@@ -20,31 +20,21 @@ permissions:
   contents: write
 
 jobs:
-  # ── Linux ─────────────────────────────────────────────────────
+  # ── Linux (x86_64 only) ───────────────────────────────────────
   build-linux:
-    name: Linux ${{ matrix.arch }}
+    name: Linux x86_64
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v4
 
       - name: Set version
         run: sed -i 's/^version = "0.1.0"/version = "${{ github.event.inputs.version }}"/' libs/core/pyproject.toml
 
-      - name: Set up QEMU (aarch64)
-        if: matrix.arch == 'aarch64'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.0
         env:
           CIBW_PLATFORM: linux
-          CIBW_ARCHS: ${{ matrix.arch }}
+          CIBW_ARCHS: x86_64
           CIBW_BUILD: "cp312-* cp313-*"
           CIBW_SKIP: "*-musllinux_*"
           CIBW_BEFORE_ALL: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
@@ -56,7 +46,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-linux-${{ matrix.arch }}
+          name: wheels-linux-x86_64
           path: wheelhouse/*.whl
 
   # ── macOS (arm64 only) ─────────────────────────────────────────
