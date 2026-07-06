@@ -29,7 +29,23 @@ pip install wing-agent
 wing
 ```
 
-On first run, wing creates a config template at `~/.wing/core/config.yaml`. Edit the `ChangeHere` placeholders with your API endpoint and key, then run `wing` again.
+On first run, wing creates a config template at `~/.wing/core/config.yaml` and exits. Open it and fill in **three fields**:
+
+```yaml
+llm:
+  base_url: "https://your-api-endpoint/v1"   # ← your provider
+  api_key: "sk-xxx"                          # ← your key
+  model: "gpt-4o"                            # ← your model
+```
+
+Then start wing:
+
+```bash
+wing stop    # stop the gateway if it was already running
+wing         # start fresh
+```
+
+> **Note:** The gateway loads config at startup. After editing `config.yaml`, always `wing stop` then `wing` to pick up changes. Hot-reload is tracked in [#xx](docs/known_issues.md).
 
 ## Configuration
 

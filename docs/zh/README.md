@@ -23,7 +23,23 @@ pip install wing-agent
 wing
 ```
 
-首次运行时，wing 会在 `~/.wing/core/config.yaml` 创建配置模板。编辑其中的 `ChangeHere` 占位符，填入你的 API 端点和密钥，然后再次运行 `wing`。
+首次运行时，wing 会在 `~/.wing/core/config.yaml` 创建配置模板并退出。打开它，填入以下 **三个字段**：
+
+```yaml
+llm:
+  base_url: "https://your-api-endpoint/v1"   # ← 你的 API 地址
+  api_key: "sk-xxx"                          # ← 你的密钥
+  model: "gpt-4o"                            # ← 你的模型
+```
+
+然后启动 wing：
+
+```bash
+wing stop    # 如果 Gateway 已在运行，先停掉
+wing         # 重新启动
+```
+
+> **注意：** Gateway 仅在启动时加载配置。修改 `config.yaml` 后，务必先 `wing stop` 再 `wing` 以加载新配置。热重载计划见 [已知问题](../known_issues.md)。
 
 ## 配置
 
