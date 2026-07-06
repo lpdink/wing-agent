@@ -1,0 +1,511 @@
+# wing/agent.py
+
+import asyncio
+import functools
+import inspect
+from dataclasses import dataclass
+from typing import Any
+
+from wing.common.process import kill_process_group
+from wing.event_bus import event_bus
+from wing.event import EventTarget
+from wing.request_context import reset_request_context, set_request_context
+from wing.openai_provider import OpenAIProvider
+
+from .agent_state_bag import AgentStateBag
+from .common.logger import log
+from .config import get_config
+from .context_manager import ContextManager
+from .hook_registry import hooks
+from .schema import ToolError
+from .event import (
+    ContextStatsEvent,
+    DoneEvent,
+    ErrorEvent,
+    LLMCallMetricsEvent,
+    WingEvent,
+    ReasoningEvent,
+    SystemEvent,
+    TextEvent,
+    ToolCallEvent,
+    ToolCallResultEvent,
+    TurnStartedEvent,
+)
+from .schema import LLMUsage, Message, Tool, ToolCall
+
+
+@dataclass
+class Inbound:
+    """进入 agent 的请求，携带消息和上下文元数据。
+
+    未来可扩展字段：source（来源前端标识）、user（多用户场景）等。
+    request_id 由 SM.post() 传入，_worker 处理时设置到 contextvar，
+    使该消息触发的所有事件都携带同一个 request_id（用于审计和 Promise resolve）。
+    """
+
+    message: Message
+    request_id: str | None = None
+
+
+class WingAgent:
+    def __init__(
+        self,
+        model: str,
+        model_provider: OpenAIProvider,
+        context_manager: ContextManager,
+        stream: bool = False,
+        tools: list[Tool] | None = None,
+    ) -> None:
+        self.stream = stream
+        self.model_provider = model_provider
+        self.model = model
+        self._tool_map: dict[str, Tool] = self._bind_tools(tools or [])
+        self.context_manager = context_manager
+        self.state = AgentStateBag()
+        self._steer = get_config().steer
+        self._inbox: asyncio.Queue[Inbound] = asyncio.Queue()
+        self._inbox_feedback: asyncio.Queue[str] = asyncio.Queue()
+        self._worker = asyncio.create_task(self._run())
+
+    @property
+    def tools(self):
+        return sorted(self._tool_map.values(), key=lambda item: item.name)
+
+    @property
+    def session_id(self) -> str:
+        return self.context_manager.id
+
+    def _bind_tools(self, tools: list[Tool]) -> dict[str, Any]:
+        bound_map = {}
+
+        # NOTE: WARNING — 闭包 _agent=self 捕获了当前 agent 实例。
+        # 当从另一个 session 重建 agent 时，必须传入 tool_registry.get_tool() 拿到的
+        # 原始（未绑定）Tool 对象，否则旧 agent 的闭包会泄漏到新 agent 中。
+        # 参见 session.py fork/switch 中 tools=unbound_tools 的处理。
+        for tool in tools:
+            if not tool.inject_agent_param:
+                bound_map[tool.name] = tool
+                continue
+
+            original_fn = tool.function
+            inject_name = tool.inject_agent_param
+
+            async def wrapper(
+                *args, _agent=self, _fn=original_fn, _name=inject_name, **kwargs
+            ):
+                kwargs[_name] = _agent
+                return (
+                    await _fn(*args, **kwargs)
+                    if inspect.iscoroutinefunction(_fn)
+                    else _fn(*args, **kwargs)
+                )
+
+            functools.update_wrapper(wrapper, original_fn)
+
+            bound_tool = tool.model_copy(
+                update={
+                    "function": wrapper,
+                    "inject_agent_param": None,
+                }
+            )
+            bound_map[tool.name] = bound_tool
+
+        return bound_map
+
+    async def _run(self) -> None:
+        """主循环：持续处理输入消息"""
+        while True:
+            try:
+                await self._process_single_message()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                await self._handle_message_error(e)
+
+    async def _process_single_message(self) -> None:
+        """处理单条用户消息，可能包含多轮工具调用。
+
+        从 inbox 取出 Inbound，设置 request_id contextvar，
+        使该消息触发的所有事件携带同一个 request_id。
+        """
+        inbound = await self._inbox.get()
+        # 设置 request_id 到当前协程 context
+        # 该消息触发的所有事件（TextEvent, ToolCallEvent, DoneEvent 等）
+        # 都会 auto-inject 此 request_id
+        token = set_request_context(request_id=inbound.request_id)
+        try:
+            # Signal turn start — frontend uses this to show working indicator.
+            self.emit(TurnStartedEvent(session_id=self.session_id))
+
+            # Hook: before_user_message — 修改用户消息内容
+            modified_content = await hooks.invoke_async(
+                "before_user_message", inbound.message.content
+            )
+            if modified_content is not None:
+                inbound.message.content = modified_content
+
+            self.context_manager.add_message(inbound.message)
+            MAX_TURNS = 1000
+            for turn in range(MAX_TURNS):
+                log.info(f"run with {inbound.message}, turn {turn}")
+                if not await self._llm_turn():
+                    break
+        finally:
+            reset_request_context(token)
+
+    async def _llm_turn(self) -> bool:
+        """
+        执行一轮 LLM 生成 + 工具执行
+        Returns: True 需要继续下一轮，False 对话结束
+        """
+        assistant_msg, pending_tool_calls = await self._call_llm()
+        tc_results = await self.exec_tool_calls(pending_tool_calls)
+
+        # Steer: 开启时，drain inbox 中积攒的用户消息，附带到最后一个 tool result 开头
+        if self._steer and tc_results:
+            steer_notes = self._drain_inbox_for_steer()
+            if steer_notes:
+                tc_results[-1].content = steer_notes + (tc_results[-1].content or "")
+
+        # TODO：this_trun_messages这个名字起的不太好，但是我一时想不到别的名字了，这里要表达的意思应该是，本轮的assistant响应和tool执行结果消息
+        this_trun_messages = [assistant_msg] + tc_results
+        self.context_manager.add_messages(this_trun_messages)
+
+        # 每次 turn 后 emit context stats——前端据此更新状态栏
+        # compact 发生在 get_messages_for_llm() 里，下次 _call_llm 调用时才执行
+        # 所以 compact 后第一次 _llm_turn 的 stats 反映的是 compact 后的真实大小
+        count, tokens = self.context_manager.get_context_stats()
+        ctx_window = 0
+        if self.context_manager.compactor:
+            ctx_window = self.context_manager.compactor.context_window_tokens
+        self.emit(
+            ContextStatsEvent(
+                session_id=self.session_id,
+                message_count=count,
+                total_tokens=tokens,
+                context_window_tokens=ctx_window,
+            )
+        )
+
+        if not pending_tool_calls:
+            if not get_config().preserved_thinking:
+                self.context_manager.clear_reasoning()
+            self.emit(DoneEvent(session_id=self.session_id))
+            return False
+        return True
+
+    def _drain_inbox_for_steer(self) -> str:
+        """Drain all pending inbox messages and format as steer notes.
+
+        Returns a formatted string prepended to the last tool result,
+        clearly marked as user steer guidance so the model can distinguish
+        it from tool output.
+        """
+        notes: list[str] = []
+        while not self._inbox.empty():
+            try:
+                inbound = self._inbox.get_nowait()
+                if inbound.message.role == "user" and inbound.message.content:
+                    notes.append(inbound.message.content)
+            except asyncio.QueueEmpty:
+                break
+
+        if not notes:
+            return ""
+
+        formatted = "\n".join(notes)
+        return f"[User steer note: {formatted}]\n"
+
+    async def _call_llm(self) -> tuple[Message, list[ToolCall]]:
+        """得到模型的响应和工具调用"""
+        content_chunks: list[str] = []
+        reasoning_chunks: list[str] = []
+        pending_tool_calls: list[ToolCall] = []
+        last_usage: LLMUsage | None = None
+
+        async for chunk in self.model_provider.generate(
+            messages=await self.context_manager.get_messages_for_llm(
+                model=self.model,
+                model_provider=self.model_provider,
+                tools=self.tools,
+            ),
+            model=self.model,
+            tools=self.tools,
+            stream=self.stream,
+        ):
+            if chunk.reasoning_content:
+                reasoning_chunks.append(chunk.reasoning_content)
+                self.emit(
+                    ReasoningEvent(
+                        session_id=self.session_id, content=chunk.reasoning_content
+                    )
+                )
+
+            if chunk.content:
+                content_chunks.append(chunk.content)
+                self.emit(TextEvent(session_id=self.session_id, content=chunk.content))
+
+            if chunk.tool_calls:
+                pending_tool_calls.extend(chunk.tool_calls)
+
+            if chunk.usage.completion_tokens or chunk.usage.prompt_tokens:
+                last_usage = chunk.usage
+                self.emit(
+                    LLMCallMetricsEvent(
+                        session_id=self.session_id,
+                        prompt_tokens=chunk.usage.prompt_tokens,
+                        completion_tokens=chunk.usage.completion_tokens,
+                        cached_tokens=chunk.usage.cached_tokens,
+                        first_chunk_rt_ms=chunk.usage.first_chunk_rt_ms,
+                        tokens_per_sec=chunk.usage.tokens_per_sec,
+                        model=chunk.usage.model,
+                    )
+                )
+
+        assistant_msg = Message(
+            role="assistant",
+            content="".join(content_chunks),
+            reasoning_content="".join(reasoning_chunks),
+            tool_calls=pending_tool_calls,
+            usage=last_usage,
+        )
+
+        return assistant_msg, pending_tool_calls
+
+    async def exec_tool_calls(self, pending_tool_calls) -> list[Message]:
+        log.info(f"exec_tool_calls: executing {len(pending_tool_calls)} tool calls")
+        tc_results: list[Message] = []
+        for tc in pending_tool_calls:
+            log.info(f"exec_tool_calls: executing tool '{tc.name}' with id={tc.id}")
+            result = await self._execute_tool(tc)
+            tc_results.append(
+                Message(
+                    role="tool",
+                    tool_call_id=tc.id,
+                    content=str(result),
+                )
+            )
+        return tc_results
+
+    async def _handle_message_error(self, error: Exception) -> None:
+        """处理消息处理异常：通知"""
+        log.error(f"处理消息失败: {error}")
+        self.emit(
+            ErrorEvent(
+                session_id=self.session_id,
+                message=f"处理消息失败：异常：{error}",
+            )
+        )
+        self.emit(DoneEvent(session_id=self.session_id))
+
+    async def _execute_tool(self, tc: ToolCall) -> str:
+        # 发送工具调用开始消息
+        self.emit(
+            ToolCallEvent(
+                session_id=self.session_id,
+                tool_name=tc.name,
+                tool_args=tc.arguments,
+                tool_call_id=tc.id,
+            )
+        )
+
+        tool = self._tool_map.get(tc.name)
+        if not tool:
+            result = f"Error: unknown tool: {tc.name}, or you don't have permission to use it."
+            self.emit(
+                ToolCallResultEvent(
+                    session_id=self.session_id,
+                    tool_name=tc.name,
+                    tool_args=tc.arguments,
+                    tool_call_id=tc.id,
+                    tool_result=result,
+                    tool_success=False,
+                    model=self.model,
+                )
+            )
+            return result
+
+        # Hook: before_tool_call — 修改工具调用参数
+        modified_tc = await hooks.invoke_async("before_tool_call", tc)
+        if modified_tc is not None:
+            tc = modified_tc
+
+        try:
+            # 过滤掉工具函数实际不接受的参数（如动态添加的 purpose）
+            sig = inspect.signature(tool.function)
+            actual_params = set(sig.parameters.keys())
+            call_args = {k: v for k, v in tc.arguments.items() if k in actual_params}
+
+            result = (
+                await tool.function(**call_args)
+                if inspect.iscoroutinefunction(tool.function)
+                else tool.function(**call_args)
+            )
+            result_str = str(result)
+            # Hook: after_tool_call — 修改工具调用结果
+            # context 传递 tc 信息，handler 可据此过滤（如只截断 Bash result）
+            modified_result = await hooks.invoke_async(
+                "after_tool_call",
+                result_str,
+                tool_name=tc.name,
+                tool_args=tc.arguments,
+                tool_call_id=tc.id,
+            )
+            if modified_result is not None:
+                result_str = modified_result
+            # 发送工具调用结果消息
+            self.emit(
+                ToolCallResultEvent(
+                    session_id=self.session_id,
+                    tool_name=tc.name,
+                    tool_args=tc.arguments,
+                    tool_call_id=tc.id,
+                    tool_result=result_str,
+                    tool_success=True,
+                    model=self.model,
+                )
+            )
+            return result_str
+        except ToolError as e:
+            result = str(e)
+            self.emit(
+                ToolCallResultEvent(
+                    session_id=self.session_id,
+                    tool_name=tc.name,
+                    tool_args=tc.arguments,
+                    tool_call_id=tc.id,
+                    tool_result=result,
+                    tool_success=False,
+                    model=self.model,
+                )
+            )
+            return result
+        except Exception as e:
+            result = f"Error executing tool '{tc.name}': {e}"
+            self.emit(
+                ToolCallResultEvent(
+                    session_id=self.session_id,
+                    tool_name=tc.name,
+                    tool_args=tc.arguments,
+                    tool_call_id=tc.id,
+                    tool_result=result,
+                    tool_success=False,
+                    model=self.model,
+                )
+            )
+            return result
+
+    def interrupt(self) -> None:
+        """中断 Agent：终止子进程、清理 inbox、重置事件循环"""
+
+        # 终止正在执行的子进程（如 Bash 命令）
+        # start_new_session=True 使子进程在独立 process group 中，
+        # 必须用 killpg 杀整棵树，否则 cmd & 产生的孤儿进程会继续运行
+        process = self.state.get("_active_process")
+        if process is not None:
+            kill_process_group(process)
+            log.info("Active process group killed on interrupt")
+            self.state.delete("_active_process")
+
+        # 重置 feedback 状态（工具可能在等待用户反馈，打断后无人消费）
+        self.state.set("need_feedback", False)
+
+        # 清理 inbox 中的所有消息
+        while not self._inbox.empty():
+            try:
+                self._inbox.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        # 停止当前 worker 并创建新的事件循环
+        self._worker.cancel()
+        self._worker = asyncio.create_task(self._run())
+        log.info("Agent interrupted and reset")
+
+    async def shutdown(self) -> None:
+        """显式关闭 Agent：清空 inbox，cancel worker 并等待其完成。
+
+        用于 switch_template 场景下干净地关闭旧 agent。
+        与 interrupt() 不同：shutdown 不重建 worker。
+        """
+        # 终止正在执行的子进程
+        process = self.state.get("_active_process")
+        if process is not None:
+            kill_process_group(process)
+            self.state.delete("_active_process")
+
+        # 清空 inbox
+        while not self._inbox.empty():
+            try:
+                self._inbox.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        self._worker.cancel()
+        try:
+            await self._worker
+        except asyncio.CancelledError:
+            pass
+        log.info(f"Agent shutdown complete: session={self.session_id}")
+
+    def schedule_wakeup(self, delay: float, message: str) -> None:
+        async def fire():
+            await asyncio.sleep(delay)
+            await self.post(message)
+
+        asyncio.create_task(fire())
+
+    async def post(
+        self, content: str, request_id: str | None = None, role: str = "user"
+    ) -> None:
+        """接收用户消息或 feedback。
+
+        request_id 由 SM.post() 传入，用于审计追踪和 SDK Promise resolve。
+        feedback 路由到 _inbox_feedback（_worker 已持有当前 request_id contextvar，
+        无需传递）。
+        """
+        # If agent is waiting for feedback, route to feedback queue
+        need_fb = self.state.get("need_feedback")
+        log.info(
+            f"agent.post: agent={id(self)}, state_bag={id(self.state)}, "
+            f"need_feedback={need_fb}, routing '{content[:40]}'"
+        )
+        if need_fb:
+            await self._inbox_feedback.put(content)
+            return
+
+        msg = Message(role=role, content=content)  # ty: ignore
+        await self._inbox.put(Inbound(message=msg, request_id=request_id))
+        log.info("post done")
+
+    def emit(self, event: WingEvent) -> None:
+        """通过 EventBus 广播事件。同步调用，不阻塞 agent。
+
+        如果事件没有设置 target，自动设为 scope="session"。
+        agent 的事件几乎总是 session 级别的。
+        """
+        if event.target is None:
+            event.target = EventTarget(scope="session")
+        event_bus.emit(event)
+
+    def emit_system(self, content: str) -> None:
+        """快捷方法：发送系统消息（魔术命令响应等）。"""
+        self.emit(SystemEvent(session_id=self.session_id, content=content))
+        self.emit(DoneEvent(session_id=self.session_id))
+
+    def get_status(self) -> dict:
+        """返回当前状态快照，供 Session.initial_status 使用."""
+        count, tokens = self.context_manager.get_context_stats()
+        ctx_window = 0
+        if self.context_manager.compactor:
+            ctx_window = self.context_manager.compactor.context_window_tokens
+        return {
+            "model": self.model,
+            "thinking": self.model_provider.thinking,
+            "reasoning_effort": self.model_provider.reasoning_effort,
+            "message_count": count,
+            "total_tokens": tokens,
+            "context_window_tokens": ctx_window,
+            "tools": [t.name for t in self.tools] if self.tools else [],
+            "api_url": getattr(self.model_provider, "base_url", "unknown"),
+        }

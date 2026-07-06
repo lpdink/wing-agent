@@ -1,0 +1,130 @@
+name: Publish to PyPI / TestPyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.1.0, 0.1.0a1)"
+        required: true
+        type: string
+      target:
+        description: "Target registry"
+        required: true
+        type: choice
+        options:
+          - testpypi
+          - pypi
+        default: testpypi
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Linux ─────────────────────────────────────────────────────
+  build-linux:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version
+        run: sed -i 's/^version = "0.1.0"/version = "${{ github.event.inputs.version }}"/' libs/core/pyproject.toml
+
+      - name: Set up QEMU (aarch64)
+        if: matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v3.0
+        env:
+          CIBW_PLATFORM: linux
+          CIBW_ARCHS: ${{ matrix.arch }}
+          CIBW_BUILD: "cp312-* cp313-*"
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_BEFORE_ALL: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+          CIBW_ENVIRONMENT: 'PATH="$HOME/.cargo/bin:$PATH"'
+          CIBW_BUILD_FRONTEND: build
+        with:
+          package-dir: libs/core
+          output-dir: wheelhouse
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.arch }}
+          path: wheelhouse/*.whl
+
+  # ── macOS ─────────────────────────────────────────────────────
+  build-macos:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-13
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version
+        run: sed -i '' 's/^version = "0.1.0"/version = "${{ github.event.inputs.version }}"/' libs/core/pyproject.toml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python & build deps
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build wheel
+        working-directory: libs/core
+        run: python -m build --wheel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.arch }}
+          path: libs/core/dist/*.whl
+
+  # ── Publish ───────────────────────────────────────────────────
+  publish:
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # for trusted publishing (optional)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist/
+
+      - name: List wheels
+        run: ls -lh dist/
+
+      - name: Install twine
+        run: pip install twine
+
+      - name: Publish to TestPyPI
+        if: github.event.inputs.target == 'testpypi'
+        run: twine upload --repository testpypi dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_TOKEN }}
+
+      - name: Publish to PyPI
+        if: github.event.inputs.target == 'pypi'
+        run: twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}

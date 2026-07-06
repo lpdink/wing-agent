@@ -1,0 +1,27 @@
+[project]
+name = "wing-agent"
+version = "0.1.0"
+description = "General-purpose agent runtime — session, event, context, tools, WebSocket gateway"
+requires-python = ">=3.12"
+dependencies = [
+    "aioconsole>=0.8.2",
+    "aiohttp>=3.9.0",
+    "openai>=2.21.0",
+    "pydantic-settings>=2.13.1",
+    "python-frontmatter>=1.1.0",
+    "pyyaml>=6.0.3",
+]
+
+[project.scripts]
+wing-gateway = "wing.gateway.cli:main"
+wing = "wing.bin.wing_cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["wing"]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"

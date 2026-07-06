@@ -1,0 +1,47 @@
+[workspace]
+members = ["crates/wing"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/abiter/wing"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Terminal UI
+ratatui = { version = "0.30", features = ["unstable-widget-ref", "unstable-rendered-line-info"] }
+crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste", "osc52"] }
+
+# Markdown
+pulldown-cmark = "0.13"
+
+# Syntax highlighting
+syntect = "5"
+two-face = "0.5"
+
+# Diff
+similar = "3"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# Utilities
+unicode-width = "0.2"
+dirs = "6"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+url = "2"

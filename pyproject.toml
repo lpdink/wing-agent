@@ -1,0 +1,38 @@
+# wing-agent workspace root
+# 开发环境编排器——不含业务代码，只管理成员包和共享开发依赖。
+
+[project]
+name = "wing-agent-workspace"
+version = "0.0.0"
+description = "Development workspace for wing-agent packages"
+requires-python = ">=3.12"
+dependencies = [
+    "wing-agent",
+    "wing-hooks"
+]
+
+[tool.uv.sources]
+wing-agent = { workspace = true }
+wing-hooks = { workspace = true }
+
+[tool.uv.workspace]
+members = ["libs/core", "libs/wing_hooks"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.7",
+    "ty>=0.0.24",
+    "vulture>=2.16",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+]
+
+[tool.vulture]
+exclude = [".venv/", "wing_ext/"]
+min_confidence = 70
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+filterwarnings = [
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+]

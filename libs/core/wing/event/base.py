@@ -1,0 +1,139 @@
+# wing/event/base.py — 基类、辅助 Schema、路由目标、通用系统事件
+
+"""
+WingEvent 基类与基础设施。
+
+所有事件均继承 WingEvent 基类，通过 type 字段区分。
+EventTarget 由 EventBus emit 时注入，Gateway 据此转发。
+"""
+
+from __future__ import annotations
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+# ============================================================
+# 路由目标 — EventBus emit 时注入，Gateway 据此转发
+# ============================================================
+
+
+class EventTarget(BaseModel):
+    """事件路由目标，由 EventBus.emit() 根据路由表计算并注入到事件中。
+
+    scope:
+      - "global"：发给所有 ws（如配置变更、全局通知）
+      - "session"：发给订阅了该 session_id 的所有 client（EventBus 内部转换为 "client" + client_ids）
+      - "client"：发给指定 client_ids 的 ws（投递者直接指定）
+
+    投递者设置 scope="session" + event.session_id → EventBus 查路由表 →
+    计算出 client_ids → 输出 scope="client" + client_ids 供 Gateway 转发。
+
+    Gateway 只看到 "global" 或 "client" + client_ids，不感知 session_id。
+    """
+
+    scope: Literal["global", "session", "client"]
+    client_ids: list[str] = Field(default_factory=list)
+
+
+# ============================================================
+# 辅助 Schema — 需要复用的结构化字段
+# ============================================================
+
+
+class SessionInfo(BaseModel):
+    """用于会话列表/详情中的 session 摘要信息。"""
+
+    id: str
+    name: str | None = None
+    created_at: datetime | None = None
+    template_name: str | None = None
+    workspace: str | None = None
+    last_interaction: str | None = None
+
+
+class AgentInfo(BaseModel):
+    """创建 agent 的完整配置，用于 Activate 时前端恢复 UI 状态。"""
+
+    model_name: str
+    system_prompt: str | None = None
+    tools: list[str] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
+    rules: list[str] = Field(default_factory=list)
+    workspace: str | None = None
+
+
+class CommandInfo(BaseModel):
+    """魔术命令元信息，用于 CommandListEvent。"""
+
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    description: str = ""
+    params: str = ""
+
+
+# ============================================================
+# 基类
+# ============================================================
+
+
+class WingEvent(BaseModel):
+    """所有事件的基类。
+
+    - created_at：UTC datetime，人类可读，前端可反序列化。
+    - type：子类必须覆盖为 Literal 字面量。
+    - session_id：可选，因为 NewSessionEvent 等操作在创建前没有 session。
+    - request_id：始终存在（自动生成 UUID），前端请求可覆写。
+                  即使不是 RPC 响应，也始终存在，方便日志串联。
+    - target：EventTarget，由 EventBus emit 时注入，Gateway 据此转发。
+    """
+
+    created_at: datetime = Field(default_factory=lambda: datetime.now())
+    type: str
+    session_id: str | None = None
+    request_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    target: EventTarget | None = None
+
+
+# ============================================================
+# 通用系统事件
+# ============================================================
+
+
+class SystemEvent(WingEvent):
+    """后端主动产生的系统消息，例如 /help、/context、/skills 的结果。"""
+
+    type: Literal["system"] = "system"
+    content: str
+
+
+class ErrorEvent(WingEvent):
+    """错误事件，替代分散的 status_code 字段。
+
+    成功事件不携带 status_code，失败事件走 ErrorEvent。
+    SDK 的主 Promise 只由业务事件 resolve，由 ErrorEvent reject。
+    """
+
+    type: Literal["error"] = "error"
+    status_code: int = 500
+    message: str = ""
+    error_code: str | None = None
+    detail: str | None = None
+
+
+class DeliveredEvent(WingEvent):
+    """表示某个请求已被后端接受并投递到 agent / handler。
+
+    所有 sendMessage / sendSteer 调用，后端都会立即回复此事件。
+    SDK 的 Promise 解析策略：
+    - sendMessage / sendSteer：DeliveredEvent resolve 主 Promise（仅确认送达）。
+    - magic command：DeliveredEvent 仅表示送达，主 Promise 由后续特定事件 resolve。
+    - ErrorEvent：reject 主 Promise。
+    """
+
+    type: Literal["delivered"] = "delivered"

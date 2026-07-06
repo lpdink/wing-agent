@@ -1,0 +1,44 @@
+[package]
+name = "wing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wing"
+path = "src/main.rs"
+
+[lib]
+name = "wing"
+path = "src/lib.rs"
+
+[lints.clippy]
+print_stdout = "deny"
+print_stderr = "deny"
+
+[dependencies]
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+pulldown-cmark = { workspace = true }
+syntect = { workspace = true }
+two-face = { workspace = true }
+similar = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+unicode-width = { workspace = true }
+dirs = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+url = { workspace = true }
+libc = "0.2"
+
+[dev-dependencies]
+pretty_assertions = "1"
