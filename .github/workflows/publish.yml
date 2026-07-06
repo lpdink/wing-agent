@@ -61,22 +61,21 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Python & build deps
-        uses: actions/setup-python@v5
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v3.0
+        env:
+          CIBW_PLATFORM: macos
+          CIBW_ARCHS: arm64
+          CIBW_BUILD: "cp312-* cp313-*"
+          CIBW_BUILD_FRONTEND: build
         with:
-          python-version: "3.12"
-
-      - name: Install build tools
-        run: pip install build
-
-      - name: Build wheel
-        working-directory: libs/core
-        run: python -m build --wheel
+          package-dir: libs/core
+          output-dir: wheelhouse
 
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-arm64
-          path: libs/core/dist/*.whl
+          path: wheelhouse/*.whl
 
   # ── Publish to PyPI / TestPyPI ─────────────────────────────────
   publish:
