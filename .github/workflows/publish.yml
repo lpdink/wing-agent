@@ -17,7 +17,7 @@ on:
         default: testpypi
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   # ── Linux ─────────────────────────────────────────────────────
@@ -88,12 +88,10 @@ jobs:
           name: wheels-macos-arm64
           path: libs/core/dist/*.whl
 
-  # ── Publish ───────────────────────────────────────────────────
+  # ── Publish to PyPI / TestPyPI ─────────────────────────────────
   publish:
     needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write  # for trusted publishing (optional)
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -120,3 +118,24 @@ jobs:
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+
+  # ── GitHub Release (PyPI only) ─────────────────────────────────
+  release:
+    needs: [publish]
+    if: github.event.inputs.target == 'pypi'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.event.inputs.version }}
+          name: v${{ github.event.inputs.version }}
+          files: dist/*.whl
+          generate_release_notes: true
+          prerelease: ${{ contains(github.event.inputs.version, 'a') || contains(github.event.inputs.version, 'b') || contains(github.event.inputs.version, 'rc') || contains(github.event.inputs.version, 'dev') }}
