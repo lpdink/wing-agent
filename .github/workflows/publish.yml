@@ -59,18 +59,10 @@ jobs:
           name: wheels-linux-${{ matrix.arch }}
           path: wheelhouse/*.whl
 
-  # ── macOS ─────────────────────────────────────────────────────
+  # ── macOS (arm64 only) ─────────────────────────────────────────
   build-macos:
-    name: macOS ${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-14
-            arch: arm64
-          - runner: macos-13
-            arch: x86_64
+    name: macOS arm64
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
@@ -93,7 +85,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-macos-${{ matrix.arch }}
+          name: wheels-macos-arm64
           path: libs/core/dist/*.whl
 
   # ── Publish ───────────────────────────────────────────────────
