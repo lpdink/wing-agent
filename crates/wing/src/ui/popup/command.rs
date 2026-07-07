@@ -17,6 +17,9 @@ const CANDIDATE_COMMANDS: &[(&str, &str)] = &[
     ("/fork", "/rewind list"),
     ("/rewind", "/rewind list"),
     ("/agents", "/agents"),
+    // Local-only: "" = no gateway request, candidates populated by App.
+    // If a second local-select-execute command appears, extract a
+    // ModalSelect variant from ActivePopup instead of extending this pattern.
     ("/copy", ""),
 ];
 

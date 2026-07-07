@@ -160,7 +160,7 @@ impl App {
     /// Returns `true` if the command was recognized and handled locally;
     /// `false` if it should be sent to the gateway as usual.
     fn try_frontend_command(&mut self, text: &str) -> bool {
-        // /copy or /copy <index>
+        // /copy accepts optional index from SubCommand popup completion.
         if text == COPY_COMMAND || text.starts_with("/copy ") {
             self.handle_copy_command(text);
             return true;

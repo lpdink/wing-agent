@@ -68,6 +68,7 @@ impl ActivePopup {
                 let rows = filter_candidates(candidates, args);
                 let count = rows.len();
                 let filter = args.to_string();
+                // /copy: newest message is the expected default.
                 let state = if cmd == "/copy" {
                     SelectionState::new_selecting_last(count)
                 } else {
