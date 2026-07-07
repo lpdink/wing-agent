@@ -17,12 +17,13 @@ const CANDIDATE_COMMANDS: &[(&str, &str)] = &[
     ("/fork", "/rewind list"),
     ("/rewind", "/rewind list"),
     ("/agents", "/agents"),
+    ("/copy", ""),
 ];
 
 /// TUI-only commands (not served by gateway) — always appended as fallback.
 const TUI_ONLY_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "Clear chat view"),
-    ("/copy", "Copy last assistant message"),
+    ("/copy", "Copy assistant message"),
 ];
 
 /// Check if a bare name (without `/`) matches a TUI-only command (case-insensitive).
@@ -163,6 +164,8 @@ pub struct CandidateCache {
     pub branches: Vec<(String, String)>,
     /// Agent list (from AgentListEvent). Description is empty.
     pub agents: Vec<(String, String)>,
+    /// Copy candidates (local-only). `(1-based index, first-line preview)`.
+    pub copies: Vec<(String, String)>,
 }
 
 impl CandidateCache {
@@ -172,6 +175,7 @@ impl CandidateCache {
         self.sessions.clear();
         self.branches.clear();
         self.agents.clear();
+        self.copies.clear();
     }
 
     /// Get candidates for a given command name.
@@ -181,6 +185,7 @@ impl CandidateCache {
             "/ss" | "/session" if !self.sessions.is_empty() => Some(&self.sessions),
             "/fork" | "/rewind" if !self.branches.is_empty() => Some(&self.branches),
             "/agents" if !self.agents.is_empty() => Some(&self.agents),
+            "/copy" if !self.copies.is_empty() => Some(&self.copies),
             _ => None,
         }
     }

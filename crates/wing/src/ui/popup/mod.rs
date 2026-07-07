@@ -68,17 +68,28 @@ impl ActivePopup {
                 let rows = filter_candidates(candidates, args);
                 let count = rows.len();
                 let filter = args.to_string();
+                let state = if cmd == "/copy" {
+                    SelectionState::new_selecting_last(count)
+                } else {
+                    SelectionState::new(count)
+                };
                 *self = Self::SubCommand {
                     command: cmd.to_string(),
                     filter,
                     rows,
-                    state: SelectionState::new(count),
+                    state,
                 };
                 return None;
             }
 
-            // Candidates not cached — request them.
-            // Show command popup while waiting.
+            // Candidates not cached.
+            // Local-only commands (empty request): nothing to fetch, no popup.
+            if request.is_empty() {
+                *self = Self::None;
+                return None;
+            }
+
+            // Show command popup while waiting for gateway response.
             let filter = cmd[1..].to_string();
             let rows = filter_commands(&cache.commands, &filter);
             let count = rows.len();

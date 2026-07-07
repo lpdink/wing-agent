@@ -307,6 +307,40 @@ impl ChatView {
         None
     }
 
+    /// Collect all assistant messages as `(1-based index, first-line preview)` pairs.
+    /// Used as `/copy` sub-command candidates.
+    pub fn collect_assistant_messages(&self) -> Vec<(String, String)> {
+        self.cells
+            .iter()
+            .filter_map(|c| match c.cell() {
+                ChatCell::AssistantMessage(text) => Some(text),
+                _ => None,
+            })
+            .enumerate()
+            .map(|(i, text)| {
+                let preview = text
+                    .lines()
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("")
+                    .chars()
+                    .take(60)
+                    .collect();
+                (format!("{}", i + 1), preview)
+            })
+            .collect()
+    }
+
+    /// Return the raw text of the N-th assistant message (1-based), if any.
+    pub fn nth_assistant_text(&self, n: usize) -> Option<&str> {
+        self.cells
+            .iter()
+            .filter_map(|c| match c.cell() {
+                ChatCell::AssistantMessage(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .nth(n.checked_sub(1)?)
+    }
+
     /// Append text to the last assistant message (for streaming).
     pub fn append_to_last_assistant(&mut self, text: &str) {
         if let Some(last) = self.cells.last_mut()

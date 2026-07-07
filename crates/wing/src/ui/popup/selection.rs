@@ -50,6 +50,16 @@ impl SelectionState {
         }
     }
 
+    /// Create state with the last item selected (scroll adjusted).
+    pub fn new_selecting_last(count: usize) -> Self {
+        let selected = count.saturating_sub(1);
+        Self {
+            selected,
+            count,
+            scroll: selected.saturating_sub(MAX_VISIBLE_ROWS - 1),
+        }
+    }
+
     /// Update count and clamp selection.
     pub fn set_count(&mut self, count: usize) {
         self.count = count;

@@ -160,13 +160,15 @@ impl App {
     /// Returns `true` if the command was recognized and handled locally;
     /// `false` if it should be sent to the gateway as usual.
     fn try_frontend_command(&mut self, text: &str) -> bool {
+        // /copy or /copy <index>
+        if text == COPY_COMMAND || text.starts_with("/copy ") {
+            self.handle_copy_command(text);
+            return true;
+        }
         match text {
-            COPY_COMMAND => {
-                self.handle_copy_command();
-                true
-            }
             CLEAR_COMMAND => {
                 self.chat.clear();
+                self.refresh_copy_candidates();
                 self.show_toast(Toast::info(
                     "Chat cleared",
                     std::time::Duration::from_secs(2),
@@ -177,11 +179,20 @@ impl App {
         }
     }
 
-    /// `/copy` — copy the last assistant message to the system clipboard.
-    fn handle_copy_command(&mut self) {
+    /// `/copy [N]` — copy the N-th (or last) assistant message to clipboard.
+    fn handle_copy_command(&mut self, text: &str) {
         use std::time::Duration;
 
-        let Some(content) = self.chat.last_assistant_text().map(String::from) else {
+        let index = text
+            .strip_prefix("/copy ")
+            .and_then(|s| s.trim().parse::<usize>().ok());
+
+        let content = match index {
+            Some(n) => self.chat.nth_assistant_text(n).map(String::from),
+            None => self.chat.last_assistant_text().map(String::from),
+        };
+
+        let Some(content) = content else {
             self.show_toast(Toast::warning(
                 "No assistant message to copy",
                 Duration::from_secs(2),
@@ -190,6 +201,11 @@ impl App {
         };
 
         self.pending_clipboard = Some(content);
+    }
+
+    /// Refresh `/copy` candidate cache from current chat state.
+    fn refresh_copy_candidates(&mut self) {
+        self.popup.cache.copies = self.chat.collect_assistant_messages();
     }
 
     /// Update popup state based on current input text.
@@ -493,11 +509,13 @@ impl App {
                 self.turn.finish();
                 self.ctx.reset();
                 self.clear_ask_selection();
+                self.refresh_copy_candidates();
             }
             WingEvent::Interrupted { .. } => {
                 self.turn.finish();
                 self.ctx.reset();
                 self.clear_ask_selection();
+                self.refresh_copy_candidates();
                 self.show_toast(Toast::info(
                     "Agent interrupted",
                     std::time::Duration::from_secs(2),
@@ -507,6 +525,7 @@ impl App {
                 self.turn.finish();
                 self.ctx.reset();
                 self.chat.push(ChatCell::ErrorMessage(message));
+                self.refresh_copy_candidates();
             }
 
             // ---- Reasoning events ----
@@ -741,6 +760,8 @@ impl App {
                 if let Some(agent_info) = agent {
                     self.status.model = agent_info.model_name;
                 }
+
+                self.refresh_copy_candidates();
             }
             WingEvent::SessionUpdated { name, .. } => {
                 // Update session attributes (e.g. renamed by /title).
