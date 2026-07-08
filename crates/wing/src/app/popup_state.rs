@@ -40,7 +40,7 @@ impl PopupState {
         self.sent_requests.remove(req_id);
     }
 
-    /// Reset all popup state (e.g., on NewSession).
+    /// Reset all popup state (e.g., on session switch).
     pub fn reset(&mut self) {
         self.cache.clear();
         self.sent_requests.clear();

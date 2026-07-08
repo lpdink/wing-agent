@@ -214,17 +214,6 @@ pub enum WingEvent {
     },
 
     // ---- state_change ----
-    /// New session created.
-    #[serde(rename = "new_session")]
-    NewSession {
-        session_id: String,
-        new_session_id: String,
-        agent: Option<AgentInfo>,
-        name: Option<String>,
-        #[serde(flatten)]
-        meta: EventMeta,
-    },
-
     /// Full session state sync.
     #[serde(rename = "sync_session")]
     SyncSession {
@@ -415,7 +404,6 @@ impl WingEvent {
             Self::Done { .. } => "done",
             Self::TurnStarted { .. } => "turn_started",
             Self::DiffContent { .. } => "diff_content",
-            Self::NewSession { .. } => "new_session",
             Self::SyncSession { .. } => "sync_session",
             Self::SessionList { .. } => "session_list",
             Self::SessionUpdated { .. } => "session_updated",
@@ -450,7 +438,6 @@ impl WingEvent {
             | Self::Done { meta, .. }
             | Self::TurnStarted { meta, .. }
             | Self::DiffContent { meta, .. }
-            | Self::NewSession { meta, .. }
             | Self::SyncSession { meta, .. }
             | Self::SessionList { meta, .. }
             | Self::SessionUpdated { meta, .. }
@@ -590,37 +577,6 @@ mod tests {
                 assert_eq!(message, "something broke");
             }
             _ => panic!("expected Error"),
-        }
-    }
-
-    #[test]
-    fn deserialize_new_session_event() {
-        let json = r#"{
-            "type": "new_session",
-            "session_id": "old_sid",
-            "new_session_id": "new_sid",
-            "agent": {
-                "model_name": "gpt-4o",
-                "tools": ["Bash"],
-                "skills": [],
-                "rules": []
-            },
-            "name": "my session",
-            "created_at": "2025-01-01T00:00:00",
-            "request_id": "req7"
-        }"#;
-        let event: WingEvent = serde_json::from_str(json).unwrap();
-        match event {
-            WingEvent::NewSession {
-                new_session_id,
-                agent,
-                ..
-            } => {
-                assert_eq!(new_session_id, "new_sid");
-                assert!(agent.is_some());
-                assert_eq!(agent.unwrap().model_name, "gpt-4o");
-            }
-            _ => panic!("expected NewSession"),
         }
     }
 

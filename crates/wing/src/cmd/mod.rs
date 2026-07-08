@@ -11,6 +11,7 @@ use crate::config::AppConfig;
 use crate::gateway::GatewayClient;
 use crate::tui;
 use crate::util::logging::init_logging;
+use wing_api_client::GatewayClient as GatewayApiClient;
 
 mod discover;
 mod start;
@@ -166,18 +167,41 @@ async fn run_tui(gateway_url: &str) -> Result<()> {
         .ok()
         .map(|p| p.to_string_lossy().to_string());
 
-    // Connect to Gateway before entering the TUI.
-    let gateway = GatewayClient::connect(gateway_url, workspace.as_deref())
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to connect to gateway at {gateway_url}: {e}\n\
-                 Make sure the gateway is running: wing start"
-            )
-        })?;
+    // Derive HTTP base URL from WS URL (ws://host:port/ws → http://host:port).
+    let http_base = gateway_url
+        .replace("ws://", "http://")
+        .replace("wss://", "https://");
+    let http_base = http_base.strip_suffix("/ws").unwrap_or(&http_base);
 
-    let session_id = gateway.session_id().to_string();
-    tracing::info!(session_id = %session_id, "connected, entering TUI");
+    // 1. WS connect (get client_id).
+    let gateway = GatewayClient::connect(gateway_url).await.map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to connect to gateway at {gateway_url}: {e}\n\
+                 Make sure the gateway is running: wing start"
+        )
+    })?;
+
+    let client_id = gateway.client_id().to_string();
+    tracing::info!(client_id = %client_id, "WS connected");
+
+    // 2. HTTP create session.
+    let http = GatewayApiClient::new(http_base)
+        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
+
+    let session = http
+        .create_session(None, workspace.as_deref())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create session: {e}"))?;
+
+    let session_id = session.session_id.clone();
+    tracing::info!(session_id = %session_id, "session created");
+
+    // 3. HTTP subscribe.
+    http.subscribe(&session_id, &client_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to subscribe to session: {e}"))?;
+
+    tracing::info!("subscribed to session, entering TUI");
 
     // Load user configuration.
     let config = AppConfig::load();
@@ -199,7 +223,7 @@ async fn run_tui(gateway_url: &str) -> Result<()> {
     }));
 
     // Run the app.
-    let result = run_app(&mut terminal, gateway, session_id, config).await;
+    let result = run_app(&mut terminal, gateway, session_id, client_id, http, config).await;
 
     // Restore terminal.
     tui::restore_terminal(&mut terminal)?;

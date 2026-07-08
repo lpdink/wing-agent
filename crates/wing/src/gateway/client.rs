@@ -15,7 +15,6 @@ use crate::protocol::WingEvent;
 /// Connection info returned after successful Gateway handshake.
 #[derive(Debug, Clone)]
 pub struct ConnectionInfo {
-    pub session_id: String,
     pub client_id: String,
 }
 
@@ -33,20 +32,10 @@ impl GatewayClient {
     /// Connect to a wing-gateway WebSocket endpoint.
     ///
     /// Performs the handshake: waits for the first `ConnectResponse` message.
-    pub async fn connect(url: &str, workspace: Option<&str>) -> Result<Self> {
-        // Append workspace as query param if provided.
-        let connect_url = match workspace {
-            Some(ws) => {
-                let encoded: String = url::form_urlencoded::byte_serialize(ws.as_bytes()).collect();
-                let separator = if url.contains('?') { '&' } else { '?' };
-                format!("{url}{separator}workspace={encoded}")
-            }
-            None => url.to_string(),
-        };
+    pub async fn connect(url: &str) -> Result<Self> {
+        tracing::info!("connecting to gateway: {url}");
 
-        tracing::info!("connecting to gateway: {connect_url}");
-
-        let (ws_stream, _response) = tokio_tungstenite::connect_async(&connect_url)
+        let (ws_stream, _response) = tokio_tungstenite::connect_async(url)
             .await
             .context("failed to connect to gateway WebSocket")?;
 
@@ -68,13 +57,11 @@ impl GatewayClient {
         };
 
         tracing::info!(
-            session_id = %connect_resp.session_id,
             client_id = %connect_resp.client_id,
             "connected to gateway"
         );
 
         let info = ConnectionInfo {
-            session_id: connect_resp.session_id,
             client_id: connect_resp.client_id,
         };
 
@@ -152,11 +139,6 @@ impl GatewayClient {
             rx: event_rx,
             info,
         })
-    }
-
-    /// Returns the session_id from the initial handshake.
-    pub fn session_id(&self) -> &str {
-        &self.info.session_id
     }
 
     /// Returns the client_id from the initial handshake.

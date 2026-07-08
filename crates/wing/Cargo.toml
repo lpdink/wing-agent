@@ -39,6 +39,7 @@ chrono = { workspace = true }
 clap = { workspace = true }
 url = { workspace = true }
 libc = "0.2"
+wing-api-client = { path = "../wing-api-client" }
 
 [dev-dependencies]
 pretty_assertions = "1"

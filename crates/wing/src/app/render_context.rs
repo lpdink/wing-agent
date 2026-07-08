@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 /// Tracks the active rendering state within a single agent turn.
 ///
-/// Reset on DoneEvent, InterruptedEvent, or NewSessionEvent.
+/// Reset on DoneEvent, InterruptedEvent, or SyncSessionEvent.
 pub struct RenderContext {
     /// Index of the current streaming AssistantMessage cell (if any).
     pub current_assistant: Option<usize>,

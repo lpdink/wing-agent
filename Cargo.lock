@@ -3034,6 +3034,7 @@ dependencies = [
  "two-face",
  "unicode-width",
  "url",
+ "wing-api-client",
 ]
 
 [[package]]

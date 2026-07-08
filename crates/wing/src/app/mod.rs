@@ -41,6 +41,7 @@ use crate::ui::status_bar::StatusData;
 use crate::ui::status_bar::TurnUsage;
 use crate::ui::toast::Toast;
 use crate::ui::toast::render_toast;
+use wing_api_client::GatewayClient as GatewayApiClient;
 
 use self::constants::CLEAR_COMMAND;
 use self::constants::COPY_COMMAND;
@@ -103,10 +104,21 @@ pub struct App {
     config: AppConfig,
     /// Resolved theme palette.
     palette: ThemePalette,
+    /// Client ID from WS handshake (for Phase 3c/3d).
+    #[allow(dead_code)]
+    client_id: String,
+    /// HTTP API client (for Phase 3c/3d).
+    #[allow(dead_code)]
+    http: GatewayApiClient,
 }
 
 impl App {
-    pub fn new(session_id: String, config: AppConfig) -> Self {
+    pub fn new(
+        session_id: String,
+        client_id: String,
+        http: GatewayApiClient,
+        config: AppConfig,
+    ) -> Self {
         let palette = ThemePalette::from_config(&config.colors);
         let max_input_lines = config.layout.max_input_lines;
         let mut chat = ChatView::new();
@@ -132,6 +144,8 @@ impl App {
             ask_selection: None,
             config,
             palette,
+            client_id,
+            http,
         }
     }
 
@@ -449,13 +463,10 @@ impl App {
         // Defense-in-depth: skip events from other sessions.
         // Protects against backend events emitted without scope="session".
         //
-        // Session lifecycle events (NewSession/SyncSession) are always accepted —
-        // they drive session switching and their session_id may intentionally
-        // differ from the current one (e.g. NewSession carries the old session_id).
-        if !matches!(
-            event,
-            WingEvent::NewSession { .. } | WingEvent::SyncSession { .. }
-        ) && let Some(event_sid) = event.session_id()
+        // Session lifecycle events (SyncSession) are always accepted —
+        // their session_id may intentionally differ from the current one.
+        if !matches!(event, WingEvent::SyncSession { .. })
+            && let Some(event_sid) = event.session_id()
             && event_sid != self.session_id
         {
             tracing::debug!(
@@ -710,21 +721,6 @@ impl App {
             WingEvent::ThinkToggled { enabled, .. } => {
                 self.status.thinking = enabled;
             }
-            WingEvent::NewSession {
-                new_session_id,
-                agent,
-                ..
-            } => {
-                self.session_id = new_session_id;
-                self.chat.clear();
-                self.ctx.reset();
-                self.status = StatusData::default();
-                if let Some(agent_info) = agent {
-                    self.status.model = agent_info.model_name;
-                }
-                self.turn.usage = TurnUsage::default();
-                self.popup.reset();
-            }
             WingEvent::SyncSession {
                 messages,
                 draft,
@@ -734,7 +730,6 @@ impl App {
             } => {
                 // Clear old content + reset render context before replay.
                 // SyncSession is a full state replacement — not an append.
-                // This is critical for /rewind which does NOT emit NewSessionEvent.
                 self.chat.clear();
                 self.ctx.reset();
 
@@ -926,21 +921,23 @@ pub async fn run_app(
     terminal: &mut WingTerminal,
     mut gateway: GatewayClient,
     session_id: String,
+    client_id: String,
+    http: GatewayApiClient,
     config: AppConfig,
 ) -> Result<()> {
-    let mut app = App::new(session_id, config);
+    let mut app = App::new(session_id.clone(), client_id, http, config);
     let mut term_events = crate::tui::spawn_event_stream();
 
     // Request system info on startup.
     if let Err(e) = gateway
-        .send_silent(gateway.session_id(), INFO_COMMAND, INIT_INFO_REQUEST_ID)
+        .send_silent(&session_id, INFO_COMMAND, INIT_INFO_REQUEST_ID)
         .await
     {
         tracing::warn!("failed to send /info: {e}");
     }
     // Fetch dynamic command list for popup.
     if let Err(e) = gateway
-        .send_silent(gateway.session_id(), HELP_COMMAND, POPUP_HELP_REQUEST_ID)
+        .send_silent(&session_id, HELP_COMMAND, POPUP_HELP_REQUEST_ID)
         .await
     {
         tracing::warn!("failed to send /help: {e}");
