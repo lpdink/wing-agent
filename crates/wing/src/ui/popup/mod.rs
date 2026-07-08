@@ -4,9 +4,11 @@ pub mod command;
 pub mod selection;
 
 use command::CandidateCache;
+use command::PopupAction;
 use command::candidate_request_for;
 use command::filter_candidates;
 use command::filter_commands;
+use command::is_session_command;
 use command::parse_slash_input;
 use selection::SelectionRow;
 use selection::SelectionState;
@@ -43,12 +45,52 @@ pub enum ActivePopup {
 impl ActivePopup {
     /// Update popup state based on current input text.
     ///
-    /// Returns an optional silent request to send for fetching candidates.
-    pub fn update_from_input(&mut self, text: &str, cache: &CandidateCache) -> Option<String> {
+    /// Returns an optional action to fetch candidates.
+    /// - `SilentRequest(String)`: WS silent request for gateway-served commands.
+    /// - `FetchSessionList`: HTTP fetch for `/session` and `/ss`.
+    pub fn update_from_input(&mut self, text: &str, cache: &CandidateCache) -> Option<PopupAction> {
         let Some((cmd, args)) = parse_slash_input(text) else {
             *self = Self::None;
             return None;
         };
+
+        // Session commands (`/session`, `/ss`): HTTP-fetched candidates.
+        if is_session_command(cmd) {
+            if let Some(candidates) = cache.get_for_command(cmd) {
+                // Hide popup if args exactly match a candidate.
+                if !args.is_empty() {
+                    let args_lower = args.to_lowercase();
+                    if candidates
+                        .iter()
+                        .any(|(id, _)| id.to_lowercase() == args_lower)
+                    {
+                        *self = Self::None;
+                        return None;
+                    }
+                }
+                let rows = filter_candidates(candidates, args);
+                let count = rows.len();
+                let filter = args.to_string();
+                *self = Self::SubCommand {
+                    command: cmd.to_string(),
+                    filter,
+                    rows,
+                    state: SelectionState::new(count),
+                };
+                return None;
+            }
+            // Candidates not cached — trigger HTTP fetch.
+            // Show command popup while waiting.
+            let filter = cmd[1..].to_string();
+            let rows = filter_commands(&cache.commands, &filter);
+            let count = rows.len();
+            *self = Self::Command {
+                filter,
+                rows,
+                state: SelectionState::new(count),
+            };
+            return Some(PopupAction::FetchSessionList);
+        }
 
         // Check if we're in sub-command mode (command + space + args).
         if let Some(request) = candidate_request_for(cmd) {
@@ -99,7 +141,7 @@ impl ActivePopup {
                 rows,
                 state: SelectionState::new(count),
             };
-            return Some(request.to_string());
+            return Some(PopupAction::SilentRequest(request.to_string()));
         }
 
         // Default: command list popup.
@@ -372,5 +414,59 @@ mod tests {
         popup.update_from_input("/model ", &cache);
         // Has a selection → should submit.
         assert!(popup.should_submit());
+    }
+
+    #[test]
+    fn test_session_empty_cache_returns_fetch_action() {
+        use command::PopupAction;
+
+        let mut popup = ActivePopup::default();
+        let cache = CandidateCache::default(); // sessions empty
+        let action = popup.update_from_input("/session ", &cache);
+        assert!(matches!(action, Some(PopupAction::FetchSessionList)));
+    }
+
+    #[test]
+    fn test_ss_empty_cache_returns_fetch_action() {
+        use command::PopupAction;
+
+        let mut popup = ActivePopup::default();
+        let cache = CandidateCache::default();
+        let action = popup.update_from_input("/ss ", &cache);
+        assert!(matches!(action, Some(PopupAction::FetchSessionList)));
+    }
+
+    #[test]
+    fn test_session_cached_shows_popup_no_action() {
+        let mut popup = ActivePopup::default();
+        let mut cache = CandidateCache::default();
+        cache.sessions = vec![
+            ("sess-1".into(), "My Session".into()),
+            ("sess-2".into(), "Other".into()),
+        ];
+        let action = popup.update_from_input("/session ", &cache);
+        assert!(action.is_none()); // No fetch needed
+        assert!(popup.is_active());
+        assert!(matches!(popup, ActivePopup::SubCommand { .. }));
+    }
+
+    #[test]
+    fn test_session_exact_match_hides_popup() {
+        let mut popup = ActivePopup::default();
+        let mut cache = CandidateCache::default();
+        cache.sessions = vec![("sess-1".into(), "My Session".into())];
+        let action = popup.update_from_input("/session sess-1", &cache);
+        assert!(action.is_none());
+        assert!(!popup.is_active());
+    }
+
+    #[test]
+    fn test_fork_still_uses_silent_request() {
+        use command::PopupAction;
+
+        let mut popup = ActivePopup::default();
+        let cache = CandidateCache::default();
+        let action = popup.update_from_input("/fork ", &cache);
+        assert!(matches!(action, Some(PopupAction::SilentRequest(_))));
     }
 }

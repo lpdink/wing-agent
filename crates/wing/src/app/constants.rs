@@ -44,6 +44,20 @@ pub const COPY_COMMAND: &str = "/copy";
 /// Clear the chat view.
 pub const CLEAR_COMMAND: &str = "/clear";
 
+// ── Session lifecycle commands (handled via HTTP API) ───────────
+
+/// Create a new session.
+pub const NEW_COMMAND: &str = "/new";
+
+/// Fork the current session at a branch target.
+pub const FORK_COMMAND: &str = "/fork";
+
+/// Resume a session by ID.
+pub const SESSION_COMMAND: &str = "/session";
+
+/// Short alias for /session.
+pub const SS_COMMAND: &str = "/ss";
+
 // ── Tool names (must match backend tool registry names) ──────────
 
 pub const TOOL_BASH: &str = "Bash";

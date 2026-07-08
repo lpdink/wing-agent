@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use crate::ui::popup::ActivePopup;
 use crate::ui::popup::command::CandidateCache;
+use crate::ui::popup::command::PopupAction;
 
 /// Aggregated popup state: active popup, candidate cache, and dedup set.
 #[derive(Default)]
@@ -19,9 +20,9 @@ pub struct PopupState {
 impl PopupState {
     /// Update popup state based on input text.
     ///
-    /// Returns the silent request content if a new fetch is needed.
-    /// Dedup check is handled by the caller via `should_send_request()`.
-    pub fn update_from_input(&mut self, text: &str) -> Option<String> {
+    /// Returns the popup action if a candidate fetch is needed.
+    /// Dedup check for `SilentRequest` is handled by the caller via `should_send_request()`.
+    pub fn update_from_input(&mut self, text: &str) -> Option<PopupAction> {
         self.active.update_from_input(text, &self.cache)
     }
 

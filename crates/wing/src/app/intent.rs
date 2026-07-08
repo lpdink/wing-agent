@@ -17,4 +17,16 @@ pub enum AppIntent {
 
     /// Write text to clipboard via OSC52 escape sequence.
     CopyToClipboard(String),
+
+    /// Create a new session via HTTP API.
+    CreateSession { workspace: Option<String> },
+
+    /// Resume an existing session via HTTP API.
+    ResumeSession { session_id: String },
+
+    /// Fork from a branch target via HTTP API.
+    ForkSession { target_uuid: String },
+
+    /// Fetch session list via HTTP API for popup candidates.
+    FetchSessionList,
 }

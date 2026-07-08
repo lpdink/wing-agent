@@ -9,11 +9,21 @@
 use super::selection::SelectionRow;
 use crate::protocol::CommandInfo;
 
+/// Action to take when popup candidates need to be fetched.
+///
+/// Replaces the old `Option<String>` return from `update_from_input()`.
+/// Allows distinguishing between WS silent requests and HTTP fetches.
+#[derive(Debug, Clone)]
+pub enum PopupAction {
+    /// Send a WS silent request to fetch candidates (existing behavior).
+    SilentRequest(String),
+    /// Fetch session list via HTTP API (Phase 3c).
+    FetchSessionList,
+}
+
 /// Commands that have sub-command candidates. Maps command name to silent request.
 const CANDIDATE_COMMANDS: &[(&str, &str)] = &[
     ("/model", "/model"),
-    ("/ss", "/session"),
-    ("/session", "/session"),
     ("/fork", "/rewind list"),
     ("/rewind", "/rewind list"),
     ("/agents", "/agents"),
@@ -43,6 +53,12 @@ pub fn candidate_request_for(name: &str) -> Option<&'static str> {
         .iter()
         .find(|(n, _)| *n == name)
         .map(|(_, req)| *req)
+}
+
+/// Check if a command is a session command (`/session` or `/ss`).
+/// These are handled via HTTP API instead of WS silent requests.
+pub fn is_session_command(name: &str) -> bool {
+    name == "/session" || name == "/ss"
 }
 
 /// Extract the command part (first word) from input starting with `/`.
@@ -316,8 +332,19 @@ mod tests {
     #[test]
     fn test_candidate_request_for() {
         assert_eq!(candidate_request_for("/model"), Some("/model"));
-        assert_eq!(candidate_request_for("/ss"), Some("/session"));
+        // /ss and /session removed from CANDIDATE_COMMANDS (Phase 3c: HTTP-fetched).
+        assert_eq!(candidate_request_for("/ss"), None);
+        assert_eq!(candidate_request_for("/session"), None);
+        assert_eq!(candidate_request_for("/fork"), Some("/rewind list"));
         assert_eq!(candidate_request_for("/help"), None);
         assert_eq!(candidate_request_for("/nonexistent"), None);
+    }
+
+    #[test]
+    fn test_is_session_command() {
+        assert!(is_session_command("/session"));
+        assert!(is_session_command("/ss"));
+        assert!(!is_session_command("/model"));
+        assert!(!is_session_command("/fork"));
     }
 }

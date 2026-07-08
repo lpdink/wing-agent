@@ -48,15 +48,19 @@ use wing_api_client::GatewayClient as GatewayApiClient;
 
 use self::constants::CLEAR_COMMAND;
 use self::constants::COPY_COMMAND;
+use self::constants::FORK_COMMAND;
 use self::constants::HELP_COMMAND;
 use self::constants::INFO_COMMAND;
 use self::constants::INIT_INFO_REQUEST_ID;
 use self::constants::INTERRUPT_COMMAND;
+use self::constants::NEW_COMMAND;
 use self::constants::POPUP_AGENTS_REQUEST_ID;
 use self::constants::POPUP_HELP_REQUEST_ID;
 use self::constants::POPUP_MODEL_REQUEST_ID;
 use self::constants::POPUP_REWIND_REQUEST_ID;
 use self::constants::POPUP_SESSION_REQUEST_ID;
+use self::constants::SESSION_COMMAND;
+use self::constants::SS_COMMAND;
 use self::constants::TOOL_BASH;
 use self::constants::TOOL_TODO;
 use self::popup_state::PopupState;
@@ -103,11 +107,9 @@ pub struct App {
     config: AppConfig,
     /// Resolved theme palette.
     palette: ThemePalette,
-    /// Client ID from WS handshake (for Phase 3c/3d).
-    #[allow(dead_code)]
+    /// Client ID from WS handshake (for subscribe/unsubscribe).
     client_id: String,
-    /// HTTP API client (for Phase 3c/3d).
-    #[allow(dead_code)]
+    /// HTTP API client (for session lifecycle operations).
     http: GatewayApiClient,
 }
 
@@ -201,6 +203,10 @@ impl App {
                 ));
                 true
             }
+            NEW_COMMAND => {
+                self.push_intent(AppIntent::CreateSession { workspace: None });
+                true
+            }
             _ => false,
         }
     }
@@ -239,21 +245,31 @@ impl App {
     /// Skips silent requests while the agent is streaming to avoid interference.
     /// Uses a sent-request set to prevent duplicate silent requests.
     fn update_popup(&mut self) {
-        // Streaming guard: skip silent requests while agent is busy.
+        use crate::ui::popup::command::PopupAction;
+
+        // Streaming guard: skip requests while agent is busy.
         let streaming = self.turn.working;
         let text = self.input.text().to_string();
-        if let Some(request) = self.popup.update_from_input(&text) {
+        if let Some(action) = self.popup.update_from_input(&text) {
             if streaming {
                 return;
             }
-            let req_id = format!("_popup_{}", request.replace(' ', "_"));
-            // Dedup: don't re-send if already pending.
-            if self.popup.should_send_request(&req_id) {
-                self.popup.mark_sent(req_id.clone());
-                self.push_intent(AppIntent::SilentRequest {
-                    content: request,
-                    request_id: req_id,
-                });
+            match action {
+                PopupAction::SilentRequest(request) => {
+                    let req_id = format!("_popup_{}", request.replace(' ', "_"));
+                    // Dedup: don't re-send if already pending.
+                    if self.popup.should_send_request(&req_id) {
+                        self.popup.mark_sent(req_id.clone());
+                        self.push_intent(AppIntent::SilentRequest {
+                            content: request,
+                            request_id: req_id,
+                        });
+                    }
+                }
+                PopupAction::FetchSessionList => {
+                    // HTTP fetch is idempotent — no dedup needed.
+                    self.push_intent(AppIntent::FetchSessionList);
+                }
             }
         }
     }
@@ -427,6 +443,37 @@ impl App {
             }
             crossterm::event::KeyCode::Enter => {
                 if self.popup.active.should_submit() {
+                    // Session lifecycle commands: intercept popup selection
+                    // and produce intents directly (no input box roundtrip).
+                    let lifecycle_intent = if let ActivePopup::SubCommand {
+                        command,
+                        rows,
+                        state,
+                        ..
+                    } = &self.popup.active
+                    {
+                        rows.get(state.selected)
+                            .and_then(|selected| match command.as_str() {
+                                cmd if cmd == FORK_COMMAND => Some(AppIntent::ForkSession {
+                                    target_uuid: selected.name.clone(),
+                                }),
+                                cmd if cmd == SESSION_COMMAND || cmd == SS_COMMAND => {
+                                    Some(AppIntent::ResumeSession {
+                                        session_id: selected.name.clone(),
+                                    })
+                                }
+                                _ => None,
+                            })
+                    } else {
+                        None
+                    };
+                    if let Some(intent) = lifecycle_intent {
+                        self.popup.active = ActivePopup::None;
+                        self.input.clear();
+                        self.push_intent(intent);
+                        return true;
+                    }
+
                     match &self.popup.active {
                         ActivePopup::Command {
                             rows,
@@ -739,12 +786,16 @@ impl App {
                 self.status.thinking = enabled;
             }
             WingEvent::SyncSession {
+                session_id,
                 messages,
                 draft,
                 name,
                 agent,
                 ..
             } => {
+                // Update session_id to the new session (Phase 3c).
+                self.session_id = session_id;
+
                 // Clear old content + reset render context before replay.
                 // SyncSession is a full state replacement — not an append.
                 self.chat.clear();
@@ -1010,6 +1061,90 @@ pub async fn run_app(
                         tracing::warn!("failed to send silent request: {e}");
                     }
                 }
+                AppIntent::CreateSession { workspace } => {
+                    let old_session_id = app.session_id.clone();
+                    match app.http.create_session(None, workspace.as_deref()).await {
+                        Ok(resp) => {
+                            let new_sid = &resp.session_id;
+                            if let Err(e) = app.http.subscribe(new_sid, &app.client_id).await {
+                                tracing::warn!("subscribe new session failed: {e}");
+                            }
+                            if let Err(e) =
+                                app.http.unsubscribe(&old_session_id, &app.client_id).await
+                            {
+                                tracing::warn!("unsubscribe old session failed: {e}");
+                            }
+                            tracing::info!(old = old_session_id, new = new_sid, "session created");
+                        }
+                        Err(e) => {
+                            app.show_toast(Toast::error(
+                                format!("Create failed: {e}"),
+                                std::time::Duration::from_secs(3),
+                            ));
+                        }
+                    }
+                }
+                AppIntent::ResumeSession {
+                    session_id: target_id,
+                } => {
+                    let old_session_id = app.session_id.clone();
+                    match app.http.resume_session(&target_id).await {
+                        Ok(resp) => {
+                            let new_sid = &resp.session_id;
+                            if let Err(e) = app.http.subscribe(new_sid, &app.client_id).await {
+                                tracing::warn!("subscribe resumed session failed: {e}");
+                            }
+                            if let Err(e) =
+                                app.http.unsubscribe(&old_session_id, &app.client_id).await
+                            {
+                                tracing::warn!("unsubscribe old session failed: {e}");
+                            }
+                            tracing::info!(old = old_session_id, new = new_sid, "session resumed");
+                        }
+                        Err(e) => {
+                            app.show_toast(Toast::error(
+                                format!("Resume failed: {e}"),
+                                std::time::Duration::from_secs(3),
+                            ));
+                        }
+                    }
+                }
+                AppIntent::ForkSession { target_uuid } => {
+                    let old_session_id = app.session_id.clone();
+                    match app.http.fork_session(&old_session_id, &target_uuid).await {
+                        Ok(resp) => {
+                            let new_sid = &resp.session_id;
+                            if let Err(e) = app.http.subscribe(new_sid, &app.client_id).await {
+                                tracing::warn!("subscribe forked session failed: {e}");
+                            }
+                            if let Err(e) =
+                                app.http.unsubscribe(&old_session_id, &app.client_id).await
+                            {
+                                tracing::warn!("unsubscribe old session failed: {e}");
+                            }
+                            tracing::info!(old = old_session_id, new = new_sid, "session forked");
+                        }
+                        Err(e) => {
+                            app.show_toast(Toast::error(
+                                format!("Fork failed: {e}"),
+                                std::time::Duration::from_secs(3),
+                            ));
+                        }
+                    }
+                }
+                AppIntent::FetchSessionList => match app.http.list_sessions().await {
+                    Ok(resp) => {
+                        app.popup.cache.sessions = resp
+                            .sessions
+                            .iter()
+                            .map(|s| (s.id.clone(), s.name.clone().unwrap_or_default()))
+                            .collect();
+                        app.update_popup();
+                    }
+                    Err(e) => {
+                        tracing::warn!("list sessions failed: {e}");
+                    }
+                },
                 // Discard gateway-dependent intents when disconnected.
                 AppIntent::SendMessage { .. } | AppIntent::SilentRequest { .. } => {}
             }
