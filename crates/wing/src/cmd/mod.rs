@@ -7,6 +7,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::app::run_app;
+use crate::app::transport::Transport;
 use crate::config::AppConfig;
 use crate::gateway::GatewayClient;
 use crate::tui;
@@ -231,7 +232,12 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     }));
 
     // Run the app.
-    let result = run_app(&mut terminal, gateway, session_id, client_id, http, config).await;
+    let transport = Transport {
+        ws: gateway,
+        http,
+        client_id,
+    };
+    let result = run_app(&mut terminal, transport, session_id, ws_url, config).await;
 
     // Restore terminal.
     tui::restore_terminal(&mut terminal)?;

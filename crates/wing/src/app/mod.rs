@@ -5,6 +5,7 @@ pub mod intent;
 pub mod popup_state;
 pub mod render_context;
 pub mod replay;
+pub mod transport;
 pub mod turn_state;
 
 pub use intent::AppIntent;
@@ -18,7 +19,9 @@ use ratatui::layout::Direction;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
 
-use crate::gateway::GatewayClient;
+use self::transport::Transport;
+use self::transport::backoff;
+use self::transport::try_reconnect;
 use crate::protocol::WingEvent;
 use crate::tui::MouseAction;
 use crate::tui::TermEvent;
@@ -43,8 +46,8 @@ use crate::ui::status_bar::StatusBar;
 use crate::ui::status_bar::StatusData;
 use crate::ui::status_bar::TurnUsage;
 use crate::ui::toast::Toast;
+use crate::ui::toast::ToastKind;
 use crate::ui::toast::render_toast;
-use wing_api_client::GatewayClient as GatewayApiClient;
 
 use self::constants::CLEAR_COMMAND;
 use self::constants::COPY_COMMAND;
@@ -107,19 +110,12 @@ pub struct App {
     config: AppConfig,
     /// Resolved theme palette.
     palette: ThemePalette,
-    /// Client ID from WS handshake (for subscribe/unsubscribe).
-    client_id: String,
-    /// HTTP API client (for session lifecycle operations).
-    http: GatewayApiClient,
+    /// Whether the gateway connection is active.
+    connected: bool,
 }
 
 impl App {
-    pub fn new(
-        session_id: String,
-        client_id: String,
-        http: GatewayApiClient,
-        config: AppConfig,
-    ) -> Self {
+    pub fn new(session_id: String, config: AppConfig) -> Self {
         let palette = ThemePalette::from_config(&config.colors);
         let max_input_lines = config.layout.max_input_lines;
         let mut chat = ChatView::new();
@@ -143,8 +139,7 @@ impl App {
             ask_selection: None,
             config,
             palette,
-            client_id,
-            http,
+            connected: true,
         }
     }
 
@@ -181,6 +176,11 @@ impl App {
     /// Drain all pending intents. Called by the runner after each draw cycle.
     pub fn drain_intents(&mut self) -> Vec<AppIntent> {
         std::mem::take(&mut self.intents)
+    }
+
+    /// Update the gateway connection state.
+    pub fn set_connected(&mut self, connected: bool) {
+        self.connected = connected;
     }
 
     /// Try to handle `text` as a frontend-only magic command.
@@ -987,31 +987,34 @@ impl App {
 /// Run the main application loop.
 pub async fn run_app(
     terminal: &mut WingTerminal,
-    mut gateway: GatewayClient,
+    transport: Transport,
     session_id: String,
-    client_id: String,
-    http: GatewayApiClient,
+    gateway_url: String,
     config: AppConfig,
 ) -> Result<()> {
-    let mut app = App::new(session_id.clone(), client_id, http, config);
+    let mut app = App::new(session_id, config);
+    app.set_connected(true);
     let mut term_events = crate::tui::spawn_event_stream();
+    let mut transport = Some(transport);
+    let mut reconnect_attempt: u32 = 0;
+    let mut reconnect_at = std::time::Instant::now();
 
     // Request system info on startup.
-    if let Err(e) = gateway
-        .send_silent(&session_id, INFO_COMMAND, INIT_INFO_REQUEST_ID)
-        .await
-    {
-        tracing::warn!("failed to send /info: {e}");
+    if let Some(t) = &transport {
+        if let Err(e) =
+            t.ws.send_silent(&app.session_id, INFO_COMMAND, INIT_INFO_REQUEST_ID)
+                .await
+        {
+            tracing::warn!("failed to send /info: {e}");
+        }
+        // Fetch dynamic command list for popup.
+        if let Err(e) =
+            t.ws.send_silent(&app.session_id, HELP_COMMAND, POPUP_HELP_REQUEST_ID)
+                .await
+        {
+            tracing::warn!("failed to send /help: {e}");
+        }
     }
-    // Fetch dynamic command list for popup.
-    if let Err(e) = gateway
-        .send_silent(&session_id, HELP_COMMAND, POPUP_HELP_REQUEST_ID)
-        .await
-    {
-        tracing::warn!("failed to send /help: {e}");
-    }
-
-    let mut gateway_alive = true;
 
     loop {
         // Draw.
@@ -1041,112 +1044,136 @@ pub async fn run_app(
                         }
                     }
                 }
-                AppIntent::SendMessage { content } if gateway_alive => {
-                    if let Err(e) = gateway.send_message(&app.session_id, &content).await {
+                AppIntent::SendMessage { content } => {
+                    if let Some(t) = &transport
+                        && let Err(e) = t.ws.send_message(&app.session_id, &content).await
+                    {
                         tracing::error!("failed to send message: {e}");
                         app.show_toast(Toast::warning(
                             format!("Send failed: {e}"),
                             std::time::Duration::from_secs(3),
                         ));
                     }
+                    // transport is None → silently discard (disconnected).
                 }
                 AppIntent::SilentRequest {
                     content,
                     request_id,
-                } if gateway_alive => {
-                    if let Err(e) = gateway
-                        .send_silent(&app.session_id, &content, &request_id)
-                        .await
+                } => {
+                    if let Some(t) = &transport
+                        && let Err(e) =
+                            t.ws.send_silent(&app.session_id, &content, &request_id)
+                                .await
                     {
                         tracing::warn!("failed to send silent request: {e}");
                     }
                 }
                 AppIntent::CreateSession { workspace } => {
-                    let old_session_id = app.session_id.clone();
-                    match app.http.create_session(None, workspace.as_deref()).await {
-                        Ok(resp) => {
-                            let new_sid = &resp.session_id;
-                            if let Err(e) = app.http.subscribe(new_sid, &app.client_id).await {
-                                tracing::warn!("subscribe new session failed: {e}");
+                    if let Some(t) = &transport {
+                        let old_session_id = app.session_id.clone();
+                        match t.http.create_session(None, workspace.as_deref()).await {
+                            Ok(resp) => {
+                                let new_sid = &resp.session_id;
+                                if let Err(e) = t.http.subscribe(new_sid, &t.client_id).await {
+                                    tracing::warn!("subscribe new session failed: {e}");
+                                }
+                                if let Err(e) =
+                                    t.http.unsubscribe(&old_session_id, &t.client_id).await
+                                {
+                                    tracing::warn!("unsubscribe old session failed: {e}");
+                                }
+                                tracing::info!(
+                                    old = old_session_id,
+                                    new = new_sid,
+                                    "session created"
+                                );
                             }
-                            if let Err(e) =
-                                app.http.unsubscribe(&old_session_id, &app.client_id).await
-                            {
-                                tracing::warn!("unsubscribe old session failed: {e}");
+                            Err(e) => {
+                                app.show_toast(Toast::error(
+                                    format!("Create failed: {e}"),
+                                    std::time::Duration::from_secs(3),
+                                ));
                             }
-                            tracing::info!(old = old_session_id, new = new_sid, "session created");
-                        }
-                        Err(e) => {
-                            app.show_toast(Toast::error(
-                                format!("Create failed: {e}"),
-                                std::time::Duration::from_secs(3),
-                            ));
                         }
                     }
                 }
                 AppIntent::ResumeSession {
                     session_id: target_id,
                 } => {
-                    let old_session_id = app.session_id.clone();
-                    match app.http.resume_session(&target_id).await {
-                        Ok(resp) => {
-                            let new_sid = &resp.session_id;
-                            if let Err(e) = app.http.subscribe(new_sid, &app.client_id).await {
-                                tracing::warn!("subscribe resumed session failed: {e}");
+                    if let Some(t) = &transport {
+                        let old_session_id = app.session_id.clone();
+                        match t.http.resume_session(&target_id).await {
+                            Ok(resp) => {
+                                let new_sid = &resp.session_id;
+                                if let Err(e) = t.http.subscribe(new_sid, &t.client_id).await {
+                                    tracing::warn!("subscribe resumed session failed: {e}");
+                                }
+                                if let Err(e) =
+                                    t.http.unsubscribe(&old_session_id, &t.client_id).await
+                                {
+                                    tracing::warn!("unsubscribe old session failed: {e}");
+                                }
+                                tracing::info!(
+                                    old = old_session_id,
+                                    new = new_sid,
+                                    "session resumed"
+                                );
                             }
-                            if let Err(e) =
-                                app.http.unsubscribe(&old_session_id, &app.client_id).await
-                            {
-                                tracing::warn!("unsubscribe old session failed: {e}");
+                            Err(e) => {
+                                app.show_toast(Toast::error(
+                                    format!("Resume failed: {e}"),
+                                    std::time::Duration::from_secs(3),
+                                ));
                             }
-                            tracing::info!(old = old_session_id, new = new_sid, "session resumed");
-                        }
-                        Err(e) => {
-                            app.show_toast(Toast::error(
-                                format!("Resume failed: {e}"),
-                                std::time::Duration::from_secs(3),
-                            ));
                         }
                     }
                 }
                 AppIntent::ForkSession { target_uuid } => {
-                    let old_session_id = app.session_id.clone();
-                    match app.http.fork_session(&old_session_id, &target_uuid).await {
-                        Ok(resp) => {
-                            let new_sid = &resp.session_id;
-                            if let Err(e) = app.http.subscribe(new_sid, &app.client_id).await {
-                                tracing::warn!("subscribe forked session failed: {e}");
+                    if let Some(t) = &transport {
+                        let old_session_id = app.session_id.clone();
+                        match t.http.fork_session(&old_session_id, &target_uuid).await {
+                            Ok(resp) => {
+                                let new_sid = &resp.session_id;
+                                if let Err(e) = t.http.subscribe(new_sid, &t.client_id).await {
+                                    tracing::warn!("subscribe forked session failed: {e}");
+                                }
+                                if let Err(e) =
+                                    t.http.unsubscribe(&old_session_id, &t.client_id).await
+                                {
+                                    tracing::warn!("unsubscribe old session failed: {e}");
+                                }
+                                tracing::info!(
+                                    old = old_session_id,
+                                    new = new_sid,
+                                    "session forked"
+                                );
                             }
-                            if let Err(e) =
-                                app.http.unsubscribe(&old_session_id, &app.client_id).await
-                            {
-                                tracing::warn!("unsubscribe old session failed: {e}");
+                            Err(e) => {
+                                app.show_toast(Toast::error(
+                                    format!("Fork failed: {e}"),
+                                    std::time::Duration::from_secs(3),
+                                ));
                             }
-                            tracing::info!(old = old_session_id, new = new_sid, "session forked");
-                        }
-                        Err(e) => {
-                            app.show_toast(Toast::error(
-                                format!("Fork failed: {e}"),
-                                std::time::Duration::from_secs(3),
-                            ));
                         }
                     }
                 }
-                AppIntent::FetchSessionList => match app.http.list_sessions().await {
-                    Ok(resp) => {
-                        app.popup.cache.sessions = resp
-                            .sessions
-                            .iter()
-                            .map(|s| (s.id.clone(), s.name.clone().unwrap_or_default()))
-                            .collect();
-                        app.update_popup();
+                AppIntent::FetchSessionList => {
+                    if let Some(t) = &transport {
+                        match t.http.list_sessions().await {
+                            Ok(resp) => {
+                                app.popup.cache.sessions = resp
+                                    .sessions
+                                    .iter()
+                                    .map(|s| (s.id.clone(), s.name.clone().unwrap_or_default()))
+                                    .collect();
+                                app.update_popup();
+                            }
+                            Err(e) => {
+                                tracing::warn!("list sessions failed: {e}");
+                            }
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!("list sessions failed: {e}");
-                    }
-                },
-                // Discard gateway-dependent intents when disconnected.
-                AppIntent::SendMessage { .. } | AppIntent::SilentRequest { .. } => {}
+                }
             }
         }
 
@@ -1161,9 +1188,20 @@ pub async fn run_app(
             .filter(|t| !t.is_expired())
             .map(|t| t.remaining());
 
+        // Reconnect sleep (only when disconnected).
+        let need_reconnect = transport.is_none();
+        let reconnect_sleep = async {
+            if need_reconnect {
+                let now = std::time::Instant::now();
+                if reconnect_at > now {
+                    tokio::time::sleep(reconnect_at - now).await;
+                }
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+
         // Select from term events and gateway events.
-        // After gateway disconnects, use pending() to keep the branch valid
-        // without busy-looping.
         tokio::select! {
             Some(term_event) = term_events.recv() => {
                 match term_event {
@@ -1195,14 +1233,53 @@ pub async fn run_app(
                     }
                 }
             }
-            event = gateway.recv_event(), if gateway_alive => {
+            event = async {
+                transport.as_mut().unwrap().ws.recv_event().await
+            }, if transport.is_some() => {
                 match event {
                     Some(e) => app.handle_event(e),
                     None => {
-                        gateway_alive = false;
-                        app.chat.push(ChatCell::ErrorMessage(
-                            "⚡ Connection to gateway lost. Please restart wing.".into(),
+                        // Disconnected.
+                        transport = None;
+                        app.set_connected(false);
+                        app.show_toast(Toast::persistent(
+                            "⚡ Connection lost — reconnecting...",
+                            ToastKind::Warning,
                         ));
+                        reconnect_attempt = 0;
+                        reconnect_at = std::time::Instant::now() + backoff(0);
+                    }
+                }
+            }
+            // Reconnect timer (only fires when disconnected).
+            _ = reconnect_sleep => {
+                match try_reconnect(&gateway_url, &app.session_id).await {
+                    Ok(new_transport) => {
+                        transport = Some(new_transport);
+                        app.set_connected(true);
+                        app.clear_toast();
+                        app.show_toast(Toast::info(
+                            "Reconnected!",
+                            std::time::Duration::from_secs(2),
+                        ));
+                        reconnect_attempt = 0;
+
+                        // Re-request /info and /help.
+                        if let Some(t) = &transport {
+                            let _ = t.ws.send_silent(
+                                &app.session_id, INFO_COMMAND, INIT_INFO_REQUEST_ID,
+                            ).await;
+                            let _ = t.ws.send_silent(
+                                &app.session_id, HELP_COMMAND, POPUP_HELP_REQUEST_ID,
+                            ).await;
+                        }
+                    }
+                    Err(e) => {
+                        reconnect_attempt += 1;
+                        reconnect_at = std::time::Instant::now() + backoff(reconnect_attempt);
+                        tracing::warn!(
+                            "reconnect attempt {reconnect_attempt} failed: {e}"
+                        );
                     }
                 }
             }
