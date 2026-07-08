@@ -23,17 +23,13 @@ from wing.event import AgentInfo, SessionInfo
 
 
 class ConnectResponse(BaseModel):
-    """连接建立后的第一个消息——携带服务端分配的 session_id 和 client_id。
+    """连接建立后的第一个消息——携带服务端分配的 client_id。
 
-    前端收到后保存 session_id 和 client_id。
-    - session_id：用于后续 ClientRequest 指定目标 session
-    - client_id：前端可保存但不需要主动传递（Gateway 自动注入）
-
-    /new 等命令会产生新 session_id，前端需要更新。
+    前端收到后保存 client_id。
+    session 生命周期通过 HTTP API 管理（create + subscribe），不再由 WS 连接自动创建。
     """
 
     type: str = "connected"
-    session_id: str
     client_id: str  # Gateway 生成的 client 标识
 
 

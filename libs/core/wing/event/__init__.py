@@ -6,7 +6,7 @@ WingEvent 统一事件协议 (V2)。
 所有事件均继承 WingEvent 基类，通过 type 字段区分。
 V2 变更：
   - 删除 CreateSessionDoneEvent、SessionActivatedEvent、RewindDoneEvent、ForkDoneEvent
-  - 新增 NewSessionEvent、SyncSessionEvent、ModelListEvent
+  - 新增 SyncSessionEvent、ModelListEvent
   - 拆分为四个模块：base、react、state_change、query_response
 """
 
@@ -46,7 +46,6 @@ from .state_change import (
     CompactDoneEvent,
     InterruptedEvent,
     ModelSwitchedEvent,
-    NewSessionEvent,
     SessionListEvent,
     SessionUpdatedEvent,
     SyncSessionEvent,
@@ -66,7 +65,6 @@ WingEventUnion = (
     | DoneEvent
     | TurnStartedEvent
     | DiffContentEvent
-    | NewSessionEvent
     | SessionListEvent
     | SyncSessionEvent
     | DeliveredEvent
@@ -106,7 +104,6 @@ __all__ = [
     "TurnStartedEvent",
     "DiffContentEvent",
     # state_change
-    "NewSessionEvent",
     "SyncSessionEvent",
     "SessionListEvent",
     "SessionUpdatedEvent",

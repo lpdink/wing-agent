@@ -87,7 +87,7 @@ class WingEvent(BaseModel):
 
     - created_at：UTC datetime，人类可读，前端可反序列化。
     - type：子类必须覆盖为 Literal 字面量。
-    - session_id：可选，因为 NewSessionEvent 等操作在创建前没有 session。
+    - session_id：可选，某些事件在 session 创建前没有关联 session。
     - request_id：始终存在（自动生成 UUID），前端请求可覆写。
                   即使不是 RPC 响应，也始终存在，方便日志串联。
     - target：EventTarget，由 EventBus emit 时注入，Gateway 据此转发。

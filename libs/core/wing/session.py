@@ -129,7 +129,7 @@ class Session:
         2. 用同一个 TrackedList 构建新 ContextManager
         3. 用新模板创建新 WingAgent
 
-        不产生 NewSessionEvent，SM 和 TUI 不感知 session 变化。
+        不产生 session 切换事件，SM 和 TUI 不感知 session 变化。
         """
         from wing.agent import WingAgent
 

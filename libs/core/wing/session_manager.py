@@ -19,8 +19,6 @@ import os
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
-
 from wing.agent_template import AgentTemplate, AgentTemplateManager
 from wing.common.logger import log
 from wing.common.tracked_list import TrackedList
@@ -28,16 +26,9 @@ from wing.common.utils import generate_session_id
 from wing.config import get_config
 from wing.hook_registry import hooks
 from wing.event import (
-    AgentInfo,
-    BranchTargetInfo,
-    BranchTargetsEvent,
-    ContextStatsEvent,
     DeliveredEvent,
     EventTarget,
-    NewSessionEvent,
     SessionInfo,
-    SessionListEvent,
-    SyncSessionEvent,
     SystemEvent,
     SystemInfoEvent,
     ModelSwitchedEvent,
@@ -57,7 +48,7 @@ class SessionManager:
 
     内部方法（_ 开头）：
       - _post：消息路由入口，由 WingRuntime 调用
-      - _dispatch_session_command：拦截 /new, /fork, /session, /ss, /title, /agents
+      - _dispatch_session_command：拦截 /title, /info, /agents
       - _dispatch_magic_command：路由到 magic_registry
 
     外部方法：
@@ -69,7 +60,7 @@ class SessionManager:
     """
 
     # SM 直接拦截的命令名（不再走 magic_registry）
-    _SESSION_COMMANDS = {"new", "fork", "session", "ss", "title", "info", "agents"}
+    _SESSION_COMMANDS = {"title", "info", "agents"}
 
     def __init__(self, sessions_path: Path | None = None) -> None:
         self._sessions: dict[str, Session] = {}
@@ -484,7 +475,7 @@ class SessionManager:
         content: str,
         client_id: str | None,
     ) -> tuple[str | None, str | None]:
-        """拦截 session 命令：/new, /fork, /session, /ss, /title,/agents。
+        """拦截 session 命令：/title, /info, /agents。
 
         Returns:
             (result_text, new_session_id): result_text 为 None 表示命令不匹配。
@@ -497,13 +488,7 @@ class SessionManager:
         if cmd_name not in self._SESSION_COMMANDS:
             return None, None
 
-        if cmd_name == "new":
-            return await self._cmd_new(session, args, client_id)
-        elif cmd_name in ("session", "ss"):
-            return await self._cmd_session(session, args, client_id)
-        elif cmd_name == "fork":
-            return await self._cmd_fork(session, args, client_id)
-        elif cmd_name == "title":
+        if cmd_name == "title":
             return await self._cmd_title(session, args)
         elif cmd_name == "info":
             return self._cmd_info(session)
@@ -511,163 +496,6 @@ class SessionManager:
             return await self._cmd_agents(session, args)
 
         return None, None
-
-    async def _cmd_new(
-        self,
-        session: Session,
-        args: str,
-        client_id: str | None,
-    ) -> tuple[str, str]:
-        """处理 /new [name] 命令。"""
-        name = args.strip() if args else None
-        original_session_id = session.session_id
-
-        new_session = self.create_session(workspace=session.session_workspace)
-        new_session_id = new_session.session_id
-
-        event_bus.emit(
-            NewSessionEvent(
-                session_id=original_session_id,
-                new_session_id=new_session_id,
-                agent=_build_agent_info(new_session.agent),
-                name=name,
-                target=EventTarget(scope="session"),
-            )
-        )
-        _emit_context_stats(new_session.agent)
-        if name:
-            return (
-                f"✅ 新 session 已创建: {new_session_id} (名称: {name})",
-                new_session_id,
-            )
-        return f"✅ 新 session 已创建: {new_session_id}", new_session_id
-
-    async def _cmd_session(
-        self,
-        session: Session,
-        args: str,
-        client_id: str | None,
-    ) -> tuple[str, str | None]:
-        """处理 /session [uuid] 或 /ss [uuid] 命令。"""
-        if not args:
-            sessions = self.list_sessions(session.session_workspace)
-            log.debug(
-                f"SM._cmd_session: emitting SessionListEvent with {len(sessions)} sessions"
-            )
-            event_bus.emit(
-                SessionListEvent(
-                    session_id=session.session_id,
-                    sessions=sessions,
-                )
-            )
-            if not sessions:
-                return "暂无 session", None
-            lines = ["📋 Session 列表:"]
-            for s in sessions:
-                workspace_hint = f" [{s.workspace}]" if s.workspace else ""
-                lines.append(f"  {s.id}: {s.name}{workspace_hint}")
-            return "\n".join(lines), None
-
-        # 切换 session
-        original_session_id = session.session_id
-        target_session = self.switch_session(original_session_id, args.strip())
-        if target_session is None:
-            return f"❌ Session 不存在: {args}", None
-
-        new_session_id = target_session.session_id
-
-        # emit NewSessionEvent + SyncSessionEvent
-        event_bus.emit(
-            NewSessionEvent(
-                session_id=original_session_id,
-                new_session_id=new_session_id,
-                agent=_build_agent_info(target_session.agent),
-                name=target_session.session_name,
-                target=EventTarget(scope="session"),
-            )
-        )
-
-        # SyncSessionEvent
-        cm = target_session.agent.context_manager
-        full_chain = cm.get_context_window()
-        event_bus.emit(
-            SyncSessionEvent(
-                session_id=new_session_id,
-                messages=_serialize_messages(full_chain),
-                agent=_build_agent_info(target_session.agent),
-                name=target_session.session_name,
-                target=EventTarget(scope="session"),
-            )
-        )
-        _emit_context_stats(target_session.agent)
-
-        count, tokens = cm.get_context_stats()
-        return (
-            f"✅ 已切换到 session: {new_session_id}\n消息数: {count}, tokens: {tokens}",
-            new_session_id,
-        )
-
-    async def _cmd_fork(
-        self,
-        session: Session,
-        args: str,
-        client_id: str | None,
-    ) -> tuple[str, str | None]:
-        """处理 /fork [uuid|list] 命令。"""
-        cm = session.agent.context_manager
-
-        if not args or args.strip() == "list":
-            targets = cm.get_branch_targets()
-            if not targets:
-                return "❌ 没有可分叉的用户消息", None
-            session.agent.emit(
-                BranchTargetsEvent(
-                    session_id=session.session_id,
-                    targets=[BranchTargetInfo(**t) for t in targets],
-                )
-            )
-            lines = ["📋 可分叉的用户消息:"]
-            for item in targets:
-                lines.append(f"  {item['uuid']}  {item['content']}")
-            lines.append("\n使用 /fork <uuid> 从指定消息分叉")
-            return "\n".join(lines), None
-
-        target_uuid = args.strip()
-        original_session_id = session.session_id
-
-        result = self.fork_session(original_session_id, target_uuid)
-        if result is None:
-            return f"❌ Session 不存在: {original_session_id}", None
-
-        new_session, draft = result
-        new_session_id = new_session.session_id
-
-        event_bus.emit(
-            NewSessionEvent(
-                session_id=original_session_id,
-                new_session_id=new_session_id,
-                agent=_build_agent_info(new_session.agent),
-                name=new_session.session_name,
-                target=EventTarget(scope="session"),
-            )
-        )
-        event_bus.emit(
-            SyncSessionEvent(
-                session_id=new_session_id,
-                messages=_serialize_messages(
-                    list(new_session.agent.context_manager._messages)
-                ),
-                agent=_build_agent_info(new_session.agent),
-                name=new_session.session_name,
-                draft=draft,
-                target=EventTarget(scope="session"),
-            )
-        )
-        _emit_context_stats(new_session.agent)
-        return (
-            f"✅ 已从 uuid={target_uuid} 分叉到新 session: {new_session_id}",
-            new_session_id,
-        )
 
     async def _cmd_title(
         self,
@@ -772,70 +600,3 @@ class SessionManager:
         handler = cmd.handler
         result = await handler(session.agent, args)
         return result
-
-
-# ============================================================
-# 辅助函数 — SM 内部使用
-# ============================================================
-
-
-def _build_agent_info(agent: Any) -> AgentInfo:
-    """从 WingAgent 构造 AgentInfo。
-
-    .. deprecated::
-        使用 Session.to_agent_info() 替代。此函数仅由魔术命令处理代码使用，
-        将在 Phase 2c 清理。
-    """
-    cm = agent.context_manager
-    return AgentInfo(
-        model_name=agent.model,
-        system_prompt=cm.system_prompt.content if cm.system_prompt else None,
-        tools=[t.name for t in agent.tools],
-        skills=list(cm._skills_cache.keys()),
-        rules=list(cm._rules_patterns),
-    )
-
-
-def _serialize_messages(messages: list[Message]) -> list[dict]:
-    """将消息序列化为 dict 列表，用于 SyncSessionEvent。
-
-    .. deprecated::
-        使用 Session.serialize_messages() 替代。此函数仅由魔术命令处理代码使用，
-        将在 Phase 2c 清理。
-    """
-    result = []
-    for msg in messages:
-        d: dict = {
-            "role": msg.role,
-            "content": msg.content or "",
-            "uuid": msg.uuid,
-        }
-        if msg.reasoning_content:
-            d["reasoning_content"] = msg.reasoning_content
-        if msg.tool_calls:
-            d["tool_calls"] = [
-                {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
-                for tc in msg.tool_calls
-            ]
-        if msg.tool_call_id:
-            d["tool_call_id"] = msg.tool_call_id
-        result.append(d)
-    return result
-
-
-def _emit_context_stats(agent: Any) -> None:
-    """emit ContextStatsEvent（scope=session，仅发给订阅了该 session 的 client）。"""
-    cm = agent.context_manager
-    count, tokens = cm.get_context_stats()
-    ctx_window = 0
-    if cm.compactor:
-        ctx_window = cm.compactor.context_window_tokens
-    event_bus.emit(
-        ContextStatsEvent(
-            session_id=agent.session_id,
-            message_count=count,
-            total_tokens=tokens,
-            context_window_tokens=ctx_window,
-            target=EventTarget(scope="session"),
-        )
-    )

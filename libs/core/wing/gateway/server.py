@@ -22,7 +22,7 @@ from fastapi import WebSocket
 import uvicorn
 
 from wing.common.logger import log
-from wing.event import NewSessionEvent, WingEvent
+from wing.event import WingEvent
 from wing.event_bus import event_bus
 from wing.runtime import WingRuntime
 
@@ -141,22 +141,6 @@ class GatewayServer:
         target = event.target
         if target is None:
             return
-
-        # 处理 session 切换：更新路由表
-        # NewSessionEvent 表示 client 从 old_session 切换到 new_session
-        if isinstance(event, NewSessionEvent):
-            old_session_id = event.session_id
-            new_session_id = event.new_session_id
-            if old_session_id is None:
-                return
-            if target.scope == "client":
-                for cid in target.client_ids:
-                    # 更新路由：移除旧 session，添加新 session
-                    event_bus.route_detach(cid, old_session_id)
-                    event_bus.route_attach(cid, new_session_id)
-                    log.info(
-                        f"Updated routing for client {cid}: {old_session_id} → {new_session_id}"
-                    )
 
         if target.scope == "global":
             # 发给所有 ws

@@ -35,22 +35,15 @@ async def handle_ws(ws: WebSocket) -> None:
     # 1. 生成 client_id
     client_id = uuid.uuid4().hex
 
-    # 2. 创建初始 session（使用默认模板）
-    workspace = ws.query_params.get("workspace")
-    session = server.runtime.create_session(workspace=workspace)
-
-    # 3. 注册 client_id ↔ ws 映射 + EventBus 路由表
+    # 2. 注册 client_id ↔ ws 映射（不创建 session，不 route_attach）
     server.clients[client_id] = ws
     server.ws_to_clients[ws] = client_id
-    event_bus.route_attach(client_id, session.session_id)
 
-    # 4. 推送连接成功 + session_id + client_id
-    await ws.send_json(
-        ConnectResponse(session_id=session.session_id, client_id=client_id).model_dump()
-    )
-    log.info(f"Client connected: {client_id}, session: {session.session_id}")
+    # 3. 推送连接成功 + client_id
+    await ws.send_json(ConnectResponse(client_id=client_id).model_dump())
+    log.info(f"Client connected: {client_id}")
 
-    # 5. 消息路由循环
+    # 4. 消息路由循环
     try:
         while True:
             data = await ws.receive_text()

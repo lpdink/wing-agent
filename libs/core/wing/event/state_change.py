@@ -2,7 +2,7 @@
 
 """
 状态变更事件：session 生命周期、模型切换、think 模式、压缩、中断等。
-也包括 NewSessionEvent 和 SyncSessionEvent——它们变更了 session 的绑定和状态。
+也包括 SyncSessionEvent——它同步 session 的完整状态。
 """
 
 from __future__ import annotations
@@ -17,25 +17,6 @@ from .base import AgentInfo, WingEvent
 # ============================================================
 # Session 生命周期事件
 # ============================================================
-
-
-class NewSessionEvent(WingEvent):
-    """新 session 已创建。
-
-    由 /new、/fork、/session 切换触发。
-    通知前端需要创建新的 tab/panel，并关联到 new_session_id。
-
-    session_id：原先的 session_id（事件发给订阅原 session 的 client）
-    new_session_id：新创建/切换到的 session_id
-    agent：新 session 的 AgentInfo
-    name：新 session 的名称
-    """
-
-    type: Literal["new_session"] = "new_session"
-    session_id: str  # 原先的 session_id
-    new_session_id: str  # 新 session 的 id
-    agent: AgentInfo | None = None
-    name: str | None = None
 
 
 class SyncSessionEvent(WingEvent):
