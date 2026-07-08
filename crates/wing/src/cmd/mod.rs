@@ -13,6 +13,7 @@ use crate::tui;
 use crate::util::logging::init_logging;
 use wing_api_client::GatewayClient as GatewayApiClient;
 
+mod backend_config;
 mod discover;
 mod start;
 mod state;
@@ -41,9 +42,13 @@ pub struct Cli {
 pub enum Command {
     /// Launch the TUI frontend (default when no subcommand given).
     Tui {
-        /// Gateway WebSocket URL.
-        #[arg(long, default_value = "ws://127.0.0.1:32523/ws")]
-        gateway_url: String,
+        /// Gateway host (default: from backend config).
+        #[arg(long)]
+        host: Option<String>,
+
+        /// Gateway port (default: from backend config).
+        #[arg(long)]
+        port: Option<u16>,
 
         /// Dump default configuration to stdout and exit.
         #[arg(long)]
@@ -73,7 +78,8 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
     match cli.command {
         Some(cmd) => match cmd {
             Command::Tui {
-                gateway_url,
+                host,
+                port,
                 dump_config,
             } => {
                 if dump_config {
@@ -81,7 +87,10 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                     print!("{}", config.to_yaml());
                     ExitCode::SUCCESS
                 } else {
-                    match run_tui(&gateway_url).await {
+                    let gw = backend_config::read_backend_gateway_config();
+                    let host = host.unwrap_or(gw.host);
+                    let port = port.unwrap_or(gw.port);
+                    match run_tui(&host, port).await {
                         Ok(()) => ExitCode::SUCCESS,
                         Err(e) => {
                             eprintln!("wing error: {e}");
@@ -91,9 +100,9 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                 }
             }
             Command::Start { host, port } => {
-                let config = AppConfig::load();
-                let host = host.unwrap_or_else(|| config.gateway.host.clone());
-                let port = port.unwrap_or(config.gateway.port);
+                let gw = backend_config::read_backend_gateway_config();
+                let host = host.unwrap_or(gw.host);
+                let port = port.unwrap_or(gw.port);
                 match start::start_gateway(&host, port) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(e) => {
@@ -128,55 +137,54 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
 }
 
 /// Smart default: check if gateway is running, start if not, then enter TUI.
+///
+/// Always reads gateway host:port from the backend config as the single
+/// source of truth.
 async fn smart_default_tui() -> Result<()> {
     let state = state::WingState::load();
 
-    let gateway_url = if let Some(ref gw) = state.gateway {
+    let (host, port) = if let Some(ref gw) = state.gateway {
         if state::is_gateway_running(gw) {
-            // Gateway already running, use its endpoint.
-            format!("ws://{}:{}/ws", gw.host, gw.port)
+            // Gateway already running, use its endpoint from state.
+            (gw.host.clone(), gw.port)
         } else {
-            // Stale state, gateway not running. Clear and auto-start.
-            let host = gw.host.clone();
-            let port = gw.port;
+            // Stale state, gateway not running. Clear and auto-start
+            // from backend config.
             state::WingState::clear_gateway();
-            start::start_gateway(&host, port)?;
-            format!("ws://{host}:{port}/ws")
+            let gw_config = backend_config::read_backend_gateway_config();
+            start::start_gateway(&gw_config.host, gw_config.port)?;
+            (gw_config.host, gw_config.port)
         }
     } else {
-        // No state file, gateway not running. Auto-start from config.
-        let config = AppConfig::load();
-        let host = &config.gateway.host;
-        let port = config.gateway.port;
-        start::start_gateway(host, port)?;
-        format!("ws://{host}:{port}/ws")
+        // No state file, gateway not running. Auto-start from backend config.
+        let gw_config = backend_config::read_backend_gateway_config();
+        start::start_gateway(&gw_config.host, gw_config.port)?;
+        (gw_config.host, gw_config.port)
     };
 
-    run_tui(&gateway_url).await
+    run_tui(&host, port).await
 }
 
 /// Launch TUI: connect to gateway, init terminal, run app.
-async fn run_tui(gateway_url: &str) -> Result<()> {
+async fn run_tui(host: &str, port: u16) -> Result<()> {
     // Initialize logging (file only, no console output).
     let _log_guard = init_logging();
 
-    tracing::info!("wing starting, gateway: {gateway_url}");
+    // Build URLs from host:port — no string replacement needed.
+    let ws_url = format!("ws://{host}:{port}/ws");
+    let http_base = format!("http://{host}:{port}");
+
+    tracing::info!("wing starting, gateway: {ws_url}");
 
     // Get current working directory as workspace.
     let workspace = std::env::current_dir()
         .ok()
         .map(|p| p.to_string_lossy().to_string());
 
-    // Derive HTTP base URL from WS URL (ws://host:port/ws → http://host:port).
-    let http_base = gateway_url
-        .replace("ws://", "http://")
-        .replace("wss://", "https://");
-    let http_base = http_base.strip_suffix("/ws").unwrap_or(&http_base);
-
     // 1. WS connect (get client_id).
-    let gateway = GatewayClient::connect(gateway_url).await.map_err(|e| {
+    let gateway = GatewayClient::connect(&ws_url).await.map_err(|e| {
         anyhow::anyhow!(
-            "Failed to connect to gateway at {gateway_url}: {e}\n\
+            "Failed to connect to gateway at {ws_url}: {e}\n\
                  Make sure the gateway is running: wing start"
         )
     })?;

@@ -79,33 +79,17 @@ impl Default for LayoutConfig {
     }
 }
 
-/// Gateway connection configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct GatewayConfig {
-    /// Gateway host address.
-    pub host: String,
-    /// Gateway port.
-    pub port: u16,
-}
-
-impl Default for GatewayConfig {
-    fn default() -> Self {
-        Self {
-            host: "127.0.0.1".into(),
-            port: 32523,
-        }
-    }
-}
-
 /// Top-level application configuration.
+///
+/// Gateway host:port is NOT stored here — it is read from the backend
+/// config (`$WING_HOME/core/config.yaml`) via `backend_config::read_backend_gateway_config()`.
+/// This struct only contains TUI-specific settings (colors, layout, rendering).
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub colors: ColorsConfig,
     pub layout: LayoutConfig,
     pub rendering: RenderingConfig,
-    pub gateway: GatewayConfig,
 }
 
 impl AppConfig {
