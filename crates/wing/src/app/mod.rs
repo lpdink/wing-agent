@@ -1,10 +1,13 @@
 //! Application state machine and main event loop.
 
 pub mod constants;
+pub mod intent;
 pub mod popup_state;
 pub mod render_context;
 pub mod replay;
 pub mod turn_state;
+
+pub use intent::AppIntent;
 
 use anyhow::Result;
 use crossterm::cursor::MoveTo;
@@ -74,12 +77,8 @@ pub struct App {
     pub session_id: String,
     /// Whether the app should exit.
     pub should_quit: bool,
-    /// Pending message to send to gateway (set by input handling).
-    pending_send: Option<String>,
-    /// Pending silent request for fetching candidates.
-    pending_silent: Option<(String, String)>,
-    /// Pending clipboard text to write via OSC52.
-    pending_clipboard: Option<String>,
+    /// Pending side-effect intents. Drained by runner after each draw cycle.
+    intents: Vec<AppIntent>,
     /// Visible chat area height (updated during draw).
     visible_height: usize,
     /// Terminal width (updated during draw).
@@ -129,9 +128,7 @@ impl App {
             input: InputArea::with_max_lines("今天构建什么？".into(), max_input_lines),
             session_id,
             should_quit: false,
-            pending_send: None,
-            pending_silent: None,
-            pending_clipboard: None,
+            intents: Vec::new(),
             visible_height: 20,
             terminal_width: 80,
             ctrl_c_count: 0,
@@ -167,6 +164,21 @@ impl App {
         let remaining = toast.remaining();
         self.toast = Some(toast);
         remaining
+    }
+
+    /// Clear the active toast (including persistent toasts).
+    pub fn clear_toast(&mut self) {
+        self.toast = None;
+    }
+
+    /// Push a side-effect intent for the runner to execute after draw.
+    fn push_intent(&mut self, intent: AppIntent) {
+        self.intents.push(intent);
+    }
+
+    /// Drain all pending intents. Called by the runner after each draw cycle.
+    pub fn drain_intents(&mut self) -> Vec<AppIntent> {
+        std::mem::take(&mut self.intents)
     }
 
     /// Try to handle `text` as a frontend-only magic command.
@@ -214,7 +226,7 @@ impl App {
             return;
         };
 
-        self.pending_clipboard = Some(content);
+        self.push_intent(AppIntent::CopyToClipboard(content));
     }
 
     /// Refresh `/copy` candidate cache from current chat state.
@@ -238,7 +250,10 @@ impl App {
             // Dedup: don't re-send if already pending.
             if self.popup.should_send_request(&req_id) {
                 self.popup.mark_sent(req_id.clone());
-                self.pending_silent = Some((request, req_id));
+                self.push_intent(AppIntent::SilentRequest {
+                    content: request,
+                    request_id: req_id,
+                });
             }
         }
     }
@@ -281,7 +296,7 @@ impl App {
                     let choice = ask.current().map(|s| s.to_string());
                     if let Some(choice) = choice {
                         self.clear_ask_selection();
-                        self.pending_send = Some(choice);
+                        self.push_intent(AppIntent::SendMessage { content: choice });
                     }
                 }
                 _ => {} // ignore other keys while selection is active
@@ -298,7 +313,9 @@ impl App {
             if !self.input.text().is_empty() {
                 self.input.clear();
             } else {
-                self.pending_send = Some(INTERRUPT_COMMAND.to_string());
+                self.push_intent(AppIntent::SendMessage {
+                    content: INTERRUPT_COMMAND.to_string(),
+                });
                 self.show_toast(Toast::info(
                     "Interrupting agent...",
                     std::time::Duration::from_secs(2),
@@ -377,7 +394,7 @@ impl App {
                     return;
                 }
                 self.chat.push(ChatCell::UserMessage(text.clone()));
-                self.pending_send = Some(text);
+                self.push_intent(AppIntent::SendMessage { content: text });
                 self.turn.usage = TurnUsage::default();
             }
             InputAction::Escape | InputAction::None => {
@@ -442,7 +459,7 @@ impl App {
                             return true;
                         }
                         self.chat.push(ChatCell::UserMessage(text.clone()));
-                        self.pending_send = Some(text);
+                        self.push_intent(AppIntent::SendMessage { content: text });
                         self.turn.usage = TurnUsage::default();
                     }
                     self.input.clear();
@@ -951,45 +968,51 @@ pub async fn run_app(
             tracing::error!("draw error: {e}");
         }
 
-        // Flush pending clipboard write via OSC52.
-        if let Some(text) = app.pending_clipboard.take() {
-            let writer = terminal.backend_mut();
-            match crate::util::clipboard::copy_to_clipboard(writer, &text) {
-                Ok(()) => {
-                    app.show_toast(Toast::info("Copied!", std::time::Duration::from_secs(2)));
+        // Execute all pending intents produced during the last event cycle.
+        for intent in app.drain_intents() {
+            match intent {
+                AppIntent::CopyToClipboard(text) => {
+                    // Clipboard works regardless of gateway state.
+                    let writer = terminal.backend_mut();
+                    match crate::util::clipboard::copy_to_clipboard(writer, &text) {
+                        Ok(()) => {
+                            app.show_toast(Toast::info(
+                                "Copied!",
+                                std::time::Duration::from_secs(2),
+                            ));
+                        }
+                        Err(e) => {
+                            tracing::warn!("clipboard copy failed: {e}");
+                            app.show_toast(Toast::warning(
+                                format!("Copy failed: {e}"),
+                                std::time::Duration::from_secs(3),
+                            ));
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("clipboard copy failed: {e}");
-                    app.show_toast(Toast::warning(
-                        format!("Copy failed: {e}"),
-                        std::time::Duration::from_secs(3),
-                    ));
+                AppIntent::SendMessage { content } if gateway_alive => {
+                    if let Err(e) = gateway.send_message(&app.session_id, &content).await {
+                        tracing::error!("failed to send message: {e}");
+                        app.show_toast(Toast::warning(
+                            format!("Send failed: {e}"),
+                            std::time::Duration::from_secs(3),
+                        ));
+                    }
                 }
+                AppIntent::SilentRequest {
+                    content,
+                    request_id,
+                } if gateway_alive => {
+                    if let Err(e) = gateway
+                        .send_silent(&app.session_id, &content, &request_id)
+                        .await
+                    {
+                        tracing::warn!("failed to send silent request: {e}");
+                    }
+                }
+                // Discard gateway-dependent intents when disconnected.
+                AppIntent::SendMessage { .. } | AppIntent::SilentRequest { .. } => {}
             }
-        }
-
-        if gateway_alive {
-            // Check for pending send.
-            if let Some(text) = app.pending_send.take()
-                && let Err(e) = gateway.send_message(&app.session_id, &text).await
-            {
-                tracing::error!("failed to send message: {e}");
-                app.chat
-                    .push(ChatCell::ErrorMessage(format!("Send failed: {e}")));
-            }
-
-            // Check for pending silent request (candidate fetching).
-            if let Some((content, req_id)) = app.pending_silent.take()
-                && let Err(e) = gateway
-                    .send_silent(&app.session_id, &content, &req_id)
-                    .await
-            {
-                tracing::warn!("failed to send silent request: {e}");
-            }
-        } else {
-            // Drain any pending sends — they can't go anywhere.
-            app.pending_send.take();
-            app.pending_silent.take();
         }
 
         if app.should_quit {

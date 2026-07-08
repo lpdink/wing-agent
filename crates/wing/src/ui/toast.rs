@@ -42,12 +42,16 @@ impl ToastKind {
     }
 }
 
-/// A transient notification that auto-expires.
+/// A transient or persistent notification.
+///
+/// Timed toasts auto-expire after `expires_at`. Persistent toasts remain
+/// visible until explicitly cleared via `App::clear_toast()`.
 #[derive(Debug, Clone)]
 pub struct Toast {
     pub message: String,
     pub kind: ToastKind,
-    pub expires_at: Instant,
+    pub persistent: bool,
+    expires_at: Instant,
 }
 
 impl Toast {
@@ -66,17 +70,30 @@ impl Toast {
         Self::new(message.into(), ToastKind::Error, duration)
     }
 
+    /// Create a persistent toast that never auto-expires.
+    /// Must be explicitly cleared via `App::clear_toast()`.
+    pub fn persistent(message: impl Into<String>, kind: ToastKind) -> Self {
+        Self {
+            message: message.into(),
+            kind,
+            persistent: true,
+            expires_at: Instant::now(), // ignored when persistent
+        }
+    }
+
     fn new(message: String, kind: ToastKind, duration: Duration) -> Self {
         Self {
             message,
             kind,
+            persistent: false,
             expires_at: Instant::now() + duration,
         }
     }
 
     /// Whether this toast has expired.
+    /// Persistent toasts never expire — they must be cleared explicitly.
     pub fn is_expired(&self) -> bool {
-        Instant::now() >= self.expires_at
+        !self.persistent && Instant::now() >= self.expires_at
     }
 
     /// Remaining duration until expiry.
@@ -232,5 +249,28 @@ mod tests {
             cell.symbol() != " " || cell.style().bg.is_some(),
             "toast area should have content"
         );
+    }
+
+    #[test]
+    fn test_persistent_constructor() {
+        let toast = Toast::persistent("Reconnecting...", ToastKind::Warning);
+        assert_eq!(toast.message, "Reconnecting...");
+        assert_eq!(toast.kind, ToastKind::Warning);
+        assert!(toast.persistent);
+    }
+
+    #[test]
+    fn test_persistent_never_expires() {
+        let toast = Toast::persistent("forever", ToastKind::Info);
+        // Persistent toast never expires regardless of elapsed time.
+        assert!(!toast.is_expired());
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(!toast.is_expired());
+    }
+
+    #[test]
+    fn test_non_persistent_default() {
+        let toast = Toast::info("timed", Duration::from_secs(5));
+        assert!(!toast.persistent);
     }
 }
