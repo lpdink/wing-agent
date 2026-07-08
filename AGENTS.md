@@ -1,94 +1,135 @@
-# wing-agent: 通用 agent 运行时
+# wing-agent
 
-Monorepo，包含 Python 后端（runtime + gateway + hooks）和 Rust 客户端（CLI + TUI）。
+Monorepo: Python agent runtime + Rust TUI client.
 
-## 架构
-
-```
-wing (Rust CLI)          wing.gateway (Python)         wing (Python core)
-┌──────────────┐    WS     ┌──────────────────┐        ┌──────────────┐
-│ GatewayClient├──────────►│  GatewayServer   │───────►│ WingRuntime  │
-│ (read/write  │           │  (EventBus 路由)  │        │ SessionManager│
-│  task pair)  │◄──────────┤                  │◄───────┤ EventBus     │
-└──────┬───────┘  events   └──────────────────┘        └──────────────┘
-       │ mpsc
-┌──────▼───────┐
-│     App      │  handle_event() → state mutation
-│  (状态机)    │  draw() → ratatui render
-└──────────────┘
-```
-
-## 项目结构
+## Architecture
 
 ```
-libs/
-├── core/wing/                    Agent 运行时 + Gateway（单包: wing-agent）
-│   ├── agent.py                  WingAgent — LLM 循环 + tool dispatch
-│   ├── session.py                Session — 消息历史 + 模板
-│   ├── session_manager.py        SessionManager — 多 session 管理
-│   ├── event_bus.py              EventBus — 全局事件总线（单例）
-│   ├── runtime.py                WingRuntime — 统一入口
-│   ├── config.py                 配置加载 + WING_HOME 管理
-│   ├── context_manager.py        上下文管理 + compaction
-│   ├── tool_registry.py          工具注册表
-│   ├── tools/                    内置工具 (Bash, Read, Write, Edit, ...)
-│   ├── event/                    事件类型 (react, state_change, query_response)
-│   ├── magic_command/            Slash 命令系统
-│   └── gateway/                  WebSocket 服务器 (server, cli, protocol)
-└── wing_hooks/wing_hooks/        官方 hooks
+Rust TUI (wing)               Gateway (FastAPI)              Runtime (Python)
+┌────────────────┐  WS+HTTP  ┌───────────────────┐          ┌──────────────┐
+│  GatewayClient ├──────────►│  GatewayServer    │────────► │ WingRuntime  │
+│  (WS events)   │           │  routes/session   │          │ (service)    │
+│  ApiClient     │◄──────────│  routes/ws        │◄──────── │SessionManager│
+│  (HTTP api)    │  events   │  routes/health    │          │ EventBus     │
+└───────┬────────┘           └───────────────────┘          └──────────────┘
+        │ mpsc
+┌───────▼────────┐
+│     App        │  handle_event() → state mutation
+│ (state machine)│ draw() → ratatui render
+└────────────────┘
+```
 
-crates/wing/src/                  Rust CLI + TUI
-├── main.rs                       clap 子命令分发
-├── cmd/                          CLI 子命令 (start/stop/status/tui) + daemon 管理
-├── gateway/client.rs             GatewayClient — WS 连接
+**Protocols**: HTTP (RPC-style, session lifecycle + queries) and WebSocket (real-time ReAct event streaming). Session creation is decoupled from WS handshake — clients create sessions via HTTP, then subscribe to events.
+
+## Project Structure
+
+```
+libs/core/wing/                   Python runtime (pip: wing-agent)
+├── agent.py                      WingAgent — LLM loop + tool dispatch
+├── session.py                    Session — messages + template + serialization
+├── session_manager.py            SessionManager — multi-session + magic commands
+├── runtime.py                    WingRuntime — service layer entry point
+├── event_bus.py                  EventBus — global singleton event routing
+├── context_manager.py            Context window + compaction
+├── config.py                     Config loading + WING_HOME
+├── event/                        Event types (base, react, state_change, query_response)
+├── tools/                        Built-in tools (Bash, Read, Write, Edit, Grep, ...)
+├── magic_command/                Slash command registry + handlers
+├── metrics_registry/             LLM call + compaction metrics
+├── common/                       Logger, utils, token counter, process helpers
+└── gateway/                      FastAPI server
+    ├── app.py                    App factory (FastAPI instance + route registration)
+    ├── server.py                 GatewayServer — lifecycle + EventBus subscriber
+    ├── routes/session.py         9 HTTP endpoints (create/resume/fork/subscribe/send/...)
+    ├── routes/ws.py              WebSocket handler (pure transport, no session creation)
+    ├── routes/health.py          GET /api/health
+    ├── protocol.py               WS + HTTP Pydantic models
+    └── openapi.py                OpenAPI metadata (tags, version, description)
+
+libs/wing_hooks/wing_hooks/       Official hooks package
+
+crates/wing/src/                  Rust TUI + CLI
+├── main.rs                       Entry point (clap dispatch)
+├── cmd/                          CLI commands (start/stop/status/tui) + daemon mgmt
+│   ├── backend_config.rs         Reads gateway host:port from backend config.yaml
+│   └── state.rs                  Daemon state persistence (~/.wing/state.json)
+├── gateway/client.rs             GatewayClient — WS connection + read/write tasks
 ├── protocol/                     WingEvent + ClientRequest + ConnectResponse
-├── app/mod.rs                    App 状态机
-├── ui/                           UI 组件
-├── render/                       渲染 (markdown, syntax highlighting)
-├── tui/                          终端抽象
-└── config/                       YAML 配置
+├── app/                          App state machine + event loop
+│   ├── mod.rs                    run_app() main loop + handle_event()
+│   ├── replay.rs                 SyncSession message replay → ChatCells
+│   └── popup_state.rs            Popup + candidate cache + dedup
+├── ui/                           UI components (chat, input, popup, status_bar, toast)
+├── render/                       Markdown + syntax highlighting
+├── tui/                          Terminal abstraction (crossterm)
+└── config/                       TUI config (colors, layout, rendering)
+
+crates/wing-api-client/src/       Hand-written Rust HTTP client for Gateway API
+├── client.rs                     GatewayClient — all HTTP API methods
+├── models.rs                     Request/response types (mirrors Python protocol.py)
+└── error.rs                      ApiClientError (transport/api/deserialize)
 ```
 
-## PyPI 分发
+## Configuration
 
-`pip install wing-agent` 安装 Python 包（core + gateway）。
-CLI 入口点：`wing-gateway`。
-
-Rust TUI (`wing`) 通过 GitHub Release 分发预编译二进制。
-
-## 数据目录
-
-所有持久化数据统一在 `~/.wing/`：
+Single source of truth: `$WING_HOME/core/config.yaml` (default `~/.wing/core/config.yaml`).
 
 ```
 ~/.wing/
-├── config.yaml         用户配置
-├── state.json          gateway daemon 状态
-├── gateway.log         gateway 日志
-├── logs/               TUI 日志
-├── sessions/           session 持久化
-├── templates/          agent 模板
-└── metrics.json        LLM 调用指标
+├── core/config.yaml      Backend config (openai, agents, gateway, hooks, commands)
+├── tui/config.yaml       TUI config (colors, layout, rendering)
+├── state.json            Gateway daemon state (pid, host, port)
+├── gateway.log           Gateway log
+├── logs/                 TUI logs
+├── sessions/             Session persistence (messages + metadata)
+└── templates/            Agent templates
 ```
 
-环境变量：`WING_HOME` 覆盖默认路径。
+`WING_HOME` env var overrides `~/.wing`.
 
-## 开发
+## Development
 
 ```bash
 # Python
 uv sync
-uv run wing-gateway           # 启动 gateway
-make test                      # pytest
-make check                     # ruff + ty + vulture
+uv run wing-gateway              # Start gateway
+make test-python                  # pytest
+make check-python                 # ruff + ty + vulture
 
 # Rust
 cargo build
 cargo test
-make check-rust                # fmt + clippy + test
+make check-rust                   # fmt + clippy + test
+
+# All
+make test                         # Python + Rust
+make check                        # Python + Rust
+make fmt                          # Format all
 ```
 
-## 文档
+## Distribution
 
-- `docs/zh/` — 中文文档
-- `docs/en/` — 英文文档
+- **Python**: `pip install wing-agent` → `wing-gateway` CLI entry point
+- **Rust**: GitHub Release prebuilt binaries → `wing` CLI
+
+## Commit Messages
+
+```
+type(scope): short description
+
+[optional body]
+```
+
+Types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`.
+
+Scopes follow module boundaries: `gateway`, `runtime`, `session`, `tui`, `protocol`, `tools`, `config`, etc.
+
+Examples:
+```
+feat(gateway): add HTTP session/fork endpoint
+refactor(runtime): clean up WingRuntime as service layer
+fix(protocol): remove session_id from ConnectResponse
+test(gateway): add HTTP endpoint unit tests
+```
+
+Keep the first line under 72 chars. Body explains *why*, not *what*.
