@@ -1,0 +1,236 @@
+//! [`GatewayClient`] — Wing Gateway 的 HTTP API 客户端。
+
+use reqwest::Client;
+
+use crate::error::{ApiClientError, extract_api_error};
+use crate::models::*;
+
+/// Gateway 默认端口。
+pub const DEFAULT_PORT: u16 = 32523;
+
+/// Wing Gateway HTTP API 客户端。
+///
+/// # Example
+///
+/// ```no_run
+/// # use wing_api_client::GatewayClient;
+/// # async fn example() -> Result<(), wing_api_client::ApiClientError> {
+/// let client = GatewayClient::new("http://127.0.0.1:32523")?;
+///
+/// // 创建 session
+/// let session = client.create_session(None, None).await?;
+/// println!("created session: {}", session.session_id);
+///
+/// // 健康检查
+/// let health = client.health().await?;
+/// println!("status: {}, version: {}", health.status, health.version);
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct GatewayClient {
+    http: Client,
+    base_url: String,
+}
+
+impl GatewayClient {
+    /// 创建新的 client。
+    ///
+    /// `base_url` 通常是 `"http://127.0.0.1:32523"`。
+    pub fn new(base_url: impl Into<String>) -> Result<Self, ApiClientError> {
+        let http = Client::builder().build()?;
+        Ok(Self {
+            http,
+            base_url: base_url.into(),
+        })
+    }
+
+    /// 使用默认地址 (`http://127.0.0.1:{DEFAULT_PORT}`) 创建 client。
+    pub fn localhost() -> Result<Self, ApiClientError> {
+        Self::new(format!("http://127.0.0.1:{DEFAULT_PORT}"))
+    }
+
+    // ============================================================
+    // Session 生命周期
+    // ============================================================
+
+    /// 创建新 session。
+    pub async fn create_session(
+        &self,
+        template_name: Option<&str>,
+        workspace: Option<&str>,
+    ) -> Result<CreateSessionResponse, ApiClientError> {
+        let body = CreateSessionRequest {
+            template_name: template_name.map(str::to_owned),
+            workspace: workspace.map(str::to_owned),
+        };
+        self.post_json("/api/session/create", &body).await
+    }
+
+    /// 从磁盘恢复已有 session。
+    pub async fn resume_session(
+        &self,
+        session_id: &str,
+    ) -> Result<ResumeSessionResponse, ApiClientError> {
+        let body = ResumeSessionRequest {
+            session_id: session_id.to_owned(),
+        };
+        self.post_json("/api/session/resume", &body).await
+    }
+
+    /// 从指定 session 的指定消息处分叉出新 session。
+    pub async fn fork_session(
+        &self,
+        source_session_id: &str,
+        target_uuid: &str,
+    ) -> Result<ForkSessionResponse, ApiClientError> {
+        let body = ForkSessionRequest {
+            source_session_id: source_session_id.to_owned(),
+            target_uuid: target_uuid.to_owned(),
+        };
+        self.post_json("/api/session/fork", &body).await
+    }
+
+    // ============================================================
+    // 订阅管理
+    // ============================================================
+
+    /// 订阅 session 事件。`client_id` 来自 WS 连接。
+    pub async fn subscribe(&self, session_id: &str, client_id: &str) -> Result<(), ApiClientError> {
+        let body = SubscribeRequest {
+            session_id: session_id.to_owned(),
+        };
+        self.post_json_with_client_id("/api/session/subscribe", &body, client_id)
+            .await
+    }
+
+    /// 取消订阅 session 事件。
+    pub async fn unsubscribe(
+        &self,
+        session_id: &str,
+        client_id: &str,
+    ) -> Result<(), ApiClientError> {
+        let body = UnsubscribeRequest {
+            session_id: session_id.to_owned(),
+        };
+        self.post_json_with_client_id("/api/session/unsubscribe", &body, client_id)
+            .await
+    }
+
+    // ============================================================
+    // 消息发送
+    // ============================================================
+
+    /// 向活跃 session 发送消息。
+    pub async fn send_message(
+        &self,
+        session_id: &str,
+        content: &str,
+        silent: bool,
+    ) -> Result<SendMessageResponse, ApiClientError> {
+        let body = SendMessageRequest {
+            session_id: session_id.to_owned(),
+            content: content.to_owned(),
+            silent,
+        };
+        self.post_json("/api/session/send", &body).await
+    }
+
+    // ============================================================
+    // 查询
+    // ============================================================
+
+    /// 列出所有活跃 session。
+    pub async fn list_sessions(&self) -> Result<SessionListResponse, ApiClientError> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, "/api/session/list"))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// 获取指定 session 的完整状态。
+    pub async fn get_session(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionGetResponse, ApiClientError> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, "/api/session/get"))
+            .query(&[("session_id", session_id)])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
+    // ============================================================
+    // Health
+    // ============================================================
+
+    /// 健康检查。
+    pub async fn health(&self) -> Result<HealthResponse, ApiClientError> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, "/api/health"))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
+    // ============================================================
+    // 内部 helper
+    // ============================================================
+
+    /// POST JSON body → deserialize JSON response。
+    async fn post_json<Req: serde::Serialize, Resp: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &Req,
+    ) -> Result<Resp, ApiClientError> {
+        let resp = self
+            .http
+            .post(format!("{}{}", self.base_url, path))
+            .json(body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// POST JSON body with X-Client-Id header → discard response body。
+    async fn post_json_with_client_id<Req: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &Req,
+        client_id: &str,
+    ) -> Result<(), ApiClientError> {
+        let resp = self
+            .http
+            .post(format!("{}{}", self.base_url, path))
+            .header("X-Client-Id", client_id)
+            .json(body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(())
+    }
+}

@@ -6,6 +6,11 @@ Gateway 的消息协议——前端和 Gateway 之间的通信格式。
 包含：
   - WS 协议：ConnectResponse、ClientRequest
   - HTTP 协议：所有 HTTP 端点的 Request/Response models
+
+这些 Pydantic models 同时用于：
+  - 请求/响应验证
+  - OpenAPI schema 生成
+  - Rust client 代码生成（通过 openapi-generator）
 """
 
 from __future__ import annotations
@@ -23,29 +28,30 @@ from wing.event import AgentInfo, SessionInfo
 
 
 class ConnectResponse(BaseModel):
-    """连接建立后的第一个消息——携带服务端分配的 client_id。
+    """WS 连接建立后的第一个消息——携带服务端分配的 client_id。
 
-    前端收到后保存 client_id。
-    session 生命周期通过 HTTP API 管理（create + subscribe），不再由 WS 连接自动创建。
+    前端收到后保存 client_id，后续 HTTP 请求通过 X-Client-Id header 传递。
     """
 
-    type: str = "connected"
-    client_id: str  # Gateway 生成的 client 标识
+    type: str = Field(default="connected", description="消息类型，固定为 'connected'")
+    client_id: str = Field(description="Gateway 分配的客户端唯一标识")
 
 
 class ClientRequest(BaseModel):
-    """前端发来的请求——Gateway 注入 client_id 后转给 SM.post()。
+    """前端通过 WS 发送的请求。
 
-    session_id: 前端指定目标 session（必填）
-    content: 消息内容或魔术命令
-    silent: 静默请求：不 emit DeliveredEvent 和 SystemEvent
-    request_id: 前端用来解 Promise
+    Gateway 注入 client_id 后转给 WingRuntime.post()。
     """
 
-    request_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
-    session_id: str  # 指定目标 session（必填）
-    content: str  # 消息内容或魔术命令
-    silent: bool = False  # 静默请求
+    request_id: str = Field(
+        default_factory=lambda: uuid.uuid4().hex,
+        description="请求唯一 ID，用于前端关联响应",
+    )
+    session_id: str = Field(description="目标 session ID")
+    content: str = Field(description="消息内容")
+    silent: bool = Field(
+        default=False, description="静默请求：不触发 DeliveredEvent 和 SystemEvent"
+    )
 
 
 # ============================================================
@@ -54,31 +60,47 @@ class ClientRequest(BaseModel):
 
 
 class CreateSessionRequest(BaseModel):
-    template_name: str | None = None
-    workspace: str | None = None
+    """创建新 session 的请求体。"""
+
+    template_name: str | None = Field(
+        default=None, description="Agent 模板名称，None 使用默认模板"
+    )
+    workspace: str | None = Field(default=None, description="工作目录路径")
 
 
 class ResumeSessionRequest(BaseModel):
-    session_id: str
+    """恢复已有 session 的请求体。"""
+
+    session_id: str = Field(description="要恢复的 session ID")
 
 
 class ForkSessionRequest(BaseModel):
-    source_session_id: str
-    target_uuid: str
+    """分叉 session 的请求体。"""
+
+    source_session_id: str = Field(description="源 session ID")
+    target_uuid: str = Field(description="分叉点消息的 UUID")
 
 
 class SubscribeRequest(BaseModel):
-    session_id: str
+    """订阅 session 事件的请求体。需要 X-Client-Id header。"""
+
+    session_id: str = Field(description="要订阅的 session ID")
 
 
 class UnsubscribeRequest(BaseModel):
-    session_id: str
+    """取消订阅 session 事件的请求体。需要 X-Client-Id header。"""
+
+    session_id: str = Field(description="要取消订阅的 session ID")
 
 
 class SendMessageRequest(BaseModel):
-    session_id: str
-    content: str
-    silent: bool = False
+    """向 session 发送消息的请求体。"""
+
+    session_id: str = Field(description="目标 session ID")
+    content: str = Field(description="消息内容")
+    silent: bool = Field(
+        default=False, description="静默发送：不触发 DeliveredEvent 和 SystemEvent"
+    )
 
 
 # ============================================================
@@ -87,51 +109,71 @@ class SendMessageRequest(BaseModel):
 
 
 class CreateSessionResponse(BaseModel):
-    session_id: str
-    template_name: str
-    workspace: str | None = None
+    """创建 session 的响应。"""
+
+    session_id: str = Field(description="新创建的 session ID")
+    template_name: str = Field(description="使用的模板名称")
+    workspace: str | None = Field(default=None, description="工作目录路径")
 
 
 class ResumeSessionResponse(BaseModel):
-    session_id: str
-    template_name: str | None = None
-    workspace: str | None = None
+    """恢复 session 的响应。"""
+
+    session_id: str = Field(description="恢复的 session ID")
+    template_name: str | None = Field(default=None, description="使用的模板名称")
+    workspace: str | None = Field(default=None, description="工作目录路径")
 
 
 class ForkSessionResponse(BaseModel):
-    session_id: str
-    draft: str | None = None
+    """分叉 session 的响应。"""
+
+    session_id: str = Field(description="新分叉出的 session ID")
+    draft: str | None = Field(
+        default=None, description="分叉点处的 draft 消息（如果有）"
+    )
 
 
 class OkResponse(BaseModel):
-    ok: bool = True
+    """通用成功响应。"""
+
+    ok: bool = Field(default=True, description="操作是否成功")
 
 
 class SendMessageResponse(BaseModel):
-    ok: bool = True
-    request_id: str
+    """发送消息的响应。"""
+
+    ok: bool = Field(default=True, description="操作是否成功")
+    request_id: str = Field(description="请求 ID，用于前端关联 agent 响应")
 
 
 class SessionListResponse(BaseModel):
-    sessions: list[SessionInfo]
+    """session 列表响应。"""
+
+    sessions: list[SessionInfo] = Field(description="所有活跃 session 的摘要列表")
 
 
 class SessionGetResponse(BaseModel):
-    session_id: str
-    name: str | None = None
-    template_name: str | None = None
-    workspace: str | None = None
-    messages: list[dict]
-    agent: AgentInfo | None = None
+    """session 详情响应。"""
+
+    session_id: str = Field(description="session ID")
+    name: str | None = Field(default=None, description="session 名称")
+    template_name: str | None = Field(default=None, description="使用的模板名称")
+    workspace: str | None = Field(default=None, description="工作目录路径")
+    messages: list[dict] = Field(description="消息历史列表")
+    agent: AgentInfo | None = Field(default=None, description="当前 agent 配置信息")
 
 
 class HealthResponse(BaseModel):
-    status: str = "ok"
-    version: str
+    """健康检查响应。"""
+
+    status: str = Field(default="ok", description="服务状态")
+    version: str = Field(description="wing-agent 版本号")
 
 
 class ErrorResponse(BaseModel):
-    error: str
-    detail: str | None = None
-    session_id: str | None = None
-    uuid: str | None = None
+    """错误响应。"""
+
+    error: str = Field(description="错误类型")
+    detail: str | None = Field(default=None, description="错误详细信息")
+    session_id: str | None = Field(default=None, description="关联的 session ID")
+    uuid: str | None = Field(default=None, description="关联的消息 UUID")

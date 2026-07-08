@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/wing"]
+members = ["crates/wing", "crates/wing-api-client"]
 resolver = "2"
 
 [workspace.package]
@@ -37,6 +37,12 @@ similar = "3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+
+# Error handling
+thiserror = "2"
 
 # Utilities
 unicode-width = "0.2"

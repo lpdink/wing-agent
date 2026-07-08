@@ -21,7 +21,11 @@ def _get_version() -> str:
         return "dev"
 
 
-@router.get("/api/health", response_model=HealthResponse)
+@router.get(
+    "/api/health",
+    response_model=HealthResponse,
+    summary="健康检查",
+)
 async def health() -> HealthResponse:
-    """健康检查——返回服务状态和版本号。"""
+    """健康检查——返回服务状态和 wing-agent 版本号。"""
     return HealthResponse(status="ok", version=_get_version())

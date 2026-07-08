@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
-from wing.gateway.openapi import OPENAPI_TAGS
+from wing.gateway.openapi import OPENAPI_METADATA
 from wing.gateway.routes import register_routes
 
 if TYPE_CHECKING:
@@ -29,9 +29,11 @@ def create_app(server: GatewayServer) -> FastAPI:
         配置好的 FastAPI app
     """
     app = FastAPI(
-        title="Wing Gateway",
-        description="wing-agent Gateway — WebSocket + HTTP API",
-        openapi_tags=OPENAPI_TAGS,
+        title=OPENAPI_METADATA["title"],
+        description=OPENAPI_METADATA["description"],
+        version=OPENAPI_METADATA["version"],
+        servers=OPENAPI_METADATA["servers"],
+        openapi_tags=OPENAPI_METADATA["tags"],
     )
 
     app.state.server = server

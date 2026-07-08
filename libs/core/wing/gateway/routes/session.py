@@ -53,12 +53,20 @@ def _get_server(request: Request):
 # ============================================================
 
 
-@router.post("/api/session/create", response_model=CreateSessionResponse)
+@router.post(
+    "/api/session/create",
+    response_model=CreateSessionResponse,
+    summary="创建新 session",
+)
 async def create_session(
     body: CreateSessionRequest,
     request: Request,
 ) -> CreateSessionResponse:
-    """创建新 session。"""
+    """创建新 session。
+
+    可选指定模板名称和工作目录。如果不指定模板，使用默认模板。
+    返回新创建的 session ID、模板名称和工作目录。
+    """
     server = _get_server(request)
     try:
         session = server.runtime.create_session(
@@ -74,12 +82,20 @@ async def create_session(
     )
 
 
-@router.post("/api/session/resume", response_model=ResumeSessionResponse)
+@router.post(
+    "/api/session/resume",
+    response_model=ResumeSessionResponse,
+    summary="恢复已有 session",
+)
 async def resume_session(
     body: ResumeSessionRequest,
     request: Request,
 ) -> ResumeSessionResponse:
-    """从磁盘恢复已有 session。"""
+    """从磁盘恢复已有 session。
+
+    通过 session_id 加载之前持久化的 session 状态和消息历史。
+    session 不存在时返回 404。
+    """
     server = _get_server(request)
     try:
         session = server.runtime.resume_session(body.session_id)
@@ -92,12 +108,21 @@ async def resume_session(
     )
 
 
-@router.post("/api/session/fork", response_model=ForkSessionResponse)
+@router.post(
+    "/api/session/fork",
+    response_model=ForkSessionResponse,
+    summary="分叉 session",
+)
 async def fork_session(
     body: ForkSessionRequest,
     request: Request,
 ) -> ForkSessionResponse:
-    """从指定 session 的指定消息处分叉出新 session。"""
+    """从指定 session 的指定消息处分叉出新 session。
+
+    `source_session_id` 为源 session，`target_uuid` 为分叉点消息的 UUID。
+    新 session 继承分叉点之前的所有消息历史。
+    返回新 session ID 和分叉点的 draft 消息（如果有）。
+    """
     server = _get_server(request)
     try:
         new_session, draft = server.runtime.fork_session(
@@ -123,13 +148,22 @@ async def fork_session(
 # ============================================================
 
 
-@router.post("/api/session/subscribe", response_model=OkResponse)
+@router.post(
+    "/api/session/subscribe",
+    response_model=OkResponse,
+    summary="订阅 session 事件",
+)
 async def subscribe(
     body: SubscribeRequest,
     request: Request,
     x_client_id: str = Depends(_require_client_id),
 ) -> OkResponse:
-    """订阅 session 事件。"""
+    """订阅 session 事件。
+
+    需要 `X-Client-Id` header（从 WS 连接获取）。
+    订阅后，该 session 的事件会通过 WS 推送给客户端。
+    一个 client 可以订阅多个 session。
+    """
     server = _get_server(request)
 
     # 验证 client 已连接
@@ -143,13 +177,20 @@ async def subscribe(
     return OkResponse()
 
 
-@router.post("/api/session/unsubscribe", response_model=OkResponse)
+@router.post(
+    "/api/session/unsubscribe",
+    response_model=OkResponse,
+    summary="取消订阅 session 事件",
+)
 async def unsubscribe(
     body: UnsubscribeRequest,
     request: Request,
     x_client_id: str = Depends(_require_client_id),
 ) -> OkResponse:
-    """取消订阅 session 事件。"""
+    """取消订阅 session 事件。
+
+    需要 `X-Client-Id` header。取消后不再接收该 session 的事件推送。
+    """
     server = _get_server(request)
     server.runtime.unsubscribe(x_client_id, body.session_id)
     return OkResponse()
@@ -160,12 +201,20 @@ async def unsubscribe(
 # ============================================================
 
 
-@router.post("/api/session/send", response_model=SendMessageResponse)
+@router.post(
+    "/api/session/send",
+    response_model=SendMessageResponse,
+    summary="发送消息到 session",
+)
 async def send_message(
     body: SendMessageRequest,
     request: Request,
 ) -> SendMessageResponse:
-    """通过 HTTP 向活跃 session 发送消息。"""
+    """通过 HTTP 向活跃 session 发送消息。
+
+    `silent` 为 true 时不触发 DeliveredEvent 和 SystemEvent。
+    返回 `request_id` 用于前端关联响应。
+    """
     server = _get_server(request)
     request_id = uuid.uuid4().hex
 
@@ -187,20 +236,31 @@ async def send_message(
 # ============================================================
 
 
-@router.get("/api/session/list", response_model=SessionListResponse)
+@router.get(
+    "/api/session/list",
+    response_model=SessionListResponse,
+    summary="列出所有 session",
+)
 async def list_sessions(request: Request) -> SessionListResponse:
-    """列出所有 session。"""
+    """列出所有活跃 session 的摘要信息。"""
     server = _get_server(request)
     sessions = server.runtime.list_sessions()
     return SessionListResponse(sessions=sessions)
 
 
-@router.get("/api/session/get", response_model=SessionGetResponse)
+@router.get(
+    "/api/session/get",
+    response_model=SessionGetResponse,
+    summary="获取 session 详情",
+)
 async def get_session(
     request: Request,
-    session_id: str = Query(...),
+    session_id: str = Query(..., description="目标 session ID"),
 ) -> SessionGetResponse:
-    """获取指定 session 的完整状态。"""
+    """获取指定 session 的完整状态，包括消息历史和 agent 信息。
+
+    session 不存在时返回 404。
+    """
     server = _get_server(request)
     state = server.runtime.get_session_state(session_id)
     if state is None:
