@@ -6,12 +6,19 @@ wing/runtime.py — WingRuntime：核心最高抽象
 
 设计约束：
   - post() 是唯一入站入口，统一管理 RequestContext（try/finally 确保恢复）
-  - 所有 create/fork/switch 统一管理 route_attach
+  - Session 生命周期方法（create/resume/fork）语义单一，不涉及路由
+  - 订阅管理（subscribe/unsubscribe）封装路由注册 + SyncSession 推送
   - SM 不感知 RequestContext 和路由表（由 Runtime 统一处理）
 """
 
 from __future__ import annotations
 
+from wing.event import (
+    ContextStatsEvent,
+    EventTarget,
+    SessionInfo,
+    SyncSessionEvent,
+)
 from wing.event_bus import event_bus
 from wing.config import get_config, load_hooks
 from wing.request_context import reset_request_context, set_request_context
@@ -75,60 +82,188 @@ class WingRuntime:
             reset_request_context(token)
 
     # ============================================================
-    # Session 生命周期
+    # Session 生命周期（原子操作，不涉及路由）
     # ============================================================
 
     def create_session(
         self,
         template_name: str | None = None,
-        session_id: str | None = None,
-        client_id: str | None = None,
         workspace: str | None = None,
     ) -> Session:
-        """创建新 session。
+        """创建新 session。session_id 由后端生成。
+
+        不接受 session_id 参数（磁盘恢复用 resume_session）。
+        不涉及路由操作（订阅用 subscribe）。
 
         Args:
             template_name: Agent 模板名称，None 时使用默认模板
-            session_id: 指定 session_id（磁盘恢复场景）
-            client_id: 客户端标识，有值时自动 route_attach
             workspace: 工作目录
         """
-        session = self.sm.create_session(
+        return self.sm.create_session(
             template_name=template_name,
-            session_id=session_id,
             workspace=workspace,
         )
-        if client_id is not None:
-            event_bus.route_attach(client_id, session.session_id)
-        return session
+
+    def resume_session(self, session_id: str) -> Session:
+        """从磁盘恢复已有 session。
+
+        如果 session 已存在于内存中，直接返回。
+        支持 session_id 模糊匹配（前缀/包含）。
+        使用默认模板恢复（原始模板信息未持久化）。
+
+        Args:
+            session_id: 要恢复的 session ID（支持模糊匹配）
+
+        Raises:
+            ValueError: session 不存在
+        """
+        # 1. 检查内存中是否已存在
+        existing = self.sm.get_session(session_id)
+        if existing is not None:
+            return existing
+
+        # 2. 解析 session_id（支持模糊匹配）
+        resolved_id = self.sm.resolve_session_id(session_id)
+        if resolved_id is None:
+            raise ValueError(f"Session not found: {session_id}")
+
+        # 已在内存中（模糊匹配命中了不同的 key）
+        existing = self.sm.get_session(resolved_id)
+        if existing is not None:
+            return existing
+
+        # 3. 从磁盘加载
+        return self.sm.load_session_from_disk(resolved_id)
 
     def fork_session(
         self,
-        session_id: str,
+        source_session_id: str,
         target_uuid: str,
-        client_id: str | None = None,
-    ) -> tuple[Session, str | None] | None:
-        """从指定消息分叉新 session。"""
+    ) -> tuple[Session, str | None]:
+        """从 source_session 的 target_uuid 处分叉出新 session。
+
+        Args:
+            source_session_id: 源 session ID
+            target_uuid: 分叉点消息 UUID
+
+        Returns:
+            (new_session, draft) — draft 为用户未发送的草稿
+
+        Raises:
+            ValueError: source session 不存在或 target_uuid 无效
+        """
         result = self.sm.fork_session(
-            session_id=session_id,
+            session_id=source_session_id,
             target_uuid=target_uuid,
         )
-        if result is not None and client_id is not None:
-            new_session, _ = result
-            event_bus.route_attach(client_id, new_session.session_id)
+        if result is None:
+            raise ValueError(
+                f"Fork failed: source session '{source_session_id}' not found "
+                f"or target_uuid '{target_uuid}' invalid"
+            )
         return result
 
-    def switch_session(
-        self,
-        session_id: str,
-        target_session_id: str,
-        client_id: str | None = None,
-    ) -> Session | None:
-        """切换到已有 session。"""
-        target = self.sm.switch_session(
-            session_id=session_id,
-            target_session_id=target_session_id,
+    # ============================================================
+    # 订阅管理（封装路由表 + SyncSession 推送）
+    # ============================================================
+
+    def subscribe(self, client_id: str, session_id: str) -> None:
+        """订阅 session 事件。
+
+        内部：
+          1. event_bus.route_attach(client_id, session_id)
+          2. 推送 SyncSessionEvent 到该 client
+          3. 推送 ContextStatsEvent
+
+        Args:
+            client_id: 客户端标识
+            session_id: 要订阅的 session ID
+
+        Raises:
+            ValueError: session 不存在
+        """
+        session = self.sm.get_session(session_id)
+        if session is None:
+            raise ValueError(f"Session not found: {session_id}")
+
+        event_bus.route_attach(client_id, session_id)
+        self._push_sync(client_id, session)
+
+    def unsubscribe(self, client_id: str, session_id: str) -> None:
+        """取消订阅 session 事件。
+
+        Args:
+            client_id: 客户端标识
+            session_id: 要取消订阅的 session ID
+        """
+        event_bus.route_detach(client_id, session_id)
+
+    # ============================================================
+    # 查询
+    # ============================================================
+
+    def list_sessions(self, workspace: str | None = None) -> list[SessionInfo]:
+        """列出所有 session（磁盘上的）。
+
+        Args:
+            workspace: 可选，过滤特定工作目录的 session
+        """
+        return self.sm.list_sessions(workspace)
+
+    def get_session_state(self, session_id: str) -> dict | None:
+        """获取 session 完整状态。
+
+        Returns:
+            包含 session_id, name, template_name, workspace, messages, agent 的 dict，
+            或 None（session 不存在）。
+        """
+        session = self.sm.get_session(session_id)
+        if session is None:
+            return None
+
+        return {
+            "session_id": session.session_id,
+            "name": session.session_name,
+            "template_name": session.template_name,
+            "workspace": session.session_workspace,
+            "messages": session.serialize_messages(),
+            "agent": session.to_agent_info(),
+        }
+
+    # ============================================================
+    # 内部辅助
+    # ============================================================
+
+    def _push_sync(
+        self, client_id: str, session: Session, draft: str | None = None
+    ) -> None:
+        """向指定 client 推送 SyncSessionEvent + ContextStatsEvent。
+
+        subscribe() 和 fork 后的同步都复用此方法。
+        """
+        event_bus.emit(
+            SyncSessionEvent(
+                session_id=session.session_id,
+                messages=session.serialize_messages(),
+                agent=session.to_agent_info(),
+                name=session.session_name,
+                draft=draft,
+                target=EventTarget(scope="client", client_ids=[client_id]),
+            )
         )
-        if target is not None and client_id is not None:
-            event_bus.route_attach(client_id, target.session_id)
-        return target
+
+        # ContextStats
+        cm = session.agent.context_manager
+        count, tokens = cm.get_context_stats()
+        ctx_window = 0
+        if cm.compactor:
+            ctx_window = cm.compactor.context_window_tokens
+        event_bus.emit(
+            ContextStatsEvent(
+                session_id=session.session_id,
+                message_count=count,
+                total_tokens=tokens,
+                context_window_tokens=ctx_window,
+                target=EventTarget(scope="client", client_ids=[client_id]),
+            )
+        )

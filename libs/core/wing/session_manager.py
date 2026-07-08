@@ -171,6 +171,31 @@ class SessionManager:
             return None
         return matched_path.name
 
+    def load_session_from_disk(self, session_id: str) -> Session:
+        """从磁盘加载已有 session 到内存。
+
+        使用默认模板恢复（原始模板信息未持久化）。
+        调用者应确保 session_id 已解析且不在内存中。
+
+        Args:
+            session_id: 已解析的完整 session ID
+
+        Returns:
+            恢复后的 Session 实例
+        """
+        template = self._template_manager.default
+        messages: TrackedList[Message] = TrackedList.load(
+            self._sessions_path / session_id, Message
+        )
+        session = Session.from_template(
+            template=template,
+            session_id=session_id,
+            messages=messages,
+        )
+        self._sessions[session_id] = session
+        log.info(f"Session loaded from disk: {session_id}")
+        return session
+
     def import_messages(
         self,
         messages: list[Message],
@@ -290,6 +315,89 @@ class SessionManager:
         self._sessions[resolved_id] = new_session
 
         return new_session
+
+    # ============================================================
+    # 外部方法：查询
+    # ============================================================
+
+    def list_sessions(self, workspace: str | None = None) -> list[SessionInfo]:
+        """列出所有有效 session，支持 workspace 优先排序。
+
+        排序规则（stable sort）：
+        1. 第一优先级：相同 workspace 的 session 排在前面
+        2. 第二优先级：last_interaction 降序（最近在前）
+        """
+        if not self._sessions_path.exists():
+            return []
+
+        result = []
+        for session_dir in self._sessions_path.iterdir():
+            if not session_dir.is_dir():
+                continue
+            newest_file = session_dir / "newest.json"
+            if not newest_file.exists():
+                continue
+
+            metadata_file = session_dir / "metadata.json"
+            session_name = None
+            session_workspace = None
+            last_interaction = None
+
+            if metadata_file.exists():
+                try:
+                    data = json.loads(metadata_file.read_text())
+                    session_name = data.get("session_name")
+                    session_workspace = data.get("workspace")
+                    last_interaction = data.get("last_interaction")
+                except Exception:
+                    pass
+
+            if session_name is None:
+                try:
+                    data = json.loads(newest_file.read_text())
+                    for msg in data:
+                        if msg.get("role") == "user":
+                            session_name = msg.get("content", "")[:100]
+                            break
+                except Exception:
+                    continue
+
+            if session_name:
+                result.append(
+                    SessionInfo(
+                        id=session_dir.name,
+                        name=session_name,
+                        workspace=session_workspace,
+                        last_interaction=last_interaction,
+                    )
+                )
+
+        # 归一化排序键
+        def _timestamp_key(s: SessionInfo) -> float:
+            ts = s.last_interaction
+            if ts is not None:
+                if isinstance(ts, str):
+                    try:
+                        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                        return dt.timestamp()
+                    except Exception:
+                        pass
+                elif isinstance(ts, (int, float)):
+                    return float(ts)
+            prefix = s.id[:15] if len(s.id) >= 15 else s.id
+            try:
+                dt = datetime.strptime(prefix, "%Y%m%d-%H%M%S")
+                return dt.timestamp()
+            except Exception:
+                return 0.0
+
+        result.sort(key=_timestamp_key, reverse=True)
+
+        if workspace:
+            norm_ws = os.path.normpath(workspace)
+            result.sort(key=lambda s: os.path.normpath(s.workspace or "") != norm_ws)
+
+        return result
 
     # ============================================================
     # 外部方法：消息路由入口
@@ -442,7 +550,7 @@ class SessionManager:
     ) -> tuple[str, str | None]:
         """处理 /session [uuid] 或 /ss [uuid] 命令。"""
         if not args:
-            sessions = _list_sessions(self._sessions_path, session.session_workspace)
+            sessions = self.list_sessions(session.session_workspace)
             log.debug(
                 f"SM._cmd_session: emitting SessionListEvent with {len(sessions)} sessions"
             )
@@ -672,7 +780,12 @@ class SessionManager:
 
 
 def _build_agent_info(agent: Any) -> AgentInfo:
-    """从 WingAgent 构造 AgentInfo。"""
+    """从 WingAgent 构造 AgentInfo。
+
+    .. deprecated::
+        使用 Session.to_agent_info() 替代。此函数仅由魔术命令处理代码使用，
+        将在 Phase 2c 清理。
+    """
     cm = agent.context_manager
     return AgentInfo(
         model_name=agent.model,
@@ -684,7 +797,12 @@ def _build_agent_info(agent: Any) -> AgentInfo:
 
 
 def _serialize_messages(messages: list[Message]) -> list[dict]:
-    """将消息序列化为 dict 列表，用于 SyncSessionEvent。"""
+    """将消息序列化为 dict 列表，用于 SyncSessionEvent。
+
+    .. deprecated::
+        使用 Session.serialize_messages() 替代。此函数仅由魔术命令处理代码使用，
+        将在 Phase 2c 清理。
+    """
     result = []
     for msg in messages:
         d: dict = {
@@ -721,85 +839,3 @@ def _emit_context_stats(agent: Any) -> None:
             target=EventTarget(scope="session"),
         )
     )
-
-
-def _list_sessions(
-    sessions_path: Path, workspace: str | None = None
-) -> list[SessionInfo]:
-    """列出所有有效 session，支持 workspace 优先排序。
-
-    排序规则（stable sort）：
-    1. 第一优先级：相同 workspace 的 session 排在前面
-    2. 第二优先级：last_interaction 降序（最近在前）
-    """
-    if not sessions_path.exists():
-        return []
-
-    result = []
-    for session_dir in sessions_path.iterdir():
-        if not session_dir.is_dir():
-            continue
-        newest_file = session_dir / "newest.json"
-        if not newest_file.exists():
-            continue
-
-        metadata_file = session_dir / "metadata.json"
-        session_name = None
-        session_workspace = None
-        last_interaction = None
-
-        if metadata_file.exists():
-            try:
-                data = json.loads(metadata_file.read_text())
-                session_name = data.get("session_name")
-                session_workspace = data.get("workspace")
-                last_interaction = data.get("last_interaction")
-            except Exception:
-                pass
-
-        if session_name is None:
-            try:
-                data = json.loads(newest_file.read_text())
-                for msg in data:
-                    if msg.get("role") == "user":
-                        session_name = msg.get("content", "")[:100]
-                        break
-            except Exception:
-                continue
-
-        if session_name:
-            result.append(
-                SessionInfo(
-                    id=session_dir.name,
-                    name=session_name,
-                    workspace=session_workspace,
-                    last_interaction=last_interaction,
-                )
-            )
-
-    # 归一化排序键
-    def _timestamp_key(s: SessionInfo) -> float:
-        ts = s.last_interaction
-        if ts is not None:
-            if isinstance(ts, str):
-                try:
-                    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                    return dt.timestamp()
-                except Exception:
-                    pass
-            elif isinstance(ts, (int, float)):
-                return float(ts)
-        prefix = s.id[:15] if len(s.id) >= 15 else s.id
-        try:
-            dt = datetime.strptime(prefix, "%Y%m%d-%H%M%S")
-            return dt.timestamp()
-        except Exception:
-            return 0.0
-
-    result.sort(key=_timestamp_key, reverse=True)
-
-    if workspace:
-        norm_ws = os.path.normpath(workspace)
-        result.sort(key=lambda s: os.path.normpath(s.workspace or "") != norm_ws)
-
-    return result

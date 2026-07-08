@@ -30,6 +30,7 @@ from wing.schema import Message
 if TYPE_CHECKING:
     from wing.agent import WingAgent
     from wing.agent_template import AgentTemplate
+    from wing.event.base import AgentInfo
 
 
 class Session:
@@ -198,6 +199,45 @@ class Session:
     def session_workspace(self) -> str | None:
         """当前 session 的工作目录（来自 metadata.json 或构造参数）。"""
         return self._session_workspace
+
+    # ── 序列化方法 ──────────────────────────────────
+
+    def to_agent_info(self) -> "AgentInfo":
+        """从 Session 的 agent 和 context_manager 构造 AgentInfo。"""
+        from wing.event.base import AgentInfo
+
+        cm = self._context_manager
+        return AgentInfo(
+            model_name=self._agent.model,
+            system_prompt=cm.system_prompt.content if cm.system_prompt else None,
+            tools=[t.name for t in self._agent.tools],
+            skills=list(cm._skills_cache.keys()),
+            rules=list(cm._rules_patterns),
+            workspace=self._session_workspace,
+        )
+
+    def serialize_messages(self) -> list[dict]:
+        """序列化 context window 中的消息为 dict 列表。"""
+        cm = self._context_manager
+        full_chain = cm.get_context_window()
+        result = []
+        for msg in full_chain:
+            d: dict = {
+                "role": msg.role,
+                "content": msg.content or "",
+                "uuid": msg.uuid,
+            }
+            if msg.reasoning_content:
+                d["reasoning_content"] = msg.reasoning_content
+            if msg.tool_calls:
+                d["tool_calls"] = [
+                    {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                    for tc in msg.tool_calls
+                ]
+            if msg.tool_call_id:
+                d["tool_call_id"] = msg.tool_call_id
+            result.append(d)
+        return result
 
     @property
     def last_interaction(self) -> str | None:

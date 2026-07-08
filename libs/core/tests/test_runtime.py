@@ -1,11 +1,11 @@
 """Tests for WingRuntime — 核心最高抽象。
 
 WingRuntime 组合 SessionManager + EventBus，提供统一入站入口。
-测试围绕 contextvars 隔离、路由表管理、错误恢复展开。
+测试围绕 contextvars 隔离、订阅管理、工具绑定隔离展开。
 
 设计约束：
   - post() 是唯一入站入口，设置 contextvars，try/finally 确保恢复
-  - create_session() 有 client_id 时自动 route_attach
+  - create_session() 不涉及路由，subscribe() 封装路由注册 + 同步推送
   - SM._post() 不处理 contextvars（由 Runtime 统一管理）
 """
 
@@ -69,7 +69,8 @@ class TestContextvarsIsolation:
         received: list = []
         event_bus.subscribe(lambda e: received.append(e))
 
-        session = runtime.create_session(client_id="test-client")
+        session = runtime.create_session()
+        event_bus.route_attach("test-client", session.session_id)
 
         await runtime.post(
             "hello",
@@ -94,7 +95,8 @@ class TestContextvarsIsolation:
             client_id="outer-cid",
         )
 
-        session = runtime.create_session(client_id="test-client")
+        session = runtime.create_session()
+        event_bus.route_attach("test-client", session.session_id)
         await runtime.post(
             "hello",
             session_id=session.session_id,
@@ -137,7 +139,8 @@ class TestContextvarsIsolation:
     async def test_multiple_posts_isolated(self, runtime: Any):
         """多次 post() 各自有自己的 contextvar，互不干扰。"""
         results: dict[str, list] = {"first": [], "second": []}
-        session = runtime.create_session(client_id="test-client")
+        session = runtime.create_session()
+        event_bus.route_attach("test-client", session.session_id)
 
         # 第一次 post
         event_bus.subscribe(lambda e: results["first"].append(e))
@@ -166,84 +169,119 @@ class TestContextvarsIsolation:
 
 
 # ============================================================
-# 路由表管理
+# 订阅管理（subscribe / unsubscribe）
 # ============================================================
 
 
-class TestRoutingTable:
-    """WingRuntime 的路由表管理。
+class TestSubscription:
+    """WingRuntime 的订阅管理。
 
     核心契约：
-      - create_session(client_id="x") 自动 event_bus.route_attach(x, new_sid)
-      - create_session() 无 client_id 时不做 route_attach
-      - fork_session / switch_session 自动更新路由表
+      - subscribe(client_id, session_id) 注册路由 + 推送 SyncSessionEvent + ContextStatsEvent
+      - unsubscribe(client_id, session_id) 取消路由注册
+      - subscribe 不存在的 session 抛出 ValueError
     """
 
     @pytest.mark.asyncio
-    async def test_create_session_with_client_id_attaches(self, runtime: Any):
-        """有 client_id 时自动 route_attach。"""
-        session = runtime.create_session(client_id="tui")
+    async def test_subscribe_attaches_route(self, runtime: Any):
+        """subscribe 注册路由。"""
+        session = runtime.create_session()
+        runtime.subscribe("tui", session.session_id)
         assert "tui" in event_bus.routing_table
         assert session.session_id in event_bus.routing_table["tui"]
 
     @pytest.mark.asyncio
-    async def test_create_session_without_client_id_no_attach(self, runtime: Any):
-        """无 client_id 时不做 route_attach。"""
+    async def test_subscribe_pushes_sync_events(self, runtime: Any):
+        """subscribe 推送 SyncSessionEvent + ContextStatsEvent。"""
+        session = runtime.create_session()
+        received: list = []
+        event_bus.subscribe(lambda e: received.append(e))
+
+        runtime.subscribe("client-1", session.session_id)
+
+        sync_events = [e for e in received if e.type == "sync_session"]
+        stats_events = [e for e in received if e.type == "context_stats"]
+        assert len(sync_events) == 1
+        assert len(stats_events) == 1
+        assert sync_events[0].session_id == session.session_id
+
+    @pytest.mark.asyncio
+    async def test_subscribe_nonexistent_session_raises(self, runtime: Any):
+        """subscribe 不存在的 session 抛出 ValueError。"""
+        with pytest.raises(ValueError, match="Session not found"):
+            runtime.subscribe("client-1", "nonexistent")
+
+    @pytest.mark.asyncio
+    async def test_unsubscribe_detaches_route(self, runtime: Any):
+        """unsubscribe 取消路由注册。"""
+        session = runtime.create_session()
+        runtime.subscribe("tui", session.session_id)
+        assert "tui" in event_bus.routing_table
+
+        runtime.unsubscribe("tui", session.session_id)
+        assert (
+            "tui" not in event_bus.routing_table
+            or session.session_id not in event_bus.routing_table.get("tui", set())
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_session_no_routing(self, runtime: Any):
+        """create_session 不涉及路由。"""
         runtime.create_session()
         assert event_bus.routing_table == {}
 
     @pytest.mark.asyncio
-    async def test_create_session_multiple_clients(self, runtime: Any):
+    async def test_multiple_clients_subscribe(self, runtime: Any):
         """多个 client 订阅同一个 session。"""
-        session = runtime.create_session(client_id="client-a")
-        runtime.create_session(client_id="client-b", session_id=session.session_id)
-
-        # 等待，create_session 中如果已经有 session_id，会把已有 session 返回？
-        # 不，这里的行为还要确认——不过我们不测试重复 session_id，那是 SM 的事。
-        # 我们只测 route_attach 行为。
+        session = runtime.create_session()
+        runtime.subscribe("client-a", session.session_id)
+        runtime.subscribe("client-b", session.session_id)
         assert "client-a" in event_bus.routing_table
-        assert "client-b" not in event_bus.routing_table or True  # 暂时放宽
+        assert "client-b" in event_bus.routing_table
+        assert session.session_id in event_bus.routing_table["client-a"]
+        assert session.session_id in event_bus.routing_table["client-b"]
+
+
+# ============================================================
+# Session 生命周期
+# ============================================================
+
+
+class TestSessionLifecycle:
+    """WingRuntime 的 session 生命周期。
+
+    核心契约：
+      - create_session 不涉及路由
+      - resume_session 从磁盘恢复，内存中已存在时直接返回
+      - fork_session 失败时 raise ValueError
+    """
 
     @pytest.mark.asyncio
-    async def test_fork_session_routes_correctly(self, runtime: Any):
-        """fork_session 委托给 SM，成功时自动 route_attach。
-
-        只验证 WingRuntime 的委托逻辑，实际的 fork 文件操作由 SM 测试覆盖。
-        """
-        session = runtime.create_session(client_id="tui")
-
-        # 使用不存在的 target_uuid——SM.fork_session 会返回 None
-        # WingRuntime 应正确处理：不 route_attach
-        result = runtime.fork_session(
-            session.session_id,
-            "nonexistent-uuid",
-            client_id="tui",
-        )
-        assert result is None
-        # 路由表不受影响
-        assert "tui" in event_bus.routing_table
+    async def test_fork_session_raises_on_nonexistent_source(self, runtime: Any):
+        """fork_session source 不存在时 raise ValueError。"""
+        session = runtime.create_session()
+        with pytest.raises(ValueError, match="Fork failed"):
+            runtime.fork_session(session.session_id, "nonexistent-uuid")
 
     @pytest.mark.asyncio
-    async def test_switch_session_routes_correctly(self, runtime: Any):
-        """switch_session 委托给 SM，成功时自动 route_attach。"""
-        session = runtime.create_session(client_id="tui")
-
-        # 不存在的目标 session——SM.switch_session 会返回 None
-        result = runtime.switch_session(
-            session.session_id,
-            "non-existent",
-            client_id="tui",
-        )
-        assert result is None
-        # 路由表不受影响
-        assert "tui" in event_bus.routing_table
+    async def test_resume_session_returns_existing(self, runtime: Any):
+        """resume_session 内存中已存在时直接返回。"""
+        session = runtime.create_session()
+        resumed = runtime.resume_session(session.session_id)
+        assert resumed is session
 
     @pytest.mark.asyncio
-    async def test_real_fork_creates_new_session_and_attaches(self, runtime: Any):
-        """真实 fork 操作创建新 session 并自动 route_attach。"""
+    async def test_resume_session_nonexistent_raises(self, runtime: Any):
+        """resume_session session 不存在时 raise ValueError。"""
+        with pytest.raises(ValueError, match="Session not found"):
+            runtime.resume_session("definitely-not-exists")
+
+    @pytest.mark.asyncio
+    async def test_real_fork_creates_new_session(self, runtime: Any):
+        """真实 fork 操作创建新 session。"""
         from wing.schema import Message
 
-        session = runtime.create_session(client_id="tui")
+        session = runtime.create_session()
 
         # 添加用户消息
         session.agent.context_manager.add_message(
@@ -255,16 +293,107 @@ class TestRoutingTable:
         assert len(targets) > 0, "Should have at least one branch target"
 
         # Fork at first target
-        result = runtime.fork_session(
+        new_session, draft = runtime.fork_session(
             session.session_id,
             targets[0]["uuid"],
-            client_id="tui",
         )
-        assert result is not None, "Fork should succeed"
-        new_session, draft = result
+        assert new_session is not None
+        assert new_session.session_id != session.session_id
 
-        # 新 session 应该在路由表中
-        assert new_session.session_id in event_bus.routing_table["tui"]
+    @pytest.mark.asyncio
+    async def test_resume_session_from_disk(self, runtime: Any):
+        """resume_session 从磁盘恢复不在内存中的 session。"""
+        from wing.schema import Message
+
+        # 创建并持久化一个 session
+        old_session = runtime.create_session()
+        old_session.agent.context_manager.add_message(
+            Message(role="user", content="test for resume")
+        )
+        old_sid = old_session.session_id
+
+        # 从内存中移除
+        del runtime.sm._sessions[old_sid]
+
+        # resume 应该从磁盘恢复
+        resumed = runtime.resume_session(old_sid)
+        assert resumed.session_id == old_sid
+        assert resumed is not old_session
+
+
+# ============================================================
+# 查询接口
+# ============================================================
+# Session 序列化方法
+# ============================================================
+
+
+class TestSessionSerialization:
+    """Session.to_agent_info() 和 Session.serialize_messages() 的独立测试。"""
+
+    @pytest.mark.asyncio
+    async def test_to_agent_info_returns_correct_fields(self, runtime: Any):
+        """to_agent_info 返回包含 model_name、tools、skills、rules、workspace 的 AgentInfo。"""
+        session = runtime.create_session()
+        info = session.to_agent_info()
+        assert info.model_name is not None
+        assert isinstance(info.tools, list)
+        assert isinstance(info.skills, list)
+        assert isinstance(info.rules, list)
+
+    @pytest.mark.asyncio
+    async def test_serialize_messages_empty(self, runtime: Any):
+        """空消息历史序列化为空列表。"""
+        session = runtime.create_session()
+        msgs = session.serialize_messages()
+        # 新 session 可能只有 system prompt 在 context window 中
+        # active_chain 无用户消息时为空
+        assert isinstance(msgs, list)
+        for m in msgs:
+            assert "role" in m
+            assert "content" in m
+            assert "uuid" in m
+
+    @pytest.mark.asyncio
+    async def test_serialize_messages_with_user_message(self, runtime: Any):
+        """添加消息后序列化包含正确字段。"""
+        from wing.schema import Message
+
+        session = runtime.create_session()
+        session.agent.context_manager.add_message(Message(role="user", content="hello"))
+        msgs = session.serialize_messages()
+        user_msgs = [m for m in msgs if m["role"] == "user"]
+        assert len(user_msgs) >= 1
+        assert user_msgs[0]["content"] == "hello"
+
+
+# ============================================================
+
+
+class TestQueryInterface:
+    """WingRuntime 的查询接口。"""
+
+    @pytest.mark.asyncio
+    async def test_get_session_state_existing(self, runtime: Any):
+        """get_session_state 返回存在的 session 状态。"""
+        session = runtime.create_session()
+        state = runtime.get_session_state(session.session_id)
+        assert state is not None
+        assert state["session_id"] == session.session_id
+        assert "messages" in state
+        assert "agent" in state
+
+    @pytest.mark.asyncio
+    async def test_get_session_state_nonexistent(self, runtime: Any):
+        """get_session_state 不存在的 session 返回 None。"""
+        assert runtime.get_session_state("nonexistent") is None
+
+    @pytest.mark.asyncio
+    async def test_list_sessions(self, runtime: Any):
+        """list_sessions 返回 SessionInfo 列表。"""
+        # 不创建任何 session，列表可能为空（取决于磁盘状态）
+        result = runtime.list_sessions()
+        assert isinstance(result, list)
 
 
 # ============================================================
@@ -273,7 +402,7 @@ class TestRoutingTable:
 
 
 class TestToolBindingIsolation:
-    """fork/switch 后，新 agent 的工具闭包不能引用旧 agent。
+    """fork/resume 后，新 agent 的工具闭包不能引用旧 agent。
 
     之前 bug：fork_session / switch_session 传入的 tools=source.agent.tools
     是已经绑定过的（inject_agent_param=None），_bind_tools 直接复用，
@@ -287,7 +416,7 @@ class TestToolBindingIsolation:
         """fork 后，新 agent 的工具闭包引用新 agent 而非旧 agent。"""
         from wing.schema import Message
 
-        old_session = runtime.create_session(client_id="tui")
+        old_session = runtime.create_session()
         old_agent_id = id(old_session.agent)
 
         # 添加消息，让 fork 有目标
@@ -297,13 +426,10 @@ class TestToolBindingIsolation:
         targets = old_session.agent.context_manager.get_branch_targets()
         assert len(targets) > 0
 
-        result = runtime.fork_session(
+        new_session, _ = runtime.fork_session(
             old_session.session_id,
             targets[0]["uuid"],
-            client_id="tui",
         )
-        assert result is not None
-        new_session, _ = result
         new_agent = new_session.agent
         new_agent_id = id(new_agent)
 
@@ -319,36 +445,27 @@ class TestToolBindingIsolation:
         )
 
     @pytest.mark.asyncio
-    async def test_session_switch_tools_bound_to_new_agent(self, runtime: WingRuntime):
-        """switch_session 后，新 agent 的工具闭包引用新 agent 而非旧 agent。
+    async def test_resume_session_tools_bound_to_new_agent(self, runtime: WingRuntime):
+        """resume_session 后，新 agent 的工具闭包引用新 agent 而非旧 agent。
 
         模拟 /ss 恢复场景：从会话列表选中一个历史 session（仅在磁盘上，
-        不在内存中），通过 switch_session 创建新 agent。
+        不在内存中），通过 resume_session 创建新 agent。
         """
         from wing.schema import Message
 
         # 先建一个"历史 session"并持久化到磁盘
-        old_session = runtime.create_session(client_id=None)
+        old_session = runtime.create_session()
         old_agent_id = id(old_session.agent)
         old_session.agent.context_manager.add_message(
-            Message(role="user", content="test for switch")
+            Message(role="user", content="test for resume")
         )
         old_sid = old_session.session_id
 
         # 从内存中移除——模拟它属于另一个 runtime 实例（仅磁盘上有文件）
         del runtime.sm._sessions[old_sid]
 
-        # 再建一个"current" session（模拟当前对话）
-        source = runtime.create_session(client_id="tui")
-
-        # switch 到历史 session（此时它不在内存中，会触发磁盘恢复）
-        result = runtime.switch_session(
-            source.session_id,
-            old_sid,
-            client_id="tui",
-        )
-        assert result is not None, f"Switch to {old_sid} should succeed"
-        new_session = result
+        # resume 到历史 session（此时它不在内存中，会触发磁盘恢复）
+        new_session = runtime.resume_session(old_sid)
         new_agent = new_session.agent
         new_agent_id = id(new_agent)
 
@@ -380,7 +497,8 @@ class TestPostRouting:
     @pytest.mark.asyncio
     async def test_post_delegates_to_sm(self, runtime: Any):
         """post() 调用 SM._post() 处理消息。"""
-        session = runtime.create_session(client_id="test-client")
+        session = runtime.create_session()
+        event_bus.route_attach("test-client", session.session_id)
         received: list = []
         event_bus.subscribe(lambda e: received.append(e))
 
@@ -397,7 +515,8 @@ class TestPostRouting:
     @pytest.mark.asyncio
     async def test_post_unrecognized_command_falls_to_agent(self, runtime: Any):
         """不认识的 /command 传给 agent 处理。"""
-        session = runtime.create_session(client_id="test-client")
+        session = runtime.create_session()
+        event_bus.route_attach("test-client", session.session_id)
         received: list = []
         event_bus.subscribe(lambda e: received.append(e))
 
@@ -446,7 +565,8 @@ class TestSMPostNoContextvars:
         event_bus.subscribe(lambda e: received.append(e))
 
         # 直接调 SM._post()——不经过 WingRuntime
-        session = runtime.create_session(client_id="test-client")
+        session = runtime.create_session()
+        event_bus.route_attach("test-client", session.session_id)
         await runtime.sm._post(
             "hello",
             session_id=session.session_id,

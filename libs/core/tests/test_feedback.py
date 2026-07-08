@@ -16,7 +16,7 @@ def runtime():
 @pytest.mark.asyncio
 async def test_feedback_basic_path(runtime: WingRuntime):
     """需要反馈时，post() 到 agent 被路由到 _inbox_feedback。"""
-    session = runtime.create_session(client_id=None)
+    session = runtime.create_session()
     agent = session.agent
 
     # 模拟 bash 工具的 _handle_dangerous_command
@@ -42,7 +42,7 @@ async def test_feedback_basic_path(runtime: WingRuntime):
 @pytest.mark.asyncio
 async def test_feedback_consumer(runtime: WingRuntime):
     """模拟 bash 工具完整流程：设置 need_feedback→等反馈→消费→清理。"""
-    session = runtime.create_session(client_id=None)
+    session = runtime.create_session()
     agent = session.agent
 
     agent.state.set("need_feedback", True)
