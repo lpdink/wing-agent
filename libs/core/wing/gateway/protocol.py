@@ -3,9 +3,9 @@
 """
 Gateway 的消息协议——前端和 Gateway 之间的通信格式。
 
-V2 协议：Gateway 注入 client_id，不感知 session_id 业务语义。
-ClientRequest 的 session_id 由前端传入（前端知道自己的 session）。
-Gateway 只做 client_id 注入和 EventTarget 路由。
+包含：
+  - WS 协议：ConnectResponse、ClientRequest
+  - HTTP 协议：所有 HTTP 端点的 Request/Response models
 """
 
 from __future__ import annotations
@@ -14,9 +14,11 @@ import uuid
 
 from pydantic import BaseModel, Field
 
+from wing.event import AgentInfo, SessionInfo
+
 
 # ============================================================
-# 连接响应（Gateway → 前端，连接建立时）
+# WS 协议（WebSocket）
 # ============================================================
 
 
@@ -35,11 +37,6 @@ class ConnectResponse(BaseModel):
     client_id: str  # Gateway 生成的 client 标识
 
 
-# ============================================================
-# 入站消息（前端 → Gateway）
-# ============================================================
-
-
 class ClientRequest(BaseModel):
     """前端发来的请求——Gateway 注入 client_id 后转给 SM.post()。
 
@@ -53,3 +50,92 @@ class ClientRequest(BaseModel):
     session_id: str  # 指定目标 session（必填）
     content: str  # 消息内容或魔术命令
     silent: bool = False  # 静默请求
+
+
+# ============================================================
+# HTTP Request Models
+# ============================================================
+
+
+class CreateSessionRequest(BaseModel):
+    template_name: str | None = None
+    workspace: str | None = None
+
+
+class ResumeSessionRequest(BaseModel):
+    session_id: str
+
+
+class ForkSessionRequest(BaseModel):
+    source_session_id: str
+    target_uuid: str
+
+
+class SubscribeRequest(BaseModel):
+    session_id: str
+
+
+class UnsubscribeRequest(BaseModel):
+    session_id: str
+
+
+class SendMessageRequest(BaseModel):
+    session_id: str
+    content: str
+    silent: bool = False
+
+
+# ============================================================
+# HTTP Response Models
+# ============================================================
+
+
+class CreateSessionResponse(BaseModel):
+    session_id: str
+    template_name: str
+    workspace: str | None = None
+
+
+class ResumeSessionResponse(BaseModel):
+    session_id: str
+    template_name: str | None = None
+    workspace: str | None = None
+
+
+class ForkSessionResponse(BaseModel):
+    session_id: str
+    draft: str | None = None
+
+
+class OkResponse(BaseModel):
+    ok: bool = True
+
+
+class SendMessageResponse(BaseModel):
+    ok: bool = True
+    request_id: str
+
+
+class SessionListResponse(BaseModel):
+    sessions: list[SessionInfo]
+
+
+class SessionGetResponse(BaseModel):
+    session_id: str
+    name: str | None = None
+    template_name: str | None = None
+    workspace: str | None = None
+    messages: list[dict]
+    agent: AgentInfo | None = None
+
+
+class HealthResponse(BaseModel):
+    status: str = "ok"
+    version: str
+
+
+class ErrorResponse(BaseModel):
+    error: str
+    detail: str | None = None
+    session_id: str | None = None
+    uuid: str | None = None

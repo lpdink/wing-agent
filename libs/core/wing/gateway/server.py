@@ -1,7 +1,7 @@
-# wing_gateway/server.py — WebSocket 服务器
+# wing_gateway/server.py — Gateway 服务器
 
 """
-Gateway 的 WebSocket 服务器。
+Gateway 服务器——生命周期管理器 + EventBus 事件路由。
 
 V2 实现（EventBus 模式）：
   - Gateway 不感知 session_id，只感知 client_id
@@ -9,29 +9,24 @@ V2 实现（EventBus 模式）：
   - Gateway subscribe EventBus，根据 EventTarget 转发给对应 ws
   - 断连时清理 Gateway 和 EventBus 的路由表
 
-核心流程：
-  1. 前端连接 ws:// → Gateway 生成 client_id → 推送 ConnectResponse(session_id)
-  2. 前端发 ClientRequest → Gateway 注入 client_id → 转给 SM.post()
-  3. EventBus emit → Gateway subscriber callback → 根据 EventTarget 路由到 ws
+FastAPI app 创建和路由注册在 app.py 中完成（App Factory 模式）。
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import socket
 import sys
-import uuid
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import WebSocket
 import uvicorn
 
 from wing.common.logger import log
-from wing.event import ErrorEvent, NewSessionEvent, WingEvent
+from wing.event import NewSessionEvent, WingEvent
 from wing.event_bus import event_bus
 from wing.runtime import WingRuntime
 
-from .protocol import ClientRequest, ConnectResponse
+from .app import create_app
 
 DEFAULT_PORT = 32523
 
@@ -53,10 +48,10 @@ def _check_port_available(host: str, port: int) -> bool:
 
 
 class GatewayServer:
-    """WebSocket 服务器——Gateway 的网络层。
+    """Gateway 服务器——生命周期管理器。
 
-    Gateway 不感知 session_id。只维护 client_id ↔ ws 映射。
-    事件路由由 EventBus 的路由表 + EventTarget 决定。
+    持有 runtime、client 映射、FastAPI app。
+    负责 start/stop 和 EventBus 事件路由。
     """
 
     def __init__(
@@ -69,10 +64,19 @@ class GatewayServer:
         self.runtime = WingRuntime()
         self._client_to_ws: dict[str, WebSocket] = {}  # client_id → ws
         self._ws_to_client: dict[WebSocket, str] = {}  # ws → client_id
-        self._app = FastAPI()
-        self._app.websocket("/ws")(self._handle_ws)
+        self._app = create_app(self)
         self._server: uvicorn.Server | None = None
         self._server_task: asyncio.Task[None] | None = None
+
+    @property
+    def clients(self) -> dict[str, WebSocket]:
+        """client_id → WebSocket 映射，供 routes 访问。"""
+        return self._client_to_ws
+
+    @property
+    def ws_to_clients(self) -> dict[WebSocket, str]:
+        """WebSocket → client_id 映射，供 routes 访问。"""
+        return self._ws_to_client
 
     def start(self) -> None:
         """启动服务器（阻塞）。"""
@@ -83,7 +87,7 @@ class GatewayServer:
         # Subscribe EventBus
         event_bus.subscribe(self._on_event)
 
-        print(f"🚀 Gateway 启动于 ws://{self.host}:{self.port}/ws")
+        print(f"🚀 Gateway 启动于 {self.host}:{self.port}")
         uvicorn.run(
             self._app,
             host=self.host,
@@ -182,53 +186,3 @@ class GatewayServer:
             await ws.send_text(data)
         except Exception as e:
             log.error(f"Failed to send to client: {e}")
-
-    async def _handle_ws(self, ws: WebSocket) -> None:
-        """处理 WebSocket 连接。"""
-        await ws.accept()
-
-        # 1. 生成 client_id
-        client_id = uuid.uuid4().hex
-
-        # 2. 创建初始 session（使用默认模板）
-        # 从 URL query 提取 workspace（TUI 传递的启动目录）
-        workspace = ws.query_params.get("workspace")
-        session = self.runtime.create_session(workspace=workspace)
-
-        # 3. 注册 client_id ↔ ws 映射 + EventBus 路由表
-        self._client_to_ws[client_id] = ws
-        self._ws_to_client[ws] = client_id
-        event_bus.route_attach(client_id, session.session_id)
-
-        # 4. 推送连接成功 + session_id + client_id
-        await ws.send_json(
-            ConnectResponse(
-                session_id=session.session_id, client_id=client_id
-            ).model_dump()
-        )
-        log.info(f"Client connected: {client_id}, session: {session.session_id}")
-
-        # 5. 消息路由循环
-        try:
-            while True:
-                data = await ws.receive_text()
-                try:
-                    req = ClientRequest(**json.loads(data))
-                    await self.runtime.post(
-                        content=req.content,
-                        request_id=req.request_id,
-                        session_id=req.session_id,
-                        client_id=client_id,
-                        silent=req.silent,
-                    )
-                except Exception as e:
-                    log.error(f"Failed to handle request: {e}")
-                    await ws.send_text(ErrorEvent(message=str(e)).model_dump_json())
-        except WebSocketDisconnect:
-            pass
-        finally:
-            # 断连：清理映射和路由表
-            self._client_to_ws.pop(client_id, None)
-            self._ws_to_client.pop(ws, None)
-            event_bus.route_detach_client(client_id)
-            log.info(f"Client disconnected: {client_id}")
