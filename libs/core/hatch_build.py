@@ -48,13 +48,17 @@ class WingBinaryHook(BuildHookInterface):
         self.app.display_info(f"✅ Binary ready: {binary_path}")
 
         # Force-include the binary at wing/bin/wing inside the wheel.
-        build_data["force_include"][binary_path] = os.path.join("wing", "bin", binary_name)
+        build_data["force_include"][binary_path] = os.path.join(
+            "wing", "bin", binary_name
+        )
 
         # Produce a platform-specific wheel tag (e.g. cp312-cp312-macosx_11_0_arm64).
         build_data["infer_tag"] = True
         build_data["pure_python"] = False
 
-    def finalize(self, _version: str, _build_data: dict[str, Any], artifact_path: str) -> None:
+    def finalize(
+        self, _version: str, _build_data: dict[str, Any], artifact_path: str
+    ) -> None:
         self.app.display_info(f"🎉 Wheel built: {os.path.basename(artifact_path)}")
 
     def clean(self, _versions: list[str]) -> None:

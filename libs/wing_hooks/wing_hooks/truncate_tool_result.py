@@ -16,6 +16,7 @@ MAX_TRUNCATE_LENGTH = 50000
 KEEP_HEAD_LENGTH = 100
 KEEP_TAIL_LENGTH = 100
 
+
 def _ensure_tmp_dir() -> Path:
     """Resolve and create the temp directory for truncated results.
 

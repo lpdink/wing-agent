@@ -66,7 +66,9 @@ def _rotate_logs(log_dir: Path, current_log: Path) -> None:
             pass
 
 
-def setup_logger(level: str = "WARNING", path: str | Path | None = None) -> logging.Logger:
+def setup_logger(
+    level: str = "WARNING", path: str | Path | None = None
+) -> logging.Logger:
     """Setup and return configured logger.
 
     Args:

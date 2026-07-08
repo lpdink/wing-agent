@@ -5,11 +5,12 @@ description = "General-purpose agent runtime — session, event, context, tools,
 requires-python = ">=3.12"
 dependencies = [
     "aioconsole>=0.8.2",
-    "aiohttp>=3.9.0",
+    "fastapi>=0.139.0",
     "openai>=2.21.0",
     "pydantic-settings>=2.13.1",
     "python-frontmatter>=1.1.0",
     "pyyaml>=6.0.3",
+    "uvicorn[standard]>=0.51.0",
 ]
 
 [project.scripts]

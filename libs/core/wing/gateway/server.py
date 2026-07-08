@@ -23,7 +23,8 @@ import socket
 import sys
 import uuid
 
-from aiohttp import WSMsgType, web
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import uvicorn
 
 from wing.common.logger import log
 from wing.event import ErrorEvent, NewSessionEvent, WingEvent
@@ -66,10 +67,12 @@ class GatewayServer:
         self.host = host
         self.port = port
         self.runtime = WingRuntime()
-        self._client_to_ws: dict[str, web.WebSocketResponse] = {}  # client_id → ws
-        self._ws_to_client: dict[web.WebSocketResponse, str] = {}  # ws → client_id
-        self._app: web.Application | None = None
-        self._runner: web.AppRunner | None = None
+        self._client_to_ws: dict[str, WebSocket] = {}  # client_id → ws
+        self._ws_to_client: dict[WebSocket, str] = {}  # ws → client_id
+        self._app = FastAPI()
+        self._app.websocket("/ws")(self._handle_ws)
+        self._server: uvicorn.Server | None = None
+        self._server_task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
         """启动服务器（阻塞）。"""
@@ -77,14 +80,16 @@ class GatewayServer:
             print(f"❌ 端口 {self.port} 已被占用，请指定其他端口或释放占用。")
             sys.exit(1)
 
-        self._app = web.Application()
-        self._app.router.add_get("/ws", self._handle_ws)
-
         # Subscribe EventBus
         event_bus.subscribe(self._on_event)
 
         print(f"🚀 Gateway 启动于 ws://{self.host}:{self.port}/ws")
-        web.run_app(self._app, host=self.host, port=self.port, print=None)
+        uvicorn.run(
+            self._app,
+            host=self.host,
+            port=self.port,
+            log_config=None,
+        )
 
     async def start_async(self, port: int | None = None) -> int:
         """异步启动服务器（用于测试）。返回实际使用的端口。"""
@@ -93,13 +98,19 @@ class GatewayServer:
             raise RuntimeError(f"端口 {actual_port} 已被占用")
 
         self.port = actual_port
-        self._app = web.Application()
-        self._app.router.add_get("/ws", self._handle_ws)
 
-        self._runner = web.AppRunner(self._app)
-        await self._runner.setup()
-        site = web.TCPSite(self._runner, self.host, self.port)
-        await site.start()
+        config = uvicorn.Config(
+            self._app,
+            host=self.host,
+            port=self.port,
+            log_config=None,
+        )
+        self._server = uvicorn.Server(config)
+        self._server_task = asyncio.create_task(self._server.serve())
+
+        # 等待服务器启动
+        while not self._server.started:
+            await asyncio.sleep(0.05)
 
         # Subscribe EventBus
         event_bus.subscribe(self._on_event)
@@ -110,9 +121,12 @@ class GatewayServer:
     async def stop_async(self) -> None:
         """异步停止服务器（用于测试）。"""
         event_bus.unsubscribe(self._on_event)
-        if self._runner:
-            await self._runner.cleanup()
-            self._runner = None
+        if self._server:
+            self._server.should_exit = True
+            if self._server_task:
+                await self._server_task
+                self._server_task = None
+            self._server = None
         log.info("Gateway stopped")
 
     def _on_event(self, event: WingEvent) -> None:
@@ -145,10 +159,9 @@ class GatewayServer:
             for ws in list(self._client_to_ws.values()):
                 try:
                     asyncio.get_running_loop().create_task(
-                        self._send_str(ws, event.model_dump_json())
+                        self._send_text(ws, event.model_dump_json())
                     )
                 except RuntimeError:
-                    # 没有 running loop（不太可能，Gateway 在 aiohttp 中运行）
                     pass
 
         elif target.scope == "client":
@@ -158,29 +171,28 @@ class GatewayServer:
                 if ws is not None:
                     try:
                         asyncio.get_running_loop().create_task(
-                            self._send_str(ws, event.model_dump_json())
+                            self._send_text(ws, event.model_dump_json())
                         )
                     except RuntimeError:
                         pass
 
-    async def _send_str(self, ws: web.WebSocketResponse, data: str) -> None:
-        """异步发送字符串到 ws。"""
+    async def _send_text(self, ws: WebSocket, data: str) -> None:
+        """异步发送文本到 ws。"""
         try:
-            await ws.send_str(data)
+            await ws.send_text(data)
         except Exception as e:
             log.error(f"Failed to send to client: {e}")
 
-    async def _handle_ws(self, request: web.Request) -> web.WebSocketResponse:
+    async def _handle_ws(self, ws: WebSocket) -> None:
         """处理 WebSocket 连接。"""
-        ws = web.WebSocketResponse()
-        await ws.prepare(request)
+        await ws.accept()
 
         # 1. 生成 client_id
         client_id = uuid.uuid4().hex
 
         # 2. 创建初始 session（使用默认模板）
         # 从 URL query 提取 workspace（TUI 传递的启动目录）
-        workspace = request.query.get("workspace")
+        workspace = ws.query_params.get("workspace")
         session = self.runtime.create_session(workspace=workspace)
 
         # 3. 注册 client_id ↔ ws 映射 + EventBus 路由表
@@ -198,27 +210,25 @@ class GatewayServer:
 
         # 5. 消息路由循环
         try:
-            async for msg in ws:
-                if msg.type == WSMsgType.TEXT:
-                    try:
-                        req = ClientRequest(**json.loads(msg.data))
-                        await self.runtime.post(
-                            content=req.content,
-                            request_id=req.request_id,
-                            session_id=req.session_id,
-                            client_id=client_id,
-                            silent=req.silent,
-                        )
-                    except Exception as e:
-                        log.error(f"Failed to handle request: {e}")
-                        await ws.send_str(ErrorEvent(message=str(e)).model_dump_json())
-                elif msg.type in (WSMsgType.ERROR, WSMsgType.CLOSE):
-                    break
+            while True:
+                data = await ws.receive_text()
+                try:
+                    req = ClientRequest(**json.loads(data))
+                    await self.runtime.post(
+                        content=req.content,
+                        request_id=req.request_id,
+                        session_id=req.session_id,
+                        client_id=client_id,
+                        silent=req.silent,
+                    )
+                except Exception as e:
+                    log.error(f"Failed to handle request: {e}")
+                    await ws.send_text(ErrorEvent(message=str(e)).model_dump_json())
+        except WebSocketDisconnect:
+            pass
         finally:
             # 断连：清理映射和路由表
             self._client_to_ws.pop(client_id, None)
             self._ws_to_client.pop(ws, None)
             event_bus.route_detach_client(client_id)
             log.info(f"Client disconnected: {client_id}")
-
-        return ws

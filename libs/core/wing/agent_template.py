@@ -44,9 +44,7 @@ class AgentTemplate(BaseModel):
     context_window_tokens: int = 100_000
 
     @classmethod
-    def from_agent(
-        cls, agent: "WingAgent", name: str | None = None
-    ) -> "AgentTemplate":
+    def from_agent(cls, agent: "WingAgent", name: str | None = None) -> "AgentTemplate":
         """从已有 WingAgent 反向抽取模板。
 
         用于 fork/switch 场景下保留当前 agent 配置。
