@@ -36,25 +36,30 @@ pub fn backoff(attempt: u32) -> Duration {
 /// Performs:
 /// 1. WS reconnect via `GatewayClient::connect()`
 /// 2. Extract `client_id` from new WS handshake
-/// 3. Create new HTTP client from the gateway URL
-/// 4. HTTP subscribe to re-establish event streaming
+/// 3. Create new HTTP client from `http_base`
+/// 4. HTTP resume_session to load session from disk into gateway memory
+/// 5. HTTP subscribe to re-establish event streaming (triggers SyncSession push)
 ///
 /// Returns a new `Transport` on success, or an error if any step fails.
-pub async fn try_reconnect(gateway_url: &str, session_id: &str) -> Result<Transport> {
+pub async fn try_reconnect(ws_url: &str, http_base: &str, session_id: &str) -> Result<Transport> {
     // 1. WS reconnect.
-    let ws = GatewayClient::connect(gateway_url)
+    let ws = GatewayClient::connect(ws_url)
         .await
         .context("WS reconnect failed")?;
 
     // 2. Extract client_id from handshake.
     let client_id = ws.client_id().to_string();
 
-    // 3. Create HTTP client from gateway URL.
-    let http_base = gateway_url.replace("ws://", "http://").replace("/ws", "");
+    // 3. Create HTTP client.
     let http =
-        GatewayApiClient::new(&http_base).context("failed to create HTTP client for reconnect")?;
+        GatewayApiClient::new(http_base).context("failed to create HTTP client for reconnect")?;
 
-    // 4. Subscribe to re-establish event streaming (triggers SyncSession push).
+    // 4. Resume session (loads from disk into gateway memory after restart).
+    http.resume_session(session_id)
+        .await
+        .context("resume_session failed during reconnect")?;
+
+    // 5. Subscribe to re-establish event streaming (triggers SyncSession push).
     http.subscribe(session_id, &client_id)
         .await
         .context("subscribe failed during reconnect")?;

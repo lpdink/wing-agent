@@ -194,7 +194,7 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     tracing::info!(client_id = %client_id, "WS connected");
 
     // 2. HTTP create session.
-    let http = GatewayApiClient::new(http_base)
+    let http = GatewayApiClient::new(http_base.clone())
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
 
     let session = http
@@ -237,7 +237,15 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
         http,
         client_id,
     };
-    let result = run_app(&mut terminal, transport, session_id, ws_url, config).await;
+    let result = run_app(
+        &mut terminal,
+        transport,
+        session_id,
+        ws_url,
+        http_base,
+        config,
+    )
+    .await;
 
     // Restore terminal.
     tui::restore_terminal(&mut terminal)?;

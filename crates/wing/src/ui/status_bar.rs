@@ -35,6 +35,8 @@ pub struct StatusData {
     pub session_completion_tokens: i64,
     /// Cumulative cached tokens for the session.
     pub session_cached_tokens: i64,
+    /// Whether the gateway connection is active.
+    pub connected: bool,
 }
 
 impl Default for StatusData {
@@ -48,6 +50,7 @@ impl Default for StatusData {
             session_prompt_tokens: 0,
             session_completion_tokens: 0,
             session_cached_tokens: 0,
+            connected: true,
         }
     }
 }
@@ -152,6 +155,17 @@ impl Widget for StatusBar<'_> {
                     Style::default().fg(self.palette.dim),
                 ));
             }
+        }
+
+        // Connection status indicator.
+        right_spans.push(Span::styled(" ", dim));
+        if d.connected {
+            right_spans.push(Span::styled("●", Style::default().fg(self.palette.success)));
+        } else {
+            right_spans.push(Span::styled(
+                "Disconnected",
+                Style::default().fg(self.palette.danger),
+            ));
         }
 
         // Calculate right side width.

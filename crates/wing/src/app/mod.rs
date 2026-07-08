@@ -181,6 +181,7 @@ impl App {
     /// Update the gateway connection state.
     pub fn set_connected(&mut self, connected: bool) {
         self.connected = connected;
+        self.status.connected = connected;
     }
 
     /// Try to handle `text` as a frontend-only magic command.
@@ -989,11 +990,11 @@ pub async fn run_app(
     terminal: &mut WingTerminal,
     transport: Transport,
     session_id: String,
-    gateway_url: String,
+    ws_url: String,
+    http_base: String,
     config: AppConfig,
 ) -> Result<()> {
     let mut app = App::new(session_id, config);
-    app.set_connected(true);
     let mut term_events = crate::tui::spawn_event_stream();
     let mut transport = Some(transport);
     let mut reconnect_attempt: u32 = 0;
@@ -1253,7 +1254,7 @@ pub async fn run_app(
             }
             // Reconnect timer (only fires when disconnected).
             _ = reconnect_sleep => {
-                match try_reconnect(&gateway_url, &app.session_id).await {
+                match try_reconnect(&ws_url, &http_base, &app.session_id).await {
                     Ok(new_transport) => {
                         transport = Some(new_transport);
                         app.set_connected(true);
