@@ -87,8 +87,7 @@ async def _handle_dangerous_command(
         if action == "yolo":
             # Enable yolo for the rest of this session.
             agent.state.set("yolo", True)
-            result = await _execute_command(command, agent, timeout)
-            return f"[yolo mode enabled — all subsequent commands auto-approved]\n{result}"
+            return await _execute_command(command, agent, timeout)
 
         if action == "y":
             return await _execute_command(command, agent, timeout)
