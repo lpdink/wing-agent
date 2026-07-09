@@ -6,7 +6,7 @@ Usage:
 
 This script:
 1. Replaces the placeholder version in root Cargo.toml [workspace.package]
-2. Pins wing-agent's dependencies to exact versions (wing-cli==X, wing-gateway==X, wing-hooks==X)
+2. Pins wing-agent's dependencies to exact versions (wing-cli==X, wing-gateway==X)
 
 Only uses Python standard library.
 """
@@ -46,9 +46,6 @@ def main() -> None:
     )
     pyproject_text = re.sub(
         r'"wing-gateway[^"]*"', f'"wing-gateway=={version}"', pyproject_text
-    )
-    pyproject_text = re.sub(
-        r'"wing-hooks[^"]*"', f'"wing-hooks=={version}"', pyproject_text
     )
     pyproject_path.write_text(pyproject_text)
 

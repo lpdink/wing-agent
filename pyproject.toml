@@ -9,7 +9,6 @@ requires-python = ">=3.12"
 dependencies = [
     "wing-cli",
     "wing-gateway",
-    "wing-hooks",
 ]
 
 [build-system]
@@ -26,12 +25,11 @@ version-file = "wing_agent/_version.py"
 packages = ["wing_agent"]
 
 [tool.uv.workspace]
-members = ["libs/core", "libs/wing_hooks", "crates/wing"]
+members = ["libs/core", "crates/wing"]
 
 [tool.uv.sources]
 wing-cli = { workspace = true }
 wing-gateway = { workspace = true }
-wing-hooks = { workspace = true }
 
 [dependency-groups]
 dev = [

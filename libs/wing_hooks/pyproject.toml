@@ -1,6 +1,6 @@
 [project]
 name = "wing-hooks"
-dynamic = ["version"]
+version = "0.1.0"
 description = "Official hook implementations for wing agent runtime"
 requires-python = ">=3.12"
 dependencies = [
@@ -8,17 +8,8 @@ dependencies = [
 ]
 
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
-
-[tool.hatch.version]
-source = "vcs"
-raw-options = { root = "../.." }
-
-[tool.hatch.build.hooks.vcs]
-version-file = "wing_hooks/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["wing_hooks"]
-
-# wing-hooks 不提供任何可运行程序——[project.scripts] 不存在

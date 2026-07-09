@@ -7,7 +7,6 @@ members = [
     "wing-agent",
     "wing-cli",
     "wing-gateway",
-    "wing-hooks",
 ]
 
 [[package]]
@@ -819,7 +818,6 @@ source = { editable = "." }
 dependencies = [
     { name = "wing-cli" },
     { name = "wing-gateway" },
-    { name = "wing-hooks" },
 ]
 
 [package.dev-dependencies]
@@ -835,7 +833,6 @@ dev = [
 requires-dist = [
     { name = "wing-cli", editable = "crates/wing" },
     { name = "wing-gateway", editable = "libs/core" },
-    { name = "wing-hooks", editable = "libs/wing_hooks" },
 ]
 
 [package.metadata.requires-dev]
@@ -874,13 +871,3 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.51.0" },
 ]
-
-[[package]]
-name = "wing-hooks"
-source = { editable = "libs/wing_hooks" }
-dependencies = [
-    { name = "wing-gateway" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "wing-gateway", editable = "libs/core" }]

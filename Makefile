@@ -21,7 +21,7 @@ gateway:
 	uv run wing-gateway
 
 test-python:
-	uv run pytest libs/core/tests/ libs/wing_hooks/tests/
+	uv run pytest libs/core/tests/
 
 check-python:
 	@RUFF_FAILED=0; TY_FAILED=0; VULTURE_FAILED=0; \
