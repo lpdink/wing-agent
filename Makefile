@@ -46,7 +46,24 @@ fmt-python:
 # ── Rust ──────────────────────────────────────────────────────
 
 check-rust:
-	cargo fmt --check && cargo clippy -- -D warnings && cargo test
+	@echo "🔍 Running cargo fmt..."; \
+	cargo fmt --check || { echo "❌ cargo fmt failed"; exit 1; }; \
+	echo "✅ cargo fmt passed"; \
+	echo ""; \
+	echo "🔍 Running cargo clippy..."; \
+	cargo clippy --quiet -- -D warnings 2>&1 || { echo "❌ cargo clippy failed"; exit 1; }; \
+	echo "✅ cargo clippy passed"; \
+	echo ""; \
+	echo "🔍 Running cargo test..."; \
+	OUTPUT=$$(cargo test 2>&1); \
+	if [ $$? -eq 0 ]; then \
+		echo "$$OUTPUT" | grep "^test result:"; \
+		echo "✅ cargo test passed"; \
+	else \
+		echo "$$OUTPUT"; \
+		echo "❌ cargo test failed"; \
+		exit 1; \
+	fi
 
 fmt-rust:
 	cargo fmt
