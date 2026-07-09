@@ -3,6 +3,7 @@ name = "wing-hooks"
 version = "0.1.0"
 description = "Official hook implementations for wing agent runtime"
 requires-python = ">=3.12"
+license-files = []
 dependencies = [
     "wing-gateway",
 ]

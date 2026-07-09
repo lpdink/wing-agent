@@ -3,6 +3,7 @@ name = "wing-gateway"
 dynamic = ["version"]
 description = "General-purpose agent runtime — session, event, context, tools, WebSocket gateway"
 requires-python = ">=3.12"
+license-files = []
 dependencies = [
     "aioconsole>=0.8.2",
     "fastapi>=0.139.0",

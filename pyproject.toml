@@ -6,6 +6,7 @@ name = "wing-agent"
 dynamic = ["version"]
 description = "General-purpose coding agent — Rust TUI/CLI + Python gateway runtime"
 requires-python = ">=3.12"
+license-files = []
 dependencies = [
     "wing-cli",
     "wing-gateway",
