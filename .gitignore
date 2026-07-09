@@ -1,5 +1,6 @@
 # Python
 .venv/
+**/_version.py
 __pycache__/
 *.pyc
 *.egg-info/

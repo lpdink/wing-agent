@@ -3009,7 +3009,7 @@ dependencies = [
 
 [[package]]
 name = "wing"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3039,7 +3039,7 @@ dependencies = [
 
 [[package]]
 name = "wing-api-client"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "chrono",
  "reqwest",

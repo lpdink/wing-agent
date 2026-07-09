@@ -815,7 +815,6 @@ wheels = [
 
 [[package]]
 name = "wing-agent"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "wing-cli" },
@@ -850,12 +849,10 @@ dev = [
 
 [[package]]
 name = "wing-cli"
-version = "0.1.0"
 source = { editable = "crates/wing" }
 
 [[package]]
 name = "wing-gateway"
-version = "0.1.0"
 source = { editable = "libs/core" }
 dependencies = [
     { name = "aioconsole" },
@@ -880,7 +877,6 @@ requires-dist = [
 
 [[package]]
 name = "wing-hooks"
-version = "0.1.0"
 source = { editable = "libs/wing_hooks" }
 dependencies = [
     { name = "wing-gateway" },

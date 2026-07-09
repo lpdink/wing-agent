@@ -1,6 +1,6 @@
 [project]
 name = "wing-gateway"
-version = "0.1.0"
+dynamic = ["version"]
 description = "General-purpose agent runtime — session, event, context, tools, WebSocket gateway"
 requires-python = ">=3.12"
 dependencies = [
@@ -17,8 +17,15 @@ dependencies = [
 wing-gateway = "wing.gateway.cli:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+raw-options = { root = "../.." }
+
+[tool.hatch.build.hooks.vcs]
+version-file = "wing/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["wing"]

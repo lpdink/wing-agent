@@ -1,6 +1,6 @@
 [project]
 name = "wing-cli"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Wing TUI/CLI — native Rust binary for the Wing agent platform"
 requires-python = ">=3.12"
 

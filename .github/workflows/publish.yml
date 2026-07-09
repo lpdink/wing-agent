@@ -1,10 +1,12 @@
 name: Publish to PyPI / TestPyPI
 
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. 0.1.0, 0.1.0a1)"
+        description: "Release version (e.g., 0.2.0, 0.2.0a1)"
         required: true
         type: string
       target:
@@ -20,20 +22,59 @@ permissions:
   contents: write
 
 jobs:
+  # ── Extract version from git tag or manual input ────────────
+  resolve-version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is-prerelease: ${{ steps.version.outputs.is-prerelease }}
+      target: ${{ steps.version.outputs.target }}
+    steps:
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            TARGET="pypi"
+          else
+            VERSION="${{ inputs.version }}"
+            TARGET="${{ inputs.target }}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+
+          # PEP 440 pre-release detection
+          if [[ "$VERSION" =~ [abc]|rc|dev ]]; then
+            echo "is-prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is-prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "📦 Version: $VERSION"
+          echo "🎯 Target: $TARGET"
+          echo "🏷️  Pre-release: $([[ "$VERSION" =~ [abc]|rc|dev ]] && echo yes || echo no)"
+
   # ── wing-cli: Linux x86_64 ────────────────────────────────────
   build-cli-linux:
     name: wing-cli Linux x86_64
+    needs: [resolve-version]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set version
-        run: sed -i 's/^version = ".*"/version = "${{ github.event.inputs.version }}"/' crates/wing/pyproject.toml
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install maturin
         run: pip install maturin
+
+      - name: Inject version into Cargo.toml
+        run: python scripts/sync_version.py "${{ needs.resolve-version.outputs.version }}"
 
       - name: Build wing-cli wheel
         working-directory: crates/wing
@@ -47,21 +88,22 @@ jobs:
   # ── wing-cli: macOS arm64 ─────────────────────────────────────
   build-cli-macos:
     name: wing-cli macOS arm64
+    needs: [resolve-version]
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set version
-        run: sed -i '' 's/^version = ".*"/version = "${{ github.event.inputs.version }}"/' crates/wing/pyproject.toml
-
-      - uses: dtolnay/rust-toolchain@stable
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Install maturin
         run: pip install maturin
+
+      - name: Inject version into Cargo.toml
+        run: python scripts/sync_version.py "${{ needs.resolve-version.outputs.version }}"
 
       - name: Build wing-cli wheel
         working-directory: crates/wing
@@ -75,22 +117,22 @@ jobs:
   # ── wing-gateway + wing-agent: py3-none-any ───────────────────
   build-python:
     name: wing-gateway + wing-agent (any)
+    needs: [resolve-version]
     runs-on: ubuntu-latest
+    env:
+      SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.resolve-version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set version
-        run: |
-          VERSION="${{ github.event.inputs.version }}"
-          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' pyproject.toml
-          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' libs/core/pyproject.toml
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install build tools
-        run: pip install build
+        run: pip install build hatch-vcs
+
+      - name: Pin meta-package dependencies
+        run: python scripts/sync_version.py "${{ needs.resolve-version.outputs.version }}"
 
       - name: Build wing-gateway wheel
         working-directory: libs/core
@@ -106,7 +148,7 @@ jobs:
 
   # ── Publish to PyPI / TestPyPI ────────────────────────────────
   publish:
-    needs: [build-cli-linux, build-cli-macos, build-python]
+    needs: [resolve-version, build-cli-linux, build-cli-macos, build-python]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -122,14 +164,14 @@ jobs:
         run: pip install twine
 
       - name: Publish to TestPyPI
-        if: github.event.inputs.target == 'testpypi'
+        if: needs.resolve-version.outputs.target == 'testpypi'
         run: twine upload --repository testpypi dist/*
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.TEST_PYPI_TOKEN }}
 
       - name: Publish to PyPI
-        if: github.event.inputs.target == 'pypi'
+        if: needs.resolve-version.outputs.target == 'pypi'
         run: twine upload dist/*
         env:
           TWINE_USERNAME: __token__
@@ -137,8 +179,8 @@ jobs:
 
   # ── GitHub Release (PyPI only) ────────────────────────────────
   release:
-    needs: [publish]
-    if: github.event.inputs.target == 'pypi'
+    needs: [resolve-version, publish]
+    if: needs.resolve-version.outputs.target == 'pypi'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -150,8 +192,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.event.inputs.version }}
-          name: v${{ github.event.inputs.version }}
+          tag_name: v${{ needs.resolve-version.outputs.version }}
+          name: v${{ needs.resolve-version.outputs.version }}
           files: dist/*.whl
           generate_release_notes: true
-          prerelease: ${{ contains(github.event.inputs.version, 'a') || contains(github.event.inputs.version, 'b') || contains(github.event.inputs.version, 'rc') || contains(github.event.inputs.version, 'dev') }}
+          prerelease: ${{ needs.resolve-version.outputs.is-prerelease }}
