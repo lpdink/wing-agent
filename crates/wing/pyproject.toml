@@ -1,0 +1,14 @@
+[project]
+name = "wing-cli"
+version = "0.1.0"
+description = "Wing TUI/CLI — native Rust binary for the Wing agent platform"
+requires-python = ">=3.12"
+
+[build-system]
+requires = ["maturin>=1.9.3,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "Cargo.toml"
+strip = true

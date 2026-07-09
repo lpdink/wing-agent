@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Official hook implementations for wing agent runtime"
 requires-python = ">=3.12"
 dependencies = [
-    "wing-agent",
+    "wing-gateway",
 ]
 
 [build-system]

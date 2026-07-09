@@ -6,8 +6,8 @@ run:
 	cargo run
 
 install:
-	pip install libs/core
-	cargo install --path crates/wing --locked
+	cd crates/wing && maturin develop --release
+	uv sync
 
 check: check-python check-rust
 

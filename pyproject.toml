@@ -1,22 +1,31 @@
-# wing-agent workspace root
-# 开发环境编排器——不含业务代码，只管理成员包和共享开发依赖。
+# wing-agent — meta package + workspace root
+# pip install wing-agent → 安装 wing-cli + wing-gateway
 
 [project]
-name = "wing-agent-workspace"
-version = "0.0.0"
-description = "Development workspace for wing-agent packages"
+name = "wing-agent"
+version = "0.1.0"
+description = "General-purpose coding agent — Rust TUI/CLI + Python gateway runtime"
 requires-python = ">=3.12"
 dependencies = [
-    "wing-agent",
-    "wing-hooks"
+    "wing-cli",
+    "wing-gateway",
+    "wing-hooks",
 ]
 
-[tool.uv.sources]
-wing-agent = { workspace = true }
-wing-hooks = { workspace = true }
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["wing_agent"]
 
 [tool.uv.workspace]
-members = ["libs/core", "libs/wing_hooks"]
+members = ["libs/core", "libs/wing_hooks", "crates/wing"]
+
+[tool.uv.sources]
+wing-cli = { workspace = true }
+wing-gateway = { workspace = true }
+wing-hooks = { workspace = true }
 
 [dependency-groups]
 dev = [
