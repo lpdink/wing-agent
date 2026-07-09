@@ -42,6 +42,7 @@ class AgentTemplate(BaseModel):
         )
     )
     context_window_tokens: int = 100_000
+    max_turns: int | None = None
 
     @classmethod
     def from_agent(cls, agent: "WingAgent", name: str | None = None) -> "AgentTemplate":
@@ -73,6 +74,7 @@ class AgentTemplate(BaseModel):
             context_window_tokens=cm.compactor.context_window_tokens
             if cm.compactor
             else 100_000,
+            max_turns=agent.max_turns,
         )
 
     @classmethod
@@ -99,6 +101,7 @@ class AgentTemplate(BaseModel):
             rules_patterns=list(agent_config.rules),
             compactor=compactor,
             context_window_tokens=agent_config.context_window_tokens,
+            max_turns=agent_config.max_turns,
         )
 
 

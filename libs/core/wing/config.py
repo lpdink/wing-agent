@@ -58,6 +58,7 @@ class AgentConfig(BaseModel):
     keep_recent_tokens: int = 50_000
     skills: list[str] = Field(default_factory=list)
     rules: list[str] = Field(default_factory=list)
+    max_turns: int | None = None
 
 
 class GatewayConfig(BaseModel):

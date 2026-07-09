@@ -95,6 +95,7 @@ class WingAgent:
         context_manager: ContextManager,
         stream: bool = False,
         tools: list[Tool] | None = None,
+        max_turns: int | None = None,
     ) -> None:
         self.stream = stream
         self.model_provider = model_provider
@@ -103,6 +104,7 @@ class WingAgent:
         self.context_manager = context_manager
         self.state = AgentStateBag()
         self._steer = get_config().steer
+        self._max_turns = max_turns
         self._inbox: asyncio.Queue[Inbound] = asyncio.Queue()
         self._inbox_feedback: asyncio.Queue[str] = asyncio.Queue()
         self._worker = asyncio.create_task(self._run())
@@ -112,8 +114,36 @@ class WingAgent:
         return sorted(self._tool_map.values(), key=lambda item: item.name)
 
     @property
+    def max_turns(self) -> int | None:
+        """Agent loop 最大轮数限制。None 表示无限。"""
+        return self._max_turns
+
+    @property
     def session_id(self) -> str:
         return self.context_manager.id
+
+    # ── 运行时覆盖方法（供 Session.apply_agent_override 调用）──
+
+    def replace_tools(self, tool_names: list[str]) -> None:
+        """替换工具列表。从 tool_registry 获取未绑定工具并重新绑定。
+
+        使用 tool_registry.get_tool() 获取全新的未绑定 Tool 对象，
+        避免闭包泄漏（旧 agent 的 _agent 引用）。
+        """
+        from wing.tool_registry import tool_registry
+
+        unbound_tools = [
+            t for name in tool_names if (t := tool_registry.get_tool(name)) is not None
+        ]
+        self._tool_map = self._bind_tools(unbound_tools)
+
+    def set_max_turns(self, max_turns: int | None) -> None:
+        """设置 agent loop 最大轮数。None 表示无限。"""
+        self._max_turns = max_turns
+
+    def set_reasoning_effort(self, effort: str | None) -> None:
+        """设置 reasoning effort 级别。"""
+        self.model_provider.reasoning_effort = effort
 
     def _bind_tools(self, tools: list[Tool]) -> dict[str, Any]:
         bound_map = {}
@@ -188,6 +218,22 @@ class WingAgent:
             self.context_manager.add_message(inbound.message)
 
             while True:
+                # Check max_turns limit before each LLM call
+                if self._max_turns is not None and ctx.num_turns >= self._max_turns:
+                    self.emit(
+                        TurnResultEvent(
+                            session_id=self.session_id,
+                            subtype="error_max_turns",
+                            is_error=True,
+                            num_turns=ctx.num_turns,
+                            duration_ms=ctx.elapsed_ms(),
+                            usage=ctx.usage_dict(),
+                            errors=[f"Reached max turns limit: {self._max_turns}"],
+                        )
+                    )
+                    self.emit(DoneEvent(session_id=self.session_id))
+                    return
+
                 log.info(f"run with {inbound.message}, turn {ctx.num_turns}")
                 if not await self._llm_turn(ctx):
                     ctx.num_turns += 1

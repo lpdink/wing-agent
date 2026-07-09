@@ -89,6 +89,7 @@ class WingRuntime:
         self,
         template_name: str | None = None,
         workspace: str | None = None,
+        agent_override=None,
     ) -> Session:
         """创建新 session。session_id 由后端生成。
 
@@ -98,10 +99,12 @@ class WingRuntime:
         Args:
             template_name: Agent 模板名称，None 时使用默认模板
             workspace: 工作目录
+            agent_override: AgentOverride 参数覆盖（None 字段不覆盖 template 值）
         """
         return self.sm.create_session(
             template_name=template_name,
             workspace=workspace,
+            agent_override=agent_override,
         )
 
     def resume_session(self, session_id: str) -> Session:

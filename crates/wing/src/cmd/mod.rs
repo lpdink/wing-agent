@@ -197,8 +197,12 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     let http = GatewayApiClient::new(http_base.clone())
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
 
+    let create_req = wing_api_client::models::CreateSessionRequest {
+        workspace: workspace.clone(),
+        ..Default::default()
+    };
     let session = http
-        .create_session(None, workspace.as_deref())
+        .create_session(&create_req)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create session: {e}"))?;
 
