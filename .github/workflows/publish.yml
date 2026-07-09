@@ -20,39 +20,15 @@ permissions:
   contents: write
 
 jobs:
-  # ── Sync versions across all pyproject.toml files ────────────
-  set-version:
-    name: Set version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Replace version in all pyproject.toml files
-        run: |
-          VERSION="${{ github.event.inputs.version }}"
-          sed -i 's/^version = "0.1.0"/version = "'"$VERSION"'"/' pyproject.toml
-          sed -i 's/^version = "0.1.0"/version = "'"$VERSION"'"/' libs/core/pyproject.toml
-          sed -i 's/^version = "0.1.0"/version = "'"$VERSION"'"/' crates/wing/pyproject.toml
-
-      - name: Upload modified sources
-        uses: actions/upload-artifact@v4
-        with:
-          name: sources-versioned
-          path: |
-            pyproject.toml
-            libs/core/pyproject.toml
-            crates/wing/pyproject.toml
-
   # ── wing-cli: Linux x86_64 ────────────────────────────────────
   build-cli-linux:
     name: wing-cli Linux x86_64
-    needs: [set-version]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Set version
-        run: sed -i 's/^version = "0.1.0"/version = "${{ github.event.inputs.version }}"/' crates/wing/pyproject.toml
+        run: sed -i 's/^version = ".*"/version = "${{ github.event.inputs.version }}"/' crates/wing/pyproject.toml
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -71,15 +47,18 @@ jobs:
   # ── wing-cli: macOS arm64 ─────────────────────────────────────
   build-cli-macos:
     name: wing-cli macOS arm64
-    needs: [set-version]
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
       - name: Set version
-        run: sed -i '' 's/^version = "0.1.0"/version = "${{ github.event.inputs.version }}"/' crates/wing/pyproject.toml
+        run: sed -i '' 's/^version = ".*"/version = "${{ github.event.inputs.version }}"/' crates/wing/pyproject.toml
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Install maturin
         run: pip install maturin
@@ -96,7 +75,6 @@ jobs:
   # ── wing-gateway + wing-agent: py3-none-any ───────────────────
   build-python:
     name: wing-gateway + wing-agent (any)
-    needs: [set-version]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -104,8 +82,8 @@ jobs:
       - name: Set version
         run: |
           VERSION="${{ github.event.inputs.version }}"
-          sed -i 's/^version = "0.1.0"/version = "'"$VERSION"'"/' pyproject.toml
-          sed -i 's/^version = "0.1.0"/version = "'"$VERSION"'"/' libs/core/pyproject.toml
+          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' pyproject.toml
+          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' libs/core/pyproject.toml
 
       - uses: actions/setup-python@v5
         with:
