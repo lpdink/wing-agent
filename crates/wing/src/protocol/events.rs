@@ -374,6 +374,50 @@ pub enum WingEvent {
         meta: EventMeta,
     },
 
+    // ---- turn-level events (for stdio / SDK consumers) ----
+    /// Turn-level assistant message (complete, not streaming).
+    #[serde(rename = "assistant_turn")]
+    AssistantTurn {
+        content_blocks: Vec<serde_json::Value>,
+        #[serde(default)]
+        model: String,
+        stop_reason: Option<String>,
+        usage: Option<serde_json::Value>,
+        #[serde(flatten)]
+        meta: EventMeta,
+    },
+
+    /// Turn-level tool result.
+    #[serde(rename = "tool_result_turn")]
+    ToolResultTurn {
+        tool_use_id: String,
+        tool_name: String,
+        content: String,
+        #[serde(default)]
+        is_error: bool,
+        #[serde(flatten)]
+        meta: EventMeta,
+    },
+
+    /// Turn-level final result of the entire agent loop.
+    #[serde(rename = "turn_result")]
+    TurnResult {
+        #[serde(default = "default_subtype")]
+        subtype: String,
+        #[serde(default)]
+        is_error: bool,
+        result: Option<String>,
+        #[serde(default)]
+        num_turns: i64,
+        #[serde(default)]
+        duration_ms: i64,
+        usage: Option<serde_json::Value>,
+        #[serde(default)]
+        errors: Vec<String>,
+        #[serde(flatten)]
+        meta: EventMeta,
+    },
+
     /// Catch-all for unknown event types — prevents deserialization failures
     /// when wing adds new event types.
     #[serde(other)]
@@ -386,6 +430,10 @@ fn default_status_code() -> i32 {
 
 fn default_api_url() -> String {
     "unknown".into()
+}
+
+fn default_subtype() -> String {
+    "success".into()
 }
 
 impl WingEvent {
@@ -419,6 +467,9 @@ impl WingEvent {
             Self::SkillsList { .. } => "skills_list",
             Self::ShellCommand { .. } => "shell_command",
             Self::SystemInfo { .. } => "system_info",
+            Self::AssistantTurn { .. } => "assistant_turn",
+            Self::ToolResultTurn { .. } => "tool_result_turn",
+            Self::TurnResult { .. } => "turn_result",
             Self::Unknown => "unknown",
         }
     }
@@ -452,7 +503,10 @@ impl WingEvent {
             | Self::AgentList { meta, .. }
             | Self::SkillsList { meta, .. }
             | Self::ShellCommand { meta, .. }
-            | Self::SystemInfo { meta, .. } => Some(meta),
+            | Self::SystemInfo { meta, .. }
+            | Self::AssistantTurn { meta, .. }
+            | Self::ToolResultTurn { meta, .. }
+            | Self::TurnResult { meta, .. } => Some(meta),
             Self::Unknown => None,
         }
     }

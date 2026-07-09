@@ -33,6 +33,7 @@ from .query_response import (
 )
 from .react import (
     AskEvent,
+    AssistantTurnEvent,
     DiffContentEvent,
     DoneEvent,
     LLMCallMetricsEvent,
@@ -40,6 +41,8 @@ from .react import (
     TextEvent,
     ToolCallEvent,
     ToolCallResultEvent,
+    ToolResultTurnEvent,
+    TurnResultEvent,
     TurnStartedEvent,
 )
 from .state_change import (
@@ -65,6 +68,9 @@ WingEventUnion = (
     | DoneEvent
     | TurnStartedEvent
     | DiffContentEvent
+    | AssistantTurnEvent
+    | ToolResultTurnEvent
+    | TurnResultEvent
     | SessionListEvent
     | SyncSessionEvent
     | DeliveredEvent
@@ -103,6 +109,9 @@ __all__ = [
     "DoneEvent",
     "TurnStartedEvent",
     "DiffContentEvent",
+    "AssistantTurnEvent",
+    "ToolResultTurnEvent",
+    "TurnResultEvent",
     # state_change
     "SyncSessionEvent",
     "SessionListEvent",

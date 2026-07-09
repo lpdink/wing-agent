@@ -78,3 +78,55 @@ class DiffContentEvent(WingEvent):
     path: str
     old_text: str | None = None  # None 表示新文件（全绿）
     new_text: str
+
+
+# ── Turn-level events (for stdio / SDK consumers) ──────────────────────
+# These coexist with the streaming events above. TUI ignores them;
+# stdio frontends consume them to produce Claude-compatible NDJSON output.
+
+
+class AssistantTurnEvent(WingEvent):
+    """Turn 级别的 assistant 完整消息（对应 Claude SDKAssistantMessage）。
+
+    在 _call_llm() 返回完整 assistant 消息后、exec_tool_calls() 之前 emit。
+    content_blocks 格式:
+      [{"type": "text", "text": "..."},
+       {"type": "tool_use", "id": "call_xxx", "name": "Bash", "input": {...}},
+       {"type": "thinking", "thinking": "..."}]
+    """
+
+    type: Literal["assistant_turn"] = "assistant_turn"
+    content_blocks: list[dict]
+    model: str = ""
+    stop_reason: str | None = None
+    usage: dict | None = None
+
+
+class ToolResultTurnEvent(WingEvent):
+    """Turn 级别的 tool result（对应 Claude SDKUserMessage tool_result block）。
+
+    在每个工具执行完成后 emit，伴随现有的 ToolCallResultEvent。
+    """
+
+    type: Literal["tool_result_turn"] = "tool_result_turn"
+    tool_use_id: str
+    tool_name: str
+    content: str
+    is_error: bool = False
+
+
+class TurnResultEvent(WingEvent):
+    """整个 agent loop 的最终结果（对应 Claude SDKResultMessage）。
+
+    在整个 agent loop 结束时 emit，位于 DoneEvent 之前。
+    subtype: "success" | "error_during_execution" | "error_max_turns"
+    """
+
+    type: Literal["turn_result"] = "turn_result"
+    subtype: str = "success"
+    is_error: bool = False
+    result: str | None = None
+    num_turns: int = 0
+    duration_ms: int = 0
+    usage: dict | None = None
+    errors: list[str] = Field(default_factory=list)
