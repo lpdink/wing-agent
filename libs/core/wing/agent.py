@@ -3,7 +3,8 @@
 import asyncio
 import functools
 import inspect
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from wing.common.process import kill_process_group
@@ -19,6 +20,7 @@ from .context_manager import ContextManager
 from .hook_registry import hooks
 from .schema import ToolError
 from .event import (
+    AssistantTurnEvent,
     ContextStatsEvent,
     DoneEvent,
     ErrorEvent,
@@ -29,6 +31,8 @@ from .event import (
     TextEvent,
     ToolCallEvent,
     ToolCallResultEvent,
+    ToolResultTurnEvent,
+    TurnResultEvent,
     TurnStartedEvent,
 )
 from .schema import LLMUsage, Message, Tool, ToolCall
@@ -47,6 +51,42 @@ class Inbound:
     request_id: str | None = None
 
 
+@dataclass
+class _TurnAccumulator:
+    """Accumulates state across a single agent turn (one user message → final response).
+
+    Used by _process_single_message to build TurnResultEvent without
+    polluting agent instance state. Created fresh per message.
+    """
+
+    num_turns: int = 0
+    last_text: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
+    start_time: float = field(default_factory=time.time)
+
+    def record_usage(self, usage: LLMUsage | None) -> None:
+        if usage:
+            self.input_tokens += usage.prompt_tokens
+            self.output_tokens += usage.completion_tokens
+            self.cached_tokens += usage.cached_tokens
+
+    def record_text(self, text: str | None) -> None:
+        if text:
+            self.last_text = text
+
+    def elapsed_ms(self) -> int:
+        return int((time.time() - self.start_time) * 1000)
+
+    def usage_dict(self) -> dict:
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cached_tokens": self.cached_tokens,
+        }
+
+
 class WingAgent:
     def __init__(
         self,
@@ -55,6 +95,8 @@ class WingAgent:
         context_manager: ContextManager,
         stream: bool = False,
         tools: list[Tool] | None = None,
+        max_turns: int | None = None,
+        yolo: bool | None = None,
     ) -> None:
         self.stream = stream
         self.model_provider = model_provider
@@ -63,6 +105,8 @@ class WingAgent:
         self.context_manager = context_manager
         self.state = AgentStateBag()
         self._steer = get_config().steer
+        self._max_turns = max_turns
+        self._yolo: bool = yolo if yolo is not None else get_config().yolo
         self._inbox: asyncio.Queue[Inbound] = asyncio.Queue()
         self._inbox_feedback: asyncio.Queue[str] = asyncio.Queue()
         self._worker = asyncio.create_task(self._run())
@@ -72,8 +116,45 @@ class WingAgent:
         return sorted(self._tool_map.values(), key=lambda item: item.name)
 
     @property
+    def max_turns(self) -> int | None:
+        """Agent loop 最大轮数限制。None 表示无限。"""
+        return self._max_turns
+
+    @property
     def session_id(self) -> str:
         return self.context_manager.id
+
+    @property
+    def yolo(self) -> bool:
+        """YOLO 模式是否启用。"""
+        return self._yolo
+
+    def set_yolo(self, value: bool) -> None:
+        """设置 yolo 模式（供 /yolo 魔术命令和 apply_agent_override 调用）。"""
+        self._yolo = value
+
+    # ── 运行时覆盖方法（供 Session.apply_agent_override 调用）──
+
+    def replace_tools(self, tool_names: list[str]) -> None:
+        """替换工具列表。从 tool_registry 获取未绑定工具并重新绑定。
+
+        使用 tool_registry.get_tool() 获取全新的未绑定 Tool 对象，
+        避免闭包泄漏（旧 agent 的 _agent 引用）。
+        """
+        from wing.tool_registry import tool_registry
+
+        unbound_tools = [
+            t for name in tool_names if (t := tool_registry.get_tool(name)) is not None
+        ]
+        self._tool_map = self._bind_tools(unbound_tools)
+
+    def set_max_turns(self, max_turns: int | None) -> None:
+        """设置 agent loop 最大轮数。None 表示无限。"""
+        self._max_turns = max_turns
+
+    def set_reasoning_effort(self, effort: str | None) -> None:
+        """设置 reasoning effort 级别。"""
+        self.model_provider.reasoning_effort = effort
 
     def _bind_tools(self, tools: list[Tool]) -> dict[str, Any]:
         bound_map = {}
@@ -133,6 +214,7 @@ class WingAgent:
         # 该消息触发的所有事件（TextEvent, ToolCallEvent, DoneEvent 等）
         # 都会 auto-inject 此 request_id
         token = set_request_context(request_id=inbound.request_id)
+        ctx = _TurnAccumulator()
         try:
             # Signal turn start — frontend uses this to show working indicator.
             self.emit(TurnStartedEvent(session_id=self.session_id))
@@ -145,20 +227,112 @@ class WingAgent:
                 inbound.message.content = modified_content
 
             self.context_manager.add_message(inbound.message)
-            MAX_TURNS = 1000
-            for turn in range(MAX_TURNS):
-                log.info(f"run with {inbound.message}, turn {turn}")
-                if not await self._llm_turn():
+
+            while True:
+                # Check max_turns limit before each LLM call
+                if self._max_turns is not None and ctx.num_turns >= self._max_turns:
+                    self.emit(
+                        TurnResultEvent(
+                            session_id=self.session_id,
+                            subtype="error_max_turns",
+                            is_error=True,
+                            num_turns=ctx.num_turns,
+                            duration_ms=ctx.elapsed_ms(),
+                            usage=ctx.usage_dict(),
+                            errors=[f"Reached max turns limit: {self._max_turns}"],
+                        )
+                    )
+                    self.emit(DoneEvent(session_id=self.session_id))
+                    return
+
+                log.info(f"run with {inbound.message}, turn {ctx.num_turns}")
+                if not await self._llm_turn(ctx):
+                    ctx.num_turns += 1
                     break
+                ctx.num_turns += 1
+
+            # Success — emit TurnResultEvent then DoneEvent
+            self.emit(
+                TurnResultEvent(
+                    session_id=self.session_id,
+                    subtype="success",
+                    result=ctx.last_text,
+                    num_turns=ctx.num_turns,
+                    duration_ms=ctx.elapsed_ms(),
+                    usage=ctx.usage_dict(),
+                )
+            )
+            self.emit(DoneEvent(session_id=self.session_id))
+        except Exception as e:
+            log.error(f"处理消息失败: {e}")
+            self.emit(
+                TurnResultEvent(
+                    session_id=self.session_id,
+                    subtype="error_during_execution",
+                    is_error=True,
+                    num_turns=ctx.num_turns,
+                    duration_ms=ctx.elapsed_ms(),
+                    usage=ctx.usage_dict(),
+                    errors=[str(e)],
+                )
+            )
+            self.emit(
+                ErrorEvent(
+                    session_id=self.session_id,
+                    message=f"处理消息失败：异常：{e}",
+                )
+            )
+            self.emit(DoneEvent(session_id=self.session_id))
         finally:
             reset_request_context(token)
 
-    async def _llm_turn(self) -> bool:
+    async def _llm_turn(self, ctx: _TurnAccumulator) -> bool:
         """
         执行一轮 LLM 生成 + 工具执行
         Returns: True 需要继续下一轮，False 对话结束
         """
         assistant_msg, pending_tool_calls = await self._call_llm()
+
+        # ── Emit turn-level AssistantTurnEvent ──
+        content_blocks: list[dict] = []
+        if assistant_msg.reasoning_content:
+            content_blocks.append(
+                {"type": "thinking", "thinking": assistant_msg.reasoning_content}
+            )
+        if assistant_msg.content:
+            content_blocks.append({"type": "text", "text": assistant_msg.content})
+        for tc in pending_tool_calls:
+            content_blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": tc.id,
+                    "name": tc.name,
+                    "input": tc.arguments,
+                }
+            )
+
+        usage_dict = None
+        if assistant_msg.usage:
+            usage_dict = {
+                "input_tokens": assistant_msg.usage.prompt_tokens,
+                "output_tokens": assistant_msg.usage.completion_tokens,
+                "cached_tokens": assistant_msg.usage.cached_tokens,
+            }
+
+        self.emit(
+            AssistantTurnEvent(
+                session_id=self.session_id,
+                content_blocks=content_blocks,
+                model=self.model,
+                stop_reason="tool_use" if pending_tool_calls else "end_turn",
+                usage=usage_dict,
+            )
+        )
+
+        # Update accumulator for TurnResultEvent
+        ctx.record_usage(assistant_msg.usage)
+        ctx.record_text(assistant_msg.content)
+
         tc_results = await self.exec_tool_calls(pending_tool_calls)
 
         # Steer: 开启时，drain inbox 中积攒的用户消息，附带到最后一个 tool result 开头
@@ -190,7 +364,6 @@ class WingAgent:
         if not pending_tool_calls:
             if not get_config().preserved_thinking:
                 self.context_manager.clear_reasoning()
-            self.emit(DoneEvent(session_id=self.session_id))
             return False
         return True
 
@@ -323,6 +496,15 @@ class WingAgent:
                     model=self.model,
                 )
             )
+            self.emit(
+                ToolResultTurnEvent(
+                    session_id=self.session_id,
+                    tool_use_id=tc.id,
+                    tool_name=tc.name,
+                    content=result,
+                    is_error=True,
+                )
+            )
             return result
 
         # Hook: before_tool_call — 修改工具调用参数
@@ -365,6 +547,15 @@ class WingAgent:
                     model=self.model,
                 )
             )
+            self.emit(
+                ToolResultTurnEvent(
+                    session_id=self.session_id,
+                    tool_use_id=tc.id,
+                    tool_name=tc.name,
+                    content=result_str,
+                    is_error=False,
+                )
+            )
             return result_str
         except ToolError as e:
             result = str(e)
@@ -379,6 +570,15 @@ class WingAgent:
                     model=self.model,
                 )
             )
+            self.emit(
+                ToolResultTurnEvent(
+                    session_id=self.session_id,
+                    tool_use_id=tc.id,
+                    tool_name=tc.name,
+                    content=result,
+                    is_error=True,
+                )
+            )
             return result
         except Exception as e:
             result = f"Error executing tool '{tc.name}': {e}"
@@ -391,6 +591,15 @@ class WingAgent:
                     tool_result=result,
                     tool_success=False,
                     model=self.model,
+                )
+            )
+            self.emit(
+                ToolResultTurnEvent(
+                    session_id=self.session_id,
+                    tool_use_id=tc.id,
+                    tool_name=tc.name,
+                    content=result,
+                    is_error=True,
                 )
             )
             return result

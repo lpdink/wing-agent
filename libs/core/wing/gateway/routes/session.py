@@ -72,6 +72,7 @@ async def create_session(
         session = server.runtime.create_session(
             template_name=body.template_name,
             workspace=body.workspace,
+            agent_override=body.agent,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

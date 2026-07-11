@@ -14,10 +14,10 @@ use crate::tui;
 use crate::util::logging::init_logging;
 use wing_api_client::GatewayClient as GatewayApiClient;
 
-mod backend_config;
+pub(crate) mod backend_config;
 mod discover;
-mod start;
-mod state;
+pub(crate) mod start;
+pub(crate) mod state;
 mod status;
 mod stop;
 
@@ -36,6 +36,57 @@ mod stop;
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
+
+    // ---- stdio mode arguments ----
+    /// Prompt text (triggers stdio mode).
+    #[arg(short = 'p', long = "prompt")]
+    pub prompt: Option<String>,
+
+    /// Override model name.
+    #[arg(short = 'm', long = "model")]
+    pub model: Option<String>,
+
+    /// Resume an existing session by ID.
+    #[arg(short = 'r', long = "resume")]
+    pub resume: Option<String>,
+
+    /// Replace system prompt.
+    #[arg(long = "system-prompt")]
+    pub system_prompt: Option<String>,
+
+    /// Append to system prompt.
+    #[arg(long = "append-system-prompt")]
+    pub append_system_prompt: Option<String>,
+
+    /// Maximum agent loop turns.
+    #[arg(long = "max-turns")]
+    pub max_turns: Option<u32>,
+
+    /// Reasoning effort level.
+    #[arg(long = "effort")]
+    pub effort: Option<String>,
+
+    /// Output format: text (default), json, stream-json.
+    #[arg(long = "output-format", default_value = "text")]
+    pub output_format: String,
+
+    /// Input format: text (default), stream-json.
+    #[arg(long = "input-format", default_value = "text")]
+    pub input_format: String,
+
+    /// Skip dangerous command review (YOLO mode).
+    #[arg(long = "yolo")]
+    pub yolo: bool,
+}
+
+impl Cli {
+    /// Check if this CLI invocation triggers stdio mode.
+    ///
+    /// Must stay in sync with `stdio::is_stdio_mode()` in `stdio/mod.rs`.
+    /// See that function's doc comment for the contract.
+    pub fn is_stdio_mode(&self) -> bool {
+        self.prompt.is_some() || self.input_format == "stream-json"
+    }
 }
 
 /// Available subcommands.
@@ -76,6 +127,11 @@ pub enum Command {
 
 /// Dispatch CLI command.
 pub async fn dispatch(cli: Cli) -> ExitCode {
+    // stdio mode takes priority over subcommands.
+    if cli.is_stdio_mode() {
+        return dispatch_stdio(cli).await;
+    }
+
     match cli.command {
         Some(cmd) => match cmd {
             Command::Tui {
@@ -137,32 +193,43 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
     }
 }
 
-/// Smart default: check if gateway is running, start if not, then enter TUI.
-///
-/// Always reads gateway host:port from the backend config as the single
-/// source of truth.
-async fn smart_default_tui() -> Result<()> {
-    let state = state::WingState::load();
+/// Dispatch to stdio mode.
+async fn dispatch_stdio(cli: Cli) -> ExitCode {
+    use crate::stdio::{InputFormat, OutputFormat, StdioArgs};
 
-    let (host, port) = if let Some(ref gw) = state.gateway {
-        if state::is_gateway_running(gw) {
-            // Gateway already running, use its endpoint from state.
-            (gw.host.clone(), gw.port)
-        } else {
-            // Stale state, gateway not running. Clear and auto-start
-            // from backend config.
-            state::WingState::clear_gateway();
-            let gw_config = backend_config::read_backend_gateway_config();
-            start::start_gateway(&gw_config.host, gw_config.port)?;
-            (gw_config.host, gw_config.port)
-        }
-    } else {
-        // No state file, gateway not running. Auto-start from backend config.
-        let gw_config = backend_config::read_backend_gateway_config();
-        start::start_gateway(&gw_config.host, gw_config.port)?;
-        (gw_config.host, gw_config.port)
+    let output_format: OutputFormat = cli.output_format.parse().unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
+    let input_format: InputFormat = cli.input_format.parse().unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
+
+    let prompt = cli.prompt.unwrap_or_default();
+
+    let args = StdioArgs {
+        prompt,
+        model: cli.model,
+        resume: cli.resume,
+        system_prompt: cli.system_prompt,
+        append_system_prompt: cli.append_system_prompt,
+        max_turns: cli.max_turns,
+        effort: cli.effort,
+        output_format,
+        input_format,
+        yolo: cli.yolo,
     };
 
+    // Initialize logging for stdio mode.
+    let _log_guard = crate::util::logging::init_logging();
+
+    crate::stdio::run_stdio(args).await
+}
+
+/// Smart default: check if gateway is running, start if not, then enter TUI.
+async fn smart_default_tui() -> Result<()> {
+    let (host, port) = crate::stdio::ensure_gateway_running()?;
     run_tui(&host, port).await
 }
 
@@ -197,8 +264,12 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     let http = GatewayApiClient::new(http_base.clone())
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
 
+    let create_req = wing_api_client::models::CreateSessionRequest {
+        workspace: workspace.clone(),
+        ..Default::default()
+    };
     let session = http
-        .create_session(None, workspace.as_deref())
+        .create_session(&create_req)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create session: {e}"))?;
 

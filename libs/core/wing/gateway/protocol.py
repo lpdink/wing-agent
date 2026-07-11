@@ -59,6 +59,24 @@ class ClientRequest(BaseModel):
 # ============================================================
 
 
+class AgentOverride(BaseModel):
+    """Agent 参数覆盖。所有字段可选，None 表示不覆盖（保留 template 值）。"""
+
+    model: str | None = Field(default=None, description="覆盖模型名称")
+    system_prompt: str | None = Field(default=None, description="替换系统提示词")
+    append_system_prompt: str | None = Field(
+        default=None, description="追加到系统提示词末尾"
+    )
+    tools: list[str] | None = Field(default=None, description="覆盖工具列表")
+    max_turns: int | None = Field(default=None, description="Agent loop 最大轮数")
+    effort: str | None = Field(
+        default=None, description="Reasoning effort: low|medium|high|xhigh|max"
+    )
+    yolo: bool | None = Field(
+        default=None, description="跳过危险命令审查（None 表示不覆盖）"
+    )
+
+
 class CreateSessionRequest(BaseModel):
     """创建新 session 的请求体。"""
 
@@ -66,6 +84,7 @@ class CreateSessionRequest(BaseModel):
         default=None, description="Agent 模板名称，None 使用默认模板"
     )
     workspace: str | None = Field(default=None, description="工作目录路径")
+    agent: AgentOverride | None = Field(default=None, description="Agent 参数覆盖")
 
 
 class ResumeSessionRequest(BaseModel):

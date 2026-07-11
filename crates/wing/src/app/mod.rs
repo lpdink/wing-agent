@@ -1072,7 +1072,11 @@ pub async fn run_app(
                 AppIntent::CreateSession { workspace } => {
                     if let Some(t) = &transport {
                         let old_session_id = app.session_id.clone();
-                        match t.http.create_session(None, workspace.as_deref()).await {
+                        let req = wing_api_client::models::CreateSessionRequest {
+                            workspace: workspace.clone(),
+                            ..Default::default()
+                        };
+                        match t.http.create_session(&req).await {
                             Ok(resp) => {
                                 let new_sid = &resp.session_id;
                                 if let Err(e) = t.http.subscribe(new_sid, &t.client_id).await {

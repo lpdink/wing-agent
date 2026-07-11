@@ -36,12 +36,33 @@ pub struct AgentInfo {
 // Session 生命周期 — Request
 // ============================================================
 
+/// Agent 参数覆盖。所有字段可选，`None` 表示不覆盖（保留 template 值）。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AgentOverride {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub append_system_prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yolo: Option<bool>,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CreateSessionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub template_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentOverride>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -1,4 +1,4 @@
-.PHONY: check test format fmt run install gateway
+.PHONY: check test test-e2e format fmt run install gateway
 
 # ── Unified commands (Python + Rust) ─────────────────────────
 
@@ -22,6 +22,9 @@ gateway:
 
 test-python:
 	uv run pytest libs/core/tests/
+
+test-e2e:
+	CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK=1 WING_SESSIONS_PATH=/tmp/wing-e2e-sessions uv run pytest e2e/claude-agent-sdk-integration/ -v --timeout=120
 
 check-python:
 	@RUFF_FAILED=0; TY_FAILED=0; VULTURE_FAILED=0; \

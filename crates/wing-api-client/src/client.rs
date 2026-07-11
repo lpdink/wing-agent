@@ -13,12 +13,14 @@ pub const DEFAULT_PORT: u16 = 32523;
 /// # Example
 ///
 /// ```no_run
+/// # use wing_api_client::models::CreateSessionRequest;
 /// # use wing_api_client::GatewayClient;
 /// # async fn example() -> Result<(), wing_api_client::ApiClientError> {
 /// let client = GatewayClient::new("http://127.0.0.1:32523")?;
 ///
 /// // 创建 session
-/// let session = client.create_session(None, None).await?;
+/// let req = CreateSessionRequest::default();
+/// let session = client.create_session(&req).await?;
 /// println!("created session: {}", session.session_id);
 ///
 /// // 健康检查
@@ -55,16 +57,14 @@ impl GatewayClient {
     // ============================================================
 
     /// 创建新 session。
+    ///
+    /// 使用 [`CreateSessionRequest`] 构建请求体，支持 template_name、
+    /// workspace 和 agent override 参数。
     pub async fn create_session(
         &self,
-        template_name: Option<&str>,
-        workspace: Option<&str>,
+        req: &CreateSessionRequest,
     ) -> Result<CreateSessionResponse, ApiClientError> {
-        let body = CreateSessionRequest {
-            template_name: template_name.map(str::to_owned),
-            workspace: workspace.map(str::to_owned),
-        };
-        self.post_json("/api/session/create", &body).await
+        self.post_json("/api/session/create", req).await
     }
 
     /// 从磁盘恢复已有 session。

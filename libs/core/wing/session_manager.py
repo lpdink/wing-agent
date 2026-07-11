@@ -19,6 +19,8 @@ import os
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
 from wing.agent_template import AgentTemplate, AgentTemplateManager
 from wing.common.logger import log
 from wing.common.tracked_list import TrackedList
@@ -38,6 +40,9 @@ from wing.event_bus import event_bus
 from wing.magic_command.registry import magic_registry
 from wing.schema import Message
 from wing.session import Session
+
+if TYPE_CHECKING:
+    from wing.gateway.protocol import AgentOverride
 
 
 class SessionManager:
@@ -91,6 +96,7 @@ class SessionManager:
         template_name: str | None = None,
         session_id: str | None = None,
         workspace: str | None = None,
+        agent_override: AgentOverride | None = None,
     ) -> Session:
         """创建新 session。
 
@@ -98,6 +104,7 @@ class SessionManager:
             template_name: Agent 模板名称，None 时使用默认模板
             session_id: 指定 session_id（磁盘恢复场景），None 时自动生成
             workspace: 工作目录
+            agent_override: AgentOverride 参数覆盖（None 字段不覆盖 template 值）
         """
         # 查询模板
         if template_name is not None:
@@ -126,6 +133,10 @@ class SessionManager:
             messages=messages,
             workspace=workspace,
         )
+
+        # 应用 agent override（在 session 完全构建后覆盖特定字段）
+        if agent_override is not None:
+            session.apply_agent_override(agent_override)
 
         self._sessions[sid] = session
 

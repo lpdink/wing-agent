@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import uuid as _uuid
 from typing import Any, Literal
 
 from pydantic import Field
@@ -84,3 +85,25 @@ class CompactDoneEvent(WingEvent):
     original_tokens: int
     compressed_tokens: int
     model: str = ""
+
+
+# ============================================================
+# Session 初始化事件（stdio 模式）
+# ============================================================
+
+
+# TODO: SessionInitEvent 与 SyncSessionEvent 存在信息重叠（两者都携带 model、tools
+# 等 session 状态）。当前阶段保持独立——前者面向 stdio 协议消费者，后者面向 TUI
+# 状态同步。未来考虑是否统一。
+class SessionInitEvent(WingEvent):
+    """Session 初始化事件——供 stdio 模式输出 system/init 消息。
+
+    在 subscribe/fork 后由 _push_sync() emit，携带权威的 session 状态。
+    """
+
+    type: Literal["session_init"] = "session_init"
+    uuid: str = Field(default_factory=lambda: _uuid.uuid4().hex)
+    tools: list[str] = Field(default_factory=list)
+    model: str = ""
+    permission_mode: str = "default"
+    cwd: str = ""

@@ -122,7 +122,7 @@ class TestSessionCreate:
         assert data["session_id"] == "test-session-id"
         assert data["template_name"] == "default"
         mock_runtime.create_session.assert_called_once_with(
-            template_name=None, workspace=None
+            template_name=None, workspace=None, agent_override=None
         )
 
     def test_create_with_template(self, client: TestClient, mock_runtime):
@@ -133,7 +133,7 @@ class TestSessionCreate:
         )
         assert resp.status_code == 200
         mock_runtime.create_session.assert_called_once_with(
-            template_name="coder", workspace="/ws"
+            template_name="coder", workspace="/ws", agent_override=None
         )
 
     def test_create_template_not_found(self, client: TestClient, mock_runtime):
@@ -141,6 +141,53 @@ class TestSessionCreate:
         mock_runtime.create_session.side_effect = ValueError("template 'xxx' not found")
         resp = client.post("/api/session/create", json={"template_name": "xxx"})
         assert resp.status_code == 400
+
+    def test_create_with_agent_override(self, client: TestClient, mock_runtime):
+        """创建 session 时传入 agent override。"""
+        resp = client.post(
+            "/api/session/create",
+            json={
+                "workspace": "/ws",
+                "agent": {
+                    "model": "gpt-4o",
+                    "tools": ["Read", "Bash"],
+                    "max_turns": 10,
+                    "effort": "high",
+                },
+            },
+        )
+        assert resp.status_code == 200
+        call_kwargs = mock_runtime.create_session.call_args
+        override = call_kwargs.kwargs["agent_override"]
+        assert override is not None
+        assert override.model == "gpt-4o"
+        assert override.tools == ["Read", "Bash"]
+        assert override.max_turns == 10
+        assert override.effort == "high"
+        assert override.system_prompt is None
+        assert override.append_system_prompt is None
+
+    def test_create_with_partial_override(self, client: TestClient, mock_runtime):
+        """创建 session 时只覆盖部分字段。"""
+        resp = client.post(
+            "/api/session/create",
+            json={
+                "template_name": "default",
+                "agent": {
+                    "model": "claude-sonnet-4-20250514",
+                    "append_system_prompt": "\nAlways respond in Chinese.",
+                },
+            },
+        )
+        assert resp.status_code == 200
+        call_kwargs = mock_runtime.create_session.call_args
+        override = call_kwargs.kwargs["agent_override"]
+        assert override.model == "claude-sonnet-4-20250514"
+        assert override.append_system_prompt == "\nAlways respond in Chinese."
+        assert override.system_prompt is None
+        assert override.tools is None
+        assert override.max_turns is None
+        assert override.effort is None
 
 
 # ============================================================

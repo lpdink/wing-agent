@@ -7,7 +7,6 @@ import time
 from wing.agent import WingAgent
 from wing.common.logger import log
 from wing.common.process import kill_process_group
-from wing.config import get_config
 from wing.schema import ToolError
 from wing.tool_registry import tool_registry
 from wing.tools.shell_safety import is_dangerous_command
@@ -27,10 +26,8 @@ async def execute_shell(command: str, agent: WingAgent, timeout: int = 30) -> st
     Returns:
         Command output with exit code.
     """
-    # Skip safety check when yolo is enabled (agent-level > global)
-    session_yolo = agent.state.get("yolo")
-    yolo = session_yolo if session_yolo is not None else get_config().yolo
-    if not yolo:
+    # Skip safety check when yolo is enabled (priority: runtime > agent > global)
+    if not agent.yolo:
         if is_dangerous_command(command):
             return await _handle_dangerous_command(command, agent, timeout)
 
@@ -86,7 +83,7 @@ async def _handle_dangerous_command(
 
         if action == "yolo":
             # Enable yolo for the rest of this session.
-            agent.state.set("yolo", True)
+            agent.set_yolo(True)
             return await _execute_command(command, agent, timeout)
 
         if action == "y":

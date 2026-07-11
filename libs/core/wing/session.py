@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from wing.agent import WingAgent
     from wing.agent_template import AgentTemplate
     from wing.event.base import AgentInfo
+    from wing.gateway.protocol import AgentOverride
 
 
 class Session:
@@ -105,6 +106,8 @@ class Session:
             stream=True,
             context_manager=context_manager,
             tools=template.resolved_tools,
+            max_turns=template.max_turns,
+            yolo=template.yolo,
         )
 
         # 将 workspace 注入 agent state 作为 Bash 工具的 cwd
@@ -154,6 +157,8 @@ class Session:
             stream=True,
             context_manager=self._context_manager,
             tools=template.resolved_tools,
+            max_turns=template.max_turns,
+            yolo=template.yolo,
         )
 
         cwd = (
@@ -166,6 +171,56 @@ class Session:
         self._template_name = template.name
         self._initial_status = self._agent.get_status()
         log.info(f"Session {self._session_id}: switched to agent '{template.name}'")
+
+    def apply_agent_override(self, override: AgentOverride) -> None:
+        """应用 AgentOverride 到当前 session 的 agent。
+
+        在 from_template 之后调用，覆盖 template 中的特定字段。
+        通过 agent 自身的公共方法完成覆盖，不直接操作内部状态。
+
+        Override 语义：
+        - None 字段不覆盖（保留 template 值）
+        - system_prompt 替换，append_system_prompt 追加
+        - 两者同时存在时，先替换再追加
+        """
+        cm = self._context_manager
+        agent = self._agent
+
+        # 1. model 覆盖
+        if override.model is not None:
+            agent.model = override.model
+
+        # 2. system_prompt 替换（先替换，后追加，保证顺序正确）
+        if override.system_prompt is not None:
+            cm.setin_system_prompt = override.system_prompt
+
+        # 3. append_system_prompt 追加
+        if override.append_system_prompt is not None:
+            current = cm.setin_system_prompt or ""
+            cm.setin_system_prompt = current + "\n" + override.append_system_prompt
+
+        # 4. tools 覆盖（从 registry 获取新的未绑定工具，避免闭包泄漏）
+        if override.tools is not None:
+            agent.replace_tools(override.tools)
+
+        # 5. max_turns 覆盖
+        if override.max_turns is not None:
+            agent.set_max_turns(override.max_turns)
+
+        # 6. effort (reasoning_effort) 覆盖
+        if override.effort is not None:
+            agent.set_reasoning_effort(override.effort)
+
+        # 7. yolo 覆盖
+        if override.yolo is not None:
+            agent.set_yolo(override.yolo)
+
+        log.info(
+            f"Session {self._session_id}: applied agent override "
+            f"(model={override.model}, tools={override.tools}, "
+            f"max_turns={override.max_turns}, effort={override.effort}, "
+            f"yolo={override.yolo})"
+        )
 
     # ── 暴露属性 ──────────────────────────────────
 

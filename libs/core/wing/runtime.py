@@ -17,6 +17,7 @@ from wing.event import (
     ContextStatsEvent,
     EventTarget,
     SessionInfo,
+    SessionInitEvent,
     SyncSessionEvent,
 )
 from wing.event_bus import event_bus
@@ -89,6 +90,7 @@ class WingRuntime:
         self,
         template_name: str | None = None,
         workspace: str | None = None,
+        agent_override=None,
     ) -> Session:
         """创建新 session。session_id 由后端生成。
 
@@ -98,10 +100,12 @@ class WingRuntime:
         Args:
             template_name: Agent 模板名称，None 时使用默认模板
             workspace: 工作目录
+            agent_override: AgentOverride 参数覆盖（None 字段不覆盖 template 值）
         """
         return self.sm.create_session(
             template_name=template_name,
             workspace=workspace,
+            agent_override=agent_override,
         )
 
     def resume_session(self, session_id: str) -> Session:
@@ -248,6 +252,20 @@ class WingRuntime:
                 agent=session.to_agent_info(),
                 name=session.session_name,
                 draft=draft,
+                target=EventTarget(scope="client", client_ids=[client_id]),
+            )
+        )
+
+        # TODO: SessionInitEvent 与 SyncSessionEvent 存在信息重叠。当前保持独立，
+        # 未来考虑统一。
+        agent = session.agent
+        event_bus.emit(
+            SessionInitEvent(
+                session_id=session.session_id,
+                tools=[t.name for t in agent.tools],
+                model=agent.model,
+                permission_mode="bypassPermissions" if agent.yolo else "default",
+                cwd=agent.state.get("cwd") or "",
                 target=EventTarget(scope="client", client_ids=[client_id]),
             )
         )
