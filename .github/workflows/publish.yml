@@ -63,22 +63,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install maturin
-        run: pip install maturin
-
       - name: Inject version into Cargo.toml
         run: python scripts/sync_version.py "${{ needs.resolve-version.outputs.version }}"
 
-      - name: Build wing-cli wheel
-        working-directory: crates/wing
-        run: maturin build --release --out ../../dist
+      - name: Build wing-cli wheel (manylinux_2_28)
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/wing
+          args: build --release --out ../../dist
+          manylinux: "2_28"
+          rust-toolchain: stable
 
       - uses: actions/upload-artifact@v4
         with:
