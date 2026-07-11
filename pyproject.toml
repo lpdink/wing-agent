@@ -43,6 +43,14 @@ dev = [
     "pytest-timeout>=2.3.0",
 ]
 
+[tool.ruff.lint]
+select = ["ANN"]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"*/tests/*" = ["ANN"]
+"libs/wing_hooks/*" = ["ANN"]
+
 [tool.vulture]
 exclude = [".venv/", "wing_ext/"]
 min_confidence = 70

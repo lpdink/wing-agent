@@ -108,7 +108,7 @@ class EventBus:
     def route_attach(self, client_id: str, session_id: str) -> None:
         self._routing.setdefault(client_id, set()).add(session_id)
 
-    def route_detach(self, client_id, session_id: str) -> None:
+    def route_detach(self, client_id: str, session_id: str) -> None:
         if client_id in self._routing:
             self._routing[client_id].discard(session_id)
             if not self._routing[client_id]:

@@ -1,10 +1,13 @@
 # wing/agent.py
 
+from __future__ import annotations
+
 import asyncio
 import functools
 import inspect
 import time
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import Any
 
 from wing.common.process import kill_process_group
@@ -112,7 +115,7 @@ class WingAgent:
         self._worker = asyncio.create_task(self._run())
 
     @property
-    def tools(self):
+    def tools(self) -> list[Tool]:
         return sorted(self._tool_map.values(), key=lambda item: item.name)
 
     @property
@@ -172,8 +175,12 @@ class WingAgent:
             inject_name = tool.inject_agent_param
 
             async def wrapper(
-                *args, _agent=self, _fn=original_fn, _name=inject_name, **kwargs
-            ):
+                *args: Any,
+                _agent: WingAgent = self,
+                _fn: Callable = original_fn,
+                _name: str = inject_name,  # type: ignore[assignment]
+                **kwargs: Any,
+            ) -> Any:
                 kwargs[_name] = _agent
                 return (
                     await _fn(*args, **kwargs)
@@ -445,7 +452,9 @@ class WingAgent:
 
         return assistant_msg, pending_tool_calls
 
-    async def exec_tool_calls(self, pending_tool_calls) -> list[Message]:
+    async def exec_tool_calls(
+        self, pending_tool_calls: list[ToolCall]
+    ) -> list[Message]:
         log.info(f"exec_tool_calls: executing {len(pending_tool_calls)} tool calls")
         tc_results: list[Message] = []
         for tc in pending_tool_calls:
@@ -658,7 +667,7 @@ class WingAgent:
         log.info(f"Agent shutdown complete: session={self.session_id}")
 
     def schedule_wakeup(self, delay: float, message: str) -> None:
-        async def fire():
+        async def fire() -> None:
             await asyncio.sleep(delay)
             await self.post(message)
 

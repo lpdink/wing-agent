@@ -12,6 +12,13 @@ TokenCounter 仅在以下场景使用：
 实测比真实值多约 10%，略高估对 compact 判断安全。
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from wing.schema import Message
+
 
 class TokenCounter:
     """纯静态类，无依赖，无实例化。"""
@@ -51,6 +58,6 @@ class TokenCounter:
         return [1] * cls.count(text)
 
     @classmethod
-    def estimate_message(cls, msg) -> int:
+    def estimate_message(cls, msg: Message) -> int:
         """估算单条消息的 token 数（基于 repr）。"""
         return cls.count(repr(msg))

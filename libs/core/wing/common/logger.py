@@ -22,7 +22,7 @@ _MAX_LOG_FILES = 7
 class _PathFormatter(logging.Formatter):
     """Formatter with relative path support."""
 
-    def __init__(self, root: Path, use_color: bool = False):
+    def __init__(self, root: Path, use_color: bool = False) -> None:
         super().__init__(
             "%(asctime)s - %(levelname)s - %(relpath)s - %(message)s",
             "%Y-%m-%d %H:%M:%S",

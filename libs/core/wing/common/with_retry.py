@@ -1,6 +1,6 @@
 import asyncio
 import inspect
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from functools import wraps
 from typing import ParamSpec, TypeVar
 
@@ -10,10 +10,11 @@ P = ParamSpec("P")
 T = TypeVar("T")
 
 
-def with_retry(max_retries: int, base_delay: float = 3.0):
+def with_retry(max_retries: int, base_delay: float = 3.0) -> Callable:
     """指数退避重试装饰器 - 支持普通 async 函数和 async generators"""
 
-    def decorator(func):
+    def decorator(func: Callable) -> Callable:
+        fn_name = getattr(func, "__name__", repr(func))
         if inspect.iscoroutinefunction(func):
 
             @wraps(func)
@@ -27,7 +28,7 @@ def with_retry(max_retries: int, base_delay: float = 3.0):
                         if attempt == max_retries:
                             raise last_exc
                         log.error(
-                            f"call {func.__name__} failed (attempt {attempt + 1}), retrying..."
+                            f"call {fn_name} failed (attempt {attempt + 1}), retrying..."
                         )
                         delay = base_delay * (2**attempt)
                         await asyncio.sleep(delay)
@@ -51,7 +52,7 @@ def with_retry(max_retries: int, base_delay: float = 3.0):
                     if attempt == max_retries:
                         raise last_exc
                     log.error(
-                        f"call {func.__name__} failed (attempt {attempt + 1}), retrying..."
+                        f"call {fn_name} failed (attempt {attempt + 1}), retrying..."
                     )
                     delay = base_delay * (2**attempt)
                     await asyncio.sleep(delay)

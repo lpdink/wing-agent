@@ -12,6 +12,8 @@ import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
+from typing import TYPE_CHECKING
+
 from wing.gateway.protocol import (
     CreateSessionRequest,
     CreateSessionResponse,
@@ -28,6 +30,9 @@ from wing.gateway.protocol import (
     UnsubscribeRequest,
 )
 
+if TYPE_CHECKING:
+    from wing.gateway.server import GatewayServer
+
 router = APIRouter(tags=["session"])
 
 
@@ -43,7 +48,7 @@ def _require_client_id(x_client_id: str | None = Header(None)) -> str:
     return x_client_id
 
 
-def _get_server(request: Request):
+def _get_server(request: Request) -> GatewayServer:
     """从 app.state 获取 GatewayServer 实例。"""
     return request.app.state.server
 
@@ -78,7 +83,7 @@ async def create_session(
         raise HTTPException(status_code=400, detail=str(e))
     return CreateSessionResponse(
         session_id=session.session_id,
-        template_name=session.template_name,
+        template_name=session.template_name or "",
         workspace=session.session_workspace,
     )
 

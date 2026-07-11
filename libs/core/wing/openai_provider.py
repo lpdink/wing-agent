@@ -27,7 +27,7 @@ class OpenAIProvider:
         self,
         base_url: str | None = None,
         api_key: str | None = None,
-    ):
+    ) -> None:
         config = get_config()
         base_url = base_url or config.openai.base_url
         api_key = api_key or config.openai.api_key
@@ -267,10 +267,10 @@ class OpenAIProvider:
             # content 已是 content parts 数组，在最后一个 part 上追加
             last_msg["content"][-1]["cache_control"] = {"type": "ephemeral"}
 
-    def set_thinking(self, enable: bool):
+    def set_thinking(self, enable: bool) -> None:
         self.thinking = enable
 
-    def set_reasoning_effort(self, effort: str | None):
+    def set_reasoning_effort(self, effort: str | None) -> None:
         self.reasoning_effort = effort
 
     def reload(self) -> list[str]:
