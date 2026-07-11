@@ -19,6 +19,8 @@ import os
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
 from wing.agent_template import AgentTemplate, AgentTemplateManager
 from wing.common.logger import log
 from wing.common.tracked_list import TrackedList
@@ -38,6 +40,9 @@ from wing.event_bus import event_bus
 from wing.magic_command.registry import magic_registry
 from wing.schema import Message
 from wing.session import Session
+
+if TYPE_CHECKING:
+    from wing.gateway.protocol import AgentOverride
 
 
 class SessionManager:
@@ -91,7 +96,7 @@ class SessionManager:
         template_name: str | None = None,
         session_id: str | None = None,
         workspace: str | None = None,
-        agent_override=None,
+        agent_override: AgentOverride | None = None,
     ) -> Session:
         """创建新 session。
 

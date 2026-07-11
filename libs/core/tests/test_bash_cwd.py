@@ -21,13 +21,13 @@ class _MockAgent:
         self.state = AgentStateBag()
         # Skip the dangerous-command confirmation flow (needs emit/session_id);
         # cwd-persistence tests don't exercise safety.
-        self.state.set("yolo", True)
+        self._yolo = True
         if cwd is not None:
             self.state.set("cwd", cwd)
 
     @property
     def yolo(self) -> bool:
-        return bool(self.state.get("yolo"))
+        return self._yolo
 
 
 def _parse_rc(result: str) -> int:

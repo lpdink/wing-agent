@@ -70,7 +70,7 @@ class AgentOverride(BaseModel):
     tools: list[str] | None = Field(default=None, description="覆盖工具列表")
     max_turns: int | None = Field(default=None, description="Agent loop 最大轮数")
     effort: str | None = Field(
-        default=None, description="Reasoning effort: low|medium|high"
+        default=None, description="Reasoning effort: low|medium|high|xhigh|max"
     )
     yolo: bool | None = Field(
         default=None, description="跳过危险命令审查（None 表示不覆盖）"

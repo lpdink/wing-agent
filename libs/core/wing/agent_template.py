@@ -76,7 +76,7 @@ class AgentTemplate(BaseModel):
             if cm.compactor
             else 100_000,
             max_turns=agent.max_turns,
-            yolo=agent._yolo,
+            yolo=agent.yolo,
         )
 
     @classmethod

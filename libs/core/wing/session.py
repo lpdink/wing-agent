@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from wing.agent import WingAgent
     from wing.agent_template import AgentTemplate
     from wing.event.base import AgentInfo
+    from wing.gateway.protocol import AgentOverride
 
 
 class Session:
@@ -171,7 +172,7 @@ class Session:
         self._initial_status = self._agent.get_status()
         log.info(f"Session {self._session_id}: switched to agent '{template.name}'")
 
-    def apply_agent_override(self, override) -> None:
+    def apply_agent_override(self, override: AgentOverride) -> None:
         """应用 AgentOverride 到当前 session 的 agent。
 
         在 from_template 之后调用，覆盖 template 中的特定字段。
