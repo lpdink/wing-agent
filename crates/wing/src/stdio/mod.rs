@@ -97,27 +97,66 @@ pub struct StdioArgs {
 }
 
 // ============================================================
-// Known arguments whitelist (for filtering unknown args)
+// Argument filtering (for stdio mode compatibility with SDK)
 // ============================================================
 
-/// Known CLI flags (long form).
-const KNOWN_FLAGS: &[&str] = &[
-    "--prompt",
-    "--model",
-    "--resume",
-    "--system-prompt",
-    "--append-system-prompt",
-    "--max-turns",
-    "--effort",
-    "--output-format",
-    "--input-format",
-    "--yolo",
-    "--help",
-    "--version",
-];
+use std::collections::HashSet;
 
-/// Short flags that take a value.
-const KNOWN_SHORT_WITH_VALUE: &[char] = &['p', 'm', 'r'];
+use clap::CommandFactory;
+
+use crate::cmd::Cli;
+
+/// Known flags derived from clap's [`Cli`] definition.
+///
+/// Built once at startup. Eliminates the need for hand-maintained
+/// whitelists — adding a new `#[arg]` to [`Cli`] automatically
+/// makes the filter aware.
+struct KnownFlags {
+    /// Long flags that take a value argument (e.g. `--model`, `--max-turns`).
+    long_with_value: HashSet<String>,
+    /// Long boolean flags (e.g. `--yolo`, `--help`, `--version`).
+    long_bool: HashSet<String>,
+    /// Short flags that take a value argument (e.g. `-p`, `-m`, `-r`).
+    short_with_value: HashSet<char>,
+    /// Short boolean flags.
+    short_bool: HashSet<char>,
+}
+
+impl KnownFlags {
+    fn from_cli() -> Self {
+        let cmd = Cli::command();
+        let mut long_with_value = HashSet::new();
+        let mut long_bool = HashSet::new();
+        let mut short_with_value = HashSet::new();
+        let mut short_bool = HashSet::new();
+
+        for arg in cmd.get_arguments() {
+            let takes_value = arg.get_action().takes_values();
+            if let Some(long) = arg.get_long() {
+                let flag = format!("--{long}");
+                if takes_value {
+                    long_with_value.insert(flag);
+                } else {
+                    long_bool.insert(flag);
+                }
+            }
+            if let Some(short) = arg.get_short() {
+                if takes_value {
+                    short_with_value.insert(short);
+                } else {
+                    short_bool.insert(short);
+                }
+            }
+        }
+
+        Self {
+            long_with_value,
+            long_bool,
+            short_with_value,
+            short_bool,
+        }
+    }
+}
 
 /// Check if stdio mode should be triggered based on raw args.
 ///
@@ -148,9 +187,19 @@ pub fn is_stdio_mode(args: &[String]) -> bool {
 
 /// Filter unknown arguments in stdio mode.
 ///
-/// Keeps known flags and their values, discards unknown `--xxx` flags.
-/// Non-flag arguments (positional, values of known flags) are always kept.
+/// Strategy:
+/// - **Known flags** (from clap): kept with correct value handling.
+/// - **Unknown `--flag=value`**: dropped (single token).
+/// - **Unknown `--flag value`**: heuristic — if the next token starts with
+///   `-`, the flag is treated as boolean (dropped, next token preserved).
+///   Otherwise the flag and its value are both dropped.
+/// - **Positional / value arguments**: always kept.
+///
+/// This lets wing accept arbitrary SDK-injected flags (e.g. `--verbose`,
+/// `--permission-mode bypassPermissions`) without maintaining a manual
+/// whitelist of external flags.
 pub fn filter_unknown_args(args: Vec<String>) -> Vec<String> {
+    let known = KnownFlags::from_cli();
     let mut result = Vec::new();
     let mut i = 0;
 
@@ -158,49 +207,53 @@ pub fn filter_unknown_args(args: Vec<String>) -> Vec<String> {
         let arg = &args[i];
 
         if arg.starts_with("--") {
-            // Long flag
             let flag_name = if let Some(eq_pos) = arg.find('=') {
                 &arg[..eq_pos]
             } else {
                 arg.as_str()
             };
 
-            if KNOWN_FLAGS.contains(&flag_name) {
+            if known.long_with_value.contains(flag_name) {
+                // Known value-carrying flag: keep flag + value.
                 result.push(arg.clone());
-                // If this flag takes a value (not --help, --version, --yolo)
-                // and uses separate arg (no =), include the next arg too.
-                if !arg.contains('=')
-                    && flag_name != "--help"
-                    && flag_name != "--version"
-                    && flag_name != "--yolo"
-                {
+                if !arg.contains('=') {
                     i += 1;
                     if i < args.len() {
                         result.push(args[i].clone());
                     }
                 }
-            } else if !arg.contains('=') {
-                // Unknown --flag without =: also skip the next token
-                // (likely the flag's value, e.g. --permission-mode bypassPermissions)
-                i += 1;
-            }
-            // Unknown --flag=value (with =): just skip this single token.
-        } else if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 1 {
-            // Short flag(s)
-            let flag_char = arg.chars().nth(1).unwrap_or(' ');
-            if KNOWN_SHORT_WITH_VALUE.contains(&flag_char) {
+            } else if known.long_bool.contains(flag_name) {
+                // Known boolean flag: keep flag only.
                 result.push(arg.clone());
-                // If value is separate (no more chars after -X)
+            } else if !arg.contains('=') {
+                // Unknown --flag without =.
+                // Heuristic: if next token starts with '-', this flag is
+                // likely boolean (e.g. --verbose --system-prompt …).
+                // Otherwise it likely takes a value (e.g. --permission-mode bypassPermissions).
+                let next_is_flag = args.get(i + 1).is_some_and(|s| s.starts_with('-'));
+                if !next_is_flag {
+                    // Skip the value token.
+                    i += 1;
+                }
+                // Drop the unknown flag itself.
+            }
+            // Unknown --flag=value (with =): drop this single token.
+        } else if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 1 {
+            let flag_char = arg.chars().nth(1).unwrap_or(' ');
+            if known.short_with_value.contains(&flag_char) {
+                result.push(arg.clone());
                 if arg.len() == 2 {
                     i += 1;
                     if i < args.len() {
                         result.push(args[i].clone());
                     }
                 }
+            } else if known.short_bool.contains(&flag_char) {
+                result.push(arg.clone());
             }
-            // else: unknown short flag, skip
+            // Unknown short flag: drop.
         } else {
-            // Positional or value — keep
+            // Positional or value — keep.
             result.push(arg.clone());
         }
 
@@ -452,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_drops_unknown_long_flags() {
+    fn filter_drops_unknown_value_flags() {
         let args: Vec<String> = vec![
             "-p",
             "hello",
@@ -465,6 +518,35 @@ mod tests {
         .collect();
         let filtered = filter_unknown_args(args);
         assert_eq!(filtered, vec!["-p", "hello"]);
+    }
+
+    #[test]
+    fn filter_unknown_bool_before_known_flag() {
+        // --verbose is unknown boolean; next token --system-prompt starts with '-'
+        // so the heuristic treats --verbose as boolean and preserves --system-prompt.
+        let args: Vec<String> = vec!["-p", "hello", "--verbose", "--system-prompt", ""]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let filtered = filter_unknown_args(args);
+        assert_eq!(filtered, vec!["-p", "hello", "--system-prompt", ""]);
+    }
+
+    #[test]
+    fn filter_multiple_unknown_bools_before_known_flag() {
+        let args: Vec<String> = vec![
+            "-p",
+            "hello",
+            "--verbose",
+            "--include-partial-messages",
+            "--max-turns",
+            "5",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let filtered = filter_unknown_args(args);
+        assert_eq!(filtered, vec!["-p", "hello", "--max-turns", "5"]);
     }
 
     #[test]
@@ -515,6 +597,42 @@ mod tests {
             .collect();
         let filtered = filter_unknown_args(args);
         assert_eq!(filtered, vec!["-p", "hello", "-r", "abc123"]);
+    }
+
+    #[test]
+    fn filter_sdk_command_line() {
+        // Full command line as constructed by claude-agent-sdk-python's
+        // SubprocessCLITransport._build_command().
+        let args: Vec<String> = vec![
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--system-prompt",
+            "",
+            "--max-turns",
+            "5",
+            "--permission-mode",
+            "bypassPermissions",
+            "--input-format",
+            "stream-json",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let filtered = filter_unknown_args(args);
+        assert_eq!(
+            filtered,
+            vec![
+                "--output-format",
+                "stream-json",
+                "--system-prompt",
+                "",
+                "--max-turns",
+                "5",
+                "--input-format",
+                "stream-json",
+            ]
+        );
     }
 
     #[test]

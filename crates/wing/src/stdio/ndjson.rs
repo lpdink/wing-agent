@@ -71,6 +71,10 @@ pub enum MessageContent {
         #[serde(rename = "type")]
         content_type: String,
         thinking: String,
+        /// Required by Claude Agent SDK's ThinkingBlock parser.
+        /// Non-Anthropic models don't produce signatures; emit empty string.
+        #[serde(default)]
+        signature: String,
     },
     Text {
         #[serde(rename = "type")]
