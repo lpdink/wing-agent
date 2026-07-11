@@ -2,6 +2,7 @@
 import inspect
 from types import UnionType
 from typing import (
+    Any,
     Callable,
     Dict,
     ForwardRef,
@@ -16,14 +17,14 @@ from wing.schema import Tool, ToolParam
 
 
 class ToolRegistry:
-    def __init__(self):
+    def __init__(self) -> None:
         self._tools_map: Dict[str, Tool] = {}
 
     @property
     def tools(self) -> list[Tool]:
         return sorted(self._tools_map.values(), key=lambda x: x.name)
 
-    def get_tool(self, name) -> Tool | None:
+    def get_tool(self, name: str) -> Tool | None:
         return self._tools_map.get(name)
 
     def register(
@@ -32,7 +33,7 @@ class ToolRegistry:
         description: str | None = None,
         params: list[ToolParam] | None = None,
         add_purpose: bool = False,
-    ):
+    ) -> Callable[[Callable], Callable]:
         def decorator(fn: Callable) -> Callable:
             sig = inspect.signature(fn)
             hints = get_type_hints(fn)
@@ -86,7 +87,7 @@ class ToolRegistry:
 
         return decorator
 
-    def _is_agent_type(self, t) -> bool:
+    def _is_agent_type(self, t: Any) -> bool:
         if t is None:
             return False
 

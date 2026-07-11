@@ -525,10 +525,10 @@ More detail in: "{dir}/SKILL.md" """
             except Exception:
                 pass
 
-    def add_message(self, message: Message):
+    def add_message(self, message: Message) -> None:
         self._messages.append(message)
 
-    def add_messages(self, messages: list[Message]):
+    def add_messages(self, messages: list[Message]) -> None:
         self._messages.extend(iter(messages))
 
     def _last_prompt_tokens(self) -> int | None:
@@ -670,7 +670,7 @@ More detail in: "{dir}/SKILL.md" """
         result.append({"uuid": "current", "content": "(current)"})
         return result
 
-    def clear_reasoning(self):
+    def clear_reasoning(self) -> None:
         for msg in self._messages:
             if isinstance(msg, Message):
                 msg.reasoning_content = ""

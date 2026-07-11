@@ -35,7 +35,7 @@ class MagicCommand(BaseModel):
 class MagicCommandRegistry:
     """魔术命令注册表."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._commands: dict[str, MagicCommand] = {}
 
     def register(
@@ -44,7 +44,7 @@ class MagicCommandRegistry:
         aliases: list[str] | None = None,
         description: str = "",
         params: str = "",
-    ):
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """装饰器方式注册命令。
 
         用法:

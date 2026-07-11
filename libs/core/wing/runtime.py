@@ -23,8 +23,13 @@ from wing.event import (
 from wing.event_bus import event_bus
 from wing.config import get_config, load_hooks
 from wing.request_context import reset_request_context, set_request_context
+from typing import TYPE_CHECKING
 from wing.session import Session
 from wing.session_manager import SessionManager
+
+if TYPE_CHECKING:
+    from wing.agent_template import AgentTemplateManager
+    from wing.gateway.protocol import AgentOverride
 
 
 class WingRuntime:
@@ -40,7 +45,7 @@ class WingRuntime:
         self.sm = SessionManager()
 
     @property
-    def template_manager(self):
+    def template_manager(self) -> AgentTemplateManager:
         """Agent 模板管理器。"""
         return self.sm.template_manager
 
@@ -90,7 +95,7 @@ class WingRuntime:
         self,
         template_name: str | None = None,
         workspace: str | None = None,
-        agent_override=None,
+        agent_override: AgentOverride | None = None,
     ) -> Session:
         """创建新 session。session_id 由后端生成。
 
