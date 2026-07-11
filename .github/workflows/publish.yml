@@ -70,7 +70,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           working-directory: crates/wing
-          args: build --release --out ../../dist
+          args: --release --out ../../dist
           manylinux: "2_28"
           rust-toolchain: stable
 
