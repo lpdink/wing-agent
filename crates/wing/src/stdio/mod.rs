@@ -331,14 +331,23 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
     let mut renderer =
         StdioRenderer::new(args.output_format.clone(), start_time, session_id.clone());
 
-    // 7. Send prompt.
-    http.send_message(&session_id, &args.prompt, false)
+    // 7. Resolve prompt: CLI arg > stdin (stream-json) > error.
+    let prompt = if !args.prompt.is_empty() {
+        args.prompt
+    } else if args.input_format == InputFormat::StreamJson {
+        stdin_handler::handle_stdin_stream().await?
+    } else {
+        anyhow::bail!("no prompt provided");
+    };
+
+    // 8. Send prompt.
+    http.send_message(&session_id, &prompt, false)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to send message: {e}"))?;
 
     tracing::info!("prompt sent, entering event loop");
 
-    // 8. Event loop: receive events from WS, render, exit on TurnResult.
+    // 9. Event loop: receive events from WS, render, exit on TurnResult.
     loop {
         match gateway.recv_event().await {
             Some(event) => {
