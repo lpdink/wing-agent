@@ -59,6 +59,7 @@ class AgentConfig(BaseModel):
     skills: list[str] = Field(default_factory=list)
     rules: list[str] = Field(default_factory=list)
     max_turns: int | None = None
+    yolo: bool | None = None
 
 
 class GatewayConfig(BaseModel):

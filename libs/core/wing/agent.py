@@ -96,6 +96,7 @@ class WingAgent:
         stream: bool = False,
         tools: list[Tool] | None = None,
         max_turns: int | None = None,
+        yolo: bool | None = None,
     ) -> None:
         self.stream = stream
         self.model_provider = model_provider
@@ -105,6 +106,7 @@ class WingAgent:
         self.state = AgentStateBag()
         self._steer = get_config().steer
         self._max_turns = max_turns
+        self._yolo: bool = yolo if yolo is not None else get_config().yolo
         self._inbox: asyncio.Queue[Inbound] = asyncio.Queue()
         self._inbox_feedback: asyncio.Queue[str] = asyncio.Queue()
         self._worker = asyncio.create_task(self._run())
@@ -121,6 +123,15 @@ class WingAgent:
     @property
     def session_id(self) -> str:
         return self.context_manager.id
+
+    @property
+    def yolo(self) -> bool:
+        """YOLO 模式是否启用。"""
+        return self._yolo
+
+    def set_yolo(self, value: bool) -> None:
+        """设置 yolo 模式（供 /yolo 魔术命令和 apply_agent_override 调用）。"""
+        self._yolo = value
 
     # ── 运行时覆盖方法（供 Session.apply_agent_override 调用）──
 

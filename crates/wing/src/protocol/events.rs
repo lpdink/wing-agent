@@ -378,6 +378,8 @@ pub enum WingEvent {
     /// Turn-level assistant message (complete, not streaming).
     #[serde(rename = "assistant_turn")]
     AssistantTurn {
+        #[serde(default)]
+        uuid: String,
         content_blocks: Vec<serde_json::Value>,
         #[serde(default)]
         model: String,
@@ -390,6 +392,8 @@ pub enum WingEvent {
     /// Turn-level tool result.
     #[serde(rename = "tool_result_turn")]
     ToolResultTurn {
+        #[serde(default)]
+        uuid: String,
         tool_use_id: String,
         tool_name: String,
         content: String,
@@ -402,6 +406,8 @@ pub enum WingEvent {
     /// Turn-level final result of the entire agent loop.
     #[serde(rename = "turn_result")]
     TurnResult {
+        #[serde(default)]
+        uuid: String,
         #[serde(default = "default_subtype")]
         subtype: String,
         #[serde(default)]
@@ -414,6 +420,25 @@ pub enum WingEvent {
         usage: Option<serde_json::Value>,
         #[serde(default)]
         errors: Vec<String>,
+        #[serde(flatten)]
+        meta: EventMeta,
+    },
+
+    // ---- session init (for stdio mode) ----
+    /// Session initialization event — emitted on subscribe/fork.
+    /// Carries authoritative session state for stdio consumers.
+    #[serde(rename = "session_init")]
+    SessionInit {
+        #[serde(default)]
+        uuid: String,
+        #[serde(default)]
+        tools: Vec<String>,
+        #[serde(default)]
+        model: String,
+        #[serde(default = "default_permission_mode")]
+        permission_mode: String,
+        #[serde(default)]
+        cwd: String,
         #[serde(flatten)]
         meta: EventMeta,
     },
@@ -434,6 +459,10 @@ fn default_api_url() -> String {
 
 fn default_subtype() -> String {
     "success".into()
+}
+
+fn default_permission_mode() -> String {
+    "default".into()
 }
 
 impl WingEvent {
@@ -470,6 +499,7 @@ impl WingEvent {
             Self::AssistantTurn { .. } => "assistant_turn",
             Self::ToolResultTurn { .. } => "tool_result_turn",
             Self::TurnResult { .. } => "turn_result",
+            Self::SessionInit { .. } => "session_init",
             Self::Unknown => "unknown",
         }
     }
@@ -506,7 +536,8 @@ impl WingEvent {
             | Self::SystemInfo { meta, .. }
             | Self::AssistantTurn { meta, .. }
             | Self::ToolResultTurn { meta, .. }
-            | Self::TurnResult { meta, .. } => Some(meta),
+            | Self::TurnResult { meta, .. }
+            | Self::SessionInit { meta, .. } => Some(meta),
             Self::Unknown => None,
         }
     }

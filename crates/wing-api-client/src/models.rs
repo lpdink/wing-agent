@@ -51,6 +51,8 @@ pub struct AgentOverride {
     pub max_turns: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yolo: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

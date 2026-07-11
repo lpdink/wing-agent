@@ -25,6 +25,10 @@ class _MockAgent:
         if cwd is not None:
             self.state.set("cwd", cwd)
 
+    @property
+    def yolo(self) -> bool:
+        return bool(self.state.get("yolo"))
+
 
 def _parse_rc(result: str) -> int:
     """Extract the [exit code: N | Xs] prefix from a Bash result."""

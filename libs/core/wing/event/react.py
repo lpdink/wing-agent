@@ -6,6 +6,7 @@ Agent react loop 期间产生的事件：文本、推理、工具调用、指标
 
 from __future__ import annotations
 
+import uuid as _uuid
 from typing import Any, Literal
 
 from pydantic import Field
@@ -96,6 +97,7 @@ class AssistantTurnEvent(WingEvent):
     """
 
     type: Literal["assistant_turn"] = "assistant_turn"
+    uuid: str = Field(default_factory=lambda: _uuid.uuid4().hex)
     content_blocks: list[dict]
     model: str = ""
     stop_reason: str | None = None
@@ -109,6 +111,7 @@ class ToolResultTurnEvent(WingEvent):
     """
 
     type: Literal["tool_result_turn"] = "tool_result_turn"
+    uuid: str = Field(default_factory=lambda: _uuid.uuid4().hex)
     tool_use_id: str
     tool_name: str
     content: str
@@ -123,6 +126,7 @@ class TurnResultEvent(WingEvent):
     """
 
     type: Literal["turn_result"] = "turn_result"
+    uuid: str = Field(default_factory=lambda: _uuid.uuid4().hex)
     subtype: str = "success"
     is_error: bool = False
     result: str | None = None

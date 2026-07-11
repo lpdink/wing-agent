@@ -106,6 +106,7 @@ class Session:
             context_manager=context_manager,
             tools=template.resolved_tools,
             max_turns=template.max_turns,
+            yolo=template.yolo,
         )
 
         # 将 workspace 注入 agent state 作为 Bash 工具的 cwd
@@ -156,6 +157,7 @@ class Session:
             context_manager=self._context_manager,
             tools=template.resolved_tools,
             max_turns=template.max_turns,
+            yolo=template.yolo,
         )
 
         cwd = (
@@ -208,10 +210,15 @@ class Session:
         if override.effort is not None:
             agent.set_reasoning_effort(override.effort)
 
+        # 7. yolo 覆盖
+        if override.yolo is not None:
+            agent.set_yolo(override.yolo)
+
         log.info(
             f"Session {self._session_id}: applied agent override "
             f"(model={override.model}, tools={override.tools}, "
-            f"max_turns={override.max_turns}, effort={override.effort})"
+            f"max_turns={override.max_turns}, effort={override.effort}, "
+            f"yolo={override.yolo})"
         )
 
     # ── 暴露属性 ──────────────────────────────────

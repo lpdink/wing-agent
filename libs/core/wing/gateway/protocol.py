@@ -72,6 +72,9 @@ class AgentOverride(BaseModel):
     effort: str | None = Field(
         default=None, description="Reasoning effort: low|medium|high"
     )
+    yolo: bool | None = Field(
+        default=None, description="跳过危险命令审查（None 表示不覆盖）"
+    )
 
 
 class CreateSessionRequest(BaseModel):

@@ -49,6 +49,7 @@ from .state_change import (
     CompactDoneEvent,
     InterruptedEvent,
     ModelSwitchedEvent,
+    SessionInitEvent,
     SessionListEvent,
     SessionUpdatedEvent,
     SyncSessionEvent,
@@ -73,6 +74,7 @@ WingEventUnion = (
     | TurnResultEvent
     | SessionListEvent
     | SyncSessionEvent
+    | SessionInitEvent
     | DeliveredEvent
     | ModelSwitchedEvent
     | ThinkToggledEvent
@@ -114,6 +116,7 @@ __all__ = [
     "TurnResultEvent",
     # state_change
     "SyncSessionEvent",
+    "SessionInitEvent",
     "SessionListEvent",
     "SessionUpdatedEvent",
     "ModelSwitchedEvent",
