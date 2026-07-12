@@ -2,12 +2,12 @@
 import asyncio
 import json
 import time
-from typing import AsyncIterator
+from typing import AsyncIterator, cast
 
 import httpx
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, AsyncStream
 from openai.types.chat.chat_completion import ChatCompletion
-from openai.types.chat.chat_completion_chunk import Choice
+from openai.types.chat.chat_completion_chunk import ChatCompletionChunk, Choice
 
 from wing.common.logger import log
 from wing.common.with_retry import with_retry
@@ -16,9 +16,16 @@ from wing.schema import LLMResponse, LLMUsage, Message, PendingCall, Tool, ToolC
 
 
 async def _remove_stainless_headers(request: httpx.Request) -> None:
-    """删除 OpenAI SDK 自动添加的 x-stainless-* 头部，避免暴露 Python 特征"""
+    """删除 OpenAI SDK 自动添加的 x-stainless-* 遥测头部，避免暴露 Python 特征。
+
+    保留 X-Stainless-Raw-Response——它是 with_raw_response 的内部标记，
+    删除后 SDK 不会将响应包装为 LegacyAPIResponse，导致无法获取 response headers。
+    """
     for key in list(request.headers.keys()):
-        if key.lower().startswith("x-stainless-"):
+        if (
+            key.lower().startswith("x-stainless-")
+            and key.lower() != "x-stainless-raw-response"
+        ):
             del request.headers[key]
 
 
@@ -98,10 +105,12 @@ class OpenAIProvider:
         """非流式：等待完整响应后返回"""
         t0 = time.monotonic()
         try:
-            response: ChatCompletion = await asyncio.wait_for(
-                self._client.chat.completions.create(**create_params),
+            raw = await asyncio.wait_for(
+                self._client.chat.completions.with_raw_response.create(**create_params),
                 timeout=self.timeout_total,
             )
+            request_id = raw.headers.get("x-request-id", "")
+            response = cast(ChatCompletion, raw.parse())
         except asyncio.TimeoutError:
             log.error(f"LLM request timeout after {self.timeout_total}s")
             raise TimeoutError(f"LLM request timeout after {self.timeout_total}s")
@@ -143,6 +152,7 @@ class OpenAIProvider:
                 first_chunk_rt_ms=elapsed * 1000,
                 tokens_per_sec=completion_tokens / elapsed if elapsed > 0 else 0.0,
                 model=create_params["model"],
+                request_id=request_id,
             ),
         )
 
@@ -154,10 +164,12 @@ class OpenAIProvider:
         create_params["stream_options"] = {"include_usage": True}
         t0 = time.monotonic()
         try:
-            response = await asyncio.wait_for(
-                self._client.chat.completions.create(**create_params),
+            raw = await asyncio.wait_for(
+                self._client.chat.completions.with_raw_response.create(**create_params),
                 timeout=self.timeout_first_chunk,
             )
+            request_id = raw.headers.get("x-request-id", "")
+            response = cast(AsyncStream[ChatCompletionChunk], raw.parse())
         except asyncio.TimeoutError:
             log.error(f"LLM first chunk timeout after {self.timeout_first_chunk}s")
             raise TimeoutError(
@@ -217,6 +229,7 @@ class OpenAIProvider:
                     first_chunk_rt_ms=first_chunk_rt_ms,
                     tokens_per_sec=decode_tps,
                     model=create_params["model"],
+                    request_id=request_id,
                 ),
             )
 
