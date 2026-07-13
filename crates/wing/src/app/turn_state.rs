@@ -25,8 +25,10 @@ pub struct TurnState {
     pub spinner: SpinnerState,
     /// Per-turn usage (reset on user submit).
     pub usage: TurnUsage,
-    /// Last turn result (set on TurnResult, before Done).
+    /// Last turn result (set on TurnResult, consumed on Done).
     pub last_result: Option<TurnResultSummary>,
+    /// Last title string written to terminal — used to deduplicate OSC 0 writes.
+    pub last_title: Option<String>,
 }
 
 impl TurnState {

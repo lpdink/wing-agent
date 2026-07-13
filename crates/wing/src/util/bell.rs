@@ -11,8 +11,10 @@ use anyhow::{Context, Result};
 
 /// Send the BEL character to trigger a terminal notification.
 ///
-/// Only effective when the terminal window/tab is not focused.
-/// Most terminal emulators silently ignore BEL when already focused.
+/// This is a best-effort signal. Behavior depends on terminal configuration:
+/// most terminals show a system notification when the tab/window is not
+/// focused, some play a sound, and a few ignore it entirely.
+/// Works transparently over SSH and WSL.
 pub fn send_bell(writer: &mut impl Write) -> Result<()> {
     writer.write_all(b"\x07").context("failed to send BEL")
 }

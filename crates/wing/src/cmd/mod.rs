@@ -297,6 +297,8 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
             std::io::stdout(),
             crossterm::terminal::LeaveAlternateScreen,
             crossterm::event::DisableBracketedPaste,
+            crossterm::event::DisableFocusChange,
+            crossterm::terminal::SetTitle(""),
             crossterm::cursor::Show
         );
         original_hook(panic_info);
