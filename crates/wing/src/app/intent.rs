@@ -29,4 +29,10 @@ pub enum AppIntent {
 
     /// Fetch session list via HTTP API for popup candidates.
     FetchSessionList,
+
+    /// Set the terminal title via OSC 0 escape sequence.
+    SetTitle(String),
+
+    /// Send a desktop notification via OSC 9 escape sequence.
+    Notify(String),
 }
