@@ -880,11 +880,9 @@ impl App {
                 ..
             } => {
                 // Extract total tokens from usage JSON.
-                let total_tokens = usage.as_ref().and_then(|u| {
-                    let input = u.get("input_tokens")?.as_i64().unwrap_or(0);
-                    let output = u.get("output_tokens")?.as_i64().unwrap_or(0);
-                    let cached = u.get("cached_tokens")?.as_i64().unwrap_or(0);
-                    Some(input + output + cached)
+                let total_tokens = usage.as_ref().map(|u| {
+                    let get = |key| u.get(key).and_then(|v| v.as_i64()).unwrap_or(0);
+                    get("input_tokens") + get("output_tokens") + get("cached_tokens")
                 });
 
                 // Store turn result for Done handler consumption.
