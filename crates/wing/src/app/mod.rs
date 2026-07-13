@@ -880,9 +880,11 @@ impl App {
                 ..
             } => {
                 // Extract total tokens from usage JSON.
+                // Note: cached_tokens is a subset of input_tokens (cache hit),
+                // so total = input + output (not input + output + cached).
                 let total_tokens = usage.as_ref().map(|u| {
                     let get = |key| u.get(key).and_then(|v| v.as_i64()).unwrap_or(0);
-                    get("input_tokens") + get("output_tokens") + get("cached_tokens")
+                    get("input_tokens") + get("output_tokens")
                 });
 
                 // Store turn result for Done handler consumption.

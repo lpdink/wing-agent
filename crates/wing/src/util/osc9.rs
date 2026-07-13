@@ -20,10 +20,11 @@ use anyhow::{Context, Result};
 pub fn send_notification(writer: &mut impl Write, message: &str) -> Result<()> {
     let safe: String = message
         .chars()
-        .filter(|&c| c == '\n' || (c >= ' ' && c != '\x7f'))
+        .filter(|&c| c == '\n' || (c >= ' ' && c != '\x7f' && !('\u{80}'..='\u{9f}').contains(&c)))
         .collect();
     // OSC 9 format: ESC ] 9 ; <message> BEL
-    write!(writer, "\x1b]9;{safe}\x07").context("failed to send OSC 9 notification")
+    write!(writer, "\x1b]9;{safe}\x07").context("failed to send OSC 9 notification")?;
+    writer.flush().context("failed to flush OSC 9 notification")
 }
 
 /// Format a duration in milliseconds to a compact human-readable string.
@@ -101,6 +102,9 @@ pub fn fmt_turn_result(
 /// Truncate a string to at most `max_bytes` bytes, without splitting
 /// UTF-8 code points. Appends "…" if truncation occurred.
 fn truncate_bytes(s: &str, max_bytes: usize) -> String {
+    if max_bytes < 3 {
+        return String::new();
+    }
     if s.len() <= max_bytes {
         return s.to_string();
     }
@@ -143,6 +147,15 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
         // \x07 and \x1b are stripped, only printable chars remain.
         assert_eq!(output, "\x1b]9;helloworld!\x07");
+    }
+
+    #[test]
+    fn send_notification_strips_c1_controls() {
+        let mut buf = Vec::new();
+        // U+009C (STRING TERMINATOR) could prematurely close OSC 9.
+        send_notification(&mut buf, "hello\u{9c}world").unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert_eq!(output, "\x1b]9;helloworld\x07");
     }
 
     #[test]
@@ -210,6 +223,13 @@ mod tests {
     fn truncate_bytes_within_limit() {
         assert_eq!(truncate_bytes("hello", 10), "hello");
         assert_eq!(truncate_bytes("hello world", 5), "he…");
+    }
+
+    #[test]
+    fn truncate_bytes_tiny_budget() {
+        // Budget < 3 bytes (size of "…") → empty string.
+        assert_eq!(truncate_bytes("hello", 2), "");
+        assert_eq!(truncate_bytes("hello", 0), "");
     }
 
     #[test]
