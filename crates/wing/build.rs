@@ -10,18 +10,33 @@ use std::process::Command;
 
 fn main() {
     // ── Git commit hash ───────────────────────────────────────────
-    let commit = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
+    // CI passes the full SHA via env var (git may be unavailable in
+    // Docker containers such as manylinux_2_28).  Fall back to running
+    // `git rev-parse` for local builds.
+    let commit = std::env::var("WING_COMMIT_HASH")
         .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "unknown".to_string());
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            Command::new("git")
+                .args(["rev-parse", "--short", "HEAD"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| "unknown".to_string())
+        });
+
+    // Truncate to 7 chars to match `git rev-parse --short` behaviour.
+    let commit = if commit.len() > 7 {
+        commit[..7].to_string()
+    } else {
+        commit
+    };
 
     println!("cargo:rustc-env=WING_COMMIT_HASH={commit}");
 
