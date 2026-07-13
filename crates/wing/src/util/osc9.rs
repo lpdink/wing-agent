@@ -38,10 +38,17 @@ pub fn fmt_duration(ms: i64) -> String {
     }
 }
 
+/// Maximum notification body size in bytes.
+///
+/// Ghostty's OSC parser uses a fixed 2048-byte buffer — exceeding it causes
+/// silent discard. The notification body field is 255 bytes. We target 250
+/// to stay safely within both limits with room for the OSC 9 framing.
+const MAX_NOTIFICATION_BYTES: usize = 250;
+
 /// Format a TurnResult notification message.
 ///
-/// Stats come first (always visible), result text follows (may be
-/// truncated by the terminal emulator's notification display).
+/// Stats come first (always visible), result text follows (truncated to
+/// fit within the notification byte budget).
 ///
 /// Example outputs:
 /// - `"3 turns · 12s · 2.1k tokens\nCreated hello.rs"`
@@ -69,22 +76,41 @@ pub fn fmt_turn_result(
     }
     let stats_line = stats.join(" · ");
 
-    // Result text (may be truncated by terminal — we don't truncate ourselves).
+    // Result text — join non-empty lines, truncate to byte budget.
     let result_text = result
         .map(|t| {
             t.lines()
                 .map(|l| l.trim())
                 .filter(|l| !l.is_empty())
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join(" · ")
         })
         .unwrap_or_default();
 
     if result_text.is_empty() {
         stats_line
     } else {
-        format!("{stats_line}\n{result_text}")
+        let budget = MAX_NOTIFICATION_BYTES
+            .saturating_sub(stats_line.len())
+            .saturating_sub(1); // 1 byte for '\n'
+        let truncated = truncate_bytes(&result_text, budget);
+        format!("{stats_line}\n{truncated}")
     }
+}
+
+/// Truncate a string to at most `max_bytes` bytes, without splitting
+/// UTF-8 code points. Appends "…" if truncation occurred.
+fn truncate_bytes(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    // Find the largest char boundary <= max_bytes (accounting for "…" = 3 bytes).
+    let target = max_bytes.saturating_sub(3); // reserve 3 bytes for "…"
+    let mut end = target;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 /// Format token count in compact notation.
@@ -166,8 +192,33 @@ mod tests {
     }
 
     #[test]
-    fn fmt_turn_result_multiline_result() {
+    fn fmt_turn_result_multiline_joins_with_dot() {
         let msg = fmt_turn_result(Some("Line 1\nLine 2\nLine 3"), 1, 1000, None);
-        assert_eq!(msg, "1 turn · 1s\nLine 1\nLine 2\nLine 3");
+        assert_eq!(msg, "1 turn · 1s\nLine 1 · Line 2 · Line 3");
+    }
+
+    #[test]
+    fn fmt_turn_result_truncates_long_result() {
+        let long_text = "A".repeat(500);
+        let msg = fmt_turn_result(Some(&long_text), 1, 1000, None);
+        // Total output must be within MAX_NOTIFICATION_BYTES.
+        assert!(msg.len() <= super::MAX_NOTIFICATION_BYTES);
+        assert!(msg.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_bytes_within_limit() {
+        assert_eq!(truncate_bytes("hello", 10), "hello");
+        assert_eq!(truncate_bytes("hello world", 5), "he…");
+    }
+
+    #[test]
+    fn truncate_bytes_no_split_utf8() {
+        // "é" is 2 bytes in UTF-8. Truncating at boundary 4 should not split it.
+        let s = "café";
+        let result = truncate_bytes(s, 4);
+        // "c" (1) + "a" (1) = 2 bytes, then "f" would be 3, "é" would be 5.
+        // Budget for text = 4 - 3 (for …) = 1 byte → "c…"
+        assert_eq!(result, "c…");
     }
 }
