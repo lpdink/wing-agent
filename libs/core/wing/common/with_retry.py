@@ -15,21 +15,20 @@ def _emit_retry_event(
 ) -> None:
     """通过 EventBus 向前端发送重试通知。懒加载避免循环导入。"""
     try:
-        from wing.event import ErrorEvent
+        from wing.event import ErrorEvent, EventTarget
         from wing.event_bus import event_bus
 
-        error_detail = f"{type(exc).__name__}: {exc}"
-        if exc.__cause__:
-            error_detail += (
-                f" (caused by {type(exc.__cause__).__name__}: {exc.__cause__})"
-            )
+        from .utils import format_exception_chain
+
+        error_detail = format_exception_chain(exc)
         event_bus.emit(
             ErrorEvent(
-                message=f"{fn_name} 调用失败 ({attempt + 1}/{max_retries}): {error_detail} {delay:.0f}s 后重试"
+                message=f"{fn_name} 调用失败 ({attempt + 1}/{max_retries}): {error_detail}, {delay:.0f}s 后重试",
+                target=EventTarget(scope="session"),
             )
         )
-    except Exception:
-        pass  # 事件通知失败不应影响重试逻辑
+    except Exception as e:
+        log.debug(f"Failed to emit retry event: {e}")
 
 
 def with_retry(max_retries: int, base_delay: float = 3.0) -> Callable:
