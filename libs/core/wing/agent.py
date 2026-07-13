@@ -220,7 +220,9 @@ class WingAgent:
         # 设置 request_id 到当前协程 context
         # 该消息触发的所有事件（TextEvent, ToolCallEvent, DoneEvent 等）
         # 都会 auto-inject 此 request_id
-        token = set_request_context(request_id=inbound.request_id)
+        token = set_request_context(
+            request_id=inbound.request_id, session_id=self.session_id
+        )
         ctx = _TurnAccumulator()
         try:
             # Signal turn start — frontend uses this to show working indicator.
@@ -271,7 +273,10 @@ class WingAgent:
             )
             self.emit(DoneEvent(session_id=self.session_id))
         except Exception as e:
-            log.error(f"处理消息失败: {e}")
+            from wing.common.utils import format_exception_chain
+
+            error_detail = format_exception_chain(e)
+            log.exception(f"处理消息失败: {error_detail}")
             self.emit(
                 TurnResultEvent(
                     session_id=self.session_id,
@@ -280,13 +285,13 @@ class WingAgent:
                     num_turns=ctx.num_turns,
                     duration_ms=ctx.elapsed_ms(),
                     usage=ctx.usage_dict(),
-                    errors=[str(e)],
+                    errors=[error_detail],
                 )
             )
             self.emit(
                 ErrorEvent(
                     session_id=self.session_id,
-                    message=f"处理消息失败：异常：{e}",
+                    message=f"处理消息失败：异常：{error_detail}",
                 )
             )
             self.emit(DoneEvent(session_id=self.session_id))

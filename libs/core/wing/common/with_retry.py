@@ -10,6 +10,27 @@ P = ParamSpec("P")
 T = TypeVar("T")
 
 
+def _emit_retry_event(
+    attempt: int, max_retries: int, fn_name: str, exc: Exception, delay: float
+) -> None:
+    """通过 EventBus 向前端发送重试通知。懒加载避免循环导入。"""
+    try:
+        from wing.event import ErrorEvent, EventTarget
+        from wing.event_bus import event_bus
+
+        from .utils import format_exception_chain
+
+        error_detail = format_exception_chain(exc)
+        event_bus.emit(
+            ErrorEvent(
+                message=f"{fn_name} 调用失败 ({attempt + 1}/{max_retries}): {error_detail}, {delay:.0f}s 后重试",
+                target=EventTarget(scope="session"),
+            )
+        )
+    except Exception as e:
+        log.debug(f"Failed to emit retry event: {e}")
+
+
 def with_retry(max_retries: int, base_delay: float = 3.0) -> Callable:
     """指数退避重试装饰器 - 支持普通 async 函数和 async generators"""
 
@@ -28,9 +49,10 @@ def with_retry(max_retries: int, base_delay: float = 3.0) -> Callable:
                         if attempt == max_retries:
                             raise last_exc
                         log.error(
-                            f"call {fn_name} failed (attempt {attempt + 1}), retrying..."
+                            f"call {fn_name} failed (attempt {attempt + 1}): {type(e).__name__}: {e}, retrying..."
                         )
                         delay = base_delay * (2**attempt)
+                        _emit_retry_event(attempt, max_retries, fn_name, e, delay)
                         await asyncio.sleep(delay)
                 raise last_exc  # ty: ignore # unreachable
 
@@ -52,9 +74,10 @@ def with_retry(max_retries: int, base_delay: float = 3.0) -> Callable:
                     if attempt == max_retries:
                         raise last_exc
                     log.error(
-                        f"call {fn_name} failed (attempt {attempt + 1}), retrying..."
+                        f"call {fn_name} failed (attempt {attempt + 1}): {type(e).__name__}: {e}, retrying..."
                     )
                     delay = base_delay * (2**attempt)
+                    _emit_retry_event(attempt, max_retries, fn_name, e, delay)
                     await asyncio.sleep(delay)
 
         return async_gen_wrapper
