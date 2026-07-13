@@ -589,9 +589,9 @@ impl App {
                 self.turn.last_result = None;
                 self.chat.reset_thinking_count();
                 // Set title to working state with initial spinner frame.
-                self.push_intent(AppIntent::SetTitle(title::title_working(
-                    self.turn.spinner.frame_str(),
-                )));
+                let working_title = title::title_working(self.turn.spinner.frame_str());
+                self.turn.last_title = Some(working_title.clone());
+                self.push_intent(AppIntent::SetTitle(working_title));
             }
             WingEvent::Done { .. } => {
                 self.turn.finish();
@@ -601,7 +601,8 @@ impl App {
                 // Restore idle title — but if the user is not focused and a
                 // TurnResult just set an attention title (✓/⚠), preserve it
                 // until the user refocuses (Focus handler restores idle).
-                if self.focused || self.turn.last_result.take().is_none() {
+                let had_result = self.turn.last_result.take().is_some();
+                if self.focused || !had_result {
                     self.push_intent(AppIntent::SetTitle(title::title_idle().to_string()));
                 }
             }
@@ -620,11 +621,11 @@ impl App {
             WingEvent::Error { message, .. } => {
                 self.turn.finish();
                 self.ctx.reset();
-                self.chat.push(ChatCell::ErrorMessage(message));
+                self.chat.push(ChatCell::ErrorMessage(message.clone()));
                 self.refresh_copy_candidates();
                 // Notify user if terminal is not focused.
                 if !self.focused {
-                    self.push_intent(AppIntent::SendBell);
+                    self.push_intent(AppIntent::Notify(message.clone()));
                     self.push_intent(AppIntent::SetTitle(
                         title::title_attention(AttentionKind::Error).to_string(),
                     ));
@@ -735,7 +736,7 @@ impl App {
                 required,
                 ..
             } => {
-                let msg = AskMessage::new(question, choices.clone());
+                let msg = AskMessage::new(question.clone(), choices.clone());
                 self.chat.push(ChatCell::Ask(msg));
                 if required && !choices.is_empty() {
                     let sel = crate::ui::ask_select::AskSelection::new(choices);
@@ -746,7 +747,7 @@ impl App {
                 }
                 // Notify user if terminal is not focused.
                 if !self.focused {
-                    self.push_intent(AppIntent::SendBell);
+                    self.push_intent(AppIntent::Notify(question.clone()));
                     self.push_intent(AppIntent::SetTitle(
                         title::title_attention(AttentionKind::Ask).to_string(),
                     ));
@@ -874,14 +875,26 @@ impl App {
                 is_error,
                 duration_ms,
                 num_turns,
+                result,
+                usage,
                 ..
             } => {
-                // Store turn result for notification content.
+                // Extract total tokens from usage JSON.
+                let total_tokens = usage.as_ref().and_then(|u| {
+                    let input = u.get("input_tokens")?.as_i64().unwrap_or(0);
+                    let output = u.get("output_tokens")?.as_i64().unwrap_or(0);
+                    let cached = u.get("cached_tokens")?.as_i64().unwrap_or(0);
+                    Some(input + output + cached)
+                });
+
+                // Store turn result for Done handler consumption.
                 self.turn.last_result = Some(crate::app::turn_state::TurnResultSummary {
                     subtype: subtype.clone(),
                     is_error,
                     duration_ms,
                     num_turns,
+                    result: result.clone(),
+                    total_tokens,
                 });
                 tracing::debug!(
                     subtype = %subtype,
@@ -892,7 +905,13 @@ impl App {
                 );
                 // Notify user if terminal is not focused.
                 if !self.focused {
-                    self.push_intent(AppIntent::SendBell);
+                    let msg = crate::util::osc9::fmt_turn_result(
+                        result.as_deref(),
+                        num_turns,
+                        duration_ms,
+                        total_tokens,
+                    );
+                    self.push_intent(AppIntent::Notify(msg));
                     let kind = if is_error {
                         AttentionKind::Error
                     } else {
@@ -1261,10 +1280,10 @@ pub async fn run_app(
                         tracing::warn!("failed to set terminal title: {e}");
                     }
                 }
-                AppIntent::SendBell => {
+                AppIntent::Notify(message) => {
                     let writer = terminal.backend_mut();
-                    if let Err(e) = crate::util::bell::send_bell(writer) {
-                        tracing::warn!("failed to send BEL: {e}");
+                    if let Err(e) = crate::util::osc9::send_notification(writer, &message) {
+                        tracing::warn!("failed to send OSC 9 notification: {e}");
                     }
                 }
             }

@@ -12,6 +12,10 @@ pub struct TurnResultSummary {
     pub is_error: bool,
     pub duration_ms: i64,
     pub num_turns: i64,
+    /// Last assistant text (may be long — truncate for display).
+    pub result: Option<String>,
+    /// Total tokens (input + output + cached).
+    pub total_tokens: Option<i64>,
 }
 
 /// Tracks the current agent turn: working flag, timer, spinner, usage.

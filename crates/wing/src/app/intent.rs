@@ -33,6 +33,6 @@ pub enum AppIntent {
     /// Set the terminal title via OSC 0 escape sequence.
     SetTitle(String),
 
-    /// Send BEL character to trigger system notification.
-    SendBell,
+    /// Send a desktop notification via OSC 9 escape sequence.
+    Notify(String),
 }
