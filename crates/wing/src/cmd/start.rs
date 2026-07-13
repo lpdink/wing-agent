@@ -67,9 +67,6 @@ pub fn start_gateway(host: &str, port: u16) -> anyhow::Result<()> {
     // `Child::drop` does not kill the process.
     let pid = child.id();
 
-    // Wait briefly and check if process is alive + port reachable.
-    std::thread::sleep(Duration::from_millis(500));
-
     let gw_state = GatewayState {
         host: host.to_string(),
         port,
@@ -77,29 +74,38 @@ pub fn start_gateway(host: &str, port: u16) -> anyhow::Result<()> {
         started_at: Utc::now(),
     };
 
-    if !is_gateway_running(&gw_state) {
-        // Process died quickly — show last log lines.
-        let log_content = std::fs::read_to_string(&log_path).unwrap_or_default();
-        let last_lines: String = log_content
-            .lines()
-            .rev()
-            .take(5)
-            .collect::<Vec<_>>()
-            .join("\n");
-        WingState::clear_gateway();
-        anyhow::bail!("Gateway exited immediately:\n{last_lines}");
+    // Poll for port readiness (happy path: exits on first check; bad path: retries up to 5s).
+    let poll_interval = Duration::from_millis(100);
+    let timeout = Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + timeout;
+    let addr = format!("{host}:{port}");
+    let mut port_ready = false;
+
+    while std::time::Instant::now() < deadline {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            port_ready = true;
+            break;
+        }
+        if !is_gateway_running(&gw_state) {
+            let log_content = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let last_lines: String = log_content
+                .lines()
+                .rev()
+                .take(5)
+                .collect::<Vec<_>>()
+                .join("\n");
+            WingState::clear_gateway();
+            anyhow::bail!("Gateway exited immediately:\n{last_lines}");
+        }
+        std::thread::sleep(poll_interval);
     }
 
-    // Check port connectivity — warn if not yet reachable.
-    if std::net::TcpStream::connect(format!("{host}:{port}")).is_err() {
-        std::thread::sleep(Duration::from_millis(500));
-        if std::net::TcpStream::connect(format!("{host}:{port}")).is_err() {
-            eprintln!(
-                "⚠ Gateway process is alive (PID {pid}) but port {port} is not yet reachable. \
-                 Check logs: {}",
-                log_path.display()
-            );
-        }
+    if !port_ready {
+        eprintln!(
+            "⚠ Gateway process is alive (PID {pid}) but port {port} is not yet reachable. \
+             Check logs: {}",
+            log_path.display()
+        );
     }
 
     // Save state.
