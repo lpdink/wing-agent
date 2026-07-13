@@ -48,6 +48,7 @@ use crate::ui::status_bar::TurnUsage;
 use crate::ui::toast::Toast;
 use crate::ui::toast::ToastKind;
 use crate::ui::toast::render_toast;
+use crate::util::title::AttentionKind;
 
 use self::constants::CLEAR_COMMAND;
 use self::constants::COPY_COMMAND;
@@ -106,6 +107,10 @@ pub struct App {
     toast: Option<Toast>,
     /// Active ask selection (when agent requires a choice from menu).
     ask_selection: Option<crate::ui::ask_select::AskSelection>,
+    /// Whether the terminal window/tab currently has focus.
+    /// Default `true` — terminals that don't support focus events
+    /// will never send FocusLost, so BEL is never triggered.
+    focused: bool,
     /// User configuration.
     config: AppConfig,
     /// Resolved theme palette.
@@ -137,6 +142,7 @@ impl App {
             last_tick: std::time::Instant::now(),
             toast: None,
             ask_selection: None,
+            focused: true,
             config,
             palette,
             connected: true,
@@ -579,13 +585,22 @@ impl App {
                 // (Ask answers may trigger a second turn within the same logical flow).
                 tracing::debug!("turn started, was_working={}", self.turn.working);
                 self.turn.start();
+                self.turn.last_result = None;
                 self.chat.reset_thinking_count();
+                // Set title to working state with initial spinner frame.
+                self.push_intent(AppIntent::SetTitle(crate::util::title::title_working(
+                    self.turn.spinner.frame_str(),
+                )));
             }
             WingEvent::Done { .. } => {
                 self.turn.finish();
                 self.ctx.reset();
                 self.clear_ask_selection();
                 self.refresh_copy_candidates();
+                // Restore idle title.
+                self.push_intent(AppIntent::SetTitle(
+                    crate::util::title::title_idle().to_string(),
+                ));
             }
             WingEvent::Interrupted { .. } => {
                 self.turn.finish();
@@ -596,12 +611,23 @@ impl App {
                     "Agent interrupted",
                     std::time::Duration::from_secs(2),
                 ));
+                // Restore idle title (no BEL — user triggered this).
+                self.push_intent(AppIntent::SetTitle(
+                    crate::util::title::title_idle().to_string(),
+                ));
             }
             WingEvent::Error { message, .. } => {
                 self.turn.finish();
                 self.ctx.reset();
                 self.chat.push(ChatCell::ErrorMessage(message));
                 self.refresh_copy_candidates();
+                // Notify user if terminal is not focused.
+                if !self.focused {
+                    self.push_intent(AppIntent::SendBell);
+                    self.push_intent(AppIntent::SetTitle(
+                        crate::util::title::title_attention(AttentionKind::Error).to_string(),
+                    ));
+                }
             }
 
             // ---- Reasoning events ----
@@ -717,6 +743,13 @@ impl App {
                     // Set initial cursor on the AskMessage in chat view.
                     self.chat.update_last_ask_selection(0);
                 }
+                // Notify user if terminal is not focused.
+                if !self.focused {
+                    self.push_intent(AppIntent::SendBell);
+                    self.push_intent(AppIntent::SetTitle(
+                        crate::util::title::title_attention(AttentionKind::Ask).to_string(),
+                    ));
+                }
             }
 
             // ---- Candidate list events (for popup) ----
@@ -831,6 +864,42 @@ impl App {
                 // Update session attributes (e.g. renamed by /title).
                 if let Some(session_name) = name {
                     self.status.session_name = Some(session_name);
+                }
+            }
+
+            // ---- Turn result (rich completion data) ----
+            WingEvent::TurnResult {
+                subtype,
+                is_error,
+                duration_ms,
+                num_turns,
+                ..
+            } => {
+                // Store turn result for notification content.
+                self.turn.last_result = Some(crate::app::turn_state::TurnResultSummary {
+                    subtype: subtype.clone(),
+                    is_error,
+                    duration_ms,
+                    num_turns,
+                });
+                tracing::debug!(
+                    subtype = %subtype,
+                    is_error,
+                    duration_ms,
+                    num_turns,
+                    "turn result received"
+                );
+                // Notify user if terminal is not focused.
+                if !self.focused {
+                    self.push_intent(AppIntent::SendBell);
+                    let kind = if is_error {
+                        AttentionKind::Error
+                    } else {
+                        AttentionKind::Done
+                    };
+                    self.push_intent(AppIntent::SetTitle(
+                        crate::util::title::title_attention(kind).to_string(),
+                    ));
                 }
             }
             _ => {
@@ -1017,6 +1086,12 @@ pub async fn run_app(
         }
     }
 
+    // Set initial terminal title.
+    {
+        let writer = terminal.backend_mut();
+        let _ = crate::util::title::set_title(writer, crate::util::title::title_idle());
+    }
+
     loop {
         // Draw.
         if let Err(e) = app.draw(terminal) {
@@ -1179,6 +1254,18 @@ pub async fn run_app(
                         }
                     }
                 }
+                AppIntent::SetTitle(title) => {
+                    let writer = terminal.backend_mut();
+                    if let Err(e) = crate::util::title::set_title(writer, &title) {
+                        tracing::warn!("failed to set terminal title: {e}");
+                    }
+                }
+                AppIntent::SendBell => {
+                    let writer = terminal.backend_mut();
+                    if let Err(e) = crate::util::bell::send_bell(writer) {
+                        tracing::warn!("failed to send BEL: {e}");
+                    }
+                }
             }
         }
 
@@ -1226,12 +1313,32 @@ pub async fn run_app(
                         app.update_popup();
                     }
                     TermEvent::Resize(_, _) => {}
+                    TermEvent::Focus(focused) => {
+                        app.focused = focused;
+                        // On focus regain, restore the correct title.
+                        if focused {
+                            let title = if app.turn.working {
+                                crate::util::title::title_working(
+                                    app.turn.spinner.frame_str(),
+                                )
+                            } else {
+                                crate::util::title::title_idle().to_string()
+                            };
+                            app.push_intent(AppIntent::SetTitle(title));
+                        }
+                    }
                     TermEvent::Tick => {
                         let now = std::time::Instant::now();
                         let dt = now.duration_since(app.last_tick);
                         app.last_tick = now;
                         if app.turn.working {
                             app.turn.spinner.tick(dt);
+                            // Update title with current spinner frame.
+                            app.push_intent(AppIntent::SetTitle(
+                                crate::util::title::title_working(
+                                    app.turn.spinner.frame_str(),
+                                ),
+                            ));
                         }
                         // Refresh Bash tool timers.
                         app.chat.tick_bash_timers();
@@ -1302,6 +1409,12 @@ pub async fn run_app(
                 break;
             }
         }
+    }
+
+    // Restore terminal title on exit.
+    {
+        let writer = terminal.backend_mut();
+        let _ = crate::util::title::set_title(writer, "");
     }
 
     Ok(())

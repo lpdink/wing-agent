@@ -7,8 +7,10 @@ use std::io::Stdout;
 
 use anyhow::Result;
 use crossterm::event::DisableBracketedPaste;
+use crossterm::event::DisableFocusChange;
 use crossterm::event::DisableMouseCapture;
 use crossterm::event::EnableBracketedPaste;
+use crossterm::event::EnableFocusChange;
 use crossterm::event::EnableMouseCapture;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -22,13 +24,14 @@ use tokio::sync::mpsc;
 
 pub type WingTerminal = Terminal<CrosstermBackend<Stdout>>;
 
-/// Events from the terminal (keyboard, mouse, resize, ticks, paste).
+/// Events from the terminal (keyboard, mouse, resize, ticks, paste, focus).
 #[derive(Debug)]
 pub enum TermEvent {
     Key(KeyEvent),
     Mouse(MouseAction),
     Paste(String),
     Resize(u16, u16),
+    Focus(bool),
     Tick,
 }
 
@@ -48,6 +51,7 @@ pub fn init_terminal() -> Result<WingTerminal> {
         EnterAlternateScreen,
         EnableBracketedPaste,
         EnableMouseCapture,
+        EnableFocusChange,
         crossterm::cursor::Hide
     )?;
     let backend = CrosstermBackend::new(stdout);
@@ -62,6 +66,7 @@ pub fn restore_terminal(terminal: &mut WingTerminal) -> Result<()> {
         LeaveAlternateScreen,
         DisableBracketedPaste,
         DisableMouseCapture,
+        DisableFocusChange,
         crossterm::cursor::Show
     )?;
     crossterm::terminal::disable_raw_mode()?;
@@ -109,8 +114,11 @@ pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
                             break;
                         }
                     }
-                    Ok(_) => {
-                        // Ignore focus events.
+                    Ok(crossterm::event::Event::FocusGained) => {
+                        let _ = tx.send(TermEvent::Focus(true)).await;
+                    }
+                    Ok(crossterm::event::Event::FocusLost) => {
+                        let _ = tx.send(TermEvent::Focus(false)).await;
                     }
                     Err(e) => {
                         tracing::error!("crossterm read error: {e}");

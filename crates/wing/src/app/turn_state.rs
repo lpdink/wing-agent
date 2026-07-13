@@ -5,6 +5,15 @@ use std::time::Instant;
 use crate::ui::spinner::SpinnerState;
 use crate::ui::status_bar::TurnUsage;
 
+/// Summary of a completed turn result (from TurnResultEvent).
+#[derive(Debug, Clone)]
+pub struct TurnResultSummary {
+    pub subtype: String,
+    pub is_error: bool,
+    pub duration_ms: i64,
+    pub num_turns: i64,
+}
+
 /// Tracks the current agent turn: working flag, timer, spinner, usage.
 #[derive(Default)]
 pub struct TurnState {
@@ -16,6 +25,8 @@ pub struct TurnState {
     pub spinner: SpinnerState,
     /// Per-turn usage (reset on user submit).
     pub usage: TurnUsage,
+    /// Last turn result (set on TurnResult, before Done).
+    pub last_result: Option<TurnResultSummary>,
 }
 
 impl TurnState {
