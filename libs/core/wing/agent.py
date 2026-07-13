@@ -271,7 +271,12 @@ class WingAgent:
             )
             self.emit(DoneEvent(session_id=self.session_id))
         except Exception as e:
-            log.error(f"处理消息失败: {e}")
+            error_detail = f"{type(e).__name__}: {e}"
+            if e.__cause__:
+                error_detail += (
+                    f" (caused by {type(e.__cause__).__name__}: {e.__cause__})"
+                )
+            log.exception(f"处理消息失败: {error_detail}")
             self.emit(
                 TurnResultEvent(
                     session_id=self.session_id,
@@ -280,13 +285,13 @@ class WingAgent:
                     num_turns=ctx.num_turns,
                     duration_ms=ctx.elapsed_ms(),
                     usage=ctx.usage_dict(),
-                    errors=[str(e)],
+                    errors=[error_detail],
                 )
             )
             self.emit(
                 ErrorEvent(
                     session_id=self.session_id,
-                    message=f"处理消息失败：异常：{e}",
+                    message=f"处理消息失败：异常：{error_detail}",
                 )
             )
             self.emit(DoneEvent(session_id=self.session_id))
