@@ -68,6 +68,8 @@ jobs:
 
       - name: Build wing-cli wheel (manylinux_2_28)
         uses: PyO3/maturin-action@v1
+        env:
+          WING_COMMIT_HASH: ${{ github.sha }}
         with:
           working-directory: crates/wing
           args: --release --out ../../dist
@@ -101,6 +103,8 @@ jobs:
 
       - name: Build wing-cli wheel
         working-directory: crates/wing
+        env:
+          WING_COMMIT_HASH: ${{ github.sha }}
         run: maturin build --release --out ../../dist
 
       - uses: actions/upload-artifact@v4
