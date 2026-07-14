@@ -221,10 +221,6 @@ impl App {
                 self.push_intent(AppIntent::FetchCommands);
                 true
             }
-            "/info" => {
-                self.push_intent(AppIntent::FetchInfo);
-                true
-            }
             "/model" => {
                 self.push_intent(AppIntent::FetchModels);
                 true
@@ -1398,24 +1394,37 @@ pub async fn run_app(
                         };
                         match t.http.update_session(&req).await {
                             Ok(_) => {
-                                // Optimistic local update.
+                                // Optimistic local update + success toast.
+                                let mut parts: Vec<String> = Vec::new();
                                 if let Some(m) = model {
-                                    app.status.model = m;
+                                    app.status.model = m.clone();
+                                    parts.push(format!("Model: {m}"));
+                                }
+                                if let Some(a) = agent {
+                                    app.status.agent = Some(a.clone());
+                                    parts.push(format!("Agent: {a}"));
+                                }
+                                if let Some(t) = title {
+                                    app.status.session_name = Some(t.clone());
+                                    parts.push(format!("Title: {t}"));
                                 }
                                 if let Some(t) = thinking {
                                     app.status.thinking = t;
+                                    parts.push(format!("Think: {}", if t { "on" } else { "off" }));
                                 }
                                 if let Some(e) = reasoning_effort {
-                                    app.status.reasoning_effort = Some(e);
+                                    app.status.reasoning_effort = Some(e.clone());
+                                    parts.push(format!("Effort: {e}"));
                                 }
                                 if let Some(y) = yolo {
                                     app.status.yolo = y;
+                                    parts.push(format!("YOLO: {}", if y { "on" } else { "off" }));
                                 }
-                                if let Some(t) = title {
-                                    app.status.session_name = Some(t);
-                                }
-                                if let Some(a) = agent {
-                                    app.status.agent = Some(a);
+                                if !parts.is_empty() {
+                                    app.show_toast(Toast::info(
+                                        parts.join(" · "),
+                                        std::time::Duration::from_secs(3),
+                                    ));
                                 }
                             }
                             Err(e) => {
