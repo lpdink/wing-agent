@@ -2,26 +2,10 @@
 
 from typing import TYPE_CHECKING
 
-from wing.event import CommandInfo, CommandListEvent
-
 from ..registry import magic_registry
 
 if TYPE_CHECKING:
     from wing.agent import WingAgent
-
-
-def _emit_command_list(agent: "WingAgent") -> None:
-    """发出 CommandListEvent 以刷新前端命令缓存。"""
-    commands = [
-        CommandInfo(
-            name=cmd.name,
-            aliases=cmd.aliases,
-            description=cmd.description,
-            params=cmd.params,
-        )
-        for cmd in magic_registry.list_all()
-    ]
-    agent.emit(CommandListEvent(session_id=agent.session_id, commands=commands))
 
 
 @magic_registry.register(
@@ -81,9 +65,6 @@ async def cmd_reload(agent: "WingAgent", args: str) -> str:
         success += 1
     except Exception as e:
         results.append(f"❌ skills & rules: {e}")
-
-    # 6. Emit CommandListEvent to refresh frontend cache
-    _emit_command_list(agent)
 
     prefix = (
         "🔄 Reload complete"

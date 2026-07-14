@@ -28,6 +28,9 @@ pub struct StatusData {
     pub total_tokens: i64,
     pub context_window_tokens: i64,
     pub thinking: bool,
+    pub reasoning_effort: Option<String>,
+    pub yolo: bool,
+    pub agent: Option<String>,
     pub session_name: Option<String>,
     /// Cumulative prompt tokens for the session.
     pub session_prompt_tokens: i64,
@@ -46,6 +49,9 @@ impl Default for StatusData {
             total_tokens: 0,
             context_window_tokens: 0,
             thinking: false,
+            reasoning_effort: None,
+            yolo: false,
+            agent: None,
             session_name: None,
             session_prompt_tokens: 0,
             session_completion_tokens: 0,
@@ -96,7 +102,11 @@ impl Widget for StatusBar<'_> {
         ];
 
         if d.thinking {
-            spans.push(Span::styled(" think", dim));
+            let think_label = match &d.reasoning_effort {
+                Some(effort) => format!(" think:{}", effort),
+                None => " think".to_string(),
+            };
+            spans.push(Span::styled(think_label, dim));
         }
 
         // Build right spans.

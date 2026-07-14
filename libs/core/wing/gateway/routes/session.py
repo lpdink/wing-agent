@@ -14,7 +14,11 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from typing import TYPE_CHECKING
 
+from wing.event import SessionStateChangedEvent
+from wing.event.query_response import BranchTargetInfo
+from wing.event_bus import event_bus
 from wing.gateway.protocol import (
+    BranchesResponse,
     CreateSessionRequest,
     CreateSessionResponse,
     ForkSessionRequest,
@@ -25,9 +29,12 @@ from wing.gateway.protocol import (
     SendMessageRequest,
     SendMessageResponse,
     SessionGetResponse,
+    SessionInfoResponse,
     SessionListResponse,
     SubscribeRequest,
     UnsubscribeRequest,
+    UpdateSessionRequest,
+    UpdateSessionResponse,
 )
 
 if TYPE_CHECKING:
@@ -218,7 +225,6 @@ async def send_message(
 ) -> SendMessageResponse:
     """通过 HTTP 向活跃 session 发送消息。
 
-    `silent` 为 true 时不触发 DeliveredEvent 和 SystemEvent。
     返回 `request_id` 用于前端关联响应。
     """
     server = _get_server(request)
@@ -232,7 +238,6 @@ async def send_message(
         content=body.content,
         request_id=request_id,
         session_id=body.session_id,
-        silent=body.silent,
     )
     return SendMessageResponse(ok=True, request_id=request_id)
 
@@ -272,3 +277,157 @@ async def get_session(
     if state is None:
         raise HTTPException(status_code=404, detail="session not found")
     return SessionGetResponse(**state)
+
+
+# ============================================================
+# Session 运行时查询
+# ============================================================
+
+
+@router.get(
+    "/api/session/info",
+    response_model=SessionInfoResponse,
+    summary="获取 session 运行时状态",
+)
+async def session_info(
+    request: Request,
+    session_id: str = Query(..., description="目标 session ID"),
+) -> SessionInfoResponse:
+    """获取 session 的运行时状态：模型、工具、token 用量等。
+
+    session 不存在时返回 404。
+    """
+    server = _get_server(request)
+    session = server.runtime.sm.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    status = session.agent.get_status()
+    return SessionInfoResponse(
+        model=status["model"],
+        api_url=status["api_url"],
+        tools=status["tools"],
+        total_tokens=status["total_tokens"],
+        context_window_tokens=status["context_window_tokens"],
+        thinking=status["thinking"],
+        reasoning_effort=status["reasoning_effort"],
+        yolo=session.agent.yolo,
+        session_name=session.session_name,
+    )
+
+
+@router.get(
+    "/api/session/branches",
+    response_model=BranchesResponse,
+    summary="获取可回退/分叉的消息节点",
+)
+async def session_branches(
+    request: Request,
+    session_id: str = Query(..., description="目标 session ID"),
+) -> BranchesResponse:
+    """获取 session 的可回退/分叉消息节点列表。
+
+    用于 /rewind 和 /fork 命令的候选面板。session 不存在时返回 404。
+    """
+    server = _get_server(request)
+    session = server.runtime.sm.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    raw_targets = session.agent.context_manager.get_branch_targets()
+    targets = [BranchTargetInfo(**t) for t in raw_targets]
+    return BranchesResponse(targets=targets)
+
+
+# ============================================================
+# Session 状态变更
+# ============================================================
+
+
+@router.post(
+    "/api/session/update",
+    response_model=UpdateSessionResponse,
+    summary="更新 session 状态",
+)
+async def update_session(
+    body: UpdateSessionRequest,
+    request: Request,
+) -> UpdateSessionResponse:
+    """统一的 session 状态变更端点。
+
+    支持模型切换、agent 模板切换、标题设置、thinking/yolo 模式开关及推理力度设置。
+    多字段同时更新时按 agent → model → title → thinking → reasoning_effort → yolo 顺序执行。
+    至少提供一个非 None 字段，否则返回 400。session 不存在时返回 404。
+    """
+    server = _get_server(request)
+
+    # 校验至少提供一个更新字段
+    if all(
+        v is None
+        for v in (
+            body.model,
+            body.agent,
+            body.title,
+            body.thinking,
+            body.reasoning_effort,
+            body.yolo,
+        )
+    ):
+        raise HTTPException(
+            status_code=400, detail="at least one update field is required"
+        )
+
+    session = server.runtime.sm.get_session(body.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    # 按 agent → model → title → thinking → reasoning_effort → yolo 顺序执行
+    if body.agent is not None:
+        template = server.runtime.template_manager.get(body.agent)
+        if template is None:
+            available = server.runtime.template_manager.all_names
+            raise HTTPException(
+                status_code=400,
+                detail=f"template '{body.agent}' not found, available: {available}",
+            )
+        await session.switch_template(template)
+
+    if body.model is not None:
+        session.agent.model = body.model
+
+    if body.title is not None:
+        session.set_title(body.title)
+
+    if body.thinking is not None:
+        session.agent.model_provider.set_thinking(body.thinking)
+
+    if body.reasoning_effort is not None:
+        session.agent.set_reasoning_effort(body.reasoning_effort)
+
+    if body.yolo is not None:
+        session.agent.set_yolo(body.yolo)
+
+    # emit SessionStateChangedEvent 通知前端状态已变更
+    # agent 切换会重置 thinking/reasoning_effort/yolo，需同步报告新值
+    agent_switched = body.agent is not None
+    event_bus.emit(
+        SessionStateChangedEvent(
+            session_id=session.session_id,
+            model=session.agent.model
+            if body.model is not None or agent_switched
+            else None,
+            thinking=session.agent.model_provider.thinking
+            if body.thinking is not None or agent_switched
+            else None,
+            reasoning_effort=session.agent.model_provider.reasoning_effort
+            if body.reasoning_effort is not None or agent_switched
+            else None,
+            yolo=session.agent.yolo
+            if body.yolo is not None or agent_switched
+            else None,
+            title=session.session_name if body.title is not None else None,
+            agent=session.template_name if agent_switched else None,
+        )
+    )
+
+    return UpdateSessionResponse(ok=True)

@@ -227,36 +227,15 @@ pub enum WingEvent {
         meta: EventMeta,
     },
 
-    /// Session list response.
-    #[serde(rename = "session_list")]
-    SessionList {
-        #[serde(default)]
-        sessions: Vec<SessionInfo>,
-        #[serde(flatten)]
-        meta: EventMeta,
-    },
-
-    /// Session attributes updated.
-    #[serde(rename = "session_updated")]
-    SessionUpdated {
-        name: Option<String>,
-        #[serde(flatten)]
-        meta: EventMeta,
-    },
-
-    /// Model switched.
-    #[serde(rename = "model_switched")]
-    ModelSwitched {
-        old_model: String,
-        new_model: String,
-        #[serde(flatten)]
-        meta: EventMeta,
-    },
-
-    /// Think mode toggled.
-    #[serde(rename = "think_toggled")]
-    ThinkToggled {
-        enabled: bool,
+    /// Session state changed — unified event for model/thinking/yolo/title/agent updates.
+    #[serde(rename = "session_state_changed")]
+    SessionStateChanged {
+        model: Option<String>,
+        thinking: Option<bool>,
+        reasoning_effort: Option<String>,
+        yolo: Option<bool>,
+        title: Option<String>,
+        agent: Option<String>,
         #[serde(flatten)]
         meta: EventMeta,
     },
@@ -280,15 +259,6 @@ pub enum WingEvent {
     },
 
     // ---- query_response ----
-    /// Magic command list.
-    #[serde(rename = "command_list")]
-    CommandList {
-        #[serde(default)]
-        commands: Vec<CommandInfo>,
-        #[serde(flatten)]
-        meta: EventMeta,
-    },
-
     /// Context usage statistics.
     #[serde(rename = "context_stats")]
     ContextStats {
@@ -307,26 +277,6 @@ pub enum WingEvent {
     BranchTargets {
         #[serde(default)]
         targets: Vec<BranchTargetInfo>,
-        #[serde(flatten)]
-        meta: EventMeta,
-    },
-
-    /// Available model list.
-    #[serde(rename = "model_list")]
-    ModelList {
-        #[serde(default)]
-        models: Vec<String>,
-        current_model: Option<String>,
-        #[serde(flatten)]
-        meta: EventMeta,
-    },
-
-    /// Available agent template list.
-    #[serde(rename = "agent_list")]
-    AgentList {
-        #[serde(default)]
-        agents: Vec<String>,
-        current_agent: Option<String>,
         #[serde(flatten)]
         meta: EventMeta,
     },
@@ -351,25 +301,6 @@ pub enum WingEvent {
         output: String,
         #[serde(default)]
         exit_code: i32,
-        #[serde(flatten)]
-        meta: EventMeta,
-    },
-
-    /// System info for TUI initialization.
-    #[serde(rename = "system_info")]
-    SystemInfo {
-        model: String,
-        #[serde(default = "default_api_url")]
-        api_url: String,
-        #[serde(default)]
-        tools: Vec<String>,
-        #[serde(default)]
-        total_tokens: i64,
-        #[serde(default)]
-        context_window_tokens: i64,
-        #[serde(default)]
-        thinking: bool,
-        session_name: Option<String>,
         #[serde(flatten)]
         meta: EventMeta,
     },
@@ -453,10 +384,6 @@ fn default_status_code() -> i32 {
     500
 }
 
-fn default_api_url() -> String {
-    "unknown".into()
-}
-
 fn default_subtype() -> String {
     "success".into()
 }
@@ -482,20 +409,13 @@ impl WingEvent {
             Self::TurnStarted { .. } => "turn_started",
             Self::DiffContent { .. } => "diff_content",
             Self::SyncSession { .. } => "sync_session",
-            Self::SessionList { .. } => "session_list",
-            Self::SessionUpdated { .. } => "session_updated",
-            Self::ModelSwitched { .. } => "model_switched",
-            Self::ThinkToggled { .. } => "think_toggled",
+            Self::SessionStateChanged { .. } => "session_state_changed",
             Self::Interrupted { .. } => "interrupted",
             Self::CompactDone { .. } => "compact_done",
-            Self::CommandList { .. } => "command_list",
             Self::ContextStats { .. } => "context_stats",
             Self::BranchTargets { .. } => "branch_targets",
-            Self::ModelList { .. } => "model_list",
-            Self::AgentList { .. } => "agent_list",
             Self::SkillsList { .. } => "skills_list",
             Self::ShellCommand { .. } => "shell_command",
-            Self::SystemInfo { .. } => "system_info",
             Self::AssistantTurn { .. } => "assistant_turn",
             Self::ToolResultTurn { .. } => "tool_result_turn",
             Self::TurnResult { .. } => "turn_result",
@@ -520,20 +440,13 @@ impl WingEvent {
             | Self::TurnStarted { meta, .. }
             | Self::DiffContent { meta, .. }
             | Self::SyncSession { meta, .. }
-            | Self::SessionList { meta, .. }
-            | Self::SessionUpdated { meta, .. }
-            | Self::ModelSwitched { meta, .. }
-            | Self::ThinkToggled { meta, .. }
+            | Self::SessionStateChanged { meta, .. }
             | Self::Interrupted { meta, .. }
             | Self::CompactDone { meta, .. }
-            | Self::CommandList { meta, .. }
             | Self::ContextStats { meta, .. }
             | Self::BranchTargets { meta, .. }
-            | Self::ModelList { meta, .. }
-            | Self::AgentList { meta, .. }
             | Self::SkillsList { meta, .. }
             | Self::ShellCommand { meta, .. }
-            | Self::SystemInfo { meta, .. }
             | Self::AssistantTurn { meta, .. }
             | Self::ToolResultTurn { meta, .. }
             | Self::TurnResult { meta, .. }
@@ -588,32 +501,32 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_system_info_event() {
+    fn deserialize_session_state_changed_event() {
         let json = r#"{
-            "type": "system_info",
+            "type": "session_state_changed",
             "model": "gpt-4o",
-            "api_url": "https://api.openai.com",
-            "tools": ["Bash", "Read"],
-            "total_tokens": 1000,
-            "context_window_tokens": 80000,
-            "thinking": false,
+            "thinking": true,
             "created_at": "2025-01-01T00:00:00",
             "session_id": "abc123",
             "request_id": "req3"
         }"#;
         let event: WingEvent = serde_json::from_str(json).unwrap();
         match event {
-            WingEvent::SystemInfo {
+            WingEvent::SessionStateChanged {
                 model,
-                tools,
-                total_tokens,
+                thinking,
+                yolo,
+                title,
+                agent,
                 ..
             } => {
-                assert_eq!(model, "gpt-4o");
-                assert_eq!(tools.len(), 2);
-                assert_eq!(total_tokens, 1000);
+                assert_eq!(model, Some("gpt-4o".to_string()));
+                assert_eq!(thinking, Some(true));
+                assert_eq!(yolo, None);
+                assert_eq!(title, None);
+                assert_eq!(agent, None);
             }
-            _ => panic!("expected SystemInfo"),
+            _ => panic!("expected SessionStateChanged"),
         }
     }
 

@@ -59,7 +59,6 @@ class WingRuntime:
         request_id: str | None = None,
         session_id: str | None = None,
         client_id: str | None = None,
-        silent: bool = False,
     ) -> None:
         """唯一入站入口。设置 RequestContext，try/finally 确保恢复。
 
@@ -82,7 +81,6 @@ class WingRuntime:
                 request_id=request_id,
                 session_id=session_id,
                 client_id=client_id,
-                silent=silent,
             )
         finally:
             reset_request_context(token)

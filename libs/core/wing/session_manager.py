@@ -10,6 +10,7 @@ wing/session_manager.py — SessionManager
   - WingAgent 不知道 SessionManager 的存在——它通过 EventBus 投递事件。
   - EventBus 不知道 WingAgent 的存在——它只是路由管道。
   - 路由表由 WingRuntime 统一管理，SM 不感知 client_id 和 contextvars。
+  - _post() 采用两级分发：/ 开头走 magic_registry，否则走 session.post()
 """
 
 from __future__ import annotations
@@ -32,10 +33,7 @@ from wing.event import (
     EventTarget,
     SessionInfo,
     SystemEvent,
-    SystemInfoEvent,
-    ModelSwitchedEvent,
 )
-from wing.event.query_response import AgentListEvent
 from wing.event_bus import event_bus
 from wing.magic_command.registry import magic_registry
 from wing.schema import Message
@@ -53,7 +51,6 @@ class SessionManager:
 
     内部方法（_ 开头）：
       - _post：消息路由入口，由 WingRuntime 调用
-      - _dispatch_session_command：拦截 /title, /info, /agents
       - _dispatch_magic_command：路由到 magic_registry
 
     外部方法：
@@ -63,9 +60,6 @@ class SessionManager:
 
     路由表由 WingRuntime 统一管理，SM 不感知 client_id 和 contextvars。
     """
-
-    # SM 直接拦截的命令名（不再走 magic_registry）
-    _SESSION_COMMANDS = {"title", "info", "agents"}
 
     def __init__(self, sessions_path: Path | None = None) -> None:
         self._sessions: dict[str, Session] = {}
@@ -411,15 +405,12 @@ class SessionManager:
         request_id: str | None = None,
         session_id: str | None = None,
         client_id: str | None = None,
-        silent: bool = False,
     ) -> None:
         """路由消息到指定 session。（内部方法，由 WingRuntime 调用）
 
         Contextvars 由 WingRuntime.post() 统一管理，此方法不设置/恢复。
 
-        - / 开头 → 先拦截 session 命令（/new, /fork, /session, /ss, /title）
-          → 然后交给 magic_registry
-          → 无法匹配时，路由给 agent 视为用户一般输入
+        - / 开头 → 交给 magic_registry → 无法匹配时，路由给 agent 视为用户一般输入
         - 否则 → session.post() → agent.post()
         """
         assert session_id is not None, "session_id is required by WingRuntime"
@@ -428,39 +419,23 @@ class SessionManager:
             log.error(f"Session not found: {session_id}")
             return
 
-        # DeliveredEvent
-        if not silent:
-            event_bus.emit(
-                DeliveredEvent(
-                    session_id=session.session_id,
-                    target=EventTarget(scope="session"),
-                )
+        # DeliveredEvent（总是 emit）
+        event_bus.emit(
+            DeliveredEvent(
+                session_id=session.session_id,
+                target=EventTarget(scope="session"),
             )
+        )
 
         # 魔术命令路由
         if content.startswith("/"):
-            # 先拦截 session 命令
-            result, new_sid = await self._dispatch_session_command(
-                session, content, client_id
-            )
-            if result is not None:
-                if not silent:
-                    event_bus.emit(
-                        SystemEvent(
-                            session_id=new_sid or session.session_id,
-                            content=result,
-                            target=EventTarget(scope="session"),
-                        )
-                    )
-                return
-
             # 交给 magic_registry
             result = await self._dispatch_magic_command(session, content)
             if result is None:
                 # 命令不匹配，交给 agent 处理
                 await session.post(content, request_id=request_id)
                 return
-            if result is not None and not silent:
+            if result:
                 event_bus.emit(
                     SystemEvent(
                         session_id=session.session_id,
@@ -475,123 +450,6 @@ class SessionManager:
             f"SM._post: routing '{content[:50]}' to session.post (session={session_id})"
         )
         await session.post(content, request_id=request_id)
-
-    # ============================================================
-    # 内部方法：session 命令分发
-    # ============================================================
-
-    async def _dispatch_session_command(
-        self,
-        session: Session,
-        content: str,
-        client_id: str | None,
-    ) -> tuple[str | None, str | None]:
-        """拦截 session 命令：/title, /info, /agents。
-
-        Returns:
-            (result_text, new_session_id): result_text 为 None 表示命令不匹配。
-            new_session_id 非 None 表示产生了新 session（用于 SystemEvent 路由）。
-        """
-        parts = content.lstrip("/").split(maxsplit=1)
-        cmd_name = parts[0]
-        args = parts[1] if len(parts) > 1 else ""
-
-        if cmd_name not in self._SESSION_COMMANDS:
-            return None, None
-
-        if cmd_name == "title":
-            return await self._cmd_title(session, args)
-        elif cmd_name == "info":
-            return self._cmd_info(session)
-        elif cmd_name == "agents":
-            return await self._cmd_agents(session, args)
-
-        return None, None
-
-    async def _cmd_title(
-        self,
-        session: Session,
-        args: str,
-    ) -> tuple[str, None]:
-        """处理 /title [title] 命令。"""
-        if not args:
-            current_name = session.session_name or "(未命名)"
-            return f"当前 session 名称: {current_name}", None
-        title = args.strip()
-        session.set_title(title)
-        return f"✅ Session 名称已设置为: {title}", None
-
-    def _cmd_info(self, session: Session) -> tuple[str, None]:
-        """处理 /info 命令。"""
-        status = session.agent.get_status()
-        event_bus.emit(
-            SystemInfoEvent(
-                session_id=session.session_id,
-                model=status["model"],
-                api_url=status.get("api_url", "unknown"),
-                tools=status.get("tools", []),
-                total_tokens=status.get("total_tokens", 0),
-                context_window_tokens=status.get("context_window_tokens", 0),
-                thinking=status.get("thinking", False),
-                session_name=session.session_name,
-                target=EventTarget(scope="session"),
-            )
-        )
-        return (
-            f"model: {status['model']}\n"
-            f"api: {status.get('api_url', 'unknown')}\n"
-            f"tools: {', '.join(status.get('tools', [])) or 'none'}",
-            None,
-        )
-
-    async def _cmd_agents(
-        self,
-        session: Session,
-        args: str,
-    ) -> tuple[str, None]:
-        """处理 /agents [name] 命令。
-
-        无参数时列出所有模板，有参数时切换到指定模板。
-        """
-        tm = self._template_manager
-
-        if not args:
-            # 列出所有模板
-            agent_names = tm.all_names
-            event_bus.emit(
-                AgentListEvent(
-                    session_id=session.session_id,
-                    agents=agent_names,
-                    current_agent=session.template_name,
-                    target=EventTarget(scope="session"),
-                )
-            )
-            lines = ["📋 Agent 模板:"]
-            for name in agent_names:
-                marker = " ← current" if name == session.template_name else ""
-                default_marker = " (default)" if name == tm.default_name else ""
-                lines.append(f"  - {name}{default_marker}{marker}")
-            return "\n".join(lines), None
-
-        # 切换到指定模板
-        template_name = args.strip()
-        template = tm.get(template_name)
-        if template is None:
-            return (
-                f"❌ Agent 模板 '{template_name}' 不存在。\n"
-                f"可用模板: {', '.join(tm.all_names)}",
-                None,
-            )
-        old_model = session.agent.model
-        await session.switch_template(template)
-        event_bus.emit(
-            ModelSwitchedEvent(
-                session_id=session.session_id,
-                old_model=old_model,
-                new_model=template.model,
-            )
-        )
-        return f"✅ 已切换到 agent 模板: {template_name}", None
 
     async def _dispatch_magic_command(
         self, session: Session, content: str

@@ -6,7 +6,7 @@ WingEvent 统一事件协议 (V2)。
 所有事件均继承 WingEvent 基类，通过 type 字段区分。
 V2 变更：
   - 删除 CreateSessionDoneEvent、SessionActivatedEvent、RewindDoneEvent、ForkDoneEvent
-  - 新增 SyncSessionEvent、ModelListEvent
+  - 新增 SyncSessionEvent、SessionStateChangedEvent
   - 拆分为四个模块：base、react、state_change、query_response
 """
 
@@ -21,15 +21,11 @@ from .base import (
     SystemEvent,
 )
 from .query_response import (
-    AgentListEvent,
     BranchTargetInfo,
     BranchTargetsEvent,
-    CommandListEvent,
     ContextStatsEvent,
-    ModelListEvent,
     SkillsListEvent,
     ShellCommandEvent,
-    SystemInfoEvent,
 )
 from .react import (
     AskEvent,
@@ -48,12 +44,9 @@ from .react import (
 from .state_change import (
     CompactDoneEvent,
     InterruptedEvent,
-    ModelSwitchedEvent,
     SessionInitEvent,
-    SessionListEvent,
-    SessionUpdatedEvent,
+    SessionStateChangedEvent,
     SyncSessionEvent,
-    ThinkToggledEvent,
 )
 
 # 事件类型总集（便于类型检查）
@@ -72,23 +65,16 @@ WingEventUnion = (
     | AssistantTurnEvent
     | ToolResultTurnEvent
     | TurnResultEvent
-    | SessionListEvent
     | SyncSessionEvent
     | SessionInitEvent
     | DeliveredEvent
-    | ModelSwitchedEvent
-    | ThinkToggledEvent
     | InterruptedEvent
     | CompactDoneEvent
-    | SessionUpdatedEvent
-    | CommandListEvent
+    | SessionStateChangedEvent
     | ContextStatsEvent
     | BranchTargetsEvent
-    | ModelListEvent
-    | AgentListEvent
     | SkillsListEvent
     | ShellCommandEvent
-    | SystemInfoEvent
 )
 
 __all__ = [
@@ -117,22 +103,15 @@ __all__ = [
     # state_change
     "SyncSessionEvent",
     "SessionInitEvent",
-    "SessionListEvent",
-    "SessionUpdatedEvent",
-    "ModelSwitchedEvent",
-    "ThinkToggledEvent",
     "InterruptedEvent",
     "CompactDoneEvent",
+    "SessionStateChangedEvent",
     # query_response
-    "CommandListEvent",
     "ContextStatsEvent",
     "BranchTargetInfo",
     "BranchTargetsEvent",
-    "ModelListEvent",
-    "AgentListEvent",
     "SkillsListEvent",
     "ShellCommandEvent",
-    "SystemInfoEvent",
     # union
     "WingEventUnion",
 ]

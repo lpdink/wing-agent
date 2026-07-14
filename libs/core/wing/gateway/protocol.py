@@ -19,7 +19,8 @@ import uuid
 
 from pydantic import BaseModel, Field
 
-from wing.event import AgentInfo, SessionInfo
+from wing.event import AgentInfo, CommandInfo, SessionInfo
+from wing.event.query_response import BranchTargetInfo
 
 
 # ============================================================
@@ -49,9 +50,6 @@ class ClientRequest(BaseModel):
     )
     session_id: str = Field(description="目标 session ID")
     content: str = Field(description="消息内容")
-    silent: bool = Field(
-        default=False, description="静默请求：不触发 DeliveredEvent 和 SystemEvent"
-    )
 
 
 # ============================================================
@@ -117,9 +115,6 @@ class SendMessageRequest(BaseModel):
 
     session_id: str = Field(description="目标 session ID")
     content: str = Field(description="消息内容")
-    silent: bool = Field(
-        default=False, description="静默发送：不触发 DeliveredEvent 和 SystemEvent"
-    )
 
 
 # ============================================================
@@ -196,3 +191,85 @@ class ErrorResponse(BaseModel):
     detail: str | None = Field(default=None, description="错误详细信息")
     session_id: str | None = Field(default=None, description="关联的 session ID")
     uuid: str | None = Field(default=None, description="关联的消息 UUID")
+
+
+# ============================================================
+# Session 查询端点 Response
+# ============================================================
+
+
+class SessionInfoResponse(BaseModel):
+    """GET /api/session/info 响应——session 运行时状态。"""
+
+    model: str = Field(description="当前模型名称")
+    api_url: str = Field(description="API 基础 URL")
+    tools: list[str] = Field(description="已启用的工具名称列表")
+    total_tokens: int = Field(description="当前上下文 token 总数")
+    context_window_tokens: int = Field(description="上下文窗口大小")
+    thinking: bool = Field(description="thinking 模式是否开启")
+    reasoning_effort: str | None = Field(
+        default=None, description="推理力度: low|medium|high|xhigh|max"
+    )
+    yolo: bool = Field(description="yolo 模式是否开启")
+    session_name: str | None = Field(default=None, description="session 名称")
+
+
+class BranchesResponse(BaseModel):
+    """GET /api/session/branches 响应——可回退/分叉的消息节点列表。"""
+
+    targets: list[BranchTargetInfo] = Field(
+        default_factory=list, description="可回退/分叉的消息节点"
+    )
+
+
+# ============================================================
+# Session 更新端点 Request / Response
+# ============================================================
+
+
+class UpdateSessionRequest(BaseModel):
+    """POST /api/session/update 请求——统一 session 状态变更。"""
+
+    session_id: str = Field(description="目标 session ID")
+    model: str | None = Field(default=None, description="切换模型")
+    agent: str | None = Field(default=None, description="切换 agent 模板")
+    title: str | None = Field(default=None, description="设置 session 名称")
+    thinking: bool | None = Field(default=None, description="开关 thinking 模式")
+    reasoning_effort: str | None = Field(
+        default=None, description="推理力度: low|medium|high|xhigh|max"
+    )
+    yolo: bool | None = Field(default=None, description="开关 yolo 模式")
+
+
+class UpdateSessionResponse(BaseModel):
+    """POST /api/session/update 响应。"""
+
+    ok: bool = Field(default=True, description="操作是否成功")
+
+
+# ============================================================
+# 系统级查询端点 Response
+# ============================================================
+
+
+class CommandsResponse(BaseModel):
+    """GET /api/commands 响应——可用命令列表。"""
+
+    commands: list[CommandInfo] = Field(
+        default_factory=list, description="所有已注册的 magic command"
+    )
+
+
+class ModelsResponse(BaseModel):
+    """GET /api/models 响应——可用模型列表。"""
+
+    models: list[str] = Field(default_factory=list, description="可用模型名称列表")
+
+
+class AgentsResponse(BaseModel):
+    """GET /api/agents 响应——可用 agent 模板列表。"""
+
+    agents: list[str] = Field(
+        default_factory=list, description="所有可用 agent 模板名称"
+    )
+    default_agent: str = Field(description="默认 agent 模板名称")

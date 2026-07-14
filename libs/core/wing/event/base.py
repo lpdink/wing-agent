@@ -69,7 +69,7 @@ class AgentInfo(BaseModel):
 
 
 class CommandInfo(BaseModel):
-    """魔术命令元信息，用于 CommandListEvent。"""
+    """魔术命令元信息，用于 HTTP GET /api/commands 端点。"""
 
     name: str
     aliases: list[str] = Field(default_factory=list)

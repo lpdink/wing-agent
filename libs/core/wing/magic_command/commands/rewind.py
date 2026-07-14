@@ -15,25 +15,12 @@ if TYPE_CHECKING:
     name="rewind",
     aliases=["rw"],
     description="回退到指定用户消息",
-    params="[uuid|list]",
+    params="<uuid>",
 )
 async def cmd_rewind(agent: "WingAgent", args: str) -> str:
     cm = agent.context_manager
-    if not args or args.strip() == "list":
-        targets = cm.get_branch_targets()
-        if not targets:
-            return "❌ 没有可回退的用户消息"
-        agent.emit(
-            BranchTargetsEvent(
-                session_id=agent.session_id,
-                targets=[BranchTargetInfo(**t) for t in targets],
-            )
-        )
-        lines = ["📋 可回退的用户消息:"]
-        for item in targets:
-            lines.append(f"  {item['uuid']}  {item['content']}")
-        lines.append("\n使用 /rewind <uuid> 回退到指定消息")
-        return "\n".join(lines)
+    if not args:
+        return "请指定要回退的消息 uuid。使用 /rewind <uuid> 回退到指定消息。"
 
     target_uuid = args.strip()
     try:

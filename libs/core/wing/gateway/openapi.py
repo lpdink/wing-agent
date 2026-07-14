@@ -19,7 +19,11 @@ OPENAPI_VERSION = "0.1.0"
 OPENAPI_TAGS = [
     {
         "name": "session",
-        "description": "Session 生命周期管理——创建、恢复、分叉、订阅、消息发送、查询",
+        "description": "Session 生命周期管理——创建、恢复、分叉、订阅、消息发送、查询、状态变更",
+    },
+    {
+        "name": "system",
+        "description": "系统级查询——命令列表、模型列表、Agent 模板列表",
     },
     {
         "name": "health",

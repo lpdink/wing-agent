@@ -12,9 +12,6 @@ pub enum AppIntent {
     /// Send a user message to the current session via gateway.
     SendMessage { content: String },
 
-    /// Send a silent request (e.g. popup candidate fetching) via gateway.
-    SilentRequest { content: String, request_id: String },
-
     /// Write text to clipboard via OSC52 escape sequence.
     CopyToClipboard(String),
 
@@ -29,6 +26,31 @@ pub enum AppIntent {
 
     /// Fetch session list via HTTP API for popup candidates.
     FetchSessionList,
+
+    /// Fetch session runtime info (model, tokens, thinking, yolo) via HTTP API.
+    FetchInfo,
+
+    /// Fetch available commands list via HTTP API.
+    FetchCommands,
+
+    /// Fetch available model list via HTTP API for popup candidates.
+    FetchModels,
+
+    /// Fetch branch targets via HTTP API for popup candidates.
+    FetchBranches,
+
+    /// Fetch available agent template list via HTTP API for popup candidates.
+    FetchAgents,
+
+    /// Update session state (model, agent, title, thinking, reasoning_effort, yolo) via HTTP API.
+    UpdateSession {
+        model: Option<String>,
+        agent: Option<String>,
+        title: Option<String>,
+        thinking: Option<bool>,
+        reasoning_effort: Option<String>,
+        yolo: Option<bool>,
+    },
 
     /// Set the terminal title via OSC 0 escape sequence.
     SetTitle(String),

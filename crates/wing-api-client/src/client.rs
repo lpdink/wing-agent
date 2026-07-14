@@ -126,12 +126,10 @@ impl GatewayClient {
         &self,
         session_id: &str,
         content: &str,
-        silent: bool,
     ) -> Result<SendMessageResponse, ApiClientError> {
         let body = SendMessageRequest {
             session_id: session_id.to_owned(),
             content: content.to_owned(),
-            silent,
         };
         self.post_json("/api/session/send", &body).await
     }
@@ -163,6 +161,101 @@ impl GatewayClient {
             .http
             .get(format!("{}{}", self.base_url, "/api/session/get"))
             .query(&[("session_id", session_id)])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
+    // ============================================================
+    // Session 查询
+    // ============================================================
+
+    /// 获取 session 的运行时状态：模型、工具、token 用量等。
+    pub async fn get_session_info(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionInfoResponse, ApiClientError> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, "/api/session/info"))
+            .query(&[("session_id", session_id)])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// 获取 session 的可回退/分叉消息节点列表。
+    pub async fn get_branches(&self, session_id: &str) -> Result<BranchesResponse, ApiClientError> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, "/api/session/branches"))
+            .query(&[("session_id", session_id)])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
+    // ============================================================
+    // Session 更新
+    // ============================================================
+
+    /// 更新 session 状态（模型切换、agent 切换、标题设置、thinking/yolo 开关）。
+    pub async fn update_session(
+        &self,
+        req: &UpdateSessionRequest,
+    ) -> Result<UpdateSessionResponse, ApiClientError> {
+        self.post_json("/api/session/update", req).await
+    }
+
+    // ============================================================
+    // 系统级查询
+    // ============================================================
+
+    /// 获取可用命令列表。
+    pub async fn get_commands(&self) -> Result<CommandsResponse, ApiClientError> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, "/api/commands"))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// 获取可用模型列表。
+    pub async fn get_models(&self) -> Result<ModelsResponse, ApiClientError> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, "/api/models"))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// 获取可用 agent 模板列表。
+    pub async fn get_agents(&self) -> Result<AgentsResponse, ApiClientError> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, "/api/agents"))
             .send()
             .await?;
 
