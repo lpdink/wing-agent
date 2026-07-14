@@ -435,13 +435,14 @@ class SessionManager:
                 # 命令不匹配，交给 agent 处理
                 await session.post(content, request_id=request_id)
                 return
-            event_bus.emit(
-                SystemEvent(
-                    session_id=session.session_id,
-                    content=result,
-                    target=EventTarget(scope="session"),
+            if result:
+                event_bus.emit(
+                    SystemEvent(
+                        session_id=session.session_id,
+                        content=result,
+                        target=EventTarget(scope="session"),
+                    )
                 )
-            )
             return
 
         # 非 / 开头：通过 Session.post 投递

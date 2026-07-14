@@ -579,3 +579,81 @@ class TestSMPostNoContextvars:
         delivered = [e for e in received if e.type == "delivered"]
         assert len(delivered) >= 1
         assert delivered[0].request_id != "direct-call"
+
+
+# ============================================================
+# /think 和 /yolo emit SessionStateChangedEvent
+# ============================================================
+
+
+class TestMagicCommandEmitsStateChanged:
+    """/think 和 /yolo magic command 应 emit SessionStateChangedEvent。"""
+
+    @pytest.mark.asyncio
+    async def test_think_on_emits_state_changed_event(self, runtime: Any):
+        """/think on emit SessionStateChangedEvent(thinking=True)。"""
+        received: list = []
+        event_bus.subscribe(lambda e: received.append(e))
+
+        session = runtime.create_session()
+        await runtime.post(
+            "/think on",
+            session_id=session.session_id,
+        )
+
+        state_events = [e for e in received if e.type == "session_state_changed"]
+        assert len(state_events) == 1
+        assert state_events[0].thinking is True
+
+    @pytest.mark.asyncio
+    async def test_think_off_emits_state_changed_event(self, runtime: Any):
+        """/think off emit SessionStateChangedEvent(thinking=False)。"""
+        session = runtime.create_session()
+        # 先开启
+        session.agent.model_provider.set_thinking(True)
+
+        received: list = []
+        event_bus.subscribe(lambda e: received.append(e))
+
+        await runtime.post(
+            "/think off",
+            session_id=session.session_id,
+        )
+
+        state_events = [e for e in received if e.type == "session_state_changed"]
+        assert len(state_events) == 1
+        assert state_events[0].thinking is False
+
+    @pytest.mark.asyncio
+    async def test_yolo_on_emits_state_changed_event(self, runtime: Any):
+        """/yolo on emit SessionStateChangedEvent(yolo=True)。"""
+        received: list = []
+        event_bus.subscribe(lambda e: received.append(e))
+
+        session = runtime.create_session()
+        await runtime.post(
+            "/yolo on",
+            session_id=session.session_id,
+        )
+
+        state_events = [e for e in received if e.type == "session_state_changed"]
+        assert len(state_events) == 1
+        assert state_events[0].yolo is True
+
+    @pytest.mark.asyncio
+    async def test_yolo_off_emits_state_changed_event(self, runtime: Any):
+        """/yolo off emit SessionStateChangedEvent(yolo=False)。"""
+        session = runtime.create_session()
+        session.agent.set_yolo(True)
+
+        received: list = []
+        event_bus.subscribe(lambda e: received.append(e))
+
+        await runtime.post(
+            "/yolo off",
+            session_id=session.session_id,
+        )
+
+        state_events = [e for e in received if e.type == "session_state_changed"]
+        assert len(state_events) == 1
+        assert state_events[0].yolo is False

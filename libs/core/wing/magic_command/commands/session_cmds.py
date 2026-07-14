@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     params="[name]",
 )
 async def cmd_new(agent: "WingAgent", args: str) -> str:
-    """占位——实际由 SM._dispatch_session_command 处理。"""
+    """占位——实际由前端通过 HTTP 端点处理。"""
     return ""
 
 
@@ -31,7 +31,7 @@ async def cmd_new(agent: "WingAgent", args: str) -> str:
     params="[session_id]",
 )
 async def cmd_session(agent: "WingAgent", args: str) -> str:
-    """占位——实际由 SM._dispatch_session_command 处理。"""
+    """占位——实际由前端通过 HTTP 端点处理。"""
     return ""
 
 
@@ -42,5 +42,5 @@ async def cmd_session(agent: "WingAgent", args: str) -> str:
     params="<uuid>",
 )
 async def cmd_fork(agent: "WingAgent", args: str) -> str:
-    """占位——实际由 SM._dispatch_session_command 处理。"""
+    """占位——实际由前端通过 HTTP 端点处理。"""
     return ""

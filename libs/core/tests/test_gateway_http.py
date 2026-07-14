@@ -511,6 +511,13 @@ class TestSessionUpdate:
         mock_session.agent.model = "gpt-4o"
         mock_session.agent.yolo = False
         mock_session.agent.model_provider.thinking = False
+        # set_thinking / set_yolo 需实际更新属性，否则 emit 读到旧值
+        mock_session.agent.model_provider.set_thinking.side_effect = lambda v: setattr(
+            mock_session.agent.model_provider, "thinking", v
+        )
+        mock_session.agent.set_yolo.side_effect = lambda v: setattr(
+            mock_session.agent, "yolo", v
+        )
         mock_session.switch_template = AsyncMock()
         mock_runtime.sm.get_session.return_value = mock_session
 
@@ -620,6 +627,74 @@ class TestSessionUpdate:
             json={"session_id": "xxx", "model": "gpt-4o"},
         )
         assert resp.status_code == 404
+
+    @patch("wing.gateway.routes.session.event_bus")
+    def test_update_model_emits_state_changed_event(
+        self, mock_bus, client: TestClient, mock_runtime
+    ):
+        """更新模型后 emit SessionStateChangedEvent，仅携带变更字段。"""
+        mock_session = self._make_mock_session(mock_runtime)
+        mock_session.agent.model = "gpt-4o-mini"  # 更新后的值
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "model": "gpt-4o-mini"},
+        )
+        assert resp.status_code == 200
+        mock_bus.emit.assert_called_once()
+        event = mock_bus.emit.call_args[0][0]
+        assert event.type == "session_state_changed"
+        assert event.model == "gpt-4o-mini"
+        assert event.thinking is None
+        assert event.yolo is None
+        assert event.title is None
+        assert event.agent is None
+
+    @patch("wing.gateway.routes.session.event_bus")
+    def test_update_multi_fields_emits_state_changed_event(
+        self, mock_bus, client: TestClient, mock_runtime
+    ):
+        """多字段同时更新后 emit SessionStateChangedEvent，携带所有变更字段。"""
+        mock_session = self._make_mock_session(mock_runtime)
+        mock_session.agent.model = "gpt-4o-mini"
+        mock_session.session_name = "new title"
+        mock_session.template_name = "coder"
+        resp = client.post(
+            "/api/session/update",
+            json={
+                "session_id": "test-id",
+                "agent": "coder",
+                "model": "gpt-4o-mini",
+                "title": "new title",
+                "thinking": True,
+                "yolo": True,
+            },
+        )
+        assert resp.status_code == 200
+        mock_bus.emit.assert_called_once()
+        event = mock_bus.emit.call_args[0][0]
+        assert event.type == "session_state_changed"
+        assert event.model == "gpt-4o-mini"
+        assert event.thinking is True
+        assert event.yolo is True
+        assert event.title == "new title"
+        assert event.agent == "coder"
+
+    @patch("wing.gateway.routes.session.event_bus")
+    def test_update_thinking_emits_state_changed_event(
+        self, mock_bus, client: TestClient, mock_runtime
+    ):
+        """切换 thinking 后 emit SessionStateChangedEvent(thinking=True)。"""
+        self._make_mock_session(mock_runtime)
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "thinking": True},
+        )
+        assert resp.status_code == 200
+        mock_bus.emit.assert_called_once()
+        event = mock_bus.emit.call_args[0][0]
+        assert event.type == "session_state_changed"
+        assert event.model is None
+        assert event.thinking is True
 
 
 # ============================================================
