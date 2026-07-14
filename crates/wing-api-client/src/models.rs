@@ -98,8 +98,6 @@ pub struct UnsubscribeRequest {
 pub struct SendMessageRequest {
     pub session_id: String,
     pub content: String,
-    #[serde(default)]
-    pub silent: bool,
 }
 
 // ============================================================
@@ -151,6 +149,107 @@ pub struct SessionGetResponse {
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+}
+
+// ============================================================
+// Session 查询端点 Response
+// ============================================================
+
+/// GET /api/session/info 响应——session 运行时状态。
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionInfoResponse {
+    pub model: String,
+    pub api_url: String,
+    pub tools: Vec<String>,
+    pub total_tokens: i64,
+    pub context_window_tokens: i64,
+    pub thinking: bool,
+    pub yolo: bool,
+    pub session_name: Option<String>,
+}
+
+/// 单个可分叉/回退的消息节点信息。
+#[derive(Debug, Clone, Deserialize)]
+pub struct BranchTargetInfo {
+    pub uuid: String,
+    pub content: String,
+    #[serde(default = "default_role")]
+    pub role: String,
+}
+
+fn default_role() -> String {
+    "user".to_owned()
+}
+
+/// GET /api/session/branches 响应——可回退/分叉的消息节点列表。
+#[derive(Debug, Clone, Deserialize)]
+pub struct BranchesResponse {
+    #[serde(default)]
+    pub targets: Vec<BranchTargetInfo>,
+}
+
+// ============================================================
+// Session 更新端点 Request / Response
+// ============================================================
+
+/// POST /api/session/update 请求——统一 session 状态变更。
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateSessionRequest {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yolo: Option<bool>,
+}
+
+/// POST /api/session/update 响应。
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateSessionResponse {
+    pub ok: bool,
+}
+
+// ============================================================
+// 系统级查询端点 Response
+// ============================================================
+
+/// 魔术命令元信息。
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommandInfo {
+    pub name: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub params: String,
+}
+
+/// GET /api/commands 响应——可用命令列表。
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommandsResponse {
+    #[serde(default)]
+    pub commands: Vec<CommandInfo>,
+}
+
+/// GET /api/models 响应——可用模型列表。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelsResponse {
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+/// GET /api/agents 响应——可用 agent 模板列表。
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentsResponse {
+    #[serde(default)]
+    pub agents: Vec<String>,
+    pub default_agent: String,
 }
 
 /// 服务端返回的错误详情（HTTP 4xx/5xx 时反序列化）。
