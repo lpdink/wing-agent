@@ -51,6 +51,7 @@ from .state_change import (
     ModelSwitchedEvent,
     SessionInitEvent,
     SessionListEvent,
+    SessionStateChangedEvent,
     SessionUpdatedEvent,
     SyncSessionEvent,
     ThinkToggledEvent,
@@ -81,6 +82,7 @@ WingEventUnion = (
     | InterruptedEvent
     | CompactDoneEvent
     | SessionUpdatedEvent
+    | SessionStateChangedEvent
     | CommandListEvent
     | ContextStatsEvent
     | BranchTargetsEvent
@@ -123,6 +125,7 @@ __all__ = [
     "ThinkToggledEvent",
     "InterruptedEvent",
     "CompactDoneEvent",
+    "SessionStateChangedEvent",
     # query_response
     "CommandListEvent",
     "ContextStatsEvent",

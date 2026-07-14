@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -419,3 +419,289 @@ class TestSessionGet:
         mock_runtime.get_session_state.return_value = None
         resp = client.get("/api/session/get", params={"session_id": "xxx"})
         assert resp.status_code == 404
+
+
+# ============================================================
+# Session Info
+# ============================================================
+
+
+class TestSessionInfo:
+    """GET /api/session/info 测试。"""
+
+    def test_info_ok(self, client: TestClient, mock_runtime):
+        """正常获取 session 运行时状态。"""
+        mock_session = MagicMock()
+        mock_session.agent.get_status.return_value = {
+            "model": "gpt-4o",
+            "api_url": "https://api.openai.com",
+            "tools": ["Bash", "Read"],
+            "total_tokens": 1000,
+            "context_window_tokens": 128000,
+            "thinking": True,
+        }
+        mock_session.agent.yolo = False
+        mock_session.session_name = "Test Session"
+        mock_runtime.sm.get_session.return_value = mock_session
+
+        resp = client.get("/api/session/info", params={"session_id": "test-id"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["model"] == "gpt-4o"
+        assert data["api_url"] == "https://api.openai.com"
+        assert data["tools"] == ["Bash", "Read"]
+        assert data["total_tokens"] == 1000
+        assert data["context_window_tokens"] == 128000
+        assert data["thinking"] is True
+        assert data["yolo"] is False
+        assert data["session_name"] == "Test Session"
+
+    def test_info_not_found(self, client: TestClient, mock_runtime):
+        """Session 不存在返回 404。"""
+        mock_runtime.sm.get_session.return_value = None
+        resp = client.get("/api/session/info", params={"session_id": "xxx"})
+        assert resp.status_code == 404
+
+
+# ============================================================
+# Session Branches
+# ============================================================
+
+
+class TestSessionBranches:
+    """GET /api/session/branches 测试。"""
+
+    def test_branches_ok(self, client: TestClient, mock_runtime):
+        """正常获取分支节点列表。"""
+        mock_session = MagicMock()
+        mock_session.agent.context_manager.get_branch_targets.return_value = [
+            {"uuid": "msg-1", "content": "hello", "role": "user"},
+            {"uuid": "msg-2", "content": "world", "role": "user"},
+        ]
+        mock_runtime.sm.get_session.return_value = mock_session
+
+        resp = client.get("/api/session/branches", params={"session_id": "test-id"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["targets"]) == 2
+        assert data["targets"][0]["uuid"] == "msg-1"
+        assert data["targets"][0]["content"] == "hello"
+
+    def test_branches_not_found(self, client: TestClient, mock_runtime):
+        """Session 不存在返回 404。"""
+        mock_runtime.sm.get_session.return_value = None
+        resp = client.get("/api/session/branches", params={"session_id": "xxx"})
+        assert resp.status_code == 404
+
+
+# ============================================================
+# Session Update
+# ============================================================
+
+
+class TestSessionUpdate:
+    """POST /api/session/update 测试。"""
+
+    def _make_mock_session(self, mock_runtime):
+        """创建 mock session 和 template_manager。"""
+        mock_session = MagicMock()
+        mock_session.agent.model = "gpt-4o"
+        mock_session.agent.yolo = False
+        mock_session.switch_template = AsyncMock()
+        mock_runtime.sm.get_session.return_value = mock_session
+
+        mock_template = MagicMock()
+        mock_runtime.template_manager.get.return_value = mock_template
+        mock_runtime.template_manager.all_names = ["default", "coder"]
+        return mock_session
+
+    def test_update_model(self, client: TestClient, mock_runtime):
+        """切换模型。"""
+        mock_session = self._make_mock_session(mock_runtime)
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "model": "gpt-4o-mini"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        assert mock_session.agent.model == "gpt-4o-mini"
+
+    def test_update_agent(self, client: TestClient, mock_runtime):
+        """切换 agent 模板。"""
+        mock_session = self._make_mock_session(mock_runtime)
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "agent": "coder"},
+        )
+        assert resp.status_code == 200
+        mock_session.switch_template.assert_called_once()
+
+    def test_update_agent_not_found(self, client: TestClient, mock_runtime):
+        """模板不存在返回 400。"""
+        self._make_mock_session(mock_runtime)
+        mock_runtime.template_manager.get.return_value = None
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "agent": "nonexistent"},
+        )
+        assert resp.status_code == 400
+        assert "nonexistent" in resp.json()["detail"]
+
+    def test_update_title(self, client: TestClient, mock_runtime):
+        """设置 session 名称。"""
+        mock_session = self._make_mock_session(mock_runtime)
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "title": "my session"},
+        )
+        assert resp.status_code == 200
+        mock_session.set_title.assert_called_once_with("my session")
+
+    def test_update_thinking(self, client: TestClient, mock_runtime):
+        """开关 thinking 模式。"""
+        mock_session = self._make_mock_session(mock_runtime)
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "thinking": True},
+        )
+        assert resp.status_code == 200
+        mock_session.agent.model_provider.set_thinking.assert_called_once_with(True)
+
+    def test_update_yolo(self, client: TestClient, mock_runtime):
+        """开关 yolo 模式。"""
+        mock_session = self._make_mock_session(mock_runtime)
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "yolo": True},
+        )
+        assert resp.status_code == 200
+        mock_session.agent.set_yolo.assert_called_once_with(True)
+
+    def test_update_multi_fields(self, client: TestClient, mock_runtime):
+        """多字段同时更新，按正确顺序执行。"""
+        mock_session = self._make_mock_session(mock_runtime)
+        resp = client.post(
+            "/api/session/update",
+            json={
+                "session_id": "test-id",
+                "agent": "coder",
+                "model": "gpt-4o-mini",
+                "title": "new title",
+                "thinking": True,
+                "yolo": True,
+            },
+        )
+        assert resp.status_code == 200
+        # agent 在前，model 在后
+        mock_session.switch_template.assert_called_once()
+        assert mock_session.agent.model == "gpt-4o-mini"
+        mock_session.set_title.assert_called_once_with("new title")
+        mock_session.agent.model_provider.set_thinking.assert_called_once_with(True)
+        mock_session.agent.set_yolo.assert_called_once_with(True)
+
+    def test_update_all_none(self, client: TestClient, mock_runtime):
+        """所有可选字段均为 None 返回 400。"""
+        self._make_mock_session(mock_runtime)
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id"},
+        )
+        assert resp.status_code == 400
+
+    def test_update_session_not_found(self, client: TestClient, mock_runtime):
+        """Session 不存在返回 404。"""
+        mock_runtime.sm.get_session.return_value = None
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "xxx", "model": "gpt-4o"},
+        )
+        assert resp.status_code == 404
+
+
+# ============================================================
+# System: Commands
+# ============================================================
+
+
+class TestSystemCommands:
+    """GET /api/commands 测试。"""
+
+    @patch("wing.gateway.routes.system.magic_registry")
+    def test_list_commands(self, mock_registry, client: TestClient):
+        """正常获取命令列表。"""
+        mock_cmd = MagicMock()
+        mock_cmd.name = "help"
+        mock_cmd.aliases = ["h", "?"]
+        mock_cmd.description = "显示帮助"
+        mock_cmd.params = ""
+        mock_registry.list_all.return_value = [mock_cmd]
+
+        resp = client.get("/api/commands")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["commands"]) == 1
+        assert data["commands"][0]["name"] == "help"
+        assert data["commands"][0]["aliases"] == ["h", "?"]
+
+
+# ============================================================
+# System: Models
+# ============================================================
+
+
+class TestSystemModels:
+    """GET /api/models 测试。"""
+
+    @patch("wing.gateway.routes.system.OpenAIProvider")
+    def test_list_models_ok(self, mock_provider_cls, client: TestClient):
+        """正常获取模型列表。"""
+        mock_provider = MagicMock()
+
+        async def mock_list_models():
+            return ["gpt-4o", "gpt-4o-mini"]
+
+        mock_provider.list_models = mock_list_models
+        mock_provider_cls.return_value = mock_provider
+
+        resp = client.get("/api/models")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["models"] == ["gpt-4o", "gpt-4o-mini"]
+
+    @patch("wing.gateway.routes.system.OpenAIProvider")
+    def test_list_models_error_returns_empty(
+        self, mock_provider_cls, client: TestClient
+    ):
+        """调用失败时返回空列表。"""
+
+        async def mock_list_models():
+            raise RuntimeError("API error")
+
+        mock_provider = MagicMock()
+        mock_provider.list_models = mock_list_models
+        mock_provider_cls.return_value = mock_provider
+
+        resp = client.get("/api/models")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["models"] == []
+
+
+# ============================================================
+# System: Agents
+# ============================================================
+
+
+class TestSystemAgents:
+    """GET /api/agents 测试。"""
+
+    def test_list_agents(self, client: TestClient, mock_runtime):
+        """正常获取 agent 模板列表。"""
+        mock_runtime.template_manager.all_names = ["default", "coder", "reviewer"]
+        mock_runtime.template_manager.default_name = "default"
+
+        resp = client.get("/api/agents")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["agents"] == ["default", "coder", "reviewer"]
+        assert data["default_agent"] == "default"

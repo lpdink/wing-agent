@@ -58,6 +58,21 @@ class SessionUpdatedEvent(WingEvent):
     name: str | None = None
 
 
+class SessionStateChangedEvent(WingEvent):
+    """统一的 session 级状态变更事件。
+
+    替代 ModelSwitchedEvent + ThinkToggledEvent + SessionUpdatedEvent。
+    所有字段可选，只携带当前值。
+    """
+
+    type: Literal["session_state_changed"] = "session_state_changed"
+    model: str | None = None
+    thinking: bool | None = None
+    yolo: bool | None = None
+    title: str | None = None
+    agent: str | None = None
+
+
 # ============================================================
 # 模型与模式变更
 # ============================================================
