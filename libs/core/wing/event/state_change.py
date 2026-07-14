@@ -1,7 +1,7 @@
 # wing/event/state_change.py — 状态变更类事件
 
 """
-状态变更事件：session 生命周期、模型切换、think 模式、压缩、中断等。
+状态变更事件：session 生命周期、压缩、中断等。
 也包括 SyncSessionEvent——它同步 session 的完整状态。
 """
 
@@ -41,23 +41,6 @@ class SyncSessionEvent(WingEvent):
     draft: str | None = None
 
 
-class SessionListEvent(WingEvent):
-    """返回当前磁盘上存在的所有会话列表。
-
-    响应 /session 命令（无参）。
-    """
-
-    type: Literal["session_list"] = "session_list"
-    sessions: list[Any] = Field(default_factory=list)  # list[SessionInfo]
-
-
-class SessionUpdatedEvent(WingEvent):
-    """session 属性更新，例如重命名。"""
-
-    type: Literal["session_updated"] = "session_updated"
-    name: str | None = None
-
-
 class SessionStateChangedEvent(WingEvent):
     """统一的 session 级状态变更事件。
 
@@ -71,24 +54,6 @@ class SessionStateChangedEvent(WingEvent):
     yolo: bool | None = None
     title: str | None = None
     agent: str | None = None
-
-
-# ============================================================
-# 模型与模式变更
-# ============================================================
-
-
-class ModelSwitchedEvent(WingEvent):
-    type: Literal["model_switched"] = "model_switched"
-    old_model: str
-    new_model: str
-
-
-class ThinkToggledEvent(WingEvent):
-    """思考模式切换（/think on|off）。"""
-
-    type: Literal["think_toggled"] = "think_toggled"
-    enabled: bool
 
 
 class InterruptedEvent(WingEvent):

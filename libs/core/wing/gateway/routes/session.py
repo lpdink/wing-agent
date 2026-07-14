@@ -14,7 +14,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from typing import TYPE_CHECKING
 
+from wing.event import SessionStateChangedEvent
 from wing.event.query_response import BranchTargetInfo
+from wing.event_bus import event_bus
 from wing.gateway.protocol import (
     BranchesResponse,
     CreateSessionRequest,
@@ -223,7 +225,6 @@ async def send_message(
 ) -> SendMessageResponse:
     """通过 HTTP 向活跃 session 发送消息。
 
-    `silent` 为 true 时不触发 DeliveredEvent 和 SystemEvent。
     返回 `request_id` 用于前端关联响应。
     """
     server = _get_server(request)
@@ -237,7 +238,6 @@ async def send_message(
         content=body.content,
         request_id=request_id,
         session_id=body.session_id,
-        silent=body.silent,
     )
     return SendMessageResponse(ok=True, request_id=request_id)
 
@@ -295,7 +295,7 @@ async def session_info(
 ) -> SessionInfoResponse:
     """获取 session 的运行时状态：模型、工具、token 用量等。
 
-    替代原来的 /info silent 请求。session 不存在时返回 404。
+    session 不存在时返回 404。
     """
     server = _get_server(request)
     session = server.runtime.sm.get_session(session_id)
@@ -395,5 +395,21 @@ async def update_session(
 
     if body.yolo is not None:
         session.agent.set_yolo(body.yolo)
+
+    # emit SessionStateChangedEvent 通知前端状态已变更
+    event_bus.emit(
+        SessionStateChangedEvent(
+            session_id=session.session_id,
+            model=session.agent.model
+            if body.model is not None or body.agent is not None
+            else None,
+            thinking=session.agent.model_provider.thinking
+            if body.thinking is not None
+            else None,
+            yolo=session.agent.yolo if body.yolo is not None else None,
+            title=session.session_name if body.title is not None else None,
+            agent=session.template_name if body.agent is not None else None,
+        )
+    )
 
     return UpdateSessionResponse(ok=True)

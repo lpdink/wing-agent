@@ -2,6 +2,8 @@
 
 from typing import TYPE_CHECKING
 
+from wing.event import SessionStateChangedEvent
+
 from ..registry import magic_registry
 from .utils import parse_bool_arg
 
@@ -22,4 +24,5 @@ async def cmd_yolo(agent: "WingAgent", args: str) -> str:
 
     old_val = agent.yolo
     agent.set_yolo(new_yolo)
+    agent.emit(SessionStateChangedEvent(session_id=agent.session_id, yolo=new_yolo))
     return f"yolo: {old_val} → {new_yolo}"

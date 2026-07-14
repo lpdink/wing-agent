@@ -505,8 +505,12 @@ class TestSessionUpdate:
     def _make_mock_session(self, mock_runtime):
         """创建 mock session 和 template_manager。"""
         mock_session = MagicMock()
+        mock_session.session_id = "test-id"
+        mock_session.session_name = "test-session"
+        mock_session.template_name = "default"
         mock_session.agent.model = "gpt-4o"
         mock_session.agent.yolo = False
+        mock_session.agent.model_provider.thinking = False
         mock_session.switch_template = AsyncMock()
         mock_runtime.sm.get_session.return_value = mock_session
 

@@ -508,7 +508,7 @@ class TestPostRouting:
             client_id="test-client",
         )
 
-        # 应该有 DeliveredEvent（因为 silent=False）
+        # 应该有 DeliveredEvent（总是 emit）
         delivered = [e for e in received if e.type == "delivered"]
         assert len(delivered) >= 1
 
@@ -520,7 +520,7 @@ class TestPostRouting:
         received: list = []
         event_bus.subscribe(lambda e: received.append(e))
 
-        # /nonexistent 不是注册的魔术命令，也不是 session 命令
+        # /nonexistent 不是注册的魔术命令
         await runtime.post(
             "/nonexistent",
             session_id=session.session_id,

@@ -50,9 +50,6 @@ class ClientRequest(BaseModel):
     )
     session_id: str = Field(description="目标 session ID")
     content: str = Field(description="消息内容")
-    silent: bool = Field(
-        default=False, description="静默请求：不触发 DeliveredEvent 和 SystemEvent"
-    )
 
 
 # ============================================================
@@ -118,9 +115,6 @@ class SendMessageRequest(BaseModel):
 
     session_id: str = Field(description="目标 session ID")
     content: str = Field(description="消息内容")
-    silent: bool = Field(
-        default=False, description="静默发送：不触发 DeliveredEvent 和 SystemEvent"
-    )
 
 
 # ============================================================

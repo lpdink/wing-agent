@@ -1,7 +1,7 @@
 """Session 生命周期命令（占位）——用于帮助和自动补全。
 
-实际处理在 SM._dispatch_session_command 中提前拦截，
-这里的 handler 不会被调用。仅占位供 magic_registry 列表显示。
+实际处理在 SM._post() 中通过 magic_registry 路由，
+这里的 handler 不会被直接调用。仅占位供 magic_registry 列表显示。
 """
 
 from __future__ import annotations
@@ -42,16 +42,5 @@ async def cmd_session(agent: "WingAgent", args: str) -> str:
     params="<uuid>",
 )
 async def cmd_fork(agent: "WingAgent", args: str) -> str:
-    """占位——实际由 SM._dispatch_session_command 处理。"""
-    return ""
-
-
-@magic_registry.register(
-    name="agents",
-    aliases=[],
-    description="切换agent",
-    params="<uuid>",
-)
-async def cmd_agents(agent: "WingAgent", args: str) -> str:
     """占位——实际由 SM._dispatch_session_command 处理。"""
     return ""
