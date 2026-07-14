@@ -712,6 +712,35 @@ class TestSessionUpdate:
         assert event.model is None
         assert event.thinking is True
 
+    @patch("wing.gateway.routes.session.event_bus")
+    def test_update_agent_emits_reset_state_fields(
+        self, mock_bus, client: TestClient, mock_runtime
+    ):
+        """Agent 切换后 emit 事件携带 switch_template 重置后的 thinking/yolo/reasoning_effort。"""
+        mock_session = self._make_mock_session(mock_runtime)
+        # switch_template 后 agent 的状态（模拟新 template 的默认值）
+        mock_session.agent.model_provider.thinking = True
+        mock_session.agent.model_provider.reasoning_effort = "medium"
+        mock_session.agent.yolo = False
+        mock_session.agent.model = "gpt-4o"
+        mock_session.template_name = "coder"
+
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "agent": "coder"},
+        )
+        assert resp.status_code == 200
+        mock_bus.emit.assert_called_once()
+        event = mock_bus.emit.call_args[0][0]
+        assert event.type == "session_state_changed"
+        assert event.agent == "coder"
+        assert event.model == "gpt-4o"
+        # agent switch 应报告重置后的值，而非 None
+        assert event.thinking is True
+        assert event.reasoning_effort == "medium"
+        assert event.yolo is False
+        assert event.title is None
+
 
 # ============================================================
 # System: Commands

@@ -408,21 +408,25 @@ async def update_session(
         session.agent.set_yolo(body.yolo)
 
     # emit SessionStateChangedEvent 通知前端状态已变更
+    # agent 切换会重置 thinking/reasoning_effort/yolo，需同步报告新值
+    agent_switched = body.agent is not None
     event_bus.emit(
         SessionStateChangedEvent(
             session_id=session.session_id,
             model=session.agent.model
-            if body.model is not None or body.agent is not None
+            if body.model is not None or agent_switched
             else None,
             thinking=session.agent.model_provider.thinking
-            if body.thinking is not None
+            if body.thinking is not None or agent_switched
             else None,
             reasoning_effort=session.agent.model_provider.reasoning_effort
-            if body.reasoning_effort is not None
+            if body.reasoning_effort is not None or agent_switched
             else None,
-            yolo=session.agent.yolo if body.yolo is not None else None,
+            yolo=session.agent.yolo
+            if body.yolo is not None or agent_switched
+            else None,
             title=session.session_name if body.title is not None else None,
-            agent=session.template_name if body.agent is not None else None,
+            agent=session.template_name if agent_switched else None,
         )
     )
 
