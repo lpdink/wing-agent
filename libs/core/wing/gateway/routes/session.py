@@ -310,6 +310,7 @@ async def session_info(
         total_tokens=status["total_tokens"],
         context_window_tokens=status["context_window_tokens"],
         thinking=status["thinking"],
+        reasoning_effort=status["reasoning_effort"],
         yolo=session.agent.yolo,
         session_name=session.session_name,
     )
@@ -354,8 +355,8 @@ async def update_session(
 ) -> UpdateSessionResponse:
     """统一的 session 状态变更端点。
 
-    支持模型切换、agent 模板切换、标题设置、thinking/yolo 模式开关。
-    多字段同时更新时按 agent → model → title → thinking → yolo 顺序执行。
+    支持模型切换、agent 模板切换、标题设置、thinking/yolo 模式开关及推理力度设置。
+    多字段同时更新时按 agent → model → title → thinking → reasoning_effort → yolo 顺序执行。
     至少提供一个非 None 字段，否则返回 400。session 不存在时返回 404。
     """
     server = _get_server(request)
@@ -363,7 +364,14 @@ async def update_session(
     # 校验至少提供一个更新字段
     if all(
         v is None
-        for v in (body.model, body.agent, body.title, body.thinking, body.yolo)
+        for v in (
+            body.model,
+            body.agent,
+            body.title,
+            body.thinking,
+            body.reasoning_effort,
+            body.yolo,
+        )
     ):
         raise HTTPException(
             status_code=400, detail="at least one update field is required"
@@ -373,7 +381,7 @@ async def update_session(
     if session is None:
         raise HTTPException(status_code=404, detail="session not found")
 
-    # 按 agent → model → title → thinking → yolo 顺序执行
+    # 按 agent → model → title → thinking → reasoning_effort → yolo 顺序执行
     if body.agent is not None:
         template = server.runtime.template_manager.get(body.agent)
         if template is None:
@@ -393,6 +401,9 @@ async def update_session(
     if body.thinking is not None:
         session.agent.model_provider.set_thinking(body.thinking)
 
+    if body.reasoning_effort is not None:
+        session.agent.set_reasoning_effort(body.reasoning_effort)
+
     if body.yolo is not None:
         session.agent.set_yolo(body.yolo)
 
@@ -405,6 +416,9 @@ async def update_session(
             else None,
             thinking=session.agent.model_provider.thinking
             if body.thinking is not None
+            else None,
+            reasoning_effort=session.agent.model_provider.reasoning_effort
+            if body.reasoning_effort is not None
             else None,
             yolo=session.agent.yolo if body.yolo is not None else None,
             title=session.session_name if body.title is not None else None,

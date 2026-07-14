@@ -439,6 +439,7 @@ class TestSessionInfo:
             "total_tokens": 1000,
             "context_window_tokens": 128000,
             "thinking": True,
+            "reasoning_effort": "high",
         }
         mock_session.agent.yolo = False
         mock_session.session_name = "Test Session"
@@ -453,6 +454,7 @@ class TestSessionInfo:
         assert data["total_tokens"] == 1000
         assert data["context_window_tokens"] == 128000
         assert data["thinking"] is True
+        assert data["reasoning_effort"] == "high"
         assert data["yolo"] is False
         assert data["session_name"] == "Test Session"
 
@@ -514,6 +516,10 @@ class TestSessionUpdate:
         # set_thinking / set_yolo 需实际更新属性，否则 emit 读到旧值
         mock_session.agent.model_provider.set_thinking.side_effect = lambda v: setattr(
             mock_session.agent.model_provider, "thinking", v
+        )
+        mock_session.agent.model_provider.reasoning_effort = None
+        mock_session.agent.set_reasoning_effort.side_effect = lambda v: setattr(
+            mock_session.agent.model_provider, "reasoning_effort", v
         )
         mock_session.agent.set_yolo.side_effect = lambda v: setattr(
             mock_session.agent, "yolo", v
@@ -577,6 +583,16 @@ class TestSessionUpdate:
         )
         assert resp.status_code == 200
         mock_session.agent.model_provider.set_thinking.assert_called_once_with(True)
+
+    def test_update_reasoning_effort(self, client: TestClient, mock_runtime):
+        """设置推理力度。"""
+        mock_session = self._make_mock_session(mock_runtime)
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "reasoning_effort": "high"},
+        )
+        assert resp.status_code == 200
+        mock_session.agent.set_reasoning_effort.assert_called_once_with("high")
 
     def test_update_yolo(self, client: TestClient, mock_runtime):
         """开关 yolo 模式。"""

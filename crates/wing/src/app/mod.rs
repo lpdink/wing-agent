@@ -241,6 +241,7 @@ impl App {
                         agent: None,
                         title: None,
                         thinking: None,
+                        reasoning_effort: None,
                         yolo: None,
                     });
                     true
@@ -256,6 +257,7 @@ impl App {
                         agent: Some(agent),
                         title: None,
                         thinking: None,
+                        reasoning_effort: None,
                         yolo: None,
                     });
                     true
@@ -271,6 +273,7 @@ impl App {
                         agent: None,
                         title: Some(title),
                         thinking: None,
+                        reasoning_effort: None,
                         yolo: None,
                     });
                     true
@@ -278,45 +281,95 @@ impl App {
                     false
                 }
             }
-            "/think on" => {
-                self.push_intent(AppIntent::UpdateSession {
-                    model: None,
-                    agent: None,
-                    title: None,
-                    thinking: Some(true),
-                    yolo: None,
-                });
-                true
+            _ if text == "/think" || text.starts_with("/think ") => {
+                let args = text.strip_prefix("/think").unwrap().trim().to_lowercase();
+                match args.as_str() {
+                    "" => {
+                        let effort = self.status.reasoning_effort.as_deref().unwrap_or("default");
+                        let msg = format!("think: {} (effort: {})", self.status.thinking, effort);
+                        self.show_toast(Toast::info(&msg, std::time::Duration::from_secs(3)));
+                        true
+                    }
+                    "on" | "true" | "1" => {
+                        self.push_intent(AppIntent::UpdateSession {
+                            model: None,
+                            agent: None,
+                            title: None,
+                            thinking: Some(true),
+                            reasoning_effort: None,
+                            yolo: None,
+                        });
+                        true
+                    }
+                    "off" | "false" | "0" => {
+                        self.push_intent(AppIntent::UpdateSession {
+                            model: None,
+                            agent: None,
+                            title: None,
+                            thinking: Some(false),
+                            reasoning_effort: None,
+                            yolo: None,
+                        });
+                        true
+                    }
+                    "low" | "medium" | "high" | "xhigh" | "max" => {
+                        self.push_intent(AppIntent::UpdateSession {
+                            model: None,
+                            agent: None,
+                            title: None,
+                            thinking: Some(true),
+                            reasoning_effort: Some(args),
+                            yolo: None,
+                        });
+                        true
+                    }
+                    _ => {
+                        self.show_toast(Toast::warning(
+                            "Usage: /think [on|off|low|medium|high|xhigh|max]",
+                            std::time::Duration::from_secs(3),
+                        ));
+                        true
+                    }
+                }
             }
-            "/think off" => {
-                self.push_intent(AppIntent::UpdateSession {
-                    model: None,
-                    agent: None,
-                    title: None,
-                    thinking: Some(false),
-                    yolo: None,
-                });
-                true
-            }
-            "/yolo on" => {
-                self.push_intent(AppIntent::UpdateSession {
-                    model: None,
-                    agent: None,
-                    title: None,
-                    thinking: None,
-                    yolo: Some(true),
-                });
-                true
-            }
-            "/yolo off" => {
-                self.push_intent(AppIntent::UpdateSession {
-                    model: None,
-                    agent: None,
-                    title: None,
-                    thinking: None,
-                    yolo: Some(false),
-                });
-                true
+            _ if text == "/yolo" || text.starts_with("/yolo ") => {
+                let args = text.strip_prefix("/yolo").unwrap().trim().to_lowercase();
+                match args.as_str() {
+                    "" => {
+                        let msg = format!("yolo: {}", self.status.yolo);
+                        self.show_toast(Toast::info(&msg, std::time::Duration::from_secs(3)));
+                        true
+                    }
+                    "on" | "true" | "1" => {
+                        self.push_intent(AppIntent::UpdateSession {
+                            model: None,
+                            agent: None,
+                            title: None,
+                            thinking: None,
+                            reasoning_effort: None,
+                            yolo: Some(true),
+                        });
+                        true
+                    }
+                    "off" | "false" | "0" => {
+                        self.push_intent(AppIntent::UpdateSession {
+                            model: None,
+                            agent: None,
+                            title: None,
+                            thinking: None,
+                            reasoning_effort: None,
+                            yolo: Some(false),
+                        });
+                        true
+                    }
+                    _ => {
+                        self.show_toast(Toast::warning(
+                            "Usage: /yolo [on|off]",
+                            std::time::Duration::from_secs(3),
+                        ));
+                        true
+                    }
+                }
             }
             _ => false,
         }
@@ -575,6 +628,7 @@ impl App {
                                     agent: None,
                                     title: None,
                                     thinking: None,
+                                    reasoning_effort: None,
                                     yolo: None,
                                 }),
                                 "/agents" => Some(AppIntent::UpdateSession {
@@ -582,6 +636,7 @@ impl App {
                                     agent: Some(selected.name.clone()),
                                     title: None,
                                     thinking: None,
+                                    reasoning_effort: None,
                                     yolo: None,
                                 }),
                                 _ => None,
@@ -886,6 +941,7 @@ impl App {
             WingEvent::SessionStateChanged {
                 model,
                 thinking,
+                reasoning_effort,
                 yolo,
                 title,
                 agent,
@@ -896,6 +952,9 @@ impl App {
                 }
                 if let Some(t) = thinking {
                     self.status.thinking = t;
+                }
+                if let Some(e) = reasoning_effort {
+                    self.status.reasoning_effort = Some(e);
                 }
                 if let Some(y) = yolo {
                     self.status.yolo = y;
@@ -1226,6 +1285,7 @@ pub async fn run_app(
                                 app.status.total_tokens = info.total_tokens;
                                 app.status.context_window_tokens = info.context_window_tokens;
                                 app.status.thinking = info.thinking;
+                                app.status.reasoning_effort = info.reasoning_effort;
                                 app.status.yolo = info.yolo;
                                 app.status.session_name = info.session_name;
                                 tracing::info!(
@@ -1323,6 +1383,7 @@ pub async fn run_app(
                     agent,
                     title,
                     thinking,
+                    reasoning_effort,
                     yolo,
                 } => {
                     if let Some(t) = &transport {
@@ -1332,6 +1393,7 @@ pub async fn run_app(
                             agent: agent.clone(),
                             title: title.clone(),
                             thinking,
+                            reasoning_effort: reasoning_effort.clone(),
                             yolo,
                         };
                         match t.http.update_session(&req).await {
@@ -1342,6 +1404,9 @@ pub async fn run_app(
                                 }
                                 if let Some(t) = thinking {
                                     app.status.thinking = t;
+                                }
+                                if let Some(e) = reasoning_effort {
+                                    app.status.reasoning_effort = Some(e);
                                 }
                                 if let Some(y) = yolo {
                                     app.status.yolo = y;

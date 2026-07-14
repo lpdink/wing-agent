@@ -42,12 +42,13 @@ pub enum AppIntent {
     /// Fetch available agent template list via HTTP API for popup candidates.
     FetchAgents,
 
-    /// Update session state (model, agent, title, thinking, yolo) via HTTP API.
+    /// Update session state (model, agent, title, thinking, reasoning_effort, yolo) via HTTP API.
     UpdateSession {
         model: Option<String>,
         agent: Option<String>,
         title: Option<String>,
         thinking: Option<bool>,
+        reasoning_effort: Option<String>,
         yolo: Option<bool>,
     },
 

@@ -207,6 +207,9 @@ class SessionInfoResponse(BaseModel):
     total_tokens: int = Field(description="当前上下文 token 总数")
     context_window_tokens: int = Field(description="上下文窗口大小")
     thinking: bool = Field(description="thinking 模式是否开启")
+    reasoning_effort: str | None = Field(
+        default=None, description="推理力度: low|medium|high|xhigh|max"
+    )
     yolo: bool = Field(description="yolo 模式是否开启")
     session_name: str | None = Field(default=None, description="session 名称")
 
@@ -232,6 +235,9 @@ class UpdateSessionRequest(BaseModel):
     agent: str | None = Field(default=None, description="切换 agent 模板")
     title: str | None = Field(default=None, description="设置 session 名称")
     thinking: bool | None = Field(default=None, description="开关 thinking 模式")
+    reasoning_effort: str | None = Field(
+        default=None, description="推理力度: low|medium|high|xhigh|max"
+    )
     yolo: bool | None = Field(default=None, description="开关 yolo 模式")
 
 

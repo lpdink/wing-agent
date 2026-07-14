@@ -6,6 +6,8 @@
 //! - Prefix matching with sort (exact > prefix)
 //! - Sub-command candidates (model list, session list, etc.)
 
+use std::sync::LazyLock;
+
 use super::selection::SelectionRow;
 use crate::protocol::CommandInfo;
 
@@ -37,17 +39,93 @@ const CANDIDATE_COMMANDS: &[(&str, PopupAction)] = &[
 const LOCAL_CANDIDATE_COMMANDS: &[&str] = &["/copy"];
 
 /// TUI-only commands (not served by gateway) — always appended as fallback.
-const TUI_ONLY_COMMANDS: &[(&str, &str)] = &[
-    ("/clear", "Clear chat view"),
-    ("/copy", "Copy assistant message"),
-];
+///
+/// These are commands handled entirely by the TUI (via `try_http_command()` or
+/// local logic). The full `CommandInfo` structure allows the popup to display
+/// aliases and parameter hints.
+static TUI_ONLY_COMMANDS: LazyLock<Vec<CommandInfo>> = LazyLock::new(|| {
+    vec![
+        CommandInfo {
+            name: "clear".into(),
+            aliases: vec![],
+            description: "Clear chat view".into(),
+            params: String::new(),
+        },
+        CommandInfo {
+            name: "copy".into(),
+            aliases: vec![],
+            description: "Copy assistant message".into(),
+            params: "[N]".into(),
+        },
+        CommandInfo {
+            name: "new".into(),
+            aliases: vec![],
+            description: "Create new session".into(),
+            params: "[name]".into(),
+        },
+        CommandInfo {
+            name: "session".into(),
+            aliases: vec!["ss".into()],
+            description: "Switch or list sessions".into(),
+            params: "[session_id]".into(),
+        },
+        CommandInfo {
+            name: "fork".into(),
+            aliases: vec![],
+            description: "Fork session at message".into(),
+            params: "<uuid>".into(),
+        },
+        CommandInfo {
+            name: "help".into(),
+            aliases: vec!["h".into(), "?".into()],
+            description: "Show available commands".into(),
+            params: String::new(),
+        },
+        CommandInfo {
+            name: "info".into(),
+            aliases: vec![],
+            description: "Show session info".into(),
+            params: String::new(),
+        },
+        CommandInfo {
+            name: "model".into(),
+            aliases: vec!["m".into()],
+            description: "Switch or show model".into(),
+            params: "[name]".into(),
+        },
+        CommandInfo {
+            name: "agents".into(),
+            aliases: vec![],
+            description: "Switch or show agent template".into(),
+            params: "[name]".into(),
+        },
+        CommandInfo {
+            name: "title".into(),
+            aliases: vec![],
+            description: "Set session title".into(),
+            params: "<name>".into(),
+        },
+        CommandInfo {
+            name: "think".into(),
+            aliases: vec!["t".into()],
+            description: "Toggle thinking / set effort".into(),
+            params: "on|off|low|medium|high|xhigh|max".into(),
+        },
+        CommandInfo {
+            name: "yolo".into(),
+            aliases: vec![],
+            description: "Toggle YOLO mode".into(),
+            params: "on|off".into(),
+        },
+    ]
+});
 
 /// Check if a bare name (without `/`) matches a TUI-only command (case-insensitive).
 pub fn is_tui_only_command(bare_name: &str) -> bool {
     let lower = bare_name.to_lowercase();
-    TUI_ONLY_COMMANDS
-        .iter()
-        .any(|(name, _)| name[1..].to_lowercase() == lower)
+    TUI_ONLY_COMMANDS.iter().any(|cmd| {
+        cmd.name.to_lowercase() == lower || cmd.aliases.iter().any(|a| a.to_lowercase() == lower)
+    })
 }
 
 /// Check if a command name has HTTP-fetched sub-command candidates.
@@ -130,10 +208,15 @@ pub fn filter_commands(commands: &[CommandInfo], filter: &str) -> Vec<SelectionR
     // TUI-only fallbacks (skip if already provided by gateway).
     let gateway_names: std::collections::HashSet<&str> =
         commands.iter().map(|c| c.name.as_str()).collect();
-    for (name, desc) in TUI_ONLY_COMMANDS {
-        let bare = &name[1..];
-        if !gateway_names.contains(bare) {
-            try_add(name, desc);
+    for cmd in TUI_ONLY_COMMANDS.iter() {
+        if !gateway_names.contains(cmd.name.as_str()) {
+            let full_name = format!("/{}", cmd.name);
+            let desc = if cmd.params.is_empty() {
+                cmd.description.clone()
+            } else {
+                format!("{} {}", cmd.description, cmd.params)
+            };
+            try_add(&full_name, &desc);
         }
     }
 

@@ -51,6 +51,7 @@ class SessionStateChangedEvent(WingEvent):
     type: Literal["session_state_changed"] = "session_state_changed"
     model: str | None = None
     thinking: bool | None = None
+    reasoning_effort: str | None = None
     yolo: bool | None = None
     title: str | None = None
     agent: str | None = None

@@ -232,6 +232,7 @@ pub enum WingEvent {
     SessionStateChanged {
         model: Option<String>,
         thinking: Option<bool>,
+        reasoning_effort: Option<String>,
         yolo: Option<bool>,
         title: Option<String>,
         agent: Option<String>,

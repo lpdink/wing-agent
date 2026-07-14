@@ -164,6 +164,7 @@ pub struct SessionInfoResponse {
     pub total_tokens: i64,
     pub context_window_tokens: i64,
     pub thinking: bool,
+    pub reasoning_effort: Option<String>,
     pub yolo: bool,
     pub session_name: Option<String>,
 }
@@ -204,6 +205,8 @@ pub struct UpdateSessionRequest {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub yolo: Option<bool>,
 }
