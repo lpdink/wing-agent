@@ -193,7 +193,7 @@ pub struct BranchesResponse {
 // ============================================================
 
 /// POST /api/session/update 请求——统一 session 状态变更。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct UpdateSessionRequest {
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -8,6 +8,7 @@ use command::PopupAction;
 use command::candidate_request_for;
 use command::filter_candidates;
 use command::filter_commands;
+use command::is_local_candidate_command;
 use command::is_session_command;
 use command::parse_slash_input;
 use selection::SelectionRow;
@@ -45,9 +46,7 @@ pub enum ActivePopup {
 impl ActivePopup {
     /// Update popup state based on current input text.
     ///
-    /// Returns an optional action to fetch candidates.
-    /// - `SilentRequest(String)`: WS silent request for gateway-served commands.
-    /// - `FetchSessionList`: HTTP fetch for `/session` and `/ss`.
+    /// Returns an optional action to fetch candidates via HTTP.
     pub fn update_from_input(&mut self, text: &str, cache: &CandidateCache) -> Option<PopupAction> {
         let Some((cmd, args)) = parse_slash_input(text) else {
             *self = Self::None;
@@ -92,9 +91,8 @@ impl ActivePopup {
             return Some(PopupAction::FetchSessionList);
         }
 
-        // Check if we're in sub-command mode (command + space + args).
-        if let Some(request) = candidate_request_for(cmd) {
-            // Check if candidates are cached.
+        // Check if we're in sub-command mode for local-only candidates (e.g. /copy).
+        if is_local_candidate_command(cmd) {
             if let Some(candidates) = cache.get_for_command(cmd) {
                 // Hide popup if args exactly match a candidate.
                 if !args.is_empty() {
@@ -111,11 +109,7 @@ impl ActivePopup {
                 let count = rows.len();
                 let filter = args.to_string();
                 // /copy: newest message is the expected default.
-                let state = if cmd == "/copy" {
-                    SelectionState::new_selecting_last(count)
-                } else {
-                    SelectionState::new(count)
-                };
+                let state = SelectionState::new_selecting_last(count);
                 *self = Self::SubCommand {
                     command: cmd.to_string(),
                     filter,
@@ -124,15 +118,38 @@ impl ActivePopup {
                 };
                 return None;
             }
+            *self = Self::None;
+            return None;
+        }
 
-            // Candidates not cached.
-            // Local-only commands (empty request): nothing to fetch, no popup.
-            if request.is_empty() {
-                *self = Self::None;
+        // Check if we're in sub-command mode for HTTP-fetched candidates.
+        if let Some(action) = candidate_request_for(cmd) {
+            // Check if candidates are cached.
+            if let Some(candidates) = cache.get_for_command(cmd) {
+                // Hide popup if args exactly match a candidate.
+                if !args.is_empty() {
+                    let args_lower = args.to_lowercase();
+                    if candidates
+                        .iter()
+                        .any(|(id, _)| id.to_lowercase() == args_lower)
+                    {
+                        *self = Self::None;
+                        return None;
+                    }
+                }
+                let rows = filter_candidates(candidates, args);
+                let count = rows.len();
+                let filter = args.to_string();
+                *self = Self::SubCommand {
+                    command: cmd.to_string(),
+                    filter,
+                    rows,
+                    state: SelectionState::new(count),
+                };
                 return None;
             }
 
-            // Show command popup while waiting for gateway response.
+            // Candidates not cached — show command popup while fetching.
             let filter = cmd[1..].to_string();
             let rows = filter_commands(&cache.commands, &filter);
             let count = rows.len();
@@ -141,7 +158,7 @@ impl ActivePopup {
                 rows,
                 state: SelectionState::new(count),
             };
-            return Some(PopupAction::SilentRequest(request.to_string()));
+            return Some(action.clone());
         }
 
         // Default: command list popup.
@@ -228,7 +245,9 @@ impl ActivePopup {
             Self::None => None,
             Self::Command { rows, state, .. } => {
                 let row = rows.get(state.selected)?;
-                if candidate_request_for(&row.name).is_some() {
+                let has_candidates = candidate_request_for(&row.name).is_some()
+                    || is_local_candidate_command(&row.name);
+                if has_candidates {
                     Some(format!("{} ", row.name))
                 } else {
                     Some(row.name.to_string())
@@ -256,6 +275,7 @@ impl ActivePopup {
             Self::Command { rows, state, .. } => {
                 if let Some(row) = rows.get(state.selected) {
                     candidate_request_for(&row.name).is_none()
+                        && !is_local_candidate_command(&row.name)
                 } else {
                     false
                 }
@@ -461,12 +481,12 @@ mod tests {
     }
 
     #[test]
-    fn test_fork_still_uses_silent_request() {
+    fn test_fork_triggers_fetch_branches() {
         use command::PopupAction;
 
         let mut popup = ActivePopup::default();
         let cache = CandidateCache::default();
         let action = popup.update_from_input("/fork ", &cache);
-        assert!(matches!(action, Some(PopupAction::SilentRequest(_))));
+        assert!(matches!(action, Some(PopupAction::FetchBranches)));
     }
 }

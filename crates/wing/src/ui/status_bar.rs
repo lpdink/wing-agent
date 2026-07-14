@@ -28,6 +28,8 @@ pub struct StatusData {
     pub total_tokens: i64,
     pub context_window_tokens: i64,
     pub thinking: bool,
+    pub yolo: bool,
+    pub agent: Option<String>,
     pub session_name: Option<String>,
     /// Cumulative prompt tokens for the session.
     pub session_prompt_tokens: i64,
@@ -46,6 +48,8 @@ impl Default for StatusData {
             total_tokens: 0,
             context_window_tokens: 0,
             thinking: false,
+            yolo: false,
+            agent: None,
             session_name: None,
             session_prompt_tokens: 0,
             session_completion_tokens: 0,

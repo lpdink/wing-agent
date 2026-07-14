@@ -3,35 +3,7 @@
 //! Centralizing these avoids typos, eases grep-ability, and makes
 //! protocol-level changes visible in one place.
 
-// ── Silent request IDs (frontend → gateway) ─────────────────────
-
-/// Request ID for the initial `/info` query on startup.
-pub const INIT_INFO_REQUEST_ID: &str = "_init_info";
-
-/// Request ID for fetching the command list via `/help`.
-pub const POPUP_HELP_REQUEST_ID: &str = "_popup_help";
-
-// ── Popup dedup request IDs ────────────────────────────────────
-
-/// Dedup key for model list popup.
-pub const POPUP_MODEL_REQUEST_ID: &str = "_popup_model";
-
-/// Dedup key for session list popup.
-pub const POPUP_SESSION_REQUEST_ID: &str = "_popup_session";
-
-/// Dedup key for branch targets (rewind/fork) popup.
-pub const POPUP_REWIND_REQUEST_ID: &str = "_popup_rewind_list";
-
-/// Dedup key for agent list popup.
-pub const POPUP_AGENTS_REQUEST_ID: &str = "_popup_agents";
-
 // ── Magic commands (frontend → gateway) ─────────────────────────
-
-/// Request system info.
-pub const INFO_COMMAND: &str = "/info";
-
-/// Request available commands list.
-pub const HELP_COMMAND: &str = "/help";
 
 /// Interrupt the current agent turn.
 pub const INTERRUPT_COMMAND: &str = "/interrupt";

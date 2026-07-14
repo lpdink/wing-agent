@@ -54,16 +54,8 @@ use title::AttentionKind;
 use self::constants::CLEAR_COMMAND;
 use self::constants::COPY_COMMAND;
 use self::constants::FORK_COMMAND;
-use self::constants::HELP_COMMAND;
-use self::constants::INFO_COMMAND;
-use self::constants::INIT_INFO_REQUEST_ID;
 use self::constants::INTERRUPT_COMMAND;
 use self::constants::NEW_COMMAND;
-use self::constants::POPUP_AGENTS_REQUEST_ID;
-use self::constants::POPUP_HELP_REQUEST_ID;
-use self::constants::POPUP_MODEL_REQUEST_ID;
-use self::constants::POPUP_REWIND_REQUEST_ID;
-use self::constants::POPUP_SESSION_REQUEST_ID;
 use self::constants::SESSION_COMMAND;
 use self::constants::SS_COMMAND;
 use self::constants::TOOL_BASH;
@@ -215,6 +207,117 @@ impl App {
                 self.push_intent(AppIntent::CreateSession { workspace: None });
                 true
             }
+            _ => self.try_http_command(text),
+        }
+    }
+
+    /// Try to handle `text` as an HTTP-migrated magic command.
+    ///
+    /// Commands that were previously sent via WS silent are now intercepted
+    /// and converted to HTTP API intents.
+    fn try_http_command(&mut self, text: &str) -> bool {
+        match text {
+            "/help" | "/h" | "/?" => {
+                self.push_intent(AppIntent::FetchCommands);
+                true
+            }
+            "/info" => {
+                self.push_intent(AppIntent::FetchInfo);
+                true
+            }
+            "/model" => {
+                self.push_intent(AppIntent::FetchModels);
+                true
+            }
+            "/agents" => {
+                self.push_intent(AppIntent::FetchAgents);
+                true
+            }
+            _ if text.starts_with("/model ") => {
+                let model = text.strip_prefix("/model ").unwrap().trim().to_string();
+                if !model.is_empty() {
+                    self.push_intent(AppIntent::UpdateSession {
+                        model: Some(model),
+                        agent: None,
+                        title: None,
+                        thinking: None,
+                        yolo: None,
+                    });
+                    true
+                } else {
+                    false
+                }
+            }
+            _ if text.starts_with("/agents ") => {
+                let agent = text.strip_prefix("/agents ").unwrap().trim().to_string();
+                if !agent.is_empty() {
+                    self.push_intent(AppIntent::UpdateSession {
+                        model: None,
+                        agent: Some(agent),
+                        title: None,
+                        thinking: None,
+                        yolo: None,
+                    });
+                    true
+                } else {
+                    false
+                }
+            }
+            _ if text.starts_with("/title ") => {
+                let title = text.strip_prefix("/title ").unwrap().trim().to_string();
+                if !title.is_empty() {
+                    self.push_intent(AppIntent::UpdateSession {
+                        model: None,
+                        agent: None,
+                        title: Some(title),
+                        thinking: None,
+                        yolo: None,
+                    });
+                    true
+                } else {
+                    false
+                }
+            }
+            "/think on" => {
+                self.push_intent(AppIntent::UpdateSession {
+                    model: None,
+                    agent: None,
+                    title: None,
+                    thinking: Some(true),
+                    yolo: None,
+                });
+                true
+            }
+            "/think off" => {
+                self.push_intent(AppIntent::UpdateSession {
+                    model: None,
+                    agent: None,
+                    title: None,
+                    thinking: Some(false),
+                    yolo: None,
+                });
+                true
+            }
+            "/yolo on" => {
+                self.push_intent(AppIntent::UpdateSession {
+                    model: None,
+                    agent: None,
+                    title: None,
+                    thinking: None,
+                    yolo: Some(true),
+                });
+                true
+            }
+            "/yolo off" => {
+                self.push_intent(AppIntent::UpdateSession {
+                    model: None,
+                    agent: None,
+                    title: None,
+                    thinking: None,
+                    yolo: Some(false),
+                });
+                true
+            }
             _ => false,
         }
     }
@@ -250,8 +353,8 @@ impl App {
 
     /// Update popup state based on current input text.
     ///
-    /// Skips silent requests while the agent is streaming to avoid interference.
-    /// Uses a sent-request set to prevent duplicate silent requests.
+    /// Skips requests while the agent is streaming to avoid interference.
+    /// HTTP calls are idempotent — no dedup needed.
     fn update_popup(&mut self) {
         use crate::ui::popup::command::PopupAction;
 
@@ -263,19 +366,16 @@ impl App {
                 return;
             }
             match action {
-                PopupAction::SilentRequest(request) => {
-                    let req_id = format!("_popup_{}", request.replace(' ', "_"));
-                    // Dedup: don't re-send if already pending.
-                    if self.popup.should_send_request(&req_id) {
-                        self.popup.mark_sent(req_id.clone());
-                        self.push_intent(AppIntent::SilentRequest {
-                            content: request,
-                            request_id: req_id,
-                        });
-                    }
+                PopupAction::FetchModels => {
+                    self.push_intent(AppIntent::FetchModels);
+                }
+                PopupAction::FetchBranches => {
+                    self.push_intent(AppIntent::FetchBranches);
+                }
+                PopupAction::FetchAgents => {
+                    self.push_intent(AppIntent::FetchAgents);
                 }
                 PopupAction::FetchSessionList => {
-                    // HTTP fetch is idempotent — no dedup needed.
                     self.push_intent(AppIntent::FetchSessionList);
                 }
             }
@@ -451,8 +551,8 @@ impl App {
             }
             crossterm::event::KeyCode::Enter => {
                 if self.popup.active.should_submit() {
-                    // Session lifecycle commands: intercept popup selection
-                    // and produce intents directly (no input box roundtrip).
+                    // Session lifecycle + state update commands: intercept popup
+                    // selection and produce intents directly (no input box roundtrip).
                     let lifecycle_intent = if let ActivePopup::SubCommand {
                         command,
                         rows,
@@ -470,6 +570,20 @@ impl App {
                                         session_id: selected.name.clone(),
                                     })
                                 }
+                                "/model" => Some(AppIntent::UpdateSession {
+                                    model: Some(selected.name.clone()),
+                                    agent: None,
+                                    title: None,
+                                    thinking: None,
+                                    yolo: None,
+                                }),
+                                "/agents" => Some(AppIntent::UpdateSession {
+                                    model: None,
+                                    agent: Some(selected.name.clone()),
+                                    title: None,
+                                    thinking: None,
+                                    yolo: None,
+                                }),
                                 _ => None,
                             })
                     } else {
@@ -554,27 +668,6 @@ impl App {
 
         match event {
             // ---- Lifecycle events ----
-            WingEvent::SystemInfo {
-                model,
-                api_url: _,
-                tools,
-                total_tokens,
-                context_window_tokens,
-                thinking,
-                session_name,
-                ..
-            } => {
-                self.status.model = model.clone();
-                self.status.total_tokens = total_tokens;
-                self.status.context_window_tokens = context_window_tokens;
-                self.status.thinking = thinking;
-                self.status.session_name = session_name;
-                tracing::info!(
-                    model = %self.status.model,
-                    tools = ?tools,
-                    "system info received"
-                );
-            }
             WingEvent::Delivered { .. } => {
                 // Transport-level ack — does NOT enter working state.
                 // Working is triggered by TurnStarted (agent-level event).
@@ -755,27 +848,8 @@ impl App {
             }
 
             // ---- Candidate list events (for popup) ----
-            WingEvent::CommandList { commands, .. } => {
-                self.popup.cache.commands = commands;
-                self.popup.clear_dedup(POPUP_HELP_REQUEST_ID);
-                self.update_popup();
-            }
-            WingEvent::ModelList { models, .. } => {
-                self.popup.cache.models = models.into_iter().map(|m| (m, String::new())).collect();
-                self.popup.clear_dedup(POPUP_MODEL_REQUEST_ID);
-                self.update_popup();
-            }
-            WingEvent::SessionList { sessions, .. } => {
-                self.popup.cache.sessions = sessions
-                    .iter()
-                    .map(|s| {
-                        let desc = s.name.as_deref().unwrap_or("").to_string();
-                        (s.id.clone(), desc)
-                    })
-                    .collect();
-                self.popup.clear_dedup(POPUP_SESSION_REQUEST_ID);
-                self.update_popup();
-            }
+            // Note: CommandList, ModelList, AgentList, SessionList removed — now via HTTP.
+            // BranchTargets is still emitted by /rewind <uuid> after execution.
             WingEvent::BranchTargets { targets, .. } => {
                 self.popup.cache.branches = targets
                     .iter()
@@ -785,12 +859,6 @@ impl App {
                         (t.uuid.clone(), preview)
                     })
                     .collect();
-                self.popup.clear_dedup(POPUP_REWIND_REQUEST_ID);
-                self.update_popup();
-            }
-            WingEvent::AgentList { agents, .. } => {
-                self.popup.cache.agents = agents.into_iter().map(|a| (a, String::new())).collect();
-                self.popup.clear_dedup(POPUP_AGENTS_REQUEST_ID);
                 self.update_popup();
             }
 
@@ -815,11 +883,29 @@ impl App {
                     "context stats"
                 );
             }
-            WingEvent::ModelSwitched { new_model, .. } => {
-                self.status.model = new_model.clone();
-            }
-            WingEvent::ThinkToggled { enabled, .. } => {
-                self.status.thinking = enabled;
+            WingEvent::SessionStateChanged {
+                model,
+                thinking,
+                yolo,
+                title,
+                agent,
+                ..
+            } => {
+                if let Some(m) = model {
+                    self.status.model = m;
+                }
+                if let Some(t) = thinking {
+                    self.status.thinking = t;
+                }
+                if let Some(y) = yolo {
+                    self.status.yolo = y;
+                }
+                if let Some(t) = title {
+                    self.status.session_name = Some(t);
+                }
+                if let Some(a) = agent {
+                    self.status.agent = Some(a);
+                }
             }
             WingEvent::SyncSession {
                 session_id,
@@ -862,13 +948,6 @@ impl App {
 
                 self.refresh_copy_candidates();
             }
-            WingEvent::SessionUpdated { name, .. } => {
-                // Update session attributes (e.g. renamed by /title).
-                if let Some(session_name) = name {
-                    self.status.session_name = Some(session_name);
-                }
-            }
-
             // ---- Turn result (rich completion data) ----
             WingEvent::TurnResult {
                 subtype,
@@ -1089,22 +1168,9 @@ pub async fn run_app(
     let mut reconnect_attempt: u32 = 0;
     let mut reconnect_at = std::time::Instant::now();
 
-    // Request system info on startup.
-    if let Some(t) = &transport {
-        if let Err(e) =
-            t.ws.send_silent(&app.session_id, INFO_COMMAND, INIT_INFO_REQUEST_ID)
-                .await
-        {
-            tracing::warn!("failed to send /info: {e}");
-        }
-        // Fetch dynamic command list for popup.
-        if let Err(e) =
-            t.ws.send_silent(&app.session_id, HELP_COMMAND, POPUP_HELP_REQUEST_ID)
-                .await
-        {
-            tracing::warn!("failed to send /help: {e}");
-        }
-    }
+    // Request system info on startup via HTTP intents.
+    app.push_intent(AppIntent::FetchInfo);
+    app.push_intent(AppIntent::FetchCommands);
 
     // Set initial terminal title.
     {
@@ -1152,16 +1218,148 @@ pub async fn run_app(
                     }
                     // transport is None → silently discard (disconnected).
                 }
-                AppIntent::SilentRequest {
-                    content,
-                    request_id,
+                AppIntent::FetchInfo => {
+                    if let Some(t) = &transport {
+                        match t.http.get_session_info(&app.session_id).await {
+                            Ok(info) => {
+                                app.status.model = info.model;
+                                app.status.total_tokens = info.total_tokens;
+                                app.status.context_window_tokens = info.context_window_tokens;
+                                app.status.thinking = info.thinking;
+                                app.status.yolo = info.yolo;
+                                app.status.session_name = info.session_name;
+                                tracing::info!(
+                                    model = %app.status.model,
+                                    "session info received"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!("get session info failed: {e}");
+                            }
+                        }
+                    }
+                }
+                AppIntent::FetchCommands => {
+                    if let Some(t) = &transport {
+                        match t.http.get_commands().await {
+                            Ok(resp) => {
+                                app.popup.cache.commands = resp
+                                    .commands
+                                    .into_iter()
+                                    .map(|c| crate::protocol::CommandInfo {
+                                        name: c.name,
+                                        aliases: c.aliases,
+                                        description: c.description,
+                                        params: c.params,
+                                    })
+                                    .collect();
+                                app.update_popup();
+                            }
+                            Err(e) => {
+                                tracing::warn!("get commands failed: {e}");
+                            }
+                        }
+                    }
+                }
+                AppIntent::FetchModels => {
+                    if let Some(t) = &transport {
+                        match t.http.get_models().await {
+                            Ok(resp) => {
+                                app.popup.cache.models = resp
+                                    .models
+                                    .into_iter()
+                                    .map(|m| (m, String::new()))
+                                    .collect();
+                                app.update_popup();
+                            }
+                            Err(e) => {
+                                tracing::warn!("get models failed: {e}");
+                            }
+                        }
+                    }
+                }
+                AppIntent::FetchBranches => {
+                    if let Some(t) = &transport {
+                        match t.http.get_branches(&app.session_id).await {
+                            Ok(resp) => {
+                                app.popup.cache.branches = resp
+                                    .targets
+                                    .into_iter()
+                                    .map(|t| {
+                                        let preview =
+                                            crate::ui::cells::tool_call::truncate_by_chars(
+                                                &t.content, 80,
+                                            );
+                                        (t.uuid, preview)
+                                    })
+                                    .collect();
+                                app.update_popup();
+                            }
+                            Err(e) => {
+                                tracing::warn!("get branches failed: {e}");
+                            }
+                        }
+                    }
+                }
+                AppIntent::FetchAgents => {
+                    if let Some(t) = &transport {
+                        match t.http.get_agents().await {
+                            Ok(resp) => {
+                                app.popup.cache.agents = resp
+                                    .agents
+                                    .into_iter()
+                                    .map(|a| (a, String::new()))
+                                    .collect();
+                                app.update_popup();
+                            }
+                            Err(e) => {
+                                tracing::warn!("get agents failed: {e}");
+                            }
+                        }
+                    }
+                }
+                AppIntent::UpdateSession {
+                    model,
+                    agent,
+                    title,
+                    thinking,
+                    yolo,
                 } => {
-                    if let Some(t) = &transport
-                        && let Err(e) =
-                            t.ws.send_silent(&app.session_id, &content, &request_id)
-                                .await
-                    {
-                        tracing::warn!("failed to send silent request: {e}");
+                    if let Some(t) = &transport {
+                        let req = wing_api_client::models::UpdateSessionRequest {
+                            session_id: app.session_id.clone(),
+                            model: model.clone(),
+                            agent: agent.clone(),
+                            title: title.clone(),
+                            thinking,
+                            yolo,
+                        };
+                        match t.http.update_session(&req).await {
+                            Ok(_) => {
+                                // Optimistic local update.
+                                if let Some(m) = model {
+                                    app.status.model = m;
+                                }
+                                if let Some(t) = thinking {
+                                    app.status.thinking = t;
+                                }
+                                if let Some(y) = yolo {
+                                    app.status.yolo = y;
+                                }
+                                if let Some(t) = title {
+                                    app.status.session_name = Some(t);
+                                }
+                                if let Some(a) = agent {
+                                    app.status.agent = Some(a);
+                                }
+                            }
+                            Err(e) => {
+                                app.show_toast(Toast::error(
+                                    format!("Update failed: {e}"),
+                                    std::time::Duration::from_secs(3),
+                                ));
+                            }
+                        }
                     }
                 }
                 AppIntent::CreateSession { workspace } => {
@@ -1398,15 +1596,9 @@ pub async fn run_app(
                         ));
                         reconnect_attempt = 0;
 
-                        // Re-request /info and /help.
-                        if let Some(t) = &transport {
-                            let _ = t.ws.send_silent(
-                                &app.session_id, INFO_COMMAND, INIT_INFO_REQUEST_ID,
-                            ).await;
-                            let _ = t.ws.send_silent(
-                                &app.session_id, HELP_COMMAND, POPUP_HELP_REQUEST_ID,
-                            ).await;
-                        }
+                        // Re-request info and commands via HTTP intents.
+                        app.push_intent(AppIntent::FetchInfo);
+                        app.push_intent(AppIntent::FetchCommands);
                     }
                     Err(e) => {
                         reconnect_attempt += 1;

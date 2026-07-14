@@ -11,27 +11,30 @@ use crate::protocol::CommandInfo;
 
 /// Action to take when popup candidates need to be fetched.
 ///
-/// Replaces the old `Option<String>` return from `update_from_input()`.
-/// Allows distinguishing between WS silent requests and HTTP fetches.
+/// Each variant maps to a specific HTTP API call or intent.
 #[derive(Debug, Clone)]
 pub enum PopupAction {
-    /// Send a WS silent request to fetch candidates (existing behavior).
-    SilentRequest(String),
+    /// Fetch model list via HTTP API for popup candidates.
+    FetchModels,
+    /// Fetch branch targets via HTTP API for popup candidates.
+    FetchBranches,
+    /// Fetch agent template list via HTTP API for popup candidates.
+    FetchAgents,
     /// Fetch session list via HTTP API (Phase 3c).
     FetchSessionList,
 }
 
-/// Commands that have sub-command candidates. Maps command name to silent request.
-const CANDIDATE_COMMANDS: &[(&str, &str)] = &[
-    ("/model", "/model"),
-    ("/fork", "/rewind list"),
-    ("/rewind", "/rewind list"),
-    ("/agents", "/agents"),
-    // Local-only: "" = no gateway request, candidates populated by App.
-    // If a second local-select-execute command appears, extract a
-    // ModalSelect variant from ActivePopup instead of extending this pattern.
-    ("/copy", ""),
+/// Commands that have sub-command candidates fetched via HTTP.
+/// Maps command name to the corresponding PopupAction.
+const CANDIDATE_COMMANDS: &[(&str, PopupAction)] = &[
+    ("/model", PopupAction::FetchModels),
+    ("/fork", PopupAction::FetchBranches),
+    ("/rewind", PopupAction::FetchBranches),
+    ("/agents", PopupAction::FetchAgents),
 ];
+
+/// Local-only candidate commands — candidates populated by App, no fetch needed.
+const LOCAL_CANDIDATE_COMMANDS: &[&str] = &["/copy"];
 
 /// TUI-only commands (not served by gateway) — always appended as fallback.
 const TUI_ONLY_COMMANDS: &[(&str, &str)] = &[
@@ -47,12 +50,17 @@ pub fn is_tui_only_command(bare_name: &str) -> bool {
         .any(|(name, _)| name[1..].to_lowercase() == lower)
 }
 
-/// Check if a command name has sub-command candidates.
-pub fn candidate_request_for(name: &str) -> Option<&'static str> {
+/// Check if a command name has HTTP-fetched sub-command candidates.
+pub fn candidate_request_for(name: &str) -> Option<&'static PopupAction> {
     CANDIDATE_COMMANDS
         .iter()
         .find(|(n, _)| *n == name)
-        .map(|(_, req)| *req)
+        .map(|(_, action)| action)
+}
+
+/// Check if a command name has locally-populated sub-command candidates.
+pub fn is_local_candidate_command(name: &str) -> bool {
+    LOCAL_CANDIDATE_COMMANDS.contains(&name)
 }
 
 /// Check if a command is a session command (`/session` or `/ss`).
@@ -173,15 +181,15 @@ pub fn filter_candidates(candidates: &[(String, String)], args: &str) -> Vec<Sel
 /// sent to the gateway on completion; `description` is display-only.
 #[derive(Debug, Clone, Default)]
 pub struct CandidateCache {
-    /// Dynamic command list from gateway (CommandListEvent).
+    /// Dynamic command list from HTTP GET /api/commands.
     pub commands: Vec<CommandInfo>,
-    /// Model list (from ModelListEvent). Description is empty.
+    /// Model list from HTTP GET /api/models. Description is empty.
     pub models: Vec<(String, String)>,
-    /// Session list (from SessionListEvent). Description is session name.
+    /// Session list from HTTP GET /api/session/list. Description is session name.
     pub sessions: Vec<(String, String)>,
-    /// Branch targets (from BranchTargetsEvent). Description is content preview.
+    /// Branch targets from HTTP GET /api/session/branches or WS BranchTargetsEvent.
     pub branches: Vec<(String, String)>,
-    /// Agent list (from AgentListEvent). Description is empty.
+    /// Agent list from HTTP GET /api/agents. Description is empty.
     pub agents: Vec<(String, String)>,
     /// Copy candidates (local-only). `(1-based index, first-line preview)`.
     pub copies: Vec<(String, String)>,
@@ -331,13 +339,36 @@ mod tests {
 
     #[test]
     fn test_candidate_request_for() {
-        assert_eq!(candidate_request_for("/model"), Some("/model"));
+        assert!(matches!(
+            candidate_request_for("/model"),
+            Some(PopupAction::FetchModels)
+        ));
+        assert!(matches!(
+            candidate_request_for("/fork"),
+            Some(PopupAction::FetchBranches)
+        ));
+        assert!(matches!(
+            candidate_request_for("/rewind"),
+            Some(PopupAction::FetchBranches)
+        ));
+        assert!(matches!(
+            candidate_request_for("/agents"),
+            Some(PopupAction::FetchAgents)
+        ));
         // /ss and /session removed from CANDIDATE_COMMANDS (Phase 3c: HTTP-fetched).
-        assert_eq!(candidate_request_for("/ss"), None);
-        assert_eq!(candidate_request_for("/session"), None);
-        assert_eq!(candidate_request_for("/fork"), Some("/rewind list"));
-        assert_eq!(candidate_request_for("/help"), None);
-        assert_eq!(candidate_request_for("/nonexistent"), None);
+        assert!(candidate_request_for("/ss").is_none());
+        assert!(candidate_request_for("/session").is_none());
+        assert!(candidate_request_for("/help").is_none());
+        assert!(candidate_request_for("/nonexistent").is_none());
+        // /copy is a local candidate command, not in CANDIDATE_COMMANDS.
+        assert!(candidate_request_for("/copy").is_none());
+    }
+
+    #[test]
+    fn test_is_local_candidate_command() {
+        assert!(is_local_candidate_command("/copy"));
+        assert!(!is_local_candidate_command("/model"));
+        assert!(!is_local_candidate_command("/help"));
     }
 
     #[test]
