@@ -302,24 +302,8 @@ fn apply_update_session(
     .collect();
 
     // Apply to local status.
-    if let Some(m) = model {
-        app.status.model = m;
-    }
-    if let Some(a) = agent {
-        app.status.agent = Some(a);
-    }
-    if let Some(t) = title {
-        app.status.session_name = Some(t);
-    }
-    if let Some(t) = thinking {
-        app.status.thinking = t;
-    }
-    if let Some(e) = reasoning_effort {
-        app.status.reasoning_effort = Some(e);
-    }
-    if let Some(y) = yolo {
-        app.status.yolo = y;
-    }
+    app.status
+        .apply_session_update(model, thinking, reasoning_effort, yolo, title, agent);
 
     if !parts.is_empty() {
         app.show_toast(Toast::info(

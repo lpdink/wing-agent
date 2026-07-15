@@ -113,6 +113,39 @@ pub struct App {
     connected: bool,
 }
 
+// ---------------------------------------------------------------------------
+// Command parsing helpers
+// ---------------------------------------------------------------------------
+
+/// Classified result of parsing a boolean-style argument.
+#[derive(Debug)]
+enum BoolArg {
+    /// No argument provided (empty string).
+    Empty,
+    /// `"on"`, `"true"`, or `"1"`.
+    On,
+    /// `"off"`, `"false"`, or `"0"`.
+    Off,
+    /// Any other value (already lowercased).
+    Other(String),
+}
+
+/// Classify a boolean toggle argument.
+fn parse_bool_arg(raw: &str) -> BoolArg {
+    match raw.to_lowercase().as_str() {
+        "on" | "true" | "1" => BoolArg::On,
+        "off" | "false" | "0" => BoolArg::Off,
+        "" => BoolArg::Empty,
+        _ => BoolArg::Other(raw.to_lowercase()),
+    }
+}
+
+/// Strip `prefix` from `text`, trim, and return `Some` if non-empty.
+fn parse_string_arg(text: &str, prefix: &str) -> Option<String> {
+    let value = text.strip_prefix(prefix)?.trim().to_string();
+    if value.is_empty() { None } else { Some(value) }
+}
+
 impl App {
     pub fn new(session_id: String, config: AppConfig) -> Self {
         let palette = ThemePalette::from_config(&config.colors);
@@ -266,8 +299,7 @@ impl App {
                 true
             }
             _ if text.starts_with("/model ") => {
-                let model = text.strip_prefix("/model ").unwrap().trim().to_string();
-                if !model.is_empty() {
+                if let Some(model) = parse_string_arg(text, "/model ") {
                     self.push_intent(AppIntent::set_model(model));
                     true
                 } else {
@@ -275,8 +307,7 @@ impl App {
                 }
             }
             _ if text.starts_with("/agents ") => {
-                let agent = text.strip_prefix("/agents ").unwrap().trim().to_string();
-                if !agent.is_empty() {
+                if let Some(agent) = parse_string_arg(text, "/agents ") {
                     self.push_intent(AppIntent::set_agent(agent));
                     true
                 } else {
@@ -284,8 +315,7 @@ impl App {
                 }
             }
             _ if text.starts_with("/title ") => {
-                let title = text.strip_prefix("/title ").unwrap().trim().to_string();
-                if !title.is_empty() {
+                if let Some(title) = parse_string_arg(text, "/title ") {
                     self.push_intent(AppIntent::set_title(title));
                     true
                 } else {
@@ -293,27 +323,32 @@ impl App {
                 }
             }
             _ if text == "/think" || text.starts_with("/think ") => {
-                let args = text.strip_prefix("/think").unwrap().trim().to_lowercase();
-                match args.as_str() {
-                    "" => {
+                let args = text.strip_prefix("/think").unwrap().trim();
+                match parse_bool_arg(args) {
+                    BoolArg::Empty => {
                         let effort = self.status.reasoning_effort.as_deref().unwrap_or("default");
                         let msg = format!("think: {} (effort: {})", self.status.thinking, effort);
                         self.show_toast(Toast::info(&msg, std::time::Duration::from_secs(3)));
                         true
                     }
-                    "on" | "true" | "1" => {
+                    BoolArg::On => {
                         self.push_intent(AppIntent::set_thinking(true, None));
                         true
                     }
-                    "off" | "false" | "0" => {
+                    BoolArg::Off => {
                         self.push_intent(AppIntent::set_thinking(false, None));
                         true
                     }
-                    "low" | "medium" | "high" | "xhigh" | "max" => {
-                        self.push_intent(AppIntent::set_thinking(true, Some(args)));
+                    BoolArg::Other(effort)
+                        if matches!(
+                            effort.as_str(),
+                            "low" | "medium" | "high" | "xhigh" | "max"
+                        ) =>
+                    {
+                        self.push_intent(AppIntent::set_thinking(true, Some(effort)));
                         true
                     }
-                    _ => {
+                    BoolArg::Other(_) => {
                         self.show_toast(Toast::warning(
                             "Usage: /think [on|off|low|medium|high|xhigh|max]",
                             std::time::Duration::from_secs(3),
@@ -323,22 +358,22 @@ impl App {
                 }
             }
             _ if text == "/yolo" || text.starts_with("/yolo ") => {
-                let args = text.strip_prefix("/yolo").unwrap().trim().to_lowercase();
-                match args.as_str() {
-                    "" => {
+                let args = text.strip_prefix("/yolo").unwrap().trim();
+                match parse_bool_arg(args) {
+                    BoolArg::Empty => {
                         let msg = format!("yolo: {}", self.status.yolo);
                         self.show_toast(Toast::info(&msg, std::time::Duration::from_secs(3)));
                         true
                     }
-                    "on" | "true" | "1" => {
+                    BoolArg::On => {
                         self.push_intent(AppIntent::set_yolo(true));
                         true
                     }
-                    "off" | "false" | "0" => {
+                    BoolArg::Off => {
                         self.push_intent(AppIntent::set_yolo(false));
                         true
                     }
-                    _ => {
+                    BoolArg::Other(_) => {
                         self.show_toast(Toast::warning(
                             "Usage: /yolo [on|off]",
                             std::time::Duration::from_secs(3),
@@ -880,24 +915,14 @@ impl App {
                 agent,
                 ..
             } => {
-                if let Some(m) = model {
-                    self.status.model = m;
-                }
-                if let Some(t) = thinking {
-                    self.status.thinking = t;
-                }
-                if let Some(e) = reasoning_effort {
-                    self.status.reasoning_effort = Some(e);
-                }
-                if let Some(y) = yolo {
-                    self.status.yolo = y;
-                }
-                if let Some(t) = title {
-                    self.status.session_name = Some(t);
-                }
-                if let Some(a) = agent {
-                    self.status.agent = Some(a);
-                }
+                self.status.apply_session_update(
+                    model,
+                    thinking,
+                    reasoning_effort,
+                    yolo,
+                    title,
+                    agent,
+                );
             }
             WingEvent::SyncSession {
                 session_id,
