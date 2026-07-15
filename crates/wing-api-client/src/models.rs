@@ -147,8 +147,10 @@ pub struct SessionGetResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HealthResponse {
+    pub service: String,
     pub status: String,
     pub version: String,
+    pub uptime: i64,
 }
 
 // ============================================================

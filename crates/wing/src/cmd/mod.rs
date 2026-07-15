@@ -17,7 +17,6 @@ use wing_api_client::GatewayClient as GatewayApiClient;
 pub(crate) mod backend_config;
 mod discover;
 pub(crate) mod start;
-pub(crate) mod state;
 mod status;
 mod stop;
 
@@ -160,7 +159,7 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                 let gw = backend_config::read_backend_gateway_config();
                 let host = host.unwrap_or(gw.host);
                 let port = port.unwrap_or(gw.port);
-                match start::start_gateway(&host, port) {
+                match start::start_gateway(&host, port).await {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(e) => {
                         eprintln!("wing start error: {e}");
@@ -168,7 +167,7 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                     }
                 }
             }
-            Command::Stop => match stop::stop_gateway() {
+            Command::Stop => match stop::stop_gateway().await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("wing stop error: {e}");
@@ -176,7 +175,7 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                 }
             },
             Command::Status => {
-                status::show_status();
+                status::show_status().await;
                 ExitCode::SUCCESS
             }
         },
@@ -229,7 +228,7 @@ async fn dispatch_stdio(cli: Cli) -> ExitCode {
 
 /// Smart default: check if gateway is running, start if not, then enter TUI.
 async fn smart_default_tui() -> Result<()> {
-    let (host, port) = crate::stdio::ensure_gateway_running()?;
+    let (host, port) = crate::stdio::ensure_gateway_running().await?;
     run_tui(&host, port).await
 }
 

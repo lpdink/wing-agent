@@ -19,7 +19,7 @@ pub fn find_gateway_executable() -> anyhow::Result<PathBuf> {
     }
 
     // 2. Standard install path.
-    let venv_path = super::state::wing_root()
+    let venv_path = super::backend_config::wing_root()
         .join("venv")
         .join("bin")
         .join("wing-gateway");

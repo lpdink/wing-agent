@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from wing.gateway.protocol import HealthResponse
 
@@ -26,6 +26,12 @@ def _get_version() -> str:
     response_model=HealthResponse,
     summary="健康检查",
 )
-async def health() -> HealthResponse:
-    """健康检查——返回服务状态和 wing-agent 版本号。"""
-    return HealthResponse(status="ok", version=_get_version())
+async def health(request: Request) -> HealthResponse:
+    """健康检查——返回服务身份、状态、版本号和运行时长。"""
+    server = request.app.state.server
+    return HealthResponse(
+        service="wing-gateway",
+        status="ok",
+        version=_get_version(),
+        uptime=server.uptime,
+    )

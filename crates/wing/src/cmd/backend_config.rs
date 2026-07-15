@@ -4,10 +4,13 @@
 //! The backend (Python) config is the single source of truth for
 //! gateway host:port. The Rust frontend reads these values instead
 //! of maintaining its own duplicate config.
+//!
+//! Also provides `tui_home()` and `wing_root()` path helpers used
+//! across the CLI for log files, venv discovery, etc.
+
+use std::path::PathBuf;
 
 use serde::Deserialize;
-
-use super::state::wing_root;
 
 /// Default gateway host.
 const DEFAULT_HOST: &str = "127.0.0.1";
@@ -59,6 +62,32 @@ impl BackendGatewayConfig {
     pub fn http_base(&self) -> String {
         format!("http://{}:{}", self.host, self.port)
     }
+}
+
+/// Path to the wing root directory: `~/.wing/`.
+///
+/// Used for shared resources (e.g. venv, core config).
+/// `WING_HOME` env var overrides the default `~/.wing`.
+pub fn wing_root() -> PathBuf {
+    if let Ok(home) = std::env::var("WING_HOME") {
+        return PathBuf::from(home);
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".wing")
+}
+
+/// Path to the TUI data directory: `~/.wing/tui/`.
+///
+/// Used for TUI logs and config.
+pub fn tui_home() -> PathBuf {
+    if let Ok(home) = std::env::var("WING_HOME") {
+        return PathBuf::from(home).join("tui");
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".wing")
+        .join("tui")
 }
 
 /// Read gateway settings from the backend config file.

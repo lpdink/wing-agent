@@ -283,6 +283,20 @@ impl GatewayClient {
         Ok(resp.json().await?)
     }
 
+    /// 优雅关闭 Gateway。
+    pub async fn shutdown(&self) -> Result<(), ApiClientError> {
+        let resp = self
+            .http
+            .post(format!("{}{}", self.base_url, "/api/shutdown"))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(())
+    }
+
     // ============================================================
     // 内部 helper
     // ============================================================

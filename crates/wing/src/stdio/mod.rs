@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::cmd::backend_config;
 use crate::cmd::start;
-use crate::cmd::state;
 use crate::gateway::GatewayClient;
 use wing_api_client::GatewayClient as GatewayApiClient;
 use wing_api_client::models::{AgentOverride, CreateSessionRequest};
@@ -268,26 +267,27 @@ pub fn filter_unknown_args(args: Vec<String>) -> Vec<String> {
 // ============================================================
 
 /// Ensure gateway is running, returning (host, port).
-/// Extracted from `smart_default_tui()` for reuse by stdio mode.
-pub fn ensure_gateway_running() -> Result<(String, u16)> {
-    let state = state::WingState::load();
+///
+/// Checks health endpoint first; if gateway is not reachable, starts it.
+pub async fn ensure_gateway_running() -> Result<(String, u16)> {
+    let gw_config = backend_config::read_backend_gateway_config();
 
-    let (host, port) = if let Some(ref gw) = state.gateway {
-        if state::is_gateway_running(gw) {
-            (gw.host.clone(), gw.port)
-        } else {
-            state::WingState::clear_gateway();
-            let gw_config = backend_config::read_backend_gateway_config();
-            start::start_gateway(&gw_config.host, gw_config.port)?;
-            (gw_config.host, gw_config.port)
-        }
+    // Check if gateway is already running via health check.
+    let http_base = format!("http://{}:{}", gw_config.host, gw_config.port);
+    let already_running = if let Ok(client) = wing_api_client::GatewayClient::new(&http_base) {
+        matches!(
+            client.health().await,
+            Ok(h) if h.service == "wing-gateway"
+        )
     } else {
-        let gw_config = backend_config::read_backend_gateway_config();
-        start::start_gateway(&gw_config.host, gw_config.port)?;
-        (gw_config.host, gw_config.port)
+        false
     };
 
-    Ok((host, port))
+    if !already_running {
+        start::start_gateway(&gw_config.host, gw_config.port).await?;
+    }
+
+    Ok((gw_config.host, gw_config.port))
 }
 
 // ============================================================
@@ -309,7 +309,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
     let start_time = Instant::now();
 
     // 1. Ensure gateway is running.
-    let (host, port) = ensure_gateway_running()?;
+    let (host, port) = ensure_gateway_running().await?;
 
     let ws_url = format!("ws://{host}:{port}/ws");
     let http_base = format!("http://{host}:{port}");

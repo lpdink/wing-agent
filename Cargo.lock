@@ -3012,12 +3012,10 @@ name = "wing"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
  "crossterm",
  "dirs",
  "futures-util",
- "libc",
  "pretty_assertions",
  "pulldown-cmark",
  "ratatui",
