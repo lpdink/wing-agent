@@ -35,10 +35,8 @@ tracing-appender = { workspace = true }
 unicode-width = { workspace = true }
 dirs = { workspace = true }
 anyhow = { workspace = true }
-chrono = { workspace = true }
 clap = { workspace = true }
 url = { workspace = true }
-libc = "0.2"
 wing-api-client = { path = "../wing-api-client" }
 
 [dev-dependencies]

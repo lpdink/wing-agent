@@ -1,62 +1,46 @@
-//! `wing stop` — stop gateway daemon.
+//! `wing stop` — stop gateway daemon via HTTP.
 
 use std::time::Duration;
 
-use super::state::{WingState, is_gateway_running};
+use super::backend_config::read_backend_gateway_config;
 
-/// Stop the gateway daemon gracefully.
+/// Stop the gateway daemon gracefully via HTTP shutdown endpoint.
 ///
-/// Sends SIGTERM, waits up to 3 seconds, then SIGKILL if still alive.
-pub fn stop_gateway() -> anyhow::Result<()> {
-    #[cfg(not(unix))]
-    anyhow::bail!("wing stop is not supported on this platform");
+/// Sends POST /api/shutdown, then polls /api/health until the gateway
+/// is no longer reachable (up to 5 seconds).
+pub async fn stop_gateway() -> anyhow::Result<()> {
+    let config = read_backend_gateway_config();
+    let http_base = format!("http://{}:{}", config.host, config.port);
 
-    #[cfg(unix)]
-    {
-        let state = WingState::load();
-        let gw = match state.gateway {
-            Some(ref gw) if is_gateway_running(gw) => gw.clone(),
-            _ => {
-                println!("Gateway is not running");
-                WingState::clear_gateway();
-                return Ok(());
-            }
-        };
+    let client = wing_api_client::GatewayClient::new(&http_base)
+        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
 
-        let pid = gw.pid as i32;
-
-        // Send SIGTERM. Check return value — EPERM means wrong user,
-        // ESRCH means process already gone.
-        let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
-        if ret != 0 {
-            let err = std::io::Error::last_os_error();
-            WingState::clear_gateway();
-            anyhow::bail!("Failed to send SIGTERM to PID {pid}: {err}");
+    // Send shutdown request.
+    match client.shutdown().await {
+        Ok(()) => {}
+        Err(wing_api_client::ApiClientError::Transport(e)) if e.is_connect() => {
+            // Connection refused — gateway is not running.
+            println!("Gateway is not running");
+            return Ok(());
         }
-
-        // Wait up to 3 seconds for graceful shutdown.
-        for _ in 0..30 {
-            std::thread::sleep(Duration::from_millis(100));
-            if !is_gateway_running(&gw) {
-                break;
-            }
+        Err(e) => {
+            anyhow::bail!("Failed to stop gateway: {e}");
         }
-
-        // If still alive, SIGKILL.
-        if is_gateway_running(&gw) {
-            let ret = unsafe { libc::kill(pid, libc::SIGKILL) };
-            if ret != 0 {
-                let err = std::io::Error::last_os_error();
-                WingState::clear_gateway();
-                anyhow::bail!("Failed to send SIGKILL to PID {pid}: {err}");
-            }
-            std::thread::sleep(Duration::from_millis(100));
-            println!("Gateway forcefully stopped (PID {pid})");
-        } else {
-            println!("Gateway stopped (PID {pid})");
-        }
-
-        WingState::clear_gateway();
-        Ok(())
     }
+
+    // Poll health endpoint until gateway is down (max 5 seconds).
+    let poll_interval = Duration::from_millis(100);
+    let timeout = Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + timeout;
+
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(poll_interval).await;
+        if client.health().await.is_err() {
+            println!("Gateway stopped");
+            return Ok(());
+        }
+    }
+
+    println!("Gateway shutdown initiated (still reachable after 5s)");
+    Ok(())
 }

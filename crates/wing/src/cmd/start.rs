@@ -4,29 +4,32 @@ use std::fs::File;
 use std::process::Stdio;
 use std::time::Duration;
 
-use chrono::Utc;
-
+use super::backend_config::tui_home;
 use super::discover::find_gateway_executable;
-use super::state::{GatewayState, WingState, is_gateway_running, tui_home};
 
 /// Start the gateway daemon.
-pub fn start_gateway(host: &str, port: u16) -> anyhow::Result<()> {
-    // Check if already running.
-    let state = WingState::load();
-    if let Some(ref gw) = state.gateway
-        && is_gateway_running(gw)
+///
+/// First checks if a gateway is already running via HTTP health check.
+/// If not, spawns a new gateway process and polls health until ready.
+pub async fn start_gateway(host: &str, port: u16) -> anyhow::Result<()> {
+    let http_base = format!("http://{host}:{port}");
+
+    // Check if gateway is already running via health check.
+    if let Ok(client) = wing_api_client::GatewayClient::new(&http_base)
+        && let Ok(health) = client.health().await
+        && health.service == "wing-gateway"
     {
         println!(
-            "Gateway already running (PID {}, ws://{}:{}/ws)",
-            gw.pid, gw.host, gw.port
+            "Gateway already running (ws://{host}:{port}/ws, v{})",
+            health.version
         );
         return Ok(());
     }
 
-    // Check port availability (something else is already listening).
+    // Port might be in use by a non-gateway service.
     if std::net::TcpStream::connect(format!("{host}:{port}")).is_ok() {
         anyhow::bail!(
-            "Port {port} is already in use by another process. \
+            "Port {port} is already in use by another process (not wing-gateway). \
              Use --port to specify a different port."
         );
     }
@@ -44,7 +47,7 @@ pub fn start_gateway(host: &str, port: u16) -> anyhow::Result<()> {
     // Spawn gateway process in a new session so it survives parent exit
     // and doesn't receive SIGHUP when the terminal closes.
     #[cfg(unix)]
-    let child = {
+    let mut child = {
         use std::os::unix::process::CommandExt;
         std::process::Command::new(&gateway_bin)
             .args(["-H", host, "-p", &port.to_string()])
@@ -56,7 +59,7 @@ pub fn start_gateway(host: &str, port: u16) -> anyhow::Result<()> {
     };
 
     #[cfg(not(unix))]
-    let child = std::process::Command::new(&gateway_bin)
+    let mut child = std::process::Command::new(&gateway_bin)
         .args(["-H", host, "-p", &port.to_string()])
         .stdout(Stdio::from(log_out))
         .stderr(Stdio::from(log_err))
@@ -67,26 +70,30 @@ pub fn start_gateway(host: &str, port: u16) -> anyhow::Result<()> {
     // `Child::drop` does not kill the process.
     let pid = child.id();
 
-    let gw_state = GatewayState {
-        host: host.to_string(),
-        port,
-        pid,
-        started_at: Utc::now(),
-    };
-
-    // Poll for port readiness (happy path: exits on first check; bad path: retries up to 5s).
+    // Poll health endpoint until gateway is ready (up to 5 seconds).
     let poll_interval = Duration::from_millis(100);
     let timeout = Duration::from_secs(5);
     let deadline = std::time::Instant::now() + timeout;
-    let addr = format!("{host}:{port}");
-    let mut port_ready = false;
 
-    while std::time::Instant::now() < deadline {
-        if std::net::TcpStream::connect(&addr).is_ok() {
-            port_ready = true;
+    let client = wing_api_client::GatewayClient::new(&http_base)
+        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
+
+    let mut ready = false;
+    loop {
+        if std::time::Instant::now() >= deadline {
             break;
         }
-        if !is_gateway_running(&gw_state) {
+
+        // Check if health endpoint is responding.
+        if let Ok(health) = client.health().await
+            && health.service == "wing-gateway"
+        {
+            ready = true;
+            break;
+        }
+
+        // Check if the child process exited.
+        if let Ok(Some(status)) = child.try_wait() {
             let log_content = std::fs::read_to_string(&log_path).unwrap_or_default();
             let last_lines: String = log_content
                 .lines()
@@ -94,27 +101,21 @@ pub fn start_gateway(host: &str, port: u16) -> anyhow::Result<()> {
                 .take(5)
                 .collect::<Vec<_>>()
                 .join("\n");
-            WingState::clear_gateway();
-            anyhow::bail!("Gateway exited immediately:\n{last_lines}");
+            anyhow::bail!("Gateway exited immediately ({status}):\n{last_lines}");
         }
-        std::thread::sleep(poll_interval);
+
+        tokio::time::sleep(poll_interval).await;
     }
 
-    if !port_ready {
+    if ready {
+        println!("Gateway started (PID {pid}, ws://{host}:{port}/ws)");
+    } else {
         eprintln!(
-            "⚠ Gateway process is alive (PID {pid}) but port {port} is not yet reachable. \
+            "⚠ Gateway process spawned (PID {pid}) but not yet reachable after 5s. \
              Check logs: {}",
             log_path.display()
         );
     }
-
-    // Save state.
-    let new_state = WingState {
-        gateway: Some(gw_state),
-    };
-    new_state.save()?;
-
-    println!("Gateway started (PID {pid}, ws://{host}:{port}/ws)");
     println!("Log: {}", log_path.display());
     Ok(())
 }

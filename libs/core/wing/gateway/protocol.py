@@ -180,8 +180,10 @@ class SessionGetResponse(BaseModel):
 class HealthResponse(BaseModel):
     """健康检查响应。"""
 
+    service: str = Field(default="wing-gateway", description="服务身份标识")
     status: str = Field(default="ok", description="服务状态")
     version: str = Field(description="wing-agent 版本号")
+    uptime: int = Field(description="Gateway 运行时长（秒）")
 
 
 class ErrorResponse(BaseModel):

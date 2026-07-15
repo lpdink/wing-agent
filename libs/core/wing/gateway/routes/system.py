@@ -7,6 +7,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+import signal
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Request
@@ -84,3 +87,17 @@ async def list_agents(request: Request) -> AgentsResponse:
         agents=tm.all_names,
         default_agent=tm.default_name,
     )
+
+
+@router.post(
+    "/api/shutdown",
+    summary="优雅关闭 Gateway",
+)
+async def shutdown() -> dict[str, str]:
+    """优雅关闭 Gateway 进程。
+
+    先返回 HTTP 200，再延迟 0.1s 向自身发送 SIGTERM。
+    uvicorn 收到 SIGTERM 后优雅关闭（drain 现有连接）。
+    """
+    asyncio.get_running_loop().call_later(0.1, os.kill, os.getpid(), signal.SIGTERM)
+    return {"status": "shutting_down"}

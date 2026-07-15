@@ -1,27 +1,28 @@
-//! `wing status` — show gateway daemon status.
+//! `wing status` — show gateway daemon status via HTTP.
 
-use super::state::{WingState, is_gateway_running};
+use super::backend_config::read_backend_gateway_config;
 
-/// Display gateway daemon status.
-pub fn show_status() {
-    let state = WingState::load();
-    match state.gateway {
-        Some(ref gw) if is_gateway_running(gw) => {
-            let uptime = chrono::Utc::now()
-                .signed_duration_since(gw.started_at)
-                .num_seconds();
-            let uptime_str = format_duration(uptime);
+/// Display gateway daemon status by querying the health endpoint.
+pub async fn show_status() {
+    let config = read_backend_gateway_config();
+    let http_base = format!("http://{}:{}", config.host, config.port);
 
+    let client = match wing_api_client::GatewayClient::new(&http_base) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("Gateway is not running (failed to create HTTP client: {e})");
+            return;
+        }
+    };
+
+    match client.health().await {
+        Ok(health) if health.service == "wing-gateway" => {
             println!("Gateway is running");
-            println!("  Endpoint: ws://{}:{}/ws", gw.host, gw.port);
-            println!("  PID:      {}", gw.pid);
-            println!("  Uptime:   {uptime_str}");
+            println!("  Endpoint: ws://{}:{}/ws", config.host, config.port);
+            println!("  Version:  {}", health.version);
+            println!("  Uptime:   {}", format_duration(health.uptime));
         }
-        Some(ref gw) => {
-            println!("Gateway is not running (stale state: PID {})", gw.pid);
-            WingState::clear_gateway();
-        }
-        None => {
+        _ => {
             println!("Gateway is not running");
         }
     }
@@ -29,6 +30,9 @@ pub fn show_status() {
 
 /// Format seconds into human-readable duration.
 fn format_duration(secs: i64) -> String {
+    if secs < 0 {
+        return "0s".to_string();
+    }
     if secs < 60 {
         format!("{secs}s")
     } else if secs < 3600 {

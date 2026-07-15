@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import socket
 import sys
+from datetime import datetime, timezone
 
 from fastapi import WebSocket
 import uvicorn
@@ -67,6 +68,17 @@ class GatewayServer:
         self._app = create_app(self)
         self._server: uvicorn.Server | None = None
         self._server_task: asyncio.Task[None] | None = None
+        self._started_at = datetime.now(timezone.utc)
+
+    @property
+    def started_at(self) -> datetime:
+        """Gateway 启动时间（UTC）。"""
+        return self._started_at
+
+    @property
+    def uptime(self) -> int:
+        """Gateway 运行时长（秒）。"""
+        return int((datetime.now(timezone.utc) - self._started_at).total_seconds())
 
     @property
     def clients(self) -> dict[str, WebSocket]:
