@@ -61,6 +61,42 @@ impl Default for StatusData {
     }
 }
 
+impl StatusData {
+    /// Apply optional session-state fields from a server event or optimistic update.
+    ///
+    /// Parameter order mirrors `AppIntent::UpdateSession` field declaration
+    /// (`model, agent, title, thinking, reasoning_effort, yolo`) so that
+    /// callers destructuring the variant can pass fields through positionally.
+    pub fn apply_session_update(
+        &mut self,
+        model: Option<String>,
+        agent: Option<String>,
+        title: Option<String>,
+        thinking: Option<bool>,
+        reasoning_effort: Option<String>,
+        yolo: Option<bool>,
+    ) {
+        if let Some(m) = model {
+            self.model = m;
+        }
+        if let Some(a) = agent {
+            self.agent = Some(a);
+        }
+        if let Some(t) = title {
+            self.session_name = Some(t);
+        }
+        if let Some(t) = thinking {
+            self.thinking = t;
+        }
+        if let Some(e) = reasoning_effort {
+            self.reasoning_effort = Some(e);
+        }
+        if let Some(y) = yolo {
+            self.yolo = y;
+        }
+    }
+}
+
 /// Status bar widget — renders a single row at the top.
 pub struct StatusBar<'a> {
     data: &'a StatusData,

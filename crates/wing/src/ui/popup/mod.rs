@@ -43,6 +43,14 @@ pub enum ActivePopup {
     },
 }
 
+/// Returns `true` if `args` (case-insensitive) exactly matches any candidate ID.
+fn is_exact_candidate_match(candidates: &[(String, String)], args: &str) -> bool {
+    let args_lower = args.to_lowercase();
+    candidates
+        .iter()
+        .any(|(id, _)| id.to_lowercase() == args_lower)
+}
+
 impl ActivePopup {
     /// Update popup state based on current input text.
     ///
@@ -57,15 +65,9 @@ impl ActivePopup {
         if is_session_command(cmd) {
             if let Some(candidates) = cache.get_for_command(cmd) {
                 // Hide popup if args exactly match a candidate.
-                if !args.is_empty() {
-                    let args_lower = args.to_lowercase();
-                    if candidates
-                        .iter()
-                        .any(|(id, _)| id.to_lowercase() == args_lower)
-                    {
-                        *self = Self::None;
-                        return None;
-                    }
+                if !args.is_empty() && is_exact_candidate_match(candidates, args) {
+                    *self = Self::None;
+                    return None;
                 }
                 let rows = filter_candidates(candidates, args);
                 let count = rows.len();
@@ -95,15 +97,9 @@ impl ActivePopup {
         if is_local_candidate_command(cmd) {
             if let Some(candidates) = cache.get_for_command(cmd) {
                 // Hide popup if args exactly match a candidate.
-                if !args.is_empty() {
-                    let args_lower = args.to_lowercase();
-                    if candidates
-                        .iter()
-                        .any(|(id, _)| id.to_lowercase() == args_lower)
-                    {
-                        *self = Self::None;
-                        return None;
-                    }
+                if !args.is_empty() && is_exact_candidate_match(candidates, args) {
+                    *self = Self::None;
+                    return None;
                 }
                 let rows = filter_candidates(candidates, args);
                 let count = rows.len();
@@ -127,15 +123,9 @@ impl ActivePopup {
             // Check if candidates are cached.
             if let Some(candidates) = cache.get_for_command(cmd) {
                 // Hide popup if args exactly match a candidate.
-                if !args.is_empty() {
-                    let args_lower = args.to_lowercase();
-                    if candidates
-                        .iter()
-                        .any(|(id, _)| id.to_lowercase() == args_lower)
-                    {
-                        *self = Self::None;
-                        return None;
-                    }
+                if !args.is_empty() && is_exact_candidate_match(candidates, args) {
+                    *self = Self::None;
+                    return None;
                 }
                 let rows = filter_candidates(candidates, args);
                 let count = rows.len();

@@ -58,3 +58,70 @@ pub enum AppIntent {
     /// Send a desktop notification via OSC 9 escape sequence.
     Notify(String),
 }
+
+impl AppIntent {
+    /// Build an `UpdateSession` intent with all fields `None`.
+    fn update_session(f: impl FnOnce(&mut Self)) -> Self {
+        let mut intent = Self::UpdateSession {
+            model: None,
+            agent: None,
+            title: None,
+            thinking: None,
+            reasoning_effort: None,
+            yolo: None,
+        };
+        f(&mut intent);
+        intent
+    }
+
+    /// Update the session model.
+    pub fn set_model(model: String) -> Self {
+        Self::update_session(|i| {
+            if let Self::UpdateSession { model: m, .. } = i {
+                *m = Some(model);
+            }
+        })
+    }
+
+    /// Update the session agent template.
+    pub fn set_agent(agent: String) -> Self {
+        Self::update_session(|i| {
+            if let Self::UpdateSession { agent: a, .. } = i {
+                *a = Some(agent);
+            }
+        })
+    }
+
+    /// Update the session title.
+    pub fn set_title(title: String) -> Self {
+        Self::update_session(|i| {
+            if let Self::UpdateSession { title: t, .. } = i {
+                *t = Some(title);
+            }
+        })
+    }
+
+    /// Update the thinking mode (and optionally reasoning effort).
+    pub fn set_thinking(enabled: bool, effort: Option<String>) -> Self {
+        Self::update_session(|i| {
+            if let Self::UpdateSession {
+                thinking,
+                reasoning_effort,
+                ..
+            } = i
+            {
+                *thinking = Some(enabled);
+                *reasoning_effort = effort;
+            }
+        })
+    }
+
+    /// Update the YOLO mode (auto-approve tool calls).
+    pub fn set_yolo(enabled: bool) -> Self {
+        Self::update_session(|i| {
+            if let Self::UpdateSession { yolo, .. } = i {
+                *yolo = Some(enabled);
+            }
+        })
+    }
+}
