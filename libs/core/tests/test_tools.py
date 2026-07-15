@@ -76,6 +76,27 @@ class TestGlobTool:
         assert "a.txt" in result
         assert "b.txt" in result
 
+    @pytest.mark.asyncio
+    async def test_glob_hidden_files_and_dirs(self, tmp_path: Path):
+        """Test that hidden files and directories (dotfiles) are found."""
+        # Hidden directory with files (like .github/workflows/)
+        hidden_dir = tmp_path / ".hidden"
+        hidden_dir.mkdir()
+        (hidden_dir / "config.yml").write_text("key: value")
+
+        # Hidden file at root
+        (tmp_path / ".env").write_text("SECRET=1")
+
+        # Normal file for comparison
+        (tmp_path / "normal.txt").write_text("normal")
+
+        result = await glob_files("**/*.yml", str(tmp_path))
+        assert ".hidden/config.yml" in result or ".hidden\\config.yml" in result
+
+        result_all = await glob_files("**", str(tmp_path))
+        assert ".env" in result_all
+        assert "normal.txt" in result_all
+
 
 class TestGrepTool:
     """Test grep_files function."""
@@ -141,6 +162,20 @@ class TestGrepTool:
         )
         assert "a.py" in result
         assert "b.txt" not in result
+
+    @pytest.mark.asyncio
+    async def test_grep_hidden_files(self, tmp_path: Path):
+        """Test that grep searches hidden files and directories."""
+        hidden_dir = tmp_path / ".config"
+        hidden_dir.mkdir()
+        (hidden_dir / "settings.yml").write_text("debug: true")
+        (tmp_path / ".env").write_text("debug: true")
+        (tmp_path / "normal.py").write_text("debug = True")
+
+        result = await grep_files("debug", str(tmp_path))
+        assert ".config/settings.yml" in result or ".config\\settings.yml" in result
+        assert ".env" in result
+        assert "normal.py" in result
 
     @pytest.mark.asyncio
     async def test_grep_no_matches(self, tmp_path: Path):

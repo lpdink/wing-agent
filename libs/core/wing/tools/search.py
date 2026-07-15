@@ -52,7 +52,7 @@ async def glob_files(
     if not base.exists():
         raise ToolError(f"glob: {path}: No such directory")
 
-    args = ["--files", "--glob", pattern]
+    args = ["--files", "--glob", pattern, "--hidden"]
     if not respect_gitignore:
         args.append("--no-ignore")
 
@@ -126,7 +126,7 @@ async def grep_files(
         work_dir = base
         target = "."
 
-    args = []
+    args = ["--hidden"]
 
     # Case insensitive
     if i:
