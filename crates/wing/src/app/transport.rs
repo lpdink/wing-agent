@@ -20,6 +20,21 @@ pub struct Transport {
     pub client_id: String,
 }
 
+impl Transport {
+    /// Switch event subscription from an old session to a new one.
+    ///
+    /// Subscribes to `new_session_id` and unsubscribes from `old_session_id`.
+    /// Both operations are fire-and-forget — failures are logged but not propagated.
+    pub async fn switch_session(&self, old_session_id: &str, new_session_id: &str) {
+        if let Err(e) = self.http.subscribe(new_session_id, &self.client_id).await {
+            tracing::warn!("subscribe new session failed: {e}");
+        }
+        if let Err(e) = self.http.unsubscribe(old_session_id, &self.client_id).await {
+            tracing::warn!("unsubscribe old session failed: {e}");
+        }
+    }
+}
+
 /// Compute exponential backoff delay for reconnect attempts.
 ///
 /// Formula: `min(1s × 2^attempt, 30s)`

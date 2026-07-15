@@ -5,6 +5,7 @@ pub mod intent;
 pub mod popup_state;
 pub mod render_context;
 pub mod replay;
+pub mod runner;
 pub mod transport;
 pub mod turn_state;
 
@@ -91,7 +92,7 @@ pub struct App {
     /// Render context — tracks current turn's active cells.
     ctx: RenderContext,
     /// Popup state (active popup + candidate cache + dedup).
-    popup: PopupState,
+    pub(crate) popup: PopupState,
     /// Turn state (working flag + timer + spinner + usage).
     turn: TurnState,
     /// Last tick instant for measuring real dt between TermEvent::Tick.
@@ -155,6 +156,26 @@ impl App {
         }
     }
 
+    /// Common cleanup at the end of an agent turn (Done / Interrupted / Error).
+    ///
+    /// Resets turn state, render context, and copy candidates.
+    /// Callers handle their own specific follow-up (title, toast, etc.).
+    fn finish_turn(&mut self) {
+        self.turn.finish();
+        self.ctx.reset();
+        self.refresh_copy_candidates();
+    }
+
+    /// Notify the user via OSC 9 + attention title when the terminal is not focused.
+    fn notify_unfocused(&mut self, message: String, kind: AttentionKind) {
+        if !self.focused {
+            self.push_intent(AppIntent::Notify(message));
+            self.push_intent(AppIntent::SetTitle(
+                title::title_attention(kind).to_string(),
+            ));
+        }
+    }
+
     /// Show a toast notification. Returns remaining duration for timer setup.
     pub fn show_toast(&mut self, toast: Toast) -> std::time::Duration {
         let remaining = toast.remaining();
@@ -165,6 +186,21 @@ impl App {
     /// Clear the active toast (including persistent toasts).
     pub fn clear_toast(&mut self) {
         self.toast = None;
+    }
+
+    /// Submit text from the input area: try frontend command, else send as message.
+    ///
+    /// Returns `true` if the text was consumed (either as a command or message).
+    fn submit_message(&mut self, text: &str) -> bool {
+        if self.try_frontend_command(text) {
+            return true;
+        }
+        self.chat.push(ChatCell::UserMessage(text.to_string()));
+        self.push_intent(AppIntent::SendMessage {
+            content: text.to_string(),
+        });
+        self.turn.usage = TurnUsage::default();
+        true
     }
 
     /// Push a side-effect intent for the runner to execute after draw.
@@ -232,14 +268,7 @@ impl App {
             _ if text.starts_with("/model ") => {
                 let model = text.strip_prefix("/model ").unwrap().trim().to_string();
                 if !model.is_empty() {
-                    self.push_intent(AppIntent::UpdateSession {
-                        model: Some(model),
-                        agent: None,
-                        title: None,
-                        thinking: None,
-                        reasoning_effort: None,
-                        yolo: None,
-                    });
+                    self.push_intent(AppIntent::set_model(model));
                     true
                 } else {
                     false
@@ -248,14 +277,7 @@ impl App {
             _ if text.starts_with("/agents ") => {
                 let agent = text.strip_prefix("/agents ").unwrap().trim().to_string();
                 if !agent.is_empty() {
-                    self.push_intent(AppIntent::UpdateSession {
-                        model: None,
-                        agent: Some(agent),
-                        title: None,
-                        thinking: None,
-                        reasoning_effort: None,
-                        yolo: None,
-                    });
+                    self.push_intent(AppIntent::set_agent(agent));
                     true
                 } else {
                     false
@@ -264,14 +286,7 @@ impl App {
             _ if text.starts_with("/title ") => {
                 let title = text.strip_prefix("/title ").unwrap().trim().to_string();
                 if !title.is_empty() {
-                    self.push_intent(AppIntent::UpdateSession {
-                        model: None,
-                        agent: None,
-                        title: Some(title),
-                        thinking: None,
-                        reasoning_effort: None,
-                        yolo: None,
-                    });
+                    self.push_intent(AppIntent::set_title(title));
                     true
                 } else {
                     false
@@ -287,36 +302,15 @@ impl App {
                         true
                     }
                     "on" | "true" | "1" => {
-                        self.push_intent(AppIntent::UpdateSession {
-                            model: None,
-                            agent: None,
-                            title: None,
-                            thinking: Some(true),
-                            reasoning_effort: None,
-                            yolo: None,
-                        });
+                        self.push_intent(AppIntent::set_thinking(true, None));
                         true
                     }
                     "off" | "false" | "0" => {
-                        self.push_intent(AppIntent::UpdateSession {
-                            model: None,
-                            agent: None,
-                            title: None,
-                            thinking: Some(false),
-                            reasoning_effort: None,
-                            yolo: None,
-                        });
+                        self.push_intent(AppIntent::set_thinking(false, None));
                         true
                     }
                     "low" | "medium" | "high" | "xhigh" | "max" => {
-                        self.push_intent(AppIntent::UpdateSession {
-                            model: None,
-                            agent: None,
-                            title: None,
-                            thinking: Some(true),
-                            reasoning_effort: Some(args),
-                            yolo: None,
-                        });
+                        self.push_intent(AppIntent::set_thinking(true, Some(args)));
                         true
                     }
                     _ => {
@@ -337,25 +331,11 @@ impl App {
                         true
                     }
                     "on" | "true" | "1" => {
-                        self.push_intent(AppIntent::UpdateSession {
-                            model: None,
-                            agent: None,
-                            title: None,
-                            thinking: None,
-                            reasoning_effort: None,
-                            yolo: Some(true),
-                        });
+                        self.push_intent(AppIntent::set_yolo(true));
                         true
                     }
                     "off" | "false" | "0" => {
-                        self.push_intent(AppIntent::UpdateSession {
-                            model: None,
-                            agent: None,
-                            title: None,
-                            thinking: None,
-                            reasoning_effort: None,
-                            yolo: Some(false),
-                        });
+                        self.push_intent(AppIntent::set_yolo(false));
                         true
                     }
                     _ => {
@@ -404,7 +384,7 @@ impl App {
     ///
     /// Skips requests while the agent is streaming to avoid interference.
     /// HTTP calls are idempotent — no dedup needed.
-    fn update_popup(&mut self) {
+    pub(crate) fn update_popup(&mut self) {
         use crate::ui::popup::command::PopupAction;
 
         // Streaming guard: skip requests while agent is busy.
@@ -563,12 +543,7 @@ impl App {
         match self.input.handle_key(key, self.terminal_width) {
             InputAction::Submit(text) => {
                 self.popup.active = ActivePopup::None;
-                if self.try_frontend_command(&text) {
-                    return;
-                }
-                self.chat.push(ChatCell::UserMessage(text.clone()));
-                self.push_intent(AppIntent::SendMessage { content: text });
-                self.turn.usage = TurnUsage::default();
+                self.submit_message(&text);
             }
             InputAction::Escape | InputAction::None => {
                 // Update popup based on new text.
@@ -619,22 +594,8 @@ impl App {
                                         session_id: selected.name.clone(),
                                     })
                                 }
-                                "/model" => Some(AppIntent::UpdateSession {
-                                    model: Some(selected.name.clone()),
-                                    agent: None,
-                                    title: None,
-                                    thinking: None,
-                                    reasoning_effort: None,
-                                    yolo: None,
-                                }),
-                                "/agents" => Some(AppIntent::UpdateSession {
-                                    model: None,
-                                    agent: Some(selected.name.clone()),
-                                    title: None,
-                                    thinking: None,
-                                    reasoning_effort: None,
-                                    yolo: None,
-                                }),
+                                "/model" => Some(AppIntent::set_model(selected.name.clone())),
+                                "/agents" => Some(AppIntent::set_agent(selected.name.clone())),
                                 _ => None,
                             })
                     } else {
@@ -674,13 +635,7 @@ impl App {
                     let text = self.input.expand_and_get_text();
                     let text = text.trim().to_string();
                     if !text.is_empty() {
-                        if self.try_frontend_command(&text) {
-                            self.input.clear();
-                            return true;
-                        }
-                        self.chat.push(ChatCell::UserMessage(text.clone()));
-                        self.push_intent(AppIntent::SendMessage { content: text });
-                        self.turn.usage = TurnUsage::default();
+                        self.submit_message(&text);
                     }
                     self.input.clear();
                 } else {
@@ -738,10 +693,8 @@ impl App {
                 self.push_intent(AppIntent::SetTitle(working_title));
             }
             WingEvent::Done { .. } => {
-                self.turn.finish();
-                self.ctx.reset();
+                self.finish_turn();
                 self.clear_ask_selection();
-                self.refresh_copy_candidates();
                 // Restore idle title — but if the user is not focused and a
                 // TurnResult just set an attention title (✓/⚠), preserve it
                 // until the user refocuses (Focus handler restores idle).
@@ -751,10 +704,8 @@ impl App {
                 }
             }
             WingEvent::Interrupted { .. } => {
-                self.turn.finish();
-                self.ctx.reset();
+                self.finish_turn();
                 self.clear_ask_selection();
-                self.refresh_copy_candidates();
                 self.show_toast(Toast::info(
                     "Agent interrupted",
                     std::time::Duration::from_secs(2),
@@ -763,17 +714,9 @@ impl App {
                 self.push_intent(AppIntent::SetTitle(title::title_idle().to_string()));
             }
             WingEvent::Error { message, .. } => {
-                self.turn.finish();
-                self.ctx.reset();
+                self.finish_turn();
                 self.chat.push(ChatCell::ErrorMessage(message.clone()));
-                self.refresh_copy_candidates();
-                // Notify user if terminal is not focused.
-                if !self.focused {
-                    self.push_intent(AppIntent::Notify(message.clone()));
-                    self.push_intent(AppIntent::SetTitle(
-                        title::title_attention(AttentionKind::Error).to_string(),
-                    ));
-                }
+                self.notify_unfocused(message.clone(), AttentionKind::Error);
             }
 
             // ---- Reasoning events ----
@@ -889,13 +832,7 @@ impl App {
                     // Set initial cursor on the AskMessage in chat view.
                     self.chat.update_last_ask_selection(0);
                 }
-                // Notify user if terminal is not focused.
-                if !self.focused {
-                    self.push_intent(AppIntent::Notify(question.clone()));
-                    self.push_intent(AppIntent::SetTitle(
-                        title::title_attention(AttentionKind::Ask).to_string(),
-                    ));
-                }
+                self.notify_unfocused(question.clone(), AttentionKind::Ask);
             }
 
             // ---- Candidate list events (for popup) ----
@@ -1038,23 +975,18 @@ impl App {
                     "turn result received"
                 );
                 // Notify user if terminal is not focused.
-                if !self.focused {
-                    let msg = crate::util::osc9::fmt_turn_result(
-                        result.as_deref(),
-                        num_turns,
-                        duration_ms,
-                        total_tokens,
-                    );
-                    self.push_intent(AppIntent::Notify(msg));
-                    let kind = if is_error {
-                        AttentionKind::Error
-                    } else {
-                        AttentionKind::Done
-                    };
-                    self.push_intent(AppIntent::SetTitle(
-                        title::title_attention(kind).to_string(),
-                    ));
-                }
+                let msg = crate::util::osc9::fmt_turn_result(
+                    result.as_deref(),
+                    num_turns,
+                    duration_ms,
+                    total_tokens,
+                );
+                let kind = if is_error {
+                    AttentionKind::Error
+                } else {
+                    AttentionKind::Done
+                };
+                self.notify_unfocused(msg, kind);
             }
             _ => {
                 tracing::debug!(
@@ -1241,324 +1173,7 @@ pub async fn run_app(
 
         // Execute all pending intents produced during the last event cycle.
         for intent in app.drain_intents() {
-            match intent {
-                AppIntent::CopyToClipboard(text) => {
-                    // Clipboard works regardless of gateway state.
-                    let writer = terminal.backend_mut();
-                    match crate::util::clipboard::copy_to_clipboard(writer, &text) {
-                        Ok(()) => {
-                            app.show_toast(Toast::info(
-                                "Copied!",
-                                std::time::Duration::from_secs(2),
-                            ));
-                        }
-                        Err(e) => {
-                            tracing::warn!("clipboard copy failed: {e}");
-                            app.show_toast(Toast::warning(
-                                format!("Copy failed: {e}"),
-                                std::time::Duration::from_secs(3),
-                            ));
-                        }
-                    }
-                }
-                AppIntent::SendMessage { content } => {
-                    if let Some(t) = &transport
-                        && let Err(e) = t.ws.send_message(&app.session_id, &content).await
-                    {
-                        tracing::error!("failed to send message: {e}");
-                        app.show_toast(Toast::warning(
-                            format!("Send failed: {e}"),
-                            std::time::Duration::from_secs(3),
-                        ));
-                    }
-                    // transport is None → silently discard (disconnected).
-                }
-                AppIntent::FetchInfo => {
-                    if let Some(t) = &transport {
-                        match t.http.get_session_info(&app.session_id).await {
-                            Ok(info) => {
-                                app.status.model = info.model;
-                                app.status.total_tokens = info.total_tokens;
-                                app.status.context_window_tokens = info.context_window_tokens;
-                                app.status.thinking = info.thinking;
-                                app.status.reasoning_effort = info.reasoning_effort;
-                                app.status.yolo = info.yolo;
-                                app.status.session_name = info.session_name;
-                                tracing::info!(
-                                    model = %app.status.model,
-                                    "session info received"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!("get session info failed: {e}");
-                            }
-                        }
-                    }
-                }
-                AppIntent::FetchCommands => {
-                    if let Some(t) = &transport {
-                        match t.http.get_commands().await {
-                            Ok(resp) => {
-                                app.popup.cache.commands = resp
-                                    .commands
-                                    .into_iter()
-                                    .map(|c| crate::protocol::CommandInfo {
-                                        name: c.name,
-                                        aliases: c.aliases,
-                                        description: c.description,
-                                        params: c.params,
-                                    })
-                                    .collect();
-                                app.update_popup();
-                            }
-                            Err(e) => {
-                                tracing::warn!("get commands failed: {e}");
-                            }
-                        }
-                    }
-                }
-                AppIntent::FetchModels => {
-                    if let Some(t) = &transport {
-                        match t.http.get_models().await {
-                            Ok(resp) => {
-                                app.popup.cache.models = resp
-                                    .models
-                                    .into_iter()
-                                    .map(|m| (m, String::new()))
-                                    .collect();
-                                app.update_popup();
-                            }
-                            Err(e) => {
-                                tracing::warn!("get models failed: {e}");
-                            }
-                        }
-                    }
-                }
-                AppIntent::FetchBranches => {
-                    if let Some(t) = &transport {
-                        match t.http.get_branches(&app.session_id).await {
-                            Ok(resp) => {
-                                app.popup.cache.branches = resp
-                                    .targets
-                                    .into_iter()
-                                    .map(|t| {
-                                        let preview =
-                                            crate::ui::cells::tool_call::truncate_by_chars(
-                                                &t.content, 80,
-                                            );
-                                        (t.uuid, preview)
-                                    })
-                                    .collect();
-                                app.update_popup();
-                            }
-                            Err(e) => {
-                                tracing::warn!("get branches failed: {e}");
-                            }
-                        }
-                    }
-                }
-                AppIntent::FetchAgents => {
-                    if let Some(t) = &transport {
-                        match t.http.get_agents().await {
-                            Ok(resp) => {
-                                app.popup.cache.agents = resp
-                                    .agents
-                                    .into_iter()
-                                    .map(|a| (a, String::new()))
-                                    .collect();
-                                app.update_popup();
-                            }
-                            Err(e) => {
-                                tracing::warn!("get agents failed: {e}");
-                            }
-                        }
-                    }
-                }
-                AppIntent::UpdateSession {
-                    model,
-                    agent,
-                    title,
-                    thinking,
-                    reasoning_effort,
-                    yolo,
-                } => {
-                    if let Some(t) = &transport {
-                        let req = wing_api_client::models::UpdateSessionRequest {
-                            session_id: app.session_id.clone(),
-                            model: model.clone(),
-                            agent: agent.clone(),
-                            title: title.clone(),
-                            thinking,
-                            reasoning_effort: reasoning_effort.clone(),
-                            yolo,
-                        };
-                        match t.http.update_session(&req).await {
-                            Ok(_) => {
-                                // Optimistic local update + success toast.
-                                let mut parts: Vec<String> = Vec::new();
-                                if let Some(m) = model {
-                                    app.status.model = m.clone();
-                                    parts.push(format!("Model: {m}"));
-                                }
-                                if let Some(a) = agent {
-                                    app.status.agent = Some(a.clone());
-                                    parts.push(format!("Agent: {a}"));
-                                }
-                                if let Some(t) = title {
-                                    app.status.session_name = Some(t.clone());
-                                    parts.push(format!("Title: {t}"));
-                                }
-                                if let Some(t) = thinking {
-                                    app.status.thinking = t;
-                                    parts.push(format!("Think: {}", if t { "on" } else { "off" }));
-                                }
-                                if let Some(e) = reasoning_effort {
-                                    app.status.reasoning_effort = Some(e.clone());
-                                    parts.push(format!("Effort: {e}"));
-                                }
-                                if let Some(y) = yolo {
-                                    app.status.yolo = y;
-                                    parts.push(format!("YOLO: {}", if y { "on" } else { "off" }));
-                                }
-                                if !parts.is_empty() {
-                                    app.show_toast(Toast::info(
-                                        parts.join(" · "),
-                                        std::time::Duration::from_secs(3),
-                                    ));
-                                }
-                            }
-                            Err(e) => {
-                                app.show_toast(Toast::error(
-                                    format!("Update failed: {e}"),
-                                    std::time::Duration::from_secs(3),
-                                ));
-                            }
-                        }
-                    }
-                }
-                AppIntent::CreateSession { workspace } => {
-                    if let Some(t) = &transport {
-                        let old_session_id = app.session_id.clone();
-                        let req = wing_api_client::models::CreateSessionRequest {
-                            workspace: workspace.clone(),
-                            ..Default::default()
-                        };
-                        match t.http.create_session(&req).await {
-                            Ok(resp) => {
-                                let new_sid = &resp.session_id;
-                                if let Err(e) = t.http.subscribe(new_sid, &t.client_id).await {
-                                    tracing::warn!("subscribe new session failed: {e}");
-                                }
-                                if let Err(e) =
-                                    t.http.unsubscribe(&old_session_id, &t.client_id).await
-                                {
-                                    tracing::warn!("unsubscribe old session failed: {e}");
-                                }
-                                tracing::info!(
-                                    old = old_session_id,
-                                    new = new_sid,
-                                    "session created"
-                                );
-                            }
-                            Err(e) => {
-                                app.show_toast(Toast::error(
-                                    format!("Create failed: {e}"),
-                                    std::time::Duration::from_secs(3),
-                                ));
-                            }
-                        }
-                    }
-                }
-                AppIntent::ResumeSession {
-                    session_id: target_id,
-                } => {
-                    if let Some(t) = &transport {
-                        let old_session_id = app.session_id.clone();
-                        match t.http.resume_session(&target_id).await {
-                            Ok(resp) => {
-                                let new_sid = &resp.session_id;
-                                if let Err(e) = t.http.subscribe(new_sid, &t.client_id).await {
-                                    tracing::warn!("subscribe resumed session failed: {e}");
-                                }
-                                if let Err(e) =
-                                    t.http.unsubscribe(&old_session_id, &t.client_id).await
-                                {
-                                    tracing::warn!("unsubscribe old session failed: {e}");
-                                }
-                                tracing::info!(
-                                    old = old_session_id,
-                                    new = new_sid,
-                                    "session resumed"
-                                );
-                            }
-                            Err(e) => {
-                                app.show_toast(Toast::error(
-                                    format!("Resume failed: {e}"),
-                                    std::time::Duration::from_secs(3),
-                                ));
-                            }
-                        }
-                    }
-                }
-                AppIntent::ForkSession { target_uuid } => {
-                    if let Some(t) = &transport {
-                        let old_session_id = app.session_id.clone();
-                        match t.http.fork_session(&old_session_id, &target_uuid).await {
-                            Ok(resp) => {
-                                let new_sid = &resp.session_id;
-                                if let Err(e) = t.http.subscribe(new_sid, &t.client_id).await {
-                                    tracing::warn!("subscribe forked session failed: {e}");
-                                }
-                                if let Err(e) =
-                                    t.http.unsubscribe(&old_session_id, &t.client_id).await
-                                {
-                                    tracing::warn!("unsubscribe old session failed: {e}");
-                                }
-                                tracing::info!(
-                                    old = old_session_id,
-                                    new = new_sid,
-                                    "session forked"
-                                );
-                            }
-                            Err(e) => {
-                                app.show_toast(Toast::error(
-                                    format!("Fork failed: {e}"),
-                                    std::time::Duration::from_secs(3),
-                                ));
-                            }
-                        }
-                    }
-                }
-                AppIntent::FetchSessionList => {
-                    if let Some(t) = &transport {
-                        match t.http.list_sessions().await {
-                            Ok(resp) => {
-                                app.popup.cache.sessions = resp
-                                    .sessions
-                                    .iter()
-                                    .map(|s| (s.id.clone(), s.name.clone().unwrap_or_default()))
-                                    .collect();
-                                app.update_popup();
-                            }
-                            Err(e) => {
-                                tracing::warn!("list sessions failed: {e}");
-                            }
-                        }
-                    }
-                }
-                AppIntent::SetTitle(title) => {
-                    let writer = terminal.backend_mut();
-                    if let Err(e) = title::set_title(writer, &title) {
-                        tracing::warn!("failed to set terminal title: {e}");
-                    }
-                }
-                AppIntent::Notify(message) => {
-                    let writer = terminal.backend_mut();
-                    if let Err(e) = crate::util::osc9::send_notification(writer, &message) {
-                        tracing::warn!("failed to send OSC 9 notification: {e}");
-                    }
-                }
-            }
+            runner::execute_intent(&mut app, &transport, terminal, intent).await;
         }
 
         if app.should_quit {
