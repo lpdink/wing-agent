@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [develop]
+    types: [opened, reopened, synchronize]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or commit to check'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Python: lint + format + type check + dead code + test ──
+  python-check:
+    name: Python Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Ruff lint
+        run: uv run ruff check libs/
+
+      - name: Ruff format check
+        run: uv run ruff format --check libs/
+
+      - name: Type check (ty)
+        run: uv run ty check libs
+
+      - name: Dead code detection (vulture)
+        run: uv run vulture libs/ --min-confidence 70 --exclude .venv/
+
+      - name: Unit tests
+        run: uv run pytest libs/core/tests/
+
+  # ── Rust: format + clippy + test ─────────────────────────────
+  rust-check:
+    name: Rust Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cargo fmt check
+        run: cargo fmt --check
+
+      - name: Cargo clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Cargo test
+        run: cargo test
