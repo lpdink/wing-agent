@@ -303,7 +303,7 @@ fn apply_update_session(
 
     // Apply to local status.
     app.status
-        .apply_session_update(model, thinking, reasoning_effort, yolo, title, agent);
+        .apply_session_update(model, agent, title, thinking, reasoning_effort, yolo);
 
     if !parts.is_empty() {
         app.show_toast(Toast::info(

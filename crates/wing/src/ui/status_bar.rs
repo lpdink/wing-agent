@@ -64,20 +64,26 @@ impl Default for StatusData {
 impl StatusData {
     /// Apply optional session-state fields from a server event or optimistic update.
     ///
-    /// Centralises the `if let Some(x) = v { self.field = x }` pattern that was
-    /// previously duplicated in both the `SessionStateChanged` handler and the
-    /// runner's `apply_update_session`.
+    /// Parameter order mirrors `AppIntent::UpdateSession` field declaration
+    /// (`model, agent, title, thinking, reasoning_effort, yolo`) so that
+    /// callers destructuring the variant can pass fields through positionally.
     pub fn apply_session_update(
         &mut self,
         model: Option<String>,
+        agent: Option<String>,
+        title: Option<String>,
         thinking: Option<bool>,
         reasoning_effort: Option<String>,
         yolo: Option<bool>,
-        title: Option<String>,
-        agent: Option<String>,
     ) {
         if let Some(m) = model {
             self.model = m;
+        }
+        if let Some(a) = agent {
+            self.agent = Some(a);
+        }
+        if let Some(t) = title {
+            self.session_name = Some(t);
         }
         if let Some(t) = thinking {
             self.thinking = t;
@@ -87,12 +93,6 @@ impl StatusData {
         }
         if let Some(y) = yolo {
             self.yolo = y;
-        }
-        if let Some(t) = title {
-            self.session_name = Some(t);
-        }
-        if let Some(a) = agent {
-            self.agent = Some(a);
         }
     }
 }

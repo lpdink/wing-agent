@@ -193,6 +193,12 @@ impl App {
     ///
     /// Resets turn state, render context, and copy candidates.
     /// Callers handle their own specific follow-up (title, toast, etc.).
+    ///
+    /// **Ordering note**: `refresh_copy_candidates()` runs *inside* this method,
+    /// so any chat mutations by the caller (e.g. `clear_ask_selection`,
+    /// `chat.push(ErrorMessage)`) happen *after* the copy cache is snapshot.
+    /// Currently safe because `collect_assistant_messages` only collects
+    /// `AssistantMessage` cells, which are unaffected by these mutations.
     fn finish_turn(&mut self) {
         self.turn.finish();
         self.ctx.reset();
@@ -917,11 +923,11 @@ impl App {
             } => {
                 self.status.apply_session_update(
                     model,
+                    agent,
+                    title,
                     thinking,
                     reasoning_effort,
                     yolo,
-                    title,
-                    agent,
                 );
             }
             WingEvent::SyncSession {
