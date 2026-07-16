@@ -39,6 +39,7 @@ from wing.gateway.protocol import (
     UpdateSessionRequest,
     UpdateSessionResponse,
 )
+from wing.common.logger import log
 from wing.event.query_response import BranchTargetInfo
 
 if TYPE_CHECKING:
@@ -365,6 +366,9 @@ async def compact_session(
         raise HTTPException(status_code=404, detail="session not found")
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log.error(f"compact failed: {e}")
+        raise HTTPException(status_code=500, detail=f"compact failed: {e}")
 
     return CompactResponse(
         ok=True, original_tokens=original, compressed_tokens=compressed
