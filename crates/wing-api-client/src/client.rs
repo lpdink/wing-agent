@@ -220,6 +220,68 @@ impl GatewayClient {
     }
 
     // ============================================================
+    // Session 操作
+    // ============================================================
+
+    /// 压缩 session 上下文。
+    pub async fn compact_session(
+        &self,
+        session_id: &str,
+    ) -> Result<CompactResponse, ApiClientError> {
+        let body = CompactRequest {
+            session_id: session_id.to_owned(),
+        };
+        self.post_json("/api/session/compact", &body).await
+    }
+
+    /// 中断 session 当前任务。
+    pub async fn interrupt_session(&self, session_id: &str) -> Result<(), ApiClientError> {
+        let body = InterruptRequest {
+            session_id: session_id.to_owned(),
+        };
+        let resp = self
+            .http
+            .post(format!("{}{}", self.base_url, "/api/session/interrupt"))
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(())
+    }
+
+    /// 回退 session 到指定消息节点。
+    pub async fn rewind_session(
+        &self,
+        session_id: &str,
+        target_uuid: &str,
+    ) -> Result<RewindResponse, ApiClientError> {
+        let body = RewindRequest {
+            session_id: session_id.to_owned(),
+            target_uuid: target_uuid.to_owned(),
+        };
+        self.post_json("/api/session/rewind", &body).await
+    }
+
+    // ============================================================
+    // 系统级操作
+    // ============================================================
+
+    /// 热重载全局配置。
+    pub async fn reload_system(&self) -> Result<ReloadResponse, ApiClientError> {
+        let resp = self
+            .http
+            .post(format!("{}{}", self.base_url, "/api/system/reload"))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
+    // ============================================================
     // 系统级查询
     // ============================================================
 

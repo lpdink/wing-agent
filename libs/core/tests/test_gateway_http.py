@@ -443,6 +443,10 @@ class TestSessionInfo:
         }
         mock_session.agent.yolo = False
         mock_session.session_name = "Test Session"
+        mock_session.agent.context_manager.get_context_stats.return_value = (5, 800)
+        mock_session.agent.context_manager.get_skills_info.return_value = (
+            "skill-a: desc"
+        )
         mock_runtime.sm.get_session.return_value = mock_session
 
         resp = client.get("/api/session/info", params={"session_id": "test-id"})
@@ -457,6 +461,9 @@ class TestSessionInfo:
         assert data["reasoning_effort"] == "high"
         assert data["yolo"] is False
         assert data["session_name"] == "Test Session"
+        assert data["context_stats"]["message_count"] == 5
+        assert data["context_stats"]["total_tokens"] == 800
+        assert data["skills_info"] == "skill-a: desc"
 
     def test_info_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
@@ -752,20 +759,28 @@ class TestSystemCommands:
 
     @patch("wing.gateway.routes.system.magic_registry")
     def test_list_commands(self, mock_registry, client: TestClient):
-        """正常获取命令列表。"""
-        mock_cmd = MagicMock()
-        mock_cmd.name = "help"
-        mock_cmd.aliases = ["h", "?"]
-        mock_cmd.description = "显示帮助"
-        mock_cmd.params = ""
-        mock_registry.list_all.return_value = [mock_cmd]
+        """只返回 prompt 类型的命令。"""
+        prompt_cmd = MagicMock()
+        prompt_cmd.name = "plan"
+        prompt_cmd.aliases = []
+        prompt_cmd.description = "Create a plan"
+        prompt_cmd.params = "[args]"
+        prompt_cmd.source = "prompt"
+
+        builtin_cmd = MagicMock()
+        builtin_cmd.name = "compact"
+        builtin_cmd.aliases = []
+        builtin_cmd.description = "Compact"
+        builtin_cmd.params = ""
+        builtin_cmd.source = "builtin"
+
+        mock_registry.list_all.return_value = [prompt_cmd, builtin_cmd]
 
         resp = client.get("/api/commands")
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["commands"]) == 1
-        assert data["commands"][0]["name"] == "help"
-        assert data["commands"][0]["aliases"] == ["h", "?"]
+        assert data["commands"][0]["name"] == "plan"
 
 
 # ============================================================
@@ -829,3 +844,173 @@ class TestSystemAgents:
         data = resp.json()
         assert data["agents"] == ["default", "coder", "reviewer"]
         assert data["default_agent"] == "default"
+
+
+# ============================================================
+# Session: Compact
+# ============================================================
+
+
+class TestSessionCompact:
+    """POST /api/session/compact 测试。"""
+
+    def test_compact_ok(self, client: TestClient, mock_runtime):
+        """正常压缩。"""
+        mock_session = MagicMock()
+        mock_session.session_id = "test-id"
+        mock_session.agent.model = "gpt-4o"
+        mock_compactor = MagicMock()
+        mock_compacted = MagicMock()
+        mock_compacted.content = "summary"
+        mock_compacted.usage.prompt_tokens = 1000
+        mock_compacted.usage.completion_tokens = 200
+        mock_compactor.do_compact = AsyncMock(return_value=mock_compacted)
+        mock_session.agent.context_manager.compactor = mock_compactor
+        mock_session.agent.context_manager._messages = MagicMock()
+        mock_session.agent.context_manager._messages.__iter__ = MagicMock(
+            return_value=iter([])
+        )
+        mock_session.agent.context_manager.system_prompt = MagicMock()
+        mock_session.agent.context_manager.get_context_stats.return_value = (2, 200)
+        mock_runtime.sm.get_session.return_value = mock_session
+
+        resp = client.post("/api/session/compact", json={"session_id": "test-id"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["original_tokens"] == 1000
+        assert data["compressed_tokens"] == 200
+
+    def test_compact_not_found(self, client: TestClient, mock_runtime):
+        """Session 不存在返回 404。"""
+        mock_runtime.sm.get_session.return_value = None
+        resp = client.post("/api/session/compact", json={"session_id": "xxx"})
+        assert resp.status_code == 404
+
+    def test_compact_no_compactor(self, client: TestClient, mock_runtime):
+        """未配置 compactor 返回 400。"""
+        mock_session = MagicMock()
+        mock_session.agent.context_manager.compactor = None
+        mock_runtime.sm.get_session.return_value = mock_session
+
+        resp = client.post("/api/session/compact", json={"session_id": "test-id"})
+        assert resp.status_code == 400
+
+
+# ============================================================
+# Session: Interrupt
+# ============================================================
+
+
+class TestSessionInterrupt:
+    """POST /api/session/interrupt 测试。"""
+
+    def test_interrupt_ok(self, client: TestClient, mock_runtime):
+        """正常中断。"""
+        mock_session = MagicMock()
+        mock_session.session_id = "test-id"
+        mock_runtime.sm.get_session.return_value = mock_session
+
+        resp = client.post("/api/session/interrupt", json={"session_id": "test-id"})
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        mock_session.agent.interrupt.assert_called_once()
+
+    def test_interrupt_not_found(self, client: TestClient, mock_runtime):
+        """Session 不存在返回 404。"""
+        mock_runtime.sm.get_session.return_value = None
+        resp = client.post("/api/session/interrupt", json={"session_id": "xxx"})
+        assert resp.status_code == 404
+
+
+# ============================================================
+# Session: Rewind
+# ============================================================
+
+
+class TestSessionRewind:
+    """POST /api/session/rewind 测试。"""
+
+    def test_rewind_ok(self, client: TestClient, mock_runtime):
+        """正常回退。"""
+        mock_session = MagicMock()
+        mock_session.session_id = "test-id"
+        mock_session.agent.context_manager.rewind.return_value = "draft text"
+        mock_session.agent.context_manager.get_context_stats.return_value = (3, 500)
+        mock_session.agent.context_manager.get_context_window.return_value = []
+        mock_session.agent.context_manager.get_branch_targets.return_value = []
+        mock_session.agent.context_manager.compactor = None
+        mock_runtime.sm.get_session.return_value = mock_session
+
+        resp = client.post(
+            "/api/session/rewind",
+            json={"session_id": "test-id", "target_uuid": "abc123"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["draft"] == "draft text"
+
+    def test_rewind_not_found(self, client: TestClient, mock_runtime):
+        """Session 不存在返回 404。"""
+        mock_runtime.sm.get_session.return_value = None
+        resp = client.post(
+            "/api/session/rewind",
+            json={"session_id": "xxx", "target_uuid": "abc"},
+        )
+        assert resp.status_code == 404
+
+    def test_rewind_invalid_uuid(self, client: TestClient, mock_runtime):
+        """无效 uuid 返回 400。"""
+        mock_session = MagicMock()
+        mock_session.agent.context_manager.rewind.side_effect = ValueError(
+            "uuid not found"
+        )
+        mock_runtime.sm.get_session.return_value = mock_session
+
+        resp = client.post(
+            "/api/session/rewind",
+            json={"session_id": "test-id", "target_uuid": "bad"},
+        )
+        assert resp.status_code == 400
+
+
+# ============================================================
+# System: Reload
+# ============================================================
+
+
+class TestSystemReload:
+    """POST /api/system/reload 测试。"""
+
+    @patch("wing.magic_command.prompt_commands.register_prompt_commands")
+    @patch("wing.config.load_hooks")
+    @patch("wing.config.load_config")
+    def test_reload_ok(
+        self, mock_load_config, _mock_load_hooks, _mock_register, client, mock_runtime
+    ):
+        """全部重载成功。"""
+        mock_config = MagicMock()
+        mock_config.hooks = []
+        mock_config.commands.paths = []
+        mock_load_config.return_value = mock_config
+        mock_runtime.sm._sessions = {}
+
+        resp = client.post("/api/system/reload")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert len(data["results"]) == 5
+
+    @patch("wing.config.load_config")
+    def test_reload_config_failure(self, mock_load_config, client, mock_runtime):
+        """config 加载失败立即中止。"""
+        mock_load_config.side_effect = Exception("bad config")
+
+        resp = client.post("/api/system/reload")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is False
+        assert len(data["results"]) == 1
+        assert data["results"][0]["name"] == "config.yaml"
+        assert data["results"][0]["ok"] is False

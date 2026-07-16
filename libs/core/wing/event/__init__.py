@@ -8,6 +8,7 @@ V2 变更：
   - 删除 CreateSessionDoneEvent、SessionActivatedEvent、RewindDoneEvent、ForkDoneEvent
   - 新增 SyncSessionEvent、SessionStateChangedEvent
   - 拆分为四个模块：base、react、state_change、query_response
+  - 删除 SystemEvent、SkillsListEvent、ShellCommandEvent（魔术命令消除后不再需要）
 """
 
 from .base import (
@@ -18,14 +19,11 @@ from .base import (
     EventTarget,
     WingEvent,
     SessionInfo,
-    SystemEvent,
 )
 from .query_response import (
     BranchTargetInfo,
     BranchTargetsEvent,
     ContextStatsEvent,
-    SkillsListEvent,
-    ShellCommandEvent,
 )
 from .react import (
     AskEvent,
@@ -51,8 +49,7 @@ from .state_change import (
 
 # 事件类型总集（便于类型检查）
 WingEventUnion = (
-    SystemEvent
-    | ErrorEvent
+    ErrorEvent
     | TextEvent
     | ReasoningEvent
     | ToolCallEvent
@@ -73,8 +70,6 @@ WingEventUnion = (
     | SessionStateChangedEvent
     | ContextStatsEvent
     | BranchTargetsEvent
-    | SkillsListEvent
-    | ShellCommandEvent
 )
 
 __all__ = [
@@ -84,7 +79,6 @@ __all__ = [
     "AgentInfo",
     "CommandInfo",
     "SessionInfo",
-    "SystemEvent",
     "ErrorEvent",
     "DeliveredEvent",
     # react
@@ -110,8 +104,6 @@ __all__ = [
     "ContextStatsEvent",
     "BranchTargetInfo",
     "BranchTargetsEvent",
-    "SkillsListEvent",
-    "ShellCommandEvent",
     # union
     "WingEventUnion",
 ]

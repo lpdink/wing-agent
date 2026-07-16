@@ -4,7 +4,7 @@ import pytest
 
 from wing.event import (
     EventTarget,
-    SystemEvent,
+    DeliveredEvent,
     TextEvent,
 )
 from wing.event_bus import EventBus
@@ -144,8 +144,7 @@ class TestEmitScopeGlobal:
         bus.subscribe(lambda e: received.append(e))
 
         bus.emit(
-            SystemEvent(
-                content="config changed",
+            DeliveredEvent(
                 target=EventTarget(scope="global"),
             )
         )
@@ -164,8 +163,7 @@ class TestEmitScopeClient:
         bus.subscribe(lambda e: received.append(e))
 
         bus.emit(
-            SystemEvent(
-                content="direct message",
+            DeliveredEvent(
                 target=EventTarget(scope="client", client_ids=["client-a", "client-b"]),
             )
         )
@@ -183,7 +181,7 @@ class TestEmitDefaultScope:
         received = []
         bus.subscribe(lambda e: received.append(e))
 
-        bus.emit(SystemEvent(content="fallback"))
+        bus.emit(DeliveredEvent())
 
         assert len(received) == 1
         assert received[0].target.scope == "global"
@@ -198,7 +196,7 @@ class TestContextvars:
         bus.subscribe(lambda e: received.append(e))
 
         token = set_request_context(request_id="req-123")
-        bus.emit(SystemEvent(content="test"))
+        bus.emit(DeliveredEvent())
         reset_request_context(token)
 
         assert received[0].request_id == "req-123"
@@ -220,7 +218,7 @@ class TestContextvars:
         bus.subscribe(lambda e: received.append(e))
 
         token = set_request_context(request_id="req-ctx")
-        bus.emit(SystemEvent(request_id="req-explicit", content="test"))
+        bus.emit(DeliveredEvent(request_id="req-explicit"))
         reset_request_context(token)
 
         assert received[0].request_id == "req-ctx"
@@ -230,7 +228,7 @@ class TestContextvars:
         received = []
         bus.subscribe(lambda e: received.append(e))
 
-        bus.emit(SystemEvent(request_id="req-explicit", content="test"))
+        bus.emit(DeliveredEvent(request_id="req-explicit"))
         assert received[0].request_id == "req-explicit"
 
 
@@ -241,7 +239,7 @@ class TestSubscribeUnsubscribe:
         """subscribe 后收到事件."""
         received = []
         bus.subscribe(lambda e: received.append(e))
-        bus.emit(SystemEvent(content="test"))
+        bus.emit(DeliveredEvent())
         assert len(received) == 1
 
     def test_multiple_subscribers(self, bus: EventBus):
@@ -250,7 +248,7 @@ class TestSubscribeUnsubscribe:
         received_b = []
         bus.subscribe(lambda e: received_a.append(e))
         bus.subscribe(lambda e: received_b.append(e))
-        bus.emit(SystemEvent(content="test"))
+        bus.emit(DeliveredEvent())
         assert len(received_a) == 1
         assert len(received_b) == 1
 
@@ -263,7 +261,7 @@ class TestSubscribeUnsubscribe:
 
         bus.subscribe(callback)
         bus.unsubscribe(callback)
-        bus.emit(SystemEvent(content="test"))
+        bus.emit(DeliveredEvent())
         assert len(received) == 0
 
     def test_subscriber_error_does_not_block(self, bus: EventBus):
@@ -275,7 +273,7 @@ class TestSubscribeUnsubscribe:
 
         bus.subscribe(bad_callback)
         bus.subscribe(lambda e: received_good.append(e))
-        bus.emit(SystemEvent(content="test"))
+        bus.emit(DeliveredEvent())
         assert len(received_good) == 1
 
     def test_subscriber_count(self, bus: EventBus):

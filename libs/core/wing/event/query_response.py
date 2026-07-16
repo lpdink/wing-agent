@@ -36,20 +36,3 @@ class BranchTargetsEvent(WingEvent):
 
     type: Literal["branch_targets"] = "branch_targets"
     targets: list[BranchTargetInfo] = Field(default_factory=list)
-
-
-class SkillsListEvent(WingEvent):
-    """/skills 的结构化响应。V1 中走 SystemEvent，此为占位。"""
-
-    type: Literal["skills_list"] = "skills_list"
-    content: str
-    skills: list[str] = Field(default_factory=list)
-
-
-class ShellCommandEvent(WingEvent):
-    """/bash 的结构化响应。V1 中走 SystemEvent，此为占位。"""
-
-    type: Literal["shell_command"] = "shell_command"
-    command: str = ""
-    output: str = ""
-    exit_code: int = 0

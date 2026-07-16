@@ -146,8 +146,10 @@ Content with $ARGUMENTS
         cmd = load_prompt_command_from_file(cmd_file)
 
         assert cmd is not None
-        # handler 是一个异步函数，这里只检查它存在
-        assert callable(cmd.handler)
+        # handler 已废弃，prompt 命令使用 file_path 进行纯文本展开
+        assert cmd.handler is None
+        assert cmd.file_path is not None
+        assert cmd.source == "prompt"
 
 
 class TestLoadPromptCommandsFromPaths:

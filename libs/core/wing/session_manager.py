@@ -32,10 +32,9 @@ from wing.event import (
     DeliveredEvent,
     EventTarget,
     SessionInfo,
-    SystemEvent,
 )
 from wing.event_bus import event_bus
-from wing.magic_command.registry import magic_registry
+from wing.magic_command.prompt_commands import expand_prompt_command
 from wing.schema import Message
 from wing.session import Session
 
@@ -410,8 +409,8 @@ class SessionManager:
 
         Contextvars 由 WingRuntime.post() 统一管理，此方法不设置/恢复。
 
-        - / 开头 → 交给 magic_registry → 无法匹配时，路由给 agent 视为用户一般输入
-        - 否则 → session.post() → agent.post()
+        - / 开头且匹配 prompt 命令 → 展开为纯文本后投递
+        - 否则 → 直接投递给 session.post()
         """
         assert session_id is not None, "session_id is required by WingRuntime"
         session = self._sessions.get(session_id)
@@ -427,45 +426,16 @@ class SessionManager:
             )
         )
 
-        # 魔术命令路由
+        # Prompt 命令展开：/ 开头 → 尝试展开 → 展开成功则用展开文本投递
         if content.startswith("/"):
-            # 交给 magic_registry
-            result = await self._dispatch_magic_command(session, content)
-            if result is None:
-                # 命令不匹配，交给 agent 处理
-                await session.post(content, request_id=request_id)
-                return
-            if result:
-                event_bus.emit(
-                    SystemEvent(
-                        session_id=session.session_id,
-                        content=result,
-                        target=EventTarget(scope="session"),
-                    )
-                )
-            return
+            parts = content.lstrip("/").split(maxsplit=1)
+            cmd_name = parts[0]
+            args = parts[1] if len(parts) > 1 else ""
+            expanded = expand_prompt_command(cmd_name, args)
+            if expanded is not None:
+                content = expanded
 
-        # 非 / 开头：通过 Session.post 投递
         log.info(
             f"SM._post: routing '{content[:50]}' to session.post (session={session_id})"
         )
         await session.post(content, request_id=request_id)
-
-    async def _dispatch_magic_command(
-        self, session: Session, content: str
-    ) -> str | None:
-        """解析并执行魔术命令。
-
-        匹配不到注册命令时返回 None——SM 将原内容交给 agent 处理。
-        """
-        parts = content.lstrip("/").split(maxsplit=1)
-        cmd_name = parts[0]
-        args = parts[1] if len(parts) > 1 else ""
-
-        cmd = magic_registry.get(cmd_name)
-        if cmd is None:
-            return None
-
-        handler = cmd.handler
-        result = await handler(session.agent, args)
-        return result

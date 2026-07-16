@@ -15,7 +15,13 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Request
 
 from wing.event import CommandInfo
-from wing.gateway.protocol import AgentsResponse, CommandsResponse, ModelsResponse
+from wing.gateway.protocol import (
+    AgentsResponse,
+    CommandsResponse,
+    ModelsResponse,
+    ReloadResponse,
+    ReloadResultItem,
+)
 from wing.magic_command.registry import magic_registry
 from wing.openai_provider import OpenAIProvider
 
@@ -36,8 +42,9 @@ def _get_server(request: Request) -> GatewayServer:
     summary="获取可用命令列表",
 )
 async def list_commands(request: Request) -> CommandsResponse:
-    """获取所有已注册的 magic command 信息列表。
+    """获取所有已注册的 prompt 类型命令信息列表。
 
+    只返回 source='prompt' 的命令（用户定义的 .md 命令）。
     用于输入框 popup 候选。不依赖 session。
     """
     commands = [
@@ -48,6 +55,7 @@ async def list_commands(request: Request) -> CommandsResponse:
             params=cmd.params,
         )
         for cmd in magic_registry.list_all()
+        if cmd.source == "prompt"
     ]
     return CommandsResponse(commands=commands)
 
@@ -87,6 +95,82 @@ async def list_agents(request: Request) -> AgentsResponse:
         agents=tm.all_names,
         default_agent=tm.default_name,
     )
+
+
+@router.post(
+    "/api/system/reload",
+    response_model=ReloadResponse,
+    summary="热重载全局配置",
+)
+async def reload_system(request: Request) -> ReloadResponse:
+    """热重载 config.yaml、hooks、prompt commands、OpenAI provider、skills & rules。
+
+    config 加载失败时立即中止。其余项失败时继续重载剩余项，
+    返回每项的成功/失败详情。
+    """
+    from wing.config import load_config, load_hooks
+    from wing.hook_registry import hooks
+    from wing.magic_command.prompt_commands import register_prompt_commands
+
+    server = _get_server(request)
+    results: list[ReloadResultItem] = []
+    total = 5
+    success = 0
+
+    # 1. Reload config
+    try:
+        config = load_config(reload=True)
+        results.append(ReloadResultItem(name="config.yaml", ok=True))
+        success += 1
+    except Exception as e:
+        results.append(ReloadResultItem(name="config.yaml", ok=False, detail=str(e)))
+        return ReloadResponse(ok=False, results=results)
+
+    # 2. Reload hooks
+    try:
+        hooks.clear()
+        load_hooks(config.hooks)
+        results.append(ReloadResultItem(name="hooks", ok=True))
+        success += 1
+    except Exception as e:
+        results.append(ReloadResultItem(name="hooks", ok=False, detail=str(e)))
+
+    # 3. Reload prompt commands
+    try:
+        magic_registry.remove_by_source("prompt")
+        register_prompt_commands(config.commands.paths)
+        results.append(ReloadResultItem(name="prompt commands", ok=True))
+        success += 1
+    except Exception as e:
+        results.append(
+            ReloadResultItem(name="prompt commands", ok=False, detail=str(e))
+        )
+
+    # 4. Reload OpenAI provider — 使用第一个 session 的 provider
+    try:
+        first_session = next(iter(server.runtime.sm._sessions.values()), None)
+        if first_session:
+            changes = first_session.agent.model_provider.reload()
+            detail = ", ".join(changes) if changes else "unchanged"
+            results.append(ReloadResultItem(name="provider", ok=True, detail=detail))
+        else:
+            results.append(
+                ReloadResultItem(name="provider", ok=True, detail="no active session")
+            )
+        success += 1
+    except Exception as e:
+        results.append(ReloadResultItem(name="provider", ok=False, detail=str(e)))
+
+    # 5. Reload skills & rules for all active sessions
+    try:
+        for session in server.runtime.sm._sessions.values():
+            session.agent.context_manager.reload_skills_and_rules()
+        results.append(ReloadResultItem(name="skills & rules", ok=True))
+        success += 1
+    except Exception as e:
+        results.append(ReloadResultItem(name="skills & rules", ok=False, detail=str(e)))
+
+    return ReloadResponse(ok=(success == total), results=results)
 
 
 @router.post(

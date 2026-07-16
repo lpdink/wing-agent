@@ -30,7 +30,6 @@ from .event import (
     LLMCallMetricsEvent,
     WingEvent,
     ReasoningEvent,
-    SystemEvent,
     TextEvent,
     ToolCallEvent,
     ToolCallResultEvent,
@@ -710,11 +709,6 @@ class WingAgent:
         if event.target is None:
             event.target = EventTarget(scope="session")
         event_bus.emit(event)
-
-    def emit_system(self, content: str) -> None:
-        """快捷方法：发送系统消息（魔术命令响应等）。"""
-        self.emit(SystemEvent(session_id=self.session_id, content=content))
-        self.emit(DoneEvent(session_id=self.session_id))
 
     def get_status(self) -> dict:
         """返回当前状态快照，供 Session.initial_status 使用."""

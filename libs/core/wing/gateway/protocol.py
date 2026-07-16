@@ -117,6 +117,25 @@ class SendMessageRequest(BaseModel):
     content: str = Field(description="消息内容")
 
 
+class CompactRequest(BaseModel):
+    """压缩 session 上下文的请求体。"""
+
+    session_id: str = Field(description="目标 session ID")
+
+
+class InterruptRequest(BaseModel):
+    """中断 session 当前任务的请求体。"""
+
+    session_id: str = Field(description="目标 session ID")
+
+
+class RewindRequest(BaseModel):
+    """回退 session 到指定消息节点的请求体。"""
+
+    session_id: str = Field(description="目标 session ID")
+    target_uuid: str = Field(description="要回退到的消息 UUID")
+
+
 # ============================================================
 # HTTP Response Models
 # ============================================================
@@ -200,6 +219,13 @@ class ErrorResponse(BaseModel):
 # ============================================================
 
 
+class ContextStatsInfo(BaseModel):
+    """上下文统计信息，嵌入 SessionInfoResponse。"""
+
+    message_count: int = Field(description="当前消息数量")
+    total_tokens: int = Field(description="当前上下文 token 总数")
+
+
 class SessionInfoResponse(BaseModel):
     """GET /api/session/info 响应——session 运行时状态。"""
 
@@ -214,6 +240,40 @@ class SessionInfoResponse(BaseModel):
     )
     yolo: bool = Field(description="yolo 模式是否开启")
     session_name: str | None = Field(default=None, description="session 名称")
+    context_stats: ContextStatsInfo = Field(description="上下文统计信息")
+    skills_info: str = Field(default="", description="已安装的 skills 信息")
+
+
+class CompactResponse(BaseModel):
+    """POST /api/session/compact 响应。"""
+
+    ok: bool = Field(default=True, description="操作是否成功")
+    original_tokens: int = Field(default=0, description="压缩前 token 数")
+    compressed_tokens: int = Field(default=0, description="压缩后 token 数")
+
+
+class RewindResponse(BaseModel):
+    """POST /api/session/rewind 响应。"""
+
+    ok: bool = Field(default=True, description="操作是否成功")
+    draft: str | None = Field(default=None, description="回退点处的用户消息草稿")
+
+
+class ReloadResultItem(BaseModel):
+    """reload 端点中每一项重载的结果。"""
+
+    name: str = Field(description="重载项名称")
+    ok: bool = Field(description="是否成功")
+    detail: str | None = Field(default=None, description="失败时的错误详情")
+
+
+class ReloadResponse(BaseModel):
+    """POST /api/system/reload 响应。"""
+
+    ok: bool = Field(description="全部重载是否成功")
+    results: list[ReloadResultItem] = Field(
+        default_factory=list, description="每项重载的结果"
+    )
 
 
 class BranchesResponse(BaseModel):

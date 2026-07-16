@@ -105,13 +105,6 @@ class WingEvent(BaseModel):
 # ============================================================
 
 
-class SystemEvent(WingEvent):
-    """后端主动产生的系统消息，例如 /help、/context、/skills 的结果。"""
-
-    type: Literal["system"] = "system"
-    content: str
-
-
 class ErrorEvent(WingEvent):
     """错误事件，替代分散的 status_code 字段。
 

@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from wing.event import SystemEvent
+from wing.event import DeliveredEvent
 from wing.event_bus import event_bus
 from wing.request_context import (
     reset_request_context,
@@ -107,7 +107,7 @@ class TestContextvarsIsolation:
         # post() 返回后，emit 一个事件验证 RequestContext 已恢复
         received: list = []
         event_bus.subscribe(lambda e: received.append(e))
-        event_bus.emit(SystemEvent(content="verify"))
+        event_bus.emit(DeliveredEvent())
 
         assert received[0].request_id == "outer-req"
         assert received[0].session_id == "outer-sid"
@@ -130,7 +130,7 @@ class TestContextvarsIsolation:
         # 恢复
         received: list = []
         event_bus.subscribe(lambda e: received.append(e))
-        event_bus.emit(SystemEvent(content="verify"))
+        event_bus.emit(DeliveredEvent())
         assert received[0].request_id == "outer"
 
         reset_request_context(token)

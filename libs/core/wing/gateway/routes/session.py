@@ -14,18 +14,34 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from typing import TYPE_CHECKING
 
-from wing.event import SessionStateChangedEvent
-from wing.event.query_response import BranchTargetInfo
+from wing.common.logger import log
+from wing.event import (
+    BranchTargetInfo,
+    BranchTargetsEvent,
+    CompactDoneEvent,
+    ContextStatsEvent,
+    EventTarget,
+    InterruptedEvent,
+    SessionStateChangedEvent,
+    SyncSessionEvent,
+)
 from wing.event_bus import event_bus
+from wing.schema import Message
 from wing.gateway.protocol import (
     BranchesResponse,
+    CompactRequest,
+    CompactResponse,
+    ContextStatsInfo,
     CreateSessionRequest,
     CreateSessionResponse,
     ForkSessionRequest,
     ForkSessionResponse,
+    InterruptRequest,
     OkResponse,
     ResumeSessionRequest,
     ResumeSessionResponse,
+    RewindRequest,
+    RewindResponse,
     SendMessageRequest,
     SendMessageResponse,
     SessionGetResponse,
@@ -36,9 +52,11 @@ from wing.gateway.protocol import (
     UpdateSessionRequest,
     UpdateSessionResponse,
 )
+from wing.magic_command.registry import magic_registry
 
 if TYPE_CHECKING:
     from wing.gateway.server import GatewayServer
+    from wing.session import Session
 
 router = APIRouter(tags=["session"])
 
@@ -303,6 +321,8 @@ async def session_info(
         raise HTTPException(status_code=404, detail="session not found")
 
     status = session.agent.get_status()
+    cm = session.agent.context_manager
+    msg_count, total_tok = cm.get_context_stats()
     return SessionInfoResponse(
         model=status["model"],
         api_url=status["api_url"],
@@ -313,6 +333,11 @@ async def session_info(
         reasoning_effort=status["reasoning_effort"],
         yolo=session.agent.yolo,
         session_name=session.session_name,
+        context_stats=ContextStatsInfo(
+            message_count=msg_count,
+            total_tokens=total_tok,
+        ),
+        skills_info=cm.get_skills_info(),
     )
 
 
@@ -431,3 +456,166 @@ async def update_session(
     )
 
     return UpdateSessionResponse(ok=True)
+
+
+# ============================================================
+# Session 操作端点（原魔术命令迁移）
+# ============================================================
+
+
+def _emit_context_stats(session: "Session") -> None:
+    """emit ContextStatsEvent — compact 和 rewind 改变上下文后共用。"""
+    cm = session.agent.context_manager
+    count, tokens = cm.get_context_stats()
+    ctx_window = 0
+    if cm.compactor:
+        ctx_window = cm.compactor.context_window_tokens
+    event_bus.emit(
+        ContextStatsEvent(
+            session_id=session.session_id,
+            message_count=count,
+            total_tokens=tokens,
+            context_window_tokens=ctx_window,
+        )
+    )
+
+
+@router.post(
+    "/api/session/compact",
+    response_model=CompactResponse,
+    summary="压缩 session 上下文",
+)
+async def compact_session(
+    body: CompactRequest,
+    request: Request,
+) -> CompactResponse:
+    """压缩指定 session 的上下文。
+
+    调用 compactor 对消息链进行摘要压缩，emit CompactDoneEvent 和
+    ContextStatsEvent 通知订阅客户端。session 不存在返回 404，
+    未配置 compactor 返回 400。
+    """
+    server = _get_server(request)
+    session = server.runtime.sm.get_session(body.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    agent = session.agent
+    cm = agent.context_manager
+    if not cm.compactor:
+        raise HTTPException(status_code=400, detail="compactor not configured")
+
+    # 丢弃任何 pending async compact
+    cm._discard_pending_compact()
+    msgs = list(cm._messages)
+    try:
+        full_context = [cm.system_prompt] + msgs
+        compacted = await cm.compactor.do_compact(
+            full_context,
+            agent.model,
+            agent.model_provider,
+            tools=agent.tools,
+        )
+        last_compressed_uuid = msgs[-1].uuid if msgs else None
+        compact_node = Message(
+            role="assistant",
+            content=compacted.content,
+            parent_uuid=None,
+            unzip_last_uuid=last_compressed_uuid,
+        )
+        compact_node.uuid = __import__("uuid").uuid4().hex
+
+        cm._messages.append_detached(compact_node)
+        cm._messages.set_tip(compact_node.uuid)
+
+        event_bus.emit(
+            CompactDoneEvent(
+                session_id=session.session_id,
+                original_tokens=compacted.usage.prompt_tokens,
+                compressed_tokens=compacted.usage.completion_tokens,
+                model=agent.model,
+            )
+        )
+        _emit_context_stats(session)
+
+        return CompactResponse(
+            ok=True,
+            original_tokens=compacted.usage.prompt_tokens,
+            compressed_tokens=compacted.usage.completion_tokens,
+        )
+    except Exception as e:
+        log.error(f"compact failed: {e}")
+        raise HTTPException(status_code=500, detail="compact failed")
+
+
+@router.post(
+    "/api/session/interrupt",
+    response_model=OkResponse,
+    summary="中断 session 当前任务",
+)
+async def interrupt_session(
+    body: InterruptRequest,
+    request: Request,
+) -> OkResponse:
+    """中断指定 session 的当前 agent 任务。
+
+    清空 agent inbox，emit InterruptedEvent 通知订阅客户端。
+    session 不存在返回 404。
+    """
+    server = _get_server(request)
+    session = server.runtime.sm.get_session(body.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    session.agent.interrupt()
+    event_bus.emit(InterruptedEvent(session_id=session.session_id))
+    return OkResponse()
+
+
+@router.post(
+    "/api/session/rewind",
+    response_model=RewindResponse,
+    summary="回退 session 到指定消息",
+)
+async def rewind_session(
+    body: RewindRequest,
+    request: Request,
+) -> RewindResponse:
+    """回退指定 session 到 target_uuid 处的消息。
+
+    emit SyncSessionEvent（含 draft）和 BranchTargetsEvent 通知订阅客户端。
+    session 不存在返回 404，target_uuid 无效返回 400。
+    """
+    server = _get_server(request)
+    session = server.runtime.sm.get_session(body.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    cm = session.agent.context_manager
+    try:
+        draft = cm.rewind(body.target_uuid)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    _emit_context_stats(session)
+
+    # 通知客户端同步 session 状态
+    event_bus.emit(
+        SyncSessionEvent(
+            session_id=session.session_id,
+            messages=[msg.model_dump() for msg in cm.get_context_window()],
+            agent=None,
+            draft=draft,
+        )
+    )
+
+    # 刷新 branch targets 缓存
+    targets = cm.get_branch_targets()
+    event_bus.emit(
+        BranchTargetsEvent(
+            session_id=session.session_id,
+            targets=[BranchTargetInfo(**t) for t in targets],
+        )
+    )
+
+    return RewindResponse(ok=True, draft=draft)

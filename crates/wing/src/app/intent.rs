@@ -57,6 +57,18 @@ pub enum AppIntent {
 
     /// Send a desktop notification via OSC 9 escape sequence.
     Notify(String),
+
+    /// Compact the current session context via HTTP API.
+    CompactSession,
+
+    /// Interrupt the current agent turn via HTTP API.
+    InterruptSession,
+
+    /// Rewind the session to a specific message via HTTP API.
+    RewindSession { target_uuid: String },
+
+    /// Reload system configuration via HTTP API.
+    ReloadSystem,
 }
 
 impl AppIntent {

@@ -25,11 +25,14 @@ class MagicCommand(BaseModel):
     params: str = ""
     """参数说明，如 '[name]'"""
 
-    handler: Callable[..., Any]
-    """处理函数，签名: async (agent: 'WingAgent', args: str) -> str"""
+    handler: Optional[Callable[..., Any]] = None
+    """处理函数（已废弃）。prompt 类型命令不使用 handler，由纯文本展开替代。"""
 
     source: str = "builtin"
     """命令来源: 'builtin' (内置) 或 'prompt' (用户 md 文件)"""
+
+    file_path: Optional[str] = None
+    """prompt 类型命令的 .md 文件路径（仅 source='prompt' 时使用）"""
 
 
 class MagicCommandRegistry:

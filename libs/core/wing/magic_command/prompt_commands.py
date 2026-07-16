@@ -1,11 +1,9 @@
-"""Prompt 类型命令加载器."""
+"""Prompt 类型命令加载器和纯文本展开。"""
 
 from __future__ import annotations
 
 import glob
-from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
 
 import frontmatter
 
@@ -13,55 +11,47 @@ from wing.common.logger import log
 
 from .registry import MagicCommand, magic_registry
 
-if TYPE_CHECKING:
-    from wing.agent import WingAgent
 
+def expand_prompt_command(name: str, args: str) -> str | None:
+    """将 prompt 命令名和参数展开为完整的 prompt 文本。
 
-def _create_prompt_handler(md_path: Path) -> Callable[..., Any]:
-    """创建 prompt 类型命令的 handler。
+    纯函数——不依赖 agent 实例，不涉及异步操作。
 
     Args:
-        md_path: markdown 文件路径
+        name: 命令名（不含 / 前缀），如 "plan"
+        args: 用户提供的参数
 
     Returns:
-        异步处理函数
+        展开后的 prompt 文本，或 None（命令名不匹配任何 prompt 命令）
     """
+    cmd = magic_registry.get(name)
+    if cmd is None or cmd.source != "prompt" or cmd.file_path is None:
+        return None
 
-    async def handler(agent: "WingAgent", args: str) -> str:
-        """读取 md 文件内容，和 args 拼接后作为 user 消息发送。"""
-        try:
-            # 读取完整文件内容（包括 frontmatter）
-            content = md_path.read_text(encoding="utf-8")
+    md_path = Path(cmd.file_path)
+    try:
+        content = md_path.read_text(encoding="utf-8")
+    except Exception as e:
+        log.error(f"Failed to read prompt command file {md_path}: {e}")
+        return None
 
-            # 替换 $ARGUMENTS 变量
-            final_content = content.replace("$ARGUMENTS", args)
+    # 替换 $ARGUMENTS 变量
+    final_content = content.replace("$ARGUMENTS", args)
 
-            # TODO：这里要优化一下，解耦agent和 magic command系统
-            # 构建最终 prompt，确保不以 "/" 开头避免被误认为 magic command
-            # 添加一个空格在最前面（如果内容以"/"开头）
-            if final_content.strip().startswith("/"):
-                final_content = " " + final_content
+    # 确保不以 "/" 开头避免被误识别为命令
+    if final_content.strip().startswith("/"):
+        final_content = " " + final_content
 
-            if args:
-                final_prompt = f"{final_content} <user_input>{args}</user_input>"
-            else:
-                final_prompt = final_content
-
-            # 以 user 身份发送给 agent
-            await agent.post(content=final_prompt, role="user")
-
-            # 返回提示信息
-            return f"✅ 已加载 prompt 命令: {md_path.name}"
-
-        except Exception as e:
-            log.error(f"Failed to execute prompt command {md_path}: {e}")
-            return f"❌ 执行命令失败: {e}"
-
-    return handler
+    if args:
+        return f"{final_content} <user_input>{args}</user_input>"
+    return final_content
 
 
 def load_prompt_command_from_file(md_path: Path) -> MagicCommand | None:
-    """从 md 文件加载 prompt 类型命令。
+    """从 md 文件加载 prompt 类型命令元数据。
+
+    只加载 frontmatter 中的元数据（name/description/aliases），
+    不创建 handler。展开由 expand_prompt_command() 负责。
 
     md 文件格式：
     ---
@@ -71,53 +61,37 @@ def load_prompt_command_from_file(md_path: Path) -> MagicCommand | None:
     ---
 
     命令正文内容...
-
-    Args:
-        md_path: markdown 文件路径
-
-    Returns:
-        MagicCommand 实例，如果加载失败返回 None
     """
     try:
         with md_path.open("r", encoding="utf-8") as f:
             post = frontmatter.load(f)
 
-        # name 是必填字段
         original_name = post.get("name")
         if not original_name:
             log.warning(f"Prompt command {md_path} missing required 'name' field")
             return None
 
-        # 规范化命令名：去除空格并转为小写
-        # 例如："OPSX: Apply" -> "opsx:apply"
         original_name_str = str(original_name)
         normalized_name = original_name_str.replace(" ", "")
 
-        # description 和 aliases 是选填字段
         description = str(post.get("description", ""))
         aliases_raw = post.get("aliases", [])
 
-        # 验证 aliases 是列表
         if not isinstance(aliases_raw, list):
             log.warning(
                 f"Prompt command {md_path} 'aliases' should be a list, got {type(aliases_raw)}"
             )
             aliases = []
         else:
-            # 确保所有alias都是字符串
             aliases = [str(a) for a in aliases_raw]
 
-        # 创建 handler
-        handler = _create_prompt_handler(md_path)
-
-        # 创建 MagicCommand
         return MagicCommand(
             name=normalized_name,
             description=description,
             aliases=aliases,
-            params="[args]",  # prompt 命令接受可选参数
-            handler=handler,
+            params="[args]",
             source="prompt",
+            file_path=str(md_path),
         )
 
     except Exception as e:
@@ -137,10 +111,7 @@ def load_prompt_commands_from_paths(paths: list[str]) -> list[MagicCommand]:
     commands: list[MagicCommand] = []
 
     for path_pattern in paths:
-        # 展开 ~ 和环境变量
         expanded_pattern = str(Path(path_pattern).expanduser())
-
-        # 使用 glob.glob 支持绝对路径
         matched_files = glob.glob(expanded_pattern, recursive=True)
 
         for matched_path in matched_files:
