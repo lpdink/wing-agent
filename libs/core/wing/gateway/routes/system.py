@@ -20,7 +20,7 @@ from wing.gateway.protocol import (
     CommandsResponse,
     ModelsResponse,
     ReloadResponse,
-    ReloadResultItem,
+    ReloadResultItem as ReloadResultItemProto,
 )
 from wing.magic_command.registry import magic_registry
 from wing.openai_provider import OpenAIProvider
@@ -94,10 +94,13 @@ async def list_agents(request: Request) -> AgentsResponse:
 async def reload_system(request: Request) -> ReloadResponse:
     """热重载 config.yaml、hooks、prompt commands、OpenAI provider、skills & rules。"""
     server = _get_server(request)
-    ok, results = server.runtime.reload_system()
+    result = server.runtime.reload_system()
     return ReloadResponse(
-        ok=ok,
-        results=[ReloadResultItem(**r) for r in results],
+        ok=result.ok,
+        results=[
+            ReloadResultItemProto(name=item.name, ok=item.ok, detail=item.detail)
+            for item in result.items
+        ],
     )
 
 

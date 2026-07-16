@@ -350,6 +350,44 @@ class Session:
         self._session_name = title
         self._write_metadata()
 
+    async def update_state(
+        self,
+        *,
+        model: str | None = None,
+        template: "AgentTemplate | None" = None,
+        title: str | None = None,
+        thinking: bool | None = None,
+        reasoning_effort: str | None = None,
+        yolo: bool | None = None,
+    ) -> None:
+        """更新 session 状态。按 template → model → title → thinking → effort → yolo 顺序执行。
+
+        Args:
+            model: 切换模型
+            template: 切换 agent 模板（None 表示不切换）
+            title: 设置标题
+            thinking: 开关 thinking 模式
+            reasoning_effort: 推理力度
+            yolo: 开关 yolo 模式
+        """
+        if template is not None:
+            await self.switch_template(template)
+
+        if model is not None:
+            self.agent.model = model
+
+        if title is not None:
+            self.set_title(title)
+
+        if thinking is not None:
+            self.agent.model_provider.set_thinking(thinking)
+
+        if reasoning_effort is not None:
+            self.agent.set_reasoning_effort(reasoning_effort)
+
+        if yolo is not None:
+            self.agent.set_yolo(yolo)
+
     def touch_last_interaction(self) -> None:
         """更新最后互动时间并写入 metadata.json。"""
         self._last_interaction = datetime.now().isoformat()

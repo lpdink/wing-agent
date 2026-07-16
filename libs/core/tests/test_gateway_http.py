@@ -208,7 +208,7 @@ class TestSessionResume:
 
     def test_resume_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
-        mock_runtime.resume_session.side_effect = ValueError("Session not found: xxx")
+        mock_runtime.resume_session.side_effect = LookupError("Session not found: xxx")
         resp = client.post("/api/session/resume", json={"session_id": "xxx"})
         assert resp.status_code == 404
 
@@ -237,7 +237,7 @@ class TestSessionFork:
 
     def test_fork_session_not_found(self, client: TestClient, mock_runtime):
         """源 session 不存在返回 404。"""
-        mock_runtime.fork_session.side_effect = ValueError(
+        mock_runtime.fork_session.side_effect = LookupError(
             "Fork failed: source session 'xxx' not found or target_uuid 'yyy' invalid"
         )
         resp = client.post(
@@ -248,7 +248,7 @@ class TestSessionFork:
 
     def test_fork_uuid_not_found(self, client: TestClient, mock_runtime):
         """目标 UUID 不存在返回 404。"""
-        mock_runtime.fork_session.side_effect = ValueError(
+        mock_runtime.fork_session.side_effect = LookupError(
             "target_uuid 'invalid-uuid' invalid"
         )
         resp = client.post(
@@ -301,7 +301,7 @@ class TestSessionSubscribe:
 
     def test_subscribe_session_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
-        mock_runtime.subscribe.side_effect = ValueError("Session not found: xxx")
+        mock_runtime.subscribe.side_effect = LookupError("Session not found: xxx")
         resp = client.post(
             "/api/session/subscribe",
             json={"session_id": "xxx"},
@@ -542,7 +542,7 @@ class TestSessionUpdate:
     def test_update_agent_not_found(self, client: TestClient, mock_runtime):
         """模板不存在返回 404。"""
         mock_runtime.update_session = AsyncMock(
-            side_effect=ValueError("template 'nonexistent' not found")
+            side_effect=LookupError("template 'nonexistent' not found")
         )
         resp = client.post(
             "/api/session/update",
@@ -614,7 +614,7 @@ class TestSessionUpdate:
     def test_update_session_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
         mock_runtime.update_session = AsyncMock(
-            side_effect=ValueError("session not found")
+            side_effect=LookupError("session not found")
         )
         resp = client.post(
             "/api/session/update",
@@ -741,7 +741,7 @@ class TestSessionCompact:
 
     def test_compact_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
-        mock_runtime.compact_session = AsyncMock(side_effect=ValueError("not found"))
+        mock_runtime.compact_session = AsyncMock(side_effect=LookupError("not found"))
         resp = client.post("/api/session/compact", json={"session_id": "xxx"})
         assert resp.status_code == 404
 
@@ -773,7 +773,7 @@ class TestSessionInterrupt:
 
     def test_interrupt_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
-        mock_runtime.interrupt_session.side_effect = ValueError("not found")
+        mock_runtime.interrupt_session.side_effect = LookupError("not found")
         resp = client.post("/api/session/interrupt", json={"session_id": "xxx"})
         assert resp.status_code == 404
 
@@ -801,7 +801,7 @@ class TestSessionRewind:
 
     def test_rewind_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
-        mock_runtime.rewind_session.side_effect = ValueError("session not found")
+        mock_runtime.rewind_session.side_effect = LookupError("session not found")
         resp = client.post(
             "/api/session/rewind",
             json={"session_id": "xxx", "target_uuid": "abc"},
@@ -828,14 +828,16 @@ class TestSystemReload:
 
     def test_reload_ok(self, client: TestClient, mock_runtime):
         """全部重载成功。"""
-        mock_runtime.reload_system.return_value = (
-            True,
-            [
-                {"name": "config.yaml", "ok": True, "detail": None},
-                {"name": "hooks", "ok": True, "detail": None},
-                {"name": "prompt commands", "ok": True, "detail": None},
-                {"name": "provider", "ok": True, "detail": "unchanged"},
-                {"name": "skills & rules", "ok": True, "detail": None},
+        from wing.runtime import ReloadResult, ReloadResultItem
+
+        mock_runtime.reload_system.return_value = ReloadResult(
+            ok=True,
+            items=[
+                ReloadResultItem(name="config.yaml", ok=True),
+                ReloadResultItem(name="hooks", ok=True),
+                ReloadResultItem(name="prompt commands", ok=True),
+                ReloadResultItem(name="provider", ok=True, detail="unchanged"),
+                ReloadResultItem(name="skills & rules", ok=True),
             ],
         )
 
@@ -847,9 +849,11 @@ class TestSystemReload:
 
     def test_reload_config_failure(self, client: TestClient, mock_runtime):
         """config 加载失败立即中止。"""
-        mock_runtime.reload_system.return_value = (
-            False,
-            [{"name": "config.yaml", "ok": False, "detail": "bad config"}],
+        from wing.runtime import ReloadResult, ReloadResultItem
+
+        mock_runtime.reload_system.return_value = ReloadResult(
+            ok=False,
+            items=[ReloadResultItem(name="config.yaml", ok=False, detail="bad config")],
         )
 
         resp = client.post("/api/system/reload")

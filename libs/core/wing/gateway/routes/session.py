@@ -2,9 +2,8 @@
 
 """Session 管理的 HTTP 端点。
 
-所有端点通过 app.state.server.runtime 访问 WingRuntime service 层。
-Route handler 只做参数验证和 HTTP 响应构造——业务逻辑在 WingRuntime 中。
-subscribe/unsubscribe 需要 X-Client-Id header。
+Route handler 只做：参数验证 → 调 Runtime → 构造 HTTP 响应。
+异常映射：LookupError → 404, ValueError → 400, RuntimeError → 400/500。
 """
 
 from __future__ import annotations
@@ -54,14 +53,12 @@ router = APIRouter(tags=["session"])
 
 
 def _require_client_id(x_client_id: str | None = Header(None)) -> str:
-    """从 X-Client-Id header 提取 client_id，缺失时返回 400。"""
     if x_client_id is None:
         raise HTTPException(status_code=400, detail="missing X-Client-Id header")
     return x_client_id
 
 
 def _get_server(request: Request) -> GatewayServer:
-    """从 app.state 获取 GatewayServer 实例。"""
     return request.app.state.server
 
 
@@ -79,7 +76,6 @@ async def create_session(
     body: CreateSessionRequest,
     request: Request,
 ) -> CreateSessionResponse:
-    """创建新 session。"""
     server = _get_server(request)
     try:
         session = server.runtime.create_session(
@@ -105,11 +101,10 @@ async def resume_session(
     body: ResumeSessionRequest,
     request: Request,
 ) -> ResumeSessionResponse:
-    """从磁盘恢复已有 session。"""
     server = _get_server(request)
     try:
         session = server.runtime.resume_session(body.session_id)
-    except ValueError:
+    except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
     return ResumeSessionResponse(
         session_id=session.session_id,
@@ -127,20 +122,14 @@ async def fork_session(
     body: ForkSessionRequest,
     request: Request,
 ) -> ForkSessionResponse:
-    """从指定 session 的指定消息处分叉出新 session。"""
     server = _get_server(request)
     try:
         new_session, draft = server.runtime.fork_session(
             source_session_id=body.source_session_id,
             target_uuid=body.target_uuid,
         )
-    except ValueError as e:
-        error_msg = str(e)
-        if "session" in error_msg.lower() and "not found" in error_msg.lower():
-            raise HTTPException(status_code=404, detail="session not found")
-        if "uuid" in error_msg.lower() or "invalid" in error_msg.lower():
-            raise HTTPException(status_code=404, detail="uuid not found")
-        raise HTTPException(status_code=404, detail=error_msg)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="session or uuid not found")
     return ForkSessionResponse(
         session_id=new_session.session_id,
         draft=draft,
@@ -162,13 +151,12 @@ async def subscribe(
     request: Request,
     x_client_id: str = Depends(_require_client_id),
 ) -> OkResponse:
-    """订阅 session 事件。需要 X-Client-Id header。"""
     server = _get_server(request)
     if x_client_id not in server.clients:
         raise HTTPException(status_code=400, detail="client not connected")
     try:
         server.runtime.subscribe(x_client_id, body.session_id)
-    except ValueError:
+    except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
     return OkResponse()
 
@@ -183,7 +171,6 @@ async def unsubscribe(
     request: Request,
     x_client_id: str = Depends(_require_client_id),
 ) -> OkResponse:
-    """取消订阅 session 事件。"""
     server = _get_server(request)
     server.runtime.unsubscribe(x_client_id, body.session_id)
     return OkResponse()
@@ -203,7 +190,6 @@ async def send_message(
     body: SendMessageRequest,
     request: Request,
 ) -> SendMessageResponse:
-    """通过 HTTP 向活跃 session 发送消息。"""
     server = _get_server(request)
     request_id = uuid.uuid4().hex
 
@@ -229,7 +215,6 @@ async def send_message(
     summary="列出所有 session",
 )
 async def list_sessions(request: Request) -> SessionListResponse:
-    """列出所有活跃 session 的摘要信息。"""
     server = _get_server(request)
     sessions = server.runtime.list_sessions()
     return SessionListResponse(sessions=sessions)
@@ -244,7 +229,6 @@ async def get_session(
     request: Request,
     session_id: str = Query(..., description="目标 session ID"),
 ) -> SessionGetResponse:
-    """获取指定 session 的完整状态。"""
     server = _get_server(request)
     state = server.runtime.get_session_state(session_id)
     if state is None:
@@ -266,7 +250,6 @@ async def session_info(
     request: Request,
     session_id: str = Query(..., description="目标 session ID"),
 ) -> SessionInfoResponse:
-    """获取 session 的运行时状态：模型、工具、token 用量等。"""
     server = _get_server(request)
     session = server.runtime.get_session(session_id)
     if session is None:
@@ -302,7 +285,6 @@ async def session_branches(
     request: Request,
     session_id: str = Query(..., description="目标 session ID"),
 ) -> BranchesResponse:
-    """获取 session 的可回退/分叉消息节点列表。"""
     server = _get_server(request)
     session = server.runtime.get_session(session_id)
     if session is None:
@@ -327,7 +309,6 @@ async def update_session(
     body: UpdateSessionRequest,
     request: Request,
 ) -> UpdateSessionResponse:
-    """统一的 session 状态变更端点。"""
     server = _get_server(request)
 
     if all(
@@ -355,17 +336,16 @@ async def update_session(
             reasoning_effort=body.reasoning_effort,
             yolo=body.yolo,
         )
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
-        err = str(e)
-        if "not found" in err.lower():
-            raise HTTPException(status_code=404, detail=err)
-        raise HTTPException(status_code=400, detail=err)
+        raise HTTPException(status_code=400, detail=str(e))
 
     return UpdateSessionResponse(ok=True)
 
 
 # ============================================================
-# Session 操作端点（原魔术命令迁移）
+# Session 操作端点
 # ============================================================
 
 
@@ -378,16 +358,13 @@ async def compact_session(
     body: CompactRequest,
     request: Request,
 ) -> CompactResponse:
-    """压缩指定 session 的上下文。"""
     server = _get_server(request)
     try:
         original, compressed = await server.runtime.compact_session(body.session_id)
-    except ValueError:
+    except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"compact failed: {e}")
 
     return CompactResponse(
         ok=True, original_tokens=original, compressed_tokens=compressed
@@ -403,11 +380,10 @@ async def interrupt_session(
     body: InterruptRequest,
     request: Request,
 ) -> OkResponse:
-    """中断指定 session 的当前 agent 任务。"""
     server = _get_server(request)
     try:
         server.runtime.interrupt_session(body.session_id)
-    except ValueError:
+    except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
     return OkResponse()
 
@@ -421,14 +397,12 @@ async def rewind_session(
     body: RewindRequest,
     request: Request,
 ) -> RewindResponse:
-    """回退指定 session 到 target_uuid 处的消息。"""
     server = _get_server(request)
     try:
         draft = server.runtime.rewind_session(body.session_id, body.target_uuid)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="session not found")
     except ValueError as e:
-        err = str(e)
-        if "not found" in err.lower():
-            raise HTTPException(status_code=404, detail=err)
-        raise HTTPException(status_code=400, detail=err)
+        raise HTTPException(status_code=400, detail=str(e))
 
     return RewindResponse(ok=True, draft=draft)

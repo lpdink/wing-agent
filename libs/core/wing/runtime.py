@@ -1,21 +1,26 @@
 # wing/runtime.py
 """
-wing/runtime.py — WingRuntime：核心最高抽象
+wing/runtime.py — WingRuntime：service 层协调者
 
 组合 SessionManager + EventBus，提供统一入站入口。
 
+架构定位：
+  Runtime 是协调者，不是实现者。它将用户请求路由到正确的组件，
+  并管理事件的发射——但具体的业务逻辑由 Session、ContextManager
+  等组件自己实现。
+
 设计约束：
-  - post() 是唯一入站入口，统一管理 RequestContext（try/finally 确保恢复）
-  - Session 生命周期方法（create/resume/fork）语义单一，不涉及路由
-  - 订阅管理（subscribe/unsubscribe）封装路由注册 + SyncSession 推送
-  - SM 不感知 RequestContext 和路由表（由 Runtime 统一处理）
-  - 所有业务逻辑（compact/interrupt/rewind/reload/update）封装为 Runtime 方法
-  - Route handler 只做参数验证和 HTTP 响应构造
+  - post() 是唯一入站入口，统一管理 RequestContext
+  - Session 生命周期方法语义单一
+  - 订阅管理封装路由注册 + SyncSession 推送
+  - 所有事件通过 _emit_session_event() 发射，保证 scope="session"
+  - 异常层次：LookupError（not found）/ ValueError（bad input）/
+    RuntimeError（bad state），route 按类型映射 HTTP status
 """
 
 from __future__ import annotations
 
-import uuid
+from dataclasses import dataclass, field
 
 from wing.event import (
     BranchTargetInfo,
@@ -32,26 +37,48 @@ from wing.event import (
 )
 from wing.event_bus import event_bus
 from wing.config import get_config, load_hooks
-from wing.common.logger import log
 from wing.request_context import reset_request_context, set_request_context
 from typing import TYPE_CHECKING
-from wing.schema import Message
 from wing.session import Session
 from wing.session_manager import SessionManager
 
 if TYPE_CHECKING:
-    from wing.agent_template import AgentTemplateManager
+    from wing.agent_template import AgentTemplate, AgentTemplateManager
     from wing.gateway.protocol import AgentOverride
 
 
+# ============================================================
+# 公共数据类
+# ============================================================
+
+
+@dataclass
+class ReloadResultItem:
+    """reload_system 中单项重载的结果。"""
+
+    name: str
+    ok: bool
+    detail: str | None = None
+
+
+@dataclass
+class ReloadResult:
+    """reload_system 的完整结果。"""
+
+    ok: bool
+    items: list[ReloadResultItem] = field(default_factory=list)
+
+
+# ============================================================
+# WingRuntime
+# ============================================================
+
+
 class WingRuntime:
-    """核心最高抽象——统一入口。
+    """核心 service 层——协调者。
 
     持有 SessionManager，管理 RequestContext 和路由表。
-    初始化时通过 config 加载用户自定义 hook。
-    post() 是唯一入站入口，Gateway 和 TUI 均通过此接口通信。
-    所有 session 操作和系统操作的实现都在这里——route handler 只做
-    参数验证 → 调 Runtime 方法 → 构造 HTTP 响应。
+    将请求路由到 Session/ContextManager，管理事件发射。
     """
 
     def __init__(self) -> None:
@@ -74,16 +101,7 @@ class WingRuntime:
         session_id: str | None = None,
         client_id: str | None = None,
     ) -> None:
-        """唯一入站入口。设置 RequestContext，try/finally 确保恢复。
-
-        RequestContext 在协程内隔离：
-          - request_id：由 caller 指定或 None（EventBus 保留事件原有值）
-          - session_id：从参数注入，event emit 时自动填充
-          - client_id：注入供下游使用
-
-        如果 session_id 对应 session 不存在，SM._post() 会 log error
-        并直接 return——此时 RequestContext 仍然正确恢复。
-        """
+        """唯一入站入口。设置 RequestContext，try/finally 确保恢复。"""
         token = set_request_context(
             request_id=request_id,
             session_id=session_id,
@@ -100,7 +118,7 @@ class WingRuntime:
             reset_request_context(token)
 
     # ============================================================
-    # Session 生命周期（原子操作，不涉及路由）
+    # Session 生命周期
     # ============================================================
 
     def create_session(
@@ -109,11 +127,7 @@ class WingRuntime:
         workspace: str | None = None,
         agent_override: AgentOverride | None = None,
     ) -> Session:
-        """创建新 session。session_id 由后端生成。
-
-        不接受 session_id 参数（磁盘恢复用 resume_session）。
-        不涉及路由操作（订阅用 subscribe）。
-        """
+        """创建新 session。"""
         return self.sm.create_session(
             template_name=template_name,
             workspace=workspace,
@@ -121,14 +135,18 @@ class WingRuntime:
         )
 
     def resume_session(self, session_id: str) -> Session:
-        """从磁盘恢复已有 session。支持模糊匹配。"""
+        """从磁盘恢复已有 session。支持模糊匹配。
+
+        Raises:
+            LookupError: session 不存在
+        """
         existing = self.sm.get_session(session_id)
         if existing is not None:
             return existing
 
         resolved_id = self.sm.resolve_session_id(session_id)
         if resolved_id is None:
-            raise ValueError(f"Session not found: {session_id}")
+            raise LookupError(f"Session not found: {session_id}")
 
         existing = self.sm.get_session(resolved_id)
         if existing is not None:
@@ -141,28 +159,33 @@ class WingRuntime:
         source_session_id: str,
         target_uuid: str,
     ) -> tuple[Session, str | None]:
-        """从 source_session 的 target_uuid 处分叉出新 session。"""
+        """从 source_session 的 target_uuid 处分叉出新 session。
+
+        Raises:
+            LookupError: session 或 uuid 不存在
+        """
         result = self.sm.fork_session(
             session_id=source_session_id,
             target_uuid=target_uuid,
         )
         if result is None:
-            raise ValueError(
+            raise LookupError(
                 f"Fork failed: source session '{source_session_id}' not found "
                 f"or target_uuid '{target_uuid}' invalid"
             )
         return result
 
     # ============================================================
-    # 订阅管理（封装路由表 + SyncSession 推送）
+    # 订阅管理
     # ============================================================
 
     def subscribe(self, client_id: str, session_id: str) -> None:
-        """订阅 session 事件。"""
-        session = self.sm.get_session(session_id)
-        if session is None:
-            raise ValueError(f"Session not found: {session_id}")
+        """订阅 session 事件。
 
+        Raises:
+            LookupError: session 不存在
+        """
+        session = self._require_session(session_id)
         event_bus.route_attach(client_id, session_id)
         self._push_sync(client_id, session)
 
@@ -198,63 +221,44 @@ class WingRuntime:
         return self.sm.get_session(session_id)
 
     # ============================================================
-    # Session 操作（原魔术命令迁移）
+    # Session 操作（协调：委托给 Session/CM，自己只管事件）
     # ============================================================
 
     async def compact_session(self, session_id: str) -> tuple[int, int]:
         """压缩 session 上下文。
 
+        委托给 ContextManager.do_manual_compact()，发射事件。
+
         Returns:
             (original_tokens, compressed_tokens)
 
         Raises:
-            ValueError: session 不存在
+            LookupError: session 不存在
             RuntimeError: 未配置 compactor 或压缩失败
         """
         session = self._require_session(session_id)
-        agent = session.agent
-        cm = agent.context_manager
-        if not cm.compactor:
-            raise RuntimeError("compactor not configured")
-
-        cm._discard_pending_compact()
-        msgs = list(cm._messages)
-        full_context = [cm.system_prompt] + msgs
-        compacted = await cm.compactor.do_compact(
-            full_context,
-            agent.model,
-            agent.model_provider,
-            tools=agent.tools,
+        original, compressed = await session.agent.context_manager.do_manual_compact(
+            model=session.agent.model,
+            model_provider=session.agent.model_provider,
+            tools=session.agent.tools,
         )
-        last_compressed_uuid = msgs[-1].uuid if msgs else None
-        compact_node = Message(
-            role="assistant",
-            content=compacted.content,
-            parent_uuid=None,
-            unzip_last_uuid=last_compressed_uuid,
-        )
-        compact_node.uuid = uuid.uuid4().hex
-
-        cm._messages.append_detached(compact_node)
-        cm._messages.set_tip(compact_node.uuid)
 
         self._emit_session_event(
             CompactDoneEvent(
                 session_id=session.session_id,
-                original_tokens=compacted.usage.prompt_tokens,
-                compressed_tokens=compacted.usage.completion_tokens,
-                model=agent.model,
+                original_tokens=original,
+                compressed_tokens=compressed,
+                model=session.agent.model,
             )
         )
         self._emit_context_stats(session)
-
-        return compacted.usage.prompt_tokens, compacted.usage.completion_tokens
+        return original, compressed
 
     def interrupt_session(self, session_id: str) -> None:
         """中断 session 当前 agent 任务。
 
         Raises:
-            ValueError: session 不存在
+            LookupError: session 不存在
         """
         session = self._require_session(session_id)
         session.agent.interrupt()
@@ -263,11 +267,14 @@ class WingRuntime:
     def rewind_session(self, session_id: str, target_uuid: str) -> str | None:
         """回退 session 到指定消息节点。
 
+        委托给 ContextManager.rewind()，发射事件。
+
         Returns:
-            draft 文本（用户未发送的草稿），或 None
+            draft 文本，或 None
 
         Raises:
-            ValueError: session 不存在或 target_uuid 无效
+            LookupError: session 不存在
+            ValueError: target_uuid 无效
         """
         session = self._require_session(session_id)
         cm = session.agent.context_manager
@@ -291,12 +298,12 @@ class WingRuntime:
                 targets=[BranchTargetInfo(**t) for t in targets],
             )
         )
-
         return draft
 
     async def update_session(
         self,
         session_id: str,
+        *,
         model: str | None = None,
         agent: str | None = None,
         title: str | None = None,
@@ -306,38 +313,34 @@ class WingRuntime:
     ) -> None:
         """统一更新 session 状态。
 
-        按 agent → model → title → thinking → reasoning_effort → yolo 顺序执行。
+        委托给 Session.update_state()，计算 event 字段后发射事件。
 
         Raises:
-            ValueError: session 不存在或 template 不存在
+            LookupError: session 或 template 不存在
         """
         session = self._require_session(session_id)
 
+        # 解析 template（如有）
+        template = None
         if agent is not None:
             template = self.template_manager.get(agent)
             if template is None:
                 available = self.template_manager.all_names
-                raise ValueError(
+                raise LookupError(
                     f"template '{agent}' not found, available: {available}"
                 )
-            await session.switch_template(template)
 
-        if model is not None:
-            session.agent.model = model
+        # 委托给 Session 执行状态变更
+        await session.update_state(
+            model=model,
+            template=template,
+            title=title,
+            thinking=thinking,
+            reasoning_effort=reasoning_effort,
+            yolo=yolo,
+        )
 
-        if title is not None:
-            session.set_title(title)
-
-        if thinking is not None:
-            session.agent.model_provider.set_thinking(thinking)
-
-        if reasoning_effort is not None:
-            session.agent.set_reasoning_effort(reasoning_effort)
-
-        if yolo is not None:
-            session.agent.set_yolo(yolo)
-
-        # emit SessionStateChangedEvent — agent 切换会重置 thinking/reasoning_effort/yolo
+        # 计算 event 字段——agent 切换会重置 thinking/reasoning_effort/yolo
         agent_switched = agent is not None
         self._emit_session_event(
             SessionStateChangedEvent(
@@ -361,90 +364,86 @@ class WingRuntime:
     # 系统操作
     # ============================================================
 
-    def reload_system(self) -> tuple[bool, list[dict]]:
-        """热重载全局配置。
+    def reload_system(self) -> ReloadResult:
+        """热重载全局配置、hooks、prompt commands、provider、skills & rules。
 
-        Returns:
-            (all_ok, results) — results 是 [{"name": ..., "ok": ..., "detail": ...}, ...]
+        config 加载失败时立即中止。其余项失败时继续。
         """
         from wing.config import load_config, load_hooks
         from wing.hook_registry import hooks
         from wing.magic_command.prompt_commands import register_prompt_commands
         from wing.magic_command.registry import magic_registry
 
-        results: list[dict] = []
-        total = 5
-        success = 0
+        items: list[ReloadResultItem] = []
 
         # 1. Reload config
         try:
             config = load_config(reload=True)
-            results.append({"name": "config.yaml", "ok": True, "detail": None})
-            success += 1
+            items.append(ReloadResultItem(name="config.yaml", ok=True))
         except Exception as e:
-            results.append({"name": "config.yaml", "ok": False, "detail": str(e)})
-            return False, results
+            items.append(ReloadResultItem(name="config.yaml", ok=False, detail=str(e)))
+            return ReloadResult(ok=False, items=items)
 
         # 2. Reload hooks
         try:
             hooks.clear()
             load_hooks(config.hooks)
-            results.append({"name": "hooks", "ok": True, "detail": None})
-            success += 1
+            items.append(ReloadResultItem(name="hooks", ok=True))
         except Exception as e:
-            results.append({"name": "hooks", "ok": False, "detail": str(e)})
+            items.append(ReloadResultItem(name="hooks", ok=False, detail=str(e)))
 
         # 3. Reload prompt commands
         try:
             magic_registry.remove_by_source("prompt")
             register_prompt_commands(config.commands.paths)
-            results.append({"name": "prompt commands", "ok": True, "detail": None})
-            success += 1
+            items.append(ReloadResultItem(name="prompt commands", ok=True))
         except Exception as e:
-            results.append({"name": "prompt commands", "ok": False, "detail": str(e)})
+            items.append(
+                ReloadResultItem(name="prompt commands", ok=False, detail=str(e))
+            )
 
-        # 4. Reload OpenAI provider — 所有 session 的 provider
+        # 4. Reload OpenAI provider — 所有 session
         try:
             all_changes: list[str] = []
             for session in self.sm.iter_sessions():
                 changes = session.agent.model_provider.reload()
                 all_changes.extend(changes)
             detail = ", ".join(all_changes) if all_changes else "unchanged"
-            results.append({"name": "provider", "ok": True, "detail": detail})
-            success += 1
+            items.append(ReloadResultItem(name="provider", ok=True, detail=detail))
         except Exception as e:
-            results.append({"name": "provider", "ok": False, "detail": str(e)})
+            items.append(ReloadResultItem(name="provider", ok=False, detail=str(e)))
 
         # 5. Reload skills & rules for all active sessions
         try:
             for session in self.sm.iter_sessions():
                 session.agent.context_manager.reload_skills_and_rules()
-            results.append({"name": "skills & rules", "ok": True, "detail": None})
-            success += 1
+            items.append(ReloadResultItem(name="skills & rules", ok=True))
         except Exception as e:
-            results.append({"name": "skills & rules", "ok": False, "detail": str(e)})
+            items.append(
+                ReloadResultItem(name="skills & rules", ok=False, detail=str(e))
+            )
 
-        return success == total, results
+        all_ok = all(item.ok for item in items)
+        return ReloadResult(ok=all_ok, items=items)
 
     # ============================================================
     # 内部辅助
     # ============================================================
 
     def _require_session(self, session_id: str) -> Session:
-        """获取 session，不存在则 raise ValueError。"""
+        """获取 session，不存在则 raise LookupError。"""
         session = self.sm.get_session(session_id)
         if session is None:
-            raise ValueError(f"Session not found: {session_id}")
+            raise LookupError(f"Session not found: {session_id}")
         return session
 
     def _emit_session_event(self, event: WingEvent) -> None:
-        """emit session 级别事件，自动设置 target=EventTarget(scope="session")。"""
-        if event.target is None:
-            event.target = EventTarget(scope="session")
+        """发射 session 级别事件，强制 target=EventTarget(scope="session")。"""
+        event.target = EventTarget(scope="session")
         event_bus.emit(event)
 
     def _emit_context_stats(self, session: Session) -> None:
-        """emit ContextStatsEvent — compact 和 rewind 改变上下文后共用。"""
+        """发射 ContextStatsEvent。"""
         cm = session.agent.context_manager
         count, tokens = cm.get_context_stats()
         ctx_window = 0
@@ -462,7 +461,9 @@ class WingRuntime:
     def _push_sync(
         self, client_id: str, session: Session, draft: str | None = None
     ) -> None:
-        """向指定 client 推送 SyncSessionEvent + ContextStatsEvent。"""
+        """向指定 client 推送 SyncSessionEvent + SessionInitEvent + ContextStatsEvent。"""
+        client_target = EventTarget(scope="client", client_ids=[client_id])
+
         event_bus.emit(
             SyncSessionEvent(
                 session_id=session.session_id,
@@ -470,7 +471,7 @@ class WingRuntime:
                 agent=session.to_agent_info(),
                 name=session.session_name,
                 draft=draft,
-                target=EventTarget(scope="client", client_ids=[client_id]),
+                target=client_target,
             )
         )
 
@@ -482,7 +483,7 @@ class WingRuntime:
                 model=agent.model,
                 permission_mode="bypassPermissions" if agent.yolo else "default",
                 cwd=agent.state.get("cwd") or "",
-                target=EventTarget(scope="client", client_ids=[client_id]),
+                target=client_target,
             )
         )
 
@@ -497,6 +498,6 @@ class WingRuntime:
                 message_count=count,
                 total_tokens=tokens,
                 context_window_tokens=ctx_window,
-                target=EventTarget(scope="client", client_ids=[client_id]),
+                target=client_target,
             )
         )
