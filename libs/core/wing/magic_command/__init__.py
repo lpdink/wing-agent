@@ -1,4 +1,4 @@
-"""魔术命令模块——仅保留 prompt 类型命令和注册表。"""
+"""Prompt 命令模块——加载、注册、展开。"""
 
 from .prompt_commands import (
     expand_prompt_command,

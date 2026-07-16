@@ -144,6 +144,12 @@ pub struct ForkSessionResponse {
     pub draft: Option<String>,
 }
 
+/// 通用成功响应。
+#[derive(Debug, Clone, Deserialize)]
+pub struct OkResponse {
+    pub ok: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SendMessageResponse {
     pub ok: bool,

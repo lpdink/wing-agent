@@ -1,4 +1,4 @@
-"""Prompt 类型命令加载器和纯文本展开。"""
+"""Prompt 类型命令加载器和文本展开。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ from .registry import MagicCommand, magic_registry
 def expand_prompt_command(name: str, args: str) -> str | None:
     """将 prompt 命令名和参数展开为完整的 prompt 文本。
 
-    纯函数——不依赖 agent 实例，不涉及异步操作。
+    查找 registry 中的命令元数据，读取 .md 文件正文（不含 frontmatter），
+    替换 $ARGUMENTS 后返回展开文本。
 
     Args:
         name: 命令名（不含 / 前缀），如 "plan"
@@ -30,7 +31,9 @@ def expand_prompt_command(name: str, args: str) -> str | None:
 
     md_path = Path(cmd.file_path)
     try:
-        content = md_path.read_text(encoding="utf-8")
+        with md_path.open("r", encoding="utf-8") as f:
+            post = frontmatter.load(f)
+        content = post.content
     except Exception as e:
         log.error(f"Failed to read prompt command file {md_path}: {e}")
         return None
@@ -52,15 +55,6 @@ def load_prompt_command_from_file(md_path: Path) -> MagicCommand | None:
 
     只加载 frontmatter 中的元数据（name/description/aliases），
     不创建 handler。展开由 expand_prompt_command() 负责。
-
-    md 文件格式：
-    ---
-    name: command-name (必填)
-    description: command description (选填)
-    aliases: [alias1, alias2] (选填)
-    ---
-
-    命令正文内容...
     """
     try:
         with md_path.open("r", encoding="utf-8") as f:
@@ -100,14 +94,7 @@ def load_prompt_command_from_file(md_path: Path) -> MagicCommand | None:
 
 
 def load_prompt_commands_from_paths(paths: list[str]) -> list[MagicCommand]:
-    """从多个 glob 路径加载 prompt 类型命令。
-
-    Args:
-        paths: glob 路径列表（支持 ~ 展开和 ** 模式）
-
-    Returns:
-        加载成功的 MagicCommand 列表
-    """
+    """从多个 glob 路径加载 prompt 类型命令。"""
     commands: list[MagicCommand] = []
 
     for path_pattern in paths:
@@ -128,11 +115,7 @@ def load_prompt_commands_from_paths(paths: list[str]) -> list[MagicCommand]:
 
 
 def register_prompt_commands(paths: list[str]) -> None:
-    """加载并注册 prompt 类型命令到全局 registry。
-
-    Args:
-        paths: glob 路径列表
-    """
+    """加载并注册 prompt 类型命令到全局 registry。"""
     commands = load_prompt_commands_from_paths(paths)
 
     for cmd in commands:

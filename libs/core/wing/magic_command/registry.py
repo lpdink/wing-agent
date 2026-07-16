@@ -1,76 +1,42 @@
-"""魔术命令注册表."""
+"""Prompt 命令注册表——仅存储元数据，不做分发。"""
 
 from __future__ import annotations
 
-import inspect
-from typing import Any, Callable, Optional
+from typing import Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
 
 class MagicCommand(BaseModel):
-    """魔术命令定义."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    """命令元数据定义。"""
 
     name: str
-    """命令名，如 'model'"""
+    """命令名，如 'plan'"""
 
     aliases: list[str] = []
-    """别名，如 ['m']"""
+    """别名列表"""
 
     description: str = ""
     """描述文本"""
 
     params: str = ""
-    """参数说明，如 '[name]'"""
+    """参数说明，如 '[args]'"""
 
-    handler: Optional[Callable[..., Any]] = None
-    """处理函数（已废弃）。prompt 类型命令不使用 handler，由纯文本展开替代。"""
-
-    source: str = "builtin"
-    """命令来源: 'builtin' (内置) 或 'prompt' (用户 md 文件)"""
+    source: str = "prompt"
+    """命令来源: 当前只支持 'prompt' (用户 md 文件)"""
 
     file_path: Optional[str] = None
-    """prompt 类型命令的 .md 文件路径（仅 source='prompt' 时使用）"""
+    """prompt 类型命令的 .md 文件路径"""
 
 
 class MagicCommandRegistry:
-    """魔术命令注册表."""
+    """命令元数据注册表。"""
 
     def __init__(self) -> None:
         self._commands: dict[str, MagicCommand] = {}
 
-    def register(
-        self,
-        name: str | None = None,
-        aliases: list[str] | None = None,
-        description: str = "",
-        params: str = "",
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        """装饰器方式注册命令。
-
-        用法:
-            @magic_registry.register(name="help", aliases=["h", "?"], description="显示帮助")
-            async def cmd_help(agent, args: str) -> str:
-                ...
-        """
-
-        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-            cmd = MagicCommand(
-                name=name or getattr(fn, "__name__", "unknown"),
-                aliases=aliases or [],
-                description=description or inspect.getdoc(fn) or "",
-                params=params,
-                handler=fn,
-            )
-            self.register_command(cmd)
-            return fn
-
-        return decorator
-
     def get(self, name: str) -> Optional[MagicCommand]:
-        """获取命令."""
+        """获取命令。"""
         return self._commands.get(name)
 
     def register_command(self, cmd: MagicCommand) -> None:
@@ -90,7 +56,7 @@ class MagicCommandRegistry:
         return len(to_remove)
 
     def list_all(self) -> list[MagicCommand]:
-        """获取所有命令列表（去重）."""
+        """获取所有命令列表（去重）。"""
         seen: set[str] = set()
         result: list[MagicCommand] = []
         for cmd in self._commands.values():
@@ -99,31 +65,15 @@ class MagicCommandRegistry:
                 result.append(cmd)
         return result
 
-    def completions(self, prefix: str) -> list[str]:
-        """获取补全列表."""
-        if not prefix.startswith("/"):
-            return []
-        return [
-            f"/{c.name}" for c in self.list_all() if f"/{c.name}".startswith(prefix)
-        ]
-
     def get_suggestions(self, prefix: str) -> list[dict[str, str]]:
-        """获取候选命令详细信息，用于 TUI 实时显示（支持大小写不敏感匹配）。
-
-        Args:
-            prefix: 用户输入的前缀，如 "/" 或 "/h"
-
-        Returns:
-            [{'name': 'help', 'aliases': 'h, ?', 'description': '...', 'params': ''}, ...]
-        """
+        """获取候选命令详细信息，用于 TUI 实时显示。"""
         if not prefix.startswith("/"):
             return []
 
-        search_term = prefix.lstrip("/").lower()  # 转为小写
+        search_term = prefix.lstrip("/").lower()
         results = []
 
         for cmd in self.list_all():
-            # 大小写不敏感匹配命令名或别名
             if cmd.name.lower().startswith(search_term) or any(
                 a.lower().startswith(search_term) for a in cmd.aliases
             ):
@@ -138,15 +88,6 @@ class MagicCommandRegistry:
                 )
 
         return results
-
-    def help_text(self) -> str:
-        """生成帮助文本."""
-        lines = ["📖 魔术命令帮助:"]
-        for cmd in self.list_all():
-            params = f" {cmd.params}" if cmd.params else ""
-            aliases = f" ({', '.join(cmd.aliases)})" if cmd.aliases else ""
-            lines.append(f"  /{cmd.name}{params} - {cmd.description}{aliases}")
-        return "\n".join(lines)
 
 
 # 全局实例

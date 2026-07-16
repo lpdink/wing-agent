@@ -291,7 +291,10 @@ pub async fn execute_intent(
             if let Some(t) = transport {
                 match t.http.rewind_session(&app.session_id, &target_uuid).await {
                     Ok(_) => {
-                        tracing::info!(uuid = target_uuid, "session rewound");
+                        app.show_toast(Toast::info(
+                            "Session rewound",
+                            std::time::Duration::from_secs(2),
+                        ));
                     }
                     Err(e) => {
                         app.show_toast(Toast::error(

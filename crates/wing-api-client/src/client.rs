@@ -235,20 +235,11 @@ impl GatewayClient {
     }
 
     /// 中断 session 当前任务。
-    pub async fn interrupt_session(&self, session_id: &str) -> Result<(), ApiClientError> {
+    pub async fn interrupt_session(&self, session_id: &str) -> Result<OkResponse, ApiClientError> {
         let body = InterruptRequest {
             session_id: session_id.to_owned(),
         };
-        let resp = self
-            .http
-            .post(format!("{}{}", self.base_url, "/api/session/interrupt"))
-            .json(&body)
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(())
+        self.post_json("/api/session/interrupt", &body).await
     }
 
     /// 回退 session 到指定消息节点。
@@ -270,15 +261,7 @@ impl GatewayClient {
 
     /// 热重载全局配置。
     pub async fn reload_system(&self) -> Result<ReloadResponse, ApiClientError> {
-        let resp = self
-            .http
-            .post(format!("{}{}", self.base_url, "/api/system/reload"))
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+        self.post_empty("/api/system/reload").await
     }
 
     // ============================================================
@@ -362,6 +345,23 @@ impl GatewayClient {
     // ============================================================
     // 内部 helper
     // ============================================================
+
+    /// POST without body → deserialize JSON response。
+    async fn post_empty<Resp: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> Result<Resp, ApiClientError> {
+        let resp = self
+            .http
+            .post(format!("{}{}", self.base_url, path))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
 
     /// POST JSON body → deserialize JSON response。
     async fn post_json<Req: serde::Serialize, Resp: serde::de::DeserializeOwned>(

@@ -80,6 +80,10 @@ class SessionManager:
     def get_session(self, session_id: str) -> Session | None:
         return self._sessions.get(session_id)
 
+    def iter_sessions(self) -> list[Session]:
+        """返回所有活跃 session 的列表（快照）。"""
+        return list(self._sessions.values())
+
     def _generate_session_id(self) -> str:
         """生成唯一 session id（委托 common.utils.generate_session_id）。"""
         return generate_session_id()
