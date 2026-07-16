@@ -111,6 +111,24 @@ static TUI_ONLY_COMMANDS: LazyLock<Vec<CommandInfo>> = LazyLock::new(|| {
             description: "Toggle YOLO mode".into(),
             params: "on|off".into(),
         },
+        CommandInfo {
+            name: "compact".into(),
+            aliases: vec![],
+            description: "Compress session context".into(),
+            params: String::new(),
+        },
+        CommandInfo {
+            name: "rewind".into(),
+            aliases: vec![],
+            description: "Rewind to a specific message".into(),
+            params: "<uuid>".into(),
+        },
+        CommandInfo {
+            name: "reload".into(),
+            aliases: vec![],
+            description: "Reload config, hooks, skills".into(),
+            params: String::new(),
+        },
     ]
 });
 

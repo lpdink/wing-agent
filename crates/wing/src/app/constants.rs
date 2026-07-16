@@ -3,11 +3,6 @@
 //! Centralizing these avoids typos, eases grep-ability, and makes
 //! protocol-level changes visible in one place.
 
-// ── Magic commands (frontend → gateway) ─────────────────────────
-
-/// Interrupt the current agent turn.
-pub const INTERRUPT_COMMAND: &str = "/interrupt";
-
 // ── Frontend-only commands (handled locally, never sent to gateway) ─
 
 /// Copy the last assistant message to clipboard.

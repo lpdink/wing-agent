@@ -101,6 +101,26 @@ pub struct SendMessageRequest {
 }
 
 // ============================================================
+// Session 操作 — Request
+// ============================================================
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CompactRequest {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InterruptRequest {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RewindRequest {
+    pub session_id: String,
+    pub target_uuid: String,
+}
+
+// ============================================================
 // Response types
 // ============================================================
 
@@ -122,6 +142,12 @@ pub struct ResumeSessionResponse {
 pub struct ForkSessionResponse {
     pub session_id: String,
     pub draft: Option<String>,
+}
+
+/// 通用成功响应。
+#[derive(Debug, Clone, Deserialize)]
+pub struct OkResponse {
+    pub ok: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -157,6 +183,13 @@ pub struct HealthResponse {
 // Session 查询端点 Response
 // ============================================================
 
+/// 上下文统计信息。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContextStatsInfo {
+    pub message_count: i64,
+    pub total_tokens: i64,
+}
+
 /// GET /api/session/info 响应——session 运行时状态。
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionInfoResponse {
@@ -169,6 +202,42 @@ pub struct SessionInfoResponse {
     pub reasoning_effort: Option<String>,
     pub yolo: bool,
     pub session_name: Option<String>,
+    pub context_stats: ContextStatsInfo,
+    #[serde(default)]
+    pub skills_info: String,
+}
+
+/// POST /api/session/compact 响应。
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompactResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub original_tokens: i64,
+    #[serde(default)]
+    pub compressed_tokens: i64,
+}
+
+/// POST /api/session/rewind 响应。
+#[derive(Debug, Clone, Deserialize)]
+pub struct RewindResponse {
+    pub ok: bool,
+    pub draft: Option<String>,
+}
+
+/// reload 端点中每一项的结果。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReloadResultItem {
+    pub name: String,
+    pub ok: bool,
+    pub detail: Option<String>,
+}
+
+/// POST /api/system/reload 响应。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReloadResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub results: Vec<ReloadResultItem>,
 }
 
 /// 单个可分叉/回退的消息节点信息。

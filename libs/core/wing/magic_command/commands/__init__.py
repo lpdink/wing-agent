@@ -1,11 +1,2 @@
-# wing/magic_command/commands/__init__.py — 触发 @magic_registry.register 装饰器
-
-from . import (  # noqa: F401
-    bash as bash,
-    compact as compact,
-    context as context,
-    interrupt as interrupt,
-    reload as reload,
-    rewind as rewind,
-    skills as skills,
-)
+# 内置命令已删除——所有状态变更命令已迁移为 WingRuntime 方法。
+# Prompt 类型命令由 prompt_commands.py 动态加载。

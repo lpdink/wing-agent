@@ -55,7 +55,6 @@ use title::AttentionKind;
 use self::constants::CLEAR_COMMAND;
 use self::constants::COPY_COMMAND;
 use self::constants::FORK_COMMAND;
-use self::constants::INTERRUPT_COMMAND;
 use self::constants::NEW_COMMAND;
 use self::constants::SESSION_COMMAND;
 use self::constants::SS_COMMAND;
@@ -388,6 +387,25 @@ impl App {
                     }
                 }
             }
+            "/compact" => {
+                self.push_intent(AppIntent::CompactSession);
+                true
+            }
+            "/reload" => {
+                self.push_intent(AppIntent::ReloadSystem);
+                true
+            }
+            _ if text.starts_with("/rewind ") => {
+                let uuid = text.strip_prefix("/rewind ").unwrap().trim();
+                if !uuid.is_empty() {
+                    self.push_intent(AppIntent::RewindSession {
+                        target_uuid: uuid.to_string(),
+                    });
+                    true
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }
@@ -507,9 +525,7 @@ impl App {
             if !self.input.text().is_empty() {
                 self.input.clear();
             } else {
-                self.push_intent(AppIntent::SendMessage {
-                    content: INTERRUPT_COMMAND.to_string(),
-                });
+                self.push_intent(AppIntent::InterruptSession);
                 self.show_toast(Toast::info(
                     "Interrupting agent...",
                     std::time::Duration::from_secs(2),
@@ -892,9 +908,6 @@ impl App {
             }
 
             // ---- State events ----
-            WingEvent::System { content, .. } => {
-                self.show_toast(Toast::info(content, std::time::Duration::from_secs(3)));
-            }
             WingEvent::ContextStats {
                 total_tokens,
                 context_window_tokens,

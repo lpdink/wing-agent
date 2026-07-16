@@ -259,6 +259,86 @@ pub async fn execute_intent(
                 }
             }
         }
+        AppIntent::CompactSession => {
+            if let Some(t) = transport {
+                match t.http.compact_session(&app.session_id).await {
+                    Ok(resp) => {
+                        app.show_toast(Toast::info(
+                            format!(
+                                "Compact done: {} → {} tokens",
+                                resp.original_tokens, resp.compressed_tokens
+                            ),
+                            std::time::Duration::from_secs(3),
+                        ));
+                    }
+                    Err(e) => {
+                        app.show_toast(Toast::error(
+                            format!("Compact failed: {e}"),
+                            std::time::Duration::from_secs(3),
+                        ));
+                    }
+                }
+            }
+        }
+        AppIntent::InterruptSession => {
+            if let Some(t) = transport
+                && let Err(e) = t.http.interrupt_session(&app.session_id).await
+            {
+                tracing::warn!("interrupt failed: {e}");
+            }
+        }
+        AppIntent::RewindSession { target_uuid } => {
+            if let Some(t) = transport {
+                match t.http.rewind_session(&app.session_id, &target_uuid).await {
+                    Ok(_) => {
+                        app.show_toast(Toast::info(
+                            "Session rewound",
+                            std::time::Duration::from_secs(2),
+                        ));
+                    }
+                    Err(e) => {
+                        app.show_toast(Toast::error(
+                            format!("Rewind failed: {e}"),
+                            std::time::Duration::from_secs(3),
+                        ));
+                    }
+                }
+            }
+        }
+        AppIntent::ReloadSystem => {
+            if let Some(t) = transport {
+                match t.http.reload_system().await {
+                    Ok(resp) => {
+                        let status = if resp.ok { "✅" } else { "⚠️" };
+                        let details: Vec<String> = resp
+                            .results
+                            .iter()
+                            .map(|r| {
+                                if r.ok {
+                                    format!("✅ {}", r.name)
+                                } else {
+                                    format!(
+                                        "❌ {}: {}",
+                                        r.name,
+                                        r.detail.as_deref().unwrap_or("unknown")
+                                    )
+                                }
+                            })
+                            .collect();
+                        app.show_toast(Toast::info(
+                            format!("{status} Reload: {}", details.join(", ")),
+                            std::time::Duration::from_secs(4),
+                        ));
+                    }
+                    Err(e) => {
+                        app.show_toast(Toast::error(
+                            format!("Reload failed: {e}"),
+                            std::time::Duration::from_secs(3),
+                        ));
+                    }
+                }
+            }
+        }
         AppIntent::SetTitle(t) => {
             let writer = terminal.backend_mut();
             if let Err(e) = title::set_title(writer, &t) {

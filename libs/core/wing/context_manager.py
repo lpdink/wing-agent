@@ -461,6 +461,53 @@ More detail in: "{dir}/SKILL.md" """
         self._pending_compact_result = None
         self._delete_pending_compact()
 
+    async def do_manual_compact(
+        self,
+        model: str,
+        model_provider: OpenAIProvider,
+        tools: list | None = None,
+    ) -> tuple[int, int]:
+        """手动压缩上下文。
+
+        丢弃 pending async compact，对当前消息链执行同步压缩，
+        将压缩结果写入消息链。
+
+        Args:
+            model: 主 model 名称
+            model_provider: OpenAIProvider 实例
+            tools: 可用工具列表
+
+        Returns:
+            (original_tokens, compressed_tokens)
+
+        Raises:
+            RuntimeError: 未配置 compactor 或压缩失败
+        """
+        if not self.compactor:
+            raise RuntimeError("compactor not configured")
+
+        self._discard_pending_compact()
+        msgs = list(self._messages)
+        full_context = [self.system_prompt] + msgs
+
+        compacted = await self.compactor.do_compact(
+            full_context, model, model_provider, tools=tools
+        )
+
+        last_compressed_uuid = msgs[-1].uuid if msgs else None
+        compact_node = Message(
+            role="assistant",
+            content=compacted.content,
+            parent_uuid=None,
+            unzip_last_uuid=last_compressed_uuid,
+        )
+        compact_node.uuid = uuid.uuid4().hex
+
+        self._messages.append_detached(compact_node)
+        self._messages.set_tip(compact_node.uuid)
+
+        return compacted.usage.prompt_tokens, compacted.usage.completion_tokens
+
     # ── Pending compact 持久化 ────────────────────
 
     @property

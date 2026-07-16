@@ -208,7 +208,7 @@ class TestSessionResume:
 
     def test_resume_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
-        mock_runtime.resume_session.side_effect = ValueError("Session not found: xxx")
+        mock_runtime.resume_session.side_effect = LookupError("Session not found: xxx")
         resp = client.post("/api/session/resume", json={"session_id": "xxx"})
         assert resp.status_code == 404
 
@@ -237,7 +237,7 @@ class TestSessionFork:
 
     def test_fork_session_not_found(self, client: TestClient, mock_runtime):
         """源 session 不存在返回 404。"""
-        mock_runtime.fork_session.side_effect = ValueError(
+        mock_runtime.fork_session.side_effect = LookupError(
             "Fork failed: source session 'xxx' not found or target_uuid 'yyy' invalid"
         )
         resp = client.post(
@@ -248,7 +248,7 @@ class TestSessionFork:
 
     def test_fork_uuid_not_found(self, client: TestClient, mock_runtime):
         """目标 UUID 不存在返回 404。"""
-        mock_runtime.fork_session.side_effect = ValueError(
+        mock_runtime.fork_session.side_effect = LookupError(
             "target_uuid 'invalid-uuid' invalid"
         )
         resp = client.post(
@@ -301,7 +301,7 @@ class TestSessionSubscribe:
 
     def test_subscribe_session_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
-        mock_runtime.subscribe.side_effect = ValueError("Session not found: xxx")
+        mock_runtime.subscribe.side_effect = LookupError("Session not found: xxx")
         resp = client.post(
             "/api/session/subscribe",
             json={"session_id": "xxx"},
@@ -443,7 +443,11 @@ class TestSessionInfo:
         }
         mock_session.agent.yolo = False
         mock_session.session_name = "Test Session"
-        mock_runtime.sm.get_session.return_value = mock_session
+        mock_session.agent.context_manager.get_context_stats.return_value = (5, 800)
+        mock_session.agent.context_manager.get_skills_info.return_value = (
+            "skill-a: desc"
+        )
+        mock_runtime.get_session.return_value = mock_session
 
         resp = client.get("/api/session/info", params={"session_id": "test-id"})
         assert resp.status_code == 200
@@ -457,10 +461,13 @@ class TestSessionInfo:
         assert data["reasoning_effort"] == "high"
         assert data["yolo"] is False
         assert data["session_name"] == "Test Session"
+        assert data["context_stats"]["message_count"] == 5
+        assert data["context_stats"]["total_tokens"] == 800
+        assert data["skills_info"] == "skill-a: desc"
 
     def test_info_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
-        mock_runtime.sm.get_session.return_value = None
+        mock_runtime.get_session.return_value = None
         resp = client.get("/api/session/info", params={"session_id": "xxx"})
         assert resp.status_code == 404
 
@@ -480,7 +487,7 @@ class TestSessionBranches:
             {"uuid": "msg-1", "content": "hello", "role": "user"},
             {"uuid": "msg-2", "content": "world", "role": "user"},
         ]
-        mock_runtime.sm.get_session.return_value = mock_session
+        mock_runtime.get_session.return_value = mock_session
 
         resp = client.get("/api/session/branches", params={"session_id": "test-id"})
         assert resp.status_code == 200
@@ -491,7 +498,7 @@ class TestSessionBranches:
 
     def test_branches_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
-        mock_runtime.sm.get_session.return_value = None
+        mock_runtime.get_session.return_value = None
         resp = client.get("/api/session/branches", params={"session_id": "xxx"})
         assert resp.status_code == 404
 
@@ -504,109 +511,85 @@ class TestSessionBranches:
 class TestSessionUpdate:
     """POST /api/session/update 测试。"""
 
-    def _make_mock_session(self, mock_runtime):
-        """创建 mock session 和 template_manager。"""
-        mock_session = MagicMock()
-        mock_session.session_id = "test-id"
-        mock_session.session_name = "test-session"
-        mock_session.template_name = "default"
-        mock_session.agent.model = "gpt-4o"
-        mock_session.agent.yolo = False
-        mock_session.agent.model_provider.thinking = False
-        # set_thinking / set_yolo 需实际更新属性，否则 emit 读到旧值
-        mock_session.agent.model_provider.set_thinking.side_effect = lambda v: setattr(
-            mock_session.agent.model_provider, "thinking", v
-        )
-        mock_session.agent.model_provider.reasoning_effort = None
-        mock_session.agent.set_reasoning_effort.side_effect = lambda v: setattr(
-            mock_session.agent.model_provider, "reasoning_effort", v
-        )
-        mock_session.agent.set_yolo.side_effect = lambda v: setattr(
-            mock_session.agent, "yolo", v
-        )
-        mock_session.switch_template = AsyncMock()
-        mock_runtime.sm.get_session.return_value = mock_session
-
-        mock_template = MagicMock()
-        mock_runtime.template_manager.get.return_value = mock_template
-        mock_runtime.template_manager.all_names = ["default", "coder"]
-        return mock_session
-
     def test_update_model(self, client: TestClient, mock_runtime):
         """切换模型。"""
-        mock_session = self._make_mock_session(mock_runtime)
+        mock_runtime.update_session = AsyncMock()
         resp = client.post(
             "/api/session/update",
             json={"session_id": "test-id", "model": "gpt-4o-mini"},
         )
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
-        assert mock_session.agent.model == "gpt-4o-mini"
+        mock_runtime.update_session.assert_called_once_with(
+            session_id="test-id",
+            model="gpt-4o-mini",
+            agent=None,
+            title=None,
+            thinking=None,
+            reasoning_effort=None,
+            yolo=None,
+        )
 
     def test_update_agent(self, client: TestClient, mock_runtime):
         """切换 agent 模板。"""
-        mock_session = self._make_mock_session(mock_runtime)
+        mock_runtime.update_session = AsyncMock()
         resp = client.post(
             "/api/session/update",
             json={"session_id": "test-id", "agent": "coder"},
         )
         assert resp.status_code == 200
-        mock_session.switch_template.assert_called_once()
 
     def test_update_agent_not_found(self, client: TestClient, mock_runtime):
-        """模板不存在返回 400。"""
-        self._make_mock_session(mock_runtime)
-        mock_runtime.template_manager.get.return_value = None
+        """模板不存在返回 404。"""
+        mock_runtime.update_session = AsyncMock(
+            side_effect=LookupError("template 'nonexistent' not found")
+        )
         resp = client.post(
             "/api/session/update",
             json={"session_id": "test-id", "agent": "nonexistent"},
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 404
         assert "nonexistent" in resp.json()["detail"]
 
     def test_update_title(self, client: TestClient, mock_runtime):
         """设置 session 名称。"""
-        mock_session = self._make_mock_session(mock_runtime)
+        mock_runtime.update_session = AsyncMock()
         resp = client.post(
             "/api/session/update",
             json={"session_id": "test-id", "title": "my session"},
         )
         assert resp.status_code == 200
-        mock_session.set_title.assert_called_once_with("my session")
 
     def test_update_thinking(self, client: TestClient, mock_runtime):
         """开关 thinking 模式。"""
-        mock_session = self._make_mock_session(mock_runtime)
+        mock_runtime.update_session = AsyncMock()
         resp = client.post(
             "/api/session/update",
             json={"session_id": "test-id", "thinking": True},
         )
         assert resp.status_code == 200
-        mock_session.agent.model_provider.set_thinking.assert_called_once_with(True)
 
     def test_update_reasoning_effort(self, client: TestClient, mock_runtime):
         """设置推理力度。"""
-        mock_session = self._make_mock_session(mock_runtime)
+        mock_runtime.update_session = AsyncMock()
         resp = client.post(
             "/api/session/update",
             json={"session_id": "test-id", "reasoning_effort": "high"},
         )
         assert resp.status_code == 200
-        mock_session.agent.set_reasoning_effort.assert_called_once_with("high")
 
     def test_update_yolo(self, client: TestClient, mock_runtime):
         """开关 yolo 模式。"""
-        mock_session = self._make_mock_session(mock_runtime)
+        mock_runtime.update_session = AsyncMock()
         resp = client.post(
             "/api/session/update",
             json={"session_id": "test-id", "yolo": True},
         )
         assert resp.status_code == 200
-        mock_session.agent.set_yolo.assert_called_once_with(True)
 
     def test_update_multi_fields(self, client: TestClient, mock_runtime):
-        """多字段同时更新，按正确顺序执行。"""
-        mock_session = self._make_mock_session(mock_runtime)
+        """多字段同时更新。"""
+        mock_runtime.update_session = AsyncMock()
         resp = client.post(
             "/api/session/update",
             json={
@@ -619,16 +602,9 @@ class TestSessionUpdate:
             },
         )
         assert resp.status_code == 200
-        # agent 在前，model 在后
-        mock_session.switch_template.assert_called_once()
-        assert mock_session.agent.model == "gpt-4o-mini"
-        mock_session.set_title.assert_called_once_with("new title")
-        mock_session.agent.model_provider.set_thinking.assert_called_once_with(True)
-        mock_session.agent.set_yolo.assert_called_once_with(True)
 
     def test_update_all_none(self, client: TestClient, mock_runtime):
         """所有可选字段均为 None 返回 400。"""
-        self._make_mock_session(mock_runtime)
         resp = client.post(
             "/api/session/update",
             json={"session_id": "test-id"},
@@ -637,109 +613,14 @@ class TestSessionUpdate:
 
     def test_update_session_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
-        mock_runtime.sm.get_session.return_value = None
+        mock_runtime.update_session = AsyncMock(
+            side_effect=LookupError("session not found")
+        )
         resp = client.post(
             "/api/session/update",
             json={"session_id": "xxx", "model": "gpt-4o"},
         )
         assert resp.status_code == 404
-
-    @patch("wing.gateway.routes.session.event_bus")
-    def test_update_model_emits_state_changed_event(
-        self, mock_bus, client: TestClient, mock_runtime
-    ):
-        """更新模型后 emit SessionStateChangedEvent，仅携带变更字段。"""
-        mock_session = self._make_mock_session(mock_runtime)
-        mock_session.agent.model = "gpt-4o-mini"  # 更新后的值
-        resp = client.post(
-            "/api/session/update",
-            json={"session_id": "test-id", "model": "gpt-4o-mini"},
-        )
-        assert resp.status_code == 200
-        mock_bus.emit.assert_called_once()
-        event = mock_bus.emit.call_args[0][0]
-        assert event.type == "session_state_changed"
-        assert event.model == "gpt-4o-mini"
-        assert event.thinking is None
-        assert event.yolo is None
-        assert event.title is None
-        assert event.agent is None
-
-    @patch("wing.gateway.routes.session.event_bus")
-    def test_update_multi_fields_emits_state_changed_event(
-        self, mock_bus, client: TestClient, mock_runtime
-    ):
-        """多字段同时更新后 emit SessionStateChangedEvent，携带所有变更字段。"""
-        mock_session = self._make_mock_session(mock_runtime)
-        mock_session.agent.model = "gpt-4o-mini"
-        mock_session.session_name = "new title"
-        mock_session.template_name = "coder"
-        resp = client.post(
-            "/api/session/update",
-            json={
-                "session_id": "test-id",
-                "agent": "coder",
-                "model": "gpt-4o-mini",
-                "title": "new title",
-                "thinking": True,
-                "yolo": True,
-            },
-        )
-        assert resp.status_code == 200
-        mock_bus.emit.assert_called_once()
-        event = mock_bus.emit.call_args[0][0]
-        assert event.type == "session_state_changed"
-        assert event.model == "gpt-4o-mini"
-        assert event.thinking is True
-        assert event.yolo is True
-        assert event.title == "new title"
-        assert event.agent == "coder"
-
-    @patch("wing.gateway.routes.session.event_bus")
-    def test_update_thinking_emits_state_changed_event(
-        self, mock_bus, client: TestClient, mock_runtime
-    ):
-        """切换 thinking 后 emit SessionStateChangedEvent(thinking=True)。"""
-        self._make_mock_session(mock_runtime)
-        resp = client.post(
-            "/api/session/update",
-            json={"session_id": "test-id", "thinking": True},
-        )
-        assert resp.status_code == 200
-        mock_bus.emit.assert_called_once()
-        event = mock_bus.emit.call_args[0][0]
-        assert event.type == "session_state_changed"
-        assert event.model is None
-        assert event.thinking is True
-
-    @patch("wing.gateway.routes.session.event_bus")
-    def test_update_agent_emits_reset_state_fields(
-        self, mock_bus, client: TestClient, mock_runtime
-    ):
-        """Agent 切换后 emit 事件携带 switch_template 重置后的 thinking/yolo/reasoning_effort。"""
-        mock_session = self._make_mock_session(mock_runtime)
-        # switch_template 后 agent 的状态（模拟新 template 的默认值）
-        mock_session.agent.model_provider.thinking = True
-        mock_session.agent.model_provider.reasoning_effort = "medium"
-        mock_session.agent.yolo = False
-        mock_session.agent.model = "gpt-4o"
-        mock_session.template_name = "coder"
-
-        resp = client.post(
-            "/api/session/update",
-            json={"session_id": "test-id", "agent": "coder"},
-        )
-        assert resp.status_code == 200
-        mock_bus.emit.assert_called_once()
-        event = mock_bus.emit.call_args[0][0]
-        assert event.type == "session_state_changed"
-        assert event.agent == "coder"
-        assert event.model == "gpt-4o"
-        # agent switch 应报告重置后的值，而非 None
-        assert event.thinking is True
-        assert event.reasoning_effort == "medium"
-        assert event.yolo is False
-        assert event.title is None
 
 
 # ============================================================
@@ -752,20 +633,28 @@ class TestSystemCommands:
 
     @patch("wing.gateway.routes.system.magic_registry")
     def test_list_commands(self, mock_registry, client: TestClient):
-        """正常获取命令列表。"""
-        mock_cmd = MagicMock()
-        mock_cmd.name = "help"
-        mock_cmd.aliases = ["h", "?"]
-        mock_cmd.description = "显示帮助"
-        mock_cmd.params = ""
-        mock_registry.list_all.return_value = [mock_cmd]
+        """只返回 prompt 类型的命令。"""
+        prompt_cmd = MagicMock()
+        prompt_cmd.name = "plan"
+        prompt_cmd.aliases = []
+        prompt_cmd.description = "Create a plan"
+        prompt_cmd.params = "[args]"
+        prompt_cmd.source = "prompt"
+
+        builtin_cmd = MagicMock()
+        builtin_cmd.name = "compact"
+        builtin_cmd.aliases = []
+        builtin_cmd.description = "Compact"
+        builtin_cmd.params = ""
+        builtin_cmd.source = "builtin"
+
+        mock_registry.list_all.return_value = [prompt_cmd, builtin_cmd]
 
         resp = client.get("/api/commands")
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["commands"]) == 1
-        assert data["commands"][0]["name"] == "help"
-        assert data["commands"][0]["aliases"] == ["h", "?"]
+        assert data["commands"][0]["name"] == "plan"
 
 
 # ============================================================
@@ -829,3 +718,148 @@ class TestSystemAgents:
         data = resp.json()
         assert data["agents"] == ["default", "coder", "reviewer"]
         assert data["default_agent"] == "default"
+
+
+# ============================================================
+# Session: Compact
+# ============================================================
+
+
+class TestSessionCompact:
+    """POST /api/session/compact 测试。"""
+
+    def test_compact_ok(self, client: TestClient, mock_runtime):
+        """正常压缩。"""
+        mock_runtime.compact_session = AsyncMock(return_value=(1000, 200))
+
+        resp = client.post("/api/session/compact", json={"session_id": "test-id"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["original_tokens"] == 1000
+        assert data["compressed_tokens"] == 200
+
+    def test_compact_not_found(self, client: TestClient, mock_runtime):
+        """Session 不存在返回 404。"""
+        mock_runtime.compact_session = AsyncMock(side_effect=LookupError("not found"))
+        resp = client.post("/api/session/compact", json={"session_id": "xxx"})
+        assert resp.status_code == 404
+
+    def test_compact_no_compactor(self, client: TestClient, mock_runtime):
+        """未配置 compactor 返回 400。"""
+        mock_runtime.compact_session = AsyncMock(
+            side_effect=RuntimeError("compactor not configured")
+        )
+        resp = client.post("/api/session/compact", json={"session_id": "test-id"})
+        assert resp.status_code == 400
+
+
+# ============================================================
+# Session: Interrupt
+# ============================================================
+
+
+class TestSessionInterrupt:
+    """POST /api/session/interrupt 测试。"""
+
+    def test_interrupt_ok(self, client: TestClient, mock_runtime):
+        """正常中断。"""
+        mock_runtime.interrupt_session.return_value = None
+
+        resp = client.post("/api/session/interrupt", json={"session_id": "test-id"})
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        mock_runtime.interrupt_session.assert_called_once_with("test-id")
+
+    def test_interrupt_not_found(self, client: TestClient, mock_runtime):
+        """Session 不存在返回 404。"""
+        mock_runtime.interrupt_session.side_effect = LookupError("not found")
+        resp = client.post("/api/session/interrupt", json={"session_id": "xxx"})
+        assert resp.status_code == 404
+
+
+# ============================================================
+# Session: Rewind
+# ============================================================
+
+
+class TestSessionRewind:
+    """POST /api/session/rewind 测试。"""
+
+    def test_rewind_ok(self, client: TestClient, mock_runtime):
+        """正常回退。"""
+        mock_runtime.rewind_session.return_value = "draft text"
+
+        resp = client.post(
+            "/api/session/rewind",
+            json={"session_id": "test-id", "target_uuid": "abc123"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["draft"] == "draft text"
+
+    def test_rewind_not_found(self, client: TestClient, mock_runtime):
+        """Session 不存在返回 404。"""
+        mock_runtime.rewind_session.side_effect = LookupError("session not found")
+        resp = client.post(
+            "/api/session/rewind",
+            json={"session_id": "xxx", "target_uuid": "abc"},
+        )
+        assert resp.status_code == 404
+
+    def test_rewind_invalid_uuid(self, client: TestClient, mock_runtime):
+        """无效 uuid 返回 400。"""
+        mock_runtime.rewind_session.side_effect = ValueError("invalid target uuid")
+        resp = client.post(
+            "/api/session/rewind",
+            json={"session_id": "test-id", "target_uuid": "bad"},
+        )
+        assert resp.status_code == 400
+
+
+# ============================================================
+# System: Reload
+# ============================================================
+
+
+class TestSystemReload:
+    """POST /api/system/reload 测试。"""
+
+    def test_reload_ok(self, client: TestClient, mock_runtime):
+        """全部重载成功。"""
+        from wing.runtime import ReloadResult, ReloadResultItem
+
+        mock_runtime.reload_system.return_value = ReloadResult(
+            ok=True,
+            items=[
+                ReloadResultItem(name="config.yaml", ok=True),
+                ReloadResultItem(name="hooks", ok=True),
+                ReloadResultItem(name="prompt commands", ok=True),
+                ReloadResultItem(name="provider", ok=True, detail="unchanged"),
+                ReloadResultItem(name="skills & rules", ok=True),
+            ],
+        )
+
+        resp = client.post("/api/system/reload")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert len(data["results"]) == 5
+
+    def test_reload_config_failure(self, client: TestClient, mock_runtime):
+        """config 加载失败立即中止。"""
+        from wing.runtime import ReloadResult, ReloadResultItem
+
+        mock_runtime.reload_system.return_value = ReloadResult(
+            ok=False,
+            items=[ReloadResultItem(name="config.yaml", ok=False, detail="bad config")],
+        )
+
+        resp = client.post("/api/system/reload")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is False
+        assert len(data["results"]) == 1
+        assert data["results"][0]["name"] == "config.yaml"
+        assert data["results"][0]["ok"] is False

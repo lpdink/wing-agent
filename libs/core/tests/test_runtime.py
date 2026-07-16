@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from wing.event import SystemEvent
+from wing.event import DeliveredEvent
 from wing.event_bus import event_bus
 from wing.request_context import (
     reset_request_context,
@@ -107,7 +107,7 @@ class TestContextvarsIsolation:
         # post() 返回后，emit 一个事件验证 RequestContext 已恢复
         received: list = []
         event_bus.subscribe(lambda e: received.append(e))
-        event_bus.emit(SystemEvent(content="verify"))
+        event_bus.emit(DeliveredEvent())
 
         assert received[0].request_id == "outer-req"
         assert received[0].session_id == "outer-sid"
@@ -130,7 +130,7 @@ class TestContextvarsIsolation:
         # 恢复
         received: list = []
         event_bus.subscribe(lambda e: received.append(e))
-        event_bus.emit(SystemEvent(content="verify"))
+        event_bus.emit(DeliveredEvent())
         assert received[0].request_id == "outer"
 
         reset_request_context(token)
@@ -179,7 +179,7 @@ class TestSubscription:
     核心契约：
       - subscribe(client_id, session_id) 注册路由 + 推送 SyncSessionEvent + ContextStatsEvent
       - unsubscribe(client_id, session_id) 取消路由注册
-      - subscribe 不存在的 session 抛出 ValueError
+      - subscribe 不存在的 session 抛出 LookupError
     """
 
     @pytest.mark.asyncio
@@ -207,8 +207,8 @@ class TestSubscription:
 
     @pytest.mark.asyncio
     async def test_subscribe_nonexistent_session_raises(self, runtime: Any):
-        """subscribe 不存在的 session 抛出 ValueError。"""
-        with pytest.raises(ValueError, match="Session not found"):
+        """subscribe 不存在的 session 抛出 LookupError。"""
+        with pytest.raises(LookupError, match="Session not found"):
             runtime.subscribe("client-1", "nonexistent")
 
     @pytest.mark.asyncio
@@ -253,14 +253,14 @@ class TestSessionLifecycle:
     核心契约：
       - create_session 不涉及路由
       - resume_session 从磁盘恢复，内存中已存在时直接返回
-      - fork_session 失败时 raise ValueError
+      - fork_session 失败时 raise LookupError
     """
 
     @pytest.mark.asyncio
     async def test_fork_session_raises_on_nonexistent_source(self, runtime: Any):
-        """fork_session source 不存在时 raise ValueError。"""
+        """fork_session source 不存在时 raise LookupError。"""
         session = runtime.create_session()
-        with pytest.raises(ValueError, match="Fork failed"):
+        with pytest.raises(LookupError, match="Fork failed"):
             runtime.fork_session(session.session_id, "nonexistent-uuid")
 
     @pytest.mark.asyncio
@@ -272,8 +272,8 @@ class TestSessionLifecycle:
 
     @pytest.mark.asyncio
     async def test_resume_session_nonexistent_raises(self, runtime: Any):
-        """resume_session session 不存在时 raise ValueError。"""
-        with pytest.raises(ValueError, match="Session not found"):
+        """resume_session session 不存在时 raise LookupError。"""
+        with pytest.raises(LookupError, match="Session not found"):
             runtime.resume_session("definitely-not-exists")
 
     @pytest.mark.asyncio

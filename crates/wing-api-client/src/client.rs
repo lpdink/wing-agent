@@ -220,6 +220,51 @@ impl GatewayClient {
     }
 
     // ============================================================
+    // Session 操作
+    // ============================================================
+
+    /// 压缩 session 上下文。
+    pub async fn compact_session(
+        &self,
+        session_id: &str,
+    ) -> Result<CompactResponse, ApiClientError> {
+        let body = CompactRequest {
+            session_id: session_id.to_owned(),
+        };
+        self.post_json("/api/session/compact", &body).await
+    }
+
+    /// 中断 session 当前任务。
+    pub async fn interrupt_session(&self, session_id: &str) -> Result<OkResponse, ApiClientError> {
+        let body = InterruptRequest {
+            session_id: session_id.to_owned(),
+        };
+        self.post_json("/api/session/interrupt", &body).await
+    }
+
+    /// 回退 session 到指定消息节点。
+    pub async fn rewind_session(
+        &self,
+        session_id: &str,
+        target_uuid: &str,
+    ) -> Result<RewindResponse, ApiClientError> {
+        let body = RewindRequest {
+            session_id: session_id.to_owned(),
+            target_uuid: target_uuid.to_owned(),
+        };
+        self.post_json("/api/session/rewind", &body).await
+    }
+
+    // ============================================================
+    // 系统级操作
+    // ============================================================
+
+    /// 热重载全局配置。
+    pub async fn reload_system(&self) -> Result<ReloadResponse, ApiClientError> {
+        self.post_empty("/api/system/reload").await
+    }
+
+    // ============================================================
     // 系统级查询
     // ============================================================
 
@@ -300,6 +345,23 @@ impl GatewayClient {
     // ============================================================
     // 内部 helper
     // ============================================================
+
+    /// POST without body → deserialize JSON response。
+    async fn post_empty<Resp: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> Result<Resp, ApiClientError> {
+        let resp = self
+            .http
+            .post(format!("{}{}", self.base_url, path))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
 
     /// POST JSON body → deserialize JSON response。
     async fn post_json<Req: serde::Serialize, Resp: serde::de::DeserializeOwned>(

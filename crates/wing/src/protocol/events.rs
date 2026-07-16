@@ -92,14 +92,6 @@ fn default_role() -> String {
 #[serde(tag = "type")]
 pub enum WingEvent {
     // ---- base ----
-    /// System message (e.g. /help output).
-    #[serde(rename = "system")]
-    System {
-        content: String,
-        #[serde(flatten)]
-        meta: EventMeta,
-    },
-
     /// Error event.
     #[serde(rename = "error")]
     Error {
@@ -281,30 +273,6 @@ pub enum WingEvent {
         meta: EventMeta,
     },
 
-    /// Skills list response.
-    #[serde(rename = "skills_list")]
-    SkillsList {
-        #[serde(default)]
-        content: String,
-        #[serde(default)]
-        skills: Vec<String>,
-        #[serde(flatten)]
-        meta: EventMeta,
-    },
-
-    /// Shell command output (/bash).
-    #[serde(rename = "shell_command")]
-    ShellCommand {
-        #[serde(default)]
-        command: String,
-        #[serde(default)]
-        output: String,
-        #[serde(default)]
-        exit_code: i32,
-        #[serde(flatten)]
-        meta: EventMeta,
-    },
-
     // ---- turn-level events (for stdio / SDK consumers) ----
     /// Turn-level assistant message (complete, not streaming).
     #[serde(rename = "assistant_turn")]
@@ -396,7 +364,6 @@ impl WingEvent {
     /// Returns the `type` discriminator string for this event.
     pub fn event_type(&self) -> &'static str {
         match self {
-            Self::System { .. } => "system",
             Self::Error { .. } => "error",
             Self::Delivered { .. } => "delivered",
             Self::Text { .. } => "text",
@@ -414,8 +381,6 @@ impl WingEvent {
             Self::CompactDone { .. } => "compact_done",
             Self::ContextStats { .. } => "context_stats",
             Self::BranchTargets { .. } => "branch_targets",
-            Self::SkillsList { .. } => "skills_list",
-            Self::ShellCommand { .. } => "shell_command",
             Self::AssistantTurn { .. } => "assistant_turn",
             Self::ToolResultTurn { .. } => "tool_result_turn",
             Self::TurnResult { .. } => "turn_result",
@@ -427,8 +392,7 @@ impl WingEvent {
     /// Returns a reference to the event metadata, if this is a known variant.
     pub fn meta(&self) -> Option<&EventMeta> {
         match self {
-            Self::System { meta, .. }
-            | Self::Error { meta, .. }
+            Self::Error { meta, .. }
             | Self::Delivered { meta, .. }
             | Self::Text { meta, .. }
             | Self::Reasoning { meta, .. }
@@ -445,8 +409,6 @@ impl WingEvent {
             | Self::CompactDone { meta, .. }
             | Self::ContextStats { meta, .. }
             | Self::BranchTargets { meta, .. }
-            | Self::SkillsList { meta, .. }
-            | Self::ShellCommand { meta, .. }
             | Self::AssistantTurn { meta, .. }
             | Self::ToolResultTurn { meta, .. }
             | Self::TurnResult { meta, .. }

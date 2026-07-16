@@ -1,10 +1,12 @@
-"""测试 prompt 类型命令加载器."""
+"""测试 prompt 类型命令加载器和文本展开."""
 
 from pathlib import Path
 
 from wing.magic_command.prompt_commands import (
+    expand_prompt_command,
     load_prompt_command_from_file,
     load_prompt_commands_from_paths,
+    register_prompt_commands,
 )
 from wing.magic_command.registry import magic_registry
 
@@ -146,8 +148,8 @@ Content with $ARGUMENTS
         cmd = load_prompt_command_from_file(cmd_file)
 
         assert cmd is not None
-        # handler 是一个异步函数，这里只检查它存在
-        assert callable(cmd.handler)
+        assert cmd.file_path is not None
+        assert cmd.source == "prompt"
 
 
 class TestLoadPromptCommandsFromPaths:
@@ -299,3 +301,82 @@ Content
             del magic_registry._commands["register-test"]
         if "rt" in magic_registry._commands:
             del magic_registry._commands["rt"]
+
+
+class TestExpandPromptCommand:
+    """测试 prompt 命令文本展开。"""
+
+    def test_expand_with_args(self, tmp_path: Path):
+        """匹配成功且有参数时正确展开。"""
+        md_file = tmp_path / "plan.md"
+        md_file.write_text(
+            "---\nname: plan\ndescription: Create a plan\n---\n\nPlan for $ARGUMENTS",
+            encoding="utf-8",
+        )
+        cmd = load_prompt_command_from_file(md_file)
+        assert cmd is not None
+        magic_registry.register_command(cmd)
+        try:
+            result = expand_prompt_command("plan", "auth feature")
+            assert result is not None
+            assert "Plan for auth feature" in result
+            assert "<user_input>auth feature</user_input>" in result
+            # frontmatter 不应出现在展开文本中
+            assert "name: plan" not in result
+        finally:
+            magic_registry.remove_by_source("prompt")
+
+    def test_expand_no_args(self, tmp_path: Path):
+        """无参数时 $ARGUMENTS 替换为空。"""
+        md_file = tmp_path / "review.md"
+        md_file.write_text(
+            "---\nname: review\n---\n\nReview $ARGUMENTS code",
+            encoding="utf-8",
+        )
+        cmd = load_prompt_command_from_file(md_file)
+        assert cmd is not None
+        magic_registry.register_command(cmd)
+        try:
+            result = expand_prompt_command("review", "")
+            assert result is not None
+            assert "Review  code" in result
+            assert "<user_input>" not in result
+        finally:
+            magic_registry.remove_by_source("prompt")
+
+    def test_expand_unknown_command(self):
+        """不匹配任何命令时返回 None。"""
+        result = expand_prompt_command("nonexistent-cmd-xyz", "args")
+        assert result is None
+
+    def test_expand_slash_prefix_protection(self, tmp_path: Path):
+        """展开文本以 / 开头时前置空格防止误识别。"""
+        md_file = tmp_path / "slash.md"
+        md_file.write_text(
+            "---\nname: slashtest\n---\n\n/this starts with slash",
+            encoding="utf-8",
+        )
+        cmd = load_prompt_command_from_file(md_file)
+        assert cmd is not None
+        magic_registry.register_command(cmd)
+        try:
+            result = expand_prompt_command("slashtest", "")
+            assert result is not None
+            assert result.startswith(" /")
+        finally:
+            magic_registry.remove_by_source("prompt")
+
+    def test_expand_missing_file(self, tmp_path: Path):
+        """文件不存在时返回 None。"""
+        md_file = tmp_path / "gone.md"
+        md_file.write_text("---\nname: gone\n---\n\ncontent", encoding="utf-8")
+        cmd = load_prompt_command_from_file(md_file)
+        assert cmd is not None
+        magic_registry.register_command(cmd)
+        # 删除文件
+        md_file.unlink()
+        try:
+            result = expand_prompt_command("gone", "")
+            assert result is None
+        finally:
+            magic_registry.remove_by_source("prompt")
