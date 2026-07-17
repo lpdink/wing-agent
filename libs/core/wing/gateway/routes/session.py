@@ -274,6 +274,7 @@ async def session_info(
             total_tokens=total_tok,
         ),
         skills_info=cm.get_skills_info(),
+        system_prompt=cm.system_prompt.content or "",
     )
 
 

@@ -88,10 +88,11 @@ impl ChatCell {
                 lines
             }
             Self::SystemMessage(text) => {
-                let dim = Style::default().fg(palette.dim);
-                let mut lines = vec![Line::from(Span::styled("⦁ system", dim))];
+                let label = Style::default().fg(palette.accent);
+                let body = Style::default().fg(palette.text).italic();
+                let mut lines = vec![Line::from(Span::styled("⦁ system", label))];
                 for line in render_plain(text) {
-                    lines.push(Span::styled(line.to_string(), dim).into());
+                    lines.push(Span::styled(line.to_string(), body).into());
                 }
                 lines.push(Line::from(""));
                 lines

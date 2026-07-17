@@ -76,12 +76,6 @@ static TUI_ONLY_COMMANDS: LazyLock<Vec<CommandInfo>> = LazyLock::new(|| {
             params: "<uuid>".into(),
         },
         CommandInfo {
-            name: "help".into(),
-            aliases: vec!["h".into(), "?".into()],
-            description: "Show available commands".into(),
-            params: String::new(),
-        },
-        CommandInfo {
             name: "model".into(),
             aliases: vec!["m".into()],
             description: "Switch or show model".into(),
@@ -115,6 +109,18 @@ static TUI_ONLY_COMMANDS: LazyLock<Vec<CommandInfo>> = LazyLock::new(|| {
             name: "compact".into(),
             aliases: vec![],
             description: "Compress session context".into(),
+            params: String::new(),
+        },
+        CommandInfo {
+            name: "context".into(),
+            aliases: vec![],
+            description: "Show context stats and system prompt".into(),
+            params: String::new(),
+        },
+        CommandInfo {
+            name: "skills".into(),
+            aliases: vec![],
+            description: "Show loaded skills".into(),
             params: String::new(),
         },
         CommandInfo {
@@ -233,6 +239,7 @@ pub fn filter_commands(commands: &[CommandInfo], filter: &str) -> Vec<SelectionR
     }
 
     exact.extend(prefix);
+    exact.sort_by_key(|a| a.name.to_lowercase());
     exact
 }
 
