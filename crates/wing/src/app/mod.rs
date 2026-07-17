@@ -291,8 +291,12 @@ impl App {
     /// and converted to HTTP API intents.
     fn try_http_command(&mut self, text: &str) -> bool {
         match text {
-            "/help" | "/h" | "/?" => {
-                self.push_intent(AppIntent::FetchCommands);
+            "/context" => {
+                self.push_intent(AppIntent::ShowContextInfo);
+                true
+            }
+            "/skills" => {
+                self.push_intent(AppIntent::ShowSkillsInfo);
                 true
             }
             "/model" => {

@@ -69,6 +69,12 @@ pub enum AppIntent {
 
     /// Reload system configuration via HTTP API.
     ReloadSystem,
+
+    /// Fetch and display context stats (messages, tokens) via HTTP API.
+    ShowContextInfo,
+
+    /// Fetch and display skills info via HTTP API.
+    ShowSkillsInfo,
 }
 
 impl AppIntent {

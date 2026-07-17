@@ -205,6 +205,8 @@ pub struct SessionInfoResponse {
     pub context_stats: ContextStatsInfo,
     #[serde(default)]
     pub skills_info: String,
+    #[serde(default)]
+    pub system_prompt: String,
 }
 
 /// POST /api/session/compact 响应。

@@ -339,6 +339,53 @@ pub async fn execute_intent(
                 }
             }
         }
+        AppIntent::ShowContextInfo => {
+            if let Some(t) = transport {
+                match t.http.get_session_info(&app.session_id).await {
+                    Ok(info) => {
+                        let mut text = format!(
+                            "Messages: {}\nTokens: {} / {}\n",
+                            info.context_stats.message_count,
+                            info.context_stats.total_tokens,
+                            info.context_window_tokens,
+                        );
+                        if !info.system_prompt.is_empty() {
+                            text.push_str("\n--- System Prompt ---\n");
+                            text.push_str(&info.system_prompt);
+                        }
+                        app.chat
+                            .push(crate::ui::chat_view::ChatCell::SystemMessage(text));
+                    }
+                    Err(e) => {
+                        app.show_toast(Toast::error(
+                            format!("Context info failed: {e}"),
+                            std::time::Duration::from_secs(3),
+                        ));
+                    }
+                }
+            }
+        }
+        AppIntent::ShowSkillsInfo => {
+            if let Some(t) = transport {
+                match t.http.get_session_info(&app.session_id).await {
+                    Ok(info) => {
+                        let text = if info.skills_info.is_empty() {
+                            "No skills loaded.".to_string()
+                        } else {
+                            info.skills_info
+                        };
+                        app.chat
+                            .push(crate::ui::chat_view::ChatCell::SystemMessage(text));
+                    }
+                    Err(e) => {
+                        app.show_toast(Toast::error(
+                            format!("Skills info failed: {e}"),
+                            std::time::Duration::from_secs(3),
+                        ));
+                    }
+                }
+            }
+        }
         AppIntent::SetTitle(t) => {
             let writer = terminal.backend_mut();
             if let Err(e) = title::set_title(writer, &t) {

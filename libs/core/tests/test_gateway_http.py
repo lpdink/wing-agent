@@ -447,6 +447,9 @@ class TestSessionInfo:
         mock_session.agent.context_manager.get_skills_info.return_value = (
             "skill-a: desc"
         )
+        mock_session.agent.context_manager.system_prompt.content = (
+            "You are a helpful assistant."
+        )
         mock_runtime.get_session.return_value = mock_session
 
         resp = client.get("/api/session/info", params={"session_id": "test-id"})
@@ -464,6 +467,7 @@ class TestSessionInfo:
         assert data["context_stats"]["message_count"] == 5
         assert data["context_stats"]["total_tokens"] == 800
         assert data["skills_info"] == "skill-a: desc"
+        assert data["system_prompt"] == "You are a helpful assistant."
 
     def test_info_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
