@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from wing.gateway.openapi import OPENAPI_METADATA
 from wing.gateway.routes import register_routes
@@ -34,6 +35,16 @@ def create_app(server: GatewayServer) -> FastAPI:
         version=OPENAPI_METADATA["version"],
         servers=OPENAPI_METADATA["servers"],
         openapi_tags=OPENAPI_METADATA["tags"],
+    )
+
+    # CORS: allow all origins for local development (Electron/Web UI).
+    # Gateway runs on localhost and is only accessible from the local machine.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     app.state.server = server

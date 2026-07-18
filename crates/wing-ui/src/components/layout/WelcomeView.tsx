@@ -1,4 +1,5 @@
 import { Code, Search, PenTool } from 'lucide-react'
+import { useSession } from '@/hooks/useSession'
 
 const suggestions = [
   {
@@ -32,6 +33,13 @@ const gradientClasses: Record<string, string> = {
  * Displays a greeting and prompt suggestion cards.
  */
 export function WelcomeView() {
+  const { createSession } = useSession()
+
+  const handleSuggestionClick = async () => {
+    // Create a new session — user can then type their message
+    await createSession()
+  }
+
   return (
     <div className="flex flex-1 flex-col items-center justify-center px-6">
       {/* Greeting */}
@@ -52,6 +60,7 @@ export function WelcomeView() {
           return (
             <button
               key={s.title}
+              onClick={() => handleSuggestionClick()}
               className={`group flex flex-col items-start rounded-xl bg-gradient-to-br p-4 text-left transition-all hover:-translate-y-0.5 hover:shadow-md ${gradientClasses[s.color]}`}
             >
               <div className="mb-3 rounded-lg bg-bg-surface p-2 shadow-sm transition-shadow group-hover:shadow-md">

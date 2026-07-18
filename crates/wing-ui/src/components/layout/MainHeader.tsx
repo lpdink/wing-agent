@@ -1,7 +1,8 @@
-import { PanelLeft, Brain, MoreHorizontal } from 'lucide-react'
+import { PanelLeft, Brain, MoreHorizontal, Square } from 'lucide-react'
+import { useSessionStore } from '@/stores/sessionStore'
+import { useSession } from '@/hooks/useSession'
 
 interface MainHeaderProps {
-  sessionTitle: string
   sidebarOpen: boolean
   onToggleSidebar: () => void
 }
@@ -9,7 +10,18 @@ interface MainHeaderProps {
 /**
  * MainHeader — session title, model badge, thinking toggle, control buttons.
  */
-export function MainHeader({ sessionTitle, sidebarOpen, onToggleSidebar }: MainHeaderProps) {
+export function MainHeader({ sidebarOpen, onToggleSidebar }: MainHeaderProps) {
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const sessions = useSessionStore((s) => s.sessions)
+  const sessionInfo = useSessionStore((s) => s.sessionInfo)
+  const isSending = useSessionStore((s) => s.isSending)
+  const { interruptSession } = useSession()
+
+  // Get session title from sessions list
+  const activeSession = sessions.find((s) => s.id === activeSessionId)
+  const sessionTitle = activeSession?.name ?? sessionInfo?.session_name ?? 'New Session'
+  const model = sessionInfo?.model ?? ''
+
   return (
     <div className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-bg-surface px-4">
       {/* Left section */}
@@ -23,15 +35,28 @@ export function MainHeader({ sessionTitle, sidebarOpen, onToggleSidebar }: MainH
           <PanelLeft className="h-5 w-5" />
         </button>
 
-        <h1 className="text-base font-semibold text-text">{sessionTitle}</h1>
+        <h1 className="truncate text-base font-semibold text-text">{sessionTitle}</h1>
       </div>
 
       {/* Right section */}
       <div className="flex items-center gap-2">
         {/* Model badge */}
-        <span className="rounded-full bg-bg-elevated px-2.5 py-0.5 text-xs font-medium text-text-dim">
-          gpt-4o
-        </span>
+        {model && (
+          <span className="rounded-full bg-bg-elevated px-2.5 py-0.5 text-xs font-medium text-text-dim">
+            {model}
+          </span>
+        )}
+
+        {/* Interrupt button (visible when sending) */}
+        {isSending && (
+          <button
+            onClick={() => interruptSession()}
+            className="flex items-center gap-1.5 rounded-md bg-error/10 px-2 py-1 text-xs text-error transition-colors hover:bg-error/20"
+          >
+            <Square className="h-3.5 w-3.5" />
+            <span>Stop</span>
+          </button>
+        )}
 
         {/* Thinking toggle (placeholder) */}
         <button className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-text-muted transition-colors hover:bg-bg-elevated hover:text-text">

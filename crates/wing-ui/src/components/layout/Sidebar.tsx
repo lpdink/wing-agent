@@ -1,22 +1,26 @@
 import { useState, useEffect } from 'react'
 import clsx from 'clsx'
 import { Plus, Search, MessageSquare, Sun, Moon, Settings } from 'lucide-react'
-import { mockSessions } from '@/lib/mock-data'
+import { useSessionStore } from '@/stores/sessionStore'
+import { useSession } from '@/hooks/useSession'
 
 interface SidebarProps {
   open: boolean
 }
 
 /**
- * Sidebar — new session button, search, session list (mock data),
+ * Sidebar — new session button, search, session list,
  * and bottom toolbar with theme toggle.
  */
 export function Sidebar({ open }: SidebarProps) {
   const [search, setSearch] = useState('')
-  const [activeId, setActiveId] = useState(mockSessions[0]?.id ?? '')
   const [isDark, setIsDark] = useState(false)
 
-  // Sync isDark state with DOM (already set by inline script in <head>)
+  const sessions = useSessionStore((s) => s.sessions)
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const { selectSession, createSession } = useSession()
+
+  // Sync isDark state with DOM
   useEffect(() => {
     setIsDark(document.documentElement.dataset.theme === 'dark')
   }, [])
@@ -28,7 +32,7 @@ export function Sidebar({ open }: SidebarProps) {
     localStorage.setItem('wing-theme', next ? 'dark' : 'light')
   }
 
-  const filteredSessions = mockSessions.filter((s) =>
+  const filteredSessions = sessions.filter((s) =>
     (s.name ?? '').toLowerCase().includes(search.toLowerCase()),
   )
 
@@ -54,7 +58,10 @@ export function Sidebar({ open }: SidebarProps) {
     >
       {/* ─── New session button ──────────────────────────── */}
       <div className="shrink-0 p-3">
-        <button className="flex w-full items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm text-text-dim transition-colors hover:border-border-hover hover:bg-bg-elevated hover:text-text">
+        <button
+          onClick={() => createSession()}
+          className="flex w-full items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm text-text-dim transition-colors hover:border-border-hover hover:bg-bg-elevated hover:text-text"
+        >
           <Plus className="h-4 w-4" />
           <span>New Session</span>
         </button>
@@ -76,26 +83,32 @@ export function Sidebar({ open }: SidebarProps) {
 
       {/* ─── Session list ───────────────────────────────── */}
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1">
-        {filteredSessions.map((session) => (
-          <button
-            key={session.id}
-            onClick={() => setActiveId(session.id)}
-            className={clsx(
-              'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors',
-              activeId === session.id
-                ? 'bg-bg-elevated text-text'
-                : 'text-text-dim hover:bg-bg-hover hover:text-text',
-            )}
-          >
-            <MessageSquare className="h-4 w-4 shrink-0 text-text-muted" />
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-sm">{session.name ?? 'Untitled'}</div>
-              <div className="mt-0.5 truncate text-[11px] text-text-muted">
-                {formatTime(session.last_interaction)}
+        {filteredSessions.length === 0 ? (
+          <div className="px-3 py-8 text-center text-sm text-text-muted">
+            {sessions.length === 0 ? 'No sessions yet' : 'No matches'}
+          </div>
+        ) : (
+          filteredSessions.map((session) => (
+            <button
+              key={session.id}
+              onClick={() => selectSession(session.id)}
+              className={clsx(
+                'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors',
+                activeSessionId === session.id
+                  ? 'bg-bg-elevated text-text'
+                  : 'text-text-dim hover:bg-bg-hover hover:text-text',
+              )}
+            >
+              <MessageSquare className="h-4 w-4 shrink-0 text-text-muted" />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm">{session.name ?? 'Untitled'}</div>
+                <div className="mt-0.5 truncate text-[11px] text-text-muted">
+                  {formatTime(session.last_interaction)}
+                </div>
               </div>
-            </div>
-          </button>
-        ))}
+            </button>
+          ))
+        )}
       </div>
 
       {/* ─── Bottom toolbar ─────────────────────────────── */}
