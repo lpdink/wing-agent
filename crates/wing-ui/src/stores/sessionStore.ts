@@ -160,21 +160,28 @@ export const useSessionStore = create<SessionStore>((set) => ({
   appendToLastAssistant: (text, id) =>
     set((state) => {
       const msgs = [...state.messages]
-      const last = msgs[msgs.length - 1]
-      if (last && last.type === 'assistant') {
-        msgs[msgs.length - 1] = { ...last, content: last.content + text, streaming: true }
-      } else {
-        msgs.push({ type: 'assistant', id, content: text, streaming: true })
+      // Search backward for the last assistant message that is still streaming.
+      // Reasoning and text events can interleave within the same LLM call,
+      // so the last message may not be an assistant — we must search back.
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].type === 'assistant' && (msgs[i] as AssistantChatItem).streaming) {
+          const target = msgs[i] as AssistantChatItem
+          msgs[i] = { ...target, content: target.content + text, streaming: true }
+          return { messages: msgs }
+        }
       }
+      msgs.push({ type: 'assistant', id, content: text, streaming: true })
       return { messages: msgs }
     }),
 
   finalizeStreaming: () =>
     set((state) => {
       const msgs = [...state.messages]
-      const last = msgs[msgs.length - 1]
-      if (last && last.type === 'assistant') {
-        msgs[msgs.length - 1] = { ...last, streaming: false }
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].type === 'assistant' && (msgs[i] as AssistantChatItem).streaming) {
+          msgs[i] = { ...(msgs[i] as AssistantChatItem), streaming: false }
+          return { messages: msgs }
+        }
       }
       return { messages: msgs }
     }),
@@ -182,21 +189,26 @@ export const useSessionStore = create<SessionStore>((set) => ({
   appendToLastReasoning: (text, id) =>
     set((state) => {
       const msgs = [...state.messages]
-      const last = msgs[msgs.length - 1]
-      if (last && last.type === 'reasoning') {
-        msgs[msgs.length - 1] = { ...last, content: last.content + text, streaming: true }
-      } else {
-        msgs.push({ type: 'reasoning', id, content: text, streaming: true })
+      // Search backward for the last reasoning message that is still streaming.
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].type === 'reasoning' && (msgs[i] as ReasoningChatItem).streaming) {
+          const target = msgs[i] as ReasoningChatItem
+          msgs[i] = { ...target, content: target.content + text, streaming: true }
+          return { messages: msgs }
+        }
       }
+      msgs.push({ type: 'reasoning', id, content: text, streaming: true })
       return { messages: msgs }
     }),
 
   finalizeReasoningStreaming: () =>
     set((state) => {
       const msgs = [...state.messages]
-      const last = msgs[msgs.length - 1]
-      if (last && last.type === 'reasoning') {
-        msgs[msgs.length - 1] = { ...last, streaming: false }
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].type === 'reasoning' && (msgs[i] as ReasoningChatItem).streaming) {
+          msgs[i] = { ...(msgs[i] as ReasoningChatItem), streaming: false }
+          return { messages: msgs }
+        }
       }
       return { messages: msgs }
     }),

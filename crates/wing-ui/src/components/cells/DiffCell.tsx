@@ -1,86 +1,28 @@
-// src/components/cells/DiffCell.tsx — GitHub-style diff view.
+// src/components/cells/DiffCell.tsx — GitHub-style diff view using LCS-based line diff.
 //
+// Uses the `diff` package (diffLines) for proper Myers/LCS diffing.
 // Shows file path header + line-by-line diff with green/red highlighting.
 
+import { diffLines, type Change } from 'diff'
 import { FileText } from 'lucide-react'
 import type { CellProps } from '@/core/cell-types'
 import type { DiffChatItem } from '@/stores/sessionStore'
 
-/** Parse unified diff format into structured lines. */
-function parseDiff(oldText: string | null, newText: string): DiffLine[] {
-  const lines: DiffLine[] = []
-  const newLines = newText.split('\n')
-  const oldLines = oldText ? oldText.split('\n') : []
-
-  // Simple approach: if no old text, everything is added
-  if (!oldText) {
-    for (const line of newLines) {
-      lines.push({ type: 'add', content: line })
-    }
-    return lines
-  }
-
-  // Use a simple LCS-based diff for small files, fallback to showing new text
-  if (oldLines.length + newLines.length > 2000) {
-    // For large diffs, just show the new text as context
-    for (const line of newLines) {
-      lines.push({ type: 'ctx', content: line })
-    }
-    return lines
-  }
-
-  // Simple line-by-line diff
-  const oldSet = new Set(oldLines)
-  const newSet = new Set(newLines)
-
-  // Show deletions first
-  for (const line of oldLines) {
-    if (!newSet.has(line)) {
-      lines.push({ type: 'del', content: line })
-    }
-  }
-
-  // Show new/unchanged lines
-  for (const line of newLines) {
-    if (!oldSet.has(line)) {
-      lines.push({ type: 'add', content: line })
-    } else {
-      lines.push({ type: 'ctx', content: line })
-    }
-  }
-
-  return lines
+function changeToLineClass(change: Change): string {
+  if (change.added) return 'bg-diff-add-bg text-diff-add-text'
+  if (change.removed) return 'bg-diff-del-bg text-diff-del-text'
+  return 'text-text-dim'
 }
 
-interface DiffLine {
-  type: 'add' | 'del' | 'ctx'
-  content: string
-}
-
-function diffLineClass(type: DiffLine['type']): string {
-  switch (type) {
-    case 'add':
-      return 'bg-diff-add-bg text-diff-add-text'
-    case 'del':
-      return 'bg-diff-del-bg text-diff-del-text'
-    case 'ctx':
-      return 'text-text-dim'
-  }
-}
-
-function diffLinePrefix(type: DiffLine['type']): string {
-  switch (type) {
-    case 'add':
-      return '+'
-    case 'del':
-      return '-'
-    case 'ctx':
-      return ' '
-  }
+function changeToPrefix(change: Change): string {
+  if (change.added) return '+'
+  if (change.removed) return '-'
+  return ' '
 }
 
 export function DiffCell({ data }: CellProps<DiffChatItem>) {
-  const lines = parseDiff(data.oldText, data.newText)
+  const oldText = data.oldText ?? ''
+  const changes = diffLines(oldText, data.newText)
 
   return (
     <div className="flex justify-start">
@@ -93,17 +35,18 @@ export function DiffCell({ data }: CellProps<DiffChatItem>) {
 
         {/* Diff body */}
         <div className="overflow-x-auto bg-bg-code">
-          {lines.map((line, i) => (
-            <div key={i} className={`flex font-mono text-xs leading-5 ${diffLineClass(line.type)}`}>
-              <span className="w-6 shrink-0 select-none px-1 text-right text-text-muted">
-                {i + 1}
-              </span>
-              <span className="w-4 shrink-0 select-none text-text-muted">
-                {diffLinePrefix(line.type)}
-              </span>
-              <span className="whitespace-pre px-1">{line.content}</span>
-            </div>
-          ))}
+          {changes.map((change, ci) => {
+            const lines = change.value.replace(/\n$/, '').split('\n')
+            const lineClass = changeToLineClass(change)
+            const prefix = changeToPrefix(change)
+
+            return lines.map((line, li) => (
+              <div key={`${ci}-${li}`} className={`flex font-mono text-xs leading-5 ${lineClass}`}>
+                <span className="w-4 shrink-0 select-none text-text-muted/50">{prefix}</span>
+                <span className="whitespace-pre px-1">{line}</span>
+              </div>
+            ))
+          })}
         </div>
       </div>
     </div>

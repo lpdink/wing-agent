@@ -12,6 +12,7 @@ import { useGatewayClient } from './useGatewayClient'
 
 export function useSessionEvents(wsClient: WebSocketClient): void {
   const addError = useUiStore((s) => s.addError)
+  const addToast = useUiStore((s) => s.addToast)
   const connectionStatus = useConnectionStore((s) => s.status)
   const { client } = useGatewayClient()
 
@@ -189,7 +190,7 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
     }) => {
       if (event.session_id !== getActiveSessionId()) return
       const saved = event.original_tokens - event.compressed_tokens
-      addError(`Context compacted: saved ${saved.toLocaleString()} tokens`)
+      addToast(`Context compacted: saved ${saved.toLocaleString()} tokens`, 'info')
     }
 
     // Register all handlers
@@ -222,7 +223,7 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
       wsClient.off('llm_call_metrics', handleLLMCallMetrics)
       wsClient.off('compact_done', handleCompactDone)
     }
-  }, [wsClient, addError, client])
+  }, [wsClient, addError, addToast, client])
 
   // Re-subscribe to active session after WS reconnect
   useEffect(() => {
