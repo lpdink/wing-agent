@@ -1,14 +1,19 @@
 // src/hooks/useSessionEvents.ts — WebSocket event stream processing.
 //
 // Listens to WingEvents from WebSocketClient and updates sessionStore.
+// Re-subscribes to the active session after WS reconnect.
 
 import { useEffect } from 'react'
 import type { WebSocketClient } from '@wing-agent/sdk'
 import { useSessionStore } from '@/stores/sessionStore'
+import { useConnectionStore } from '@/stores/connectionStore'
 import { useUiStore } from '@/stores/uiStore'
+import { useGatewayClient } from './useGatewayClient'
 
 export function useSessionEvents(wsClient: WebSocketClient): void {
   const addError = useUiStore((s) => s.addError)
+  const connectionStatus = useConnectionStore((s) => s.status)
+  const { client } = useGatewayClient()
 
   useEffect(() => {
     const getActiveSessionId = () => useSessionStore.getState().activeSessionId
@@ -78,6 +83,7 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
     const handleDone = (event: { session_id: string | null }) => {
       if (event.session_id !== getActiveSessionId()) return
       const store = useSessionStore.getState()
+      store.finalizeStreaming()
       store.appendMessage({ type: 'done', id: crypto.randomUUID() })
       store.setSending(false)
     }
@@ -85,7 +91,9 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
     // ── Interrupted events ────────────────────────────────────
     const handleInterrupted = (event: { session_id: string | null }) => {
       if (event.session_id !== getActiveSessionId()) return
-      useSessionStore.getState().setSending(false)
+      const store = useSessionStore.getState()
+      store.finalizeStreaming()
+      store.setSending(false)
     }
 
     // ── Error events ──────────────────────────────────────────
@@ -139,4 +147,17 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
       wsClient.off('session_state_changed', handleSessionStateChanged)
     }
   }, [wsClient, addError])
+
+  // Re-subscribe to active session after WS reconnect
+  useEffect(() => {
+    if (connectionStatus !== 'connected') return
+
+    const sessionId = useSessionStore.getState().activeSessionId
+    const clientId = useConnectionStore.getState().clientId
+    if (!sessionId || !clientId) return
+
+    client.subscribe(sessionId).catch(() => {
+      // Ignore re-subscribe errors — will retry on next reconnect
+    })
+  }, [client, connectionStatus])
 }

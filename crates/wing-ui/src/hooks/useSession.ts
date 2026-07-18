@@ -11,7 +11,20 @@ import { useUiStore } from '@/stores/uiStore'
 /** Convert API message format to ChatItem[]. */
 function apiMessagesToChatItems(messages: Record<string, unknown>[]): ChatItem[] {
   const items: ChatItem[] = []
+  // Build toolCallId → toolName mapping for tool results
+  const toolCallNames = new Map<string, string>()
 
+  // First pass: collect tool call names from assistant messages
+  for (const msg of messages) {
+    if (msg.role === 'assistant' && msg.tool_calls) {
+      const toolCalls = msg.tool_calls as Array<{ id: string; name: string }>
+      for (const tc of toolCalls) {
+        toolCallNames.set(tc.id, tc.name)
+      }
+    }
+  }
+
+  // Second pass: build ChatItems
   for (const msg of messages) {
     const role = msg.role as string
     const content = (msg.content as string) ?? ''
@@ -51,13 +64,13 @@ function apiMessagesToChatItems(messages: Record<string, unknown>[]): ChatItem[]
         items.push({ type: 'assistant', id: uuid, content })
       }
     } else if (role === 'tool') {
-      // Tool result
-      const toolCallId = msg.tool_call_id as string
+      // Tool result — resolve tool name from mapping
+      const toolCallId = (msg.tool_call_id as string) ?? ''
       items.push({
         type: 'tool_call_result',
         id: uuid,
-        toolName: 'tool',
-        toolCallId: toolCallId ?? '',
+        toolName: toolCallNames.get(toolCallId) ?? 'tool',
+        toolCallId,
         result: content,
         success: true,
       })

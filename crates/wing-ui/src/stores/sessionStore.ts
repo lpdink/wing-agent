@@ -90,6 +90,8 @@ interface SessionActions {
   appendMessage: (item: ChatItem) => void
   /** Append text to the last assistant message (streaming). Creates one if none exists. */
   appendToLastAssistant: (text: string, id: string) => void
+  /** Mark the last assistant message as no longer streaming. */
+  finalizeStreaming: () => void
   clearMessages: () => void
   setLoading: (loading: boolean) => void
   setSending: (sending: boolean) => void
@@ -128,7 +130,17 @@ export const useSessionStore = create<SessionStore>((set) => ({
       return { messages: msgs }
     }),
 
-  clearMessages: () => set({ messages: [] }),
+  finalizeStreaming: () =>
+    set((state) => {
+      const msgs = [...state.messages]
+      const last = msgs[msgs.length - 1]
+      if (last && last.type === 'assistant') {
+        msgs[msgs.length - 1] = { ...last, streaming: false }
+      }
+      return { messages: msgs }
+    }),
+
+  clearMessages: () => set({ messages: [], isSending: false }),
 
   setLoading: (loading) => set({ isLoading: loading }),
 

@@ -5,6 +5,7 @@
 
 import { useEffect, useRef } from 'react'
 import { WebSocketClient } from '@wing-agent/sdk'
+import type { ConnectionStatus } from '@wing-agent/sdk'
 import { useConnectionStore } from '@/stores/connectionStore'
 import { getGatewayWsUrl } from '@/lib/gateway-config'
 
@@ -20,11 +21,14 @@ export function useWebSocket(): { wsClient: WebSocketClient } {
   useEffect(() => {
     const ws = wsRef.current!
 
-    // Sync connection status to store
-    const handleStatusChange = (
-      status: 'disconnected' | 'connecting' | 'connected' | 'reconnecting',
-    ) => {
+    // Sync connection status to store + extract clientId on connect
+    const handleStatusChange = (status: ConnectionStatus) => {
       setStatus(status)
+      if (status === 'connected' && ws.clientId) {
+        setClientId(ws.clientId)
+      } else if (status === 'disconnected') {
+        setClientId(null)
+      }
     }
 
     ws.onStatusChange(handleStatusChange)
@@ -34,20 +38,7 @@ export function useWebSocket(): { wsClient: WebSocketClient } {
       ws.offStatusChange(handleStatusChange)
       ws.disconnect()
     }
-  }, [setStatus])
-
-  // Poll for clientId changes (ConnectResponse arrives async after 'connected')
-  useEffect(() => {
-    const ws = wsRef.current!
-    const checkClientId = () => {
-      if (ws.clientId && ws.clientId !== useConnectionStore.getState().clientId) {
-        setClientId(ws.clientId)
-      }
-    }
-    // Check periodically for clientId (WS doesn't expose a direct callback for this)
-    const interval = setInterval(checkClientId, 100)
-    return () => clearInterval(interval)
-  }, [setClientId])
+  }, [setStatus, setClientId])
 
   return { wsClient: wsRef.current }
 }

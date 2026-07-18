@@ -1,4 +1,5 @@
 import { AppShell } from '@/components/layout/AppShell'
+import { ToastContainer } from '@/components/ui/Toast'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { useSessionEvents } from '@/hooks/useSessionEvents'
 
@@ -16,6 +17,7 @@ export function App() {
   return (
     <GatewayProvider>
       <AppShell />
+      <ToastContainer />
     </GatewayProvider>
   )
 }

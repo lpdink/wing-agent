@@ -7,18 +7,21 @@ const suggestions = [
     title: 'Write code',
     description: 'Help me implement a feature',
     color: 'accent' as const,
+    prompt: 'Help me implement a new feature in my codebase.',
   },
   {
     icon: Search,
     title: 'Debug an issue',
     description: 'Find and fix a bug in my codebase',
     color: 'success' as const,
+    prompt: 'Help me debug an issue in my code.',
   },
   {
     icon: PenTool,
     title: 'Refactor',
     description: 'Improve code structure and quality',
     color: 'warning' as const,
+    prompt: 'Help me refactor this code to improve its structure.',
   },
 ]
 
@@ -33,11 +36,12 @@ const gradientClasses: Record<string, string> = {
  * Displays a greeting and prompt suggestion cards.
  */
 export function WelcomeView() {
-  const { createSession } = useSession()
+  const { createSession, sendMessage } = useSession()
 
-  const handleSuggestionClick = async () => {
-    // Create a new session — user can then type their message
+  const handleSuggestionClick = async (prompt: string) => {
+    // Create a new session, then send the prompt as first message
     await createSession()
+    await sendMessage(prompt)
   }
 
   return (
@@ -60,7 +64,7 @@ export function WelcomeView() {
           return (
             <button
               key={s.title}
-              onClick={() => handleSuggestionClick()}
+              onClick={() => handleSuggestionClick(s.prompt)}
               className={`group flex flex-col items-start rounded-xl bg-gradient-to-br p-4 text-left transition-all hover:-translate-y-0.5 hover:shadow-md ${gradientClasses[s.color]}`}
             >
               <div className="mb-3 rounded-lg bg-bg-surface p-2 shadow-sm transition-shadow group-hover:shadow-md">
