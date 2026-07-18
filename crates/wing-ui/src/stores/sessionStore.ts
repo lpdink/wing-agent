@@ -42,6 +42,38 @@ export interface ReasoningChatItem {
   type: 'reasoning'
   id: string
   content: string
+  /** True if still streaming (more reasoning events expected) */
+  streaming?: boolean
+}
+
+export interface AskChatItem {
+  type: 'ask'
+  id: string
+  question: string
+  choices: string[]
+  /** True after user has answered */
+  answered?: boolean
+  /** The choice the user selected */
+  selectedChoice?: string
+}
+
+export interface DiffChatItem {
+  type: 'diff'
+  id: string
+  path: string
+  oldText: string | null
+  newText: string
+}
+
+export interface MetricsChatItem {
+  type: 'metrics'
+  id: string
+  model: string
+  promptTokens: number
+  completionTokens: number
+  cachedTokens: number
+  firstChunkRtMs: number
+  tokensPerSec: number
 }
 
 export interface TurnStartedChatItem {
@@ -69,6 +101,9 @@ export type ChatItem =
   | TurnStartedChatItem
   | DoneChatItem
   | ErrorChatItem
+  | AskChatItem
+  | DiffChatItem
+  | MetricsChatItem
 
 // ============================================================
 // Store
@@ -92,6 +127,10 @@ interface SessionActions {
   appendToLastAssistant: (text: string, id: string) => void
   /** Mark the last assistant message as no longer streaming. */
   finalizeStreaming: () => void
+  /** Append text to the last reasoning message (streaming). Creates one if none exists. */
+  appendToLastReasoning: (text: string, id: string) => void
+  /** Mark the last reasoning message as no longer streaming. */
+  finalizeReasoningStreaming: () => void
   clearMessages: () => void
   setLoading: (loading: boolean) => void
   setSending: (sending: boolean) => void
@@ -135,6 +174,28 @@ export const useSessionStore = create<SessionStore>((set) => ({
       const msgs = [...state.messages]
       const last = msgs[msgs.length - 1]
       if (last && last.type === 'assistant') {
+        msgs[msgs.length - 1] = { ...last, streaming: false }
+      }
+      return { messages: msgs }
+    }),
+
+  appendToLastReasoning: (text, id) =>
+    set((state) => {
+      const msgs = [...state.messages]
+      const last = msgs[msgs.length - 1]
+      if (last && last.type === 'reasoning') {
+        msgs[msgs.length - 1] = { ...last, content: last.content + text, streaming: true }
+      } else {
+        msgs.push({ type: 'reasoning', id, content: text, streaming: true })
+      }
+      return { messages: msgs }
+    }),
+
+  finalizeReasoningStreaming: () =>
+    set((state) => {
+      const msgs = [...state.messages]
+      const last = msgs[msgs.length - 1]
+      if (last && last.type === 'reasoning') {
         msgs[msgs.length - 1] = { ...last, streaming: false }
       }
       return { messages: msgs }

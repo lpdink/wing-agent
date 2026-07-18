@@ -60,14 +60,10 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
       })
     }
 
-    // ── Reasoning events ──────────────────────────────────────
+    // ── Reasoning events (streaming — append to last, don't create new) ──
     const handleReasoning = (event: { session_id: string | null; content: string }) => {
       if (event.session_id !== getActiveSessionId()) return
-      useSessionStore.getState().appendMessage({
-        type: 'reasoning',
-        id: crypto.randomUUID(),
-        content: event.content,
-      })
+      useSessionStore.getState().appendToLastReasoning(event.content, crypto.randomUUID())
     }
 
     // ── Turn started events ───────────────────────────────────
@@ -84,6 +80,7 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
       if (event.session_id !== getActiveSessionId()) return
       const store = useSessionStore.getState()
       store.finalizeStreaming()
+      store.finalizeReasoningStreaming()
       store.appendMessage({ type: 'done', id: crypto.randomUUID() })
       store.setSending(false)
     }
@@ -93,6 +90,7 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
       if (event.session_id !== getActiveSessionId()) return
       const store = useSessionStore.getState()
       store.finalizeStreaming()
+      store.finalizeReasoningStreaming()
       store.setSending(false)
     }
 
@@ -114,7 +112,6 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
       title: string | null
     }) => {
       if (event.session_id !== getActiveSessionId()) return
-      // Update session title in the list if changed
       if (event.title) {
         const store = useSessionStore.getState()
         const sessions = store.sessions.map((s) =>
@@ -122,6 +119,77 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
         )
         store.setSessions(sessions)
       }
+    }
+
+    // ── Ask events (interactive question + choices) ───────────
+    const handleAsk = (event: {
+      session_id: string | null
+      question: string
+      choices: string[]
+    }) => {
+      if (event.session_id !== getActiveSessionId()) return
+      useSessionStore.getState().appendMessage({
+        type: 'ask',
+        id: crypto.randomUUID(),
+        question: event.question,
+        choices: event.choices,
+      })
+    }
+
+    // ── Diff content events ───────────────────────────────────
+    const handleDiffContent = (event: {
+      session_id: string | null
+      path: string
+      old_text: string | null
+      new_text: string
+    }) => {
+      if (event.session_id !== getActiveSessionId()) return
+      useSessionStore.getState().appendMessage({
+        type: 'diff',
+        id: crypto.randomUUID(),
+        path: event.path,
+        oldText: event.old_text,
+        newText: event.new_text,
+      })
+    }
+
+    // ── LLM call metrics events ───────────────────────────────
+    const handleLLMCallMetrics = (event: {
+      session_id: string | null
+      model: string
+      prompt_tokens: number
+      completion_tokens: number
+      cached_tokens: number
+      first_chunk_rt_ms: number
+      tokens_per_sec: number
+    }) => {
+      if (event.session_id !== getActiveSessionId()) return
+      useSessionStore.getState().appendMessage({
+        type: 'metrics',
+        id: crypto.randomUUID(),
+        model: event.model,
+        promptTokens: event.prompt_tokens,
+        completionTokens: event.completion_tokens,
+        cachedTokens: event.cached_tokens,
+        firstChunkRtMs: event.first_chunk_rt_ms,
+        tokensPerSec: event.tokens_per_sec,
+      })
+    }
+
+    // ── Sync session events (full context replacement) ────────
+    // When session is loaded/forked, Gateway sends the complete message history.
+    // We skip this since useSession.selectSession() already loads messages via HTTP.
+    // If we ever need to handle live sync, we'd replace messages here.
+
+    // ── Compact done events (context compaction finished) ─────
+    const handleCompactDone = (event: {
+      session_id: string | null
+      original_tokens: number
+      compressed_tokens: number
+    }) => {
+      if (event.session_id !== getActiveSessionId()) return
+      const saved = event.original_tokens - event.compressed_tokens
+      addError(`Context compacted: saved ${saved.toLocaleString()} tokens`)
     }
 
     // Register all handlers
@@ -134,6 +202,10 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
     wsClient.on('interrupted', handleInterrupted)
     wsClient.on('error', handleError)
     wsClient.on('session_state_changed', handleSessionStateChanged)
+    wsClient.on('ask', handleAsk)
+    wsClient.on('diff_content', handleDiffContent)
+    wsClient.on('llm_call_metrics', handleLLMCallMetrics)
+    wsClient.on('compact_done', handleCompactDone)
 
     return () => {
       wsClient.off('text', handleText)
@@ -145,8 +217,12 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
       wsClient.off('interrupted', handleInterrupted)
       wsClient.off('error', handleError)
       wsClient.off('session_state_changed', handleSessionStateChanged)
+      wsClient.off('ask', handleAsk)
+      wsClient.off('diff_content', handleDiffContent)
+      wsClient.off('llm_call_metrics', handleLLMCallMetrics)
+      wsClient.off('compact_done', handleCompactDone)
     }
-  }, [wsClient, addError])
+  }, [wsClient, addError, client])
 
   // Re-subscribe to active session after WS reconnect
   useEffect(() => {
