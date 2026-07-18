@@ -1,0 +1,5 @@
+packages:
+  - 'sdk'
+allowBuilds:
+  electron-winstaller: true
+  esbuild: true

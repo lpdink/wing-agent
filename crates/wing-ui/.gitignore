@@ -1,0 +1,19 @@
+node_modules/
+out/
+dist/
+*.tsbuildinfo
+
+# Electron
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Env
+.env
+.env.*

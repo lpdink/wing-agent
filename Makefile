@@ -1,6 +1,6 @@
-.PHONY: check test test-e2e format fmt run install gateway
+.PHONY: check test test-e2e format fmt run install gateway check-ui fmt-ui build-ui
 
-# ── Unified commands (Python + Rust) ─────────────────────────
+# ── Unified commands (Python + Rust + UI) ────────────────────
 
 run:
 	cargo run
@@ -9,9 +9,9 @@ install:
 	cd crates/wing && maturin develop --release
 	uv sync
 
-check: check-python check-rust
+check: check-python check-rust check-ui
 
-fmt: fmt-python fmt-rust
+fmt: fmt-python fmt-rust fmt-ui
 
 test: test-python test-rust
 
@@ -73,3 +73,24 @@ fmt-rust:
 
 test-rust:
 	cargo test
+
+# ── UI (Electron / Web) ─────────────────────────────────────
+
+check-ui:
+	@echo "🔍 Running prettier..."; \
+	(cd crates/wing-ui && pnpm format:check) || { echo "❌ prettier failed"; exit 1; }; \
+	echo "✅ prettier passed"; \
+	echo ""; \
+	echo "🔍 Running oxlint..."; \
+	(cd crates/wing-ui && pnpm lint) || { echo "❌ oxlint failed"; exit 1; }; \
+	echo "✅ oxlint passed"; \
+	echo ""; \
+	echo "🔍 Running typecheck..."; \
+	(cd crates/wing-ui && pnpm typecheck) || { echo "❌ typecheck failed"; exit 1; }; \
+	echo "✅ typecheck passed"
+
+fmt-ui:
+	cd crates/wing-ui && pnpm format
+
+build-ui:
+	cd crates/wing-ui && pnpm build && pnpm build:web

@@ -1,0 +1,17 @@
+appId: com.wing-agent.app
+productName: Wing
+directories:
+  buildResources: resources
+  output: dist
+files:
+  - out/**/*
+  - '!node_modules/**/*'
+mac:
+  target:
+    - dmg
+  icon: resources/icon.icns
+linux:
+  target:
+    - AppImage
+  icon: resources/icon.png
+  category: Development
