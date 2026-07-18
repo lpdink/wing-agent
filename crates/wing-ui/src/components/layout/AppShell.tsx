@@ -17,14 +17,6 @@ import { mockSessions } from '@/lib/mock-data'
 export function AppShell() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
 
-  // Initialize theme from localStorage (defaults to light)
-  useEffect(() => {
-    const stored = localStorage.getItem('wing-theme')
-    if (stored === 'dark') {
-      document.documentElement.dataset.theme = 'dark'
-    }
-  }, [])
-
   // Auto-collapse sidebar on narrow viewports
   useEffect(() => {
     const mq = window.matchMedia('(max-width: 767px)')

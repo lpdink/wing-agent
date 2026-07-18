@@ -5,21 +5,27 @@ const suggestions = [
     icon: Code,
     title: 'Write code',
     description: 'Help me implement a feature',
-    gradient: 'from-accent/15 to-accent/5',
+    color: 'accent' as const,
   },
   {
     icon: Search,
     title: 'Debug an issue',
     description: 'Find and fix a bug in my codebase',
-    gradient: 'from-success/15 to-success/5',
+    color: 'success' as const,
   },
   {
     icon: PenTool,
     title: 'Refactor',
     description: 'Improve code structure and quality',
-    gradient: 'from-warning/15 to-warning/5',
+    color: 'warning' as const,
   },
 ]
+
+const gradientClasses: Record<string, string> = {
+  accent: 'from-accent/15 to-accent/5',
+  success: 'from-success/15 to-success/5',
+  warning: 'from-warning/15 to-warning/5',
+}
 
 /**
  * WelcomeView — empty-state page shown when no messages exist.
@@ -46,7 +52,7 @@ export function WelcomeView() {
           return (
             <button
               key={s.title}
-              className={`group flex flex-col items-start rounded-xl bg-gradient-to-br ${s.gradient} p-4 text-left transition-all hover:-translate-y-0.5 hover:shadow-md`}
+              className={`group flex flex-col items-start rounded-xl bg-gradient-to-br p-4 text-left transition-all hover:-translate-y-0.5 hover:shadow-md ${gradientClasses[s.color]}`}
             >
               <div className="mb-3 rounded-lg bg-bg-surface p-2 shadow-sm transition-shadow group-hover:shadow-md">
                 <Icon className="h-4 w-4 text-accent" />

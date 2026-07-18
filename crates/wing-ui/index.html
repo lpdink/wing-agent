@@ -4,6 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Wing</title>
+    <script>
+      // Blocking theme init — runs before first paint to prevent FOUC
+      if (localStorage.getItem('wing-theme') === 'dark')
+        document.documentElement.dataset.theme = 'dark'
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -16,13 +16,9 @@ export function Sidebar({ open }: SidebarProps) {
   const [activeId, setActiveId] = useState(mockSessions[0]?.id ?? '')
   const [isDark, setIsDark] = useState(false)
 
-  // Restore persisted theme preference on mount
+  // Sync isDark state with DOM (already set by inline script in <head>)
   useEffect(() => {
-    const stored = localStorage.getItem('wing-theme')
-    if (stored === 'dark') {
-      document.documentElement.dataset.theme = 'dark'
-      setIsDark(true)
-    }
+    setIsDark(document.documentElement.dataset.theme === 'dark')
   }, [])
 
   const toggleTheme = () => {
@@ -66,7 +62,7 @@ export function Sidebar({ open }: SidebarProps) {
 
       {/* ─── Search ─────────────────────────────────────── */}
       <div className="shrink-0 px-3 pb-2">
-        <div className="flex items-center gap-2 rounded-lg bg-bg-input px-2.5 py-1.5 transition-colors focus-within:ring-1 focus-within:ring-accent">
+        <div className="flex items-center gap-2 rounded-lg bg-bg-input px-2.5 py-1.5 transition-colors focus-within:ring-1 focus-within:ring-border-focus">
           <Search className="h-3.5 w-3.5 shrink-0 text-text-muted" />
           <input
             type="text"
@@ -88,7 +84,7 @@ export function Sidebar({ open }: SidebarProps) {
               'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors',
               activeId === session.id
                 ? 'bg-bg-elevated text-text'
-                : 'text-text-dim hover:bg-bg-elevated/50 hover:text-text',
+                : 'text-text-dim hover:bg-bg-hover hover:text-text',
             )}
           >
             <MessageSquare className="h-4 w-4 shrink-0 text-text-muted" />

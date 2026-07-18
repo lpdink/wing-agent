@@ -13,16 +13,19 @@
   --color-bg-input: var(--bg-input);
   --color-bg-code: var(--bg-code);
   --color-bg-tool: var(--bg-tool);
+  --color-bg-hover: var(--bg-hover);
 
   /* Borders */
   --color-border: var(--border);
   --color-border-hover: var(--border-hover);
+  --color-border-focus: var(--border-focus);
 
   /* Text */
   --color-text: var(--text);
   --color-text-dim: var(--text-dim);
   --color-text-muted: var(--text-muted);
   --color-text-inverse: var(--text-inverse);
+  --color-text-link: var(--text-link);
 
   /* Accent */
   --color-accent: var(--accent);
@@ -46,6 +49,40 @@
   --color-reasoning-border: var(--reasoning-border);
   --color-tool-bg: var(--tool-bg);
   --color-ask-border: var(--ask-border);
+}
+
+/*
+ * Shadow + radius utilities cannot use @theme because Tailwind v4's
+ * --shadow-* and --radius-* namespaces would create self-referencing
+ * CSS variables. Instead, we override the generated utility classes
+ * in @layer utilities to reference our theme-aware tokens.
+ */
+@layer utilities {
+  .shadow-sm {
+    box-shadow: var(--shadow-sm);
+  }
+  .shadow-md {
+    box-shadow: var(--shadow-md);
+  }
+  .shadow-lg {
+    box-shadow: var(--shadow-lg);
+  }
+  .shadow-xl {
+    box-shadow: var(--shadow-xl);
+  }
+
+  .rounded-sm {
+    border-radius: var(--radius-sm);
+  }
+  .rounded-md {
+    border-radius: var(--radius-md);
+  }
+  .rounded-lg {
+    border-radius: var(--radius-lg);
+  }
+  .rounded-xl {
+    border-radius: var(--radius-xl);
+  }
 }
 
 /* Global base styles */

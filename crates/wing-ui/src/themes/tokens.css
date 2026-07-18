@@ -14,6 +14,7 @@
   --bg: #f5f5f7;
   --bg-surface: #ffffff;
   --bg-elevated: #f0f0f3;
+  --bg-hover: #e8e8ed;
   --bg-input: #eaeaef;
   --bg-code: #f0f0f4;
   --bg-tool: #eaeaef;
@@ -21,12 +22,14 @@
   /* Borders */
   --border: #dddde3;
   --border-hover: #c8c8d2;
+  --border-focus: #6366f1;
 
   /* Text */
   --text: #18181b;
   --text-dim: #52525b;
   --text-muted: #a1a1aa;
   --text-inverse: #fafafa;
+  --text-link: #6366f1;
 
   /* Accent — primary interactive color */
   --accent: #6366f1;
@@ -53,6 +56,7 @@
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 12px;
+  --radius-xl: 16px;
 
   /* Transitions */
   --transition-fast: 150ms ease;
@@ -62,6 +66,7 @@
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
   --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.12);
+  --shadow-xl: 0 20px 48px rgba(0, 0, 0, 0.16);
 
   /* Semantic — component-specific tokens */
   --user-bubble-bg: #6366f1;
@@ -76,17 +81,20 @@
   --bg: #09090b;
   --bg-surface: #111114;
   --bg-elevated: #1c1c22;
+  --bg-hover: #252530;
   --bg-input: #1c1c22;
   --bg-code: #16161b;
   --bg-tool: #18181d;
 
   --border: #27272e;
   --border-hover: #3f3f4a;
+  --border-focus: #818cf8;
 
   --text: #fafafa;
   --text-dim: #a1a1aa;
   --text-muted: #52525b;
   --text-inverse: #18181b;
+  --text-link: #818cf8;
 
   --accent: #818cf8;
   --accent-hover: #9ba3fb;
@@ -108,6 +116,7 @@
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 12px;
+  --radius-xl: 16px;
 
   --transition-fast: 150ms ease;
   --transition-normal: 250ms ease;
@@ -115,6 +124,7 @@
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5);
+  --shadow-xl: 0 20px 48px rgba(0, 0, 0, 0.6);
 
   --user-bubble-bg: #4f46e5;
   --user-bubble-text: #ffffff;

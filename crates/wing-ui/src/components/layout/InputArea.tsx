@@ -49,7 +49,7 @@ export function InputArea() {
   return (
     <div className="shrink-0 border-t border-border bg-bg-surface px-4 py-3">
       <div className="mx-auto max-w-3xl">
-        <div className="rounded-xl border border-border bg-bg-input transition-colors focus-within:border-accent">
+        <div className="rounded-xl border border-border bg-bg-input transition-colors focus-within:border-border-focus">
           <textarea
             ref={textareaRef}
             value={value}
@@ -88,7 +88,7 @@ export function InputArea() {
                   }
                 }}
                 disabled={!value.trim()}
-                className="rounded-lg bg-accent p-1.5 text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-30"
+                className="rounded-lg bg-accent p-1.5 text-text-inverse transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-30"
               >
                 <SendHorizontal className="h-4 w-4" />
               </button>
