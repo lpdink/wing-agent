@@ -1,0 +1,64 @@
+/*
+ * Tailwind v4 @theme integration.
+ *
+ * Maps design-token CSS Variables into Tailwind's theme,
+ * so components can use utility classes like bg-bg-surface, text-text-dim, etc.
+ */
+
+@theme {
+  /* Backgrounds */
+  --color-bg: var(--bg);
+  --color-bg-surface: var(--bg-surface);
+  --color-bg-elevated: var(--bg-elevated);
+  --color-bg-input: var(--bg-input);
+  --color-bg-code: var(--bg-code);
+  --color-bg-tool: var(--bg-tool);
+
+  /* Borders */
+  --color-border: var(--border);
+  --color-border-hover: var(--border-hover);
+
+  /* Text */
+  --color-text: var(--text);
+  --color-text-dim: var(--text-dim);
+  --color-text-muted: var(--text-muted);
+  --color-text-inverse: var(--text-inverse);
+
+  /* Accent */
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-muted: var(--accent-muted);
+
+  /* Signal */
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--error);
+
+  /* Diff */
+  --color-diff-add-bg: var(--diff-add-bg);
+  --color-diff-add-text: var(--diff-add-text);
+  --color-diff-del-bg: var(--diff-del-bg);
+  --color-diff-del-text: var(--diff-del-text);
+
+  /* Semantic */
+  --color-user-bubble-bg: var(--user-bubble-bg);
+  --color-user-bubble-text: var(--user-bubble-text);
+  --color-reasoning-border: var(--reasoning-border);
+  --color-tool-bg: var(--tool-bg);
+  --color-ask-border: var(--ask-border);
+}
+
+/* Global base styles */
+@layer base {
+  body {
+    font-family: var(--font-sans);
+    font-size: var(--font-size-base);
+    background-color: var(--bg);
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    transition:
+      background-color var(--transition-normal),
+      color var(--transition-normal);
+  }
+}

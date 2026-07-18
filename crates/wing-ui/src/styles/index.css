@@ -1,15 +1,21 @@
 @import 'tailwindcss';
+@import '../themes/tokens.css';
+@import './theme.css';
+@import './scrollbar.css';
+@import './animations.css';
 
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
 
-html,
-body,
-#root {
-  height: 100%;
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
 }

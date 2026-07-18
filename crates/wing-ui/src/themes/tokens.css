@@ -1,0 +1,124 @@
+/*
+ * Design Tokens — Light (default) + Dark themes.
+ *
+ * All colors are defined as CSS Variables.
+ * Components MUST reference these variables, never hard-code color values.
+ *
+ * Switch themes by setting data-theme="dark" on <html>.
+ * Future: data-theme="<theme-id>" for arbitrary themes.
+ */
+
+/* ─── Light theme (default) ─────────────────────────────────── */
+:root {
+  /* Backgrounds — layered depth */
+  --bg: #f5f5f7;
+  --bg-surface: #ffffff;
+  --bg-elevated: #f0f0f3;
+  --bg-input: #eaeaef;
+  --bg-code: #f0f0f4;
+  --bg-tool: #eaeaef;
+
+  /* Borders */
+  --border: #dddde3;
+  --border-hover: #c8c8d2;
+
+  /* Text */
+  --text: #18181b;
+  --text-dim: #52525b;
+  --text-muted: #a1a1aa;
+  --text-inverse: #fafafa;
+
+  /* Accent — primary interactive color */
+  --accent: #6366f1;
+  --accent-hover: #5457e5;
+  --accent-muted: #e0e0ff;
+
+  /* Signal colors */
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --error: #ef4444;
+
+  /* Diff */
+  --diff-add-bg: #dcfce7;
+  --diff-add-text: #166534;
+  --diff-del-bg: #fee2e2;
+  --diff-del-text: #991b1b;
+
+  /* Typography */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  --font-size-base: 14px;
+
+  /* Radius */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* Transitions */
+  --transition-fast: 150ms ease;
+  --transition-normal: 250ms ease;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.12);
+
+  /* Semantic — component-specific tokens */
+  --user-bubble-bg: #6366f1;
+  --user-bubble-text: #ffffff;
+  --reasoning-border: #f59e0b;
+  --tool-bg: #f0f0f4;
+  --ask-border: #6366f1;
+}
+
+/* ─── Dark theme ────────────────────────────────────────────── */
+[data-theme='dark'] {
+  --bg: #09090b;
+  --bg-surface: #111114;
+  --bg-elevated: #1c1c22;
+  --bg-input: #1c1c22;
+  --bg-code: #16161b;
+  --bg-tool: #18181d;
+
+  --border: #27272e;
+  --border-hover: #3f3f4a;
+
+  --text: #fafafa;
+  --text-dim: #a1a1aa;
+  --text-muted: #52525b;
+  --text-inverse: #18181b;
+
+  --accent: #818cf8;
+  --accent-hover: #9ba3fb;
+  --accent-muted: #1e1b4b;
+
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --error: #f87171;
+
+  --diff-add-bg: #052e16;
+  --diff-add-text: #86efac;
+  --diff-del-bg: #450a0a;
+  --diff-del-text: #fca5a5;
+
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  --font-size-base: 14px;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  --transition-fast: 150ms ease;
+  --transition-normal: 250ms ease;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5);
+
+  --user-bubble-bg: #4f46e5;
+  --user-bubble-text: #ffffff;
+  --reasoning-border: #fbbf24;
+  --tool-bg: #18181d;
+  --ask-border: #818cf8;
+}
