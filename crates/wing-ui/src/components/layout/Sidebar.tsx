@@ -7,6 +7,7 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import clsx from 'clsx'
 import { Plus, Search, MessageSquare, Sun, Moon, Settings, Pencil } from 'lucide-react'
 import { useSessionStore } from '@/stores/sessionStore'
+import { useUiStore } from '@/stores/uiStore'
 import { useSession } from '@/hooks/useSession'
 import { ContextMenu } from '@/components/ui/ContextMenu'
 import type { SessionInfo } from '@wing-agent/sdk'
@@ -271,7 +272,10 @@ export function Sidebar({ open }: SidebarProps) {
           {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           <span>{isDark ? 'Light' : 'Dark'}</span>
         </button>
-        <button className="rounded-md p-1.5 text-text-muted transition-colors hover:bg-bg-elevated hover:text-text">
+        <button
+          onClick={() => useUiStore.getState().toggleSettings()}
+          className="rounded-md p-1.5 text-text-muted transition-colors hover:bg-bg-elevated hover:text-text"
+        >
           <Settings className="h-4 w-4" />
         </button>
       </div>

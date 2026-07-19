@@ -1,19 +1,22 @@
-// src/hooks/useGatewayClient.ts — GatewayClient singleton.
+// src/hooks/useGatewayClient.ts — GatewayClient with reactive URL.
 //
-// Creates and caches a GatewayClient instance.
+// Recreates the GatewayClient when connectionStore.gatewayUrl changes.
 // Automatically syncs clientId from connectionStore.
 
 import { useRef } from 'react'
 import { GatewayClient } from '@wing-agent/sdk'
 import { useConnectionStore } from '@/stores/connectionStore'
-import { getGatewayHttpBase } from '@/lib/gateway-config'
 
 export function useGatewayClient(): { client: GatewayClient } {
   const clientRef = useRef<GatewayClient | null>(null)
+  const urlRef = useRef<string | null>(null)
+  const gatewayUrl = useConnectionStore((s) => s.gatewayUrl)
   const clientId = useConnectionStore((s) => s.clientId)
 
-  if (!clientRef.current) {
-    clientRef.current = new GatewayClient({ baseUrl: getGatewayHttpBase() })
+  // Recreate client when URL changes
+  if (!clientRef.current || urlRef.current !== gatewayUrl) {
+    clientRef.current = new GatewayClient({ baseUrl: gatewayUrl })
+    urlRef.current = gatewayUrl
   }
 
   // Sync clientId from store (set after WS connects)

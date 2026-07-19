@@ -4,9 +4,13 @@ import { MainHeader } from './MainHeader'
 import { ChatArea } from './ChatArea'
 import { InputArea } from './InputArea'
 import { StatusBar } from './StatusBar'
+import { CommandPalette } from '@/components/ui/CommandPalette'
+import { ConnectionBanner } from '@/components/ui/ConnectionBanner'
+import { SettingsPanel } from '@/components/ui/SettingsPanel'
 import { useUiStore } from '@/stores/uiStore'
 import { useSession } from '@/hooks/useSession'
 import { useSessionStore } from '@/stores/sessionStore'
+import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
 
 /**
  * AppShell — top-level layout composing sidebar + main area.
@@ -15,12 +19,17 @@ import { useSessionStore } from '@/stores/sessionStore'
  * - Sidebar open/close state (from uiStore)
  * - Responsive auto-collapse at < 768px
  * - Initial session list loading
+ * - Global keyboard shortcuts
+ * - Command palette, settings panel, connection banner
  */
 export function AppShell() {
   const sidebarOpen = useUiStore((s) => s.sidebarOpen)
   const setSidebarOpen = useUiStore((s) => s.setSidebarOpen)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const { loadSessions } = useSession()
+
+  // Global keyboard shortcuts
+  useKeyboardShortcuts()
 
   // Auto-collapse sidebar on narrow viewports
   useEffect(() => {
@@ -49,10 +58,15 @@ export function AppShell() {
             onToggleSidebar={() => useUiStore.getState().toggleSidebar()}
           />
         )}
+        <ConnectionBanner />
         <ChatArea />
         <InputArea />
         <StatusBar />
       </div>
+
+      {/* Overlays */}
+      <CommandPalette />
+      <SettingsPanel />
     </div>
   )
 }
