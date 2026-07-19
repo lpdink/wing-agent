@@ -210,8 +210,20 @@ export function ChatArea() {
                     transform: `translateY(${virtualRow.start}px)`,
                   }}
                 >
-                  {/* pb-4 provides inter-item spacing (replaces flex gap) */}
-                  <div className="px-4 pb-4 pt-0 first:pt-6">
+                  {/* Spacing varies by cell type: compact for tools/reasoning, normal for messages */}
+                  <div
+                    className={`px-4 pt-0 first:pt-6 ${
+                      [
+                        'tool_call',
+                        'tool_call_result',
+                        'tool_group',
+                        'reasoning',
+                        'turn_started',
+                      ].includes(renderItems[virtualRow.index]?.type ?? '')
+                        ? 'pb-1'
+                        : 'pb-4'
+                    }`}
+                  >
                     {isTypingRow ? (
                       <TypingIndicator />
                     ) : (

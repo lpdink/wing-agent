@@ -117,15 +117,13 @@ function groupReadonlyTools(items: ChatItem[]): ChatItem[] {
   for (const item of items) {
     if (item.type === 'tool_call' && getToolCategory(item.toolName) === 'readonly') {
       if (currentGroup.length === 0) groupId = `tg-${item.id}`
-      currentGroup.push({ name: item.toolName, args: item.toolArgs })
+      currentGroup.push({ name: item.toolName, args: item.toolArgs, toolCallId: item.toolCallId })
     } else if (item.type === 'tool_call_result' && getToolCategory(item.toolName) === 'readonly') {
-      // Attach result to the last matching tool in the group
-      for (let i = currentGroup.length - 1; i >= 0; i--) {
-        if (currentGroup[i].name === item.toolName && currentGroup[i].result === undefined) {
-          currentGroup[i].result = item.result
-          currentGroup[i].success = item.success
-          break
-        }
+      // Attach result by toolCallId
+      const entry = currentGroup.find((t) => t.toolCallId === item.toolCallId)
+      if (entry) {
+        entry.result = item.result
+        entry.success = item.success
       }
     } else {
       flushGroup()
@@ -200,29 +198,36 @@ export function useSession() {
     [client, addError],
   )
 
+  /** Build an optimistic SessionInfo from create response for immediate sidebar insert. */
+  const buildOptimisticSession = (resp: {
+    session_id: string
+    template_name: string
+    workspace: string | null
+  }): SessionInfo => {
+    const now = new Date().toISOString()
+    return {
+      id: resp.session_id,
+      name: null,
+      created_at: now,
+      template_name: resp.template_name ?? null,
+      workspace: resp.workspace ?? null,
+      last_interaction: now,
+    }
+  }
+
   const createSession = useCallback(
     async (options?: CreateSessionRequest) => {
       try {
         const resp = await client.createSession(options)
         const store = useSessionStore.getState()
-
-        // Optimistic sidebar insert
-        const newSession: SessionInfo = {
-          id: resp.session_id,
-          name: null,
-          created_at: new Date().toISOString(),
-          template_name: resp.template_name ?? null,
-          workspace: resp.workspace ?? null,
-          last_interaction: null,
-        }
-        store.setSessions([newSession, ...store.sessions])
-
+        store.setSessions([buildOptimisticSession(resp), ...store.sessions])
         await selectSession(resp.session_id)
       } catch (e) {
         addError(`Failed to create session: ${e instanceof Error ? e.message : String(e)}`)
+        loadSessions() // Recover sidebar state
       }
     },
-    [client, selectSession, addError],
+    [client, selectSession, addError, loadSessions],
   )
 
   /** Create a new session and immediately send the first message. */
@@ -234,15 +239,7 @@ export function useSession() {
         const sessionId = resp.session_id
 
         // Optimistic sidebar insert
-        const newSession: SessionInfo = {
-          id: sessionId,
-          name: null,
-          created_at: new Date().toISOString(),
-          template_name: resp.template_name ?? null,
-          workspace: resp.workspace ?? null,
-          last_interaction: null,
-        }
-        store.setSessions([newSession, ...store.sessions])
+        store.setSessions([buildOptimisticSession(resp), ...store.sessions])
 
         // Activate and subscribe
         store.setActiveSessionId(sessionId)
@@ -261,9 +258,10 @@ export function useSession() {
       } catch (e) {
         useSessionStore.getState().setSending(false)
         addError(`Failed to start session: ${e instanceof Error ? e.message : String(e)}`)
+        loadSessions() // Recover sidebar state
       }
     },
-    [client, addError],
+    [client, addError, loadSessions],
   )
 
   const sendMessage = useCallback(

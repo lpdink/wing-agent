@@ -202,7 +202,6 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
       prompt_tokens: number
       completion_tokens: number
       cached_tokens: number
-      first_chunk_rt_ms: number
       tokens_per_sec: number
     }) => {
       if (event.session_id !== getActiveSessionId()) return

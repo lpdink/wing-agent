@@ -76,12 +76,12 @@ export function ReasoningCell({ data }: CellProps<ReasoningChatItem>) {
             {userExpanded ? (
               <>
                 <ChevronUp className="h-3 w-3" />
-                <span>收起</span>
+                <span>Collapse</span>
               </>
             ) : (
               <>
                 <ChevronDown className="h-3 w-3" />
-                <span>展开全文</span>
+                <span>Expand</span>
               </>
             )}
           </button>

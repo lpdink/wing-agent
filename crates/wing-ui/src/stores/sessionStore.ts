@@ -73,6 +73,7 @@ export interface DiffChatItem {
 export interface ToolGroupEntry {
   name: string
   args: Record<string, unknown>
+  toolCallId: string
   result?: string
   success?: boolean
 }
@@ -345,7 +346,7 @@ export const useSessionStore = create<SessionStore>((set) => ({
       const last = msgs[msgs.length - 1]
       if (last && last.type === 'tool_group') {
         // Extend existing group
-        const group = { ...last, tools: [...last.tools, { name, args }] }
+        const group = { ...last, tools: [...last.tools, { name, args, toolCallId }] }
         group.summary = buildToolGroupSummary(group.tools)
         msgs[msgs.length - 1] = group
       } else {
@@ -353,8 +354,8 @@ export const useSessionStore = create<SessionStore>((set) => ({
         msgs.push({
           type: 'tool_group',
           id: `tg-${toolCallId}`,
-          tools: [{ name, args }],
-          summary: buildToolGroupSummary([{ name, args }]),
+          tools: [{ name, args, toolCallId }],
+          summary: buildToolGroupSummary([{ name, args, toolCallId }]),
         })
       }
       return { messages: msgs }
@@ -363,17 +364,16 @@ export const useSessionStore = create<SessionStore>((set) => ({
   appendReadonlyToolResult: (name, toolCallId, result, success) =>
     set((state) => {
       const msgs = [...state.messages]
-      // Find the last tool_group and attach result
+      // Find the last tool_group and attach result by toolCallId
       for (let i = msgs.length - 1; i >= 0; i--) {
         if (msgs[i].type === 'tool_group') {
           const group = msgs[i] as ToolGroupChatItem
           const newTools = [...group.tools]
-          for (let j = newTools.length - 1; j >= 0; j--) {
-            if (newTools[j].name === name && newTools[j].result === undefined) {
-              newTools[j] = { ...newTools[j], result, success }
-              msgs[i] = { ...group, tools: newTools }
-              return { messages: msgs }
-            }
+          const idx = newTools.findIndex((t) => t.toolCallId === toolCallId)
+          if (idx !== -1) {
+            newTools[idx] = { ...newTools[idx], result, success }
+            msgs[i] = { ...group, tools: newTools }
+            return { messages: msgs }
           }
           break
         }
