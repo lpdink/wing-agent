@@ -141,6 +141,8 @@ interface SessionActions {
   setLoading: (loading: boolean) => void
   setSending: (sending: boolean) => void
   setSessionInfo: (info: SessionInfoResponse | null) => void
+  /** Merge partial fields into sessionInfo (for incremental state sync). */
+  patchSessionInfo: (patch: Partial<SessionInfoResponse>) => void
 }
 
 export type SessionStore = SessionState & SessionActions
@@ -246,4 +248,9 @@ export const useSessionStore = create<SessionStore>((set) => ({
   setSending: (sending) => set({ isSending: sending }),
 
   setSessionInfo: (info) => set({ sessionInfo: info }),
+
+  patchSessionInfo: (patch) =>
+    set((state) => ({
+      sessionInfo: state.sessionInfo ? { ...state.sessionInfo, ...patch } : state.sessionInfo,
+    })),
 }))

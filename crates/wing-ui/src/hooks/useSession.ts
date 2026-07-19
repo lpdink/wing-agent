@@ -3,7 +3,7 @@
 // Wraps GatewayClient methods with store updates.
 
 import { useCallback } from 'react'
-import type { CreateSessionRequest } from '@wing-agent/sdk'
+import type { CreateSessionRequest, UpdateSessionRequest } from '@wing-agent/sdk'
 import { useGatewayClient } from './useGatewayClient'
 import { useSessionStore, type ChatItem } from '@/stores/sessionStore'
 import { useUiStore } from '@/stores/uiStore'
@@ -89,6 +89,7 @@ function apiMessagesToChatItems(messages: Record<string, unknown>[]): ChatItem[]
 export function useSession() {
   const { client } = useGatewayClient()
   const addError = useUiStore((s) => s.addError)
+  const addToast = useUiStore((s) => s.addToast)
 
   const loadSessions = useCallback(async () => {
     try {
@@ -199,11 +200,99 @@ export function useSession() {
     }
   }, [client, addError])
 
+  const forkSession = useCallback(
+    async (targetUuid: string) => {
+      const store = useSessionStore.getState()
+      const sessionId = store.activeSessionId
+      if (!sessionId) return
+
+      try {
+        const resp = await client.forkSession(sessionId, targetUuid)
+        addToast('Session forked', 'success')
+        await loadSessions()
+        await selectSession(resp.session_id)
+      } catch (e) {
+        addError(`Fork failed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    },
+    [client, loadSessions, selectSession, addError, addToast],
+  )
+
+  const rewindSession = useCallback(
+    async (targetUuid: string) => {
+      const store = useSessionStore.getState()
+      const sessionId = store.activeSessionId
+      if (!sessionId) return
+
+      try {
+        await client.rewindSession(sessionId, targetUuid)
+        addToast('Session rewound', 'info')
+        // Reload messages for the current session
+        const sessionData = await client.getSession(sessionId)
+        const items = apiMessagesToChatItems(sessionData.messages)
+        store.setMessages(items)
+      } catch (e) {
+        addError(`Rewind failed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    },
+    [client, addError, addToast],
+  )
+
+  const compactSession = useCallback(async () => {
+    const sessionId = useSessionStore.getState().activeSessionId
+    if (!sessionId) return
+
+    try {
+      const resp = await client.compactSession(sessionId)
+      const saved = resp.original_tokens - resp.compressed_tokens
+      addToast(`Context compacted: saved ${saved.toLocaleString()} tokens`, 'info')
+    } catch (e) {
+      addError(`Compact failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }, [client, addError, addToast])
+
+  const updateSession = useCallback(
+    async (req: Omit<UpdateSessionRequest, 'session_id'>) => {
+      const sessionId = useSessionStore.getState().activeSessionId
+      if (!sessionId) return
+
+      try {
+        await client.updateSession({ session_id: sessionId, ...req })
+        // Optimistically patch local sessionInfo
+        const patch: Record<string, unknown> = {}
+        if (req.model != null) patch.model = req.model
+        if (req.thinking != null) patch.thinking = req.thinking
+        if (req.reasoning_effort != null) patch.reasoning_effort = req.reasoning_effort
+        if (req.yolo != null) patch.yolo = req.yolo
+        if (req.title != null) {
+          const newTitle = req.title
+          patch.session_name = newTitle
+          // Also update the sessions list name
+          const store = useSessionStore.getState()
+          const sessions = store.sessions.map((s) =>
+            s.id === sessionId ? { ...s, name: newTitle } : s,
+          )
+          store.setSessions(sessions)
+        }
+        if (Object.keys(patch).length > 0) {
+          useSessionStore.getState().patchSessionInfo(patch)
+        }
+      } catch (e) {
+        addError(`Update failed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    },
+    [client, addError],
+  )
+
   return {
     loadSessions,
     selectSession,
     createSession,
     sendMessage,
     interruptSession,
+    forkSession,
+    rewindSession,
+    compactSession,
+    updateSession,
   }
 }

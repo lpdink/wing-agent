@@ -116,15 +116,33 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
     // ── Session state changed events ──────────────────────────
     const handleSessionStateChanged = (event: {
       session_id: string | null
+      model: string | null
+      thinking: boolean | null
+      reasoning_effort: string | null
+      yolo: boolean | null
       title: string | null
+      agent: string | null
     }) => {
       if (event.session_id !== getActiveSessionId()) return
+      const store = useSessionStore.getState()
+
+      // Update title in sessions list
       if (event.title) {
-        const store = useSessionStore.getState()
         const sessions = store.sessions.map((s) =>
           s.id === event.session_id ? { ...s, name: event.title } : s,
         )
         store.setSessions(sessions)
+      }
+
+      // Patch sessionInfo with any changed config fields
+      const patch: Record<string, unknown> = {}
+      if (event.model != null) patch.model = event.model
+      if (event.thinking != null) patch.thinking = event.thinking
+      if (event.reasoning_effort != null) patch.reasoning_effort = event.reasoning_effort
+      if (event.yolo != null) patch.yolo = event.yolo
+      if (event.title != null) patch.session_name = event.title
+      if (Object.keys(patch).length > 0) {
+        store.patchSessionInfo(patch)
       }
     }
 

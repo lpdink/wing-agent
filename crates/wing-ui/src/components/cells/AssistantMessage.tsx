@@ -3,14 +3,17 @@
 // Uses react-markdown + remark-gfm for rich text rendering.
 // Code blocks are rendered via the CodeBlock component (Shiki highlighting).
 // Shows a streaming cursor while text events are still arriving.
+// Hover action bar (fork/rewind/copy) via MessageActions.
 
 import { memo } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Bot } from 'lucide-react'
 import { CodeBlock } from './CodeBlock'
+import { MessageActions } from './MessageActions'
 import type { CellProps } from '@/core/cell-types'
 import type { AssistantChatItem } from '@/stores/sessionStore'
+import { useSession } from '@/hooks/useSession'
 
 /** Custom renderers for react-markdown. */
 const components: Components = {
@@ -102,8 +105,10 @@ const components: Components = {
 export const AssistantMessageCell = memo(function AssistantMessageCell({
   data,
 }: CellProps<AssistantChatItem>) {
+  const { forkSession, rewindSession } = useSession()
+
   return (
-    <div className="flex justify-start">
+    <div className="group flex justify-start">
       <div className="flex gap-3">
         {/* Avatar */}
         <div className="mt-0.5 flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-sm bg-accent/10">
@@ -119,6 +124,15 @@ export const AssistantMessageCell = memo(function AssistantMessageCell({
           </div>
           {data.streaming && (
             <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-accent align-middle" />
+          )}
+          {/* Hover actions — only when not streaming */}
+          {!data.streaming && (
+            <MessageActions
+              messageUuid={data.messageUuid}
+              content={data.content}
+              onFork={forkSession}
+              onRewind={rewindSession}
+            />
           )}
         </div>
       </div>
