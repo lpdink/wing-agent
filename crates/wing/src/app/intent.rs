@@ -3,6 +3,50 @@
 //! All operations from App to the external world (gateway, clipboard) are
 //! expressed as `AppIntent` variants. The runner drains pending intents after
 //! each draw and executes them in order.
+//!
+//! Fetch-type intents (read-only HTTP queries) are executed as background
+//! tasks to avoid blocking the main event loop. Results are delivered back
+//! via [`FetchResult`] through an mpsc channel.
+
+use wing_api_client::models::{
+    AgentsResponse, BranchesResponse, CommandsResponse, ModelsResponse, SessionInfoResponse,
+    SessionListResponse,
+};
+
+/// Payload of a background fetch result.
+pub enum FetchPayload {
+    /// Session runtime info (model, tokens, thinking, yolo).
+    Info(Box<SessionInfoResponse>),
+    /// Available commands list.
+    Commands(CommandsResponse),
+    /// Available model list.
+    Models(ModelsResponse),
+    /// Branch targets for fork/rewind.
+    Branches(BranchesResponse),
+    /// Available agent templates.
+    Agents(AgentsResponse),
+    /// Session list.
+    SessionList(SessionListResponse),
+    /// Context stats display text.
+    ContextInfo(String),
+    /// Skills info display text.
+    SkillsInfo(String),
+    /// Compact session completed (original_tokens, compressed_tokens).
+    CompactDone { original: i64, compressed: i64 },
+    /// Show a toast message (for errors or success feedback from background tasks).
+    Toast { message: String, is_error: bool },
+}
+
+/// Result of a background fetch intent, delivered via mpsc channel.
+///
+/// Carries the `session_id` that was active when the request was spawned,
+/// so the receiver can discard stale results after a session switch.
+pub struct FetchResult {
+    /// Session ID at spawn time — used to discard stale results.
+    pub session_id: String,
+    /// The actual payload.
+    pub payload: FetchPayload,
+}
 
 /// A side-effect intent produced by the App state machine.
 ///

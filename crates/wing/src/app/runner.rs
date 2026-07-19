@@ -3,8 +3,14 @@
 //! The App state machine declares *what* should happen by pushing `AppIntent`
 //! variants. This module implements *how* each intent is executed, keeping
 //! I/O concerns out of the core state machine.
+//!
+//! Fetch-type intents (read-only HTTP queries) are spawned as background
+//! tasks to avoid blocking the main event loop. Results are sent back via
+//! an mpsc channel as [`FetchResult`] variants.
 
-use crate::app::intent::AppIntent;
+use tokio::sync::mpsc;
+
+use crate::app::intent::{AppIntent, FetchPayload, FetchResult};
 use crate::app::transport::Transport;
 use crate::tui::WingTerminal;
 use crate::ui::toast::Toast;
@@ -16,11 +22,15 @@ use super::App;
 ///
 /// `transport` is `None` when the gateway connection is lost; intents that
 /// require the gateway are silently discarded in that case.
+///
+/// Fetch-type intents are spawned as background tasks; their results arrive
+/// asynchronously via `fetch_tx`.
 pub async fn execute_intent(
     app: &mut App,
     transport: &Option<Transport>,
     terminal: &mut WingTerminal,
     intent: AppIntent,
+    fetch_tx: &mpsc::Sender<FetchResult>,
 ) {
     match intent {
         AppIntent::CopyToClipboard(text) => {
@@ -51,98 +61,114 @@ pub async fn execute_intent(
         }
         AppIntent::FetchInfo => {
             if let Some(t) = transport {
-                match t.http.get_session_info(&app.session_id).await {
-                    Ok(info) => {
-                        app.status.model = info.model;
-                        app.status.total_tokens = info.total_tokens;
-                        app.status.context_window_tokens = info.context_window_tokens;
-                        app.status.thinking = info.thinking;
-                        app.status.reasoning_effort = info.reasoning_effort;
-                        app.status.yolo = info.yolo;
-                        app.status.session_name = info.session_name;
-                        tracing::info!(model = %app.status.model, "session info received");
+                let http = t.http.clone();
+                let session_id = app.session_id.clone();
+                let tx = fetch_tx.clone();
+                let sid = session_id.clone();
+                tokio::spawn(async move {
+                    match http.get_session_info(&session_id).await {
+                        Ok(info) => {
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id: sid,
+                                    payload: FetchPayload::Info(Box::new(info)),
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("get session info failed: {e}");
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!("get session info failed: {e}");
-                    }
-                }
+                });
             }
         }
         AppIntent::FetchCommands => {
             if let Some(t) = transport {
-                match t.http.get_commands().await {
-                    Ok(resp) => {
-                        app.popup.cache.commands = resp
-                            .commands
-                            .into_iter()
-                            .map(|c| crate::protocol::CommandInfo {
-                                name: c.name,
-                                aliases: c.aliases,
-                                description: c.description,
-                                params: c.params,
-                            })
-                            .collect();
-                        app.update_popup();
+                let http = t.http.clone();
+                let session_id = app.session_id.clone();
+                let tx = fetch_tx.clone();
+                tokio::spawn(async move {
+                    match http.get_commands().await {
+                        Ok(resp) => {
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id,
+                                    payload: FetchPayload::Commands(resp),
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("get commands failed: {e}");
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!("get commands failed: {e}");
-                    }
-                }
+                });
             }
         }
         AppIntent::FetchModels => {
             if let Some(t) = transport {
-                match t.http.get_models().await {
-                    Ok(resp) => {
-                        app.popup.cache.models = resp
-                            .models
-                            .into_iter()
-                            .map(|m| (m, String::new()))
-                            .collect();
-                        app.update_popup();
+                let http = t.http.clone();
+                let session_id = app.session_id.clone();
+                let tx = fetch_tx.clone();
+                tokio::spawn(async move {
+                    match http.get_models().await {
+                        Ok(resp) => {
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id,
+                                    payload: FetchPayload::Models(resp),
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("get models failed: {e}");
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!("get models failed: {e}");
-                    }
-                }
+                });
             }
         }
         AppIntent::FetchBranches => {
             if let Some(t) = transport {
-                match t.http.get_branches(&app.session_id).await {
-                    Ok(resp) => {
-                        app.popup.cache.branches = resp
-                            .targets
-                            .into_iter()
-                            .map(|t| {
-                                let preview =
-                                    crate::ui::cells::tool_call::truncate_by_chars(&t.content, 80);
-                                (t.uuid, preview)
-                            })
-                            .collect();
-                        app.update_popup();
+                let http = t.http.clone();
+                let session_id = app.session_id.clone();
+                let tx = fetch_tx.clone();
+                let sid = session_id.clone();
+                tokio::spawn(async move {
+                    match http.get_branches(&session_id).await {
+                        Ok(resp) => {
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id: sid,
+                                    payload: FetchPayload::Branches(resp),
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("get branches failed: {e}");
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!("get branches failed: {e}");
-                    }
-                }
+                });
             }
         }
         AppIntent::FetchAgents => {
             if let Some(t) = transport {
-                match t.http.get_agents().await {
-                    Ok(resp) => {
-                        app.popup.cache.agents = resp
-                            .agents
-                            .into_iter()
-                            .map(|a| (a, String::new()))
-                            .collect();
-                        app.update_popup();
+                let http = t.http.clone();
+                let session_id = app.session_id.clone();
+                let tx = fetch_tx.clone();
+                tokio::spawn(async move {
+                    match http.get_agents().await {
+                        Ok(resp) => {
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id,
+                                    payload: FetchPayload::Agents(resp),
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("get agents failed: {e}");
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!("get agents failed: {e}");
-                    }
-                }
+                });
             }
         }
         AppIntent::UpdateSession {
@@ -244,40 +270,58 @@ pub async fn execute_intent(
         }
         AppIntent::FetchSessionList => {
             if let Some(t) = transport {
-                match t.http.list_sessions().await {
-                    Ok(resp) => {
-                        app.popup.cache.sessions = resp
-                            .sessions
-                            .iter()
-                            .map(|s| (s.id.clone(), s.name.clone().unwrap_or_default()))
-                            .collect();
-                        app.update_popup();
+                let http = t.http.clone();
+                let session_id = app.session_id.clone();
+                let tx = fetch_tx.clone();
+                tokio::spawn(async move {
+                    match http.list_sessions().await {
+                        Ok(resp) => {
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id,
+                                    payload: FetchPayload::SessionList(resp),
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("list sessions failed: {e}");
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!("list sessions failed: {e}");
-                    }
-                }
+                });
             }
         }
         AppIntent::CompactSession => {
             if let Some(t) = transport {
-                match t.http.compact_session(&app.session_id).await {
-                    Ok(resp) => {
-                        app.show_toast(Toast::info(
-                            format!(
-                                "Compact done: {} → {} tokens",
-                                resp.original_tokens, resp.compressed_tokens
-                            ),
-                            std::time::Duration::from_secs(3),
-                        ));
+                let http = t.http.clone();
+                let session_id = app.session_id.clone();
+                let tx = fetch_tx.clone();
+                let sid = session_id.clone();
+                tokio::spawn(async move {
+                    match http.compact_session(&session_id).await {
+                        Ok(resp) => {
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id: sid,
+                                    payload: FetchPayload::CompactDone {
+                                        original: resp.original_tokens,
+                                        compressed: resp.compressed_tokens,
+                                    },
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id,
+                                    payload: FetchPayload::Toast {
+                                        message: format!("Compact failed: {e}"),
+                                        is_error: true,
+                                    },
+                                })
+                                .await;
+                        }
                     }
-                    Err(e) => {
-                        app.show_toast(Toast::error(
-                            format!("Compact failed: {e}"),
-                            std::time::Duration::from_secs(3),
-                        ));
-                    }
-                }
+                });
             }
         }
         AppIntent::InterruptSession => {
@@ -341,49 +385,79 @@ pub async fn execute_intent(
         }
         AppIntent::ShowContextInfo => {
             if let Some(t) = transport {
-                match t.http.get_session_info(&app.session_id).await {
-                    Ok(info) => {
-                        let mut text = format!(
-                            "Messages: {}\nTokens: {} / {}\n",
-                            info.context_stats.message_count,
-                            info.context_stats.total_tokens,
-                            info.context_window_tokens,
-                        );
-                        if !info.system_prompt.is_empty() {
-                            text.push_str("\n--- System Prompt ---\n");
-                            text.push_str(&info.system_prompt);
+                let http = t.http.clone();
+                let session_id = app.session_id.clone();
+                let tx = fetch_tx.clone();
+                let sid = session_id.clone();
+                tokio::spawn(async move {
+                    match http.get_session_info(&session_id).await {
+                        Ok(info) => {
+                            let mut text = format!(
+                                "Messages: {}\nTokens: {} / {}\n",
+                                info.context_stats.message_count,
+                                info.context_stats.total_tokens,
+                                info.context_window_tokens,
+                            );
+                            if !info.system_prompt.is_empty() {
+                                text.push_str("\n--- System Prompt ---\n");
+                                text.push_str(&info.system_prompt);
+                            }
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id: sid,
+                                    payload: FetchPayload::ContextInfo(text),
+                                })
+                                .await;
                         }
-                        app.chat
-                            .push(crate::ui::chat_view::ChatCell::SystemMessage(text));
+                        Err(e) => {
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id,
+                                    payload: FetchPayload::Toast {
+                                        message: format!("Context info failed: {e}"),
+                                        is_error: true,
+                                    },
+                                })
+                                .await;
+                        }
                     }
-                    Err(e) => {
-                        app.show_toast(Toast::error(
-                            format!("Context info failed: {e}"),
-                            std::time::Duration::from_secs(3),
-                        ));
-                    }
-                }
+                });
             }
         }
         AppIntent::ShowSkillsInfo => {
             if let Some(t) = transport {
-                match t.http.get_session_info(&app.session_id).await {
-                    Ok(info) => {
-                        let text = if info.skills_info.is_empty() {
-                            "No skills loaded.".to_string()
-                        } else {
-                            info.skills_info
-                        };
-                        app.chat
-                            .push(crate::ui::chat_view::ChatCell::SystemMessage(text));
+                let http = t.http.clone();
+                let session_id = app.session_id.clone();
+                let tx = fetch_tx.clone();
+                let sid = session_id.clone();
+                tokio::spawn(async move {
+                    match http.get_session_info(&session_id).await {
+                        Ok(info) => {
+                            let text = if info.skills_info.is_empty() {
+                                "No skills loaded.".to_string()
+                            } else {
+                                info.skills_info
+                            };
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id: sid,
+                                    payload: FetchPayload::SkillsInfo(text),
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id,
+                                    payload: FetchPayload::Toast {
+                                        message: format!("Skills info failed: {e}"),
+                                        is_error: true,
+                                    },
+                                })
+                                .await;
+                        }
                     }
-                    Err(e) => {
-                        app.show_toast(Toast::error(
-                            format!("Skills info failed: {e}"),
-                            std::time::Duration::from_secs(3),
-                        ));
-                    }
-                }
+                });
             }
         }
         AppIntent::SetTitle(t) => {

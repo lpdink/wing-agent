@@ -65,7 +65,7 @@ async def list_models(request: Request) -> ModelsResponse:
     """获取当前配置下可用的 LLM 模型列表。"""
     try:
         provider = OpenAIProvider()
-        models = await provider.list_models()
+        models = await asyncio.wait_for(provider.list_models(), timeout=10.0)
     except Exception:
         models = []
     return ModelsResponse(models=models)
