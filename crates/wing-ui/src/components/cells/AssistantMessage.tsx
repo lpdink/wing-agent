@@ -11,7 +11,6 @@
 import { memo, useCallback } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Bot } from 'lucide-react'
 import { CodeBlock } from './CodeBlock'
 import { MessageActions } from './MessageActions'
 import type { CellProps } from '@/core/cell-types'
@@ -154,33 +153,25 @@ export const AssistantMessageCell = memo(function AssistantMessageCell({
   )
 
   return (
-    <div className="group flex justify-start">
-      <div className="flex gap-3">
-        {/* Avatar */}
-        <div className="mt-0.5 flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-sm bg-accent/10">
-          <Bot className="h-[18px] w-[18px] text-accent" />
+    <div className="group">
+      <div className="min-w-0">
+        <div className="prose-custom">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+            {data.content}
+          </ReactMarkdown>
         </div>
-
-        {/* Content */}
-        <div className="min-w-0 max-w-[calc(100%-3rem)]">
-          <div className="prose-custom">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-              {data.content}
-            </ReactMarkdown>
-          </div>
-          {data.streaming && (
-            <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-accent align-middle" />
-          )}
-          {/* Hover actions — only when not streaming */}
-          {!data.streaming && (
-            <MessageActions
-              messageUuid={data.messageUuid}
-              content={data.content}
-              onFork={handleFork}
-              onRewind={handleRewind}
-            />
-          )}
-        </div>
+        {data.streaming && (
+          <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-accent align-middle" />
+        )}
+        {/* Hover actions — only when not streaming */}
+        {!data.streaming && (
+          <MessageActions
+            messageUuid={data.messageUuid}
+            content={data.content}
+            onFork={handleFork}
+            onRewind={handleRewind}
+          />
+        )}
       </div>
     </div>
   )

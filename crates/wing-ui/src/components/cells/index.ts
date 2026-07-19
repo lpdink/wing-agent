@@ -9,7 +9,7 @@ import { ReasoningCell } from './ReasoningCell'
 import { DiffCell } from './DiffCell'
 import { AskCell } from './AskCell'
 import { FallbackCell } from './FallbackCell'
-import { TurnStartedCell, DoneCell, ErrorCell, ToolResultCell } from './TurnCells'
+import { ErrorCell, ToolResultCell } from './TurnCells'
 
 // Register all cells
 registry.register('user', UserMessageCell)
@@ -20,8 +20,6 @@ registry.register('tool_group', ToolGroupCell)
 registry.register('reasoning', ReasoningCell)
 registry.register('diff', DiffCell)
 registry.register('ask', AskCell)
-registry.register('turn_started', TurnStartedCell)
-registry.register('done', DoneCell)
 registry.register('error', ErrorCell)
 
 // Register fallback for unknown types
@@ -37,8 +35,6 @@ export {
   DiffCell,
   AskCell,
   FallbackCell,
-  TurnStartedCell,
-  DoneCell,
   ErrorCell,
   ToolResultCell,
 }

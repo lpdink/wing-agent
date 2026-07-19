@@ -1,15 +1,16 @@
-// src/components/cells/ToolCallCell.tsx — Tool call card with collapsible details.
+// src/components/cells/ToolCallCell.tsx — Tool call as a process line.
 //
-// Shows tool icon + name + argument summary in header.
-// Expands to show full JSON arguments.
-// If a tool_call_result follows, merges it into the same card.
-// Mutation tools (Write/Edit) render as compact one-liners (diff is the focus).
+// Non-mutation tools: ProcessLine trigger (icon + name + summary + status).
+// Mutation tools (Write/Edit): compact one-liner (DiffCell is the real content).
+// TodoWrite: special checklist rendering (see TodoChecklist below).
 
 import { useState } from 'react'
-import { ChevronDown, ChevronRight, Wrench, CheckCircle2, XCircle, FilePen } from 'lucide-react'
+import { Wrench, FilePen, CheckCircle2, XCircle } from 'lucide-react'
 import type { CellProps } from '@/core/cell-types'
 import type { ToolCallChatItem, ToolResultChatItem } from '@/stores/sessionStore'
 import { getToolCategory } from '@/stores/sessionStore'
+import { ProcessLine } from './ProcessLine'
+import { TodoChecklist } from './TodoChecklist'
 
 interface ToolCallCellProps extends CellProps<ToolCallChatItem> {
   /** Optional tool result (if next message is tool_call_result with same toolCallId) */
@@ -18,7 +19,6 @@ interface ToolCallCellProps extends CellProps<ToolCallChatItem> {
 
 /** Extract a short summary from tool args for the collapsed header. */
 function getArgsSummary(args: Record<string, unknown>): string {
-  // Common patterns: file path, command, pattern
   if (typeof args.path === 'string') return args.path
   if (typeof args.command === 'string') {
     const cmd = args.command
@@ -35,81 +35,68 @@ export function ToolCallCell({ data, result }: ToolCallCellProps) {
   const summary = getArgsSummary(data.toolArgs)
   const hasResult = result != null
   const isMutation = getToolCategory(data.toolName) === 'mutation'
+  const isTodoWrite = data.toolName === 'TodoWrite' || data.toolName === 'todo_write'
 
   // Mutation tools: compact one-liner (DiffCell is the real content)
   if (isMutation) {
     return (
-      <div className="flex items-center gap-2 py-0.5 text-xs text-text-muted">
+      <div className="flex h-6 items-center gap-1.5 px-1 text-[13px] text-text-muted">
         <FilePen className="h-3.5 w-3.5 shrink-0 text-accent" />
-        <span className="font-medium">{data.toolName}</span>
-        {summary && <span className="truncate text-text-dim">{summary}</span>}
+        <span className="shrink-0 font-medium">{data.toolName}</span>
+        {summary && <span className="min-w-0 truncate text-text-dim">{summary}</span>}
         {hasResult &&
           (result.success ? (
-            <CheckCircle2 className="h-3 w-3 shrink-0 text-success" />
+            <CheckCircle2 className="ml-auto h-3 w-3 shrink-0 text-success" />
           ) : (
-            <XCircle className="h-3 w-3 shrink-0 text-error" />
+            <XCircle className="ml-auto h-3 w-3 shrink-0 text-error" />
           ))}
       </div>
     )
   }
 
-  // Execution tools: full card
+  // TodoWrite: special checklist rendering
+  if (isTodoWrite) {
+    return <TodoChecklist data={data} />
+  }
+
+  // Non-mutation tools: process line
+  const status = hasResult ? (result.success ? 'success' : 'error') : null
+
   return (
-    <div className="flex justify-start">
-      <div className="max-w-[85%] rounded-lg border border-border bg-bg-tool px-3 py-2.5 shadow-sm">
-        {/* Header — always visible */}
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="flex w-full items-center gap-2 text-left"
-        >
-          {expanded ? (
-            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-text-muted" />
-          ) : (
-            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-text-muted" />
-          )}
-          <Wrench className="h-3.5 w-3.5 shrink-0 text-accent" />
-          <span className="text-sm font-medium text-text">{data.toolName}</span>
-          {summary && <span className="truncate text-xs text-text-muted">{summary}</span>}
-          {hasResult &&
-            (result.success ? (
-              <CheckCircle2 className="ml-auto h-3.5 w-3.5 shrink-0 text-success" />
+    <ProcessLine
+      icon={Wrench}
+      label={data.toolName}
+      subject={summary || undefined}
+      status={status}
+      expanded={expanded}
+      onToggle={() => setExpanded(!expanded)}
+    >
+      {/* Arguments */}
+      <div>
+        <div className="text-[10px] font-medium uppercase tracking-wider text-text-dim">
+          Arguments
+        </div>
+        <pre className="mt-1 max-h-60 overflow-auto rounded bg-bg-code p-2 text-xs text-text-dim">
+          {JSON.stringify(data.toolArgs, null, 2)}
+        </pre>
+      </div>
+
+      {/* Result (if available) */}
+      {hasResult && (
+        <div className="mt-2">
+          <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-text-dim">
+            <span>Result</span>
+            {result!.success ? (
+              <CheckCircle2 className="h-3 w-3 text-success" />
             ) : (
-              <XCircle className="ml-auto h-3.5 w-3.5 shrink-0 text-error" />
-            ))}
-        </button>
-
-        {/* Expanded content */}
-        {expanded && (
-          <div className="mt-2 space-y-2">
-            {/* Arguments */}
-            <div>
-              <div className="text-[10px] font-medium uppercase tracking-wider text-text-muted">
-                Arguments
-              </div>
-              <pre className="mt-1 max-h-60 overflow-auto rounded bg-bg-code p-2 text-xs text-text-dim">
-                {JSON.stringify(data.toolArgs, null, 2)}
-              </pre>
-            </div>
-
-            {/* Result (if available) */}
-            {hasResult && (
-              <div>
-                <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-text-muted">
-                  <span>Result</span>
-                  {result!.success ? (
-                    <CheckCircle2 className="h-3 w-3 text-success" />
-                  ) : (
-                    <XCircle className="h-3 w-3 text-error" />
-                  )}
-                </div>
-                <pre className="mt-1 max-h-60 overflow-auto rounded bg-bg-code p-2 text-xs text-text-dim">
-                  {result!.result}
-                </pre>
-              </div>
+              <XCircle className="h-3 w-3 text-error" />
             )}
           </div>
-        )}
-      </div>
-    </div>
+          <pre className="mt-1 max-h-60 overflow-auto rounded bg-bg-code p-2 text-xs text-text-dim">
+            {result!.result}
+          </pre>
+        </div>
+      )}
+    </ProcessLine>
   )
 }

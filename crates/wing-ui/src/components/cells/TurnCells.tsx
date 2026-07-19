@@ -1,35 +1,12 @@
-// src/components/cells/TurnCells.tsx — TurnStarted, Done, Error, ToolResult cells.
+// src/components/cells/TurnCells.tsx — Error and standalone ToolResult cells.
 //
-// Simple indicator cells for turn lifecycle events and standalone tool results.
+// TurnStarted and Done cells removed — turn boundaries are conveyed
+// naturally by user messages. ChatArea SKIP_TYPES still filters these
+// event types from the render list.
 
 import { AlertCircle, Wrench } from 'lucide-react'
 import type { CellProps } from '@/core/cell-types'
-import type {
-  TurnStartedChatItem,
-  DoneChatItem,
-  ErrorChatItem,
-  ToolResultChatItem,
-} from '@/stores/sessionStore'
-
-export function TurnStartedCell(_props: CellProps<TurnStartedChatItem>) {
-  return (
-    <div className="flex justify-center">
-      <span className="rounded-full bg-bg-elevated px-3 py-1 text-xs text-text-muted">
-        Turn started
-      </span>
-    </div>
-  )
-}
-
-export function DoneCell(_props: CellProps<DoneChatItem>) {
-  return (
-    <div className="flex justify-center">
-      <span className="rounded-full bg-bg-elevated px-3 py-1 text-xs text-text-muted">
-        Turn complete
-      </span>
-    </div>
-  )
-}
+import type { ErrorChatItem, ToolResultChatItem } from '@/stores/sessionStore'
 
 export function ErrorCell({ data }: CellProps<ErrorChatItem>) {
   return (
@@ -45,15 +22,11 @@ export function ErrorCell({ data }: CellProps<ErrorChatItem>) {
 /** Standalone tool result (when not merged into a ToolCallCell). */
 export function ToolResultCell({ data }: CellProps<ToolResultChatItem>) {
   return (
-    <div className="flex justify-start">
-      <div className="max-w-[85%] rounded-lg border border-border bg-bg-elevated px-3 py-2">
-        <div className="flex items-center gap-2 text-sm">
-          <Wrench className="h-3.5 w-3.5 text-text-muted" />
-          <span className="text-text-dim">
-            {data.toolName} result {data.success ? '✓' : '✗'}
-          </span>
-        </div>
-      </div>
+    <div className="flex h-6 items-center gap-1.5 px-1 text-[13px] text-text-muted">
+      <Wrench className="h-3.5 w-3.5 shrink-0 text-text-dim" />
+      <span className="text-text-dim">
+        {data.toolName} result {data.success ? '✓' : '✗'}
+      </span>
     </div>
   )
 }

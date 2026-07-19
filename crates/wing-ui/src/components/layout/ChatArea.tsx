@@ -14,6 +14,20 @@ import '@/components/cells'
 /** Types that should not be rendered in the virtualized list. */
 const SKIP_TYPES = new Set(['turn_started', 'done'])
 
+/** Types that render as compact process lines (2px spacing between them). */
+const PROCESS_TYPES = new Set(['tool_call', 'tool_call_result', 'tool_group', 'reasoning'])
+
+/** Compute bottom padding class based on current and next item type. */
+function getSpacingClass(currentType: string, nextType: string | undefined): string {
+  if (PROCESS_TYPES.has(currentType)) {
+    // Process → prose: 8px; process → process: 2px
+    if (nextType && !PROCESS_TYPES.has(nextType)) return 'pb-2'
+    return 'pb-0.5'
+  }
+  // Messages (assistant, user, etc.): 12px
+  return 'pb-3'
+}
+
 const AUTO_SCROLL_THRESHOLD = 80 // px from bottom to count as "near bottom"
 
 /** Render a single ChatItem via the cell registry with special-case handling. */
@@ -117,7 +131,7 @@ export function ChatArea() {
   const virtualizer = useVirtualizer({
     count: totalRows,
     getScrollElement: () => scrollElementRef.current,
-    estimateSize: () => 96, // ~80px content + 16px gap
+    estimateSize: () => 64, // process lines ~26px, messages ~120px; weighted average
     overscan: 5,
     getItemKey: (index) => {
       if (index < renderItems.length) return renderItems[index].id
@@ -210,19 +224,12 @@ export function ChatArea() {
                     transform: `translateY(${virtualRow.start}px)`,
                   }}
                 >
-                  {/* Spacing varies by cell type: compact for tools/reasoning, normal for messages */}
+                  {/* Spacing: process lines 2px, process→prose 8px, messages 12px */}
                   <div
-                    className={`px-4 pt-0 first:pt-6 ${
-                      [
-                        'tool_call',
-                        'tool_call_result',
-                        'tool_group',
-                        'reasoning',
-                        'turn_started',
-                      ].includes(renderItems[virtualRow.index]?.type ?? '')
-                        ? 'pb-1'
-                        : 'pb-4'
-                    }`}
+                    className={`px-4 pt-0 first:pt-6 ${getSpacingClass(
+                      renderItems[virtualRow.index]?.type ?? '',
+                      renderItems[virtualRow.index + 1]?.type,
+                    )}`}
                   >
                     {isTypingRow ? (
                       <TypingIndicator />
