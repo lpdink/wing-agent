@@ -2,6 +2,7 @@
 //
 // Recreates the GatewayClient when connectionStore.gatewayUrl changes.
 // Automatically syncs clientId from connectionStore.
+// Client construction is lazy (render-safe); no side effects in render phase.
 
 import { useRef } from 'react'
 import { GatewayClient } from '@wing-agent/sdk'
@@ -13,7 +14,7 @@ export function useGatewayClient(): { client: GatewayClient } {
   const gatewayUrl = useConnectionStore((s) => s.gatewayUrl)
   const clientId = useConnectionStore((s) => s.clientId)
 
-  // Recreate client when URL changes
+  // Recreate client when URL changes (GatewayClient construction is side-effect-free)
   if (!clientRef.current || urlRef.current !== gatewayUrl) {
     clientRef.current = new GatewayClient({ baseUrl: gatewayUrl })
     urlRef.current = gatewayUrl

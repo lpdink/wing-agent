@@ -22,6 +22,11 @@ interface Command {
   execute: () => void
 }
 
+/** A command with its flat index pre-computed for keyboard navigation. */
+interface IndexedCommand extends Command {
+  flatIndex: number
+}
+
 // ── Component ──────────────────────────────────────────────────
 
 export function CommandPalette() {
@@ -157,15 +162,20 @@ export function CommandPalette() {
     )
   }, [commands, query])
 
-  // Group filtered results
-  const groups = useMemo(() => {
-    const map = new Map<string, Command[]>()
-    for (const cmd of filtered) {
-      const list = map.get(cmd.group) ?? []
-      list.push(cmd)
-      map.set(cmd.group, list)
+  // Group filtered results with pre-computed flat indices
+  const groupedCommands = useMemo(() => {
+    const groupOrder = ['Sessions', 'Models', 'Actions'] as const
+    const result: { group: string; items: IndexedCommand[] }[] = []
+    let idx = 0
+    for (const group of groupOrder) {
+      const items = filtered
+        .filter((c) => c.group === group)
+        .map((c) => ({ ...c, flatIndex: idx++ }))
+      if (items.length > 0) {
+        result.push({ group, items })
+      }
     }
-    return map
+    return result
   }, [filtered])
 
   // Reset selection when query changes
@@ -202,8 +212,6 @@ export function CommandPalette() {
 
   if (!open) return null
 
-  let flatIndex = -1
-
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh]">
       {/* Backdrop */}
@@ -221,6 +229,10 @@ export function CommandPalette() {
             onKeyDown={handleKeyDown}
             placeholder="Search sessions, models, actions…"
             className="w-full bg-transparent text-sm text-text placeholder-text-muted outline-none"
+            role="combobox"
+            aria-expanded={filtered.length > 0}
+            aria-controls="command-palette-list"
+            aria-activedescendant={filtered[selectedIndex]?.id}
           />
           <kbd className="shrink-0 rounded border border-border bg-bg-surface px-1.5 py-0.5 text-[10px] text-text-muted">
             Esc
@@ -228,49 +240,49 @@ export function CommandPalette() {
         </div>
 
         {/* Results */}
-        <div ref={listRef} className="max-h-80 overflow-y-auto py-2">
+        <div
+          ref={listRef}
+          id="command-palette-list"
+          role="listbox"
+          aria-label="Commands"
+          className="max-h-80 overflow-y-auto py-2"
+        >
           {filtered.length === 0 ? (
             <div className="px-4 py-8 text-center text-sm text-text-muted">No results</div>
           ) : (
-            (['Sessions', 'Models', 'Actions'] as const).map((group) => {
-              const items = groups.get(group)
-              if (!items || items.length === 0) return null
-              return (
-                <div key={group}>
-                  <div className="px-4 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wider text-text-muted">
-                    {group}
-                  </div>
-                  {items.map((cmd) => {
-                    flatIndex++
-                    const idx = flatIndex
-                    const isSelected = idx === selectedIndex
-                    const isActive = cmd.id === `session-${activeSessionId}`
-                    return (
-                      <button
-                        key={cmd.id}
-                        data-selected={isSelected}
-                        onClick={() => {
-                          setSelectedIndex(idx)
-                          executeSelected()
-                        }}
-                        onMouseEnter={() => setSelectedIndex(idx)}
-                        className={`flex w-full items-center gap-3 px-4 py-2 text-left text-sm transition-colors ${
-                          isSelected ? 'bg-bg-hover text-text' : 'text-text-dim'
-                        }`}
-                      >
-                        {cmd.icon}
-                        <span className="min-w-0 flex-1 truncate">{cmd.label}</span>
-                        {isActive && (
-                          <span className="shrink-0 rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">
-                            active
-                          </span>
-                        )}
-                      </button>
-                    )
-                  })}
+            groupedCommands.map(({ group, items }) => (
+              <div key={group}>
+                <div className="px-4 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wider text-text-muted">
+                  {group}
                 </div>
-              )
-            })
+                {items.map((cmd) => {
+                  const isSelected = cmd.flatIndex === selectedIndex
+                  const isActive = cmd.id === `session-${activeSessionId}`
+                  return (
+                    <button
+                      key={cmd.id}
+                      id={cmd.id}
+                      role="option"
+                      aria-selected={isSelected}
+                      data-selected={isSelected}
+                      onClick={() => cmd.execute()}
+                      onMouseEnter={() => setSelectedIndex(cmd.flatIndex)}
+                      className={`flex w-full items-center gap-3 px-4 py-2 text-left text-sm transition-colors ${
+                        isSelected ? 'bg-bg-hover text-text' : 'text-text-dim'
+                      }`}
+                    >
+                      {cmd.icon}
+                      <span className="min-w-0 flex-1 truncate">{cmd.label}</span>
+                      {isActive && (
+                        <span className="shrink-0 rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">
+                          active
+                        </span>
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            ))
           )}
         </div>
 

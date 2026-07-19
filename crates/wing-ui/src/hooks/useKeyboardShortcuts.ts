@@ -98,8 +98,10 @@ export function useKeyboardShortcuts(): void {
         for (let i = messages.length - 1; i >= 0; i--) {
           if (messages[i].type === 'assistant') {
             const content = (messages[i] as { content: string }).content
-            navigator.clipboard.writeText(content)
-            useUiStore.getState().addToast('Copied last response', 'success')
+            navigator.clipboard.writeText(content).then(
+              () => useUiStore.getState().addToast('Copied last response', 'success'),
+              () => useUiStore.getState().addToast('Failed to copy', 'error'),
+            )
             break
           }
         }

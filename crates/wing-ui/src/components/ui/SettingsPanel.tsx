@@ -8,8 +8,7 @@ import { X, Sun, Moon, Server, Check } from 'lucide-react'
 import { useUiStore } from '@/stores/uiStore'
 import { useConnectionStore } from '@/stores/connectionStore'
 import { setStoredGatewayUrl } from '@/lib/gateway-config'
-
-const THEME_KEY = 'wing-theme'
+import { THEME_STORAGE_KEY } from '@/lib/constants'
 
 export function SettingsPanel() {
   const open = useUiStore((s) => s.settingsOpen)
@@ -35,13 +34,28 @@ export function SettingsPanel() {
     const next = !isDark
     setIsDark(next)
     document.documentElement.dataset.theme = next ? 'dark' : 'light'
-    localStorage.setItem(THEME_KEY, next ? 'dark' : 'light')
+    localStorage.setItem(THEME_STORAGE_KEY, next ? 'dark' : 'light')
   }
+
+  const [urlError, setUrlError] = useState('')
 
   const handleSaveUrl = () => {
     const trimmed = urlInput.trim().replace(/\/+$/, '')
     if (!trimmed) return
 
+    // Validate URL format and protocol
+    try {
+      const parsed = new URL(trimmed)
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        setUrlError('Only http:// and https:// are supported')
+        return
+      }
+    } catch {
+      setUrlError('Invalid URL format')
+      return
+    }
+
+    setUrlError('')
     setStoredGatewayUrl(trimmed)
     setGatewayUrl(trimmed)
     setUrlSaved(true)
@@ -122,10 +136,15 @@ export function SettingsPanel() {
               <div className="flex items-center gap-2">
                 <input
                   value={urlInput}
-                  onChange={(e) => setUrlInput(e.target.value)}
+                  onChange={(e) => {
+                    setUrlInput(e.target.value)
+                    setUrlError('')
+                  }}
                   onKeyDown={handleUrlKeyDown}
                   placeholder="http://127.0.0.1:32523"
-                  className="flex-1 rounded-lg border border-border bg-bg-input px-3 py-2 text-sm text-text placeholder-text-muted outline-none transition-colors focus:border-border-focus"
+                  className={`flex-1 rounded-lg border bg-bg-input px-3 py-2 text-sm text-text placeholder-text-muted outline-none transition-colors focus:border-border-focus ${
+                    urlError ? 'border-error' : 'border-border'
+                  }`}
                 />
                 <button
                   onClick={handleSaveUrl}
@@ -139,6 +158,7 @@ export function SettingsPanel() {
                   {urlSaved ? 'Saved' : 'Save'}
                 </button>
               </div>
+              {urlError && <p className="mt-1.5 text-[11px] text-error">{urlError}</p>}
               <p className="mt-2 text-[11px] text-text-muted">
                 Changes take effect immediately. The app will reconnect to the new address.
               </p>

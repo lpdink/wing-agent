@@ -2,6 +2,7 @@
 //
 // Creates WebSocketClient, connects on mount, syncs status/clientId
 // to connectionStore. Recreates the client when gatewayUrl changes.
+// All side effects (connect/disconnect) happen inside useEffect.
 
 import { useEffect, useRef } from 'react'
 import { WebSocketClient } from '@wing-agent/sdk'
@@ -18,18 +19,21 @@ export function useWebSocket(): { wsClient: WebSocketClient } {
 
   const wsUrl = toWsUrl(gatewayUrl)
 
-  // Recreate client when URL changes
-  if (!wsRef.current || urlRef.current !== wsUrl) {
-    // Disconnect previous client if exists
-    if (wsRef.current) {
-      wsRef.current.disconnect()
-    }
+  // Lazily create initial client (no side effects — just object construction)
+  if (!wsRef.current) {
     wsRef.current = new WebSocketClient({ url: wsUrl })
     urlRef.current = wsUrl
   }
 
   useEffect(() => {
-    const ws = wsRef.current!
+    // If URL changed, recreate the client
+    let ws = wsRef.current!
+    if (urlRef.current !== wsUrl) {
+      ws.disconnect()
+      ws = new WebSocketClient({ url: wsUrl })
+      wsRef.current = ws
+      urlRef.current = wsUrl
+    }
 
     // Sync connection status to store + extract clientId on connect
     const handleStatusChange = (status: ConnectionStatus) => {
@@ -48,7 +52,7 @@ export function useWebSocket(): { wsClient: WebSocketClient } {
       ws.offStatusChange(handleStatusChange)
       ws.disconnect()
     }
-  }, [gatewayUrl, setStatus, setClientId])
+  }, [wsUrl, setStatus, setClientId])
 
   return { wsClient: wsRef.current }
 }

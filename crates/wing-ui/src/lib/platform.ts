@@ -2,7 +2,12 @@
 
 /** True if running on macOS (uses ⌘ instead of Ctrl). */
 export function isMac(): boolean {
-  return navigator.platform.toUpperCase().includes('MAC') || navigator.userAgent.includes('Mac')
+  // Prefer userAgentData (modern), fall back to userAgent
+  const ua = navigator as Navigator & { userAgentData?: { platform: string } }
+  if (ua.userAgentData?.platform) {
+    return ua.userAgentData.platform.toUpperCase().includes('MAC')
+  }
+  return navigator.userAgent.includes('Mac')
 }
 
 /** The modifier key label for the current platform. */

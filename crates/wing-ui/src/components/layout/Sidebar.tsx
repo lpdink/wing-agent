@@ -10,6 +10,7 @@ import { useSessionStore } from '@/stores/sessionStore'
 import { useUiStore } from '@/stores/uiStore'
 import { useSession } from '@/hooks/useSession'
 import { ContextMenu } from '@/components/ui/ContextMenu'
+import { THEME_STORAGE_KEY } from '@/lib/constants'
 import type { SessionInfo } from '@wing-agent/sdk'
 
 interface SidebarProps {
@@ -91,7 +92,7 @@ export function Sidebar({ open }: SidebarProps) {
     const next = !isDark
     setIsDark(next)
     document.documentElement.dataset.theme = next ? 'dark' : 'light'
-    localStorage.setItem('wing-theme', next ? 'dark' : 'light')
+    localStorage.setItem(THEME_STORAGE_KEY, next ? 'dark' : 'light')
   }
 
   // Filter by name + workspace

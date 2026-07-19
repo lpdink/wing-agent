@@ -3,14 +3,15 @@
 // Priority: localStorage → VITE_GATEWAY_URL env → default.
 // Mirrors: crates/wing/src/cmd/backend_config.rs
 
+import { GATEWAY_URL_STORAGE_KEY } from './constants'
+
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 32523
-const STORAGE_KEY = 'wing-gateway-url'
 
 /** Read the persisted Gateway URL from localStorage (or null). */
 export function getStoredGatewayUrl(): string | null {
   try {
-    return localStorage.getItem(STORAGE_KEY)
+    return localStorage.getItem(GATEWAY_URL_STORAGE_KEY)
   } catch {
     return null
   }
@@ -19,7 +20,7 @@ export function getStoredGatewayUrl(): string | null {
 /** Persist a Gateway URL to localStorage. */
 export function setStoredGatewayUrl(url: string): void {
   try {
-    localStorage.setItem(STORAGE_KEY, url)
+    localStorage.setItem(GATEWAY_URL_STORAGE_KEY, url)
   } catch {
     // Ignore storage errors (private browsing, etc.)
   }
