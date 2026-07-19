@@ -10,7 +10,7 @@
 
 use tokio::sync::mpsc;
 
-use crate::app::intent::{AppIntent, FetchResult};
+use crate::app::intent::{AppIntent, FetchPayload, FetchResult};
 use crate::app::transport::Transport;
 use crate::tui::WingTerminal;
 use crate::ui::toast::Toast;
@@ -64,10 +64,16 @@ pub async fn execute_intent(
                 let http = t.http.clone();
                 let session_id = app.session_id.clone();
                 let tx = fetch_tx.clone();
+                let sid = session_id.clone();
                 tokio::spawn(async move {
                     match http.get_session_info(&session_id).await {
                         Ok(info) => {
-                            let _ = tx.send(FetchResult::Info(Box::new(info))).await;
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id: sid,
+                                    payload: FetchPayload::Info(Box::new(info)),
+                                })
+                                .await;
                         }
                         Err(e) => {
                             tracing::warn!("get session info failed: {e}");
@@ -79,11 +85,17 @@ pub async fn execute_intent(
         AppIntent::FetchCommands => {
             if let Some(t) = transport {
                 let http = t.http.clone();
+                let session_id = app.session_id.clone();
                 let tx = fetch_tx.clone();
                 tokio::spawn(async move {
                     match http.get_commands().await {
                         Ok(resp) => {
-                            let _ = tx.send(FetchResult::Commands(resp)).await;
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id,
+                                    payload: FetchPayload::Commands(resp),
+                                })
+                                .await;
                         }
                         Err(e) => {
                             tracing::warn!("get commands failed: {e}");
@@ -95,11 +107,17 @@ pub async fn execute_intent(
         AppIntent::FetchModels => {
             if let Some(t) = transport {
                 let http = t.http.clone();
+                let session_id = app.session_id.clone();
                 let tx = fetch_tx.clone();
                 tokio::spawn(async move {
                     match http.get_models().await {
                         Ok(resp) => {
-                            let _ = tx.send(FetchResult::Models(resp)).await;
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id,
+                                    payload: FetchPayload::Models(resp),
+                                })
+                                .await;
                         }
                         Err(e) => {
                             tracing::warn!("get models failed: {e}");
@@ -113,10 +131,16 @@ pub async fn execute_intent(
                 let http = t.http.clone();
                 let session_id = app.session_id.clone();
                 let tx = fetch_tx.clone();
+                let sid = session_id.clone();
                 tokio::spawn(async move {
                     match http.get_branches(&session_id).await {
                         Ok(resp) => {
-                            let _ = tx.send(FetchResult::Branches(resp)).await;
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id: sid,
+                                    payload: FetchPayload::Branches(resp),
+                                })
+                                .await;
                         }
                         Err(e) => {
                             tracing::warn!("get branches failed: {e}");
@@ -128,11 +152,17 @@ pub async fn execute_intent(
         AppIntent::FetchAgents => {
             if let Some(t) = transport {
                 let http = t.http.clone();
+                let session_id = app.session_id.clone();
                 let tx = fetch_tx.clone();
                 tokio::spawn(async move {
                     match http.get_agents().await {
                         Ok(resp) => {
-                            let _ = tx.send(FetchResult::Agents(resp)).await;
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id,
+                                    payload: FetchPayload::Agents(resp),
+                                })
+                                .await;
                         }
                         Err(e) => {
                             tracing::warn!("get agents failed: {e}");
@@ -241,11 +271,17 @@ pub async fn execute_intent(
         AppIntent::FetchSessionList => {
             if let Some(t) = transport {
                 let http = t.http.clone();
+                let session_id = app.session_id.clone();
                 let tx = fetch_tx.clone();
                 tokio::spawn(async move {
                     match http.list_sessions().await {
                         Ok(resp) => {
-                            let _ = tx.send(FetchResult::SessionList(resp)).await;
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id,
+                                    payload: FetchPayload::SessionList(resp),
+                                })
+                                .await;
                         }
                         Err(e) => {
                             tracing::warn!("list sessions failed: {e}");
@@ -256,23 +292,36 @@ pub async fn execute_intent(
         }
         AppIntent::CompactSession => {
             if let Some(t) = transport {
-                match t.http.compact_session(&app.session_id).await {
-                    Ok(resp) => {
-                        app.show_toast(Toast::info(
-                            format!(
-                                "Compact done: {} → {} tokens",
-                                resp.original_tokens, resp.compressed_tokens
-                            ),
-                            std::time::Duration::from_secs(3),
-                        ));
+                let http = t.http.clone();
+                let session_id = app.session_id.clone();
+                let tx = fetch_tx.clone();
+                let sid = session_id.clone();
+                tokio::spawn(async move {
+                    match http.compact_session(&session_id).await {
+                        Ok(resp) => {
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id: sid,
+                                    payload: FetchPayload::CompactDone {
+                                        original: resp.original_tokens,
+                                        compressed: resp.compressed_tokens,
+                                    },
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id,
+                                    payload: FetchPayload::Toast {
+                                        message: format!("Compact failed: {e}"),
+                                        is_error: true,
+                                    },
+                                })
+                                .await;
+                        }
                     }
-                    Err(e) => {
-                        app.show_toast(Toast::error(
-                            format!("Compact failed: {e}"),
-                            std::time::Duration::from_secs(3),
-                        ));
-                    }
-                }
+                });
             }
         }
         AppIntent::InterruptSession => {
@@ -339,6 +388,7 @@ pub async fn execute_intent(
                 let http = t.http.clone();
                 let session_id = app.session_id.clone();
                 let tx = fetch_tx.clone();
+                let sid = session_id.clone();
                 tokio::spawn(async move {
                     match http.get_session_info(&session_id).await {
                         Ok(info) => {
@@ -352,10 +402,23 @@ pub async fn execute_intent(
                                 text.push_str("\n--- System Prompt ---\n");
                                 text.push_str(&info.system_prompt);
                             }
-                            let _ = tx.send(FetchResult::ContextInfo(text)).await;
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id: sid,
+                                    payload: FetchPayload::ContextInfo(text),
+                                })
+                                .await;
                         }
                         Err(e) => {
-                            tracing::warn!("context info failed: {e}");
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id,
+                                    payload: FetchPayload::Toast {
+                                        message: format!("Context info failed: {e}"),
+                                        is_error: true,
+                                    },
+                                })
+                                .await;
                         }
                     }
                 });
@@ -366,6 +429,7 @@ pub async fn execute_intent(
                 let http = t.http.clone();
                 let session_id = app.session_id.clone();
                 let tx = fetch_tx.clone();
+                let sid = session_id.clone();
                 tokio::spawn(async move {
                     match http.get_session_info(&session_id).await {
                         Ok(info) => {
@@ -374,10 +438,23 @@ pub async fn execute_intent(
                             } else {
                                 info.skills_info
                             };
-                            let _ = tx.send(FetchResult::SkillsInfo(text)).await;
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id: sid,
+                                    payload: FetchPayload::SkillsInfo(text),
+                                })
+                                .await;
                         }
                         Err(e) => {
-                            tracing::warn!("skills info failed: {e}");
+                            let _ = tx
+                                .send(FetchResult {
+                                    session_id,
+                                    payload: FetchPayload::Toast {
+                                        message: format!("Skills info failed: {e}"),
+                                        is_error: true,
+                                    },
+                                })
+                                .await;
                         }
                     }
                 });

@@ -8,6 +8,7 @@ Route handler 只做：参数验证 → 调 Runtime → 构造 HTTP 响应。
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -362,7 +363,11 @@ async def compact_session(
 ) -> CompactResponse:
     server = _get_server(request)
     try:
-        original, compressed = await server.runtime.compact_session(body.session_id)
+        original, compressed = await asyncio.wait_for(
+            server.runtime.compact_session(body.session_id), timeout=60.0
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="compact timed out (60s)")
     except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
     except RuntimeError as e:

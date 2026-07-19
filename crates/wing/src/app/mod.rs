@@ -477,10 +477,22 @@ impl App {
     /// Apply a background fetch result to app state.
     ///
     /// Called from the main event loop when a spawned fetch task completes.
+    /// Discards stale results whose `session_id` doesn't match the current session.
     fn handle_fetch_result(&mut self, result: crate::app::intent::FetchResult) {
-        use crate::app::intent::FetchResult;
-        match result {
-            FetchResult::Info(info) => {
+        use crate::app::intent::FetchPayload;
+
+        // Session guard: discard results from a previous session.
+        if result.session_id != self.session_id {
+            tracing::debug!(
+                stale = %result.session_id,
+                current = %self.session_id,
+                "discarding stale fetch result"
+            );
+            return;
+        }
+
+        match result.payload {
+            FetchPayload::Info(info) => {
                 self.status.model = info.model;
                 self.status.total_tokens = info.total_tokens;
                 self.status.context_window_tokens = info.context_window_tokens;
@@ -490,7 +502,7 @@ impl App {
                 self.status.session_name = info.session_name;
                 tracing::info!(model = %self.status.model, "session info received");
             }
-            FetchResult::Commands(resp) => {
+            FetchPayload::Commands(resp) => {
                 self.popup.cache.commands = resp
                     .commands
                     .into_iter()
@@ -503,7 +515,7 @@ impl App {
                     .collect();
                 self.update_popup();
             }
-            FetchResult::Models(resp) => {
+            FetchPayload::Models(resp) => {
                 self.popup.cache.models = resp
                     .models
                     .into_iter()
@@ -511,7 +523,7 @@ impl App {
                     .collect();
                 self.update_popup();
             }
-            FetchResult::Branches(resp) => {
+            FetchPayload::Branches(resp) => {
                 self.popup.cache.branches = resp
                     .targets
                     .into_iter()
@@ -523,7 +535,7 @@ impl App {
                     .collect();
                 self.update_popup();
             }
-            FetchResult::Agents(resp) => {
+            FetchPayload::Agents(resp) => {
                 self.popup.cache.agents = resp
                     .agents
                     .into_iter()
@@ -531,7 +543,7 @@ impl App {
                     .collect();
                 self.update_popup();
             }
-            FetchResult::SessionList(resp) => {
+            FetchPayload::SessionList(resp) => {
                 self.popup.cache.sessions = resp
                     .sessions
                     .iter()
@@ -539,13 +551,29 @@ impl App {
                     .collect();
                 self.update_popup();
             }
-            FetchResult::ContextInfo(text) => {
+            FetchPayload::ContextInfo(text) => {
                 self.chat
                     .push(crate::ui::chat_view::ChatCell::SystemMessage(text));
             }
-            FetchResult::SkillsInfo(text) => {
+            FetchPayload::SkillsInfo(text) => {
                 self.chat
                     .push(crate::ui::chat_view::ChatCell::SystemMessage(text));
+            }
+            FetchPayload::CompactDone {
+                original,
+                compressed,
+            } => {
+                self.show_toast(Toast::info(
+                    format!("Compact done: {original} → {compressed} tokens"),
+                    std::time::Duration::from_secs(3),
+                ));
+            }
+            FetchPayload::Toast { message, is_error } => {
+                if is_error {
+                    self.show_toast(Toast::error(message, std::time::Duration::from_secs(3)));
+                } else {
+                    self.show_toast(Toast::info(message, std::time::Duration::from_secs(3)));
+                }
             }
         }
     }
@@ -1280,7 +1308,8 @@ pub async fn run_app(
     let mut reconnect_at = std::time::Instant::now();
 
     // Channel for background fetch results.
-    let (fetch_tx, mut fetch_rx) = tokio::sync::mpsc::channel::<crate::app::intent::FetchResult>(32);
+    let (fetch_tx, mut fetch_rx) =
+        tokio::sync::mpsc::channel::<crate::app::intent::FetchResult>(32);
 
     // Request system info on startup via HTTP intents.
     app.push_intent(AppIntent::FetchInfo);
