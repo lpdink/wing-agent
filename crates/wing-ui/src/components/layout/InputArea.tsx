@@ -11,7 +11,8 @@ import { useSession } from '@/hooks/useSession'
  * - Enter sends (calls onSend)
  * - Shift+Enter inserts newline
  * - Auto-grows up to 160px
- * - Disabled while sending (with interrupt option)
+ * - Always enabled: no session → auto-create on send; isSending → steer message
+ * - Send and Stop are independent actions (both visible during agent execution)
  */
 export function InputArea() {
   const [value, setValue] = useState('')
@@ -19,7 +20,7 @@ export function InputArea() {
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const isSending = useSessionStore((s) => s.isSending)
-  const { sendMessage, interruptSession } = useSession()
+  const { sendMessage, createAndSend, interruptSession } = useSession()
 
   const autoResize = useCallback(() => {
     const el = textareaRef.current
@@ -29,16 +30,24 @@ export function InputArea() {
   }, [])
 
   const handleSend = useCallback(() => {
-    if (!value.trim() || !activeSessionId || isSending) return
-    sendMessage(value.trim())
+    const text = value.trim()
+    if (!text) return
+
+    if (!activeSessionId) {
+      // Auto-create session and send first message
+      createAndSend(text)
+    } else {
+      // Normal send (also works as steer when isSending)
+      sendMessage(text)
+    }
+
     setValue('')
-    // Reset height after clearing
     requestAnimationFrame(() => {
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto'
       }
     })
-  }, [value, activeSessionId, isSending, sendMessage])
+  }, [value, activeSessionId, sendMessage, createAndSend])
 
   const handleChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
     setValue(e.target.value)
@@ -52,8 +61,6 @@ export function InputArea() {
     }
   }
 
-  const disabled = !activeSessionId || isSending
-
   return (
     <div className="shrink-0 border-t border-border bg-bg-surface px-4 py-3">
       <div className="mx-auto max-w-3xl">
@@ -63,27 +70,33 @@ export function InputArea() {
             value={value}
             onChange={handleChange}
             onKeyDown={handleKeyDown}
-            placeholder={
-              activeSessionId ? 'Send a message…' : 'Select or create a session to start'
-            }
+            placeholder={activeSessionId ? 'Send a message…' : 'Type to start a new session…'}
             rows={1}
-            disabled={disabled}
-            className="block w-full resize-none bg-transparent px-4 py-3 text-text placeholder-text-muted outline-none disabled:cursor-not-allowed disabled:opacity-50"
+            className="block w-full resize-none bg-transparent px-4 py-3 text-text placeholder-text-muted outline-none"
           />
 
           {/* Bottom toolbar */}
           <div className="flex items-center justify-between px-3 pb-2">
             {/* Left — attachment (placeholder) */}
-            <button
-              disabled={!activeSessionId}
-              className="rounded-md p-1 text-text-muted transition-colors hover:bg-bg-elevated hover:text-text disabled:opacity-50"
-            >
+            <button className="rounded-md p-1 text-text-muted transition-colors hover:bg-bg-elevated hover:text-text">
               <Paperclip className="h-4 w-4" />
             </button>
 
-            {/* Right — shortcut hint + send/interrupt */}
-            <div className="flex items-center gap-3">
-              {isSending ? (
+            {/* Right — shortcut hint + send/stop */}
+            <div className="flex items-center gap-2">
+              <span className="hidden text-[11px] text-text-muted sm:inline">
+                <kbd className="rounded border border-border bg-bg-elevated px-1 py-px font-mono text-[10px]">
+                  Enter
+                </kbd>{' '}
+                to send ·{' '}
+                <kbd className="rounded border border-border bg-bg-elevated px-1 py-px font-mono text-[10px]">
+                  Shift+Enter
+                </kbd>{' '}
+                for new line
+              </span>
+
+              {/* Stop button — visible during agent execution */}
+              {isSending && (
                 <button
                   onClick={() => interruptSession()}
                   className="flex items-center gap-1.5 rounded-lg bg-error px-3 py-1.5 text-sm text-text-inverse transition-colors hover:bg-error/90"
@@ -91,28 +104,16 @@ export function InputArea() {
                   <Square className="h-3.5 w-3.5" />
                   <span>Stop</span>
                 </button>
-              ) : (
-                <>
-                  <span className="hidden text-[11px] text-text-muted sm:inline">
-                    <kbd className="rounded border border-border bg-bg-elevated px-1 py-px font-mono text-[10px]">
-                      Enter
-                    </kbd>{' '}
-                    to send ·{' '}
-                    <kbd className="rounded border border-border bg-bg-elevated px-1 py-px font-mono text-[10px]">
-                      Shift+Enter
-                    </kbd>{' '}
-                    for new line
-                  </span>
-
-                  <button
-                    onClick={handleSend}
-                    disabled={disabled || !value.trim()}
-                    className="rounded-lg bg-accent p-1.5 text-text-inverse transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-30"
-                  >
-                    <SendHorizontal className="h-4 w-4" />
-                  </button>
-                </>
               )}
+
+              {/* Send button — always visible */}
+              <button
+                onClick={handleSend}
+                disabled={!value.trim()}
+                className="rounded-lg bg-accent p-1.5 text-text-inverse transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                <SendHorizontal className="h-4 w-4" />
+              </button>
             </div>
           </div>
         </div>

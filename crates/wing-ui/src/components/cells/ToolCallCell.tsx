@@ -3,11 +3,13 @@
 // Shows tool icon + name + argument summary in header.
 // Expands to show full JSON arguments.
 // If a tool_call_result follows, merges it into the same card.
+// Mutation tools (Write/Edit) render as compact one-liners (diff is the focus).
 
 import { useState } from 'react'
-import { ChevronDown, ChevronRight, Wrench, CheckCircle2, XCircle } from 'lucide-react'
+import { ChevronDown, ChevronRight, Wrench, CheckCircle2, XCircle, FilePen } from 'lucide-react'
 import type { CellProps } from '@/core/cell-types'
 import type { ToolCallChatItem, ToolResultChatItem } from '@/stores/sessionStore'
+import { getToolCategory } from '@/stores/sessionStore'
 
 interface ToolCallCellProps extends CellProps<ToolCallChatItem> {
   /** Optional tool result (if next message is tool_call_result with same toolCallId) */
@@ -32,7 +34,26 @@ export function ToolCallCell({ data, result }: ToolCallCellProps) {
   const [expanded, setExpanded] = useState(false)
   const summary = getArgsSummary(data.toolArgs)
   const hasResult = result != null
+  const isMutation = getToolCategory(data.toolName) === 'mutation'
 
+  // Mutation tools: compact one-liner (DiffCell is the real content)
+  if (isMutation) {
+    return (
+      <div className="flex items-center gap-2 py-0.5 text-xs text-text-muted">
+        <FilePen className="h-3.5 w-3.5 shrink-0 text-accent" />
+        <span className="font-medium">{data.toolName}</span>
+        {summary && <span className="truncate text-text-dim">{summary}</span>}
+        {hasResult &&
+          (result.success ? (
+            <CheckCircle2 className="h-3 w-3 shrink-0 text-success" />
+          ) : (
+            <XCircle className="h-3 w-3 shrink-0 text-error" />
+          ))}
+      </div>
+    )
+  }
+
+  // Execution tools: full card
   return (
     <div className="flex justify-start">
       <div className="max-w-[85%] rounded-lg border border-border bg-bg-tool px-3 py-2.5 shadow-sm">

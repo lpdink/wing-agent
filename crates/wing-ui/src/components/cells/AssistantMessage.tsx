@@ -4,8 +4,11 @@
 // Code blocks are rendered via the CodeBlock component (Shiki highlighting).
 // Shows a streaming cursor while text events are still arriving.
 // Hover action bar (fork/rewind/copy) via MessageActions.
+//
+// NOTE: This component is memo'd. Do NOT call useSession() inside —
+// fork/rewind use store.getState() directly to keep references stable.
 
-import { memo } from 'react'
+import { memo, useCallback } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Bot } from 'lucide-react'
@@ -13,7 +16,9 @@ import { CodeBlock } from './CodeBlock'
 import { MessageActions } from './MessageActions'
 import type { CellProps } from '@/core/cell-types'
 import type { AssistantChatItem } from '@/stores/sessionStore'
-import { useSession } from '@/hooks/useSession'
+import { useGatewayClient } from '@/hooks/useGatewayClient'
+import { useSessionStore } from '@/stores/sessionStore'
+import { useUiStore } from '@/stores/uiStore'
 
 /** Custom renderers for react-markdown. */
 const components: Components = {
@@ -105,7 +110,48 @@ const components: Components = {
 export const AssistantMessageCell = memo(function AssistantMessageCell({
   data,
 }: CellProps<AssistantChatItem>) {
-  const { forkSession, rewindSession } = useSession()
+  const { client } = useGatewayClient()
+  const addToast = useUiStore((s) => s.addToast)
+  const addError = useUiStore((s) => s.addError)
+
+  // Stable callbacks using getState() — no hook subscription, memo stays effective
+  const handleFork = useCallback(
+    async (targetUuid: string) => {
+      const store = useSessionStore.getState()
+      const sessionId = store.activeSessionId
+      if (!sessionId) return
+      try {
+        const resp = await client.forkSession(sessionId, targetUuid)
+        addToast('Session forked', 'success')
+        // Reload sessions and select the forked one
+        const listResp = await client.listSessions()
+        store.setSessions(listResp.sessions)
+        store.setActiveSessionId(resp.session_id)
+        store.clearMessages()
+        store.resetSessionState()
+        if (client.clientId) await client.subscribe(resp.session_id)
+      } catch (e) {
+        addError(`Fork failed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    },
+    [client, addToast, addError],
+  )
+
+  const handleRewind = useCallback(
+    async (targetUuid: string) => {
+      const store = useSessionStore.getState()
+      const sessionId = store.activeSessionId
+      if (!sessionId) return
+      try {
+        await client.rewindSession(sessionId, targetUuid)
+        addToast('Session rewound', 'info')
+        // Messages will be updated via sync_session event
+      } catch (e) {
+        addError(`Rewind failed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    },
+    [client, addToast, addError],
+  )
 
   return (
     <div className="group flex justify-start">
@@ -130,8 +176,8 @@ export const AssistantMessageCell = memo(function AssistantMessageCell({
             <MessageActions
               messageUuid={data.messageUuid}
               content={data.content}
-              onFork={forkSession}
-              onRewind={rewindSession}
+              onFork={handleFork}
+              onRewind={handleRewind}
             />
           )}
         </div>

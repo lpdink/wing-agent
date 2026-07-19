@@ -4,11 +4,12 @@ import { useSessionStore } from '@/stores/sessionStore'
 
 /**
  * StatusBar — bottom bar showing connection status, model info,
- * token usage, and turn count.
+ * token usage (real-time from llm_call_metrics), and session config.
  */
 export function StatusBar() {
   const status = useConnectionStore((s) => s.status)
-  const sessionInfo = useSessionStore((s) => s.sessionInfo)
+  const metrics = useSessionStore((s) => s.metrics)
+  const sessionConfig = useSessionStore((s) => s.sessionConfig)
 
   const statusConfig = {
     connected: { icon: Wifi, color: 'bg-success', text: 'Connected' },
@@ -18,6 +19,9 @@ export function StatusBar() {
   }
 
   const { icon: StatusIcon, color, text } = statusConfig[status]
+
+  // Model: prefer metrics (real-time), fallback to sessionConfig
+  const model = metrics?.model ?? sessionConfig.model
 
   return (
     <div className="flex h-7 shrink-0 items-center justify-between border-t border-border bg-bg-surface px-3 text-xs">
@@ -30,24 +34,30 @@ export function StatusBar() {
         <span>{text}</span>
       </div>
 
-      {/* Center — model + token progress */}
+      {/* Center — model + token metrics */}
       <div className="flex items-center gap-3 text-text-muted">
-        {sessionInfo && (
-          <>
-            <span>{sessionInfo.model}</span>
-            <span className="flex items-center gap-1.5">
-              <Zap className="h-3 w-3" />
-              <span>
-                {sessionInfo.total_tokens.toLocaleString()} /{' '}
-                {(sessionInfo.context_window_tokens / 1000).toFixed(0)}k
-              </span>
+        {model && <span>{model}</span>}
+        {metrics && (
+          <span className="flex items-center gap-1.5">
+            <Zap className="h-3 w-3" />
+            <span>
+              {(metrics.promptTokens / 1000).toFixed(1)}k →{' '}
+              {(metrics.completionTokens / 1000).toFixed(1)}k
+              {metrics.cachedTokens > 0 && ` | ${metrics.cachedTokens.toLocaleString()} cached`}
+              {` | ${metrics.tokensPerSec.toFixed(0)} tok/s`}
             </span>
-          </>
+          </span>
+        )}
+        {sessionConfig.thinking && (
+          <span className="rounded bg-bg-elevated px-1 py-0.5 text-[10px]">thinking</span>
+        )}
+        {sessionConfig.yolo && (
+          <span className="rounded bg-bg-elevated px-1 py-0.5 text-[10px]">yolo</span>
         )}
       </div>
 
-      {/* Right — session name */}
-      <div className="max-w-48 truncate text-text-muted">{sessionInfo?.session_name ?? ''}</div>
+      {/* Right — reasoning effort */}
+      <div className="max-w-48 truncate text-text-muted">{sessionConfig.reasoningEffort ?? ''}</div>
     </div>
   )
 }

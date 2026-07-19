@@ -1,6 +1,7 @@
 // src/components/ui/ContextMenu.tsx — Right-click context menu built on @floating-ui/react.
 //
 // Renders a positioned menu at the cursor location on contextmenu event.
+// Uses a virtual reference point (cursor coordinates) for positioning.
 
 import { useState, type ReactNode } from 'react'
 import {
@@ -22,7 +23,6 @@ interface ContextMenuProps {
 
 export function ContextMenu({ children, menu }: ContextMenuProps) {
   const [open, setOpen] = useState(false)
-  const [position, setPosition] = useState({ x: 0, y: 0 })
 
   const { refs, floatingStyles, context } = useFloating({
     open,
@@ -36,19 +36,22 @@ export function ContextMenu({ children, menu }: ContextMenuProps) {
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault()
-    setPosition({ x: e.clientX, y: e.clientY })
+    // Set a virtual reference element at cursor position
+    refs.setReference({
+      getBoundingClientRect: () => new DOMRect(e.clientX, e.clientY, 0, 0),
+    })
     setOpen(true)
   }
 
   return (
     <>
-      <div ref={refs.setReference} onContextMenu={handleContextMenu} className="contents">
+      <div onContextMenu={handleContextMenu} className="inline-flex min-w-0 flex-1">
         {children}
       </div>
       {open && (
         <div
           ref={refs.setFloating}
-          style={{ ...floatingStyles, left: position.x, top: position.y, position: 'fixed' }}
+          style={floatingStyles}
           {...getFloatingProps()}
           className="z-50 min-w-[140px] rounded-lg border border-border bg-bg-elevated py-1 shadow-lg"
         >

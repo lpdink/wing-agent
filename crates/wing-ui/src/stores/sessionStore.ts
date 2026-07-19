@@ -69,15 +69,20 @@ export interface DiffChatItem {
   newText: string
 }
 
-export interface MetricsChatItem {
-  type: 'metrics'
+/** A single tool entry within a ToolGroup. */
+export interface ToolGroupEntry {
+  name: string
+  args: Record<string, unknown>
+  result?: string
+  success?: boolean
+}
+
+/** Grouped consecutive read-only tool calls (compressed summary). */
+export interface ToolGroupChatItem {
+  type: 'tool_group'
   id: string
-  model: string
-  promptTokens: number
-  completionTokens: number
-  cachedTokens: number
-  firstChunkRtMs: number
-  tokensPerSec: number
+  tools: ToolGroupEntry[]
+  summary: string
 }
 
 export interface TurnStartedChatItem {
@@ -107,11 +112,61 @@ export type ChatItem =
   | ErrorChatItem
   | AskChatItem
   | DiffChatItem
-  | MetricsChatItem
+  | ToolGroupChatItem
+
+// ============================================================
+// Tool classification for layered rendering
+// ============================================================
+
+/** Read-only / exploration tools — compressed into group summaries. */
+export const READONLY_TOOLS = new Set(['Read', 'Glob', 'Grep', 'LS', 'WebSearch'])
+
+/** Mutation tools — rendered with diff focus. */
+export const MUTATION_TOOLS = new Set(['Write', 'Edit'])
+
+/** Execution tools — standard ToolCallCell rendering. */
+export const EXECUTION_TOOLS = new Set(['Bash'])
+
+export function getToolCategory(name: string): 'readonly' | 'mutation' | 'execution' {
+  if (READONLY_TOOLS.has(name)) return 'readonly'
+  if (MUTATION_TOOLS.has(name)) return 'mutation'
+  return 'execution'
+}
+
+/** Build a human-readable summary for a group of read-only tools. */
+export function buildToolGroupSummary(tools: ToolGroupEntry[]): string {
+  const counts = new Map<string, number>()
+  for (const t of tools) {
+    counts.set(t.name, (counts.get(t.name) ?? 0) + 1)
+  }
+  const parts: string[] = []
+  for (const [name, count] of counts) {
+    const label = name === 'Read' ? 'file' : name === 'Grep' ? 'pattern' : 'item'
+    parts.push(`${name} ${count} ${label}${count > 1 ? 's' : ''}`)
+  }
+  return parts.join(', ')
+}
 
 // ============================================================
 // Store
 // ============================================================
+
+/** Real-time LLM metrics (updated by llm_call_metrics events). */
+export interface LLMetrics {
+  model: string
+  promptTokens: number
+  completionTokens: number
+  cachedTokens: number
+  tokensPerSec: number
+}
+
+/** Session config state (from sync_session / session_state_changed). */
+export interface SessionConfig {
+  model: string | null
+  thinking: boolean | null
+  reasoningEffort: string | null
+  yolo: boolean | null
+}
 
 interface SessionState {
   sessions: SessionInfo[]
@@ -120,6 +175,8 @@ interface SessionState {
   isLoading: boolean
   isSending: boolean
   sessionInfo: SessionInfoResponse | null
+  metrics: LLMetrics | null
+  sessionConfig: SessionConfig
 }
 
 interface SessionActions {
@@ -143,6 +200,21 @@ interface SessionActions {
   setSessionInfo: (info: SessionInfoResponse | null) => void
   /** Merge partial fields into sessionInfo (for incremental state sync). */
   patchSessionInfo: (patch: Partial<SessionInfoResponse>) => void
+  /** Update real-time LLM metrics (from llm_call_metrics events). */
+  setMetrics: (metrics: LLMetrics | null) => void
+  /** Update session config state (from sync_session / session_state_changed). */
+  setSessionConfig: (config: Partial<SessionConfig>) => void
+  /** Reset metrics and config (on session switch). */
+  resetSessionState: () => void
+  /** Append a readonly tool call to the current group (or start a new group). */
+  appendReadonlyTool: (name: string, args: Record<string, unknown>, toolCallId: string) => void
+  /** Attach a result to a readonly tool in the current group. */
+  appendReadonlyToolResult: (
+    name: string,
+    toolCallId: string,
+    result: string,
+    success: boolean,
+  ) => void
 }
 
 export type SessionStore = SessionState & SessionActions
@@ -155,6 +227,8 @@ export const useSessionStore = create<SessionStore>((set) => ({
   isLoading: false,
   isSending: false,
   sessionInfo: null,
+  metrics: null,
+  sessionConfig: { model: null, thinking: null, reasoningEffort: null, yolo: null },
 
   // Actions
   setSessions: (sessions) => set({ sessions }),
@@ -253,4 +327,57 @@ export const useSessionStore = create<SessionStore>((set) => ({
     set((state) => ({
       sessionInfo: state.sessionInfo ? { ...state.sessionInfo, ...patch } : state.sessionInfo,
     })),
+
+  setMetrics: (metrics) => set({ metrics }),
+
+  setSessionConfig: (config) =>
+    set((state) => ({ sessionConfig: { ...state.sessionConfig, ...config } })),
+
+  resetSessionState: () =>
+    set({
+      metrics: null,
+      sessionConfig: { model: null, thinking: null, reasoningEffort: null, yolo: null },
+    }),
+
+  appendReadonlyTool: (name, args, toolCallId) =>
+    set((state) => {
+      const msgs = [...state.messages]
+      const last = msgs[msgs.length - 1]
+      if (last && last.type === 'tool_group') {
+        // Extend existing group
+        const group = { ...last, tools: [...last.tools, { name, args }] }
+        group.summary = buildToolGroupSummary(group.tools)
+        msgs[msgs.length - 1] = group
+      } else {
+        // Start new group
+        msgs.push({
+          type: 'tool_group',
+          id: `tg-${toolCallId}`,
+          tools: [{ name, args }],
+          summary: buildToolGroupSummary([{ name, args }]),
+        })
+      }
+      return { messages: msgs }
+    }),
+
+  appendReadonlyToolResult: (name, toolCallId, result, success) =>
+    set((state) => {
+      const msgs = [...state.messages]
+      // Find the last tool_group and attach result
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].type === 'tool_group') {
+          const group = msgs[i] as ToolGroupChatItem
+          const newTools = [...group.tools]
+          for (let j = newTools.length - 1; j >= 0; j--) {
+            if (newTools[j].name === name && newTools[j].result === undefined) {
+              newTools[j] = { ...newTools[j], result, success }
+              msgs[i] = { ...group, tools: newTools }
+              return { messages: msgs }
+            }
+          }
+          break
+        }
+      }
+      return { messages: msgs }
+    }),
 }))

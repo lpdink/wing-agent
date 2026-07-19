@@ -206,6 +206,24 @@ class TestSubscription:
         assert sync_events[0].session_id == session.session_id
 
     @pytest.mark.asyncio
+    async def test_sync_session_event_carries_config_fields(self, runtime: Any):
+        """SyncSessionEvent 携带 model/thinking/reasoning_effort/yolo 字段。"""
+        session = runtime.create_session()
+        received: list = []
+        event_bus.subscribe(lambda e: received.append(e))
+
+        runtime.subscribe("client-1", session.session_id)
+
+        sync_events = [e for e in received if e.type == "sync_session"]
+        assert len(sync_events) == 1
+        evt = sync_events[0]
+        # 新字段应反映 session agent 的当前配置
+        assert evt.model == session.agent.model
+        assert evt.thinking == session.agent.model_provider.thinking
+        assert evt.reasoning_effort == session.agent.model_provider.reasoning_effort
+        assert evt.yolo == session.agent.yolo
+
+    @pytest.mark.asyncio
     async def test_subscribe_nonexistent_session_raises(self, runtime: Any):
         """subscribe 不存在的 session 抛出 LookupError。"""
         with pytest.raises(LookupError, match="Session not found"):

@@ -288,6 +288,10 @@ class WingRuntime:
                 messages=[msg.model_dump() for msg in cm.get_context_window()],
                 agent=None,
                 draft=draft,
+                model=session.agent.model,
+                thinking=session.agent.model_provider.thinking,
+                reasoning_effort=session.agent.model_provider.reasoning_effort,
+                yolo=session.agent.yolo,
             )
         )
 
@@ -471,6 +475,10 @@ class WingRuntime:
                 agent=session.to_agent_info(),
                 name=session.session_name,
                 draft=draft,
+                model=session.agent.model,
+                thinking=session.agent.model_provider.thinking,
+                reasoning_effort=session.agent.model_provider.reasoning_effort,
+                yolo=session.agent.yolo,
                 target=client_target,
             )
         )

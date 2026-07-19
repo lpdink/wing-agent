@@ -3,13 +3,20 @@
 // Wraps GatewayClient methods with store updates.
 
 import { useCallback } from 'react'
-import type { CreateSessionRequest, UpdateSessionRequest } from '@wing-agent/sdk'
+import type { CreateSessionRequest, UpdateSessionRequest, SessionInfo } from '@wing-agent/sdk'
 import { useGatewayClient } from './useGatewayClient'
-import { useSessionStore, type ChatItem } from '@/stores/sessionStore'
+import {
+  useSessionStore,
+  type ChatItem,
+  type ToolGroupEntry,
+  getToolCategory,
+  buildToolGroupSummary,
+} from '@/stores/sessionStore'
+import { useConnectionStore } from '@/stores/connectionStore'
 import { useUiStore } from '@/stores/uiStore'
 
 /** Convert API message format to ChatItem[]. */
-function apiMessagesToChatItems(messages: Record<string, unknown>[]): ChatItem[] {
+export function apiMessagesToChatItems(messages: Record<string, unknown>[]): ChatItem[] {
   const items: ChatItem[] = []
   // Build toolCallId → toolName mapping for tool results
   const toolCallNames = new Map<string, string>()
@@ -83,7 +90,51 @@ function apiMessagesToChatItems(messages: Record<string, unknown>[]): ChatItem[]
     // Skip 'system' role messages
   }
 
-  return items
+  return groupReadonlyTools(items)
+}
+
+/**
+ * Post-process: merge consecutive readonly tool_call + tool_call_result
+ * items into ToolGroupChatItem for compressed rendering.
+ */
+function groupReadonlyTools(items: ChatItem[]): ChatItem[] {
+  const result: ChatItem[] = []
+  let currentGroup: ToolGroupEntry[] = []
+  let groupId = ''
+
+  const flushGroup = () => {
+    if (currentGroup.length > 0) {
+      result.push({
+        type: 'tool_group',
+        id: groupId,
+        tools: currentGroup,
+        summary: buildToolGroupSummary(currentGroup),
+      })
+      currentGroup = []
+    }
+  }
+
+  for (const item of items) {
+    if (item.type === 'tool_call' && getToolCategory(item.toolName) === 'readonly') {
+      if (currentGroup.length === 0) groupId = `tg-${item.id}`
+      currentGroup.push({ name: item.toolName, args: item.toolArgs })
+    } else if (item.type === 'tool_call_result' && getToolCategory(item.toolName) === 'readonly') {
+      // Attach result to the last matching tool in the group
+      for (let i = currentGroup.length - 1; i >= 0; i--) {
+        if (currentGroup[i].name === item.toolName && currentGroup[i].result === undefined) {
+          currentGroup[i].result = item.result
+          currentGroup[i].success = item.success
+          break
+        }
+      }
+    } else {
+      flushGroup()
+      result.push(item)
+    }
+  }
+  flushGroup()
+
+  return result
 }
 
 export function useSession() {
@@ -117,27 +168,28 @@ export function useSession() {
       store.setActiveSessionId(sessionId)
       store.setLoading(true)
       store.clearMessages()
+      store.resetSessionState()
 
       try {
-        // Resume session first (loads it into Gateway memory)
+        // Resume session (loads into Gateway memory, triggers sync_session via WS)
         await client.resumeSession(sessionId)
 
-        // Subscribe to events (must happen before getSession to receive sync_session)
+        // Subscribe to events — sync_session handler will populate messages + config
         if (client.clientId) {
           await client.subscribe(sessionId)
         }
 
-        // Load message history
-        const sessionData = await client.getSession(sessionId)
-        const items = apiMessagesToChatItems(sessionData.messages)
-        store.setMessages(items)
-
-        // Try to get session info (model, tokens, etc.)
-        try {
-          const info = await client.getSessionInfo(sessionId)
-          store.setSessionInfo(info)
-        } catch {
-          // Session info is optional
+        // Fallback: if WS is not connected, load via HTTP
+        const wsConnected = useConnectionStore.getState().status === 'connected'
+        if (!wsConnected) {
+          const sessionData = await client.getSession(sessionId)
+          store.setMessages(apiMessagesToChatItems(sessionData.messages))
+          try {
+            const info = await client.getSessionInfo(sessionId)
+            store.setSessionInfo(info)
+          } catch {
+            // Session info is optional
+          }
         }
       } catch (e) {
         addError(`Failed to load session: ${e instanceof Error ? e.message : String(e)}`)
@@ -152,14 +204,66 @@ export function useSession() {
     async (options?: CreateSessionRequest) => {
       try {
         const resp = await client.createSession(options)
-        // Reload sessions and select the new one
-        await loadSessions()
+        const store = useSessionStore.getState()
+
+        // Optimistic sidebar insert
+        const newSession: SessionInfo = {
+          id: resp.session_id,
+          name: null,
+          created_at: new Date().toISOString(),
+          template_name: resp.template_name ?? null,
+          workspace: resp.workspace ?? null,
+          last_interaction: null,
+        }
+        store.setSessions([newSession, ...store.sessions])
+
         await selectSession(resp.session_id)
       } catch (e) {
         addError(`Failed to create session: ${e instanceof Error ? e.message : String(e)}`)
       }
     },
-    [client, loadSessions, selectSession, addError],
+    [client, selectSession, addError],
+  )
+
+  /** Create a new session and immediately send the first message. */
+  const createAndSend = useCallback(
+    async (message: string) => {
+      try {
+        const resp = await client.createSession()
+        const store = useSessionStore.getState()
+        const sessionId = resp.session_id
+
+        // Optimistic sidebar insert
+        const newSession: SessionInfo = {
+          id: sessionId,
+          name: null,
+          created_at: new Date().toISOString(),
+          template_name: resp.template_name ?? null,
+          workspace: resp.workspace ?? null,
+          last_interaction: null,
+        }
+        store.setSessions([newSession, ...store.sessions])
+
+        // Activate and subscribe
+        store.setActiveSessionId(sessionId)
+        store.clearMessages()
+        store.resetSessionState()
+
+        if (client.clientId) {
+          await client.subscribe(sessionId)
+        }
+
+        // Show user message and send
+        store.appendMessage({ type: 'user', id: crypto.randomUUID(), content: message })
+        store.setSending(true)
+
+        await client.sendMessage(sessionId, message)
+      } catch (e) {
+        useSessionStore.getState().setSending(false)
+        addError(`Failed to start session: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    },
+    [client, addError],
   )
 
   const sendMessage = useCallback(
@@ -252,13 +356,14 @@ export function useSession() {
   }, [client, addError, addToast])
 
   const updateSession = useCallback(
-    async (req: Omit<UpdateSessionRequest, 'session_id'>) => {
-      const sessionId = useSessionStore.getState().activeSessionId
-      if (!sessionId) return
+    async (req: Omit<UpdateSessionRequest, 'session_id'>, sessionId?: string) => {
+      const targetId = sessionId ?? useSessionStore.getState().activeSessionId
+      if (!targetId) return
 
       try {
-        await client.updateSession({ session_id: sessionId, ...req })
-        // Optimistically patch local sessionInfo
+        await client.updateSession({ session_id: targetId, ...req })
+        // Optimistically patch local sessionInfo (only if updating active session)
+        const store = useSessionStore.getState()
         const patch: Record<string, unknown> = {}
         if (req.model != null) patch.model = req.model
         if (req.thinking != null) patch.thinking = req.thinking
@@ -266,16 +371,18 @@ export function useSession() {
         if (req.yolo != null) patch.yolo = req.yolo
         if (req.title != null) {
           const newTitle = req.title
-          patch.session_name = newTitle
-          // Also update the sessions list name
-          const store = useSessionStore.getState()
+          // Update the sessions list name
           const sessions = store.sessions.map((s) =>
-            s.id === sessionId ? { ...s, name: newTitle } : s,
+            s.id === targetId ? { ...s, name: newTitle } : s,
           )
           store.setSessions(sessions)
+          // Only patch sessionInfo if this is the active session
+          if (targetId === store.activeSessionId) {
+            patch.session_name = newTitle
+          }
         }
-        if (Object.keys(patch).length > 0) {
-          useSessionStore.getState().patchSessionInfo(patch)
+        if (Object.keys(patch).length > 0 && targetId === store.activeSessionId) {
+          store.patchSessionInfo(patch)
         }
       } catch (e) {
         addError(`Update failed: ${e instanceof Error ? e.message : String(e)}`)
@@ -288,6 +395,7 @@ export function useSession() {
     loadSessions,
     selectSession,
     createSession,
+    createAndSend,
     sendMessage,
     interruptSession,
     forkSession,

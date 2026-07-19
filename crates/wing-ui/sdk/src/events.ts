@@ -140,6 +140,10 @@ export interface SyncSessionEvent extends WingEventBase {
   agent: AgentInfo | null
   name: string | null
   draft: string | null
+  model: string | null
+  thinking: boolean | null
+  reasoning_effort: string | null
+  yolo: boolean | null
 }
 
 export interface SessionStateChangedEvent extends WingEventBase {

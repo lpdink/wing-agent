@@ -116,16 +116,7 @@ export function Sidebar({ open }: SidebarProps) {
     if (renamingId) {
       const trimmed = renameValue.trim()
       if (trimmed) {
-        // Temporarily set active session for updateSession to work
-        const store = useSessionStore.getState()
-        const prevActive = store.activeSessionId
-        if (prevActive !== renamingId) {
-          store.setActiveSessionId(renamingId)
-        }
-        updateSession({ title: trimmed })
-        if (prevActive !== renamingId) {
-          store.setActiveSessionId(prevActive)
-        }
+        updateSession({ title: trimmed }, renamingId)
       }
     }
     setRenamingId(null)

@@ -39,6 +39,11 @@ class SyncSessionEvent(WingEvent):
     agent: AgentInfo | None = None
     name: str | None = None
     draft: str | None = None
+    # Session 配置状态（供前端一次性恢复 UI）
+    model: str | None = None
+    thinking: bool | None = None
+    reasoning_effort: str | None = None
+    yolo: bool | None = None
 
 
 class SessionStateChangedEvent(WingEvent):

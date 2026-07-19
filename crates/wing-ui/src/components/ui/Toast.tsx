@@ -2,7 +2,7 @@
 //
 // Consumes uiStore.errors and uiStore.toasts, displays them as auto-dismissing toasts.
 
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { X, AlertCircle, WifiOff, Info, CheckCircle2, AlertTriangle } from 'lucide-react'
 import { useUiStore, type UiToast } from '@/stores/uiStore'
 
@@ -62,10 +62,14 @@ function toastIcon(level: UiToast['level'], message: string) {
 }
 
 function ToastItem({ toast, onDismiss }: { toast: UiToast; onDismiss: () => void }) {
+  // Hold onDismiss in a ref so the timer is not reset on re-render
+  const dismissRef = useRef(onDismiss)
+  dismissRef.current = onDismiss
+
   useEffect(() => {
-    const timer = setTimeout(onDismiss, AUTO_DISMISS_MS)
+    const timer = setTimeout(() => dismissRef.current(), AUTO_DISMISS_MS)
     return () => clearTimeout(timer)
-  }, [onDismiss])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const style = toastStyle(toast.level)
   const Icon = toastIcon(toast.level, toast.message)

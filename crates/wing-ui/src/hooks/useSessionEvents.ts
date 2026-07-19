@@ -6,9 +6,11 @@
 import { useEffect } from 'react'
 import type { WebSocketClient } from '@wing-agent/sdk'
 import { useSessionStore } from '@/stores/sessionStore'
+import { getToolCategory } from '@/stores/sessionStore'
 import { useConnectionStore } from '@/stores/connectionStore'
 import { useUiStore } from '@/stores/uiStore'
 import { useGatewayClient } from './useGatewayClient'
+import { apiMessagesToChatItems } from './useSession'
 
 export function useSessionEvents(wsClient: WebSocketClient): void {
   const addError = useUiStore((s) => s.addError)
@@ -33,13 +35,18 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
       tool_call_id: string
     }) => {
       if (event.session_id !== getActiveSessionId()) return
-      useSessionStore.getState().appendMessage({
-        type: 'tool_call',
-        id: crypto.randomUUID(),
-        toolName: event.tool_name,
-        toolArgs: event.tool_args,
-        toolCallId: event.tool_call_id,
-      })
+      const store = useSessionStore.getState()
+      if (getToolCategory(event.tool_name) === 'readonly') {
+        store.appendReadonlyTool(event.tool_name, event.tool_args, event.tool_call_id)
+      } else {
+        store.appendMessage({
+          type: 'tool_call',
+          id: crypto.randomUUID(),
+          toolName: event.tool_name,
+          toolArgs: event.tool_args,
+          toolCallId: event.tool_call_id,
+        })
+      }
     }
 
     // ── Tool call result events ───────────────────────────────
@@ -51,14 +58,24 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
       tool_success: boolean
     }) => {
       if (event.session_id !== getActiveSessionId()) return
-      useSessionStore.getState().appendMessage({
-        type: 'tool_call_result',
-        id: crypto.randomUUID(),
-        toolName: event.tool_name,
-        toolCallId: event.tool_call_id,
-        result: event.tool_result,
-        success: event.tool_success,
-      })
+      const store = useSessionStore.getState()
+      if (getToolCategory(event.tool_name) === 'readonly') {
+        store.appendReadonlyToolResult(
+          event.tool_name,
+          event.tool_call_id,
+          event.tool_result,
+          event.tool_success,
+        )
+      } else {
+        store.appendMessage({
+          type: 'tool_call_result',
+          id: crypto.randomUUID(),
+          toolName: event.tool_name,
+          toolCallId: event.tool_call_id,
+          result: event.tool_result,
+          success: event.tool_success,
+        })
+      }
     }
 
     // ── Reasoning events (streaming — append to last, don't create new) ──
@@ -178,7 +195,7 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
       })
     }
 
-    // ── LLM call metrics events ───────────────────────────────
+    // ── LLM call metrics events → update StatusBar metrics ────
     const handleLLMCallMetrics = (event: {
       session_id: string | null
       model: string
@@ -189,22 +206,44 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
       tokens_per_sec: number
     }) => {
       if (event.session_id !== getActiveSessionId()) return
-      useSessionStore.getState().appendMessage({
-        type: 'metrics',
-        id: crypto.randomUUID(),
+      useSessionStore.getState().setMetrics({
         model: event.model,
         promptTokens: event.prompt_tokens,
         completionTokens: event.completion_tokens,
         cachedTokens: event.cached_tokens,
-        firstChunkRtMs: event.first_chunk_rt_ms,
         tokensPerSec: event.tokens_per_sec,
       })
     }
 
     // ── Sync session events (full context replacement) ────────
-    // When session is loaded/forked, Gateway sends the complete message history.
-    // We skip this since useSession.selectSession() already loads messages via HTTP.
-    // If we ever need to handle live sync, we'd replace messages here.
+    // Single source of truth for session switch: update messages + config in one shot.
+    const handleSyncSession = (event: {
+      session_id: string | null
+      messages: Record<string, unknown>[]
+      model: string | null
+      thinking: boolean | null
+      reasoning_effort: string | null
+      yolo: boolean | null
+      name: string | null
+    }) => {
+      if (event.session_id !== getActiveSessionId()) return
+      const store = useSessionStore.getState()
+      store.setMessages(apiMessagesToChatItems(event.messages))
+      store.setSessionConfig({
+        model: event.model,
+        thinking: event.thinking,
+        reasoningEffort: event.reasoning_effort,
+        yolo: event.yolo,
+      })
+      store.setMetrics(null)
+      // Update session name in sidebar if provided
+      if (event.name) {
+        const sessions = store.sessions.map((s) =>
+          s.id === event.session_id ? { ...s, name: event.name } : s,
+        )
+        store.setSessions(sessions)
+      }
+    }
 
     // ── Compact done events (context compaction finished) ─────
     const handleCompactDone = (event: {
@@ -232,6 +271,7 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
     wsClient.on('diff_content', handleDiffContent)
     wsClient.on('llm_call_metrics', handleLLMCallMetrics)
     wsClient.on('compact_done', handleCompactDone)
+    wsClient.on('sync_session', handleSyncSession)
 
     return () => {
       wsClient.off('text', handleText)
@@ -248,6 +288,7 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
       wsClient.off('diff_content', handleDiffContent)
       wsClient.off('llm_call_metrics', handleLLMCallMetrics)
       wsClient.off('compact_done', handleCompactDone)
+      wsClient.off('sync_session', handleSyncSession)
     }
   }, [wsClient, addError, addToast, client])
 
