@@ -37,7 +37,12 @@ function apiMessagesToChatItems(messages: Record<string, unknown>[]): ChatItem[]
       // 1. Reasoning content (thinking)
       const reasoning = msg.reasoning_content as string | undefined
       if (reasoning) {
-        items.push({ type: 'reasoning', id: `${uuid}-reasoning`, content: reasoning })
+        items.push({
+          type: 'reasoning',
+          id: `${uuid}-reasoning`,
+          content: reasoning,
+          messageUuid: uuid,
+        })
       }
       // 2. Tool calls from this assistant message
       const toolCalls = msg.tool_calls as
@@ -61,7 +66,7 @@ function apiMessagesToChatItems(messages: Record<string, unknown>[]): ChatItem[]
       }
       // 3. Main assistant text (final response)
       if (content) {
-        items.push({ type: 'assistant', id: uuid, content })
+        items.push({ type: 'assistant', id: uuid, content, messageUuid: uuid })
       }
     } else if (role === 'tool') {
       // Tool result — resolve tool name from mapping

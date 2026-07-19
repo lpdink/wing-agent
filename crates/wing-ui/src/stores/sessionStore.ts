@@ -19,6 +19,8 @@ export interface AssistantChatItem {
   content: string
   /** True if still streaming (more text events expected) */
   streaming?: boolean
+  /** Backend message uuid (stamped when the LLM turn completes) */
+  messageUuid?: string
 }
 
 export interface ToolCallChatItem {
@@ -44,6 +46,8 @@ export interface ReasoningChatItem {
   content: string
   /** True if still streaming (more reasoning events expected) */
   streaming?: boolean
+  /** Backend message uuid (stamped when the LLM turn completes) */
+  messageUuid?: string
 }
 
 export interface AskChatItem {
@@ -131,6 +135,8 @@ interface SessionActions {
   appendToLastReasoning: (text: string, id: string) => void
   /** Mark the last reasoning message as no longer streaming. */
   finalizeReasoningStreaming: () => void
+  /** Seal the current LLM turn: finalize streaming blocks and stamp the backend uuid. */
+  sealCurrentTurn: (uuid: string) => void
   clearMessages: () => void
   setLoading: (loading: boolean) => void
   setSending: (sending: boolean) => void
@@ -208,6 +214,26 @@ export const useSessionStore = create<SessionStore>((set) => ({
         if (msgs[i].type === 'reasoning' && (msgs[i] as ReasoningChatItem).streaming) {
           msgs[i] = { ...(msgs[i] as ReasoningChatItem), streaming: false }
           return { messages: msgs }
+        }
+      }
+      return { messages: msgs }
+    }),
+
+  sealCurrentTurn: (uuid) =>
+    set((state) => {
+      const msgs = [...state.messages]
+      // Seal the last streaming assistant block
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].type === 'assistant' && (msgs[i] as AssistantChatItem).streaming) {
+          msgs[i] = { ...(msgs[i] as AssistantChatItem), streaming: false, messageUuid: uuid }
+          break
+        }
+      }
+      // Seal the last streaming reasoning block
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].type === 'reasoning' && (msgs[i] as ReasoningChatItem).streaming) {
+          msgs[i] = { ...(msgs[i] as ReasoningChatItem), streaming: false, messageUuid: uuid }
+          break
         }
       }
       return { messages: msgs }

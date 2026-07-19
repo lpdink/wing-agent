@@ -67,6 +67,12 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
       useSessionStore.getState().appendToLastReasoning(event.content, crypto.randomUUID())
     }
 
+    // ── Assistant turn events (LLM turn boundary — seal streaming blocks) ──
+    const handleAssistantTurn = (event: { session_id: string | null; uuid: string }) => {
+      if (event.session_id !== getActiveSessionId()) return
+      useSessionStore.getState().sealCurrentTurn(event.uuid)
+    }
+
     // ── Turn started events ───────────────────────────────────
     const handleTurnStarted = (event: { session_id: string | null }) => {
       if (event.session_id !== getActiveSessionId()) return
@@ -198,6 +204,7 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
     wsClient.on('tool_call', handleToolCall)
     wsClient.on('tool_call_result', handleToolCallResult)
     wsClient.on('reasoning', handleReasoning)
+    wsClient.on('assistant_turn', handleAssistantTurn)
     wsClient.on('turn_started', handleTurnStarted)
     wsClient.on('done', handleDone)
     wsClient.on('interrupted', handleInterrupted)
@@ -213,6 +220,7 @@ export function useSessionEvents(wsClient: WebSocketClient): void {
       wsClient.off('tool_call', handleToolCall)
       wsClient.off('tool_call_result', handleToolCallResult)
       wsClient.off('reasoning', handleReasoning)
+      wsClient.off('assistant_turn', handleAssistantTurn)
       wsClient.off('turn_started', handleTurnStarted)
       wsClient.off('done', handleDone)
       wsClient.off('interrupted', handleInterrupted)

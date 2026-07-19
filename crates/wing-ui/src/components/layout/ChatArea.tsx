@@ -1,5 +1,5 @@
 import { useCallback, useMemo } from 'react'
-import { Loader2 } from 'lucide-react'
+import { Loader2, ArrowDown } from 'lucide-react'
 import { WelcomeView } from './WelcomeView'
 import { registry } from '@/core/cell-registry'
 import { TypingIndicator } from '@/components/cells/TypingIndicator'
@@ -16,6 +16,7 @@ import '@/components/cells'
  *
  * Shows WelcomeView when no session active or no messages.
  * Renders messages via Cell Registry for extensibility.
+ * Smart auto-scroll: follows bottom unless user scrolls up.
  */
 export function ChatArea() {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
@@ -24,7 +25,7 @@ export function ChatArea() {
   const isSending = useSessionStore((s) => s.isSending)
   const { sendMessage } = useSession()
 
-  const scrollRef = useAutoScroll<HTMLDivElement>({
+  const { scrollRef, isFollowing, scrollToBottom } = useAutoScroll<HTMLDivElement>({
     deps: [messages],
   })
 
@@ -88,35 +89,48 @@ export function ChatArea() {
   }
 
   return (
-    <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-3xl">
-        <div className="flex flex-col gap-4 px-4 py-6">
-          {messages.map((item) => {
-            // Skip tool_call_results that are merged into ToolCallCells
-            if (item.type === 'tool_call_result' && mergedResultIds.has(item.id)) {
-              return null
-            }
+    <div className="relative min-h-0 flex-1">
+      <div ref={scrollRef} className="h-full overflow-y-auto">
+        <div className="mx-auto max-w-3xl">
+          <div className="flex flex-col gap-4 px-4 py-6">
+            {messages.map((item) => {
+              // Skip tool_call_results that are merged into ToolCallCells
+              if (item.type === 'tool_call_result' && mergedResultIds.has(item.id)) {
+                return null
+              }
 
-            // Special handling for tool_call: merge with result
-            if (item.type === 'tool_call') {
-              const result = toolResultMap.get(item.toolCallId) ?? null
-              return <ToolCallCell key={item.id} data={item} result={result} />
-            }
+              // Special handling for tool_call: merge with result
+              if (item.type === 'tool_call') {
+                const result = toolResultMap.get(item.toolCallId) ?? null
+                return <ToolCallCell key={item.id} data={item} result={result} />
+              }
 
-            // Special handling for ask: inject onAnswer callback
-            if (item.type === 'ask') {
-              return <AskCell key={item.id} data={item} onAnswer={handleAskAnswer} />
-            }
+              // Special handling for ask: inject onAnswer callback
+              if (item.type === 'ask') {
+                return <AskCell key={item.id} data={item} onAnswer={handleAskAnswer} />
+              }
 
-            // Standard cell rendering via registry
-            const Cell = registry.resolve(item.type)
-            return <Cell key={item.id} data={item} />
-          })}
+              // Standard cell rendering via registry
+              const Cell = registry.resolve(item.type)
+              return <Cell key={item.id} data={item} />
+            })}
 
-          {/* Typing indicator while agent is processing */}
-          {showTyping && <TypingIndicator />}
+            {/* Typing indicator while agent is processing */}
+            {showTyping && <TypingIndicator />}
+          </div>
         </div>
       </div>
+
+      {/* Floating "scroll to bottom" button — visible when not following */}
+      {!isFollowing && (
+        <button
+          onClick={scrollToBottom}
+          className="absolute bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-border bg-bg-elevated px-3 py-1.5 text-xs text-text-muted shadow-lg transition-colors hover:bg-bg-hover hover:text-text"
+        >
+          <ArrowDown className="h-3.5 w-3.5" />
+          Latest
+        </button>
+      )}
     </div>
   )
 }

@@ -17,5 +17,5 @@
       "@wing-agent/sdk": ["./sdk/src"]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "electron/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
 }
