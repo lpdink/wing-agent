@@ -40,7 +40,9 @@ impl GatewayClient {
     ///
     /// `base_url` 通常是 `"http://127.0.0.1:32523"`。
     pub fn new(base_url: impl Into<String>) -> Result<Self, ApiClientError> {
-        let http = Client::builder().build()?;
+        let http = Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()?;
         Ok(Self {
             http,
             base_url: base_url.into(),

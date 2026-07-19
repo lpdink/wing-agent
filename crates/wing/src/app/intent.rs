@@ -3,6 +3,35 @@
 //! All operations from App to the external world (gateway, clipboard) are
 //! expressed as `AppIntent` variants. The runner drains pending intents after
 //! each draw and executes them in order.
+//!
+//! Fetch-type intents (read-only HTTP queries) are executed as background
+//! tasks to avoid blocking the main event loop. Results are delivered back
+//! via [`FetchResult`] through an mpsc channel.
+
+use wing_api_client::models::{
+    AgentsResponse, BranchesResponse, CommandsResponse, ModelsResponse, SessionInfoResponse,
+    SessionListResponse,
+};
+
+/// Result of a background fetch intent, delivered via mpsc channel.
+pub enum FetchResult {
+    /// Session runtime info (model, tokens, thinking, yolo).
+    Info(Box<SessionInfoResponse>),
+    /// Available commands list.
+    Commands(CommandsResponse),
+    /// Available model list.
+    Models(ModelsResponse),
+    /// Branch targets for fork/rewind.
+    Branches(BranchesResponse),
+    /// Available agent templates.
+    Agents(AgentsResponse),
+    /// Session list.
+    SessionList(SessionListResponse),
+    /// Context stats display text.
+    ContextInfo(String),
+    /// Skills info display text.
+    SkillsInfo(String),
+}
 
 /// A side-effect intent produced by the App state machine.
 ///

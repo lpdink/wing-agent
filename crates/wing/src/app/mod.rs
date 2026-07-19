@@ -474,6 +474,82 @@ impl App {
         }
     }
 
+    /// Apply a background fetch result to app state.
+    ///
+    /// Called from the main event loop when a spawned fetch task completes.
+    fn handle_fetch_result(&mut self, result: crate::app::intent::FetchResult) {
+        use crate::app::intent::FetchResult;
+        match result {
+            FetchResult::Info(info) => {
+                self.status.model = info.model;
+                self.status.total_tokens = info.total_tokens;
+                self.status.context_window_tokens = info.context_window_tokens;
+                self.status.thinking = info.thinking;
+                self.status.reasoning_effort = info.reasoning_effort;
+                self.status.yolo = info.yolo;
+                self.status.session_name = info.session_name;
+                tracing::info!(model = %self.status.model, "session info received");
+            }
+            FetchResult::Commands(resp) => {
+                self.popup.cache.commands = resp
+                    .commands
+                    .into_iter()
+                    .map(|c| crate::protocol::CommandInfo {
+                        name: c.name,
+                        aliases: c.aliases,
+                        description: c.description,
+                        params: c.params,
+                    })
+                    .collect();
+                self.update_popup();
+            }
+            FetchResult::Models(resp) => {
+                self.popup.cache.models = resp
+                    .models
+                    .into_iter()
+                    .map(|m| (m, String::new()))
+                    .collect();
+                self.update_popup();
+            }
+            FetchResult::Branches(resp) => {
+                self.popup.cache.branches = resp
+                    .targets
+                    .into_iter()
+                    .map(|t| {
+                        let preview =
+                            crate::ui::cells::tool_call::truncate_by_chars(&t.content, 80);
+                        (t.uuid, preview)
+                    })
+                    .collect();
+                self.update_popup();
+            }
+            FetchResult::Agents(resp) => {
+                self.popup.cache.agents = resp
+                    .agents
+                    .into_iter()
+                    .map(|a| (a, String::new()))
+                    .collect();
+                self.update_popup();
+            }
+            FetchResult::SessionList(resp) => {
+                self.popup.cache.sessions = resp
+                    .sessions
+                    .iter()
+                    .map(|s| (s.id.clone(), s.name.clone().unwrap_or_default()))
+                    .collect();
+                self.update_popup();
+            }
+            FetchResult::ContextInfo(text) => {
+                self.chat
+                    .push(crate::ui::chat_view::ChatCell::SystemMessage(text));
+            }
+            FetchResult::SkillsInfo(text) => {
+                self.chat
+                    .push(crate::ui::chat_view::ChatCell::SystemMessage(text));
+            }
+        }
+    }
+
     /// Handle a terminal key event.
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         // Ctrl+C: double-press quit.
@@ -1203,6 +1279,9 @@ pub async fn run_app(
     let mut reconnect_attempt: u32 = 0;
     let mut reconnect_at = std::time::Instant::now();
 
+    // Channel for background fetch results.
+    let (fetch_tx, mut fetch_rx) = tokio::sync::mpsc::channel::<crate::app::intent::FetchResult>(32);
+
     // Request system info on startup via HTTP intents.
     app.push_intent(AppIntent::FetchInfo);
     app.push_intent(AppIntent::FetchCommands);
@@ -1221,7 +1300,7 @@ pub async fn run_app(
 
         // Execute all pending intents produced during the last event cycle.
         for intent in app.drain_intents() {
-            runner::execute_intent(&mut app, &transport, terminal, intent).await;
+            runner::execute_intent(&mut app, &transport, terminal, intent, &fetch_tx).await;
         }
 
         if app.should_quit {
@@ -1355,6 +1434,10 @@ pub async fn run_app(
                 }
             } => {
                 // Toast expired — next draw() will lazy-cleanup.
+            }
+            // Background fetch results (non-blocking HTTP queries).
+            Some(result) = fetch_rx.recv() => {
+                app.handle_fetch_result(result);
             }
             else => {
                 break;
