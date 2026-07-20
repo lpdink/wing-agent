@@ -349,11 +349,16 @@ mod tests {
     }
 
     #[test]
-    fn table_box_drawing() {
+    fn table_borderless() {
         let md = "| A | B |\n|---|---|\n| 1 | 2 |";
         let lines = render_text(md);
         let text = join_lines(&lines);
-        assert!(text.contains("│"), "should use box-drawing │, got: {text}");
+        // Borderless style uses a heavy header rule, not vertical bars.
+        assert!(
+            text.contains("━"),
+            "should use heavy header rule, got: {text}"
+        );
+        assert!(!text.contains("│"), "should be borderless, got: {text}");
         assert!(text.contains("A"), "got: {text}");
         assert!(text.contains("1"), "got: {text}");
     }
@@ -364,8 +369,8 @@ mod tests {
         let lines = render_text(md);
         let text = join_lines(&lines);
         assert!(
-            text.contains("├") || text.contains("─"),
-            "should have separator, got: {text}"
+            text.contains("━"),
+            "should have heavy header separator, got: {text}"
         );
     }
 
@@ -435,7 +440,9 @@ mod tests {
             .map(|l| l.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("│"), "got: {text}");
+        // Borderless style: heavy header rule, no vertical bars.
+        assert!(text.contains("━"), "got: {text}");
+        assert!(!text.contains("│"), "should be borderless, got: {text}");
         assert!(text.contains("A"), "got: {text}");
     }
 
@@ -452,18 +459,16 @@ mod tests {
             .map(|s| s.as_str())
             .filter(|l| !l.is_empty())
             .collect();
+        // Layout: header, heavy rule, row0, light rule, row1.
         assert!(
-            non_blank.len() >= 4,
-            "expected header + separator + 2 rows, got: {non_blank:?}"
+            non_blank.len() >= 5,
+            "expected header + rule + row + rule + row, got: {non_blank:?}"
         );
         assert!(non_blank[0].contains("File") && non_blank[0].contains("Function"));
-        assert!(
-            non_blank[1].contains("├") && non_blank[1].contains("┼"),
-            "separator: {}",
-            non_blank[1]
-        );
+        assert!(non_blank[1].contains("━"), "header rule: {}", non_blank[1]);
         assert!(non_blank[2].contains("src/main.rs"));
-        assert!(non_blank[3].contains("src/lib.rs"));
+        assert!(non_blank[3].contains("─"), "body rule: {}", non_blank[3]);
+        assert!(non_blank[4].contains("src/lib.rs"));
     }
 
     #[test]

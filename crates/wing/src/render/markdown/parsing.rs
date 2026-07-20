@@ -210,9 +210,12 @@ pub(crate) fn handle_start_tag(tag: &Tag<'_>, ctx: &mut MarkdownContext<'_>) {
                 buffer: String::new(),
             });
         }
-        Tag::Table(_) => {
+        Tag::Table(alignments) => {
             ctx.flush_paragraph();
-            *ctx.active_table = Some(TableBuffer::default());
+            *ctx.active_table = Some(TableBuffer {
+                alignments: alignments.clone(),
+                ..Default::default()
+            });
         }
         Tag::TableRow => {
             if let Some(table) = ctx.active_table.as_mut() {
