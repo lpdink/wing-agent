@@ -90,6 +90,15 @@ pub struct AppConfig {
     pub colors: ColorsConfig,
     pub layout: LayoutConfig,
     pub rendering: RenderingConfig,
+    pub goal: GoalConfig,
+}
+
+/// Goal orchestration configuration.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GoalConfig {
+    /// Override the checker agent's system prompt.
+    pub checker_system_prompt: Option<String>,
 }
 
 impl AppConfig {

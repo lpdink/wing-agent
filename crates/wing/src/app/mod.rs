@@ -1,6 +1,7 @@
 //! Application state machine and main event loop.
 
 pub mod constants;
+pub mod goal;
 pub mod intent;
 pub mod popup_state;
 pub mod render_context;
@@ -55,6 +56,8 @@ use title::AttentionKind;
 use self::constants::CLEAR_COMMAND;
 use self::constants::COPY_COMMAND;
 use self::constants::FORK_COMMAND;
+use self::constants::GOAL_COMMAND;
+use self::constants::GOAL_EXIT_COMMAND;
 use self::constants::NEW_COMMAND;
 use self::constants::SESSION_COMMAND;
 use self::constants::SS_COMMAND;
@@ -110,6 +113,8 @@ pub struct App {
     palette: ThemePalette,
     /// Whether the gateway connection is active.
     connected: bool,
+    /// Goal orchestration state (None = normal mode).
+    pub(crate) goal: Option<goal::GoalState>,
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +177,7 @@ impl App {
             config,
             palette,
             connected: true,
+            goal: None,
         }
     }
 
@@ -233,6 +239,14 @@ impl App {
         if self.try_frontend_command(text) {
             return true;
         }
+        // Goal mode: route user input through Goal state machine.
+        if let Some(goal) = self.goal.as_mut() {
+            self.chat.push(ChatCell::UserMessage(text.to_string()));
+            let actions = goal.on_user_input(text);
+            self.execute_goal_actions(actions);
+            self.turn.usage = TurnUsage::default();
+            return true;
+        }
         self.chat.push(ChatCell::UserMessage(text.to_string()));
         self.push_intent(AppIntent::SendMessage {
             content: text.to_string(),
@@ -251,6 +265,94 @@ impl App {
         std::mem::take(&mut self.intents)
     }
 
+    /// Execute GoalActions produced by the GoalState state machine.
+    ///
+    /// Translates pure logic actions into AppIntents (side-effects) and
+    /// chat mutations.
+    pub(crate) fn execute_goal_actions(&mut self, actions: Vec<goal::GoalAction>) {
+        use goal::GoalAction;
+        for action in actions {
+            match action {
+                GoalAction::SendToExecutor(content) => {
+                    let session_id = self.session_id.clone();
+                    self.push_intent(AppIntent::GoalSend {
+                        session_id,
+                        content,
+                    });
+                }
+                GoalAction::SendToChecker(content) => {
+                    if let Some(goal) = &self.goal
+                        && let Some(checker_id) = &goal.checker_session_id
+                    {
+                        self.push_intent(AppIntent::GoalSend {
+                            session_id: checker_id.clone(),
+                            content,
+                        });
+                    }
+                }
+                GoalAction::CreateChecker { system_prompt } => {
+                    self.push_intent(AppIntent::GoalCreateChecker { system_prompt });
+                }
+                GoalAction::PushSeparator { role, round } => {
+                    self.chat.push(ChatCell::GoalSeparator { role, round });
+                }
+                GoalAction::GoalComplete { reason } => {
+                    // Reset turn state now — the checker's follow-up Done event
+                    // will be filtered out after goal exit, so finish_turn() would
+                    // otherwise never run (working indicator + title stuck).
+                    self.finish_turn();
+                    self.push_intent(AppIntent::SetTitle(title::title_idle().to_string()));
+                    let msg = if reason.is_empty() {
+                        "Goal completed ✓".to_string()
+                    } else {
+                        format!("Goal completed ✓ — {reason}")
+                    };
+                    self.show_toast(Toast::info(msg, std::time::Duration::from_secs(5)));
+                    self.notify_unfocused("Goal completed".into(), AttentionKind::Done);
+                }
+                GoalAction::Toast(msg) => {
+                    self.show_toast(Toast::warning(msg, std::time::Duration::from_secs(4)));
+                }
+                GoalAction::ExitGoal => {
+                    self.exit_goal();
+                }
+            }
+        }
+    }
+
+    /// Exit Goal mode: unsubscribe checker, clear state.
+    fn exit_goal(&mut self) {
+        if let Some(goal) = self.goal.take() {
+            if let Some(checker_id) = goal.checker_session_id {
+                self.push_intent(AppIntent::GoalUnsubscribe {
+                    session_id: checker_id,
+                });
+            }
+            self.status.goal_active = false;
+        }
+    }
+
+    /// Check if a session_id belongs to the active Goal (checker session).
+    fn is_goal_session(&self, session_id: &str) -> bool {
+        self.goal
+            .as_ref()
+            .and_then(|g| g.checker_session_id.as_deref())
+            .is_some_and(|id| id == session_id)
+    }
+
+    /// Determine which Goal role a session_id corresponds to.
+    fn goal_role_for_session(&self, session_id: Option<&str>) -> Option<goal::GoalRole> {
+        let goal = self.goal.as_ref()?;
+        let sid = session_id?;
+        if sid == self.session_id {
+            Some(goal::GoalRole::Executor)
+        } else if goal.checker_session_id.as_deref() == Some(sid) {
+            Some(goal::GoalRole::Checker)
+        } else {
+            None
+        }
+    }
+
     /// Update the gateway connection state.
     pub fn set_connected(&mut self, connected: bool) {
         self.connected = connected;
@@ -265,6 +367,16 @@ impl App {
         // /copy accepts optional index from SubCommand popup completion.
         if text == COPY_COMMAND || text.starts_with("/copy ") {
             self.handle_copy_command(text);
+            return true;
+        }
+        // /goal <prompt> — activate Goal orchestration.
+        if text == GOAL_COMMAND || text.starts_with("/goal ") {
+            self.handle_goal_command(text);
+            return true;
+        }
+        // /goal-exit — exit Goal mode.
+        if text == GOAL_EXIT_COMMAND {
+            self.handle_goal_exit_command();
             return true;
         }
         match text {
@@ -436,6 +548,58 @@ impl App {
         };
 
         self.push_intent(AppIntent::CopyToClipboard(content));
+    }
+
+    /// `/goal <prompt>` — activate Goal orchestration mode.
+    fn handle_goal_command(&mut self, text: &str) {
+        if self.goal.is_some() {
+            self.show_toast(Toast::warning(
+                "Goal already active, use /goal-exit first",
+                std::time::Duration::from_secs(3),
+            ));
+            return;
+        }
+
+        let prompt = text.strip_prefix("/goal ").map(|s| s.trim()).unwrap_or("");
+        if prompt.is_empty() {
+            self.show_toast(Toast::warning(
+                "Usage: /goal <prompt>",
+                std::time::Duration::from_secs(3),
+            ));
+            return;
+        }
+
+        let checker_prompt = self
+            .config
+            .goal
+            .checker_system_prompt
+            .clone()
+            .unwrap_or_else(|| goal::DEFAULT_CHECKER_SYSTEM_PROMPT.to_string());
+
+        let (state, actions) =
+            goal::GoalState::new(self.session_id.clone(), prompt.to_string(), checker_prompt);
+        self.goal = Some(state);
+        self.status.goal_active = true;
+        // Show the goal prompt as a user message in chat.
+        self.chat
+            .push(ChatCell::UserMessage(format!("/goal {prompt}")));
+        self.execute_goal_actions(actions);
+    }
+
+    /// `/goal-exit` — exit Goal orchestration mode.
+    fn handle_goal_exit_command(&mut self) {
+        if self.goal.is_none() {
+            self.show_toast(Toast::warning(
+                "Goal not active",
+                std::time::Duration::from_secs(2),
+            ));
+            return;
+        }
+        self.exit_goal();
+        self.show_toast(Toast::info(
+            "Goal mode exited",
+            std::time::Duration::from_secs(2),
+        ));
     }
 
     /// Refresh `/copy` candidate cache from current chat state.
@@ -616,7 +780,22 @@ impl App {
                     let choice = ask.current().map(|s| s.to_string());
                     if let Some(choice) = choice {
                         self.clear_ask_selection();
-                        self.push_intent(AppIntent::SendMessage { content: choice });
+                        // Goal mode: send to active session, not app.session_id.
+                        if let Some(goal) = &self.goal
+                            && let Some(role) = goal.active_role()
+                        {
+                            let actions = match role {
+                                goal::GoalRole::Executor => {
+                                    vec![goal::GoalAction::SendToExecutor(choice)]
+                                }
+                                goal::GoalRole::Checker => {
+                                    vec![goal::GoalAction::SendToChecker(choice)]
+                                }
+                            };
+                            self.execute_goal_actions(actions);
+                        } else {
+                            self.push_intent(AppIntent::SendMessage { content: choice });
+                        }
                     }
                 }
                 _ => {} // ignore other keys while selection is active
@@ -633,7 +812,25 @@ impl App {
             if !self.input.text().is_empty() {
                 self.input.clear();
             } else {
-                self.push_intent(AppIntent::InterruptSession);
+                // Goal mode: interrupt only the active session.
+                if let Some(goal) = &self.goal
+                    && let Some(role) = goal.active_role()
+                {
+                    match role {
+                        goal::GoalRole::Executor => {
+                            self.push_intent(AppIntent::InterruptSession);
+                        }
+                        goal::GoalRole::Checker => {
+                            if let Some(checker_id) = &goal.checker_session_id {
+                                self.push_intent(AppIntent::GoalInterrupt {
+                                    session_id: checker_id.clone(),
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    self.push_intent(AppIntent::InterruptSession);
+                }
                 self.show_toast(Toast::info(
                     "Interrupting agent...",
                     std::time::Duration::from_secs(2),
@@ -822,9 +1019,12 @@ impl App {
         //
         // Session lifecycle events (SyncSession) are always accepted —
         // their session_id may intentionally differ from the current one.
+        //
+        // Goal mode: also accept events from the checker session.
         if !matches!(event, WingEvent::SyncSession { .. })
             && let Some(event_sid) = event.session_id()
             && event_sid != self.session_id
+            && !self.is_goal_session(event_sid)
         {
             tracing::debug!(
                 event_type = %event.event_type(),
@@ -868,9 +1068,17 @@ impl App {
                     self.push_intent(AppIntent::SetTitle(title::title_idle().to_string()));
                 }
             }
-            WingEvent::Interrupted { .. } => {
+            WingEvent::Interrupted { meta, .. } => {
                 self.finish_turn();
                 self.clear_ask_selection();
+                // Goal mode: record which role was interrupted.
+                let goal_role = self.goal_role_for_session(meta.session_id.as_deref());
+                if let Some(goal) = self.goal.as_mut()
+                    && let Some(role) = goal_role
+                {
+                    let actions = goal.on_interrupted(role);
+                    self.execute_goal_actions(actions);
+                }
                 self.show_toast(Toast::info(
                     "Agent interrupted",
                     std::time::Duration::from_secs(2),
@@ -1059,6 +1267,14 @@ impl App {
                 agent,
                 ..
             } => {
+                // Goal mode: ignore SyncSession from checker session.
+                // We subscribe to checker for events only — it must NOT
+                // replace the current session or clear the chat.
+                if self.goal.is_some() && self.is_goal_session(&session_id) {
+                    tracing::debug!(session_id, "ignoring checker SyncSession in goal mode");
+                    return;
+                }
+
                 // Update session_id to the new session (Phase 3c).
                 self.session_id = session_id;
 
@@ -1100,6 +1316,7 @@ impl App {
                 num_turns,
                 result,
                 usage,
+                meta,
                 ..
             } => {
                 // Extract total tokens from usage JSON.
@@ -1126,6 +1343,16 @@ impl App {
                     num_turns,
                     "turn result received"
                 );
+
+                // Goal mode: drive the orchestration loop.
+                let goal_role = self.goal_role_for_session(meta.session_id.as_deref());
+                if let Some(goal) = self.goal.as_mut()
+                    && let Some(role) = goal_role
+                {
+                    let actions = goal.on_turn_result(role, result.clone());
+                    self.execute_goal_actions(actions);
+                }
+
                 // Notify user if terminal is not focused.
                 let msg = crate::util::osc9::fmt_turn_result(
                     result.as_deref(),
@@ -1191,6 +1418,10 @@ impl App {
         let palette = self.palette;
         let layout = self.config.layout.clone();
         let thinking_mode = self.config.rendering.thinking;
+        let goal_role_label: Option<String> = self.goal.as_ref().and_then(|g| {
+            g.active_role()
+                .map(|r| format!("{} {}", r.label(), r.working_verb()))
+        });
 
         terminal.draw(|frame| {
             let area = frame.area();
@@ -1254,7 +1485,8 @@ impl App {
                             &self.turn.spinner,
                             started_at,
                             &palette,
-                        ),
+                        )
+                        .with_role_label(goal_role_label.as_deref()),
                         chunks[idx],
                     );
                 }

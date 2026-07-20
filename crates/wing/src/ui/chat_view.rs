@@ -54,6 +54,11 @@ pub enum ChatCell {
     Ask(AskMessage),
     /// ReAct loop separator.
     Separator,
+    /// Goal orchestration separator (marks agent role + round).
+    GoalSeparator {
+        role: crate::app::goal::GoalRole,
+        round: u32,
+    },
 }
 
 impl ChatCell {
@@ -120,6 +125,21 @@ impl ChatCell {
                     sep,
                     Style::default().fg(palette.dim),
                 ))]
+            }
+            Self::GoalSeparator { role, round } => {
+                use unicode_width::UnicodeWidthStr;
+                let label = format!(" {} {} · Round {} ", role.icon(), role.label(), round);
+                // Display width (not char count) — emoji like 🔍 are 2 columns.
+                let label_w = UnicodeWidthStr::width(label.as_str());
+                let dash_total = (width as usize).saturating_sub(label_w);
+                let left = dash_total / 2;
+                let right = dash_total - left;
+                let text = format!("{}{}{}", "─".repeat(left), label, "─".repeat(right));
+                vec![
+                    Line::from(""),
+                    Line::from(Span::styled(text, Style::default().fg(palette.dim))),
+                    Line::from(""),
+                ]
             }
         }
     }

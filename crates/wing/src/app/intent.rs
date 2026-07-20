@@ -119,6 +119,18 @@ pub enum AppIntent {
 
     /// Fetch and display skills info via HTTP API.
     ShowSkillsInfo,
+
+    /// Send a message to a specific session (Goal orchestration).
+    GoalSend { session_id: String, content: String },
+
+    /// Create a checker session for Goal mode (with fixed tools + system prompt).
+    GoalCreateChecker { system_prompt: String },
+
+    /// Unsubscribe from a Goal session (cleanup on exit).
+    GoalUnsubscribe { session_id: String },
+
+    /// Interrupt a Goal session (ESC stops both agents).
+    GoalInterrupt { session_id: String },
 }
 
 impl AppIntent {

@@ -25,6 +25,12 @@ pub const SESSION_COMMAND: &str = "/session";
 /// Short alias for /session.
 pub const SS_COMMAND: &str = "/ss";
 
+/// Activate Goal orchestration mode.
+pub const GOAL_COMMAND: &str = "/goal";
+
+/// Exit Goal orchestration mode.
+pub const GOAL_EXIT_COMMAND: &str = "/goal-exit";
+
 // ── Tool names (must match backend tool registry names) ──────────
 
 pub const TOOL_BASH: &str = "Bash";

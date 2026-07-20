@@ -135,6 +135,18 @@ static TUI_ONLY_COMMANDS: LazyLock<Vec<CommandInfo>> = LazyLock::new(|| {
             description: "Reload config, hooks, skills".into(),
             params: String::new(),
         },
+        CommandInfo {
+            name: "goal".into(),
+            aliases: vec![],
+            description: "Start Goal orchestration (executor + checker loop)".into(),
+            params: "<prompt>".into(),
+        },
+        CommandInfo {
+            name: "goal-exit".into(),
+            aliases: vec![],
+            description: "Exit Goal orchestration mode".into(),
+            params: String::new(),
+        },
     ]
 });
 
