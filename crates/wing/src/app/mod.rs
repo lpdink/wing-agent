@@ -1,5 +1,6 @@
 //! Application state machine and main event loop.
 
+pub mod ask_flow;
 pub mod constants;
 pub mod intent;
 pub mod popup_state;
@@ -100,6 +101,8 @@ pub struct App {
     toast: Option<Toast>,
     /// Active ask selection (when agent requires a choice from menu).
     ask_selection: Option<crate::ui::ask_select::AskSelection>,
+    /// Active multi-question ask flow (AskUserQuestion with questions array).
+    ask_flow: Option<ask_flow::AskFlow>,
     /// Whether the terminal window/tab currently has focus.
     /// Default `true` — terminals that don't support focus events
     /// will never send FocusLost, so BEL is never triggered.
@@ -168,6 +171,7 @@ impl App {
             last_tick: std::time::Instant::now(),
             toast: None,
             ask_selection: None,
+            ask_flow: None,
             focused: true,
             config,
             palette,
@@ -183,6 +187,11 @@ impl App {
     /// Clear the ask selection and remove the Ask cell from chat.
     fn clear_ask_selection(&mut self) {
         if self.ask_selection.take().is_some() {
+            self.chat.remove_last_ask();
+            self.input.placeholder = "今天构建什么？".into();
+        }
+        // Also clear multi-question flow if active (e.g., turn interrupted).
+        if self.ask_flow.take().is_some() {
             self.chat.remove_last_ask();
             self.input.placeholder = "今天构建什么？".into();
         }
@@ -230,6 +239,10 @@ impl App {
     ///
     /// Returns `true` if the text was consumed (either as a command or message).
     fn submit_message(&mut self, text: &str) -> bool {
+        // Multi-question ask flow: intercept submission to advance questions.
+        if self.ask_flow.is_some() {
+            return self.handle_ask_flow_submit(text);
+        }
         if self.try_frontend_command(text) {
             return true;
         }
@@ -238,6 +251,42 @@ impl App {
             content: text.to_string(),
         });
         self.turn.usage = TurnUsage::default();
+        true
+    }
+
+    /// Handle submission during a multi-question ask flow.
+    ///
+    /// Advances to the next question or sends the final structured response.
+    fn handle_ask_flow_submit(&mut self, text: &str) -> bool {
+        // Advance the flow and extract needed data to avoid borrow conflicts.
+        let Some(result) = self.ask_flow.as_mut().map(|flow| {
+            let advance_result = flow.advance(text);
+            (
+                advance_result,
+                flow.current_idx,
+                flow.answers.clone(),
+                flow.len(),
+                flow.progress(),
+            )
+        }) else {
+            return false;
+        };
+        let (advance_result, idx, answers, total, progress) = result;
+
+        match advance_result {
+            None => {
+                // More questions to answer — update the AskMessage cell.
+                self.chat.update_last_ask_progress(idx, answers);
+                self.input.placeholder = format!("Question {progress} — type your answer...");
+            }
+            Some(json) => {
+                // All questions answered — send structured response.
+                self.ask_flow = None;
+                self.input.placeholder = "今天构建什么？".into();
+                self.chat.update_last_ask_progress(total, answers);
+                self.push_intent(AppIntent::SendMessage { content: json });
+            }
+        }
         true
     }
 
@@ -983,21 +1032,37 @@ impl App {
 
             // ---- Ask events ----
             WingEvent::Ask {
+                questions,
                 question,
                 choices,
                 required,
                 ..
             } => {
-                let msg = AskMessage::new(question.clone(), choices.clone());
-                self.chat.push(ChatCell::Ask(msg));
-                if required && !choices.is_empty() {
-                    let sel = crate::ui::ask_select::AskSelection::new(choices);
-                    self.ask_selection = Some(sel);
-                    self.input.placeholder = "↑↓ select · Enter confirm".into();
-                    // Set initial cursor on the AskMessage in chat view.
-                    self.chat.update_last_ask_selection(0);
+                if !questions.is_empty() {
+                    // Multi-question flow (AskUserQuestion tool).
+                    let msg = AskMessage::new_multi(questions.clone());
+                    self.chat.push(ChatCell::Ask(msg));
+                    let flow = ask_flow::AskFlow::new(questions.clone());
+                    self.input.placeholder =
+                        format!("Question {} — type your answer...", flow.progress());
+                    self.ask_flow = Some(flow);
+                    let notify_text = questions
+                        .first()
+                        .map(|q| q.question.clone())
+                        .unwrap_or_default();
+                    self.notify_unfocused(notify_text, AttentionKind::Ask);
+                } else {
+                    // Legacy single-question (Bash dangerous command confirmation).
+                    let msg = AskMessage::new(question.clone(), choices.clone());
+                    self.chat.push(ChatCell::Ask(msg));
+                    if required && !choices.is_empty() {
+                        let sel = crate::ui::ask_select::AskSelection::new(choices);
+                        self.ask_selection = Some(sel);
+                        self.input.placeholder = "↑↓ select · Enter confirm".into();
+                        self.chat.update_last_ask_selection(0);
+                    }
+                    self.notify_unfocused(question.clone(), AttentionKind::Ask);
                 }
-                self.notify_unfocused(question.clone(), AttentionKind::Ask);
             }
 
             // ---- Candidate list events (for popup) ----

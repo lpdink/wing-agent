@@ -239,6 +239,23 @@ impl ChatView {
         }
     }
 
+    /// Update the multi-question progress on the last Ask cell.
+    ///
+    /// Sets `current_idx` and `answers` to reflect progress.
+    pub fn update_last_ask_progress(&mut self, current_idx: usize, answers: Vec<String>) {
+        for cell in self.cells.iter_mut().rev() {
+            if matches!(cell.cell(), ChatCell::Ask(_)) {
+                cell.mutate(|c| {
+                    if let ChatCell::Ask(msg) = c {
+                        msg.current_idx = current_idx;
+                        msg.answers = answers;
+                    }
+                });
+                return;
+            }
+        }
+    }
+
     /// Check if the last non-Separator cell is a ToolCall.
     fn last_non_separator_is_tool_call(&self) -> bool {
         for cell in self.cells.iter().rev() {

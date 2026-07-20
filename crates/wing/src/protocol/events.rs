@@ -47,6 +47,15 @@ pub struct AgentInfo {
     pub workspace: Option<String>,
 }
 
+/// A single question in a multi-question Ask event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AskQuestion {
+    pub id: String,
+    pub question: String,
+    #[serde(default)]
+    pub choices: Vec<String>,
+}
+
 /// Magic command metadata for command list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandInfo {
@@ -169,6 +178,11 @@ pub enum WingEvent {
     /// Agent asks the user a question.
     #[serde(rename = "ask")]
     Ask {
+        /// Multi-question format (AskUserQuestion tool).
+        #[serde(default)]
+        questions: Vec<AskQuestion>,
+        /// Legacy single-question (Bash dangerous command confirmation).
+        #[serde(default)]
         question: String,
         #[serde(default)]
         choices: Vec<String>,
