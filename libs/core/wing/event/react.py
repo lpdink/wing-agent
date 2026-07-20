@@ -53,7 +53,10 @@ class LLMCallMetricsEvent(WingEvent):
 
 class AskEvent(WingEvent):
     type: Literal["ask"] = "ask"
-    question: str
+    # Multi-question format (AskUserQuestion tool)
+    questions: list[dict] = Field(default_factory=list)
+    # Legacy single-question format (Bash dangerous command confirmation)
+    question: str = ""
     choices: list[str] = Field(default_factory=list)
     required: bool = False
 
