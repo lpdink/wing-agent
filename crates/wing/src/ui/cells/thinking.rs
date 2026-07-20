@@ -6,7 +6,7 @@
 
 use crate::config::ThemePalette;
 use crate::config::rendering::ThinkingMode;
-use crate::render::markdown::render_markdown;
+use crate::render::markdown::render_markdown_with_width;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -34,18 +34,27 @@ impl ThinkingBlock {
     }
 
     /// Render to lines based on thinking mode.
-    pub fn to_lines(&self, palette: &ThemePalette, mode: ThinkingMode) -> Vec<Line<'static>> {
+    ///
+    /// `width` is the full content width; 2 columns are reserved for the line
+    /// prefix so tables balance to fit.
+    pub fn to_lines(
+        &self,
+        palette: &ThemePalette,
+        mode: ThinkingMode,
+        width: u16,
+    ) -> Vec<Line<'static>> {
         let dim = Style::default().fg(palette.dim);
         match mode {
-            ThinkingMode::Visible => self.render_visible(palette),
+            ThinkingMode::Visible => self.render_visible(palette, width),
             ThinkingMode::Hidden => self.render_hidden(dim),
         }
     }
 
-    fn render_visible(&self, palette: &ThemePalette) -> Vec<Line<'static>> {
+    fn render_visible(&self, palette: &ThemePalette, width: u16) -> Vec<Line<'static>> {
         let thinking_style = Style::default().fg(palette.thinking);
         let mut lines = Vec::new();
-        let md_lines = render_markdown(&self.content, palette);
+        let md_width = Some(width.saturating_sub(2));
+        let md_lines = render_markdown_with_width(&self.content, md_width, palette);
         for (i, line) in md_lines.iter().enumerate() {
             if i == 0 {
                 let mut spans = vec![Span::styled("⦁ ", thinking_style)];
@@ -94,7 +103,7 @@ mod tests {
     fn test_thinking_renders_content() {
         let mut block = ThinkingBlock::new();
         block.append("Let me think about this...");
-        let lines = block.to_lines(&p(), ThinkingMode::Visible);
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80);
         let text: String = lines
             .iter()
             .map(|l| l.to_string())
@@ -110,7 +119,7 @@ mod tests {
     #[test]
     fn test_thinking_empty() {
         let block = ThinkingBlock::new();
-        let lines = block.to_lines(&p(), ThinkingMode::Visible);
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80);
         // Empty content → just blank line
         assert_eq!(lines.len(), 1);
     }
@@ -119,7 +128,7 @@ mod tests {
     fn test_thinking_hidden_no_events() {
         let mut block = ThinkingBlock::new();
         block.append("secret reasoning");
-        let lines = block.to_lines(&p(), ThinkingMode::Hidden);
+        let lines = block.to_lines(&p(), ThinkingMode::Hidden, 80);
         let text: String = lines
             .iter()
             .map(|l| l.to_string())
@@ -134,7 +143,7 @@ mod tests {
         let mut block = ThinkingBlock::new();
         block.append("reasoning");
         block.event_count = 5;
-        let lines = block.to_lines(&p(), ThinkingMode::Hidden);
+        let lines = block.to_lines(&p(), ThinkingMode::Hidden, 80);
         let text: String = lines
             .iter()
             .map(|l| l.to_string())

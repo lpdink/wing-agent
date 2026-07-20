@@ -5,7 +5,7 @@
 //! current choice instead of static letter prefixes.
 
 use crate::config::ThemePalette;
-use crate::render::markdown::render_markdown;
+use crate::render::markdown::render_markdown_with_width;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::Line;
@@ -36,13 +36,17 @@ impl AskMessage {
     /// to the first line. Choices are rendered as:
     /// - Static mode (selected = None): `A. choice`
     /// - Interactive mode (selected = Some(i)): `▸ choice` for i, `  choice` for others
-    pub fn to_lines(&self, palette: &ThemePalette) -> Vec<Line<'static>> {
+    ///
+    /// `width` is the full content width; 2 columns are reserved for the `? `
+    /// marker so tables balance to fit.
+    pub fn to_lines(&self, palette: &ThemePalette, width: u16) -> Vec<Line<'static>> {
         let accent_style = Style::default()
             .fg(palette.accent)
             .add_modifier(Modifier::BOLD);
 
         // Render question body as markdown.
-        let mut md_lines = render_markdown(&self.question, palette);
+        let md_width = Some(width.saturating_sub(2));
+        let mut md_lines = render_markdown_with_width(&self.question, md_width, palette);
 
         // Prepend `? ` marker to the first line.
         if let Some(first) = md_lines.first_mut() {
@@ -116,7 +120,7 @@ mod tests {
             "Which approach?".into(),
             vec!["Option A".into(), "Option B".into()],
         );
-        let lines = msg.to_lines(&p());
+        let lines = msg.to_lines(&p(), 80);
         let text: String = lines
             .iter()
             .map(|l| l.to_string())
@@ -131,7 +135,7 @@ mod tests {
     #[test]
     fn test_ask_without_choices() {
         let msg = AskMessage::new("Continue?".into(), vec![]);
-        let lines = msg.to_lines(&p());
+        let lines = msg.to_lines(&p(), 80);
         let text: String = lines
             .iter()
             .map(|l| l.to_string())
@@ -147,7 +151,7 @@ mod tests {
             vec!["y".into(), "n".into(), "yolo".into()],
         );
         msg.selected = Some(1); // "n" is selected
-        let lines = msg.to_lines(&p());
+        let lines = msg.to_lines(&p(), 80);
         let text: String = lines
             .iter()
             .map(|l| l.to_string())
@@ -167,7 +171,7 @@ mod tests {
     fn test_ask_selection_first() {
         let mut msg = AskMessage::new("Proceed?".into(), vec!["y".into(), "n".into()]);
         msg.selected = Some(0);
-        let lines = msg.to_lines(&p());
+        let lines = msg.to_lines(&p(), 80);
         let text: String = lines
             .iter()
             .map(|l| l.to_string())

@@ -1,22 +1,42 @@
-//! Table rendering with word-wrap and column width balancing.
+//! Table rendering — borderless layout with content-aware width allocation.
 //!
-//! Adapted from VTCode (MIT license) for the table framework.
-//! Word-wrap algorithm inspired by md-tui's approach (AGPL, algorithm only).
-//!
-//! Key features:
+//! Visual style (adapted from codex, MIT license):
+//! - Columns are separated by gaps + cell padding instead of `│` borders
+//! - A heavy `━` rule sits under the header; light `─` rules separate body rows
+//! - Cell padding honors column alignment (left / center / right)
 //! - Cell content word-wraps instead of truncating (zero information loss)
-//! - Column widths are balanced proportionally when the table overflows
-//! - CJK-aware display width calculation
-//! - Multi-line rows with automatic height adjustment
+//!
+//! ## Width allocation
+//!
+//! Columns are classified as [`ColumnKind::Narrative`] (long prose),
+//! [`ColumnKind::TokenHeavy`] (paths, URLs, hashes), or [`ColumnKind::Compact`]
+//! (short values such as counts or status labels). When the table overflows the
+//! available width, token-heavy columns surrender excess width before narrative
+//! prose, and compact columns are preserved last — so an oversized path does not
+//! collapse readable prose into an unreadable narrow strip.
 
-use std::cmp::max;
-
+use pulldown_cmark::Alignment;
 use ratatui::style::Style;
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 use super::types::MarkdownLine;
 use super::types::MarkdownSegment;
+
+/// Spaces between adjacent columns.
+const COLUMN_GAP: usize = 2;
+/// Spaces of padding on each side of a cell's content.
+const CELL_PADDING: usize = 1;
+/// Rule character drawn under the header row.
+const HEADER_SEPARATOR_CHAR: char = '━';
+/// Rule character drawn between body rows.
+const BODY_SEPARATOR_CHAR: char = '─';
+/// Hard minimum column width.
+const MIN_COLUMN_WIDTH: usize = 3;
+/// Soft readable floor for narrative / token-heavy columns.
+const PREFERRED_FLOOR: usize = 16;
+/// A whitespace token at least this wide marks its column as token-heavy.
+const LONG_TOKEN_WIDTH: usize = 20;
 
 /// Accumulates table rows during markdown parsing.
 #[derive(Debug, Default)]
@@ -25,9 +45,15 @@ pub(crate) struct TableBuffer {
     pub(crate) rows: Vec<Vec<MarkdownLine>>,
     pub(crate) current_row: Vec<MarkdownLine>,
     pub(crate) in_head: bool,
+    pub(crate) alignments: Vec<Alignment>,
 }
 
-/// Render a table buffer with word-wrap and column balancing.
+/// Render a table buffer with word-wrap and content-aware column balancing.
+///
+/// `available_width` is the full content width the table may occupy (caller has
+/// already subtracted any line prefix). When `Some`, column widths are shrunk to
+/// fit; the rendered lines are guaranteed not to exceed this width so downstream
+/// wrapping never breaks the layout mid-row.
 pub(crate) fn render_table(
     table: &TableBuffer,
     base_style: Style,
@@ -38,100 +64,55 @@ pub(crate) fn render_table(
         return lines;
     }
 
-    let max_cols = table
+    let col_count = table
         .headers
         .len()
         .max(table.rows.iter().map(|r| r.len()).max().unwrap_or(0));
-
-    if max_cols == 0 {
+    if col_count == 0 {
         return lines;
     }
 
-    // Calculate natural column widths.
-    let mut col_widths: Vec<usize> = vec![0; max_cols];
-    for (i, header) in table.headers.iter().enumerate() {
-        col_widths[i] = max(col_widths[i], header.width());
-    }
-    for row in &table.rows {
-        for (i, cell) in row.iter().enumerate() {
-            if i < max_cols {
-                col_widths[i] = max(col_widths[i], cell.width());
-            }
-        }
-    }
+    // Normalize alignments to the column count.
+    let mut alignments = table.alignments.clone();
+    alignments.resize(col_count, Alignment::None);
 
-    // Calculate styling overhead: `│ ` + content + ` │ ` per column + trailing `│`
-    // = 1 (leading │) + cols * (1 space + content + 1 space + 1 │ + 1 space)
-    // Simplified: overhead = 1 + cols * 4  (│ space ... space │ space)
-    let styling_width = 1 + max_cols * 4;
+    let metrics = collect_column_metrics(&table.headers, &table.rows, col_count);
 
-    // Balance column widths if table overflows available width.
-    if let Some(avail) = available_width {
-        let avail = avail as usize;
-        let total_content: usize = col_widths.iter().sum();
-        if total_content + styling_width > avail && total_content > 0 {
-            col_widths = balance_column_widths(&col_widths, avail.saturating_sub(styling_width));
-        }
-    }
+    // Content budget = available width minus per-column padding and inter-column
+    // gaps. This is the space the column *content* widths may collectively use.
+    let content_budget = available_width.map(|avail| {
+        let overhead = col_count * CELL_PADDING * 2 + col_count.saturating_sub(1) * COLUMN_GAP;
+        (avail as usize).saturating_sub(overhead)
+    });
 
-    let border_style = base_style.dim();
+    let col_widths = compute_column_widths(&metrics, content_budget);
 
-    // Render header.
+    let separator_style = base_style.dim();
+
+    // Header row + heavy rule.
     if !table.headers.is_empty() {
-        // Wrap header cells.
-        let wrapped_headers: Vec<Vec<Vec<MarkdownSegment>>> = table
-            .headers
-            .iter()
-            .zip(col_widths.iter())
-            .map(|(cell, &w)| wrap_cell(cell, w))
-            .collect();
-        let header_height = wrapped_headers.iter().map(|c| c.len()).max().unwrap_or(1);
-
-        for row_line in 0..header_height {
-            lines.push(render_table_row_line(
-                &wrapped_headers,
-                &col_widths,
-                border_style,
-                base_style,
-                row_line,
-                true,
-            ));
-        }
-
-        // Separator.
-        let mut sep = MarkdownLine::default();
-        sep.push_segment(border_style, "├");
-        for (i, &w) in col_widths.iter().enumerate() {
-            sep.push_segment(border_style, &"─".repeat(w + 2));
-            sep.push_segment(
-                border_style,
-                if i < col_widths.len() - 1 {
-                    "┼"
-                } else {
-                    "┤"
-                },
-            );
-        }
-        lines.push(sep);
+        lines.extend(render_row(
+            &table.headers,
+            &col_widths,
+            &alignments,
+            base_style,
+            true,
+        ));
+        lines.push(render_separator(
+            &col_widths,
+            HEADER_SEPARATOR_CHAR,
+            separator_style,
+        ));
     }
 
-    // Render body rows with word-wrap.
-    for row in &table.rows {
-        let wrapped_cells: Vec<Vec<Vec<MarkdownSegment>>> = row
-            .iter()
-            .zip(col_widths.iter())
-            .map(|(cell, &w)| wrap_cell(cell, w))
-            .collect();
-        let row_height = wrapped_cells.iter().map(|c| c.len()).max().unwrap_or(1);
-
-        for row_line in 0..row_height {
-            lines.push(render_table_row_line(
-                &wrapped_cells,
+    // Body rows with a light rule between each pair.
+    for (row_idx, row) in table.rows.iter().enumerate() {
+        lines.extend(render_row(row, &col_widths, &alignments, base_style, false));
+        if row_idx + 1 < table.rows.len() {
+            lines.push(render_separator(
                 &col_widths,
-                border_style,
-                base_style,
-                row_line,
-                false,
+                BODY_SEPARATOR_CHAR,
+                separator_style,
             ));
         }
     }
@@ -139,66 +120,299 @@ pub(crate) fn render_table(
     lines
 }
 
-/// Balance column widths proportionally when the table overflows.
-///
-/// Strategy: columns wider than the average threshold are compressed
-/// proportionally, while narrower columns keep their natural width.
-fn balance_column_widths(natural_widths: &[usize], available: usize) -> Vec<usize> {
-    let col_count = natural_widths.len();
-    if col_count == 0 || available == 0 {
-        return vec![1; col_count];
-    }
+/// Classification of a table column for width-allocation priority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColumnKind {
+    /// Long-form prose content.
+    Narrative,
+    /// Paths, URLs, hashes — long unbroken tokens.
+    TokenHeavy,
+    /// Short values such as counts or status labels.
+    Compact,
+}
 
-    let threshold = available / col_count;
-    let mut balanced = natural_widths.to_vec();
+/// Per-column measurements used for width allocation.
+struct ColumnMetrics {
+    /// Widest cell content (display width) in this column.
+    max_width: usize,
+    /// Widest whitespace token in the header cell.
+    header_token_width: usize,
+    /// Widest whitespace token across body cells.
+    body_token_width: usize,
+    kind: ColumnKind,
+}
 
-    // Identify overflowing and non-overflowing columns.
-    let mut overflowing: Vec<(usize, usize)> = Vec::new(); // (index, width)
-    let mut non_overflowing_total = 0usize;
+/// Gather width/token statistics for each column and classify it.
+fn collect_column_metrics(
+    headers: &[MarkdownLine],
+    rows: &[Vec<MarkdownLine>],
+    col_count: usize,
+) -> Vec<ColumnMetrics> {
+    let mut metrics = Vec::with_capacity(col_count);
+    for col in 0..col_count {
+        let header_plain = headers.get(col).map(|h| h.to_plain()).unwrap_or_default();
+        let header_token_width = longest_token_width(&header_plain);
+        let mut max_width = headers.get(col).map(|h| h.width()).unwrap_or(0);
+        let mut body_token_width = 0usize;
+        let mut body_token_count = 0usize;
+        let mut long_body_token_count = 0usize;
+        let mut total_words = 0usize;
+        let mut total_cells = 0usize;
+        let mut total_cell_width = 0usize;
 
-    for (i, &w) in natural_widths.iter().enumerate() {
-        if w > threshold {
-            overflowing.push((i, w));
+        for row in rows {
+            let plain = row.get(col).map(|c| c.to_plain()).unwrap_or_default();
+            let cell_width = row.get(col).map(|c| c.width()).unwrap_or(0);
+            max_width = max_width.max(cell_width);
+            body_token_width = body_token_width.max(longest_token_width(&plain));
+            let word_count = plain.split_whitespace().count();
+            if word_count > 0 {
+                body_token_count += word_count;
+                long_body_token_count += plain
+                    .split_whitespace()
+                    .filter(|token| token.width() >= LONG_TOKEN_WIDTH)
+                    .count();
+                total_words += word_count;
+                total_cells += 1;
+                total_cell_width += UnicodeWidthStr::width(plain.as_str());
+            }
+        }
+
+        let avg_words_per_cell = if total_cells == 0 {
+            header_plain.split_whitespace().count() as f64
         } else {
-            non_overflowing_total += w;
+            total_words as f64 / total_cells as f64
+        };
+        let avg_cell_width = if total_cells == 0 {
+            UnicodeWidthStr::width(header_plain.as_str()) as f64
+        } else {
+            total_cell_width as f64 / total_cells as f64
+        };
+
+        let kind = if long_body_token_count > 0
+            && long_body_token_count >= body_token_count.saturating_sub(long_body_token_count)
+        {
+            ColumnKind::TokenHeavy
+        } else if avg_words_per_cell >= 4.0 || avg_cell_width >= 28.0 {
+            ColumnKind::Narrative
+        } else {
+            ColumnKind::Compact
+        };
+
+        metrics.push(ColumnMetrics {
+            max_width,
+            header_token_width,
+            body_token_width,
+            kind,
+        });
+    }
+    metrics
+}
+
+/// Allocate column content widths so the table fits within `content_budget`.
+///
+/// Each column starts at its natural (max cell content) width, then columns are
+/// shrunk one character at a time until the total fits. Token-heavy columns
+/// shrink before narrative prose; compact columns are preserved last. Always
+/// returns widths whose sum is `<= content_budget` (when a budget is given).
+fn compute_column_widths(metrics: &[ColumnMetrics], content_budget: Option<usize>) -> Vec<usize> {
+    let col_count = metrics.len();
+    let mut widths: Vec<usize> = metrics
+        .iter()
+        .map(|m| m.max_width.max(MIN_COLUMN_WIDTH))
+        .collect();
+
+    let Some(budget) = content_budget else {
+        return widths;
+    };
+    if col_count == 0 {
+        return widths;
+    }
+
+    // Degenerate budget: cannot even hold minimum-width columns. Split evenly.
+    let min_total = col_count * MIN_COLUMN_WIDTH;
+    if budget < min_total {
+        let share = (budget / col_count).max(1);
+        return vec![share; col_count];
+    }
+
+    // Preferred floors, relaxed in shrink-priority order until they fit.
+    let mut floors: Vec<usize> = metrics
+        .iter()
+        .map(|m| preferred_column_floor(m, MIN_COLUMN_WIDTH))
+        .collect();
+    let mut floor_total: usize = floors.iter().sum();
+    while floor_total > budget {
+        let Some((idx, _)) = floors
+            .iter()
+            .enumerate()
+            .filter(|(_, floor)| **floor > MIN_COLUMN_WIDTH)
+            .min_by_key(|(idx, floor)| {
+                (
+                    shrink_priority(metrics[*idx].kind),
+                    usize::MAX.saturating_sub(**floor),
+                )
+            })
+        else {
+            break;
+        };
+        floors[idx] -= 1;
+        floor_total -= 1;
+    }
+
+    // Shrink columns one char at a time until the total fits the budget.
+    let mut total: usize = widths.iter().sum();
+    while total > budget {
+        let Some(idx) = next_column_to_shrink(&widths, &floors, metrics) else {
+            break;
+        };
+        widths[idx] -= 1;
+        total -= 1;
+    }
+
+    widths
+}
+
+/// Preferred minimum width for a column before the shrink loop runs.
+///
+/// Narrative and token-heavy columns keep a readable 16-cell soft floor; compact
+/// columns floor at the wider of their header/body token widths (body capped at
+/// 16). Clamped to `[min, max_width]`.
+fn preferred_column_floor(metrics: &ColumnMetrics, min: usize) -> usize {
+    let target = match metrics.kind {
+        ColumnKind::Narrative | ColumnKind::TokenHeavy => PREFERRED_FLOOR,
+        ColumnKind::Compact => metrics
+            .header_token_width
+            .max(metrics.body_token_width.min(PREFERRED_FLOOR)),
+    };
+    target.max(min).min(metrics.max_width.max(min))
+}
+
+/// Pick the next column to shrink by one character.
+///
+/// Priority: TokenHeavy before Narrative before Compact. Within the same kind,
+/// the column with the most slack above its floor shrinks first so similarly
+/// shaped columns stay balanced.
+fn next_column_to_shrink(
+    widths: &[usize],
+    floors: &[usize],
+    metrics: &[ColumnMetrics],
+) -> Option<usize> {
+    widths
+        .iter()
+        .enumerate()
+        .filter(|(idx, width)| **width > floors[*idx])
+        .min_by_key(|(idx, width)| {
+            let slack = width.saturating_sub(floors[*idx]);
+            (
+                shrink_priority(metrics[*idx].kind),
+                usize::MAX.saturating_sub(slack),
+            )
+        })
+        .map(|(idx, _)| idx)
+}
+
+fn shrink_priority(kind: ColumnKind) -> usize {
+    match kind {
+        ColumnKind::TokenHeavy => 0,
+        ColumnKind::Narrative => 1,
+        ColumnKind::Compact => 2,
+    }
+}
+
+/// Longest whitespace-delimited token width in `text` (CJK-aware).
+fn longest_token_width(text: &str) -> usize {
+    text.split_whitespace()
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Render a horizontal rule spanning all columns.
+///
+/// Each column contributes `width + 2*CELL_PADDING` rule characters, joined by
+/// `COLUMN_GAP` spaces — matching the row layout exactly.
+fn render_separator(col_widths: &[usize], ch: char, style: Style) -> MarkdownLine {
+    let mut line = MarkdownLine::default();
+    let segment = ch.to_string();
+    for (i, &w) in col_widths.iter().enumerate() {
+        line.push_segment(style, &segment.repeat(w + CELL_PADDING * 2));
+        if i + 1 < col_widths.len() {
+            line.push_segment(style, &" ".repeat(COLUMN_GAP));
         }
     }
+    line
+}
 
-    if overflowing.is_empty() {
-        // All columns fit — no balancing needed, but check total.
-        let total: usize = balanced.iter().sum();
-        if total <= available {
-            return balanced;
+/// Render a single table row (possibly multi-line after wrapping).
+///
+/// Columns are gap-separated with alignment-aware padding. Trailing columns that
+/// are empty on a given line are trimmed so rows do not carry useless padding.
+fn render_row(
+    row: &[MarkdownLine],
+    col_widths: &[usize],
+    alignments: &[Alignment],
+    base_style: Style,
+    bold: bool,
+) -> Vec<MarkdownLine> {
+    let wrapped_cells: Vec<Vec<Vec<MarkdownSegment>>> = col_widths
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| {
+            let cell = row.get(i).cloned().unwrap_or_default();
+            wrap_cell(&cell, w)
+        })
+        .collect();
+    let row_height = wrapped_cells.iter().map(Vec::len).max().unwrap_or(1);
+
+    let mut out = Vec::with_capacity(row_height);
+    for line_idx in 0..row_height {
+        // Rightmost column with visible content on this line.
+        let last_visible = wrapped_cells.iter().rposition(|cell_lines| {
+            cell_lines
+                .get(line_idx)
+                .is_some_and(|segs| segs.iter().any(|s| !s.text.is_empty()))
+        });
+        let Some(last) = last_visible else {
+            out.push(MarkdownLine::default());
+            continue;
+        };
+
+        let mut line = MarkdownLine::default();
+        for col in 0..=last {
+            let width = col_widths[col];
+            let segments = wrapped_cells[col]
+                .get(line_idx)
+                .cloned()
+                .unwrap_or_default();
+            let content_width: usize = segments.iter().map(|s| s.width()).sum();
+            let remaining = width.saturating_sub(content_width);
+            let (left_pad, right_pad) = match alignments[col] {
+                Alignment::Left | Alignment::None => (0, remaining),
+                Alignment::Center => (remaining / 2, remaining - remaining / 2),
+                Alignment::Right => (remaining, 0),
+            };
+            let is_last = col == last;
+
+            line.push_segment(base_style, &" ".repeat(CELL_PADDING));
+            if left_pad > 0 {
+                line.push_segment(base_style, &" ".repeat(left_pad));
+            }
+            for seg in &segments {
+                let style = if bold { seg.style.bold() } else { seg.style };
+                line.push_segment(style, &seg.text);
+            }
+            if !is_last {
+                if right_pad > 0 {
+                    line.push_segment(base_style, &" ".repeat(right_pad));
+                }
+                line.push_segment(base_style, &" ".repeat(CELL_PADDING));
+                line.push_segment(base_style, &" ".repeat(COLUMN_GAP));
+            }
         }
-        // Proportional shrink as fallback.
-        for w in &mut balanced {
-            *w = (*w * available) / total.max(1);
-            *w = (*w).max(1);
-        }
-        return balanced;
+        out.push(line);
     }
-
-    // Sort by width ascending so narrower overflowing columns get minimum
-    // allocation first, leaving more space for wider columns.
-    overflowing.sort_by_key(|&(_, w)| w);
-
-    let overflowing_total: usize = overflowing.iter().map(|(_, w)| *w).sum();
-    let available_for_overflow = available.saturating_sub(non_overflowing_total);
-    let min_col_width = (available_for_overflow / (2 * overflowing.len())).max(1);
-
-    for &(i, old_width) in &overflowing {
-        let ratio = old_width as f64 / overflowing_total as f64;
-        let mut new_width = (ratio * available_for_overflow as f64).floor() as usize;
-        new_width = new_width.max(min_col_width);
-        balanced[i] = new_width;
-    }
-
-    // Ensure minimum width of 1 for all columns.
-    for w in &mut balanced {
-        *w = (*w).max(1);
-    }
-
-    balanced
+    out
 }
 
 /// Wrap a cell's segments into multiple lines, each fitting within `width`.
@@ -315,48 +529,6 @@ fn split_str_by_width(text: &str, max_width: usize) -> (&str, &str) {
     (text, "")
 }
 
-/// Render a single line of a multi-line table row.
-fn render_table_row_line(
-    wrapped_cells: &[Vec<Vec<MarkdownSegment>>],
-    col_widths: &[usize],
-    border_style: Style,
-    base_style: Style,
-    line_idx: usize,
-    bold: bool,
-) -> MarkdownLine {
-    let mut line = MarkdownLine::default();
-    line.push_segment(border_style, "│");
-
-    for (i, &width) in col_widths.iter().enumerate() {
-        line.push_segment(base_style, " ");
-
-        if let Some(cell_lines) = wrapped_cells.get(i) {
-            if let Some(segments) = cell_lines.get(line_idx) {
-                for seg in segments {
-                    let style = if bold { seg.style.bold() } else { seg.style };
-                    line.push_segment(style, &seg.text);
-                }
-                // Pad remaining width.
-                let content_width: usize = segments.iter().map(|s| s.width()).sum();
-                let padding = width.saturating_sub(content_width);
-                if padding > 0 {
-                    line.push_segment(base_style, &" ".repeat(padding));
-                }
-            } else {
-                // Empty line for this cell — fill with spaces.
-                line.push_segment(base_style, &" ".repeat(width));
-            }
-        } else {
-            line.push_segment(base_style, &" ".repeat(width));
-        }
-
-        line.push_segment(base_style, " ");
-        line.push_segment(border_style, "│");
-    }
-
-    line
-}
-
 // ============================================================
 // Tests
 // ============================================================
@@ -369,6 +541,10 @@ mod tests {
         let mut line = MarkdownLine::default();
         line.push_segment(Style::new(), text);
         line
+    }
+
+    fn plain_lines(lines: &[MarkdownLine]) -> Vec<String> {
+        lines.iter().map(|l| l.to_plain()).collect()
     }
 
     #[test]
@@ -424,53 +600,211 @@ mod tests {
     }
 
     #[test]
-    fn test_balance_columns_fits() {
-        let widths = vec![10, 15, 5];
-        let balanced = balance_column_widths(&widths, 100);
-        assert_eq!(balanced, widths);
+    fn test_longest_token_width() {
+        assert_eq!(longest_token_width("a bb ccc"), 3);
+        assert_eq!(longest_token_width(""), 0);
+        assert_eq!(longest_token_width("你好 ab"), 4); // 你好 = 4 cols
     }
 
     #[test]
-    fn test_balance_columns_overflow() {
-        let widths = vec![10, 80, 10];
-        let balanced = balance_column_widths(&widths, 50);
-        let total: usize = balanced.iter().sum();
+    fn test_classify_token_heavy() {
+        // A column of long paths classifies as TokenHeavy.
+        let headers = vec![make_line("Path")];
+        let rows = vec![
+            vec![make_line("libs/core/wing/config.py")],
+            vec![make_line("libs/core/wing/session_manager.py")],
+        ];
+        let metrics = collect_column_metrics(&headers, &rows, 1);
+        assert_eq!(metrics[0].kind, ColumnKind::TokenHeavy);
+    }
+
+    #[test]
+    fn test_classify_compact() {
+        let headers = vec![make_line("Count")];
+        let rows = vec![vec![make_line("1")], vec![make_line("2")]];
+        let metrics = collect_column_metrics(&headers, &rows, 1);
+        assert_eq!(metrics[0].kind, ColumnKind::Compact);
+    }
+
+    #[test]
+    fn test_classify_narrative() {
+        let headers = vec![make_line("Description")];
+        let rows = vec![vec![make_line(
+            "This is a fairly long prose description that reads like narrative text",
+        )]];
+        let metrics = collect_column_metrics(&headers, &rows, 1);
+        assert_eq!(metrics[0].kind, ColumnKind::Narrative);
+    }
+
+    #[test]
+    fn test_compute_widths_no_budget_keeps_natural() {
+        let metrics = vec![
+            ColumnMetrics {
+                max_width: 10,
+                header_token_width: 3,
+                body_token_width: 5,
+                kind: ColumnKind::Compact,
+            },
+            ColumnMetrics {
+                max_width: 20,
+                header_token_width: 3,
+                body_token_width: 5,
+                kind: ColumnKind::Compact,
+            },
+        ];
+        let widths = compute_column_widths(&metrics, None);
+        assert_eq!(widths, vec![10, 20]);
+    }
+
+    #[test]
+    fn test_compute_widths_fits_budget() {
+        let metrics = vec![
+            ColumnMetrics {
+                max_width: 10,
+                header_token_width: 3,
+                body_token_width: 5,
+                kind: ColumnKind::Compact,
+            },
+            ColumnMetrics {
+                max_width: 80,
+                header_token_width: 3,
+                body_token_width: 60,
+                kind: ColumnKind::TokenHeavy,
+            },
+            ColumnMetrics {
+                max_width: 40,
+                header_token_width: 3,
+                body_token_width: 30,
+                kind: ColumnKind::Narrative,
+            },
+        ];
+        let widths = compute_column_widths(&metrics, Some(60));
+        let total: usize = widths.iter().sum();
+        assert!(total <= 60, "total {total} exceeds budget 60: {widths:?}");
+        assert!(widths.iter().all(|&w| w >= 1));
+    }
+
+    #[test]
+    fn test_compute_widths_token_heavy_shrinks_first() {
+        // TokenHeavy column should give up width before the Narrative column.
+        let metrics = vec![
+            ColumnMetrics {
+                max_width: 60,
+                header_token_width: 3,
+                body_token_width: 50,
+                kind: ColumnKind::TokenHeavy,
+            },
+            ColumnMetrics {
+                max_width: 60,
+                header_token_width: 3,
+                body_token_width: 30,
+                kind: ColumnKind::Narrative,
+            },
+        ];
+        let widths = compute_column_widths(&metrics, Some(60));
         assert!(
-            total <= 50,
-            "balanced total {total} should be <= 50: {balanced:?}"
+            widths[1] >= widths[0],
+            "narrative ({}) should retain at least as much width as token-heavy ({}): {widths:?}",
+            widths[1],
+            widths[0]
         );
-        // Each column should have at least width 1.
-        assert!(balanced.iter().all(|&w| w >= 1));
     }
 
     #[test]
-    fn test_balance_columns_single_overflow() {
-        let widths = vec![10, 10, 200];
-        let balanced = balance_column_widths(&widths, 60);
-        // The first two columns should keep their natural width.
-        assert_eq!(balanced[0], 10);
-        assert_eq!(balanced[1], 10);
-        // The third should get the remaining space.
-        assert!(balanced[2] <= 40);
-        assert!(balanced[2] >= 1);
+    fn test_compute_widths_degenerate_budget() {
+        let metrics = vec![
+            ColumnMetrics {
+                max_width: 10,
+                header_token_width: 3,
+                body_token_width: 5,
+                kind: ColumnKind::Compact,
+            },
+            ColumnMetrics {
+                max_width: 10,
+                header_token_width: 3,
+                body_token_width: 5,
+                kind: ColumnKind::Compact,
+            },
+            ColumnMetrics {
+                max_width: 10,
+                header_token_width: 3,
+                body_token_width: 5,
+                kind: ColumnKind::Compact,
+            },
+        ];
+        // Budget too small for 3 * MIN_COLUMN_WIDTH.
+        let widths = compute_column_widths(&metrics, Some(6));
+        assert_eq!(widths.len(), 3);
+        assert!(widths.iter().all(|&w| w >= 1));
     }
 
     #[test]
-    fn test_render_table_basic() {
+    fn test_render_table_basic_borderless() {
         let table = TableBuffer {
             headers: vec![make_line("A"), make_line("B")],
             rows: vec![vec![make_line("1"), make_line("2")]],
             ..Default::default()
         };
         let lines = render_table(&table, Style::new(), Some(80));
-        let text: String = lines
-            .iter()
-            .map(|l| l.to_plain())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = plain_lines(&lines).join("\n");
         assert!(text.contains("A"), "header missing: {text}");
         assert!(text.contains("1"), "data missing: {text}");
-        assert!(text.contains("│"), "border missing: {text}");
+        // Borderless style: no vertical bars, heavy header rule present.
+        assert!(!text.contains("│"), "should be borderless: {text}");
+        assert!(text.contains("━"), "header rule missing: {text}");
+    }
+
+    #[test]
+    fn test_render_table_body_separator_between_rows() {
+        let table = TableBuffer {
+            headers: vec![make_line("H")],
+            rows: vec![vec![make_line("a")], vec![make_line("b")]],
+            ..Default::default()
+        };
+        let lines = render_table(&table, Style::new(), Some(40));
+        let text = plain_lines(&lines).join("\n");
+        // Light rule between the two body rows.
+        assert!(text.contains("─"), "body separator missing: {text}");
+    }
+
+    #[test]
+    fn test_render_table_lines_fit_available_width() {
+        // The critical invariant: no rendered line exceeds the available width,
+        // so downstream Paragraph wrapping never breaks a row mid-line.
+        let table = TableBuffer {
+            headers: vec![
+                make_line("Implementation"),
+                make_line("Path"),
+                make_line("Reuse"),
+            ],
+            rows: vec![
+                vec![
+                    make_line("_ensure_tmp_dir / _save_full_result pattern"),
+                    make_line("libs/wing_hooks/wing_hooks/truncate_tool_result.py"),
+                    make_line(
+                        "Reference its temp file writing approach and write equivalent private methods in agent.py",
+                    ),
+                ],
+                vec![
+                    make_line("get_wing_home()"),
+                    make_line("libs/core/wing/config.py:L107"),
+                    make_line("Call directly to determine the tmp directory"),
+                ],
+            ],
+            ..Default::default()
+        };
+        for avail in [40u16, 60, 80, 120] {
+            let lines = render_table(&table, Style::new(), Some(avail));
+            for line in &lines {
+                assert!(
+                    line.width() <= avail as usize,
+                    "line width {} exceeds available {} (avail={avail}): {:?}",
+                    line.width(),
+                    avail,
+                    line.to_plain()
+                );
+            }
+        }
     }
 
     #[test]
@@ -490,11 +824,7 @@ mod tests {
             "expected header + separator + multi-line row, got {} lines",
             lines.len()
         );
-        let text: String = lines
-            .iter()
-            .map(|l| l.to_plain())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = plain_lines(&lines).join("\n");
         assert!(
             text.contains("should wrap"),
             "wrapped text should be visible: {text}"
@@ -508,11 +838,7 @@ mod tests {
         table.headers = vec![make_line("Col")];
         table.rows = vec![vec![make_line(long_text)]];
         let lines = render_table(&table, Style::new(), Some(20));
-        let text: String = lines
-            .iter()
-            .map(|l| l.to_plain())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = plain_lines(&lines).join("\n");
         // All words must be preserved (they'll be on separate lines due to wrapping).
         for word in long_text.split_whitespace() {
             assert!(
@@ -530,12 +856,29 @@ mod tests {
             ..Default::default()
         };
         let lines = render_table(&table, Style::new(), Some(40));
-        let text: String = lines
-            .iter()
-            .map(|l| l.to_plain())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = plain_lines(&lines).join("\n");
         assert!(text.contains("你好"), "CJK content missing: {text}");
+    }
+
+    #[test]
+    fn test_render_table_right_alignment() {
+        let table = TableBuffer {
+            headers: vec![make_line("Name"), make_line("Count")],
+            rows: vec![vec![make_line("x"), make_line("5")]],
+            alignments: vec![Alignment::Left, Alignment::Right],
+            ..Default::default()
+        };
+        let lines = render_table(&table, Style::new(), Some(40));
+        // The right-aligned "5" should be preceded by padding spaces within
+        // its column (i.e. appear with leading spaces before the column gap/end).
+        let data_line = plain_lines(&lines)
+            .into_iter()
+            .find(|l| l.contains('5'))
+            .expect("data line with 5");
+        assert!(
+            data_line.contains("5"),
+            "right-aligned value missing: {data_line}"
+        );
     }
 
     #[test]

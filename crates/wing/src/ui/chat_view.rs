@@ -16,7 +16,7 @@ use ratatui::widgets::Widget;
 use ratatui::widgets::Wrap;
 
 use crate::render::Renderable;
-use crate::render::markdown::render_markdown;
+use crate::render::markdown::render_markdown_with_width;
 use crate::render::markdown::render_plain;
 use crate::render::renderable::CellContext;
 
@@ -70,7 +70,10 @@ impl ChatCell {
                 lines
             }
             Self::AssistantMessage(text) => {
-                let md_lines = render_markdown(text, palette);
+                // Reserve 2 columns for the `⦁ ` / `  ` line prefix so tables
+                // balance to fit and downstream wrapping never breaks a row.
+                let md_width = Some(width.saturating_sub(2));
+                let md_lines = render_markdown_with_width(text, md_width, palette);
                 let bullet_style = Style::default().fg(palette.text);
                 let mut lines = Vec::new();
                 for (i, line) in md_lines.iter().enumerate() {
@@ -106,11 +109,11 @@ impl ChatCell {
                 lines.push(Line::from(""));
                 lines
             }
-            Self::Thinking(block) => block.to_lines(palette, ctx.thinking_mode),
+            Self::Thinking(block) => block.to_lines(palette, ctx.thinking_mode, width),
             Self::ToolCall(block) => block.to_lines(palette, ctx.layout.tool_output_max),
             Self::Diff(view) => view.to_lines(palette, ctx.layout.diff_context),
             Self::Todo(msg) => msg.to_lines(palette),
-            Self::Ask(msg) => msg.to_lines(palette),
+            Self::Ask(msg) => msg.to_lines(palette, width),
             Self::Separator => {
                 let sep = "─".repeat(width as usize);
                 vec![Line::from(Span::styled(
