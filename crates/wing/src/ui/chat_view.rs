@@ -632,16 +632,24 @@ impl Widget for ChatViewWidget<'_> {
                         buf[(x, y)].set_style(bg);
                     }
                 }
-                // Inset text area: 2 left, 1 top, 1 bottom padding
+                // Inset text area: 2 left, 1 top, 1 bottom padding.
+                // Padding rows only consume visible height while actually on
+                // screen: once the cell top is scrolled past (skip > 0) the
+                // top padding is gone, and the bottom padding only exists
+                // when the cell end lies inside the window. Reserving both
+                // unconditionally clipped the last text row whenever the
+                // cell top was scrolled off (big-paste / replay bug).
+                let top_pad = usize::from(skip == 0);
+                let bottom_pad = usize::from(cell_end <= view_end);
                 let text_area = Rect::new(
                     cell_area.x + 2,
-                    cell_area.y + 1,
+                    cell_area.y + top_pad as u16,
                     cell_area.width.saturating_sub(3),
-                    cell_area.height.saturating_sub(2),
+                    cell_visible.saturating_sub(top_pad + bottom_pad) as u16,
                 );
                 Paragraph::new(cell_lines)
                     .wrap(Wrap { trim: false })
-                    .scroll((skip.saturating_sub(1) as u16, 0)) // adjust for 1-line top padding
+                    .scroll((skip.saturating_sub(1) as u16, 0)) // row 0 is top padding
                     .render(text_area, buf);
                 render_y += cell_visible as u16;
                 if render_y >= content_area.bottom() {
@@ -1024,5 +1032,93 @@ mod tests {
         view.push(ChatCell::AssistantMessage("answer".into()));
         assert_eq!(view.len(), 4); // no extra separator
         assert!(!matches!(view.cells[3].cell(), ChatCell::Separator));
+    }
+
+    /// Flatten a Buffer into a string (one line per row) for assertions.
+    fn buffer_text(buf: &Buffer) -> String {
+        let mut out = String::new();
+        for y in buf.area.y..buf.area.bottom() {
+            for x in buf.area.x..buf.area.right() {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Render the view into a buffer at the given size.
+    fn render_view(view: &mut ChatView, width: u16, height: u16) -> Buffer {
+        let (p, l) = test_ctx();
+        let ctx = make_ctx(&p, &l);
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        ChatViewWidget::new(view, ctx).render(area, &mut buf);
+        buf
+    }
+
+    #[test]
+    fn test_user_message_last_line_rendered_when_top_scrolled_off() {
+        // Regression: a tall UserMessage whose top is scrolled past the
+        // viewport must still render its last text line (the "big paste
+        // drops its last line" bug — padding rows were double-counted).
+        let mut view = ChatView::new();
+        let text = (0..30)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        view.push(ChatCell::UserMessage(text));
+        view.push(ChatCell::AssistantMessage("reply".into()));
+
+        // Window of 12 rows: auto-scroll pins to bottom, so the top of the
+        // 32-row user message (30 text + 2 padding) is scrolled off.
+        let buf = render_view(&mut view, 40, 12);
+        let rendered = buffer_text(&buf);
+        assert!(
+            rendered.contains("line-29"),
+            "last text line must survive top-scroll clipping:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("line-22"),
+            "first visible text line must be rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn test_user_message_last_line_rendered_when_cell_taller_than_window() {
+        // A single UserMessage taller than the whole window: pinned to
+        // bottom, its last line must be the row above the bottom padding.
+        let mut view = ChatView::new();
+        let text = (0..50)
+            .map(|i| format!("row-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        view.push(ChatCell::UserMessage(text));
+
+        let buf = render_view(&mut view, 40, 10);
+        let rendered = buffer_text(&buf);
+        assert!(
+            rendered.contains("row-49"),
+            "last line must render when the cell alone overflows the window:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn test_user_message_fully_visible_renders_all_lines() {
+        // Fully visible cell (no scroll into it): all lines render and
+        // keep the 1-row top/bottom padding.
+        let mut view = ChatView::new();
+        view.push(ChatCell::UserMessage("first\nsecond\nthird".into()));
+
+        let buf = render_view(&mut view, 40, 10);
+        let rendered = buffer_text(&buf);
+        for line in ["first", "second", "third"] {
+            assert!(rendered.contains(line), "missing {line}:\n{rendered}");
+        }
+        // Top padding: row 0 of the cell must be blank (background only).
+        let first_row = rendered.lines().next().unwrap_or("");
+        assert!(
+            first_row.trim().is_empty(),
+            "top padding row should be blank, got: {first_row:?}"
+        );
     }
 }
