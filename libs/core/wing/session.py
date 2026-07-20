@@ -102,7 +102,7 @@ class Session:
         # 创建 WingAgent
         agent = WingAgent(
             model=template.model,
-            model_provider=OpenAIProvider(),
+            model_provider=OpenAIProvider(session_id=session_id),
             stream=True,
             context_manager=context_manager,
             tools=template.resolved_tools,
@@ -153,7 +153,7 @@ class Session:
         # 3. 创建新 Agent
         self._agent = WingAgent(
             model=template.model,
-            model_provider=OpenAIProvider(),
+            model_provider=OpenAIProvider(session_id=self._session_id),
             stream=True,
             context_manager=self._context_manager,
             tools=template.resolved_tools,

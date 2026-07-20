@@ -34,6 +34,7 @@ class OpenAIProvider:
         self,
         base_url: str | None = None,
         api_key: str | None = None,
+        session_id: str | None = None,
     ) -> None:
         config = get_config()
         base_url = base_url or config.openai.base_url
@@ -45,6 +46,7 @@ class OpenAIProvider:
             raise ValueError("api_key required (check config.yaml: openai.api_key)")
         log.info(f"Using open ai base url:{base_url}")
         self.base_url = base_url
+        self._session_id = session_id
 
         # 构建 default headers（包含 User-Agent 及可能的额外 headers）
         default_headers = get_headers()
@@ -85,6 +87,8 @@ class OpenAIProvider:
         extra_body: dict = {"enable_thinking": self.thinking, "preserve_thinking": True}
         if self.reasoning_effort:
             extra_body["reasoning_effort"] = self.reasoning_effort
+        if self.explicit_cache_mode and self._session_id:
+            extra_body["prompt_cache_key"] = self._session_id
         create_params = {
             "model": model,
             "messages": openai_messages,
