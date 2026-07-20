@@ -472,6 +472,88 @@ pub async fn execute_intent(
                 tracing::warn!("failed to send OSC 9 notification: {e}");
             }
         }
+        AppIntent::GoalSend {
+            session_id,
+            content,
+        } => {
+            if let Some(t) = transport
+                && let Err(e) = t.http.send_message(&session_id, &content).await
+            {
+                tracing::error!("goal send failed: {e}");
+                app.show_toast(Toast::warning(
+                    format!("Goal send failed: {e}"),
+                    std::time::Duration::from_secs(3),
+                ));
+            }
+        }
+        AppIntent::GoalUnsubscribe { session_id } => {
+            if let Some(t) = transport
+                && let Err(e) = t.http.unsubscribe(&session_id, &t.client_id).await
+            {
+                tracing::warn!("goal unsubscribe failed: {e}");
+            }
+        }
+        AppIntent::GoalInterrupt { session_id } => {
+            if let Some(t) = transport
+                && let Err(e) = t.http.interrupt_session(&session_id).await
+            {
+                tracing::warn!("goal interrupt failed: {e}");
+            }
+        }
+        AppIntent::GoalCreateChecker { system_prompt } => {
+            if let Some(t) = transport {
+                let req = wing_api_client::models::CreateSessionRequest {
+                    workspace: None,
+                    template_name: None,
+                    agent: Some(wing_api_client::models::AgentOverride {
+                        tools: Some(vec![
+                            "Bash".into(),
+                            "Read".into(),
+                            "Glob".into(),
+                            "Grep".into(),
+                        ]),
+                        system_prompt: Some(system_prompt),
+                        ..Default::default()
+                    }),
+                };
+                match t.http.create_session(&req).await {
+                    Ok(resp) => {
+                        let checker_id = resp.session_id.clone();
+                        // Subscribe to checker session events. Without a successful
+                        // subscribe no checker events would ever arrive, leaving the
+                        // loop hung in CheckerWorking — so treat failure as fatal.
+                        if let Err(e) = t.http.subscribe(&checker_id, &t.client_id).await {
+                            tracing::warn!("subscribe checker failed: {e}");
+                            app.show_toast(Toast::error(
+                                format!("Checker created but subscribe failed: {e}"),
+                                std::time::Duration::from_secs(4),
+                            ));
+                            if let Some(goal) = app.goal.as_mut() {
+                                let actions = goal.on_checker_create_failed();
+                                app.execute_goal_actions(actions);
+                            }
+                            return;
+                        }
+                        // Notify GoalState of successful creation.
+                        if let Some(goal) = app.goal.as_mut() {
+                            let actions = goal.on_checker_created(checker_id);
+                            app.execute_goal_actions(actions);
+                        }
+                        tracing::info!("checker session created for goal mode");
+                    }
+                    Err(e) => {
+                        app.show_toast(Toast::error(
+                            format!("Checker creation failed: {e}"),
+                            std::time::Duration::from_secs(3),
+                        ));
+                        if let Some(goal) = app.goal.as_mut() {
+                            let actions = goal.on_checker_create_failed();
+                            app.execute_goal_actions(actions);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

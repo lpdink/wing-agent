@@ -90,6 +90,8 @@ pub struct WorkingIndicatorWidget<'a> {
     spinner: &'a SpinnerState,
     started_at: Instant,
     palette: &'a ThemePalette,
+    /// Optional role label for Goal mode (e.g. "Executor working", "Checker reviewing").
+    role_label: Option<&'a str>,
 }
 
 impl<'a> WorkingIndicatorWidget<'a> {
@@ -98,7 +100,14 @@ impl<'a> WorkingIndicatorWidget<'a> {
             spinner,
             started_at,
             palette,
+            role_label: None,
         }
+    }
+
+    /// Set the role label (Goal mode).
+    pub fn with_role_label(mut self, label: Option<&'a str>) -> Self {
+        self.role_label = label;
+        self
     }
 }
 
@@ -112,10 +121,18 @@ impl Widget for WorkingIndicatorWidget<'_> {
         let dim = Style::default().fg(self.palette.dim);
         let accent = Style::default().fg(self.palette.accent);
 
-        let mut spans = vec![
-            Span::styled(self.spinner.frame_str().to_string(), accent),
-            Span::styled(" Working...", Style::default().fg(self.palette.text)),
-        ];
+        let mut spans = vec![Span::styled(self.spinner.frame_str().to_string(), accent)];
+        if let Some(label) = self.role_label {
+            spans.push(Span::styled(
+                format!(" {label}..."),
+                Style::default().fg(self.palette.text),
+            ));
+        } else {
+            spans.push(Span::styled(
+                " Working...",
+                Style::default().fg(self.palette.text),
+            ));
+        }
         if elapsed > 0 {
             spans.push(Span::styled(format!(" ({})", fmt_elapsed(elapsed)), dim));
         }
