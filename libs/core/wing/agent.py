@@ -490,26 +490,31 @@ class WingAgent:
         if len(result) <= cfg.max_length:
             return result
 
-        # Save full result to persistent temp file
-        tmp_dir = get_wing_home() / "tmp"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".txt",
-            prefix="wing_truncated_",
-            dir=str(tmp_dir),
-            delete=False,
-            encoding="utf-8",
-        ) as f:
-            f.write(result)
-            full_path = Path(f.name)
+        # Clamp keep_chars to avoid head/tail overlap
+        keep = min(cfg.keep_chars, len(result) // 2)
 
-        head = result[: cfg.keep_chars]
-        tail = result[-cfg.keep_chars :]
-        marker = (
-            f"... [truncated, original length: {len(result)} chars, "
-            f"full result saved to: {full_path}. Use Read tool to view it.]"
-        )
+        # Save full result to persistent temp file
+        try:
+            tmp_dir = get_wing_home() / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".txt",
+                prefix="wing_truncated_",
+                dir=str(tmp_dir),
+                delete=False,
+                encoding="utf-8",
+            ) as f:
+                f.write(result)
+                full_path = Path(f.name)
+            file_note = f"full result saved to: {full_path}. Use Read tool to view it."
+        except OSError:
+            log.warning("Failed to save truncated tool result to temp file")
+            file_note = "full result could not be saved to disk."
+
+        head = result[:keep]
+        tail = result[-keep:] if keep > 0 else ""
+        marker = f"... [truncated, original length: {len(result)} chars, {file_note}]"
         return f"{head}\n{marker}\n{tail}"
 
     async def _handle_message_error(self, error: Exception) -> None:

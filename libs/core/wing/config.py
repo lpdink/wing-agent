@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class OpenAIConfig(BaseModel):
@@ -71,6 +71,13 @@ class ToolResultTruncateConfig(BaseModel):
 
     max_length: int | None = 50_000
     keep_chars: int = 200
+
+    @field_validator("keep_chars")
+    @classmethod
+    def _keep_chars_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("keep_chars must be >= 0")
+        return v
 
 
 class GatewayConfig(BaseModel):
