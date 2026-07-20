@@ -104,6 +104,15 @@ steer: true
 # Preserve reasoning content in thinking blocks (don't strip).
 preserved_thinking: true
 
+# ── Tool Result Truncation ───────────────────────────────────
+# Built-in truncation for overly long tool results. When a tool
+# result exceeds max_length chars, the full output is saved to a
+# temp file and only head/tail chars are kept in the context.
+# Set max_length to null or a negative value to disable.
+tool_result_truncate:
+  max_length: 50000   # trigger threshold (chars). null or <0 disables
+  keep_chars: 200     # chars to keep at head and tail
+
 # ── Logging ──────────────────────────────────────────────────
 log:
   # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL.
