@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class OpenAIConfig(BaseModel):
@@ -62,6 +62,24 @@ class AgentConfig(BaseModel):
     yolo: bool | None = None
 
 
+class ToolResultTruncateConfig(BaseModel):
+    """Tool result truncation policy.
+
+    max_length: trigger threshold in chars. None or <0 disables truncation.
+    keep_chars: number of chars to keep at head and tail when truncating.
+    """
+
+    max_length: int | None = 50_000
+    keep_chars: int = 200
+
+    @field_validator("keep_chars")
+    @classmethod
+    def _keep_chars_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("keep_chars must be >= 0")
+        return v
+
+
 class GatewayConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 32523
@@ -86,6 +104,9 @@ class Config(BaseModel):
     commands: CommandsConfig = Field(default_factory=CommandsConfig)
     user_agent: UserAgentConfig = Field(default_factory=UserAgentConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    tool_result_truncate: ToolResultTruncateConfig = Field(
+        default_factory=ToolResultTruncateConfig
+    )
 
     @model_validator(mode="after")
     def _validate_agents(self) -> "Config":

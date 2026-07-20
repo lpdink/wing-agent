@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import tempfile
 import time
 from dataclasses import dataclass, field
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from wing.common.process import kill_process_group
@@ -464,14 +466,56 @@ class WingAgent:
         for tc in pending_tool_calls:
             log.info(f"exec_tool_calls: executing tool '{tc.name}' with id={tc.id}")
             result = await self._execute_tool(tc)
+            result = self._maybe_truncate(result)
             tc_results.append(
                 Message(
                     role="tool",
                     tool_call_id=tc.id,
-                    content=str(result),
+                    content=result,
                 )
             )
         return tc_results
+
+    def _maybe_truncate(self, result: str) -> str:
+        """Truncate tool result if it exceeds configured threshold.
+
+        Full result is saved to a temp file so the agent can read it
+        back via the Read tool if needed.
+        """
+        from wing.config import get_config, get_wing_home
+
+        cfg = get_config().tool_result_truncate
+        if cfg.max_length is None or cfg.max_length < 0:
+            return result
+        if len(result) <= cfg.max_length:
+            return result
+
+        # Clamp keep_chars to avoid head/tail overlap
+        keep = min(cfg.keep_chars, len(result) // 2)
+
+        # Save full result to persistent temp file
+        try:
+            tmp_dir = get_wing_home() / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".txt",
+                prefix="wing_truncated_",
+                dir=str(tmp_dir),
+                delete=False,
+                encoding="utf-8",
+            ) as f:
+                f.write(result)
+                full_path = Path(f.name)
+            file_note = f"full result saved to: {full_path}. Use Read tool to view it."
+        except OSError:
+            log.warning("Failed to save truncated tool result to temp file")
+            file_note = "full result could not be saved to disk."
+
+        head = result[:keep]
+        tail = result[-keep:] if keep > 0 else ""
+        marker = f"... [truncated, original length: {len(result)} chars, {file_note}]"
+        return f"{head}\n{marker}\n{tail}"
 
     async def _handle_message_error(self, error: Exception) -> None:
         """处理消息处理异常：通知"""
