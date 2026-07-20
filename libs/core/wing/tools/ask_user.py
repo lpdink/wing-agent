@@ -77,6 +77,8 @@ async def ask_user(
         JSON mapping each question id to the user's answer.
     """
     # Normalize and validate questions.
+    if not questions:
+        raise ToolError("At least one question is required.")
     normalized: list[AskQuestion] = []
     seen_ids: set[str] = set()
     for i, q in enumerate(questions):

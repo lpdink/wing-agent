@@ -258,6 +258,11 @@ impl App {
     ///
     /// Advances to the next question or sends the final structured response.
     fn handle_ask_flow_submit(&mut self, text: &str) -> bool {
+        // Reject whitespace-only input (honors "must provide an answer" invariant).
+        let text = text.trim();
+        if text.is_empty() {
+            return true; // consumed but no-op
+        }
         // Advance the flow and extract needed data to avoid borrow conflicts.
         let Some(result) = self.ask_flow.as_mut().map(|flow| {
             let advance_result = flow.advance(text);
