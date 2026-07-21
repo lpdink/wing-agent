@@ -14,13 +14,13 @@ pub mod turn_state;
 pub use intent::AppIntent;
 
 use anyhow::Result;
+use crossterm::cursor::Hide;
 use crossterm::cursor::MoveTo;
 use crossterm::cursor::Show;
 use crossterm::execute;
 use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
-use ratatui::layout::Rect;
 
 use self::transport::Transport;
 use self::transport::backoff;
@@ -37,14 +37,13 @@ use crate::ui::cells::tool_call::ToolCallBlock;
 use crate::ui::chat_view::ChatCell;
 use crate::ui::chat_view::ChatView;
 use crate::ui::chat_view::ChatViewWidget;
+use crate::ui::chat_view::ComposerTail;
 use crate::ui::header::build_header_lines;
 use crate::ui::input_area::InputAction;
 use crate::ui::input_area::InputArea;
-use crate::ui::input_area::InputAreaWidget;
 use crate::ui::input_area::cursor_screen_pos;
 use crate::ui::popup::ActivePopup;
 use crate::ui::popup::command::candidate_request_for;
-use crate::ui::popup::selection::SelectionPopup;
 use crate::ui::status_bar::StatusBar;
 use crate::ui::status_bar::StatusData;
 use crate::ui::status_bar::TurnUsage;
@@ -718,6 +717,7 @@ impl App {
                 self.status.reasoning_effort = info.reasoning_effort;
                 self.status.yolo = info.yolo;
                 self.status.session_name = info.session_name;
+                self.status.workdir = info.workdir;
                 tracing::info!(model = %self.status.model, "session info received");
             }
             FetchPayload::Commands(resp) => {
@@ -956,6 +956,7 @@ impl App {
         }
 
         // Everything else goes to the input area.
+        let text_before = self.input.text();
         match self.input.handle_key(key, self.terminal_width) {
             InputAction::Submit(text) => {
                 self.popup.active = ActivePopup::None;
@@ -965,6 +966,11 @@ impl App {
                 // Update popup based on new text.
                 self.update_popup();
             }
+        }
+        // Any content edit brings the input back into view (it may have
+        // been scrolled out while the user was reading history).
+        if self.input.text() != text_before {
+            self.chat.jump_bottom();
         }
     }
 
@@ -1371,9 +1377,10 @@ impl App {
                     self.status.session_name = Some(session_name);
                 }
 
-                // Restore model from agent snapshot.
+                // Restore model + workdir from agent snapshot.
                 if let Some(agent_info) = agent {
                     self.status.model = agent_info.model_name;
+                    self.status.workdir = agent_info.workspace;
                 }
 
                 self.refresh_copy_candidates();
@@ -1482,7 +1489,6 @@ impl App {
     /// Draw the UI.
     fn draw(&mut self, terminal: &mut WingTerminal) -> Result<()> {
         let mut chat_height: u16 = 0;
-        let mut input_rect = Rect::default();
 
         // Extract render context before the draw closure borrows self.
         let palette = self.palette;
@@ -1496,76 +1502,42 @@ impl App {
         terminal.draw(|frame| {
             let area = frame.area();
             self.terminal_width = area.width;
-            let popup_h = self.popup.height();
 
-            // Layout: status_bar (1) | chat (fill) | [popup] | [working] | input (dynamic)
-            let input_h = self.input.height(area.width);
-            let mut constraints = vec![
-                Constraint::Length(1), // status bar
-                Constraint::Min(3),    // chat view (min 3 rows)
-            ];
-            if popup_h > 0 {
-                constraints.push(Constraint::Length(popup_h)); // popup
-            }
-            if self.turn.working {
-                constraints.push(Constraint::Length(1)); // working indicator
-            }
-            constraints.push(Constraint::Length(input_h)); // input area
-
+            // Layout: status_bar (1) | chat-with-composer-tail (fill).
+            // The input, pop-down popup, working line and telemetry bar
+            // are rendered as the trailing segment of the scrollable chat
+            // content (see ChatViewWidget), not as separate layout blocks.
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints(constraints)
+                .constraints([Constraint::Length(1), Constraint::Min(3)])
                 .split(area);
 
-            // Status bar.
+            // Status bar (model top-left, cumulative usage, connection).
             frame.render_widget(
                 StatusBar::new(&self.status, self.is_wide(), &palette),
                 chunks[0],
             );
 
-            // Chat view (includes header when present).
+            // Chat view + composer tail.
             chat_height = chunks[1].height;
             let ctx = crate::render::renderable::CellContext {
                 palette: &palette,
                 thinking_mode,
                 layout: &layout,
             };
-            let widget = ChatViewWidget::new(&mut self.chat, ctx).with_usage(&self.turn.usage);
+            let popup_data = self.popup.active.render_data();
+            let tail = ComposerTail {
+                input: &mut self.input,
+                usage: &self.turn.usage,
+                workdir: self.status.workdir.as_deref(),
+                working: self.turn.working,
+                spinner: &self.turn.spinner,
+                started_at: self.turn.started_at,
+                role_label: goal_role_label.as_deref(),
+                popup: popup_data,
+            };
+            let widget = ChatViewWidget::new(&mut self.chat, ctx).with_tail(tail);
             frame.render_widget(widget, chunks[1]);
-
-            // Track chunk index for popup / working / input.
-            let mut idx = 2;
-
-            // Popup (if active).
-            if popup_h > 0 {
-                if let Some((rows, state, filter)) = self.popup.active.render_data() {
-                    frame.render_widget(
-                        SelectionPopup::new(rows, state, filter, &palette),
-                        chunks[idx],
-                    );
-                }
-                idx += 1;
-            }
-
-            // Working indicator (if active).
-            if self.turn.working {
-                if let Some(started_at) = self.turn.started_at {
-                    frame.render_widget(
-                        crate::ui::spinner::WorkingIndicatorWidget::new(
-                            &self.turn.spinner,
-                            started_at,
-                            &palette,
-                        )
-                        .with_role_label(goal_role_label.as_deref()),
-                        chunks[idx],
-                    );
-                }
-                idx += 1;
-            }
-
-            // Input area.
-            input_rect = chunks[idx];
-            frame.render_widget(InputAreaWidget::new(&mut self.input, &palette), chunks[idx]);
 
             // Toast overlay (rendered last, on top of everything).
             if let Some(ref toast) = self.toast
@@ -1582,13 +1554,20 @@ impl App {
 
         self.visible_height = chat_height as usize;
 
-        // Position cursor in the input area.
+        // Position cursor in the input area; hide it when the input is
+        // scrolled out of view.
         let size = terminal.size()?;
-        let (cursor_x, cursor_y) = cursor_screen_pos(&self.input, &input_rect);
-        let cursor_x = cursor_x.min(size.width.saturating_sub(1));
-        let cursor_y = cursor_y.min(size.height.saturating_sub(1));
-
-        execute!(terminal.backend_mut(), Show, MoveTo(cursor_x, cursor_y))?;
+        match self.chat.input_card_rect {
+            Some(rect) => {
+                let (cursor_x, cursor_y) = cursor_screen_pos(&self.input, &rect);
+                let cursor_x = cursor_x.min(size.width.saturating_sub(1));
+                let cursor_y = cursor_y.min(size.height.saturating_sub(1));
+                execute!(terminal.backend_mut(), Show, MoveTo(cursor_x, cursor_y))?;
+            }
+            None => {
+                execute!(terminal.backend_mut(), Hide)?;
+            }
+        }
 
         Ok(())
     }
@@ -1676,6 +1655,8 @@ pub async fn run_app(
                     TermEvent::Paste(text) => {
                         app.input.insert_str(&text);
                         app.update_popup();
+                        // Pasted content brings the input back into view.
+                        app.chat.jump_bottom();
                     }
                     TermEvent::Resize(_, _) => {}
                     TermEvent::Focus(focused) => {

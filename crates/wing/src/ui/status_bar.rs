@@ -32,6 +32,8 @@ pub struct StatusData {
     pub yolo: bool,
     pub agent: Option<String>,
     pub session_name: Option<String>,
+    /// Current session workdir (session workspace, not the TUI launch dir).
+    pub workdir: Option<String>,
     /// Cumulative prompt tokens for the session.
     pub session_prompt_tokens: i64,
     /// Cumulative completion tokens for the session.
@@ -55,6 +57,7 @@ impl Default for StatusData {
             yolo: false,
             agent: None,
             session_name: None,
+            workdir: None,
             session_prompt_tokens: 0,
             session_completion_tokens: 0,
             session_cached_tokens: 0,

@@ -66,6 +66,12 @@ class Session:
         self._context_manager = context_manager
         self._agent = agent
 
+        # 将 workspace 注入 agent state 作为 Bash 工具的 cwd。
+        # 无论是新建（workspace 参数）还是磁盘恢复（metadata），
+        # 都在此处统一设置，确保 resume 后 agent cwd 正确。
+        if self._session_workspace:
+            self._agent.state.set("cwd", str(Path(self._session_workspace).resolve()))
+
         self._initial_status = self._agent.get_status()
 
         log.info(f"Session initialized: {session_id}")
@@ -109,10 +115,6 @@ class Session:
             max_turns=template.max_turns,
             yolo=template.yolo,
         )
-
-        # 将 workspace 注入 agent state 作为 Bash 工具的 cwd
-        if workspace:
-            agent.state.set("cwd", str(Path(workspace).resolve()))
 
         session = cls(
             session_id=session_id,

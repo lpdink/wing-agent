@@ -202,6 +202,8 @@ pub struct SessionInfoResponse {
     pub reasoning_effort: Option<String>,
     pub yolo: bool,
     pub session_name: Option<String>,
+    #[serde(default)]
+    pub workdir: Option<String>,
     pub context_stats: ContextStatsInfo,
     #[serde(default)]
     pub skills_info: String,

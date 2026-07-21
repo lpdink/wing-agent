@@ -443,6 +443,7 @@ class TestSessionInfo:
         }
         mock_session.agent.yolo = False
         mock_session.session_name = "Test Session"
+        mock_session.session_workspace = "/tmp/ws"
         mock_session.agent.context_manager.get_context_stats.return_value = (5, 800)
         mock_session.agent.context_manager.get_skills_info.return_value = (
             "skill-a: desc"
@@ -464,10 +465,35 @@ class TestSessionInfo:
         assert data["reasoning_effort"] == "high"
         assert data["yolo"] is False
         assert data["session_name"] == "Test Session"
+        assert data["workdir"] == "/tmp/ws"
         assert data["context_stats"]["message_count"] == 5
         assert data["context_stats"]["total_tokens"] == 800
         assert data["skills_info"] == "skill-a: desc"
         assert data["system_prompt"] == "You are a helpful assistant."
+
+    def test_info_no_workspace(self, client: TestClient, mock_runtime):
+        """Session 无 workspace 时 workdir 为 null。"""
+        mock_session = MagicMock()
+        mock_session.agent.get_status.return_value = {
+            "model": "gpt-4o",
+            "api_url": "https://api.openai.com",
+            "tools": [],
+            "total_tokens": 0,
+            "context_window_tokens": 128000,
+            "thinking": False,
+            "reasoning_effort": None,
+        }
+        mock_session.agent.yolo = False
+        mock_session.session_name = None
+        mock_session.session_workspace = None
+        mock_session.agent.context_manager.get_context_stats.return_value = (0, 0)
+        mock_session.agent.context_manager.get_skills_info.return_value = ""
+        mock_session.agent.context_manager.system_prompt.content = ""
+        mock_runtime.get_session.return_value = mock_session
+
+        resp = client.get("/api/session/info", params={"session_id": "test-id"})
+        assert resp.status_code == 200
+        assert resp.json()["workdir"] is None
 
     def test_info_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
