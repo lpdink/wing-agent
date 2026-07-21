@@ -27,7 +27,12 @@ pub async fn start_gateway(host: &str, port: u16) -> anyhow::Result<()> {
     }
 
     // Port might be in use by a non-gateway service.
-    if std::net::TcpStream::connect(format!("{host}:{port}")).is_ok() {
+    // Use connect_timeout with a short timeout to avoid hanging on WSL2
+    // where SYN to a closed port may be silently dropped (no RST).
+    let addr: std::net::SocketAddr = format!("{host}:{port}")
+        .parse()
+        .map_err(|_| anyhow::anyhow!("cannot parse {host}:{port}"))?;
+    if std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok() {
         anyhow::bail!(
             "Port {port} is already in use by another process (not wing-gateway). \
              Use --port to specify a different port."
