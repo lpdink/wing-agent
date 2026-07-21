@@ -199,7 +199,7 @@ class Tool(BaseModel):
                 )
 
             properties[p.name] = prop
-            if not p.default:
+            if p.default is None:
                 required.append(p.name)
 
         return {
