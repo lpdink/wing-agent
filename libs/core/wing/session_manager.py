@@ -55,7 +55,7 @@ class SessionManager:
     外部方法：
       - create_session：创建新 session
       - fork_session：从指定消息分叉
-      - switch_session：切换到已有 session
+      - resume_session：恢复已有 session（支持模糊匹配）
 
     路由表由 WingRuntime 统一管理，SM 不感知 client_id 和 contextvars。
     """
@@ -164,35 +164,54 @@ class SessionManager:
         return matches[0] if len(matches) == 1 else None
 
     def resolve_session_id(self, session_id: str) -> str | None:
-        """解析 session id（支持模糊匹配），返回完全匹配的 session_id。"""
+        """解析 session id（支持模糊匹配），返回完全匹配的 session_id。
+
+        优先精确匹配内存中的 session，再走文件系统模糊匹配。
+        """
+        if session_id in self._sessions:
+            return session_id
         matched_path = self._resolve_session(session_id)
         if matched_path is None:
             return None
         return matched_path.name
 
-    def load_session_from_disk(self, session_id: str) -> Session:
-        """从磁盘加载已有 session 到内存。
-
-        使用默认模板恢复（原始模板信息未持久化）。
-        调用者应确保 session_id 已解析且不在内存中。
+    def resume_session(
+        self,
+        session_id: str,
+        template: "AgentTemplate | None" = None,
+    ) -> Session:
+        """恢复已有 session（支持模糊匹配）。已在内存中则直接返回。
 
         Args:
-            session_id: 已解析的完整 session ID
+            session_id: 目标 session ID（支持前缀/包含匹配）
+            template: 可选模板。传入时使用该模板恢复（如从 source agent 反推）；
+                      不传时使用默认模板。
 
         Returns:
             恢复后的 Session 实例
+
+        Raises:
+            LookupError: session 不存在
         """
-        template = self._template_manager.default
+        resolved = self.resolve_session_id(session_id)
+        if resolved is None:
+            raise LookupError(f"Session not found: {session_id}")
+
+        existing = self._sessions.get(resolved)
+        if existing is not None:
+            return existing
+
+        tpl = template or self._template_manager.default
         messages: TrackedList[Message] = TrackedList.load(
-            self._sessions_path / session_id, Message
+            self._sessions_path / resolved, Message
         )
         session = Session.from_template(
-            template=template,
-            session_id=session_id,
+            template=tpl,
+            session_id=resolved,
             messages=messages,
         )
-        self._sessions[session_id] = session
-        log.info(f"Session loaded from disk: {session_id}")
+        self._sessions[resolved] = session
+        log.info(f"Session resumed: {resolved}")
         return session
 
     def import_messages(
@@ -275,45 +294,6 @@ class SessionManager:
         self._sessions[new_session_id] = new_session
 
         return new_session, draft
-
-    def switch_session(
-        self,
-        session_id: str,
-        target_session_id: str,
-    ) -> Session | None:
-        """切换到已有的 target_session_id。"""
-        source = self._sessions.get(session_id)
-        if source is None:
-            return None
-
-        # 解析 session_id
-        resolved_id = self.resolve_session_id(target_session_id)
-        if resolved_id is None:
-            return None
-
-        # 如果目标 session 已在 _sessions 中，直接返回
-        target = self._sessions.get(resolved_id)
-        if target is not None:
-            return target
-
-        # 目标 session 不在 _sessions 中，需要从磁盘恢复
-        # 从旧 agent 抽取模板
-        template = AgentTemplate.from_agent(source.agent, name=source.template_name)
-
-        # 加载消息
-        messages: TrackedList[Message] = TrackedList.load(
-            self._sessions_path / resolved_id, Message
-        )
-
-        new_session = Session.from_template(
-            template=template,
-            session_id=resolved_id,
-            messages=messages,
-            workspace=source.session_workspace,
-        )
-        self._sessions[resolved_id] = new_session
-
-        return new_session
 
     # ============================================================
     # 外部方法：查询

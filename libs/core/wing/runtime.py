@@ -140,19 +140,7 @@ class WingRuntime:
         Raises:
             LookupError: session 不存在
         """
-        existing = self.sm.get_session(session_id)
-        if existing is not None:
-            return existing
-
-        resolved_id = self.sm.resolve_session_id(session_id)
-        if resolved_id is None:
-            raise LookupError(f"Session not found: {session_id}")
-
-        existing = self.sm.get_session(resolved_id)
-        if existing is not None:
-            return existing
-
-        return self.sm.load_session_from_disk(resolved_id)
+        return self.sm.resume_session(session_id)
 
     def fork_session(
         self,

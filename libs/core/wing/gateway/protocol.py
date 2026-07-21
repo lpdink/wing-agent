@@ -240,6 +240,10 @@ class SessionInfoResponse(BaseModel):
     )
     yolo: bool = Field(description="yolo 模式是否开启")
     session_name: str | None = Field(default=None, description="session 名称")
+    workdir: str | None = Field(
+        default=None,
+        description="session 工作目录（session workspace，非进程启动目录）",
+    )
     context_stats: ContextStatsInfo = Field(description="上下文统计信息")
     skills_info: str = Field(default="", description="已安装的 skills 信息")
     system_prompt: str = Field(default="", description="完整系统提示词")
