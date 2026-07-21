@@ -109,6 +109,16 @@ impl InputArea {
 
     // ── Cursor helpers ──────────────────────────────────────────
 
+    /// Whether the cursor can move up (not on the first row).
+    pub fn can_move_up(&self) -> bool {
+        self.cursor_row > 0
+    }
+
+    /// Whether the cursor can move down (not on the last row).
+    pub fn can_move_down(&self) -> bool {
+        self.cursor_row < self.lines.len() - 1
+    }
+
     /// Length of the current line in chars.
     pub(crate) fn current_line_len(&self) -> usize {
         self.lines[self.cursor_row].chars().count()

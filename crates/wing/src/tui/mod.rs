@@ -2,20 +2,19 @@
 //!
 //! Borrowed concepts from codex-rs/tui/src/tui.rs (Apache 2.0).
 
+use std::fmt;
 use std::io;
 use std::io::Stdout;
 
 use anyhow::Result;
+use crossterm::Command;
 use crossterm::event::DisableBracketedPaste;
 use crossterm::event::DisableFocusChange;
-use crossterm::event::DisableMouseCapture;
 use crossterm::event::EnableBracketedPaste;
 use crossterm::event::EnableFocusChange;
-use crossterm::event::EnableMouseCapture;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
-use crossterm::event::MouseEventKind;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 use ratatui::Terminal;
@@ -24,22 +23,65 @@ use tokio::sync::mpsc;
 
 pub type WingTerminal = Terminal<CrosstermBackend<Stdout>>;
 
-/// Events from the terminal (keyboard, mouse, resize, ticks, paste, focus).
+/// Events from the terminal (keyboard, resize, paste, focus).
 #[derive(Debug)]
 pub enum TermEvent {
     Key(KeyEvent),
-    Mouse(MouseAction),
     Paste(String),
     Resize(u16, u16),
     Focus(bool),
     Tick,
 }
 
-/// Simplified mouse actions we care about.
-#[derive(Debug)]
-pub enum MouseAction {
-    ScrollUp,
-    ScrollDown,
+// ---------------------------------------------------------------------------
+// Alternate Scroll (DECSET 1007)
+//
+// Tells the terminal to translate scroll-wheel / trackpad gestures into
+// Up/Down arrow key sequences while in the alternate screen. This gives us
+// scroll support *without* enabling full mouse capture, so native text
+// selection (click-drag to copy) still works without holding Shift.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EnableAlternateScroll;
+
+impl Command for EnableAlternateScroll {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        write!(f, "\x1b[?1007h")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        Err(io::Error::other(
+            "EnableAlternateScroll: WinAPI not supported, use ANSI",
+        ))
+    }
+
+    #[cfg(windows)]
+    fn is_ansi_code_supported(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DisableAlternateScroll;
+
+impl Command for DisableAlternateScroll {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        write!(f, "\x1b[?1007l")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        Err(io::Error::other(
+            "DisableAlternateScroll: WinAPI not supported, use ANSI",
+        ))
+    }
+
+    #[cfg(windows)]
+    fn is_ansi_code_supported(&self) -> bool {
+        true
+    }
 }
 
 /// Initialize the terminal for TUI rendering.
@@ -49,8 +91,8 @@ pub fn init_terminal() -> Result<WingTerminal> {
     crossterm::execute!(
         stdout,
         EnterAlternateScreen,
+        EnableAlternateScroll,
         EnableBracketedPaste,
-        EnableMouseCapture,
         EnableFocusChange,
         crossterm::cursor::Hide
     )?;
@@ -63,9 +105,9 @@ pub fn init_terminal() -> Result<WingTerminal> {
 pub fn restore_terminal(terminal: &mut WingTerminal) -> Result<()> {
     crossterm::execute!(
         terminal.backend_mut(),
+        DisableAlternateScroll,
         LeaveAlternateScreen,
         DisableBracketedPaste,
-        DisableMouseCapture,
         DisableFocusChange,
         crossterm::cursor::Show
     )?;
@@ -92,18 +134,6 @@ pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
                             break;
                         }
                     }
-                    Ok(crossterm::event::Event::Mouse(mouse)) => {
-                        let action = match mouse.kind {
-                            MouseEventKind::ScrollUp => Some(MouseAction::ScrollUp),
-                            MouseEventKind::ScrollDown => Some(MouseAction::ScrollDown),
-                            _ => None,
-                        };
-                        if let Some(action) = action
-                            && tx.send(TermEvent::Mouse(action)).await.is_err()
-                        {
-                            break;
-                        }
-                    }
                     Ok(crossterm::event::Event::Resize(w, h)) => {
                         if tx.send(TermEvent::Resize(w, h)).await.is_err() {
                             break;
@@ -120,6 +150,9 @@ pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
                     Ok(crossterm::event::Event::FocusLost) => {
                         let _ = tx.send(TermEvent::Focus(false)).await;
                     }
+                    // Mouse events are not captured (no EnableMouseCapture),
+                    // so they won't arrive here. Ignore anything else.
+                    Ok(_) => {}
                     Err(e) => {
                         tracing::error!("crossterm read error: {e}");
                         break;

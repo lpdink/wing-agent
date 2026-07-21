@@ -313,6 +313,14 @@ impl ChatView {
         self.cells.is_empty()
     }
 
+    /// Whether auto-scroll is active (view is pinned to the bottom).
+    ///
+    /// Approximated by the auto-scroll flag rather than a geometric
+    /// comparison of `scroll_offset` vs total height.
+    pub fn is_at_bottom(&self) -> bool {
+        self.auto_scroll
+    }
+
     /// Scroll up by N lines.
     pub fn scroll_up(&mut self, n: usize) {
         self.auto_scroll = false;
