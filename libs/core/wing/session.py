@@ -257,6 +257,31 @@ class Session:
         """当前 session 的工作目录（来自 metadata.json 或构造参数）。"""
         return self._session_workspace
 
+    def set_workspace(self, path: str) -> None:
+        """切换 session 工作目录。
+
+        校验路径合法性（存在且为目录），更新 agent cwd、
+        ContextManager workspace，并持久化到 metadata.json。
+
+        Args:
+            path: 目标路径（支持 ~ 展开）
+
+        Raises:
+            ValueError: 路径不存在或不是目录
+        """
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.exists():
+            raise ValueError(f"workspace path does not exist: {resolved}")
+        if not resolved.is_dir():
+            raise ValueError(f"workspace path is not a directory: {resolved}")
+
+        resolved_str = str(resolved)
+        self._session_workspace = resolved_str
+        self._agent.state.set("cwd", resolved_str)
+        self._context_manager._workspace = resolved
+        self._write_metadata()
+        log.info(f"Session {self._session_id}: workspace changed to {resolved_str}")
+
     # ── 序列化方法 ──────────────────────────────────
 
     def to_agent_info(self) -> "AgentInfo":
@@ -361,8 +386,9 @@ class Session:
         thinking: bool | None = None,
         reasoning_effort: str | None = None,
         yolo: bool | None = None,
+        workspace: str | None = None,
     ) -> None:
-        """更新 session 状态。按 template → model → title → thinking → effort → yolo 顺序执行。
+        """更新 session 状态。按 template → model → title → thinking → effort → yolo → workspace 顺序执行。
 
         Args:
             model: 切换模型
@@ -371,6 +397,7 @@ class Session:
             thinking: 开关 thinking 模式
             reasoning_effort: 推理力度
             yolo: 开关 yolo 模式
+            workspace: 切换工作目录
         """
         if template is not None:
             await self.switch_template(template)
@@ -389,6 +416,9 @@ class Session:
 
         if yolo is not None:
             self.agent.set_yolo(yolo)
+
+        if workspace is not None:
+            self.set_workspace(workspace)
 
     def touch_last_interaction(self) -> None:
         """更新最后互动时间并写入 metadata.json。"""

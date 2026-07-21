@@ -306,6 +306,7 @@ class UpdateSessionRequest(BaseModel):
         default=None, description="推理力度: low|medium|high|xhigh|max"
     )
     yolo: bool | None = Field(default=None, description="开关 yolo 模式")
+    workspace: str | None = Field(default=None, description="切换工作目录路径")
 
 
 class UpdateSessionResponse(BaseModel):

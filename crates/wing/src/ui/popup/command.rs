@@ -94,6 +94,12 @@ static TUI_ONLY_COMMANDS: LazyLock<Vec<CommandInfo>> = LazyLock::new(|| {
             params: "<name>".into(),
         },
         CommandInfo {
+            name: "workdir".into(),
+            aliases: vec![],
+            description: "Switch working directory".into(),
+            params: "<path>".into(),
+        },
+        CommandInfo {
             name: "think".into(),
             aliases: vec!["t".into()],
             description: "Toggle thinking / set effort".into(),

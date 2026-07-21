@@ -298,6 +298,7 @@ class WingRuntime:
         thinking: bool | None = None,
         reasoning_effort: str | None = None,
         yolo: bool | None = None,
+        workspace: str | None = None,
     ) -> None:
         """统一更新 session 状态。
 
@@ -305,6 +306,7 @@ class WingRuntime:
 
         Raises:
             LookupError: session 或 template 不存在
+            ValueError: workspace 路径不合法
         """
         session = self._require_session(session_id)
 
@@ -326,6 +328,7 @@ class WingRuntime:
             thinking=thinking,
             reasoning_effort=reasoning_effort,
             yolo=yolo,
+            workspace=workspace,
         )
 
         # 计算 event 字段——agent 切换会重置 thinking/reasoning_effort/yolo

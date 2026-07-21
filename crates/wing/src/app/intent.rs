@@ -86,7 +86,7 @@ pub enum AppIntent {
     /// Fetch available agent template list via HTTP API for popup candidates.
     FetchAgents,
 
-    /// Update session state (model, agent, title, thinking, reasoning_effort, yolo) via HTTP API.
+    /// Update session state (model, agent, title, thinking, reasoning_effort, yolo, workspace) via HTTP API.
     UpdateSession {
         model: Option<String>,
         agent: Option<String>,
@@ -94,6 +94,7 @@ pub enum AppIntent {
         thinking: Option<bool>,
         reasoning_effort: Option<String>,
         yolo: Option<bool>,
+        workspace: Option<String>,
     },
 
     /// Set the terminal title via OSC 0 escape sequence.
@@ -143,6 +144,7 @@ impl AppIntent {
             thinking: None,
             reasoning_effort: None,
             yolo: None,
+            workspace: None,
         };
         f(&mut intent);
         intent
@@ -195,6 +197,15 @@ impl AppIntent {
         Self::update_session(|i| {
             if let Self::UpdateSession { yolo, .. } = i {
                 *yolo = Some(enabled);
+            }
+        })
+    }
+
+    /// Update the session working directory.
+    pub fn set_workdir(path: String) -> Self {
+        Self::update_session(|i| {
+            if let Self::UpdateSession { workspace, .. } = i {
+                *workspace = Some(path);
             }
         })
     }

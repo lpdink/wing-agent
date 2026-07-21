@@ -178,6 +178,7 @@ pub async fn execute_intent(
             thinking,
             reasoning_effort,
             yolo,
+            workspace,
         } => {
             if let Some(t) = transport {
                 let req = wing_api_client::models::UpdateSessionRequest {
@@ -188,6 +189,7 @@ pub async fn execute_intent(
                     thinking,
                     reasoning_effort: reasoning_effort.clone(),
                     yolo,
+                    workspace: workspace.clone(),
                 };
                 match t.http.update_session(&req).await {
                     Ok(_) => apply_update_session(
@@ -198,12 +200,13 @@ pub async fn execute_intent(
                         thinking,
                         reasoning_effort,
                         yolo,
+                        workspace,
                     ),
                     Err(e) => {
-                        app.show_toast(Toast::error(
-                            format!("Update failed: {e}"),
-                            std::time::Duration::from_secs(3),
-                        ));
+                        app.chat
+                            .push(crate::ui::chat_view::ChatCell::ErrorMessage(format!(
+                                "Update failed: {e}"
+                            )));
                     }
                 }
             }
@@ -560,6 +563,7 @@ pub async fn execute_intent(
 /// Apply optimistic local status update after a successful UpdateSession HTTP call.
 ///
 /// Updates `app.status` fields and shows a summary toast.
+#[allow(clippy::too_many_arguments)]
 fn apply_update_session(
     app: &mut App,
     model: Option<String>,
@@ -568,6 +572,7 @@ fn apply_update_session(
     thinking: Option<bool>,
     reasoning_effort: Option<String>,
     yolo: Option<bool>,
+    workspace: Option<String>,
 ) {
     let on_off = |b: bool| if b { "on" } else { "off" };
 
@@ -579,6 +584,7 @@ fn apply_update_session(
         thinking.map(|t| format!("Think: {}", on_off(t))),
         reasoning_effort.as_ref().map(|e| format!("Effort: {e}")),
         yolo.map(|y| format!("YOLO: {}", on_off(y))),
+        workspace.as_ref().map(|w| format!("Workdir: {w}")),
     ]
     .into_iter()
     .flatten()
@@ -587,6 +593,10 @@ fn apply_update_session(
     // Apply to local status.
     app.status
         .apply_session_update(model, agent, title, thinking, reasoning_effort, yolo);
+
+    if let Some(w) = workspace {
+        app.status.workdir = Some(w);
+    }
 
     if !parts.is_empty() {
         app.show_toast(Toast::info(

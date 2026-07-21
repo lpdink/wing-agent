@@ -324,6 +324,7 @@ async def update_session(
             body.thinking,
             body.reasoning_effort,
             body.yolo,
+            body.workspace,
         )
     ):
         raise HTTPException(
@@ -339,6 +340,7 @@ async def update_session(
             thinking=body.thinking,
             reasoning_effort=body.reasoning_effort,
             yolo=body.yolo,
+            workspace=body.workspace,
         )
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
