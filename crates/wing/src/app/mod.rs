@@ -117,6 +117,8 @@ pub struct App {
     connected: bool,
     /// Goal orchestration state (None = normal mode).
     pub(crate) goal: Option<goal::GoalState>,
+    /// TUI 启动时的工作目录，用于 /new 创建 session 时传递 workspace。
+    launch_workspace: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +155,7 @@ fn parse_string_arg(text: &str, prefix: &str) -> Option<String> {
 }
 
 impl App {
-    pub fn new(session_id: String, config: AppConfig) -> Self {
+    pub fn new(session_id: String, config: AppConfig, launch_workspace: Option<String>) -> Self {
         let palette = ThemePalette::from_config(&config.colors);
         let max_input_lines = config.layout.max_input_lines;
         let mut chat = ChatView::new();
@@ -181,6 +183,7 @@ impl App {
             palette,
             connected: true,
             goal: None,
+            launch_workspace,
         }
     }
 
@@ -443,7 +446,9 @@ impl App {
                 true
             }
             NEW_COMMAND => {
-                self.push_intent(AppIntent::CreateSession { workspace: None });
+                self.push_intent(AppIntent::CreateSession {
+                    workspace: self.launch_workspace.clone(),
+                });
                 true
             }
             _ => self.try_http_command(text),
@@ -495,6 +500,19 @@ impl App {
                 } else {
                     false
                 }
+            }
+            _ if text == "/workdir" || text.starts_with("/workdir ") => {
+                let args = text.strip_prefix("/workdir").unwrap().trim();
+                if args.is_empty() {
+                    let wd = self.status.workdir.as_deref().unwrap_or("(not set)");
+                    self.show_toast(Toast::info(
+                        format!("workdir: {wd}"),
+                        std::time::Duration::from_secs(3),
+                    ));
+                } else {
+                    self.push_intent(AppIntent::set_workdir(args.to_string()));
+                }
+                true
             }
             _ if text == "/think" || text.starts_with("/think ") => {
                 let args = text.strip_prefix("/think").unwrap().trim();
@@ -1581,8 +1599,9 @@ pub async fn run_app(
     ws_url: String,
     http_base: String,
     config: AppConfig,
+    launch_workspace: Option<String>,
 ) -> Result<()> {
-    let mut app = App::new(session_id, config);
+    let mut app = App::new(session_id, config, launch_workspace);
     let mut term_events = crate::tui::spawn_event_stream();
     let mut transport = Some(transport);
     let mut reconnect_attempt: u32 = 0;

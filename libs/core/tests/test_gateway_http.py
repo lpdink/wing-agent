@@ -558,6 +558,7 @@ class TestSessionUpdate:
             thinking=None,
             reasoning_effort=None,
             yolo=None,
+            workspace=None,
         )
 
     def test_update_agent(self, client: TestClient, mock_runtime):
@@ -651,6 +652,38 @@ class TestSessionUpdate:
             json={"session_id": "xxx", "model": "gpt-4o"},
         )
         assert resp.status_code == 404
+
+    def test_update_workspace(self, client: TestClient, mock_runtime):
+        """切换工作目录。"""
+        mock_runtime.update_session = AsyncMock()
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "workspace": "/tmp"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        mock_runtime.update_session.assert_called_once_with(
+            session_id="test-id",
+            model=None,
+            agent=None,
+            title=None,
+            thinking=None,
+            reasoning_effort=None,
+            yolo=None,
+            workspace="/tmp",
+        )
+
+    def test_update_workspace_invalid(self, client: TestClient, mock_runtime):
+        """workspace 路径不合法返回 400。"""
+        mock_runtime.update_session = AsyncMock(
+            side_effect=ValueError("workspace path does not exist: /nonexistent")
+        )
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "workspace": "/nonexistent"},
+        )
+        assert resp.status_code == 400
+        assert "does not exist" in resp.json()["detail"]
 
 
 # ============================================================

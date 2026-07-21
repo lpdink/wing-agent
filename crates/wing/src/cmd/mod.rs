@@ -316,6 +316,7 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
         ws_url,
         http_base,
         config,
+        workspace,
     )
     .await;
 
