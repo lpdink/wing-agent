@@ -27,7 +27,18 @@ pub async fn start_gateway(host: &str, port: u16) -> anyhow::Result<()> {
     }
 
     // Port might be in use by a non-gateway service.
-    if std::net::TcpStream::connect(format!("{host}:{port}")).is_ok() {
+    // Use a short timeout: on WSL2/container environments, SYN to a closed
+    // port may be silently dropped (no RST), causing connect to block for
+    // the kernel's full TCP retry window (~63s).
+    let port_in_use = matches!(
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect(format!("{host}:{port}")),
+        )
+        .await,
+        Ok(Ok(_))
+    );
+    if port_in_use {
         anyhow::bail!(
             "Port {port} is already in use by another process (not wing-gateway). \
              Use --port to specify a different port."
