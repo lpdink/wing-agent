@@ -2,11 +2,13 @@
 """Explorer — read-only sub-agent tool for code exploration.
 
 Creates a lightweight sub-agent with Read/Glob/Grep tools only.
-Runs asynchronously — the tool returns immediately with a launch confirmation,
-and the parent agent is notified via inbox when the sub-agent completes.
+By default runs in foreground (blocking) — the tool waits for the sub-agent
+to finish and returns results directly. Set run_in_background=true to launch
+asynchronously and get notified via inbox when complete.
 """
 
 import asyncio
+import re
 from pathlib import Path
 
 from wing.agent import WingAgent
@@ -43,29 +45,34 @@ _active_explorers: set[asyncio.Task] = set()
 async def explorer_agent(
     name: str,
     task_detail: str,
-    agent: WingAgent,
+    run_in_background: bool = False,
+    agent: WingAgent | None = None,
 ) -> str:
     """Launch a read-only Explorer sub-agent to investigate code or files.
 
     The Explorer has access to Read, Glob, and Grep tools only.
-    Runs asynchronously — you will be notified when results are ready.
+
+    By default this tool blocks until the Explorer finishes and returns
+    results directly. Set run_in_background=true to launch asynchronously
+    and continue with other work — you will be notified when it completes.
 
     IMPORTANT: The Explorer has NO context about your conversation.
-    You MUST provide a self-contained, detailed task description including:
-    - Absolute paths of directories/files to explore
-    - Specific goals and what information to gather
-    - Expected output format
+    Provide a self-contained task description with absolute paths and goals.
 
     Args:
-        name: Short task name (used as result filename).
+        name: Short task name (3-5 words).
         task_detail: Detailed, self-contained exploration task description.
+        run_in_background: Set to true to run in background. Default false (blocking).
     """
+    assert agent is not None  # always injected by tool_registry
+
+    safe_name = _sanitize_name(name)
     sub_sid = generate_session_id()
 
     sessions_path = get_config().sessions.resolved_path()
     parent_dir = sessions_path / agent.session_id
     sub_dir = parent_dir / "subagents" / sub_sid
-    result_path = sub_dir / f"{name}_result.md"
+    result_path = sub_dir / f"{safe_name}_result.md"
 
     # TrackedList — persists sub-agent message history
     messages: TrackedList[Message] = TrackedList(sub_dir)
@@ -79,9 +86,6 @@ async def explorer_agent(
     )
 
     # Sub-agent — same model, stream=False, read-only tools
-    # NOTE: sub-agent events broadcast through the global EventBus just like
-    #       the parent agent. TUI filters by session_id; other subscribers
-    #       (e.g. Gateway) must do the same if they don't want sub-agent events.
     ro_tools = [tool_registry.get_tool(n) for n in ("Read", "Glob", "Grep")]
     sub_agent = WingAgent(
         model=agent.model,
@@ -91,33 +95,60 @@ async def explorer_agent(
         tools=[t for t in ro_tools if t is not None],
     )
 
-    # Fire-and-forget: run in background, return immediately.
-    task = asyncio.create_task(
-        _run_explorer_background(
-            sub_agent, sub_sid, sub_dir, name, task_detail, result_path, agent
+    if run_in_background:
+        # Fire-and-forget: run in background, return immediately.
+        task = asyncio.create_task(
+            _run_explorer_background(
+                sub_agent,
+                sub_sid,
+                sub_dir,
+                name,
+                safe_name,
+                task_detail,
+                result_path,
+                agent,
+            )
         )
-    )
-    _active_explorers.add(task)
-    task.add_done_callback(_active_explorers.discard)
+        _active_explorers.add(task)
+        task.add_done_callback(_active_explorers.discard)
 
-    return (
-        f"Explorer task '{name}' launched (session: {sub_sid}). "
-        "Sub-agent results typically take several minutes. "
-        "If you have other tasks, proceed with them or consider dispatching more sub-agents. "
-        "If not, simply wait — you will be notified when results are ready."
-    )
+        return (
+            f"Explorer task '{name}' launched in background (session: {sub_sid}). "
+            "You will be notified when results are ready. "
+            "Continue with other work in the meantime."
+        )
+
+    # ── Foreground (blocking) path ──
+    try:
+        content_parts = await _collect_explorer_output(sub_agent, sub_sid, task_detail)
+        _write_result(sub_dir, safe_name, content_parts)
+        body = (
+            "\n".join(content_parts)
+            if content_parts
+            else "Explorer returned no results."
+        )
+        return body
+    except asyncio.TimeoutError:
+        _write_result(sub_dir, safe_name, [])
+        return (
+            f"Explorer task '{name}' timed out after {_TIMEOUT_SECONDS}s. "
+            "No results were produced."
+        )
+    except Exception as e:
+        return f"Explorer task '{name}' failed with error: {e}"
+    finally:
+        await sub_agent.shutdown()
 
 
-async def _run_explorer_background(
+async def _collect_explorer_output(
     sub_agent: WingAgent,
     sub_sid: str,
-    sub_dir: Path,
-    name: str,
     task_detail: str,
-    result_path: Path,
-    parent_agent: WingAgent,
-) -> None:
-    """Background task: run explorer, write results, notify parent via post()."""
+) -> list[str]:
+    """Run sub-agent and collect its text output until DoneEvent.
+
+    Raises asyncio.TimeoutError if the sub-agent exceeds _TIMEOUT_SECONDS.
+    """
     done_event = asyncio.Event()
     content_parts: list[str] = []
 
@@ -132,28 +163,58 @@ async def _run_explorer_background(
     event_bus.subscribe(on_event)
     try:
         await sub_agent.post(task_detail)
+        await asyncio.wait_for(done_event.wait(), timeout=_TIMEOUT_SECONDS)
+    finally:
+        event_bus.unsubscribe(on_event)
 
-        try:
-            await asyncio.wait_for(done_event.wait(), timeout=_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            _write_result(sub_dir, name, content_parts)
-            await parent_agent.post(
-                f"[Explorer] Task '{name}' timed out after {_TIMEOUT_SECONDS}s. "
-                f"Partial results saved to: {result_path}"
-            )
-            return
+    return content_parts
 
-        _write_result(sub_dir, name, content_parts)
+
+async def _run_explorer_background(
+    sub_agent: WingAgent,
+    sub_sid: str,
+    sub_dir: Path,
+    name: str,
+    safe_name: str,
+    task_detail: str,
+    result_path: Path,
+    parent_agent: WingAgent,
+) -> None:
+    """Background task: run explorer, write results, notify parent via post()."""
+    try:
+        content_parts = await _collect_explorer_output(sub_agent, sub_sid, task_detail)
+        _write_result(sub_dir, safe_name, content_parts)
         await parent_agent.post(
             f"[Explorer] Task '{name}' completed. "
             f"Results saved to: {result_path}. "
             f"Read the file for details."
         )
+    except asyncio.TimeoutError:
+        _write_result(sub_dir, safe_name, [])
+        await parent_agent.post(
+            f"[Explorer] Task '{name}' timed out after {_TIMEOUT_SECONDS}s."
+        )
     except Exception as e:
         await parent_agent.post(f"[Explorer] Task '{name}' failed with error: {e}")
     finally:
-        event_bus.unsubscribe(on_event)
         await sub_agent.shutdown()
+
+
+def _sanitize_name(name: str) -> str:
+    """Sanitize task name for safe use as a filename component.
+
+    Replaces whitespace with hyphens, strips path separators and traversal
+    sequences, and removes characters outside [a-zA-Z0-9._-].
+    """
+    # Collapse whitespace (spaces, tabs, etc.) into single hyphen
+    s = re.sub(r"\s+", "-", name.strip())
+    # Remove path separators and traversal
+    s = s.replace("/", "").replace("\\", "").replace("..", "")
+    # Keep only safe filename characters
+    s = re.sub(r"[^a-zA-Z0-9._-]", "", s)
+    # Collapse multiple hyphens
+    s = re.sub(r"-{2,}", "-", s).strip("-")
+    return s or "explorer"
 
 
 def _write_result(dir_path: Path, name: str, parts: list[str]) -> None:
