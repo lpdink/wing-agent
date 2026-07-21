@@ -26,7 +26,6 @@ use self::transport::Transport;
 use self::transport::backoff;
 use self::transport::try_reconnect;
 use crate::protocol::WingEvent;
-use crate::tui::MouseAction;
 use crate::tui::TermEvent;
 use crate::tui::WingTerminal;
 use crate::tui::is_quit_key;
@@ -954,6 +953,32 @@ impl App {
                 self.chat.scroll_down(1, self.visible_height);
                 return;
             }
+            // Alternate-scroll mode translates trackpad/wheel into plain
+            // Up/Down arrows. Route them to chat scrolling when:
+            //   - the user is reading history (not pinned to the bottom), OR
+            //   - the input cursor cannot move further in that direction
+            //     (e.g. single-line input + Up → scroll history, like a shell).
+            // Otherwise fall through to the input area for cursor movement.
+            crossterm::event::KeyCode::Up
+                if !key.modifiers.intersects(
+                    crossterm::event::KeyModifiers::CONTROL
+                        | crossterm::event::KeyModifiers::ALT
+                        | crossterm::event::KeyModifiers::SHIFT,
+                ) && (!self.chat.is_at_bottom() || !self.input.can_move_up()) =>
+            {
+                self.chat.scroll_up(3);
+                return;
+            }
+            crossterm::event::KeyCode::Down
+                if !key.modifiers.intersects(
+                    crossterm::event::KeyModifiers::CONTROL
+                        | crossterm::event::KeyModifiers::ALT
+                        | crossterm::event::KeyModifiers::SHIFT,
+                ) && (!self.chat.is_at_bottom() || !self.input.can_move_down()) =>
+            {
+                self.chat.scroll_down(3, self.visible_height);
+                return;
+            }
             crossterm::event::KeyCode::Home
                 if key
                     .modifiers
@@ -1663,14 +1688,6 @@ pub async fn run_app(
                     TermEvent::Key(key) => {
                         app.handle_key(key);
                     }
-                    TermEvent::Mouse(action) => match action {
-                        MouseAction::ScrollUp => {
-                            app.chat.scroll_up(3);
-                        }
-                        MouseAction::ScrollDown => {
-                            app.chat.scroll_down(3, app.visible_height);
-                        }
-                    },
                     TermEvent::Paste(text) => {
                         app.input.insert_str(&text);
                         app.update_popup();
