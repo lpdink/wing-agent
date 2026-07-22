@@ -1325,6 +1325,10 @@ impl App {
                     }
                     self.notify_unfocused(question.clone(), AttentionKind::Ask);
                 }
+                // Bring the ask into view so the user sees it immediately and
+                // understands why Up/Down now navigate the selection menu
+                // (alternate-scroll translates trackpad into arrow keys).
+                self.chat.jump_bottom();
             }
 
             // ---- Candidate list events (for popup) ----
