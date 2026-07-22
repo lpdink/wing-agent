@@ -192,6 +192,9 @@ class SessionGetResponse(BaseModel):
     name: str | None = Field(default=None, description="session 名称")
     template_name: str | None = Field(default=None, description="使用的模板名称")
     workspace: str | None = Field(default=None, description="工作目录路径")
+    status: str = Field(
+        default="idle", description="运行时状态: inactive|idle|working|waiting"
+    )
     messages: list[dict] = Field(description="消息历史列表")
     agent: AgentInfo | None = Field(default=None, description="当前 agent 配置信息")
 
@@ -243,6 +246,9 @@ class SessionInfoResponse(BaseModel):
     workdir: str | None = Field(
         default=None,
         description="session 工作目录（session workspace，非进程启动目录）",
+    )
+    status: str = Field(
+        default="idle", description="运行时状态: inactive|idle|working|waiting"
     )
     context_stats: ContextStatsInfo = Field(description="上下文统计信息")
     skills_info: str = Field(default="", description="已安装的 skills 信息")

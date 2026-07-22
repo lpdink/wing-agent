@@ -220,13 +220,19 @@ impl App {
         self.refresh_copy_candidates();
     }
 
+    /// Workdir last-component label for the terminal title suffix (e.g. `myproject`).
+    fn dir_label(&self) -> Option<String> {
+        title::dir_label(self.status.workdir.as_deref())
+    }
+
     /// Notify the user via OSC 9 + attention title when the terminal is not focused.
     fn notify_unfocused(&mut self, message: String, kind: AttentionKind) {
         if !self.focused {
             self.push_intent(AppIntent::Notify(message));
-            self.push_intent(AppIntent::SetTitle(
-                title::title_attention(kind).to_string(),
-            ));
+            self.push_intent(AppIntent::SetTitle(title::title_attention(
+                kind,
+                self.dir_label().as_deref(),
+            )));
         }
     }
 
@@ -356,7 +362,9 @@ impl App {
                     // will be filtered out after goal exit, so finish_turn() would
                     // otherwise never run (working indicator + title stuck).
                     self.finish_turn();
-                    self.push_intent(AppIntent::SetTitle(title::title_idle().to_string()));
+                    self.push_intent(AppIntent::SetTitle(title::title_idle(
+                        self.dir_label().as_deref(),
+                    )));
                     let msg = if reason.is_empty() {
                         "Goal completed ✓".to_string()
                     } else {
@@ -735,6 +743,15 @@ impl App {
                 self.status.yolo = info.yolo;
                 self.status.session_name = info.session_name;
                 self.status.workdir = info.workdir;
+                // Refresh title so the workdir suffix appears once known.
+                let dir = self.dir_label();
+                let title = if self.turn.working {
+                    title::title_working(self.turn.spinner.frame_str(), dir.as_deref())
+                } else {
+                    title::title_idle(dir.as_deref())
+                };
+                self.turn.last_title = Some(title.clone());
+                self.push_intent(AppIntent::SetTitle(title));
                 tracing::info!(model = %self.status.model, "session info received");
             }
             FetchPayload::Commands(resp) => {
@@ -779,11 +796,48 @@ impl App {
                 self.update_popup();
             }
             FetchPayload::SessionList(resp) => {
-                self.popup.cache.sessions = resp
+                use crate::ui::popup::command::SessionCandidate;
+                use crate::ui::popup::selection::SessionStatus;
+
+                // Normalize a path for workdir comparison (strip trailing slashes).
+                let norm = |p: &str| {
+                    let t = p.trim_end_matches('/');
+                    if t.is_empty() {
+                        "/".to_string()
+                    } else {
+                        t.to_string()
+                    }
+                };
+                let launch_norm = norm(self.launch_workspace.as_deref().unwrap_or(""));
+
+                // A session workspace "matches" the launch dir if it equals it or
+                // is a subdirectory (prefix match on path components).
+                let ws_matches = |ws: &str| {
+                    let n = norm(ws);
+                    n == launch_norm || n.starts_with(&format!("{launch_norm}/"))
+                };
+
+                let mut candidates: Vec<SessionCandidate> = resp
                     .sessions
                     .iter()
-                    .map(|s| (s.id.clone(), s.name.clone().unwrap_or_default()))
+                    .map(|s| SessionCandidate {
+                        id: s.id.clone(),
+                        title: s.name.clone().unwrap_or_default(),
+                        workspace: s.workspace.clone().unwrap_or_default(),
+                        status: s.status.clone(),
+                        last_interaction: s.last_interaction.clone().unwrap_or_default(),
+                    })
                     .collect();
+
+                // Stable sort: ① workdir 匹配当前启动目录者优先（前缀匹配）→
+                // ② 状态优先级 (waiting > working > idle > inactive) →
+                // ③ 保持后端时间降序。
+                candidates.sort_by_key(|c| {
+                    let ws_mismatch = !ws_matches(&c.workspace);
+                    (ws_mismatch, SessionStatus::parse(&c.status).rank())
+                });
+
+                self.popup.cache.sessions = candidates;
                 self.update_popup();
             }
             FetchPayload::ContextInfo(text) => {
@@ -1156,7 +1210,10 @@ impl App {
                 self.turn.last_result = None;
                 self.chat.reset_thinking_count();
                 // Set title to working state with initial spinner frame.
-                let working_title = title::title_working(self.turn.spinner.frame_str());
+                let working_title = title::title_working(
+                    self.turn.spinner.frame_str(),
+                    self.dir_label().as_deref(),
+                );
                 self.turn.last_title = Some(working_title.clone());
                 self.push_intent(AppIntent::SetTitle(working_title));
             }
@@ -1168,7 +1225,9 @@ impl App {
                 // until the user refocuses (Focus handler restores idle).
                 let had_result = self.turn.last_result.take().is_some();
                 if self.focused || !had_result {
-                    self.push_intent(AppIntent::SetTitle(title::title_idle().to_string()));
+                    self.push_intent(AppIntent::SetTitle(title::title_idle(
+                        self.dir_label().as_deref(),
+                    )));
                 }
             }
             WingEvent::Interrupted { meta, .. } => {
@@ -1187,7 +1246,9 @@ impl App {
                     std::time::Duration::from_secs(2),
                 ));
                 // Restore idle title (no BEL — user triggered this).
-                self.push_intent(AppIntent::SetTitle(title::title_idle().to_string()));
+                self.push_intent(AppIntent::SetTitle(title::title_idle(
+                    self.dir_label().as_deref(),
+                )));
             }
             WingEvent::Error { message, .. } => {
                 self.finish_turn();
@@ -1644,10 +1705,10 @@ pub async fn run_app(
     app.push_intent(AppIntent::FetchInfo);
     app.push_intent(AppIntent::FetchCommands);
 
-    // Set initial terminal title.
+    // Set initial terminal title (workdir suffix appears once FetchInfo lands).
     {
         let writer = terminal.backend_mut();
-        let _ = title::set_title(writer, title::title_idle());
+        let _ = title::set_title(writer, &title::title_idle(app.dir_label().as_deref()));
     }
 
     loop {
@@ -1703,12 +1764,14 @@ pub async fn run_app(
                         app.focused = focused;
                         // On focus regain, restore the correct title.
                         if focused {
+                            let dir = app.dir_label();
                             let title = if app.turn.working {
                                 title::title_working(
                                     app.turn.spinner.frame_str(),
+                                    dir.as_deref(),
                                 )
                             } else {
-                                title::title_idle().to_string()
+                                title::title_idle(dir.as_deref())
                             };
                             app.push_intent(AppIntent::SetTitle(title));
                         }
@@ -1722,6 +1785,7 @@ pub async fn run_app(
                             // Update title only when spinner frame changed.
                             let new_title = title::title_working(
                                 app.turn.spinner.frame_str(),
+                                app.dir_label().as_deref(),
                             );
                             if app.turn.last_title.as_deref() != Some(&new_title) {
                                 app.turn.last_title = Some(new_title.clone());

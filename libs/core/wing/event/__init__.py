@@ -19,6 +19,7 @@ from .base import (
     EventTarget,
     WingEvent,
     SessionInfo,
+    SessionStatus,
 )
 from .query_response import (
     BranchTargetInfo,
@@ -79,6 +80,7 @@ __all__ = [
     "AgentInfo",
     "CommandInfo",
     "SessionInfo",
+    "SessionStatus",
     "ErrorEvent",
     "DeliveredEvent",
     # react

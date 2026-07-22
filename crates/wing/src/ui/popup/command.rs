@@ -8,7 +8,10 @@
 
 use std::sync::LazyLock;
 
+use super::selection::RichSessionRow;
 use super::selection::SelectionRow;
+use super::selection::SessionStatus;
+use super::selection::plain_row;
 use crate::protocol::CommandInfo;
 
 /// Action to take when popup candidates need to be fetched.
@@ -218,20 +221,11 @@ pub fn filter_commands(commands: &[CommandInfo], filter: &str) -> Vec<SelectionR
         let name_lower = name_stripped.to_lowercase();
 
         if filter_lower.is_empty() {
-            prefix.push(SelectionRow {
-                name: name.to_string(),
-                description: desc.to_string(),
-            });
+            prefix.push(plain_row(name, desc));
         } else if name_lower == filter_lower {
-            exact.push(SelectionRow {
-                name: name.to_string(),
-                description: desc.to_string(),
-            });
+            exact.push(plain_row(name, desc));
         } else if name_lower.starts_with(&filter_lower) {
-            prefix.push(SelectionRow {
-                name: name.to_string(),
-                description: desc.to_string(),
-            });
+            prefix.push(plain_row(name, desc));
         }
     };
 
@@ -275,10 +269,7 @@ pub fn filter_candidates(candidates: &[(String, String)], args: &str) -> Vec<Sel
 
     for (id, desc) in candidates {
         let id_lower = id.to_lowercase();
-        let row = || SelectionRow {
-            name: id.clone(),
-            description: desc.clone(),
-        };
+        let row = || plain_row(id.clone(), desc.clone());
         if args.is_empty() {
             prefix.push(row());
         } else if id_lower == args_lower {
@@ -295,18 +286,88 @@ pub fn filter_candidates(candidates: &[(String, String)], args: &str) -> Vec<Sel
     exact
 }
 
+/// Filter session candidates by the given args string, producing rich two-line rows.
+///
+/// Matching is done on id, title, and workspace (case-insensitive). The order
+/// of `candidates` is preserved within each match tier (exact > prefix > contains),
+/// so the caller's pre-sort (workdir → status → time) is retained.
+pub fn filter_session_candidates(candidates: &[SessionCandidate], args: &str) -> Vec<SelectionRow> {
+    let args_lower = args.to_lowercase();
+
+    let mut exact = Vec::new();
+    let mut prefix = Vec::new();
+    let mut contains = Vec::new();
+
+    for c in candidates {
+        let id_lower = c.id.to_lowercase();
+        let title_lower = c.title.to_lowercase();
+        let ws_lower = c.workspace.to_lowercase();
+        let row = || SelectionRow {
+            name: c.id.clone(),
+            description: String::new(),
+            rich: Some(RichSessionRow {
+                status: SessionStatus::parse(&c.status),
+                workspace: c.workspace.clone(),
+                last_active: super::selection::format_last_active(&c.last_interaction),
+                title: c.title.clone(),
+            }),
+        };
+        if args.is_empty() {
+            prefix.push(row());
+        } else if id_lower == args_lower {
+            exact.push(row());
+        } else if id_lower.starts_with(&args_lower) || title_lower.starts_with(&args_lower) {
+            prefix.push(row());
+        } else if id_lower.contains(&args_lower)
+            || title_lower.contains(&args_lower)
+            || ws_lower.contains(&args_lower)
+        {
+            contains.push(row());
+        }
+    }
+
+    exact.extend(prefix);
+    exact.extend(contains);
+    exact
+}
+
+/// Returns `true` if `args` exactly matches a session candidate id (case-insensitive).
+pub fn is_exact_session_match(candidates: &[SessionCandidate], args: &str) -> bool {
+    let args_lower = args.to_lowercase();
+    candidates.iter().any(|c| c.id.to_lowercase() == args_lower)
+}
+
+/// A session candidate for the `/session`、`/ss` popup.
+///
+/// Carries everything needed for the two-line render (status icon + workspace
+/// on line 1, title on line 2) plus the `id` used as the completion value.
+#[derive(Debug, Clone)]
+pub struct SessionCandidate {
+    /// Session id — inserted on completion (not displayed verbatim).
+    pub id: String,
+    /// Session title (line 2).
+    pub title: String,
+    /// Session workspace (line 1, after the status icon).
+    pub workspace: String,
+    /// Runtime status string from the backend (inactive|idle|working|waiting).
+    pub status: String,
+    /// Last interaction timestamp (ISO 8601), displayed on line 1.
+    pub last_interaction: String,
+}
+
 /// Cached sub-command candidate data and dynamic command list.
 ///
-/// All candidate lists use `(id, description)` tuples. The `id` is the value
-/// sent to the gateway on completion; `description` is display-only.
+/// Most candidate lists use `(id, description)` tuples. The `id` is the value
+/// sent to the gateway on completion; `description` is display-only. Sessions
+/// use the richer [`SessionCandidate`] to drive the two-line popup.
 #[derive(Debug, Clone, Default)]
 pub struct CandidateCache {
     /// Dynamic command list from HTTP GET /api/commands.
     pub commands: Vec<CommandInfo>,
     /// Model list from HTTP GET /api/models. Description is empty.
     pub models: Vec<(String, String)>,
-    /// Session list from HTTP GET /api/session/list. Description is session name.
-    pub sessions: Vec<(String, String)>,
+    /// Session list from HTTP GET /api/session/list (rich, two-line render).
+    pub sessions: Vec<SessionCandidate>,
     /// Branch targets from HTTP GET /api/session/branches or WS BranchTargetsEvent.
     pub branches: Vec<(String, String)>,
     /// Agent list from HTTP GET /api/agents. Description is empty.
@@ -325,11 +386,15 @@ impl CandidateCache {
         self.copies.clear();
     }
 
-    /// Get candidates for a given command name.
+    /// Whether session candidates are cached (for `/ss`、`/session`).
+    pub fn has_sessions(&self) -> bool {
+        !self.sessions.is_empty()
+    }
+
+    /// Get candidates for a given command name (non-session commands).
     pub fn get_for_command(&self, cmd_name: &str) -> Option<&[(String, String)]> {
         match cmd_name {
             "/model" if !self.models.is_empty() => Some(&self.models),
-            "/ss" | "/session" if !self.sessions.is_empty() => Some(&self.sessions),
             "/fork" | "/rewind" if !self.branches.is_empty() => Some(&self.branches),
             "/agents" if !self.agents.is_empty() => Some(&self.agents),
             "/copy" if !self.copies.is_empty() => Some(&self.copies),

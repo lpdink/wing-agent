@@ -402,6 +402,18 @@ class TestSessionList:
         assert len(data["sessions"]) == 1
         assert data["sessions"][0]["id"] == "s1"
 
+    def test_list_includes_status(self, client: TestClient, mock_runtime):
+        """列表项携带运行时 status。"""
+        mock_runtime.list_sessions.return_value = [
+            SessionInfo(id="s1", name="a", status="working"),
+            SessionInfo(id="s2", name="b", status="inactive"),
+        ]
+        resp = client.get("/api/session/list")
+        assert resp.status_code == 200
+        data = resp.json()
+        statuses = {s["id"]: s["status"] for s in data["sessions"]}
+        assert statuses == {"s1": "working", "s2": "inactive"}
+
 
 class TestSessionGet:
     """GET /api/session/get 测试。"""
@@ -419,6 +431,21 @@ class TestSessionGet:
         mock_runtime.get_session_state.return_value = None
         resp = client.get("/api/session/get", params={"session_id": "xxx"})
         assert resp.status_code == 404
+
+    def test_get_includes_status(self, client: TestClient, mock_runtime):
+        """详情响应携带运行时 status。"""
+        mock_runtime.get_session_state.return_value = {
+            "session_id": "test-session-id",
+            "name": None,
+            "template_name": "default",
+            "workspace": "/tmp",
+            "status": "waiting",
+            "messages": [],
+            "agent": None,
+        }
+        resp = client.get("/api/session/get", params={"session_id": "test-session-id"})
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "waiting"
 
 
 # ============================================================
@@ -444,6 +471,7 @@ class TestSessionInfo:
         mock_session.agent.yolo = False
         mock_session.session_name = "Test Session"
         mock_session.session_workspace = "/tmp/ws"
+        mock_session.status = "idle"
         mock_session.agent.context_manager.get_context_stats.return_value = (5, 800)
         mock_session.agent.context_manager.get_skills_info.return_value = (
             "skill-a: desc"
@@ -466,6 +494,7 @@ class TestSessionInfo:
         assert data["yolo"] is False
         assert data["session_name"] == "Test Session"
         assert data["workdir"] == "/tmp/ws"
+        assert data["status"] == "idle"
         assert data["context_stats"]["message_count"] == 5
         assert data["context_stats"]["total_tokens"] == 800
         assert data["skills_info"] == "skill-a: desc"
@@ -486,6 +515,7 @@ class TestSessionInfo:
         mock_session.agent.yolo = False
         mock_session.session_name = None
         mock_session.session_workspace = None
+        mock_session.status = "idle"
         mock_session.agent.context_manager.get_context_stats.return_value = (0, 0)
         mock_session.agent.context_manager.get_skills_info.return_value = ""
         mock_session.agent.context_manager.system_prompt.content = ""
@@ -494,6 +524,31 @@ class TestSessionInfo:
         resp = client.get("/api/session/info", params={"session_id": "test-id"})
         assert resp.status_code == 200
         assert resp.json()["workdir"] is None
+
+    def test_info_includes_status(self, client: TestClient, mock_runtime):
+        """info 响应携带运行时 status（如 waiting）。"""
+        mock_session = MagicMock()
+        mock_session.agent.get_status.return_value = {
+            "model": "gpt-4o",
+            "api_url": "https://api.openai.com",
+            "tools": [],
+            "total_tokens": 0,
+            "context_window_tokens": 128000,
+            "thinking": False,
+            "reasoning_effort": None,
+        }
+        mock_session.agent.yolo = False
+        mock_session.session_name = None
+        mock_session.session_workspace = None
+        mock_session.status = "waiting"
+        mock_session.agent.context_manager.get_context_stats.return_value = (0, 0)
+        mock_session.agent.context_manager.get_skills_info.return_value = ""
+        mock_session.agent.context_manager.system_prompt.content = ""
+        mock_runtime.get_session.return_value = mock_session
+
+        resp = client.get("/api/session/info", params={"session_id": "test-id"})
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "waiting"
 
     def test_info_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""

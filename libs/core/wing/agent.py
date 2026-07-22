@@ -30,6 +30,7 @@ from .event import (
     DoneEvent,
     ErrorEvent,
     LLMCallMetricsEvent,
+    SessionStatus,
     WingEvent,
     ReasoningEvent,
     TextEvent,
@@ -113,6 +114,8 @@ class WingAgent:
         self._yolo: bool = yolo if yolo is not None else get_config().yolo
         self._inbox: asyncio.Queue[Inbound] = asyncio.Queue()
         self._inbox_feedback: asyncio.Queue[str] = asyncio.Queue()
+        # 是否有 turn 正在进行（TurnStarted 置真，turn 收尾置假）。用于推导 session 状态。
+        self._working: bool = False
         self._worker = asyncio.create_task(self._run())
 
     @property
@@ -127,6 +130,22 @@ class WingAgent:
     @property
     def session_id(self) -> str:
         return self.context_manager.id
+
+    @property
+    def status(self) -> SessionStatus:
+        """Session 运行时状态（后端为唯一事实源）。
+
+        优先级：waiting > working > idle。
+        - waiting：工具阻塞在 ask / need_feedback，等待用户反馈
+        - working：有 turn 正在进行（TurnStarted 已 emit、Done 未至）
+        - idle：已 resume 但无进行中的 turn
+        （inactive 由 SessionManager 依据是否加载进内存判定，不在此处。）
+        """
+        if self.state.get("need_feedback"):
+            return "waiting"
+        if self._working:
+            return "working"
+        return "idle"
 
     @property
     def yolo(self) -> bool:
@@ -228,6 +247,8 @@ class WingAgent:
         try:
             # Signal turn start — frontend uses this to show working indicator.
             self.emit(TurnStartedEvent(session_id=self.session_id))
+            # 进入 working 状态（status property 据此推导），finally 中复位。
+            self._working = True
 
             # Hook: before_user_message — 修改用户消息内容
             modified_content = await hooks.invoke_async(
@@ -297,6 +318,8 @@ class WingAgent:
             )
             self.emit(DoneEvent(session_id=self.session_id))
         finally:
+            # 退出 working 状态（覆盖成功/异常/max_turns/取消所有路径）。
+            self._working = False
             reset_request_context(token)
 
     async def _llm_turn(self, ctx: _TurnAccumulator) -> bool:

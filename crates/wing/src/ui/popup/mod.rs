@@ -8,12 +8,15 @@ use command::PopupAction;
 use command::candidate_request_for;
 use command::filter_candidates;
 use command::filter_commands;
+use command::filter_session_candidates;
+use command::is_exact_session_match;
 use command::is_local_candidate_command;
 use command::is_session_command;
 use command::parse_slash_input;
 use selection::SelectionRow;
 use selection::SelectionState;
 use selection::popup_height;
+use selection::rich_max_visible;
 
 /// Active popup state.
 #[derive(Debug, Clone, Default)]
@@ -61,22 +64,23 @@ impl ActivePopup {
             return None;
         };
 
-        // Session commands (`/session`, `/ss`): HTTP-fetched candidates.
+        // Session commands (`/session`, `/ss`): HTTP-fetched rich candidates.
         if is_session_command(cmd) {
-            if let Some(candidates) = cache.get_for_command(cmd) {
-                // Hide popup if args exactly match a candidate.
-                if !args.is_empty() && is_exact_candidate_match(candidates, args) {
+            if cache.has_sessions() {
+                let candidates = &cache.sessions;
+                // Hide popup if args exactly match a candidate id.
+                if !args.is_empty() && is_exact_session_match(candidates, args) {
                     *self = Self::None;
                     return None;
                 }
-                let rows = filter_candidates(candidates, args);
+                let rows = filter_session_candidates(candidates, args);
                 let count = rows.len();
                 let filter = args.to_string();
                 *self = Self::SubCommand {
                     command: cmd.to_string(),
                     filter,
                     rows,
-                    state: SelectionState::new(count),
+                    state: SelectionState::with_max_visible(count, rich_max_visible()),
                 };
                 return None;
             }
@@ -180,8 +184,8 @@ impl ActivePopup {
     pub fn height(&self) -> u16 {
         match self {
             Self::None => 0,
-            Self::Command { rows, .. } => popup_height(rows.len()),
-            Self::SubCommand { rows, .. } => popup_height(rows.len()),
+            Self::Command { rows, state, .. } => popup_height(rows, state.max_visible),
+            Self::SubCommand { rows, state, .. } => popup_height(rows, state.max_visible),
         }
     }
 
@@ -300,6 +304,17 @@ impl ActivePopup {
 mod tests {
     use super::*;
     use crate::protocol::CommandInfo;
+
+    /// Build a SessionCandidate for tests.
+    fn sess(id: &str, title: &str) -> command::SessionCandidate {
+        command::SessionCandidate {
+            id: id.into(),
+            title: title.into(),
+            workspace: "/tmp/ws".into(),
+            status: "idle".into(),
+            last_interaction: "2025-07-22T21:41:00".into(),
+        }
+    }
 
     fn sample_cache() -> CandidateCache {
         CandidateCache {
@@ -450,10 +465,7 @@ mod tests {
     fn test_session_cached_shows_popup_no_action() {
         let mut popup = ActivePopup::default();
         let mut cache = CandidateCache::default();
-        cache.sessions = vec![
-            ("sess-1".into(), "My Session".into()),
-            ("sess-2".into(), "Other".into()),
-        ];
+        cache.sessions = vec![sess("sess-1", "My Session"), sess("sess-2", "Other")];
         let action = popup.update_from_input("/session ", &cache);
         assert!(action.is_none()); // No fetch needed
         assert!(popup.is_active());
@@ -464,10 +476,26 @@ mod tests {
     fn test_session_exact_match_hides_popup() {
         let mut popup = ActivePopup::default();
         let mut cache = CandidateCache::default();
-        cache.sessions = vec![("sess-1".into(), "My Session".into())];
+        cache.sessions = vec![sess("sess-1", "My Session")];
         let action = popup.update_from_input("/session sess-1", &cache);
         assert!(action.is_none());
         assert!(!popup.is_active());
+    }
+
+    #[test]
+    fn test_session_popup_rows_are_rich() {
+        let mut popup = ActivePopup::default();
+        let mut cache = CandidateCache::default();
+        cache.sessions = vec![sess("sess-1", "My Session")];
+        popup.update_from_input("/session ", &cache);
+        if let ActivePopup::SubCommand { rows, state, .. } = &popup {
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].rich.is_some());
+            // Rich popup uses the smaller visible-item window.
+            assert_eq!(state.max_visible, rich_max_visible());
+        } else {
+            panic!("expected SubCommand popup");
+        }
     }
 
     #[test]
