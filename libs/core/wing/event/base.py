@@ -46,6 +46,14 @@ class EventTarget(BaseModel):
 # ============================================================
 
 
+# Session 运行时状态（后端为唯一事实源）：
+#   inactive — 在磁盘、未被 resume 进内存
+#   idle     — 已 resume、agent 空闲
+#   working  — agent 正在处理 turn
+#   waiting  — agent 阻塞在 ask / need_feedback，等待用户反馈
+SessionStatus = Literal["inactive", "idle", "working", "waiting"]
+
+
 class SessionInfo(BaseModel):
     """用于会话列表/详情中的 session 摘要信息。"""
 
@@ -55,6 +63,7 @@ class SessionInfo(BaseModel):
     template_name: str | None = None
     workspace: str | None = None
     last_interaction: str | None = None
+    status: SessionStatus = "inactive"
 
 
 class AgentInfo(BaseModel):

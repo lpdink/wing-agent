@@ -30,7 +30,7 @@ from wing.schema import Message
 if TYPE_CHECKING:
     from wing.agent import WingAgent
     from wing.agent_template import AgentTemplate
-    from wing.event.base import AgentInfo
+    from wing.event.base import AgentInfo, SessionStatus
     from wing.gateway.protocol import AgentOverride
 
 
@@ -256,6 +256,11 @@ class Session:
     def session_workspace(self) -> str | None:
         """当前 session 的工作目录（来自 metadata.json 或构造参数）。"""
         return self._session_workspace
+
+    @property
+    def status(self) -> "SessionStatus":
+        """Session 运行时状态（idle/working/waiting），委托 agent 推导。"""
+        return self._agent.status
 
     def set_workspace(self, path: str) -> None:
         """切换 session 工作目录。

@@ -185,9 +185,9 @@ class WingRuntime:
     # 查询
     # ============================================================
 
-    def list_sessions(self, workspace: str | None = None) -> list[SessionInfo]:
-        """列出所有 session（磁盘上的）。"""
-        return self.sm.list_sessions(workspace)
+    def list_sessions(self) -> list[SessionInfo]:
+        """列出所有 session（磁盘上的），按时间降序，携带运行时状态。"""
+        return self.sm.list_sessions()
 
     def get_session_state(self, session_id: str) -> dict | None:
         """获取 session 完整状态。返回 dict 或 None。"""
@@ -200,6 +200,7 @@ class WingRuntime:
             "name": session.session_name,
             "template_name": session.template_name,
             "workspace": session.session_workspace,
+            "status": session.status,
             "messages": session.serialize_messages(),
             "agent": session.to_agent_info(),
         }

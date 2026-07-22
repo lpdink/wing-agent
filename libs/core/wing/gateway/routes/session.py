@@ -271,6 +271,7 @@ async def session_info(
         yolo=session.agent.yolo,
         session_name=session.session_name,
         workdir=session.session_workspace,
+        status=session.status,
         context_stats=ContextStatsInfo(
             message_count=msg_count,
             total_tokens=total_tok,

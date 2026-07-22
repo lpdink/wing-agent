@@ -299,12 +299,14 @@ class SessionManager:
     # 外部方法：查询
     # ============================================================
 
-    def list_sessions(self, workspace: str | None = None) -> list[SessionInfo]:
-        """列出所有有效 session，支持 workspace 优先排序。
+    def list_sessions(self) -> list[SessionInfo]:
+        """列出所有有效 session，按 last_interaction 时间降序（最近在前）。
 
-        排序规则（stable sort）：
-        1. 第一优先级：相同 workspace 的 session 排在前面
-        2. 第二优先级：last_interaction 降序（最近在前）
+        每个 session 携带运行时 `status`：
+        - 已加载进内存（在 `self._sessions` 中）→ 取 live 状态（idle/working/waiting）
+        - 仅在磁盘、未 resume → `inactive`
+
+        workdir 优先排序属于前端业务语义，不在此处处理。
         """
         if not self._sessions_path.exists():
             return []
@@ -342,12 +344,14 @@ class SessionManager:
                     continue
 
             if session_name:
+                loaded = self._sessions.get(session_dir.name)
                 result.append(
                     SessionInfo(
                         id=session_dir.name,
                         name=session_name,
                         workspace=session_workspace,
                         last_interaction=last_interaction,
+                        status=loaded.status if loaded is not None else "inactive",
                     )
                 )
 
@@ -371,10 +375,6 @@ class SessionManager:
                 return 0.0
 
         result.sort(key=_timestamp_key, reverse=True)
-
-        if workspace:
-            norm_ws = os.path.normpath(workspace)
-            result.sort(key=lambda s: os.path.normpath(s.workspace or "") != norm_ws)
 
         return result
 

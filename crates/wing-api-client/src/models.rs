@@ -16,6 +16,9 @@ pub struct SessionInfo {
     pub template_name: Option<String>,
     pub workspace: Option<String>,
     pub last_interaction: Option<String>,
+    /// 运行时状态: inactive|idle|working|waiting（旧网关缺省时为空串，前端降级为 inactive）。
+    #[serde(default)]
+    pub status: String,
 }
 
 /// Agent 配置信息。
@@ -167,6 +170,8 @@ pub struct SessionGetResponse {
     pub name: Option<String>,
     pub template_name: Option<String>,
     pub workspace: Option<String>,
+    #[serde(default)]
+    pub status: String,
     pub messages: Vec<serde_json::Value>,
     pub agent: Option<AgentInfo>,
 }
@@ -204,6 +209,8 @@ pub struct SessionInfoResponse {
     pub session_name: Option<String>,
     #[serde(default)]
     pub workdir: Option<String>,
+    #[serde(default)]
+    pub status: String,
     pub context_stats: ContextStatsInfo,
     #[serde(default)]
     pub skills_info: String,

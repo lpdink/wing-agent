@@ -597,7 +597,7 @@ fn compute_tail_geom(tail: &ComposerTail<'_>, width: u16) -> TailGeom {
     let popup_h = tail
         .popup
         .as_ref()
-        .map(|(rows, _, _)| popup_height(rows.len()) as usize)
+        .map(|(rows, state, _)| popup_height(rows, state.max_visible) as usize)
         .unwrap_or(0);
     let total = working_h + separator_h + input_h + popup_h;
     TailGeom {
@@ -1008,6 +1008,7 @@ mod tests {
     use crate::config::rendering::ThinkingMode;
     use crate::config::{LayoutConfig, ThemePalette};
     use crate::render::renderable::CellContext;
+    use crate::ui::popup::selection::plain_row;
 
     fn test_ctx() -> (ThemePalette, LayoutConfig) {
         (ThemePalette::default(), LayoutConfig::default())
@@ -1460,14 +1461,8 @@ mod tests {
         input.set_text("/he");
         let usage = TurnUsage::default();
         let rows = vec![
-            SelectionRow {
-                name: "/help".into(),
-                description: "show help".into(),
-            },
-            SelectionRow {
-                name: "/hello".into(),
-                description: "say hi".into(),
-            },
+            plain_row("/help", "show help"),
+            plain_row("/hello", "say hi"),
         ];
         let state = SelectionState::new(rows.len());
         let buf = render_view_with_tail(
