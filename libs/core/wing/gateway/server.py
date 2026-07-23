@@ -23,6 +23,7 @@ from fastapi import WebSocket
 import uvicorn
 
 from wing.common.logger import log
+from wing.config import AuthConfig, load_config
 from wing.event import WingEvent
 from wing.event_bus import event_bus
 from wing.runtime import WingRuntime
@@ -63,6 +64,7 @@ class GatewayServer:
         self.host = host
         self.port = port
         self.runtime = WingRuntime()
+        self.auth_config: AuthConfig = load_config().gateway.auth
         self._client_to_ws: dict[str, WebSocket] = {}  # client_id → ws
         self._ws_to_client: dict[WebSocket, str] = {}  # ws → client_id
         self._app = create_app(self)

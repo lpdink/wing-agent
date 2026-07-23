@@ -20,6 +20,7 @@ from wing.common.logger import log
 from wing.event import ErrorEvent
 from wing.event_bus import event_bus
 
+from wing.gateway.auth import extract_key_from_ws
 from wing.gateway.protocol import ClientRequest, ConnectResponse
 
 router = APIRouter()
@@ -28,9 +29,17 @@ router = APIRouter()
 @router.websocket("/ws")
 async def handle_ws(ws: WebSocket) -> None:
     """处理 WebSocket 连接。"""
-    await ws.accept()
-
     server = ws.app.state.server
+
+    # 0. 鉴权（accept 之前）
+    auth_config = server.auth_config
+    if auth_config.enabled:
+        key = extract_key_from_ws(ws)
+        if key is None or auth_config.verify(key) is None:
+            await ws.close(code=4001, reason="Unauthorized")
+            return
+
+    await ws.accept()
 
     # 1. 生成 client_id
     client_id = uuid.uuid4().hex

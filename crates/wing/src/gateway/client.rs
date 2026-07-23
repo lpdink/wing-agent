@@ -7,6 +7,7 @@ use futures_util::SinkExt;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::http::Request;
 
 use crate::protocol::ClientRequest;
 use crate::protocol::ConnectResponse;
@@ -32,12 +33,30 @@ impl GatewayClient {
     /// Connect to a wing-gateway WebSocket endpoint.
     ///
     /// Performs the handshake: waits for the first `ConnectResponse` message.
-    pub async fn connect(url: &str) -> Result<Self> {
+    /// If `api_key` is provided and non-empty, the WS handshake carries
+    /// an `Authorization: Bearer <key>` header.
+    pub async fn connect(url: &str, api_key: Option<&str>) -> Result<Self> {
         tracing::info!("connecting to gateway: {url}");
 
-        let (ws_stream, _response) = tokio_tungstenite::connect_async(url)
-            .await
-            .context("failed to connect to gateway WebSocket")?;
+        let ws_stream = match api_key {
+            Some(key) if !key.is_empty() => {
+                let request = Request::builder()
+                    .uri(url)
+                    .header("Authorization", format!("Bearer {key}"))
+                    .body(())
+                    .context("failed to build WS request")?;
+                let (stream, _resp) = tokio_tungstenite::connect_async(request)
+                    .await
+                    .context("failed to connect to gateway WebSocket")?;
+                stream
+            }
+            _ => {
+                let (stream, _resp) = tokio_tungstenite::connect_async(url)
+                    .await
+                    .context("failed to connect to gateway WebSocket")?;
+                stream
+            }
+        };
 
         tracing::debug!("WebSocket connection established");
 

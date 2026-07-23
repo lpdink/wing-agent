@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
+from wing.gateway.auth import AuthMiddleware
 from wing.gateway.openapi import OPENAPI_METADATA
 from wing.gateway.routes import register_routes
 
@@ -37,6 +38,7 @@ def create_app(server: GatewayServer) -> FastAPI:
     )
 
     app.state.server = server
+    app.add_middleware(AuthMiddleware, auth_config=server.auth_config)
     register_routes(app, server)
 
     return app

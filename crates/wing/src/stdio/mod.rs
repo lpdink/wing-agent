@@ -274,7 +274,8 @@ pub async fn ensure_gateway_running() -> Result<(String, u16)> {
 
     // Check if gateway is already running via health check.
     let http_base = format!("http://{}:{}", gw_config.host, gw_config.port);
-    let already_running = if let Ok(client) = wing_api_client::GatewayClient::new(&http_base) {
+    let already_running = if let Ok(client) = wing_api_client::GatewayClient::new(&http_base, None)
+    {
         matches!(
             client.health().await,
             Ok(h) if h.service == "wing-gateway"
@@ -316,19 +317,27 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
 
     tracing::info!("stdio mode: gateway at {ws_url}");
 
+    // Load API key from TUI config.
+    let api_key = crate::config::AppConfig::load()
+        .api_key
+        .filter(|k| !k.is_empty());
+    let api_key_ref = api_key.as_deref();
+
     // 2. WS connect.
-    let mut gateway = GatewayClient::connect(&ws_url).await.map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to connect to gateway at {ws_url}: {e}\n\
+    let mut gateway = GatewayClient::connect(&ws_url, api_key_ref)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to connect to gateway at {ws_url}: {e}\n\
              Make sure the gateway is running: wing start"
-        )
-    })?;
+            )
+        })?;
 
     let client_id = gateway.client_id().to_string();
     tracing::info!(client_id = %client_id, "WS connected");
 
     // 3. HTTP client.
-    let http = GatewayApiClient::new(http_base)
+    let http = GatewayApiClient::new(http_base, api_key_ref)
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
 
     // 4. Create or resume session.

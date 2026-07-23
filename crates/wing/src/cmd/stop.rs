@@ -12,7 +12,12 @@ pub async fn stop_gateway() -> anyhow::Result<()> {
     let config = read_backend_gateway_config();
     let http_base = format!("http://{}:{}", config.host, config.port);
 
-    let client = wing_api_client::GatewayClient::new(&http_base)
+    // Read API key from TUI config for authenticated shutdown.
+    let api_key = crate::config::AppConfig::load()
+        .api_key
+        .filter(|k| !k.is_empty());
+
+    let client = wing_api_client::GatewayClient::new(&http_base, api_key.as_deref())
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
 
     // Send shutdown request.

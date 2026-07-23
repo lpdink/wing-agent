@@ -22,6 +22,7 @@ use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
 
+use self::transport::GatewayEndpoint;
 use self::transport::Transport;
 use self::transport::backoff;
 use self::transport::try_reconnect;
@@ -1708,8 +1709,7 @@ pub async fn run_app(
     terminal: &mut WingTerminal,
     transport: Transport,
     session_id: String,
-    ws_url: String,
-    http_base: String,
+    endpoint: GatewayEndpoint,
     config: AppConfig,
     launch_workspace: Option<String>,
 ) -> Result<()> {
@@ -1839,7 +1839,7 @@ pub async fn run_app(
             }
             // Reconnect timer (only fires when disconnected).
             _ = reconnect_sleep => {
-                match try_reconnect(&ws_url, &http_base, &app.session_id).await {
+                match try_reconnect(&endpoint, &app.session_id).await {
                     Ok(new_transport) => {
                         transport = Some(new_transport);
                         app.set_connected(true);

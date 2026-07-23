@@ -91,6 +91,9 @@ pub struct AppConfig {
     pub layout: LayoutConfig,
     pub rendering: RenderingConfig,
     pub goal: GoalConfig,
+    /// API key for gateway authentication.
+    /// Empty or None → no auth header sent.
+    pub api_key: Option<String>,
 }
 
 /// Goal orchestration configuration.
