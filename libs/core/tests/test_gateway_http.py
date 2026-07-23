@@ -1163,3 +1163,44 @@ class TestWsAuth:
         with client.websocket_connect("/ws") as ws:
             data = ws.receive_json()
             assert data["type"] == "connected"
+
+
+class TestAuthHotReload:
+    """auth 配置热重载测试——property 读最新单例，不缓存。"""
+
+    def test_reload_toggles_auth(self, mock_runtime):
+        """运行时切换 auth.enabled，无需重启即生效。"""
+        mock_cfg = _mock_config(auth_enabled=False)
+        with (
+            patch("wing.gateway.server.WingRuntime") as MockRuntime,
+            patch("wing.gateway.server.load_config") as mock_load_config,
+        ):
+            MockRuntime.return_value = mock_runtime
+            mock_load_config.return_value = mock_cfg
+
+            from wing.gateway.server import GatewayServer
+
+            server = GatewayServer()
+            server.runtime = mock_runtime
+
+            with TestClient(server._app) as tc:
+                # auth disabled → 200
+                resp = tc.get("/api/session/list")
+                assert resp.status_code == 200
+
+                # 模拟热重载：切换到 auth enabled
+                mock_load_config.return_value = _mock_config(
+                    auth_enabled=True,
+                    auth_keys=[ApiKeyEntry(key="new-key", role="admin")],
+                )
+
+                # 无 key → 401（立即生效，无需重启）
+                resp = tc.get("/api/session/list")
+                assert resp.status_code == 401
+
+                # 正确 key → 200
+                resp = tc.get(
+                    "/api/session/list",
+                    headers={"Authorization": "Bearer new-key"},
+                )
+                assert resp.status_code == 200

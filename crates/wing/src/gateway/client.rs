@@ -48,9 +48,21 @@ impl GatewayClient {
             .body(())
             .context("failed to build WS request")?;
 
-        let (ws_stream, _resp) = tokio_tungstenite::connect_async(request)
-            .await
-            .context("failed to connect to gateway WebSocket")?;
+        let (ws_stream, _resp) = match tokio_tungstenite::connect_async(request).await {
+            Ok(pair) => pair,
+            Err(tokio_tungstenite::tungstenite::Error::Http(resp))
+                if resp.status() == 401 || resp.status() == 403 =>
+            {
+                anyhow::bail!(
+                    "gateway rejected authentication (HTTP {}); \
+                     check `api_key` in ~/.wing/tui/config.yaml matches gateway.auth.keys",
+                    resp.status()
+                );
+            }
+            Err(e) => {
+                return Err(e).context("failed to connect to gateway WebSocket");
+            }
+        };
 
         tracing::debug!("WebSocket connection established");
 
