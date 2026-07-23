@@ -5,7 +5,7 @@
 //! ```no_run
 //! # use wing_api_client::GatewayClient;
 //! # async fn example() -> Result<(), wing_api_client::ApiClientError> {
-//! let client = GatewayClient::localhost()?;
+//! let client = GatewayClient::localhost(None)?;
 //! let health = client.health().await?;
 //! assert_eq!(health.status, "ok");
 //! # Ok(())

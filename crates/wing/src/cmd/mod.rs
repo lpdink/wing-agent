@@ -237,6 +237,15 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     // Initialize logging (file only, no console output).
     let _log_guard = init_logging();
 
+    // Load user configuration (needed early for api_key).
+    let config = AppConfig::load();
+    let api_key = config
+        .api_key
+        .as_deref()
+        .filter(|k| !k.is_empty())
+        .map(|k| k.to_string());
+    let api_key_ref = api_key.as_deref();
+
     // Build URLs from host:port — no string replacement needed.
     let ws_url = format!("ws://{host}:{port}/ws");
     let http_base = format!("http://{host}:{port}");
@@ -249,18 +258,20 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
         .map(|p| p.to_string_lossy().to_string());
 
     // 1. WS connect (get client_id).
-    let gateway = GatewayClient::connect(&ws_url).await.map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to connect to gateway at {ws_url}: {e}\n\
+    let gateway = GatewayClient::connect(&ws_url, api_key_ref)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to connect to gateway at {ws_url}: {e}\n\
                  Make sure the gateway is running: wing start"
-        )
-    })?;
+            )
+        })?;
 
     let client_id = gateway.client_id().to_string();
     tracing::info!(client_id = %client_id, "WS connected");
 
     // 2. HTTP create session.
-    let http = GatewayApiClient::new(http_base.clone())
+    let http = GatewayApiClient::new(http_base.clone(), api_key_ref)
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
 
     let create_req = wing_api_client::models::CreateSessionRequest {
@@ -281,9 +292,6 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to subscribe to session: {e}"))?;
 
     tracing::info!("subscribed to session, entering TUI");
-
-    // Load user configuration.
-    let config = AppConfig::load();
 
     // Initialize terminal.
     let mut terminal = tui::init_terminal()?;
@@ -313,8 +321,11 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
         &mut terminal,
         transport,
         session_id,
-        ws_url,
-        http_base,
+        crate::app::transport::GatewayEndpoint {
+            ws_url,
+            http_base,
+            api_key,
+        },
         config,
         workspace,
     )

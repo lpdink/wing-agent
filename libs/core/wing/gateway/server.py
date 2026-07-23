@@ -23,6 +23,7 @@ from fastapi import WebSocket
 import uvicorn
 
 from wing.common.logger import log
+from wing.config import AuthConfig, load_config
 from wing.event import WingEvent
 from wing.event_bus import event_bus
 from wing.runtime import WingRuntime
@@ -81,6 +82,21 @@ class GatewayServer:
         return int((datetime.now(timezone.utc) - self._started_at).total_seconds())
 
     @property
+    def auth_config(self) -> AuthConfig:
+        """当前鉴权配置（每次读取最新单例，热重载后立即生效）。"""
+        return load_config().gateway.auth
+
+    def _warn_auth_lockout(self) -> None:
+        """启动时检查 auth 配置，空 keys 锁死时发出警告。"""
+        auth = self.auth_config
+        if auth.enabled and not auth.keys:
+            log.warning(
+                "gateway.auth.enabled=true but keys list is empty — "
+                "ALL requests (including /api/system/reload) will be "
+                "rejected with 401. Edit config.yaml and restart to fix."
+            )
+
+    @property
     def clients(self) -> dict[str, WebSocket]:
         """client_id → WebSocket 映射，供 routes 访问。"""
         return self._client_to_ws
@@ -95,6 +111,8 @@ class GatewayServer:
         if not _check_port_available(self.host, self.port):
             print(f"❌ 端口 {self.port} 已被占用，请指定其他端口或释放占用。")
             sys.exit(1)
+
+        self._warn_auth_lockout()
 
         # Subscribe EventBus
         event_bus.subscribe(self._on_event)
@@ -114,6 +132,7 @@ class GatewayServer:
             raise RuntimeError(f"端口 {actual_port} 已被占用")
 
         self.port = actual_port
+        self._warn_auth_lockout()
 
         config = uvicorn.Config(
             self._app,

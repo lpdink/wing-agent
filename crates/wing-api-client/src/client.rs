@@ -1,6 +1,7 @@
 //! [`GatewayClient`] — Wing Gateway 的 HTTP API 客户端。
 
 use reqwest::Client;
+use reqwest::header::{AUTHORIZATION, HeaderMap};
 
 use crate::error::{ApiClientError, extract_api_error};
 use crate::models::*;
@@ -16,7 +17,7 @@ pub const DEFAULT_PORT: u16 = 32523;
 /// # use wing_api_client::models::CreateSessionRequest;
 /// # use wing_api_client::GatewayClient;
 /// # async fn example() -> Result<(), wing_api_client::ApiClientError> {
-/// let client = GatewayClient::new("http://127.0.0.1:32523")?;
+/// let client = GatewayClient::new("http://127.0.0.1:32523", None)?;
 ///
 /// // 创建 session
 /// let req = CreateSessionRequest::default();
@@ -39,9 +40,12 @@ impl GatewayClient {
     /// 创建新的 client。
     ///
     /// `base_url` 通常是 `"http://127.0.0.1:32523"`。
-    pub fn new(base_url: impl Into<String>) -> Result<Self, ApiClientError> {
+    /// `api_key` 为 `Some` 且非空时，所有请求自动携带
+    /// `Authorization: Bearer <key>` header。
+    pub fn new(base_url: impl Into<String>, api_key: Option<&str>) -> Result<Self, ApiClientError> {
         let http = Client::builder()
             .timeout(std::time::Duration::from_secs(60))
+            .default_headers(build_auth_headers(api_key)?)
             .build()?;
         Ok(Self {
             http,
@@ -50,8 +54,8 @@ impl GatewayClient {
     }
 
     /// 使用默认地址 (`http://127.0.0.1:{DEFAULT_PORT}`) 创建 client。
-    pub fn localhost() -> Result<Self, ApiClientError> {
-        Self::new(format!("http://127.0.0.1:{DEFAULT_PORT}"))
+    pub fn localhost(api_key: Option<&str>) -> Result<Self, ApiClientError> {
+        Self::new(format!("http://127.0.0.1:{DEFAULT_PORT}"), api_key)
     }
 
     // ============================================================
@@ -403,5 +407,72 @@ impl GatewayClient {
             return Err(extract_api_error(resp).await);
         }
         Ok(())
+    }
+}
+
+/// Build default headers with optional API key authentication.
+///
+/// Returns a `HeaderMap` containing `Authorization: Bearer <key>`
+/// when `api_key` is `Some` and non-empty; otherwise an empty map.
+fn build_auth_headers(api_key: Option<&str>) -> Result<HeaderMap, ApiClientError> {
+    let mut headers = HeaderMap::new();
+    if let Some(key) = api_key
+        && !key.is_empty()
+    {
+        let value = format!("Bearer {key}").parse()?;
+        headers.insert(AUTHORIZATION, value);
+    }
+    Ok(headers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_auth_headers_with_key() {
+        let headers = build_auth_headers(Some("my-secret")).unwrap();
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
+            "Bearer my-secret"
+        );
+    }
+
+    #[test]
+    fn test_build_auth_headers_none() {
+        let headers = build_auth_headers(None).unwrap();
+        assert!(headers.get(AUTHORIZATION).is_none());
+    }
+
+    #[test]
+    fn test_build_auth_headers_empty() {
+        let headers = build_auth_headers(Some("")).unwrap();
+        assert!(headers.get(AUTHORIZATION).is_none());
+    }
+
+    #[test]
+    fn test_build_auth_headers_invalid_key() {
+        // Control characters are invalid in HTTP header values.
+        let result = build_auth_headers(Some("bad\nkey"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_client_new_with_key() {
+        let client = GatewayClient::new("http://127.0.0.1:32523", Some("key"));
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_client_new_without_key() {
+        let client = GatewayClient::new("http://127.0.0.1:32523", None);
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_client_localhost() {
+        let client = GatewayClient::localhost(None);
+        assert!(client.is_ok());
+        assert_eq!(client.unwrap().base_url, "http://127.0.0.1:32523");
     }
 }

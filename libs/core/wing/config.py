@@ -7,6 +7,7 @@ When the config file is missing, a template is created from ``default_config.py`
 # SYNC: Keep this file in sync with default_config.py when adding/removing fields.
 """
 
+import hmac
 import os
 from pathlib import Path
 from typing import Literal, Optional
@@ -80,9 +81,54 @@ class ToolResultTruncateConfig(BaseModel):
         return v
 
 
+class ApiKeyEntry(BaseModel):
+    """Single API key with an identity role.
+
+    Keys are restricted to ASCII printable characters (0x20–0x7E).
+    HTTP headers are latin-1 encoded; non-ASCII keys would silently
+    mismatch between client and server.
+    """
+
+    key: str
+    role: str = "admin"
+
+    @field_validator("key")
+    @classmethod
+    def _key_ascii_printable(cls, v: str) -> str:
+        if not v or not all(0x20 <= ord(c) <= 0x7E for c in v):
+            raise ValueError(
+                "API key must contain only ASCII printable characters (0x20-0x7E)"
+            )
+        return v
+
+
+class AuthConfig(BaseModel):
+    """Gateway API key authentication configuration.
+
+    When ``enabled`` is True, all HTTP/WS requests (except exempt paths)
+    must carry a valid API key.  ``role`` is stored but not enforced yet
+    — reserved for future RBAC (e.g. ``tool_runtime``).
+    """
+
+    enabled: bool = False
+    keys: list[ApiKeyEntry] = Field(default_factory=list)
+
+    def verify(self, key: str) -> str | None:
+        """Return the role for *key*, or ``None`` if not found.
+
+        Uses constant-time comparison to prevent timing attacks.
+        """
+        key_bytes = key.encode("utf-8")
+        for entry in self.keys:
+            if hmac.compare_digest(key_bytes, entry.key.encode("utf-8")):
+                return entry.role
+        return None
+
+
 class GatewayConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 32523
+    auth: AuthConfig = Field(default_factory=AuthConfig)
 
 
 class CommandsConfig(BaseModel):

@@ -127,6 +127,21 @@ gateway:
   host: 127.0.0.1
   port: 32523
 
+  # API key authentication. When enabled, all HTTP/WS requests
+  # (except /api/health) must carry a valid key via
+  # "Authorization: Bearer <key>" or "X-API-Key: <key>" header.
+  # WS also accepts ?api_key=<key> query parameter (note: query
+  # params may appear in reverse proxy access logs).
+  # Keys must be ASCII printable characters only.
+  # WARNING: enabled=true with empty keys locks out ALL requests.
+  auth:
+    enabled: false
+    keys: []
+    # Example:
+    # keys:
+    #   - key: "my-secret-key"
+    #     role: admin        # identity role (reserved for future RBAC)
+
 # ── Prompt Commands ──────────────────────────────────────────
 # Paths to directories containing prompt command definition files.
 # Each .yaml file in these directories defines a slash command.

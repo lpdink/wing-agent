@@ -12,7 +12,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from wing.config import ApiKeyEntry, AuthConfig
 from wing.event import AgentInfo, SessionInfo
+
+
+def _mock_config(auth_enabled: bool = False, auth_keys: list | None = None):
+    """构建 mock Config，仅填充 gateway.auth 字段。"""
+    config = MagicMock()
+    config.gateway.auth = AuthConfig(
+        enabled=auth_enabled,
+        keys=auth_keys or [],
+    )
+    return config
 
 
 @pytest.fixture
@@ -71,9 +82,13 @@ def mock_runtime():
 @pytest.fixture
 def client(mock_runtime):
     """创建 TestClient，注入 mock runtime。"""
-    # 需要 mock WingRuntime.__init__ 和 load_hooks 避免真实初始化
-    with patch("wing.gateway.server.WingRuntime") as MockRuntime:
+    # 需要 mock WingRuntime.__init__ 和 load_config 避免真实初始化
+    with (
+        patch("wing.gateway.server.WingRuntime") as MockRuntime,
+        patch("wing.gateway.server.load_config") as mock_load_config,
+    ):
         MockRuntime.return_value = mock_runtime
+        mock_load_config.return_value = _mock_config()
 
         from wing.gateway.server import GatewayServer
 
@@ -981,3 +996,211 @@ class TestSystemReload:
         assert len(data["results"]) == 1
         assert data["results"][0]["name"] == "config.yaml"
         assert data["results"][0]["ok"] is False
+
+
+# ============================================================
+# Auth 鉴权测试
+# ============================================================
+
+
+@pytest.fixture
+def auth_client(mock_runtime):
+    """创建开启鉴权的 TestClient（两个 key：test-key-1, test-key-2）。"""
+    with (
+        patch("wing.gateway.server.WingRuntime") as MockRuntime,
+        patch("wing.gateway.server.load_config") as mock_load_config,
+    ):
+        MockRuntime.return_value = mock_runtime
+        mock_load_config.return_value = _mock_config(
+            auth_enabled=True,
+            auth_keys=[
+                ApiKeyEntry(key="test-key-1", role="admin"),
+                ApiKeyEntry(key="test-key-2", role="admin"),
+            ],
+        )
+
+        from wing.gateway.server import GatewayServer
+
+        server = GatewayServer()
+        server.runtime = mock_runtime
+
+        app = server._app
+        with TestClient(app) as tc:
+            yield tc
+
+
+class TestAuthDisabled:
+    """auth.enabled=false 时请求透传。"""
+
+    def test_no_key_passes(self, client: TestClient):
+        """鉴权关闭时，无 key 请求正常通过。"""
+        resp = client.get("/api/session/list")
+        assert resp.status_code == 200
+
+
+class TestAuthEnabled:
+    """auth.enabled=true 时的鉴权行为。"""
+
+    def test_no_key_rejected(self, auth_client: TestClient):
+        """无 key → 401。"""
+        resp = auth_client.get("/api/session/list")
+        assert resp.status_code == 401
+        assert resp.json()["detail"] == "Invalid or missing API key"
+
+    def test_wrong_key_rejected(self, auth_client: TestClient):
+        """错误 key → 401。"""
+        resp = auth_client.get(
+            "/api/session/list",
+            headers={"Authorization": "Bearer wrong-key"},
+        )
+        assert resp.status_code == 401
+
+    def test_bearer_header_ok(self, auth_client: TestClient):
+        """Bearer header 正确 key → 200。"""
+        resp = auth_client.get(
+            "/api/session/list",
+            headers={"Authorization": "Bearer test-key-1"},
+        )
+        assert resp.status_code == 200
+
+    def test_x_api_key_header_ok(self, auth_client: TestClient):
+        """X-API-Key header 正确 key → 200。"""
+        resp = auth_client.get(
+            "/api/session/list",
+            headers={"X-API-Key": "test-key-1"},
+        )
+        assert resp.status_code == 200
+
+    def test_health_exempt(self, auth_client: TestClient):
+        """/api/health 免鉴权。"""
+        resp = auth_client.get("/api/health")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+    def test_second_key_ok(self, auth_client: TestClient):
+        """多 key 配置，使用第二个 key 通过鉴权。"""
+        resp = auth_client.get(
+            "/api/session/list",
+            headers={"Authorization": "Bearer test-key-2"},
+        )
+        assert resp.status_code == 200
+
+    def test_post_endpoint_auth(self, auth_client: TestClient):
+        """POST 端点同样需要鉴权。"""
+        resp = auth_client.post("/api/session/create", json={})
+        assert resp.status_code == 401
+
+        resp = auth_client.post(
+            "/api/session/create",
+            json={},
+            headers={"Authorization": "Bearer test-key-1"},
+        )
+        assert resp.status_code == 200
+
+
+class TestAuthConfigVerify:
+    """AuthConfig.verify() 单元测试。"""
+
+    def test_correct_key_returns_role(self):
+        cfg = AuthConfig(enabled=True, keys=[ApiKeyEntry(key="abc", role="admin")])
+        assert cfg.verify("abc") == "admin"
+
+    def test_wrong_key_returns_none(self):
+        cfg = AuthConfig(enabled=True, keys=[ApiKeyEntry(key="abc")])
+        assert cfg.verify("xyz") is None
+
+    def test_unicode_key_rejected(self):
+        """非 ASCII key 在配置解析时即被拒绝。"""
+        with pytest.raises(Exception):
+            AuthConfig(enabled=True, keys=[ApiKeyEntry(key="🌙月亮")])
+
+    def test_empty_keys(self):
+        cfg = AuthConfig(enabled=True, keys=[])
+        assert cfg.verify("anything") is None
+
+    def test_custom_role(self):
+        cfg = AuthConfig(
+            enabled=True,
+            keys=[ApiKeyEntry(key="tool-key", role="tool_runtime")],
+        )
+        assert cfg.verify("tool-key") == "tool_runtime"
+
+
+class TestWsAuth:
+    """WebSocket 连接鉴权测试。"""
+
+    def test_ws_bearer_header_ok(self, auth_client: TestClient):
+        """WS + Bearer header 正确 key → 连接成功，收到 ConnectResponse。"""
+        with auth_client.websocket_connect(
+            "/ws", headers={"Authorization": "Bearer test-key-1"}
+        ) as ws:
+            data = ws.receive_json()
+            assert data["type"] == "connected"
+            assert "client_id" in data
+
+    def test_ws_query_param_ok(self, auth_client: TestClient):
+        """WS + query param api_key → 连接成功。"""
+        with auth_client.websocket_connect("/ws?api_key=test-key-1") as ws:
+            data = ws.receive_json()
+            assert data["type"] == "connected"
+
+    def test_ws_no_key_rejected(self, auth_client: TestClient):
+        """WS 无 key → 连接被拒绝。"""
+        with pytest.raises(Exception):
+            with auth_client.websocket_connect("/ws"):
+                pass
+
+    def test_ws_wrong_key_rejected(self, auth_client: TestClient):
+        """WS 错误 key → 连接被拒绝。"""
+        with pytest.raises(Exception):
+            with auth_client.websocket_connect(
+                "/ws", headers={"Authorization": "Bearer wrong"}
+            ):
+                pass
+
+    def test_ws_auth_disabled_no_key(self, client: TestClient):
+        """鉴权关闭时，WS 无 key 正常连接。"""
+        with client.websocket_connect("/ws") as ws:
+            data = ws.receive_json()
+            assert data["type"] == "connected"
+
+
+class TestAuthHotReload:
+    """auth 配置热重载测试——property 读最新单例，不缓存。"""
+
+    def test_reload_toggles_auth(self, mock_runtime):
+        """运行时切换 auth.enabled，无需重启即生效。"""
+        mock_cfg = _mock_config(auth_enabled=False)
+        with (
+            patch("wing.gateway.server.WingRuntime") as MockRuntime,
+            patch("wing.gateway.server.load_config") as mock_load_config,
+        ):
+            MockRuntime.return_value = mock_runtime
+            mock_load_config.return_value = mock_cfg
+
+            from wing.gateway.server import GatewayServer
+
+            server = GatewayServer()
+            server.runtime = mock_runtime
+
+            with TestClient(server._app) as tc:
+                # auth disabled → 200
+                resp = tc.get("/api/session/list")
+                assert resp.status_code == 200
+
+                # 模拟热重载：切换到 auth enabled
+                mock_load_config.return_value = _mock_config(
+                    auth_enabled=True,
+                    auth_keys=[ApiKeyEntry(key="new-key", role="admin")],
+                )
+
+                # 无 key → 401（立即生效，无需重启）
+                resp = tc.get("/api/session/list")
+                assert resp.status_code == 401
+
+                # 正确 key → 200
+                resp = tc.get(
+                    "/api/session/list",
+                    headers={"Authorization": "Bearer new-key"},
+                )
+                assert resp.status_code == 200

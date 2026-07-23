@@ -7,7 +7,7 @@ pub async fn show_status() {
     let config = read_backend_gateway_config();
     let http_base = format!("http://{}:{}", config.host, config.port);
 
-    let client = match wing_api_client::GatewayClient::new(&http_base) {
+    let client = match wing_api_client::GatewayClient::new(&http_base, None) {
         Ok(c) => c,
         Err(e) => {
             println!("Gateway is not running (failed to create HTTP client: {e})");

@@ -10,6 +10,14 @@ use anyhow::{Context, Result};
 use crate::gateway::GatewayClient;
 use wing_api_client::GatewayClient as GatewayApiClient;
 
+/// Gateway connection parameters for reconnection.
+#[derive(Debug, Clone)]
+pub struct GatewayEndpoint {
+    pub ws_url: String,
+    pub http_base: String,
+    pub api_key: Option<String>,
+}
+
 /// Encapsulates the full transport layer for gateway communication.
 pub struct Transport {
     /// WebSocket client for real-time event streaming.
@@ -56,9 +64,9 @@ pub fn backoff(attempt: u32) -> Duration {
 /// 5. HTTP subscribe to re-establish event streaming (triggers SyncSession push)
 ///
 /// Returns a new `Transport` on success, or an error if any step fails.
-pub async fn try_reconnect(ws_url: &str, http_base: &str, session_id: &str) -> Result<Transport> {
+pub async fn try_reconnect(endpoint: &GatewayEndpoint, session_id: &str) -> Result<Transport> {
     // 1. WS reconnect.
-    let ws = GatewayClient::connect(ws_url)
+    let ws = GatewayClient::connect(&endpoint.ws_url, endpoint.api_key.as_deref())
         .await
         .context("WS reconnect failed")?;
 
@@ -66,8 +74,8 @@ pub async fn try_reconnect(ws_url: &str, http_base: &str, session_id: &str) -> R
     let client_id = ws.client_id().to_string();
 
     // 3. Create HTTP client.
-    let http =
-        GatewayApiClient::new(http_base).context("failed to create HTTP client for reconnect")?;
+    let http = GatewayApiClient::new(&endpoint.http_base, endpoint.api_key.as_deref())
+        .context("failed to create HTTP client for reconnect")?;
 
     // 4. Resume session (loads from disk into gateway memory after restart).
     http.resume_session(session_id)

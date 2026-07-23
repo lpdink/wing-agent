@@ -7,6 +7,7 @@ use futures_util::SinkExt;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::http::Request;
 
 use crate::protocol::ClientRequest;
 use crate::protocol::ConnectResponse;
@@ -32,12 +33,36 @@ impl GatewayClient {
     /// Connect to a wing-gateway WebSocket endpoint.
     ///
     /// Performs the handshake: waits for the first `ConnectResponse` message.
-    pub async fn connect(url: &str) -> Result<Self> {
+    /// If `api_key` is provided and non-empty, the WS handshake carries
+    /// an `Authorization: Bearer <key>` header.
+    pub async fn connect(url: &str, api_key: Option<&str>) -> Result<Self> {
         tracing::info!("connecting to gateway: {url}");
 
-        let (ws_stream, _response) = tokio_tungstenite::connect_async(url)
-            .await
-            .context("failed to connect to gateway WebSocket")?;
+        let mut request_builder = Request::builder().uri(url);
+        if let Some(key) = api_key
+            && !key.is_empty()
+        {
+            request_builder = request_builder.header("Authorization", format!("Bearer {key}"));
+        }
+        let request = request_builder
+            .body(())
+            .context("failed to build WS request")?;
+
+        let (ws_stream, _resp) = match tokio_tungstenite::connect_async(request).await {
+            Ok(pair) => pair,
+            Err(tokio_tungstenite::tungstenite::Error::Http(resp))
+                if resp.status() == 401 || resp.status() == 403 =>
+            {
+                anyhow::bail!(
+                    "gateway rejected authentication (HTTP {}); \
+                     check `api_key` in ~/.wing/tui/config.yaml matches gateway.auth.keys",
+                    resp.status()
+                );
+            }
+            Err(e) => {
+                return Err(e).context("failed to connect to gateway WebSocket");
+            }
+        };
 
         tracing::debug!("WebSocket connection established");
 

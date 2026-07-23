@@ -15,7 +15,7 @@ pub async fn start_gateway(host: &str, port: u16) -> anyhow::Result<()> {
     let http_base = format!("http://{host}:{port}");
 
     // Check if gateway is already running via health check.
-    if let Ok(client) = wing_api_client::GatewayClient::new(&http_base)
+    if let Ok(client) = wing_api_client::GatewayClient::new(&http_base, None)
         && let Ok(health) = client.health().await
         && health.service == "wing-gateway"
     {
@@ -86,7 +86,7 @@ pub async fn start_gateway(host: &str, port: u16) -> anyhow::Result<()> {
     let timeout = Duration::from_secs(5);
     let deadline = std::time::Instant::now() + timeout;
 
-    let client = wing_api_client::GatewayClient::new(&http_base)
+    let client = wing_api_client::GatewayClient::new(&http_base, None)
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
 
     let mut ready = false;
