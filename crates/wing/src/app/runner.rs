@@ -222,6 +222,7 @@ pub async fn execute_intent(
                     Ok(resp) => {
                         let new_sid = resp.session_id.clone();
                         t.switch_session(&old_session_id, &new_sid).await;
+                        app.invalidate_session_cache();
                         tracing::info!(old = old_session_id, new = new_sid, "session created");
                     }
                     Err(e) => {
@@ -242,6 +243,7 @@ pub async fn execute_intent(
                     Ok(resp) => {
                         let new_sid = resp.session_id.clone();
                         t.switch_session(&old_session_id, &new_sid).await;
+                        app.invalidate_session_cache();
                         tracing::info!(old = old_session_id, new = new_sid, "session resumed");
                     }
                     Err(e) => {
@@ -260,6 +262,7 @@ pub async fn execute_intent(
                     Ok(resp) => {
                         let new_sid = resp.session_id.clone();
                         t.switch_session(&old_session_id, &new_sid).await;
+                        app.invalidate_session_cache();
                         tracing::info!(old = old_session_id, new = new_sid, "session forked");
                     }
                     Err(e) => {
@@ -591,6 +594,7 @@ fn apply_update_session(
     .collect();
 
     // Apply to local status.
+    let affects_list = title.is_some() || workspace.is_some();
     app.status
         .apply_session_update(model, agent, title, thinking, reasoning_effort, yolo);
 
@@ -598,10 +602,98 @@ fn apply_update_session(
         app.status.workdir = Some(w);
     }
 
+    // Title/workspace changes affect the session list display — invalidate cache.
+    if affects_list {
+        app.invalidate_session_cache();
+    }
+
     if !parts.is_empty() {
         app.show_toast(Toast::info(
             parts.join(" · "),
             std::time::Duration::from_secs(3),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use crate::ui::popup::command::SessionCandidate;
+
+    fn app_with_cached_sessions() -> App {
+        let mut app = App::new("test-session".into(), AppConfig::default(), None);
+        app.popup.cache.sessions = vec![SessionCandidate {
+            id: "s1".into(),
+            title: "Old Title".into(),
+            workspace: "/old".into(),
+            status: "idle".into(),
+            last_interaction: "2025-01-01T00:00:00Z".into(),
+        }];
+        app
+    }
+
+    #[test]
+    fn test_update_session_invalidates_cache_on_title() {
+        let mut app = app_with_cached_sessions();
+        apply_update_session(
+            &mut app,
+            None,
+            None,
+            Some("New Title".into()),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(app.popup.cache.sessions.is_empty());
+    }
+
+    #[test]
+    fn test_update_session_invalidates_cache_on_workspace() {
+        let mut app = app_with_cached_sessions();
+        apply_update_session(
+            &mut app,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("/new/dir".into()),
+        );
+        assert!(app.popup.cache.sessions.is_empty());
+    }
+
+    #[test]
+    fn test_update_session_preserves_cache_on_model_only() {
+        let mut app = app_with_cached_sessions();
+        apply_update_session(
+            &mut app,
+            Some("gpt-4o".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(!app.popup.cache.sessions.is_empty());
+    }
+
+    #[test]
+    fn test_update_session_preserves_cache_on_thinking_only() {
+        let mut app = app_with_cached_sessions();
+        apply_update_session(
+            &mut app,
+            None,
+            None,
+            None,
+            Some(true),
+            Some("high".into()),
+            None,
+            None,
+        );
+        assert!(!app.popup.cache.sessions.is_empty());
     }
 }
