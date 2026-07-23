@@ -485,18 +485,27 @@ class WingAgent:
         self, pending_tool_calls: list[ToolCall]
     ) -> list[Message]:
         log.info(f"exec_tool_calls: executing {len(pending_tool_calls)} tool calls")
-        tc_results: list[Message] = []
-        for tc in pending_tool_calls:
+
+        async def _exec_one(tc: ToolCall) -> Message:
             log.info(f"exec_tool_calls: executing tool '{tc.name}' with id={tc.id}")
-            result = await self._execute_tool(tc)
-            result = self._maybe_truncate(result)
-            tc_results.append(
-                Message(
-                    role="tool",
-                    tool_call_id=tc.id,
-                    content=result,
-                )
+            try:
+                result = await self._execute_tool(tc)
+                result = self._maybe_truncate(result)
+            except Exception as e:
+                # 安全兜底：_execute_tool 内部已捕获绝大多数异常，
+                # 此处防止意外逃逸导致 asyncio.gather 中断其他并发任务
+                log.error(f"exec_tool_calls: unexpected error in tool '{tc.name}': {e}")
+                result = f"Error executing tool '{tc.name}': {e}"
+            return Message(
+                role="tool",
+                tool_call_id=tc.id,
+                content=result,
             )
+
+        # asyncio.gather 并发执行所有工具调用，返回值顺序与输入顺序一致
+        tc_results = list(
+            await asyncio.gather(*(_exec_one(tc) for tc in pending_tool_calls))
+        )
         return tc_results
 
     def _maybe_truncate(self, result: str) -> str:
@@ -587,12 +596,12 @@ class WingAgent:
             )
             return result
 
-        # Hook: before_tool_call — 修改工具调用参数
-        modified_tc = await hooks.invoke_async("before_tool_call", tc)
-        if modified_tc is not None:
-            tc = modified_tc
-
         try:
+            # Hook: before_tool_call — 修改工具调用参数
+            modified_tc = await hooks.invoke_async("before_tool_call", tc)
+            if modified_tc is not None:
+                tc = modified_tc
+
             # 过滤掉工具函数实际不接受的参数（如动态添加的 purpose）
             sig = inspect.signature(tool.function)
             actual_params = set(sig.parameters.keys())
