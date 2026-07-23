@@ -64,7 +64,6 @@ class GatewayServer:
         self.host = host
         self.port = port
         self.runtime = WingRuntime()
-        self.auth_config: AuthConfig = load_config().gateway.auth
         self._client_to_ws: dict[str, WebSocket] = {}  # client_id → ws
         self._ws_to_client: dict[WebSocket, str] = {}  # ws → client_id
         self._app = create_app(self)
@@ -81,6 +80,11 @@ class GatewayServer:
     def uptime(self) -> int:
         """Gateway 运行时长（秒）。"""
         return int((datetime.now(timezone.utc) - self._started_at).total_seconds())
+
+    @property
+    def auth_config(self) -> AuthConfig:
+        """当前鉴权配置（每次读取最新单例，热重载后立即生效）。"""
+        return load_config().gateway.auth
 
     @property
     def clients(self) -> dict[str, WebSocket]:

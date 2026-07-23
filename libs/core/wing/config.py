@@ -82,10 +82,24 @@ class ToolResultTruncateConfig(BaseModel):
 
 
 class ApiKeyEntry(BaseModel):
-    """Single API key with an identity role."""
+    """Single API key with an identity role.
+
+    Keys are restricted to ASCII printable characters (0x20–0x7E).
+    HTTP headers are latin-1 encoded; non-ASCII keys would silently
+    mismatch between client and server.
+    """
 
     key: str
     role: str = "admin"
+
+    @field_validator("key")
+    @classmethod
+    def _key_ascii_printable(cls, v: str) -> str:
+        if not v or not all(0x20 <= ord(c) <= 0x7E for c in v):
+            raise ValueError(
+                "API key must contain only ASCII printable characters (0x20-0x7E)"
+            )
+        return v
 
 
 class AuthConfig(BaseModel):

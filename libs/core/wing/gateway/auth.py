@@ -8,9 +8,13 @@
   - AuthMiddleware: Starlette HTTP 中间件，拦截未鉴权请求
 
 鉴权逻辑完全在 Gateway 层，不侵入 Runtime。
+AuthMiddleware 不缓存 AuthConfig——每次请求从 ``app.state.server.auth_config``
+动态读取，确保 ``/api/system/reload`` 热重载后立即生效。
 """
 
 from __future__ import annotations
+
+from collections.abc import Mapping
 
 from fastapi import WebSocket
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -18,25 +22,24 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
-from wing.config import AuthConfig
-
 # 免鉴权路径——无论 auth.enabled 如何，这些路径始终开放。
 EXEMPT_PATHS: set[str] = {"/api/health"}
 
-_UNAUTHORIZED = JSONResponse(
-    status_code=401,
-    content={"detail": "Invalid or missing API key"},
-)
+
+def _unauthorized() -> JSONResponse:
+    """构造 401 响应（每次新建，避免共享实例被 middleware 链 mutate）。"""
+    return JSONResponse(
+        status_code=401,
+        content={"detail": "Invalid or missing API key"},
+    )
 
 
-def extract_key_from_headers(headers: dict[str, str] | Request) -> str | None:
+def extract_key_from_headers(headers: Mapping[str, str]) -> str | None:
     """从 HTTP headers 提取 API key。
 
     优先级：Authorization: Bearer <key> > X-API-Key: <key>。
+    header name 查找不区分大小写（Starlette Headers 本身即如此）。
     """
-    if isinstance(headers, Request):
-        headers = dict(headers.headers)
-
     # 1. Authorization: Bearer <key>
     auth = headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
@@ -58,7 +61,7 @@ def extract_key_from_ws(ws: WebSocket) -> str | None:
     优先级：headers（同 HTTP）> query param ``api_key``。
     """
     # 1. Headers
-    key = extract_key_from_headers(dict(ws.headers))
+    key = extract_key_from_headers(ws.headers)
     if key:
         return key
 
@@ -72,28 +75,32 @@ class AuthMiddleware(BaseHTTPMiddleware):
     当 ``auth_config.enabled`` 为 True 时，拦截所有非免鉴权路径的
     HTTP 请求，校验 API Key。校验通过后将 role 写入
     ``request.state.api_key_role``。
+
+    不缓存 AuthConfig——每次 dispatch 从 ``app.state.server.auth_config``
+    读取最新配置，热重载后立即生效。
     """
 
-    def __init__(self, app: ASGIApp, auth_config: AuthConfig) -> None:
+    def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
-        self.auth_config = auth_config
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
-        if not self.auth_config.enabled:
+        auth_config = request.app.state.server.auth_config
+
+        if not auth_config.enabled:
             return await call_next(request)
 
         if request.url.path in EXEMPT_PATHS:
             return await call_next(request)
 
-        key = extract_key_from_headers(request)
+        key = extract_key_from_headers(request.headers)
         if key is None:
-            return _UNAUTHORIZED
+            return _unauthorized()
 
-        role = self.auth_config.verify(key)
+        role = auth_config.verify(key)
         if role is None:
-            return _UNAUTHORIZED
+            return _unauthorized()
 
         request.state.api_key_role = role
         return await call_next(request)

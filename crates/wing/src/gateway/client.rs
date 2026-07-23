@@ -38,25 +38,19 @@ impl GatewayClient {
     pub async fn connect(url: &str, api_key: Option<&str>) -> Result<Self> {
         tracing::info!("connecting to gateway: {url}");
 
-        let ws_stream = match api_key {
-            Some(key) if !key.is_empty() => {
-                let request = Request::builder()
-                    .uri(url)
-                    .header("Authorization", format!("Bearer {key}"))
-                    .body(())
-                    .context("failed to build WS request")?;
-                let (stream, _resp) = tokio_tungstenite::connect_async(request)
-                    .await
-                    .context("failed to connect to gateway WebSocket")?;
-                stream
-            }
-            _ => {
-                let (stream, _resp) = tokio_tungstenite::connect_async(url)
-                    .await
-                    .context("failed to connect to gateway WebSocket")?;
-                stream
-            }
-        };
+        let mut request_builder = Request::builder().uri(url);
+        if let Some(key) = api_key
+            && !key.is_empty()
+        {
+            request_builder = request_builder.header("Authorization", format!("Bearer {key}"));
+        }
+        let request = request_builder
+            .body(())
+            .context("failed to build WS request")?;
+
+        let (ws_stream, _resp) = tokio_tungstenite::connect_async(request)
+            .await
+            .context("failed to connect to gateway WebSocket")?;
 
         tracing::debug!("WebSocket connection established");
 

@@ -45,7 +45,7 @@ impl GatewayClient {
     pub fn new(base_url: impl Into<String>, api_key: Option<&str>) -> Result<Self, ApiClientError> {
         let http = Client::builder()
             .timeout(std::time::Duration::from_secs(60))
-            .default_headers(build_auth_headers(api_key))
+            .default_headers(build_auth_headers(api_key)?)
             .build()?;
         Ok(Self {
             http,
@@ -414,17 +414,15 @@ impl GatewayClient {
 ///
 /// Returns a `HeaderMap` containing `Authorization: Bearer <key>`
 /// when `api_key` is `Some` and non-empty; otherwise an empty map.
-fn build_auth_headers(api_key: Option<&str>) -> HeaderMap {
+fn build_auth_headers(api_key: Option<&str>) -> Result<HeaderMap, ApiClientError> {
     let mut headers = HeaderMap::new();
     if let Some(key) = api_key
         && !key.is_empty()
     {
-        let value = format!("Bearer {key}")
-            .parse()
-            .expect("API key contains invalid header characters");
+        let value = format!("Bearer {key}").parse()?;
         headers.insert(AUTHORIZATION, value);
     }
-    headers
+    Ok(headers)
 }
 
 #[cfg(test)]
@@ -433,7 +431,7 @@ mod tests {
 
     #[test]
     fn test_build_auth_headers_with_key() {
-        let headers = build_auth_headers(Some("my-secret"));
+        let headers = build_auth_headers(Some("my-secret")).unwrap();
         assert_eq!(
             headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
             "Bearer my-secret"
@@ -442,14 +440,21 @@ mod tests {
 
     #[test]
     fn test_build_auth_headers_none() {
-        let headers = build_auth_headers(None);
+        let headers = build_auth_headers(None).unwrap();
         assert!(headers.get(AUTHORIZATION).is_none());
     }
 
     #[test]
     fn test_build_auth_headers_empty() {
-        let headers = build_auth_headers(Some(""));
+        let headers = build_auth_headers(Some("")).unwrap();
         assert!(headers.get(AUTHORIZATION).is_none());
+    }
+
+    #[test]
+    fn test_build_auth_headers_invalid_key() {
+        // Control characters are invalid in HTTP header values.
+        let result = build_auth_headers(Some("bad\nkey"));
+        assert!(result.is_err());
     }
 
     #[test]

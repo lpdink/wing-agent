@@ -12,13 +12,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from wing.config import ApiKeyEntry, AuthConfig
 from wing.event import AgentInfo, SessionInfo
 
 
 def _mock_config(auth_enabled: bool = False, auth_keys: list | None = None):
     """构建 mock Config，仅填充 gateway.auth 字段。"""
-    from wing.config import AuthConfig
-
     config = MagicMock()
     config.gateway.auth = AuthConfig(
         enabled=auth_enabled,
@@ -1003,8 +1002,6 @@ class TestSystemReload:
 # Auth 鉴权测试
 # ============================================================
 
-from wing.config import ApiKeyEntry, AuthConfig  # noqa: E402
-
 
 @pytest.fixture
 def auth_client(mock_runtime):
@@ -1112,10 +1109,10 @@ class TestAuthConfigVerify:
         cfg = AuthConfig(enabled=True, keys=[ApiKeyEntry(key="abc")])
         assert cfg.verify("xyz") is None
 
-    def test_unicode_key(self):
-        cfg = AuthConfig(enabled=True, keys=[ApiKeyEntry(key="🌙月亮")])
-        assert cfg.verify("🌙月亮") == "admin"
-        assert cfg.verify("🌙") is None
+    def test_unicode_key_rejected(self):
+        """非 ASCII key 在配置解析时即被拒绝。"""
+        with pytest.raises(Exception):
+            AuthConfig(enabled=True, keys=[ApiKeyEntry(key="🌙月亮")])
 
     def test_empty_keys(self):
         cfg = AuthConfig(enabled=True, keys=[])
@@ -1127,3 +1124,42 @@ class TestAuthConfigVerify:
             keys=[ApiKeyEntry(key="tool-key", role="tool_runtime")],
         )
         assert cfg.verify("tool-key") == "tool_runtime"
+
+
+class TestWsAuth:
+    """WebSocket 连接鉴权测试。"""
+
+    def test_ws_bearer_header_ok(self, auth_client: TestClient):
+        """WS + Bearer header 正确 key → 连接成功，收到 ConnectResponse。"""
+        with auth_client.websocket_connect(
+            "/ws", headers={"Authorization": "Bearer test-key-1"}
+        ) as ws:
+            data = ws.receive_json()
+            assert data["type"] == "connected"
+            assert "client_id" in data
+
+    def test_ws_query_param_ok(self, auth_client: TestClient):
+        """WS + query param api_key → 连接成功。"""
+        with auth_client.websocket_connect("/ws?api_key=test-key-1") as ws:
+            data = ws.receive_json()
+            assert data["type"] == "connected"
+
+    def test_ws_no_key_rejected(self, auth_client: TestClient):
+        """WS 无 key → 连接被拒绝。"""
+        with pytest.raises(Exception):
+            with auth_client.websocket_connect("/ws"):
+                pass
+
+    def test_ws_wrong_key_rejected(self, auth_client: TestClient):
+        """WS 错误 key → 连接被拒绝。"""
+        with pytest.raises(Exception):
+            with auth_client.websocket_connect(
+                "/ws", headers={"Authorization": "Bearer wrong"}
+            ):
+                pass
+
+    def test_ws_auth_disabled_no_key(self, client: TestClient):
+        """鉴权关闭时，WS 无 key 正常连接。"""
+        with client.websocket_connect("/ws") as ws:
+            data = ws.receive_json()
+            assert data["type"] == "connected"

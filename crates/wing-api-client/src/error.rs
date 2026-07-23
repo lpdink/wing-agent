@@ -21,6 +21,10 @@ pub enum ApiClientError {
     /// 响应体反序列化失败。
     #[error("failed to deserialize response: {0}")]
     Deserialize(#[from] serde_json::Error),
+
+    /// API key 含非法 HTTP header 字符。
+    #[error("invalid API key for HTTP header: {0}")]
+    InvalidApiKey(#[from] reqwest::header::InvalidHeaderValue),
 }
 
 /// 从 reqwest::Response 中提取 ApiClientError::Api。

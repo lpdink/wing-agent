@@ -130,7 +130,10 @@ gateway:
   # API key authentication. When enabled, all HTTP/WS requests
   # (except /api/health) must carry a valid key via
   # "Authorization: Bearer <key>" or "X-API-Key: <key>" header.
-  # WS also accepts ?api_key=<key> query parameter.
+  # WS also accepts ?api_key=<key> query parameter (note: query
+  # params may appear in reverse proxy access logs).
+  # Keys must be ASCII printable characters only.
+  # WARNING: enabled=true with empty keys locks out ALL requests.
   auth:
     enabled: false
     keys: []

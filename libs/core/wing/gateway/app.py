@@ -38,7 +38,7 @@ def create_app(server: GatewayServer) -> FastAPI:
     )
 
     app.state.server = server
-    app.add_middleware(AuthMiddleware, auth_config=server.auth_config)
+    app.add_middleware(AuthMiddleware)
     register_routes(app, server)
 
     return app
