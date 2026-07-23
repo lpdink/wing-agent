@@ -7,7 +7,7 @@ use futures_util::SinkExt;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::http::Request;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::protocol::ClientRequest;
 use crate::protocol::ConnectResponse;
@@ -38,15 +38,21 @@ impl GatewayClient {
     pub async fn connect(url: &str, api_key: Option<&str>) -> Result<Self> {
         tracing::info!("connecting to gateway: {url}");
 
-        let mut request_builder = Request::builder().uri(url);
+        // Let tungstenite build the proper WS handshake request from the URL
+        // (sets Host, Upgrade, Sec-WebSocket-Key, etc.), then append auth header.
+        let mut request = url
+            .into_client_request()
+            .context("failed to build WS request")?;
         if let Some(key) = api_key
             && !key.is_empty()
         {
-            request_builder = request_builder.header("Authorization", format!("Bearer {key}"));
+            request.headers_mut().insert(
+                "Authorization",
+                format!("Bearer {key}")
+                    .parse()
+                    .context("API key contains invalid header characters")?,
+            );
         }
-        let request = request_builder
-            .body(())
-            .context("failed to build WS request")?;
 
         let (ws_stream, _resp) = match tokio_tungstenite::connect_async(request).await {
             Ok(pair) => pair,
