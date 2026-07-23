@@ -86,7 +86,7 @@ async def explorer_agent(
     )
 
     # Sub-agent — same model, stream=False, read-only tools
-    ro_tools = [tool_registry.get_tool(n) for n in ("Read", "Glob", "Grep")]
+    ro_tools = [tool_registry.resolve(n) for n in ("Read", "Glob", "Grep")]
     sub_agent = WingAgent(
         model=agent.model,
         model_provider=agent.model_provider,

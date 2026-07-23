@@ -120,7 +120,7 @@ class WingAgent:
 
     @property
     def tools(self) -> list[Tool]:
-        return sorted(self._tool_map.values(), key=lambda item: item.name)
+        return sorted(self._tool_map.values(), key=lambda item: item.effective_llm_name)
 
     @property
     def max_turns(self) -> int | None:
@@ -161,13 +161,13 @@ class WingAgent:
     def replace_tools(self, tool_names: list[str]) -> None:
         """替换工具列表。从 tool_registry 获取未绑定工具并重新绑定。
 
-        使用 tool_registry.get_tool() 获取全新的未绑定 Tool 对象，
-        避免闭包泄漏（旧 agent 的 _agent 引用）。
+        使用 tool_registry.resolve() 解析工具引用（支持裸名和 namespace.name），
+        获取全新的未绑定 Tool 对象，避免闭包泄漏（旧 agent 的 _agent 引用）。
         """
         from wing.tool_registry import tool_registry
 
         unbound_tools = [
-            t for name in tool_names if (t := tool_registry.get_tool(name)) is not None
+            t for name in tool_names if (t := tool_registry.resolve(name)) is not None
         ]
         self._tool_map = self._bind_tools(unbound_tools)
 
@@ -180,6 +180,20 @@ class WingAgent:
         self.model_provider.reasoning_effort = effort
 
     def _bind_tools(self, tools: list[Tool]) -> dict[str, Any]:
+        from wing.tool_registry import ToolRef
+
+        # 检测 effective_llm_name 碰撞——同一 agent 内 LLM 可见名必须唯一
+        seen: dict[str, str] = {}  # llm_name → ToolRef 描述
+        for tool in tools:
+            key = tool.effective_llm_name
+            desc = str(ToolRef(namespace=tool.namespace, name=tool.name))
+            if key in seen:
+                raise ValueError(
+                    f"LLM name collision: '{key}' is claimed by both "
+                    f"{seen[key]} and {desc}"
+                )
+            seen[key] = desc
+
         bound_map = {}
 
         # NOTE: WARNING — 闭包 _agent=self 捕获了当前 agent 实例。
@@ -188,7 +202,7 @@ class WingAgent:
         # 参见 session.py fork/switch 中 tools=unbound_tools 的处理。
         for tool in tools:
             if not tool.inject_agent_param:
-                bound_map[tool.name] = tool
+                bound_map[tool.effective_llm_name] = tool
                 continue
 
             original_fn = tool.function
@@ -216,7 +230,7 @@ class WingAgent:
                     "inject_agent_param": None,
                 }
             )
-            bound_map[tool.name] = bound_tool
+            bound_map[tool.effective_llm_name] = bound_tool
 
         return bound_map
 
@@ -799,6 +813,6 @@ class WingAgent:
             "message_count": count,
             "total_tokens": tokens,
             "context_window_tokens": ctx_window,
-            "tools": [t.name for t in self.tools] if self.tools else [],
+            "tools": [t.effective_llm_name for t in self.tools] if self.tools else [],
             "api_url": getattr(self.model_provider, "base_url", "unknown"),
         }

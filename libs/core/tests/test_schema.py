@@ -135,3 +135,44 @@ class TestMessageToOpenai:
         args = json.loads(o["function"]["arguments"])
         assert args["command"] == "ls"
         assert args["timeout"] == 30
+
+
+class TestToolToOpenai:
+    """Verify Tool.to_openai() uses effective_llm_name."""
+
+    def test_default_llm_name_uses_name(self):
+        from wing.schema import Tool
+
+        tool = Tool(
+            name="Bash", description="run shell", params=[], function=lambda: None
+        )
+        schema = tool.to_openai()
+        assert schema["function"]["name"] == "Bash"
+
+    def test_explicit_llm_name_overrides(self):
+        from wing.schema import Tool
+
+        tool = Tool(
+            name="Bash",
+            llm_name="Shell",
+            description="run shell",
+            params=[],
+            function=lambda: None,
+        )
+        schema = tool.to_openai()
+        assert schema["function"]["name"] == "Shell"
+
+    def test_effective_llm_name_property(self):
+        from wing.schema import Tool
+
+        t1 = Tool(name="Bash", description="", params=[], function=lambda: None)
+        assert t1.effective_llm_name == "Bash"
+
+        t2 = Tool(
+            name="Bash",
+            llm_name="Shell",
+            description="",
+            params=[],
+            function=lambda: None,
+        )
+        assert t2.effective_llm_name == "Shell"
