@@ -297,7 +297,7 @@ class Session:
         return AgentInfo(
             model_name=self._agent.model,
             system_prompt=cm.system_prompt.content if cm.system_prompt else None,
-            tools=[t.name for t in self._agent.tools],
+            tools=[t.effective_llm_name for t in self._agent.tools],
             skills=list(cm._skills_cache.keys()),
             rules=list(cm._rules_patterns),
             workspace=self._session_workspace,

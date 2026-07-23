@@ -2,7 +2,7 @@
 import json
 from typing import Any, Callable, Dict, List, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 ########## EXCEPTIONS
@@ -174,12 +174,36 @@ class ToolParam(BaseModel):
 
 class Tool(BaseModel):
     name: str
+    """注册名（registry key），在同一命名空间内唯一。"""
+    namespace: str = "default"
+    """工具命名空间。内置工具为 "default"，远程工具可用 client ID 等。"""
+    llm_name: str | None = None
+    """LLM 可见名。None 时退化为 name。用于 to_openai() 输出和 agent 调度。"""
     description: str
     params: list[ToolParam]
     function: Callable
     inject_agent_param: str | None = Field(default=None, exclude=True)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @field_validator("namespace")
+    @classmethod
+    def _namespace_not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("namespace must not be empty")
+        return v
+
+    @field_validator("llm_name")
+    @classmethod
+    def _llm_name_not_empty(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError("llm_name must not be empty when provided")
+        return v
+
+    @property
+    def effective_llm_name(self) -> str:
+        """LLM 实际看到的工具名。llm_name 未设置时退化为 name。"""
+        return self.llm_name if self.llm_name is not None else self.name
 
     def to_openai(self) -> dict:
         properties: Dict[str, Any] = {}
@@ -205,7 +229,7 @@ class Tool(BaseModel):
         return {
             "type": "function",
             "function": {
-                "name": self.name,
+                "name": self.effective_llm_name,
                 "description": self.description,
                 "parameters": {
                     "type": "object",

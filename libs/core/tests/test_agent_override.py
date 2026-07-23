@@ -244,6 +244,59 @@ class TestWingAgentSetters:
         agent.set_reasoning_effort(None)
         assert agent.model_provider.reasoning_effort is None
 
+    @pytest.mark.asyncio
+    async def test_bind_tools_llm_name_collision_raises(self, runtime: Any):
+        """不同 namespace 的工具若 effective_llm_name 相同，绑定时 raise。"""
+        from wing.schema import Tool
+
+        session = runtime.create_session()
+        agent = session.agent
+
+        t1 = Tool(
+            name="Bash",
+            namespace="client-a",
+            description="",
+            params=[],
+            function=lambda: None,
+        )
+        t2 = Tool(
+            name="Bash",
+            namespace="client-b",
+            description="",
+            params=[],
+            function=lambda: None,
+        )
+        with pytest.raises(ValueError, match="LLM name collision"):
+            agent._bind_tools([t1, t2])
+
+    @pytest.mark.asyncio
+    async def test_bind_tools_different_llm_names_ok(self, runtime: Any):
+        """不同 namespace 的工具若 llm_name 不同，绑定正常。"""
+        from wing.schema import Tool
+
+        session = runtime.create_session()
+        agent = session.agent
+
+        t1 = Tool(
+            name="Bash",
+            namespace="client-a",
+            llm_name="BashA",
+            description="",
+            params=[],
+            function=lambda: None,
+        )
+        t2 = Tool(
+            name="Bash",
+            namespace="client-b",
+            llm_name="BashB",
+            description="",
+            params=[],
+            function=lambda: None,
+        )
+        bound = agent._bind_tools([t1, t2])
+        assert "BashA" in bound
+        assert "BashB" in bound
+
 
 # ============================================================
 # max_turns config integration

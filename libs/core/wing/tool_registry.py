@@ -1,10 +1,10 @@
 # wing/tool_registry.py
 import inspect
+from dataclasses import dataclass
 from types import UnionType
 from typing import (
     Any,
     Callable,
-    Dict,
     ForwardRef,
     Literal,
     Union,
@@ -15,17 +15,66 @@ from typing import (
 
 from wing.schema import Tool, ToolParam
 
+DEFAULT_NAMESPACE = "default"
+
+
+@dataclass(frozen=True)
+class ToolRef:
+    """工具引用——将字符串引用解析为 (namespace, name) 对。
+
+    解析规则（k8s 风格，rsplit(".", 1)）：
+      - "Bash"          → (default, Bash)
+      - "client.Bash"   → (client, Bash)
+      - "org.team.Bash" → (org.team, Bash)
+
+    约束：default 命名空间内工具名不含 "."。
+    """
+
+    namespace: str
+    name: str
+
+    @classmethod
+    def parse(cls, ref: str) -> "ToolRef":
+        if not ref:
+            raise ValueError("Tool reference cannot be empty")
+        if "." in ref:
+            ns, name = ref.rsplit(".", 1)
+            if not ns or not name:
+                raise ValueError(f"Invalid tool reference: '{ref}'")
+            return cls(namespace=ns, name=name)
+        return cls(namespace=DEFAULT_NAMESPACE, name=ref)
+
+    def __str__(self) -> str:
+        if self.namespace == DEFAULT_NAMESPACE:
+            return self.name
+        return f"{self.namespace}.{self.name}"
+
 
 class ToolRegistry:
     def __init__(self) -> None:
-        self._tools_map: Dict[str, Tool] = {}
+        self._namespaces: dict[str, dict[str, Tool]] = {}
 
     @property
     def tools(self) -> list[Tool]:
-        return sorted(self._tools_map.values(), key=lambda x: x.name)
+        all_tools: list[Tool] = []
+        for ns_tools in self._namespaces.values():
+            all_tools.extend(ns_tools.values())
+        return sorted(all_tools, key=lambda x: (x.namespace, x.name))
 
-    def get_tool(self, name: str) -> Tool | None:
-        return self._tools_map.get(name)
+    def get_tool(self, name: str, namespace: str = DEFAULT_NAMESPACE) -> Tool | None:
+        return self._namespaces.get(namespace, {}).get(name)
+
+    def resolve(self, ref: str) -> Tool | None:
+        """解析工具引用字符串（裸名或 namespace.name），返回对应 Tool。
+
+        畸形引用（空串、".Bash" 等）视为"未找到"返回 None，
+        不向调用方抛异常——config 解析和 replace_tools 依赖此契约。
+        """
+        try:
+            parsed = ToolRef.parse(ref)
+        except ValueError:
+            return None
+        return self.get_tool(parsed.name, parsed.namespace)
 
     def register(
         self,
@@ -33,6 +82,8 @@ class ToolRegistry:
         description: str | None = None,
         params: list[ToolParam] | None = None,
         add_purpose: bool = False,
+        namespace: str = DEFAULT_NAMESPACE,
+        llm_name: str | None = None,
     ) -> Callable[[Callable], Callable]:
         def decorator(fn: Callable) -> Callable:
             sig = inspect.signature(fn)
@@ -77,12 +128,19 @@ class ToolRegistry:
 
             tool = Tool(
                 name=name or getattr(fn, "__name__", ""),
+                namespace=namespace,
+                llm_name=llm_name,
                 description=description or inspect.getdoc(fn) or "",
                 params=tool_params,
                 function=fn,
                 inject_agent_param=inject_agent_param,
             )
-            self._tools_map[tool.name] = tool
+            ns_map = self._namespaces.setdefault(namespace, {})
+            if tool.name in ns_map:
+                raise ValueError(
+                    f"Tool '{tool.name}' already registered in namespace '{namespace}'"
+                )
+            ns_map[tool.name] = tool
             return fn
 
         return decorator

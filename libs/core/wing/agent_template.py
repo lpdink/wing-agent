@@ -55,9 +55,10 @@ class AgentTemplate(BaseModel):
         cm = agent.context_manager
 
         # 反查 tool_registry 获取未绑定工具
-        agent_tool_names = [t.name for t in agent.tools]
         unbound_tools = [
-            t for n in agent_tool_names if (t := tool_registry.get_tool(n)) is not None
+            t
+            for tool in agent.tools
+            if (t := tool_registry.get_tool(tool.name, tool.namespace)) is not None
         ]
 
         return cls(
@@ -86,7 +87,7 @@ class AgentTemplate(BaseModel):
         resolved_tools = [
             t
             for name in agent_config.tools
-            if (t := tool_registry.get_tool(name)) is not None
+            if (t := tool_registry.resolve(name)) is not None
         ]
 
         compactor = Compactor(

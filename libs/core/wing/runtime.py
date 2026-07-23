@@ -471,7 +471,7 @@ class WingRuntime:
         event_bus.emit(
             SessionInitEvent(
                 session_id=session.session_id,
-                tools=[t.name for t in agent.tools],
+                tools=[t.effective_llm_name for t in agent.tools],
                 model=agent.model,
                 permission_mode="bypassPermissions" if agent.yolo else "default",
                 cwd=agent.state.get("cwd") or "",
