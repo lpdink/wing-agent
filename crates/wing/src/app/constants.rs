@@ -16,15 +16,6 @@ pub const CLEAR_COMMAND: &str = "/clear";
 /// Create a new session.
 pub const NEW_COMMAND: &str = "/new";
 
-/// Fork the current session at a branch target.
-pub const FORK_COMMAND: &str = "/fork";
-
-/// Resume a session by ID.
-pub const SESSION_COMMAND: &str = "/session";
-
-/// Short alias for /session.
-pub const SS_COMMAND: &str = "/ss";
-
 /// Activate Goal orchestration mode.
 pub const GOAL_COMMAND: &str = "/goal";
 

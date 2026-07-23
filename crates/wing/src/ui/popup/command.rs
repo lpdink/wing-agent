@@ -93,8 +93,8 @@ static TUI_ONLY_COMMANDS: LazyLock<Vec<CommandInfo>> = LazyLock::new(|| {
         CommandInfo {
             name: "title".into(),
             aliases: vec![],
-            description: "Set session title".into(),
-            params: "<name>".into(),
+            description: "Show or set session title".into(),
+            params: "[name]".into(),
         },
         CommandInfo {
             name: "workdir".into(),

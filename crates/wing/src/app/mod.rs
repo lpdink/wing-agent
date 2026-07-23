@@ -54,12 +54,9 @@ use title::AttentionKind;
 
 use self::constants::CLEAR_COMMAND;
 use self::constants::COPY_COMMAND;
-use self::constants::FORK_COMMAND;
 use self::constants::GOAL_COMMAND;
 use self::constants::GOAL_EXIT_COMMAND;
 use self::constants::NEW_COMMAND;
-use self::constants::SESSION_COMMAND;
-use self::constants::SS_COMMAND;
 use self::constants::TOOL_BASH;
 use self::constants::TOOL_TODO;
 use self::popup_state::PopupState;
@@ -485,28 +482,39 @@ impl App {
                 true
             }
             _ if text.starts_with("/model ") => {
-                if let Some(model) = parse_string_arg(text, "/model ") {
-                    self.push_intent(AppIntent::set_model(model));
-                    true
-                } else {
-                    false
+                match parse_string_arg(text, "/model") {
+                    Some(model) => {
+                        self.push_intent(AppIntent::set_model(model));
+                    }
+                    None => {
+                        self.push_intent(AppIntent::FetchModels);
+                    }
                 }
+                true
             }
             _ if text.starts_with("/agents ") => {
-                if let Some(agent) = parse_string_arg(text, "/agents ") {
-                    self.push_intent(AppIntent::set_agent(agent));
-                    true
-                } else {
-                    false
+                match parse_string_arg(text, "/agents") {
+                    Some(agent) => {
+                        self.push_intent(AppIntent::set_agent(agent));
+                    }
+                    None => {
+                        self.push_intent(AppIntent::FetchAgents);
+                    }
                 }
+                true
             }
-            _ if text.starts_with("/title ") => {
-                if let Some(title) = parse_string_arg(text, "/title ") {
-                    self.push_intent(AppIntent::set_title(title));
-                    true
+            _ if text == "/title" || text.starts_with("/title ") => {
+                let args = text.strip_prefix("/title").unwrap().trim();
+                if args.is_empty() {
+                    let title = self.status.session_name.as_deref().unwrap_or("(not set)");
+                    self.show_toast(Toast::info(
+                        format!("title: {title}"),
+                        std::time::Duration::from_secs(3),
+                    ));
                 } else {
-                    false
+                    self.push_intent(AppIntent::set_title(args.to_string()));
                 }
+                true
             }
             _ if text == "/workdir" || text.starts_with("/workdir ") => {
                 let args = text.strip_prefix("/workdir").unwrap().trim();
@@ -589,16 +597,53 @@ impl App {
                 self.push_intent(AppIntent::ReloadSystem);
                 true
             }
-            _ if text.starts_with("/rewind ") => {
-                let uuid = text.strip_prefix("/rewind ").unwrap().trim();
-                if !uuid.is_empty() {
-                    self.push_intent(AppIntent::RewindSession {
-                        target_uuid: uuid.to_string(),
-                    });
-                    true
-                } else {
-                    false
+            _ if text == "/fork" || text.starts_with("/fork ") => {
+                match parse_string_arg(text, "/fork") {
+                    Some(uuid) => {
+                        self.push_intent(AppIntent::ForkSession { target_uuid: uuid });
+                    }
+                    None => {
+                        self.show_toast(Toast::warning(
+                            "Usage: /fork <uuid>",
+                            std::time::Duration::from_secs(3),
+                        ));
+                    }
                 }
+                true
+            }
+            _ if text == "/rewind" || text.starts_with("/rewind ") => {
+                match parse_string_arg(text, "/rewind") {
+                    Some(uuid) => {
+                        self.push_intent(AppIntent::RewindSession { target_uuid: uuid });
+                    }
+                    None => {
+                        self.show_toast(Toast::warning(
+                            "Usage: /rewind <uuid>",
+                            std::time::Duration::from_secs(3),
+                        ));
+                    }
+                }
+                true
+            }
+            _ if text == "/session"
+                || text == "/ss"
+                || text.starts_with("/session ")
+                || text.starts_with("/ss ") =>
+            {
+                let id =
+                    parse_string_arg(text, "/session").or_else(|| parse_string_arg(text, "/ss"));
+                match id {
+                    Some(id) => {
+                        self.push_intent(AppIntent::ResumeSession { session_id: id });
+                    }
+                    None => {
+                        self.show_toast(Toast::warning(
+                            "Usage: /session <id>",
+                            std::time::Duration::from_secs(3),
+                        ));
+                    }
+                }
+                true
             }
             _ => false,
         }
@@ -1102,39 +1147,8 @@ impl App {
             }
             crossterm::event::KeyCode::Enter => {
                 if self.popup.active.should_submit() {
-                    // Session lifecycle + state update commands: intercept popup
-                    // selection and produce intents directly (no input box roundtrip).
-                    let lifecycle_intent = if let ActivePopup::SubCommand {
-                        command,
-                        rows,
-                        state,
-                        ..
-                    } = &self.popup.active
-                    {
-                        rows.get(state.selected)
-                            .and_then(|selected| match command.as_str() {
-                                cmd if cmd == FORK_COMMAND => Some(AppIntent::ForkSession {
-                                    target_uuid: selected.name.clone(),
-                                }),
-                                cmd if cmd == SESSION_COMMAND || cmd == SS_COMMAND => {
-                                    Some(AppIntent::ResumeSession {
-                                        session_id: selected.name.clone(),
-                                    })
-                                }
-                                "/model" => Some(AppIntent::set_model(selected.name.clone())),
-                                "/agents" => Some(AppIntent::set_agent(selected.name.clone())),
-                                _ => None,
-                            })
-                    } else {
-                        None
-                    };
-                    if let Some(intent) = lifecycle_intent {
-                        self.popup.active = ActivePopup::None;
-                        self.input.clear();
-                        self.push_intent(intent);
-                        return true;
-                    }
-
+                    // Complete the input from popup selection, then route through
+                    // submit_message() — the single command dispatch path.
                     match &self.popup.active {
                         ActivePopup::Command {
                             rows,
@@ -1884,6 +1898,7 @@ mod tests {
     use crate::config::AppConfig;
     use crate::ui::popup::command::SessionCandidate;
 
+    /// Create a minimal App for command dispatch testing.
     fn test_app() -> App {
         App::new("test-session".into(), AppConfig::default(), None)
     }
@@ -1912,5 +1927,188 @@ mod tests {
         assert!(!app.popup.cache.has_sessions());
         app.invalidate_session_cache();
         assert!(!app.popup.cache.has_sessions());
+    }
+
+    /// Assert that `text` is consumed as a command (not sent to LLM).
+    fn assert_consumed(text: &str) {
+        let mut app = test_app();
+        assert!(
+            app.try_frontend_command(text),
+            "expected '{text}' to be consumed as a command"
+        );
+    }
+
+    /// Assert that `text` is NOT consumed (falls through to LLM).
+    fn assert_not_consumed(text: &str) {
+        let mut app = test_app();
+        assert!(
+            !app.try_frontend_command(text),
+            "expected '{text}' to fall through to LLM"
+        );
+    }
+
+    // ── Dispatch completeness: all known commands are consumed ──
+
+    #[test]
+    fn test_frontend_commands_consumed() {
+        for cmd in [
+            "/clear",
+            "/new",
+            "/copy",
+            "/copy 1",
+            "/goal do something",
+            "/goal-exit",
+        ] {
+            assert_consumed(cmd);
+        }
+    }
+
+    #[test]
+    fn test_http_commands_consumed() {
+        for cmd in [
+            "/context",
+            "/skills",
+            "/model",
+            "/agents",
+            "/model gpt-4o",
+            "/agents coder",
+            "/title",
+            "/title my session",
+            "/workdir",
+            "/workdir /tmp",
+            "/think",
+            "/think on",
+            "/think off",
+            "/think high",
+            "/yolo",
+            "/yolo on",
+            "/yolo off",
+            "/compact",
+            "/reload",
+            "/fork abc-123",
+            "/rewind def-456",
+            "/session sess-789",
+            "/ss sess-789",
+        ] {
+            assert_consumed(cmd);
+        }
+    }
+
+    // ── Bare commands with no args are consumed (usage toast) ──
+
+    #[test]
+    fn test_bare_commands_consumed() {
+        for cmd in ["/fork", "/rewind", "/session", "/ss"] {
+            assert_consumed(cmd);
+        }
+    }
+
+    // ── Trailing space with empty args is consumed (not sent to LLM) ──
+
+    #[test]
+    fn test_trailing_space_consumed() {
+        for cmd in [
+            "/fork ",
+            "/rewind ",
+            "/session ",
+            "/ss ",
+            "/model ",
+            "/agents ",
+        ] {
+            assert_consumed(cmd);
+        }
+    }
+
+    // ── Unknown commands fall through to LLM ──
+
+    #[test]
+    fn test_unknown_commands_fall_through() {
+        for cmd in ["hello world", "/unknown", "/forkabc", "fork abc", "/titlex"] {
+            assert_not_consumed(cmd);
+        }
+    }
+
+    // ── Intent correctness for key commands ──
+
+    #[test]
+    fn test_fork_produces_intent() {
+        let mut app = test_app();
+        app.try_frontend_command("/fork uuid-123");
+        let intents = app.drain_intents();
+        assert!(intents.iter().any(
+            |i| matches!(i, AppIntent::ForkSession { target_uuid } if target_uuid == "uuid-123")
+        ));
+    }
+
+    #[test]
+    fn test_rewind_produces_intent() {
+        let mut app = test_app();
+        app.try_frontend_command("/rewind uuid-456");
+        let intents = app.drain_intents();
+        assert!(intents.iter().any(
+            |i| matches!(i, AppIntent::RewindSession { target_uuid } if target_uuid == "uuid-456")
+        ));
+    }
+
+    #[test]
+    fn test_session_produces_intent() {
+        let mut app = test_app();
+        app.try_frontend_command("/session sess-abc");
+        let intents = app.drain_intents();
+        assert!(intents.iter().any(
+            |i| matches!(i, AppIntent::ResumeSession { session_id } if session_id == "sess-abc")
+        ));
+    }
+
+    #[test]
+    fn test_ss_alias_produces_intent() {
+        let mut app = test_app();
+        app.try_frontend_command("/ss sess-def");
+        let intents = app.drain_intents();
+        assert!(intents.iter().any(
+            |i| matches!(i, AppIntent::ResumeSession { session_id } if session_id == "sess-def")
+        ));
+    }
+
+    #[test]
+    fn test_model_produces_intent() {
+        let mut app = test_app();
+        app.try_frontend_command("/model gpt-4o");
+        let intents = app.drain_intents();
+        assert!(intents.iter().any(
+            |i| matches!(i, AppIntent::UpdateSession { model: Some(m), .. } if m == "gpt-4o")
+        ));
+    }
+
+    #[test]
+    fn test_title_set_produces_intent() {
+        let mut app = test_app();
+        app.try_frontend_command("/title my project");
+        let intents = app.drain_intents();
+        assert!(intents.iter().any(
+            |i| matches!(i, AppIntent::UpdateSession { title: Some(t), .. } if t == "my project")
+        ));
+    }
+
+    #[test]
+    fn test_bare_title_no_intent() {
+        let mut app = test_app();
+        app.try_frontend_command("/title");
+        let intents = app.drain_intents();
+        assert!(
+            intents.is_empty(),
+            "bare /title should only show toast, no intent"
+        );
+    }
+
+    #[test]
+    fn test_bare_fork_no_intent() {
+        let mut app = test_app();
+        app.try_frontend_command("/fork");
+        let intents = app.drain_intents();
+        assert!(
+            intents.is_empty(),
+            "bare /fork should only show usage toast, no intent"
+        );
     }
 }
