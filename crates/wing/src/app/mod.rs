@@ -685,6 +685,14 @@ impl App {
         self.popup.cache.copies = self.chat.collect_assistant_messages();
     }
 
+    /// Invalidate the cached session list so the next `/session` popup re-fetches.
+    ///
+    /// Called after session-mutating operations (resume, create, fork, title
+    /// update) succeed, ensuring the popup always shows fresh data.
+    pub fn invalidate_session_cache(&mut self) {
+        self.popup.cache.sessions.clear();
+    }
+
     /// Update popup state based on current input text.
     ///
     /// Skips requests while the agent is streaming to avoid interference.
@@ -1868,4 +1876,41 @@ pub async fn run_app(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use crate::ui::popup::command::SessionCandidate;
+
+    fn test_app() -> App {
+        App::new("test-session".into(), AppConfig::default(), None)
+    }
+
+    #[test]
+    fn test_invalidate_session_cache_clears_sessions() {
+        let mut app = test_app();
+        // Populate cache with a dummy session.
+        app.popup.cache.sessions = vec![SessionCandidate {
+            id: "s1".into(),
+            title: "Test".into(),
+            workspace: "/tmp".into(),
+            status: "idle".into(),
+            last_interaction: "2025-01-01T00:00:00Z".into(),
+        }];
+        assert!(app.popup.cache.has_sessions());
+
+        app.invalidate_session_cache();
+        assert!(!app.popup.cache.has_sessions());
+        assert!(app.popup.cache.sessions.is_empty());
+    }
+
+    #[test]
+    fn test_invalidate_session_cache_noop_when_empty() {
+        let mut app = test_app();
+        assert!(!app.popup.cache.has_sessions());
+        app.invalidate_session_cache();
+        assert!(!app.popup.cache.has_sessions());
+    }
 }
