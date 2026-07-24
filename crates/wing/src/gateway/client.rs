@@ -178,8 +178,16 @@ impl GatewayClient {
     }
 
     /// Send a message to the agent.
-    pub async fn send_message(&self, session_id: &str, content: &str) -> Result<()> {
-        let req = ClientRequest::message(session_id, content);
+    ///
+    /// `tool_call_id` — when replying to an Ask event, pass its tool_call_id
+    /// so the gateway resolves the matching feedback waiter.
+    pub async fn send_message(
+        &self,
+        session_id: &str,
+        content: &str,
+        tool_call_id: Option<String>,
+    ) -> Result<()> {
+        let req = ClientRequest::message(session_id, content, tool_call_id);
         self.tx
             .send(req)
             .await
@@ -193,6 +201,7 @@ impl GatewayClient {
             request_id: crate::protocol::generate_request_id(),
             session_id: session_id.to_string(),
             content: content.to_string(),
+            tool_call_id: None,
         };
         self.tx
             .send(req)

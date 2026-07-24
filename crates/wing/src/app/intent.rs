@@ -54,7 +54,13 @@ pub struct FetchResult {
 /// each variant to perform the corresponding I/O operation.
 pub enum AppIntent {
     /// Send a user message to the current session via gateway.
-    SendMessage { content: String },
+    ///
+    /// `tool_call_id` — Some when this message answers a pending Ask event
+    /// (routes to the ask's feedback waiter); None for plain user input.
+    SendMessage {
+        content: String,
+        tool_call_id: Option<String>,
+    },
 
     /// Write text to clipboard via OSC52 escape sequence.
     CopyToClipboard(String),

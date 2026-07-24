@@ -10,6 +10,9 @@ use crate::protocol::AskQuestion;
 /// Multi-question answering state machine.
 #[derive(Debug, Clone)]
 pub struct AskFlow {
+    /// Correlation id of the Ask event — echoed back when sending the
+    /// final response so the gateway resolves the right feedback waiter.
+    pub tool_call_id: String,
     /// All questions from the Ask event.
     pub questions: Vec<AskQuestion>,
     /// Index of the question currently being answered.
@@ -19,9 +22,10 @@ pub struct AskFlow {
 }
 
 impl AskFlow {
-    pub fn new(questions: Vec<AskQuestion>) -> Self {
+    pub fn new(tool_call_id: String, questions: Vec<AskQuestion>) -> Self {
         let len = questions.len();
         Self {
+            tool_call_id,
             questions,
             current_idx: 0,
             answers: vec![String::new(); len],
@@ -97,7 +101,7 @@ mod tests {
 
     #[test]
     fn test_single_question() {
-        let mut flow = AskFlow::new(make_questions(1));
+        let mut flow = AskFlow::new("tc".into(), make_questions(1));
         assert_eq!(flow.progress(), "1/1");
         let result = flow.advance("yes");
         assert!(result.is_some());
@@ -107,7 +111,7 @@ mod tests {
 
     #[test]
     fn test_multi_question() {
-        let mut flow = AskFlow::new(make_questions(3));
+        let mut flow = AskFlow::new("tc".into(), make_questions(3));
         assert_eq!(flow.progress(), "1/3");
 
         assert!(flow.advance("answer1").is_none());
@@ -125,7 +129,7 @@ mod tests {
 
     #[test]
     fn test_answers_with_special_chars() {
-        let mut flow = AskFlow::new(make_questions(1));
+        let mut flow = AskFlow::new("tc".into(), make_questions(1));
         let result = flow.advance(r#"say "hello" and \ stuff"#);
         let json = result.unwrap();
         // Should be valid JSON
@@ -135,7 +139,7 @@ mod tests {
 
     #[test]
     fn test_empty_flow() {
-        let flow = AskFlow::new(vec![]);
+        let flow = AskFlow::new("tc".into(), vec![]);
         assert!(flow.is_empty());
         assert_eq!(flow.current(), None);
     }

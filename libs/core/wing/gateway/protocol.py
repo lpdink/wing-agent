@@ -50,6 +50,10 @@ class ClientRequest(BaseModel):
     )
     session_id: str = Field(description="目标 session ID")
     content: str = Field(description="消息内容")
+    tool_call_id: str | None = Field(
+        default=None,
+        description="回复某个 Ask 事件时携带其 tool_call_id，定向 resolve feedback waiter",
+    )
 
 
 # ============================================================
@@ -115,6 +119,10 @@ class SendMessageRequest(BaseModel):
 
     session_id: str = Field(description="目标 session ID")
     content: str = Field(description="消息内容")
+    tool_call_id: str | None = Field(
+        default=None,
+        description="回复某个 Ask 事件时携带其 tool_call_id，定向 resolve feedback waiter",
+    )
 
 
 class CompactRequest(BaseModel):

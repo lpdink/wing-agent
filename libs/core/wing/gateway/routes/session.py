@@ -202,6 +202,7 @@ async def send_message(
         content=body.content,
         request_id=request_id,
         session_id=body.session_id,
+        tool_call_id=body.tool_call_id,
     )
     return SendMessageResponse(ok=True, request_id=request_id)
 

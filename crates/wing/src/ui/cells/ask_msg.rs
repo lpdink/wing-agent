@@ -20,6 +20,9 @@ use unicode_width::UnicodeWidthChar;
 /// An agent question with optional choices.
 #[derive(Debug, Clone)]
 pub struct AskMessage {
+    /// Correlation id of the Ask event (used to locate this cell when
+    /// updating progress/selection under concurrent asks).
+    pub tool_call_id: String,
     pub question: String,
     pub choices: Vec<String>,
     /// When Some(i), choice i is highlighted with a ▸ cursor.
@@ -36,8 +39,9 @@ pub struct AskMessage {
 
 impl AskMessage {
     /// Create a legacy single-question message.
-    pub fn new(question: String, choices: Vec<String>) -> Self {
+    pub fn new(tool_call_id: String, question: String, choices: Vec<String>) -> Self {
         Self {
+            tool_call_id,
             question,
             choices,
             selected: None,
@@ -48,9 +52,10 @@ impl AskMessage {
     }
 
     /// Create a multi-question message.
-    pub fn new_multi(questions: Vec<AskQuestion>) -> Self {
+    pub fn new_multi(tool_call_id: String, questions: Vec<AskQuestion>) -> Self {
         let len = questions.len();
         Self {
+            tool_call_id,
             question: String::new(),
             choices: Vec::new(),
             selected: None,
@@ -250,6 +255,7 @@ mod tests {
     #[test]
     fn test_ask_with_choices() {
         let msg = AskMessage::new(
+            "tc".into(),
             "Which approach?".into(),
             vec!["Option A".into(), "Option B".into()],
         );
@@ -267,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_ask_without_choices() {
-        let msg = AskMessage::new("Continue?".into(), vec![]);
+        let msg = AskMessage::new("tc".into(), "Continue?".into(), vec![]);
         let lines = msg.to_lines(&p(), 80);
         let text: String = lines
             .iter()
@@ -280,6 +286,7 @@ mod tests {
     #[test]
     fn test_ask_with_selection_cursor() {
         let mut msg = AskMessage::new(
+            "tc".into(),
             "Proceed?".into(),
             vec!["y".into(), "n".into(), "yolo".into()],
         );
@@ -300,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_ask_selection_first() {
-        let mut msg = AskMessage::new("Proceed?".into(), vec!["y".into(), "n".into()]);
+        let mut msg = AskMessage::new("tc".into(), "Proceed?".into(), vec!["y".into(), "n".into()]);
         msg.selected = Some(0);
         let lines = msg.to_lines(&p(), 80);
         let text: String = lines
@@ -325,7 +332,7 @@ mod tests {
                 choices: vec![],
             },
         ];
-        let msg = AskMessage::new_multi(questions);
+        let msg = AskMessage::new_multi("tc".into(), questions);
         let lines = msg.to_lines(&p(), 80);
         let text: String = lines
             .iter()
@@ -355,7 +362,7 @@ mod tests {
                 choices: vec![],
             },
         ];
-        let mut msg = AskMessage::new_multi(questions);
+        let mut msg = AskMessage::new_multi("tc".into(), questions);
         msg.current_idx = 1;
         msg.answers[0] = "my answer".into();
         let lines = msg.to_lines(&p(), 80);

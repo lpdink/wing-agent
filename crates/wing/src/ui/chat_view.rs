@@ -243,12 +243,15 @@ impl ChatView {
         self.cells.push(CachedCell::new(cell));
     }
 
-    /// Update the selection cursor on the last Ask cell.
+    /// Update the selection cursor on the Ask cell with the given tool_call_id.
     ///
-    /// Returns true if an Ask cell was found and updated.
-    pub fn update_last_ask_selection(&mut self, selected: usize) -> bool {
+    /// Addressed by id so concurrent Ask cells don't clobber each other.
+    /// Returns true if the cell was found and updated.
+    pub fn update_ask_selection(&mut self, tool_call_id: &str, selected: usize) -> bool {
         for cell in self.cells.iter_mut().rev() {
-            if matches!(cell.cell(), ChatCell::Ask(_)) {
+            if let ChatCell::Ask(msg) = cell.cell()
+                && msg.tool_call_id == tool_call_id
+            {
                 cell.mutate(|c| {
                     if let ChatCell::Ask(msg) = c {
                         msg.selected = Some(selected);
@@ -260,26 +263,30 @@ impl ChatView {
         false
     }
 
-    /// Remove the last Ask cell from the chat view.
+    /// Remove the Ask cell with the given tool_call_id from the chat view.
     ///
-    /// Called after the user makes a selection to clean up the prompt.
-    pub fn remove_last_ask(&mut self) {
-        // Find the index of the last Ask cell.
-        let idx = self
-            .cells
-            .iter()
-            .rposition(|c| matches!(c.cell(), ChatCell::Ask(_)));
+    /// Called after the ask is answered/interrupted to clean up the prompt.
+    pub fn remove_ask(&mut self, tool_call_id: &str) {
+        let idx = self.cells.iter().position(
+            |c| matches!(c.cell(), ChatCell::Ask(msg) if msg.tool_call_id == tool_call_id),
+        );
         if let Some(i) = idx {
             self.cells.remove(i);
         }
     }
 
-    /// Update the multi-question progress on the last Ask cell.
-    ///
-    /// Sets `current_idx` and `answers` to reflect progress.
-    pub fn update_last_ask_progress(&mut self, current_idx: usize, answers: Vec<String>) {
+    /// Update the multi-question progress on the Ask cell with the given
+    /// tool_call_id. Sets `current_idx` and `answers` to reflect progress.
+    pub fn update_ask_progress(
+        &mut self,
+        tool_call_id: &str,
+        current_idx: usize,
+        answers: Vec<String>,
+    ) {
         for cell in self.cells.iter_mut().rev() {
-            if matches!(cell.cell(), ChatCell::Ask(_)) {
+            if let ChatCell::Ask(msg) = cell.cell()
+                && msg.tool_call_id == tool_call_id
+            {
                 cell.mutate(|c| {
                     if let ChatCell::Ask(msg) = c {
                         msg.current_idx = current_idx;
@@ -1517,6 +1524,7 @@ mod tests {
         let mut view = ChatView::new();
         view.push(ChatCell::AssistantMessage("question?".into()));
         view.push(ChatCell::Ask(AskMessage::new(
+            "tc".into(),
             "pick one".into(),
             vec!["a".into(), "b".into()],
         )));

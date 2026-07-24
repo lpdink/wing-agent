@@ -128,14 +128,19 @@ impl GatewayClient {
     // ============================================================
 
     /// 向活跃 session 发送消息。
+    ///
+    /// `tool_call_id` — 回复 Ask 事件时传入其 tool_call_id，
+    /// 定向 resolve 对应的 feedback waiter。
     pub async fn send_message(
         &self,
         session_id: &str,
         content: &str,
+        tool_call_id: Option<String>,
     ) -> Result<SendMessageResponse, ApiClientError> {
         let body = SendMessageRequest {
             session_id: session_id.to_owned(),
             content: content.to_owned(),
+            tool_call_id,
         };
         self.post_json("/api/session/send", &body).await
     }

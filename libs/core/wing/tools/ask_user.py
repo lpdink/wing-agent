@@ -95,26 +95,19 @@ async def ask_user(
             AskQuestion(id=qid, question=question_text, choices=q.get("choices") or [])
         )
 
-    # Set need_feedback state
-    agent.state.set("need_feedback", True)
-
-    # Send questions to user via EventBus
-    agent.emit(
-        AskEvent(
-            session_id=agent.session_id,
-            questions=[q.model_dump() for q in normalized],
-        )
-    )
-
-    # Wait for user feedback (TUI sends structured JSON)
+    # Ask the user and wait for the addressed response.
+    # ask_feedback() 注入 tool_call_id 并 emit AskEvent，注册 feedback waiter，
+    # 用户回复经 post(tool_call_id=...) 定向 resolve（并发 ask 互不干扰）。
     try:
-        feedback = await asyncio.wait_for(
-            agent._inbox_feedback.get(), timeout=FEEDBACK_TIMEOUT
+        feedback = await agent.ask_feedback(
+            AskEvent(
+                session_id=agent.session_id,
+                questions=[q.model_dump() for q in normalized],
+            ),
+            timeout=FEEDBACK_TIMEOUT,
         )
-        agent.state.set("need_feedback", False)
         return feedback if feedback else "{}"
     except asyncio.TimeoutError:
-        agent.state.set("need_feedback", False)
         raise ToolError(
             "⚠️ Feedback timeout. User did not respond in time. "
             "Please proceed with your best judgment or try again."

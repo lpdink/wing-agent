@@ -48,9 +48,14 @@ pub async fn execute_intent(
                 }
             }
         }
-        AppIntent::SendMessage { content } => {
+        AppIntent::SendMessage {
+            content,
+            tool_call_id,
+        } => {
             if let Some(t) = transport
-                && let Err(e) = t.ws.send_message(&app.session_id, &content).await
+                && let Err(e) =
+                    t.ws.send_message(&app.session_id, &content, tool_call_id)
+                        .await
             {
                 tracing::error!("failed to send message: {e}");
                 app.show_toast(Toast::warning(
@@ -483,7 +488,7 @@ pub async fn execute_intent(
             content,
         } => {
             if let Some(t) = transport
-                && let Err(e) = t.http.send_message(&session_id, &content).await
+                && let Err(e) = t.http.send_message(&session_id, &content, None).await
             {
                 tracing::error!("goal send failed: {e}");
                 app.show_toast(Toast::warning(

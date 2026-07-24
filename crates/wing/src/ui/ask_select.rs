@@ -8,6 +8,9 @@
 /// Mutable state for an active ask selection.
 #[derive(Debug, Clone)]
 pub struct AskSelection {
+    /// Correlation id of the Ask event — echoed back when sending the
+    /// chosen answer so the gateway resolves the right feedback waiter.
+    pub tool_call_id: String,
     /// Available choices.
     pub choices: Vec<String>,
     /// Index of the currently highlighted choice (wraps around).
@@ -15,8 +18,9 @@ pub struct AskSelection {
 }
 
 impl AskSelection {
-    pub fn new(choices: Vec<String>) -> Self {
+    pub fn new(tool_call_id: String, choices: Vec<String>) -> Self {
         Self {
+            tool_call_id,
             choices,
             selected: 0,
         }
@@ -54,14 +58,14 @@ mod tests {
 
     #[test]
     fn test_new_selection() {
-        let sel = AskSelection::new(vec!["a".into(), "b".into(), "c".into()]);
+        let sel = AskSelection::new("tc".into(), vec!["a".into(), "b".into(), "c".into()]);
         assert_eq!(sel.selected, 0);
         assert_eq!(sel.current(), Some("a"));
     }
 
     #[test]
     fn test_move_down_wraps() {
-        let mut sel = AskSelection::new(vec!["a".into(), "b".into()]);
+        let mut sel = AskSelection::new("tc".into(), vec!["a".into(), "b".into()]);
         sel.move_down();
         assert_eq!(sel.selected, 1);
         sel.move_down();
@@ -70,7 +74,7 @@ mod tests {
 
     #[test]
     fn test_move_up_wraps() {
-        let mut sel = AskSelection::new(vec!["a".into(), "b".into()]);
+        let mut sel = AskSelection::new("tc".into(), vec!["a".into(), "b".into()]);
         sel.move_up();
         assert_eq!(sel.selected, 1);
         sel.move_up();
@@ -79,7 +83,7 @@ mod tests {
 
     #[test]
     fn test_empty_selection() {
-        let sel = AskSelection::new(vec![]);
+        let sel = AskSelection::new("tc".into(), vec![]);
         assert_eq!(sel.current(), None);
     }
 }
