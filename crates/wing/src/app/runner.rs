@@ -486,9 +486,13 @@ pub async fn execute_intent(
         AppIntent::GoalSend {
             session_id,
             content,
+            tool_call_id,
         } => {
             if let Some(t) = transport
-                && let Err(e) = t.http.send_message(&session_id, &content, None).await
+                && let Err(e) = t
+                    .http
+                    .send_message(&session_id, &content, tool_call_id)
+                    .await
             {
                 tracing::error!("goal send failed: {e}");
                 app.show_toast(Toast::warning(

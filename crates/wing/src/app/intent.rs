@@ -128,7 +128,14 @@ pub enum AppIntent {
     ShowSkillsInfo,
 
     /// Send a message to a specific session (Goal orchestration).
-    GoalSend { session_id: String, content: String },
+    ///
+    /// `tool_call_id` — Some when the message answers a pending Ask event
+    /// (routes to the ask's feedback waiter); None otherwise.
+    GoalSend {
+        session_id: String,
+        content: String,
+        tool_call_id: Option<String>,
+    },
 
     /// Create a checker session for Goal mode (with fixed tools + system prompt).
     GoalCreateChecker { system_prompt: String },

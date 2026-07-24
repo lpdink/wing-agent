@@ -359,20 +359,28 @@ impl App {
         use goal::GoalAction;
         for action in actions {
             match action {
-                GoalAction::SendToExecutor(content) => {
+                GoalAction::SendToExecutor {
+                    content,
+                    tool_call_id,
+                } => {
                     let session_id = self.session_id.clone();
                     self.push_intent(AppIntent::GoalSend {
                         session_id,
                         content,
+                        tool_call_id,
                     });
                 }
-                GoalAction::SendToChecker(content) => {
+                GoalAction::SendToChecker {
+                    content,
+                    tool_call_id,
+                } => {
                     if let Some(goal) = &self.goal
                         && let Some(checker_id) = &goal.checker_session_id
                     {
                         self.push_intent(AppIntent::GoalSend {
                             session_id: checker_id.clone(),
                             content,
+                            tool_call_id,
                         });
                     }
                 }
@@ -998,10 +1006,16 @@ impl App {
                         {
                             let actions = match role {
                                 goal::GoalRole::Executor => {
-                                    vec![goal::GoalAction::SendToExecutor(choice)]
+                                    vec![goal::GoalAction::SendToExecutor {
+                                        content: choice,
+                                        tool_call_id: Some(id),
+                                    }]
                                 }
                                 goal::GoalRole::Checker => {
-                                    vec![goal::GoalAction::SendToChecker(choice)]
+                                    vec![goal::GoalAction::SendToChecker {
+                                        content: choice,
+                                        tool_call_id: Some(id),
+                                    }]
                                 }
                             };
                             self.execute_goal_actions(actions);
