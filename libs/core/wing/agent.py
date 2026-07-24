@@ -7,6 +7,8 @@ import functools
 import inspect
 import tempfile
 import time
+import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from collections.abc import Callable
 from pathlib import Path
@@ -26,6 +28,7 @@ from .hook_registry import hooks
 from .schema import ToolError
 from .event import (
     AssistantTurnEvent,
+    AskEvent,
     ContextStatsEvent,
     DoneEvent,
     ErrorEvent,
@@ -41,6 +44,13 @@ from .event import (
     TurnStartedEvent,
 )
 from .schema import LLMUsage, Message, Tool, ToolCall
+
+
+# 当前正在执行的工具调用 id。exec_tool_calls 为每个工具任务设置（gather 各 task
+# 的 context 相互隔离），ask_feedback() 据此把 AskEvent 与 feedback waiter 关联。
+_current_tool_call_id: ContextVar[str | None] = ContextVar(
+    "current_tool_call_id", default=None
+)
 
 
 @dataclass
@@ -113,7 +123,10 @@ class WingAgent:
         self._max_turns = max_turns
         self._yolo: bool = yolo if yolo is not None else get_config().yolo
         self._inbox: asyncio.Queue[Inbound] = asyncio.Queue()
-        self._inbox_feedback: asyncio.Queue[str] = asyncio.Queue()
+        # Feedback waiters：tool_call_id → Future，严格寻址。
+        # 工具通过 ask_feedback() 注册 waiter，用户回复携带 tool_call_id 定向 resolve。
+        # 非空即表示 agent 处于 waiting 状态（status property 据此推导）。
+        self._feedback_waiters: dict[str, asyncio.Future[str]] = {}
         # 是否有 turn 正在进行（TurnStarted 置真，turn 收尾置假）。用于推导 session 状态。
         self._working: bool = False
         self._worker = asyncio.create_task(self._run())
@@ -136,12 +149,12 @@ class WingAgent:
         """Session 运行时状态（后端为唯一事实源）。
 
         优先级：waiting > working > idle。
-        - waiting：工具阻塞在 ask / need_feedback，等待用户反馈
+        - waiting：有工具阻塞在 feedback waiter，等待用户反馈
         - working：有 turn 正在进行（TurnStarted 已 emit、Done 未至）
         - idle：已 resume 但无进行中的 turn
         （inactive 由 SessionManager 依据是否加载进内存判定，不在此处。）
         """
-        if self.state.get("need_feedback"):
+        if self._feedback_waiters:
             return "waiting"
         if self._working:
             return "working"
@@ -502,6 +515,9 @@ class WingAgent:
 
         async def _exec_one(tc: ToolCall) -> Message:
             log.info(f"exec_tool_calls: executing tool '{tc.name}' with id={tc.id}")
+            # 设置当前工具调用 id（gather 各 task context 独立，互不污染），
+            # 供 ask_feedback() 关联 AskEvent 与 feedback waiter。
+            token = _current_tool_call_id.set(tc.id)
             try:
                 result = await self._execute_tool(tc)
                 result = self._maybe_truncate(result)
@@ -510,6 +526,8 @@ class WingAgent:
                 # 此处防止意外逃逸导致 asyncio.gather 中断其他并发任务
                 log.error(f"exec_tool_calls: unexpected error in tool '{tc.name}': {e}")
                 result = f"Error executing tool '{tc.name}': {e}"
+            finally:
+                _current_tool_call_id.reset(token)
             return Message(
                 role="tool",
                 tool_call_id=tc.id,
@@ -707,6 +725,31 @@ class WingAgent:
             )
             return result
 
+    async def ask_feedback(self, event: AskEvent, timeout: float) -> str:
+        """Emit 一个 Ask 事件并等待用户按 tool_call_id 定向回复。
+
+        工具侧等待反馈的唯一入口：
+        - 从工具执行 context 读取当前 tool_call_id（exec_tool_calls 设置），
+          缺失时（如测试中直接调用工具）退化为随机 id；
+        - 将 id 注入 AskEvent 后 emit，客户端回复时回传该 id；
+        - 注册 Future 到 _feedback_waiters，用户回复经 post() 按 id resolve。
+
+        同一工具循环内重复调用（如 Bash 危险命令 re-ask）即以同 id 重新注册。
+        超时抛 asyncio.TimeoutError，由调用方转换为 ToolError。
+        """
+        tool_call_id = _current_tool_call_id.get() or uuid.uuid4().hex
+        event.tool_call_id = tool_call_id
+        if event.session_id is None:
+            event.session_id = self.session_id
+        self.emit(event)
+
+        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._feedback_waiters[tool_call_id] = future
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        finally:
+            self._feedback_waiters.pop(tool_call_id, None)
+
     def interrupt(self) -> None:
         """中断 Agent：终止子进程、清理 inbox、重置事件循环"""
 
@@ -719,8 +762,8 @@ class WingAgent:
             log.info("Active process group killed on interrupt")
             self.state.delete("_active_process")
 
-        # 重置 feedback 状态（工具可能在等待用户反馈，打断后无人消费）
-        self.state.set("need_feedback", False)
+        # 取消所有 feedback waiter（工具可能在等待用户反馈，打断后无人应答）
+        self._cancel_feedback_waiters()
 
         # 清理 inbox 中的所有消息
         while not self._inbox.empty():
@@ -734,6 +777,16 @@ class WingAgent:
         self._worker = asyncio.create_task(self._run())
         log.info("Agent interrupted and reset")
 
+    def _cancel_feedback_waiters(self) -> None:
+        """取消并清空所有 feedback waiter。
+
+        interrupt/shutdown 时调用：等待中的工具随 worker 取消而终止，
+        Future 显式 cancel 避免悬挂与告警。
+        """
+        for future in self._feedback_waiters.values():
+            future.cancel()
+        self._feedback_waiters.clear()
+
     async def shutdown(self) -> None:
         """显式关闭 Agent：清空 inbox，cancel worker 并等待其完成。
 
@@ -745,6 +798,9 @@ class WingAgent:
         if process is not None:
             kill_process_group(process)
             self.state.delete("_active_process")
+
+        # 取消 feedback waiter
+        self._cancel_feedback_waiters()
 
         # 清空 inbox
         while not self._inbox.empty():
@@ -768,23 +824,33 @@ class WingAgent:
         asyncio.create_task(fire())
 
     async def post(
-        self, content: str, request_id: str | None = None, role: str = "user"
+        self,
+        content: str,
+        request_id: str | None = None,
+        role: str = "user",
+        tool_call_id: str | None = None,
     ) -> None:
         """接收用户消息或 feedback。
 
         request_id 由 SM.post() 传入，用于审计追踪和 SDK Promise resolve。
-        feedback 路由到 _inbox_feedback（_worker 已持有当前 request_id contextvar，
-        无需传递）。
+
+        Feedback 严格寻址：只有携带 tool_call_id 且命中 waiter 的消息才会
+        resolve 对应 Future；无 id（普通用户消息、Explorer/Timer 等内部通知）
+        或 id 已失效（waiter 超时）的消息一律进 inbox 作为新用户消息。
         """
-        # If agent is waiting for feedback, route to feedback queue
-        need_fb = self.state.get("need_feedback")
-        log.info(
-            f"agent.post: agent={id(self)}, state_bag={id(self.state)}, "
-            f"need_feedback={need_fb}, routing '{content[:40]}'"
-        )
-        if need_fb:
-            await self._inbox_feedback.put(content)
-            return
+        if tool_call_id is not None:
+            future = self._feedback_waiters.get(tool_call_id)
+            if future is not None and not future.done():
+                log.info(
+                    f"agent.post: resolving feedback waiter "
+                    f"tool_call_id={tool_call_id} with '{content[:40]}'"
+                )
+                future.set_result(content)
+                return
+            log.info(
+                f"agent.post: no live feedback waiter for tool_call_id="
+                f"{tool_call_id}, falling through to inbox"
+            )
 
         msg = Message(role=role, content=content)  # ty: ignore
         await self._inbox.put(Inbound(message=msg, request_id=request_id))

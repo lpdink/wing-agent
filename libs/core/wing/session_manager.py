@@ -388,6 +388,7 @@ class SessionManager:
         request_id: str | None = None,
         session_id: str | None = None,
         client_id: str | None = None,
+        tool_call_id: str | None = None,
     ) -> None:
         """路由消息到指定 session。（内部方法，由 WingRuntime 调用）
 
@@ -422,4 +423,4 @@ class SessionManager:
         log.info(
             f"SM._post: routing '{content[:50]}' to session.post (session={session_id})"
         )
-        await session.post(content, request_id=request_id)
+        await session.post(content, request_id=request_id, tool_call_id=tool_call_id)

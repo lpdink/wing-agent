@@ -98,10 +98,12 @@ pub struct App {
     last_tick: std::time::Instant,
     /// Active toast notification (lazy-expired in draw).
     toast: Option<Toast>,
-    /// Active ask selection (when agent requires a choice from menu).
-    ask_selection: Option<crate::ui::ask_select::AskSelection>,
-    /// Active multi-question ask flow (AskUserQuestion with questions array).
-    ask_flow: Option<ask_flow::AskFlow>,
+    /// Queued ask selections (when agent requires a choice from menu).
+    /// Concurrent asks queue up; the front entry is the active one.
+    ask_selections: std::collections::VecDeque<crate::ui::ask_select::AskSelection>,
+    /// Queued multi-question ask flows (AskUserQuestion with questions array).
+    /// Concurrent asks queue up; the front entry is the active one.
+    ask_flows: std::collections::VecDeque<ask_flow::AskFlow>,
     /// Whether the terminal window/tab currently has focus.
     /// Default `true` — terminals that don't support focus events
     /// will never send FocusLost, so BEL is never triggered.
@@ -173,8 +175,8 @@ impl App {
             turn: TurnState::default(),
             last_tick: std::time::Instant::now(),
             toast: None,
-            ask_selection: None,
-            ask_flow: None,
+            ask_selections: std::collections::VecDeque::new(),
+            ask_flows: std::collections::VecDeque::new(),
             focused: true,
             config,
             palette,
@@ -189,15 +191,32 @@ impl App {
         self.terminal_width >= WIDE_THRESHOLD
     }
 
-    /// Clear the ask selection and remove the Ask cell from chat.
-    fn clear_ask_selection(&mut self) {
-        if self.ask_selection.take().is_some() {
-            self.chat.remove_last_ask();
-            self.input.placeholder = "今天构建什么？".into();
+    /// Clear all queued ask state (selections + flows) and remove their
+    /// cells from chat. Called when a turn ends or is interrupted — the
+    /// backend cancels all feedback waiters at the same time.
+    fn clear_ask_state(&mut self) {
+        if self.ask_selections.is_empty() && self.ask_flows.is_empty() {
+            return;
         }
-        // Also clear multi-question flow if active (e.g., turn interrupted).
-        if self.ask_flow.take().is_some() {
-            self.chat.remove_last_ask();
+        for sel in self.ask_selections.drain(..) {
+            self.chat.remove_ask(&sel.tool_call_id);
+        }
+        for flow in self.ask_flows.drain(..) {
+            self.chat.remove_ask(&flow.tool_call_id);
+        }
+        self.input.placeholder = "今天构建什么？".into();
+    }
+
+    /// Refresh the input placeholder to reflect the active (front) ask state.
+    ///
+    /// Selection takes precedence over flow: while a selection is active its
+    /// key handler captures all keys, so the flow cannot be answered yet.
+    fn refresh_ask_placeholder(&mut self) {
+        if self.ask_selections.front().is_some() {
+            self.input.placeholder = "↑↓ select · Enter confirm".into();
+        } else if let Some(flow) = self.ask_flows.front() {
+            self.input.placeholder = format!("Question {} — type your answer...", flow.progress());
+        } else {
             self.input.placeholder = "今天构建什么？".into();
         }
     }
@@ -208,7 +227,7 @@ impl App {
     /// Callers handle their own specific follow-up (title, toast, etc.).
     ///
     /// **Ordering note**: `refresh_copy_candidates()` runs *inside* this method,
-    /// so any chat mutations by the caller (e.g. `clear_ask_selection`,
+    /// so any chat mutations by the caller (e.g. `clear_ask_state`,
     /// `chat.push(ErrorMessage)`) happen *after* the copy cache is snapshot.
     /// Currently safe because `collect_assistant_messages` only collects
     /// `AssistantMessage` cells, which are unaffected by these mutations.
@@ -250,8 +269,9 @@ impl App {
     ///
     /// Returns `true` if the text was consumed (either as a command or message).
     fn submit_message(&mut self, text: &str) -> bool {
-        // Multi-question ask flow: intercept submission to advance questions.
-        if self.ask_flow.is_some() {
+        // Multi-question ask flow: intercept submission to advance the
+        // front flow (concurrent asks are answered in arrival order).
+        if !self.ask_flows.is_empty() {
             return self.handle_ask_flow_submit(text);
         }
         if self.try_frontend_command(text) {
@@ -268,6 +288,7 @@ impl App {
         self.chat.push(ChatCell::UserMessage(text.to_string()));
         self.push_intent(AppIntent::SendMessage {
             content: text.to_string(),
+            tool_call_id: None,
         });
         self.turn.usage = TurnUsage::default();
         true
@@ -275,18 +296,20 @@ impl App {
 
     /// Handle submission during a multi-question ask flow.
     ///
-    /// Advances to the next question or sends the final structured response.
+    /// Advances the front flow to the next question or sends the final
+    /// structured response (addressed by the flow's tool_call_id).
     fn handle_ask_flow_submit(&mut self, text: &str) -> bool {
         // Reject whitespace-only input (honors "must provide an answer" invariant).
         let text = text.trim();
         if text.is_empty() {
             return true; // consumed but no-op
         }
-        // Advance the flow and extract needed data to avoid borrow conflicts.
-        let Some(result) = self.ask_flow.as_mut().map(|flow| {
+        // Advance the front flow and extract needed data to avoid borrow conflicts.
+        let Some(result) = self.ask_flows.front_mut().map(|flow| {
             let advance_result = flow.advance(text);
             (
                 advance_result,
+                flow.tool_call_id.clone(),
                 flow.current_idx,
                 flow.answers.clone(),
                 flow.len(),
@@ -295,20 +318,24 @@ impl App {
         }) else {
             return false;
         };
-        let (advance_result, idx, answers, total, progress) = result;
+        let (advance_result, tool_call_id, idx, answers, total, progress) = result;
 
         match advance_result {
             None => {
                 // More questions to answer — update the AskMessage cell.
-                self.chat.update_last_ask_progress(idx, answers);
+                self.chat.update_ask_progress(&tool_call_id, idx, answers);
                 self.input.placeholder = format!("Question {progress} — type your answer...");
             }
             Some(json) => {
-                // All questions answered — send structured response.
-                self.ask_flow = None;
-                self.input.placeholder = "今天构建什么？".into();
-                self.chat.update_last_ask_progress(total, answers);
-                self.push_intent(AppIntent::SendMessage { content: json });
+                // All questions answered — send the addressed response and
+                // move on to the next queued ask (if any).
+                self.ask_flows.pop_front();
+                self.chat.update_ask_progress(&tool_call_id, total, answers);
+                self.push_intent(AppIntent::SendMessage {
+                    content: json,
+                    tool_call_id: Some(tool_call_id),
+                });
+                self.refresh_ask_placeholder();
             }
         }
         true
@@ -332,20 +359,28 @@ impl App {
         use goal::GoalAction;
         for action in actions {
             match action {
-                GoalAction::SendToExecutor(content) => {
+                GoalAction::SendToExecutor {
+                    content,
+                    tool_call_id,
+                } => {
                     let session_id = self.session_id.clone();
                     self.push_intent(AppIntent::GoalSend {
                         session_id,
                         content,
+                        tool_call_id,
                     });
                 }
-                GoalAction::SendToChecker(content) => {
+                GoalAction::SendToChecker {
+                    content,
+                    tool_call_id,
+                } => {
                     if let Some(goal) = &self.goal
                         && let Some(checker_id) = &goal.checker_session_id
                     {
                         self.push_intent(AppIntent::GoalSend {
                             session_id: checker_id.clone(),
                             content,
+                            tool_call_id,
                         });
                     }
                 }
@@ -943,37 +978,52 @@ impl App {
             return;
         }
 
-        // Ask selection menu: capture all keys when active.
-        if self.ask_selection.is_some() {
-            let ask = self.ask_selection.as_mut().unwrap();
+        // Ask selection menu: capture all keys when active (queue front).
+        if let Some(ask) = self.ask_selections.front_mut() {
             match key.code {
                 crossterm::event::KeyCode::Up => {
                     ask.move_up();
-                    self.chat.update_last_ask_selection(ask.selected);
+                    let id = ask.tool_call_id.clone();
+                    let selected = ask.selected;
+                    self.chat.update_ask_selection(&id, selected);
                 }
                 crossterm::event::KeyCode::Down => {
                     ask.move_down();
-                    self.chat.update_last_ask_selection(ask.selected);
+                    let id = ask.tool_call_id.clone();
+                    let selected = ask.selected;
+                    self.chat.update_ask_selection(&id, selected);
                 }
                 crossterm::event::KeyCode::Enter => {
                     let choice = ask.current().map(|s| s.to_string());
+                    let id = ask.tool_call_id.clone();
                     if let Some(choice) = choice {
-                        self.clear_ask_selection();
+                        self.ask_selections.pop_front();
+                        self.chat.remove_ask(&id);
+                        self.refresh_ask_placeholder();
                         // Goal mode: send to active session, not app.session_id.
                         if let Some(goal) = &self.goal
                             && let Some(role) = goal.active_role()
                         {
                             let actions = match role {
                                 goal::GoalRole::Executor => {
-                                    vec![goal::GoalAction::SendToExecutor(choice)]
+                                    vec![goal::GoalAction::SendToExecutor {
+                                        content: choice,
+                                        tool_call_id: Some(id),
+                                    }]
                                 }
                                 goal::GoalRole::Checker => {
-                                    vec![goal::GoalAction::SendToChecker(choice)]
+                                    vec![goal::GoalAction::SendToChecker {
+                                        content: choice,
+                                        tool_call_id: Some(id),
+                                    }]
                                 }
                             };
                             self.execute_goal_actions(actions);
                         } else {
-                            self.push_intent(AppIntent::SendMessage { content: choice });
+                            self.push_intent(AppIntent::SendMessage {
+                                content: choice,
+                                tool_call_id: Some(id),
+                            });
                         }
                     }
                 }
@@ -1242,7 +1292,7 @@ impl App {
             }
             WingEvent::Done { .. } => {
                 self.finish_turn();
-                self.clear_ask_selection();
+                self.clear_ask_state();
                 // Restore idle title — but if the user is not focused and a
                 // TurnResult just set an attention title (✓/⚠), preserve it
                 // until the user refocuses (Focus handler restores idle).
@@ -1255,7 +1305,7 @@ impl App {
             }
             WingEvent::Interrupted { meta, .. } => {
                 self.finish_turn();
-                self.clear_ask_selection();
+                self.clear_ask_state();
                 // Goal mode: record which role was interrupted.
                 let goal_role = self.goal_role_for_session(meta.session_id.as_deref());
                 if let Some(goal) = self.goal.as_mut()
@@ -1378,6 +1428,7 @@ impl App {
 
             // ---- Ask events ----
             WingEvent::Ask {
+                tool_call_id,
                 questions,
                 question,
                 choices,
@@ -1386,12 +1437,11 @@ impl App {
             } => {
                 if !questions.is_empty() {
                     // Multi-question flow (AskUserQuestion tool).
-                    let msg = AskMessage::new_multi(questions.clone());
+                    let msg = AskMessage::new_multi(tool_call_id.clone(), questions.clone());
                     self.chat.push(ChatCell::Ask(msg));
-                    let flow = ask_flow::AskFlow::new(questions.clone());
-                    self.input.placeholder =
-                        format!("Question {} — type your answer...", flow.progress());
-                    self.ask_flow = Some(flow);
+                    let flow = ask_flow::AskFlow::new(tool_call_id.clone(), questions.clone());
+                    self.ask_flows.push_back(flow);
+                    self.refresh_ask_placeholder();
                     let notify_text = questions
                         .first()
                         .map(|q| q.question.clone())
@@ -1399,13 +1449,19 @@ impl App {
                     self.notify_unfocused(notify_text, AttentionKind::Ask);
                 } else {
                     // Legacy single-question (Bash dangerous command confirmation).
-                    let msg = AskMessage::new(question.clone(), choices.clone());
+                    let msg =
+                        AskMessage::new(tool_call_id.clone(), question.clone(), choices.clone());
                     self.chat.push(ChatCell::Ask(msg));
                     if required && !choices.is_empty() {
-                        let sel = crate::ui::ask_select::AskSelection::new(choices);
-                        self.ask_selection = Some(sel);
-                        self.input.placeholder = "↑↓ select · Enter confirm".into();
-                        self.chat.update_last_ask_selection(0);
+                        let sel =
+                            crate::ui::ask_select::AskSelection::new(tool_call_id.clone(), choices);
+                        self.ask_selections.push_back(sel);
+                        self.refresh_ask_placeholder();
+                        if let Some(front) = self.ask_selections.front()
+                            && front.tool_call_id == tool_call_id
+                        {
+                            self.chat.update_ask_selection(&tool_call_id, 0);
+                        }
                     }
                     self.notify_unfocused(question.clone(), AttentionKind::Ask);
                 }

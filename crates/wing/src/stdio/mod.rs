@@ -403,7 +403,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
     };
 
     // 8. Send prompt.
-    http.send_message(&session_id, &prompt)
+    http.send_message(&session_id, &prompt, None)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to send message: {e}"))?;
 

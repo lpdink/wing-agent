@@ -449,11 +449,19 @@ class Session:
         metadata_path.parent.mkdir(parents=True, exist_ok=True)
         self._write_metadata()
 
-    async def post(self, content: str, request_id: str | None = None) -> None:
+    async def post(
+        self,
+        content: str,
+        request_id: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> None:
         """投递用户消息。
 
         先检查并写入第一条消息 metadata，更新最后互动时间，再转发给 agent。
+        tool_call_id 非空时表示这是对某个 Ask 事件的定向回复。
         """
         self._check_first_message_metadata(content)
         self.touch_last_interaction()
-        await self._agent.post(content, request_id=request_id)
+        await self._agent.post(
+            content, request_id=request_id, tool_call_id=tool_call_id
+        )

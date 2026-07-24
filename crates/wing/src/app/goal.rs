@@ -53,9 +53,19 @@ pub enum GoalPhase {
 #[derive(Debug, Clone, PartialEq)]
 pub enum GoalAction {
     /// Send a message to the executor session.
-    SendToExecutor(String),
+    SendToExecutor {
+        content: String,
+        /// Set when this send answers a pending Ask event — routes to the
+        /// ask's feedback waiter instead of the session inbox.
+        tool_call_id: Option<String>,
+    },
     /// Send a message to the checker session.
-    SendToChecker(String),
+    SendToChecker {
+        content: String,
+        /// Set when this send answers a pending Ask event — routes to the
+        /// ask's feedback waiter instead of the session inbox.
+        tool_call_id: Option<String>,
+    },
     /// Request checker session creation (with system prompt).
     CreateChecker { system_prompt: String },
     /// Push a separator cell into chat view.
@@ -124,7 +134,10 @@ impl GoalState {
                 role: GoalRole::Executor,
                 round: 1,
             },
-            GoalAction::SendToExecutor(state.build_prompt_user()),
+            GoalAction::SendToExecutor {
+                content: state.build_prompt_user(),
+                tool_call_id: None,
+            },
         ];
 
         (state, actions)
@@ -191,11 +204,17 @@ impl GoalState {
             GoalPhase::ExecutorWorking => {
                 // Forward to executor (Ask/permission response). No prompt_user append —
                 // intentional追加 happens after ESC interruption.
-                vec![GoalAction::SendToExecutor(text.to_string())]
+                vec![GoalAction::SendToExecutor {
+                    content: text.to_string(),
+                    tool_call_id: None,
+                }]
             }
             GoalPhase::CheckerWorking => {
                 // Forward to checker (Ask/permission response).
-                vec![GoalAction::SendToChecker(text.to_string())]
+                vec![GoalAction::SendToChecker {
+                    content: text.to_string(),
+                    tool_call_id: None,
+                }]
             }
             GoalPhase::Interrupted(role) => {
                 // Resume: append to prompt_user and send to interrupted agent.
@@ -207,8 +226,14 @@ impl GoalState {
                     GoalRole::Checker => GoalPhase::CheckerWorking,
                 };
                 vec![match role {
-                    GoalRole::Executor => GoalAction::SendToExecutor(msg),
-                    GoalRole::Checker => GoalAction::SendToChecker(msg),
+                    GoalRole::Executor => GoalAction::SendToExecutor {
+                        content: msg,
+                        tool_call_id: None,
+                    },
+                    GoalRole::Checker => GoalAction::SendToChecker {
+                        content: msg,
+                        tool_call_id: None,
+                    },
                 }]
             }
             _ => Vec::new(),
@@ -249,7 +274,10 @@ impl GoalState {
                 role: GoalRole::Checker,
                 round: self.round,
             },
-            GoalAction::SendToChecker(checker_msg),
+            GoalAction::SendToChecker {
+                content: checker_msg,
+                tool_call_id: None,
+            },
         ]
     }
 
@@ -273,7 +301,10 @@ impl GoalState {
                         role: GoalRole::Executor,
                         round: self.round,
                     },
-                    GoalAction::SendToExecutor(executor_msg),
+                    GoalAction::SendToExecutor {
+                        content: executor_msg,
+                        tool_call_id: None,
+                    },
                 ]
             }
             None => {
@@ -289,7 +320,10 @@ impl GoalState {
                     )]
                 } else {
                     // Stay in CheckerWorking, send format reminder.
-                    vec![GoalAction::SendToChecker(FORMAT_REMINDER.to_string())]
+                    vec![GoalAction::SendToChecker {
+                        content: FORMAT_REMINDER.to_string(),
+                        tool_call_id: None,
+                    }]
                 }
             }
         }
@@ -422,7 +456,7 @@ mod tests {
                 round: 1
             }
         ));
-        assert!(matches!(&actions[2], GoalAction::SendToExecutor(_)));
+        assert!(matches!(&actions[2], GoalAction::SendToExecutor { .. }));
     }
 
     #[test]
@@ -449,7 +483,7 @@ mod tests {
                 round: 1
             }
         ));
-        assert!(matches!(&actions[1], GoalAction::SendToChecker(_)));
+        assert!(matches!(&actions[1], GoalAction::SendToChecker { .. }));
     }
 
     #[test]
@@ -493,7 +527,7 @@ mod tests {
         assert!(
             actions
                 .iter()
-                .any(|a| matches!(a, GoalAction::SendToExecutor(_)))
+                .any(|a| matches!(a, GoalAction::SendToExecutor { .. }))
         );
     }
 
@@ -509,7 +543,7 @@ mod tests {
         assert!(
             actions
                 .iter()
-                .any(|a| matches!(a, GoalAction::SendToChecker(_)))
+                .any(|a| matches!(a, GoalAction::SendToChecker { .. }))
         );
 
         // Second format error
@@ -517,7 +551,7 @@ mod tests {
         assert!(
             actions
                 .iter()
-                .any(|a| matches!(a, GoalAction::SendToChecker(_)))
+                .any(|a| matches!(a, GoalAction::SendToChecker { .. }))
         );
 
         // Third format error — exceeds max: stalls into Interrupted(Checker).
@@ -541,7 +575,7 @@ mod tests {
         assert_eq!(state.phase, GoalPhase::ExecutorWorking);
         assert_eq!(actions.len(), 1);
         assert!(
-            matches!(&actions[0], GoalAction::SendToExecutor(msg) if msg.contains("use python 3.12"))
+            matches!(&actions[0], GoalAction::SendToExecutor { content, .. } if content.contains("use python 3.12"))
         );
     }
 
@@ -553,7 +587,9 @@ mod tests {
         // During working: forwards to active agent, does NOT append to prompt_user.
         let actions = state.on_user_input("y");
         assert_eq!(actions.len(), 1);
-        assert!(matches!(&actions[0], GoalAction::SendToExecutor(msg) if msg == "y"));
+        assert!(
+            matches!(&actions[0], GoalAction::SendToExecutor { content, .. } if content == "y")
+        );
         assert!(state.pending_appends.is_empty());
 
         // After interruption: appends to prompt_user AND sends.
@@ -561,7 +597,7 @@ mod tests {
         let actions = state.on_user_input("use python 3.12");
         assert_eq!(actions.len(), 1);
         assert!(
-            matches!(&actions[0], GoalAction::SendToExecutor(msg) if msg.contains("use python 3.12"))
+            matches!(&actions[0], GoalAction::SendToExecutor { content, .. } if content.contains("use python 3.12"))
         );
         assert!(state.appends.contains(&"use python 3.12".to_string()));
     }

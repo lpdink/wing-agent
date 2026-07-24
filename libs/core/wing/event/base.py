@@ -50,7 +50,7 @@ class EventTarget(BaseModel):
 #   inactive — 在磁盘、未被 resume 进内存
 #   idle     — 已 resume、agent 空闲
 #   working  — agent 正在处理 turn
-#   waiting  — agent 阻塞在 ask / need_feedback，等待用户反馈
+#   waiting  — 有工具阻塞在 feedback waiter，等待用户反馈
 SessionStatus = Literal["inactive", "idle", "working", "waiting"]
 
 

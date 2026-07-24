@@ -53,6 +53,9 @@ class LLMCallMetricsEvent(WingEvent):
 
 class AskEvent(WingEvent):
     type: Literal["ask"] = "ask"
+    # 关联的工具调用 id。客户端回复时经 post(tool_call_id=...) 定向 resolve
+    # 对应的 feedback waiter（并发 ask 场景下区分回复归属）。
+    tool_call_id: str = ""
     # Multi-question format (AskUserQuestion tool)
     questions: list[dict] = Field(default_factory=list)
     # Legacy single-question format (Bash dangerous command confirmation)

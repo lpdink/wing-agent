@@ -178,6 +178,10 @@ pub enum WingEvent {
     /// Agent asks the user a question.
     #[serde(rename = "ask")]
     Ask {
+        /// Correlation id — echo back via send_message to resolve this ask's
+        /// feedback waiter (distinguishes replies under concurrent asks).
+        #[serde(default)]
+        tool_call_id: String,
         /// Multi-question format (AskUserQuestion tool).
         #[serde(default)]
         questions: Vec<AskQuestion>,

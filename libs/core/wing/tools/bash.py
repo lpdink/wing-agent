@@ -43,25 +43,22 @@ async def _handle_dangerous_command(
     """Handle dangerous command by requesting user confirmation."""
     from wing.event import AskEvent
 
-    agent.state.set("need_feedback", True)
+    question = f"⚠️ Dangerous command detected:\n```bash\n{command}\n```\nProceed?"
 
-    agent.emit(
-        AskEvent(
-            session_id=agent.session_id,
-            question=f"⚠️ Dangerous command detected:\n```bash\n{command}\n```\nProceed?",
-            choices=_DANGEROUS_CHOICES,
-            required=True,
-        )
-    )
-
-    # Wait for feedback
+    # ask_feedback() 注入 tool_call_id 并 emit AskEvent，注册 feedback waiter，
+    # 用户回复经 post(tool_call_id=...) 定向 resolve（并发确认互不干扰）。
     while True:
         try:
-            feedback = await asyncio.wait_for(
-                agent._inbox_feedback.get(), timeout=FEEDBACK_TIMEOUT
+            feedback = await agent.ask_feedback(
+                AskEvent(
+                    session_id=agent.session_id,
+                    question=question,
+                    choices=_DANGEROUS_CHOICES,
+                    required=True,
+                ),
+                timeout=FEEDBACK_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            agent.state.set("need_feedback", False)
             raise ToolError(
                 "⚠️ Feedback timeout. The command was considered dangerous. "
                 "Please try a different approach or ask user to respond in time."
@@ -69,17 +66,9 @@ async def _handle_dangerous_command(
 
         action = _parse_feedback(feedback)
         if action is None:
-            agent.emit(
-                AskEvent(
-                    session_id=agent.session_id,
-                    question="⚠️ Please choose one of the options.",
-                    choices=_DANGEROUS_CHOICES,
-                    required=True,
-                )
-            )
+            # 无效回答 —— 换提示 re-ask（ask_feedback 以同一 tool_call_id 重新注册 waiter）
+            question = "⚠️ Please choose one of the options."
             continue
-
-        agent.state.set("need_feedback", False)
 
         if action == "yolo":
             # Enable yolo for the rest of this session.

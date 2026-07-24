@@ -101,6 +101,10 @@ pub struct UnsubscribeRequest {
 pub struct SendMessageRequest {
     pub session_id: String,
     pub content: String,
+    /// When replying to an Ask event, its tool_call_id — routes the message
+    /// to the matching feedback waiter instead of the session inbox.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 // ============================================================
