@@ -671,6 +671,24 @@ class TestSessionUpdate:
         assert resp.status_code == 404
         assert "nonexistent" in resp.json()["detail"]
 
+    def test_error_response_shape(self, client: TestClient, mock_runtime):
+        """错误响应统一为 ErrorResponse 形状（error + detail）。
+
+        回归：FastAPI 默认只返回 {"detail": ...}，缺少 wing-api-client
+        期望的 error 字段，导致结构化错误反序列化恒为 None。
+        """
+        mock_runtime.update_session = AsyncMock(
+            side_effect=LookupError("template 'nonexistent' not found")
+        )
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "agent": "nonexistent"},
+        )
+        assert resp.status_code == 404
+        body = resp.json()
+        assert body["error"] == "not_found"
+        assert "nonexistent" in body["detail"]
+
     def test_update_title(self, client: TestClient, mock_runtime):
         """设置 session 名称。"""
         mock_runtime.update_session = AsyncMock()
