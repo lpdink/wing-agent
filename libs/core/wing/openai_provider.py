@@ -10,9 +10,18 @@ from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk, Choice
 
 from wing.common.logger import log
+from wing.common.partial_json import parse_streaming_json
 from wing.common.with_retry import with_retry
 from wing.config import get_config, get_headers
-from wing.schema import LLMResponse, LLMUsage, Message, PendingCall, Tool, ToolCall
+from wing.schema import (
+    LLMResponse,
+    LLMUsage,
+    Message,
+    PendingCall,
+    Tool,
+    ToolCall,
+    ToolCallDelta,
+)
 
 
 async def _remove_stainless_headers(request: httpx.Request) -> None:
@@ -207,10 +216,8 @@ class OpenAIProvider:
             if first_token_ts is None and (content or reasoning):
                 first_token_ts = time.monotonic()
 
-            tcs = (
-                [item async for item in self._handle_tool_calls(choice, pending)]
-                if choice
-                else None
+            tcs, deltas = (
+                self._process_tool_deltas(choice, pending) if choice else (None, None)
             )
 
             # Decode TPS
@@ -226,6 +233,7 @@ class OpenAIProvider:
                 content=content,
                 reasoning_content=reasoning,
                 tool_calls=tcs,
+                tool_call_deltas=deltas,
                 usage=LLMUsage(
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
@@ -237,11 +245,21 @@ class OpenAIProvider:
                 ),
             )
 
-    async def _handle_tool_calls(
+    def _process_tool_deltas(
         self,
         choice: Choice,
-        pending: dict[int, PendingCall],  # NOTE: 这里不能用闭包，著名陷阱
-    ) -> AsyncIterator[ToolCall]:
+        pending: dict[int, PendingCall],
+    ) -> tuple[list[ToolCall] | None, list[ToolCallDelta] | None]:
+        """Process tool call deltas from a streaming chunk.
+
+        Returns:
+            (final_tool_calls, streaming_deltas)
+            - final_tool_calls: populated only when finish_reason == "tool_calls"
+            - streaming_deltas: partial args snapshots for UI streaming
+              (only when current chunk carries tool call data)
+        """
+        has_tool_delta = bool(choice.delta.tool_calls)
+
         for tc in choice.delta.tool_calls or []:
             call = pending.setdefault(tc.index, PendingCall())
             if tc.id:
@@ -250,14 +268,40 @@ class OpenAIProvider:
                 call.name = tc.function.name
             if tc.function and tc.function.arguments:
                 call.args_buffer += tc.function.arguments
-        if choice.finish_reason == "tool_calls":
+
+        # Build streaming deltas only when this chunk carries tool data.
+        # Guard: skip calls without id (some providers send args before id).
+        deltas: list[ToolCallDelta] | None = None
+        if has_tool_delta and pending:
+            is_final = choice.finish_reason == "tool_calls"
+            deltas = []
             for call in pending.values():
-                yield ToolCall(
+                if call.id and call.args_buffer:
+                    deltas.append(
+                        ToolCallDelta(
+                            id=call.id,
+                            name=call.name,
+                            partial_args=parse_streaming_json(call.args_buffer),
+                            is_final=is_final,
+                        )
+                    )
+            if not deltas:
+                deltas = None
+
+        # Finalize on finish_reason
+        finals: list[ToolCall] | None = None
+        if choice.finish_reason == "tool_calls":
+            finals = [
+                ToolCall(
                     id=call.id,
                     name=call.name,
                     arguments=json.loads(call.args_buffer),
                 )
+                for call in pending.values()
+            ]
             pending.clear()
+
+        return finals, deltas
 
     @staticmethod
     def _apply_cache_control(openai_messages: list[dict]) -> None:

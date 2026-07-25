@@ -26,6 +26,8 @@ use ratatui::text::Span;
 
 use crate::app::constants;
 use crate::config::ThemePalette;
+use crate::render::markdown::types::MarkdownLine;
+use crate::render::syntax;
 
 /// Maximum characters for failed result display.
 const FAILED_RESULT_MAX_CHARS: usize = 50;
@@ -37,6 +39,9 @@ const PATH_SEGMENT_COUNT: usize = 6;
 /// Tool call status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
+    /// Args still streaming from LLM (◌ hollow bullet, dim).
+    Streaming,
+    /// Args complete, tool executing or about to execute (⦁ solid, warning).
     Pending,
     Success,
     Failed,
@@ -45,11 +50,137 @@ pub enum ToolStatus {
 impl ToolStatus {
     fn color(&self, palette: &ThemePalette) -> Color {
         match self {
+            Self::Streaming => palette.dim,
             Self::Pending => palette.warning,
             Self::Success => palette.success,
             Self::Failed => palette.danger,
         }
     }
+
+    fn bullet(&self) -> &'static str {
+        match self {
+            Self::Streaming => "◌",
+            _ => "⦁",
+        }
+    }
+}
+
+// ── WriteHighlightCache ────────────────────────────────────────
+
+/// Incremental syntax highlight cache for Write tool streaming.
+///
+/// Follows PI's `updateWriteHighlightCacheIncremental` strategy:
+/// - Maintains raw_content + highlighted_lines cache
+/// - On delta: only highlights new/changed lines (last line + appended lines)
+/// - Uses single-line highlighting (no multi-line context) during streaming
+#[derive(Debug, Clone)]
+pub struct WriteHighlightCache {
+    /// Raw content string seen so far.
+    raw_content: String,
+    /// Detected language name (syntect syntax name).
+    lang: String,
+    /// Highlighted output lines (one per source line).
+    highlighted_lines: Vec<MarkdownLine>,
+    /// Raw text of the last line (for O(1) incremental append).
+    last_line_raw: String,
+}
+
+/// Maximum lines to display for streaming Write content.
+const WRITE_STREAM_MAX_LINES: usize = 20;
+
+/// Strip trailing `\r` for CRLF consistency.
+fn strip_cr(s: &str) -> &str {
+    s.strip_suffix('\r').unwrap_or(s)
+}
+
+impl WriteHighlightCache {
+    /// Create or update the cache incrementally.
+    ///
+    /// Falls back to plain-text rendering when path has no detectable
+    /// extension (LLMs may emit `content` before `path` in args JSON).
+    /// When the real path arrives later, the lang mismatch triggers a
+    /// full rebuild with proper syntax highlighting.
+    pub fn update(
+        cache: Option<WriteHighlightCache>,
+        path: &str,
+        content: &str,
+    ) -> Option<WriteHighlightCache> {
+        // Empty string → highlight_single_line returns None → plain_line fallback.
+        let lang = syntax::detect_syntax_from_path(path).unwrap_or_default();
+
+        let mut cache = match cache {
+            Some(c) if c.lang == lang && content.starts_with(&c.raw_content) => c,
+            // Full rebuild: new cache or content doesn't match prefix.
+            // Use split('\n') (not .lines()) to preserve trailing empty line
+            // from content ending with '\n' — keeps incremental path consistent.
+            _ => {
+                let raw_lines: Vec<&str> = content.split('\n').collect();
+                let highlighted: Vec<MarkdownLine> = raw_lines
+                    .iter()
+                    .map(|line| {
+                        let clean = strip_cr(line);
+                        syntax::highlight_single_line(clean, &lang)
+                            .unwrap_or_else(|| plain_line(clean))
+                    })
+                    .collect();
+                let last_line_raw = raw_lines
+                    .last()
+                    .map(|s| strip_cr(s).to_string())
+                    .unwrap_or_default();
+                return Some(WriteHighlightCache {
+                    raw_content: content.to_string(),
+                    lang,
+                    highlighted_lines: highlighted,
+                    last_line_raw,
+                });
+            }
+        };
+
+        // Incremental: content is a prefix extension of cached content
+        if content.len() == cache.raw_content.len() {
+            return Some(cache); // No change
+        }
+
+        let delta = &content[cache.raw_content.len()..];
+        cache.raw_content = content.to_string();
+
+        // Split delta into segments by newline
+        let segments: Vec<&str> = delta.split('\n').collect();
+
+        if cache.highlighted_lines.is_empty() {
+            cache.highlighted_lines.push(plain_line(""));
+            cache.last_line_raw.clear();
+        }
+
+        // First segment extends the last cached line (O(1) via cached last_line_raw)
+        let last_idx = cache.highlighted_lines.len() - 1;
+        cache.last_line_raw.push_str(strip_cr(segments[0]));
+        cache.highlighted_lines[last_idx] =
+            syntax::highlight_single_line(&cache.last_line_raw, &cache.lang)
+                .unwrap_or_else(|| plain_line(&cache.last_line_raw));
+
+        // Remaining segments are new lines
+        for (i, segment) in segments[1..].iter().enumerate() {
+            let clean = strip_cr(segment);
+            cache.highlighted_lines.push(
+                syntax::highlight_single_line(clean, &cache.lang)
+                    .unwrap_or_else(|| plain_line(clean)),
+            );
+            // Track last_line_raw for the final segment
+            if i == segments.len() - 2 {
+                cache.last_line_raw = clean.to_string();
+            }
+        }
+
+        Some(cache)
+    }
+}
+
+/// Create a plain (unstyled) MarkdownLine.
+fn plain_line(text: &str) -> MarkdownLine {
+    let mut line = MarkdownLine::default();
+    line.push_segment(Style::default(), text);
+    line
 }
 
 // ── ResultStrategy ──────────────────────────────────────────────
@@ -174,6 +305,8 @@ pub struct ToolCallBlock {
     pub result: Option<String>,
     /// When the tool started executing (for Bash timer display).
     pub started_at: Option<Instant>,
+    /// Incremental syntax highlight cache for Write streaming.
+    pub write_highlight: Option<WriteHighlightCache>,
 }
 
 impl ToolCallBlock {
@@ -185,6 +318,7 @@ impl ToolCallBlock {
             status: ToolStatus::Pending,
             result: None,
             started_at: None,
+            write_highlight: None,
         }
     }
 
@@ -196,6 +330,20 @@ impl ToolCallBlock {
         } else {
             ToolStatus::Failed
         };
+    }
+
+    /// Update args during streaming (ToolCallStreamEvent).
+    pub fn update_args(&mut self, args: serde_json::Value) {
+        // Incremental Write highlight: update cache when content grows.
+        if self.tool_name == constants::TOOL_WRITE {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            if !content.is_empty() {
+                self.write_highlight =
+                    WriteHighlightCache::update(self.write_highlight.take(), path, content);
+            }
+        }
+        self.tool_args = args;
     }
 
     /// Render to lines.
@@ -211,7 +359,7 @@ impl ToolCallBlock {
         let args_part = renderer.header_args(&self.tool_args);
 
         let mut header_spans = vec![
-            Span::styled("⦁", Style::default().fg(status.color(palette))),
+            Span::styled(status.bullet(), Style::default().fg(status.color(palette))),
             Span::raw(" "),
             Span::styled(self.tool_name.clone(), bold),
             Span::styled(args_part, bold),
@@ -228,6 +376,31 @@ impl ToolCallBlock {
 
         let header = Line::from(header_spans);
         let mut lines = vec![header];
+
+        // Write streaming: render highlighted content preview.
+        if status == ToolStatus::Streaming
+            && renderer == ToolRenderer::Write
+            && let Some(ref cache) = self.write_highlight
+        {
+            let total = cache.highlighted_lines.len();
+            let show_count = total.min(WRITE_STREAM_MAX_LINES);
+            let start = total.saturating_sub(show_count);
+            if start > 0 {
+                let dim = Style::default().fg(palette.dim);
+                lines.push(Line::from(Span::styled(
+                    format!("    … +{start} lines"),
+                    dim,
+                )));
+            }
+            for hl_line in &cache.highlighted_lines[start..] {
+                let mut spans: Vec<Span<'static>> =
+                    vec![Span::styled("    ", Style::default().fg(palette.dim))];
+                for seg in &hl_line.segments {
+                    spans.push(Span::styled(seg.text.clone(), seg.style));
+                }
+                lines.push(Line::from(spans));
+            }
+        }
 
         // Result rendering.
         if let Some(ref result) = self.result {
@@ -252,8 +425,8 @@ impl ToolCallBlock {
                         render_truncated_result(&mut lines, result, max_output, palette);
                     }
                 },
-                ToolStatus::Pending => {
-                    // Pending tools don't have results yet.
+                ToolStatus::Pending | ToolStatus::Streaming => {
+                    // Pending/streaming tools don't have results yet.
                 }
             }
         }
@@ -726,5 +899,168 @@ mod tests {
             !text.contains("()"),
             "empty parens should not appear: {text}"
         );
+    }
+
+    #[test]
+    fn test_streaming_status_hollow_bullet() {
+        let mut block = ToolCallBlock::new(
+            "Edit".into(),
+            json!({"path": "src/main.rs"}),
+            "tc_s1".into(),
+        );
+        block.status = ToolStatus::Streaming;
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(
+            text.contains("◌"),
+            "streaming should use hollow bullet: {text}"
+        );
+        assert!(
+            !text.contains("⦁"),
+            "streaming should not use solid bullet: {text}"
+        );
+        assert!(text.contains("Edit"), "missing tool name: {text}");
+    }
+
+    #[test]
+    fn test_pending_status_solid_bullet() {
+        let block = ToolCallBlock::new(
+            "Edit".into(),
+            json!({"path": "src/main.rs"}),
+            "tc_s2".into(),
+        );
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(
+            text.contains("⦁"),
+            "pending should use solid bullet: {text}"
+        );
+        assert!(
+            !text.contains("◌"),
+            "pending should not use hollow bullet: {text}"
+        );
+    }
+
+    #[test]
+    fn test_update_args() {
+        let mut block = ToolCallBlock::new("Bash".into(), json!({}), "tc_s3".into());
+        block.status = ToolStatus::Streaming;
+        block.update_args(json!({"command": "ls -la"}));
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(
+            text.contains("ls -la"),
+            "updated args should be visible: {text}"
+        );
+    }
+
+    #[test]
+    fn test_write_streaming_highlight() {
+        let mut block = ToolCallBlock::new(
+            "Write".into(),
+            json!({"path": "/tmp/test.py", "content": "def main():\n    print('hello')"}),
+            "tc_s4".into(),
+        );
+        block.status = ToolStatus::Streaming;
+        // Simulate streaming update
+        block.update_args(
+            json!({"path": "/tmp/test.py", "content": "def main():\n    print('hello')"}),
+        );
+        let text = lines_text(&block.to_lines(&p(), 30));
+        assert!(text.contains("Write"), "missing tool name: {text}");
+        assert!(
+            text.contains("◌"),
+            "streaming should use hollow bullet: {text}"
+        );
+        // Content should be rendered (highlighted or plain)
+        assert!(
+            text.contains("def main()") || text.contains("print"),
+            "streaming content should be visible: {text}"
+        );
+    }
+
+    #[test]
+    fn test_write_highlight_cache_incremental() {
+        // First update: full build
+        let cache = WriteHighlightCache::update(None, "/tmp/test.py", "line1\nline2");
+        assert!(cache.is_some());
+        let cache = cache.unwrap();
+        assert_eq!(cache.highlighted_lines.len(), 2);
+
+        // Incremental update: append a line
+        let cache2 =
+            WriteHighlightCache::update(Some(cache), "/tmp/test.py", "line1\nline2\nline3");
+        assert!(cache2.is_some());
+        let cache2 = cache2.unwrap();
+        assert_eq!(cache2.highlighted_lines.len(), 3);
+
+        // No change
+        let cache3 = WriteHighlightCache::update(
+            Some(cache2.clone()),
+            "/tmp/test.py",
+            "line1\nline2\nline3",
+        );
+        assert!(cache3.is_some());
+        assert_eq!(cache3.unwrap().highlighted_lines.len(), 3);
+    }
+
+    #[test]
+    fn test_write_highlight_cache_unknown_ext() {
+        // Unknown extension → falls back to plain text (lang=""), still renders.
+        let cache = WriteHighlightCache::update(None, "/tmp/file.xyz_unknown", "content");
+        assert!(cache.is_some());
+        let cache = cache.unwrap();
+        assert_eq!(cache.highlighted_lines.len(), 1);
+        assert_eq!(cache.lang, "");
+    }
+
+    #[test]
+    fn test_write_highlight_cache_empty_path_fallback() {
+        // Empty path (LLM emits content before path) → plain text fallback.
+        let cache = WriteHighlightCache::update(None, "", "line1\nline2");
+        assert!(cache.is_some());
+        let cache = cache.unwrap();
+        assert_eq!(cache.highlighted_lines.len(), 2);
+        assert_eq!(cache.lang, "");
+
+        // When real path arrives, lang mismatch triggers full rebuild.
+        let cache2 = WriteHighlightCache::update(Some(cache), "/tmp/t.py", "line1\nline2\nline3");
+        assert!(cache2.is_some());
+        let cache2 = cache2.unwrap();
+        assert_ne!(cache2.lang, ""); // Now has real syntax
+        assert_eq!(cache2.highlighted_lines.len(), 3);
+    }
+
+    #[test]
+    fn test_write_highlight_cache_trailing_newline() {
+        // P0 regression: trailing '\n' must produce an extra empty line
+        let cache = WriteHighlightCache::update(None, "/tmp/t.py", "line1\n");
+        assert!(cache.is_some());
+        let cache = cache.unwrap();
+        // "line1\n".split('\n') → ["line1", ""] → 2 lines
+        assert_eq!(cache.highlighted_lines.len(), 2);
+
+        // Incremental: append after trailing newline
+        let cache2 = WriteHighlightCache::update(Some(cache), "/tmp/t.py", "line1\nl");
+        assert!(cache2.is_some());
+        let cache2 = cache2.unwrap();
+        // Should be ["line1", "l"] — NOT ["line1l"]
+        assert_eq!(cache2.highlighted_lines.len(), 2);
+        assert_eq!(cache2.last_line_raw, "l");
+    }
+
+    #[test]
+    fn test_write_highlight_cache_crlf() {
+        // CRLF content: \r should be stripped
+        let cache = WriteHighlightCache::update(None, "/tmp/t.py", "line1\r\nline2\r\n");
+        assert!(cache.is_some());
+        let cache = cache.unwrap();
+        // "line1\r\nline2\r\n".split('\n') → ["line1\r", "line2\r", ""] → 3 lines
+        assert_eq!(cache.highlighted_lines.len(), 3);
+        assert_eq!(cache.last_line_raw, "");
+
+        // Incremental after CRLF
+        let cache2 = WriteHighlightCache::update(Some(cache), "/tmp/t.py", "line1\r\nline2\r\nx");
+        assert!(cache2.is_some());
+        let cache2 = cache2.unwrap();
+        assert_eq!(cache2.highlighted_lines.len(), 3);
+        assert_eq!(cache2.last_line_raw, "x");
     }
 }

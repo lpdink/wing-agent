@@ -31,6 +31,21 @@ class ToolCallEvent(WingEvent):
     tool_call_id: str
 
 
+class ToolCallStreamEvent(WingEvent):
+    """Streaming tool call args delta — emitted during LLM generation.
+
+    Carries partial (best-effort parsed) args for real-time UI rendering.
+    Coexists with ToolCallEvent: this fires during arg generation,
+    ToolCallEvent fires when execution begins.
+    """
+
+    type: Literal["tool_call_stream"] = "tool_call_stream"
+    tool_call_id: str
+    tool_name: str
+    tool_args: dict[str, Any] = Field(default_factory=dict)
+    is_final: bool = False
+
+
 class ToolCallResultEvent(WingEvent):
     type: Literal["tool_call_result"] = "tool_call_result"
     tool_name: str
