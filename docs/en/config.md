@@ -49,6 +49,8 @@ agents:
       - Explorer
     context_window_tokens: 256000          # Context window limit before compaction
     keep_recent_tokens: 50000              # Tokens to keep after compaction
+    max_turns: null                        # Max agent loop turns (null = unlimited)
+    yolo: null                             # Per-agent yolo override (null = inherit global)
     skills:                                # Skills glob patterns
       - ~/.agents/skills/*/SKILL.md
       - .claude/skills/*/SKILL.md
@@ -67,6 +69,14 @@ preserved_thinking: true                   # Keep reasoning content (don't clear
 safe_command_patterns: []                  # Regex whitelist for auto-approved bash commands
                                            # e.g. ["^ls ", "^cat "]
 
+# ── Tool Result Truncation ────────────────────────────
+# Built-in truncation for overly long tool results. When a result
+# exceeds max_length chars, the full output is saved to a temp file
+# and only head/tail chars are kept in the context.
+tool_result_truncate:
+  max_length: 100000                       # Trigger threshold (chars). null or <0 disables
+  keep_chars: 200                          # Chars to keep at head and tail
+
 # ── Logging ───────────────────────────────────────────
 log:
   level: "WARNING"                         # Log level (DEBUG/INFO/WARNING/ERROR/CRITICAL)
@@ -77,14 +87,19 @@ log:
 gateway:
   host: "127.0.0.1"                        # Listen address
   port: 32523                              # Listen port
+  auth:                                    # Opt-in API key auth (default: disabled)
+    enabled: false                         # Master switch
+    keys:
+      - key: "my-secret"                   # ASCII printable; sent by clients
+        role: admin                        # Reserved for future RBAC (not enforced)
 
 # ── Prompt Commands ───────────────────────────────────
 commands:
-  paths: []                                # Additional magic command file paths
+  paths: []                                # Additional prompt command (.md) file paths
 
 # ── User Agent ────────────────────────────────────────
 user_agent:
-  preset: "opencode"                       # Client identity preset (opencode | qwen-code)
+  preset: "qwen-code"                      # Client identity preset (opencode | qwen-code)
 ```
 
 ## Field Details
@@ -115,10 +130,12 @@ Each entry defines an agent template. You can have multiple templates and switch
 | `keep_recent_tokens` | int | 50000 | How many recent tokens to preserve after compaction. |
 | `skills` | list[string] | [] | Glob patterns for skill files (Markdown). Skills are injected into the system prompt. |
 | `rules` | list[string] | [] | Glob patterns for rule files (Markdown). Rules are injected into the system prompt. |
+| `max_turns` | int? | null | Max agent loop turns per request (null = unlimited). |
+| `yolo` | bool? | null | Per-agent override for dangerous-command review (null = inherit global `yolo`). |
 
 ### hooks
 
-Glob patterns for Python hook files. Hooks extend wing's behavior at defined extension points (e.g., `after_tool_call`, `before_llm_call`).
+Glob patterns for Python hook files. Hooks extend wing's behavior at defined extension points: `before_session_start`, `before_user_message`, `before_tool_call`, `after_tool_call`.
 
 See [Custom Tools & Hooks](custom-tools.md) for details.
 
@@ -142,8 +159,29 @@ Without matching patterns, all commands require user confirmation (or `yolo: tru
 |-------|------|---------|-------------|
 | `host` | string | "127.0.0.1" | Listen address when launching `wing-gateway` directly. |
 | `port` | int | 32523 | Listen port. |
+| `auth.enabled` | bool | false | Master switch for API key authentication. |
+| `auth.keys` | list | [] | List of `{key, role}` entries. `key` must be ASCII printable; `role` is reserved for future RBAC (not enforced). |
 
-> **Note:** When using the Rust TUI (`wing`), gateway settings are read from `~/.wing/tui/config.yaml` instead.
+> **Note:** When using the Rust TUI (`wing`), gateway settings are read from `~/.wing/tui/config.yaml` instead. Set `api_key` there so the client sends it with every HTTP/WS request. `/api/health` is always exempt. Encryption (TLS) is delegated to a reverse proxy.
+
+### tool_result_truncate
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_length` | int? | 100000 | Trigger threshold in chars. When a tool result exceeds this, the full output is saved to a temp file and only head/tail are kept in context. `null` or `<0` disables. |
+| `keep_chars` | int | 200 | Chars to keep at head and tail when truncating (must be ≥ 0). |
+
+### user_agent
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `preset` | string | "qwen-code" | Client identity preset (`opencode` \| `qwen-code`). Controls identifying headers sent to the provider. |
+
+### commands
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `paths` | list[string] | [] | Additional prompt command (`.md`) file paths, beyond the default discovery locations. |
 
 ## Environment Variables
 
@@ -164,4 +202,5 @@ Without matching patterns, all commands require user confirmation (or `yolo: tru
 | `Grep` | Search file contents with regex |
 | `AskUserQuestion` | Ask the user a question |
 | `TodoWrite` | Track task progress |
-| `Explorer` | Autonomous code exploration agent |
+| `Explorer` | Autonomous code exploration sub-agent (blocking or background) |
+| `BetterEdit` | Anchored `[upto]` edits (experimental) |

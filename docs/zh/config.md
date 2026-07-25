@@ -49,6 +49,8 @@ agents:
       - Explorer
     context_window_tokens: 256000          # 触发压缩的上下文窗口上限
     keep_recent_tokens: 50000              # 压缩后保留的近期 token 数
+    max_turns: null                        # agent loop 最大轮数（null = 不限）
+    yolo: null                             # 每 agent 的 yolo 覆盖（null = 继承全局）
     skills:                                # Skills glob 模式
       - ~/.agents/skills/*/SKILL.md
       - .claude/skills/*/SKILL.md
@@ -67,6 +69,13 @@ preserved_thinking: true                   # 保留推理内容（不清理）
 safe_command_patterns: []                  # 自动放行的 bash 命令正则白名单
                                            # 如 ["^ls ", "^cat "]
 
+# ── 工具结果截断 ──────────────────────────────────────
+# 内置的超长工具结果截断。当结果超过 max_length 字符时，
+# 完整输出存入临时文件，上下文中仅保留头尾字符。
+tool_result_truncate:
+  max_length: 100000                       # 触发阈值（字符）。null 或 <0 禁用
+  keep_chars: 200                          # 截断时头尾各保留的字符数
+
 # ── 日志 ──────────────────────────────────────────────
 log:
   level: "WARNING"                         # 日志级别 (DEBUG/INFO/WARNING/ERROR/CRITICAL)
@@ -77,14 +86,19 @@ log:
 gateway:
   host: "127.0.0.1"                        # 监听地址
   port: 32523                              # 监听端口
+  auth:                                    # 可选的 API key 鉴权（默认关闭）
+    enabled: false                         # 总开关
+    keys:
+      - key: "my-secret"                   # ASCII 可打印字符；由客户端发送
+        role: admin                        # 预留未来 RBAC（当前不强制）
 
 # ── Prompt 命令 ───────────────────────────────────────
 commands:
-  paths: []                                # 额外的魔术命令文件路径
+  paths: []                                # 额外的 prompt 命令（.md）文件路径
 
 # ── User Agent ────────────────────────────────────────
 user_agent:
-  preset: "opencode"                       # 客户端身份预设 (opencode | qwen-code)
+  preset: "qwen-code"                      # 客户端身份预设 (opencode | qwen-code)
 ```
 
 ## 字段详解
@@ -115,10 +129,12 @@ user_agent:
 | `keep_recent_tokens` | int | 50000 | 压缩后保留的近期 token 数。 |
 | `skills` | list[string] | [] | Skill 文件的 glob 模式（Markdown）。Skills 会被注入系统提示词。 |
 | `rules` | list[string] | [] | Rule 文件的 glob 模式（Markdown）。Rules 会被注入系统提示词。 |
+| `max_turns` | int? | null | 每次请求的 agent loop 最大轮数（null = 不限）。 |
+| `yolo` | bool? | null | 每 agent 的危险命令审查覆盖（null = 继承全局 `yolo`）。 |
 
 ### hooks
 
-Python hook 文件的 glob 模式。Hooks 在定义的扩展点（如 `after_tool_call`、`before_llm_call`）扩展 wing 的行为。
+Python hook 文件的 glob 模式。Hooks 在定义的扩展点扩展 wing 的行为：`before_session_start`、`before_user_message`、`before_tool_call`、`after_tool_call`。
 
 详见[自定义工具与 Hooks](custom-tools.md)。
 
@@ -142,8 +158,29 @@ safe_command_patterns:
 |------|------|--------|------|
 | `host` | string | "127.0.0.1" | 直接启动 `wing-gateway` 时的监听地址。 |
 | `port` | int | 32523 | 监听端口。 |
+| `auth.enabled` | bool | false | API key 鉴权总开关。 |
+| `auth.keys` | list | [] | `{key, role}` 条目列表。`key` 须为 ASCII 可打印字符；`role` 预留未来 RBAC（当前不强制）。 |
 
-> **注意：** 使用 Rust TUI（`wing`）时，gateway 设置从 `~/.wing/tui/config.yaml` 读取。
+> **注意：** 使用 Rust TUI（`wing`）时，gateway 设置从 `~/.wing/tui/config.yaml` 读取。在那里设置 `api_key`，客户端会随每个 HTTP/WS 请求发送。`/api/health` 始终豁免。加密（TLS）交由反向代理负责。
+
+### tool_result_truncate
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `max_length` | int? | 100000 | 触发阈值（字符）。工具结果超过此值时，完整输出存入临时文件，上下文中仅保留头尾。`null` 或 `<0` 禁用。 |
+| `keep_chars` | int | 200 | 截断时头尾各保留的字符数（须 ≥ 0）。 |
+
+### user_agent
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `preset` | string | "qwen-code" | 客户端身份预设（`opencode` \| `qwen-code`）。决定发给服务商的身份请求头。 |
+
+### commands
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `paths` | list[string] | [] | 除默认发现位置外，额外的 prompt 命令（`.md`）文件路径。 |
 
 ## 环境变量
 
@@ -164,4 +201,5 @@ safe_command_patterns:
 | `Grep` | 正则搜索文件内容 |
 | `AskUserQuestion` | 向用户提问 |
 | `TodoWrite` | 跟踪任务进度 |
-| `Explorer` | 自主代码探索 agent |
+| `Explorer` | 自主代码探索子 agent（可阻塞或后台运行） |
+| `BetterEdit` | 锚定 `[upto]` 编辑（实验性） |

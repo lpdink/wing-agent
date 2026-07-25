@@ -1,0 +1,93 @@
+# HTTP API 与 WebSocket 协议
+
+Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态变更（RPC 风格），WebSocket 只负责实时事件流。** 会话创建与 WS 握手解耦：客户端先经 HTTP 创建会话，再订阅事件。
+
+默认监听 `127.0.0.1:32523`（`gateway.host` / `gateway.port`）。OpenAPI 文档由 `wing/gateway/openapi.py` 提供元数据。
+
+## 典型客户端流程
+
+```
+1. WS  GET/WS  /ws                 → ConnectResponse { type:"connected", client_id }
+2. HTTP POST  /api/session/create   → { session_id }
+3. HTTP POST  /api/session/subscribe { session_id, client_id }
+4. HTTP POST  /api/session/send      { session_id, content }   → agent loop 启动
+5. WS   接收 ReAct 事件流（text / tool_call / … / turn_result）
+```
+
+查询（弹窗候选、系统信息等）走 GET 端点；状态变更（切模型、压缩、回退等）走 POST 端点。TUI 中的斜杠命令多数被前端拦截并转换为这些 HTTP 调用（见 [glossary.md](glossary.md) 中「命令」条目）。
+
+## HTTP 端点
+
+### Session（`routes/session.py`，14 个）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/session/create` | 创建新 session（可选 `backend: file\|memory`，默认 file；`workspace`、`template` 等） |
+| POST | `/api/session/resume` | 恢复已有 session（默认还原 template_name 与 workspace） |
+| POST | `/api/session/fork` | 从指定消息 uuid 分叉；新 session 含该消息及之前全部消息，继承源 backend |
+| POST | `/api/session/subscribe` | 将某 client 订阅到 session 事件（触发 SyncSession 重放） |
+| POST | `/api/session/unsubscribe` | 取消订阅 |
+| POST | `/api/session/send` | 发送用户消息，驱动 agent loop |
+| GET | `/api/session/list` | 列出所有 session（跨 store 聚合） |
+| GET | `/api/session/get` | 获取 session 详情 |
+| GET | `/api/session/info` | 运行时状态，含 `context_stats`、`skills_info`、`reasoning_effort` |
+| GET | `/api/session/branches` | 可回退 / 分叉的消息节点 |
+| POST | `/api/session/update` | 更新状态：model / agents / title / reasoning_effort / yolo |
+| POST | `/api/session/compact` | 手动压缩上下文 |
+| POST | `/api/session/interrupt` | 中断当前任务（Esc 键） |
+| POST | `/api/session/rewind` | 回退到指定消息 uuid |
+
+### System（`routes/system.py`，5 个）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/commands` | 命令列表（仅返回 `source == "prompt"` 的命令） |
+| GET | `/api/models` | 可用模型列表 |
+| GET | `/api/agents` | 可用 agent 模板列表 |
+| POST | `/api/system/reload` | 重载配置 / hooks / provider / skills / auth（无需重启） |
+| POST | `/api/shutdown` | Gateway 优雅自关闭（返回 200 后延迟自送 SIGTERM） |
+
+### Health（`routes/health.py`，1 个）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/health` | 健康检查，返回 `service: "wing-gateway"`（身份标识）+ `uptime` + version。**鉴权豁免**，供 `wing status` 探活。 |
+
+> `wing start/stop/status` 完全基于 HTTP：`stop` → `POST /api/shutdown` 后轮询 health 直至不可达；`start` → 探活 health，无响应则拉起再轮询；`status` → 读 health 的 version + uptime。已无 PID / state.json（PR #10）。
+
+## WebSocket 协议（`/ws`）
+
+握手成功后服务端推送 `ConnectResponse { type: "connected", client_id }`。之后是单向事件流（服务端 → 客户端），事件均为 `WingEvent` 子类，按 `type` 字段区分。
+
+**ReAct 事件**（`event/react.py`）：`turn_started` · `text` · `reasoning` · `tool_call` · `tool_call_result` · `diff_content` · `ask` · `assistant_turn` · `tool_result_turn` · `turn_result`（subtype: success / error_during_execution / error_max_turns）· `done` · `llm_call_metrics`。
+
+**状态事件**（`event/state_change.py`）：`session_init` · `sync_session`（订阅时重放历史）· `session_state_changed`（update / think / yolo 后统一发出）· `interrupted` · `compact_done`。
+
+**其他**（`event/base.py`、`query_response.py`）：`error` · `delivered` · `context_stats` · `branch_targets`。
+
+## 鉴权（opt-in，PR #35）
+
+默认关闭，完全向后兼容。配置于后端 `gateway.auth`：
+
+```yaml
+gateway:
+  auth:
+    enabled: false
+    keys:
+      - key: "my-secret"
+        role: admin        # 预留 RBAC，当前不强制
+```
+
+前端在 `~/.wing/tui/config.yaml` 设 `api_key: "my-secret"`，随每个请求发送。
+
+| 通道 | 接受形式 | 优先级 |
+|------|----------|--------|
+| HTTP | `Authorization: Bearer <key>` | 1 |
+| HTTP | `X-API-Key: <key>` | 2 |
+| WS | 同 HTTP 请求头 | 1 |
+| WS | 查询参数 `?api_key=<key>` | 2 |
+
+- `/api/health` 始终豁免。
+- key 用 `hmac.compare_digest` 常量时间比较；须为 ASCII 可打印字符（配置解析时校验）。
+- `auth_config` 每次请求读取最新配置单例，`/api/system/reload` 可即时生效。
+- **加密（TLS）由外部反向代理（nginx 等）负责**，应用层只做身份验证。

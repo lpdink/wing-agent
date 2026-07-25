@@ -29,13 +29,18 @@ pip install wing-agent
 wing
 ```
 
-On first run, wing creates a config template at `~/.wing/core/config.yaml` and exits. Open it and fill in **three fields**:
+On first run, wing creates a config template at `~/.wing/core/config.yaml` and exits. Open it and fill in your **provider, key, and model**:
 
 ```yaml
-llm:
+openai:
   base_url: "https://your-api-endpoint/v1"   # ← your provider
   api_key: "sk-xxx"                          # ← your key
-  model: "gpt-4o"                            # ← your model
+
+agents:
+  - name: default
+    model: "gpt-4o"                          # ← your model
+    default: true
+    tools: [Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, TodoWrite, Explorer]
 ```
 
 Then start wing:
@@ -45,7 +50,7 @@ wing stop    # stop the gateway if it was already running
 wing         # start fresh
 ```
 
-> **Note:** The gateway loads config at startup. After editing `config.yaml`, always `wing stop` then `wing` to pick up changes. Hot-reload is tracked in [#xx](docs/known_issues.md).
+> **Note:** The gateway loads config at startup. After editing `config.yaml`, run `/reload` in the TUI (or `wing stop` then `wing`) to pick up changes.
 
 ## Configuration
 
@@ -66,7 +71,8 @@ Full reference: **[docs/en/config.md](docs/en/config.md)**
 | `Grep` | Search file contents with regex |
 | `AskUserQuestion` | Ask the user a question |
 | `TodoWrite` | Track task progress |
-| `Explorer` | Autonomous code exploration agent |
+| `Explorer` | Autonomous code exploration sub-agent (blocking or background) |
+| `BetterEdit` | Anchored `[upto]` edits (experimental) |
 
 Custom tools: **[docs/en/custom-tools.md](docs/en/custom-tools.md)**
 
@@ -76,6 +82,18 @@ Type `/` in the TUI to see available commands.
 
 Full reference: **[docs/en/magic-commands.md](docs/en/magic-commands.md)**
 
+## Headless mode (stdio)
+
+`wing` also runs headless with a Claude Code compatible stdio protocol — alias `wing` as `claude` to plug into external orchestrators, or drive it from scripts:
+
+```bash
+wing -p "list the files in this directory"                    # text (default): final result only
+wing -p "list files" --output-format json                     # single result JSON object
+wing -p "list files" --output-format stream-json              # real-time NDJSON stream
+```
+
+Useful flags: `-m/--model`, `-r/--resume`, `--system-prompt`, `--append-system-prompt`, `--max-turns`, `--effort`, `--input-format`, `--yolo`. Unknown `--xxx` flags are ignored for Claude compatibility.
+
 ## Documentation
 
 | Document | English | 中文 |
@@ -83,6 +101,10 @@ Full reference: **[docs/en/magic-commands.md](docs/en/magic-commands.md)**
 | Configuration | [docs/en/config.md](docs/en/config.md) | [docs/zh/config.md](docs/zh/config.md) |
 | Custom Tools | [docs/en/custom-tools.md](docs/en/custom-tools.md) | [docs/zh/custom-tools.md](docs/zh/custom-tools.md) |
 | Magic Commands | [docs/en/magic-commands.md](docs/en/magic-commands.md) | [docs/zh/magic-commands.md](docs/zh/magic-commands.md) |
+
+## Developing
+
+Start with **[AGENTS.md](AGENTS.md)** (high-density project overview). For mechanism-level deep dives (data flow, full HTTP API, glossary), see **[docs/dev/](docs/dev/)** (中文).
 
 ## License
 

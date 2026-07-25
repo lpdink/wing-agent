@@ -23,13 +23,18 @@ pip install wing-agent
 wing
 ```
 
-首次运行时，wing 会在 `~/.wing/core/config.yaml` 创建配置模板并退出。打开它，填入以下 **三个字段**：
+首次运行时，wing 会在 `~/.wing/core/config.yaml` 创建配置模板并退出。打开它，填入你的 **provider、密钥与模型**：
 
 ```yaml
-llm:
+openai:
   base_url: "https://your-api-endpoint/v1"   # ← 你的 API 地址
   api_key: "sk-xxx"                          # ← 你的密钥
-  model: "gpt-4o"                            # ← 你的模型
+
+agents:
+  - name: default
+    model: "gpt-4o"                          # ← 你的模型
+    default: true
+    tools: [Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, TodoWrite, Explorer]
 ```
 
 然后启动 wing：
@@ -39,7 +44,7 @@ wing stop    # 如果 Gateway 已在运行，先停掉
 wing         # 重新启动
 ```
 
-> **注意：** Gateway 仅在启动时加载配置。修改 `config.yaml` 后，务必先 `wing stop` 再 `wing` 以加载新配置。热重载计划见 [已知问题](../known_issues.md)。
+> **注意：** Gateway 仅在启动时加载配置。修改 `config.yaml` 后，在 TUI 中执行 `/reload`（或 `wing stop` 再 `wing`）以加载新配置。
 
 ## 配置
 
@@ -60,7 +65,8 @@ wing         # 重新启动
 | `Grep` | 正则搜索文件内容 |
 | `AskUserQuestion` | 向用户提问 |
 | `TodoWrite` | 跟踪任务进度 |
-| `Explorer` | 自主代码探索 agent |
+| `Explorer` | 自主代码探索子 agent（可阻塞或后台运行） |
+| `BetterEdit` | 锚定 `[upto]` 编辑（实验性） |
 
 自定义工具：**[docs/zh/custom-tools.md](custom-tools.md)**
 
@@ -70,6 +76,18 @@ wing         # 重新启动
 
 完整参考：**[docs/zh/magic-commands.md](magic-commands.md)**
 
+## 无头模式（stdio）
+
+`wing` 也能以兼容 Claude Code 的 stdio 协议无头运行——把 `wing` alias 为 `claude` 即可接入外部编排层，或在脚本中直接驱动：
+
+```bash
+wing -p "列出当前目录的文件"                    # text（默认）：仅输出最终结果
+wing -p "列出文件" --output-format json         # 单个 result JSON 对象
+wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
+```
+
+常用参数：`-m/--model`、`-r/--resume`、`--system-prompt`、`--append-system-prompt`、`--max-turns`、`--effort`、`--input-format`、`--yolo`。为兼容 Claude，未识别的 `--xxx` 参数会被静默忽略。
+
 ## 文档
 
 | 文档 | English | 中文 |
@@ -77,6 +95,10 @@ wing         # 重新启动
 | 配置 | [docs/en/config.md](../en/config.md) | [docs/zh/config.md](config.md) |
 | 自定义工具 | [docs/en/custom-tools.md](../en/custom-tools.md) | [docs/zh/custom-tools.md](custom-tools.md) |
 | 魔术命令 | [docs/en/magic-commands.md](../en/magic-commands.md) | [docs/zh/magic-commands.md](magic-commands.md) |
+
+## 开发
+
+从 **[AGENTS.md](../../AGENTS.md)** 开始（高信息密度的项目总览）。需要机制级细节（数据流、完整 HTTP API、术语表）请读 **[docs/dev/](../dev/)**。
 
 ## 许可证
 
