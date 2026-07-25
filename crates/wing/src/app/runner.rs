@@ -520,6 +520,7 @@ pub async fn execute_intent(
                 let req = wing_api_client::models::CreateSessionRequest {
                     workspace: None,
                     template_name: None,
+                    backend: None,
                     agent: Some(wing_api_client::models::AgentOverride {
                         tools: Some(vec![
                             "Bash".into(),

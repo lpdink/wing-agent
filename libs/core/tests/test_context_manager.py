@@ -6,7 +6,7 @@
 3. compact: 压缩节点 + relink 行
 4. rewind: 追加回退行，返回 draft
 5. get_branch_targets: 活跃链上的 user 消息列表
-6. extract_subchain + import_messages: fork 流程
+6. extract_subchain + _remap_chain_uuids: fork 流程
 """
 
 import json
@@ -18,8 +18,9 @@ import pytest
 
 from wing.context_manager import ContextManager
 from wing.common.tracked_list import TrackedList
+from wing.store import FileMessageLog, FileSessionStore
 from wing.schema import Message
-from wing.session_manager import SessionManager
+from wing.session_manager import _remap_chain_uuids
 
 
 @pytest.fixture
@@ -47,7 +48,7 @@ def _make_cm(tmp_dir: Path, session_id: str | None = None) -> ContextManager:
     from wing.compactor import Compactor
 
     sid = session_id or "test-session"
-    messages: TrackedList[Message] = TrackedList(tmp_dir / sid)
+    messages: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir / sid))
     return ContextManager(
         session_id=sid,
         messages=messages,
@@ -511,17 +512,20 @@ class TestFork:
         # 记录原活跃链
         original_len = len(cm._messages.active_chain)
 
-        # fork（extract_subchain + import_messages）
+        # fork 的持久化路径（extract_subchain + remap + store 写入）
         subchain, _ = cm.extract_subchain("current")
-        sm = SessionManager(sessions_path=tmp_dir)
-        new_session_id = sm.import_messages(subchain)
+        remapped = _remap_chain_uuids(subchain)
 
-        # 加载新 session
-        new_path = sm._sessions_path / new_session_id
-        new_tl = TrackedList.load(new_path, Message)
+        store = FileSessionStore(tmp_dir)
+        new_session_id = "forked-session"
+        new_tl = TrackedList(store.open_log(new_session_id))
+        new_tl.extend_detached(remapped)
+
+        # 重新加载新 session
+        reloaded = TrackedList.load(store.open_log(new_session_id), Message)
 
         # 新活跃链应与原活跃链长度一致（compact + tail1）
-        new_active = new_tl.active_chain
+        new_active = reloaded.active_chain
         assert len(new_active) == original_len
         # 第一条是 compact 节点
         assert new_active[0].parent_uuid is None
@@ -531,7 +535,7 @@ class TestFork:
         assert new_active[1].content == "tail1"
 
         # history.jsonl 有 4 条（old1, old2, compact, tail1）
-        entries = _read_history(new_path)
+        entries = _read_history(tmp_dir / new_session_id)
         assert len(entries) == 4
 
     def test_extract_subchain_to_compressed_message(self, tmp_dir):
@@ -564,8 +568,8 @@ class TestFork:
         assert len(subchain) == 1
         assert subchain[0].content == "old1"
 
-    def test_import_messages_creates_new_session(self, tmp_dir):
-        """import_messages 创建新 session，重写 uuid，保持拓扑。"""
+    def test_remap_chain_uuids_preserves_topology(self, tmp_dir):
+        """_remap_chain_uuids 重写 uuid，保持拓扑。"""
         cm = _make_cm(tmp_dir)
         msgs = [
             Message(role="user", content="hello"),
@@ -574,20 +578,14 @@ class TestFork:
         cm.add_messages(msgs)
 
         subchain, _ = cm.extract_subchain(msgs[1].uuid)  # ty: ignore[invalid-argument-type]
+        remapped = _remap_chain_uuids(subchain)
 
-        sm = SessionManager(sessions_path=tmp_dir)
-        new_session_id = sm.import_messages(subchain, source_session_id=cm.id)
-        assert new_session_id is not None
-        assert new_session_id != cm.id
+        assert len(remapped) == 1
+        assert remapped[0].content == "hello"
+        assert remapped[0].parent_uuid is None
 
-        new_path = sm._sessions_path / new_session_id
-        entries = _read_history(new_path)
-        assert len(entries) == 1
-        assert entries[0]["content"] == "hello"
-        assert entries[0]["parent_uuid"] is None
-
-    def test_import_messages_rewrites_uuids(self, tmp_dir):
-        """import_messages 重写所有 uuid，保持线性拓扑。"""
+    def test_remap_chain_uuids_rewrites_all_uuids(self, tmp_dir):
+        """_remap_chain_uuids 重写所有 uuid，线性拓扑保持链接。"""
         cm = _make_cm(tmp_dir)
         msgs = [
             Message(role="user", content="hello"),
@@ -598,18 +596,15 @@ class TestFork:
         subchain, _ = cm.extract_subchain("current")
         original_uuids = [m.uuid for m in subchain]
 
-        sm = SessionManager(sessions_path=tmp_dir)
-        new_session_id = sm.import_messages(subchain, source_session_id=cm.id)
-        new_path = sm._sessions_path / new_session_id
-        entries = _read_history(new_path)
+        remapped = _remap_chain_uuids(subchain)
 
-        assert entries[0]["uuid"] != original_uuids[0]
-        assert entries[1]["uuid"] != original_uuids[1]
-        assert entries[0]["parent_uuid"] is None
-        assert entries[1]["parent_uuid"] == entries[0]["uuid"]
+        assert remapped[0].uuid != original_uuids[0]
+        assert remapped[1].uuid != original_uuids[1]
+        assert remapped[0].parent_uuid is None
+        assert remapped[1].parent_uuid == remapped[0].uuid
 
-    def test_import_messages_writes_metadata(self, tmp_dir):
-        """import_messages 写入 metadata.json 记录 source_session_id。"""
+    def test_remap_chain_uuids_does_not_mutate_source(self, tmp_dir):
+        """_remap_chain_uuids 深拷贝，不污染源 session 的 live 消息。"""
         cm = _make_cm(tmp_dir)
         msgs = [
             Message(role="user", content="hello"),
@@ -618,11 +613,12 @@ class TestFork:
         cm.add_messages(msgs)
 
         subchain, _ = cm.extract_subchain("current")
-        sm = SessionManager(sessions_path=tmp_dir)
-        new_session_id = sm.import_messages(subchain, source_session_id=cm.id)
+        original_uuids = [m.uuid for m in subchain]
 
-        new_path = sm._sessions_path / new_session_id
-        metadata_path = new_path / "metadata.json"
-        assert metadata_path.exists()
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        assert metadata.get("forked_from") == cm.id
+        _remap_chain_uuids(subchain)
+
+        # 源消息对象的 uuid 未被修改
+        assert [m.uuid for m in subchain] == original_uuids
+        # 源 CM 的链状态完好
+        assert [m.uuid for m in cm._messages.active_chain] == original_uuids
+        assert cm._messages.find(original_uuids[0]) is not None  # ty: ignore[invalid-argument-type]

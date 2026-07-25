@@ -8,13 +8,13 @@ __init__.py 从 handler 模块导入 handler（触发装饰器注册），无循
 from __future__ import annotations
 
 import json
-import os
 import time as time_mod
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
 
+from wing.common.fs import atomic_write_json
 from wing.common.logger import log
 from wing.event import WingEvent
 
@@ -27,14 +27,8 @@ E = TypeVar("E", bound=WingEvent)
 
 
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    """原子写入 JSON 文件。先写 tmp 再 rename，确保写入不丢失。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".tmp.{os.getpid()}")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.rename(tmp, path)
+    """原子写入 JSON 文件。委托 common.fs.atomic_write_json（indent=2）。"""
+    atomic_write_json(path, data, indent=2)
 
 
 def _read_metrics_json(path: Path) -> dict[str, Any]:

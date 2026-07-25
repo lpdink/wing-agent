@@ -84,6 +84,7 @@ async def create_session(
             template_name=body.template_name,
             workspace=body.workspace,
             agent_override=body.agent,
+            backend=body.backend,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -91,6 +92,7 @@ async def create_session(
         session_id=session.session_id,
         template_name=session.template_name or "",
         workspace=session.session_workspace,
+        backend=session.store.name,
     )
 
 

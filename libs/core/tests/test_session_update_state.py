@@ -15,8 +15,10 @@ from wing.session_manager import SessionManager
 
 @pytest.fixture
 def sm():
-    """创建 SessionManager。"""
-    return SessionManager()
+    """创建 SessionManager（memory 后端，不落盘）。"""
+    from wing.store import MemorySessionStore
+
+    return SessionManager({"memory": MemorySessionStore()}, default_backend="memory")
 
 
 class TestSessionUpdateState:

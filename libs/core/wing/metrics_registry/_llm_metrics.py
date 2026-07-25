@@ -2,6 +2,10 @@
 
 schema: LLMCallMetricsEntry (BaseModel)
 handler: _handle_global_metrics, _handle_session_metrics
+
+TODO(future): metrics.json 目前直接写 session 目录，是 session 数据之外
+唯一的文件直写点。审计日志与 session 状态生命周期不同，将来可作为
+SessionStore 的子协议（append-only 审计通道）收编，而非并入主接口。
 """
 
 from __future__ import annotations

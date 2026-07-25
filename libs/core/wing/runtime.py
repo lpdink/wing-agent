@@ -41,6 +41,7 @@ from wing.request_context import reset_request_context, set_request_context
 from typing import TYPE_CHECKING
 from wing.session import Session
 from wing.session_manager import SessionManager
+from wing.store import FileSessionStore, MemorySessionStore, SessionStore
 
 if TYPE_CHECKING:
     from wing.agent_template import AgentTemplate, AgentTemplateManager
@@ -83,7 +84,13 @@ class WingRuntime:
 
     def __init__(self) -> None:
         load_hooks(get_config().hooks)
-        self.sm = SessionManager()
+        # TODO(future): config 驱动的 backend 选择（sessions.backend / dsn）——
+        # SQL 后端（SQLite/PG/Supabase）到来时的扩展点。
+        stores: dict[str, SessionStore] = {
+            "file": FileSessionStore(get_config().sessions.resolved_path()),
+            "memory": MemorySessionStore(),
+        }
+        self.sm = SessionManager(stores)
 
     @property
     def template_manager(self) -> AgentTemplateManager:
@@ -128,12 +135,21 @@ class WingRuntime:
         template_name: str | None = None,
         workspace: str | None = None,
         agent_override: AgentOverride | None = None,
+        backend: str | None = None,
     ) -> Session:
-        """创建新 session。"""
+        """创建新 session。
+
+        Args:
+            backend: 存储后端（file/memory），None 使用默认后端（file）。
+
+        Raises:
+            ValueError: 模板不存在或 backend 未知
+        """
         return self.sm.create_session(
             template_name=template_name,
             workspace=workspace,
             agent_override=agent_override,
+            backend=backend,
         )
 
     def resume_session(self, session_id: str) -> Session:

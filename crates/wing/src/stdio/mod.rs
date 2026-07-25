@@ -372,6 +372,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
             template_name: None,
             workspace,
             agent: Some(override_),
+            backend: None,
         };
 
         let resp = http

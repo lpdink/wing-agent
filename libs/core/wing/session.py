@@ -8,24 +8,23 @@ Session 是有行为的对象，在构造器中创建 ContextManager 和 WingAge
 设计约束：
   - Session 通过 from_template 类方法创建（统一入口）
   - Session 不反向引用 agent（agent 在 Session 之下）
-  - TrackedList 在第一条消息到来时创建 session 目录（由 _ensure_type 触发）
-  - Session 在此基础上写入 metadata.json
+  - Session 不直接与存储介质打交道——持久状态全部经由 SessionStore
+    （metadata 读写、消息日志均委托 store；TrackedList 在第一条消息
+    到来时经 MessageLog 创建底层存储）
 """
 
 from __future__ import annotations
 
-import json
-import os
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from wing.common.logger import log
 from wing.common.tracked_list import TrackedList
-from wing.config import get_config
 from wing.context_manager import ContextManager
 from wing.openai_provider import OpenAIProvider
 from wing.schema import Message
+from wing.store import SessionMetadata, SessionStore
 
 if TYPE_CHECKING:
     from wing.agent import WingAgent
@@ -41,27 +40,26 @@ class Session:
     负责 session 内部操作：metadata 管理、第一条消息自动 title。
     """
 
-    _METADATA_FILE = "metadata.json"
-
     def __init__(
         self,
         session_id: str,
         messages: TrackedList[Message],
         context_manager: ContextManager,
         agent: "WingAgent",
+        store: SessionStore,
         workspace: str | None = None,
     ) -> None:
         """底层构造器——由 from_template 调用，不建议直接使用。"""
         self._session_id = session_id
         self._messages = messages
-        self._sessions_path = get_config().sessions.resolved_path()
+        self._store = store
         self._template_name: str | None = None
 
-        # 读取已有 metadata（磁盘恢复场景）
-        metadata = self._read_metadata()
-        self._session_name: str | None = metadata.get("session_name")
-        self._session_workspace: str | None = workspace or metadata.get("workspace")
-        self._last_interaction: str | None = metadata.get("last_interaction")
+        # 从 store 加载已有 metadata（磁盘恢复场景），与 workspace 参数合并
+        metadata = store.load_metadata(session_id) or SessionMetadata()
+        if workspace is not None:
+            metadata.workspace = workspace
+        self._metadata = metadata
 
         self._context_manager = context_manager
         self._agent = agent
@@ -69,8 +67,8 @@ class Session:
         # 将 workspace 注入 agent state 作为 Bash 工具的 cwd。
         # 无论是新建（workspace 参数）还是磁盘恢复（metadata），
         # 都在此处统一设置，确保 resume 后 agent cwd 正确。
-        if self._session_workspace:
-            self._agent.state.set("cwd", str(Path(self._session_workspace).resolve()))
+        if self._metadata.workspace:
+            self._agent.state.set("cwd", str(Path(self._metadata.workspace).resolve()))
 
         self._initial_status = self._agent.get_status()
 
@@ -82,6 +80,7 @@ class Session:
         template: "AgentTemplate",
         session_id: str,
         messages: TrackedList[Message],
+        store: SessionStore,
         workspace: str | None = None,
     ) -> "Session":
         """从模板构建全新 Session。
@@ -90,6 +89,7 @@ class Session:
             template: 解析后的 AgentTemplate
             session_id: Session ID
             messages: TrackedList 消息列表
+            store: 该 session 所属的 SessionStore
             workspace: 工作目录
         """
         from wing.agent import WingAgent
@@ -121,9 +121,11 @@ class Session:
             messages=messages,
             context_manager=context_manager,
             agent=agent,
+            store=store,
             workspace=workspace,
         )
         session._template_name = template.name
+        session._metadata.template_name = template.name
         return session
 
     async def switch_template(self, template: "AgentTemplate") -> None:
@@ -149,7 +151,7 @@ class Session:
             compactor=template.compactor,
             skills_patterns=template.skills_patterns,
             rules_patterns=template.rules_patterns,
-            workspace=self._session_workspace,
+            workspace=self._metadata.workspace,
         )
 
         # 3. 创建新 Agent
@@ -164,13 +166,15 @@ class Session:
         )
 
         cwd = (
-            str(Path(self._session_workspace).resolve())
-            if self._session_workspace
+            str(Path(self._metadata.workspace).resolve())
+            if self._metadata.workspace
             else None
         )
         self._agent.state.set("cwd", cwd)
 
         self._template_name = template.name
+        self._metadata.template_name = template.name
+        self._save_metadata()
         self._initial_status = self._agent.get_status()
         log.info(f"Session {self._session_id}: switched to agent '{template.name}'")
 
@@ -249,13 +253,13 @@ class Session:
 
     @property
     def session_name(self) -> str | None:
-        """当前 session 名称（来自 metadata.json）。"""
-        return self._session_name
+        """当前 session 名称（来自 metadata）。"""
+        return self._metadata.session_name
 
     @property
     def session_workspace(self) -> str | None:
-        """当前 session 的工作目录（来自 metadata.json 或构造参数）。"""
-        return self._session_workspace
+        """当前 session 的工作目录（来自 metadata）。"""
+        return self._metadata.workspace
 
     @property
     def status(self) -> "SessionStatus":
@@ -281,10 +285,10 @@ class Session:
             raise ValueError(f"workspace path is not a directory: {resolved}")
 
         resolved_str = str(resolved)
-        self._session_workspace = resolved_str
+        self._metadata.workspace = resolved_str
         self._agent.state.set("cwd", resolved_str)
         self._context_manager._workspace = resolved
-        self._write_metadata()
+        self._save_metadata()
         log.info(f"Session {self._session_id}: workspace changed to {resolved_str}")
 
     # ── 序列化方法 ──────────────────────────────────
@@ -300,7 +304,7 @@ class Session:
             tools=[t.effective_llm_name for t in self._agent.tools],
             skills=list(cm._skills_cache.keys()),
             rules=list(cm._rules_patterns),
-            workspace=self._session_workspace,
+            workspace=self._metadata.workspace,
         )
 
     def serialize_messages(self) -> list[dict]:
@@ -329,58 +333,23 @@ class Session:
     @property
     def last_interaction(self) -> str | None:
         """最后一次用户互动时间（ISO 8601 格式）。"""
-        return self._last_interaction
+        return self._metadata.last_interaction
 
     @property
-    def sessions_path(self) -> Path:
-        """sessions 存储根路径（来自配置）。"""
-        return self._sessions_path
+    def store(self) -> SessionStore:
+        """该 session 所属的 SessionStore（fork 继承后端、SM 聚合用）。"""
+        return self._store
 
     # ── metadata 管理 ──────────────────────────────
 
-    @property
-    def _metadata_path(self) -> Path:
-        return self._sessions_path / self._session_id / self._METADATA_FILE
-
-    def _build_metadata(self) -> dict[str, Any]:
-        """构建完整的 metadata dict，显式包含所有非 None 字段。"""
-        data: dict[str, Any] = {}
-        if self._session_name is not None:
-            data["session_name"] = self._session_name
-        if self._session_workspace is not None:
-            data["workspace"] = self._session_workspace
-        if self._last_interaction is not None:
-            data["last_interaction"] = self._last_interaction
-        return data
-
-    def _write_metadata(self) -> None:
-        """原子写入 metadata.json。"""
-        data = self._build_metadata()
-        if not data:
-            return
-        target = self._metadata_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_suffix(f".tmp.{os.getpid()}")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(tmp, target)
-
-    def _read_metadata(self) -> dict[str, Any]:
-        """读取 metadata.json，文件不存在或解析失败时返回空 dict。"""
-        path = self._metadata_path
-        if not path.exists():
-            return {}
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+    def _save_metadata(self) -> None:
+        """将当前 metadata 模型保存到 store。"""
+        self._store.save_metadata(self._session_id, self._metadata)
 
     def set_title(self, title: str) -> None:
-        """设置 session 标题并写入 metadata.json。"""
-        self._session_name = title
-        self._write_metadata()
+        """设置 session 标题并持久化。"""
+        self._metadata.session_name = title
+        self._save_metadata()
 
     async def update_state(
         self,
@@ -426,28 +395,23 @@ class Session:
             self.set_workspace(workspace)
 
     def touch_last_interaction(self) -> None:
-        """更新最后互动时间并写入 metadata.json。"""
-        self._last_interaction = datetime.now().isoformat()
-        self._write_metadata()
+        """更新最后互动时间并持久化。"""
+        self._metadata.last_interaction = datetime.now().isoformat()
+        self._save_metadata()
 
     # ── 第一条消息 metadata 写入 ──────────────────
 
     def _check_first_message_metadata(self, content: str) -> None:
-        """检查是否是第一条用户消息，如果是则写入 metadata.json。
+        """检查是否是第一条用户消息，如果是则写入标题。
 
-        在 TrackedList 创建目录前预先创建目录，然后写入 metadata.json。
-        TrackedList._assert_initialized 使用 exist_ok=True，预创建目录无影响。
+        判断条件是 metadata.session_name 为 None（而非存储中是否存在记录）——
+        fork 产生的 session 已有 metadata（forked_from 等），但标题仍为空，
+        应正常获得自动标题，且保存时不会覆盖其他字段（模型整体保存）。
         """
-        if self._session_name is not None:
+        if self._metadata.session_name is not None:
             return  # 已有标题，不是第一条消息
-        metadata_path = self._metadata_path
-        if metadata_path.exists():
-            return  # 已有 metadata（磁盘恢复）
-        # 第一条用户消息——写 title
-        self._session_name = content[:100]
-        # 确保目录存在（TrackedList 后续也会创建，但我们需要先写 metadata）
-        metadata_path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_metadata()
+        self._metadata.session_name = content[:100]
+        self._save_metadata()
 
     async def post(
         self,

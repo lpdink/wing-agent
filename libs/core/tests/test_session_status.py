@@ -73,9 +73,10 @@ class TestAgentStatus:
 
 class TestSessionStatusDelegation:
     def test_session_status_delegates_to_agent(self, tmp_path: Path):
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
 
         from wing.session import Session
+        from wing.store import MemorySessionStore
 
         agent = _make_agent(working=True)
         # 补齐 Session.__init__ → agent.get_status() 所需属性
@@ -89,19 +90,13 @@ class TestSessionStatusDelegation:
         agent.model_provider.reasoning_effort = None
 
         mock_cm = MagicMock()
-        session_dir = tmp_path / "sessions" / "test-status"
-        session_dir.mkdir(parents=True, exist_ok=True)
-
-        with patch("wing.session.get_config") as mock_cfg:
-            mock_cfg.return_value.sessions.resolved_path.return_value = (
-                tmp_path / "sessions"
-            )
-            session = Session(
-                session_id="test-status",
-                messages=MagicMock(),
-                context_manager=mock_cm,
-                agent=agent,
-            )
+        session = Session(
+            session_id="test-status",
+            messages=MagicMock(),
+            context_manager=mock_cm,
+            agent=agent,
+            store=MemorySessionStore(),
+        )
 
         assert session.status == "working"
         agent._working = False
@@ -128,14 +123,10 @@ def _write_session_dir(
 
 
 def _make_manager(sessions_path: Path):
-    from unittest.mock import patch
-
     from wing.session_manager import SessionManager
+    from wing.store import FileSessionStore
 
-    with patch("wing.session_manager.get_config") as mock_cfg:
-        mock_cfg.return_value.sessions.resolved_path.return_value = sessions_path
-        sm = SessionManager(sessions_path=sessions_path)
-    return sm
+    return SessionManager({"file": FileSessionStore(sessions_path)})
 
 
 class TestListSessions:

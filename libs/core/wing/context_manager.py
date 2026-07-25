@@ -1,7 +1,6 @@
 # wing/context_manager.py
 import asyncio
 import glob
-import json
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -15,9 +14,6 @@ from .common.tracked_list import TrackedList
 from .compactor import Compactor
 from .openai_provider import OpenAIProvider
 from .schema import AgentSkill, LLMUsage, Message
-
-
-_PENDING_COMPACT_FILE = "pending_compact.json"
 
 
 @dataclass
@@ -509,21 +505,13 @@ More detail in: "{dir}/SKILL.md" """
         return compacted.usage.prompt_tokens, compacted.usage.completion_tokens
 
     # ── Pending compact 持久化 ────────────────────
+    # 经由 MessageLog 的 aux kv 通道（key="pending_compact"），
+    # 与消息日志同生命周期，CM 不感知任何存储介质细节。
 
-    @property
-    def _pending_compact_path(self) -> Path | None:
-        """pending_compact.json 的路径（与 messages 同目录）。"""
-        p = self._messages.path
-        if p is None:
-            return None
-        return p / _PENDING_COMPACT_FILE
+    _PENDING_COMPACT_AUX_KEY = "pending_compact"
 
     def _persist_pending_compact(self, result: PendingCompact) -> None:
-        """原子写入 pending_compact.json。"""
-        path = self._pending_compact_path
-        if path is None:
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
+        """持久化 pending compact（经 MessageLog aux 通道）。"""
         data = {
             "compact_content": result.compact_content,
             "start_uuid": result.start_uuid,
@@ -531,23 +519,20 @@ More detail in: "{dir}/SKILL.md" """
             "usage": result.usage.model_dump() if result.usage else None,
             "timestamp": result.timestamp,
         }
-        tmp = path.with_suffix(f".tmp.{os.getpid()}")
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-            os.rename(tmp, path)
+            self._messages.write_aux(self._PENDING_COMPACT_AUX_KEY, data)
         except Exception as e:
             log.warning(f"Failed to persist pending compact: {e}")
 
     def _load_pending_compact(self) -> PendingCompact | None:
-        """从磁盘恢复 pending_compact.json。"""
-        path = self._pending_compact_path
-        if path is None or not path.exists():
+        """恢复 pending compact（经 MessageLog aux 通道）。
+
+        损坏数据由 MessageLog 后端丢弃（返回 None）。
+        """
+        data = self._messages.read_aux(self._PENDING_COMPACT_AUX_KEY)
+        if data is None:
             return None
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
             usage = None
             if data.get("usage"):
                 usage = LLMUsage(**data["usage"])
@@ -559,18 +544,13 @@ More detail in: "{dir}/SKILL.md" """
                 timestamp=data.get("timestamp", ""),
             )
         except Exception as e:
-            log.warning(f"Failed to load pending compact, deleting corrupt file: {e}")
+            log.warning(f"Failed to load pending compact, deleting: {e}")
             self._delete_pending_compact()
             return None
 
     def _delete_pending_compact(self) -> None:
-        """删除 pending_compact.json。"""
-        path = self._pending_compact_path
-        if path is not None and path.exists():
-            try:
-                path.unlink()
-            except Exception:
-                pass
+        """删除 pending compact aux 数据。"""
+        self._messages.delete_aux(self._PENDING_COMPACT_AUX_KEY)
 
     def add_message(self, message: Message) -> None:
         self._messages.append(message)
