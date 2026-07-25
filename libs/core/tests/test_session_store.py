@@ -159,10 +159,20 @@ class TestResolve:
         self._seed(store, "20260101-111111-aaaaaaaa")
         assert store.resolve("zzz") is None
 
-    def test_file_wildcard(self, tmp_path: Path):
-        store = FileSessionStore(tmp_path / "sessions")
-        self._seed(store, "20260101-111111-aaaaaaaa")
+    def test_wildcard(self, store: SessionStore):
+        self._seed(store, "20260101-111111-aaaaaaaa", "20260202-222222-bbbbbbbb")
         assert store.resolve("20260101*aaaaaaaa") == "20260101-111111-aaaaaaaa"
+
+    def test_wildcard_ambiguous_returns_none(self, store: SessionStore):
+        self._seed(store, "20260101-111111-aaaaaaaa", "20260101-222222-bbbbbbbb")
+        assert store.resolve("20260101*") is None
+
+    def test_empty_session_not_resolvable(self, store: SessionStore):
+        """仅 open_log 而未写入任何记录的 session 不可解析（两后端一致）。"""
+        store.open_log("sid-empty")
+        assert store.resolve("sid-empty") is None
+        store.open_log("sid-empty").append([{"role": "user", "content": "x"}])
+        assert store.resolve("sid-empty") == "sid-empty"
 
 
 class TestListSummaries:
@@ -194,16 +204,6 @@ class TestListSummaries:
         assert summaries[0].first_user_message is not None
         assert len(summaries[0].first_user_message) <= 100
         assert summaries[0].first_user_message.startswith("hello")
-
-
-class TestExists:
-    def test_exists_via_metadata_or_log(self, store: SessionStore):
-        assert not store.exists("sid-x")
-        store.save_metadata("sid-x", SessionMetadata(session_name="x"))
-        assert store.exists("sid-x")
-        assert not store.exists("sid-y")
-        store.open_log("sid-y").append([{"role": "user", "content": "m"}])
-        assert store.exists("sid-y")
 
 
 class TestMemoryNoDisk:

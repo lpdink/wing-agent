@@ -89,7 +89,10 @@ class CreateSessionRequest(BaseModel):
     agent: AgentOverride | None = Field(default=None, description="Agent 参数覆盖")
     backend: str | None = Field(
         default=None,
-        description="存储后端：file（默认，落盘）| memory（不落盘，仅本次进程有效）",
+        description=(
+            "存储后端：file（默认，落盘）| memory（session 状态不落盘，仅本次进程有效；"
+            "注意 metrics 审计文件不受此约束）"
+        ),
     )
 
 

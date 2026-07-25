@@ -70,6 +70,11 @@ class Session:
         if self._metadata.workspace:
             self._agent.state.set("cwd", str(Path(self._metadata.workspace).resolve()))
 
+        # 磁盘恢复场景下 CM 以 workspace=None 构建，用 metadata 补齐——
+        # 否则相对路径的 skills/rules patterns 解析行为与原 session 不一致。
+        if self._metadata.workspace and self._context_manager._workspace is None:
+            self._context_manager._workspace = Path(self._metadata.workspace).resolve()
+
         self._initial_status = self._agent.get_status()
 
         log.info(f"Session initialized: {session_id}")
@@ -402,16 +407,18 @@ class Session:
     # ── 第一条消息 metadata 写入 ──────────────────
 
     def _check_first_message_metadata(self, content: str) -> None:
-        """检查是否是第一条用户消息，如果是则写入标题。
+        """首条用户消息时设置标题（仅变更模型，不落盘）。
 
         判断条件是 metadata.session_name 为 None（而非存储中是否存在记录）——
         fork 产生的 session 已有 metadata（forked_from 等），但标题仍为空，
         应正常获得自动标题，且保存时不会覆盖其他字段（模型整体保存）。
+
+        持久化由 post 流程中紧随其后的 touch_last_interaction 一次性完成，
+        避免首条消息两次连续落盘。
         """
         if self._metadata.session_name is not None:
             return  # 已有标题，不是第一条消息
         self._metadata.session_name = content[:100]
-        self._save_metadata()
 
     async def post(
         self,
@@ -422,6 +429,7 @@ class Session:
         """投递用户消息。
 
         先检查并写入第一条消息 metadata，更新最后互动时间，再转发给 agent。
+        标题与 last_interaction 合并为一次 metadata 落盘（touch_last_interaction）。
         tool_call_id 非空时表示这是对某个 Ask 事件的定向回复。
         """
         self._check_first_message_metadata(content)

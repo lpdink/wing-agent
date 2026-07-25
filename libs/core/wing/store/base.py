@@ -95,7 +95,10 @@ class SessionStore(ABC):
     实现：FileSessionStore（现有文件布局）、MemorySessionStore（不落盘）。
     """
 
-    name: str = "abstract"
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """后端名称（API 响应回显、create_session 的 backend 参数）。"""
 
     @abstractmethod
     def load_metadata(self, session_id: str) -> SessionMetadata | None:
@@ -115,8 +118,4 @@ class SessionStore(ABC):
 
     @abstractmethod
     def resolve(self, partial: str) -> str | None:
-        """模糊解析 session id（精确/通配/前缀/包含），唯一匹配返回 id，否则 None。"""
-
-    @abstractmethod
-    def exists(self, session_id: str) -> bool:
-        """session 是否存在（有元数据或消息日志）。"""
+        """模糊解析 session id（通配/前缀/包含），唯一匹配返回 id，否则 None。"""

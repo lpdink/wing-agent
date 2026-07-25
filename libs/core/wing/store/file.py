@@ -123,7 +123,13 @@ class FileSessionStore(SessionStore):
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception as e:
+            # 不静默降级：损坏的 metadata 若被下一次 save 无痕覆盖，
+            # 会丢失 forked_from/标题等字段——正是本轮要消灭的数据丢失。
+            log.warning(
+                f"Corrupted metadata.json for session '{session_id}' at {path}: {e}. "
+                "Treating as empty; next save will overwrite it."
+            )
             return SessionMetadata()
         return SessionMetadata.model_validate(data)
 
@@ -140,11 +146,8 @@ class FileSessionStore(SessionStore):
 
     # ── 查询 ──────────────────────────────────
 
-    def exists(self, session_id: str) -> bool:
-        return self._session_dir(session_id).is_dir()
-
     def resolve(self, partial: str) -> str | None:
-        """四级模糊匹配：通配符 → 前缀 → 包含。唯一匹配返回 id，否则 None。"""
+        """三级模糊匹配：通配符 → 前缀 → 包含。唯一匹配返回 id，否则 None。"""
         if not self._root.exists():
             return None
 

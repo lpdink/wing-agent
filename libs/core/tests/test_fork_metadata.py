@@ -71,6 +71,8 @@ class TestForkMetadata:
 
         assert resumed.session_workspace == str(ws)
         assert resumed.template_name == "default"
+        # ContextManager 的 workspace 同步恢复（相对路径 skills/rules 解析依赖它）
+        assert resumed.context_manager._workspace == ws.resolve()
         # 消息链完整恢复（fork 复制 target 之前的子链，target 成为 draft）
         assert len(resumed.context_manager.get_context_window()) == 1
 
@@ -87,8 +89,10 @@ class TestForkMetadata:
         last_uuid = source.context_manager.get_context_window()[-1].uuid
         new_session, _ = file_sm.fork_session(source.session_id, last_uuid)  # ty: ignore[invalid-argument-type, not-iterable]
 
-        # 首条消息标题逻辑（post 的前置步骤，不经 LLM）
+        # 首条消息标题逻辑（post 的前置步骤，不经 LLM）：
+        # _check 变更模型，touch 一次性落盘
         new_session._check_first_message_metadata("my new question")
+        new_session.touch_last_interaction()
 
         meta = source.store.load_metadata(new_session.session_id)
         assert meta is not None

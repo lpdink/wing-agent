@@ -7,6 +7,7 @@ wing/store/memory.py — 内存后端（不落盘）。
 
 from __future__ import annotations
 
+import fnmatch
 from typing import Any
 
 from wing.store.base import MessageLog, SessionMetadata, SessionStore, SessionSummary
@@ -69,14 +70,21 @@ class MemorySessionStore(SessionStore):
 
     # ── 查询 ──────────────────────────────────
 
-    def exists(self, session_id: str) -> bool:
-        return session_id in self._metadata or session_id in self._logs
+    def _live_session_ids(self) -> set[str]:
+        """有 metadata 或有消息的 session（对齐文件后端"首次写入前不存在"语义：
+        仅 open_log 而未写入任何记录的 session 不可解析）。"""
+        ids = set(self._metadata)
+        for session_id, message_log in self._logs.items():
+            if message_log.load_all():
+                ids.add(session_id)
+        return ids
 
     def resolve(self, partial: str) -> str | None:
-        """精确 → 前缀 → 包含。唯一匹配返回 id，否则 None。"""
-        keys = set(self._metadata) | set(self._logs)
-        if partial in keys:
-            return partial
+        """三级模糊匹配：通配符 → 前缀 → 包含。唯一匹配返回 id，否则 None。"""
+        keys = self._live_session_ids()
+        if "*" in partial:
+            matches = [k for k in keys if fnmatch.fnmatch(k, partial)]
+            return matches[0] if len(matches) == 1 else None
         matches = [k for k in keys if k.startswith(partial)]
         if len(matches) == 1:
             return matches[0]

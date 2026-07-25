@@ -280,7 +280,7 @@ class SessionManager:
         if source is None:
             return None
 
-        cm = source.agent.context_manager
+        cm = source.context_manager
         try:
             subchain, draft = cm.extract_subchain(target_uuid)
         except ValueError:
