@@ -689,6 +689,14 @@ class TestSessionUpdate:
         assert body["error"] == "not_found"
         assert "nonexistent" in body["detail"]
 
+    def test_validation_error_shape(self, client: TestClient):
+        """请求体校验失败（422）也输出 ErrorResponse 形状。"""
+        resp = client.post("/api/session/resume", json={})
+        assert resp.status_code == 422
+        body = resp.json()
+        assert body["error"] == "validation_error"
+        assert body["detail"]
+
     def test_update_title(self, client: TestClient, mock_runtime):
         """设置 session 名称。"""
         mock_runtime.update_session = AsyncMock()
@@ -1082,7 +1090,9 @@ class TestAuthEnabled:
         """无 key → 401。"""
         resp = auth_client.get("/api/session/list")
         assert resp.status_code == 401
-        assert resp.json()["detail"] == "Invalid or missing API key"
+        body = resp.json()
+        assert body["error"] == "unauthorized"
+        assert body["detail"] == "Invalid or missing API key"
 
     def test_wrong_key_rejected(self, auth_client: TestClient):
         """错误 key → 401。"""
