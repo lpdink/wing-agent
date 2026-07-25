@@ -7,7 +7,6 @@ wing/store/memory.py — 内存后端（不落盘）。
 
 from __future__ import annotations
 
-import fnmatch
 from typing import Any
 
 from wing.store.base import MessageLog, SessionMetadata, SessionStore, SessionSummary
@@ -79,17 +78,9 @@ class MemorySessionStore(SessionStore):
                 ids.add(session_id)
         return ids
 
-    def resolve(self, partial: str) -> str | None:
-        """三级模糊匹配：通配符 → 前缀 → 包含。唯一匹配返回 id，否则 None。"""
-        keys = self._live_session_ids()
-        if "*" in partial:
-            matches = [k for k in keys if fnmatch.fnmatch(k, partial)]
-            return matches[0] if len(matches) == 1 else None
-        matches = [k for k in keys if k.startswith(partial)]
-        if len(matches) == 1:
-            return matches[0]
-        matches = [k for k in keys if partial in k]
-        return matches[0] if len(matches) == 1 else None
+    def exists(self, session_id: str) -> bool:
+        """精确判断 session 是否存在。"""
+        return session_id in self._live_session_ids()
 
     def list_summaries(self) -> list[SessionSummary]:
         """列举有消息的 session（与文件后端 newest.json 语义对齐）。"""

@@ -146,21 +146,16 @@ class FileSessionStore(SessionStore):
 
     # ── 查询 ──────────────────────────────────
 
-    def resolve(self, partial: str) -> str | None:
-        """三级模糊匹配：通配符 → 前缀 → 包含。唯一匹配返回 id，否则 None。"""
-        if not self._root.exists():
-            return None
-
-        if "*" in partial:
-            matches = list(self._root.glob(partial))
-            return matches[0].name if len(matches) == 1 else None
-
-        matches = list(self._root.glob(f"{partial}*"))
-        if len(matches) == 1:
-            return matches[0].name
-
-        matches = list(self._root.glob(f"*{partial}*"))
-        return matches[0].name if len(matches) == 1 else None
+    def exists(self, session_id: str) -> bool:
+        """精确判断 session 是否存在（有 metadata 或消息记录）。"""
+        session_dir = self._session_dir(session_id)
+        if not session_dir.is_dir():
+            return False
+        return (
+            (session_dir / self._METADATA).exists()
+            or (session_dir / FileMessageLog._NEWEST).exists()
+            or (session_dir / FileMessageLog._HISTORY).exists()
+        )
 
     def list_summaries(self) -> list[SessionSummary]:
         """列举有消息的 session。
