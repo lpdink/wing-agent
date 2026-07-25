@@ -70,7 +70,7 @@ class ToolResultTruncateConfig(BaseModel):
     keep_chars: number of chars to keep at head and tail when truncating.
     """
 
-    max_length: int | None = 50_000
+    max_length: int | None = 100_000
     keep_chars: int = 200
 
     @field_validator("keep_chars")

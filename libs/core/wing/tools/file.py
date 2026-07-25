@@ -183,25 +183,33 @@ async def edit_file(
     )
 
 
+MAX_LINES_TO_READ = 2000
+
+
 @tool_registry.register(name="Read")
 async def read_file(
-    path: str, agent: WingAgent, offset: int = 0, limit: int = 200
+    path: str,
+    agent: WingAgent,
+    offset: int = 1,
+    limit: int = MAX_LINES_TO_READ,
+    line_numbers: bool = False,
 ) -> str:
-    """Read file segment. offset=0 is first line, negative counts from end.
+    """Read file segment.
 
     Args:
         path: File to read.
-        offset: Starting line (0-based). -1 = last line.
-        limit: Max lines to return (capped at 1000).
+        offset: Line number to start from (1-based). Negative counts from end (-1 = last line).
+        limit: Number of lines to read (capped at 2000).
+        line_numbers: Prefix each line with its line number.
 
     Returns:
-        [file: PATH | lines START-END/TOTAL | ENCODING]
+        [file: PATH | lines START-END/TOTAL | ENCODING | mtime MTIME]
         Content...
         [... N more lines]  # if truncated
 
     Errors: "read_file: PATH: No such file|Is a directory|Permission denied|Binary file"
     """
-    limit = min(max(limit, 0), 1000)
+    limit = min(max(limit, 1), MAX_LINES_TO_READ)
     path = _resolve_path(path, agent)
 
     try:
@@ -226,15 +234,11 @@ async def read_file(
         raise ToolError(f"read_file: {path}: Binary file ({mime or 'unknown'})")
 
     try:
-        text = raw.decode("utf-8")
+        text = raw.decode("utf-8-sig")
         encoding = "utf-8"
     except UnicodeDecodeError:
-        try:
-            text = raw.decode("utf-8-sig")
-            encoding = "utf-8-sig"
-        except UnicodeDecodeError:
-            text = raw.decode("latin-1", errors="replace")
-            encoding = "latin-1"
+        text = raw.decode("latin-1", errors="replace")
+        encoding = "latin-1"
 
     lines = text.splitlines()
     total = len(lines)
@@ -242,14 +246,27 @@ async def read_file(
     if total == 0:
         return f"[file: {path} | empty | {encoding}]"
 
-    start = max(0, total + offset) if offset < 0 else min(offset, total)
+    # Convert 1-based offset to 0-based index; negative offsets count from end
+    if offset < 0:
+        start = max(0, total + offset)
+    else:
+        start = min(max(offset - 1, 0), total)
+
+    if start >= total:
+        mtime = int(st.st_mtime)
+        return f"[file: {path} | offset {offset} beyond EOF ({total} lines) | {encoding} | mtime {mtime}]"
+
     end = min(start + limit, total)
 
     selected = lines[start:end]
+
+    if line_numbers:
+        selected = [f"{start + i + 1}→{line}" for i, line in enumerate(selected)]
+
     # Include mtime for change tracking
     mtime = int(st.st_mtime)
     header = (
-        f"[file: {path} | lines {start}-{end}/{total} | {encoding} | mtime {mtime}]"
+        f"[file: {path} | lines {start + 1}-{end}/{total} | {encoding} | mtime {mtime}]"
     )
     trailer = f"\n[... {total - end} more lines]" if end < total else ""
 
