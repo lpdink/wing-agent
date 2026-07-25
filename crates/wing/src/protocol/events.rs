@@ -147,6 +147,19 @@ pub enum WingEvent {
         meta: EventMeta,
     },
 
+    /// Streaming tool call args delta (during LLM generation).
+    #[serde(rename = "tool_call_stream")]
+    ToolCallStream {
+        tool_call_id: String,
+        tool_name: String,
+        #[serde(default)]
+        tool_args: serde_json::Value,
+        #[serde(default)]
+        is_final: bool,
+        #[serde(flatten)]
+        meta: EventMeta,
+    },
+
     /// Tool call result.
     #[serde(rename = "tool_call_result")]
     ToolCallResult {
@@ -387,6 +400,7 @@ impl WingEvent {
             Self::Text { .. } => "text",
             Self::Reasoning { .. } => "reasoning",
             Self::ToolCall { .. } => "tool_call",
+            Self::ToolCallStream { .. } => "tool_call_stream",
             Self::ToolCallResult { .. } => "tool_call_result",
             Self::LlmCallMetrics { .. } => "llm_call_metrics",
             Self::Ask { .. } => "ask",
@@ -415,6 +429,7 @@ impl WingEvent {
             | Self::Text { meta, .. }
             | Self::Reasoning { meta, .. }
             | Self::ToolCall { meta, .. }
+            | Self::ToolCallStream { meta, .. }
             | Self::ToolCallResult { meta, .. }
             | Self::LlmCallMetrics { meta, .. }
             | Self::Ask { meta, .. }
@@ -607,6 +622,61 @@ mod tests {
                 assert_eq!(context_window_tokens, 80000);
             }
             _ => panic!("expected ContextStats"),
+        }
+    }
+
+    #[test]
+    fn deserialize_tool_call_stream_event() {
+        let json = r#"{
+            "type": "tool_call_stream",
+            "tool_call_id": "tc_stream_1",
+            "tool_name": "Bash",
+            "tool_args": {"command": "ls"},
+            "is_final": false,
+            "created_at": "2025-01-01T00:00:00",
+            "session_id": "abc123",
+            "request_id": "req10"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event_type(), "tool_call_stream");
+        match event {
+            WingEvent::ToolCallStream {
+                tool_call_id,
+                tool_name,
+                tool_args,
+                is_final,
+                ..
+            } => {
+                assert_eq!(tool_call_id, "tc_stream_1");
+                assert_eq!(tool_name, "Bash");
+                assert_eq!(tool_args["command"], "ls");
+                assert!(!is_final);
+            }
+            _ => panic!("expected ToolCallStream"),
+        }
+    }
+
+    #[test]
+    fn deserialize_tool_call_stream_defaults() {
+        let json = r#"{
+            "type": "tool_call_stream",
+            "tool_call_id": "tc_2",
+            "tool_name": "Read",
+            "created_at": "2025-01-01T00:00:00",
+            "session_id": "abc",
+            "request_id": "req11"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match event {
+            WingEvent::ToolCallStream {
+                tool_args,
+                is_final,
+                ..
+            } => {
+                assert_eq!(tool_args, serde_json::Value::Null);
+                assert!(!is_final);
+            }
+            _ => panic!("expected ToolCallStream"),
         }
     }
 }

@@ -39,6 +39,7 @@ from .event import (
     TextEvent,
     ToolCallEvent,
     ToolCallResultEvent,
+    ToolCallStreamEvent,
     ToolResultTurnEvent,
     TurnResultEvent,
     TurnStartedEvent,
@@ -513,6 +514,18 @@ class WingAgent:
 
             if chunk.tool_calls:
                 pending_tool_calls.extend(chunk.tool_calls)
+
+            if chunk.tool_call_deltas:
+                for delta in chunk.tool_call_deltas:
+                    self.emit(
+                        ToolCallStreamEvent(
+                            session_id=self.session_id,
+                            tool_call_id=delta.id,
+                            tool_name=delta.name,
+                            tool_args=delta.partial_args,
+                            is_final=delta.is_final,
+                        )
+                    )
 
             if chunk.usage.completion_tokens or chunk.usage.prompt_tokens:
                 last_usage = chunk.usage

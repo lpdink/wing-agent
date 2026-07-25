@@ -82,10 +82,20 @@ class LLMUsage(BaseModel):
         return " ".join(parts)
 
 
+class ToolCallDelta(BaseModel):
+    """Partial tool call state during streaming (before args are complete)."""
+
+    id: str
+    name: str
+    partial_args: dict = {}
+    is_final: bool = False
+
+
 class LLMResponse(BaseModel):
     content: str | None = None
     reasoning_content: str | None = None
     tool_calls: list[ToolCall] | None = None
+    tool_call_deltas: list[ToolCallDelta] | None = None
     usage: LLMUsage = LLMUsage()
 
 

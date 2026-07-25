@@ -1346,6 +1346,42 @@ impl App {
             }
 
             // ---- Tool events ----
+            WingEvent::ToolCallStream {
+                tool_call_id,
+                tool_name,
+                tool_args,
+                is_final,
+                ..
+            } => {
+                self.ctx.current_thinking = None;
+                self.ctx.current_assistant = None;
+
+                if let Some(idx) = self.ctx.get_tool_call_index(&tool_call_id) {
+                    // Update existing streaming cell
+                    self.chat.update_tool_args_by_index(idx, tool_args.clone());
+                    if is_final {
+                        self.chat.set_tool_status_by_index(
+                            idx,
+                            crate::ui::cells::tool_call::ToolStatus::Pending,
+                        );
+                    }
+                } else {
+                    // Create new streaming cell
+                    let mut block = ToolCallBlock::new(
+                        tool_name.clone(),
+                        tool_args.clone(),
+                        tool_call_id.clone(),
+                    );
+                    block.status = if is_final {
+                        crate::ui::cells::tool_call::ToolStatus::Pending
+                    } else {
+                        crate::ui::cells::tool_call::ToolStatus::Streaming
+                    };
+                    let idx = self.chat.len();
+                    self.chat.push(ChatCell::ToolCall(block));
+                    self.ctx.register_tool_call(tool_call_id.clone(), idx);
+                }
+            }
             WingEvent::ToolCall {
                 tool_name,
                 tool_args,
@@ -1355,15 +1391,31 @@ impl App {
                 self.ctx.current_thinking = None;
                 self.ctx.current_assistant = None;
 
-                let mut block =
-                    ToolCallBlock::new(tool_name.clone(), tool_args.clone(), tool_call_id.clone());
-                // Start timer for Bash tools.
-                if tool_name == TOOL_BASH {
-                    block.started_at = Some(std::time::Instant::now());
+                // If a streaming cell already exists for this id, update it
+                if let Some(idx) = self.ctx.get_tool_call_index(&tool_call_id) {
+                    self.chat.update_tool_args_by_index(idx, tool_args.clone());
+                    self.chat.set_tool_status_by_index(
+                        idx,
+                        crate::ui::cells::tool_call::ToolStatus::Pending,
+                    );
+                    // Start timer for Bash tools on execution start.
+                    if tool_name == TOOL_BASH {
+                        self.chat.set_tool_started_at_by_index(idx);
+                    }
+                } else {
+                    let mut block = ToolCallBlock::new(
+                        tool_name.clone(),
+                        tool_args.clone(),
+                        tool_call_id.clone(),
+                    );
+                    // Start timer for Bash tools.
+                    if tool_name == TOOL_BASH {
+                        block.started_at = Some(std::time::Instant::now());
+                    }
+                    let idx = self.chat.len();
+                    self.chat.push(ChatCell::ToolCall(block));
+                    self.ctx.register_tool_call(tool_call_id, idx);
                 }
-                let idx = self.chat.len();
-                self.chat.push(ChatCell::ToolCall(block));
-                self.ctx.register_tool_call(tool_call_id, idx);
 
                 tracing::debug!(tool = %tool_name, "tool call started");
             }

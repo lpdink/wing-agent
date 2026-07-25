@@ -507,6 +507,45 @@ impl ChatView {
         }
     }
 
+    /// Update tool args on a streaming tool call block by index.
+    pub fn update_tool_args_by_index(&mut self, index: usize, args: serde_json::Value) {
+        if let Some(cached) = self.cells.get_mut(index)
+            && matches!(cached.cell(), ChatCell::ToolCall(_))
+        {
+            cached.mutate(|cell| {
+                if let ChatCell::ToolCall(block) = cell {
+                    block.update_args(args);
+                }
+            });
+        }
+    }
+
+    /// Set tool status on a tool call block by index.
+    pub fn set_tool_status_by_index(&mut self, index: usize, status: ToolStatus) {
+        if let Some(cached) = self.cells.get_mut(index)
+            && matches!(cached.cell(), ChatCell::ToolCall(_))
+        {
+            cached.mutate(|cell| {
+                if let ChatCell::ToolCall(block) = cell {
+                    block.status = status;
+                }
+            });
+        }
+    }
+
+    /// Set started_at on a tool call block by index (for Bash timer).
+    pub fn set_tool_started_at_by_index(&mut self, index: usize) {
+        if let Some(cached) = self.cells.get_mut(index)
+            && matches!(cached.cell(), ChatCell::ToolCall(_))
+        {
+            cached.mutate(|cell| {
+                if let ChatCell::ToolCall(block) = cell {
+                    block.started_at = Some(std::time::Instant::now());
+                }
+            });
+        }
+    }
+
     /// Replace a cell at the given index with a new cell (e.g., ToolCallBlock → TodoMessage).
     ///
     /// Used during replay when a tool result requires a different cell type.

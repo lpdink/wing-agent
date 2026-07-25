@@ -39,6 +39,39 @@ pub fn detect_syntax(extension: Option<&str>) -> Option<String> {
     }
 }
 
+/// Detect syntax name from a file path (uses the file extension).
+pub fn detect_syntax_from_path(path: &str) -> Option<String> {
+    let ext = path.rsplit('.').next()?;
+    if ext.is_empty() || ext == path {
+        return None;
+    }
+    detect_syntax(Some(ext))
+}
+
+/// Highlight a single line independently (no multi-line context).
+///
+/// Used for streaming rendering where full context is unavailable.
+/// Returns styled segments for the line, or None if highlighting fails.
+pub fn highlight_single_line(line: &str, lang: &str) -> Option<MarkdownLine> {
+    let ss = syntax_set();
+    let ts = theme_set();
+
+    let syntax = ss
+        .find_syntax_by_token(lang)
+        .or_else(|| ss.find_syntax_by_extension(lang))?;
+
+    let theme = &ts.themes["base16-ocean.dark"];
+    let mut highlighter = HighlightLines::new(syntax, theme);
+
+    let ops = highlighter.highlight_line(line, ss).ok()?;
+    let mut result = MarkdownLine::default();
+    for (style, text) in ops {
+        let ratatui_style = convert_syntect_style(style);
+        result.push_segment(ratatui_style, text);
+    }
+    Some(result)
+}
+
 /// Highlight code and return styled lines, or None if highlighting fails.
 ///
 /// Each returned `MarkdownLine` contains styled segments for that source line.

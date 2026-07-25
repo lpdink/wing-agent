@@ -36,6 +36,7 @@ from .react import (
     TextEvent,
     ToolCallEvent,
     ToolCallResultEvent,
+    ToolCallStreamEvent,
     ToolResultTurnEvent,
     TurnResultEvent,
     TurnStartedEvent,
@@ -54,6 +55,7 @@ WingEventUnion = (
     | TextEvent
     | ReasoningEvent
     | ToolCallEvent
+    | ToolCallStreamEvent
     | ToolCallResultEvent
     | LLMCallMetricsEvent
     | AskEvent
@@ -87,6 +89,7 @@ __all__ = [
     "TextEvent",
     "ReasoningEvent",
     "ToolCallEvent",
+    "ToolCallStreamEvent",
     "ToolCallResultEvent",
     "LLMCallMetricsEvent",
     "AskEvent",
