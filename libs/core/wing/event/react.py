@@ -69,7 +69,7 @@ class DoneEvent(WingEvent):
 
 
 class TurnStartedEvent(WingEvent):
-    """Agent turn 开始处理。在 agent._process_single_message() 入口 emit。
+    """Agent turn 开始处理。在 agent._process_turn() 入口 emit。
 
     与 DeliveredEvent 的区别：Delivered 是 transport ack（消息到达后端），
     TurnStarted 是语义信号（agent 开始处理该消息）。魔术命令不触发此事件。
