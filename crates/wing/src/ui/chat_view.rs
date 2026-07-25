@@ -521,15 +521,28 @@ impl ChatView {
     }
 
     /// Set tool status on a tool call block by index.
+    ///
+    /// Tracks `pending_bash_count` when a Bash tool transitions into
+    /// Pending (e.g. from Streaming after `ToolCallStream` created the cell).
     pub fn set_tool_status_by_index(&mut self, index: usize, status: ToolStatus) {
         if let Some(cached) = self.cells.get_mut(index)
             && matches!(cached.cell(), ChatCell::ToolCall(_))
         {
+            let is_bash_entering_pending = matches!(
+                cached.cell(),
+                ChatCell::ToolCall(b)
+                    if b.tool_name == TOOL_BASH && b.status != ToolStatus::Pending
+            ) && status == ToolStatus::Pending;
+
             cached.mutate(|cell| {
                 if let ChatCell::ToolCall(block) = cell {
                     block.status = status;
                 }
             });
+
+            if is_bash_entering_pending {
+                self.pending_bash_count += 1;
+            }
         }
     }
 

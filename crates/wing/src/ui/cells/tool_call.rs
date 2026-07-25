@@ -96,13 +96,17 @@ fn strip_cr(s: &str) -> &str {
 impl WriteHighlightCache {
     /// Create or update the cache incrementally.
     ///
-    /// Returns None if the path has no detectable language.
+    /// Falls back to plain-text rendering when path has no detectable
+    /// extension (LLMs may emit `content` before `path` in args JSON).
+    /// When the real path arrives later, the lang mismatch triggers a
+    /// full rebuild with proper syntax highlighting.
     pub fn update(
         cache: Option<WriteHighlightCache>,
         path: &str,
         content: &str,
     ) -> Option<WriteHighlightCache> {
-        let lang = syntax::detect_syntax_from_path(path)?;
+        // Empty string → highlight_single_line returns None → plain_line fallback.
+        let lang = syntax::detect_syntax_from_path(path).unwrap_or_default();
 
         let mut cache = match cache {
             Some(c) if c.lang == lang && content.starts_with(&c.raw_content) => c,
@@ -999,9 +1003,29 @@ mod tests {
 
     #[test]
     fn test_write_highlight_cache_unknown_ext() {
-        // Unknown extension → None
+        // Unknown extension → falls back to plain text (lang=""), still renders.
         let cache = WriteHighlightCache::update(None, "/tmp/file.xyz_unknown", "content");
-        assert!(cache.is_none());
+        assert!(cache.is_some());
+        let cache = cache.unwrap();
+        assert_eq!(cache.highlighted_lines.len(), 1);
+        assert_eq!(cache.lang, "");
+    }
+
+    #[test]
+    fn test_write_highlight_cache_empty_path_fallback() {
+        // Empty path (LLM emits content before path) → plain text fallback.
+        let cache = WriteHighlightCache::update(None, "", "line1\nline2");
+        assert!(cache.is_some());
+        let cache = cache.unwrap();
+        assert_eq!(cache.highlighted_lines.len(), 2);
+        assert_eq!(cache.lang, "");
+
+        // When real path arrives, lang mismatch triggers full rebuild.
+        let cache2 = WriteHighlightCache::update(Some(cache), "/tmp/t.py", "line1\nline2\nline3");
+        assert!(cache2.is_some());
+        let cache2 = cache2.unwrap();
+        assert_ne!(cache2.lang, ""); // Now has real syntax
+        assert_eq!(cache2.highlighted_lines.len(), 3);
     }
 
     #[test]
