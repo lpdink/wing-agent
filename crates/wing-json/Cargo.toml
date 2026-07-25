@@ -1,0 +1,20 @@
+[package]
+name = "wing-json"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "wing_json"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Default: pure Rust (no PyO3 linking) — safe for `cargo test` / `cargo build`.
+default = []
+# Enable Python bindings (maturin adds extension-module automatically).
+python = ["dep:pyo3"]
+extension-module = ["python", "pyo3/extension-module"]
+
+[dependencies]
+pyo3 = { version = "0.25", features = ["abi3-py312"], optional = true }
+serde_json = { workspace = true }

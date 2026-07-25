@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/wing", "crates/wing-api-client"]
+members = ["crates/wing", "crates/wing-api-client", "crates/wing-json"]
 resolver = "2"
 
 [workspace.package]

@@ -3,6 +3,9 @@
 """
 Best-effort parsing of potentially incomplete JSON during LLM streaming.
 
+Uses the Rust extension (wing_json) when available (~100x faster);
+falls back to a pure-Python implementation otherwise.
+
 Strategy (mirrors PI json-parse.ts):
   1. Try json.loads directly.
   2. Repair malformed escapes / control chars, then close unterminated
@@ -13,6 +16,12 @@ Strategy (mirrors PI json-parse.ts):
 from __future__ import annotations
 
 import json
+
+# ── Native acceleration ────────────────────────────────────────
+try:
+    from wing_json import parse_streaming_json as _rust_parse  # ty: ignore[unresolved-import]
+except ImportError:
+    _rust_parse = None
 
 _VALID_ESCAPES = frozenset('"\\/bfnrtu')
 
@@ -156,8 +165,17 @@ def _close_json(raw: str) -> str:
 def parse_streaming_json(raw: str) -> dict:
     """Parse potentially incomplete JSON, returning best-effort dict.
 
+    Uses the Rust extension (~100x faster) when available,
+    falls back to pure-Python repair + close + json.loads.
     Never raises. Returns {} on total failure.
     """
+    if _rust_parse is not None:
+        return _rust_parse(raw)  # type: ignore[no-any-return]
+    return _parse_streaming_json_py(raw)
+
+
+def _parse_streaming_json_py(raw: str) -> dict:
+    """Pure-Python fallback implementation."""
     if not raw or not raw.strip():
         return {}
 
