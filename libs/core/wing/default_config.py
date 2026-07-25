@@ -110,7 +110,7 @@ preserved_thinking: true
 # temp file and only head/tail chars are kept in the context.
 # Set max_length to null or a negative value to disable.
 tool_result_truncate:
-  max_length: 50000   # trigger threshold (chars). null or <0 disables
+  max_length: 100000  # trigger threshold (chars). null or <0 disables
   keep_chars: 200     # chars to keep at head and tail
 
 # ── Logging ──────────────────────────────────────────────────
