@@ -697,6 +697,16 @@ class TestSessionUpdate:
         assert body["error"] == "validation_error"
         assert body["detail"]
 
+    def test_method_not_allowed_shape(self, client: TestClient):
+        """405（starlette 父类 HTTPException）也输出 ErrorResponse 形状。
+
+        /api/health 免鉴权且仅允许 GET，POST 触发 router 层 405——验证
+        handler 注册在 starlette HTTPException 基类上确实覆盖了父类异常。
+        """
+        resp = client.post("/api/health")
+        assert resp.status_code == 405
+        assert resp.json()["error"] == "method_not_allowed"
+
     def test_update_title(self, client: TestClient, mock_runtime):
         """设置 session 名称。"""
         mock_runtime.update_session = AsyncMock()
