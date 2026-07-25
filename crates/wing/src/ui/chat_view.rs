@@ -786,16 +786,26 @@ fn render_composer_tail(
     // bounds checks (Cell is Clone, not Copy). Bounds mirror the naive
     // per-cell loop exactly: x spans [0, width) in tbuf and
     // [content_area.x, content_area.x + width) in buf.
+    //
+    // `w > 0` 守卫使本函数自包含安全：`Buffer::index_of` 在零宽 area 上会
+    // panic，而旧的逐 cell 空循环天然无此问题——因此不依赖调用方
+    // （ChatViewWidget::render）的 area.width 守卫。行内越界由几何保证
+    // （skip + vis <= tail_height，tbuf/buf 的 area 宽度均为 width），
+    // 由 debug_assert 钉住。
     let w = width as usize;
-    for dy in 0..vis {
-        let dst_y = render_y + dy as u16;
-        if dst_y >= content_area.bottom() {
-            break;
+    if w > 0 {
+        for dy in 0..vis {
+            let dst_y = render_y + dy as u16;
+            if dst_y >= content_area.bottom() {
+                break;
+            }
+            let src_y = (skip + dy) as u16;
+            let src = tbuf.index_of(0, src_y);
+            let dst = buf.index_of(content_area.x, dst_y);
+            debug_assert!(src + w <= tbuf.content.len());
+            debug_assert!(dst + w <= buf.content.len());
+            buf.content[dst..dst + w].clone_from_slice(&tbuf.content[src..src + w]);
         }
-        let src_y = (skip + dy) as u16;
-        let src = tbuf.index_of(0, src_y);
-        let dst = buf.index_of(content_area.x, dst_y);
-        buf.content[dst..dst + w].clone_from_slice(&tbuf.content[src..src + w]);
     }
 
     // Record the on-screen input text rect for cursor positioning.
