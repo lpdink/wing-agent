@@ -22,16 +22,20 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
+from wing.gateway.protocol import error_response
+
 # 免鉴权路径——无论 auth.enabled 如何，这些路径始终开放。
 EXEMPT_PATHS: set[str] = {"/api/health"}
 
 
 def _unauthorized() -> JSONResponse:
-    """构造 401 响应（每次新建，避免共享实例被 middleware 链 mutate）。"""
-    return JSONResponse(
-        status_code=401,
-        content={"detail": "Invalid or missing API key"},
-    )
+    """构造 401 响应（每次新建，避免共享实例被 middleware 链 mutate）。
+
+    经 protocol.error_response 输出统一 ErrorResponse 形状，使鉴权失败也能被
+    wing-api-client 结构化解析（中间件在 ExceptionMiddleware 之外，无法依赖
+    gateway 的 exception handler）。
+    """
+    return error_response(401, "Invalid or missing API key")
 
 
 def extract_key_from_headers(headers: Mapping[str, str]) -> str | None:

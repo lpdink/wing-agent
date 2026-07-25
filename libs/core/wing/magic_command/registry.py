@@ -65,30 +65,6 @@ class MagicCommandRegistry:
                 result.append(cmd)
         return result
 
-    def get_suggestions(self, prefix: str) -> list[dict[str, str]]:
-        """获取候选命令详细信息，用于 TUI 实时显示。"""
-        if not prefix.startswith("/"):
-            return []
-
-        search_term = prefix.lstrip("/").lower()
-        results = []
-
-        for cmd in self.list_all():
-            if cmd.name.lower().startswith(search_term) or any(
-                a.lower().startswith(search_term) for a in cmd.aliases
-            ):
-                aliases_str = ", ".join(cmd.aliases) if cmd.aliases else ""
-                results.append(
-                    {
-                        "name": cmd.name,
-                        "aliases": aliases_str,
-                        "description": cmd.description,
-                        "params": cmd.params,
-                    }
-                )
-
-        return results
-
 
 # 全局实例
 magic_registry = MagicCommandRegistry()

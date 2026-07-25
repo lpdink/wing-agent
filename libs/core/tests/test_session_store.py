@@ -134,45 +134,32 @@ class TestAux:
         assert not (log._path / "pending_compact.json").exists()
 
 
-class TestResolve:
+class TestExists:
     def _seed(self, store: SessionStore, *sids: str):
         for sid in sids:
             store.save_metadata(sid, SessionMetadata(session_name=sid))
 
-    def test_exact(self, store: SessionStore):
+    def test_exact_match(self, store: SessionStore):
         self._seed(store, "20260101-111111-aaaaaaaa")
-        assert store.resolve("20260101-111111-aaaaaaaa") == "20260101-111111-aaaaaaaa"
+        assert store.exists("20260101-111111-aaaaaaaa") is True
 
-    def test_prefix(self, store: SessionStore):
-        self._seed(store, "20260101-111111-aaaaaaaa", "20260202-222222-bbbbbbbb")
-        assert store.resolve("20260101") == "20260101-111111-aaaaaaaa"
-
-    def test_contains(self, store: SessionStore):
-        self._seed(store, "20260101-111111-aaaaaaaa", "20260202-222222-bbbbbbbb")
-        assert store.resolve("bbbbbbbb") == "20260202-222222-bbbbbbbb"
-
-    def test_ambiguous_returns_none(self, store: SessionStore):
-        self._seed(store, "20260101-111111-aaaaaaaa", "20260101-222222-bbbbbbbb")
-        assert store.resolve("20260101") is None
-
-    def test_no_match_returns_none(self, store: SessionStore):
+    def test_missing_returns_false(self, store: SessionStore):
         self._seed(store, "20260101-111111-aaaaaaaa")
-        assert store.resolve("zzz") is None
+        assert store.exists("zzz") is False
 
-    def test_wildcard(self, store: SessionStore):
+    def test_no_fuzzy_matching(self, store: SessionStore):
+        """精确匹配：前缀/子串/通配符都不再解析（历史模糊匹配已移除）。"""
         self._seed(store, "20260101-111111-aaaaaaaa", "20260202-222222-bbbbbbbb")
-        assert store.resolve("20260101*aaaaaaaa") == "20260101-111111-aaaaaaaa"
+        assert store.exists("20260101") is False
+        assert store.exists("bbbbbbbb") is False
+        assert store.exists("20260101*aaaaaaaa") is False
 
-    def test_wildcard_ambiguous_returns_none(self, store: SessionStore):
-        self._seed(store, "20260101-111111-aaaaaaaa", "20260101-222222-bbbbbbbb")
-        assert store.resolve("20260101*") is None
-
-    def test_empty_session_not_resolvable(self, store: SessionStore):
-        """仅 open_log 而未写入任何记录的 session 不可解析（两后端一致）。"""
+    def test_empty_session_not_exists(self, store: SessionStore):
+        """仅 open_log 而未写入任何记录的 session 不算存在（两后端一致）。"""
         store.open_log("sid-empty")
-        assert store.resolve("sid-empty") is None
+        assert store.exists("sid-empty") is False
         store.open_log("sid-empty").append([{"role": "user", "content": "x"}])
-        assert store.resolve("sid-empty") == "sid-empty"
+        assert store.exists("sid-empty") is True
 
 
 class TestListSummaries:
@@ -220,7 +207,7 @@ class TestMemoryNoDisk:
         log.write_aux("pending_compact", {"start_uuid": "u1"})
         assert log.read_aux("pending_compact") is not None
         assert store.list_summaries()
-        assert store.resolve("sid-m") == "sid-m"
+        assert store.exists("sid-m") is True
 
         assert not sentinel.exists()
         # tmp_path 下没有任何 wing 产生的内容

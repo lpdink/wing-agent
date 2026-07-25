@@ -426,9 +426,9 @@ class WingAgent:
             if steer_notes:
                 tc_results[-1].content = steer_notes + (tc_results[-1].content or "")
 
-        # TODO：this_trun_messages这个名字起的不太好，但是我一时想不到别的名字了，这里要表达的意思应该是，本轮的assistant响应和tool执行结果消息
-        this_trun_messages = [assistant_msg] + tc_results
-        self.context_manager.add_messages(this_trun_messages)
+        # 本轮产生的消息：assistant 响应 + 其触发的 tool 执行结果
+        turn_messages = [assistant_msg] + tc_results
+        self.context_manager.add_messages(turn_messages)
 
         # 每次 turn 后 emit context stats——前端据此更新状态栏
         # compact 发生在 get_messages_for_llm() 里，下次 _call_llm 调用时才执行
@@ -846,13 +846,6 @@ class WingAgent:
             pass
         log.info(f"Agent shutdown complete: session={self.session_id}")
 
-    def schedule_wakeup(self, delay: float, message: str) -> None:
-        async def fire() -> None:
-            await asyncio.sleep(delay)
-            await self.post(message)
-
-        asyncio.create_task(fire())
-
     async def post(
         self,
         content: str,
@@ -865,7 +858,7 @@ class WingAgent:
         request_id 由 SM.post() 传入，用于审计追踪和 SDK Promise resolve。
 
         Feedback 严格寻址：只有携带 tool_call_id 且命中 waiter 的消息才会
-        resolve 对应 Future；无 id（普通用户消息、Explorer/Timer 等内部通知）
+        resolve 对应 Future；无 id（普通用户消息、Explorer 等内部通知）
         或 id 已失效（waiter 超时）的消息一律进 inbox 作为新用户消息。
         """
         if tool_call_id is not None:

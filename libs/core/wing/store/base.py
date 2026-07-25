@@ -117,5 +117,5 @@ class SessionStore(ABC):
         """列举所有有消息的 session。"""
 
     @abstractmethod
-    def resolve(self, partial: str) -> str | None:
-        """模糊解析 session id（通配/前缀/包含），唯一匹配返回 id，否则 None。"""
+    def exists(self, session_id: str) -> bool:
+        """该 session 是否存在（精确匹配 session id）。"""

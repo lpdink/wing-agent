@@ -3,7 +3,7 @@
 PR #33 将工具调用改为并发执行后，旧的「单共享队列 + need_feedback 布尔」
 设计会让并发的 feedback 等待者互相饿死。现在 feedback 严格寻址：
 每个等待者注册一个以 tool_call_id 为 key 的 Future，只有携带对应 key
-的回复才会 resolve 它；无 key 的消息（普通用户输入、Explorer/Timer 等
+的回复才会 resolve 它；无 key 的消息（普通用户输入、Explorer 等
 内部通知）一律进 inbox。
 """
 
@@ -98,7 +98,7 @@ async def test_concurrent_waiters_addressed_out_of_order(runtime: WingRuntime):
 async def test_unaddressed_message_goes_to_inbox_not_waiter(runtime: WingRuntime):
     """无 tool_call_id 的消息即使存在 waiter 也进 inbox。
 
-    回归用例：后台 Explorer 完成通知 / Timer wakeup 经 post() 投递时不带 id，
+    回归用例：后台 Explorer 完成通知经 post() 投递时不带 id，
     旧设计中会被 need_feedback flag 误导成「用户回答」被等待中的工具吃掉。
     """
     session = runtime.create_session()

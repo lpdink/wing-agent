@@ -671,6 +671,42 @@ class TestSessionUpdate:
         assert resp.status_code == 404
         assert "nonexistent" in resp.json()["detail"]
 
+    def test_error_response_shape(self, client: TestClient, mock_runtime):
+        """错误响应统一为 ErrorResponse 形状（error + detail）。
+
+        回归：FastAPI 默认只返回 {"detail": ...}，缺少 wing-api-client
+        期望的 error 字段，导致结构化错误反序列化恒为 None。
+        """
+        mock_runtime.update_session = AsyncMock(
+            side_effect=LookupError("template 'nonexistent' not found")
+        )
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "agent": "nonexistent"},
+        )
+        assert resp.status_code == 404
+        body = resp.json()
+        assert body["error"] == "not_found"
+        assert "nonexistent" in body["detail"]
+
+    def test_validation_error_shape(self, client: TestClient):
+        """请求体校验失败（422）也输出 ErrorResponse 形状。"""
+        resp = client.post("/api/session/resume", json={})
+        assert resp.status_code == 422
+        body = resp.json()
+        assert body["error"] == "validation_error"
+        assert body["detail"]
+
+    def test_method_not_allowed_shape(self, client: TestClient):
+        """405（starlette 父类 HTTPException）也输出 ErrorResponse 形状。
+
+        /api/health 免鉴权且仅允许 GET，POST 触发 router 层 405——验证
+        handler 注册在 starlette HTTPException 基类上确实覆盖了父类异常。
+        """
+        resp = client.post("/api/health")
+        assert resp.status_code == 405
+        assert resp.json()["error"] == "method_not_allowed"
+
     def test_update_title(self, client: TestClient, mock_runtime):
         """设置 session 名称。"""
         mock_runtime.update_session = AsyncMock()
@@ -1064,7 +1100,9 @@ class TestAuthEnabled:
         """无 key → 401。"""
         resp = auth_client.get("/api/session/list")
         assert resp.status_code == 401
-        assert resp.json()["detail"] == "Invalid or missing API key"
+        body = resp.json()
+        assert body["error"] == "unauthorized"
+        assert body["detail"] == "Invalid or missing API key"
 
     def test_wrong_key_rejected(self, auth_client: TestClient):
         """错误 key → 401。"""

@@ -81,7 +81,7 @@ class SessionManager:
     外部方法：
       - create_session：创建新 session（可选 backend）
       - fork_session：从指定消息分叉（继承源 session 后端）
-      - resume_session：恢复已有 session（跨 stores 模糊匹配）
+      - resume_session：恢复已有 session（精确匹配 session id）
 
     路由表由 WingRuntime 统一管理，SM 不感知 client_id 和 contextvars。
     """
@@ -197,34 +197,28 @@ class SessionManager:
     # ── resolve ───────────────────────────────
 
     def _resolve_with_store(self, session_id: str) -> tuple[str, SessionStore] | None:
-        """跨 stores 解析 session id，返回 (resolved_id, store)。
+        """跨 stores 精确解析 session id，返回 (session_id, store)。
 
-        优先精确匹配内存中的 session，再按 stores 注册顺序走后端模糊匹配。
+        优先命中内存中的 session，再按 stores 注册顺序查后端是否存在。
         """
         if session_id in self._sessions:
             return session_id, self._sessions[session_id].store
         for store in self._stores.values():
-            resolved = store.resolve(session_id)
-            if resolved is not None:
-                return resolved, store
+            if store.exists(session_id):
+                return session_id, store
         return None
-
-    def resolve_session_id(self, session_id: str) -> str | None:
-        """解析 session id（跨 stores 模糊匹配），返回完全匹配的 session_id。"""
-        result = self._resolve_with_store(session_id)
-        return result[0] if result is not None else None
 
     def resume_session(
         self,
         session_id: str,
         template: "AgentTemplate | None" = None,
     ) -> Session:
-        """恢复已有 session（跨 stores 模糊匹配）。已在内存中则直接返回。
+        """恢复已有 session（精确匹配 session id）。已在内存中则直接返回。
 
         模板解析优先级：显式传入 > metadata.template_name > 默认模板。
 
         Args:
-            session_id: 目标 session ID（支持前缀/包含匹配）
+            session_id: 目标 session ID（须为完整 ID）
             template: 可选模板。传入时使用该模板恢复；
                       不传时优先使用 metadata 中持久化的模板。
 
