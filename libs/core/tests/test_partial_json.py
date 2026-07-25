@@ -136,3 +136,15 @@ class TestParseStreamingJson:
         raw = '{"text": "hello\\u00'
         result = parse_streaming_json(raw)
         assert isinstance(result, dict)
+
+    def test_trailing_colon(self):
+        """`{"a":` — colon 后无值，应补 null 而非返回空。"""
+        raw = '{"a":'
+        result = parse_streaming_json(raw)
+        assert result.get("a") is None  # null → Python None
+        assert "a" in result
+
+    def test_trailing_colon_with_space(self):
+        raw = '{"key": '
+        result = parse_streaming_json(raw)
+        assert "key" in result

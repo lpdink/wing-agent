@@ -255,8 +255,11 @@ class OpenAIProvider:
         Returns:
             (final_tool_calls, streaming_deltas)
             - final_tool_calls: populated only when finish_reason == "tool_calls"
-            - streaming_deltas: partial args snapshots for UI streaming (every chunk)
+            - streaming_deltas: partial args snapshots for UI streaming
+              (only when current chunk carries tool call data)
         """
+        has_tool_delta = bool(choice.delta.tool_calls)
+
         for tc in choice.delta.tool_calls or []:
             call = pending.setdefault(tc.index, PendingCall())
             if tc.id:
@@ -266,13 +269,14 @@ class OpenAIProvider:
             if tc.function and tc.function.arguments:
                 call.args_buffer += tc.function.arguments
 
-        # Build streaming deltas for any pending call with accumulated args
+        # Build streaming deltas only when this chunk carries tool data.
+        # Guard: skip calls without id (some providers send args before id).
         deltas: list[ToolCallDelta] | None = None
-        if pending:
+        if has_tool_delta and pending:
             is_final = choice.finish_reason == "tool_calls"
             deltas = []
             for call in pending.values():
-                if call.args_buffer:
+                if call.id and call.args_buffer:
                     deltas.append(
                         ToolCallDelta(
                             id=call.id,

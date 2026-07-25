@@ -128,7 +128,8 @@ def _close_json(raw: str) -> str:
     # Close unterminated string
     if in_string:
         if escaped:
-            # Trailing backslash inside string — remove it then close
+            # Trailing backslash inside string — remove it then close.
+            # (Defense-in-depth: _repair_json normally handles this upstream.)
             out.pop()
         out.append('"')
         # If the unterminated string is a key (after { or , in object context),
@@ -140,6 +141,10 @@ def _close_json(raw: str) -> str:
     result = "".join(out).rstrip()
     if result.endswith(","):
         result = result[:-1]
+
+    # Handle trailing colon (e.g. {"a":) — append null value
+    if result.rstrip().endswith(":"):
+        result = result.rstrip() + " null"
 
     # Close open brackets in reverse order
     for opener in reversed(stack):

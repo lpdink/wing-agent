@@ -81,10 +81,17 @@ pub struct WriteHighlightCache {
     lang: String,
     /// Highlighted output lines (one per source line).
     highlighted_lines: Vec<MarkdownLine>,
+    /// Raw text of the last line (for O(1) incremental append).
+    last_line_raw: String,
 }
 
 /// Maximum lines to display for streaming Write content.
 const WRITE_STREAM_MAX_LINES: usize = 20;
+
+/// Strip trailing `\r` for CRLF consistency.
+fn strip_cr(s: &str) -> &str {
+    s.strip_suffix('\r').unwrap_or(s)
+}
 
 impl WriteHighlightCache {
     /// Create or update the cache incrementally.
@@ -99,19 +106,28 @@ impl WriteHighlightCache {
 
         let mut cache = match cache {
             Some(c) if c.lang == lang && content.starts_with(&c.raw_content) => c,
-            // Full rebuild: new cache or content doesn't match prefix
+            // Full rebuild: new cache or content doesn't match prefix.
+            // Use split('\n') (not .lines()) to preserve trailing empty line
+            // from content ending with '\n' — keeps incremental path consistent.
             _ => {
-                let lines: Vec<MarkdownLine> = content
-                    .lines()
+                let raw_lines: Vec<&str> = content.split('\n').collect();
+                let highlighted: Vec<MarkdownLine> = raw_lines
+                    .iter()
                     .map(|line| {
-                        syntax::highlight_single_line(line, &lang)
-                            .unwrap_or_else(|| plain_line(line))
+                        let clean = strip_cr(line);
+                        syntax::highlight_single_line(clean, &lang)
+                            .unwrap_or_else(|| plain_line(clean))
                     })
                     .collect();
+                let last_line_raw = raw_lines
+                    .last()
+                    .map(|s| strip_cr(s).to_string())
+                    .unwrap_or_default();
                 return Some(WriteHighlightCache {
                     raw_content: content.to_string(),
                     lang,
-                    highlighted_lines: lines,
+                    highlighted_lines: highlighted,
+                    last_line_raw,
                 });
             }
         };
@@ -129,29 +145,27 @@ impl WriteHighlightCache {
 
         if cache.highlighted_lines.is_empty() {
             cache.highlighted_lines.push(plain_line(""));
+            cache.last_line_raw.clear();
         }
 
-        // First segment extends the last cached line
+        // First segment extends the last cached line (O(1) via cached last_line_raw)
         let last_idx = cache.highlighted_lines.len() - 1;
-        let last_line_text = {
-            // Get the raw text of the last line
-            let prefix_lines: Vec<&str> = content[..content.len() - delta.len()].lines().collect();
-            prefix_lines
-                .last()
-                .map(|s| s.to_string())
-                .unwrap_or_default()
-        };
-        let extended_last = format!("{last_line_text}{}", segments[0]);
+        cache.last_line_raw.push_str(strip_cr(segments[0]));
         cache.highlighted_lines[last_idx] =
-            syntax::highlight_single_line(&extended_last, &cache.lang)
-                .unwrap_or_else(|| plain_line(&extended_last));
+            syntax::highlight_single_line(&cache.last_line_raw, &cache.lang)
+                .unwrap_or_else(|| plain_line(&cache.last_line_raw));
 
         // Remaining segments are new lines
-        for segment in &segments[1..] {
+        for (i, segment) in segments[1..].iter().enumerate() {
+            let clean = strip_cr(segment);
             cache.highlighted_lines.push(
-                syntax::highlight_single_line(segment, &cache.lang)
-                    .unwrap_or_else(|| plain_line(segment)),
+                syntax::highlight_single_line(clean, &cache.lang)
+                    .unwrap_or_else(|| plain_line(clean)),
             );
+            // Track last_line_raw for the final segment
+            if i == segments.len() - 2 {
+                cache.last_line_raw = clean.to_string();
+            }
         }
 
         Some(cache)
@@ -988,5 +1002,41 @@ mod tests {
         // Unknown extension → None
         let cache = WriteHighlightCache::update(None, "/tmp/file.xyz_unknown", "content");
         assert!(cache.is_none());
+    }
+
+    #[test]
+    fn test_write_highlight_cache_trailing_newline() {
+        // P0 regression: trailing '\n' must produce an extra empty line
+        let cache = WriteHighlightCache::update(None, "/tmp/t.py", "line1\n");
+        assert!(cache.is_some());
+        let cache = cache.unwrap();
+        // "line1\n".split('\n') → ["line1", ""] → 2 lines
+        assert_eq!(cache.highlighted_lines.len(), 2);
+
+        // Incremental: append after trailing newline
+        let cache2 = WriteHighlightCache::update(Some(cache), "/tmp/t.py", "line1\nl");
+        assert!(cache2.is_some());
+        let cache2 = cache2.unwrap();
+        // Should be ["line1", "l"] — NOT ["line1l"]
+        assert_eq!(cache2.highlighted_lines.len(), 2);
+        assert_eq!(cache2.last_line_raw, "l");
+    }
+
+    #[test]
+    fn test_write_highlight_cache_crlf() {
+        // CRLF content: \r should be stripped
+        let cache = WriteHighlightCache::update(None, "/tmp/t.py", "line1\r\nline2\r\n");
+        assert!(cache.is_some());
+        let cache = cache.unwrap();
+        // "line1\r\nline2\r\n".split('\n') → ["line1\r", "line2\r", ""] → 3 lines
+        assert_eq!(cache.highlighted_lines.len(), 3);
+        assert_eq!(cache.last_line_raw, "");
+
+        // Incremental after CRLF
+        let cache2 = WriteHighlightCache::update(Some(cache), "/tmp/t.py", "line1\r\nline2\r\nx");
+        assert!(cache2.is_some());
+        let cache2 = cache2.unwrap();
+        assert_eq!(cache2.highlighted_lines.len(), 3);
+        assert_eq!(cache2.last_line_raw, "x");
     }
 }

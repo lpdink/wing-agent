@@ -1358,7 +1358,7 @@ impl App {
 
                 if let Some(idx) = self.ctx.get_tool_call_index(&tool_call_id) {
                     // Update existing streaming cell
-                    self.chat.update_tool_args_by_index(idx, tool_args.clone());
+                    self.chat.update_tool_args_by_index(idx, tool_args);
                     if is_final {
                         self.chat.set_tool_status_by_index(
                             idx,
@@ -1367,11 +1367,7 @@ impl App {
                     }
                 } else {
                     // Create new streaming cell
-                    let mut block = ToolCallBlock::new(
-                        tool_name.clone(),
-                        tool_args.clone(),
-                        tool_call_id.clone(),
-                    );
+                    let mut block = ToolCallBlock::new(tool_name, tool_args, tool_call_id.clone());
                     block.status = if is_final {
                         crate::ui::cells::tool_call::ToolStatus::Pending
                     } else {
@@ -1379,7 +1375,7 @@ impl App {
                     };
                     let idx = self.chat.len();
                     self.chat.push(ChatCell::ToolCall(block));
-                    self.ctx.register_tool_call(tool_call_id.clone(), idx);
+                    self.ctx.register_tool_call(tool_call_id, idx);
                 }
             }
             WingEvent::ToolCall {
@@ -1393,7 +1389,7 @@ impl App {
 
                 // If a streaming cell already exists for this id, update it
                 if let Some(idx) = self.ctx.get_tool_call_index(&tool_call_id) {
-                    self.chat.update_tool_args_by_index(idx, tool_args.clone());
+                    self.chat.update_tool_args_by_index(idx, tool_args);
                     self.chat.set_tool_status_by_index(
                         idx,
                         crate::ui::cells::tool_call::ToolStatus::Pending,
@@ -1403,11 +1399,8 @@ impl App {
                         self.chat.set_tool_started_at_by_index(idx);
                     }
                 } else {
-                    let mut block = ToolCallBlock::new(
-                        tool_name.clone(),
-                        tool_args.clone(),
-                        tool_call_id.clone(),
-                    );
+                    let mut block =
+                        ToolCallBlock::new(tool_name.clone(), tool_args, tool_call_id.clone());
                     // Start timer for Bash tools.
                     if tool_name == TOOL_BASH {
                         block.started_at = Some(std::time::Instant::now());

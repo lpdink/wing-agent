@@ -87,7 +87,7 @@ class ToolCallDelta(BaseModel):
 
     id: str
     name: str
-    partial_args: dict = {}
+    partial_args: dict = Field(default_factory=dict)
     is_final: bool = False
 
 
