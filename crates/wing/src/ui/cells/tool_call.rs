@@ -27,6 +27,7 @@ use ratatui::text::Span;
 use crate::app::constants;
 use crate::config::ThemePalette;
 use crate::render::markdown::types::MarkdownLine;
+use crate::render::markdown::types::SegmentKind;
 use crate::render::syntax;
 
 /// Maximum characters for failed result display.
@@ -177,9 +178,12 @@ impl WriteHighlightCache {
 }
 
 /// Create a plain (unstyled) MarkdownLine.
+///
+/// Kind is [`SegmentKind::CodeBlock`] to stay consistent with the
+/// syntax-highlighted lines this fallback renders alongside.
 fn plain_line(text: &str) -> MarkdownLine {
     let mut line = MarkdownLine::default();
-    line.push_segment(Style::default(), text);
+    line.push_segment(SegmentKind::CodeBlock, Style::default(), text);
     line
 }
 
