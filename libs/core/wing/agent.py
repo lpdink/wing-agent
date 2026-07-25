@@ -70,8 +70,8 @@ class Inbound:
 class _TurnAccumulator:
     """Accumulates state across a single agent turn (one user message → final response).
 
-    Used by _process_single_message to build TurnResultEvent without
-    polluting agent instance state. Created fresh per message.
+    Used by _process_turn to build TurnResultEvent without
+    polluting agent instance state. Created fresh per turn.
     """
 
     num_turns: int = 0
@@ -248,22 +248,44 @@ class WingAgent:
         return bound_map
 
     async def _run(self) -> None:
-        """主循环：持续处理输入消息"""
+        """主循环：持续 drain inbox 并处理"""
         while True:
             try:
-                await self._process_single_message()
+                await self._process_turn()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 await self._handle_message_error(e)
 
-    async def _process_single_message(self) -> None:
-        """处理单条用户消息，可能包含多轮工具调用。
+    async def _process_turn(self) -> None:
+        """处理一个 turn：drain inbox 中所有待处理消息，合并后执行 ReAct loop。
 
-        从 inbox 取出 Inbound，设置 request_id contextvar，
-        使该消息触发的所有事件携带同一个 request_id。
+        消费语义为 drain-and-merge——block 等待首条消息，再 non-blocking
+        取出剩余消息，将所有 user content 拼接为一条消息注入 context。
+        这与 Steer 的 mid-loop drain 共享同一个 _drain_inbox() 原语。
+
+        NOTE: batch 内非首条消息的 request_id 被有意丢弃。当前无 consumer
+        依赖 per-request correlation（TUI 为纯事件驱动，HTTP send 入队即 ack）。
+        若未来需要 request-level completion tracking，可在 merge 时为每条
+        被合并消息 emit MergedEvent(request_id=...) 通知 transport 层。
         """
-        inbound = await self._inbox.get()
+        first = await self._inbox.get()
+        batch = [first] + self._drain_inbox()
+
+        # Merge: 所有 user 消息内容拼接为一条 user message
+        content = "\n".join(
+            b.message.content
+            for b in batch
+            if b.message.role == "user" and b.message.content
+        )
+        if not content:
+            return
+
+        inbound = Inbound(
+            message=Message(role="user", content=content),
+            request_id=first.request_id,
+        )
+
         # 设置 request_id 到当前协程 context
         # 该消息触发的所有事件（TextEvent, ToolCallEvent, DoneEvent 等）
         # 都会 auto-inject 此 request_id
@@ -430,27 +452,35 @@ class WingAgent:
             return False
         return True
 
+    def _drain_inbox(self) -> list[Inbound]:
+        """Non-blocking drain: 取出 inbox 中所有待处理消息。
+
+        唯一的 inbox drain 原语——入口 batch 合并和 Steer mid-loop 注入共用。
+        """
+        items: list[Inbound] = []
+        while not self._inbox.empty():
+            try:
+                items.append(self._inbox.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return items
+
     def _drain_inbox_for_steer(self) -> str:
-        """Drain all pending inbox messages and format as steer notes.
+        """Drain pending inbox messages and format as steer notes.
 
         Returns a formatted string prepended to the last tool result,
         clearly marked as user steer guidance so the model can distinguish
         it from tool output.
         """
-        notes: list[str] = []
-        while not self._inbox.empty():
-            try:
-                inbound = self._inbox.get_nowait()
-                if inbound.message.role == "user" and inbound.message.content:
-                    notes.append(inbound.message.content)
-            except asyncio.QueueEmpty:
-                break
-
+        items = self._drain_inbox()
+        notes = [
+            b.message.content
+            for b in items
+            if b.message.role == "user" and b.message.content
+        ]
         if not notes:
             return ""
-
-        formatted = "\n".join(notes)
-        return f"[User steer note: {formatted}]\n"
+        return f"[User steer note: {'\n'.join(notes)}]\n"
 
     async def _call_llm(self) -> tuple[Message, list[ToolCall]]:
         """得到模型的响应和工具调用"""
