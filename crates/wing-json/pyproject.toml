@@ -1,0 +1,14 @@
+[project]
+name = "wing-json"
+dynamic = ["version"]
+description = "Rust-accelerated partial JSON parser for LLM streaming (PyO3 abi3)"
+requires-python = ">=3.12"
+
+[build-system]
+requires = ["maturin>=1.9.3,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+manifest-path = "Cargo.toml"
+features = ["extension-module"]
+strip = true

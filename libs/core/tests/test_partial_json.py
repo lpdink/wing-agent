@@ -38,7 +38,9 @@ class TestParseStreamingJson:
     def test_unterminated_key(self):
         raw = '{"comm'
         result = parse_streaming_json(raw)
-        assert result.get("comm") == ""
+        # Rust parser: key with no value → null; Python fallback: empty string.
+        assert "comm" in result
+        assert result.get("comm") in ("", None)
 
     def test_missing_closing_brace(self):
         raw = '{"path": "/tmp/test.py"}'
