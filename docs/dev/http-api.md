@@ -32,7 +32,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | GET | `/api/session/get` | 获取 session 详情 |
 | GET | `/api/session/info` | 运行时状态，含 `context_stats`、`skills_info`、`reasoning_effort` |
 | GET | `/api/session/branches` | 可回退 / 分叉的消息节点 |
-| POST | `/api/session/update` | 更新状态：model / agents / title / reasoning_effort / yolo |
+| POST | `/api/session/update` | 更新状态：model / agent / title / thinking / reasoning_effort / yolo / workspace |
 | POST | `/api/session/compact` | 手动压缩上下文 |
 | POST | `/api/session/interrupt` | 中断当前任务（Esc 键） |
 | POST | `/api/session/rewind` | 回退到指定消息 uuid |
@@ -57,7 +57,12 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 ## WebSocket 协议（`/ws`）
 
-握手成功后服务端推送 `ConnectResponse { type: "connected", client_id }`。之后是单向事件流（服务端 → 客户端），事件均为 `WingEvent` 子类，按 `type` 字段区分。
+握手成功后服务端推送 `ConnectResponse { type: "connected", client_id }`。之后是**双向**通道：
+
+- **服务端 → 客户端**：推送 `WingEvent` 事件流，事件均为 `WingEvent` 子类，按 `type` 字段区分。
+- **客户端 → 服务端**：发送 `ClientRequest` 帧 `{ request_id, session_id, content, tool_call_id? }`，用于投递用户消息，或携带 `tool_call_id` 定向回复某个 `ask` 事件（resolve 对应的 feedback waiter）。Gateway 注入 `client_id` 后转给 `WingRuntime.post()`。
+
+> 投递消息有两条等价路径：WS `ClientRequest`（TUI 实际所用，便于与 Ask 回复复用同一连接）或 HTTP `POST /api/session/send`。
 
 **ReAct 事件**（`event/react.py`）：`turn_started` · `text` · `reasoning` · `tool_call` · `tool_call_result` · `diff_content` · `ask` · `assistant_turn` · `tool_result_turn` · `turn_result`（subtype: success / error_during_execution / error_max_turns）· `done` · `llm_call_metrics`。
 
