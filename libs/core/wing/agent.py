@@ -522,7 +522,7 @@ class WingAgent:
                             session_id=self.session_id,
                             tool_call_id=delta.id,
                             tool_name=delta.name,
-                            tool_args=delta.partial_args,
+                            args_fragment=delta.args_fragment,
                             is_final=delta.is_final,
                         )
                     )

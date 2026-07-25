@@ -1349,7 +1349,7 @@ impl App {
             WingEvent::ToolCallStream {
                 tool_call_id,
                 tool_name,
-                tool_args,
+                args_fragment,
                 is_final,
                 ..
             } => {
@@ -1358,7 +1358,8 @@ impl App {
 
                 if let Some(idx) = self.ctx.get_tool_call_index(&tool_call_id) {
                     // Update existing streaming cell
-                    self.chat.update_tool_args_by_index(idx, tool_args);
+                    self.chat
+                        .append_tool_args_fragment_by_index(idx, &args_fragment);
                     if is_final {
                         self.chat.set_tool_status_by_index(
                             idx,
@@ -1367,12 +1368,11 @@ impl App {
                     }
                 } else {
                     // Create new streaming cell
-                    let mut block = ToolCallBlock::new(tool_name, tool_args, tool_call_id.clone());
-                    block.status = if is_final {
-                        crate::ui::cells::tool_call::ToolStatus::Pending
-                    } else {
-                        crate::ui::cells::tool_call::ToolStatus::Streaming
-                    };
+                    let mut block = ToolCallBlock::new_streaming(tool_name, tool_call_id.clone());
+                    block.append_args_fragment(&args_fragment);
+                    if is_final {
+                        block.status = crate::ui::cells::tool_call::ToolStatus::Pending;
+                    }
                     let idx = self.chat.len();
                     self.chat.push(ChatCell::ToolCall(block));
                     self.ctx.register_tool_call(tool_call_id, idx);

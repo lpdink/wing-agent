@@ -307,6 +307,9 @@ pub struct ToolCallBlock {
     pub started_at: Option<Instant>,
     /// Incremental syntax highlight cache for Write streaming.
     pub write_highlight: Option<WriteHighlightCache>,
+    /// Raw args text accumulated from streaming fragments. Cleared when
+    /// authoritative args arrive (`set_final_args`) to release memory.
+    args_buffer: String,
 }
 
 impl ToolCallBlock {
@@ -319,6 +322,22 @@ impl ToolCallBlock {
             result: None,
             started_at: None,
             write_highlight: None,
+            args_buffer: String::new(),
+        }
+    }
+
+    /// Create a streaming cell. Args arrive via `append_args_fragment`
+    /// and are parsed locally — the backend sends raw text only.
+    pub fn new_streaming(tool_name: String, tool_call_id: String) -> Self {
+        Self {
+            tool_name,
+            tool_args: serde_json::Value::Object(serde_json::Map::new()),
+            tool_call_id,
+            status: ToolStatus::Streaming,
+            result: None,
+            started_at: None,
+            write_highlight: None,
+            args_buffer: String::new(),
         }
     }
 
@@ -332,8 +351,28 @@ impl ToolCallBlock {
         };
     }
 
-    /// Update args during streaming (ToolCallStreamEvent).
-    pub fn update_args(&mut self, args: serde_json::Value) {
+    /// Append a raw args fragment (ToolCallStreamEvent) and re-parse the
+    /// accumulated buffer for rendering.
+    pub fn append_args_fragment(&mut self, fragment: &str) {
+        self.args_buffer.push_str(fragment);
+        let parsed = crate::util::partial_json::parse_streaming_json(&self.args_buffer);
+        // Tool args are always a JSON object; ignore malformed non-object partials.
+        let args = match parsed {
+            obj @ serde_json::Value::Object(_) => obj,
+            _ => serde_json::Value::Object(serde_json::Map::new()),
+        };
+        self.apply_args(args);
+    }
+
+    /// Set authoritative parsed args (execution start) and release the
+    /// streaming buffer.
+    pub fn set_final_args(&mut self, args: serde_json::Value) {
+        self.args_buffer = String::new();
+        self.apply_args(args);
+    }
+
+    /// Shared args application: refresh Write highlight cache, store args.
+    fn apply_args(&mut self, args: serde_json::Value) {
         // Incremental Write highlight: update cache when content grows.
         if self.tool_name == constants::TOOL_WRITE {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -940,29 +979,40 @@ mod tests {
     }
 
     #[test]
-    fn test_update_args() {
-        let mut block = ToolCallBlock::new("Bash".into(), json!({}), "tc_s3".into());
-        block.status = ToolStatus::Streaming;
-        block.update_args(json!({"command": "ls -la"}));
+    fn test_append_args_fragment() {
+        let mut block = ToolCallBlock::new_streaming("Bash".into(), "tc_s3".into());
+        // Fragments accumulate and are partial-parsed for rendering.
+        block.append_args_fragment(r#"{"command": "ls"#);
         let text = lines_text(&block.to_lines(&p(), 10));
         assert!(
-            text.contains("ls -la"),
-            "updated args should be visible: {text}"
+            text.contains("ls"),
+            "partial args should be visible: {text}"
         );
+
+        block.append_args_fragment(r#" -la"}"#);
+        assert_eq!(block.tool_args["command"], "ls -la");
+    }
+
+    #[test]
+    fn test_set_final_args_releases_buffer() {
+        let mut block = ToolCallBlock::new_streaming("Bash".into(), "tc_s5".into());
+        block.append_args_fragment(r#"{"command": "ls"#);
+        assert!(!block.args_buffer.is_empty());
+
+        block.set_final_args(json!({"command": "ls -la"}));
+        assert!(
+            block.args_buffer.is_empty(),
+            "streaming buffer should be released"
+        );
+        assert_eq!(block.tool_args["command"], "ls -la");
     }
 
     #[test]
     fn test_write_streaming_highlight() {
-        let mut block = ToolCallBlock::new(
-            "Write".into(),
-            json!({"path": "/tmp/test.py", "content": "def main():\n    print('hello')"}),
-            "tc_s4".into(),
-        );
-        block.status = ToolStatus::Streaming;
-        // Simulate streaming update
-        block.update_args(
-            json!({"path": "/tmp/test.py", "content": "def main():\n    print('hello')"}),
-        );
+        let mut block = ToolCallBlock::new_streaming("Write".into(), "tc_s4".into());
+        // Simulate streaming via raw fragments (backend sends unparsed text).
+        block.append_args_fragment(r#"{"path": "/tmp/test.py", "content": "def main"#);
+        block.append_args_fragment(r#"():\n    print('hello')"}"#);
         let text = lines_text(&block.to_lines(&p(), 30));
         assert!(text.contains("Write"), "missing tool name: {text}");
         assert!(

@@ -1,8 +1,10 @@
-//! wing-json — single-pass partial JSON parser for LLM streaming.
+//! Fault-tolerant partial JSON parser for LLM streaming tool args.
 //!
 //! Parses potentially incomplete JSON (unterminated strings, unclosed
-//! brackets) in a single pass, returning the best-effort result.
-//! Exposed to Python via PyO3 (abi3).
+//! brackets, invalid escapes, raw control characters) in a single O(n)
+//! pass, returning the best-effort result. Used by the TUI to render
+//! tool call cards while the model is still generating arguments —
+//! the backend forwards raw args fragments and never parses them.
 
 use serde_json::Value;
 
@@ -307,8 +309,8 @@ impl<'a> Parser<'a> {
 
 // ── Public API ─────────────────────────────────────────────────
 
-/// Parse potentially incomplete JSON, returning best-effort dict.
-/// Never panics. Returns empty object on total failure.
+/// Parse potentially incomplete JSON, returning the best-effort value.
+/// Never panics. Returns an empty object on total failure.
 pub fn parse_streaming_json(input: &str) -> Value {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -326,64 +328,6 @@ pub fn parse_streaming_json(input: &str) -> Value {
         .parse_value()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()))
 }
-
-// ── PyO3 bindings ──────────────────────────────────────────────
-
-#[cfg(feature = "python")]
-mod python {
-    use super::*;
-    use pyo3::prelude::*;
-    use pyo3::types::PyDict;
-
-    fn value_to_py(py: Python<'_>, val: &Value) -> PyObject {
-        match val {
-            Value::Null => py.None(),
-            Value::Bool(b) => b.into_pyobject(py).unwrap().to_owned().into_any().unbind(),
-            Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    i.into_pyobject(py).unwrap().into_any().unbind()
-                } else if let Some(f) = n.as_f64() {
-                    f.into_pyobject(py).unwrap().into_any().unbind()
-                } else {
-                    py.None()
-                }
-            }
-            Value::String(s) => s.into_pyobject(py).unwrap().into_any().unbind(),
-            Value::Array(arr) => {
-                let list: Vec<PyObject> = arr.iter().map(|v| value_to_py(py, v)).collect();
-                list.into_pyobject(py).unwrap().into_any().unbind()
-            }
-            Value::Object(map) => {
-                let dict = PyDict::new(py);
-                for (k, v) in map {
-                    dict.set_item(k, value_to_py(py, v)).ok();
-                }
-                dict.into_any().unbind()
-            }
-        }
-    }
-
-    #[pyfunction(name = "parse_streaming_json")]
-    fn parse_streaming_json_py(py: Python<'_>, raw: &str) -> PyObject {
-        let val = super::parse_streaming_json(raw);
-        // Ensure we return a dict (not array/scalar)
-        match &val {
-            Value::Object(_) => value_to_py(py, &val),
-            _ => PyDict::new(py).into_any().unbind(),
-        }
-    }
-
-    #[pymodule]
-    pub fn wing_json(m: &Bound<'_, PyModule>) -> PyResult<()> {
-        m.add_function(wrap_pyfunction!(parse_streaming_json_py, m)?)?;
-        Ok(())
-    }
-}
-
-#[cfg(feature = "python")]
-pub use python::wing_json;
-
-// ── Tests ──────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -411,7 +355,6 @@ mod tests {
 
     #[test]
     fn non_dict_returns_array() {
-        // Rust API returns raw Value; dict enforcement is in the Python binding.
         let v = parse("[1, 2, 3]");
         assert!(v.is_array());
     }

@@ -147,13 +147,19 @@ pub enum WingEvent {
         meta: EventMeta,
     },
 
-    /// Streaming tool call args delta (during LLM generation).
+    /// Streaming tool call args fragment (during LLM generation).
+    ///
+    /// Carries the incremental raw args text emitted since the last event
+    /// for this call (the first event carries the full prefix accumulated
+    /// so far). Clients accumulate fragments into a buffer and parse it
+    /// locally for rendering — the backend never parses partial args.
+    /// `ToolCall` (authoritative parsed args) follows at execution start.
     #[serde(rename = "tool_call_stream")]
     ToolCallStream {
         tool_call_id: String,
         tool_name: String,
         #[serde(default)]
-        tool_args: serde_json::Value,
+        args_fragment: String,
         #[serde(default)]
         is_final: bool,
         #[serde(flatten)]
@@ -631,7 +637,7 @@ mod tests {
             "type": "tool_call_stream",
             "tool_call_id": "tc_stream_1",
             "tool_name": "Bash",
-            "tool_args": {"command": "ls"},
+            "args_fragment": "{\"command\": \"ls\"}",
             "is_final": false,
             "created_at": "2025-01-01T00:00:00",
             "session_id": "abc123",
@@ -643,13 +649,13 @@ mod tests {
             WingEvent::ToolCallStream {
                 tool_call_id,
                 tool_name,
-                tool_args,
+                args_fragment,
                 is_final,
                 ..
             } => {
                 assert_eq!(tool_call_id, "tc_stream_1");
                 assert_eq!(tool_name, "Bash");
-                assert_eq!(tool_args["command"], "ls");
+                assert_eq!(args_fragment, "{\"command\": \"ls\"}");
                 assert!(!is_final);
             }
             _ => panic!("expected ToolCallStream"),
@@ -669,11 +675,11 @@ mod tests {
         let event: WingEvent = serde_json::from_str(json).unwrap();
         match event {
             WingEvent::ToolCallStream {
-                tool_args,
+                args_fragment,
                 is_final,
                 ..
             } => {
-                assert_eq!(tool_args, serde_json::Value::Null);
+                assert_eq!(args_fragment, "");
                 assert!(!is_final);
             }
             _ => panic!("expected ToolCallStream"),

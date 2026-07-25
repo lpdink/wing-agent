@@ -507,14 +507,28 @@ impl ChatView {
         }
     }
 
-    /// Update tool args on a streaming tool call block by index.
+    /// Append a raw args fragment to a streaming tool call block by index.
+    pub fn append_tool_args_fragment_by_index(&mut self, index: usize, fragment: &str) {
+        if let Some(cached) = self.cells.get_mut(index)
+            && matches!(cached.cell(), ChatCell::ToolCall(_))
+        {
+            cached.mutate(|cell| {
+                if let ChatCell::ToolCall(block) = cell {
+                    block.append_args_fragment(fragment);
+                }
+            });
+        }
+    }
+
+    /// Set authoritative tool args on a tool call block by index
+    /// (execution start — releases any streaming buffer).
     pub fn update_tool_args_by_index(&mut self, index: usize, args: serde_json::Value) {
         if let Some(cached) = self.cells.get_mut(index)
             && matches!(cached.cell(), ChatCell::ToolCall(_))
         {
             cached.mutate(|cell| {
                 if let ChatCell::ToolCall(block) = cell {
-                    block.update_args(args);
+                    block.set_final_args(args);
                 }
             });
         }

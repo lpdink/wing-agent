@@ -83,11 +83,17 @@ class LLMUsage(BaseModel):
 
 
 class ToolCallDelta(BaseModel):
-    """Partial tool call state during streaming (before args are complete)."""
+    """Incremental raw args fragment emitted during streaming.
+
+    Carries only the args text accumulated since the last delta for this
+    call (the first delta carries the full prefix). Clients accumulate
+    fragments and partial-parse locally — the runtime never parses
+    partial args.
+    """
 
     id: str
     name: str
-    partial_args: dict = Field(default_factory=dict)
+    args_fragment: str = ""
     is_final: bool = False
 
 
@@ -254,3 +260,5 @@ class PendingCall(BaseModel):
     id: str = ""
     name: str = ""
     args_buffer: str = ""
+    emitted_len: int = 0
+    """args_buffer 中已作为流式碎片 emit 的长度（增量游标）。"""
