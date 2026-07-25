@@ -78,7 +78,7 @@ class SessionToolCallMetrics(BaseModel):
 # ============================================================
 
 
-# TODO: 也许全局不应该审计这个，额...这个比我想的长多了，因为我们的工具其实很多。不过先审着吧，不想要了不注册就行了。或者回头把整个审计系统外包掉，和hook差不多。不过我们审计做的还是很干净的，因为输入的事件很纯粹。比hook好一些，hook目前做的不太干净。
+# 全局工具调用审计。聚合键随工具种类增长；不需要时不注册本 handler 即可。
 @metrics_registry.on(ToolCallResultEvent)
 def _handle_tool_call_global(event: ToolCallResultEvent) -> None:
     """全局工具调用审计：按 yyyy-mm-dd:model:tool_name 聚合。"""

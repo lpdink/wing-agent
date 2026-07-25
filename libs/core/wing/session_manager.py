@@ -209,11 +209,6 @@ class SessionManager:
                 return resolved, store
         return None
 
-    def resolve_session_id(self, session_id: str) -> str | None:
-        """解析 session id（跨 stores 模糊匹配），返回完全匹配的 session_id。"""
-        result = self._resolve_with_store(session_id)
-        return result[0] if result is not None else None
-
     def resume_session(
         self,
         session_id: str,

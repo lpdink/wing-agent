@@ -67,14 +67,7 @@ class GatewayServer:
         self._client_to_ws: dict[str, WebSocket] = {}  # client_id → ws
         self._ws_to_client: dict[WebSocket, str] = {}  # ws → client_id
         self._app = create_app(self)
-        self._server: uvicorn.Server | None = None
-        self._server_task: asyncio.Task[None] | None = None
         self._started_at = datetime.now(timezone.utc)
-
-    @property
-    def started_at(self) -> datetime:
-        """Gateway 启动时间（UTC）。"""
-        return self._started_at
 
     @property
     def uptime(self) -> int:
@@ -124,45 +117,6 @@ class GatewayServer:
             port=self.port,
             log_config=None,
         )
-
-    async def start_async(self, port: int | None = None) -> int:
-        """异步启动服务器（用于测试）。返回实际使用的端口。"""
-        actual_port = port or self.port
-        if not _check_port_available(self.host, actual_port):
-            raise RuntimeError(f"端口 {actual_port} 已被占用")
-
-        self.port = actual_port
-        self._warn_auth_lockout()
-
-        config = uvicorn.Config(
-            self._app,
-            host=self.host,
-            port=self.port,
-            log_config=None,
-        )
-        self._server = uvicorn.Server(config)
-        self._server_task = asyncio.create_task(self._server.serve())
-
-        # 等待服务器启动
-        while not self._server.started:
-            await asyncio.sleep(0.05)
-
-        # Subscribe EventBus
-        event_bus.subscribe(self._on_event)
-
-        log.info(f"Gateway async started on {self.host}:{self.port}")
-        return self.port
-
-    async def stop_async(self) -> None:
-        """异步停止服务器（用于测试）。"""
-        event_bus.unsubscribe(self._on_event)
-        if self._server:
-            self._server.should_exit = True
-            if self._server_task:
-                await self._server_task
-                self._server_task = None
-            self._server = None
-        log.info("Gateway stopped")
 
     def _on_event(self, event: WingEvent) -> None:
         """EventBus subscriber callback：根据 EventTarget 路由事件到 ws。
