@@ -84,6 +84,25 @@ async def search_files(query: str, path: str = ".", limit: int = 20) -> str:
     ...
 ```
 
+### Tool Namespaces & LLM Names (optional)
+
+`@tool_registry.register` also accepts two optional identity fields:
+
+```python
+@tool_registry.register(
+    name="Bash",            # registry key (used in config + lookup)
+    namespace="client-a",   # group by source (built-ins live in "default")
+    llm_name="Shell",       # name the LLM sees (defaults to `name`)
+)
+async def run(cmd: str) -> str:
+    ...
+```
+
+- **`namespace`** groups tools by source so same-named tools from different origins (e.g. multiple remote clients each registering a `Bash`) can coexist. A tool is referenced as `"namespace.name"` (e.g. `"client-a.Bash"`); a bare name like `"Bash"` resolves to the `default` namespace, so existing configs are unaffected.
+- **`llm_name`** decouples the registry key from what the model sees in its function-calling schema and calls back with. The agent dispatches by the effective LLM name; binding two tools that claim the same LLM name into one agent raises an error.
+
+Most custom tools don't need either field — they exist to support multi-source / remote tool registration.
+
 ## Hooks
 
 ### Extension Points

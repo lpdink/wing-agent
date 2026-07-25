@@ -84,6 +84,25 @@ async def search_files(query: str, path: str = ".", limit: int = 20) -> str:
     ...
 ```
 
+### 工具命名空间与 LLM 名（可选）
+
+`@tool_registry.register` 还接受两个可选的身份字段：
+
+```python
+@tool_registry.register(
+    name="Bash",            # 注册键（用于配置与查找）
+    namespace="client-a",   # 按来源分组（内置工具在 "default"）
+    llm_name="Shell",       # LLM 可见名（缺省为 `name`）
+)
+async def run(cmd: str) -> str:
+    ...
+```
+
+- **`namespace`** 按来源分组工具，让不同来源的同名工具（如多个远程客户端各自注册 `Bash`）可以共存。工具以 `"namespace.name"` 引用（如 `"client-a.Bash"`）；裸名如 `"Bash"` 解析到 `default` 命名空间，因此现有配置不受影响。
+- **`llm_name`** 将注册键与模型在 function-calling schema 中看到、并回调所用的名字解耦。agent 按有效 LLM 名分发；把两个声明相同 LLM 名的工具绑进同一个 agent 会报错。
+
+大多数自定义工具两者都不需要——它们是为多来源 / 远程工具注册准备的。
+
 ## Hooks
 
 ### 扩展点
