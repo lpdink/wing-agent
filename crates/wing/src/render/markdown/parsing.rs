@@ -9,7 +9,7 @@ use pulldown_cmark::{CodeBlockKind, HeadingLevel, Tag, TagEnd};
 use super::code_blocks::CodeBlockState;
 use super::links;
 use super::tables::{TableBuffer, render_table};
-use super::types::{MarkdownLine, MarkdownTheme};
+use super::types::{MarkdownLine, MarkdownTheme, SegmentKind};
 
 use ratatui::style::Style;
 
@@ -50,6 +50,10 @@ pub(crate) struct LinkState {
 
 pub(crate) struct MarkdownContext<'a> {
     pub(crate) style_stack: &'a mut Vec<Style>,
+    /// Semantic element stack mirroring `style_stack` for element kinds.
+    /// Only elements that change the segment *kind* (headings, links) push
+    /// here; pure modifiers (bold/italic/strike) do not.
+    pub(crate) kind_stack: &'a mut Vec<SegmentKind>,
     pub(crate) blockquote_depth: &'a mut usize,
     pub(crate) list_stack: &'a mut Vec<ListState>,
     pub(crate) list_continuation_prefix: &'a mut String,
@@ -69,12 +73,27 @@ impl MarkdownContext<'_> {
         self.style_stack.last().copied().unwrap_or(self.base_style)
     }
 
+    fn current_kind(&self) -> SegmentKind {
+        self.kind_stack
+            .last()
+            .copied()
+            .expect("kind stack must never be empty")
+    }
+
     fn push_style(&mut self, style: Style) {
         self.style_stack.push(style);
     }
 
     fn pop_style(&mut self) {
         self.style_stack.pop();
+    }
+
+    fn push_kind(&mut self, kind: SegmentKind) {
+        self.kind_stack.push(kind);
+    }
+
+    fn pop_kind(&mut self) {
+        self.kind_stack.pop();
     }
 
     pub(crate) fn flush_line(&mut self) {
@@ -134,6 +153,7 @@ pub(crate) fn handle_start_tag(tag: &Tag<'_>, ctx: &mut MarkdownContext<'_>) {
         Tag::Heading { level, .. } => {
             let style = heading_style(*level, ctx.theme);
             ctx.push_style(style);
+            ctx.push_kind(SegmentKind::Heading);
             ctx.ensure_prefix();
         }
         Tag::BlockQuote(_) => {
@@ -195,6 +215,7 @@ pub(crate) fn handle_start_tag(tag: &Tag<'_>, ctx: &mut MarkdownContext<'_>) {
                 label_start_segment_idx,
             });
             ctx.push_style(ctx.theme.link);
+            ctx.push_kind(SegmentKind::Link);
         }
         Tag::CodeBlock(kind) => {
             let language = match kind {
@@ -251,6 +272,7 @@ pub(crate) fn handle_end_tag(tag: TagEnd, ctx: &mut MarkdownContext<'_>) {
         TagEnd::Heading(_) => {
             ctx.flush_line();
             ctx.pop_style();
+            ctx.pop_kind();
             push_blank_line(ctx.lines);
         }
         TagEnd::BlockQuote(_) => {
@@ -287,17 +309,23 @@ pub(crate) fn handle_end_tag(tag: TagEnd, ctx: &mut MarkdownContext<'_>) {
                 if link.show_destination {
                     let style = ctx.current_style();
                     ctx.current_line.push_segment_with_link(
+                        SegmentKind::Link,
                         style,
                         " (",
                         Some(link.destination.clone()),
                     );
                     ctx.current_line.push_segment_with_link(
+                        SegmentKind::Link,
                         style,
                         &link.destination,
                         Some(link.destination.clone()),
                     );
-                    ctx.current_line
-                        .push_segment_with_link(style, ")", Some(link.destination));
+                    ctx.current_line.push_segment_with_link(
+                        SegmentKind::Link,
+                        style,
+                        ")",
+                        Some(link.destination),
+                    );
                 } else if let Some(suffix) = link.hidden_location_suffix.as_deref() {
                     let label_segments = ctx
                         .current_line
@@ -305,12 +333,17 @@ pub(crate) fn handle_end_tag(tag: TagEnd, ctx: &mut MarkdownContext<'_>) {
                         .get(link.label_start_segment_idx..)
                         .unwrap_or(&[]);
                     if !links::label_segments_have_location_suffix(label_segments) {
-                        ctx.current_line
-                            .push_segment_with_link(ctx.current_style(), suffix, None);
+                        ctx.current_line.push_segment_with_link(
+                            SegmentKind::Link,
+                            ctx.current_style(),
+                            suffix,
+                            None,
+                        );
                     }
                 }
             }
             ctx.pop_style();
+            ctx.pop_kind();
         }
         TagEnd::CodeBlock => {} // Handled by code_block module.
         TagEnd::Table => {
@@ -359,6 +392,7 @@ pub(crate) fn handle_end_tag(tag: TagEnd, ctx: &mut MarkdownContext<'_>) {
 
 pub(crate) fn append_text(text: &str, ctx: &mut MarkdownContext<'_>) {
     let style = ctx.current_style();
+    let kind = ctx.current_kind();
     let link_target = ctx.active_link_target();
 
     let mut start = 0usize;
@@ -370,7 +404,7 @@ pub(crate) fn append_text(text: &str, ctx: &mut MarkdownContext<'_>) {
             if !segment.is_empty() {
                 ctx.ensure_prefix();
                 ctx.current_line
-                    .push_segment_with_link(style, segment, link_target.clone());
+                    .push_segment_with_link(kind, style, segment, link_target.clone());
             }
             ctx.lines.push(std::mem::take(ctx.current_line));
             start = idx + 1;
@@ -387,7 +421,7 @@ pub(crate) fn append_text(text: &str, ctx: &mut MarkdownContext<'_>) {
         if !remaining.is_empty() {
             ctx.ensure_prefix();
             ctx.current_line
-                .push_segment_with_link(style, remaining, link_target);
+                .push_segment_with_link(kind, style, remaining, link_target);
         }
     }
 }
@@ -452,13 +486,13 @@ fn ensure_prefix(
     }
 
     for _ in 0..blockquote_depth {
-        current_line.push_segment(base_style.dim().italic(), "│ ");
+        current_line.push_segment(SegmentKind::Border, base_style.dim().italic(), "│ ");
     }
 
     if let Some(prefix) = pending_list_prefix.take() {
-        current_line.push_segment(base_style, &prefix);
+        current_line.push_segment(SegmentKind::Marker, base_style, &prefix);
     } else if !list_continuation_prefix.is_empty() {
-        current_line.push_segment(base_style, list_continuation_prefix);
+        current_line.push_segment(SegmentKind::Marker, base_style, list_continuation_prefix);
     }
 }
 

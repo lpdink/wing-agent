@@ -3,10 +3,17 @@
 //! Renders with thinking color and `⦁ ` prefix, no header or border:
 //!   ⦁ reasoning content in thinking color...
 //!     continuation lines indented...
+//!
+//! Only plain prose (text, headings, list markers) inherits the thinking
+//! color — with the foreground swapped while everything else (modifiers,
+//! background) is preserved. Code-like and decorative segments (inline
+//! code, code blocks, links, borders, gutters) keep their own theme
+//! colors so they stay distinguishable inside reasoning content.
 
 use crate::config::ThemePalette;
 use crate::config::rendering::ThinkingMode;
-use crate::render::markdown::render_markdown_with_width;
+use crate::render::markdown::SegmentKind;
+use crate::render::markdown::render_markdown_lines;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -54,21 +61,17 @@ impl ThinkingBlock {
         let thinking_style = Style::default().fg(palette.thinking);
         let mut lines = Vec::new();
         let md_width = Some(width.saturating_sub(2));
-        let md_lines = render_markdown_with_width(&self.content, md_width, palette);
-        for (i, line) in md_lines.iter().enumerate() {
-            if i == 0 {
-                let mut spans = vec![Span::styled("⦁ ", thinking_style)];
-                for span in &line.spans {
-                    spans.push(Span::styled(span.content.clone(), thinking_style));
-                }
-                lines.push(Line::from(spans));
-            } else {
-                let mut spans = vec![Span::styled("  ", thinking_style)];
-                for span in &line.spans {
-                    spans.push(Span::styled(span.content.clone(), thinking_style));
-                }
-                lines.push(Line::from(spans));
+        let md_lines = render_markdown_lines(&self.content, md_width, palette);
+        for (i, md_line) in md_lines.iter().enumerate() {
+            let prefix = if i == 0 { "⦁ " } else { "  " };
+            let mut spans = vec![Span::styled(prefix.to_string(), thinking_style)];
+            for seg in &md_line.segments {
+                spans.push(Span::styled(
+                    seg.text.clone(),
+                    thinking_segment_style(seg.kind, seg.style, thinking_style),
+                ));
             }
+            lines.push(Line::from(spans));
         }
         lines.push(Line::from(""));
         lines
@@ -84,6 +87,26 @@ impl ThinkingBlock {
     }
 }
 
+/// Map a markdown segment's style into the thinking block's visual layer.
+///
+/// Code-like and decorative elements keep their theme colors so inline code
+/// and code blocks stay distinguishable inside reasoning content; prose
+/// elements inherit the thinking foreground while everything else (bold,
+/// italic, dim, background, underline color) is preserved untouched.
+fn thinking_segment_style(kind: SegmentKind, original: Style, thinking_style: Style) -> Style {
+    match kind {
+        SegmentKind::InlineCode
+        | SegmentKind::CodeBlock
+        | SegmentKind::Link
+        | SegmentKind::Border
+        | SegmentKind::Gutter => original,
+        SegmentKind::Text | SegmentKind::Heading | SegmentKind::Marker => Style {
+            fg: thinking_style.fg,
+            ..original
+        },
+    }
+}
+
 impl Default for ThinkingBlock {
     fn default() -> Self {
         Self::new()
@@ -94,9 +117,27 @@ impl Default for ThinkingBlock {
 mod tests {
     use super::*;
     use crate::config::rendering::ThinkingMode;
+    use ratatui::style::Color;
+    use ratatui::style::Modifier;
 
     fn p() -> ThemePalette {
         ThemePalette::default()
+    }
+
+    /// Collect (text, style) pairs across all rendered spans.
+    fn span_pairs(lines: &[Line<'static>]) -> Vec<(String, Style)> {
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| (s.content.to_string(), s.style))
+            .collect()
+    }
+
+    fn find_span<'a>(pairs: &'a [(String, Style)], needle: &str) -> &'a (String, Style) {
+        pairs
+            .iter()
+            .find(|(text, _)| text.contains(needle))
+            .unwrap_or_else(|| panic!("span containing {needle:?} not found: {pairs:?}"))
     }
 
     #[test]
@@ -114,6 +155,94 @@ mod tests {
         // No header, no border
         assert!(!text.contains("thinking"), "should not have header: {text}");
         assert!(!text.contains("│"), "should not have border: {text}");
+    }
+
+    #[test]
+    fn test_thinking_prose_uses_thinking_color() {
+        let mut block = ThinkingBlock::new();
+        block.append("plain reasoning text");
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80);
+        let pairs = span_pairs(&lines);
+        let (_, style) = find_span(&pairs, "plain reasoning");
+        assert_eq!(style.fg, Some(Color::Gray), "prose fg: {style:?}");
+    }
+
+    #[test]
+    fn test_thinking_keeps_inline_code_color() {
+        let mut block = ThinkingBlock::new();
+        block.append("run `cargo build` now");
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80);
+        let pairs = span_pairs(&lines);
+        // Inline code keeps the accent color.
+        let (_, code_style) = find_span(&pairs, "cargo build");
+        assert_eq!(code_style.fg, Some(Color::Cyan), "code fg: {code_style:?}");
+        // Surrounding prose is recolored to thinking gray.
+        let (_, prose_style) = find_span(&pairs, "run ");
+        assert_eq!(
+            prose_style.fg,
+            Some(Color::Gray),
+            "prose fg: {prose_style:?}"
+        );
+    }
+
+    #[test]
+    fn test_thinking_bold_keeps_modifier_with_gray_fg() {
+        let mut block = ThinkingBlock::new();
+        block.append("this is **important** indeed");
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80);
+        let pairs = span_pairs(&lines);
+        let (_, style) = find_span(&pairs, "important");
+        assert_eq!(style.fg, Some(Color::Gray), "bold fg: {style:?}");
+        assert!(
+            style.add_modifier.contains(Modifier::BOLD),
+            "bold modifier lost: {style:?}"
+        );
+    }
+
+    #[test]
+    fn test_thinking_prose_recolor_preserves_bg_and_sub_modifier() {
+        // Only the foreground is swapped; bg and sub-modifiers (set via
+        // remove_modifier) must survive untouched.
+        let original = Style::default()
+            .bg(Color::Red)
+            .remove_modifier(Modifier::ITALIC);
+        let out = thinking_segment_style(
+            SegmentKind::Text,
+            original,
+            Style::default().fg(Color::Gray),
+        );
+        assert_eq!(out.fg, Some(Color::Gray), "fg not swapped: {out:?}");
+        assert_eq!(out.bg, Some(Color::Red), "bg lost: {out:?}");
+        assert!(
+            out.sub_modifier.contains(Modifier::ITALIC),
+            "sub_modifier lost: {out:?}"
+        );
+    }
+
+    #[test]
+    fn test_thinking_code_kind_keeps_style_verbatim() {
+        let original = Style::default().fg(Color::Cyan).bold();
+        for kind in [
+            SegmentKind::InlineCode,
+            SegmentKind::CodeBlock,
+            SegmentKind::Link,
+            SegmentKind::Border,
+            SegmentKind::Gutter,
+        ] {
+            let out = thinking_segment_style(kind, original, Style::default().fg(Color::Gray));
+            assert_eq!(out, original, "kind {kind:?} should keep its style");
+        }
+    }
+
+    #[test]
+    fn test_thinking_keeps_code_block_colors() {
+        let mut block = ThinkingBlock::new();
+        block.append("like this:\n```\nlet x = 1;\n```");
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80);
+        let pairs = span_pairs(&lines);
+        // Code block content keeps the accent color, not thinking gray.
+        let (_, style) = find_span(&pairs, "let x = 1;");
+        assert_eq!(style.fg, Some(Color::Cyan), "code block fg: {style:?}");
     }
 
     #[test]

@@ -18,6 +18,7 @@ use syntect::parsing::SyntaxSet;
 
 use super::markdown::types::MarkdownLine;
 use super::markdown::types::MarkdownTheme;
+use super::markdown::types::SegmentKind;
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
@@ -67,7 +68,7 @@ pub fn highlight_single_line(line: &str, lang: &str) -> Option<MarkdownLine> {
     let mut result = MarkdownLine::default();
     for (style, text) in ops {
         let ratatui_style = convert_syntect_style(style);
-        result.push_segment(ratatui_style, text);
+        result.push_segment(SegmentKind::CodeBlock, ratatui_style, text);
     }
     Some(result)
 }
@@ -102,7 +103,7 @@ pub fn highlight_code_lines(
         let mut line = MarkdownLine::default();
         for (style, text) in ops {
             let ratatui_style = convert_syntect_style(style);
-            line.push_segment(ratatui_style, text);
+            line.push_segment(SegmentKind::CodeBlock, ratatui_style, text);
         }
         lines.push(line);
     }

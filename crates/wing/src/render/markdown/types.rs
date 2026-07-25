@@ -12,28 +12,67 @@ use unicode_width::UnicodeWidthStr;
 use crate::config::ThemePalette;
 
 // ============================================================
+// SegmentKind — semantic element origin of a segment
+// ============================================================
+
+/// Semantic element kind a segment originates from.
+///
+/// Lets downstream renderers make element-aware decisions (e.g. the thinking
+/// block recolors prose but preserves code colors) without reverse-engineering
+/// styles. Defaults to [`SegmentKind::Text`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SegmentKind {
+    /// Plain prose (default).
+    #[default]
+    Text,
+    /// Heading text.
+    Heading,
+    /// Inline code span (`` `code` ``).
+    InlineCode,
+    /// Fenced code block content, including syntax-highlighted and diff lines.
+    CodeBlock,
+    /// Link label or rendered URL.
+    Link,
+    /// List bullet, ordered-list number, or task-list marker.
+    Marker,
+    /// Decorative chrome: code block frames, table rules, horizontal rules,
+    /// blockquote bars.
+    Border,
+    /// Code block line-number gutter.
+    Gutter,
+}
+
+// ============================================================
 // MarkdownSegment — a styled text fragment
 // ============================================================
 
 /// A single styled text segment within a markdown line.
 #[derive(Clone, Debug)]
 pub struct MarkdownSegment {
+    pub kind: SegmentKind,
     pub style: Style,
     pub text: String,
     pub link_target: Option<String>,
 }
 
 impl MarkdownSegment {
-    pub fn new(style: Style, text: impl Into<String>) -> Self {
+    pub fn new(kind: SegmentKind, style: Style, text: impl Into<String>) -> Self {
         Self {
+            kind,
             style,
             text: text.into(),
             link_target: None,
         }
     }
 
-    pub fn with_link(style: Style, text: impl Into<String>, link_target: Option<String>) -> Self {
+    pub fn with_link(
+        kind: SegmentKind,
+        style: Style,
+        text: impl Into<String>,
+        link_target: Option<String>,
+    ) -> Self {
         Self {
+            kind,
             style,
             text: text.into(),
             link_target,
@@ -62,15 +101,19 @@ pub struct MarkdownLine {
 }
 
 impl MarkdownLine {
-    /// Append a segment, merging with the previous if styles match.
-    pub fn push_segment(&mut self, style: Style, text: &str) {
-        self.push_segment_with_link(style, text, None);
+    /// Append a segment. Every callsite must declare the segment's
+    /// [`SegmentKind`] explicitly — kind drives element-aware rendering
+    /// downstream (e.g. thinking recolors prose but not code), so there is
+    /// no default: use [`SegmentKind::Text`] for plain prose.
+    pub fn push_segment(&mut self, kind: SegmentKind, style: Style, text: &str) {
+        self.push_segment_with_link(kind, style, text, None);
     }
 
     /// Append a segment with an optional link target, merging adjacent
-    /// segments that share the same style and link target.
+    /// segments that share the same kind, style, and link target.
     pub fn push_segment_with_link(
         &mut self,
+        kind: SegmentKind,
         style: Style,
         text: &str,
         link_target: Option<String>,
@@ -78,8 +121,9 @@ impl MarkdownLine {
         if text.is_empty() {
             return;
         }
-        // Merge with previous segment if style and link match.
+        // Merge with previous segment if kind, style, and link match.
         if let Some(last) = self.segments.last_mut()
+            && last.kind == kind
             && last.style == style
             && last.link_target == link_target
         {
@@ -87,7 +131,7 @@ impl MarkdownLine {
             return;
         }
         self.segments
-            .push(MarkdownSegment::with_link(style, text, link_target));
+            .push(MarkdownSegment::with_link(kind, style, text, link_target));
     }
 
     /// Whether this line contains only whitespace segments.
@@ -239,28 +283,28 @@ mod tests {
 
     #[test]
     fn segment_width_ascii() {
-        let seg = MarkdownSegment::new(Style::new(), "hello");
+        let seg = MarkdownSegment::new(SegmentKind::Text, Style::new(), "hello");
         assert_eq!(seg.width(), 5);
     }
 
     #[test]
     fn segment_width_cjk() {
-        let seg = MarkdownSegment::new(Style::new(), "你好");
+        let seg = MarkdownSegment::new(SegmentKind::Text, Style::new(), "你好");
         assert_eq!(seg.width(), 4);
     }
 
     #[test]
     fn segment_is_whitespace() {
-        assert!(MarkdownSegment::new(Style::new(), "   ").is_whitespace());
-        assert!(!MarkdownSegment::new(Style::new(), "hi").is_whitespace());
+        assert!(MarkdownSegment::new(SegmentKind::Text, Style::new(), "   ").is_whitespace());
+        assert!(!MarkdownSegment::new(SegmentKind::Text, Style::new(), "hi").is_whitespace());
     }
 
     #[test]
     fn line_push_merges_same_style() {
         let mut line = MarkdownLine::default();
         let style = Style::new().bold();
-        line.push_segment(style, "hello ");
-        line.push_segment(style, "world");
+        line.push_segment(SegmentKind::Text, style, "hello ");
+        line.push_segment(SegmentKind::Text, style, "world");
         assert_eq!(line.segments.len(), 1);
         assert_eq!(line.segments[0].text, "hello world");
     }
@@ -268,8 +312,8 @@ mod tests {
     #[test]
     fn line_push_no_merge_different_style() {
         let mut line = MarkdownLine::default();
-        line.push_segment(Style::new().bold(), "bold");
-        line.push_segment(Style::new().italic(), "italic");
+        line.push_segment(SegmentKind::Text, Style::new().bold(), "bold");
+        line.push_segment(SegmentKind::Text, Style::new().italic(), "italic");
         assert_eq!(line.segments.len(), 2);
     }
 
@@ -277,15 +321,37 @@ mod tests {
     fn line_push_no_merge_different_link() {
         let mut line = MarkdownLine::default();
         let style = Style::new();
-        line.push_segment_with_link(style, "a", Some("url1".into()));
-        line.push_segment_with_link(style, "b", Some("url2".into()));
+        line.push_segment_with_link(SegmentKind::Text, style, "a", Some("url1".into()));
+        line.push_segment_with_link(SegmentKind::Text, style, "b", Some("url2".into()));
         assert_eq!(line.segments.len(), 2);
+    }
+
+    #[test]
+    fn line_push_no_merge_different_kind() {
+        let mut line = MarkdownLine::default();
+        let style = Style::new();
+        line.push_segment(SegmentKind::Text, style, "plain ");
+        line.push_segment(SegmentKind::Marker, style, "marker");
+        assert_eq!(line.segments.len(), 2);
+        assert_eq!(line.segments[0].kind, SegmentKind::Text);
+        assert_eq!(line.segments[1].kind, SegmentKind::Marker);
+    }
+
+    #[test]
+    fn line_push_merges_same_kind() {
+        let mut line = MarkdownLine::default();
+        let style = Style::new();
+        line.push_segment(SegmentKind::InlineCode, style, "foo ");
+        line.push_segment(SegmentKind::InlineCode, style, "bar");
+        assert_eq!(line.segments.len(), 1);
+        assert_eq!(line.segments[0].text, "foo bar");
+        assert_eq!(line.segments[0].kind, SegmentKind::InlineCode);
     }
 
     #[test]
     fn line_push_ignores_empty_text() {
         let mut line = MarkdownLine::default();
-        line.push_segment(Style::new(), "");
+        line.push_segment(SegmentKind::Text, Style::new(), "");
         assert!(line.segments.is_empty());
     }
 
@@ -293,33 +359,33 @@ mod tests {
     fn line_is_empty() {
         let mut line = MarkdownLine::default();
         assert!(line.is_empty());
-        line.push_segment(Style::new(), "   ");
+        line.push_segment(SegmentKind::Text, Style::new(), "   ");
         assert!(line.is_empty());
-        line.push_segment(Style::new(), "hi");
+        line.push_segment(SegmentKind::Text, Style::new(), "hi");
         assert!(!line.is_empty());
     }
 
     #[test]
     fn line_width_mixed() {
         let mut line = MarkdownLine::default();
-        line.push_segment(Style::new(), "ab"); // 2 cols
-        line.push_segment(Style::new(), "你好"); // 4 cols
+        line.push_segment(SegmentKind::Text, Style::new(), "ab"); // 2 cols
+        line.push_segment(SegmentKind::Text, Style::new(), "你好"); // 4 cols
         assert_eq!(line.width(), 6);
     }
 
     #[test]
     fn line_to_plain() {
         let mut line = MarkdownLine::default();
-        line.push_segment(Style::new().bold(), "hello ");
-        line.push_segment(Style::new().italic(), "world");
+        line.push_segment(SegmentKind::Text, Style::new().bold(), "hello ");
+        line.push_segment(SegmentKind::Text, Style::new().italic(), "world");
         assert_eq!(line.to_plain(), "hello world");
     }
 
     #[test]
     fn line_to_ratatui_line() {
         let mut md_line = MarkdownLine::default();
-        md_line.push_segment(Style::new().bold(), "bold");
-        md_line.push_segment(Style::new(), " normal");
+        md_line.push_segment(SegmentKind::Text, Style::new().bold(), "bold");
+        md_line.push_segment(SegmentKind::Text, Style::new(), " normal");
 
         let ratatui_line: Line<'static> = md_line.into();
         assert_eq!(ratatui_line.spans.len(), 2);

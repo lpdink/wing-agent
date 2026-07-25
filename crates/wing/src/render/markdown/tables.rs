@@ -22,6 +22,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::types::MarkdownLine;
 use super::types::MarkdownSegment;
+use super::types::SegmentKind;
 
 /// Spaces between adjacent columns.
 const COLUMN_GAP: usize = 2;
@@ -336,9 +337,13 @@ fn render_separator(col_widths: &[usize], ch: char, style: Style) -> MarkdownLin
     let mut line = MarkdownLine::default();
     let segment = ch.to_string();
     for (i, &w) in col_widths.iter().enumerate() {
-        line.push_segment(style, &segment.repeat(w + CELL_PADDING * 2));
+        line.push_segment(
+            SegmentKind::Border,
+            style,
+            &segment.repeat(w + CELL_PADDING * 2),
+        );
         if i + 1 < col_widths.len() {
-            line.push_segment(style, &" ".repeat(COLUMN_GAP));
+            line.push_segment(SegmentKind::Border, style, &" ".repeat(COLUMN_GAP));
         }
     }
     line
@@ -394,20 +399,21 @@ fn render_row(
             };
             let is_last = col == last;
 
-            line.push_segment(base_style, &" ".repeat(CELL_PADDING));
+            // Padding is layout whitespace within the prose area.
+            line.push_segment(SegmentKind::Text, base_style, &" ".repeat(CELL_PADDING));
             if left_pad > 0 {
-                line.push_segment(base_style, &" ".repeat(left_pad));
+                line.push_segment(SegmentKind::Text, base_style, &" ".repeat(left_pad));
             }
             for seg in &segments {
                 let style = if bold { seg.style.bold() } else { seg.style };
-                line.push_segment(style, &seg.text);
+                line.push_segment(seg.kind, style, &seg.text);
             }
             if !is_last {
                 if right_pad > 0 {
-                    line.push_segment(base_style, &" ".repeat(right_pad));
+                    line.push_segment(SegmentKind::Text, base_style, &" ".repeat(right_pad));
                 }
-                line.push_segment(base_style, &" ".repeat(CELL_PADDING));
-                line.push_segment(base_style, &" ".repeat(COLUMN_GAP));
+                line.push_segment(SegmentKind::Text, base_style, &" ".repeat(CELL_PADDING));
+                line.push_segment(SegmentKind::Text, base_style, &" ".repeat(COLUMN_GAP));
             }
         }
         out.push(line);
@@ -440,13 +446,17 @@ fn wrap_cell(cell: &MarkdownLine, width: usize) -> Vec<Vec<MarkdownSegment>> {
 
             if current_width + word_width <= width {
                 // Fits on current line.
-                current_line.push(MarkdownSegment::new(seg.style, word));
+                current_line.push(MarkdownSegment::new(seg.kind, seg.style, word));
                 current_width += word_width;
             } else if word_width <= width {
                 // Word fits on a new line.
                 lines.push(std::mem::take(&mut current_line));
                 let trimmed = word.trim_start();
-                current_line.push(MarkdownSegment::new(seg.style, trimmed.to_string()));
+                current_line.push(MarkdownSegment::new(
+                    seg.kind,
+                    seg.style,
+                    trimmed.to_string(),
+                ));
                 current_width = UnicodeWidthStr::width(trimmed);
             } else {
                 // Word is wider than column — hard break it.
@@ -460,7 +470,11 @@ fn wrap_cell(cell: &MarkdownLine, width: usize) -> Vec<Vec<MarkdownSegment>> {
                     }
                     let (head, tail) = split_str_by_width(remaining, space_left);
                     if !head.is_empty() {
-                        current_line.push(MarkdownSegment::new(seg.style, head.to_string()));
+                        current_line.push(MarkdownSegment::new(
+                            seg.kind,
+                            seg.style,
+                            head.to_string(),
+                        ));
                         current_width += UnicodeWidthStr::width(head);
                     }
                     if !tail.is_empty() {
@@ -539,7 +553,7 @@ mod tests {
 
     fn make_line(text: &str) -> MarkdownLine {
         let mut line = MarkdownLine::default();
-        line.push_segment(Style::new(), text);
+        line.push_segment(SegmentKind::Text, Style::new(), text);
         line
     }
 

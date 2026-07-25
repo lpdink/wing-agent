@@ -23,6 +23,7 @@ pub mod types;
 pub use types::MarkdownLine;
 pub use types::MarkdownSegment;
 pub use types::MarkdownTheme;
+pub use types::SegmentKind;
 
 // Re-export utilities used by other modules.
 pub use types::truncate_to_display_width;
@@ -55,15 +56,29 @@ pub fn render_markdown_with_width(
     width: Option<u16>,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
+    render_markdown_lines(text, width, palette)
+        .into_iter()
+        .map(Line::from)
+        .collect()
+}
+
+/// Render markdown text to intermediate [`MarkdownLine`]s, preserving each
+/// segment's [`SegmentKind`].
+///
+/// Used by callers that need element-aware post-processing — e.g. the
+/// thinking block recolors prose segments while preserving code colors.
+pub fn render_markdown_lines(
+    text: &str,
+    width: Option<u16>,
+    palette: &ThemePalette,
+) -> Vec<MarkdownLine> {
     let theme = MarkdownTheme::from_palette(palette);
     let base_style = theme.base;
 
     // Pre-process: ensure code fences are on their own line.
     let text = ensure_fences_on_own_line(text);
 
-    let md_lines = render_markdown_to_lines(&text, base_style, &theme, width);
-
-    md_lines.into_iter().map(Line::from).collect()
+    render_markdown_to_lines(&text, base_style, &theme, width)
 }
 
 /// Ensure fenced code block delimiters (```) are on their own line.
@@ -139,6 +154,7 @@ fn render_markdown_to_lines(
     let mut lines = Vec::new();
     let mut current_line = MarkdownLine::default();
     let mut style_stack = vec![base_style];
+    let mut kind_stack = vec![SegmentKind::Text];
     let mut blockquote_depth = 0usize;
     let mut list_stack: Vec<ListState> = Vec::new();
     let mut list_continuation_prefix = String::new();
@@ -165,6 +181,7 @@ fn render_markdown_to_lines(
 
         let mut ctx = MarkdownContext {
             style_stack: &mut style_stack,
+            kind_stack: &mut kind_stack,
             blockquote_depth: &mut blockquote_depth,
             list_stack: &mut list_stack,
             list_continuation_prefix: &mut list_continuation_prefix,
@@ -186,6 +203,7 @@ fn render_markdown_to_lines(
             Event::Code(code) => {
                 ctx.ensure_prefix();
                 ctx.current_line.push_segment_with_link(
+                    SegmentKind::InlineCode,
                     inline_code_style(theme, base_style),
                     &code,
                     ctx.active_link_target(),
@@ -195,14 +213,17 @@ fn render_markdown_to_lines(
             Event::Rule => {
                 ctx.flush_line();
                 let mut line = MarkdownLine::default();
-                line.push_segment(base_style.dim(), &"―".repeat(32));
+                line.push_segment(SegmentKind::Border, base_style.dim(), &"―".repeat(32));
                 ctx.lines.push(line);
                 push_blank_line(ctx.lines);
             }
             Event::TaskListMarker(checked) => {
                 ctx.ensure_prefix();
-                ctx.current_line
-                    .push_segment(base_style, if checked { "[x] " } else { "[ ] " });
+                ctx.current_line.push_segment(
+                    SegmentKind::Marker,
+                    base_style,
+                    if checked { "[x] " } else { "[ ] " },
+                );
             }
             Event::Html(html) | Event::InlineHtml(html) => append_text(&html, &mut ctx),
             _ => {}
@@ -246,6 +267,134 @@ mod tests {
 
     fn join_lines(lines: &[String]) -> String {
         lines.join("\n")
+    }
+
+    /// Flatten rendered markdown into (kind, text) segment pairs.
+    fn segment_pairs(md: &str) -> Vec<(SegmentKind, String)> {
+        render_markdown_lines(md, None, &dp())
+            .into_iter()
+            .flat_map(|line| line.segments)
+            .map(|seg| (seg.kind, seg.text))
+            .collect()
+    }
+
+    fn find_segment(pairs: &[(SegmentKind, String)], needle: &str) -> SegmentKind {
+        pairs
+            .iter()
+            .find(|(_, text)| text.contains(needle))
+            .unwrap_or_else(|| panic!("segment containing {needle:?} not found: {pairs:?}"))
+            .0
+    }
+
+    // ============================================================
+    // Segment kind tagging
+    // ============================================================
+
+    #[test]
+    fn segment_kinds_inline_elements() {
+        let pairs = segment_pairs("use `cargo build` and **bold** text");
+        assert_eq!(find_segment(&pairs, "cargo build"), SegmentKind::InlineCode);
+        assert_eq!(find_segment(&pairs, "bold"), SegmentKind::Text);
+        assert_eq!(find_segment(&pairs, "use "), SegmentKind::Text);
+    }
+
+    #[test]
+    fn segment_kinds_heading() {
+        let pairs = segment_pairs("# Title here");
+        assert_eq!(find_segment(&pairs, "Title here"), SegmentKind::Heading);
+    }
+
+    #[test]
+    fn segment_kinds_link() {
+        let pairs = segment_pairs("see [docs](https://example.com) now");
+        assert_eq!(find_segment(&pairs, "docs"), SegmentKind::Link);
+        assert_eq!(
+            find_segment(&pairs, "https://example.com"),
+            SegmentKind::Link
+        );
+        assert_eq!(find_segment(&pairs, "see "), SegmentKind::Text);
+    }
+
+    #[test]
+    fn segment_kinds_code_block() {
+        let pairs = segment_pairs("```\nlet x = 1;\n```");
+        assert_eq!(find_segment(&pairs, "let x = 1;"), SegmentKind::CodeBlock);
+        assert_eq!(find_segment(&pairs, "┌"), SegmentKind::Border);
+        assert_eq!(find_segment(&pairs, "└"), SegmentKind::Border);
+    }
+
+    #[test]
+    fn segment_kinds_list_and_rule() {
+        let pairs = segment_pairs("- item one\n\n---");
+        assert_eq!(find_segment(&pairs, "•"), SegmentKind::Marker);
+        assert_eq!(find_segment(&pairs, "item one"), SegmentKind::Text);
+        assert_eq!(find_segment(&pairs, "―"), SegmentKind::Border);
+    }
+
+    #[test]
+    fn segment_kinds_blockquote_bar() {
+        let pairs = segment_pairs("> quoted");
+        assert_eq!(find_segment(&pairs, "│"), SegmentKind::Border);
+        assert_eq!(find_segment(&pairs, "quoted"), SegmentKind::Text);
+    }
+
+    #[test]
+    fn segment_kinds_code_inside_link_is_code() {
+        // Innermost element wins: code inside a link keeps InlineCode kind.
+        let pairs = segment_pairs("[`readme`](https://example.com)");
+        assert_eq!(find_segment(&pairs, "readme"), SegmentKind::InlineCode);
+    }
+
+    #[test]
+    fn segment_kinds_table_preserves_kinds_through_wrap() {
+        // Narrow width exercises wrap_cell's word-wrap and hard-break paths;
+        // kinds must survive both, plus the render_row passthrough.
+        let md = "| Code | Desc |\n|---|---|\n| `snip` then `averylongcodetokenwhichcannotfit` | some long prose content that will wrap over lines |";
+        let pairs: Vec<(SegmentKind, String)> = render_markdown_lines(md, Some(40), &dp())
+            .into_iter()
+            .flat_map(|line| line.segments)
+            .map(|seg| (seg.kind, seg.text))
+            .collect();
+
+        // Short inline code survives the cell wrap.
+        assert_eq!(find_segment(&pairs, "snip"), SegmentKind::InlineCode);
+
+        // The over-wide code token is hard-broken; every fragment must keep
+        // the InlineCode kind so the token reconstructs from code segments.
+        let code_text: String = pairs
+            .iter()
+            .filter(|(kind, _)| *kind == SegmentKind::InlineCode)
+            .map(|(_, text)| text.as_str())
+            .collect();
+        assert!(
+            code_text.contains("averylongcodetokenwhichcannotfit"),
+            "code fragments lost kind during hard break: {pairs:?}"
+        );
+
+        // Word-wrapped prose stays Text.
+        assert_eq!(find_segment(&pairs, "prose"), SegmentKind::Text);
+
+        // Table rules are Border.
+        assert_eq!(find_segment(&pairs, "━"), SegmentKind::Border);
+    }
+
+    #[test]
+    fn segment_kinds_code_block_gutter() {
+        // A language-tagged block gets line numbers (Gutter) next to
+        // highlighted code (CodeBlock).
+        let pairs = segment_pairs("```rust\nlet x = 1;\n```");
+        assert!(
+            pairs
+                .iter()
+                .any(|(kind, text)| *kind == SegmentKind::Gutter && text.contains('1')),
+            "line number gutter missing: {pairs:?}"
+        );
+        assert!(
+            pairs
+                .iter()
+                .any(|(kind, _)| *kind == SegmentKind::CodeBlock),
+            "code content missing: {pairs:?}"
+        );
     }
 
     #[test]

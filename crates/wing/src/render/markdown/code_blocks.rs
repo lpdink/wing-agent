@@ -6,7 +6,7 @@
 use ratatui::style::Style;
 
 use super::parsing::{flush_current_line, push_blank_line};
-use super::types::{MarkdownLine, MarkdownSegment, MarkdownTheme};
+use super::types::{MarkdownLine, MarkdownSegment, MarkdownTheme, SegmentKind};
 use crate::render::syntax::highlight_code_lines;
 
 /// Tracks the state of an in-progress fenced code block.
@@ -103,7 +103,11 @@ fn render_code_block(state: &CodeBlockState, env: &CodeBlockRenderEnv<'_>) -> Ve
         "┌────────".to_string()
     };
     lines.push(MarkdownLine {
-        segments: vec![MarkdownSegment::new(border_style, label)],
+        segments: vec![MarkdownSegment::new(
+            SegmentKind::Border,
+            border_style,
+            label,
+        )],
     });
 
     // Determine if this is a diff block.
@@ -138,9 +142,9 @@ fn render_code_block(state: &CodeBlockState, env: &CodeBlockRenderEnv<'_>) -> Ve
             let mut line = build_prefix(env);
             if show_line_numbers {
                 let num = format!("{:>width$}  ", i + 1, width = number_width);
-                line.push_segment(env.theme.code_block_gutter, &num);
+                line.push_segment(SegmentKind::Gutter, env.theme.code_block_gutter, &num);
             }
-            line.push_segment(border_style, "│ ");
+            line.push_segment(SegmentKind::Border, border_style, "│ ");
             for seg in hl_line.segments {
                 line.segments.push(seg);
             }
@@ -154,28 +158,29 @@ fn render_code_block(state: &CodeBlockState, env: &CodeBlockRenderEnv<'_>) -> Ve
             // Emit file summary line if we have a path.
             if let Some(ref path) = block.path {
                 let mut line = build_prefix(env);
-                line.push_segment(border_style, "│ ");
+                line.push_segment(SegmentKind::Border, border_style, "│ ");
                 let summary = format!("▸ Edit {path} (+{} -{})", block.additions, block.deletions);
-                line.push_segment(env.theme.diff_hunk, &summary);
+                line.push_segment(SegmentKind::CodeBlock, env.theme.diff_hunk, &summary);
                 lines.push(line);
             }
 
             // Emit diff lines.
             for src_line in &block.lines {
                 let mut line = build_prefix(env);
-                line.push_segment(border_style, "│ ");
+                line.push_segment(SegmentKind::Border, border_style, "│ ");
                 let trimmed = src_line.trim_start();
-                if trimmed.is_empty() {
-                    line.push_segment(env.theme.code_block, src_line);
+                let style = if trimmed.is_empty() {
+                    env.theme.code_block
                 } else if trimmed.starts_with('+') {
-                    line.push_segment(env.theme.diff_add, src_line);
+                    env.theme.diff_add
                 } else if trimmed.starts_with('-') {
-                    line.push_segment(env.theme.diff_del, src_line);
+                    env.theme.diff_del
                 } else if trimmed.starts_with("@@") {
-                    line.push_segment(env.theme.diff_hunk, src_line);
+                    env.theme.diff_hunk
                 } else {
-                    line.push_segment(env.theme.dimmed, src_line);
-                }
+                    env.theme.dimmed
+                };
+                line.push_segment(SegmentKind::CodeBlock, style, src_line);
                 lines.push(line);
             }
         }
@@ -185,17 +190,21 @@ fn render_code_block(state: &CodeBlockState, env: &CodeBlockRenderEnv<'_>) -> Ve
             let mut line = build_prefix(env);
             if show_line_numbers {
                 let num = format!("{:>width$}  ", i + 1, width = number_width);
-                line.push_segment(env.theme.code_block_gutter, &num);
+                line.push_segment(SegmentKind::Gutter, env.theme.code_block_gutter, &num);
             }
-            line.push_segment(border_style, "│ ");
-            line.push_segment(env.theme.code_block, src_line);
+            line.push_segment(SegmentKind::Border, border_style, "│ ");
+            line.push_segment(SegmentKind::CodeBlock, env.theme.code_block, src_line);
             lines.push(line);
         }
     }
 
     // Bottom border.
     lines.push(MarkdownLine {
-        segments: vec![MarkdownSegment::new(border_style, "└────────")],
+        segments: vec![MarkdownSegment::new(
+            SegmentKind::Border,
+            border_style,
+            "└────────",
+        )],
     });
 
     lines
@@ -295,10 +304,14 @@ fn group_diff_by_file<'a>(source_lines: &[&'a str]) -> Vec<DiffFileBlock<'a>> {
 fn build_prefix(env: &CodeBlockRenderEnv<'_>) -> MarkdownLine {
     let mut line = MarkdownLine::default();
     for _ in 0..env.blockquote_depth {
-        line.push_segment(env.base_style.dim().italic(), "│ ");
+        line.push_segment(SegmentKind::Border, env.base_style.dim().italic(), "│ ");
     }
     if !env.list_continuation_prefix.is_empty() {
-        line.push_segment(env.base_style, env.list_continuation_prefix);
+        line.push_segment(
+            SegmentKind::Marker,
+            env.base_style,
+            env.list_continuation_prefix,
+        );
     }
     line
 }
