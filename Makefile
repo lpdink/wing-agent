@@ -7,7 +7,6 @@ run:
 
 install:
 	cd crates/wing && maturin develop --release
-	cd crates/wing-json && maturin develop --release
 	uv sync
 
 check: check-python check-rust

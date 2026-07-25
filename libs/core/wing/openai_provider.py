@@ -10,7 +10,6 @@ from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk, Choice
 
 from wing.common.logger import log
-from wing.common.partial_json import parse_streaming_json
 from wing.common.with_retry import with_retry
 from wing.config import get_config, get_headers
 from wing.schema import (
@@ -255,8 +254,10 @@ class OpenAIProvider:
         Returns:
             (final_tool_calls, streaming_deltas)
             - final_tool_calls: populated only when finish_reason == "tool_calls"
-            - streaming_deltas: partial args snapshots for UI streaming
-              (only when current chunk carries tool call data)
+            - streaming_deltas: raw args fragments for UI streaming — the
+              runtime forwards provider text as-is; partial JSON parsing is
+              a frontend concern. Each delta carries only the text accumulated
+              since the previous delta for that call (first delta = full prefix).
         """
         has_tool_delta = bool(choice.delta.tool_calls)
 
@@ -270,21 +271,26 @@ class OpenAIProvider:
                 call.args_buffer += tc.function.arguments
 
         # Build streaming deltas only when this chunk carries tool data.
-        # Guard: skip calls without id (some providers send args before id).
+        # Guard: skip calls without id (some providers send args before id) —
+        # the buffer keeps accumulating and flushes as a full prefix once the
+        # id arrives (emitted_len is still 0).
         deltas: list[ToolCallDelta] | None = None
         if has_tool_delta and pending:
             is_final = choice.finish_reason == "tool_calls"
             deltas = []
             for call in pending.values():
-                if call.id and call.args_buffer:
-                    deltas.append(
-                        ToolCallDelta(
-                            id=call.id,
-                            name=call.name,
-                            partial_args=parse_streaming_json(call.args_buffer),
-                            is_final=is_final,
-                        )
+                fragment = call.args_buffer[call.emitted_len :]
+                if not call.id or not fragment:
+                    continue
+                call.emitted_len = len(call.args_buffer)
+                deltas.append(
+                    ToolCallDelta(
+                        id=call.id,
+                        name=call.name,
+                        args_fragment=fragment,
+                        is_final=is_final,
                     )
+                )
             if not deltas:
                 deltas = None
 
