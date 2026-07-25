@@ -781,16 +781,21 @@ fn render_composer_tail(
     }
 
     // Blit the visible slice [skip .. skip + vis) into the main buffer.
-    // TODO: optimize with row-level copy if tail grows significantly.
+    // Row-level `clone_from_slice` copies each visible row in one shot,
+    // reusing destination cell allocations and skipping per-cell `Index`
+    // bounds checks (Cell is Clone, not Copy). Bounds mirror the naive
+    // per-cell loop exactly: x spans [0, width) in tbuf and
+    // [content_area.x, content_area.x + width) in buf.
+    let w = width as usize;
     for dy in 0..vis {
         let dst_y = render_y + dy as u16;
         if dst_y >= content_area.bottom() {
             break;
         }
         let src_y = (skip + dy) as u16;
-        for x in 0..width {
-            buf[(content_area.x + x, dst_y)] = tbuf[(x, src_y)].clone();
-        }
+        let src = tbuf.index_of(0, src_y);
+        let dst = buf.index_of(content_area.x, dst_y);
+        buf.content[dst..dst + w].clone_from_slice(&tbuf.content[src..src + w]);
     }
 
     // Record the on-screen input text rect for cursor positioning.
