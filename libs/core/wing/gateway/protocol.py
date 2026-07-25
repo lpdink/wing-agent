@@ -87,6 +87,13 @@ class CreateSessionRequest(BaseModel):
     )
     workspace: str | None = Field(default=None, description="工作目录路径")
     agent: AgentOverride | None = Field(default=None, description="Agent 参数覆盖")
+    backend: str | None = Field(
+        default=None,
+        description=(
+            "存储后端：file（默认，落盘）| memory（session 状态不落盘，仅本次进程有效；"
+            "注意 metrics 审计文件不受此约束）"
+        ),
+    )
 
 
 class ResumeSessionRequest(BaseModel):
@@ -155,6 +162,7 @@ class CreateSessionResponse(BaseModel):
     session_id: str = Field(description="新创建的 session ID")
     template_name: str = Field(description="使用的模板名称")
     workspace: str | None = Field(default=None, description="工作目录路径")
+    backend: str = Field(default="file", description="存储后端（file/memory）")
 
 
 class ResumeSessionResponse(BaseModel):

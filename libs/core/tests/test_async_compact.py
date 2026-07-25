@@ -12,6 +12,7 @@ import pytest
 
 from wing.compactor import Compactor
 from wing.common.tracked_list import TrackedList
+from wing.store import FileMessageLog
 from wing.context_manager import ContextManager, PendingCompact
 from wing.schema import LLMResponse, LLMUsage, Message
 
@@ -33,7 +34,7 @@ def _make_cm(
     compactor: Compactor | None = None,
     session_id: str = "test-async",
 ) -> ContextManager:
-    messages: TrackedList[Message] = TrackedList(tmp_dir / session_id)
+    messages: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir / session_id))
     if compactor is None:
         compactor = Compactor(
             context_window_tokens=100_000,

@@ -36,6 +36,7 @@ def mock_runtime():
     mock_session.session_id = "test-session-id"
     mock_session.template_name = "default"
     mock_session.session_workspace = "/tmp"
+    mock_session.store.name = "file"
     runtime.create_session.return_value = mock_session
 
     # resume_session 默认返回 mock session
@@ -136,8 +137,9 @@ class TestSessionCreate:
         data = resp.json()
         assert data["session_id"] == "test-session-id"
         assert data["template_name"] == "default"
+        assert data["backend"] == "file"
         mock_runtime.create_session.assert_called_once_with(
-            template_name=None, workspace=None, agent_override=None
+            template_name=None, workspace=None, agent_override=None, backend=None
         )
 
     def test_create_with_template(self, client: TestClient, mock_runtime):
@@ -148,7 +150,7 @@ class TestSessionCreate:
         )
         assert resp.status_code == 200
         mock_runtime.create_session.assert_called_once_with(
-            template_name="coder", workspace="/ws", agent_override=None
+            template_name="coder", workspace="/ws", agent_override=None, backend=None
         )
 
     def test_create_template_not_found(self, client: TestClient, mock_runtime):
@@ -156,6 +158,23 @@ class TestSessionCreate:
         mock_runtime.create_session.side_effect = ValueError("template 'xxx' not found")
         resp = client.post("/api/session/create", json={"template_name": "xxx"})
         assert resp.status_code == 400
+
+    def test_create_with_backend(self, client: TestClient, mock_runtime):
+        """backend 参数透传。"""
+        resp = client.post("/api/session/create", json={"backend": "memory"})
+        assert resp.status_code == 200
+        mock_runtime.create_session.assert_called_once_with(
+            template_name=None, workspace=None, agent_override=None, backend="memory"
+        )
+
+    def test_create_unknown_backend_returns_400(self, client: TestClient, mock_runtime):
+        """未知 backend 返回 400。"""
+        mock_runtime.create_session.side_effect = ValueError(
+            "Unknown storage backend 'redis'. Available: ['file', 'memory']"
+        )
+        resp = client.post("/api/session/create", json={"backend": "redis"})
+        assert resp.status_code == 400
+        assert "redis" in resp.json()["detail"]
 
     def test_create_with_agent_override(self, client: TestClient, mock_runtime):
         """创建 session 时传入 agent override。"""

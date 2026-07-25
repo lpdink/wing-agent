@@ -66,6 +66,9 @@ pub struct CreateSessionRequest {
     pub workspace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentOverride>,
+    /// Storage backend: "file" (default, durable) | "memory" (ephemeral).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -136,6 +139,10 @@ pub struct CreateSessionResponse {
     pub session_id: String,
     pub template_name: String,
     pub workspace: Option<String>,
+    /// Storage backend ("file" | "memory"). Optional for backward
+    /// compatibility with gateways predating backend selection.
+    #[serde(default)]
+    pub backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

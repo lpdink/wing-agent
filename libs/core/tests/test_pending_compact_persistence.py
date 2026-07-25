@@ -1,4 +1,7 @@
-"""Tests for pending_compact.json persistence — write, read, delete, corrupt recovery."""
+"""Tests for pending compact persistence — write, read, delete, corrupt recovery.
+
+pending compact 经由 MessageLog 的 aux kv 通道持久化（file 后端落
+<session_dir>/pending_compact.json）。"""
 
 from __future__ import annotations
 
@@ -11,6 +14,7 @@ import pytest
 
 from wing.compactor import Compactor
 from wing.common.tracked_list import TrackedList
+from wing.store import FileMessageLog
 from wing.context_manager import ContextManager, PendingCompact
 from wing.schema import LLMUsage, Message
 
@@ -22,11 +26,16 @@ def tmp_dir():
     shutil.rmtree(d)
 
 
+def _aux_path(tmp_dir: Path, session_id: str = "test-persist") -> Path:
+    """file 后端 aux 文件路径（pending_compact.json）。"""
+    return tmp_dir / session_id / "pending_compact.json"
+
+
 def _make_cm(
     tmp_dir: Path,
     session_id: str = "test-persist",
 ) -> ContextManager:
-    messages: TrackedList[Message] = TrackedList(tmp_dir / session_id)
+    messages: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir / session_id))
     compactor = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
     return ContextManager(
         session_id=session_id,
@@ -51,8 +60,7 @@ class TestPersistAndLoad:
             usage=LLMUsage(prompt_tokens=5000, completion_tokens=200),
         )
         cm._persist_pending_compact(result)
-        path = cm._pending_compact_path
-        assert path is not None and path.exists()
+        assert _aux_path(tmp_dir).exists()
 
     def test_load_recovers_data(self, tmp_dir):
         cm = _make_cm(tmp_dir)
@@ -93,8 +101,8 @@ class TestDelete:
             end_uuid="e",
         )
         cm._persist_pending_compact(result)
-        path = cm._pending_compact_path
-        assert path is not None and path.exists()
+        path = _aux_path(tmp_dir)
+        assert path.exists()
 
         cm._delete_pending_compact()
         assert not path.exists()
@@ -112,8 +120,7 @@ class TestDelete:
 class TestCorruptRecovery:
     def test_corrupt_json_deleted(self, tmp_dir):
         cm = _make_cm(tmp_dir)
-        path = cm._pending_compact_path
-        assert path is not None
+        path = _aux_path(tmp_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("not valid json{{{", encoding="utf-8")
 
@@ -124,8 +131,7 @@ class TestCorruptRecovery:
 
     def test_missing_fields_deleted(self, tmp_dir):
         cm = _make_cm(tmp_dir)
-        path = cm._pending_compact_path
-        assert path is not None
+        path = _aux_path(tmp_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         # Missing required fields
         path.write_text(json.dumps({"compact_content": "x"}), encoding="utf-8")

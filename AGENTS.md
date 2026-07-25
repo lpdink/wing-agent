@@ -21,6 +21,8 @@ Rust TUI (wing)               Gateway (FastAPI)              Runtime (Python)
 
 **Protocols**: HTTP (RPC-style, session lifecycle + queries) and WebSocket (real-time ReAct event streaming). Session creation is decoupled from WS handshake — clients create sessions via HTTP, then subscribe to events.
 
+**Persistence**: All durable session state (metadata, message log, aux data like pending compactions) is owned by a single abstraction, `SessionStore` (`wing/store/`). No other module does storage I/O for session data. `SessionStore` composes `MessageLog` (append-only message durability + aux kv); `TrackedList` is a pure in-memory chain-topology engine (uuid/parentUuid) that delegates I/O to a `MessageLog`. Backends: `file` (default, `~/.wing/core/sessions/`) and `memory` (ephemeral, per-process). Session creation selects the backend via the `backend` parameter. The interface is storage-agnostic by design — SQL backends (SQLite/PG/Supabase) are additive implementations.
+
 ## Project Structure
 
 ```
@@ -32,11 +34,17 @@ libs/core/wing/                   Python runtime (pip: wing-agent)
 ├── event_bus.py                  EventBus — global singleton event routing
 ├── context_manager.py            Context window + compaction
 ├── config.py                     Config loading + WING_HOME
+├── store/                        Session persistence layer (single owner of durable state)
+│   ├── base.py                   SessionStore + MessageLog ABCs, SessionMetadata model
+│   ├── file.py                   File backend (sessions/<sid>/ layout, zero-migration)
+│   └── memory.py                 In-memory backend (ephemeral sessions, no disk)
 ├── event/                        Event types (base, react, state_change, query_response)
 ├── tools/                        Built-in tools (Bash, Read, Write, Edit, Grep, ...)
 ├── magic_command/                Slash command registry + handlers
 ├── metrics_registry/             LLM call + compaction metrics
 ├── common/                       Logger, utils, token counter, process helpers
+│   ├── tracked_list.py           TrackedList — chain topology engine (I/O via MessageLog)
+│   └── fs.py                     Atomic write helpers (tmp + fsync + rename)
 └── gateway/                      FastAPI server
     ├── app.py                    App factory (FastAPI instance + route registration)
     ├── server.py                 GatewayServer — lifecycle + EventBus subscriber

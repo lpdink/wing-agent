@@ -19,6 +19,7 @@ from wing.context_manager import ContextManager
 from wing.event import DoneEvent, WingEvent, TextEvent
 from wing.event_bus import event_bus
 from wing.schema import Message
+from wing.store import FileMessageLog
 from wing.tool_registry import tool_registry
 
 _EXPLORER_SYSTEM_PROMPT = (
@@ -75,7 +76,9 @@ async def explorer_agent(
     result_path = sub_dir / f"{safe_name}_result.md"
 
     # TrackedList — persists sub-agent message history
-    messages: TrackedList[Message] = TrackedList(sub_dir)
+    # TODO(remote-workspace): 子 agent 历史目前显式使用文件后端，
+    # 随远程工具注册改经 session 所属 store。
+    messages: TrackedList[Message] = TrackedList(FileMessageLog(sub_dir))
 
     # ContextManager — no skills, no rules, inherits parent's compactor
     cm = ContextManager(

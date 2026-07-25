@@ -14,6 +14,7 @@ from wing.agent_state_bag import AgentStateBag
 def _make_session(tmp_path: Path, workspace: str | None = None):
     """构建最小化 Session 实例用于 set_workspace 测试。"""
     from wing.session import Session
+    from wing.store import FileSessionStore
 
     mock_agent = MagicMock()
     mock_agent.state = AgentStateBag()
@@ -23,22 +24,14 @@ def _make_session(tmp_path: Path, workspace: str | None = None):
     mock_cm = MagicMock()
     mock_cm._workspace = Path(workspace) if workspace else None
 
-    messages = MagicMock()
-
-    sessions_path = tmp_path / "sessions"
-    session_id = "test-ws"
-    session_dir = sessions_path / session_id
-    session_dir.mkdir(parents=True, exist_ok=True)
-
-    with patch("wing.session.get_config") as mock_cfg:
-        mock_cfg.return_value.sessions.resolved_path.return_value = sessions_path
-        session = Session(
-            session_id=session_id,
-            messages=messages,
-            context_manager=mock_cm,
-            agent=mock_agent,
-            workspace=workspace,
-        )
+    session = Session(
+        session_id="test-ws",
+        messages=MagicMock(),
+        context_manager=mock_cm,
+        agent=mock_agent,
+        store=FileSessionStore(tmp_path / "sessions"),
+        workspace=workspace,
+    )
 
     return session
 

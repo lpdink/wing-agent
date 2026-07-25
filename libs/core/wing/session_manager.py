@@ -7,6 +7,7 @@ wing/session_manager.py — SessionManager
 核心设计约束：
   - SessionManager 只处理跨 session 行为（create、switch、fork、列表、id 模糊匹配）
   - 单 session 内部逻辑（metadata 管理、title 设置）在 Session 中
+  - 持久状态统一经由 SessionStore——SM 不直接与存储介质打交道
   - WingAgent 不知道 SessionManager 的存在——它通过 EventBus 投递事件。
   - EventBus 不知道 WingAgent 的存在——它只是路由管道。
   - 路由表由 WingRuntime 统一管理，SM 不感知 client_id 和 contextvars。
@@ -15,11 +16,8 @@ wing/session_manager.py — SessionManager
 
 from __future__ import annotations
 
-import json
-import os
 import uuid
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from wing.agent_template import AgentTemplate, AgentTemplateManager
@@ -37,9 +35,34 @@ from wing.event_bus import event_bus
 from wing.magic_command.prompt_commands import expand_prompt_command
 from wing.schema import Message
 from wing.session import Session
+from wing.store import SessionMetadata, SessionStore
 
 if TYPE_CHECKING:
     from wing.gateway.protocol import AgentOverride
+
+
+def _remap_chain_uuids(messages: list[Message]) -> list[Message]:
+    """深拷贝消息链并重映射 uuid/parent_uuid/unzip_last_uuid，保持拓扑。
+
+    深拷贝确保 fork 不污染源 session 的内存链状态
+    （extract_subchain 返回的是源 TrackedList 中的 live 对象）。
+    """
+    copies = [msg.model_copy(deep=True) for msg in messages]
+
+    uuid_map: dict[str, str] = {}
+    for msg in copies:
+        if msg.uuid:
+            uuid_map[msg.uuid] = str(uuid.uuid4())
+
+    for msg in copies:
+        if msg.uuid:
+            msg.uuid = uuid_map.get(msg.uuid, str(uuid.uuid4()))
+        if msg.parent_uuid:
+            msg.parent_uuid = uuid_map.get(msg.parent_uuid)
+        if msg.unzip_last_uuid:
+            msg.unzip_last_uuid = uuid_map.get(msg.unzip_last_uuid)
+
+    return copies
 
 
 class SessionManager:
@@ -48,21 +71,35 @@ class SessionManager:
     每个 Session 有独立的 WingAgent。
     事件通过全局 EventBus 投递。
 
+    持久化经由 store 注册表（如 {"file": FileSessionStore, "memory": MemorySessionStore}），
+    创建 session 时选择后端，Session 持有自己所属的 store 引用。
+
     内部方法（_ 开头）：
       - _post：消息路由入口，由 WingRuntime 调用
       - _dispatch_magic_command：路由到 magic_registry
 
     外部方法：
-      - create_session：创建新 session
-      - fork_session：从指定消息分叉
-      - resume_session：恢复已有 session（支持模糊匹配）
+      - create_session：创建新 session（可选 backend）
+      - fork_session：从指定消息分叉（继承源 session 后端）
+      - resume_session：恢复已有 session（跨 stores 模糊匹配）
 
     路由表由 WingRuntime 统一管理，SM 不感知 client_id 和 contextvars。
     """
 
-    def __init__(self, sessions_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        stores: dict[str, SessionStore],
+        default_backend: str = "file",
+    ) -> None:
+        if not stores:
+            raise ValueError("stores cannot be empty")
+        if default_backend not in stores:
+            raise ValueError(
+                f"default backend '{default_backend}' not in stores: {list(stores)}"
+            )
         self._sessions: dict[str, Session] = {}
-        self._sessions_path = sessions_path or get_config().sessions.resolved_path()
+        self._stores = stores
+        self._default_backend = default_backend
 
         # 从 config 创建 AgentTemplateManager
         config = get_config()
@@ -94,6 +131,7 @@ class SessionManager:
         session_id: str | None = None,
         workspace: str | None = None,
         agent_override: AgentOverride | None = None,
+        backend: str | None = None,
     ) -> Session:
         """创建新 session。
 
@@ -102,7 +140,19 @@ class SessionManager:
             session_id: 指定 session_id（磁盘恢复场景），None 时自动生成
             workspace: 工作目录
             agent_override: AgentOverride 参数覆盖（None 字段不覆盖 template 值）
+            backend: 存储后端名称（如 file/memory），None 时使用默认后端
+
+        Raises:
+            ValueError: 模板不存在或 backend 未知
         """
+        backend_name = backend if backend is not None else self._default_backend
+        store = self._stores.get(backend_name)
+        if store is None:
+            raise ValueError(
+                f"Unknown storage backend '{backend_name}'. "
+                f"Available: {list(self._stores)}"
+            )
+
         # 查询模板
         if template_name is not None:
             template = self._template_manager.get(template_name)
@@ -117,17 +167,18 @@ class SessionManager:
         # 生成或使用传入的 session_id
         sid = session_id if session_id is not None else self._generate_session_id()
 
-        # 创建 TrackedList
+        # 创建 TrackedList（经 store 打开消息日志）
         messages: TrackedList[Message] = (
-            TrackedList.load(self._sessions_path / sid, Message)
+            TrackedList.load(store.open_log(sid), Message)
             if session_id is not None
-            else TrackedList(self._sessions_path / sid)
+            else TrackedList(store.open_log(sid))
         )
 
         session = Session.from_template(
             template=template,
             session_id=sid,
             messages=messages,
+            store=store,
             workspace=workspace,
         )
 
@@ -143,49 +194,39 @@ class SessionManager:
         log.info(f"Session created: {sid} (template={template.name})")
         return session
 
-    # ── resolve / import ──────────────────────────
+    # ── resolve ───────────────────────────────
 
-    def _resolve_session(self, session_id: str) -> Path | None:
-        """解析 session id（支持模糊匹配）。"""
-        if not self._sessions_path.exists():
-            return None
+    def _resolve_with_store(self, session_id: str) -> tuple[str, SessionStore] | None:
+        """跨 stores 解析 session id，返回 (resolved_id, store)。
 
-        if "*" in session_id:
-            matches = list(self._sessions_path.glob(session_id))
-            return matches[0] if len(matches) == 1 else None
-
-        # 前缀匹配
-        matches = list(self._sessions_path.glob(f"{session_id}*"))
-        if len(matches) == 1:
-            return matches[0]
-
-        # 包含匹配
-        matches = list(self._sessions_path.glob(f"*{session_id}*"))
-        return matches[0] if len(matches) == 1 else None
-
-    def resolve_session_id(self, session_id: str) -> str | None:
-        """解析 session id（支持模糊匹配），返回完全匹配的 session_id。
-
-        优先精确匹配内存中的 session，再走文件系统模糊匹配。
+        优先精确匹配内存中的 session，再按 stores 注册顺序走后端模糊匹配。
         """
         if session_id in self._sessions:
-            return session_id
-        matched_path = self._resolve_session(session_id)
-        if matched_path is None:
-            return None
-        return matched_path.name
+            return session_id, self._sessions[session_id].store
+        for store in self._stores.values():
+            resolved = store.resolve(session_id)
+            if resolved is not None:
+                return resolved, store
+        return None
+
+    def resolve_session_id(self, session_id: str) -> str | None:
+        """解析 session id（跨 stores 模糊匹配），返回完全匹配的 session_id。"""
+        result = self._resolve_with_store(session_id)
+        return result[0] if result is not None else None
 
     def resume_session(
         self,
         session_id: str,
         template: "AgentTemplate | None" = None,
     ) -> Session:
-        """恢复已有 session（支持模糊匹配）。已在内存中则直接返回。
+        """恢复已有 session（跨 stores 模糊匹配）。已在内存中则直接返回。
+
+        模板解析优先级：显式传入 > metadata.template_name > 默认模板。
 
         Args:
             session_id: 目标 session ID（支持前缀/包含匹配）
-            template: 可选模板。传入时使用该模板恢复（如从 source agent 反推）；
-                      不传时使用默认模板。
+            template: 可选模板。传入时使用该模板恢复；
+                      不传时优先使用 metadata 中持久化的模板。
 
         Returns:
             恢复后的 Session 实例
@@ -193,102 +234,88 @@ class SessionManager:
         Raises:
             LookupError: session 不存在
         """
-        resolved = self.resolve_session_id(session_id)
-        if resolved is None:
+        result = self._resolve_with_store(session_id)
+        if result is None:
             raise LookupError(f"Session not found: {session_id}")
+        resolved, store = result
 
         existing = self._sessions.get(resolved)
         if existing is not None:
             return existing
 
-        tpl = template or self._template_manager.default
+        # 模板解析：显式传入 > metadata.template_name > 默认
+        tpl = template
+        if tpl is None:
+            metadata = store.load_metadata(resolved)
+            if metadata is not None and metadata.template_name is not None:
+                tpl = self._template_manager.get(metadata.template_name)
+        if tpl is None:
+            tpl = self._template_manager.default
+
         messages: TrackedList[Message] = TrackedList.load(
-            self._sessions_path / resolved, Message
+            store.open_log(resolved), Message
         )
         session = Session.from_template(
             template=tpl,
             session_id=resolved,
             messages=messages,
+            store=store,
         )
         self._sessions[resolved] = session
         log.info(f"Session resumed: {resolved}")
         return session
-
-    def import_messages(
-        self,
-        messages: list[Message],
-        source_session_id: str | None = None,
-    ) -> str:
-        """将消息列表导入新 session，返回新 session_id。"""
-        new_session_id = self._generate_session_id()
-        new_session_path = self._sessions_path / new_session_id
-
-        new_tl = TrackedList(new_session_path)
-        new_tl._type = Message
-        # 确保目录存在——即使 messages 为空，后续 metadata 写入也需要
-        new_session_path.mkdir(parents=True, exist_ok=True)
-
-        if messages:
-            # 建立 UUID 映射：旧 uuid → 新 uuid，保留原始拓扑
-            uuid_map: dict[str, str] = {}
-            for msg in messages:
-                if msg.uuid:
-                    uuid_map[msg.uuid] = str(uuid.uuid4())
-
-            # 替换 uuid、parent_uuid、unzip_last_uuid 引用
-            for msg in messages:
-                if msg.uuid:
-                    msg.uuid = uuid_map.get(msg.uuid, str(uuid.uuid4()))
-                if msg.parent_uuid:
-                    msg.parent_uuid = uuid_map.get(msg.parent_uuid)
-                if msg.unzip_last_uuid:
-                    msg.unzip_last_uuid = uuid_map.get(msg.unzip_last_uuid)
-
-            # 使用 extend_detached 一次性写入，避免 _ensure_type 自动填充 parent_uuid
-            new_tl.extend_detached(messages)
-
-        # 写入 metadata.json 记录 fork 来源
-        if source_session_id:
-            metadata = {"forked_from": source_session_id}
-            metadata_path = new_session_path / "metadata.json"
-            with open(metadata_path, "w", encoding="utf-8") as f:
-                json.dump(metadata, f, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-
-        return new_session_id
 
     def fork_session(
         self,
         session_id: str,
         target_uuid: str,
     ) -> tuple[Session, str | None] | None:
-        """从指定 session 的 target_uuid 处 fork 出新 session。"""
+        """从指定 session 的 target_uuid 处 fork 出新 session。
+
+        新 session 继承源 session 的后端。消息与元数据均经由源 session
+        所属 store 写入：元数据（workspace/forked_from/template_name/
+        last_interaction）一次写全——fork 的正确性由 store 单一所有者保证。
+        """
         source = self._sessions.get(session_id)
         if source is None:
             return None
 
-        cm = source.agent.context_manager
+        cm = source.context_manager
         try:
             subchain, draft = cm.extract_subchain(target_uuid)
         except ValueError:
             log.warning(f"fork_session: uuid {target_uuid} not found")
             return None
 
-        # import messages
-        new_session_id = self.import_messages(subchain, source_session_id=session_id)
+        store = source.store
+        new_session_id = self._generate_session_id()
 
-        # 从旧 agent 抽取模板
-        template = AgentTemplate.from_agent(source.agent, name=source.template_name)
+        # 深拷贝 + uuid 重映射（不污染源 session）
+        remapped = _remap_chain_uuids(subchain)
 
-        # 用 from_template 创建新 session
-        messages: TrackedList[Message] = TrackedList.load(
-            self._sessions_path / new_session_id, Message
+        # 写入消息（经 store 打开日志）
+        new_messages: TrackedList[Message] = TrackedList(store.open_log(new_session_id))
+        if remapped:
+            new_messages.extend_detached(remapped)
+
+        # 一次写全元数据——fork bug 的结构性修复
+        store.save_metadata(
+            new_session_id,
+            SessionMetadata(
+                workspace=source.session_workspace,
+                forked_from=session_id,
+                template_name=source.template_name,
+                last_interaction=datetime.now().isoformat(),
+            ),
         )
+
+        # 从旧 agent 抽取模板，构建新 session
+        template = AgentTemplate.from_agent(source.agent, name=source.template_name)
         new_session = Session.from_template(
             template=template,
             session_id=new_session_id,
-            messages=messages,
+            messages=new_messages,
+            store=store,
             workspace=source.session_workspace,
         )
         self._sessions[new_session_id] = new_session
@@ -300,57 +327,29 @@ class SessionManager:
     # ============================================================
 
     def list_sessions(self) -> list[SessionInfo]:
-        """列出所有有效 session，按 last_interaction 时间降序（最近在前）。
+        """列出所有有效 session（跨 stores 聚合），按 last_interaction 时间降序。
 
         每个 session 携带运行时 `status`：
         - 已加载进内存（在 `self._sessions` 中）→ 取 live 状态（idle/working/waiting）
-        - 仅在磁盘、未 resume → `inactive`
+        - 未 resume → `inactive`
 
         workdir 优先排序属于前端业务语义，不在此处处理。
         """
-        if not self._sessions_path.exists():
-            return []
-
         result = []
-        for session_dir in self._sessions_path.iterdir():
-            if not session_dir.is_dir():
-                continue
-            newest_file = session_dir / "newest.json"
-            if not newest_file.exists():
-                continue
-
-            metadata_file = session_dir / "metadata.json"
-            session_name = None
-            session_workspace = None
-            last_interaction = None
-
-            if metadata_file.exists():
-                try:
-                    data = json.loads(metadata_file.read_text())
-                    session_name = data.get("session_name")
-                    session_workspace = data.get("workspace")
-                    last_interaction = data.get("last_interaction")
-                except Exception:
-                    pass
-
-            if session_name is None:
-                try:
-                    data = json.loads(newest_file.read_text())
-                    for msg in data:
-                        if msg.get("role") == "user":
-                            session_name = msg.get("content", "")[:100]
-                            break
-                except Exception:
+        for store in self._stores.values():
+            for summary in store.list_summaries():
+                metadata = summary.metadata
+                name = metadata.session_name or summary.first_user_message
+                if not name:
                     continue
 
-            if session_name:
-                loaded = self._sessions.get(session_dir.name)
+                loaded = self._sessions.get(summary.id)
                 result.append(
                     SessionInfo(
-                        id=session_dir.name,
-                        name=session_name,
-                        workspace=session_workspace,
-                        last_interaction=last_interaction,
+                        id=summary.id,
+                        name=name,
+                        workspace=metadata.workspace,
+                        last_interaction=metadata.last_interaction,
                         status=loaded.status if loaded is not None else "inactive",
                     )
                 )
@@ -398,6 +397,7 @@ class SessionManager:
         - 否则 → 直接投递给 session.post()
         """
         assert session_id is not None, "session_id is required by WingRuntime"
+
         session = self._sessions.get(session_id)
         if session is None:
             log.error(f"Session not found: {session_id}")

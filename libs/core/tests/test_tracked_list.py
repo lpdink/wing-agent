@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from pydantic.errors import PydanticUserError
 
 from wing.common.tracked_list import TrackedList
+from wing.store import FileMessageLog
 from wing.schema import ChainNode, Message
 
 
@@ -64,7 +65,7 @@ def _read_newest(path: Path) -> list[dict]:
 
 class TestAppendExtend:
     def test_append_assigns_uuid(self, tmp_dir):
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         msg = Message(role="user", content="hello")
         tl.append(msg)
 
@@ -81,7 +82,7 @@ class TestAppendExtend:
         assert "ts" in entries[0]
 
     def test_append_chain_parent(self, tmp_dir):
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         msg1 = Message(role="user", content="hello")
         msg2 = Message(role="assistant", content="hi")
         tl.append(msg1)
@@ -95,7 +96,7 @@ class TestAppendExtend:
         assert entries[1]["parent_uuid"] == msg1.uuid
 
     def test_extend_assigns_uuids(self, tmp_dir):
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         msgs = [
             Message(role="user", content="hello"),
             Message(role="assistant", content="hi"),
@@ -113,13 +114,13 @@ class TestAppendExtend:
         assert len(entries) == 3
 
     def test_type_locking(self, tmp_dir):
-        tl = TrackedList(tmp_dir)
+        tl = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Item(name="a"))
         with pytest.raises((TypeError, PydanticUserError)):
             tl.append(BaseModel())
 
     def test_newest_json_updated(self, tmp_dir):
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Message(role="user", content="hello"))
         newest = _read_newest(tmp_dir)
         assert len(newest) == 1
@@ -127,7 +128,7 @@ class TestAppendExtend:
 
     def test_no_snapshot_lines(self, tmp_dir):
         """Verify that append does NOT write snapshot lines."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Message(role="user", content="hello"))
         tl.append(Message(role="assistant", content="hi"))
 
@@ -137,7 +138,7 @@ class TestAppendExtend:
 
     def test_active_chain_matches_data(self, tmp_dir):
         """active_chain property returns current _data."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Message(role="user", content="hello"))
         tl.append(Message(role="assistant", content="hi"))
 
@@ -148,7 +149,7 @@ class TestAppendExtend:
 
     def test_last_uuid_property(self, tmp_dir):
         """last_uuid returns the uuid of the last message."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         msg1 = Message(role="user", content="hello")
         msg2 = Message(role="assistant", content="hi")
         tl.append(msg1)
@@ -163,7 +164,7 @@ class TestAppendExtend:
 class TestAppendDetached:
     def test_append_detached_writes_as_is(self, tmp_dir):
         """append_detached writes to JSONL without auto-filling uuid/parent_uuid."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         msg = Message(
             role="user",
             content="hello",
@@ -182,7 +183,7 @@ class TestAppendDetached:
 
     def test_append_detached_preserves_none_uuid(self, tmp_dir):
         """append_detached preserves None uuid (doesn't auto-fill)."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         msg = Message(role="user", content="hello", uuid=None, parent_uuid=None)
         tl.append_detached(msg)
 
@@ -193,7 +194,7 @@ class TestAppendDetached:
 
     def test_append_detached_updates_newest(self, tmp_dir):
         """append_detached updates newest.json."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         msg = Message(role="user", content="hello", uuid="u1", parent_uuid=None)
         tl.append_detached(msg)
 
@@ -203,7 +204,7 @@ class TestAppendDetached:
 
     def test_append_detached_chain(self, tmp_dir):
         """Multiple append_detached calls build a chain."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         m1 = Message(role="user", content="a", uuid="u1", parent_uuid=None)
         m2 = Message(role="assistant", content="b", uuid="u2", parent_uuid="u1")
         m3 = Message(role="user", content="c", uuid="u3", parent_uuid="u2")
@@ -222,7 +223,7 @@ class TestAppendDetached:
 class TestSetTip:
     def test_set_tip_switches_active_chain(self, tmp_dir):
         """set_tip rebuilds active chain from the specified tip."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         m1 = Message(role="user", content="a", uuid="u1", parent_uuid=None)
         m2 = Message(role="assistant", content="b", uuid="u2", parent_uuid="u1")
         m3 = Message(role="user", content="c", uuid="u3", parent_uuid="u2")
@@ -238,7 +239,7 @@ class TestSetTip:
 
     def test_set_tip_to_root(self, tmp_dir):
         """set_tip to root gives chain of length 1."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         m1 = Message(role="user", content="a", uuid="u1", parent_uuid=None)
         m2 = Message(role="assistant", content="b", uuid="u2", parent_uuid="u1")
         tl.append_detached(m1)
@@ -251,7 +252,7 @@ class TestSetTip:
 
     def test_set_tip_updates_newest(self, tmp_dir):
         """set_tip updates newest.json cache."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         m1 = Message(role="user", content="a", uuid="u1", parent_uuid=None)
         m2 = Message(role="assistant", content="b", uuid="u2", parent_uuid="u1")
         tl.append_detached(m1)
@@ -264,7 +265,7 @@ class TestSetTip:
 
     def test_set_tip_invalid_uuid(self, tmp_dir):
         """set_tip with nonexistent uuid raises ValueError."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Message(role="user", content="hello"))
         with pytest.raises(ValueError):
             tl.set_tip("nonexistent-uuid")
@@ -276,7 +277,7 @@ class TestSetTip:
 class TestTraceChain:
     def test_trace_chain_from_leaf(self, tmp_dir):
         """trace_chain from leaf traverses to root (倒序遍历)."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         m1 = Message(role="user", content="a", uuid="u1", parent_uuid=None)
         m2 = Message(role="assistant", content="b", uuid="u2", parent_uuid="u1")
         m3 = Message(role="user", content="c", uuid="u3", parent_uuid="u2")
@@ -290,7 +291,7 @@ class TestTraceChain:
 
     def test_trace_chain_from_uuid(self, tmp_dir):
         """trace_chain from specific uuid."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         m1 = Message(role="user", content="a", uuid="u1", parent_uuid=None)
         m2 = Message(role="assistant", content="b", uuid="u2", parent_uuid="u1")
         m3 = Message(role="user", content="c", uuid="u3", parent_uuid="u2")
@@ -304,13 +305,13 @@ class TestTraceChain:
 
     def test_trace_chain_empty(self, tmp_dir):
         """trace_chain on empty JSONL returns empty list."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         chain = tl.trace_chain()
         assert chain == []
 
     def test_trace_chain_single(self, tmp_dir):
         """trace_chain with single message."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         m1 = Message(role="user", content="a", uuid="u1", parent_uuid=None)
         tl.append_detached(m1)
 
@@ -320,7 +321,7 @@ class TestTraceChain:
 
     def test_trace_chain_returns_typed_objects(self, tmp_dir):
         """trace_chain returns typed Message objects, not raw dicts."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         m1 = Message(role="user", content="hello", uuid="u1", parent_uuid=None)
         tl.append_detached(m1)
 
@@ -335,7 +336,7 @@ class TestTraceChain:
 
     def test_trace_chain_branch_not_included(self, tmp_dir):
         """trace_chain only follows the specified branch (倒序遍历)."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         m1 = Message(role="user", content="a", uuid="u1", parent_uuid=None)
         m2 = Message(role="assistant", content="b", uuid="u2", parent_uuid="u1")
         m3 = Message(role="user", content="c", uuid="u3", parent_uuid="u2")
@@ -359,7 +360,7 @@ class TestTraceChain:
 
     def test_trace_chain_stops_at_compact_node(self, tmp_dir):
         """trace_chain stops at compact node (parent_uuid=None)."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         m1 = Message(role="user", content="old1", uuid="u1", parent_uuid=None)
         m2 = Message(role="assistant", content="old2", uuid="u2", parent_uuid="u1")
         tl.append_detached(m1)
@@ -389,7 +390,7 @@ class TestTraceFullChain:
 
     def test_trace_full_chain_no_compact(self, tmp_dir):
         """无压缩时 trace_full_chain 与 trace_chain 结果相同。"""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         m1 = Message(role="user", content="a", uuid="u1", parent_uuid=None)
         m2 = Message(role="assistant", content="b", uuid="u2", parent_uuid="u1")
         m3 = Message(role="user", content="c", uuid="u3", parent_uuid="u2")
@@ -404,7 +405,7 @@ class TestTraceFullChain:
 
     def test_trace_full_chain_skips_compact(self, tmp_dir):
         """trace_full_chain 跳过压缩节点，沿 unzip_last_uuid 继续。"""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         m1 = Message(role="user", content="old1", uuid="u1", parent_uuid=None)
         m2 = Message(role="assistant", content="old2", uuid="u2", parent_uuid="u1")
         m3 = Message(role="user", content="tail1", uuid="u3", parent_uuid="u2")
@@ -435,7 +436,7 @@ class TestTraceFullChain:
 
     def test_trace_full_chain_from_uuid(self, tmp_dir):
         """trace_full_chain 从指定 uuid 开始。"""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         m1 = Message(role="user", content="a", uuid="u1", parent_uuid=None)
         m2 = Message(role="assistant", content="b", uuid="u2", parent_uuid="u1")
         m3 = Message(role="user", content="c", uuid="u3", parent_uuid="u2")
@@ -448,12 +449,12 @@ class TestTraceFullChain:
 
     def test_trace_full_chain_empty(self, tmp_dir):
         """trace_full_chain on empty returns empty list."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         assert tl.trace_full_chain() == []
 
     def test_walk_full_chain_includes_compact(self, tmp_dir):
         """walk_full_chain 包含压缩节点。"""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         m1 = Message(role="user", content="old1", uuid="u1", parent_uuid=None)
         m2 = Message(role="assistant", content="old2", uuid="u2", parent_uuid="u1")
         m3 = Message(role="user", content="tail1", uuid="u3", parent_uuid="u2")
@@ -493,7 +494,7 @@ class TestTraceFullChain:
 class TestFind:
     def test_find_by_uuid(self, tmp_dir):
         """find returns typed Message by uuid."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         m1 = Message(role="user", content="a", uuid="u1", parent_uuid=None)
         m2 = Message(role="assistant", content="b", uuid="u2", parent_uuid="u1")
         tl.append_detached(m1)
@@ -508,13 +509,13 @@ class TestFind:
 
     def test_find_nonexistent(self, tmp_dir):
         """find returns None for nonexistent uuid."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Message(role="user", content="hello"))
         assert tl.find("nonexistent") is None
 
     def test_find_last_write_wins(self, tmp_dir):
         """find returns the last occurrence of a uuid (last-write-wins)."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         m1 = Message(role="user", content="original", uuid="u1", parent_uuid=None)
         tl.append_detached(m1)
 
@@ -532,11 +533,11 @@ class TestFind:
 class TestLoad:
     def test_normal_load(self, tmp_dir):
         """Load from newest.json when it exists and is valid."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Message(role="user", content="hello"))
         tl.append(Message(role="assistant", content="hi"))
 
-        tl2 = TrackedList.load(tmp_dir, Message)
+        tl2 = TrackedList.load(FileMessageLog(tmp_dir), Message)
         assert len(tl2) == 2
         assert tl2.active_chain[0].content == "hello"
         assert tl2.active_chain[1].content == "hi"
@@ -544,37 +545,37 @@ class TestLoad:
 
     def test_missing_newest_fallback(self, tmp_dir):
         """newest.json missing → fallback to history.jsonl."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Message(role="user", content="hello"))
         tl.append(Message(role="assistant", content="hi"))
 
         (tmp_dir / "newest.json").unlink()
 
-        tl2 = TrackedList.load(tmp_dir, Message)
+        tl2 = TrackedList.load(FileMessageLog(tmp_dir), Message)
         assert len(tl2) == 2
         assert tl2.active_chain[0].content == "hello"
         assert tl2.active_chain[1].content == "hi"
 
     def test_corrupt_newest_fallback(self, tmp_dir):
         """newest.json corrupt → fallback to history.jsonl."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Message(role="user", content="hello"))
 
         (tmp_dir / "newest.json").write_text("NOT JSON!!")
 
-        tl2 = TrackedList.load(tmp_dir, Message)
+        tl2 = TrackedList.load(FileMessageLog(tmp_dir), Message)
         assert len(tl2) == 1
         assert tl2.active_chain[0].content == "hello"
 
     def test_last_uuid_recovery(self, tmp_dir):
         """_last_uuid is restored from the loaded chain."""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         msg1 = Message(role="user", content="hello")
         msg2 = Message(role="assistant", content="hi")
         tl.append(msg1)
         tl.append(msg2)
 
-        tl2 = TrackedList.load(tmp_dir, Message)
+        tl2 = TrackedList.load(FileMessageLog(tmp_dir), Message)
         assert tl2.last_uuid == msg2.uuid
 
         msg3 = Message(role="user", content="bye")
@@ -583,7 +584,7 @@ class TestLoad:
 
     def test_load_empty_dir(self, tmp_dir):
         """Load from empty directory returns empty TrackedList."""
-        tl = TrackedList.load(tmp_dir, Message)
+        tl = TrackedList.load(FileMessageLog(tmp_dir), Message)
         assert len(tl) == 0
         assert tl.last_uuid is None
 
@@ -596,24 +597,24 @@ class TestInMemoryCache:
 
     def test_find_after_load_without_newest(self, tmp_dir):
         """删除 newest.json 后 load，find 仍能从内存中找到消息。"""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Message(role="user", content="hello"))
         u = tl[0].uuid
         (tmp_dir / "newest.json").unlink()
 
-        tl2 = TrackedList.load(tmp_dir, Message)
+        tl2 = TrackedList.load(FileMessageLog(tmp_dir), Message)
         found = tl2.find(u)  # ty: ignore[invalid-argument-type]
         assert found is not None
         assert found.content == "hello"
 
     def test_trace_chain_after_load_without_newest(self, tmp_dir):
         """删除 newest.json 后 load，trace_chain 从内存重建。"""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Message(role="user", content="a"))
         tl.append(Message(role="assistant", content="b"))
         (tmp_dir / "newest.json").unlink()
 
-        tl2 = TrackedList.load(tmp_dir, Message)
+        tl2 = TrackedList.load(FileMessageLog(tmp_dir), Message)
         chain = tl2.trace_chain()
         assert len(chain) == 2
         assert chain[0].content == "a"
@@ -621,7 +622,7 @@ class TestInMemoryCache:
 
     def test_all_items_includes_branches(self, tmp_dir):
         """内存 map 包含分支消息（不在活跃链中也能 find）。"""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append_detached(
             Message(role="user", content="a", uuid="u1", parent_uuid=None)
         )
@@ -643,7 +644,7 @@ class TestInMemoryCache:
 
     def test_find_after_append_uses_memory(self, tmp_dir):
         """append 后立即 find，从内存读取（不依赖外存）。"""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         msg = Message(role="user", content="hello")
         tl.append(msg)
 
@@ -657,7 +658,7 @@ class TestInMemoryCache:
 
     def test_trace_chain_after_append_uses_memory(self, tmp_dir):
         """append 后 trace_chain 从内存读取。"""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Message(role="user", content="a"))
         tl.append(Message(role="assistant", content="b"))
 
@@ -671,7 +672,7 @@ class TestInMemoryCache:
 
     def test_extend_updates_memory(self, tmp_dir):
         """extend 后 find 和 trace_chain 从内存读取。"""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         msgs = [
             Message(role="user", content="a"),
             Message(role="assistant", content="b"),
@@ -690,7 +691,7 @@ class TestInMemoryCache:
 
     def test_append_detached_updates_memory(self, tmp_dir):
         """append_detached 后 find 从内存读取。"""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         msg = Message(role="user", content="hello", uuid="my-uuid", parent_uuid=None)
         tl.append_detached(msg)
 
@@ -703,7 +704,7 @@ class TestInMemoryCache:
 
     def test_set_tip_uses_memory(self, tmp_dir):
         """set_tip 从内存重建链（不读外存）。"""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append_detached(
             Message(role="user", content="a", uuid="u1", parent_uuid=None)
         )
@@ -724,7 +725,7 @@ class TestInMemoryCache:
 
     def test_last_write_wins_in_memory(self, tmp_dir):
         """相同 uuid 的消息，后写入的覆盖先写入的（last-write-wins）。"""
-        tl: TrackedList[Message] = TrackedList(tmp_dir)
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append_detached(
             Message(role="user", content="original", uuid="u1", parent_uuid=None)
         )
@@ -738,3 +739,41 @@ class TestInMemoryCache:
         found = tl.find("u1")
         assert found is not None
         assert found.content == "rewritten"
+
+
+class TestPureMemoryMode:
+    """log=None：纯内存链引擎，全部操作无文件产生。"""
+
+    def test_full_chain_ops_no_files(self, tmp_dir):
+        tl: TrackedList[Message] = TrackedList()
+        tl.append(Message(role="user", content="a"))
+        tl.append(Message(role="assistant", content="b"))
+        tl.extend([Message(role="user", content="c")])
+
+        assert len(tl) == 3
+        assert tl.active_chain[-1].content == "c"
+        assert tl.last_uuid is not None
+        assert tl.find(tl.last_uuid) is not None
+        assert len(tl.trace_chain()) == 3
+        assert len(tl.walk_full_chain()) == 3
+
+        # rewind 风格：append_detached + set_tip
+        branch = Message(role="user", content="branch", parent_uuid=None)
+        branch.uuid = "branch-1"
+        tl.append_detached(branch)
+        tl.set_tip("branch-1")
+        assert tl.active_chain == [branch]
+
+        # aux NOP
+        tl.write_aux("pending_compact", {"k": "v"})
+        assert tl.read_aux("pending_compact") is None
+        tl.delete_aux("pending_compact")
+
+        # 目录始终为空（无任何文件产生）
+        assert list(Path(tmp_dir).iterdir()) == []
+
+    def test_type_locking_still_works(self, tmp_dir):
+        tl: TrackedList[Message] = TrackedList()
+        tl.append(Message(role="user", content="a"))
+        with pytest.raises(TypeError):
+            tl.append(Item(name="not a message"))  # ty: ignore[invalid-argument-type]
