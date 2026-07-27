@@ -1561,3 +1561,98 @@ class TestWsFrameRouting:
                 time.sleep(0.02)
             server.runtime.post.assert_called_once()
             server.remote_tools.resolve_result.assert_not_called()
+
+
+# ============================================================
+# 保留字 client_id + admin 断连注销 + llm_name 注册
+# ============================================================
+
+
+class TestReservedClientIdAndLifecycle:
+    def test_client_id_default_reserved(self, rbac_env):
+        """client_id='default' 是内置命名空间保留字，连接即拒。"""
+        _, tc = rbac_env
+        with pytest.raises(Exception):
+            with tc.websocket_connect("/ws?client_id=default", headers=TOOL_HEADERS):
+                pass
+
+    def test_admin_declared_disconnect_unregisters_tools(self, rbac_env):
+        """声明了 client_id 的 admin 断连后，其远程工具同样被注销。"""
+        import time
+
+        from wing.tool_registry import tool_registry
+
+        server, tc = rbac_env
+        with tc.websocket_connect(
+            "/ws?client_id=admin-host", headers=ADMIN_HEADERS
+        ) as ws:
+            ws.receive_json()
+            resp = tc.post(
+                "/api/tools/register",
+                json={"tools": [{"name": "Read", "description": "d", "params": []}]},
+                headers={**ADMIN_HEADERS, "X-Client-Id": "admin-host"},
+            )
+            assert resp.status_code == 200
+            assert tool_registry.resolve("admin-host.Read") is not None
+
+        deadline = time.time() + 2.0
+        while (
+            tool_registry.resolve("admin-host.Read") is not None
+            and time.time() < deadline
+        ):
+            time.sleep(0.02)
+        assert tool_registry.resolve("admin-host.Read") is None
+        assert not server.remote_tools.is_attached("admin-host")
+
+    def test_register_with_llm_name(self, rbac_env):
+        """端上声明的 llm_name 经注册端点透传到核心 Tool。"""
+        from wing.tool_registry import tool_registry
+
+        server, tc = rbac_env
+        server.remote_tools.attach("host-llm", MagicMock())
+        try:
+            resp = tc.post(
+                "/api/tools/register",
+                json={
+                    "tools": [
+                        {
+                            "name": "Read",
+                            "description": "d",
+                            "llm_name": "RemoteRead",
+                            "params": [],
+                        }
+                    ]
+                },
+                headers={**TOOL_HEADERS, "X-Client-Id": "host-llm"},
+            )
+            assert resp.status_code == 200
+            tool = tool_registry.resolve("host-llm.Read")
+            assert tool is not None
+            assert tool.effective_llm_name == "RemoteRead"
+        finally:
+            tool_registry.unregister_namespace("host-llm")
+
+    def test_register_bad_llm_name_rejected(self, rbac_env):
+        """坏 llm_name（含点）在注册端点被拒（422 校验错误）。"""
+        from wing.tool_registry import tool_registry
+
+        server, tc = rbac_env
+        server.remote_tools.attach("host-bad", MagicMock())
+        try:
+            resp = tc.post(
+                "/api/tools/register",
+                json={
+                    "tools": [
+                        {
+                            "name": "Read",
+                            "description": "d",
+                            "llm_name": "a.b",
+                            "params": [],
+                        }
+                    ]
+                },
+                headers={**TOOL_HEADERS, "X-Client-Id": "host-bad"},
+            )
+            assert resp.status_code == 422
+        finally:
+            tool_registry.unregister_namespace("host-bad")

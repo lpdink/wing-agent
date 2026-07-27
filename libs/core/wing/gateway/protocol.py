@@ -15,6 +15,7 @@ Gateway 的消息协议——前端和 Gateway 之间的通信格式。
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Mapping
 from typing import Literal
@@ -181,15 +182,29 @@ class RewindRequest(BaseModel):
     target_uuid: str = Field(description="要回退到的消息 UUID")
 
 
+# LLM 可见工具名须符合 provider function-name 文法（OpenAI: ^[a-zA-Z0-9_-]{1,64}$）。
+# 远程工具是首个真正使用自定义 llm_name 的消费方，注册时即校验，避免坏名字
+# 延迟到 LLM 调用时才 confusing 地失败。
+_LLM_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
 class RemoteToolSpec(BaseModel):
     """远程工具规格——tool host 注册单个工具的 schema。
 
     复用核心 ToolParam，与内置工具 schema 同构。注册后以 client_id 为
-    namespace 落入核心 registry，工具引用形如 ``<client_id>.<name>``。
+    namespace 落入核心 registry，配置引用形如 ``<client_id>.<name>``。
+
+    llm_name 由端上自选（LLM 实际看到的名字）；None 时退化为裸 name。
+    运行时**不**自动以 client_id 限定 llm_name——当前模型尚不适合同时持有
+    两个同名工具（如两个 Read），两个 effective_llm_name 相同的工具绑定到
+    同一 agent 会在 create session 时失败，这是预期行为。
     """
 
     name: str = Field(description="工具注册名（同 namespace 内唯一）")
     description: str = Field(default="", description="工具描述（LLM 可见）")
+    llm_name: str | None = Field(
+        default=None, description="LLM 可见名（None 退化为 name；须符合 provider 文法）"
+    )
     params: list[ToolParam] = Field(
         default_factory=list, description="工具参数列表（复用核心 ToolParam）"
     )
@@ -201,8 +216,21 @@ class RemoteToolSpec(BaseModel):
         # 无法以 "<client_id>.<name>" 解析——静默坑，注册时即拒绝。
         if not v.strip():
             raise ValueError("tool name must not be empty")
+        if v != v.strip():
+            raise ValueError("tool name must not have leading/trailing whitespace")
         if "." in v:
             raise ValueError("tool name must not contain '.'")
+        return v
+
+    @field_validator("llm_name")
+    @classmethod
+    def _llm_name_provider_safe(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not _LLM_NAME_RE.match(v):
+            raise ValueError(
+                "llm_name must match ^[a-zA-Z0-9_-]{1,64}$ (provider function-name grammar)"
+            )
         return v
 
 

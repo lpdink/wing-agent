@@ -64,6 +64,8 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 **远程工具注册**（实验性）：tool host 建立 WS 连接并经 `?client_id=<id>` 自选 client_id（作为工具 namespace），再经此端点注册工具。client_id 自定义**与权限解耦**——任何角色都可声明（面向未来 UX：用户需知道"远程是谁"以分配工具），先来先得到、全量唯一性校验（冲突拒连）；`tool_runtime` 必须声明，admin 可选。声明 client_id 的连接即具备注册资格。注册后：
 
 - 调用走 WS：agent 调用 `<client_id>.<name>` 时，Gateway 经该 client 的 WS 发 `tool_call_request` 帧，tool host 执行后回 `tool_call_result` 帧（同 `call_id`）。
+- 工具规格可携带可选 `llm_name`（LLM 可见名，须符合 provider 文法 `^[a-zA-Z0-9_-]{1,64}$`）；未提供退化为裸 name。运行时不自动以 client_id 限定 llm_name——当前不允许一个 agent 同时持有两个同名工具，绑定时撞名会在 create session 失败（预期行为）。
+- `client_id="default"` 为保留字（内置工具命名空间），连接即拒。
 - 核心网络无关：核心只看到一个普通 `Tool`（schema + 可执行体），远程性封装在 Gateway 注入的 dispatch 闭包里。
 - 断连即失败并注销：WS 断开时在途调用立即失败、工具从 registry 移除。**已加载 agent 持有的工具引用不受影响**（保护 KV cache）——再次调用时清晰返回 "tool unavailable / not connected"。动态工具切换为后续特性。
 - 总超时：`gateway.remote_tool_timeout`（默认 1800s）仅为安全网，断连是首要失败信号。

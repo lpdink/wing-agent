@@ -33,6 +33,7 @@ from wing.event_bus import event_bus
 
 from wing.gateway.auth import ROLE_TOOL_RUNTIME, extract_key_from_ws
 from wing.gateway.protocol import ClientRequest, ConnectResponse, ToolCallResult
+from wing.tool_registry import DEFAULT_NAMESPACE
 
 router = APIRouter()
 
@@ -61,6 +62,11 @@ async def handle_ws(ws: WebSocket) -> None:
     #    - 任何角色声明的 client_id 都走同一套唯一性校验（先来先得到）；
     #    - 未声明者服务端分配 uuid（纯前端，不 attach）。
     if declared_id:
+        if declared_id == DEFAULT_NAMESPACE:
+            # 'default' 是内置工具命名空间——若允许占用，断连注销会清空全局
+            # 内置工具表。保留字，注册时即拒。（核心终将不持有内置工具，届时可放开。）
+            await ws.close(code=4009, reason="client_id 'default' is reserved")
+            return
         if declared_id in server.clients:
             await ws.close(
                 code=4009, reason=f"client_id '{declared_id}' already in use"

@@ -58,6 +58,22 @@ class TestRemoteToolSpecValidation:
     def test_valid_name_ok(self):
         assert RemoteToolSpec(name="Read", description="", params=[]).name == "Read"
 
+    def test_name_whitespace_rejected(self):
+        with pytest.raises(ValueError, match="whitespace"):
+            RemoteToolSpec(name="  Read", description="", params=[])
+
+    def test_llm_name_bad_charset_rejected(self):
+        # 点号不符合 provider function-name 文法
+        with pytest.raises(ValueError, match="function-name grammar"):
+            RemoteToolSpec(name="Read", llm_name="host.Read", params=[])
+
+    def test_llm_name_none_ok(self):
+        assert RemoteToolSpec(name="Read", llm_name=None).llm_name is None
+
+    def test_llm_name_valid_ok(self):
+        spec = RemoteToolSpec(name="Read", llm_name="Remote-Read_1", params=[])
+        assert spec.llm_name == "Remote-Read_1"
+
 
 @pytest.mark.asyncio
 async def test_register_and_dispatch_round_trip(manager: RemoteToolManager):
@@ -193,6 +209,27 @@ def test_register_tools_rejects_intra_request_duplicate(manager: RemoteToolManag
     with pytest.raises(ValueError, match="duplicate tool names"):
         manager.register_tools(HOST, [_spec("Read"), _spec("Read")])
     assert tool_registry.resolve(f"{HOST}.Read") is None
+
+
+def test_register_tools_with_llm_name(manager: RemoteToolManager):
+    """端上声明的 llm_name 透传到 Tool，决定 LLM 可见名。"""
+    manager.attach(HOST, FakeWS())
+    spec = RemoteToolSpec(
+        name="Read", description="d", llm_name="RemoteRead", params=[]
+    )
+    manager.register_tools(HOST, [spec])
+    tool = tool_registry.resolve(f"{HOST}.Read")
+    assert tool is not None
+    assert tool.effective_llm_name == "RemoteRead"
+
+
+def test_register_tools_default_llm_name_is_bare(manager: RemoteToolManager):
+    """不声明 llm_name 时退化为裸 name（运行时不自动以 client_id 限定）。"""
+    manager.attach(HOST, FakeWS())
+    manager.register_tools(HOST, [_spec("Read")])
+    tool = tool_registry.resolve(f"{HOST}.Read")
+    assert tool is not None
+    assert tool.effective_llm_name == "Read"
 
 
 @pytest.mark.asyncio

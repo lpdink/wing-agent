@@ -113,6 +113,7 @@ class RemoteToolManager:
             tool = Tool(
                 name=spec.name,
                 namespace=client_id,
+                llm_name=spec.llm_name,
                 description=spec.description,
                 params=list(spec.params),
                 function=self._make_dispatch(client_id, spec.name),
