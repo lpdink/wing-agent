@@ -20,7 +20,7 @@ import uuid
 from collections.abc import Mapping
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from starlette.responses import JSONResponse
 
 from wing.event import AgentInfo, CommandInfo, SessionInfo
@@ -232,6 +232,20 @@ class RemoteToolSpec(BaseModel):
                 "llm_name must match ^[a-zA-Z0-9_-]{1,64}$ (provider function-name grammar)"
             )
         return v
+
+    @model_validator(mode="after")
+    def _effective_llm_name_provider_safe(self) -> "RemoteToolSpec":
+        # effective LLM 可见名（llm_name or name）须过 provider 文法——否则
+        # llm_name=None 时裸 name（如 "My Tool" / "读文件"）会注册通过、却延迟到
+        # LLM 调用才 400，违反"坏名字应在注册时失败"。即使将来 llm_name 按存废
+        # 判断被删、name 成为唯一 LLM 可见名，这道校验依然必要。
+        effective = self.llm_name or self.name
+        if not _LLM_NAME_RE.match(effective):
+            raise ValueError(
+                "effective LLM-visible name (llm_name or name) must match "
+                "^[a-zA-Z0-9_-]{1,64}$ (provider function-name grammar)"
+            )
+        return self
 
 
 class RegisterToolsRequest(BaseModel):

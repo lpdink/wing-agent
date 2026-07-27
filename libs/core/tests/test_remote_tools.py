@@ -74,6 +74,20 @@ class TestRemoteToolSpecValidation:
         spec = RemoteToolSpec(name="Read", llm_name="Remote-Read_1", params=[])
         assert spec.llm_name == "Remote-Read_1"
 
+    def test_bare_name_internal_space_rejected(self):
+        # llm_name=None 时裸 name 即 LLM 可见名，"My Tool" 不合 provider 文法
+        with pytest.raises(ValueError, match="function-name grammar"):
+            RemoteToolSpec(name="My Tool", llm_name=None, params=[])
+
+    def test_bare_name_non_ascii_rejected(self):
+        with pytest.raises(ValueError, match="function-name grammar"):
+            RemoteToolSpec(name="读文件", llm_name=None, params=[])
+
+    def test_non_ascii_name_with_safe_llm_name_ok(self):
+        # name 仅作 registry key（不直达 provider），llm_name 安全即可
+        spec = RemoteToolSpec(name="读文件", llm_name="Read", params=[])
+        assert spec.name == "读文件"
+
 
 @pytest.mark.asyncio
 async def test_register_and_dispatch_round_trip(manager: RemoteToolManager):
