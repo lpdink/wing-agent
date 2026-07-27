@@ -1,0 +1,135 @@
+"""GatewayClient — Wing Gateway 全量 HTTP API 客户端。"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import httpx
+
+
+class GatewayClient:
+    """异步 HTTP 客户端，覆盖 Gateway 全部端点。
+
+    Usage:
+        client = GatewayClient("http://127.0.0.1:32523", api_key="secret")
+        session = await client.create_session(workspace="/path")
+        await client.send_message(session["session_id"], "hello")
+    """
+
+    def __init__(
+        self,
+        gateway_url: str = "http://127.0.0.1:32523",
+        api_key: str | None = None,
+    ) -> None:
+        self.gateway_url = gateway_url.rstrip("/")
+        headers: dict[str, str] = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        self._client = httpx.AsyncClient(
+            base_url=self.gateway_url,
+            headers=headers,
+            timeout=60.0,
+        )
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+    async def __aenter__(self) -> "GatewayClient":
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        await self.close()
+
+    # ── Session 生命周期 ──────────────────────────────────────
+
+    async def create_session(
+        self,
+        template_name: str | None = None,
+        workspace: str | None = None,
+        agent: dict | None = None,
+        backend: str | None = None,
+    ) -> dict:
+        body: dict[str, Any] = {}
+        if template_name:
+            body["template_name"] = template_name
+        if workspace:
+            body["workspace"] = workspace
+        if agent:
+            body["agent"] = agent
+        if backend:
+            body["backend"] = backend
+        return await self._post("/api/session/create", body)
+
+    async def resume_session(self, session_id: str) -> dict:
+        return await self._post("/api/session/resume", {"session_id": session_id})
+
+    async def fork_session(self, source_session_id: str, target_uuid: str) -> dict:
+        return await self._post(
+            "/api/session/fork",
+            {"source_session_id": source_session_id, "target_uuid": target_uuid},
+        )
+
+    # ── 订阅 ─────────────────────────────────────────────────
+
+    async def subscribe(self, session_id: str, client_id: str) -> dict:
+        return await self._post(
+            "/api/session/subscribe",
+            {"session_id": session_id},
+            headers={"X-Client-Id": client_id},
+        )
+
+    async def unsubscribe(self, session_id: str, client_id: str) -> dict:
+        return await self._post(
+            "/api/session/unsubscribe",
+            {"session_id": session_id},
+            headers={"X-Client-Id": client_id},
+        )
+
+    # ── 消息 ─────────────────────────────────────────────────
+
+    async def send_message(
+        self,
+        session_id: str,
+        content: str,
+        tool_call_id: str | None = None,
+    ) -> dict:
+        body: dict[str, Any] = {"session_id": session_id, "content": content}
+        if tool_call_id:
+            body["tool_call_id"] = tool_call_id
+        return await self._post("/api/session/send", body)
+
+    # ── 操作 ─────────────────────────────────────────────────
+
+    async def interrupt_session(self, session_id: str) -> dict:
+        return await self._post("/api/session/interrupt", {"session_id": session_id})
+
+    async def compact_session(self, session_id: str) -> dict:
+        return await self._post("/api/session/compact", {"session_id": session_id})
+
+    # ── 查询 ─────────────────────────────────────────────────
+
+    async def list_sessions(self) -> dict:
+        return await self._get("/api/session/list")
+
+    async def get_session(self, session_id: str) -> dict:
+        return await self._get("/api/session/get", params={"session_id": session_id})
+
+    async def get_session_info(self, session_id: str) -> dict:
+        return await self._get("/api/session/info", params={"session_id": session_id})
+
+    async def health(self) -> dict:
+        return await self._get("/api/health")
+
+    # ── 内部 ─────────────────────────────────────────────────
+
+    async def _post(
+        self, path: str, body: dict, headers: dict[str, str] | None = None
+    ) -> dict:
+        resp = await self._client.post(path, json=body, headers=headers)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def _get(self, path: str, params: dict | None = None) -> dict:
+        resp = await self._client.get(path, params=params)
+        resp.raise_for_status()
+        return resp.json()

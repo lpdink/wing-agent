@@ -26,7 +26,7 @@ version-file = "wing_agent/_version.py"
 packages = ["wing_agent"]
 
 [tool.uv.workspace]
-members = ["libs/core", "crates/wing"]
+members = ["libs/core", "libs/wing-sdk", "crates/wing"]
 
 [tool.uv.sources]
 wing-cli = { workspace = true }

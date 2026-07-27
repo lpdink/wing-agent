@@ -358,3 +358,92 @@ pub struct ErrorResponse {
     pub session_id: Option<String>,
     pub uuid: Option<String>,
 }
+
+// ============================================================
+// 远程工具注册 — Request / Response
+// ============================================================
+
+/// 工具参数规格（镜像 Python `wing.schema.ToolParam`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolParam {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub param_type: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<serde_json::Value>,
+}
+
+/// 远程工具规格（镜像 Python `RemoteToolSpec`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteToolSpec {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<ToolParam>,
+}
+
+/// POST /api/tools/register 请求体。
+#[derive(Debug, Clone, Serialize)]
+pub struct RegisterToolsRequest {
+    pub tools: Vec<RemoteToolSpec>,
+}
+
+/// POST /api/tools/register 响应。
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegisterToolsResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub registered: Vec<String>,
+}
+
+// ============================================================
+// 远程工具 WS 帧
+// ============================================================
+
+/// Gateway → tool host 的工具调用请求帧。
+#[derive(Debug, Clone, Deserialize)]
+pub struct WsToolCallRequest {
+    #[serde(rename = "type")]
+    pub frame_type: String,
+    pub call_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+/// tool host → Gateway 的工具调用结果帧。
+#[derive(Debug, Clone, Serialize)]
+pub struct WsToolCallResult {
+    #[serde(rename = "type")]
+    pub frame_type: String,
+    pub call_id: String,
+    pub result: String,
+    pub is_error: bool,
+}
+
+impl WsToolCallResult {
+    pub fn success(call_id: &str, result: String) -> Self {
+        Self {
+            frame_type: "tool_call_result".to_owned(),
+            call_id: call_id.to_owned(),
+            result,
+            is_error: false,
+        }
+    }
+
+    pub fn error(call_id: &str, result: String) -> Self {
+        Self {
+            frame_type: "tool_call_result".to_owned(),
+            call_id: call_id.to_owned(),
+            result,
+            is_error: true,
+        }
+    }
+}

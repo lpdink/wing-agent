@@ -1,6 +1,7 @@
 //! Wing Gateway HTTP API client — 手写的、符合项目风格的 Rust 客户端。
 //!
 //! 唯一的入口类型是 [`GatewayClient`]，所有 API 调用都是其上的 async 方法。
+//! 远程工具宿主使用 [`tool_host::ToolHost`]（builder 模式注册 + 服务调用）。
 //!
 //! ```no_run
 //! # use wing_api_client::GatewayClient;
@@ -15,6 +16,7 @@
 mod client;
 mod error;
 pub mod models;
+pub mod tool_host;
 
 pub use client::{DEFAULT_PORT, GatewayClient};
 pub use error::ApiClientError;

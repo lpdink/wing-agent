@@ -13,6 +13,7 @@ members = [
     "wing-agent",
     "wing-cli",
     "wing-gateway",
+    "wing-sdk",
 ]
 
 [[package]]
@@ -1312,4 +1313,19 @@ requires-dist = [
     { name = "python-frontmatter", specifier = ">=1.1.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.51.0" },
+]
+
+[[package]]
+name = "wing-sdk"
+version = "0.1.0"
+source = { editable = "libs/wing-sdk" }
+dependencies = [
+    { name = "httpx" },
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "websockets", specifier = ">=12.0" },
 ]
