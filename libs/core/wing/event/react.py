@@ -97,12 +97,19 @@ class TurnStartedEvent(WingEvent):
 
 
 class DiffContentEvent(WingEvent):
-    """工具产生的 diff 内容，前端据此渲染 DiffView。"""
+    """工具产生的 diff 内容，前端据此渲染 DiffView。
+
+    tool_call_id 关联产生此 diff 的工具调用（Write/Edit/BetterEdit）。
+    并发工具调用场景下事件乱序到达，前端据此把 diff 锚定到对应
+    ToolCall cell 之后，而非追加到聊天尾部。取自 agent.py 的
+    current_tool_call_id()（exec_tool_calls 为每个 gather task 设置）。
+    """
 
     type: Literal["diff_content"] = "diff_content"
     path: str
     old_text: str | None = None  # None 表示新文件（全绿）
     new_text: str
+    tool_call_id: str = ""
 
 
 # ── Turn-level events (for stdio / SDK consumers) ──────────────────────

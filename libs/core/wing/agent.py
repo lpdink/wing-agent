@@ -54,6 +54,15 @@ _current_tool_call_id: ContextVar[str | None] = ContextVar(
 )
 
 
+def current_tool_call_id() -> str | None:
+    """当前执行上下文的工具调用 id（不在工具执行中时为 None）。
+
+    工具据此把派生事件（如 DiffContentEvent）关联回自身的 ToolCall，
+    使前端在并发乱序场景下仍能把事件锚定到正确的 ToolCall cell。
+    """
+    return _current_tool_call_id.get()
+
+
 @dataclass
 class Inbound:
     """进入 agent 的请求，携带消息和上下文元数据。
