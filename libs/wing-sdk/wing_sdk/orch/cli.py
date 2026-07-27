@@ -163,7 +163,10 @@ def main() -> None:
     try:
         asyncio.run(runner.run())
     except KeyboardInterrupt:
-        pass
+        sys.exit(130)
+
+    if runner.interrupted:
+        sys.exit(130)
 
 
 def _setup_logging(log_file: str | None) -> None:

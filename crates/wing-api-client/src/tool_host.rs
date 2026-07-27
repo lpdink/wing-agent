@@ -44,6 +44,17 @@ use crate::client::GatewayClient;
 use crate::error::ApiClientError;
 use crate::models::{RemoteToolSpec, ToolParam, WsToolCallRequest, WsToolCallResult};
 
+/// WS sink 类型别名（避免重复书写长泛型）。
+type WsSink = futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    Message,
+>;
+
+/// WS stream 类型别名。
+type WsStream = futures_util::stream::SplitStream<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+>;
+
 /// 工具调用 handler 类型。
 pub type ToolHandler =
     fn(HashMap<String, Value>) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
@@ -105,6 +116,23 @@ impl ToolSpec {
             description: description.into(),
             default: Some(default.into()),
             items: None,
+        });
+        self
+    }
+
+    /// 添加数组参数。
+    pub fn param_array(
+        mut self,
+        name: impl Into<String>,
+        items_type: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        self.params.push(ToolParam {
+            name: name.into(),
+            param_type: "array".to_owned(),
+            description: description.into(),
+            default: None,
+            items: Some(Value::String(items_type.into())),
         });
         self
     }
@@ -234,21 +262,8 @@ impl ToolHostBuilder {
 /// 远程工具宿主——持有 WS 连接，服务工具调用。
 pub struct ToolHost {
     client_id: String,
-    ws_sink: Arc<
-        Mutex<
-            futures_util::stream::SplitSink<
-                tokio_tungstenite::WebSocketStream<
-                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-                >,
-                Message,
-            >,
-        >,
-    >,
-    ws_stream: futures_util::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    >,
+    ws_sink: Arc<Mutex<WsSink>>,
+    ws_stream: WsStream,
     handlers: HashMap<String, ToolHandler>,
 }
 

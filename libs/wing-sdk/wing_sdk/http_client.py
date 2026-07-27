@@ -120,6 +120,23 @@ class GatewayClient:
     async def health(self) -> dict:
         return await self._get("/api/health")
 
+    # ── 系统 ─────────────────────────────────────────────────
+
+    async def get_commands(self) -> dict:
+        return await self._get("/api/commands")
+
+    async def get_models(self) -> dict:
+        return await self._get("/api/models")
+
+    async def get_agents(self) -> dict:
+        return await self._get("/api/agents")
+
+    async def reload(self) -> dict:
+        return await self._post("/api/system/reload", {})
+
+    async def shutdown(self) -> dict:
+        return await self._post("/api/shutdown", {})
+
     # ── 内部 ─────────────────────────────────────────────────
 
     async def _post(

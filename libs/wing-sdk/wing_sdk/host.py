@@ -219,8 +219,13 @@ def _extract_description(fn: Callable) -> str:
 
 def _infer_params(fn: Callable) -> list[ToolParam]:
     """从函数签名 + docstring Args section 推断参数列表。"""
+    import typing
+
     sig = inspect.signature(fn)
-    hints = fn.__annotations__ if hasattr(fn, "__annotations__") else {}
+    try:
+        hints = typing.get_type_hints(fn)
+    except Exception:
+        hints = {}
     arg_docs = _parse_args_section(inspect.getdoc(fn) or "")
 
     params: list[ToolParam] = []

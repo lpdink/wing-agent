@@ -260,8 +260,7 @@ class GoalState:
             ]
 
         if finish is False:
-            reason = parse_reason(output) or output
-            executor_msg = self.build_executor_message(reason)
+            executor_msg = self.build_executor_message(output)
             self.round += 1
             self.phase = GoalPhase.EXECUTOR_WORKING
             return [

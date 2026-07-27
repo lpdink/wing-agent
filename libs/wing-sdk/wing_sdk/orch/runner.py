@@ -70,6 +70,8 @@ class GoalRunner:
         self._http: GatewayClient | None = None
         self._ws: Any = None
         self._shutdown = False
+        self.interrupted = False
+        """True if shutdown was due to signal/interrupt (exit code 130)."""
 
     async def run(self) -> None:
         """主入口。"""
@@ -132,6 +134,9 @@ class GoalRunner:
         except (ConnectionClosed, Exception) as e:
             logger.error(f"tool host error: {e}")
             self._shutdown = True
+            # 主动关闭 event WS，使 _event_loop 的 async for 立即退出
+            if self._ws:
+                await self._ws.close()
 
     async def _init_goal(self, event_client_id: str) -> None:
         """创建 executor + checker session，初始化状态机。"""
@@ -325,6 +330,7 @@ class GoalRunner:
     def _handle_signal(self) -> None:
         logger.info("signal received, shutting down")
         self._shutdown = True
+        self.interrupted = True
 
     # ── 持久化 ────────────────────────────────────────────────
 
