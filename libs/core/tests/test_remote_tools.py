@@ -44,6 +44,21 @@ def _spec(name: str) -> RemoteToolSpec:
     return RemoteToolSpec(name=name, description=f"remote {name}", params=[])
 
 
+class TestRemoteToolSpecValidation:
+    """工具名校验——含 '.' 或空串会破坏 ToolRef 解析，注册时即拒绝。"""
+
+    def test_name_with_dot_rejected(self):
+        with pytest.raises(ValueError, match="must not contain"):
+            RemoteToolSpec(name="my.tool", description="", params=[])
+
+    def test_empty_name_rejected(self):
+        with pytest.raises(ValueError, match="must not be empty"):
+            RemoteToolSpec(name="   ", description="", params=[])
+
+    def test_valid_name_ok(self):
+        assert RemoteToolSpec(name="Read", description="", params=[]).name == "Read"
+
+
 @pytest.mark.asyncio
 async def test_register_and_dispatch_round_trip(manager: RemoteToolManager):
     ws = FakeWS()
@@ -63,7 +78,7 @@ async def test_register_and_dispatch_round_trip(manager: RemoteToolManager):
     assert frame["name"] == "Read"
     assert frame["arguments"] == {"path": "/etc/hostname"}
 
-    assert manager.resolve_result(frame["call_id"], "file content", False) is True
+    assert manager.resolve_result(HOST, frame["call_id"], "file content", False) is True
     assert await task == "file content"
 
 
@@ -79,7 +94,7 @@ async def test_dispatch_error_result_raises_tool_error(manager: RemoteToolManage
     while not ws.sent:
         await asyncio.sleep(0)
 
-    manager.resolve_result(ws.last_call_id(), "exit code 1", True)
+    manager.resolve_result(HOST, ws.last_call_id(), "exit code 1", True)
     with pytest.raises(ToolError, match="exit code 1"):
         await task
 
@@ -131,7 +146,78 @@ async def test_dispatch_to_unattached_client_errors(manager: RemoteToolManager):
 
 
 def test_resolve_unknown_call_id_returns_false(manager: RemoteToolManager):
-    assert manager.resolve_result("nonexistent", "x", False) is False
+    # 未知 client → False
+    assert manager.resolve_result("ghost-client", "some-call", "", False) is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_result_rejects_cross_client_forgery(manager: RemoteToolManager):
+    """归属校验：host A 不能用伪造结果 resolve host B 的在途调用。"""
+    other = "other-host"
+    ws_a, ws_b = FakeWS(), FakeWS()
+    manager.attach(HOST, ws_a)
+    manager.attach(other, ws_b)
+    manager.register_tools(other, [_spec("Read")])
+    tool = tool_registry.resolve(f"{other}.Read")
+    assert tool is not None
+
+    task = asyncio.create_task(tool.function(path="/x"))
+    while not ws_b.sent:
+        await asyncio.sleep(0)
+    stolen_call_id = ws_b.last_call_id()
+
+    try:
+        # HOST 试图 resolve other 的调用 → 拒绝
+        assert manager.resolve_result(HOST, stolen_call_id, "forged", False) is False
+        # 调用仍在途；真正的 owner 可以 resolve
+        assert manager.resolve_result(other, stolen_call_id, "real", False) is True
+        assert await task == "real"
+    finally:
+        tool_registry.unregister_namespace(other)
+
+
+def test_register_tools_atomic_on_registry_collision(manager: RemoteToolManager):
+    """碰撞时批量注册原子回滚——前序项不留残留。"""
+    manager.register_tools(HOST, [_spec("Read")])  # 先占用 Read
+
+    with pytest.raises(ValueError, match="already registered"):
+        manager.register_tools(HOST, [_spec("Write"), _spec("Read")])
+
+    # Write 未被部分注册
+    assert tool_registry.resolve(f"{HOST}.Write") is None
+    assert tool_registry.resolve(f"{HOST}.Read") is not None
+
+
+def test_register_tools_rejects_intra_request_duplicate(manager: RemoteToolManager):
+    """同一请求内工具重名 → 拒绝，且无任何注册。"""
+    with pytest.raises(ValueError, match="duplicate tool names"):
+        manager.register_tools(HOST, [_spec("Read"), _spec("Read")])
+    assert tool_registry.resolve(f"{HOST}.Read") is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_dispatch_serialized_by_lock(manager: RemoteToolManager):
+    """同一 host 并发 dispatch（agent asyncio.gather 场景）都成功——per-client
+    锁串行化对单连接的并发写，两个调用各自正确 resolve。"""
+    ws = FakeWS()
+    manager.attach(HOST, ws)
+    manager.register_tools(HOST, [_spec("Read"), _spec("Glob")])
+    read = tool_registry.resolve(f"{HOST}.Read")
+    glob = tool_registry.resolve(f"{HOST}.Glob")
+    assert read is not None and glob is not None
+
+    t_read = asyncio.create_task(read.function(path="/a"))
+    t_glob = asyncio.create_task(glob.function(pattern="*"))
+    while len(ws.sent) < 2:
+        await asyncio.sleep(0)
+
+    # 按帧顺序 resolve（call_id → 工具名）
+    for frame in ws.sent:
+        result = "R" if frame["name"] == "Read" else "G"
+        manager.resolve_result(HOST, frame["call_id"], result, False)
+
+    assert await t_read == "R"
+    assert await t_glob == "G"
 
 
 @pytest.mark.asyncio

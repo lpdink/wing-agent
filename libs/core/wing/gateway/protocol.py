@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.responses import JSONResponse
 
 from wing.event import AgentInfo, CommandInfo, SessionInfo
@@ -66,7 +67,7 @@ class ToolCallRequest(BaseModel):
     RemoteToolManager 生成，用于在 pending future 表中关联请求与响应。
     """
 
-    type: str = Field(
+    type: Literal["tool_call_request"] = Field(
         default="tool_call_request", description="帧类型，固定为 'tool_call_request'"
     )
     call_id: str = Field(description="调用唯一 ID，结果帧据此关联")
@@ -77,7 +78,7 @@ class ToolCallRequest(BaseModel):
 class ToolCallResult(BaseModel):
     """tool host 经 WS 回传的工具调用结果帧（入站）。"""
 
-    type: str = Field(
+    type: Literal["tool_call_result"] = Field(
         default="tool_call_result", description="帧类型，固定为 'tool_call_result'"
     )
     call_id: str = Field(description="对应的调用 ID")
@@ -192,6 +193,17 @@ class RemoteToolSpec(BaseModel):
     params: list[ToolParam] = Field(
         default_factory=list, description="工具参数列表（复用核心 ToolParam）"
     )
+
+    @field_validator("name")
+    @classmethod
+    def _name_resolvable(cls, v: str) -> str:
+        # 工具名含 "." 会破坏 ToolRef.parse（rsplit(".", 1)）：注册成功却永远
+        # 无法以 "<client_id>.<name>" 解析——静默坑，注册时即拒绝。
+        if not v.strip():
+            raise ValueError("tool name must not be empty")
+        if "." in v:
+            raise ValueError("tool name must not contain '.'")
+        return v
 
 
 class RegisterToolsRequest(BaseModel):

@@ -28,9 +28,9 @@ from wing.gateway.protocol import error_response
 EXEMPT_PATHS: set[str] = {"/api/health"}
 
 # ── 身份角色 ─────────────────────────────────────────────────
-# admin：全量访问。tool_runtime：纯工具执行远端，仅允许注册工具。
+# admin（ApiKeyEntry.role 默认值）：全量访问，是隐式的"非受限"角色。
+# tool_runtime：纯工具执行远端，仅允许注册工具——唯一需要显式判定的角色。
 # 既要注册工具又要订阅事件的客户端应持 admin 身份。
-ROLE_ADMIN = "admin"
 ROLE_TOOL_RUNTIME = "tool_runtime"
 
 # tool_runtime 角色允许访问的路径（allowlist）。新增端点默认对其关闭——

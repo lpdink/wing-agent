@@ -33,9 +33,11 @@ class RemoteToolManager:
     """远程工具连接与调用管理器（Gateway 持有单例）。
 
     内部索引：
-      - _clients:      client_id → WebSocket
-      - _pending:      call_id → Future[str]（全局，resolve 据此 O(1) 寻址）
-      - _client_calls: client_id → set[call_id]（断连时批量 fail 用）
+      - _clients:         client_id → WebSocket
+      - _pending:         call_id → Future[str]（全局，resolve 据此 O(1) 寻址）
+      - _client_calls:    client_id → set[call_id]（断连批量 fail + 归属校验）
+      - _send_locks:      client_id → Lock（串行化对同一 WS 的并发写）
+      - _receives_events: client_id → bool（tool_runtime 为 False，不收事件）
     """
 
     def __init__(self, timeout: float | None = None) -> None:
@@ -45,6 +47,8 @@ class RemoteToolManager:
         self._clients: dict[str, Any] = {}
         self._pending: dict[str, asyncio.Future[str]] = {}
         self._client_calls: dict[str, set[str]] = {}
+        self._send_locks: dict[str, asyncio.Lock] = {}
+        self._receives_events: dict[str, bool] = {}
 
     @property
     def _effective_timeout(self) -> float:
@@ -54,14 +58,27 @@ class RemoteToolManager:
 
     # ── 连接管理 ──────────────────────────────────────────────
 
-    def attach(self, client_id: str, ws: Any) -> None:
-        """登记一个 tool host 连接。"""
+    def attach(self, client_id: str, ws: Any, *, receives_events: bool = True) -> None:
+        """登记一个 tool host 连接。
+
+        receives_events=False 用于 tool_runtime——纯工具执行远端，不参与
+        事件订阅（global 广播会跳过它）。
+        """
         self._clients[client_id] = ws
         self._client_calls.setdefault(client_id, set())
-        log.info(f"RemoteToolManager: attached tool host '{client_id}'")
+        self._send_locks.setdefault(client_id, asyncio.Lock())
+        self._receives_events[client_id] = receives_events
+        log.info(
+            f"RemoteToolManager: attached tool host '{client_id}' "
+            f"(receives_events={receives_events})"
+        )
 
     def is_attached(self, client_id: str) -> bool:
         return client_id in self._clients
+
+    def receives_events(self, client_id: str) -> bool:
+        """该 client 是否接收事件。未 attach 的 client（纯前端）默认接收。"""
+        return self._receives_events.get(client_id, True)
 
     # ── 注册 ──────────────────────────────────────────────────
 
@@ -71,9 +88,26 @@ class RemoteToolManager:
         每个工具的 function 是一个绑定 (client_id, tool_name) 的 dispatch
         闭包——Agent 调用它时内部发起远程调用。返回完整工具引用列表。
 
+        原子性：先校验（请求内重名 + registry 碰撞）再提交，要么全成要么
+        全不成——碰撞时不留部分注册（spec 碰撞契约：既有工具保持不变）。
+
         Raises:
-            ValueError: 同 namespace 同名工具已存在（来自 register_tool）。
+            ValueError: 请求内工具重名，或同 namespace 同名工具已存在。
         """
+        # 1. 请求内查重
+        names = [spec.name for spec in specs]
+        if len(names) != len(set(names)):
+            dupes = sorted({n for n in names if names.count(n) > 1})
+            raise ValueError(f"duplicate tool names in request: {dupes}")
+
+        # 2. registry 碰撞预检（提交前）
+        for spec in specs:
+            if tool_registry.get_tool(spec.name, client_id) is not None:
+                raise ValueError(
+                    f"Tool '{spec.name}' already registered in namespace '{client_id}'"
+                )
+
+        # 3. 提交（预检通过后不会碰撞）
         registered: list[str] = []
         for spec in specs:
             tool = Tool(
@@ -113,6 +147,9 @@ class RemoteToolManager:
                 f"is not connected"
             )
 
+        # 读一次超时，wait_for 与错误消息共用，避免热重载下两次读取不一致
+        timeout = self._effective_timeout
+
         call_id = uuid.uuid4().hex
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
@@ -120,8 +157,12 @@ class RemoteToolManager:
         self._client_calls.setdefault(client_id, set()).add(call_id)
 
         request = ToolCallRequest(call_id=call_id, name=tool_name, arguments=arguments)
+        # per-client 锁串行化对同一 WS 的并发写——agent 并发执行多个远程工具
+        # （asyncio.gather）时，避免对单连接并发 send（ASGI 不保证安全）。
+        lock = self._send_locks.setdefault(client_id, asyncio.Lock())
         try:
-            await ws.send_text(request.model_dump_json())
+            async with lock:
+                await ws.send_text(request.model_dump_json())
         except Exception as e:
             self._discard_call(client_id, call_id)
             raise ToolError(
@@ -129,26 +170,32 @@ class RemoteToolManager:
             ) from e
 
         try:
-            return await asyncio.wait_for(future, timeout=self._effective_timeout)
+            return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             self._discard_call(client_id, call_id)
             raise ToolError(
-                f"remote tool '{tool_name}' timed out after "
-                f"{self._effective_timeout:.0f}s"
+                f"remote tool '{tool_name}' timed out after {timeout:.0f}s"
             ) from None
 
-    def resolve_result(self, call_id: str, result: str, is_error: bool) -> bool:
+    def resolve_result(
+        self, client_id: str, call_id: str, result: str, is_error: bool
+    ) -> bool:
         """resolve 一个在途调用。返回是否命中已知 call_id。
+
+        归属校验：call_id 必须属于发帧的 client——防止 tool host A 用伪造
+        结果 resolve host B 的在途调用（多 host 隔离）。call_id 是 uuid 不可
+        猜，但归属校验闭合了 RBAC 主题下的这道边界。
 
         is_error 时以 ToolError 置错——dispatch 侧 wait_for 会抛出它，
         agent 据此把结果标记为工具错误。
         """
+        calls = self._client_calls.get(client_id)
+        if calls is None or call_id not in calls:
+            return False
         future = self._pending.pop(call_id, None)
         if future is None or future.done():
             return False
-        # 从所属 client 的调用集合中清除（反查）
-        for calls in self._client_calls.values():
-            calls.discard(call_id)
+        calls.discard(call_id)
         if is_error:
             future.set_exception(ToolError(result or "remote tool error"))
         else:
@@ -178,6 +225,8 @@ class RemoteToolManager:
             if future is not None and not future.done():
                 future.set_exception(ToolError(f"remote tool call aborted: {reason}"))
         self._clients.pop(client_id, None)
+        self._send_locks.pop(client_id, None)
+        self._receives_events.pop(client_id, None)
 
         removed = tool_registry.unregister_namespace(client_id)
         log.info(
