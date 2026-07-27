@@ -6,6 +6,7 @@ import asyncio
 import os
 from pathlib import Path
 
+from wing_sdk.tools._proc import kill_process_group
 from wing_sdk.tools._resolve import resolve_path
 
 
@@ -143,10 +144,15 @@ async def _run_rg(args: list[str], cwd: str) -> tuple[str, int]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            start_new_session=True,  # 新进程组，超时时杀整棵树
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
         return stdout.decode(errors="replace"), proc.returncode or 0
     except FileNotFoundError:
         return "grep: ripgrep not available in this environment", 1
     except asyncio.TimeoutError:
+        # wait_for 取消的只是 communicate()——不杀进程组会留下孤儿 rg
+        # （大目录 / 慢网络挂载上 30s 超时是现实场景）
+        kill_process_group(proc)
+        await proc.wait()
         return "grep: timeout", 1

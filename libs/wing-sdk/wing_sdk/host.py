@@ -10,6 +10,7 @@ import inspect
 import json
 import re
 from typing import Any, Callable
+from urllib.parse import quote
 
 import httpx
 import websockets
@@ -103,7 +104,8 @@ class ToolHost:
         ws_url = self.gateway_url.replace("http://", "ws://").replace(
             "https://", "wss://"
         )
-        ws_uri = f"{ws_url}/ws?client_id={self.client_id}"
+        # client_id 来自调用方，须百分号编码——裸 & = # 空格等会破坏 URI
+        ws_uri = f"{ws_url}/ws?client_id={quote(self.client_id, safe='')}"
 
         headers: dict[str, str] = {}
         if self.api_key:

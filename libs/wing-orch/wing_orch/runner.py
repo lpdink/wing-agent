@@ -12,6 +12,7 @@ import os
 import signal
 import tempfile
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import websockets
@@ -132,7 +133,7 @@ class GoalRunner:
         # 须用另一个。注意角色由 API key 决定而非 client_id：开启鉴权时
         # wing-orch 需要 admin 角色的 key（tool_runtime 仅允许注册工具）。
         event_client_id = f"{self.client_id}-events"
-        ws_uri = f"{ws_url}/ws?client_id={event_client_id}"
+        ws_uri = f"{ws_url}/ws?client_id={quote(event_client_id, safe='')}"
 
         try:
             async with websockets.connect(

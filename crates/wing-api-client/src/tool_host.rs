@@ -35,6 +35,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::Value;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
@@ -54,6 +55,22 @@ type WsSink = futures_util::stream::SplitSink<
 type WsStream = futures_util::stream::SplitStream<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
+
+/// query 值编码集：字母数字与 `-_.~` 不编码（与 Python `quote(safe="")` 一致）。
+const QUERY_VALUE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
+/// 构造 WS 连接 URL——client_id 百分号编码，裸 `& = # 空格` 等会破坏 URI。
+fn ws_url_with_client_id(ws_url: &str, client_id: &str) -> String {
+    format!(
+        "{}?client_id={}",
+        ws_url,
+        utf8_percent_encode(client_id, QUERY_VALUE_SET)
+    )
+}
 
 /// 工具调用 handler 类型——可捕获环境的闭包（Arc 共享，Send+Sync）。
 pub type ToolHandler = Arc<
@@ -184,7 +201,7 @@ impl ToolHostBuilder {
     /// 构建 ToolHost：WS 连接 → 注册工具。失败时断连并返回错误。
     pub async fn build(self) -> Result<ToolHost, ApiClientError> {
         // 1. WS connect with client_id
-        let url = format!("{}?client_id={}", self.ws_url, self.client_id);
+        let url = ws_url_with_client_id(&self.ws_url, &self.client_id);
         let mut request = url
             .into_client_request()
             .map_err(|e| ApiClientError::Connection(format!("invalid WS URL: {e}")))?;
@@ -450,5 +467,19 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["tools"][0]["name"], "Read");
         assert_eq!(json["tools"][0]["params"][0]["name"], "path");
+    }
+
+    #[test]
+    fn ws_url_encodes_client_id() {
+        // 安全字符（字母数字 - _ . ~）保持原样
+        assert_eq!(
+            ws_url_with_client_id("ws://127.0.0.1:32523/ws", "wing-orch-abcd1234"),
+            "ws://127.0.0.1:32523/ws?client_id=wing-orch-abcd1234"
+        );
+        // URI 特殊字符被百分号编码
+        assert_eq!(
+            ws_url_with_client_id("ws://h/ws", "my host&x=1"),
+            "ws://h/ws?client_id=my%20host%26x%3D1"
+        );
     }
 }

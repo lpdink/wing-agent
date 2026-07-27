@@ -16,3 +16,4 @@ tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 tracing = { workspace = true }
+percent-encoding = "2.3"

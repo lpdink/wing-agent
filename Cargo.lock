@@ -3041,6 +3041,7 @@ version = "0.0.0"
 dependencies = [
  "chrono",
  "futures-util",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
