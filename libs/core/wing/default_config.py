@@ -127,6 +127,13 @@ gateway:
   host: 127.0.0.1
   port: 32523
 
+  # Remote tool call total timeout (seconds). A safety net, NOT a
+  # short timeout — remote tools (e.g. Bash) may run for a long time.
+  # Connection close is the primary failure signal (in-flight calls
+  # fail immediately on WS disconnect); this only guards the extreme
+  # case of a silently dead client that never closes the connection.
+  remote_tool_timeout: 1800.0
+
   # API key authentication. When enabled, all HTTP/WS requests
   # (except /api/health) must carry a valid key via
   # "Authorization: Bearer <key>" or "X-API-Key: <key>" header.
@@ -140,7 +147,8 @@ gateway:
     # Example:
     # keys:
     #   - key: "my-secret-key"
-    #     role: admin        # identity role (reserved for future RBAC)
+    #     role: admin        # admin = full access; tool_runtime = may only
+    #                        # register remote tools (and hold its WS)
 
 # ── Prompt Commands ──────────────────────────────────────────
 # Paths to directories containing prompt command definition files.

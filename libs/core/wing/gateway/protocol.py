@@ -23,6 +23,7 @@ from starlette.responses import JSONResponse
 
 from wing.event import AgentInfo, CommandInfo, SessionInfo
 from wing.event.query_response import BranchTargetInfo
+from wing.schema import ToolParam
 
 
 # ============================================================
@@ -56,6 +57,32 @@ class ClientRequest(BaseModel):
         default=None,
         description="回复某个 Ask 事件时携带其 tool_call_id，定向 resolve feedback waiter",
     )
+
+
+class ToolCallRequest(BaseModel):
+    """Gateway 经 WS 发给 tool host 的工具调用请求帧（出站）。
+
+    tool host 执行后以 ToolCallResult（同 call_id）回传。call_id 由
+    RemoteToolManager 生成，用于在 pending future 表中关联请求与响应。
+    """
+
+    type: str = Field(
+        default="tool_call_request", description="帧类型，固定为 'tool_call_request'"
+    )
+    call_id: str = Field(description="调用唯一 ID，结果帧据此关联")
+    name: str = Field(description="工具注册名（不含 namespace 前缀）")
+    arguments: dict = Field(default_factory=dict, description="工具调用参数")
+
+
+class ToolCallResult(BaseModel):
+    """tool host 经 WS 回传的工具调用结果帧（入站）。"""
+
+    type: str = Field(
+        default="tool_call_result", description="帧类型，固定为 'tool_call_result'"
+    )
+    call_id: str = Field(description="对应的调用 ID")
+    result: str = Field(default="", description="工具执行结果文本")
+    is_error: bool = Field(default=False, description="结果是否为错误")
 
 
 # ============================================================
@@ -153,6 +180,26 @@ class RewindRequest(BaseModel):
     target_uuid: str = Field(description="要回退到的消息 UUID")
 
 
+class RemoteToolSpec(BaseModel):
+    """远程工具规格——tool host 注册单个工具的 schema。
+
+    复用核心 ToolParam，与内置工具 schema 同构。注册后以 client_id 为
+    namespace 落入核心 registry，工具引用形如 ``<client_id>.<name>``。
+    """
+
+    name: str = Field(description="工具注册名（同 namespace 内唯一）")
+    description: str = Field(default="", description="工具描述（LLM 可见）")
+    params: list[ToolParam] = Field(
+        default_factory=list, description="工具参数列表（复用核心 ToolParam）"
+    )
+
+
+class RegisterToolsRequest(BaseModel):
+    """注册远程工具的请求体。需要 X-Client-Id header 标识 tool host。"""
+
+    tools: list[RemoteToolSpec] = Field(description="要注册的工具规格列表")
+
+
 # ============================================================
 # HTTP Response Models
 # ============================================================
@@ -188,6 +235,16 @@ class OkResponse(BaseModel):
     """通用成功响应。"""
 
     ok: bool = Field(default=True, description="操作是否成功")
+
+
+class RegisterToolsResponse(BaseModel):
+    """注册远程工具的响应。"""
+
+    ok: bool = Field(default=True, description="操作是否成功")
+    registered: list[str] = Field(
+        default_factory=list,
+        description="已注册工具的完整引用列表（形如 <client_id>.<name>）",
+    )
 
 
 class SendMessageResponse(BaseModel):
@@ -242,6 +299,7 @@ class ErrorResponse(BaseModel):
 HTTP_ERROR_TYPES: dict[int, str] = {
     400: "bad_request",
     401: "unauthorized",
+    403: "forbidden",
     404: "not_found",
     405: "method_not_allowed",
     422: "validation_error",

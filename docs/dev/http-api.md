@@ -55,6 +55,19 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 > `wing start/stop/status` 完全基于 HTTP：`stop` → `POST /api/shutdown` 后轮询 health 直至不可达；`start` → 探活 health，无响应则拉起再轮询；`status` → 读 health 的 version + uptime。已无 PID / state.json（PR #10）。
 
+### Tools（`routes/tools.py`，1 个）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/tools/register` | 注册远程工具。需 `X-Client-Id` header，且该 client 已持有活跃 WS（否则 400）。工具以 client_id 为 namespace 落入核心 registry，引用形如 `<client_id>.<name>`。 |
+
+**远程工具注册**（实验性）：tool host 先以 `tool_runtime` 身份建立 WS 连接并**自选 client_id**（`/ws?client_id=<id>`，作为工具 namespace，冲突拒连），再经此端点注册工具。注册后：
+
+- 调用走 WS：agent 调用 `<client_id>.<name>` 时，Gateway 经该 client 的 WS 发 `tool_call_request` 帧，tool host 执行后回 `tool_call_result` 帧（同 `call_id`）。
+- 核心网络无关：核心只看到一个普通 `Tool`（schema + 可执行体），远程性封装在 Gateway 注入的 dispatch 闭包里。
+- 断连即失败并注销：WS 断开时在途调用立即失败、工具从 registry 移除。**已加载 agent 持有的工具引用不受影响**（保护 KV cache）——再次调用时清晰返回 "tool unavailable / not connected"。动态工具切换为后续特性。
+- 总超时：`gateway.remote_tool_timeout`（默认 1800s）仅为安全网，断连是首要失败信号。
+
 ## WebSocket 协议（`/ws`）
 
 握手成功后服务端推送 `ConnectResponse { type: "connected", client_id }`。之后是**双向**通道：
@@ -64,6 +77,13 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 > 投递消息有两条等价路径：WS `ClientRequest`（TUI 实际所用，便于与 Ask 回复复用同一连接）或 HTTP `POST /api/session/send`。
 
+**远程工具帧**（tool host 专用，按 `call_id` 字段与 `ClientRequest` 区分，向后兼容）：
+
+- **服务端 → tool host**：`tool_call_request { type, call_id, name, arguments }` —— 发起一次远程工具调用。
+- **tool host → 服务端**：`tool_call_result { type, call_id, result, is_error }` —— 回传调用结果，Gateway 据此 resolve 在途调用。
+
+`tool_runtime` 角色连接时须经 `?client_id=<id>` 自选 client_id（admin 仍由服务端分配）；该 WS 是纯工具执行通道，不参与事件订阅。
+
 **ReAct 事件**（`event/react.py`）：`turn_started` · `text` · `reasoning` · `tool_call_stream` · `tool_call` · `tool_call_result` · `diff_content` · `ask` · `assistant_turn` · `tool_result_turn` · `turn_result`（subtype: success / error_during_execution / error_max_turns）· `done` · `llm_call_metrics`。
 
 > `tool_call_stream`：LLM 生成工具参数期间的流式渲染事件，携带**增量原始 args 文本碎片**（`args_fragment`，首个事件含完整前缀）。后端不解析 partial JSON，前端自行累积 buffer 并容错解析渲染；参数生成结束后由 `tool_call` 事件携带权威解析结果。
@@ -72,7 +92,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 **其他**（`event/base.py`、`query_response.py`）：`error` · `delivered` · `context_stats` · `branch_targets`。
 
-## 鉴权（opt-in，PR #35）
+## 鉴权与 RBAC（opt-in，PR #35）
 
 默认关闭，完全向后兼容。配置于后端 `gateway.auth`：
 
@@ -82,10 +102,16 @@ gateway:
     enabled: false
     keys:
       - key: "my-secret"
-        role: admin        # 预留 RBAC，当前不强制
+        role: admin        # admin = 全量；tool_runtime = 仅注册远程工具
 ```
 
 前端在 `~/.wing/tui/config.yaml` 设 `api_key: "my-secret"`，随每个请求发送。
+
+**角色强制（RBAC）**：`role` 现已强制（不再仅存储）。
+
+- `admin`：全量访问所有端点与 WS 事件订阅。
+- `tool_runtime`：纯工具执行远端，仅允许 `POST /api/tools/register`（及豁免的 `/api/health`）与其工具 WS 连接；访问其他端点返回 **403**（`ErrorResponse` 形状，`error: "forbidden"`）。既要注册工具又要订阅事件的客户端应持 admin 身份。
+- 强制在 `AuthMiddleware` 集中完成（allowlist），新增端点对 `tool_runtime` 默认关闭。鉴权关闭时不做角色强制。
 
 | 通道 | 接受形式 | 优先级 |
 |------|----------|--------|

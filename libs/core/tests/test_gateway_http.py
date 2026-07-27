@@ -1261,3 +1261,180 @@ class TestAuthHotReload:
                     headers={"Authorization": "Bearer new-key"},
                 )
                 assert resp.status_code == 200
+
+
+# ============================================================
+# RBAC 角色强制测试（admin / tool_runtime）
+# ============================================================
+
+
+@pytest.fixture
+def rbac_env(mock_runtime):
+    """开启鉴权 + 两种角色的环境：admin-key(admin)、tool-key(tool_runtime)。
+
+    yield (server, client)——暴露 server 以便操作 remote_tools / clients。
+    """
+    with (
+        patch("wing.gateway.server.WingRuntime") as MockRuntime,
+        patch("wing.gateway.server.load_config") as mock_load_config,
+    ):
+        MockRuntime.return_value = mock_runtime
+        mock_load_config.return_value = _mock_config(
+            auth_enabled=True,
+            auth_keys=[
+                ApiKeyEntry(key="admin-key", role="admin"),
+                ApiKeyEntry(key="tool-key", role="tool_runtime"),
+            ],
+        )
+
+        from wing.gateway.server import GatewayServer
+
+        server = GatewayServer()
+        server.runtime = mock_runtime
+
+        with TestClient(server._app) as tc:
+            yield server, tc
+
+
+TOOL_HEADERS = {"Authorization": "Bearer tool-key"}
+ADMIN_HEADERS = {"Authorization": "Bearer admin-key"}
+
+
+class TestRBAC:
+    """tool_runtime 受限、admin 全量。"""
+
+    def test_tool_runtime_restricted_endpoint_403(self, rbac_env):
+        """tool_runtime 访问工具注册以外的端点 → 403 + ErrorResponse 形状。"""
+        _, tc = rbac_env
+        resp = tc.get("/api/session/list", headers=TOOL_HEADERS)
+        assert resp.status_code == 403
+        body = resp.json()
+        assert body["error"] == "forbidden"
+        assert "detail" in body
+
+    def test_tool_runtime_create_session_403(self, rbac_env):
+        """tool_runtime 创建 session → 403。"""
+        _, tc = rbac_env
+        resp = tc.post("/api/session/create", json={}, headers=TOOL_HEADERS)
+        assert resp.status_code == 403
+
+    def test_tool_runtime_register_allowed_through_rbac(self, rbac_env):
+        """tool_runtime 访问注册端点不被 RBAC 拦（到达路由，因未连接 → 400）。"""
+        _, tc = rbac_env
+        resp = tc.post(
+            "/api/tools/register",
+            json={"tools": []},
+            headers={**TOOL_HEADERS, "X-Client-Id": "ghost"},
+        )
+        # 400（无活跃 WS）而非 403/401——证明 RBAC allowlist 放行
+        assert resp.status_code == 400
+        assert "WebSocket" in resp.json()["detail"]
+
+    def test_tool_runtime_register_missing_client_id_header(self, rbac_env):
+        """注册端点缺 X-Client-Id → 400（仍非 403）。"""
+        _, tc = rbac_env
+        resp = tc.post("/api/tools/register", json={"tools": []}, headers=TOOL_HEADERS)
+        assert resp.status_code == 400
+
+    def test_admin_full_access(self, rbac_env):
+        """admin 访问受限端点 → 200。"""
+        _, tc = rbac_env
+        resp = tc.get("/api/session/list", headers=ADMIN_HEADERS)
+        assert resp.status_code == 200
+
+    def test_admin_can_reach_register(self, rbac_env):
+        """admin 也能到达注册端点（全量权限）。"""
+        _, tc = rbac_env
+        resp = tc.post(
+            "/api/tools/register",
+            json={"tools": []},
+            headers={**ADMIN_HEADERS, "X-Client-Id": "ghost"},
+        )
+        assert resp.status_code == 400  # 到达路由，未连接 → 400
+
+    def test_register_success_with_attached_client(self, rbac_env):
+        """已连接 client 注册工具成功，落入核心 registry（namespace=client_id）。"""
+        from wing.tool_registry import tool_registry
+
+        server, tc = rbac_env
+        server.remote_tools.attach("host-1", MagicMock())
+        try:
+            resp = tc.post(
+                "/api/tools/register",
+                json={"tools": [{"name": "Read", "description": "d", "params": []}]},
+                headers={**TOOL_HEADERS, "X-Client-Id": "host-1"},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["ok"] is True
+            assert body["registered"] == ["host-1.Read"]
+            assert tool_registry.resolve("host-1.Read") is not None
+        finally:
+            tool_registry.unregister_namespace("host-1")
+
+
+# ============================================================
+# 远程工具 WS 流程测试（tool host 连接 / 断连）
+# ============================================================
+
+
+class TestRemoteToolWS:
+    """tool_runtime 经 WS 声明 client_id、断连注销工具。"""
+
+    def test_tool_host_connect_declares_client_id(self, rbac_env):
+        """tool host 连接时自选 client_id，连接成功并被 attach。"""
+        server, tc = rbac_env
+        with tc.websocket_connect("/ws?client_id=host-ws", headers=TOOL_HEADERS) as ws:
+            data = ws.receive_json()
+            assert data["type"] == "connected"
+            assert data["client_id"] == "host-ws"
+            assert server.remote_tools.is_attached("host-ws")
+
+    def test_tool_host_connect_requires_client_id(self, rbac_env):
+        """tool host 未声明 client_id → 拒连。"""
+        _, tc = rbac_env
+        with pytest.raises(Exception):
+            with tc.websocket_connect("/ws", headers=TOOL_HEADERS):
+                pass
+
+    def test_tool_host_client_id_collision(self, rbac_env):
+        """client_id 冲突 → 第二个连接被拒。"""
+        _, tc = rbac_env
+        with tc.websocket_connect("/ws?client_id=dup", headers=TOOL_HEADERS):
+            with pytest.raises(Exception):
+                with tc.websocket_connect("/ws?client_id=dup", headers=TOOL_HEADERS):
+                    pass
+
+    def test_admin_ws_still_server_assigned(self, rbac_env):
+        """admin WS 维持服务端分配 client_id（既有行为不变）。"""
+        _, tc = rbac_env
+        with tc.websocket_connect("/ws", headers=ADMIN_HEADERS) as ws:
+            data = ws.receive_json()
+            assert data["type"] == "connected"
+            assert data["client_id"]  # 服务端分配的非空 id
+
+    def test_tool_host_disconnect_unregisters_tools(self, rbac_env):
+        """tool host 断连后其远程工具被注销。"""
+        import time
+
+        from wing.tool_registry import tool_registry
+
+        server, tc = rbac_env
+        with tc.websocket_connect("/ws?client_id=host-dc", headers=TOOL_HEADERS) as ws:
+            ws.receive_json()  # connected
+            resp = tc.post(
+                "/api/tools/register",
+                json={"tools": [{"name": "Read", "description": "d", "params": []}]},
+                headers={**TOOL_HEADERS, "X-Client-Id": "host-dc"},
+            )
+            assert resp.status_code == 200
+            assert tool_registry.resolve("host-dc.Read") is not None
+
+        # 断连后 fail_client 注销工具（轮询等待 app 处理 close）
+        deadline = time.time() + 2.0
+        while (
+            tool_registry.resolve("host-dc.Read") is not None and time.time() < deadline
+        ):
+            time.sleep(0.02)
+        assert tool_registry.resolve("host-dc.Read") is None
+        assert not server.remote_tools.is_attached("host-dc")

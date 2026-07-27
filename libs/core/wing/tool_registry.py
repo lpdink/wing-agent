@@ -76,6 +76,32 @@ class ToolRegistry:
             return None
         return self.get_tool(parsed.name, parsed.namespace)
 
+    def register_tool(self, tool: Tool) -> None:
+        """注册一个完全构造好的 Tool——外部工具入口。
+
+        与 register() 装饰器不同：不内省函数签名，直接接纳调用方提供的
+        schema 与可执行体。Gateway 借此注入远程工具——核心对其 function 的
+        来源（进程内 / 网络）不做任何假设，保持网络无关。
+
+        碰撞契约与 register() 一致：同 namespace 同名抛 ValueError。
+        """
+        ns_map = self._namespaces.setdefault(tool.namespace, {})
+        if tool.name in ns_map:
+            raise ValueError(
+                f"Tool '{tool.name}' already registered in namespace '{tool.namespace}'"
+            )
+        ns_map[tool.name] = tool
+
+    def unregister_namespace(self, namespace: str) -> list[Tool]:
+        """移除并返回某 namespace 下的全部工具。
+
+        用于 tool host 断连时一次性清除其远程工具。namespace 不存在返回空列表。
+        """
+        ns_map = self._namespaces.pop(namespace, None)
+        if not ns_map:
+            return []
+        return list(ns_map.values())
+
     def register(
         self,
         name: str | None = None,

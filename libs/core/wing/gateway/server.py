@@ -29,6 +29,7 @@ from wing.event_bus import event_bus
 from wing.runtime import WingRuntime
 
 from .app import create_app
+from .remote_tools import RemoteToolManager
 
 DEFAULT_PORT = 32523
 
@@ -66,6 +67,7 @@ class GatewayServer:
         self.runtime = WingRuntime()
         self._client_to_ws: dict[str, WebSocket] = {}  # client_id → ws
         self._ws_to_client: dict[WebSocket, str] = {}  # ws → client_id
+        self._remote_tools = RemoteToolManager()  # 远程工具连接与调用中枢
         self._app = create_app(self)
         self._started_at = datetime.now(timezone.utc)
 
@@ -98,6 +100,11 @@ class GatewayServer:
     def ws_to_clients(self) -> dict[WebSocket, str]:
         """WebSocket → client_id 映射，供 routes 访问。"""
         return self._ws_to_client
+
+    @property
+    def remote_tools(self) -> RemoteToolManager:
+        """远程工具管理器，供 routes（ws / tools）访问。"""
+        return self._remote_tools
 
     def start(self) -> None:
         """启动服务器（阻塞）。"""
