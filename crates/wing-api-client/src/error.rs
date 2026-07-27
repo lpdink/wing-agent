@@ -25,6 +25,10 @@ pub enum ApiClientError {
     /// API key 含非法 HTTP header 字符。
     #[error("invalid API key for HTTP header: {0}")]
     InvalidApiKey(#[from] reqwest::header::InvalidHeaderValue),
+
+    /// WS 连接或握手错误（tool host 使用）。
+    #[error("connection error: {0}")]
+    Connection(String),
 }
 
 /// 从 reqwest::Response 中提取 ApiClientError::Api。

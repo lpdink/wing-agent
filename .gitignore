@@ -26,3 +26,5 @@ Thumbs.db
 
 # wing runtime
 ~/.wing/
+libs/wing-sdk/uv.lock
+.wing-orch.json

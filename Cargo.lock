@@ -3040,10 +3040,15 @@ name = "wing-api-client"
 version = "0.0.0"
 dependencies = [
  "chrono",
+ "futures-util",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
 ]
 
 [[package]]

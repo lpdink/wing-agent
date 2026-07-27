@@ -13,6 +13,8 @@ members = [
     "wing-agent",
     "wing-cli",
     "wing-gateway",
+    "wing-orch",
+    "wing-sdk",
 ]
 
 [[package]]
@@ -1266,6 +1268,8 @@ dev = [
     { name = "ruff" },
     { name = "ty" },
     { name = "vulture" },
+    { name = "wing-orch" },
+    { name = "wing-sdk" },
 ]
 
 [package.metadata]
@@ -1284,6 +1288,8 @@ dev = [
     { name = "ruff", specifier = ">=0.15.7" },
     { name = "ty", specifier = ">=0.0.24" },
     { name = "vulture", specifier = ">=2.16" },
+    { name = "wing-orch", editable = "libs/wing-orch" },
+    { name = "wing-sdk", editable = "libs/wing-sdk" },
 ]
 
 [[package]]
@@ -1312,4 +1318,34 @@ requires-dist = [
     { name = "python-frontmatter", specifier = ">=1.1.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.51.0" },
+]
+
+[[package]]
+name = "wing-orch"
+version = "0.1.0"
+source = { editable = "libs/wing-orch" }
+dependencies = [
+    { name = "websockets" },
+    { name = "wing-sdk" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "websockets", specifier = ">=13.0" },
+    { name = "wing-sdk", editable = "libs/wing-sdk" },
+]
+
+[[package]]
+name = "wing-sdk"
+version = "0.1.0"
+source = { editable = "libs/wing-sdk" }
+dependencies = [
+    { name = "httpx" },
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "websockets", specifier = ">=13.0" },
 ]

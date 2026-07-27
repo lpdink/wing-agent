@@ -354,6 +354,31 @@ impl GatewayClient {
     }
 
     // ============================================================
+    // 远程工具注册
+    // ============================================================
+
+    /// 注册远程工具。`client_id` 经 X-Client-Id header 传递，指向已持有 WS 的 tool host。
+    pub async fn register_tools(
+        &self,
+        client_id: &str,
+        tools: Vec<RemoteToolSpec>,
+    ) -> Result<RegisterToolsResponse, ApiClientError> {
+        let body = RegisterToolsRequest { tools };
+        let resp = self
+            .http
+            .post(format!("{}{}", self.base_url, "/api/tools/register"))
+            .header("X-Client-Id", client_id)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
+    // ============================================================
     // 内部 helper
     // ============================================================
 
