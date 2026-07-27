@@ -185,7 +185,11 @@ class GoalRunner:
         await self._execute_actions(actions, event_client_id)
 
     async def _resume_sessions(self, event_client_id: str) -> None:
-        """Resume：恢复 executor session，创建新 checker。"""
+        """Resume：恢复 executor session，重新开始当前轮。
+
+        无论中断时处于何阶段，resume 统一从 EXECUTOR_WORKING 重新开始当前
+        round——checker 上下文是临时的（新 session），无法恢复中间状态。
+        """
         assert self._http is not None and self._state is not None
 
         # Resume executor
@@ -193,16 +197,16 @@ class GoalRunner:
         await self._http.subscribe(self._state.executor_session_id, event_client_id)
         logger.info(f"resumed executor: {self._state.executor_session_id}")
 
-        # 如果状态机需要 checker，创建新的
-        if self._state.phase in (GoalPhase.CHECKER_WORKING, GoalPhase.CREATING_CHECKER):
+        # 确保 checker 存在（后续轮次需要）
+        if self._state.checker_session_id is None:
             await self._create_checker(event_client_id)
-            self._state.phase = GoalPhase.CHECKER_WORKING
-        elif self._state.phase == GoalPhase.EXECUTOR_WORKING:
-            # 重新发送 prompt 给 executor
-            await self._http.send_message(
-                self._state.executor_session_id,
-                self._state.build_prompt_user(),
-            )
+
+        # 统一从 executor 重新开始当前 round
+        self._state.phase = GoalPhase.EXECUTOR_WORKING
+        await self._http.send_message(
+            self._state.executor_session_id,
+            self._state.build_prompt_user(),
+        )
 
     async def _event_loop(self, ws: Any, event_client_id: str) -> None:
         """WS 事件消费循环。"""
@@ -338,6 +342,9 @@ class GoalRunner:
         logger.info("signal received, shutting down")
         self._shutdown = True
         self.interrupted = True
+        # 主动关闭 event WS 以 unblock async for 循环
+        if self._ws:
+            asyncio.get_running_loop().create_task(self._ws.close())
 
     # ── 持久化 ────────────────────────────────────────────────
 

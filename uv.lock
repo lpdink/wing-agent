@@ -1268,6 +1268,8 @@ dev = [
     { name = "ruff" },
     { name = "ty" },
     { name = "vulture" },
+    { name = "wing-orch" },
+    { name = "wing-sdk" },
 ]
 
 [package.metadata]
@@ -1286,6 +1288,8 @@ dev = [
     { name = "ruff", specifier = ">=0.15.7" },
     { name = "ty", specifier = ">=0.0.24" },
     { name = "vulture", specifier = ">=2.16" },
+    { name = "wing-orch", editable = "libs/wing-orch" },
+    { name = "wing-sdk", editable = "libs/wing-sdk" },
 ]
 
 [[package]]

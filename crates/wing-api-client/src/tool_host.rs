@@ -290,6 +290,7 @@ impl ToolHost {
     pub async fn run(mut self) -> Result<(), ApiClientError> {
         let sink = self.ws_sink.clone();
         let handlers = Arc::new(self.handlers);
+        let mut tasks = tokio::task::JoinSet::new();
 
         while let Some(msg_result) = self.ws_stream.next().await {
             match msg_result {
@@ -310,7 +311,7 @@ impl ToolHost {
                     let sink = sink.clone();
                     let handlers = handlers.clone();
 
-                    tokio::spawn(async move {
+                    tasks.spawn(async move {
                         let result = if let Some(handler) = handlers.get(&tool_name) {
                             let args = match arguments {
                                 Value::Object(map) => map.into_iter().collect(),
@@ -350,6 +351,9 @@ impl ToolHost {
                 }
             }
         }
+
+        // 等待在途 handler tasks 完成（优雅排水）
+        while tasks.join_next().await.is_some() {}
 
         tracing::info!(client_id = %self.client_id, "tool host disconnected");
         Ok(())
