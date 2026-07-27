@@ -35,33 +35,53 @@ async def read(
         return f"read_file: {path}: Is a directory"
 
     try:
-        text = Path(resolved).read_text(encoding="utf-8", errors="replace")
+        raw = Path(resolved).read_bytes()
+        st = os.stat(resolved)
     except PermissionError:
         return f"read_file: {path}: Permission denied"
+
+    # 二进制探测与核心 Read 一致（首 8KB 含 NUL 即判定）
+    if b"\x00" in raw[:8192]:
+        import mimetypes
+
+        mime, _ = mimetypes.guess_type(resolved)
+        return f"read_file: {path}: Binary file ({mime or 'unknown'})"
+
+    # 编码探测与核心 Read 一致：utf-8(-sig) 优先，退 latin-1
+    try:
+        text = raw.decode("utf-8-sig")
+        encoding = "utf-8"
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1", errors="replace")
+        encoding = "latin-1"
 
     lines = text.splitlines()
     total = len(lines)
 
+    if total == 0:
+        return f"[file: {path} | empty | {encoding}]"
+
     if offset < 0:
         start = max(0, total + offset)
     else:
-        start = max(0, offset - 1)
+        start = min(max(offset - 1, 0), total)
+
+    # mtime 供调用方做变更跟踪（与核心 Read 输出同构）
+    mtime = int(st.st_mtime)
+    if start >= total:
+        return f"[file: {path} | offset {offset} beyond EOF ({total} lines) | {encoding} | mtime {mtime}]"
 
     end = min(start + limit, total)
     segment = lines[start:end]
 
-    header = f"[file: {path} | lines {start + 1}-{end}/{total}]"
-    body_lines = []
-    for i, line in enumerate(segment, start=start + 1):
-        if line_numbers:
-            body_lines.append(f"{i:>6}\t{line}")
-        else:
-            body_lines.append(line)
+    if line_numbers:
+        segment = [f"{start + i + 1}→{line}" for i, line in enumerate(segment)]
 
-    result = header + "\n" + "\n".join(body_lines)
-    if end < total:
-        result += f"\n[... {total - end} more lines]"
-    return result
+    header = (
+        f"[file: {path} | lines {start + 1}-{end}/{total} | {encoding} | mtime {mtime}]"
+    )
+    trailer = f"\n[... {total - end} more lines]" if end < total else ""
+    return f"{header}\n" + "\n".join(segment) + trailer
 
 
 async def write(path: str, content: str, _workspace: str = ".") -> str:
@@ -139,5 +159,22 @@ async def edit(
     )
     Path(resolved).write_text(new_text, encoding="utf-8")
 
-    replaced = count if replace_all else 1
-    return f"edit: ok ({replaced} replacement{'s' if replaced > 1 else ''})"
+    # 统计输出与核心 Edit 同构（位置 + 行数变化）
+    total_old_lines = len(text.splitlines())
+    total_new_lines = len(new_text.splitlines())
+
+    if replace_all:
+        return (
+            f"edit: ok ({count} replacements)\n"
+            f"  file: {total_old_lines} → {total_new_lines} lines"
+        )
+
+    pos = text.find(old_block)
+    old_lines = len(old_block.splitlines())
+    new_lines = len(new_block.splitlines())
+    line_no = text[:pos].count("\n") + 1
+    return (
+        f"edit: ok @ line {line_no}\n"
+        f"  replaced: {old_lines} → {new_lines} lines\n"
+        f"  file: {total_old_lines} → {total_new_lines} lines"
+    )

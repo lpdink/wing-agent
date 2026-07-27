@@ -21,6 +21,11 @@ class ConnectionClosed(Exception):
     """WS 连接关闭。"""
 
 
+# WS 消息上限——与 uvicorn 默认 ws_max_size (16MB) 对齐。websockets 默认
+# 1MB 会拒收大 Write 参数 / 大工具结果帧，直接断连。
+WS_MAX_SIZE = 16 * 1024 * 1024
+
+
 class ToolHost:
     """远程工具宿主——注册工具并服务调用。
 
@@ -104,7 +109,9 @@ class ToolHost:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        async with websockets.connect(ws_uri, additional_headers=headers) as ws:
+        async with websockets.connect(
+            ws_uri, additional_headers=headers, max_size=WS_MAX_SIZE
+        ) as ws:
             # 1. 读 ConnectResponse
             first = await ws.recv()
             msg = json.loads(first)
@@ -232,6 +239,10 @@ def _hint_to_type(hint: object) -> tuple[str, str | None]:
         args = typing.get_args(hint)
         items = _TYPE_MAP.get(args[0], "string") if args else "string"
         return ("array", items)
+
+    # dict[str, Any] 等映射类型 → object
+    if origin is dict:
+        return ("object", None)
 
     # Optional[X] / X | None — unwrap to inner type
     if origin is typing.Union or isinstance(hint, UnionType):

@@ -40,7 +40,9 @@ def main() -> None:
         help="Gateway URL (default: http://127.0.0.1:32523)",
     )
     goal_parser.add_argument(
-        "--api-key", default=None, help="API key for authentication"
+        "--api-key",
+        default=None,
+        help="API key for authentication (requires admin role; tool_runtime keys cannot create sessions)",
     )
     goal_parser.add_argument(
         "--client-id",

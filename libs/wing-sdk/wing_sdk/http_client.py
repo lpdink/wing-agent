@@ -8,7 +8,9 @@ import httpx
 
 
 class GatewayClient:
-    """异步 HTTP 客户端，覆盖 Gateway 全部端点。
+    """异步 HTTP 客户端，覆盖 Gateway 会话与系统端点。
+
+    工具注册端点（/api/tools/register）由 ToolHost 内部处理，不在此暴露。
 
     Usage:
         client = GatewayClient("http://127.0.0.1:32523", api_key="secret")
@@ -106,6 +108,37 @@ class GatewayClient:
     async def compact_session(self, session_id: str) -> dict:
         return await self._post("/api/session/compact", {"session_id": session_id})
 
+    async def rewind_session(self, session_id: str, target_uuid: str) -> dict:
+        return await self._post(
+            "/api/session/rewind",
+            {"session_id": session_id, "target_uuid": target_uuid},
+        )
+
+    async def update_session(
+        self,
+        session_id: str,
+        model: str | None = None,
+        agent: str | None = None,
+        title: str | None = None,
+        thinking: bool | None = None,
+        reasoning_effort: str | None = None,
+        yolo: bool | None = None,
+        workspace: str | None = None,
+    ) -> dict:
+        body: dict[str, Any] = {"session_id": session_id}
+        for key, value in [
+            ("model", model),
+            ("agent", agent),
+            ("title", title),
+            ("thinking", thinking),
+            ("reasoning_effort", reasoning_effort),
+            ("yolo", yolo),
+            ("workspace", workspace),
+        ]:
+            if value is not None:
+                body[key] = value
+        return await self._post("/api/session/update", body)
+
     # ── 查询 ─────────────────────────────────────────────────
 
     async def list_sessions(self) -> dict:
@@ -116,6 +149,11 @@ class GatewayClient:
 
     async def get_session_info(self, session_id: str) -> dict:
         return await self._get("/api/session/info", params={"session_id": session_id})
+
+    async def get_branches(self, session_id: str) -> dict:
+        return await self._get(
+            "/api/session/branches", params={"session_id": session_id}
+        )
 
     async def health(self) -> dict:
         return await self._get("/api/health")

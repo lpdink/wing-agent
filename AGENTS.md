@@ -63,14 +63,16 @@ libs/core/wing/                   Python runtime (pip: wing-agent)
     ├── app.py                    App factory (FastAPI + route registration)
     ├── server.py                 GatewayServer — lifecycle + EventBus subscriber + uptime
     ├── cli.py                    `wing-gateway` CLI entry point
-    ├── auth.py                   Opt-in API key auth middleware (HTTP + WS)
+    ├── auth.py                   Opt-in API key auth middleware (HTTP + WS; admin / tool_runtime roles)
+    ├── remote_tools.py           RemoteToolManager — tool host connections + WS call dispatch
     ├── protocol.py               WS + HTTP Pydantic models
     ├── openapi.py                OpenAPI metadata
     └── routes/
         ├── session.py            Session lifecycle + queries + mutations (14 endpoints)
         ├── system.py             commands/models/agents listing, reload, shutdown (5)
+        ├── tools.py              POST /api/tools/register (remote tool registration)
         ├── health.py             GET /api/health (1)
-        └── ws.py                 WebSocket /ws (pure event transport)
+        └── ws.py                 WebSocket /ws (event transport + tool call result frames)
 
 crates/wing/src/                  Rust CLI: TUI + stdio frontends
 ├── main.rs                       Entry (clap; stdio mode detection → filter unknown args)
@@ -108,8 +110,21 @@ crates/wing/src/                  Rust CLI: TUI + stdio frontends
 
 crates/wing-api-client/src/       Hand-written Rust HTTP client for Gateway API
 ├── client.rs                     GatewayClient — all HTTP API methods (+ api_key)
+├── tool_host.rs                  ToolHost — remote tool host (WS serve loop + builder)
 ├── models.rs                     Request/response types (mirrors Python protocol.py)
 └── error.rs                      ApiClientError
+
+libs/wing-sdk/                    Python SDK (pip: wing-sdk) — remote tool host
+├── wing_sdk/host.py              ToolHost — decorator registration + WS serve loop
+├── wing_sdk/http_client.py       GatewayClient — session/system HTTP API
+├── wing_sdk/schema.py            ToolParam / RemoteToolSpec (gateway-independent)
+└── wing_sdk/tools/               Standard tools (Bash/Read/Write/Edit/Glob/Grep, workspace-bound)
+
+libs/wing-orch/                   Orchestration CLI (pip: wing-orch) — depends on wing-sdk
+└── wing_orch/
+    ├── cli.py                    `wing-orch goal` entry point
+    ├── goal.py                   Goal state machine (port of crates/wing/src/app/goal.rs)
+    └── runner.py                 asyncio driver: tool host + sessions + event loop + persistence
 ```
 
 ## Configuration
@@ -160,6 +175,8 @@ make fmt                          # Format all
 
 - **Python**: `pip install wing-agent` → `wing-gateway` CLI entry point
 - **Rust**: GitHub Release prebuilt binaries → `wing` CLI (TUI + stdio + daemon control)
+- **SDK/Orch**: `wing-sdk` / `wing-orch` — uv workspace 包（`libs/`），未发布 PyPI；
+  `wing-orch` 提供 `wing-orch` CLI（后台 Goal 编排），`wing-sdk` 提供远程工具宿主 SDK
 
 ## Commit Messages
 

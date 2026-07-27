@@ -16,7 +16,7 @@ from typing import Any
 import httpx
 import websockets
 
-from wing_sdk.host import ConnectionClosed, ToolHost
+from wing_sdk.host import WS_MAX_SIZE, ConnectionClosed, ToolHost
 from wing_sdk.http_client import GatewayClient
 from wing_orch.goal import (
     DEFAULT_CHECKER_SYSTEM_PROMPT,
@@ -81,7 +81,6 @@ class GoalRunner:
         try:
             await self._run_inner()
         except httpx.HTTPStatusError as e:
-            detail = ""
             try:
                 detail = e.response.json().get("detail", "")
             except Exception:
@@ -89,6 +88,9 @@ class GoalRunner:
             raise RuntimeError(
                 f"Gateway API error ({e.response.status_code}): {detail}"
             ) from e
+        except httpx.RequestError as e:
+            # 连接层错误（gateway 不可达 / 中途断开）——与 API 错误同样干净退出
+            raise RuntimeError(f"Gateway connection error: {e}") from e
         finally:
             await self._http.close()
 
@@ -112,12 +114,13 @@ class GoalRunner:
             exc = host_task.exception()
             raise RuntimeError(f"tool host failed to start: {exc}")
         if ready_task not in done:
+            ready_task.cancel()
             host_task.cancel()
             raise RuntimeError(
                 f"tool host failed to register within 15s (gateway at {self.gateway_url} reachable?)"
             )
 
-        # 2. 建立 WS 事件连接（admin 身份，用于订阅事件）
+        # 2. 建立 WS 事件连接（订阅 session 事件 + 经 HTTP 发消息）
         ws_url = self.gateway_url.replace("http://", "ws://").replace(
             "https://", "wss://"
         )
@@ -125,12 +128,16 @@ class GoalRunner:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        # 使用单独的 client_id 订阅事件（tool host 的 client_id 是 tool_runtime 语义）
+        # client_id 全局唯一（先来先得到），tool host 已占用一个，事件连接
+        # 须用另一个。注意角色由 API key 决定而非 client_id：开启鉴权时
+        # wing-orch 需要 admin 角色的 key（tool_runtime 仅允许注册工具）。
         event_client_id = f"{self.client_id}-events"
         ws_uri = f"{ws_url}/ws?client_id={event_client_id}"
 
         try:
-            async with websockets.connect(ws_uri, additional_headers=headers) as ws:
+            async with websockets.connect(
+                ws_uri, additional_headers=headers, max_size=WS_MAX_SIZE
+            ) as ws:
                 self._ws = ws
                 # 读 ConnectResponse
                 first = await ws.recv()
@@ -158,7 +165,7 @@ class GoalRunner:
         """ToolHost 服务循环（后台）。"""
         try:
             await host.run()
-        except (ConnectionClosed, Exception) as e:
+        except Exception as e:
             logger.error(f"tool host error: {e}")
             self._shutdown = True
             # 主动关闭 event WS，使 _event_loop 的 async for 立即退出
@@ -211,6 +218,10 @@ class GoalRunner:
         - checker：尝试 resume 旧 session（gateway 未重启时有效）；
           失败则创建新 checker（gateway 重启 / session 已过期）。
         - 统一从 EXECUTOR_WORKING 重新开始当前 round。
+
+        注意：会向 executor 重发整份 build_prompt_user()——目标文本在其历史
+        中会出现两次。这是有意为之：中断可能发生在 turn 中途，重发完整目标
+        重新锚定任务，代价是一条重复消息。
         """
         assert self._http is not None and self._state is not None
 
@@ -261,9 +272,7 @@ class GoalRunner:
                 continue
 
             event_type = event.get("type", "")
-            session_id = event.get("session_id", "") or event.get("meta", {}).get(
-                "session_id", ""
-            )
+            session_id = event.get("session_id", "")
 
             if event_type == "turn_result":
                 await self._on_turn_result(event, session_id, event_client_id)
@@ -321,7 +330,7 @@ class GoalRunner:
 
         for action in actions:
             if action.kind == "create_checker":
-                await self._create_checker(event_client_id)
+                await self._create_checker(event_client_id, action.system_prompt)
             elif action.kind == "send_executor":
                 await self._http.send_message(
                     self._state.executor_session_id, action.content
@@ -340,7 +349,9 @@ class GoalRunner:
                 logger.warning(f"stall: {action.reason}")
                 self._shutdown = True
 
-    async def _create_checker(self, event_client_id: str) -> None:
+    async def _create_checker(
+        self, event_client_id: str, system_prompt: str = ""
+    ) -> None:
         assert self._http is not None and self._state is not None
 
         checker_tools = self.checker_tools or [
@@ -349,7 +360,7 @@ class GoalRunner:
         agent: dict[str, Any] = {
             "tools": checker_tools,
             "yolo": True,
-            "system_prompt": self._state.checker_system_prompt,
+            "system_prompt": system_prompt or self._state.checker_system_prompt,
         }
         if self.checker_model:
             agent["model"] = self.checker_model

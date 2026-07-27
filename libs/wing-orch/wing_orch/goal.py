@@ -35,7 +35,6 @@ class GoalAction:
     content: str = ""
     reason: str = ""
     system_prompt: str = ""
-    round: int = 0
 
 
 # ── 常量 ──────────────────────────────────────────────────────
@@ -121,7 +120,6 @@ class GoalState:
     checker_session_id: str | None = None
     round: int = 1
     appends: list[str] = field(default_factory=list)
-    pending_appends: list[str] = field(default_factory=list)
     format_retries: int = 0
 
     @classmethod
@@ -165,8 +163,6 @@ class GoalState:
         )
         if self.phase != expected:
             return []
-
-        self._flush_pending()
 
         if role == GoalRole.EXECUTOR:
             return self._on_executor_done(result or "")
@@ -245,7 +241,7 @@ class GoalState:
         self.phase = GoalPhase.CHECKER_WORKING
         self.format_retries = 0
         return [
-            GoalAction(kind="send_checker", content=checker_msg, round=self.round),
+            GoalAction(kind="send_checker", content=checker_msg),
         ]
 
     def _on_checker_done(self, output: str) -> list[GoalAction]:
@@ -264,9 +260,7 @@ class GoalState:
             self.round += 1
             self.phase = GoalPhase.EXECUTOR_WORKING
             return [
-                GoalAction(
-                    kind="send_executor", content=executor_msg, round=self.round
-                ),
+                GoalAction(kind="send_executor", content=executor_msg),
             ]
 
         # 格式错误
@@ -278,8 +272,3 @@ class GoalState:
                 GoalAction(kind="stall", reason="checker format error (max retries)")
             ]
         return [GoalAction(kind="send_checker", content=FORMAT_REMINDER)]
-
-    def _flush_pending(self) -> None:
-        if self.pending_appends:
-            self.appends.extend(self.pending_appends)
-            self.pending_appends.clear()
