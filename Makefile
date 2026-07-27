@@ -21,7 +21,7 @@ gateway:
 	uv run wing-gateway
 
 test-python:
-	uv run pytest libs/core/tests/
+	uv run pytest libs/core/tests/ libs/wing-orch/tests/ libs/wing-sdk/tests/
 
 test-e2e:
 	CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK=1 WING_SESSIONS_PATH=/tmp/wing-e2e-sessions uv run pytest e2e/claude-agent-sdk-integration/ -v --timeout=120

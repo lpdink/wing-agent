@@ -164,6 +164,9 @@ def main() -> None:
         asyncio.run(runner.run())
     except KeyboardInterrupt:
         sys.exit(130)
+    except RuntimeError as e:
+        logging.getLogger("wing-orch").error(str(e))
+        sys.exit(1)
 
     if runner.interrupted:
         sys.exit(130)

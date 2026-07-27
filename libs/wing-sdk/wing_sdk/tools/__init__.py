@@ -104,7 +104,7 @@ _GREP_PARAMS = [
         default=".",
     ),
     ToolParam(
-        name="glob_filter",
+        name="glob",
         type="string",
         description='Glob pattern to filter files (e.g., "*.py", "*.ts"). Ignored if path is a file.',
         default="*",
@@ -188,7 +188,7 @@ def register_standard_tools(host: "ToolHost", workspace: str = ".") -> None:
         ),
         (
             "Grep",
-            'Search file contents with regex pattern.\n\nArgs:\n    pattern: The regular expression pattern to search for.\n    path: Directory or file to search in. Defaults to current directory.\n    glob_filter: Glob pattern to filter files (e.g., "*.py", "*.ts"). Ignored if path is a file.\n    output_mode: "files_with_matches" (default), "content", or "count".\n    i: Case insensitive search.\n    head_limit: Max results to return (default 100).\n    respect_gitignore: Whether to respect ignore rules (.gitignore, .ignore, etc).\n        Only effective in git repositories. Defaults to True.\n    context: Number of lines to show before and after each match.\n        Only works with output_mode="content". Default is 0.\n\nReturns:\n    - files_with_matches: file paths containing the pattern\n    - content: file:line content for each match (with context if specified)\n    - count: file path and match count',
+            'Search file contents with regex pattern.\n\nArgs:\n    pattern: The regular expression pattern to search for.\n    path: Directory or file to search in. Defaults to current directory.\n    glob: Glob pattern to filter files (e.g., "*.py", "*.ts"). Ignored if path is a file.\n    output_mode: "files_with_matches" (default), "content", or "count".\n    i: Case insensitive search.\n    head_limit: Max results to return (default 100).\n    respect_gitignore: Whether to respect ignore rules (.gitignore, .ignore, etc).\n        Only effective in git repositories. Defaults to True.\n    context: Number of lines to show before and after each match.\n        Only works with output_mode="content". Default is 0.\n\nReturns:\n    - files_with_matches: file paths containing the pattern\n    - content: file:line content for each match (with context if specified)\n    - count: file path and match count',
             _GREP_PARAMS,
             grep,
         ),

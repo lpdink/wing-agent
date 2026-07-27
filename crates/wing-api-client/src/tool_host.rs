@@ -55,9 +55,12 @@ type WsStream = futures_util::stream::SplitStream<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
-/// 工具调用 handler 类型。
-pub type ToolHandler =
-    fn(HashMap<String, Value>) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
+/// 工具调用 handler 类型——可捕获环境的闭包（Arc 共享，Send+Sync）。
+pub type ToolHandler = Arc<
+    dyn Fn(HashMap<String, Value>) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// 工具规格 builder。
 #[derive(Debug, Clone)]
@@ -158,8 +161,17 @@ pub struct ToolHostBuilder {
 
 impl ToolHostBuilder {
     /// 注册一个工具及其 handler。
-    pub fn tool(mut self, spec: ToolSpec, handler: ToolHandler) -> Self {
-        self.tools.push((spec, handler));
+    pub fn tool(
+        mut self,
+        spec: ToolSpec,
+        handler: impl Fn(
+            HashMap<String, Value>,
+        ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.tools.push((spec, Arc::new(handler)));
         self
     }
 
@@ -241,7 +253,7 @@ impl ToolHostBuilder {
         // 4. Build handler map
         let mut handlers: HashMap<String, ToolHandler> = HashMap::new();
         for (spec, handler) in &self.tools {
-            handlers.insert(spec.name.clone(), *handler);
+            handlers.insert(spec.name.clone(), handler.clone());
         }
 
         tracing::info!(
@@ -295,15 +307,17 @@ impl ToolHost {
         while let Some(msg_result) = self.ws_stream.next().await {
             match msg_result {
                 Ok(Message::Text(text)) => {
-                    let request: WsToolCallRequest =
-                        match serde_json::from_str::<WsToolCallRequest>(&text) {
-                            Ok(req) if req.frame_type == "tool_call_request" => req,
-                            Ok(_) => continue, // 非工具调用帧，忽略
-                            Err(e) => {
-                                tracing::warn!("unparseable frame: {e}");
-                                continue;
-                            }
-                        };
+                    // 轻量过滤：先检查 type 字段，避免对事件帧做完整反序列化
+                    let Ok(val) = serde_json::from_str::<Value>(&text) else {
+                        continue;
+                    };
+                    if val.get("type").and_then(|t| t.as_str()) != Some("tool_call_request") {
+                        continue;
+                    }
+                    let Ok(request) = serde_json::from_value::<WsToolCallRequest>(val) else {
+                        tracing::warn!("malformed tool_call_request frame");
+                        continue;
+                    };
 
                     let call_id = request.call_id.clone();
                     let tool_name = request.name.clone();
@@ -347,6 +361,8 @@ impl ToolHost {
                 }
                 Ok(_) => {}
                 Err(e) => {
+                    // 等待在途 tasks 完成后返回错误
+                    while tasks.join_next().await.is_some() {}
                     return Err(ApiClientError::Connection(format!("WS read error: {e}")));
                 }
             }

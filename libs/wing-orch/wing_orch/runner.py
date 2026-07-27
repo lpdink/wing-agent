@@ -13,6 +13,7 @@ import signal
 import tempfile
 from typing import Any
 
+import httpx
 import websockets
 
 from wing_sdk.host import ConnectionClosed, ToolHost
@@ -69,15 +70,25 @@ class GoalRunner:
         self._state: GoalState | None = None
         self._http: GatewayClient | None = None
         self._ws: Any = None
+        self._close_task: Any = None  # 保持 signal handler 创建的 task 引用
         self._shutdown = False
         self.interrupted = False
         """True if shutdown was due to signal/interrupt (exit code 130)."""
 
     async def run(self) -> None:
-        """主入口。"""
+        """主入口。HTTP 错误翻译为干净的 RuntimeError（CLI 层捕获退出）。"""
         self._http = GatewayClient(self.gateway_url, self.api_key)
         try:
             await self._run_inner()
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                detail = e.response.json().get("detail", "")
+            except Exception:
+                detail = e.response.text[:200]
+            raise RuntimeError(
+                f"Gateway API error ({e.response.status_code}): {detail}"
+            ) from e
         finally:
             await self._http.close()
 
@@ -88,10 +99,19 @@ class GoalRunner:
         host_task = asyncio.create_task(self._run_host(host))
 
         # 等待工具注册完成（消除竞态：session 创建必须在工具注册之后）
-        # 超时兜底：gateway 不可达时 host_task 会失败但 ready 永不 set
-        try:
-            await asyncio.wait_for(host.ready.wait(), timeout=15.0)
-        except asyncio.TimeoutError:
+        # 同时监听 host_task 失败（gateway 不可达时快速报错而非等满超时）
+        ready_task = asyncio.create_task(host.ready.wait())
+        done, _ = await asyncio.wait(
+            {ready_task, host_task},
+            timeout=15.0,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if host_task in done:
+            # host 在注册前就失败了
+            ready_task.cancel()
+            exc = host_task.exception()
+            raise RuntimeError(f"tool host failed to start: {exc}")
+        if ready_task not in done:
             host_task.cancel()
             raise RuntimeError(
                 f"tool host failed to register within 15s (gateway at {self.gateway_url} reachable?)"
@@ -185,10 +205,12 @@ class GoalRunner:
         await self._execute_actions(actions, event_client_id)
 
     async def _resume_sessions(self, event_client_id: str) -> None:
-        """Resume：恢复 executor session，重新开始当前轮。
+        """Resume：恢复 executor session，尝试恢复 checker。
 
-        无论中断时处于何阶段，resume 统一从 EXECUTOR_WORKING 重新开始当前
-        round——checker 上下文是临时的（新 session），无法恢复中间状态。
+        - executor：必须恢复（持有完整对话历史）。
+        - checker：尝试 resume 旧 session（gateway 未重启时有效）；
+          失败则创建新 checker（gateway 重启 / session 已过期）。
+        - 统一从 EXECUTOR_WORKING 重新开始当前 round。
         """
         assert self._http is not None and self._state is not None
 
@@ -197,12 +219,26 @@ class GoalRunner:
         await self._http.subscribe(self._state.executor_session_id, event_client_id)
         logger.info(f"resumed executor: {self._state.executor_session_id}")
 
-        # 确保 checker 存在（后续轮次需要）
-        if self._state.checker_session_id is None:
+        # 尝试恢复 checker；失败则新建
+        checker_ok = False
+        if self._state.checker_session_id:
+            try:
+                await self._http.resume_session(self._state.checker_session_id)
+                await self._http.subscribe(
+                    self._state.checker_session_id, event_client_id
+                )
+                logger.info(f"resumed checker: {self._state.checker_session_id}")
+                checker_ok = True
+            except Exception:
+                logger.info("old checker unavailable, creating new one")
+
+        if not checker_ok:
+            self._state.checker_session_id = None
             await self._create_checker(event_client_id)
 
         # 统一从 executor 重新开始当前 round
         self._state.phase = GoalPhase.EXECUTOR_WORKING
+        self._state.format_retries = 0
         await self._http.send_message(
             self._state.executor_session_id,
             self._state.build_prompt_user(),
@@ -344,7 +380,7 @@ class GoalRunner:
         self.interrupted = True
         # 主动关闭 event WS 以 unblock async for 循环
         if self._ws:
-            asyncio.get_running_loop().create_task(self._ws.close())
+            self._close_task = asyncio.get_running_loop().create_task(self._ws.close())
 
     # ── 持久化 ────────────────────────────────────────────────
 

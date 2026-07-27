@@ -163,6 +163,9 @@ class ToolHost:
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
+        # async for 正常结束 = 对端关闭（ConnectionClosedOK 不抛异常）
+        raise ConnectionClosed("WebSocket connection closed by gateway")
+
     async def _dispatch(
         self, ws: Any, call_id: str, tool_name: str, arguments: dict
     ) -> None:
@@ -210,6 +213,36 @@ _TYPE_MAP: dict[type, str] = {
 }
 
 
+def _hint_to_type(hint: object) -> tuple[str, str | None]:
+    """将 type hint 转为 (param_type, items)。处理泛型和 Optional。"""
+    import typing
+    from types import UnionType
+
+    if hint is None or hint is inspect.Parameter.empty:
+        return ("string", None)
+
+    # 直接基本类型
+    if isinstance(hint, type) and hint in _TYPE_MAP:
+        return (_TYPE_MAP[hint], None)
+
+    origin = typing.get_origin(hint)
+
+    # list[str] / list[int]
+    if origin is list:
+        args = typing.get_args(hint)
+        items = _TYPE_MAP.get(args[0], "string") if args else "string"
+        return ("array", items)
+
+    # Optional[X] / X | None — unwrap to inner type
+    if origin is typing.Union or isinstance(hint, UnionType):
+        args = [a for a in typing.get_args(hint) if a is not type(None)]
+        if args:
+            return _hint_to_type(args[0])
+        return ("string", None)
+
+    return ("string", None)
+
+
 def _extract_description(fn: Callable) -> str:
     """从 docstring 提取首段作为工具描述。"""
     doc = inspect.getdoc(fn) or ""
@@ -241,7 +274,7 @@ def _infer_params(fn: Callable) -> list[ToolParam]:
             continue
 
         hint = hints.get(param_name)
-        param_type = _TYPE_MAP.get(hint, "string") if hint else "string"
+        param_type, items = _hint_to_type(hint)
 
         default = None
         if param.default is not inspect.Parameter.empty:
@@ -253,6 +286,7 @@ def _infer_params(fn: Callable) -> list[ToolParam]:
                 type=param_type,
                 description=arg_docs.get(param_name, ""),
                 default=default,
+                items=items,
             )
         )
     return params
