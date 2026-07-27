@@ -1356,7 +1356,7 @@ impl App {
                 self.ctx.current_thinking = None;
                 self.ctx.current_assistant = None;
 
-                if let Some(idx) = self.ctx.get_tool_call_index(&tool_call_id) {
+                if let Some(idx) = self.chat.tool_call_index(&tool_call_id) {
                     // Update existing streaming cell
                     self.chat
                         .append_tool_args_fragment_by_index(idx, &args_fragment);
@@ -1373,9 +1373,7 @@ impl App {
                     if is_final {
                         block.status = crate::ui::cells::tool_call::ToolStatus::Pending;
                     }
-                    let idx = self.chat.len();
                     self.chat.push(ChatCell::ToolCall(block));
-                    self.ctx.register_tool_call(tool_call_id, idx);
                 }
             }
             WingEvent::ToolCall {
@@ -1388,7 +1386,7 @@ impl App {
                 self.ctx.current_assistant = None;
 
                 // If a streaming cell already exists for this id, update it
-                if let Some(idx) = self.ctx.get_tool_call_index(&tool_call_id) {
+                if let Some(idx) = self.chat.tool_call_index(&tool_call_id) {
                     self.chat.update_tool_args_by_index(idx, tool_args);
                     self.chat.set_tool_status_by_index(
                         idx,
@@ -1405,9 +1403,7 @@ impl App {
                     if tool_name == TOOL_BASH {
                         block.started_at = Some(std::time::Instant::now());
                     }
-                    let idx = self.chat.len();
                     self.chat.push(ChatCell::ToolCall(block));
-                    self.ctx.register_tool_call(tool_call_id, idx);
                 }
 
                 tracing::debug!(tool = %tool_name, "tool call started");
@@ -1434,10 +1430,20 @@ impl App {
                 path,
                 old_text,
                 new_text,
+                tool_call_id,
                 ..
             } => {
                 let diff = DiffView::new(path, old_text, new_text);
-                self.chat.push(ChatCell::Diff(diff));
+                // Anchor the diff directly after the ToolCall cell that
+                // produced it — concurrent edits complete out of order, so
+                // appending would interleave diffs arbitrarily. Unknown id
+                // (older gateway / lost ToolCall event) falls back to append.
+                if let Err(cell) = self
+                    .chat
+                    .insert_after_tool_call(&tool_call_id, ChatCell::Diff(diff))
+                {
+                    self.chat.push(*cell);
+                }
             }
 
             // ---- Metrics events ----
@@ -1697,18 +1703,36 @@ impl App {
         tool_result: String,
         tool_success: bool,
     ) {
-        // Special handling for TodoWrite — render as TodoMessage cell.
+        // Special handling for TodoWrite — render as TodoMessage cell
+        // anchored directly after its ToolCall cell. Concurrent tool
+        // execution makes results arrive out of order, so appending would
+        // misplace the todo list below unrelated cells.
         if tool_name == TOOL_TODO
             && tool_success
             && let Some(todo) = TodoMessage::from_tool_args(&tool_args)
         {
-            self.chat.push(ChatCell::Todo(todo));
+            let todo_cell = ChatCell::Todo(todo);
+            if let Some(idx) = self.chat.tool_call_index(&tool_call_id) {
+                // Mark the ToolCall cell Success (mirrors replay behavior;
+                // the early return previously left it Pending forever).
+                self.chat
+                    .set_tool_result_by_index(idx, tool_result, tool_success);
+                // Cannot fail — the ToolCall cell was just located above.
+                let _ = self.chat.insert_after_tool_call(&tool_call_id, todo_cell);
+            } else {
+                // Orphan result (lost ToolCall event) — mirror the unified
+                // path below: show the ToolCall block, then the todo list.
+                let mut block = ToolCallBlock::new(tool_name, tool_args, tool_call_id);
+                block.set_result(tool_result, tool_success);
+                self.chat.push(ChatCell::ToolCall(block));
+                self.chat.push(todo_cell);
+            }
             tracing::debug!("todo updated");
             return;
         }
 
         // Unified path: set result on existing ToolCallBlock, or create orphan.
-        if let Some(idx) = self.ctx.get_tool_call_index(&tool_call_id) {
+        if let Some(idx) = self.chat.tool_call_index(&tool_call_id) {
             self.chat
                 .set_tool_result_by_index(idx, tool_result, tool_success);
         } else {

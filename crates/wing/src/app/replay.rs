@@ -4,7 +4,6 @@
 //! UI cells for display in the chat view.
 
 use serde::Deserialize;
-use std::collections::HashMap;
 
 use crate::app::constants::TOOL_TODO;
 use crate::ui::cells::thinking::ThinkingBlock;
@@ -40,9 +39,6 @@ struct ReplayMessage {
 /// Line counts are computed at render time by `Paragraph::line_count(width)`,
 /// so no batch optimization is needed here.
 pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
-    // Map tool_call_id → cell index for pairing results.
-    let mut tool_call_indices: HashMap<String, usize> = HashMap::new();
-
     for msg_val in messages {
         let msg: ReplayMessage = match serde_json::from_value(msg_val.clone()) {
             Ok(m) => m,
@@ -71,14 +67,12 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
                 // Tool calls.
                 if let Some(tool_calls) = msg.tool_calls {
                     for tc in tool_calls {
-                        let idx = chat.len();
                         let block = ToolCallBlock::new(
                             tc.name.clone(),
                             tc.arguments.clone(),
                             tc.id.clone(),
                         );
                         chat.push(ChatCell::ToolCall(block));
-                        tool_call_indices.insert(tc.id, idx);
                     }
                 }
 
@@ -88,32 +82,38 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
                 }
             }
             "tool" => {
-                // Match tool result to its call.
-                if let Some(tool_call_id) = msg.tool_call_id {
-                    if let Some(&idx) = tool_call_indices.get(&tool_call_id) {
-                        // Check if this is a TodoWrite — keep ToolCallBlock + append TodoMessage.
-                        let todo_cell = chat.cells.get(idx).and_then(|c| {
-                            if let ChatCell::ToolCall(block) = c.cell()
-                                && block.tool_name == TOOL_TODO
-                            {
-                                TodoMessage::from_tool_args(&block.tool_args).map(ChatCell::Todo)
-                            } else {
-                                None
-                            }
-                        });
+                // Match tool result to its call, addressed by id — tool
+                // messages are persisted in completion order (concurrent
+                // execution), so positional pairing is not possible.
+                let Some(tool_call_id) = msg.tool_call_id else {
+                    continue;
+                };
+                let Some(idx) = chat.tool_call_index(&tool_call_id) else {
+                    // Orphan tool result — render as system message.
+                    chat.push(ChatCell::SystemMessage(format!(
+                        "Tool result (orphan): {}",
+                        msg.content
+                    )));
+                    continue;
+                };
 
-                        chat.set_tool_result_by_index(idx, msg.content, true);
-
-                        if let Some(cell) = todo_cell {
-                            chat.push(cell);
-                        }
+                // Check if this is a TodoWrite — keep ToolCallBlock,
+                // insert TodoMessage directly after it.
+                let todo_cell = chat.cells.get(idx).and_then(|c| {
+                    if let ChatCell::ToolCall(block) = c.cell()
+                        && block.tool_name == TOOL_TODO
+                    {
+                        TodoMessage::from_tool_args(&block.tool_args).map(ChatCell::Todo)
                     } else {
-                        // Orphan tool result — render as system message.
-                        chat.push(ChatCell::SystemMessage(format!(
-                            "Tool result (orphan): {}",
-                            msg.content
-                        )));
+                        None
                     }
+                });
+
+                chat.set_tool_result_by_index(idx, msg.content, true);
+
+                if let Some(cell) = todo_cell {
+                    // Cannot fail — the ToolCall cell was located above.
+                    let _ = chat.insert_after_tool_call(&tool_call_id, cell);
                 }
             }
             _ => {
@@ -254,6 +254,102 @@ mod tests {
         assert!(
             matches!(chat.cells[1].cell(), ChatCell::Todo(_)),
             "Expected TodoMessage"
+        );
+    }
+
+    #[test]
+    fn test_replay_todo_anchored_under_out_of_order_results() {
+        // Concurrent execution: results are persisted in completion order
+        // (Bash finished first), but the Todo cell must still land directly
+        // after its own TodoWrite ToolCall cell.
+        let mut chat = ChatView::new();
+        let messages = vec![
+            json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "tc_todo",
+                        "name": "TodoWrite",
+                        "arguments": {
+                            "todos": [{"content": "task", "status": "pending"}]
+                        }
+                    },
+                    {
+                        "id": "tc_bash",
+                        "name": "Bash",
+                        "arguments": {"command": "ls"}
+                    }
+                ]
+            }),
+            // Bash result arrives first (faster completion).
+            json!({
+                "role": "tool",
+                "tool_call_id": "tc_bash",
+                "content": "file.txt"
+            }),
+            json!({
+                "role": "tool",
+                "tool_call_id": "tc_todo",
+                "content": "Todo updated."
+            }),
+        ];
+        replay_messages(&mut chat, &messages);
+        assert_eq!(chat.len(), 3);
+        // Order: ToolCall(TodoWrite), Todo, ToolCall(Bash).
+        match chat.cells[0].cell() {
+            ChatCell::ToolCall(block) => assert_eq!(block.tool_name, "TodoWrite"),
+            other => panic!("Expected TodoWrite ToolCall, got {other:?}"),
+        }
+        assert!(
+            matches!(chat.cells[1].cell(), ChatCell::Todo(_)),
+            "Todo cell must be anchored directly after its ToolCall"
+        );
+        match chat.cells[2].cell() {
+            ChatCell::ToolCall(block) => {
+                assert_eq!(block.tool_name, "Bash");
+                assert!(block.result.is_some(), "Bash result must still be set");
+            }
+            other => panic!("Expected Bash ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_replay_multiple_todos_out_of_order() {
+        // Two TodoWrites + one Bash, results persisted in reverse completion
+        // order — each todo list must land under its own ToolCall cell.
+        let mut chat = ChatView::new();
+        let todo_args = |task: &str| json!({"todos": [{"content": task, "status": "pending"}]});
+        let messages = vec![
+            json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "tc_todo1", "name": "TodoWrite", "arguments": todo_args("first")},
+                    {"id": "tc_bash", "name": "Bash", "arguments": {"command": "ls"}},
+                    {"id": "tc_todo2", "name": "TodoWrite", "arguments": todo_args("second")}
+                ]
+            }),
+            json!({"role": "tool", "tool_call_id": "tc_todo2", "content": "ok"}),
+            json!({"role": "tool", "tool_call_id": "tc_bash", "content": "ok"}),
+            json!({"role": "tool", "tool_call_id": "tc_todo1", "content": "ok"}),
+        ];
+        replay_messages(&mut chat, &messages);
+
+        // Order: TC(todo1), Todo1, TC(bash), TC(todo2), Todo2.
+        assert_eq!(chat.len(), 5);
+        let names: Vec<String> = chat
+            .cells
+            .iter()
+            .map(|c| match c.cell() {
+                ChatCell::ToolCall(b) => format!("TC({})", b.tool_name),
+                ChatCell::Todo(_) => "Todo".to_string(),
+                _ => "?".to_string(),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["TC(TodoWrite)", "Todo", "TC(Bash)", "TC(TodoWrite)", "Todo"]
         );
     }
 }

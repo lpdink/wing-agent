@@ -233,11 +233,18 @@ pub enum WingEvent {
     },
 
     /// Diff content for file edits.
+    ///
+    /// `tool_call_id` correlates the diff with the tool call that produced
+    /// it (Write/Edit/BetterEdit) so the TUI can anchor the Diff cell
+    /// directly after its ToolCall cell under concurrent (out-of-order)
+    /// execution. Empty for older gateways — falls back to append.
     #[serde(rename = "diff_content")]
     DiffContent {
         path: String,
         old_text: Option<String>,
         new_text: String,
+        #[serde(default)]
+        tool_call_id: String,
         #[serde(flatten)]
         meta: EventMeta,
     },
@@ -586,6 +593,7 @@ mod tests {
             "path": "src/main.rs",
             "old_text": "fn old() {}",
             "new_text": "fn new() {}",
+            "tool_call_id": "call_edit_1",
             "created_at": "2025-01-01T00:00:00",
             "session_id": "abc",
             "request_id": "req8"
@@ -596,11 +604,34 @@ mod tests {
                 path,
                 old_text,
                 new_text,
+                tool_call_id,
                 ..
             } => {
                 assert_eq!(path, "src/main.rs");
                 assert_eq!(old_text.unwrap(), "fn old() {}");
                 assert_eq!(new_text, "fn new() {}");
+                assert_eq!(tool_call_id, "call_edit_1");
+            }
+            _ => panic!("expected DiffContent"),
+        }
+    }
+
+    #[test]
+    fn deserialize_diff_content_event_tool_call_id_defaults_empty() {
+        // Older gateways omit tool_call_id — must default to "" (append fallback).
+        let json = r#"{
+            "type": "diff_content",
+            "path": "src/main.rs",
+            "old_text": null,
+            "new_text": "fn new() {}",
+            "created_at": "2025-01-01T00:00:00",
+            "session_id": "abc",
+            "request_id": "req8"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match event {
+            WingEvent::DiffContent { tool_call_id, .. } => {
+                assert_eq!(tool_call_id, "");
             }
             _ => panic!("expected DiffContent"),
         }

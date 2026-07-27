@@ -5,7 +5,7 @@ import os
 import stat
 from pathlib import Path
 
-from wing.agent import WingAgent
+from wing.agent import WingAgent, current_tool_call_id
 from wing.event import DiffContentEvent
 from wing.schema import ToolError
 from wing.tool_registry import tool_registry
@@ -56,6 +56,7 @@ async def write_file(path: str, content: str, agent: WingAgent) -> str:
                 path=path,
                 old_text=old_text,
                 new_text=content,
+                tool_call_id=current_tool_call_id() or "",
             )
         )
 
@@ -157,6 +158,7 @@ async def edit_file(
             path=path,
             old_text=content,
             new_text=new_content,
+            tool_call_id=current_tool_call_id() or "",
         )
     )
 

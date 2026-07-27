@@ -243,6 +243,59 @@ impl ChatView {
         self.cells.push(CachedCell::new(cell));
     }
 
+    /// Find the cell index of the ToolCall block with the given id.
+    ///
+    /// Reverse scan (most recent first); tool_call_ids are unique per
+    /// session. This is the ONLY supported way to address tool call cells:
+    /// indices must be computed and consumed within one handler frame,
+    /// never stored across events — anchored insertion below moves cells,
+    /// so any cached index would silently go stale.
+    pub fn tool_call_index(&self, tool_call_id: &str) -> Option<usize> {
+        self.cells.iter().rposition(
+            |c| matches!(c.cell(), ChatCell::ToolCall(block) if block.tool_call_id == tool_call_id),
+        )
+    }
+
+    /// Anchor a derived cell (Todo/Diff) directly after the ToolCall cell
+    /// that produced it.
+    ///
+    /// Concurrent tool execution makes derived events arrive out of order;
+    /// appending them would misplace them below unrelated cells. If the
+    /// ToolCall already has anchored derived cells (they sit contiguously
+    /// right after it — anchoring never interleaves foreign cells into the
+    /// group), the new cell is inserted after them so multiple emissions
+    /// from one tool call keep their original order.
+    ///
+    /// When no ToolCall cell matches (unknown id, older gateway, lost
+    /// event), the cell is handed back via `Err` (boxed to keep the
+    /// `Result` small) so the caller can fall back to `push` without a
+    /// pre-check or clone.
+    ///
+    /// `cell_heights` needs no maintenance — it is resized/recomputed
+    /// lazily in `update_heights` on every draw (same as `remove_ask`).
+    pub fn insert_after_tool_call(
+        &mut self,
+        tool_call_id: &str,
+        cell: ChatCell,
+    ) -> Result<(), Box<ChatCell>> {
+        let Some(mut at) = self.tool_call_index(tool_call_id) else {
+            return Err(Box::new(cell));
+        };
+        // Sibling group = contiguous derived cells anchored to this
+        // ToolCall. NOTE: new anchored derived cell types must be
+        // registered in this matches!, or they will be inserted before
+        // earlier siblings and break emission order.
+        while self
+            .cells
+            .get(at + 1)
+            .is_some_and(|c| matches!(c.cell(), ChatCell::Diff(_) | ChatCell::Todo(_)))
+        {
+            at += 1;
+        }
+        self.cells.insert(at + 1, CachedCell::new(cell));
+        Ok(())
+    }
+
     /// Update the selection cursor on the Ask cell with the given tool_call_id.
     ///
     /// Addressed by id so concurrent Ask cells don't clobber each other.
@@ -1218,6 +1271,96 @@ mod tests {
         if let ChatCell::ToolCall(block) = view.cells[idx].cell() {
             assert!(block.result.is_some());
         }
+    }
+
+    #[test]
+    fn test_tool_call_index_finds_by_id() {
+        use super::super::cells::tool_call::ToolCallBlock;
+        let mut view = ChatView::new();
+        view.push(ChatCell::UserMessage("a".into()));
+        view.push(ChatCell::ToolCall(ToolCallBlock::new(
+            "Edit".into(),
+            serde_json::json!({}),
+            "tc1".into(),
+        )));
+        view.push(ChatCell::ToolCall(ToolCallBlock::new(
+            "Bash".into(),
+            serde_json::json!({}),
+            "tc2".into(),
+        )));
+
+        assert_eq!(view.tool_call_index("tc1"), Some(1));
+        assert_eq!(view.tool_call_index("tc2"), Some(2));
+        assert_eq!(view.tool_call_index("nope"), None);
+        assert_eq!(view.tool_call_index(""), None);
+    }
+
+    #[test]
+    fn test_insert_after_tool_call_anchors_under_its_call() {
+        use super::super::cells::tool_call::ToolCallBlock;
+        let mut view = ChatView::new();
+        view.push(ChatCell::ToolCall(ToolCallBlock::new(
+            "TodoWrite".into(),
+            serde_json::json!({}),
+            "tc_todo".into(),
+        )));
+        view.push(ChatCell::ToolCall(ToolCallBlock::new(
+            "Bash".into(),
+            serde_json::json!({}),
+            "tc_bash".into(),
+        )));
+
+        // Anchored insert lands between the two ToolCall cells even though
+        // the event arrived "late" (concurrent out-of-order completion).
+        assert!(
+            view.insert_after_tool_call("tc_todo", ChatCell::SystemMessage("todo".into()))
+                .is_ok()
+        );
+
+        assert_eq!(view.len(), 3);
+        assert!(matches!(view.cells[1].cell(), ChatCell::SystemMessage(_)));
+        match view.cells[2].cell() {
+            ChatCell::ToolCall(b) => assert_eq!(b.tool_call_id, "tc_bash"),
+            other => panic!("expected Bash ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_insert_after_tool_call_preserves_sibling_order() {
+        use super::super::cells::diff_view::DiffView;
+        use super::super::cells::tool_call::ToolCallBlock;
+        let mut view = ChatView::new();
+        view.push(ChatCell::ToolCall(ToolCallBlock::new(
+            "Edit".into(),
+            serde_json::json!({}),
+            "tc_edit".into(),
+        )));
+
+        // Two derived cells for the same tool call keep emission order
+        // (the second anchoring skips past the first sibling).
+        let diff = |p: &str| ChatCell::Diff(DiffView::new(p.into(), None, "new".into()));
+        assert!(view.insert_after_tool_call("tc_edit", diff("d1")).is_ok());
+        assert!(view.insert_after_tool_call("tc_edit", diff("d2")).is_ok());
+
+        match (view.cells[1].cell(), view.cells[2].cell()) {
+            (ChatCell::Diff(a), ChatCell::Diff(b)) => {
+                assert_eq!(a.path, "d1");
+                assert_eq!(b.path, "d2");
+            }
+            other => panic!("expected d1, d2 in order, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_insert_after_tool_call_unknown_id_hands_cell_back() {
+        let mut view = ChatView::new();
+        view.push(ChatCell::UserMessage("a".into()));
+        let err = view
+            .insert_after_tool_call("missing", ChatCell::SystemMessage("x".into()))
+            .unwrap_err();
+        // Cell is handed back so the caller can fall back to push.
+        assert!(matches!(*err, ChatCell::SystemMessage(_)));
+        assert_eq!(view.len(), 1); // unchanged
     }
 
     #[test]
