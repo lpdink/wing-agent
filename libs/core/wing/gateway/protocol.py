@@ -15,14 +15,17 @@ Gateway 的消息协议——前端和 Gateway 之间的通信格式。
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Mapping
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from starlette.responses import JSONResponse
 
 from wing.event import AgentInfo, CommandInfo, SessionInfo
 from wing.event.query_response import BranchTargetInfo
+from wing.schema import ToolParam
 
 
 # ============================================================
@@ -56,6 +59,32 @@ class ClientRequest(BaseModel):
         default=None,
         description="回复某个 Ask 事件时携带其 tool_call_id，定向 resolve feedback waiter",
     )
+
+
+class ToolCallRequest(BaseModel):
+    """Gateway 经 WS 发给 tool host 的工具调用请求帧（出站）。
+
+    tool host 执行后以 ToolCallResult（同 call_id）回传。call_id 由
+    RemoteToolManager 生成，用于在 pending future 表中关联请求与响应。
+    """
+
+    type: Literal["tool_call_request"] = Field(
+        default="tool_call_request", description="帧类型，固定为 'tool_call_request'"
+    )
+    call_id: str = Field(description="调用唯一 ID，结果帧据此关联")
+    name: str = Field(description="工具注册名（不含 namespace 前缀）")
+    arguments: dict = Field(default_factory=dict, description="工具调用参数")
+
+
+class ToolCallResult(BaseModel):
+    """tool host 经 WS 回传的工具调用结果帧（入站）。"""
+
+    type: Literal["tool_call_result"] = Field(
+        default="tool_call_result", description="帧类型，固定为 'tool_call_result'"
+    )
+    call_id: str = Field(description="对应的调用 ID")
+    result: str = Field(default="", description="工具执行结果文本")
+    is_error: bool = Field(default=False, description="结果是否为错误")
 
 
 # ============================================================
@@ -153,6 +182,78 @@ class RewindRequest(BaseModel):
     target_uuid: str = Field(description="要回退到的消息 UUID")
 
 
+# LLM 可见工具名须符合 provider function-name 文法（OpenAI: ^[a-zA-Z0-9_-]{1,64}$）。
+# 远程工具是首个真正使用自定义 llm_name 的消费方，注册时即校验，避免坏名字
+# 延迟到 LLM 调用时才 confusing 地失败。
+_LLM_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+class RemoteToolSpec(BaseModel):
+    """远程工具规格——tool host 注册单个工具的 schema。
+
+    复用核心 ToolParam，与内置工具 schema 同构。注册后以 client_id 为
+    namespace 落入核心 registry，配置引用形如 ``<client_id>.<name>``。
+
+    llm_name 由端上自选（LLM 实际看到的名字）；None 时退化为裸 name。
+    运行时**不**自动以 client_id 限定 llm_name——当前模型尚不适合同时持有
+    两个同名工具（如两个 Read），两个 effective_llm_name 相同的工具绑定到
+    同一 agent 会在 create session 时失败，这是预期行为。
+    """
+
+    name: str = Field(description="工具注册名（同 namespace 内唯一）")
+    description: str = Field(default="", description="工具描述（LLM 可见）")
+    llm_name: str | None = Field(
+        default=None, description="LLM 可见名（None 退化为 name；须符合 provider 文法）"
+    )
+    params: list[ToolParam] = Field(
+        default_factory=list, description="工具参数列表（复用核心 ToolParam）"
+    )
+
+    @field_validator("name")
+    @classmethod
+    def _name_resolvable(cls, v: str) -> str:
+        # 工具名含 "." 会破坏 ToolRef.parse（rsplit(".", 1)）：注册成功却永远
+        # 无法以 "<client_id>.<name>" 解析——静默坑，注册时即拒绝。
+        if not v.strip():
+            raise ValueError("tool name must not be empty")
+        if v != v.strip():
+            raise ValueError("tool name must not have leading/trailing whitespace")
+        if "." in v:
+            raise ValueError("tool name must not contain '.'")
+        return v
+
+    @field_validator("llm_name")
+    @classmethod
+    def _llm_name_provider_safe(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not _LLM_NAME_RE.match(v):
+            raise ValueError(
+                "llm_name must match ^[a-zA-Z0-9_-]{1,64}$ (provider function-name grammar)"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _effective_llm_name_provider_safe(self) -> "RemoteToolSpec":
+        # effective LLM 可见名（llm_name or name）须过 provider 文法——否则
+        # llm_name=None 时裸 name（如 "My Tool" / "读文件"）会注册通过、却延迟到
+        # LLM 调用才 400，违反"坏名字应在注册时失败"。即使将来 llm_name 按存废
+        # 判断被删、name 成为唯一 LLM 可见名，这道校验依然必要。
+        effective = self.llm_name or self.name
+        if not _LLM_NAME_RE.match(effective):
+            raise ValueError(
+                "effective LLM-visible name (llm_name or name) must match "
+                "^[a-zA-Z0-9_-]{1,64}$ (provider function-name grammar)"
+            )
+        return self
+
+
+class RegisterToolsRequest(BaseModel):
+    """注册远程工具的请求体。需要 X-Client-Id header 标识 tool host。"""
+
+    tools: list[RemoteToolSpec] = Field(description="要注册的工具规格列表")
+
+
 # ============================================================
 # HTTP Response Models
 # ============================================================
@@ -188,6 +289,16 @@ class OkResponse(BaseModel):
     """通用成功响应。"""
 
     ok: bool = Field(default=True, description="操作是否成功")
+
+
+class RegisterToolsResponse(BaseModel):
+    """注册远程工具的响应。"""
+
+    ok: bool = Field(default=True, description="操作是否成功")
+    registered: list[str] = Field(
+        default_factory=list,
+        description="已注册工具的完整引用列表（形如 <client_id>.<name>）",
+    )
 
 
 class SendMessageResponse(BaseModel):
@@ -242,6 +353,7 @@ class ErrorResponse(BaseModel):
 HTTP_ERROR_TYPES: dict[int, str] = {
     400: "bad_request",
     401: "unauthorized",
+    403: "forbidden",
     404: "not_found",
     405: "method_not_allowed",
     422: "validation_error",

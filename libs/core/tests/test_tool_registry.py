@@ -227,3 +227,65 @@ class TestToolValidation:
             name="Bash", llm_name=None, description="", params=[], function=lambda: None
         )
         assert tool.effective_llm_name == "Bash"
+
+
+# ============================================================
+# 外部工具注册（register_tool / unregister_namespace）
+# ============================================================
+
+
+def _make_tool(name: str, namespace: str = "client-a"):
+    from wing.schema import Tool
+
+    async def fn(**kwargs: object) -> str:
+        return "ok"
+
+    return Tool(
+        name=name,
+        namespace=namespace,
+        description="remote tool",
+        params=[],
+        function=fn,
+    )
+
+
+class TestExternalToolRegistration:
+    """核心外部工具注册能力（远程工具入口，网络无关）。"""
+
+    def test_register_tool_success(self):
+        reg = ToolRegistry()
+        reg.register_tool(_make_tool("Read"))
+        tool = reg.resolve("client-a.Read")
+        assert tool is not None
+        assert tool.namespace == "client-a"
+        assert tool.name == "Read"
+
+    def test_register_tool_collision_raises(self):
+        reg = ToolRegistry()
+        reg.register_tool(_make_tool("Read"))
+        with pytest.raises(ValueError, match="already registered"):
+            reg.register_tool(_make_tool("Read"))
+
+    def test_register_tool_same_name_different_namespace_coexist(self):
+        reg = ToolRegistry()
+        reg.register_tool(_make_tool("Read", namespace="host-1"))
+        reg.register_tool(_make_tool("Read", namespace="host-2"))
+        assert reg.resolve("host-1.Read") is not None
+        assert reg.resolve("host-2.Read") is not None
+
+    def test_unregister_namespace_removes_and_returns(self):
+        reg = ToolRegistry()
+        reg.register_tool(_make_tool("Read"))
+        reg.register_tool(_make_tool("Write"))
+        reg.register_tool(_make_tool("Read", namespace="other"))
+
+        removed = reg.unregister_namespace("client-a")
+        assert {t.name for t in removed} == {"Read", "Write"}
+        assert reg.resolve("client-a.Read") is None
+        assert reg.resolve("client-a.Write") is None
+        # 其他 namespace 不受影响
+        assert reg.resolve("other.Read") is not None
+
+    def test_unregister_namespace_absent_returns_empty(self):
+        reg = ToolRegistry()
+        assert reg.unregister_namespace("nonexistent") == []

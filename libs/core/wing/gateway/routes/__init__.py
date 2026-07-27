@@ -13,13 +13,15 @@ if TYPE_CHECKING:
 
 
 def register_routes(app: FastAPI, server: GatewayServer) -> None:
-    """注册所有路由（session、system、health、ws）。"""
+    """注册所有路由（session、system、health、tools、ws）。"""
     from .health import router as health_router
     from .session import router as session_router
     from .system import router as system_router
+    from .tools import router as tools_router
     from .ws import router as ws_router
 
     app.include_router(health_router)
     app.include_router(session_router)
     app.include_router(system_router)
+    app.include_router(tools_router)
     app.include_router(ws_router)

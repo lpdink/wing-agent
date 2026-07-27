@@ -27,6 +27,17 @@ from wing.gateway.protocol import error_response
 # 免鉴权路径——无论 auth.enabled 如何，这些路径始终开放。
 EXEMPT_PATHS: set[str] = {"/api/health"}
 
+# ── 身份角色 ─────────────────────────────────────────────────
+# admin（ApiKeyEntry.role 默认值）：全量访问，是隐式的"非受限"角色。
+# tool_runtime：纯工具执行远端，仅允许注册工具——唯一需要显式判定的角色。
+# 既要注册工具又要订阅事件的客户端应持 admin 身份。
+ROLE_TOOL_RUNTIME = "tool_runtime"
+
+# tool_runtime 角色允许访问的路径（allowlist）。新增端点默认对其关闭——
+# 安全默认，无需为每个新端点额外维护拒绝逻辑。/api/health 已由 EXEMPT_PATHS
+# 在更早处放行，列入此处仅为语义完整。
+TOOL_RUNTIME_ALLOWED_PATHS: set[str] = {"/api/tools/register", "/api/health"}
+
 
 def _unauthorized() -> JSONResponse:
     """构造 401 响应（每次新建，避免共享实例被 middleware 链 mutate）。
@@ -36,6 +47,11 @@ def _unauthorized() -> JSONResponse:
     gateway 的 exception handler）。
     """
     return error_response(401, "Invalid or missing API key")
+
+
+def _forbidden() -> JSONResponse:
+    """构造 403 响应（角色权限不足），与 401 同为统一 ErrorResponse 形状。"""
+    return error_response(403, "Role not permitted to access this endpoint")
 
 
 def extract_key_from_headers(headers: Mapping[str, str]) -> str | None:
@@ -105,6 +121,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
         role = auth_config.verify(key)
         if role is None:
             return _unauthorized()
+
+        # RBAC：tool_runtime 仅允许访问 allowlist 路径，其余 403。
+        # admin 全量放行；auth 关闭时本方法已在更早处早返回，不做强制。
+        if (
+            role == ROLE_TOOL_RUNTIME
+            and request.url.path not in TOOL_RUNTIME_ALLOWED_PATHS
+        ):
+            return _forbidden()
 
         request.state.api_key_role = role
         return await call_next(request)

@@ -29,6 +29,7 @@ from wing.event_bus import event_bus
 from wing.runtime import WingRuntime
 
 from .app import create_app
+from .remote_tools import RemoteToolManager
 
 DEFAULT_PORT = 32523
 
@@ -66,6 +67,7 @@ class GatewayServer:
         self.runtime = WingRuntime()
         self._client_to_ws: dict[str, WebSocket] = {}  # client_id → ws
         self._ws_to_client: dict[WebSocket, str] = {}  # ws → client_id
+        self._remote_tools = RemoteToolManager()  # 远程工具连接与调用中枢
         self._app = create_app(self)
         self._started_at = datetime.now(timezone.utc)
 
@@ -99,6 +101,11 @@ class GatewayServer:
         """WebSocket → client_id 映射，供 routes 访问。"""
         return self._ws_to_client
 
+    @property
+    def remote_tools(self) -> RemoteToolManager:
+        """远程工具管理器，供 routes（ws / tools）访问。"""
+        return self._remote_tools
+
     def start(self) -> None:
         """启动服务器（阻塞）。"""
         if not _check_port_available(self.host, self.port):
@@ -122,14 +129,18 @@ class GatewayServer:
         """EventBus subscriber callback：根据 EventTarget 路由事件到 ws。
 
         同步回调，内部 asyncio.create_task 调度异步 send。
+        tool_runtime（纯工具执行远端）不接收事件——global 广播与 client
+        定向都跳过它，闭合"不参与事件订阅"的边界。
         """
         target = event.target
         if target is None:
             return
 
         if target.scope == "global":
-            # 发给所有 ws
-            for ws in list(self._client_to_ws.values()):
+            # 发给所有 ws（跳过不收事件的 tool host）
+            for cid, ws in list(self._client_to_ws.items()):
+                if not self._receives_events(cid):
+                    continue
                 try:
                     asyncio.get_running_loop().create_task(
                         self._send_text(ws, event.model_dump_json())
@@ -141,13 +152,21 @@ class GatewayServer:
             # 发给指定 client_ids 的 ws
             for cid in target.client_ids:
                 ws = self._client_to_ws.get(cid)
-                if ws is not None:
+                if ws is not None and self._receives_events(cid):
                     try:
                         asyncio.get_running_loop().create_task(
                             self._send_text(ws, event.model_dump_json())
                         )
                     except RuntimeError:
                         pass
+
+    def _receives_events(self, client_id: str) -> bool:
+        """client 是否接收事件。tool_runtime（attached 且 receives_events=False）
+        被跳过；纯前端（未 attach）默认接收。"""
+        return not (
+            self._remote_tools.is_attached(client_id)
+            and not self._remote_tools.receives_events(client_id)
+        )
 
     async def _send_text(self, ws: WebSocket, data: str) -> None:
         """异步发送文本到 ws。"""

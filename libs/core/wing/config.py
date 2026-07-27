@@ -106,8 +106,8 @@ class AuthConfig(BaseModel):
     """Gateway API key authentication configuration.
 
     When ``enabled`` is True, all HTTP/WS requests (except exempt paths)
-    must carry a valid API key.  ``role`` is stored but not enforced yet
-    — reserved for future RBAC (e.g. ``tool_runtime``).
+    must carry a valid API key.  ``role`` is enforced (RBAC): ``admin``
+    has full access; ``tool_runtime`` may only register remote tools.
     """
 
     enabled: bool = False
@@ -129,6 +129,13 @@ class GatewayConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 32523
     auth: AuthConfig = Field(default_factory=AuthConfig)
+    remote_tool_timeout: float = 1800.0
+    """远程工具调用总超时（秒）——安全网，非小超时。
+
+    远程工具（如 Bash）可能执行很久，故默认宽口径（30 分钟）。
+    断连是首要失败信号（WS 关闭立即 fail 在途调用），此超时仅兜底
+    客户端静默挂死但未断连的极端情况。
+    """
 
 
 class CommandsConfig(BaseModel):

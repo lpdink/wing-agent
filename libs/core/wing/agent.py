@@ -677,10 +677,20 @@ class WingAgent:
             if modified_tc is not None:
                 tc = modified_tc
 
-            # 过滤掉工具函数实际不接受的参数（如动态添加的 purpose）
+            # 过滤掉工具函数实际不接受的参数（如动态添加的 purpose）。
+            # 远程工具的可执行体是 **kwargs 闭包（VAR_KEYWORD），其参数集合由
+            # 远程 schema 完整定义，应全量透传——检测到 VAR_KEYWORD 时跳过过滤。
             sig = inspect.signature(tool.function)
-            actual_params = set(sig.parameters.keys())
-            call_args = {k: v for k, v in tc.arguments.items() if k in actual_params}
+            has_var_keyword = any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            )
+            if has_var_keyword:
+                call_args = dict(tc.arguments)
+            else:
+                actual_params = set(sig.parameters.keys())
+                call_args = {
+                    k: v for k, v in tc.arguments.items() if k in actual_params
+                }
 
             result = (
                 await tool.function(**call_args)
