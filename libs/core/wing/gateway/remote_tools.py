@@ -173,10 +173,14 @@ class RemoteToolManager:
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
-            self._discard_call(client_id, call_id)
             raise ToolError(
                 f"remote tool '{tool_name}' timed out after {timeout:.0f}s"
             ) from None
+        finally:
+            # 覆盖成功 / 超时 / 取消所有路径：成功时 resolve_result 已清除（幂等），
+            # 取消时（Agent.interrupt()/shutdown() cancel worker，工具跑在 gather 下）
+            # CancelledError 穿过前在此清理，避免 _pending / _client_calls 残留至断连。
+            self._discard_call(client_id, call_id)
 
     def resolve_result(
         self, client_id: str, call_id: str, result: str, is_error: bool
@@ -193,10 +197,12 @@ class RemoteToolManager:
         calls = self._client_calls.get(client_id)
         if calls is None or call_id not in calls:
             return False
+        # 通过归属校验后即从 calls 清除，保持两个索引一致——即使 future 已
+        # done/缺失（早退路径）也不留残留 call_id。
+        calls.discard(call_id)
         future = self._pending.pop(call_id, None)
         if future is None or future.done():
             return False
-        calls.discard(call_id)
         if is_error:
             future.set_exception(ToolError(result or "remote tool error"))
         else:

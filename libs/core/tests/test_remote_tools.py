@@ -143,6 +143,31 @@ async def test_dispatch_times_out(manager: RemoteToolManager):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_cancellation_cleans_up(manager: RemoteToolManager):
+    """等待中的 dispatch 被取消（interrupt/shutdown 场景）时清理索引，无残留。"""
+    ws = FakeWS()
+    manager.attach(HOST, ws)
+    manager.register_tools(HOST, [_spec("Bash")])
+    tool = tool_registry.resolve(f"{HOST}.Bash")
+    assert tool is not None
+
+    task = asyncio.create_task(tool.function(command="sleep 100"))
+    while not ws.sent:
+        await asyncio.sleep(0)
+    call_id = ws.last_call_id()
+    assert call_id in manager._client_calls[HOST]
+    assert call_id in manager._pending
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # finally 清理：pending 与 client_calls 都不留残留
+    assert call_id not in manager._pending
+    assert call_id not in manager._client_calls.get(HOST, set())
+
+
+@pytest.mark.asyncio
 async def test_fail_client_aborts_pending_and_unregisters(manager: RemoteToolManager):
     ws = FakeWS()
     manager.attach(HOST, ws)
