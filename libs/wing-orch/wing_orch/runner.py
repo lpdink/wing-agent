@@ -17,7 +17,7 @@ import websockets
 
 from wing_sdk.host import ConnectionClosed, ToolHost
 from wing_sdk.http_client import GatewayClient
-from wing_sdk.orch.goal import (
+from wing_orch.goal import (
     DEFAULT_CHECKER_SYSTEM_PROMPT,
     GoalAction,
     GoalPhase,
@@ -88,7 +88,14 @@ class GoalRunner:
         host_task = asyncio.create_task(self._run_host(host))
 
         # 等待工具注册完成（消除竞态：session 创建必须在工具注册之后）
-        await host.ready.wait()
+        # 超时兜底：gateway 不可达时 host_task 会失败但 ready 永不 set
+        try:
+            await asyncio.wait_for(host.ready.wait(), timeout=15.0)
+        except asyncio.TimeoutError:
+            host_task.cancel()
+            raise RuntimeError(
+                f"tool host failed to register within 15s (gateway at {self.gateway_url} reachable?)"
+            )
 
         # 2. 建立 WS 事件连接（admin 身份，用于订阅事件）
         ws_url = self.gateway_url.replace("http://", "ws://").replace(

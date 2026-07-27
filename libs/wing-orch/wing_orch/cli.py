@@ -8,7 +8,7 @@ import logging
 import sys
 import uuid
 
-from wing_sdk.orch.runner import GoalRunner
+from wing_orch.runner import GoalRunner
 
 
 def main() -> None:

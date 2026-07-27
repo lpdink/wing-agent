@@ -324,7 +324,13 @@ impl ToolHost {
                             WsToolCallResult::error(&call_id, format!("unknown tool: {tool_name}"))
                         };
 
-                        let json = serde_json::to_string(&result).unwrap_or_default();
+                        let json = match serde_json::to_string(&result) {
+                            Ok(j) => j,
+                            Err(e) => {
+                                tracing::error!("failed to serialize tool result: {e}");
+                                return;
+                            }
+                        };
                         let mut sink_guard = sink.lock().await;
                         if let Err(e) = sink_guard.send(Message::Text(json.into())).await {
                             tracing::error!("failed to send tool result: {e}");

@@ -1,0 +1,22 @@
+[project]
+name = "wing-orch"
+version = "0.1.0"
+description = "Wing orchestration — background Goal loop CLI"
+requires-python = ">=3.12"
+dependencies = [
+    "wing-sdk",
+    "websockets>=12.0",
+]
+
+[project.scripts]
+wing-orch = "wing_orch.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["wing_orch"]
+
+[tool.uv.sources]
+wing-sdk = { workspace = true }

@@ -150,6 +150,12 @@ async def _run_rg(args: list[str], cwd: str) -> tuple[str, int]:
 
 
 def _resolve(path: str, workspace: str) -> str:
+    """Resolve path within workspace sandbox. Rejects traversal outside."""
     if os.path.isabs(path):
-        return path
-    return os.path.join(workspace, path)
+        resolved = os.path.realpath(path)
+    else:
+        resolved = os.path.realpath(os.path.join(workspace, path))
+    ws_real = os.path.realpath(workspace)
+    if not resolved.startswith(ws_real + os.sep) and resolved != ws_real:
+        raise ValueError(f"path escapes workspace: {path}")
+    return resolved

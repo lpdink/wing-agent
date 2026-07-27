@@ -137,6 +137,7 @@ class ToolHost:
 
     async def _serve(self, ws: Any) -> None:
         """读循环：收 tool_call_request → dispatch → 回 tool_call_result。"""
+        tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
         try:
             async for raw in ws:
                 try:
@@ -151,10 +152,16 @@ class ToolHost:
                 tool_name = payload.get("name", "")
                 arguments = payload.get("arguments", {})
 
-                # 并发执行（asyncio.gather 语义：多工具同时被调用）
-                asyncio.create_task(self._dispatch(ws, call_id, tool_name, arguments))
+                task = asyncio.create_task(
+                    self._dispatch(ws, call_id, tool_name, arguments)
+                )
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
         except websockets.exceptions.ConnectionClosed as e:
             raise ConnectionClosed(f"WebSocket closed: {e}") from e
+        finally:
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _dispatch(
         self, ws: Any, call_id: str, tool_name: str, arguments: dict

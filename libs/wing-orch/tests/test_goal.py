@@ -1,6 +1,6 @@
 """Goal 状态机单元测试——与 Rust goal.rs 测试 1:1 对应。"""
 
-from wing_sdk.orch.goal import (
+from wing_orch.goal import (
     DEFAULT_CHECKER_SYSTEM_PROMPT,
     GoalPhase,
     GoalRole,
