@@ -58,48 +58,57 @@ impl TodoMessage {
 
     /// Render to lines.
     pub fn to_lines(&self, palette: &ThemePalette) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-
-        for item in &self.items {
-            let (icon, style, color) = match item.status.as_str() {
-                "in_progress" => (
-                    "●",
-                    Style::default()
-                        .fg(palette.warning)
-                        .add_modifier(Modifier::BOLD),
-                    palette.warning,
-                ),
-                "completed" => (
-                    "✓",
-                    Style::default()
-                        .fg(palette.success)
-                        .add_modifier(Modifier::DIM),
-                    palette.success,
-                ),
-                _ => (
-                    "○",
-                    Style::default().fg(palette.dim).add_modifier(Modifier::DIM),
-                    palette.dim,
-                ),
-            };
-
-            let display_text = if item.status == "in_progress" {
-                item.active_form.as_deref().unwrap_or(&item.content)
-            } else {
-                &item.content
-            };
-
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(icon, style),
-                Span::raw(" "),
-                Span::styled(display_text.to_string(), Style::default().fg(color)),
-            ]));
-        }
-
+        let mut lines = render_todo_items(&self.items, palette);
         lines.push(Line::from(""));
         lines
     }
+}
+
+/// Render todo items to lines (without trailing blank line).
+///
+/// Shared by `TodoMessage::to_lines` (final rendering) and
+/// `ToolCallBlock::to_lines` (streaming preview) to prevent drift.
+pub fn render_todo_items(items: &[TodoItem], palette: &ThemePalette) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    for item in items {
+        let (icon, style, color) = match item.status.as_str() {
+            "in_progress" => (
+                "●",
+                Style::default()
+                    .fg(palette.warning)
+                    .add_modifier(Modifier::BOLD),
+                palette.warning,
+            ),
+            "completed" => (
+                "✓",
+                Style::default()
+                    .fg(palette.success)
+                    .add_modifier(Modifier::DIM),
+                palette.success,
+            ),
+            _ => (
+                "○",
+                Style::default().fg(palette.dim).add_modifier(Modifier::DIM),
+                palette.dim,
+            ),
+        };
+
+        let display_text = if item.status == "in_progress" {
+            item.active_form.as_deref().unwrap_or(&item.content)
+        } else {
+            &item.content
+        };
+
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(icon, style),
+            Span::raw(" "),
+            Span::styled(display_text.to_string(), Style::default().fg(color)),
+        ]));
+    }
+
+    lines
 }
 
 #[cfg(test)]
