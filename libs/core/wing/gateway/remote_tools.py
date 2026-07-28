@@ -218,7 +218,7 @@ class RemoteToolManager:
         工具从核心 registry 移除，后续新建 agent 不再看到它们。
 
         KV Cache 保护（重要）：本方法**只**清理全局 tool_registry，绝不
-        触碰已加载 agent 的 ``_tool_map``。修改 agent 已绑定的工具集会破坏
+        触碰已加载 agent 的 ``_tools``。修改 agent 已绑定的工具集会破坏
         KV cache。已绑定进 agent 的 dispatch 闭包保持原样——当 agent 再次
         调用它时，``_dispatch`` 在调用时刻检测到 client 不在线，返回清晰的
         "tool unavailable / not connected" 错误作为工具结果。

@@ -126,8 +126,11 @@ class WingAgent:
         self.stream = stream
         self.model_provider = model_provider
         self.model = model
-        self._tool_map: dict[str, Tool] = self._bind_tools(tools or [])
+        # 唯一工具集：agent 能调度什么。LLM 可见视图（声明集）由 ContextManager 管理。
+        self._tools: dict[str, Tool] = self._bind_tools(tools or [])
         self.context_manager = context_manager
+        # 通知 CM 初始工具集（CM 内部走初始化路径，直接设置声明集）
+        self.context_manager.on_tools_changed(self.tools)
         self.state = AgentStateBag()
         self._steer = get_config().steer
         self._max_turns = max_turns
@@ -143,7 +146,8 @@ class WingAgent:
 
     @property
     def tools(self) -> list[Tool]:
-        return sorted(self._tool_map.values(), key=lambda item: item.effective_llm_name)
+        """当前可执行工具集（排序快照）。"""
+        return sorted(self._tools.values(), key=lambda item: item.effective_llm_name)
 
     @property
     def max_turns(self) -> int | None:
@@ -181,18 +185,31 @@ class WingAgent:
 
     # ── 运行时覆盖方法（供 Session.apply_agent_override 调用）──
 
-    def replace_tools(self, tool_names: list[str]) -> None:
-        """替换工具列表。从 tool_registry 获取未绑定工具并重新绑定。
+    def set_tools(self, tool_names: list[str]) -> None:
+        """设置工具集——唯一变更入口。
 
-        使用 tool_registry.resolve() 解析工具引用（支持裸名和 namespace.name），
-        获取全新的未绑定 Tool 对象，避免闭包泄漏（旧 agent 的 _agent 引用）。
+        原子 resolve + bind，然后通知 ContextManager 工具已变更。
+        CM 内部决定冷/热切换策略（它拥有链状态和声明集）。
+
+        创建时 override、HTTP update、未来任何路径全部走这一个口。
+
+        Raises:
+            ValueError: 任一工具引用无法解析（原子性：整体不切换）
         """
         from wing.tool_registry import tool_registry
 
-        unbound_tools = [
-            t for name in tool_names if (t := tool_registry.resolve(name)) is not None
-        ]
-        self._tool_map = self._bind_tools(unbound_tools)
+        # 原子 resolve：先全部解析，任一失败则抛异常
+        unbound_tools: list[Tool] = []
+        for name in tool_names:
+            tool = tool_registry.resolve(name)
+            if tool is None:
+                raise ValueError(f"cannot resolve tool reference: '{name}'")
+            unbound_tools.append(tool)
+
+        self._tools = self._bind_tools(unbound_tools)
+        # 通知 CM——CM 拥有声明集和冻结策略
+        self.context_manager.on_tools_changed(self.tools)
+        log.info(f"set_tools: {len(self._tools)} tools")
 
     def set_max_turns(self, max_turns: int | None) -> None:
         """设置 agent loop 最大轮数。None 表示无限。"""
@@ -499,14 +516,16 @@ class WingAgent:
         pending_tool_calls: list[ToolCall] = []
         last_usage: LLMUsage | None = None
 
-        async for chunk in self.model_provider.generate(
-            messages=await self.context_manager.get_messages_for_llm(
-                model=self.model,
-                model_provider=self.model_provider,
-                tools=self.tools,
-            ),
+        llm_result = await self.context_manager.get_messages_for_llm(
             model=self.model,
-            tools=self.tools,
+            model_provider=self.model_provider,
+            current_tools=lambda: self.tools,
+        )
+
+        async for chunk in self.model_provider.generate(
+            messages=llm_result.messages,
+            model=self.model,
+            tools=llm_result.tools,
             stream=self.stream,
         ):
             if chunk.reasoning_content:
@@ -655,7 +674,7 @@ class WingAgent:
             )
         )
 
-        tool = self._tool_map.get(tc.name)
+        tool = self._tools.get(tc.name)
         if not tool:
             result = f"Error: unknown tool: {tc.name}, or you don't have permission to use it."
             self.emit(

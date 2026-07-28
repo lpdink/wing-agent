@@ -648,6 +648,7 @@ class TestSessionUpdate:
             reasoning_effort=None,
             yolo=None,
             workspace=None,
+            tools=None,
         )
 
     def test_update_agent(self, client: TestClient, mock_runtime):
@@ -796,6 +797,7 @@ class TestSessionUpdate:
             reasoning_effort=None,
             yolo=None,
             workspace="/tmp",
+            tools=None,
         )
 
     def test_update_workspace_invalid(self, client: TestClient, mock_runtime):

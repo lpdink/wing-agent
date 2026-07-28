@@ -88,7 +88,11 @@ class TestBasicMessageManagement:
         cm.add_message(Message(role="user", content="hello"))
 
         prov = OpenAIProvider.__new__(OpenAIProvider)  # bare instance for type
-        llm_msgs = await cm.get_messages_for_llm(model="test", model_provider=prov)
+        llm_msgs = (
+            await cm.get_messages_for_llm(
+                model="test", model_provider=prov, current_tools=lambda: []
+            )
+        ).messages
         assert len(llm_msgs) == 2  # system + user
         assert llm_msgs[0].role == "system"
         assert "helpful assistant" in (llm_msgs[0].content or "")

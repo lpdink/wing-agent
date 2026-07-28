@@ -247,7 +247,7 @@ class WingRuntime:
         original, compressed = await session.agent.context_manager.do_manual_compact(
             model=session.agent.model,
             model_provider=session.agent.model_provider,
-            tools=session.agent.tools,
+            current_tools=lambda: session.agent.tools,
         )
 
         self._emit_session_event(
@@ -318,6 +318,7 @@ class WingRuntime:
         reasoning_effort: str | None = None,
         yolo: bool | None = None,
         workspace: str | None = None,
+        tools: list[str] | None = None,
     ) -> None:
         """统一更新 session 状态。
 
@@ -325,7 +326,7 @@ class WingRuntime:
 
         Raises:
             LookupError: session 或 template 不存在
-            ValueError: workspace 路径不合法
+            ValueError: workspace 路径不合法 / 工具引用无法解析
         """
         session = self._require_session(session_id)
 
@@ -348,6 +349,7 @@ class WingRuntime:
             reasoning_effort=reasoning_effort,
             yolo=yolo,
             workspace=workspace,
+            tools=tools,
         )
 
         # 计算 event 字段——agent 切换会重置 thinking/reasoning_effort/yolo
