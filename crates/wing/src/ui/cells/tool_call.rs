@@ -29,11 +29,19 @@ use crate::config::ThemePalette;
 use crate::render::markdown::types::MarkdownLine;
 use crate::render::markdown::types::SegmentKind;
 use crate::render::syntax;
+use crate::ui::cells::todo_msg::TodoMessage;
+use crate::ui::cells::todo_msg::render_todo_items;
 
 /// Maximum characters for failed result display.
 const FAILED_RESULT_MAX_CHARS: usize = 50;
 /// Number of trailing path segments to keep.
 const PATH_SEGMENT_COUNT: usize = 6;
+/// Maximum lines for Edit streaming new_block preview.
+const EDIT_STREAM_MAX_NEW_LINES: usize = 20;
+/// Maximum lines for Edit streaming old_block before collapsing.
+const EDIT_STREAM_MAX_OLD_LINES: usize = 8;
+/// Lines to keep at head/tail when collapsing old_block.
+const EDIT_STREAM_OLD_COLLAPSE_KEEP: usize = 3;
 
 // ── ToolStatus ──────────────────────────────────────────────────
 
@@ -280,7 +288,21 @@ impl ToolRenderer {
                     (false, false) => format!("({path}, {pattern})"),
                 }
             }
-            Self::AskUser | Self::TodoWrite => String::new(),
+            Self::AskUser => String::new(),
+            Self::TodoWrite => {
+                let Some(todos) = args.get("todos").and_then(|v| v.as_array()) else {
+                    return String::new();
+                };
+                let total = todos.len();
+                if total == 0 {
+                    return String::new();
+                }
+                let open = todos
+                    .iter()
+                    .filter(|t| t.get("status").and_then(|s| s.as_str()) != Some("completed"))
+                    .count();
+                format!("({total} items · {open} open)")
+            }
             Self::Fallback => fallback_args_summary(args),
         }
     }
@@ -309,8 +331,14 @@ pub struct ToolCallBlock {
     pub result: Option<String>,
     /// When the tool started executing (for Bash timer display).
     pub started_at: Option<Instant>,
-    /// Incremental syntax highlight cache for Write streaming.
-    pub write_highlight: Option<WriteHighlightCache>,
+    /// Incremental syntax highlight cache for Write/Edit streaming.
+    /// Write: file content preview. Edit: new_block preview.
+    /// Mutually exclusive per tool — a block is never both Write and Edit.
+    pub stream_highlight: Option<WriteHighlightCache>,
+    /// Edit streaming: old_block lines (rendered red, no highlight).
+    edit_old_lines: Vec<String>,
+    /// TodoWrite streaming: partial todo list parsed from streaming args.
+    todo_stream: Option<TodoMessage>,
     /// Raw args text accumulated from streaming fragments. Cleared when
     /// authoritative args arrive (`set_final_args`) to release memory.
     args_buffer: String,
@@ -325,7 +353,9 @@ impl ToolCallBlock {
             status: ToolStatus::Pending,
             result: None,
             started_at: None,
-            write_highlight: None,
+            stream_highlight: None,
+            edit_old_lines: Vec::new(),
+            todo_stream: None,
             args_buffer: String::new(),
         }
     }
@@ -340,7 +370,9 @@ impl ToolCallBlock {
             status: ToolStatus::Streaming,
             result: None,
             started_at: None,
-            write_highlight: None,
+            stream_highlight: None,
+            edit_old_lines: Vec::new(),
+            todo_stream: None,
             args_buffer: String::new(),
         }
     }
@@ -368,23 +400,54 @@ impl ToolCallBlock {
         self.apply_args(args);
     }
 
-    /// Set authoritative parsed args (execution start) and release the
-    /// streaming buffer.
+    /// Set authoritative parsed args (execution start), transition to
+    /// Pending, and release all streaming state. Self-contained — callers
+    /// do not need a separate status transition.
     pub fn set_final_args(&mut self, args: serde_json::Value) {
+        self.status = ToolStatus::Pending;
         self.args_buffer = String::new();
-        self.apply_args(args);
+        self.stream_highlight = None;
+        self.edit_old_lines.clear();
+        self.todo_stream = None;
+        self.tool_args = args;
     }
 
-    /// Shared args application: refresh Write highlight cache, store args.
+    /// Shared args application: refresh streaming caches, store args.
     fn apply_args(&mut self, args: serde_json::Value) {
-        // Incremental Write highlight: update cache when content grows.
-        if self.tool_name == constants::TOOL_WRITE {
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            if !content.is_empty() {
-                self.write_highlight =
-                    WriteHighlightCache::update(self.write_highlight.take(), path, content);
+        match self.tool_name.as_str() {
+            constants::TOOL_WRITE => {
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                if !content.is_empty() {
+                    self.stream_highlight =
+                        WriteHighlightCache::update(self.stream_highlight.take(), path, content);
+                }
             }
+            constants::TOOL_EDIT => {
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let old_block = args.get("old_block").and_then(|v| v.as_str()).unwrap_or("");
+                let new_block = args.get("new_block").and_then(|v| v.as_str()).unwrap_or("");
+
+                // old_block: full re-split each time (typically short).
+                // Use split('\n') + strip_cr to match WriteHighlightCache semantics.
+                if !old_block.is_empty() {
+                    self.edit_old_lines = old_block
+                        .split('\n')
+                        .map(|l| strip_cr(l).to_string())
+                        .collect();
+                }
+
+                // new_block: incremental highlight (shares stream_highlight cache;
+                // Write and Edit are mutually exclusive per block).
+                if !new_block.is_empty() {
+                    self.stream_highlight =
+                        WriteHighlightCache::update(self.stream_highlight.take(), path, new_block);
+                }
+            }
+            constants::TOOL_TODO => {
+                self.todo_stream = TodoMessage::from_tool_args(&args);
+            }
+            _ => {}
         }
         self.tool_args = args;
     }
@@ -423,7 +486,7 @@ impl ToolCallBlock {
         // Write streaming: render highlighted content preview.
         if status == ToolStatus::Streaming
             && renderer == ToolRenderer::Write
-            && let Some(ref cache) = self.write_highlight
+            && let Some(ref cache) = self.stream_highlight
         {
             let total = cache.highlighted_lines.len();
             let show_count = total.min(WRITE_STREAM_MAX_LINES);
@@ -443,6 +506,79 @@ impl ToolCallBlock {
                 }
                 lines.push(Line::from(spans));
             }
+        }
+
+        // Edit streaming: render live diff preview (old_block red, new_block green).
+        if status == ToolStatus::Streaming && renderer == ToolRenderer::Edit {
+            let danger = Style::default().fg(palette.danger);
+            let dim_style = Style::default().fg(palette.dim);
+
+            // old_block lines (red, no syntax highlight).
+            if !self.edit_old_lines.is_empty() {
+                let total = self.edit_old_lines.len();
+                if total > EDIT_STREAM_MAX_OLD_LINES {
+                    // Collapse: keep head + tail, insert gap indicator.
+                    let keep = EDIT_STREAM_OLD_COLLAPSE_KEEP;
+                    debug_assert!(
+                        keep * 2 < EDIT_STREAM_MAX_OLD_LINES,
+                        "KEEP*2 must be < MAX_OLD to avoid overlap/underflow"
+                    );
+                    for line in &self.edit_old_lines[..keep] {
+                        lines.push(Line::from(vec![
+                            Span::styled("    ", dim_style),
+                            Span::styled(format!("- {line}"), danger),
+                        ]));
+                    }
+                    let omitted = total - keep * 2;
+                    lines.push(Line::from(Span::styled(
+                        format!("    ⋮ {omitted} lines"),
+                        dim_style,
+                    )));
+                    for line in &self.edit_old_lines[total - keep..] {
+                        lines.push(Line::from(vec![
+                            Span::styled("    ", dim_style),
+                            Span::styled(format!("- {line}"), danger),
+                        ]));
+                    }
+                } else {
+                    for line in &self.edit_old_lines {
+                        lines.push(Line::from(vec![
+                            Span::styled("    ", dim_style),
+                            Span::styled(format!("- {line}"), danger),
+                        ]));
+                    }
+                }
+            }
+
+            // new_block lines (green, syntax highlighted).
+            if let Some(ref cache) = self.stream_highlight {
+                let total = cache.highlighted_lines.len();
+                let show_count = total.min(EDIT_STREAM_MAX_NEW_LINES);
+                let start = total.saturating_sub(show_count);
+                if start > 0 {
+                    lines.push(Line::from(Span::styled(
+                        format!("    ⋮ {start} lines"),
+                        dim_style,
+                    )));
+                }
+                let success = Style::default().fg(palette.success);
+                for hl_line in &cache.highlighted_lines[start..] {
+                    let mut spans: Vec<Span<'static>> =
+                        vec![Span::styled("    ", dim_style), Span::styled("+ ", success)];
+                    for seg in &hl_line.segments {
+                        spans.push(Span::styled(seg.text.clone(), seg.style));
+                    }
+                    lines.push(Line::from(spans));
+                }
+            }
+        }
+
+        // TodoWrite streaming: render partial todo list.
+        if status == ToolStatus::Streaming
+            && renderer == ToolRenderer::TodoWrite
+            && let Some(ref todo) = self.todo_stream
+        {
+            lines.extend(render_todo_items(&todo.items, palette));
         }
 
         // Result rendering.
@@ -1031,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn test_write_highlight_cache_incremental() {
+    fn test_stream_highlight_cache_incremental() {
         // First update: full build
         let cache = WriteHighlightCache::update(None, "/tmp/test.py", "line1\nline2");
         assert!(cache.is_some());
@@ -1056,7 +1192,7 @@ mod tests {
     }
 
     #[test]
-    fn test_write_highlight_cache_unknown_ext() {
+    fn test_stream_highlight_cache_unknown_ext() {
         // Unknown extension → falls back to plain text (lang=""), still renders.
         let cache = WriteHighlightCache::update(None, "/tmp/file.xyz_unknown", "content");
         assert!(cache.is_some());
@@ -1066,7 +1202,7 @@ mod tests {
     }
 
     #[test]
-    fn test_write_highlight_cache_empty_path_fallback() {
+    fn test_stream_highlight_cache_empty_path_fallback() {
         // Empty path (LLM emits content before path) → plain text fallback.
         let cache = WriteHighlightCache::update(None, "", "line1\nline2");
         assert!(cache.is_some());
@@ -1083,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    fn test_write_highlight_cache_trailing_newline() {
+    fn test_stream_highlight_cache_trailing_newline() {
         // P0 regression: trailing '\n' must produce an extra empty line
         let cache = WriteHighlightCache::update(None, "/tmp/t.py", "line1\n");
         assert!(cache.is_some());
@@ -1101,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn test_write_highlight_cache_crlf() {
+    fn test_stream_highlight_cache_crlf() {
         // CRLF content: \r should be stripped
         let cache = WriteHighlightCache::update(None, "/tmp/t.py", "line1\r\nline2\r\n");
         assert!(cache.is_some());
@@ -1116,5 +1252,164 @@ mod tests {
         let cache2 = cache2.unwrap();
         assert_eq!(cache2.highlighted_lines.len(), 3);
         assert_eq!(cache2.last_line_raw, "x");
+    }
+
+    // ── Edit streaming tests ─────────────────────────────────────
+
+    #[test]
+    fn test_edit_streaming_old_block_only() {
+        let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e1".into());
+        block.append_args_fragment(
+            r#"{"path": "src/main.rs", "old_block": "fn old() {\n    println!(\"old\");\n}"#,
+        );
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(text.contains("◌"), "streaming bullet: {text}");
+        assert!(text.contains("Edit(src/main.rs)"), "header: {text}");
+        assert!(text.contains("- fn old()"), "old_block line: {text}");
+        assert!(text.contains("- }"), "old_block last line: {text}");
+        // No new_block yet — no "+ " prefixed lines.
+        assert!(!text.contains("+ fn"), "no new_block yet: {text}");
+    }
+
+    #[test]
+    fn test_edit_streaming_both_blocks() {
+        let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e2".into());
+        block.append_args_fragment(
+            r#"{"path": "src/main.rs", "old_block": "fn old() {}", "new_block": "fn new() {\n    todo!()\n}"#,
+        );
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(text.contains("- fn old() {}"), "old_block: {text}");
+        assert!(text.contains("+ fn new()"), "new_block first line: {text}");
+        assert!(text.contains("+ }"), "new_block last line: {text}");
+    }
+
+    #[test]
+    fn test_edit_streaming_new_block_only() {
+        // LLM might emit new_block before old_block.
+        let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e3".into());
+        block.append_args_fragment(r#"{"path": "a.rs", "new_block": "hello world"#);
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(
+            text.contains("+ hello world"),
+            "new_block without old: {text}"
+        );
+        // No old_block lines (no "- " prefixed content lines).
+        assert!(!text.contains("- hello"), "no old_block lines: {text}");
+    }
+
+    #[test]
+    fn test_edit_streaming_old_block_collapse() {
+        // old_block > 8 lines should collapse.
+        let old_lines: Vec<String> = (1..=12).map(|i| format!("line {i}")).collect();
+        let old_block = old_lines.join("\n");
+        let fragment = format!(
+            r#"{{"path": "a.rs", "old_block": "{}"}}"#,
+            old_block.replace('\n', "\\n")
+        );
+        let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e4".into());
+        block.append_args_fragment(&fragment);
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(text.contains("⋮"), "should collapse: {text}");
+        assert!(text.contains("- line 1"), "head kept: {text}");
+        assert!(text.contains("- line 12"), "tail kept: {text}");
+        assert!(!text.contains("- line 5"), "middle hidden: {text}");
+    }
+
+    #[test]
+    fn test_edit_streaming_disappears_on_pending() {
+        let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e5".into());
+        block.append_args_fragment(r#"{"path": "a.rs", "old_block": "old", "new_block": "new"#);
+        // Streaming: preview visible.
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(text.contains("- old"), "visible during streaming: {text}");
+
+        // Transition to Pending (ToolCall event arrives).
+        block.set_final_args(json!({"path": "a.rs", "old_block": "old", "new_block": "new"}));
+        // Caches are released.
+        assert!(block.edit_old_lines.is_empty(), "old_lines cleared");
+        assert!(block.stream_highlight.is_none(), "highlight cleared");
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(
+            !text.contains("- old"),
+            "preview gone after pending: {text}"
+        );
+        assert!(
+            !text.contains("+ new"),
+            "preview gone after pending: {text}"
+        );
+    }
+
+    #[test]
+    fn test_edit_streaming_trailing_newline_consistency() {
+        // old_block and new_block with trailing \n should produce symmetric lines.
+        let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e6".into());
+        block.append_args_fragment(r#"{"path": "a.rs", "old_block": "a\n", "new_block": "b\n"}"#);
+        let text = lines_text(&block.to_lines(&p(), 10));
+        // Both use split('\n'): "a\n" → ["a", ""], "b\n" → ["b", ""]
+        let old_count = text.matches("- ").count();
+        let new_count = text.matches("+ ").count();
+        assert_eq!(old_count, new_count, "symmetric lines: {text}");
+        assert_eq!(old_count, 2, "trailing newline produces 2 lines: {text}");
+    }
+
+    #[test]
+    fn test_edit_streaming_crlf() {
+        // CRLF in old_block: \r should be stripped.
+        let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e7".into());
+        block.append_args_fragment(r#"{"path": "a.rs", "old_block": "line1\r\nline2\r\n"}"#);
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(text.contains("- line1"), "CRLF stripped: {text}");
+        assert!(text.contains("- line2"), "CRLF stripped: {text}");
+        assert!(!text.contains('\r'), "no stray \\r: {text}");
+    }
+
+    // ── TodoWrite streaming tests ────────────────────────────────
+
+    #[test]
+    fn test_todo_streaming_partial_items() {
+        let mut block = ToolCallBlock::new_streaming("TodoWrite".into(), "tc_t1".into());
+        block.append_args_fragment(
+            r#"{"todos": [{"content": "task 1", "status": "completed"}, {"content": "task 2", "status": "in_progress", "activeForm": "Doing task 2"}"#,
+        );
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(text.contains("◌"), "streaming bullet: {text}");
+        assert!(text.contains("TodoWrite"), "tool name: {text}");
+        assert!(text.contains("✓"), "completed icon: {text}");
+        assert!(text.contains("task 1"), "completed content: {text}");
+        assert!(text.contains("●"), "in_progress icon: {text}");
+        assert!(text.contains("Doing task 2"), "activeForm: {text}");
+    }
+
+    #[test]
+    fn test_todo_streaming_header_stats() {
+        let mut block = ToolCallBlock::new_streaming("TodoWrite".into(), "tc_t2".into());
+        block.append_args_fragment(
+            r#"{"todos": [{"content": "a", "status": "completed"}, {"content": "b", "status": "pending"}, {"content": "c", "status": "in_progress"}]}"#,
+        );
+        let text = lines_text(&block.to_lines(&p(), 10));
+        // 3 items, 2 open (pending + in_progress are both "open").
+        assert!(text.contains("(3 items · 2 open)"), "header stats: {text}");
+    }
+
+    #[test]
+    fn test_todo_streaming_disappears_on_pending() {
+        let mut block = ToolCallBlock::new_streaming("TodoWrite".into(), "tc_t3".into());
+        block.append_args_fragment(r#"{"todos": [{"content": "x", "status": "pending"}]}"#);
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(text.contains("○"), "visible during streaming: {text}");
+
+        block.set_final_args(json!({"todos": [{"content": "x", "status": "pending"}]}));
+        assert!(block.todo_stream.is_none(), "todo_stream cleared");
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(!text.contains("○"), "preview gone after pending: {text}");
+    }
+
+    #[test]
+    fn test_todo_streaming_empty_todos() {
+        let mut block = ToolCallBlock::new_streaming("TodoWrite".into(), "tc_t4".into());
+        block.append_args_fragment(r#"{"todos": ["#);
+        let text = lines_text(&block.to_lines(&p(), 10));
+        // No items yet — just header, no crash.
+        assert!(text.contains("TodoWrite"), "tool name: {text}");
     }
 }
