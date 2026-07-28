@@ -90,7 +90,7 @@ class TestBasicMessageManagement:
         prov = OpenAIProvider.__new__(OpenAIProvider)  # bare instance for type
         llm_msgs = (
             await cm.get_messages_for_llm(
-                model="test", model_provider=prov, current_tools=[]
+                model="test", model_provider=prov, current_tools=lambda: []
             )
         ).messages
         assert len(llm_msgs) == 2  # system + user

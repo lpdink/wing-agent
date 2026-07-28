@@ -108,7 +108,7 @@ class TestEarlyTrigger:
         prov = _mock_provider()
         msgs = (
             await cm.get_messages_for_llm(
-                model="m", model_provider=prov, current_tools=[]
+                model="m", model_provider=prov, current_tools=lambda: []
             )
         ).messages
         assert cm._pending_compact_task is None
@@ -127,7 +127,9 @@ class TestEarlyTrigger:
         cm.add_message(Message(role="assistant", content="y" * 800))
         cm.add_message(Message(role="user", content="z" * 100))
         prov = _mock_provider(delay=0.5)
-        await cm.get_messages_for_llm(model="m", model_provider=prov, current_tools=[])
+        await cm.get_messages_for_llm(
+            model="m", model_provider=prov, current_tools=lambda: []
+        )
         # Background task should be started
         assert cm._pending_compact_task is not None
         # Wait for task to complete
@@ -145,7 +147,9 @@ class TestEarlyTrigger:
         cm.add_message(Message(role="assistant", content="y" * 800))
         cm.add_message(Message(role="user", content="z" * 100))
         prov = _mock_provider(delay=0.1)
-        await cm.get_messages_for_llm(model="m", model_provider=prov, current_tools=[])
+        await cm.get_messages_for_llm(
+            model="m", model_provider=prov, current_tools=lambda: []
+        )
 
         # Wait for task to complete → result is set
         if cm._pending_compact_task:
@@ -155,7 +159,9 @@ class TestEarlyTrigger:
         # Second call: result exists, tokens < context_window_tokens
         # → should NOT start a new task
         old_task = cm._pending_compact_task
-        await cm.get_messages_for_llm(model="m", model_provider=prov, current_tools=[])
+        await cm.get_messages_for_llm(
+            model="m", model_provider=prov, current_tools=lambda: []
+        )
         # Task should not have been replaced (no new task started)
         assert cm._pending_compact_task is old_task or cm._pending_compact_task is None
 
@@ -175,7 +181,9 @@ class TestApplyFlow:
         # Add enough messages to trigger early compact
         cm.add_message(Message(role="user", content="x" * 800))
         prov = _mock_provider()
-        await cm.get_messages_for_llm(model="m", model_provider=prov, current_tools=[])
+        await cm.get_messages_for_llm(
+            model="m", model_provider=prov, current_tools=lambda: []
+        )
 
         # Wait for background task
         if cm._pending_compact_task:
@@ -187,7 +195,7 @@ class TestApplyFlow:
 
         msgs = (
             await cm.get_messages_for_llm(
-                model="m", model_provider=prov, current_tools=[]
+                model="m", model_provider=prov, current_tools=lambda: []
             )
         ).messages
         # After apply, compact node should be in the chain
@@ -202,7 +210,9 @@ class TestApplyFlow:
 
         cm.add_message(Message(role="user", content="x" * 800))
         prov = _mock_provider()
-        await cm.get_messages_for_llm(model="m", model_provider=prov, current_tools=[])
+        await cm.get_messages_for_llm(
+            model="m", model_provider=prov, current_tools=lambda: []
+        )
 
         if cm._pending_compact_task:
             await cm._pending_compact_task
@@ -212,7 +222,9 @@ class TestApplyFlow:
             pytest.skip("early trigger didn't fire with this token estimation")
 
         # Get messages again — tokens should be below context_window_tokens
-        await cm.get_messages_for_llm(model="m", model_provider=prov, current_tools=[])
+        await cm.get_messages_for_llm(
+            model="m", model_provider=prov, current_tools=lambda: []
+        )
         # Result should still be pending (not applied)
         # (unless tokens actually exceeded, which is unlikely with our test data)
 
@@ -232,7 +244,9 @@ class TestUUIDValidation:
         cm.add_message(Message(role="user", content="x" * 800))
         cm.add_message(Message(role="assistant", content="y" * 800))
         prov = _mock_provider()
-        await cm.get_messages_for_llm(model="m", model_provider=prov, current_tools=[])
+        await cm.get_messages_for_llm(
+            model="m", model_provider=prov, current_tools=lambda: []
+        )
 
         if cm._pending_compact_task:
             await cm._pending_compact_task
@@ -253,7 +267,9 @@ class TestUUIDValidation:
         cm.add_message(Message(role="user", content="x" * 800))
         cm.add_message(Message(role="assistant", content="y" * 800))
         prov = _mock_provider()
-        await cm.get_messages_for_llm(model="m", model_provider=prov, current_tools=[])
+        await cm.get_messages_for_llm(
+            model="m", model_provider=prov, current_tools=lambda: []
+        )
 
         if cm._pending_compact_task:
             await cm._pending_compact_task
@@ -285,7 +301,9 @@ class TestBackgroundTaskFailure:
 
         cm.add_message(Message(role="user", content="x" * 800))
         prov = _failing_provider()
-        await cm.get_messages_for_llm(model="m", model_provider=prov, current_tools=[])
+        await cm.get_messages_for_llm(
+            model="m", model_provider=prov, current_tools=lambda: []
+        )
 
         if cm._pending_compact_task:
             await asyncio.sleep(0.2)  # let task fail
@@ -301,7 +319,7 @@ class TestBackgroundTaskFailure:
         prov = _failing_provider()
         msgs = (
             await cm.get_messages_for_llm(
-                model="m", model_provider=prov, current_tools=[]
+                model="m", model_provider=prov, current_tools=lambda: []
             )
         ).messages
         assert len(msgs) == 2  # system + user (original, no compact)
@@ -324,7 +342,9 @@ class TestAwaitRunningTask:
         cm.add_message(Message(role="assistant", content="y" * 800))
         cm.add_message(Message(role="user", content="z" * 100))
         prov = _mock_provider(delay=2.0)  # long delay so task is still running
-        await cm.get_messages_for_llm(model="m", model_provider=prov, current_tools=[])
+        await cm.get_messages_for_llm(
+            model="m", model_provider=prov, current_tools=lambda: []
+        )
 
         # Task should be running
         assert cm._pending_compact_task is not None
@@ -333,7 +353,7 @@ class TestAwaitRunningTask:
         # Second call — task still running → return original messages
         msgs = (
             await cm.get_messages_for_llm(
-                model="m", model_provider=prov, current_tools=[]
+                model="m", model_provider=prov, current_tools=lambda: []
             )
         ).messages
         assert len(msgs) >= 2  # system + messages (no compact applied)
@@ -355,7 +375,9 @@ class TestAwaitRunningTask:
         cm.add_message(Message(role="assistant", content="y" * 800))
         cm.add_message(Message(role="user", content="z" * 100))
         prov = _mock_provider(delay=0.1)
-        await cm.get_messages_for_llm(model="m", model_provider=prov, current_tools=[])
+        await cm.get_messages_for_llm(
+            model="m", model_provider=prov, current_tools=lambda: []
+        )
 
         # Wait for task to complete
         if cm._pending_compact_task:
@@ -370,7 +392,7 @@ class TestAwaitRunningTask:
 
         msgs = (
             await cm.get_messages_for_llm(
-                model="m", model_provider=prov, current_tools=[]
+                model="m", model_provider=prov, current_tools=lambda: []
             )
         ).messages
         # After apply, compact node should be in chain

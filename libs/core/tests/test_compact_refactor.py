@@ -294,7 +294,7 @@ class TestGetMessagesForLlm:
                 model_provider=_mock_provider(
                     LLMResponse(content="<summary>t</summary>")
                 ),
-                current_tools=[],
+                current_tools=lambda: [],
             )
         ).messages
         assert len(llm_msgs) == 2
@@ -311,7 +311,7 @@ class TestGetMessagesForLlm:
                 model_provider=_mock_provider(
                     LLMResponse(content="<summary>t</summary>")
                 ),
-                current_tools=[],
+                current_tools=lambda: [],
             )
         ).messages
         assert len(llm_msgs) == 3
@@ -327,7 +327,7 @@ class TestGetMessagesForLlm:
         cm.add_message(Message(role="user", content="z" * 50))
         prov, state = _capturing_provider()
         await cm.get_messages_for_llm(
-            model="main-model", model_provider=prov, current_tools=[]
+            model="main-model", model_provider=prov, current_tools=lambda: []
         )
         # Wait for background task
         if cm._pending_compact_task:
@@ -349,7 +349,7 @@ class TestGetMessagesForLlm:
         prov = _mock_provider(LLMResponse(content="no summary tags"))
         llm_msgs = (
             await cm.get_messages_for_llm(
-                model="m", model_provider=prov, current_tools=[]
+                model="m", model_provider=prov, current_tools=lambda: []
             )
         ).messages
         # Wait for background task to fail
@@ -394,7 +394,7 @@ class TestCompactIntegration:
         await cm.get_messages_for_llm(
             model="main-model",
             model_provider=prov,  # ty: ignore[invalid-argument-type]
-            current_tools=[],
+            current_tools=lambda: [],
         )
 
         # Wait for background task
@@ -410,7 +410,7 @@ class TestCompactIntegration:
             await cm.get_messages_for_llm(
                 model="main-model",
                 model_provider=prov,  # ty: ignore[invalid-argument-type]
-                current_tools=[],
+                current_tools=lambda: [],
             )
         ).messages
 

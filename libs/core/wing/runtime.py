@@ -247,7 +247,7 @@ class WingRuntime:
         original, compressed = await session.agent.context_manager.do_manual_compact(
             model=session.agent.model,
             model_provider=session.agent.model_provider,
-            current_tools=session.agent.tools,
+            current_tools=lambda: session.agent.tools,
         )
 
         self._emit_session_event(

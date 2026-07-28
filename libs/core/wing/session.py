@@ -380,6 +380,14 @@ class Session:
             workspace: 切换工作目录
             tools: 切换工具集（全量替换，ref 格式）
         """
+        # 纯校验：任何字段非法在 mutation 之前退出，避免部分应用
+        if tools is not None:
+            from wing.tool_registry import tool_registry
+
+            for ref in tools:
+                if tool_registry.resolve(ref) is None:
+                    raise ValueError(f"cannot resolve tool reference: '{ref}'")
+
         if template is not None:
             await self.switch_template(template)
 

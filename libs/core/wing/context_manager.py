@@ -4,6 +4,7 @@ import glob
 import json
 import os
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -106,6 +107,9 @@ More detail in: "{dir}/SKILL.md" """
         # 由 on_tools_changed() 管理。冻结策略：链非空时不动（保护 KV prefix cache），
         # compaction 时自动同步（cache 已碎）。Agent 不持有此状态。
         self._declared_tools: list[Tool] = []
+        # 显式标志区分「未初始化」和「合法为空」。不持久化——resume/重建 agent
+        # 时新 CM 走 init 路径（_declared_initialized=False）直接设置声明集，
+        # 不会误触热切换注入 reminder。
         self._declared_initialized: bool = False
 
     @property
@@ -367,7 +371,7 @@ More detail in: "{dir}/SKILL.md" """
         self,
         model: str,
         model_provider: OpenAIProvider,
-        current_tools: list[Tool],
+        current_tools: Callable[[], list[Tool]],
     ) -> LLMMessagesResult:
         """Get messages ready for LLM API call.
 
@@ -382,7 +386,8 @@ More detail in: "{dir}/SKILL.md" """
         Args:
             model: 主 model 名称（触发 compact 时透传给 provider）。
             model_provider: OpenAIProvider 实例（触发 compact 时使用）。
-            current_tools: Agent 当前可执行工具（compact 时同步声明集用）。
+            current_tools: 零参 callable，返回 Agent 当前可执行工具。
+                compact sync 在 await 结束后求值，避免并发切换导致过期快照。
         """
         if not self.compactor:
             return LLMMessagesResult(
@@ -407,8 +412,8 @@ More detail in: "{dir}/SKILL.md" """
                     indices = self._verify_snapshot_valid(msgs)
                     if indices is not None:
                         self._apply_pending_compact(msgs, *indices)
-                        # Compact 打破 prefix cache——同步声明集
-                        self._sync_declared_tools(current_tools)
+                        # Compact 打破 prefix cache——同步声明集（await 后求值，避免过期快照）
+                        self._sync_declared_tools(current_tools())
                         return LLMMessagesResult(
                             [self.system_prompt] + self._messages.active_chain,
                             tools=list(self._declared_tools),
@@ -420,7 +425,7 @@ More detail in: "{dir}/SKILL.md" """
                 # 已有预计算结果，但还没到 apply 阈值——直接返回，
                 # 不再走 Step 2/3，避免重复启动 compact task
                 return LLMMessagesResult(
-                    [self.system_prompt] + msgs, tools=self._declared_tools
+                    [self.system_prompt] + msgs, tools=list(self._declared_tools)
                 )
 
         # ── Step 2: task 还在跑？ ──
@@ -431,7 +436,7 @@ More detail in: "{dir}/SKILL.md" """
             else:
                 # task 还在跑，返回原始消息
                 return LLMMessagesResult(
-                    [self.system_prompt] + msgs, tools=self._declared_tools
+                    [self.system_prompt] + msgs, tools=list(self._declared_tools)
                 )
 
         # ── Step 3: 该触发 early compact 了？ ──
@@ -439,7 +444,7 @@ More detail in: "{dir}/SKILL.md" """
             self._start_background_compact(msgs, model, model_provider)
 
         return LLMMessagesResult(
-            [self.system_prompt] + msgs, tools=self._declared_tools
+            [self.system_prompt] + msgs, tools=list(self._declared_tools)
         )
 
     # ── 异步 compact 内部方法 ─────────────────────
@@ -580,18 +585,18 @@ More detail in: "{dir}/SKILL.md" """
         self,
         model: str,
         model_provider: OpenAIProvider,
-        current_tools: list[Tool],
+        current_tools: Callable[[], list[Tool]],
     ) -> tuple[int, int]:
         """手动压缩上下文。
 
         丢弃 pending async compact，对当前消息链执行同步压缩，
         将压缩结果写入消息链。Compact 打破 prefix cache，完成后
-        自动同步声明集为 current_tools。
+        自动同步声明集为 current_tools()（await 后求值，避免并发切换导致过期快照）。
 
         Args:
             model: 主 model 名称
             model_provider: OpenAIProvider 实例
-            current_tools: Agent 当前可执行工具（compact 后同步声明集）
+            current_tools: 零参 callable，返回 Agent 当前可执行工具
 
         Returns:
             (original_tokens, compressed_tokens)
@@ -607,7 +612,7 @@ More detail in: "{dir}/SKILL.md" """
         full_context = [self.system_prompt] + msgs
 
         compacted = await self.compactor.do_compact(
-            full_context, model, model_provider, tools=self._declared_tools
+            full_context, model, model_provider, tools=list(self._declared_tools)
         )
 
         last_compressed_uuid = msgs[-1].uuid if msgs else None
@@ -622,8 +627,8 @@ More detail in: "{dir}/SKILL.md" """
         self._messages.append_detached(compact_node)
         self._messages.set_tip(compact_node.uuid)
 
-        # Compact 打破 prefix cache——同步声明集
-        self._sync_declared_tools(current_tools)
+        # Compact 打破 prefix cache——同步声明集（await 后求值）
+        self._sync_declared_tools(current_tools())
 
         return compacted.usage.prompt_tokens, compacted.usage.completion_tokens
 

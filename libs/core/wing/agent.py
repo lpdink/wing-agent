@@ -519,7 +519,7 @@ class WingAgent:
         llm_result = await self.context_manager.get_messages_for_llm(
             model=self.model,
             model_provider=self.model_provider,
-            current_tools=self.tools,
+            current_tools=lambda: self.tools,
         )
 
         async for chunk in self.model_provider.generate(
