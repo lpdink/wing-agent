@@ -81,7 +81,7 @@ class TestSessionStatusDelegation:
         agent = _make_agent(working=True)
         # 补齐 Session.__init__ → agent.get_status() 所需属性
         agent.model = "gpt-4"
-        agent._tool_map = {}
+        agent._tools = {}
         agent.context_manager = MagicMock()
         agent.context_manager.get_context_stats.return_value = (0, 0)
         agent.context_manager.compactor = None

@@ -68,7 +68,7 @@ class ToolRegistry:
         """解析工具引用字符串（裸名或 namespace.name），返回对应 Tool。
 
         畸形引用（空串、".Bash" 等）视为"未找到"返回 None，
-        不向调用方抛异常——config 解析和 replace_tools 依赖此契约。
+        不向调用方抛异常——config 解析和 set_tools 依赖此契约。
         """
         try:
             parsed = ToolRef.parse(ref)

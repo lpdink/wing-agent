@@ -288,10 +288,15 @@ class TestGetMessagesForLlm:
     async def test_accepts_model_and_provider(self, tmp_dir):
         cm = _make_cm(tmp_dir)
         cm.add_message(Message(role="user", content="hello"))
-        llm_msgs = await cm.get_messages_for_llm(
-            model=DEFAULT_MODEL,
-            model_provider=_mock_provider(LLMResponse(content="<summary>t</summary>")),
-        )
+        llm_msgs = (
+            await cm.get_messages_for_llm(
+                model=DEFAULT_MODEL,
+                model_provider=_mock_provider(
+                    LLMResponse(content="<summary>t</summary>")
+                ),
+                current_tools=[],
+            )
+        ).messages
         assert len(llm_msgs) == 2
         assert llm_msgs[1].content == "hello"
 
@@ -300,10 +305,15 @@ class TestGetMessagesForLlm:
         cm = _make_cm(tmp_dir)
         cm.add_message(Message(role="user", content="hello"))
         cm.add_message(Message(role="assistant", content="hi"))
-        llm_msgs = await cm.get_messages_for_llm(
-            model=DEFAULT_MODEL,
-            model_provider=_mock_provider(LLMResponse(content="<summary>t</summary>")),
-        )
+        llm_msgs = (
+            await cm.get_messages_for_llm(
+                model=DEFAULT_MODEL,
+                model_provider=_mock_provider(
+                    LLMResponse(content="<summary>t</summary>")
+                ),
+                current_tools=[],
+            )
+        ).messages
         assert len(llm_msgs) == 3
 
     @pytest.mark.asyncio
@@ -316,7 +326,9 @@ class TestGetMessagesForLlm:
         cm.add_message(Message(role="assistant", content="y" * 200))
         cm.add_message(Message(role="user", content="z" * 50))
         prov, state = _capturing_provider()
-        await cm.get_messages_for_llm(model="main-model", model_provider=prov)
+        await cm.get_messages_for_llm(
+            model="main-model", model_provider=prov, current_tools=[]
+        )
         # Wait for background task
         if cm._pending_compact_task:
             await cm._pending_compact_task
@@ -335,7 +347,11 @@ class TestGetMessagesForLlm:
             ]
         )
         prov = _mock_provider(LLMResponse(content="no summary tags"))
-        llm_msgs = await cm.get_messages_for_llm(model="m", model_provider=prov)
+        llm_msgs = (
+            await cm.get_messages_for_llm(
+                model="m", model_provider=prov, current_tools=[]
+            )
+        ).messages
         # Wait for background task to fail
         if cm._pending_compact_task:
             await cm._pending_compact_task
@@ -375,7 +391,11 @@ class TestCompactIntegration:
         prov = type("MockProvider", (), {"generate": _gen})()
 
         # First call: should trigger early compact (background)
-        await cm.get_messages_for_llm(model="main-model", model_provider=prov)  # ty: ignore[invalid-argument-type]
+        await cm.get_messages_for_llm(
+            model="main-model",
+            model_provider=prov,  # ty: ignore[invalid-argument-type]
+            current_tools=[],
+        )
 
         # Wait for background task
         if cm._pending_compact_task:
@@ -386,10 +406,13 @@ class TestCompactIntegration:
         cm.add_message(Message(role="user", content="more " * 20))
 
         # Second call: should apply the pending compact
-        llm_msgs = await cm.get_messages_for_llm(
-            model="main-model",
-            model_provider=prov,  # ty: ignore[invalid-argument-type]
-        )
+        llm_msgs = (
+            await cm.get_messages_for_llm(
+                model="main-model",
+                model_provider=prov,  # ty: ignore[invalid-argument-type]
+                current_tools=[],
+            )
+        ).messages
 
         assert len(llm_msgs) >= 2
         # compact node should be in the active chain (if apply happened)

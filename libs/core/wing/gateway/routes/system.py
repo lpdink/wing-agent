@@ -21,6 +21,8 @@ from wing.gateway.protocol import (
     ModelsResponse,
     ReloadResponse,
     ReloadResultItem as ReloadResultItemProto,
+    ToolInfo,
+    ToolsListResponse,
 )
 from wing.magic_command.registry import magic_registry
 from wing.openai_provider import OpenAIProvider
@@ -112,3 +114,26 @@ async def shutdown() -> dict[str, str]:
     """优雅关闭 Gateway 进程。"""
     asyncio.get_running_loop().call_later(0.1, os.kill, os.getpid(), signal.SIGTERM)
     return {"status": "shutting_down"}
+
+
+@router.get(
+    "/api/tools",
+    response_model=ToolsListResponse,
+    summary="获取全局工具列表",
+)
+async def list_tools() -> ToolsListResponse:
+    """列出所有已注册工具（含内置 + 远程），平铺列表。"""
+    from wing.tool_registry import ToolRef, tool_registry
+
+    return ToolsListResponse(
+        tools=[
+            ToolInfo(
+                ref=str(ToolRef(namespace=t.namespace, name=t.name)),
+                namespace=t.namespace,
+                name=t.name,
+                llm_name=t.effective_llm_name,
+                description=t.description,
+            )
+            for t in tool_registry.tools
+        ]
+    )

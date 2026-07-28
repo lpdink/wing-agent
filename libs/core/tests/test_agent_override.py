@@ -9,7 +9,7 @@
   - None 字段不覆盖
 
 同时测试 WingAgent 的 setter 方法：
-  - replace_tools()
+  - set_tools()
   - set_max_turns()
   - set_reasoning_effort()
 """
@@ -190,35 +190,35 @@ class TestWingAgentSetters:
     """WingAgent 的公共 setter 方法测试。"""
 
     @pytest.mark.asyncio
-    async def test_replace_tools_valid(self, runtime: Any):
-        """replace_tools 替换为新的工具列表。"""
+    async def test_set_tools_valid(self, runtime: Any):
+        """set_tools 替换为新的工具列表。"""
         session = runtime.create_session()
         agent = session.agent
 
         original_names = [t.name for t in agent.tools]
         if len(original_names) >= 2:
             # 只保留第一个工具
-            agent.replace_tools([original_names[0]])
+            agent.set_tools([original_names[0]])
             new_names = [t.name for t in agent.tools]
             assert new_names == [original_names[0]]
 
     @pytest.mark.asyncio
-    async def test_replace_tools_empty(self, runtime: Any):
-        """replace_tools 空列表清除所有工具。"""
+    async def test_set_tools_empty(self, runtime: Any):
+        """set_tools 空列表清除所有工具。"""
         session = runtime.create_session()
         agent = session.agent
 
-        agent.replace_tools([])
+        agent.set_tools([])
         assert agent.tools == []
 
     @pytest.mark.asyncio
-    async def test_replace_tools_unknown_ignored(self, runtime: Any):
-        """replace_tools 忽略不存在的工具名。"""
+    async def test_set_tools_unknown_raises(self, runtime: Any):
+        """set_tools 对不存在的工具名抛 ValueError（原子性）。"""
         session = runtime.create_session()
         agent = session.agent
 
-        agent.replace_tools(["NonExistentTool123"])
-        assert agent.tools == []
+        with pytest.raises(ValueError, match="cannot resolve"):
+            agent.set_tools(["NonExistentTool123"])
 
     @pytest.mark.asyncio
     async def test_set_max_turns(self, runtime: Any):

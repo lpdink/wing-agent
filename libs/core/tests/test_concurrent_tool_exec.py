@@ -74,7 +74,7 @@ class TestConcurrentExecution:
             await asyncio.sleep(delay)
             return "result-c"
 
-        agent._tool_map = {
+        agent._tools = {
             "SlowA": _make_tool("SlowA", slow_tool_a),
             "SlowB": _make_tool("SlowB", slow_tool_b),
             "SlowC": _make_tool("SlowC", slow_tool_c),
@@ -121,7 +121,7 @@ class TestResultOrderPreservation:
             await asyncio.sleep(0.01)
             return "fast-result"
 
-        agent._tool_map = {
+        agent._tools = {
             "Slow": _make_tool("Slow", slow_tool),
             "Fast": _make_tool("Fast", fast_tool),
         }
@@ -164,7 +164,7 @@ class TestErrorIsolation:
             await asyncio.sleep(0.01)
             raise RuntimeError("boom")
 
-        agent._tool_map = {
+        agent._tools = {
             "Good": _make_tool("Good", good_tool),
             "Bad": _make_tool("Bad", bad_tool),
         }
@@ -199,7 +199,7 @@ class TestErrorIsolation:
         async def good_tool(input: str = "") -> str:
             return "good-result"
 
-        agent._tool_map = {
+        agent._tools = {
             "Good": _make_tool("Good", good_tool),
         }
 
@@ -232,7 +232,7 @@ class TestSingleToolCall:
         async def simple_tool(input: str = "") -> str:
             return f"echo: {input}"
 
-        agent._tool_map = {
+        agent._tools = {
             "Simple": _make_tool("Simple", simple_tool),
         }
 

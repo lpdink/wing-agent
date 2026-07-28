@@ -477,12 +477,32 @@ class UpdateSessionRequest(BaseModel):
     )
     yolo: bool | None = Field(default=None, description="开关 yolo 模式")
     workspace: str | None = Field(default=None, description="切换工作目录路径")
+    tools: list[str] | None = Field(
+        default=None,
+        description="切换工具集（全量替换，ref 格式：namespace.name 或裸名）",
+    )
 
 
 class UpdateSessionResponse(BaseModel):
     """POST /api/session/update 响应。"""
 
     ok: bool = Field(default=True, description="操作是否成功")
+
+
+class ToolInfo(BaseModel):
+    """单个工具的元信息。"""
+
+    ref: str = Field(description="工具引用（namespace.name 或裸名）")
+    namespace: str = Field(description="工具命名空间")
+    name: str = Field(description="注册名")
+    llm_name: str = Field(description="LLM 可见名（effective_llm_name）")
+    description: str = Field(default="", description="工具描述")
+
+
+class ToolsListResponse(BaseModel):
+    """GET /api/tools 响应——全局工具列表。"""
+
+    tools: list[ToolInfo] = Field(default_factory=list, description="所有已注册工具")
 
 
 # ============================================================

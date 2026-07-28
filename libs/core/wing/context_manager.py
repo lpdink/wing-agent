@@ -1,6 +1,7 @@
 # wing/context_manager.py
 import asyncio
 import glob
+import json
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -13,7 +14,19 @@ from .common.logger import log
 from .common.tracked_list import TrackedList
 from .compactor import Compactor
 from .openai_provider import OpenAIProvider
-from .schema import AgentSkill, LLMUsage, Message
+from .schema import AgentSkill, LLMUsage, Message, Tool
+
+
+@dataclass
+class LLMMessagesResult:
+    """get_messages_for_llm() 的结构化返回值。
+
+    tools: 本次 LLM 调用应使用的工具列表（声明集快照）。
+    Agent 直接将此传给 provider.generate(tools=...)。
+    """
+
+    messages: list[Message]
+    tools: list[Tool]
 
 
 @dataclass
@@ -89,6 +102,12 @@ More detail in: "{dir}/SKILL.md" """
         # 尝试从磁盘恢复 pending compact（进程重启场景）
         self._pending_compact_result = self._load_pending_compact()
 
+        # ── 工具声明集（LLM 可见视图）──────────────
+        # 由 on_tools_changed() 管理。冻结策略：链非空时不动（保护 KV prefix cache），
+        # compaction 时自动同步（cache 已碎）。Agent 不持有此状态。
+        self._declared_tools: list[Tool] = []
+        self._declared_initialized: bool = False
+
     @property
     def id(self) -> str:
         """当前 session 的标识符。"""
@@ -105,6 +124,87 @@ More detail in: "{dir}/SKILL.md" """
         if self._skills_prompt:
             parts.append(self._skills_prompt)
         return Message(role="system", content="\n\n".join(parts))
+
+    # ── 工具声明集管理 ─────────────────────────────
+
+    @property
+    def declared_tools(self) -> list[Tool]:
+        """当前 LLM 可见工具集（冻结视图）。"""
+        return list(self._declared_tools)
+
+    def on_tools_changed(self, new_tools: list[Tool]) -> None:
+        """工具集变更通知——由 Agent.set_tools() 调用。
+
+        策略：
+        - 首次初始化（_declared_tools 为空）→ 直接设置（无论链状态）
+        - 链为空（无 user/assistant 消息）→ 冷切换：直接更新声明集
+        - 链非空 → 热切换：冻结声明集，注入 System Reminder
+
+        Compaction 时声明集自动同步（见 get_messages_for_llm 内部）。
+        """
+        sorted_new = sorted(new_tools, key=lambda t: t.effective_llm_name)
+
+        if not self._declared_initialized or self._chain_is_empty():
+            # 初始化或冷切换：直接设置
+            self._declared_tools = sorted_new
+            self._declared_initialized = True
+        else:
+            # 热切换：冻结 _declared_tools，注入 reminder
+            old_set = {
+                (t.namespace, t.effective_llm_name) for t in self._declared_tools
+            }
+            new_set = {(t.namespace, t.effective_llm_name) for t in new_tools}
+            removed = old_set - new_set
+            added = new_set - old_set
+            if removed or added:
+                self._inject_tool_change_reminder(removed, added, new_tools)
+
+    def _chain_is_empty(self) -> bool:
+        """活跃链中是否存在 user 或 assistant 消息。"""
+        for msg in self._messages.active_chain:
+            if msg.role in ("user", "assistant"):
+                return False
+        return True
+
+    def _inject_tool_change_reminder(
+        self,
+        removed: set[tuple[str, str]],
+        added: set[tuple[str, str]],
+        current_tools: list[Tool],
+    ) -> None:
+        """向 context chain 追加 System Reminder，告知模型工具变更。"""
+        lines: list[str] = [
+            "[System Reminder] Your available tools have changed.",
+            "",
+        ]
+
+        if removed:
+            details = [f"{name} (namespace: {ns})" for ns, name in sorted(removed)]
+            lines.append(f"Removed: {', '.join(details)}")
+
+        if added:
+            details = [f"{name} (namespace: {ns})" for ns, name in sorted(added)]
+            lines.append(f"Added: {', '.join(details)}")
+
+        lines.append("")
+        lines.append("Available tools (full schema):")
+        lines.append("<tools>")
+        for tool in sorted(current_tools, key=lambda t: t.effective_llm_name):
+            lines.append(json.dumps(tool.to_openai(), ensure_ascii=False))
+        lines.append("</tools>")
+
+        lines.append("")
+        lines.append(
+            "The tools listed in the system prompt above may be outdated.\n"
+            "Use ONLY the tools listed in this reminder going forward.\n"
+            "If you attempt to call a removed tool, you will receive an error."
+        )
+
+        self.add_message(Message(role="user", content="\n".join(lines)))
+
+    def _sync_declared_tools(self, current_tools: list[Tool]) -> None:
+        """Compaction 后同步声明集。"""
+        self._declared_tools = sorted(current_tools, key=lambda t: t.effective_llm_name)
 
     def reload_skills_and_rules(self) -> None:
         """重新加载 skills 和 rules，用于 /reload 命令。"""
@@ -267,8 +367,8 @@ More detail in: "{dir}/SKILL.md" """
         self,
         model: str,
         model_provider: OpenAIProvider,
-        tools: list | None = None,
-    ) -> list[Message]:
+        current_tools: list[Tool],
+    ) -> LLMMessagesResult:
         """Get messages ready for LLM API call.
 
         异步 compact 三步流程（无同步 fallback）：
@@ -276,12 +376,19 @@ More detail in: "{dir}/SKILL.md" """
         2. 有 running task → 等待（这次不 apply）
         3. tokens >= compact_window_tokens → 启动后台 compact task
 
+        Returns:
+            LLMMessagesResult(messages, tools)——tools 为本次调用应使用的声明集。
+
         Args:
             model: 主 model 名称（触发 compact 时透传给 provider）。
             model_provider: OpenAIProvider 实例（触发 compact 时使用）。
+            current_tools: Agent 当前可执行工具（compact 时同步声明集用）。
         """
         if not self.compactor:
-            return [self.system_prompt] + self._messages.active_chain
+            return LLMMessagesResult(
+                [self.system_prompt] + self._messages.active_chain,
+                tools=list(self._declared_tools),
+            )
 
         msgs = self._messages.active_chain
         server_tokens = self._last_prompt_tokens()
@@ -300,14 +407,21 @@ More detail in: "{dir}/SKILL.md" """
                     indices = self._verify_snapshot_valid(msgs)
                     if indices is not None:
                         self._apply_pending_compact(msgs, *indices)
-                        return [self.system_prompt] + self._messages.active_chain
+                        # Compact 打破 prefix cache——同步声明集
+                        self._sync_declared_tools(current_tools)
+                        return LLMMessagesResult(
+                            [self.system_prompt] + self._messages.active_chain,
+                            tools=list(self._declared_tools),
+                        )
                     else:
                         # UUID 不匹配（rewind 等），丢弃
                         self._discard_pending_compact()
             else:
                 # 已有预计算结果，但还没到 apply 阈值——直接返回，
                 # 不再走 Step 2/3，避免重复启动 compact task
-                return [self.system_prompt] + msgs
+                return LLMMessagesResult(
+                    [self.system_prompt] + msgs, tools=self._declared_tools
+                )
 
         # ── Step 2: task 还在跑？ ──
         if self._pending_compact_task is not None:
@@ -316,13 +430,17 @@ More detail in: "{dir}/SKILL.md" """
                 self._pending_compact_task = None
             else:
                 # task 还在跑，返回原始消息
-                return [self.system_prompt] + msgs
+                return LLMMessagesResult(
+                    [self.system_prompt] + msgs, tools=self._declared_tools
+                )
 
         # ── Step 3: 该触发 early compact 了？ ──
         if self.compactor.need_early_trigger(msgs, server_tokens):
-            self._start_background_compact(msgs, model, model_provider, tools)
+            self._start_background_compact(msgs, model, model_provider)
 
-        return [self.system_prompt] + msgs
+        return LLMMessagesResult(
+            [self.system_prompt] + msgs, tools=self._declared_tools
+        )
 
     # ── 异步 compact 内部方法 ─────────────────────
 
@@ -331,7 +449,6 @@ More detail in: "{dir}/SKILL.md" """
         msgs: list[Message],
         model: str,
         model_provider: OpenAIProvider,
-        tools: list | None,
     ) -> None:
         """启动后台异步 compact task。"""
         preserve_last = msgs[-1].role == "user" if msgs else False
@@ -344,6 +461,8 @@ More detail in: "{dir}/SKILL.md" """
         start_uuid: str = head[0].uuid  # ty: ignore[invalid-assignment]
         end_uuid: str = head[cut_idx - 1].uuid  # ty: ignore[invalid-assignment]
         full_context = [self.system_prompt] + head[:cut_idx]
+        # 使用声明集——与主调用 prefix 一致，最大化缓存命中
+        compact_tools = list(self._declared_tools)
 
         async def _run() -> None:
             try:
@@ -351,7 +470,7 @@ More detail in: "{dir}/SKILL.md" """
                     full_context,
                     model,
                     model_provider,
-                    tools=tools,
+                    tools=compact_tools,
                 )
                 result = PendingCompact(
                     compact_content=response.content or "",
@@ -461,17 +580,18 @@ More detail in: "{dir}/SKILL.md" """
         self,
         model: str,
         model_provider: OpenAIProvider,
-        tools: list | None = None,
+        current_tools: list[Tool],
     ) -> tuple[int, int]:
         """手动压缩上下文。
 
         丢弃 pending async compact，对当前消息链执行同步压缩，
-        将压缩结果写入消息链。
+        将压缩结果写入消息链。Compact 打破 prefix cache，完成后
+        自动同步声明集为 current_tools。
 
         Args:
             model: 主 model 名称
             model_provider: OpenAIProvider 实例
-            tools: 可用工具列表
+            current_tools: Agent 当前可执行工具（compact 后同步声明集）
 
         Returns:
             (original_tokens, compressed_tokens)
@@ -487,7 +607,7 @@ More detail in: "{dir}/SKILL.md" """
         full_context = [self.system_prompt] + msgs
 
         compacted = await self.compactor.do_compact(
-            full_context, model, model_provider, tools=tools
+            full_context, model, model_provider, tools=self._declared_tools
         )
 
         last_compressed_uuid = msgs[-1].uuid if msgs else None
@@ -501,6 +621,9 @@ More detail in: "{dir}/SKILL.md" """
 
         self._messages.append_detached(compact_node)
         self._messages.set_tip(compact_node.uuid)
+
+        # Compact 打破 prefix cache——同步声明集
+        self._sync_declared_tools(current_tools)
 
         return compacted.usage.prompt_tokens, compacted.usage.completion_tokens
 

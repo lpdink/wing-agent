@@ -212,7 +212,7 @@ class Session:
 
         # 4. tools 覆盖（从 registry 获取新的未绑定工具，避免闭包泄漏）
         if override.tools is not None:
-            agent.replace_tools(override.tools)
+            agent.set_tools(override.tools)
 
         # 5. max_turns 覆盖
         if override.max_turns is not None:
@@ -366,8 +366,9 @@ class Session:
         reasoning_effort: str | None = None,
         yolo: bool | None = None,
         workspace: str | None = None,
+        tools: list[str] | None = None,
     ) -> None:
-        """更新 session 状态。按 template → model → title → thinking → effort → yolo → workspace 顺序执行。
+        """更新 session 状态。按 template → model → tools → title → thinking → effort → yolo → workspace 顺序执行。
 
         Args:
             model: 切换模型
@@ -377,12 +378,16 @@ class Session:
             reasoning_effort: 推理力度
             yolo: 开关 yolo 模式
             workspace: 切换工作目录
+            tools: 切换工具集（全量替换，ref 格式）
         """
         if template is not None:
             await self.switch_template(template)
 
         if model is not None:
             self.agent.model = model
+
+        if tools is not None:
+            self.agent.set_tools(tools)
 
         if title is not None:
             self.set_title(title)
