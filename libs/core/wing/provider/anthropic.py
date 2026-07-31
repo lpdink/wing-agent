@@ -140,11 +140,7 @@ class AnthropicProvider(ModelProvider):
                     pool=30.0,
                 ),
             )
-            import asyncio
-
-            asyncio.get_event_loop().call_soon(
-                lambda: asyncio.ensure_future(old_client.aclose())
-            )
+            asyncio.ensure_future(old_client.aclose())
             changes.append(f"base_url={new_cfg.base_url}")
 
         for attr in (
