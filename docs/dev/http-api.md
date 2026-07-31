@@ -32,12 +32,12 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | GET | `/api/session/get` | 获取 session 详情 |
 | GET | `/api/session/info` | 运行时状态，含 `context_stats`、`skills_info`、`reasoning_effort` |
 | GET | `/api/session/branches` | 可回退 / 分叉的消息节点 |
-| POST | `/api/session/update` | 更新状态：model / agent / title / thinking / reasoning_effort / yolo / workspace |
+| POST | `/api/session/update` | 更新状态：model / agent / title / thinking / reasoning_effort / yolo / workspace / tools（`tools` 全量替换，ref 格式，PR #50） |
 | POST | `/api/session/compact` | 手动压缩上下文 |
 | POST | `/api/session/interrupt` | 中断当前任务（Esc 键） |
 | POST | `/api/session/rewind` | 回退到指定消息 uuid |
 
-### System（`routes/system.py`，5 个）
+### System（`routes/system.py`，6 个）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -46,6 +46,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | GET | `/api/agents` | 可用 agent 模板列表 |
 | POST | `/api/system/reload` | 重载配置 / hooks / provider / skills / auth（无需重启） |
 | POST | `/api/shutdown` | Gateway 优雅自关闭（返回 200 后延迟自送 SIGTERM） |
+| GET | `/api/tools` | 全局工具列表（内置 + 远程，平铺；ref / namespace / name / llm_name / description）（PR #50） |
 
 ### Health（`routes/health.py`，1 个）
 
@@ -67,7 +68,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 - 工具规格可携带可选 `llm_name`（LLM 可见名，须符合 provider 文法 `^[a-zA-Z0-9_-]{1,64}$`）；未提供退化为裸 name。运行时不自动以 client_id 限定 llm_name——当前不允许一个 agent 同时持有两个同名工具，绑定时撞名会在 create session 失败（预期行为）。
 - `client_id="default"` 为保留字（内置工具命名空间），连接即拒。
 - 核心网络无关：核心只看到一个普通 `Tool`（schema + 可执行体），远程性封装在 Gateway 注入的 dispatch 闭包里。
-- 断连即失败并注销：WS 断开时在途调用立即失败、工具从 registry 移除。**已加载 agent 持有的工具引用不受影响**（保护 KV cache）——再次调用时清晰返回 "tool unavailable / not connected"。动态工具切换为后续特性。
+- 断连即失败并注销：WS 断开时在途调用立即失败、工具从 registry 移除。**已加载 agent 持有的工具引用不受影响**（保护 KV cache）——再次调用时清晰返回 "tool unavailable / not connected"。运行期工具集切换已由 `POST /api/session/update`（`tools`）支持（PR #50，见 [architecture.md](architecture.md) 远程工具与编排一节）。
 - 总超时：`gateway.remote_tool_timeout`（默认 1800s）仅为安全网，断连是首要失败信号。
 
 ## WebSocket 协议（`/ws`）

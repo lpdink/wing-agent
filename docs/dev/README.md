@@ -10,4 +10,4 @@
 
 > 事实来源优先级：**代码 > 本目录 > AGENTS.md 概述**。若发现不一致，以代码为准并欢迎修正文档。
 >
-> 许多设计决策的 *why* 记录在对应 PR 的 body 中，可用 `gh pr view <number>` 查阅。关键 PR：#1(stdio) · #9(HTTP 化) · #10(HTTP 生命周期) · #14(去 magic dispatch) · #22(Goal) · #34(工具命名空间) · #35(鉴权) · #39(SessionStore)。
+> 许多设计决策的 *why* 记录在对应 PR 的 body 中，可用 `gh pr view <number>` 查阅。关键 PR：#1(stdio) · #9(HTTP 化) · #10(HTTP 生命周期) · #14(去 magic dispatch) · #22(Goal) · #34(工具命名空间) · #35(鉴权) · #39(SessionStore) · #43(流式工具渲染) · #47(远程工具注册) · #49(SDK + wing-orch) · #50(动态工具切换) · #52(中断提交) · #53(WingAgent 拆包)。
