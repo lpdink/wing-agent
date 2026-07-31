@@ -64,11 +64,11 @@ class Session:
         self._context_manager = context_manager
         self._agent = agent
 
-        # 将 workspace 注入 agent state 作为 Bash 工具的 cwd。
+        # 将 workspace 注入 agent 作为 Bash 工具的 cwd。
         # 无论是新建（workspace 参数）还是磁盘恢复（metadata），
         # 都在此处统一设置，确保 resume 后 agent cwd 正确。
         if self._metadata.workspace:
-            self._agent.state.set("cwd", str(Path(self._metadata.workspace).resolve()))
+            self._agent.set_cwd(Path(self._metadata.workspace).resolve())
 
         # 磁盘恢复场景下 CM 以 workspace=None 构建，用 metadata 补齐——
         # 否则相对路径的 skills/rules patterns 解析行为与原 session 不一致。
@@ -175,7 +175,7 @@ class Session:
             if self._metadata.workspace
             else None
         )
-        self._agent.state.set("cwd", cwd)
+        self._agent.set_cwd(Path(cwd) if cwd else None)
 
         self._template_name = template.name
         self._metadata.template_name = template.name
@@ -291,7 +291,7 @@ class Session:
 
         resolved_str = str(resolved)
         self._metadata.workspace = resolved_str
-        self._agent.state.set("cwd", resolved_str)
+        self._agent.set_cwd(resolved)
         self._context_manager._workspace = resolved
         self._save_metadata()
         log.info(f"Session {self._session_id}: workspace changed to {resolved_str}")

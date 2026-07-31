@@ -1,10 +1,10 @@
 # wing/tools/bash.py
-"""Shell command execution tool — stateless, no cwd persistence."""
+"""Shell command execution tool."""
 
 import asyncio
 import time
 
-from wing.agent import WingAgent
+from wing.agent import ToolContext
 from wing.common.logger import log
 from wing.common.process import kill_process_group
 from wing.schema import ToolError
@@ -16,7 +16,7 @@ FEEDBACK_TIMEOUT = 6000
 
 
 @tool_registry.register(name="Bash", add_purpose=True)
-async def execute_shell(command: str, agent: WingAgent, timeout: int = 30) -> str:
+async def execute_shell(command: str, ctx: ToolContext, timeout: int = 30) -> str:
     """Execute a shell command.
 
     Args:
@@ -26,32 +26,29 @@ async def execute_shell(command: str, agent: WingAgent, timeout: int = 30) -> st
     Returns:
         Command output with exit code.
     """
-    # Skip safety check when yolo is enabled (priority: runtime > agent > global)
-    if not agent.yolo:
+    if not ctx.yolo:
         if is_dangerous_command(command):
-            return await _handle_dangerous_command(command, agent, timeout)
+            return await _handle_dangerous_command(command, ctx, timeout)
 
-    return await _execute_command(command, agent, timeout)
+    return await _execute_command(command, ctx, timeout)
 
 
 _DANGEROUS_CHOICES = ["y", "n", "yolo"]
 
 
 async def _handle_dangerous_command(
-    command: str, agent: WingAgent, timeout: int
+    command: str, ctx: ToolContext, timeout: int
 ) -> str:
     """Handle dangerous command by requesting user confirmation."""
     from wing.event import AskEvent
 
     question = f"⚠️ Dangerous command detected:\n```bash\n{command}\n```\nProceed?"
 
-    # ask_feedback() 注入 tool_call_id 并 emit AskEvent，注册 feedback waiter，
-    # 用户回复经 post(tool_call_id=...) 定向 resolve（并发确认互不干扰）。
     while True:
         try:
-            feedback = await agent.ask_feedback(
+            feedback = await ctx.ask_feedback(
                 AskEvent(
-                    session_id=agent.session_id,
+                    session_id=ctx.session_id,
                     question=question,
                     choices=_DANGEROUS_CHOICES,
                     required=True,
@@ -66,31 +63,21 @@ async def _handle_dangerous_command(
 
         action = _parse_feedback(feedback)
         if action is None:
-            # 无效回答 —— 换提示 re-ask（ask_feedback 以同一 tool_call_id 重新注册 waiter）
             question = "⚠️ Please choose one of the options."
             continue
 
         if action == "yolo":
-            # Enable yolo for the rest of this session.
-            agent.set_yolo(True)
-            return await _execute_command(command, agent, timeout)
+            ctx.set_yolo(True)
+            return await _execute_command(command, ctx, timeout)
 
         if action == "y":
-            return await _execute_command(command, agent, timeout)
+            return await _execute_command(command, ctx, timeout)
 
-        # action == "n"
         raise ToolError("❌ Command rejected by user.")
 
 
 def _parse_feedback(feedback: str) -> str | None:
-    """Parse user feedback for dangerous command.
-
-    Args:
-        feedback: User's feedback string.
-
-    Returns:
-        One of "y", "n", "yolo", or None if not recognized.
-    """
+    """Parse user feedback for dangerous command."""
     value = feedback.strip().lower()
     if value in ("y", "n", "yolo"):
         log.info(f"_parse_feedback('{feedback}') -> '{value}'")
@@ -102,13 +89,7 @@ def _parse_feedback(feedback: str) -> str | None:
 async def _drain_pipes(
     process: asyncio.subprocess.Process, timeout: float = 1.0
 ) -> tuple[bytes, bytes]:
-    """Drain stdout/stderr pipes after process exit, with bounded total wait.
-
-    Background children (`cmd &`) inherit the pipe write-ends, so pipes
-    may not reach EOF after the shell exits. The total timeout caps the
-    entire drain — not per-read — so a chatty background process cannot
-    keep us waiting indefinitely.
-    """
+    """Drain stdout/stderr pipes after process exit, with bounded total wait."""
     stdout_chunks: list[bytes] = []
     stderr_chunks: list[bytes] = []
 
@@ -135,22 +116,13 @@ async def _drain_pipes(
             timeout=timeout,
         )
     except asyncio.TimeoutError:
-        pass  # time's up, return what we have
+        pass
     return b"".join(stdout_chunks), b"".join(stderr_chunks)
 
 
-async def _execute_command(command: str, agent: WingAgent, timeout: int) -> str:
-    """Execute a shell command. Stateless — no cwd persistence across calls.
-
-    - wait() returns when the shell exits (not when pipe EOF, which
-      background children keep open).
-    - start_new_session=True isolates the process group so
-      os.killpg() can clean up the entire tree on timeout.
-
-    On timeout, partial stdout/stderr is collected and returned so the
-    agent can reason about what happened before the kill.
-    """
-    cwd = agent.state.get("cwd")
+async def _execute_command(command: str, ctx: ToolContext, timeout: int) -> str:
+    """Execute a shell command with interrupt hook for process cleanup."""
+    cwd = ctx.cwd
 
     try:
         start_time = time.monotonic()
@@ -159,35 +131,26 @@ async def _execute_command(command: str, agent: WingAgent, timeout: int) -> str:
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=cwd if isinstance(cwd, str) else None,
+            cwd=str(cwd) if cwd else None,
             start_new_session=True,
         )
 
-        agent.state.set("_active_process", process)
+        hook_id = ctx.register_interrupt_hook(lambda: kill_process_group(process))
         try:
-            # Wait for the shell process itself to exit (not children from &).
-            # communicate() would block on pipe EOF which background children
-            # keep open — wait() returns as soon as the shell exits.
             try:
                 await asyncio.wait_for(process.wait(), timeout=timeout)
             except asyncio.TimeoutError:
-                # Pre-kill drain: collect whatever output has been produced
                 stdout, stderr = await _drain_pipes(process, timeout=0.5)
                 kill_process_group(process)
-                # Post-kill drain: SIGKILL closes pipe write-ends, remaining
-                # buffer becomes readable now
                 post_out, post_err = await _drain_pipes(process, timeout=0.3)
                 stdout += post_out
                 stderr += post_err
                 elapsed = int(time.monotonic() - start_time)
                 raise ToolError(_format_timeout_result(stdout, stderr, elapsed))
 
-            # Shell exited — drain remaining pipe output with short grace period.
-            # Background children may still be writing; we give them 1s then
-            # move on. The children continue running detached.
             stdout, stderr = await _drain_pipes(process, timeout=1.0)
         finally:
-            agent.state.delete("_active_process")
+            ctx.unregister_interrupt_hook(hook_id)
 
         rc = process.returncode if process.returncode is not None else -1
         elapsed = int(time.monotonic() - start_time)

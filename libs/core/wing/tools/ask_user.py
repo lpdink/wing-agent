@@ -8,7 +8,7 @@ import asyncio
 
 from pydantic import BaseModel, Field
 
-from wing.agent import WingAgent
+from wing.agent import ToolContext
 from wing.event import AskEvent
 from wing.schema import ToolError, ToolParam
 from wing.tool_registry import tool_registry
@@ -59,7 +59,7 @@ _QUESTIONS_PARAM = ToolParam(
 )
 async def ask_user(
     questions: list[dict],
-    agent: WingAgent,
+    ctx: ToolContext,
 ) -> str:
     """Ask user questions and wait for their responses.
 
@@ -99,9 +99,9 @@ async def ask_user(
     # ask_feedback() 注入 tool_call_id 并 emit AskEvent，注册 feedback waiter，
     # 用户回复经 post(tool_call_id=...) 定向 resolve（并发 ask 互不干扰）。
     try:
-        feedback = await agent.ask_feedback(
+        feedback = await ctx.ask_feedback(
             AskEvent(
-                session_id=agent.session_id,
+                session_id=ctx.session_id,
                 questions=[q.model_dump() for q in normalized],
             ),
             timeout=FEEDBACK_TIMEOUT,

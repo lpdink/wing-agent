@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from wing.agent import _current_tool_call_id
+from wing.agent.tool_executor import _current_tool_call_id
 from wing.event import DiffContentEvent
 from wing.tools.experimental import better_edit
 from wing.tools.file import edit_file, write_file
@@ -39,7 +39,7 @@ async def test_write_emits_diff_with_current_tool_call_id(tmp_path: Path):
     agent = _StubAgent()
     token = _current_tool_call_id.set("call_write_1")
     try:
-        await write_file(str(tmp_path / "new.txt"), "hello", agent=agent)  # type: ignore[arg-type]
+        await write_file(str(tmp_path / "new.txt"), "hello", ctx=agent)  # type: ignore[arg-type]
     finally:
         _current_tool_call_id.reset(token)
 
@@ -56,7 +56,7 @@ async def test_edit_emits_diff_with_current_tool_call_id(tmp_path: Path):
     agent = _StubAgent()
     token = _current_tool_call_id.set("call_edit_1")
     try:
-        await edit_file(str(p), "foo", "baz", agent=agent)  # type: ignore[arg-type]
+        await edit_file(str(p), "foo", "baz", ctx=agent)  # type: ignore[arg-type]
     finally:
         _current_tool_call_id.reset(token)
 
@@ -73,7 +73,7 @@ async def test_better_edit_emits_diff_with_current_tool_call_id(tmp_path: Path):
     agent = _StubAgent()
     token = _current_tool_call_id.set("call_better_1")
     try:
-        await better_edit(str(p), "alpha", "gamma", agent=agent)  # type: ignore[arg-type]
+        await better_edit(str(p), "alpha", "gamma", ctx=agent)  # type: ignore[arg-type]
     finally:
         _current_tool_call_id.reset(token)
 
@@ -87,7 +87,7 @@ async def test_diff_tool_call_id_empty_outside_tool_context(tmp_path: Path):
     # No contextvar set (e.g., direct invocation) → empty string, which the
     # frontend treats as "anchor unknown, append".
     agent = _StubAgent()
-    await write_file(str(tmp_path / "x.txt"), "x", agent=agent)  # type: ignore[arg-type]
+    await write_file(str(tmp_path / "x.txt"), "x", ctx=agent)  # type: ignore[arg-type]
 
     (diff,) = _diffs(agent)
     assert diff.tool_call_id == ""

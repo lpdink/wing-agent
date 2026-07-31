@@ -7,11 +7,14 @@ Agent react loop 期间产生的事件：文本、推理、工具调用、指标
 from __future__ import annotations
 
 import uuid as _uuid
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 from pydantic import Field
 
 from .base import WingEvent
+
+if TYPE_CHECKING:
+    from wing.schema import Message, ToolCall
 
 
 class TextEvent(WingEvent):
@@ -29,6 +32,15 @@ class ToolCallEvent(WingEvent):
     tool_name: str
     tool_args: dict[str, Any]
     tool_call_id: str
+
+    @classmethod
+    def from_tool_call(cls, tc: ToolCall, session_id: str) -> Self:
+        return cls(
+            session_id=session_id,
+            tool_name=tc.name,
+            tool_args=tc.arguments,
+            tool_call_id=tc.id,
+        )
 
 
 class ToolCallStreamEvent(WingEvent):
@@ -57,6 +69,25 @@ class ToolCallResultEvent(WingEvent):
     tool_result: str
     tool_success: bool
     model: str = ""
+
+    @classmethod
+    def from_execution(
+        cls,
+        tc: ToolCall,
+        result: str,
+        success: bool,
+        model: str,
+        session_id: str,
+    ) -> Self:
+        return cls(
+            session_id=session_id,
+            tool_name=tc.name,
+            tool_args=tc.arguments,
+            tool_call_id=tc.id,
+            tool_result=result,
+            tool_success=success,
+            model=model,
+        )
 
 
 class LLMCallMetricsEvent(WingEvent):
@@ -134,6 +165,42 @@ class AssistantTurnEvent(WingEvent):
     stop_reason: str | None = None
     usage: dict | None = None
 
+    @classmethod
+    def from_message(cls, msg: Message, model: str, session_id: str) -> Self:
+        """从完整 assistant Message 构造。"""
+        content_blocks: list[dict] = []
+        if msg.reasoning_content:
+            content_blocks.append(
+                {"type": "thinking", "thinking": msg.reasoning_content}
+            )
+        if msg.content:
+            content_blocks.append({"type": "text", "text": msg.content})
+        for tc in msg.tool_calls or []:
+            content_blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": tc.id,
+                    "name": tc.name,
+                    "input": tc.arguments,
+                }
+            )
+
+        usage_dict = None
+        if msg.usage:
+            usage_dict = {
+                "input_tokens": msg.usage.prompt_tokens,
+                "output_tokens": msg.usage.completion_tokens,
+                "cached_tokens": msg.usage.cached_tokens,
+            }
+
+        return cls(
+            session_id=session_id,
+            content_blocks=content_blocks,
+            model=model,
+            stop_reason="tool_use" if msg.tool_calls else "end_turn",
+            usage=usage_dict,
+        )
+
 
 class ToolResultTurnEvent(WingEvent):
     """Turn 级别的 tool result（对应 Claude SDKUserMessage tool_result block）。
@@ -147,6 +214,22 @@ class ToolResultTurnEvent(WingEvent):
     tool_name: str
     content: str
     is_error: bool = False
+
+    @classmethod
+    def from_execution(
+        cls,
+        tc: ToolCall,
+        result: str,
+        success: bool,
+        session_id: str,
+    ) -> Self:
+        return cls(
+            session_id=session_id,
+            tool_use_id=tc.id,
+            tool_name=tc.name,
+            content=result,
+            is_error=not success,
+        )
 
 
 class TurnResultEvent(WingEvent):

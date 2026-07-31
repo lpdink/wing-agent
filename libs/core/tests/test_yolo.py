@@ -47,7 +47,7 @@ def runtime():
 
 def _patch_agent_config(yolo: bool):
     """Patch get_config in agent.py (which imports it as a local reference)."""
-    return patch("wing.agent.get_config", return_value=_cfg(yolo=yolo))
+    return patch("wing.agent.core.get_config", return_value=_cfg(yolo=yolo))
 
 
 # ============================================================

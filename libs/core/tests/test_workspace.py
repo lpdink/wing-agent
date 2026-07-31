@@ -8,8 +8,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from wing.agent_state_bag import AgentStateBag
-
 
 def _make_session(tmp_path: Path, workspace: str | None = None):
     """构建最小化 Session 实例用于 set_workspace 测试。"""
@@ -17,9 +15,7 @@ def _make_session(tmp_path: Path, workspace: str | None = None):
     from wing.store import FileSessionStore
 
     mock_agent = MagicMock()
-    mock_agent.state = AgentStateBag()
-    if workspace:
-        mock_agent.state.set("cwd", workspace)
+    mock_agent.cwd = Path(workspace) if workspace else None
 
     mock_cm = MagicMock()
     mock_cm._workspace = Path(workspace) if workspace else None
@@ -46,7 +42,7 @@ class TestSetWorkspace:
         session.set_workspace(str(target))
 
         assert session.session_workspace == str(target)
-        assert session.agent.state.get("cwd") == str(target)
+        assert session.agent.set_cwd.call_args[0][0] == target
         assert session._context_manager._workspace == target
 
         # metadata.json 已持久化

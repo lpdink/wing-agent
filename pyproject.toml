@@ -49,7 +49,7 @@ dev = [
 ]
 
 [tool.ruff.lint]
-select = ["ANN"]
+select = ["ANN", "F"]
 ignore = ["ANN401"]
 
 [tool.ruff.lint.per-file-ignores]

@@ -11,7 +11,8 @@ import asyncio
 
 import pytest
 
-from wing.agent import WingAgent, _current_tool_call_id
+from wing.agent import WingAgent
+from wing.agent.tool_executor import _current_tool_call_id
 from wing.event import AskEvent
 from wing.request_context import set_request_context, reset_request_context
 from wing.runtime import WingRuntime
@@ -59,7 +60,7 @@ async def test_addressed_feedback_basic_path(runtime: WingRuntime):
     feedback = await asyncio.wait_for(task, timeout=1.0)
     assert feedback == "y, go ahead"
     assert agent.status != "waiting"
-    assert not agent._feedback_waiters
+    assert not agent._inbox._feedback_waiters
 
 
 @pytest.mark.asyncio
@@ -78,7 +79,7 @@ async def test_concurrent_waiters_addressed_out_of_order(runtime: WingRuntime):
     task1 = asyncio.create_task(_ask(agent, "tc_1"))
     task2 = asyncio.create_task(_ask(agent, "tc_2"))
     await asyncio.sleep(0.01)
-    assert set(agent._feedback_waiters) == {"tc_1", "tc_2"}
+    assert set(agent._inbox._feedback_waiters) == {"tc_1", "tc_2"}
     assert agent.status == "waiting"
 
     token = set_request_context(client_id="tui", session_id=session.session_id)
@@ -91,7 +92,7 @@ async def test_concurrent_waiters_addressed_out_of_order(runtime: WingRuntime):
 
     assert await asyncio.wait_for(task1, timeout=1.0) == "y"
     assert await asyncio.wait_for(task2, timeout=1.0) == "n"
-    assert not agent._feedback_waiters
+    assert not agent._inbox._feedback_waiters
 
 
 @pytest.mark.asyncio
@@ -115,10 +116,10 @@ async def test_unaddressed_message_goes_to_inbox_not_waiter(runtime: WingRuntime
     await asyncio.sleep(0.01)
 
     # waiter 未被消费
-    assert "tc_1" in agent._feedback_waiters
+    assert "tc_1" in agent._inbox._feedback_waiters
     assert not task.done()
     # 通知进了 inbox
-    inbound = agent._inbox.get_nowait()
+    inbound = agent._inbox._queue.get_nowait()
     assert (inbound.message.content or "").startswith("[Explorer]")
 
     # 定向回复依然正常 resolve waiter
@@ -136,7 +137,7 @@ async def test_stale_tool_call_id_falls_through_to_inbox(runtime: WingRuntime):
     agent._worker.cancel()
 
     await agent.post("late reply", tool_call_id="tc_gone")
-    inbound = agent._inbox.get_nowait()
+    inbound = agent._inbox._queue.get_nowait()
     assert inbound.message.content == "late reply"
 
 
@@ -152,12 +153,12 @@ async def test_feedback_timeout_unregisters_waiter(runtime: WingRuntime):
     with pytest.raises(asyncio.TimeoutError):
         await _ask(agent, "tc_1", timeout=0.05)
 
-    assert "tc_1" not in agent._feedback_waiters
+    assert "tc_1" not in agent._inbox._feedback_waiters
     assert agent.status == "idle"
 
     # 超时后该 id 的迟到回复落 inbox
     await agent.post("better late than never", tool_call_id="tc_1")
-    inbound = agent._inbox.get_nowait()
+    inbound = agent._inbox._queue.get_nowait()
     assert inbound.message.content == "better late than never"
 
 
@@ -173,10 +174,10 @@ async def test_interrupt_cancels_waiters(runtime: WingRuntime):
     task1 = asyncio.create_task(_ask(agent, "tc_1"))
     task2 = asyncio.create_task(_ask(agent, "tc_2"))
     await asyncio.sleep(0.01)
-    assert len(agent._feedback_waiters) == 2
+    assert len(agent._inbox._feedback_waiters) == 2
 
     await agent.interrupt()
-    assert not agent._feedback_waiters
+    assert not agent._inbox._feedback_waiters
 
     with pytest.raises(asyncio.CancelledError):
         await task1

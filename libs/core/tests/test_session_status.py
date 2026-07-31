@@ -15,24 +15,25 @@ from pathlib import Path
 import pytest
 
 from wing.agent import WingAgent
-from wing.agent_state_bag import AgentStateBag
+from wing.agent.inbox import Inbox
 
 
 def _make_agent(working: bool = False) -> WingAgent:
     """构造最小化 WingAgent（绕过 __init__，避免启动 worker task）。
 
-    仅设置 status property 依赖的属性：_feedback_waiters 与 _working。
+    仅设置 status property 依赖的属性：_inbox 与 _working。
     """
     agent = object.__new__(WingAgent)
-    agent.state = AgentStateBag()
+    agent._inbox = Inbox()
     agent._working = working
-    agent._feedback_waiters = {}
     return agent
 
 
 def _register_waiter(agent: WingAgent) -> None:
     """在 agent 上注册一个 feedback waiter（需运行中的事件循环）。"""
-    agent._feedback_waiters["tc_stub"] = asyncio.get_running_loop().create_future()
+    agent._inbox._feedback_waiters["tc_stub"] = (
+        asyncio.get_running_loop().create_future()
+    )
 
 
 class TestAgentStatus:
@@ -62,7 +63,7 @@ class TestAgentStatus:
         agent = _make_agent(working=True)
         _register_waiter(agent)
         assert agent.status == "waiting"
-        agent._feedback_waiters.clear()
+        agent._inbox._feedback_waiters.clear()
         assert agent.status == "working"
 
     def test_back_to_idle_after_turn(self):

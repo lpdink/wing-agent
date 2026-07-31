@@ -22,7 +22,8 @@ from typing import Any
 
 import pytest
 
-from wing.agent import Inbound, WingAgent, _INTERRUPTED_RESULT
+from wing.agent import Inbound, WingAgent
+from wing.agent.tool_executor import INTERRUPTED_RESULT as _INTERRUPTED_RESULT
 from wing.event import (
     AskEvent,
     DoneEvent,
@@ -78,7 +79,9 @@ async def _wait_until(pred, timeout: float = 5.0) -> None:
 
 
 def _start_turn(agent: WingAgent, content: str = "go") -> None:
-    agent._inbox.put_nowait(Inbound(message=Message(role="user", content=content)))
+    agent._inbox._queue.put_nowait(
+        Inbound(message=Message(role="user", content=content))
+    )
 
 
 def _result_emitted(events: list[Any], tool_call_id: str) -> bool:
@@ -120,7 +123,7 @@ class TestInterruptDuringToolExec:
             await asyncio.sleep(30)
             return "never"
 
-        agent._tools = {
+        agent._executor._tools = {
             "Fast": _make_tool("Fast", fast_tool),
             "Slow": _make_tool("Slow", slow_tool),
         }
@@ -191,7 +194,7 @@ class TestInterruptDuringToolExec:
             )
             return "never"
 
-        agent._tools = {"Ask": _make_tool("Ask", asking_tool)}
+        agent._executor._tools = {"Ask": _make_tool("Ask", asking_tool)}
 
         events: list[Any] = []
         event_bus.subscribe(events.append)
@@ -201,7 +204,7 @@ class TestInterruptDuringToolExec:
 
         monkeypatch.setattr(agent.model_provider, "generate", _generate)
         _start_turn(agent)
-        await _wait_until(lambda: "call-ask" in agent._feedback_waiters)
+        await _wait_until(lambda: "call-ask" in agent._inbox._feedback_waiters)
         await agent.interrupt()
         await _wait_until(lambda: _result_emitted(events, "call-ask"))
 
@@ -209,7 +212,7 @@ class TestInterruptDuringToolExec:
         tools = {m.tool_call_id: m.content for m in chain if m.role == "tool"}
         assert tools == {"call-ask": _INTERRUPTED_RESULT}
         _assert_well_formed(chain)
-        assert not agent._feedback_waiters
+        assert not agent._inbox._feedback_waiters
 
         await agent.shutdown()
 
@@ -263,7 +266,7 @@ class TestInterruptOutsideToolExec:
         async def fast_tool(input: str = "") -> str:
             return "fast-result"
 
-        agent._tools = {"Fast": _make_tool("Fast", fast_tool)}
+        agent._executor._tools = {"Fast": _make_tool("Fast", fast_tool)}
 
         done = asyncio.Event()
         event_bus.subscribe(lambda e: done.set() if isinstance(e, DoneEvent) else None)
@@ -310,7 +313,7 @@ class TestPostInterruptRecovery:
             await asyncio.sleep(30)
             return "never"
 
-        agent._tools = {
+        agent._executor._tools = {
             "Fast": _make_tool("Fast", fast_tool),
             "Slow": _make_tool("Slow", slow_tool),
         }
@@ -368,7 +371,7 @@ class TestPostInterruptRecovery:
             await asyncio.sleep(30)
             return "never"
 
-        agent._tools = {
+        agent._executor._tools = {
             "Fast": _make_tool("Fast", fast_tool),
             "Slow": _make_tool("Slow", slow_tool),
         }

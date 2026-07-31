@@ -62,19 +62,19 @@ class TestDrainAndMerge:
         from wing.agent import Inbound
         from wing.schema import Message
 
-        agent._inbox.put_nowait(
+        agent._inbox._queue.put_nowait(
             Inbound(message=Message(role="user", content="msg-A"), request_id="req-1")
         )
-        agent._inbox.put_nowait(
+        agent._inbox._queue.put_nowait(
             Inbound(message=Message(role="user", content="msg-B"), request_id="req-2")
         )
-        agent._inbox.put_nowait(
+        agent._inbox._queue.put_nowait(
             Inbound(message=Message(role="user", content="msg-C"), request_id="req-3")
         )
 
         # Mock LLM 并手动触发一次 _process_turn
         with patch.object(agent.model_provider, "generate", _mock_generate):
-            await agent._process_turn()
+            await agent._loop.run_turn()
 
         # 断言：context 中只有一条 user message，内容为三者拼接
         messages = agent.context_manager._messages.active_chain
@@ -97,10 +97,10 @@ class TestDrainAndMerge:
         from wing.agent import Inbound
         from wing.schema import Message
 
-        agent._inbox.put_nowait(
+        agent._inbox._queue.put_nowait(
             Inbound(message=Message(role="user", content="first"), request_id="req-A")
         )
-        agent._inbox.put_nowait(
+        agent._inbox._queue.put_nowait(
             Inbound(message=Message(role="user", content="second"), request_id="req-B")
         )
 
@@ -115,7 +115,7 @@ class TestDrainAndMerge:
         event_bus.subscribe(_capture)
 
         with patch.object(agent.model_provider, "generate", _mock_generate):
-            await agent._process_turn()
+            await agent._loop.run_turn()
 
         # 所有事件应携带首条消息的 request_id
         assert len(captured_request_ids) > 0
@@ -136,12 +136,12 @@ class TestDrainAndMerge:
         from wing.agent import Inbound
         from wing.schema import Message
 
-        agent._inbox.put_nowait(
+        agent._inbox._queue.put_nowait(
             Inbound(message=Message(role="user", content="solo"), request_id="req-1")
         )
 
         with patch.object(agent.model_provider, "generate", _mock_generate):
-            await agent._process_turn()
+            await agent._loop.run_turn()
 
         messages = agent.context_manager._messages.active_chain
         user_msgs = [m for m in messages if m.role == "user"]

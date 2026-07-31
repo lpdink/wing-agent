@@ -182,9 +182,6 @@ class GoalRunner:
             f"{self.client_id}.{t}"
             for t in ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
         ]
-        checker_tools = self.checker_tools or [
-            f"{self.client_id}.{t}" for t in ["Bash", "Read", "Glob", "Grep"]
-        ]
 
         # 创建 executor session
         exec_agent: dict[str, Any] = {"tools": exec_tools, "yolo": True}

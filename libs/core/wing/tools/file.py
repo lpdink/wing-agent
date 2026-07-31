@@ -5,7 +5,7 @@ import os
 import stat
 from pathlib import Path
 
-from wing.agent import WingAgent, current_tool_call_id
+from wing.agent import ToolContext, current_tool_call_id
 from wing.event import DiffContentEvent
 from wing.schema import ToolError
 from wing.tool_registry import tool_registry
@@ -13,7 +13,7 @@ from wing.tools.utils import resolve_path as _resolve_path
 
 
 @tool_registry.register(name="Write")
-async def write_file(path: str, content: str, agent: WingAgent) -> str:
+async def write_file(path: str, content: str, ctx: ToolContext) -> str:
     """Write content to file (overwrite).
 
     Args:
@@ -24,7 +24,7 @@ async def write_file(path: str, content: str, agent: WingAgent) -> str:
         Success with stats, or error message.
     """
     try:
-        path = _resolve_path(path, agent)
+        path = _resolve_path(path, ctx)
 
         # Ensure parent directory exists
         parent = os.path.dirname(os.path.abspath(path))
@@ -50,9 +50,9 @@ async def write_file(path: str, content: str, agent: WingAgent) -> str:
         new_lines = len(content.splitlines())
 
         # Emit DiffContentEvent for frontend diff rendering
-        agent.emit(
+        ctx.emit(
             DiffContentEvent(
-                session_id=agent.session_id,
+                session_id=ctx.session_id,
                 path=path,
                 old_text=old_text,
                 new_text=content,
@@ -80,7 +80,7 @@ async def edit_file(
     path: str,
     old_block: str,
     new_block: str,
-    agent: WingAgent,
+    ctx: ToolContext,
     replace_all: bool = False,
 ) -> str:
     """Replace old_block with new_block. Exact match only. replace_all=True replaces all matches.
@@ -94,7 +94,7 @@ async def edit_file(
     Returns:
         Success with location and stats, or concise error with hints.
     """
-    path = _resolve_path(path, agent)
+    path = _resolve_path(path, ctx)
 
     # 读取
     try:
@@ -152,9 +152,9 @@ async def edit_file(
         raise ToolError(f"edit: write failed: {e}")
 
     # 成功：emit DiffContentEvent（传完整文件内容，非仅变更块）
-    agent.emit(
+    ctx.emit(
         DiffContentEvent(
-            session_id=agent.session_id,
+            session_id=ctx.session_id,
             path=path,
             old_text=content,
             new_text=new_content,
@@ -191,7 +191,7 @@ MAX_LINES_TO_READ = 2000
 @tool_registry.register(name="Read")
 async def read_file(
     path: str,
-    agent: WingAgent,
+    ctx: ToolContext,
     offset: int = 1,
     limit: int = MAX_LINES_TO_READ,
     line_numbers: bool = False,
@@ -212,7 +212,7 @@ async def read_file(
     Errors: "read_file: PATH: No such file|Is a directory|Permission denied|Binary file"
     """
     limit = min(max(limit, 1), MAX_LINES_TO_READ)
-    path = _resolve_path(path, agent)
+    path = _resolve_path(path, ctx)
 
     try:
         st = os.stat(path)

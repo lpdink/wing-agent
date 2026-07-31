@@ -6,7 +6,7 @@ Inspired by antirez's ds4-agent edit tool design.
 
 import os
 
-from wing.agent import WingAgent, current_tool_call_id
+from wing.agent import ToolContext, current_tool_call_id
 from wing.event import DiffContentEvent
 from wing.schema import ToolError
 from wing.tool_registry import tool_registry
@@ -95,7 +95,7 @@ async def better_edit(
     path: str,
     old_block: str,
     new_block: str,
-    agent: WingAgent,
+    ctx: ToolContext,
 ) -> str:
     """Edit a file using path, old_block, and new_block. The old text must match exactly once in the file; otherwise the edit fails for safety.
 
@@ -161,9 +161,9 @@ async def better_edit(
         raise BetterEditError(f"write failed: {e}")
 
     # Emit DiffContentEvent for frontend rendering
-    agent.emit(
+    ctx.emit(
         DiffContentEvent(
-            session_id=agent.session_id,
+            session_id=ctx.session_id,
             path=path,
             old_text=content,
             new_text=new_content,

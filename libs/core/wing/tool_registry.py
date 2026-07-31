@@ -172,24 +172,25 @@ class ToolRegistry:
         return decorator
 
     def _is_agent_type(self, t: Any) -> bool:
+        """Detect injectable context parameter (ToolContext or legacy WingAgent)."""
         if t is None:
             return False
 
+        _INJECTABLE_NAMES = ("WingAgent", "ToolContext")
+
         if isinstance(t, str):
-            return "WingAgent" in t
+            return any(n in t for n in _INJECTABLE_NAMES)
 
         if isinstance(t, ForwardRef):
-            return "WingAgent" in t.__forward_arg__
+            return any(n in t.__forward_arg__ for n in _INJECTABLE_NAMES)
 
-        # Unwrap Optional[WingAgent] / WingAgent | None so tools may declare
-        # `agent: WingAgent | None = None` (callers can omit it, e.g. in tests)
-        # while still being auto-injected + hidden from the LLM schema.
+        # Unwrap Optional[ToolContext] / ToolContext | None
         origin = get_origin(t)
         if origin is Union or isinstance(t, UnionType):
             return any(self._is_agent_type(a) for a in get_args(t))
 
         try:
-            return t.__name__ == "WingAgent"
+            return t.__name__ in _INJECTABLE_NAMES
         except AttributeError:
             return False
 
