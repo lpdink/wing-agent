@@ -101,6 +101,9 @@ class AnthropicProvider(ModelProvider):
             log.error(f"Failed to list models: {e}")
             raise
 
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
     def set_thinking(self, enable: bool) -> None:
         self.thinking = enable
 
@@ -122,6 +125,7 @@ class AnthropicProvider(ModelProvider):
         changes: list[str] = []
         if new_cfg.base_url != self._config.base_url:
             self.base_url = new_cfg.base_url.rstrip("/")
+            old_client = self._client
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 headers={
@@ -135,6 +139,11 @@ class AnthropicProvider(ModelProvider):
                     write=30.0,
                     pool=30.0,
                 ),
+            )
+            import asyncio
+
+            asyncio.get_event_loop().call_soon(
+                lambda: asyncio.ensure_future(old_client.aclose())
             )
             changes.append(f"base_url={new_cfg.base_url}")
 
@@ -168,7 +177,7 @@ class AnthropicProvider(ModelProvider):
         body: dict = {
             "model": model,
             "messages": anthropic_messages,
-            "max_tokens": 16384,
+            "max_tokens": self._config.max_tokens,
             "stream": stream,
         }
         if system_text:
@@ -176,12 +185,10 @@ class AnthropicProvider(ModelProvider):
         if tools:
             body["tools"] = [self._tool_to_anthropic(t) for t in tools]
 
-        # Thinking 配置
-        if self.thinking:
-            body["thinking"] = {"type": "enabled", "budget_tokens": 10000}
-
-        # extra_body 透传
-        body.update(self._extra_body)
+        # extra_body 透传（不覆盖已设置的 key）
+        for k, v in self._extra_body.items():
+            if k not in body:
+                body[k] = v
 
         # 缓存标记
         if self.explicit_cache_mode and anthropic_messages:
@@ -467,6 +474,10 @@ class AnthropicProvider(ModelProvider):
                                 json.loads(tool_args_buffer) if tool_args_buffer else {}
                             )
                         except json.JSONDecodeError:
+                            log.warning(
+                                f"Failed to parse tool args JSON for "
+                                f"{current_tool_name}: {tool_args_buffer[:200]}"
+                            )
                             args = {}
                         # 发射 is_final delta
                         remaining = tool_args_buffer[tool_emitted_len:]

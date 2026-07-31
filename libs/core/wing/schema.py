@@ -65,7 +65,7 @@ class LLMUsage(BaseModel):
     tokens_per_sec: float = 0.0
     """流式输出 tokens/s（基于服务端返回的 completion_tokens 精准计算）"""
     model: str = ""
-    """模型名称，由 OpenAIProvider 在构建 usage 时从 create_params 注入"""
+    """模型名称，由 provider 在构建 usage 时注入"""
     request_id: str = ""
     """LLM API 响应的 x-request-id，用于排查问题"""
 

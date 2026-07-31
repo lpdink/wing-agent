@@ -31,10 +31,21 @@ class ProviderConfig(BaseModel):
     timeout_total: float = 600.0
     explicit_cache_mode: bool = True
     reasoning_effort: str | None = None
+    max_tokens: int = 128_000
+    """最大输出 token 数（Anthropic 协议必填）。"""
     extra_body: dict = Field(default_factory=dict)
     """透传到 request body 的额外字段（平铺合并到顶层）。"""
     anthropic_version: str = "2023-06-01"
     """Anthropic API 版本 header（仅 anthropic 协议使用）。"""
+
+    @field_validator("name")
+    @classmethod
+    def _name_valid(cls, v: str) -> str:
+        import re
+
+        if not re.match(r"^[a-zA-Z0-9_-]+$", v):
+            raise ValueError(f"provider name must match ^[a-zA-Z0-9_-]+$, got: '{v}'")
+        return v
 
 
 class UserAgentConfig(BaseModel):

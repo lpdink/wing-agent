@@ -860,7 +860,7 @@ class TestSystemModels:
     def test_list_models_ok(
         self, mock_get_config, mock_create_provider, client: TestClient
     ):
-        """正常获取模型列表。"""
+        """正常获取模型列表（带 provider 前缀）。"""
         from wing.config import ProviderConfig
 
         mock_cfg = MagicMock()
@@ -874,13 +874,17 @@ class TestSystemModels:
         async def mock_list_models():
             return ["gpt-4o", "gpt-4o-mini"]
 
+        async def mock_aclose():
+            pass
+
         mock_provider.list_models = mock_list_models
+        mock_provider.aclose = mock_aclose
         mock_create_provider.return_value = mock_provider
 
         resp = client.get("/api/models")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["models"] == ["gpt-4o", "gpt-4o-mini"]
+        assert data["models"] == ["default.gpt-4o", "default.gpt-4o-mini"]
 
     @patch("wing.gateway.routes.system.create_provider")
     @patch("wing.gateway.routes.system.get_config")
@@ -899,8 +903,12 @@ class TestSystemModels:
         async def mock_list_models():
             raise RuntimeError("API error")
 
+        async def mock_aclose():
+            pass
+
         mock_provider = MagicMock()
         mock_provider.list_models = mock_list_models
+        mock_provider.aclose = mock_aclose
         mock_create_provider.return_value = mock_provider
 
         resp = client.get("/api/models")

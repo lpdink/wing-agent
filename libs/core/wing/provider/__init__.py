@@ -21,11 +21,13 @@ def create_provider(
     session_id: str | None = None,
 ) -> ModelProvider:
     """根据 ProviderConfig 的 protocol 字段创建对应 provider 实例。"""
-    if config.protocol == "anthropic":
+    if config.protocol == "openai":
+        from wing.provider.openai_compat import OpenAICompatProvider
+
+        return OpenAICompatProvider(config=config, session_id=session_id)
+    elif config.protocol == "anthropic":
         from wing.provider.anthropic import AnthropicProvider
 
         return AnthropicProvider(config=config, session_id=session_id)
     else:
-        from wing.provider.openai_compat import OpenAICompatProvider
-
-        return OpenAICompatProvider(config=config, session_id=session_id)
+        raise ValueError(f"unsupported protocol: '{config.protocol}'")

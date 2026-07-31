@@ -35,6 +35,9 @@ class ModelProvider(ABC):
         """获取可用模型列表。"""
         ...
 
+    async def aclose(self) -> None:
+        """关闭底层 HTTP 客户端，释放连接池。子类应覆盖。"""
+
     def set_thinking(self, enable: bool) -> None:
         """运行时切换思考模式。子类可覆盖。"""
         self.thinking = enable

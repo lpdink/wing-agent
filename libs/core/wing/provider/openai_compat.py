@@ -1,9 +1,5 @@
 # wing/provider/openai_compat.py
-"""OpenAI 兼容协议 Provider — 基于 httpx 裸写。
-
-替代旧的 openai_provider.py（依赖 OpenAI SDK）。
-SSE 流解析使用 wing/provider/sse.py。
-"""
+"""OpenAI 兼容协议 Provider — 基于 httpx 实现。"""
 
 from __future__ import annotations
 
@@ -99,6 +95,9 @@ class OpenAICompatProvider(ModelProvider):
             log.error(f"Failed to list models: {e}")
             raise
 
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
     def set_thinking(self, enable: bool) -> None:
         self.thinking = enable
 
@@ -127,6 +126,7 @@ class OpenAICompatProvider(ModelProvider):
             headers = get_headers()
             headers["Authorization"] = f"Bearer {new_cfg.api_key}"
             headers["Content-Type"] = "application/json"
+            old_client = self._client
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 headers=headers,
@@ -136,6 +136,12 @@ class OpenAICompatProvider(ModelProvider):
                     write=30.0,
                     pool=30.0,
                 ),
+            )
+            # 异步关闭旧 client（fire-and-forget，不阻塞 reload）
+            import asyncio
+
+            asyncio.get_event_loop().call_soon(
+                lambda: asyncio.ensure_future(old_client.aclose())
             )
             changes.append(f"base_url={new_cfg.base_url}")
 
@@ -178,8 +184,10 @@ class OpenAICompatProvider(ModelProvider):
         if stream:
             body["stream_options"] = {"include_usage": True}
 
-        # extra_body 透传（配置中的额外字段平铺到 body 顶层）
-        body.update(self._extra_body)
+        # extra_body 透传（不覆盖已设置的 key）
+        for k, v in self._extra_body.items():
+            if k not in body:
+                body[k] = v
 
         # reasoning_effort
         if self.reasoning_effort:
