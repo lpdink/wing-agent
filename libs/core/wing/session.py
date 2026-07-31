@@ -21,8 +21,9 @@ from typing import TYPE_CHECKING
 
 from wing.common.logger import log
 from wing.common.tracked_list import TrackedList
+from wing.config import get_config
 from wing.context_manager import ContextManager
-from wing.openai_provider import OpenAIProvider
+from wing.provider import create_provider
 from wing.schema import Message
 from wing.store import SessionMetadata, SessionStore
 
@@ -106,9 +107,10 @@ class Session:
         )
 
         # 创建 WingAgent
+        provider_cfg = get_config().get_provider(template.provider_name)
         agent = WingAgent(
             model=template.model,
-            model_provider=OpenAIProvider(session_id=session_id),
+            model_provider=create_provider(provider_cfg, session_id=session_id),
             stream=True,
             context_manager=context_manager,
             tools=template.resolved_tools,
@@ -155,9 +157,10 @@ class Session:
         )
 
         # 3. 创建新 Agent
+        provider_cfg = get_config().get_provider(template.provider_name)
         self._agent = WingAgent(
             model=template.model,
-            model_provider=OpenAIProvider(session_id=self._session_id),
+            model_provider=create_provider(provider_cfg, session_id=self._session_id),
             stream=True,
             context_manager=self._context_manager,
             tools=template.resolved_tools,

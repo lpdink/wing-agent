@@ -16,13 +16,25 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-class OpenAIConfig(BaseModel):
+class ProviderConfig(BaseModel):
+    """单个 LLM provider 配置。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    """用户自定义标识，全局唯一。"""
+    protocol: Literal["openai", "anthropic"] = "openai"
+    """协议类型。"""
     base_url: str
     api_key: str
     timeout_first_chunk: float = 300.0
     timeout_total: float = 600.0
     explicit_cache_mode: bool = True
     reasoning_effort: str | None = None
+    extra_body: dict = Field(default_factory=dict)
+    """透传到 request body 的额外字段（平铺合并到顶层）。"""
+    anthropic_version: str = "2023-06-01"
+    """Anthropic API 版本 header（仅 anthropic 协议使用）。"""
 
 
 class UserAgentConfig(BaseModel):
@@ -52,6 +64,8 @@ class AgentConfig(BaseModel):
 
     name: str
     model: str
+    provider: str | None = None
+    """引用的 providers[].name。None 时绑定第一个 provider。"""
     default: bool = False
     system_prompt: str = ""
     tools: list[str] = Field(default_factory=list)
@@ -145,7 +159,7 @@ class CommandsConfig(BaseModel):
 class Config(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    openai: OpenAIConfig
+    providers: list[ProviderConfig]
     agents: list[AgentConfig]
     hooks: list[str] = Field(default_factory=list)
     safe_command_patterns: list[str] = Field(default_factory=list)
@@ -162,17 +176,48 @@ class Config(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _validate_agents(self) -> "Config":
+    def _validate_config(self) -> "Config":
         if not self.agents:
             raise ValueError("agents list cannot be empty")
-        names = [a.name for a in self.agents]
-        if len(names) != len(set(names)):
+        if not self.providers:
+            raise ValueError("providers list cannot be empty")
+
+        # provider name 唯一性
+        provider_names = [p.name for p in self.providers]
+        if len(provider_names) != len(set(provider_names)):
             seen = set()
-            for n in names:
+            for n in provider_names:
                 if n in seen:
-                    raise ValueError(f"duplicate agent name: '{n}'")
+                    raise ValueError(f"duplicate provider name: '{n}'")
                 seen.add(n)
+
+        # agent name 唯一性
+        agent_names = [a.name for a in self.agents]
+        if len(agent_names) != len(set(agent_names)):
+            seen_agents: set[str] = set()
+            for n in agent_names:
+                if n in seen_agents:
+                    raise ValueError(f"duplicate agent name: '{n}'")
+                seen_agents.add(n)
+
+        # agent.provider 引用存在性
+        provider_name_set = set(provider_names)
+        for agent in self.agents:
+            if agent.provider is not None and agent.provider not in provider_name_set:
+                raise ValueError(
+                    f"agent '{agent.name}' references unknown provider '{agent.provider}'"
+                )
+
         return self
+
+    def get_provider(self, name: str | None = None) -> ProviderConfig:
+        """获取 provider 配置。name 为 None 时返回第一个。"""
+        if name is None:
+            return self.providers[0]
+        for p in self.providers:
+            if p.name == name:
+                return p
+        raise ValueError(f"provider '{name}' not found")
 
 
 _config: Optional[Config] = None

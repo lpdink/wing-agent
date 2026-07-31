@@ -11,7 +11,7 @@ import yaml
 
 from wing.config import (
     Config,
-    OpenAIConfig,
+    ProviderConfig,
     get_config,
     get_config_path,
     get_wing_home,
@@ -32,10 +32,13 @@ def reset_config_before_each_test():
 def minimal_config_dict() -> dict:
     """最小配置字典（仅必需字段）"""
     return {
-        "openai": {
-            "base_url": "https://api.example.com/v1",
-            "api_key": "test-key-123",
-        },
+        "providers": [
+            {
+                "name": "default",
+                "base_url": "https://api.example.com/v1",
+                "api_key": "test-key-123",
+            },
+        ],
         "agents": [
             {"name": "default", "model": "gpt-4"},
         ],
@@ -46,14 +49,23 @@ def minimal_config_dict() -> dict:
 def full_config_dict() -> dict:
     """完整配置字典"""
     return {
-        "openai": {
-            "base_url": "https://api.example.com/v1",
-            "api_key": "test-key-123",
-        },
+        "providers": [
+            {
+                "name": "main",
+                "protocol": "openai",
+                "base_url": "https://api.example.com/v1",
+                "api_key": "test-key-123",
+                "timeout_first_chunk": 120.0,
+                "explicit_cache_mode": False,
+                "reasoning_effort": "high",
+                "extra_body": {"enable_thinking": True},
+            },
+        ],
         "agents": [
             {
                 "name": "main",
                 "model": "gpt-4",
+                "provider": "main",
                 "system_prompt": "You are a helpful assistant.",
                 "tools": ["Bash", "Read", "Write"],
                 "context_window_tokens": 50000,
@@ -65,28 +77,62 @@ def full_config_dict() -> dict:
 class TestConfigModels:
     """测试 Pydantic 模型"""
 
-    def test_openai_config_required_fields(self):
-        """OpenAIConfig 必需字段验证"""
+    def test_provider_config_required_fields(self):
+        """ProviderConfig 必需字段验证"""
         with pytest.raises(Exception):
-            OpenAIConfig()  # ty: ignore[missing-argument]
+            ProviderConfig()  # ty: ignore[missing-argument]
 
-        config = OpenAIConfig(base_url="https://api.example.com", api_key="key")
+        config = ProviderConfig(
+            name="test", base_url="https://api.example.com", api_key="key"
+        )
         assert config.base_url == "https://api.example.com"
         assert config.api_key == "key"
+        assert config.protocol == "openai"
 
     def test_config_minimal(self, minimal_config_dict):
         """Minimal config builds successfully."""
         config = Config(**minimal_config_dict)
-        assert config.openai.base_url == "https://api.example.com/v1"
-        assert config.openai.api_key == "test-key-123"
+        assert config.providers[0].base_url == "https://api.example.com/v1"
+        assert config.providers[0].api_key == "test-key-123"
         assert config.agents[0].model == "gpt-4"
 
     def test_config_full(self, full_config_dict):
         """Full config builds successfully."""
         config = Config(**full_config_dict)
-        assert config.openai.base_url == "https://api.example.com/v1"
+        assert config.providers[0].base_url == "https://api.example.com/v1"
         assert config.agents[0].model == "gpt-4"
         assert config.agents[0].tools == ["Bash", "Read", "Write"]
+        assert config.agents[0].provider == "main"
+
+    def test_duplicate_provider_name_rejected(self):
+        """重复 provider name 报错"""
+        with pytest.raises(ValueError, match="duplicate provider name"):
+            Config(
+                providers=[  # ty: ignore[invalid-argument-type]
+                    {"name": "x", "base_url": "http://a", "api_key": "k1"},
+                    {"name": "x", "base_url": "http://b", "api_key": "k2"},
+                ],
+                agents=[{"name": "default", "model": "m"}],  # ty: ignore[invalid-argument-type]
+            )
+
+    def test_agent_references_unknown_provider(self):
+        """agent 引用不存在的 provider 报错"""
+        with pytest.raises(ValueError, match="unknown provider"):
+            Config(
+                providers=[  # ty: ignore[invalid-argument-type]
+                    {"name": "a", "base_url": "http://a", "api_key": "k"},
+                ],
+                agents=[{"name": "default", "model": "m", "provider": "nonexistent"}],  # ty: ignore[invalid-argument-type]
+            )
+
+    def test_get_provider_helper(self, minimal_config_dict):
+        """get_provider 按名称查询"""
+        config = Config(**minimal_config_dict)
+        p = config.get_provider("default")
+        assert p.name == "default"
+        # None 返回第一个
+        p2 = config.get_provider(None)
+        assert p2.name == "default"
 
 
 class TestLoadConfig:
@@ -124,10 +170,9 @@ class TestLoadConfig:
                 with pytest.raises(RuntimeError) as exc_info:
                     load_config()
                 assert "created template" in str(exc_info.value)
-                # 验证模板文件已创建
                 assert config_path.exists()
                 content = config_path.read_text()
-                assert "openai:" in content
+                assert "providers:" in content
                 assert "agents:" in content
 
     def test_load_config_success(self, minimal_config_dict):
@@ -141,8 +186,8 @@ class TestLoadConfig:
                 "wing.config.get_config_path", return_value=Path(temp_path)
             ):
                 config = load_config()
-                assert config.openai.base_url == "https://api.example.com/v1"
-                assert config.openai.api_key == "test-key-123"
+                assert config.providers[0].base_url == "https://api.example.com/v1"
+                assert config.providers[0].api_key == "test-key-123"
         finally:
             os.unlink(temp_path)
 
@@ -192,10 +237,10 @@ class TestLoadConfig:
         finally:
             os.unlink(temp_path)
 
-    def test_load_config_missing_required_field(self):
-        """缺少必需字段"""
+    def test_load_config_missing_providers(self):
+        """缺少 providers 字段"""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump({"agents": [{"name": "x", "model": "gpt-4"}]}, f)  # 缺少 openai
+            yaml.dump({"agents": [{"name": "x", "model": "gpt-4"}]}, f)
             temp_path = f.name
 
         try:
@@ -237,18 +282,26 @@ class TestLoadConfig:
                 config1 = load_config()
 
                 # 修改文件
-                new_config = dict(minimal_config_dict)
-                new_config["openai"]["base_url"] = "https://new.example.com"
+                new_config = {
+                    "providers": [
+                        {
+                            "name": "default",
+                            "base_url": "https://new.example.com",
+                            "api_key": "test-key-123",
+                        },
+                    ],
+                    "agents": [{"name": "default", "model": "gpt-4"}],
+                }
                 with open(temp_path, "w") as f:
                     yaml.dump(new_config, f)
 
                 # 不强制重载，应返回缓存
                 config2 = load_config()
-                assert config2.openai.base_url == "https://api.example.com/v1"
+                assert config2.providers[0].base_url == "https://api.example.com/v1"
 
                 # 强制重载
                 config3 = load_config(reload=True)
-                assert config3.openai.base_url == "https://new.example.com"
+                assert config3.providers[0].base_url == "https://new.example.com"
                 assert config3 is not config1
         finally:
             os.unlink(temp_path)
@@ -268,7 +321,7 @@ class TestGetConfig:
                 "wing.config.get_config_path", return_value=Path(temp_path)
             ):
                 config = get_config()
-                assert config.openai.base_url == "https://api.example.com/v1"
+                assert config.providers[0].base_url == "https://api.example.com/v1"
         finally:
             os.unlink(temp_path)
 
@@ -304,7 +357,6 @@ class TestResetConfig:
             ):
                 _ = get_config()
                 reset_config()
-                # 重置后内部缓存应为 None
                 import wing.config as config_module
 
                 assert config_module._config is None

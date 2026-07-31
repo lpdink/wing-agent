@@ -15,14 +15,14 @@ from wing.schema import LLMUsage, Message, ToolCall
 from .event_sink import AgentEventSink
 
 if TYPE_CHECKING:
-    from wing.openai_provider import OpenAIProvider
+    from wing.provider.base import ModelProvider
     from wing.schema import Tool
 
 
 class LLMCaller:
     """LLM 流式调用器——消费 chunk 流，产出完整 assistant Message。"""
 
-    def __init__(self, model_provider: OpenAIProvider, sink: AgentEventSink) -> None:
+    def __init__(self, model_provider: ModelProvider, sink: AgentEventSink) -> None:
         self._provider = model_provider
         self._sink = sink
 

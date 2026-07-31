@@ -855,34 +855,53 @@ class TestSystemCommands:
 class TestSystemModels:
     """GET /api/models 测试。"""
 
-    @patch("wing.gateway.routes.system.OpenAIProvider")
-    def test_list_models_ok(self, mock_provider_cls, client: TestClient):
+    @patch("wing.gateway.routes.system.create_provider")
+    @patch("wing.gateway.routes.system.get_config")
+    def test_list_models_ok(
+        self, mock_get_config, mock_create_provider, client: TestClient
+    ):
         """正常获取模型列表。"""
+        from wing.config import ProviderConfig
+
+        mock_cfg = MagicMock()
+        mock_cfg.providers = [
+            ProviderConfig(name="default", base_url="http://x", api_key="k")
+        ]
+        mock_get_config.return_value = mock_cfg
+
         mock_provider = MagicMock()
 
         async def mock_list_models():
             return ["gpt-4o", "gpt-4o-mini"]
 
         mock_provider.list_models = mock_list_models
-        mock_provider_cls.return_value = mock_provider
+        mock_create_provider.return_value = mock_provider
 
         resp = client.get("/api/models")
         assert resp.status_code == 200
         data = resp.json()
         assert data["models"] == ["gpt-4o", "gpt-4o-mini"]
 
-    @patch("wing.gateway.routes.system.OpenAIProvider")
+    @patch("wing.gateway.routes.system.create_provider")
+    @patch("wing.gateway.routes.system.get_config")
     def test_list_models_error_returns_empty(
-        self, mock_provider_cls, client: TestClient
+        self, mock_get_config, mock_create_provider, client: TestClient
     ):
         """调用失败时返回空列表。"""
+        from wing.config import ProviderConfig
+
+        mock_cfg = MagicMock()
+        mock_cfg.providers = [
+            ProviderConfig(name="default", base_url="http://x", api_key="k")
+        ]
+        mock_get_config.return_value = mock_cfg
 
         async def mock_list_models():
             raise RuntimeError("API error")
 
         mock_provider = MagicMock()
         mock_provider.list_models = mock_list_models
-        mock_provider_cls.return_value = mock_provider
+        mock_create_provider.return_value = mock_provider
 
         resp = client.get("/api/models")
         assert resp.status_code == 200

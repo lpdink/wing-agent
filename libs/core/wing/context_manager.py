@@ -14,7 +14,7 @@ import frontmatter
 from .common.logger import log
 from .common.tracked_list import TrackedList
 from .compactor import Compactor
-from .openai_provider import OpenAIProvider
+from .provider.base import ModelProvider
 from .schema import AgentSkill, LLMUsage, Message, Tool
 
 
@@ -370,7 +370,7 @@ More detail in: "{dir}/SKILL.md" """
     async def get_messages_for_llm(
         self,
         model: str,
-        model_provider: OpenAIProvider,
+        model_provider: ModelProvider,
         current_tools: Callable[[], list[Tool]],
     ) -> LLMMessagesResult:
         """Get messages ready for LLM API call.
@@ -385,7 +385,7 @@ More detail in: "{dir}/SKILL.md" """
 
         Args:
             model: 主 model 名称（触发 compact 时透传给 provider）。
-            model_provider: OpenAIProvider 实例（触发 compact 时使用）。
+            model_provider: ModelProvider 实例（触发 compact 时使用）。
             current_tools: 零参 callable，返回 Agent 当前可执行工具。
                 compact sync 在 await 结束后求值，避免并发切换导致过期快照。
         """
@@ -453,7 +453,7 @@ More detail in: "{dir}/SKILL.md" """
         self,
         msgs: list[Message],
         model: str,
-        model_provider: OpenAIProvider,
+        model_provider: ModelProvider,
     ) -> None:
         """启动后台异步 compact task。"""
         preserve_last = msgs[-1].role == "user" if msgs else False
@@ -584,7 +584,7 @@ More detail in: "{dir}/SKILL.md" """
     async def do_manual_compact(
         self,
         model: str,
-        model_provider: OpenAIProvider,
+        model_provider: ModelProvider,
         current_tools: Callable[[], list[Tool]],
     ) -> tuple[int, int]:
         """手动压缩上下文。
@@ -595,7 +595,7 @@ More detail in: "{dir}/SKILL.md" """
 
         Args:
             model: 主 model 名称
-            model_provider: OpenAIProvider 实例
+            model_provider: ModelProvider 实例
             current_tools: 零参 callable，返回 Agent 当前可执行工具
 
         Returns:

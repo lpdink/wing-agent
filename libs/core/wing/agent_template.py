@@ -32,6 +32,8 @@ class AgentTemplate(BaseModel):
 
     name: str
     model: str
+    provider_name: str | None = None
+    """绑定的 provider 名称（对应 providers[].name）。None 时使用第一个 provider。"""
     system_prompt: str = ""
     resolved_tools: list[Tool] = Field(default_factory=list)
     skills_patterns: list[str] = Field(default_factory=list)
@@ -98,6 +100,7 @@ class AgentTemplate(BaseModel):
         return cls(
             name=agent_config.name,
             model=agent_config.model,
+            provider_name=agent_config.provider,
             system_prompt=agent_config.system_prompt,
             resolved_tools=resolved_tools,
             skills_patterns=list(agent_config.skills),

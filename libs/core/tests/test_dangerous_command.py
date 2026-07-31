@@ -2,14 +2,18 @@
 
 from unittest.mock import patch
 
-from wing.config import AgentConfig, Config, OpenAIConfig
+from wing.config import AgentConfig, Config, ProviderConfig
 from wing.tools.shell_safety import is_dangerous_command
 
 
 def _cfg(safe_patterns: list[str] | None = None) -> Config:
     """Create a Config with optional safe_command_patterns."""
     return Config(
-        openai=OpenAIConfig(base_url="https://api.example.com", api_key="test"),
+        providers=[
+            ProviderConfig(
+                name="default", base_url="https://api.example.com", api_key="test"
+            )
+        ],
         agents=[AgentConfig(name="default", model="gpt-4")],
         safe_command_patterns=safe_patterns or [],
     )

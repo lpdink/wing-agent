@@ -19,7 +19,7 @@ from wing.common.logger import log
 from wing.config import get_config
 from wing.event import AskEvent, EventTarget, WingEvent
 from wing.event_bus import event_bus
-from wing.openai_provider import OpenAIProvider
+from wing.provider.base import ModelProvider
 from wing.schema import Tool
 
 from .event_sink import AgentEventSink
@@ -35,7 +35,7 @@ class WingAgent:
     def __init__(
         self,
         model: str,
-        model_provider: OpenAIProvider,
+        model_provider: ModelProvider,
         context_manager: Any,  # ContextManager（避免循环导入）
         stream: bool = False,
         tools: list[Tool] | None = None,

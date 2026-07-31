@@ -30,14 +30,18 @@ def _isolate_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
 def _mock_config():
     """自动 mock config，避免加载真实 config.yaml。
 
-    提供一个最小化的测试 Config，使用新的 agents 列表格式。
+    提供一个最小化的测试 Config，使用新的 providers 列表格式。
     """
-    from wing.config import AgentConfig, Config, OpenAIConfig, reset_config
+    from wing.config import AgentConfig, Config, ProviderConfig, reset_config
 
     reset_config()
 
     test_config = Config(
-        openai=OpenAIConfig(base_url="https://api.example.com", api_key="test"),
+        providers=[
+            ProviderConfig(
+                name="default", base_url="https://api.example.com", api_key="test"
+            )
+        ],
         agents=[
             AgentConfig(
                 name="default",

@@ -17,30 +17,48 @@ DEFAULT_CONFIG_YAML = """\
 # Location: $WING_HOME/core/config.yaml (default: ~/.wing/core/config.yaml)
 # ──────────────────────────────────────────────────────────────
 
-# ── LLM Provider ─────────────────────────────────────────────
-openai:
-  # Base URL for the OpenAI-compatible API endpoint.
-  base_url: ChangeHere    # e.g. https://api.openai.com/v1
+# ── LLM Providers ───────────────────────────────────────────
+# Configure one or more LLM providers. Each provider declares
+# its protocol (openai or anthropic), endpoint, and credentials.
+providers:
+  - name: default
+    protocol: openai          # openai | anthropic
+    base_url: ChangeHere      # e.g. https://api.openai.com/v1
+    api_key: ChangeHere       # e.g. sk-xxx
 
-  # API key for authentication.
-  api_key: ChangeHere     # e.g. sk-xxx
+    # Streaming first-chunk timeout (seconds).
+    timeout_first_chunk: 300.0
 
-  # Streaming first-chunk timeout (seconds). Some providers have high
-  # first-chunk latency when the agent is performing long tool calls.
-  timeout_first_chunk: 300.0
+    # Total response timeout for non-streaming calls (seconds).
+    timeout_total: 600.0
 
-  # Total response timeout for non-streaming calls (seconds).
-  timeout_total: 600.0
+    # Explicit cache mode: appends cache_control ephemeral markers
+    # to the last content block. Silently ignored by providers
+    # that don't support it.
+    explicit_cache_mode: true
 
-  # Explicit cache mode: appends cache_control ephemeral markers to
-  # the last content block. Supported by DashScope/Alibaba Cloud.
-  # Silently ignored by providers that don't support it.
-  explicit_cache_mode: true
+    # Reasoning effort level. Options: low / medium / high / max.
+    # Set to null to let the provider decide.
+    reasoning_effort: null
 
-  # Reasoning effort level, sent via extra_body. Options:
-  # low / medium / high / xhigh / max.
-  # Set to null to let the provider decide.
-  reasoning_effort: null
+    # Extra fields merged into the request body top-level.
+    # Use for provider-specific parameters (e.g. thinking toggle).
+    extra_body: {}
+    # Example for DashScope:
+    #   extra_body:
+    #     enable_thinking: true
+    #     preserve_thinking: true
+    # Example for DeepSeek:
+    #   extra_body:
+    #     thinking:
+    #       type: enabled
+
+  # Additional provider example (Anthropic):
+  # - name: claude
+  #   protocol: anthropic
+  #   base_url: https://api.anthropic.com
+  #   api_key: sk-ant-xxx
+  #   anthropic_version: "2023-06-01"
 
 # ── Agent Templates ──────────────────────────────────────────
 # At least one agent is required. Each agent defines a model,
@@ -48,6 +66,7 @@ openai:
 agents:
   - name: default
     model: ChangeHere      # e.g. gpt-4, qwen-max, etc.
+    # provider: default    # references providers[].name (defaults to first)
 
     # Mark as default agent (used when no agent is explicitly selected).
     default: true

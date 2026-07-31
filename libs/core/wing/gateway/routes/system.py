@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Request
 
+from wing.config import get_config
 from wing.event import CommandInfo
 from wing.gateway.protocol import (
     AgentsResponse,
@@ -25,9 +26,10 @@ from wing.gateway.protocol import (
     ToolsListResponse,
 )
 from wing.magic_command.registry import magic_registry
-from wing.openai_provider import OpenAIProvider
+from wing.provider import create_provider
 
 if TYPE_CHECKING:
+    from wing.config import ProviderConfig
     from wing.gateway.server import GatewayServer
 
 router = APIRouter(tags=["system"])
@@ -64,13 +66,25 @@ async def list_commands(request: Request) -> CommandsResponse:
     summary="获取可用模型列表",
 )
 async def list_models(request: Request) -> ModelsResponse:
-    """获取当前配置下可用的 LLM 模型列表。"""
-    try:
-        provider = OpenAIProvider()
-        models = await asyncio.wait_for(provider.list_models(), timeout=10.0)
-    except Exception:
-        models = []
-    return ModelsResponse(models=models)
+    """并发请求所有已配置 provider，聚合去重返回模型列表。"""
+    config = get_config()
+
+    async def _query_one(provider_cfg: "ProviderConfig") -> list[str]:
+        try:
+            provider = create_provider(provider_cfg)
+            return await asyncio.wait_for(provider.list_models(), timeout=10.0)
+        except Exception:
+            return []
+
+    results = await asyncio.gather(
+        *[_query_one(p) for p in config.providers],
+        return_exceptions=True,
+    )
+    models: set[str] = set()
+    for r in results:
+        if isinstance(r, list):
+            models.update(r)
+    return ModelsResponse(models=sorted(models))
 
 
 @router.get(

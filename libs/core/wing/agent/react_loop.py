@@ -26,7 +26,7 @@ from .tool_executor import InterruptedToolResults, ToolExecutor
 
 if TYPE_CHECKING:
     from wing.context_manager import ContextManager
-    from wing.openai_provider import OpenAIProvider
+    from wing.provider.base import ModelProvider
     from wing.schema import Tool
 
 
@@ -73,7 +73,7 @@ class ReActLoop:
         context_manager: ContextManager,
         inbox: Inbox,
         model: str,
-        model_provider: OpenAIProvider,
+        model_provider: ModelProvider,
         current_tools: Callable[[], list[Tool]],
         stream: bool = True,
         set_working: Callable[[bool], None] | None = None,
