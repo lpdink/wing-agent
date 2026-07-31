@@ -312,6 +312,7 @@ class WingRuntime:
         session_id: str,
         *,
         model: str | None = None,
+        provider: str | None = None,
         agent: str | None = None,
         title: str | None = None,
         thinking: bool | None = None,
@@ -343,6 +344,7 @@ class WingRuntime:
         # 委托给 Session 执行状态变更
         await session.update_state(
             model=model,
+            provider_name=provider,
             template=template,
             title=title,
             thinking=thinking,

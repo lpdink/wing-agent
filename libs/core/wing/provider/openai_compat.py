@@ -86,6 +86,8 @@ class OpenAICompatProvider(ModelProvider):
                 yield item
 
     async def list_models(self) -> list[str]:
+        if self._config.models:
+            return sorted(self._config.models)
         try:
             resp = await self._client.get("/models")
             resp.raise_for_status()

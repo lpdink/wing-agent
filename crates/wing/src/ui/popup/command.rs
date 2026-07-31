@@ -364,7 +364,7 @@ pub struct SessionCandidate {
 pub struct CandidateCache {
     /// Dynamic command list from HTTP GET /api/commands.
     pub commands: Vec<CommandInfo>,
-    /// Model list from HTTP GET /api/models. Description is empty.
+    /// Model list from HTTP GET /api/models. Tuple: (model_name, provider_name).
     pub models: Vec<(String, String)>,
     /// Session list from HTTP GET /api/session/list (rich, two-line render).
     pub sessions: Vec<SessionCandidate>,

@@ -143,7 +143,9 @@ class Session:
         from wing.agent import WingAgent
 
         # 1. 干净关闭旧 agent（清空 inbox + cancel worker + await 完成）
+        old_provider = self._agent.model_provider
         await self._agent.shutdown()
+        await old_provider.aclose()
 
         # 2. 用同一个 TrackedList 构建新 ContextManager
         self._context_manager = ContextManager(
@@ -197,7 +199,7 @@ class Session:
 
         # 1. model 覆盖
         if override.model is not None:
-            agent.model = override.model
+            agent.set_model(override.model)
 
         # 2. system_prompt 替换（先替换，后追加，保证顺序正确）
         if override.system_prompt is not None:
@@ -358,6 +360,7 @@ class Session:
         self,
         *,
         model: str | None = None,
+        provider_name: str | None = None,
         template: "AgentTemplate | None" = None,
         title: str | None = None,
         thinking: bool | None = None,
@@ -369,7 +372,8 @@ class Session:
         """更新 session 状态。按 template → model → tools → title → thinking → effort → yolo → workspace 顺序执行。
 
         Args:
-            model: 切换模型
+            model: 切换模型（裸模型名）
+            provider_name: 切换 provider（配合 model 使用）
             template: 切换 agent 模板（None 表示不切换）
             title: 设置标题
             thinking: 开关 thinking 模式
@@ -390,7 +394,7 @@ class Session:
             await self.switch_template(template)
 
         if model is not None:
-            self.agent.model = model
+            self._apply_model(model, provider_name)
 
         if tools is not None:
             self.agent.set_tools(tools)
@@ -409,6 +413,23 @@ class Session:
 
         if workspace is not None:
             self.set_workspace(workspace)
+
+    def _apply_model(self, model: str, provider_name: str | None = None) -> None:
+        """切换模型，必要时切换 provider。"""
+        new_provider = None
+        if provider_name is not None:
+            current_name = self.agent.model_provider.name
+            if provider_name != current_name:
+                cfg = get_config().get_provider(provider_name)
+                new_provider = create_provider(cfg, session_id=self._session_id)
+
+        old_provider = self.agent.model_provider
+        self.agent.set_model(model, provider=new_provider)
+        # 关闭旧 provider（fire-and-forget）
+        if new_provider is not None and old_provider is not new_provider:
+            import asyncio
+
+            asyncio.ensure_future(old_provider.aclose())
 
     def touch_last_interaction(self) -> None:
         """更新最后互动时间并持久化。"""

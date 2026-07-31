@@ -37,6 +37,8 @@ class ProviderConfig(BaseModel):
     """透传到 request body 的额外字段（平铺合并到顶层）。"""
     anthropic_version: str = "2023-06-01"
     """Anthropic API 版本 header（仅 anthropic 协议使用）。"""
+    models: list[str] = Field(default_factory=list)
+    """静态模型列表。配置后不再请求远端 GET /models。"""
 
     @field_validator("name")
     @classmethod

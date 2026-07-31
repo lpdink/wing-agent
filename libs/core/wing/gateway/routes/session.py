@@ -323,6 +323,7 @@ async def update_session(
         v is None
         for v in (
             body.model,
+            body.provider,
             body.agent,
             body.title,
             body.thinking,
@@ -340,6 +341,7 @@ async def update_session(
         await server.runtime.update_session(
             session_id=body.session_id,
             model=body.model,
+            provider=body.provider,
             agent=body.agent,
             title=body.title,
             thinking=body.thinking,

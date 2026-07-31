@@ -92,6 +92,8 @@ class AnthropicProvider(ModelProvider):
                 yield item
 
     async def list_models(self) -> list[str]:
+        if self._config.models:
+            return sorted(self._config.models)
         try:
             resp = await self._client.get("/v1/models")
             resp.raise_for_status()
@@ -105,10 +107,14 @@ class AnthropicProvider(ModelProvider):
         await self._client.aclose()
 
     def set_thinking(self, enable: bool) -> None:
-        self.thinking = enable
+        # Anthropic 协议不通过此 flag 控制 thinking；用户应通过 extra_body 配置。
+        # No-op：不持有状态，不影响请求。
+        pass
 
     def set_reasoning_effort(self, effort: str | None) -> None:
-        self.reasoning_effort = effort
+        # Anthropic 协议无 reasoning_effort 概念（百炼用 output_config.effort，走 extra_body）。
+        # No-op：不持有状态，不影响请求。
+        pass
 
     def reload(self) -> list[str]:
         from wing.config import get_config
@@ -177,7 +183,16 @@ class AnthropicProvider(ModelProvider):
             "stream": stream,
         }
         if system_text:
-            body["system"] = system_text
+            if self.explicit_cache_mode:
+                body["system"] = [
+                    {
+                        "type": "text",
+                        "text": system_text,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+            else:
+                body["system"] = system_text
         if tools:
             body["tools"] = [self._tool_to_anthropic(t) for t in tools]
 
@@ -211,9 +226,13 @@ class AnthropicProvider(ModelProvider):
                 blocks: list[dict] = []
                 # thinking content
                 if msg.reasoning_content:
-                    blocks.append(
-                        {"type": "thinking", "thinking": msg.reasoning_content}
-                    )
+                    thinking_block: dict = {
+                        "type": "thinking",
+                        "thinking": msg.reasoning_content,
+                    }
+                    if msg.reasoning_signature:
+                        thinking_block["signature"] = msg.reasoning_signature
+                    blocks.append(thinking_block)
                 # text content
                 if msg.content:
                     blocks.append({"type": "text", "text": msg.content})
@@ -320,6 +339,7 @@ class AnthropicProvider(ModelProvider):
         content_blocks = data.get("content", [])
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
+        reasoning_signature: str | None = None
         tool_calls: list[ToolCall] = []
 
         for block in content_blocks:
@@ -328,6 +348,8 @@ class AnthropicProvider(ModelProvider):
                 text_parts.append(block.get("text", ""))
             elif btype == "thinking":
                 reasoning_parts.append(block.get("thinking", ""))
+                if block.get("signature"):
+                    reasoning_signature = block["signature"]
             elif btype == "tool_use":
                 tool_calls.append(
                     ToolCall(
@@ -345,6 +367,7 @@ class AnthropicProvider(ModelProvider):
         yield LLMResponse(
             content="".join(text_parts) or None,
             reasoning_content="".join(reasoning_parts) or None,
+            reasoning_signature=reasoning_signature,
             tool_calls=tool_calls or None,
             usage=LLMUsage(
                 prompt_tokens=prompt_tokens,
@@ -381,6 +404,7 @@ class AnthropicProvider(ModelProvider):
         log.info("[DONE] anthropic stream connected")
 
         first_token_ts: float | None = None
+        reasoning_signature: str | None = None
         # 当前活跃的 content block 状态
         current_block_type: str = ""
         current_tool_id: str = ""
@@ -392,6 +416,7 @@ class AnthropicProvider(ModelProvider):
         prompt_tokens = 0
         completion_tokens = 0
         cached_tokens = 0
+        cache_creation = 0
 
         try:
             async for event in parse_sse_stream(resp.aiter_lines()):
@@ -439,6 +464,12 @@ class AnthropicProvider(ModelProvider):
                                 request_id=request_id,
                             ),
                         )
+
+                    elif delta_type == "signature_delta":
+                        # Anthropic thinking block signature（多轮回放必需）
+                        sig = delta.get("signature", "")
+                        if sig:
+                            reasoning_signature = sig
 
                     elif delta_type == "input_json_delta":
                         partial_json = delta.get("partial_json", "")
@@ -518,6 +549,10 @@ class AnthropicProvider(ModelProvider):
                     completion_tokens = usage_delta.get(
                         "output_tokens", completion_tokens
                     )
+                    cached_tokens = usage_delta.get(
+                        "cache_read_input_tokens", cached_tokens
+                    )
+                    cache_creation = usage_delta.get("cache_creation_input_tokens", 0)
 
                 elif event_type == "message_start":
                     msg = data.get("message", {})
@@ -526,15 +561,19 @@ class AnthropicProvider(ModelProvider):
                     cached_tokens = usage_start.get("cache_read_input_tokens", 0)
 
                 elif event_type == "message_stop":
-                    # 最终 usage 发射
+                    # 最终 usage + signature 发射
+                    # Anthropic 的 input_tokens 仅为非缓存部分；
+                    # 对齐 OpenAI 语义：prompt_tokens = 总输入（含缓存）
+                    total_prompt = prompt_tokens + cached_tokens + cache_creation
                     decode_tps = 0.0
                     if completion_tokens > 0 and first_token_ts is not None:
                         decode_elapsed = time.monotonic() - first_token_ts
                         if decode_elapsed > 0:
                             decode_tps = completion_tokens / decode_elapsed
                     yield LLMResponse(
+                        reasoning_signature=reasoning_signature,
                         usage=LLMUsage(
-                            prompt_tokens=prompt_tokens,
+                            prompt_tokens=total_prompt,
                             completion_tokens=completion_tokens,
                             cached_tokens=cached_tokens,
                             first_chunk_rt_ms=first_chunk_rt_ms,

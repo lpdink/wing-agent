@@ -66,14 +66,16 @@ async def list_commands(request: Request) -> CommandsResponse:
     summary="获取可用模型列表",
 )
 async def list_models(request: Request) -> ModelsResponse:
-    """并发请求所有已配置 provider，聚合返回模型列表（带 provider 前缀）。"""
+    """并发请求所有已配置 provider，聚合返回结构化模型列表。"""
+    from wing.gateway.protocol import ModelEntry
+
     config = get_config()
 
-    async def _query_one(provider_cfg: "ProviderConfig") -> list[str]:
+    async def _query_one(provider_cfg: "ProviderConfig") -> list[ModelEntry]:
         provider = create_provider(provider_cfg)
         try:
             models = await asyncio.wait_for(provider.list_models(), timeout=10.0)
-            return [f"{provider_cfg.name}.{m}" for m in models]
+            return [ModelEntry(provider=provider_cfg.name, model=m) for m in models]
         except Exception:
             return []
         finally:
@@ -83,11 +85,12 @@ async def list_models(request: Request) -> ModelsResponse:
         *[_query_one(p) for p in config.providers],
         return_exceptions=True,
     )
-    models: list[str] = []
+    entries: list[ModelEntry] = []
     for r in results:
         if isinstance(r, list):
-            models.extend(r)
-    return ModelsResponse(models=sorted(models))
+            entries.extend(r)
+    entries.sort(key=lambda e: (e.provider, e.model))
+    return ModelsResponse(models=entries)
 
 
 @router.get(

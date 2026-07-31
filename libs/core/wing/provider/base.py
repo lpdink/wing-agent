@@ -8,16 +8,25 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import AsyncIterator
+from typing import TYPE_CHECKING, AsyncIterator
 
 from wing.schema import LLMResponse, Message, Tool
+
+if TYPE_CHECKING:
+    from wing.config import ProviderConfig
 
 
 class ModelProvider(ABC):
     """模型调用 provider 基类。"""
 
+    _config: ProviderConfig
     thinking: bool = True
     reasoning_effort: str | None = None
+
+    @property
+    def name(self) -> str:
+        """Provider 名称（来自 config）。"""
+        return self._config.name
 
     @abstractmethod
     def generate(

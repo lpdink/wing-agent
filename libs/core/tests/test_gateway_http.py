@@ -642,6 +642,7 @@ class TestSessionUpdate:
         mock_runtime.update_session.assert_called_once_with(
             session_id="test-id",
             model="gpt-4o-mini",
+            provider=None,
             agent=None,
             title=None,
             thinking=None,
@@ -791,6 +792,7 @@ class TestSessionUpdate:
         mock_runtime.update_session.assert_called_once_with(
             session_id="test-id",
             model=None,
+            provider=None,
             agent=None,
             title=None,
             thinking=None,
@@ -884,7 +886,10 @@ class TestSystemModels:
         resp = client.get("/api/models")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["models"] == ["default.gpt-4o", "default.gpt-4o-mini"]
+        assert data["models"] == [
+            {"provider": "default", "model": "gpt-4o"},
+            {"provider": "default", "model": "gpt-4o-mini"},
+        ]
 
     @patch("wing.gateway.routes.system.create_provider")
     @patch("wing.gateway.routes.system.get_config")

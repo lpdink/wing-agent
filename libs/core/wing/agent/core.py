@@ -170,6 +170,15 @@ class WingAgent:
     def set_max_turns(self, max_turns: int | None) -> None:
         self._loop.max_turns = max_turns
 
+    def set_model(self, model: str, provider: "ModelProvider | None" = None) -> None:
+        """切换模型（及可选的 provider）。同步更新所有内部引用。"""
+        self.model = model
+        self._loop._model = model
+        if provider is not None:
+            self.model_provider = provider
+            self._llm_caller._provider = provider
+            self._loop._model_provider = provider
+
     def set_reasoning_effort(self, effort: str | None) -> None:
         self.model_provider.reasoning_effort = effort
 
@@ -209,7 +218,11 @@ class WingAgent:
         log.info("Agent interrupted and reset")
 
     async def shutdown(self) -> None:
-        """显式关闭 Agent：不重建 worker。"""
+        """显式关闭 Agent：不重建 worker。
+
+        注意：不关闭 provider——provider 生命周期由 Session 层管理
+        （Explorer 子 agent 共享父 agent 的 provider）。
+        """
         self._fire_interrupt_hooks()
         self._inbox.cancel_all_waiters()
         self._inbox.clear()

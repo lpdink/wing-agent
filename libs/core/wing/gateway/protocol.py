@@ -469,6 +469,9 @@ class UpdateSessionRequest(BaseModel):
 
     session_id: str = Field(description="目标 session ID")
     model: str | None = Field(default=None, description="切换模型")
+    provider: str | None = Field(
+        default=None, description="切换 provider（配合 model 使用）"
+    )
     agent: str | None = Field(default=None, description="切换 agent 模板")
     title: str | None = Field(default=None, description="设置 session 名称")
     thinking: bool | None = Field(default=None, description="开关 thinking 模式")
@@ -518,10 +521,19 @@ class CommandsResponse(BaseModel):
     )
 
 
+class ModelEntry(BaseModel):
+    """单个可用模型条目。"""
+
+    provider: str = Field(description="Provider 名称")
+    model: str = Field(description="模型名称")
+
+
 class ModelsResponse(BaseModel):
     """GET /api/models 响应——可用模型列表。"""
 
-    models: list[str] = Field(default_factory=list, description="可用模型名称列表")
+    models: list[ModelEntry] = Field(
+        default_factory=list, description="可用模型列表（provider + model）"
+    )
 
 
 class AgentsResponse(BaseModel):

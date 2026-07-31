@@ -526,7 +526,14 @@ impl App {
             _ if text.starts_with("/model ") => {
                 match parse_string_arg(text, "/model") {
                     Some(model) => {
-                        self.push_intent(AppIntent::set_model(model));
+                        let provider = self
+                            .popup
+                            .cache
+                            .models
+                            .iter()
+                            .find(|(m, _)| m == &model)
+                            .map(|(_, p)| p.clone());
+                        self.push_intent(AppIntent::set_model(model, provider));
                     }
                     None => {
                         self.push_intent(AppIntent::FetchModels);
@@ -866,7 +873,7 @@ impl App {
                 self.popup.cache.models = resp
                     .models
                     .into_iter()
-                    .map(|m| (m, String::new()))
+                    .map(|e| (e.model, e.provider))
                     .collect();
                 self.update_popup();
             }

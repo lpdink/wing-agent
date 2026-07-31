@@ -100,6 +100,8 @@ class ToolCallDelta(BaseModel):
 class LLMResponse(BaseModel):
     content: str | None = None
     reasoning_content: str | None = None
+    reasoning_signature: str | None = None
+    """Anthropic thinking block signature（多轮回放必需）。"""
     tool_calls: list[ToolCall] | None = None
     tool_call_deltas: list[ToolCallDelta] | None = None
     usage: LLMUsage = LLMUsage()
@@ -117,6 +119,8 @@ class Message(ChainNode):
     role: Literal["system", "user", "assistant", "tool"]
     content: str | None = None
     reasoning_content: str | None = None
+    reasoning_signature: str | None = None
+    """Anthropic thinking block signature（多轮回放必需）。"""
     tool_calls: list[ToolCall] | None = None  # assistant calls tools
     tool_call_id: str | None = None  # tool response only
     usage: "LLMUsage | None" = (

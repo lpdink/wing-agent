@@ -542,6 +542,7 @@ More detail in: "{dir}/SKILL.md" """
                 role=msg.role,
                 content=msg.content,
                 reasoning_content=msg.reasoning_content,
+                reasoning_signature=msg.reasoning_signature,
                 tool_calls=msg.tool_calls,
                 tool_call_id=msg.tool_call_id,
                 usage=msg.usage,
@@ -761,6 +762,7 @@ More detail in: "{dir}/SKILL.md" """
                 role=parent_msg.role,
                 content=parent_msg.content,
                 reasoning_content=parent_msg.reasoning_content,
+                reasoning_signature=parent_msg.reasoning_signature,
                 tool_calls=parent_msg.tool_calls,
                 tool_call_id=parent_msg.tool_call_id,
                 parent_uuid=parent_msg.parent_uuid,  # 祖父 uuid

@@ -178,6 +178,7 @@ pub async fn execute_intent(
         }
         AppIntent::UpdateSession {
             model,
+            provider,
             agent,
             title,
             thinking,
@@ -189,6 +190,7 @@ pub async fn execute_intent(
                 let req = wing_api_client::models::UpdateSessionRequest {
                     session_id: app.session_id.clone(),
                     model: model.clone(),
+                    provider: provider.clone(),
                     agent: agent.clone(),
                     title: title.clone(),
                     thinking,

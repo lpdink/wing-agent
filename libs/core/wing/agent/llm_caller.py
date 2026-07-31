@@ -39,6 +39,7 @@ class LLMCaller:
         """
         content_chunks: list[str] = []
         reasoning_chunks: list[str] = []
+        reasoning_signature: str | None = None
         pending_tool_calls: list[ToolCall] = []
         last_usage: LLMUsage | None = None
 
@@ -51,6 +52,9 @@ class LLMCaller:
             if chunk.reasoning_content:
                 reasoning_chunks.append(chunk.reasoning_content)
                 self._sink.llm_reasoning(chunk.reasoning_content)
+
+            if chunk.reasoning_signature:
+                reasoning_signature = chunk.reasoning_signature
 
             if chunk.content:
                 content_chunks.append(chunk.content)
@@ -81,6 +85,7 @@ class LLMCaller:
             role="assistant",
             content="".join(content_chunks),
             reasoning_content="".join(reasoning_chunks),
+            reasoning_signature=reasoning_signature,
             tool_calls=pending_tool_calls,
             usage=last_usage,
         )
