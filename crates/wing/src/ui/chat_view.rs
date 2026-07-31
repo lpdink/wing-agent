@@ -187,9 +187,6 @@ pub struct ChatView {
     scroll_offset: usize,
     /// Whether auto-scroll is active (follow bottom).
     auto_scroll: bool,
-    /// Count of pending (unresolved) Bash tool calls — used to skip
-    /// timer scanning when zero.
-    pending_bash_count: usize,
     /// Header lines (wing logo + MOTD) — always rendered at the top,
     /// scroll with the content. Preserved across `clear()`.
     header_lines: Vec<Line<'static>>,
@@ -206,7 +203,6 @@ impl ChatView {
             cell_heights: Vec::new(),
             scroll_offset: 0,
             auto_scroll: true,
-            pending_bash_count: 0,
             header_lines: Vec::new(),
             input_card_rect: None,
         }
@@ -230,14 +226,6 @@ impl ChatView {
 
         if needs_separator {
             self.cells.push(CachedCell::new(ChatCell::Separator));
-        }
-
-        // Track pending Bash tool calls for timer refresh.
-        if let ChatCell::ToolCall(ref block) = cell
-            && block.tool_name == TOOL_BASH
-            && block.status == ToolStatus::Pending
-        {
-            self.pending_bash_count += 1;
         }
 
         self.cells.push(CachedCell::new(cell));
@@ -528,23 +516,6 @@ impl ChatView {
 
     /// Set the result on a tool call block by index (from RenderContext).
     pub fn set_tool_result_by_index(&mut self, index: usize, result: String, success: bool) {
-        // Check if this is a pending Bash tool before borrowing for mutate.
-        let is_pending_bash = self
-            .cells
-            .get(index)
-            .and_then(|c| {
-                if let ChatCell::ToolCall(block) = c.cell() {
-                    Some(block.tool_name == TOOL_BASH && block.status == ToolStatus::Pending)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(false);
-
-        if is_pending_bash {
-            self.pending_bash_count = self.pending_bash_count.saturating_sub(1);
-        }
-
         if let Some(cached) = self.cells.get_mut(index)
             && matches!(cached.cell(), ChatCell::ToolCall(_))
         {
@@ -591,28 +562,15 @@ impl ChatView {
     }
 
     /// Set tool status on a tool call block by index.
-    ///
-    /// Tracks `pending_bash_count` when a Bash tool transitions into
-    /// Pending (e.g. from Streaming after `ToolCallStream` created the cell).
     pub fn set_tool_status_by_index(&mut self, index: usize, status: ToolStatus) {
         if let Some(cached) = self.cells.get_mut(index)
             && matches!(cached.cell(), ChatCell::ToolCall(_))
         {
-            let is_bash_entering_pending = matches!(
-                cached.cell(),
-                ChatCell::ToolCall(b)
-                    if b.tool_name == TOOL_BASH && b.status != ToolStatus::Pending
-            ) && status == ToolStatus::Pending;
-
             cached.mutate(|cell| {
                 if let ChatCell::ToolCall(block) = cell {
                     block.status = status;
                 }
             });
-
-            if is_bash_entering_pending {
-                self.pending_bash_count += 1;
-            }
         }
     }
 
@@ -633,15 +591,6 @@ impl ChatView {
     ///
     /// Used during replay when a tool result requires a different cell type.
     pub fn replace_cell(&mut self, index: usize, cell: ChatCell) {
-        // Decrement pending_bash_count if replacing a pending Bash tool.
-        if let Some(cached) = self.cells.get(index)
-            && let ChatCell::ToolCall(block) = cached.cell()
-            && block.tool_name == TOOL_BASH
-            && block.status == ToolStatus::Pending
-        {
-            self.pending_bash_count = self.pending_bash_count.saturating_sub(1);
-        }
-
         if let Some(cached) = self.cells.get_mut(index) {
             cached.replace(cell);
         }
@@ -655,12 +604,12 @@ impl ChatView {
     /// `CachedCell` render cache, forcing `to_lines()` to recompute with
     /// the current `Instant::now()`.
     ///
-    /// Guarded by `pending_bash_count` to skip the O(n) scan when no
-    /// Bash tools are pending.
+    /// Pending Bash tools are selected by their authoritative cell status —
+    /// there is no separately maintained counter, so a new status-mutating
+    /// path (e.g. `set_final_args`) cannot silently desync the timer. The
+    /// caller gates this on `turn.working` (a tool can only be pending
+    /// mid-turn), so idle sessions pay nothing for the scan.
     pub fn tick_bash_timers(&mut self) {
-        if self.pending_bash_count == 0 {
-            return;
-        }
         for cached in &mut self.cells {
             if let ChatCell::ToolCall(block) = cached.cell()
                 && block.tool_name == TOOL_BASH
@@ -1774,11 +1723,11 @@ mod tests {
         );
     }
 
-    /// Regression: an interrupted Bash call used to tick forever — the timer
-    /// only advances while the cell is Pending, and nothing flipped the status
-    /// when the turn was interrupted. The backend now emits a (synthesized)
-    /// tool result on interrupt; this test pins the view-side contract: a
-    /// result event freezes the timer by leaving the Pending state.
+    /// Regression: the Bash timer must advance only while the cell is
+    /// Pending. `tick_bash_timers` selects cells by their authoritative
+    /// status, so a pending Bash cell's render cache is invalidated every
+    /// tick (timer advances); once a result flips the status away from
+    /// Pending, ticks stop touching it and the displayed elapsed freezes.
     #[test]
     fn test_bash_timer_freezes_after_result() {
         let mut view = ChatView::new();
@@ -1789,7 +1738,6 @@ mod tests {
         );
         block.started_at = Some(Instant::now());
         view.push(ChatCell::ToolCall(block));
-        assert_eq!(view.pending_bash_count, 1);
 
         let idx = view.tool_call_index("tc-timer").unwrap();
 
@@ -1799,14 +1747,46 @@ mod tests {
         assert_eq!(view.cells[idx].generation(), before + 1);
 
         // Result lands (interrupted turns send a synthesized failure result):
-        // status flips, the pending counter drains, and ticks stop touching
-        // the cell — the displayed elapsed time is frozen.
+        // status flips away from Pending, and ticks stop touching the cell —
+        // the displayed elapsed time is frozen.
         // NOTE: 字符串内容与 Python 端 _INTERRUPTED_RESULT 语义对应，但此处
         // 仅作为"任意失败结果"触发状态翻转，内容本身不影响断言。
         view.set_tool_result_by_index(idx, "Tool call interrupted by user.".into(), false);
-        assert_eq!(view.pending_bash_count, 0);
         let frozen = view.cells[idx].generation();
         view.tick_bash_timers();
         assert_eq!(view.cells[idx].generation(), frozen);
+    }
+
+    /// Regression (#54ee2e9): a Bash cell that reaches Pending through the
+    /// streaming-finalization path — `update_tool_args_by_index` →
+    /// `set_final_args`, which flips the status itself — must still tick.
+    ///
+    /// The old materialized `pending_bash_count` missed this transition:
+    /// `set_final_args` set the status to Pending opaquely, so the separate
+    /// `set_tool_status_by_index` call saw an already-Pending cell and
+    /// skipped its bookkeeping, leaving the counter at zero. `tick_bash_timers`
+    /// then returned early and the timer froze at 0s until the result landed.
+    /// Selecting by authoritative status makes the path irrelevant.
+    #[test]
+    fn test_bash_timer_ticks_after_streaming_finalize() {
+        let mut view = ChatView::new();
+        // Streaming cell, as created by a ToolCallStream fragment.
+        let block = ToolCallBlock::new_streaming(TOOL_BASH.into(), "tc-stream".into());
+        view.push(ChatCell::ToolCall(block));
+        let idx = view.tool_call_index("tc-stream").unwrap();
+
+        // Still Streaming — a tick must not touch it.
+        let streaming_gen = view.cells[idx].generation();
+        view.tick_bash_timers();
+        assert_eq!(view.cells[idx].generation(), streaming_gen);
+
+        // ToolCall event finalizes args; set_final_args flips status to Pending.
+        view.update_tool_args_by_index(idx, serde_json::json!({"command": "sleep 5"}));
+        view.set_tool_started_at_by_index(idx);
+
+        // Now Pending — a tick must invalidate the cache so the timer advances.
+        let before = view.cells[idx].generation();
+        view.tick_bash_timers();
+        assert_eq!(view.cells[idx].generation(), before + 1);
     }
 }
