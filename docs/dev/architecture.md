@@ -80,11 +80,11 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 面向现代模型的生成时序（reasoning → content → tool_calls，tool 流完响应才结束），打断分四种情况，只有一种需要对账：
 
 - **流式三段**（reasoning / content / tool 参数流式）中打断：LLM 响应未完成，半截响应丢弃，上下文不变。
-- **工具执行中**打断：LLM 响应已完整。`interrupt()` cancel worker → `exec_tool_calls` 的 `except CancelledError` 收拢每个 call 的最终结果——已完成的取**真结果**，被取消的合成一句话结果（`"Tool call interrupted by user."`）——经 `_InterruptedToolResults` 抛给 `_llm_turn`，本轮消息沿**正常路径** `add_messages` 提交，然后重新抛出 `CancelledError` 让 worker 终止（不重抛则取消被消化，agent 会继续跑下一轮 LLM）。`shutdown()`（switch_template）走同一路径，免费获得同样保证。
+- **工具执行中**打断：LLM 响应已完整。`interrupt()`（async）cancel 旧 worker 并 **await 其拆卸完成**后重建 → 旧 worker 的 `exec_tool_calls` 在 `except CancelledError` 中收拢每个 call 的最终结果——已完成的取**真结果**，被取消的合成一句话结果（`"Tool call interrupted by user."`）——经 `_InterruptedToolResults` 抛给 `_llm_turn`，本轮消息沿**正常路径** `add_messages` 提交，然后重新抛出**原始** `CancelledError`（保留取消调用栈）让 worker 终止（不重抛则取消被消化，agent 会继续跑下一轮 LLM）。`shutdown()`（switch_template）走同一路径，免费获得同样保证。
 
 合成结果同时发射与正常完成相同的 `ToolCallResultEvent` / `ToolResultTurnEvent`：TUI 据此翻转 cell 状态（Bash 计时器仅在 cell 为 Pending 时前进，结果事件使其冻结——修复了打断后计时器不停的存量问题），stdio 模式据此输出 user turn 消息。
 
-已知取舍：提交发生在 worker 的取消回调中，晚于 runtime 的 `InterruptedEvent`（客户端收到 Interrupted 时 store 尚未一致——wing 客户端不在此刻重读 store，resume 重放不受影响）；半截流式内容前端已渲染但未入库，属展示层偏差，replay 时自然对齐。
+**时序**：runtime 先 await `agent.interrupt()`（补提交随之完成）再 emit `InterruptedEvent`——客户端观察到 Interrupted 时 store 已一致。收尸 gather 带 5s 兜底超时，行为不端的工具（吞掉取消）不会无限挂起补提交路径。剩余取舍仅展示层：半截流式内容前端已渲染但未入库，replay 时自然对齐。
 
 ## 持久化（PR #39）
 
