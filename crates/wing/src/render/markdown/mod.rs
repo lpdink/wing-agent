@@ -18,6 +18,7 @@ pub(crate) mod links;
 pub(crate) mod parsing;
 pub(crate) mod tables;
 pub mod types;
+pub(crate) mod wrap;
 
 // Re-export the public API.
 pub use types::MarkdownLine;
@@ -78,7 +79,16 @@ pub fn render_markdown_lines(
     // Pre-process: ensure code fences are on their own line.
     let text = ensure_fences_on_own_line(text);
 
-    render_markdown_to_lines(&text, base_style, &theme, width)
+    let lines = render_markdown_to_lines(&text, base_style, &theme, width);
+
+    // Pre-wrap prose to the available width using UAX #14 line breaking so CJK
+    // runs break at the margin instead of being shoved whole to the next line
+    // by ratatui's whitespace-only word wrap. Code/border lines and lines that
+    // already fit pass through untouched.
+    match width {
+        Some(w) => wrap::wrap_prose_lines(lines, w as usize),
+        None => lines,
+    }
 }
 
 /// Ensure fenced code block delimiters (```) are on their own line.

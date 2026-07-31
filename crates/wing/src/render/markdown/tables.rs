@@ -528,7 +528,7 @@ fn split_into_words(text: &str) -> Vec<String> {
 /// Split a string at a display width boundary (CJK-safe).
 ///
 /// Returns `(head, tail)` where `head` fits within `max_width` display columns.
-fn split_str_by_width(text: &str, max_width: usize) -> (&str, &str) {
+pub(crate) fn split_str_by_width(text: &str, max_width: usize) -> (&str, &str) {
     if max_width == 0 {
         return ("", text);
     }
