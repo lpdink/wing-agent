@@ -54,6 +54,27 @@ _current_tool_call_id: ContextVar[str | None] = ContextVar(
 )
 
 
+# 被打断的未完成工具调用写入的统一结果内容。同时作为合成 tool 消息入库内容与
+# 前端关 cell 事件（ToolCallResultEvent / ToolResultTurnEvent）的载荷。
+_INTERRUPTED_RESULT = "Tool call interrupted by user."
+
+
+class _InterruptedToolResults(Exception):
+    """exec_tool_calls 被中断：携带每个 call 的最终结果（真实或合成）。
+
+    worker 被取消（interrupt()/shutdown()）时，exec_tool_calls 不让
+    CancelledError 直接逃逸——那样本轮工具结果全部丢失，assistant 消息的
+    tool_calls 将悬空（下次 LLM 请求被服务端拒绝）。它收拢每个 call 的
+    最终结果（已完成者取真结果，被取消者合成一句话打断结果）并向
+    _llm_turn 抛此异常：_llm_turn 沿正常路径提交本轮消息，然后再重新
+    抛出 CancelledError 让 worker 终止。
+    """
+
+    def __init__(self, results: list[Message]) -> None:
+        self.results = results
+        super().__init__("tool execution interrupted")
+
+
 def current_tool_call_id() -> str | None:
     """当前执行上下文的工具调用 id（不在工具执行中时为 None）。
 
@@ -445,7 +466,15 @@ class WingAgent:
         ctx.record_usage(assistant_msg.usage)
         ctx.record_text(assistant_msg.content)
 
-        tc_results = await self.exec_tool_calls(pending_tool_calls)
+        # 工具执行被中断时，exec_tool_calls 收拢各 call 的最终结果（真实/
+        # 合成）并抛 _InterruptedToolResults——本轮消息仍沿正常路径提交，
+        # 保证每个 tool_call 都有对应 tool 消息（无悬空，详见类 docstring）。
+        try:
+            tc_results = await self.exec_tool_calls(pending_tool_calls)
+            interrupted = False
+        except _InterruptedToolResults as e:
+            tc_results = e.results
+            interrupted = True
 
         # Steer: 开启时，drain inbox 中积攒的用户消息，附带到最后一个 tool result 开头
         if self._steer and tc_results:
@@ -472,6 +501,13 @@ class WingAgent:
                 context_window_tokens=ctx_window,
             )
         )
+
+        if interrupted:
+            # 恢复中断：提交完成（stats 已刷新）后 worker 应按预期终止
+            # （_process_turn 的 finally 清理状态，runtime 发 InterruptedEvent）。
+            # 不重新抛出的话，取消已被 exec_tool_calls 消化，agent 会继续跑
+            # 下一轮 LLM——interrupt 就失效了。
+            raise asyncio.CancelledError()
 
         if not pending_tool_calls:
             if not get_config().preserved_thinking:
@@ -605,11 +641,60 @@ class WingAgent:
                 content=result,
             )
 
-        # asyncio.gather 并发执行所有工具调用，返回值顺序与输入顺序一致
-        tc_results = list(
-            await asyncio.gather(*(_exec_one(tc) for tc in pending_tool_calls))
-        )
-        return tc_results
+        # 显式 create_task：worker 被取消（interrupt/shutdown）时需要在下方
+        # except 分支收拢每个 task 的最终结果——裸 gather 被取消时只给
+        # worker 抛 CancelledError，结果全部丢失。
+        tasks = [asyncio.create_task(_exec_one(tc)) for tc in pending_tool_calls]
+        try:
+            # asyncio.gather 并发执行所有工具调用，返回值顺序与输入顺序一致
+            return list(await asyncio.gather(*tasks))
+        except asyncio.CancelledError:
+            # 把取消传给每个工具任务：仍在运行的以取消态结束（_exec_one 的
+            # except Exception 不拦 CancelledError），已完成的携带真结果。
+            for task in tasks:
+                task.cancel()
+            # 收尸：return_exceptions 使被取消的 task 以异常实例返回而非
+            # 再次抛出。正常结果取真值；被取消的合成一句话打断结果——
+            # 每个 tool_call 都有对应 tool 消息，本轮经 _llm_turn 正常提交，
+            # 上下文永不悬空（悬空的 tool_calls 会被服务端拒绝）。
+            raw = await asyncio.gather(*tasks, return_exceptions=True)
+            results: list[Message] = []
+            for tc, item in zip(pending_tool_calls, raw, strict=True):
+                if isinstance(item, Message):
+                    results.append(item)
+                    continue
+                results.append(
+                    Message(
+                        role="tool", tool_call_id=tc.id, content=_INTERRUPTED_RESULT
+                    )
+                )
+                # 发与正常完成路径相同的关 cell 事件，使前端 cell 以此结果
+                # 落定（顺带修复打断后 TUI Bash 计时器不停——计时器仅在
+                # cell 为 Pending 时前进，结果事件翻转状态）：TUI 消费
+                # ToolCallResultEvent，stdio 模式消费 ToolResultTurnEvent。
+                self.emit(
+                    ToolCallResultEvent(
+                        session_id=self.session_id,
+                        tool_name=tc.name,
+                        tool_args=tc.arguments,
+                        tool_call_id=tc.id,
+                        tool_result=_INTERRUPTED_RESULT,
+                        tool_success=False,
+                        model=self.model,
+                    )
+                )
+                self.emit(
+                    ToolResultTurnEvent(
+                        session_id=self.session_id,
+                        tool_use_id=tc.id,
+                        tool_name=tc.name,
+                        content=_INTERRUPTED_RESULT,
+                        is_error=True,
+                    )
+                )
+            synthesized = sum(1 for item in raw if not isinstance(item, Message))
+            log.info(f"exec_tool_calls: interrupted ({synthesized} synthesized)")
+            raise _InterruptedToolResults(results) from None
 
     def _maybe_truncate(self, result: str) -> str:
         """Truncate tool result if it exceeds configured threshold.
