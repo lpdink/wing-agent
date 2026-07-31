@@ -1770,4 +1770,40 @@ mod tests {
             "telemetry workdir should render:\n{rendered}"
         );
     }
+
+    /// Regression: an interrupted Bash call used to tick forever — the timer
+    /// only advances while the cell is Pending, and nothing flipped the status
+    /// when the turn was interrupted. The backend now emits a (synthesized)
+    /// tool result on interrupt; this test pins the view-side contract: a
+    /// result event freezes the timer by leaving the Pending state.
+    #[test]
+    fn test_bash_timer_freezes_after_result() {
+        let mut view = ChatView::new();
+        let mut block = ToolCallBlock::new(
+            TOOL_BASH.into(),
+            serde_json::json!({"command": "sleep 5"}),
+            "tc-timer".into(),
+        );
+        block.started_at = Some(Instant::now());
+        view.push(ChatCell::ToolCall(block));
+        assert_eq!(view.pending_bash_count, 1);
+
+        let idx = view.tool_call_index("tc-timer").unwrap();
+
+        // Pending: every tick invalidates the render cache (timer advances).
+        let before = view.cells[idx].generation();
+        view.tick_bash_timers();
+        assert_eq!(view.cells[idx].generation(), before + 1);
+
+        // Result lands (interrupted turns send a synthesized failure result):
+        // status flips, the pending counter drains, and ticks stop touching
+        // the cell — the displayed elapsed time is frozen.
+        // NOTE: 字符串内容与 Python 端 _INTERRUPTED_RESULT 语义对应，但此处
+        // 仅作为"任意失败结果"触发状态翻转，内容本身不影响断言。
+        view.set_tool_result_by_index(idx, "Tool call interrupted by user.".into(), false);
+        assert_eq!(view.pending_bash_count, 0);
+        let frozen = view.cells[idx].generation();
+        view.tick_bash_timers();
+        assert_eq!(view.cells[idx].generation(), frozen);
+    }
 }

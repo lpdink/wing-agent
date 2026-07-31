@@ -58,6 +58,12 @@ impl CachedCell {
         self.generation += 1;
     }
 
+    /// Current generation counter (test seam: observe cache invalidation).
+    #[cfg(test)]
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Replace the inner cell entirely and bump generation (invalidates all caches).
     pub fn replace(&mut self, cell: ChatCell) {
         self.cell = cell;

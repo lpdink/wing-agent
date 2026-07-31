@@ -261,14 +261,14 @@ class WingRuntime:
         self._emit_context_stats(session)
         return original, compressed
 
-    def interrupt_session(self, session_id: str) -> None:
+    async def interrupt_session(self, session_id: str) -> None:
         """中断 session 当前 agent 任务。
 
         Raises:
             LookupError: session 不存在
         """
         session = self._require_session(session_id)
-        session.agent.interrupt()
+        await session.agent.interrupt()
         self._emit_session_event(InterruptedEvent(session_id=session.session_id))
 
     def rewind_session(self, session_id: str, target_uuid: str) -> str | None:

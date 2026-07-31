@@ -175,7 +175,7 @@ async def test_interrupt_cancels_waiters(runtime: WingRuntime):
     await asyncio.sleep(0.01)
     assert len(agent._feedback_waiters) == 2
 
-    agent.interrupt()
+    await agent.interrupt()
     assert not agent._feedback_waiters
 
     with pytest.raises(asyncio.CancelledError):
