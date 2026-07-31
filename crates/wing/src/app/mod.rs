@@ -1960,9 +1960,11 @@ pub async fn run_app(
                                 app.turn.last_title = Some(new_title.clone());
                                 app.push_intent(AppIntent::SetTitle(new_title));
                             }
+                            // Refresh Bash tool timers. Only meaningful while a
+                            // turn is active (a tool can only be pending mid-turn);
+                            // gating here keeps idle sessions from scanning cells.
+                            app.chat.tick_bash_timers();
                         }
-                        // Refresh Bash tool timers.
-                        app.chat.tick_bash_timers();
                     }
                 }
             }
