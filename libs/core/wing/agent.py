@@ -176,6 +176,9 @@ class WingAgent:
         self._feedback_waiters: dict[str, asyncio.Future[str]] = {}
         # 是否有 turn 正在进行（TurnStarted 置真，turn 收尾置假）。用于推导 session 状态。
         self._working: bool = False
+        # 序列化 interrupt() 的 teardown 序列：防止并发 interrupt（双击 Esc / SDK
+        # 重试）第二次 .cancel() 打在旧 worker 的补提交 await 上，跳过 commit。
+        self._interrupt_lock = asyncio.Lock()
         self._worker = asyncio.create_task(self._run())
 
     @property
@@ -684,7 +687,19 @@ class WingAgent:
                     "exec_tool_calls: gather timed out during interrupt cleanup; "
                     "forcing remaining tasks"
                 )
-                raw = await asyncio.gather(*tasks, return_exceptions=True)
+                # 不再 await 第二个 gather：能吞掉 CancelledError 的工具同样会
+                # 吞掉 wait_for 发出的二次取消，第二个 gather 永远不返回，
+                # interrupt() 的 await 随之挂死，HTTP 路由一起卡住。
+                # 改为同步收尸：已完成的取真结果，其余合成打断结果。
+                # 被放弃的 task 在后台自行结束，其副作用无法避免，但补提交
+                # 路径和 HTTP 路由保证有界终止。
+                raw = []
+                for task in tasks:
+                    task.cancel()
+                    if task.done() and not task.cancelled() and task.exception() is None:
+                        raw.append(task.result())
+                    else:
+                        raw.append(None)  # 非 Message → 走下方合成分支
             results: list[Message] = []
             for tc, item in zip(pending_tool_calls, raw, strict=True):
                 if isinstance(item, Message):
@@ -974,12 +989,25 @@ class WingAgent:
 
         # 取消旧 worker 并等待其完成补提交（CancelledError 在 _run 中被
         # re-raise，worker task 以 CancelledError 终止，此处捕获即可）。
-        self._worker.cancel()
-        try:
-            await self._worker
-        except asyncio.CancelledError:
-            pass
-        self._worker = asyncio.create_task(self._run())
+        # _interrupt_lock 序列化并发 interrupt（双击 Esc / SDK 重试）：无锁时
+        # 第二次 .cancel() 会打在旧 worker 的补提交 await 上，CancelledError
+        # 逃出 exec_tool_calls 的 except 分支，commit 被跳过——即本 PR 修复的
+        # 悬空 bug 被并发 interrupt 重新引入。锁保证第二次调用等第一次 teardown
+        # 完成后才执行（届时 worker 已空闲，cancel 无害）。
+        # try/finally 保证即使 interrupt() 自身被取消（HTTP 客户端断连导致
+        # Starlette cancel handler）或旧 worker 以非 CancelledError 异常终止，
+        # agent 也不会陷入无 worker 的死态。
+        async with self._interrupt_lock:
+            old = self._worker
+            old.cancel()
+            try:
+                await old
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                log.exception("old worker died with error during interrupt")
+            finally:
+                self._worker = asyncio.create_task(self._run())
         log.info("Agent interrupted and reset")
 
     def _cancel_feedback_waiters(self) -> None:
