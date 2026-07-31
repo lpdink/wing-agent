@@ -60,7 +60,25 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 - 编排在 Rust TUI 内，`goal.rs` 是**无 I/O 的纯状态机**（每次转移返回 `Vec<GoalAction>`，App 翻译为副作用），无后端改动，可干净移除。
 - 每轮向两个 agent 发送**完整**结构化 prompt（【任务目标】+【追加信息】），避免压缩漂移。
-- 限制：不持久化（重启 TUI 丢失）、无迭代上限、重连不自动恢复。`/goal-exit` 退出。
+- TUI 内编排的限制：不持久化（重启 TUI 丢失）、无迭代上限、重连不自动恢复。`/goal-exit` 退出。后台 + 持久化版本见 `wing-orch`（下节）。
+
+## 远程工具与编排（PR #47 / #49 / #50）
+
+工具不必跑在 gateway 进程里。外部 **tool host** 经 HTTP 注册工具、经一条常驻 WS 服务调用，让工具可跑在另一台机器 / 容器 / 编排器里——这是迈向外部编排（`wing-orch`）与端到端软件交付的第一步。
+
+**dispatch 模型（闭包，非事件 RPC）**：注册时 gateway 为每个远程工具构造一个捕获 `(RemoteToolManager, client_id, tool_name)` 的 async 闭包，装进 `Tool.function`。agent 调用时闭包生成 `call_id`，经该 client 的 WS 发 `tool_call_request` 帧，await 一个由 WS 读循环在匹配 `tool_call_result` 帧时 resolve 的 future。请求/响应关联全在 manager 的 future 表里——EventBus（仅出站通知）不被打扰，**核心完全网络无关**。
+
+**身份与权限解耦**：任何角色都可在 WS 连接经 `?client_id=<id>` 自选 client_id（先来先得到、全量唯一性校验、`default` 保留），声明 client_id 即具备注册资格。RBAC 角色独立：`admin` 全量，`tool_runtime` 纯工具执行（仅 `POST /api/tools/register` + 工具 WS，不收事件、不能发用户消息）。
+
+**生命周期与缓存保护**：断连是首要失败信号——`fail_client` 立即失败在途调用并注销工具；`gateway.remote_tool_timeout`（默认 1800s）仅为安全网。**KV cache 保护**：断连只清全局 registry，绝不动已加载 agent 绑定的工具表——持有的工具引用仍可调用，清晰返回 "not connected"。
+
+**动态工具切换（PR #50）**：工具集可运行期经 `POST /api/session/update`（`tools`）变更。难点在于改 OpenAI `tools` 字段会使服务端 KV 前缀 cache 失效。策略（唯一事实 `Agent._tools` + 唯一入口 `set_tools()`，policy 下沉到拥有链状态的 ContextManager）：
+
+- **冷**（链空 / 首次初始化）：declared 与可执行集同步更新，无提醒。
+- **热**（链非空）：declared 冻结，注入 user-role System Reminder（完整工具 schema + namespace 标注）。
+- **压缩后**：declared 自动同步（前缀 cache 本就已失效）。
+
+**SDK 与编排**：Rust `wing-api-client::tool_host`（builder）与 Python `wing-sdk`（decorator）让注册/服务工具原生化。`wing-orch goal` 把 Goal 状态机从 TUI 抽出为独立后台进程：无限轮次、yolo（远程工具无审批路径）、原子状态持久化 + `--resume`，终端关闭不死。
 
 ## 会话生命周期
 

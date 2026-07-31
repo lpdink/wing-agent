@@ -19,17 +19,27 @@ Monorepo: Python agent runtime + Rust frontends (TUI + stdio).
 
 The `wing` binary is both frontends: **TUI** (interactive, human-in-the-loop) and **stdio** (`wing -p`, headless, Claude Code compatible — alias `wing` as `claude` to plug into external orchestrators). Both drive the same Gateway + Runtime.
 
-**Protocols.** HTTP for lifecycle / queries / mutations (~20 RPC-style endpoints); WebSocket (`/ws`) carries the real-time ReAct event stream plus client→server message / Ask-reply frames (`ClientRequest`), while queries and mutations stay on HTTP. Session creation is decoupled from the WS handshake — clients create a session via HTTP, then subscribe to events. API key auth is opt-in at the Gateway (HTTP headers / WS query param); TLS is delegated to a reverse proxy.
+**Protocols.** HTTP for lifecycle / queries / mutations (~22 RPC-style endpoints); WebSocket (`/ws`) carries the real-time ReAct event stream plus client→server message / Ask-reply frames (`ClientRequest`), while queries and mutations stay on HTTP. Session creation is decoupled from the WS handshake — clients create a session via HTTP, then subscribe to events. API key auth is opt-in at the Gateway (HTTP headers / WS query param); TLS is delegated to a reverse proxy.
 
 **Persistence.** All durable session state (metadata, message log, aux data like pending compactions) is owned by a single abstraction, `SessionStore` (`wing/store/`). No other module does storage I/O for session data. `SessionStore` composes `MessageLog` (append-only message durability + aux kv); `TrackedList` is a pure in-memory chain-topology engine (uuid/parentUuid) that delegates I/O to a `MessageLog`. Backends: `file` (default, `~/.wing/core/sessions/`) and `memory` (ephemeral, per-process), selected per session via the `backend` parameter. The interface is storage-agnostic — SQL backends (SQLite/PG/Supabase) are additive implementations.
+
+**Remote tools & orchestration.** Tools need not run in the gateway process. An external **tool host** registers tools over HTTP (`POST /api/tools/register`) and serves their calls over a held WebSocket (`tool_call_request` / `tool_call_result` frames, correlated by `call_id`). The core stays network-agnostic — a remote tool is an ordinary `Tool` whose callable is a gateway-injected dispatch closure (`gateway/remote_tools.py`). The host's `client_id` (chosen via `?client_id=` on WS connect) is both its tool namespace and identity, decoupled from the RBAC role (`admin` = full access, `tool_runtime` = pure executor). Tool sets can also change at runtime via `POST /api/session/update` (`tools` field) with KV-cache protection — a cold swap when the chain is empty, else a frozen declared view plus an injected System Reminder, policy owned by `ContextManager`. SDKs: Rust `wing-api-client::tool_host` and Python `wing-sdk`; `wing-orch` lifts the TUI Goal loop into a standalone background CLI (state persist + resume).
+
+**Streaming rendering.** During LLM argument generation the runtime emits `tool_call_stream` events carrying incremental raw args text fragments (`args_fragment`); it never parses partial JSON itself. The Rust frontend accumulates fragments and parses them locally (`util/partial_json.rs`, single-pass O(n)) to render live tool cards (Write/Edit previews, TodoWrite lists) before execution starts; the authoritative parsed args arrive with the `tool_call` event.
 
 ## Project Structure
 
 ```
 libs/core/wing/                   Python runtime (pip: wing-agent)
-├── agent.py                      WingAgent — LLM loop + concurrent tool dispatch
+├── agent/                        WingAgent package (public import paths unchanged via re-export)
+│   ├── core.py                   WingAgent thin shell: assembly, public API, worker lifecycle
+│   ├── react_loop.py             ReAct main loop: drain → hook → LLM → tools → commit
+│   ├── llm_caller.py             LLM streaming call + chunk → event projection
+│   ├── tool_executor.py          Concurrent tool dispatch (asyncio.gather) + interrupt teardown
+│   ├── event_sink.py             AgentEventSink — single event emission outlet
+│   ├── inbox.py                  Message queue (drain-and-merge) + feedback waiters
+│   └── tool_context.py           ToolContext Protocol — narrow interface tools receive (`ctx`)
 ├── agent_template.py             AgentTemplate — model/tools/prompt from config `agents:`
-├── agent_state_bag.py            Per-agent mutable state (yolo, reasoning effort, …)
 ├── session.py                    Session — messages + state + metadata (via SessionStore)
 ├── session_manager.py            SessionManager — multi-session, fork/resume, store registry
 ├── runtime.py                    WingRuntime — service-layer coordinator (thin routes → Session/CM)
@@ -69,7 +79,7 @@ libs/core/wing/                   Python runtime (pip: wing-agent)
     ├── openapi.py                OpenAPI metadata
     └── routes/
         ├── session.py            Session lifecycle + queries + mutations (14 endpoints)
-        ├── system.py             commands/models/agents listing, reload, shutdown (5)
+        ├── system.py             commands/models/agents/tools listing, reload, shutdown (6)
         ├── tools.py              POST /api/tools/register (remote tool registration)
         ├── health.py             GET /api/health (1)
         └── ws.py                 WebSocket /ws (event transport + tool call result frames)
@@ -106,7 +116,7 @@ crates/wing/src/                  Rust CLI: TUI + stdio frontends
 ├── render/                       Markdown + syntax highlighting (code_blocks, tables, links)
 ├── tui/                          Terminal abstraction (crossterm)
 ├── config/                       TUI config (colors, rendering, goal)
-└── util/                         clipboard, logging, osc9 notifications, terminal title
+└── util/                         clipboard, logging, osc9, terminal title, partial_json (streaming args parser)
 
 crates/wing-api-client/src/       Hand-written Rust HTTP client for Gateway API
 ├── client.rs                     GatewayClient — all HTTP API methods (+ api_key)
@@ -147,7 +157,7 @@ Single source of truth: `$WING_HOME/core/config.yaml` (default `~/.wing/core/con
 
 AGENTS.md stays a high-density overview. For mechanism-level detail, read `docs/dev/` (中文):
 
-- [`docs/dev/architecture.md`](docs/dev/architecture.md) — 运行时/网关/前端数据流、stdio 模式、Goal 编排、会话生命周期与持久化。
+- [`docs/dev/architecture.md`](docs/dev/architecture.md) — 运行时/网关/前端数据流、stdio 模式、Goal 编排、远程工具与编排、会话生命周期与持久化。
 - [`docs/dev/http-api.md`](docs/dev/http-api.md) — 完整 HTTP 端点表 + WebSocket 协议 + 鉴权。
 - [`docs/dev/glossary.md`](docs/dev/glossary.md) — 核心概念：SessionStore/MessageLog/TrackedList、工具命名空间、prompt 命令、压缩等。
 
