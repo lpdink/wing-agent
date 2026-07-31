@@ -401,7 +401,7 @@ async def interrupt_session(
 ) -> OkResponse:
     server = _get_server(request)
     try:
-        server.runtime.interrupt_session(body.session_id)
+        await server.runtime.interrupt_session(body.session_id)
     except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
     return OkResponse()

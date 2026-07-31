@@ -139,9 +139,8 @@ class TestInterruptDuringToolExec:
         await _wait_until(
             lambda: slow_started.is_set() and _result_emitted(events, "call-fast")
         )
-        agent.interrupt()
-        # 提交发生在 worker 的取消处理路径（interrupt 返回后的循环回调），
-        # 等其落定。
+        await agent.interrupt()
+        # interrupt() 已 await 旧 worker 完成补提交，结果事件必已发出。
         await _wait_until(lambda: _result_emitted(events, "call-slow"))
 
         # ── 上下文：[user, assistant(tool_calls), tool×2] ──
@@ -203,7 +202,7 @@ class TestInterruptDuringToolExec:
         monkeypatch.setattr(agent.model_provider, "generate", _generate)
         _start_turn(agent)
         await _wait_until(lambda: "call-ask" in agent._feedback_waiters)
-        agent.interrupt()
+        await agent.interrupt()
         await _wait_until(lambda: _result_emitted(events, "call-ask"))
 
         chain = agent.context_manager.get_context_window()
@@ -236,8 +235,7 @@ class TestInterruptOutsideToolExec:
         _start_turn(agent)
         # 事件在生成器体内设置——此刻 worker 必挂在该生成器的 await 上。
         await _wait_until(streaming.is_set)
-        agent.interrupt()
-        await asyncio.sleep(0.05)  # 给取消处理留一拍
+        await agent.interrupt()
 
         # 只剩 turn 开始时注入的 user 消息，半截响应未入库。
         chain = agent.context_manager.get_context_window()
@@ -250,7 +248,7 @@ class TestInterruptOutsideToolExec:
         session = runtime.create_session()
         agent = session.agent
 
-        agent.interrupt()
+        await agent.interrupt()
 
         assert agent.context_manager.get_context_window() == []
 
@@ -286,8 +284,7 @@ class TestInterruptOutsideToolExec:
         # [user, assistant(tool_calls), tool, assistant("done")]
         assert [m.role for m in before] == ["user", "assistant", "tool", "assistant"]
 
-        agent.interrupt()
-        await asyncio.sleep(0.05)
+        await agent.interrupt()
 
         after = agent.context_manager.get_context_window()
         assert len(after) == len(before)
@@ -338,7 +335,7 @@ class TestPostInterruptRecovery:
         await _wait_until(
             lambda: slow_started.is_set() and _result_emitted(events, "call-fast")
         )
-        agent.interrupt()
+        await agent.interrupt()
         await _wait_until(lambda: _result_emitted(events, "call-slow"))
 
         # 打断后继续对话：第二次 LLM 调用必须收到合法历史。
@@ -390,7 +387,7 @@ class TestPostInterruptRecovery:
         await _wait_until(
             lambda: slow_started.is_set() and _result_emitted(events, "call-fast")
         )
-        agent.interrupt()
+        await agent.interrupt()
         await _wait_until(lambda: _result_emitted(events, "call-slow"))
 
         await agent.shutdown()

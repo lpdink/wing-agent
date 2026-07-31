@@ -1798,6 +1798,8 @@ mod tests {
         // Result lands (interrupted turns send a synthesized failure result):
         // status flips, the pending counter drains, and ticks stop touching
         // the cell — the displayed elapsed time is frozen.
+        // NOTE: 字符串内容与 Python 端 _INTERRUPTED_RESULT 语义对应，但此处
+        // 仅作为"任意失败结果"触发状态翻转，内容本身不影响断言。
         view.set_tool_result_by_index(idx, "Tool call interrupted by user.".into(), false);
         assert_eq!(view.pending_bash_count, 0);
         let frozen = view.cells[idx].generation();

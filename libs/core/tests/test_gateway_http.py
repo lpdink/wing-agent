@@ -954,7 +954,7 @@ class TestSessionInterrupt:
 
     def test_interrupt_ok(self, client: TestClient, mock_runtime):
         """正常中断。"""
-        mock_runtime.interrupt_session.return_value = None
+        mock_runtime.interrupt_session = AsyncMock(return_value=None)
 
         resp = client.post("/api/session/interrupt", json={"session_id": "test-id"})
         assert resp.status_code == 200
@@ -963,7 +963,7 @@ class TestSessionInterrupt:
 
     def test_interrupt_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
-        mock_runtime.interrupt_session.side_effect = LookupError("not found")
+        mock_runtime.interrupt_session = AsyncMock(side_effect=LookupError("not found"))
         resp = client.post("/api/session/interrupt", json={"session_id": "xxx"})
         assert resp.status_code == 404
 

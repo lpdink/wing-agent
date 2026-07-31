@@ -58,6 +58,11 @@ _current_tool_call_id: ContextVar[str | None] = ContextVar(
 # 前端关 cell 事件（ToolCallResultEvent / ToolResultTurnEvent）的载荷。
 _INTERRUPTED_RESULT = "Tool call interrupted by user."
 
+# 取消处理路径中等待工具 task 收尸的超时（秒）。正常取消在毫秒级完成；
+# 此超时仅兜底工具函数内部 shield/吞掉 CancelledError 的极端情况，防止
+# 补提交路径无限挂起。超时后强制合成剩余 task 的结果，保证有界终止。
+_INTERRUPT_GATHER_TIMEOUT = 5.0
+
 
 class _InterruptedToolResults(Exception):
     """exec_tool_calls 被中断：携带每个 call 的最终结果（真实或合成）。
@@ -67,11 +72,19 @@ class _InterruptedToolResults(Exception):
     tool_calls 将悬空（下次 LLM 请求被服务端拒绝）。它收拢每个 call 的
     最终结果（已完成者取真结果，被取消者合成一句话打断结果）并向
     _llm_turn 抛此异常：_llm_turn 沿正常路径提交本轮消息，然后再重新
-    抛出 CancelledError 让 worker 终止。
+    抛出原始 CancelledError（保留完整 traceback）让 worker 终止。
+
+    Attributes:
+        results: 每个 tool_call 对应的 tool 消息（真实或合成）。
+        original: 触发本异常的原始 CancelledError，_llm_turn 补提交后
+            原样 re-raise，保留取消调用栈供调试。
     """
 
-    def __init__(self, results: list[Message]) -> None:
+    def __init__(
+        self, results: list[Message], original: asyncio.CancelledError
+    ) -> None:
         self.results = results
+        self.original = original
         super().__init__("tool execution interrupted")
 
 
@@ -471,10 +484,10 @@ class WingAgent:
         # 保证每个 tool_call 都有对应 tool 消息（无悬空，详见类 docstring）。
         try:
             tc_results = await self.exec_tool_calls(pending_tool_calls)
-            interrupted = False
+            interrupted_exc: _InterruptedToolResults | None = None
         except _InterruptedToolResults as e:
             tc_results = e.results
-            interrupted = True
+            interrupted_exc = e
 
         # Steer: 开启时，drain inbox 中积攒的用户消息，附带到最后一个 tool result 开头
         if self._steer and tc_results:
@@ -502,12 +515,13 @@ class WingAgent:
             )
         )
 
-        if interrupted:
+        if interrupted_exc is not None:
             # 恢复中断：提交完成（stats 已刷新）后 worker 应按预期终止
             # （_process_turn 的 finally 清理状态，runtime 发 InterruptedEvent）。
             # 不重新抛出的话，取消已被 exec_tool_calls 消化，agent 会继续跑
             # 下一轮 LLM——interrupt 就失效了。
-            raise asyncio.CancelledError()
+            # re-raise 原始 CancelledError 而非裸构造，保留完整取消调用栈。
+            raise interrupted_exc.original
 
         if not pending_tool_calls:
             if not get_config().preserved_thinking:
@@ -648,7 +662,7 @@ class WingAgent:
         try:
             # asyncio.gather 并发执行所有工具调用，返回值顺序与输入顺序一致
             return list(await asyncio.gather(*tasks))
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as cancel_err:
             # 把取消传给每个工具任务：仍在运行的以取消态结束（_exec_one 的
             # except Exception 不拦 CancelledError），已完成的携带真结果。
             for task in tasks:
@@ -657,7 +671,20 @@ class WingAgent:
             # 再次抛出。正常结果取真值；被取消的合成一句话打断结果——
             # 每个 tool_call 都有对应 tool 消息，本轮经 _llm_turn 正常提交，
             # 上下文永不悬空（悬空的 tool_calls 会被服务端拒绝）。
-            raw = await asyncio.gather(*tasks, return_exceptions=True)
+            # 加超时兜底：若工具函数内部 shield/吞掉了 CancelledError，
+            # gather 会挂起；超时后 wait_for 取消 gather（进而取消所有 task），
+            # 再收一次尸，保证补提交路径有界终止。
+            try:
+                raw = await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=_INTERRUPT_GATHER_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                log.warning(
+                    "exec_tool_calls: gather timed out during interrupt cleanup; "
+                    "forcing remaining tasks"
+                )
+                raw = await asyncio.gather(*tasks, return_exceptions=True)
             results: list[Message] = []
             for tc, item in zip(pending_tool_calls, raw, strict=True):
                 if isinstance(item, Message):
@@ -694,7 +721,7 @@ class WingAgent:
                 )
             synthesized = sum(1 for item in raw if not isinstance(item, Message))
             log.info(f"exec_tool_calls: interrupted ({synthesized} synthesized)")
-            raise _InterruptedToolResults(results) from None
+            raise _InterruptedToolResults(results, original=cancel_err) from None
 
     def _maybe_truncate(self, result: str) -> str:
         """Truncate tool result if it exceeds configured threshold.
@@ -916,8 +943,15 @@ class WingAgent:
         finally:
             self._feedback_waiters.pop(tool_call_id, None)
 
-    def interrupt(self) -> None:
-        """中断 Agent：终止子进程、清理 inbox、重置事件循环"""
+    async def interrupt(self) -> None:
+        """中断 Agent：终止子进程、清理 inbox、等待旧 worker 完成补提交后重建。
+
+        旧 worker 被 cancel 后，其取消处理路径（exec_tool_calls 收拢工具结果
+        → _llm_turn 补提交本轮消息）是异步的，必须 await 其完成再重建新
+        worker，否则补提交与新 worker 并发修改 context_manager，消息顺序
+        可能错乱；shutdown() 也只 await 新 worker，旧 worker 的写入可能被
+        进程退出截断。
+        """
 
         # 终止正在执行的子进程（如 Bash 命令）
         # start_new_session=True 使子进程在独立 process group 中，
@@ -938,8 +972,13 @@ class WingAgent:
             except asyncio.QueueEmpty:
                 break
 
-        # 停止当前 worker 并创建新的事件循环
+        # 取消旧 worker 并等待其完成补提交（CancelledError 在 _run 中被
+        # re-raise，worker task 以 CancelledError 终止，此处捕获即可）。
         self._worker.cancel()
+        try:
+            await self._worker
+        except asyncio.CancelledError:
+            pass
         self._worker = asyncio.create_task(self._run())
         log.info("Agent interrupted and reset")
 
