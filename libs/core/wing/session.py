@@ -70,11 +70,6 @@ class Session:
         if self._metadata.workspace:
             self._agent.set_cwd(Path(self._metadata.workspace).resolve())
 
-        # 磁盘恢复场景下 CM 以 workspace=None 构建，用 metadata 补齐——
-        # 否则相对路径的 skills/rules patterns 解析行为与原 session 不一致。
-        if self._metadata.workspace and self._context_manager._workspace is None:
-            self._context_manager._workspace = Path(self._metadata.workspace).resolve()
-
         self._initial_status = self._agent.get_status()
 
         log.info(f"Session initialized: {session_id}")

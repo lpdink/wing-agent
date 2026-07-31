@@ -237,23 +237,28 @@ class SessionManager:
         if existing is not None:
             return existing
 
+        metadata = store.load_metadata(resolved)
+
         # 模板解析：显式传入 > metadata.template_name > 默认
         tpl = template
-        if tpl is None:
-            metadata = store.load_metadata(resolved)
-            if metadata is not None and metadata.template_name is not None:
-                tpl = self._template_manager.get(metadata.template_name)
+        if tpl is None and metadata is not None and metadata.template_name is not None:
+            tpl = self._template_manager.get(metadata.template_name)
         if tpl is None:
             tpl = self._template_manager.default
 
         messages: TrackedList[Message] = TrackedList.load(
             store.open_log(resolved), Message
         )
+        # workspace 从 metadata 恢复，使 CM 构造时即以正确工作目录加载相对路径的
+        # rules/skills。漏传会让 CM 以 workspace=None 构建、patterns 退化到进程
+        # cwd 展开，把错误文件加载进系统提示词（Session.__init__ 的事后回填救不
+        # 回来——rules/skills 在 CM.__init__ 里就已急切加载并缓存）。
         session = Session.from_template(
             template=tpl,
             session_id=resolved,
             messages=messages,
             store=store,
+            workspace=metadata.workspace if metadata is not None else None,
         )
         self._sessions[resolved] = session
         log.info(f"Session resumed: {resolved}")
