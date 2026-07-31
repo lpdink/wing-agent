@@ -4,9 +4,12 @@ Schema follows Claude's TodoWrite for LLM SFT compatibility,
 but description is significantly trimmed to reduce context overhead.
 """
 
-from wing.agent import WingAgent
+from wing.agent import ToolContext
 from wing.schema import ToolError, ToolParam
 from wing.tool_registry import tool_registry
+
+# 模块级 todo 状态（session_id → todos）。仅 TodoWrite 工具读写。
+_todo_store: dict[str, list[dict]] = {}
 
 VALID_STATUSES = ("pending", "in_progress", "completed")
 
@@ -131,7 +134,7 @@ def _build_feedback_message(normalized: list[dict], all_done: bool) -> str:
 
 
 @tool_registry.register(name="TodoWrite", params=TODO_PARAMS, description=_DESCRIPTION)
-async def todo_write(todos: list[dict], agent: WingAgent) -> str:
+async def todo_write(todos: list[dict], ctx: ToolContext) -> str:
     """Update the todo list for the current session."""
     normalized, warnings = _validate_and_normalize(todos)
 
@@ -143,8 +146,7 @@ async def todo_write(todos: list[dict], agent: WingAgent) -> str:
         raise ToolError(msg)
 
     # Get old todos for comparison
-    raw = agent.state.get("todo", [])
-    old_todos = raw if isinstance(raw, list) else []
+    old_todos = _todo_store.get(ctx.session_id, [])
 
     # Detect batch completion: >=3 items changed to completed from in_progress/pending
     batch_completed_count = 0
@@ -165,7 +167,7 @@ async def todo_write(todos: list[dict], agent: WingAgent) -> str:
     new_todos = [] if all_done else normalized
 
     # Store normalized todos
-    agent.state.set("todo", new_todos)
+    _todo_store[ctx.session_id] = new_todos
 
     # Build result message
     result = _build_feedback_message(normalized, all_done)

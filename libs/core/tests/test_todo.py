@@ -2,8 +2,12 @@
 
 import pytest
 
-from wing.agent_state_bag import AgentStateBag
-from wing.tools.todo import VALID_STATUSES, _validate_and_normalize, todo_write
+from wing.tools.todo import (
+    VALID_STATUSES,
+    _todo_store,
+    _validate_and_normalize,
+    todo_write,
+)
 
 
 class TestValidateAndNormalize:
@@ -148,51 +152,55 @@ class TestValidateAndNormalize:
 class TestTodoWrite:
     """Test the todo_write async function."""
 
-    @pytest.mark.asyncio
-    async def test_basic_write(self):
+    @pytest.fixture(autouse=True)
+    def _clear_store(self):
+        _todo_store.clear()
+        yield
+        _todo_store.clear()
+
+    def _mock_ctx(self, session_id: str = "test-session"):
         from unittest.mock import MagicMock
 
-        agent = MagicMock()
-        agent.state = AgentStateBag()
+        ctx = MagicMock()
+        ctx.session_id = session_id
+        return ctx
+
+    @pytest.mark.asyncio
+    async def test_basic_write(self):
+        ctx = self._mock_ctx()
 
         result = await todo_write(
             [
                 {"content": "Task A", "status": "in_progress"},
                 {"content": "Task B", "status": "pending"},
             ],
-            agent,
+            ctx,
         )
         assert "Stay focused" in result
         assert "Task A" in result
-        stored = agent.state.get("todo")
+        stored = _todo_store.get("test-session", [])
         assert len(stored) == 2
 
     @pytest.mark.asyncio
     async def test_all_completed_clears_list(self):
-        from unittest.mock import MagicMock
-
-        agent = MagicMock()
-        agent.state = AgentStateBag()
+        ctx = self._mock_ctx()
 
         result = await todo_write(
             [
                 {"content": "Task A", "status": "completed"},
                 {"content": "Task B", "status": "completed"},
             ],
-            agent,
+            ctx,
         )
         assert "All todos completed" in result
-        stored = agent.state.get("todo")
+        stored = _todo_store.get("test-session", [])
         assert stored == []
 
     @pytest.mark.asyncio
     async def test_all_invalid_returns_error_message(self):
-        from unittest.mock import MagicMock
-
         from wing.schema import ToolError
 
-        agent = MagicMock()
-        agent.state = AgentStateBag()
+        ctx = self._mock_ctx()
 
         with pytest.raises(ToolError) as exc_info:
             await todo_write(
@@ -200,25 +208,19 @@ class TestTodoWrite:
                     {"content": "", "status": "pending"},
                     {"content": "Task", "status": "invalid"},
                 ],
-                agent,
+                ctx,
             )
         assert "No valid todo items" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_batch_completion_warning(self):
-        from unittest.mock import MagicMock
-
-        agent = MagicMock()
-        agent.state = AgentStateBag()
+        ctx = self._mock_ctx()
         # Pre-seed old todos
-        agent.state.set(
-            "todo",
-            [
-                {"content": "Task A", "status": "in_progress"},
-                {"content": "Task B", "status": "pending"},
-                {"content": "Task C", "status": "pending"},
-            ],
-        )
+        _todo_store["test-session"] = [
+            {"content": "Task A", "status": "in_progress"},
+            {"content": "Task B", "status": "pending"},
+            {"content": "Task C", "status": "pending"},
+        ]
 
         result = await todo_write(
             [
@@ -226,23 +228,20 @@ class TestTodoWrite:
                 {"content": "Task B", "status": "completed"},
                 {"content": "Task C", "status": "completed"},
             ],
-            agent,
+            ctx,
         )
         assert "3 tasks as completed" in result
 
     @pytest.mark.asyncio
     async def test_warning_from_validation_appears_in_result(self):
-        from unittest.mock import MagicMock
-
-        agent = MagicMock()
-        agent.state = AgentStateBag()
+        ctx = self._mock_ctx()
 
         result = await todo_write(
             [
                 {"content": "Good task", "status": "pending"},
                 {"content": "Bad task", "status": "invalid_status"},
             ],
-            agent,
+            ctx,
         )
         assert "Next task" in result
         assert "Good task" in result

@@ -74,7 +74,7 @@ class TestConcurrentExecution:
             await asyncio.sleep(delay)
             return "result-c"
 
-        agent._tools = {
+        agent._executor._tools = {
             "SlowA": _make_tool("SlowA", slow_tool_a),
             "SlowB": _make_tool("SlowB", slow_tool_b),
             "SlowC": _make_tool("SlowC", slow_tool_c),
@@ -87,7 +87,7 @@ class TestConcurrentExecution:
         ]
 
         start = time.monotonic()
-        results = await agent.exec_tool_calls(tool_calls)
+        results = await agent._executor.execute(tool_calls)
         elapsed = time.monotonic() - start
 
         # 串行需要 ~0.9s，并发应 ~0.3s；用 0.6s 作为阈值留足余量
@@ -121,7 +121,7 @@ class TestResultOrderPreservation:
             await asyncio.sleep(0.01)
             return "fast-result"
 
-        agent._tools = {
+        agent._executor._tools = {
             "Slow": _make_tool("Slow", slow_tool),
             "Fast": _make_tool("Fast", fast_tool),
         }
@@ -133,7 +133,7 @@ class TestResultOrderPreservation:
             _make_tool_call("call-fast-2", "Fast"),
         ]
 
-        results = await agent.exec_tool_calls(tool_calls)
+        results = await agent._executor.execute(tool_calls)
 
         assert len(results) == 3
         # 顺序必须与输入一致：Slow, Fast, Fast
@@ -164,7 +164,7 @@ class TestErrorIsolation:
             await asyncio.sleep(0.01)
             raise RuntimeError("boom")
 
-        agent._tools = {
+        agent._executor._tools = {
             "Good": _make_tool("Good", good_tool),
             "Bad": _make_tool("Bad", bad_tool),
         }
@@ -175,7 +175,7 @@ class TestErrorIsolation:
             _make_tool_call("call-good-2", "Good"),
         ]
 
-        results = await agent.exec_tool_calls(tool_calls)
+        results = await agent._executor.execute(tool_calls)
 
         assert len(results) == 3
         # 第一个 Good 正常
@@ -199,7 +199,7 @@ class TestErrorIsolation:
         async def good_tool(input: str = "") -> str:
             return "good-result"
 
-        agent._tools = {
+        agent._executor._tools = {
             "Good": _make_tool("Good", good_tool),
         }
 
@@ -208,7 +208,7 @@ class TestErrorIsolation:
             _make_tool_call("call-unknown", "NonExistent"),
         ]
 
-        results = await agent.exec_tool_calls(tool_calls)
+        results = await agent._executor.execute(tool_calls)
 
         assert len(results) == 2
         assert results[0].content == "good-result"
@@ -232,13 +232,13 @@ class TestSingleToolCall:
         async def simple_tool(input: str = "") -> str:
             return f"echo: {input}"
 
-        agent._tools = {
+        agent._executor._tools = {
             "Simple": _make_tool("Simple", simple_tool),
         }
 
         tool_calls = [_make_tool_call("call-1", "Simple", {"input": "hello"})]
 
-        results = await agent.exec_tool_calls(tool_calls)
+        results = await agent._executor.execute(tool_calls)
 
         assert len(results) == 1
         assert results[0].tool_call_id == "call-1"
@@ -253,7 +253,7 @@ class TestSingleToolCall:
         session = runtime.create_session()
         agent = session.agent
 
-        results = await agent.exec_tool_calls([])
+        results = await agent._executor.execute([])
 
         assert results == []
 

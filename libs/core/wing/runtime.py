@@ -44,7 +44,7 @@ from wing.session_manager import SessionManager
 from wing.store import FileSessionStore, MemorySessionStore, SessionStore
 
 if TYPE_CHECKING:
-    from wing.agent_template import AgentTemplate, AgentTemplateManager
+    from wing.agent_template import AgentTemplateManager
     from wing.gateway.protocol import AgentOverride
 
 
@@ -494,7 +494,7 @@ class WingRuntime:
                 tools=[t.effective_llm_name for t in agent.tools],
                 model=agent.model,
                 permission_mode="bypassPermissions" if agent.yolo else "default",
-                cwd=agent.state.get("cwd") or "",
+                cwd=str(agent.cwd) if agent.cwd else "",
                 target=client_target,
             )
         )

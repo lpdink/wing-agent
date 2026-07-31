@@ -6,12 +6,11 @@
 
 from __future__ import annotations
 
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from wing.event import EventTarget, SessionStateChangedEvent
+from wing.event import SessionStateChangedEvent
 from wing.event_bus import event_bus
 
 

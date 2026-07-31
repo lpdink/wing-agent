@@ -8,26 +8,46 @@ from pathlib import Path
 
 import pytest
 
-from wing.agent_state_bag import AgentStateBag
 from wing.schema import ToolError
 from wing.tools import glob_files, grep_files
 from wing.tools.bash import execute_shell
 
 
 class _MockAgent:
-    """Minimal agent: only state is exercised on the safe command path."""
+    """Minimal ToolContext implementation for tests."""
 
     def __init__(self, cwd: str | None = None) -> None:
-        self.state = AgentStateBag()
-        # Skip the dangerous-command confirmation flow (needs emit/session_id);
-        # cwd-persistence tests don't exercise safety.
+        self._cwd = Path(cwd) if cwd else None
         self._yolo = True
-        if cwd is not None:
-            self.state.set("cwd", cwd)
+        self._hooks: dict[str, object] = {}
+
+    @property
+    def session_id(self) -> str:
+        return "test-session"
 
     @property
     def yolo(self) -> bool:
         return self._yolo
+
+    @property
+    def cwd(self) -> Path | None:
+        return self._cwd
+
+    def set_yolo(self, value: bool) -> None:
+        self._yolo = value
+
+    def set_cwd(self, path: Path | None) -> None:
+        self._cwd = path
+
+    def register_interrupt_hook(self, hook) -> str:
+        import uuid
+
+        hook_id = uuid.uuid4().hex
+        self._hooks[hook_id] = hook
+        return hook_id
+
+    def unregister_interrupt_hook(self, hook_id: str) -> None:
+        self._hooks.pop(hook_id, None)
 
 
 def _parse_rc(result: str) -> int:
@@ -79,7 +99,7 @@ class TestBashExecution:
             await execute_shell("sleep 5", agent, timeout=1)
         assert "timed out" in str(exc_info.value)
         # cwd unchanged
-        assert agent.state.get("cwd") == str(tmp_path)
+        assert agent.cwd == tmp_path
 
 
 class TestBashShellBehavior:
@@ -121,7 +141,7 @@ class TestBashShellBehavior:
 
 
 class TestGlobGrepCwdResolution:
-    """Glob/Grep resolve relative paths against agent.state['cwd']."""
+    """Glob/Grep resolve relative paths against ctx.cwd."""
 
     @pytest.mark.asyncio
     async def test_glob_resolves_relative_to_workspace(self, tmp_path: Path):
@@ -130,7 +150,7 @@ class TestGlobGrepCwdResolution:
         (tmp_path / "other.py").write_text("y = 2")
         agent = _MockAgent(str(tmp_path))
 
-        result = await glob_files("*.py", agent=agent)
+        result = await glob_files("*.py", ctx=agent)
         assert "other.py" in result
 
     @pytest.mark.asyncio
@@ -139,5 +159,5 @@ class TestGlobGrepCwdResolution:
         (tmp_path / "src" / "a.py").write_text("needle = 1\n")
         agent = _MockAgent(str(tmp_path))
 
-        result = await grep_files("needle", path="src", agent=agent)
+        result = await grep_files("needle", path="src", ctx=agent)
         assert "a.py" in result

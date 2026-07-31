@@ -282,7 +282,6 @@ Content
         )
 
         # 注册
-        from wing.magic_command.prompt_commands import register_prompt_commands
 
         register_prompt_commands([str(tmp_path / "*.md")])
 

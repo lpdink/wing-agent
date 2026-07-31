@@ -4,7 +4,7 @@
 import subprocess
 from pathlib import Path
 
-from wing.agent import WingAgent
+from wing.agent import ToolContext
 from wing.schema import ToolError
 from wing.tool_registry import tool_registry
 from wing.tools.utils import resolve_path
@@ -31,7 +31,7 @@ def _run_rg(args: list[str], cwd: str | Path) -> tuple[str, str, int]:
 async def glob_files(
     pattern: str,
     path: str = ".",
-    agent: WingAgent | None = None,
+    ctx: ToolContext | None = None,
     respect_gitignore: bool = True,
 ) -> str:
     """Find files matching glob pattern.
@@ -48,7 +48,7 @@ async def glob_files(
     Returns:
         List of matching file paths, one per line.
     """
-    base = Path(resolve_path(path, agent))
+    base = Path(resolve_path(path, ctx))
     if not base.exists():
         raise ToolError(f"glob: {path}: No such directory")
 
@@ -87,7 +87,7 @@ async def glob_files(
 async def grep_files(
     pattern: str,
     path: str = ".",
-    agent: WingAgent | None = None,
+    ctx: ToolContext | None = None,
     glob: str = "*",
     output_mode: str = "files_with_matches",
     i: bool = False,
@@ -114,7 +114,7 @@ async def grep_files(
         - content: file:line content for each match (with context if specified)
         - count: file path and match count
     """
-    base = Path(resolve_path(path, agent))
+    base = Path(resolve_path(path, ctx))
     if not base.exists():
         raise ToolError(f"grep: {path}: No such file or directory")
 

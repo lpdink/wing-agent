@@ -119,7 +119,7 @@ class TestDelete:
 
 class TestCorruptRecovery:
     def test_corrupt_json_deleted(self, tmp_dir):
-        cm = _make_cm(tmp_dir)
+        _make_cm(tmp_dir)
         path = _aux_path(tmp_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("not valid json{{{", encoding="utf-8")
@@ -130,7 +130,7 @@ class TestCorruptRecovery:
         assert not path.exists()
 
     def test_missing_fields_deleted(self, tmp_dir):
-        cm = _make_cm(tmp_dir)
+        _make_cm(tmp_dir)
         path = _aux_path(tmp_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         # Missing required fields
