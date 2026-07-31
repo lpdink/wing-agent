@@ -14,10 +14,6 @@ pub mod turn_state;
 pub use intent::AppIntent;
 
 use anyhow::Result;
-use crossterm::cursor::Hide;
-use crossterm::cursor::MoveTo;
-use crossterm::cursor::Show;
-use crossterm::execute;
 use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
@@ -84,6 +80,15 @@ pub struct App {
     visible_height: usize,
     /// Terminal width (updated during draw).
     terminal_width: u16,
+    /// Force a full repaint on the next draw.
+    ///
+    /// ratatui is a diff-based renderer: it only repaints cells whose buffer
+    /// value changed. When the physical terminal is disturbed out-of-band
+    /// (focus regain, resize), its screen no longer matches ratatui's back
+    /// buffer and the diff leaves stale glyphs behind ("rendering residue").
+    /// Setting this flag makes the next draw call `Terminal::clear` first,
+    /// which resets the back buffer so the whole screen is repainted.
+    needs_full_redraw: bool,
     /// Ctrl+C press count for double-press quit.
     ctrl_c_count: u8,
     /// Last Ctrl+C timestamp (for double-press detection).
@@ -168,6 +173,7 @@ impl App {
             intents: Vec::new(),
             visible_height: 20,
             terminal_width: 80,
+            needs_full_redraw: true,
             ctrl_c_count: 0,
             ctrl_c_last: None,
             ctx: RenderContext::new(),
@@ -1092,7 +1098,7 @@ impl App {
                 return;
             }
             crossterm::event::KeyCode::PageDown => {
-                self.chat.page_down(page, self.visible_height);
+                self.chat.page_down(page);
                 return;
             }
             crossterm::event::KeyCode::Up
@@ -1108,7 +1114,7 @@ impl App {
                     .modifiers
                     .contains(crossterm::event::KeyModifiers::CONTROL) =>
             {
-                self.chat.scroll_down(1, self.visible_height);
+                self.chat.scroll_down(1);
                 return;
             }
             // Alternate-scroll mode translates trackpad/wheel into plain
@@ -1134,7 +1140,7 @@ impl App {
                         | crossterm::event::KeyModifiers::SHIFT,
                 ) && (!self.chat.is_at_bottom() || !self.input.can_move_down()) =>
             {
-                self.chat.scroll_down(3, self.visible_height);
+                self.chat.scroll_down(3);
                 return;
             }
             crossterm::event::KeyCode::Home
@@ -1744,6 +1750,14 @@ impl App {
 
     /// Draw the UI.
     fn draw(&mut self, terminal: &mut WingTerminal) -> Result<()> {
+        // Out-of-band terminal disturbance (focus regain / resize) — see
+        // `needs_full_redraw`. Reset the back buffer so this draw repaints
+        // the whole screen and resyncs with the terminal.
+        if self.needs_full_redraw {
+            terminal.clear()?;
+            self.needs_full_redraw = false;
+        }
+
         let mut chat_height: u16 = 0;
 
         // Extract render context before the draw closure borrows self.
@@ -1795,6 +1809,19 @@ impl App {
             let widget = ChatViewWidget::new(&mut self.chat, ctx).with_tail(tail);
             frame.render_widget(widget, chunks[1]);
 
+            // Position the input cursor *inside* the render pass so ratatui
+            // owns cursor show/hide/move. The previous post-draw
+            // `execute!(Show/Hide, MoveTo)` wrote to the backend out-of-band,
+            // which desyncs ratatui's cursor tracking and is explicitly
+            // discouraged by ratatui. Leaving the position unset hides the
+            // cursor (input scrolled out of view).
+            if let Some(rect) = self.chat.input_card_rect {
+                let (cursor_x, cursor_y) = cursor_screen_pos(&self.input, &rect);
+                let cursor_x = cursor_x.min(area.width.saturating_sub(1));
+                let cursor_y = cursor_y.min(area.height.saturating_sub(1));
+                frame.set_cursor_position((cursor_x, cursor_y));
+            }
+
             // Toast overlay (rendered last, on top of everything).
             if let Some(ref toast) = self.toast
                 && !toast.is_expired()
@@ -1809,21 +1836,6 @@ impl App {
         }
 
         self.visible_height = chat_height as usize;
-
-        // Position cursor in the input area; hide it when the input is
-        // scrolled out of view.
-        let size = terminal.size()?;
-        match self.chat.input_card_rect {
-            Some(rect) => {
-                let (cursor_x, cursor_y) = cursor_screen_pos(&self.input, &rect);
-                let cursor_x = cursor_x.min(size.width.saturating_sub(1));
-                let cursor_y = cursor_y.min(size.height.saturating_sub(1));
-                execute!(terminal.backend_mut(), Show, MoveTo(cursor_x, cursor_y))?;
-            }
-            None => {
-                execute!(terminal.backend_mut(), Hide)?;
-            }
-        }
 
         Ok(())
     }
@@ -1906,11 +1918,21 @@ pub async fn run_app(
                         // Pasted content brings the input back into view.
                         app.chat.jump_bottom();
                     }
-                    TermEvent::Resize(_, _) => {}
+                    TermEvent::Resize(_, _) => {
+                        // ratatui auto-resizes its buffers on the next draw;
+                        // force a full repaint so the resized screen is fully
+                        // resynced with the terminal.
+                        app.needs_full_redraw = true;
+                    }
                     TermEvent::Focus(focused) => {
                         app.focused = focused;
                         // On focus regain, restore the correct title.
                         if focused {
+                            // The terminal re-shows its surface on focus
+                            // regain and may have drifted from ratatui's
+                            // buffer (observed: stale glyphs on the status
+                            // bar after switching tabs). Force a full repaint.
+                            app.needs_full_redraw = true;
                             let dir = app.dir_label();
                             let title = if app.turn.working {
                                 title::title_working(

@@ -388,7 +388,10 @@ impl ChatView {
     }
 
     /// Scroll down by N lines.
-    pub fn scroll_down(&mut self, n: usize, _visible_height: usize) {
+    ///
+    /// `scroll_offset` is clamped to the content height during rendering
+    /// (see `ChatViewWidget::render`), so this cannot scroll past the bottom.
+    pub fn scroll_down(&mut self, n: usize) {
         self.scroll_offset = self.scroll_offset.saturating_add(n);
     }
 
@@ -398,8 +401,8 @@ impl ChatView {
     }
 
     /// Scroll by one page down.
-    pub fn page_down(&mut self, page_height: usize, visible_height: usize) {
-        self.scroll_down(page_height, visible_height);
+    pub fn page_down(&mut self, page_height: usize) {
+        self.scroll_down(page_height);
     }
 
     /// Jump to top.
@@ -1229,7 +1232,7 @@ mod tests {
         assert!(!view.auto_scroll);
         assert_eq!(view.scroll_offset, 0);
 
-        view.scroll_down(10, 5);
+        view.scroll_down(10);
         assert!(view.scroll_offset > 0);
     }
 
