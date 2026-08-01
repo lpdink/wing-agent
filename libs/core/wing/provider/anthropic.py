@@ -360,9 +360,13 @@ class AnthropicProvider(ModelProvider):
                 )
 
         usage_data = data.get("usage", {})
+        log.debug(f"[anthropic usage] sync raw: {usage_data}")
         prompt_tokens = usage_data.get("input_tokens", 0)
         completion_tokens = usage_data.get("output_tokens", 0)
         cached_tokens = usage_data.get("cache_read_input_tokens", 0)
+        cache_creation = usage_data.get("cache_creation_input_tokens", 0)
+        # 与流式路径/OpenAI 路径口径一致：prompt_tokens = 总输入（含缓存）
+        prompt_tokens = prompt_tokens + cached_tokens + cache_creation
 
         yield LLMResponse(
             content="".join(text_parts) or None,
@@ -417,6 +421,7 @@ class AnthropicProvider(ModelProvider):
         completion_tokens = 0
         cached_tokens = 0
         cache_creation = 0
+        input_source = "start"  # input_tokens 来源：delta（权威）或 start（兜底）
 
         try:
             async for event in parse_sse_stream(resp.aiter_lines()):
@@ -545,26 +550,49 @@ class AnthropicProvider(ModelProvider):
                     current_block_type = ""
 
                 elif event_type == "message_delta":
+                    # 权威累计 usage（官方文档：message_delta 的 usage 为 cumulative，
+                    # 且当前版本 API 含 input_tokens；message_start 仅作兜底）。
                     usage_delta = data.get("usage", {})
-                    completion_tokens = usage_delta.get(
-                        "output_tokens", completion_tokens
-                    )
-                    cached_tokens = usage_delta.get(
-                        "cache_read_input_tokens", cached_tokens
-                    )
-                    cache_creation = usage_delta.get("cache_creation_input_tokens", 0)
+                    log.debug(f"[anthropic usage] message_delta raw: {usage_delta}")
+                    if "input_tokens" in usage_delta:
+                        prompt_tokens = usage_delta["input_tokens"]
+                        input_source = "delta"
+                    if "output_tokens" in usage_delta:
+                        completion_tokens = usage_delta["output_tokens"]
+                    if "cache_read_input_tokens" in usage_delta:
+                        cached_tokens = usage_delta["cache_read_input_tokens"]
+                    if "cache_creation_input_tokens" in usage_delta:
+                        cache_creation = usage_delta["cache_creation_input_tokens"]
 
                 elif event_type == "message_start":
+                    # 兜底：部分 API 版本（如 2023-06-01）message_delta 不带
+                    # input_tokens，此时回退到 message_start 的初值。
                     msg = data.get("message", {})
                     usage_start = msg.get("usage", {})
-                    prompt_tokens = usage_start.get("input_tokens", 0)
-                    cached_tokens = usage_start.get("cache_read_input_tokens", 0)
+                    log.debug(f"[anthropic usage] message_start raw: {usage_start}")
+                    if "input_tokens" in usage_start:
+                        prompt_tokens = usage_start["input_tokens"]
+                        input_source = "start"
+                    if "cache_read_input_tokens" in usage_start:
+                        cached_tokens = usage_start["cache_read_input_tokens"]
 
                 elif event_type == "message_stop":
                     # 最终 usage + signature 发射
-                    # Anthropic 的 input_tokens 仅为非缓存部分；
+                    # Anthropic 的 input_tokens 仅为非缓存部分（含兜底/增量源）；
                     # 对齐 OpenAI 语义：prompt_tokens = 总输入（含缓存）
                     total_prompt = prompt_tokens + cached_tokens + cache_creation
+                    hit_rate = (
+                        cached_tokens / total_prompt * 100 if total_prompt else 0.0
+                    )
+                    log.debug(
+                        f"[anthropic usage] final: "
+                        f"input(non-cached)={prompt_tokens}({input_source}) "
+                        f"cache_read={cached_tokens} "
+                        f"cache_creation={cache_creation} "
+                        f"output={completion_tokens} => "
+                        f"prompt_tokens(total)={total_prompt} "
+                        f"hit_rate={hit_rate:.1f}%"
+                    )
                     decode_tps = 0.0
                     if completion_tokens > 0 and first_token_ts is not None:
                         decode_elapsed = time.monotonic() - first_token_ts
