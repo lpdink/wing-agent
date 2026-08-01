@@ -565,8 +565,10 @@ class AnthropicProvider(ModelProvider):
                         cache_creation = usage_delta["cache_creation_input_tokens"]
 
                 elif event_type == "message_start":
-                    # 兜底：部分 API 版本（如 2023-06-01）message_delta 不带
-                    # input_tokens，此时回退到 message_start 的初值。
+                    # 兜底：标准 Anthropic 把完整 usage（含 cache_creation/
+                    # cache_read）放在 message_start，message_delta 仅含
+                    # output_tokens；部分代理则相反（见 message_delta 分支）。
+                    # 两处都读，谁带就用谁，message_delta 后到则覆盖。
                     msg = data.get("message", {})
                     usage_start = msg.get("usage", {})
                     log.debug(f"[anthropic usage] message_start raw: {usage_start}")
@@ -575,6 +577,8 @@ class AnthropicProvider(ModelProvider):
                         input_source = "start"
                     if "cache_read_input_tokens" in usage_start:
                         cached_tokens = usage_start["cache_read_input_tokens"]
+                    if "cache_creation_input_tokens" in usage_start:
+                        cache_creation = usage_start["cache_creation_input_tokens"]
 
                 elif event_type == "message_stop":
                     # 最终 usage + signature 发射
