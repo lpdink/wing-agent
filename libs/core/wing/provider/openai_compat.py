@@ -14,15 +14,21 @@ from wing.common.logger import log
 from wing.common.with_retry import with_retry
 from wing.config import get_headers
 from wing.provider.base import ModelProvider
+from wing.provider.errors import raise_with_body
+from wing.provider.http import make_http_timeout
 from wing.provider.sse import parse_json_event, parse_sse_stream
 from wing.schema import (
+    ContentBlock,
     LLMResponse,
     LLMUsage,
     Message,
     PendingCall,
+    TextBlock,
+    ThinkingBlock,
     Tool,
     ToolCall,
     ToolCallDelta,
+    ToolUseBlock,
 )
 
 if TYPE_CHECKING:
@@ -40,7 +46,6 @@ class OpenAICompatProvider(ModelProvider):
         self._config = config
         self._session_id = session_id
         self.base_url = config.base_url.rstrip("/")
-        self.thinking = True
         self.reasoning_effort: str | None = config.reasoning_effort
         self.timeout_first_chunk = config.timeout_first_chunk
         self.timeout_total = config.timeout_total
@@ -54,12 +59,7 @@ class OpenAICompatProvider(ModelProvider):
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             headers=headers,
-            timeout=httpx.Timeout(
-                connect=30.0,
-                read=self.timeout_first_chunk,
-                write=30.0,
-                pool=30.0,
-            ),
+            timeout=make_http_timeout(),
         )
         log.info(f"OpenAICompatProvider initialized: {self.base_url}")
 
@@ -90,7 +90,7 @@ class OpenAICompatProvider(ModelProvider):
             return sorted(self._config.models)
         try:
             resp = await self._client.get("/models")
-            resp.raise_for_status()
+            await raise_with_body(resp)
             data = resp.json()
             return sorted([m["id"] for m in data.get("data", [])])
         except Exception as e:
@@ -106,60 +106,27 @@ class OpenAICompatProvider(ModelProvider):
     def set_reasoning_effort(self, effort: str | None) -> None:
         self.reasoning_effort = effort
 
-    def reload(self) -> list[str]:
-        """从最新 config 刷新 provider 配置。返回变更项列表。"""
-        from wing.config import get_config
-
-        config = get_config()
-        # 找到同名 provider 配置
-        new_cfg = None
-        for p in config.providers:
-            if p.name == self._config.name:
-                new_cfg = p
-                break
-        if new_cfg is None:
-            return []
-
-        changes: list[str] = []
-
-        if new_cfg.base_url != self._config.base_url:
-            self._config = new_cfg
-            self.base_url = new_cfg.base_url.rstrip("/")
-            headers = get_headers()
-            headers["Authorization"] = f"Bearer {new_cfg.api_key}"
-            headers["Content-Type"] = "application/json"
-            old_client = self._client
-            self._client = httpx.AsyncClient(
-                base_url=self.base_url,
-                headers=headers,
-                timeout=httpx.Timeout(
-                    connect=30.0,
-                    read=new_cfg.timeout_first_chunk,
-                    write=30.0,
-                    pool=30.0,
-                ),
-            )
-            # 异步关闭旧 client（fire-and-forget，不阻塞 reload）
-            asyncio.ensure_future(old_client.aclose())
-            changes.append(f"base_url={new_cfg.base_url}")
-
-        for attr in (
-            "timeout_first_chunk",
-            "timeout_total",
-            "explicit_cache_mode",
-            "reasoning_effort",
-        ):
-            old = getattr(self, attr)
-            new = getattr(new_cfg, attr)
-            if old != new:
-                setattr(self, attr, new)
-                changes.append(f"{attr}: {old} → {new}")
-
-        self._config = new_cfg
-        self._extra_body = dict(new_cfg.extra_body)
-        return changes
-
     # ─── Request Building ─────────────────────────────────────────
+
+    @staticmethod
+    def _build_content_blocks(
+        reasoning: str | None,
+        content: str | None,
+        tool_calls: list[ToolCall],
+    ) -> list[ContentBlock]:
+        """从 OpenAI 扁平响应构建权威块数组（与 Anthropic 路径输出契约统一）。
+
+        OpenAI 扁平协议无块序信息，约定序为 thinking → text → tool_use；
+        reasoning 映射为无签名 ThinkingBlock（OpenAI 协议无签名概念）。
+        """
+        blocks: list[ContentBlock] = []
+        if reasoning:
+            blocks.append(ThinkingBlock(thinking=reasoning))
+        if content:
+            blocks.append(TextBlock(text=content))
+        for tc in tool_calls:
+            blocks.append(ToolUseBlock(id=tc.id, name=tc.name, input=tc.arguments))
+        return blocks
 
     def _build_body(
         self,
@@ -208,7 +175,7 @@ class OpenAICompatProvider(ModelProvider):
                 self._client.post("/chat/completions", json=body),
                 timeout=self.timeout_total,
             )
-            resp.raise_for_status()
+            await raise_with_body(resp)
         except asyncio.TimeoutError:
             log.error(f"LLM request timeout after {self.timeout_total}s")
             raise TimeoutError(f"LLM request timeout after {self.timeout_total}s")
@@ -240,6 +207,9 @@ class OpenAICompatProvider(ModelProvider):
             content=message.get("content"),
             reasoning_content=message.get("reasoning_content"),
             tool_calls=tool_calls or None,
+            content_blocks=self._build_content_blocks(
+                message.get("reasoning_content"), message.get("content"), tool_calls
+            ),
             usage=LLMUsage(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
@@ -263,7 +233,7 @@ class OpenAICompatProvider(ModelProvider):
                 self._client.send(req, stream=True),
                 timeout=self.timeout_first_chunk,
             )
-            resp.raise_for_status()
+            await raise_with_body(resp)
         except asyncio.TimeoutError:
             log.error(f"LLM first chunk timeout after {self.timeout_first_chunk}s")
             raise TimeoutError(
@@ -276,6 +246,13 @@ class OpenAICompatProvider(ModelProvider):
 
         pending: dict[int, PendingCall] = {}
         first_token_ts: float | None = None
+        # 块数组累积：流结束时产出权威 content_blocks（与 Anthropic 路径契约统一）
+        reasoning_chunks: list[str] = []
+        content_chunks: list[str] = []
+        final_tool_calls: list[ToolCall] = []
+        last_usage = LLMUsage(
+            first_chunk_rt_ms=first_chunk_rt_ms, model=model, request_id=request_id
+        )
 
         try:
             async for event in parse_sse_stream(resp.aiter_lines()):
@@ -298,6 +275,11 @@ class OpenAICompatProvider(ModelProvider):
                 reasoning = delta.get("reasoning_content")
                 content = delta.get("content")
 
+                if reasoning:
+                    reasoning_chunks.append(reasoning)
+                if content:
+                    content_chunks.append(content)
+
                 if first_token_ts is None and (content or reasoning):
                     first_token_ts = time.monotonic()
 
@@ -306,6 +288,8 @@ class OpenAICompatProvider(ModelProvider):
                     if choice
                     else (None, None)
                 )
+                if tcs:
+                    final_tool_calls.extend(tcs)
 
                 decode_tps = 0.0
                 if completion_tokens > 0 and first_token_ts is not None:
@@ -313,21 +297,35 @@ class OpenAICompatProvider(ModelProvider):
                     if decode_elapsed > 0:
                         decode_tps = completion_tokens / decode_elapsed
 
+                chunk_usage = LLMUsage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    cached_tokens=cached_tokens,
+                    first_chunk_rt_ms=first_chunk_rt_ms,
+                    tokens_per_sec=decode_tps,
+                    model=model,
+                    request_id=request_id,
+                )
+                if prompt_tokens or completion_tokens:
+                    last_usage = chunk_usage
+
                 yield LLMResponse(
                     content=content,
                     reasoning_content=reasoning,
                     tool_calls=tcs,
                     tool_call_deltas=deltas,
-                    usage=LLMUsage(
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        cached_tokens=cached_tokens,
-                        first_chunk_rt_ms=first_chunk_rt_ms,
-                        tokens_per_sec=decode_tps,
-                        model=model,
-                        request_id=request_id,
-                    ),
+                    usage=chunk_usage,
                 )
+
+            # 流结束：产出权威 content_blocks（ReActLoop 以此为 Message 唯一组装依据）
+            yield LLMResponse(
+                content_blocks=self._build_content_blocks(
+                    "".join(reasoning_chunks) or None,
+                    "".join(content_chunks) or None,
+                    final_tool_calls,
+                ),
+                usage=last_usage,
+            )
         finally:
             await resp.aclose()
 

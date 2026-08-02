@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, AsyncIterator
 
 import httpx
@@ -20,11 +21,14 @@ import httpx
 from wing.common.logger import log
 from wing.common.with_retry import with_retry
 from wing.provider.base import ModelProvider
+from wing.provider.errors import ProviderStreamError, raise_with_body
+from wing.provider.http import make_http_timeout
 from wing.provider.sse import parse_json_event, parse_sse_stream
 from wing.schema import (
     LLMResponse,
     LLMUsage,
     Message,
+    PendingCall,
     TextBlock,
     ThinkingBlock,
     Tool,
@@ -35,6 +39,28 @@ from wing.schema import (
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
+
+
+@dataclass
+class _StreamState:
+    """Anthropic 流式解析状态——per-index 结构化。
+
+    块与 tool 参数均按事件 index 独立累积，不依赖"块事件严格顺序"的隐式
+    假设：交错到达的 delta 各归其 index，content_block_stop 按其 index
+    终结对应块。
+    """
+
+    blocks_by_index: dict[int, TextBlock | ThinkingBlock | ToolUseBlock] = field(
+        default_factory=dict
+    )
+    pending_tools: dict[int, PendingCall] = field(default_factory=dict)
+    # usage 累计
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_tokens: int = 0
+    cache_creation: int = 0
+    input_source: str = "start"  # input_tokens 来源：delta（权威）或 start（兜底）
+    first_token_ts: float | None = None
 
 
 class AnthropicProvider(ModelProvider):
@@ -48,10 +74,6 @@ class AnthropicProvider(ModelProvider):
         self._config = config
         self._session_id = session_id
         self.base_url = config.base_url.rstrip("/")
-        # Anthropic 的 thinking 实际由 extra_body（thinking.type）控制；
-        # `thinking` 为只读派生属性（见下），不在此赋值。
-        self.allow_empty_signature = False
-        """对接受空签名的兼容端点发 signature:""（默认关；官方 Anthropic 必须降级 text）。"""
         self.reasoning_effort: str | None = config.reasoning_effort
         self.timeout_first_chunk = config.timeout_first_chunk
         self.timeout_total = config.timeout_total
@@ -66,12 +88,7 @@ class AnthropicProvider(ModelProvider):
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             headers=headers,
-            timeout=httpx.Timeout(
-                connect=30.0,
-                read=self.timeout_first_chunk,
-                write=30.0,
-                pool=30.0,
-            ),
+            timeout=make_http_timeout(),
         )
         log.info(f"AnthropicProvider initialized: {self.base_url}")
 
@@ -100,7 +117,7 @@ class AnthropicProvider(ModelProvider):
             return sorted(self._config.models)
         try:
             resp = await self._client.get("/v1/models")
-            resp.raise_for_status()
+            await raise_with_body(resp)
             data = resp.json()
             return sorted([m["id"] for m in data.get("data", [])])
         except Exception as e:
@@ -114,12 +131,16 @@ class AnthropicProvider(ModelProvider):
     def thinking(self) -> bool:
         """thinking 开关状态——从 extra_body 的 thinking 配置推导。
 
-        Anthropic 的 thinking 实际由 extra_body（如 thinking.type=enabled）
-        控制，该配置会平铺进请求 body。状态从它推导，保证「序列化回放 /
-        对外 get_status() 上报 / 开关语义」三者自洽（此前恒为 True，TUI 开关
-        是空操作）。
+        Anthropic 的 thinking 由 extra_body（thinking.type=enabled）控制，
+        该配置平铺进请求 body。状态从它推导，保证「序列化回放 / 对外
+        get_status() 上报 / 开关语义」三者自洽。
         """
-        tb = self._extra_body.get("thinking")
+        return self._thinking_enabled(self._extra_body)
+
+    @staticmethod
+    def _thinking_enabled(extra_body: dict) -> bool:
+        """extra_body 是否启用 thinking（Anthropic 官方开关：thinking.type=enabled）。"""
+        tb = extra_body.get("thinking")
         return isinstance(tb, dict) and tb.get("type") == "enabled"
 
     def set_thinking(self, enable: bool) -> None:
@@ -132,53 +153,6 @@ class AnthropicProvider(ModelProvider):
         # No-op：不持有状态，不影响请求。
         pass
 
-    def reload(self) -> list[str]:
-        from wing.config import get_config
-
-        config = get_config()
-        new_cfg = None
-        for p in config.providers:
-            if p.name == self._config.name:
-                new_cfg = p
-                break
-        if new_cfg is None:
-            return []
-
-        changes: list[str] = []
-        if new_cfg.base_url != self._config.base_url:
-            self.base_url = new_cfg.base_url.rstrip("/")
-            old_client = self._client
-            self._client = httpx.AsyncClient(
-                base_url=self.base_url,
-                headers=self._make_headers(
-                    new_cfg.api_key, new_cfg.anthropic_version, dict(new_cfg.extra_body)
-                ),
-                timeout=httpx.Timeout(
-                    connect=30.0,
-                    read=new_cfg.timeout_first_chunk,
-                    write=30.0,
-                    pool=30.0,
-                ),
-            )
-            asyncio.ensure_future(old_client.aclose())
-            changes.append(f"base_url={new_cfg.base_url}")
-
-        for attr in (
-            "timeout_first_chunk",
-            "timeout_total",
-            "explicit_cache_mode",
-            "reasoning_effort",
-        ):
-            old = getattr(self, attr)
-            new = getattr(new_cfg, attr)
-            if old != new:
-                setattr(self, attr, new)
-                changes.append(f"{attr}: {old} → {new}")
-
-        self._config = new_cfg
-        self._extra_body = dict(new_cfg.extra_body)
-        return changes
-
     # ─── Request Building ─────────────────────────────────────────
 
     @staticmethod
@@ -190,8 +164,7 @@ class AnthropicProvider(ModelProvider):
             "anthropic-version": anthropic_version,
             "Content-Type": "application/json",
         }
-        tb = extra_body.get("thinking")
-        if isinstance(tb, dict) and tb.get("type") == "enabled":
+        if AnthropicProvider._thinking_enabled(extra_body):
             headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
         return headers
 
@@ -278,40 +251,26 @@ class AnthropicProvider(ModelProvider):
                         }
                     )
 
-        # 尾部 thinking 过滤：最后一条 assistant 消息不得以 thinking/redacted 结尾
-        self._strip_trailing_thinking(anthropic_msgs)
-
-        # 合并连续的 user 消息（Anthropic 要求 user/assistant 交替）
+        # 合并连续的 user 消息：Anthropic Messages API 要求 user/assistant
+        # 严格交替，连续同角色返回 400。wing 的真实产生路径：tool 消息序列化为
+        # user（tool_result）后，紧跟 steer 注入的 user 消息。
         merged = self._merge_consecutive_user(anthropic_msgs)
         return "\n\n".join(system_parts), merged
 
     def _serialize_assistant(self, msg: Message) -> list[dict]:
         """将 assistant 消息的 content_blocks 按序一对一映射回 Anthropic block。
 
-        回放契约（照搬 PI convertMessages）：
-        - thinking 有有效 signature → 原样按序发出，一个字节都不改
+        忠实回放契约：
+        - thinking 有 signature → 原样按序发出，一个字节都不改
           （改了会签名失配 + 击穿 prompt cache）
-        - thinking 无有效 signature → 降级成 text 块（绝不给官方 Anthropic
-          发空/坏签名的 thinking block，必被拒）
+        - thinking 无 signature → 原样发空签名（signature:""）。此类数据
+          产生于不下发签名的推理 provider 或存量旧会话——回放官方 Anthropic
+          被拒是预期行为（官方必下发签名），MUST NOT 降级 text 破坏内容语义
         - thinking 文本为空且无 signature → 整块丢弃
         - redacted → redacted_thinking + data（不透明黑盒原样回放）
         """
-        content_blocks = msg.content_blocks
-        if content_blocks is None:
-            # 防御性兜底：validator 已为 assistant 填充块数组；此处从扁平字段构建。
-            fallback: list[TextBlock | ThinkingBlock | ToolUseBlock] = []
-            if msg.reasoning_content:
-                fallback.append(ThinkingBlock(thinking=msg.reasoning_content))
-            if msg.content:
-                fallback.append(TextBlock(text=msg.content))
-            for tc in msg.tool_calls or []:
-                fallback.append(
-                    ToolUseBlock(id=tc.id, name=tc.name, input=tc.arguments)
-                )
-            content_blocks = fallback
-
         blocks: list[dict] = []
-        for block in content_blocks:
+        for block in msg.content_blocks or []:
             if isinstance(block, TextBlock):
                 if block.text:
                     blocks.append({"type": "text", "text": block.text})
@@ -320,27 +279,16 @@ class AnthropicProvider(ModelProvider):
                     blocks.append(
                         {"type": "redacted_thinking", "data": block.signature or ""}
                     )
-                elif block.has_valid_signature:
-                    blocks.append(
-                        {
-                            "type": "thinking",
-                            "thinking": block.thinking,
-                            "signature": block.signature,
-                        }
-                    )
-                elif block.thinking.strip() == "":
+                elif not block.thinking.strip() and not block.signature:
                     continue  # 空 thinking 无签名 → 丢弃
-                elif self.allow_empty_signature:
+                else:
                     blocks.append(
                         {
                             "type": "thinking",
                             "thinking": block.thinking,
-                            "signature": "",
+                            "signature": block.signature or "",
                         }
                     )
-                else:
-                    # 无有效签名 → 降级 text
-                    blocks.append({"type": "text", "text": block.thinking})
             elif isinstance(block, ToolUseBlock):
                 blocks.append(
                     {
@@ -351,28 +299,6 @@ class AnthropicProvider(ModelProvider):
                     }
                 )
         return blocks
-
-    @staticmethod
-    def _strip_trailing_thinking(msgs: list[dict]) -> None:
-        """尾部 thinking 过滤：最后一条 assistant 消息不得以 thinking/redacted 结尾。
-
-        API 规则：thinking block 不能作为消息的最后一个 block。用户中断流式时
-        最易产生尾部 thinking。整条全是 thinking 则插占位 text。
-        """
-        for msg in reversed(msgs):
-            if msg["role"] != "assistant":
-                continue
-            content = msg.get("content")
-            if not isinstance(content, list):
-                return
-            while content and content[-1].get("type") in (
-                "thinking",
-                "redacted_thinking",
-            ):
-                content.pop()
-            if not content:
-                content.append({"type": "text", "text": "[No message content]"})
-            return
 
     @staticmethod
     def _merge_consecutive_user(msgs: list[dict]) -> list[dict]:
@@ -404,10 +330,10 @@ class AnthropicProvider(ModelProvider):
 
     @staticmethod
     def _apply_cache_control(anthropic_messages: list[dict]) -> None:
-        """为最后一条消息的最后一个非 thinking content block 打 cache_control。
+        """为最后一条消息的最后一个 content block 打 cache_control。
 
-        thinking 块字节须稳定（任何改写会签名失配 + 击穿缓存），故 cache_control
-        打在最后一个非 thinking/redacted 块上。
+        与 OpenAI 路径同构：cache_control 是附加字段，不改写 thinking 字节、
+        不影响签名；Anthropic prompt caching 支持 thinking 块携带缓存标记。
         """
         if not anthropic_messages:
             return
@@ -415,10 +341,7 @@ class AnthropicProvider(ModelProvider):
         content = last_msg.get("content")
         if not isinstance(content, list) or not content:
             return
-        for i in range(len(content) - 1, -1, -1):
-            if content[i].get("type") not in ("thinking", "redacted_thinking"):
-                content[i]["cache_control"] = {"type": "ephemeral"}
-                return
+        content[-1]["cache_control"] = {"type": "ephemeral"}
 
     # ─── Non-streaming ────────────────────────────────────────────
 
@@ -431,7 +354,7 @@ class AnthropicProvider(ModelProvider):
                 self._client.post("/v1/messages", json=body),
                 timeout=self.timeout_total,
             )
-            resp.raise_for_status()
+            await raise_with_body(resp)
         except asyncio.TimeoutError:
             log.error(f"LLM request timeout after {self.timeout_total}s")
             raise TimeoutError(f"LLM request timeout after {self.timeout_total}s")
@@ -517,7 +440,7 @@ class AnthropicProvider(ModelProvider):
                 self._client.send(req, stream=True),
                 timeout=self.timeout_first_chunk,
             )
-            resp.raise_for_status()
+            await raise_with_body(resp)
         except asyncio.TimeoutError:
             log.error(f"LLM first chunk timeout after {self.timeout_first_chunk}s")
             raise TimeoutError(
@@ -528,247 +451,238 @@ class AnthropicProvider(ModelProvider):
         first_chunk_rt_ms = (time.monotonic() - t0) * 1000
         log.info("[DONE] anthropic stream connected")
 
-        first_token_ts: float | None = None
-        # 块累积器：按 index 建块，流式结束时产出有序 content_blocks
-        blocks_by_index: dict[int, TextBlock | ThinkingBlock | ToolUseBlock] = {}
-        tool_args_by_index: dict[int, str] = {}
-        # 当前活跃的 content block 状态（增量事件发射用）
-        current_block_type: str = ""
-        current_tool_id: str = ""
-        current_tool_name: str = ""
-        tool_args_buffer: str = ""
-        tool_emitted_len: int = 0
-
-        # 累计 usage
-        prompt_tokens = 0
-        completion_tokens = 0
-        cached_tokens = 0
-        cache_creation = 0
-        input_source = "start"  # input_tokens 来源：delta（权威）或 start（兜底）
-
+        state = _StreamState()
         try:
             async for event in parse_sse_stream(resp.aiter_lines()):
                 data = parse_json_event(event)
                 if data is None:
                     continue
-
                 event_type = data.get("type", "")
 
                 if event_type == "content_block_start":
-                    idx = data.get("index", 0)
-                    block = data.get("content_block", {})
-                    current_block_type = block.get("type", "")
-                    if current_block_type == "thinking":
-                        blocks_by_index[idx] = ThinkingBlock(thinking="", signature="")
-                    elif current_block_type == "redacted_thinking":
-                        # 加密 payload 当不透明黑盒，存进 signature，redacted=True
-                        blocks_by_index[idx] = ThinkingBlock(
-                            thinking="", signature=block.get("data", ""), redacted=True
-                        )
-                    elif current_block_type == "text":
-                        blocks_by_index[idx] = TextBlock(text="")
-                    elif current_block_type == "tool_use":
-                        current_tool_id = block.get("id", "")
-                        current_tool_name = block.get("name", "")
-                        tool_args_buffer = ""
-                        tool_emitted_len = 0
-                        blocks_by_index[idx] = ToolUseBlock(
-                            id=current_tool_id, name=current_tool_name, input={}
-                        )
-                        tool_args_by_index[idx] = ""
-
+                    self._on_block_start(state, data)
                 elif event_type == "content_block_delta":
-                    delta = data.get("delta", {})
-                    delta_type = delta.get("type", "")
-
-                    if delta_type == "text_delta":
-                        text = delta.get("text", "")
-                        if first_token_ts is None and text:
-                            first_token_ts = time.monotonic()
-                        blk = blocks_by_index.get(data.get("index", 0))
-                        if isinstance(blk, TextBlock):
-                            blk.text += text
-                        yield LLMResponse(
-                            content=text,
-                            usage=LLMUsage(
-                                first_chunk_rt_ms=first_chunk_rt_ms,
-                                model=model,
-                                request_id=request_id,
-                            ),
-                        )
-
-                    elif delta_type == "thinking_delta":
-                        thinking = delta.get("thinking", "")
-                        if first_token_ts is None and thinking:
-                            first_token_ts = time.monotonic()
-                        blk = blocks_by_index.get(data.get("index", 0))
-                        if isinstance(blk, ThinkingBlock):
-                            blk.thinking += thinking
-                        yield LLMResponse(
-                            reasoning_content=thinking,
-                            usage=LLMUsage(
-                                first_chunk_rt_ms=first_chunk_rt_ms,
-                                model=model,
-                                request_id=request_id,
-                            ),
-                        )
-
-                    elif delta_type == "signature_delta":
-                        # per-block signature：累加进对应块（兼容单片/多片），
-                        # 绝不"只留最后一个全局 signature"
-                        sig = delta.get("signature", "")
-                        blk = blocks_by_index.get(data.get("index", 0))
-                        if isinstance(blk, ThinkingBlock) and sig:
-                            blk.signature = (blk.signature or "") + sig
-
-                    elif delta_type == "input_json_delta":
-                        partial_json = delta.get("partial_json", "")
-                        tool_args_buffer += partial_json
-                        tool_args_by_index[data.get("index", 0)] = tool_args_buffer
-                        fragment = tool_args_buffer[tool_emitted_len:]
-                        if fragment and current_tool_id:
-                            tool_emitted_len = len(tool_args_buffer)
-                            yield LLMResponse(
-                                tool_call_deltas=[
-                                    ToolCallDelta(
-                                        id=current_tool_id,
-                                        name=current_tool_name,
-                                        args_fragment=fragment,
-                                        is_final=False,
-                                    )
-                                ],
-                                usage=LLMUsage(
-                                    first_chunk_rt_ms=first_chunk_rt_ms,
-                                    model=model,
-                                    request_id=request_id,
-                                ),
-                            )
-
+                    out = self._on_block_delta(
+                        state, data, model, request_id, first_chunk_rt_ms
+                    )
+                    if out is not None:
+                        yield out
                 elif event_type == "content_block_stop":
-                    if current_block_type == "tool_use" and current_tool_id:
-                        # 发射 final tool call
-                        try:
-                            args = (
-                                json.loads(tool_args_buffer) if tool_args_buffer else {}
-                            )
-                        except json.JSONDecodeError:
-                            log.warning(
-                                f"Failed to parse tool args JSON for "
-                                f"{current_tool_name}: {tool_args_buffer[:200]}"
-                            )
-                            args = {}
-                        # 权威 JSON 解析结果写回块（失败落 {}）
-                        blk = blocks_by_index.get(data.get("index", 0))
-                        if isinstance(blk, ToolUseBlock):
-                            blk.input = args
-                        # 发射 is_final delta
-                        remaining = tool_args_buffer[tool_emitted_len:]
-                        deltas = []
-                        if remaining:
-                            deltas.append(
-                                ToolCallDelta(
-                                    id=current_tool_id,
-                                    name=current_tool_name,
-                                    args_fragment=remaining,
-                                    is_final=True,
-                                )
-                            )
-                        else:
-                            deltas.append(
-                                ToolCallDelta(
-                                    id=current_tool_id,
-                                    name=current_tool_name,
-                                    args_fragment="",
-                                    is_final=True,
-                                )
-                            )
-                        yield LLMResponse(
-                            tool_calls=[
-                                ToolCall(
-                                    id=current_tool_id,
-                                    name=current_tool_name,
-                                    arguments=args,
-                                )
-                            ],
-                            tool_call_deltas=deltas,
-                            usage=LLMUsage(
-                                first_chunk_rt_ms=first_chunk_rt_ms,
-                                model=model,
-                                request_id=request_id,
-                            ),
-                        )
-                    current_block_type = ""
-
+                    out = self._on_block_stop(
+                        state, data, model, request_id, first_chunk_rt_ms
+                    )
+                    if out is not None:
+                        yield out
                 elif event_type == "message_delta":
-                    # 权威累计 usage（官方文档：message_delta 的 usage 为 cumulative，
-                    # 且当前版本 API 含 input_tokens；message_start 仅作兜底）。
-                    usage_delta = data.get("usage", {})
-                    log.debug(f"[anthropic usage] message_delta raw: {usage_delta}")
-                    if "input_tokens" in usage_delta:
-                        prompt_tokens = usage_delta["input_tokens"]
-                        input_source = "delta"
-                    if "output_tokens" in usage_delta:
-                        completion_tokens = usage_delta["output_tokens"]
-                    if "cache_read_input_tokens" in usage_delta:
-                        cached_tokens = usage_delta["cache_read_input_tokens"]
-                    if "cache_creation_input_tokens" in usage_delta:
-                        cache_creation = usage_delta["cache_creation_input_tokens"]
-
+                    self._on_message_delta(state, data)
                 elif event_type == "message_start":
-                    # 兜底：标准 Anthropic 把完整 usage（含 cache_creation/
-                    # cache_read）放在 message_start，message_delta 仅含
-                    # output_tokens；部分代理则相反（见 message_delta 分支）。
-                    # 两处都读，谁带就用谁，message_delta 后到则覆盖。
-                    msg = data.get("message", {})
-                    usage_start = msg.get("usage", {})
-                    log.debug(f"[anthropic usage] message_start raw: {usage_start}")
-                    if "input_tokens" in usage_start:
-                        prompt_tokens = usage_start["input_tokens"]
-                        input_source = "start"
-                    if "cache_read_input_tokens" in usage_start:
-                        cached_tokens = usage_start["cache_read_input_tokens"]
-                    if "cache_creation_input_tokens" in usage_start:
-                        cache_creation = usage_start["cache_creation_input_tokens"]
-
+                    self._on_message_start(state, data)
                 elif event_type == "message_stop":
-                    # 最终 usage + content_blocks 发射
-                    # Anthropic 的 input_tokens 仅为非缓存部分（含兜底/增量源）；
-                    # 对齐 OpenAI 语义：prompt_tokens = 总输入（含缓存）
-                    total_prompt = prompt_tokens + cached_tokens + cache_creation
-                    hit_rate = (
-                        cached_tokens / total_prompt * 100 if total_prompt else 0.0
+                    yield self._build_final_response(
+                        state, model, request_id, first_chunk_rt_ms
                     )
-                    log.debug(
-                        f"[anthropic usage] final: "
-                        f"input(non-cached)={prompt_tokens}({input_source}) "
-                        f"cache_read={cached_tokens} "
-                        f"cache_creation={cache_creation} "
-                        f"output={completion_tokens} => "
-                        f"prompt_tokens(total)={total_prompt} "
-                        f"hit_rate={hit_rate:.1f}%"
-                    )
-                    decode_tps = 0.0
-                    if completion_tokens > 0 and first_token_ts is not None:
-                        decode_elapsed = time.monotonic() - first_token_ts
-                        if decode_elapsed > 0:
-                            decode_tps = completion_tokens / decode_elapsed
-                    # 产出有序 content_blocks（按 index 排序）——权威块数组，
-                    # LLMCaller commit 进 Message
-                    ordered_blocks = [
-                        blocks_by_index[i] for i in sorted(blocks_by_index)
-                    ]
-                    yield LLMResponse(
-                        content_blocks=ordered_blocks or None,
-                        usage=LLMUsage(
-                            prompt_tokens=total_prompt,
-                            completion_tokens=completion_tokens,
-                            cached_tokens=cached_tokens,
-                            first_chunk_rt_ms=first_chunk_rt_ms,
-                            tokens_per_sec=decode_tps,
-                            model=model,
-                            request_id=request_id,
-                        ),
-                    )
-
+                elif event_type == "error":
+                    # Anthropic 流中 error 事件（overloaded / rate limit / 中途
+                    # 终止）：抛出触发 with_retry 重试与错误上报——截断轮次绝不
+                    # 作为成功 turn 提交。
+                    raise ProviderStreamError(data)
         finally:
             await resp.aclose()
+
+    # ─── Stream Event Handlers ────────────────────────────────────
+
+    @staticmethod
+    def _on_block_start(state: _StreamState, data: dict) -> None:
+        idx = data.get("index", 0)
+        block = data.get("content_block", {})
+        btype = block.get("type", "")
+        if btype == "thinking":
+            state.blocks_by_index[idx] = ThinkingBlock(thinking="", signature="")
+        elif btype == "redacted_thinking":
+            # 加密 payload 当不透明黑盒，存进 signature，redacted=True
+            state.blocks_by_index[idx] = ThinkingBlock(
+                thinking="", signature=block.get("data", ""), redacted=True
+            )
+        elif btype == "text":
+            state.blocks_by_index[idx] = TextBlock(text="")
+        elif btype == "tool_use":
+            tool_id = block.get("id", "")
+            tool_name = block.get("name", "")
+            state.blocks_by_index[idx] = ToolUseBlock(
+                id=tool_id, name=tool_name, input={}
+            )
+            state.pending_tools[idx] = PendingCall(id=tool_id, name=tool_name)
+
+    @staticmethod
+    def _on_block_delta(
+        state: _StreamState,
+        data: dict,
+        model: str,
+        request_id: str,
+        first_chunk_rt_ms: float,
+    ) -> LLMResponse | None:
+        """处理 content_block_delta：累积进对应 index 的块，发射增量事件。"""
+        idx = data.get("index", 0)
+        delta = data.get("delta", {})
+        delta_type = delta.get("type", "")
+        meta = LLMUsage(
+            first_chunk_rt_ms=first_chunk_rt_ms, model=model, request_id=request_id
+        )
+
+        if delta_type == "text_delta":
+            text = delta.get("text", "")
+            if state.first_token_ts is None and text:
+                state.first_token_ts = time.monotonic()
+            blk = state.blocks_by_index.get(idx)
+            if isinstance(blk, TextBlock):
+                blk.text += text
+            return LLMResponse(content=text, usage=meta)
+
+        if delta_type == "thinking_delta":
+            thinking = delta.get("thinking", "")
+            if state.first_token_ts is None and thinking:
+                state.first_token_ts = time.monotonic()
+            blk = state.blocks_by_index.get(idx)
+            if isinstance(blk, ThinkingBlock):
+                blk.thinking += thinking
+            return LLMResponse(reasoning_content=thinking, usage=meta)
+
+        if delta_type == "signature_delta":
+            # per-block signature：累加进对应块（兼容单片/多片）
+            sig = delta.get("signature", "")
+            blk = state.blocks_by_index.get(idx)
+            if isinstance(blk, ThinkingBlock) and sig:
+                blk.signature = (blk.signature or "") + sig
+            return None
+
+        if delta_type == "input_json_delta":
+            call = state.pending_tools.get(idx)
+            if call is None:
+                return None
+            call.args_buffer += delta.get("partial_json", "")
+            fragment = call.args_buffer[call.emitted_len :]
+            if not fragment or not call.id:
+                return None
+            call.emitted_len = len(call.args_buffer)
+            return LLMResponse(
+                tool_call_deltas=[
+                    ToolCallDelta(
+                        id=call.id,
+                        name=call.name,
+                        args_fragment=fragment,
+                        is_final=False,
+                    )
+                ],
+                usage=meta,
+            )
+
+        return None
+
+    @staticmethod
+    def _on_block_stop(
+        state: _StreamState,
+        data: dict,
+        model: str,
+        request_id: str,
+        first_chunk_rt_ms: float,
+    ) -> LLMResponse | None:
+        """content_block_stop：按其 index 终结 tool 块（权威 JSON 解析）。"""
+        idx = data.get("index", 0)
+        call = state.pending_tools.pop(idx, None)
+        if call is None or not call.id:
+            return None
+        try:
+            args = json.loads(call.args_buffer) if call.args_buffer else {}
+        except json.JSONDecodeError:
+            log.warning(
+                f"Failed to parse tool args JSON for "
+                f"{call.name}: {call.args_buffer[:200]}"
+            )
+            args = {}
+        blk = state.blocks_by_index.get(idx)
+        if isinstance(blk, ToolUseBlock):
+            blk.input = args
+        return LLMResponse(
+            tool_calls=[ToolCall(id=call.id, name=call.name, arguments=args)],
+            tool_call_deltas=[
+                ToolCallDelta(
+                    id=call.id,
+                    name=call.name,
+                    args_fragment=call.args_buffer[call.emitted_len :],
+                    is_final=True,
+                )
+            ],
+            usage=LLMUsage(
+                first_chunk_rt_ms=first_chunk_rt_ms, model=model, request_id=request_id
+            ),
+        )
+
+    @staticmethod
+    def _on_message_delta(state: _StreamState, data: dict) -> None:
+        # 权威累计 usage（官方文档：message_delta 的 usage 为 cumulative，
+        # 且当前版本 API 含 input_tokens；message_start 仅作兜底）。
+        usage_delta = data.get("usage", {})
+        log.debug(f"[anthropic usage] message_delta raw: {usage_delta}")
+        if "input_tokens" in usage_delta:
+            state.prompt_tokens = usage_delta["input_tokens"]
+            state.input_source = "delta"
+        if "output_tokens" in usage_delta:
+            state.completion_tokens = usage_delta["output_tokens"]
+        if "cache_read_input_tokens" in usage_delta:
+            state.cached_tokens = usage_delta["cache_read_input_tokens"]
+        if "cache_creation_input_tokens" in usage_delta:
+            state.cache_creation = usage_delta["cache_creation_input_tokens"]
+
+    @staticmethod
+    def _on_message_start(state: _StreamState, data: dict) -> None:
+        # 兜底：标准 Anthropic 把完整 usage（含 cache_creation/cache_read）
+        # 放在 message_start，message_delta 仅含 output_tokens；部分代理则
+        # 相反（见 message_delta 分支）。两处都读，谁带就用谁，delta 后到覆盖。
+        usage_start = data.get("message", {}).get("usage", {})
+        log.debug(f"[anthropic usage] message_start raw: {usage_start}")
+        if "input_tokens" in usage_start:
+            state.prompt_tokens = usage_start["input_tokens"]
+            state.input_source = "start"
+        if "cache_read_input_tokens" in usage_start:
+            state.cached_tokens = usage_start["cache_read_input_tokens"]
+        if "cache_creation_input_tokens" in usage_start:
+            state.cache_creation = usage_start["cache_creation_input_tokens"]
+
+    @staticmethod
+    def _build_final_response(
+        state: _StreamState, model: str, request_id: str, first_chunk_rt_ms: float
+    ) -> LLMResponse:
+        """message_stop：产出有序 content_blocks（权威块数组）+ 最终 usage。"""
+        # Anthropic 的 input_tokens 仅为非缓存部分（含兜底/增量源）；
+        # 对齐 OpenAI 语义：prompt_tokens = 总输入（含缓存）
+        total_prompt = state.prompt_tokens + state.cached_tokens + state.cache_creation
+        hit_rate = state.cached_tokens / total_prompt * 100 if total_prompt else 0.0
+        log.debug(
+            f"[anthropic usage] final: "
+            f"input(non-cached)={state.prompt_tokens}({state.input_source}) "
+            f"cache_read={state.cached_tokens} "
+            f"cache_creation={state.cache_creation} "
+            f"output={state.completion_tokens} => "
+            f"prompt_tokens(total)={total_prompt} "
+            f"hit_rate={hit_rate:.1f}%"
+        )
+        decode_tps = 0.0
+        if state.completion_tokens > 0 and state.first_token_ts is not None:
+            decode_elapsed = time.monotonic() - state.first_token_ts
+            if decode_elapsed > 0:
+                decode_tps = state.completion_tokens / decode_elapsed
+        ordered_blocks = [
+            state.blocks_by_index[i] for i in sorted(state.blocks_by_index)
+        ]
+        return LLMResponse(
+            content_blocks=ordered_blocks or None,
+            usage=LLMUsage(
+                prompt_tokens=total_prompt,
+                completion_tokens=state.completion_tokens,
+                cached_tokens=state.cached_tokens,
+                first_chunk_rt_ms=first_chunk_rt_ms,
+                tokens_per_sec=decode_tps,
+                model=model,
+                request_id=request_id,
+            ),
+        )

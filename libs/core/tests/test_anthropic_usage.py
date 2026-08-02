@@ -23,6 +23,8 @@ from wing.provider.anthropic import AnthropicProvider
 class _FakeResponse:
     """伪造 httpx 流式响应：headers + aiter_lines + aclose。"""
 
+    is_error = False
+
     def __init__(self, lines: list[str]) -> None:
         self._lines = lines
         self.headers = {"request-id": "test-request-id"}

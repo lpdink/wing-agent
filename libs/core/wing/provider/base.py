@@ -2,7 +2,7 @@
 """ModelProvider ABC — 模型调用层的统一接口。
 
 所有协议实现（OpenAI 兼容、Anthropic）继承此基类，
-输出统一的 LLMResponse 流，上层 LLMCaller 对协议无感知。
+输出统一的 LLMResponse 流，上层 ReActLoop 对协议无感知。
 """
 
 from __future__ import annotations
@@ -28,6 +28,11 @@ class ModelProvider(ABC):
         """Provider 名称（来自 config）。"""
         return self._config.name
 
+    @property
+    def protocol(self) -> str:
+        """协议类型（来自 config，如 "openai" / "anthropic"）。"""
+        return self._config.protocol
+
     @abstractmethod
     def generate(
         self,
@@ -45,7 +50,11 @@ class ModelProvider(ABC):
         ...
 
     async def aclose(self) -> None:
-        """关闭底层 HTTP 客户端，释放连接池。子类应覆盖。"""
+        """释放 provider 持有的资源。
+
+        由所有者在生命周期终结时调用（agent 模板切换 / session 释放 /
+        模型列表 registry 重置 / 驱逐重建）。持有长连接等资源的子类应覆盖。
+        """
 
     def set_thinking(self, enable: bool) -> None:
         """运行时切换思考模式。子类可覆盖。"""
@@ -54,7 +63,3 @@ class ModelProvider(ABC):
     def set_reasoning_effort(self, effort: str | None) -> None:
         """运行时切换推理强度。子类可覆盖。"""
         self.reasoning_effort = effort
-
-    def reload(self) -> list[str]:
-        """从配置热刷新，返回变更项列表。子类可覆盖。"""
-        return []

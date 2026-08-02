@@ -3,13 +3,15 @@
 
 锁定行为（参考 test_anthropic_usage.py 的真实形态 payload 风格）：
 - 多块 thinking + 各自 signature + 顺序的流式构建与回放 round-trip
-- 无签名 thinking 降级 text（绝不给官方 Anthropic 发空/坏签名 thinking block）
+- 无签名 thinking 原样回放（发空签名 signature:""，MUST NOT 降级 text）——
+  此类数据产生于不下发签名的推理 provider 或存量旧会话，回放官方 Anthropic
+  被拒是预期行为
 - 存量兼容：develop 基线旧格式（content/reasoning_content/tool_calls）干净加载、
-  对 Anthropic 回放不产生 thinking block、不报错
+  回放保持 thinking 原样
 - redacted 块 round-trip
-- 尾部 thinking 过滤
+- cache_control 与 OpenAI 路径同构（最后一个 block，不规避 thinking）
 - 跨 provider 切模型不打断在途、旧 client 未关闭、切回同名复用
-- OpenAI-compat 流事件映射 / 请求体序列化
+- OpenAI-compat 流事件映射 / 权威块数组产出 / 请求体序列化
 """
 
 from __future__ import annotations
@@ -34,6 +36,8 @@ from wing.schema import (
 
 
 class _FakeResponse:
+    is_error = False
+
     def __init__(self, lines: list[str]) -> None:
         self._lines = lines
         self.headers = {"request-id": "test-request-id"}
@@ -110,7 +114,7 @@ class TestContentBlockModel:
         assert kinds == ["ThinkingBlock", "TextBlock", "ToolUseBlock"]
         # 旧数据 thinking 无 signature
         assert isinstance(m.content_blocks[0], ThinkingBlock)
-        assert not m.content_blocks[0].has_valid_signature
+        assert m.content_blocks[0].signature is None
 
     def test_legacy_ignores_unknown_reasoning_signature(self):
         """旧数据若残留 reasoning_signature 字段（extra=ignore）应被忽略，不报错。"""
@@ -125,7 +129,7 @@ class TestContentBlockModel:
         # thinking 块不带签名（stale-sig 被忽略）
         thinking = m.content_blocks[0]
         assert isinstance(thinking, ThinkingBlock)
-        assert not thinking.has_valid_signature
+        assert thinking.signature is None
 
     def test_blocks_round_trip_persistence(self):
         """块数组（含 per-block signature）经 model_dump/model_validate 无损 round-trip。"""
@@ -147,22 +151,6 @@ class TestContentBlockModel:
         assert blocks[2].signature == "sig2"
         assert isinstance(blocks[1], ToolUseBlock)
         assert blocks[1].input == {"p": "/a"}
-
-    def test_sync_flat_from_blocks(self):
-        """commit 时扁平字段由块数组填充。"""
-        m = Message(
-            role="assistant",
-            content_blocks=[
-                ThinkingBlock(thinking="th", signature="s"),
-                TextBlock(text="hi"),
-                ToolUseBlock(id="x", name="Read", input={"p": "/a"}),
-            ],
-        )
-        m.sync_flat_from_blocks()
-        assert m.content == "hi"
-        assert m.reasoning_content == "th"
-        assert m.tool_calls is not None
-        assert m.tool_calls[0].name == "Read"
 
     def test_user_message_has_no_blocks(self):
         assert Message(role="user", content="q").content_blocks is None
@@ -204,8 +192,8 @@ class TestAnthropicReplay:
             await p.aclose()
 
     @pytest.mark.asyncio
-    async def test_no_signature_degrades_to_text(self):
-        """无有效 signature 的 thinking 降级为 text 块，绝不发 thinking block。"""
+    async def test_no_signature_replays_with_empty_signature(self):
+        """无 signature 的 thinking 原样回放（发空签名），MUST NOT 降级 text。"""
         p = _make_anthropic()
         try:
             m = Message(
@@ -216,8 +204,11 @@ class TestAnthropicReplay:
                 ],
             )
             ser = p._serialize_assistant(m)
-            assert all(b["type"] != "thinking" for b in ser)
-            assert ser[0] == {"type": "text", "text": "old reasoning"}
+            assert ser[0] == {
+                "type": "thinking",
+                "thinking": "old reasoning",
+                "signature": "",
+            }
             assert ser[1] == {"type": "text", "text": "hi"}
         finally:
             await p.aclose()
@@ -256,61 +247,26 @@ class TestAnthropicReplay:
             await p.aclose()
 
     @pytest.mark.asyncio
-    async def test_legacy_replay_no_thinking_block(self):
-        """存量旧格式回放：不产生任何 thinking block（降级 text），不报错。"""
+    async def test_legacy_replay_preserves_thinking(self):
+        """存量旧格式回放：thinking 保持原样（空签名），不降级 text。
+
+        旧数据非官方 Anthropic 产出（官方必下发签名），回放官方被拒是预期；
+        回放不下发签名的推理 provider 则保真。
+        """
         p = _make_anthropic()
         try:
             m = Message.model_validate(
                 {"role": "assistant", "content": "hi", "reasoning_content": "old"}
             )
             ser = p._serialize_assistant(m)
-            assert all(b["type"] != "thinking" for b in ser)
-            assert {"type": "text", "text": "old"} in ser
-            assert {"type": "text", "text": "hi"} in ser
+            assert ser[0] == {"type": "thinking", "thinking": "old", "signature": ""}
+            assert ser[1] == {"type": "text", "text": "hi"}
         finally:
             await p.aclose()
 
-    def test_strip_trailing_thinking(self):
-        """尾部 thinking 过滤：剥离尾部连续 thinking；全 thinking 插占位。"""
-        # 尾部是 tool_use → 不变
-        msgs = [
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "thinking", "thinking": "x", "signature": "s"},
-                    {"type": "tool_use", "id": "t", "name": "n", "input": {}},
-                ],
-            }
-        ]
-        AnthropicProvider._strip_trailing_thinking(msgs)
-        assert len(msgs[0]["content"]) == 2
-
-        # 尾部 thinking 被剥离
-        msgs2 = [
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": "hi"},
-                    {"type": "thinking", "thinking": "x", "signature": "s"},
-                ],
-            }
-        ]
-        AnthropicProvider._strip_trailing_thinking(msgs2)
-        assert msgs2[0]["content"] == [{"type": "text", "text": "hi"}]
-
-        # 全 thinking → 占位 text
-        msgs3 = [
-            {
-                "role": "assistant",
-                "content": [{"type": "thinking", "thinking": "x", "signature": "s"}],
-            }
-        ]
-        AnthropicProvider._strip_trailing_thinking(msgs3)
-        assert msgs3[0]["content"] == [{"type": "text", "text": "[No message content]"}]
-
     @pytest.mark.asyncio
-    async def test_cache_control_avoids_thinking(self):
-        """cache_control 打在最后一个非 thinking 块上。"""
+    async def test_cache_control_last_block_isomorphic(self):
+        """cache_control 打在最后一个 block 上（与 OpenAI 路径同构，不规避 thinking）。"""
         msgs = [
             {
                 "role": "assistant",
@@ -321,8 +277,8 @@ class TestAnthropicReplay:
             }
         ]
         AnthropicProvider._apply_cache_control(msgs)
-        assert "cache_control" not in msgs[0]["content"][1]
-        assert msgs[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+        assert "cache_control" not in msgs[0]["content"][0]
+        assert msgs[0]["content"][1]["cache_control"] == {"type": "ephemeral"}
 
 
 # ─── Anthropic 流式逐块构建 ──────────────────────────────────────
@@ -422,6 +378,115 @@ class TestAnthropicStreaming:
         assert final_blocks[3].text == "done"
 
 
+# ─── 流式 per-index 结构化 + 错误面 ─────────────────────────────
+
+
+class TestStreamPerIndexAndErrors:
+    @pytest.mark.asyncio
+    async def test_interleaved_tool_deltas_not_corrupted(self):
+        """两个 tool_use 块的 input_json_delta 交错到达 → 按 index 独立累积。"""
+        events = [
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "tool_use", "id": "t0", "name": "Bash"},
+            },
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "tool_use", "id": "t1", "name": "Read"},
+            },
+            # 交错 delta：index 0 与 index 1 交替
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": '{"cmd":'},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": '{"path":'},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": '"ls"}'},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": '"/a"}'},
+            },
+            # stop 乱序：先停 index 1，再停 index 0
+            {"type": "content_block_stop", "index": 1},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_stop"},
+        ]
+        p = _make_anthropic()
+        await p._client.aclose()
+        p._client = _FakeClient(_anthropic_sse(events))  # ty: ignore[invalid-assignment]
+
+        finals: dict[str, dict] = {}
+        blocks = None
+        async for chunk in p._generate_stream(body={}, model="claude"):
+            for tc in chunk.tool_calls or []:
+                finals[tc.name] = tc.arguments
+            if chunk.content_blocks is not None:
+                blocks = chunk.content_blocks
+
+        assert finals["Bash"] == {"cmd": "ls"}
+        assert finals["Read"] == {"path": "/a"}
+        assert blocks is not None and len(blocks) == 2
+        assert blocks[0].input == {"cmd": "ls"}  # ty: ignore[unresolved-attribute]
+        assert blocks[1].input == {"path": "/a"}  # ty: ignore[unresolved-attribute]
+
+    @pytest.mark.asyncio
+    async def test_stream_error_event_raises(self):
+        """流中 error 事件抛 ProviderStreamError（触发重试，截断轮次不提交）。"""
+        from wing.provider.errors import ProviderStreamError
+
+        events = [
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "partial"},
+            },
+            {
+                "type": "error",
+                "error": {"type": "overloaded_error", "message": "Overloaded"},
+            },
+        ]
+        p = _make_anthropic()
+        await p._client.aclose()
+        p._client = _FakeClient(_anthropic_sse(events))  # ty: ignore[invalid-assignment]
+
+        with pytest.raises(ProviderStreamError, match="Overloaded"):
+            async for _ in p._generate_stream(body={}, model="claude"):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_http_error_carries_body(self):
+        """4xx 响应 body 进异常消息（max_tokens 超限等关键信息的所在）。"""
+        from wing.provider.errors import ProviderHTTPError, raise_with_body
+
+        class _ErrResponse:
+            is_error = True
+            status_code = 400
+            url = "https://api.anthropic.com/v1/messages"
+            text = '{"error":{"message":"max_tokens: 128000 exceeds the maximum"}}'
+
+            async def aread(self) -> None:
+                pass
+
+        with pytest.raises(ProviderHTTPError, match="max_tokens: 128000 exceeds"):
+            await raise_with_body(_ErrResponse())  # ty: ignore[invalid-argument-type]
+
+
 # ─── thinking 对外状态 ───────────────────────────────────────────
 
 
@@ -483,15 +548,16 @@ class TestProviderLifecycle:
             ],
             agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
         )
-        monkeypatch.setattr("wing.session.get_config", lambda: two)
+        monkeypatch.setattr("wing.agent.core.get_config", lambda: two)
 
         # 跨 provider 切模型
         session._apply_model("model-2", provider_name="p2")
         assert session.agent.model_provider.name == "p2"
         # 旧 client 未被关闭（在途生成不被打断）
         assert old_provider._client.is_closed is False
-        # 旧 provider 仍被有界持有
-        assert session._providers["default"] is old_provider
+        # 旧 provider 仍被 agent 有界持有（Session 不持有 provider）
+        assert session.agent._providers["default"] is old_provider
+        assert not hasattr(session, "_providers")
 
         # 切回 default：复用缓存的 client（同一对象），而非新建
         session._apply_model("model-3", provider_name="default")
@@ -505,6 +571,99 @@ class TestProviderLifecycle:
         session._apply_model("new-model", provider_name="default")
         assert session.agent.model_provider is original
         assert session.agent.model == "new-model"
+
+    @pytest.mark.asyncio
+    async def test_switch_template_closes_old_agent_providers(self, sm, monkeypatch):
+        """模板切换：旧 agent 的整个 provider 表被关闭，新 agent 从空表开始。
+
+        锁定 bot#1 修复：switch_template 后不得交回已关闭的 client。
+        """
+        from wing.agent_template import AgentTemplate
+
+        session = sm.create_session()
+        agent_v1 = session.agent
+        p_default = agent_v1.model_provider
+
+        # 先跨 provider 用一次 p2，使旧 agent 表中含两个 client
+        two = Config(
+            providers=[
+                ProviderConfig(
+                    name="default", base_url="https://a.example.com", api_key="k"
+                ),
+                ProviderConfig(
+                    name="p2", base_url="https://b.example.com", api_key="k"
+                ),
+            ],
+            agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
+        )
+        monkeypatch.setattr("wing.agent.core.get_config", lambda: two)
+        monkeypatch.setattr("wing.session.get_config", lambda: two)
+        session._apply_model("model-2", provider_name="p2")
+        p2 = agent_v1._providers["p2"]
+
+        # 切换模板（回到 default provider 的新 agent）
+        template = AgentTemplate(name="default", model="gpt-4", provider_name="default")
+        await session.switch_template(template)
+
+        # 旧 agent 的两个 client 全部关闭
+        assert p_default._client.is_closed is True
+        assert p2._client.is_closed is True
+        assert agent_v1._providers == {}
+        # 新 agent 是另一实例，持有全新的活跃 provider
+        assert session.agent is not agent_v1
+        assert session.agent.model_provider.name == "default"
+        assert session.agent.model_provider._client.is_closed is False
+
+    @pytest.mark.asyncio
+    async def test_rebuild_providers_evicts_all_and_recreates_active(
+        self, sm, monkeypatch
+    ):
+        """驱逐重建：表中 client 全部关闭驱逐，活跃 provider 按新配置重建。
+
+        锁定 bot#2 修复：api_key 轮换经 reload（驱逐重建）自然生效。
+        """
+        session = sm.create_session()
+        agent = session.agent
+        old_provider = agent.model_provider
+
+        two = Config(
+            providers=[
+                ProviderConfig(
+                    name="default", base_url="https://a.example.com", api_key="k"
+                ),
+                ProviderConfig(
+                    name="p2", base_url="https://b.example.com", api_key="k"
+                ),
+            ],
+            agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
+        )
+        monkeypatch.setattr("wing.agent.core.get_config", lambda: two)
+        # 表中放入第二个 provider（模拟跨 provider 用过）
+        session._apply_model("model-2", provider_name="p2")
+        p2 = agent._providers["p2"]
+        session._apply_model("model-3", provider_name="default")
+
+        # 新配置：default 的 api_key 轮换
+        rotated = Config(
+            providers=[
+                ProviderConfig(
+                    name="default", base_url="https://a.example.com", api_key="NEW-KEY"
+                ),
+            ],
+            agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
+        )
+        monkeypatch.setattr("wing.agent.core.get_config", lambda: rotated)
+
+        await agent.rebuild_providers()
+
+        # 旧 client 全部关闭、驱逐
+        assert old_provider._client.is_closed is True
+        assert p2._client.is_closed is True
+        # 活跃 provider 按新配置重建（新实例、新 key），model 名保持
+        assert agent.model_provider is not old_provider
+        assert agent.model_provider._client.is_closed is False
+        assert agent._providers == {"default": agent.model_provider}
+        assert agent.model == "model-3"
 
 
 # ─── OpenAI-compat 覆盖 ──────────────────────────────────────────
@@ -579,6 +738,68 @@ class TestOpenAICompat:
         assert tool_calls is not None
         assert tool_calls[0].name == "Bash"
         assert tool_calls[0].arguments == {"cmd": "ls"}
+
+    @pytest.mark.asyncio
+    async def test_stream_emits_authoritative_blocks(self):
+        """流结束时最终 chunk 携带权威 content_blocks（thinking→text→tool_use）。"""
+        chunks = [
+            {"choices": [{"delta": {"reasoning_content": "let me think"}}]},
+            {"choices": [{"delta": {"content": "hello "}}]},
+            {"choices": [{"delta": {"content": "world"}}]},
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "c1",
+                                    "function": {
+                                        "name": "Bash",
+                                        "arguments": '{"cmd":"ls"}',
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5}},
+        ]
+        p = self._make()
+        await p._client.aclose()
+        p._client = _FakeClient(_openai_sse(chunks))  # ty: ignore[invalid-assignment]
+
+        blocks = None
+        async for chunk in p._generate_stream(body={}, model="gpt-4"):
+            if chunk.content_blocks is not None:
+                blocks = chunk.content_blocks
+
+        assert blocks is not None, "最终 chunk 必须携带权威块数组"
+        assert [type(b).__name__ for b in blocks] == [
+            "ThinkingBlock",
+            "TextBlock",
+            "ToolUseBlock",
+        ]
+        assert blocks[0].thinking == "let me think"  # ty: ignore[unresolved-attribute]
+        assert blocks[0].signature is None  # ty: ignore[unresolved-attribute]
+        assert blocks[1].text == "hello world"  # ty: ignore[unresolved-attribute]
+        assert blocks[2].name == "Bash"  # ty: ignore[unresolved-attribute]
+        assert blocks[2].input == {"cmd": "ls"}  # ty: ignore[unresolved-attribute]
+
+    def test_sync_builds_blocks(self):
+        """同步路径同样产出 content_blocks。"""
+        p = self._make()
+        blocks = p._build_content_blocks(
+            "hmm", "answer", [ToolCall(id="c1", name="Bash", arguments={"a": 1})]
+        )
+        assert len(blocks) == 3
+        assert isinstance(blocks[0], ThinkingBlock) and blocks[0].thinking == "hmm"
+        assert isinstance(blocks[1], TextBlock) and blocks[1].text == "answer"
+        assert isinstance(blocks[2], ToolUseBlock) and blocks[2].input == {"a": 1}
+        # 空响应 → 空块数组（合法空 turn，非 None）
+        assert p._build_content_blocks(None, None, []) == []
 
     @pytest.mark.asyncio
     async def test_build_body_serialization(self):
