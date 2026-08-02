@@ -54,6 +54,19 @@ fn is_exact_candidate_match(candidates: &[(String, String)], args: &str) -> bool
         .any(|(id, _)| id.to_lowercase() == args_lower)
 }
 
+/// Move selection to the row exactly matching `args` (case-insensitive), if any.
+///
+/// must-select 命令的 Tab 补全路径：输入被填为精确候选名后 popup 保持打开，
+/// 选中位跟随该行，Enter 即确认它。
+fn select_exact_match(rows: &[SelectionRow], args: &str, state: &mut SelectionState) {
+    if args.is_empty() {
+        return;
+    }
+    if let Some(idx) = rows.iter().position(|r| r.name.eq_ignore_ascii_case(args)) {
+        state.select(idx);
+    }
+}
+
 impl ActivePopup {
     /// Update popup state based on current input text.
     ///
@@ -68,19 +81,25 @@ impl ActivePopup {
         if is_session_command(cmd) {
             if cache.has_sessions() {
                 let candidates = &cache.sessions;
-                // Hide popup if args exactly match a candidate id.
-                if !args.is_empty() && is_exact_session_match(candidates, args) {
+                // must-select 命令精确匹配时保持 popup 打开（Enter = 确认选择）；
+                // 非 must-select 命令精确匹配即隐藏。
+                if !command::is_must_select_command(cmd)
+                    && !args.is_empty()
+                    && is_exact_session_match(candidates, args)
+                {
                     *self = Self::None;
                     return None;
                 }
                 let rows = filter_session_candidates(candidates, args);
                 let count = rows.len();
                 let filter = args.to_string();
+                let mut state = SelectionState::with_max_visible(count, rich_max_visible());
+                select_exact_match(&rows, args, &mut state);
                 *self = Self::SubCommand {
                     command: cmd.to_string(),
                     filter,
                     rows,
-                    state: SelectionState::with_max_visible(count, rich_max_visible()),
+                    state,
                 };
                 return None;
             }
@@ -126,19 +145,25 @@ impl ActivePopup {
         if let Some(action) = candidate_request_for(cmd) {
             // Check if candidates are cached.
             if let Some(candidates) = cache.get_for_command(cmd) {
-                // Hide popup if args exactly match a candidate.
-                if !args.is_empty() && is_exact_candidate_match(candidates, args) {
+                // must-select 命令精确匹配时保持 popup 打开（Enter = 确认选择）；
+                // 非 must-select 命令精确匹配即隐藏。
+                if !command::is_must_select_command(cmd)
+                    && !args.is_empty()
+                    && is_exact_candidate_match(candidates, args)
+                {
                     *self = Self::None;
                     return None;
                 }
                 let rows = filter_candidates(candidates, args);
                 let count = rows.len();
                 let filter = args.to_string();
+                let mut state = SelectionState::new(count);
+                select_exact_match(&rows, args, &mut state);
                 *self = Self::SubCommand {
                     command: cmd.to_string(),
                     filter,
                     rows,
-                    state: SelectionState::new(count),
+                    state,
                 };
                 return None;
             }
@@ -199,6 +224,20 @@ impl ActivePopup {
         match self {
             Self::None => false,
             Self::Command { rows, .. } | Self::SubCommand { rows, .. } => !rows.is_empty(),
+        }
+    }
+
+    /// must-select 命令且候选列表为空。
+    ///
+    /// 此类命令的参数必须来自候选：列表为空时 Enter 需给显式反馈，
+    /// MUST NOT 落到自由文本发送（那会构造出未定义请求，如无 provider
+    /// 的 model 更新）。
+    pub fn is_must_select_empty(&self) -> bool {
+        match self {
+            Self::SubCommand { command, rows, .. } => {
+                rows.is_empty() && command::is_must_select_command(command)
+            }
+            _ => false,
         }
     }
 
@@ -416,19 +455,45 @@ mod tests {
     }
 
     #[test]
-    fn test_active_popup_exact_match_hides_popup() {
+    fn test_must_select_exact_match_keeps_popup() {
         let mut popup = ActivePopup::default();
         let mut cache = sample_cache();
-        // Command exact match hides popup.
+        // 非候选命令精确匹配 → 隐藏 popup（原行为不变）。
         popup.update_from_input("/clear", &cache);
         assert!(!popup.is_active());
-        // SubCommand exact match hides popup.
-        cache.models = vec![("gpt-4o".into(), String::new())];
+        // must-select 命令精确匹配 → popup 保持打开，选中位跟随精确行
+        //（Enter = 确认选择，而非自由文本发送）。
+        cache.models = vec![
+            ("gpt-4o".into(), String::new()),
+            ("gpt-5".into(), String::new()),
+        ];
         popup.update_from_input("/model gpt-4o", &cache);
-        assert!(!popup.is_active());
-        // SubCommand partial match shows popup.
+        assert!(popup.is_active());
+        assert!(popup.should_submit());
+        if let ActivePopup::SubCommand { rows, state, .. } = &popup {
+            assert_eq!(rows[state.selected].name, "gpt-4o");
+        } else {
+            panic!("expected SubCommand popup");
+        }
+        // 部分匹配同样显示 popup。
         popup.update_from_input("/model gpt", &cache);
         assert!(popup.is_active());
+    }
+
+    #[test]
+    fn test_must_select_empty_detection() {
+        let mut popup = ActivePopup::default();
+        let mut cache = sample_cache();
+        cache.models = vec![("gpt-4o".into(), String::new())];
+        // 无匹配候选 → must-select 空（Enter 需给显式反馈，不落自由发送）。
+        popup.update_from_input("/model nonexistent", &cache);
+        assert!(popup.is_must_select_empty());
+        // 有匹配候选 → 非空。
+        popup.update_from_input("/model gpt", &cache);
+        assert!(!popup.is_must_select_empty());
+        // 非 must-select 命令的空 popup → false。
+        popup.update_from_input("/zzz", &cache);
+        assert!(!popup.is_must_select_empty());
     }
 
     #[test]
@@ -473,13 +538,19 @@ mod tests {
     }
 
     #[test]
-    fn test_session_exact_match_hides_popup() {
+    fn test_session_exact_match_keeps_popup_selects_row() {
         let mut popup = ActivePopup::default();
         let mut cache = CandidateCache::default();
-        cache.sessions = vec![sess("sess-1", "My Session")];
+        cache.sessions = vec![sess("sess-1", "My Session"), sess("sess-2", "Other")];
         let action = popup.update_from_input("/session sess-1", &cache);
         assert!(action.is_none());
-        assert!(!popup.is_active());
+        // must-select：精确匹配不隐藏 popup，选中位跟随该行。
+        assert!(popup.is_active());
+        if let ActivePopup::SubCommand { rows, state, .. } = &popup {
+            assert_eq!(rows[state.selected].name, "sess-1");
+        } else {
+            panic!("expected SubCommand popup");
+        }
     }
 
     #[test]

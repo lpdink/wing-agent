@@ -40,6 +40,8 @@ use crate::ui::input_area::InputArea;
 use crate::ui::input_area::cursor_screen_pos;
 use crate::ui::popup::ActivePopup;
 use crate::ui::popup::command::candidate_request_for;
+use crate::ui::popup::command::is_must_select_command;
+use crate::ui::popup::command::parse_slash_input;
 use crate::ui::status_bar::StatusBar;
 use crate::ui::status_bar::StatusData;
 use crate::ui::status_bar::TurnUsage;
@@ -1099,8 +1101,20 @@ impl App {
         }
 
         // If popup is active but has no items, close it (Enter falls through to input).
+        // 例外：must-select 命令保持 popup——Enter 给显式"无匹配候选"反馈，
+        // 绝不落到自由文本发送（参数必须来自候选）。
         if self.popup.active.is_active() && !self.popup.active.has_items() {
-            self.popup.active = ActivePopup::None;
+            if self.popup.active.is_must_select_empty() {
+                if key.code == crossterm::event::KeyCode::Enter {
+                    self.show_toast(Toast::warning(
+                        "No matching candidates — adjust the argument and select from the popup",
+                        std::time::Duration::from_secs(4),
+                    ));
+                    return;
+                }
+            } else {
+                self.popup.active = ActivePopup::None;
+            }
         }
 
         // Scrolling keys for chat view.
@@ -1179,6 +1193,19 @@ impl App {
         let text_before = self.input.text();
         match self.input.handle_key(key, self.terminal_width) {
             InputAction::Submit(text) => {
+                // must-select 命令：参数必须来自候选选择。popup 若被关闭
+                //（如 Esc），重开 popup 而非发送自由文本——消灭未定义请求
+                //（如无 provider 的 /model 更新撞网关对称契约 400）。
+                if let Some((cmd, _)) = parse_slash_input(&text)
+                    && is_must_select_command(cmd)
+                {
+                    self.input.set_text(&text);
+                    self.update_popup();
+                    if self.popup.active.is_active() {
+                        return;
+                    }
+                    self.input.clear();
+                }
                 self.popup.active = ActivePopup::None;
                 self.submit_message(&text);
             }

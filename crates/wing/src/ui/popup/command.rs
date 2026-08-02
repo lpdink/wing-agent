@@ -41,6 +41,16 @@ const CANDIDATE_COMMANDS: &[(&str, PopupAction)] = &[
 /// Local-only candidate commands — candidates populated by App, no fetch needed.
 const LOCAL_CANDIDATE_COMMANDS: &[&str] = &["/copy"];
 
+/// Commands whose argument MUST come from candidate selection.
+///
+/// For these commands Enter means "confirm the highlighted candidate", never
+/// "send free text": the popup stays open on exact match (Tab fills the input
+/// without dismissing it), and submission is only constructed from a selected
+/// candidate. This structurally eliminates undefined resolution — e.g.
+/// `/model <name>` where the name is absent from the fetched list previously
+/// sent a provider-less update and hit the gateway's symmetric-contract 400.
+const MUST_SELECT_COMMANDS: &[&str] = &["/model", "/fork", "/rewind", "/agents", "/session", "/ss"];
+
 /// TUI-only commands (not served by gateway) — always appended as fallback.
 ///
 /// These are commands handled entirely by the TUI (via `try_http_command()` or
@@ -178,6 +188,11 @@ pub fn candidate_request_for(name: &str) -> Option<&'static PopupAction> {
 /// Check if a command name has locally-populated sub-command candidates.
 pub fn is_local_candidate_command(name: &str) -> bool {
     LOCAL_CANDIDATE_COMMANDS.contains(&name)
+}
+
+/// Check if a command requires its argument to be selected from candidates.
+pub fn is_must_select_command(name: &str) -> bool {
+    MUST_SELECT_COMMANDS.contains(&name)
 }
 
 /// Check if a command is a session command (`/session` or `/ss`).
