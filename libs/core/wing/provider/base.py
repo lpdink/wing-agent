@@ -57,7 +57,11 @@ class ModelProvider(ABC):
         """
 
     def set_thinking(self, enable: bool) -> None:
-        """运行时切换思考模式。子类可覆盖。"""
+        """运行时切换思考模式。子类可覆盖。
+
+        约定：thinking 状态应从实际请求 payload 源（如 extra_body）派生，
+        setter 改写同一存储——保证 property / get_status 上报 / 请求体自洽。
+        """
         self.thinking = enable
 
     def set_reasoning_effort(self, effort: str | None) -> None:

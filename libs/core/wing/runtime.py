@@ -332,17 +332,6 @@ class WingRuntime:
         """
         session = self._require_session(session_id)
 
-        # Anthropic 协议的 thinking 由 extra_body 配置派生，运行时开关无语义——
-        # 明确拒绝（no-op 假装成功更糟：TUI 开关看似成功、下次状态刷新闪回）。
-        if (
-            thinking is not None
-            and session.agent.model_provider.protocol == "anthropic"
-        ):
-            raise ValueError(
-                "thinking is configured via extra_body for anthropic protocol "
-                "and cannot be toggled at runtime"
-            )
-
         # 解析 template（如有）
         template = None
         if agent is not None:

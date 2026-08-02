@@ -42,16 +42,18 @@ providers:
     reasoning_effort: null
 
     # Extra fields merged into the request body top-level.
-    # Use for provider-specific parameters (e.g. thinking toggle).
-    extra_body: {}
-    # Example for DashScope:
+    # Use for provider-specific parameters.
+    #
+    # For openai protocol, enable_thinking / preserve_thinking default
+    # to true and are sent on every request — override here if needed:
     #   extra_body:
-    #     enable_thinking: true
-    #     preserve_thinking: true
+    #     enable_thinking: false
+    #
     # Example for DeepSeek:
     #   extra_body:
     #     thinking:
     #       type: enabled
+    extra_body: {}
 
   # Additional provider example (Anthropic):
   # - name: claude

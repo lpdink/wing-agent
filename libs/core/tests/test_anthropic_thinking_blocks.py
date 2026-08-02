@@ -554,13 +554,73 @@ class TestThinkingStatus:
             await p.aclose()
 
     @pytest.mark.asyncio
-    async def test_interleaved_beta_header_when_thinking(self):
-        headers = AnthropicProvider._make_headers(
-            "sk", "2023-06-01", {"thinking": {"type": "enabled"}}
-        )
-        assert headers["anthropic-beta"] == "interleaved-thinking-2025-05-14"
-        headers_off = AnthropicProvider._make_headers("sk", "2023-06-01", {})
-        assert "anthropic-beta" not in headers_off
+    async def test_interleaved_beta_header_follows_thinking_state(self):
+        """beta header 每请求计算，跟随运行时 thinking 状态（不固化在 client）。
+
+        缺 interleaved beta header 则工具轮次间不会产生多块 thinking，
+        故运行时 set_thinking() 切换后 header 必须跟随。
+        """
+        p = _make_anthropic({"thinking": {"type": "enabled"}})
+        try:
+            assert p._request_headers() == {
+                "anthropic-beta": "interleaved-thinking-2025-05-14"
+            }
+            # 运行时关闭 → 下次请求 header 跟随
+            p.set_thinking(False)
+            assert p._request_headers() == {}
+            # 再启用 → 跟随恢复
+            p.set_thinking(True)
+            assert "anthropic-beta" in p._request_headers()
+        finally:
+            await p.aclose()
+
+    @pytest.mark.asyncio
+    async def test_static_headers_have_no_beta(self):
+        """静态 header（client 固化）不含 beta——beta 只走每请求动态路径。"""
+        headers = AnthropicProvider._make_headers("sk", "2023-06-01")
+        assert "anthropic-beta" not in headers
+        assert headers["x-api-key"] == "sk"
+
+    @pytest.mark.asyncio
+    async def test_set_thinking_roundtrip_self_consistent(self):
+        """set_thinking 改写 extra_body（payload 源）：property / 请求体 /
+        beta header 全部跟随，无第二份状态。"""
+        p = _make_anthropic({"thinking": {"type": "enabled", "budget_tokens": 8192}})
+        try:
+            msgs = [Message(role="user", content="hi")]
+
+            # 关闭：body thinking.type=disabled，且按 Anthropic 校验剥离 budget
+            p.set_thinking(False)
+            assert p.thinking is False
+            body = p._build_body(msgs, "claude-x", None, False)
+            assert body["thinking"] == {"type": "disabled"}
+            # 状态层保留用户原预算（再启用时恢复）
+            assert p._extra_body["thinking"]["budget_tokens"] == 8192
+
+            # 再启用：用户原预算原样恢复（非默认值）
+            p.set_thinking(True)
+            assert p.thinking is True
+            body = p._build_body(msgs, "claude-x", None, False)
+            assert body["thinking"] == {"type": "enabled", "budget_tokens": 8192}
+        finally:
+            await p.aclose()
+
+    @pytest.mark.asyncio
+    async def test_set_thinking_enable_fills_default_budget(self):
+        """无 thinking 配置时启用：补默认预算（type=enabled 必带 budget）。"""
+        from wing.provider.anthropic import _DEFAULT_THINKING_BUDGET
+
+        p = _make_anthropic({})
+        try:
+            p.set_thinking(True)
+            assert p.thinking is True
+            body = p._build_body([Message(role="user", content="hi")], "m", None, False)
+            assert body["thinking"] == {
+                "type": "enabled",
+                "budget_tokens": _DEFAULT_THINKING_BUDGET,
+            }
+        finally:
+            await p.aclose()
 
 
 # ─── Provider 生命周期 ───────────────────────────────────────────
@@ -929,5 +989,66 @@ class TestOpenAICompat:
             tc = body["messages"][2]["tool_calls"][0]
             assert tc["function"]["name"] == "Bash"
             assert json.loads(tc["function"]["arguments"]) == {"cmd": "ls"}
+        finally:
+            await p.aclose()
+
+    @pytest.mark.asyncio
+    async def test_thinking_defaults_sent_in_body(self):
+        """基线行为：enable_thinking / preserve_thinking 默认随请求发送。
+
+        preserve_thinking 尤为关键——缺它则多轮工具回合间 thinking 被服务端剥离。
+        """
+        p = self._make()
+        try:
+            assert p.thinking is True
+            body = p._build_body(
+                [Message(role="user", content="hi")], "gpt-4", None, False
+            )
+            assert body["enable_thinking"] is True
+            assert body["preserve_thinking"] is True
+        finally:
+            await p.aclose()
+
+    @pytest.mark.asyncio
+    async def test_set_thinking_flips_body_and_status(self):
+        """set_thinking 改写 extra_body（payload 源）：请求体与 property 同步翻转。"""
+        p = self._make()
+        try:
+            p.set_thinking(False)
+            assert p.thinking is False
+            body = p._build_body(
+                [Message(role="user", content="hi")], "gpt-4", None, False
+            )
+            assert body["enable_thinking"] is False
+            # preserve_thinking 不随开关变化（与 develop 基线一致：恒真）
+            assert body["preserve_thinking"] is True
+
+            p.set_thinking(True)
+            assert p.thinking is True
+            body = p._build_body(
+                [Message(role="user", content="hi")], "gpt-4", None, False
+            )
+            assert body["enable_thinking"] is True
+        finally:
+            await p.aclose()
+
+    @pytest.mark.asyncio
+    async def test_user_extra_body_overrides_defaults(self):
+        """用户 extra_body 显式值优先于内置默认。"""
+        cfg = ProviderConfig(
+            name="test-openai",
+            protocol="openai",
+            base_url="https://api.example.com",
+            api_key="sk-test",
+            extra_body={"enable_thinking": False, "preserve_thinking": False},
+        )
+        p = OpenAICompatProvider(cfg)
+        try:
+            assert p.thinking is False
+            body = p._build_body(
+                [Message(role="user", content="hi")], "gpt-4", None, False
+            )
+            assert body["enable_thinking"] is False
+            assert body["preserve_thinking"] is False
         finally:
             await p.aclose()

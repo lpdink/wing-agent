@@ -40,6 +40,10 @@ from wing.schema import (
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
 
+# 运行时开启 thinking 且用户未配置 budget 时的默认预算。
+# Anthropic 要求 type=enabled 必带 budget_tokens（1024 <= budget < max_tokens）。
+_DEFAULT_THINKING_BUDGET = 4096
+
 
 @dataclass
 class _StreamState:
@@ -81,9 +85,7 @@ class AnthropicProvider(ModelProvider):
         self._extra_body: dict = dict(config.extra_body)
         self._anthropic_version = config.anthropic_version
 
-        headers = self._make_headers(
-            config.api_key, self._anthropic_version, self._extra_body
-        )
+        headers = self._make_headers(config.api_key, self._anthropic_version)
 
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
@@ -133,7 +135,8 @@ class AnthropicProvider(ModelProvider):
 
         Anthropic 的 thinking 由 extra_body（thinking.type=enabled）控制，
         该配置平铺进请求 body。状态从它推导，保证「序列化回放 / 对外
-        get_status() 上报 / 开关语义」三者自洽。
+        get_status() 上报 / 开关语义」三者自洽。set_thinking() 直接改写
+        这份配置（运行时开关与静态配置走同一存储）。
         """
         return self._thinking_enabled(self._extra_body)
 
@@ -144,9 +147,23 @@ class AnthropicProvider(ModelProvider):
         return isinstance(tb, dict) and tb.get("type") == "enabled"
 
     def set_thinking(self, enable: bool) -> None:
-        # Anthropic 协议不通过此 flag 控制 thinking；用户应通过 extra_body 配置。
-        # No-op：不持有状态，不影响请求。
-        pass
+        """运行时 thinking 开关：改写 extra_body.thinking（请求 body 透传源）。
+
+        与 OpenAI-compat 路径同构：状态取自实际 payload 源，property 派生 /
+        get_status 上报 / 请求体三者自洽。启用时缺 budget_tokens 则补默认预算
+        （Anthropic 要求 type=enabled 必带 budget）；关闭只改 type、保留
+        budget——序列化时按 Anthropic 校验剥离（disabled 不得携带 budget），
+        再启用时用户原预算原样恢复。
+        """
+        tb = self._extra_body.get("thinking")
+        if not isinstance(tb, dict):
+            tb = {}
+            self._extra_body["thinking"] = tb
+        if enable:
+            tb["type"] = "enabled"
+            tb.setdefault("budget_tokens", _DEFAULT_THINKING_BUDGET)
+        else:
+            tb["type"] = "disabled"
 
     def set_reasoning_effort(self, effort: str | None) -> None:
         # Anthropic 协议无 reasoning_effort 概念（百炼用 output_config.effort，走 extra_body）。
@@ -156,17 +173,28 @@ class AnthropicProvider(ModelProvider):
     # ─── Request Building ─────────────────────────────────────────
 
     @staticmethod
-    def _make_headers(api_key: str, anthropic_version: str, extra_body: dict) -> dict:
-        """构造请求 header。启用 thinking 时携带交错 thinking beta header
-        （缺它则工具轮次间不会产生多块 thinking）。"""
-        headers = {
+    def _make_headers(api_key: str, anthropic_version: str) -> dict:
+        """构造静态请求 header（client 创建时固化）。
+
+        interleaved thinking beta header 随运行时 thinking 状态变化，
+        由 _request_headers() 每请求计算，不在此固化。
+        """
+        return {
             "x-api-key": api_key,
             "anthropic-version": anthropic_version,
             "Content-Type": "application/json",
         }
-        if AnthropicProvider._thinking_enabled(extra_body):
-            headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
-        return headers
+
+    def _request_headers(self) -> dict:
+        """每请求动态 header：thinking 启用时携带 interleaved thinking beta header
+        （缺它则工具轮次间不会产生多块 thinking）。
+
+        运行时 set_thinking() 改写 extra_body.thinking 后 header 必须跟随，
+        故 MUST NOT 在 client 创建时固化。
+        """
+        if self._thinking_enabled(self._extra_body):
+            return {"anthropic-beta": "interleaved-thinking-2025-05-14"}
+        return {}
 
     def _build_body(
         self,
@@ -201,6 +229,17 @@ class AnthropicProvider(ModelProvider):
         for k, v in self._extra_body.items():
             if k not in body:
                 body[k] = v
+
+        # Anthropic 校验：type=disabled 的 thinking 不得携带 budget_tokens。
+        # 状态层（_extra_body）保留 budget（toggle 再启用时原样恢复），仅序列化
+        # 时剥离——浅拷贝写 body，MUST NOT 改动 _extra_body。
+        tb = body.get("thinking")
+        if (
+            isinstance(tb, dict)
+            and tb.get("type") != "enabled"
+            and "budget_tokens" in tb
+        ):
+            body["thinking"] = {k: v for k, v in tb.items() if k != "budget_tokens"}
 
         # 缓存标记
         if self.explicit_cache_mode and anthropic_messages:
@@ -357,7 +396,9 @@ class AnthropicProvider(ModelProvider):
         t0 = time.monotonic()
         try:
             resp = await asyncio.wait_for(
-                self._client.post("/v1/messages", json=body),
+                self._client.post(
+                    "/v1/messages", json=body, headers=self._request_headers()
+                ),
                 timeout=self.timeout_total,
             )
             await raise_with_body(resp)
@@ -441,7 +482,9 @@ class AnthropicProvider(ModelProvider):
     ) -> AsyncIterator[LLMResponse]:
         t0 = time.monotonic()
         try:
-            req = self._client.build_request("POST", "/v1/messages", json=body)
+            req = self._client.build_request(
+                "POST", "/v1/messages", json=body, headers=self._request_headers()
+            )
             resp = await asyncio.wait_for(
                 self._client.send(req, stream=True),
                 timeout=self.timeout_first_chunk,

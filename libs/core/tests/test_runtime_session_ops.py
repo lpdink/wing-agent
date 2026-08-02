@@ -206,17 +206,21 @@ class TestRuntimeUpdateSessionEvents:
                 )
 
 
-class TestAnthropicThinkingRejection:
-    """Anthropic 协议的 thinking 运行时更新拒绝（thinking 由 extra_body 派生）。"""
+class TestThinkingTogglePassthrough:
+    """thinking 运行时开关两协议一致放行。
+
+    状态由 provider 从实际请求 payload 源（extra_body）派生，set_thinking()
+    改写同一存储——runtime 层不做协议分支（历史上 anthropic 曾在此被拒绝，
+    彼时 set_thinking 为 no-op；现已两协议同构）。
+    """
 
     @pytest.mark.asyncio
-    async def test_anthropic_thinking_update_rejected(self, runtime, mock_session):
+    async def test_anthropic_thinking_update_allowed(self, runtime, mock_session):
         mock_session.agent.model_provider.protocol = "anthropic"
         runtime.sm._sessions["test-session"] = mock_session
 
-        with pytest.raises(ValueError, match="extra_body"):
-            await runtime.update_session("test-session", thinking=True)
-        mock_session.update_state.assert_not_awaited()
+        await runtime.update_session("test-session", thinking=True)
+        mock_session.update_state.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_openai_thinking_update_allowed(self, runtime, mock_session):

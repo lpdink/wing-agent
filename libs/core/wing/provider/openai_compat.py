@@ -51,6 +51,13 @@ class OpenAICompatProvider(ModelProvider):
         self.timeout_total = config.timeout_total
         self.explicit_cache_mode = config.explicit_cache_mode
         self._extra_body: dict = dict(config.extra_body)
+        # 基线默认行为（对齐 develop）：enable_thinking / preserve_thinking 默认
+        # 随每个请求发送（用户 extra_body 的显式值优先）。preserve_thinking 尤为
+        # 关键——缺它则多轮工具回合间 thinking 被服务端剥离。
+        # thinking 状态从 extra_body 派生（实际请求 payload 源），与 Anthropic
+        # 路径同构：property / setter / 请求体 / 对外上报四者自洽。
+        self._extra_body.setdefault("enable_thinking", True)
+        self._extra_body.setdefault("preserve_thinking", True)
 
         headers = get_headers()
         headers["Authorization"] = f"Bearer {config.api_key}"
@@ -100,8 +107,20 @@ class OpenAICompatProvider(ModelProvider):
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    @property
+    def thinking(self) -> bool:
+        """thinking 开关状态——从 extra_body 的 enable_thinking 派生。
+
+        extra_body 平铺进请求 body，是实际 payload 源；状态从它派生，保证
+        「序列化回放 / 对外 get_status() 上报 / 开关语义」三者自洽
+        （与 Anthropic 路径同构）。
+        """
+        return bool(self._extra_body.get("enable_thinking", True))
+
     def set_thinking(self, enable: bool) -> None:
-        self.thinking = enable
+        # 改写 extra_body（请求 body 透传源）：切换下次请求即生效，
+        # property 派生随之翻转，无第二份状态。
+        self._extra_body["enable_thinking"] = enable
 
     def set_reasoning_effort(self, effort: str | None) -> None:
         self.reasoning_effort = effort
