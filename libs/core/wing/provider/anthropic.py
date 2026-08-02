@@ -25,9 +25,12 @@ from wing.schema import (
     LLMResponse,
     LLMUsage,
     Message,
+    TextBlock,
+    ThinkingBlock,
     Tool,
     ToolCall,
     ToolCallDelta,
+    ToolUseBlock,
 )
 
 if TYPE_CHECKING:
@@ -45,7 +48,10 @@ class AnthropicProvider(ModelProvider):
         self._config = config
         self._session_id = session_id
         self.base_url = config.base_url.rstrip("/")
-        self.thinking = True
+        # Anthropic 的 thinking 实际由 extra_body（thinking.type）控制；
+        # `thinking` 为只读派生属性（见下），不在此赋值。
+        self.allow_empty_signature = False
+        """对接受空签名的兼容端点发 signature:""（默认关；官方 Anthropic 必须降级 text）。"""
         self.reasoning_effort: str | None = config.reasoning_effort
         self.timeout_first_chunk = config.timeout_first_chunk
         self.timeout_total = config.timeout_total
@@ -53,11 +59,9 @@ class AnthropicProvider(ModelProvider):
         self._extra_body: dict = dict(config.extra_body)
         self._anthropic_version = config.anthropic_version
 
-        headers = {
-            "x-api-key": config.api_key,
-            "anthropic-version": self._anthropic_version,
-            "Content-Type": "application/json",
-        }
+        headers = self._make_headers(
+            config.api_key, self._anthropic_version, self._extra_body
+        )
 
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
@@ -106,6 +110,18 @@ class AnthropicProvider(ModelProvider):
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    @property
+    def thinking(self) -> bool:
+        """thinking 开关状态——从 extra_body 的 thinking 配置推导。
+
+        Anthropic 的 thinking 实际由 extra_body（如 thinking.type=enabled）
+        控制，该配置会平铺进请求 body。状态从它推导，保证「序列化回放 /
+        对外 get_status() 上报 / 开关语义」三者自洽（此前恒为 True，TUI 开关
+        是空操作）。
+        """
+        tb = self._extra_body.get("thinking")
+        return isinstance(tb, dict) and tb.get("type") == "enabled"
+
     def set_thinking(self, enable: bool) -> None:
         # Anthropic 协议不通过此 flag 控制 thinking；用户应通过 extra_body 配置。
         # No-op：不持有状态，不影响请求。
@@ -134,11 +150,9 @@ class AnthropicProvider(ModelProvider):
             old_client = self._client
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
-                headers={
-                    "x-api-key": new_cfg.api_key,
-                    "anthropic-version": new_cfg.anthropic_version,
-                    "Content-Type": "application/json",
-                },
+                headers=self._make_headers(
+                    new_cfg.api_key, new_cfg.anthropic_version, dict(new_cfg.extra_body)
+                ),
                 timeout=httpx.Timeout(
                     connect=30.0,
                     read=new_cfg.timeout_first_chunk,
@@ -166,6 +180,20 @@ class AnthropicProvider(ModelProvider):
         return changes
 
     # ─── Request Building ─────────────────────────────────────────
+
+    @staticmethod
+    def _make_headers(api_key: str, anthropic_version: str, extra_body: dict) -> dict:
+        """构造请求 header。启用 thinking 时携带交错 thinking beta header
+        （缺它则工具轮次间不会产生多块 thinking）。"""
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": anthropic_version,
+            "Content-Type": "application/json",
+        }
+        tb = extra_body.get("thinking")
+        if isinstance(tb, dict) and tb.get("type") == "enabled":
+            headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
+        return headers
 
     def _build_body(
         self,
@@ -223,30 +251,7 @@ class AnthropicProvider(ModelProvider):
                 continue
 
             if msg.role == "assistant":
-                blocks: list[dict] = []
-                # thinking content
-                if msg.reasoning_content:
-                    thinking_block: dict = {
-                        "type": "thinking",
-                        "thinking": msg.reasoning_content,
-                    }
-                    if msg.reasoning_signature:
-                        thinking_block["signature"] = msg.reasoning_signature
-                    blocks.append(thinking_block)
-                # text content
-                if msg.content:
-                    blocks.append({"type": "text", "text": msg.content})
-                # tool_use blocks
-                if msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        blocks.append(
-                            {
-                                "type": "tool_use",
-                                "id": tc.id,
-                                "name": tc.name,
-                                "input": tc.arguments,
-                            }
-                        )
+                blocks = self._serialize_assistant(msg)
                 anthropic_msgs.append({"role": "assistant", "content": blocks})
 
             elif msg.role == "tool":
@@ -273,9 +278,101 @@ class AnthropicProvider(ModelProvider):
                         }
                     )
 
+        # 尾部 thinking 过滤：最后一条 assistant 消息不得以 thinking/redacted 结尾
+        self._strip_trailing_thinking(anthropic_msgs)
+
         # 合并连续的 user 消息（Anthropic 要求 user/assistant 交替）
         merged = self._merge_consecutive_user(anthropic_msgs)
         return "\n\n".join(system_parts), merged
+
+    def _serialize_assistant(self, msg: Message) -> list[dict]:
+        """将 assistant 消息的 content_blocks 按序一对一映射回 Anthropic block。
+
+        回放契约（照搬 PI convertMessages）：
+        - thinking 有有效 signature → 原样按序发出，一个字节都不改
+          （改了会签名失配 + 击穿 prompt cache）
+        - thinking 无有效 signature → 降级成 text 块（绝不给官方 Anthropic
+          发空/坏签名的 thinking block，必被拒）
+        - thinking 文本为空且无 signature → 整块丢弃
+        - redacted → redacted_thinking + data（不透明黑盒原样回放）
+        """
+        content_blocks = msg.content_blocks
+        if content_blocks is None:
+            # 防御性兜底：validator 已为 assistant 填充块数组；此处从扁平字段构建。
+            fallback: list[TextBlock | ThinkingBlock | ToolUseBlock] = []
+            if msg.reasoning_content:
+                fallback.append(ThinkingBlock(thinking=msg.reasoning_content))
+            if msg.content:
+                fallback.append(TextBlock(text=msg.content))
+            for tc in msg.tool_calls or []:
+                fallback.append(
+                    ToolUseBlock(id=tc.id, name=tc.name, input=tc.arguments)
+                )
+            content_blocks = fallback
+
+        blocks: list[dict] = []
+        for block in content_blocks:
+            if isinstance(block, TextBlock):
+                if block.text:
+                    blocks.append({"type": "text", "text": block.text})
+            elif isinstance(block, ThinkingBlock):
+                if block.redacted:
+                    blocks.append(
+                        {"type": "redacted_thinking", "data": block.signature or ""}
+                    )
+                elif block.has_valid_signature:
+                    blocks.append(
+                        {
+                            "type": "thinking",
+                            "thinking": block.thinking,
+                            "signature": block.signature,
+                        }
+                    )
+                elif block.thinking.strip() == "":
+                    continue  # 空 thinking 无签名 → 丢弃
+                elif self.allow_empty_signature:
+                    blocks.append(
+                        {
+                            "type": "thinking",
+                            "thinking": block.thinking,
+                            "signature": "",
+                        }
+                    )
+                else:
+                    # 无有效签名 → 降级 text
+                    blocks.append({"type": "text", "text": block.thinking})
+            elif isinstance(block, ToolUseBlock):
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    }
+                )
+        return blocks
+
+    @staticmethod
+    def _strip_trailing_thinking(msgs: list[dict]) -> None:
+        """尾部 thinking 过滤：最后一条 assistant 消息不得以 thinking/redacted 结尾。
+
+        API 规则：thinking block 不能作为消息的最后一个 block。用户中断流式时
+        最易产生尾部 thinking。整条全是 thinking 则插占位 text。
+        """
+        for msg in reversed(msgs):
+            if msg["role"] != "assistant":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                return
+            while content and content[-1].get("type") in (
+                "thinking",
+                "redacted_thinking",
+            ):
+                content.pop()
+            if not content:
+                content.append({"type": "text", "text": "[No message content]"})
+            return
 
     @staticmethod
     def _merge_consecutive_user(msgs: list[dict]) -> list[dict]:
@@ -307,13 +404,21 @@ class AnthropicProvider(ModelProvider):
 
     @staticmethod
     def _apply_cache_control(anthropic_messages: list[dict]) -> None:
-        """为最后一条消息的最后一个 content block 打 cache_control 标记。"""
+        """为最后一条消息的最后一个非 thinking content block 打 cache_control。
+
+        thinking 块字节须稳定（任何改写会签名失配 + 击穿缓存），故 cache_control
+        打在最后一个非 thinking/redacted 块上。
+        """
         if not anthropic_messages:
             return
         last_msg = anthropic_messages[-1]
         content = last_msg.get("content")
-        if isinstance(content, list) and content:
-            content[-1]["cache_control"] = {"type": "ephemeral"}
+        if not isinstance(content, list) or not content:
+            return
+        for i in range(len(content) - 1, -1, -1):
+            if content[i].get("type") not in ("thinking", "redacted_thinking"):
+                content[i]["cache_control"] = {"type": "ephemeral"}
+                return
 
     # ─── Non-streaming ────────────────────────────────────────────
 
@@ -336,26 +441,42 @@ class AnthropicProvider(ModelProvider):
         elapsed = time.monotonic() - t0
         log.info("[DONE] anthropic sync call")
 
-        content_blocks = data.get("content", [])
+        raw_blocks = data.get("content", [])
+        blocks: list[TextBlock | ThinkingBlock | ToolUseBlock] = []
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
-        reasoning_signature: str | None = None
         tool_calls: list[ToolCall] = []
 
-        for block in content_blocks:
+        for block in raw_blocks:
             btype = block.get("type")
             if btype == "text":
-                text_parts.append(block.get("text", ""))
+                text = block.get("text", "")
+                text_parts.append(text)
+                blocks.append(TextBlock(text=text))
             elif btype == "thinking":
-                reasoning_parts.append(block.get("thinking", ""))
-                if block.get("signature"):
-                    reasoning_signature = block["signature"]
+                thinking = block.get("thinking", "")
+                reasoning_parts.append(thinking)
+                blocks.append(
+                    ThinkingBlock(thinking=thinking, signature=block.get("signature"))
+                )
+            elif btype == "redacted_thinking":
+                # 加密 payload 当不透明黑盒，存进 signature，原样回放永不解析
+                blocks.append(
+                    ThinkingBlock(
+                        thinking="", signature=block.get("data", ""), redacted=True
+                    )
+                )
             elif btype == "tool_use":
                 tool_calls.append(
                     ToolCall(
                         id=block["id"],
                         name=block["name"],
                         arguments=block.get("input", {}),
+                    )
+                )
+                blocks.append(
+                    ToolUseBlock(
+                        id=block["id"], name=block["name"], input=block.get("input", {})
                     )
                 )
 
@@ -371,7 +492,7 @@ class AnthropicProvider(ModelProvider):
         yield LLMResponse(
             content="".join(text_parts) or None,
             reasoning_content="".join(reasoning_parts) or None,
-            reasoning_signature=reasoning_signature,
+            content_blocks=blocks or None,
             tool_calls=tool_calls or None,
             usage=LLMUsage(
                 prompt_tokens=prompt_tokens,
@@ -408,8 +529,10 @@ class AnthropicProvider(ModelProvider):
         log.info("[DONE] anthropic stream connected")
 
         first_token_ts: float | None = None
-        reasoning_signature: str | None = None
-        # 当前活跃的 content block 状态
+        # 块累积器：按 index 建块，流式结束时产出有序 content_blocks
+        blocks_by_index: dict[int, TextBlock | ThinkingBlock | ToolUseBlock] = {}
+        tool_args_by_index: dict[int, str] = {}
+        # 当前活跃的 content block 状态（增量事件发射用）
         current_block_type: str = ""
         current_tool_id: str = ""
         current_tool_name: str = ""
@@ -432,13 +555,27 @@ class AnthropicProvider(ModelProvider):
                 event_type = data.get("type", "")
 
                 if event_type == "content_block_start":
+                    idx = data.get("index", 0)
                     block = data.get("content_block", {})
                     current_block_type = block.get("type", "")
-                    if current_block_type == "tool_use":
+                    if current_block_type == "thinking":
+                        blocks_by_index[idx] = ThinkingBlock(thinking="", signature="")
+                    elif current_block_type == "redacted_thinking":
+                        # 加密 payload 当不透明黑盒，存进 signature，redacted=True
+                        blocks_by_index[idx] = ThinkingBlock(
+                            thinking="", signature=block.get("data", ""), redacted=True
+                        )
+                    elif current_block_type == "text":
+                        blocks_by_index[idx] = TextBlock(text="")
+                    elif current_block_type == "tool_use":
                         current_tool_id = block.get("id", "")
                         current_tool_name = block.get("name", "")
                         tool_args_buffer = ""
                         tool_emitted_len = 0
+                        blocks_by_index[idx] = ToolUseBlock(
+                            id=current_tool_id, name=current_tool_name, input={}
+                        )
+                        tool_args_by_index[idx] = ""
 
                 elif event_type == "content_block_delta":
                     delta = data.get("delta", {})
@@ -448,6 +585,9 @@ class AnthropicProvider(ModelProvider):
                         text = delta.get("text", "")
                         if first_token_ts is None and text:
                             first_token_ts = time.monotonic()
+                        blk = blocks_by_index.get(data.get("index", 0))
+                        if isinstance(blk, TextBlock):
+                            blk.text += text
                         yield LLMResponse(
                             content=text,
                             usage=LLMUsage(
@@ -461,6 +601,9 @@ class AnthropicProvider(ModelProvider):
                         thinking = delta.get("thinking", "")
                         if first_token_ts is None and thinking:
                             first_token_ts = time.monotonic()
+                        blk = blocks_by_index.get(data.get("index", 0))
+                        if isinstance(blk, ThinkingBlock):
+                            blk.thinking += thinking
                         yield LLMResponse(
                             reasoning_content=thinking,
                             usage=LLMUsage(
@@ -471,14 +614,17 @@ class AnthropicProvider(ModelProvider):
                         )
 
                     elif delta_type == "signature_delta":
-                        # Anthropic thinking block signature（多轮回放必需）
+                        # per-block signature：累加进对应块（兼容单片/多片），
+                        # 绝不"只留最后一个全局 signature"
                         sig = delta.get("signature", "")
-                        if sig:
-                            reasoning_signature = sig
+                        blk = blocks_by_index.get(data.get("index", 0))
+                        if isinstance(blk, ThinkingBlock) and sig:
+                            blk.signature = (blk.signature or "") + sig
 
                     elif delta_type == "input_json_delta":
                         partial_json = delta.get("partial_json", "")
                         tool_args_buffer += partial_json
+                        tool_args_by_index[data.get("index", 0)] = tool_args_buffer
                         fragment = tool_args_buffer[tool_emitted_len:]
                         if fragment and current_tool_id:
                             tool_emitted_len = len(tool_args_buffer)
@@ -511,6 +657,10 @@ class AnthropicProvider(ModelProvider):
                                 f"{current_tool_name}: {tool_args_buffer[:200]}"
                             )
                             args = {}
+                        # 权威 JSON 解析结果写回块（失败落 {}）
+                        blk = blocks_by_index.get(data.get("index", 0))
+                        if isinstance(blk, ToolUseBlock):
+                            blk.input = args
                         # 发射 is_final delta
                         remaining = tool_args_buffer[tool_emitted_len:]
                         deltas = []
@@ -581,7 +731,7 @@ class AnthropicProvider(ModelProvider):
                         cache_creation = usage_start["cache_creation_input_tokens"]
 
                 elif event_type == "message_stop":
-                    # 最终 usage + signature 发射
+                    # 最终 usage + content_blocks 发射
                     # Anthropic 的 input_tokens 仅为非缓存部分（含兜底/增量源）；
                     # 对齐 OpenAI 语义：prompt_tokens = 总输入（含缓存）
                     total_prompt = prompt_tokens + cached_tokens + cache_creation
@@ -602,8 +752,13 @@ class AnthropicProvider(ModelProvider):
                         decode_elapsed = time.monotonic() - first_token_ts
                         if decode_elapsed > 0:
                             decode_tps = completion_tokens / decode_elapsed
+                    # 产出有序 content_blocks（按 index 排序）——权威块数组，
+                    # LLMCaller commit 进 Message
+                    ordered_blocks = [
+                        blocks_by_index[i] for i in sorted(blocks_by_index)
+                    ]
                     yield LLMResponse(
-                        reasoning_signature=reasoning_signature,
+                        content_blocks=ordered_blocks or None,
                         usage=LLMUsage(
                             prompt_tokens=total_prompt,
                             completion_tokens=completion_tokens,

@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from wing.common.logger import log
-from wing.schema import LLMUsage, Message, ToolCall
+from wing.schema import ContentBlock, LLMUsage, Message, ToolCall
 
 from .event_sink import AgentEventSink
 
@@ -26,6 +26,10 @@ class LLMCaller:
         self._provider = model_provider
         self._sink = sink
 
+    def set_provider(self, provider: ModelProvider) -> None:
+        """切换底层 provider（运行时切模型时由 WingAgent 委托）。"""
+        self._provider = provider
+
     async def call(
         self,
         messages: list[Message],
@@ -39,8 +43,8 @@ class LLMCaller:
         """
         content_chunks: list[str] = []
         reasoning_chunks: list[str] = []
-        reasoning_signature: str | None = None
         pending_tool_calls: list[ToolCall] = []
+        content_blocks: list[ContentBlock] | None = None
         last_usage: LLMUsage | None = None
 
         async for chunk in self._provider.generate(
@@ -53,15 +57,16 @@ class LLMCaller:
                 reasoning_chunks.append(chunk.reasoning_content)
                 self._sink.llm_reasoning(chunk.reasoning_content)
 
-            if chunk.reasoning_signature:
-                reasoning_signature = chunk.reasoning_signature
-
             if chunk.content:
                 content_chunks.append(chunk.content)
                 self._sink.llm_text(chunk.content)
 
             if chunk.tool_calls:
                 pending_tool_calls.extend(chunk.tool_calls)
+
+            if chunk.content_blocks is not None:
+                # provider 产出的权威块数组（最终 chunk 携带）
+                content_blocks = chunk.content_blocks
 
             if chunk.tool_call_deltas:
                 for delta in chunk.tool_call_deltas:
@@ -81,11 +86,19 @@ class LLMCaller:
             f"{len(pending_tool_calls)} tool calls"
         )
 
+        if content_blocks is not None:
+            # provider 产出权威块数组：作为真相源，扁平字段由其填充
+            msg = Message(
+                role="assistant", content_blocks=content_blocks, usage=last_usage
+            )
+            msg.sync_flat_from_blocks()
+            return msg
+
+        # 兜底：provider 未给块数组，从累积的扁平 chunk 构建
         return Message(
             role="assistant",
             content="".join(content_chunks),
             reasoning_content="".join(reasoning_chunks),
-            reasoning_signature=reasoning_signature,
             tool_calls=pending_tool_calls,
             usage=last_usage,
         )
