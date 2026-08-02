@@ -337,18 +337,19 @@ pub struct CommandsResponse {
     pub commands: Vec<CommandInfo>,
 }
 
-/// 单个可用模型条目。
+/// 单个 provider 的可用模型（嵌套模型列表条目）。
 #[derive(Debug, Clone, Deserialize)]
-pub struct ModelEntry {
+pub struct ProviderModels {
     pub provider: String,
-    pub model: String,
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
-/// GET /api/models 响应——可用模型列表。
+/// GET /api/models 响应——可用模型列表（按 provider 分组嵌套）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelsResponse {
     #[serde(default)]
-    pub models: Vec<ModelEntry>,
+    pub providers: Vec<ProviderModels>,
 }
 
 /// GET /api/agents 响应——可用 agent 模板列表。

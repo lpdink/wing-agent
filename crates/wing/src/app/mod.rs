@@ -870,10 +870,16 @@ impl App {
                 self.update_popup();
             }
             FetchPayload::Models(resp) => {
+                // 嵌套响应（按 provider 分组）→ 展平为 (model, provider) 缓存
                 self.popup.cache.models = resp
-                    .models
+                    .providers
                     .into_iter()
-                    .map(|e| (e.model, e.provider))
+                    .flat_map(|group| {
+                        group
+                            .models
+                            .into_iter()
+                            .map(move |model| (model, group.provider.clone()))
+                    })
                     .collect();
                 self.update_popup();
             }
