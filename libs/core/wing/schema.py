@@ -2,7 +2,15 @@
 import json
 from typing import Annotated, Any, Callable, Dict, List, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 
 ########## EXCEPTIONS
@@ -115,12 +123,9 @@ class ThinkingBlock(BaseModel):
     type: Literal["thinking"] = "thinking"
     thinking: str = ""
     signature: str | None = None
-    """per-block 签名。None/空串视为无效——回放时降级为 text。"""
+    """per-block 签名。None/空串表示该块产生于不下发签名的推理 provider
+    或存量旧数据——回放时原样发空签名（AnthropicProvider 回放契约）。"""
     redacted: bool = False
-
-    @property
-    def has_valid_signature(self) -> bool:
-        return self.signature is not None and self.signature.strip() != ""
 
 
 class ToolUseBlock(BaseModel):
@@ -139,12 +144,40 @@ ContentBlock = Annotated[
 """assistant 消息的有序 content block（真相源）。顺序即数组下标。"""
 
 
+def _blocks_from_flat(
+    reasoning_content: str | None,
+    content: str | None,
+    tool_calls: list | None,
+) -> list[TextBlock | ThinkingBlock | ToolUseBlock] | None:
+    """存量映射：扁平字段 → 块数组（thinking 无 signature）。
+
+    develop 基线 JSONL 只有 content / reasoning_content / tool_calls，无块
+    数组、无 signature。加载时自然映射进块数组作为唯一存储——无签名 thinking
+    回放时原样发空签名（见 AnthropicProvider 回放契约）。
+    """
+    blocks: list[TextBlock | ThinkingBlock | ToolUseBlock] = []
+    if reasoning_content:
+        blocks.append(ThinkingBlock(thinking=reasoning_content))
+    if content:
+        blocks.append(TextBlock(text=content))
+    for tc in tool_calls or []:
+        if isinstance(tc, ToolCall):
+            blocks.append(ToolUseBlock(id=tc.id, name=tc.name, input=tc.arguments))
+        else:
+            blocks.append(
+                ToolUseBlock(
+                    id=tc["id"], name=tc["name"], input=tc.get("arguments", {})
+                )
+            )
+    return blocks or None
+
+
 class LLMResponse(BaseModel):
     content: str | None = None
     reasoning_content: str | None = None
     content_blocks: list[ContentBlock] | None = None
     """provider 产出的结构化块数组（权威）。流式结束时由 provider 在最终
-    chunk 给出，LLMCaller commit 进 Message。"""
+    chunk 给出，ReActLoop 组装进 Message。"""
     tool_calls: list[ToolCall] | None = None
     tool_call_deltas: list[ToolCallDelta] | None = None
     usage: LLMUsage = LLMUsage()
@@ -160,65 +193,160 @@ class ChainNode(BaseModel):
 
 class Message(ChainNode):
     role: Literal["system", "user", "assistant", "tool"]
-    content: str | None = None
-    reasoning_content: str | None = None
     content_blocks: list[ContentBlock] | None = None
-    """assistant 消息的有序 content block 数组（Anthropic 路径真相源）。
-    仅 assistant 消息携带；顺序即数组下标。"""
-    tool_calls: list[ToolCall] | None = None  # assistant calls tools
+    """assistant 消息的有序 content block 数组——assistant 的唯一存储。
+    顺序即数组下标。非 assistant 消息不携带。"""
     tool_call_id: str | None = None  # tool response only
     usage: "LLMUsage | None" = (
         None  # assistant 消息的 token 审计信息，持久化后重放可恢复
     )
 
+    # 扁平存储：仅非 assistant 消息（user/tool/system）使用。assistant 的
+    # content / reasoning_content / tool_calls 全部从 content_blocks 实时派生，
+    # 不存在第二份存储。
+    _content: str | None = PrivateAttr(default=None)
+    _tool_calls: list[ToolCall] | None = PrivateAttr(default=None)
+
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
-    @model_validator(mode="after")
-    def _build_blocks_from_flat(self) -> "Message":
-        """存量兼容：assistant 消息无 content_blocks 时，从扁平字段映射。
+    def __init__(
+        self,
+        *,
+        role: Literal["system", "user", "assistant", "tool"],
+        content: str | None = None,
+        reasoning_content: str | None = None,
+        content_blocks: list[ContentBlock] | None = None,
+        tool_calls: list[ToolCall] | None = None,
+        tool_call_id: str | None = None,
+        usage: LLMUsage | None = None,
+        uuid: str | None = None,
+        parent_uuid: str | None = None,
+        unzip_last_uuid: str | None = None,
+        **extra: Any,
+    ) -> None:
+        """显式签名供类型检查器识别扁平入参；路由逻辑在 `_route_flat`
+        wrap validator（构造与 model_validate 加载共用）。**extra 透传
+        未知键（如 MessageLog 附加的 ts），由 extra="ignore" 丢弃。"""
+        data: dict[str, Any] = {
+            "role": role,
+            "content": content,
+            "reasoning_content": reasoning_content,
+            "content_blocks": content_blocks,
+            "tool_calls": tool_calls,
+            "tool_call_id": tool_call_id,
+            "usage": usage,
+            "uuid": uuid,
+            "parent_uuid": parent_uuid,
+            "unzip_last_uuid": unzip_last_uuid,
+        }
+        data.update(extra)
+        super().__init__(**data)
 
-        develop 基线 JSONL 只有 content / reasoning_content / tool_calls，
-        无块数组、无 signature。此处自然映射进块数组（thinking 无 signature），
-        使业务代码只见统一块数组——回放时命中"无签名降级 text"，对官方
-        Anthropic 不 400。业务代码无需 `if 旧格式` 特判。
+    @model_validator(mode="wrap")
+    @classmethod
+    def _route_flat(cls, data: Any, handler: Callable[[Any], "Message"]) -> "Message":
+        """单一存储路由：扁平入参（content / reasoning_content / tool_calls）
+        不进字段，按 role 分流——
+
+        - assistant：无 content_blocks 时由扁平值构建块数组（存量旧格式映射，
+          thinking 无 signature）；有 content_blocks 时扁平值忽略（派生）。
+        - 非 assistant：写入私有存储，property 直通。
+
+        构造（__init__）与加载（model_validate）共用此路径，业务代码无
+        `if 旧格式` 特判。
         """
-        if self.role != "assistant" or self.content_blocks is not None:
-            return self
-        blocks: list[TextBlock | ThinkingBlock | ToolUseBlock] = []
-        if self.reasoning_content:
-            blocks.append(ThinkingBlock(thinking=self.reasoning_content))
-        if self.content:
-            blocks.append(TextBlock(text=self.content))
-        for tc in self.tool_calls or []:
-            blocks.append(ToolUseBlock(id=tc.id, name=tc.name, input=tc.arguments))
-        if blocks:
-            self.content_blocks = blocks
-        return self
+        if not isinstance(data, dict):
+            return handler(data)
+        data = dict(data)
+        content = data.pop("content", None)
+        reasoning_content = data.pop("reasoning_content", None)
+        tool_calls = data.pop("tool_calls", None)
 
-    def sync_flat_from_blocks(self) -> None:
-        """从 content_blocks 重算扁平字段 content / reasoning_content / tool_calls。
-
-        content_blocks 是真相源；扁平字段在 commit 时由块数组一次性填充，
-        供 OpenAI-compat provider、渲染、持久化等现有消费方使用。
-        """
-        if not self.content_blocks:
-            return
-        text_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        tool_calls: list[ToolCall] = []
-        for block in self.content_blocks:
-            if isinstance(block, TextBlock):
-                text_parts.append(block.text)
-            elif isinstance(block, ThinkingBlock):
-                if block.thinking:
-                    reasoning_parts.append(block.thinking)
-            elif isinstance(block, ToolUseBlock):
-                tool_calls.append(
-                    ToolCall(id=block.id, name=block.name, arguments=block.input)
+        if data.get("role") == "assistant":
+            if data.get("content_blocks") is None:
+                data["content_blocks"] = _blocks_from_flat(
+                    reasoning_content, content, tool_calls
                 )
-        self.content = "".join(text_parts) or None
-        self.reasoning_content = "".join(reasoning_parts) or None
-        self.tool_calls = tool_calls or None
+            msg = handler(data)
+            return msg
+
+        msg = handler(data)
+        msg._content = content
+        if tool_calls:
+            msg._tool_calls = [
+                tc if isinstance(tc, ToolCall) else ToolCall.model_validate(tc)
+                for tc in tool_calls
+            ]
+        return msg
+
+    @model_serializer(mode="wrap")
+    def _serialize_flat(self, handler: Callable[[Any], dict]) -> dict:
+        """导出派生的扁平字段（向后兼容旧消费方与落盘格式）。
+
+        导出是派生行为，不是第二份存储：assistant 的 content /
+        reasoning_content / tool_calls 实时取自 content_blocks。
+        """
+        data = handler(self)
+        data["content"] = self.content
+        data["reasoning_content"] = self.reasoning_content
+        data["tool_calls"] = (
+            [tc.model_dump() for tc in self.tool_calls] if self.tool_calls else None
+        )
+        return data
+
+    @property
+    def content(self) -> str | None:
+        """assistant：拼接 TextBlock（实时派生）；非 assistant：存储值。"""
+        if self.role == "assistant":
+            if not self.content_blocks:
+                return None
+            parts = [b.text for b in self.content_blocks if isinstance(b, TextBlock)]
+            return "".join(parts) or None
+        return self._content
+
+    @content.setter
+    def content(self, value: str | None) -> None:
+        if self.role == "assistant":
+            raise AttributeError(
+                "assistant message content is derived from content_blocks; "
+                "mutate the blocks instead"
+            )
+        self._content = value
+
+    @property
+    def reasoning_content(self) -> str | None:
+        """拼接非 redacted ThinkingBlock 的 thinking 文本（实时派生）。"""
+        if not self.content_blocks:
+            return None
+        parts = [
+            b.thinking
+            for b in self.content_blocks
+            if isinstance(b, ThinkingBlock) and not b.redacted and b.thinking
+        ]
+        return "".join(parts) or None
+
+    @property
+    def tool_calls(self) -> list[ToolCall] | None:
+        """assistant：抽取 ToolUseBlock（实时派生）；非 assistant：存储值。"""
+        if self.role == "assistant":
+            if not self.content_blocks:
+                return None
+            calls = [
+                ToolCall(id=b.id, name=b.name, arguments=b.input)
+                for b in self.content_blocks
+                if isinstance(b, ToolUseBlock)
+            ]
+            return calls or None
+        return self._tool_calls
+
+    @tool_calls.setter
+    def tool_calls(self, value: list[ToolCall] | None) -> None:
+        if self.role == "assistant":
+            raise AttributeError(
+                "assistant message tool_calls is derived from content_blocks; "
+                "mutate the blocks instead"
+            )
+        self._tool_calls = value
 
     def to_openai(self) -> dict:
         result: dict[str, Any] = {"role": self.role}

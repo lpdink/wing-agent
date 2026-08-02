@@ -15,7 +15,7 @@ from .common.logger import log
 from .common.tracked_list import TrackedList
 from .compactor import Compactor
 from .provider.base import ModelProvider
-from .schema import AgentSkill, LLMUsage, Message, ThinkingBlock, Tool
+from .schema import AgentSkill, ContentBlock, LLMUsage, Message, ThinkingBlock, Tool
 
 
 @dataclass
@@ -829,13 +829,10 @@ More detail in: "{dir}/SKILL.md" """
 
     def clear_reasoning(self) -> None:
         for msg in self._messages:
-            if isinstance(msg, Message):
-                msg.reasoning_content = ""
-                # 同步剥离 content_blocks 中的 thinking 块，保持扁平字段与
-                # 块数组一致（Anthropic 回放以块数组为准）。
-                if msg.content_blocks:
-                    msg.content_blocks = [
-                        b
-                        for b in msg.content_blocks
-                        if not isinstance(b, ThinkingBlock)
-                    ]
+            if isinstance(msg, Message) and msg.content_blocks:
+                # 只修改存储（块数组）：剥离 thinking 块，派生的
+                # reasoning_content 自然为空。
+                remaining: list[ContentBlock] = [
+                    b for b in msg.content_blocks if not isinstance(b, ThinkingBlock)
+                ]
+                msg.content_blocks = remaining or None
