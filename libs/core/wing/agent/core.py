@@ -212,15 +212,24 @@ class WingAgent:
             await provider.aclose()
 
     async def rebuild_providers(self) -> None:
-        """驱逐重建：关闭并驱逐表中全部 client，按新配置重建当前活跃 provider。
+        """驱逐重建：按新配置重建活跃 provider，成功后关闭旧表全部 client。
 
         配置热加载入口——provider 客户端无"热刷新"语义（ModelProvider 不提供
         reload），reload 即驱逐 + 重建。api_key / base_url / anthropic_version /
         extra_body 等变更随重建自然生效；非活跃 name 下次用到时按新配置懒创建。
+
+        先建后关：重建失败（如 provider 从新配置中移除）时旧 client 保持可用，
+        session 不会被钉死在已关闭的 client 上。
         """
         active_name = self.model_provider.name
-        await self.aclose_providers()
-        self.model_provider = self.get_or_create_provider(active_name)
+        cfg = get_config().get_provider(active_name)
+        new_provider = create_provider(cfg, session_id=self.session_id)
+
+        old_providers = list(self._providers.values())
+        self._providers = {active_name: new_provider}
+        self.model_provider = new_provider
+        for provider in old_providers:
+            await provider.aclose()
 
     def set_reasoning_effort(self, effort: str | None) -> None:
         self.model_provider.reasoning_effort = effort

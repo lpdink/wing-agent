@@ -225,6 +225,12 @@ class AnthropicProvider(ModelProvider):
 
             if msg.role == "assistant":
                 blocks = self._serialize_assistant(msg)
+                # 零块 assistant（如纯 thinking 轮的 thinking 块被 clear_reasoning
+                # 剥离后）MUST NOT 发出 content: []——Anthropic 要求 content 至少
+                # 一个块，否则本次及该 session 后续所有请求 400。丢弃是配对安全
+                # 的：零块即无 tool_use，不会有后续 tool_result 引用本条。
+                if not blocks:
+                    continue
                 anthropic_msgs.append({"role": "assistant", "content": blocks})
 
             elif msg.role == "tool":

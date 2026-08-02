@@ -438,21 +438,28 @@ class WingRuntime:
                 ReloadResultItem(name="prompt commands", ok=False, detail=str(e))
             )
 
-        # 4. Rebuild provider clients — 所有 session（驱逐重建：关闭旧 client，
-        #    按新配置重建活跃 provider；配置变更随重建自然生效）。
+        # 4. Rebuild provider clients — 所有 session（驱逐重建：按新配置重建
+        #    活跃 provider 后关闭旧 client；配置变更随重建自然生效）。
         #    模型列表 registry 一并重置（下次查询按新配置重建）。
+        #    单 session 失败不阻断其余 session（否则一个坏 session 会让其他
+        #    session 悄悄留着旧凭据——正是驱逐重建要修的 bug）。
         try:
             from wing.provider import reset_registry
 
             await reset_registry()
             rebuilt = 0
+            failures: list[str] = []
             for session in self.sm.iter_sessions():
-                await session.agent.rebuild_providers()
-                rebuilt += 1
+                try:
+                    await session.agent.rebuild_providers()
+                    rebuilt += 1
+                except Exception as e:
+                    failures.append(f"{session.session_id}: {e}")
+            detail = f"rebuilt {rebuilt} session(s)"
+            if failures:
+                detail += "; failed: " + ", ".join(failures)
             items.append(
-                ReloadResultItem(
-                    name="provider", ok=True, detail=f"rebuilt {rebuilt} session(s)"
-                )
+                ReloadResultItem(name="provider", ok=not failures, detail=detail)
             )
         except Exception as e:
             items.append(ReloadResultItem(name="provider", ok=False, detail=str(e)))

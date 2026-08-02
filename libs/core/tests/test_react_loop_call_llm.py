@@ -11,7 +11,18 @@ import pytest
 
 from wing.agent.event_sink import AgentEventSink
 from wing.agent.react_loop import ReActLoop
-from wing.schema import LLMResponse, TextBlock, ThinkingBlock, ToolUseBlock
+from wing.event import LLMCallMetricsEvent
+from wing.event_bus import event_bus
+from wing.schema import LLMResponse, LLMUsage, TextBlock, ThinkingBlock, ToolUseBlock
+
+
+@pytest.fixture(autouse=True)
+def cleanup_event_bus():
+    event_bus._subscribers.clear()
+    event_bus._routing.clear()
+    yield
+    event_bus._subscribers.clear()
+    event_bus._routing.clear()
 
 
 def _make_loop() -> ReActLoop:
@@ -65,3 +76,34 @@ class TestCallLlmContract:
         provider = _FakeProvider([LLMResponse(content="partial")])
         with pytest.raises(RuntimeError, match="content_blocks"):
             await _make_loop()._call_llm(provider, [], "m", None)  # ty: ignore[invalid-argument-type]
+
+    @pytest.mark.asyncio
+    async def test_metrics_emitted_once_per_call(self):
+        """llm_metrics 每次调用只发射一次（锁定 token 双计回归）。
+
+        provider 契约：非零 usage 由带内 chunk 携带，最终块数组 chunk 只带
+        零 token 元信息。_call_llm 对每个非零 usage chunk 发射一次——若最终
+        chunk 再附着非零 usage，metrics 事件翻倍。
+        """
+        events: list = []
+        event_bus.subscribe(events.append)
+
+        provider = _FakeProvider(
+            [
+                LLMResponse(content="hi"),
+                LLMResponse(usage=LLMUsage(prompt_tokens=10, completion_tokens=5)),
+                LLMResponse(
+                    content_blocks=[TextBlock(text="hi")],
+                    usage=LLMUsage(model="m"),  # 零 token 元信息（provider 契约）
+                ),
+            ]
+        )
+        msg = await _make_loop()._call_llm(provider, [], "m", None)  # ty: ignore[invalid-argument-type]
+
+        metrics = [e for e in events if isinstance(e, LLMCallMetricsEvent)]
+        assert len(metrics) == 1
+        assert metrics[0].prompt_tokens == 10
+        assert metrics[0].completion_tokens == 5
+        # Message.usage 取自带内非零 chunk，不受终块零元信息影响
+        assert msg.usage is not None
+        assert msg.usage.prompt_tokens == 10

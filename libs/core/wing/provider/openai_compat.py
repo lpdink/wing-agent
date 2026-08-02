@@ -250,9 +250,6 @@ class OpenAICompatProvider(ModelProvider):
         reasoning_chunks: list[str] = []
         content_chunks: list[str] = []
         final_tool_calls: list[ToolCall] = []
-        last_usage = LLMUsage(
-            first_chunk_rt_ms=first_chunk_rt_ms, model=model, request_id=request_id
-        )
 
         try:
             async for event in parse_sse_stream(resp.aiter_lines()):
@@ -306,8 +303,6 @@ class OpenAICompatProvider(ModelProvider):
                     model=model,
                     request_id=request_id,
                 )
-                if prompt_tokens or completion_tokens:
-                    last_usage = chunk_usage
 
                 yield LLMResponse(
                     content=content,
@@ -317,14 +312,21 @@ class OpenAICompatProvider(ModelProvider):
                     usage=chunk_usage,
                 )
 
-            # 流结束：产出权威 content_blocks（ReActLoop 以此为 Message 唯一组装依据）
+            # 流结束：产出权威 content_blocks（ReActLoop 以此为 Message 唯一组装
+            # 依据）。usage 只带零 token 元信息——非零 usage 已由带内 usage chunk
+            # 触发过上游 metrics 发射，此处再附着会造成 token 双计；流无带内
+            # usage 时 Message.usage 仍保留 first_chunk_rt_ms 等元信息。
             yield LLMResponse(
                 content_blocks=self._build_content_blocks(
                     "".join(reasoning_chunks) or None,
                     "".join(content_chunks) or None,
                     final_tool_calls,
                 ),
-                usage=last_usage,
+                usage=LLMUsage(
+                    first_chunk_rt_ms=first_chunk_rt_ms,
+                    model=model,
+                    request_id=request_id,
+                ),
             )
         finally:
             await resp.aclose()

@@ -265,6 +265,52 @@ class TestAnthropicReplay:
             await p.aclose()
 
     @pytest.mark.asyncio
+    async def test_zero_block_assistant_dropped_from_request(self):
+        """序列化零块的 assistant 整条丢弃——content:[] 会使本次及该
+        session 后续所有请求 400（Anthropic 要求 content 至少一个块）。
+
+        真实路径：纯 thinking 轮的 thinking 块被 clear_reasoning 剥离
+        （preserved_thinking: false）。丢弃是配对安全的：零块即无
+        tool_use，不会有后续 tool_result 引用本条。
+        """
+        p = _make_anthropic()
+        try:
+            thinking_only = Message(
+                role="assistant",
+                content_blocks=[ThinkingBlock(thinking="hmm", signature="s")],
+            )
+            # clear_reasoning 剥离 thinking 块 → 块数组为空
+            thinking_only.content_blocks = None
+
+            _, am = p._serialize_messages(
+                [
+                    Message(role="user", content="q1"),
+                    thinking_only,
+                    Message(role="user", content="q2"),
+                ]
+            )
+            # 零块 assistant 被丢弃；两个 user 按严格交替规则合并
+            assert [m["role"] for m in am] == ["user"]
+            assert all(m["content"] for m in am), "不得出现空 content"
+
+            # 配对安全：带 tool_use 的 assistant 不受丢弃逻辑影响
+            _, am2 = p._serialize_messages(
+                [
+                    Message(role="user", content="q"),
+                    Message(
+                        role="assistant",
+                        content_blocks=[
+                            ToolUseBlock(id="t1", name="Bash", input={"cmd": "ls"})
+                        ],
+                    ),
+                    Message(role="tool", tool_call_id="t1", content="ok"),
+                ]
+            )
+            assert [m["role"] for m in am2] == ["user", "assistant", "user"]
+        finally:
+            await p.aclose()
+
+    @pytest.mark.asyncio
     async def test_cache_control_last_block_isomorphic(self):
         """cache_control 打在最后一个 block 上（与 OpenAI 路径同构，不规避 thinking）。"""
         msgs = [
@@ -665,6 +711,35 @@ class TestProviderLifecycle:
         assert agent._providers == {"default": agent.model_provider}
         assert agent.model == "model-3"
 
+    @pytest.mark.asyncio
+    async def test_rebuild_failure_keeps_old_clients_live(self, sm, monkeypatch):
+        """先建后关：重建失败时旧 client 保持可用，session 不被钉死。
+
+        场景：新配置移除了活跃 provider 名 → get_provider 抛错；此时旧
+        client 必须仍然打开、agent 状态不变（而非关了一切后重建失败）。
+        """
+        session = sm.create_session()
+        agent = session.agent
+        old_provider = agent.model_provider
+
+        empty = Config(
+            providers=[
+                ProviderConfig(
+                    name="other", base_url="https://b.example.com", api_key="k"
+                )
+            ],
+            agents=[AgentConfig(name="default", model="gpt-4", provider="other")],
+        )
+        monkeypatch.setattr("wing.agent.core.get_config", lambda: empty)
+
+        with pytest.raises(ValueError, match="provider 'default' not found"):
+            await agent.rebuild_providers()
+
+        # 旧 client 未关闭、活跃 provider 与表均不变
+        assert old_provider._client.is_closed is False
+        assert agent.model_provider is old_provider
+        assert agent._providers["default"] is old_provider
+
 
 # ─── OpenAI-compat 覆盖 ──────────────────────────────────────────
 
@@ -787,6 +862,36 @@ class TestOpenAICompat:
         assert blocks[1].text == "hello world"  # ty: ignore[unresolved-attribute]
         assert blocks[2].name == "Bash"  # ty: ignore[unresolved-attribute]
         assert blocks[2].input == {"cmd": "ls"}  # ty: ignore[unresolved-attribute]
+
+    @pytest.mark.asyncio
+    async def test_final_blocks_chunk_carries_zero_usage(self):
+        """最终权威块数组 chunk 只带零 token usage 元信息。
+
+        锁定 token 双计回归：非零 usage 已由带内 usage chunk 发射一次
+        （上游 metrics 按事件累加）；最终 chunk 再附着同一非零 usage 会
+        使所有 OpenAI-compat 流式调用的 token 统计翻倍。
+        """
+        chunks = [
+            {"choices": [{"delta": {"content": "hi"}}]},
+            {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5}},
+        ]
+        p = self._make()
+        await p._client.aclose()
+        p._client = _FakeClient(_openai_sse(chunks))  # ty: ignore[invalid-assignment]
+
+        nonzero: list = []
+        final = None
+        async for chunk in p._generate_stream(body={}, model="gpt-4"):
+            if chunk.content_blocks is not None:
+                final = chunk
+            elif chunk.usage.prompt_tokens or chunk.usage.completion_tokens:
+                nonzero.append(chunk.usage)
+
+        assert len(nonzero) == 1, "带内 usage chunk 恰好一个"
+        assert final is not None
+        assert final.usage.prompt_tokens == 0
+        assert final.usage.completion_tokens == 0
+        assert final.usage.model == "gpt-4", "元信息保留"
 
     def test_sync_builds_blocks(self):
         """同步路径同样产出 content_blocks。"""

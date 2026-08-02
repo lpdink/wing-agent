@@ -225,3 +225,25 @@ class TestAnthropicThinkingRejection:
 
         await runtime.update_session("test-session", thinking=True)
         mock_session.update_state.assert_awaited_once()
+
+
+class TestReloadProviderIsolation:
+    """reload_system 的 provider 驱逐重建：单 session 失败不阻断其余。"""
+
+    @pytest.mark.asyncio
+    async def test_one_bad_session_does_not_skip_rest(self, runtime, monkeypatch):
+        s1 = runtime.create_session()
+        s2 = runtime.create_session()
+
+        s1.agent.rebuild_providers = AsyncMock(side_effect=RuntimeError("boom"))
+        s2.agent.rebuild_providers = AsyncMock()
+        monkeypatch.setattr("wing.provider.reset_registry", AsyncMock())
+
+        result = await runtime.reload_system()
+
+        provider_item = next(i for i in result.items if i.name == "provider")
+        assert provider_item.ok is False
+        assert "rebuilt 1 session(s)" in provider_item.detail
+        assert "boom" in provider_item.detail
+        # 坏 session 之后的 session 仍然被重建（不被跳过）
+        s2.agent.rebuild_providers.assert_awaited_once()
