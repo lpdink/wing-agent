@@ -17,11 +17,10 @@ from wing.common.logger import log
 from wing.config import get_config
 from wing.hook_registry import hooks
 from wing.request_context import reset_request_context, set_request_context
-from wing.schema import LLMUsage, Message
+from wing.schema import ContentBlock, LLMUsage, Message
 
 from .event_sink import AgentEventSink
 from .inbox import Inbox
-from .llm_caller import LLMCaller
 from .tool_executor import InterruptedToolResults, ToolExecutor
 
 if TYPE_CHECKING:
@@ -63,40 +62,37 @@ class _TurnAccumulator:
 
 
 class ReActLoop:
-    """ReAct 主循环编排器。"""
+    """ReAct 主循环编排器。
+
+    职责包括 LLM chunk 流消费与 assistant Message 组装（`_call_llm`）——
+    注意边界：实际模型调用在 `ModelProvider.generate()`，loop 侧只消费流、
+    经 sink 发射流式事件、以 provider 产出的权威块数组组装 Message。
+    """
 
     def __init__(
         self,
-        llm_caller: LLMCaller,
         tool_executor: ToolExecutor,
         sink: AgentEventSink,
         context_manager: ContextManager,
         inbox: Inbox,
-        model: str,
-        model_provider: ModelProvider,
+        current_model: Callable[[], str],
+        current_provider: Callable[[], "ModelProvider"],
         current_tools: Callable[[], list[Tool]],
         stream: bool = True,
         set_working: Callable[[bool], None] | None = None,
     ) -> None:
-        self._llm = llm_caller
         self._executor = tool_executor
         self._sink = sink
         self._cm = context_manager
         self._inbox = inbox
-        self._model = model
-        self._model_provider = model_provider
+        self._current_model = current_model
+        self._current_provider = current_provider
         self._current_tools = current_tools
         self._stream = stream
         self._set_working = set_working
         # 运行时可变配置（由 WingAgent 设置）
         self.max_turns: int | None = None
         self.steer: bool = get_config().steer
-
-    def set_model(self, model: str, provider: "ModelProvider | None" = None) -> None:
-        """切换模型（及可选的 provider）——显式接口，供 WingAgent 委托。"""
-        self._model = model
-        if provider is not None:
-            self._model_provider = provider
 
     async def run_turn(self) -> None:
         """处理一个 turn：drain inbox → merge → ReAct loop → TurnResult/Done。
@@ -188,21 +184,25 @@ class ReActLoop:
 
         Returns: True 需要继续下一轮，False 对话结束。
         """
+        # model / provider 从唯一存储（WingAgent）调用点取值
+        model = self._current_model()
+        provider = self._current_provider()
+
         # LLM 调用
         llm_result = await self._cm.get_messages_for_llm(
-            model=self._model,
-            model_provider=self._model_provider,
+            model=model,
+            model_provider=provider,
             current_tools=self._current_tools,
         )
-        assistant_msg = await self._llm.call(
+        assistant_msg = await self._call_llm(
+            provider=provider,
             messages=llm_result.messages,
-            model=self._model,
+            model=model,
             tools=llm_result.tools,
-            stream=self._stream,
         )
 
         # Emit turn-level AssistantTurnEvent
-        self._sink.assistant_turn(assistant_msg, self._model)
+        self._sink.assistant_turn(assistant_msg, model)
 
         # Update accumulator
         ctx.record_usage(assistant_msg.usage)
@@ -211,7 +211,7 @@ class ReActLoop:
         # 工具执行
         pending_tool_calls = assistant_msg.tool_calls or []
         try:
-            tc_results = await self._executor.execute(pending_tool_calls)
+            tc_results = await self._executor.execute(pending_tool_calls, model)
             interrupted_exc: InterruptedToolResults | None = None
         except InterruptedToolResults as e:
             tc_results = e.results
@@ -243,3 +243,58 @@ class ReActLoop:
                 self._cm.clear_reasoning()
             return False
         return True
+
+    async def _call_llm(
+        self,
+        provider: "ModelProvider",
+        messages: list[Message],
+        model: str,
+        tools: list[Tool] | None,
+    ) -> Message:
+        """消费 provider 的 chunk 流：发射流式事件，组装 assistant Message。
+
+        实际模型调用在 provider.generate()；本方法只消费流 + 发射事件 +
+        组装 Message。两个 provider 统一在最终 chunk 产出权威 content_blocks，
+        是 Message 组装的唯一依据；provider 未产出块数组（流未正常结束）
+        视为契约违反并报错——截断轮次 MUST NOT 作为成功 turn 提交，无扁平兜底。
+        """
+        content_blocks: list[ContentBlock] | None = None
+        last_usage: LLMUsage | None = None
+
+        async for chunk in provider.generate(
+            messages=messages,
+            model=model,
+            tools=tools,
+            stream=self._stream,
+        ):
+            if chunk.reasoning_content:
+                self._sink.llm_reasoning(chunk.reasoning_content)
+
+            if chunk.content:
+                self._sink.llm_text(chunk.content)
+
+            if chunk.content_blocks is not None:
+                # provider 产出的权威块数组（最终 chunk 携带）
+                content_blocks = chunk.content_blocks
+
+            if chunk.tool_call_deltas:
+                for delta in chunk.tool_call_deltas:
+                    self._sink.llm_tool_call_delta(
+                        tool_call_id=delta.id,
+                        tool_name=delta.name,
+                        args_fragment=delta.args_fragment,
+                        is_final=delta.is_final,
+                    )
+
+            if chunk.usage.completion_tokens or chunk.usage.prompt_tokens:
+                last_usage = chunk.usage
+                self._sink.llm_metrics(chunk.usage)
+
+        if content_blocks is None:
+            raise RuntimeError(
+                "provider did not emit authoritative content_blocks "
+                "(stream ended without a complete block array)"
+            )
+        return Message(
+            role="assistant", content_blocks=content_blocks, usage=last_usage
+        )

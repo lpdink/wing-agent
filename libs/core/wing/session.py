@@ -32,7 +32,6 @@ if TYPE_CHECKING:
     from wing.agent_template import AgentTemplate
     from wing.event.base import AgentInfo, SessionStatus
     from wing.gateway.protocol import AgentOverride
-    from wing.provider.base import ModelProvider
 
 
 class Session:
@@ -65,13 +64,6 @@ class Session:
 
         self._context_manager = context_manager
         self._agent = agent
-
-        # Provider 有界缓存：按 name 持有用过的 client，切回同名复用。
-        # 跨 provider 切模型不关闭旧 client（不打断在途生成）；client 仅在
-        # Session 释放时关闭（当前无释放机制，接受先不补）。
-        self._providers: dict[str, "ModelProvider"] = {
-            agent.model_provider.name: agent.model_provider
-        }
 
         # 将 workspace 注入 agent 作为 Bash 工具的 cwd。
         # 无论是新建（workspace 参数）还是磁盘恢复（metadata），
@@ -150,10 +142,12 @@ class Session:
         """
         from wing.agent import WingAgent
 
-        # 1. 干净关闭旧 agent（清空 inbox + cancel worker + await 完成）
-        old_provider = self._agent.model_provider
-        await self._agent.shutdown()
-        await old_provider.aclose()
+        # 1. 干净关闭旧 agent（清空 inbox + cancel worker + await 完成），
+        #    并关闭其拥有的全部 provider client（新 agent 从空表开始——
+        #    旧缓存连同已关闭的 client 一起清除，不会被后续切换交回）。
+        old_agent = self._agent
+        await old_agent.shutdown()
+        await old_agent.aclose_providers()
 
         # 2. 用同一个 TrackedList 构建新 ContextManager
         self._context_manager = ContextManager(
@@ -205,9 +199,9 @@ class Session:
         cm = self._context_manager
         agent = self._agent
 
-        # 1. model 覆盖
+        # 1. model 覆盖（provider 显式传当前实例——set_model 两参必填）
         if override.model is not None:
-            agent.set_model(override.model)
+            agent.set_model(override.model, agent.model_provider)
 
         # 2. system_prompt 替换（先替换，后追加，保证顺序正确）
         if override.system_prompt is not None:
@@ -423,30 +417,16 @@ class Session:
             self.set_workspace(workspace)
 
     def _apply_model(self, model: str, provider_name: str | None = None) -> None:
-        """切换模型，必要时切换 provider。
+        """切换模型，必要时切换 provider——委托 agent 的单一持有能力。
 
-        Session 按 provider name 有界持有 client：切回同名复用而非新建；
-        跨 provider 切模型**不关闭**旧 client（当前轮在旧 provider 上跑完，
-        下一轮起用新 provider），既不打断在途生成也不需要 gating。client 仅在
-        Session 释放时关闭（当前无释放机制，接受先不补）。
+        Session 不持有 provider：provider client 表归 WingAgent（按 name 有界
+        持有、切回同名复用、跨 provider 切模型不关闭旧 client）。
         """
-        new_provider = None
-        if provider_name is not None:
-            current_name = self.agent.model_provider.name
-            if provider_name != current_name:
-                new_provider = self._get_or_create_provider(provider_name)
-
-        self.agent.set_model(model, provider=new_provider)
-
-    def _get_or_create_provider(self, provider_name: str) -> "ModelProvider":
-        """按 name 获取缓存的 provider client，缺失时创建并缓存。"""
-        cached = self._providers.get(provider_name)
-        if cached is not None:
-            return cached
-        cfg = get_config().get_provider(provider_name)
-        provider = create_provider(cfg, session_id=self._session_id)
-        self._providers[provider_name] = provider
-        return provider
+        if provider_name is None or provider_name == self.agent.model_provider.name:
+            provider = self.agent.model_provider
+        else:
+            provider = self.agent.get_or_create_provider(provider_name)
+        self.agent.set_model(model, provider)
 
     def touch_last_interaction(self) -> None:
         """更新最后互动时间并持久化。"""

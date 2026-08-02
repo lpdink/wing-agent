@@ -2,7 +2,7 @@
 """WingAgent — 瘦壳：组装 + 对外接口 + worker 生命周期。
 
 实现 ToolContext Protocol，供工具侧通过窄接口访问 agent 能力。
-内部编排委托给 ReActLoop / ToolExecutor / LLMCaller / AgentEventSink / Inbox。
+内部编排委托给 ReActLoop / ToolExecutor / AgentEventSink / Inbox。
 """
 
 from __future__ import annotations
@@ -19,12 +19,12 @@ from wing.common.logger import log
 from wing.config import get_config
 from wing.event import AskEvent, EventTarget, WingEvent
 from wing.event_bus import event_bus
+from wing.provider import create_provider
 from wing.provider.base import ModelProvider
 from wing.schema import Tool
 
 from .event_sink import AgentEventSink
 from .inbox import Inbox
-from .llm_caller import LLMCaller
 from .react_loop import ReActLoop
 from .tool_executor import ToolExecutor, _current_tool_call_id
 
@@ -47,19 +47,25 @@ class WingAgent:
         self.context_manager = context_manager
         self.stream = stream
 
+        # Provider client 表：按 name 有界持有，切回同名复用（创建即拥有）。
+        # 跨 provider 切模型不关闭旧 client（不打断在途生成）；shutdown() 不动
+        # provider（Explorer 子 agent 共享父 provider）；aclose_providers() 仅在
+        # agent 整体废弃（模板切换）或 session 释放时调用。
+        self._providers: dict[str, ModelProvider] = {
+            model_provider.name: model_provider
+        }
+
         # ── 内部部件组装 ──
         self._inbox = Inbox()
         self._sink = AgentEventSink(session_id=self.session_id)
-        self._llm_caller = LLMCaller(model_provider, self._sink)
-        self._executor = ToolExecutor(self._sink, model)
+        self._executor = ToolExecutor(self._sink)
         self._loop = ReActLoop(
-            llm_caller=self._llm_caller,
             tool_executor=self._executor,
             sink=self._sink,
             context_manager=context_manager,
             inbox=self._inbox,
-            model=model,
-            model_provider=model_provider,
+            current_model=lambda: self.model,
+            current_provider=lambda: self.model_provider,
             current_tools=lambda: self.tools,
             stream=stream,
             set_working=self._set_working,
@@ -170,16 +176,51 @@ class WingAgent:
     def set_max_turns(self, max_turns: int | None) -> None:
         self._loop.max_turns = max_turns
 
-    def set_model(self, model: str, provider: ModelProvider | None = None) -> None:
-        """切换模型（及可选的 provider）。通过各部件显式接口委托，
-        并把新 model 名一致传播到所有持有 model 的部件（含 ToolExecutor，
-        使切模型后 tool_finished 事件带新模型名）。"""
+    def set_model(self, model: str, provider: ModelProvider) -> None:
+        """切换模型与 provider（两参必填）。
+
+        model 只由 WingAgent 持有（唯一存储）；provider 入表并换为活跃。
+        ReActLoop / ToolExecutor 不存储 model——经注入取值器与调用点传参
+        获取，无需传播。同 provider 内换 model 的调用方传当前 provider
+        实例——任何 OpenAI-compat 端点都能给出 provider，可选 + fallback
+        只引入隐式约定。
+        """
         self.model = model
-        self._loop.set_model(model, provider=provider)
-        if provider is not None:
-            self.model_provider = provider
-            self._llm_caller.set_provider(provider)
-        self._executor.model = model
+        self.model_provider = provider
+        self._providers[provider.name] = provider
+
+    def get_or_create_provider(self, name: str) -> ModelProvider:
+        """按 name 获取缓存的 provider client，缺失时创建并缓存（创建即拥有）。"""
+        cached = self._providers.get(name)
+        if cached is not None:
+            return cached
+        cfg = get_config().get_provider(name)
+        provider = create_provider(cfg, session_id=self.session_id)
+        self._providers[name] = provider
+        return provider
+
+    async def aclose_providers(self) -> None:
+        """关闭并清空 provider client 表。
+
+        仅由显式终结 provider 生命周期的一方调用：模板切换（旧 agent 整体
+        废弃）、未来的 session 释放。shutdown() 不做此事（Explorer 子 agent
+        共享父 agent 的 provider 实例，子 agent 关停不得影响父）。
+        """
+        providers = list(self._providers.values())
+        self._providers.clear()
+        for provider in providers:
+            await provider.aclose()
+
+    async def rebuild_providers(self) -> None:
+        """驱逐重建：关闭并驱逐表中全部 client，按新配置重建当前活跃 provider。
+
+        配置热加载入口——provider 客户端无"热刷新"语义（ModelProvider 不提供
+        reload），reload 即驱逐 + 重建。api_key / base_url / anthropic_version /
+        extra_body 等变更随重建自然生效；非活跃 name 下次用到时按新配置懒创建。
+        """
+        active_name = self.model_provider.name
+        await self.aclose_providers()
+        self.model_provider = self.get_or_create_provider(active_name)
 
     def set_reasoning_effort(self, effort: str | None) -> None:
         self.model_provider.reasoning_effort = effort

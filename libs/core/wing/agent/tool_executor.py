@@ -66,27 +66,22 @@ class InterruptedToolResults(Exception):
 class ToolExecutor:
     """工具并发执行器。"""
 
-    def __init__(self, sink: AgentEventSink, model: str) -> None:
+    def __init__(self, sink: AgentEventSink) -> None:
         self._sink = sink
-        self._model = model
         # 工具表由外部设置（set_tools 时更新）
         self._tools: dict[str, Any] = {}
-
-    @property
-    def model(self) -> str:
-        return self._model
-
-    @model.setter
-    def model(self, value: str) -> None:
-        self._model = value
 
     def set_tools(self, tools: dict[str, Any]) -> None:
         self._tools = tools
 
-    async def execute(self, pending_tool_calls: list[ToolCall]) -> list[Message]:
+    async def execute(
+        self, pending_tool_calls: list[ToolCall], model: str
+    ) -> list[Message]:
         """并发执行所有 tool calls，返回对应的 tool 消息列表。
 
-        中断时抛 InterruptedToolResults（携带真实/合成结果）。
+        model 由调用点传入（ReActLoop 从唯一存储取值）——ToolExecutor 不持有
+        model，仅用于 tool_finished 事件上报。中断时抛 InterruptedToolResults
+        （携带真实/合成结果）。
         """
         log.info(f"exec_tool_calls: executing {len(pending_tool_calls)} tool calls")
 
@@ -94,7 +89,7 @@ class ToolExecutor:
             log.info(f"exec_tool_calls: executing tool '{tc.name}' with id={tc.id}")
             token = _current_tool_call_id.set(tc.id)
             try:
-                result = await self._execute_one(tc)
+                result = await self._execute_one(tc, model)
                 result = _maybe_truncate(result)
             except Exception as e:
                 log.error(f"exec_tool_calls: unexpected error in tool '{tc.name}': {e}")
@@ -140,14 +135,14 @@ class ToolExecutor:
                     Message(role="tool", tool_call_id=tc.id, content=INTERRUPTED_RESULT)
                 )
                 self._sink.tool_finished(
-                    tc, INTERRUPTED_RESULT, success=False, model=self._model
+                    tc, INTERRUPTED_RESULT, success=False, model=model
                 )
 
             synthesized = sum(1 for item in raw if not isinstance(item, Message))
             log.info(f"exec_tool_calls: interrupted ({synthesized} synthesized)")
             raise InterruptedToolResults(results, original=cancel_err) from None
 
-    async def _execute_one(self, tc: ToolCall) -> str:
+    async def _execute_one(self, tc: ToolCall, model: str) -> str:
         """执行单个工具调用：hook → 参数过滤 → 调用。"""
         self._sink.tool_started(tc)
 
@@ -157,7 +152,7 @@ class ToolExecutor:
                 f"Error: unknown tool: {tc.name}, "
                 f"or you don't have permission to use it."
             )
-            self._sink.tool_finished(tc, result, success=False, model=self._model)
+            self._sink.tool_finished(tc, result, success=False, model=model)
             return result
 
         try:
@@ -197,15 +192,15 @@ class ToolExecutor:
             if modified_result is not None:
                 result_str = modified_result
 
-            self._sink.tool_finished(tc, result_str, success=True, model=self._model)
+            self._sink.tool_finished(tc, result_str, success=True, model=model)
             return result_str
         except ToolError as e:
             result = str(e)
-            self._sink.tool_finished(tc, result, success=False, model=self._model)
+            self._sink.tool_finished(tc, result, success=False, model=model)
             return result
         except Exception as e:
             result = f"Error executing tool '{tc.name}': {e}"
-            self._sink.tool_finished(tc, result, success=False, model=self._model)
+            self._sink.tool_finished(tc, result, success=False, model=model)
             return result
 
 
