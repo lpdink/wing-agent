@@ -46,6 +46,7 @@ from wing.store import FileSessionStore, MemorySessionStore, SessionStore
 if TYPE_CHECKING:
     from wing.agent_template import AgentTemplateManager
     from wing.gateway.protocol import AgentOverride
+    from wing.provider import ProviderModels
 
 
 # ============================================================
@@ -331,6 +332,17 @@ class WingRuntime:
         """
         session = self._require_session(session_id)
 
+        # Anthropic 协议的 thinking 由 extra_body 配置派生，运行时开关无语义——
+        # 明确拒绝（no-op 假装成功更糟：TUI 开关看似成功、下次状态刷新闪回）。
+        if (
+            thinking is not None
+            and session.agent.model_provider.protocol == "anthropic"
+        ):
+            raise ValueError(
+                "thinking is configured via extra_body for anthropic protocol "
+                "and cannot be toggled at runtime"
+            )
+
         # 解析 template（如有）
         template = None
         if agent is not None:
@@ -378,7 +390,17 @@ class WingRuntime:
     # 系统操作
     # ============================================================
 
-    def reload_system(self) -> ReloadResult:
+    async def list_models(self) -> list["ProviderModels"]:
+        """可用模型列表（跨 provider 聚合，按 provider 分组）。
+
+        转发 provider 包 registry（模块级持有所有 provider client；配置了
+        静态 models 的 provider 跳过请求）。gateway 路由经此获取，不感知 config。
+        """
+        from wing.provider import list_all_models
+
+        return await list_all_models()
+
+    async def reload_system(self) -> ReloadResult:
         """热重载全局配置、hooks、prompt commands、provider、skills & rules。
 
         config 加载失败时立即中止。其余项失败时继续。
@@ -416,14 +438,22 @@ class WingRuntime:
                 ReloadResultItem(name="prompt commands", ok=False, detail=str(e))
             )
 
-        # 4. Reload OpenAI provider — 所有 session
+        # 4. Rebuild provider clients — 所有 session（驱逐重建：关闭旧 client，
+        #    按新配置重建活跃 provider；配置变更随重建自然生效）。
+        #    模型列表 registry 一并重置（下次查询按新配置重建）。
         try:
-            all_changes: list[str] = []
+            from wing.provider import reset_registry
+
+            await reset_registry()
+            rebuilt = 0
             for session in self.sm.iter_sessions():
-                changes = session.agent.model_provider.reload()
-                all_changes.extend(changes)
-            detail = ", ".join(all_changes) if all_changes else "unchanged"
-            items.append(ReloadResultItem(name="provider", ok=True, detail=detail))
+                await session.agent.rebuild_providers()
+                rebuilt += 1
+            items.append(
+                ReloadResultItem(
+                    name="provider", ok=True, detail=f"rebuilt {rebuilt} session(s)"
+                )
+            )
         except Exception as e:
             items.append(ReloadResultItem(name="provider", ok=False, detail=str(e)))
 

@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Request
 
-from wing.config import get_config
 from wing.event import CommandInfo
 from wing.gateway.protocol import (
     AgentsResponse,
@@ -26,10 +25,8 @@ from wing.gateway.protocol import (
     ToolsListResponse,
 )
 from wing.magic_command.registry import magic_registry
-from wing.provider import create_provider
 
 if TYPE_CHECKING:
-    from wing.config import ProviderConfig
     from wing.gateway.server import GatewayServer
 
 router = APIRouter(tags=["system"])
@@ -66,31 +63,14 @@ async def list_commands(request: Request) -> CommandsResponse:
     summary="获取可用模型列表",
 )
 async def list_models(request: Request) -> ModelsResponse:
-    """并发请求所有已配置 provider，聚合返回结构化模型列表。"""
-    from wing.gateway.protocol import ModelEntry
+    """可用模型列表（按 provider 分组嵌套）——经 runtime 转发，路由不感知 config。"""
+    from wing.gateway.protocol import ProviderModels
 
-    config = get_config()
-
-    async def _query_one(provider_cfg: "ProviderConfig") -> list[ModelEntry]:
-        provider = create_provider(provider_cfg)
-        try:
-            models = await asyncio.wait_for(provider.list_models(), timeout=10.0)
-            return [ModelEntry(provider=provider_cfg.name, model=m) for m in models]
-        except Exception:
-            return []
-        finally:
-            await provider.aclose()
-
-    results = await asyncio.gather(
-        *[_query_one(p) for p in config.providers],
-        return_exceptions=True,
+    server = _get_server(request)
+    groups = await server.runtime.list_models()
+    return ModelsResponse(
+        providers=[ProviderModels(provider=g.provider, models=g.models) for g in groups]
     )
-    entries: list[ModelEntry] = []
-    for r in results:
-        if isinstance(r, list):
-            entries.extend(r)
-    entries.sort(key=lambda e: (e.provider, e.model))
-    return ModelsResponse(models=entries)
 
 
 @router.get(
@@ -116,7 +96,7 @@ async def list_agents(request: Request) -> AgentsResponse:
 async def reload_system(request: Request) -> ReloadResponse:
     """热重载 config.yaml、hooks、prompt commands、OpenAI provider、skills & rules。"""
     server = _get_server(request)
-    result = server.runtime.reload_system()
+    result = await server.runtime.reload_system()
     return ReloadResponse(
         ok=result.ok,
         results=[

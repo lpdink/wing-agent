@@ -337,11 +337,10 @@ async def update_session(
             status_code=400, detail="at least one update field is required"
         )
 
-    if body.provider is not None and body.model is None:
+    if (body.model is None) != (body.provider is None):
         raise HTTPException(
             status_code=400,
-            detail="provider change requires model: switching provider without "
-            "model has no product semantics",
+            detail="model and provider must be set together or both omitted",
         )
 
     try:

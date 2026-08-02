@@ -204,3 +204,24 @@ class TestRuntimeUpdateSessionEvents:
                     f"Event {type(event).__name__} has scope='global' — "
                     f"_emit_session_event should have set scope='session'"
                 )
+
+
+class TestAnthropicThinkingRejection:
+    """Anthropic 协议的 thinking 运行时更新拒绝（thinking 由 extra_body 派生）。"""
+
+    @pytest.mark.asyncio
+    async def test_anthropic_thinking_update_rejected(self, runtime, mock_session):
+        mock_session.agent.model_provider.protocol = "anthropic"
+        runtime.sm._sessions["test-session"] = mock_session
+
+        with pytest.raises(ValueError, match="extra_body"):
+            await runtime.update_session("test-session", thinking=True)
+        mock_session.update_state.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_openai_thinking_update_allowed(self, runtime, mock_session):
+        mock_session.agent.model_provider.protocol = "openai"
+        runtime.sm._sessions["test-session"] = mock_session
+
+        await runtime.update_session("test-session", thinking=True)
+        mock_session.update_state.assert_awaited_once()

@@ -521,18 +521,20 @@ class CommandsResponse(BaseModel):
     )
 
 
-class ModelEntry(BaseModel):
-    """单个可用模型条目。"""
+class ProviderModels(BaseModel):
+    """单个 provider 的可用模型（嵌套模型列表条目）。"""
 
     provider: str = Field(description="Provider 名称")
-    model: str = Field(description="模型名称")
+    models: list[str] = Field(
+        default_factory=list, description="该 provider 的模型名列表"
+    )
 
 
 class ModelsResponse(BaseModel):
-    """GET /api/models 响应——可用模型列表。"""
+    """GET /api/models 响应——可用模型列表（按 provider 分组嵌套）。"""
 
-    models: list[ModelEntry] = Field(
-        default_factory=list, description="可用模型列表（provider + model）"
+    providers: list[ProviderModels] = Field(
+        default_factory=list, description="按 provider 分组的模型列表"
     )
 
 

@@ -213,10 +213,13 @@ class Config(BaseModel):
                     raise ValueError(f"duplicate agent name: '{n}'")
                 seen_agents.add(n)
 
-        # agent.provider 引用存在性
+        # agent.provider 引用存在性；未指定时落定第一个 provider（解析阶段
+        # 消除可选性——解析产物 AgentTemplate 的 provider_name 为必填）
         provider_name_set = set(provider_names)
         for agent in self.agents:
-            if agent.provider is not None and agent.provider not in provider_name_set:
+            if agent.provider is None:
+                agent.provider = provider_names[0]
+            elif agent.provider not in provider_name_set:
                 raise ValueError(
                     f"agent '{agent.name}' references unknown provider '{agent.provider}'"
                 )
