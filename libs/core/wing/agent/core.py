@@ -170,14 +170,16 @@ class WingAgent:
     def set_max_turns(self, max_turns: int | None) -> None:
         self._loop.max_turns = max_turns
 
-    def set_model(self, model: str, provider: "ModelProvider | None" = None) -> None:
-        """切换模型（及可选的 provider）。同步更新所有内部引用。"""
+    def set_model(self, model: str, provider: ModelProvider | None = None) -> None:
+        """切换模型（及可选的 provider）。通过各部件显式接口委托，
+        并把新 model 名一致传播到所有持有 model 的部件（含 ToolExecutor，
+        使切模型后 tool_finished 事件带新模型名）。"""
         self.model = model
-        self._loop._model = model
+        self._loop.set_model(model, provider=provider)
         if provider is not None:
             self.model_provider = provider
-            self._llm_caller._provider = provider
-            self._loop._model_provider = provider
+            self._llm_caller.set_provider(provider)
+        self._executor.model = model
 
     def set_reasoning_effort(self, effort: str | None) -> None:
         self.model_provider.reasoning_effort = effort

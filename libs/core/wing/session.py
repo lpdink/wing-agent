@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from wing.agent_template import AgentTemplate
     from wing.event.base import AgentInfo, SessionStatus
     from wing.gateway.protocol import AgentOverride
+    from wing.provider.base import ModelProvider
 
 
 class Session:
@@ -64,6 +65,13 @@ class Session:
 
         self._context_manager = context_manager
         self._agent = agent
+
+        # Provider 有界缓存：按 name 持有用过的 client，切回同名复用。
+        # 跨 provider 切模型不关闭旧 client（不打断在途生成）；client 仅在
+        # Session 释放时关闭（当前无释放机制，接受先不补）。
+        self._providers: dict[str, "ModelProvider"] = {
+            agent.model_provider.name: agent.model_provider
+        }
 
         # 将 workspace 注入 agent 作为 Bash 工具的 cwd。
         # 无论是新建（workspace 参数）还是磁盘恢复（metadata），
@@ -415,21 +423,30 @@ class Session:
             self.set_workspace(workspace)
 
     def _apply_model(self, model: str, provider_name: str | None = None) -> None:
-        """切换模型，必要时切换 provider。"""
+        """切换模型，必要时切换 provider。
+
+        Session 按 provider name 有界持有 client：切回同名复用而非新建；
+        跨 provider 切模型**不关闭**旧 client（当前轮在旧 provider 上跑完，
+        下一轮起用新 provider），既不打断在途生成也不需要 gating。client 仅在
+        Session 释放时关闭（当前无释放机制，接受先不补）。
+        """
         new_provider = None
         if provider_name is not None:
             current_name = self.agent.model_provider.name
             if provider_name != current_name:
-                cfg = get_config().get_provider(provider_name)
-                new_provider = create_provider(cfg, session_id=self._session_id)
+                new_provider = self._get_or_create_provider(provider_name)
 
-        old_provider = self.agent.model_provider
         self.agent.set_model(model, provider=new_provider)
-        # 关闭旧 provider（fire-and-forget）
-        if new_provider is not None and old_provider is not new_provider:
-            import asyncio
 
-            asyncio.ensure_future(old_provider.aclose())
+    def _get_or_create_provider(self, provider_name: str) -> "ModelProvider":
+        """按 name 获取缓存的 provider client，缺失时创建并缓存。"""
+        cached = self._providers.get(provider_name)
+        if cached is not None:
+            return cached
+        cfg = get_config().get_provider(provider_name)
+        provider = create_provider(cfg, session_id=self._session_id)
+        self._providers[provider_name] = provider
+        return provider
 
     def touch_last_interaction(self) -> None:
         """更新最后互动时间并持久化。"""

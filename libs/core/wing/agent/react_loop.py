@@ -92,6 +92,12 @@ class ReActLoop:
         self.max_turns: int | None = None
         self.steer: bool = get_config().steer
 
+    def set_model(self, model: str, provider: "ModelProvider | None" = None) -> None:
+        """切换模型（及可选的 provider）——显式接口，供 WingAgent 委托。"""
+        self._model = model
+        if provider is not None:
+            self._model_provider = provider
+
     async def run_turn(self) -> None:
         """处理一个 turn：drain inbox → merge → ReAct loop → TurnResult/Done。
 
