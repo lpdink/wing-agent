@@ -25,7 +25,6 @@ from wing.gateway.protocol import (
     ToolsListResponse,
 )
 from wing.magic_command.registry import magic_registry
-from wing.openai_provider import OpenAIProvider
 
 if TYPE_CHECKING:
     from wing.gateway.server import GatewayServer
@@ -64,13 +63,14 @@ async def list_commands(request: Request) -> CommandsResponse:
     summary="获取可用模型列表",
 )
 async def list_models(request: Request) -> ModelsResponse:
-    """获取当前配置下可用的 LLM 模型列表。"""
-    try:
-        provider = OpenAIProvider()
-        models = await asyncio.wait_for(provider.list_models(), timeout=10.0)
-    except Exception:
-        models = []
-    return ModelsResponse(models=models)
+    """可用模型列表（按 provider 分组嵌套）——经 runtime 转发，路由不感知 config。"""
+    from wing.gateway.protocol import ProviderModels
+
+    server = _get_server(request)
+    groups = await server.runtime.list_models()
+    return ModelsResponse(
+        providers=[ProviderModels(provider=g.provider, models=g.models) for g in groups]
+    )
 
 
 @router.get(
@@ -96,7 +96,7 @@ async def list_agents(request: Request) -> AgentsResponse:
 async def reload_system(request: Request) -> ReloadResponse:
     """热重载 config.yaml、hooks、prompt commands、OpenAI provider、skills & rules。"""
     server = _get_server(request)
-    result = server.runtime.reload_system()
+    result = await server.runtime.reload_system()
     return ReloadResponse(
         ok=result.ok,
         results=[

@@ -46,6 +46,7 @@ from wing.store import FileSessionStore, MemorySessionStore, SessionStore
 if TYPE_CHECKING:
     from wing.agent_template import AgentTemplateManager
     from wing.gateway.protocol import AgentOverride
+    from wing.provider import ProviderModels
 
 
 # ============================================================
@@ -312,6 +313,7 @@ class WingRuntime:
         session_id: str,
         *,
         model: str | None = None,
+        provider: str | None = None,
         agent: str | None = None,
         title: str | None = None,
         thinking: bool | None = None,
@@ -343,6 +345,7 @@ class WingRuntime:
         # 委托给 Session 执行状态变更
         await session.update_state(
             model=model,
+            provider_name=provider,
             template=template,
             title=title,
             thinking=thinking,
@@ -376,7 +379,17 @@ class WingRuntime:
     # 系统操作
     # ============================================================
 
-    def reload_system(self) -> ReloadResult:
+    async def list_models(self) -> list["ProviderModels"]:
+        """可用模型列表（跨 provider 聚合，按 provider 分组）。
+
+        转发 provider 包 registry（模块级持有所有 provider client；配置了
+        静态 models 的 provider 跳过请求）。gateway 路由经此获取，不感知 config。
+        """
+        from wing.provider import list_all_models
+
+        return await list_all_models()
+
+    async def reload_system(self) -> ReloadResult:
         """热重载全局配置、hooks、prompt commands、provider、skills & rules。
 
         config 加载失败时立即中止。其余项失败时继续。
@@ -414,14 +427,29 @@ class WingRuntime:
                 ReloadResultItem(name="prompt commands", ok=False, detail=str(e))
             )
 
-        # 4. Reload OpenAI provider — 所有 session
+        # 4. Rebuild provider clients — 所有 session（驱逐重建：按新配置重建
+        #    活跃 provider 后关闭旧 client；配置变更随重建自然生效）。
+        #    模型列表 registry 一并重置（下次查询按新配置重建）。
+        #    单 session 失败不阻断其余 session（否则一个坏 session 会让其他
+        #    session 悄悄留着旧凭据——正是驱逐重建要修的 bug）。
         try:
-            all_changes: list[str] = []
+            from wing.provider import reset_registry
+
+            await reset_registry()
+            rebuilt = 0
+            failures: list[str] = []
             for session in self.sm.iter_sessions():
-                changes = session.agent.model_provider.reload()
-                all_changes.extend(changes)
-            detail = ", ".join(all_changes) if all_changes else "unchanged"
-            items.append(ReloadResultItem(name="provider", ok=True, detail=detail))
+                try:
+                    await session.agent.rebuild_providers()
+                    rebuilt += 1
+                except Exception as e:
+                    failures.append(f"{session.session_id}: {e}")
+            detail = f"rebuilt {rebuilt} session(s)"
+            if failures:
+                detail += "; failed: " + ", ".join(failures)
+            items.append(
+                ReloadResultItem(name="provider", ok=not failures, detail=detail)
+            )
         except Exception as e:
             items.append(ReloadResultItem(name="provider", ok=False, detail=str(e)))
 

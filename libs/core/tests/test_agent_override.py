@@ -325,7 +325,9 @@ class TestMaxTurnsConfig:
         from wing.agent_template import AgentTemplate
         from wing.config import AgentConfig
 
-        config = AgentConfig(name="test", model="gpt-4", max_turns=30)
+        config = AgentConfig(
+            name="test", model="gpt-4", provider="default", max_turns=30
+        )
         template = AgentTemplate.from_config(config)
         assert template.max_turns == 30
 
@@ -334,6 +336,7 @@ class TestMaxTurnsConfig:
         from wing.agent_template import AgentTemplate
         from wing.config import AgentConfig
 
-        config = AgentConfig(name="test", model="gpt-4")
+        # provider 绑定在 Config 解析阶段落定（此处模拟解析后的 AgentConfig）
+        config = AgentConfig(name="test", model="gpt-4", provider="default")
         template = AgentTemplate.from_config(config)
         assert template.max_turns is None

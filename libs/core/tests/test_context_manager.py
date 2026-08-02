@@ -82,12 +82,19 @@ class TestBasicMessageManagement:
 
     @pytest.mark.asyncio
     async def test_get_messages_for_llm_includes_system_prompt(self, tmp_dir):
-        from wing.openai_provider import OpenAIProvider
+        from wing.provider.base import ModelProvider
 
         cm = _make_cm(tmp_dir)
         cm.add_message(Message(role="user", content="hello"))
 
-        prov = OpenAIProvider.__new__(OpenAIProvider)  # bare instance for type
+        class _StubProvider(ModelProvider):
+            async def generate(self, messages, model, tools=None, stream=False):
+                yield  # pragma: no cover
+
+            async def list_models(self):
+                return []
+
+        prov = _StubProvider()
         llm_msgs = (
             await cm.get_messages_for_llm(
                 model="test", model_provider=prov, current_tools=lambda: []

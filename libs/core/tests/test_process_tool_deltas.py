@@ -1,4 +1,4 @@
-# tests/test_process_tool_deltas.py — OpenAIProvider._process_tool_deltas 单元测试
+# tests/test_process_tool_deltas.py — OpenAICompatProvider._process_tool_deltas 单元测试
 
 """
 测试 _process_tool_deltas 的纯函数行为（碎片透传语义）：
@@ -9,40 +9,44 @@
 - 空 id 防御
 """
 
-from types import SimpleNamespace
-
-from wing.openai_provider import OpenAIProvider
+from wing.provider.openai_compat import OpenAICompatProvider
 from wing.schema import PendingCall
 
 
 def _make_choice(tool_calls=None, finish_reason=None):
-    """构造模拟 Choice 对象。"""
-    delta = SimpleNamespace(tool_calls=tool_calls, content=None)
-    choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
-    return choice
+    """构造模拟 choice dict。"""
+    delta = {}
+    if tool_calls is not None:
+        delta["tool_calls"] = tool_calls
+    return {"delta": delta, "finish_reason": finish_reason}
 
 
 def _make_tc(index, id=None, name=None, arguments=None):
-    """构造模拟 tool_call delta 对象。"""
-    function = None
-    if name or arguments:
-        function = SimpleNamespace(name=name, arguments=arguments)
-    return SimpleNamespace(index=index, id=id, function=function)
+    """构造模拟 tool_call delta dict。"""
+    tc = {"index": index}
+    if id is not None:
+        tc["id"] = id
+    function = {}
+    if name:
+        function["name"] = name
+    if arguments:
+        function["arguments"] = arguments
+    if function:
+        tc["function"] = function
+    return tc
 
 
 class TestProcessToolDeltas:
     """_process_tool_deltas 纯函数测试。"""
 
     def setup_method(self):
-        # 创建一个最小的 provider 实例（只需要调用 _process_tool_deltas）
-        # 使用 object.__new__ 跳过 __init__（避免需要 config）
-        self.provider = object.__new__(OpenAIProvider)
+        pass
 
     def test_no_tool_calls_returns_none(self):
         """无 tool_calls 的 chunk 不产出 delta。"""
         pending = {}
         choice = _make_choice(tool_calls=None)
-        finals, deltas = self.provider._process_tool_deltas(choice, pending)
+        finals, deltas = OpenAICompatProvider._process_tool_deltas(choice, pending)
         assert finals is None
         assert deltas is None
 
@@ -50,7 +54,7 @@ class TestProcessToolDeltas:
         """空 tool_calls 列表不产出 delta。"""
         pending = {}
         choice = _make_choice(tool_calls=[])
-        finals, deltas = self.provider._process_tool_deltas(choice, pending)
+        finals, deltas = OpenAICompatProvider._process_tool_deltas(choice, pending)
         assert finals is None
         assert deltas is None
 
@@ -59,7 +63,7 @@ class TestProcessToolDeltas:
         pending = {}
         tc = _make_tc(index=0, id="call_1", name="Bash")
         choice = _make_choice(tool_calls=[tc])
-        finals, deltas = self.provider._process_tool_deltas(choice, pending)
+        finals, deltas = OpenAICompatProvider._process_tool_deltas(choice, pending)
         assert finals is None
         assert deltas is None
         # pending 已注册
@@ -74,7 +78,7 @@ class TestProcessToolDeltas:
         }
         tc = _make_tc(index=0, arguments='mand": "ls"}')
         choice = _make_choice(tool_calls=[tc])
-        finals, deltas = self.provider._process_tool_deltas(choice, pending)
+        finals, deltas = OpenAICompatProvider._process_tool_deltas(choice, pending)
         assert finals is None
         assert deltas is not None
         assert len(deltas) == 1
@@ -93,19 +97,19 @@ class TestProcessToolDeltas:
         choice1 = _make_choice(
             tool_calls=[_make_tc(0, id="c1", name="Bash", arguments='{"a": "')]
         )
-        _, deltas1 = self.provider._process_tool_deltas(choice1, pending)
+        _, deltas1 = OpenAICompatProvider._process_tool_deltas(choice1, pending)
         assert deltas1 is not None
         assert deltas1[0].args_fragment == '{"a": "'
 
         # chunk 2：仅增量
         choice2 = _make_choice(tool_calls=[_make_tc(0, arguments="1")])
-        _, deltas2 = self.provider._process_tool_deltas(choice2, pending)
+        _, deltas2 = OpenAICompatProvider._process_tool_deltas(choice2, pending)
         assert deltas2 is not None
         assert deltas2[0].args_fragment == "1"
 
         # chunk 3：仅增量
         choice3 = _make_choice(tool_calls=[_make_tc(0, arguments='"}')])
-        _, deltas3 = self.provider._process_tool_deltas(choice3, pending)
+        _, deltas3 = OpenAICompatProvider._process_tool_deltas(choice3, pending)
         assert deltas3 is not None
         assert deltas3[0].args_fragment == '"}'
 
@@ -129,7 +133,7 @@ class TestProcessToolDeltas:
         }
         tc = _make_tc(index=0, name="Bash")  # 只有 name，无 arguments
         choice = _make_choice(tool_calls=[tc])
-        finals, deltas = self.provider._process_tool_deltas(choice, pending)
+        finals, deltas = OpenAICompatProvider._process_tool_deltas(choice, pending)
         assert finals is None
         assert deltas is None
 
@@ -140,7 +144,7 @@ class TestProcessToolDeltas:
         }
         choice = _make_choice(tool_calls=[], finish_reason="tool_calls")
         # 空 tool_calls 列表 → has_tool_delta=False → 不产出 delta
-        finals, deltas = self.provider._process_tool_deltas(choice, pending)
+        finals, deltas = OpenAICompatProvider._process_tool_deltas(choice, pending)
         assert finals is not None
         assert len(finals) == 1
         assert finals[0].id == "call_1"
@@ -158,7 +162,7 @@ class TestProcessToolDeltas:
         }
         tc = _make_tc(index=0, arguments='"}')
         choice = _make_choice(tool_calls=[tc], finish_reason="tool_calls")
-        finals, deltas = self.provider._process_tool_deltas(choice, pending)
+        finals, deltas = OpenAICompatProvider._process_tool_deltas(choice, pending)
         assert finals is not None
         assert finals[0].arguments == {"path": "/tmp"}
         assert deltas is not None
@@ -172,7 +176,7 @@ class TestProcessToolDeltas:
         pending = {}
         # chunk 1：只有 args，无 id → 缓冲但不 emit
         choice1 = _make_choice(tool_calls=[_make_tc(0, arguments='{"command": ')])
-        _, deltas1 = self.provider._process_tool_deltas(choice1, pending)
+        _, deltas1 = OpenAICompatProvider._process_tool_deltas(choice1, pending)
         assert deltas1 is None
         assert pending[0].emitted_len == 0
 
@@ -180,7 +184,7 @@ class TestProcessToolDeltas:
         choice2 = _make_choice(
             tool_calls=[_make_tc(0, id="late_id", name="Bash", arguments='"ls"}')]
         )
-        _, deltas2 = self.provider._process_tool_deltas(choice2, pending)
+        _, deltas2 = OpenAICompatProvider._process_tool_deltas(choice2, pending)
         assert deltas2 is not None
         assert deltas2[0].id == "late_id"
         assert deltas2[0].args_fragment == '{"command": "ls"}'
@@ -190,7 +194,7 @@ class TestProcessToolDeltas:
         pending = {0: PendingCall(id="", name="Bash", args_buffer='{"command": "ls"}')}
         tc = _make_tc(index=0, arguments=" ")
         choice = _make_choice(tool_calls=[tc])
-        finals, deltas = self.provider._process_tool_deltas(choice, pending)
+        finals, deltas = OpenAICompatProvider._process_tool_deltas(choice, pending)
         assert finals is None
         assert deltas is None
         # 游标不前进，id 一旦到达仍可 flush 全量
@@ -207,7 +211,7 @@ class TestProcessToolDeltas:
         tc0 = _make_tc(index=0, arguments="}")
         tc1 = _make_tc(index=1, arguments='s"}')
         choice = _make_choice(tool_calls=[tc0, tc1])
-        finals, deltas = self.provider._process_tool_deltas(choice, pending)
+        finals, deltas = OpenAICompatProvider._process_tool_deltas(choice, pending)
         assert finals is None
         assert deltas is not None
         assert len(deltas) == 2
@@ -224,7 +228,7 @@ class TestProcessToolDeltas:
         }
         # 模拟一个只有 content 的 chunk（tool_calls=None）
         choice = _make_choice(tool_calls=None)
-        finals, deltas = self.provider._process_tool_deltas(choice, pending)
+        finals, deltas = OpenAICompatProvider._process_tool_deltas(choice, pending)
         assert finals is None
         assert deltas is None
         # pending 不受影响

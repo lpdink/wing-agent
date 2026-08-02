@@ -7,7 +7,7 @@
 
 import re
 
-from wing.openai_provider import OpenAIProvider
+from wing.provider.base import ModelProvider
 
 from .schema import LLMResponse, Message
 
@@ -158,7 +158,7 @@ class Compactor:
         self,
         full_messages: list[Message],
         model: str,
-        model_provider: OpenAIProvider,
+        model_provider: ModelProvider,
         tools: list | None = None,
     ) -> LLMResponse:
         """执行压缩。

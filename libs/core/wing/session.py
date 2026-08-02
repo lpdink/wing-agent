@@ -21,8 +21,9 @@ from typing import TYPE_CHECKING
 
 from wing.common.logger import log
 from wing.common.tracked_list import TrackedList
+from wing.config import get_config
 from wing.context_manager import ContextManager
-from wing.openai_provider import OpenAIProvider
+from wing.provider import create_provider
 from wing.schema import Message
 from wing.store import SessionMetadata, SessionStore
 
@@ -106,9 +107,10 @@ class Session:
         )
 
         # 创建 WingAgent
+        provider_cfg = get_config().get_provider(template.provider_name)
         agent = WingAgent(
             model=template.model,
-            model_provider=OpenAIProvider(session_id=session_id),
+            model_provider=create_provider(provider_cfg, session_id=session_id),
             stream=True,
             context_manager=context_manager,
             tools=template.resolved_tools,
@@ -140,8 +142,12 @@ class Session:
         """
         from wing.agent import WingAgent
 
-        # 1. 干净关闭旧 agent（清空 inbox + cancel worker + await 完成）
-        await self._agent.shutdown()
+        # 1. 干净关闭旧 agent（清空 inbox + cancel worker + await 完成），
+        #    并关闭其拥有的全部 provider client（新 agent 从空表开始——
+        #    旧缓存连同已关闭的 client 一起清除，不会被后续切换交回）。
+        old_agent = self._agent
+        await old_agent.shutdown()
+        await old_agent.aclose_providers()
 
         # 2. 用同一个 TrackedList 构建新 ContextManager
         self._context_manager = ContextManager(
@@ -155,9 +161,10 @@ class Session:
         )
 
         # 3. 创建新 Agent
+        provider_cfg = get_config().get_provider(template.provider_name)
         self._agent = WingAgent(
             model=template.model,
-            model_provider=OpenAIProvider(session_id=self._session_id),
+            model_provider=create_provider(provider_cfg, session_id=self._session_id),
             stream=True,
             context_manager=self._context_manager,
             tools=template.resolved_tools,
@@ -192,9 +199,9 @@ class Session:
         cm = self._context_manager
         agent = self._agent
 
-        # 1. model 覆盖
+        # 1. model 覆盖（provider 显式传当前实例——set_model 两参必填）
         if override.model is not None:
-            agent.model = override.model
+            agent.set_model(override.model, agent.model_provider)
 
         # 2. system_prompt 替换（先替换，后追加，保证顺序正确）
         if override.system_prompt is not None:
@@ -355,6 +362,7 @@ class Session:
         self,
         *,
         model: str | None = None,
+        provider_name: str | None = None,
         template: "AgentTemplate | None" = None,
         title: str | None = None,
         thinking: bool | None = None,
@@ -366,7 +374,8 @@ class Session:
         """更新 session 状态。按 template → model → tools → title → thinking → effort → yolo → workspace 顺序执行。
 
         Args:
-            model: 切换模型
+            model: 切换模型（裸模型名）
+            provider_name: 切换 provider（配合 model 使用）
             template: 切换 agent 模板（None 表示不切换）
             title: 设置标题
             thinking: 开关 thinking 模式
@@ -387,7 +396,7 @@ class Session:
             await self.switch_template(template)
 
         if model is not None:
-            self.agent.model = model
+            self._apply_model(model, provider_name)
 
         if tools is not None:
             self.agent.set_tools(tools)
@@ -406,6 +415,18 @@ class Session:
 
         if workspace is not None:
             self.set_workspace(workspace)
+
+    def _apply_model(self, model: str, provider_name: str | None = None) -> None:
+        """切换模型，必要时切换 provider——委托 agent 的单一持有能力。
+
+        Session 不持有 provider：provider client 表归 WingAgent（按 name 有界
+        持有、切回同名复用、跨 provider 切模型不关闭旧 client）。
+        """
+        if provider_name is None or provider_name == self.agent.model_provider.name:
+            provider = self.agent.model_provider
+        else:
+            provider = self.agent.get_or_create_provider(provider_name)
+        self.agent.set_model(model, provider)
 
     def touch_last_interaction(self) -> None:
         """更新最后互动时间并持久化。"""

@@ -14,8 +14,8 @@ import frontmatter
 from .common.logger import log
 from .common.tracked_list import TrackedList
 from .compactor import Compactor
-from .openai_provider import OpenAIProvider
-from .schema import AgentSkill, LLMUsage, Message, Tool
+from .provider.base import ModelProvider
+from .schema import AgentSkill, ContentBlock, LLMUsage, Message, ThinkingBlock, Tool
 
 
 @dataclass
@@ -370,7 +370,7 @@ More detail in: "{dir}/SKILL.md" """
     async def get_messages_for_llm(
         self,
         model: str,
-        model_provider: OpenAIProvider,
+        model_provider: ModelProvider,
         current_tools: Callable[[], list[Tool]],
     ) -> LLMMessagesResult:
         """Get messages ready for LLM API call.
@@ -385,7 +385,7 @@ More detail in: "{dir}/SKILL.md" """
 
         Args:
             model: 主 model 名称（触发 compact 时透传给 provider）。
-            model_provider: OpenAIProvider 实例（触发 compact 时使用）。
+            model_provider: ModelProvider 实例（触发 compact 时使用）。
             current_tools: 零参 callable，返回 Agent 当前可执行工具。
                 compact sync 在 await 结束后求值，避免并发切换导致过期快照。
         """
@@ -453,7 +453,7 @@ More detail in: "{dir}/SKILL.md" """
         self,
         msgs: list[Message],
         model: str,
-        model_provider: OpenAIProvider,
+        model_provider: ModelProvider,
     ) -> None:
         """启动后台异步 compact task。"""
         preserve_last = msgs[-1].role == "user" if msgs else False
@@ -542,6 +542,7 @@ More detail in: "{dir}/SKILL.md" """
                 role=msg.role,
                 content=msg.content,
                 reasoning_content=msg.reasoning_content,
+                content_blocks=msg.content_blocks,
                 tool_calls=msg.tool_calls,
                 tool_call_id=msg.tool_call_id,
                 usage=msg.usage,
@@ -584,7 +585,7 @@ More detail in: "{dir}/SKILL.md" """
     async def do_manual_compact(
         self,
         model: str,
-        model_provider: OpenAIProvider,
+        model_provider: ModelProvider,
         current_tools: Callable[[], list[Tool]],
     ) -> tuple[int, int]:
         """手动压缩上下文。
@@ -595,7 +596,7 @@ More detail in: "{dir}/SKILL.md" """
 
         Args:
             model: 主 model 名称
-            model_provider: OpenAIProvider 实例
+            model_provider: ModelProvider 实例
             current_tools: 零参 callable，返回 Agent 当前可执行工具
 
         Returns:
@@ -761,6 +762,7 @@ More detail in: "{dir}/SKILL.md" """
                 role=parent_msg.role,
                 content=parent_msg.content,
                 reasoning_content=parent_msg.reasoning_content,
+                content_blocks=parent_msg.content_blocks,
                 tool_calls=parent_msg.tool_calls,
                 tool_call_id=parent_msg.tool_call_id,
                 parent_uuid=parent_msg.parent_uuid,  # 祖父 uuid
@@ -827,5 +829,10 @@ More detail in: "{dir}/SKILL.md" """
 
     def clear_reasoning(self) -> None:
         for msg in self._messages:
-            if isinstance(msg, Message):
-                msg.reasoning_content = ""
+            if isinstance(msg, Message) and msg.content_blocks:
+                # 只修改存储（块数组）：剥离 thinking 块，派生的
+                # reasoning_content 自然为空。
+                remaining: list[ContentBlock] = [
+                    b for b in msg.content_blocks if not isinstance(b, ThinkingBlock)
+                ]
+                msg.content_blocks = remaining or None

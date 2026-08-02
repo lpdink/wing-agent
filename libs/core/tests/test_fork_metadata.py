@@ -143,7 +143,7 @@ class TestResumeTemplate:
         store = FileSessionStore(tmp_path / "sessions")
         sm = SessionManager({"file": store})
         # 注入第二个模板
-        coder = AgentTemplate(name="coder", model="gpt-4")
+        coder = AgentTemplate(name="coder", model="gpt-4", provider_name="default")
         sm._template_manager._templates["coder"] = coder
 
         session = sm.create_session(template_name="coder")
@@ -164,7 +164,7 @@ class TestResumeTemplate:
 
         store = FileSessionStore(tmp_path / "sessions")
         sm = SessionManager({"file": store})
-        coder = AgentTemplate(name="coder", model="gpt-4")
+        coder = AgentTemplate(name="coder", model="gpt-4", provider_name="default")
         sm._template_manager._templates["coder"] = coder
 
         session = sm.create_session(template_name="coder")

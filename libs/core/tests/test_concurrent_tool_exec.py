@@ -87,7 +87,7 @@ class TestConcurrentExecution:
         ]
 
         start = time.monotonic()
-        results = await agent._executor.execute(tool_calls)
+        results = await agent._executor.execute(tool_calls, agent.model)
         elapsed = time.monotonic() - start
 
         # 串行需要 ~0.9s，并发应 ~0.3s；用 0.6s 作为阈值留足余量
@@ -133,7 +133,7 @@ class TestResultOrderPreservation:
             _make_tool_call("call-fast-2", "Fast"),
         ]
 
-        results = await agent._executor.execute(tool_calls)
+        results = await agent._executor.execute(tool_calls, agent.model)
 
         assert len(results) == 3
         # 顺序必须与输入一致：Slow, Fast, Fast
@@ -175,7 +175,7 @@ class TestErrorIsolation:
             _make_tool_call("call-good-2", "Good"),
         ]
 
-        results = await agent._executor.execute(tool_calls)
+        results = await agent._executor.execute(tool_calls, agent.model)
 
         assert len(results) == 3
         # 第一个 Good 正常
@@ -208,7 +208,7 @@ class TestErrorIsolation:
             _make_tool_call("call-unknown", "NonExistent"),
         ]
 
-        results = await agent._executor.execute(tool_calls)
+        results = await agent._executor.execute(tool_calls, agent.model)
 
         assert len(results) == 2
         assert results[0].content == "good-result"
@@ -238,7 +238,7 @@ class TestSingleToolCall:
 
         tool_calls = [_make_tool_call("call-1", "Simple", {"input": "hello"})]
 
-        results = await agent._executor.execute(tool_calls)
+        results = await agent._executor.execute(tool_calls, agent.model)
 
         assert len(results) == 1
         assert results[0].tool_call_id == "call-1"
@@ -253,7 +253,7 @@ class TestSingleToolCall:
         session = runtime.create_session()
         agent = session.agent
 
-        results = await agent._executor.execute([])
+        results = await agent._executor.execute([], agent.model)
 
         assert results == []
 

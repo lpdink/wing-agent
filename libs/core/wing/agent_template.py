@@ -32,6 +32,10 @@ class AgentTemplate(BaseModel):
 
     name: str
     model: str
+    provider_name: str
+    """绑定的 provider 名称（对应 providers[].name）。解析后必填——
+    "未指定时默认第一个 provider" 在配置解析阶段落定（Config 校验），
+    解析产物不携带可选性。"""
     system_prompt: str = ""
     resolved_tools: list[Tool] = Field(default_factory=list)
     skills_patterns: list[str] = Field(default_factory=list)
@@ -64,6 +68,7 @@ class AgentTemplate(BaseModel):
         return cls(
             name=name or agent.model,
             model=agent.model,
+            provider_name=agent.model_provider.name,
             system_prompt=cm.setin_system_prompt,
             resolved_tools=unbound_tools,
             skills_patterns=list(cm._skills_patterns)
@@ -83,6 +88,14 @@ class AgentTemplate(BaseModel):
     @classmethod
     def from_config(cls, agent_config: AgentConfig) -> "AgentTemplate":
         """从 AgentConfig 构建 AgentTemplate。"""
+        # provider 绑定在配置解析阶段落定（Config 校验填充默认第一个
+        # provider）；此处不接受 None（解析产物不携带可选性）。
+        if agent_config.provider is None:
+            raise ValueError(
+                f"agent '{agent_config.name}': provider must be resolved "
+                "before template construction"
+            )
+
         # 解析 tools（walrus 避免双重查询）
         resolved_tools = [
             t
@@ -98,6 +111,7 @@ class AgentTemplate(BaseModel):
         return cls(
             name=agent_config.name,
             model=agent_config.model,
+            provider_name=agent_config.provider,
             system_prompt=agent_config.system_prompt,
             resolved_tools=resolved_tools,
             skills_patterns=list(agent_config.skills),

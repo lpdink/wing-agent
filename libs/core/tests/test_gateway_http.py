@@ -631,17 +631,22 @@ class TestSessionUpdate:
     """POST /api/session/update 测试。"""
 
     def test_update_model(self, client: TestClient, mock_runtime):
-        """切换模型。"""
+        """切换模型（model 与 provider 同时设置）。"""
         mock_runtime.update_session = AsyncMock()
         resp = client.post(
             "/api/session/update",
-            json={"session_id": "test-id", "model": "gpt-4o-mini"},
+            json={
+                "session_id": "test-id",
+                "model": "gpt-4o-mini",
+                "provider": "default",
+            },
         )
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
         mock_runtime.update_session.assert_called_once_with(
             session_id="test-id",
             model="gpt-4o-mini",
+            provider="default",
             agent=None,
             title=None,
             thinking=None,
@@ -753,6 +758,7 @@ class TestSessionUpdate:
                 "session_id": "test-id",
                 "agent": "coder",
                 "model": "gpt-4o-mini",
+                "provider": "default",
                 "title": "new title",
                 "thinking": True,
                 "yolo": True,
@@ -768,6 +774,38 @@ class TestSessionUpdate:
         )
         assert resp.status_code == 400
 
+    def test_update_provider_only_rejected(self, client: TestClient, mock_runtime):
+        """只给 provider 不给 model 返回 400（对称契约），报错只陈述契约。"""
+        mock_runtime.update_session = AsyncMock()
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "provider": "claude"},
+        )
+        assert resp.status_code == 400
+        assert "set together or both omitted" in resp.json()["detail"]
+        mock_runtime.update_session.assert_not_awaited()
+
+    def test_update_model_only_rejected(self, client: TestClient, mock_runtime):
+        """只给 model 不给 provider 同样返回 400（对称契约）。"""
+        mock_runtime.update_session = AsyncMock()
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "model": "gpt-4o"},
+        )
+        assert resp.status_code == 400
+        assert "set together or both omitted" in resp.json()["detail"]
+        mock_runtime.update_session.assert_not_awaited()
+
+    def test_update_provider_with_model_ok(self, client: TestClient, mock_runtime):
+        """provider 伴随 model 时正常处理。"""
+        mock_runtime.update_session = AsyncMock()
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "provider": "claude", "model": "claude-x"},
+        )
+        assert resp.status_code == 200
+        mock_runtime.update_session.assert_awaited_once()
+
     def test_update_session_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
         mock_runtime.update_session = AsyncMock(
@@ -775,7 +813,7 @@ class TestSessionUpdate:
         )
         resp = client.post(
             "/api/session/update",
-            json={"session_id": "xxx", "model": "gpt-4o"},
+            json={"session_id": "xxx", "model": "gpt-4o", "provider": "default"},
         )
         assert resp.status_code == 404
 
@@ -791,6 +829,7 @@ class TestSessionUpdate:
         mock_runtime.update_session.assert_called_once_with(
             session_id="test-id",
             model=None,
+            provider=None,
             agent=None,
             title=None,
             thinking=None,
@@ -853,41 +892,35 @@ class TestSystemCommands:
 
 
 class TestSystemModels:
-    """GET /api/models 测试。"""
+    """GET /api/models 测试——嵌套响应，经 runtime 转发（路由不感知 config）。"""
 
-    @patch("wing.gateway.routes.system.OpenAIProvider")
-    def test_list_models_ok(self, mock_provider_cls, client: TestClient):
-        """正常获取模型列表。"""
-        mock_provider = MagicMock()
+    def test_list_models_ok(self, client: TestClient, mock_runtime):
+        """正常获取模型列表（按 provider 分组嵌套）。"""
+        from wing.provider import ProviderModels
 
-        async def mock_list_models():
-            return ["gpt-4o", "gpt-4o-mini"]
-
-        mock_provider.list_models = mock_list_models
-        mock_provider_cls.return_value = mock_provider
-
-        resp = client.get("/api/models")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["models"] == ["gpt-4o", "gpt-4o-mini"]
-
-    @patch("wing.gateway.routes.system.OpenAIProvider")
-    def test_list_models_error_returns_empty(
-        self, mock_provider_cls, client: TestClient
-    ):
-        """调用失败时返回空列表。"""
-
-        async def mock_list_models():
-            raise RuntimeError("API error")
-
-        mock_provider = MagicMock()
-        mock_provider.list_models = mock_list_models
-        mock_provider_cls.return_value = mock_provider
+        mock_runtime.list_models = AsyncMock(
+            return_value=[
+                ProviderModels(provider="default", models=["gpt-4o", "gpt-4o-mini"]),
+                ProviderModels(provider="claude", models=["claude-opus-4"]),
+            ]
+        )
 
         resp = client.get("/api/models")
         assert resp.status_code == 200
-        data = resp.json()
-        assert data["models"] == []
+        assert resp.json() == {
+            "providers": [
+                {"provider": "default", "models": ["gpt-4o", "gpt-4o-mini"]},
+                {"provider": "claude", "models": ["claude-opus-4"]},
+            ]
+        }
+
+    def test_list_models_empty(self, client: TestClient, mock_runtime):
+        """无 provider 时返回空分组列表。"""
+        mock_runtime.list_models = AsyncMock(return_value=[])
+
+        resp = client.get("/api/models")
+        assert resp.status_code == 200
+        assert resp.json() == {"providers": []}
 
 
 # ============================================================
@@ -1020,15 +1053,17 @@ class TestSystemReload:
         """全部重载成功。"""
         from wing.runtime import ReloadResult, ReloadResultItem
 
-        mock_runtime.reload_system.return_value = ReloadResult(
-            ok=True,
-            items=[
-                ReloadResultItem(name="config.yaml", ok=True),
-                ReloadResultItem(name="hooks", ok=True),
-                ReloadResultItem(name="prompt commands", ok=True),
-                ReloadResultItem(name="provider", ok=True, detail="unchanged"),
-                ReloadResultItem(name="skills & rules", ok=True),
-            ],
+        mock_runtime.reload_system = AsyncMock(
+            return_value=ReloadResult(
+                ok=True,
+                items=[
+                    ReloadResultItem(name="config.yaml", ok=True),
+                    ReloadResultItem(name="hooks", ok=True),
+                    ReloadResultItem(name="prompt commands", ok=True),
+                    ReloadResultItem(name="provider", ok=True, detail="unchanged"),
+                    ReloadResultItem(name="skills & rules", ok=True),
+                ],
+            )
         )
 
         resp = client.post("/api/system/reload")
@@ -1041,9 +1076,13 @@ class TestSystemReload:
         """config 加载失败立即中止。"""
         from wing.runtime import ReloadResult, ReloadResultItem
 
-        mock_runtime.reload_system.return_value = ReloadResult(
-            ok=False,
-            items=[ReloadResultItem(name="config.yaml", ok=False, detail="bad config")],
+        mock_runtime.reload_system = AsyncMock(
+            return_value=ReloadResult(
+                ok=False,
+                items=[
+                    ReloadResultItem(name="config.yaml", ok=False, detail="bad config")
+                ],
+            )
         )
 
         resp = client.post("/api/system/reload")

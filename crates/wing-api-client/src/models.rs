@@ -293,6 +293,8 @@ pub struct UpdateSessionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -335,11 +337,19 @@ pub struct CommandsResponse {
     pub commands: Vec<CommandInfo>,
 }
 
-/// GET /api/models 响应——可用模型列表。
+/// 单个 provider 的可用模型（嵌套模型列表条目）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderModels {
+    pub provider: String,
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+/// GET /api/models 响应——可用模型列表（按 provider 分组嵌套）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelsResponse {
     #[serde(default)]
-    pub models: Vec<String>,
+    pub providers: Vec<ProviderModels>,
 }
 
 /// GET /api/agents 响应——可用 agent 模板列表。

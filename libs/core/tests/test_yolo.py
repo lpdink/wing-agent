@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from wing.config import AgentConfig, Config, OpenAIConfig
+from wing.config import AgentConfig, Config, ProviderConfig
 from wing.event_bus import event_bus
 from wing.gateway.protocol import AgentOverride
 
@@ -21,7 +21,11 @@ from wing.gateway.protocol import AgentOverride
 def _cfg(yolo: bool = False) -> Config:
     """Create a Config with specified global yolo."""
     return Config(
-        openai=OpenAIConfig(base_url="https://api.example.com", api_key="test"),
+        providers=[
+            ProviderConfig(
+                name="default", base_url="https://api.example.com", api_key="test"
+            )
+        ],
         agents=[AgentConfig(name="default", model="gpt-4")],
         yolo=yolo,
     )

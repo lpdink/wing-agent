@@ -95,6 +95,7 @@ pub enum AppIntent {
     /// Update session state (model, agent, title, thinking, reasoning_effort, yolo, workspace) via HTTP API.
     UpdateSession {
         model: Option<String>,
+        provider: Option<String>,
         agent: Option<String>,
         title: Option<String>,
         thinking: Option<bool>,
@@ -152,6 +153,7 @@ impl AppIntent {
     fn update_session(f: impl FnOnce(&mut Self)) -> Self {
         let mut intent = Self::UpdateSession {
             model: None,
+            provider: None,
             agent: None,
             title: None,
             thinking: None,
@@ -163,11 +165,17 @@ impl AppIntent {
         intent
     }
 
-    /// Update the session model.
-    pub fn set_model(model: String) -> Self {
+    /// Update the session model (with optional provider).
+    pub fn set_model(model: String, provider: Option<String>) -> Self {
         Self::update_session(|i| {
-            if let Self::UpdateSession { model: m, .. } = i {
+            if let Self::UpdateSession {
+                model: m,
+                provider: p,
+                ..
+            } = i
+            {
                 *m = Some(model);
+                *p = provider;
             }
         })
     }

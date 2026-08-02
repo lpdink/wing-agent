@@ -31,7 +31,16 @@ from wing.event import (
     ToolResultTurnEvent,
 )
 from wing.event_bus import event_bus
-from wing.schema import LLMResponse, LLMUsage, Message, Tool, ToolCall, ToolParam
+from wing.schema import (
+    LLMResponse,
+    LLMUsage,
+    Message,
+    TextBlock,
+    Tool,
+    ToolCall,
+    ToolParam,
+    ToolUseBlock,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -62,6 +71,23 @@ def _make_tool(name: str, fn) -> Tool:
 
 def _tc(tool_id: str, name: str) -> ToolCall:
     return ToolCall(id=tool_id, name=name, arguments={"input": "x"})
+
+
+def _final_resp(
+    content: str | None = None, tool_calls: list[ToolCall] | None = None
+) -> LLMResponse:
+    """模拟 provider 的最终 chunk：扁平字段 + 权威 content_blocks（新契约）。"""
+    blocks = []
+    if content:
+        blocks.append(TextBlock(text=content))
+    for tc in tool_calls or []:
+        blocks.append(ToolUseBlock(id=tc.id, name=tc.name, input=tc.arguments))
+    return LLMResponse(
+        content=content,
+        tool_calls=tool_calls,
+        content_blocks=blocks,
+        usage=_usage(),
+    )
 
 
 def _usage() -> LLMUsage:
@@ -134,7 +160,7 @@ class TestInterruptDuringToolExec:
         calls = [_tc("call-fast", "Fast"), _tc("call-slow", "Slow")]
 
         async def _generate(*args: Any, **kwargs: Any):
-            yield LLMResponse(tool_calls=calls, usage=_usage())
+            yield _final_resp(tool_calls=calls)
 
         monkeypatch.setattr(agent.model_provider, "generate", _generate)
         _start_turn(agent)
@@ -200,7 +226,7 @@ class TestInterruptDuringToolExec:
         event_bus.subscribe(events.append)
 
         async def _generate(*args: Any, **kwargs: Any):
-            yield LLMResponse(tool_calls=[_tc("call-ask", "Ask")], usage=_usage())
+            yield _final_resp(tool_calls=[_tc("call-ask", "Ask")])
 
         monkeypatch.setattr(agent.model_provider, "generate", _generate)
         _start_turn(agent)
@@ -272,8 +298,8 @@ class TestInterruptOutsideToolExec:
         event_bus.subscribe(lambda e: done.set() if isinstance(e, DoneEvent) else None)
 
         responses = [
-            LLMResponse(tool_calls=[_tc("call-1", "Fast")], usage=_usage()),
-            LLMResponse(content="done", usage=_usage()),
+            _final_resp(tool_calls=[_tc("call-1", "Fast")]),
+            _final_resp(content="done"),
         ]
 
         async def _generate(*args: Any, **kwargs: Any):
@@ -326,12 +352,11 @@ class TestPostInterruptRecovery:
         async def _generate(*args: Any, **kwargs: Any):
             seen_messages.append(kwargs["messages"])
             if len(seen_messages) == 1:
-                yield LLMResponse(
-                    tool_calls=[_tc("call-fast", "Fast"), _tc("call-slow", "Slow")],
-                    usage=_usage(),
+                yield _final_resp(
+                    tool_calls=[_tc("call-fast", "Fast"), _tc("call-slow", "Slow")]
                 )
             else:
-                yield LLMResponse(content="recovered", usage=_usage())
+                yield _final_resp(content="recovered")
 
         monkeypatch.setattr(agent.model_provider, "generate", _generate)
         _start_turn(agent)
@@ -380,9 +405,8 @@ class TestPostInterruptRecovery:
         event_bus.subscribe(events.append)
 
         async def _generate(*args: Any, **kwargs: Any):
-            yield LLMResponse(
-                tool_calls=[_tc("call-fast", "Fast"), _tc("call-slow", "Slow")],
-                usage=_usage(),
+            yield _final_resp(
+                tool_calls=[_tc("call-fast", "Fast"), _tc("call-slow", "Slow")]
             )
 
         monkeypatch.setattr(agent.model_provider, "generate", _generate)

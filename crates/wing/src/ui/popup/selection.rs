@@ -197,6 +197,16 @@ impl SelectionState {
         }
     }
 
+    /// Select a specific item (clamped, scroll adjusted to keep it visible).
+    pub fn select(&mut self, index: usize) {
+        self.selected = index.min(self.count.saturating_sub(1));
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll + self.max_visible {
+            self.scroll = self.selected.saturating_sub(self.max_visible - 1);
+        }
+    }
+
     /// Move selection up (wraps to last item at top).
     pub fn move_up(&mut self) {
         if self.count == 0 {
