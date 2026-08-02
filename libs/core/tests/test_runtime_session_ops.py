@@ -232,12 +232,19 @@ class TestReloadProviderIsolation:
 
     @pytest.mark.asyncio
     async def test_one_bad_session_does_not_skip_rest(self, runtime, monkeypatch):
+        from wing.config import get_config
+
         s1 = runtime.create_session()
         s2 = runtime.create_session()
 
         s1.agent.rebuild_providers = AsyncMock(side_effect=RuntimeError("boom"))
         s2.agent.rebuild_providers = AsyncMock()
         monkeypatch.setattr("wing.provider.reset_registry", AsyncMock())
+        # 隔离环境配置：CI 无用户 config 文件，load_config(reload=True) 会因
+        # 文件缺失提前中止 reload（本测试只关心 provider 重建的失败隔离）。
+        monkeypatch.setattr(
+            "wing.config.load_config", lambda reload=False: get_config()
+        )
 
         result = await runtime.reload_system()
 
