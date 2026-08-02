@@ -337,6 +337,13 @@ async def update_session(
             status_code=400, detail="at least one update field is required"
         )
 
+    if body.provider is not None and body.model is None:
+        raise HTTPException(
+            status_code=400,
+            detail="provider change requires model: switching provider without "
+            "model has no product semantics",
+        )
+
     try:
         await server.runtime.update_session(
             session_id=body.session_id,

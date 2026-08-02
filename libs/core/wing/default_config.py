@@ -59,6 +59,15 @@ providers:
   #   base_url: https://api.anthropic.com
   #   api_key: sk-ant-xxx
   #   anthropic_version: "2023-06-01"
+  #   max_tokens: 8192            # REQUIRED for Anthropic (max output tokens)
+  #   # Static model list — skips remote GET /models when set.
+  #   models:
+  #     - claude-sonnet-4-20250514
+  #   # Extended thinking (drives the thinking toggle + interleaved beta header):
+  #   extra_body:
+  #     thinking:
+  #       type: enabled
+  #       budget_tokens: 4096
 
 # ── Agent Templates ──────────────────────────────────────────
 # At least one agent is required. Each agent defines a model,
