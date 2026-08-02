@@ -769,6 +769,26 @@ class TestSessionUpdate:
         )
         assert resp.status_code == 400
 
+    def test_update_provider_only_rejected(self, client: TestClient, mock_runtime):
+        """只给 provider 不给 model 返回 400（provider-only 无产品语义）。"""
+        mock_runtime.update_session = AsyncMock()
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "provider": "claude"},
+        )
+        assert resp.status_code == 400
+        mock_runtime.update_session.assert_not_awaited()
+
+    def test_update_provider_with_model_ok(self, client: TestClient, mock_runtime):
+        """provider 伴随 model 时正常处理。"""
+        mock_runtime.update_session = AsyncMock()
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "provider": "claude", "model": "claude-x"},
+        )
+        assert resp.status_code == 200
+        mock_runtime.update_session.assert_awaited_once()
+
     def test_update_session_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
         mock_runtime.update_session = AsyncMock(
