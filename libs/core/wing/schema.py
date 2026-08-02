@@ -1,8 +1,8 @@
 # wing/schema.py
 import json
-from typing import Any, Callable, Dict, List, Literal, Union
+from typing import Annotated, Any, Callable, Dict, List, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 ########## EXCEPTIONS
@@ -97,11 +97,54 @@ class ToolCallDelta(BaseModel):
     is_final: bool = False
 
 
+class TextBlock(BaseModel):
+    """assistant content block：普通文本。"""
+
+    type: Literal["text"] = "text"
+    text: str
+
+
+class ThinkingBlock(BaseModel):
+    """assistant content block：thinking（extended thinking）。
+
+    signature 是 per-block 的（每个 thinking 块自带），绝不存在"全局一个
+    signature"。redacted_thinking 复用本块：redacted=True 时 signature 存放
+    加密 payload，作为不透明黑盒原样回放，永不解析。
+    """
+
+    type: Literal["thinking"] = "thinking"
+    thinking: str = ""
+    signature: str | None = None
+    """per-block 签名。None/空串视为无效——回放时降级为 text。"""
+    redacted: bool = False
+
+    @property
+    def has_valid_signature(self) -> bool:
+        return self.signature is not None and self.signature.strip() != ""
+
+
+class ToolUseBlock(BaseModel):
+    """assistant content block：工具调用。"""
+
+    type: Literal["tool_use"] = "tool_use"
+    id: str
+    name: str
+    input: dict = Field(default_factory=dict)
+
+
+ContentBlock = Annotated[
+    Union[TextBlock, ThinkingBlock, ToolUseBlock],
+    Field(discriminator="type"),
+]
+"""assistant 消息的有序 content block（真相源）。顺序即数组下标。"""
+
+
 class LLMResponse(BaseModel):
     content: str | None = None
     reasoning_content: str | None = None
-    reasoning_signature: str | None = None
-    """Anthropic thinking block signature（多轮回放必需）。"""
+    content_blocks: list[ContentBlock] | None = None
+    """provider 产出的结构化块数组（权威）。流式结束时由 provider 在最终
+    chunk 给出，LLMCaller commit 进 Message。"""
     tool_calls: list[ToolCall] | None = None
     tool_call_deltas: list[ToolCallDelta] | None = None
     usage: LLMUsage = LLMUsage()
@@ -119,8 +162,9 @@ class Message(ChainNode):
     role: Literal["system", "user", "assistant", "tool"]
     content: str | None = None
     reasoning_content: str | None = None
-    reasoning_signature: str | None = None
-    """Anthropic thinking block signature（多轮回放必需）。"""
+    content_blocks: list[ContentBlock] | None = None
+    """assistant 消息的有序 content block 数组（Anthropic 路径真相源）。
+    仅 assistant 消息携带；顺序即数组下标。"""
     tool_calls: list[ToolCall] | None = None  # assistant calls tools
     tool_call_id: str | None = None  # tool response only
     usage: "LLMUsage | None" = (
@@ -128,6 +172,53 @@ class Message(ChainNode):
     )
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    @model_validator(mode="after")
+    def _build_blocks_from_flat(self) -> "Message":
+        """存量兼容：assistant 消息无 content_blocks 时，从扁平字段映射。
+
+        develop 基线 JSONL 只有 content / reasoning_content / tool_calls，
+        无块数组、无 signature。此处自然映射进块数组（thinking 无 signature），
+        使业务代码只见统一块数组——回放时命中"无签名降级 text"，对官方
+        Anthropic 不 400。业务代码无需 `if 旧格式` 特判。
+        """
+        if self.role != "assistant" or self.content_blocks is not None:
+            return self
+        blocks: list[TextBlock | ThinkingBlock | ToolUseBlock] = []
+        if self.reasoning_content:
+            blocks.append(ThinkingBlock(thinking=self.reasoning_content))
+        if self.content:
+            blocks.append(TextBlock(text=self.content))
+        for tc in self.tool_calls or []:
+            blocks.append(ToolUseBlock(id=tc.id, name=tc.name, input=tc.arguments))
+        if blocks:
+            self.content_blocks = blocks
+        return self
+
+    def sync_flat_from_blocks(self) -> None:
+        """从 content_blocks 重算扁平字段 content / reasoning_content / tool_calls。
+
+        content_blocks 是真相源；扁平字段在 commit 时由块数组一次性填充，
+        供 OpenAI-compat provider、渲染、持久化等现有消费方使用。
+        """
+        if not self.content_blocks:
+            return
+        text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        for block in self.content_blocks:
+            if isinstance(block, TextBlock):
+                text_parts.append(block.text)
+            elif isinstance(block, ThinkingBlock):
+                if block.thinking:
+                    reasoning_parts.append(block.thinking)
+            elif isinstance(block, ToolUseBlock):
+                tool_calls.append(
+                    ToolCall(id=block.id, name=block.name, arguments=block.input)
+                )
+        self.content = "".join(text_parts) or None
+        self.reasoning_content = "".join(reasoning_parts) or None
+        self.tool_calls = tool_calls or None
 
     def to_openai(self) -> dict:
         result: dict[str, Any] = {"role": self.role}

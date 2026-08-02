@@ -15,7 +15,7 @@ from .common.logger import log
 from .common.tracked_list import TrackedList
 from .compactor import Compactor
 from .provider.base import ModelProvider
-from .schema import AgentSkill, LLMUsage, Message, Tool
+from .schema import AgentSkill, LLMUsage, Message, ThinkingBlock, Tool
 
 
 @dataclass
@@ -542,7 +542,7 @@ More detail in: "{dir}/SKILL.md" """
                 role=msg.role,
                 content=msg.content,
                 reasoning_content=msg.reasoning_content,
-                reasoning_signature=msg.reasoning_signature,
+                content_blocks=msg.content_blocks,
                 tool_calls=msg.tool_calls,
                 tool_call_id=msg.tool_call_id,
                 usage=msg.usage,
@@ -762,7 +762,7 @@ More detail in: "{dir}/SKILL.md" """
                 role=parent_msg.role,
                 content=parent_msg.content,
                 reasoning_content=parent_msg.reasoning_content,
-                reasoning_signature=parent_msg.reasoning_signature,
+                content_blocks=parent_msg.content_blocks,
                 tool_calls=parent_msg.tool_calls,
                 tool_call_id=parent_msg.tool_call_id,
                 parent_uuid=parent_msg.parent_uuid,  # 祖父 uuid
@@ -831,3 +831,11 @@ More detail in: "{dir}/SKILL.md" """
         for msg in self._messages:
             if isinstance(msg, Message):
                 msg.reasoning_content = ""
+                # 同步剥离 content_blocks 中的 thinking 块，保持扁平字段与
+                # 块数组一致（Anthropic 回放以块数组为准）。
+                if msg.content_blocks:
+                    msg.content_blocks = [
+                        b
+                        for b in msg.content_blocks
+                        if not isinstance(b, ThinkingBlock)
+                    ]
