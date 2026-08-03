@@ -5,6 +5,9 @@ FROM ${REGISTRY}/wing-py-base:${BASE_TAG}
 
 WORKDIR /app
 COPY . .
+# hatch-vcs 需要 git 历史取版本；镜像里没有 .git，用 pretend 版本
+ARG VERSION=0.0.0+docker
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}
 RUN uv sync --frozen --no-dev --package wing-gateway
 
 COPY deploy/gateway/entrypoint.py /entrypoint.py

@@ -25,140 +25,181 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  ALIYUN_REGISTRY: ${{ secrets.ALIYUN_REGISTRY }}
-  ALIYUN_NAME_SPACE: ${{ secrets.ALIYUN_NAME_SPACE }}
+  NS: ${{ secrets.ALIYUN_REGISTRY }}/${{ secrets.ALIYUN_NAME_SPACE }}
 
 jobs:
-  build:
-    name: Build & push images
+  # ── 基础镜像（依赖层，tag = 内容哈希；未变化时缓存秒过）──
+
+  base-py:
+    name: wing-py-base
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.ref }}
-
-      - uses: docker/setup-buildx-action@v3
-        with:
-          # buildkit 容器走宿主网络——共享宿主 /etc/hosts（registry 解析兜底）
-          driver-opts: network=host
-
-      - name: Ensure registry resolvable (DoH + /etc/hosts fallback)
-        run: |
-          REG="${{ secrets.ALIYUN_REGISTRY }}"
-          echo "registry value length: ${#REG} (expect 32)"
-          if getent hosts "$REG" >/dev/null; then
-            echo "$REG resolves normally"; exit 0
-          fi
-          echo "resolver broken for $REG — using DNS-over-HTTPS"
-          IP=""
-          for doh in "https://dns.google/resolve" "https://1.1.1.1/resolve"; do
-            IP=$(curl -sS -H 'accept: application/dns-json' \
-              "$doh?name=$REG&type=A" | jq -r '.Answer[]? | select(.type==1) | .data' | head -1) \
-              && [ -n "$IP" ] && break
-          done
-          if [ -z "$IP" ]; then echo "::error::cannot resolve $REG via DoH"; exit 1; fi
-          echo "$IP $REG" | sudo tee -a /etc/hosts
-          getent hosts "$REG"
-
-      - name: Login to Aliyun registry
-        uses: docker/login-action@v3
+      - uses: ./.github/actions/registry-setup
         with:
           registry: ${{ secrets.ALIYUN_REGISTRY }}
           username: ${{ secrets.ALIYUN_REGISTRY_USER }}
           password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
-
-      - name: Compute base tags
-        id: tags
-        run: |
-          LOCK_HASH=$(sha256sum uv.lock | cut -c1-12)
-          DEVBOX_HASH=$(cat uv.lock deploy/docker/Dockerfile.base-devbox | sha256sum | cut -c1-12)
-          SHA_SHORT=$(git rev-parse --short HEAD)
-          APP_TAG="${{ inputs.tag || 'develop' }}"
-          {
-            echo "lock_hash=$LOCK_HASH"
-            echo "devbox_hash=$DEVBOX_HASH"
-            echo "sha=$SHA_SHORT"
-            echo "app_tag=$APP_TAG"
-          } >> "$GITHUB_OUTPUT"
-          echo "base-py=${LOCK_HASH} base-devbox=${DEVBOX_HASH} app=${APP_TAG}+${SHA_SHORT}"
-
-      # ── 基础镜像（稳定层；tag = 内容哈希，未变化时秒过）──
-
-      - name: Build & push wing-py-base
+      - id: tags
+        run: echo "base=$(sha256sum uv.lock | cut -c1-12)" >> "$GITHUB_OUTPUT"
+      - name: Build & push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/docker/Dockerfile.base-py
           push: true
-          tags: ${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_NAME_SPACE }}/wing-py-base:${{ steps.tags.outputs.lock_hash }}
+          tags: ${{ env.NS }}/wing-py-base:${{ steps.tags.outputs.base }}
           cache-from: type=gha,scope=base-py
           cache-to: type=gha,mode=max,scope=base-py
 
-      - name: Build & push wing-devbox-base
+  base-devbox:
+    name: wing-devbox-base
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: ./.github/actions/registry-setup
+        with:
+          registry: ${{ secrets.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_REGISTRY_USER }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+      - id: tags
+        run: |
+          echo "base=$(cat uv.lock deploy/docker/Dockerfile.base-devbox | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+      - name: Build & push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/docker/Dockerfile.base-devbox
           push: true
-          tags: ${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_NAME_SPACE }}/wing-devbox-base:${{ steps.tags.outputs.devbox_hash }}
+          tags: ${{ env.NS }}/wing-devbox-base:${{ steps.tags.outputs.base }}
           cache-from: type=gha,scope=base-devbox
           cache-to: type=gha,mode=max,scope=base-devbox
 
-      # ── 应用镜像（基础镜像之上叠代码薄层）──
+  # ── 应用镜像（基础镜像之上叠代码薄层，全部并行）──
 
-      - name: Build & push wing-gateway
+  gateway:
+    name: wing-gateway
+    needs: base-py
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: ./.github/actions/registry-setup
+        with:
+          registry: ${{ secrets.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_REGISTRY_USER }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+      - id: tags
+        run: |
+          echo "base=$(sha256sum uv.lock | cut -c1-12)" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Build & push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/docker/Dockerfile.gateway
           push: true
           build-args: |
-            REGISTRY=${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_NAME_SPACE }}
-            BASE_TAG=${{ steps.tags.outputs.lock_hash }}
+            REGISTRY=${{ env.NS }}
+            BASE_TAG=${{ steps.tags.outputs.base }}
+            VERSION=0.0.0+${{ steps.tags.outputs.sha }}
           tags: |
-            ${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_NAME_SPACE }}/wing-gateway:${{ steps.tags.outputs.app_tag }}
-            ${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_NAME_SPACE }}/wing-gateway:sha-${{ steps.tags.outputs.sha }}
+            ${{ env.NS }}/wing-gateway:${{ inputs.tag || 'develop' }}
+            ${{ env.NS }}/wing-gateway:sha-${{ steps.tags.outputs.sha }}
           cache-from: type=gha,scope=app-gateway
           cache-to: type=gha,mode=max,scope=app-gateway
 
-      - name: Build & push wing-dingtalk
+  dingtalk:
+    name: wing-dingtalk
+    needs: base-py
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: ./.github/actions/registry-setup
+        with:
+          registry: ${{ secrets.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_REGISTRY_USER }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+      - id: tags
+        run: |
+          echo "base=$(sha256sum uv.lock | cut -c1-12)" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Build & push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/docker/Dockerfile.dingtalk
           push: true
           build-args: |
-            REGISTRY=${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_NAME_SPACE }}
-            BASE_TAG=${{ steps.tags.outputs.lock_hash }}
+            REGISTRY=${{ env.NS }}
+            BASE_TAG=${{ steps.tags.outputs.base }}
           tags: |
-            ${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_NAME_SPACE }}/wing-dingtalk:${{ steps.tags.outputs.app_tag }}
-            ${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_NAME_SPACE }}/wing-dingtalk:sha-${{ steps.tags.outputs.sha }}
+            ${{ env.NS }}/wing-dingtalk:${{ inputs.tag || 'develop' }}
+            ${{ env.NS }}/wing-dingtalk:sha-${{ steps.tags.outputs.sha }}
           cache-from: type=gha,scope=app-dingtalk
           cache-to: type=gha,mode=max,scope=app-dingtalk
 
-      - name: Build & push wing-devbox
+  devbox:
+    name: wing-devbox
+    needs: base-devbox
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: ./.github/actions/registry-setup
+        with:
+          registry: ${{ secrets.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_REGISTRY_USER }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+      - id: tags
+        run: |
+          echo "base=$(cat uv.lock deploy/docker/Dockerfile.base-devbox | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Build & push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/docker/Dockerfile.devbox
           push: true
           build-args: |
-            REGISTRY=${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_NAME_SPACE }}
-            BASE_TAG=${{ steps.tags.outputs.devbox_hash }}
+            REGISTRY=${{ env.NS }}
+            BASE_TAG=${{ steps.tags.outputs.base }}
           tags: |
-            ${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_NAME_SPACE }}/wing-devbox:${{ steps.tags.outputs.app_tag }}
-            ${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_NAME_SPACE }}/wing-devbox:sha-${{ steps.tags.outputs.sha }}
+            ${{ env.NS }}/wing-devbox:${{ inputs.tag || 'develop' }}
+            ${{ env.NS }}/wing-devbox:sha-${{ steps.tags.outputs.sha }}
           cache-from: type=gha,scope=app-devbox
           cache-to: type=gha,mode=max,scope=app-devbox
 
-      - name: Build & push wing-ai-proxy
+  proxy:
+    name: wing-ai-proxy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: ./.github/actions/registry-setup
+        with:
+          registry: ${{ secrets.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_REGISTRY_USER }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+      - id: tags
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Build & push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/docker/Dockerfile.proxy
           push: true
           tags: |
-            ${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_NAME_SPACE }}/wing-ai-proxy:${{ steps.tags.outputs.app_tag }}
-            ${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_NAME_SPACE }}/wing-ai-proxy:sha-${{ steps.tags.outputs.sha }}
+            ${{ env.NS }}/wing-ai-proxy:${{ inputs.tag || 'develop' }}
+            ${{ env.NS }}/wing-ai-proxy:sha-${{ steps.tags.outputs.sha }}
           cache-from: type=gha,scope=app-proxy
           cache-to: type=gha,mode=max,scope=app-proxy
