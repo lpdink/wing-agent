@@ -2,7 +2,8 @@ name: Images
 
 on:
   push:
-    branches: [develop]
+    # TODO(merge 前移除 feature/dingtalk): 仅为首次部署前在特性分支触发构建
+    branches: [develop, feature/dingtalk]
   workflow_dispatch:
     inputs:
       ref:
