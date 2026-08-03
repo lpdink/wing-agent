@@ -32,6 +32,13 @@ providers:
     # Total response timeout for non-streaming calls (seconds).
     timeout_total: 600.0
 
+    # Maximum retries for LLM calls on failure.
+    max_retries: 10
+
+    # Exponential backoff max retry delay (seconds); backoff is clamped
+    # to this upper bound (default 3 minutes).
+    max_retry_delay: 180.0
+
     # Explicit cache mode: appends cache_control ephemeral markers
     # to the last content block. Silently ignored by providers
     # that don't support it.

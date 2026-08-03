@@ -72,7 +72,7 @@ class OpenAICompatProvider(ModelProvider):
 
     # ─── Public API ───────────────────────────────────────────────
 
-    @with_retry(max_retries=2)
+    @with_retry()
     async def generate(
         self,
         messages: list[Message],
