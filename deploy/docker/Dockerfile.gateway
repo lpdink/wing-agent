@@ -1,0 +1,15 @@
+# wing-gateway 应用镜像——基础镜像之上只叠代码薄层。
+ARG REGISTRY=registry.cn-hangzhou.aliyuncs.com/8bitpd
+ARG BASE_TAG=latest
+FROM ${REGISTRY}/wing-py-base:${BASE_TAG}
+
+WORKDIR /app
+COPY . .
+RUN uv sync --frozen --no-dev --package wing-gateway
+
+COPY deploy/gateway/entrypoint.py /entrypoint.py
+COPY deploy/gateway/config.template.yaml /template.yaml
+ENV WING_HOME=/data/wing
+VOLUME /data/wing
+
+ENTRYPOINT ["python", "/entrypoint.py"]

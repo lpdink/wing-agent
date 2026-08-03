@@ -1,0 +1,16 @@
+# devbox 工具宿主应用镜像——wing-sdk ToolHost（六个标准工具）。
+ARG REGISTRY=registry.cn-hangzhou.aliyuncs.com/8bitpd
+ARG BASE_TAG=latest
+FROM ${REGISTRY}/wing-devbox-base:${BASE_TAG}
+
+# wing-sdk 依赖薄层
+WORKDIR /app
+COPY . .
+RUN uv sync --frozen --no-dev --package wing-sdk
+
+COPY deploy/devbox/toolhost.py /opt/toolhost.py
+COPY deploy/devbox/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+WORKDIR /workspace
+ENTRYPOINT ["/entrypoint.sh"]

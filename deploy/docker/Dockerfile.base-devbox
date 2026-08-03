@@ -1,0 +1,85 @@
+# devbox 工具宿主基础镜像——“什么都有”的开发环境。
+# Rust / Go / Java / Python+uv / Node / C-C++ / gh CLI / docker CLI。
+# apt/pip/cargo/go 全部配置国内镜像源：基础镜像在 CI 构建一次后推阿里云，
+# 之后 Agent 在容器里装东西（apt/pip/cargo/go）走国内源，不会卡。
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    PATH=/usr/local/go/bin:/root/.cargo/bin:/root/.local/bin:$PATH \
+    GOPROXY=https://goproxy.cn,direct \
+    PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+    UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+    UV_LINK_MODE=copy
+
+# ── apt 换阿里云源（noble 用 deb822 格式）──
+RUN printf '%s\n' \
+    'Types: deb' \
+    'URIs: http://mirrors.aliyun.com/ubuntu/' \
+    'Suites: noble noble-updates noble-backports' \
+    'Components: main restricted universe multiverse' \
+    'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+    '' \
+    'Types: deb' \
+    'URIs: http://mirrors.aliyun.com/ubuntu/' \
+    'Suites: noble-security' \
+    'Components: main restricted universe multiverse' \
+    'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+    > /etc/apt/sources.list.d/ubuntu.sources
+
+# ── 基础工具链（C/C++、make、git 等）──
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake ninja-build pkg-config \
+    git curl wget ca-certificates gnupg lsb-release \
+    jq unzip xz-utils ripgrep fd-find tree vim-tiny less openssh-client \
+    python3 python3-venv python3-pip python3-dev python3-full \
+    openjdk-21-jdk-headless maven \
+    sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── GitHub CLI（官方 apt 源）──
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── docker CLI + compose（挂载宿主 socket 用，不需要 DinD）──
+RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+      | gpg --dearmor -o /usr/share/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu noble stable" \
+      > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Node.js 22（NodeSource）──
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm config set registry https://registry.npmmirror.com \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Go（官方 tarball，固定版本）──
+ARG GO_VERSION=1.23.4
+RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz \
+    && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
+
+# ── Rust（rustup，国内镜像）──
+ENV RUSTUP_DIST_SERVER=https://rsproxy.cn \
+    RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
+RUN curl --proto '=https' --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh \
+      | sh -s -- -y --profile minimal --default-toolchain stable \
+    && /root/.cargo/bin/rustup component add rustfmt clippy \
+    && printf '%s\n' \
+        '[source.crates-io]' 'replace-with = "rsproxy-sparse"' \
+        '[source.rsproxy]' 'registry = "https://rsproxy.cn/crates.io-index"' \
+        '[source.rsproxy-sparse]' 'registry = "sparse+https://rsproxy.cn/index/"' \
+        '[registries.rsproxy]' 'index = "https://rsproxy.cn/crates.io-index"' \
+        '[net]' 'git-fetch-with-cli = true' \
+        > /root/.cargo/config.toml
+
+# ── uv（Python 包管理）──
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+WORKDIR /workspace

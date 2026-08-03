@@ -26,13 +26,20 @@ version-file = "wing_agent/_version.py"
 packages = ["wing_agent"]
 
 [tool.uv.workspace]
-members = ["libs/core", "libs/wing-sdk", "libs/wing-orch", "crates/wing"]
+members = [
+    "libs/core",
+    "libs/wing-sdk",
+    "libs/wing-orch",
+    "crates/wing",
+    "libs/wing-dingtalk",
+]
 
 [tool.uv.sources]
 wing-cli = { workspace = true }
 wing-gateway = { workspace = true }
 wing-sdk = { workspace = true }
 wing-orch = { workspace = true }
+wing-dingtalk = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -46,6 +53,7 @@ dev = [
     "maturin>=1.9.3,<2.0",
     "wing-sdk",
     "wing-orch",
+    "wing-dingtalk",
 ]
 
 [tool.ruff.lint]

@@ -1,0 +1,23 @@
+# Python 依赖基础镜像——wing-gateway / wing-dingtalk 共享。
+# 只装第三方依赖（锁定自 uv.lock），不含 workspace 包（避免编译 wing-cli）。
+# tag = uv.lock 内容哈希，作为稳定基础层；应用镜像在其上只叠代码薄层。
+FROM python:3.12-slim
+
+ENV UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
+    UV_PYTHON_DOWNLOADS=never \
+    PATH=/app/.venv/bin:$PATH
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# 仅依赖清单——锁定依赖层（源码变更不触发重装）
+COPY pyproject.toml uv.lock README.md ./
+COPY libs/core/pyproject.toml libs/core/pyproject.toml
+COPY libs/wing-sdk/pyproject.toml libs/wing-sdk/pyproject.toml
+COPY libs/wing-orch/pyproject.toml libs/wing-orch/pyproject.toml
+COPY libs/wing-dingtalk/pyproject.toml libs/wing-dingtalk/pyproject.toml
+COPY crates/wing/pyproject.toml crates/wing/pyproject.toml
+
+RUN uv sync --frozen --no-dev --no-install-project --no-install-workspace

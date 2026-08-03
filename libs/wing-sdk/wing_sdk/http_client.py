@@ -118,6 +118,7 @@ class GatewayClient:
         self,
         session_id: str,
         model: str | None = None,
+        provider: str | None = None,
         agent: str | None = None,
         title: str | None = None,
         thinking: bool | None = None,
@@ -128,6 +129,7 @@ class GatewayClient:
         body: dict[str, Any] = {"session_id": session_id}
         for key, value in [
             ("model", model),
+            ("provider", provider),
             ("agent", agent),
             ("title", title),
             ("thinking", thinking),
@@ -168,6 +170,9 @@ class GatewayClient:
 
     async def get_agents(self) -> dict:
         return await self._get("/api/agents")
+
+    async def list_tools(self) -> dict:
+        return await self._get("/api/tools")
 
     async def reload(self) -> dict:
         return await self._post("/api/system/reload", {})

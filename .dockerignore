@@ -1,0 +1,14 @@
+.git
+.venv
+target
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+*.egg-info
+dist
+.pytest_cache
+.ruff_cache
+.idea
+deploy/proxy/config.yaml
+deploy/.env
+*.log

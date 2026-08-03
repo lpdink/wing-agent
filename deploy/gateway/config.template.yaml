@@ -1,0 +1,48 @@
+# Gateway 配置模板——容器入口经环境变量展开（os.path.expandvars）。
+# 变量来自 deploy/.env，勿在容器内手改渲染产物。
+
+providers:
+  - name: proxy
+    protocol: openai
+    base_url: "${PROXY_URL}"
+    api_key: "${PROXY_API_KEY}"
+    timeout_first_chunk: 300.0
+    timeout_total: 1800.0
+    explicit_cache_mode: true
+
+agents:
+  - name: default
+    model: ${DEFAULT_MODEL}
+    default: true
+    system_prompt: ""
+    tools:
+      - ${DEVBOX_NS}.Bash
+      - ${DEVBOX_NS}.Read
+      - ${DEVBOX_NS}.Write
+      - ${DEVBOX_NS}.Edit
+      - ${DEVBOX_NS}.Glob
+      - ${DEVBOX_NS}.Grep
+      - AskUserQuestion
+      - TodoWrite
+      - ${DINGTALK_TOOL_NS}.SendFile
+    context_window_tokens: 256000
+    keep_recent_tokens: 50000
+
+commands:
+  paths:
+    - /data/wing/core/commands/**/*.md
+
+log:
+  level: INFO
+
+gateway:
+  host: 0.0.0.0
+  port: 32523
+  remote_tool_timeout: 1800.0
+  auth:
+    enabled: true
+    keys:
+      - key: "${WING_ADMIN_KEY}"
+        role: admin
+      - key: "${WING_TOOL_KEY}"
+        role: tool_runtime

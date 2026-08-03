@@ -1,0 +1,13 @@
+# wing-ai-proxy——LLM 调用网关（Go 单二进制，来自 GitHub Release）。
+FROM debian:bookworm-slim
+
+ARG PROXY_VERSION=v0.1.0
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && curl -fsSL -o /usr/local/bin/wing-ai-proxy \
+        "https://github.com/lpdink/wing-ai-proxy/releases/download/${PROXY_VERSION}/wing-ai-proxy-linux-amd64" \
+    && chmod +x /usr/local/bin/wing-ai-proxy \
+    && rm -rf /var/lib/apt/lists/*
+
+VOLUME /data
+CMD ["wing-ai-proxy", "/etc/wing-ai-proxy/config.yaml"]

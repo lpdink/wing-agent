@@ -1,0 +1,66 @@
+# Wing 生产部署——四容器：gateway / dingtalk / devbox / proxy
+# 镜像由 CI 构建推送（阿里云），本地不 build；全部走内网，零端口暴露。
+name: wing
+
+services:
+  gateway:
+    image: ${REGISTRY:-registry.cn-hangzhou.aliyuncs.com/8bitpd}/wing-gateway:${TAG:-develop}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      WING_HOME: /data/wing
+      # 配置模板渲染用（见 gateway/config.template.yaml）
+      PROXY_URL: http://proxy:39998
+      DEVBOX_NS: ${TOOL_CLIENT_ID:-devbox}
+      DINGTALK_TOOL_NS: ${WING_DINGTALK_TOOL_CLIENT_ID:-dingtalk}
+    volumes:
+      - wing-home:/data/wing
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:32523/api/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  dingtalk:
+    image: ${REGISTRY:-registry.cn-hangzhou.aliyuncs.com/8bitpd}/wing-dingtalk:${TAG:-develop}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      WING_API_KEY: ${WING_ADMIN_KEY}
+      WING_GATEWAY_URL: http://gateway:32523
+    volumes:
+      - dingtalk-state:/data
+      - workspace:/workspace:ro
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  devbox:
+    image: ${REGISTRY:-registry.cn-hangzhou.aliyuncs.com/8bitpd}/wing-devbox:${TAG:-develop}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      WING_API_KEY: ${WING_TOOL_KEY}
+      WING_GATEWAY_URL: http://gateway:32523
+      TOOL_CLIENT_ID: ${TOOL_CLIENT_ID:-devbox}
+    volumes:
+      - workspace:/workspace
+      # 操作宿主 docker（不嵌套 DinD）
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  proxy:
+    image: ${REGISTRY:-registry.cn-hangzhou.aliyuncs.com/8bitpd}/wing-ai-proxy:${TAG:-develop}
+    restart: unless-stopped
+    volumes:
+      - ./proxy/config.yaml:/etc/wing-ai-proxy/config.yaml:ro
+      - proxy-data:/data
+
+volumes:
+  wing-home:
+  dingtalk-state:
+  workspace:
+  proxy-data:

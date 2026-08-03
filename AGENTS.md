@@ -135,6 +135,17 @@ libs/wing-orch/                   Orchestration CLI (pip: wing-orch) — depends
     ├── cli.py                    `wing-orch goal` entry point
     ├── goal.py                   Goal state machine (port of crates/wing/src/app/goal.rs)
     └── runner.py                 asyncio driver: tool host + sessions + event loop + persistence
+
+libs/wing-dingtalk/               DingTalk frontend — depends on wing-sdk
+└── wing_dingtalk/
+    ├── cli.py                    `wing-dingtalk` entry point (env-driven config)
+    ├── bot.py                    DingTalk Stream handler + message routing + whitelist
+    ├── link.py                   Gateway WS event link (turn_result/ask/error) + reconnect
+    ├── commands.py               /new /model /restart /sessions /switch /interrupt /help
+    ├── sender.py                 DingTalk OpenAPI sender (text/markdown/file)
+    ├── router.py                 conversation ↔ session map (file-persisted)
+    ├── models_match.py           fuzzy model matching (provider:name aware)
+    └── file_tool.py              SendFile remote tool (shared volume → DingTalk)
 ```
 
 ## Configuration

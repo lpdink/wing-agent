@@ -1,0 +1,13 @@
+# wing-dingtalk 应用镜像——钉钉前端。
+ARG REGISTRY=registry.cn-hangzhou.aliyuncs.com/8bitpd
+ARG BASE_TAG=latest
+FROM ${REGISTRY}/wing-py-base:${BASE_TAG}
+
+WORKDIR /app
+COPY . .
+RUN uv sync --frozen --no-dev --package wing-dingtalk
+
+ENV WING_DINGTALK_STATE_DIR=/data
+VOLUME /data
+
+ENTRYPOINT ["wing-dingtalk"]
