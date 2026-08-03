@@ -32,6 +32,7 @@ members = [
     "libs/wing-orch",
     "crates/wing",
     "libs/wing-dingtalk",
+    "libs/wing-spawn",
 ]
 
 [tool.uv.sources]
@@ -40,6 +41,7 @@ wing-gateway = { workspace = true }
 wing-sdk = { workspace = true }
 wing-orch = { workspace = true }
 wing-dingtalk = { workspace = true }
+wing-spawn = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -54,6 +56,7 @@ dev = [
     "wing-sdk",
     "wing-orch",
     "wing-dingtalk",
+    "wing-spawn",
 ]
 
 [tool.ruff.lint]

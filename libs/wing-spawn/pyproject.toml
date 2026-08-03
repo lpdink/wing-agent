@@ -1,0 +1,22 @@
+[project]
+name = "wing-spawn"
+version = "0.1.0"
+description = "Wing spawn — spawn a disposable tool container and run a goal against it"
+requires-python = ">=3.12"
+dependencies = [
+    "wing-sdk",
+    "websockets>=13.0",
+]
+
+[project.scripts]
+wing-spawn = "wing_spawn.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["wing_spawn"]
+
+[tool.uv.sources]
+wing-sdk = { workspace = true }

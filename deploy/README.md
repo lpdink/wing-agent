@@ -56,3 +56,20 @@ docker compose up -d
   tool_runtime = devbox 工具宿主）。
 - `PROXY_API_KEY` 必须与 `proxy/config.yaml` 的 `virtual_api_keys` 一致。
 - `DINGTALK_ALLOWED_USERS`：白名单（staff_id 或昵称，逗号分隔）。
+
+## wing-spawn（父 Agent 下发任务）
+
+`wing-spawn`（`libs/wing-spawn`）是父 Agent 调用、把任务交给一个**一次性工具容器**
+执行的 CLI。它复用 devbox 的 `wing-devbox` 镜像，在网关里注册一个独立 namespace
+（`task-<hex>`）的工具宿主，建 session 下发 goal，并把 `turn_result` 回传，默认跑完
+即删容器。
+
+```bash
+# 在 devbox 容器内（已挂 docker.sock + 环境变量）
+wing-spawn "Implement X and write tests" --model deepseek-v4-flash-0731
+wing-spawn --task-file task.md --keep          # 保留容器便于排查
+wing-spawn cleanup                              # 清理残留容器
+```
+
+子容器与父容器**共享网络栈 + 持久 workspace 卷**（`_parent_mounts()` 探测复用），
+因此无需额外网络/挂载配置。详见 `libs/wing-spawn/README.md`。
