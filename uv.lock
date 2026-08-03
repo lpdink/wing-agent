@@ -1714,6 +1714,7 @@ source = { editable = "libs/core" }
 dependencies = [
     { name = "aioconsole" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "pydantic-settings" },
     { name = "python-frontmatter" },
     { name = "pyyaml" },
@@ -1724,6 +1725,7 @@ dependencies = [
 requires-dist = [
     { name = "aioconsole", specifier = ">=0.8.2" },
     { name = "fastapi", specifier = ">=0.139.0" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "pydantic-settings", specifier = ">=2.13.1" },
     { name = "python-frontmatter", specifier = ">=1.1.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
