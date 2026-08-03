@@ -38,17 +38,27 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
 
       - uses: docker/setup-buildx-action@v3
+        with:
+          # buildkit 容器走宿主网络——共享宿主 /etc/hosts（registry 解析兜底）
+          driver-opts: network=host
 
-      - name: Verify registry DNS
+      - name: Ensure registry resolvable (DoH + /etc/hosts fallback)
         run: |
-          for i in 1 2 3 4 5; do
-            if getent hosts "${{ secrets.ALIYUN_REGISTRY }}" >/dev/null; then
-              echo "registry resolvable"; exit 0
-            fi
-            echo "DNS not ready, retry $i"; sleep 5
+          REG="${{ secrets.ALIYUN_REGISTRY }}"
+          echo "registry value length: ${#REG} (expect 32)"
+          if getent hosts "$REG" >/dev/null; then
+            echo "$REG resolves normally"; exit 0
+          fi
+          echo "resolver broken for $REG — using DNS-over-HTTPS"
+          IP=""
+          for doh in "https://dns.google/resolve" "https://1.1.1.1/resolve"; do
+            IP=$(curl -sS -H 'accept: application/dns-json' \
+              "$doh?name=$REG&type=A" | jq -r '.Answer[]? | select(.type==1) | .data' | head -1) \
+              && [ -n "$IP" ] && break
           done
-          echo "::error::registry host not resolvable"
-          exit 1
+          if [ -z "$IP" ]; then echo "::error::cannot resolve $REG via DoH"; exit 1; fi
+          echo "$IP $REG" | sudo tee -a /etc/hosts
+          getent hosts "$REG"
 
       - name: Login to Aliyun registry
         uses: docker/login-action@v3
