@@ -16,14 +16,13 @@ agents:
     default: true
     system_prompt: ""
     tools:
+      - TodoWrite
       - ${DEVBOX_NS}.Bash
       - ${DEVBOX_NS}.Read
       - ${DEVBOX_NS}.Write
       - ${DEVBOX_NS}.Edit
       - ${DEVBOX_NS}.Glob
       - ${DEVBOX_NS}.Grep
-      - AskUserQuestion
-      - TodoWrite
       - ${DINGTALK_TOOL_NS}.SendFile
     context_window_tokens: 256000
     keep_recent_tokens: 50000

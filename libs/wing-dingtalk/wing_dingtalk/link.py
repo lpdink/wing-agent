@@ -89,7 +89,7 @@ class GatewayLink:
                 raise RuntimeError(f"unexpected first frame: {first}")
             log.info(f"ws connected as {self.cfg.event_client_id}")
 
-            await self._wait_tools_and_reload()
+            await self._wait_tools_registered()
             await self._restore_subscriptions()
             self.connected.set()
 
@@ -100,15 +100,15 @@ class GatewayLink:
                     continue
                 await self._dispatch(event)
 
-    async def _wait_tools_and_reload(self) -> None:
-        """等待工具宿主注册完成，然后 reload 配置重建 agent 模板。
+    async def _wait_tools_registered(self) -> None:
+        """等待工具宿主注册完成——create session 显式下发工具引用的前置条件。
 
-        Gateway 启动早于工具宿主，模板首次解析会静默丢弃未注册的远程
-        工具引用；宿主就位后 reload 一次，模板即带上完整工具集。
-        每次（重）连接都执行——Gateway 重启后同样存在该窗口。
+        会话工具集不依赖 gateway 模板 fallback（模板在 gateway 启动时解析，
+        彼时远程工具尚未注册会被静默丢弃），而是由前端在建 session 时经
+        agent override 显式指定；set_tools 对未注册引用会抛错，故必须先等
+        宿主就位。每次（重）连接都执行——Gateway 重启后同样存在该窗口。
         """
-        expected = set(self.cfg.expected_tool_refs)
-        expected.add(f"{self.cfg.tool_client_id}.SendFile")
+        expected = set(self.cfg.required_tool_refs())
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.cfg.expected_tools_timeout_s
@@ -118,36 +118,43 @@ class GatewayLink:
                 refs = {t.get("ref", "") for t in resp.get("tools", [])}
                 missing = expected - refs
                 if not missing:
-                    break
+                    log.info(f"tool hosts registered: {sorted(expected)}")
+                    return
                 log.info(f"waiting for tool hosts: {sorted(missing)}")
             except Exception:
                 pass
             await asyncio.sleep(2.0)
-        else:
-            log.warning(
-                f"tool hosts not fully registered within "
-                f"{self.cfg.expected_tools_timeout_s:.0f}s, reloading anyway"
-            )
 
-        try:
-            result = await self.http.reload()
-            if not result.get("ok", False):
-                log.warning(f"reload reported failure: {result}")
-            else:
-                log.info("config reloaded — agent templates rebuilt")
-        except Exception as e:
-            log.warning(f"reload failed: {e}")
+        log.warning(
+            f"tool hosts not fully registered within "
+            f"{self.cfg.expected_tools_timeout_s:.0f}s, proceeding anyway"
+        )
 
     async def _restore_subscriptions(self) -> None:
-        """重连后恢复所有已绑定 session：resume（尽力）+ subscribe。"""
+        """重连后恢复所有已绑定 session：resume + 重新注入工具集 + subscribe。
+
+        Gateway 重启后，resume 用模板重建 agent——模板在 gateway 启动时解析，
+        远程工具彼时未注册被丢弃。故 resume 后立即 update_session 以完整工具集
+        覆写（链非空 → 热切换：冻结声明集 + 注入 System Reminder 携带 schema）。
+        """
+        tools = self.cfg.session_tools()
         for session_id in self.router.all_session_ids():
+            resumed = False
             try:
                 await self.http.resume_session(session_id)
+                resumed = True
             except httpx.HTTPStatusError as e:
                 if e.response.status_code != 404:
                     log.warning(f"resume {session_id} failed: {e}")
             except Exception as e:
                 log.warning(f"resume {session_id} failed: {e}")
+
+            if resumed:
+                try:
+                    await self.http.update_session(session_id, tools=tools)
+                except Exception as e:
+                    log.warning(f"re-inject tools for {session_id} failed: {e}")
+
             try:
                 await self.http.subscribe(session_id, self.cfg.event_client_id)
             except Exception as e:
@@ -283,7 +290,7 @@ class GatewayLink:
         if conv.session_id:
             return conv.session_id
         await self._await_ready()
-        resp = await self.http.create_session(workspace=self.cfg.workspace)
+        resp = await self._create_session_with_tools()
         session_id = resp["session_id"]
         self.router.set_session(conv, session_id)
         await self._subscribe_quiet(session_id)
@@ -292,11 +299,23 @@ class GatewayLink:
 
     async def new_session(self, conv: Conversation) -> str:
         await self._await_ready()
-        resp = await self.http.create_session(workspace=self.cfg.workspace)
+        resp = await self._create_session_with_tools()
         session_id = resp["session_id"]
         self.router.set_session(conv, session_id)
         await self._subscribe_quiet(session_id)
         return session_id
+
+    async def _create_session_with_tools(self) -> dict:
+        """创建 session——显式下发工具集（agent override）。
+
+        不依赖 gateway 模板 fallback：模板在 gateway 启动时解析，远程工具
+        尚未注册会被静默丢弃；此处在链路就绪（工具宿主已注册）后显式指定，
+        set_tools 冷切换（新 session 链为空）直接生效。
+        """
+        return await self.http.create_session(
+            workspace=self.cfg.workspace,
+            agent={"tools": self.cfg.session_tools()},
+        )
 
     async def switch_session(self, conv: Conversation, session_id: str) -> None:
         await self.http.resume_session(session_id)

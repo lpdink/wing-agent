@@ -44,8 +44,12 @@ class Config:
     event_client_id: str = "dingtalk-fe"
     # 工具宿主 WS 的 client_id——工具引用形如 `<id>.SendFile`。
     tool_client_id: str = "dingtalk"
-    # 链路就绪前等待注册的工具引用（宿主就位 → reload 模板的必要条件）。
-    expected_tool_refs: list[str] = field(default_factory=lambda: ["devbox.Bash"])
+    # 开发工具宿主的 client_id（远程六件套的命名空间）。
+    tool_host_ns: str = "devbox"
+    # 显式会话工具集（覆盖模板 fallback）。None = 按命名空间自动构造。
+    session_tools_override: list[str] | None = None
+    # 链路就绪前等待注册的工具引用（宿主就位是 create session 的前置条件）。
+    expected_tool_refs: list[str] = field(default_factory=list)
     expected_tools_timeout_s: float = 120.0
 
     # ── 行为 ──────────────────────────────────────────────────
@@ -67,10 +71,38 @@ class Config:
             shared_root=Path(_env("WING_DINGTALK_SHARED_ROOT", "/workspace")),
             event_client_id=_env("WING_DINGTALK_EVENT_CLIENT_ID", "dingtalk-fe"),
             tool_client_id=_env("WING_DINGTALK_TOOL_CLIENT_ID", "dingtalk"),
-            expected_tool_refs=_env_list("WING_EXPECTED_TOOL_REFS") or ["devbox.Bash"],
+            tool_host_ns=_env("WING_DINGTALK_TOOL_HOST_NS", "devbox"),
+            session_tools_override=_env_list("WING_SESSION_TOOLS") or None,
+            expected_tool_refs=_env_list("WING_EXPECTED_TOOL_REFS"),
             ack_emoji=_env("WING_DINGTALK_ACK_EMOJI", "👌"),
             log_level=_env("WING_DINGTALK_LOG_LEVEL", "INFO"),
         )
+
+    # 远程工具宿主的六个标准工具名。
+    _STANDARD_TOOLS = ("Bash", "Read", "Write", "Edit", "Glob", "Grep")
+    # TodoWrite 是后端内置工具，重启后模板必然持有它——保证 LLM 的 tools
+    # 参数永不为空（部分推理引擎对空 tools 直接不解析工具字段），
+    # 使 resume 热切换注入的 System Reminder（含远程工具 schema）可达。
+    _ANCHOR_TOOLS = ("TodoWrite",)
+
+    def session_tools(self) -> list[str]:
+        """会话显式工具集——create session 时作为 agent override 下发。
+
+        不依赖 gateway 模板 fallback：远程工具须已注册（link 就绪保证），
+        此处按命名空间构造引用；WING_SESSION_TOOLS 可整体覆盖。
+        """
+        if self.session_tools_override:
+            return list(self.session_tools_override)
+        tools = [f"{self.tool_host_ns}.{name}" for name in self._STANDARD_TOOLS]
+        tools.append(f"{self.tool_client_id}.SendFile")
+        tools.extend(self._ANCHOR_TOOLS)
+        return tools
+
+    def required_tool_refs(self) -> list[str]:
+        """链路就绪前必须注册的工具引用（会话工具集的子集即可定位宿主）。"""
+        if self.expected_tool_refs:
+            return list(self.expected_tool_refs)
+        return [f"{self.tool_host_ns}.Bash", f"{self.tool_client_id}.SendFile"]
 
     def validate(self) -> None:
         """启动前校验——缺失关键配置直接 fail fast。"""

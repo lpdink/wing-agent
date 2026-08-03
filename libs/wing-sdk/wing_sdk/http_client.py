@@ -125,6 +125,7 @@ class GatewayClient:
         reasoning_effort: str | None = None,
         yolo: bool | None = None,
         workspace: str | None = None,
+        tools: list[str] | None = None,
     ) -> dict:
         body: dict[str, Any] = {"session_id": session_id}
         for key, value in [
@@ -136,6 +137,7 @@ class GatewayClient:
             ("reasoning_effort", reasoning_effort),
             ("yolo", yolo),
             ("workspace", workspace),
+            ("tools", tools),
         ]:
             if value is not None:
                 body[key] = value
