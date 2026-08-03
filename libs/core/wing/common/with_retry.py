@@ -93,9 +93,7 @@ def with_retry(
                             f"call {fn_name} failed (attempt {attempt + 1}): {type(e).__name__}: {e}, retrying..."
                         )
                         delay = min(base_delay * (2**attempt), resolved_max_delay)
-                        _emit_retry_event(
-                            attempt, resolved_retries, fn_name, e, delay
-                        )
+                        _emit_retry_event(attempt, resolved_retries, fn_name, e, delay)
                         await asyncio.sleep(delay)
                 raise last_exc  # ty: ignore # unreachable
 
@@ -123,9 +121,7 @@ def with_retry(
                         f"call {fn_name} failed (attempt {attempt + 1}): {type(e).__name__}: {e}, retrying..."
                     )
                     delay = min(base_delay * (2**attempt), resolved_max_delay)
-                    _emit_retry_event(
-                        attempt, resolved_retries, fn_name, e, delay
-                    )
+                    _emit_retry_event(attempt, resolved_retries, fn_name, e, delay)
                     await asyncio.sleep(delay)
 
         return async_gen_wrapper

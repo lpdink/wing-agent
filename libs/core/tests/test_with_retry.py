@@ -85,7 +85,9 @@ class TestRetryDelayCap:
 
     def test_delay_clamped_to_max_delay(self):
         """延迟不超过 max_delay，且超过上限后保持在上限。"""
-        provider = FakeProvider(config=FakeConfig(max_retries=10, max_retry_delay=180.0))
+        provider = FakeProvider(
+            config=FakeConfig(max_retries=10, max_retry_delay=180.0)
+        )
         obj = _AsyncCallable(provider, fail_times=10)
 
         sleeps = []
@@ -132,7 +134,9 @@ class TestRetryConfigurable:
 
     def test_config_max_retries_used_when_passed(self):
         """显式传入 max_retries 时以显式值为准（不读 config）。"""
-        provider = FakeProvider(config=FakeConfig(max_retries=10, max_retry_delay=180.0))
+        provider = FakeProvider(
+            config=FakeConfig(max_retries=10, max_retry_delay=180.0)
+        )
 
         class Explicit:
             def __init__(self, provider):
