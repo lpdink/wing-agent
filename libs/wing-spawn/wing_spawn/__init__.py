@@ -12,6 +12,10 @@ ephemeral coding agent. It:
 The container is a *pure executor*: no interpreter sits inside it, so the
 parent agent survives the child's lifetime. Reusing the parent's network
 stack means no extra network wiring is needed.
+
+In `--async` mode the goal is submitted, a detached watcher waits for the
+result, and the parent can observe progress via `wing-spawn status` /
+`wing-spawn list` and be notified via a completion callback.
 """
 
 from wing_spawn.containers import (
