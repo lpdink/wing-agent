@@ -49,3 +49,15 @@ pub fn print_json_compact<T: serde::Serialize>(value: &T) {
         Err(e) => eprintln!("error: failed to serialize JSON: {e}"),
     }
 }
+
+/// Truncate a string to at most `max` characters (Unicode-safe).
+/// Appends "..." if truncated. Avoids splitting multi-byte characters.
+pub fn truncate_chars(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(3);
+    let truncated: String = chars.into_iter().take(keep).collect();
+    format!("{truncated}...")
+}

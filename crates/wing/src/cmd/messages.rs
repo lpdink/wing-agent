@@ -188,11 +188,7 @@ fn print_messages(messages: &[&Value], filter: &str) {
             println!();
             println!("  ← {tool_call_id}");
             // Truncate long tool results.
-            let display = if content.len() > 500 {
-                format!("{}...", &content[..497])
-            } else {
-                content.to_string()
-            };
+            let display = common::truncate_chars(content, 500);
             println!("  {display}");
         }
     }

@@ -101,10 +101,8 @@ fn print_tools(resp: &ToolsListResponse) {
     for tool in &resp.tools {
         let desc: String = if tool.description.is_empty() {
             "-".to_string()
-        } else if tool.description.len() > 40 {
-            format!("{}...", &tool.description[..37])
         } else {
-            tool.description.clone()
+            common::truncate_chars(&tool.description, 40)
         };
         println!(
             "{:<name_w$} {:<ns_w$} {desc}",

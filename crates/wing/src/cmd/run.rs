@@ -150,11 +150,7 @@ fn print_text(output: &RunOutput) {
         println!("workspace:   {ws}");
     }
     // Truncate prompt for display if too long.
-    let prompt_display = if output.prompt.len() > 80 {
-        format!("{}...", &output.prompt[..77])
-    } else {
-        output.prompt.clone()
-    };
+    let prompt_display = common::truncate_chars(&output.prompt, 80);
     println!("prompt:      {prompt_display}");
     println!("started_at:  {}", output.started_at);
 }

@@ -140,10 +140,7 @@ fn print_session_info(info: &SessionInfoResponse) {
     println!("  context_window:     {}", info.context_window_tokens);
 }
 
+/// Truncate a string to at most `max` chars (Unicode-safe, delegates to common).
 fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    } else {
-        s.to_string()
-    }
+    common::truncate_chars(s, max)
 }

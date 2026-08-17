@@ -293,11 +293,7 @@ fn print_text(output: &WaitOutput) {
         println!("  is_error:   {}", r.is_error);
         println!("  num_turns:  {}", r.num_turns);
         // Truncate long results for display.
-        let result_display = if r.result.len() > 200 {
-            format!("{}...", &r.result[..197])
-        } else {
-            r.result.clone()
-        };
+        let result_display = common::truncate_chars(&r.result, 200);
         println!("  last_text:  {result_display}");
         println!();
     }
