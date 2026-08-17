@@ -199,9 +199,13 @@ class Session:
         cm = self._context_manager
         agent = self._agent
 
-        # 1. model 覆盖（provider 显式传当前实例——set_model 两参必填）
+        # 1. model 覆盖（若指定 provider 则切换 provider，否则用当前）
         if override.model is not None:
-            agent.set_model(override.model, agent.model_provider)
+            if override.provider is not None:
+                provider = agent.get_or_create_provider(override.provider)
+            else:
+                provider = agent.model_provider
+            agent.set_model(override.model, provider)
 
         # 2. system_prompt 替换（先替换，后追加，保证顺序正确）
         if override.system_prompt is not None:
@@ -230,7 +234,8 @@ class Session:
 
         log.info(
             f"Session {self._session_id}: applied agent override "
-            f"(model={override.model}, tools={override.tools}, "
+            f"(model={override.model}, provider={override.provider}, "
+            f"tools={override.tools}, "
             f"max_turns={override.max_turns}, effort={override.effort}, "
             f"yolo={override.yolo})"
         )
