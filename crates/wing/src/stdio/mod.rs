@@ -355,6 +355,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
 
         let override_ = AgentOverride {
             model: args.model.clone(),
+            provider: None,
             system_prompt: args.system_prompt.clone(),
             append_system_prompt: args.append_system_prompt.clone(),
             tools: Some(vec![

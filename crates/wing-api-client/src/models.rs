@@ -44,6 +44,10 @@ pub struct AgentInfo {
 pub struct AgentOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Provider name (references config `providers[].name`).
+    /// When set with `model`, switches to that provider's endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
