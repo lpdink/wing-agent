@@ -15,7 +15,6 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use serde::Serialize;
@@ -72,10 +71,7 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
             .collect::<Vec<String>>()
     });
 
-    let started_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs().to_string())
-        .unwrap_or_default();
+    let started_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     let (session_id, template_name, resolved_workspace) = if let Some(ref resume_id) = args.resume {
         let resp = http.resume_session(resume_id).await?;
@@ -108,12 +104,11 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
     };
 
     // 3. Send prompt (non-blocking — the HTTP call returns immediately,
-    //    the agent processes asynchronously).
-    if args.resume.is_none() {
-        http.send_message(&session_id, &args.prompt, None)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to send prompt: {e}"))?;
-    }
+    //    the agent processes asynchronously). Always sent, including on
+    //    resume: `wing run -r <sid> -p "next task"` resumes + sends.
+    http.send_message(&session_id, &args.prompt, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to send prompt: {e}"))?;
 
     // 4. Fetch session info for model/tools display.
     let (model, tools_list) = match http.get_session_info(&session_id).await {

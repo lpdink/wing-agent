@@ -38,6 +38,7 @@ dirs = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 url = { workspace = true }
+chrono = { workspace = true }
 wing-api-client = { path = "../wing-api-client" }
 
 [dev-dependencies]

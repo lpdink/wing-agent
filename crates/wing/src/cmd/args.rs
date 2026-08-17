@@ -41,10 +41,6 @@ pub struct RunArgs {
     #[arg(long = "effort")]
     pub effort: Option<String>,
 
-    /// Skip dangerous command review (YOLO mode).
-    #[arg(long = "yolo")]
-    pub yolo: bool,
-
     /// Override tools (comma-separated). If not set, uses template defaults.
     #[arg(long = "tools")]
     pub tools: Option<String>,

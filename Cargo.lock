@@ -3018,6 +3018,7 @@ name = "wing"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "crossterm",
  "dirs",

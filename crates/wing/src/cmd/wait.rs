@@ -1,4 +1,8 @@
-//! `wing wait` — block until specified sessions finish.
+//! `wing wait` — block until specified sessions reach idle.
+//!
+//! Semantics: **wait for idle**. A session is "done" when its status
+//! becomes `idle` or `inactive`. We do not distinguish "task hasn't
+//! started yet" from "task already finished" — if it's idle, it's done.
 //!
 //! Uses a hybrid approach: subscribes to session events via WebSocket
 //! for fast TurnResult notification, and polls HTTP `/api/session/info`
@@ -36,7 +40,7 @@ struct SessionResult {
     subtype: String,
     is_error: bool,
     result: String,
-    num_turns: i64,
+    num_messages: i64,
 }
 
 /// Output of `wing wait`.
@@ -98,24 +102,24 @@ async fn wait_inner(session_ids: &[String], timeout_secs: u64) -> Result<WaitOut
 
     // 5. Initialize tracking state.
     let mut pending: HashSet<String> = session_ids.iter().cloned().collect();
-    let mut seen_working: HashSet<String> = HashSet::new();
     let mut results: Vec<SessionResult> = Vec::new();
 
-    // Track sessions that were initially idle (possible race: not started yet).
-    let mut idle_since: std::collections::HashMap<String, std::time::Instant> =
-        std::collections::HashMap::new();
-
-    // 6. Check initial status.
+    // 6. Check initial status — "wait for idle" means idle/inactive → done now.
     for sid in session_ids {
         match http.get_session_info(sid).await {
             Ok(info) => {
-                let status = info.status.as_str();
-                if status == "working" || status == "waiting" {
-                    seen_working.insert(sid.clone());
-                } else if status == "idle" || status == "inactive" {
-                    // Might be done already, or might not have started yet.
-                    // Record the time we first saw idle.
-                    idle_since.insert(sid.clone(), std::time::Instant::now());
+                if is_idle(&info.status) {
+                    // Already idle — fetch result and mark done.
+                    let (result_text, num_messages) = fetch_last_result(&http, sid).await;
+                    results.push(SessionResult {
+                        session_id: sid.clone(),
+                        status: info.status,
+                        subtype: "success".into(),
+                        is_error: false,
+                        result: result_text,
+                        num_messages,
+                    });
+                    pending.remove(sid);
                 }
             }
             Err(e) => {
@@ -127,7 +131,7 @@ async fn wait_inner(session_ids: &[String], timeout_secs: u64) -> Result<WaitOut
                     subtype: "error".into(),
                     is_error: true,
                     result: format!("failed to get session info: {e}"),
-                    num_turns: 0,
+                    num_messages: 0,
                 });
                 pending.remove(sid);
             }
@@ -152,7 +156,7 @@ async fn wait_inner(session_ids: &[String], timeout_secs: u64) -> Result<WaitOut
                     subtype: "timeout".into(),
                     is_error: true,
                     result: format!("timed out after {timeout_secs}s"),
-                    num_turns: 0,
+                    num_messages: 0,
                 });
             }
             break;
@@ -178,7 +182,7 @@ async fn wait_inner(session_ids: &[String], timeout_secs: u64) -> Result<WaitOut
                                 subtype,
                                 is_error,
                                 result: result.unwrap_or_default(),
-                                num_turns,
+                                num_messages: num_turns,
                             });
                         }
                     }
@@ -191,51 +195,24 @@ async fn wait_inner(session_ids: &[String], timeout_secs: u64) -> Result<WaitOut
             }
 
             // HTTP polling path: safety net (every 1s).
+            // "Wait for idle": if status is idle/inactive → done.
             _ = poll_timer.tick() => {
                 let to_check: Vec<String> = pending.iter().cloned().collect();
                 for sid in to_check {
-                    match http.get_session_info(&sid).await {
-                        Ok(info) => {
-                            let status = info.status.as_str();
-                            if status == "working" || status == "waiting" {
-                                seen_working.insert(sid.clone());
-                                // Reset idle_since if it was tracking.
-                                idle_since.remove(&sid);
-                            } else if status == "idle" || status == "inactive" {
-                                // Session is idle. Two cases:
-                                // a) We've seen it working → done.
-                                // b) Never seen working → maybe hasn't started yet.
-                                //    Wait 3s grace period before declaring done.
-                                let should_finish = if seen_working.contains(&sid) {
-                                    true
-                                } else {
-                                    // Check grace period.
-                                    let first_idle = idle_since
-                                        .entry(sid.clone())
-                                        .or_insert(std::time::Instant::now());
-                                    first_idle.elapsed() > Duration::from_secs(3)
-                                };
-
-                                if should_finish {
-                                    pending.remove(&sid);
-                                    idle_since.remove(&sid);
-                                    // Try to get last result via session/get.
-                                    let (result_text, num_turns) =
-                                        fetch_last_result(&http, &sid).await;
-                                    results.push(SessionResult {
-                                        session_id: sid,
-                                        status: status.to_string(),
-                                        subtype: "success".into(),
-                                        is_error: false,
-                                        result: result_text,
-                                        num_turns,
-                                    });
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Poll failed for {sid}: {e}");
-                        }
+                    if let Ok(info) = http.get_session_info(&sid).await
+                        && is_idle(&info.status)
+                    {
+                        pending.remove(&sid);
+                        let (result_text, num_messages) =
+                            fetch_last_result(&http, &sid).await;
+                        results.push(SessionResult {
+                            session_id: sid,
+                            status: info.status,
+                            subtype: "success".into(),
+                            is_error: false,
+                            result: result_text,
+                            num_messages,
+                        });
                     }
                 }
             }
@@ -264,6 +241,11 @@ async fn wait_inner(session_ids: &[String], timeout_secs: u64) -> Result<WaitOut
     Ok(WaitOutput { results: ordered })
 }
 
+/// A session is idle (done) if its status is `idle` or `inactive`.
+fn is_idle(status: &str) -> bool {
+    status == "idle" || status == "inactive"
+}
+
 /// Fetch the last assistant message from a session as a best-effort result.
 async fn fetch_last_result(http: &GatewayApiClient, sid: &str) -> (String, i64) {
     match http.get_session(sid).await {
@@ -287,14 +269,14 @@ async fn fetch_last_result(http: &GatewayApiClient, sid: &str) -> (String, i64) 
 
 fn print_text(output: &WaitOutput) {
     for r in &output.results {
-        println!("session_id: {}", r.session_id);
-        println!("  status:     {}", r.status);
-        println!("  result:     {}", r.subtype);
-        println!("  is_error:   {}", r.is_error);
-        println!("  num_turns:  {}", r.num_turns);
+        println!("session_id:   {}", r.session_id);
+        println!("  status:       {}", r.status);
+        println!("  result:       {}", r.subtype);
+        println!("  is_error:     {}", r.is_error);
+        println!("  num_messages: {}", r.num_messages);
         // Truncate long results for display.
         let result_display = common::truncate_chars(&r.result, 200);
-        println!("  last_text:  {result_display}");
+        println!("  last_text:    {result_display}");
         println!();
     }
 }

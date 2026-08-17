@@ -40,7 +40,10 @@ def _mock_config():
         providers=[
             ProviderConfig(
                 name="default", base_url="https://api.example.com", api_key="test"
-            )
+            ),
+            ProviderConfig(
+                name="alt", base_url="https://api.alt.com", api_key="test-alt"
+            ),
         ],
         agents=[
             AgentConfig(

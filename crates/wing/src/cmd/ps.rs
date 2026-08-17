@@ -20,14 +20,7 @@ pub async fn run_ps(all: bool, json: bool, watch: bool) -> ExitCode {
     }
     match fetch_sessions().await {
         Ok(sessions) => {
-            let filtered = if all {
-                sessions
-            } else {
-                sessions
-                    .into_iter()
-                    .filter(|s| s.status != "inactive")
-                    .collect()
-            };
+            let filtered = filter_sessions(sessions, all);
             if json {
                 common::print_json_compact(&filtered);
             } else {
@@ -43,18 +36,27 @@ pub async fn run_ps(all: bool, json: bool, watch: bool) -> ExitCode {
 }
 
 /// Watch mode: clear screen and reprint every 2 seconds.
+/// Creates the HTTP client once, then polls in a loop.
 async fn run_ps_watch(all: bool, json: bool) -> ExitCode {
+    let (host, port) = match common::ensure_gateway().await {
+        Ok(hp) => hp,
+        Err(e) => {
+            eprintln!("wing ps error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let http = match common::create_api_client(&host, port) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("wing ps error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     loop {
-        match fetch_sessions().await {
-            Ok(sessions) => {
-                let filtered = if all {
-                    sessions
-                } else {
-                    sessions
-                        .into_iter()
-                        .filter(|s| s.status != "inactive")
-                        .collect()
-                };
+        match http.list_sessions().await {
+            Ok(resp) => {
+                let filtered = filter_sessions(resp.sessions, all);
                 // Clear screen.
                 print!("\x1b[2J\x1b[H");
                 if json {
@@ -89,6 +91,18 @@ pub async fn run_info(session_id: &str, json: bool) -> ExitCode {
     }
 }
 
+/// Filter sessions: `all=true` keeps everything; otherwise drop `inactive`.
+fn filter_sessions(sessions: Vec<SessionInfo>, all: bool) -> Vec<SessionInfo> {
+    if all {
+        sessions
+    } else {
+        sessions
+            .into_iter()
+            .filter(|s| s.status != "inactive")
+            .collect()
+    }
+}
+
 async fn fetch_sessions() -> Result<Vec<SessionInfo>> {
     let (host, port) = common::ensure_gateway().await?;
     let http = common::create_api_client(&host, port)?;
@@ -111,23 +125,23 @@ fn print_sessions_table(sessions: &[SessionInfo]) {
     // Column widths.
     let id_w = 30;
     let status_w = 10;
-    let model_w = 20;
+    let last_w = 20;
     let name_w = 30;
 
     // Header.
     println!(
-        "{:id_w$} {:<status_w$} {:<model_w$} {:<name_w$}",
+        "{:id_w$} {:<status_w$} {:<last_w$} {:<name_w$}",
         "SESSION ID", "STATUS", "LAST INTERACTION", "NAME",
     );
-    println!("{}", "-".repeat(id_w + status_w + model_w + name_w + 3));
+    println!("{}", "-".repeat(id_w + status_w + last_w + name_w + 3));
 
     for s in sessions {
         let id = truncate_str(&s.id, id_w);
         let status = truncate_str(&s.status, status_w);
-        let last = truncate_str(s.last_interaction.as_deref().unwrap_or("-"), model_w);
+        let last = truncate_str(s.last_interaction.as_deref().unwrap_or("-"), last_w);
         let name = truncate_str(s.name.as_deref().unwrap_or("-"), name_w);
         println!(
-            "{:id_w$} {:<status_w$} {:<model_w$} {:<name_w$}",
+            "{:id_w$} {:<status_w$} {:<last_w$} {:<name_w$}",
             id, status, last, name
         );
     }

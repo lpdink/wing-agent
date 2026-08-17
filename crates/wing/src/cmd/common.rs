@@ -57,7 +57,11 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
     if chars.len() <= max {
         return s.to_string();
     }
-    let keep = max.saturating_sub(3);
+    // Not enough room for ellipsis — just take what fits.
+    if max <= 3 {
+        return chars.into_iter().take(max).collect();
+    }
+    let keep = max - 3;
     let truncated: String = chars.into_iter().take(keep).collect();
     format!("{truncated}...")
 }
