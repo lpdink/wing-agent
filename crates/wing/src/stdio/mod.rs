@@ -90,6 +90,8 @@ pub struct StdioArgs {
     pub append_system_prompt: Option<String>,
     pub max_turns: Option<u32>,
     pub effort: Option<String>,
+    pub provider: Option<String>,
+    pub tools: Option<String>,
     pub output_format: OutputFormat,
     pub input_format: InputFormat,
     pub yolo: bool,
@@ -347,23 +349,29 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to resume session: {e}"))?;
         tracing::info!(session_id = %resp.session_id, "session resumed");
+        // Print session_id to stderr so it doesn't pollute stdout
+        // (which carries the Claude Code protocol stream).
+        eprintln!("session_id: {}", resp.session_id);
         resp.session_id
     } else {
         let workspace = std::env::current_dir()
             .ok()
             .map(|p| p.to_string_lossy().to_string());
 
+        // Parse --tools (comma-separated) if provided; None = use template defaults.
+        let tools = args.tools.as_ref().map(|s| {
+            s.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<String>>()
+        });
+
         let override_ = AgentOverride {
             model: args.model.clone(),
-            provider: None,
+            provider: args.provider.clone(),
             system_prompt: args.system_prompt.clone(),
             append_system_prompt: args.append_system_prompt.clone(),
-            tools: Some(vec![
-                "Read".into(),
-                "Write".into(),
-                "Edit".into(),
-                "Bash".into(),
-            ]),
+            tools,
             max_turns: args.max_turns,
             effort: args.effort.clone(),
             yolo: Some(true),
@@ -381,6 +389,8 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create session: {e}"))?;
         tracing::info!(session_id = %resp.session_id, "session created");
+        // Print session_id to stderr for recovery/reference.
+        eprintln!("session_id: {}", resp.session_id);
         resp.session_id
     };
 

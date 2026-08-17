@@ -14,11 +14,18 @@ use crate::tui;
 use crate::util::logging::init_logging;
 use wing_api_client::GatewayClient as GatewayApiClient;
 
+pub mod args;
 pub(crate) mod backend_config;
+pub mod common;
 mod discover;
+pub mod messages;
+pub mod ps;
+pub mod query;
+pub mod run;
 pub(crate) mod start;
 mod status;
 mod stop;
+pub mod wait;
 
 /// wing — AI agent CLI
 #[derive(Parser, Debug)]
@@ -44,6 +51,14 @@ pub struct Cli {
     /// Override model name.
     #[arg(short = 'm', long = "model")]
     pub model: Option<String>,
+
+    /// Override provider name (references config `providers[].name`).
+    #[arg(long = "provider")]
+    pub provider: Option<String>,
+
+    /// Override tools (comma-separated). If not set, uses template defaults.
+    #[arg(long = "tools")]
+    pub tools: Option<String>,
 
     /// Resume an existing session by ID.
     #[arg(short = 'r', long = "resume")]
@@ -76,6 +91,15 @@ pub struct Cli {
     /// Skip dangerous command review (YOLO mode).
     #[arg(long = "yolo")]
     pub yolo: bool,
+
+    // ---- global output flags (available to all subcommands) ----
+    /// Output JSON (for agent consumption). Default is table/text.
+    #[arg(global = true, long = "json")]
+    pub json: bool,
+
+    /// Watch mode: refresh every 2 seconds.
+    #[arg(global = true, short = 'w', long = "watch")]
+    pub watch: bool,
 }
 
 impl Cli {
@@ -122,6 +146,67 @@ pub enum Command {
 
     /// Show gateway daemon status.
     Status,
+
+    /// Launch a task in the background (non-blocking).
+    ///
+    /// Creates a session, sends the prompt, and returns immediately
+    /// with the session ID. Use `wing wait` to block until completion.
+    Run(args::RunArgs),
+
+    /// Block until specified sessions finish.
+    ///
+    /// Accepts multiple session IDs. Polls session status via HTTP
+    /// and listens for TurnResult events via WebSocket. Returns when
+    /// all sessions reach a terminal state (idle/inactive).
+    Wait {
+        /// Session IDs to wait for (space-separated).
+        session_ids: Vec<String>,
+        /// Maximum wait time in seconds (default 600).
+        #[arg(long, default_value = "600")]
+        timeout: u64,
+    },
+
+    /// List all sessions.
+    Ps,
+
+    /// Show session runtime info (model, tools, tokens, status).
+    Info {
+        /// Session ID.
+        session_id: String,
+    },
+
+    /// Show last N messages from a session (like `tail`).
+    Tail {
+        /// Session ID.
+        session_id: String,
+        /// Number of messages to show (default 10).
+        #[arg(short = 'n', long, default_value = "10")]
+        n: usize,
+        /// Filter by type: all|user|assistant|tool_call|tool_result|reasoning|content.
+        #[arg(short = 't', long, default_value = "all")]
+        filter: String,
+    },
+
+    /// Show first N messages from a session (like `head`).
+    Head {
+        /// Session ID.
+        session_id: String,
+        /// Number of messages to show (default 10).
+        #[arg(short = 'n', long, default_value = "10")]
+        n: usize,
+        /// Filter by type: all|user|assistant|tool_call|tool_result|reasoning|content.
+        #[arg(short = 't', long, default_value = "all")]
+        filter: String,
+    },
+
+    /// List available models (grouped by provider).
+    Models,
+
+    /// List available tools.
+    Tools,
+
+    /// List available agent templates.
+    Agents,
 }
 
 /// Dispatch CLI command.
@@ -178,6 +263,26 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                 status::show_status().await;
                 ExitCode::SUCCESS
             }
+            Command::Run(args) => crate::cmd::run::run(args, cli.json).await,
+            Command::Wait {
+                session_ids,
+                timeout,
+            } => crate::cmd::wait::run_wait(&session_ids, timeout, cli.json).await,
+            Command::Ps => crate::cmd::ps::run_ps(cli.json, cli.watch).await,
+            Command::Info { session_id } => crate::cmd::ps::run_info(&session_id, cli.json).await,
+            Command::Tail {
+                session_id,
+                n,
+                filter,
+            } => crate::cmd::messages::run_tail(&session_id, n, &filter, cli.json).await,
+            Command::Head {
+                session_id,
+                n,
+                filter,
+            } => crate::cmd::messages::run_head(&session_id, n, &filter, cli.json).await,
+            Command::Models => crate::cmd::query::run_models(cli.json).await,
+            Command::Tools => crate::cmd::query::run_tools(cli.json).await,
+            Command::Agents => crate::cmd::query::run_agents(cli.json).await,
         },
         None => {
             // Smart default: auto-start gateway if needed, then enter TUI.
@@ -215,6 +320,8 @@ async fn dispatch_stdio(cli: Cli) -> ExitCode {
         append_system_prompt: cli.append_system_prompt,
         max_turns: cli.max_turns,
         effort: cli.effort,
+        provider: cli.provider,
+        tools: cli.tools,
         output_format,
         input_format,
         yolo: cli.yolo,
