@@ -166,8 +166,12 @@ pub enum Command {
         timeout: u64,
     },
 
-    /// List all sessions.
-    Ps,
+    /// List sessions (active only by default; use --all for all).
+    Ps {
+        /// Show all sessions including inactive ones.
+        #[arg(long = "all")]
+        all: bool,
+    },
 
     /// Show session runtime info (model, tools, tokens, status).
     Info {
@@ -268,7 +272,7 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                 session_ids,
                 timeout,
             } => crate::cmd::wait::run_wait(&session_ids, timeout, cli.json).await,
-            Command::Ps => crate::cmd::ps::run_ps(cli.json, cli.watch).await,
+            Command::Ps { all } => crate::cmd::ps::run_ps(all, cli.json, cli.watch).await,
             Command::Info { session_id } => crate::cmd::ps::run_info(&session_id, cli.json).await,
             Command::Tail {
                 session_id,

@@ -14,16 +14,24 @@ use wing_api_client::models::{SessionInfo, SessionInfoResponse};
 use super::common;
 
 /// Entry point for `wing ps`.
-pub async fn run_ps(json: bool, watch: bool) -> ExitCode {
+pub async fn run_ps(all: bool, json: bool, watch: bool) -> ExitCode {
     if watch {
-        return run_ps_watch(json).await;
+        return run_ps_watch(all, json).await;
     }
     match fetch_sessions().await {
         Ok(sessions) => {
-            if json {
-                common::print_json_compact(&sessions);
+            let filtered = if all {
+                sessions
             } else {
-                print_sessions_table(&sessions);
+                sessions
+                    .into_iter()
+                    .filter(|s| s.status != "inactive")
+                    .collect()
+            };
+            if json {
+                common::print_json_compact(&filtered);
+            } else {
+                print_sessions_table(&filtered);
             }
             ExitCode::SUCCESS
         }
@@ -35,16 +43,24 @@ pub async fn run_ps(json: bool, watch: bool) -> ExitCode {
 }
 
 /// Watch mode: clear screen and reprint every 2 seconds.
-async fn run_ps_watch(json: bool) -> ExitCode {
+async fn run_ps_watch(all: bool, json: bool) -> ExitCode {
     loop {
         match fetch_sessions().await {
             Ok(sessions) => {
+                let filtered = if all {
+                    sessions
+                } else {
+                    sessions
+                        .into_iter()
+                        .filter(|s| s.status != "inactive")
+                        .collect()
+                };
                 // Clear screen.
                 print!("\x1b[2J\x1b[H");
                 if json {
-                    common::print_json_compact(&sessions);
+                    common::print_json_compact(&filtered);
                 } else {
-                    print_sessions_table(&sessions);
+                    print_sessions_table(&filtered);
                 }
             }
             Err(e) => {
