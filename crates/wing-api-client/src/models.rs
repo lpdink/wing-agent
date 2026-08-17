@@ -44,6 +44,10 @@ pub struct AgentInfo {
 pub struct AgentOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Provider name (references config `providers[].name`).
+    /// When set with `model`, switches to that provider's endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -134,7 +138,7 @@ pub struct RewindRequest {
 // Response types
 // ============================================================
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSessionResponse {
     pub session_id: String,
     pub template_name: String,
@@ -145,37 +149,37 @@ pub struct CreateSessionResponse {
     pub backend: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResumeSessionResponse {
     pub session_id: String,
     pub template_name: Option<String>,
     pub workspace: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForkSessionResponse {
     pub session_id: String,
     pub draft: Option<String>,
 }
 
 /// 通用成功响应。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OkResponse {
     pub ok: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendMessageResponse {
     pub ok: bool,
     pub request_id: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionListResponse {
     pub sessions: Vec<SessionInfo>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionGetResponse {
     pub session_id: String,
     pub name: Option<String>,
@@ -187,7 +191,7 @@ pub struct SessionGetResponse {
     pub agent: Option<AgentInfo>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthResponse {
     pub service: String,
     pub status: String,
@@ -200,14 +204,14 @@ pub struct HealthResponse {
 // ============================================================
 
 /// 上下文统计信息。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextStatsInfo {
     pub message_count: i64,
     pub total_tokens: i64,
 }
 
 /// GET /api/session/info 响应——session 运行时状态。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfoResponse {
     pub model: String,
     pub api_url: String,
@@ -230,7 +234,7 @@ pub struct SessionInfoResponse {
 }
 
 /// POST /api/session/compact 响应。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactResponse {
     pub ok: bool,
     #[serde(default)]
@@ -240,14 +244,14 @@ pub struct CompactResponse {
 }
 
 /// POST /api/session/rewind 响应。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RewindResponse {
     pub ok: bool,
     pub draft: Option<String>,
 }
 
 /// reload 端点中每一项的结果。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReloadResultItem {
     pub name: String,
     pub ok: bool,
@@ -255,7 +259,7 @@ pub struct ReloadResultItem {
 }
 
 /// POST /api/system/reload 响应。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReloadResponse {
     pub ok: bool,
     #[serde(default)]
@@ -263,7 +267,7 @@ pub struct ReloadResponse {
 }
 
 /// 单个可分叉/回退的消息节点信息。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchTargetInfo {
     pub uuid: String,
     pub content: String,
@@ -276,7 +280,7 @@ fn default_role() -> String {
 }
 
 /// GET /api/session/branches 响应——可回退/分叉的消息节点列表。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchesResponse {
     #[serde(default)]
     pub targets: Vec<BranchTargetInfo>,
@@ -309,7 +313,7 @@ pub struct UpdateSessionRequest {
 }
 
 /// POST /api/session/update 响应。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSessionResponse {
     pub ok: bool,
 }
@@ -319,7 +323,7 @@ pub struct UpdateSessionResponse {
 // ============================================================
 
 /// 魔术命令元信息。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandInfo {
     pub name: String,
     #[serde(default)]
@@ -331,14 +335,14 @@ pub struct CommandInfo {
 }
 
 /// GET /api/commands 响应——可用命令列表。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandsResponse {
     #[serde(default)]
     pub commands: Vec<CommandInfo>,
 }
 
 /// 单个 provider 的可用模型（嵌套模型列表条目）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderModels {
     pub provider: String,
     #[serde(default)]
@@ -346,14 +350,14 @@ pub struct ProviderModels {
 }
 
 /// GET /api/models 响应——可用模型列表（按 provider 分组嵌套）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelsResponse {
     #[serde(default)]
     pub providers: Vec<ProviderModels>,
 }
 
 /// GET /api/agents 响应——可用 agent 模板列表。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentsResponse {
     #[serde(default)]
     pub agents: Vec<String>,
@@ -361,7 +365,7 @@ pub struct AgentsResponse {
 }
 
 /// 服务端返回的错误详情（HTTP 4xx/5xx 时反序列化）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub error: String,
     pub detail: Option<String>,
@@ -406,7 +410,7 @@ pub struct RegisterToolsRequest {
 }
 
 /// POST /api/tools/register 响应。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterToolsResponse {
     pub ok: bool,
     #[serde(default)]
@@ -418,7 +422,7 @@ pub struct RegisterToolsResponse {
 // ============================================================
 
 /// Gateway → tool host 的工具调用请求帧。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WsToolCallRequest {
     #[serde(rename = "type")]
     pub frame_type: String,
@@ -456,4 +460,28 @@ impl WsToolCallResult {
             is_error: true,
         }
     }
+}
+
+// ============================================================
+// Tools list — GET /api/tools
+// ============================================================
+
+/// Single tool metadata (mirrors Python `wing.gateway.protocol.ToolInfo`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolInfo {
+    #[serde(rename = "ref")]
+    pub ref_field: String,
+    #[serde(default)]
+    pub namespace: String,
+    pub name: String,
+    pub llm_name: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// GET /api/tools response — all registered tools (built-in + remote).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolsListResponse {
+    #[serde(default)]
+    pub tools: Vec<ToolInfo>,
 }

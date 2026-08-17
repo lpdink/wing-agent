@@ -381,10 +381,10 @@ async def compact_session(
     server = _get_server(request)
     try:
         original, compressed = await asyncio.wait_for(
-            server.runtime.compact_session(body.session_id), timeout=60.0
+            server.runtime.compact_session(body.session_id), timeout=1200.0
         )
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="compact timed out (60s)")
+        raise HTTPException(status_code=504, detail="compact timed out (1200s)")
     except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
     except RuntimeError as e:

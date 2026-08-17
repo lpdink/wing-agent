@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import httpx
 
-# 对齐旧 OpenAI SDK 默认（openai/_constants.py: DEFAULT_TIMEOUT =
-# httpx.Timeout(60.0, connect=5.0)）：替换 SDK 前的代码未向 AsyncOpenAI 传
-# timeout，底层即走该默认。实际生效的超时由调用侧 asyncio.wait_for
-# （timeout_first_chunk / timeout_total）控制，httpx 层超时是底层兜底。
-_DEFAULT_TIMEOUT = 60.0
+# httpx 层超时是底层兜底——必须 > 应用层 timeout_total（默认 600s），
+# 否则非流式调用（如压缩 LLM decode）会在 httpx 层被杀，先于 asyncio.wait_for
+# 的 timeout_total 触发。设 1200s（2x timeout_total）确保不干扰应用层控制。
+# 实际生效的超时由调用侧 asyncio.wait_for
+# （timeout_first_chunk / timeout_total）控制。
+_DEFAULT_TIMEOUT = 1200.0
 _CONNECT_TIMEOUT = 5.0
 
 

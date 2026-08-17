@@ -63,6 +63,29 @@ class TestApplyAgentOverride:
         assert session.agent.model != original_model
 
     @pytest.mark.asyncio
+    async def test_override_model_with_provider(self, runtime: Any):
+        """model + provider 覆盖：切换到指定 provider 后 set_model。"""
+        session = runtime.create_session()
+        original_provider_name = session.agent.model_provider.name
+
+        # Switch to the "alt" provider (added in conftest mock config).
+        override = AgentOverride(model="qwen-max", provider="alt")
+        session.apply_agent_override(override)
+
+        assert session.agent.model == "qwen-max"
+        assert session.agent.model_provider.name == "alt"
+        assert session.agent.model_provider.name != original_provider_name
+
+    @pytest.mark.asyncio
+    async def test_override_model_with_unknown_provider_raises(self, runtime: Any):
+        """指定不存在的 provider 名应抛 ValueError。"""
+        session = runtime.create_session()
+
+        override = AgentOverride(model="gpt-4o", provider="nonexistent")
+        with pytest.raises(ValueError, match="provider 'nonexistent' not found"):
+            session.apply_agent_override(override)
+
+    @pytest.mark.asyncio
     async def test_override_system_prompt_replace(self, runtime: Any):
         """system_prompt 替换 setin_system_prompt。"""
         session = runtime.create_session()

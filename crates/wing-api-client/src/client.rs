@@ -321,6 +321,20 @@ impl GatewayClient {
         Ok(resp.json().await?)
     }
 
+    /// 获取全局工具列表（含内置 + 远程）。
+    pub async fn list_tools(&self) -> Result<ToolsListResponse, ApiClientError> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, "/api/tools"))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
     // ============================================================
     // Health
     // ============================================================

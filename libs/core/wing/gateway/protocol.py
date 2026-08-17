@@ -93,9 +93,17 @@ class ToolCallResult(BaseModel):
 
 
 class AgentOverride(BaseModel):
-    """Agent 参数覆盖。所有字段可选，None 表示不覆盖（保留 template 值）。"""
+    """Agent 参数覆盖。所有字段可选，None 表示不覆盖（保留 template 值）。
+
+    provider 与 model 配合使用：指定 provider 时，model 切换到该 provider
+    的 endpoint；不指定时使用当前 provider。
+    """
 
     model: str | None = Field(default=None, description="覆盖模型名称")
+    provider: str | None = Field(
+        default=None,
+        description="覆盖 provider 名称（配合 model 使用，引用 providers[].name）",
+    )
     system_prompt: str | None = Field(default=None, description="替换系统提示词")
     append_system_prompt: str | None = Field(
         default=None, description="追加到系统提示词末尾"
