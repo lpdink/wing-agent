@@ -26,6 +26,7 @@ from wing.event import (
     ToolResultTurnEvent,
     TurnResultEvent,
     TurnStartedEvent,
+    UserMessageAcceptedEvent,
 )
 
 if TYPE_CHECKING:
@@ -50,6 +51,18 @@ class AgentEventSink:
 
     def turn_started(self) -> None:
         self._emit(TurnStartedEvent(session_id=self._session_id))
+
+    def user_message_accepted(
+        self, content: str, origin_request_id: str | None
+    ) -> None:
+        """用户消息被消费进模型上下文（新 turn 输入或 steer 注入）。"""
+        self._emit(
+            UserMessageAcceptedEvent(
+                session_id=self._session_id,
+                content=content,
+                origin_request_id=origin_request_id or "",
+            )
+        )
 
     def turn_result(
         self,

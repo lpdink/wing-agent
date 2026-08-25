@@ -127,6 +127,28 @@ class TurnStartedEvent(WingEvent):
     type: Literal["turn_started"] = "turn_started"
 
 
+class UserMessageAcceptedEvent(WingEvent):
+    """用户消息已被注入模型上下文——前端据此把排队消息上移进聊天历史。
+
+    产品语义：用户消息"开始往上渲染"当且仅当它真的被发给了模型。消费发生在
+    两个时刻，本事件随之发射（每条消息一个事件）：
+      1. run_turn 入口的 drain-and-merge——消息成为新一轮的输入（先于
+         turn_started）；
+      2. 工具执行后的 steer 注入——消息早于/期间工具调用发送，随
+         steer note 进入下一轮。
+
+    origin_request_id 是客户端提交时的 ClientRequest.request_id，前端用它
+    关联本地排队状态；无 request_id 的内部投递（如 Explorer 回传）不发射。
+
+    与 DeliveredEvent 的区别：Delivered 是 transport ack（到达网关即发），
+    本事件是消费确认（消息真正进入模型上下文才发）。
+    """
+
+    type: Literal["user_message_accepted"] = "user_message_accepted"
+    content: str
+    origin_request_id: str = ""
+
+
 class DiffContentEvent(WingEvent):
     """工具产生的 diff 内容，前端据此渲染 DiffView。
 
