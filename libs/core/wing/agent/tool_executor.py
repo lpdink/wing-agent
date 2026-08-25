@@ -4,7 +4,7 @@
 职责：
 - 并发调度多个 tool call（asyncio.gather）
 - 中断时收拢每个 call 的最终结果（真实或合成），保证上下文不悬空
-- 单工具执行：hook → 参数过滤 → 调用 → 截断
+- 单工具执行：非法参数短路 → hook → 参数过滤 → 调用 → 截断
 - 事件通过 AgentEventSink 发射
 """
 
@@ -143,8 +143,21 @@ class ToolExecutor:
             raise InterruptedToolResults(results, original=cancel_err) from None
 
     async def _execute_one(self, tc: ToolCall, model: str) -> str:
-        """执行单个工具调用：hook → 参数过滤 → 调用。"""
+        """执行单个工具调用：非法参数短路 → hook → 参数过滤 → 调用。"""
         self._sink.tool_started(tc)
+
+        # 参数 JSON 解析失败（provider 已容错并置 arguments_error）：不执行
+        # 工具，把错误现场作为结果回灌给模型自纠——与 unknown-tool 同级的
+        # 正常失败路径，MUST NOT 抛异常（抛了会触发整轮重试，丢弃本轮
+        # thinking/content/tool call）。
+        if tc.arguments_error:
+            result = (
+                f"Error: tool call '{tc.name}' was NOT executed — the arguments "
+                f"you generated are invalid.\n{tc.arguments_error}\n"
+                f"Please re-issue the tool call with corrected arguments."
+            )
+            self._sink.tool_finished(tc, result, success=False, model=model)
+            return result
 
         tool = self._tools.get(tc.name)
         if not tool:

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from typing import TYPE_CHECKING, AsyncIterator
 
@@ -13,7 +12,7 @@ import httpx
 from wing.common.logger import log
 from wing.common.with_retry import with_retry
 from wing.config import get_headers
-from wing.provider.base import ModelProvider
+from wing.provider.base import ModelProvider, parse_tool_args
 from wing.provider.errors import raise_with_body
 from wing.provider.http import make_http_timeout
 from wing.provider.sse import parse_json_event, parse_sse_stream
@@ -144,7 +143,14 @@ class OpenAICompatProvider(ModelProvider):
         if content:
             blocks.append(TextBlock(text=content))
         for tc in tool_calls:
-            blocks.append(ToolUseBlock(id=tc.id, name=tc.name, input=tc.arguments))
+            blocks.append(
+                ToolUseBlock(
+                    id=tc.id,
+                    name=tc.name,
+                    input=tc.arguments,
+                    input_error=tc.arguments_error,
+                )
+            )
         return blocks
 
     def _build_body(
@@ -210,9 +216,11 @@ class OpenAICompatProvider(ModelProvider):
             ToolCall(
                 id=tc["id"],
                 name=tc["function"]["name"],
-                arguments=json.loads(tc["function"]["arguments"]),
+                arguments=args,
+                arguments_error=args_error,
             )
             for tc in (message.get("tool_calls") or [])
+            for args, args_error in [parse_tool_args(tc["function"]["arguments"])]
         ]
 
         usage_data = data.get("usage") or {}
@@ -399,13 +407,18 @@ class OpenAICompatProvider(ModelProvider):
 
         finals: list[ToolCall] | None = None
         if choice.get("finish_reason") == "tool_calls":
+            # 容错解析：笨模型的 args JSON 可能非法——绝不抛异常（会触发
+            # 整轮重试并丢弃已生成内容），置 arguments_error 由执行器短路
+            # 回灌给模型自纠。
             finals = [
                 ToolCall(
                     id=call.id,
                     name=call.name,
-                    arguments=json.loads(call.args_buffer),
+                    arguments=args,
+                    arguments_error=args_error,
                 )
                 for call in pending.values()
+                for args, args_error in [parse_tool_args(call.args_buffer)]
             ]
             pending.clear()
 

@@ -7,8 +7,11 @@
 - is_final 时机
 - pending.clear() 行为
 - 空 id 防御
+- finalize 容错解析（非法 JSON / 空 buffer / 非 object → arguments_error，不抛异常）
+- parse_tool_args 共享助手
 """
 
+from wing.provider.base import parse_tool_args
 from wing.provider.openai_compat import OpenAICompatProvider
 from wing.schema import PendingCall
 
@@ -233,3 +236,78 @@ class TestProcessToolDeltas:
         assert deltas is None
         # pending 不受影响
         assert len(pending) == 1
+
+    def test_finish_with_malformed_json_sets_arguments_error(self):
+        """非法 JSON（尾逗号）→ 不抛异常，arguments={} + arguments_error 保留现场。
+
+        异常逃逸会触发 with_retry 整轮重试，丢弃已生成的
+        thinking/content/tool call——正确路径是置错误标记，由执行器
+        短路回灌给模型。
+        """
+        raw = '{"questions": [{"id": "q1",},]}'
+        pending = {0: PendingCall(id="call_1", name="AskUserQuestion", args_buffer=raw)}
+        choice = _make_choice(tool_calls=[], finish_reason="tool_calls")
+        finals, deltas = OpenAICompatProvider._process_tool_deltas(choice, pending)
+        assert finals is not None
+        assert len(finals) == 1
+        assert finals[0].arguments == {}
+        assert finals[0].arguments_error is not None
+        assert "Invalid JSON" in finals[0].arguments_error
+        # 原始文本保留在错误现场，供回灌模型自纠
+        assert raw in finals[0].arguments_error
+        assert deltas is None
+        assert len(pending) == 0
+
+    def test_finish_with_empty_buffer_yields_empty_args(self):
+        """无参工具且服务端未下发 "{}" → {} 且无错误。
+
+        此前 json.loads("") 会直接抛异常进重试循环。
+        """
+        pending = {0: PendingCall(id="call_1", name="GetTime", args_buffer="")}
+        choice = _make_choice(tool_calls=[], finish_reason="tool_calls")
+        finals, _ = OpenAICompatProvider._process_tool_deltas(choice, pending)
+        assert finals is not None
+        assert finals[0].arguments == {}
+        assert finals[0].arguments_error is None
+
+    def test_finish_with_non_object_json_sets_arguments_error(self):
+        """解析成功但非 object（数组/字符串）→ 同按参数错误处理。
+
+        否则 pydantic 的 dict 校验会在构造 ToolCall 时抛异常进重试循环。
+        """
+        pending = {0: PendingCall(id="call_1", name="Bash", args_buffer='["ls"]')}
+        choice = _make_choice(tool_calls=[], finish_reason="tool_calls")
+        finals, _ = OpenAICompatProvider._process_tool_deltas(choice, pending)
+        assert finals is not None
+        assert finals[0].arguments == {}
+        assert finals[0].arguments_error is not None
+        assert "JSON object" in finals[0].arguments_error
+
+
+class TestParseToolArgs:
+    """parse_tool_args 共享助手（两个 provider 的流式/非流式路径共用）。"""
+
+    def test_valid_object(self):
+        args, err = parse_tool_args('{"a": 1}')
+        assert args == {"a": 1}
+        assert err is None
+
+    def test_empty_or_blank_returns_empty_no_error(self):
+        assert parse_tool_args("") == ({}, None)
+        assert parse_tool_args("   ") == ({}, None)
+
+    def test_invalid_json_carries_raw_text(self):
+        raw = '{"a": 1,}'
+        args, err = parse_tool_args(raw)
+        assert args == {}
+        assert err is not None
+        assert "Invalid JSON" in err
+        assert raw in err
+
+    def test_non_object_carries_raw_text(self):
+        raw = '"just a string"'
+        args, err = parse_tool_args(raw)
+        assert args == {}
+        assert err is not None
+        assert "JSON object" in err
+        assert raw in err

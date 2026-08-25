@@ -46,6 +46,13 @@ class ToolCall(BaseModel):
     id: str
     name: str
     arguments: dict
+    arguments_error: str | None = None
+    """工具参数解析失败的错误描述（含原始参数文本）。
+
+    模型吐出的 args JSON 非法（如尾逗号）时，provider 不抛异常，而是
+    置 arguments={} 并在此记录现场。ToolExecutor 见它短路执行，把错误
+    作为工具结果回灌给模型自纠，而非整轮重试丢弃。
+    """
 
     def to_openai(self) -> dict:
         """Convert to OpenAI tool_calls format."""
@@ -135,6 +142,9 @@ class ToolUseBlock(BaseModel):
     id: str
     name: str
     input: dict = Field(default_factory=dict)
+    input_error: str | None = None
+    """参数 JSON 解析失败的现场记录（与 ToolCall.arguments_error 对应）。
+    出错时 input 为 {}，本字段承载错误详情 + 原始参数文本。"""
 
 
 ContentBlock = Annotated[
@@ -332,7 +342,12 @@ class Message(ChainNode):
             if not self.content_blocks:
                 return None
             calls = [
-                ToolCall(id=b.id, name=b.name, arguments=b.input)
+                ToolCall(
+                    id=b.id,
+                    name=b.name,
+                    arguments=b.input,
+                    arguments_error=b.input_error,
+                )
                 for b in self.content_blocks
                 if isinstance(b, ToolUseBlock)
             ]
