@@ -4,8 +4,6 @@
 //! Each cell's height is computed via `Paragraph::line_count(width)` and
 //! cached with a generation counter for invalidation.
 
-use std::time::Instant;
-
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
@@ -31,14 +29,6 @@ use super::cells::thinking::ThinkingBlock;
 use super::cells::todo_msg::TodoMessage;
 use super::cells::tool_call::ToolCallBlock;
 use super::cells::tool_call::ToolStatus;
-use super::input_area::InputArea;
-use super::input_area::InputAreaWidget;
-use super::popup::selection::SelectionPopup;
-use super::popup::selection::SelectionRow;
-use super::popup::selection::SelectionState;
-use super::popup::selection::popup_height;
-use super::spinner::SpinnerState;
-use super::spinner::WorkingIndicatorWidget;
 use super::status_bar::TurnUsage;
 
 /// A single cell in the chat view.
@@ -184,16 +174,16 @@ pub struct ChatView {
     /// Cached wrap-aware line count per cell (mirrors cells.len()).
     cell_heights: Vec<usize>,
     /// Scroll offset in lines (0 = top).
-    scroll_offset: usize,
+    pub(crate) scroll_offset: usize,
     /// Whether auto-scroll is active (follow bottom).
     auto_scroll: bool,
     /// Header lines (wing logo + MOTD) — always rendered at the top,
     /// scroll with the content. Preserved across `clear()`.
     header_lines: Vec<Line<'static>>,
-    /// On-screen rect of the composer input text area recorded during the
-    /// last render (None when the input is scrolled out of view).
-    /// Used by the draw loop to position/hide the cursor.
-    pub(crate) input_card_rect: Option<Rect>,
+    /// Total content height (header + cells) from the last render.
+    /// Used by `scroll_down` to detect the bottom edge and re-arm
+    /// auto-scroll immediately, without waiting for the next render pass.
+    pub(crate) last_total: usize,
 }
 
 impl ChatView {
@@ -204,7 +194,7 @@ impl ChatView {
             scroll_offset: 0,
             auto_scroll: true,
             header_lines: Vec::new(),
-            input_card_rect: None,
+            last_total: 0,
         }
     }
 
@@ -375,12 +365,23 @@ impl ChatView {
         self.scroll_offset = self.scroll_offset.saturating_sub(n);
     }
 
-    /// Scroll down by N lines.
+    /// Scroll down by N lines within a `viewport_h`-tall viewport.
     ///
-    /// `scroll_offset` is clamped to the content height during rendering
-    /// (see `ChatViewWidget::render`), so this cannot scroll past the bottom.
-    pub fn scroll_down(&mut self, n: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_add(n);
+    /// The bottom edge is derived from `last_total` (content height
+    /// recorded by the last render). Reaching it re-arms `auto_scroll`
+    /// synchronously — without waiting for the next render pass — so the
+    /// Up/Down routing in the app returns control to the composer as soon
+    /// as the view hits the bottom, even while new content is streaming.
+    pub fn scroll_down(&mut self, n: usize, viewport_h: usize) {
+        let max_scroll = self.last_total.saturating_sub(viewport_h);
+        if self.scroll_offset >= max_scroll {
+            self.auto_scroll = true;
+            return;
+        }
+        self.scroll_offset = (self.scroll_offset + n).min(max_scroll);
+        if self.scroll_offset >= max_scroll {
+            self.auto_scroll = true;
+        }
     }
 
     /// Scroll by one page up.
@@ -389,8 +390,8 @@ impl ChatView {
     }
 
     /// Scroll by one page down.
-    pub fn page_down(&mut self, page_height: usize) {
-        self.scroll_down(page_height);
+    pub fn page_down(&mut self, page_height: usize, viewport_h: usize) {
+        self.scroll_down(page_height, viewport_h);
     }
 
     /// Jump to top.
@@ -402,6 +403,17 @@ impl ChatView {
     /// Jump to bottom.
     pub fn jump_bottom(&mut self) {
         self.auto_scroll = true;
+    }
+
+    /// Total content height from the last render (header + cells).
+    /// `0` before the first render.
+    pub fn content_height(&self) -> usize {
+        self.last_total
+    }
+
+    /// Current scroll offset in lines.
+    pub fn scroll_position(&self) -> usize {
+        self.scroll_offset
     }
 
     /// Clear all cells.
@@ -635,58 +647,6 @@ impl Default for ChatView {
     }
 }
 
-/// Bundled inputs for rendering the scrollable composer tail:
-/// working line + separator + input + pop-down command popup + telemetry bar.
-///
-/// The tail is rendered as the trailing segment of the scrollable content,
-/// so it follows the conversation and scrolls out of view when the user
-/// scrolls up.
-pub struct ComposerTail<'a> {
-    pub input: &'a mut InputArea,
-    pub usage: &'a TurnUsage,
-    pub workdir: Option<&'a str>,
-    pub working: bool,
-    pub spinner: &'a SpinnerState,
-    pub started_at: Option<Instant>,
-    pub role_label: Option<&'a str>,
-    /// Active command popup render data (rows, state, filter) for pop-down.
-    pub popup: Option<(&'a [SelectionRow], &'a SelectionState, &'a str)>,
-}
-
-/// Geometry (row heights) of the composer tail segments.
-struct TailGeom {
-    /// Working indicator line (0 or 1).
-    working_h: usize,
-    /// Info separator line (always 1) — carries usage/workdir/scroll.
-    separator_h: usize,
-    /// Input text rows.
-    input_h: usize,
-    /// Pop-down popup height (0 when inactive).
-    popup_h: usize,
-    /// Total tail height.
-    total: usize,
-}
-
-/// Compute tail segment heights for the given terminal width.
-fn compute_tail_geom(tail: &ComposerTail<'_>, width: u16) -> TailGeom {
-    let working_h = usize::from(tail.working);
-    let separator_h = 1;
-    let input_h = tail.input.height(width) as usize;
-    let popup_h = tail
-        .popup
-        .as_ref()
-        .map(|(rows, state, _)| popup_height(rows, state.max_visible) as usize)
-        .unwrap_or(0);
-    let total = working_h + separator_h + input_h + popup_h;
-    TailGeom {
-        working_h,
-        separator_h,
-        input_h,
-        popup_h,
-        total,
-    }
-}
-
 /// Collapse the user's home directory prefix to `~` for compact display.
 fn collapse_home(path: &str) -> String {
     use std::sync::OnceLock;
@@ -701,12 +661,12 @@ fn collapse_home(path: &str) -> String {
 }
 
 /// Render the info separator line: a `─` rule carrying workdir, per-turn
-/// usage and scroll position — the same visual language as the classic
-/// scroll indicator, but living inside the scrollable tail.
+/// usage and scroll position — the classic scroll indicator, now living in
+/// a fixed layout block right above the composer input.
 ///
 /// Layout: `─[workdir · usage · pos/total] ───── [percent%] ─`
 #[allow(clippy::too_many_arguments)]
-fn render_info_separator(
+pub(crate) fn render_info_separator(
     workdir: Option<&str>,
     usage: &TurnUsage,
     total_lines: usize,
@@ -768,167 +728,26 @@ fn render_info_separator(
     }
 }
 
-/// Render the composer tail into a sub-buffer, then blit the visible slice
-/// (accounting for scroll) into `buf`. Records the on-screen input text rect
-/// into `out_input_rect` (None when the input is scrolled out of view).
-#[allow(clippy::too_many_arguments)]
-fn render_composer_tail(
-    tail: ComposerTail<'_>,
-    geom: &TailGeom,
-    palette: &ThemePalette,
-    content_area: Rect,
-    render_y: u16,
-    tail_start: usize,
-    scroll: usize,
-    view_end: usize,
-    buf: &mut Buffer,
-    out_input_rect: &mut Option<Rect>,
-) {
-    let tail_height = geom.total;
-    let tail_end = tail_start + tail_height;
-
-    // Tail fully outside the visible window.
-    if tail_end <= scroll || tail_start >= view_end {
-        *out_input_rect = None;
-        return;
-    }
-    let skip = scroll.saturating_sub(tail_start);
-    let vis = tail_end.min(view_end) - tail_start.max(scroll);
-
-    let width = content_area.width;
-    let mut tbuf = Buffer::empty(Rect::new(0, 0, width, tail_height as u16));
-
-    let ComposerTail {
-        input,
-        usage,
-        workdir,
-        working,
-        spinner,
-        started_at,
-        role_label,
-        popup,
-    } = tail;
-
-    let mut ly: u16 = 0;
-
-    // 1. Working indicator line.
-    if working {
-        if let Some(started) = started_at {
-            WorkingIndicatorWidget::new(spinner, started, palette)
-                .with_role_label(role_label)
-                .render(Rect::new(0, ly, width, 1), &mut tbuf);
-        }
-        ly += geom.working_h as u16;
-    }
-
-    // 2. Info separator line (─ with workdir/usage/scroll embedded).
-    let sep_y = ly;
-    let total_lines = tail_start + geom.total;
-    let visible_height = content_area.height as usize;
-    render_info_separator(
-        workdir,
-        usage,
-        total_lines,
-        visible_height,
-        scroll,
-        palette,
-        Rect::new(0, sep_y, width, 1),
-        &mut tbuf,
-    );
-    ly += geom.separator_h as u16;
-
-    // 3. Input text (no background — flows naturally with the content).
-    let input_top = ly;
-    let text_area = Rect::new(0, input_top, width, geom.input_h as u16);
-    InputAreaWidget::new(input, palette).render(text_area, &mut tbuf);
-    ly = input_top + geom.input_h as u16;
-
-    // 4. Pop-down command popup (below the input).
-    if let Some((rows, state, filter)) = popup
-        && geom.popup_h > 0
-    {
-        SelectionPopup::new(rows, state, filter, palette)
-            .render(Rect::new(0, ly, width, geom.popup_h as u16), &mut tbuf);
-    }
-
-    // Blit the visible slice [skip .. skip + vis) into the main buffer.
-    // Row-level `clone_from_slice` copies each visible row in one shot,
-    // reusing destination cell allocations and skipping per-cell `Index`
-    // bounds checks (Cell is Clone, not Copy). Bounds mirror the naive
-    // per-cell loop exactly: x spans [0, width) in tbuf and
-    // [content_area.x, content_area.x + width) in buf.
-    //
-    // `w > 0` 守卫使本函数自包含安全：`Buffer::index_of` 在零宽 area 上会
-    // panic，而旧的逐 cell 空循环天然无此问题——因此不依赖调用方
-    // （ChatViewWidget::render）的 area.width 守卫。行内越界由几何保证
-    // （skip + vis <= tail_height，tbuf/buf 的 area 宽度均为 width），
-    // 由 debug_assert 钉住。
-    let w = width as usize;
-    if w > 0 {
-        for dy in 0..vis {
-            let dst_y = render_y + dy as u16;
-            if dst_y >= content_area.bottom() {
-                break;
-            }
-            let src_y = (skip + dy) as u16;
-            let src = tbuf.index_of(0, src_y);
-            let dst = buf.index_of(content_area.x, dst_y);
-            debug_assert!(src + w <= tbuf.content.len());
-            debug_assert!(dst + w <= buf.content.len());
-            buf.content[dst..dst + w].clone_from_slice(&tbuf.content[src..src + w]);
-        }
-    }
-
-    // Record the on-screen input text rect for cursor positioning.
-    // Tail-local row `r` maps to screen y = render_y + (r - skip).
-    let text_screen_y = render_y as i32 + text_area.y as i32 - skip as i32;
-    if text_screen_y >= content_area.y as i32 && (text_screen_y as u16) < content_area.bottom() {
-        *out_input_rect = Some(Rect::new(
-            content_area.x + text_area.x,
-            text_screen_y as u16,
-            text_area.width,
-            geom.input_h as u16,
-        ));
-    } else {
-        *out_input_rect = None;
-    }
-}
-
 /// Widget for rendering the chat view with scrollbar.
 pub struct ChatViewWidget<'a> {
     view: &'a mut ChatView,
     ctx: CellContext<'a>,
-    tail: Option<ComposerTail<'a>>,
 }
 
 impl<'a> ChatViewWidget<'a> {
     pub fn new(view: &'a mut ChatView, ctx: CellContext<'a>) -> Self {
-        Self {
-            view,
-            ctx,
-            tail: None,
-        }
-    }
-
-    /// Attach the composer tail (input + popup + telemetry) to render
-    /// as the trailing segment of the scrollable content.
-    pub fn with_tail(mut self, tail: ComposerTail<'a>) -> Self {
-        self.tail = Some(tail);
-        self
+        Self { view, ctx }
     }
 }
 
 impl Widget for ChatViewWidget<'_> {
-    fn render(mut self, area: Rect, buf: &mut Buffer) {
+    fn render(self, area: Rect, buf: &mut Buffer) {
         if area.height == 0 || area.width == 0 {
             return;
         }
 
-        // Take the composer tail out of self so we can still borrow view/ctx.
-        let tail = self.tail.take();
-
-        // The whole area is the scroll viewport (the composer tail is part
-        // of the scrollable content, not a reserved layout block).
+        // The whole area is the chat viewport (header + cells only — the
+        // composer lives in a fixed layout block owned by the App).
         let content_area = area;
         let visible = area.height as usize;
 
@@ -936,11 +755,11 @@ impl Widget for ChatViewWidget<'_> {
         self.view.update_heights(area.width, &self.ctx);
         let header_height = self.view.header_lines.len();
         let cell_total: usize = self.view.cell_heights.iter().sum();
+        let total = header_height + cell_total;
 
-        // Composer tail geometry (working + separator + input + popup + telemetry).
-        let tail_geom = tail.as_ref().map(|t| compute_tail_geom(t, area.width));
-        let tail_height = tail_geom.as_ref().map(|g| g.total).unwrap_or(0);
-        let total = header_height + cell_total + tail_height;
+        // Record the content height so `scroll_down` can detect the bottom
+        // edge and re-arm auto-scroll between renders.
+        self.view.last_total = total;
 
         // Auto-scroll: pin to bottom.
         if self.view.auto_scroll {
@@ -1071,27 +890,6 @@ impl Widget for ChatViewWidget<'_> {
                 break;
             }
         }
-
-        // Render the composer tail (working + separator + input + popup + telemetry)
-        // as the trailing segment of the scrollable content.
-        if let (Some(tail), Some(geom)) = (tail, tail_geom) {
-            let palette = self.ctx.palette;
-            let tail_start = header_height + cell_total;
-            render_composer_tail(
-                tail,
-                &geom,
-                palette,
-                content_area,
-                render_y,
-                tail_start,
-                scroll,
-                view_end,
-                buf,
-                &mut self.view.input_card_rect,
-            );
-        } else {
-            self.view.input_card_rect = None;
-        }
     }
 }
 
@@ -1101,7 +899,7 @@ mod tests {
     use crate::config::rendering::ThinkingMode;
     use crate::config::{LayoutConfig, ThemePalette};
     use crate::render::renderable::CellContext;
-    use crate::ui::popup::selection::plain_row;
+    use std::time::Instant;
 
     fn test_ctx() -> (ThemePalette, LayoutConfig) {
         (ThemePalette::default(), LayoutConfig::default())
@@ -1177,12 +975,51 @@ mod tests {
         }
         assert!(view.auto_scroll);
 
+        // Simulate the post-render state of a pinned view
+        // (content height 100, viewport 20 → bottom edge at offset 80).
+        view.last_total = 100;
+        view.scroll_offset = 80;
+        assert!(view.auto_scroll);
+
+        // Up: leaves the bottom and disables auto-scroll.
         view.scroll_up(5);
         assert!(!view.auto_scroll);
-        assert_eq!(view.scroll_offset, 0);
+        assert_eq!(view.scroll_offset, 75);
 
-        view.scroll_down(10);
-        assert!(view.scroll_offset > 0);
+        // Down within the window: offset grows, still not at bottom.
+        view.scroll_down(3, 20);
+        assert_eq!(view.scroll_offset, 78);
+        assert!(!view.auto_scroll);
+
+        // Down reaching the bottom edge: clamped + auto-scroll re-armed.
+        view.scroll_down(10, 20);
+        assert_eq!(view.scroll_offset, 80);
+        assert!(
+            view.auto_scroll,
+            "reaching the bottom must re-arm auto-scroll"
+        );
+
+        // Further down at the bottom is idempotent.
+        view.scroll_down(5, 20);
+        assert_eq!(view.scroll_offset, 80);
+        assert!(view.auto_scroll);
+
+        // Up beyond the top clamps at zero and stays unpinned.
+        view.scroll_up(1000);
+        assert_eq!(view.scroll_offset, 0);
+        assert!(!view.auto_scroll);
+    }
+
+    #[test]
+    fn test_scroll_down_bottom_before_render_is_idempotent() {
+        // Before the first render `last_total` is 0: the view cannot scroll
+        // past a bottom edge it does not know yet — scroll_down re-arms
+        // auto-scroll and stays put instead of drifting the offset.
+        let mut view = ChatView::new();
+        view.push(ChatCell::UserMessage("hello".into()));
+        view.scroll_down(3, 20);
+        assert_eq!(view.scroll_offset, 0);
+        assert!(view.auto_scroll);
     }
 
     #[test]
@@ -1558,119 +1395,7 @@ mod tests {
         );
     }
 
-    // ── Composer tail tests ────────────────────────────────────
-
-    /// Render the view with a composer tail (input + telemetry, etc.).
-    fn render_view_with_tail(
-        view: &mut ChatView,
-        input: &mut InputArea,
-        usage: &TurnUsage,
-        workdir: Option<&str>,
-        popup: Option<(&[SelectionRow], &SelectionState, &str)>,
-        width: u16,
-        height: u16,
-    ) -> Buffer {
-        let (p, l) = test_ctx();
-        let ctx = make_ctx(&p, &l);
-        let area = Rect::new(0, 0, width, height);
-        let mut buf = Buffer::empty(area);
-        let spinner = SpinnerState::new();
-        let tail = ComposerTail {
-            input,
-            usage,
-            workdir,
-            working: false,
-            spinner: &spinner,
-            started_at: None,
-            role_label: None,
-            popup,
-        };
-        ChatViewWidget::new(view, ctx)
-            .with_tail(tail)
-            .render(area, &mut buf);
-        buf
-    }
-
-    #[test]
-    fn test_tail_input_visible_when_pinned_bottom() {
-        let mut view = ChatView::new();
-        for i in 0..20 {
-            view.push(ChatCell::AssistantMessage(format!("msg {i}")));
-        }
-        let mut input = InputArea::new("");
-        input.set_text("tail_marker_xyz");
-        let usage = TurnUsage::default();
-        let buf = render_view_with_tail(&mut view, &mut input, &usage, None, None, 40, 10);
-        let rendered = buffer_text(&buf);
-        assert!(
-            rendered.contains("tail_marker_xyz"),
-            "input (tail) should be visible when pinned to bottom:\n{rendered}"
-        );
-        assert!(
-            view.input_card_rect.is_some(),
-            "input rect should be recorded when visible"
-        );
-    }
-
-    #[test]
-    fn test_tail_scrolls_out_when_at_top() {
-        let mut view = ChatView::new();
-        for i in 0..30 {
-            view.push(ChatCell::AssistantMessage(format!("msg {i}")));
-        }
-        let mut input = InputArea::new("");
-        input.set_text("tail_marker_xyz");
-        let usage = TurnUsage::default();
-        view.jump_top();
-        let buf = render_view_with_tail(&mut view, &mut input, &usage, None, None, 40, 10);
-        let rendered = buffer_text(&buf);
-        assert!(
-            !rendered.contains("tail_marker_xyz"),
-            "input (tail) should scroll out of view at top:\n{rendered}"
-        );
-        assert!(
-            view.input_card_rect.is_none(),
-            "input rect should be None when scrolled out"
-        );
-    }
-
-    #[test]
-    fn test_popdown_popup_rendered_and_not_clipped() {
-        let mut view = ChatView::new();
-        for i in 0..5 {
-            view.push(ChatCell::AssistantMessage(format!("msg {i}")));
-        }
-        let mut input = InputArea::new("");
-        input.set_text("/he");
-        let usage = TurnUsage::default();
-        let rows = vec![
-            plain_row("/help", "show help"),
-            plain_row("/hello", "say hi"),
-        ];
-        let state = SelectionState::new(rows.len());
-        let buf = render_view_with_tail(
-            &mut view,
-            &mut input,
-            &usage,
-            None,
-            Some((&rows, &state, "he")),
-            50,
-            12,
-        );
-        let rendered = buffer_text(&buf);
-        assert!(
-            rendered.contains("/help"),
-            "popup row should render:\n{rendered}"
-        );
-        assert!(
-            rendered.contains("/hello"),
-            "popup row should render:\n{rendered}"
-        );
-        assert!(
-            rendered.contains("/he"),
-            "input text should still render above popup:\n{rendered}"
-        );
-    }
+    // ── Info separator tests ───────────────────────────────────
 
     #[test]
     fn test_info_separator_contains_workdir_and_usage() {
@@ -1695,31 +1420,25 @@ mod tests {
         assert!(rendered.contains("100%"), "scroll percent:\n{rendered}");
     }
 
+    /// The render pass must record the content height so `scroll_down`
+    /// can detect the bottom edge between renders.
     #[test]
-    fn test_tail_composes_with_ask_cell() {
+    fn test_last_total_recorded_after_render() {
         let mut view = ChatView::new();
-        view.push(ChatCell::AssistantMessage("question?".into()));
-        view.push(ChatCell::Ask(AskMessage::new(
-            "tc".into(),
-            "pick one".into(),
-            vec!["a".into(), "b".into()],
-        )));
-        let mut input = InputArea::new("");
-        input.set_text("reply");
-        let usage = TurnUsage::default();
-        let buf = render_view_with_tail(&mut view, &mut input, &usage, Some("/ws"), None, 50, 14);
+        for i in 0..20 {
+            view.push(ChatCell::AssistantMessage(format!("msg {i}")));
+        }
+        let buf = render_view(&mut view, 40, 10);
+        assert!(
+            view.last_total > 10,
+            "content height must be recorded from the render: {}",
+            view.last_total
+        );
+        // Pinned view shows the trailing content.
         let rendered = buffer_text(&buf);
         assert!(
-            rendered.contains("pick one"),
-            "ask cell should render:\n{rendered}"
-        );
-        assert!(
-            rendered.contains("reply"),
-            "input tail should render:\n{rendered}"
-        );
-        assert!(
-            rendered.contains("/ws"),
-            "telemetry workdir should render:\n{rendered}"
+            rendered.contains("msg 19"),
+            "last message should be visible when pinned to bottom:\n{rendered}"
         );
     }
 

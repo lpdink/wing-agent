@@ -33,15 +33,18 @@ use crate::ui::cells::tool_call::ToolCallBlock;
 use crate::ui::chat_view::ChatCell;
 use crate::ui::chat_view::ChatView;
 use crate::ui::chat_view::ChatViewWidget;
-use crate::ui::chat_view::ComposerTail;
+use crate::ui::chat_view::render_info_separator;
 use crate::ui::header::build_header_lines;
 use crate::ui::input_area::InputAction;
 use crate::ui::input_area::InputArea;
+use crate::ui::input_area::InputAreaWidget;
 use crate::ui::input_area::cursor_screen_pos;
 use crate::ui::popup::ActivePopup;
 use crate::ui::popup::command::candidate_request_for;
 use crate::ui::popup::command::is_must_select_command;
 use crate::ui::popup::command::parse_slash_input;
+use crate::ui::popup::selection::SelectionPopup;
+use crate::ui::spinner::WorkingIndicatorWidget;
 use crate::ui::status_bar::StatusBar;
 use crate::ui::status_bar::StatusData;
 use crate::ui::status_bar::TurnUsage;
@@ -1125,7 +1128,7 @@ impl App {
                 return;
             }
             crossterm::event::KeyCode::PageDown => {
-                self.chat.page_down(page);
+                self.chat.page_down(page, self.visible_height);
                 return;
             }
             crossterm::event::KeyCode::Up
@@ -1141,7 +1144,7 @@ impl App {
                     .modifiers
                     .contains(crossterm::event::KeyModifiers::CONTROL) =>
             {
-                self.chat.scroll_down(1);
+                self.chat.scroll_down(1, self.visible_height);
                 return;
             }
             // Alternate-scroll mode translates trackpad/wheel into plain
@@ -1167,7 +1170,7 @@ impl App {
                         | crossterm::event::KeyModifiers::SHIFT,
                 ) && (!self.chat.is_at_bottom() || !self.input.can_move_down()) =>
             {
-                self.chat.scroll_down(3);
+                self.chat.scroll_down(3, self.visible_height);
                 return;
             }
             crossterm::event::KeyCode::Home
@@ -1190,9 +1193,11 @@ impl App {
         }
 
         // Everything else goes to the input area.
-        let text_before = self.input.text();
         match self.input.handle_key(key, self.terminal_width) {
             InputAction::Submit(text) => {
+                // Submitting a message pins the view to the bottom so the
+                // sent message and the agent's reply come into view.
+                self.chat.jump_bottom();
                 // must-select 命令：参数必须来自候选选择。popup 若被关闭
                 //（如 Esc），重开 popup 而非发送自由文本——消灭未定义请求
                 //（如无 provider 的 /model 更新撞网关对称契约 400）。
@@ -1214,11 +1219,9 @@ impl App {
                 self.update_popup();
             }
         }
-        // Any content edit brings the input back into view (it may have
-        // been scrolled out while the user was reading history).
-        if self.input.text() != text_before {
-            self.chat.jump_bottom();
-        }
+        // NOTE: editing the composer must NOT yank the view back to the
+        // bottom — the composer is a fixed block, and the user may be
+        // reading history (e.g. item 456 of a review) while typing.
     }
 
     /// Handle popup navigation keys. Returns `true` if the key was consumed.
@@ -1813,13 +1816,27 @@ impl App {
             let area = frame.area();
             self.terminal_width = area.width;
 
-            // Layout: status_bar (1) | chat-with-composer-tail (fill).
-            // The input, pop-down popup, working line and telemetry bar
-            // are rendered as the trailing segment of the scrollable chat
-            // content (see ChatViewWidget), not as separate layout blocks.
+            // Layout: status (1) | chat (fill) | [working] | info bar | input | [popup].
+            // The composer (working line + info separator + input + popup) is a
+            // fixed block below the scrollable chat viewport — it stays in view
+            // regardless of the chat scroll position.
+            let input_h = self.input.height(area.width);
+            let popup_h = self.popup.height();
+            let mut constraints = vec![
+                Constraint::Length(1), // status bar
+                Constraint::Min(3),    // chat view (min 3 rows)
+            ];
+            if self.turn.working {
+                constraints.push(Constraint::Length(1)); // working indicator
+            }
+            constraints.push(Constraint::Length(1)); // info separator
+            constraints.push(Constraint::Length(input_h)); // input area
+            if popup_h > 0 {
+                constraints.push(Constraint::Length(popup_h)); // pop-down command popup
+            }
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Min(3)])
+                .constraints(constraints)
                 .split(area);
 
             // Status bar (model top-left, cumulative usage, connection).
@@ -1828,39 +1845,67 @@ impl App {
                 chunks[0],
             );
 
-            // Chat view + composer tail.
+            // Chat view — the scrollable viewport only.
             chat_height = chunks[1].height;
             let ctx = crate::render::renderable::CellContext {
                 palette: &palette,
                 thinking_mode,
                 layout: &layout,
             };
-            let popup_data = self.popup.active.render_data();
-            let tail = ComposerTail {
-                input: &mut self.input,
-                usage: &self.turn.usage,
-                workdir: self.status.workdir.as_deref(),
-                working: self.turn.working,
-                spinner: &self.turn.spinner,
-                started_at: self.turn.started_at,
-                role_label: goal_role_label.as_deref(),
-                popup: popup_data,
-            };
-            let widget = ChatViewWidget::new(&mut self.chat, ctx).with_tail(tail);
-            frame.render_widget(widget, chunks[1]);
+            frame.render_widget(ChatViewWidget::new(&mut self.chat, ctx), chunks[1]);
+
+            // Fixed composer block below the chat viewport.
+            let mut idx = 2;
+
+            // Working indicator (when a turn is running).
+            if self.turn.working {
+                if let Some(started_at) = self.turn.started_at {
+                    frame.render_widget(
+                        WorkingIndicatorWidget::new(&self.turn.spinner, started_at, &palette)
+                            .with_role_label(goal_role_label.as_deref()),
+                        chunks[idx],
+                    );
+                }
+                idx += 1;
+            }
+
+            // Info separator (workdir · usage · scroll position).
+            render_info_separator(
+                self.status.workdir.as_deref(),
+                &self.turn.usage,
+                self.chat.content_height(),
+                chat_height as usize,
+                self.chat.scroll_position(),
+                &palette,
+                chunks[idx],
+                frame.buffer_mut(),
+            );
+            idx += 1;
+
+            // Input area — always visible; record its rect for cursor placement.
+            let input_rect = chunks[idx];
+            frame.render_widget(InputAreaWidget::new(&mut self.input, &palette), input_rect);
+            idx += 1;
+
+            // Pop-down command popup (below the input).
+            if popup_h > 0
+                && let Some((rows, state, filter)) = self.popup.active.render_data()
+            {
+                frame.render_widget(
+                    SelectionPopup::new(rows, state, filter, &palette),
+                    chunks[idx],
+                );
+            }
 
             // Position the input cursor *inside* the render pass so ratatui
             // owns cursor show/hide/move. The previous post-draw
             // `execute!(Show/Hide, MoveTo)` wrote to the backend out-of-band,
             // which desyncs ratatui's cursor tracking and is explicitly
-            // discouraged by ratatui. Leaving the position unset hides the
-            // cursor (input scrolled out of view).
-            if let Some(rect) = self.chat.input_card_rect {
-                let (cursor_x, cursor_y) = cursor_screen_pos(&self.input, &rect);
-                let cursor_x = cursor_x.min(area.width.saturating_sub(1));
-                let cursor_y = cursor_y.min(area.height.saturating_sub(1));
-                frame.set_cursor_position((cursor_x, cursor_y));
-            }
+            // discouraged by ratatui.
+            let (cursor_x, cursor_y) = cursor_screen_pos(&self.input, &input_rect);
+            let cursor_x = cursor_x.min(area.width.saturating_sub(1));
+            let cursor_y = cursor_y.min(area.height.saturating_sub(1));
+            frame.set_cursor_position((cursor_x, cursor_y));
 
             // Toast overlay (rendered last, on top of everything).
             if let Some(ref toast) = self.toast
@@ -1955,8 +2000,6 @@ pub async fn run_app(
                     TermEvent::Paste(text) => {
                         app.input.insert_str(&text);
                         app.update_popup();
-                        // Pasted content brings the input back into view.
-                        app.chat.jump_bottom();
                     }
                     TermEvent::Resize(_, _) => {
                         // ratatui auto-resizes its buffers on the next draw;
@@ -2298,6 +2341,66 @@ mod tests {
         assert!(
             intents.is_empty(),
             "bare /fork should only show usage toast, no intent"
+        );
+    }
+
+    // ── Composer pinning & scroll routing ────────────────────
+
+    #[test]
+    fn test_scroll_down_rearms_autoscroll_at_bottom() {
+        let mut app = test_app();
+        app.visible_height = 20;
+        app.chat.last_total = 100;
+        app.chat.scroll_offset = 75;
+        app.chat.scroll_up(0); // leave the bottom: auto_scroll=false, offset 75
+
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app.handle_key(key.clone());
+        assert_eq!(app.chat.scroll_offset, 78);
+        assert!(!app.chat.is_at_bottom(), "still above the bottom edge");
+
+        // Next step reaches offset 80 == max_scroll → auto-scroll re-armed.
+        app.handle_key(key);
+        assert!(app.chat.is_at_bottom());
+        assert_eq!(app.chat.scroll_offset, 80);
+    }
+
+    #[test]
+    fn test_submit_jumps_to_bottom_and_pushes_cell() {
+        let mut app = test_app();
+        app.chat.scroll_up(5); // reading history: auto_scroll=false
+        app.input.set_text("hi");
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(
+            app.chat.is_at_bottom(),
+            "submit must pin the view to the bottom"
+        );
+        assert!(
+            app.chat
+                .cells
+                .iter()
+                .any(|c| matches!(c.cell(), ChatCell::UserMessage(s) if s == "hi"))
+        );
+    }
+
+    #[test]
+    fn test_edit_does_not_jump_to_bottom() {
+        let mut app = test_app();
+        app.chat.scroll_up(5); // user is reading history
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(app.input.text(), "x");
+        assert!(
+            !app.chat.is_at_bottom(),
+            "typing must not yank the view back to the bottom while reading history"
         );
     }
 }
