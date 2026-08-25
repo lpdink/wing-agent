@@ -487,6 +487,49 @@ class TestStreamPerIndexAndErrors:
         assert blocks[1].input == {"path": "/a"}  # ty: ignore[unresolved-attribute]
 
     @pytest.mark.asyncio
+    async def test_malformed_tool_input_sets_input_error_not_raises(self):
+        """tool input JSON 非法 → 流正常完成，块带 input_error、
+        ToolCall 带 arguments_error（与 OpenAI 路径同构，MUST NOT 抛异常）。"""
+        raw = '{"questions": [{"id": "q1",},]}'
+        events = [
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "t0",
+                    "name": "AskUserQuestion",
+                },
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": raw},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_stop"},
+        ]
+        p = _make_anthropic()
+        await p._client.aclose()
+        p._client = _FakeClient(_anthropic_sse(events))  # ty: ignore[invalid-assignment]
+
+        final_tc = None
+        blocks = None
+        async for chunk in p._generate_stream(body={}, model="claude"):
+            for tc in chunk.tool_calls or []:
+                final_tc = tc
+            if chunk.content_blocks is not None:
+                blocks = chunk.content_blocks
+
+        assert final_tc is not None
+        assert final_tc.arguments == {}
+        assert final_tc.arguments_error is not None
+        assert raw in final_tc.arguments_error
+        assert blocks is not None and len(blocks) == 1
+        assert blocks[0].input == {}  # ty: ignore[unresolved-attribute]
+        assert blocks[0].input_error is not None  # ty: ignore[unresolved-attribute]
+
+    @pytest.mark.asyncio
     async def test_stream_error_event_raises(self):
         """流中 error 事件抛 ProviderStreamError（触发重试，截断轮次不提交）。"""
         from wing.provider.errors import ProviderStreamError

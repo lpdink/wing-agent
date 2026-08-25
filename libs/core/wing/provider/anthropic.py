@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, AsyncIterator
@@ -20,7 +19,7 @@ import httpx
 
 from wing.common.logger import log
 from wing.common.with_retry import with_retry
-from wing.provider.base import ModelProvider
+from wing.provider.base import ModelProvider, parse_tool_args
 from wing.provider.errors import ProviderStreamError, raise_with_body
 from wing.provider.http import make_http_timeout
 from wing.provider.sse import parse_json_event, parse_sse_stream
@@ -640,19 +639,22 @@ class AnthropicProvider(ModelProvider):
         call = state.pending_tools.pop(idx, None)
         if call is None or not call.id:
             return None
-        try:
-            args = json.loads(call.args_buffer) if call.args_buffer else {}
-        except json.JSONDecodeError:
-            log.warning(
-                f"Failed to parse tool args JSON for "
-                f"{call.name}: {call.args_buffer[:200]}"
-            )
-            args = {}
+        # 容错解析与 OpenAI 路径同构：非法 JSON 不抛异常、也不静默吞掉，
+        # 置 arguments_error 由执行器短路回灌给模型自纠。
+        args, args_error = parse_tool_args(call.args_buffer)
         blk = state.blocks_by_index.get(idx)
         if isinstance(blk, ToolUseBlock):
             blk.input = args
+            blk.input_error = args_error
         return LLMResponse(
-            tool_calls=[ToolCall(id=call.id, name=call.name, arguments=args)],
+            tool_calls=[
+                ToolCall(
+                    id=call.id,
+                    name=call.name,
+                    arguments=args,
+                    arguments_error=args_error,
+                )
+            ],
             tool_call_deltas=[
                 ToolCallDelta(
                     id=call.id,

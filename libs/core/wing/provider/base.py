@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, AsyncIterator
 
@@ -14,6 +15,36 @@ from wing.schema import LLMResponse, Message, Tool
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
+
+
+def parse_tool_args(raw: str) -> tuple[dict, str | None]:
+    """解析工具调用原始 args JSON——永不抛异常。
+
+    笨模型的 args JSON 可能非法（尾逗号、未转义引号等）。解析失败时
+    MUST NOT 让异常逃逸出流——那会触发整轮重试、丢弃已生成的
+    thinking/content/tool call。正确路径：返回 ({}, 错误现场)，由
+    ToolExecutor 短路执行并把错误作为工具结果回灌给模型自纠。
+
+    Returns:
+        (arguments, arguments_error)：
+        - 成功 → (解析出的 dict, None)
+        - 空/空白串 → ({}, None)——无参工具的部分服务端不下发 "{}"
+        - 非法 JSON 或非 object → ({}, 错误描述 + 完整原始文本)
+    """
+    if not raw or not raw.strip():
+        return {}, None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return {}, (
+            f"Invalid JSON in tool call arguments: {e}. Arguments received:\n{raw}"
+        )
+    if not isinstance(parsed, dict):
+        return {}, (
+            f"Tool call arguments must be a JSON object, "
+            f"got {type(parsed).__name__}. Arguments received:\n{raw}"
+        )
+    return parsed, None
 
 
 class ModelProvider(ABC):
