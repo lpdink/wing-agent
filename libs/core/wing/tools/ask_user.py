@@ -5,6 +5,7 @@ collecting structured answers before continuing.
 """
 
 import asyncio
+import json
 
 from pydantic import BaseModel, Field
 
@@ -15,6 +16,16 @@ from wing.tool_registry import tool_registry
 
 # Feedback timeout in seconds
 FEEDBACK_TIMEOUT = 6000
+
+
+def _label_choices(choices: list[str]) -> list[str]:
+    """Prefix each choice with a canonical letter label (``A.``, ``B.``, ...).
+
+    Labels are derived from position so they always match what the TUI shows.
+    Callers should write RAW choice text (no letter prefixes); the tool owns
+    the lettering.
+    """
+    return [f"{chr(ord('A') + i)}. {c}" for i, c in enumerate(choices)]
 
 
 class AskQuestion(BaseModel):
@@ -42,14 +53,21 @@ _QUESTIONS_PARAM = ToolParam(
             "choices": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Optional suggested choices. User can still provide their own answer freely.",
+                "description": (
+                    "Optional suggested choices. Write RAW choice text (no "
+                    "letter prefixes) — the tool prefixes each with a letter "
+                    "(A., B., ...) for display and returns the labeled list "
+                    "alongside the user's answer."
+                ),
             },
         },
         "required": ["id", "question"],
     },
     description=(
         "Questions to show the user. Prefer 1 and do not exceed 3. "
-        "User answers each question freely (free-form text or picking a choice)."
+        "The user answers each question freely: they may pick a labeled choice, "
+        "reference letters, or type arbitrary free text. Do NOT assume the "
+        "answer is always a letter."
     ),
 )
 
@@ -71,10 +89,15 @@ async def ask_user(
 
     Args:
         questions: List of questions (1-3). Each has an id, question text,
-            and optional choices.
+            and optional raw choices (the tool adds ``A.``/``B.`` letters).
 
     Returns:
-        JSON mapping each question id to the user's answer.
+        JSON mapping each question id to an object:
+          {"answer": <verbatim user text>, "choices": ["A. ...", "B. ..."]}
+        ``answer`` is the user's raw input, passed through VERBATIM (the tool
+        never parses it). ``choices`` is the agent's own choices re-labeled
+        ``A.``/``B.``... so the agent can resolve any bare letters or letter
+        references semantically instead of relying on memory.
     """
     # Normalize and validate questions.
     if not questions:
@@ -106,9 +129,42 @@ async def ask_user(
             ),
             timeout=FEEDBACK_TIMEOUT,
         )
-        return feedback if feedback else "{}"
+        return _build_enriched_response(normalized, feedback)
     except asyncio.TimeoutError:
         raise ToolError(
             "⚠️ Feedback timeout. User did not respond in time. "
             "Please proceed with your best judgment or try again."
         )
+
+
+def _build_enriched_response(
+    questions: list[AskQuestion], feedback: str | None
+) -> str:
+    """Enrich the raw feedback ``{id: answer}`` into a self-describing shape.
+
+    The user's answer is kept VERBATIM (never parsed) under ``answer``; the
+    question's own choices (as the agent authored them) are re-labeled
+    ``A.``/``B.``... and echoed under ``choices``. This lets the agent resolve
+    bare letters or letter references semantically instead of from memory —
+    which is exactly why the tool never force-parses the user's free text
+    (e.g. a word like "Agent" must not be treated as "choice A").
+
+    Falls back to the original feedback verbatim if it is not valid JSON.
+    """
+    if not feedback:
+        return "{}"
+    try:
+        raw = json.loads(feedback)
+    except json.JSONDecodeError:
+        return feedback
+    if not isinstance(raw, dict):
+        return feedback
+
+    enriched = {
+        q.id: {
+            "answer": raw.get(q.id, ""),
+            "choices": _label_choices(q.choices),
+        }
+        for q in questions
+    }
+    return json.dumps(enriched, ensure_ascii=False)
