@@ -57,9 +57,14 @@ pub enum AppIntent {
     ///
     /// `tool_call_id` — Some when this message answers a pending Ask event
     /// (routes to the ask's feedback waiter); None for plain user input.
+    ///
+    /// `request_id` — client-generated correlation id; echoes back in
+    /// `delivered` / `user_message_accepted` events so the app can match
+    /// the message against its pending queue.
     SendMessage {
         content: String,
         tool_call_id: Option<String>,
+        request_id: String,
     },
 
     /// Write text to clipboard via OSC52 escape sequence.

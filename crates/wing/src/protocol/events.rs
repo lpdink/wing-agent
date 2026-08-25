@@ -232,6 +232,23 @@ pub enum WingEvent {
         meta: EventMeta,
     },
 
+    /// User message accepted into the model context — either as the input of
+    /// a new turn (before `turn_started`) or as a steer note after tool
+    /// execution. The TUI holds sent messages in a pending area and promotes
+    /// them into chat history only when this event arrives: a message moves
+    /// up exactly when the model actually receives it.
+    ///
+    /// `origin_request_id` is the request_id the client submitted with, used
+    /// to correlate with the local pending queue; `content` carries the
+    /// original text. Internal posts (no request_id) never fire this event.
+    #[serde(rename = "user_message_accepted")]
+    UserMessageAccepted {
+        content: String,
+        origin_request_id: String,
+        #[serde(flatten)]
+        meta: EventMeta,
+    },
+
     /// Diff content for file edits.
     ///
     /// `tool_call_id` correlates the diff with the tool call that produced
@@ -419,6 +436,7 @@ impl WingEvent {
             Self::Ask { .. } => "ask",
             Self::Done { .. } => "done",
             Self::TurnStarted { .. } => "turn_started",
+            Self::UserMessageAccepted { .. } => "user_message_accepted",
             Self::DiffContent { .. } => "diff_content",
             Self::SyncSession { .. } => "sync_session",
             Self::SessionStateChanged { .. } => "session_state_changed",
@@ -448,6 +466,7 @@ impl WingEvent {
             | Self::Ask { meta, .. }
             | Self::Done { meta, .. }
             | Self::TurnStarted { meta, .. }
+            | Self::UserMessageAccepted { meta, .. }
             | Self::DiffContent { meta, .. }
             | Self::SyncSession { meta, .. }
             | Self::SessionStateChanged { meta, .. }
@@ -660,6 +679,31 @@ mod tests {
             }
             _ => panic!("expected ContextStats"),
         }
+    }
+
+    #[test]
+    fn deserialize_user_message_accepted_event() {
+        let json = r#"{
+            "type": "user_message_accepted",
+            "content": "hello while busy",
+            "origin_request_id": "req-42",
+            "created_at": "2025-01-01T00:00:00",
+            "session_id": "abc123",
+            "request_id": "req-turn"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match &event {
+            WingEvent::UserMessageAccepted {
+                content,
+                origin_request_id,
+                ..
+            } => {
+                assert_eq!(content, "hello while busy");
+                assert_eq!(origin_request_id, "req-42");
+            }
+            _ => panic!("expected UserMessageAccepted"),
+        }
+        assert_eq!(event.event_type(), "user_message_accepted");
     }
 
     #[test]

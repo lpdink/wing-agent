@@ -296,10 +296,15 @@ impl App {
             self.turn.usage = TurnUsage::default();
             return true;
         }
-        self.chat.push(ChatCell::UserMessage(text.to_string()));
+        // Normal path: the message only moves up into chat history when the
+        // model actually receives it (user_message_accepted). Until then it
+        // queues in the pending area below in-flight streaming output.
+        let request_id = crate::protocol::generate_request_id();
+        self.chat.push_pending(request_id.clone(), text.to_string());
         self.push_intent(AppIntent::SendMessage {
             content: text.to_string(),
             tool_call_id: None,
+            request_id,
         });
         self.turn.usage = TurnUsage::default();
         true
@@ -345,6 +350,9 @@ impl App {
                 self.push_intent(AppIntent::SendMessage {
                     content: json,
                     tool_call_id: Some(tool_call_id),
+                    // Ask replies resolve a feedback waiter — no pending entry,
+                    // the id only correlates the delivered ack.
+                    request_id: crate::protocol::generate_request_id(),
                 });
                 self.refresh_ask_placeholder();
             }
@@ -1047,6 +1055,7 @@ impl App {
                             self.push_intent(AppIntent::SendMessage {
                                 content: choice,
                                 tool_call_id: Some(id),
+                                request_id: crate::protocol::generate_request_id(),
                             });
                         }
                     }
@@ -1339,7 +1348,24 @@ impl App {
                 self.turn.last_title = Some(working_title.clone());
                 self.push_intent(AppIntent::SetTitle(working_title));
             }
+            WingEvent::UserMessageAccepted {
+                origin_request_id, ..
+            } => {
+                // The message has actually been fed to the model — only now
+                // may it move up into chat history. Untracked ids (goal
+                // orchestration sends, other clients) are ignored: this
+                // client does not render them.
+                if !self.chat.promote_pending(&origin_request_id) {
+                    tracing::debug!(
+                        origin_request_id,
+                        "user_message_accepted for untracked message, ignoring"
+                    );
+                }
+            }
             WingEvent::Done { .. } => {
+                // Turn-end safety net: promote anything still queued (e.g.
+                // accepted events lost across a disconnect/reconnect).
+                self.chat.promote_all_pending();
                 self.finish_turn();
                 self.clear_ask_state();
                 // Restore idle title — but if the user is not focused and a
@@ -1353,6 +1379,10 @@ impl App {
                 }
             }
             WingEvent::Interrupted { meta, .. } => {
+                // Interrupt clears the backend inbox — pending messages never
+                // reached the model. Commit them as discarded (dim + struck
+                // through) rather than silently vanishing.
+                self.chat.discard_all_pending();
                 self.finish_turn();
                 self.clear_ask_state();
                 // Goal mode: record which role was interrupted.
@@ -2369,7 +2399,7 @@ mod tests {
     }
 
     #[test]
-    fn test_submit_jumps_to_bottom_and_pushes_cell() {
+    fn test_submit_jumps_to_bottom_and_queues_pending() {
         let mut app = test_app();
         app.chat.scroll_up(5); // reading history: auto_scroll=false
         app.input.set_text("hi");
@@ -2381,12 +2411,19 @@ mod tests {
             app.chat.is_at_bottom(),
             "submit must pin the view to the bottom"
         );
+        // Not committed to history yet — queued until the model accepts it.
         assert!(
             app.chat
                 .cells
                 .iter()
-                .any(|c| matches!(c.cell(), ChatCell::UserMessage(s) if s == "hi"))
+                .all(|c| !matches!(c.cell(), ChatCell::UserMessage(_))),
+            "submitted message must not enter history before acceptance"
         );
+        assert_eq!(app.chat.pending.len(), 1);
+        assert!(matches!(
+            app.chat.pending[0].cell.cell(),
+            ChatCell::PendingUserMessage(s) if s == "hi"
+        ));
     }
 
     #[test]
@@ -2401,6 +2438,111 @@ mod tests {
         assert!(
             !app.chat.is_at_bottom(),
             "typing must not yank the view back to the bottom while reading history"
+        );
+    }
+
+    // ── Pending message lifecycle (user_message_accepted) ──
+
+    fn event_meta() -> crate::protocol::EventMeta {
+        crate::protocol::EventMeta {
+            created_at: "2025-01-01T00:00:00".into(),
+            session_id: Some("test-session".into()),
+            request_id: "evt-req".into(),
+        }
+    }
+
+    fn accepted_event(origin_request_id: &str) -> WingEvent {
+        WingEvent::UserMessageAccepted {
+            content: String::new(),
+            origin_request_id: origin_request_id.into(),
+            meta: event_meta(),
+        }
+    }
+
+    #[test]
+    fn test_submit_intent_carries_pending_request_id() {
+        let mut app = test_app();
+        assert!(app.submit_message("hello"));
+
+        assert_eq!(app.chat.pending.len(), 1);
+        let pending_id = app.chat.pending[0].request_id.clone();
+
+        let intents = app.drain_intents();
+        let Some(AppIntent::SendMessage {
+            request_id,
+            tool_call_id,
+            ..
+        }) = intents.first()
+        else {
+            panic!("expected SendMessage intent");
+        };
+        assert_eq!(request_id, &pending_id);
+        assert!(tool_call_id.is_none());
+    }
+
+    #[test]
+    fn test_accepted_event_promotes_pending() {
+        let mut app = test_app();
+        assert!(app.submit_message("hello"));
+        let pending_id = app.chat.pending[0].request_id.clone();
+        app.drain_intents();
+
+        app.handle_event(accepted_event(&pending_id));
+
+        assert!(app.chat.pending.is_empty());
+        assert!(
+            app.chat
+                .cells
+                .iter()
+                .any(|c| matches!(c.cell(), ChatCell::UserMessage(s) if s == "hello"))
+        );
+    }
+
+    #[test]
+    fn test_accepted_event_unknown_id_ignored() {
+        let mut app = test_app();
+        assert!(app.submit_message("hello"));
+        app.drain_intents();
+
+        app.handle_event(accepted_event("someone-elses-id"));
+
+        // Not ours (goal orchestration / other client) — nothing changes.
+        assert_eq!(app.chat.pending.len(), 1);
+        assert!(app.chat.cells.is_empty());
+    }
+
+    #[test]
+    fn test_done_flushes_remaining_pending() {
+        let mut app = test_app();
+        assert!(app.submit_message("hello"));
+        app.drain_intents();
+
+        app.handle_event(WingEvent::Done { meta: event_meta() });
+
+        assert!(app.chat.pending.is_empty());
+        assert!(
+            app.chat
+                .cells
+                .iter()
+                .any(|c| matches!(c.cell(), ChatCell::UserMessage(s) if s == "hello"))
+        );
+    }
+
+    #[test]
+    fn test_interrupted_discards_pending() {
+        let mut app = test_app();
+        assert!(app.submit_message("hello"));
+        app.drain_intents();
+
+        app.handle_event(WingEvent::Interrupted { meta: event_meta() });
+
+        assert!(app.chat.pending.is_empty());
+        assert!(
+            app.chat
+                .cells
+                .iter()
+                .any(|c| matches!(c.cell(), ChatCell::DiscardedUserMessage(s) if s == "hello")),
+            "interrupted pending message must be committed as discarded, not lost"
         );
     }
 }

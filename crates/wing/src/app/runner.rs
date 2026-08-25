@@ -51,17 +51,33 @@ pub async fn execute_intent(
         AppIntent::SendMessage {
             content,
             tool_call_id,
+            request_id,
         } => {
-            if let Some(t) = transport
-                && let Err(e) =
-                    t.ws.send_message(&app.session_id, &content, tool_call_id)
+            match transport {
+                Some(t) => {
+                    if let Err(e) = t
+                        .ws
+                        .send_message(&app.session_id, &content, tool_call_id, request_id.clone())
                         .await
-            {
-                tracing::error!("failed to send message: {e}");
-                app.show_toast(Toast::warning(
-                    format!("Send failed: {e}"),
-                    std::time::Duration::from_secs(3),
-                ));
+                    {
+                        tracing::error!("failed to send message: {e}");
+                        // Never left the client — drop from the pending queue.
+                        app.chat.remove_pending(&request_id);
+                        app.show_toast(Toast::warning(
+                            format!("Send failed: {e}"),
+                            std::time::Duration::from_secs(3),
+                        ));
+                    }
+                }
+                None => {
+                    // Gateway connection lost — the intent is discarded, so the
+                    // pending entry must not linger on screen.
+                    app.chat.remove_pending(&request_id);
+                    app.show_toast(Toast::warning(
+                        "Not sent — gateway disconnected".to_string(),
+                        std::time::Duration::from_secs(3),
+                    ));
+                }
             }
         }
         AppIntent::FetchInfo => {
