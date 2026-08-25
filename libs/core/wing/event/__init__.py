@@ -40,6 +40,7 @@ from .react import (
     ToolResultTurnEvent,
     TurnResultEvent,
     TurnStartedEvent,
+    UserMessageAcceptedEvent,
 )
 from .state_change import (
     CompactDoneEvent,
@@ -61,6 +62,7 @@ WingEventUnion = (
     | AskEvent
     | DoneEvent
     | TurnStartedEvent
+    | UserMessageAcceptedEvent
     | DiffContentEvent
     | AssistantTurnEvent
     | ToolResultTurnEvent
@@ -95,6 +97,7 @@ __all__ = [
     "AskEvent",
     "DoneEvent",
     "TurnStartedEvent",
+    "UserMessageAcceptedEvent",
     "DiffContentEvent",
     "AssistantTurnEvent",
     "ToolResultTurnEvent",

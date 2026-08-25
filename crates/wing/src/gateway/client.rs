@@ -181,13 +181,22 @@ impl GatewayClient {
     ///
     /// `tool_call_id` — when replying to an Ask event, pass its tool_call_id
     /// so the gateway resolves the matching feedback waiter.
+    ///
+    /// `request_id` — caller-generated correlation id, echoed back in the
+    /// `delivered` / `user_message_accepted` events for this message.
     pub async fn send_message(
         &self,
         session_id: &str,
         content: &str,
         tool_call_id: Option<String>,
+        request_id: String,
     ) -> Result<()> {
-        let req = ClientRequest::message(session_id, content, tool_call_id);
+        let req = ClientRequest {
+            request_id,
+            session_id: session_id.to_string(),
+            content: content.to_string(),
+            tool_call_id,
+        };
         self.tx
             .send(req)
             .await

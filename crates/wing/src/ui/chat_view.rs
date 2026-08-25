@@ -36,6 +36,15 @@ use super::status_bar::TurnUsage;
 pub enum ChatCell {
     /// User message.
     UserMessage(String),
+    /// User message awaiting model acceptance — rendered in the pending
+    /// area below all committed cells, dimmed to signal "queued, not yet
+    /// fed to the model". Promoted to `UserMessage` on
+    /// `user_message_accepted`, or demoted to `DiscardedUserMessage` when
+    /// an interrupt discards it.
+    PendingUserMessage(String),
+    /// User message discarded by an interrupt before reaching the model —
+    /// dimmed + struck through to signal "never sent".
+    DiscardedUserMessage(String),
     /// Assistant text (may be accumulated from streaming TextEvents).
     AssistantMessage(String),
     /// System message.
@@ -67,12 +76,22 @@ impl ChatCell {
         let palette = ctx.palette;
         match self {
             Self::UserMessage(text) => {
-                let bg_style = Style::default().bg(palette.surface).fg(palette.text);
-                let mut lines = Vec::new();
-                for line in render_plain(text) {
-                    lines.push(Line::from(Span::styled(line.to_string(), bg_style)));
-                }
-                lines
+                let style = Style::default().bg(palette.surface).fg(palette.text);
+                Self::user_message_lines(text, style)
+            }
+            Self::PendingUserMessage(text) => {
+                // Queued, not yet accepted by the model — dimmed.
+                let style = Style::default().bg(palette.surface).fg(palette.dim);
+                Self::user_message_lines(text, style)
+            }
+            Self::DiscardedUserMessage(text) => {
+                // Discarded by an interrupt before reaching the model —
+                // dimmed + struck through.
+                let style = Style::default()
+                    .bg(palette.surface)
+                    .fg(palette.dim)
+                    .add_modifier(Modifier::CROSSED_OUT);
+                Self::user_message_lines(text, style)
             }
             Self::AssistantMessage(text) => {
                 // Reserve 2 columns for the `⦁ ` / `  ` line prefix so tables
@@ -143,6 +162,15 @@ impl ChatCell {
             }
         }
     }
+
+    /// Shared rendering for the three user-message cell states (normal /
+    /// pending / discarded) — plain text lines under the given style.
+    fn user_message_lines(text: &str, style: Style) -> Vec<Line<'static>> {
+        render_plain(text)
+            .iter()
+            .map(|line| Line::from(Span::styled(line.to_string(), style)))
+            .collect()
+    }
 }
 
 impl Renderable for ChatCell {
@@ -155,7 +183,10 @@ impl Renderable for ChatCell {
     /// Wrap-aware line count — the single source of truth for cell height.
     fn desired_height(&self, width: u16, ctx: &CellContext<'_>) -> usize {
         // UserMessage: text rendered in inset area (2 left, 1 top, 1 bottom padding)
-        if matches!(self, Self::UserMessage(_)) {
+        if matches!(
+            self,
+            Self::UserMessage(_) | Self::PendingUserMessage(_) | Self::DiscardedUserMessage(_)
+        ) {
             let text_width = width.saturating_sub(3);
             return Paragraph::new(self.to_lines(width, ctx))
                 .wrap(Wrap { trim: false })
@@ -168,11 +199,27 @@ impl Renderable for ChatCell {
     }
 }
 
+/// A user message that has been sent but not yet accepted by the model.
+///
+/// Rendered in the pending area below all committed cells ("stuck at the
+/// bottom") until `user_message_accepted` promotes it into history.
+pub struct PendingMessage {
+    /// ClientRequest.request_id — correlates with UserMessageAccepted.
+    pub request_id: String,
+    pub(crate) cell: CachedCell, // PendingUserMessage(content)
+}
+
 /// Scrollable chat view with scrollbar indicator.
 pub struct ChatView {
     pub(crate) cells: Vec<CachedCell>,
     /// Cached wrap-aware line count per cell (mirrors cells.len()).
     cell_heights: Vec<usize>,
+    /// User messages awaiting model acceptance, in send order. Rendered
+    /// below all cells; promoted/discarded by the app on acceptance
+    /// events (see `push_pending` and friends).
+    pub(crate) pending: Vec<PendingMessage>,
+    /// Cached wrap-aware line count per pending message.
+    pending_heights: Vec<usize>,
     /// Scroll offset in lines (0 = top).
     pub(crate) scroll_offset: usize,
     /// Whether auto-scroll is active (follow bottom).
@@ -191,6 +238,8 @@ impl ChatView {
         Self {
             cells: Vec::new(),
             cell_heights: Vec::new(),
+            pending: Vec::new(),
+            pending_heights: Vec::new(),
             scroll_offset: 0,
             auto_scroll: true,
             header_lines: Vec::new(),
@@ -219,6 +268,81 @@ impl ChatView {
         }
 
         self.cells.push(CachedCell::new(cell));
+    }
+
+    // ── Pending user messages (sent, awaiting model acceptance) ──
+    //
+    // A user message only moves up into chat history when it has really
+    // been fed to the model. Until then it sits in this queue, rendered
+    // below all committed cells ("stuck at the latest"), and is promoted
+    // by `user_message_accepted` or discarded by an interrupt.
+
+    /// Queue a sent-but-not-yet-accepted user message.
+    pub fn push_pending(&mut self, request_id: String, content: String) {
+        self.pending.push(PendingMessage {
+            request_id,
+            cell: CachedCell::new(ChatCell::PendingUserMessage(content)),
+        });
+        // The user's own submission must be visible immediately — pending
+        // messages render below in-flight streaming content.
+        self.jump_bottom();
+    }
+
+    /// Promote the pending message matching `request_id` into history.
+    ///
+    /// Returns `false` when nothing matches (message originated from
+    /// another client / goal orchestration — not tracked here).
+    pub fn promote_pending(&mut self, request_id: &str) -> bool {
+        let Some(pos) = self.pending.iter().position(|p| p.request_id == request_id) else {
+            return false;
+        };
+        let msg = self.pending.remove(pos);
+        let ChatCell::PendingUserMessage(content) = msg.cell.into_inner() else {
+            return false;
+        };
+        self.push(ChatCell::UserMessage(content));
+        true
+    }
+
+    /// Promote all pending messages into history (turn-end safety net —
+    /// e.g. accepted events lost across a disconnect/reconnect).
+    pub fn promote_all_pending(&mut self) {
+        let contents: Vec<String> = self
+            .pending
+            .drain(..)
+            .filter_map(|msg| match msg.cell.into_inner() {
+                ChatCell::PendingUserMessage(content) => Some(content),
+                _ => None,
+            })
+            .collect();
+        for content in contents {
+            self.push(ChatCell::UserMessage(content));
+        }
+    }
+
+    /// Interrupted: pending messages were dropped from the backend inbox
+    /// without reaching the model — commit them as discarded (dim +
+    /// struck through) instead of silently vanishing.
+    pub fn discard_all_pending(&mut self) {
+        let contents: Vec<String> = self
+            .pending
+            .drain(..)
+            .filter_map(|msg| match msg.cell.into_inner() {
+                ChatCell::PendingUserMessage(content) => Some(content),
+                _ => None,
+            })
+            .collect();
+        for content in contents {
+            self.push(ChatCell::DiscardedUserMessage(content));
+        }
+    }
+
+    /// Remove a pending message without committing it (send failed /
+    /// gateway unreachable — the message never left the client).
+    pub fn remove_pending(&mut self, request_id: &str) {
+        if let Some(pos) = self.pending.iter().position(|p| p.request_id == request_id) {
+            self.pending.remove(pos);
+        }
     }
 
     /// Find the cell index of the ToolCall block with the given id.
@@ -420,6 +544,8 @@ impl ChatView {
     pub fn clear(&mut self) {
         self.cells.clear();
         self.cell_heights.clear();
+        self.pending.clear();
+        self.pending_heights.clear();
         self.scroll_offset = 0;
         self.auto_scroll = true;
     }
@@ -638,6 +764,10 @@ impl ChatView {
         for (i, cached) in self.cells.iter_mut().enumerate() {
             self.cell_heights[i] = cached.compute_height(width, ctx);
         }
+        self.pending_heights.resize(self.pending.len(), 0);
+        for (i, msg) in self.pending.iter_mut().enumerate() {
+            self.pending_heights[i] = msg.cell.compute_height(width, ctx);
+        }
     }
 }
 
@@ -755,7 +885,8 @@ impl Widget for ChatViewWidget<'_> {
         self.view.update_heights(area.width, &self.ctx);
         let header_height = self.view.header_lines.len();
         let cell_total: usize = self.view.cell_heights.iter().sum();
-        let total = header_height + cell_total;
+        let pending_total: usize = self.view.pending_heights.iter().sum();
+        let total = header_height + cell_total + pending_total;
 
         // Record the content height so `scroll_down` can detect the bottom
         // edge and re-arm auto-scroll between renders.
@@ -806,10 +937,20 @@ impl Widget for ChatViewWidget<'_> {
             }
         }
 
-        // Render cells (accumulated starts after header).
+        // Render cells + pending messages in one virtual coordinate space
+        // (accumulated starts after header). Pending messages extend the
+        // space below all committed cells, so auto-scroll keeps the user's
+        // queued submissions in view while the turn streams on above them.
         let mut accumulated = header_height;
+        let cell_count = self.view.cell_heights.len();
+        let pending_count = self.view.pending_heights.len();
 
-        for (i, &height) in self.view.cell_heights.iter().enumerate() {
+        for i in 0..cell_count + pending_count {
+            let height = if i < cell_count {
+                self.view.cell_heights[i]
+            } else {
+                self.view.pending_heights[i - cell_count]
+            };
             let cell_start = accumulated;
             let cell_end = accumulated + height;
             accumulated = cell_end;
@@ -833,9 +974,12 @@ impl Widget for ChatViewWidget<'_> {
             }
 
             // This cell is visible — use cached lines and render directly.
-            let cell_lines = self.view.cells[i]
-                .compute_lines(content_area.width, &self.ctx)
-                .to_vec();
+            let cached = if i < cell_count {
+                &mut self.view.cells[i]
+            } else {
+                &mut self.view.pending[i - cell_count].cell
+            };
+            let cell_lines = cached.compute_lines(content_area.width, &self.ctx).to_vec();
             let cell_area = Rect::new(
                 content_area.x,
                 render_y,
@@ -843,11 +987,17 @@ impl Widget for ChatViewWidget<'_> {
                 cell_visible as u16,
             );
 
-            // UserMessage: fill full-width background before text rendering.
+            // User messages (normal / pending / discarded): fill full-width
+            // background before text rendering.
             // Line.style(bg) only covers text width (ratatui Paragraph limitation),
             // so we pre-fill the cell area with the background color.
             // Text is rendered in an inset area for padding (2 left, 1 top, 1 bottom).
-            if matches!(self.view.cells[i].cell(), ChatCell::UserMessage(_)) {
+            if matches!(
+                cached.cell(),
+                ChatCell::UserMessage(_)
+                    | ChatCell::PendingUserMessage(_)
+                    | ChatCell::DiscardedUserMessage(_)
+            ) {
                 let bg = Style::default().bg(self.ctx.palette.surface);
                 for y in cell_area.y..cell_area.y + cell_area.height {
                     for x in cell_area.x..cell_area.x + cell_area.width {
@@ -1507,5 +1657,131 @@ mod tests {
         let before = view.cells[idx].generation();
         view.tick_bash_timers();
         assert_eq!(view.cells[idx].generation(), before + 1);
+    }
+
+    // ── Pending user messages (sent, awaiting model acceptance) ──
+
+    #[test]
+    fn test_push_pending_keeps_message_out_of_history() {
+        let mut view = ChatView::new();
+        view.push_pending("req-1".into(), "queued".into());
+
+        assert!(view.cells.is_empty());
+        assert_eq!(view.pending.len(), 1);
+        assert!(matches!(
+            view.pending[0].cell.cell(),
+            ChatCell::PendingUserMessage(text) if text == "queued"
+        ));
+        // The user's own submission must be visible — auto-scroll re-armed.
+        assert!(view.is_at_bottom());
+    }
+
+    #[test]
+    fn test_promote_pending_moves_message_into_history() {
+        let mut view = ChatView::new();
+        view.push(ChatCell::AssistantMessage("answer".into()));
+        view.push_pending("req-1".into(), "follow-up".into());
+
+        assert!(view.promote_pending("req-1"));
+        assert!(view.pending.is_empty());
+        assert_eq!(view.cells.len(), 2);
+        assert!(matches!(
+            view.cells[1].cell(),
+            ChatCell::UserMessage(text) if text == "follow-up"
+        ));
+    }
+
+    #[test]
+    fn test_promote_pending_unknown_id_returns_false() {
+        let mut view = ChatView::new();
+        view.push_pending("req-1".into(), "queued".into());
+
+        assert!(!view.promote_pending("req-other"));
+        assert_eq!(view.pending.len(), 1);
+        assert!(view.cells.is_empty());
+    }
+
+    #[test]
+    fn test_promote_all_pending_preserves_send_order() {
+        let mut view = ChatView::new();
+        view.push_pending("req-1".into(), "first".into());
+        view.push_pending("req-2".into(), "second".into());
+
+        view.promote_all_pending();
+
+        assert!(view.pending.is_empty());
+        let texts: Vec<&str> = view
+            .cells
+            .iter()
+            .filter_map(|c| match c.cell() {
+                ChatCell::UserMessage(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn test_discard_all_pending_marks_messages_unsent() {
+        let mut view = ChatView::new();
+        view.push_pending("req-1".into(), "lost".into());
+
+        view.discard_all_pending();
+
+        assert!(view.pending.is_empty());
+        assert_eq!(view.cells.len(), 1);
+        assert!(matches!(
+            view.cells[0].cell(),
+            ChatCell::DiscardedUserMessage(text) if text == "lost"
+        ));
+    }
+
+    #[test]
+    fn test_remove_pending_drops_unsent_message() {
+        let mut view = ChatView::new();
+        view.push_pending("req-1".into(), "never sent".into());
+
+        view.remove_pending("req-1");
+
+        assert!(view.pending.is_empty());
+        assert!(view.cells.is_empty());
+    }
+
+    #[test]
+    fn test_clear_removes_pending() {
+        let mut view = ChatView::new();
+        view.push(ChatCell::AssistantMessage("a".into()));
+        view.push_pending("req-1".into(), "queued".into());
+
+        view.clear();
+
+        assert!(view.cells.is_empty());
+        assert!(view.pending.is_empty());
+    }
+
+    #[test]
+    fn test_user_message_state_lines_use_distinct_styles() {
+        let (palette, layout) = test_ctx();
+        let ctx = make_ctx(&palette, &layout);
+
+        let normal = ChatCell::UserMessage("m".into()).to_lines(80, &ctx);
+        let pending = ChatCell::PendingUserMessage("m".into()).to_lines(80, &ctx);
+        let discarded = ChatCell::DiscardedUserMessage("m".into()).to_lines(80, &ctx);
+
+        // Pending is dimmed; discarded is dimmed + struck through; normal is neither.
+        let style_of = |lines: &Vec<Line<'static>>| lines[0].spans[0].style;
+        assert_eq!(style_of(&pending).fg, Some(palette.dim));
+        assert_eq!(style_of(&discarded).fg, Some(palette.dim));
+        assert!(
+            style_of(&discarded)
+                .add_modifier
+                .contains(Modifier::CROSSED_OUT)
+        );
+        assert!(
+            !style_of(&pending)
+                .add_modifier
+                .contains(Modifier::CROSSED_OUT)
+        );
+        assert_eq!(style_of(&normal).fg, Some(palette.text));
     }
 }

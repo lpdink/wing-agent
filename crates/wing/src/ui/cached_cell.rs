@@ -72,6 +72,11 @@ impl CachedCell {
         self.cached_lines = None;
     }
 
+    /// Consume the wrapper and return the inner cell.
+    pub fn into_inner(self) -> ChatCell {
+        self.cell
+    }
+
     /// Get or compute cached lines. Single source of truth for rendered output.
     ///
     /// Width-aware: invalidates cache when width changes (for full-width elements

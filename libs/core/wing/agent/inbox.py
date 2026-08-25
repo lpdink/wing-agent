@@ -52,18 +52,20 @@ class Inbox:
                 break
         return items
 
-    def drain_for_steer(self) -> str:
-        """Drain 并格式化为 steer notes。
+    def drain_for_steer(self) -> list[Inbound]:
+        """Drain 并筛选可 steer 的用户消息（user role + 非空 content）。
 
-        Returns:
-            格式化的用户转向指引字符串，无消息时返回空串。
+        返回 Inbound 列表（保留 request_id），由调用方发射
+        UserMessageAcceptedEvent 并经 `format_steer_note` 格式化注入。
         """
-        items = self.drain()
-        notes = [
-            b.message.content
-            for b in items
-            if b.message.role == "user" and b.message.content
+        return [
+            b for b in self.drain() if b.message.role == "user" and b.message.content
         ]
+
+    @staticmethod
+    def format_steer_note(items: list[Inbound]) -> str:
+        """把 Inbound 列表格式化为 steer note。无有效消息时返回空串。"""
+        notes = [b.message.content for b in items if b.message.content]
         if not notes:
             return ""
         return f"[User steer note: {'\n'.join(notes)}]\n"

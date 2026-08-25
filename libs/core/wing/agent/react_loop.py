@@ -121,6 +121,13 @@ class ReActLoop:
         token = set_request_context(request_id=request_id, session_id=self._cm.id)
         ctx = _TurnAccumulator()
         try:
+            # 消费确认：被合并进本轮输入的用户消息在此正式"被模型接受"。
+            # 前端据此把排队中的消息上移进聊天历史。只对外部投递发射
+            # （request_id 存在）；内部投递（如 Explorer 回传）不发射。
+            # 先于 turn_started——事件流顺序即渲染顺序。
+            for b in batch:
+                if b.request_id and b.message.role == "user" and b.message.content:
+                    self._sink.user_message_accepted(b.message.content, b.request_id)
             self._sink.turn_started()
 
             # Hook: before_user_message
@@ -217,10 +224,18 @@ class ReActLoop:
             tc_results = e.results
             interrupted_exc = e
 
-        # Steer: drain inbox 中积攒的用户消息
+        # Steer: drain inbox 中积攒的用户消息。每条被消费的消息都是在此刻
+        # 真正"被模型接受"——逐条发射 UserMessageAcceptedEvent，前端据此
+        # 把排队消息上移（落在工具结果之后、下一轮输出之前）。
         if self.steer and tc_results:
-            steer_notes = self._inbox.drain_for_steer()
-            if steer_notes:
+            steer_items = self._inbox.drain_for_steer()
+            if steer_items:
+                for b in steer_items:
+                    if b.request_id and b.message.content:
+                        self._sink.user_message_accepted(
+                            b.message.content, b.request_id
+                        )
+                steer_notes = self._inbox.format_steer_note(steer_items)
                 tc_results[-1].content = steer_notes + (tc_results[-1].content or "")
 
         # 提交本轮消息

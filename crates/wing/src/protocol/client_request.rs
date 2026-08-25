@@ -20,18 +20,6 @@ pub struct ClientRequest {
     pub tool_call_id: Option<String>,
 }
 
-impl ClientRequest {
-    /// Create a normal (non-silent) message request.
-    pub fn message(session_id: &str, content: &str, tool_call_id: Option<String>) -> Self {
-        Self {
-            request_id: super::generate_request_id(),
-            session_id: session_id.to_string(),
-            content: content.to_string(),
-            tool_call_id,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,7 +38,12 @@ mod tests {
         // None tool_call_id is omitted from the payload.
         assert!(!json.contains("tool_call_id"));
 
-        let req = ClientRequest::message("sid", "hi", Some("tc_1".into()));
+        let req = ClientRequest {
+            request_id: "abc2".into(),
+            session_id: "sid".into(),
+            content: "hi".into(),
+            tool_call_id: Some("tc_1".into()),
+        };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"tool_call_id\":\"tc_1\""));
     }
