@@ -29,6 +29,10 @@ class ProviderConfig(BaseModel):
     api_key: str
     timeout_first_chunk: float = 300.0
     timeout_total: float = 600.0
+    max_retries: int = 10
+    """LLM 调用失败时的最大重试次数。"""
+    max_retry_delay: float = 180.0
+    """指数退避最大重试间隔（秒，默认 3 分钟）。"""
     explicit_cache_mode: bool = True
     reasoning_effort: str | None = None
     max_tokens: int = 128_000
