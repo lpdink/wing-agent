@@ -1716,6 +1716,14 @@ impl App {
                 self.chat.clear();
                 self.ctx.reset();
 
+                // Ask flows are session-scoped interactive state, not rendered
+                // history: without this, a reconnect / session switch while an
+                // ask is pending would leave the live-registered flow in the
+                // deque AND re-register it from the replayed pending ask —
+                // the duplicate stale front entry would later swallow the
+                // answer of a subsequent ask (posted to a dead tool_call_id).
+                self.clear_ask_state();
+
                 // Restore working state BEFORE feeding uncommitted content, so
                 // the spinner / Bash timers / terminal title reflect an
                 // in-progress turn (a mid-turn resume). `turn_started_at`
@@ -2453,6 +2461,41 @@ mod tests {
             started.elapsed().as_secs() < 2,
             "future timestamp must clamp elapsed to ~0, not wrap"
         );
+    }
+
+    #[test]
+    fn test_sync_clears_stale_ask_flows_before_replay() {
+        // Reconnect / session switch while an ask is pending: the
+        // live-registered flow must be cleared before the replayed pending
+        // ask re-registers — otherwise the deque holds a duplicate and a
+        // later answer pops the stale front entry (routed to a dead
+        // tool_call_id, swallowing the next ask's answer).
+        let mut app = test_app();
+        // Simulate a live ask registered before the disconnect.
+        app.ask_flows.push_back(ask_flow::AskFlow::new(
+            "ask-live".into(),
+            vec![AskQuestion {
+                id: "q0".into(),
+                question: "old session question?".into(),
+                choices: vec![],
+            }],
+        ));
+        // Re-sync: the still-pending ask is replayed (backend filter keeps
+        // it) and re-registered.
+        let events = vec![serde_json::json!({
+            "type": "ask",
+            "tool_call_id": "ask-live",
+            "questions": [{"id": "q1", "question": "proceed?", "choices": []}],
+        })];
+        app.handle_event(sync_event(vec![], None, vec![], events, None));
+        assert_eq!(
+            app.ask_flows.len(),
+            1,
+            "replayed ask must be the only registered flow"
+        );
+        assert_eq!(app.ask_flows[0].tool_call_id, "ask-live");
+        // And the replayed payload is the one registered (fresh question).
+        assert_eq!(app.ask_flows[0].questions[0].id, "q1");
     }
 
     #[test]
