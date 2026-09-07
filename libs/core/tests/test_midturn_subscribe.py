@@ -145,3 +145,40 @@ class TestPersistedEventsOnChain:
         assert ev.tool_success is True
 
         await agent.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_interrupted_event_persisted_request_id(self, runtime):
+        """runtime 出口的 persist=true 事件同样在落盘前定型 request_id。"""
+        import json
+        import os
+        from pathlib import Path
+
+        from wing.event import InterruptedEvent
+        from wing.request_context import (
+            reset_request_context,
+            set_request_context,
+        )
+
+        session = runtime.create_session()
+        sid = session.session_id
+
+        token = set_request_context(request_id="req-int", session_id=sid)
+        try:
+            runtime._emit_session_event(
+                InterruptedEvent(session_id=sid), session=session
+            )
+        finally:
+            reset_request_context(token)
+
+        # 磁盘行携带触发请求的 request_id（中断审计可串联）
+        history = Path(os.environ["WING_SESSIONS_PATH"], sid, "history.jsonl")
+        records = [
+            json.loads(line)
+            for line in history.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        interrupted = [r for r in records if r.get("type") == "interrupted"]
+        assert len(interrupted) == 1
+        assert interrupted[0]["request_id"] == "req-int"
+
+        await session.agent.shutdown()

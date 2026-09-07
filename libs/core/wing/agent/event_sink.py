@@ -38,6 +38,7 @@ from wing.event import (
     TurnStartedEvent,
     UserMessageAcceptedEvent,
 )
+from wing.request_context import get_request_context
 
 from .event_journal import EventJournal
 
@@ -62,6 +63,14 @@ class AgentEventSink:
         self.journal = EventJournal()
 
     def _emit(self, event: WingEvent) -> None:
+        # 关联元数据定型：在落盘之前完成 request_id 注入，保证磁盘记录
+        # 与广播帧携带同一个值（日志是唯一事实来源——live replay 与
+        # resume replay 不允许对同一事件呈现不同的 request_id）。
+        # 注：request_id 是关联标记（correlation id）而非链拓扑身份——
+        # 身份（uuid/parent_uuid）由 TrackedList 后端生成，与此无关。
+        ctx = get_request_context()
+        if ctx.request_id is not None:
+            event.request_id = ctx.request_id
         if event.session_id is None:
             event.session_id = self._session_id
         if event.target is None:

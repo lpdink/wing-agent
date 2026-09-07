@@ -37,7 +37,11 @@ from wing.event import (
 )
 from wing.event_bus import event_bus
 from wing.config import get_config, load_hooks
-from wing.request_context import reset_request_context, set_request_context
+from wing.request_context import (
+    get_request_context,
+    reset_request_context,
+    set_request_context,
+)
 from typing import TYPE_CHECKING
 from wing.session import Session
 from wing.session_manager import SessionManager
@@ -495,7 +499,12 @@ class WingRuntime:
 
         persist=true 且 session 给定时先落盘进链（与 AgentEventSink 同一
         持久化语义）；session 为 None 的事件（无会话上下文）只广播。
+        request_id 在落盘前从 RequestContext 定型注入——磁盘记录与广播
+        帧携带同一关联值（与 AgentEventSink._emit 一致）。
         """
+        ctx = get_request_context()
+        if ctx.request_id is not None:
+            event.request_id = ctx.request_id
         event.target = EventTarget(scope="session")
         if event.persist and session is not None:
             session.context_manager.append_event(event)

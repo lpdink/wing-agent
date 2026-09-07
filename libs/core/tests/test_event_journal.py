@@ -206,3 +206,73 @@ class TestPersistSplit:
         assert len(persisted) == 0
         assert len(sink.journal) == 1
         assert isinstance(sink.journal.snapshot()[0], ToolCallEvent)
+
+
+class TestRequestIdFinalization:
+    """request_id 在落盘前定型——磁盘记录与广播帧携带同一关联值。
+
+    日志是唯一事实来源：live replay 与 resume replay 对同一事件不允许
+    呈现不同的 request_id（否则按 request_id 串联日志时断裂）。
+    """
+
+    @staticmethod
+    def _read_log_lines(tmp_dir) -> list[dict]:
+        import json
+
+        path = tmp_dir / "history.jsonl"
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def test_persisted_record_carries_request_context_id(self, tmp_path):
+        """ctx 有 request_id 时，磁盘行的 request_id == ctx 值。"""
+        from wing.agent.event_sink import AgentEventSink
+        from wing.common.tracked_list import TrackedList
+        from wing.event_bus import event_bus
+        from wing.request_context import (
+            reset_request_context,
+            set_request_context,
+        )
+        from wing.schema import ChainNode
+        from wing.store import FileMessageLog
+
+        event_bus._subscribers.clear()
+        tl: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_path))
+        sink = AgentEventSink(session_id="s", append_event=tl.append)
+        token = set_request_context(request_id="req-from-client", session_id="s")
+        try:
+            sink._emit(DiffContentEvent(path="f", new_text="x"))
+        finally:
+            reset_request_context(token)
+            event_bus._subscribers.clear()
+
+        # 磁盘行（jsonl 序列化快照）携带 ctx 的 request_id
+        (record,) = self._read_log_lines(tmp_path)
+        assert record["type"] == "diff_content"
+        assert record["request_id"] == "req-from-client"
+        # 内存链上对象与磁盘一致（广播后的覆写是幂等 no-op，无漂移）
+        node = tl.active_chain[0]
+        assert isinstance(node, DiffContentEvent)
+        assert node.request_id == "req-from-client"
+
+    def test_no_request_context_keeps_backend_generated_id(self, tmp_path):
+        """ctx 无 request_id 时保留后端生成值，内存与磁盘一致。"""
+        from wing.agent.event_sink import AgentEventSink
+        from wing.common.tracked_list import TrackedList
+        from wing.event_bus import event_bus
+        from wing.schema import ChainNode
+        from wing.store import FileMessageLog
+
+        event_bus._subscribers.clear()
+        tl: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_path))
+        sink = AgentEventSink(session_id="s", append_event=tl.append)
+        sink._emit(DiffContentEvent(path="f", new_text="x"))
+        event_bus._subscribers.clear()
+
+        (record,) = self._read_log_lines(tmp_path)
+        assert record["request_id"]  # 非空：后端生成的 uuid4 hex
+        node = tl.active_chain[0]
+        assert isinstance(node, DiffContentEvent)
+        assert record["request_id"] == node.request_id
