@@ -18,7 +18,11 @@ use serde::Serialize;
 pub struct EventMeta {
     /// UTC ISO-8601 timestamp string.
     pub created_at: String,
-    /// Session this event belongs to (may be absent for global events).
+    /// Session this event belongs to. `#[serde(default)]` makes the tolerance
+    /// explicit: the wire serializer strips null fields, so global events (no
+    /// session) arrive without this key — serde already maps a missing
+    /// `Option<T>` to `None`, this documents the intent.
+    #[serde(default)]
     pub session_id: Option<String>,
     /// Unique request correlation id.
     pub request_id: String,
@@ -190,6 +194,9 @@ pub enum WingEvent {
         cached_tokens: i64,
         first_chunk_rt_ms: f64,
         tokens_per_sec: f64,
+        /// Termination cause (end_turn / max_tokens / tool_use / stop / length).
+        #[serde(default)]
+        stop_reason: Option<String>,
         #[serde(flatten)]
         meta: EventMeta,
     },
@@ -268,13 +275,42 @@ pub enum WingEvent {
 
     // ---- state_change ----
     /// Full session state sync.
+    ///
+    /// Carries four replay groups — subscribers MUST assemble in the order
+    /// `messages → uncommitted → uncommitted_tools → events`, then continue
+    /// seamlessly with the live stream. All fields are `#[serde(default)]` so
+    /// older gateways (or null-stripped wire frames) degrade gracefully.
     #[serde(rename = "sync_session")]
     SyncSession {
+        #[serde(default)]
         session_id: String,
+        /// Committed Message projections (active chain).
         #[serde(default)]
         messages: Vec<serde_json::Value>,
+        /// Single uncommitted assistant Message projection (finalized blocks of
+        /// the in-progress turn) — rendered via the same `replay_messages` path
+        /// as `messages`. Null when no turn is in progress.
+        #[serde(default)]
+        uncommitted: Option<serde_json::Value>,
+        /// Unfinished tool calls' raw args fragments
+        /// (`[{tool_call_id, tool_name, args_fragment}]`) — rendered via the
+        /// live `ToolCallStream` branch (client-side partial parse).
+        #[serde(default)]
+        uncommitted_tools: Vec<serde_json::Value>,
+        /// Durable fact-event nodes on the active chain (in chain order) —
+        /// replay material for diff views and other message-projection gaps.
+        #[serde(default)]
+        events: Vec<serde_json::Value>,
+        /// When the current turn started (UTC ISO-8601) — restores elapsed time
+        /// on resume instead of recounting from the resume moment. Null when no
+        /// turn is in progress.
+        #[serde(default)]
+        turn_started_at: Option<String>,
+        #[serde(default)]
         agent: Option<AgentInfo>,
+        #[serde(default)]
         name: Option<String>,
+        #[serde(default)]
         draft: Option<String>,
         #[serde(flatten)]
         meta: EventMeta,
@@ -758,6 +794,156 @@ mod tests {
                 assert!(!is_final);
             }
             _ => panic!("expected ToolCallStream"),
+        }
+    }
+
+    // ── Wire frames after null/storage-field stripping (lean-event-log) ──
+    //
+    // The backend `wire_dump` strips storage-only fields (role / parent_uuid /
+    // unzip_last_uuid / target / persist) and every null-valued field. These
+    // lock that the Rust mirror still parses such frames — missing `Option<T>`
+    // fields fall back to None, and SyncSession's new fields default.
+
+    #[test]
+    fn deserialize_stripped_text_frame() {
+        // No session_id (global / stripped null), no role/parent_uuid/persist.
+        let json = r#"{
+            "type": "text",
+            "content": "hello",
+            "created_at": "2025-01-01T00:00:00",
+            "request_id": "req1"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match event {
+            WingEvent::Text { content, meta } => {
+                assert_eq!(content, "hello");
+                assert!(meta.session_id.is_none(), "absent session_id → None");
+            }
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn deserialize_stripped_diff_frame_missing_old_text() {
+        // old_text=None (new file) is stripped → must parse as None.
+        let json = r#"{
+            "type": "diff_content",
+            "path": "new.txt",
+            "new_text": "content",
+            "created_at": "2025-01-01T00:00:00",
+            "session_id": "s1",
+            "request_id": "req2"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match event {
+            WingEvent::DiffContent {
+                path,
+                old_text,
+                new_text,
+                tool_call_id,
+                ..
+            } => {
+                assert_eq!(path, "new.txt");
+                assert!(old_text.is_none(), "absent old_text → None (new file)");
+                assert_eq!(new_text, "content");
+                assert_eq!(tool_call_id, "", "absent tool_call_id → default empty");
+            }
+            _ => panic!("expected DiffContent"),
+        }
+    }
+
+    #[test]
+    fn deserialize_stripped_error_frame() {
+        // error_code / detail are None → stripped → must parse as None.
+        let json = r#"{
+            "type": "error",
+            "message": "boom",
+            "status_code": 500,
+            "created_at": "2025-01-01T00:00:00",
+            "request_id": "req3"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match event {
+            WingEvent::Error {
+                message,
+                error_code,
+                detail,
+                ..
+            } => {
+                assert_eq!(message, "boom");
+                assert!(error_code.is_none());
+                assert!(detail.is_none());
+            }
+            _ => panic!("expected Error"),
+        }
+    }
+
+    #[test]
+    fn deserialize_sync_session_without_new_fields() {
+        // Backward compat: a SyncSession frame with none of the new fields
+        // (uncommitted / uncommitted_tools / turn_started_at) — older gateway or
+        // all stripped — parses and degrades to "replay committed only".
+        let json = r#"{
+            "type": "sync_session",
+            "session_id": "s1",
+            "messages": [{"role": "user", "content": "hi"}],
+            "created_at": "2025-01-01T00:00:00",
+            "request_id": "req4"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match event {
+            WingEvent::SyncSession {
+                session_id,
+                messages,
+                uncommitted,
+                uncommitted_tools,
+                events,
+                turn_started_at,
+                ..
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(messages.len(), 1);
+                assert!(uncommitted.is_none());
+                assert!(uncommitted_tools.is_empty());
+                assert!(events.is_empty());
+                assert!(turn_started_at.is_none());
+            }
+            _ => panic!("expected SyncSession"),
+        }
+    }
+
+    #[test]
+    fn deserialize_sync_session_with_uncommitted() {
+        let json = r#"{
+            "type": "sync_session",
+            "session_id": "s1",
+            "messages": [],
+            "uncommitted": {"role": "assistant", "content": "partial"},
+            "uncommitted_tools": [
+                {"tool_call_id": "tc1", "tool_name": "Bash", "args_fragment": "{\"c"}
+            ],
+            "events": [{"type": "diff_content", "path": "f", "new_text": "x"}],
+            "turn_started_at": "2026-01-01T00:00:00+00:00",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "request_id": "req5"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match event {
+            WingEvent::SyncSession {
+                uncommitted,
+                uncommitted_tools,
+                turn_started_at,
+                ..
+            } => {
+                assert!(uncommitted.is_some());
+                assert_eq!(uncommitted_tools.len(), 1);
+                assert_eq!(uncommitted_tools[0]["tool_call_id"].as_str(), Some("tc1"));
+                assert_eq!(
+                    turn_started_at.as_deref(),
+                    Some("2026-01-01T00:00:00+00:00")
+                );
+            }
+            _ => panic!("expected SyncSession"),
         }
     }
 }

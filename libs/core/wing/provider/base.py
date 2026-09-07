@@ -9,12 +9,28 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, AsyncIterator
 
 from wing.schema import LLMResponse, Message, Tool
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
+
+
+@dataclass(frozen=True)
+class PendingToolView:
+    """未终结 tool call 的渲染投影（活工具卡素材）。
+
+    `args_fragment` 是模型吐出的**原始参数文本**累积——后端 MUST NOT 对其
+    做任何 JSON 解析（含 partial parse）；局部解析职责在客户端
+    （`util/partial_json.rs`）。与 `snapshot_blocks()` 覆盖互斥：已终结块进
+    snapshot，未终结调用进本投影。
+    """
+
+    tool_call_id: str
+    tool_name: str
+    args_fragment: str
 
 
 def parse_tool_args(raw: str) -> tuple[dict, str | None]:
@@ -47,6 +63,21 @@ def parse_tool_args(raw: str) -> tuple[dict, str | None]:
     return parsed, None
 
 
+class StreamAccumulator:
+    """caller 持有的流累积状态容器（provider 协议中立的不透明壳）。
+
+    provider.generate(..., accumulator=...) 在每次尝试开始时把内部流
+    状态装入 holder.state（重试重置——累积只反映当前尝试，与消费者看到
+    的重传内容一致）。caller 不解读 state，只原样传回
+    provider.snapshot_blocks(accumulator)。
+    """
+
+    __slots__ = ("state",)
+
+    def __init__(self) -> None:
+        self.state: object | None = None
+
+
 class ModelProvider(ABC):
     """模型调用 provider 基类。"""
 
@@ -71,14 +102,52 @@ class ModelProvider(ABC):
         model: str,
         tools: list[Tool] | None = None,
         stream: bool = False,
+        accumulator: "StreamAccumulator | None" = None,
     ) -> AsyncIterator[LLMResponse]:
-        """统一调用入口，产出 LLMResponse 流。"""
+        """统一调用入口，产出 LLMResponse 流。
+
+        accumulator：caller 持有的流累积状态容器（可选）。传入时 provider
+        在每次尝试开始时填充新状态（重试重置——累积只反映当前尝试）；
+        流被取消后 caller 仍可经 snapshot_blocks() 读取已累积的部分内容
+        （中断补提交路径）。不传时行为与无 accumulator 完全一致。
+        """
         ...  # pragma: no cover
 
     @abstractmethod
     async def list_models(self) -> list[str]:
         """获取可用模型列表。"""
         ...
+
+    # ── 流累积状态（中断补提交）───────────────
+
+    def create_accumulator(self) -> "StreamAccumulator":
+        """创建 caller 持有的流累积状态容器。
+
+        基类默认返回不透明容器（无累积语义）。具体 provider 覆盖：
+        generate(..., accumulator) 每次尝试填充新状态；caller 在流被
+        取消后经 snapshot_blocks() 取已累积的部分内容块。
+        """
+        return StreamAccumulator()
+
+    def snapshot_blocks(self, accumulator: "StreamAccumulator | None") -> list | None:
+        """从累积状态提取已生成的内容块（caller 在取消后调用）。
+
+        语义：text/thinking 块任意长度保留；未被流协议终结的 tool 块
+        丢弃（半截参数不可解析，且无配对结果会使下轮请求结构非法）。
+        基类默认返回 None（无状态可取）。
+        """
+        return None
+
+    def pending_tool_calls(
+        self, accumulator: "StreamAccumulator | None"
+    ) -> list[PendingToolView]:
+        """从累积状态提取**未终结**的 tool 调用（活工具卡渲染投影）。
+
+        与 `snapshot_blocks()` 覆盖互斥：snapshot 只含已终结块（未终结 tool
+        块被丢弃），本投影补齐那部分——携带原始 args 文本累积，后端不解析。
+        用于中途订阅者看到带半截参数的活工具卡。基类默认返回空列表。
+        """
+        return []
 
     async def aclose(self) -> None:
         """释放 provider 持有的资源。

@@ -14,7 +14,7 @@ from wing.compactor import Compactor
 from wing.common.tracked_list import TrackedList
 from wing.store import FileMessageLog
 from wing.context_manager import ContextManager, PendingCompact
-from wing.schema import LLMResponse, LLMUsage, Message
+from wing.schema import ChainNode, LLMResponse, LLMUsage, Message
 
 
 # ---------------------------------------------------------------------------
@@ -34,7 +34,7 @@ def _make_cm(
     compactor: Compactor | None = None,
     session_id: str = "test-async",
 ) -> ContextManager:
-    messages: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir / session_id))
+    messages: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir / session_id))
     if compactor is None:
         compactor = Compactor(
             context_window_tokens=100_000,
@@ -252,7 +252,7 @@ class TestUUIDValidation:
             await cm._pending_compact_task
 
         if cm._pending_compact_result:
-            msgs = list(cm._messages)
+            msgs = [m for m in cm._messages if isinstance(m, Message)]
             indices = cm._verify_snapshot_valid(msgs)
             assert indices is not None
             start_idx, end_idx = indices
@@ -282,7 +282,7 @@ class TestUUIDValidation:
         if len(chain) >= 1:
             cm.rewind(chain[0].uuid)  # ty: ignore[invalid-argument-type]
             # Now the UUIDs should not match
-            msgs = list(cm._messages)
+            msgs = [m for m in cm._messages if isinstance(m, Message)]
             indices = cm._verify_snapshot_valid(msgs)
             assert indices is None
 

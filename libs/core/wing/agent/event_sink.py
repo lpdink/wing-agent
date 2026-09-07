@@ -4,10 +4,22 @@
 所有 react loop 期间的事件（流式文本、工具调用、turn 结果等）均通过
 AgentEventSink 的方法发射。内部自动注入 session_id 和 EventTarget，
 调用方无需关心路由细节。
+
+持久化分流：
+- persist=true → 经 append_event 落盘进混合链（即时，事件完整产生时刻）
+  再广播——日志是事实源，广播是投影；
+- persist=false → 纯广播，绝不落盘、不缓冲。流式 delta 等瞬态内容由轮
+  提交时的 Message 记录承载；turn 进行中的未提交内容由 provider
+  accumulator 投影（uncommitted_message / uncommitted_tools）按需取得，
+  sink 不持有任何内存事件缓冲。
+
+工具侧派生事件（DiffContentEvent 等经 ctx.emit / WingAgent.emit）同样
+路由至此——sink 是唯一的发射出口，不存在绕过 sink 的直连 event_bus。
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from wing.event import EventTarget
@@ -28,6 +40,7 @@ from wing.event import (
     TurnStartedEvent,
     UserMessageAcceptedEvent,
 )
+from wing.request_context import get_request_context
 
 if TYPE_CHECKING:
     from wing.event import WingEvent
@@ -35,16 +48,39 @@ if TYPE_CHECKING:
 
 
 class AgentEventSink:
-    """事件发射唯一出口——构造时绑定 session_id。"""
+    """事件发射唯一出口——构造时绑定 session_id 与事件落盘回调。"""
 
-    def __init__(self, session_id: str) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        append_event: Callable[[WingEvent], None] | None = None,
+    ) -> None:
         self._session_id = session_id
+        # 事件落盘回调（ContextManager.append_event）——None 时纯内存
+        # （无持久化语义的场景，如测试）。
+        self._append_event = append_event
 
     def _emit(self, event: WingEvent) -> None:
+        # 关联元数据定型：在落盘之前完成 request_id 注入，保证磁盘记录
+        # 与广播帧携带同一个值（日志是唯一事实来源——live replay 与
+        # resume replay 不允许对同一事件呈现不同的 request_id）。
+        # 注：request_id 是关联标记（correlation id）而非链拓扑身份——
+        # 身份（uuid/parent_uuid）由 TrackedList 后端生成，与此无关。
+        ctx = get_request_context()
+        if ctx.request_id is not None:
+            event.request_id = ctx.request_id
         if event.session_id is None:
             event.session_id = self._session_id
         if event.target is None:
             event.target = EventTarget(scope="session")
+
+        # 分流：persist=true 先落盘（事实）再广播（投影）；
+        # persist=false 纯广播——不落盘、不缓冲（瞬态内容由轮提交的
+        # Message 记录承载，未提交内容由 accumulator 投影按需取得）。
+        if event.persist:
+            if self._append_event is not None:
+                self._append_event(event)
+
         event_bus.emit(event)
 
     # ── Turn 生命周期 ──
@@ -162,5 +198,6 @@ class AgentEventSink:
                 first_chunk_rt_ms=usage.first_chunk_rt_ms,
                 tokens_per_sec=usage.tokens_per_sec,
                 model=usage.model,
+                stop_reason=usage.stop_reason,
             )
         )

@@ -28,7 +28,7 @@ import uuid
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from wing.common.logger import log
-from wing.event import ErrorEvent
+from wing.event import ErrorEvent, wire_dump
 from wing.event_bus import event_bus
 
 from wing.gateway.auth import ROLE_TOOL_RUNTIME, extract_key_from_ws
@@ -115,9 +115,13 @@ async def handle_ws(ws: WebSocket) -> None:
                     # 用户消息帧。tool_runtime 是纯工具执行远端，禁止投递。
                     if is_tool_host:
                         await ws.send_text(
-                            ErrorEvent(
-                                message="tool_runtime role cannot send user messages"
-                            ).model_dump_json()
+                            json.dumps(
+                                wire_dump(
+                                    ErrorEvent(
+                                        message="tool_runtime role cannot send user messages"
+                                    )
+                                )
+                            )
                         )
                         continue
                     req = ClientRequest(**payload)
@@ -130,7 +134,7 @@ async def handle_ws(ws: WebSocket) -> None:
                     )
             except Exception as e:
                 log.error(f"Failed to handle request: {e}")
-                await ws.send_text(ErrorEvent(message=str(e)).model_dump_json())
+                await ws.send_text(json.dumps(wire_dump(ErrorEvent(message=str(e)))))
     except WebSocketDisconnect:
         pass
     finally:

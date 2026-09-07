@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import frontmatter
 
@@ -15,7 +16,18 @@ from .common.logger import log
 from .common.tracked_list import TrackedList
 from .compactor import Compactor
 from .provider.base import ModelProvider
-from .schema import AgentSkill, ContentBlock, LLMUsage, Message, ThinkingBlock, Tool
+from .schema import (
+    AgentSkill,
+    ChainNode,
+    ContentBlock,
+    LLMUsage,
+    Message,
+    ThinkingBlock,
+    Tool,
+)
+
+if TYPE_CHECKING:
+    from wing.event import WingEvent
 
 
 @dataclass
@@ -61,7 +73,7 @@ More detail in: "{dir}/SKILL.md" """
     def __init__(
         self,
         session_id: str,
-        messages: TrackedList[Message],
+        messages: TrackedList[ChainNode],
         system_prompt: str,
         compactor: Compactor,
         skills_patterns: list[str] | None = None,
@@ -71,7 +83,7 @@ More detail in: "{dir}/SKILL.md" """
         """
         Args:
             session_id: Session 标识符（只读，不用于生成或路径计算）
-            messages: TrackedList 消息列表（外部创建，不感知外存路径）
+            messages: TrackedList 混合链（Message + 事件节点，外部创建）
             system_prompt: 系统提示词
             compactor: 压缩助手（必填）
             skills_patterns: Skills glob 模式列表
@@ -83,7 +95,7 @@ More detail in: "{dir}/SKILL.md" """
 
         # 接收外部传入的 session_id 和 messages
         self._session_id = session_id
-        self._messages = messages
+        self._messages = messages  # 混合链：Message + WingEvent（role="event"）
         self._workspace = Path(workspace).resolve() if workspace else None
 
         # 使用传入的 patterns（不再从全局 config 读取）
@@ -164,9 +176,9 @@ More detail in: "{dir}/SKILL.md" """
                 self._inject_tool_change_reminder(removed, added, new_tools)
 
     def _chain_is_empty(self) -> bool:
-        """活跃链中是否存在 user 或 assistant 消息。"""
-        for msg in self._messages.active_chain:
-            if msg.role in ("user", "assistant"):
+        """活跃链中是否存在 user 或 assistant 消息（事件节点不计）。"""
+        for node in self._messages.active_chain:
+            if isinstance(node, Message) and node.role in ("user", "assistant"):
                 return False
         return True
 
@@ -391,11 +403,11 @@ More detail in: "{dir}/SKILL.md" """
         """
         if not self.compactor:
             return LLMMessagesResult(
-                [self.system_prompt] + self._messages.active_chain,
+                [self.system_prompt] + self.get_context_window(),
                 tools=list(self._declared_tools),
             )
 
-        msgs = self._messages.active_chain
+        msgs = self.get_context_window()
         server_tokens = self._last_prompt_tokens()
 
         # ── Step 1: 有预计算结果？尝试 apply ──
@@ -415,7 +427,7 @@ More detail in: "{dir}/SKILL.md" """
                         # Compact 打破 prefix cache——同步声明集（await 后求值，避免过期快照）
                         self._sync_declared_tools(current_tools())
                         return LLMMessagesResult(
-                            [self.system_prompt] + self._messages.active_chain,
+                            [self.system_prompt] + self.get_context_window(),
                             tools=list(self._declared_tools),
                         )
                     else:
@@ -609,7 +621,7 @@ More detail in: "{dir}/SKILL.md" """
             raise RuntimeError("compactor not configured")
 
         self._discard_pending_compact()
-        msgs = list(self._messages)
+        msgs = self.get_context_window()
         full_context = [self.system_prompt] + msgs
 
         compacted = await self.compactor.do_compact(
@@ -687,36 +699,81 @@ More detail in: "{dir}/SKILL.md" """
     def add_messages(self, messages: list[Message]) -> None:
         self._messages.extend(iter(messages))
 
+    def append_event(self, event: "WingEvent") -> None:
+        """将事件节点追加进混合链（即时落盘，唯一持久化入口）。
+
+        事件与 Message 同链：uuid/parent_uuid 由 TrackedList 填充，
+        记录级判别靠 role="event"。调用方（AgentEventSink / runtime）负责
+        仅对 persist=true 的事件调用本方法——persist=false 的瞬态事件只
+        广播、不落盘、不缓冲。
+        """
+        self._messages.append(event)
+
     def _last_prompt_tokens(self) -> int | None:
         """从消息列表中查找最后一条有服务端 usage 的 assistant 消息的 prompt_tokens。
 
-        这是服务端回传的真实 context 大小——优先使用。
+        这是服务端回传的真实 context 大小——优先使用。事件节点不计。
         """
-        for msg in reversed(self._messages):
+        for node in reversed(self._messages.active_chain):
             if (
-                msg.role == "assistant"
-                and msg.usage is not None
-                and msg.usage.prompt_tokens > 0
+                isinstance(node, Message)
+                and node.role == "assistant"
+                and node.usage is not None
+                and node.usage.prompt_tokens > 0
             ):
-                return msg.usage.prompt_tokens
+                return node.usage.prompt_tokens
         return None
 
     def get_context_window(self) -> list[Message]:
-        """返回当前上下文窗口（活跃链）。"""
-        return self._messages.active_chain
+        """返回当前上下文窗口——活跃链的 Message 投影（事件节点过滤）。
+
+        这是 LLM 上下文的唯一视图：get_messages_for_llm、token 统计、
+        compact、序列化等所有消费方都经此过滤，事件节点绝不进入模型请求。
+        """
+        return [m for m in self._messages.active_chain if isinstance(m, Message)]
+
+    def get_active_events(
+        self, pending_ask_ids: set[str] | None = None
+    ) -> list["WingEvent"]:
+        """返回活跃链上**可下发**的事实事件节点（按链序）——前端重放视图。
+
+        过滤策略归属后端单点（前端只做能力分发，不编码"某类不得渲染"）：
+        - 仅事实类事件（`FACT_EVENTS`，与 persist 标记同处一文件）下发；
+          存量日志里已写入的孪生记录（tool_call_result / llm_call_metrics）
+          能加载进链但不在集合中，自然不下发（零迁移，前向容忍）；
+        - `AskEvent` 额外按 `pending_ask_ids` 过滤——只下发**仍挂起**的提问
+          （已答/已失效的 ask 重放会渲染出活的 Ask 卡，用户回答进虚空）。
+          pending_ask_ids 为 None 时不下发任何 ask（调用方未提供待答集合）。
+
+        被压缩/回退区间的事件不在活跃链上，自然不发射（无需孤儿处理）。
+        """
+        from wing.event import FACT_EVENTS, AskEvent, WingEvent
+
+        result: list[WingEvent] = []
+        for e in self._messages.active_chain:
+            if not isinstance(e, WingEvent):
+                continue
+            if e.type not in FACT_EVENTS:
+                continue
+            if isinstance(e, AskEvent):
+                if pending_ask_ids is None or e.tool_call_id not in pending_ask_ids:
+                    continue
+            result.append(e)
+        return result
 
     def get_context_stats(self) -> tuple[int, int]:
-        """获取上下文统计信息：消息数量和 token 数。
+        """获取上下文统计信息：消息数量和 token 数（事件节点不计）。
 
         优先使用服务端 usage（从 _last_prompt_tokens），
         fallback 到 TokenCounter 估算。
         """
-        count = len(self._messages)
+        msgs = self.get_context_window()
+        count = len(msgs)
         server_tokens = self._last_prompt_tokens()
         if server_tokens is not None:
             tokens = server_tokens
         else:
-            tokens = sum(m.estimate_tokens() for m in self._messages)
+            tokens = sum(m.estimate_tokens() for m in msgs)
         return count, tokens
 
     def rewind(self, target_uuid: str) -> str | None:
@@ -735,16 +792,27 @@ More detail in: "{dir}/SKILL.md" """
             return None
 
         # 用 find() 定位 target
-        target_msg = self._messages.find(target_uuid)
-        if target_msg is None:
+        target = self._messages.find(target_uuid)
+        if target is None:
             raise ValueError(f"uuid {target_uuid} not found")
+        if not isinstance(target, Message):
+            raise ValueError(f"uuid {target_uuid} is not a message node")
+        target_msg = target
 
         draft = target_msg.content or ""
 
-        # 找到 target 的 parent
+        # 找到 target 的 parent（沿链回溯跳过事件节点——事件是显示注解，
+        # 不是上下文状态，rewind 的"回到 parent"语义只对 Message 有定义）
         parent_uuid = target_msg.parent_uuid
+        while parent_uuid is not None:
+            parent_node = self._messages.find(parent_uuid)
+            if parent_node is None:
+                raise ValueError(f"parent uuid {parent_uuid} not found")
+            if isinstance(parent_node, Message):
+                break
+            parent_uuid = parent_node.parent_uuid
         if parent_uuid is None:
-            # target 是根消息：回退到空
+            # target 是根消息（或其上只有事件节点）：回退到空
             rewind_msg = Message(
                 role="system",
                 content="[rewind_to_root]",
@@ -752,10 +820,9 @@ More detail in: "{dir}/SKILL.md" """
             )
             rewind_msg.uuid = str(uuid.uuid4())
         else:
-            # 用 find() 定位 parent
+            # 用 find() 定位 parent（上面循环已保证是 Message）
             parent_msg = self._messages.find(parent_uuid)
-            if parent_msg is None:
-                raise ValueError(f"parent uuid {parent_uuid} not found")
+            assert isinstance(parent_msg, Message)
 
             # 构造回退行
             rewind_msg = Message(
@@ -773,55 +840,62 @@ More detail in: "{dir}/SKILL.md" """
         self._messages.set_tip(rewind_msg.uuid)
         return draft
 
-    def extract_subchain(self, target_uuid: str) -> tuple[list[Message], str | None]:
+    def extract_subchain(self, target_uuid: str) -> tuple[list[ChainNode], str | None]:
         """提取 target_uuid 之前的完整子链（不含目标消息），用于 fork 到新 session。
+
+        返回混合链前缀（Message + 事件节点）——事件随 fork 拷贝到新 session，
+        diff 等视图在新 session 重放时可见。
 
         - target = "current" → 复制整个完整链（walk_full_chain），draft 为空字符串
         - 其他 → 用 find() 定位 target，用 walk_full_chain(from_uuid=target.parent_uuid)
           构建完整子链（包含压缩节点，保留拓扑结构）
 
-        返回 (subchain_messages, draft_content)，draft 为目标消息的 content。
+        返回 (subchain_nodes, draft_content)，draft 为目标消息的 content。
         """
         if target_uuid == "current":
             return self._messages.walk_full_chain(), ""
 
         # 用 find() 定位 target
-        target_msg = self._messages.find(target_uuid)
-        if target_msg is None:
+        target = self._messages.find(target_uuid)
+        if target is None:
             raise ValueError(f"uuid {target_uuid} not found")
+        if not isinstance(target, Message):
+            raise ValueError(f"uuid {target_uuid} is not a message node")
 
-        draft = target_msg.content or ""
+        draft = target.content or ""
 
         # 从 target 的 parent 开始构建完整子链
-        if target_msg.parent_uuid is None:
+        if target.parent_uuid is None:
             return [], draft
 
-        subchain = self._messages.walk_full_chain(from_uuid=target_msg.parent_uuid)
+        subchain = self._messages.walk_full_chain(from_uuid=target.parent_uuid)
         return subchain, draft
 
     def get_branch_targets(self) -> list[dict]:
         """返回完整链上的 user 消息 + 压缩节点标记 + (current)。
 
-        遍历完整链（walk_full_chain，包含压缩节点），
-        过滤出 user 消息和压缩节点（unzip_last_uuid 不为空）。
-        末尾追加 (current) 选项，代表当前最新状态。
-        每个返回项格式：{"uuid": str, "content": str}
+        遍历完整链（walk_full_chain，包含压缩节点与事件节点——事件节点
+        无 user role、无 unzip 标记，天然被过滤），取出 user 消息和压缩
+        节点（unzip_last_uuid 不为空）。末尾追加 (current) 选项，代表当前
+        最新状态。每项格式：{"uuid": str, "content": str}
         """
         result = []
-        for msg in self._messages.walk_full_chain():
-            if msg.role == "user" and msg.content:
+        for node in self._messages.walk_full_chain():
+            if not isinstance(node, Message):
+                continue
+            if node.role == "user" and node.content:
                 result.append(
                     {
-                        "uuid": msg.uuid,
-                        "content": (msg.content or "")[:100],
+                        "uuid": node.uuid,
+                        "content": (node.content or "")[:100],
                     }
                 )
-            elif msg.unzip_last_uuid is not None:
+            elif node.unzip_last_uuid is not None:
                 # 压缩节点标记
                 result.append(
                     {
-                        "uuid": msg.uuid,
-                        "content": f"[Compact] {(msg.content or '')[:80]}",
+                        "uuid": node.uuid,
+                        "content": f"[Compact] {(node.content or '')[:80]}",
                     }
                 )
         result.append({"uuid": "current", "content": "(current)"})

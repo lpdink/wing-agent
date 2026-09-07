@@ -16,7 +16,7 @@ from wing.compactor import Compactor
 from wing.common.tracked_list import TrackedList
 from wing.store import FileMessageLog
 from wing.context_manager import ContextManager, PendingCompact
-from wing.schema import LLMUsage, Message
+from wing.schema import ChainNode, LLMUsage
 
 
 @pytest.fixture
@@ -35,7 +35,7 @@ def _make_cm(
     tmp_dir: Path,
     session_id: str = "test-persist",
 ) -> ContextManager:
-    messages: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir / session_id))
+    messages: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir / session_id))
     compactor = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
     return ContextManager(
         session_id=session_id,

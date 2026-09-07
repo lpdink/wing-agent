@@ -1,12 +1,12 @@
 """
 wing/store/file.py — 文件后端。
 
-磁盘布局（与重构前完全一致，老 session 零迁移）：
+磁盘布局（事件系统变更后，newest.json 快照已移除——重放职责由
+history.jsonl 的混合日志承担，遗留快照文件不读不写不删）：
 
     <root>/<session_id>/
     ├── metadata.json        SessionMetadata（exclude_none）
-    ├── history.jsonl        append-only 消息记录（每行一条 dict + ts）
-    ├── newest.json          活跃链人类可读快照（只写不读，列表标题回退除外）
+    ├── history.jsonl        append-only 混合记录（Message + 事件，每行一条 dict + ts）
     ├── <aux-key>.json       aux kv（如 pending_compact.json）
     └── subagents/           子 agent 历史（explorer 工具产物）
 """
@@ -24,10 +24,9 @@ from wing.store.base import MessageLog, SessionMetadata, SessionStore, SessionSu
 
 
 class FileMessageLog(MessageLog):
-    """文件消息日志：history.jsonl（append+fsync）+ newest.json（原子快照）。"""
+    """文件消息日志：history.jsonl（append+fsync）。"""
 
     _HISTORY = "history.jsonl"
-    _NEWEST = "newest.json"
 
     def __init__(self, path: Path | str) -> None:
         self._path = Path(path)
@@ -67,9 +66,6 @@ class FileMessageLog(MessageLog):
             f.write("\n".join(lines) + "\n")
             f.flush()
             os.fsync(f.fileno())
-
-    def write_snapshot(self, records: list[dict[str, Any]]) -> None:
-        atomic_write_json(self._path / self._NEWEST, records)
 
     # ── aux kv ────────────────────────────────
 
@@ -147,22 +143,20 @@ class FileSessionStore(SessionStore):
     # ── 查询 ──────────────────────────────────
 
     def exists(self, session_id: str) -> bool:
-        """精确判断 session 是否存在（有 metadata 或消息记录）。"""
+        """精确判断 session 是否存在（判据：metadata 或 history.jsonl）。"""
         session_dir = self._session_dir(session_id)
         if not session_dir.is_dir():
             return False
-        return (
-            (session_dir / self._METADATA).exists()
-            or (session_dir / FileMessageLog._NEWEST).exists()
-            or (session_dir / FileMessageLog._HISTORY).exists()
-        )
+        return (session_dir / self._METADATA).exists() or (
+            session_dir / FileMessageLog._HISTORY
+        ).exists()
 
     def list_summaries(self) -> list[SessionSummary]:
         """列举有消息的 session。
 
-        存在性判据：history.jsonl 或 newest.json 存在（history.jsonl 是 source of
-        truth，newest.json 兼容崩溃窗口与老布局）。标题回退优先读 newest.json，
-        其次 history.jsonl。两者均不可读的 session 跳过。
+        存在性判据：history.jsonl 存在（唯一事实来源日志）。标题回退从
+        history.jsonl 提取第一条 user 消息。不可读的 session 跳过。
+        遗留的 newest.json 文件不读不删（快照已废弃）。
         """
         if not self._root.exists():
             return []
@@ -171,17 +165,14 @@ class FileSessionStore(SessionStore):
         for session_dir in self._root.iterdir():
             if not session_dir.is_dir():
                 continue
-            newest = session_dir / FileMessageLog._NEWEST
             history = session_dir / FileMessageLog._HISTORY
-            if not newest.exists() and not history.exists():
+            if not history.exists():
                 continue
 
             metadata = self.load_metadata(session_dir.name) or SessionMetadata()
             first_user: str | None = None
             if metadata.session_name is None:
-                records = self._read_snapshot(newest)
-                if records is None:
-                    records = self._read_history_records(history)
+                records = self._read_history_records(history)
                 if records is None:
                     continue
                 for msg in records:
@@ -197,16 +188,6 @@ class FileSessionStore(SessionStore):
                 )
             )
         return result
-
-    @staticmethod
-    def _read_snapshot(path: Path) -> list[dict] | None:
-        """读 newest.json（dict 列表）。不存在或损坏返回 None。"""
-        if not path.exists():
-            return None
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return None
 
     @staticmethod
     def _read_history_records(path: Path) -> list[dict] | None:

@@ -37,7 +37,11 @@ from wing.event import (
 )
 from wing.event_bus import event_bus
 from wing.config import get_config, load_hooks
-from wing.request_context import reset_request_context, set_request_context
+from wing.request_context import (
+    get_request_context,
+    reset_request_context,
+    set_request_context,
+)
 from typing import TYPE_CHECKING
 from wing.session import Session
 from wing.session_manager import SessionManager
@@ -257,7 +261,8 @@ class WingRuntime:
                 original_tokens=original,
                 compressed_tokens=compressed,
                 model=session.agent.model,
-            )
+            ),
+            session=session,
         )
         self._emit_context_stats(session)
         return original, compressed
@@ -265,12 +270,19 @@ class WingRuntime:
     async def interrupt_session(self, session_id: str) -> None:
         """中断 session 当前 agent 任务。
 
+        agent.interrupt() 内部 await 旧 worker 完成补提交（流式半截
+        reasoning/text 的 partial Message 已落盘），之后 InterruptedEvent
+        才落盘+广播——链序保证事件在 partial Message 之后。
+
         Raises:
             LookupError: session 不存在
         """
         session = self._require_session(session_id)
         await session.agent.interrupt()
-        self._emit_session_event(InterruptedEvent(session_id=session.session_id))
+        self._emit_session_event(
+            InterruptedEvent(session_id=session.session_id),
+            session=session,
+        )
 
     def rewind_session(self, session_id: str, target_uuid: str) -> str | None:
         """回退 session 到指定消息节点。
@@ -286,14 +298,29 @@ class WingRuntime:
         """
         session = self._require_session(session_id)
         cm = session.agent.context_manager
+        agent = session.agent
 
         draft = cm.rewind(target_uuid)
         self._emit_context_stats(session)
 
+        from wing.event import serialize_event
+
+        turn_started_at = (
+            agent.turn_started_at.isoformat() if agent.turn_started_at else None
+        )
         self._emit_session_event(
             SyncSessionEvent(
                 session_id=session.session_id,
-                messages=[msg.model_dump() for msg in cm.get_context_window()],
+                messages=session.serialize_messages(),
+                uncommitted=agent.uncommitted_message(),
+                uncommitted_tools=agent.uncommitted_tools(),
+                events=[
+                    serialize_event(e)
+                    for e in cm.get_active_events(
+                        pending_ask_ids=agent.pending_ask_ids()
+                    )
+                ],
+                turn_started_at=turn_started_at,
                 agent=None,
                 draft=draft,
             )
@@ -477,9 +504,22 @@ class WingRuntime:
             raise LookupError(f"Session not found: {session_id}")
         return session
 
-    def _emit_session_event(self, event: WingEvent) -> None:
-        """发射 session 级别事件，强制 target=EventTarget(scope="session")。"""
+    def _emit_session_event(
+        self, event: WingEvent, session: Session | None = None
+    ) -> None:
+        """发射 session 级别事件，强制 target=EventTarget(scope="session")。
+
+        persist=true 且 session 给定时先落盘进链（与 AgentEventSink 同一
+        持久化语义）；session 为 None 的事件（无会话上下文）只广播。
+        request_id 在落盘前从 RequestContext 定型注入——磁盘记录与广播
+        帧携带同一关联值（与 AgentEventSink._emit 一致）。
+        """
+        ctx = get_request_context()
+        if ctx.request_id is not None:
+            event.request_id = ctx.request_id
         event.target = EventTarget(scope="session")
+        if event.persist and session is not None:
+            session.context_manager.append_event(event)
         event_bus.emit(event)
 
     def _emit_context_stats(self, session: Session) -> None:
@@ -501,13 +541,37 @@ class WingRuntime:
     def _push_sync(
         self, client_id: str, session: Session, draft: str | None = None
     ) -> None:
-        """向指定 client 推送 SyncSessionEvent + SessionInitEvent + ContextStatsEvent。"""
-        client_target = EventTarget(scope="client", client_ids=[client_id])
+        """向指定 client 推送 SyncSessionEvent + SessionInitEvent + ContextStatsEvent。
 
+        SyncSession 携带四组重放素材：messages（已提交 Message 投影）、
+        uncommitted（单个未提交 assistant Message 投影）、uncommitted_tools
+        （未终结 tool 调用的原始 args 片段）、events（活跃链事实事件，按链序）
+        ——中途订阅者据此获得与从始至终订阅一致的完整视图，组装顺序为
+        messages → uncommitted → uncommitted_tools → events。turn_started_at
+        供前端恢复 working 已耗时。
+        """
+        client_target = EventTarget(scope="client", client_ids=[client_id])
+        from wing.event import serialize_event
+
+        cm = session.context_manager
+        agent = session.agent
+
+        turn_started_at = (
+            agent.turn_started_at.isoformat() if agent.turn_started_at else None
+        )
         event_bus.emit(
             SyncSessionEvent(
                 session_id=session.session_id,
                 messages=session.serialize_messages(),
+                uncommitted=agent.uncommitted_message(),
+                uncommitted_tools=agent.uncommitted_tools(),
+                events=[
+                    serialize_event(e)
+                    for e in cm.get_active_events(
+                        pending_ask_ids=agent.pending_ask_ids()
+                    )
+                ],
+                turn_started_at=turn_started_at,
                 agent=session.to_agent_info(),
                 name=session.session_name,
                 draft=draft,
@@ -515,7 +579,6 @@ class WingRuntime:
             )
         )
 
-        agent = session.agent
         event_bus.emit(
             SessionInitEvent(
                 session_id=session.session_id,
@@ -527,7 +590,6 @@ class WingRuntime:
             )
         )
 
-        cm = session.agent.context_manager
         count, tokens = cm.get_context_stats()
         ctx_window = 0
         if cm.compactor:

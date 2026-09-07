@@ -13,7 +13,7 @@ from wing.store.base import MessageLog, SessionMetadata, SessionStore, SessionSu
 
 
 class MemoryMessageLog(MessageLog):
-    """进程内消息日志：list 存记录，dict 存 aux，快照 NOP。"""
+    """进程内消息日志：list 存记录，dict 存 aux。"""
 
     def __init__(self) -> None:
         self._records: list[dict[str, Any]] = []
@@ -24,9 +24,6 @@ class MemoryMessageLog(MessageLog):
 
     def append(self, records: list[dict[str, Any]]) -> None:
         self._records.extend(records)
-
-    def write_snapshot(self, records: list[dict[str, Any]]) -> None:
-        pass  # 无人类可读快照需求
 
     def read_aux(self, key: str) -> dict[str, Any] | None:
         return self._aux.get(key)
@@ -83,7 +80,7 @@ class MemorySessionStore(SessionStore):
         return session_id in self._live_session_ids()
 
     def list_summaries(self) -> list[SessionSummary]:
-        """列举有消息的 session（与文件后端 newest.json 语义对齐）。"""
+        """列举有消息的 session（存在性判据与文件后端一致：有日志记录）。"""
         result: list[SessionSummary] = []
         for session_id in set(self._metadata) | set(self._logs):
             message_log = self._logs.get(session_id)

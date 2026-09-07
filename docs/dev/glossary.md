@@ -19,9 +19,24 @@
 | 概念 | 说明 |
 |------|------|
 | **SessionStore** | 会话持久化的**唯一**所有者（ABC，`store/base.py`）。backend：`file` / `memory`，建会话时选。 |
-| **MessageLog** | 追加式消息持久化 + 快照 + aux kv（`store/base.py`）。pending compaction 存于 aux。 |
-| **TrackedList** | 纯内存链拓扑引擎（uuid/parentUuid），I/O 全委托 MessageLog（`common/tracked_list.py`）。 |
+| **MessageLog** | 追加式混合记录 + aux kv（`store/base.py`）。pending compaction 存于 aux。newest.json 快照已移除（重放由混合日志承担）。 |
+| **TrackedList** | 纯内存链拓扑引擎（uuid/parentUuid），ChainNode 家族混排（Message + 事件节点），I/O 全委托 MessageLog（`common/tracked_list.py`）。 |
 | **SessionMetadata** | 会话元数据模型（workspace、forked_from、template_name、last_interaction…）。 |
+
+## 事件系统
+
+| 概念 | 说明 |
+|------|------|
+| **混合日志** | history.jsonl 单一事实来源：Message 记录（role ∈ user/assistant/tool/system，进 LLM 上下文）+ 事件记录（`role="event"`，含事件自身字段），共享链拓扑。记录级判别只用 role。 |
+| **未提交投影（uncommitted）** | turn 进行中"已生成未提交"内容的唯一权威 = caller 持有的 provider accumulator（`ReActLoop._current_acc`，一轮生命周期）。两个覆盖互斥的投影按需快照：`snapshot_blocks()`（已终结块——中断补提交与 resume 同源）+ `pending_tool_calls()`（未终结调用原始 args，后端不解析）。取代旧的内存事件缓冲。 |
+| **落盘只存事实** | `persist=true` 事实事件（diff/ask/interrupted/error/compact_done）即时落盘；流式 delta（persist=false）纯广播、不落盘不缓冲（内容由轮提交的 Message 承载）。孪生事件（tool_call_result/llm_call_metrics）停止落盘；turn_result 落盘但 result 字段经 disk_exclude 排除。 |
+| **persist 分流** | `WingEvent.persist` 是 `ClassVar[bool]`（非 pydantic 字段——旧 `Field(exclude=True)` 会被子类重声明击穿），基类默认 true。判据：**是事实** 且 **无 Message 孪生**。false 仅限流式 delta、Message 孪生体积事件、可实时重建的协议/查询事件。 |
+| **中断补提交** | 流式期间打断：accumulator 快照部分块（text/thinking 保留、未终结 tool 块剔除）→ partial Message（`stop_reason="interrupted"`）提交 → re-raise，当前 accumulator 置空。用户可放心打断长思考。 |
+| **accumulator 协议** | `generate(..., accumulator=)` caller 注入容器，provider 每次尝试填充新状态；取消后 `snapshot_blocks()` 取已终结块、`pending_tool_calls()` 取未终结调用。 |
+| **stop_reason** | provider 捕获协议原值（end_turn/max_tokens/tool_use/stop/length）→ **`Message.stop_reason` 是唯一落盘审计位置**；LLMCallMetricsEvent.stop_reason 仅用于直播（persist=false）。 |
+| **事件链锚定** | rewind/fork/compact 凭链序免费工作：事件是链节点，set_tip/fork 拷贝/压缩边界自然裁剪事件可见性。 |
+| **中途订阅视图** | SyncSessionEvent 携带四组素材：messages（已提交投影）+ uncommitted（单个未提交 assistant Message 投影）+ uncommitted_tools（未终结调用原始 args）+ events（活跃链**事实**事件），外加 turn_started_at。前端按 **messages → uncommitted → uncommitted_tools → events → live** 组装（uncommitted 走 replay_messages、uncommitted_tools 走 live ToolCallStream 分支），diff 锚点结构性先于 diff 存在。 |
+| **事实事件下发过滤** | 后端单点策略：`get_active_events()` 按 `FACT_EVENTS`（与 persist 标记同处 `event/__init__.py`）过滤，ask 额外按 `pending_ask_ids()`（inbox feedback waiters）过滤。前端只做能力分发（有渲染器则渲染），不编码"孪生不得渲染"策略。存量孪生记录加载进链但不下发（零迁移）。 |
 
 ## 上下文与压缩
 

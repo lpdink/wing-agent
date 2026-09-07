@@ -21,7 +21,9 @@ The `wing` binary is both frontends: **TUI** (interactive, human-in-the-loop) an
 
 **Protocols.** HTTP for lifecycle / queries / mutations (~22 RPC-style endpoints); WebSocket (`/ws`) carries the real-time ReAct event stream plus client→server message / Ask-reply frames (`ClientRequest`), while queries and mutations stay on HTTP. Session creation is decoupled from the WS handshake — clients create a session via HTTP, then subscribe to events. API key auth is opt-in at the Gateway (HTTP headers / WS query param); TLS is delegated to a reverse proxy.
 
-**Persistence.** All durable session state (metadata, message log, aux data like pending compactions) is owned by a single abstraction, `SessionStore` (`wing/store/`). No other module does storage I/O for session data. `SessionStore` composes `MessageLog` (append-only message durability + aux kv); `TrackedList` is a pure in-memory chain-topology engine (uuid/parentUuid) that delegates I/O to a `MessageLog`. Backends: `file` (default, `~/.wing/core/sessions/`) and `memory` (ephemeral, per-process), selected per session via the `backend` parameter. The interface is storage-agnostic — SQL backends (SQLite/PG/Supabase) are additive implementations.
+**Persistence.** All durable session state (metadata, mixed message/event log, aux data like pending compactions) is owned by a single abstraction, `SessionStore` (`wing/store/`). No other module does storage I/O for session data. `SessionStore` composes `MessageLog` (append-only log durability + aux kv); `TrackedList` is a pure in-memory chain-topology engine (uuid/parentUuid) over ChainNode-family nodes (Message + WingEvent mixed) that delegates I/O to a `MessageLog`. Backends: `file` (default, `~/.wing/core/sessions/`) and `memory` (ephemeral, per-process), selected per session via the `backend` parameter. The interface is storage-agnostic — SQL backends (SQLite/PG/Supabase) are additive implementations.
+
+**Unified event log.** `history.jsonl` is the single source of truth — a mixed log of Message records (LLM-context projection) and event records (`role="event"`), all sharing chain topology. The log stores **facts, not copies**: only `persist=true` fact events with no Message twin (diff, ask, interrupted, error, compact_done) hit the log the moment they complete; streaming deltas are pure broadcast (`persist=false` — never persisted, never buffered), their content carried by the Message record at turn close. `tool_call_result` / `llm_call_metrics` are Message twins (`Message.usage` + `Message.stop_reason` / the `role="tool"` Message) so they no longer persist; `turn_result` persists but its `result` field (final-text twin) is excluded from the disk record. `persist` is a `ClassVar[bool]` (not a pydantic field — a re-declared `Field(exclude=True)` was silently pierced by subclasses). Uncommitted turn content has a **single authority**: the caller-held provider stream accumulator (`ReActLoop._current_acc`), projected on demand via `snapshot_blocks()` (finalized blocks — interrupt partial-commit *and* resume) + `pending_tool_calls()` (unfinished tool args, raw text — live tool cards); the backend never parses partial JSON. Interrupt/max-tokens turns commit their partial content (unfinished tool calls dropped — unverifiable args + dangling tool_use) and capture `stop_reason` on the Message. rewind/fork/compact work on events for free via chain order; mid-turn subscribers get `messages + uncommitted + uncommitted_tools + events` (+ `turn_started_at`) in SyncSessionEvent, assembled in that order so a diff always anchors after its (finalized) tool_use cell — a view identical to subscribing from the start.
 
 **Remote tools & orchestration.** Tools need not run in the gateway process. An external **tool host** registers tools over HTTP (`POST /api/tools/register`) and serves their calls over a held WebSocket (`tool_call_request` / `tool_call_result` frames, correlated by `call_id`). The core stays network-agnostic — a remote tool is an ordinary `Tool` whose callable is a gateway-injected dispatch closure (`gateway/remote_tools.py`). The host's `client_id` (chosen via `?client_id=` on WS connect) is both its tool namespace and identity, decoupled from the RBAC role (`admin` = full access, `tool_runtime` = pure executor). Tool sets can also change at runtime via `POST /api/session/update` (`tools` field) with KV-cache protection — a cold swap when the chain is empty, else a frozen declared view plus an injected System Reminder, policy owned by `ContextManager`. SDKs: Rust `wing-api-client::tool_host` and Python `wing-sdk`; `wing-orch` lifts the TUI Goal loop into a standalone background CLI (state persist + resume).
 
@@ -32,11 +34,11 @@ The `wing` binary is both frontends: **TUI** (interactive, human-in-the-loop) an
 ```
 libs/core/wing/                   Python runtime (pip: wing-agent)
 ├── agent/                        WingAgent package (public import paths unchanged via re-export)
-│   ├── core.py                   WingAgent thin shell: assembly, public API, worker lifecycle
-│   ├── react_loop.py             ReAct main loop: drain → hook → LLM → tools → commit
+│   ├── core.py                   WingAgent thin shell: assembly, public API, worker lifecycle, uncommitted projection
+│   ├── react_loop.py             ReAct main loop: drain → hook → LLM → tools → commit; turn-level accumulator; partial commit on interrupt
 │   ├── llm_caller.py             LLM streaming call + chunk → event projection
 │   ├── tool_executor.py          Concurrent tool dispatch (asyncio.gather) + interrupt teardown
-│   ├── event_sink.py             AgentEventSink — single event emission outlet
+│   ├── event_sink.py             AgentEventSink — single event emission outlet + persist split (false = broadcast only)
 │   ├── inbox.py                  Message queue (drain-and-merge) + feedback waiters
 │   └── tool_context.py           ToolContext Protocol — narrow interface tools receive (`ctx`)
 ├── agent_template.py             AgentTemplate — model/tools/prompt from config `agents:`
@@ -55,9 +57,9 @@ libs/core/wing/                   Python runtime (pip: wing-agent)
 ├── hook_registry.py              Hook extension points (before/after user message & tool call)
 ├── store/                        Session persistence (single owner of durable state)
 │   ├── base.py                   SessionStore + MessageLog ABCs, SessionMetadata model
-│   ├── file.py                   File backend (~/.wing/core/sessions/, zero-migration)
+│   ├── file.py                   File backend (~/.wing/core/sessions/, mixed log, zero-migration)
 │   └── memory.py                 In-memory backend (ephemeral, no disk)
-├── event/                        Event types (base, react, state_change, query_response)
+├── event/                        Event types (base, react, state_change, query_response) + EVENT_TYPES / FACT_EVENTS registries + persist ClassVar + wire_dump (strip null/storage fields)
 ├── tools/                        Built-in tools
 │   ├── bash.py / file.py / search.py   Bash · Read/Write/Edit · Glob/Grep
 │   ├── ask_user.py / todo.py           AskUserQuestion · TodoWrite

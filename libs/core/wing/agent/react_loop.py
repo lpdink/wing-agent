@@ -8,6 +8,7 @@ steer → commit）→ emit TurnResult/Done。不持有工具执行、LLM 调用
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -25,7 +26,7 @@ from .tool_executor import InterruptedToolResults, ToolExecutor
 
 if TYPE_CHECKING:
     from wing.context_manager import ContextManager
-    from wing.provider.base import ModelProvider
+    from wing.provider.base import ModelProvider, StreamAccumulator
     from wing.schema import Tool
 
 
@@ -93,6 +94,16 @@ class ReActLoop:
         # 运行时可变配置（由 WingAgent 设置）
         self.max_turns: int | None = None
         self.steer: bool = get_config().steer
+        # 当前一轮 LLM 调用的流累积状态（未提交内容的唯一权威）。
+        # _call_llm 入口新建并登记，轮提交/中断补提交/turn 收口后置空。
+        # 未提交投影（uncommitted_message / uncommitted_tools）按需快照它，
+        # 不缓存副本。
+        self._current_acc: "StreamAccumulator | None" = None
+
+    @property
+    def current_acc(self) -> "StreamAccumulator | None":
+        """当前一轮 LLM 调用的流累积状态（None 表示无进行中轮次）。"""
+        return self._current_acc
 
     async def run_turn(self) -> None:
         """处理一个 turn：drain inbox → merge → ReAct loop → TurnResult/Done。
@@ -182,6 +193,10 @@ class ReActLoop:
             self._sink.error(f"处理消息失败：异常：{error_detail}")
             self._sink.done()
         finally:
+            # 兜底置空当前 accumulator（错误/取消路径轮边界未触达时；
+            # 正常路径轮边界已置空，此处幂等）。未提交投影随之失效——
+            # turn 收口后不再有"进行中内容"。
+            self._current_acc = None
             if self._set_working:
                 self._set_working(False)
             reset_request_context(token)
@@ -242,6 +257,11 @@ class ReActLoop:
         turn_messages = [assistant_msg] + tc_results
         self._cm.add_messages(turn_messages)
 
+        # 轮边界：本轮内容已提交进链（assistant Message + tool 结果），
+        # 当前 accumulator 置空——未提交投影失效，避免中途订阅者把已提交
+        # 内容经投影再渲染一次（多轮 turn 的双重渲染）。
+        self._current_acc = None
+
         # Emit context stats
         count, tokens = self._cm.get_context_stats()
         ctx_window = 0
@@ -272,38 +292,64 @@ class ReActLoop:
         组装 Message。两个 provider 统一在最终 chunk 产出权威 content_blocks，
         是 Message 组装的唯一依据；provider 未产出块数组（流未正常结束）
         视为契约违反并报错——截断轮次 MUST NOT 作为成功 turn 提交，无扁平兜底。
+
+        中断补提交：流式生成期间被取消（CancelledError 直通——with_retry
+        只捕 Exception）时，从 caller 持有的 accumulator 快照已累积的部分块
+        （text/thinking 任意长度保留，未终结 tool 块由 provider 剔除），
+        有内容则组装 partial assistant Message 提交进上下文，然后 re-raise
+        让 worker 终止。用户可放心打断长思考——已花费 tokens 的内容不丢。
         """
         content_blocks: list[ContentBlock] | None = None
         last_usage: LLMUsage | None = None
+        # accumulator 上提为 turn 级持有（self._current_acc）——未提交投影
+        # （resume）与中断补提交按需快照同一个对象，不再是 _call_llm 局部变量。
+        accumulator = provider.create_accumulator()
+        self._current_acc = accumulator
 
-        async for chunk in provider.generate(
-            messages=messages,
-            model=model,
-            tools=tools,
-            stream=self._stream,
-        ):
-            if chunk.reasoning_content:
-                self._sink.llm_reasoning(chunk.reasoning_content)
+        try:
+            async for chunk in provider.generate(
+                messages=messages,
+                model=model,
+                tools=tools,
+                stream=self._stream,
+                accumulator=accumulator,
+            ):
+                if chunk.reasoning_content:
+                    self._sink.llm_reasoning(chunk.reasoning_content)
 
-            if chunk.content:
-                self._sink.llm_text(chunk.content)
+                if chunk.content:
+                    self._sink.llm_text(chunk.content)
 
-            if chunk.content_blocks is not None:
-                # provider 产出的权威块数组（最终 chunk 携带）
-                content_blocks = chunk.content_blocks
+                if chunk.content_blocks is not None:
+                    # provider 产出的权威块数组（最终 chunk 携带）
+                    content_blocks = chunk.content_blocks
 
-            if chunk.tool_call_deltas:
-                for delta in chunk.tool_call_deltas:
-                    self._sink.llm_tool_call_delta(
-                        tool_call_id=delta.id,
-                        tool_name=delta.name,
-                        args_fragment=delta.args_fragment,
-                        is_final=delta.is_final,
-                    )
+                if chunk.tool_call_deltas:
+                    for delta in chunk.tool_call_deltas:
+                        self._sink.llm_tool_call_delta(
+                            tool_call_id=delta.id,
+                            tool_name=delta.name,
+                            args_fragment=delta.args_fragment,
+                            is_final=delta.is_final,
+                        )
 
-            if chunk.usage.completion_tokens or chunk.usage.prompt_tokens:
-                last_usage = chunk.usage
-                self._sink.llm_metrics(chunk.usage)
+                if chunk.usage.completion_tokens or chunk.usage.prompt_tokens:
+                    last_usage = chunk.usage
+                    self._sink.llm_metrics(chunk.usage)
+        except asyncio.CancelledError:
+            # 中断补提交：快照当前 accumulator（与 resume 未提交投影同源）。
+            partial_blocks = provider.snapshot_blocks(self._current_acc)
+            if partial_blocks:
+                partial_msg = Message(
+                    role="assistant",
+                    content_blocks=partial_blocks,
+                    usage=last_usage,
+                    stop_reason="interrupted",
+                )
+                self._cm.add_message(partial_msg)
+                # 补提交完成：内容已进链，未提交投影失效（不再双重渲染）。
+                self._current_acc = None
+            raise
 
         if content_blocks is None:
             raise RuntimeError(
@@ -311,5 +357,8 @@ class ReActLoop:
                 "(stream ended without a complete block array)"
             )
         return Message(
-            role="assistant", content_blocks=content_blocks, usage=last_usage
+            role="assistant",
+            content_blocks=content_blocks,
+            usage=last_usage,
+            stop_reason=last_usage.stop_reason if last_usage else None,
         )

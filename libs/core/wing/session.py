@@ -24,7 +24,7 @@ from wing.common.tracked_list import TrackedList
 from wing.config import get_config
 from wing.context_manager import ContextManager
 from wing.provider import create_provider
-from wing.schema import Message
+from wing.schema import ChainNode, Message
 from wing.store import SessionMetadata, SessionStore
 
 if TYPE_CHECKING:
@@ -32,6 +32,30 @@ if TYPE_CHECKING:
     from wing.agent_template import AgentTemplate
     from wing.event.base import AgentInfo, SessionStatus
     from wing.gateway.protocol import AgentOverride
+
+
+def serialize_message(msg: Message) -> dict:
+    """Message → 前端重放投影 dict。
+
+    SyncSessionEvent.messages（已提交）与 uncommitted（未提交 assistant
+    投影）共用此形状——前端经同一条 replay_messages 路径渲染。assistant 的
+    content / reasoning_content / tool_calls 实时派生自 content_blocks。
+    """
+    d: dict = {
+        "role": msg.role,
+        "content": msg.content or "",
+        "uuid": msg.uuid,
+    }
+    if msg.reasoning_content:
+        d["reasoning_content"] = msg.reasoning_content
+    if msg.tool_calls:
+        d["tool_calls"] = [
+            {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+            for tc in msg.tool_calls
+        ]
+    if msg.tool_call_id:
+        d["tool_call_id"] = msg.tool_call_id
+    return d
 
 
 class Session:
@@ -44,7 +68,7 @@ class Session:
     def __init__(
         self,
         session_id: str,
-        messages: TrackedList[Message],
+        messages: TrackedList[ChainNode],
         context_manager: ContextManager,
         agent: "WingAgent",
         store: SessionStore,
@@ -80,7 +104,7 @@ class Session:
         cls,
         template: "AgentTemplate",
         session_id: str,
-        messages: TrackedList[Message],
+        messages: TrackedList[ChainNode],
         store: SessionStore,
         workspace: str | None = None,
     ) -> "Session":
@@ -322,25 +346,7 @@ class Session:
     def serialize_messages(self) -> list[dict]:
         """序列化 context window 中的消息为 dict 列表。"""
         cm = self._context_manager
-        full_chain = cm.get_context_window()
-        result = []
-        for msg in full_chain:
-            d: dict = {
-                "role": msg.role,
-                "content": msg.content or "",
-                "uuid": msg.uuid,
-            }
-            if msg.reasoning_content:
-                d["reasoning_content"] = msg.reasoning_content
-            if msg.tool_calls:
-                d["tool_calls"] = [
-                    {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
-                    for tc in msg.tool_calls
-                ]
-            if msg.tool_call_id:
-                d["tool_call_id"] = msg.tool_call_id
-            result.append(d)
-        return result
+        return [serialize_message(msg) for msg in cm.get_context_window()]
 
     @property
     def last_interaction(self) -> str | None:

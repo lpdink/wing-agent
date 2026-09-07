@@ -9,13 +9,13 @@ EventTarget 由 EventBus emit 时注入，Gateway 据此转发。
 
 from __future__ import annotations
 
-from __future__ import annotations
-
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field
+
+from wing.schema import ChainNode
 
 
 # ============================================================
@@ -91,8 +91,12 @@ class CommandInfo(BaseModel):
 # ============================================================
 
 
-class WingEvent(BaseModel):
+class WingEvent(ChainNode):
     """所有事件的基类。
+
+    事件与 Message 共享链拓扑（ChainNode：uuid/parent_uuid），可混合进入
+    TrackedList 活跃链——history.jsonl 的记录级判别靠 role 字段
+    （Message 的 role ∈ user/assistant/tool/system，事件恒为 "event"）。
 
     - created_at：UTC datetime，人类可读，前端可反序列化。
     - type：子类必须覆盖为 Literal 字面量。
@@ -100,13 +104,29 @@ class WingEvent(BaseModel):
     - request_id：始终存在（自动生成 UUID），前端请求可覆写。
                   即使不是 RPC 响应，也始终存在，方便日志串联。
     - target：EventTarget，由 EventBus emit 时注入，Gateway 据此转发。
+              传输路由元数据，不落盘（落盘记录在序列化时剥离）。
+    - persist：是否持久化进 history.jsonl。ClassVar——不是 pydantic 字段，
+      因此绝不进序列化（无 `Field(exclude=True)` 被子类重声明击穿的陷阱）。
+      判据两条同时成立：**是事实**（读回来仍成立，非一次性信号）**且无
+      Message 孪生**。true —— 完整产生时即时落盘进链（diff/ask/interrupted
+      等权威记录）；false —— 只广播，不落盘、不缓冲（流式 delta 等瞬态内容
+      由轮提交的 Message 记录承载，未提交内容由 accumulator 投影取得）。
+      基类默认 True；需要不落盘的子类声明 `persist: ClassVar[bool] = False`。
+      约束：ClassVar 不能按实例覆盖——全仓库无运行时 `persist=` 赋值/构造
+      传参（已 grep 确认），代价今天为零；将来若需按实例覆盖，改回字段并在
+      wire_dump / _to_record 显式排除。
+    - disk_exclude：落盘记录排除的字段名（wire 帧与直播仍携带）。用于
+      `result` 这类"只服务直播、落盘即孪生"的字段。ClassVar，不进序列化。
     """
 
+    role: Literal["event"] = "event"
     created_at: datetime = Field(default_factory=lambda: datetime.now())
     type: str
     session_id: str | None = None
     request_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     target: EventTarget | None = None
+    persist: ClassVar[bool] = True
+    disk_exclude: ClassVar[frozenset[str]] = frozenset()
 
 
 # ============================================================
@@ -139,3 +159,4 @@ class DeliveredEvent(WingEvent):
     """
 
     type: Literal["delivered"] = "delivered"
+    persist: ClassVar[bool] = False
