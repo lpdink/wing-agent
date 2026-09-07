@@ -19,9 +19,23 @@
 | 概念 | 说明 |
 |------|------|
 | **SessionStore** | 会话持久化的**唯一**所有者（ABC，`store/base.py`）。backend：`file` / `memory`，建会话时选。 |
-| **MessageLog** | 追加式消息持久化 + 快照 + aux kv（`store/base.py`）。pending compaction 存于 aux。 |
-| **TrackedList** | 纯内存链拓扑引擎（uuid/parentUuid），I/O 全委托 MessageLog（`common/tracked_list.py`）。 |
+| **MessageLog** | 追加式混合记录 + aux kv（`store/base.py`）。pending compaction 存于 aux。newest.json 快照已移除（重放由混合日志承担）。 |
+| **TrackedList** | 纯内存链拓扑引擎（uuid/parentUuid），ChainNode 家族混排（Message + 事件节点），I/O 全委托 MessageLog（`common/tracked_list.py`）。 |
 | **SessionMetadata** | 会话元数据模型（workspace、forked_from、template_name、last_interaction…）。 |
+
+## 事件系统
+
+| 概念 | 说明 |
+|------|------|
+| **混合日志** | history.jsonl 单一事实来源：Message 记录（role ∈ user/assistant/tool/system，进 LLM 上下文）+ 事件记录（`role="event"`，含事件自身字段），共享链拓扑。记录级判别只用 role。 |
+| **两次 commit** | 流式 delta commit 到 RAM（EventJournal 合成缓冲）；最终事件/Message commit 到磁盘。Gateway 几乎不崩溃，in-flight 不落盘（20/80）。 |
+| **EventJournal** | 当前 turn 瞬态事件的内存缓冲（`agent/event_journal.py`）：直播逐包产出、journal 多包合成一包（相邻同类合并、ToolCallStream 按 tool_call_id 拼接）；轮边界/收口清空；snapshot 供中途订阅重放。 |
+| **persist 分流** | `WingEvent.persist` 默认 true（完整产生即落盘进链）；false 仅限流式 delta、Message 孪生体积事件、可实时重建的协议/查询事件。 |
+| **中断补提交** | 流式期间打断：accumulator 快照部分块（text/thinking 保留、未终结 tool 块剔除）→ partial Message（`stop_reason="interrupted"`）提交 → re-raise。用户可放心打断长思考。 |
+| **accumulator 协议** | `generate(..., accumulator=)` caller 注入容器，provider 每次尝试填充新状态；取消后 `snapshot_blocks()` 取已累积内容。 |
+| **stop_reason** | provider 捕获协议原值（end_turn/max_tokens/tool_use/stop/length）→ Message.stop_reason + LLMCallMetricsEvent（落盘截断审计）。 |
+| **事件链锚定** | rewind/fork/compact 凭链序免费工作：事件是链节点，set_tip/fork 拷贝/压缩边界自然裁剪事件可见性。 |
+| **中途订阅视图** | SyncSessionEvent 携带 messages + events（活跃链事件）+ in_flight（journal 合成包）；前端按 messages+events → in_flight → live 组装，与从始至终订阅等价。 |
 
 ## 上下文与压缩
 

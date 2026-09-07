@@ -17,8 +17,7 @@ from typing import Any
 
 from wing.common.logger import log
 from wing.config import get_config
-from wing.event import AskEvent, EventTarget, WingEvent
-from wing.event_bus import event_bus
+from wing.event import AskEvent, WingEvent
 from wing.provider import create_provider
 from wing.provider.base import ModelProvider
 from wing.schema import Tool
@@ -57,7 +56,10 @@ class WingAgent:
 
         # ── 内部部件组装 ──
         self._inbox = Inbox()
-        self._sink = AgentEventSink(session_id=self.session_id)
+        self._sink = AgentEventSink(
+            session_id=self.session_id,
+            append_event=context_manager.append_event,
+        )
         self._executor = ToolExecutor(self._sink)
         self._loop = ReActLoop(
             tool_executor=self._executor,
@@ -124,10 +126,13 @@ class WingAgent:
             self._inbox.unregister_waiter(tool_call_id)
 
     def emit(self, event: WingEvent) -> None:
-        """通过 EventBus 广播事件（工具侧 emit 入口）。"""
-        if event.target is None:
-            event.target = EventTarget(scope="session")
-        event_bus.emit(event)
+        """通过 EventBus 广播事件（工具侧 emit 入口）。
+
+        路由到 sink 的统一分流路径：persist=true 即时落盘进链，
+        persist=false 记入 RAM journal——与 react loop 事件同一出口，
+        不存在绕过 sink 的直连 event_bus。
+        """
+        self._sink._emit(event)
 
     def register_interrupt_hook(self, hook: Callable[[], None]) -> str:
         hook_id = uuid.uuid4().hex
@@ -143,6 +148,11 @@ class WingAgent:
     def tools(self) -> list[Tool]:
         """当前可执行工具集（排序快照）。"""
         return sorted(self._tools.values(), key=lambda t: t.effective_llm_name)
+
+    @property
+    def sink(self) -> AgentEventSink:
+        """事件发射出口（供 runtime 读取 journal 快照等）。"""
+        return self._sink
 
     @property
     def max_turns(self) -> int | None:

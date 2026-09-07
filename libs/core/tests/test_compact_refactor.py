@@ -22,7 +22,7 @@ from wing.common.tracked_list import TrackedList
 from wing.store import FileMessageLog
 from wing.compactor import Compactor
 from wing.context_manager import ContextManager
-from wing.schema import LLMResponse, Message, ToolCall
+from wing.schema import ChainNode, LLMResponse, Message, ToolCall
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +39,7 @@ def tmp_dir():
 
 def _make_cm(tmp_dir: Path, compactor: Compactor | None = None) -> ContextManager:
     sid = "test-session"
-    messages: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir / sid))
+    messages: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir / sid))
     if compactor is None:
         compactor = Compactor(
             context_window_tokens=100_000,

@@ -190,6 +190,9 @@ pub enum WingEvent {
         cached_tokens: i64,
         first_chunk_rt_ms: f64,
         tokens_per_sec: f64,
+        /// Termination cause (end_turn / max_tokens / tool_use / stop / length).
+        #[serde(default)]
+        stop_reason: Option<String>,
         #[serde(flatten)]
         meta: EventMeta,
     },
@@ -273,6 +276,14 @@ pub enum WingEvent {
         session_id: String,
         #[serde(default)]
         messages: Vec<serde_json::Value>,
+        /// Durable event nodes on the active chain (in chain order) —
+        /// replay material for diff views and other message-projection gaps.
+        #[serde(default)]
+        events: Vec<serde_json::Value>,
+        /// In-flight transient events (RAM journal coalesced packets) —
+        /// reconstructs the mid-turn streaming state for late subscribers.
+        #[serde(default)]
+        in_flight: Vec<serde_json::Value>,
         agent: Option<AgentInfo>,
         name: Option<String>,
         draft: Option<String>,

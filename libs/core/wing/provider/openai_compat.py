@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, AsyncIterator
 
 import httpx
@@ -12,7 +13,7 @@ import httpx
 from wing.common.logger import log
 from wing.common.with_retry import with_retry
 from wing.config import get_headers
-from wing.provider.base import ModelProvider, parse_tool_args
+from wing.provider.base import ModelProvider, StreamAccumulator, parse_tool_args
 from wing.provider.errors import raise_with_body
 from wing.provider.http import make_http_timeout
 from wing.provider.sse import parse_json_event, parse_sse_stream
@@ -32,6 +33,23 @@ from wing.schema import (
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
+
+
+@dataclass
+class _OAIStreamState:
+    """OpenAI-compat 流式累积状态（中断补提交的快照源）。
+
+    final_tool_calls 只含已终结的调用（finish_reason=tool_calls 到达时
+    解析入列）；pending 中未终结的调用在 snapshot 时丢弃——半截参数
+    不可解析且无配对结果。
+    """
+
+    reasoning_chunks: list[str] = field(default_factory=list)
+    content_chunks: list[str] = field(default_factory=list)
+    final_tool_calls: list[ToolCall] = field(default_factory=list)
+    pending: dict[int, PendingCall] = field(default_factory=dict)
+    first_token_ts: float | None = None
+    stop_reason: str | None = None
 
 
 class OpenAICompatProvider(ModelProvider):
@@ -78,6 +96,7 @@ class OpenAICompatProvider(ModelProvider):
         model: str,
         tools: list[Tool] | None = None,
         stream: bool = False,
+        accumulator: StreamAccumulator | None = None,
     ) -> AsyncIterator[LLMResponse]:
         log.info(
             f"[BEGIN] openai_compat call {model} with {len(messages)} stream:{stream}"
@@ -85,11 +104,34 @@ class OpenAICompatProvider(ModelProvider):
         body = self._build_body(messages, model, tools, stream)
 
         if stream:
-            async for item in self._generate_stream(body, model):
+            async for item in self._generate_stream(body, model, accumulator):
                 yield item
         else:
             async for item in self._generate_sync(body, model):
                 yield item
+
+    def create_accumulator(self) -> StreamAccumulator:
+        return StreamAccumulator()
+
+    def snapshot_blocks(self, accumulator: StreamAccumulator | None) -> list | None:
+        """从累积状态提取已生成块——中断补提交路径。
+
+        已终结的 tool call（finish_reason=tool_calls 时解析入 final_tool_calls）
+        保留；仍在 pending（参数流未完成）的调用丢弃——半截参数不可解析。
+        状态从未填充（流未开始/非流式）返回 None。
+        """
+        state = accumulator.state if accumulator is not None else None
+        if not isinstance(state, _OAIStreamState):
+            return None
+        if not (
+            state.reasoning_chunks or state.content_chunks or state.final_tool_calls
+        ):
+            return None
+        return self._build_content_blocks(
+            "".join(state.reasoning_chunks) or None,
+            "".join(state.content_chunks) or None,
+            state.final_tool_calls,
+        )
 
     async def list_models(self) -> list[str]:
         if self._config.models:
@@ -245,13 +287,14 @@ class OpenAICompatProvider(ModelProvider):
                 tokens_per_sec=completion_tokens / elapsed if elapsed > 0 else 0.0,
                 model=model,
                 request_id=request_id,
+                stop_reason=choice.get("finish_reason"),
             ),
         )
 
     # ─── Streaming ────────────────────────────────────────────────
 
     async def _generate_stream(
-        self, body: dict, model: str
+        self, body: dict, model: str, accumulator: StreamAccumulator | None = None
     ) -> AsyncIterator[LLMResponse]:
         t0 = time.monotonic()
         try:
@@ -271,12 +314,11 @@ class OpenAICompatProvider(ModelProvider):
         first_chunk_rt_ms = (time.monotonic() - t0) * 1000
         log.info("[DONE] openai_compat stream call connected")
 
-        pending: dict[int, PendingCall] = {}
-        first_token_ts: float | None = None
-        # 块数组累积：流结束时产出权威 content_blocks（与 Anthropic 路径契约统一）
-        reasoning_chunks: list[str] = []
-        content_chunks: list[str] = []
-        final_tool_calls: list[ToolCall] = []
+        # 累积状态装入 caller 持有的容器（每次尝试重置——重试重传时
+        # 快照只反映当前尝试，与消费者看到的内容一致）
+        state = _OAIStreamState()
+        if accumulator is not None:
+            accumulator.state = state
 
         try:
             async for event in parse_sse_stream(resp.aiter_lines()):
@@ -300,24 +342,28 @@ class OpenAICompatProvider(ModelProvider):
                 content = delta.get("content")
 
                 if reasoning:
-                    reasoning_chunks.append(reasoning)
+                    state.reasoning_chunks.append(reasoning)
                 if content:
-                    content_chunks.append(content)
+                    state.content_chunks.append(content)
 
-                if first_token_ts is None and (content or reasoning):
-                    first_token_ts = time.monotonic()
+                if state.first_token_ts is None and (content or reasoning):
+                    state.first_token_ts = time.monotonic()
+
+                # 终止原因（stop / length / tool_calls）——首个非空值生效
+                if state.stop_reason is None and choice is not None:
+                    state.stop_reason = choice.get("finish_reason")
 
                 tcs, deltas = (
-                    self._process_tool_deltas(choice, pending)
+                    self._process_tool_deltas(choice, state.pending)
                     if choice
                     else (None, None)
                 )
                 if tcs:
-                    final_tool_calls.extend(tcs)
+                    state.final_tool_calls.extend(tcs)
 
                 decode_tps = 0.0
-                if completion_tokens > 0 and first_token_ts is not None:
-                    decode_elapsed = time.monotonic() - first_token_ts
+                if completion_tokens > 0 and state.first_token_ts is not None:
+                    decode_elapsed = time.monotonic() - state.first_token_ts
                     if decode_elapsed > 0:
                         decode_tps = completion_tokens / decode_elapsed
 
@@ -343,16 +389,18 @@ class OpenAICompatProvider(ModelProvider):
             # 依据）。usage 只带零 token 元信息——非零 usage 已由带内 usage chunk
             # 触发过上游 metrics 发射，此处再附着会造成 token 双计；流无带内
             # usage 时 Message.usage 仍保留 first_chunk_rt_ms 等元信息。
+            # stop_reason 随最终 usage 传导（截断审计：length ≠ stop）。
             yield LLMResponse(
                 content_blocks=self._build_content_blocks(
-                    "".join(reasoning_chunks) or None,
-                    "".join(content_chunks) or None,
-                    final_tool_calls,
+                    "".join(state.reasoning_chunks) or None,
+                    "".join(state.content_chunks) or None,
+                    state.final_tool_calls,
                 ),
                 usage=LLMUsage(
                     first_chunk_rt_ms=first_chunk_rt_ms,
                     model=model,
                     request_id=request_id,
+                    stop_reason=state.stop_reason,
                 ),
             )
         finally:

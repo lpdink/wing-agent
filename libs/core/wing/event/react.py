@@ -19,16 +19,19 @@ if TYPE_CHECKING:
 
 class TextEvent(WingEvent):
     type: Literal["text"] = "text"
+    persist: bool = False
     content: str
 
 
 class ReasoningEvent(WingEvent):
     type: Literal["reasoning"] = "reasoning"
+    persist: bool = False
     content: str
 
 
 class ToolCallEvent(WingEvent):
     type: Literal["tool_call"] = "tool_call"
+    persist: bool = False
     tool_name: str
     tool_args: dict[str, Any]
     tool_call_id: str
@@ -55,6 +58,7 @@ class ToolCallStreamEvent(WingEvent):
     """
 
     type: Literal["tool_call_stream"] = "tool_call_stream"
+    persist: bool = False
     tool_call_id: str
     tool_name: str
     args_fragment: str = ""
@@ -98,6 +102,10 @@ class LLMCallMetricsEvent(WingEvent):
     cached_tokens: int
     first_chunk_rt_ms: float
     tokens_per_sec: float
+    stop_reason: str | None = None
+    """终止原因（协议原值：end_turn / max_tokens / tool_use / stop / length）。
+
+    落盘即 turn 截断审计——正常结束与预算耗尽在日志中可区分。"""
 
 
 class AskEvent(WingEvent):
@@ -181,6 +189,7 @@ class AssistantTurnEvent(WingEvent):
     """
 
     type: Literal["assistant_turn"] = "assistant_turn"
+    persist: bool = False
     uuid: str = Field(default_factory=lambda: _uuid.uuid4().hex)
     content_blocks: list[dict]
     model: str = ""
@@ -231,6 +240,7 @@ class ToolResultTurnEvent(WingEvent):
     """
 
     type: Literal["tool_result_turn"] = "tool_result_turn"
+    persist: bool = False
     uuid: str = Field(default_factory=lambda: _uuid.uuid4().hex)
     tool_use_id: str
     tool_name: str

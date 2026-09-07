@@ -6,7 +6,9 @@ TrackedList — 链拓扑引擎，UUID + parentUuid 链模型。
 - 所有耐久 I/O 委托给组合的 MessageLog（wing.store.base）；log=None 时纯内存
 - 消息以 uuid 为唯一标识，以 parentUuid 构建链拓扑
 - 日志语义 append-only（只追加，不修改已有记录）
-- write_snapshot 写活跃链快照（人类可读，后端可选）
+- 链节点是 ChainNode 家族：Message（LLM 上下文投影）与 WingEvent（事件
+  记录，role="event"）混合成链——history.jsonl 单一日志承载两种记录，
+  记录级判别靠 role 字段。加载时按 role 分发（事件走 EVENT_TYPES 注册表）。
 - 始终以类型化对象工作，存储层传输 raw dict（ts 由本类注入）
 - 内存中维护 full chain map（_all_items），find/trace_chain 从内存读取
 
@@ -29,12 +31,16 @@ T = TypeVar("T", bound=ChainNode)
 
 
 class TrackedList(Generic[T]):
-    """链拓扑引擎 + 可空 MessageLog 委托。log=None 时为纯内存列表。"""
+    """链拓扑引擎 + 可空 MessageLog 委托。log=None 时为纯内存列表。
+
+    类型参数 T 是链的"主类型"标注（session 场景为 ChainNode——Message 与
+    事件混排）。Message 投影（过滤事件节点）由 ContextManager 的
+    get_context_window() 集中提供。
+    """
 
     def __init__(self, log: MessageLog | None = None) -> None:
         self._log: MessageLog | None = log
         self._data: list[T] = []
-        self._type: type[T] | None = None
         self._last_uuid: str | None = None  # 活跃链最后一条消息的 uuid
 
         # 内存 full chain map：仅 load / 写操作维护，find/trace_chain 从此读取
@@ -57,13 +63,15 @@ class TrackedList(Generic[T]):
     # ── 内部：类型与序列化 ────────────────────
 
     def _ensure_type(self, items: list[T]) -> None:
-        """首次修改时锁定类型，后续检查兼容性。同时填充 uuid/parentUuid。"""
+        """检查 ChainNode 家族约束，同时填充 uuid/parentUuid。
+
+        混合链：Message 与 WingEvent（均继承 ChainNode）可任意混排。
+        """
         for it in items:
-            if self._type is None:
-                self._type = type(it)
-            elif not isinstance(it, self._type):
+            if not isinstance(it, ChainNode):
                 raise TypeError(
-                    f"expected {self._type.__name__}, got {type(it).__name__}"
+                    f"expected ChainNode (Message or WingEvent), "
+                    f"got {type(it).__name__}"
                 )
             # 填充 uuid 和 parentUuid
             if it.uuid is None:
@@ -75,19 +83,23 @@ class TrackedList(Generic[T]):
                 self._last_uuid = it.uuid
 
     def _check_type(self, items: list[T]) -> None:
-        """锁定/检查类型，不填充 uuid/parentUuid（detached 场景）。"""
+        """检查 ChainNode 家族约束（detached 场景，不填充拓扑字段）。"""
         for it in items:
-            if self._type is None:
-                self._type = type(it)
-            elif not isinstance(it, self._type):
+            if not isinstance(it, ChainNode):
                 raise TypeError(
-                    f"expected {self._type.__name__}, got {type(it).__name__}"
+                    f"expected ChainNode (Message or WingEvent), "
+                    f"got {type(it).__name__}"
                 )
 
     @staticmethod
     def _to_record(item: T) -> dict[str, Any]:
-        """序列化为存储记录（model_dump + ts）。"""
-        entry = item.model_dump()
+        """序列化为存储记录（model_dump + 剥离 target + ts）。
+
+        target 是 EventBus 注入的传输路由元数据，不属于事实记录。
+        Message 无该字段，pop 为 NOP。
+        """
+        entry = item.model_dump(mode="json")
+        entry.pop("target", None)
         entry["ts"] = datetime.now().isoformat()
         return entry
 
@@ -97,11 +109,6 @@ class TrackedList(Generic[T]):
         """追加记录到 MessageLog。log=None 时 NOP。"""
         if self._log is not None:
             self._log.append([self._to_record(it) for it in items])
-
-    def _persist_snapshot(self) -> None:
-        """写活跃链快照到 MessageLog。log=None 时 NOP。"""
-        if self._log is not None:
-            self._log.write_snapshot([m.model_dump() for m in self._data])
 
     # ── 内部：内存 map 维护 ───────────────────
 
@@ -137,15 +144,27 @@ class TrackedList(Generic[T]):
     def load(cls, log: MessageLog, item_type: Type[T]) -> TrackedList[T]:
         """从 MessageLog 完全恢复状态（冷启动）。
 
-        1. 将全部记录读入内存 map（schema 校验失败的消息跳过）
-        2. 从内存 map 重建活跃链（trace_chain）
+        混合日志按记录级 role 字段分发：
+        - role="event" → EVENT_TYPES 注册表按 type 还原事件节点
+          （未知事件 type 跳过——前向容忍；校验失败的记录跳过）
+        - 其余 → item_type.model_validate（Message）
+
+        1. 将全部记录读入内存 map
+        2. 从内存 map 重建活跃链（trace_chain）——事件节点与消息同链
         """
+        from wing.event import EVENT_TYPES
+
         tl = cls(log)
-        tl._type = item_type
 
         for record in log.load_all():
             try:
-                item = item_type.model_validate(record)
+                if record.get("role") == "event":
+                    event_cls = EVENT_TYPES.get(record.get("type", ""))
+                    if event_cls is None:
+                        continue
+                    item: ChainNode = event_cls.model_validate(record)
+                else:
+                    item = item_type.model_validate(record)
             except Exception:
                 continue
             tl._update_memory(item)
@@ -162,16 +181,15 @@ class TrackedList(Generic[T]):
     # ── 写操作（日志语义 append-only）─────────
 
     def append(self, item: T) -> None:
-        """追加元素。填充 uuid/parentUuid，写日志，更新快照。"""
+        """追加元素。填充 uuid/parentUuid，写日志。"""
         self._ensure_type([item])
         self._data.append(item)
         self._last_uuid = item.uuid
         self._persist_append([item])
         self._update_memory(item)
-        self._persist_snapshot()
 
     def extend(self, items: Union[Iterator[T], List[T]]) -> None:
-        """批量追加多条消息。每条填充 uuid/parentUuid，写日志，更新快照。"""
+        """批量追加多条消息。每条填充 uuid/parentUuid，写日志。"""
         lst = list(items)
         self._ensure_type(lst)
         self._data.extend(lst)
@@ -179,7 +197,6 @@ class TrackedList(Generic[T]):
             self._update_memory(item)
             self._last_uuid = item.uuid
         self._persist_append(lst)
-        self._persist_snapshot()
 
     def extend_detached(self, items: Union[Iterator[T], List[T]]) -> None:
         """批量追加多条消息，不自动填充 uuid/parentUuid。
@@ -195,7 +212,6 @@ class TrackedList(Generic[T]):
             self._update_memory(item)
             self._last_uuid = item.uuid
         self._persist_append(lst)
-        self._persist_snapshot()
 
     def append_detached(self, item: T) -> None:
         """追加消息，但不自动填充 uuid/parentUuid。
@@ -207,7 +223,6 @@ class TrackedList(Generic[T]):
         self._last_uuid = item.uuid
         self._persist_append([item])
         self._update_memory(item)
-        self._persist_snapshot()
 
     def set_tip(self, uuid: str) -> None:
         """将活跃链末尾切换到指定 uuid。
@@ -215,14 +230,12 @@ class TrackedList(Generic[T]):
         1. 从内存 map 重建以 uuid 为叶的链（沿 parent_uuid 回溯到根）
         2. 用重建结果替换 _data
         3. 更新 _last_uuid = uuid
-        4. 更新快照
         """
         chain = self.trace_chain(from_uuid=uuid)
         if not chain and uuid is not None:
             raise ValueError(f"uuid {uuid} not found in history")
         self._data = chain
         self._last_uuid = uuid
-        self._persist_snapshot()
 
     # ── 查询（从内存读取）─────────────────────
 

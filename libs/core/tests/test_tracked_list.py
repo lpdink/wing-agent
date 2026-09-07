@@ -1,12 +1,13 @@
-"""Tests for TrackedList — 持久化链容器。
+"""Tests for TrackedList — 持久化混合链容器。
 
 核心场景：
-1. append/extend: 基本追加，自动填充 uuid/parent_uuid
+1. append/extend: 基本追加，自动填充 uuid/parent_uuid（ChainNode 家族混排）
 2. append_detached: 不自动填充，调用方自行管理拓扑
 3. set_tip: 切换活跃链末尾
-4. trace_chain: 从 JSONL 沿 parent_uuid 回溯（倒序遍历）
+4. trace_chain: 从内存 map 沿 parent_uuid 回溯（倒序遍历）
 5. find: 按 uuid 查找
-6. load: 从 newest.json 或 history.jsonl 恢复
+6. load: 从 history.jsonl 恢复混合链（Message + 事件记录按 role 分发）
+7. 混合链：事件节点与 Message 同链，rewind/fork 凭链序工作
 """
 
 import json
@@ -19,6 +20,7 @@ from pydantic import BaseModel
 from pydantic.errors import PydanticUserError
 
 from wing.common.tracked_list import TrackedList
+from wing.event import DiffContentEvent, LLMCallMetricsEvent
 from wing.store import FileMessageLog
 from wing.schema import ChainNode, Message
 
@@ -53,7 +55,7 @@ def _read_history(path: Path) -> list[dict]:
 
 
 def _read_newest(path: Path) -> list[dict]:
-    """Read newest.json as parsed JSON."""
+    """读遗留 newest.json（快照已废弃：新代码不写，仅存量文件存在）。"""
     newest = path / "newest.json"
     if not newest.exists():
         return []
@@ -114,17 +116,20 @@ class TestAppendExtend:
         assert len(entries) == 3
 
     def test_type_locking(self, tmp_dir):
+        """ChainNode 家族约束：非 ChainNode 拒绝，家族内混排允许。"""
         tl = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Item(name="a"))
         with pytest.raises((TypeError, PydanticUserError)):
             tl.append(BaseModel())
 
-    def test_newest_json_updated(self, tmp_dir):
+    def test_no_newest_json_written(self, tmp_dir):
+        """快照已废弃：append 不产生 newest.json。"""
         tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Message(role="user", content="hello"))
-        newest = _read_newest(tmp_dir)
-        assert len(newest) == 1
-        assert newest[0]["role"] == "user"
+        tl.append(Message(role="assistant", content="hi"))
+
+        assert _read_newest(tmp_dir) == []
+        assert not (tmp_dir / "newest.json").exists()
 
     def test_no_snapshot_lines(self, tmp_dir):
         """Verify that append does NOT write snapshot lines."""
@@ -192,15 +197,13 @@ class TestAppendDetached:
         assert entries[0]["uuid"] is None
         assert entries[0]["parent_uuid"] is None
 
-    def test_append_detached_updates_newest(self, tmp_dir):
-        """append_detached updates newest.json."""
+    def test_append_detached_no_snapshot(self, tmp_dir):
+        """append_detached 不产生快照文件。"""
         tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         msg = Message(role="user", content="hello", uuid="u1", parent_uuid=None)
         tl.append_detached(msg)
 
-        newest = _read_newest(tmp_dir)
-        assert len(newest) == 1
-        assert newest[0]["uuid"] == "u1"
+        assert not (tmp_dir / "newest.json").exists()
 
     def test_append_detached_chain(self, tmp_dir):
         """Multiple append_detached calls build a chain."""
@@ -250,8 +253,8 @@ class TestSetTip:
         assert tl.active_chain[0].content == "a"
         assert tl.last_uuid == "u1"
 
-    def test_set_tip_updates_newest(self, tmp_dir):
-        """set_tip updates newest.json cache."""
+    def test_set_tip_no_snapshot(self, tmp_dir):
+        """set_tip 不产生快照文件（重放职责由 history.jsonl 混合日志承担）。"""
         tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         m1 = Message(role="user", content="a", uuid="u1", parent_uuid=None)
         m2 = Message(role="assistant", content="b", uuid="u2", parent_uuid="u1")
@@ -259,9 +262,7 @@ class TestSetTip:
         tl.append_detached(m2)
 
         tl.set_tip("u1")
-        newest = _read_newest(tmp_dir)
-        assert len(newest) == 1
-        assert newest[0]["uuid"] == "u1"
+        assert not (tmp_dir / "newest.json").exists()
 
     def test_set_tip_invalid_uuid(self, tmp_dir):
         """set_tip with nonexistent uuid raises ValueError."""
@@ -544,12 +545,10 @@ class TestLoad:
         assert tl2.last_uuid == tl2.active_chain[1].uuid
 
     def test_missing_newest_fallback(self, tmp_dir):
-        """newest.json missing → fallback to history.jsonl."""
+        """老 session（快照废弃前的日志）load 回归：仅凭 history.jsonl 恢复。"""
         tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Message(role="user", content="hello"))
         tl.append(Message(role="assistant", content="hi"))
-
-        (tmp_dir / "newest.json").unlink()
 
         tl2 = TrackedList.load(FileMessageLog(tmp_dir), Message)
         assert len(tl2) == 2
@@ -557,7 +556,7 @@ class TestLoad:
         assert tl2.active_chain[1].content == "hi"
 
     def test_corrupt_newest_fallback(self, tmp_dir):
-        """newest.json corrupt → fallback to history.jsonl."""
+        """遗留 newest.json（损坏）不影响 load——快照不参与恢复。"""
         tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Message(role="user", content="hello"))
 
@@ -596,11 +595,10 @@ class TestInMemoryCache:
     """验证 find/trace_chain 从内存读取，而非每次读外存。"""
 
     def test_find_after_load_without_newest(self, tmp_dir):
-        """删除 newest.json 后 load，find 仍能从内存中找到消息。"""
+        """load 后 find 从内存读取（不依赖外存）。"""
         tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Message(role="user", content="hello"))
         u = tl[0].uuid
-        (tmp_dir / "newest.json").unlink()
 
         tl2 = TrackedList.load(FileMessageLog(tmp_dir), Message)
         found = tl2.find(u)  # ty: ignore[invalid-argument-type]
@@ -608,11 +606,10 @@ class TestInMemoryCache:
         assert found.content == "hello"
 
     def test_trace_chain_after_load_without_newest(self, tmp_dir):
-        """删除 newest.json 后 load，trace_chain 从内存重建。"""
+        """load 后 trace_chain 从内存重建（不读外存）。"""
         tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Message(role="user", content="a"))
         tl.append(Message(role="assistant", content="b"))
-        (tmp_dir / "newest.json").unlink()
 
         tl2 = TrackedList.load(FileMessageLog(tmp_dir), Message)
         chain = tl2.trace_chain()
@@ -650,7 +647,6 @@ class TestInMemoryCache:
 
         # 删除外存文件，验证 find 仍能工作
         (tmp_dir / "history.jsonl").unlink()
-        (tmp_dir / "newest.json").unlink()
 
         found = tl.find(msg.uuid)  # ty: ignore[invalid-argument-type]
         assert found is not None
@@ -663,7 +659,6 @@ class TestInMemoryCache:
         tl.append(Message(role="assistant", content="b"))
 
         (tmp_dir / "history.jsonl").unlink()
-        (tmp_dir / "newest.json").unlink()
 
         chain = tl.trace_chain()
         assert len(chain) == 2
@@ -680,7 +675,6 @@ class TestInMemoryCache:
         tl.extend(msgs)
 
         (tmp_dir / "history.jsonl").unlink()
-        (tmp_dir / "newest.json").unlink()
 
         found = tl.find(msgs[0].uuid)  # ty: ignore[invalid-argument-type]
         assert found is not None
@@ -696,7 +690,6 @@ class TestInMemoryCache:
         tl.append_detached(msg)
 
         (tmp_dir / "history.jsonl").unlink()
-        (tmp_dir / "newest.json").unlink()
 
         found = tl.find("my-uuid")
         assert found is not None
@@ -716,7 +709,6 @@ class TestInMemoryCache:
         )
 
         (tmp_dir / "history.jsonl").unlink()
-        (tmp_dir / "newest.json").unlink()
 
         tl.set_tip("u2")
         assert len(tl.active_chain) == 2
@@ -734,7 +726,6 @@ class TestInMemoryCache:
         )
 
         (tmp_dir / "history.jsonl").unlink()
-        (tmp_dir / "newest.json").unlink()
 
         found = tl.find("u1")
         assert found is not None
@@ -773,7 +764,144 @@ class TestPureMemoryMode:
         assert list(Path(tmp_dir).iterdir()) == []
 
     def test_type_locking_still_works(self, tmp_dir):
-        tl: TrackedList[Message] = TrackedList()
+        """ChainNode 家族约束（纯内存模式同构）：家族内混排 OK，族外拒绝。"""
+        tl: TrackedList[ChainNode] = TrackedList()
         tl.append(Message(role="user", content="a"))
-        with pytest.raises(TypeError):
-            tl.append(Item(name="not a message"))  # ty: ignore[invalid-argument-type]
+        # ChainNode 家族内混排：Item 也是 ChainNode，允许
+        tl.append(Item(name="not a message"))
+        # 非 ChainNode：拒绝
+        with pytest.raises((TypeError, PydanticUserError)):
+            tl.append(BaseModel())  # ty: ignore[invalid-argument-type]
+
+
+# ── 8. 混合链（Message + 事件节点）─────────────
+
+
+class TestMixedChain:
+    """事件节点参与链构建：落盘、加载往返、rewind/fork 凭链序工作。"""
+
+    def test_mixed_append_and_load_roundtrip(self, tmp_dir):
+        """混合链 append → history.jsonl 记录序 → load 拓扑恢复。"""
+        tl: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir))
+        u = Message(role="user", content="hi")
+        tl.append(u)
+        d = DiffContentEvent(path="a.txt", new_text="hello")
+        tl.append(d)
+        a = Message(role="assistant", content="ok")
+        tl.append(a)
+        t = Message(role="tool", tool_call_id="c1", content="res")
+        tl.append(t)
+
+        records = _read_history(tmp_dir)
+        assert [r["role"] for r in records] == ["user", "event", "assistant", "tool"]
+        ev = records[1]
+        assert ev["type"] == "diff_content"
+        assert "target" not in ev and "persist" not in ev
+        assert ev["path"] == "a.txt"
+
+        tl2 = TrackedList.load(FileMessageLog(tmp_dir), Message)
+        chain = tl2.active_chain
+        assert [type(x).__name__ for x in chain] == [
+            "Message",
+            "DiffContentEvent",
+            "Message",
+            "Message",
+        ]
+        # 拓扑连续性：事件节点在链上
+        assert chain[1].parent_uuid == chain[0].uuid
+        assert chain[2].parent_uuid == chain[1].uuid
+        assert chain[3].parent_uuid == chain[2].uuid
+        # 事件字段还原
+        assert chain[1].path == "a.txt"
+
+    def test_rewind_excludes_events_after_tip(self, tmp_dir):
+        """rewind（set_tip）后，目标点之后的事件节点随链切换移出活跃链。"""
+        tl: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir))
+        u1 = Message(role="user", content="q1")
+        tl.append(u1)
+        tl.append(DiffContentEvent(path="f1", new_text="x"))
+        tl.append(Message(role="assistant", content="a1"))
+        u2 = Message(role="user", content="q2")
+        tl.append(u2)
+        tl.append(DiffContentEvent(path="f2", new_text="y"))
+
+        assert u2.uuid is not None
+        tl.set_tip(u2.uuid)
+        chain = tl.active_chain
+        # tip=u2：f2 事件（u2 之后落盘）不在活跃链上；f1 保留
+        assert [type(x).__name__ for x in chain] == [
+            "Message",
+            "DiffContentEvent",
+            "Message",
+            "Message",
+        ]
+
+    def test_fork_copies_events_with_prefix(self, tmp_dir):
+        """fork（extend_detached 导入混合链前缀）事件随链拷贝。"""
+        tl: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir))
+        tl.append(Message(role="user", content="q1"))
+        tl.append(DiffContentEvent(path="f1", new_text="x"))
+        tl.append(Message(role="assistant", content="a1"))
+
+        # fork：深拷贝混合链前缀（模拟 _remap_chain_uuids 后导入）
+        from wing.session_manager import _remap_chain_uuids
+
+        remapped = _remap_chain_uuids(tl.active_chain)
+        forked: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir / "fork"))
+        forked.extend_detached(remapped)
+
+        kinds = [type(x).__name__ for x in forked.active_chain]
+        assert kinds == ["Message", "DiffContentEvent", "Message"]
+        # 拓扑重映射后保持连续
+        fc = forked.active_chain
+        assert fc[1].parent_uuid == fc[0].uuid
+        assert fc[2].parent_uuid == fc[1].uuid
+
+    def test_load_skips_unknown_event_type(self, tmp_dir):
+        """未知事件 type 的记录被跳过（前向容忍），其余节点照常恢复。"""
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
+        tl.append(Message(role="user", content="hi"))
+
+        # 手工追加一条未知类型的 event 记录
+        with open(tmp_dir / "history.jsonl", "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "role": "event",
+                        "type": "from_the_future",
+                        "uuid": "ev-1",
+                        "parent_uuid": tl[0].uuid,
+                    }
+                )
+                + "\n"
+            )
+
+        tl2 = TrackedList.load(FileMessageLog(tmp_dir), Message)
+        assert len(tl2.active_chain) == 1
+        assert tl2.active_chain[0].content == "hi"
+
+    def test_event_metrics_persist_shape(self, tmp_dir):
+        """LLMCallMetricsEvent 落盘形状：usage 数值字段 + stop_reason 审计。"""
+        tl: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir))
+        tl.append(Message(role="user", content="hi"))
+        tl.append(
+            LLMCallMetricsEvent(
+                prompt_tokens=100,
+                completion_tokens=50,
+                cached_tokens=10,
+                first_chunk_rt_ms=123.0,
+                tokens_per_sec=42.0,
+                stop_reason="max_tokens",
+            )
+        )
+
+        records = _read_history(tmp_dir)
+        ev = records[1]
+        assert ev["type"] == "llm_call_metrics"
+        assert ev["stop_reason"] == "max_tokens"
+        assert ev["prompt_tokens"] == 100
+
+        tl2 = TrackedList.load(FileMessageLog(tmp_dir), Message)
+        restored = [x for x in tl2.active_chain if not isinstance(x, Message)]
+        assert len(restored) == 1
+        assert restored[0].stop_reason == "max_tokens"

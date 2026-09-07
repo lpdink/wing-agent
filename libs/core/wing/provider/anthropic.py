@@ -19,7 +19,11 @@ import httpx
 
 from wing.common.logger import log
 from wing.common.with_retry import with_retry
-from wing.provider.base import ModelProvider, parse_tool_args
+from wing.provider.base import (
+    ModelProvider,
+    StreamAccumulator,
+    parse_tool_args,
+)
 from wing.provider.errors import ProviderStreamError, raise_with_body
 from wing.provider.http import make_http_timeout
 from wing.provider.sse import parse_json_event, parse_sse_stream
@@ -64,6 +68,8 @@ class _StreamState:
     cache_creation: int = 0
     input_source: str = "start"  # input_tokens 来源：delta（权威）或 start（兜底）
     first_token_ts: float | None = None
+    # 终止原因（message_delta.delta.stop_reason：end_turn/max_tokens/tool_use/…）
+    stop_reason: str | None = None
 
 
 class AnthropicProvider(ModelProvider):
@@ -102,16 +108,46 @@ class AnthropicProvider(ModelProvider):
         model: str,
         tools: list[Tool] | None = None,
         stream: bool = False,
+        accumulator: StreamAccumulator | None = None,
     ) -> AsyncIterator[LLMResponse]:
         log.info(f"[BEGIN] anthropic call {model} with {len(messages)} stream:{stream}")
         body = self._build_body(messages, model, tools, stream)
 
         if stream:
-            async for item in self._generate_stream(body, model):
+            async for item in self._generate_stream(body, model, accumulator):
                 yield item
         else:
             async for item in self._generate_sync(body, model):
                 yield item
+
+    def create_accumulator(self) -> StreamAccumulator:
+        return StreamAccumulator()
+
+    def snapshot_blocks(self, accumulator: StreamAccumulator | None) -> list | None:
+        """从累积状态提取已生成块——中断补提交路径。
+
+        text/thinking 任意长度保留；未被 content_block_stop 终结的 tool
+        块丢弃（半截参数不可解析，且无配对结果会使下轮请求结构非法）。
+        状态从未填充（流未开始/非流式路径）返回 None。
+        """
+        state = accumulator.state if accumulator is not None else None
+        if not isinstance(state, _StreamState):
+            return None
+        return self._ordered_finalized_blocks(state) or None
+
+    @staticmethod
+    def _ordered_finalized_blocks(state: _StreamState) -> list:
+        """按 index 排序产出已终结的块（跳过仍在 pending 的 tool 块）。
+
+        同时服务于 message_stop 的权威块数组产出（max_tokens 截断在
+        tool args 中间时，半截 tool_use 不得进入）与中断快照。
+        """
+        blocks = []
+        for idx in sorted(state.blocks_by_index):
+            if idx in state.pending_tools:
+                continue  # 未终结的 tool 块：半截，剔除
+            blocks.append(state.blocks_by_index[idx])
+        return blocks
 
     async def list_models(self) -> list[str]:
         if self._config.models:
@@ -471,13 +507,14 @@ class AnthropicProvider(ModelProvider):
                 tokens_per_sec=completion_tokens / elapsed if elapsed > 0 else 0.0,
                 model=model,
                 request_id=request_id,
+                stop_reason=data.get("stop_reason"),
             ),
         )
 
     # ─── Streaming ────────────────────────────────────────────────
 
     async def _generate_stream(
-        self, body: dict, model: str
+        self, body: dict, model: str, accumulator: StreamAccumulator | None = None
     ) -> AsyncIterator[LLMResponse]:
         t0 = time.monotonic()
         try:
@@ -494,6 +531,12 @@ class AnthropicProvider(ModelProvider):
             raise TimeoutError(
                 f"LLM first chunk timeout after {self.timeout_first_chunk}s"
             )
+
+        # 累积状态装入 caller 持有的容器（每次尝试重置——重试重传时
+        # 快照只反映当前尝试，与消费者看到的内容一致）
+        state = _StreamState()
+        if accumulator is not None:
+            accumulator.state = state
 
         request_id = resp.headers.get("request-id", "")
         first_chunk_rt_ms = (time.monotonic() - t0) * 1000
@@ -683,6 +726,10 @@ class AnthropicProvider(ModelProvider):
             state.cached_tokens = usage_delta["cache_read_input_tokens"]
         if "cache_creation_input_tokens" in usage_delta:
             state.cache_creation = usage_delta["cache_creation_input_tokens"]
+        # 终止原因（end_turn / max_tokens / tool_use / stop_sequence）
+        stop_reason = data.get("delta", {}).get("stop_reason")
+        if stop_reason:
+            state.stop_reason = stop_reason
 
     @staticmethod
     def _on_message_start(state: _StreamState, data: dict) -> None:
@@ -703,7 +750,11 @@ class AnthropicProvider(ModelProvider):
     def _build_final_response(
         state: _StreamState, model: str, request_id: str, first_chunk_rt_ms: float
     ) -> LLMResponse:
-        """message_stop：产出有序 content_blocks（权威块数组）+ 最终 usage。"""
+        """message_stop：产出有序 content_blocks（权威块数组）+ 最终 usage。
+
+        未被 content_block_stop 终结的 tool 块（max_tokens 砍在参数中间）
+        从块数组中剔除——半截 tool_use 不产生工具调用。
+        """
         # Anthropic 的 input_tokens 仅为非缓存部分（含兜底/增量源）；
         # 对齐 OpenAI 语义：prompt_tokens = 总输入（含缓存）
         total_prompt = state.prompt_tokens + state.cached_tokens + state.cache_creation
@@ -722,9 +773,7 @@ class AnthropicProvider(ModelProvider):
             decode_elapsed = time.monotonic() - state.first_token_ts
             if decode_elapsed > 0:
                 decode_tps = state.completion_tokens / decode_elapsed
-        ordered_blocks = [
-            state.blocks_by_index[i] for i in sorted(state.blocks_by_index)
-        ]
+        ordered_blocks = AnthropicProvider._ordered_finalized_blocks(state)
         return LLMResponse(
             content_blocks=ordered_blocks or None,
             usage=LLMUsage(
@@ -735,5 +784,6 @@ class AnthropicProvider(ModelProvider):
                 tokens_per_sec=decode_tps,
                 model=model,
                 request_id=request_id,
+                stop_reason=state.stop_reason,
             ),
         )

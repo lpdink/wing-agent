@@ -9,13 +9,13 @@ EventTarget 由 EventBus emit 时注入，Gateway 据此转发。
 
 from __future__ import annotations
 
-from __future__ import annotations
-
 import uuid
 from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+from wing.schema import ChainNode
 
 
 # ============================================================
@@ -91,8 +91,12 @@ class CommandInfo(BaseModel):
 # ============================================================
 
 
-class WingEvent(BaseModel):
+class WingEvent(ChainNode):
     """所有事件的基类。
+
+    事件与 Message 共享链拓扑（ChainNode：uuid/parent_uuid），可混合进入
+    TrackedList 活跃链——history.jsonl 的记录级判别靠 role 字段
+    （Message 的 role ∈ user/assistant/tool/system，事件恒为 "event"）。
 
     - created_at：UTC datetime，人类可读，前端可反序列化。
     - type：子类必须覆盖为 Literal 字面量。
@@ -100,13 +104,21 @@ class WingEvent(BaseModel):
     - request_id：始终存在（自动生成 UUID），前端请求可覆写。
                   即使不是 RPC 响应，也始终存在，方便日志串联。
     - target：EventTarget，由 EventBus emit 时注入，Gateway 据此转发。
+              传输路由元数据，不落盘（落盘记录在序列化时剥离）。
+    - persist：是否持久化进 history.jsonl（两次 commit 语义）。
+      true —— 完整产生时即时落盘进链（diff/metrics/ask 等权威记录）；
+      false —— 瞬态事件（流式 delta、transport ack、状态同步），只进
+      RAM journal 供中途订阅者重放，turn 收口由 Message 记录承载。
+      从序列化中排除：落盘记录恒为 true，协议帧不需要该字段。
     """
 
+    role: Literal["event"] = "event"
     created_at: datetime = Field(default_factory=lambda: datetime.now())
     type: str
     session_id: str | None = None
     request_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     target: EventTarget | None = None
+    persist: bool = Field(default=True, exclude=True)
 
 
 # ============================================================
@@ -139,3 +151,4 @@ class DeliveredEvent(WingEvent):
     """
 
     type: Literal["delivered"] = "delivered"
+    persist: bool = False

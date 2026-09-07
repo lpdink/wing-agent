@@ -29,6 +29,41 @@ def _seed(session, *contents: str) -> None:
         session.context_manager.add_message(Message(role=role, content=content))
 
 
+class TestForkCarriesEvents:
+    @pytest.mark.asyncio
+    async def test_fork_copies_chain_events_with_prefix(self, file_sm):
+        """fork 拷贝混合链前缀：事件节点随链拷贝，重放视图在新 session 可见。"""
+        from wing.event import DiffContentEvent
+
+        source = file_sm.create_session()
+        cm = source.context_manager
+        _seed(source, "hello", "hi")
+        # 在 fork 点之前落盘事件节点（模拟工具执行期间的 diff）
+        source.agent.sink._emit(
+            DiffContentEvent(path="f.txt", new_text="content", tool_call_id="tc-1")
+        )
+        cm.add_message(Message(role="user", content="question"))
+
+        fork_point = cm.get_context_window()[-1].uuid
+        new_session, draft = file_sm.fork_session(source.session_id, fork_point)
+        assert draft == "question"
+
+        # 新 session 活跃链：fork 点之前的 Message + 事件节点
+        msgs = new_session.context_manager.get_context_window()
+        events = new_session.context_manager.get_active_events()
+        assert [m.content for m in msgs] == ["hello", "hi"]
+        assert len(events) == 1
+        assert isinstance(events[0], DiffContentEvent)
+        assert events[0].path == "f.txt"
+
+        # fork 深拷贝：源 session 不受新 session 链操作影响
+        src_events = source.context_manager.get_active_events()
+        assert src_events[0].uuid != events[0].uuid
+
+        await source.agent.shutdown()
+        await new_session.agent.shutdown()
+
+
 class TestForkMetadata:
     @pytest.mark.asyncio
     async def test_fork_persists_complete_metadata(
@@ -239,9 +274,6 @@ class TestLegacyCompat:
         ]
         (session_dir / "history.jsonl").write_text(
             "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
-        )
-        (session_dir / "newest.json").write_text(
-            json.dumps([r for r in records]), encoding="utf-8"
         )
 
         sm = SessionManager({"file": FileSessionStore(root)})

@@ -11,8 +11,10 @@ _llm_turn 抛 _InterruptedToolResults；_llm_turn 沿正常路径提交本轮消
     ToolResultTurnEvent），TUI 的 Bash 计时器随之冻结；
   - 补提交经 MessageLog 持久化，resume 后可见。
 
-流式三段（reasoning / content / tool 参数流式）中被打断时 LLM 响应未完成，
-按原语义丢弃，上下文不变。
+流式三段（reasoning / content / tool 参数流式）中被打断时：半截
+reasoning/text 经 provider accumulator 快照组装 partial assistant Message
+提交（stop_reason="interrupted"），半截 tool call（未终结参数流）丢弃；
+瞬态 journal 清空——用户可放心打断长思考，已花费 tokens 的内容不丢。
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from wing.schema import (
     LLMUsage,
     Message,
     TextBlock,
+    ThinkingBlock,
     Tool,
     ToolCall,
     ToolParam,
@@ -243,13 +246,76 @@ class TestInterruptDuringToolExec:
         await agent.shutdown()
 
 
-class TestInterruptOutsideToolExec:
-    """工具执行之外的打断：不补提交（半截响应丢弃 / 空闲 no-op）。"""
+class TestInterruptDuringStreaming:
+    """流式生成期间打断：半截 reasoning/text 补提交，半截 tool call 丢弃。"""
 
     @pytest.mark.asyncio
-    async def test_interrupt_during_streaming_discards_partial(
+    async def test_interrupt_during_streaming_commits_partial(
         self, runtime, monkeypatch
     ):
+        """reasoning 流式中途打断 → partial assistant Message 提交。
+
+        - 已生成的 thinking/text 块保留（任意长度皆可提交）；
+        - 未终结的 tool 参数流丢弃（无配对结果的 tool_use 不产生）；
+        - stop_reason="interrupted"（截断审计）；
+        - 瞬态 journal 清空（内容已由 Message 承载）；
+        - InterruptedEvent 落盘于 partial Message 之后（链序）。
+        """
+        session = runtime.create_session()
+        agent = session.agent
+
+        streaming = asyncio.Event()
+        # snapshot 语义与真实 provider 一致：text/thinking 保留，
+        # 未终结 tool 块已在 provider 侧剔除
+        blocks = [
+            ThinkingBlock(thinking="half-done reasoning"),
+            TextBlock(text="partial answer"),
+        ]
+
+        async def _blocking_generate(*args: Any, **kwargs: Any):
+            streaming.set()
+            await asyncio.sleep(30)
+            yield LLMResponse(content="never")  # pragma: no cover
+
+        # accumulator 协议：caller 持有容器，取消后 snapshot 半截块
+        class _Acc:
+            state = object()
+
+        monkeypatch.setattr(agent.model_provider, "generate", _blocking_generate)
+        monkeypatch.setattr(agent.model_provider, "create_accumulator", lambda: _Acc())
+        monkeypatch.setattr(agent.model_provider, "snapshot_blocks", lambda acc: blocks)
+
+        _start_turn(agent)
+        await _wait_until(streaming.is_set)
+        await runtime.interrupt_session(session.session_id)
+
+        chain = agent.context_manager.get_context_window()
+        # [user, assistant(partial)] —— 半截 tool call 被剔除
+        assert [m.role for m in chain] == ["user", "assistant"]
+        partial = chain[1]
+        assert partial.reasoning_content == "half-done reasoning"
+        assert partial.content == "partial answer"
+        assert partial.tool_calls is None
+        assert partial.stop_reason == "interrupted"
+        # 下轮请求结构合法（无悬空 tool_calls）
+        _assert_well_formed(chain)
+
+        # journal 已清空
+        assert len(agent._sink.journal) == 0
+
+        # InterruptedEvent 落盘在 partial Message 之后（链序）
+        from wing.event import InterruptedEvent
+
+        events = session.context_manager.get_active_events()
+        assert any(isinstance(e, InterruptedEvent) for e in events)
+
+        await agent.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_interrupt_with_no_partial_content_commits_nothing(
+        self, runtime, monkeypatch
+    ):
+        """首个 chunk 到达前打断（无已生成内容）：不产生 partial 提交。"""
         session = runtime.create_session()
         agent = session.agent
 
@@ -261,16 +327,55 @@ class TestInterruptOutsideToolExec:
             yield LLMResponse(content="never")  # pragma: no cover
 
         monkeypatch.setattr(agent.model_provider, "generate", _blocking_generate)
+        # snapshot 返回 None（无内容可提交——真实 provider 流未开始时的行为）
+        monkeypatch.setattr(agent.model_provider, "snapshot_blocks", lambda acc: None)
+        monkeypatch.setattr(agent.model_provider, "create_accumulator", lambda: None)
+
         _start_turn(agent)
-        # 事件在生成器体内设置——此刻 worker 必挂在该生成器的 await 上。
         await _wait_until(streaming.is_set)
         await agent.interrupt()
 
-        # 只剩 turn 开始时注入的 user 消息，半截响应未入库。
         chain = agent.context_manager.get_context_window()
         assert [m.role for m in chain] == ["user"]
 
         await agent.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_partial_commit_persisted_across_resume(self, runtime, monkeypatch):
+        """流式中断的 partial Message 经 MessageLog 落盘：resume 后可见。"""
+        session = runtime.create_session()
+        sid = session.session_id
+        agent = session.agent
+
+        streaming = asyncio.Event()
+        blocks = [ThinkingBlock(thinking="interrupted thought")]
+
+        async def _blocking_generate(*args: Any, **kwargs: Any):
+            streaming.set()
+            await asyncio.sleep(30)
+            yield LLMResponse(content="never")  # pragma: no cover
+
+        monkeypatch.setattr(agent.model_provider, "generate", _blocking_generate)
+        monkeypatch.setattr(
+            agent.model_provider, "create_accumulator", lambda: object()
+        )
+        monkeypatch.setattr(agent.model_provider, "snapshot_blocks", lambda acc: blocks)
+
+        _start_turn(agent)
+        await _wait_until(streaming.is_set)
+        await agent.interrupt()
+        await agent.shutdown()
+
+        from wing.runtime import WingRuntime
+
+        restarted = WingRuntime()
+        resumed = restarted.resume_session(sid)
+        chain = resumed.context_manager.get_context_window()
+        assert [m.role for m in chain] == ["user", "assistant"]
+        assert chain[1].reasoning_content == "interrupted thought"
+        assert chain[1].stop_reason == "interrupted"
+
+        await resumed.agent.shutdown()
 
     @pytest.mark.asyncio
     async def test_interrupt_idle_is_noop(self, runtime):

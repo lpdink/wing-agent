@@ -83,6 +83,12 @@ class LLMUsage(BaseModel):
     """模型名称，由 provider 在构建 usage 时注入"""
     request_id: str = ""
     """LLM API 响应的 x-request-id，用于排查问题"""
+    stop_reason: str | None = None
+    """终止原因（协议原值：end_turn / max_tokens / tool_use / stop / length…）。
+
+    provider 在最终响应的 usage 上设置；react_loop 据此传导进
+    Message.stop_reason 与 LLMCallMetricsEvent——截断审计与补提交语义
+    的唯一事实源。中断路径由 runtime 合成 "interrupted"。"""
 
     def __repr__(self) -> str:
         parts = [f"in:{self.prompt_tokens} out:{self.completion_tokens}"]
@@ -210,6 +216,11 @@ class Message(ChainNode):
     usage: "LLMUsage | None" = (
         None  # assistant 消息的 token 审计信息，持久化后重放可恢复
     )
+    stop_reason: str | None = None
+    """assistant 消息的终止原因（正常 stop / max_tokens 截断 / interrupted 补提交）。
+
+    审计元数据——不进入 LLM 请求体（to_openai 不导出）。extra="ignore"
+    容忍存量记录缺失。"""
 
     # 扁平存储：仅非 assistant 消息（user/tool/system）使用。assistant 的
     # content / reasoning_content / tool_calls 全部从 content_blocks 实时派生，
@@ -229,6 +240,7 @@ class Message(ChainNode):
         tool_calls: list[ToolCall] | None = None,
         tool_call_id: str | None = None,
         usage: LLMUsage | None = None,
+        stop_reason: str | None = None,
         uuid: str | None = None,
         parent_uuid: str | None = None,
         unzip_last_uuid: str | None = None,
@@ -245,6 +257,7 @@ class Message(ChainNode):
             "tool_calls": tool_calls,
             "tool_call_id": tool_call_id,
             "usage": usage,
+            "stop_reason": stop_reason,
             "uuid": uuid,
             "parent_uuid": parent_uuid,
             "unzip_last_uuid": unzip_last_uuid,

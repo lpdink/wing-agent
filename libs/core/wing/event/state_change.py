@@ -27,15 +27,21 @@ class SyncSessionEvent(WingEvent):
     通知前端需要同步（replay）指定 session 的完整上下文。
 
     session_id：新 session 的 id（事件发给订阅新 session 的 client）
-    messages：完整上下文消息列表
+    messages：完整上下文消息列表（Message 投影）
+    events：活跃链上的事件节点（按链序）——diff 等视图的重放素材
+    in_flight：RAM journal 的瞬态事件合成包（当前 turn 进行中的内容），
+    中途订阅者据此看到与从始至终订阅一致的视图
     agent：该 session 的 AgentInfo
     name：session 名称
     draft：用户还没发出去的草稿（rewind/fork 时可能有）
     """
 
     type: Literal["sync_session"] = "sync_session"
+    persist: bool = False
     session_id: str  # 新 session 的 id
     messages: list[dict[str, Any]] = Field(default_factory=list)
+    events: list[dict[str, Any]] = Field(default_factory=list)
+    in_flight: list[dict[str, Any]] = Field(default_factory=list)
     agent: AgentInfo | None = None
     name: str | None = None
     draft: str | None = None
@@ -49,6 +55,7 @@ class SessionStateChangedEvent(WingEvent):
     """
 
     type: Literal["session_state_changed"] = "session_state_changed"
+    persist: bool = False
     model: str | None = None
     thinking: bool | None = None
     reasoning_effort: str | None = None
@@ -83,6 +90,7 @@ class SessionInitEvent(WingEvent):
     """
 
     type: Literal["session_init"] = "session_init"
+    persist: bool = False
     uuid: str = Field(default_factory=lambda: _uuid.uuid4().hex)
     tools: list[str] = Field(default_factory=list)
     model: str = ""

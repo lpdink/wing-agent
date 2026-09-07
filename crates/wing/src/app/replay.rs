@@ -6,6 +6,7 @@
 use serde::Deserialize;
 
 use crate::app::constants::TOOL_TODO;
+use crate::ui::cells::diff_view::DiffView;
 use crate::ui::cells::thinking::ThinkingBlock;
 use crate::ui::cells::todo_msg::TodoMessage;
 use crate::ui::cells::tool_call::ToolCallBlock;
@@ -32,6 +33,58 @@ struct ReplayMessage {
     tool_calls: Option<Vec<ReplayToolCall>>,
     #[serde(default)]
     tool_call_id: Option<String>,
+}
+
+/// A durable event node from the session's mixed chain.
+#[derive(Debug, Deserialize)]
+struct ReplayEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    old_text: Option<String>,
+    #[serde(default)]
+    new_text: Option<String>,
+    #[serde(default)]
+    tool_call_id: Option<String>,
+}
+
+/// Replay durable event nodes onto the message-rendered chat view.
+///
+/// Events are anchored by `tool_call_id` onto the ToolCall cells built from
+/// the message projection. Chain order places events before their assistant
+/// message, but replay runs the message pass first — so anchors exist by the
+/// time events are applied. Unknown anchor (e.g. a tool call whose assistant
+/// message was truncated away) falls back to append, mirroring the live-path
+/// DiffContent handler.
+///
+/// Twin events (tool_call_result etc.) are skipped: their facts are already
+/// rendered from the message projection — the log keeps them for future
+/// consumers (export/analysis), not for the TUI replay.
+pub fn replay_events(chat: &mut ChatView, events: &[serde_json::Value]) {
+    for ev_val in events {
+        let ev: ReplayEvent = match serde_json::from_value(ev_val.clone()) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("Failed to parse replay event: {e}");
+                continue;
+            }
+        };
+        if ev.event_type != "diff_content" {
+            continue;
+        }
+        let (Some(path), Some(new_text)) = (ev.path, ev.new_text) else {
+            tracing::warn!(event_type = %ev.event_type, "diff event missing fields");
+            continue;
+        };
+        let diff = DiffView::new(path, ev.old_text, new_text);
+        let tool_call_id = ev.tool_call_id.unwrap_or_default();
+        if let Err(cell) = chat.insert_after_tool_call(&tool_call_id, ChatCell::Diff(diff)) {
+            // Unknown anchor — same fallback as the live DiffContent handler.
+            chat.push(*cell);
+        }
+    }
 }
 
 /// Replay session messages into the chat view.
@@ -351,5 +404,159 @@ mod tests {
             names,
             vec!["TC(TodoWrite)", "Todo", "TC(Bash)", "TC(TodoWrite)", "Todo"]
         );
+    }
+
+    // ── replay_events：事件重放（diff 锚定）─────────────
+
+    #[test]
+    fn test_replay_events_anchors_diff_to_tool_call() {
+        // Message pass builds the ToolCall cell; the event pass anchors the
+        // diff directly after it — resume restores the diff view.
+        let mut chat = ChatView::new();
+        let messages = vec![json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "tc-edit",
+                "name": "Edit",
+                "arguments": {"path": "main.rs"}
+            }]
+        })];
+        let events = vec![json!({
+            "role": "event",
+            "type": "diff_content",
+            "path": "main.rs",
+            "old_text": "fn main() {}",
+            "new_text": "fn main() { println!(\"hi\"); }",
+            "tool_call_id": "tc-edit"
+        })];
+        replay_messages(&mut chat, &messages);
+        replay_events(&mut chat, &events);
+
+        assert_eq!(chat.len(), 2);
+        assert!(
+            matches!(chat.cells[0].cell(), ChatCell::ToolCall(_)),
+            "ToolCall cell first"
+        );
+        assert!(
+            matches!(chat.cells[1].cell(), ChatCell::Diff(_)),
+            "Diff cell anchored directly after its ToolCall"
+        );
+    }
+
+    #[test]
+    fn test_replay_events_event_before_anchor_in_chain_order() {
+        // Chain order places the diff BEFORE the assistant message (events
+        // are persisted during tool execution, ahead of the turn commit).
+        // The two-pass replay (messages first, events second) makes the
+        // anchor exist by the time the diff is applied — order-independent.
+        let mut chat = ChatView::new();
+        let messages = vec![json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "tc-write",
+                "name": "Write",
+                "arguments": {"path": "new.txt"}
+            }]
+        })];
+        // Events list in chain order (diff first) — anchor still resolves.
+        let events = vec![json!({
+            "type": "diff_content",
+            "path": "new.txt",
+            "old_text": null,
+            "new_text": "hello",
+            "tool_call_id": "tc-write"
+        })];
+        replay_messages(&mut chat, &messages);
+        replay_events(&mut chat, &events);
+        assert_eq!(chat.len(), 2);
+        assert!(matches!(chat.cells[1].cell(), ChatCell::Diff(_)));
+    }
+
+    #[test]
+    fn test_replay_events_unknown_anchor_falls_back_to_append() {
+        // A diff whose ToolCall cell is gone (e.g. the assistant message was
+        // truncated by max_tokens) appends instead of erroring — mirrors the
+        // live DiffContent handler's fallback.
+        let mut chat = ChatView::new();
+        let messages = vec![json!({"role": "user", "content": "hi"})];
+        let events = vec![json!({
+            "type": "diff_content",
+            "path": "gone.rs",
+            "old_text": null,
+            "new_text": "content",
+            "tool_call_id": "tc-unknown"
+        })];
+        replay_messages(&mut chat, &messages);
+        replay_events(&mut chat, &events);
+        assert_eq!(chat.len(), 2);
+        assert!(matches!(chat.cells[1].cell(), ChatCell::Diff(_)));
+    }
+
+    #[test]
+    fn test_replay_events_skips_twin_and_unknown_events() {
+        // Twin events (tool_call_result) and unknown future event types are
+        // skipped — their facts are rendered from the message projection /
+        // tolerated for forward compatibility.
+        let mut chat = ChatView::new();
+        let messages = vec![json!({"role": "user", "content": "hi"})];
+        let events = vec![
+            json!({
+                "type": "tool_call_result",
+                "tool_call_id": "tc-1",
+                "tool_result": "ok"
+            }),
+            json!({"type": "from_the_future", "anything": true}),
+        ];
+        replay_messages(&mut chat, &messages);
+        replay_events(&mut chat, &events);
+        assert_eq!(chat.len(), 1, "twin/unknown events must not render");
+    }
+
+    #[test]
+    fn test_replay_events_multiple_diffs_keep_anchor_order() {
+        let mut chat = ChatView::new();
+        let messages = vec![json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "tc-a", "name": "Edit", "arguments": {"path": "a"}},
+                {"id": "tc-b", "name": "Edit", "arguments": {"path": "b"}}
+            ]
+        })];
+        let events = vec![
+            json!({
+                "type": "diff_content",
+                "path": "b", "old_text": null, "new_text": "B",
+                "tool_call_id": "tc-b"
+            }),
+            json!({
+                "type": "diff_content",
+                "path": "a", "old_text": null, "new_text": "A",
+                "tool_call_id": "tc-a"
+            }),
+        ];
+        replay_messages(&mut chat, &messages);
+        replay_events(&mut chat, &events);
+
+        // Order: TC(a), Diff(a), TC(b), Diff(b) — each diff under its own
+        // ToolCall regardless of event arrival order.
+        let kinds: Vec<String> = chat
+            .cells
+            .iter()
+            .map(|c| match c.cell() {
+                ChatCell::ToolCall(b) => format!(
+                    "TC({})",
+                    b.tool_args
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                ),
+                ChatCell::Diff(d) => format!("Diff({})", d.path),
+                _ => "?".to_string(),
+            })
+            .collect();
+        assert_eq!(kinds, vec!["TC(a)", "Diff(a)", "TC(b)", "Diff(b)"]);
     }
 }

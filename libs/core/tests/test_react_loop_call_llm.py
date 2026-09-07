@@ -46,6 +46,13 @@ class _FakeProvider:
         for chunk in self._chunks:
             yield chunk
 
+    def create_accumulator(self):
+        # duck-type 协议：_call_llm 只透传 + 取消时调 snapshot_blocks
+        return None
+
+    def snapshot_blocks(self, accumulator):
+        return None
+
 
 class TestCallLlmContract:
     @pytest.mark.asyncio

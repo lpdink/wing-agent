@@ -19,8 +19,13 @@ import pytest
 from wing.context_manager import ContextManager
 from wing.common.tracked_list import TrackedList
 from wing.store import FileMessageLog, FileSessionStore
-from wing.schema import Message
+from wing.schema import ChainNode, Message
 from wing.session_manager import _remap_chain_uuids
+
+
+def _contents(nodes: list) -> list:
+    """提取链节点的 Message content（窄化 ChainNode → Message，事件跳过）。"""
+    return [n.content or "" for n in nodes if isinstance(n, Message)]
 
 
 @pytest.fixture
@@ -48,7 +53,7 @@ def _make_cm(tmp_dir: Path, session_id: str | None = None) -> ContextManager:
     from wing.compactor import Compactor
 
     sid = session_id or "test-session"
-    messages: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir / sid))
+    messages: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir / sid))
     return ContextManager(
         session_id=sid,
         messages=messages,
@@ -88,7 +93,9 @@ class TestBasicMessageManagement:
         cm.add_message(Message(role="user", content="hello"))
 
         class _StubProvider(ModelProvider):
-            async def generate(self, messages, model, tools=None, stream=False):
+            async def generate(
+                self, messages, model, tools=None, stream=False, accumulator=None
+            ):
                 yield  # pragma: no cover
 
             async def list_models(self):
@@ -429,8 +436,7 @@ class TestFork:
         subchain, draft = cm.extract_subchain(msgs[2].uuid)  # ty: ignore[invalid-argument-type]
         assert draft == "question"
         assert len(subchain) == 2
-        assert subchain[0].content == "hello"
-        assert subchain[1].content == "hi"
+        assert _contents(subchain) == ["hello", "hi"]
 
     def test_extract_subchain_to_first_message(self, tmp_dir):
         """extract_subchain 到第一条消息返回空子链。"""
@@ -457,8 +463,7 @@ class TestFork:
         subchain, draft = cm.extract_subchain("current")
         assert draft == ""
         assert len(subchain) == 2
-        assert subchain[0].content == "hello"
-        assert subchain[1].content == "hi"
+        assert _contents(subchain) == ["hello", "hi"]
 
     def test_extract_subchain_current_with_compact(self, tmp_dir):
         """extract_subchain('current') 返回完整链，包含压缩节点。"""
@@ -488,8 +493,8 @@ class TestFork:
         subchain, draft = cm.extract_subchain("current")
         assert draft == ""
         assert len(subchain) == 4
-        assert subchain[0].content == "old1"
-        assert subchain[1].content == "old2"
+        assert _contents(subchain)[:2] == ["old1", "old2"]
+        assert _contents(subchain)[-1] == "tail1"
         assert subchain[2].uuid == "cu"
         assert subchain[2].parent_uuid is None
         assert subchain[2].unzip_last_uuid == msgs[1].uuid
@@ -577,7 +582,7 @@ class TestFork:
         subchain, draft = cm.extract_subchain(msgs[1].uuid)  # ty: ignore[invalid-argument-type]
         assert draft == "old2"
         assert len(subchain) == 1
-        assert subchain[0].content == "old1"
+        assert _contents(subchain) == ["old1"]
 
     def test_remap_chain_uuids_preserves_topology(self, tmp_dir):
         """_remap_chain_uuids 重写 uuid，保持拓扑。"""
@@ -592,7 +597,7 @@ class TestFork:
         remapped = _remap_chain_uuids(subchain)
 
         assert len(remapped) == 1
-        assert remapped[0].content == "hello"
+        assert _contents(remapped) == ["hello"]
         assert remapped[0].parent_uuid is None
 
     def test_remap_chain_uuids_rewrites_all_uuids(self, tmp_dir):

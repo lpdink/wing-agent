@@ -77,6 +77,45 @@ WingEventUnion = (
     | BranchTargetsEvent
 )
 
+# 事件类型注册表：type 字面量 → 事件类。
+# history.jsonl 加载时按 role="event" + type 在此分发还原事件节点
+# （TrackedList.load）。未知 type 跳过——前向容忍。
+EVENT_TYPES: dict[str, type[WingEvent]] = {
+    "error": ErrorEvent,
+    "text": TextEvent,
+    "reasoning": ReasoningEvent,
+    "tool_call": ToolCallEvent,
+    "tool_call_stream": ToolCallStreamEvent,
+    "tool_call_result": ToolCallResultEvent,
+    "llm_call_metrics": LLMCallMetricsEvent,
+    "ask": AskEvent,
+    "done": DoneEvent,
+    "turn_started": TurnStartedEvent,
+    "user_message_accepted": UserMessageAcceptedEvent,
+    "diff_content": DiffContentEvent,
+    "assistant_turn": AssistantTurnEvent,
+    "tool_result_turn": ToolResultTurnEvent,
+    "turn_result": TurnResultEvent,
+    "sync_session": SyncSessionEvent,
+    "session_init": SessionInitEvent,
+    "delivered": DeliveredEvent,
+    "interrupted": InterruptedEvent,
+    "compact_done": CompactDoneEvent,
+    "session_state_changed": SessionStateChangedEvent,
+    "context_stats": ContextStatsEvent,
+    "branch_targets": BranchTargetsEvent,
+}
+
+
+def serialize_event(event: WingEvent) -> dict:
+    """事件 → 传输/重放用的 dict（剥离传输路由元数据 target）。
+
+    持久化记录与 SyncSessionEvent.events / in_flight 共用此形状：
+    role="event" 记录级判别 + 事件自身字段。
+    """
+    return event.model_dump(exclude={"target"})
+
+
 __all__ = [
     # base
     "WingEvent",
@@ -114,4 +153,7 @@ __all__ = [
     "BranchTargetsEvent",
     # union
     "WingEventUnion",
+    # registry + serializer
+    "EVENT_TYPES",
+    "serialize_event",
 ]

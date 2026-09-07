@@ -104,12 +104,6 @@ class TestMessageLog:
         log2 = store.open_log("sid-shared")
         assert len(log2.load_all()) == 1
 
-    def test_snapshot_nop_or_written(self, store: SessionStore):
-        log = store.open_log("sid-snap")
-        log.write_snapshot([{"role": "user", "content": "x"}])
-        # 不对快照做跨后端断言：file 写 newest.json，memory NOP。
-        # file 布局在 TestFileLayout 中断言。
-
 
 class TestAux:
     def test_write_read_delete(self, store: SessionStore):
@@ -203,7 +197,6 @@ class TestMemoryNoDisk:
         store.save_metadata("sid-m", SessionMetadata(session_name="m", workspace="/w"))
         log = store.open_log("sid-m")
         log.append([{"role": "user", "content": "hi", "uuid": "u1"}])
-        log.write_snapshot([{"role": "user", "content": "hi"}])
         log.write_aux("pending_compact", {"start_uuid": "u1"})
         assert log.read_aux("pending_compact") is not None
         assert store.list_summaries()
@@ -215,7 +208,7 @@ class TestMemoryNoDisk:
 
 
 class TestFileLayout:
-    """文件后端保持既有磁盘布局。"""
+    """文件后端磁盘布局（newest.json 快照已移除）。"""
 
     def test_layout_files(self, tmp_path: Path):
         root = tmp_path / "sessions"
@@ -223,13 +216,12 @@ class TestFileLayout:
         store.save_metadata("sid-l", SessionMetadata(session_name="l", workspace="/w"))
         log = store.open_log("sid-l")
         log.append([{"role": "user", "content": "hi"}])
-        log.write_snapshot([{"role": "user", "content": "hi"}])
         log.write_aux("pending_compact", {"k": "v"})
 
         session_dir = root / "sid-l"
         assert (session_dir / "metadata.json").exists()
         assert (session_dir / "history.jsonl").exists()
-        assert (session_dir / "newest.json").exists()
+        assert not (session_dir / "newest.json").exists()
         assert (session_dir / "pending_compact.json").exists()
 
         meta = json.loads((session_dir / "metadata.json").read_text())

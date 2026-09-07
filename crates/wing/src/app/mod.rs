@@ -1655,6 +1655,8 @@ impl App {
             WingEvent::SyncSession {
                 session_id,
                 messages,
+                events,
+                in_flight,
                 draft,
                 name,
                 agent,
@@ -1676,13 +1678,32 @@ impl App {
                 self.chat.clear();
                 self.ctx.reset();
 
-                // Replay session history.
+                // Replay session history: message projection first (builds
+                // ToolCall/thinking/text cells), then durable events (diff
+                // views anchored onto the cells built above).
                 replay::replay_messages(&mut self.chat, &messages);
+                replay::replay_events(&mut self.chat, &events);
                 tracing::info!(
                     message_count = messages.len(),
+                    event_count = events.len(),
+                    in_flight_count = in_flight.len(),
                     has_draft = draft.is_some(),
                     "session replayed"
                 );
+
+                // In-flight transient events (RAM journal coalesced packets):
+                // rebuild the mid-turn streaming state by feeding them through
+                // the same live-event branches — a late subscriber then sees
+                // exactly what an from-the-start subscriber sees, and the
+                // subsequent live stream continues appending seamlessly.
+                for ev in in_flight {
+                    match serde_json::from_value::<WingEvent>(ev.clone()) {
+                        Ok(event) => self.handle_event(event),
+                        Err(e) => {
+                            tracing::warn!("Failed to parse in-flight event: {e}")
+                        }
+                    }
+                }
 
                 // Restore draft to input box if present.
                 if let Some(draft_text) = draft {

@@ -69,10 +69,6 @@ class MessageLog(ABC):
         """批量追加记录（append-only，永不修改已有记录）。空列表为 NOP。"""
 
     @abstractmethod
-    def write_snapshot(self, records: list[dict[str, Any]]) -> None:
-        """写入活跃链的人类可读快照。无快照概念的后端 NOP。"""
-
-    @abstractmethod
     def read_aux(self, key: str) -> dict[str, Any] | None:
         """读取辅助数据（与消息日志同生命周期，如 pending_compact）。
 

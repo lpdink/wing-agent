@@ -24,7 +24,7 @@ from wing.common.tracked_list import TrackedList
 from wing.config import get_config
 from wing.context_manager import ContextManager
 from wing.provider import create_provider
-from wing.schema import Message
+from wing.schema import ChainNode
 from wing.store import SessionMetadata, SessionStore
 
 if TYPE_CHECKING:
@@ -44,7 +44,7 @@ class Session:
     def __init__(
         self,
         session_id: str,
-        messages: TrackedList[Message],
+        messages: TrackedList[ChainNode],
         context_manager: ContextManager,
         agent: "WingAgent",
         store: SessionStore,
@@ -80,7 +80,7 @@ class Session:
         cls,
         template: "AgentTemplate",
         session_id: str,
-        messages: TrackedList[Message],
+        messages: TrackedList[ChainNode],
         store: SessionStore,
         workspace: str | None = None,
     ) -> "Session":

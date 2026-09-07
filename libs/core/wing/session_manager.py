@@ -33,7 +33,7 @@ from wing.event import (
 )
 from wing.event_bus import event_bus
 from wing.magic_command.prompt_commands import expand_prompt_command
-from wing.schema import Message
+from wing.schema import ChainNode, Message
 from wing.session import Session
 from wing.store import SessionMetadata, SessionStore
 
@@ -41,26 +41,26 @@ if TYPE_CHECKING:
     from wing.gateway.protocol import AgentOverride
 
 
-def _remap_chain_uuids(messages: list[Message]) -> list[Message]:
-    """深拷贝消息链并重映射 uuid/parent_uuid/unzip_last_uuid，保持拓扑。
+def _remap_chain_uuids(nodes: list[ChainNode]) -> list[ChainNode]:
+    """深拷贝混合链（Message + 事件节点）并重映射 uuid/parent_uuid/unzip_last_uuid，保持拓扑。
 
     深拷贝确保 fork 不污染源 session 的内存链状态
     （extract_subchain 返回的是源 TrackedList 中的 live 对象）。
     """
-    copies = [msg.model_copy(deep=True) for msg in messages]
+    copies = [node.model_copy(deep=True) for node in nodes]
 
     uuid_map: dict[str, str] = {}
-    for msg in copies:
-        if msg.uuid:
-            uuid_map[msg.uuid] = str(uuid.uuid4())
+    for node in copies:
+        if node.uuid:
+            uuid_map[node.uuid] = str(uuid.uuid4())
 
-    for msg in copies:
-        if msg.uuid:
-            msg.uuid = uuid_map.get(msg.uuid, str(uuid.uuid4()))
-        if msg.parent_uuid:
-            msg.parent_uuid = uuid_map.get(msg.parent_uuid)
-        if msg.unzip_last_uuid:
-            msg.unzip_last_uuid = uuid_map.get(msg.unzip_last_uuid)
+    for node in copies:
+        if node.uuid:
+            node.uuid = uuid_map.get(node.uuid, str(uuid.uuid4()))
+        if node.parent_uuid:
+            node.parent_uuid = uuid_map.get(node.parent_uuid)
+        if node.unzip_last_uuid:
+            node.unzip_last_uuid = uuid_map.get(node.unzip_last_uuid)
 
     return copies
 
@@ -167,8 +167,8 @@ class SessionManager:
         # 生成或使用传入的 session_id
         sid = session_id if session_id is not None else self._generate_session_id()
 
-        # 创建 TrackedList（经 store 打开消息日志）
-        messages: TrackedList[Message] = (
+        # 创建 TrackedList（经 store 打开消息日志；混合链：Message + 事件）
+        messages: TrackedList[ChainNode] = (
             TrackedList.load(store.open_log(sid), Message)
             if session_id is not None
             else TrackedList(store.open_log(sid))
@@ -246,7 +246,7 @@ class SessionManager:
         if tpl is None:
             tpl = self._template_manager.default
 
-        messages: TrackedList[Message] = TrackedList.load(
+        messages: TrackedList[ChainNode] = TrackedList.load(
             store.open_log(resolved), Message
         )
         # workspace 从 metadata 恢复，使 CM 构造时即以正确工作目录加载相对路径的
@@ -293,7 +293,9 @@ class SessionManager:
         remapped = _remap_chain_uuids(subchain)
 
         # 写入消息（经 store 打开日志）
-        new_messages: TrackedList[Message] = TrackedList(store.open_log(new_session_id))
+        new_messages: TrackedList[ChainNode] = TrackedList(
+            store.open_log(new_session_id)
+        )
         if remapped:
             new_messages.extend_detached(remapped)
 

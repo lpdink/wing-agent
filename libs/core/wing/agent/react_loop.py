@@ -8,6 +8,7 @@ steer → commit）→ emit TurnResult/Done。不持有工具执行、LLM 调用
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -182,6 +183,9 @@ class ReActLoop:
             self._sink.error(f"处理消息失败：异常：{error_detail}")
             self._sink.done()
         finally:
+            # 兜底清空瞬态缓冲（错误/取消路径轮边界未触达时；
+            # 正常路径轮边界已清，此处幂等）
+            self._sink.clear_journal()
             if self._set_working:
                 self._set_working(False)
             reset_request_context(token)
@@ -242,6 +246,11 @@ class ReActLoop:
         turn_messages = [assistant_msg] + tc_results
         self._cm.add_messages(turn_messages)
 
+        # 轮边界：瞬态事件内容已由 Message 记录承载，清空 RAM journal。
+        # （多轮 turn 中途订阅者会看到「已提交 Message + journal 快照」，
+        # 不清空则同一内容双重渲染。）
+        self._sink.clear_journal()
+
         # Emit context stats
         count, tokens = self._cm.get_context_stats()
         ctx_window = 0
@@ -272,38 +281,60 @@ class ReActLoop:
         组装 Message。两个 provider 统一在最终 chunk 产出权威 content_blocks，
         是 Message 组装的唯一依据；provider 未产出块数组（流未正常结束）
         视为契约违反并报错——截断轮次 MUST NOT 作为成功 turn 提交，无扁平兜底。
+
+        中断补提交：流式生成期间被取消（CancelledError 直通——with_retry
+        只捕 Exception）时，从 caller 持有的 accumulator 快照已累积的部分块
+        （text/thinking 任意长度保留，未终结 tool 块由 provider 剔除），
+        有内容则组装 partial assistant Message 提交进上下文，然后 re-raise
+        让 worker 终止。用户可放心打断长思考——已花费 tokens 的内容不丢。
         """
         content_blocks: list[ContentBlock] | None = None
         last_usage: LLMUsage | None = None
+        accumulator = provider.create_accumulator()
 
-        async for chunk in provider.generate(
-            messages=messages,
-            model=model,
-            tools=tools,
-            stream=self._stream,
-        ):
-            if chunk.reasoning_content:
-                self._sink.llm_reasoning(chunk.reasoning_content)
+        try:
+            async for chunk in provider.generate(
+                messages=messages,
+                model=model,
+                tools=tools,
+                stream=self._stream,
+                accumulator=accumulator,
+            ):
+                if chunk.reasoning_content:
+                    self._sink.llm_reasoning(chunk.reasoning_content)
 
-            if chunk.content:
-                self._sink.llm_text(chunk.content)
+                if chunk.content:
+                    self._sink.llm_text(chunk.content)
 
-            if chunk.content_blocks is not None:
-                # provider 产出的权威块数组（最终 chunk 携带）
-                content_blocks = chunk.content_blocks
+                if chunk.content_blocks is not None:
+                    # provider 产出的权威块数组（最终 chunk 携带）
+                    content_blocks = chunk.content_blocks
 
-            if chunk.tool_call_deltas:
-                for delta in chunk.tool_call_deltas:
-                    self._sink.llm_tool_call_delta(
-                        tool_call_id=delta.id,
-                        tool_name=delta.name,
-                        args_fragment=delta.args_fragment,
-                        is_final=delta.is_final,
-                    )
+                if chunk.tool_call_deltas:
+                    for delta in chunk.tool_call_deltas:
+                        self._sink.llm_tool_call_delta(
+                            tool_call_id=delta.id,
+                            tool_name=delta.name,
+                            args_fragment=delta.args_fragment,
+                            is_final=delta.is_final,
+                        )
 
-            if chunk.usage.completion_tokens or chunk.usage.prompt_tokens:
-                last_usage = chunk.usage
-                self._sink.llm_metrics(chunk.usage)
+                if chunk.usage.completion_tokens or chunk.usage.prompt_tokens:
+                    last_usage = chunk.usage
+                    self._sink.llm_metrics(chunk.usage)
+        except asyncio.CancelledError:
+            partial_blocks = provider.snapshot_blocks(accumulator)
+            if partial_blocks:
+                partial_msg = Message(
+                    role="assistant",
+                    content_blocks=partial_blocks,
+                    usage=last_usage,
+                    stop_reason="interrupted",
+                )
+                self._cm.add_message(partial_msg)
+                # 补提交完成：瞬态 delta 内容已由 partial Message 承载
+                self._sink.clear_journal()
+            raise
 
         if content_blocks is None:
             raise RuntimeError(
@@ -311,5 +342,8 @@ class ReActLoop:
                 "(stream ended without a complete block array)"
             )
         return Message(
-            role="assistant", content_blocks=content_blocks, usage=last_usage
+            role="assistant",
+            content_blocks=content_blocks,
+            usage=last_usage,
+            stop_reason=last_usage.stop_reason if last_usage else None,
         )

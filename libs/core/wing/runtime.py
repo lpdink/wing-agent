@@ -257,7 +257,8 @@ class WingRuntime:
                 original_tokens=original,
                 compressed_tokens=compressed,
                 model=session.agent.model,
-            )
+            ),
+            session=session,
         )
         self._emit_context_stats(session)
         return original, compressed
@@ -265,12 +266,19 @@ class WingRuntime:
     async def interrupt_session(self, session_id: str) -> None:
         """中断 session 当前 agent 任务。
 
+        agent.interrupt() 内部 await 旧 worker 完成补提交（流式半截
+        reasoning/text 的 partial Message 已落盘），之后 InterruptedEvent
+        才落盘+广播——链序保证事件在 partial Message 之后。
+
         Raises:
             LookupError: session 不存在
         """
         session = self._require_session(session_id)
         await session.agent.interrupt()
-        self._emit_session_event(InterruptedEvent(session_id=session.session_id))
+        self._emit_session_event(
+            InterruptedEvent(session_id=session.session_id),
+            session=session,
+        )
 
     def rewind_session(self, session_id: str, target_uuid: str) -> str | None:
         """回退 session 到指定消息节点。
@@ -290,10 +298,13 @@ class WingRuntime:
         draft = cm.rewind(target_uuid)
         self._emit_context_stats(session)
 
+        from wing.event import serialize_event
+
         self._emit_session_event(
             SyncSessionEvent(
                 session_id=session.session_id,
                 messages=[msg.model_dump() for msg in cm.get_context_window()],
+                events=[serialize_event(e) for e in cm.get_active_events()],
                 agent=None,
                 draft=draft,
             )
@@ -477,9 +488,17 @@ class WingRuntime:
             raise LookupError(f"Session not found: {session_id}")
         return session
 
-    def _emit_session_event(self, event: WingEvent) -> None:
-        """发射 session 级别事件，强制 target=EventTarget(scope="session")。"""
+    def _emit_session_event(
+        self, event: WingEvent, session: Session | None = None
+    ) -> None:
+        """发射 session 级别事件，强制 target=EventTarget(scope="session")。
+
+        persist=true 且 session 给定时先落盘进链（与 AgentEventSink 同一
+        持久化语义）；session 为 None 的事件（无会话上下文）只广播。
+        """
         event.target = EventTarget(scope="session")
+        if event.persist and session is not None:
+            session.context_manager.append_event(event)
         event_bus.emit(event)
 
     def _emit_context_stats(self, session: Session) -> None:
@@ -501,13 +520,24 @@ class WingRuntime:
     def _push_sync(
         self, client_id: str, session: Session, draft: str | None = None
     ) -> None:
-        """向指定 client 推送 SyncSessionEvent + SessionInitEvent + ContextStatsEvent。"""
+        """向指定 client 推送 SyncSessionEvent + SessionInitEvent + ContextStatsEvent。
+
+        SyncSession 携带三组重放素材：messages（Message 投影）、events
+        （活跃链事件节点，按链序）、in_flight（journal 合成包）——中途
+        订阅者据此获得与从始至终订阅一致的完整视图。
+        """
         client_target = EventTarget(scope="client", client_ids=[client_id])
+        from wing.event import serialize_event
+
+        cm = session.context_manager
+        agent = session.agent
 
         event_bus.emit(
             SyncSessionEvent(
                 session_id=session.session_id,
                 messages=session.serialize_messages(),
+                events=[serialize_event(e) for e in cm.get_active_events()],
+                in_flight=[serialize_event(e) for e in agent.sink.journal.snapshot()],
                 agent=session.to_agent_info(),
                 name=session.session_name,
                 draft=draft,
@@ -515,7 +545,6 @@ class WingRuntime:
             )
         )
 
-        agent = session.agent
         event_bus.emit(
             SessionInitEvent(
                 session_id=session.session_id,
@@ -527,7 +556,6 @@ class WingRuntime:
             )
         )
 
-        cm = session.agent.context_manager
         count, tokens = cm.get_context_stats()
         ctx_window = 0
         if cm.compactor:

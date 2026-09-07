@@ -111,11 +111,11 @@ def _write_session_dir(
     workspace: str | None = None,
     name: str = "test session",
 ) -> None:
-    """在磁盘上构造一个合法 session 目录（newest.json + metadata.json）。"""
+    """在磁盘上构造一个合法 session 目录（history.jsonl + metadata.json）。"""
     session_dir = sessions_path / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
-    (session_dir / "newest.json").write_text(
-        json.dumps([{"role": "user", "content": name}])
+    (session_dir / "history.jsonl").write_text(
+        json.dumps({"role": "user", "content": name, "uuid": f"{session_id}-u1"}) + "\n"
     )
     metadata: dict = {"session_name": name, "last_interaction": last_interaction}
     if workspace is not None:

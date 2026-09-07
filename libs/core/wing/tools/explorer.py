@@ -21,7 +21,7 @@ from wing.config import get_config
 from wing.context_manager import ContextManager
 from wing.event import DoneEvent, TextEvent, WingEvent
 from wing.event_bus import event_bus
-from wing.schema import Message
+from wing.schema import ChainNode
 from wing.store import FileMessageLog
 from wing.tool_registry import tool_registry
 
@@ -87,7 +87,7 @@ async def explorer_agent(
     sub_dir = parent_dir / "subagents" / sub_sid
     result_path = sub_dir / f"{safe_name}_result.md"
 
-    messages: TrackedList[Message] = TrackedList(FileMessageLog(sub_dir))
+    messages: TrackedList[ChainNode] = TrackedList(FileMessageLog(sub_dir))
 
     cm = ContextManager(
         session_id=sub_sid,
