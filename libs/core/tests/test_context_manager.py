@@ -170,7 +170,8 @@ class TestCompact:
         assert len(entries) == 7  # 原始 4 + compact + 2 relink
 
         compact_entry = [e for e in entries if e.get("uuid") == "compact-uuid"][0]
-        assert compact_entry["parent_uuid"] is None
+        # compact 根节点 parent_uuid=None → 存储记录剥除该 null 键
+        assert "parent_uuid" not in compact_entry
         assert compact_entry["unzip_last_uuid"] == msgs[1].uuid
 
         relink1 = [e for e in entries if e.get("uuid") == "relink-2"][0]

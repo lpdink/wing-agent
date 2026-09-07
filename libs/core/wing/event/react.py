@@ -7,7 +7,7 @@ Agent react loop 期间产生的事件：文本、推理、工具调用、指标
 from __future__ import annotations
 
 import uuid as _uuid
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 
 from pydantic import Field
 
@@ -19,19 +19,19 @@ if TYPE_CHECKING:
 
 class TextEvent(WingEvent):
     type: Literal["text"] = "text"
-    persist: bool = False
+    persist: ClassVar[bool] = False
     content: str
 
 
 class ReasoningEvent(WingEvent):
     type: Literal["reasoning"] = "reasoning"
-    persist: bool = False
+    persist: ClassVar[bool] = False
     content: str
 
 
 class ToolCallEvent(WingEvent):
     type: Literal["tool_call"] = "tool_call"
-    persist: bool = False
+    persist: ClassVar[bool] = False
     tool_name: str
     tool_args: dict[str, Any]
     tool_call_id: str
@@ -58,7 +58,7 @@ class ToolCallStreamEvent(WingEvent):
     """
 
     type: Literal["tool_call_stream"] = "tool_call_stream"
-    persist: bool = False
+    persist: ClassVar[bool] = False
     tool_call_id: str
     tool_name: str
     args_fragment: str = ""
@@ -67,6 +67,9 @@ class ToolCallStreamEvent(WingEvent):
 
 class ToolCallResultEvent(WingEvent):
     type: Literal["tool_call_result"] = "tool_call_result"
+    # tool Message 的逐字节孪生，无代码从磁盘读回——停止落盘（事件本身保留：
+    # 3 个 metrics handler + TUI 直播路径依赖，走 event_bus 而非读回磁盘）。
+    persist: ClassVar[bool] = False
     tool_name: str
     tool_args: dict[str, Any]
     tool_call_id: str
@@ -96,6 +99,11 @@ class ToolCallResultEvent(WingEvent):
 
 class LLMCallMetricsEvent(WingEvent):
     type: Literal["llm_call_metrics"] = "llm_call_metrics"
+    # 与 Message.usage + Message.stop_reason 逐字段等价——停止落盘（截断审计
+    # 的唯一落盘位置收敛为 Message.stop_reason + Message.usage）。事件本身
+    # 保留：metrics_registry 经 event_bus 聚合进独立的 metrics.json，且直播
+    # 路径的用量/截断提示依赖它。
+    persist: ClassVar[bool] = False
     model: str = ""
     prompt_tokens: int
     completion_tokens: int
@@ -105,7 +113,8 @@ class LLMCallMetricsEvent(WingEvent):
     stop_reason: str | None = None
     """终止原因（协议原值：end_turn / max_tokens / tool_use / stop / length）。
 
-    落盘即 turn 截断审计——正常结束与预算耗尽在日志中可区分。"""
+    仅用于直播路径的用量与截断提示——不落盘（截断审计由 Message.stop_reason
+    + Message.usage 唯一承载）。"""
 
 
 class AskEvent(WingEvent):
@@ -189,7 +198,7 @@ class AssistantTurnEvent(WingEvent):
     """
 
     type: Literal["assistant_turn"] = "assistant_turn"
-    persist: bool = False
+    persist: ClassVar[bool] = False
     uuid: str = Field(default_factory=lambda: _uuid.uuid4().hex)
     content_blocks: list[dict]
     model: str = ""
@@ -240,7 +249,7 @@ class ToolResultTurnEvent(WingEvent):
     """
 
     type: Literal["tool_result_turn"] = "tool_result_turn"
-    persist: bool = False
+    persist: ClassVar[bool] = False
     uuid: str = Field(default_factory=lambda: _uuid.uuid4().hex)
     tool_use_id: str
     tool_name: str
@@ -269,9 +278,15 @@ class TurnResultEvent(WingEvent):
 
     在整个 agent loop 结束时 emit，位于 DoneEvent 之前。
     subtype: "success" | "error_during_execution" | "error_max_turns"
+
+    保留落盘（duration_ms / num_turns / usage / errors 别处没有，是审计
+    字段），但 `result` 字段排除出落盘记录——它是最终 assistant 文本的孪生
+    （已由 assistant Message 记录承载）。wire 帧与直播仍携带 result（stdio
+    前端消费），仅磁盘记录剥离（disk_exclude）。
     """
 
     type: Literal["turn_result"] = "turn_result"
+    disk_exclude: ClassVar[frozenset[str]] = frozenset({"result"})
     uuid: str = Field(default_factory=lambda: _uuid.uuid4().hex)
     subtype: str = "success"
     is_error: bool = False

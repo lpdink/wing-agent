@@ -6,6 +6,8 @@
 use serde::Deserialize;
 
 use crate::app::constants::TOOL_TODO;
+use crate::protocol::AskQuestion;
+use crate::ui::cells::ask_msg::AskMessage;
 use crate::ui::cells::diff_view::DiffView;
 use crate::ui::cells::thinking::ThinkingBlock;
 use crate::ui::cells::todo_msg::TodoMessage;
@@ -36,10 +38,15 @@ struct ReplayMessage {
 }
 
 /// A durable event node from the session's mixed chain.
+///
+/// Carries the union of fields across fact-event types (`diff_content`, `ask`);
+/// missing keys default. The backend already filters to fact events, so this
+/// only ever sees renderable payloads.
 #[derive(Debug, Deserialize)]
 struct ReplayEvent {
     #[serde(rename = "type")]
     event_type: String,
+    // diff_content
     #[serde(default)]
     path: Option<String>,
     #[serde(default)]
@@ -48,21 +55,50 @@ struct ReplayEvent {
     new_text: Option<String>,
     #[serde(default)]
     tool_call_id: Option<String>,
+    // ask
+    #[serde(default)]
+    questions: Vec<AskQuestion>,
+    #[serde(default)]
+    question: String,
+    #[serde(default)]
+    choices: Vec<String>,
+    #[serde(default)]
+    required: bool,
 }
 
-/// Replay durable event nodes onto the message-rendered chat view.
+/// An `ask` event rendered during replay, returned so the App can register the
+/// answerable flow state (`AskFlow` / `AskSelection`) that makes the card
+/// interactive — replay builds the cell, the App owns the reply channel.
+#[derive(Debug, Clone)]
+pub struct ReplayedAsk {
+    pub tool_call_id: String,
+    /// Multi-question payload (empty → legacy single-question form).
+    pub questions: Vec<AskQuestion>,
+    pub question: String,
+    pub choices: Vec<String>,
+    pub required: bool,
+}
+
+/// Replay durable fact-event nodes onto the message-rendered chat view.
 ///
-/// Events are anchored by `tool_call_id` onto the ToolCall cells built from
-/// the message projection. Chain order places events before their assistant
-/// message, but replay runs the message pass first — so anchors exist by the
-/// time events are applied. Unknown anchor (e.g. a tool call whose assistant
-/// message was truncated away) falls back to append, mirroring the live-path
-/// DiffContent handler.
+/// Capability dispatch — render the types that have a renderer, skip the rest
+/// (forward tolerant). There is NO policy whitelist: the backend already
+/// filters the chain down to fact events (`FACT_EVENTS` + pending asks), so the
+/// frontend never encodes "this type is a Message twin, skip it". Adding a new
+/// fact event later only needs a renderer arm here, no allow/deny registry.
 ///
-/// Twin events (tool_call_result etc.) are skipped: their facts are already
-/// rendered from the message projection — the log keeps them for future
-/// consumers (export/analysis), not for the TUI replay.
-pub fn replay_events(chat: &mut ChatView, events: &[serde_json::Value]) {
+/// Events are anchored by `tool_call_id` onto the ToolCall cells built from the
+/// message projection (`messages` + `uncommitted`). The assembly order
+/// (`messages → uncommitted → uncommitted_tools → events`) guarantees a diff's
+/// anchor cell already exists — the producing tool_use block is *finalized*, so
+/// it is in the projection. Unknown anchor (e.g. the assistant message was
+/// compacted away) falls back to append, mirroring the live-path DiffContent
+/// handler.
+///
+/// Returns the `ask` events it rendered so the caller can register their
+/// answerable flows.
+pub fn replay_events(chat: &mut ChatView, events: &[serde_json::Value]) -> Vec<ReplayedAsk> {
+    let mut asks: Vec<ReplayedAsk> = Vec::new();
     for ev_val in events {
         let ev: ReplayEvent = match serde_json::from_value(ev_val.clone()) {
             Ok(e) => e,
@@ -71,20 +107,50 @@ pub fn replay_events(chat: &mut ChatView, events: &[serde_json::Value]) {
                 continue;
             }
         };
-        if ev.event_type != "diff_content" {
-            continue;
-        }
-        let (Some(path), Some(new_text)) = (ev.path, ev.new_text) else {
-            tracing::warn!(event_type = %ev.event_type, "diff event missing fields");
-            continue;
-        };
-        let diff = DiffView::new(path, ev.old_text, new_text);
-        let tool_call_id = ev.tool_call_id.unwrap_or_default();
-        if let Err(cell) = chat.insert_after_tool_call(&tool_call_id, ChatCell::Diff(diff)) {
-            // Unknown anchor — same fallback as the live DiffContent handler.
-            chat.push(*cell);
+        match ev.event_type.as_str() {
+            "diff_content" => {
+                let (Some(path), Some(new_text)) = (ev.path, ev.new_text) else {
+                    tracing::warn!(event_type = %ev.event_type, "diff event missing fields");
+                    continue;
+                };
+                let diff = DiffView::new(path, ev.old_text, new_text);
+                let tool_call_id = ev.tool_call_id.unwrap_or_default();
+                if let Err(cell) = chat.insert_after_tool_call(&tool_call_id, ChatCell::Diff(diff))
+                {
+                    // Unknown anchor — same fallback as the live DiffContent handler.
+                    chat.push(*cell);
+                }
+            }
+            "ask" => {
+                // Reuse the live-path Ask cell construction (questions / choices
+                // / tool_call_id). Only still-pending asks reach here (the
+                // backend filters by live feedback waiters).
+                let tool_call_id = ev.tool_call_id.unwrap_or_default();
+                let msg = if ev.questions.is_empty() {
+                    AskMessage::new(
+                        tool_call_id.clone(),
+                        ev.question.clone(),
+                        ev.choices.clone(),
+                    )
+                } else {
+                    AskMessage::new_multi(tool_call_id.clone(), ev.questions.clone())
+                };
+                chat.push(ChatCell::Ask(msg));
+                asks.push(ReplayedAsk {
+                    tool_call_id,
+                    questions: ev.questions,
+                    question: ev.question,
+                    choices: ev.choices,
+                    required: ev.required,
+                });
+            }
+            // No renderer for this type → skip (forward tolerant).
+            other => {
+                tracing::debug!(event_type = %other, "no replay renderer, skipping");
+            }
         }
     }
+    asks
 }
 
 /// Replay session messages into the chat view.
@@ -495,10 +561,12 @@ mod tests {
     }
 
     #[test]
-    fn test_replay_events_skips_twin_and_unknown_events() {
-        // Twin events (tool_call_result) and unknown future event types are
-        // skipped — their facts are rendered from the message projection /
-        // tolerated for forward compatibility.
+    fn test_replay_events_capability_dispatch_skips_unrenderable() {
+        // Capability dispatch (NOT a policy whitelist): a type with no renderer
+        // here is skipped for forward tolerance. The backend already filters the
+        // chain down to fact events, so twins (tool_call_result) never reach
+        // replay; this asserts the frontend keeps no "twin must not render"
+        // policy of its own — it simply has no renderer for these types.
         let mut chat = ChatView::new();
         let messages = vec![json!({"role": "user", "content": "hi"})];
         let events = vec![
@@ -510,8 +578,78 @@ mod tests {
             json!({"type": "from_the_future", "anything": true}),
         ];
         replay_messages(&mut chat, &messages);
-        replay_events(&mut chat, &events);
-        assert_eq!(chat.len(), 1, "twin/unknown events must not render");
+        let asks = replay_events(&mut chat, &events);
+        assert_eq!(chat.len(), 1, "types without a renderer are skipped");
+        assert!(asks.is_empty());
+    }
+
+    #[test]
+    fn test_replay_events_renders_ask_cell_and_returns_it() {
+        // 6.14: an ask event renders an Ask cell (reusing the live-path cell
+        // construction) and is returned so the App can register the answerable
+        // flow. Multi-question form carries questions + tool_call_id.
+        let mut chat = ChatView::new();
+        let events = vec![json!({
+            "type": "ask",
+            "tool_call_id": "ask-1",
+            "questions": [{"id": "q1", "question": "proceed?", "choices": ["y", "n"]}],
+        })];
+        let asks = replay_events(&mut chat, &events);
+        assert_eq!(chat.len(), 1);
+        assert!(matches!(chat.cells[0].cell(), ChatCell::Ask(_)));
+        assert_eq!(asks.len(), 1);
+        assert_eq!(asks[0].tool_call_id, "ask-1");
+        assert_eq!(asks[0].questions.len(), 1);
+        assert_eq!(asks[0].questions[0].question, "proceed?");
+    }
+
+    #[test]
+    fn test_replay_events_renders_legacy_ask_and_preserves_required() {
+        // Legacy single-question form: question + choices + required flag are
+        // carried through so the App can register an AskSelection.
+        let mut chat = ChatView::new();
+        let events = vec![json!({
+            "type": "ask",
+            "tool_call_id": "ask-2",
+            "question": "dangerous, proceed?",
+            "choices": ["yes", "no"],
+            "required": true,
+        })];
+        let asks = replay_events(&mut chat, &events);
+        assert!(matches!(chat.cells[0].cell(), ChatCell::Ask(_)));
+        assert_eq!(asks.len(), 1);
+        assert!(asks[0].questions.is_empty(), "legacy form has no questions");
+        assert_eq!(asks[0].question, "dangerous, proceed?");
+        assert_eq!(asks[0].choices, vec!["yes".to_string(), "no".to_string()]);
+        assert!(asks[0].required);
+    }
+
+    #[test]
+    fn test_replay_events_ask_and_diff_coexist_in_chain_order() {
+        // Mixed fact events render in chain order: a diff anchors to its
+        // ToolCall, an ask appends — no policy ordering between types.
+        let mut chat = ChatView::new();
+        let messages = vec![json!({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "tc-e", "name": "Edit", "arguments": {"path": "f"}}],
+        })];
+        let events = vec![
+            json!({
+                "type": "diff_content", "path": "f", "old_text": null,
+                "new_text": "x", "tool_call_id": "tc-e",
+            }),
+            json!({
+                "type": "ask", "tool_call_id": "ask-1",
+                "questions": [{"id": "q1", "question": "continue?", "choices": []}],
+            }),
+        ];
+        replay_messages(&mut chat, &messages);
+        let asks = replay_events(&mut chat, &events);
+        // Order: ToolCall, Diff (anchored), Ask.
+        assert!(matches!(chat.cells[0].cell(), ChatCell::ToolCall(_)));
+        assert!(matches!(chat.cells[1].cell(), ChatCell::Diff(_)));
+        assert!(matches!(chat.cells[2].cell(), ChatCell::Ask(_)));
+        assert_eq!(asks.len(), 1);
     }
 
     #[test]

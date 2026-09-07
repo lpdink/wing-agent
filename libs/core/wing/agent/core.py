@@ -12,6 +12,7 @@ import functools
 import inspect
 import uuid
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,7 @@ from wing.config import get_config
 from wing.event import AskEvent, WingEvent
 from wing.provider import create_provider
 from wing.provider.base import ModelProvider
-from wing.schema import Tool
+from wing.schema import Message, Tool
 
 from .event_sink import AgentEventSink
 from .inbox import Inbox
@@ -88,6 +89,10 @@ class WingAgent:
 
         # ── Worker 生命周期 ──
         self._working: bool = False
+        # 当前 turn 的开始时刻（UTC）——working 状态期间有效，供 resume 的
+        # SyncSessionEvent.turn_started_at 取值（前端据此恢复已耗时而非从
+        # resume 时刻重算）。与 _working 同生命周期（_set_working 维护）。
+        self._turn_started_at: datetime | None = None
         self._interrupt_lock = asyncio.Lock()
         self._worker = asyncio.create_task(self._run())
 
@@ -129,7 +134,7 @@ class WingAgent:
         """通过 EventBus 广播事件（工具侧 emit 入口）。
 
         路由到 sink 的统一分流路径：persist=true 即时落盘进链，
-        persist=false 记入 RAM journal——与 react loop 事件同一出口，
+        persist=false 纯广播（不落盘、不缓冲）——与 react loop 事件同一出口，
         不存在绕过 sink 的直连 event_bus。
         """
         self._sink._emit(event)
@@ -151,8 +156,58 @@ class WingAgent:
 
     @property
     def sink(self) -> AgentEventSink:
-        """事件发射出口（供 runtime 读取 journal 快照等）。"""
+        """事件发射出口（供 runtime / 工具侧发射事件）。"""
         return self._sink
+
+    @property
+    def turn_started_at(self) -> datetime | None:
+        """当前 turn 的开始时刻（UTC）；无进行中 turn 时为 None。"""
+        return self._turn_started_at
+
+    def uncommitted_message(self) -> dict | None:
+        """未提交的 assistant Message 投影（单个 Message 形状 dict | None）。
+
+        按需快照当前一轮的 provider accumulator（未提交内容的唯一权威），
+        取**已终结**块组装为 assistant Message 再投影为前端重放形状——与
+        中断补提交同源（同一个 snapshot_blocks）。无进行中轮次或无已终结
+        块时返回 None。MUST NOT 缓存副本。
+        """
+        from wing.session import serialize_message
+
+        acc = self._loop.current_acc
+        if acc is None:
+            return None
+        blocks = self.model_provider.snapshot_blocks(acc)
+        if not blocks:
+            return None
+        return serialize_message(Message(role="assistant", content_blocks=blocks))
+
+    def uncommitted_tools(self) -> list[dict]:
+        """未终结 tool 调用的原始 args 片段列表（活工具卡渲染素材）。
+
+        按需快照当前 accumulator 的 pending 投影——每项
+        `{tool_call_id, tool_name, args_fragment}`，`args_fragment` 是原始
+        参数文本（后端不解析，前端经既有局部解析路径渲染）。
+        """
+        acc = self._loop.current_acc
+        if acc is None:
+            return []
+        return [
+            {
+                "tool_call_id": v.tool_call_id,
+                "tool_name": v.tool_name,
+                "args_fragment": v.args_fragment,
+            }
+            for v in self.model_provider.pending_tool_calls(acc)
+        ]
+
+    def pending_ask_ids(self) -> set[str]:
+        """仍然挂起的 ask 的 tool_call_id 集合（源自 inbox feedback waiters）。
+
+        resume 重放据此过滤链上的 AskEvent——只下发仍挂起的提问（已答/已
+        失效的 ask 重放会渲染出活的 Ask 卡，用户回答进虚空）。
+        """
+        return self._inbox.pending_ask_ids()
 
     @property
     def max_turns(self) -> int | None:
@@ -317,6 +372,12 @@ class WingAgent:
 
     def _set_working(self, value: bool) -> None:
         self._working = value
+        # turn_started_at 与 working 同生命周期：进入 working 登记开始时刻，
+        # 退出（收口/中断/错误——run_turn 的 finally 必经此处）清空。
+        if value:
+            self._turn_started_at = datetime.now(timezone.utc)
+        else:
+            self._turn_started_at = None
 
     def _fire_interrupt_hooks(self) -> None:
         for hook_id, hook in list(self._interrupt_hooks.items()):

@@ -22,7 +22,7 @@ use self::transport::GatewayEndpoint;
 use self::transport::Transport;
 use self::transport::backoff;
 use self::transport::try_reconnect;
-use crate::protocol::WingEvent;
+use crate::protocol::{AskQuestion, EventMeta, WingEvent};
 use crate::tui::TermEvent;
 use crate::tui::WingTerminal;
 use crate::tui::is_quit_key;
@@ -230,6 +230,42 @@ impl App {
         } else {
             self.input.placeholder = "今天构建什么？".into();
         }
+    }
+
+    /// Register the answerable flow state for a replayed pending ask.
+    ///
+    /// Resume replay builds the Ask *cell* in `replay_events` (chain-ordered
+    /// with diffs); this makes it *interactive* by registering the same reply
+    /// channel the live path uses — a multi-question `AskFlow`, or a legacy
+    /// required `AskSelection` — so answering routes to `post(tool_call_id)`
+    /// and resolves the backend waiter. The live `WingEvent::Ask` branch keeps
+    /// its own inline registration (live rendering semantics are frozen); this
+    /// mirrors only the flow state, not the cell push / notification.
+    fn register_ask_flow(
+        &mut self,
+        tool_call_id: &str,
+        questions: &[AskQuestion],
+        choices: &[String],
+        required: bool,
+    ) {
+        if !questions.is_empty() {
+            self.ask_flows.push_back(ask_flow::AskFlow::new(
+                tool_call_id.to_string(),
+                questions.to_vec(),
+            ));
+        } else if required && !choices.is_empty() {
+            self.ask_selections
+                .push_back(crate::ui::ask_select::AskSelection::new(
+                    tool_call_id.to_string(),
+                    choices.to_vec(),
+                ));
+            if let Some(front) = self.ask_selections.front()
+                && front.tool_call_id == tool_call_id
+            {
+                self.chat.update_ask_selection(tool_call_id, 0);
+            }
+        }
+        self.refresh_ask_placeholder();
     }
 
     /// Common cleanup at the end of an agent turn (Done / Interrupted / Error).
@@ -1655,8 +1691,10 @@ impl App {
             WingEvent::SyncSession {
                 session_id,
                 messages,
+                uncommitted,
+                uncommitted_tools,
                 events,
-                in_flight,
+                turn_started_at,
                 draft,
                 name,
                 agent,
@@ -1678,32 +1716,102 @@ impl App {
                 self.chat.clear();
                 self.ctx.reset();
 
-                // Replay session history: message projection first (builds
-                // ToolCall/thinking/text cells), then durable events (diff
-                // views anchored onto the cells built above).
+                // Restore working state BEFORE feeding uncommitted content, so
+                // the spinner / Bash timers / terminal title reflect an
+                // in-progress turn (a mid-turn resume). `turn_started_at`
+                // restores the real elapsed instead of recounting from resume.
+                let turn_instant = turn_started_at
+                    .as_deref()
+                    .and_then(turn_state::instant_from_utc_iso);
+                let mid_turn = uncommitted.is_some() || !uncommitted_tools.is_empty();
+                if mid_turn {
+                    self.turn.start();
+                    if let Some(instant) = turn_instant {
+                        self.turn.started_at = Some(instant);
+                    }
+                    let working_title = title::title_working(
+                        self.turn.spinner.frame_str(),
+                        self.dir_label().as_deref(),
+                    );
+                    self.turn.last_title = Some(working_title.clone());
+                    self.push_intent(AppIntent::SetTitle(working_title));
+                }
+
+                // Replay order: messages → uncommitted → uncommitted_tools →
+                // events. This makes diff anchoring structural: the tool_use
+                // block that produced a diff is a *finalized* block, so it is
+                // built as a ToolCall cell by step 1/2 before step 4 applies
+                // the diff — the anchor always exists first.
+                //
+                // 1. Committed Message projections (text/thinking/ToolCall cells).
                 replay::replay_messages(&mut self.chat, &messages);
-                replay::replay_events(&mut self.chat, &events);
+                // 2. Uncommitted assistant Message projection — SAME replay path
+                //    (a single Message payload, not a list). Never fed to
+                //    handle_event as a pseudo-event.
+                if let Some(uncommitted_msg) = &uncommitted {
+                    replay::replay_messages(&mut self.chat, std::slice::from_ref(uncommitted_msg));
+                    // A mid-execution Bash card (finalized tool_use, no result
+                    // yet) shows elapsed anchored to the turn start.
+                    if let Some(instant) = turn_instant {
+                        self.chat.mark_pending_bash_running(instant);
+                    }
+                }
+                // 3. Unfinished tool calls' raw args fragments — through the
+                //    EXISTING live ToolCallStream branch (client-side partial
+                //    parse via partial_json.rs); zero new rendering logic. The
+                //    subsequent live tool_call_stream deltas append seamlessly.
+                for tool in &uncommitted_tools {
+                    let tool_call_id = tool
+                        .get("tool_call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    if tool_call_id.is_empty() {
+                        continue;
+                    }
+                    let tool_name = tool
+                        .get("tool_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let args_fragment = tool
+                        .get("args_fragment")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    self.handle_event(WingEvent::ToolCallStream {
+                        tool_call_id: tool_call_id.to_string(),
+                        tool_name: tool_name.to_string(),
+                        args_fragment: args_fragment.to_string(),
+                        is_final: false,
+                        // session_id None → bypasses the cross-session filter
+                        // (this is the session we just switched to).
+                        meta: EventMeta {
+                            created_at: String::new(),
+                            session_id: None,
+                            request_id: String::new(),
+                        },
+                    });
+                }
+                // 4. Durable fact events (diff anchored onto cells above; ask
+                //    rendered as an answerable card). replay_events builds the
+                //    ask cells; register their reply flows so a resumed pending
+                //    ask is answerable through the same channel as live.
+                for ask in replay::replay_events(&mut self.chat, &events) {
+                    self.register_ask_flow(
+                        &ask.tool_call_id,
+                        &ask.questions,
+                        &ask.choices,
+                        ask.required,
+                    );
+                }
+
                 tracing::info!(
                     message_count = messages.len(),
+                    has_uncommitted = uncommitted.is_some(),
+                    uncommitted_tools_count = uncommitted_tools.len(),
                     event_count = events.len(),
-                    in_flight_count = in_flight.len(),
+                    mid_turn,
                     has_draft = draft.is_some(),
                     "session replayed"
                 );
-
-                // In-flight transient events (RAM journal coalesced packets):
-                // rebuild the mid-turn streaming state by feeding them through
-                // the same live-event branches — a late subscriber then sees
-                // exactly what an from-the-start subscriber sees, and the
-                // subsequent live stream continues appending seamlessly.
-                for ev in in_flight {
-                    match serde_json::from_value::<WingEvent>(ev.clone()) {
-                        Ok(event) => self.handle_event(event),
-                        Err(e) => {
-                            tracing::warn!("Failed to parse in-flight event: {e}")
-                        }
-                    }
-                }
 
                 // Restore draft to input box if present.
                 if let Some(draft_text) = draft {
@@ -2210,6 +2318,252 @@ mod tests {
         assert!(!app.popup.cache.has_sessions());
         app.invalidate_session_cache();
         assert!(!app.popup.cache.has_sessions());
+    }
+
+    // ── SyncSession replay: uncommitted projection, working state, ask ──
+
+    /// Build a SyncSession event for the test session.
+    fn sync_event(
+        messages: Vec<serde_json::Value>,
+        uncommitted: Option<serde_json::Value>,
+        uncommitted_tools: Vec<serde_json::Value>,
+        events: Vec<serde_json::Value>,
+        turn_started_at: Option<String>,
+    ) -> WingEvent {
+        WingEvent::SyncSession {
+            session_id: "test-session".into(),
+            messages,
+            uncommitted,
+            uncommitted_tools,
+            events,
+            turn_started_at,
+            agent: None,
+            name: None,
+            draft: None,
+            meta: EventMeta {
+                created_at: "2026-01-01T00:00:00+00:00".into(),
+                session_id: Some("test-session".into()),
+                request_id: "r".into(),
+            },
+        }
+    }
+
+    fn utc_ago(secs: i64) -> String {
+        (chrono::Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339()
+    }
+
+    fn cell_kinds(app: &App) -> Vec<&'static str> {
+        app.chat
+            .cells
+            .iter()
+            .map(|c| match c.cell() {
+                ChatCell::UserMessage(_) => "user",
+                ChatCell::AssistantMessage(_) => "assistant",
+                ChatCell::Thinking(_) => "thinking",
+                ChatCell::ToolCall(_) => "tool_call",
+                ChatCell::Diff(_) => "diff",
+                ChatCell::Ask(_) => "ask",
+                ChatCell::Todo(_) => "todo",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_sync_midturn_restores_working_and_elapsed() {
+        // 6.13: uncommitted non-null → working; elapsed from turn_started_at
+        // (not recounted from the resume moment).
+        let mut app = test_app();
+        let uncommitted = serde_json::json!({
+            "role": "assistant",
+            "content": "partial answer",
+        });
+        app.handle_event(sync_event(
+            vec![serde_json::json!({"role": "user", "content": "hi"})],
+            Some(uncommitted),
+            vec![],
+            vec![],
+            Some(utc_ago(5)),
+        ));
+
+        assert!(app.turn.working, "mid-turn resume must enter working state");
+        let started = app.turn.started_at.expect("started_at set");
+        let elapsed = started.elapsed().as_secs();
+        assert!(
+            (3..=7).contains(&elapsed),
+            "elapsed should reflect turn_started_at (~5s), got {elapsed}s"
+        );
+        // uncommitted rendered via replay_messages (assistant cell present)
+        assert!(cell_kinds(&app).contains(&"assistant"));
+    }
+
+    #[test]
+    fn test_sync_uncommitted_tools_alone_restores_working() {
+        // uncommitted_tools non-empty (args still streaming) → working too.
+        let mut app = test_app();
+        app.handle_event(sync_event(
+            vec![],
+            None,
+            vec![serde_json::json!({
+                "tool_call_id": "tc-1",
+                "tool_name": "Bash",
+                "args_fragment": "{\"command\": \"sl",
+            })],
+            vec![],
+            Some(utc_ago(2)),
+        ));
+        assert!(app.turn.working);
+        // The streaming tool cell was built via the live ToolCallStream branch.
+        assert!(cell_kinds(&app).contains(&"tool_call"));
+    }
+
+    #[test]
+    fn test_sync_idle_session_not_working() {
+        // 6.13: idle session (no uncommitted, no tools) → stays idle.
+        let mut app = test_app();
+        app.handle_event(sync_event(
+            vec![serde_json::json!({"role": "user", "content": "done earlier"})],
+            None,
+            vec![],
+            vec![],
+            None,
+        ));
+        assert!(
+            !app.turn.working,
+            "idle resume must NOT enter working state"
+        );
+        assert!(app.turn.started_at.is_none());
+    }
+
+    #[test]
+    fn test_sync_clock_skew_clamps_elapsed() {
+        // 6.13: turn_started_at in the future (clock skew) → clamp to ~zero,
+        // no panic / wrap-around to a huge value.
+        let mut app = test_app();
+        app.handle_event(sync_event(
+            vec![],
+            Some(serde_json::json!({"role": "assistant", "content": "x"})),
+            vec![],
+            vec![],
+            Some(utc_ago(-3600)), // 1h in the future
+        ));
+        assert!(app.turn.working);
+        let started = app.turn.started_at.expect("started_at set");
+        assert!(
+            started.elapsed().as_secs() < 2,
+            "future timestamp must clamp elapsed to ~0, not wrap"
+        );
+    }
+
+    #[test]
+    fn test_sync_diff_anchors_to_uncommitted_tool_call() {
+        // 6.12 (P1-1 regression lock): the tool_use that produced a diff is a
+        // *finalized* block → it is in the uncommitted projection → replayed
+        // (step 2) before events (step 4) → the diff anchors AFTER its ToolCall
+        // cell, not at the tail.
+        let mut app = test_app();
+        let uncommitted = serde_json::json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "tc-edit", "name": "Edit", "arguments": {"path": "main.rs"}}],
+        });
+        let events = vec![serde_json::json!({
+            "type": "diff_content",
+            "path": "main.rs",
+            "old_text": null,
+            "new_text": "fn main() {}",
+            "tool_call_id": "tc-edit",
+        })];
+        app.handle_event(sync_event(
+            vec![serde_json::json!({"role": "user", "content": "edit it"})],
+            Some(uncommitted),
+            vec![],
+            events,
+            Some(utc_ago(1)),
+        ));
+        // Order: user → ToolCall(from uncommitted) → Diff(anchored, not tail-appended
+        // — here tail and anchored coincide, so assert the adjacency explicitly).
+        let kinds = cell_kinds(&app);
+        assert_eq!(kinds, vec!["user", "tool_call", "diff"]);
+    }
+
+    #[test]
+    fn test_sync_three_segment_mixed_order() {
+        // 6.12: messages → uncommitted → events across a multi-round turn.
+        // Committed round (messages) renders first; the in-progress round
+        // (uncommitted) next; diffs anchor to whichever ToolCall they belong to.
+        let mut app = test_app();
+        let messages = vec![
+            serde_json::json!({"role": "user", "content": "do two edits"}),
+            serde_json::json!({
+                "role": "assistant", "content": "",
+                "tool_calls": [{"id": "tc-a", "name": "Edit", "arguments": {"path": "a"}}],
+            }),
+            serde_json::json!({"role": "tool", "tool_call_id": "tc-a", "content": "ok"}),
+        ];
+        let uncommitted = serde_json::json!({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "tc-b", "name": "Edit", "arguments": {"path": "b"}}],
+        });
+        // events in chain order: diff for the committed tc-a AND the in-progress tc-b
+        let events = vec![
+            serde_json::json!({
+                "type": "diff_content", "path": "b", "old_text": null,
+                "new_text": "B", "tool_call_id": "tc-b",
+            }),
+            serde_json::json!({
+                "type": "diff_content", "path": "a", "old_text": null,
+                "new_text": "A", "tool_call_id": "tc-a",
+            }),
+        ];
+        app.handle_event(sync_event(
+            messages,
+            Some(uncommitted),
+            vec![],
+            events,
+            Some(utc_ago(1)),
+        ));
+        // Each diff lands directly after its own ToolCall regardless of event order.
+        let kinds = cell_kinds(&app);
+        assert_eq!(
+            kinds,
+            vec!["user", "tool_call", "diff", "tool_call", "diff"]
+        );
+    }
+
+    #[test]
+    fn test_sync_replays_pending_ask_answerable() {
+        // 6.14: a pending ask replays as an Ask cell AND registers the reply
+        // flow, so the user can answer it (resolves the backend waiter).
+        let mut app = test_app();
+        let events = vec![serde_json::json!({
+            "type": "ask",
+            "tool_call_id": "ask-1",
+            "questions": [{"id": "q1", "question": "proceed?", "choices": ["y", "n"]}],
+        })];
+        app.handle_event(sync_event(vec![], None, vec![], events, None));
+
+        assert!(cell_kinds(&app).contains(&"ask"), "ask cell rendered");
+        // Answerable: the multi-question flow is registered with the right id.
+        assert_eq!(app.ask_flows.len(), 1);
+        assert_eq!(app.ask_flows[0].tool_call_id, "ask-1");
+    }
+
+    #[test]
+    fn test_sync_replays_legacy_required_ask_selection() {
+        // Legacy single-question required ask → AskSelection registered.
+        let mut app = test_app();
+        let events = vec![serde_json::json!({
+            "type": "ask",
+            "tool_call_id": "ask-2",
+            "question": "dangerous command, proceed?",
+            "choices": ["yes", "no"],
+            "required": true,
+        })];
+        app.handle_event(sync_event(vec![], None, vec![], events, None));
+        assert!(cell_kinds(&app).contains(&"ask"));
+        assert_eq!(app.ask_selections.len(), 1);
+        assert_eq!(app.ask_selections[0].tool_call_id, "ask-2");
     }
 
     /// Assert that `text` is consumed as a command (not sent to LLM).

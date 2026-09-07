@@ -104,7 +104,7 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 **provider accumulator 协议**：`ModelProvider.generate(..., accumulator=)` 接受 caller 注入的不透明容器（`StreamAccumulator`），每次尝试（含重试）开始时填充新状态——取消后 caller 仍可经 `snapshot_blocks()` 读取已累积内容。`with_retry` 只捕 `Exception`（CancelledError 是 BaseException），取消直通，不会被重试吞掉（`test_with_retry.py` 钉死）。
 
-**stop_reason 捕获**：两个 provider 均在最终 usage 携带协议原值（`end_turn`/`max_tokens`/`tool_use`/`stop`/`length`），传导进 `Message.stop_reason` 与 `LLMCallMetricsEvent.stop_reason`（落盘审计）。Anthropic 的 max_tokens 砍在 tool args 中间时，未终结的 tool 块从权威块数组剔除（半截 tool_use 不再被当作完整调用执行）。
+**stop_reason 捕获**：两个 provider 均在最终 usage 携带协议原值（`end_turn`/`max_tokens`/`tool_use`/`stop`/`length`），传导进 `Message.stop_reason`（**唯一落盘审计位置**）与 `LLMCallMetricsEvent.stop_reason`（仅用于直播——该事件 persist=false，不落盘；metrics_registry 经 event_bus 聚合进独立的 metrics.json）。Anthropic 的 max_tokens 砍在 tool args 中间时，未终结的 tool 块从权威块数组剔除（半截 tool_use 不再被当作完整调用执行）；该剔除与未提交投影共用同一实现（`_ordered_finalized_blocks`）。
 
 合成结果同时发射与正常完成相同的 `ToolCallResultEvent` / `ToolResultTurnEvent`：TUI 据此翻转 cell 状态（Bash 计时器仅在 cell 为 Pending 时前进，结果事件使其冻结——修复了打断后计时器不停的存量问题），stdio 模式据此输出 user turn 消息。
 
@@ -114,18 +114,24 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 **事件是唯一事实来源**：history.jsonl 是混合日志，承载两种记录——Message 记录（`role ∈ user/assistant/tool/system`，进入 LLM 上下文）与事件记录（`role="event"`，携带事件自身字段）。所有记录共享链拓扑（uuid/parent_uuid），事件参与链构建；`Message` 与前端 `ChatView` 都是同一日志的投影。记录级判别只用 `role`。
 
-**两次 commit**：
+**未提交内容的单一权威 = provider accumulator**：turn 进行中"已生成但未提交"的内容只有一处权威——caller（`ReActLoop`）持有的流累积状态（`_current_acc`，一轮 LLM 调用生命周期：`_call_llm` 入口新建、轮提交/中断补提交/turn 收口后置空）。对外两个覆盖互斥的投影，按需快照、不缓存副本：
 
-- **RAM commit（第一层）**：流式 delta（Text/Reasoning/ToolCallStream 等 `persist=false` 瞬态事件）记入 `EventJournal`（`agent/event_journal.py`），直播逐包产出的同时做多包合成一包（相邻同类合并、ToolCallStream 按 tool_call_id 拼接）——中途订阅者的重放效率由此提升。turn 收口/轮边界清空。Gateway 几乎不崩溃，in-flight 不落盘（20/80：不为极端场景付复杂性）。
-- **磁盘 commit（第二层）**：`persist=true` 事件（diff/metrics/ask/interrupted/tool_call_result/compact_done/error/turn 边界等）在完整产生时即时落盘进链；流式 delta 在 turn 收口合并为 Message 记录落盘。
+- `snapshot_blocks(acc)`：**已终结**块（text/thinking 任意长度保留，未终结 tool 块剔除）——中断补提交与未提交 Message 投影**同源**（resume 与打断变成同一个操作）。
+- `pending_tool_calls(acc)`：**未终结** tool 调用的原始 args 文本（`PendingToolView`）——活工具卡渲染素材，后端不解析半截 JSON（局部解析在客户端 `partial_json.rs`）。
 
-**persist 分流原则**：`WingEvent.persist` 默认 true；false 仅限（a）流式 delta——两次 commit 设计，（b）与 Message 完全孪生且体积可观的事件（AssistantTurn/ToolResultTurn/ToolCall——落盘即同一事实双写），（c）可从权威状态实时重建的协议/查询事件（Sync/SessionInit/ContextStats/BranchTargets/Delivered）。
+**落盘只存事实，不存副本**：`persist=true` 事件（diff/ask/interrupted/error/compact_done）在完整产生时即时落盘进链；流式 delta（`persist=false`）纯广播——不落盘、不进任何内存缓冲，其内容由轮提交时的 Message 记录承载。`tool_call_result` / `llm_call_metrics` 是 Message 孪生（`role="tool"` Message / `Message.usage` + `Message.stop_reason`），已停止落盘（事件本身保留：metrics_registry 与 TUI 直播经 event_bus 依赖）；`turn_result` 保留落盘但 `result` 字段（最终文本孪生）经 `disk_exclude` 排除出磁盘记录（wire 帧仍携带，stdio 消费）。
+
+**persist 分流原则**：`WingEvent.persist` 是 `ClassVar[bool]`（非 pydantic 字段——旧的 `Field(exclude=True)` 会被子类重声明静默击穿），基类默认 true。判据两条同时成立：**是事实**（读回来仍成立，非一次性信号）**且无 Message 孪生**。false 仅限（a）流式 delta，（b）与 Message 完全孪生且体积可观的事件（AssistantTurn/ToolResultTurn/ToolCall/ToolCallResult/LLMCallMetrics），（c）可从权威状态实时重建的协议/查询事件（Sync/SessionInit/ContextStats/BranchTargets/Delivered/SessionStateChanged）。
+
+**三个序列化边界，三套剥离规则**（不可用一个 `model_dump(exclude_none)` 打通——`Message._serialize_flat` 是 wrap 序列化器，`content`/`reasoning_content`/`tool_calls` 在内层 handler 之后才注入）：磁盘记录（`TrackedList._to_record`：字典推导剥 null + 剥 target + disk_exclude）、WS 直播帧与 SyncSession 载荷（`event/__init__.py::wire_dump`：剥 null + 剥 `parent_uuid`/`unzip_last_uuid`/`role`/`target`，保留 `uuid`）。`serialize_event` 是 `wire_dump` 的别名——一套规则，无分散实现。
 
 **rewind/fork/compact 凭链序免费工作**：事件是链节点——set_tip 后边界外事件移出活跃链；fork 拷贝混合链前缀（事件随行）；compact 后被压缩区间的事件与消息一并离开活跃链（被压缩的 diff 自然不再重放，无孤儿处理）。
 
-**中途订阅完整视图**：`_push_sync` 的 SyncSessionEvent 携带 `messages`（Message 投影）+ `events`（活跃链事件节点，按链序）+ `in_flight`（journal 合成包）。前端组装顺序 messages+events → in_flight（走 live handle_event 分支重建进行中 cell）→ live 流——任何时刻订阅都与从始至终订阅等价。
+**中途订阅完整视图**：`_push_sync` 的 SyncSessionEvent 携带四组重放素材——`messages`（已提交 Message 投影）+ `uncommitted`（**单个**未提交 assistant Message 投影，已终结块）+ `uncommitted_tools`（未终结调用的原始 args 片段）+ `events`（活跃链上的**事实类**事件，按链序），外加 `turn_started_at`（恢复 working 已耗时）。前端组装顺序 **messages → uncommitted → uncommitted_tools → events → live 流**：`messages` 与 `uncommitted` 走同一条 `replay_messages` 路径，`uncommitted_tools` 走既有 live `ToolCallStream` 分支（客户端局部解析），`events` 最后锚定。这个顺序让"diff 渲染在其 ToolCall 卡片之前"的缺陷结构性消失——产生 diff 的 tool_use 是已终结块，必在 `uncommitted` 投影里先建出锚点 cell。`events` 的下发过滤归属后端单点（`FACT_EVENTS` + pending ask 谓词，见下）。
 
-**前端重放**：`replay.rs` 两段式——先 replay_messages（建 ToolCall/thinking/text cell），再 replay_events（diff 按 tool_call_id 锚定插入对应 ToolCall cell 后，未知锚点 fallback append，与直播路径同款兜底）；孪生事件跳过（Message 投影已渲染）。
+**pending ask 重放**：`AskEvent` 落盘，但已答的 ask 不再是关于当下的事实（重放会渲染活的 Ask 卡，回答找不到 waiter 进虚空）。后端用 `Inbox._feedback_waiters` 的键集合（`pending_ask_ids()`）作权威待答集合，`get_active_events()` 据此只下发仍挂起的 ask；前端重放渲染 Ask cell 并注册 reply flow（`AskFlow`/`AskSelection`），用户回答走既有通道 resolve waiter。
+
+**前端重放**：`replay.rs` 两段式——先 replay_messages（建 ToolCall/thinking/text cell），再 replay_events（**能力分发**：diff 按 tool_call_id 锚定插入对应 ToolCall cell 后、ask 渲染为可答卡片，无渲染器的类型跳过以保持前向容忍；未知锚点 fallback append，与直播路径同款兜底）。前端**不再编码"孪生事件不得渲染"这类策略**——过滤已在后端 `FACT_EVENTS` 完成，前端只做能力分发。
 
 **newest.json 已移除**：快照的消费者（重放）由混合日志承担；存在性判据与标题回退收敛为 history.jsonl。磁盘遗留的 newest.json 不读不写不删。
 

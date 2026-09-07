@@ -14,7 +14,8 @@ _llm_turn 抛 _InterruptedToolResults；_llm_turn 沿正常路径提交本轮消
 流式三段（reasoning / content / tool 参数流式）中被打断时：半截
 reasoning/text 经 provider accumulator 快照组装 partial assistant Message
 提交（stop_reason="interrupted"），半截 tool call（未终结参数流）丢弃；
-瞬态 journal 清空——用户可放心打断长思考，已花费 tokens 的内容不丢。
+补提交后当前 accumulator 置空、未提交投影失效——用户可放心打断长思考，
+已花费 tokens 的内容不丢。
 """
 
 from __future__ import annotations
@@ -258,7 +259,7 @@ class TestInterruptDuringStreaming:
         - 已生成的 thinking/text 块保留（任意长度皆可提交）；
         - 未终结的 tool 参数流丢弃（无配对结果的 tool_use 不产生）；
         - stop_reason="interrupted"（截断审计）；
-        - 瞬态 journal 清空（内容已由 Message 承载）；
+        - 未提交投影失效（accumulator 置空，内容已由 Message 承载）；
         - InterruptedEvent 落盘于 partial Message 之后（链序）。
         """
         session = runtime.create_session()
@@ -300,8 +301,8 @@ class TestInterruptDuringStreaming:
         # 下轮请求结构合法（无悬空 tool_calls）
         _assert_well_formed(chain)
 
-        # journal 已清空
-        assert len(agent._sink.journal) == 0
+        # 未提交投影失效：补提交后当前 accumulator 置空（内容已进 messages）
+        assert agent._loop.current_acc is None
 
         # InterruptedEvent 落盘在 partial Message 之后（链序）
         from wing.event import InterruptedEvent

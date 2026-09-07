@@ -298,17 +298,29 @@ class WingRuntime:
         """
         session = self._require_session(session_id)
         cm = session.agent.context_manager
+        agent = session.agent
 
         draft = cm.rewind(target_uuid)
         self._emit_context_stats(session)
 
         from wing.event import serialize_event
 
+        turn_started_at = (
+            agent.turn_started_at.isoformat() if agent.turn_started_at else None
+        )
         self._emit_session_event(
             SyncSessionEvent(
                 session_id=session.session_id,
-                messages=[msg.model_dump() for msg in cm.get_context_window()],
-                events=[serialize_event(e) for e in cm.get_active_events()],
+                messages=session.serialize_messages(),
+                uncommitted=agent.uncommitted_message(),
+                uncommitted_tools=agent.uncommitted_tools(),
+                events=[
+                    serialize_event(e)
+                    for e in cm.get_active_events(
+                        pending_ask_ids=agent.pending_ask_ids()
+                    )
+                ],
+                turn_started_at=turn_started_at,
                 agent=None,
                 draft=draft,
             )
@@ -531,9 +543,12 @@ class WingRuntime:
     ) -> None:
         """向指定 client 推送 SyncSessionEvent + SessionInitEvent + ContextStatsEvent。
 
-        SyncSession 携带三组重放素材：messages（Message 投影）、events
-        （活跃链事件节点，按链序）、in_flight（journal 合成包）——中途
-        订阅者据此获得与从始至终订阅一致的完整视图。
+        SyncSession 携带四组重放素材：messages（已提交 Message 投影）、
+        uncommitted（单个未提交 assistant Message 投影）、uncommitted_tools
+        （未终结 tool 调用的原始 args 片段）、events（活跃链事实事件，按链序）
+        ——中途订阅者据此获得与从始至终订阅一致的完整视图，组装顺序为
+        messages → uncommitted → uncommitted_tools → events。turn_started_at
+        供前端恢复 working 已耗时。
         """
         client_target = EventTarget(scope="client", client_ids=[client_id])
         from wing.event import serialize_event
@@ -541,12 +556,22 @@ class WingRuntime:
         cm = session.context_manager
         agent = session.agent
 
+        turn_started_at = (
+            agent.turn_started_at.isoformat() if agent.turn_started_at else None
+        )
         event_bus.emit(
             SyncSessionEvent(
                 session_id=session.session_id,
                 messages=session.serialize_messages(),
-                events=[serialize_event(e) for e in cm.get_active_events()],
-                in_flight=[serialize_event(e) for e in agent.sink.journal.snapshot()],
+                uncommitted=agent.uncommitted_message(),
+                uncommitted_tools=agent.uncommitted_tools(),
+                events=[
+                    serialize_event(e)
+                    for e in cm.get_active_events(
+                        pending_ask_ids=agent.pending_ask_ids()
+                    )
+                ],
+                turn_started_at=turn_started_at,
                 agent=session.to_agent_info(),
                 name=session.session_name,
                 draft=draft,

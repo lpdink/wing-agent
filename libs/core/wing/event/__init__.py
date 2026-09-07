@@ -108,12 +108,48 @@ EVENT_TYPES: dict[str, type[WingEvent]] = {
 
 
 def serialize_event(event: WingEvent) -> dict:
-    """事件 → 传输/重放用的 dict（剥离传输路由元数据 target）。
+    """事件 → 传输/重放用的 dict（统一 wire 规则，`wire_dump` 的别名）。
 
-    持久化记录与 SyncSessionEvent.events / in_flight 共用此形状：
-    role="event" 记录级判别 + 事件自身字段。
+    保留此名以兼容既有调用方（runtime 的 SyncSession.events 组装）；
+    实现与直播帧共用 `wire_dump`，不存在两套序列化形状。
     """
-    return event.model_dump(exclude={"target"})
+    return wire_dump(event)
+
+
+# 事实事件集合：persist=true 且无 Message 孪生的"事实类"事件——resume 时
+# 下发给前端重放（ContextManager.get_active_events 据此过滤）。与 persist
+# 标记同处一文件，过滤策略单点。存量日志里已写入的孪生记录
+# （tool_call_result / llm_call_metrics）不在此集合：加载进链但不下发。
+# 终态（follow-up）：待信号类事件的落盘取舍定完，FACT_EVENTS 与 persist=true
+# 集合重合，下发过滤即消失。本次不宣称达到终态，只把策略从两端收敛到后端单点。
+FACT_EVENTS: frozenset[str] = frozenset(
+    {
+        "diff_content",
+        "ask",
+        "interrupted",
+        "error",
+        "compact_done",
+    }
+)
+
+# wire 帧 / SyncSession 载荷剥除的存储专用字段：parent_uuid / unzip_last_uuid
+# 是链拓扑（仅磁盘记录需要），role 是记录级判别（恒为 "event"，无信息），
+# target 是 EventBus 注入的传输路由元数据（gateway 消费后不进帧）。
+# uuid 保留——AssistantTurnEvent / TurnResultEvent 的 uuid 被 stdio 前端消费。
+_WIRE_EXCLUDE: set[str] = {"target", "parent_uuid", "unzip_last_uuid", "role"}
+
+
+def wire_dump(event: WingEvent) -> dict:
+    """事件 → WS 直播帧 / SyncSession 载荷的统一 wire dict。
+
+    剥除存储专用字段（`_WIRE_EXCLUDE`）与值为 null 的字段；保留 uuid。
+    直播帧（gateway server / ws）、SyncSession.events、SyncSession.uncommitted
+    共用此规则——消除各调用点分散的 `model_dump_json`。事件无 wrap 序列化器，
+    `model_dump(mode="json", exclude=...)` 后字典过滤 null 即可（与 Message 的
+    存储边界不同，见 TrackedList._to_record）。
+    """
+    data = event.model_dump(mode="json", exclude=_WIRE_EXCLUDE)
+    return {k: v for k, v in data.items() if v is not None}
 
 
 __all__ = [
@@ -155,5 +191,7 @@ __all__ = [
     "WingEventUnion",
     # registry + serializer
     "EVENT_TYPES",
+    "FACT_EVENTS",
     "serialize_event",
+    "wire_dump",
 ]

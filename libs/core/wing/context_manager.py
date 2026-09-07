@@ -704,7 +704,8 @@ More detail in: "{dir}/SKILL.md" """
 
         事件与 Message 同链：uuid/parent_uuid 由 TrackedList 填充，
         记录级判别靠 role="event"。调用方（AgentEventSink / runtime）负责
-        仅对 persist=true 的事件调用本方法——瞬态事件走 EventJournal。
+        仅对 persist=true 的事件调用本方法——persist=false 的瞬态事件只
+        广播、不落盘、不缓冲。
         """
         self._messages.append(event)
 
@@ -731,14 +732,34 @@ More detail in: "{dir}/SKILL.md" """
         """
         return [m for m in self._messages.active_chain if isinstance(m, Message)]
 
-    def get_active_events(self) -> list["WingEvent"]:
-        """返回活跃链上的事件节点（按链序）——前端重放的 events 视图。
+    def get_active_events(
+        self, pending_ask_ids: set[str] | None = None
+    ) -> list["WingEvent"]:
+        """返回活跃链上**可下发**的事实事件节点（按链序）——前端重放视图。
+
+        过滤策略归属后端单点（前端只做能力分发，不编码"某类不得渲染"）：
+        - 仅事实类事件（`FACT_EVENTS`，与 persist 标记同处一文件）下发；
+          存量日志里已写入的孪生记录（tool_call_result / llm_call_metrics）
+          能加载进链但不在集合中，自然不下发（零迁移，前向容忍）；
+        - `AskEvent` 额外按 `pending_ask_ids` 过滤——只下发**仍挂起**的提问
+          （已答/已失效的 ask 重放会渲染出活的 Ask 卡，用户回答进虚空）。
+          pending_ask_ids 为 None 时不下发任何 ask（调用方未提供待答集合）。
 
         被压缩/回退区间的事件不在活跃链上，自然不发射（无需孤儿处理）。
         """
-        from wing.event import WingEvent
+        from wing.event import FACT_EVENTS, AskEvent, WingEvent
 
-        return [e for e in self._messages.active_chain if isinstance(e, WingEvent)]
+        result: list[WingEvent] = []
+        for e in self._messages.active_chain:
+            if not isinstance(e, WingEvent):
+                continue
+            if e.type not in FACT_EVENTS:
+                continue
+            if isinstance(e, AskEvent):
+                if pending_ask_ids is None or e.tool_call_id not in pending_ask_ids:
+                    continue
+            result.append(e)
+        return result
 
     def get_context_stats(self) -> tuple[int, int]:
         """获取上下文统计信息：消息数量和 token 数（事件节点不计）。

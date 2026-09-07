@@ -28,14 +28,15 @@
 | 概念 | 说明 |
 |------|------|
 | **混合日志** | history.jsonl 单一事实来源：Message 记录（role ∈ user/assistant/tool/system，进 LLM 上下文）+ 事件记录（`role="event"`，含事件自身字段），共享链拓扑。记录级判别只用 role。 |
-| **两次 commit** | 流式 delta commit 到 RAM（EventJournal 合成缓冲）；最终事件/Message commit 到磁盘。Gateway 几乎不崩溃，in-flight 不落盘（20/80）。 |
-| **EventJournal** | 当前 turn 瞬态事件的内存缓冲（`agent/event_journal.py`）：直播逐包产出、journal 多包合成一包（相邻同类合并、ToolCallStream 按 tool_call_id 拼接）；轮边界/收口清空；snapshot 供中途订阅重放。 |
-| **persist 分流** | `WingEvent.persist` 默认 true（完整产生即落盘进链）；false 仅限流式 delta、Message 孪生体积事件、可实时重建的协议/查询事件。 |
-| **中断补提交** | 流式期间打断：accumulator 快照部分块（text/thinking 保留、未终结 tool 块剔除）→ partial Message（`stop_reason="interrupted"`）提交 → re-raise。用户可放心打断长思考。 |
-| **accumulator 协议** | `generate(..., accumulator=)` caller 注入容器，provider 每次尝试填充新状态；取消后 `snapshot_blocks()` 取已累积内容。 |
-| **stop_reason** | provider 捕获协议原值（end_turn/max_tokens/tool_use/stop/length）→ Message.stop_reason + LLMCallMetricsEvent（落盘截断审计）。 |
+| **未提交投影（uncommitted）** | turn 进行中"已生成未提交"内容的唯一权威 = caller 持有的 provider accumulator（`ReActLoop._current_acc`，一轮生命周期）。两个覆盖互斥的投影按需快照：`snapshot_blocks()`（已终结块——中断补提交与 resume 同源）+ `pending_tool_calls()`（未终结调用原始 args，后端不解析）。取代旧的内存事件缓冲。 |
+| **落盘只存事实** | `persist=true` 事实事件（diff/ask/interrupted/error/compact_done）即时落盘；流式 delta（persist=false）纯广播、不落盘不缓冲（内容由轮提交的 Message 承载）。孪生事件（tool_call_result/llm_call_metrics）停止落盘；turn_result 落盘但 result 字段经 disk_exclude 排除。 |
+| **persist 分流** | `WingEvent.persist` 是 `ClassVar[bool]`（非 pydantic 字段——旧 `Field(exclude=True)` 会被子类重声明击穿），基类默认 true。判据：**是事实** 且 **无 Message 孪生**。false 仅限流式 delta、Message 孪生体积事件、可实时重建的协议/查询事件。 |
+| **中断补提交** | 流式期间打断：accumulator 快照部分块（text/thinking 保留、未终结 tool 块剔除）→ partial Message（`stop_reason="interrupted"`）提交 → re-raise，当前 accumulator 置空。用户可放心打断长思考。 |
+| **accumulator 协议** | `generate(..., accumulator=)` caller 注入容器，provider 每次尝试填充新状态；取消后 `snapshot_blocks()` 取已终结块、`pending_tool_calls()` 取未终结调用。 |
+| **stop_reason** | provider 捕获协议原值（end_turn/max_tokens/tool_use/stop/length）→ **`Message.stop_reason` 是唯一落盘审计位置**；LLMCallMetricsEvent.stop_reason 仅用于直播（persist=false）。 |
 | **事件链锚定** | rewind/fork/compact 凭链序免费工作：事件是链节点，set_tip/fork 拷贝/压缩边界自然裁剪事件可见性。 |
-| **中途订阅视图** | SyncSessionEvent 携带 messages + events（活跃链事件）+ in_flight（journal 合成包）；前端按 messages+events → in_flight → live 组装，与从始至终订阅等价。 |
+| **中途订阅视图** | SyncSessionEvent 携带四组素材：messages（已提交投影）+ uncommitted（单个未提交 assistant Message 投影）+ uncommitted_tools（未终结调用原始 args）+ events（活跃链**事实**事件），外加 turn_started_at。前端按 **messages → uncommitted → uncommitted_tools → events → live** 组装（uncommitted 走 replay_messages、uncommitted_tools 走 live ToolCallStream 分支），diff 锚点结构性先于 diff 存在。 |
+| **事实事件下发过滤** | 后端单点策略：`get_active_events()` 按 `FACT_EVENTS`（与 persist 标记同处 `event/__init__.py`）过滤，ask 额外按 `pending_ask_ids()`（inbox feedback waiters）过滤。前端只做能力分发（有渲染器则渲染），不编码"孪生不得渲染"策略。存量孪生记录加载进链但不下发（零迁移）。 |
 
 ## 上下文与压缩
 

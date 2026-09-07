@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from pydantic.errors import PydanticUserError
 
 from wing.common.tracked_list import TrackedList
-from wing.event import DiffContentEvent, LLMCallMetricsEvent
+from wing.event import DiffContentEvent
 from wing.store import FileMessageLog
 from wing.schema import ChainNode, Message
 
@@ -78,7 +78,8 @@ class TestAppendExtend:
         entries = _read_history(tmp_dir)
         assert len(entries) == 1
         assert entries[0]["uuid"] == msg.uuid
-        assert entries[0]["parent_uuid"] is None
+        # null 字段在存储边界被剥除（parent_uuid 为 None → 键不存在）
+        assert "parent_uuid" not in entries[0]
         assert entries[0]["role"] == "user"
         assert entries[0]["content"] == "hello"
         assert "ts" in entries[0]
@@ -192,10 +193,14 @@ class TestAppendDetached:
         msg = Message(role="user", content="hello", uuid=None, parent_uuid=None)
         tl.append_detached(msg)
 
+        # 内存对象保留 None（不自动填充）
+        assert msg.uuid is None
+        assert msg.parent_uuid is None
+        # 存储记录剥除 null 键（uuid / parent_uuid 为 None → 键不存在）
         entries = _read_history(tmp_dir)
         assert len(entries) == 1
-        assert entries[0]["uuid"] is None
-        assert entries[0]["parent_uuid"] is None
+        assert "uuid" not in entries[0]
+        assert "parent_uuid" not in entries[0]
 
     def test_append_detached_no_snapshot(self, tmp_dir):
         """append_detached 不产生快照文件。"""
@@ -880,28 +885,77 @@ class TestMixedChain:
         assert len(tl2.active_chain) == 1
         assert tl2.active_chain[0].content == "hi"
 
-    def test_event_metrics_persist_shape(self, tmp_dir):
-        """LLMCallMetricsEvent 落盘形状：usage 数值字段 + stop_reason 审计。"""
+    def test_persist_shrink_and_turn_result_disk_exclude(self, tmp_dir):
+        """落盘集合收缩 + turn_result.result 字段级排除（经 sink 分流到存储边界）。
+
+        - llm_call_metrics / tool_call_result：persist=False → 不落盘
+          （孪生：截断审计由 Message.usage + Message.stop_reason 承载，工具结果
+          由 role="tool" 的 Message 承载）；事件本身仍广播（走 event_bus）。
+        - turn_result：persist=True 落盘，但 result 字段被 disk_exclude 剥离
+          （最终 assistant 文本的孪生）；duration_ms / num_turns / usage /
+          errors / subtype 保留——别处没有的审计字段。
+        """
+        from wing.agent.event_sink import AgentEventSink
+        from wing.event_bus import event_bus
+        from wing.schema import LLMUsage, ToolCall
+
+        event_bus._subscribers.clear()
         tl: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir))
-        tl.append(Message(role="user", content="hi"))
-        tl.append(
-            LLMCallMetricsEvent(
-                prompt_tokens=100,
-                completion_tokens=50,
-                cached_tokens=10,
-                first_chunk_rt_ms=123.0,
-                tokens_per_sec=42.0,
-                stop_reason="max_tokens",
+        sink = AgentEventSink(session_id="s", append_event=tl.append)
+        try:
+            sink.llm_metrics(
+                LLMUsage(
+                    prompt_tokens=100,
+                    completion_tokens=50,
+                    cached_tokens=10,
+                    first_chunk_rt_ms=123.0,
+                    tokens_per_sec=42.0,
+                    stop_reason="max_tokens",
+                )
             )
-        )
+            sink.tool_finished(
+                ToolCall(id="tc", name="Bash", arguments={}),
+                result="ok",
+                success=True,
+                model="m",
+            )
+            sink.turn_result(
+                subtype="success",
+                result="final assistant text",
+                num_turns=2,
+                duration_ms=999,
+                usage={"input_tokens": 10, "output_tokens": 5},
+            )
+        finally:
+            event_bus._subscribers.clear()
 
         records = _read_history(tmp_dir)
-        ev = records[1]
-        assert ev["type"] == "llm_call_metrics"
-        assert ev["stop_reason"] == "max_tokens"
-        assert ev["prompt_tokens"] == 100
+        types = [r.get("type") for r in records]
+        # 孪生事件不落盘
+        assert "llm_call_metrics" not in types
+        assert "tool_call_result" not in types
+        assert "tool_result_turn" not in types
+        # turn_result 落盘但不含 result（disk_exclude），审计字段保留
+        (tr,) = [r for r in records if r.get("type") == "turn_result"]
+        assert "result" not in tr
+        assert tr["subtype"] == "success"
+        assert tr["num_turns"] == 2
+        assert tr["duration_ms"] == 999
+        assert tr["usage"] == {"input_tokens": 10, "output_tokens": 5}
 
-        tl2 = TrackedList.load(FileMessageLog(tmp_dir), Message)
-        restored = [x for x in tl2.active_chain if not isinstance(x, Message)]
-        assert len(restored) == 1
-        assert restored[0].stop_reason == "max_tokens"
+    def test_turn_result_wire_frame_keeps_result(self, tmp_dir):
+        """对照：turn_result 的 wire 帧仍携带 result（stdio 前端消费）。
+
+        disk_exclude 只作用于存储记录，不影响直播/重放帧。
+        """
+        from wing.event import TurnResultEvent, wire_dump
+
+        ev = TurnResultEvent(result="final text", num_turns=1, duration_ms=10)
+        frame = wire_dump(ev)
+        assert frame["result"] == "final text"
+        # wire 帧剥除存储专用字段
+        assert "parent_uuid" not in frame
+        assert "unzip_last_uuid" not in frame
+        assert "role" not in frame
+        assert "persist" not in frame
+        assert frame["uuid"]  # uuid 保留

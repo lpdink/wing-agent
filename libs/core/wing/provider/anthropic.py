@@ -21,6 +21,7 @@ from wing.common.logger import log
 from wing.common.with_retry import with_retry
 from wing.provider.base import (
     ModelProvider,
+    PendingToolView,
     StreamAccumulator,
     parse_tool_args,
 )
@@ -148,6 +149,32 @@ class AnthropicProvider(ModelProvider):
                 continue  # 未终结的 tool 块：半截，剔除
             blocks.append(state.blocks_by_index[idx])
         return blocks
+
+    def pending_tool_calls(
+        self, accumulator: StreamAccumulator | None
+    ) -> list[PendingToolView]:
+        """未终结 tool 调用投影——数据源 `state.pending_tools`。
+
+        与 `_ordered_finalized_blocks` 共用同一状态且判定互斥：凡 index 仍在
+        `pending_tools` 中的块即未终结（snapshot 跳过它们），这里恰恰取出它们。
+        `args_fragment` 搬运原始 args 文本累积（`args_buffer`），后端不解析。
+        """
+        state = accumulator.state if accumulator is not None else None
+        if not isinstance(state, _StreamState):
+            return []
+        views: list[PendingToolView] = []
+        for idx in sorted(state.pending_tools):
+            call = state.pending_tools[idx]
+            if not call.id:
+                continue  # 尚无 id 的半截调用无法锚定，跳过
+            views.append(
+                PendingToolView(
+                    tool_call_id=call.id,
+                    tool_name=call.name,
+                    args_fragment=call.args_buffer,
+                )
+            )
+        return views
 
     async def list_models(self) -> list[str]:
         if self._config.models:

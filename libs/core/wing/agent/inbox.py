@@ -85,6 +85,15 @@ class Inbox:
         """是否有工具在等待用户反馈。"""
         return bool(self._feedback_waiters)
 
+    def pending_ask_ids(self) -> set[str]:
+        """仍然挂起的 ask 的 tool_call_id 集合（权威待答集合）。
+
+        `_feedback_waiters` 的键集合即"仍在等待回答"的 ask——resume 重放
+        据此过滤链上的 AskEvent，只下发仍挂起的提问。已答（unregister_waiter）
+        或已失效（cancel_all_waiters）的 ask 自然不在集合中。
+        """
+        return set(self._feedback_waiters.keys())
+
     def register_waiter(self, tool_call_id: str) -> asyncio.Future[str]:
         """注册 feedback waiter，返回 Future 供工具 await。"""
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()

@@ -15,6 +15,7 @@ FastAPI app 创建和路由注册在 app.py 中完成（App Factory 模式）。
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 import sys
 from datetime import datetime, timezone
@@ -24,7 +25,7 @@ import uvicorn
 
 from wing.common.logger import log
 from wing.config import AuthConfig, load_config
-from wing.event import WingEvent
+from wing.event import WingEvent, wire_dump
 from wing.event_bus import event_bus
 from wing.runtime import WingRuntime
 
@@ -131,10 +132,16 @@ class GatewayServer:
         同步回调，内部 asyncio.create_task 调度异步 send。
         tool_runtime（纯工具执行远端）不接收事件——global 广播与 client
         定向都跳过它，闭合"不参与事件订阅"的边界。
+
+        帧内容在 create_task 之前 eager 序列化定型（统一 wire 出口
+        `wire_dump`）：保证送达顺序等于发射顺序，且不依赖任何延迟序列化
+        的时序（事件对象广播后不再被改写）。每个事件只序列化一次。
         """
         target = event.target
         if target is None:
             return
+
+        payload = json.dumps(wire_dump(event))
 
         if target.scope == "global":
             # 发给所有 ws（跳过不收事件的 tool host）
@@ -142,9 +149,7 @@ class GatewayServer:
                 if not self._receives_events(cid):
                     continue
                 try:
-                    asyncio.get_running_loop().create_task(
-                        self._send_text(ws, event.model_dump_json())
-                    )
+                    asyncio.get_running_loop().create_task(self._send_text(ws, payload))
                 except RuntimeError:
                     pass
 
@@ -155,7 +160,7 @@ class GatewayServer:
                 if ws is not None and self._receives_events(cid):
                     try:
                         asyncio.get_running_loop().create_task(
-                            self._send_text(ws, event.model_dump_json())
+                            self._send_text(ws, payload)
                         )
                     except RuntimeError:
                         pass

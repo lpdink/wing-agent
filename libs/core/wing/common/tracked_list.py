@@ -93,13 +93,29 @@ class TrackedList(Generic[T]):
 
     @staticmethod
     def _to_record(item: T) -> dict[str, Any]:
-        """序列化为存储记录（model_dump + 剥离 target + ts）。
+        """序列化为存储记录（model_dump + 剥离无信息字段 + ts）。
 
-        target 是 EventBus 注入的传输路由元数据，不属于事实记录。
-        Message 无该字段，pop 为 NOP。
+        剥离三类：
+        - `target`：EventBus 注入的传输路由元数据，不属于事实记录
+          （Message 无该字段，pop 为 NOP）；
+        - `disk_exclude` 列出的字段（事件 ClassVar）：只服务直播、落盘即孪生
+          （如 TurnResultEvent.result）——wire 帧仍携带，仅磁盘记录剥离；
+        - 值为 null 的字段：**字典推导剥除**，MUST NOT 用
+          `model_dump(exclude_none=True)`——`Message._serialize_flat` 是
+          `mode="wrap"` 序列化器，content / reasoning_content / tool_calls 在
+          内层 handler 跑完之后才注入 dict，exclude_none 看不到它们。
+
+        链拓扑与记录判别字段（role / uuid / parent_uuid / unzip_last_uuid）
+        在非 null 时保留。加载路径对"键缺失"与"值为 null"一视同仁
+        （TrackedList.load 用 record.get，Message._route_flat 用 pop(...,None)）。
         """
         entry = item.model_dump(mode="json")
         entry.pop("target", None)
+        disk_exclude = getattr(item, "disk_exclude", None)
+        if disk_exclude:
+            for key in disk_exclude:
+                entry.pop(key, None)
+        entry = {k: v for k, v in entry.items() if v is not None}
         entry["ts"] = datetime.now().isoformat()
         return entry
 

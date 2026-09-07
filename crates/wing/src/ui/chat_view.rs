@@ -725,6 +725,31 @@ impl ChatView {
         }
     }
 
+    /// On resume, anchor the elapsed timer of still-running Bash cards.
+    ///
+    /// A mid-execution Bash tool replays from the uncommitted Message
+    /// projection as a Pending cell with no `started_at` (the live ToolCall
+    /// event that would set it never arrives for a late subscriber). Set it to
+    /// the turn-start instant so the card shows elapsed time and keeps
+    /// advancing (via `tick_bash_timers`) instead of showing nothing. Cells
+    /// that already have a timer, or that already finished (Success/Failed),
+    /// are left untouched.
+    pub fn mark_pending_bash_running(&mut self, started_at: std::time::Instant) {
+        for cached in &mut self.cells {
+            if let ChatCell::ToolCall(block) = cached.cell()
+                && block.tool_name == TOOL_BASH
+                && block.status == ToolStatus::Pending
+                && block.started_at.is_none()
+            {
+                cached.mutate(|cell| {
+                    if let ChatCell::ToolCall(block) = cell {
+                        block.started_at = Some(started_at);
+                    }
+                });
+            }
+        }
+    }
+
     /// Replace a cell at the given index with a new cell (e.g., ToolCallBlock → TodoMessage).
     ///
     /// Used during replay when a tool result requires a different cell type.

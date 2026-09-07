@@ -9,12 +9,28 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, AsyncIterator
 
 from wing.schema import LLMResponse, Message, Tool
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
+
+
+@dataclass(frozen=True)
+class PendingToolView:
+    """未终结 tool call 的渲染投影（活工具卡素材）。
+
+    `args_fragment` 是模型吐出的**原始参数文本**累积——后端 MUST NOT 对其
+    做任何 JSON 解析（含 partial parse）；局部解析职责在客户端
+    （`util/partial_json.rs`）。与 `snapshot_blocks()` 覆盖互斥：已终结块进
+    snapshot，未终结调用进本投影。
+    """
+
+    tool_call_id: str
+    tool_name: str
+    args_fragment: str
 
 
 def parse_tool_args(raw: str) -> tuple[dict, str | None]:
@@ -121,6 +137,17 @@ class ModelProvider(ABC):
         基类默认返回 None（无状态可取）。
         """
         return None
+
+    def pending_tool_calls(
+        self, accumulator: "StreamAccumulator | None"
+    ) -> list[PendingToolView]:
+        """从累积状态提取**未终结**的 tool 调用（活工具卡渲染投影）。
+
+        与 `snapshot_blocks()` 覆盖互斥：snapshot 只含已终结块（未终结 tool
+        块被丢弃），本投影补齐那部分——携带原始 args 文本累积，后端不解析。
+        用于中途订阅者看到带半截参数的活工具卡。基类默认返回空列表。
+        """
+        return []
 
     async def aclose(self) -> None:
         """释放 provider 持有的资源。

@@ -13,7 +13,12 @@ import httpx
 from wing.common.logger import log
 from wing.common.with_retry import with_retry
 from wing.config import get_headers
-from wing.provider.base import ModelProvider, StreamAccumulator, parse_tool_args
+from wing.provider.base import (
+    ModelProvider,
+    PendingToolView,
+    StreamAccumulator,
+    parse_tool_args,
+)
 from wing.provider.errors import raise_with_body
 from wing.provider.http import make_http_timeout
 from wing.provider.sse import parse_json_event, parse_sse_stream
@@ -132,6 +137,32 @@ class OpenAICompatProvider(ModelProvider):
             "".join(state.content_chunks) or None,
             state.final_tool_calls,
         )
+
+    def pending_tool_calls(
+        self, accumulator: StreamAccumulator | None
+    ) -> list[PendingToolView]:
+        """未终结 tool 调用投影——数据源 `state.pending`。
+
+        与 `snapshot_blocks` 判定互斥：snapshot 只取 `final_tool_calls`
+        （finish_reason=tool_calls 时解析入列并 clear pending），仍在 `pending`
+        中的即未终结调用。`args_fragment` 搬运原始 args 文本累积，后端不解析。
+        """
+        state = accumulator.state if accumulator is not None else None
+        if not isinstance(state, _OAIStreamState):
+            return []
+        views: list[PendingToolView] = []
+        for idx in sorted(state.pending):
+            call = state.pending[idx]
+            if not call.id:
+                continue  # 尚无 id 的半截调用无法锚定，跳过
+            views.append(
+                PendingToolView(
+                    tool_call_id=call.id,
+                    tool_name=call.name,
+                    args_fragment=call.args_buffer,
+                )
+            )
+        return views
 
     async def list_models(self) -> list[str]:
         if self._config.models:

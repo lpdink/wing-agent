@@ -26,7 +26,7 @@ from .tool_executor import InterruptedToolResults, ToolExecutor
 
 if TYPE_CHECKING:
     from wing.context_manager import ContextManager
-    from wing.provider.base import ModelProvider
+    from wing.provider.base import ModelProvider, StreamAccumulator
     from wing.schema import Tool
 
 
@@ -94,6 +94,16 @@ class ReActLoop:
         # 运行时可变配置（由 WingAgent 设置）
         self.max_turns: int | None = None
         self.steer: bool = get_config().steer
+        # 当前一轮 LLM 调用的流累积状态（未提交内容的唯一权威）。
+        # _call_llm 入口新建并登记，轮提交/中断补提交/turn 收口后置空。
+        # 未提交投影（uncommitted_message / uncommitted_tools）按需快照它，
+        # 不缓存副本。
+        self._current_acc: "StreamAccumulator | None" = None
+
+    @property
+    def current_acc(self) -> "StreamAccumulator | None":
+        """当前一轮 LLM 调用的流累积状态（None 表示无进行中轮次）。"""
+        return self._current_acc
 
     async def run_turn(self) -> None:
         """处理一个 turn：drain inbox → merge → ReAct loop → TurnResult/Done。
@@ -183,9 +193,10 @@ class ReActLoop:
             self._sink.error(f"处理消息失败：异常：{error_detail}")
             self._sink.done()
         finally:
-            # 兜底清空瞬态缓冲（错误/取消路径轮边界未触达时；
-            # 正常路径轮边界已清，此处幂等）
-            self._sink.clear_journal()
+            # 兜底置空当前 accumulator（错误/取消路径轮边界未触达时；
+            # 正常路径轮边界已置空，此处幂等）。未提交投影随之失效——
+            # turn 收口后不再有"进行中内容"。
+            self._current_acc = None
             if self._set_working:
                 self._set_working(False)
             reset_request_context(token)
@@ -246,10 +257,10 @@ class ReActLoop:
         turn_messages = [assistant_msg] + tc_results
         self._cm.add_messages(turn_messages)
 
-        # 轮边界：瞬态事件内容已由 Message 记录承载，清空 RAM journal。
-        # （多轮 turn 中途订阅者会看到「已提交 Message + journal 快照」，
-        # 不清空则同一内容双重渲染。）
-        self._sink.clear_journal()
+        # 轮边界：本轮内容已提交进链（assistant Message + tool 结果），
+        # 当前 accumulator 置空——未提交投影失效，避免中途订阅者把已提交
+        # 内容经投影再渲染一次（多轮 turn 的双重渲染）。
+        self._current_acc = None
 
         # Emit context stats
         count, tokens = self._cm.get_context_stats()
@@ -290,7 +301,10 @@ class ReActLoop:
         """
         content_blocks: list[ContentBlock] | None = None
         last_usage: LLMUsage | None = None
+        # accumulator 上提为 turn 级持有（self._current_acc）——未提交投影
+        # （resume）与中断补提交按需快照同一个对象，不再是 _call_llm 局部变量。
         accumulator = provider.create_accumulator()
+        self._current_acc = accumulator
 
         try:
             async for chunk in provider.generate(
@@ -323,7 +337,8 @@ class ReActLoop:
                     last_usage = chunk.usage
                     self._sink.llm_metrics(chunk.usage)
         except asyncio.CancelledError:
-            partial_blocks = provider.snapshot_blocks(accumulator)
+            # 中断补提交：快照当前 accumulator（与 resume 未提交投影同源）。
+            partial_blocks = provider.snapshot_blocks(self._current_acc)
             if partial_blocks:
                 partial_msg = Message(
                     role="assistant",
@@ -332,8 +347,8 @@ class ReActLoop:
                     stop_reason="interrupted",
                 )
                 self._cm.add_message(partial_msg)
-                # 补提交完成：瞬态 delta 内容已由 partial Message 承载
-                self._sink.clear_journal()
+                # 补提交完成：内容已进链，未提交投影失效（不再双重渲染）。
+                self._current_acc = None
             raise
 
         if content_blocks is None:
