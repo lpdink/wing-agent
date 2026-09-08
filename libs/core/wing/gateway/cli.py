@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from wing.common.logger import setup_logger
 from wing.config import get_config
 from wing.magic_command import register_prompt_commands
 
@@ -47,6 +48,11 @@ def main() -> None:
 
     # 加载配置
     config = get_config()
+
+    # 初始化日志（控制台级别来自 config；文件日志见 common/logger.py 策略）。
+    # 库代码 import 时不再有日志副作用，网关进程在此显式挂载 handler。
+    setup_logger(level=config.log.level)
+
     register_prompt_commands(config.commands.paths)
 
     # CLI args override config; config provides defaults
