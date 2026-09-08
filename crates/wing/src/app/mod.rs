@@ -2259,7 +2259,7 @@ pub async fn run_app(
                             retry_attempt += 1;
                             retry_at = std::time::Instant::now() + backoff(retry_attempt);
                             tracing::warn!(
-                                "reconnect attempt {retry_attempt} failed: {e}"
+                                "reconnect attempt {retry_attempt} failed: {e:#}"
                             );
                         }
                     }
@@ -2291,7 +2291,7 @@ pub async fn run_app(
                             retry_attempt += 1;
                             retry_at = std::time::Instant::now() + backoff(retry_attempt);
                             tracing::warn!(
-                                "session recovery attempt {retry_attempt} failed: {e}"
+                                "session recovery attempt {retry_attempt} failed: {e:#}"
                             );
                         }
                     }
