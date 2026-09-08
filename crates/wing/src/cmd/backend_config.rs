@@ -5,7 +5,7 @@
 //! gateway host:port. The Rust frontend reads these values instead
 //! of maintaining its own duplicate config.
 //!
-//! Also provides `tui_home()` and `wing_root()` path helpers used
+//! Also provides `wing_root()` and `core_logs_dir()` path helpers used
 //! across the CLI for log files, venv discovery, etc.
 
 use std::path::PathBuf;
@@ -77,17 +77,13 @@ pub fn wing_root() -> PathBuf {
         .join(".wing")
 }
 
-/// Path to the TUI data directory: `~/.wing/tui/`.
+/// Path to the backend log directory: `~/.wing/core/logs/`.
 ///
-/// Used for TUI logs and config.
-pub fn tui_home() -> PathBuf {
-    if let Ok(home) = std::env::var("WING_HOME") {
-        return PathBuf::from(home).join("tui");
-    }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".wing")
-        .join("tui")
+/// Backend-owned logs live here: daily runtime logs (`wing_YYYY-MM-DD.log`,
+/// written by the gateway) and `gateway.log` (daemon stdout/stderr,
+/// appended by `wing start`).
+pub fn core_logs_dir() -> PathBuf {
+    wing_root().join("core").join("logs")
 }
 
 /// Read gateway settings from the backend config file.

@@ -152,7 +152,9 @@ tool_result_truncate:
 
 # ── Logging ──────────────────────────────────────────────────
 log:
-  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL.
+  # Gateway console log level (stdout/stderr of the daemon; the daemon's
+  # output is captured in ~/.wing/core/logs/gateway.log).
+  # The daily file log (~/.wing/core/logs/wing_YYYY-MM-DD.log) is always DEBUG.
   level: WARNING
 
 # ── Gateway ──────────────────────────────────────────────────

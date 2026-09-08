@@ -1,11 +1,34 @@
 """
-Logging module for OpenWing.
+Logging for the wing backend.
+
+Policy (kept in sync with the TUI frontend, see AGENTS.md "Logging"):
+
+- One file per **local** calendar day: ``wing_YYYY-MM-DD.log`` under
+  ``$WING_HOME/core/logs/`` (default ``~/.wing/core/logs/``), opened in
+  append mode so gateway restarts never truncate or fork the log.
+- The ``new.log`` symlink in that directory always points at the active
+  daily file (refreshed on every rotation and on every setup).
+- Files older than ``RETENTION_DAYS`` days are pruned on setup and rotation.
+- **No import side effects**: importing ``wing`` never touches the
+  filesystem — file/console handlers attach only via :func:`setup_logger`,
+  called explicitly by the gateway CLI entry point.
 """
 
+from __future__ import annotations
+
 import logging
+import re
 import sys
-from datetime import datetime
+from collections.abc import Callable
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import IO
+
+_LOGGER_NAME = "wing"
+RETENTION_DAYS = 7
+
+# Current `wing_YYYY-MM-DD.log` and legacy per-process `wing_YYYY-MM-DD-HH-MM-SS.log`.
+_LOG_NAME_RE = re.compile(r"^wing_(\d{4}-\d{2}-\d{2})(?:-\d{2}-\d{2}-\d{2})?\.log$")
 
 # ANSI color codes
 _COLORS = {
@@ -15,8 +38,6 @@ _COLORS = {
     "ERROR": "\033[91m",
     "CRITICAL": "\033[91;1m",
 }
-
-_MAX_LOG_FILES = 7
 
 
 class _PathFormatter(logging.Formatter):
@@ -44,40 +65,106 @@ class _PathFormatter(logging.Formatter):
         return msg
 
 
-def _rotate_logs(log_dir: Path, current_log: Path) -> None:
-    """Maintain log files: keep newest 7, update new.log symlink."""
-    # Update symlink
-    symlink = log_dir / "new.log"
-    if symlink.exists() or symlink.is_symlink():
-        symlink.unlink()
-    try:
-        symlink.symlink_to(current_log.name)
-    except OSError:
-        pass  # Symlink creation failed, not critical
+def _daily_file(log_dir: Path, day: date) -> Path:
+    return log_dir / f"wing_{day:%Y-%m-%d}.log"
 
-    # Clean old logs
-    logs = sorted(
-        log_dir.glob("wing_*.log"), key=lambda p: p.stat().st_mtime, reverse=True
-    )
-    for old_log in logs[_MAX_LOG_FILES:]:
+
+def _update_new_symlink(log_dir: Path, target: Path) -> None:
+    """Point ``new.log`` at the active daily file (best-effort)."""
+    symlink = log_dir / "new.log"
+    try:
+        if symlink.is_symlink() or symlink.exists():
+            symlink.unlink()
+        symlink.symlink_to(target.name)
+    except OSError:
+        pass  # Symlink maintenance failed, not critical
+
+
+def _prune_old_logs(log_dir: Path, today: date) -> None:
+    """Delete daily log files older than the retention window."""
+    cutoff = today - timedelta(days=RETENTION_DAYS - 1)
+    for path in log_dir.glob("wing_*.log"):
+        match = _LOG_NAME_RE.match(path.name)
+        if match and date.fromisoformat(match.group(1)) < cutoff:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+class _DailyFileHandler(logging.Handler):
+    """Append-only daily log file named by local date.
+
+    The file is opened lazily on the first record (silent processes never
+    create empty files) and re-checked on every emit, so a long-running
+    gateway rolls at local midnight without a restart.
+    """
+
+    def __init__(
+        self, log_dir: Path, now: Callable[[], datetime] = datetime.now
+    ) -> None:
+        super().__init__()
+        self._log_dir = log_dir
+        self._now = now
+        self._day: date | None = None
+        self._stream: IO[str] | None = None
+
+    def emit(self, record: logging.LogRecord) -> None:
         try:
-            old_log.unlink()
-        except OSError:
-            pass
+            day = self._now().date()
+            if day != self._day:
+                self._rotate(day)
+            stream = self._stream
+            if stream is not None:
+                stream.write(self.format(record) + "\n")
+                stream.flush()
+        except Exception:  # noqa: BLE001 - logging must never raise
+            self.handleError(record)
+
+    def _rotate(self, day: date) -> None:
+        if self._stream is not None:
+            try:
+                self._stream.close()
+            except OSError:
+                pass
+            self._stream = None
+        self._log_dir.mkdir(parents=True, exist_ok=True)
+        target = _daily_file(self._log_dir, day)
+        self._stream = target.open("a", encoding="utf-8")
+        self._day = day
+        _update_new_symlink(self._log_dir, target)
+        _prune_old_logs(self._log_dir, day)
+
+    def close(self) -> None:
+        if self._stream is not None:
+            try:
+                self._stream.close()
+            except OSError:
+                pass
+            self._stream = None
+        super().close()
 
 
 def setup_logger(
-    level: str = "WARNING", path: str | Path | None = None
+    level: str = "WARNING",
+    log_dir: str | Path | None = None,
+    *,
+    now: Callable[[], datetime] = datetime.now,
 ) -> logging.Logger:
-    """Setup and return configured logger.
+    """Attach console + daily-file handlers to the ``wing`` logger.
+
+    Called explicitly by the gateway CLI; importing ``wing`` alone never
+    writes log files.
 
     Args:
-        level: Console log level, default WARNING.
-        path: Log directory, default ``$WING_HOME/core/logs``.
+        level: Console log level (stdout); the daily file always logs DEBUG.
+        log_dir: Log directory, default ``$WING_HOME/core/logs``.
+        now: Clock override for tests.
     """
-    logger = logging.getLogger("wing")
+    logger = logging.getLogger(_LOGGER_NAME)
     logger.handlers.clear()
     logger.setLevel(logging.DEBUG)  # Logger captures all, handlers filter
+    logger.propagate = False
 
     root = Path(__file__).parent.resolve()
 
@@ -87,30 +174,27 @@ def setup_logger(
     console.setFormatter(_PathFormatter(root, use_color=True))
     logger.addHandler(console)
 
-    # File handler - always DEBUG level
-    from wing.config import get_wing_home
+    # File handler - always DEBUG level, one file per local day
+    if log_dir is None:
+        from wing.config import get_wing_home
 
-    log_dir = Path(path).expanduser() if path else get_wing_home() / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+        log_dir = get_wing_home() / "logs"
+    log_dir = Path(log_dir).expanduser()
 
-    timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-    log_file = log_dir / f"wing_{timestamp}.log"
-
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler = _DailyFileHandler(log_dir, now=now)
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(_PathFormatter(root))
     logger.addHandler(file_handler)
 
-    # Force immediate write
-    def _force_flush() -> None:
-        if file_handler.stream is not None:
-            file_handler.stream.flush()
-
-    file_handler.flush = _force_flush  # ty: ignore
-
-    _rotate_logs(log_dir, log_file)
+    # Prune stale files at startup, even before the first record.
+    log_dir.mkdir(parents=True, exist_ok=True)
+    _prune_old_logs(log_dir, now().date())
 
     return logger
 
 
-log = setup_logger()
+# Library logger — inert (NullHandler, no propagation) until setup_logger()
+# is called by the gateway CLI. Importing wing never touches the filesystem.
+log = logging.getLogger(_LOGGER_NAME)
+log.addHandler(logging.NullHandler())
+log.propagate = False

@@ -1,10 +1,10 @@
 //! `wing start` — spawn gateway daemon.
 
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::process::Stdio;
 use std::time::Duration;
 
-use super::backend_config::tui_home;
+use super::backend_config::core_logs_dir;
 use super::discover::find_gateway_executable;
 
 /// Start the gateway daemon.
@@ -48,11 +48,16 @@ pub async fn start_gateway(host: &str, port: u16) -> anyhow::Result<()> {
     // Find gateway executable.
     let gateway_bin = find_gateway_executable()?;
 
-    // Prepare log file (truncate mode).
-    let home = tui_home();
-    std::fs::create_dir_all(&home)?;
-    let log_path = home.join("gateway.log");
-    let log_out = File::create(&log_path)?;
+    // Prepare the daemon log file — append mode, under the backend's log
+    // directory. Crash output from previous gateway runs must survive a
+    // restart (`wing start` may be called while old logs are still needed).
+    let log_dir = core_logs_dir();
+    std::fs::create_dir_all(&log_dir)?;
+    let log_path = log_dir.join("gateway.log");
+    let log_out = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
     let log_err = log_out.try_clone()?;
 
     // Spawn gateway process in a new session so it survives parent exit

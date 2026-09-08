@@ -147,13 +147,19 @@ Single source of truth: `$WING_HOME/core/config.yaml` (default `~/.wing/core/con
 ~/.wing/
 ├── core/
 │   ├── config.yaml      Backend config
+│   ├── logs/            Backend logs (see Logging below)
+│   │   ├── wing_YYYY-MM-DD.log   Gateway runtime log (daily, local time, append)
+│   │   ├── new.log → wing_YYYY-MM-DD.log   Symlink to the active backend log
+│   │   └── gateway.log  Gateway daemon stdout/stderr (uvicorn errors, tracebacks; append)
 │   └── sessions/        Session persistence (metadata + message log)
-├── tui/config.yaml      TUI config (colors, rendering, api_key, goal)
-├── gateway.log          Gateway log
-└── logs/                TUI logs
+└── tui/
+    ├── config.yaml      TUI config (colors, rendering, api_key, goal)
+    └── logs/            TUI logs: wing_YYYY-MM-DD.log (daily, local time, append)
 ```
 
 `WING_HOME` overrides `~/.wing` (backend data lives under `$WING_HOME/core`); `WING_SESSIONS_PATH` overrides the sessions directory.
+
+**Logging policy (unified front & back).** Both sides write one file per **local** calendar day — `wing_YYYY-MM-DD.log` — opened in append mode, so gateway/TUI restarts never truncate or fork logs, and prune files older than 7 days (at startup and on rotation). Backend logs live in `~/.wing/core/logs/`; the `new.log` symlink there always points at the active backend log (backend-only; the gateway refreshes it on every rotation). TUI logs live in `~/.wing/tui/logs/` (same naming, no symlink). Logging initializes explicitly — the gateway CLI (`wing-gateway`, via `wing.common.logger.setup_logger`, console level from `log.level`) and the TUI (`util/logging.rs`) attach handlers at startup; **importing `wing` has no logging side effects** — tests and scripts never create files in `~/.wing`. Every line starts with `YYYY-MM-DD HH:MM:SS` (local time on both sides), so time-range greps work directly: `grep '^2026-09-08 23:' ~/.wing/core/logs/new.log`, or `awk '$0 >= "2026-09-08 23:10" && $0 < "2026-09-08 23:30"' ~/.wing/tui/logs/wing_2026-09-08.log`.
 
 ## Deep dives (docs/dev)
 
