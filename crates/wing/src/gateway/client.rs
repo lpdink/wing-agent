@@ -121,44 +121,60 @@ impl GatewayClient {
 
         // Spawn read task.
         tokio::spawn(async move {
-            while let Some(msg_result) = ws_stream.next().await {
-                match msg_result {
-                    Ok(Message::Text(text)) => {
-                        match serde_json::from_str::<WingEvent>(&text) {
-                            Ok(event) => {
-                                tracing::debug!(
-                                    event_type = %event.event_type(),
-                                    "received event"
-                                );
-                                if event_tx.send(event).await.is_err() {
-                                    tracing::debug!("event receiver dropped, stopping read task");
-                                    break;
+            loop {
+                tokio::select! {
+                    // Zero-traffic shutdown: `event_rx` lives inside
+                    // GatewayClient, so dropping the client closes the channel
+                    // and wakes us here. Without this branch an idle connection
+                    // (never subscribed, hence nothing but pings ever arrives)
+                    // would keep this task and its socket alive forever,
+                    // leaking an fd per abandoned client.
+                    _ = event_tx.closed() => break,
+                    msg = ws_stream.next() => {
+                        let Some(msg_result) = msg else { break };
+                        match msg_result {
+                            Ok(Message::Text(text)) => {
+                                match serde_json::from_str::<WingEvent>(&text) {
+                                    Ok(event) => {
+                                        tracing::debug!(
+                                            event_type = %event.event_type(),
+                                            "received event"
+                                        );
+                                        if event_tx.send(event).await.is_err() {
+                                            tracing::debug!(
+                                                "event receiver dropped, stopping read task"
+                                            );
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("failed to parse event: {e}, raw: {text}");
+                                        // Try to at least extract the type for debugging.
+                                        if let Ok(val) =
+                                            serde_json::from_str::<serde_json::Value>(&text)
+                                            && let Some(t) =
+                                                val.get("type").and_then(|v| v.as_str())
+                                        {
+                                            tracing::warn!("unparseable event type: {t}");
+                                        }
+                                    }
                                 }
+                            }
+                            Ok(Message::Close(frame)) => {
+                                tracing::info!("gateway sent close frame: {frame:?}");
+                                break;
+                            }
+                            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {
+                                // Handled by tungstenite internally.
+                            }
+                            Ok(other) => {
+                                tracing::debug!("unexpected message type: {other:?}");
                             }
                             Err(e) => {
-                                tracing::warn!("failed to parse event: {e}, raw: {text}");
-                                // Try to at least extract the type for debugging.
-                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text)
-                                    && let Some(t) = val.get("type").and_then(|v| v.as_str())
-                                {
-                                    tracing::warn!("unparseable event type: {t}");
-                                }
+                                tracing::error!("WebSocket read error: {e}");
+                                break;
                             }
                         }
-                    }
-                    Ok(Message::Close(frame)) => {
-                        tracing::info!("gateway sent close frame: {frame:?}");
-                        break;
-                    }
-                    Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {
-                        // Handled by tungstenite internally.
-                    }
-                    Ok(other) => {
-                        tracing::debug!("unexpected message type: {other:?}");
-                    }
-                    Err(e) => {
-                        tracing::error!("WebSocket read error: {e}");
-                        break;
                     }
                 }
             }

@@ -5,7 +5,7 @@ wing/session_manager.py — SessionManager
 管理 session 生命周期、消息路由、魔术命令分发。
 
 核心设计约束：
-  - SessionManager 只处理跨 session 行为（create、switch、fork、列表、id 模糊匹配）
+  - SessionManager 只处理跨 session 行为（create、resume、switch、fork、列表；id 均为精确匹配）
   - 单 session 内部逻辑（metadata 管理、title 设置）在 Session 中
   - 持久状态统一经由 SessionStore——SM 不直接与存储介质打交道
   - WingAgent 不知道 SessionManager 的存在——它通过 EventBus 投递事件。

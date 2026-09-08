@@ -21,7 +21,7 @@ use ratatui::layout::Layout;
 use self::transport::GatewayEndpoint;
 use self::transport::Transport;
 use self::transport::backoff;
-use self::transport::try_reconnect;
+use self::transport::connect_transport;
 use crate::protocol::{AskQuestion, EventMeta, WingEvent};
 use crate::tui::TermEvent;
 use crate::tui::WingTerminal;
@@ -2105,8 +2105,12 @@ pub async fn run_app(
     let mut app = App::new(session_id, config, launch_workspace);
     let mut term_events = crate::tui::spawn_event_stream();
     let mut transport = Some(transport);
-    let mut reconnect_attempt: u32 = 0;
-    let mut reconnect_at = std::time::Instant::now();
+    // Session recovery pending: the transport (WS) is up but the session
+    // event subscription isn't re-established yet. Cleared once
+    // `recover_session` succeeds.
+    let mut recovery_pending = false;
+    let mut retry_attempt: u32 = 0;
+    let mut retry_at = std::time::Instant::now();
 
     // Channel for background fetch results.
     let (fetch_tx, mut fetch_rx) =
@@ -2144,13 +2148,13 @@ pub async fn run_app(
             .filter(|t| !t.is_expired())
             .map(|t| t.remaining());
 
-        // Reconnect sleep (only when disconnected).
-        let need_reconnect = transport.is_none();
-        let reconnect_sleep = async {
-            if need_reconnect {
+        // Retry sleep (fires when disconnected or session recovery is pending).
+        let need_retry = transport.is_none() || recovery_pending;
+        let retry_sleep = async {
+            if need_retry {
                 let now = std::time::Instant::now();
-                if reconnect_at > now {
-                    tokio::time::sleep(reconnect_at - now).await;
+                if retry_at > now {
+                    tokio::time::sleep(retry_at - now).await;
                 }
             } else {
                 std::future::pending::<()>().await;
@@ -2231,34 +2235,65 @@ pub async fn run_app(
                             "⚡ Connection lost — reconnecting...",
                             ToastKind::Warning,
                         ));
-                        reconnect_attempt = 0;
-                        reconnect_at = std::time::Instant::now() + backoff(0);
+                        retry_attempt = 0;
+                        retry_at = std::time::Instant::now() + backoff(0);
                     }
                 }
             }
-            // Reconnect timer (only fires when disconnected).
-            _ = reconnect_sleep => {
-                match try_reconnect(&endpoint, &app.session_id).await {
-                    Ok(new_transport) => {
-                        transport = Some(new_transport);
-                        app.set_connected(true);
-                        app.clear_toast();
-                        app.show_toast(Toast::info(
-                            "Reconnected!",
-                            std::time::Duration::from_secs(2),
-                        ));
-                        reconnect_attempt = 0;
-
-                        // Re-request info and commands via HTTP intents.
-                        app.push_intent(AppIntent::FetchInfo);
-                        app.push_intent(AppIntent::FetchCommands);
+            // Retry timer: reconnect transport first, then recover the
+            // session over it (two decoupled phases — session failures never
+            // dispose of the WebSocket).
+            _ = retry_sleep => {
+                if transport.is_none() {
+                    // Phase 1: transport-level reconnect. One WebSocket for
+                    // everything that follows, including phase-2 retries.
+                    match connect_transport(&endpoint).await {
+                        Ok(new_transport) => {
+                            transport = Some(new_transport);
+                            recovery_pending = true;
+                            retry_attempt = 0;
+                            // Try session recovery immediately.
+                            retry_at = std::time::Instant::now();
+                        }
+                        Err(e) => {
+                            retry_attempt += 1;
+                            retry_at = std::time::Instant::now() + backoff(retry_attempt);
+                            tracing::warn!(
+                                "reconnect attempt {retry_attempt} failed: {e:#}"
+                            );
+                        }
                     }
-                    Err(e) => {
-                        reconnect_attempt += 1;
-                        reconnect_at = std::time::Instant::now() + backoff(reconnect_attempt);
-                        tracing::warn!(
-                            "reconnect attempt {reconnect_attempt} failed: {e}"
-                        );
+                } else if let Some(t) = transport.as_ref() {
+                    // Phase 2: session recovery over the existing WebSocket.
+                    // A resume 404 (session never persisted / deleted) makes
+                    // this silently start a fresh session — like first launch.
+                    // The pushed SyncSession updates App state (session_id,
+                    // chat replay), exactly like the `/new` command.
+                    let workspace = app.launch_workspace.clone();
+                    match t.recover_session(&app.session_id, workspace.as_deref()).await {
+                        Ok(()) => {
+                            recovery_pending = false;
+                            app.set_connected(true);
+                            app.clear_toast();
+                            app.show_toast(Toast::info(
+                                "Reconnected!",
+                                std::time::Duration::from_secs(2),
+                            ));
+                            // The session may have been silently replaced —
+                            // the popup list must re-fetch.
+                            app.invalidate_session_cache();
+
+                            // Re-request info and commands via HTTP intents.
+                            app.push_intent(AppIntent::FetchInfo);
+                            app.push_intent(AppIntent::FetchCommands);
+                        }
+                        Err(e) => {
+                            retry_attempt += 1;
+                            retry_at = std::time::Instant::now() + backoff(retry_attempt);
+                            tracing::warn!(
+                                "session recovery attempt {retry_attempt} failed: {e:#}"
+                            );
+                        }
                     }
                 }
             }
