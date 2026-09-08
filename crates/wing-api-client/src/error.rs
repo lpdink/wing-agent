@@ -31,6 +31,16 @@ pub enum ApiClientError {
     Connection(String),
 }
 
+impl ApiClientError {
+    /// 服务端明确回答"资源不存在"（404）。
+    ///
+    /// 与网络错误或 5xx 不同，404 不会因重试而好转——调用方应停止重试
+    /// 并采取恢复动作（如为丢失的 session 新建一个）。
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::Api { status: 404, .. })
+    }
+}
+
 /// 从 reqwest::Response 中提取 ApiClientError::Api。
 pub(crate) async fn extract_api_error(resp: reqwest::Response) -> ApiClientError {
     let status = resp.status().as_u16();
@@ -49,5 +59,27 @@ pub(crate) async fn extract_api_error(resp: reqwest::Response) -> ApiClientError
         status,
         detail,
         body,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn api_err(status: u16) -> ApiClientError {
+        ApiClientError::Api {
+            status,
+            detail: "detail".to_string(),
+            body: None,
+        }
+    }
+
+    #[test]
+    fn is_not_found_matches_404_only() {
+        assert!(api_err(404).is_not_found());
+        assert!(!api_err(400).is_not_found());
+        assert!(!api_err(500).is_not_found());
+        // 非服务端应答的错误（网络层/连接层）同样不是 404。
+        assert!(!ApiClientError::Connection("reset".into()).is_not_found());
     }
 }

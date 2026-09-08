@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 
 use crate::gateway::GatewayClient;
 use wing_api_client::GatewayClient as GatewayApiClient;
+use wing_api_client::models::CreateSessionRequest;
 
 /// Gateway connection parameters for reconnection.
 #[derive(Debug, Clone)]
@@ -54,44 +55,82 @@ pub fn backoff(attempt: u32) -> Duration {
     delay.min(max)
 }
 
-/// Attempt to reconnect to the gateway.
+/// Establish the transport layer: WebSocket handshake + HTTP client.
 ///
-/// Performs:
-/// 1. WS reconnect via `GatewayClient::connect()`
-/// 2. Extract `client_id` from new WS handshake
-/// 3. Create new HTTP client from `http_base`
-/// 4. HTTP resume_session to load session from disk into gateway memory
-/// 5. HTTP subscribe to re-establish event streaming (triggers SyncSession push)
-///
-/// Returns a new `Transport` on success, or an error if any step fails.
-pub async fn try_reconnect(endpoint: &GatewayEndpoint, session_id: &str) -> Result<Transport> {
-    // 1. WS reconnect.
+/// Transport-level only — no session operations. Keeping this separate from
+/// session recovery preserves the invariant that a client holds at most one
+/// WebSocket: session-level failures (resume 404, transient errors) never
+/// tear the transport down, so retries reuse the existing connection instead
+/// of piling up new ones.
+pub async fn connect_transport(endpoint: &GatewayEndpoint) -> Result<Transport> {
+    // 1. WS connect (performs the handshake; yields our client_id).
     let ws = GatewayClient::connect(&endpoint.ws_url, endpoint.api_key.as_deref())
         .await
-        .context("WS reconnect failed")?;
+        .context("WS connect failed")?;
 
     // 2. Extract client_id from handshake.
     let client_id = ws.client_id().to_string();
 
     // 3. Create HTTP client.
     let http = GatewayApiClient::new(&endpoint.http_base, endpoint.api_key.as_deref())
-        .context("failed to create HTTP client for reconnect")?;
-
-    // 4. Resume session (loads from disk into gateway memory after restart).
-    http.resume_session(session_id)
-        .await
-        .context("resume_session failed during reconnect")?;
-
-    // 5. Subscribe to re-establish event streaming (triggers SyncSession push).
-    http.subscribe(session_id, &client_id)
-        .await
-        .context("subscribe failed during reconnect")?;
+        .context("failed to create HTTP client")?;
 
     Ok(Transport {
         ws,
         http,
         client_id,
     })
+}
+
+impl Transport {
+    /// Recover session event streaming over this transport after a (re)connect.
+    ///
+    /// 1. `resume` the session (loads it from disk into gateway memory after
+    ///    a gateway restart)
+    /// 2. `subscribe` — re-establishes event routing; the gateway then pushes
+    ///    a SyncSession which updates App state (session_id, chat replay).
+    ///
+    /// A 404 from resume is permanent — the session was never persisted (blank
+    /// TUI whose gateway restarted before the first user message) or vanished
+    /// from disk. Retrying can never succeed, so instead we silently start a
+    /// fresh session over this same WebSocket, exactly like first launch.
+    ///
+    /// Any other failure (network error, 5xx) is transient: returned as `Err`
+    /// for the caller to retry with backoff. The WebSocket itself stays
+    /// untouched either way — one client, one socket, many session attempts.
+    pub async fn recover_session(&self, session_id: &str, workspace: Option<&str>) -> Result<()> {
+        let effective_id = match self.http.resume_session(session_id).await {
+            Ok(_) => session_id.to_string(),
+            Err(e) if e.is_not_found() => {
+                let req = CreateSessionRequest {
+                    workspace: workspace.map(str::to_string),
+                    ..Default::default()
+                };
+                let resp = self
+                    .http
+                    .create_session(&req)
+                    .await
+                    .context("create_session failed during session recovery")?;
+                tracing::info!(
+                    lost = session_id,
+                    fresh = %resp.session_id,
+                    "session not found; started a fresh one"
+                );
+                resp.session_id
+            }
+            // Transient: caller retries with backoff; transport stays up.
+            Err(e) => {
+                return Err(e).context("resume failed during session recovery");
+            }
+        };
+
+        self.http
+            .subscribe(&effective_id, &self.client_id)
+            .await
+            .context("subscribe failed during session recovery")?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
