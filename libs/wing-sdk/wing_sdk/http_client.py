@@ -105,8 +105,18 @@ class GatewayClient:
     async def interrupt_session(self, session_id: str) -> dict:
         return await self._post("/api/session/interrupt", {"session_id": session_id})
 
-    async def compact_session(self, session_id: str) -> dict:
-        return await self._post("/api/session/compact", {"session_id": session_id})
+    async def compact_session(
+        self, session_id: str, instruction: str | None = None
+    ) -> dict:
+        """压缩 session 上下文。
+
+        instruction: 可选的压缩侧重指令（附加到压缩 prompt），如
+            "保留架构决策与未完成的 TODO"。
+        """
+        body: dict = {"session_id": session_id}
+        if instruction:
+            body["instruction"] = instruction
+        return await self._post("/api/session/compact", body)
 
     async def rewind_session(self, session_id: str, target_uuid: str) -> dict:
         return await self._post(

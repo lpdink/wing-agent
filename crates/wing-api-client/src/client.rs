@@ -235,12 +235,17 @@ impl GatewayClient {
     // ============================================================
 
     /// 压缩 session 上下文。
+    ///
+    /// `instruction` 为可选的压缩侧重指令，附加到压缩 prompt；
+    /// `None` 使用默认压缩策略。
     pub async fn compact_session(
         &self,
         session_id: &str,
+        instruction: Option<&str>,
     ) -> Result<CompactResponse, ApiClientError> {
         let body = CompactRequest {
             session_id: session_id.to_owned(),
+            instruction: instruction.map(str::to_owned),
         };
         self.post_json("/api/session/compact", &body).await
     }

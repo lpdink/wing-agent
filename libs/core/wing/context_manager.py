@@ -599,6 +599,7 @@ More detail in: "{dir}/SKILL.md" """
         model: str,
         model_provider: ModelProvider,
         current_tools: Callable[[], list[Tool]],
+        instruction: str | None = None,
     ) -> tuple[int, int]:
         """手动压缩上下文。
 
@@ -610,6 +611,7 @@ More detail in: "{dir}/SKILL.md" """
             model: 主 model 名称
             model_provider: ModelProvider 实例
             current_tools: 零参 callable，返回 Agent 当前可执行工具
+            instruction: 用户下发的压缩侧重指令（/compact <侧重>），透传给 Compactor
 
         Returns:
             (original_tokens, compressed_tokens)
@@ -625,7 +627,11 @@ More detail in: "{dir}/SKILL.md" """
         full_context = [self.system_prompt] + msgs
 
         compacted = await self.compactor.do_compact(
-            full_context, model, model_provider, tools=list(self._declared_tools)
+            full_context,
+            model,
+            model_provider,
+            tools=list(self._declared_tools),
+            instruction=instruction,
         )
 
         last_compressed_uuid = msgs[-1].uuid if msgs else None

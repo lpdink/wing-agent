@@ -52,6 +52,7 @@ pub struct FetchResult {
 ///
 /// The runner calls `drain_intents()` after each draw cycle and matches on
 /// each variant to perform the corresponding I/O operation.
+#[derive(Debug)]
 pub enum AppIntent {
     /// Send a user message to the current session via gateway.
     ///
@@ -116,7 +117,9 @@ pub enum AppIntent {
     Notify(String),
 
     /// Compact the current session context via HTTP API.
-    CompactSession,
+    /// `instruction` is an optional user-directed compaction focus
+    /// (parsed from `/compact <instruction>`), appended to the compact prompt.
+    CompactSession { instruction: Option<String> },
 
     /// Interrupt the current agent turn via HTTP API.
     InterruptSession,
