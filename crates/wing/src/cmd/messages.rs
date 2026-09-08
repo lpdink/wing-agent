@@ -5,15 +5,19 @@
 //!
 //! # Filter types
 //!
-//! | `--type`       | Condition                                  |
-//! |----------------|---------------------------------------------|
-//! | `all` (default)| All messages                                |
-//! | `user`         | `role == "user"`                            |
-//! | `assistant`    | `role == "assistant"`                       |
-//! | `tool_call`    | Assistant messages with `tool_calls`        |
-//! | `tool_result`  | `role == "tool"`                            |
-//! | `reasoning`    | Messages with `reasoning_content`           |
-//! | `content`      | Assistant with text content, no tool_calls  |
+//! Role filters select messages and print all their sections; field filters
+//! additionally restrict printing to that section only (e.g. `content`
+//! prints text without leaking reasoning):
+//!
+//! | `--type`       | Condition                                  | Printed sections |
+//! |----------------|--------------------------------------------|------------------|
+//! | `all` (default)| All messages                               | everything       |
+//! | `user`         | `role == "user"`                           | everything       |
+//! | `assistant`    | `role == "assistant"`                      | everything       |
+//! | `tool_call`    | Assistant messages with `tool_calls`       | tool calls only  |
+//! | `tool_result`  | `role == "tool"`                           | tool result only |
+//! | `reasoning`    | Messages with non-empty `reasoning_content`| reasoning only   |
+//! | `content`      | Assistant with text content, no tool_calls | text only        |
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -103,7 +107,11 @@ fn filter_messages<'a>(messages: &'a [Value], filter: &str) -> Vec<&'a Value> {
         "tool_result" => messages.iter().filter(|m| role_is(m, "tool")).collect(),
         "reasoning" => messages
             .iter()
-            .filter(|m| m.get("reasoning_content").is_some())
+            .filter(|m| {
+                m.get("reasoning_content")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|r| !r.is_empty())
+            })
             .collect(),
         "content" => messages
             .iter()
@@ -133,12 +141,93 @@ fn has_tool_calls(msg: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// Which sections of a message `print_messages` renders.
+///
+/// `--type` has two kinds of filters:
+/// - **role filters** (`all`, `user`, `assistant`) select *messages* and print
+///   every section of them;
+/// - **field filters** (`reasoning`, `content`, `tool_call`, `tool_result`)
+///   select messages *and* restrict printing to that section only — filtering
+///   `content` must not leak reasoning, which is what this enum enforces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SectionFilter {
+    All,
+    Reasoning,
+    Content,
+    ToolCall,
+    ToolResult,
+}
+
+impl SectionFilter {
+    fn from_filter(filter: &str) -> Self {
+        match filter {
+            "reasoning" => Self::Reasoning,
+            "content" => Self::Content,
+            "tool_call" => Self::ToolCall,
+            "tool_result" => Self::ToolResult,
+            _ => Self::All,
+        }
+    }
+}
+
+/// Body lines of one message under a section filter (header/separator excluded).
+fn message_body_lines(msg: &Value, section: SectionFilter) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+
+    let reasoning = msg
+        .get("reasoning_content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !reasoning.is_empty() && matches!(section, SectionFilter::All | SectionFilter::Reasoning) {
+        lines.push(String::new());
+        lines.push(reasoning.to_string());
+    }
+
+    let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    if !content.is_empty() && matches!(section, SectionFilter::All | SectionFilter::Content) {
+        lines.push(String::new());
+        lines.push(content.to_string());
+    }
+
+    if matches!(section, SectionFilter::All | SectionFilter::ToolCall)
+        && let Some(tool_calls) = msg.get("tool_calls").and_then(|v| v.as_array())
+    {
+        for tc in tool_calls {
+            let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let args = tc
+                .get("arguments")
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            lines.push(String::new());
+            lines.push(format!("  → {name}({args})"));
+        }
+    }
+
+    if msg.get("role").and_then(|v| v.as_str()) == Some("tool")
+        && matches!(section, SectionFilter::All | SectionFilter::ToolResult)
+    {
+        let tool_call_id = msg
+            .get("tool_call_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        lines.push(String::new());
+        lines.push(format!("  ← {tool_call_id}"));
+        // Truncate long tool results.
+        let display = common::truncate_chars(content, 500);
+        lines.push(format!("  {display}"));
+    }
+
+    lines
+}
+
 fn print_messages(messages: &[&Value], filter: &str) {
     if messages.is_empty() {
         println!("No messages matching filter '{filter}'.");
         return;
     }
 
+    let section = SectionFilter::from_filter(filter);
     for msg in messages {
         let role = msg
             .get("role")
@@ -148,49 +237,147 @@ fn print_messages(messages: &[&Value], filter: &str) {
 
         println!("─────────────────────────────────────────────");
         println!("[{role}] {uuid}");
-
-        // Reasoning content (if present).
-        if let Some(reasoning) = msg.get("reasoning_content").and_then(|v| v.as_str())
-            && !reasoning.is_empty()
-        {
-            println!();
-            println!("{reasoning}");
-        }
-
-        // Text content.
-        if let Some(content) = msg.get("content").and_then(|v| v.as_str())
-            && !content.is_empty()
-        {
-            println!();
-            println!("{content}");
-        }
-
-        // Tool calls (if present).
-        if let Some(tool_calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
-            for tc in tool_calls {
-                let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let args = tc
-                    .get("arguments")
-                    .map(|v| v.to_string())
-                    .unwrap_or_default();
-                println!();
-                println!("  → {name}({args})");
-            }
-        }
-
-        // Tool result (if role == "tool").
-        if role == "tool" {
-            let tool_call_id = msg
-                .get("tool_call_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            println!();
-            println!("  ← {tool_call_id}");
-            // Truncate long tool results.
-            let display = common::truncate_chars(content, 500);
-            println!("  {display}");
+        for line in message_body_lines(msg, section) {
+            println!("{line}");
         }
     }
     println!("─────────────────────────────────────────────");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Assistant message carrying reasoning + text + one tool call — the
+    /// kitchen-sink case every section filter must slice correctly.
+    fn assistant_msg() -> Value {
+        json!({
+            "role": "assistant",
+            "uuid": "u1",
+            "reasoning_content": "thinking hard",
+            "content": "the answer",
+            "tool_calls": [
+                {"name": "bash", "arguments": {"cmd": "ls"}}
+            ],
+        })
+    }
+
+    fn tool_result_msg() -> Value {
+        json!({
+            "role": "tool",
+            "uuid": "u2",
+            "tool_call_id": "tc1",
+            "content": "file-a\nfile-b",
+        })
+    }
+
+    // ── filter_messages ──────────────────────────────
+
+    #[test]
+    fn filter_by_role() {
+        let msgs = vec![assistant_msg(), json!({"role": "user", "content": "hi"})];
+        assert_eq!(filter_messages(&msgs, "user").len(), 1);
+        assert_eq!(filter_messages(&msgs, "assistant").len(), 1);
+        assert_eq!(filter_messages(&msgs, "all").len(), 2);
+    }
+
+    #[test]
+    fn filter_reasoning_requires_non_empty() {
+        let empty = json!({"role": "assistant", "reasoning_content": ""});
+        let msgs = vec![assistant_msg(), empty];
+        // Empty-string reasoning is not a reasoning message.
+        assert_eq!(filter_messages(&msgs, "reasoning").len(), 1);
+    }
+
+    #[test]
+    fn filter_content_excludes_tool_call_messages() {
+        let msgs = vec![
+            assistant_msg(),
+            json!({"role": "assistant", "content": "plain"}),
+        ];
+        // The kitchen-sink message has tool_calls → excluded from "content".
+        assert_eq!(filter_messages(&msgs, "content").len(), 1);
+    }
+
+    #[test]
+    fn filter_tool_result_selects_tool_role() {
+        let msgs = vec![assistant_msg(), tool_result_msg()];
+        assert_eq!(filter_messages(&msgs, "tool_result").len(), 1);
+        assert_eq!(filter_messages(&msgs, "tool_call").len(), 1);
+    }
+
+    // ── message_body_lines: field filters slice sections ──
+
+    #[test]
+    fn body_lines_content_does_not_leak_reasoning() {
+        // Regression: `--type content` used to print reasoning too, because
+        // the filter only selected messages while print_messages rendered
+        // every section.
+        let lines = message_body_lines(&assistant_msg(), SectionFilter::Content);
+        let joined = lines.join("\n");
+        assert!(joined.contains("the answer"));
+        assert!(!joined.contains("thinking hard"));
+        assert!(!joined.contains("bash"));
+    }
+
+    #[test]
+    fn body_lines_reasoning_only() {
+        let lines = message_body_lines(&assistant_msg(), SectionFilter::Reasoning);
+        let joined = lines.join("\n");
+        assert!(joined.contains("thinking hard"));
+        assert!(!joined.contains("the answer"));
+        assert!(!joined.contains("bash"));
+    }
+
+    #[test]
+    fn body_lines_tool_call_only() {
+        let lines = message_body_lines(&assistant_msg(), SectionFilter::ToolCall);
+        let joined = lines.join("\n");
+        assert!(joined.contains("→ bash"));
+        assert!(!joined.contains("thinking hard"));
+        assert!(!joined.contains("the answer"));
+    }
+
+    #[test]
+    fn body_lines_tool_result_only() {
+        let lines = message_body_lines(&tool_result_msg(), SectionFilter::ToolResult);
+        let joined = lines.join("\n");
+        assert!(joined.contains("← tc1"));
+        assert!(joined.contains("file-a"));
+    }
+
+    #[test]
+    fn body_lines_all_renders_every_section() {
+        let lines = message_body_lines(&assistant_msg(), SectionFilter::All);
+        let joined = lines.join("\n");
+        assert!(joined.contains("thinking hard"));
+        assert!(joined.contains("the answer"));
+        assert!(joined.contains("→ bash"));
+    }
+
+    #[test]
+    fn section_filter_from_filter_mapping() {
+        assert_eq!(
+            SectionFilter::from_filter("reasoning"),
+            SectionFilter::Reasoning
+        );
+        assert_eq!(
+            SectionFilter::from_filter("content"),
+            SectionFilter::Content
+        );
+        assert_eq!(
+            SectionFilter::from_filter("tool_call"),
+            SectionFilter::ToolCall
+        );
+        assert_eq!(
+            SectionFilter::from_filter("tool_result"),
+            SectionFilter::ToolResult
+        );
+        // Role filters (and unknown values) keep full-message rendering.
+        assert_eq!(SectionFilter::from_filter("all"), SectionFilter::All);
+        assert_eq!(SectionFilter::from_filter("user"), SectionFilter::All);
+        assert_eq!(SectionFilter::from_filter("assistant"), SectionFilter::All);
+        assert_eq!(SectionFilter::from_filter("bogus"), SectionFilter::All);
+    }
 }
