@@ -236,8 +236,13 @@ class WingRuntime:
     # Session 操作（协调：委托给 Session/CM，自己只管事件）
     # ============================================================
 
-    async def compact_session(self, session_id: str) -> tuple[int, int]:
+    async def compact_session(
+        self, session_id: str, instruction: str | None = None
+    ) -> tuple[int, int]:
         """压缩 session 上下文。
+
+        instruction 为用户下发的压缩侧重指令（/compact <侧重>），
+        透传给 Compactor 附加到压缩 prompt；None 表示使用默认压缩策略。
 
         委托给 ContextManager.do_manual_compact()，发射事件。
 
@@ -253,6 +258,7 @@ class WingRuntime:
             model=session.agent.model,
             model_provider=session.agent.model_provider,
             current_tools=lambda: session.agent.tools,
+            instruction=instruction,
         )
 
         self._emit_session_event(

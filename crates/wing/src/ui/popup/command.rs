@@ -128,7 +128,7 @@ static TUI_ONLY_COMMANDS: LazyLock<Vec<CommandInfo>> = LazyLock::new(|| {
             name: "compact".into(),
             aliases: vec![],
             description: "Compress session context".into(),
-            params: String::new(),
+            params: "[focus]".into(),
         },
         CommandInfo {
             name: "context".into(),
@@ -440,7 +440,7 @@ mod tests {
                 name: "compact".into(),
                 aliases: vec![],
                 description: "Trigger context compaction".into(),
-                params: String::new(),
+                params: "[focus]".into(),
             },
         ]
     }

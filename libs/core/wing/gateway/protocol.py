@@ -175,6 +175,11 @@ class CompactRequest(BaseModel):
     """压缩 session 上下文的请求体。"""
 
     session_id: str = Field(description="目标 session ID")
+    instruction: str | None = Field(
+        default=None,
+        description="用户下发的压缩侧重指令（如“保留架构决策与未完成的 TODO”），"
+        "附加到压缩 prompt；缺省使用默认压缩策略",
+    )
 
 
 class InterruptRequest(BaseModel):

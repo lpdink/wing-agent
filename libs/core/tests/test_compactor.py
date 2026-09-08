@@ -208,6 +208,57 @@ class TestDoCompact:
         assert resp.content == "[Compact] ok"
 
     @pytest.mark.asyncio
+    async def test_instruction_inserted_between_body_and_format(self):
+        """用户指令条件插入 BODY 与 FORMAT 之间：CRITICAL 保持末位 recency。"""
+        c = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
+        full = [Message(role="system", content="sys")]
+        prov, state = _capturing_provider()
+
+        await c.do_compact(
+            full, DEFAULT_MODEL, prov, instruction="保留架构决策与未完成的 TODO"
+        )
+        content = state["messages"][-1].content or ""
+        assert "Additional instruction from the user" in content
+        assert "保留架构决策与未完成的 TODO" in content
+        # 顺序：主体末段 → 用户指令 → <summary> 标签约束 → CRITICAL
+        body_end = content.index("immediate resumption of the task.")
+        ins = content.index("保留架构决策与未完成的 TODO")
+        wrap = content.index("Wrap your summary in <summary></summary> tags.")
+        critical = content.index("## CRITICAL")
+        assert body_end < ins < wrap < critical
+
+    @pytest.mark.asyncio
+    async def test_no_instruction_prompt_byte_identical(self):
+        """无指令 → prompt 与 COMPACT_PROMPT 逐字节一致。
+        自动压缩与裸手动压缩（高频、经过大量验证的路径）零影响。"""
+        c = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
+        full = [Message(role="system", content="sys")]
+        prov, state = _capturing_provider()
+
+        await c.do_compact(full, DEFAULT_MODEL, prov)
+        assert state["messages"][-1].content == c.COMPACT_PROMPT
+
+    def test_compact_prompt_split_identity(self):
+        """拆分恒等式：BODY + FORMAT == COMPACT_PROMPT（原始提示词未被改动，
+        只做了条件性增加）。防止后续直接改动其一，导致带指令/不带指令
+        两条路径的 prompt 漂移。"""
+        assert (
+            Compactor._COMPACT_PROMPT_BODY + Compactor._COMPACT_PROMPT_FORMAT
+            == Compactor.COMPACT_PROMPT
+        )
+
+    @pytest.mark.asyncio
+    async def test_blank_instruction_ignored(self):
+        """空白指令视同未提供——prompt 与默认逐字节一致。"""
+        c = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
+        full = [Message(role="system", content="sys")]
+        prov, state = _capturing_provider()
+
+        await c.do_compact(full, DEFAULT_MODEL, prov, instruction="   ")
+        content = state["messages"][-1].content or ""
+        assert content == c.COMPACT_PROMPT
+
+    @pytest.mark.asyncio
     async def test_tool_calls_silently_ignored(self):
         c = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
         full = [Message(role="system", content="sys")]

@@ -687,8 +687,15 @@ impl App {
                     }
                 }
             }
-            "/compact" => {
-                self.push_intent(AppIntent::CompactSession);
+            _ if text == "/compact" || text.starts_with("/compact ") => {
+                // `/compact` 或 `/compact <侧重指令>` —— 指令附加到压缩 prompt。
+                let args = text.strip_prefix("/compact").unwrap().trim();
+                let instruction = if args.is_empty() {
+                    None
+                } else {
+                    Some(args.to_string())
+                };
+                self.push_intent(AppIntent::CompactSession { instruction });
                 true
             }
             "/reload" => {
@@ -2777,6 +2784,7 @@ mod tests {
             "/yolo on",
             "/yolo off",
             "/compact",
+            "/compact keep architecture decisions",
             "/reload",
             "/fork abc-123",
             "/rewind def-456",
@@ -2785,6 +2793,37 @@ mod tests {
         ] {
             assert_consumed(cmd);
         }
+    }
+
+    // ── /compact instruction parsing ────────────────────
+
+    #[test]
+    fn test_compact_command_parses_instruction() {
+        // `/compact <侧重>` → instruction rides on the intent.
+        let mut app = test_app();
+        assert!(app.try_frontend_command("/compact keep architecture decisions and pending TODOs"));
+        let intents = app.drain_intents();
+        assert!(
+            matches!(
+                &intents[..],
+                [AppIntent::CompactSession {
+                    instruction: Some(i)
+                }] if i == "keep architecture decisions and pending TODOs"
+            ),
+            "expected CompactSession with instruction, got {intents:?}"
+        );
+
+        // Bare `/compact` → default strategy (no instruction).
+        let mut app = test_app();
+        assert!(app.try_frontend_command("/compact"));
+        let intents = app.drain_intents();
+        assert!(
+            matches!(
+                &intents[..],
+                [AppIntent::CompactSession { instruction: None }]
+            ),
+            "expected CompactSession without instruction, got {intents:?}"
+        );
     }
 
     // ── Bare commands with no args are consumed (usage toast) ──

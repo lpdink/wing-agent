@@ -976,6 +976,32 @@ class TestSessionCompact:
         resp = client.post("/api/session/compact", json={"session_id": "test-id"})
         assert resp.status_code == 400
 
+    def test_compact_forwards_instruction(self, client: TestClient, mock_runtime):
+        """instruction 随请求体透传给 runtime.compact_session。"""
+        mock_runtime.compact_session = AsyncMock(return_value=(1000, 200))
+
+        resp = client.post(
+            "/api/session/compact",
+            json={
+                "session_id": "test-id",
+                "instruction": "保留架构决策与未完成的 TODO",
+            },
+        )
+        assert resp.status_code == 200
+        mock_runtime.compact_session.assert_called_once_with(
+            "test-id", "保留架构决策与未完成的 TODO"
+        )
+
+    def test_compact_without_instruction_passes_none(
+        self, client: TestClient, mock_runtime
+    ):
+        """缺省 instruction → None（默认压缩策略）。"""
+        mock_runtime.compact_session = AsyncMock(return_value=(1000, 200))
+
+        resp = client.post("/api/session/compact", json={"session_id": "test-id"})
+        assert resp.status_code == 200
+        mock_runtime.compact_session.assert_called_once_with("test-id", None)
+
 
 # ============================================================
 # Session: Interrupt

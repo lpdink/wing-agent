@@ -319,14 +319,17 @@ pub async fn execute_intent(
                 });
             }
         }
-        AppIntent::CompactSession => {
+        AppIntent::CompactSession { instruction } => {
             if let Some(t) = transport {
                 let http = t.http.clone();
                 let session_id = app.session_id.clone();
                 let tx = fetch_tx.clone();
                 let sid = session_id.clone();
                 tokio::spawn(async move {
-                    match http.compact_session(&session_id).await {
+                    match http
+                        .compact_session(&session_id, instruction.as_deref())
+                        .await
+                    {
                         Ok(resp) => {
                             let _ = tx
                                 .send(FetchResult {

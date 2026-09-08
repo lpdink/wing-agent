@@ -22,7 +22,8 @@ class Compactor:
     """
 
     # This PROMPT comes from https://github.com/browser-use/agent-sdk
-    COMPACT_PROMPT = """You have been working on the task described above but have not yet completed it. Write a continuation summary that will allow you (or another instance of yourself) to resume work efficiently in a future context window where the conversation history will be replaced with this summary. Your summary should be structured, concise, and actionable. Include:
+    # 内容主体：五段式续作摘要模板（截至 "immediate resumption" 段）。
+    _COMPACT_PROMPT_BODY = """You have been working on the task described above but have not yet completed it. Write a continuation summary that will allow you (or another instance of yourself) to resume work efficiently in a future context window where the conversation history will be replaced with this summary. Your summary should be structured, concise, and actionable. Include:
 
     1. Task Overview
     The user's core request and success criteria
@@ -49,7 +50,17 @@ class Compactor:
     Domain-specific details that aren't obvious
     Any promises made to the user
 
-    Be concise but complete - err on the side of including information that would prevent duplicate work or repeated mistakes. Write in a way that enables immediate resumption of the task.
+    Be concise but complete - err on the side of including information that would prevent duplicate work or repeated mistakes. Write in a way that enables immediate resumption of the task."""
+
+    # 格式约束尾部：<summary> 标签 + CRITICAL 工具禁令。
+    # 拆分目的：用户指令（/compact <侧重>）以条件渲染方式插在主体与
+    # 格式约束之间（存在则插入、不存在则原样）——对提示词只做增加、
+    # 不做修改，无指令路径（后台自动压缩、裸手动压缩）的 prompt 与
+    # 历史 COMPACT_PROMPT 逐字节一致。
+    # 指令必须排在格式约束之前、CRITICAL 保持末位 recency：
+    # _extract_compact_result 以正则强提取 <summary> 标签，格式失守
+    # 即整次压缩报废（手动 500 / 后台静默丢弃）。
+    _COMPACT_PROMPT_FORMAT = """
 
     Wrap your summary in <summary></summary> tags.
 
@@ -57,6 +68,10 @@ class Compactor:
     ## DO NOT execute any tool calls.
     ## Your entire response must be ONLY the summary wrapped in <summary> tags.
     ## Any tool calls in your response will be SILENTLY IGNORED."""
+
+    # 兼容别名：恒等于 BODY + FORMAT（测试锁定恒等式，防止后续改动
+    # 其一导致带指令/不带指令两条路径的 prompt 漂移）。
+    COMPACT_PROMPT = _COMPACT_PROMPT_BODY + _COMPACT_PROMPT_FORMAT
 
     def __init__(
         self,
@@ -160,16 +175,35 @@ class Compactor:
         model: str,
         model_provider: ModelProvider,
         tools: list | None = None,
+        instruction: str | None = None,
     ) -> LLMResponse:
         """执行压缩。
 
         full_messages 是完整上下文（system + head），
         与主 agent 调用 LLM 的前缀完全一致（含 tools），从而最大化缓存命中率。
 
-        COMPACT_PROMPT 被追加为最后一条 user message。
+        prompt（BODY [+ 指令块] + FORMAT）被追加为最后一条 user message。
         工具调用在响应中被静默忽略。
+
+        instruction 是用户通过 /compact <侧重> 下发的压缩侧重指令
+        （仅手动压缩传入；后台自动压缩不带）。条件渲染：存在则插入
+        BODY 与 FORMAT 之间——指令只声明 summary content 范围内的
+        优先级，<summary> 标签 + CRITICAL 格式约束保持末位 recency
+        （_extract_compact_result 强提取标签，格式失守即整次压缩报废）；
+        不存在（含空白）时 prompt 与 COMPACT_PROMPT 逐字节一致，
+        默认路径零影响。
         """
-        messages = full_messages + [Message(role="user", content=self.COMPACT_PROMPT)]
+        instruction_block = ""
+        if instruction and instruction.strip():
+            instruction_block = (
+                "\n\n    ## Additional instruction from the user "
+                "(highest priority for summary content):\n    "
+                f"{instruction.strip()}"
+            )
+        prompt = (
+            self._COMPACT_PROMPT_BODY + instruction_block + self._COMPACT_PROMPT_FORMAT
+        )
+        messages = full_messages + [Message(role="user", content=prompt)]
 
         response = None
         async for item in model_provider.generate(

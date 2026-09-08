@@ -121,6 +121,10 @@ pub struct SendMessageRequest {
 #[derive(Debug, Clone, Serialize)]
 pub struct CompactRequest {
     pub session_id: String,
+    /// Optional user-directed compaction focus, appended to the compact
+    /// prompt (e.g. "keep architecture decisions and pending TODOs").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -484,4 +488,33 @@ pub struct ToolInfo {
 pub struct ToolsListResponse {
     #[serde(default)]
     pub tools: Vec<ToolInfo>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_request_omits_none_instruction() {
+        let req = CompactRequest {
+            session_id: "s1".into(),
+            instruction: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["session_id"], "s1");
+        assert!(
+            json.get("instruction").is_none(),
+            "None instruction must be omitted, got {json}"
+        );
+    }
+
+    #[test]
+    fn compact_request_serializes_instruction() {
+        let req = CompactRequest {
+            session_id: "s1".into(),
+            instruction: Some("keep architecture decisions".into()),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["instruction"], "keep architecture decisions");
+    }
 }
