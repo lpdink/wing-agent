@@ -103,6 +103,8 @@ More detail in: "{dir}/SKILL.md" """
         self._rules_patterns = rules_patterns or []
 
         # 加载 rules 和 skills（在初始化时加载一次）
+        # _rules_files 由 _load_rules 记录：实际匹配并成功读取的规则文件路径
+        self._rules_files: list[str] = []
         self._rules_prompt = self._load_rules()
         self._skills_cache: dict[str, AgentSkill] = self._load_all_skills()
         self._skills_prompt = self._build_skills_prompt()
@@ -250,8 +252,12 @@ More detail in: "{dir}/SKILL.md" """
         rules 配置支持 glob 模式，如 ~/.wing/rules/*.md
         相对路径基于 workspace 解析。
         文件不存在或读取失败时 log.warning 并跳过。
+
+        实际匹配并成功读取的文件路径记录到 _rules_files
+        （供 AgentInfo 下发，前端展示加载概览）。
         """
         all_patterns = self._resolve_patterns(self._rules_patterns)
+        self._rules_files = []
         if not all_patterns:
             return ""
 
@@ -263,6 +269,7 @@ More detail in: "{dir}/SKILL.md" """
                 try:
                     content = Path(file_path).read_text(encoding="utf-8")
                     contents.extend([file_path, content])
+                    self._rules_files.append(file_path)
                 except Exception as e:
                     log.warning(f"Failed to read rules file {file_path}: {e}")
 
@@ -359,7 +366,7 @@ More detail in: "{dir}/SKILL.md" """
         return "\n".join(skill_descriptions)
 
     def get_skills_info(self) -> str:
-        """返回 skills 信息，用于 /skills 命令显示。"""
+        """返回 skills/rules 信息，用于 /skills 命令显示。"""
         lines = []
 
         # 显示 skills patterns
@@ -376,6 +383,19 @@ More detail in: "{dir}/SKILL.md" """
                 lines.append(f"  {skill.name}: {skill.description}")
         else:
             lines.append("暂无已加载的 Skills")
+
+        # 显示实际加载的 rules 文件
+        if self._rules_patterns:
+            lines.append("")
+            lines.append("Rules patterns:")
+            for pattern in self._rules_patterns:
+                lines.append(f"  - {pattern}")
+            if self._rules_files:
+                lines.append("已加载的 Rules 文件:")
+                for file_path in self._rules_files:
+                    lines.append(f"  {file_path}")
+            else:
+                lines.append("暂无已加载的 Rules 文件")
 
         return "\n".join(lines)
 

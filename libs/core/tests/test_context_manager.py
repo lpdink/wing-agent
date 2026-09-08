@@ -639,3 +639,75 @@ class TestFork:
         # 源 CM 的链状态完好
         assert [m.uuid for m in cm._messages.active_chain] == original_uuids
         assert cm._messages.find(original_uuids[0]) is not None  # ty: ignore[invalid-argument-type]
+
+
+# ── 12. Rules 文件跟踪 ──────────────────────────
+
+
+def _make_cm_with_rules(tmp_dir: Path, rules_patterns: list[str]) -> ContextManager:
+    """构造带 rules_patterns 的 ContextManager（复用 _make_cm 的组装方式）。"""
+    from wing.compactor import Compactor
+
+    sid = "test-session-rules"
+    messages: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir / sid))
+    return ContextManager(
+        session_id=sid,
+        messages=messages,
+        system_prompt="You are a helpful assistant.",
+        compactor=Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000),
+        rules_patterns=rules_patterns,
+    )
+
+
+class TestRulesFilesTracking:
+    """_rules_files：实际匹配并成功读取的规则文件路径（AgentInfo 下发用）。"""
+
+    def test_load_rules_records_matched_files(self, tmp_dir):
+        """glob 匹配到的文件按序记录到 _rules_files。"""
+        rules_dir = tmp_dir / "rules"
+        rules_dir.mkdir()
+        (rules_dir / "b.md").write_text("rule b", encoding="utf-8")
+        (rules_dir / "a.md").write_text("rule a", encoding="utf-8")
+
+        cm = _make_cm_with_rules(tmp_dir, [str(rules_dir / "*.md")])
+
+        # sorted glob 顺序
+        assert cm._rules_files == [
+            str(rules_dir / "a.md"),
+            str(rules_dir / "b.md"),
+        ]
+        assert "rule a" in cm._rules_prompt
+
+    def test_unmatched_pattern_yields_empty_list(self, tmp_dir):
+        """pattern 无匹配 → _rules_files 为空。"""
+        cm = _make_cm_with_rules(tmp_dir, [str(tmp_dir / "nope" / "*.md")])
+        assert cm._rules_files == []
+        assert cm._rules_prompt == ""
+
+    def test_no_patterns_yields_empty_list(self, tmp_dir):
+        """未配置 rules → _rules_files 为空。"""
+        cm = _make_cm(tmp_dir)
+        assert cm._rules_files == []
+
+    def test_reload_updates_rules_files(self, tmp_dir):
+        """reload_skills_and_rules 后 _rules_files 与磁盘状态同步。"""
+        rules_file = tmp_dir / "rule.md"
+        rules_file.write_text("v1", encoding="utf-8")
+        cm = _make_cm_with_rules(tmp_dir, [str(rules_file)])
+        assert cm._rules_files == [str(rules_file)]
+
+        # 磁盘变化后 reload → 记录更新（pattern 不再匹配）
+        rules_file.unlink()
+        cm.reload_skills_and_rules()
+        assert cm._rules_files == []
+
+    def test_get_skills_info_lists_rules_files(self, tmp_dir):
+        """/skills 详情包含 rules patterns 与已加载文件。"""
+        rules_file = tmp_dir / "rule.md"
+        rules_file.write_text("rule content", encoding="utf-8")
+        cm = _make_cm_with_rules(tmp_dir, [str(rules_file)])
+
+        info = cm.get_skills_info()
+        assert "Rules patterns:" in info
+        assert str(rules_file) in info
+        assert "已加载的 Rules 文件:" in info

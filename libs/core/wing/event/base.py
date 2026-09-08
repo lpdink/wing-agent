@@ -67,7 +67,12 @@ class SessionInfo(BaseModel):
 
 
 class AgentInfo(BaseModel):
-    """创建 agent 的完整配置，用于 Activate 时前端恢复 UI 状态。"""
+    """创建 agent 的完整配置，用于 Activate 时前端恢复 UI 状态。
+
+    skills/rules 携带的是**已加载**的技能名/规则文件路径（非配置 pattern），
+    前端据此渲染加载概览（如 "loaded N skills, M rules"）；
+    配置 pattern 等细节经 /skills 按需拉取（SessionInfo.skills_info）。
+    """
 
     model_name: str
     system_prompt: str | None = None
