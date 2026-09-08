@@ -1716,6 +1716,19 @@ impl App {
                 self.chat.clear();
                 self.ctx.reset();
 
+                // Loaded skills/rules banner: one summary line pinned at the
+                // top of the chat, mirrored on every sync (connect / resume /
+                // switch / fork) — counts only; details stay behind /skills
+                // so the sync payload carries lists, not rendered blobs.
+                if let Some(agent_info) = &agent {
+                    let line = format!(
+                        "loaded {} skills, {} rules · /skills for details",
+                        agent_info.skills.len(),
+                        agent_info.rules.len()
+                    );
+                    self.chat.push(ChatCell::SystemMessage(line));
+                }
+
                 // Ask flows are session-scoped interactive state, not rendered
                 // history: without this, a reconnect / session switch while an
                 // ask is pending would leave the live-registered flow in the
@@ -2367,6 +2380,7 @@ mod tests {
             .map(|c| match c.cell() {
                 ChatCell::UserMessage(_) => "user",
                 ChatCell::AssistantMessage(_) => "assistant",
+                ChatCell::SystemMessage(_) => "system",
                 ChatCell::Thinking(_) => "thinking",
                 ChatCell::ToolCall(_) => "tool_call",
                 ChatCell::Diff(_) => "diff",
@@ -2441,6 +2455,70 @@ mod tests {
             "idle resume must NOT enter working state"
         );
         assert!(app.turn.started_at.is_none());
+    }
+
+    /// sync_event with an AgentInfo attached (skills/rules banner source).
+    fn sync_event_with_agent(
+        agent: Option<crate::protocol::AgentInfo>,
+        messages: Vec<serde_json::Value>,
+    ) -> WingEvent {
+        let mut ev = sync_event(messages, None, vec![], vec![], None);
+        if let WingEvent::SyncSession {
+            agent: agent_slot, ..
+        } = &mut ev
+        {
+            *agent_slot = agent;
+        }
+        ev
+    }
+
+    #[test]
+    fn test_sync_renders_skills_rules_banner() {
+        // Loaded-skills/rules summary: one SystemMessage at the top of the
+        // chat, counts from AgentInfo, details left to /skills.
+        let mut app = test_app();
+        let agent = crate::protocol::AgentInfo {
+            model_name: "test-model".into(),
+            system_prompt: None,
+            tools: vec![],
+            skills: vec!["pdf".into(), "webapp".into()],
+            rules: vec!["AGENTS.md".into()],
+            workspace: None,
+        };
+        app.handle_event(sync_event_with_agent(
+            Some(agent),
+            vec![serde_json::json!({"role": "user", "content": "hi"})],
+        ));
+
+        match app.chat.cells.first().map(|c| c.cell()) {
+            Some(ChatCell::SystemMessage(text)) => {
+                assert!(
+                    text.contains("loaded 2 skills, 1 rules"),
+                    "banner should carry counts, got: {text}"
+                );
+                assert!(
+                    text.contains("/skills"),
+                    "banner should hint the details command, got: {text}"
+                );
+            }
+            other => panic!("expected SystemMessage banner as first cell, got {other:?}"),
+        }
+        // Replay content is untouched behind the banner.
+        assert!(cell_kinds(&app).contains(&"user"));
+    }
+
+    #[test]
+    fn test_sync_without_agent_omits_banner() {
+        // agent: None (e.g. older gateway) → no banner, replay only.
+        let mut app = test_app();
+        app.handle_event(sync_event_with_agent(
+            None,
+            vec![serde_json::json!({"role": "user", "content": "hi"})],
+        ));
+        assert!(
+            !cell_kinds(&app).contains(&"system"),
+            "no agent info → no banner"
+        );
     }
 
     #[test]
