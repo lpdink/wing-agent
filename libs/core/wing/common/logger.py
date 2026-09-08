@@ -80,12 +80,29 @@ def _update_new_symlink(log_dir: Path, target: Path) -> None:
         pass  # Symlink maintenance failed, not critical
 
 
+def _parse_log_date(name: str) -> date | None:
+    """Extract the day encoded in a log file name, if any.
+
+    Accepts the current daily naming and the legacy per-process naming.
+    Malformed dates (e.g. ``wing_2026-13-45.log`` — regex-shaped but not a
+    real calendar day) yield ``None`` so pruning never raises on foreign
+    files, mirroring the Rust side's ``parse_log_date``.
+    """
+    match = _LOG_NAME_RE.match(name)
+    if match is None:
+        return None
+    try:
+        return date.fromisoformat(match.group(1))
+    except ValueError:
+        return None
+
+
 def _prune_old_logs(log_dir: Path, today: date) -> None:
     """Delete daily log files older than the retention window."""
     cutoff = today - timedelta(days=RETENTION_DAYS - 1)
     for path in log_dir.glob("wing_*.log"):
-        match = _LOG_NAME_RE.match(path.name)
-        if match and date.fromisoformat(match.group(1)) < cutoff:
+        day = _parse_log_date(path.name)
+        if day is not None and day < cutoff:
             try:
                 path.unlink()
             except OSError:

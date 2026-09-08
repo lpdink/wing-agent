@@ -139,3 +139,29 @@ def test_prune_older_than_retention(tmp_path: Path, _restore_logger) -> None:
     for path in kept:
         assert path.exists(), f"{path.name} should have been kept"
     assert unrelated.exists()
+
+
+def test_malformed_date_names_never_crash(tmp_path: Path, _restore_logger) -> None:
+    """Regex-shaped but calendar-invalid names must not raise.
+
+    Regression: `wing_2026-13-45.log` once blew up date.fromisoformat inside
+    _prune_old_logs, crashing gateway startup. Such files are foreign — they
+    are skipped (left untouched), never deleted, and never fatal.
+    """
+    malformed = [
+        "wing_2026-13-45.log",  # month 13, day 45
+        "wing_2026-02-30.log",  # Feb 30
+        "wing_2026-13-45-01-02-03.log",  # legacy per-process shape
+    ]
+    for name in malformed:
+        (tmp_path / name).write_text("", encoding="utf-8")
+
+    now = datetime(2026, 9, 8, 12, 0, 0)
+    setup_logger(log_dir=tmp_path, now=lambda: now)  # must not raise
+    _log("still alive")
+
+    assert "still alive" in (tmp_path / "wing_2026-09-08.log").read_text(
+        encoding="utf-8"
+    )
+    for name in malformed:
+        assert (tmp_path / name).exists(), f"{name} should be left untouched"
