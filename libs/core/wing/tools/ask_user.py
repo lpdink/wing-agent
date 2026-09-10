@@ -174,7 +174,8 @@ async def ask_user(
 
     The user's answers come back as text lines of the form `header: answer`,
     one line per question (multi-select answers list the chosen labels
-    separated by commas). If the user cancels, the result is
+    separated by commas). Questions the user left unanswered come back as
+    `header: (user did not answer)`. If the user cancels, the result is
     "User cancelled the questions. Proceed with your best judgment."
 
     Args:

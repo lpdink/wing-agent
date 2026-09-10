@@ -7,15 +7,24 @@
 //! - `↑`/`↓` — move the option cursor (wraps; the last row is the free-form row)
 //! - `←`/`→` — switch question tab (wraps; the last tab is the confirm page)
 //! - `Space`/`Tab` — toggle the option under the cursor (multi-select only)
-//! - `Enter` — advance to the next tab; on the free-form row it starts inline
-//!   editing; while editing it confirms the text and advances
+//! - `Enter` — advance to the next tab; on a single-select option row it also
+//!   commits that option; on the free-form row it starts inline editing;
+//!   while editing it confirms the text and advances
 //! - edit mode: `←`/`→` move the text cursor, `Backspace`/`Delete`/`Home`/`End`
 //!   edit the buffer, `↑`/`↓` leave the editor keeping the draft
 //! - `Esc` is NOT consumed here — the app owns it (interrupt) at any time.
 //!
-//! Single-select answers are "cursor is the answer": the option under the
-//! cursor is the choice, so leaving the question records it. An empty
-//! free-form row never counts as an answer.
+//! Answers are **explicit acts only** — browsing (moving the cursor, switching
+//! tabs) never records an answer, so tabs only turn "answered" when the user
+//! actually chose something:
+//! - single-select: the option committed with Enter (captured, not derived —
+//!   later cursor movement cannot change it; re-commit overrides)
+//! - multi-select: the toggled options (each toggle is itself an explicit act)
+//! - free-form: the text confirmed with Enter in the editor
+//!
+//! The user may leave questions unanswered: Submit is not gated, unanswered
+//! questions are sent as `(user did not answer)` and the confirm page warns
+//! about them. An empty free-form row never counts as an answer.
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -27,6 +36,9 @@ use crate::protocol::AskQuestion;
 /// The AskUserQuestion tool translates it into a normal "user cancelled"
 /// result — it does NOT interrupt the turn.
 pub const ASK_CANCEL_CONTENT: &str = "__wing_ask_cancelled__";
+
+/// Placeholder sent for a question the user left unanswered.
+pub const UNANSWERED_PLACEHOLDER: &str = "(user did not answer)";
 
 /// Terminal state of a finished panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,19 +60,23 @@ pub enum PanelAction {
 #[derive(Debug, Clone, Default)]
 pub struct QuestionState {
     /// Cursor row: `0..options.len()` = option, `options.len()` = free-form row.
+    /// Pure navigation — never part of the answer.
     pub cursor: usize,
     /// Multi-select toggle state (parallel to `options`).
     pub toggles: Vec<bool>,
-    /// Confirmed free-form text (None = not used).
+    /// Committed single-select option index (Enter on an option row).
+    /// None = no option committed yet; captured at commit time so later
+    /// cursor movement cannot change it.
+    pub selected: Option<usize>,
+    /// Confirmed free-form text (None = not used). Confirming text clears
+    /// `selected` — the last explicit choice wins.
     pub custom: Option<String>,
     /// Whether the inline editor is active on the free-form row.
     pub editing: bool,
-    /// Editor buffer; survives leaving the editor (kept as a draft).
+    /// Editor buffer; survives leaving the editor (kept as an uncommitted draft).
     pub draft: String,
     /// Editor cursor position in chars.
     pub edit_cursor: usize,
-    /// Whether the user has left this question at least once (candidate answer).
-    pub visited: bool,
 }
 
 /// Interactive state for one AskUserQuestion panel.
@@ -126,11 +142,11 @@ impl AskPanel {
         self.questions[qi].options.len() + 1
     }
 
-    /// Answer value for question `qi`, or None when not answerable.
+    /// Answer value for question `qi`, or None when unanswered.
     ///
-    /// Single-select: the option under the cursor — or the free-form text when
-    /// the cursor sits on the free-form row. Multi-select: toggled labels plus
-    /// the free-form text (comma-joined).
+    /// Single-select: the committed option (Enter), falling back to confirmed
+    /// free-form text. Multi-select: toggled labels plus the free-form text
+    /// (comma-joined). Browsing never produces an answer.
     pub fn answer_value(&self, qi: usize) -> Option<String> {
         let q = &self.questions[qi];
         let st = &self.states[qi];
@@ -151,16 +167,17 @@ impl AskPanel {
             } else {
                 Some(parts.join(", "))
             }
-        } else if st.cursor < q.options.len() {
-            Some(q.options[st.cursor].label.clone())
         } else {
-            custom.map(|s| s.to_string())
+            st.selected
+                .and_then(|i| q.options.get(i))
+                .map(|o| o.label.clone())
+                .or_else(|| custom.map(|s| s.to_string()))
         }
     }
 
     /// Whether question `qi` holds a usable answer (tab shows the answered state).
     pub fn is_answered(&self, qi: usize) -> bool {
-        self.states[qi].visited && self.answer_value(qi).is_some()
+        self.answer_value(qi).is_some()
     }
 
     /// Whether every question holds a usable answer.
@@ -168,25 +185,27 @@ impl AskPanel {
         (0..self.questions.len()).all(|qi| self.is_answered(qi))
     }
 
-    /// Index of the first unanswered question, if any.
-    fn first_unanswered(&self) -> Option<usize> {
-        (0..self.questions.len()).find(|&qi| !self.is_answered(qi))
+    /// Tab labels of the questions left unanswered (for the confirm-page hint).
+    pub fn unanswered_headers(&self) -> Vec<&str> {
+        self.questions
+            .iter()
+            .enumerate()
+            .filter(|(qi, _)| !self.is_answered(*qi))
+            .map(|(_, q)| q.tab_label())
+            .collect()
     }
 
     /// Final reply text: `header: answer` lines, newline-separated.
-    /// Unvisited questions contribute an empty answer (submit is gated on
-    /// `all_answered`, so this only matters defensively).
+    /// Unanswered questions contribute the `(user did not answer)` placeholder
+    /// (the user may submit deliberately with gaps — the confirm page warns).
     pub fn build_response(&self) -> String {
         self.questions
             .iter()
             .enumerate()
             .map(|(qi, q)| {
-                let answer = if self.states[qi].visited {
-                    self.answer_value(qi)
-                } else {
-                    None
-                }
-                .unwrap_or_default();
+                let answer = self
+                    .answer_value(qi)
+                    .unwrap_or_else(|| UNANSWERED_PLACEHOLDER.to_string());
                 format!("{}: {}", q.tab_label(), answer)
             })
             .collect::<Vec<_>>()
@@ -225,7 +244,6 @@ impl AskPanel {
 
     /// Switch tab with wrap-around (confirm page included).
     fn switch_tab(&mut self, delta: isize) {
-        self.leave_current();
         let tabs = self.tab_count();
         self.current = wrap_index(self.current, delta, tabs);
         if self.on_confirm_page() {
@@ -235,7 +253,6 @@ impl AskPanel {
 
     /// Advance to the next tab, clamped at the confirm page (Enter semantics).
     fn advance(&mut self) {
-        self.leave_current();
         if self.current < self.questions.len() {
             self.current += 1;
         }
@@ -244,17 +261,17 @@ impl AskPanel {
         }
     }
 
-    /// Record the current question's state before leaving it.
-    fn leave_current(&mut self) {
+    /// Commit the option under the cursor as the single-select answer
+    /// (Enter on an option row). The choice is captured, not derived — later
+    /// cursor movement cannot change a committed answer; re-commit overrides.
+    fn commit_option(&mut self) {
         let qi = self.current;
-        if qi >= self.questions.len() {
-            return;
+        let cursor = self.states[qi].cursor;
+        if cursor < self.questions[qi].options.len() {
+            let st = &mut self.states[qi];
+            st.selected = Some(cursor);
+            st.custom = None; // last explicit choice wins
         }
-        let st = &mut self.states[qi];
-        if !st.draft.trim().is_empty() {
-            st.custom = Some(st.draft.clone());
-        }
-        st.visited = true;
     }
 
     // ── Editor ──────────────────────────────────────────────────
@@ -286,6 +303,7 @@ impl AskPanel {
         } else {
             Some(st.draft.clone())
         };
+        st.selected = None; // free-form text overrides a committed option
     }
 
     fn edit_insert_char(&mut self, c: char) {
@@ -402,17 +420,13 @@ impl AskPanel {
         PanelAction::None
     }
 
-    /// Enter on the current tab: advance, enter the editor, or activate the
-    /// confirm page.
+    /// Enter on the current tab: commit+advance (option row), enter the
+    /// editor (free-form row), or activate the confirm page. Submit is not
+    /// gated — unanswered questions are sent with the placeholder; the
+    /// confirm page has already warned about them.
     fn enter(&mut self) -> PanelAction {
         if self.on_confirm_page() {
             if self.confirm_cursor == 0 {
-                // Submit — only with every question answered; otherwise jump
-                // to the first unanswered question (no silent defaults).
-                if let Some(qi) = self.first_unanswered() {
-                    self.current = qi;
-                    return PanelAction::None;
-                }
                 self.finished = Some(PanelFinish::Submitted);
                 PanelAction::Reply(self.build_response())
             } else {
@@ -423,6 +437,9 @@ impl AskPanel {
             self.start_editing();
             PanelAction::None
         } else {
+            if !self.questions[self.current].multi_select {
+                self.commit_option();
+            }
             self.advance();
             PanelAction::None
         }
@@ -510,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_wraps_and_is_the_single_select_answer() {
+    fn cursor_wraps_but_browsing_never_answers() {
         let mut p = two_question_panel();
         assert_eq!(p.states[0].cursor, 0);
         p.handle_key(key(KeyCode::Down));
@@ -519,12 +536,58 @@ mod tests {
         assert_eq!(p.states[0].cursor, 2, "third row is the free-form row");
         p.handle_key(key(KeyCode::Down));
         assert_eq!(p.states[0].cursor, 0, "cursor wraps");
-        p.handle_key(key(KeyCode::Down));
-        assert_eq!(p.answer_value(0).as_deref(), Some("深色"));
-        p.handle_key(key(KeyCode::Enter));
-        // Enter advanced to the next question and recorded the answer.
+        // Pure navigation (cursor moves + tab switches) records no answer —
+        // the tab must not turn green just because the user looked around.
+        p.handle_key(key(KeyCode::Right));
         assert_eq!(p.current, 1);
+        assert!(!p.is_answered(0), "browsing must not answer q1");
+        assert_eq!(p.answer_value(0), None);
+    }
+
+    #[test]
+    fn enter_commits_single_select_option_and_advances() {
+        let mut p = two_question_panel();
+        p.handle_key(key(KeyCode::Down)); // cursor → 深色
+        p.handle_key(key(KeyCode::Enter)); // commit + advance
+        assert_eq!(p.states[0].selected, Some(1));
+        assert_eq!(p.answer_value(0).as_deref(), Some("深色"));
         assert!(p.is_answered(0));
+        assert_eq!(p.current, 1);
+    }
+
+    #[test]
+    fn committed_answer_survives_cursor_movement() {
+        let mut p = two_question_panel();
+        p.handle_key(key(KeyCode::Down));
+        p.handle_key(key(KeyCode::Enter)); // commit 深色
+        p.handle_key(key(KeyCode::Left)); // back to q1
+        p.handle_key(key(KeyCode::Up)); // cursor → 浅色 (row 0)
+        assert_eq!(
+            p.answer_value(0).as_deref(),
+            Some("深色"),
+            "committed answer is captured, not derived from the cursor"
+        );
+        // Re-commit overrides.
+        p.handle_key(key(KeyCode::Enter));
+        assert_eq!(p.answer_value(0).as_deref(), Some("浅色"));
+    }
+
+    #[test]
+    fn custom_text_overrides_committed_option() {
+        let mut p = two_question_panel();
+        p.handle_key(key(KeyCode::Down));
+        p.handle_key(key(KeyCode::Enter)); // commit 深色, advance to q2
+        p.handle_key(key(KeyCode::Left)); // back to q1 (cursor still row 1)
+        p.handle_key(key(KeyCode::Down)); // → free-form row
+        p.handle_key(ch('h'));
+        p.handle_key(key(KeyCode::Enter)); // confirm text
+        assert_eq!(p.answer_value(0).as_deref(), Some("h"));
+        // Committing an option again overrides back.
+        p.handle_key(key(KeyCode::Left));
+        p.handle_key(key(KeyCode::Up));
+        p.handle_key(key(KeyCode::Up)); // cursor → row 0
+        p.handle_key(key(KeyCode::Enter));
+        assert_eq!(p.answer_value(0).as_deref(), Some("浅色"));
     }
 
     #[test]
@@ -543,12 +606,13 @@ mod tests {
     }
 
     #[test]
-    fn tab_does_not_toggle_single_select() {
+    fn tab_and_space_do_not_touch_single_select() {
         let mut p = two_question_panel();
         p.handle_key(key(KeyCode::Tab));
         p.handle_key(ch(' '));
-        assert_eq!(p.answer_value(0).as_deref(), Some("浅色"));
         assert_eq!(p.states[0].toggles, vec![false, false]);
+        assert_eq!(p.states[0].selected, None);
+        assert_eq!(p.answer_value(0), None);
     }
 
     #[test]
@@ -620,13 +684,20 @@ mod tests {
     }
 
     #[test]
-    fn leaving_custom_row_falls_back_to_options_when_text_empty() {
+    fn leaving_a_question_never_auto_commits_a_draft() {
         let mut p = two_question_panel();
         p.handle_key(key(KeyCode::Down));
-        p.handle_key(key(KeyCode::Down)); // custom row, empty
-        p.handle_key(key(KeyCode::Right)); // leave via tab switch
+        p.handle_key(key(KeyCode::Down)); // custom row
+        p.handle_key(ch('x')); // uncommitted draft
+        p.handle_key(key(KeyCode::Up)); // leave the editor, keep the draft
+        p.handle_key(key(KeyCode::Right)); // leave the question
         assert_eq!(p.current, 1);
-        assert!(!p.is_answered(0), "empty free-form row is no answer");
+        assert_eq!(
+            p.answer_value(0),
+            None,
+            "a draft without Enter is no answer"
+        );
+        assert_eq!(p.states[0].draft, "x", "the draft itself is preserved");
     }
 
     #[test]
@@ -644,7 +715,7 @@ mod tests {
     #[test]
     fn build_response_appends_custom_text_for_multi() {
         let mut p = two_question_panel();
-        p.handle_key(key(KeyCode::Right)); // to Q2 (leaves Q1 on its cursor)
+        p.handle_key(key(KeyCode::Right)); // browse to Q2 — Q1 left unanswered
         p.handle_key(ch(' ')); // 多选 on
         for _ in 0..3 {
             p.handle_key(key(KeyCode::Down)); // slide to the free-form row
@@ -653,33 +724,45 @@ mod tests {
             p.handle_key(ch(c));
         }
         p.handle_key(key(KeyCode::Enter)); // confirm, advance to confirm page
-        assert_eq!(p.build_response(), "配色方案: 浅色\n测试项: 多选, XY");
-        assert!(p.is_answered(0), "Q1 keeps its cursor answer");
+        assert_eq!(
+            p.build_response(),
+            "配色方案: (user did not answer)\n测试项: 多选, XY"
+        );
+        assert!(
+            !p.is_answered(0),
+            "browsed-but-uncommitted Q1 stays unanswered"
+        );
         assert!(p.is_answered(1));
     }
 
     #[test]
-    fn submit_gating_jumps_to_first_unanswered() {
+    fn submit_is_not_gated_and_uses_placeholder_for_unanswered() {
         let mut p = two_question_panel();
-        p.handle_key(key(KeyCode::Enter)); // Q1 answered (cursor = 浅色) → Q2
+        p.handle_key(key(KeyCode::Enter)); // commit 浅色 → Q2
         assert!(p.is_answered(0));
-        p.handle_key(key(KeyCode::Right)); // Q2 → confirm page
+        p.handle_key(key(KeyCode::Right)); // Q2 (unanswered) → confirm page
         assert_eq!(p.current, 2);
-        assert_eq!(p.handle_key(key(KeyCode::Enter)), PanelAction::None);
         assert_eq!(
-            p.current, 1,
-            "submit bounces to the first unanswered question"
+            p.unanswered_headers(),
+            vec!["测试项"],
+            "confirm-page hint lists the unanswered question"
         );
-        // Answer Q2 then submit for real.
-        p.handle_key(ch(' '));
-        p.handle_key(key(KeyCode::Enter));
-        assert_eq!(p.current, 2);
+        // Submit goes through — no bounce.
         let action = p.handle_key(key(KeyCode::Enter));
         assert_eq!(
             action,
-            PanelAction::Reply("配色方案: 浅色\n测试项: 多选".into())
+            PanelAction::Reply("配色方案: 浅色\n测试项: (user did not answer)".into())
         );
         assert_eq!(p.finished, Some(PanelFinish::Submitted));
+    }
+
+    #[test]
+    fn multi_toggle_back_to_none_is_unanswered() {
+        let mut p = two_question_panel();
+        p.handle_key(key(KeyCode::Right));
+        p.handle_key(ch(' ')); // on
+        p.handle_key(ch(' ')); // off
+        assert_eq!(p.answer_value(1), None);
     }
 
     #[test]
@@ -719,10 +802,12 @@ mod tests {
     fn legacy_choices_are_normalized_into_options() {
         let mut q = question("q1", "", false, &[]);
         q.choices = vec!["y".into(), "n".into()];
-        let p = AskPanel::new("tc".into(), vec![q]);
+        let mut p = AskPanel::new("tc".into(), vec![q]);
         assert_eq!(p.questions[0].options.len(), 2);
         assert!(p.questions[0].choices.is_empty());
         assert_eq!(p.questions[0].tab_label(), "q1", "header falls back to id");
+        assert_eq!(p.answer_value(0), None, "no implicit answer before Enter");
+        p.handle_key(key(KeyCode::Enter)); // commit first option
         assert_eq!(p.answer_value(0).as_deref(), Some("y"));
     }
 

@@ -15,6 +15,7 @@
 
 use crate::app::ask_panel::AskPanel;
 use crate::app::ask_panel::PanelFinish;
+use crate::app::ask_panel::UNANSWERED_PLACEHOLDER;
 use crate::config::ThemePalette;
 use crate::render::markdown::render_markdown_with_width;
 use ratatui::style::Modifier;
@@ -24,8 +25,12 @@ use ratatui::text::Span;
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
-/// Indent of option descriptions (aligned under the option label).
-const DESC_INDENT: usize = 6;
+/// Description indent under option rows: cursor(2) + number(3) + marker(4)
+/// columns — the label always starts at column 9.
+const OPTION_DESC_INDENT: usize = 9;
+/// Description indent under marker-less rows (free-form / confirm rows):
+/// cursor(2) + number(3) columns.
+const ROW_DESC_INDENT: usize = 5;
 
 /// An agent question: an interactive panel, or a legacy single-question prompt.
 #[derive(Debug, Clone)]
@@ -184,10 +189,18 @@ fn option_rows(
         ];
         if q.multi_select {
             spans.push(checkbox_span(st.toggles[i], palette));
+        } else {
+            spans.push(radio_span(st.selected == Some(i), palette));
         }
         spans.push(label_span(&option.label, is_cursor, palette));
         lines.push(Line::from(spans));
-        push_description(&option.description, palette, width, lines);
+        push_description(
+            &option.description,
+            palette,
+            width,
+            lines,
+            OPTION_DESC_INDENT,
+        );
     }
 
     // Free-form row (always last).
@@ -233,7 +246,13 @@ fn option_rows(
             label_style(is_cursor, palette),
         ));
         lines.push(Line::from(spans));
-        push_description("Enter a custom response", palette, width, lines);
+        push_description(
+            "Enter a custom response",
+            palette,
+            width,
+            lines,
+            ROW_DESC_INDENT,
+        );
     }
 }
 
@@ -244,6 +263,19 @@ fn confirm_rows(
     width: u16,
     lines: &mut Vec<Line<'static>>,
 ) {
+    // Unanswered-question warning: the user may still submit (unanswered
+    // questions are sent as the placeholder), but never silently.
+    let unanswered = panel.unanswered_headers();
+    if !unanswered.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "⚠ Unanswered: {} — they will be sent as \"{UNANSWERED_PLACEHOLDER}\"",
+                unanswered.join(", ")
+            ),
+            Style::default().fg(palette.warning),
+        )));
+        lines.push(Line::from(""));
+    }
     const ROWS: [(&str, &str); 2] = [
         ("Submit", "Send the collected answers to the agent."),
         (
@@ -259,7 +291,7 @@ fn confirm_rows(
             label_span(label, is_cursor, palette),
         ];
         lines.push(Line::from(spans));
-        push_description(description, palette, width, lines);
+        push_description(description, palette, width, lines, ROW_DESC_INDENT);
     }
 }
 
@@ -303,21 +335,32 @@ fn checkbox_span(checked: bool, palette: &ThemePalette) -> Span<'static> {
     }
 }
 
+/// Single-select marker: `( )` uncommitted, `(●)` the committed option.
+/// Mirrors the multi-select checkbox column.
+fn radio_span(selected: bool, palette: &ThemePalette) -> Span<'static> {
+    if selected {
+        Span::styled("(●) ", Style::default().fg(palette.success))
+    } else {
+        Span::styled("( ) ", Style::default().fg(palette.dim))
+    }
+}
+
 fn push_description(
     text: &str,
     palette: &ThemePalette,
     width: u16,
     lines: &mut Vec<Line<'static>>,
+    indent: usize,
 ) {
     if text.trim().is_empty() {
         return;
     }
     let dim = Style::default().fg(palette.dim);
-    let indent = " ".repeat(DESC_INDENT);
-    let avail = (width as usize).saturating_sub(DESC_INDENT);
+    let indent_str = " ".repeat(indent);
+    let avail = (width as usize).saturating_sub(indent);
     for wrapped in wrap_plain(text, avail) {
         lines.push(Line::from(vec![
-            Span::raw(indent.clone()),
+            Span::raw(indent_str.clone()),
             Span::styled(wrapped, dim),
         ]));
     }
@@ -558,15 +601,26 @@ mod tests {
         let out = text(&msg.to_lines(&p(), 80));
         assert!(out.contains("配色方案 > 测试项 > Submit"), "{out}");
         assert!(out.contains("theme?"), "{out}");
-        assert!(out.contains("❯ 1. 浅色主题"), "{out}");
+        assert!(out.contains("❯ 1. ( ) 浅色主题"), "{out}");
         assert!(out.contains("白色背景、深色文字"), "{out}");
-        assert!(out.contains("2. 深色主题"), "{out}");
+        assert!(out.contains("2. ( ) 深色主题"), "{out}");
         assert!(out.contains("3. Type Something"), "{out}");
         assert!(out.contains("Enter a custom response"), "{out}");
         assert!(out.contains("↑↓ select · Enter next"), "{out}");
         // No synthetic letters anywhere.
         assert!(!out.contains("A."), "{out}");
         assert!(!out.contains("B."), "{out}");
+    }
+
+    #[test]
+    fn committed_single_select_renders_radio() {
+        let mut panel = multi_panel();
+        panel.states[0].cursor = 1;
+        panel.states[0].selected = Some(1);
+        let msg = AskMessage::new_panel("tc".into(), panel);
+        let out = text(&msg.to_lines(&p(), 80));
+        assert!(out.contains("1. ( ) 浅色主题"), "{out}");
+        assert!(out.contains("❯ 2. (●) 深色主题"), "{out}");
     }
 
     #[test]
@@ -611,16 +665,33 @@ mod tests {
         let msg = AskMessage::new_panel("tc".into(), panel);
         let out = text(&msg.to_lines(&p(), 80));
         assert!(out.contains("Submit your answers?"), "{out}");
+        // Both questions unanswered → the warning lists them with the placeholder.
+        assert!(
+            out.contains(&format!(
+                "⚠ Unanswered: 配色方案, 测试项 — they will be sent as \"{UNANSWERED_PLACEHOLDER}\""
+            )),
+            "{out}"
+        );
         assert!(out.contains("❯ 1. Submit"), "{out}");
         assert!(out.contains("2. Cancel"), "{out}");
         assert!(out.contains("↑↓ select · Enter confirm"), "{out}");
     }
 
     #[test]
+    fn confirm_page_hides_warning_when_all_answered() {
+        let mut panel = multi_panel();
+        panel.states[0].selected = Some(0);
+        panel.states[1].toggles[0] = true;
+        panel.current = 2;
+        let msg = AskMessage::new_panel("tc".into(), panel);
+        let out = text(&msg.to_lines(&p(), 80));
+        assert!(!out.contains("Unanswered"), "{out}");
+    }
+
+    #[test]
     fn finished_panel_renders_summary() {
         let mut panel = multi_panel();
-        panel.states[0].visited = true;
-        panel.states[1].visited = true;
+        panel.states[0].selected = Some(0);
         panel.states[1].toggles[0] = true;
         panel.finished = Some(PanelFinish::Submitted);
         let msg = AskMessage::new_panel("tc".into(), panel);
@@ -681,7 +752,7 @@ mod tests {
         panel.questions[0].options[0].description = "一段比较长的描述文字用于验证换行行为".into();
         let msg = AskMessage::new_panel("tc".into(), panel);
         let out = text(&msg.to_lines(&p(), 20));
-        // Description must live on its own indented lines.
-        assert!(out.contains("      一段比较"), "{out}");
+        // Description indents under the option label (col 9: cursor+number+radio).
+        assert!(out.contains("         一段比较"), "{out}");
     }
 }
