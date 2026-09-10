@@ -78,17 +78,17 @@ async def write_file(path: str, content: str, ctx: ToolContext) -> str:
 @tool_registry.register(name="Edit")
 async def edit_file(
     path: str,
-    old_block: str,
-    new_block: str,
+    old_string: str,
+    new_string: str,
     ctx: ToolContext,
     replace_all: bool = False,
 ) -> str:
-    """Replace old_block with new_block. Exact match only. replace_all=True replaces all matches.
+    """Replace old_string with new_string. Exact match only. replace_all=True replaces all matches.
 
     Args:
         path: Target file path.
-        old_block: Exact text to find (must be unique in file unless replace_all=True).
-        new_block: Replacement text.
+        old_string: Exact text to find (must be unique in file unless replace_all=True).
+        new_string: Replacement text.
         replace_all: Replace all matches instead of requiring uniqueness.
 
     Returns:
@@ -105,27 +105,27 @@ async def edit_file(
     except (IsADirectoryError, PermissionError) as e:
         raise ToolError(f"edit: {path}: {e.strerror}")
 
-    if not old_block:
-        raise ToolError("edit: old_block cannot be empty")
+    if not old_string:
+        raise ToolError("edit: old_string cannot be empty")
 
     # 计数匹配
-    count = content.count(old_block)
+    count = content.count(old_string)
     if count == 0:
         # 提供有用提示：文件总行数、是否为空文件
         total_lines = len(content.splitlines())
         if total_lines == 0:
-            raise ToolError("edit: old_block not found (file is empty)")
+            raise ToolError("edit: old_string not found (file is empty)")
         # 提供前几行内容作为提示
         first_lines = "\n".join(content.splitlines()[:3])
         raise ToolError(
-            f"edit: old_block not found in {total_lines} lines\nfile starts with:\n{first_lines}"
+            f"edit: old_string not found in {total_lines} lines\nfile starts with:\n{first_lines}"
         )
     if count > 1 and not replace_all:
         # 返回所有匹配位置的行号
         pos = 0
         match_lines = []
         while True:
-            pos = content.find(old_block, pos)
+            pos = content.find(old_string, pos)
             if pos == -1:
                 break
             line_no = content[:pos].count("\n") + 1
@@ -137,10 +137,10 @@ async def edit_file(
 
     # 原子替换
     if replace_all:
-        new_content = content.replace(old_block, new_block)
+        new_content = content.replace(old_string, new_string)
     else:
-        pos = content.find(old_block)
-        new_content = content[:pos] + new_block + content[pos + len(old_block) :]
+        pos = content.find(old_string)
+        new_content = content[:pos] + new_string + content[pos + len(old_string) :]
 
     tmp = f"{path}.tmp.{os.getpid()}"
     try:
@@ -172,9 +172,9 @@ async def edit_file(
             f"  file: {total_old_lines} → {total_new_lines} lines"
         )
 
-    pos = content.find(old_block)
-    old_lines = len(old_block.splitlines())
-    new_lines = len(new_block.splitlines())
+    pos = content.find(old_string)
+    old_lines = len(old_string.splitlines())
+    new_lines = len(new_string.splitlines())
     line_no = content[:pos].count("\n") + 1
 
     # 轻量级返回：位置 + 行数变化 + 文件变化

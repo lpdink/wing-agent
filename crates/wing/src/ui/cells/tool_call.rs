@@ -36,11 +36,11 @@ use crate::ui::cells::todo_msg::render_todo_items;
 const FAILED_RESULT_MAX_CHARS: usize = 50;
 /// Number of trailing path segments to keep.
 const PATH_SEGMENT_COUNT: usize = 6;
-/// Maximum lines for Edit streaming new_block preview.
+/// Maximum lines for Edit streaming new_string preview.
 const EDIT_STREAM_MAX_NEW_LINES: usize = 20;
-/// Maximum lines for Edit streaming old_block before collapsing.
+/// Maximum lines for Edit streaming old_string before collapsing.
 const EDIT_STREAM_MAX_OLD_LINES: usize = 8;
-/// Lines to keep at head/tail when collapsing old_block.
+/// Lines to keep at head/tail when collapsing old_string.
 const EDIT_STREAM_OLD_COLLAPSE_KEEP: usize = 3;
 
 // ── ToolStatus ──────────────────────────────────────────────────
@@ -332,10 +332,10 @@ pub struct ToolCallBlock {
     /// When the tool started executing (for Bash timer display).
     pub started_at: Option<Instant>,
     /// Incremental syntax highlight cache for Write/Edit streaming.
-    /// Write: file content preview. Edit: new_block preview.
+    /// Write: file content preview. Edit: new_string preview.
     /// Mutually exclusive per tool — a block is never both Write and Edit.
     pub stream_highlight: Option<WriteHighlightCache>,
-    /// Edit streaming: old_block lines (rendered red, no highlight).
+    /// Edit streaming: old_string lines (rendered red, no highlight).
     edit_old_lines: Vec<String>,
     /// TodoWrite streaming: partial todo list parsed from streaming args.
     todo_stream: Option<TodoMessage>,
@@ -425,23 +425,29 @@ impl ToolCallBlock {
             }
             constants::TOOL_EDIT => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                let old_block = args.get("old_block").and_then(|v| v.as_str()).unwrap_or("");
-                let new_block = args.get("new_block").and_then(|v| v.as_str()).unwrap_or("");
+                let old_string = args
+                    .get("old_string")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let new_string = args
+                    .get("new_string")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
-                // old_block: full re-split each time (typically short).
+                // old_string: full re-split each time (typically short).
                 // Use split('\n') + strip_cr to match WriteHighlightCache semantics.
-                if !old_block.is_empty() {
-                    self.edit_old_lines = old_block
+                if !old_string.is_empty() {
+                    self.edit_old_lines = old_string
                         .split('\n')
                         .map(|l| strip_cr(l).to_string())
                         .collect();
                 }
 
-                // new_block: incremental highlight (shares stream_highlight cache;
+                // new_string: incremental highlight (shares stream_highlight cache;
                 // Write and Edit are mutually exclusive per block).
-                if !new_block.is_empty() {
+                if !new_string.is_empty() {
                     self.stream_highlight =
-                        WriteHighlightCache::update(self.stream_highlight.take(), path, new_block);
+                        WriteHighlightCache::update(self.stream_highlight.take(), path, new_string);
                 }
             }
             constants::TOOL_TODO => {
@@ -508,12 +514,12 @@ impl ToolCallBlock {
             }
         }
 
-        // Edit streaming: render live diff preview (old_block red, new_block green).
+        // Edit streaming: render live diff preview (old_string red, new_string green).
         if status == ToolStatus::Streaming && renderer == ToolRenderer::Edit {
             let danger = Style::default().fg(palette.danger);
             let dim_style = Style::default().fg(palette.dim);
 
-            // old_block lines (red, no syntax highlight).
+            // old_string lines (red, no syntax highlight).
             if !self.edit_old_lines.is_empty() {
                 let total = self.edit_old_lines.len();
                 if total > EDIT_STREAM_MAX_OLD_LINES {
@@ -550,7 +556,7 @@ impl ToolCallBlock {
                 }
             }
 
-            // new_block lines (green, syntax highlighted).
+            // new_string lines (green, syntax highlighted).
             if let Some(ref cache) = self.stream_highlight {
                 let total = cache.highlighted_lines.len();
                 let show_count = total.min(EDIT_STREAM_MAX_NEW_LINES);
@@ -1037,8 +1043,8 @@ mod tests {
             "Edit".into(),
             json!({
                 "path": "/Users/abiter/project/src/main.rs",
-                "old_block": "old",
-                "new_block": "new"
+                "old_string": "old",
+                "new_string": "new"
             }),
             "tc13".into(),
         );
@@ -1046,7 +1052,7 @@ mod tests {
         assert!(text.contains("Edit"), "missing tool name: {text}");
         assert!(text.contains("main.rs"), "missing path: {text}");
         assert!(
-            !text.contains("old_block"),
+            !text.contains("old_string"),
             "should not show old/new in header: {text}"
         );
         // No space between tool name and args.
@@ -1257,54 +1263,54 @@ mod tests {
     // ── Edit streaming tests ─────────────────────────────────────
 
     #[test]
-    fn test_edit_streaming_old_block_only() {
+    fn test_edit_streaming_old_string_only() {
         let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e1".into());
         block.append_args_fragment(
-            r#"{"path": "src/main.rs", "old_block": "fn old() {\n    println!(\"old\");\n}"#,
+            r#"{"path": "src/main.rs", "old_string": "fn old() {\n    println!(\"old\");\n}"#,
         );
         let text = lines_text(&block.to_lines(&p(), 10));
         assert!(text.contains("◌"), "streaming bullet: {text}");
         assert!(text.contains("Edit(src/main.rs)"), "header: {text}");
-        assert!(text.contains("- fn old()"), "old_block line: {text}");
-        assert!(text.contains("- }"), "old_block last line: {text}");
-        // No new_block yet — no "+ " prefixed lines.
-        assert!(!text.contains("+ fn"), "no new_block yet: {text}");
+        assert!(text.contains("- fn old()"), "old_string line: {text}");
+        assert!(text.contains("- }"), "old_string last line: {text}");
+        // No new_string yet — no "+ " prefixed lines.
+        assert!(!text.contains("+ fn"), "no new_string yet: {text}");
     }
 
     #[test]
-    fn test_edit_streaming_both_blocks() {
+    fn test_edit_streaming_both_strings() {
         let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e2".into());
         block.append_args_fragment(
-            r#"{"path": "src/main.rs", "old_block": "fn old() {}", "new_block": "fn new() {\n    todo!()\n}"#,
+            r#"{"path": "src/main.rs", "old_string": "fn old() {}", "new_string": "fn new() {\n    todo!()\n}"#,
         );
         let text = lines_text(&block.to_lines(&p(), 10));
-        assert!(text.contains("- fn old() {}"), "old_block: {text}");
-        assert!(text.contains("+ fn new()"), "new_block first line: {text}");
-        assert!(text.contains("+ }"), "new_block last line: {text}");
+        assert!(text.contains("- fn old() {}"), "old_string: {text}");
+        assert!(text.contains("+ fn new()"), "new_string first line: {text}");
+        assert!(text.contains("+ }"), "new_string last line: {text}");
     }
 
     #[test]
-    fn test_edit_streaming_new_block_only() {
-        // LLM might emit new_block before old_block.
+    fn test_edit_streaming_new_string_only() {
+        // LLM might emit new_string before old_string.
         let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e3".into());
-        block.append_args_fragment(r#"{"path": "a.rs", "new_block": "hello world"#);
+        block.append_args_fragment(r#"{"path": "a.rs", "new_string": "hello world"#);
         let text = lines_text(&block.to_lines(&p(), 10));
         assert!(
             text.contains("+ hello world"),
-            "new_block without old: {text}"
+            "new_string without old: {text}"
         );
-        // No old_block lines (no "- " prefixed content lines).
-        assert!(!text.contains("- hello"), "no old_block lines: {text}");
+        // No old_string lines (no "- " prefixed content lines).
+        assert!(!text.contains("- hello"), "no old_string lines: {text}");
     }
 
     #[test]
-    fn test_edit_streaming_old_block_collapse() {
-        // old_block > 8 lines should collapse.
+    fn test_edit_streaming_old_string_collapse() {
+        // old_string > 8 lines should collapse.
         let old_lines: Vec<String> = (1..=12).map(|i| format!("line {i}")).collect();
-        let old_block = old_lines.join("\n");
+        let old_string = old_lines.join("\n");
         let fragment = format!(
-            r#"{{"path": "a.rs", "old_block": "{}"}}"#,
-            old_block.replace('\n', "\\n")
+            r#"{{"path": "a.rs", "old_string": "{}"}}"#,
+            old_string.replace('\n', "\\n")
         );
         let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e4".into());
         block.append_args_fragment(&fragment);
@@ -1318,13 +1324,13 @@ mod tests {
     #[test]
     fn test_edit_streaming_disappears_on_pending() {
         let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e5".into());
-        block.append_args_fragment(r#"{"path": "a.rs", "old_block": "old", "new_block": "new"#);
+        block.append_args_fragment(r#"{"path": "a.rs", "old_string": "old", "new_string": "new"#);
         // Streaming: preview visible.
         let text = lines_text(&block.to_lines(&p(), 10));
         assert!(text.contains("- old"), "visible during streaming: {text}");
 
         // Transition to Pending (ToolCall event arrives).
-        block.set_final_args(json!({"path": "a.rs", "old_block": "old", "new_block": "new"}));
+        block.set_final_args(json!({"path": "a.rs", "old_string": "old", "new_string": "new"}));
         // Caches are released.
         assert!(block.edit_old_lines.is_empty(), "old_lines cleared");
         assert!(block.stream_highlight.is_none(), "highlight cleared");
@@ -1341,9 +1347,9 @@ mod tests {
 
     #[test]
     fn test_edit_streaming_trailing_newline_consistency() {
-        // old_block and new_block with trailing \n should produce symmetric lines.
+        // old_string and new_string with trailing \n should produce symmetric lines.
         let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e6".into());
-        block.append_args_fragment(r#"{"path": "a.rs", "old_block": "a\n", "new_block": "b\n"}"#);
+        block.append_args_fragment(r#"{"path": "a.rs", "old_string": "a\n", "new_string": "b\n"}"#);
         let text = lines_text(&block.to_lines(&p(), 10));
         // Both use split('\n'): "a\n" → ["a", ""], "b\n" → ["b", ""]
         let old_count = text.matches("- ").count();
@@ -1354,9 +1360,9 @@ mod tests {
 
     #[test]
     fn test_edit_streaming_crlf() {
-        // CRLF in old_block: \r should be stripped.
+        // CRLF in old_string: \r should be stripped.
         let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e7".into());
-        block.append_args_fragment(r#"{"path": "a.rs", "old_block": "line1\r\nline2\r\n"}"#);
+        block.append_args_fragment(r#"{"path": "a.rs", "old_string": "line1\r\nline2\r\n"}"#);
         let text = lines_text(&block.to_lines(&p(), 10));
         assert!(text.contains("- line1"), "CRLF stripped: {text}");
         assert!(text.contains("- line2"), "CRLF stripped: {text}");

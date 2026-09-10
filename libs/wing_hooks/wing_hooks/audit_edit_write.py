@@ -32,7 +32,7 @@ def audit_edit_write(tc: ToolCall | None, **ctx) -> ToolCall | None:
     args_summary = {
         k: v
         for k, v in tc.arguments.items()
-        if k in ("path", "old_block", "new_block", "content")
+        if k in ("path", "old_string", "new_string", "content")
     }
     log.info(f"[audit] tool={tc.name}, args={args_summary}")
     return None
