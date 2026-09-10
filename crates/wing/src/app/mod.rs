@@ -1,6 +1,6 @@
 //! Application state machine and main event loop.
 
-pub mod ask_flow;
+pub mod ask_panel;
 pub mod constants;
 pub mod goal;
 pub mod intent;
@@ -111,9 +111,9 @@ pub struct App {
     /// Queued ask selections (when agent requires a choice from menu).
     /// Concurrent asks queue up; the front entry is the active one.
     ask_selections: std::collections::VecDeque<crate::ui::ask_select::AskSelection>,
-    /// Queued multi-question ask flows (AskUserQuestion with questions array).
+    /// Queued AskUserQuestion panels (multi-question / multi-select asks).
     /// Concurrent asks queue up; the front entry is the active one.
-    ask_flows: std::collections::VecDeque<ask_flow::AskFlow>,
+    ask_panels: std::collections::VecDeque<ask_panel::AskPanel>,
     /// Whether the terminal window/tab currently has focus.
     /// Default `true` — terminals that don't support focus events
     /// will never send FocusLost, so BEL is never triggered.
@@ -187,7 +187,7 @@ impl App {
             last_tick: std::time::Instant::now(),
             toast: None,
             ask_selections: std::collections::VecDeque::new(),
-            ask_flows: std::collections::VecDeque::new(),
+            ask_panels: std::collections::VecDeque::new(),
             focused: true,
             config,
             palette,
@@ -202,46 +202,46 @@ impl App {
         self.terminal_width >= WIDE_THRESHOLD
     }
 
-    /// Clear all queued ask state (selections + flows) and remove their
+    /// Clear all queued ask state (selections + panels) and remove their
     /// cells from chat. Called when a turn ends or is interrupted — the
     /// backend cancels all feedback waiters at the same time.
     fn clear_ask_state(&mut self) {
-        if self.ask_selections.is_empty() && self.ask_flows.is_empty() {
+        if self.ask_selections.is_empty() && self.ask_panels.is_empty() {
             return;
         }
         for sel in self.ask_selections.drain(..) {
             self.chat.remove_ask(&sel.tool_call_id);
         }
-        for flow in self.ask_flows.drain(..) {
-            self.chat.remove_ask(&flow.tool_call_id);
+        for panel in self.ask_panels.drain(..) {
+            self.chat.remove_ask(&panel.tool_call_id);
         }
         self.input.placeholder = "今天构建什么？".into();
     }
 
     /// Refresh the input placeholder to reflect the active (front) ask state.
     ///
-    /// Selection takes precedence over flow: while a selection is active its
-    /// key handler captures all keys, so the flow cannot be answered yet.
+    /// Selection takes precedence over panel: while a selection is active its
+    /// key handler captures all keys, so the panel cannot be answered yet.
     fn refresh_ask_placeholder(&mut self) {
         if self.ask_selections.front().is_some() {
             self.input.placeholder = "↑↓ select · Enter confirm".into();
-        } else if let Some(flow) = self.ask_flows.front() {
-            self.input.placeholder = format!("Question {} — type your answer...", flow.progress());
+        } else if self.ask_panels.front().is_some() {
+            self.input.placeholder = "Answering above · Esc to interrupt".into();
         } else {
             self.input.placeholder = "今天构建什么？".into();
         }
     }
 
-    /// Register the answerable flow state for a replayed pending ask.
+    /// Register the answerable state for a replayed pending ask.
     ///
     /// Resume replay builds the Ask *cell* in `replay_events` (chain-ordered
     /// with diffs); this makes it *interactive* by registering the same reply
-    /// channel the live path uses — a multi-question `AskFlow`, or a legacy
-    /// required `AskSelection` — so answering routes to `post(tool_call_id)`
-    /// and resolves the backend waiter. The live `WingEvent::Ask` branch keeps
-    /// its own inline registration (live rendering semantics are frozen); this
-    /// mirrors only the flow state, not the cell push / notification.
-    fn register_ask_flow(
+    /// channel the live path uses — an `AskPanel`, or a legacy required
+    /// `AskSelection` — so answering routes to `post(tool_call_id)` and
+    /// resolves the backend waiter. The live `WingEvent::Ask` branch keeps
+    /// its own inline registration; this mirrors only the panel state, not
+    /// the cell push / notification.
+    fn register_ask_panel(
         &mut self,
         tool_call_id: &str,
         questions: &[AskQuestion],
@@ -249,10 +249,9 @@ impl App {
         required: bool,
     ) {
         if !questions.is_empty() {
-            self.ask_flows.push_back(ask_flow::AskFlow::new(
-                tool_call_id.to_string(),
-                questions.to_vec(),
-            ));
+            let panel = ask_panel::AskPanel::new(tool_call_id.to_string(), questions.to_vec());
+            self.chat.update_ask_panel(tool_call_id, panel.clone());
+            self.ask_panels.push_back(panel);
         } else if required && !choices.is_empty() {
             self.ask_selections
                 .push_back(crate::ui::ask_select::AskSelection::new(
@@ -264,6 +263,48 @@ impl App {
             {
                 self.chat.update_ask_selection(tool_call_id, 0);
             }
+        }
+        self.refresh_ask_placeholder();
+    }
+
+    /// Sync the front panel's state into its chat cell (render snapshot).
+    fn sync_front_panel(&mut self) {
+        if let Some(panel) = self.ask_panels.front() {
+            let id = panel.tool_call_id.clone();
+            let panel = panel.clone();
+            self.chat.update_ask_panel(&id, panel);
+        }
+    }
+
+    /// Send the front panel's final reply and pop it from the queue.
+    ///
+    /// Goal mode routes to the active session (executor/checker), mirroring
+    /// the legacy selection path.
+    fn finish_ask_panel(&mut self, content: String) {
+        let Some(panel) = self.ask_panels.pop_front() else {
+            return;
+        };
+        let tool_call_id = panel.tool_call_id.clone();
+        if let Some(goal) = &self.goal
+            && let Some(role) = goal.active_role()
+        {
+            let actions = match role {
+                goal::GoalRole::Executor => vec![goal::GoalAction::SendToExecutor {
+                    content,
+                    tool_call_id: Some(tool_call_id),
+                }],
+                goal::GoalRole::Checker => vec![goal::GoalAction::SendToChecker {
+                    content,
+                    tool_call_id: Some(tool_call_id),
+                }],
+            };
+            self.execute_goal_actions(actions);
+        } else {
+            self.push_intent(AppIntent::SendMessage {
+                content,
+                tool_call_id: Some(tool_call_id),
+                request_id: crate::protocol::generate_request_id(),
+            });
         }
         self.refresh_ask_placeholder();
     }
@@ -316,11 +357,6 @@ impl App {
     ///
     /// Returns `true` if the text was consumed (either as a command or message).
     fn submit_message(&mut self, text: &str) -> bool {
-        // Multi-question ask flow: intercept submission to advance the
-        // front flow (concurrent asks are answered in arrival order).
-        if !self.ask_flows.is_empty() {
-            return self.handle_ask_flow_submit(text);
-        }
         if self.try_frontend_command(text) {
             return true;
         }
@@ -346,54 +382,18 @@ impl App {
         true
     }
 
-    /// Handle submission during a multi-question ask flow.
-    ///
-    /// Advances the front flow to the next question or sends the final
-    /// structured response (addressed by the flow's tool_call_id).
-    fn handle_ask_flow_submit(&mut self, text: &str) -> bool {
-        // Reject whitespace-only input (honors "must provide an answer" invariant).
-        let text = text.trim();
-        if text.is_empty() {
-            return true; // consumed but no-op
-        }
-        // Advance the front flow and extract needed data to avoid borrow conflicts.
-        let Some(result) = self.ask_flows.front_mut().map(|flow| {
-            let advance_result = flow.advance(text);
-            (
-                advance_result,
-                flow.tool_call_id.clone(),
-                flow.current_idx,
-                flow.answers.clone(),
-                flow.len(),
-                flow.progress(),
-            )
-        }) else {
-            return false;
-        };
-        let (advance_result, tool_call_id, idx, answers, total, progress) = result;
-
-        match advance_result {
-            None => {
-                // More questions to answer — update the AskMessage cell.
-                self.chat.update_ask_progress(&tool_call_id, idx, answers);
-                self.input.placeholder = format!("Question {progress} — type your answer...");
+    /// Handle a bracketed paste event: routed to the active ask panel's inline
+    /// editor when a panel is up (panel is modal), otherwise to the composer.
+    fn handle_paste(&mut self, text: &str) {
+        if !self.ask_panels.is_empty() {
+            if let Some(panel) = self.ask_panels.front_mut() {
+                panel.insert_paste(text);
             }
-            Some(json) => {
-                // All questions answered — send the addressed response and
-                // move on to the next queued ask (if any).
-                self.ask_flows.pop_front();
-                self.chat.update_ask_progress(&tool_call_id, total, answers);
-                self.push_intent(AppIntent::SendMessage {
-                    content: json,
-                    tool_call_id: Some(tool_call_id),
-                    // Ask replies resolve a feedback waiter — no pending entry,
-                    // the id only correlates the delivered ack.
-                    request_id: crate::protocol::generate_request_id(),
-                });
-                self.refresh_ask_placeholder();
-            }
+            self.sync_front_panel();
+            return;
         }
-        true
+        self.input.insert_str(text);
+        self.update_popup();
     }
 
     /// Push a side-effect intent for the runner to execute after draw.
@@ -1108,6 +1108,29 @@ impl App {
             return;
         }
 
+        // Ask panel: capture all keys while active (queue front) — except the
+        // keys the app keeps: Esc (global interrupt ladder below, so the user
+        // can interrupt at any time inside the panel) and PageUp/PageDown
+        // (chat still scrolls while the panel is modal).
+        let panel_owns_key = !matches!(
+            key.code,
+            crossterm::event::KeyCode::Esc
+                | crossterm::event::KeyCode::PageUp
+                | crossterm::event::KeyCode::PageDown
+        );
+        if panel_owns_key && !self.ask_panels.is_empty() {
+            let action = self
+                .ask_panels
+                .front_mut()
+                .map(|panel| panel.handle_key(key))
+                .unwrap_or(ask_panel::PanelAction::None);
+            self.sync_front_panel();
+            if let ask_panel::PanelAction::Reply(content) = action {
+                self.finish_ask_panel(content);
+            }
+            return;
+        }
+
         // Esc: close popup if active, otherwise clear/interrupt.
         if key.code == crossterm::event::KeyCode::Esc {
             if self.popup.active.is_active() {
@@ -1609,11 +1632,11 @@ impl App {
                 ..
             } => {
                 if !questions.is_empty() {
-                    // Multi-question flow (AskUserQuestion tool).
-                    let msg = AskMessage::new_multi(tool_call_id.clone(), questions.clone());
+                    // Multi-question panel (AskUserQuestion tool).
+                    let panel = ask_panel::AskPanel::new(tool_call_id.clone(), questions.clone());
+                    let msg = AskMessage::new_panel(tool_call_id.clone(), panel.clone());
                     self.chat.push(ChatCell::Ask(msg));
-                    let flow = ask_flow::AskFlow::new(tool_call_id.clone(), questions.clone());
-                    self.ask_flows.push_back(flow);
+                    self.ask_panels.push_back(panel);
                     self.refresh_ask_placeholder();
                     let notify_text = questions
                         .first()
@@ -1622,8 +1645,11 @@ impl App {
                     self.notify_unfocused(notify_text, AttentionKind::Ask);
                 } else {
                     // Legacy single-question (Bash dangerous command confirmation).
-                    let msg =
-                        AskMessage::new(tool_call_id.clone(), question.clone(), choices.clone());
+                    let msg = AskMessage::new_legacy(
+                        tool_call_id.clone(),
+                        question.clone(),
+                        choices.clone(),
+                    );
                     self.chat.push(ChatCell::Ask(msg));
                     if required && !choices.is_empty() {
                         let sel =
@@ -1820,10 +1846,10 @@ impl App {
                 }
                 // 4. Durable fact events (diff anchored onto cells above; ask
                 //    rendered as an answerable card). replay_events builds the
-                //    ask cells; register their reply flows so a resumed pending
+                //    ask cells; register their reply state so a resumed pending
                 //    ask is answerable through the same channel as live.
                 for ask in replay::replay_events(&mut self.chat, &events) {
-                    self.register_ask_flow(
+                    self.register_ask_panel(
                         &ask.tool_call_id,
                         &ask.questions,
                         &ask.choices,
@@ -2189,8 +2215,7 @@ pub async fn run_app(
                         app.handle_key(key);
                     }
                     TermEvent::Paste(text) => {
-                        app.input.insert_str(&text);
-                        app.update_popup();
+                        app.handle_paste(&text);
                     }
                     TermEvent::Resize(_, _) => {
                         // ratatui auto-resizes its buffers on the next draw;
@@ -2584,19 +2609,22 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_clears_stale_ask_flows_before_replay() {
+    fn test_sync_clears_stale_ask_panels_before_replay() {
         // Reconnect / session switch while an ask is pending: the
-        // live-registered flow must be cleared before the replayed pending
+        // live-registered panel must be cleared before the replayed pending
         // ask re-registers — otherwise the deque holds a duplicate and a
         // later answer pops the stale front entry (routed to a dead
         // tool_call_id, swallowing the next ask's answer).
         let mut app = test_app();
         // Simulate a live ask registered before the disconnect.
-        app.ask_flows.push_back(ask_flow::AskFlow::new(
+        app.ask_panels.push_back(ask_panel::AskPanel::new(
             "ask-live".into(),
             vec![AskQuestion {
                 id: "q0".into(),
                 question: "old session question?".into(),
+                header: String::new(),
+                multi_select: false,
+                options: vec![],
                 choices: vec![],
             }],
         ));
@@ -2609,13 +2637,13 @@ mod tests {
         })];
         app.handle_event(sync_event(vec![], None, vec![], events, None));
         assert_eq!(
-            app.ask_flows.len(),
+            app.ask_panels.len(),
             1,
-            "replayed ask must be the only registered flow"
+            "replayed ask must be the only registered panel"
         );
-        assert_eq!(app.ask_flows[0].tool_call_id, "ask-live");
+        assert_eq!(app.ask_panels[0].tool_call_id, "ask-live");
         // And the replayed payload is the one registered (fresh question).
-        assert_eq!(app.ask_flows[0].questions[0].id, "q1");
+        assert_eq!(app.ask_panels[0].questions[0].id, "q1");
     }
 
     #[test]
@@ -2697,7 +2725,7 @@ mod tests {
     #[test]
     fn test_sync_replays_pending_ask_answerable() {
         // 6.14: a pending ask replays as an Ask cell AND registers the reply
-        // flow, so the user can answer it (resolves the backend waiter).
+        // panel, so the user can answer it (resolves the backend waiter).
         let mut app = test_app();
         let events = vec![serde_json::json!({
             "type": "ask",
@@ -2707,9 +2735,107 @@ mod tests {
         app.handle_event(sync_event(vec![], None, vec![], events, None));
 
         assert!(cell_kinds(&app).contains(&"ask"), "ask cell rendered");
-        // Answerable: the multi-question flow is registered with the right id.
-        assert_eq!(app.ask_flows.len(), 1);
-        assert_eq!(app.ask_flows[0].tool_call_id, "ask-1");
+        // Answerable: the panel is registered with the right id, and the
+        // legacy choices were normalized into options.
+        assert_eq!(app.ask_panels.len(), 1);
+        assert_eq!(app.ask_panels[0].tool_call_id, "ask-1");
+        assert_eq!(app.ask_panels[0].questions[0].options.len(), 2);
+    }
+
+    #[test]
+    fn test_ask_panel_key_flow_submits_header_answer() {
+        // Arrow keys move the cursor, Enter advances to the confirm page and
+        // Submit sends the `header: answer` reply addressed by tool_call_id.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        let mut app = test_app();
+        app.handle_event(sync_event(
+            vec![],
+            None,
+            vec![],
+            vec![serde_json::json!({
+                "type": "ask",
+                "tool_call_id": "ask-9",
+                "questions": [{
+                    "id": "theme",
+                    "header": "配色",
+                    "question": "which theme?",
+                    "options": [{"label": "浅色"}, {"label": "深色"}],
+                }],
+            })],
+            None,
+        ));
+        assert_eq!(app.ask_panels.len(), 1);
+
+        app.handle_key(key(KeyCode::Down)); // cursor → 深色
+        app.handle_key(key(KeyCode::Enter)); // advance → confirm page
+        app.handle_key(key(KeyCode::Enter)); // Submit
+
+        let sent = app.drain_intents().into_iter().find_map(|i| match i {
+            AppIntent::SendMessage {
+                content,
+                tool_call_id,
+                ..
+            } => Some((content, tool_call_id)),
+            _ => None,
+        });
+        assert_eq!(sent, Some(("配色: 深色".to_string(), Some("ask-9".into()))));
+        assert!(app.ask_panels.is_empty(), "panel popped after submit");
+        let finished = app.chat.cells.iter().any(|c| {
+            matches!(
+                c.cell(),
+                ChatCell::Ask(msg) if msg
+                    .panel
+                    .as_ref()
+                    .is_some_and(|p| p.finished == Some(ask_panel::PanelFinish::Submitted))
+            )
+        });
+        assert!(finished, "cell keeps the submitted summary");
+    }
+
+    #[test]
+    fn test_ask_panel_escape_interrupts_and_cancel_sends_sentinel() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        let mut app = test_app();
+        app.handle_event(sync_event(
+            vec![],
+            None,
+            vec![],
+            vec![serde_json::json!({
+                "type": "ask",
+                "tool_call_id": "ask-10",
+                "questions": [{"id": "q1", "header": "H", "question": "go?", "options": [{"label": "y"}]}],
+            })],
+            None,
+        ));
+
+        // Esc is never consumed by the panel — it reaches the interrupt ladder.
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(
+            app.ask_panels.len(),
+            1,
+            "panel survives until interrupted event"
+        );
+        assert!(
+            app.drain_intents()
+                .iter()
+                .any(|i| matches!(i, AppIntent::InterruptSession)),
+            "Esc must interrupt while the panel is active"
+        );
+
+        // Cancel path: → to the confirm page, ↓ to Cancel, Enter.
+        app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Enter));
+        let sent = app.drain_intents().into_iter().find_map(|i| match i {
+            AppIntent::SendMessage { content, .. } => Some(content),
+            _ => None,
+        });
+        assert_eq!(sent.as_deref(), Some(ask_panel::ASK_CANCEL_CONTENT));
+        assert!(app.ask_panels.is_empty());
     }
 
     #[test]

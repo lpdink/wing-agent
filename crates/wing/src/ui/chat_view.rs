@@ -20,6 +20,7 @@ use crate::render::markdown::render_markdown_with_width;
 use crate::render::markdown::render_plain;
 use crate::render::renderable::CellContext;
 
+use crate::app::ask_panel::AskPanel;
 use crate::app::constants::TOOL_BASH;
 
 use super::cached_cell::CachedCell;
@@ -430,22 +431,18 @@ impl ChatView {
         }
     }
 
-    /// Update the multi-question progress on the Ask cell with the given
-    /// tool_call_id. Sets `current_idx` and `answers` to reflect progress.
-    pub fn update_ask_progress(
-        &mut self,
-        tool_call_id: &str,
-        current_idx: usize,
-        answers: Vec<String>,
-    ) {
+    /// Replace the interactive panel state on the Ask cell with the given
+    /// tool_call_id (render snapshot of the app-owned `AskPanel`).
+    ///
+    /// Addressed by id so concurrent Ask cells don't clobber each other.
+    pub fn update_ask_panel(&mut self, tool_call_id: &str, panel: AskPanel) {
         for cell in self.cells.iter_mut().rev() {
             if let ChatCell::Ask(msg) = cell.cell()
                 && msg.tool_call_id == tool_call_id
             {
                 cell.mutate(|c| {
                     if let ChatCell::Ask(msg) = c {
-                        msg.current_idx = current_idx;
-                        msg.answers = answers;
+                        msg.panel = Some(panel);
                     }
                 });
                 return;

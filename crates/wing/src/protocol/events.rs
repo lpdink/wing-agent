@@ -51,13 +51,43 @@ pub struct AgentInfo {
     pub workspace: Option<String>,
 }
 
+/// A selectable option in an Ask question: label + optional description.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AskOption {
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+}
+
 /// A single question in a multi-question Ask event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AskQuestion {
     pub id: String,
     pub question: String,
+    /// Very short label rendered as the question tab (falls back to `id`).
+    #[serde(default)]
+    pub header: String,
+    /// true = the user may toggle several options.
+    #[serde(default, rename = "multiSelect")]
+    pub multi_select: bool,
+    /// Selectable options; empty = free-form only.
+    #[serde(default)]
+    pub options: Vec<AskOption>,
+    /// Legacy plain-string choices (old gateway records) — normalized into
+    /// `options` by `AskPanel::new`, kept for replay compatibility.
     #[serde(default)]
     pub choices: Vec<String>,
+}
+
+impl AskQuestion {
+    /// Effective tab label: header, falling back to id.
+    pub fn tab_label(&self) -> &str {
+        if self.header.trim().is_empty() {
+            &self.id
+        } else {
+            &self.header
+        }
+    }
 }
 
 /// Magic command metadata for command list.
@@ -944,6 +974,70 @@ mod tests {
                 );
             }
             _ => panic!("expected SyncSession"),
+        }
+    }
+
+    #[test]
+    fn deserialize_ask_event_with_panel_questions() {
+        // Wire contract with the Python AskUserQuestion tool
+        // (AskQuestion.model_dump(by_alias=True)): header + multiSelect +
+        // options[{label, description}].
+        let json = r#"{
+            "type": "ask",
+            "tool_call_id": "tc_ask",
+            "questions": [
+                {
+                    "id": "features",
+                    "header": "测试项",
+                    "question": "测哪些？",
+                    "multiSelect": true,
+                    "options": [
+                        {"label": "多选交互", "description": "测试 multiSelect"},
+                        {"label": "代码预览", "description": ""}
+                    ]
+                }
+            ],
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "request_id": "req6"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match event {
+            WingEvent::Ask { questions, .. } => {
+                let q = &questions[0];
+                assert_eq!(q.id, "features");
+                assert_eq!(q.header, "测试项");
+                assert!(q.multi_select);
+                assert_eq!(q.tab_label(), "测试项");
+                assert_eq!(q.options.len(), 2);
+                assert_eq!(q.options[0].label, "多选交互");
+                assert_eq!(q.options[0].description, "测试 multiSelect");
+                assert_eq!(q.options[1].description, "");
+            }
+            _ => panic!("expected Ask"),
+        }
+    }
+
+    #[test]
+    fn deserialize_legacy_ask_question_falls_back_to_choices() {
+        // Old gateway records carry plain-string choices and no header —
+        // serde defaults must keep them parseable; AskPanel normalizes them.
+        let json = r#"{
+            "type": "ask",
+            "tool_call_id": "tc_old",
+            "questions": [{"id": "q1", "question": "proceed?", "choices": ["y", "n"]}],
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "request_id": "req7"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match event {
+            WingEvent::Ask { questions, .. } => {
+                let q = &questions[0];
+                assert!(!q.multi_select);
+                assert!(q.options.is_empty());
+                assert_eq!(q.choices, vec!["y".to_string(), "n".to_string()]);
+                assert_eq!(q.tab_label(), "q1", "missing header falls back to id");
+            }
+            _ => panic!("expected Ask"),
         }
     }
 }

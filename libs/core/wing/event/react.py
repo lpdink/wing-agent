@@ -122,7 +122,10 @@ class AskEvent(WingEvent):
     # 关联的工具调用 id。客户端回复时经 post(tool_call_id=...) 定向 resolve
     # 对应的 feedback waiter（并发 ask 场景下区分回复归属）。
     tool_call_id: str = ""
-    # Multi-question format (AskUserQuestion tool)
+    # Multi-question format (AskUserQuestion tool)：每条含 id / header（tab
+    # 短标签）/ question / multiSelect / options[{label, description}]。
+    # 前端渲染为可交互面板，回复文本为 `header: answer` 逐行（多选 = 逗号
+    # 连接的选项 label 原文；确认页 Cancel 发 ASK_CANCEL_TOKEN 哨兵）。
     questions: list[dict] = Field(default_factory=list)
     # Legacy single-question format (Bash dangerous command confirmation)
     question: str = ""
