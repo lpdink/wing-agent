@@ -5,6 +5,7 @@
 
 use serde::Deserialize;
 
+use crate::app::ask_panel::AskPanel;
 use crate::app::constants::TOOL_TODO;
 use crate::protocol::AskQuestion;
 use crate::ui::cells::ask_msg::AskMessage;
@@ -67,7 +68,7 @@ struct ReplayEvent {
 }
 
 /// An `ask` event rendered during replay, returned so the App can register the
-/// answerable flow state (`AskFlow` / `AskSelection`) that makes the card
+/// answerable state (`AskPanel` / `AskSelection`) that makes the card
 /// interactive — replay builds the cell, the App owns the reply channel.
 #[derive(Debug, Clone)]
 pub struct ReplayedAsk {
@@ -122,18 +123,19 @@ pub fn replay_events(chat: &mut ChatView, events: &[serde_json::Value]) -> Vec<R
                 }
             }
             "ask" => {
-                // Reuse the live-path Ask cell construction (questions / choices
-                // / tool_call_id). Only still-pending asks reach here (the
+                // Reuse the live-path Ask cell construction (panel / choices /
+                // tool_call_id). Only still-pending asks reach here (the
                 // backend filters by live feedback waiters).
                 let tool_call_id = ev.tool_call_id.unwrap_or_default();
                 let msg = if ev.questions.is_empty() {
-                    AskMessage::new(
+                    AskMessage::new_legacy(
                         tool_call_id.clone(),
                         ev.question.clone(),
                         ev.choices.clone(),
                     )
                 } else {
-                    AskMessage::new_multi(tool_call_id.clone(), ev.questions.clone())
+                    let panel = AskPanel::new(tool_call_id.clone(), ev.questions.clone());
+                    AskMessage::new_panel(tool_call_id.clone(), panel)
                 };
                 chat.push(ChatCell::Ask(msg));
                 asks.push(ReplayedAsk {

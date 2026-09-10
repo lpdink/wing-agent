@@ -105,7 +105,7 @@ crates/wing/src/                  Rust CLI: TUI + stdio frontends
 │   ├── runner.rs                 Execute AppIntents (HTTP/WS side effects)
 │   ├── intent.rs / transport.rs  AppIntent enum + gateway transport abstraction
 │   ├── goal.rs                   Goal orchestration state machine (executor/checker loop)
-│   ├── ask_flow.rs               AskUserQuestion interaction flow
+│   ├── ask_panel.rs              AskUserQuestion panel (tabs/multi-select/inline editor; Esc owns interrupt)
 │   ├── turn_state.rs / render_context.rs / constants.rs
 │   ├── replay.rs                 SyncSession replay → ChatCells
 │   └── popup_state.rs            Popup + candidate cache + dedup
@@ -114,7 +114,7 @@ crates/wing/src/                  Rust CLI: TUI + stdio frontends
 │   ├── cells/                    Chat cell renderers (tool_call, thinking, todo, ask, diff)
 │   ├── input_area/               Composer (editing, movement, wrap, paste)
 │   ├── popup/                    Command palette + selection
-│   └── ask_select.rs             Ask option selector
+│   └── ask_select.rs             Legacy required-choice selector (Bash confirm)
 ├── render/                       Markdown + syntax highlighting (code_blocks, tables, links)
 ├── tui/                          Terminal abstraction (crossterm)
 ├── config/                       TUI config (colors, rendering, goal)

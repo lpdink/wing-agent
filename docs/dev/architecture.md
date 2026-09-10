@@ -129,7 +129,7 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 **中途订阅完整视图**：`_push_sync` 的 SyncSessionEvent 携带四组重放素材——`messages`（已提交 Message 投影）+ `uncommitted`（**单个**未提交 assistant Message 投影，已终结块）+ `uncommitted_tools`（未终结调用的原始 args 片段）+ `events`（活跃链上的**事实类**事件，按链序），外加 `turn_started_at`（恢复 working 已耗时）。前端组装顺序 **messages → uncommitted → uncommitted_tools → events → live 流**：`messages` 与 `uncommitted` 走同一条 `replay_messages` 路径，`uncommitted_tools` 走既有 live `ToolCallStream` 分支（客户端局部解析），`events` 最后锚定。这个顺序让"diff 渲染在其 ToolCall 卡片之前"的缺陷结构性消失——产生 diff 的 tool_use 是已终结块，必在 `uncommitted` 投影里先建出锚点 cell。`events` 的下发过滤归属后端单点（`FACT_EVENTS` + pending ask 谓词，见下）。
 
-**pending ask 重放**：`AskEvent` 落盘，但已答的 ask 不再是关于当下的事实（重放会渲染活的 Ask 卡，回答找不到 waiter 进虚空）。后端用 `Inbox._feedback_waiters` 的键集合（`pending_ask_ids()`）作权威待答集合，`get_active_events()` 据此只下发仍挂起的 ask；前端重放渲染 Ask cell 并注册 reply flow（`AskFlow`/`AskSelection`），用户回答走既有通道 resolve waiter。
+**pending ask 重放**：`AskEvent` 落盘，但已答的 ask 不再是关于当下的事实（重放会渲染活的 Ask 卡，回答找不到 waiter 进虚空）。后端用 `Inbox._feedback_waiters` 的键集合（`pending_ask_ids()`）作权威待答集合，`get_active_events()` 据此只下发仍挂起的 ask；前端重放渲染 Ask cell 并注册可答状态（`AskPanel`/`AskSelection`），用户回答走既有通道 resolve waiter。
 
 **前端重放**：`replay.rs` 两段式——先 replay_messages（建 ToolCall/thinking/text cell），再 replay_events（**能力分发**：diff 按 tool_call_id 锚定插入对应 ToolCall cell 后、ask 渲染为可答卡片，无渲染器的类型跳过以保持前向容忍；未知锚点 fallback append，与直播路径同款兜底）。前端**不再编码"孪生事件不得渲染"这类策略**——过滤已在后端 `FACT_EVENTS` 完成，前端只做能力分发。
 
