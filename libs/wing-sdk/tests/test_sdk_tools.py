@@ -124,9 +124,23 @@ async def test_read_binary_rejected(tmp_path):
 
 async def test_edit_unique(tmp_path):
     await write("f.txt", "foo bar foo", _workspace=str(tmp_path))
-    out = await edit("f.txt", "bar", "baz", _workspace=str(tmp_path))
+    # Claude Code dialect: old_string / new_string (LLM-facing names).
+    out = await edit(
+        "f.txt", old_string="bar", new_string="baz", _workspace=str(tmp_path)
+    )
     assert "ok @ line 1" in out
     assert "foo baz foo" in await read("f.txt", _workspace=str(tmp_path))
+
+
+async def test_edit_spec_uses_claude_param_names():
+    from wing_sdk.tools import _EDIT_PARAMS
+
+    assert [p.name for p in _EDIT_PARAMS] == [
+        "path",
+        "old_string",
+        "new_string",
+        "replace_all",
+    ]
 
 
 async def test_edit_multi_requires_replace_all(tmp_path):

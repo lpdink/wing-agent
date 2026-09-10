@@ -39,8 +39,8 @@ class BetterEditMetricsEntry(BaseModel):
         """累加一次工具调用结果。返回 self（就地修改）。"""
         self.times += 1
 
-        old_block = event.tool_args.get("old_block", "")
-        has_upto = UPTO_MARKER in old_block
+        old_string = event.tool_args.get("old_string", "")
+        has_upto = UPTO_MARKER in old_string
 
         if has_upto:
             self.with_upto_times += 1

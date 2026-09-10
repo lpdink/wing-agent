@@ -58,11 +58,11 @@ _WRITE_PARAMS = [
 _EDIT_PARAMS = [
     ToolParam(name="path", type="string", description="Target file path."),
     ToolParam(
-        name="old_block",
+        name="old_string",
         type="string",
         description="Exact text to find (must be unique in file unless replace_all=True).",
     ),
-    ToolParam(name="new_block", type="string", description="Replacement text."),
+    ToolParam(name="new_string", type="string", description="Replacement text."),
     ToolParam(
         name="replace_all",
         type="boolean",
@@ -176,7 +176,7 @@ def register_standard_tools(host: "ToolHost", workspace: str = ".") -> None:
         ),
         (
             "Edit",
-            "Replace old_block with new_block. Exact match only. replace_all=True replaces all matches.\n\nArgs:\n    path: Target file path.\n    old_block: Exact text to find (must be unique in file unless replace_all=True).\n    new_block: Replacement text.\n    replace_all: Replace all matches instead of requiring uniqueness.\n\nReturns:\n    Success with location and stats, or concise error with hints.",
+            "Replace old_string with new_string. Exact match only. replace_all=True replaces all matches.\n\nArgs:\n    path: Target file path.\n    old_string: Exact text to find (must be unique in file unless replace_all=True).\n    new_string: Replacement text.\n    replace_all: Replace all matches instead of requiring uniqueness.\n\nReturns:\n    Success with location and stats, or concise error with hints.",
             _EDIT_PARAMS,
             edit,
         ),

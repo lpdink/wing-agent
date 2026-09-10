@@ -21,7 +21,7 @@ class BetterEditError(ToolError):
     pass
 
 
-def _find_old_span(content: str, old_block: str) -> tuple[int, int]:
+def _find_old_span(content: str, old_string: str) -> tuple[int, int]:
     """Find the span to replace in content.
 
     Returns:
@@ -30,32 +30,32 @@ def _find_old_span(content: str, old_block: str) -> tuple[int, int]:
     Raises:
         BetterEditError: If match not found or ambiguous.
     """
-    if UPTO_MARKER not in old_block:
+    if UPTO_MARKER not in old_string:
         # Simple exact match mode
-        pos = content.find(old_block)
+        pos = content.find(old_string)
         if pos == -1:
             total_lines = len(content.splitlines())
             if total_lines == 0:
-                raise BetterEditError("old_block not found (file is empty)")
+                raise BetterEditError("old_string not found (file is empty)")
             first_lines = "\n".join(content.splitlines()[:3])
             raise BetterEditError(
-                f"old_block not found in {total_lines} lines\nfile starts with:\n{first_lines}"
+                f"old_string not found in {total_lines} lines\nfile starts with:\n{first_lines}"
             )
-        return pos, pos + len(old_block)
+        return pos, pos + len(old_string)
 
-    # Anchored edit mode: old_block contains [upto]
-    parts = old_block.split(UPTO_MARKER, 1)
+    # Anchored edit mode: old_string contains [upto]
+    parts = old_string.split(UPTO_MARKER, 1)
     if len(parts) != 2:
-        raise BetterEditError(f"old_block contains more than one {UPTO_MARKER} marker")
+        raise BetterEditError(f"old_string contains more than one {UPTO_MARKER} marker")
 
     head, tail = parts
     tail = tail.lstrip("\n")  # Allow newline after [upto] for readability
 
     if not head:
-        raise BetterEditError(f"old_block before {UPTO_MARKER} (head) cannot be empty")
+        raise BetterEditError(f"old_string before {UPTO_MARKER} (head) cannot be empty")
     if not tail or not tail.strip():
         raise BetterEditError(
-            f"old_block after {UPTO_MARKER} (tail) must contain unique anchor text"
+            f"old_string after {UPTO_MARKER} (tail) must contain unique anchor text"
         )
 
     # Find unique head
@@ -93,16 +93,16 @@ def _find_old_span(content: str, old_block: str) -> tuple[int, int]:
 @tool_registry.register(name="BetterEdit")
 async def better_edit(
     path: str,
-    old_block: str,
-    new_block: str,
+    old_string: str,
+    new_string: str,
     ctx: ToolContext,
 ) -> str:
-    """Edit a file using path, old_block, and new_block. The old text must match exactly once in the file; otherwise the edit fails for safety.
+    """Edit a file using path, old_string, and new_string. The old text must match exactly once in the file; otherwise the edit fails for safety.
 
-    For large replacements, prefer anchored old_block: write the first lines, then [upto], then the final lines.
+    For large replacements, prefer anchored old_string: write the first lines, then [upto], then the final lines.
     The tool replaces everything from the head through the tail. If the head or tail is ambiguous, the edit fails.
 
-    After [upto], always write unique final lines before closing old_block; never close old_block immediately after [upto].
+    After [upto], always write unique final lines before closing old_string; never close old_string immediately after [upto].
     Do not use a generic tail anchor like:
 
         some_function() {
@@ -115,23 +115,23 @@ async def better_edit(
 
     Example anchored edit:
 
-        old_block: "static int parse(void) {
+        old_string: "static int parse(void) {
             int ok = 0;
     [upto]
             return ok;
         }"
-        new_block: "static int parse(void) {
+        new_string: "static int parse(void) {
             return parse_impl();
         }"
 
-    To insert text, use old_block set to an exact unique anchor and new_block set to that anchor plus the added text.
+    To insert text, use old_string set to an exact unique anchor and new_string set to that anchor plus the added text.
 
-    Without [upto], old_block must match exactly once.
+    Without [upto], old_string must match exactly once.
 
     Args:
         path: Target file path.
-        old_block: Exact text to find. Use [upto] marker for anchored edit.
-        new_block: Replacement text.
+        old_string: Exact text to find. Use [upto] marker for anchored edit.
+        new_string: Replacement text.
     """
     # Read file
     try:
@@ -142,12 +142,12 @@ async def better_edit(
     except (IsADirectoryError, PermissionError) as e:
         raise BetterEditError(f"cannot read {path}: {e.strerror}")
 
-    if not old_block:
-        raise BetterEditError("old_block cannot be empty")
+    if not old_string:
+        raise BetterEditError("old_string cannot be empty")
 
     # Find span to replace
-    start, end = _find_old_span(content, old_block)
-    new_content = content[:start] + new_block + content[end:]
+    start, end = _find_old_span(content, old_string)
+    new_content = content[:start] + new_string + content[end:]
 
     # Atomic write
     tmp = f"{path}.tmp.{os.getpid()}"
@@ -174,7 +174,7 @@ async def better_edit(
     # Calculate stats
     total_old_lines = len(content.splitlines())
     total_new_lines = len(new_content.splitlines())
-    has_upto = UPTO_MARKER in old_block
+    has_upto = UPTO_MARKER in old_string
 
     if has_upto:
         return (
@@ -182,8 +182,8 @@ async def better_edit(
             f"  file: {total_old_lines} → {total_new_lines} lines"
         )
     else:
-        old_lines = len(old_block.splitlines())
-        new_lines = len(new_block.splitlines())
+        old_lines = len(old_string.splitlines())
+        new_lines = len(new_string.splitlines())
         line_no = content[:start].count("\n") + 1
         return (
             f"better_edit: ok @ line {line_no}\n"

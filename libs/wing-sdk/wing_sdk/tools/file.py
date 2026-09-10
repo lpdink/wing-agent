@@ -120,17 +120,17 @@ async def write(path: str, content: str, _workspace: str = ".") -> str:
 
 async def edit(
     path: str,
-    old_block: str,
-    new_block: str,
+    old_string: str,
+    new_string: str,
     replace_all: bool = False,
     _workspace: str = ".",
 ) -> str:
-    """Replace old_block with new_block. Exact match only. replace_all=True replaces all matches.
+    """Replace old_string with new_string. Exact match only. replace_all=True replaces all matches.
 
     Args:
         path: Target file path.
-        old_block: Exact text to find (must be unique in file unless replace_all=True).
-        new_block: Replacement text.
+        old_string: Exact text to find (must be unique in file unless replace_all=True).
+        new_string: Replacement text.
         replace_all: Replace all matches instead of requiring uniqueness.
 
     Returns:
@@ -146,16 +146,16 @@ async def edit(
     except PermissionError:
         return f"edit: {path}: Permission denied"
 
-    count = text.count(old_block)
+    count = text.count(old_string)
     if count == 0:
-        return f"edit: old_block not found in {path}"
+        return f"edit: old_string not found in {path}"
     if count > 1 and not replace_all:
-        return f"edit: old_block found {count} times in {path} (use replace_all=True)"
+        return f"edit: old_string found {count} times in {path} (use replace_all=True)"
 
     new_text = (
-        text.replace(old_block, new_block)
+        text.replace(old_string, new_string)
         if replace_all
-        else text.replace(old_block, new_block, 1)
+        else text.replace(old_string, new_string, 1)
     )
     Path(resolved).write_text(new_text, encoding="utf-8")
 
@@ -169,9 +169,9 @@ async def edit(
             f"  file: {total_old_lines} → {total_new_lines} lines"
         )
 
-    pos = text.find(old_block)
-    old_lines = len(old_block.splitlines())
-    new_lines = len(new_block.splitlines())
+    pos = text.find(old_string)
+    old_lines = len(old_string.splitlines())
+    new_lines = len(new_string.splitlines())
     line_no = text[:pos].count("\n") + 1
     return (
         f"edit: ok @ line {line_no}\n"
