@@ -25,6 +25,8 @@ fn fmt_tokens(n: i64) -> String {
 #[derive(Debug, Clone)]
 pub struct StatusData {
     pub model: String,
+    /// Active model provider name (None until known / on old gateways).
+    pub provider: Option<String>,
     pub total_tokens: i64,
     pub context_window_tokens: i64,
     pub thinking: bool,
@@ -50,6 +52,7 @@ impl Default for StatusData {
     fn default() -> Self {
         Self {
             model: "unknown".into(),
+            provider: None,
             total_tokens: 0,
             context_window_tokens: 0,
             thinking: false,
@@ -131,7 +134,7 @@ impl Widget for StatusBar<'_> {
         let dim = Style::default().fg(self.palette.dim);
         let line_y = area.y;
 
-        // Build left spans: " Wing · model [think]"
+        // Build left spans: " Wing · model [· provider] [think]"
         let mut spans: Vec<Span<'static>> = vec![
             Span::styled(
                 " Wing",
@@ -142,6 +145,12 @@ impl Widget for StatusBar<'_> {
             Span::styled(" · ", dim),
             Span::styled(d.model.clone(), Style::default().fg(self.palette.text)),
         ];
+
+        // Provider name next to the model — hidden when unknown (old gateway).
+        if let Some(provider) = d.provider.as_deref().filter(|p| !p.is_empty()) {
+            spans.push(Span::styled(" · ", dim));
+            spans.push(Span::styled(provider.to_string(), dim));
+        }
 
         if d.thinking {
             let think_label = match &d.reasoning_effort {
@@ -346,5 +355,44 @@ mod tests {
         assert_eq!(data.model, "unknown");
         assert_eq!(data.session_prompt_tokens, 0);
         assert_eq!(data.session_completion_tokens, 0);
+    }
+
+    /// Render the status bar into a buffer and return its text.
+    fn render_left(data: &StatusData) -> String {
+        let area = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(area);
+        StatusBar::new(data, true, &ThemePalette::default()).render(area, &mut buf);
+        (0..area.width)
+            .map(|x| buf[(x, 0)].symbol())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    #[test]
+    fn test_status_bar_shows_provider_when_known() {
+        let data = StatusData {
+            model: "deepseek-v4-flash-0731".into(),
+            provider: Some("dashscope-openai".into()),
+            ..StatusData::default()
+        };
+        let out = render_left(&data);
+        assert!(
+            out.contains("deepseek-v4-flash-0731 · dashscope-openai"),
+            "provider must render next to the model, got: {out}"
+        );
+    }
+
+    #[test]
+    fn test_status_bar_hides_provider_when_unknown() {
+        let data = StatusData {
+            model: "gpt-4".into(),
+            ..StatusData::default()
+        };
+        let out = render_left(&data);
+        assert!(out.contains("gpt-4"), "got: {out}");
+        assert!(
+            !out.contains("gpt-4 · "),
+            "no provider → no dangling separator, got: {out}"
+        );
     }
 }

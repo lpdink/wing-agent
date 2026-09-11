@@ -1,4 +1,10 @@
-//! AskPanel — interactive state machine for an AskUserQuestion panel.
+//! AskPanel — AskUserQuestion adapter on top of the selection-panel kernel.
+//!
+//! Kernel responsibilities ([`SelectionPanel`]): page switching, per-question
+//! cursor memory, single-select commit capture. Adapter responsibilities
+//! (here): multi-select toggles, the inline free-form editor, the confirm page
+//! (registered as a *custom* page — the kernel keeps its tab slot but has no
+//! cursor on it), and reply construction.
 //!
 //! The panel renders a tab bar (question headers + a final confirm page),
 //! one question at a time with selectable options, and a free-form
@@ -17,8 +23,8 @@
 //! Answers are **explicit acts only** — browsing (moving the cursor, switching
 //! tabs) never records an answer, so tabs only turn "answered" when the user
 //! actually chose something:
-//! - single-select: the option committed with Enter (captured, not derived —
-//!   later cursor movement cannot change it; re-commit overrides)
+//! - single-select: the option committed with Enter (captured via the kernel,
+//!   not derived — later cursor movement cannot change it; re-commit overrides)
 //! - multi-select: the toggled options (each toggle is itself an explicit act)
 //! - free-form: the text confirmed with Enter in the editor
 //!
@@ -30,6 +36,9 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 
+use crate::app::selection_panel::PageKind;
+use crate::app::selection_panel::SelectionPanel;
+use crate::app::selection_panel::wrap_index;
 use crate::protocol::AskQuestion;
 
 /// Content sent to the backend when the user cancels from the confirm page.
@@ -57,6 +66,10 @@ pub enum PanelAction {
 }
 
 /// Per-question interaction state.
+///
+/// `cursor` and `selected` are the storage backing the kernel's per-page
+/// cursor / committed-row accessors (see the `SelectionPanel` impl below);
+/// the rest is adapter state.
 #[derive(Debug, Clone, Default)]
 pub struct QuestionState {
     /// Cursor row: `0..options.len()` = option, `options.len()` = free-form row.
@@ -116,11 +129,6 @@ impl AskPanel {
         }
     }
 
-    /// Total number of tabs including the confirm page.
-    fn tab_count(&self) -> usize {
-        self.questions.len() + 1
-    }
-
     /// Whether the confirm page is active.
     pub fn on_confirm_page(&self) -> bool {
         self.current >= self.questions.len()
@@ -135,11 +143,6 @@ impl AskPanel {
     fn on_custom_row(&self) -> bool {
         !self.on_confirm_page()
             && self.states[self.current].cursor >= self.questions[self.current].options.len()
-    }
-
-    /// Number of rows of question `qi` (options + free-form row).
-    fn row_count(&self, qi: usize) -> usize {
-        self.questions[qi].options.len() + 1
     }
 
     /// Answer value for question `qi`, or None when unanswered.
@@ -214,19 +217,6 @@ impl AskPanel {
 
     // ── Cursor / toggles ────────────────────────────────────────
 
-    /// Move the option cursor on the current question (wraps).
-    fn move_cursor(&mut self, delta: isize) {
-        if self.on_confirm_page() {
-            return;
-        }
-        let rows = self.row_count(self.current);
-        if rows == 0 {
-            return;
-        }
-        let st = &mut self.states[self.current];
-        st.cursor = wrap_index(st.cursor, delta, rows);
-    }
-
     /// Toggle the option under the cursor (multi-select questions only).
     fn toggle(&mut self) {
         if self.on_confirm_page() {
@@ -242,10 +232,10 @@ impl AskPanel {
         }
     }
 
-    /// Switch tab with wrap-around (confirm page included).
+    /// Switch tab with wrap-around (confirm page included); entering the
+    /// confirm page resets its Submit/Cancel cursor.
     fn switch_tab(&mut self, delta: isize) {
-        let tabs = self.tab_count();
-        self.current = wrap_index(self.current, delta, tabs);
+        self.move_page(delta);
         if self.on_confirm_page() {
             self.confirm_cursor = 0;
         }
@@ -262,15 +252,14 @@ impl AskPanel {
     }
 
     /// Commit the option under the cursor as the single-select answer
-    /// (Enter on an option row). The choice is captured, not derived — later
+    /// (Enter on an option row). The kernel captures the choice — later
     /// cursor movement cannot change a committed answer; re-commit overrides.
     fn commit_option(&mut self) {
-        let qi = self.current;
-        let cursor = self.states[qi].cursor;
-        if cursor < self.questions[qi].options.len() {
-            let st = &mut self.states[qi];
-            st.selected = Some(cursor);
-            st.custom = None; // last explicit choice wins
+        if self.on_custom_row() {
+            return; // the free-form row is no option
+        }
+        if self.commit_current().is_some() {
+            self.states[self.current].custom = None; // last explicit choice wins
         }
     }
 
@@ -451,6 +440,54 @@ impl AskPanel {
     }
 }
 
+/// AskPanel as a selection-panel adapter: each question is an options page
+/// (options + the free-form row as its last cursor row); the confirm page is
+/// an adapter-owned *custom* page — the kernel keeps its tab slot and window
+/// position but holds no cursor for it.
+impl SelectionPanel for AskPanel {
+    fn page_count(&self) -> usize {
+        self.questions.len() + 1
+    }
+
+    fn page_kind(&self, page: usize) -> PageKind {
+        if page < self.questions.len() {
+            PageKind::Options {
+                rows: self.questions[page].options.len() + 1,
+            }
+        } else {
+            PageKind::Custom
+        }
+    }
+
+    fn current_page(&self) -> usize {
+        self.current
+    }
+
+    fn set_current_page(&mut self, page: usize) {
+        self.current = page;
+    }
+
+    fn cursor_at(&self, page: usize) -> usize {
+        self.states.get(page).map_or(0, |st| st.cursor)
+    }
+
+    fn set_cursor_at(&mut self, page: usize, row: usize) {
+        if let Some(st) = self.states.get_mut(page) {
+            st.cursor = row;
+        }
+    }
+
+    fn committed_at(&self, page: usize) -> Option<usize> {
+        self.states.get(page).and_then(|st| st.selected)
+    }
+
+    fn set_committed_at(&mut self, page: usize, row: Option<usize>) {
+        if let Some(st) = self.states.get_mut(page) {
+            st.selected = row;
+        }
+    }
+}
+
 /// Normalize a question in place: legacy `choices` become options and the
 /// cursor bounds stay consistent.
 fn normalize_question(mut q: AskQuestion) -> AskQuestion {
@@ -466,14 +503,6 @@ fn normalize_question(mut q: AskQuestion) -> AskQuestion {
         q.choices.clear();
     }
     q
-}
-
-/// Wrap `index + delta` into `0..len`.
-fn wrap_index(index: usize, delta: isize, len: usize) -> usize {
-    if len == 0 {
-        return 0;
-    }
-    (index as isize + delta).rem_euclid(len as isize) as usize
 }
 
 /// Byte offset of the `char_idx`-th char in `s` (clamped to s.len()).
@@ -796,6 +825,54 @@ mod tests {
         assert_eq!(p.current, 0);
         p.handle_key(key(KeyCode::Right));
         assert_eq!(p.current, 1);
+    }
+
+    #[test]
+    fn confirm_page_is_a_custom_page_in_navigation_and_window() {
+        use crate::app::selection_panel::PANEL_WINDOW;
+        use crate::app::selection_panel::window_range;
+
+        let questions: Vec<AskQuestion> = (0..6)
+            .map(|i| question(&format!("q{i}"), &format!("Q{i}"), false, &["a", "b"]))
+            .collect();
+        let mut p = AskPanel::new("tc".into(), questions);
+        let confirm = 6;
+
+        // The confirm page is a tab like any other — but adapter-owned.
+        assert_eq!(p.page_count(), confirm + 1, "custom page counts as a tab");
+        assert_eq!(p.page_kind(confirm), PageKind::Custom);
+        assert_eq!(
+            p.page_kind(0),
+            PageKind::Options { rows: 3 },
+            "2 options + the free-form row"
+        );
+
+        // ← from the first question wraps onto the confirm page.
+        p.move_page(-1);
+        assert_eq!(p.current_page(), confirm);
+        // Kernel cursor operations are no-ops on the custom page.
+        p.move_cursor(1);
+        assert_eq!(p.cursor_at(confirm), 0);
+        p.move_cursor(-1);
+        assert_eq!(p.cursor_at(confirm), 0);
+        // → wraps back to the first question.
+        p.move_page(1);
+        assert_eq!(p.current_page(), 0);
+        // Per-question cursor memory survives the round trip.
+        p.set_cursor_at(0, 1);
+        p.move_page(-1);
+        p.move_page(1);
+        assert_eq!(p.cursor_at(0), 1);
+
+        // The tab window covers custom pages: standing on confirm, the window
+        // slides to keep it visible; standing on the last question it is one
+        // `›` away (hidden right).
+        let range = window_range(confirm, p.page_count(), PANEL_WINDOW);
+        assert_eq!(range, 2..7, "window slides to keep the confirm tab visible");
+        assert!(range.contains(&confirm));
+        let range = window_range(5, p.page_count(), PANEL_WINDOW);
+        assert_eq!(range, 1..6);
+        assert!(!range.contains(&confirm), "hidden behind the › marker");
     }
 
     #[test]

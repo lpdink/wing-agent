@@ -15,9 +15,19 @@
 
 use crate::app::ask_panel::AskPanel;
 use crate::app::ask_panel::PanelFinish;
+use crate::app::ask_panel::QuestionState;
 use crate::app::ask_panel::UNANSWERED_PLACEHOLDER;
 use crate::config::ThemePalette;
 use crate::render::markdown::render_markdown_with_width;
+use crate::ui::panel::Tab;
+use crate::ui::panel::TabState;
+use crate::ui::panel::Window;
+use crate::ui::panel::cursor_span;
+use crate::ui::panel::footer;
+use crate::ui::panel::label_span;
+use crate::ui::panel::label_style;
+use crate::ui::panel::option_row;
+use crate::ui::panel::tab_bar;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::Line;
@@ -82,9 +92,8 @@ impl AskMessage {
 // ── Panel rendering ──────────────────────────────────────────────
 
 fn panel_lines(panel: &AskPanel, palette: &ThemePalette, width: u16) -> Vec<Line<'static>> {
-    let dim = Style::default().fg(palette.dim);
     let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(tab_bar(panel, palette));
+    lines.push(ask_tab_bar(panel, palette));
     lines.push(Line::from(""));
 
     match panel.finished {
@@ -93,7 +102,7 @@ fn panel_lines(panel: &AskPanel, palette: &ThemePalette, width: u16) -> Vec<Line
             for line in panel.build_response().lines() {
                 lines.push(Line::from(vec![
                     Span::styled("✓ ", success),
-                    Span::styled(line.to_string(), dim),
+                    Span::styled(line.to_string(), Style::default().fg(palette.dim)),
                 ]));
             }
         }
@@ -119,58 +128,58 @@ fn panel_lines(panel: &AskPanel, palette: &ThemePalette, width: u16) -> Vec<Line
                 let md_width = Some(width.saturating_sub(2));
                 lines.extend(render_markdown_with_width(&q.question, md_width, palette));
                 if q.multi_select {
-                    lines.push(Line::from(Span::styled("(Select all that apply)", dim)));
+                    lines.push(Line::from(Span::styled(
+                        "(Select all that apply)",
+                        Style::default().fg(palette.dim),
+                    )));
                 }
                 lines.push(Line::from(""));
                 option_rows(panel, palette, width, &mut lines);
             }
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(footer_hint(panel), dim)));
+            lines.push(footer(footer_hint(panel), palette));
         }
     }
     lines.push(Line::from(""));
     lines
 }
 
-/// `? 配色方案 > 测试项 > Submit` — question tabs + confirm page.
-fn tab_bar(panel: &AskPanel, palette: &ThemePalette) -> Line<'static> {
-    let accent = Style::default()
-        .fg(palette.accent)
-        .add_modifier(Modifier::BOLD);
-    let dim = Style::default().fg(palette.dim);
-    let success = Style::default().fg(palette.success);
-
-    let mut spans: Vec<Span<'static>> = vec![Span::styled("? ", accent)];
-    for (i, q) in panel.questions.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(" > ", dim));
-        }
-        let style = if panel.finished.is_some() {
-            dim
-        } else if i == panel.current {
-            accent
-        } else if panel.is_answered(i) {
-            success
+/// `? 配色方案 > 测试项 > Submit` — question tabs + confirm page, windowed.
+fn ask_tab_bar(panel: &AskPanel, palette: &ThemePalette) -> Line<'static> {
+    let mut tabs: Vec<Tab> = panel
+        .questions
+        .iter()
+        .enumerate()
+        .map(|(i, q)| Tab {
+            label: q.tab_label(),
+            state: if panel.finished.is_some() {
+                TabState::Normal
+            } else if i == panel.current {
+                TabState::Active
+            } else if panel.is_answered(i) {
+                TabState::Marked
+            } else {
+                TabState::Normal
+            },
+        })
+        .collect();
+    tabs.push(Tab {
+        label: "Submit",
+        state: if panel.finished.is_some() {
+            TabState::Normal
+        } else if panel.on_confirm_page() {
+            TabState::Active
+        } else if panel.all_answered() {
+            TabState::Marked
         } else {
-            dim
-        };
-        spans.push(Span::styled(q.tab_label().to_string(), style));
-    }
-    spans.push(Span::styled(" > ", dim));
-    let submit_style = if panel.finished.is_some() {
-        dim
-    } else if panel.on_confirm_page() {
-        accent
-    } else if panel.all_answered() {
-        success
-    } else {
-        dim
-    };
-    spans.push(Span::styled("Submit", submit_style));
-    Line::from(spans)
+            TabState::Normal
+        },
+    });
+    tab_bar("? ", &tabs, panel.current, palette)
 }
 
-/// Option rows of the current question, plus the free-form row.
+/// Option rows of the current question, plus the free-form row, windowed to
+/// the shared visible size (the cursor row is always inside the window).
 fn option_rows(
     panel: &AskPanel,
     palette: &ThemePalette,
@@ -180,72 +189,85 @@ fn option_rows(
     let qi = panel.current;
     let q = &panel.questions[qi];
     let st = &panel.states[qi];
+    let window = Window::new(st.cursor, q.options.len() + 1);
 
-    for (i, option) in q.options.iter().enumerate() {
+    for i in window.range.clone() {
         let is_cursor = st.cursor == i;
-        let mut spans = vec![
-            cursor_span(is_cursor, palette),
-            number_span(i + 1, is_cursor, palette),
-        ];
-        if q.multi_select {
-            spans.push(checkbox_span(st.toggles[i], palette));
+        if i < q.options.len() {
+            let option = &q.options[i];
+            let mut content = vec![number_span(i + 1, is_cursor, palette)];
+            if q.multi_select {
+                content.push(checkbox_span(st.toggles[i], palette));
+            } else {
+                content.push(radio_span(st.selected == Some(i), palette));
+            }
+            content.push(label_span(&option.label, is_cursor, palette));
+            lines.push(option_row(&window, i, is_cursor, palette, content));
+            push_description(
+                &option.description,
+                palette,
+                width,
+                lines,
+                OPTION_DESC_INDENT,
+            );
         } else {
-            spans.push(radio_span(st.selected == Some(i), palette));
+            custom_row(&window, st, q.options.len(), palette, width, lines);
         }
-        spans.push(label_span(&option.label, is_cursor, palette));
-        lines.push(Line::from(spans));
-        push_description(
-            &option.description,
-            palette,
-            width,
-            lines,
-            OPTION_DESC_INDENT,
-        );
     }
+}
 
-    // Free-form row (always last).
-    let custom_idx = q.options.len();
+/// The free-form row (always the last row of a question): placeholder,
+/// committed text, kept draft, or the inline editor.
+fn custom_row(
+    window: &Window,
+    st: &QuestionState,
+    custom_idx: usize,
+    palette: &ThemePalette,
+    width: u16,
+    lines: &mut Vec<Line<'static>>,
+) {
     let is_cursor = st.cursor == custom_idx;
-    let mut spans = vec![
-        cursor_span(is_cursor, palette),
-        number_span(custom_idx + 1, is_cursor, palette),
-    ];
+    let mut content = vec![number_span(custom_idx + 1, is_cursor, palette)];
     if st.editing {
-        let used = 2 + 3 + "Type Something: ".chars().count();
-        spans.push(Span::styled(
+        // Reserve the cursor/number columns plus the window markers when this
+        // row carries one — editor text must not push them off-screen.
+        let markers = usize::from(window.left_hidden && custom_idx == window.range.start) * 2
+            + usize::from(window.right_hidden && custom_idx + 1 == window.range.end) * 2;
+        let used = 2 + 3 + "Type Something: ".chars().count() + markers;
+        content.push(Span::styled(
             "Type Something: ",
             label_style(is_cursor, palette),
         ));
         let budget = (width as usize).saturating_sub(used);
-        spans.extend(edit_spans(&st.draft, st.edit_cursor, palette, budget));
-        lines.push(Line::from(spans));
+        content.extend(edit_spans(&st.draft, st.edit_cursor, palette, budget));
+        lines.push(option_row(window, custom_idx, is_cursor, palette, content));
     } else if let Some(text) = st.custom.as_deref() {
-        spans.push(Span::styled(
+        content.push(Span::styled(
             "Type Something: ",
             label_style(is_cursor, palette),
         ));
-        spans.push(Span::styled(
+        content.push(Span::styled(
             text.to_string(),
             label_style(is_cursor, palette),
         ));
-        lines.push(Line::from(spans));
+        lines.push(option_row(window, custom_idx, is_cursor, palette, content));
     } else if !st.draft.trim().is_empty() {
         // Kept draft (editor left via ↑/↓) — uncommitted but visible.
-        spans.push(Span::styled(
+        content.push(Span::styled(
             "Type Something: ",
             label_style(is_cursor, palette),
         ));
-        spans.push(Span::styled(
+        content.push(Span::styled(
             st.draft.clone(),
             Style::default().fg(palette.dim),
         ));
-        lines.push(Line::from(spans));
+        lines.push(option_row(window, custom_idx, is_cursor, palette, content));
     } else {
-        spans.push(Span::styled(
+        content.push(Span::styled(
             "Type Something",
             label_style(is_cursor, palette),
         ));
-        lines.push(Line::from(spans));
+        lines.push(option_row(window, custom_idx, is_cursor, palette, content));
         push_description(
             "Enter a custom response",
             palette,
@@ -295,36 +317,9 @@ fn confirm_rows(
     }
 }
 
-fn cursor_span(is_cursor: bool, palette: &ThemePalette) -> Span<'static> {
-    if is_cursor {
-        Span::styled(
-            "❯ ",
-            Style::default()
-                .fg(palette.accent)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        Span::raw("  ")
-    }
-}
-
 fn number_span(index: usize, is_cursor: bool, palette: &ThemePalette) -> Span<'static> {
     // Decorative ordinal only — never part of the answer text.
     Span::styled(format!("{index}. "), label_style(is_cursor, palette))
-}
-
-fn label_span(label: &str, is_cursor: bool, palette: &ThemePalette) -> Span<'static> {
-    Span::styled(label.to_string(), label_style(is_cursor, palette))
-}
-
-fn label_style(is_cursor: bool, palette: &ThemePalette) -> Style {
-    if is_cursor {
-        Style::default()
-            .fg(palette.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(palette.text)
-    }
 }
 
 fn checkbox_span(checked: bool, palette: &ThemePalette) -> Span<'static> {
@@ -754,5 +749,31 @@ mod tests {
         let out = text(&msg.to_lines(&p(), 20));
         // Description indents under the option label (col 9: cursor+number+radio).
         assert!(out.contains("         一段比较"), "{out}");
+    }
+
+    #[test]
+    fn long_option_list_windows_and_marks_hidden_sides() {
+        // 8 options + free-form row, cursor on the 6th option (index 5):
+        // window slides to rows 1..6 (m1..m5), both sides hidden.
+        let mut panel = AskPanel::new(
+            "tc".into(),
+            vec![question(
+                "q",
+                "Q",
+                false,
+                &["m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7"],
+            )],
+        );
+        panel.states[0].cursor = 5;
+        let msg = AskMessage::new_panel("tc".into(), panel);
+        let out = text(&msg.to_lines(&p(), 80));
+        assert!(!out.contains("m0"), "above the window: {out}");
+        assert!(!out.contains("m6") && !out.contains("m7"), "below: {out}");
+        assert!(out.contains('‹') && out.contains('›'), "markers: {out}");
+        assert!(out.contains("❯ 6. ( ) m5"), "cursor on last visible: {out}");
+        assert!(
+            !out.contains("Type Something"),
+            "free-form row is outside the window: {out}"
+        );
     }
 }

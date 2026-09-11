@@ -395,11 +395,11 @@ mod tests {
     fn test_active_popup_sub_command_mode() {
         let mut popup = ActivePopup::default();
         let mut cache = sample_cache();
-        cache.models = vec![
-            ("gpt-4o".into(), String::new()),
-            ("gpt-4".into(), String::new()),
+        cache.branches = vec![
+            ("uuid-1".into(), "first".into()),
+            ("uuid-2".into(), "second".into()),
         ];
-        popup.update_from_input("/model ", &cache);
+        popup.update_from_input("/fork ", &cache);
         assert!(popup.is_active());
         assert!(matches!(popup, ActivePopup::SubCommand { .. }));
     }
@@ -418,11 +418,11 @@ mod tests {
     fn test_active_popup_sub_completion() {
         let mut popup = ActivePopup::default();
         let mut cache = sample_cache();
-        cache.models = vec![("gpt-4o".into(), String::new())];
-        popup.update_from_input("/model gp", &cache);
+        cache.branches = vec![("uuid-1".into(), "first".into())];
+        popup.update_from_input("/fork uu", &cache);
         let completion = popup.completion_text();
         assert!(completion.is_some());
-        assert_eq!(completion.unwrap(), "/model gpt-4o");
+        assert_eq!(completion.unwrap(), "/fork uuid-1");
     }
 
     #[test]
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn test_active_popup_should_submit() {
         let mut popup = ActivePopup::default();
-        let cache = sample_cache();
+        let mut cache = sample_cache();
         // /help exact match → popup hidden (None).
         popup.update_from_input("/help", &cache);
         assert!(!popup.is_active());
@@ -448,8 +448,9 @@ mod tests {
         popup.update_from_input("/hel", &cache);
         assert!(popup.is_active());
         assert!(popup.should_submit());
-        // /mod partial match → popup shows, should NOT submit (has candidates).
-        popup.update_from_input("/mod", &cache);
+        // /for partial match → popup shows, should NOT submit (has candidates).
+        cache.branches = vec![("uuid-1".into(), "first".into())];
+        popup.update_from_input("/for", &cache);
         assert!(popup.is_active());
         assert!(!popup.should_submit());
     }
@@ -463,20 +464,20 @@ mod tests {
         assert!(!popup.is_active());
         // must-select 命令精确匹配 → popup 保持打开，选中位跟随精确行
         //（Enter = 确认选择，而非自由文本发送）。
-        cache.models = vec![
-            ("gpt-4o".into(), String::new()),
-            ("gpt-5".into(), String::new()),
+        cache.branches = vec![
+            ("uuid-1".into(), "first".into()),
+            ("uuid-2".into(), "second".into()),
         ];
-        popup.update_from_input("/model gpt-4o", &cache);
+        popup.update_from_input("/fork uuid-1", &cache);
         assert!(popup.is_active());
         assert!(popup.should_submit());
         if let ActivePopup::SubCommand { rows, state, .. } = &popup {
-            assert_eq!(rows[state.selected].name, "gpt-4o");
+            assert_eq!(rows[state.selected].name, "uuid-1");
         } else {
             panic!("expected SubCommand popup");
         }
         // 部分匹配同样显示 popup。
-        popup.update_from_input("/model gpt", &cache);
+        popup.update_from_input("/fork uuid", &cache);
         assert!(popup.is_active());
     }
 
@@ -484,12 +485,12 @@ mod tests {
     fn test_must_select_empty_detection() {
         let mut popup = ActivePopup::default();
         let mut cache = sample_cache();
-        cache.models = vec![("gpt-4o".into(), String::new())];
+        cache.agents = vec![("coder".into(), String::new())];
         // 无匹配候选 → must-select 空（Enter 需给显式反馈，不落自由发送）。
-        popup.update_from_input("/model nonexistent", &cache);
+        popup.update_from_input("/agents nonexistent", &cache);
         assert!(popup.is_must_select_empty());
         // 有匹配候选 → 非空。
-        popup.update_from_input("/model gpt", &cache);
+        popup.update_from_input("/agents cod", &cache);
         assert!(!popup.is_must_select_empty());
         // 非 must-select 命令的空 popup → false。
         popup.update_from_input("/zzz", &cache);
@@ -500,8 +501,8 @@ mod tests {
     fn test_active_popup_sub_should_submit_requires_selection() {
         let mut popup = ActivePopup::default();
         let mut cache = sample_cache();
-        cache.models = vec![("gpt-4o".into(), String::new())];
-        popup.update_from_input("/model ", &cache);
+        cache.branches = vec![("uuid-1".into(), "first".into())];
+        popup.update_from_input("/fork ", &cache);
         // Has a selection → should submit.
         assert!(popup.should_submit());
     }

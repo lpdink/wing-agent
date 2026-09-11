@@ -4,10 +4,12 @@ pub mod ask_panel;
 pub mod constants;
 pub mod goal;
 pub mod intent;
+pub mod model_panel;
 pub mod popup_state;
 pub mod render_context;
 pub mod replay;
 pub mod runner;
+pub mod selection_panel;
 pub mod transport;
 pub mod turn_state;
 
@@ -39,6 +41,7 @@ use crate::ui::input_area::InputAction;
 use crate::ui::input_area::InputArea;
 use crate::ui::input_area::InputAreaWidget;
 use crate::ui::input_area::cursor_screen_pos;
+use crate::ui::model_panel::ModelPanelWidget;
 use crate::ui::popup::ActivePopup;
 use crate::ui::popup::command::candidate_request_for;
 use crate::ui::popup::command::is_must_select_command;
@@ -114,6 +117,11 @@ pub struct App {
     /// Queued AskUserQuestion panels (multi-question / multi-select asks).
     /// Concurrent asks queue up; the front entry is the active one.
     ask_panels: std::collections::VecDeque<ask_panel::AskPanel>,
+    /// `/model` selection panel (None = closed). Modal while open.
+    model_panel: Option<model_panel::ModelPanel>,
+    /// Last successful `/api/models` response — `/model` opens the panel from
+    /// this cache instantly and refreshes in the background.
+    model_sources: Vec<wing_api_client::models::ProviderModels>,
     /// Whether the terminal window/tab currently has focus.
     /// Default `true` — terminals that don't support focus events
     /// will never send FocusLost, so BEL is never triggered.
@@ -188,6 +196,8 @@ impl App {
             toast: None,
             ask_selections: std::collections::VecDeque::new(),
             ask_panels: std::collections::VecDeque::new(),
+            model_panel: None,
+            model_sources: Vec::new(),
             focused: true,
             config,
             palette,
@@ -383,13 +393,18 @@ impl App {
     }
 
     /// Handle a bracketed paste event: routed to the active ask panel's inline
-    /// editor when a panel is up (panel is modal), otherwise to the composer.
+    /// editor when one is up (panel is modal); the modal model panel drops it;
+    /// otherwise it goes to the composer.
     fn handle_paste(&mut self, text: &str) {
         if !self.ask_panels.is_empty() {
             if let Some(panel) = self.ask_panels.front_mut() {
                 panel.insert_paste(text);
             }
             self.sync_front_panel();
+            return;
+        }
+        // The model panel is modal and owns no text field — paste is dropped.
+        if self.model_panel.is_some() {
             return;
         }
         self.input.insert_str(text);
@@ -564,30 +579,14 @@ impl App {
                 self.push_intent(AppIntent::ShowSkillsInfo);
                 true
             }
-            "/model" => {
-                self.push_intent(AppIntent::FetchModels);
+            // `/model [ignored]` — args are ignored (BREAKING): model selection
+            // goes through the panel so the (provider, model) pair is explicit.
+            _ if text == "/model" || text.starts_with("/model ") => {
+                self.open_model_panel();
                 true
             }
             "/agents" => {
                 self.push_intent(AppIntent::FetchAgents);
-                true
-            }
-            _ if text.starts_with("/model ") => {
-                match parse_string_arg(text, "/model") {
-                    Some(model) => {
-                        let provider = self
-                            .popup
-                            .cache
-                            .models
-                            .iter()
-                            .find(|(m, _)| m == &model)
-                            .map(|(_, p)| p.clone());
-                        self.push_intent(AppIntent::set_model(model, provider));
-                    }
-                    None => {
-                        self.push_intent(AppIntent::FetchModels);
-                    }
-                }
                 true
             }
             _ if text.starts_with("/agents ") => {
@@ -835,6 +834,55 @@ impl App {
         self.popup.cache.copies = self.chat.collect_assistant_messages();
     }
 
+    /// Open the `/model` panel: cache-first (instant open, background refresh)
+    /// when models were fetched before, fetch-first otherwise. Refused while a
+    /// turn is running — the model must not change under an executing turn.
+    fn open_model_panel(&mut self) {
+        if self.turn.working {
+            self.show_toast(Toast::warning(
+                "Can't switch model while the agent is working",
+                std::time::Duration::from_secs(3),
+            ));
+            return;
+        }
+        if !self.model_sources.is_empty() {
+            // Open now from cache; the fetch below refreshes in place.
+            let panel =
+                model_panel::ModelPanel::new(self.model_sources.clone(), self.current_model_pair());
+            self.model_panel = Some(panel);
+            // The popup yields to the modal panel (never both at once).
+            self.popup.active = ActivePopup::None;
+        } else {
+            self.show_toast(Toast::info(
+                "Loading models…",
+                std::time::Duration::from_secs(2),
+            ));
+        }
+        self.push_intent(AppIntent::FetchModels);
+    }
+
+    /// The session's active `(provider, model)` pair — both must be known
+    /// (a model without a provider cannot be preselected unambiguously).
+    fn current_model_pair(&self) -> Option<(&str, &str)> {
+        let provider = self.status.provider.as_deref().filter(|p| !p.is_empty())?;
+        let model = self.status.model.as_str();
+        if model.is_empty() || model == "unknown" {
+            return None;
+        }
+        Some((provider, model))
+    }
+
+    /// Apply the pair chosen in the model panel: close it, dispatch the
+    /// explicit `(provider, model)` update and give immediate feedback.
+    fn apply_model_selection(&mut self, provider: String, model: String) {
+        self.model_panel = None;
+        self.push_intent(AppIntent::set_model(model.clone(), Some(provider.clone())));
+        self.show_toast(Toast::info(
+            format!("Model: {model} ({provider})"),
+            std::time::Duration::from_secs(3),
+        ));
+    }
+
     /// Invalidate the cached session list so the next `/session` popup re-fetches.
     ///
     /// Called after session-mutating operations (resume, create, fork, title
@@ -850,6 +898,11 @@ impl App {
     pub(crate) fn update_popup(&mut self) {
         use crate::ui::popup::command::PopupAction;
 
+        // The modal model panel owns keyboard input — no popup while open.
+        if self.model_panel.is_some() {
+            return;
+        }
+
         // Streaming guard: skip requests while agent is busy.
         let streaming = self.turn.working;
         let text = self.input.text().to_string();
@@ -858,9 +911,6 @@ impl App {
                 return;
             }
             match action {
-                PopupAction::FetchModels => {
-                    self.push_intent(AppIntent::FetchModels);
-                }
                 PopupAction::FetchBranches => {
                     self.push_intent(AppIntent::FetchBranches);
                 }
@@ -926,18 +976,27 @@ impl App {
                 self.update_popup();
             }
             FetchPayload::Models(resp) => {
-                // 嵌套响应（按 provider 分组）→ 展平为 (model, provider) 缓存
-                self.popup.cache.models = resp
-                    .providers
-                    .into_iter()
-                    .flat_map(|group| {
-                        group
-                            .models
-                            .into_iter()
-                            .map(move |model| (model, group.provider.clone()))
-                    })
-                    .collect();
-                self.update_popup();
+                if resp.providers.is_empty() {
+                    // Nothing to choose from — tell the user, keep any open
+                    // panel as it was.
+                    self.show_toast(Toast::warning(
+                        "No models available",
+                        std::time::Duration::from_secs(3),
+                    ));
+                } else {
+                    self.model_sources = resp.providers;
+                    if let Some(panel) = self.model_panel.as_mut() {
+                        // Panel already open: refresh in place, keeping the
+                        // current page and cursor.
+                        panel.set_sources(self.model_sources.clone());
+                    } else {
+                        let panel = model_panel::ModelPanel::new(
+                            self.model_sources.clone(),
+                            self.current_model_pair(),
+                        );
+                        self.model_panel = Some(panel);
+                    }
+                }
             }
             FetchPayload::Branches(resp) => {
                 self.popup.cache.branches = resp
@@ -1131,6 +1190,33 @@ impl App {
             return;
         }
 
+        // Model panel: modal while open. Esc closes the panel (it is not part
+        // of any turn, so it must NOT reach the interrupt ladder below);
+        // PageUp/PageDown stay available for chat scrolling; every other key
+        // is consumed by the panel.
+        if self.model_panel.is_some()
+            && !matches!(
+                key.code,
+                crossterm::event::KeyCode::PageUp | crossterm::event::KeyCode::PageDown
+            )
+        {
+            let action = self
+                .model_panel
+                .as_mut()
+                .map(|panel| panel.handle_key(key))
+                .unwrap_or(model_panel::ModelPanelAction::None);
+            match action {
+                model_panel::ModelPanelAction::Apply { provider, model } => {
+                    self.apply_model_selection(provider, model);
+                }
+                model_panel::ModelPanelAction::Cancel => {
+                    self.model_panel = None;
+                }
+                model_panel::ModelPanelAction::None => {}
+            }
+            return;
+        }
+
         // Esc: close popup if active, otherwise clear/interrupt.
         if key.code == crossterm::event::KeyCode::Esc {
             if self.popup.active.is_active() {
@@ -1275,7 +1361,7 @@ impl App {
                 self.chat.jump_bottom();
                 // must-select 命令：参数必须来自候选选择。popup 若被关闭
                 //（如 Esc），重开 popup 而非发送自由文本——消灭未定义请求
-                //（如无 provider 的 /model 更新撞网关对称契约 400）。
+                //（如 /fork 携带未经验证的 uuid）。
                 if let Some((cmd, _)) = parse_slash_input(&text)
                     && is_must_select_command(cmd)
                 {
@@ -1769,6 +1855,10 @@ impl App {
                 // the duplicate stale front entry would later swallow the
                 // answer of a subsequent ask (posted to a dead tool_call_id).
                 self.clear_ask_state();
+                // The model panel targets the previous session (preselect +
+                // apply go to its session_id) — a sync means the session
+                // changed, so the panel must not survive it.
+                self.model_panel = None;
 
                 // Restore working state BEFORE feeding uncommitted content, so
                 // the spinner / Bash timers / terminal title reflect an
@@ -1877,9 +1967,10 @@ impl App {
                     self.status.session_name = Some(session_name);
                 }
 
-                // Restore model + workdir from agent snapshot.
+                // Restore model + provider + workdir from agent snapshot.
                 if let Some(agent_info) = agent {
                     self.status.model = agent_info.model_name;
+                    self.status.provider = agent_info.provider_name;
                     self.status.workdir = agent_info.workspace;
                 }
 
@@ -2035,6 +2126,7 @@ impl App {
             // regardless of the chat scroll position.
             let input_h = self.input.height(area.width);
             let popup_h = self.popup.height();
+            let model_panel_h = self.model_panel.as_ref().map_or(0, |panel| panel.height());
             let mut constraints = vec![
                 Constraint::Length(1), // status bar
                 Constraint::Min(3),    // chat view (min 3 rows)
@@ -2043,6 +2135,9 @@ impl App {
                 constraints.push(Constraint::Length(1)); // working indicator
             }
             constraints.push(Constraint::Length(1)); // info separator
+            if model_panel_h > 0 {
+                constraints.push(Constraint::Length(model_panel_h)); // /model panel
+            }
             constraints.push(Constraint::Length(input_h)); // input area
             if popup_h > 0 {
                 constraints.push(Constraint::Length(popup_h)); // pop-down command popup
@@ -2094,6 +2189,14 @@ impl App {
                 frame.buffer_mut(),
             );
             idx += 1;
+
+            // `/model` panel — above the input, below the info separator.
+            if model_panel_h > 0
+                && let Some(panel) = self.model_panel.as_ref()
+            {
+                frame.render_widget(ModelPanelWidget::new(panel, &palette), chunks[idx]);
+                idx += 1;
+            }
 
             // Input area — always visible; record its rect for cursor placement.
             let input_rect = chunks[idx];
@@ -2374,6 +2477,7 @@ pub async fn run_app(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::selection_panel::SelectionPanel;
     use crate::config::AppConfig;
     use crate::ui::popup::command::SessionCandidate;
 
@@ -3030,13 +3134,172 @@ mod tests {
     }
 
     #[test]
-    fn test_model_produces_intent() {
+    fn test_model_command_opens_panel_instead_of_direct_switch() {
+        // 4.6/4.7: `/model <name>` no longer switches directly — it opens the
+        // panel exactly like `/model` (BREAKING).
         let mut app = test_app();
+        app.model_sources = vec![model_group("p", &["gpt-4o"])];
         app.try_frontend_command("/model gpt-4o");
+        assert!(app.model_panel.is_some(), "panel must open");
+        assert_eq!(app.status.model, "unknown", "no direct model change");
         let intents = app.drain_intents();
-        assert!(intents.iter().any(
-            |i| matches!(i, AppIntent::UpdateSession { model: Some(m), .. } if m == "gpt-4o")
-        ));
+        assert!(
+            !intents
+                .iter()
+                .any(|i| matches!(i, AppIntent::UpdateSession { .. })),
+            "no direct switch request: {intents:?}"
+        );
+        assert!(intents.iter().any(|i| matches!(i, AppIntent::FetchModels)));
+    }
+
+    // ── /model panel (4.7) ──────────────────────────────────────
+
+    fn model_group(provider: &str, models: &[&str]) -> wing_api_client::models::ProviderModels {
+        wing_api_client::models::ProviderModels {
+            provider: provider.into(),
+            models: models.iter().map(|m| m.to_string()).collect(),
+        }
+    }
+
+    fn feed_models(app: &mut App, providers: Vec<wing_api_client::models::ProviderModels>) {
+        let session_id = app.session_id.clone();
+        app.handle_fetch_result(crate::app::intent::FetchResult {
+            session_id,
+            payload: crate::app::intent::FetchPayload::Models(
+                wing_api_client::models::ModelsResponse { providers },
+            ),
+        });
+    }
+
+    fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn test_model_opens_panel_instantly_from_cache_and_preselects() {
+        let mut app = test_app();
+        app.model_sources = vec![model_group("p", &["m1", "m2"])];
+        app.status.provider = Some("p".into());
+        app.status.model = "m2".into();
+        assert!(app.try_frontend_command("/model"));
+        let panel = app.model_panel.as_ref().expect("panel opens from cache");
+        assert_eq!(panel.current_page(), 0);
+        assert_eq!(panel.cursor(), 1, "preselected the current model");
+        assert_eq!(panel.committed_at(0), Some(1), "● on the current model");
+        let intents = app.drain_intents();
+        assert!(
+            intents.iter().any(|i| matches!(i, AppIntent::FetchModels)),
+            "background refresh requested"
+        );
+    }
+
+    #[test]
+    fn test_model_refused_while_working() {
+        let mut app = test_app();
+        app.model_sources = vec![model_group("p", &["m1"])];
+        app.turn.working = true;
+        assert!(app.try_frontend_command("/model"));
+        assert!(app.model_panel.is_none(), "no panel while working");
+        assert!(
+            !app.drain_intents()
+                .iter()
+                .any(|i| matches!(i, AppIntent::FetchModels))
+        );
+        assert!(app.toast.is_some(), "refusal toast shown");
+    }
+
+    #[test]
+    fn test_model_panel_applies_explicit_provider_for_same_name_model() {
+        // Regression: two providers expose the same model name — applying the
+        // second one must carry the SECOND provider explicitly.
+        let mut app = test_app();
+        app.model_sources = vec![
+            model_group("dashscope", &["shared"]),
+            model_group("dashscope-openai", &["shared"]),
+        ];
+        app.try_frontend_command("/model");
+        app.drain_intents();
+        app.handle_key(key(crossterm::event::KeyCode::Right)); // → second provider
+        app.handle_key(key(crossterm::event::KeyCode::Enter)); // apply
+        assert!(app.model_panel.is_none(), "panel closes on apply");
+        let intents = app.drain_intents();
+        assert!(
+            intents.iter().any(|i| matches!(
+                i,
+                AppIntent::UpdateSession { model: Some(m), provider: Some(p), .. }
+                    if m == "shared" && p == "dashscope-openai"
+            )),
+            "explicit provider required, got {intents:?}"
+        );
+    }
+
+    #[test]
+    fn test_model_fetch_opens_panel_and_refreshes_in_place() {
+        let mut app = test_app();
+        assert!(app.try_frontend_command("/model"));
+        assert!(app.model_panel.is_none(), "no cache → wait for the fetch");
+        feed_models(&mut app, vec![model_group("p", &["m1", "m2"])]);
+        assert_eq!(app.model_panel.as_ref().unwrap().page_count(), 1);
+        // Move the cursor, then refresh: page and cursor stay put.
+        app.handle_key(key(crossterm::event::KeyCode::Down));
+        assert_eq!(app.model_panel.as_ref().unwrap().cursor(), 1);
+        feed_models(&mut app, vec![model_group("p", &["m1", "m2", "m3"])]);
+        assert_eq!(
+            app.model_panel.as_ref().unwrap().cursor(),
+            1,
+            "in-place refresh keeps the cursor"
+        );
+    }
+
+    #[test]
+    fn test_model_fetch_empty_shows_toast_and_no_panel() {
+        let mut app = test_app();
+        assert!(app.try_frontend_command("/model"));
+        feed_models(&mut app, vec![]);
+        assert!(app.model_panel.is_none());
+        assert!(app.toast.is_some(), "empty result gives a hint");
+    }
+
+    #[test]
+    fn test_model_panel_esc_closes_without_interrupt_or_request() {
+        let mut app = test_app();
+        app.model_sources = vec![model_group("p", &["m1"])];
+        app.try_frontend_command("/model");
+        app.drain_intents();
+        app.handle_key(key(crossterm::event::KeyCode::Esc));
+        assert!(app.model_panel.is_none(), "Esc closes the panel");
+        let intents = app.drain_intents();
+        assert!(
+            !intents
+                .iter()
+                .any(|i| matches!(i, AppIntent::InterruptSession)),
+            "panel Esc is not a turn interrupt"
+        );
+        assert!(
+            !intents
+                .iter()
+                .any(|i| matches!(i, AppIntent::UpdateSession { .. })),
+            "closing sends no model request"
+        );
+    }
+
+    #[test]
+    fn test_model_panel_swallows_keys_but_lets_page_keys_scroll() {
+        let mut app = test_app();
+        app.model_sources = vec![model_group("p", &["m1"])];
+        app.try_frontend_command("/model");
+        app.drain_intents();
+        // Typing is consumed by the panel — the composer stays empty.
+        app.handle_key(key(crossterm::event::KeyCode::Char('x')));
+        assert!(app.input.text().is_empty());
+        assert!(app.model_panel.is_some());
+        // PageUp/PageDown still scroll the chat.
+        app.visible_height = 20;
+        app.chat.scroll_offset = 50;
+        app.chat.scroll_up(0); // leave auto-scroll
+        app.handle_key(key(crossterm::event::KeyCode::PageUp));
+        assert_eq!(app.chat.scroll_offset, 32, "page scroll reaches the chat");
+        assert!(app.model_panel.is_some(), "panel stays open");
     }
 
     #[test]

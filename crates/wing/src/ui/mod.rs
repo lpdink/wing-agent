@@ -6,6 +6,8 @@ pub mod cells;
 pub mod chat_view;
 pub mod header;
 pub mod input_area;
+pub mod model_panel;
+pub mod panel;
 pub mod popup;
 pub mod spinner;
 pub mod status_bar;

@@ -19,8 +19,6 @@ use crate::protocol::CommandInfo;
 /// Each variant maps to a specific HTTP API call or intent.
 #[derive(Debug, Clone)]
 pub enum PopupAction {
-    /// Fetch model list via HTTP API for popup candidates.
-    FetchModels,
     /// Fetch branch targets via HTTP API for popup candidates.
     FetchBranches,
     /// Fetch agent template list via HTTP API for popup candidates.
@@ -32,7 +30,6 @@ pub enum PopupAction {
 /// Commands that have sub-command candidates fetched via HTTP.
 /// Maps command name to the corresponding PopupAction.
 const CANDIDATE_COMMANDS: &[(&str, PopupAction)] = &[
-    ("/model", PopupAction::FetchModels),
     ("/fork", PopupAction::FetchBranches),
     ("/rewind", PopupAction::FetchBranches),
     ("/agents", PopupAction::FetchAgents),
@@ -47,9 +44,8 @@ const LOCAL_CANDIDATE_COMMANDS: &[&str] = &["/copy"];
 /// "send free text": the popup stays open on exact match (Tab fills the input
 /// without dismissing it), and submission is only constructed from a selected
 /// candidate. This structurally eliminates undefined resolution — e.g.
-/// `/model <name>` where the name is absent from the fetched list previously
-/// sent a provider-less update and hit the gateway's symmetric-contract 400.
-const MUST_SELECT_COMMANDS: &[&str] = &["/model", "/fork", "/rewind", "/agents", "/session", "/ss"];
+/// `/fork <uuid>` where the uuid is absent from the fetched list.
+const MUST_SELECT_COMMANDS: &[&str] = &["/fork", "/rewind", "/agents", "/session", "/ss"];
 
 /// TUI-only commands (not served by gateway) — always appended as fallback.
 ///
@@ -91,8 +87,8 @@ static TUI_ONLY_COMMANDS: LazyLock<Vec<CommandInfo>> = LazyLock::new(|| {
         CommandInfo {
             name: "model".into(),
             aliases: vec!["m".into()],
-            description: "Switch or show model".into(),
-            params: "[name]".into(),
+            description: "Select provider and model".into(),
+            params: String::new(),
         },
         CommandInfo {
             name: "agents".into(),
@@ -379,8 +375,6 @@ pub struct SessionCandidate {
 pub struct CandidateCache {
     /// Dynamic command list from HTTP GET /api/commands.
     pub commands: Vec<CommandInfo>,
-    /// Model list from HTTP GET /api/models. Tuple: (model_name, provider_name).
-    pub models: Vec<(String, String)>,
     /// Session list from HTTP GET /api/session/list (rich, two-line render).
     pub sessions: Vec<SessionCandidate>,
     /// Branch targets from HTTP GET /api/session/branches or WS BranchTargetsEvent.
@@ -394,7 +388,6 @@ pub struct CandidateCache {
 impl CandidateCache {
     pub fn clear(&mut self) {
         // commands 不清空——来自 gateway 的全局命令列表，不随 session 变化
-        self.models.clear();
         self.sessions.clear();
         self.branches.clear();
         self.agents.clear();
@@ -409,7 +402,6 @@ impl CandidateCache {
     /// Get candidates for a given command name (non-session commands).
     pub fn get_for_command(&self, cmd_name: &str) -> Option<&[(String, String)]> {
         match cmd_name {
-            "/model" if !self.models.is_empty() => Some(&self.models),
             "/fork" | "/rewind" if !self.branches.is_empty() => Some(&self.branches),
             "/agents" if !self.agents.is_empty() => Some(&self.agents),
             "/copy" if !self.copies.is_empty() => Some(&self.copies),
@@ -530,19 +522,15 @@ mod tests {
     #[test]
     fn test_candidate_cache() {
         let mut cache = CandidateCache::default();
-        assert!(cache.get_for_command("/model").is_none());
-        cache.models = vec![("gpt-4o".into(), String::new())];
-        assert_eq!(cache.get_for_command("/model").unwrap().len(), 1);
+        assert!(cache.get_for_command("/rewind").is_none());
+        cache.branches = vec![("uuid-1".into(), "preview".into())];
+        assert_eq!(cache.get_for_command("/rewind").unwrap().len(), 1);
         cache.clear();
-        assert!(cache.get_for_command("/model").is_none());
+        assert!(cache.get_for_command("/rewind").is_none());
     }
 
     #[test]
     fn test_candidate_request_for() {
-        assert!(matches!(
-            candidate_request_for("/model"),
-            Some(PopupAction::FetchModels)
-        ));
         assert!(matches!(
             candidate_request_for("/fork"),
             Some(PopupAction::FetchBranches)
@@ -555,6 +543,8 @@ mod tests {
             candidate_request_for("/agents"),
             Some(PopupAction::FetchAgents)
         ));
+        // /model no longer has popup candidates — it opens the model panel.
+        assert!(candidate_request_for("/model").is_none());
         // /ss and /session removed from CANDIDATE_COMMANDS (Phase 3c: HTTP-fetched).
         assert!(candidate_request_for("/ss").is_none());
         assert!(candidate_request_for("/session").is_none());
