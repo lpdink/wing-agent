@@ -49,6 +49,9 @@ pub struct AgentInfo {
     #[serde(default)]
     pub rules: Vec<String>,
     pub workspace: Option<String>,
+    /// Active provider name; absent on old gateways (serde → None).
+    #[serde(default)]
+    pub provider_name: Option<String>,
 }
 
 /// A selectable option in an Ask question: label + optional description.
@@ -336,8 +339,10 @@ pub enum WingEvent {
         /// turn is in progress.
         #[serde(default)]
         turn_started_at: Option<String>,
+        /// Boxed: the agent snapshot is the largest inline payload of this
+        /// variant — boxing keeps `WingEvent` small (clippy large_enum_variant).
         #[serde(default)]
-        agent: Option<AgentInfo>,
+        agent: Option<Box<AgentInfo>>,
         #[serde(default)]
         name: Option<String>,
         #[serde(default)]
@@ -634,6 +639,54 @@ mod tests {
         let event: WingEvent = serde_json::from_str(json).unwrap();
         assert!(matches!(event, WingEvent::Unknown));
         assert_eq!(event.event_type(), "unknown");
+    }
+
+    #[test]
+    fn sync_session_agent_provider_name_tolerated_and_roundtripped() {
+        // Old gateway: agent payload without provider_name → None, no error.
+        let legacy = r#"{
+            "type": "sync_session",
+            "session_id": "s1",
+            "messages": [],
+            "uncommitted": null,
+            "uncommitted_tools": [],
+            "events": [],
+            "agent": {
+                "model_name": "gpt-4",
+                "system_prompt": null,
+                "tools": [],
+                "skills": [],
+                "rules": [],
+                "workspace": null
+            },
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "request_id": "req-agent-1"
+        }"#;
+        let event: WingEvent = serde_json::from_str(legacy).unwrap();
+        match event {
+            WingEvent::SyncSession { agent, .. } => {
+                assert_eq!(
+                    agent.and_then(|a| a.provider_name),
+                    None,
+                    "missing provider_name must deserialize to None"
+                );
+            }
+            _ => panic!("expected SyncSession"),
+        }
+
+        // New gateway: provider_name survives a serialize → deserialize round trip.
+        let info = AgentInfo {
+            model_name: "gpt-4".into(),
+            system_prompt: None,
+            tools: vec![],
+            skills: vec![],
+            rules: vec![],
+            workspace: None,
+            provider_name: Some("dashscope-openai".into()),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: AgentInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.provider_name.as_deref(), Some("dashscope-openai"));
     }
 
     #[test]

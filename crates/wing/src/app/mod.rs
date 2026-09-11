@@ -2534,7 +2534,7 @@ mod tests {
             agent: agent_slot, ..
         } = &mut ev
         {
-            *agent_slot = agent;
+            *agent_slot = agent.map(Box::new);
         }
         ev
     }
@@ -2551,6 +2551,7 @@ mod tests {
             skills: vec!["pdf".into(), "webapp".into()],
             rules: vec!["AGENTS.md".into()],
             workspace: None,
+            provider_name: None,
         };
         app.handle_event(sync_event_with_agent(
             Some(agent),

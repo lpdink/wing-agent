@@ -33,6 +33,9 @@ pub struct AgentInfo {
     #[serde(default)]
     pub rules: Vec<String>,
     pub workspace: Option<String>,
+    /// 当前活跃 provider 的名称；旧网关/降级路径缺失时为 None。
+    #[serde(default)]
+    pub provider_name: Option<String>,
 }
 
 // ============================================================
@@ -516,5 +519,33 @@ mod tests {
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["instruction"], "keep architecture decisions");
+    }
+
+    #[test]
+    fn agent_info_provider_name_optional() {
+        // Legacy response without provider_name → None.
+        let legacy = r#"{
+            "model_name": "gpt-4",
+            "system_prompt": null,
+            "tools": [],
+            "skills": [],
+            "rules": [],
+            "workspace": null
+        }"#;
+        let info: AgentInfo = serde_json::from_str(legacy).unwrap();
+        assert_eq!(info.provider_name, None);
+
+        // Round trip keeps the field.
+        let info = AgentInfo {
+            model_name: "gpt-4".into(),
+            system_prompt: None,
+            tools: vec![],
+            skills: vec![],
+            rules: vec![],
+            workspace: None,
+            provider_name: Some("alt".into()),
+        };
+        let back: AgentInfo = serde_json::from_str(&serde_json::to_string(&info).unwrap()).unwrap();
+        assert_eq!(back.provider_name.as_deref(), Some("alt"));
     }
 }
