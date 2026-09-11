@@ -1,13 +1,15 @@
 //! ModelPanel — the `/model` adapter on the selection-panel kernel.
 //!
 //! Provider tabs (pages) × model rows:
-//! - `←`/`→` switch provider (wraps), `↑`/`↓` move the model cursor (wraps,
-//!   per-provider memory),
+//! - `←`/`→` switch provider (clamped at the ends — no wrap-around),
+//! - `↑`/`↓` move the model cursor (clamped at the ends; per-provider memory),
 //! - `Enter` applies the highlighted `(provider, model)` in one keypress —
 //!   there is no confirm page (model switching is a cheap, reversible act),
 //! - `Esc` cancels (the app closes the panel; no request is sent),
-//! - provider tabs and model rows are windowed by the kernel (≤ 5 visible)
-//!   with `‹`/`›` markers rendered by the shared panel renderer.
+//! - provider tabs and model rows are windowed by the kernel (≤ 5 visible),
+//!   the cursor / active tab stays centered while scrolling, the window is
+//!   pinned at the ends, and there are **no** indicator glyphs (`‹`/`›`)
+//!   — the rows stay column-aligned instead.
 //!
 //! Opening preselects the session's current `(provider, model)`: the cursor
 //! lands on that provider page / model row and a `●` mark (the kernel's
@@ -65,16 +67,52 @@ impl ModelPanel {
     }
 
     /// In-place refresh: replace the sources, keeping the active page, cursor
-    /// and mark where they are still valid (kernel fallback otherwise). An
-    /// empty update is ignored so the last good data stays on screen.
+    /// and mark where they are still valid.  Cursor and committed mark are
+    /// re-resolved by **(provider, model) name** (not index), so re-ordering
+    /// or insertion in the model list never shifts the selection to a
+    /// different model — the same principle this feature branch establishes
+    /// for the `/model` command path.  An empty update is ignored so the last
+    /// good data stays on screen.
     pub fn set_sources(&mut self, sources: Vec<ProviderModels>) {
         if sources.is_empty() {
             return;
         }
+        // Snapshot cursor/committed by (provider name, model name).
+        let prev: Vec<(String, Option<String>, Option<String>)> = self
+            .sources
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                let row = self.cursor_at(i);
+                let cursor = g.models.get(row).cloned();
+                let committed = self.committed_at(i).and_then(|r| g.models.get(r).cloned());
+                (g.provider.clone(), cursor, committed)
+            })
+            .collect();
+        let prev_active = self.current_page();
+        let prev_active_name: Option<String> =
+            self.sources.get(prev_active).map(|g| g.provider.clone());
+
         self.sources = sources;
-        self.cursors.resize(self.sources.len(), 0);
-        self.committed.resize(self.sources.len(), None);
-        self.clamp_after_refresh();
+        self.cursors = vec![0; self.sources.len()];
+        self.committed = vec![None; self.sources.len()];
+        self.current = 0;
+
+        for (i, group) in self.sources.iter().enumerate() {
+            if let Some((_, cursor, committed)) = prev.iter().find(|(p, _, _)| *p == group.provider)
+            {
+                if let Some(name) = cursor {
+                    self.cursors[i] = group.models.iter().position(|m| m == name).unwrap_or(0);
+                }
+                if let Some(name) = committed {
+                    self.committed[i] = group.models.iter().position(|m| m == name);
+                }
+            }
+            // Restore the active page by provider name.
+            if prev_active_name.as_deref() == Some(group.provider.as_str()) {
+                self.current = i;
+            }
+        }
     }
 
     /// Preselect the session's current `(provider, model)`: provider page,

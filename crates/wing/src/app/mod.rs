@@ -121,6 +121,11 @@ pub struct App {
     /// Last successful `/api/models` response — `/model` opens the panel from
     /// this cache instantly and refreshes in the background.
     model_sources: Vec<wing_api_client::models::ProviderModels>,
+    /// `/model` was requested but the sources were not yet fetched (no cache
+    /// at the time of request).  When true, a successful FetchModels result
+    /// auto-opens the panel even though the user has not yet seen one.
+    /// Cleared on any explicit panel close (Esc, apply) and on delivery.
+    model_panel_pending: bool,
     /// Whether the terminal window/tab currently has focus.
     /// Default `true` — terminals that don't support focus events
     /// will never send FocusLost, so BEL is never triggered.
@@ -197,6 +202,7 @@ impl App {
             ask_panels: std::collections::VecDeque::new(),
             model_panel: None,
             model_sources: Vec::new(),
+            model_panel_pending: false,
             focused: true,
             config,
             palette,
@@ -856,6 +862,7 @@ impl App {
                 "Loading models…",
                 std::time::Duration::from_secs(2),
             ));
+            self.model_panel_pending = true;
         }
         self.push_intent(AppIntent::FetchModels);
     }
@@ -863,6 +870,7 @@ impl App {
     /// Show a freshly built picker panel: store it as the interactive state
     /// and render it at the tail of the transcript (like the Ask panel).
     fn present_model_panel(&mut self, panel: model_panel::ModelPanel) {
+        self.model_panel_pending = false;
         self.chat.show_model_picker(panel.clone());
         self.model_panel = Some(panel);
     }
@@ -877,6 +885,7 @@ impl App {
     /// Close the picker without changing the model (Esc): drop both the
     /// interactive state and its transient cell.
     fn close_model_panel(&mut self) {
+        self.model_panel_pending = false;
         self.model_panel = None;
         self.chat.remove_model_picker();
     }
@@ -894,7 +903,18 @@ impl App {
 
     /// Apply the pair chosen in the model panel: close it, dispatch the
     /// explicit `(provider, model)` update and give immediate feedback.
+    /// Refuses while a turn is running (defense-in-depth — the panel is
+    /// already guarded against opening mid-turn, but a race via SyncSession
+    /// / fork could start a turn while the panel is visible).
     fn apply_model_selection(&mut self, provider: String, model: String) {
+        if self.turn.working {
+            self.close_model_panel();
+            self.show_toast(Toast::warning(
+                "Can't switch model while the agent is working",
+                std::time::Duration::from_secs(3),
+            ));
+            return;
+        }
         self.close_model_panel();
         self.push_intent(AppIntent::set_model(model.clone(), Some(provider.clone())));
         self.show_toast(Toast::info(
@@ -963,6 +983,12 @@ impl App {
 
         match result.payload {
             FetchPayload::Info(info) => {
+                // Update model; clear provider when the model changes, since
+                // Info does not carry provider info and the old provider
+                // may be stale (e.g. the model was changed via another path).
+                if info.model != self.status.model {
+                    self.status.provider = None;
+                }
                 self.status.model = info.model;
                 self.status.total_tokens = info.total_tokens;
                 self.status.context_window_tokens = info.context_window_tokens;
@@ -1005,20 +1031,26 @@ impl App {
                     ));
                 } else {
                     self.model_sources = resp.providers;
-                    if self.model_panel.is_some() {
+                    if let Some(panel) = self.model_panel.as_mut() {
                         // Panel already open: refresh in place, keeping the
                         // current page and cursor, and mirror it into its cell.
-                        if let Some(panel) = self.model_panel.as_mut() {
-                            panel.set_sources(self.model_sources.clone());
-                        }
+                        panel.set_sources(self.model_sources.clone());
                         self.sync_model_panel_cell();
-                    } else {
+                    } else if self.model_panel_pending {
+                        // The user typed `/model` before the cache was
+                        // available — deliver the panel now that the fetch
+                        // completed.  Clear the flag so a subsequent fetch
+                        // (refresh) does NOT reopen after the user closes it.
+                        self.model_panel_pending = false;
                         let panel = model_panel::ModelPanel::new(
                             self.model_sources.clone(),
                             self.current_model_pair(),
                         );
                         self.present_model_panel(panel);
                     }
+                    // If the panel was closed (Esc) while the fetch was in
+                    // flight, do NOT reopen it — the user's explicit action
+                    // takes priority over the stale fetch result.
                 }
             }
             FetchPayload::Branches(resp) => {
