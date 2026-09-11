@@ -199,24 +199,6 @@ impl Renderable for ChatCell {
                 .line_count(text_width)
                 + 2; // top + bottom padding
         }
-
-        // Streamed cells: height from plain text — cheaper and equally accurate
-        // for scrolling purposes.  Avoids markdown re‑render + syntax highlight.
-        match self {
-            Self::AssistantMessage(text) => {
-                return Paragraph::new(render_plain(text))
-                    .wrap(Wrap { trim: false })
-                    .line_count(width);
-            }
-            Self::Thinking(block) => {
-                return Paragraph::new(render_plain(&block.content))
-                    .wrap(Wrap { trim: false })
-                    .line_count(width);
-            }
-            _ => {}
-        }
-
-        // All other cells: height from full rendered lines (they're short).
         Paragraph::new(self.to_lines(width, ctx))
             .wrap(Wrap { trim: false })
             .line_count(width)
