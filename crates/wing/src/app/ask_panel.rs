@@ -232,23 +232,10 @@ impl AskPanel {
         }
     }
 
-    /// Switch tab with wrap-around (confirm page included); entering the
-    /// confirm page resets its Submit/Cancel cursor.
-    fn switch_tab(&mut self, delta: isize) {
-        self.move_page(delta);
-        if self.on_confirm_page() {
-            self.confirm_cursor = 0;
-        }
-    }
-
     /// Advance to the next tab, clamped at the confirm page (Enter semantics).
     fn advance(&mut self) {
-        if self.current < self.questions.len() {
-            self.current += 1;
-        }
-        if self.on_confirm_page() {
-            self.confirm_cursor = 0;
-        }
+        let next = (self.current + 1).min(self.questions.len());
+        self.set_current_page(next);
     }
 
     /// Commit the option under the cursor as the single-select answer
@@ -391,8 +378,8 @@ impl AskPanel {
             KeyCode::Down if self.on_confirm_page() => self.move_confirm_cursor(1),
             KeyCode::Up => self.move_cursor(-1),
             KeyCode::Down => self.move_cursor(1),
-            KeyCode::Left => self.switch_tab(-1),
-            KeyCode::Right => self.switch_tab(1),
+            KeyCode::Left => self.move_page(-1),
+            KeyCode::Right => self.move_page(1),
             KeyCode::Tab => self.toggle(),
             KeyCode::Char(c) if !ctrl && !alt => {
                 if self.on_custom_row() {
@@ -465,6 +452,11 @@ impl SelectionPanel for AskPanel {
 
     fn set_current_page(&mut self, page: usize) {
         self.current = page;
+        // Entering the confirm page resets its Submit/Cancel cursor so that
+        // every tab-switch path (move_page, advance) picks it up implicitly.
+        if self.on_confirm_page() {
+            self.confirm_cursor = 0;
+        }
     }
 
     fn cursor_at(&self, page: usize) -> usize {

@@ -65,8 +65,8 @@ pub trait SelectionPanel {
     /// Set (or clear) the captured row of `page`.
     fn set_committed_at(&mut self, page: usize, row: Option<usize>);
 
-    /// Move the cursor on the active page, clamped at the first/last row —
-    /// no wrap-around. No-op on custom pages and on pages without rows.
+    /// Move the cursor on the active page, clamped at `0..rows-1` — no
+    /// wrap-around. No-op on custom pages and on pages without rows.
     fn move_cursor(&mut self, delta: isize) {
         let page = self.current_page();
         let PageKind::Options { rows } = self.page_kind(page) else {
@@ -75,21 +75,20 @@ pub trait SelectionPanel {
         if rows == 0 {
             return;
         }
-        let current = self.cursor_at(page).min(rows - 1);
-        let next = current.saturating_add_signed(delta).min(rows - 1);
-        self.set_cursor_at(page, next);
+        let current = self.cursor_at(page);
+        let next = current.saturating_add_signed(delta);
+        self.set_cursor_at(page, next.clamp(0, rows.saturating_sub(1)));
     }
 
-    /// Switch the active page, clamped at the first/last page — no
-    /// wrap-around. Custom pages still participate as tab slots.
+    /// Switch the active page, clamped at `0..count-1` — no wrap-around.
+    /// Custom pages still participate as tab slots.
     fn move_page(&mut self, delta: isize) {
         let count = self.page_count();
         if count == 0 {
             return;
         }
-        let current = self.current_page().min(count - 1);
-        let next = current.saturating_add_signed(delta).min(count - 1);
-        self.set_current_page(next);
+        let next = self.current_page().saturating_add_signed(delta);
+        self.set_current_page(next.clamp(0, count.saturating_sub(1)));
     }
 
     /// Capture the option under the cursor as the active page's committed
