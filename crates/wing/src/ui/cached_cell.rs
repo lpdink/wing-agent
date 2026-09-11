@@ -7,6 +7,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::render::Renderable;
+use crate::render::markdown::render_plain;
 use crate::render::renderable::CellContext;
 use crate::ui::chat_view::ChatCell;
 
@@ -132,10 +133,27 @@ impl CachedCell {
 
     /// Compute height from already-rendered lines — no markdown re-render.
     ///
-    /// Mirrors the cell-type-specific layout logic from `ChatCell::desired_height`
-    /// (UserMessage inset padding vs. full-width wrapping) but works on the
-    /// cached lines, avoiding a second call to `to_lines`.
+    /// For streamed cells (Thinking, AssistantMessage) uses `render_plain` on
+    /// the raw text content for height estimation — saves the cost of cloning
+    /// and wrapping the complex rendered lines.  Non-streamed cells still wrap
+    /// the full rendered lines (they're short).
     fn lines_height(cell: &ChatCell, lines: &[Line<'static>], width: u16) -> usize {
+        // Streamed cells: height from plain text (no markdown/syntax overhead).
+        match cell {
+            ChatCell::AssistantMessage(text) => {
+                return Paragraph::new(render_plain(text))
+                    .wrap(Wrap { trim: false })
+                    .line_count(width);
+            }
+            ChatCell::Thinking(block) => {
+                return Paragraph::new(render_plain(&block.content))
+                    .wrap(Wrap { trim: false })
+                    .line_count(width);
+            }
+            _ => {}
+        }
+
+        // Non-streamed cells: height from full rendered lines.
         match cell {
             ChatCell::UserMessage(_)
             | ChatCell::PendingUserMessage(_)
