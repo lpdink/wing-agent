@@ -2,11 +2,20 @@
 //!
 //! Caches both rendered lines and width-aware height to avoid
 //! redundant `render_markdown()` calls during rendering.
+//!
+//! Streaming cells (Thinking / AssistantMessage while a turn is active)
+//! carry a [`StreamingRender`] instead: deltas append through
+//! `append_stream` without invalidating the generation cache — only the
+//! active tail re-renders each sync, and heights come from the flat line
+//! count (O(1)). At turn end the stream is reconciled
+//! (`request_finalize` → the next render installs the full reference
+//! render as the cached lines, flagged `prewrapped`).
 
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::render::Renderable;
+use crate::render::markdown::stream::{Profile, StreamingRender};
 use crate::render::renderable::CellContext;
 use crate::ui::chat_view::ChatCell;
 
@@ -23,6 +32,17 @@ pub struct CachedCell {
     cached_height: Option<CachedHeight>,
     /// Cached rendered lines (generation-keyed).
     cached_lines: Option<CachedLines>,
+    /// Incremental rendering state for streaming cells. While present it
+    /// is the render authority (the cell's text stays in sync for readers
+    /// like `last_assistant_text`).
+    stream: Option<StreamingRender>,
+    /// True while the cell's lines are pre-wrapped (≤ width) and can be
+    /// blitted directly — set for streaming cells and kept after their
+    /// finalize.
+    prewrapped: bool,
+    /// Turn-end reconcile requested: the next `compute_lines` /
+    /// `compute_height` installs the full reference render.
+    pending_finalize: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -45,6 +65,9 @@ impl CachedCell {
             generation: 0,
             cached_height: None,
             cached_lines: None,
+            stream: None,
+            prewrapped: false,
+            pending_finalize: false,
         }
     }
 
@@ -71,6 +94,74 @@ impl CachedCell {
         self.generation += 1;
         self.cached_height = None;
         self.cached_lines = None;
+        self.stream = None;
+        self.prewrapped = false;
+        self.pending_finalize = false;
+    }
+
+    /// Append a streaming delta to this cell (Thinking / AssistantMessage).
+    ///
+    /// The cell's own text stays in sync (for text readers), and the
+    /// incremental render state receives the delta WITHOUT invalidating
+    /// the generation caches — only the active tail re-renders on the
+    /// next sync.
+    pub fn append_stream(&mut self, delta: &str) {
+        let profile = match &self.cell {
+            ChatCell::Thinking(_) => Profile::Thinking,
+            ChatCell::AssistantMessage(_) => Profile::Content,
+            _ => return,
+        };
+        match &mut self.cell {
+            ChatCell::Thinking(block) => block.append(delta),
+            ChatCell::AssistantMessage(content) => content.push_str(delta),
+            _ => unreachable!("profile checked above"),
+        }
+        let stream = self
+            .stream
+            .get_or_insert_with(|| StreamingRender::new(profile));
+        stream.push(delta);
+    }
+
+    /// Whether this cell is currently rendering through the incremental
+    /// stream.
+    pub fn is_streaming(&self) -> bool {
+        self.stream.is_some()
+    }
+
+    /// Whether the cell's lines are pre-wrapped (≤ width) — the render
+    /// loop blits these directly instead of going through `Paragraph`.
+    pub fn is_prewrapped(&self) -> bool {
+        self.prewrapped
+    }
+
+    /// Request the turn-end reconcile: the next render call installs the
+    /// full reference render (Content keeps highlighting; Thinking stays
+    /// plain) as the cell's cached lines and drops the stream state.
+    pub fn request_finalize(&mut self) {
+        if self.stream.is_some() {
+            self.pending_finalize = true;
+        }
+    }
+
+    /// Install the finalized reference render as the cached lines.
+    fn run_finalize(&mut self, width: u16, ctx: &CellContext<'_>) {
+        if let Some(mut stream) = self.stream.take() {
+            stream.finalize(width, ctx.palette);
+            let lines = stream.lines(width, ctx.palette).to_vec();
+            let height = lines.len();
+            self.cached_lines = Some(CachedLines {
+                width,
+                generation: self.generation,
+                lines,
+            });
+            self.cached_height = Some(CachedHeight {
+                width,
+                generation: self.generation,
+                height,
+            });
+        }
+        self.pending_finalize = false;
+        self.prewrapped = true;
     }
 
     /// Consume the wrapper and return the inner cell.
@@ -83,6 +174,13 @@ impl CachedCell {
     /// Width-aware: invalidates cache when width changes (for full-width elements
     /// like Separator and UserMessage card).
     pub fn compute_lines(&mut self, width: u16, ctx: &CellContext<'_>) -> &[Line<'static>] {
+        if self.pending_finalize {
+            self.run_finalize(width, ctx);
+        }
+        if let Some(stream) = self.stream.as_mut() {
+            self.prewrapped = true;
+            return stream.lines(width, ctx.palette);
+        }
         let cached_valid = self
             .cached_lines
             .as_ref()
@@ -110,6 +208,46 @@ impl CachedCell {
     /// before the mutable `cached_height` assignment.  The clone is cheap
     /// (~50–100µs at 124 KB) relative to the saved markdown re‑render.
     pub fn compute_height(&mut self, width: u16, ctx: &CellContext<'_>) -> usize {
+        if self.pending_finalize {
+            self.run_finalize(width, ctx);
+        }
+        if let Some(stream) = self.stream.as_mut() {
+            let height = stream.lines(width, ctx.palette).len();
+            self.cached_height = Some(CachedHeight {
+                width,
+                generation: self.generation,
+                height,
+            });
+            return height;
+        }
+        if self.prewrapped {
+            // Finalized streaming cell — lines are pre-wrapped; the line
+            // count is the height.
+            if let Some(c) = self.cached_height
+                && c.width == width
+                && c.generation == self.generation
+            {
+                return c.height;
+            }
+            let lines_valid = self
+                .cached_lines
+                .as_ref()
+                .is_some_and(|c| c.generation == self.generation && c.width == width);
+            if !lines_valid {
+                let _ = self.compute_lines(width, ctx);
+            }
+            let height = self
+                .cached_lines
+                .as_ref()
+                .map(|c| c.lines.len())
+                .unwrap_or(0);
+            self.cached_height = Some(CachedHeight {
+                width,
+                generation: self.generation,
+                height,
+            });
+            return height;
+        }
         if let Some(c) = self.cached_height
             && c.width == width
             && c.generation == self.generation

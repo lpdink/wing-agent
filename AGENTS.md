@@ -116,9 +116,17 @@ crates/wing/src/                  Rust CLI: TUI + stdio frontends
 │   ├── popup/                    Command palette + selection
 │   └── ask_select.rs             Legacy required-choice selector (Bash confirm)
 ├── render/                       Markdown + syntax highlighting (code_blocks, tables, links)
+│   └── markdown/stream.rs        StreamingRender — incremental streaming renderer (stable prefix + active tail)
 ├── tui/                          Terminal abstraction (crossterm)
 ├── config/                       TUI config (colors, rendering, goal)
 └── util/                         clipboard, logging, osc9, terminal title, partial_json (streaming args parser)
+
+crates/wing/benches/              Criterion benchmarks
+└── stream_render.rs              Streaming-render perf (baseline vs incremental engines; corpus generators committed)
+crates/wing/tests/                Integration tests
+├── stream_render_reconcile.rs    Span-exactness reconcile matrix (incremental vs full render)
+├── stream_render_throughput.rs   3000 tokens/s throughput judgment (p99 < 16ms, no backlog)
+└── common/mod.rs                 Shared corpus generation + frame harness
 
 crates/wing-api-client/src/       Hand-written Rust HTTP client for Gateway API
 ├── client.rs                     GatewayClient — all HTTP API methods (+ api_key)

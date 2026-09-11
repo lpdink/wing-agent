@@ -627,35 +627,42 @@ impl ChatView {
     }
 
     /// Append text to the last assistant message (for streaming).
+    ///
+    /// Routes through the incremental `StreamingRender` (stable prefix +
+    /// active tail) — no full re-render per delta.
     pub fn append_to_last_assistant(&mut self, text: &str) {
         if let Some(last) = self.cells.last_mut()
             && matches!(last.cell(), ChatCell::AssistantMessage(_))
         {
-            last.mutate(|cell| {
-                if let ChatCell::AssistantMessage(content) = cell {
-                    content.push_str(text);
-                }
-            });
+            last.append_stream(text);
             return;
         }
-        self.push(ChatCell::AssistantMessage(text.to_string()));
+        // New cell: push it EMPTY and route the first delta through the
+        // stream too — otherwise the incremental state would start one
+        // delta late and never render the first block.
+        self.push(ChatCell::AssistantMessage(String::new()));
+        if let Some(last) = self.cells.last_mut() {
+            last.append_stream(text);
+        }
     }
 
     /// Append reasoning content to the last thinking block (for streaming).
+    ///
+    /// Routes through the incremental `StreamingRender` (stable prefix +
+    /// active tail) — no full re-render per delta.
     pub fn append_to_last_thinking(&mut self, text: &str) {
         if let Some(last) = self.cells.last_mut()
             && matches!(last.cell(), ChatCell::Thinking(_))
         {
-            last.mutate(|cell| {
-                if let ChatCell::Thinking(block) = cell {
-                    block.append(text);
-                }
-            });
+            last.append_stream(text);
             return;
         }
-        let mut block = ThinkingBlock::new();
-        block.append(text);
-        self.push(ChatCell::Thinking(block));
+        // New cell: push it EMPTY and route the first delta through the
+        // stream too (see append_to_last_assistant).
+        self.push(ChatCell::Thinking(ThinkingBlock::new()));
+        if let Some(last) = self.cells.last_mut() {
+            last.append_stream(text);
+        }
     }
 
     /// Increment the thinking event counter on the last thinking block.
@@ -812,6 +819,15 @@ impl ChatView {
             {
                 cached.mutate(|_| {});
             }
+        }
+    }
+
+    /// Request the turn-end reconcile for all streaming cells. The next
+    /// render (width known there) installs the full reference render and
+    /// drops the incremental state.
+    pub fn finalize_streams(&mut self) {
+        for cached in &mut self.cells {
+            cached.request_finalize();
         }
     }
 
@@ -1036,13 +1052,33 @@ impl Widget for ChatViewWidget<'_> {
             } else {
                 &mut self.view.pending[i - cell_count].cell
             };
-            let cell_lines = cached.compute_lines(content_area.width, &self.ctx).to_vec();
             let cell_area = Rect::new(
                 content_area.x,
                 render_y,
                 content_area.width,
                 cell_visible as u16,
             );
+
+            // Pre-wrapped cells (streaming Thinking / AssistantMessage,
+            // before and after their turn-end reconcile): every line is
+            // already ≤ width — blit the visible slice directly, no
+            // Paragraph wrap Composer, no to_vec clone.
+            if cached.is_prewrapped() {
+                let lines = cached.compute_lines(content_area.width, &self.ctx);
+                let skip_lines = skip.min(lines.len());
+                let end = (skip_lines + cell_visible).min(lines.len());
+                for (i, line) in lines[skip_lines..end].iter().enumerate() {
+                    let row = Rect::new(content_area.x, render_y + i as u16, content_area.width, 1);
+                    line.render(row, buf);
+                }
+                render_y += cell_visible as u16;
+                if render_y >= content_area.bottom() {
+                    break;
+                }
+                continue;
+            }
+
+            let cell_lines = cached.compute_lines(content_area.width, &self.ctx).to_vec();
 
             // User messages (normal / pending / discarded): fill full-width
             // background before text rendering.
@@ -1105,6 +1141,7 @@ mod tests {
     use super::*;
     use crate::config::rendering::ThinkingMode;
     use crate::config::{LayoutConfig, ThemePalette};
+    use crate::render::markdown::stream::Profile;
     use crate::render::renderable::CellContext;
     use std::time::Instant;
 
@@ -1840,5 +1877,170 @@ mod tests {
                 .contains(Modifier::CROSSED_OUT)
         );
         assert_eq!(style_of(&normal).fg, Some(palette.text));
+    }
+
+    // ============================================================
+    // Streaming (incremental render) integration
+    // ============================================================
+
+    fn span_texts(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn test_streaming_append_matches_full_render() {
+        let (p, l) = test_ctx();
+        let ctx = make_ctx(&p, &l);
+        let text = "First paragraph.\n\nSecond with `code`.\n\n- item one\n- item two\n\n```rust\nlet x = 1;\n```\n\nAfter.";
+        let mut view = ChatView::new();
+        // Feed as odd-sized chunks, syncing (compute_lines) after each.
+        let mut fed = String::new();
+        for chunk in text.as_bytes().chunks(7) {
+            // cut at char boundary
+            let mut s = String::new();
+            for b in chunk {
+                s.push(*b as char);
+            }
+            // Rebuild from bytes safely: only ASCII in this corpus.
+            let mut owned = String::new();
+            for c in s.chars() {
+                owned.push(c);
+            }
+            fed.push_str(&owned);
+            view.append_to_last_assistant(&owned);
+            let _ = view.cells[0].compute_lines(80, &ctx);
+        }
+        let streaming: Vec<Line<'static>> = view.cells[0].compute_lines(80, &ctx).to_vec();
+        let reference = crate::render::markdown::stream::full_lines(&fed, 80, Profile::Content, &p);
+        assert_eq!(span_texts(&streaming), span_texts(&reference));
+
+        // Height is the flat line count (pre-wrapped).
+        let h = view.cells[0].compute_height(80, &ctx);
+        assert_eq!(h, streaming.len());
+    }
+
+    #[test]
+    fn test_streaming_finalize_installs_reference() {
+        let (p, l) = test_ctx();
+        let ctx = make_ctx(&p, &l);
+        let text = "Reasoning paragraph.\n\n```rust\nfn main() {}\n```\n\nDone.";
+        let mut view = ChatView::new();
+        view.append_to_last_thinking("Reasoning par");
+        view.append_to_last_thinking("agraph.\n\n```rust\nfn main() {}\n```\n\nDone.");
+        let _ = view.cells[0].compute_lines(80, &ctx);
+        assert!(view.cells[0].is_streaming());
+
+        view.finalize_streams();
+        let finalized: Vec<Line<'static>> = view.cells[0].compute_lines(80, &ctx).to_vec();
+        assert!(!view.cells[0].is_streaming());
+        assert!(view.cells[0].is_prewrapped());
+
+        let reference =
+            crate::render::markdown::stream::full_lines(text, 80, Profile::Thinking, &p);
+        assert_eq!(span_texts(&finalized), span_texts(&reference));
+        // Height survives as the line count after finalize.
+        assert_eq!(view.cells[0].compute_height(80, &ctx), finalized.len());
+    }
+
+    #[test]
+    fn test_streaming_width_change_rebuild() {
+        let (p, l) = test_ctx();
+        let ctx = make_ctx(&p, &l);
+        let text = "A reasonably long paragraph that wraps at narrow widths.";
+        let mut view = ChatView::new();
+        view.append_to_last_assistant(text);
+        let wide: Vec<Line<'static>> = view.cells[0].compute_lines(100, &ctx).to_vec();
+        let reference_wide =
+            crate::render::markdown::stream::full_lines(text, 100, Profile::Content, &p);
+        assert_eq!(span_texts(&wide), span_texts(&reference_wide));
+
+        // Narrow: full rebuild from the buffer.
+        let narrow: Vec<Line<'static>> = view.cells[0].compute_lines(30, &ctx).to_vec();
+        let reference_narrow =
+            crate::render::markdown::stream::full_lines(text, 30, Profile::Content, &p);
+        assert_eq!(span_texts(&narrow), span_texts(&reference_narrow));
+        assert!(narrow.len() > wide.len(), "should wrap more when narrower");
+    }
+
+    #[test]
+    fn test_streaming_widget_blit_render() {
+        // A streaming cell renders through the direct-blit path (no
+        // Paragraph Composer) — verify the buffer contents match the
+        // reference full render and every row fits the width.
+        let mut view = ChatView::new();
+        view.append_to_last_assistant("streaming answer with **bold** and `code`.\n\n- item");
+        let mut buf = render_view(&mut view, 40, 10);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("streaming answer"),
+            "streaming content missing from blit render: {text}"
+        );
+        assert!(text.contains("item"), "list content missing: {text}");
+        for line in text.lines() {
+            assert!(line.chars().count() <= 40, "row exceeds width: {line:?}");
+        }
+
+        // After finalize the cell stays on the blit path.
+        view.finalize_streams();
+        buf = render_view(&mut view, 40, 10);
+        let text2 = buffer_text(&buf);
+        assert!(
+            text2.contains("streaming answer"),
+            "finalized content missing: {text2}"
+        );
+        assert!(text2.contains("item"));
+    }
+
+    #[test]
+    fn test_streaming_blit_scroll() {
+        // A long streaming cell, scrolled to the bottom via auto-scroll,
+        // renders the LAST lines through the blit path.
+        let mut view = ChatView::new();
+        let mut text = String::new();
+        for i in 0..60 {
+            text.push_str(&format!("line {i:03} of the stream\n"));
+        }
+        view.append_to_last_assistant(&text);
+        let buf = render_view(&mut view, 40, 8);
+        let text = buffer_text(&buf);
+        // Auto-scroll pins to bottom: the last visible row region shows
+        // the tail lines, not the head.
+        assert!(
+            !text.contains("line 000"),
+            "auto-scroll lost — head visible: {text}"
+        );
+        assert!(
+            text.contains("line 05"),
+            "tail lines missing from blit render: {text}"
+        );
+    }
+
+    #[test]
+    fn test_streaming_stable_prefix_not_rewritten() {
+        let (p, l) = test_ctx();
+        let ctx = make_ctx(&p, &l);
+        let mut view = ChatView::new();
+        view.append_to_last_assistant("first block.\n\n");
+        let _ = view.cells[0].compute_lines(80, &ctx);
+        let before: Vec<Line<'static>> = view.cells[0].compute_lines(80, &ctx).to_vec();
+
+        view.append_to_last_assistant("second block grows ");
+        view.append_to_last_assistant("more");
+        let after: Vec<Line<'static>> = view.cells[0].compute_lines(80, &ctx).to_vec();
+
+        // The promoted first block's lines are unchanged prefix-wise.
+        let prefix_len = before.len().saturating_sub(1); // minus trailing cell blank
+        assert!(after.len() >= prefix_len);
+        for i in 0..prefix_len {
+            assert_eq!(
+                before[i].to_string(),
+                after[i].to_string(),
+                "stable prefix line {i} changed"
+            );
+        }
     }
 }

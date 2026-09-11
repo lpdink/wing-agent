@@ -252,6 +252,29 @@ impl<'a> From<&'a MarkdownLine> for Line<'a> {
     }
 }
 
+/// Map a markdown segment's style into the thinking block's visual layer.
+///
+/// Code-like and decorative elements keep their theme colors so inline code
+/// and code blocks stay distinguishable inside reasoning content; prose
+/// elements inherit the thinking foreground while everything else (bold,
+/// italic, dim, background, underline color) is preserved untouched.
+///
+/// Lives at the render layer (not in the thinking cell) so the streaming
+/// renderer can share the exact same recolor semantics.
+pub fn thinking_segment_style(kind: SegmentKind, original: Style, thinking_style: Style) -> Style {
+    match kind {
+        SegmentKind::InlineCode
+        | SegmentKind::CodeBlock
+        | SegmentKind::Link
+        | SegmentKind::Border
+        | SegmentKind::Gutter => original,
+        SegmentKind::Text | SegmentKind::Heading | SegmentKind::Marker => Style {
+            fg: thinking_style.fg,
+            ..original
+        },
+    }
+}
+
 /// Truncate a string to fit within a given display width (CJK-safe).
 ///
 /// Uses UnicodeWidthChar to measure each character's display width,
