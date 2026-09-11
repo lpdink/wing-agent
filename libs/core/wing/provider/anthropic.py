@@ -73,6 +73,20 @@ class _StreamState:
     stop_reason: str | None = None
 
 
+def _is_zero_info_block(block: object) -> bool:
+    """零信息块：取消恰逢 content_block_start 与首个 delta 之间的产物。
+
+    空 text 块与「无文本、无签名、非 redacted」的 thinking 块携带零信息，
+    落链/进权威块数组会产出空 assistant 消息。带 signature / redacted 的
+    空文本 thinking 携带不可重建信息，必须保留。
+    """
+    if isinstance(block, TextBlock):
+        return not block.text
+    if isinstance(block, ThinkingBlock):
+        return not block.redacted and not block.thinking.strip() and not block.signature
+    return False
+
+
 class AnthropicProvider(ModelProvider):
     """Anthropic Messages API provider（httpx 实现）。"""
 
@@ -141,24 +155,15 @@ class AnthropicProvider(ModelProvider):
         """按 index 排序产出已终结的块（跳过仍在 pending 的 tool 块）。
 
         同时服务于 message_stop 的权威块数组产出（max_tokens 截断在
-        tool args 中间时，半截 tool_use 不得进入）与中断快照。
-
-        零信息 thinking 块（无文本、无签名、非 redacted）一并剔除——取消
-        恰逢 content_block_start 与首个 delta 之间时的产物；零信息块落链
-        会产生空 assistant 消息。带签名 / redacted 的空文本块携带不可
-        重建信息，必须保留。
+        tool args 中间时，半截 tool_use 不得进入）与中断快照。零信息块
+        （见 _is_zero_info_block）一并剔除。
         """
         blocks = []
         for idx in sorted(state.blocks_by_index):
             if idx in state.pending_tools:
                 continue  # 未终结的 tool 块：半截，剔除
             block = state.blocks_by_index[idx]
-            if (
-                isinstance(block, ThinkingBlock)
-                and not block.redacted
-                and not block.thinking.strip()
-                and not block.signature
-            ):
+            if _is_zero_info_block(block):
                 continue
             blocks.append(block)
         return blocks
@@ -525,6 +530,9 @@ class AnthropicProvider(ModelProvider):
                     )
                 )
 
+        # 零信息块剔除（与流式路径 / OpenAI 路径对齐）
+        blocks = [b for b in blocks if not _is_zero_info_block(b)]
+
         usage_data = data.get("usage", {})
         log.debug(f"[anthropic usage] sync raw: {usage_data}")
         prompt_tokens = usage_data.get("input_tokens", 0)
@@ -537,7 +545,8 @@ class AnthropicProvider(ModelProvider):
         yield LLMResponse(
             content="".join(text_parts) or None,
             reasoning_content="".join(reasoning_parts) or None,
-            content_blocks=blocks or None,
+            # 空响应 → 空块数组（合法空 turn，与 OpenAI 路径统一）
+            content_blocks=blocks,
             tool_calls=tool_calls or None,
             usage=LLMUsage(
                 prompt_tokens=prompt_tokens,
@@ -792,7 +801,9 @@ class AnthropicProvider(ModelProvider):
         """message_stop：产出有序 content_blocks（权威块数组）+ 最终 usage。
 
         未被 content_block_stop 终结的 tool 块（max_tokens 砍在参数中间）
-        从块数组中剔除——半截 tool_use 不产生工具调用。
+        从块数组中剔除——半截 tool_use 不产生工具调用。零信息块过滤后为
+        空数组时原样输出 []（合法空 turn，与 OpenAI 路径统一）——None 保留
+        给「流未正常结束」的契约违反信号。
         """
         # Anthropic 的 input_tokens 仅为非缓存部分（含兜底/增量源）；
         # 对齐 OpenAI 语义：prompt_tokens = 总输入（含缓存）
@@ -814,7 +825,7 @@ class AnthropicProvider(ModelProvider):
                 decode_tps = state.completion_tokens / decode_elapsed
         ordered_blocks = AnthropicProvider._ordered_finalized_blocks(state)
         return LLMResponse(
-            content_blocks=ordered_blocks or None,
+            content_blocks=ordered_blocks,
             usage=LLMUsage(
                 prompt_tokens=total_prompt,
                 completion_tokens=state.completion_tokens,

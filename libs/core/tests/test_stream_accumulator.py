@@ -54,18 +54,21 @@ def runtime():
 
 
 class _HoldingResponse:
-    """逐行喂 SSE；喂完后挂起保持流打开——测试在此刻取消消费。"""
+    """逐行喂 SSE；hold=True 时喂完后挂起保持流打开（等待消费方取消），
+    hold=False 时流正常结束（completed-stream 场景）。"""
 
     is_error = False
 
-    def __init__(self, lines: list[str]) -> None:
+    def __init__(self, lines: list[str], hold: bool = True) -> None:
         self._lines = lines
+        self._hold = hold
         self.headers = {"request-id": "test-rid", "x-request-id": "test-rid"}
 
     async def aiter_lines(self):
         for line in self._lines:
             yield line
-        await asyncio.Event().wait()  # 挂起：等待被取消
+        if self._hold:
+            await asyncio.Event().wait()  # 挂起：等待被取消
 
     async def aclose(self) -> None:
         pass
@@ -74,8 +77,9 @@ class _HoldingResponse:
 class _FakeClient:
     """httpx.AsyncClient 替身：记录请求 body，返回可控 SSE 流。"""
 
-    def __init__(self, lines: list[str]) -> None:
+    def __init__(self, lines: list[str], hold: bool = True) -> None:
         self._lines = lines
+        self._hold = hold
         self.bodies: list[dict] = []
 
     def build_request(self, method: str, url: str, **kwargs: Any) -> object:
@@ -85,7 +89,7 @@ class _FakeClient:
         return object()
 
     async def send(self, request: object, stream: bool = False) -> "_HoldingResponse":
-        return _HoldingResponse(self._lines)
+        return _HoldingResponse(self._lines, hold=self._hold)
 
     async def aclose(self) -> None:
         pass
@@ -431,11 +435,26 @@ class TestEmptyThinkingBlockFilter:
         assert blocks is not None
         assert [type(b).__name__ for b in blocks] == ["TextBlock"]
 
-    def test_only_empty_thinking_snapshot_is_none(self):
-        """取消恰逢 block_start 与首个 delta 之间：不补提交空消息。"""
+    def test_empty_text_block_excluded_symmetrically(self):
+        """空 TextBlock（取消恰逢 text block_start 与首个 delta 之间）
+        与空 thinking 同构剔除——零信息过滤对称。"""
+        provider = self._provider()
+        state = _StreamState()
+        state.blocks_by_index[0] = ThinkingBlock(thinking="real reasoning")
+        state.blocks_by_index[1] = TextBlock(text="")
+        acc = provider.create_accumulator()
+        acc.state = state
+
+        blocks = provider.snapshot_blocks(acc)
+        assert blocks is not None
+        assert [type(b).__name__ for b in blocks] == ["ThinkingBlock"]
+
+    def test_only_empty_blocks_snapshot_is_none(self):
+        """全部为零信息块（空 thinking 或空 text）：不补提交空消息。"""
         provider = self._provider()
         state = _StreamState()
         state.blocks_by_index[0] = ThinkingBlock(thinking="")
+        state.blocks_by_index[1] = TextBlock(text="")
         acc = provider.create_accumulator()
         acc.state = state
 
@@ -458,6 +477,81 @@ class TestEmptyThinkingBlockFilter:
         assert blocks is not None
         assert len(blocks) == 3
 
+    @pytest.mark.asyncio
+    async def test_completed_stream_excludes_zero_info_text_block(self):
+        """message_stop 权威块数组同一过滤：空 text 块不进最终块数组。"""
+        provider = _make_anthropic()
+        try:
+            await provider._client.aclose()
+            provider._client = _FakeClient(  # ty: ignore[invalid-assignment]
+                hold=False,
+                lines=_anthropic_sse(
+                    [
+                        {
+                            "type": "content_block_start",
+                            "index": 0,
+                            "content_block": {"type": "text", "text": ""},
+                        },
+                        {"type": "content_block_stop", "index": 0},
+                        {
+                            "type": "content_block_start",
+                            "index": 1,
+                            "content_block": {"type": "text", "text": ""},
+                        },
+                        {
+                            "type": "content_block_delta",
+                            "index": 1,
+                            "delta": {"type": "text_delta", "text": "answer"},
+                        },
+                        {"type": "content_block_stop", "index": 1},
+                        {"type": "message_stop"},
+                    ]
+                ),
+            )
+            final_blocks = None
+            async for chunk in provider._generate_stream(body={}, model="claude"):
+                if chunk.content_blocks is not None:
+                    final_blocks = chunk.content_blocks
+
+            assert final_blocks is not None
+            assert [b.text for b in final_blocks if isinstance(b, TextBlock)] == [
+                "answer"
+            ]
+        finally:
+            await provider.aclose()
+
+    @pytest.mark.asyncio
+    async def test_completed_empty_stream_is_legal_empty_turn(self):
+        """P2-2 统一：message_stop 到达但零信息块全被过滤 → 权威块数组为
+        []（合法空 turn），MUST NOT 是 None（那是「流未正常结束」的契约
+        违反信号，会触发无谓重试 + RuntimeError）。与 OpenAI 路径行为一致。
+        """
+        provider = _make_anthropic()
+        try:
+            await provider._client.aclose()
+            provider._client = _FakeClient(  # ty: ignore[invalid-assignment]
+                hold=False,
+                lines=_anthropic_sse(
+                    [
+                        {
+                            "type": "content_block_start",
+                            "index": 0,
+                            "content_block": {"type": "thinking", "thinking": ""},
+                        },
+                        {"type": "content_block_stop", "index": 0},
+                        {"type": "message_stop"},
+                    ]
+                ),
+            )
+            final_blocks = "unset"
+            async for chunk in provider._generate_stream(body={}, model="claude"):
+                if chunk.content_blocks is not None:
+                    final_blocks = chunk.content_blocks
+
+            assert final_blocks == []
+        finally:
+            await provider.aclose()
+
 
 # ─── 端到端：打断补提交 + 下一轮请求 ─────────────────────────────
 
@@ -466,10 +560,12 @@ async def _interrupted_agent(
     runtime: "WingRuntime",
     provider: AnthropicProvider | OpenAICompatProvider,
     lines: list[str],
+    ready: Callable[[StreamAccumulator], bool] | None = None,
 ) -> tuple["WingAgent", _FakeClient]:
-    """真实 provider 起一轮，等 delta 进入累积状态后打断。
+    """真实 provider 起一轮，等就绪条件满足后打断。
 
-    返回 (agent, client)：client 记录每一轮请求 body。
+    默认就绪条件：快照出现已终结内容。返回 (agent, client)——client 记录
+    每一轮请求 body。
     """
     await provider._client.aclose()
     client = _FakeClient(lines)
@@ -480,12 +576,14 @@ async def _interrupted_agent(
     agent.set_model("test-model", provider)
 
     await agent.post("go")
+
+    def _default_ready(acc: StreamAccumulator) -> bool:
+        return bool(provider.snapshot_blocks(acc))
+
+    check = ready or _default_ready
     # 等到 delta 进入真实累积状态（正是打断补提交的数据源）
     await _wait_until(
-        lambda: (
-            agent._loop.current_acc is not None
-            and bool(provider.snapshot_blocks(agent._loop.current_acc))
-        )
+        lambda: agent._loop.current_acc is not None and check(agent._loop.current_acc)
     )
     await agent.interrupt()
     return agent, client
@@ -593,6 +691,187 @@ class TestInterruptCommitEndToEnd:
             )
             assert partial_msg["content"] == ""
             assert partial_msg["role"] == "assistant"
+
+            await agent.shutdown()
+        finally:
+            await provider.aclose()
+
+    @pytest.mark.asyncio
+    async def test_anthropic_finalized_tool_interrupt_synthesizes_result(self, runtime):
+        """P0-1（Anthropic）：tool_use 已终结（content_block_stop）未执行时
+        打断 → 合成 tool_result 补配对，下一轮请求结构合法。
+
+        回归：快照原样落链会悬空 tool_use——Anthropic 要求 tool_use 后紧跟
+        tool_result，否则 400 毒化会话。触发窗口：A 已终结、模型仍在生成
+        后续块时打断；并行调用 A 终结 B 流式中同理（B 由 provider 剔除）。
+        """
+        from wing.agent.tool_executor import INTERRUPTED_RESULT
+        from wing.event import ToolCallResultEvent
+        from wing.schema import ToolUseBlock
+
+        provider = _make_anthropic()
+        try:
+            events: list[Any] = []
+            event_bus.subscribe(events.append)
+
+            agent, client = await _interrupted_agent(
+                runtime,
+                provider,
+                _anthropic_sse(
+                    [
+                        {
+                            "type": "content_block_start",
+                            "index": 0,
+                            "content_block": {"type": "thinking", "thinking": ""},
+                        },
+                        {
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {
+                                "type": "thinking_delta",
+                                "thinking": "about to run a tool",
+                            },
+                        },
+                        {
+                            "type": "content_block_start",
+                            "index": 1,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": "t1",
+                                "name": "Bash",
+                            },
+                        },
+                        {
+                            "type": "content_block_delta",
+                            "index": 1,
+                            "delta": {
+                                "type": "input_json_delta",
+                                "partial_json": '{"cmd":',
+                            },
+                        },
+                        {
+                            "type": "content_block_delta",
+                            "index": 1,
+                            "delta": {
+                                "type": "input_json_delta",
+                                "partial_json": '"ls"}',
+                            },
+                        },
+                        # tool 块就此终结（content_block_stop）；流继续挂着
+                        {"type": "content_block_stop", "index": 1},
+                    ]
+                ),
+                ready=lambda acc: any(
+                    isinstance(b, ToolUseBlock)
+                    for b in (provider.snapshot_blocks(acc) or [])
+                ),
+            )
+
+            # ── 链：[user, assistant(thinking+tool_use), tool(合成)] ──
+            chain = agent.context_manager.get_context_window()
+            assert [m.role for m in chain] == ["user", "assistant", "tool"]
+            assistant = chain[1]
+            assert assistant.stop_reason == "interrupted"
+            assert assistant.reasoning_content == "about to run a tool"
+            assert [tc.id for tc in assistant.tool_calls or []] == ["t1"]
+            assert assistant.tool_calls[0].arguments == {"cmd": "ls"}
+            assert chain[2].tool_call_id == "t1"
+            assert chain[2].content == INTERRUPTED_RESULT
+
+            # ── 事件：合成的关卡片事件（前端冻结流式工具卡）──
+            result_events = [e for e in events if isinstance(e, ToolCallResultEvent)]
+            assert [
+                (e.tool_call_id, e.tool_success, e.tool_result) for e in result_events
+            ] == [("t1", False, INTERRUPTED_RESULT)]
+
+            # ── 下一轮请求：tool_use 有配对 tool_result（wire 级）──
+            await agent.post("continue")
+            await _wait_until(lambda: len(client.bodies) >= 2)
+            messages = client.bodies[1]["messages"]
+            idx, assistant_wire = next(
+                (i, m) for i, m in enumerate(messages) if m["role"] == "assistant"
+            )
+            tool_uses = [
+                b for b in assistant_wire["content"] if b["type"] == "tool_use"
+            ]
+            assert [b["id"] for b in tool_uses] == ["t1"]
+            # 紧随消息必须携带配对 tool_result
+            follow = messages[idx + 1]
+            results = [b for b in follow["content"] if b.get("type") == "tool_result"]
+            assert [(r["tool_use_id"], r["content"]) for r in results] == [
+                ("t1", INTERRUPTED_RESULT)
+            ]
+
+            await agent.shutdown()
+        finally:
+            await provider.aclose()
+
+    @pytest.mark.asyncio
+    async def test_openai_finalized_tool_interrupt_synthesizes_result(self, runtime):
+        """P0-1（OpenAI）：finish_reason=tool_calls 到达（调用已终结）后
+        打断 → tool_calls 有配对 tool 消息，且 assistant content 非 null。"""
+        from wing.agent.tool_executor import INTERRUPTED_RESULT
+        from wing.schema import ToolUseBlock
+
+        provider = _make_openai()
+        try:
+            agent, client = await _interrupted_agent(
+                runtime,
+                provider,
+                _openai_sse(
+                    [
+                        {
+                            "choices": [
+                                {"delta": {"reasoning_content": "about to run a tool"}}
+                            ]
+                        },
+                        {
+                            "choices": [
+                                {
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "id": "c1",
+                                                "function": {
+                                                    "name": "Bash",
+                                                    "arguments": '{"cmd":"ls"}',
+                                                },
+                                            }
+                                        ]
+                                    },
+                                    "finish_reason": "tool_calls",
+                                }
+                            ]
+                        },
+                    ]
+                ),
+                ready=lambda acc: any(
+                    isinstance(b, ToolUseBlock)
+                    for b in (provider.snapshot_blocks(acc) or [])
+                ),
+            )
+
+            chain = agent.context_manager.get_context_window()
+            assert [m.role for m in chain] == ["user", "assistant", "tool"]
+            assistant = chain[1]
+            assert [tc.id for tc in assistant.tool_calls or []] == ["c1"]
+            assert chain[2].tool_call_id == "c1"
+            assert chain[2].content == INTERRUPTED_RESULT
+
+            await agent.post("continue")
+            await _wait_until(lambda: len(client.bodies) >= 2)
+            messages = client.bodies[1]["messages"]
+            assert '"content": null' not in json.dumps(messages, ensure_ascii=False)
+            idx, assistant_wire = next(
+                (i, m) for i, m in enumerate(messages) if m.get("tool_calls")
+            )
+            assert assistant_wire["content"] == ""
+            assert assistant_wire["tool_calls"][0]["id"] == "c1"
+            follow = messages[idx + 1]
+            assert follow["role"] == "tool"
+            assert follow["tool_call_id"] == "c1"
+            assert follow["content"] == INTERRUPTED_RESULT
 
             await agent.shutdown()
         finally:
