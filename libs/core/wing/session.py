@@ -341,6 +341,7 @@ class Session:
             skills=list(cm._skills_cache.keys()),
             rules=list(cm._rules_files),
             workspace=self._metadata.workspace,
+            provider_name=self._agent.model_provider.name,
         )
 
     def serialize_messages(self) -> list[dict]:

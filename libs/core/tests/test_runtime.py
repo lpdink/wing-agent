@@ -333,13 +333,29 @@ class TestSessionSerialization:
 
     @pytest.mark.asyncio
     async def test_to_agent_info_returns_correct_fields(self, runtime: Any):
-        """to_agent_info 返回包含 model_name、tools、skills、rules、workspace 的 AgentInfo。"""
+        """to_agent_info 返回包含 model_name、provider_name、tools、skills、rules、workspace 的 AgentInfo。"""
         session = runtime.create_session()
         info = session.to_agent_info()
         assert info.model_name is not None
         assert isinstance(info.tools, list)
         assert isinstance(info.skills, list)
         assert isinstance(info.rules, list)
+        # provider_name 与 model_name 同源同刻：当前活跃 provider 的名称。
+        assert info.provider_name == session.agent.model_provider.name == "default"
+
+    def test_agent_info_provider_name_defaults_to_none(self):
+        """provider_name 可选：缺省为 None，序列化/反序列化不报错（旧数据兼容）。"""
+        from wing.event import AgentInfo
+
+        info = AgentInfo(model_name="gpt-4")
+        assert info.provider_name is None
+        assert info.model_dump()["provider_name"] is None
+        assert AgentInfo.model_validate(info.model_dump()).provider_name is None
+        # 显式携带时 round-trip 保持不变。
+        with_provider = AgentInfo(model_name="gpt-4", provider_name="alt")
+        assert (
+            AgentInfo.model_validate(with_provider.model_dump()).provider_name == "alt"
+        )
 
     @pytest.mark.asyncio
     async def test_serialize_messages_empty(self, runtime: Any):

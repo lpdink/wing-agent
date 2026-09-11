@@ -72,6 +72,10 @@ class AgentInfo(BaseModel):
     skills/rules 携带的是**已加载**的技能名/规则文件路径（非配置 pattern），
     前端据此渲染加载概览（如 "loaded N skills, M rules"）；
     配置 pattern 等细节经 /skills 按需拉取（SessionInfo.skills_info）。
+
+    model_name 与 provider_name 同源同刻：provider_name 是当前活跃
+    ModelProvider 的名称（model/provider 二元组是模型选择的完整身份，
+    同名模型跨 provider 时前端据此消歧）。旧数据/降级路径下可为 None。
     """
 
     model_name: str
@@ -80,6 +84,7 @@ class AgentInfo(BaseModel):
     skills: list[str] = Field(default_factory=list)
     rules: list[str] = Field(default_factory=list)
     workspace: str | None = None
+    provider_name: str | None = None
 
 
 class CommandInfo(BaseModel):

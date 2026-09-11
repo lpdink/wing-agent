@@ -218,6 +218,7 @@ pub async fn execute_intent(
                     Ok(_) => apply_update_session(
                         app,
                         model,
+                        provider,
                         agent,
                         title,
                         thinking,
@@ -601,6 +602,7 @@ pub async fn execute_intent(
 fn apply_update_session(
     app: &mut App,
     model: Option<String>,
+    provider: Option<String>,
     agent: Option<String>,
     title: Option<String>,
     thinking: Option<bool>,
@@ -612,7 +614,10 @@ fn apply_update_session(
 
     // Build toast parts from non-None fields.
     let parts: Vec<String> = [
-        model.as_ref().map(|m| format!("Model: {m}")),
+        model.as_ref().map(|m| match provider.as_deref() {
+            Some(p) => format!("Model: {m} ({p})"),
+            None => format!("Model: {m}"),
+        }),
         agent.as_ref().map(|a| format!("Agent: {a}")),
         title.as_ref().map(|t| format!("Title: {t}")),
         thinking.map(|t| format!("Think: {}", on_off(t))),
@@ -628,6 +633,9 @@ fn apply_update_session(
     let affects_list = title.is_some() || workspace.is_some();
     app.status
         .apply_session_update(model, agent, title, thinking, reasoning_effort, yolo);
+    if let Some(p) = provider {
+        app.status.provider = Some(p);
+    }
 
     if let Some(w) = workspace {
         app.status.workdir = Some(w);
@@ -671,6 +679,7 @@ mod tests {
             &mut app,
             None,
             None,
+            None,
             Some("New Title".into()),
             None,
             None,
@@ -685,6 +694,7 @@ mod tests {
         let mut app = app_with_cached_sessions();
         apply_update_session(
             &mut app,
+            None,
             None,
             None,
             None,
@@ -708,8 +718,27 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(!app.popup.cache.sessions.is_empty());
+    }
+
+    #[test]
+    fn test_update_session_syncs_provider() {
+        let mut app = app_with_cached_sessions();
+        apply_update_session(
+            &mut app,
+            Some("gpt-4o".into()),
+            Some("alt".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(app.status.model, "gpt-4o");
+        assert_eq!(app.status.provider.as_deref(), Some("alt"));
     }
 
     #[test]
@@ -717,6 +746,7 @@ mod tests {
         let mut app = app_with_cached_sessions();
         apply_update_session(
             &mut app,
+            None,
             None,
             None,
             None,
