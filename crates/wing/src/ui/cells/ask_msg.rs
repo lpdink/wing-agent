@@ -17,16 +17,16 @@ use crate::app::ask_panel::AskPanel;
 use crate::app::ask_panel::PanelFinish;
 use crate::app::ask_panel::QuestionState;
 use crate::app::ask_panel::UNANSWERED_PLACEHOLDER;
+use crate::app::selection_panel::PANEL_WINDOW;
+use crate::app::selection_panel::window_range;
 use crate::config::ThemePalette;
 use crate::render::markdown::render_markdown_with_width;
 use crate::ui::panel::Tab;
 use crate::ui::panel::TabState;
-use crate::ui::panel::Window;
 use crate::ui::panel::cursor_span;
 use crate::ui::panel::footer;
 use crate::ui::panel::label_span;
 use crate::ui::panel::label_style;
-use crate::ui::panel::option_row;
 use crate::ui::panel::tab_bar;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
@@ -179,7 +179,7 @@ fn ask_tab_bar(panel: &AskPanel, palette: &ThemePalette) -> Line<'static> {
 }
 
 /// Option rows of the current question, plus the free-form row, windowed to
-/// the shared visible size (the cursor row is always inside the window).
+/// the shared visible size (the cursor row stays centered while scrolling).
 fn option_rows(
     panel: &AskPanel,
     palette: &ThemePalette,
@@ -189,20 +189,24 @@ fn option_rows(
     let qi = panel.current;
     let q = &panel.questions[qi];
     let st = &panel.states[qi];
-    let window = Window::new(st.cursor, q.options.len() + 1);
+    let rows = q.options.len() + 1;
+    let range = window_range(st.cursor, rows, PANEL_WINDOW);
 
-    for i in window.range.clone() {
+    for i in range {
         let is_cursor = st.cursor == i;
         if i < q.options.len() {
             let option = &q.options[i];
-            let mut content = vec![number_span(i + 1, is_cursor, palette)];
+            let mut spans = vec![
+                cursor_span(is_cursor, palette),
+                number_span(i + 1, is_cursor, palette),
+            ];
             if q.multi_select {
-                content.push(checkbox_span(st.toggles[i], palette));
+                spans.push(checkbox_span(st.toggles[i], palette));
             } else {
-                content.push(radio_span(st.selected == Some(i), palette));
+                spans.push(radio_span(st.selected == Some(i), palette));
             }
-            content.push(label_span(&option.label, is_cursor, palette));
-            lines.push(option_row(&window, i, is_cursor, palette, content));
+            spans.push(label_span(&option.label, is_cursor, palette));
+            lines.push(Line::from(spans));
             push_description(
                 &option.description,
                 palette,
@@ -211,7 +215,7 @@ fn option_rows(
                 OPTION_DESC_INDENT,
             );
         } else {
-            custom_row(&window, st, q.options.len(), palette, width, lines);
+            custom_row(st, q.options.len(), palette, width, lines);
         }
     }
 }
@@ -219,7 +223,6 @@ fn option_rows(
 /// The free-form row (always the last row of a question): placeholder,
 /// committed text, kept draft, or the inline editor.
 fn custom_row(
-    window: &Window,
     st: &QuestionState,
     custom_idx: usize,
     palette: &ThemePalette,
@@ -227,47 +230,48 @@ fn custom_row(
     lines: &mut Vec<Line<'static>>,
 ) {
     let is_cursor = st.cursor == custom_idx;
-    let mut content = vec![number_span(custom_idx + 1, is_cursor, palette)];
+    let mut spans = vec![
+        cursor_span(is_cursor, palette),
+        number_span(custom_idx + 1, is_cursor, palette),
+    ];
     if st.editing {
-        // Reserve the cursor/number columns plus the window markers when this
-        // row carries one — editor text must not push them off-screen.
-        let markers = usize::from(window.left_hidden && custom_idx == window.range.start) * 2
-            + usize::from(window.right_hidden && custom_idx + 1 == window.range.end) * 2;
-        let used = 2 + 3 + "Type Something: ".chars().count() + markers;
-        content.push(Span::styled(
+        // Reserve the cursor/number columns plus the label prefix — editor
+        // text must not push the row beyond the panel width.
+        let used = 2 + 3 + "Type Something: ".chars().count();
+        spans.push(Span::styled(
             "Type Something: ",
             label_style(is_cursor, palette),
         ));
         let budget = (width as usize).saturating_sub(used);
-        content.extend(edit_spans(&st.draft, st.edit_cursor, palette, budget));
-        lines.push(option_row(window, custom_idx, is_cursor, palette, content));
+        spans.extend(edit_spans(&st.draft, st.edit_cursor, palette, budget));
+        lines.push(Line::from(spans));
     } else if let Some(text) = st.custom.as_deref() {
-        content.push(Span::styled(
+        spans.push(Span::styled(
             "Type Something: ",
             label_style(is_cursor, palette),
         ));
-        content.push(Span::styled(
+        spans.push(Span::styled(
             text.to_string(),
             label_style(is_cursor, palette),
         ));
-        lines.push(option_row(window, custom_idx, is_cursor, palette, content));
+        lines.push(Line::from(spans));
     } else if !st.draft.trim().is_empty() {
         // Kept draft (editor left via ↑/↓) — uncommitted but visible.
-        content.push(Span::styled(
+        spans.push(Span::styled(
             "Type Something: ",
             label_style(is_cursor, palette),
         ));
-        content.push(Span::styled(
+        spans.push(Span::styled(
             st.draft.clone(),
             Style::default().fg(palette.dim),
         ));
-        lines.push(option_row(window, custom_idx, is_cursor, palette, content));
+        lines.push(Line::from(spans));
     } else {
-        content.push(Span::styled(
+        spans.push(Span::styled(
             "Type Something",
             label_style(is_cursor, palette),
         ));
-        lines.push(option_row(window, custom_idx, is_cursor, palette, content));
+        lines.push(Line::from(spans));
         push_description(
             "Enter a custom response",
             palette,
@@ -752,9 +756,9 @@ mod tests {
     }
 
     #[test]
-    fn long_option_list_windows_and_marks_hidden_sides() {
-        // 8 options + free-form row, cursor on the 6th option (index 5):
-        // window slides to rows 1..6 (m1..m5), both sides hidden.
+    fn long_option_list_scrolls_a_centered_window() {
+        // 8 options + free-form row, cursor on the 6th option (index 5): the
+        // window centers the cursor → rows 3..8 (m3..m7), no marker glyphs.
         let mut panel = AskPanel::new(
             "tc".into(),
             vec![question(
@@ -767,13 +771,18 @@ mod tests {
         panel.states[0].cursor = 5;
         let msg = AskMessage::new_panel("tc".into(), panel);
         let out = text(&msg.to_lines(&p(), 80));
-        assert!(!out.contains("m0"), "above the window: {out}");
-        assert!(!out.contains("m6") && !out.contains("m7"), "below: {out}");
-        assert!(out.contains('‹') && out.contains('›'), "markers: {out}");
-        assert!(out.contains("❯ 6. ( ) m5"), "cursor on last visible: {out}");
+        for hidden in ["m0", "m1", "m2"] {
+            assert!(!out.contains(hidden), "{hidden} above the window: {out}");
+        }
+        assert!(out.contains("m3") && out.contains("m7"), "window: {out}");
+        assert!(out.contains("❯ 6. ( ) m5"), "cursor centered: {out}");
         assert!(
             !out.contains("Type Something"),
             "free-form row is outside the window: {out}"
+        );
+        assert!(
+            !out.contains('‹') && !out.contains('›'),
+            "no markers: {out}"
         );
     }
 }

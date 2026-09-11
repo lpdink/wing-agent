@@ -2,6 +2,7 @@
 
 pub mod ask_msg;
 pub mod diff_view;
+pub mod model_picker;
 pub mod thinking;
 pub mod todo_msg;
 pub mod tool_call;

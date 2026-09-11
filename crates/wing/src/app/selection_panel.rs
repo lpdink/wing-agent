@@ -5,12 +5,17 @@
 //! confirm page: the kernel keeps its tab slot but no cursor). The kernel
 //! provides, once for every adapter:
 //!
-//! - page switching (`←`/`→`, wraps) and page-local cursor movement
-//!   (`↑`/`↓`, wraps) with per-page cursor memory,
+//! - page switching (`←`/`→`) and page-local cursor movement (`↑`/`↓`) with
+//!   per-page cursor memory; both **clamp at the ends by default** (no
+//!   wrap-around — the model picker's UX). Adapters may override the two
+//!   methods to opt into wrap semantics (AskPanel keeps its established
+//!   wrap-around tab/row navigation),
 //! - single-select commit capture (`commit_current`), decoupled from later
 //!   cursor movement,
 //! - visible-window math ([`window_range`], default [`PANEL_WINDOW`]) for the
-//!   tab bar and the option rows,
+//!   tab bar and the option rows — the cursor/active page is kept in the
+//!   *middle* of the window while it scrolls, and the window is pinned at the
+//!   ends (no wrap, no indicator glyphs),
 //! - the refresh fallback policy ([`SelectionPanel::clamp_after_refresh`]).
 //!
 //! **Storage belongs to the adapter.** AskPanel keeps one cursor per question
@@ -60,8 +65,8 @@ pub trait SelectionPanel {
     /// Set (or clear) the captured row of `page`.
     fn set_committed_at(&mut self, page: usize, row: Option<usize>);
 
-    /// Move the cursor on the active page (wraps). No-op on custom pages and
-    /// on pages without rows.
+    /// Move the cursor on the active page, clamped at the first/last row —
+    /// no wrap-around. No-op on custom pages and on pages without rows.
     fn move_cursor(&mut self, delta: isize) {
         let page = self.current_page();
         let PageKind::Options { rows } = self.page_kind(page) else {
@@ -70,16 +75,21 @@ pub trait SelectionPanel {
         if rows == 0 {
             return;
         }
-        self.set_cursor_at(page, wrap_index(self.cursor_at(page), delta, rows));
+        let current = self.cursor_at(page).min(rows - 1);
+        let next = current.saturating_add_signed(delta).min(rows - 1);
+        self.set_cursor_at(page, next);
     }
 
-    /// Switch the active page (wraps; custom pages participate).
+    /// Switch the active page, clamped at the first/last page — no
+    /// wrap-around. Custom pages still participate as tab slots.
     fn move_page(&mut self, delta: isize) {
         let count = self.page_count();
         if count == 0 {
             return;
         }
-        self.set_current_page(wrap_index(self.current_page(), delta, count));
+        let current = self.current_page().min(count - 1);
+        let next = current.saturating_add_signed(delta).min(count - 1);
+        self.set_current_page(next);
     }
 
     /// Capture the option under the cursor as the active page's committed
@@ -127,6 +137,9 @@ pub trait SelectionPanel {
 }
 
 /// Wrap `index + delta` into `0..len` (empty list → 0).
+///
+/// Not used by the kernel defaults (they clamp); kept for adapters that opt
+/// into wrap-around navigation (AskPanel).
 pub fn wrap_index(index: usize, delta: isize, len: usize) -> usize {
     if len == 0 {
         return 0;
@@ -135,15 +148,13 @@ pub fn wrap_index(index: usize, delta: isize, len: usize) -> usize {
 }
 
 /// Visible range of a sliding window of `size` items that always contains
-/// `cursor`:
+/// `cursor`, keeping the cursor in the *middle* slot whenever possible:
 ///
 /// - fewer items than the window → the whole list,
-/// - cursor before the window's right edge → window pinned at the start,
-/// - cursor past the right edge → window slides right (the cursor ends up on
-///   the last visible slot).
-///
-/// The render layer compares the range against `0` / `len` to draw the
-/// `‹` / `›` markers on the hidden sides.
+/// - window pinned at the start while the cursor is near the top,
+/// - window slides one item per cursor step so the cursor stays centered,
+/// - window pinned at the end near the bottom (the cursor moves through the
+///   last slots instead of wrapping around).
 pub fn window_range(cursor: usize, len: usize, size: usize) -> std::ops::Range<usize> {
     if len == 0 || size == 0 {
         return 0..0;
@@ -152,7 +163,8 @@ pub fn window_range(cursor: usize, len: usize, size: usize) -> std::ops::Range<u
         return 0..len;
     }
     let cursor = cursor.min(len - 1);
-    let start = cursor.saturating_sub(size - 1).min(len - size);
+    let half = size / 2;
+    let start = cursor.saturating_sub(half).min(len - size);
     start..start + size
 }
 
@@ -215,14 +227,16 @@ mod tests {
     // ── Page / cursor navigation ────────────────────────────────
 
     #[test]
-    fn page_switch_wraps() {
+    fn page_switch_clamps_at_ends() {
         let mut host = Host::new(&[Some(2), Some(2), Some(2)]);
         host.move_page(-1);
-        assert_eq!(host.current_page(), 2, "← from the first page wraps");
-        host.move_page(1);
-        assert_eq!(host.current_page(), 0);
+        assert_eq!(host.current_page(), 0, "← at the first page stays put");
         host.move_page(1);
         assert_eq!(host.current_page(), 1);
+        host.move_page(1);
+        assert_eq!(host.current_page(), 2);
+        host.move_page(1);
+        assert_eq!(host.current_page(), 2, "→ at the last page stays put");
     }
 
     #[test]
@@ -240,12 +254,15 @@ mod tests {
     }
 
     #[test]
-    fn cursor_wraps_both_ways() {
+    fn cursor_clamps_at_ends() {
         let mut host = Host::new(&[Some(3)]);
         host.move_cursor(-1);
+        assert_eq!(host.cursor_at(0), 0, "↑ at the first row stays put");
+        host.move_cursor(1);
+        host.move_cursor(1);
         assert_eq!(host.cursor_at(0), 2);
         host.move_cursor(1);
-        assert_eq!(host.cursor_at(0), 0);
+        assert_eq!(host.cursor_at(0), 2, "↓ at the last row stays put");
     }
 
     #[test]
@@ -258,7 +275,9 @@ mod tests {
         host.move_cursor(-1);
         assert_eq!(host.cursor_at(1), 0);
         assert_eq!(host.commit_current(), None, "custom pages never commit");
-        host.move_page(1); // wraps back to the first page
+        host.move_page(1); // clamped: the custom page is the last one
+        assert_eq!(host.current_page(), 1);
+        host.move_page(-1);
         assert_eq!(host.current_page(), 0);
     }
 
@@ -367,19 +386,25 @@ mod tests {
     }
 
     #[test]
-    fn window_slides_when_cursor_crosses_bottom_edge() {
-        // 8 items, window 5: cursor on 5 (the 6th) → window 1..6, cursor on
-        // the last visible slot; the left side is hidden.
-        assert_eq!(window_range(4, 8, 5), 0..5);
-        assert_eq!(window_range(5, 8, 5), 1..6);
-        assert_eq!(window_range(7, 8, 5), 3..8, "pinned at the end");
+    fn window_keeps_the_cursor_centered_while_sliding() {
+        // 8 items, window 5: near the top the window is pinned at the start
+        // (the cursor walks its first slots); from the middle on it slides one
+        // item per step so the cursor stays in the middle slot; near the end
+        // it is pinned again (the cursor walks the last slots). No wrap.
+        assert_eq!(window_range(0, 8, 5), 0..5);
+        assert_eq!(window_range(2, 8, 5), 0..5);
+        assert_eq!(window_range(3, 8, 5), 1..6);
+        assert_eq!(window_range(4, 8, 5), 2..7);
+        assert_eq!(window_range(5, 8, 5), 3..8);
+        assert_eq!(window_range(7, 8, 5), 3..8);
     }
 
     #[test]
     fn window_is_recomputed_per_page() {
         // Switching to a page with a different cursor/length recomputes.
         assert_eq!(window_range(0, 3, 5), 0..3);
-        assert_eq!(window_range(5, 8, 5), 1..6);
+        assert_eq!(window_range(4, 10, 5), 2..7);
+        assert_eq!(window_range(1, 10, 5), 0..5);
         assert_eq!(window_range(1, 2, 5), 0..2);
     }
 

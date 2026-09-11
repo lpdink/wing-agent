@@ -486,6 +486,33 @@ impl SelectionPanel for AskPanel {
             st.selected = row;
         }
     }
+
+    // Ask keeps its established wrap-around navigation: ←/→ cycles the tabs
+    // (confirm page included) and ↑/↓ wraps over the rows. The kernel default
+    // clamps at the ends (model-picker semantics); Ask opts into wrapping.
+
+    /// Move the option cursor on the current question (wraps).
+    fn move_cursor(&mut self, delta: isize) {
+        let page = self.current_page();
+        let PageKind::Options { rows } = self.page_kind(page) else {
+            return;
+        };
+        if rows == 0 {
+            return;
+        }
+        let cursor = self.cursor_at(page);
+        self.set_cursor_at(page, wrap_index(cursor, delta, rows));
+    }
+
+    /// Switch tab with wrap-around (confirm page included).
+    fn move_page(&mut self, delta: isize) {
+        let count = self.page_count();
+        if count == 0 {
+            return;
+        }
+        let current = self.current_page();
+        self.set_current_page(wrap_index(current, delta, count));
+    }
 }
 
 /// Normalize a question in place: legacy `choices` become options and the
@@ -864,15 +891,19 @@ mod tests {
         p.move_page(1);
         assert_eq!(p.cursor_at(0), 1);
 
-        // The tab window covers custom pages: standing on confirm, the window
-        // slides to keep it visible; standing on the last question it is one
-        // `›` away (hidden right).
+        // The tab window covers custom pages: the confirm tab stays inside
+        // the centered window while it is near the active page; on the first
+        // pages it is outside the window (no marker glyphs — the window just
+        // scrolls when the user navigates to it).
         let range = window_range(confirm, p.page_count(), PANEL_WINDOW);
-        assert_eq!(range, 2..7, "window slides to keep the confirm tab visible");
+        assert_eq!(range, 2..7, "window keeps the confirm tab visible");
         assert!(range.contains(&confirm));
         let range = window_range(5, p.page_count(), PANEL_WINDOW);
-        assert_eq!(range, 1..6);
-        assert!(!range.contains(&confirm), "hidden behind the › marker");
+        assert_eq!(range, 2..7);
+        assert!(range.contains(&confirm));
+        let range = window_range(0, p.page_count(), PANEL_WINDOW);
+        assert_eq!(range, 0..5);
+        assert!(!range.contains(&confirm), "outside the window at the start");
     }
 
     #[test]

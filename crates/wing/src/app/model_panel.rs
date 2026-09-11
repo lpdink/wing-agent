@@ -22,7 +22,6 @@
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 
-use crate::app::selection_panel::PANEL_WINDOW;
 use crate::app::selection_panel::PageKind;
 use crate::app::selection_panel::SelectionPanel;
 use wing_api_client::models::ProviderModels;
@@ -155,12 +154,6 @@ impl ModelPanel {
     pub fn cursor(&self) -> usize {
         self.cursor_at(self.current_page())
     }
-
-    /// Rendered height: tab bar (1) + visible rows (min 1 empty-state row, max
-    /// [`PANEL_WINDOW`]) + hint footer (1).
-    pub fn height(&self) -> u16 {
-        (self.models().len().clamp(1, PANEL_WINDOW) + 2) as u16
-    }
 }
 
 /// ModelPanel as a selection-panel adapter: each provider is an options page
@@ -256,12 +249,12 @@ mod tests {
     }
 
     #[test]
-    fn page_switch_wraps_and_keeps_per_provider_cursor() {
+    fn page_switch_clamps_and_keeps_per_provider_cursor() {
         let mut panel = ModelPanel::new(same_name_sources(), None);
         panel.handle_key(key(KeyCode::Down)); // provider 0 → row 1 (only-a)
         panel.handle_key(key(KeyCode::Right)); // provider 1
         panel.handle_key(key(KeyCode::Down)); // → row 1 (only-b)
-        panel.handle_key(key(KeyCode::Left)); // wrap back to provider 0
+        panel.handle_key(key(KeyCode::Left)); // back to provider 0
         assert_eq!(panel.cursor(), 1, "provider 0 keeps its cursor");
         assert_eq!(
             panel.handle_key(key(KeyCode::Enter)),
@@ -270,7 +263,11 @@ mod tests {
                 model: "only-a".into(),
             }
         );
-        panel.handle_key(key(KeyCode::Left)); // wrap: 0 → last provider
+        // ← at the first provider stays put; → walks back to the second one
+        // with its remembered cursor.
+        panel.handle_key(key(KeyCode::Left));
+        assert_eq!(panel.current_page(), 0, "clamped at the first provider");
+        panel.handle_key(key(KeyCode::Right));
         assert_eq!(panel.cursor(), 1);
         assert_eq!(
             panel.handle_key(key(KeyCode::Enter)),
@@ -335,8 +332,8 @@ mod tests {
         );
         panel.handle_key(key(KeyCode::Up)); // cursor stays put
         assert_eq!(panel.cursor(), 0);
-        panel.handle_key(key(KeyCode::Right)); // can move on
-        assert_eq!(panel.current_page(), 0, "wraps back to the full page");
+        panel.handle_key(key(KeyCode::Left)); // can move on
+        assert_eq!(panel.current_page(), 0, "back to the full page");
     }
 
     // ── Esc / other keys ────────────────────────────────────────
@@ -399,21 +396,11 @@ mod tests {
         assert_eq!(panel.models().len(), 2);
     }
 
-    // ── Height / window ─────────────────────────────────────────
+    // ── Window ──────────────────────────────────────────────────
 
     #[test]
-    fn height_reflects_visible_window() {
-        let panel = ModelPanel::new(vec![group("p", &["m1", "m2", "m3"])], None);
-        assert_eq!(panel.height(), 5, "tabs + 3 rows + hint");
-        let many: Vec<&str> = (0..9).map(|_| "m").collect();
-        let panel = ModelPanel::new(vec![group("p", &many)], None);
-        assert_eq!(panel.height(), 7, "tabs + 5 visible rows + hint");
-        let panel = ModelPanel::new(vec![group("p", &[])], None);
-        assert_eq!(panel.height(), 3, "tabs + empty-state row + hint");
-    }
-
-    #[test]
-    fn window_on_long_model_list_follows_the_cursor() {
+    fn window_on_long_model_list_centers_the_cursor() {
+        use crate::app::selection_panel::PANEL_WINDOW;
         use crate::app::selection_panel::window_range;
         let many: Vec<String> = (0..8).map(|i| format!("m{i}")).collect();
         let mut panel = ModelPanel::new(
@@ -427,7 +414,15 @@ mod tests {
             panel.handle_key(key(KeyCode::Down));
         }
         let range = window_range(panel.cursor(), panel.models().len(), PANEL_WINDOW);
-        assert_eq!(range, 1..6, "cursor on row 5 slides the window");
+        assert_eq!(range, 3..8, "cursor (m5) centered in the window");
         assert!(range.contains(&panel.cursor()));
+        // Clamped at the end: the last rows fill the window, the cursor moves
+        // to the bottom slot instead of wrapping to the top.
+        for _ in 0..5 {
+            panel.handle_key(key(KeyCode::Down));
+        }
+        assert_eq!(panel.cursor(), 7, "cursor clamps at the last model");
+        let range = window_range(panel.cursor(), panel.models().len(), PANEL_WINDOW);
+        assert_eq!(range, 3..8);
     }
 }

@@ -22,10 +22,12 @@ use crate::render::renderable::CellContext;
 
 use crate::app::ask_panel::AskPanel;
 use crate::app::constants::TOOL_BASH;
+use crate::app::model_panel::ModelPanel;
 
 use super::cached_cell::CachedCell;
 use super::cells::ask_msg::AskMessage;
 use super::cells::diff_view::DiffView;
+use super::cells::model_picker::model_picker_lines;
 use super::cells::thinking::ThinkingBlock;
 use super::cells::todo_msg::TodoMessage;
 use super::cells::tool_call::ToolCallBlock;
@@ -62,6 +64,8 @@ pub enum ChatCell {
     Todo(TodoMessage),
     /// Agent question.
     Ask(AskMessage),
+    /// `/model` picker (transient — removed when applied or closed).
+    ModelPicker(ModelPanel),
     /// ReAct loop separator.
     Separator,
     /// Goal orchestration separator (marks agent role + round).
@@ -139,6 +143,7 @@ impl ChatCell {
             Self::Diff(view) => view.to_lines(palette, ctx.layout.diff_context),
             Self::Todo(msg) => msg.to_lines(palette),
             Self::Ask(msg) => msg.to_lines(palette, width),
+            Self::ModelPicker(panel) => model_picker_lines(panel, palette),
             Self::Separator => {
                 let sep = "─".repeat(width as usize);
                 vec![Line::from(Span::styled(
@@ -447,6 +452,36 @@ impl ChatView {
                 });
                 return;
             }
+        }
+    }
+
+    /// Show the `/model` picker at the tail of the transcript (replacing any
+    /// previous picker cell) and bring it into view.
+    pub fn show_model_picker(&mut self, panel: ModelPanel) {
+        self.remove_model_picker();
+        self.cells
+            .push(CachedCell::new(ChatCell::ModelPicker(panel)));
+        self.jump_bottom();
+    }
+
+    /// Replace the picker's render snapshot (no-op when the cell is absent).
+    pub fn update_model_picker(&mut self, panel: ModelPanel) {
+        for cell in self.cells.iter_mut().rev() {
+            if matches!(cell.cell(), ChatCell::ModelPicker(_)) {
+                cell.mutate(|c| *c = ChatCell::ModelPicker(panel));
+                return;
+            }
+        }
+    }
+
+    /// Remove the picker cell — the panel is transient (applied / closed).
+    pub fn remove_model_picker(&mut self) {
+        let idx = self
+            .cells
+            .iter()
+            .position(|c| matches!(c.cell(), ChatCell::ModelPicker(_)));
+        if let Some(i) = idx {
+            self.cells.remove(i);
         }
     }
 

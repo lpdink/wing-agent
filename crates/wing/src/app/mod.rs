@@ -41,7 +41,6 @@ use crate::ui::input_area::InputAction;
 use crate::ui::input_area::InputArea;
 use crate::ui::input_area::InputAreaWidget;
 use crate::ui::input_area::cursor_screen_pos;
-use crate::ui::model_panel::ModelPanelWidget;
 use crate::ui::popup::ActivePopup;
 use crate::ui::popup::command::candidate_request_for;
 use crate::ui::popup::command::is_must_select_command;
@@ -849,7 +848,7 @@ impl App {
             // Open now from cache; the fetch below refreshes in place.
             let panel =
                 model_panel::ModelPanel::new(self.model_sources.clone(), self.current_model_pair());
-            self.model_panel = Some(panel);
+            self.present_model_panel(panel);
             // The popup yields to the modal panel (never both at once).
             self.popup.active = ActivePopup::None;
         } else {
@@ -859,6 +858,27 @@ impl App {
             ));
         }
         self.push_intent(AppIntent::FetchModels);
+    }
+
+    /// Show a freshly built picker panel: store it as the interactive state
+    /// and render it at the tail of the transcript (like the Ask panel).
+    fn present_model_panel(&mut self, panel: model_panel::ModelPanel) {
+        self.chat.show_model_picker(panel.clone());
+        self.model_panel = Some(panel);
+    }
+
+    /// Mirror the app-owned picker state into its chat cell (render snapshot).
+    fn sync_model_panel_cell(&mut self) {
+        if let Some(panel) = self.model_panel.as_ref() {
+            self.chat.update_model_picker(panel.clone());
+        }
+    }
+
+    /// Close the picker without changing the model (Esc): drop both the
+    /// interactive state and its transient cell.
+    fn close_model_panel(&mut self) {
+        self.model_panel = None;
+        self.chat.remove_model_picker();
     }
 
     /// The session's active `(provider, model)` pair — both must be known
@@ -875,7 +895,7 @@ impl App {
     /// Apply the pair chosen in the model panel: close it, dispatch the
     /// explicit `(provider, model)` update and give immediate feedback.
     fn apply_model_selection(&mut self, provider: String, model: String) {
-        self.model_panel = None;
+        self.close_model_panel();
         self.push_intent(AppIntent::set_model(model.clone(), Some(provider.clone())));
         self.show_toast(Toast::info(
             format!("Model: {model} ({provider})"),
@@ -985,16 +1005,19 @@ impl App {
                     ));
                 } else {
                     self.model_sources = resp.providers;
-                    if let Some(panel) = self.model_panel.as_mut() {
+                    if self.model_panel.is_some() {
                         // Panel already open: refresh in place, keeping the
-                        // current page and cursor.
-                        panel.set_sources(self.model_sources.clone());
+                        // current page and cursor, and mirror it into its cell.
+                        if let Some(panel) = self.model_panel.as_mut() {
+                            panel.set_sources(self.model_sources.clone());
+                        }
+                        self.sync_model_panel_cell();
                     } else {
                         let panel = model_panel::ModelPanel::new(
                             self.model_sources.clone(),
                             self.current_model_pair(),
                         );
-                        self.model_panel = Some(panel);
+                        self.present_model_panel(panel);
                     }
                 }
             }
@@ -1210,9 +1233,11 @@ impl App {
                     self.apply_model_selection(provider, model);
                 }
                 model_panel::ModelPanelAction::Cancel => {
-                    self.model_panel = None;
+                    self.close_model_panel();
                 }
-                model_panel::ModelPanelAction::None => {}
+                // Navigation keeps the panel open — mirror the new cursor /
+                // page into the chat cell.
+                model_panel::ModelPanelAction::None => self.sync_model_panel_cell(),
             }
             return;
         }
@@ -2126,7 +2151,6 @@ impl App {
             // regardless of the chat scroll position.
             let input_h = self.input.height(area.width);
             let popup_h = self.popup.height();
-            let model_panel_h = self.model_panel.as_ref().map_or(0, |panel| panel.height());
             let mut constraints = vec![
                 Constraint::Length(1), // status bar
                 Constraint::Min(3),    // chat view (min 3 rows)
@@ -2135,9 +2159,6 @@ impl App {
                 constraints.push(Constraint::Length(1)); // working indicator
             }
             constraints.push(Constraint::Length(1)); // info separator
-            if model_panel_h > 0 {
-                constraints.push(Constraint::Length(model_panel_h)); // /model panel
-            }
             constraints.push(Constraint::Length(input_h)); // input area
             if popup_h > 0 {
                 constraints.push(Constraint::Length(popup_h)); // pop-down command popup
@@ -2189,14 +2210,6 @@ impl App {
                 frame.buffer_mut(),
             );
             idx += 1;
-
-            // `/model` panel — above the input, below the info separator.
-            if model_panel_h > 0
-                && let Some(panel) = self.model_panel.as_ref()
-            {
-                frame.render_widget(ModelPanelWidget::new(panel, &palette), chunks[idx]);
-                idx += 1;
-            }
 
             // Input area — always visible; record its rect for cursor placement.
             let input_rect = chunks[idx];
@@ -3175,6 +3188,14 @@ mod tests {
         crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
     }
 
+    /// The rendered picker cell's panel snapshot, if the cell is present.
+    fn picker_cell(app: &App) -> Option<&model_panel::ModelPanel> {
+        app.chat.cells.iter().find_map(|c| match c.cell() {
+            ChatCell::ModelPicker(panel) => Some(panel),
+            _ => None,
+        })
+    }
+
     #[test]
     fn test_model_opens_panel_instantly_from_cache_and_preselects() {
         let mut app = test_app();
@@ -3186,6 +3207,9 @@ mod tests {
         assert_eq!(panel.current_page(), 0);
         assert_eq!(panel.cursor(), 1, "preselected the current model");
         assert_eq!(panel.committed_at(0), Some(1), "● on the current model");
+        // Rendered in the transcript (like the Ask panel), not near the input.
+        let rendered = picker_cell(&app).expect("picker cell shown in the chat");
+        assert_eq!(rendered.cursor(), 1);
         let intents = app.drain_intents();
         assert!(
             intents.iter().any(|i| matches!(i, AppIntent::FetchModels)),
@@ -3222,6 +3246,10 @@ mod tests {
         app.handle_key(key(crossterm::event::KeyCode::Right)); // → second provider
         app.handle_key(key(crossterm::event::KeyCode::Enter)); // apply
         assert!(app.model_panel.is_none(), "panel closes on apply");
+        assert!(
+            picker_cell(&app).is_none(),
+            "the transient picker cell disappears on apply"
+        );
         let intents = app.drain_intents();
         assert!(
             intents.iter().any(|i| matches!(
@@ -3240,14 +3268,28 @@ mod tests {
         assert!(app.model_panel.is_none(), "no cache → wait for the fetch");
         feed_models(&mut app, vec![model_group("p", &["m1", "m2"])]);
         assert_eq!(app.model_panel.as_ref().unwrap().page_count(), 1);
+        assert!(
+            picker_cell(&app).is_some(),
+            "the fetched result shows the picker cell"
+        );
         // Move the cursor, then refresh: page and cursor stay put.
         app.handle_key(key(crossterm::event::KeyCode::Down));
         assert_eq!(app.model_panel.as_ref().unwrap().cursor(), 1);
+        assert_eq!(
+            picker_cell(&app).unwrap().cursor(),
+            1,
+            "the cell mirrors the navigation"
+        );
         feed_models(&mut app, vec![model_group("p", &["m1", "m2", "m3"])]);
         assert_eq!(
             app.model_panel.as_ref().unwrap().cursor(),
             1,
             "in-place refresh keeps the cursor"
+        );
+        assert_eq!(
+            picker_cell(&app).unwrap().models().len(),
+            3,
+            "the open cell refreshes in place"
         );
     }
 
@@ -3268,6 +3310,10 @@ mod tests {
         app.drain_intents();
         app.handle_key(key(crossterm::event::KeyCode::Esc));
         assert!(app.model_panel.is_none(), "Esc closes the panel");
+        assert!(
+            picker_cell(&app).is_none(),
+            "the transient picker cell disappears on close"
+        );
         let intents = app.drain_intents();
         assert!(
             !intents
