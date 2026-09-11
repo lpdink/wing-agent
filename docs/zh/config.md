@@ -64,7 +64,6 @@ hooks: []                                  # Hook 文件 glob 模式, 如 ~/.win
 # ── 安全 ──────────────────────────────────────────────
 yolo: false                                # 跳过危险命令安全审查
 steer: true                                # 启用 steer 模式
-preserved_thinking: true                   # 保留推理内容（不清理）
 
 safe_command_patterns: []                  # 自动放行的 bash 命令正则白名单
                                            # 如 ["^ls ", "^cat "]

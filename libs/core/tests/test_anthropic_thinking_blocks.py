@@ -269,23 +269,18 @@ class TestAnthropicReplay:
         """序列化零块的 assistant 整条丢弃——content:[] 会使本次及该
         session 后续所有请求 400（Anthropic 要求 content 至少一个块）。
 
-        真实路径：纯 thinking 轮的 thinking 块被 clear_reasoning 剥离
-        （preserved_thinking: false）。丢弃是配对安全的：零块即无
-        tool_use，不会有后续 tool_result 引用本条。
+        零块来源：存量历史的空 assistant / 旧版本 clear_reasoning 剥离
+        thinking 的产物（该开关已随本修复移除，不再产生新记录）。丢弃是
+        配对安全的：零块即无 tool_use，不会有后续 tool_result 引用本条。
         """
         p = _make_anthropic()
         try:
-            thinking_only = Message(
-                role="assistant",
-                content_blocks=[ThinkingBlock(thinking="hmm", signature="s")],
-            )
-            # clear_reasoning 剥离 thinking 块 → 块数组为空
-            thinking_only.content_blocks = None
+            ghost = Message(role="assistant", content_blocks=None)
 
             _, am = p._serialize_messages(
                 [
                     Message(role="user", content="q1"),
-                    thinking_only,
+                    ghost,
                     Message(role="user", content="q2"),
                 ]
             )

@@ -313,6 +313,87 @@ class TestInterruptDuringStreaming:
         await agent.shutdown()
 
     @pytest.mark.asyncio
+    async def test_interrupt_with_finalized_tool_commits_synthesized_result(
+        self, runtime, monkeypatch
+    ):
+        """打断时 tool 已终结（参数流完整）但未执行 → 合成打断结果补配对。
+
+        回归：快照含已终结 ToolUseBlock 时原样落链会悬空——下一轮请求
+        （Anthropic 要求 tool_use 后紧跟 tool_result / OpenAI 要求
+        tool_calls 后有 tool 消息）结构非法 400。修复：每个已终结未执行
+        调用合成 INTERRUPTED_RESULT 的 tool 消息 + 关卡片事件（与工具
+        执行期打断的合成语义一致）。
+        """
+        session = runtime.create_session()
+        agent = session.agent
+
+        streaming = asyncio.Event()
+        blocks = [
+            ThinkingBlock(thinking="about to call a tool"),
+            ToolUseBlock(id="call-done", name="Bash", input={"command": "ls"}),
+        ]
+
+        async def _blocking_generate(*args: Any, **kwargs: Any):
+            streaming.set()
+            await asyncio.sleep(30)
+            yield LLMResponse(content="never")  # pragma: no cover
+
+        class _Acc:
+            state = object()
+
+        monkeypatch.setattr(agent.model_provider, "generate", _blocking_generate)
+        monkeypatch.setattr(agent.model_provider, "create_accumulator", lambda: _Acc())
+        monkeypatch.setattr(agent.model_provider, "snapshot_blocks", lambda acc: blocks)
+
+        events: list[Any] = []
+        event_bus.subscribe(events.append)
+
+        _start_turn(agent)
+        await _wait_until(streaming.is_set)
+        await agent.interrupt()
+
+        # ── 上下文：[user, assistant(thinking+tool_use), tool(合成)] ──
+        chain = agent.context_manager.get_context_window()
+        assert [m.role for m in chain] == ["user", "assistant", "tool"]
+        assistant = chain[1]
+        assert assistant.stop_reason == "interrupted"
+        assert assistant.reasoning_content == "about to call a tool"
+        assert [tc.id for tc in assistant.tool_calls or []] == ["call-done"]
+        tool_msg = chain[2]
+        assert tool_msg.tool_call_id == "call-done"
+        assert tool_msg.content == _INTERRUPTED_RESULT
+        _assert_well_formed(chain)
+
+        # ── 事件：合成的关卡片事件（前端冻结流式工具卡）──
+        result_events = [
+            e
+            for e in events
+            if isinstance(e, ToolCallResultEvent) and e.tool_call_id == "call-done"
+        ]
+        assert len(result_events) == 1
+        assert result_events[0].tool_success is False
+        assert result_events[0].tool_result == _INTERRUPTED_RESULT
+
+        # ── 打断后继续对话：下一次 LLM 调用收到合法历史（无悬空）──
+        seen_messages: list[list[Message]] = []
+
+        async def _capture_generate(*args: Any, **kwargs: Any):
+            seen_messages.append(kwargs["messages"])
+            yield _final_resp(content="recovered")
+
+        monkeypatch.setattr(agent.model_provider, "generate", _capture_generate)
+        await agent.post("continue")
+        await _wait_until(lambda: len(seen_messages) == 1)
+
+        _assert_well_formed(seen_messages[0])
+        assert any(
+            m.role == "tool" and m.content == _INTERRUPTED_RESULT
+            for m in seen_messages[0]
+        )
+
+        await agent.shutdown()
+
+    @pytest.mark.asyncio
     async def test_interrupt_with_no_partial_content_commits_nothing(
         self, runtime, monkeypatch
     ):

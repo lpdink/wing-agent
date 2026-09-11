@@ -22,7 +22,11 @@ from wing.schema import ContentBlock, LLMUsage, Message
 
 from .event_sink import AgentEventSink
 from .inbox import Inbox
-from .tool_executor import InterruptedToolResults, ToolExecutor
+from .tool_executor import (
+    INTERRUPTED_RESULT,
+    InterruptedToolResults,
+    ToolExecutor,
+)
 
 if TYPE_CHECKING:
     from wing.context_manager import ContextManager
@@ -274,8 +278,6 @@ class ReActLoop:
             raise interrupted_exc.original
 
         if not pending_tool_calls:
-            if not get_config().preserved_thinking:
-                self._cm.clear_reasoning()
             return False
         return True
 
@@ -298,6 +300,11 @@ class ReActLoop:
         （text/thinking 任意长度保留，未终结 tool 块由 provider 剔除），
         有内容则组装 partial assistant Message 提交进上下文，然后 re-raise
         让 worker 终止。用户可放心打断长思考——已花费 tokens 的内容不丢。
+
+        已终结但未执行的 tool_use 不能悬空落链：Anthropic 要求 tool_use 后
+        紧跟 tool_result、OpenAI 要求 tool_calls 后有 tool 消息，否则下一轮
+        请求 400。为每个已终结调用合成打断结果（与工具执行期打断的合成
+        语义一致，卡片保留、配对合法）。
         """
         content_blocks: list[ContentBlock] | None = None
         last_usage: LLMUsage | None = None
@@ -346,7 +353,22 @@ class ReActLoop:
                     usage=last_usage,
                     stop_reason="interrupted",
                 )
-                self._cm.add_message(partial_msg)
+                # 已终结未执行的 tool_use → 合成打断结果补配对（先落链，
+                # 再广播关卡片事件——日志是事实源，广播是投影）。
+                interrupted_calls = partial_msg.tool_calls or []
+                tool_results = [
+                    Message(
+                        role="tool",
+                        tool_call_id=tc.id,
+                        content=INTERRUPTED_RESULT,
+                    )
+                    for tc in interrupted_calls
+                ]
+                self._cm.add_messages([partial_msg] + tool_results)
+                for tc in interrupted_calls:
+                    self._sink.tool_finished(
+                        tc, INTERRUPTED_RESULT, success=False, model=model
+                    )
                 # 补提交完成：内容已进链，未提交投影失效（不再双重渲染）。
                 self._current_acc = None
             raise

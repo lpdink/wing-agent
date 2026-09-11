@@ -19,10 +19,8 @@ from .provider.base import ModelProvider
 from .schema import (
     AgentSkill,
     ChainNode,
-    ContentBlock,
     LLMUsage,
     Message,
-    ThinkingBlock,
     Tool,
 )
 
@@ -926,13 +924,3 @@ More detail in: "{dir}/SKILL.md" """
                 )
         result.append({"uuid": "current", "content": "(current)"})
         return result
-
-    def clear_reasoning(self) -> None:
-        for msg in self._messages:
-            if isinstance(msg, Message) and msg.content_blocks:
-                # 只修改存储（块数组）：剥离 thinking 块，派生的
-                # reasoning_content 自然为空。
-                remaining: list[ContentBlock] = [
-                    b for b in msg.content_blocks if not isinstance(b, ThinkingBlock)
-                ]
-                msg.content_blocks = remaining or None
