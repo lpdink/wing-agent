@@ -121,6 +121,7 @@ impl GatewayClient {
 
         // Spawn read task.
         tokio::spawn(async move {
+            let mut last_pressure_warn = std::time::Instant::now();
             loop {
                 tokio::select! {
                     // Zero-traffic shutdown: `event_rx` lives inside
@@ -140,6 +141,22 @@ impl GatewayClient {
                                             event_type = %event.event_type(),
                                             "received event"
                                         );
+                                        // Channel pressure: warn once per 10 s when >90% full.
+                                        let capacity = event_tx.max_capacity();
+                                        let used = capacity.saturating_sub(event_tx.capacity());
+                                        if used >= capacity * 9 / 10
+                                            && last_pressure_warn.elapsed()
+                                                > std::time::Duration::from_secs(10)
+                                        {
+                                            last_pressure_warn = std::time::Instant::now();
+                                            tracing::warn!(
+                                                "event channel pressure: {}/{} ({}%) — \
+                                                 consider a slower model or incremental rendering",
+                                                used,
+                                                capacity,
+                                                used * 100 / capacity,
+                                            );
+                                        }
                                         if event_tx.send(event).await.is_err() {
                                             tracing::debug!(
                                                 "event receiver dropped, stopping read task"
