@@ -6,7 +6,7 @@ Every field that matters to the LLM must survive the round-trip.
 
 import json
 
-from wing.schema import Message, ToolCall
+from wing.schema import Message, ThinkingBlock, ToolCall
 
 
 class TestMessageToOpenai:
@@ -40,24 +40,77 @@ class TestMessageToOpenai:
         assert o["tool_calls"][0]["function"]["name"] == "Bash"
 
     def test_assistant_tool_calls_no_content(self):
-        """Assistant calls a tool without any text — content should be null."""
+        """Assistant calls a tool without any text — content is empty string, not null.
+
+        Wire 契约：content 恒为非 null 字符串（严格 OpenAI 兼容网关对 null
+        直接 400，即使带 tool_calls 的轮次也不必冒险）。
+        """
         msg = Message(
             role="assistant",
             content=None,
             tool_calls=[ToolCall(id="tc_2", name="Bash", arguments={"command": "pwd"})],
         )
         o = msg.to_openai()
-        assert o["content"] is None
+        assert o["content"] == ""
         assert len(o["tool_calls"]) == 1
 
     def test_assistant_no_content_no_tool_calls(self):
-        """Edge case: assistant with neither content nor tool_calls.
-        content field must still exist (strict providers validate this)."""
+        """Edge case: assistant with neither content nor tool_calls (存量零块
+        ghost 记录的形态)。content 字段必须存在且为非 null 字符串。"""
         msg = Message(role="assistant", content=None)
         o = msg.to_openai()
         assert o["role"] == "assistant"
-        assert "content" in o
-        assert o["content"] is None
+        assert o["content"] == ""
+
+    def test_assistant_thinking_only_content_is_empty_string(self):
+        """打断补提交 / max_tokens 截断在 thinking 中途：仅含 thinking 的
+        assistant 消息 → content 为非 null 空串 + reasoning_content 原样保留。
+
+        回归（#68）：此类消息此前序列化为 content:null，阿里云 MaaS 等严格
+        网关对「无 tool_calls 且 content 缺失」返回 400，且毒消息持久化后
+        污染整个会话。
+        """
+        msg = Message(
+            role="assistant",
+            content_blocks=[ThinkingBlock(thinking="half-done reasoning")],
+            stop_reason="interrupted",
+        )
+        o = msg.to_openai()
+        assert o["content"] == ""
+        assert o["reasoning_content"] == "half-done reasoning"
+
+        # 经过 JSON 序列化后仍是字符串（回归断言：不得出现 "content": null）
+        assert '"content": null' not in json.dumps(o, ensure_ascii=False)
+
+    def test_assistant_max_tokens_truncated_at_thinking(self):
+        """max_tokens 截断在 thinking 中途：同一序列化路径，content 非 null。"""
+        msg = Message(
+            role="assistant",
+            content_blocks=[ThinkingBlock(thinking="truncated thought")],
+            stop_reason="max_tokens",
+        )
+        o = msg.to_openai()
+        assert o["content"] == ""
+        assert o["reasoning_content"] == "truncated thought"
+
+    def test_legacy_flat_thinking_only_record(self):
+        """存量旧格式记录（扁平 reasoning_content、无块数组）加载后同样不回 null。"""
+        msg = Message.model_validate(
+            {
+                "role": "assistant",
+                "reasoning_content": "old reasoning",
+                "stop_reason": "interrupted",
+            }
+        )
+        o = msg.to_openai()
+        assert o["content"] == ""
+        assert o["reasoning_content"] == "old reasoning"
+
+    def test_tool_message_empty_content_is_empty_string(self):
+        """tool 消息空结果：严格网关同样要求 content 存在且非 null。"""
+        msg = Message(role="tool", tool_call_id="tc_1", content="")
+        o = msg.to_openai()
+        assert o["content"] == ""
 
     def test_assistant_reasoning_with_tool_calls(self):
         """Full real-world scenario: reasoning + content + tool_calls all at once."""

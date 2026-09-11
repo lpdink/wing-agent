@@ -141,7 +141,7 @@ libs/wing-orch/                   Orchestration CLI (pip: wing-orch) — depends
 
 ## Configuration
 
-Single source of truth: `$WING_HOME/core/config.yaml` (default `~/.wing/core/config.yaml`). Top-level keys: `openai` (provider), `agents` (templates: model/tools/prompt/skills/rules), `hooks`, `gateway` (host/port/`auth`), `safe_command_patterns`, `yolo`, `steer`, `preserved_thinking`, `tool_result_truncate`, `log`. See `wing/default_config.py` for the annotated template.
+Single source of truth: `$WING_HOME/core/config.yaml` (default `~/.wing/core/config.yaml`). Top-level keys: `openai` (provider), `agents` (templates: model/tools/prompt/skills/rules), `hooks`, `gateway` (host/port/`auth`), `safe_command_patterns`, `yolo`, `steer`, `tool_result_truncate`, `log`. See `wing/default_config.py` for the annotated template.
 
 ```
 ~/.wing/

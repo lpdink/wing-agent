@@ -64,7 +64,6 @@ hooks: []                                  # Hook file glob patterns, e.g. ~/.wi
 # ── Safety ────────────────────────────────────────────
 yolo: false                                # Skip dangerous command safety review
 steer: true                                # Enable steer mode
-preserved_thinking: true                   # Keep reasoning content (don't clear)
 
 safe_command_patterns: []                  # Regex whitelist for auto-approved bash commands
                                            # e.g. ["^ls ", "^cat "]

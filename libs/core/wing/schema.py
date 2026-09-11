@@ -378,7 +378,12 @@ class Message(ChainNode):
 
     def to_openai(self) -> dict:
         result: dict[str, Any] = {"role": self.role}
-        result["content"] = self.content
+        # wire 契约：content 恒为非 null 字符串。assistant 在 thinking-only 轮
+        # （打断补提交 / max_tokens 截断在 thinking 中途）派生 content 为
+        # None，严格 OpenAI 兼容网关（阿里云 MaaS 等）对「无 tool_calls 且
+        # content 为 null」直接 400。内部 / 磁盘 / 前端保留 None 语义，
+        # 仅此处（唯一 wire 投影出口）兜底为空串。
+        result["content"] = self.content if self.content is not None else ""
 
         # reasoning content可能为""，此时要回传给llm
         if self.reasoning_content is not None:

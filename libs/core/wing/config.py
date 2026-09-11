@@ -182,7 +182,6 @@ class Config(BaseModel):
     safe_command_patterns: list[str] = Field(default_factory=list)
     yolo: bool = False
     steer: bool = True
-    preserved_thinking: bool = True
     log: LogConfig = Field(default_factory=LogConfig)
     sessions: SessionsConfig = Field(default_factory=SessionsConfig)
     commands: CommandsConfig = Field(default_factory=CommandsConfig)

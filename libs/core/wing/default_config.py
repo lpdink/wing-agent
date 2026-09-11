@@ -138,9 +138,6 @@ yolo: false
 # Enable steer mode (guides agent behavior with steering prompts).
 steer: true
 
-# Preserve reasoning content in thinking blocks (don't strip).
-preserved_thinking: true
-
 # ── Tool Result Truncation ───────────────────────────────────
 # Built-in truncation for overly long tool results. When a tool
 # result exceeds max_length chars, the full output is saved to a

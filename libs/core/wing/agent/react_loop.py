@@ -274,8 +274,6 @@ class ReActLoop:
             raise interrupted_exc.original
 
         if not pending_tool_calls:
-            if not get_config().preserved_thinking:
-                self._cm.clear_reasoning()
             return False
         return True
 

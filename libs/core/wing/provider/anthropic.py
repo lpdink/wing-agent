@@ -142,12 +142,25 @@ class AnthropicProvider(ModelProvider):
 
         同时服务于 message_stop 的权威块数组产出（max_tokens 截断在
         tool args 中间时，半截 tool_use 不得进入）与中断快照。
+
+        零信息 thinking 块（无文本、无签名、非 redacted）一并剔除——取消
+        恰逢 content_block_start 与首个 delta 之间时的产物；零信息块落链
+        会产生空 assistant 消息。带签名 / redacted 的空文本块携带不可
+        重建信息，必须保留。
         """
         blocks = []
         for idx in sorted(state.blocks_by_index):
             if idx in state.pending_tools:
                 continue  # 未终结的 tool 块：半截，剔除
-            blocks.append(state.blocks_by_index[idx])
+            block = state.blocks_by_index[idx]
+            if (
+                isinstance(block, ThinkingBlock)
+                and not block.redacted
+                and not block.thinking.strip()
+                and not block.signature
+            ):
+                continue
+            blocks.append(block)
         return blocks
 
     def pending_tool_calls(
@@ -326,10 +339,10 @@ class AnthropicProvider(ModelProvider):
 
             if msg.role == "assistant":
                 blocks = self._serialize_assistant(msg)
-                # 零块 assistant（如纯 thinking 轮的 thinking 块被 clear_reasoning
-                # 剥离后）MUST NOT 发出 content: []——Anthropic 要求 content 至少
-                # 一个块，否则本次及该 session 后续所有请求 400。丢弃是配对安全
-                # 的：零块即无 tool_use，不会有后续 tool_result 引用本条。
+                # 零块 assistant（存量历史的空记录 / thinking 块被剥离的产物）
+                # MUST NOT 发出 content: []——Anthropic 要求 content 至少一个块，
+                # 否则本次及该 session 后续所有请求 400。丢弃是配对安全的：
+                # 零块即无 tool_use，不会有后续 tool_result 引用本条。
                 if not blocks:
                     continue
                 anthropic_msgs.append({"role": "assistant", "content": blocks})
@@ -569,7 +582,6 @@ class AnthropicProvider(ModelProvider):
         first_chunk_rt_ms = (time.monotonic() - t0) * 1000
         log.info("[DONE] anthropic stream connected")
 
-        state = _StreamState()
         try:
             async for event in parse_sse_stream(resp.aiter_lines()):
                 data = parse_json_event(event)
