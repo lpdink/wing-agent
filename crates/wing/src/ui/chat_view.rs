@@ -1063,7 +1063,7 @@ impl Widget for ChatViewWidget<'_> {
             // before and after their turn-end reconcile): every line is
             // already ≤ width — blit the visible slice directly, no
             // Paragraph wrap Composer, no to_vec clone.
-            if cached.is_prewrapped() {
+            if cached.is_prewrapped(content_area.width, &self.ctx) {
                 let lines = cached.compute_lines(content_area.width, &self.ctx);
                 let skip_lines = skip.min(lines.len());
                 let end = (skip_lines + cell_visible).min(lines.len());
@@ -1937,7 +1937,7 @@ mod tests {
         view.finalize_streams();
         let finalized: Vec<Line<'static>> = view.cells[0].compute_lines(80, &ctx).to_vec();
         assert!(!view.cells[0].is_streaming());
-        assert!(view.cells[0].is_prewrapped());
+        assert!(view.cells[0].is_prewrapped(80, &ctx));
 
         let reference =
             crate::render::markdown::stream::full_lines(text, 80, Profile::Thinking, &p);
@@ -1964,6 +1964,137 @@ mod tests {
             crate::render::markdown::stream::full_lines(text, 30, Profile::Content, &p);
         assert_eq!(span_texts(&narrow), span_texts(&reference_narrow));
         assert!(narrow.len() > wide.len(), "should wrap more when narrower");
+    }
+
+    // ============================================================
+    // Review-fix regressions (P0-1/2/3)
+    // ============================================================
+
+    #[test]
+    fn test_streaming_replayed_prefix_stays_visible() {
+        // Mid-turn resume: the cell is replayed with existing content
+        // (replay_messages → push), then live deltas land on the SAME
+        // cell. The stream must be seeded with the replayed prefix —
+        // the rendered view must contain BOTH prefix and delta.
+        let (p, l) = test_ctx();
+        let ctx = make_ctx(&p, &l);
+        let mut view = ChatView::new();
+        view.push(ChatCell::AssistantMessage("REPLAYED-PREFIX-TEXT ".into()));
+        view.append_to_last_assistant("live delta");
+        let lines: Vec<Line<'static>> = view.cells[0].compute_lines(80, &ctx).to_vec();
+        let text: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("REPLAYED-PREFIX-TEXT") && text.contains("live delta"),
+            "replayed prefix lost from view: {text}"
+        );
+
+        // Same through the turn-end reconcile (finalize must not drop it
+        // either — stream buffer == cell text invariant).
+        view.finalize_streams();
+        let lines: Vec<Line<'static>> = view.cells[0].compute_lines(80, &ctx).to_vec();
+        let text: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("REPLAYED-PREFIX-TEXT") && text.contains("live delta"),
+            "replayed prefix lost after finalize: {text}"
+        );
+    }
+
+    #[test]
+    fn test_streaming_thinking_hidden_mode_no_leak() {
+        // Hidden thinking mode: the stream keeps accumulating but the
+        // visible lines come from the cell's own renderer (the hidden
+        // indicator) — the reasoning content must never leak, neither
+        // while streaming nor after the turn-end finalize.
+        let (p, l) = test_ctx();
+        let ctx = CellContext {
+            palette: &p,
+            thinking_mode: ThinkingMode::Hidden,
+            layout: &l,
+        };
+        let mut view = ChatView::new();
+        view.append_to_last_thinking("SECRET-REASONING-CONTENT");
+        view.increment_thinking_count();
+        let lines: Vec<Line<'static>> = view.cells[0].compute_lines(80, &ctx).to_vec();
+        let text: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Thinking..."), "indicator missing: {text}");
+        assert!(
+            !text.contains("SECRET-REASONING"),
+            "hidden reasoning leaked while streaming: {text}"
+        );
+        let h_streaming = view.cells[0].compute_height(80, &ctx);
+        assert!(
+            h_streaming <= 2,
+            "hidden indicator height wrong: {h_streaming}"
+        );
+
+        // Turn end: finalize must not install the visible full render.
+        view.finalize_streams();
+        let lines: Vec<Line<'static>> = view.cells[0].compute_lines(80, &ctx).to_vec();
+        let text: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !text.contains("SECRET-REASONING"),
+            "hidden reasoning leaked after finalize: {text}"
+        );
+        assert!(text.contains("1 events"), "event count lost: {text}");
+        assert_eq!(view.cells[0].compute_height(80, &ctx), h_streaming);
+    }
+
+    #[test]
+    fn test_streaming_resize_after_finalize_wraps_not_truncates() {
+        // P0-3: after the turn-end finalize, a width change must render
+        // through the normal (wrapping) path — a long code line must
+        // WRAP at the narrower width, not truncate.
+        let long_line = format!("let x = \"{}\";", "A".repeat(160));
+        let text = format!("intro\n\n```rust\n{long_line}\n```\n\nafter");
+
+        // A: streaming + finalize.
+        let (p, l) = test_ctx();
+        let ctx_wide = make_ctx(&p, &l);
+        let mut view_a = ChatView::new();
+        view_a.append_to_last_assistant(&text);
+        let _ = view_a.cells[0].compute_lines(100, &ctx_wide);
+        view_a.finalize_streams();
+        let _ = view_a.cells[0].compute_lines(100, &ctx_wide);
+
+        // B: same content, never streamed.
+        let mut view_b = ChatView::new();
+        view_b.push(ChatCell::AssistantMessage(text.clone()));
+
+        // Resize both to width 40 and compare.
+        let buf_a = render_view(&mut view_a, 40, 30);
+        let buf_b = render_view(&mut view_b, 40, 30);
+        let text_a = buffer_text(&buf_a);
+        let text_b = buffer_text(&buf_b);
+        // The tail of the long line must survive wrapping in BOTH.
+        let tail = "A".repeat(100);
+        assert!(
+            text_b.contains(&tail[..20]),
+            "control (never-streamed) lost the line tail — test broken: {text_b}"
+        );
+        assert!(
+            text_a.contains(&tail[..20]),
+            "finalized streaming cell truncated instead of wrapping after resize: {text_a}"
+        );
+        // And heights agree (blit vs Paragraph path).
+        let h_a = view_a.cells[0].compute_height(40, &ctx_wide);
+        let h_b = view_b.cells[0].compute_height(40, &ctx_wide);
+        assert_eq!(h_a, h_b, "height mismatch after resize: {h_a} vs {h_b}");
     }
 
     #[test]

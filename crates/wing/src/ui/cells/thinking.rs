@@ -72,6 +72,7 @@ impl ThinkingBlock {
             palette,
             RenderOpts {
                 code_highlight: false,
+                trim_trailing_blank: true,
             },
         );
         for (i, md_line) in md_lines.iter().enumerate() {

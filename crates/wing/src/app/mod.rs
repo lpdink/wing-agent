@@ -344,6 +344,13 @@ impl App {
     /// `chat.push(ErrorMessage)`) happen *after* the copy cache is snapshot.
     /// Currently safe because `collect_assistant_messages` only collects
     /// `AssistantMessage` cells, which are unaffected by these mutations.
+    /// Mark the UI dirty (coalesced to ~60fps by the frame gate). Call
+    /// after any side effect that may have mutated visible state outside
+    /// the event handlers — intent execution, toasts, focus changes.
+    fn mark_dirty(&mut self) {
+        self.chat_dirty = true;
+    }
+
     /// Frame-gated draw decision.
     ///
     /// WS stream events (deltas, tool updates, …) only mark the chat
@@ -400,6 +407,9 @@ impl App {
     pub fn show_toast(&mut self, toast: Toast) -> std::time::Duration {
         let remaining = toast.remaining();
         self.toast = Some(toast);
+        // A toast IS a visible change — always schedule a draw (the frame
+        // gate coalesces bursts).
+        self.chat_dirty = true;
         remaining
     }
 
@@ -2380,8 +2390,12 @@ pub async fn run_app(
         }
 
         // Execute all pending intents produced during the last event cycle.
+        // Intents may mutate visible state (session switch + replay, popup
+        // status, toasts on failure) — mark dirty uniformly instead of
+        // relying on each intent remembering to.
         for intent in app.drain_intents() {
             runner::execute_intent(&mut app, &transport, terminal, intent, &fetch_tx).await;
+            app.mark_dirty();
         }
 
         if app.should_quit {
@@ -2428,6 +2442,7 @@ pub async fn run_app(
                     }
                     TermEvent::Focus(focused) => {
                         app.focused = focused;
+                        app.mark_dirty();
                         // On focus regain, restore the correct title.
                         if focused {
                             // The terminal re-shows its surface on focus
@@ -2466,9 +2481,13 @@ pub async fn run_app(
                             // turn is active (a tool can only be pending mid-turn);
                             // gating here keeps idle sessions from scanning cells.
                             app.chat.tick_bash_timers();
+                            // Spinner animation / tool timers changed the UI —
+                            // ONLY while a turn is active. An idle session's
+                            // ticks draw nothing (idle iterations skip
+                            // drawing entirely); toasts are static (their
+                            // expiry has its own timer arm).
+                            app.chat_dirty = true;
                         }
-                        // Spinner animation / tool timers changed the UI.
-                        app.chat_dirty = true;
                     }
                 }
             }

@@ -54,6 +54,17 @@ fn shapes() -> Vec<(&'static str, String)> {
         ("long_code_block", "```rust\nlet a = 1;\nlet b = 2;\nlet c = 3;\nlet d = 4;\nlet e = 5;\n```\n\nDone.".into()),
         ("overwide_code_line", "```rust\nlet some_extremely_long_variable_name_that_exceeds_terminal_width_by_a_lot = 1234567890;\n```\n\nafter".into()),
         ("cjk_code_comment", "```rust\n// 中文注释的代码行，验证宽度与硬折行\nlet x = 1;\n```\n\n结束。".into()),
+        // --- review-fix shapes (P1-4/P1-5) ---
+        ("diff_block", "```diff\ndiff --git a/foo.rs b/foo.rs\nindex abc123..def456 100644\n--- a/foo.rs\n+++ b/foo.rs\n@@ -1,3 +1,4 @@\n-old line\n+new line\n context line\n```\n\nafter".into()),
+        ("diff_block_no_git", "```diff\n--- a/bar.rs\n+++ b/bar.rs\n@@ -1 +1 @@\n-x\n+y\n```\n\nafter".into()),
+        ("unclosed_diff", "intro\n\n```diff\ndiff --git a/bar.rs b/bar.rs\n@@ -1 +1 @@\n-x\n+y\n".into()),
+        ("raw_html_block", "<div>\nraw html\n</div>\n\nafter".into()),
+        ("html_then_para_inline", "text\n<b>inline html</b>\nmore\n\nafter".into()),
+        ("html_then_code", "<div>\nx\n</div>\n\n```rust\nlet a = 1;\n```\n\nafter".into()),
+        ("empty_list_item", "- \n\ntext after\n".into()),
+        ("empty_list_item_then_more", "- \n\ntext after\n\nmore para\n".into()),
+        ("empty_quote", "> \n\nafter".into()),
+        ("quote_para_then_quote_code", "> before\n\n> ```rust\n> let a = 1;\n> ```\n\nafter".into()),
     ]
 }
 

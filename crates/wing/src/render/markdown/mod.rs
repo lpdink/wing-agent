@@ -54,12 +54,20 @@ use crate::config::ThemePalette;
 pub struct RenderOpts {
     /// Render fenced code with syntect highlighting + line-number gutters.
     pub code_highlight: bool,
+    /// Trim trailing blank lines (doc-end semantics). The streaming
+    /// renderer disables this when rendering a PROMOTED block: the
+    /// presence of the renderer's own trailing blank line is exactly the
+    /// separator the doc-context full render would emit at that boundary
+    /// (paragraph/heading/list/table ends push one; code/HTML do not) —
+    /// the block promotion pops it and re-emits it lazily instead.
+    pub trim_trailing_blank: bool,
 }
 
 impl Default for RenderOpts {
     fn default() -> Self {
         Self {
             code_highlight: true,
+            trim_trailing_blank: true,
         }
     }
 }
@@ -290,7 +298,9 @@ fn render_markdown_to_lines(
         lines.push(current_line);
     }
 
-    trim_trailing_blank_lines(&mut lines);
+    if opts.trim_trailing_blank {
+        trim_trailing_blank_lines(&mut lines);
+    }
     lines
 }
 

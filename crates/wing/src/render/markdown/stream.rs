@@ -97,16 +97,16 @@ enum Mode {
 
 /// A block closed by the splitter, awaiting promotion (render + compose)
 /// at the next sync.
+///
+/// The post-block separator is NOT decided here — it is derived at
+/// promotion time from the renderer's own behavior (see `sync`).
 struct ClosedBlock {
-    /// Byte range of the block's source slice in `buf` (inclusive of its
-    /// closing blank run; the renderer trims trailing blanks).
+    /// Byte range of the block's source slice in `buf`.
     start: usize,
     end: usize,
-    /// Whether the full renderer would emit a blank separator line after
-    /// this block (paragraph/heading/list/table: yes; code: no).
-    sep: bool,
     /// Live code cache moved out of the tail when a fenced block closes —
     /// lets promotion compose cached lines without re-highlighting.
+    /// None for diff blocks (whole-block renderer) and non-fence slices.
     code: Option<CodeCache>,
 }
 
@@ -117,10 +117,11 @@ struct Splitter {
     /// Byte offset just past the last complete line handed to the state
     /// machine. Always at a line boundary (or buf end).
     scan: usize,
-    /// Whether the last complete non-blank line of the current Paragraph
-    /// slice was a fence-close line — suppresses the separator (a
-    /// paragraph/quote ending in a code block emits no trailing blank).
-    para_ends_with_code: bool,
+    /// Whether the current list item has any content beyond its marker.
+    /// pulldown keeps post-blank column-0 text INSIDE an empty list item
+    /// (lazy continuation) — matching that boundary keeps the slice
+    /// structure in agreement with the parser.
+    list_item_has_content: bool,
     /// Blocks closed since the last sync, pending promotion.
     closed: Vec<ClosedBlock>,
 }
@@ -130,7 +131,7 @@ impl Splitter {
         self.mode = Mode::Gap;
         self.tail_start = 0;
         self.scan = 0;
-        self.para_ends_with_code = false;
+        self.list_item_has_content = false;
         self.closed.clear();
     }
 }
@@ -215,7 +216,7 @@ impl StreamingRender {
                 mode: Mode::Gap,
                 tail_start: 0,
                 scan: 0,
-                para_ends_with_code: false,
+                list_item_has_content: false,
                 closed: Vec::new(),
             },
             flat: Vec::new(),
@@ -319,6 +320,15 @@ impl StreamingRender {
 
     /// Incremental sync: promote newly-closed blocks, re-render the tail,
     /// append the cell trailing blank. Requires `self.width == Some(width)`.
+    ///
+    /// Separator semantics are DERIVED from the renderer itself: a
+    /// promoted block renders with `trim_trailing_blank: false`, and the
+    /// presence of the renderer's own trailing blank line is exactly what
+    /// the doc-context full render would emit at that boundary
+    /// (paragraph/heading/list/table ends push one via `push_blank_line`;
+    /// code blocks, HTML blocks and quotes ending in code do not). The
+    /// promotion pops that blank and re-emits it lazily before the NEXT
+    /// block, so it never dangles at stream end.
     fn sync(&mut self, width: u16, palette: &ThemePalette) {
         self.dirty = false;
 
@@ -326,34 +336,44 @@ impl StreamingRender {
         self.flat.truncate(self.stable_len);
         let closed = std::mem::take(&mut self.split.closed);
         for block in closed {
-            if self.pending_sep {
+            let emitted_sep = if self.pending_sep {
                 self.flat.push(self.sep_line(palette));
                 self.pending_sep = false;
-            }
+                true
+            } else {
+                false
+            };
             let slice = self.buf[block.start..block.end].to_string();
-            let md_lines = match block.code {
-                Some(cache) => code_block_markdown_lines(
-                    &mut Some(cache),
+            let mut md_lines = match block.code {
+                Some(mut cache) => code_block_markdown_lines(
+                    &mut cache,
                     &slice,
                     self.profile,
                     &MarkdownTheme::from_palette(palette),
                 ),
-                None => render_generic(&slice, width, self.profile, palette),
+                None => render_block(&slice, width, self.profile, palette),
             };
+            // The renderer's trailing blank IS the separator signal.
+            let sep = md_lines.last().is_some_and(|l| l.segments.is_empty());
+            if sep {
+                md_lines.pop();
+            }
             if md_lines.is_empty() {
-                // A slice that renders to nothing (e.g. an empty blockquote
-                // "> ") emits no lines and no separator of its own — the
-                // pending separator of the PREVIOUS block was already
-                // emitted above.
-                self.pending_sep = false;
+                // The block contributes no lines (e.g. an empty
+                // blockquote renders to just a blank). In doc context its
+                // blank dedups against an already-present separator blank —
+                // replicate that: keep the pending state only when no
+                // separator was emitted for this block.
+                self.pending_sep = sep && !emitted_sep;
                 continue;
             }
             self.compose_extend(md_lines, width, palette);
-            self.pending_sep = block.sep;
+            self.pending_sep = sep;
         }
         self.stable_len = self.flat.len();
 
-        // 2) Render the active tail.
+        // 2) Render the active tail (doc-end semantics: trailing blanks
+        // trimmed, matching the full render at the same text).
         let tail_start = self.split.tail_start;
         if tail_start < self.buf.len() || self.code_tail.is_some() {
             let profile = self.profile;
@@ -361,9 +381,17 @@ impl StreamingRender {
             let mode = self.split.mode.clone();
             let mut cache = self.code_tail.take();
             let md_lines = match mode {
-                Mode::FencedCode { .. } => {
-                    code_block_markdown_lines(&mut cache, &self.buf[tail_start..], profile, &theme)
-                }
+                // Cached (non-diff) fenced code: line-level incremental.
+                Mode::FencedCode { .. } if cache.is_some() => code_block_markdown_lines(
+                    cache.as_mut().expect("checked is_some"),
+                    &self.buf[tail_start..],
+                    profile,
+                    &theme,
+                ),
+                // Diff fences (and any cache-less fence): the generic
+                // path — exact reference semantics (file summaries,
+                // metadata stripping via group_diff_by_file) at
+                // O(block)/frame; diff blocks are bounded in practice.
                 _ => render_generic(&self.buf[tail_start..], width, profile, palette),
             };
             // Emit the pending separator only when the tail actually
@@ -460,25 +488,25 @@ impl StreamingRender {
                         fence_len: fl,
                     };
                 } else if list_marker_len(line).is_some() {
+                    self.split.list_item_has_content = false;
                     self.split.mode = Mode::List { blank_seen: false };
                 } else if indent_of(line) >= 4 {
                     self.split.mode = Mode::IndentedCode;
                 } else {
                     self.split.mode = Mode::Paragraph;
                 }
-                self.split.para_ends_with_code = false;
                 true
             }
             Mode::Paragraph => {
                 if line_is_blank(line) {
-                    self.close_slice(line_start, !self.split.para_ends_with_code);
+                    self.close_slice(line_start);
                     self.split.mode = Mode::Gap;
                     return true;
                 }
                 if let Some((fc, fl, info)) = fence_open(line) {
                     // A fence interrupts the paragraph (and needs its own
                     // mode for the line-level code cache).
-                    self.close_slice(line_start, true);
+                    self.close_slice(line_start);
                     self.open_code_cache(fc, fl, info);
                     self.split.mode = Mode::FencedCode {
                         fence_char: fc,
@@ -486,8 +514,6 @@ impl StreamingRender {
                     };
                     return true;
                 }
-                self.split.para_ends_with_code =
-                    self.split.para_ends_with_code || fence_close_len_any(line).is_some();
                 self.split.mode = Mode::Paragraph;
                 true
             }
@@ -498,7 +524,7 @@ impl StreamingRender {
                 }
                 if let Some((fc, fl, info)) = fence_open(line) {
                     // A column-0 fence ends the list.
-                    self.close_slice(line_start, true);
+                    self.close_slice(line_start);
                     self.open_code_cache(fc, fl, info);
                     self.split.mode = Mode::FencedCode {
                         fence_char: fc,
@@ -509,13 +535,20 @@ impl StreamingRender {
                 let marker = list_marker_len(line).is_some();
                 let indented = indent_of(line) >= 2;
                 let lazy = !blank_seen;
-                if marker || indented || lazy {
-                    self.split.mode = Mode::List {
-                        blank_seen: blank_seen && line_is_blank(line),
-                    };
+                // pulldown keeps post-blank column-0 text inside an EMPTY
+                // list item (lazy continuation) — match it so the slice
+                // boundary agrees with the parser's block structure.
+                let empty_item_continuation = blank_seen && !self.split.list_item_has_content;
+                if marker {
+                    self.split.list_item_has_content = false;
+                    self.split.mode = Mode::List { blank_seen: false };
+                    true
+                } else if indented || lazy || empty_item_continuation {
+                    self.split.list_item_has_content = true;
+                    self.split.mode = Mode::List { blank_seen: false };
                     true
                 } else {
-                    self.close_slice(line_start, true);
+                    self.close_slice(line_start);
                     self.split.mode = Mode::Gap;
                     false
                 }
@@ -525,7 +558,7 @@ impl StreamingRender {
                 fence_len,
             } => {
                 if is_fence_close(line, fence_char, fence_len) {
-                    self.close_slice(line_start + line.len() + 1, false);
+                    self.close_slice(line_start + line.len() + 1);
                     self.split.mode = Mode::Gap;
                     // The cache moved into the closed block.
                     return true;
@@ -545,7 +578,7 @@ impl StreamingRender {
                     self.split.mode = Mode::IndentedCode;
                     true
                 } else {
-                    self.close_slice(line_start, false);
+                    self.close_slice(line_start);
                     self.split.mode = Mode::Gap;
                     false
                 }
@@ -555,17 +588,11 @@ impl StreamingRender {
 
     /// Close the current slice: record a pending block over
     /// `[tail_start, end)` and reset the tail to `end`.
-    fn close_slice(&mut self, end: usize, sep: bool) {
+    fn close_slice(&mut self, end: usize) {
         let start = self.split.tail_start;
         let code = self.code_tail.take();
-        self.split.closed.push(ClosedBlock {
-            start,
-            end,
-            sep,
-            code,
-        });
+        self.split.closed.push(ClosedBlock { start, end, code });
         self.split.tail_start = end;
-        self.split.para_ends_with_code = false;
     }
 
     /// Open the code cache for a fence opener at `line_start`.
@@ -673,6 +700,7 @@ pub fn full_lines(
 ) -> Vec<Line<'static>> {
     let opts = RenderOpts {
         code_highlight: profile.code_highlight(),
+        trim_trailing_blank: true,
     };
     let md = render_markdown_lines_with(text, Some(width.saturating_sub(2)), palette, opts);
     let thinking_style = Style::default().fg(palette.thinking);
@@ -707,7 +735,9 @@ pub fn full_lines(
 // Rendering helpers
 // ============================================================
 
-/// Render a generic (non-code-tail) slice with profile options.
+/// Render a generic slice with doc-end semantics (trailing blanks
+/// trimmed) — used for the ACTIVE TAIL, where the full render at the same
+/// text would also trim.
 fn render_generic(
     slice: &str,
     width: u16,
@@ -716,6 +746,25 @@ fn render_generic(
 ) -> Vec<MarkdownLine> {
     let opts = RenderOpts {
         code_highlight: profile.code_highlight(),
+        trim_trailing_blank: true,
+    };
+    render_markdown_lines_with(slice, Some(width.saturating_sub(2)), palette, opts)
+}
+
+/// Render a PROMOTED block with `trim_trailing_blank: false`: the
+/// renderer's own trailing blank line (pushed by paragraph/heading/list/
+/// table end tags, absent after code/HTML blocks) is exactly the
+/// separator the doc-context full render emits at this boundary — the
+/// promotion pops it and re-emits it lazily.
+fn render_block(
+    slice: &str,
+    width: u16,
+    profile: Profile,
+    palette: &ThemePalette,
+) -> Vec<MarkdownLine> {
+    let opts = RenderOpts {
+        code_highlight: profile.code_highlight(),
+        trim_trailing_blank: false,
     };
     render_markdown_lines_with(slice, Some(width.saturating_sub(2)), palette, opts)
 }
@@ -730,9 +779,9 @@ fn render_generic(
 /// `cache` is None when the block closed before any sync rendered it —
 /// a fresh cache is created and filled (equivalent output, no reuse).
 fn code_block_markdown_lines(
-    cache: &mut Option<CodeCache>,
+    cache: &mut CodeCache,
     slice: &str,
-    profile: Profile,
+    _profile: Profile,
     theme: &MarkdownTheme,
 ) -> Vec<MarkdownLine> {
     let mut lines = Vec::new();
@@ -748,30 +797,6 @@ fn code_block_markdown_lines(
         .filter(|l| !l.is_empty())
         .map(str::to_string);
     let has_language = lang_owned.as_deref().is_some_and(|l| !l.trim().is_empty());
-
-    if cache.is_none() {
-        // Closed-before-rendered (or diff): build a cache shell. Diff
-        // blocks never cache — signal that by leaving the flag set and
-        // letting the fill loop render via... no: diff renders plain-ish
-        // per-line below. Simpler: diff has no highlighter, no gutter, and
-        // its +/- coloring is applied per line in the fill loop.
-        let is_diff = lang_owned
-            .as_deref()
-            .is_some_and(|l| l.eq_ignore_ascii_case("diff"));
-        let highlighter = if profile.code_highlight() && has_language && !is_diff {
-            new_highlighter(lang_owned.as_deref().unwrap_or(""))
-        } else {
-            None
-        };
-        let show_gutter = profile.code_highlight() && has_language && !is_diff;
-        *cache = Some(CodeCache::new(
-            lang_owned.clone(),
-            is_diff,
-            highlighter,
-            if show_gutter { 3 } else { 0 },
-        ));
-    }
-    let cache = cache.as_mut().expect("cache just created");
     cache.lang = lang_owned;
 
     // Top border.
@@ -1049,26 +1074,6 @@ fn fence_close_len(line: &str) -> Option<usize> {
     let run = rest.bytes().take_while(|&c| c == fc).count();
     if run >= 3 && rest[run..].trim().is_empty() {
         Some(run)
-    } else {
-        None
-    }
-}
-
-/// Fence-close check that also sees closes nested in blockquotes
-/// ("> ```") — used for separator suppression when a paragraph/quote
-/// slice ends in a code block.
-fn fence_close_len_any(line: &str) -> Option<usize> {
-    if let Some(direct) = fence_close_len(line) {
-        return Some(direct);
-    }
-    let mut rest = line;
-    let mut stripped = false;
-    while let Some(r) = rest.strip_prefix('>') {
-        rest = r.strip_prefix(' ').unwrap_or(r);
-        stripped = true;
-    }
-    if stripped {
-        fence_close_len(rest)
     } else {
         None
     }

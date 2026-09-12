@@ -14,6 +14,7 @@
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
+use crate::config::rendering::ThinkingMode;
 use crate::render::Renderable;
 use crate::render::markdown::stream::{Profile, StreamingRender};
 use crate::render::renderable::CellContext;
@@ -36,10 +37,12 @@ pub struct CachedCell {
     /// is the render authority (the cell's text stays in sync for readers
     /// like `last_assistant_text`).
     stream: Option<StreamingRender>,
-    /// True while the cell's lines are pre-wrapped (≤ width) and can be
-    /// blitted directly — set for streaming cells and kept after their
-    /// finalize.
-    prewrapped: bool,
+    /// The width at which the cell's current lines are pre-wrapped (≤
+    /// width, blittable directly). `None` = not pre-wrapped. Lives at the
+    /// (width, generation) lifecycle of the lines: a width change or a
+    /// re-render through `to_lines` clears it, so stale pre-wrapped lines
+    /// are never blitted (they would truncate instead of wrapping).
+    prewrapped_width: Option<u16>,
     /// Turn-end reconcile requested: the next `compute_lines` /
     /// `compute_height` installs the full reference render.
     pending_finalize: bool,
@@ -66,7 +69,7 @@ impl CachedCell {
             cached_height: None,
             cached_lines: None,
             stream: None,
-            prewrapped: false,
+            prewrapped_width: None,
             pending_finalize: false,
         }
     }
@@ -77,9 +80,34 @@ impl CachedCell {
     }
 
     /// Mutate the inner cell and bump generation (invalidates all caches).
+    ///
+    /// CONTRACT: a streaming cell's text may only grow through
+    /// [`append_stream`](CachedCell::append_stream) — the incremental
+    /// render state holds its own copy of the text, and a mutation that
+    /// changes the text would desynchronize the two (dirty render). The
+    /// debug assertion below guards the invariant; non-text mutations
+    /// (e.g. the thinking event counter) are fine.
     pub fn mutate<F: FnOnce(&mut ChatCell)>(&mut self, f: F) {
+        let text_len_before = self.stream_text_len();
         f(&mut self.cell);
         self.generation += 1;
+        debug_assert_eq!(
+            text_len_before,
+            self.stream_text_len(),
+            "CachedCell::mutate changed streaming text — streaming cells \
+             must only grow via append_stream (stream buffer would desync)"
+        );
+    }
+
+    /// Text length of a streaming cell (None when not streaming) — the
+    /// debug-checked invariant anchor for `mutate`.
+    fn stream_text_len(&self) -> Option<usize> {
+        self.stream.as_ref()?;
+        match &self.cell {
+            ChatCell::Thinking(block) => Some(block.content.len()),
+            ChatCell::AssistantMessage(text) => Some(text.len()),
+            _ => None,
+        }
     }
 
     /// Current generation counter (test seam: observe cache invalidation).
@@ -95,7 +123,7 @@ impl CachedCell {
         self.cached_height = None;
         self.cached_lines = None;
         self.stream = None;
-        self.prewrapped = false;
+        self.prewrapped_width = None;
         self.pending_finalize = false;
     }
 
@@ -111,15 +139,32 @@ impl CachedCell {
             ChatCell::AssistantMessage(_) => Profile::Content,
             _ => return,
         };
+        // Existing text, captured BEFORE this delta lands in the cell —
+        // when the stream is created lazily (replay/resume path: the cell
+        // already carries content), it must be SEEDED with that content,
+        // otherwise the stream buffer would hold only the live deltas and
+        // the rendered view would drop the replayed prefix entirely.
+        let seed = match &self.cell {
+            ChatCell::Thinking(block) => block.content.clone(),
+            ChatCell::AssistantMessage(text) => text.clone(),
+            _ => unreachable!("profile checked above"),
+        };
         match &mut self.cell {
             ChatCell::Thinking(block) => block.append(delta),
             ChatCell::AssistantMessage(content) => content.push_str(delta),
             _ => unreachable!("profile checked above"),
         }
-        let stream = self
-            .stream
-            .get_or_insert_with(|| StreamingRender::new(profile));
-        stream.push(delta);
+        if let Some(stream) = self.stream.as_mut() {
+            stream.push(delta);
+        } else {
+            // Invariant: stream.buf == cell text at all times.
+            let mut stream = StreamingRender::new(profile);
+            if !seed.is_empty() {
+                stream.push(&seed);
+            }
+            stream.push(delta);
+            self.stream = Some(stream);
+        }
     }
 
     /// Whether this cell is currently rendering through the incremental
@@ -128,10 +173,30 @@ impl CachedCell {
         self.stream.is_some()
     }
 
-    /// Whether the cell's lines are pre-wrapped (≤ width) — the render
-    /// loop blits these directly instead of going through `Paragraph`.
-    pub fn is_prewrapped(&self) -> bool {
-        self.prewrapped
+    /// Whether the incremental stream is the active RENDER authority at
+    /// this context. Hidden thinking mode bypasses it: the stream keeps
+    /// accumulating (for a later mode change / finalize) but the visible
+    /// lines come from the cell's own renderer (the hidden indicator),
+    /// which is the only place ThinkingMode is honored.
+    fn stream_render_active(&self, ctx: &CellContext<'_>) -> bool {
+        if self.stream.is_none() {
+            return false;
+        }
+        match &self.cell {
+            ChatCell::Thinking(_) => ctx.thinking_mode == ThinkingMode::Visible,
+            _ => true,
+        }
+    }
+
+    /// Whether the cell's lines at `width` are pre-wrapped (≤ width) —
+    /// the render loop blits these directly instead of going through
+    /// `Paragraph`. Width- and generation-aware: a resize or a re-render
+    /// through `to_lines` invalidates it.
+    pub fn is_prewrapped(&self, width: u16, ctx: &CellContext<'_>) -> bool {
+        if self.stream_render_active(ctx) {
+            return true;
+        }
+        self.prewrapped_width == Some(width)
     }
 
     /// Request the turn-end reconcile: the next render call installs the
@@ -144,7 +209,21 @@ impl CachedCell {
     }
 
     /// Install the finalized reference render as the cached lines.
+    ///
+    /// Hidden thinking mode never rendered through the stream — drop it
+    /// and fall back to the cell's own renderer (the hidden indicator
+    /// line); the accumulated text stays in the cell.
     fn run_finalize(&mut self, width: u16, ctx: &CellContext<'_>) {
+        self.pending_finalize = false;
+        let hidden_thinking = matches!(self.cell, ChatCell::Thinking(_))
+            && ctx.thinking_mode != ThinkingMode::Visible;
+        if hidden_thinking {
+            self.stream = None;
+            self.cached_lines = None;
+            self.cached_height = None;
+            self.prewrapped_width = None;
+            return;
+        }
         if let Some(mut stream) = self.stream.take() {
             stream.finalize(width, ctx.palette);
             let lines = stream.lines(width, ctx.palette).to_vec();
@@ -159,9 +238,8 @@ impl CachedCell {
                 generation: self.generation,
                 height,
             });
+            self.prewrapped_width = Some(width);
         }
-        self.pending_finalize = false;
-        self.prewrapped = true;
     }
 
     /// Consume the wrapper and return the inner cell.
@@ -177,9 +255,11 @@ impl CachedCell {
         if self.pending_finalize {
             self.run_finalize(width, ctx);
         }
-        if let Some(stream) = self.stream.as_mut() {
-            self.prewrapped = true;
-            return stream.lines(width, ctx.palette);
+        if self.stream_render_active(ctx) {
+            let stream = self.stream.as_mut().expect("checked active");
+            let lines = stream.lines(width, ctx.palette);
+            self.prewrapped_width = Some(width);
+            return lines;
         }
         let cached_valid = self
             .cached_lines
@@ -193,6 +273,8 @@ impl CachedCell {
                 generation: self.generation,
                 lines,
             });
+            // Lines from `to_lines` are not pre-wrapped — never blit them.
+            self.prewrapped_width = None;
         }
 
         &self.cached_lines.as_ref().unwrap().lines
@@ -211,41 +293,18 @@ impl CachedCell {
         if self.pending_finalize {
             self.run_finalize(width, ctx);
         }
-        if let Some(stream) = self.stream.as_mut() {
+        if self.stream_render_active(ctx) {
+            // Pre-wrapped flat lines: the line count IS the height (O(1)).
+            // (A finalized streaming cell's height was cached by
+            // run_finalize and hits the cached_height check below.)
+            let stream = self.stream.as_mut().expect("checked active");
             let height = stream.lines(width, ctx.palette).len();
             self.cached_height = Some(CachedHeight {
                 width,
                 generation: self.generation,
                 height,
             });
-            return height;
-        }
-        if self.prewrapped {
-            // Finalized streaming cell — lines are pre-wrapped; the line
-            // count is the height.
-            if let Some(c) = self.cached_height
-                && c.width == width
-                && c.generation == self.generation
-            {
-                return c.height;
-            }
-            let lines_valid = self
-                .cached_lines
-                .as_ref()
-                .is_some_and(|c| c.generation == self.generation && c.width == width);
-            if !lines_valid {
-                let _ = self.compute_lines(width, ctx);
-            }
-            let height = self
-                .cached_lines
-                .as_ref()
-                .map(|c| c.lines.len())
-                .unwrap_or(0);
-            self.cached_height = Some(CachedHeight {
-                width,
-                generation: self.generation,
-                height,
-            });
+            self.prewrapped_width = Some(width);
             return height;
         }
         if let Some(c) = self.cached_height
