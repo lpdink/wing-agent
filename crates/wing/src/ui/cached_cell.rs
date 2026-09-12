@@ -91,6 +91,10 @@ impl CachedCell {
         let text_len_before = self.stream_text_len();
         f(&mut self.cell);
         self.generation += 1;
+        // The lines will be rebuilt by `to_lines` (which never pre-wraps):
+        // drop the blit fast path here rather than relying on
+        // `update_heights` having refreshed it earlier in the same frame.
+        self.prewrapped_width = None;
         debug_assert_eq!(
             text_len_before,
             self.stream_text_len(),
@@ -140,14 +144,19 @@ impl CachedCell {
             _ => return,
         };
         // Existing text, captured BEFORE this delta lands in the cell —
-        // when the stream is created lazily (replay/resume path: the cell
-        // already carries content), it must be SEEDED with that content,
-        // otherwise the stream buffer would hold only the live deltas and
-        // the rendered view would drop the replayed prefix entirely.
-        let seed = match &self.cell {
-            ChatCell::Thinking(block) => block.content.clone(),
-            ChatCell::AssistantMessage(text) => text.clone(),
-            _ => unreachable!("profile checked above"),
+        // only the delta that CREATES the stream needs it (replay/resume
+        // path: the cell already carries content that the fresh stream
+        // would otherwise not know about, and the rendered view would drop
+        // the replayed prefix). Later deltas must not pay an O(text) clone
+        // per event, which is why this is not hoisted out of the branch.
+        let seed = if self.stream.is_none() {
+            Some(match &self.cell {
+                ChatCell::Thinking(block) => block.content.clone(),
+                ChatCell::AssistantMessage(text) => text.clone(),
+                _ => unreachable!("profile checked above"),
+            })
+        } else {
+            None
         };
         match &mut self.cell {
             ChatCell::Thinking(block) => block.append(delta),
@@ -159,7 +168,7 @@ impl CachedCell {
         } else {
             // Invariant: stream.buf == cell text at all times.
             let mut stream = StreamingRender::new(profile);
-            if !seed.is_empty() {
+            if let Some(seed) = seed.filter(|s| !s.is_empty()) {
                 stream.push(&seed);
             }
             stream.push(delta);

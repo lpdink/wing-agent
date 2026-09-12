@@ -60,8 +60,14 @@ fn streaming_pass(
     let start = Instant::now();
     let mut cell = StreamCell::new(kind, engine);
     let mut frames_us: Vec<u64> = Vec::with_capacity(chunks.len());
+    let mut pushes_us: Vec<u64> = Vec::with_capacity(chunks.len());
     for chunk in chunks {
+        let t = Instant::now();
         cell.push(chunk);
+        let dt = t.elapsed().as_micros() as u64;
+        if report {
+            pushes_us.push(dt);
+        }
         let t = Instant::now();
         cell.frame(WIDTH, VIEWPORT);
         let dt = t.elapsed().as_micros() as u64;
@@ -73,16 +79,19 @@ fn streaming_pass(
         cell.finalize(WIDTH);
     }
     if report {
-        let s = frame_stats(&frames_us);
+        let f = frame_stats(&frames_us);
+        let p = frame_stats(&pushes_us);
         let _ = writeln!(
             std::io::stderr(),
             "engine={engine:?} scenario={scenario} size={kb}KB frames={} \
-             avg={}µs p50={}µs p99={}µs max={}µs",
-            s.frames,
-            s.avg_us,
-            s.p50_us,
-            s.p99_us,
-            s.max_us
+             frame avg={}µs p50={}µs p99={}µs max={}µs | push avg={}µs p99={}µs",
+            f.frames,
+            f.avg_us,
+            f.p50_us,
+            f.p99_us,
+            f.max_us,
+            p.avg_us,
+            p.p99_us,
         );
     }
     start.elapsed()
@@ -94,6 +103,13 @@ fn bench_engine(c: &mut Criterion, engine: Engine) {
         Engine::Incremental => "incremental",
     };
     for &scenario in SCENARIOS {
+        // The baseline re-renders the whole text per frame regardless of
+        // fence structure, so `giant_fence` only measures the incremental
+        // engine's O(new lines) behavior — `code_block` already covers the
+        // baseline's cost (and would take minutes on a 512 KB single fence).
+        if engine == Engine::Baseline && scenario == "giant_fence" {
+            continue;
+        }
         let mut group = c.benchmark_group(format!("{prefix}/{scenario}"));
         group.sample_size(10);
         group.warm_up_time(Duration::from_secs(1));

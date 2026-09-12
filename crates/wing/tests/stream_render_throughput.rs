@@ -1,10 +1,16 @@
 //! Throughput judgment for streaming rendering.
 //!
 //! Pumps a corpus as ~400B delta events (the 33ms cadence of a 12 KB/s
-//! stream ≈ 3000 tokens/s) and measures the per-frame render cost
-//! distribution. The stream is sustainable iff:
-//!   - avg frame cost ≤ 33ms  (consumption keeps up with arrival — no backlog)
-//!   - p99 frame cost < 16ms  (frame budget headroom)
+//! stream ≈ 3000 tokens/s) and measures BOTH halves of the per-event cost
+//! distribution:
+//!   - `push` — the append path (WS event → cell text + incremental
+//!     buffer), which runs outside the frame gate
+//!   - `frame` — the render path (cached-cell sync + blit)
+//!
+//! The stream is sustainable iff:
+//!   - avg(push) + avg(frame) ≤ 33ms  (consumption keeps up with arrival —
+//!     no backlog)
+//!   - p99 frame cost < 16ms          (frame budget headroom)
 //!
 //! Before optimization the baseline engine FAILS by design — run it with
 //!   WING_ENGINE=baseline cargo test --release --test stream_render_throughput -- --ignored --nocapture
@@ -61,8 +67,13 @@ fn throughput_judgment() {
 
             let mut cell = StreamCell::new(kind, engine);
             let mut frames_us = Vec::with_capacity(chunks.len());
+            let mut pushes_us = Vec::with_capacity(chunks.len());
             for chunk in &chunks {
+                // Time the append too: the WS event path pays it outside
+                // the frame gate, so it belongs to the arrival budget.
+                let t = Instant::now();
                 cell.push(chunk);
+                pushes_us.push(t.elapsed().as_micros() as u64);
                 let t = Instant::now();
                 cell.frame(WIDTH, VIEWPORT);
                 frames_us.push(t.elapsed().as_micros() as u64);
@@ -74,21 +85,27 @@ fn throughput_judgment() {
             }
 
             let s = frame_stats(&frames_us);
+            let p = frame_stats(&pushes_us);
             let _ = writeln!(
                 std::io::stderr(),
                 "engine={engine:?} {scenario:<11} {kb:>4}KB  frames={frames:<6} \
-                 avg={avg:>7}µs  p50={p50:>7}µs  p99={p99:>7}µs  max={max:>7}µs",
+                 frame avg={avg:>7}µs p99={p99:>7}µs max={max:>8}µs | \
+                 push avg={pavg:>5}µs p99={pp99:>5}µs",
                 frames = s.frames,
                 avg = s.avg_us,
-                p50 = s.p50_us,
                 p99 = s.p99_us,
                 max = s.max_us,
+                pavg = p.avg_us,
+                pp99 = p.p99_us,
             );
 
-            if s.avg_us > ARRIVAL_BUDGET_US {
+            // Arrival budget: append + render must fit between two
+            // 400 B events at 12 KB/s.
+            let event_avg = s.avg_us + p.avg_us;
+            if event_avg > ARRIVAL_BUDGET_US {
                 failures.push(format!(
-                    "{scenario}@{kb}KB: avg frame {}µs > {}µs arrival budget (backlog)",
-                    s.avg_us, ARRIVAL_BUDGET_US
+                    "{scenario}@{kb}KB: avg push+frame {event_avg}µs > {}µs arrival budget (backlog)",
+                    ARRIVAL_BUDGET_US
                 ));
             }
             if s.p99_us >= FRAME_BUDGET_US {

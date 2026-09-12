@@ -1067,8 +1067,13 @@ impl Widget for ChatViewWidget<'_> {
                 let lines = cached.compute_lines(content_area.width, &self.ctx);
                 let skip_lines = skip.min(lines.len());
                 let end = (skip_lines + cell_visible).min(lines.len());
-                for (i, line) in lines[skip_lines..end].iter().enumerate() {
-                    let row = Rect::new(content_area.x, render_y + i as u16, content_area.width, 1);
+                for (row_in_cell, line) in lines[skip_lines..end].iter().enumerate() {
+                    let row = Rect::new(
+                        content_area.x,
+                        render_y + row_in_cell as u16,
+                        content_area.width,
+                        1,
+                    );
                     line.render(row, buf);
                 }
                 render_y += cell_visible as u16;

@@ -4,6 +4,19 @@
 //! incremental `StreamingRender` output must equal the reference full
 //! render ([`full_lines`]) span by span (text + style) — for BOTH profiles
 //! (Thinking renders code plain; Content keeps highlighting).
+//!
+//! Scope of the assertion: the **last frame before `finalize()`**, i.e.
+//! the state the incremental engine leaves after every chunk has been
+//! pushed and synced. Transient mid-stream deviations are allowed by
+//! design (a misjudged block boundary only delays promotion) and are
+//! reconciled at turn end; what must hold is that the stream's resting
+//! state never diverges from the reference without converging later.
+//!
+//! Deliberately NOT in `shapes()` (see the module header's "Known limit"):
+//! a reference-style link definition in one block and its use in another —
+//! slice-isolated parsing cannot resolve it, so it renders literally until
+//! `finalize()`. Adding it here would assert something the engine does not
+//! promise.
 
 mod common;
 
@@ -65,6 +78,18 @@ fn shapes() -> Vec<(&'static str, String)> {
         ("empty_list_item_then_more", "- \n\ntext after\n\nmore para\n".into()),
         ("empty_quote", "> \n\nafter".into()),
         ("quote_para_then_quote_code", "> before\n\n> ```rust\n> let a = 1;\n> ```\n\nafter".into()),
+        // --- review round 2 ---
+        ("indented_closing_fence", "```rust\nlet x = 1;\n  ```\n\nafter the block\n".into()),
+        ("indented_closing_fence_trailing_space", "```rust\nlet x = 1;\n  ```  \n\nafter\n".into()),
+        ("indented_closing_fence_tilde", "~~~python\nx = 1\n   ~~~\n\nafter\n".into()),
+        (
+            "crlf_document",
+            "First paragraph.\r\n\r\n```rust\r\nlet a = 1;\r\nlet b = 2;\r\n```\r\n\r\nafter\r\n".into(),
+        ),
+        (
+            "crlf_unclosed_fence",
+            "intro\r\n\r\n```rust\r\nlet x = 1;\r\nlet y = 2;\r\n".into(),
+        ),
     ]
 }
 
@@ -167,6 +192,65 @@ fn reconcile_matrix_corpora() {
                         width,
                         profile,
                         &format!("corpus chunk={chunk}B"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Prefix-exactness: for the shapes whose output converges mid-stream,
+/// EVERY prefix (not just the last frame) must equal the reference render
+/// of the same prefix. This is the property that catches cursor/offset
+/// drift in the incremental paths — a stale or duplicated body line shows
+/// up here immediately, where the end-of-stream compare would only notice
+/// if it survived to the final frame.
+///
+/// Shapes whose mid-stream output is transiently different by design (diff
+/// fences' whole-block metadata handling, raw HTML blocks, empty list
+/// items) are excluded: they converge at `finalize()`, not per prefix.
+#[test]
+fn reconcile_prefixes() {
+    const CONVERGENT: &[&str] = &[
+        "plain_paragraphs",
+        "cjk_prose",
+        "unclosed_fence",
+        "fence_with_blank_lines",
+        "long_code_block",
+        "overwide_code_line",
+        "tight_list",
+        "ordered_loose_list",
+        "table",
+        "mixed_document",
+        "indented_code",
+        "indented_closing_fence",
+        "indented_closing_fence_trailing_space",
+        "indented_closing_fence_tilde",
+        "crlf_document",
+        "crlf_unclosed_fence",
+    ];
+    let palette = ThemePalette::default();
+    for (name, corpus) in shapes() {
+        if !CONVERGENT.contains(&name) {
+            continue;
+        }
+        for &profile in PROFILES {
+            for &width in &[40u16, 80] {
+                let mut sr = StreamingRender::new(profile);
+                let mut fed = String::new();
+                for chunk in chunk_stream(&corpus, 7) {
+                    sr.push(chunk);
+                    fed.push_str(chunk);
+                    let streamed = sr.lines(width, &palette).to_vec();
+                    let reference = full_lines(&fed, width, profile, &palette);
+                    pretty_assertions::assert_eq!(
+                        span_pairs(&streamed),
+                        span_pairs(&reference),
+                        "prefix shape={name} profile={profile:?} width={width} \
+                         at {} bytes:\nstreaming:\n{}\nreference:\n{}",
+                        fed.len(),
+                        describe(&span_pairs(&streamed)),
+                        describe(&span_pairs(&reference)),
                     );
                 }
             }

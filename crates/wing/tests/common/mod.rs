@@ -64,7 +64,7 @@ impl Rng {
 // Corpus generation
 // ============================================================
 
-pub const SCENARIOS: &[&str] = &["thinking", "content", "code_block"];
+pub const SCENARIOS: &[&str] = &["thinking", "content", "code_block", "giant_fence"];
 
 /// Sizes in KB covered by the frame-cost curve.
 pub const SIZES_KB: &[usize] = &[8, 64, 256, 512];
@@ -378,12 +378,29 @@ fn code_corpus(target: usize) -> String {
     out
 }
 
+/// ONE giant fenced block (no intermediate closes), preceded by a short
+/// intro: the shape where the open fence IS the whole remaining document
+/// for most of the stream, so the line cache's per-sync cost dominates.
+fn giant_fence_corpus(target: usize) -> String {
+    let mut rng = Rng::new(0x6E7E);
+    let mut out = String::from("A single long code block:\n\n```rust\n");
+    while out.len() < target {
+        for _ in 0..8 {
+            out.push_str(rng.pick(RUST_LINES));
+            out.push('\n');
+        }
+    }
+    out.push_str("```\n");
+    out
+}
+
 /// Deterministic corpus for a scenario, approximately `target_bytes` bytes.
 pub fn corpus(scenario: &str, target_bytes: usize) -> String {
     match scenario {
         "thinking" => thinking_corpus(target_bytes),
         "content" => content_corpus(target_bytes),
         "code_block" => code_corpus(target_bytes),
+        "giant_fence" => giant_fence_corpus(target_bytes),
         _ => panic!("unknown scenario: {scenario}"),
     }
 }
