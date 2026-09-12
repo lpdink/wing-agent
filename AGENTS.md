@@ -29,6 +29,8 @@ The `wing` binary is both frontends: **TUI** (interactive, human-in-the-loop) an
 
 **Streaming rendering.** During LLM argument generation the runtime emits `tool_call_stream` events carrying incremental raw args text fragments (`args_fragment`); it never parses partial JSON itself. The Rust frontend accumulates fragments and parses them locally (`util/partial_json.rs`, single-pass O(n)) to render live tool cards (Write/Edit previews, TodoWrite lists) before execution starts; the authoritative parsed args arrive with the `tool_call` event.
 
+**Fence normalization — Thinking vs Content.** The `Content` profile normalizes inline ```` to line-level fences (matching the full renderer's `ensure_fences_on_own_line`), so model output like `text:```python\ncode```` renders as a proper code block. The `Thinking` profile **skips** this normalization: reasoning text often contains inline ```` references to discuss code fences (e.g. `（```rust）`), and normalizing them would create spurious code blocks with wrong language tags, swallowing subsequent text inside a code block border. Genuine line-start ```` in reasoning are still detected as code blocks via `fence_open`.
+
 ## Project Structure
 
 ```

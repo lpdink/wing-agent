@@ -49,6 +49,16 @@
 //! blockquotes-ending-in-code; the separator is emitted lazily when the
 //! next block starts, so a trailing blank never dangles at the end of the
 //! stream (matching the full render's trailing-blank trim).
+//!
+//! **Thinking vs Content fences.** The `Content` profile normalizes inline
+//! ```` to line-level fences (via `ensure_fences_on_own_line` / its
+//! streaming equivalent `normalize_fences`), which lets model output like
+//! `text:```python\ncode```` render as a proper code block. The `Thinking`
+//! profile **skips** this normalization: reasoning text often contains
+//! inline ```` references to discuss code fences themselves (e.g.
+//! `（```rust）`), and normalizing them would create spurious code blocks
+//! with wrong language tags. Genuine line-start code blocks in reasoning
+//! are still detected by the splitter via [`fence_open`] in both profiles.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -543,7 +553,19 @@ impl StreamingRender {
     /// only start at or after the splitter's last line boundary, because
     /// the bytes before it are either line-terminated content or too short
     /// to hold a fence.
+    ///
+    /// **Thinking profile**: reasoning text often contains inline ``` references
+    /// to discuss code fences (e.g. `（```rust）`). Normalizing these into
+    /// line-level fences would create spurious code blocks with wrong language
+    /// tags, swallowing the rest of the reasoning inside a code block border.
+    /// Skip normalization entirely — inline ``` stays as literal text. Genuine
+    /// line-start code blocks in reasoning are still detected by the splitter
+    /// via [`fence_open`].
     fn normalize_fences(&mut self) {
+        if self.profile == Profile::Thinking {
+            self.norm_cursor = self.buf.len().saturating_sub(2);
+            return;
+        }
         let mut i = self.norm_cursor;
         let bytes = self.buf.as_bytes();
         let mut insertions: Vec<usize> = Vec::new();
