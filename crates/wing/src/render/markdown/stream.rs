@@ -1293,23 +1293,30 @@ mod tests {
         let text = "First para.\n\nSecond para with **bold** and `code`.\n\nThird.";
         for profile in [Profile::Thinking, Profile::Content] {
             let mut sr = StreamingRender::new(profile);
-            // Chunked at odd offsets.
-            for chunk in text.as_bytes().chunks(7) {
-                let s = std::str::from_utf8(chunk).unwrap_or_default();
-                let mut owned = s.to_string();
-                // cut at char boundary
-                while !owned.is_empty() && !text.contains(&owned) {
-                    owned.pop();
-                }
-                sr.push(&owned);
+            // Feed as odd-sized chunks at char boundaries, syncing after
+            // each — the mid-stream output must match the reference full
+            // render at every step (the reconcile matrix covers this more
+            // thoroughly; this is a minimal unit-test guard).
+            let mut pos = 0;
+            while pos < text.len() {
+                let chunk_end = (pos + 7).min(text.len());
+                // Never split a UTF-8 char.
+                let end = text[..chunk_end]
+                    .char_indices()
+                    .last()
+                    .map(|(i, c)| i + c.len_utf8())
+                    .unwrap_or(chunk_end);
+                let chunk = &text[pos..end];
+                sr.push(chunk);
                 let _ = sr.lines(80, &palette);
+                pos = end;
             }
-            sr.finalize(80, &palette);
+            let streamed = sr.lines(80, &palette).to_vec();
             let reference = full_lines(text, 80, profile, &palette);
             assert_eq!(
-                span_texts(sr.lines(80, &palette)),
+                span_texts(&streamed),
                 span_texts(&reference),
-                "profile {profile:?}"
+                "mid-stream profile {profile:?}"
             );
         }
     }

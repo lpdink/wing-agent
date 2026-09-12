@@ -334,19 +334,9 @@ impl App {
         self.refresh_ask_placeholder();
     }
 
-    /// Common cleanup at the end of an agent turn (Done / Interrupted / Error).
-    ///
-    /// Resets turn state, render context, and copy candidates.
-    /// Callers handle their own specific follow-up (title, toast, etc.).
-    ///
-    /// **Ordering note**: `refresh_copy_candidates()` runs *inside* this method,
-    /// so any chat mutations by the caller (e.g. `clear_ask_state`,
-    /// `chat.push(ErrorMessage)`) happen *after* the copy cache is snapshot.
-    /// Currently safe because `collect_assistant_messages` only collects
-    /// `AssistantMessage` cells, which are unaffected by these mutations.
-    /// Mark the UI dirty (coalesced to ~60fps by the frame gate). Call
-    /// after any side effect that may have mutated visible state outside
-    /// the event handlers — intent execution, toasts, focus changes.
+    /// Mark the UI as changed (coalesced to ~60fps by the frame gate).
+    /// Call after any side effect that may have mutated visible state
+    /// outside the event handlers — intent execution, toasts, focus changes.
     fn mark_dirty(&mut self) {
         self.chat_dirty = true;
     }
@@ -376,6 +366,16 @@ impl App {
         false
     }
 
+    /// Common cleanup at the end of an agent turn (Done / Interrupted / Error).
+    ///
+    /// Resets turn state, render context, and copy candidates.
+    /// Callers handle their own specific follow-up (title, toast, etc.).
+    ///
+    /// **Ordering note**: `refresh_copy_candidates()` runs *inside* this method,
+    /// so any chat mutations by the caller (e.g. `clear_ask_state`,
+    /// `chat.push(ErrorMessage)`) happen *after* the copy cache is snapshot.
+    /// Currently safe because `collect_assistant_messages` only collects
+    /// `AssistantMessage` cells, which are unaffected by these mutations.
     fn finish_turn(&mut self) {
         self.turn.finish();
         self.ctx.reset();

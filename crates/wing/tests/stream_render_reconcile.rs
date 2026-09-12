@@ -154,8 +154,6 @@ fn reconcile_matrix_shapes() {
 /// keep runtime sane) — the bench workloads themselves must converge.
 #[test]
 fn reconcile_matrix_corpora() {
-    let palette_probe = ThemePalette::default();
-    let _ = palette_probe;
     for scenario in common::SCENARIOS {
         let corpus = common::corpus(scenario, 4 * 1024);
         for &profile in PROFILES {
