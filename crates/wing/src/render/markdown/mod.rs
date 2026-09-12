@@ -116,7 +116,14 @@ pub fn render_markdown_lines_with(
     let base_style = theme.base;
 
     // Pre-process: ensure code fences are on their own line.
-    let text = ensure_fences_on_own_line(text);
+    // Reasoning (non-highlight) text often contains inline ``` references
+    // (e.g. `（```rust）`). Normalizing these would create spurious code
+    // blocks — skip for the Thinking profile.
+    let text = if opts.code_highlight {
+        ensure_fences_on_own_line(text)
+    } else {
+        text.into()
+    };
 
     let lines = render_markdown_to_lines(&text, base_style, &theme, width, opts);
 
