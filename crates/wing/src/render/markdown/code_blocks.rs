@@ -25,6 +25,9 @@ pub(crate) struct CodeBlockRenderEnv<'a> {
     pub(crate) pending_list_prefix: &'a mut Option<String>,
     pub(crate) base_style: Style,
     pub(crate) theme: &'a MarkdownTheme,
+    /// Render code with syntect highlighting + gutters. False = plain
+    /// single-color code (the Thinking profile).
+    pub(crate) highlight: bool,
 }
 
 /// Handle an event while inside a code block.
@@ -120,7 +123,7 @@ fn render_code_block(state: &CodeBlockState, env: &CodeBlockRenderEnv<'_>) -> Ve
     let code = state.buffer.trim_end_matches('\n');
     let source_lines: Vec<&str> = code.lines().collect();
     let line_count = source_lines.len();
-    let show_line_numbers = has_language && !is_diff;
+    let show_line_numbers = has_language && !is_diff && env.highlight;
 
     let number_width = if show_line_numbers {
         line_count.max(1).to_string().len().max(3)
@@ -129,7 +132,7 @@ fn render_code_block(state: &CodeBlockState, env: &CodeBlockRenderEnv<'_>) -> Ve
     };
 
     // Try syntax highlighting if we have a language.
-    let highlighted = if has_language && !is_diff {
+    let highlighted = if has_language && !is_diff && env.highlight {
         let lang = state.language.as_deref().unwrap_or("");
         let ext = lang.split_whitespace().next().unwrap_or(lang);
         highlight_code_lines(code, Some(ext), env.theme)

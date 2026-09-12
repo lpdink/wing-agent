@@ -16,6 +16,7 @@
 pub(crate) mod code_blocks;
 pub(crate) mod links;
 pub(crate) mod parsing;
+pub mod stream;
 pub(crate) mod tables;
 pub mod types;
 pub(crate) mod wrap;
@@ -25,6 +26,7 @@ pub use types::MarkdownLine;
 pub use types::MarkdownSegment;
 pub use types::MarkdownTheme;
 pub use types::SegmentKind;
+pub use types::thinking_segment_style;
 
 // Re-export utilities used by other modules.
 pub use types::truncate_to_display_width;
@@ -42,6 +44,33 @@ use ratatui::text::Line;
 use tables::TableBuffer;
 
 use crate::config::ThemePalette;
+
+/// Code-block rendering options.
+///
+/// The streaming Thinking profile renders code blocks plain (no syntect
+/// highlight, no gutter) — both while streaming and in its final reconcile
+/// render, so the visual stays consistent across the whole turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RenderOpts {
+    /// Render fenced code with syntect highlighting + line-number gutters.
+    pub code_highlight: bool,
+    /// Trim trailing blank lines (doc-end semantics). The streaming
+    /// renderer disables this when rendering a PROMOTED block: the
+    /// presence of the renderer's own trailing blank line is exactly the
+    /// separator the doc-context full render would emit at that boundary
+    /// (paragraph/heading/list/table ends push one; code/HTML do not) —
+    /// the block promotion pops it and re-emits it lazily instead.
+    pub trim_trailing_blank: bool,
+}
+
+impl Default for RenderOpts {
+    fn default() -> Self {
+        Self {
+            code_highlight: true,
+            trim_trailing_blank: true,
+        }
+    }
+}
 
 /// Render markdown text to ratatui Lines using the given theme palette.
 pub fn render_markdown(text: &str, palette: &ThemePalette) -> Vec<Line<'static>> {
@@ -73,13 +102,23 @@ pub fn render_markdown_lines(
     width: Option<u16>,
     palette: &ThemePalette,
 ) -> Vec<MarkdownLine> {
+    render_markdown_lines_with(text, width, palette, RenderOpts::default())
+}
+
+/// [`render_markdown_lines`] with explicit code-block rendering options.
+pub fn render_markdown_lines_with(
+    text: &str,
+    width: Option<u16>,
+    palette: &ThemePalette,
+    opts: RenderOpts,
+) -> Vec<MarkdownLine> {
     let theme = MarkdownTheme::from_palette(palette);
     let base_style = theme.base;
 
     // Pre-process: ensure code fences are on their own line.
     let text = ensure_fences_on_own_line(text);
 
-    let lines = render_markdown_to_lines(&text, base_style, &theme, width);
+    let lines = render_markdown_to_lines(&text, base_style, &theme, width, opts);
 
     // Pre-wrap prose to the available width using UAX #14 line breaking so CJK
     // runs break at the margin instead of being shoved whole to the next line
@@ -156,6 +195,7 @@ fn render_markdown_to_lines(
     base_style: Style,
     theme: &MarkdownTheme,
     available_width: Option<u16>,
+    opts: RenderOpts,
 ) -> Vec<MarkdownLine> {
     let parser_options =
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
@@ -183,6 +223,7 @@ fn render_markdown_to_lines(
             pending_list_prefix: &mut pending_list_prefix,
             base_style,
             theme,
+            highlight: opts.code_highlight,
         };
         if handle_code_block_event(&event, &mut code_block, &mut code_block_env) {
             blockquote_depth = code_block_env.blockquote_depth;
@@ -249,6 +290,7 @@ fn render_markdown_to_lines(
         pending_list_prefix: &mut pending_list_prefix,
         base_style,
         theme,
+        highlight: opts.code_highlight,
     };
     finalize_unclosed_code_block(&mut code_block, &mut code_block_env);
 
@@ -256,7 +298,9 @@ fn render_markdown_to_lines(
         lines.push(current_line);
     }
 
-    trim_trailing_blank_lines(&mut lines);
+    if opts.trim_trailing_blank {
+        trim_trailing_blank_lines(&mut lines);
+    }
     lines
 }
 

@@ -12,8 +12,9 @@
 
 use crate::config::ThemePalette;
 use crate::config::rendering::ThinkingMode;
-use crate::render::markdown::SegmentKind;
-use crate::render::markdown::render_markdown_lines;
+use crate::render::markdown::RenderOpts;
+use crate::render::markdown::render_markdown_lines_with;
+use crate::render::markdown::types::thinking_segment_style;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -61,7 +62,19 @@ impl ThinkingBlock {
         let thinking_style = Style::default().fg(palette.thinking);
         let mut lines = Vec::new();
         let md_width = Some(width.saturating_sub(2));
-        let md_lines = render_markdown_lines(&self.content, md_width, palette);
+        // Thinking renders code blocks plain — no syntect, no gutter —
+        // permanently (streaming AND final). Keeps the incremental
+        // streaming path stateless and the visual consistent across the
+        // whole turn (no highlight popping in at turn end).
+        let md_lines = render_markdown_lines_with(
+            &self.content,
+            md_width,
+            palette,
+            RenderOpts {
+                code_highlight: false,
+                trim_trailing_blank: true,
+            },
+        );
         for (i, md_line) in md_lines.iter().enumerate() {
             let prefix = if i == 0 { "⦁ " } else { "  " };
             let mut spans = vec![Span::styled(prefix.to_string(), thinking_style)];
@@ -87,26 +100,6 @@ impl ThinkingBlock {
     }
 }
 
-/// Map a markdown segment's style into the thinking block's visual layer.
-///
-/// Code-like and decorative elements keep their theme colors so inline code
-/// and code blocks stay distinguishable inside reasoning content; prose
-/// elements inherit the thinking foreground while everything else (bold,
-/// italic, dim, background, underline color) is preserved untouched.
-fn thinking_segment_style(kind: SegmentKind, original: Style, thinking_style: Style) -> Style {
-    match kind {
-        SegmentKind::InlineCode
-        | SegmentKind::CodeBlock
-        | SegmentKind::Link
-        | SegmentKind::Border
-        | SegmentKind::Gutter => original,
-        SegmentKind::Text | SegmentKind::Heading | SegmentKind::Marker => Style {
-            fg: thinking_style.fg,
-            ..original
-        },
-    }
-}
-
 impl Default for ThinkingBlock {
     fn default() -> Self {
         Self::new()
@@ -117,6 +110,7 @@ impl Default for ThinkingBlock {
 mod tests {
     use super::*;
     use crate::config::rendering::ThinkingMode;
+    use crate::render::markdown::SegmentKind;
     use ratatui::style::Color;
     use ratatui::style::Modifier;
 

@@ -43,3 +43,9 @@ wing-api-client = { path = "../wing-api-client" }
 
 [dev-dependencies]
 pretty_assertions = "1"
+criterion = "0.5"
+
+[[bench]]
+name = "stream_render"
+harness = false
+

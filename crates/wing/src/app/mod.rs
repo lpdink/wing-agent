@@ -96,6 +96,13 @@ pub struct App {
     /// Setting this flag makes the next draw call `Terminal::clear` first,
     /// which resets the back buffer so the whole screen is repainted.
     needs_full_redraw: bool,
+    /// Chat (or any non-input UI state) changed since the last draw —
+    /// coalesced by the frame gate.
+    chat_dirty: bool,
+    /// User input arrived — bypasses the frame gate (immediate draw).
+    input_dirty: bool,
+    /// Timestamp of the last executed draw (frame-gate reference).
+    last_draw: std::time::Instant,
     /// Ctrl+C press count for double-press quit.
     ctrl_c_count: u8,
     /// Last Ctrl+C timestamp (for double-press detection).
@@ -191,6 +198,9 @@ impl App {
             visible_height: 20,
             terminal_width: 80,
             needs_full_redraw: true,
+            chat_dirty: false,
+            input_dirty: false,
+            last_draw: std::time::Instant::now(),
             ctrl_c_count: 0,
             ctrl_c_last: None,
             ctx: RenderContext::new(),
@@ -324,6 +334,38 @@ impl App {
         self.refresh_ask_placeholder();
     }
 
+    /// Mark the UI as changed (coalesced to ~60fps by the frame gate).
+    /// Call after any side effect that may have mutated visible state
+    /// outside the event handlers — intent execution, toasts, focus changes.
+    fn mark_dirty(&mut self) {
+        self.chat_dirty = true;
+    }
+
+    /// Frame-gated draw decision.
+    ///
+    /// WS stream events (deltas, tool updates, …) only mark the chat
+    /// dirty and are coalesced to [`MIN_FRAME_INTERVAL`] — the draw rate
+    /// decouples from the delta event rate (3000 tokens/s ≈ 50 events/s
+    /// would otherwise mean 50 full draws/s). User input, resize and full
+    /// repaints bypass the gate and draw immediately.
+    fn should_draw_now(&mut self) -> bool {
+        let immediate = self.needs_full_redraw || self.input_dirty;
+        if immediate {
+            self.input_dirty = false;
+            self.chat_dirty = false;
+            return true;
+        }
+        if !self.chat_dirty {
+            return false;
+        }
+        let elapsed = self.last_draw.elapsed();
+        if draw_gate(elapsed) {
+            self.chat_dirty = false;
+            return true;
+        }
+        false
+    }
+
     /// Common cleanup at the end of an agent turn (Done / Interrupted / Error).
     ///
     /// Resets turn state, render context, and copy candidates.
@@ -338,6 +380,11 @@ impl App {
         self.turn.finish();
         self.ctx.reset();
         self.refresh_copy_candidates();
+        // Turn-end reconcile: install the full reference render for all
+        // streaming cells (converges any incremental drift, frees stream
+        // state). The actual render happens at the next draw, where the
+        // terminal width is known.
+        self.chat.finalize_streams();
     }
 
     /// Workdir last-component label for the terminal title suffix (e.g. `myproject`).
@@ -360,6 +407,9 @@ impl App {
     pub fn show_toast(&mut self, toast: Toast) -> std::time::Duration {
         let remaining = toast.remaining();
         self.toast = Some(toast);
+        // A toast IS a visible change — always schedule a draw (the frame
+        // gate coalesces bursts).
+        self.chat_dirty = true;
         remaining
     }
 
@@ -2287,6 +2337,15 @@ impl App {
     }
 }
 
+/// Minimum spacing between chat-dirty draws (≈60fps frame budget).
+const MIN_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// Pure frame-gate predicate: a chat-dirty draw is due iff at least
+/// [`MIN_FRAME_INTERVAL`] has elapsed since the last draw.
+fn draw_gate(elapsed_since_last_draw: std::time::Duration) -> bool {
+    elapsed_since_last_draw >= MIN_FRAME_INTERVAL
+}
+
 /// Run the main application loop.
 pub async fn run_app(
     terminal: &mut WingTerminal,
@@ -2321,14 +2380,22 @@ pub async fn run_app(
     }
 
     loop {
-        // Draw.
-        if let Err(e) = app.draw(terminal) {
-            tracing::error!("draw error: {e}");
+        // Draw — frame-gated: streaming deltas coalesce, input draws
+        // immediately, idle iterations skip the draw entirely.
+        if app.should_draw_now() {
+            if let Err(e) = app.draw(terminal) {
+                tracing::error!("draw error: {e}");
+            }
+            app.last_draw = std::time::Instant::now();
         }
 
         // Execute all pending intents produced during the last event cycle.
+        // Intents may mutate visible state (session switch + replay, popup
+        // status, toasts on failure) — mark dirty uniformly instead of
+        // relying on each intent remembering to.
         for intent in app.drain_intents() {
             runner::execute_intent(&mut app, &transport, terminal, intent, &fetch_tx).await;
+            app.mark_dirty();
         }
 
         if app.should_quit {
@@ -2361,9 +2428,11 @@ pub async fn run_app(
                 match term_event {
                     TermEvent::Key(key) => {
                         app.handle_key(key);
+                        app.input_dirty = true;
                     }
                     TermEvent::Paste(text) => {
                         app.handle_paste(&text);
+                        app.input_dirty = true;
                     }
                     TermEvent::Resize(_, _) => {
                         // ratatui auto-resizes its buffers on the next draw;
@@ -2373,6 +2442,7 @@ pub async fn run_app(
                     }
                     TermEvent::Focus(focused) => {
                         app.focused = focused;
+                        app.mark_dirty();
                         // On focus regain, restore the correct title.
                         if focused {
                             // The terminal re-shows its surface on focus
@@ -2411,6 +2481,12 @@ pub async fn run_app(
                             // turn is active (a tool can only be pending mid-turn);
                             // gating here keeps idle sessions from scanning cells.
                             app.chat.tick_bash_timers();
+                            // Spinner animation / tool timers changed the UI —
+                            // ONLY while a turn is active. An idle session's
+                            // ticks draw nothing (idle iterations skip
+                            // drawing entirely); toasts are static (their
+                            // expiry has its own timer arm).
+                            app.chat_dirty = true;
                         }
                     }
                 }
@@ -2419,7 +2495,12 @@ pub async fn run_app(
                 transport.as_mut().unwrap().ws.recv_event().await
             }, if transport.is_some() => {
                 match event {
-                    Some(e) => app.handle_event(e),
+                    Some(e) => {
+                        app.handle_event(e);
+                        // Any gateway event may have mutated chat state;
+                        // coalesced by the frame gate.
+                        app.chat_dirty = true;
+                    }
                     None => {
                         // Disconnected.
                         transport = None;
@@ -2428,6 +2509,7 @@ pub async fn run_app(
                             "⚡ Connection lost — reconnecting...",
                             ToastKind::Warning,
                         ));
+                        app.chat_dirty = true;
                         retry_attempt = 0;
                         retry_at = std::time::Instant::now() + backoff(0);
                     }
@@ -2499,10 +2581,12 @@ pub async fn run_app(
                 }
             } => {
                 // Toast expired — next draw() will lazy-cleanup.
+                app.chat_dirty = true;
             }
             // Background fetch results (non-blocking HTTP queries).
             Some(result) = fetch_rx.recv() => {
                 app.handle_fetch_result(result);
+                app.chat_dirty = true;
             }
             else => {
                 break;
@@ -2529,6 +2613,57 @@ mod tests {
     /// Create a minimal App for command dispatch testing.
     fn test_app() -> App {
         App::new("test-session".into(), AppConfig::default(), None)
+    }
+
+    #[test]
+    fn test_draw_gate_frame_interval() {
+        use std::time::Duration;
+        // Within the frame interval: coalesce.
+        assert!(!draw_gate(Duration::from_millis(5)));
+        assert!(!draw_gate(Duration::from_millis(15)));
+        // At/after the interval: due.
+        assert!(draw_gate(Duration::from_millis(16)));
+        assert!(draw_gate(Duration::from_millis(50)));
+    }
+
+    #[test]
+    fn test_should_draw_now_input_bypasses_gate() {
+        let mut app = test_app();
+        // The fresh app wants a full first repaint — consume it.
+        app.needs_full_redraw = false;
+        // Just drew — frame gate closed.
+        app.last_draw = std::time::Instant::now();
+        app.chat_dirty = true;
+        assert!(!app.should_draw_now(), "chat-only change coalesces");
+
+        // Input arrives: immediate draw, gate bypassed.
+        app.input_dirty = true;
+        assert!(app.should_draw_now());
+        assert!(!app.input_dirty, "input flag consumed");
+        assert!(!app.chat_dirty, "chat flag consumed with the draw");
+
+        // Nothing pending: no draw.
+        assert!(!app.should_draw_now());
+    }
+
+    #[test]
+    fn test_should_draw_now_chat_dirty_frame_due() {
+        let mut app = test_app();
+        app.needs_full_redraw = false;
+        app.chat_dirty = true;
+        // Simulate the last draw 20ms ago — frame due.
+        app.last_draw = std::time::Instant::now() - std::time::Duration::from_millis(20);
+        assert!(app.should_draw_now());
+        assert!(!app.chat_dirty, "dirty consumed by the draw");
+        assert!(!app.should_draw_now());
+    }
+
+    #[test]
+    fn test_should_draw_now_full_redraw_immediate() {
+        let mut app = test_app();
+        app.last_draw = std::time::Instant::now();
+        app.needs_full_redraw = true;
+        assert!(app.should_draw_now());
     }
 
     #[test]

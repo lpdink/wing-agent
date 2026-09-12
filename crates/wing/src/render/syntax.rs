@@ -111,6 +111,37 @@ pub fn highlight_code_lines(
     Some(lines)
 }
 
+/// Build a stateful highlighter for incremental (line-at-a-time) code
+/// highlighting — used by the streaming renderer so already-highlighted
+/// lines are never recomputed.
+///
+/// Returns None when the language is unknown (callers fall back to plain).
+pub fn new_highlighter(lang: &str) -> Option<HighlightLines<'static>> {
+    let ss = syntax_set();
+    let syntax = ss
+        .find_syntax_by_token(lang)
+        .or_else(|| ss.find_syntax_by_extension(lang))?;
+    let theme = &theme_set().themes["base16-ocean.dark"];
+    Some(HighlightLines::new(syntax, theme))
+}
+
+/// Highlight a single line, ADVANCING the highlighter state.
+///
+/// The state is positioned "after the previous line" — highlighting line N
+/// then N+1 with the same highlighter reproduces `highlight_code_lines`
+/// exactly.
+pub fn highlight_line_with(
+    highlighter: &mut HighlightLines<'static>,
+    line: &str,
+) -> Option<Vec<(Style, String)>> {
+    let ops = highlighter.highlight_line(line, syntax_set()).ok()?;
+    Some(
+        ops.into_iter()
+            .map(|(style, text)| (convert_syntect_style(style), text.to_string()))
+            .collect(),
+    )
+}
+
 fn convert_syntect_style(style: syntect::highlighting::Style) -> Style {
     let fg = style.foreground;
     let color = Color::Rgb(fg.r, fg.g, fg.b);
