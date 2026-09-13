@@ -76,6 +76,22 @@ pub async fn execute_intent(
                 }
             }
         }
+        AppIntent::OpenLink(target) => {
+            // Resolution + spawn happen on the blocking pool; the intent is
+            // awaited with a bound so a wedged opener cannot freeze the UI.
+            match crate::util::open::open_target(&target).await {
+                Ok(plan) => {
+                    tracing::debug!(program = ?plan.program, describe = %plan.describe, "opened link");
+                }
+                Err(e) => {
+                    tracing::warn!("open link failed: {e:#}");
+                    app.show_toast(Toast::warning(
+                        format!("Open failed: {e:#}"),
+                        std::time::Duration::from_secs(3),
+                    ));
+                }
+            }
+        }
         AppIntent::SendMessage {
             content,
             tool_call_id,

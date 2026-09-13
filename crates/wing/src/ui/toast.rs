@@ -110,9 +110,18 @@ const MIN_TERMINAL_WIDTH: u16 = 20;
 const EDGE_PADDING: u16 = 2;
 
 /// Render a toast overlay on the frame.
-pub fn render_toast(toast: &Toast, area: Rect, buf: &mut Buffer, palette: &ThemePalette) {
+///
+/// Returns the rect that was painted, so callers can drop anything the toast
+/// covered (the chat view keeps per-frame link hit boxes — a click on a toast
+/// must not open the link underneath it).
+pub fn render_toast(
+    toast: &Toast,
+    area: Rect,
+    buf: &mut Buffer,
+    palette: &ThemePalette,
+) -> Option<Rect> {
     if toast.is_expired() || area.width < MIN_TERMINAL_WIDTH {
-        return;
+        return None;
     }
 
     // Use display width (handles CJK correctly).
@@ -152,6 +161,7 @@ pub fn render_toast(toast: &Toast, area: Rect, buf: &mut Buffer, palette: &Theme
     Paragraph::new(toast.message.as_str())
         .block(block)
         .render(toast_area, buf);
+    Some(toast_area)
 }
 
 #[cfg(test)]

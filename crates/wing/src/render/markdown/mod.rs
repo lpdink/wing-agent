@@ -28,6 +28,18 @@ pub use types::MarkdownTheme;
 pub use types::SegmentKind;
 pub use types::thinking_segment_style;
 
+// Link side channel (see `links`): rendered lines + their link spans.
+pub use links::ComposedLines;
+pub use links::LinkSpan;
+pub use links::compose_lines;
+pub use links::line_link_spans;
+pub use links::links_for_lines;
+pub use links::osc8_close;
+pub use links::osc8_open;
+pub use links::sanitize_osc8_target;
+pub use links::strip_osc8;
+pub use links::symbol_width;
+
 // Re-export utilities used by other modules.
 pub use types::truncate_to_display_width;
 

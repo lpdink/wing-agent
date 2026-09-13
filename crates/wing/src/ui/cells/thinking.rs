@@ -12,7 +12,10 @@
 
 use crate::config::ThemePalette;
 use crate::config::rendering::ThinkingMode;
+use crate::render::markdown::ComposedLines;
 use crate::render::markdown::RenderOpts;
+use crate::render::markdown::compose_lines;
+use crate::render::markdown::links::CELL_PREFIX_WIDTH;
 use crate::render::markdown::render_markdown_lines_with;
 use crate::render::markdown::types::thinking_segment_style;
 use ratatui::style::Style;
@@ -51,16 +54,26 @@ impl ThinkingBlock {
         mode: ThinkingMode,
         width: u16,
     ) -> Vec<Line<'static>> {
+        self.render_lines(palette, mode, width).into_lines()
+    }
+
+    /// [`to_lines`](Self::to_lines) with the markdown link spans of every
+    /// rendered line (visible mode only — the hidden indicator has no links).
+    pub fn render_lines(
+        &self,
+        palette: &ThemePalette,
+        mode: ThinkingMode,
+        width: u16,
+    ) -> ComposedLines {
         let dim = Style::default().fg(palette.dim);
         match mode {
             ThinkingMode::Visible => self.render_visible(palette, width),
-            ThinkingMode::Hidden => self.render_hidden(dim),
+            ThinkingMode::Hidden => ComposedLines::plain(self.render_hidden(dim)),
         }
     }
 
-    fn render_visible(&self, palette: &ThemePalette, width: u16) -> Vec<Line<'static>> {
+    fn render_visible(&self, palette: &ThemePalette, width: u16) -> ComposedLines {
         let thinking_style = Style::default().fg(palette.thinking);
-        let mut lines = Vec::new();
         let md_width = Some(width.saturating_sub(2));
         // Thinking renders code blocks plain — no syntect, no gutter —
         // permanently (streaming AND final). Keeps the incremental
@@ -75,19 +88,17 @@ impl ThinkingBlock {
                 trim_trailing_blank: true,
             },
         );
-        for (i, md_line) in md_lines.iter().enumerate() {
-            let prefix = if i == 0 { "⦁ " } else { "  " };
-            let mut spans = vec![Span::styled(prefix.to_string(), thinking_style)];
-            for seg in &md_line.segments {
-                spans.push(Span::styled(
-                    seg.text.clone(),
-                    thinking_segment_style(seg.kind, seg.style, thinking_style),
-                ));
-            }
-            lines.push(Line::from(spans));
-        }
-        lines.push(Line::from(""));
-        lines
+        let mut composed = compose_lines(
+            &md_lines,
+            CELL_PREFIX_WIDTH,
+            |i| {
+                let prefix = if i == 0 { "⦁ " } else { "  " };
+                Span::styled(prefix.to_string(), thinking_style)
+            },
+            |kind, style| thinking_segment_style(kind, style, thinking_style),
+        );
+        composed.push_blank();
+        composed
     }
 
     fn render_hidden(&self, dim: Style) -> Vec<Line<'static>> {
