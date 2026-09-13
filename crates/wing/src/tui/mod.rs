@@ -35,16 +35,21 @@ pub enum TermEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Mouse reporting (DECSET 1000 + 1002 + 1006)
+// Mouse reporting (DECSET 1000 + 1002 + 1006, plus 1003 when hover pays off)
 //
 // Written by hand instead of using `crossterm::event::EnableMouseCapture`:
-// the crossterm helper also enables any-motion reporting (`?1003`) and RXVT
-// coordinates (`?1015`). We only want key press/release plus button-motion
-// (drag) events in SGR encoding — no hover event flood, and the full
-// `MouseEvent` (kind / modifiers / 0-based column & row) reaches the app,
-// which is what later changes (text selection, scrollbar) build on.
-// `?1003` (hover / any-motion) is to be turned on here and nowhere else —
-// the scrollbar change is the one that needs it.
+// the crossterm helper also enables RXVT coordinates (`?1015`). We only want
+// key press/release plus button-motion (drag) events in SGR encoding, and the
+// full `MouseEvent` (kind / modifiers / 0-based column & row) reaching the
+// app, which is what the text selection and scrollbar changes build on.
+//
+// `?1003` (any-motion / hover) is what lets the scrollbar highlight while the
+// pointer rests on it. It is the *only* place this mode is turned on, and the
+// only mode gated by the environment: a multiplexer forwards every pointer
+// movement with noticeable lag, so under tmux / zellij / screen the bar falls
+// back to button motion — clicks, drags and the wheel are still reported,
+// only the hover enhancement is lost (same trade-off as Pi,
+// `tui-alt-screen.ts:350-363`).
 //
 // Alternate scroll (DECSET 1007) is deliberately NOT used: it makes the
 // terminal translate the wheel into plain Up/Down keys, which are
@@ -52,12 +57,32 @@ pub enum TermEvent {
 // panel that navigates with Up/Down.
 // ---------------------------------------------------------------------------
 
+/// Environment variables meaning "pointer events pass through a multiplexer".
+const MULTIPLEXER_ENV: [&str; 3] = ["TMUX", "ZELLIJ", "STY"];
+
+/// Whether any-motion reporting (`?1003`) is worth enabling in this
+/// environment. Pure over its inputs so both branches are unit-testable
+/// without mutating the process env.
+fn any_motion_enabled(env: impl Fn(&str) -> Option<String>, term: Option<&str>) -> bool {
+    let multiplexed = MULTIPLEXER_ENV.iter().any(|key| env(key).is_some())
+        || term.is_some_and(|t| t.starts_with("tmux") || t.starts_with("screen"));
+    !multiplexed
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EnableMouseReporting;
+struct EnableMouseReporting {
+    /// Also report every pointer movement (`?1003`) — the scrollbar's hover
+    /// state depends on it; clicks / drags / wheel do not.
+    any_motion: bool,
+}
 
 impl Command for EnableMouseReporting {
     fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        write!(f, "\x1b[?1000h\x1b[?1002h\x1b[?1006h")
+        write!(f, "\x1b[?1000h\x1b[?1002h")?;
+        if self.any_motion {
+            write!(f, "\x1b[?1003h")?;
+        }
+        write!(f, "\x1b[?1006h")
     }
 
     #[cfg(windows)]
@@ -77,13 +102,17 @@ impl Command for EnableMouseReporting {
 /// terminal never ends up in a state where motion events are still enabled
 /// while SGR encoding is already off.
 ///
+/// `?1003` is disabled unconditionally: turning off a mode that was never
+/// enabled is a no-op in every terminal, and it keeps the teardown a single
+/// constant — the panic hook must not have to re-check the environment.
+///
 /// `pub` so the panic hook (`cmd`) can share the one teardown sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisableMouseReporting;
 
 impl Command for DisableMouseReporting {
     fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        write!(f, "\x1b[?1006l\x1b[?1002l\x1b[?1000l")
+        write!(f, "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l")
     }
 
     #[cfg(windows)]
@@ -107,10 +136,26 @@ impl Command for DisableMouseReporting {
 /// `test_enter_sequence_is_exact`, so reordering the arguments here is a
 /// test failure, not a silent behavior change.
 pub fn enter_sequence(w: &mut impl io::Write) -> io::Result<()> {
+    enter_sequence_for(
+        w,
+        |key| std::env::var(key).ok(),
+        std::env::var("TERM").ok().as_deref(),
+    )
+}
+
+/// [`enter_sequence`] with an injectable environment, so the multiplexer
+/// downgrade is covered by tests that do not depend on how the suite is run.
+fn enter_sequence_for(
+    w: &mut impl io::Write,
+    env: impl Fn(&str) -> Option<String>,
+    term: Option<&str>,
+) -> io::Result<()> {
     crossterm::execute!(
         w,
         EnterAlternateScreen,
-        EnableMouseReporting,
+        EnableMouseReporting {
+            any_motion: any_motion_enabled(env, term),
+        },
         EnableBracketedPaste,
         EnableFocusChange,
         crossterm::cursor::Hide
@@ -228,10 +273,25 @@ mod tests {
 
     /// The exact bytes of each path, spelled out once so that reordering or
     /// extending a sequence is a test failure rather than a silent change.
+    ///
+    /// `ENTER_BYTES` is the non-multiplexed variant (any-motion on);
+    /// `ENTER_BYTES_BUTTON_MOTION_ONLY` is what tmux / zellij / screen get.
     const ENTER_BYTES: &str =
+        "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?25l";
+    const ENTER_BYTES_BUTTON_MOTION_ONLY: &str =
         "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?25l";
     const LEAVE_BYTES: &str =
-        "\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?1049l\x1b[?2004l\x1b[?1004l\x1b[?25h";
+        "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l\x1b[?2004l\x1b[?1004l\x1b[?25h";
+
+    /// No multiplexer, a plain terminal: the hover-capable variant.
+    fn plain_env(_: &str) -> Option<String> {
+        None
+    }
+
+    /// tmux-like environment: every pointer move would be forwarded.
+    fn tmux_env(key: &str) -> Option<String> {
+        (key == "TMUX").then(|| "/tmp/tmux-501/default,1234,0".to_string())
+    }
 
     fn ansi_of(cmd: impl Command) -> String {
         let mut out = String::new();
@@ -261,11 +321,70 @@ mod tests {
 
     #[test]
     fn test_enter_sequence_is_exact() {
-        // `init_terminal` consumes this function, so the assertion covers the
-        // real setup path: alt screen → mouse → paste → focus → hide cursor.
+        // `init_terminal` consumes `enter_sequence`, which only supplies the
+        // real environment to this function; the env is injected here so the
+        // assertion does not depend on whether the suite runs inside tmux.
         let mut out = Vec::new();
-        enter_sequence(&mut out).expect("write enter sequence");
+        enter_sequence_for(&mut out, plain_env, Some("xterm-256color"))
+            .expect("write enter sequence");
         assert_eq!(String::from_utf8(out).unwrap(), ENTER_BYTES);
+    }
+
+    #[test]
+    fn test_enter_sequence_drops_any_motion_under_a_multiplexer() {
+        // tmux / zellij / screen forward every pointer movement, which is
+        // exactly the event flood `?1003` would create → button motion only.
+        // Hover degrades; clicks, drags and the wheel still work.
+        let cases: [(fn(&str) -> Option<String>, &str); 3] = [
+            (tmux_env, "xterm-256color"),
+            (plain_env, "tmux-256color"),
+            (plain_env, "screen.xterm"),
+        ];
+        for (env, term) in cases {
+            let mut out = Vec::new();
+            enter_sequence_for(&mut out, env, Some(term)).expect("write enter sequence");
+            let seq = String::from_utf8(out).unwrap();
+            assert_eq!(seq, ENTER_BYTES_BUTTON_MOTION_ONLY);
+            assert_eq!(
+                seq.find("?1003h"),
+                None,
+                "no any-motion mode under a multiplexer"
+            );
+        }
+
+        // The two environments really do produce different setup bytes.
+        assert_ne!(ENTER_BYTES, ENTER_BYTES_BUTTON_MOTION_ONLY);
+        assert_eq!(
+            ENTER_BYTES.replace("\x1b[?1003h", ""),
+            ENTER_BYTES_BUTTON_MOTION_ONLY,
+            "the only difference is ?1003"
+        );
+        assert_eq!(
+            ansi_of(EnableMouseReporting { any_motion: true }),
+            "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"
+        );
+        assert_eq!(
+            ansi_of(EnableMouseReporting { any_motion: false }),
+            "\x1b[?1000h\x1b[?1002h\x1b[?1006h"
+        );
+    }
+
+    #[test]
+    fn test_any_motion_policy() {
+        assert!(any_motion_enabled(plain_env, Some("xterm-256color")));
+        assert!(any_motion_enabled(plain_env, None));
+        for key in MULTIPLEXER_ENV {
+            let env = move |asked: &str| (asked == key).then(String::new);
+            assert!(
+                !any_motion_enabled(env, Some("xterm-256color")),
+                "{key} present → downgrade (even when empty)"
+            );
+        }
+        assert!(!any_motion_enabled(plain_env, Some("tmux-256color")));
+        assert!(!any_motion_enabled(plain_env, Some("screen")));
+        // Only the prefixes count: a TERM that merely mentions them does not.
+        assert!(any_motion_enabled(plain_env, Some("xterm-screen-256color")));
+        assert!(any_motion_enabled(plain_env, Some("zellij")));
     }
 
     #[test]
@@ -288,19 +407,44 @@ mod tests {
 
     #[test]
     fn test_sequences_leave_out_forbidden_modes() {
-        // ?1003 (any-motion) floods the event loop with hover events,
         // ?1015 is RXVT coordinates (we want SGR / 1006 only) and ?1007
-        // (alternate scroll) turns the wheel into arrow keys.
-        for seq in [ENTER_BYTES, LEAVE_BYTES] {
-            for forbidden in ["?1003", "?1015", "?1007"] {
+        // (alternate scroll) turns the wheel into arrow keys. ?1003 is
+        // allowed in the any-motion variant only — the multiplexer variant
+        // and the teardown must never enable it.
+        for seq in [ENTER_BYTES, ENTER_BYTES_BUTTON_MOTION_ONLY, LEAVE_BYTES] {
+            for forbidden in ["?1015", "?1007"] {
                 assert!(
                     !seq.contains(forbidden),
                     "{seq:?} must not touch {forbidden}"
                 );
             }
         }
+        assert!(!ENTER_BYTES_BUTTON_MOTION_ONLY.contains("?1003"));
+        for seq in [ENTER_BYTES_BUTTON_MOTION_ONLY, LEAVE_BYTES] {
+            assert!(
+                !seq.contains("?1003h"),
+                "{seq:?} must never enable any-motion outside the plain path"
+            );
+        }
+        assert!(
+            ENTER_BYTES.contains("?1003h"),
+            "the plain path is the one that turns hover on"
+        );
         assert_eq!(
             parse_modes(ENTER_BYTES),
+            vec![
+                (1049, true),
+                (1000, true),
+                (1002, true),
+                (1003, true),
+                (1006, true),
+                (2004, true),
+                (1004, true),
+                (25, false),
+            ]
+        );
+        assert_eq!(
+            parse_modes(ENTER_BYTES_BUTTON_MOTION_ONLY),
             vec![
                 (1049, true),
                 (1000, true),
@@ -315,6 +459,7 @@ mod tests {
             parse_modes(LEAVE_BYTES),
             vec![
                 (1006, false),
+                (1003, false),
                 (1002, false),
                 (1000, false),
                 (1049, false),
@@ -328,25 +473,40 @@ mod tests {
     #[test]
     fn test_mouse_reporting_sequences_are_exact() {
         assert_eq!(
-            ansi_of(EnableMouseReporting),
+            ansi_of(EnableMouseReporting { any_motion: true }),
+            "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"
+        );
+        assert_eq!(
+            ansi_of(EnableMouseReporting { any_motion: false }),
             "\x1b[?1000h\x1b[?1002h\x1b[?1006h"
         );
         assert_eq!(
             ansi_of(DisableMouseReporting),
-            "\x1b[?1006l\x1b[?1002l\x1b[?1000l"
+            "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l"
         );
     }
 
     #[test]
     fn test_disable_order_reverses_enable_order() {
         // High-bit-first teardown: the terminal must never sit in a state
-        // where motion tracking is still on while SGR encoding is off.
-        let mut expected: Vec<(u32, bool)> = parse_modes(&ansi_of(EnableMouseReporting))
-            .into_iter()
-            .map(|(mode, _)| (mode, false))
-            .collect();
+        // where motion tracking is still on while SGR encoding is off. The
+        // teardown is shared by both enable variants, so it disables the
+        // union (turning off a mode that was never on is a no-op).
+        let mut expected: Vec<(u32, bool)> =
+            parse_modes(&ansi_of(EnableMouseReporting { any_motion: true }))
+                .into_iter()
+                .map(|(mode, _)| (mode, false))
+                .collect();
         expected.reverse();
         assert_eq!(parse_modes(&ansi_of(DisableMouseReporting)), expected);
+
+        let downgraded = parse_modes(&ansi_of(EnableMouseReporting { any_motion: false }));
+        assert_eq!(
+            parse_modes(&ansi_of(DisableMouseReporting)),
+            expected,
+            "the multiplexer path reuses the same teardown bytes"
+        );
+        assert_eq!(downgraded.len() + 1, expected.len());
     }
 
     #[test]
