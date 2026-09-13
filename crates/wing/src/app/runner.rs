@@ -34,9 +34,12 @@ pub async fn execute_intent(
 ) {
     match intent {
         AppIntent::CopyToClipboard(text) => {
-            let writer = terminal.backend_mut();
-            match crate::util::clipboard::copy_to_clipboard(writer, &text) {
-                Ok(()) => {
+            // Platform helper first (real system clipboard), OSC52 as the
+            // fallback — see `util::clipboard`. The helper probe runs on the
+            // blocking pool, so a slow / missing binary never stalls a frame.
+            match crate::util::clipboard::copy_best_effort(terminal.backend_mut(), &text).await {
+                Ok(path) => {
+                    tracing::debug!(?path, "clipboard copy");
                     app.show_toast(Toast::info("Copied!", std::time::Duration::from_secs(2)));
                 }
                 Err(e) => {
