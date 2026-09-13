@@ -98,8 +98,8 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 | 操作 | 端点 | 要点 |
 |------|------|------|
 | create | `POST /api/session/create` | 选 `backend: file\|memory` |
-| resume | `POST /api/session/resume` | 还原 template_name + workspace |
-| fork | `POST /api/session/fork` | 写完整 metadata（workspace/forked_from/template），继承源 backend；uuid 重映射在深拷贝上进行 |
+| resume | `POST /api/session/resume` | 还原 template_name + workspace + 模型绑定（metadata 的 model_name/provider_name 优先于模板默认，见 glossary） |
+| fork | `POST /api/session/fork` | 写完整 metadata（workspace/forked_from/template + 源生效模型快照），继承源 backend；uuid 重映射在深拷贝上进行 |
 | rewind | `POST /api/session/rewind` | 丢弃指定消息之后的内容 |
 | compact | `POST /api/session/compact` | 委托 `ContextManager.do_manual_compact()` |
 | interrupt | `POST /api/session/interrupt` | 委托 `Session.agent.interrupt()`；打断对账见下 |

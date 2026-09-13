@@ -34,10 +34,31 @@ class TestMetadata:
             last_interaction="2026-07-25T22:00:00",
             forked_from="20260101-000000-aaaaaaaa",
             template_name="coder",
+            model_name="qwen3-max",
+            provider_name="dashscope",
         )
         store.save_metadata("sid-1", meta)
         loaded = store.load_metadata("sid-1")
         assert loaded == meta
+
+    def test_model_binding_roundtrip(self, store: SessionStore):
+        """模型绑定成对 round-trip：provider 与 model 一并读回。"""
+        store.save_metadata(
+            "sid-model",
+            SessionMetadata(model_name="qwen3-max", provider_name="dashscope"),
+        )
+        loaded = store.load_metadata("sid-model")
+        assert loaded is not None
+        assert loaded.model_name == "qwen3-max"
+        assert loaded.provider_name == "dashscope"
+
+    def test_half_written_model_binding_kept_as_is(self, store: SessionStore):
+        """半写记录原样存取（「单字段视为无记录」是读取侧语义，非存储侧）。"""
+        store.save_metadata("sid-half", SessionMetadata(model_name="qwen3-max"))
+        loaded = store.load_metadata("sid-half")
+        assert loaded is not None
+        assert loaded.model_name == "qwen3-max"
+        assert loaded.provider_name is None
 
     def test_load_missing_returns_none(self, store: SessionStore):
         assert store.load_metadata("no-such") is None
@@ -53,6 +74,8 @@ class TestMetadata:
         assert loaded.workspace == "/tmp/ws"
         assert loaded.session_name is None
         assert loaded.forked_from is None
+        assert loaded.model_name is None
+        assert loaded.provider_name is None
 
 
 class TestFileCompat:

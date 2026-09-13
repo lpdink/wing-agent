@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from wing.agent_template import AgentTemplate
     from wing.event.base import AgentInfo, SessionStatus
     from wing.gateway.protocol import AgentOverride
+    from wing.provider import ModelProvider
 
 
 def serialize_message(msg: Message) -> dict:
@@ -94,6 +95,11 @@ class Session:
         # 都在此处统一设置，确保 resume 后 agent cwd 正确。
         if self._metadata.workspace:
             self._agent.set_cwd(Path(self._metadata.workspace).resolve())
+
+        # 模型绑定还原：与 workspace 同理，构造时统一应用持久状态。
+        # 记录存在时优先于模板默认模型（重启后 resume 的核心），覆盖
+        # resume 与「带 session_id 的 create 恢复」两条路径。
+        self._restore_persisted_model()
 
         self._initial_status = self._agent.get_status()
 
@@ -205,7 +211,9 @@ class Session:
 
         self._template_name = template.name
         self._metadata.template_name = template.name
-        self._save_metadata()
+        # 模板切换覆写模型记录（新模板的生效模型）——与 template_name
+        # 同一次落盘（_persist_model 保存整个 metadata）。
+        self._persist_model()
         self._initial_status = self._agent.get_status()
         log.info(f"Session {self._session_id}: switched to agent '{template.name}'")
 
@@ -224,12 +232,9 @@ class Session:
         agent = self._agent
 
         # 1. model 覆盖（若指定 provider 则切换 provider，否则用当前）
+        #    走 _apply_model：与运行时切换同一条路径，一并落盘模型记录。
         if override.model is not None:
-            if override.provider is not None:
-                provider = agent.get_or_create_provider(override.provider)
-            else:
-                provider = agent.model_provider
-            agent.set_model(override.model, provider)
+            self._apply_model(override.model, override.provider)
 
         # 2. system_prompt 替换（先替换，后追加，保证顺序正确）
         if override.system_prompt is not None:
@@ -433,12 +438,80 @@ class Session:
 
         Session 不持有 provider：provider client 表归 WingAgent（按 name 有界
         持有、切回同名复用、跨 provider 切模型不关闭旧 client）。
+
+        切换成功后把生效的 (provider, model) 记入 metadata 并落盘——这是
+        显式模型动作的落盘点，也是模型选择跨进程重启的唯一恢复来源。
         """
+        self.agent.set_model(model, self._resolve_provider(provider_name))
+        self._persist_model()
+
+    def _resolve_provider(self, provider_name: str | None) -> "ModelProvider":
+        """按 name 解析 provider：None 或与当前同名时沿用当前活跃实例。"""
         if provider_name is None or provider_name == self.agent.model_provider.name:
-            provider = self.agent.model_provider
-        else:
-            provider = self.agent.get_or_create_provider(provider_name)
+            return self.agent.model_provider
+        return self.agent.get_or_create_provider(provider_name)
+
+    def _persist_model(self) -> None:
+        """把 agent 当前生效的 (provider, model) 成对记入 metadata 并落盘。
+
+        成对语义：不落盘半写记录（读取侧把单字段视为无记录）。
+        保存的是整个 metadata，因此调用方（如 switch_template）设置的
+        其他字段（template_name 等）随同一次写入落盘。
+
+        落盘是 best-effort：写失败（disk full / 只读挂载 / 权限）只打 warning，
+        不让 OSError 穿出去——切换已经生效，把请求变成 500 只会制造一次新的
+        前后端错位（agent 在新模型上跑、前端以为失败）。最坏退化成本次进程内
+        正确、重启后回模板默认。
+        """
+        self._metadata.model_name = self.agent.model
+        self._metadata.provider_name = self.agent.model_provider.name
+        try:
+            self._save_metadata()
+        except OSError as e:
+            log.warning(
+                f"Session {self._session_id}: model record not persisted ({e}); "
+                "switch stays in effect for this process"
+            )
+
+    def _restore_persisted_model(self) -> None:
+        """从 metadata 还原模型绑定（重启后 resume 的核心动作）。
+
+        - 记录存在（两字段齐全）时优先于模板默认模型，直接 set 到 agent；
+          还原动作本身不落盘——记录已在磁盘上，不产生写噪声。
+        - provider 已不可解析（config 变更/构建失败）时降级：打 warning、
+          保持模板默认模型、记录原样保留（config 修复后下次 resume 仍可还原）。
+        - 记录不完整（单字段）视为无记录。
+        - model 不在 provider 的静态模型列表内时只打 warning，仍然还原
+          （记录是用户选择，不因配置列表变动而作废）。
+        """
+        model = self._metadata.model_name
+        provider_name = self._metadata.provider_name
+        if model is None or provider_name is None:
+            return
+        try:
+            provider_cfg = get_config().get_provider(provider_name)
+            provider = self._resolve_provider(provider_name)
+        except Exception as e:
+            log.warning(
+                f"Session {self._session_id}: cannot restore model '{model}' "
+                f"on provider '{provider_name}' ({e}); "
+                "falling back to template default (record kept)"
+            )
+            return
+        # 静态模型列表非空时能对记录做一致性提示（不阻断）：记录到已下架
+        # 模型时，用户看到的失败来自上游 model not found，看不出与 session
+        # 记录有关——这条 warning 是唯一线索。列表为空 = 远端 /models 动态
+        # 来源，跳过（避免在构造期发网络请求）。
+        if provider_cfg.models and model not in provider_cfg.models:
+            log.warning(
+                f"Session {self._session_id}: recorded model '{model}' is not "
+                f"in provider '{provider_name}' static model list; restoring anyway"
+            )
         self.agent.set_model(model, provider)
+        log.info(
+            f"Session {self._session_id}: restored model "
+            f"'{model}' (provider '{provider_name}')"
+        )
 
     def touch_last_interaction(self) -> None:
         """更新最后互动时间并持久化。"""

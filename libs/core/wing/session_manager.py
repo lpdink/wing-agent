@@ -208,19 +208,16 @@ class SessionManager:
                 return session_id, store
         return None
 
-    def resume_session(
-        self,
-        session_id: str,
-        template: "AgentTemplate | None" = None,
-    ) -> Session:
+    def resume_session(self, session_id: str) -> Session:
         """恢复已有 session（精确匹配 session id）。已在内存中则直接返回。
 
-        模板解析优先级：显式传入 > metadata.template_name > 默认模板。
+        模板只从 metadata.template_name 解析——resume 不接受显式模板：
+        **metadata 是模板的唯一来源**，要换模板请在恢复后走
+        `session/update`（agent 字段）。template_name 缺失或已不存在于
+        config 时回退默认模板。
 
         Args:
             session_id: 目标 session ID（须为完整 ID）
-            template: 可选模板。传入时使用该模板恢复；
-                      不传时优先使用 metadata 中持久化的模板。
 
         Returns:
             恢复后的 Session 实例
@@ -239,9 +236,9 @@ class SessionManager:
 
         metadata = store.load_metadata(resolved)
 
-        # 模板解析：显式传入 > metadata.template_name > 默认
-        tpl = template
-        if tpl is None and metadata is not None and metadata.template_name is not None:
+        # 模板解析：metadata.template_name > 默认（metadata 是唯一来源）
+        tpl = None
+        if metadata is not None and metadata.template_name is not None:
             tpl = self._template_manager.get(metadata.template_name)
         if tpl is None:
             tpl = self._template_manager.default
@@ -273,7 +270,8 @@ class SessionManager:
 
         新 session 继承源 session 的后端。消息与元数据均经由源 session
         所属 store 写入：元数据（workspace/forked_from/template_name/
-        last_interaction）一次写全——fork 的正确性由 store 单一所有者保证。
+        model_name+provider_name 快照/last_interaction）一次写全——fork 的
+        正确性由 store 单一所有者保证。
         """
         source = self._sessions.get(session_id)
         if source is None:
@@ -300,12 +298,17 @@ class SessionManager:
             new_messages.extend_detached(remapped)
 
         # 一次写全元数据——fork bug 的结构性修复
+        # 模型记录是**快照**：子 session 的 agent 由源 agent 反向抽取模板构造
+        # （生效模型=源此刻模型），metadata 记录同一对值，重启后 resume 才
+        # 不会偏离 fork 时用户看到的模型。
         store.save_metadata(
             new_session_id,
             SessionMetadata(
                 workspace=source.session_workspace,
                 forked_from=session_id,
                 template_name=source.template_name,
+                model_name=source.agent.model,
+                provider_name=source.agent.model_provider.name,
                 last_interaction=datetime.now().isoformat(),
             ),
         )
