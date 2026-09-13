@@ -18,6 +18,15 @@ use crate::util::title;
 
 use super::App;
 
+/// Upper bound for one clipboard copy as seen from the run loop.
+///
+/// The helper probe already runs on the blocking pool, but the intent itself
+/// is awaited serially by the event loop — a wedged helper (a hung
+/// `pbcopy`-alike) would otherwise freeze input and rendering indefinitely.
+/// Timing out degrades to the OSC52-less failure path: a `Copy failed` toast
+/// with the reason.
+const CLIPBOARD_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Execute a single intent, performing any necessary I/O.
 ///
 /// `transport` is `None` when the gateway connection is lost; intents that
@@ -34,9 +43,28 @@ pub async fn execute_intent(
 ) {
     match intent {
         AppIntent::CopyToClipboard(text) => {
-            let writer = terminal.backend_mut();
-            match crate::util::clipboard::copy_to_clipboard(writer, &text) {
-                Ok(()) => {
+            // Platform helper first (real system clipboard), OSC52 as the
+            // fallback — see `util::clipboard`. The helper probe runs on the
+            // blocking pool, but this intent is still awaited serially by the
+            // run loop, so bound it: the loop resumes after at most
+            // `CLIPBOARD_TIMEOUT` even when a helper wedges (the copy then
+            // reports a failure instead of freezing the UI).
+            let copy = tokio::time::timeout(
+                CLIPBOARD_TIMEOUT,
+                crate::util::clipboard::copy_best_effort(terminal.backend_mut(), &text),
+            )
+            .await;
+            let outcome = match copy {
+                Ok(Ok(path)) => Ok(path),
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(anyhow::anyhow!(
+                    "clipboard helper timed out after {} ms",
+                    CLIPBOARD_TIMEOUT.as_millis()
+                )),
+            };
+            match outcome {
+                Ok(path) => {
+                    tracing::debug!(?path, "clipboard copy");
                     app.show_toast(Toast::info("Copied!", std::time::Duration::from_secs(2)));
                 }
                 Err(e) => {
