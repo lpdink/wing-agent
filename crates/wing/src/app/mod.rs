@@ -606,9 +606,9 @@ impl App {
     /// region the press landed in (see [`App::mouse_press`]): the chat band
     /// keeps its drag-to-copy contract, the composer adds click-to-place-
     /// cursor. A press outside both regions (status bar, popups) is ignored,
-    /// exactly like `Moved` (hover, owned by the scrollbar) and horizontal
-    /// wheel. Horizontal wheel (`ScrollLeft` / `ScrollRight`) is not a chat
-    /// gesture at all and stays ignored.
+    /// exactly like `Moved` — hover belongs to the scrollbar alone — and
+    /// horizontal wheel (`ScrollLeft` / `ScrollRight`), which is not a chat
+    /// gesture at all.
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> MouseOutcome {
         use crossterm::event::MouseButton;
         use crossterm::event::MouseEventKind;
