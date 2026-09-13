@@ -43,6 +43,20 @@ pub struct Grapheme {
     pub symbol: String,
 }
 
+/// One rendered chat row in a copy snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RenderedRow {
+    /// Graphemes as they were drawn, in content columns.
+    pub graphemes: Vec<Grapheme>,
+    /// Columns at the row's left edge that are the *cell's* padding (the
+    /// background inset a user message draws before its text), not content.
+    ///
+    /// Extraction skips them, so dragging from the chat band's left edge does
+    /// not paste two phantom spaces per line — while indentation that is part
+    /// of the text stays.
+    pub inset: u16,
+}
+
 /// Drag selection over the chat content.
 #[derive(Debug, Default, Clone)]
 pub struct Selection {
@@ -50,12 +64,15 @@ pub struct Selection {
     focus: Option<ContentPoint>,
     /// A left button is down and this selection owns the drag.
     press_active: bool,
+    /// The pointer moved since the press (a `Drag` event arrived).
+    ///
+    /// Distinguishes "dragged back onto the anchor" from a plain click: both
+    /// look like `anchor == focus` in coordinates, but only the click must stay
+    /// zero-width (the release path also snaps the focus onto the character
+    /// under the pointer when the user really dragged).
     dragged: bool,
     /// Edge auto-scroll direction: -1 up, 0 stopped, 1 down.
     auto_scroll: i8,
-    /// Latest pointer position (screen coordinates) — the app's auto-scroll
-    /// step uses it to tell an edge drag from an in-band drag.
-    pointer: Option<(u16, u16)>,
 }
 
 impl Selection {
@@ -67,7 +84,6 @@ impl Selection {
         self.press_active = true;
         self.dragged = false;
         self.auto_scroll = 0;
-        self.pointer = None;
     }
 
     /// Extend the selection to `at`. Ignored unless a press is active.
@@ -107,7 +123,6 @@ impl Selection {
         self.press_active = false;
         self.dragged = false;
         self.auto_scroll = 0;
-        self.pointer = None;
     }
 
     /// Whether a drag is in flight (highlight / freeze-follow / snapshotting
@@ -116,9 +131,14 @@ impl Selection {
         self.press_active
     }
 
-    /// Whether the pointer actually moved since the press.
-    pub fn has_dragged(&self) -> bool {
+    /// Whether the pointer moved since the press.
+    pub fn is_dragged(&self) -> bool {
         self.dragged
+    }
+
+    /// The press position (the fixed end of the selection), if any.
+    pub fn anchor(&self) -> Option<ContentPoint> {
+        self.anchor
     }
 
     /// Ordered selection bounds, or `None` when the selection is empty.
@@ -145,27 +165,20 @@ impl Selection {
     }
 
     /// Arm / re-arm the edge auto-scroll for `dir` (-1 up, 1 down); `0`
-    /// stops it. `pointer` is the screen position the focus is re-derived
-    /// from on every scroll step.
-    pub fn set_auto_scroll(&mut self, dir: i8, pointer: (u16, u16)) {
+    /// stops it. The step itself lives in the app layer (it needs the frame
+    /// geometry and the viewport height).
+    pub fn set_auto_scroll(&mut self, dir: i8) {
         self.auto_scroll = dir;
-        self.pointer = Some(pointer);
     }
 
     /// Stop the edge auto-scroll (keeps the selection itself).
     pub fn stop_auto_scroll(&mut self) {
         self.auto_scroll = 0;
-        self.pointer = None;
     }
 
     /// Current auto-scroll direction (-1 / 0 / 1).
     pub fn auto_scroll(&self) -> i8 {
         self.auto_scroll
-    }
-
-    /// Latest pointer position (screen coordinates), if any.
-    pub fn pointer(&self) -> Option<(u16, u16)> {
-        self.pointer
     }
 
     /// Current focus (the moving end of the selection), if any.
@@ -209,13 +222,18 @@ pub fn row_span(
 /// snapshot (the selection may reach past the captured band, or the view may
 /// have scrolled since) are skipped — the copy stays "what you saw".
 ///
+/// Each row starts at its own `inset` ([`RenderedRow::inset`]): the columns a
+/// cell fills with background padding are not text, so dragging from the chat
+/// band's left edge does not paste the inset — while indentation that is part
+/// of the content is kept.
+///
 /// A grapheme is taken as a whole when it *intersects* the column span, so a
 /// partially selected wide character is not split in two. Each row is
 /// trimmed at the end, rows are joined with `\n`, and leading / trailing
 /// blank lines are dropped. An all-blank selection yields `None` (nothing to
 /// copy, no feedback).
 pub fn extract_text(
-    rows: &[Vec<Grapheme>],
+    rows: &[RenderedRow],
     scroll_offset: usize,
     bounds: (ContentPoint, ContentPoint),
 ) -> Option<String> {
@@ -230,10 +248,14 @@ pub fn extract_text(
     let mut lines: Vec<String> = Vec::new();
     for vrow in first..=last {
         let row = &rows[vrow - scroll_offset];
-        let from = if vrow == start.vrow { start.col } else { 0 };
+        let from = if vrow == start.vrow {
+            start.col.max(row.inset)
+        } else {
+            row.inset
+        };
         let to = if vrow == end.vrow { end.col } else { u16::MAX };
         let mut line = String::new();
-        for grapheme in row {
+        for grapheme in &row.graphemes {
             let grapheme_end = grapheme.col.saturating_add(grapheme.width);
             if grapheme_end > from && grapheme.col < to {
                 line.push_str(&grapheme.symbol);
@@ -277,6 +299,19 @@ mod tests {
         }
     }
 
+    /// A snapshot row with no cell padding.
+    fn row(graphemes: Vec<Grapheme>) -> RenderedRow {
+        RenderedRow {
+            graphemes,
+            inset: 0,
+        }
+    }
+
+    /// A snapshot row of a cell that insets its text (user messages).
+    fn padded_row(graphemes: Vec<Grapheme>, inset: u16) -> RenderedRow {
+        RenderedRow { graphemes, inset }
+    }
+
     // ── 状态机 ──────────────────────────────────────────────
 
     #[test]
@@ -284,7 +319,6 @@ mod tests {
         let mut sel = Selection::default();
         sel.begin(p(3, 4));
         assert!(sel.is_press_active());
-        assert!(!sel.has_dragged());
         assert!(sel.bounds().is_none(), "a press alone selects nothing");
     }
 
@@ -300,7 +334,6 @@ mod tests {
         sel.begin(p(3, 9));
         sel.drag_to(p(3, 4));
         assert_eq!(sel.bounds(), Some((p(3, 4), p(3, 9))));
-        assert!(sel.has_dragged());
     }
 
     #[test]
@@ -357,12 +390,11 @@ mod tests {
         let mut sel = Selection::default();
         sel.begin(p(1, 2));
         sel.drag_to(p(1, 6));
-        sel.set_auto_scroll(1, (5, 20));
+        sel.set_auto_scroll(1);
         sel.cancel();
         assert!(!sel.is_press_active());
         assert!(sel.bounds().is_none());
         assert_eq!(sel.auto_scroll(), 0);
-        assert_eq!(sel.pointer(), None);
     }
 
     #[test]
@@ -370,7 +402,7 @@ mod tests {
         let mut sel = Selection::default();
         sel.begin(p(1, 2));
         sel.drag_to(p(1, 6));
-        sel.set_auto_scroll(-1, (5, 3));
+        sel.set_auto_scroll(-1);
         sel.release(p(1, 6));
         assert_eq!(sel.auto_scroll(), 0);
     }
@@ -379,15 +411,14 @@ mod tests {
     fn test_auto_scroll_round_trip() {
         let mut sel = Selection::default();
         sel.begin(p(1, 2));
-        sel.set_auto_scroll(1, (7, 40));
+        sel.set_auto_scroll(1);
         assert_eq!(sel.auto_scroll(), 1);
-        assert_eq!(sel.pointer(), Some((7, 40)));
-        sel.set_auto_scroll(0, (7, 20));
+        sel.set_auto_scroll(0);
         assert_eq!(sel.auto_scroll(), 0);
-        sel.set_auto_scroll(-1, (7, 1));
+        sel.set_auto_scroll(-1);
+        assert_eq!(sel.auto_scroll(), -1);
         sel.stop_auto_scroll();
         assert_eq!(sel.auto_scroll(), 0);
-        assert_eq!(sel.pointer(), None);
     }
 
     // ── 行内列区间 ──────────────────────────────────────────
@@ -433,12 +464,12 @@ mod tests {
 
     #[test]
     fn test_extract_single_row() {
-        let rows = vec![vec![
+        let rows = vec![row(vec![
             grapheme(0, 1, "h"),
             grapheme(1, 1, "i"),
             grapheme(2, 1, " "),
             grapheme(3, 1, "x"),
-        ]];
+        ])];
         let text = extract_text(&rows, 0, (p(0, 0), p(0, 2)));
         assert_eq!(text.as_deref(), Some("hi"));
     }
@@ -446,18 +477,18 @@ mod tests {
     #[test]
     fn test_extract_wide_grapheme_does_not_add_padding() {
         // A CJK row: one 2-cell grapheme per character, no filler cells.
-        let rows = vec![vec![
+        let rows = vec![row(vec![
             grapheme(0, 2, "你"),
             grapheme(2, 2, "好"),
             grapheme(4, 2, "🌍"),
-        ]];
+        ])];
         let text = extract_text(&rows, 0, (p(0, 0), p(0, 6)));
         assert_eq!(text.as_deref(), Some("你好🌍"));
     }
 
     #[test]
     fn test_extract_partially_selected_wide_grapheme_takes_it_whole() {
-        let rows = vec![vec![grapheme(0, 2, "你"), grapheme(2, 2, "好")]];
+        let rows = vec![row(vec![grapheme(0, 2, "你"), grapheme(2, 2, "好")])];
         // Selecting only the first cell of the second grapheme still yields it.
         let text = extract_text(&rows, 0, (p(0, 2), p(0, 3)));
         assert_eq!(text.as_deref(), Some("好"));
@@ -466,12 +497,12 @@ mod tests {
     #[test]
     fn test_extract_trims_row_ends_and_joins_lines() {
         let rows = vec![
-            vec![
+            row(vec![
                 grapheme(0, 1, "a"),
                 grapheme(1, 1, " "),
                 grapheme(2, 1, " "),
-            ],
-            vec![grapheme(0, 1, "b"), grapheme(1, 1, " ")],
+            ]),
+            row(vec![grapheme(0, 1, "b"), grapheme(1, 1, " ")]),
         ];
         let text = extract_text(&rows, 10, (p(10, 0), p(12, 1)));
         // Row 12 is outside the snapshot — it is skipped, not padded.
@@ -481,9 +512,9 @@ mod tests {
     #[test]
     fn test_extract_drops_leading_and_trailing_blank_lines() {
         let rows = vec![
-            vec![grapheme(0, 1, " ")],
-            vec![grapheme(0, 1, "x")],
-            vec![grapheme(0, 1, " ")],
+            row(vec![grapheme(0, 1, " ")]),
+            row(vec![grapheme(0, 1, "x")]),
+            row(vec![grapheme(0, 1, " ")]),
         ];
         let text = extract_text(&rows, 0, (p(0, 0), p(2, 1)));
         assert_eq!(text.as_deref(), Some("x"));
@@ -491,13 +522,16 @@ mod tests {
 
     #[test]
     fn test_extract_all_blank_is_none() {
-        let rows = vec![vec![grapheme(0, 1, " ")], vec![grapheme(0, 1, " ")]];
+        let rows = vec![
+            row(vec![grapheme(0, 1, " ")]),
+            row(vec![grapheme(0, 1, " ")]),
+        ];
         assert_eq!(extract_text(&rows, 0, (p(0, 0), p(1, 1))), None);
     }
 
     #[test]
     fn test_extract_skips_rows_below_the_snapshot() {
-        let rows = vec![vec![grapheme(0, 1, "x")]];
+        let rows = vec![row(vec![grapheme(0, 1, "x")])];
         // Selection starts above the captured band: the first line is empty
         // and therefore dropped, the visible row is still copied.
         let text = extract_text(&rows, 5, (p(4, 0), p(5, 1)));
@@ -506,13 +540,16 @@ mod tests {
 
     #[test]
     fn test_extract_before_snapshot_is_none() {
-        let rows = vec![vec![grapheme(0, 1, "x")]];
+        let rows = vec![row(vec![grapheme(0, 1, "x")])];
         assert_eq!(extract_text(&rows, 9, (p(0, 0), p(1, 1))), None);
     }
 
     #[test]
     fn test_extract_ignores_rows_outside_the_snapshot() {
-        let rows = vec![vec![grapheme(0, 1, "x")], vec![grapheme(0, 1, "y")]];
+        let rows = vec![
+            row(vec![grapheme(0, 1, "x")]),
+            row(vec![grapheme(0, 1, "y")]),
+        ];
         // Snapshot covers content rows 5..=6.
         assert_eq!(
             extract_text(&rows, 5, (p(10, 0), p(12, 3))),
@@ -528,6 +565,50 @@ mod tests {
         assert_eq!(
             extract_text(&rows, 5, (p(4, 0), p(6, 1))).as_deref(),
             Some("x\ny")
+        );
+    }
+
+    #[test]
+    fn test_extract_skips_cell_padding_but_keeps_content_indent() {
+        // A user message cell fills two columns of background before its text:
+        // dragging from the chat band's left edge must not paste them.
+        let rows = vec![padded_row(
+            vec![
+                grapheme(0, 1, " "),
+                grapheme(1, 1, " "),
+                grapheme(2, 1, "h"),
+                grapheme(3, 1, "i"),
+            ],
+            2,
+        )];
+        assert_eq!(
+            extract_text(&rows, 0, (p(0, 0), p(0, 4))).as_deref(),
+            Some("hi")
+        );
+        // Selecting *only* the padding is not a copyable selection.
+        assert_eq!(extract_text(&rows, 0, (p(0, 0), p(0, 2))), None);
+
+        // Indentation that is part of the content stays (inset 0 row).
+        let rows = vec![row(vec![
+            grapheme(0, 1, " "),
+            grapheme(1, 1, " "),
+            grapheme(2, 1, "x"),
+        ])];
+        assert_eq!(
+            extract_text(&rows, 0, (p(0, 0), p(0, 3))).as_deref(),
+            Some("  x")
+        );
+    }
+
+    #[test]
+    fn test_extract_inset_applies_to_every_row_of_a_multi_row_selection() {
+        let rows = vec![
+            padded_row(vec![grapheme(0, 1, " "), grapheme(1, 1, "a")], 1),
+            padded_row(vec![grapheme(0, 1, " "), grapheme(1, 1, "b")], 1),
+        ];
+        assert_eq!(
+            extract_text(&rows, 0, (p(0, 0), p(1, 2))).as_deref(),
+            Some("a\nb")
         );
     }
 

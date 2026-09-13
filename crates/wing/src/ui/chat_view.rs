@@ -17,9 +17,10 @@ use unicode_width::UnicodeWidthStr;
 
 use super::selection::ContentPoint;
 use super::selection::Grapheme;
+use super::selection::RenderedRow;
+use super::selection::Selection;
 use super::selection::extract_text;
 use super::selection::grapheme_width;
-use super::selection::row_span;
 
 use crate::config::ThemePalette;
 use crate::render::Renderable;
@@ -252,6 +253,14 @@ pub struct ChatView {
     pub(crate) scroll_offset: usize,
     /// Whether auto-scroll is active (follow bottom).
     auto_scroll: bool,
+    /// Follow is frozen for the duration of a drag selection.
+    ///
+    /// `auto_scroll = false` alone is not enough: the render re-arms
+    /// `auto_scroll` whenever the offset sits at the bottom edge, which is
+    /// exactly where a drag on the newest output starts — the very next frame
+    /// would undo the freeze. Only the scroll entries (the sole owners of the
+    /// follow contract) may lift it.
+    follow_frozen: bool,
     /// Header lines (wing logo + MOTD) — always rendered at the top,
     /// scroll with the content. Preserved across `clear()`.
     header_lines: Vec<Line<'static>>,
@@ -272,7 +281,7 @@ pub struct ChatView {
     /// the text has to be taken from a frame the user was actually looking
     /// at. Refreshed only while a drag is in flight ([`Self::capture_visible_rows`]),
     /// so an idle app pays nothing.
-    visible_rows: Vec<Vec<Grapheme>>,
+    visible_rows: Vec<RenderedRow>,
 }
 
 impl ChatView {
@@ -284,6 +293,7 @@ impl ChatView {
             pending_heights: Vec::new(),
             scroll_offset: 0,
             auto_scroll: true,
+            follow_frozen: false,
             header_lines: Vec::new(),
             last_total: 0,
             rebuilds: 0,
@@ -553,12 +563,16 @@ impl ChatView {
     /// streaming deltas); scrolling back to the bottom edge re-arms it. All
     /// scrolling entries (wheel, PageUp/PageDown, Ctrl+arrows, jumps) share
     /// this state, so the contract lives in the scroll methods below.
+    ///
+    /// A drag selection freezes the contract outright ([`Self::unfollow`]) —
+    /// see `follow_frozen`.
     pub fn is_at_bottom(&self) -> bool {
         self.auto_scroll
     }
 
     /// Scroll up by N lines — leaves the follow state (reading history).
     pub fn scroll_up(&mut self, n: usize) {
+        self.follow_frozen = false;
         self.auto_scroll = false;
         self.scroll_offset = self.scroll_offset.saturating_sub(n);
     }
@@ -572,6 +586,7 @@ impl ChatView {
     /// contract the moment the view hits the bottom, even while new content
     /// is streaming.
     pub fn scroll_down(&mut self, n: usize, viewport_h: usize) {
+        self.follow_frozen = false;
         let max_scroll = self.last_total.saturating_sub(viewport_h);
         if self.scroll_offset >= max_scroll {
             self.auto_scroll = true;
@@ -595,25 +610,35 @@ impl ChatView {
 
     /// Jump to top (leaves the follow state).
     pub fn jump_top(&mut self) {
+        self.follow_frozen = false;
         self.auto_scroll = false;
         self.scroll_offset = 0;
     }
 
     /// Jump to bottom (re-arms the follow state).
     pub fn jump_bottom(&mut self) {
+        self.follow_frozen = false;
         self.auto_scroll = true;
     }
 
-    /// Freeze the follow state without moving the viewport.
+    /// Freeze the follow contract without moving the viewport.
     ///
-    /// Used while a text selection is in progress: the render only pins the
-    /// viewport to the bottom edge when `auto_scroll` is set, so clearing it
-    /// keeps streaming content from yanking the view — and with it the
-    /// highlighted content — out from under the drag. [`Self::scroll_down`]
-    /// re-arms the follow state on release when the view is still at the
-    /// bottom edge (the `n = 0` call only judges; it never moves).
+    /// Used while a text selection is in progress: the render pins the
+    /// viewport to the bottom edge and re-arms `auto_scroll` whenever the
+    /// offset sits there, so clearing the flag alone would be undone by the
+    /// very next frame — exactly the "drag on the newest output" case. While
+    /// frozen, only a scroll entry ([`Self::scroll_up`] / [`Self::scroll_down`]
+    /// / [`Self::jump_*`]) may lift it: the release path calls
+    /// `scroll_down(0, viewport_h)`, which judges the bottom edge without
+    /// moving and re-arms follow when the view is still there.
     pub fn unfollow(&mut self) {
         self.auto_scroll = false;
+        self.follow_frozen = true;
+    }
+
+    /// Whether the follow state is frozen by an in-flight drag.
+    pub fn is_follow_frozen(&self) -> bool {
+        self.follow_frozen
     }
 
     /// Number of pending (sent, not yet accepted) messages.
@@ -648,12 +673,15 @@ impl ChatView {
     }
 
     /// Map a screen position to a content point, clamping the pointer into
-    /// the visible band.
+    /// the visible band *and* into the content.
     ///
     /// Clamping (rather than rejecting out-of-band coordinates) is what makes
     /// edge drags work: the pointer may sit on the status bar / composer, yet
     /// the selection still ends on the chat band's first / last visible row —
-    /// which is also what the edge auto-scroll then scrolls from.
+    /// which is also what the edge auto-scroll then scrolls from. The extra
+    /// clamp against the content height keeps the coordinates meaningful when
+    /// the content is shorter than the band (the blank rows below it are not
+    /// content).
     pub fn content_point_at(&self, column: u16, row: u16) -> Option<ContentPoint> {
         let area = self.geometry.area;
         if area.width == 0 || area.height == 0 {
@@ -661,14 +689,19 @@ impl ChatView {
         }
         let row = row.clamp(area.y, area.bottom() - 1);
         let column = column.clamp(area.x, area.right() - 1);
+        let vrow = self.geometry.scroll_offset + (row - area.y) as usize;
         Some(ContentPoint {
-            vrow: self.geometry.scroll_offset + (row - area.y) as usize,
+            vrow: vrow.min(self.last_total.saturating_sub(1)),
             col: column - area.x,
         })
     }
 
     /// Screen row that showed content row `vrow` in the last frame
     /// (`None` when it is scrolled out of the visible band).
+    ///
+    /// Kept for the tests and for the follow-up changes that need to ask where
+    /// a content row currently sits (panel-visible checks, scrollbar) —
+    /// production code only needs the forward direction today.
     pub fn screen_row_of(&self, vrow: usize) -> Option<u16> {
         let area = self.geometry.area;
         if area.height == 0 {
@@ -679,6 +712,34 @@ impl ChatView {
             return None;
         }
         Some(area.y + offset as u16)
+    }
+
+    /// Snap a drag focus to the right edge of the grapheme under it.
+    ///
+    /// The pointer selects the character it rests on (reference behaviour):
+    /// stopping on `d` copies through the `d` instead of cutting before it.
+    /// Uses the last snapshot, which describes exactly the frame the pointer
+    /// coordinates were mapped through; rows outside it are left untouched, and
+    /// a click never reaches here (no drag event), so "press and release
+    /// without moving = no selection" is unaffected.
+    pub fn snap_focus_right(&self, point: ContentPoint) -> ContentPoint {
+        let Some(row) = point
+            .vrow
+            .checked_sub(self.geometry.scroll_offset)
+            .and_then(|index| self.visible_rows.get(index))
+        else {
+            return point;
+        };
+        for grapheme in &row.graphemes {
+            let end = grapheme.col.saturating_add(grapheme.width);
+            if point.col >= grapheme.col && point.col < end {
+                return ContentPoint {
+                    vrow: point.vrow,
+                    col: end.max(row.inset),
+                };
+            }
+        }
+        point
     }
 
     // ── Text selection: highlight + copy source ─────────────────────────
@@ -695,9 +756,14 @@ impl ChatView {
     /// band (status bar, composer, popups) are never touched. Wide graphemes
     /// are painted as a whole (all of their cells), so a partially selected
     /// CJK / emoji character is never half-inverted.
-    pub fn paint_selection(&self, buf: &mut Buffer, bounds: (ContentPoint, ContentPoint)) {
+    pub fn paint_selection(&self, buf: &mut Buffer, selection: &Selection) {
         let area = self.geometry.area;
         if area.width == 0 || area.height == 0 {
+            return;
+        }
+        // Nothing to paint for a click / released selection (`bounds` is only
+        // `Some` for a non-empty drag).
+        if selection.bounds().is_none() {
             return;
         }
         // Iterate the *band* rows (bounded by the terminal height), not the
@@ -705,7 +771,7 @@ impl ChatView {
         // while only the visible ones can be painted anyway.
         for row in area.y..area.bottom() {
             let vrow = self.geometry.scroll_offset + (row - area.y) as usize;
-            let Some((from, to)) = row_span(bounds, vrow, area.width) else {
+            let Some((from, to)) = selection.row_span(vrow, area.width) else {
                 continue;
             };
             for grapheme in buffer_row_graphemes(buf, row, area) {
@@ -725,15 +791,73 @@ impl ChatView {
     ///
     /// Called from the draw pass while a drag is in flight (never on the
     /// release itself: the frame the user was looking at is the authority).
+    /// Each row also records the columns its cell fills with *padding*, so the
+    /// copy can skip the inset a user message draws before its text without
+    /// touching indentation that is part of the content.
     pub fn capture_visible_rows(&mut self, buf: &Buffer) {
         let area = self.geometry.area;
         if area.width == 0 || area.height == 0 {
             self.visible_rows.clear();
             return;
         }
+        let insets = self.visible_row_insets(area.height);
         self.visible_rows = (area.y..area.bottom())
-            .map(|row| buffer_row_graphemes(buf, row, area))
+            .enumerate()
+            .map(|(index, row)| RenderedRow {
+                graphemes: buffer_row_graphemes(buf, row, area),
+                inset: insets.get(index).copied().unwrap_or(0),
+            })
             .collect();
+    }
+
+    /// Left padding (in columns) of every visible band row, in row order.
+    ///
+    /// Only the user-message cells inset their text (`cell_area.x + 2`); every
+    /// other cell starts at the band's left edge. The rows are walked exactly
+    /// like the render walks them (header → cells → pending), so a row's inset
+    /// belongs to whichever entry drew it. Rows of an entry that is scrolled
+    /// out of the band contribute nothing, which the caller reads as "no
+    /// padding".
+    fn visible_row_insets(&self, visible: u16) -> Vec<u16> {
+        let top = self.geometry.scroll_offset;
+        let bottom = top + visible as usize;
+        let mut insets = Vec::with_capacity(visible as usize);
+        let mut vrow = top;
+        push_row_insets(
+            &mut insets,
+            &mut vrow,
+            self.header_lines.len(),
+            0,
+            top,
+            bottom,
+        );
+        for (index, cached) in self.cells.iter().enumerate() {
+            let height = self.cell_heights.get(index).copied().unwrap_or(0);
+            let inset = if matches!(
+                cached.cell(),
+                ChatCell::UserMessage(_)
+                    | ChatCell::PendingUserMessage(_)
+                    | ChatCell::DiscardedUserMessage(_)
+            ) {
+                USER_MESSAGE_INSET
+            } else {
+                0
+            };
+            push_row_insets(&mut insets, &mut vrow, height, inset, top, bottom);
+        }
+        for index in 0..self.pending.len() {
+            let height = self.pending_heights.get(index).copied().unwrap_or(0);
+            push_row_insets(
+                &mut insets,
+                &mut vrow,
+                height,
+                USER_MESSAGE_INSET,
+                top,
+                bottom,
+            );
+        }
+        insets.truncate(visible as usize);
+        insets
     }
 
     /// Text of the selected content range, taken from the last snapshot.
@@ -767,6 +891,7 @@ impl ChatView {
         self.pending_heights.clear();
         self.scroll_offset = 0;
         self.auto_scroll = true;
+        self.follow_frozen = false;
         self.rebuilds = self.rebuilds.wrapping_add(1);
     }
 
@@ -1124,6 +1249,29 @@ pub(crate) fn render_info_separator(
     }
 }
 
+/// Columns a user-message cell fills with background before its text starts
+/// (`cell_area.x + 2` in the render path) — the padding the copy skips.
+const USER_MESSAGE_INSET: u16 = 2;
+
+/// Append the padding inset of `height` content rows to `out`, clipped to the
+/// visible range `[top, bottom)`; `vrow` advances past them.
+fn push_row_insets(
+    out: &mut Vec<u16>,
+    vrow: &mut usize,
+    height: usize,
+    inset: u16,
+    top: usize,
+    bottom: usize,
+) {
+    let end = *vrow + height;
+    let first = (*vrow).max(top);
+    let last = end.min(bottom);
+    if last > first {
+        out.resize(out.len() + (last - first), inset);
+    }
+    *vrow = end;
+}
+
 /// Widget for rendering the chat view with scrollbar.
 pub struct ChatViewWidget<'a> {
     view: &'a mut ChatView,
@@ -1195,8 +1343,11 @@ impl Widget for ChatViewWidget<'_> {
             self.view.scroll_offset = max_scroll;
         }
 
-        // Re-enable auto_scroll if scrolled to bottom.
-        if self.view.scroll_offset >= max_scroll && total > 0 {
+        // Re-enable auto_scroll if scrolled to bottom — unless a drag has the
+        // contract frozen (`unfollow`): "at the bottom" is exactly where such
+        // a drag starts, and re-arming here would let the next streaming delta
+        // yank the view (and the highlighted rows) away.
+        if !self.view.follow_frozen && self.view.scroll_offset >= max_scroll && total > 0 {
             self.view.auto_scroll = true;
         }
 
@@ -2471,6 +2622,14 @@ mod tests {
         buf
     }
 
+    /// A selection covering `bounds` (press + drag), for the paint tests.
+    fn selection_over(bounds: (ContentPoint, ContentPoint)) -> Selection {
+        let mut selection = Selection::default();
+        selection.begin(bounds.0);
+        selection.drag_to(bounds.1);
+        selection
+    }
+
     fn reversed_columns(buf: &Buffer, row: u16) -> Vec<u16> {
         (buf.area.x..buf.area.right())
             .filter(|&x| buf[(x, row)].modifier.contains(Modifier::REVERSED))
@@ -2502,16 +2661,20 @@ mod tests {
         let band = Rect::new(2, 1, 30, 10);
         let _ = render_view_in(&mut view, Rect::new(0, 0, 40, 20), band);
 
-        // Inside the band: content row = scroll + (row - band.top).
+        // Inside the band: content row = scroll + (row - band.top), clamped
+        // into the content — this conversation is only three rows tall, so a
+        // row further down the band maps to its last row.
         let point = view.content_point_at(7, 4).expect("inside the band");
-        assert_eq!((point.vrow, point.col), (3, 5));
+        assert_eq!((point.vrow, point.col), (2, 5));
         assert!(view.contains_screen(7, 4));
 
         // Pointer outside the band clamps to the nearest edge instead of
-        // failing — edge drags (and their auto-scroll) depend on this.
+        // failing — edge drags (and their auto-scroll) depend on this. The
+        // row clamps twice: into the band, then into the content (the blank
+        // rows below a short conversation are not content).
         assert_eq!(view.content_point_at(0, 0).map(|p| p.vrow), Some(0));
         assert_eq!(view.content_point_at(0, 0).map(|p| p.col), Some(0));
-        assert_eq!(view.content_point_at(99, 99).map(|p| p.vrow), Some(9));
+        assert_eq!(view.content_point_at(99, 99).map(|p| p.vrow), Some(2));
         assert_eq!(view.content_point_at(99, 99).map(|p| p.col), Some(29));
         assert!(!view.contains_screen(1, 4), "left of the band");
         assert!(!view.contains_screen(7, 11), "below the band");
@@ -2560,7 +2723,7 @@ mod tests {
             ContentPoint { vrow: 1, col: 2 },
             ContentPoint { vrow: 1, col: 13 },
         );
-        view.paint_selection(&mut buf, bounds);
+        view.paint_selection(&mut buf, &selection_over(bounds));
 
         assert_eq!(
             reversed_columns(&buf, band.y + 1),
@@ -2595,7 +2758,7 @@ mod tests {
             ContentPoint { vrow: 1, col: 2 },
             ContentPoint { vrow: 1, col: 5 },
         );
-        view.paint_selection(&mut buf, bounds);
+        view.paint_selection(&mut buf, &selection_over(bounds));
         assert_eq!(
             reversed_columns(&buf, 1),
             (2..6).collect::<Vec<u16>>(),
@@ -2621,7 +2784,7 @@ mod tests {
             ContentPoint { vrow: 0, col: 0 },
             ContentPoint { vrow: 0, col: 40 },
         );
-        view.paint_selection(&mut buf, bounds);
+        view.paint_selection(&mut buf, &selection_over(bounds));
         for y in buf.area.y..buf.area.bottom() {
             for x in buf.area.x..buf.area.right() {
                 let inside_band =
