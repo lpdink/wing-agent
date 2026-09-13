@@ -109,6 +109,52 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 - 回收立即生效：投递列表就是路由表，注销后该 client 不再收到任何事件——失败投递与日志洪泛随之停止。
 - 边界：uvicorn 的 WS 写走用户态缓冲，`send_text` 往往立即返回；此时触发回收的是异常分支（连接已死 / ASGI 已关闭），两条分支走同一条回收路径。
 
+## 单帧上界与分片（`_chunk`）
+
+客户端单帧上限是 tungstenite 默认的 **16 MiB**（`max_frame_size`，不改），而 `sync_session` 载荷可以更大（2026-09-13 实测 22,151,988 B → 读任务 `Message too long` 死亡 → 重连重同步再死，会话在 TUI 里永久打不开）。**上界由发送方保证**：超过软上限的载荷在唯一 wire 出口（`GatewayServer._on_event` → `_send_frames`）切分，客户端在读任务内合并还原——应用层零感知（不引入半成品事件、不做增量渲染）。
+
+| 常量 | 值 | 含义 |
+|------|-----|------|
+| `SOFT_LIMIT_BYTES` | 8 MiB | 序列化载荷超过它即切分；每帧（含信封与 JSON 转义开销）≤ 它 |
+| `HARD_LIMIT_BYTES` | 16 MiB | 任何出网帧的上界，= 客户端默认 `max_frame_size`；仍超限的帧被拦截丢弃 + 一行 WARN（含 client / 类型 / 字节数 / 阈值），应用层照常 emit，不新增计数指标 |
+
+切分按 **UTF-8 字符边界**，每帧尽量撞软上限（帧数最小化）；同一事件的所有帧在**同一个发送任务内**按 `index` 升序发出（每事件一次 `asyncio.create_task`，无发送队列；每帧仍是一次 `send_text`，逐帧受 60s 写超时约束）。载荷小于软上限时原样单帧，零额外开销。
+
+### 信封
+
+```json
+{"type":"_chunk","id":"7","index":0,"count":3,"of_type":"sync_session","data":"{…"}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `type` | 恒为 `"_chunk"`；以 `_` 开头的 `type` 是**传输层保留命名**，应用事件（含未来新增）MUST NOT 使用 |
+| `id` | 同一事件的所有帧共享，事件间由网关保证唯一（进程内递增计数器） |
+| `index` | 0-based 帧序号，同一事件内连续 |
+| `count` | 该事件的总帧数（≥ 2） |
+| `of_type` | 原始事件的 `type`（诊断用，不参与路由） |
+| `data` | 原始载荷 JSON 文本的一段；所有帧按 `index` 顺序拼接后与原始载荷逐字节相等 |
+
+字段语义不依赖出现顺序；`_chunk` 不是 `WingEvent`（不进事件注册表），Rust 侧也是独立类型（`gateway::chunk::ChunkEnvelope`）。**接收方契约**：客户端读任务的正常路径不变（先按 `WingEvent` 解析；未知类型 `WingEvent::Unknown` 才尝试信封解析，热路径无额外成本）。
+
+### 客户端重组与防护
+
+重组发生在读任务内（`crates/wing/src/gateway/chunk.rs`），`recv_event()` 只产出**完整事件**：
+
+- **保序**：窗口打开期间（收到某事件首片、未闭合）所有其他帧原样缓冲、不解析、不投递；闭合时先投递完整事件、再按到达序放行缓冲帧。否则 `sync_session` 与其后的 live delta 交错会让应用的 `chat.clear()` 吞掉先到的 delta。
+- **防护**（违反任一条即断开并记录原因，由既有重连路径重新订阅重放）：
+
+| 约束 | 值 |
+|------|-----|
+| `count` 合法区间 | 2..=1024（`MAX_CHUNKS`） |
+| 首帧 `index` | 必须为 0；后续帧必须严格连续（重复 / 空洞 / 越界即失败） |
+| 窗口内换 `id` | 失败（同一时刻至多一个重组窗口；并发切分事件 → 断开重连） |
+| 缓冲上限（未闭合分片 + 窗口内缓冲帧） | 64 MiB |
+| 分片不闭合超时 | 30s（收到任一属于该事件的分片即重置——静默才是异常信号） |
+
+- 失败分类复用 `CloseReason`（新增 `ReassemblyFailed { detail }`）：TUI 的重连提示与 `wing wait` 的失败信息都能说出原因，不静默降级、不空转。
+- **边界**：远程工具帧（`tool_call_request` / `tool_call_result`，走 `RemoteToolManager` 独立的 `ws.send_text`）不在本机制覆盖范围内——tool host 不参与事件订阅，其超大载荷（如大文件 Write）是已知限制，另行立项。
+
 ## 鉴权与 RBAC（opt-in，PR #35）
 
 默认关闭，完全向后兼容。配置于后端 `gateway.auth`：
