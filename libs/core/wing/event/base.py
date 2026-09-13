@@ -170,3 +170,27 @@ class DeliveredEvent(WingEvent):
 
     type: Literal["delivered"] = "delivered"
     persist: ClassVar[bool] = False
+
+
+class NoticeEvent(WingEvent):
+    """一次性通知——提醒，不表示错误、不表示 turn 结束。
+
+    与 ErrorEvent 的语义边界：ErrorEvent 是「真错误」（前端据此终结 turn、
+    渲染错误单元、必要时终端通知）；NoticeEvent 只提醒（如"LLM 调用失败，
+    N 秒后重试"），turn 仍在进行，前端 MUST NOT 终结它。因此重试通知不再
+    复用 ErrorEvent——那会让前端把"会自愈的重试"误判为"这一轮已经结束"。
+
+    不落盘（persist=False）：一次性信号，读回来不再成立，也无 Message 孪生
+    可能承载它；广播完即弃，不进 history.jsonl、不进 resume 重放。
+
+    字段只服务展示；需要持久化的业务事实一律走别的（落盘）事件。
+    """
+
+    type: Literal["notice"] = "notice"
+    persist: ClassVar[bool] = False
+    level: Literal["info", "warning", "error"] = "info"
+    message: str = ""
+    # 廉价结构化字段（重试通知用；其它通知可留空）
+    attempt: int | None = None
+    max_attempts: int | None = None
+    retry_in_s: float | None = None

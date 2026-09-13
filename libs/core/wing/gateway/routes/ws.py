@@ -29,7 +29,6 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from wing.common.logger import log
 from wing.event import ErrorEvent, wire_dump
-from wing.event_bus import event_bus
 
 from wing.gateway.auth import ROLE_TOOL_RUNTIME, extract_key_from_ws
 from wing.gateway.protocol import ClientRequest, ConnectResponse, ToolCallResult
@@ -138,11 +137,7 @@ async def handle_ws(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
-        # 断连：清理映射和路由表
-        server.clients.pop(client_id, None)
-        server.ws_to_clients.pop(ws, None)
-        event_bus.route_detach_client(client_id)
-        if manager.is_attached(client_id):
-            # 在途调用立即失败 + 注销远程工具（敏锐检测断连）
-            manager.fail_client(client_id, "connection closed")
-        log.info(f"Client disconnected: {client_id}")
+        # 断连：清理映射、路由表与远程工具归属。与慢消费者回收（server.py
+        # 的 _send_text → _recycle_client）共用同一个幂等入口——两条路径
+        # 的清理动作不允许漂移。
+        await server.drop_client(ws, reason="connection closed")

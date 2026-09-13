@@ -37,11 +37,46 @@ def _is_safe_path_component(name: str) -> bool:
 # ============================================================
 
 
+def _cheap_context(exc: BaseException) -> str:
+    """尽力为异常补一点廉价上下文（鸭子类型，不依赖传输层）。
+
+    只认 httpx 风格的 `.request`（`method` + `url`）——空消息异常多半来自
+    传输层（如 `httpx.ReadError("")`），"哪个请求"是它唯一能说出的信息。
+
+    `.request` 可能是个**会抛异常**的 property（httpx 在未绑定请求时抛
+    RuntimeError）——取上下文属于尽力而为，绝不能因为它把格式化本身搞崩。
+    """
+    try:
+        request = getattr(exc, "request", None)
+        url = getattr(request, "url", None)
+    except Exception:
+        return ""
+    if url is None:
+        return ""
+    method = str(getattr(request, "method", "") or "")
+    return f"{method} {url}".strip()
+
+
+def _describe_exception(exc: BaseException) -> str:
+    """单个异常的一行描述：`Type: message`；消息为空时不留空尾。
+
+    空消息（`ReadError: ` 这种）信息量为零，至少给类型名，并尽量补上下文。
+    """
+    name = type(exc).__name__
+    message = str(exc).strip()
+    if message:
+        return f"{name}: {message}"
+    context = _cheap_context(exc)
+    return f"{name} ({context})" if context else name
+
+
 def format_exception_chain(exc: BaseException, max_depth: int = 5) -> str:
     """格式化完整异常链：遍历 __cause__ 和 __context__，返回可读字符串。
 
     例如：APIConnectionError: Connection error. (caused by ConnectError: Connection refused)
     深层链：A: msg (caused by B: msg (caused by C: msg))
+
+    空消息异常不会产出 `Type: ` 这样的空尾文案（见 `_describe_exception`）。
     """
     parts: list[str] = []
     seen: set[int] = set()
@@ -53,8 +88,7 @@ def format_exception_chain(exc: BaseException, max_depth: int = 5) -> str:
             break
         seen.add(exc_id)
 
-        label = f"{type(current).__name__}: {current}"
-        parts.append(label)
+        parts.append(_describe_exception(current))
 
         current = current.__cause__ or current.__context__
 

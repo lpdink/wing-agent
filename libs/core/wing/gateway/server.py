@@ -35,6 +35,14 @@ from .remote_tools import RemoteToolManager
 
 DEFAULT_PORT = 32523
 
+# 单帧写超时（秒）：向一个客户端的单次发送超过它即判为慢/死消费者并回收。
+# 硬编码——对"单帧 ≤8 MiB 的内网投递"极其宽裕（正常是毫秒级），对"永远不读"
+# 的客户端足够快。不引入发送队列/背压池：投递模型仍是每事件一次 create_task。
+WRITE_TIMEOUT_SECONDS = 60.0
+
+# 回收时关闭连接的上界（秒）：对手正是"不读的客户端"，回收路径自己不能挂住。
+CLOSE_TIMEOUT_SECONDS = 5.0
+
 
 def _check_port_available(host: str, port: int) -> bool:
     """检查端口是否可用，不可用时返回 False。
@@ -176,9 +184,68 @@ class GatewayServer:
             and not self._remote_tools.receives_events(client_id)
         )
 
-    async def _send_text(self, ws: WebSocket, data: str) -> None:
-        """异步发送文本到 ws。"""
+    async def drop_client(self, ws: WebSocket, *, reason: str) -> str | None:
+        """回收一个客户端连接——**唯一的清理入口**，幂等。
+
+        两条路径共用：`handle_ws` 的正常断连收尾（客户端已经走了，不需要
+        再关连接）与慢消费者回收（写超时/写失败，调用方随后主动关连接）。
+        两份平行实现必然漂移——`fail_client` 的 KV cache 保护、路由表清理
+        这些不变量只能有一个家。
+
+        幂等靠 ``ws_to_clients.pop`` 的返回值：只有"第一次拿到回收权"的
+        调用者产生副作用（关连接、fail_client、日志）。并发的多个
+        `_send_text` 同时失败、或发送失败紧接 `handle_ws` 的 finally 时，
+        只有一个赢家——这也是"每个死客户端最多一条回收日志"的结构性保证。
+
+        返回 client_id（首次回收）；已被回收 / 从未登记返回 None。
+        """
+        client_id = self._ws_to_client.pop(ws, None)
+        if client_id is None:
+            return None
+        self._client_to_ws.pop(client_id, None)
+        event_bus.route_detach_client(client_id)
+        if self._remote_tools.is_attached(client_id):
+            # 在途调用立即失败 + 注销远程工具（敏锐检测断连）
+            self._remote_tools.fail_client(client_id, reason)
+        log.info(f"Client disconnected: {client_id} ({reason})")
+        return client_id
+
+    async def _recycle_client(self, ws: WebSocket, reason: str) -> None:
+        """回收慢/死消费者：先注销（投递立即停止），再尽力关闭连接。"""
+        client_id = await self.drop_client(ws, reason=reason)
+        if client_id is None:
+            return  # 已被回收——不重复关闭
         try:
-            await ws.send_text(data)
+            await asyncio.wait_for(
+                ws.close(code=1013, reason="slow consumer"),
+                timeout=CLOSE_TIMEOUT_SECONDS,
+            )
+        except Exception as e:
+            # 关闭失败无需补救：路由与投递列表已经清干净，连接由 ASGI 层收尸。
+            # 回收路径绝不能因为对端不读而挂住。
+            log.debug(f"Failed to close recycled client {client_id}: {e}")
+
+    async def _send_text(self, ws: WebSocket, data: str) -> None:
+        """异步发送文本到 ws——有界等待，超时/失败即回收该客户端。
+
+        投递模型未变（每事件一次 create_task）。这里的上界是"无限期"与
+        "有限期"的分界：写超时（或写失败）后该 client 从路由表消失，后续
+        事件不再投递（`_on_event` 的投递列表就是路由表），因此不会再有
+        失败投递与日志洪泛。
+
+        边界说明：uvicorn 的 WS 实现把未写完的数据放进用户态缓冲，
+        `send_text` 往往立即返回——此时真正触发回收的是异常分支（连接已死 /
+        ASGI 已关闭）。两条分支走同一条回收路径，行为一致。
+        """
+        try:
+            await asyncio.wait_for(ws.send_text(data), timeout=WRITE_TIMEOUT_SECONDS)
+        except TimeoutError:
+            log.error(
+                f"Dropping slow client: send blocked for >{WRITE_TIMEOUT_SECONDS:.0f}s"
+            )
+            await self._recycle_client(
+                ws, f"write timeout after {WRITE_TIMEOUT_SECONDS:.0f}s"
+            )
         except Exception as e:
             log.error(f"Failed to send to client: {e}")
+            await self._recycle_client(ws, f"send failed: {e}")

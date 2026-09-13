@@ -13,6 +13,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use chrono::{Datelike, Local, NaiveDate};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -27,10 +28,23 @@ const RETENTION_DAYS: i64 = 7;
 
 /// Initialize the tracing subscriber.
 ///
-/// Must be called once at startup. The returned guard must be held for the
-/// lifetime of the program to ensure log flushing on exit.
-pub fn init_logging() -> WorkerGuard {
-    let dir = log_dir();
+/// Idempotent: safe to call from every entry path (`dispatch` covers TUI,
+/// stdio and all orchestration subcommands; the TUI / stdio paths keep their
+/// own call). The **first** call installs the subscriber and returns the flush
+/// guard — hold it for the lifetime of the program. Later calls are no-ops and
+/// return `None`, which makes "who owns the guard" explicit instead of relying
+/// on tracing's panic-prone `init()`.
+pub fn init_logging() -> Option<WorkerGuard> {
+    init_logging_in(log_dir())
+}
+
+/// [`init_logging`] against an explicit directory (test seam).
+fn init_logging_in(dir: PathBuf) -> Option<WorkerGuard> {
+    static INITIALIZED: OnceLock<()> = OnceLock::new();
+    if INITIALIZED.get().is_some() {
+        return None;
+    }
+
     std::fs::create_dir_all(&dir).ok();
     prune_old_logs(&dir, Local::now().date_naive());
 
@@ -40,20 +54,25 @@ pub fn init_logging() -> WorkerGuard {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("wing=warn,tokio_tungstenite=warn"));
 
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(
-            fmt::layer()
-                .with_writer(non_blocking)
-                .with_timer(LocalTimer)
-                .with_target(true)
-                .with_thread_ids(true)
-                .with_ansi(false),
-        )
-        .init();
+    let subscriber = tracing_subscriber::registry().with(filter).with(
+        fmt::layer()
+            .with_writer(non_blocking)
+            .with_timer(LocalTimer)
+            .with_target(true)
+            .with_thread_ids(true)
+            .with_ansi(false),
+    );
+
+    // `try_init` instead of `init`: a global subscriber may already exist
+    // (another component, or a second path within this process) — logging must
+    // never take the process down.
+    if subscriber.try_init().is_err() {
+        return None;
+    }
+    let _ = INITIALIZED.set(());
 
     tracing::info!(log_dir = %dir.display(), "logging initialized");
-    guard
+    Some(guard)
 }
 
 /// Determine the log directory.
@@ -237,6 +256,48 @@ mod tests {
             assert!(dir.join(name).exists(), "{name} should have been kept");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn init_logging_is_idempotent_and_writes_todays_file() {
+        let dir = scratch_dir("init");
+
+        // First call: installs the subscriber and owns the flush guard.
+        let guard = init_logging_in(dir.clone());
+        assert!(guard.is_some(), "first init must return the flush guard");
+        tracing::warn!("first init marker");
+
+        // Second call (the TUI / stdio paths do this too): no-op, no panic.
+        assert!(
+            init_logging_in(dir.clone()).is_none(),
+            "second init must be a no-op"
+        );
+        tracing::warn!("second init marker");
+
+        drop(guard); // flush the non-blocking writer
+
+        let path = dir.join(log_file_name(Local::now().date_naive()));
+        assert!(
+            path.exists(),
+            "expected today's log file at {}",
+            path.display()
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("first init marker"), "{text}");
+        assert!(
+            text.contains("second init marker"),
+            "logging must keep working after a repeated init: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn log_file_name_matches_backend_convention() {
+        // Same naming on both sides — the front/back log families grep alike.
+        assert_eq!(
+            log_file_name(NaiveDate::from_ymd_opt(2026, 9, 8).unwrap()),
+            "wing_2026-09-08.log"
+        );
     }
 
     #[test]

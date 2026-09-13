@@ -101,7 +101,10 @@ pub fn fmt_turn_result(
 
 /// Truncate a string to at most `max_bytes` bytes, without splitting
 /// UTF-8 code points. Appends "…" if truncation occurred.
-fn truncate_bytes(s: &str, max_bytes: usize) -> String {
+///
+/// Shared with the TUI's disconnect toast, which carries the gateway close
+/// reason (an IO error text can be arbitrarily long).
+pub(crate) fn truncate_bytes(s: &str, max_bytes: usize) -> String {
     if max_bytes < 3 {
         return String::new();
     }

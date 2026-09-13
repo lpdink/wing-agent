@@ -18,17 +18,31 @@ DEFAULT_MAX_DELAY = 180.0
 def _emit_retry_event(
     attempt: int, max_retries: int, fn_name: str, exc: Exception, delay: float
 ) -> None:
-    """通过 EventBus 向前端发送重试通知。懒加载避免循环导入。"""
+    """通过 EventBus 向前端发送重试通知。
+
+    用 NoticeEvent 而非 ErrorEvent：重试中的 turn 并没有结束，而前端把任何
+    error 都当作「这一轮结束了」（终结 turn + 错误单元 + 通知）——那会把
+    "会自愈的失败"误报成真错误。notice 不终结 turn、不落盘。
+
+    懒加载避免循环导入。
+    """
     try:
-        from wing.event import ErrorEvent, EventTarget
+        from wing.event import EventTarget, NoticeEvent
         from wing.event_bus import event_bus
 
         from .utils import format_exception_chain
 
         error_detail = format_exception_chain(exc)
         event_bus.emit(
-            ErrorEvent(
-                message=f"{fn_name} 调用失败 ({attempt + 1}/{max_retries}): {error_detail}, {delay:.0f}s 后重试",
+            NoticeEvent(
+                level="warning",
+                message=(
+                    f"{fn_name} 调用失败 ({attempt + 1}/{max_retries}): "
+                    f"{error_detail}, {delay:.0f}s 后重试"
+                ),
+                attempt=attempt + 1,
+                max_attempts=max_retries,
+                retry_in_s=delay,
                 target=EventTarget(scope="session"),
             )
         )

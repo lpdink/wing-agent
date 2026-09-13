@@ -1661,6 +1661,38 @@ impl App {
                     self.dir_label().as_deref(),
                 )));
             }
+            WingEvent::Notice {
+                level,
+                message,
+                attempt,
+                max_attempts,
+                retry_in_s,
+                ..
+            } => {
+                // Informational only. Deliberately does NOT call finish_turn():
+                // retrying a failed LLM call means the turn is still running —
+                // treating it as an error used to fake an end-of-turn in the UI
+                // while the backend kept working.
+                let text = if message.is_empty() {
+                    "notice".to_string()
+                } else {
+                    message
+                };
+                let text = match (attempt, max_attempts, retry_in_s) {
+                    (Some(a), Some(max), Some(delay)) => {
+                        format!("{text} (attempt {a}/{max}, retrying in {delay:.0}s)")
+                    }
+                    _ => text,
+                };
+                if level.eq_ignore_ascii_case("warning") || level.eq_ignore_ascii_case("error") {
+                    self.chat.push(ChatCell::WarningMessage(text));
+                } else {
+                    // `info` (or a level from a newer gateway we don't know):
+                    // degrade to the plain system style rather than guessing.
+                    self.chat.push(ChatCell::SystemMessage(text));
+                }
+            }
+
             WingEvent::Error { message, .. } => {
                 self.finish_turn();
                 self.chat.push(ChatCell::ErrorMessage(message.clone()));
@@ -2502,13 +2534,20 @@ pub async fn run_app(
                         app.chat_dirty = true;
                     }
                     None => {
-                        // Disconnected.
+                        // Disconnected. Carry the read task's reason into the
+                        // toast so the user can tell "gateway restarted" from
+                        // "this session's payload exceeds the frame limit".
+                        let reason = transport
+                            .as_ref()
+                            .and_then(|t| t.ws.close_reason())
+                            .map(|r| crate::util::osc9::truncate_bytes(&r.describe(), 120));
                         transport = None;
                         app.set_connected(false);
-                        app.show_toast(Toast::persistent(
-                            "⚡ Connection lost — reconnecting...",
-                            ToastKind::Warning,
-                        ));
+                        let text = match reason {
+                            Some(reason) => format!("⚡ Connection lost: {reason} — reconnecting..."),
+                            None => "⚡ Connection lost — reconnecting...".to_string(),
+                        };
+                        app.show_toast(Toast::persistent(text, ToastKind::Warning));
                         app.chat_dirty = true;
                         retry_attempt = 0;
                         retry_at = std::time::Instant::now() + backoff(0);
@@ -2722,6 +2761,128 @@ mod tests {
 
     fn utc_ago(secs: i64) -> String {
         (chrono::Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339()
+    }
+
+    // ── notice events: warn without faking end-of-turn ──
+
+    fn notice_event(level: Option<&str>, message: &str) -> WingEvent {
+        WingEvent::Notice {
+            level: level.unwrap_or("info").to_string(),
+            message: message.to_string(),
+            attempt: Some(1),
+            max_attempts: Some(3),
+            retry_in_s: Some(6.0),
+            meta: EventMeta {
+                created_at: "2026-01-01T00:00:00+00:00".into(),
+                session_id: Some("test-session".into()),
+                request_id: "r".into(),
+            },
+        }
+    }
+
+    fn turn_started_event() -> WingEvent {
+        WingEvent::TurnStarted {
+            meta: EventMeta {
+                created_at: "2026-01-01T00:00:00+00:00".into(),
+                session_id: Some("test-session".into()),
+                request_id: "r".into(),
+            },
+        }
+    }
+
+    /// The regression: a retry notice must NOT end the turn (the backend is
+    /// still working on it) — it is a warning cell, not an error cell.
+    #[test]
+    fn test_notice_keeps_turn_running_and_renders_warning() {
+        let mut app = test_app();
+        app.handle_event(turn_started_event());
+        let _ = app.drain_intents();
+        assert!(app.turn.working, "turn started");
+
+        app.handle_event(notice_event(
+            Some("warning"),
+            "generate 调用失败 (1/3): TimeoutError: stalled, 6s 后重试",
+        ));
+
+        assert!(app.turn.working, "a notice must not finish the turn");
+        match app.chat.cells.last().map(|c| c.cell()) {
+            Some(ChatCell::WarningMessage(text)) => {
+                assert!(text.contains("stalled"), "{text}");
+                assert!(text.contains("attempt 1/3"), "{text}");
+            }
+            other => panic!("expected WarningMessage, got {other:?}"),
+        }
+        // No OSC 9 notification intent (an error would have sent one).
+        assert!(
+            !app.drain_intents()
+                .iter()
+                .any(|i| matches!(i, AppIntent::Notify(_))),
+            "notice must not raise a desktop notification"
+        );
+    }
+
+    #[test]
+    fn test_notice_missing_level_degrades_to_system_message() {
+        let mut app = test_app();
+        app.handle_event(notice_event(None, "something happened"));
+        assert!(
+            matches!(
+                app.chat.cells.last().map(|c| c.cell()),
+                Some(ChatCell::SystemMessage(text)) if text.contains("something happened")
+            ),
+            "unknown/missing level must degrade to a plain system message"
+        );
+        // Also covers an outright unknown level string.
+        app.handle_event(notice_event(Some("weird"), "still ok"));
+        assert!(matches!(
+            app.chat.cells.last().map(|c| c.cell()),
+            Some(ChatCell::SystemMessage(_))
+        ));
+    }
+
+    #[test]
+    fn test_notice_without_retry_fields_renders_message_only() {
+        let mut app = test_app();
+        app.handle_event(WingEvent::Notice {
+            level: "warning".into(),
+            message: "degraded".into(),
+            attempt: None,
+            max_attempts: None,
+            retry_in_s: None,
+            meta: EventMeta {
+                created_at: "2026-01-01T00:00:00+00:00".into(),
+                session_id: Some("test-session".into()),
+                request_id: "r".into(),
+            },
+        });
+        match app.chat.cells.last().map(|c| c.cell()) {
+            Some(ChatCell::WarningMessage(text)) => assert_eq!(text, "degraded"),
+            other => panic!("expected WarningMessage, got {other:?}"),
+        }
+    }
+
+    /// `error` keeps its "this turn is over" semantics (unchanged by notice).
+    #[test]
+    fn test_error_still_finishes_turn() {
+        let mut app = test_app();
+        app.handle_event(turn_started_event());
+        let _ = app.drain_intents();
+        app.handle_event(WingEvent::Error {
+            message: "boom".into(),
+            status_code: 500,
+            error_code: None,
+            detail: None,
+            meta: EventMeta {
+                created_at: "2026-01-01T00:00:00+00:00".into(),
+                session_id: Some("test-session".into()),
+                request_id: "r".into(),
+            },
+        });
+        assert!(!app.turn.working, "error still finishes the turn");
+        assert!(matches!(
+            app.chat.cells.last().map(|c| c.cell()),
+            Some(ChatCell::ErrorMessage(text)) if text == "boom"
+        ));
     }
 
     fn cell_kinds(app: &App) -> Vec<&'static str> {

@@ -29,6 +29,7 @@ use tokio::time::interval;
 use wing_api_client::GatewayClient as GatewayApiClient;
 
 use super::common;
+use crate::gateway::CloseReason;
 use crate::gateway::GatewayClient;
 use crate::protocol::WingEvent;
 
@@ -139,11 +140,21 @@ async fn wait_inner(session_ids: &[String], timeout_secs: u64) -> Result<WaitOut
     }
 
     // 7. Hybrid event loop: WS events + HTTP polling.
+    //
+    // The WS arm is **fail-fast**: a dead event stream is a fatal error, not a
+    // reason to keep looping. `recv_event()` returns `None` as soon as the read
+    // task ends, and a closed tokio channel returns `None` *immediately* — the
+    // old `warn!`-and-continue behavior turned this into a 100% CPU busy loop
+    // until the timeout while the actual cause (frame limit / close frame / IO
+    // error) stayed invisible. Consumers must be able to say why (and to which
+    // sessions) the wait failed, so they can decide whether re-running is
+    // useful at all.
     let mut poll_timer = interval(Duration::from_secs(1));
     // First tick fires immediately; skip it.
     poll_timer.tick().await;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let mut fatal: Option<anyhow::Error> = None;
 
     while !pending.is_empty() {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -165,32 +176,14 @@ async fn wait_inner(session_ids: &[String], timeout_secs: u64) -> Result<WaitOut
         tokio::select! {
             // WS event path: fast TurnResult notification.
             event = gateway.recv_event() => {
-                match event {
-                    Some(WingEvent::TurnResult {
-                        subtype,
-                        is_error,
-                        result,
-                        num_turns,
-                        meta,
-                        ..
-                    }) => {
-                        let sid = meta.session_id.unwrap_or_default();
-                        if pending.remove(&sid) {
-                            results.push(SessionResult {
-                                session_id: sid.clone(),
-                                status: "idle".into(),
-                                subtype,
-                                is_error,
-                                result: result.unwrap_or_default(),
-                                num_messages: num_turns,
-                            });
-                        }
-                    }
-                    Some(_) => { /* ignore other events */ }
-                    None => {
-                        // WS closed — fall back to pure polling.
-                        tracing::warn!("WS connection closed during wait, falling back to polling");
-                    }
+                if let Err(e) = handle_wait_event(
+                    event,
+                    &mut pending,
+                    &mut results,
+                    gateway.close_reason(),
+                ) {
+                    fatal = Some(e);
+                    break;
                 }
             }
 
@@ -219,9 +212,13 @@ async fn wait_inner(session_ids: &[String], timeout_secs: u64) -> Result<WaitOut
         }
     }
 
-    // 8. Unsubscribe (best effort).
+    // 8. Unsubscribe (best effort) — runs on both the normal and the fatal path.
     for sid in session_ids {
         let _ = http.unsubscribe(sid, &client_id).await;
+    }
+
+    if let Some(e) = fatal {
+        return Err(e);
     }
 
     // Sort results to match input order.
@@ -244,6 +241,69 @@ async fn wait_inner(session_ids: &[String], timeout_secs: u64) -> Result<WaitOut
 /// A session is idle (done) if its status is `idle` or `inactive`.
 fn is_idle(status: &str) -> bool {
     status == "idle" || status == "inactive"
+}
+
+/// Apply one WS event to the wait state.
+///
+/// `Err` means the event stream is gone: the caller MUST abort the wait
+/// instead of looping on (a dead stream can never report the remaining
+/// sessions, and `recv()` on the closed channel returns `None` instantly).
+///
+/// Kept as a pure function (no I/O) so the fail-fast decision is unit-testable
+/// without a gateway.
+fn handle_wait_event(
+    event: Option<WingEvent>,
+    pending: &mut HashSet<String>,
+    results: &mut Vec<SessionResult>,
+    close_reason: Option<&CloseReason>,
+) -> Result<()> {
+    match event {
+        Some(WingEvent::TurnResult {
+            subtype,
+            is_error,
+            result,
+            num_turns,
+            meta,
+            ..
+        }) => {
+            let sid = meta.session_id.unwrap_or_default();
+            if pending.remove(&sid) {
+                results.push(SessionResult {
+                    session_id: sid.clone(),
+                    status: "idle".into(),
+                    subtype,
+                    is_error,
+                    result: result.unwrap_or_default(),
+                    num_messages: num_turns,
+                });
+            }
+            Ok(())
+        }
+        Some(_) => Ok(()), // ignore other events
+        None => Err(ws_stream_ended_error(close_reason, pending)),
+    }
+}
+
+/// Build the fatal error for a terminated event stream.
+///
+/// Carries both halves of the diagnosis: *why* the stream died (so the
+/// orchestrator knows whether re-running could ever help) and *which* sessions
+/// were still pending (so it knows what to re-run).
+fn ws_stream_ended_error(
+    close_reason: Option<&CloseReason>,
+    pending: &HashSet<String>,
+) -> anyhow::Error {
+    let reason = match close_reason {
+        Some(r) => r.describe(),
+        None => "no close reason recorded".to_string(),
+    };
+    let mut waiting: Vec<&str> = pending.iter().map(|s| s.as_str()).collect();
+    waiting.sort_unstable(); // HashSet order is unstable — keep the message stable.
+    anyhow::anyhow!(
+        "gateway event stream closed ({reason}); still waiting for {} session(s): {}",
+        waiting.len(),
+        waiting.join(", "),
+    )
 }
 
 /// Fetch the last assistant message from a session as a best-effort result.
@@ -278,5 +338,144 @@ fn print_text(output: &WaitOutput) {
         let result_display = common::truncate_chars(&r.result, 200);
         println!("  last_text:    {result_display}");
         println!();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::EventMeta;
+
+    fn turn_result(sid: &str, is_error: bool) -> WingEvent {
+        WingEvent::TurnResult {
+            uuid: "u".into(),
+            subtype: if is_error { "error" } else { "success" }.into(),
+            is_error,
+            result: Some("done".into()),
+            num_turns: 3,
+            duration_ms: 100,
+            usage: None,
+            errors: vec![],
+            meta: EventMeta {
+                created_at: "2026-01-01T00:00:00+00:00".into(),
+                session_id: Some(sid.into()),
+                request_id: "r".into(),
+            },
+        }
+    }
+
+    fn pending_of(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn turn_result_records_session_and_clears_pending() {
+        let mut pending = pending_of(&["s1", "s2"]);
+        let mut results = Vec::new();
+
+        handle_wait_event(
+            Some(turn_result("s1", false)),
+            &mut pending,
+            &mut results,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(pending, pending_of(&["s2"]));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].session_id, "s1");
+        assert_eq!(results[0].num_messages, 3);
+        assert!(!results[0].is_error);
+    }
+
+    #[test]
+    fn unknown_events_are_ignored() {
+        let mut pending = pending_of(&["s1"]);
+        let mut results = Vec::new();
+
+        let event = WingEvent::Done {
+            meta: EventMeta {
+                created_at: "2026-01-01T00:00:00+00:00".into(),
+                session_id: Some("s1".into()),
+                request_id: "r".into(),
+            },
+        };
+        handle_wait_event(Some(event), &mut pending, &mut results, None).unwrap();
+
+        assert_eq!(pending, pending_of(&["s1"]));
+        assert!(results.is_empty());
+    }
+
+    /// The regression this change fixes: a dead event stream must fail the
+    /// wait instead of being swallowed (`warn!` + continue ⇒ busy loop).
+    #[test]
+    fn terminated_event_stream_is_fatal() {
+        let mut pending = pending_of(&["s1", "s2"]);
+        let mut results = Vec::new();
+        let reason = CloseReason::FrameTooLarge {
+            size: 22_151_988,
+            max_size: 16_777_216,
+        };
+
+        let err = handle_wait_event(None, &mut pending, &mut results, Some(&reason))
+            .expect_err("None must be fatal");
+
+        let text = err.to_string();
+        assert!(text.contains("22151988"), "{text}");
+        assert!(text.contains("16777216"), "{text}");
+        // Both remaining sessions listed, in stable order.
+        assert!(text.contains("still waiting for 2 session(s)"), "{text}");
+        assert!(text.contains("s1, s2"), "{text}");
+        // Nothing was recorded as a result — the wait did not "finish".
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn every_close_reason_is_reported() {
+        for reason in [
+            CloseReason::CloseFrame {
+                code: 1000,
+                reason: "bye".into(),
+            },
+            CloseReason::ReadError {
+                detail: "connection reset by peer".into(),
+            },
+            CloseReason::StreamEnded,
+            CloseReason::ChannelClosed,
+        ] {
+            let mut pending = pending_of(&["s1"]);
+            let mut results = Vec::new();
+            let err = handle_wait_event(None, &mut pending, &mut results, Some(&reason))
+                .expect_err("None must be fatal");
+            let text = err.to_string();
+            assert!(text.contains(&reason.describe()), "{text}");
+        }
+    }
+
+    #[test]
+    fn missing_close_reason_still_fails_with_context() {
+        let mut pending = pending_of(&["s1"]);
+        let mut results = Vec::new();
+        let err = handle_wait_event(None, &mut pending, &mut results, None)
+            .expect_err("None must be fatal");
+        let text = err.to_string();
+        assert!(text.contains("no close reason recorded"), "{text}");
+        assert!(text.contains("s1"), "{text}");
+    }
+
+    /// A `TurnResult` for an unknown session must not panic or add results.
+    #[test]
+    fn turn_result_for_untracked_session_is_ignored() {
+        let mut pending = pending_of(&["s1"]);
+        let mut results = Vec::new();
+        handle_wait_event(
+            Some(turn_result("other", false)),
+            &mut pending,
+            &mut results,
+            None,
+        )
+        .unwrap();
+        assert_eq!(pending, pending_of(&["s1"]));
+        assert!(results.is_empty());
     }
 }
