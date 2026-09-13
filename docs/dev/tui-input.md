@@ -67,19 +67,23 @@
 | 单击定位光标 API | `crates/wing/src/ui/input_area/mod.rs`（`InputArea::set_cursor_from_visual`） |
 | 事件接线 / 互斥 / 失效 | `crates/wing/src/app/mod.rs`（`mouse_press` / `mouse_drag` / `mouse_release` → `composer_*` / `chat_selection_*`） |
 
-**坐标模型（与 chat 的关键差异）**：composer 的选区锚定在**逻辑坐标**（逻辑行下标 + 行内 char 下标），每帧用**渲染同一个** `wrap::build_visual_rows`（同样的可用宽度：`input_rect.width - PREFIX_WIDTH`，不足 1 列时按 1 列）映射到视觉行列。chat 必须用「渲染结果快照 + 内容坐标」是因为换行发生在 ratatui `Paragraph::wrap` 内部、脱离渲染就得复刻 `WordWrapper`；composer 的换行是应用自己算的，**模型即权威**——所以复制文本直接从 `lines` 取，且**软换行不插换行符**（只有真正的逻辑行边界才有 `\n`）。逻辑坐标对**纵向滚动与重排免疫**：滚动只改变可见窗口，不改变选区。
+**坐标模型（与 chat 的关键差异）**：composer 的选区锚定在**逻辑坐标**（逻辑行下标 + 行内 char 下标），每帧用**渲染同一个** `wrap::build_visual_rows`（同样的可用宽度：`input_rect.width - PREFIX_WIDTH`，不足 1 列时按 1 列——`update_vertical_scroll` / `hit` / `paint_selection` / `cursor_screen_pos` 与 widget 全部同源）映射到视觉行列。渲染的 Rect 由 **`InputArea` 自己记录**（`rendered_area`，`InputAreaWidget::render` 每帧回写，与 `ChatView::geometry()` 同一所有权模型：鼠标事件发生在帧之间，命中必须描述用户正看到的那一帧）。chat 必须用「渲染结果快照 + 内容坐标」是因为换行发生在 ratatui `Paragraph::wrap` 内部、脱离渲染就得复刻 `WordWrapper`；composer 的换行是应用自己算的，**模型即权威**——所以复制文本直接从 `lines` 取，且**软换行不插换行符**（只有真正的逻辑行边界才有 `\n`）。逻辑坐标对**纵向滚动与重排免疫**：滚动只改变可见窗口，不改变选区。
+
+**复制内容为空**：只跨了换行、一个字符都没取到的区间（例如从行末拖到下一空行的行首）视为空选区——不复制、不 toast，不产生裸 `\n`。
 
 **屏幕 → 逻辑命中**：`pointer::hit` 把屏幕位置换算成 `ComposerHit { vis_row, display_col, point, on_char }`。行先夹进可见窗口（`vertical_scroll` + 行内偏移）、再夹进视觉行列表（窗口外/内容下方的行 → 最后一个视觉行）；列在 `area.x + PREFIX_WIDTH` 处饱和（点在 `> ` 前缀或更左 → 该视觉行行首），右侧不设上限（超出行文本 → 该视觉行行末）。锚点用 `point`（**指针前插入点**：压在字符的单元格上 → 该字符之前），拖动 / 松手的终点用 `hit.focus()`（`on_char` → `col + 1`，**把指针下的字符整格纳入**）——与 chat 的 `snap_focus_right` 同构，单击不吸附所以「按下不拖动 = 零宽不复制」在两个区域都成立。
 
-**单击定位光标**：按下只记录锚点（此时还不知道是点击还是拖拽），松手时若**未发生拖动**则把指针换算成光标位置（`InputArea::set_cursor_from_visual(available_width, vis_row, display_col)`）：显示列 → char 下标由 `wrap::display_col_to_char` 完成（宽字符按 char 粒度，任一格都取「字符之前」；显示列超出该视觉行文本 → 行末），并清 `desired_col`。单击不产生选区、不高亮、不复制。
+**单击定位光标**：按下只记录锚点（此时还不知道是点击还是拖拽），松手时若**未发生位置移动**则把指针换算成光标位置（`InputArea::set_cursor_from_visual(available_width, vis_row, display_col)`）：显示列 → char 下标由 `wrap::display_col_to_char` 完成（宽字符按 char 粒度，任一格都取「字符之前」；显示列超出该视觉行文本 → 行末），并清 `desired_col`。单击不产生选区、不高亮、不复制。**「点击 vs 拖拽」只按位置判定**（`anchor != 终点`，不看 `is_dragged`）：触摸板在同一格内的抖动仍是单击（不会退化成「复制指针下那 1 个字符」），拖出去又拖回锚点 = 零宽；chat 侧因为映射会在字素内吸附，才额外 OR 上 `is_dragged()`。
 
 **高亮**：与 chat 走同一条 Buffer patch 通道（`REVERSED` 合并语义、toast 之后绘制），但按区域分派、各用**本帧**自己那个 Rect 裁剪：composer 的区间由模型换算成显示列 `[x0, x1)`，`x0` 起于 `area.x + PREFIX_WIDTH`（**永不染 `> ` 前缀**），`x1` 夹到 `area.right()`；宽字符按 char 宽度整组覆盖。
 
-**互斥（按下时判定一次）**：AskUserQuestion 面板 / 旧 ask 菜单 / `/model` 面板 / 命令候选 popup（`ActivePopup::is_active`）在键盘接管状态时，落在 composer 内的按下**直接忽略**——不开始选择、不移动光标、不复制（后续 drag / release 自然也是 no-op）。这些状态下草稿正被面板的内联输入框与按键改写，指针交互进去只会与它们竞争；**滚轮与 chat band 的拖选不受影响**。
+**互斥（按下时判定一次）**：AskUserQuestion 面板 / 旧 ask 菜单 / `/model` 面板 / **可见的**命令候选 popup 在键盘接管状态时，落在 composer 内的按下**直接忽略**——不开始选择、不移动光标、不复制（后续 drag / release 自然也是 no-op）。这些状态下草稿正被面板的内联输入框与按键改写，指针交互进去只会与它们竞争；**滚轮与 chat band 的拖选不受影响**。
+
+「键盘接管」按**是否真的占用键盘 / 屏幕**判定，而不是 `ActivePopup::is_active()`：后者只表示「不是 `None`」，而**无候选（不可见）**的 popup 是常态可达（`/zzz` 无匹配命令、`/session abc` 过滤后为空、候选尚未 fetch 回来）——它们高度为 0（不绘制、不产生布局位移），按键也已经直接放行给 composer，此时再拦指针只会让「看起来空闲」的界面点不动。因此条件是 `popup.active.height() > 0 || popup.active.is_must_select_empty()`：前者保证「有可见 popup 才有布局位移」，后者保留 must-select 命令（`/fork` `/rewind` `/agents` `/session` `/ss`）在无候选时对 Enter 的拦截——**输入了无匹配候选的 must-select 命令（如 `/session abc`）时，输入框内的点击 / 拖选仍不生效**（Enter 会被 popup 吃掉，指针交互没有意义）。
 
 **失效与冻结**：composer 选区用「草稿文本 + 终端宽度」指纹——键盘输入 / 退格 / 删除 / 粘贴 / 提交 / 草稿恢复（`/new`、会话切换）**任一内容变化即中止并清高亮**（每帧渲染前与松手时各比对一次）；纯导航键（←→↑↓ / Home/End）不改变文本，因此**不中止**。chat 侧的结构变化（cell 增删 / 重建）**不影响** composer 选区，反之亦然。composer 选区**不触碰** `chat.unfollow()`，也**不武装**边缘自动滚动定时器（输入框最多 `max_lines` 行，可见窗口外的行不参与选择）。
 
-**已知限制**：输入框内不做边缘自动滚动（草稿超过 `max_lines` 时窗口外的视觉行无法拖选）；placeholder（空输入时显示的提示文案）不是内容——在它上面拖选不产生选区、不复制；粘贴占位符行按屏幕文本复制（`[Pasted text #N …]`，与所见一致）；宽字符单击取「字符之前」（char 下标没有半格精度）。
+**已知限制**：must-select 命令在「无匹配候选」时输入框内的点击 / 拖选不生效（见上）；输入框内不做边缘自动滚动（草稿超过 `max_lines` 时窗口外的视觉行无法拖选）；placeholder（空输入时显示的提示文案）不是内容——在它上面拖选不产生选区、不复制；粘贴占位符行按屏幕文本复制（`[Pasted text #N …]`，与所见一致）；宽字符单击取「字符之前」（char 下标没有半格精度）。
 
 
 ## 已知中间态：原生拖选需要 Shift/Option
