@@ -413,6 +413,7 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = crossterm::execute!(
             std::io::stdout(),
+            tui::DisableMouseReporting,
             crossterm::terminal::LeaveAlternateScreen,
             crossterm::event::DisableBracketedPaste,
             crossterm::event::DisableFocusChange,
