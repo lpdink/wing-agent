@@ -4,9 +4,10 @@
 
 | 文档 | 内容 |
 |------|------|
-| [architecture.md](architecture.md) | 三层架构与数据流、TUI / stdio 两种前端、Goal 编排、会话生命周期、持久化与压缩 |
+| [architecture.md](architecture.md) | 三层架构与数据流、TUI / stdio / 编排 CLI 三种前端形态、Goal 编排、会话生命周期、持久化与压缩 |
 | [http-api.md](http-api.md) | 完整 HTTP 端点表、WebSocket 事件协议、Gateway 鉴权 |
 | [glossary.md](glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |
+| [config-logging.md](config-logging.md) | WING_HOME 布局、config.yaml 顶层键、TUI 配置、日志轮转与查询、环境变量 |
 
 > 事实来源优先级：**代码 > 本目录 > AGENTS.md 概述**。若发现不一致，以代码为准并欢迎修正文档。
 >

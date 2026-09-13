@@ -1,190 +1,202 @@
 # wing-agent
 
-Monorepo: Python agent runtime + Rust frontends (TUI + stdio).
+Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+ Rust 前端（`crates/wing/`，一个 `wing` 二进制，提供 TUI / stdio / 编排 CLI 三种形态）。
 
-## Architecture
+> **维护约定**：本文件只保留高信息密度总览。**不要随手往里加东西，除非 user 明确要求或同意**；机制细节、临时知识、踩坑记录一律写进 `docs/dev/`（见文末「深潜阅读」登记表）。
 
-```
-   Frontends (wing binary)              Gateway (FastAPI)            Runtime (Python)
-┌────────────────────────────┐  WS+HTTP ┌───────────────────┐       ┌────────────────┐
-│ TUI mode (default)         ├─────────►│  GatewayServer    │──────►│  WingRuntime   │
-│  ratatui event loop        │          │  · routes/session │       │  (coordinator) │
-│  Goal loop (executor/      │◄─────────│  · routes/system  │◄──────│ SessionManager │
-│   checker, TUI-side)       │  events  │  · routes/health  │       │ SessionStore   │
-│ Stdio mode (wing -p)       │          │  · routes/ws      │       │ ContextManager │
-│  Claude-protocol NDJSON    │          │  auth (opt-in)    │       │ EventBus       │
-│ GatewayClient(WS)+ApiClient│          └───────────────────┘       └────────────────┘
-└────────────────────────────┘
-```
-
-The `wing` binary is both frontends: **TUI** (interactive, human-in-the-loop) and **stdio** (`wing -p`, headless, Claude Code compatible — alias `wing` as `claude` to plug into external orchestrators). Both drive the same Gateway + Runtime.
-
-**Protocols.** HTTP for lifecycle / queries / mutations (~22 RPC-style endpoints); WebSocket (`/ws`) carries the real-time ReAct event stream plus client→server message / Ask-reply frames (`ClientRequest`), while queries and mutations stay on HTTP. Session creation is decoupled from the WS handshake — clients create a session via HTTP, then subscribe to events. API key auth is opt-in at the Gateway (HTTP headers / WS query param); TLS is delegated to a reverse proxy.
-
-**Persistence.** All durable session state (metadata, mixed message/event log, aux data like pending compactions) is owned by a single abstraction, `SessionStore` (`wing/store/`). No other module does storage I/O for session data. `SessionStore` composes `MessageLog` (append-only log durability + aux kv); `TrackedList` is a pure in-memory chain-topology engine (uuid/parentUuid) over ChainNode-family nodes (Message + WingEvent mixed) that delegates I/O to a `MessageLog`. Backends: `file` (default, `~/.wing/core/sessions/`) and `memory` (ephemeral, per-process), selected per session via the `backend` parameter. The interface is storage-agnostic — SQL backends (SQLite/PG/Supabase) are additive implementations.
-
-**Unified event log.** `history.jsonl` is the single source of truth — a mixed log of Message records (LLM-context projection) and event records (`role="event"`), all sharing chain topology. The log stores **facts, not copies**: only `persist=true` fact events with no Message twin (diff, ask, interrupted, error, compact_done) hit the log the moment they complete; streaming deltas are pure broadcast (`persist=false` — never persisted, never buffered), their content carried by the Message record at turn close. `tool_call_result` / `llm_call_metrics` are Message twins (`Message.usage` + `Message.stop_reason` / the `role="tool"` Message) so they no longer persist; `turn_result` persists but its `result` field (final-text twin) is excluded from the disk record. `persist` is a `ClassVar[bool]` (not a pydantic field — a re-declared `Field(exclude=True)` was silently pierced by subclasses). Uncommitted turn content has a **single authority**: the caller-held provider stream accumulator (`ReActLoop._current_acc`), projected on demand via `snapshot_blocks()` (finalized blocks — interrupt partial-commit *and* resume) + `pending_tool_calls()` (unfinished tool args, raw text — live tool cards); the backend never parses partial JSON. Interrupt/max-tokens turns commit their partial content and capture `stop_reason` on the Message: unfinished tool calls are dropped (unverifiable args), while finalized-but-unexecuted tool calls are committed **with a synthesized interrupted tool result** each — no dangling tool_use in the next request; zero-info blocks (empty text / unsigned empty thinking) never enter the snapshot or the authoritative block array. rewind/fork/compact work on events for free via chain order; mid-turn subscribers get `messages + uncommitted + uncommitted_tools + events` (+ `turn_started_at`) in SyncSessionEvent, assembled in that order so a diff always anchors after its (finalized) tool_use cell — a view identical to subscribing from the start.
-
-**Remote tools & orchestration.** Tools need not run in the gateway process. An external **tool host** registers tools over HTTP (`POST /api/tools/register`) and serves their calls over a held WebSocket (`tool_call_request` / `tool_call_result` frames, correlated by `call_id`). The core stays network-agnostic — a remote tool is an ordinary `Tool` whose callable is a gateway-injected dispatch closure (`gateway/remote_tools.py`). The host's `client_id` (chosen via `?client_id=` on WS connect) is both its tool namespace and identity, decoupled from the RBAC role (`admin` = full access, `tool_runtime` = pure executor). Tool sets can also change at runtime via `POST /api/session/update` (`tools` field) with KV-cache protection — a cold swap when the chain is empty, else a frozen declared view plus an injected System Reminder, policy owned by `ContextManager`. SDKs: Rust `wing-api-client::tool_host` and Python `wing-sdk`; `wing-orch` lifts the TUI Goal loop into a standalone background CLI (state persist + resume).
-
-**Streaming rendering.** During LLM argument generation the runtime emits `tool_call_stream` events carrying incremental raw args text fragments (`args_fragment`); it never parses partial JSON itself. The Rust frontend accumulates fragments and parses them locally (`util/partial_json.rs`, single-pass O(n)) to render live tool cards (Write/Edit previews, TodoWrite lists) before execution starts; the authoritative parsed args arrive with the `tool_call` event.
-
-**Fence normalization — Thinking vs Content.** The `Content` profile normalizes inline ```` to line-level fences (matching the full renderer's `ensure_fences_on_own_line`), so model output like `text:```python\ncode```` renders as a proper code block. The `Thinking` profile **skips** this normalization: reasoning text often contains inline ```` references to discuss code fences (e.g. `（```rust）`), and normalizing them would create spurious code blocks with wrong language tags, swallowing subsequent text inside a code block border. Genuine line-start ```` in reasoning are still detected as code blocks via `fence_open`.
-
-## Project Structure
+## 架构
 
 ```
-libs/core/wing/                   Python runtime (pip: wing-agent)
-├── agent/                        WingAgent package (public import paths unchanged via re-export)
-│   ├── core.py                   WingAgent thin shell: assembly, public API, worker lifecycle, uncommitted projection
-│   ├── react_loop.py             ReAct main loop: drain → hook → LLM → tools → commit; turn-level accumulator; partial commit on interrupt
-│   ├── llm_caller.py             LLM streaming call + chunk → event projection
-│   ├── tool_executor.py          Concurrent tool dispatch (asyncio.gather) + interrupt teardown
-│   ├── event_sink.py             AgentEventSink — single event emission outlet + persist split (false = broadcast only)
-│   ├── inbox.py                  Message queue (drain-and-merge) + feedback waiters
-│   └── tool_context.py           ToolContext Protocol — narrow interface tools receive (`ctx`)
-├── agent_template.py             AgentTemplate — model/tools/prompt from config `agents:`
-├── session.py                    Session — messages + state + metadata (via SessionStore)
-├── session_manager.py            SessionManager — multi-session, fork/resume, store registry
-├── runtime.py                    WingRuntime — service-layer coordinator (thin routes → Session/CM)
-├── context_manager.py            Context window tracking + compaction + rewind
-├── compactor.py                  Compaction strategy (LLM summarization)
-├── event_bus.py                  EventBus — global singleton event routing
-├── config.py                     Config models + WING_HOME resolution
-├── default_config.py             Hand-maintained default config.yaml template (source of truth)
-├── schema.py                     Tool / ToolParam models (namespace, llm_name, to_openai)
-├── tool_registry.py              ToolRegistry — namespace-aware registry + ToolRef resolution
-├── openai_provider.py            OpenAI-compatible provider (streaming, retry, cache control)
-├── request_context.py            Per-request context (ids, tracing)
-├── hook_registry.py              Hook extension points (before/after user message & tool call)
-├── store/                        Session persistence (single owner of durable state)
-│   ├── base.py                   SessionStore + MessageLog ABCs, SessionMetadata model
-│   ├── file.py                   File backend (~/.wing/core/sessions/, mixed log, zero-migration)
-│   └── memory.py                 In-memory backend (ephemeral, no disk)
-├── event/                        Event types (base, react, state_change, query_response) + EVENT_TYPES / FACT_EVENTS registries + persist ClassVar + wire_dump (strip null/storage fields)
-├── tools/                        Built-in tools
+┌─────────────────────────────┐             ┌─────────────────────────┐               ┌─────────────────────────┐
+│ Frontends（wing 二进制）    │             │ Gateway (FastAPI)       │               │ Runtime (Python)        │
+│ TUI（默认）· ratatui 循环   │──── WS ────►│ GatewayServer           │──── HTTP ────►│ WingRuntime（协调者）   │
+│ stdio（wing -p）· NDJSON    │             │ · routes/session(14)    │               │ ├ SessionManager        │
+│ 编排 CLI · run/wait/ps/…    │◄── 事件 ────│ · routes/system(6)      │◄──────────────│ ├ SessionStore          │
+│ Goal loop（TUI 侧）         │             │ · routes/tools · health │               │ ├ ContextManager        │
+│ GatewayClient(WS)+ApiClient │             │ · routes/ws（事件流）   │               │ ├ EventBus              │
+│ HTTP 建会话 → WS 订阅       │             │ auth（opt-in）          │               │ └ provider/（LLM 调用） │
+└─────────────────────────────┘             └─────────────────────────┘               └─────────────────────────┘
+```
+
+- **三种前端形态，同一个二进制**：TUI（默认，human-in-the-loop）；stdio（`wing -p`，headless，Claude Code 兼容 NDJSON——把 `wing` alias 为 `claude` 即可接入外部编排器）；编排 CLI（`wing run/wait/ps/info/tail/head` 后台任务，`wing start/stop/status` 网关生命周期）。
+- **协议**：HTTP 承载生命周期 / 查询 / 变更（22 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header / WS query param），TLS 交给反向代理。
+- **持久化**：`SessionStore` 是会话全部持久状态（metadata、混合 message/event 日志、aux）的唯一所有者；后端 `file`（默认，`~/.wing/core/sessions/`）与 `memory`（进程内）。`TrackedList` 是纯内存链拓扑引擎（uuid/parentUuid），I/O 全部委托 `MessageLog`；SQL 后端是增量实现，非架构改动。
+- **模型调用**：`provider/` 隔离协议差异（OpenAI 兼容 / Anthropic），ReAct 循环对协议无感知。
+
+**改代码前必读的不变量**（细节一律在 docs/dev，不要在这里展开）：
+
+1. `history.jsonl` 是唯一事实来源：Message 记录（role ∈ user/assistant/tool/system）与事件记录（`role="event"`）混排、共享链拓扑；落盘只存事实不存副本，流式 delta（`persist=false`）永不落盘。
+2. turn 进行中「已生成未提交」内容的唯一权威是 provider 流累积器（`ReActLoop._current_acc`）：按需投影（`snapshot_blocks` / `pending_tool_calls`），后端从不解析半截 JSON（局部解析在前端 `util/partial_json.rs`）。
+3. 中断后上下文必须自洽：每个带 `tool_calls` 的 assistant 消息必须跟齐每个 call_id 的 tool 消息；未终结（半截参数）的 tool 块一律剔除。
+4. 工具不必跑在 gateway 进程内：远程工具 = 普通 `Tool` + 注入的 dispatch 闭包（`gateway/remote_tools.py`），核心保持网络无关。
+5. 运行期改工具集（`POST /api/session/update`）需 KV cache 保护：链空冷切换；链非空冻结 declared 视图 + 注入 System Reminder（策略归 `ContextManager`）。
+
+## 项目结构
+
+> 目录树是代码结构的索引：新增 / 删除 / 重命名模块时请同步更新本节。
+
+### 后端：`libs/core/wing/`（Python runtime）
+
+```
+libs/core/wing/
+├── __init__.py / _version.py        包入口（re-export execute_shell，触发 metrics 订阅）/ 版本号
+├── runtime.py                       WingRuntime — service 层协调者（post() 唯一入站，路由到 Session/CM）
+├── session.py                       Session — messages + state + metadata（经 SessionStore）
+├── session_manager.py               SessionManager — 多会话、fork/resume、store registry
+├── context_manager.py               上下文窗口跟踪 + 压缩 + rewind
+├── compactor.py                     压缩策略（LLM 摘要）
+├── agent_template.py                AgentTemplate — 配置 agents: 的 model/tools/prompt/skills/rules
+├── config.py                        Config 模型 + WING_HOME 解析
+├── default_config.py                手写默认 config.yaml 模板（事实来源）
+├── schema.py                        Tool / ToolParam / Message 等核心 schema
+├── tool_registry.py                 ToolRegistry — 命名空间感知注册表 + ToolRef 解析
+├── event_bus.py                     EventBus — 全局单例事件路由
+├── hook_registry.py                 Hook 扩展点（before_session_start / before_user_message / before_tool_call / after_tool_call）
+├── request_context.py               每请求上下文（request_id / session_id / client_id，单 ContextVar）
+├── agent/                           WingAgent 包（公共 API 经 __init__ re-export，导入路径不变）
+│   ├── core.py                      瘦壳：组装、公共 API、worker 生命周期、未提交投影
+│   ├── react_loop.py                ReAct 主循环：drain → hook → LLM → tools → commit
+│   ├── tool_executor.py             工具并发分发（asyncio.gather）+ 中断拆卸
+│   ├── event_sink.py                AgentEventSink — 唯一事件发射出口 + persist 分流
+│   ├── inbox.py                     消息队列（drain-and-merge）+ feedback waiters
+│   └── tool_context.py              ToolContext Protocol — 工具收到的窄接口（ctx）
+├── provider/                        模型调用层（协议隔离）
+│   ├── base.py                      ModelProvider ABC + StreamAccumulator + parse_tool_args（容错，永不抛）
+│   ├── openai_compat.py             OpenAI 兼容协议（httpx 流式 + 重试）
+│   ├── anthropic.py                 Anthropic Messages API（thinking blocks、x-api-key）
+│   ├── sse.py                       两个协议共用的 SSE 行解析
+│   ├── http.py / errors.py          httpx 构造 / 带 body 的错误面（raise_with_body）
+│   └── __init__.py                  create_provider() + provider registry（并发聚合模型列表）
+├── store/                           SessionStore — 会话持久状态唯一所有者
+│   ├── base.py                      SessionStore / MessageLog ABC + SessionMetadata
+│   ├── file.py                      File 后端（history.jsonl 混合日志，零迁移）
+│   └── memory.py                    Memory 后端（进程内，不落盘）
+├── event/                           事件类型 + 注册表 + 序列化边界
+│   ├── base.py                      WingEvent（= ChainNode）基类 + 通用系统事件
+│   ├── react.py / state_change.py / query_response.py
+│   └── __init__.py                  EVENT_TYPES / FACT_EVENTS 注册表 + wire_dump（WS 帧规则）
+├── tools/                           内置工具
 │   ├── bash.py / file.py / search.py   Bash · Read/Write/Edit · Glob/Grep
 │   ├── ask_user.py / todo.py           AskUserQuestion · TodoWrite
-│   ├── explorer.py                     Explorer sub-agent (run_in_background)
-│   ├── experimental.py                 BetterEdit (experimental)
-│   └── shell_safety.py                 Bash command safety review
-├── magic_command/                Prompt-command metadata registry + $ARGUMENTS text expansion (no dispatch)
-├── metrics_registry/             LLM / tool-call / compaction metrics
-├── common/                       Logger, utils, token counter, process & retry helpers
-│   ├── tracked_list.py           TrackedList — chain-topology engine (I/O via MessageLog)
-│   └── fs.py                     Atomic write helpers (tmp + fsync + rename)
-└── gateway/                      FastAPI server
-    ├── app.py                    App factory (FastAPI + route registration)
-    ├── server.py                 GatewayServer — lifecycle + EventBus subscriber + uptime
-    ├── cli.py                    `wing-gateway` CLI entry point
-    ├── auth.py                   Opt-in API key auth middleware (HTTP + WS; admin / tool_runtime roles)
-    ├── remote_tools.py           RemoteToolManager — tool host connections + WS call dispatch
-    ├── protocol.py               WS + HTTP Pydantic models
-    ├── openapi.py                OpenAPI metadata
-    └── routes/
-        ├── session.py            Session lifecycle + queries + mutations (14 endpoints)
-        ├── system.py             commands/models/agents/tools listing, reload, shutdown (6)
-        ├── tools.py              POST /api/tools/register (remote tool registration)
-        ├── health.py             GET /api/health (1)
-        └── ws.py                 WebSocket /ws (event transport + tool call result frames)
-
-crates/wing/src/                  Rust CLI: TUI + stdio frontends
-├── main.rs                       Entry (clap; stdio mode detection → filter unknown args)
-├── cmd/                          CLI subcommands
-│   ├── mod.rs                    Cli/Command defs + dispatch (tui/start/stop/status + stdio flags)
-│   ├── start.rs / stop.rs / status.rs   HTTP-based gateway lifecycle (health + /api/shutdown)
-│   ├── backend_config.rs         Read gateway host:port + wing_home from backend config
-│   └── discover.rs               Gateway discovery
-├── stdio/                        Headless Claude-protocol mode (`wing -p`)
-│   ├── mod.rs                    run_stdio + ensure_gateway_running + arg filtering
-│   ├── ndjson.rs                 stream-json NDJSON framing
-│   ├── renderer.rs               text / json / stream-json output rendering
-│   └── stdin_handler.rs          SDK bidirectional stdin handshake
-├── gateway/client.rs             GatewayClient — WS connection + read/write tasks
-├── protocol/                     WingEvent + ClientRequest + ConnectResponse + CommandInfo
-├── app/                          App state machine + event loop
-│   ├── mod.rs                    run_app() main loop + handle_event()
-│   ├── runner.rs                 Execute AppIntents (HTTP/WS side effects)
-│   ├── intent.rs / transport.rs  AppIntent enum + gateway transport abstraction
-│   ├── goal.rs                   Goal orchestration state machine (executor/checker loop)
-│   ├── ask_panel.rs              AskUserQuestion panel (tabs/multi-select/inline editor; Esc owns interrupt)
-│   ├── turn_state.rs / render_context.rs / constants.rs
-│   ├── replay.rs                 SyncSession replay → ChatCells
-│   └── popup_state.rs            Popup + candidate cache + dedup
-├── ui/                           UI components
-│   ├── chat_view.rs / header.rs / status_bar.rs / spinner.rs / toast.rs
-│   ├── cells/                    Chat cell renderers (tool_call, thinking, todo, ask, diff)
-│   ├── input_area/               Composer (editing, movement, wrap, paste)
-│   ├── popup/                    Command palette + selection
-│   └── ask_select.rs             Legacy required-choice selector (Bash confirm)
-├── render/                       Markdown + syntax highlighting (code_blocks, tables, links)
-│   └── markdown/stream.rs        StreamingRender — incremental streaming renderer (stable prefix + active tail)
-├── tui/                          Terminal abstraction (crossterm)
-├── config/                       TUI config (colors, rendering, goal)
-└── util/                         clipboard, logging, osc9, terminal title, partial_json (streaming args parser)
-
-crates/wing/benches/              Criterion benchmarks
-└── stream_render.rs              Streaming-render perf (baseline vs incremental engines; corpus generators committed)
-crates/wing/tests/                Integration tests
-├── stream_render_reconcile.rs    Span-exactness reconcile matrix (incremental vs full render)
-├── stream_render_throughput.rs   3000 tokens/s throughput judgment (p99 < 16ms, no backlog)
-└── common/mod.rs                 Shared corpus generation + frame harness
-
-crates/wing-api-client/src/       Hand-written Rust HTTP client for Gateway API
-├── client.rs                     GatewayClient — all HTTP API methods (+ api_key)
-├── tool_host.rs                  ToolHost — remote tool host (WS serve loop + builder)
-├── models.rs                     Request/response types (mirrors Python protocol.py)
-└── error.rs                      ApiClientError
-
-libs/wing-sdk/                    Python SDK (pip: wing-sdk) — remote tool host
-├── wing_sdk/host.py              ToolHost — decorator registration + WS serve loop
-├── wing_sdk/http_client.py       GatewayClient — session/system HTTP API
-├── wing_sdk/schema.py            ToolParam / RemoteToolSpec (gateway-independent)
-└── wing_sdk/tools/               Standard tools (Bash/Read/Write/Edit/Glob/Grep, workspace-bound)
-
-libs/wing-orch/                   Orchestration CLI (pip: wing-orch) — depends on wing-sdk
-└── wing_orch/
-    ├── cli.py                    `wing-orch goal` entry point
-    ├── goal.py                   Goal state machine (port of crates/wing/src/app/goal.rs)
-    └── runner.py                 asyncio driver: tool host + sessions + event loop + persistence
+│   ├── explorer.py                     Explorer 子 agent（只读工具集，可 run_in_background）
+│   ├── experimental.py                 BetterEdit（实验，[upto] 锚点）
+│   ├── shell_safety.py                 Bash 命令安全审查（白名单放行 / 默认拦截）
+│   └── utils.py                        resolve_path — 相对路径按会话 workspace 解析
+├── magic_command/                   prompt 命令：registry.py（元数据）+ prompt_commands.py（$ARGUMENTS 展开，无分发）
+├── metrics_registry/                指标 / 审计注册中心（EventBus 订阅，原子写 JSON）
+│   ├── core.py                      MetricsRegistry 类 + 单例 + 原子读写工具
+│   ├── _llm_metrics.py / _tool_call_metrics.py / _compact_metrics.py
+│   └── experimental.py              BetterEdit 实验审计（~/.wing/core/metrics_experimental.json）
+├── common/
+│   ├── logger.py                    日志初始化（按本地日期切分 + 轮转 / prune）
+│   ├── tracked_list.py              TrackedList — 链拓扑引擎（I/O 委托 MessageLog）
+│   ├── fs.py                        原子写（tmp + fsync + rename）/ JSON 读写
+│   ├── with_retry.py                重试（指数退避 + 重试事件）
+│   ├── process.py                   进程组管理（killpg 清理子进程树）
+│   ├── token_counter.py             token 估算
+│   └── utils.py                     session id、路径安全校验、异常链格式化
+└── gateway/                         FastAPI 网关
+    ├── app.py                       应用工厂（FastAPI + 路由注册）
+    ├── server.py                    GatewayServer — 生命周期 + EventBus 订阅 + uptime
+    ├── cli.py                       wing-gateway CLI 入口
+    ├── auth.py                      opt-in API key 鉴权中间件（HTTP + WS；admin / tool_runtime）
+    ├── remote_tools.py              RemoteToolManager — 远程工具宿主连接 + WS 调用分发
+    ├── protocol.py                  WS + HTTP Pydantic 模型
+    ├── openapi.py                   OpenAPI 元数据
+    └── routes/                      session(14) · system(6) · tools(1) · health(1) · ws（事件传输 + 上行帧）
 ```
 
-## Configuration
-
-Single source of truth: `$WING_HOME/core/config.yaml` (default `~/.wing/core/config.yaml`). Top-level keys: `openai` (provider), `agents` (templates: model/tools/prompt/skills/rules), `hooks`, `gateway` (host/port/`auth`), `safe_command_patterns`, `yolo`, `steer`, `tool_result_truncate`, `log`. See `wing/default_config.py` for the annotated template.
+### 前端：`crates/wing/src/`（Rust，TUI + stdio + 编排 CLI）
 
 ```
-~/.wing/
-├── core/
-│   ├── config.yaml      Backend config
-│   ├── logs/            Backend logs (see Logging below)
-│   │   ├── wing_YYYY-MM-DD.log   Gateway runtime log (daily, local time, append)
-│   │   ├── new.log → wing_YYYY-MM-DD.log   Symlink to the active backend log
-│   │   └── gateway.log  Gateway daemon stdout/stderr (uvicorn errors, tracebacks; append)
-│   └── sessions/        Session persistence (metadata + message log)
-└── tui/
-    ├── config.yaml      TUI config (colors, rendering, api_key, goal)
-    └── logs/            TUI logs: wing_YYYY-MM-DD.log (daily, local time, append)
+crates/wing/src/
+├── main.rs                          入口（clap；stdio 模式检测 → 过滤未知参数）
+├── lib.rs                           库根：模块导出（供 bench / tests 引用；deny print_stdout/stderr）
+├── cmd/                             CLI 子命令与分发
+│   ├── mod.rs                       Cli/Command 定义 + dispatch（TUI / 网关生命周期 / 编排子命令 / stdio）
+│   ├── args.rs                      `wing run` 与 stdio 共享的启动参数
+│   ├── backend_config.rs            读 backend config（gateway host:port、wing_home）
+│   ├── common.rs                    子命令共享工具（网关发现、HTTP client、输出格式化）
+│   ├── discover.rs                  定位 wing-gateway 可执行文件
+│   ├── start.rs / stop.rs / status.rs  网关守护进程生命周期（health + /api/shutdown）
+│   ├── run.rs                       `wing run` 非阻塞启动任务（建会话 + 发 prompt，返回 session id）
+│   ├── wait.rs                      `wing wait` 阻塞至会话 idle（HTTP 轮询 + WS TurnResult）
+│   ├── ps.rs                        `wing ps` / `wing info`（会话列表 / 单会话运行时信息）
+│   ├── messages.rs                  `wing tail` / `wing head`（消息过滤，类 Unix head/tail）
+│   └── query.rs                     `wing models` / `tools` / `agents`（查询端点，表格 / JSON）
+├── stdio/                           headless 前端（wing -p，Claude 协议）
+│   ├── mod.rs                       run_stdio + ensure_gateway_running + 参数过滤
+│   ├── ndjson.rs                    stream-json NDJSON 帧
+│   ├── renderer.rs                  text / json / stream-json 输出渲染
+│   └── stdin_handler.rs             SDK 双向 stdin 握手
+├── gateway/client.rs                GatewayClient — WS 连接 + 读写任务
+├── protocol/                        WingEvent + ClientRequest + ConnectResponse（Python 事件的 Rust 镜像）
+│   ├── events.rs / client_request.rs / connect_response.rs
+├── app/                             App 状态机 + 事件循环
+│   ├── mod.rs                       run_app() 主循环 + handle_event()
+│   ├── runner.rs                    执行 AppIntent（HTTP/WS 副作用）
+│   ├── intent.rs / transport.rs     AppIntent 枚举 + 传输抽象（WS+HTTP+client_id 原子单元，含重连退避）
+│   ├── goal.rs                      Goal 编排状态机（executor/checker 循环，纯逻辑无 I/O）
+│   ├── selection_panel.rs           选择面板共享内核（翻页 / 光标 / 窗口 / commit；存储归 adapter）
+│   ├── ask_panel.rs                 AskUserQuestion 适配器（Tab 切题 / 多选 / 内联输入 / 确认页）
+│   ├── model_panel.rs               /model 适配器（provider tab × model 行，Enter 即应用）
+│   ├── replay.rs                    SyncSession 重放 → ChatCells（messages → events 能力分发）
+│   ├── turn_state.rs / render_context.rs   轮次耗时 / 流式目标 cell 跟踪
+│   ├── popup_state.rs               Popup + 候选缓存 + 去重
+│   └── constants.rs                 协议常量（本地命令、工具名等 magic string）
+├── ui/                              UI 组件
+│   ├── chat_view.rs                 Chat 视图（宽度感知虚拟化 + 滚动条）
+│   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存
+│   ├── panel.rs                     选择面板共享渲染（窗口数学与内核一致）
+│   ├── header.rs / status_bar.rs / spinner.rs / toast.rs
+│   ├── input_area/                  Composer（editing / movement / wrap / paste / widget / helpers）
+│   ├── popup/                       command（斜杠命令 + 候选项）/ selection（通用可选列表）
+│   ├── ask_select.rs                旧版必选选择器（Bash 确认）
+│   └── cells/                       Chat cell 渲染（tool_call / thinking / todo_msg / ask_msg / diff_view / model_picker）
+├── render/                          Markdown + 语法高亮
+│   ├── markdown/                    types / parsing / code_blocks / tables / links / wrap（CJK UAX#14）
+│   │   └── stream.rs                StreamingRender — 增量渲染（稳定前缀 + 活动尾部；Thinking 跳过 fence 归一化）
+│   ├── syntax.rs                    syntect 高亮（two-face 主题）
+│   └── line_utils.rs / renderable.rs
+├── tui/mod.rs                       终端生命周期（init/restore、crossterm 事件流）
+├── config/                          TUI 配置（mod / colors / rendering）
+└── util/                            clipboard(OSC52) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）
 ```
 
-`WING_HOME` overrides `~/.wing` (backend data lives under `$WING_HOME/core`); `WING_SESSIONS_PATH` overrides the sessions directory.
+配套：`crates/wing/benches/stream_render.rs`（流式渲染基准）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期）、`crates/wing/examples/reconnect_flow_verify.rs`。
 
-**Logging policy (unified front & back).** Both sides write one file per **local** calendar day — `wing_YYYY-MM-DD.log` — opened in append mode, so gateway/TUI restarts never truncate or fork logs, and prune files older than 7 days (at startup and on rotation). Backend logs live in `~/.wing/core/logs/`; the `new.log` symlink there always points at the active backend log (backend-only; the gateway refreshes it on every rotation). TUI logs live in `~/.wing/tui/logs/` (same naming, no symlink). Logging initializes explicitly — the gateway CLI (`wing-gateway`, via `wing.common.logger.setup_logger`, console level from `log.level`) and the TUI (`util/logging.rs`) attach handlers at startup; **importing `wing` has no logging side effects** — tests and scripts never create files in `~/.wing`. Every line starts with `YYYY-MM-DD HH:MM:SS` (local time on both sides), so time-range greps work directly: `grep '^2026-09-08 23:' ~/.wing/core/logs/new.log`, or `awk '$0 >= "2026-09-08 23:10" && $0 < "2026-09-08 23:30"' ~/.wing/tui/logs/wing_2026-09-08.log`.
+### 其他
 
-## Deep dives (docs/dev)
+- `crates/wing-api-client/src/` — 手写 Rust HTTP 客户端：`client.rs`（全部 API 方法）、`models.rs`、`error.rs`、`tool_host.rs`（远程工具宿主，WS 服务循环 + builder）。
+- `libs/wing-sdk/wing_sdk/` — Python 远程工具宿主 SDK：`host.py`（装饰器注册 + WS 循环）、`http_client.py`、`schema.py`、`tools/`（Bash/Read/Write/Edit/Glob/Grep，workspace-bound）。
+- `libs/wing-orch/wing_orch/` — 编排 CLI（后台 Goal，port of `app/goal.rs`）：`cli.py`、`goal.py`、`runner.py`。**目前少用，改动不必同步本节细节。**
+- `e2e/claude-agent-sdk-integration/` — 用 claude-agent-sdk 跑 wing 的端到端测试（`make test-e2e`）。
+- 测试目录：`libs/core/tests/`（后端 pytest，60 个文件）、`libs/wing-sdk/tests/`、`libs/wing-orch/tests/`。
+- 顶层 `docs/dev/` 为开发者深度文档（中文），`scripts/sync_version.py` 同步版本号。
 
-AGENTS.md stays a high-density overview. For mechanism-level detail, read `docs/dev/` (中文):
+## 配置与日志
 
-- [`docs/dev/architecture.md`](docs/dev/architecture.md) — 运行时/网关/前端数据流、stdio 模式、Goal 编排、远程工具与编排、会话生命周期与持久化。
-- [`docs/dev/http-api.md`](docs/dev/http-api.md) — 完整 HTTP 端点表 + WebSocket 协议 + 鉴权。
-- [`docs/dev/glossary.md`](docs/dev/glossary.md) — 核心概念：SessionStore/MessageLog/TrackedList、工具命名空间、prompt 命令、压缩等。
+`$WING_HOME`（默认 `~/.wing`）目录布局、`config.yaml` 顶层键、前后端统一的日志策略与按日期 grep 技巧 → [docs/dev/config-logging.md](docs/dev/config-logging.md)。
 
-## Development
+## 深潜阅读（docs/dev）
+
+AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文）：
+
+| 文档 | 内容 |
+|------|------|
+| [`docs/dev/architecture.md`](docs/dev/architecture.md) | 三层架构与数据流、TUI / stdio / 编排 CLI 三种前端形态、Goal 编排、远程工具与编排、会话生命周期与中断提交语义、事件系统与统一日志、持久化与压缩 |
+| [`docs/dev/http-api.md`](docs/dev/http-api.md) | 完整 HTTP 端点表 + WebSocket 协议 + 鉴权 |
+| [`docs/dev/glossary.md`](docs/dev/glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |
+| [`docs/dev/config-logging.md`](docs/dev/config-logging.md) | WING_HOME 布局、config.yaml 键、日志轮转与查询 |
+
+事实来源优先级：**代码 > docs/dev > AGENTS.md 概述**。若发现不一致，以代码为准并欢迎修正文档。
+
+## 开发
 
 ```bash
 # Python
 uv sync
-uv run wing-gateway              # Start gateway
+uv run wing-gateway              # 启动网关
 make test-python                  # pytest
 make check-python                 # ruff + ty + vulture
 
@@ -196,17 +208,16 @@ make check-rust                   # fmt + clippy + test
 # All
 make test                         # Python + Rust
 make check                        # Python + Rust
-make fmt                          # Format all
+make fmt                          # 格式化全部
 ```
 
-## Distribution
+## 分发
 
-- **Python**: `pip install wing-agent` → `wing-gateway` CLI entry point
-- **Rust**: GitHub Release prebuilt binaries → `wing` CLI (TUI + stdio + daemon control)
-- **SDK/Orch**: `wing-sdk` / `wing-orch` — uv workspace 包（`libs/`），未发布 PyPI；
-  `wing-orch` 提供 `wing-orch` CLI（后台 Goal 编排），`wing-sdk` 提供远程工具宿主 SDK
+- **Python**：`pip install wing-agent` → 安装 `wing-gateway`（Python 网关）与 `wing-cli`（maturin 构建的 Rust 二进制，提供 `wing` 命令）。
+- **Rust**：GitHub Release 预编译二进制 → `wing` CLI（TUI + stdio + 守护进程控制）。
+- **SDK/Orch**：`wing-sdk` / `wing-orch` 为 uv workspace 包（`libs/`），未发布 PyPI。
 
-## Commit Messages
+## 提交信息
 
 ```
 type(scope): short description
@@ -214,11 +225,12 @@ type(scope): short description
 [optional body]
 ```
 
-Types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`.
+Types：`feat`, `fix`, `refactor`, `test`, `docs`, `chore`。
 
-Scopes follow module boundaries: `gateway`, `runtime`, `session`, `tui`, `protocol`, `tools`, `config`, etc.
+Scopes 沿用模块边界：`gateway`, `runtime`, `session`, `tui`, `protocol`, `tools`, `config` 等。
 
-Examples:
+示例：
+
 ```
 feat(gateway): add HTTP session/fork endpoint
 refactor(runtime): clean up WingRuntime as service layer
@@ -226,4 +238,4 @@ fix(protocol): remove session_id from ConnectResponse
 test(gateway): add HTTP endpoint unit tests
 ```
 
-Keep the first line under 72 chars. Body explains *why*, not *what*.
+首行不超过 72 字符；body 讲 *why*，不讲 *what*。

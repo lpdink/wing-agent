@@ -1,7 +1,7 @@
 """
 Logging for the wing backend.
 
-Policy (kept in sync with the TUI frontend, see AGENTS.md "Logging"):
+Policy (kept in sync with the TUI frontend, see docs/dev/config-logging.md):
 
 - One file per **local** calendar day: ``wing_YYYY-MM-DD.log`` under
   ``$WING_HOME/core/logs/`` (default ``~/.wing/core/logs/``), opened in

@@ -1,6 +1,6 @@
 """Tests for the backend logging policy (wing.common.logger).
 
-Policy under test (see AGENTS.md "Logging"):
+Policy under test (see docs/dev/config-logging.md):
 - importing wing has no logging side effects (no files created);
 - one append-mode file per local day, named wing_YYYY-MM-DD.log;
 - new.log symlink always points at the active daily file;

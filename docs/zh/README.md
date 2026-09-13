@@ -26,9 +26,11 @@ wing
 首次运行时，wing 会在 `~/.wing/core/config.yaml` 创建配置模板并退出。打开它，填入你的 **provider、密钥与模型**：
 
 ```yaml
-openai:
-  base_url: "https://your-api-endpoint/v1"   # ← 你的 API 地址
-  api_key: "sk-xxx"                          # ← 你的密钥
+providers:
+  - name: default
+    protocol: openai                         # openai | anthropic
+    base_url: "https://your-api-endpoint/v1" # ← 你的 API 地址
+    api_key: "sk-xxx"                        # ← 你的密钥
 
 agents:
   - name: default
@@ -48,10 +50,8 @@ wing         # 重新启动
 
 ## 配置
 
-后端配置：`~/.wing/core/config.yaml`
+后端配置：`~/.wing/core/config.yaml` —— 首次运行自动生成，模板带完整注释（见 `wing/default_config.py`）。
 前端配置：`~/.wing/tui/config.yaml`
-
-完整参考：**[docs/zh/config.md](config.md)**
 
 ## 内置工具
 
@@ -92,7 +92,6 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 | 文档 | English | 中文 |
 |------|---------|------|
-| 配置 | [docs/en/config.md](../en/config.md) | [docs/zh/config.md](config.md) |
 | 自定义工具 | [docs/en/custom-tools.md](../en/custom-tools.md) | [docs/zh/custom-tools.md](custom-tools.md) |
 | 魔术命令 | [docs/en/magic-commands.md](../en/magic-commands.md) | [docs/zh/magic-commands.md](magic-commands.md) |
 

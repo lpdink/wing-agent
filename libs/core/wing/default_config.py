@@ -187,8 +187,9 @@ gateway:
     #                        # register remote tools (and hold its WS)
 
 # ── Prompt Commands ──────────────────────────────────────────
-# Paths to directories containing prompt command definition files.
-# Each .yaml file in these directories defines a slash command.
+# Glob patterns for prompt command definition files.
+# Each .md file (YAML frontmatter: name/description/aliases; body uses
+# $ARGUMENTS) defines a slash command. Example: "~/.wing/commands/*.md"
 commands:
   paths: []
 

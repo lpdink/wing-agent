@@ -32,9 +32,11 @@ wing
 On first run, wing creates a config template at `~/.wing/core/config.yaml` and exits. Open it and fill in your **provider, key, and model**:
 
 ```yaml
-openai:
-  base_url: "https://your-api-endpoint/v1"   # ← your provider
-  api_key: "sk-xxx"                          # ← your key
+providers:
+  - name: default
+    protocol: openai                         # openai | anthropic
+    base_url: "https://your-api-endpoint/v1" # ← your provider
+    api_key: "sk-xxx"                        # ← your key
 
 agents:
   - name: default
@@ -54,10 +56,8 @@ wing         # start fresh
 
 ## Configuration
 
-Backend config: `~/.wing/core/config.yaml`
+Backend config: `~/.wing/core/config.yaml` — generated on first run, fully annotated (see `wing/default_config.py` for the template).
 Frontend config: `~/.wing/tui/config.yaml`
-
-Full reference: **[docs/en/config.md](docs/en/config.md)**
 
 ## Built-in Tools
 
@@ -98,7 +98,6 @@ Useful flags: `-m/--model`, `-r/--resume`, `--system-prompt`, `--append-system-p
 
 | Document | English | 中文 |
 |----------|---------|------|
-| Configuration | [docs/en/config.md](docs/en/config.md) | [docs/zh/config.md](docs/zh/config.md) |
 | Custom Tools | [docs/en/custom-tools.md](docs/en/custom-tools.md) | [docs/zh/custom-tools.md](docs/zh/custom-tools.md) |
 | Magic Commands | [docs/en/magic-commands.md](docs/en/magic-commands.md) | [docs/zh/magic-commands.md](docs/zh/magic-commands.md) |
 

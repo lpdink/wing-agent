@@ -1,6 +1,6 @@
 //! Tracing-based logging with file output.
 //!
-//! Policy (kept in sync with the Python backend, see AGENTS.md "Logging"):
+//! Policy (kept in sync with the Python backend, see docs/dev/config-logging.md):
 //! - One file per **local** calendar day: `$WING_HOME/tui/logs/wing_YYYY-MM-DD.log`
 //!   (default `~/.wing/tui/logs/`), opened in append mode so TUI restarts
 //!   never truncate or fork the log. `tracing-appender`'s built-in daily
