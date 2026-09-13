@@ -523,13 +523,16 @@ impl ChatView {
 
     /// Whether auto-scroll is active (view is pinned to the bottom).
     ///
-    /// Approximated by the auto-scroll flag rather than a geometric
-    /// comparison of `scroll_offset` vs total height.
+    /// The follow contract: pinned → new content scrolls into view; the user
+    /// scrolling up clears the pin (reading history is never yanked back by
+    /// streaming deltas); scrolling back to the bottom edge re-arms it. All
+    /// scrolling entries (wheel, PageUp/PageDown, Ctrl+arrows, jumps) share
+    /// this state, so the contract lives in the scroll methods below.
     pub fn is_at_bottom(&self) -> bool {
         self.auto_scroll
     }
 
-    /// Scroll up by N lines.
+    /// Scroll up by N lines — leaves the follow state (reading history).
     pub fn scroll_up(&mut self, n: usize) {
         self.auto_scroll = false;
         self.scroll_offset = self.scroll_offset.saturating_sub(n);
@@ -539,9 +542,10 @@ impl ChatView {
     ///
     /// The bottom edge is derived from `last_total` (content height
     /// recorded by the last render). Reaching it re-arms `auto_scroll`
-    /// synchronously — without waiting for the next render pass — so the
-    /// Up/Down routing in the app returns control to the composer as soon
-    /// as the view hits the bottom, even while new content is streaming.
+    /// synchronously — without waiting for the next render pass — so every
+    /// scrolling entry (wheel, PageDown, Ctrl+Down) re-arms the follow
+    /// contract the moment the view hits the bottom, even while new content
+    /// is streaming.
     pub fn scroll_down(&mut self, n: usize, viewport_h: usize) {
         let max_scroll = self.last_total.saturating_sub(viewport_h);
         if self.scroll_offset >= max_scroll {
@@ -554,23 +558,23 @@ impl ChatView {
         }
     }
 
-    /// Scroll by one page up.
+    /// Scroll by one page up (leaves the follow state).
     pub fn page_up(&mut self, page_height: usize) {
         self.scroll_up(page_height);
     }
 
-    /// Scroll by one page down.
+    /// Scroll by one page down (re-arms the follow state at the bottom edge).
     pub fn page_down(&mut self, page_height: usize, viewport_h: usize) {
         self.scroll_down(page_height, viewport_h);
     }
 
-    /// Jump to top.
+    /// Jump to top (leaves the follow state).
     pub fn jump_top(&mut self) {
         self.auto_scroll = false;
         self.scroll_offset = 0;
     }
 
-    /// Jump to bottom.
+    /// Jump to bottom (re-arms the follow state).
     pub fn jump_bottom(&mut self) {
         self.auto_scroll = true;
     }
@@ -1681,6 +1685,57 @@ mod tests {
         assert!(rendered.contains("320ms ttft"), "ttft:\n{rendered}");
         assert!(rendered.contains("100/100"), "scroll pos:\n{rendered}");
         assert!(rendered.contains("100%"), "scroll percent:\n{rendered}");
+    }
+
+    /// Follow contract: pinned → new content follows; scrolled up → the
+    /// reader is never yanked back; back at the bottom → follow re-armed.
+    /// Every scrolling entry (wheel, keyboard, jumps) shares this state.
+    #[test]
+    fn test_follow_contract_across_new_content() {
+        let mut view = ChatView::new();
+        for i in 0..20 {
+            view.push(ChatCell::AssistantMessage(format!("msg {i}")));
+        }
+        render_view(&mut view, 40, 10);
+        let bottom = view.scroll_offset;
+        assert!(view.is_at_bottom(), "a fresh view follows the bottom");
+
+        // Scrolling up leaves the bottom edge → reading history.
+        view.scroll_up(3);
+        render_view(&mut view, 40, 10);
+        let reading = view.scroll_offset;
+        assert_eq!(reading, bottom - 3);
+        assert!(!view.is_at_bottom());
+
+        // New content streams in: the viewport must not move.
+        for i in 20..30 {
+            view.push(ChatCell::AssistantMessage(format!("msg {i}")));
+        }
+        render_view(&mut view, 40, 10);
+        assert_eq!(
+            view.scroll_offset, reading,
+            "streaming content must not yank the reader back to the bottom"
+        );
+        assert!(!view.is_at_bottom());
+
+        // Scrolling back to the bottom re-arms follow.
+        view.scroll_down(1000, 10);
+        assert!(view.is_at_bottom(), "reaching the bottom re-arms follow");
+        for i in 30..40 {
+            view.push(ChatCell::AssistantMessage(format!("msg {i}")));
+        }
+        let buf = render_view(&mut view, 40, 10);
+        assert!(view.is_at_bottom());
+        assert_eq!(
+            view.scroll_offset,
+            view.content_height() - 10,
+            "the re-armed view is pinned to the new bottom edge"
+        );
+        let rendered = buffer_text(&buf);
+        assert!(
+            rendered.contains("msg 39"),
+            "followed content must be visible:\n{rendered}"
+        );
     }
 
     /// The render pass must record the content height so `scroll_down`
