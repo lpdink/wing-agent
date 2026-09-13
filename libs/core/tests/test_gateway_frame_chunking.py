@@ -177,6 +177,21 @@ class TestBuildFrames:
             f"转义预算算错会浪费一半帧：{first.size}"
         )
 
+    def test_raw_control_characters_still_respect_the_limit(self):
+        """载荷含裸控制字符（不是 `json.dumps` 输出）时退回精确测量，仍不超限。
+
+        `json.dumps` 的输出里控制字符必然是转义形态（常态走转义计数的快路径）；
+        这里刻意构造裸控制字符，钉住慢路径的存在与正确性。
+        """
+        payload = 'a\u0001b\\c"d' * (2 * 1024 * 1024)
+        frames = build_frames(payload, "sync_session")
+        assert len(frames) >= 2
+        for frame in frames:
+            assert frame.size <= SOFT_LIMIT_BYTES
+            assert frame.size == len(frame.text.encode("utf-8"))
+        joined = "".join(json.loads(f.text)["data"] for f in frames)
+        assert joined == payload
+
     def test_envelope_fields_are_stable(self):
         payload = "x" * (SOFT_LIMIT_BYTES + 1)
         frames = build_frames(payload, "sync_session")
