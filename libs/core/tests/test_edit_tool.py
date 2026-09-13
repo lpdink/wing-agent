@@ -82,10 +82,13 @@ class TestClaudeDialectBinding:
 
         assert "edit: ok @ line 1" in result
         assert p.read_text() == "foo baz\n"
-        # Full-file diff event still emitted for the frontend.
+        # Windowed diff event for the frontend: this file is shorter than the
+        # window, so the window is the whole file (re-joined without the
+        # trailing newline — the frontend diffs lines).
         assert len(ctx.events) == 1
-        assert ctx.events[0].old_text == "foo bar\n"
-        assert ctx.events[0].new_text == "foo baz\n"
+        assert ctx.events[0].old_text == "foo bar"
+        assert ctx.events[0].new_text == "foo baz"
+        assert (ctx.events[0].old_start_line, ctx.events[0].new_start_line) == (1, 1)
 
     @pytest.mark.asyncio
     async def test_replace_all_kwarg(self, tmp_path: Path):

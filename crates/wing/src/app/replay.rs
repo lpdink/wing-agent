@@ -8,6 +8,7 @@ use serde::Deserialize;
 use crate::app::ask_panel::AskPanel;
 use crate::app::constants::TOOL_TODO;
 use crate::protocol::AskQuestion;
+use crate::protocol::first_line;
 use crate::ui::cells::ask_msg::AskMessage;
 use crate::ui::cells::diff_view::DiffView;
 use crate::ui::cells::thinking::ThinkingBlock;
@@ -54,6 +55,12 @@ struct ReplayEvent {
     old_text: Option<String>,
     #[serde(default)]
     new_text: Option<String>,
+    /// Absolute line numbers of the window's first line (absent for
+    /// pre-windowing payloads → 1).
+    #[serde(default = "first_line")]
+    old_start_line: usize,
+    #[serde(default = "first_line")]
+    new_start_line: usize,
     #[serde(default)]
     tool_call_id: Option<String>,
     // ask
@@ -114,7 +121,13 @@ pub fn replay_events(chat: &mut ChatView, events: &[serde_json::Value]) -> Vec<R
                     tracing::warn!(event_type = %ev.event_type, "diff event missing fields");
                     continue;
                 };
-                let diff = DiffView::new(path, ev.old_text, new_text);
+                let diff = DiffView::new(
+                    path,
+                    ev.old_text,
+                    new_text,
+                    ev.old_start_line,
+                    ev.new_start_line,
+                );
                 let tool_call_id = ev.tool_call_id.unwrap_or_default();
                 if let Err(cell) = chat.insert_after_tool_call(&tool_call_id, ChatCell::Diff(diff))
                 {
@@ -698,5 +711,121 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, vec!["TC(a)", "Diff(a)", "TC(b)", "Diff(b)"]);
+    }
+
+    // ── windowed payloads (diff-payload-window) ─────────────
+
+    /// A windowed payload keeps its absolute line numbers through replay:
+    /// the gutter starts at `old_start_line` / `new_start_line` and the `@@`
+    /// header uses them (frontend renders what the backend sent, verbatim).
+    #[test]
+    fn test_replay_events_windowed_diff_renders_absolute_lines() {
+        let mut chat = ChatView::new();
+        let messages = vec![json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "tc-edit", "name": "Edit", "arguments": {"path": "main.rs"}}]
+        })];
+        let events = vec![json!({
+            "type": "diff_content",
+            "path": "main.rs",
+            "old_text": "line 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13",
+            "new_text": "line 7\nline 8\nline 9\nLINE TEN\nline 11\nline 12\nline 13",
+            "old_start_line": 7,
+            "new_start_line": 7,
+            "tool_call_id": "tc-edit"
+        })];
+        replay_messages(&mut chat, &messages);
+        replay_events(&mut chat, &events);
+
+        let ChatCell::Diff(diff) = chat.cells[1].cell() else {
+            panic!("expected a Diff cell, got {:?}", chat.cells[1].cell());
+        };
+        let text: String = diff
+            .to_lines(&crate::config::ThemePalette::default(), 80)
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("@@ -7,7 +7,7 @@"), "{text}");
+        assert!(text.contains("    7   7 │   line 7"), "{text}");
+        assert!(text.contains("   10     │ - line 10"), "{text}");
+        assert!(text.contains("       10 │ + LINE TEN"), "{text}");
+        assert!(text.contains("   13  13 │   line 13"), "{text}");
+    }
+
+    /// A windowed payload without start lines (pre-windowing session) still
+    /// renders — as a window starting at line 1.
+    #[test]
+    fn test_replay_events_payload_without_start_lines_defaults_to_one() {
+        let mut chat = ChatView::new();
+        let messages = vec![json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "tc-edit", "name": "Edit", "arguments": {"path": "main.rs"}}]
+        })];
+        let events = vec![json!({
+            "type": "diff_content",
+            "path": "main.rs",
+            "old_text": "fn old() {}",
+            "new_text": "fn new() {}",
+            "tool_call_id": "tc-edit"
+        })];
+        replay_messages(&mut chat, &messages);
+        replay_events(&mut chat, &events);
+
+        let ChatCell::Diff(diff) = chat.cells[1].cell() else {
+            panic!("expected a Diff cell");
+        };
+        assert_eq!(diff.old_start_line, 1);
+        assert_eq!(diff.new_start_line, 1);
+        let text: String = diff
+            .to_lines(&crate::config::ThemePalette::default(), 80)
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("@@ -1,1 +1,1 @@"), "{text}");
+    }
+
+    /// `replace_all` produces several events with the SAME tool_call_id; the
+    /// anchored insert must keep them in event order (each lands after the
+    /// previous diff sibling), so resume shows the same order as live.
+    #[test]
+    fn test_replay_events_replace_all_windows_keep_order_under_one_anchor() {
+        let mut chat = ChatView::new();
+        let messages = vec![json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "tc-all", "name": "Edit", "arguments": {"path": "f.txt"}}]
+        })];
+        let events: Vec<serde_json::Value> = (0..3)
+            .map(|i| {
+                json!({
+                    "type": "diff_content",
+                    "path": "f.txt",
+                    "old_text": format!("old {i}"),
+                    "new_text": format!("NEW {i}"),
+                    "old_start_line": 10 + i,
+                    "new_start_line": 10 + i,
+                    "tool_call_id": "tc-all"
+                })
+            })
+            .collect();
+        replay_messages(&mut chat, &messages);
+        replay_events(&mut chat, &events);
+
+        // TC, then the three windows in emission order.
+        assert_eq!(chat.len(), 4);
+        let window_ids: Vec<usize> = chat
+            .cells
+            .iter()
+            .filter_map(|c| match c.cell() {
+                ChatCell::Diff(d) => Some(d.old_start_line),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(window_ids, vec![10, 11, 12]);
     }
 }

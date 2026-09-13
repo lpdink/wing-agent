@@ -12,8 +12,11 @@
 //!   - `Insert` lines feed the new revision's highlighter,
 //!   - context (unchanged) lines belong to **both** revisions, so they advance
 //!     the old revision's state as well — even though the colors rendered are
-//!     the new revision's,
-//!   - lines that are not rendered (collapsed context) still advance state.
+//!     the new revision's.
+//!
+//! Every row of a diff window is rendered (the payload IS the window — the
+//! frontend never collapses it), so feeding a line and rendering it are the
+//! same operation.
 //!
 //! Both diff renderers ([`crate::ui::cells::diff_view`] and the fenced
 //! ```diff``` block renderer) share this type so the rules cannot drift apart
@@ -53,17 +56,11 @@ impl DiffHighlighters {
         }
     }
 
-    /// Feed one line of `side` to the matching highlighter(s).
-    ///
-    /// Returns the styled spans when `render` is set, otherwise only advances
-    /// state (the cheap path for collapsed or non-visible rows). Either way
-    /// every revision the line belongs to advances by exactly one line.
-    pub(crate) fn line(
-        &mut self,
-        side: DiffSide,
-        text: &str,
-        render: bool,
-    ) -> Option<Vec<(Style, String)>> {
+    /// Feed one line of `side` to the matching highlighter(s) and return its
+    /// styled spans (`None` for an unknown language — callers then render
+    /// plain text). Every revision the line belongs to advances by exactly
+    /// one line.
+    pub(crate) fn line(&mut self, side: DiffSide, text: &str) -> Option<Vec<(Style, String)>> {
         // Context lines exist in both revisions: the old state has to advance
         // too, or every later `Delete` line is highlighted from a stale state.
         if side == DiffSide::Context
@@ -77,12 +74,7 @@ impl DiffHighlighters {
             DiffSide::Context | DiffSide::Insert => self.new.as_mut(),
         }?;
 
-        if render {
-            highlight_line_with(highlighter, text)
-        } else {
-            advance_line(highlighter, text);
-            None
-        }
+        highlight_line_with(highlighter, text)
     }
 }
 
@@ -97,10 +89,10 @@ mod tests {
     fn context_lines_advance_the_old_revision() {
         let mut hl = DiffHighlighters::for_file("main.rs", None);
         let context = hl
-            .line(DiffSide::Context, "/* note", true)
+            .line(DiffSide::Context, "/* note")
             .expect("context highlight");
         let deleted = hl
-            .line(DiffSide::Delete, "   removed();", true)
+            .line(DiffSide::Delete, "   removed();")
             .expect("delete highlight");
 
         let fg = |spans: &[(Style, String)]| spans[0].0.fg;
@@ -116,13 +108,13 @@ mod tests {
     #[test]
     fn delete_state_stays_inside_the_old_revision() {
         let mut hl = DiffHighlighters::for_file("main.rs", None);
-        hl.line(DiffSide::Delete, "let a = \"unterminated", true);
-        hl.line(DiffSide::Context, "let b = 1;", true);
+        hl.line(DiffSide::Delete, "let a = \"unterminated");
+        hl.line(DiffSide::Context, "let b = 1;");
         let after = hl
-            .line(DiffSide::Delete, "let c = 2;", true)
+            .line(DiffSide::Delete, "let c = 2;")
             .expect("delete highlight");
         let plain = hl
-            .line(DiffSide::Insert, "let d = 3;", true)
+            .line(DiffSide::Insert, "let d = 3;")
             .expect("insert highlight");
         // The new revision never saw the old line's string opener.
         assert_ne!(
@@ -135,7 +127,7 @@ mod tests {
     #[test]
     fn unknown_language_is_inert() {
         let mut hl = DiffHighlighters::for_file("data.zzzq", None);
-        assert!(hl.line(DiffSide::Context, "whatever", true).is_none());
-        assert!(hl.line(DiffSide::Delete, "whatever", true).is_none());
+        assert!(hl.line(DiffSide::Context, "whatever").is_none());
+        assert!(hl.line(DiffSide::Delete, "whatever").is_none());
     }
 }

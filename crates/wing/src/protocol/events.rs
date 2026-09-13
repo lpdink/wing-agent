@@ -28,6 +28,13 @@ pub struct EventMeta {
     pub request_id: String,
 }
 
+/// `#[serde(default = …)]` for the diff window's absolute start lines: an
+/// absent field means "starts at line 1" — which is exactly what the
+/// pre-windowing payloads (whole file, both sides from line 1) carried.
+pub(crate) fn first_line() -> usize {
+    1
+}
+
 /// Routing target injected by EventBus — the TUI can ignore this but must
 /// tolerate it in the JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -320,11 +327,23 @@ pub enum WingEvent {
     /// it (Write/Edit/BetterEdit) so the TUI can anchor the Diff cell
     /// directly after its ToolCall cell under concurrent (out-of-order)
     /// execution. Empty for older gateways — falls back to append.
+    ///
+    /// The payload is a **window**: `old_text` / `new_text` carry the changed
+    /// region ± context lines (Edit/BetterEdit), or the full content (Write /
+    /// new files). `old_start_line` / `new_start_line` are the 1-based
+    /// absolute line numbers of the window's first line in the old / new
+    /// revision — the TUI renders the given rows verbatim and uses these for
+    /// the gutter and the `@@` header. Absent (old gateway, old session) →
+    /// line 1, which is correct for the pre-windowing full-file payloads.
     #[serde(rename = "diff_content")]
     DiffContent {
         path: String,
         old_text: Option<String>,
         new_text: String,
+        #[serde(default = "first_line")]
+        old_start_line: usize,
+        #[serde(default = "first_line")]
+        new_start_line: usize,
         #[serde(default)]
         tool_call_id: String,
         #[serde(flatten)]
@@ -827,6 +846,8 @@ mod tests {
             "path": "src/main.rs",
             "old_text": "fn old() {}",
             "new_text": "fn new() {}",
+            "old_start_line": 42,
+            "new_start_line": 43,
             "tool_call_id": "call_edit_1",
             "created_at": "2025-01-01T00:00:00",
             "session_id": "abc",
@@ -838,13 +859,44 @@ mod tests {
                 path,
                 old_text,
                 new_text,
+                old_start_line,
+                new_start_line,
                 tool_call_id,
                 ..
             } => {
                 assert_eq!(path, "src/main.rs");
                 assert_eq!(old_text.unwrap(), "fn old() {}");
                 assert_eq!(new_text, "fn new() {}");
+                assert_eq!(old_start_line, 42);
+                assert_eq!(new_start_line, 43);
                 assert_eq!(tool_call_id, "call_edit_1");
+            }
+            _ => panic!("expected DiffContent"),
+        }
+    }
+
+    #[test]
+    fn deserialize_diff_content_window_lines_default_to_one() {
+        // Pre-windowing payloads (and old gateways) omit the start lines —
+        // the whole file started at line 1, so 1 is the correct default.
+        let json = r#"{
+            "type": "diff_content",
+            "path": "src/main.rs",
+            "old_text": "fn old() {}",
+            "new_text": "fn new() {}",
+            "created_at": "2025-01-01T00:00:00",
+            "session_id": "abc",
+            "request_id": "req8"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match event {
+            WingEvent::DiffContent {
+                old_start_line,
+                new_start_line,
+                ..
+            } => {
+                assert_eq!(old_start_line, 1);
+                assert_eq!(new_start_line, 1);
             }
             _ => panic!("expected DiffContent"),
         }

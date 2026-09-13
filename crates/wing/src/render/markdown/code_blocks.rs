@@ -209,9 +209,9 @@ fn render_code_block(state: &CodeBlockState, env: &CodeBlockRenderEnv<'_>) -> Ve
                         &format!("{marker} "),
                     );
                 }
-                let styled = highlighters.as_mut().and_then(|hl| {
-                    hl.line(row.side.unwrap_or(DiffSide::Context), row.content, true)
-                });
+                let styled = highlighters
+                    .as_mut()
+                    .and_then(|hl| hl.line(row.side.unwrap_or(DiffSide::Context), row.content));
                 match styled {
                     Some(spans) => {
                         for (style, text) in spans {

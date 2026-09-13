@@ -7,9 +7,9 @@ Inspired by antirez's ds4-agent edit tool design.
 import os
 
 from wing.agent import ToolContext, current_tool_call_id
-from wing.event import DiffContentEvent
 from wing.schema import ToolError
 from wing.tool_registry import tool_registry
+from wing.tools.diff_window import build_diff_events
 
 # Marker for anchored edit
 UPTO_MARKER = "[upto]"
@@ -160,16 +160,19 @@ async def better_edit(
             os.unlink(tmp)
         raise BetterEditError(f"write failed: {e}")
 
-    # Emit DiffContentEvent for frontend rendering
-    ctx.emit(
-        DiffContentEvent(
-            session_id=ctx.session_id,
-            path=path,
-            old_text=content,
-            new_text=new_content,
-            tool_call_id=current_tool_call_id() or "",
-        )
-    )
+    # Emit DiffContentEvent for frontend rendering (windowed: changed region
+    # ± context lines — see tools/diff_window.py)
+    for event in build_diff_events(
+        session_id=ctx.session_id,
+        path=path,
+        tool_call_id=current_tool_call_id() or "",
+        old_content=content,
+        new_content=new_content,
+        old_len=end - start,
+        new_len=len(new_string),
+        positions=[start],
+    ):
+        ctx.emit(event)
 
     # Calculate stats
     total_old_lines = len(content.splitlines())

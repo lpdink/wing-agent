@@ -148,6 +148,8 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 **前端重放**：`replay.rs` 两段式——先 replay_messages（建 ToolCall/thinking/text cell），再 replay_events（**能力分发**：diff 按 tool_call_id 锚定插入对应 ToolCall cell 后、ask 渲染为可答卡片，无渲染器的类型跳过以保持前向容忍；未知锚点 fallback append，与直播路径同款兜底）。前端**不再编码"孪生事件不得渲染"这类策略**——过滤已在后端 `FACT_EVENTS` 完成，前端只做能力分发。
 
+**diff 载荷是窗口，不是文件**（`diff-payload-window`）：`DiffContentEvent.old_text/new_text` 只携带**变更区域 ± 3 行**（`tools/diff_window.py` 的 `DIFF_CONTEXT_LINES`），外加窗口首行在各自修订版中的 1 起绝对行号 `old_start_line` / `new_start_line`（缺失按 1——旧载荷与旧网关照此渲染）。Write / 新建文件仍发全量（`old_text=None` 即"全是新增"）；`replace_all` 每个匹配位置一条事件（同一 `tool_call_id`、按位置升序），前端按既有锚点顺序逐个插入 diff cell。前端**不折叠**：`DiffView` 逐行渲染后端给的窗口，gutter 行号与 `@@` 头由 `*_start_line` 推算（`LayoutConfig.diff_context` 已删除，前端不再有"上下文行数"这个策略旋钮）。窗口化把 diff 载荷从"随文件大小"降到"随变更区域大小"（实测 67 条事件 10.1 MB → 0.21 MB、渲染行 121k → 2.0k）；历史会话里已落盘的全量事件不迁移，在前端就是"一个覆盖整文件的窗口"。
+
 **newest.json 已移除**：快照的消费者（重放）由混合日志承担；存在性判据与标题回退收敛为 history.jsonl。磁盘遗留的 newest.json 不读不写不删。
 
 ## 持久化（PR #39）

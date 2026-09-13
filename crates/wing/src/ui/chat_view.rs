@@ -154,7 +154,7 @@ impl ChatCell {
             }
             Self::Thinking(block) => block.to_lines(palette, ctx.thinking_mode, width),
             Self::ToolCall(block) => block.to_lines(palette, ctx.layout.tool_output_max),
-            Self::Diff(view) => view.to_lines(palette, ctx.layout.diff_context, width),
+            Self::Diff(view) => view.to_lines(palette, width),
             Self::Todo(msg) => msg.to_lines(palette),
             Self::Ask(msg) => msg.to_lines(palette, width),
             Self::ModelPicker(panel) => model_picker_lines(panel, palette),
@@ -1390,7 +1390,7 @@ mod tests {
 
         // Two derived cells for the same tool call keep emission order
         // (the second anchoring skips past the first sibling).
-        let diff = |p: &str| ChatCell::Diff(DiffView::new(p.into(), None, "new".into()));
+        let diff = |p: &str| ChatCell::Diff(DiffView::new(p.into(), None, "new".into(), 1, 1));
         assert!(view.insert_after_tool_call("tc_edit", diff("d1")).is_ok());
         assert!(view.insert_after_tool_call("tc_edit", diff("d2")).is_ok());
 

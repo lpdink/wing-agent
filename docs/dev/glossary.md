@@ -38,6 +38,7 @@
 | **事件链锚定** | rewind/fork/compact 凭链序免费工作：事件是链节点，set_tip/fork 拷贝/压缩边界自然裁剪事件可见性。 |
 | **中途订阅视图** | SyncSessionEvent 携带四组素材：messages（已提交投影）+ uncommitted（单个未提交 assistant Message 投影）+ uncommitted_tools（未终结调用原始 args）+ events（活跃链**事实**事件），外加 turn_started_at。前端按 **messages → uncommitted → uncommitted_tools → events → live** 组装（uncommitted 走 replay_messages、uncommitted_tools 走 live ToolCallStream 分支），diff 锚点结构性先于 diff 存在。 |
 | **事实事件下发过滤** | 后端单点策略：`get_active_events()` 按 `FACT_EVENTS`（与 persist 标记同处 `event/__init__.py`）过滤，ask 额外按 `pending_ask_ids()`（inbox feedback waiters）过滤。前端只做能力分发（有渲染器则渲染），不编码"孪生不得渲染"策略。存量孪生记录加载进链但不下发（零迁移）。 |
+| **diff 载荷窗口** | `DiffContentEvent` 的 old_text/new_text 只带变更区域 ± 3 行（`tools/diff_window.py`）与窗口首行绝对行号（old_start_line/new_start_line，缺失按 1）。Write / 新建文件仍全量；`replace_all` 每匹配一条事件（同一 tool_call_id）。前端逐行渲染、不折叠（`LayoutConfig.diff_context` 已删）。 |
 
 ## 上下文与压缩
 

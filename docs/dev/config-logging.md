@@ -41,7 +41,7 @@
 
 ## TUI 配置（`~/.wing/tui/config.yaml`）
 
-`colors`（含 diff 行背景 tint：`diff_add_bg` / `diff_del_bg` 与词级强调 `diff_*_bg_strong`，24-bit hex）、`layout`（输入区 / 弹窗 / diff 上下文行数 / 工具输出的行数上限）、`rendering`、`goal.checker_system_prompt`、`api_key`（网关鉴权，空则不发送）。
+`colors`（含 diff 行背景 tint：`diff_add_bg` / `diff_del_bg` 与词级强调 `diff_*_bg_strong`，24-bit hex）、`layout`（输入区 / 弹窗 / 工具输出的行数上限）、`rendering`、`goal.checker_system_prompt`、`api_key`（网关鉴权，空则不发送）。diff 的上下文行数不是前端配置——窗口由后端随载荷下发（见 `diff-payload-window`），前端按给定内容逐行渲染。
 
 > `gateway.host/port` 只影响独立启动 `wing-gateway` 的场景；Rust TUI 读的是 backend config，不会读 TUI config 里的网关地址。
 
