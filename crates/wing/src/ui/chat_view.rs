@@ -352,6 +352,16 @@ pub struct ChatView {
     /// at. Refreshed only while a drag is in flight ([`Self::capture_visible_rows`]),
     /// so an idle app pays nothing.
     visible_rows: Vec<RenderedRow>,
+    /// Width of the content that a chat selection may cover, in columns
+    /// (`None` = the whole band).
+    ///
+    /// Set by `App` for the frame it belongs to, exactly like
+    /// [`Self::geometry`]: the overlay scrollbar paints *over* the content's
+    /// last column, so while the bar is drawn that column is chrome — a drag
+    /// may cross it, but the highlight must not invert it and the copy must
+    /// not pick up its `│` glyph (nor the padding spaces in front of it, which
+    /// `trim_end` would otherwise keep).
+    content_width: Option<u16>,
 }
 
 impl ChatView {
@@ -370,6 +380,7 @@ impl ChatView {
             geometry: ChatGeometry::default(),
             frame_links: Vec::new(),
             visible_rows: Vec::new(),
+            content_width: None,
         }
     }
 
@@ -851,6 +862,15 @@ impl ChatView {
 
     // ── Text selection: highlight + copy source ─────────────────────────
 
+    /// Set the width of the selectable content for the frame being drawn.
+    ///
+    /// `App` calls this once per frame — `Some(width - 1)` while the overlay
+    /// scrollbar is painted, `None` when the whole band belongs to the content
+    /// (no bar). See [`Self::content_width`].
+    pub fn set_content_width(&mut self, width: Option<u16>) {
+        self.content_width = width;
+    }
+
     /// Paint the highlight for `bounds` into the frame's buffer.
     ///
     /// A pure overlay: the cell styles coming out of the widget render are
@@ -877,9 +897,10 @@ impl ChatView {
         // Iterate the *band* rows (bounded by the terminal height), not the
         // selection rows: an edge drag can span thousands of content rows,
         // while only the visible ones can be painted anyway.
+        let width = self.selectable_width(area.width);
         for row in area.y..area.bottom() {
             let vrow = self.geometry.scroll_offset + (row - area.y) as usize;
-            let Some((from, to)) = row_span(bounds, vrow, area.width) else {
+            let Some((from, to)) = row_span(bounds, vrow, width) else {
                 continue;
             };
             for grapheme in buffer_row_graphemes(buf, row, area) {
@@ -893,6 +914,12 @@ impl ChatView {
                 }
             }
         }
+    }
+
+    /// Width of the band a selection may cover this frame, see
+    /// [`Self::content_width`].
+    fn selectable_width(&self, band_width: u16) -> u16 {
+        self.content_width.map_or(band_width, |w| w.min(band_width))
     }
 
     /// Snapshot the visible rows as graphemes — the copy-on-select source.
@@ -974,7 +1001,12 @@ impl ChatView {
     /// or the rows are not part of the snapshot) — in that case there is
     /// nothing to copy and no feedback is shown.
     pub fn selected_text(&self, bounds: (SelectionPoint, SelectionPoint)) -> Option<String> {
-        extract_text(&self.visible_rows, self.geometry.scroll_offset, bounds)
+        extract_text(
+            &self.visible_rows,
+            self.geometry.scroll_offset,
+            bounds,
+            self.content_width,
+        )
     }
 
     /// Set an absolute scroll offset in lines — the scrollbar's track click
@@ -1760,10 +1792,17 @@ fn place_links(
 /// the one string the crossterm backend prints verbatim. Two details make that
 /// safe:
 ///
-/// * `CellDiffOption::ForcedWidth(1)`: `Cell::cell_width()` otherwise measures
-///   the symbol (URL included) and `BufferDiff` uses that width to skip the
-///   cells *after* a wide one — a 40-character URL would make the diff skip the
-///   rest of the line.
+/// * `CellDiffOption::ForcedWidth(visible width)`: `Cell::cell_width()`
+///   otherwise measures the symbol (URL included) and `BufferDiff` uses that
+///   width to skip the cells *after* a wide one — a 40-character URL would make
+///   the diff skip the rest of the line. The forced value has to be the width
+///   the **terminal** renders (1 for a narrow grapheme, 2 for CJK / emoji), not
+///   a constant 1: `CrosstermBackend::draw` skips the `MoveTo` for a cell that
+///   follows at `x + 1`, so a cell that claims one column but prints two
+///   desynchronises the backend's cursor from the terminal's and every cell
+///   after it in the row lands one column off (visible as `百度` turning into
+///   `百 度` plus the row's tail bleeding onto the next line, but only on
+///   partial repaints — a full repaint re-emits the row in order).
 /// * every head cell carries its own open/close pair, so a partial repaint can
 ///   never leave a cell without its hyperlink (the alternative — open on the
 ///   first cell, close on the last — breaks when the diff re-emits a middle
@@ -1791,7 +1830,10 @@ fn inject_osc8(buf: &mut Buffer, row: u16, start: u16, end: u16, target: &str) {
         let cell = &mut buf[(x, row)];
         cell.set_symbol(&format!("{open}{symbol}{close}"))
             .set_diff_option(CellDiffOption::ForcedWidth(
-                std::num::NonZeroU16::new(1).expect("1 is non-zero"),
+                // The width the terminal renders, see the note above: the
+                // diff and the backend's adjacency shortcut both have to
+                // agree with it or the rest of the row shifts.
+                std::num::NonZeroU16::new(width).expect("a grapheme is at least 1 column"),
             ));
         x += width;
     }
@@ -3392,6 +3434,85 @@ mod link_tests {
             );
         }
         assert_eq!(view.link_at(4, row), None, "the space before the link");
+    }
+
+    /// Replay a frame-to-frame diff the way `CrosstermBackend::draw` writes it,
+    /// onto a terminal that advances its cursor by what it *prints*.
+    ///
+    /// The backend skips its `MoveTo` when the next emitted cell sits at
+    /// `last_x + 1` — sound only while every printed symbol advances the cursor
+    /// by exactly the width the cell claimed. This returns the prints that
+    /// landed somewhere the backend did not mean, which is the artifact class a
+    /// `TestBackend` cannot see: it never models a cursor, it just copies cells.
+    fn wired_desync(prev: &Buffer, next: &Buffer) -> Vec<String> {
+        let mut cursor = (0u16, 0u16);
+        let mut assumed: Option<(u16, u16)> = None;
+        let mut drifted = Vec::new();
+        for (x, y, cell) in prev.diff(next) {
+            let rendered = strip_osc8(cell.symbol());
+            let width = super::super::selection::grapheme_width(&rendered);
+            let skip_move = assumed == Some((x.wrapping_sub(1), y));
+            let at = if skip_move { cursor } else { (x, y) };
+            if at != (x, y) {
+                drifted.push(format!(
+                    "{rendered:?} meant for ({x},{y}) was printed at {at:?}"
+                ));
+            }
+            let next_x = at.0 + width;
+            cursor = if next_x >= next.area.width {
+                (next_x - next.area.width, at.1 + 1)
+            } else {
+                (next_x, at.1)
+            };
+            assumed = Some((x, y));
+        }
+        drifted
+    }
+
+    /// A frame-to-frame repaint must not smear on a real terminal.
+    ///
+    /// The regression: an OSC8-wrapped CJK grapheme used to pin its diff width
+    /// to `1` while the terminal renders it in two columns. The backend then
+    /// skipped the `MoveTo` for the filler column (it believed the cursor was
+    /// already there) and printed it one column to the right — `百度` came out
+    /// as `百 度` and the row's tail bled into the next line, but only on
+    /// partial repaints (scrolling), because a full repaint emits the row in
+    /// order.
+    #[test]
+    fn a_wide_linked_grapheme_moving_one_column_keeps_the_wire_in_step() {
+        // Same message, one character longer: the linked wide graphemes sit one
+        // column further right, so the repaint has to write a wide cell *and*
+        // the filler column the previous frame held a glyph in.
+        let mut before = ChatView::new();
+        before.push(ChatCell::AssistantMessage(
+            "见 [百度首页](https://www.baidu.com)".into(),
+        ));
+        let prev = render(&mut before, 40, 3);
+
+        let mut after = ChatView::new();
+        after.push(ChatCell::AssistantMessage(
+            "见一 [百度首页](https://www.baidu.com)".into(),
+        ));
+        let next = render(&mut after, 40, 3);
+
+        // Guard: the frame must really carry an injected wide grapheme, or the
+        // test would pass by rendering nothing interesting.
+        let linked: Vec<u16> = (0..40)
+            .filter(|&x| prev[(x, 0)].symbol().contains("\u{1b}]8;;"))
+            .collect();
+        assert!(
+            linked
+                .iter()
+                .any(|&x| symbol_width(prev[(x, 0)].symbol()) == 2),
+            "expected an OSC8-wrapped CJK grapheme, got linked columns {linked:?}"
+        );
+
+        let drifted = wired_desync(&prev, &next);
+        assert!(
+            drifted.is_empty(),
+            "the terminal cursor drifted from the backend's model:\n{}",
+            drifted.join("\n")
+        );
     }
 
     #[test]

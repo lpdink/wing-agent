@@ -309,11 +309,20 @@ pub fn row_span(
 /// trimmed at the end, rows are joined with `\n`, and leading / trailing
 /// blank lines are dropped. An all-blank selection yields `None` (nothing to
 /// copy, no feedback).
+///
+/// `content_width` limits every row to the columns that belong to the content
+/// (see [`ChatView::set_content_width`]): rows strictly inside the selection
+/// span run to the end of the band, which is where the overlay scrollbar sits
+/// — without the limit the copy would end in its `│` glyph plus the padding in
+/// front of it. A wide grapheme that *starts* before the limit is still taken
+/// whole.
 pub fn extract_text(
     rows: &[RenderedRow],
     scroll_offset: usize,
     bounds: (SelectionPoint, SelectionPoint),
+    content_width: Option<u16>,
 ) -> Option<String> {
+    let end_limit = content_width.unwrap_or(u16::MAX);
     let (start, end) = bounds;
     debug_assert_eq!(start.region, SelectionRegion::Chat);
     debug_assert_eq!(end.region, SelectionRegion::Chat);
@@ -332,7 +341,11 @@ pub fn extract_text(
         } else {
             row.inset
         };
-        let to = if vrow == end.row { end.col } else { u16::MAX };
+        let to = if vrow == end.row {
+            end.col.min(end_limit)
+        } else {
+            end_limit
+        };
         let mut line = String::new();
         for grapheme in &row.graphemes {
             let grapheme_end = grapheme.col.saturating_add(grapheme.width);
@@ -610,7 +623,7 @@ mod tests {
             grapheme(2, 1, " "),
             grapheme(3, 1, "x"),
         ])];
-        let text = extract_text(&rows, 0, (p(0, 0), p(0, 2)));
+        let text = extract_text(&rows, 0, (p(0, 0), p(0, 2)), None);
         assert_eq!(text.as_deref(), Some("hi"));
     }
 
@@ -622,7 +635,7 @@ mod tests {
             grapheme(2, 2, "好"),
             grapheme(4, 2, "🌍"),
         ])];
-        let text = extract_text(&rows, 0, (p(0, 0), p(0, 6)));
+        let text = extract_text(&rows, 0, (p(0, 0), p(0, 6)), None);
         assert_eq!(text.as_deref(), Some("你好🌍"));
     }
 
@@ -630,7 +643,7 @@ mod tests {
     fn test_extract_partially_selected_wide_grapheme_takes_it_whole() {
         let rows = vec![row(vec![grapheme(0, 2, "你"), grapheme(2, 2, "好")])];
         // Selecting only the first cell of the second grapheme still yields it.
-        let text = extract_text(&rows, 0, (p(0, 2), p(0, 3)));
+        let text = extract_text(&rows, 0, (p(0, 2), p(0, 3)), None);
         assert_eq!(text.as_deref(), Some("好"));
     }
 
@@ -644,7 +657,7 @@ mod tests {
             ]),
             row(vec![grapheme(0, 1, "b"), grapheme(1, 1, " ")]),
         ];
-        let text = extract_text(&rows, 10, (p(10, 0), p(12, 1)));
+        let text = extract_text(&rows, 10, (p(10, 0), p(12, 1)), None);
         // Row 12 is outside the snapshot — it is skipped, not padded.
         assert_eq!(text.as_deref(), Some("a\nb"));
     }
@@ -656,7 +669,7 @@ mod tests {
             row(vec![grapheme(0, 1, "x")]),
             row(vec![grapheme(0, 1, " ")]),
         ];
-        let text = extract_text(&rows, 0, (p(0, 0), p(2, 1)));
+        let text = extract_text(&rows, 0, (p(0, 0), p(2, 1)), None);
         assert_eq!(text.as_deref(), Some("x"));
     }
 
@@ -666,7 +679,7 @@ mod tests {
             row(vec![grapheme(0, 1, " ")]),
             row(vec![grapheme(0, 1, " ")]),
         ];
-        assert_eq!(extract_text(&rows, 0, (p(0, 0), p(1, 1))), None);
+        assert_eq!(extract_text(&rows, 0, (p(0, 0), p(1, 1)), None), None);
     }
 
     #[test]
@@ -674,14 +687,14 @@ mod tests {
         let rows = vec![row(vec![grapheme(0, 1, "x")])];
         // Selection starts above the captured band: the first line is empty
         // and therefore dropped, the visible row is still copied.
-        let text = extract_text(&rows, 5, (p(4, 0), p(5, 1)));
+        let text = extract_text(&rows, 5, (p(4, 0), p(5, 1)), None);
         assert_eq!(text.as_deref(), Some("x"));
     }
 
     #[test]
     fn test_extract_before_snapshot_is_none() {
         let rows = vec![row(vec![grapheme(0, 1, "x")])];
-        assert_eq!(extract_text(&rows, 9, (p(0, 0), p(1, 1))), None);
+        assert_eq!(extract_text(&rows, 9, (p(0, 0), p(1, 1)), None), None);
     }
 
     #[test]
@@ -692,18 +705,18 @@ mod tests {
         ];
         // Snapshot covers content rows 5..=6.
         assert_eq!(
-            extract_text(&rows, 5, (p(10, 0), p(12, 3))),
+            extract_text(&rows, 5, (p(10, 0), p(12, 3)), None),
             None,
             "a selection entirely below the snapshot copies nothing"
         );
         assert_eq!(
-            extract_text(&rows, 5, (p(0, 0), p(3, 3))),
+            extract_text(&rows, 5, (p(0, 0), p(3, 3)), None),
             None,
             "a selection entirely above the snapshot copies nothing"
         );
         // A selection overlapping the snapshot keeps exactly the covered rows.
         assert_eq!(
-            extract_text(&rows, 5, (p(4, 0), p(6, 1))).as_deref(),
+            extract_text(&rows, 5, (p(4, 0), p(6, 1)), None).as_deref(),
             Some("x\ny")
         );
     }
@@ -722,11 +735,11 @@ mod tests {
             2,
         )];
         assert_eq!(
-            extract_text(&rows, 0, (p(0, 0), p(0, 4))).as_deref(),
+            extract_text(&rows, 0, (p(0, 0), p(0, 4)), None).as_deref(),
             Some("hi")
         );
         // Selecting *only* the padding is not a copyable selection.
-        assert_eq!(extract_text(&rows, 0, (p(0, 0), p(0, 2))), None);
+        assert_eq!(extract_text(&rows, 0, (p(0, 0), p(0, 2)), None), None);
 
         // Indentation that is part of the content stays (inset 0 row).
         let rows = vec![row(vec![
@@ -735,7 +748,7 @@ mod tests {
             grapheme(2, 1, "x"),
         ])];
         assert_eq!(
-            extract_text(&rows, 0, (p(0, 0), p(0, 3))).as_deref(),
+            extract_text(&rows, 0, (p(0, 0), p(0, 3)), None).as_deref(),
             Some("  x")
         );
     }
@@ -747,7 +760,7 @@ mod tests {
             padded_row(vec![grapheme(0, 1, " "), grapheme(1, 1, "b")], 1),
         ];
         assert_eq!(
-            extract_text(&rows, 0, (p(0, 0), p(1, 2))).as_deref(),
+            extract_text(&rows, 0, (p(0, 0), p(1, 2)), None).as_deref(),
             Some("a\nb")
         );
     }

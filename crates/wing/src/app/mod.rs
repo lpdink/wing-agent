@@ -3012,12 +3012,18 @@ impl App {
             // effective scroll offset (auto-scroll / clamp included).
             if let Some(geom) = self.scrollbar_geometry() {
                 scrollbar::paint(frame.buffer_mut(), &geom, self.scrollbar, &palette);
+                // The bar's column is chrome for the selection as well: it
+                // must not be inverted by the highlight, and the copy must not
+                // pick up its glyph (see `ChatView::set_content_width`).
+                self.chat.set_content_width(Some(geom.column - chunks[1].x));
             } else {
                 // No bar this frame (content fits, or nothing drawn yet):
                 // drop the interaction state now instead of waiting for the
                 // next mouse event, so a later overflow cannot resurrect a
-                // stale hover / drag look.
+                // stale hover / drag look — and give the whole band back to
+                // the selection.
                 self.clear_scrollbar_interaction();
+                self.chat.set_content_width(None);
             }
 
             // Fixed composer block below the chat viewport.
@@ -4970,6 +4976,175 @@ mod tests {
             "the bar must not touch panel state"
         );
         assert_eq!(app.ask_panels.len(), 1, "panel stays open");
+    }
+
+    // ── Wire level: what a real terminal does with the emitted frames ────
+
+    /// A stand-in for the terminal the frames are written to.
+    ///
+    /// It consumes the very stream `CrosstermBackend::draw` writes —
+    /// `(x, y, cell)` triples — and checks the one property that keeps a frame
+    /// from smearing: **the cursor has to be where the backend thinks it is at
+    /// every print**.
+    ///
+    /// The backend skips its `MoveTo` when the next cell sits at `last_x + 1`,
+    /// a shortcut that only holds while every printed symbol advances the
+    /// cursor by exactly what the cell claimed (`Cell::cell_width()`). A cell
+    /// whose claimed width disagrees with what the terminal renders prints one
+    /// column off instead, and every following cell of that row inherits the
+    /// error — the "scroll and the text smears" class of artifact, which a
+    /// `TestBackend` cannot see because it never models a cursor.
+    struct TerminalSim {
+        width: u16,
+        /// Where the terminal really is (after the last print).
+        cursor: (u16, u16),
+        /// Where the backend believes it is — crossterm's `last_pos`, which is
+        /// local to one `draw` call.
+        assumed: Option<(u16, u16)>,
+        /// Prints that landed somewhere other than the backend meant.
+        desync: Vec<String>,
+        /// Every cell the frames emitted, `<frame>`-annotated, for assertions
+        /// and debugging.
+        emitted: Vec<(u16, u16, String, u16)>,
+    }
+
+    impl TerminalSim {
+        fn new(width: u16, height: u16) -> Self {
+            Self {
+                width,
+                cursor: (0, height - 1),
+                assumed: None,
+                desync: Vec::new(),
+                emitted: Vec::new(),
+            }
+        }
+
+        /// The terminal's side of one `Print(cell)`.
+        fn write(&mut self, x: u16, y: u16, symbol: &str) {
+            // What the terminal renders: the visible text, control sequences
+            // (an injected OSC8 link) included in the string but not printed.
+            let rendered = crate::render::markdown::links::strip_osc8(symbol);
+            let width = crate::ui::selection::grapheme_width(&rendered);
+            let skip_move = self.assumed == Some((x.wrapping_sub(1), y));
+            let at = if skip_move { self.cursor } else { (x, y) };
+            if at != (x, y) {
+                self.desync.push(format!(
+                    "printed {symbol:?} at {at:?} while the backend meant ({x}, {y})"
+                ));
+            }
+            let next = at.0 + width;
+            self.cursor = if next >= self.width {
+                (next - self.width, at.1 + 1)
+            } else {
+                (next, at.1)
+            };
+            self.assumed = Some((x, y));
+        }
+    }
+
+    impl ratatui::backend::Backend for TerminalSim {
+        type Error = std::io::Error;
+
+        fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
+        where
+            I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
+        {
+            // `last_pos` is local to one draw call in the real backend.
+            self.assumed = None;
+            use ratatui::buffer::CellWidth;
+            for (x, y, cell) in content {
+                let symbol = cell.symbol().to_string();
+                let width = cell.cell_width();
+                self.emitted.push((x, y, symbol.clone(), width));
+                self.write(x, y, &symbol);
+            }
+            Ok(())
+        }
+
+        fn hide_cursor(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn show_cursor(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn get_cursor_position(&mut self) -> std::io::Result<ratatui::layout::Position> {
+            Ok(self.cursor.into())
+        }
+
+        fn set_cursor_position<P: Into<ratatui::layout::Position>>(
+            &mut self,
+            position: P,
+        ) -> std::io::Result<()> {
+            self.cursor = position.into().into();
+            Ok(())
+        }
+
+        fn clear(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn clear_region(
+            &mut self,
+            _clear_type: ratatui::backend::ClearType,
+        ) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn size(&self) -> std::io::Result<ratatui::layout::Size> {
+            Ok(ratatui::layout::Size::new(self.width, 24))
+        }
+
+        fn window_size(&mut self) -> std::io::Result<ratatui::backend::WindowSize> {
+            Ok(ratatui::backend::WindowSize {
+                columns_rows: ratatui::layout::Size::new(self.width, 24),
+                pixels: ratatui::layout::Size::new(0, 0),
+            })
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Frame with links, CJK and enough content to scroll — the shape that
+    /// reproduced the artifact in the wild.
+    fn app_with_chinese_links() -> App {
+        let mut app = test_app();
+        app.chat.set_header(Vec::new());
+        for i in 0..3 {
+            app.chat
+                .push(ChatCell::AssistantMessage(format!("above {i}")));
+        }
+        app.chat.push(ChatCell::AssistantMessage(
+            "• Markdown 链接：[百度首页](https://www.baidu.com)、[wing-agent 仓库](https://github.com/lpdink/wing-agent)".into(),
+        ));
+        for i in 0..12 {
+            app.chat
+                .push(ChatCell::AssistantMessage(format!("below {i}")));
+        }
+        app
+    }
+
+    /// Scrolling must not smear: every cell of the partial repaint has to land
+    /// where the buffer says — wide graphemes inside links included.
+    #[test]
+    fn scrolling_linked_cjk_keeps_the_terminal_in_step() {
+        let mut app = app_with_chinese_links();
+        let mut terminal = ratatui::Terminal::new(TerminalSim::new(40, 12)).expect("test terminal");
+        app.draw(&mut terminal).expect("first frame");
+
+        // A wheel notch scrolls three lines: the next frame is a partial
+        // repaint, which is where a width mismatch starts to smear.
+        app.handle_mouse(mouse_at(crossterm::event::MouseEventKind::ScrollUp, (5, 5)));
+        app.draw(&mut terminal).expect("scrolled frame");
+
+        assert!(
+            terminal.backend().desync.is_empty(),
+            "the terminal cursor drifted from the backend's model:\n{}",
+            terminal.backend().desync.join("\n")
+        );
     }
 
     // ── Overlay scrollbar: whole-frame checks through a real Terminal ────
@@ -7182,6 +7357,62 @@ mod tests {
             [AppIntent::CopyToClipboard(text)] => assert_eq!(text, label),
             other => panic!("expected exactly one clipboard intent, got {other:?}"),
         }
+    }
+
+    /// A multi-row drag copies every row only up to the bar's column: the bar's
+    /// glyph must not land in the paste, and neither must the padding spaces in
+    /// front of it (`trim_end` stops at the glyph, not at the content).
+    #[test]
+    fn a_multi_row_copy_ends_before_the_bar_column() {
+        let mut app = app_with_tall_message();
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let band = app.chat.geometry().area;
+        let geom = app.scrollbar_geometry().expect("content overflows");
+
+        app.handle_mouse(press((band.x + 2, band.y + 1)));
+        draw(&mut app, &mut terminal);
+        // Drag down over three rows, ending on the bar's own column.
+        app.handle_mouse(drag((geom.column, band.y + 3)));
+        draw(&mut app, &mut terminal);
+        app.handle_mouse(release((geom.column, band.y + 3)));
+
+        match app.drain_intents().as_slice() {
+            [AppIntent::CopyToClipboard(text)] => {
+                assert!(text.contains("line-"), "copied the chat rows: {text:?}");
+                assert!(!text.contains('│'), "the bar must not be copied: {text:?}");
+                for line in text.lines() {
+                    assert_eq!(line, line.trim_end(), "trailing padding in {line:?}");
+                }
+            }
+            other => panic!("expected exactly one clipboard intent, got {other:?}"),
+        }
+    }
+
+    /// …and the highlight leaves that column alone too, on every selected row
+    /// (not just on the row the drag started or ended in).
+    #[test]
+    fn a_multi_row_highlight_never_inverts_the_bar_column() {
+        let mut app = app_with_tall_message();
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let band = app.chat.geometry().area;
+        let geom = app.scrollbar_geometry().expect("content overflows");
+
+        app.handle_mouse(press((band.x + 2, band.y + 1)));
+        draw(&mut app, &mut terminal);
+        app.handle_mouse(drag((geom.column, band.y + 3)));
+        draw(&mut app, &mut terminal);
+
+        let painted = reversed_cells(&terminal);
+        assert!(
+            painted.iter().any(|&(x, _)| x > band.x + 2),
+            "the drag painted something: {painted:?}"
+        );
+        assert!(
+            !painted.iter().any(|&(x, _)| x == geom.column),
+            "the bar's column must stay out of the highlight: {painted:?}"
+        );
     }
 
     /// A press beside the bar belongs to the chat band: it starts a drag
