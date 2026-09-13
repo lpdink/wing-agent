@@ -46,6 +46,8 @@ use crate::ui::popup::command::candidate_request_for;
 use crate::ui::popup::command::is_must_select_command;
 use crate::ui::popup::command::parse_slash_input;
 use crate::ui::popup::selection::SelectionPopup;
+use crate::ui::selection::ContentPoint;
+use crate::ui::selection::Selection;
 use crate::ui::spinner::WorkingIndicatorWidget;
 use crate::ui::status_bar::StatusBar;
 use crate::ui::status_bar::StatusData;
@@ -80,12 +82,44 @@ const WIDE_THRESHOLD: u16 = 100;
 /// change's Open Questions.
 const WHEEL_SCROLL_LINES: usize = 3;
 
+/// Step interval of the drag edge auto-scroll: one content line per tick
+/// (20 lines/s). Matches the reference implementation's cadence, and is fast
+/// enough to feel continuous without skipping rows. The timer only runs while
+/// the pointer rests on the chat band's top / bottom row — reaching the
+/// content edge stops it (see `App::tick_selection_autoscroll`).
+const SELECTION_AUTOSCROLL_MS: u64 = 50;
+
+/// Timer arm of the run loop's `select!`: completes after
+/// [`SELECTION_AUTOSCROLL_MS`] while a drag auto-scroll direction is armed,
+/// and never otherwise.
+///
+/// `pending()` instead of a shorter sleep is what keeps the loop from waking
+/// up for nothing: with no drag at an edge there is simply nothing to do, and
+/// the arm carrying no state means there is no timer left behind when the
+/// selection ends.
+async fn selection_autoscroll_tick(active: bool) {
+    if active {
+        tokio::time::sleep(std::time::Duration::from_millis(SELECTION_AUTOSCROLL_MS)).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
 /// Application state.
 pub struct App {
     pub status: StatusData,
     pub chat: ChatView,
     pub input: InputArea,
     pub session_id: String,
+    /// In-app text selection over the chat band (drag select, copy on
+    /// release). Anchored in content coordinates — see
+    /// [`crate::ui::selection`].
+    selection: Selection,
+    /// Structure fingerprint captured when the drag started:
+    /// `(cells, pending, terminal width)`. Any change means virtual rows may
+    /// have shifted under the anchor, so the selection is aborted; pure
+    /// content appends (streaming) leave it untouched.
+    selection_guard: Option<(usize, usize, u16)>,
     /// Whether the app should exit.
     pub should_quit: bool,
     /// Pending side-effect intents. Drained by runner after each draw cycle.
@@ -200,6 +234,8 @@ impl App {
             chat,
             input: InputArea::with_max_lines("今天构建什么？".into(), max_input_lines),
             session_id,
+            selection: Selection::default(),
+            selection_guard: None,
             should_quit: false,
             intents: Vec::new(),
             visible_height: 20,
@@ -481,23 +517,177 @@ impl App {
     /// reachable while the AskUserQuestion panel / model picker / command
     /// popup is open (plain Up/Down stay with the focused widget).
     ///
-    /// Everything else is ignored for now: press / drag / release are taken
-    /// over by the in-app text selection follow-up, `Moved` by the scrollbar,
-    /// and horizontal wheel (`ScrollLeft` / `ScrollRight`) is not a chat
-    /// gesture at all.
+    /// Left press / drag / release drive the in-app text selection, but only
+    /// when the press lands inside the chat band — a press anywhere else
+    /// (status bar, composer, popups) is ignored, exactly like `Moved` (hover,
+    /// taken over by the scrollbar change) and horizontal wheel.
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> bool {
+        use crossterm::event::MouseButton;
+        use crossterm::event::MouseEventKind;
+
         match mouse.kind {
-            crossterm::event::MouseEventKind::ScrollUp => {
+            MouseEventKind::ScrollUp => {
                 self.chat.scroll_up(WHEEL_SCROLL_LINES);
                 true
             }
-            crossterm::event::MouseEventKind::ScrollDown => {
+            MouseEventKind::ScrollDown => {
                 self.chat
                     .scroll_down(WHEEL_SCROLL_LINES, self.visible_height);
                 true
             }
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.selection_press(mouse.column, mouse.row)
+            }
+            MouseEventKind::Drag(MouseButton::Left) => self.selection_drag(mouse.column, mouse.row),
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.selection_release(mouse.column, mouse.row)
+            }
             _ => false,
         }
+    }
+
+    /// Left press inside the chat band: start a drag selection.
+    ///
+    /// Returns `false` (no redraw, no state) when the press is outside the
+    /// chat band or before the first frame has established the geometry.
+    fn selection_press(&mut self, column: u16, row: u16) -> bool {
+        if !self.chat.contains_screen(column, row) {
+            return false;
+        }
+        let Some(point) = self.chat.content_point_at(column, row) else {
+            return false;
+        };
+        self.selection.begin(point);
+        // Freeze follow for the duration of the drag: the render only pins the
+        // viewport to the bottom edge while `auto_scroll` is set, so streaming
+        // content cannot yank the view (and the highlighted rows) away.
+        // Released again by `selection_release` → `scroll_down(0, …)`.
+        self.chat.unfollow();
+        self.selection_guard = Some(self.selection_fingerprint());
+        true
+    }
+
+    /// Drag: extend the selection and arm / disarm the edge auto-scroll.
+    ///
+    /// The pointer is clamped into the visible band, so dragging past an edge
+    /// keeps producing content coordinates — that is what makes the pointer
+    /// resting on the top / bottom row scroll the view and extend the
+    /// selection.
+    fn selection_drag(&mut self, column: u16, row: u16) -> bool {
+        if !self.selection.is_press_active() {
+            return false;
+        }
+        let Some(point) = self.chat.content_point_at(column, row) else {
+            return false;
+        };
+        self.selection.drag_to(point);
+        let area = self.chat.geometry().area;
+        let direction = if row <= area.y {
+            -1
+        } else if row >= area.bottom() - 1 {
+            1
+        } else {
+            0
+        };
+        self.selection.set_auto_scroll(direction, (column, row));
+        true
+    }
+
+    /// Release: end the selection and copy whatever it covered.
+    ///
+    /// The highlight disappears by construction (the selection state is gone
+    /// after this call), the follow contract is restored from the current
+    /// scroll position, and a non-empty selection is pushed as a clipboard
+    /// intent. A zero-width selection (plain click) copies nothing.
+    fn selection_release(&mut self, column: u16, row: u16) -> bool {
+        if !self.selection.is_press_active() {
+            return false;
+        }
+        self.selection_guard = None;
+        // Re-arm the follow state iff the viewport is still at the bottom edge
+        // (`n = 0` only judges — it never moves). This runs for clicks too, so
+        // the `unfollow` from the press cannot leave the view stuck in reading
+        // mode.
+        self.chat.scroll_down(0, self.visible_height);
+        let bounds = match self.chat.content_point_at(column, row) {
+            Some(point) => self.selection.release(point),
+            None => {
+                self.selection.cancel();
+                None
+            }
+        };
+        let Some(text) = bounds.and_then(|bounds| self.chat.selected_text(bounds)) else {
+            return true;
+        };
+        self.push_intent(AppIntent::CopyToClipboard(text));
+        true
+    }
+
+    /// Abort an in-flight selection and restore the follow state.
+    ///
+    /// Used when a drag can no longer be trusted: the release will never
+    /// arrive (focus loss) or the content moved under the anchor (structural
+    /// change). Clearing `auto_scroll`'s freeze is part of the contract —
+    /// otherwise the view would stay in reading mode forever.
+    fn cancel_selection(&mut self) {
+        if !self.selection.is_press_active() {
+            return;
+        }
+        self.selection.cancel();
+        self.selection_guard = None;
+        self.chat.scroll_down(0, self.visible_height);
+    }
+
+    /// Structural fingerprint of the chat content, see [`Self::selection_guard`].
+    fn selection_fingerprint(&self) -> (usize, usize, u16) {
+        (
+            self.chat.len(),
+            self.chat.pending_len(),
+            self.terminal_width,
+        )
+    }
+
+    /// Whether the drag edge auto-scroll is currently armed (the run loop
+    /// only spins its 50 ms timer arm while this is true).
+    fn selection_auto_scroll_active(&self) -> bool {
+        self.selection.auto_scroll() != 0
+    }
+
+    /// Step the drag edge auto-scroll by one content line.
+    ///
+    /// Returns `true` when the frame must be redrawn. The step stops (and
+    /// disarms the timer) the moment the viewport cannot move any further —
+    /// no busy loop, no timer left behind. The focus travels with the rows
+    /// that scrolled by, so the selection grows while the view moves.
+    fn tick_selection_autoscroll(&mut self) -> bool {
+        let direction = self.selection.auto_scroll();
+        if direction == 0 {
+            return false;
+        }
+        let before = self.chat.scroll_position();
+        if direction < 0 {
+            self.chat.scroll_up(1);
+        } else {
+            self.chat.scroll_down(1, self.visible_height);
+        }
+        // The drag keeps the follow state frozen, even when this step landed
+        // exactly on the bottom edge (that judgement happens on release).
+        self.chat.unfollow();
+        if self.chat.scroll_position() == before {
+            self.selection.stop_auto_scroll();
+            return false;
+        }
+        // The pointer did not move, but the content under it did: the mapping
+        // table still describes the previous frame, so the focus shifts by the
+        // same single line the view just scrolled. (Re-deriving it from the
+        // frame would be stale by exactly one step.)
+        if let Some(focus) = self.selection.focus() {
+            self.selection.drag_to(ContentPoint {
+                vrow: focus.vrow.saturating_add_signed(direction as isize),
+                col: focus.col,
+            });
+        }
+        true
     }
 
     /// Push a side-effect intent for the runner to execute after draw.
@@ -2213,7 +2403,15 @@ impl App {
     }
 
     /// Draw the UI.
-    fn draw(&mut self, terminal: &mut WingTerminal) -> Result<()> {
+    ///
+    /// Generic over the backend so tests can drive it with a `TestBackend` and
+    /// assert on the very frame the user would see (highlight cells, text
+    /// snapshot) — production always passes the crossterm terminal.
+    fn draw<B>(&mut self, terminal: &mut ratatui::Terminal<B>) -> Result<()>
+    where
+        B: ratatui::backend::Backend,
+        B::Error: std::error::Error + Send + Sync + 'static,
+    {
         // Out-of-band terminal disturbance (focus regain / resize) — see
         // `needs_full_redraw`. Reset the back buffer so this draw repaints
         // the whole screen and resyncs with the terminal.
@@ -2236,6 +2434,18 @@ impl App {
         terminal.draw(|frame| {
             let area = frame.area();
             self.terminal_width = area.width;
+
+            // A selection is anchored to *content* coordinates, which only
+            // survive while the content structure is stable. Adding / removing
+            // / promoting cells or changing the width shifts the virtual rows
+            // under the anchor — abort instead of pointing the highlight at
+            // different text. Streamed text growth does not (it never moves an
+            // existing row), so it keeps the selection alive.
+            if self.selection.is_press_active()
+                && self.selection_guard != Some(self.selection_fingerprint())
+            {
+                self.cancel_selection();
+            }
 
             // Layout: status (1) | chat (fill) | [working] | info bar | input | [popup].
             // The composer (working line + info separator + input + popup) is a
@@ -2333,6 +2543,22 @@ impl App {
                 && !toast.is_expired()
             {
                 render_toast(toast, area, frame.buffer_mut(), &palette);
+            }
+
+            // In-app text selection — painted after the toast (the selection
+            // sits above every overlay) and clipped to *this* frame's chat
+            // band. It is a pure `Buffer` patch: merging `REVERSED` into the
+            // cell styles the widgets just produced, so no cell / widget code
+            // has to know about selections and the background colors survive.
+            //
+            // The same pass snapshots the visible rows: the release event
+            // lands between frames, so the copy must come from the frame the
+            // user was actually looking at.
+            if self.selection.is_press_active() {
+                if let Some(bounds) = self.selection.bounds() {
+                    self.chat.paint_selection(frame.buffer_mut(), bounds);
+                }
+                self.chat.capture_visible_rows(frame.buffer_mut());
             }
         })?;
 
@@ -2464,6 +2690,13 @@ pub async fn run_app(
                     TermEvent::Focus(focused) => {
                         app.focused = focused;
                         app.mark_dirty();
+                        // A drag that leaves the window never reports its
+                        // release — drop the in-flight selection so no
+                        // highlight (and no frozen follow state) is left
+                        // behind.
+                        if !focused {
+                            app.cancel_selection();
+                        }
                         // On focus regain, restore the correct title.
                         if focused {
                             // The terminal re-shows its surface on focus
@@ -2603,6 +2836,17 @@ pub async fn run_app(
             } => {
                 // Toast expired — next draw() will lazy-cleanup.
                 app.chat_dirty = true;
+            }
+            // Selection edge auto-scroll: one line per tick while the pointer
+            // rests on the chat band's top / bottom row. The arm carries no
+            // state of its own — `selection_autoscroll_tick` only completes
+            // while a direction is armed, and the direction is cleared the
+            // moment the selection ends or hits the content edge, so nothing
+            // is left spinning (and no busy loop when the view cannot move).
+            _ = selection_autoscroll_tick(app.selection_auto_scroll_active()) => {
+                if app.tick_selection_autoscroll() {
+                    app.input_dirty = true;
+                }
             }
             // Background fetch results (non-blocking HTTP queries).
             Some(result) = fetch_rx.recv() => {
@@ -3635,6 +3879,10 @@ mod tests {
         app.chat.scroll_offset = 50;
         app.chat.scroll_up(0); // leave the bottom without moving the offset
 
+        // No frame has been drawn, so the chat band has no geometry yet: press
+        // / drag / release cannot start a selection (they only ever do inside
+        // the band — see the text-selection tests) and hover / horizontal
+        // wheel are never a chat gesture at all.
         for kind in [
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
             crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
@@ -4007,6 +4255,478 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c.cell(), ChatCell::DiscardedUserMessage(s) if s == "hello")),
             "interrupted pending message must be committed as discarded, not lost"
+        );
+    }
+
+    // ── In-app text selection ────────────────────────────────
+
+    /// A `TestBackend` terminal: assertions read the very frame the app drew,
+    /// which is what the highlight and the copy source are made of.
+    fn test_terminal(width: u16, height: u16) -> ratatui::Terminal<ratatui::backend::TestBackend> {
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+            .expect("test terminal")
+    }
+
+    fn draw(app: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>) {
+        app.draw(terminal).expect("draw");
+    }
+
+    fn mouse_at(
+        kind: crossterm::event::MouseEventKind,
+        (column, row): (u16, u16),
+    ) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    fn press(at: (u16, u16)) -> crossterm::event::MouseEvent {
+        mouse_at(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            at,
+        )
+    }
+
+    fn drag(at: (u16, u16)) -> crossterm::event::MouseEvent {
+        mouse_at(
+            crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            at,
+        )
+    }
+
+    fn release(at: (u16, u16)) -> crossterm::event::MouseEvent {
+        mouse_at(
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            at,
+        )
+    }
+
+    /// App whose chat holds one user message and no header, so the rendered
+    /// rows are known: row 1 of the chat band holds "hello world" at column 2
+    /// (the user cell insets its text by two columns, one padding row on top).
+    fn app_with_message() -> App {
+        let mut app = test_app();
+        app.chat.set_header(Vec::new());
+        app.chat.push(ChatCell::UserMessage("hello world".into()));
+        app
+    }
+
+    /// App with content taller than the band (30 lines), so scrolling and
+    /// auto-scroll have somewhere to go.
+    fn app_with_tall_message() -> App {
+        let mut app = test_app();
+        app.chat.set_header(Vec::new());
+        let text = (0..30)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.chat.push(ChatCell::UserMessage(text));
+        app
+    }
+
+    fn reversed_cells(
+        terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+    ) -> Vec<(u16, u16)> {
+        let buf = terminal.backend().buffer();
+        let mut cells = Vec::new();
+        for y in buf.area.y..buf.area.bottom() {
+            for x in buf.area.x..buf.area.right() {
+                if buf[(x, y)]
+                    .modifier
+                    .contains(ratatui::style::Modifier::REVERSED)
+                {
+                    cells.push((x, y));
+                }
+            }
+        }
+        cells
+    }
+
+    #[test]
+    fn test_drag_select_copies_the_selected_text() {
+        let mut app = app_with_message();
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+
+        let band = app.chat.geometry().area;
+        assert!(band.height > 1 && app.chat.is_at_bottom());
+
+        assert!(
+            app.handle_mouse(press((band.x + 2, band.y + 1))),
+            "a press inside the chat band starts a selection"
+        );
+        assert!(
+            app.handle_mouse(drag((band.x + 13, band.y + 1))),
+            "a drag changes the highlight"
+        );
+        draw(&mut app, &mut terminal);
+
+        // The drag frame carries the highlight over exactly the selected span.
+        assert_eq!(
+            reversed_cells(&terminal),
+            (band.x + 2..band.x + 13)
+                .map(|x| (x, band.y + 1))
+                .collect::<Vec<_>>()
+        );
+
+        assert!(app.handle_mouse(release((band.x + 13, band.y + 1))));
+        match app.drain_intents().as_slice() {
+            [AppIntent::CopyToClipboard(text)] => assert_eq!(text, "hello world"),
+            other => panic!("expected exactly one clipboard intent, got {other:?}"),
+        }
+
+        // Release clears the highlight immediately — no residue, no Esc.
+        draw(&mut app, &mut terminal);
+        assert!(
+            reversed_cells(&terminal).is_empty(),
+            "the selection must leave no highlight behind"
+        );
+        draw(&mut app, &mut terminal);
+        assert!(reversed_cells(&terminal).is_empty());
+    }
+
+    #[test]
+    fn test_click_without_drag_copies_nothing() {
+        let mut app = app_with_message();
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let band = app.chat.geometry().area;
+
+        assert!(app.handle_mouse(press((band.x + 2, band.y + 1))));
+        assert!(app.handle_mouse(release((band.x + 2, band.y + 1))));
+        assert!(app.drain_intents().is_empty(), "a click selects nothing");
+        assert!(
+            app.chat.is_at_bottom(),
+            "a click at the bottom must not leave the view unfollowed"
+        );
+
+        draw(&mut app, &mut terminal);
+        assert!(reversed_cells(&terminal).is_empty());
+    }
+
+    #[test]
+    fn test_press_outside_the_chat_band_never_starts_a_selection() {
+        let mut app = app_with_message();
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let band = app.chat.geometry().area;
+
+        // Status bar (row 0), composer (last row): both outside the band.
+        for at in [(band.x + 2, 0), (band.x + 2, 11), (0, band.y + 1)] {
+            if app.chat.contains_screen(at.0, at.1) {
+                continue;
+            }
+            assert!(!app.handle_mouse(press(at)), "press at {at:?} is ignored");
+            assert!(!app.selection.is_press_active());
+            assert!(!app.handle_mouse(drag((band.x + 5, band.y + 1))));
+            assert!(!app.handle_mouse(release((band.x + 5, band.y + 1))));
+            assert!(app.drain_intents().is_empty());
+        }
+    }
+
+    #[test]
+    fn test_drag_freezes_follow_and_release_keeps_reading_when_content_grew() {
+        let mut app = app_with_message();
+        app.chat
+            .push(ChatCell::AssistantMessage("streaming".into()));
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        assert!(app.chat.is_at_bottom());
+        let band = app.chat.geometry().area;
+
+        app.handle_mouse(press((band.x + 2, band.y + 1)));
+        assert!(
+            !app.chat.is_at_bottom(),
+            "the drag freezes the follow state"
+        );
+        let frozen = app.chat.scroll_position();
+
+        // Streaming delta: the existing assistant cell grows. No new cell, no
+        // width change — neither the selection nor the frozen view may move.
+        let growth = (0..20)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.chat.append_to_last_assistant(&format!("\n{growth}"));
+        draw(&mut app, &mut terminal);
+        assert_eq!(
+            app.chat.scroll_position(),
+            frozen,
+            "new content must not yank the frozen view"
+        );
+        assert!(
+            app.chat.content_height() > app.visible_height,
+            "the content must have outgrown the band"
+        );
+        assert!(
+            app.selection.is_press_active(),
+            "pure text growth must not abort the selection"
+        );
+
+        app.handle_mouse(release((band.x + 4, band.y + 1)));
+        assert!(
+            !app.chat.is_at_bottom(),
+            "released above the bottom edge → stay in reading mode"
+        );
+    }
+
+    #[test]
+    fn test_release_at_the_bottom_rearms_follow() {
+        let mut app = app_with_tall_message();
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        assert!(app.chat.is_at_bottom(), "pinned to the bottom on load");
+        let band = app.chat.geometry().area;
+
+        app.handle_mouse(press((band.x + 2, band.y + 1)));
+        app.handle_mouse(drag((band.x + 6, band.y + 3)));
+        draw(&mut app, &mut terminal);
+        app.handle_mouse(release((band.x + 6, band.y + 3)));
+
+        assert!(
+            app.chat.is_at_bottom(),
+            "a release at the bottom edge re-arms the follow state"
+        );
+    }
+
+    #[test]
+    fn test_release_above_the_bottom_keeps_the_reading_state() {
+        let mut app = app_with_tall_message();
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        app.chat.scroll_up(5);
+        draw(&mut app, &mut terminal);
+        assert!(!app.chat.is_at_bottom());
+        let reading = app.chat.scroll_position();
+        let band = app.chat.geometry().area;
+
+        app.handle_mouse(press((band.x + 2, band.y + 1)));
+        app.handle_mouse(drag((band.x + 8, band.y + 4)));
+        draw(&mut app, &mut terminal);
+        app.handle_mouse(release((band.x + 8, band.y + 4)));
+
+        assert!(!app.chat.is_at_bottom(), "still above the bottom edge");
+        assert_eq!(app.chat.scroll_position(), reading);
+    }
+
+    #[test]
+    fn test_structural_change_aborts_the_selection() {
+        // Width (resize), cell count and pending count all shift virtual rows
+        // under the anchor — the selection must be dropped, not pointed at
+        // different text.
+        let cases: Vec<(&str, Box<dyn Fn(&mut App)>)> = vec![
+            (
+                "width",
+                Box::new(|app: &mut App| {
+                    // Handled by drawing into a differently sized terminal.
+                    let _ = app;
+                }),
+            ),
+            (
+                "cell count",
+                Box::new(|app: &mut App| {
+                    app.chat.push(ChatCell::SystemMessage("new cell".into()));
+                }),
+            ),
+            (
+                "pending count",
+                Box::new(|app: &mut App| {
+                    app.chat.push_pending("req-1".into(), "queued".into());
+                }),
+            ),
+        ];
+
+        for (name, mutate) in cases {
+            let mut app = app_with_tall_message();
+            let mut terminal = test_terminal(40, 12);
+            draw(&mut app, &mut terminal);
+            let band = app.chat.geometry().area;
+            app.handle_mouse(press((band.x + 2, band.y + 1)));
+            app.handle_mouse(drag((band.x + 6, band.y + 2)));
+            assert!(app.selection.is_press_active(), "{name}: drag in flight");
+
+            if name == "width" {
+                // A resize: the next frame's width no longer matches the one
+                // the anchor was taken with.
+                let mut wider = test_terminal(60, 12);
+                draw(&mut app, &mut wider);
+            } else {
+                mutate(&mut app);
+                draw(&mut app, &mut terminal);
+            }
+
+            assert!(
+                !app.selection.is_press_active(),
+                "{name}: the selection must be aborted"
+            );
+            assert!(
+                reversed_cells(&terminal).is_empty(),
+                "{name}: the highlight must be cleared"
+            );
+            assert!(
+                !app.handle_mouse(release((band.x + 6, band.y + 2))),
+                "{name}: a release after the abort is a no-op"
+            );
+            assert!(
+                app.drain_intents().is_empty(),
+                "{name}: nothing may be copied"
+            );
+        }
+    }
+
+    #[test]
+    fn test_focus_loss_aborts_the_selection() {
+        let mut app = app_with_tall_message();
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let band = app.chat.geometry().area;
+
+        app.handle_mouse(press((band.x + 2, band.y + 1)));
+        app.handle_mouse(drag((band.x + 6, band.y + 3)));
+        assert!(app.selection.is_press_active());
+
+        // The release of a drag that left the window never arrives.
+        app.cancel_selection();
+        assert!(!app.selection.is_press_active());
+        assert!(
+            app.chat.is_at_bottom(),
+            "the frozen follow state is restored"
+        );
+        draw(&mut app, &mut terminal);
+        assert!(reversed_cells(&terminal).is_empty());
+    }
+
+    #[test]
+    fn test_edge_autoscroll_steps_one_line_and_stops_at_the_edge() {
+        let mut app = app_with_tall_message();
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        // Reading history: the view has room to move in both directions.
+        app.chat.scroll_up(10);
+        draw(&mut app, &mut terminal);
+        let band = app.chat.geometry().area;
+        assert!(!app.chat.is_at_bottom());
+
+        // Drag onto the band's last row → downward auto-scroll arms.
+        app.handle_mouse(press((band.x + 2, band.y + 2)));
+        app.handle_mouse(drag((band.x + 2, band.bottom() - 1)));
+        assert_eq!(app.selection.auto_scroll(), 1);
+        let before = app.chat.scroll_position();
+        assert!(app.tick_selection_autoscroll(), "a step redraws");
+        assert_eq!(app.chat.scroll_position(), before + 1, "one line per tick");
+        assert_eq!(app.selection.auto_scroll(), 1, "still armed");
+        assert!(
+            !app.chat.is_at_bottom(),
+            "the drag keeps the follow state frozen while it steps"
+        );
+
+        // Reaching the content edge stops the step instead of spinning.
+        app.chat.scroll_down(1000, app.visible_height);
+        let bottom = app.chat.scroll_position();
+        assert!(!app.tick_selection_autoscroll(), "nothing left to scroll");
+        assert_eq!(app.chat.scroll_position(), bottom, "the view stays put");
+        assert_eq!(app.selection.auto_scroll(), 0, "the timer is disarmed");
+        assert!(!app.selection_auto_scroll_active());
+
+        // Drag onto the band's first row → upward auto-scroll arms.
+        app.handle_mouse(drag((band.x + 2, band.y)));
+        assert_eq!(app.selection.auto_scroll(), -1);
+        let before = app.chat.scroll_position();
+        assert!(app.tick_selection_autoscroll());
+        assert_eq!(app.chat.scroll_position(), before - 1);
+
+        // And it stops at the top edge too.
+        app.chat.jump_top();
+        assert!(!app.tick_selection_autoscroll());
+        assert_eq!(app.selection.auto_scroll(), 0);
+    }
+
+    #[test]
+    fn test_edge_autoscroll_extends_the_selection_with_the_rows() {
+        let mut app = app_with_tall_message();
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        app.chat.scroll_up(10);
+        draw(&mut app, &mut terminal);
+        let band = app.chat.geometry().area;
+
+        app.handle_mouse(press((band.x + 2, band.y + 4)));
+        app.handle_mouse(drag((band.x + 2, band.bottom() - 1)));
+        let before = app.selection.bounds().expect("a drag produced bounds");
+        let (anchor_row, focus_before) = (before.0.vrow, before.1.vrow);
+
+        assert!(app.tick_selection_autoscroll());
+        let after = app.selection.bounds().expect("still selected");
+        let focus_after = after.1.vrow;
+        assert!(
+            focus_after > focus_before,
+            "the focus follows the rows scrolling by: {focus_before} -> {focus_after}"
+        );
+        assert_eq!(
+            after.0.vrow, anchor_row,
+            "the anchor is content-anchored and does not move"
+        );
+
+        // Moving the pointer away from the edge disarms the step.
+        app.handle_mouse(drag((band.x + 4, band.y + 3)));
+        assert_eq!(app.selection.auto_scroll(), 0);
+
+        // Releasing stops it for good.
+        app.handle_mouse(drag((band.x + 4, band.bottom() - 1)));
+        assert_eq!(app.selection.auto_scroll(), 1);
+        app.handle_mouse(release((band.x + 4, band.bottom() - 1)));
+        assert_eq!(app.selection.auto_scroll(), 0);
+        assert!(!app.selection.is_press_active());
+    }
+
+    #[test]
+    fn test_hover_and_horizontal_wheel_stay_inert_during_a_drag() {
+        let mut app = app_with_tall_message();
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let band = app.chat.geometry().area;
+        app.handle_mouse(press((band.x + 2, band.y + 1)));
+        app.handle_mouse(drag((band.x + 6, band.y + 2)));
+
+        let offset = app.chat.scroll_position();
+        let focus = app.selection.bounds();
+        for kind in [
+            crossterm::event::MouseEventKind::Moved,
+            crossterm::event::MouseEventKind::ScrollLeft,
+            crossterm::event::MouseEventKind::ScrollRight,
+        ] {
+            assert!(!app.handle_mouse(mouse_at(kind, (band.x + 9, band.y + 4))));
+        }
+        assert_eq!(app.chat.scroll_position(), offset);
+        assert_eq!(app.selection.bounds(), focus, "the selection is untouched");
+    }
+
+    #[tokio::test]
+    async fn test_selection_autoscroll_timer_fires_only_when_armed() {
+        use std::time::Duration;
+
+        // Armed: the arm completes on its own (the run loop then steps the
+        // view one line).
+        tokio::select! {
+            () = selection_autoscroll_tick(true) => {}
+            () = tokio::time::sleep(Duration::from_millis(
+                SELECTION_AUTOSCROLL_MS * 20,
+            )) => panic!("an armed timer must fire"),
+        }
+
+        // Disarmed: the arm never completes on its own — the loop stays parked
+        // instead of spinning at the tick rate.
+        let parked = tokio::time::timeout(
+            Duration::from_millis(SELECTION_AUTOSCROLL_MS * 3),
+            selection_autoscroll_tick(false),
+        )
+        .await;
+        assert!(
+            parked.is_err(),
+            "a disarmed timer must not wake the event loop"
         );
     }
 }
