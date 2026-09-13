@@ -11,7 +11,7 @@ repository = "https://github.com/abiter/wing"
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 futures-util = "0.3"
 
 # Serialization
@@ -39,7 +39,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# `query` 是 reqwest 0.13 起的显式 feature（默认关闭），`.query(...)` 依赖它。
+# TLS 未启用（只连本地 http://127.0.0.1）；若将来需要 https：0.13 默认
+# rustls + aws-lc-rs（编译需 C 工具链），交叉编译建议改用 rustls-no-provider。
+reqwest = { version = "0.13", default-features = false, features = ["json", "query"] }
 
 # Error handling
 thiserror = "2"
@@ -47,7 +50,7 @@ thiserror = "2"
 # Utilities
 unicode-width = "0.2"
 unicode-linebreak = "0.1.5"
-dirs = "6"
+dirs = "7"
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
