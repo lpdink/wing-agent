@@ -80,6 +80,9 @@ pub struct ScrollbarState {
     pub dragging: bool,
     /// Row offset inside the thumb kept under the pointer while dragging.
     pub grip: u16,
+    /// `(row, offset)` the current drag started at — the anchor a *fine* drag
+    /// is relative to (see [`offset_for_drag`]).
+    pub drag_from: Option<(u16, usize)>,
 }
 
 impl ScrollbarState {
@@ -91,10 +94,11 @@ impl ScrollbarState {
     /// Drop hover + drag. Returns `true` when something actually changed, so
     /// callers can skip a redraw on no-op cleanups.
     pub fn clear(&mut self) -> bool {
-        let changed = self.is_active();
+        let changed = self.is_active() || self.drag_from.is_some();
         self.hovered = false;
         self.dragging = false;
         self.grip = 0;
+        self.drag_from = None;
         changed
     }
 }
@@ -167,12 +171,25 @@ pub fn grip_at(geom: &ScrollbarGeometry, row: u16) -> u16 {
     }
 }
 
-/// Target scroll offset for a pointer row — the one mapping used by both the
-/// track click and the thumb drag.
+/// Whether the pointer row sits on the thumb itself (as opposed to the bare
+/// track above / below it).
 ///
-/// The row is clamped into the track first, so a drag that leaves the chat
-/// area (or the bar column) keeps dragging along the extremes instead of
-/// jumping or stalling.
+/// A press on the thumb keeps its position (the drag that follows is
+/// relative); a press on the bare track jumps proportionally.
+pub fn hit_thumb(geom: &ScrollbarGeometry, row: u16) -> bool {
+    row >= geom.thumb_top && row <= geom.thumb_bottom
+}
+
+/// Target scroll offset for a *press* on the track — the coarse mapping.
+///
+/// Proportional: the thumb travels its whole range as the pointer travels the
+/// track, so one gesture reaches any position (`max_scroll / travel` lines per
+/// pointer row — hundreds of lines on a long session, which is fine for a
+/// jump and useless for precision). The fine mapping is [`offset_for_drag`].
+///
+/// The row is clamped into the track first, so a press that leaves the chat
+/// area (or the bar column) lands on the nearest extreme instead of jumping or
+/// stalling.
 pub fn offset_for_row(geom: &ScrollbarGeometry, row: u16, grip: u16) -> usize {
     let max_scroll = geom.max_scroll();
     let travel = geom.track_height().saturating_sub(geom.thumb_height());
@@ -192,6 +209,36 @@ pub fn offset_for_row(geom: &ScrollbarGeometry, row: u16, grip: u16) -> usize {
     let travel = travel as u64;
     let offset = (rel * max_scroll as u64 + travel / 2) / travel;
     (offset as usize).min(max_scroll)
+}
+
+/// Target scroll offset for a *drag* — the fine mapping.
+///
+/// Relative to the press (`origin` = the row and the offset the drag started
+/// at): one pointer row moves the view `lines_per_row` **content lines**, i.e.
+/// exactly one wheel notch when the caller passes the wheel's step, so dragging
+/// the bar and rolling the wheel feel the same.
+///
+/// A drag cannot reach an arbitrary position on its own — one gesture covers
+/// `travel × lines_per_row` lines (≈ 100 rows of a 40-row band) — so the two
+/// gestures are complementary: **press the bare track to get close** (the
+/// proportional jump lands within half a pointer row of the target), then drag
+/// the thumb to fine-tune. Reaching for the extremes with one gesture is what
+/// the jump is for; making the drag proportional instead would bring back the
+/// hundred-lines-per-row step.
+///
+/// The row is clamped into the track, so a drag that leaves the chat area
+/// keeps moving along the extremes instead of accelerating.
+pub fn offset_for_drag(
+    geom: &ScrollbarGeometry,
+    origin: (u16, usize),
+    row: u16,
+    lines_per_row: usize,
+) -> usize {
+    let max_scroll = geom.max_scroll() as i64;
+    let row = row.clamp(geom.track_top, geom.track_bottom);
+    let rows = row as i64 - origin.0 as i64;
+    let moved = (rows * lines_per_row as i64).clamp(-max_scroll, max_scroll);
+    (origin.1 as i64 + moved).clamp(0, max_scroll) as usize
 }
 
 /// Paint the bar into the frame buffer.
@@ -385,6 +432,7 @@ mod tests {
         assert_eq!(offset_for_row(&geom, geom.track_bottom - 1, grip), 80);
     }
 
+    /// A press on the thumb keeps its position — the fine drag needs no `grip`.
     #[test]
     fn test_press_on_the_thumb_keeps_the_grabbed_row() {
         let geom = even_geom(40); // thumb rows 8..=11
@@ -404,17 +452,49 @@ mod tests {
     }
 
     #[test]
-    fn test_drag_clamps_at_both_ends() {
+    fn test_press_mapping_clamps_at_both_ends() {
         let geom = even_geom(40);
         let grip = 1;
-        // Pointer dragged far above the track (even out of the chat area).
+        // A press far above the track (even out of the chat area) lands on the
+        // top, one far below on the bottom — a press never overshoots.
         assert_eq!(offset_for_row(&geom, 0, grip), 0);
         for row in [geom.track_top, geom.track_top + 1] {
             assert_eq!(offset_for_row(&geom, row, grip), 0);
         }
-        // …and far below it.
         assert_eq!(offset_for_row(&geom, 9999, grip), 80);
         assert_eq!(offset_for_row(&geom, geom.track_bottom, grip), 80);
+    }
+
+    /// The drag mapping is *relative* and fine: one pointer row is one wheel
+    /// notch, anchored at the press.
+    #[test]
+    fn test_drag_moves_the_wheel_step_per_pointer_row() {
+        let geom = even_geom(40); // track 0..=19, thumb 8..=11, max_scroll 80
+
+        // Two rows down from the anchor: 6 lines further.
+        assert_eq!(offset_for_drag(&geom, (10, 40), 12, 3), 46);
+        // Two rows up: 6 lines back.
+        assert_eq!(offset_for_drag(&geom, (10, 40), 8, 3), 34);
+        // The row is clamped into the track, so dragging past an edge keeps
+        // moving by what the track still offers — never accelerating.
+        assert_eq!(offset_for_drag(&geom, (10, 40), 0, 3), 10);
+        assert_eq!(offset_for_drag(&geom, (10, 40), 9999, 3), 67);
+        // Both ends of the content clamp.
+        assert_eq!(offset_for_drag(&geom, (10, 0), 0, 3), 0);
+        assert_eq!(offset_for_drag(&geom, (10, 80), 9999, 3), 80);
+    }
+
+    /// The two mappings are complementary: the press covers the whole range in
+    /// one gesture, the drag lands exactly where it is told.
+    #[test]
+    fn test_drag_is_finer_than_the_press_it_follows() {
+        let geom = even_geom(40);
+        // The press at the bottom row reaches the end…
+        let jumped = offset_for_row(&geom, geom.track_bottom, 1);
+        assert_eq!(jumped, 80);
+        // …and a drag from there walks back in wheel-sized steps.
+        let row = geom.track_bottom;
+        assert_eq!(offset_for_drag(&geom, (row, jumped), row - 1, 3), 77);
     }
 
     #[test]
@@ -458,6 +538,7 @@ mod tests {
         assert!(state.clear());
         assert!(!state.is_active());
         assert_eq!(state.grip, 0);
+        assert_eq!(state.drag_from, None);
 
         state.dragging = true;
         state.grip = 3;
