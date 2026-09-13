@@ -457,10 +457,21 @@ class Session:
         成对语义：不落盘半写记录（读取侧把单字段视为无记录）。
         保存的是整个 metadata，因此调用方（如 switch_template）设置的
         其他字段（template_name 等）随同一次写入落盘。
+
+        落盘是 best-effort：写失败（disk full / 只读挂载 / 权限）只打 warning，
+        不让 OSError 穿出去——切换已经生效，把请求变成 500 只会制造一次新的
+        前后端错位（agent 在新模型上跑、前端以为失败）。最坏退化成本次进程内
+        正确、重启后回模板默认。
         """
         self._metadata.model_name = self.agent.model
         self._metadata.provider_name = self.agent.model_provider.name
-        self._save_metadata()
+        try:
+            self._save_metadata()
+        except OSError as e:
+            log.warning(
+                f"Session {self._session_id}: model record not persisted ({e}); "
+                "switch stays in effect for this process"
+            )
 
     def _restore_persisted_model(self) -> None:
         """从 metadata 还原模型绑定（重启后 resume 的核心动作）。
@@ -470,12 +481,15 @@ class Session:
         - provider 已不可解析（config 变更/构建失败）时降级：打 warning、
           保持模板默认模型、记录原样保留（config 修复后下次 resume 仍可还原）。
         - 记录不完整（单字段）视为无记录。
+        - model 不在 provider 的静态模型列表内时只打 warning，仍然还原
+          （记录是用户选择，不因配置列表变动而作废）。
         """
         model = self._metadata.model_name
         provider_name = self._metadata.provider_name
         if model is None or provider_name is None:
             return
         try:
+            provider_cfg = get_config().get_provider(provider_name)
             provider = self._resolve_provider(provider_name)
         except Exception as e:
             log.warning(
@@ -484,6 +498,15 @@ class Session:
                 "falling back to template default (record kept)"
             )
             return
+        # 静态模型列表非空时能对记录做一致性提示（不阻断）：记录到已下架
+        # 模型时，用户看到的失败来自上游 model not found，看不出与 session
+        # 记录有关——这条 warning 是唯一线索。列表为空 = 远端 /models 动态
+        # 来源，跳过（避免在构造期发网络请求）。
+        if provider_cfg.models and model not in provider_cfg.models:
+            log.warning(
+                f"Session {self._session_id}: recorded model '{model}' is not "
+                f"in provider '{provider_name}' static model list; restoring anyway"
+            )
         self.agent.set_model(model, provider)
         log.info(
             f"Session {self._session_id}: restored model "

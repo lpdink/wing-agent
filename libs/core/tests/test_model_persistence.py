@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from wing.agent_template import AgentTemplate
-from wing.event import SessionInitEvent, SyncSessionEvent
+from wing.event import SessionInitEvent, SessionStateChangedEvent, SyncSessionEvent
 from wing.event_bus import event_bus
 from wing.gateway.protocol import AgentOverride
 from wing.schema import Message
@@ -224,6 +224,27 @@ class TestDegradation:
         assert (meta.model_name, meta.provider_name) == ("ghost-model", "ghost")
 
     @pytest.mark.asyncio
+    async def test_model_not_in_static_list_restores_with_warning(
+        self, sm, root, wing_logs, _mock_config
+    ):
+        """provider 在、model 不在其静态列表内：仍然还原，只打 warning。"""
+        _mock_config.providers[0].models = ["only-this-model"]
+
+        session = sm.create_session()
+        sid = session.session_id
+        session.store.save_metadata(
+            sid,
+            SessionMetadata(
+                model_name="not-in-list", provider_name=_mock_config.providers[0].name
+            ),
+        )
+
+        restored = _restart(root).resume_session(sid)
+
+        assert restored.agent.model == "not-in-list"
+        assert any("static model list" in r.getMessage() for r in wing_logs)
+
+    @pytest.mark.asyncio
     async def test_partial_record_treated_as_no_record(self, sm, root):
         session = sm.create_session()
         sid = session.session_id
@@ -231,6 +252,33 @@ class TestDegradation:
 
         restored = _restart(root).resume_session(sid)
         assert restored.agent.model == sm.template_manager.default.model
+
+
+class TestPersistFailureIsBestEffort:
+    """落盘失败不改变「切换已生效」的事实（写侧与读侧一样宽容）。"""
+
+    @pytest.mark.asyncio
+    async def test_metadata_write_failure_does_not_break_switch(
+        self, received, wing_logs, monkeypatch
+    ):
+        from wing.runtime import WingRuntime
+
+        rt = WingRuntime()
+        session = rt.create_session()
+        sid = session.session_id
+
+        def _boom(session_id: str, metadata: SessionMetadata) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(session.store, "save_metadata", _boom)
+
+        received.clear()
+        await rt.update_session(sid, model="qwen3-max", provider="alt")
+
+        # 切换生效、事件照发——一次磁盘写失败不会把已生效的切换变成 500
+        assert session.agent.model == "qwen3-max"
+        assert any(isinstance(e, SessionStateChangedEvent) for e in received)
+        assert any("model record not persisted" in r.getMessage() for r in wing_logs)
 
 
 class TestCompatibility:

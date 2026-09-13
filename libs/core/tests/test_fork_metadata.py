@@ -193,23 +193,21 @@ class TestResumeTemplate:
         assert resumed.template_name == "coder"
 
     @pytest.mark.asyncio
-    async def test_resume_explicit_template_wins(self, tmp_path: Path):
-        """显式传入模板优先于 metadata。"""
-        from wing.agent_template import AgentTemplate
+    async def test_resume_rejects_explicit_template(self, tmp_path: Path):
+        """resume 不接受显式模板——metadata 是模板的唯一来源。
 
+        要换模板请在恢复后走 session/update（agent 字段）。
+        """
         store = FileSessionStore(tmp_path / "sessions")
         sm = SessionManager({"file": store})
-        coder = AgentTemplate(name="coder", model="gpt-4", provider_name="default")
-        sm._template_manager._templates["coder"] = coder
-
-        session = sm.create_session(template_name="coder")
+        session = sm.create_session()
         _seed(session, "hello")
 
-        del sm._sessions[session.session_id]
-        resumed = sm.resume_session(
-            session.session_id, template=sm.template_manager.default
-        )
-        assert resumed.template_name == "default"
+        with pytest.raises(TypeError):
+            sm.resume_session(
+                session.session_id,
+                template=sm.template_manager.default,  # ty: ignore[unknown-argument]
+            )
 
     @pytest.mark.asyncio
     async def test_resume_legacy_metadata_falls_back_default(self, tmp_path: Path):

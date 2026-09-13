@@ -208,19 +208,16 @@ class SessionManager:
                 return session_id, store
         return None
 
-    def resume_session(
-        self,
-        session_id: str,
-        template: "AgentTemplate | None" = None,
-    ) -> Session:
+    def resume_session(self, session_id: str) -> Session:
         """恢复已有 session（精确匹配 session id）。已在内存中则直接返回。
 
-        模板解析优先级：显式传入 > metadata.template_name > 默认模板。
+        模板只从 metadata.template_name 解析——resume 不接受显式模板：
+        **metadata 是模板的唯一来源**，要换模板请在恢复后走
+        `session/update`（agent 字段）。template_name 缺失或已不存在于
+        config 时回退默认模板。
 
         Args:
             session_id: 目标 session ID（须为完整 ID）
-            template: 可选模板。传入时使用该模板恢复；
-                      不传时优先使用 metadata 中持久化的模板。
 
         Returns:
             恢复后的 Session 实例
@@ -239,9 +236,9 @@ class SessionManager:
 
         metadata = store.load_metadata(resolved)
 
-        # 模板解析：显式传入 > metadata.template_name > 默认
-        tpl = template
-        if tpl is None and metadata is not None and metadata.template_name is not None:
+        # 模板解析：metadata.template_name > 默认（metadata 是唯一来源）
+        tpl = None
+        if metadata is not None and metadata.template_name is not None:
             tpl = self._template_manager.get(metadata.template_name)
         if tpl is None:
             tpl = self._template_manager.default
