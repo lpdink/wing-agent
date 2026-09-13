@@ -24,6 +24,33 @@
 
 「底部跟随新内容 / 滚动离开底部后不被拉回 / 回到最底部重新武装跟随」由 `ChatView` 的滚动方法统一承载，所有滚动入口（滚轮、键盘、`jump_*`）共用同一状态，细节与 Scenario 见 openspec change `revert-alternate-scroll` 的 `tui-scroll-follow` spec。
 
+## 应用内文本选择（`tui-text-selection`）
+
+免修饰键拖选复制由应用侧实现，模块分工：
+
+| 关注点 | 位置 |
+|---|---|
+| 选区状态机（纯逻辑，可单测） | `crates/wing/src/ui/selection.rs` |
+| 坐标映射 / 高亮 patch / 文本快照 | `crates/wing/src/ui/chat_view.rs` |
+| 事件接线 / 冻结跟随 / 失效规则 / 自动滚动 | `crates/wing/src/app/mod.rs` |
+| 剪贴板链路 | `crates/wing/src/util/clipboard.rs` + `app/runner.rs` |
+
+**坐标模型**：选区锚定在**内容坐标** `(vrow, col)`（`vrow` = chat 内容虚拟行 = header + cells + pending 的连续空间）。每帧通过 `ChatView::geometry()`（**上一帧真实使用的** chat 区域 Rect + `scroll_offset`）双向映射到屏幕行。指针越界时**夹到可见带边缘**而不是拒绝——这正是边缘拖拽能继续扩展选区、并驱动边缘自动滚动的前提。内容纯追加时锚点不漂移（追加不改变已有行号）。
+
+**高亮**：在 `App::draw` 的 `terminal.draw` 闭包内、**所有 widget（含 toast）渲染完之后**，用 `frame.buffer_mut()` 给落入选区的单元格 `set_style(Style::default().add_modifier(Modifier::REVERSED))`。要点：① `set_style` 是**合并**语义（保留 fg/bg，只叠加 modifier），不要用 `Style::default().bg(...)` 覆盖；② 宽字符按字素整组染色（头单元 + 尾单元），不出现半个字反显；③ 一律用**本帧** chat 区域裁剪，禁止跨帧缓存矩形；④ 不需要清理逻辑——Buffer 每帧由 widget 重新填充，松手后不再 paint 就自然消失。
+
+**复制链路**：远端会话（`SSH_CONNECTION` / `SSH_CLIENT` / `MOSH_CONNECTION`）→ 直接 OSC52（本地命令会写到**远端机器**的剪贴板）；否则平台命令优先（macOS `pbcopy` / Windows `clip` / Linux `wl-copy` → `xclip -selection clipboard` → `xsel --clipboard --input`），全部失败退回 OSC52。命令用 `Command::output()` 捕获输出（raw mode 下不能继承终端的 stdio；crate 也 deny `print_stdout/stderr`），并在 `tokio::task::spawn_blocking` 上执行（不阻塞事件循环/渲染帧）。OSC52 载荷超过 100000 字节（编码后）直接报错，不写巨型序列。成功 `Copied!`，失败 `Copy failed: …`。
+
+**文本提取**：所见即所得——拖动期间每帧把 chat 可见带抽成字素快照（`capture_visible_rows`），松手时按内容坐标区间从快照里取字符。按 `unicode-width` 推进列、跳过宽字符尾单元（CJK / emoji 不产生多余空格）；每行 `trim_end`、行间 `\n`、去掉首尾空行；全空 → 不复制不提示。**不要**尝试脱离渲染自己算换行（要复刻 ratatui 的 `WordWrapper`，必然漂移）。
+
+**边缘自动滚动**：指针停在可见带顶/底行（含等号）时 `run_app` 的 `select!` 多出一条按需 sleep 臂（50ms）；每 tick 滚 1 行、焦点随滚过的行平移、重绘；**位置没动即停止**（到边界）并清方向，方向为 0 时该 future 挂 `pending()`——不 busy loop、不泄漏任务。步进期间跟随状态保持冻结。
+
+**冻结跟随**：按下时 `ChatView::unfollow()`（清 `auto_scroll`，渲染便不再钉底边），松手时 `scroll_down(0, visible_height)` 按「是否仍在底边」恢复——完全复用 `tui-scroll-follow` 契约，没有新增状态。
+
+**失效规则（保守）**：按下时记录结构指纹 `(cells 数, pending 数, 终端宽度)`，每帧渲染前比对，任一变化即中止选择并清高亮（cell 增删 / pending 提升 / compaction / rewind / 会话切换 / 窗口缩放都会命中）。**纯内容追加（流式 delta、既有 cell 文本增长）不改变指纹，因此不失效**——这是与「total 高度变化即清」的关键区别。焦点丢失（`Focus(false)`，拖拽松手事件永不到达）同样中止。
+
+**已知限制**：选区只覆盖 chat 区域（composer / 状态栏 / 弹层不参与，点击定位光标属 `tui-composer-pointer`）；选择期间滚轮仍可滚动，滚出快照范围的行不参与复制（所见即所得）；OSC52 在部分终端仍可能「假成功」（无法探测，本地平台命令优先已缓解）；不做词/行粒度、键盘选择、Esc 清除、搜索与滚动条。
+
 ## 已知中间态：原生拖选需要 Shift/Option
 
-鼠标上报接管后，终端不再把拖拽交给自身的文本选择——**不按 Shift（macOS 用 Option）的拖选不再选中文本**。这是回退 #28 的已知代价：应用内自研选择（`tui-text-selection`）会恢复免修饰键体验，同时保留 Shift/Option 原生拖选作为兜底。
+鼠标上报接管后，终端不再把拖拽交给自身的文本选择——**不按 Shift（macOS 用 Option）的拖选不再选中文本**。这是回退 #28 的已知代价：应用内自研选择（`tui-text-selection`）已恢复 chat 区域的免修饰键体验，同时保留 Shift/Option 原生拖选作为兜底（composer 区域的拖选仍只能用原生方式）。
