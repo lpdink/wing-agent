@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
+from importlib.metadata import PackageNotFoundError
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,6 +16,12 @@ from fastapi.testclient import TestClient
 
 from wing.config import ApiKeyEntry, AuthConfig
 from wing.event import AgentInfo, SessionInfo
+from wing.gateway.routes import health as health_route
+
+
+def _raise_package_not_found(name: str) -> str:
+    """替身 version()：任何包名都不存在。"""
+    raise PackageNotFoundError(name)
 
 
 def _mock_config(auth_enabled: bool = False, auth_keys: list | None = None):
@@ -114,12 +122,45 @@ class TestHealth:
     """GET /api/health 测试。"""
 
     def test_health_ok(self, client: TestClient):
-        """健康检查返回 200 + status=ok + version。"""
+        """健康检查返回 200 + status=ok + version + commit。"""
         resp = client.get("/api/health")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
-        assert "version" in data
+        assert data["version"]
+        assert data["commit"] is None or re.fullmatch(r"[0-9a-f]{7}", data["commit"])
+
+    def test_version_prefers_build_info(self, monkeypatch: pytest.MonkeyPatch):
+        """版本解析：构建信息（构建时注入）优先于发行包元数据。"""
+        monkeypatch.setattr(
+            health_route, "get_version", lambda: "0.4.1.dev9+g3e6e47256"
+        )
+        monkeypatch.setattr(health_route, "version", _raise_package_not_found)
+        assert health_route._get_version() == "0.4.1.dev9+g3e6e47256"
+
+    def test_version_falls_back_to_dist_metadata(self, monkeypatch: pytest.MonkeyPatch):
+        """无构建信息（旧安装缺生成文件）→ 回落 wing-agent 元数据。"""
+        monkeypatch.setattr(health_route, "get_version", lambda: None)
+        monkeypatch.setattr(health_route, "version", lambda name: "0.4.1")
+        assert health_route._get_version() == "0.4.1"
+
+    def test_version_falls_back_to_gateway_dist(self, monkeypatch: pytest.MonkeyPatch):
+        """没有 wing-agent（如 pip install libs/core）→ 回落 wing-gateway 元数据。"""
+        monkeypatch.setattr(health_route, "get_version", lambda: None)
+
+        def fake_version(name: str) -> str:
+            if name == "wing-agent":
+                raise PackageNotFoundError(name)
+            return "0.4.1"
+
+        monkeypatch.setattr(health_route, "version", fake_version)
+        assert health_route._get_version() == "0.4.1"
+
+    def test_version_unknown_falls_back_to_dev(self, monkeypatch: pytest.MonkeyPatch):
+        """构建信息与元数据都拿不到 → dev。"""
+        monkeypatch.setattr(health_route, "get_version", lambda: None)
+        monkeypatch.setattr(health_route, "version", _raise_package_not_found)
+        assert health_route._get_version() == "dev"
 
 
 # ============================================================

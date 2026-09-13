@@ -52,9 +52,9 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/health` | 健康检查，返回 `service: "wing-gateway"`（身份标识）+ `uptime` + version。**鉴权豁免**，供 `wing status` 探活。 |
+| GET | `/api/health` | 健康检查，返回 `service: "wing-gateway"`（身份标识）+ `version` + `commit`（构建时注入的短 hash）+ `uptime`。**鉴权豁免**，供 `wing status` 探活。 |
 
-> `wing start/stop/status` 完全基于 HTTP：`stop` → `POST /api/shutdown` 后轮询 health 直至不可达；`start` → 探活 health，无响应则拉起再轮询；`status` → 读 health 的 version + uptime。已无 PID / state.json（PR #10）。
+> `wing start/stop/status` 完全基于 HTTP：`stop` → `POST /api/shutdown` 后轮询 health 直至不可达；`start` → 探活 health，无响应则拉起再轮询；`status` → 读 health 的 version + commit + uptime。已无 PID / state.json（PR #10）。
 
 ### Tools（`routes/tools.py`，1 个）
 

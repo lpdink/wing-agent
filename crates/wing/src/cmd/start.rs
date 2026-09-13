@@ -20,8 +20,9 @@ pub async fn start_gateway(host: &str, port: u16) -> anyhow::Result<()> {
         && health.service == "wing-gateway"
     {
         println!(
-            "Gateway already running (ws://{host}:{port}/ws, v{})",
-            health.version
+            "Gateway already running (ws://{host}:{port}/ws, v{}, commit {})",
+            health.version,
+            health.commit.as_deref().unwrap_or("unknown"),
         );
         return Ok(());
     }

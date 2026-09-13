@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from fastapi import WebSocket
 import uvicorn
 
+from wing.build_info import get_commit
 from wing.common.logger import log
 from wing.config import AuthConfig, load_config
 from wing.event import WingEvent, wire_dump
@@ -118,7 +119,9 @@ class GatewayServer:
         # Subscribe EventBus
         event_bus.subscribe(self._on_event)
 
-        print(f"🚀 Gateway 启动于 {self.host}:{self.port}")
+        print(
+            f"🚀 Gateway 启动于 {self.host}:{self.port} (commit {get_commit() or 'unknown'})"
+        )
         uvicorn.run(
             self._app,
             host=self.host,
