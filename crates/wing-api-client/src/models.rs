@@ -203,6 +203,9 @@ pub struct HealthResponse {
     pub service: String,
     pub status: String,
     pub version: String,
+    /// 构建时注入的 commit hash（短）；旧网关不返回该字段时为 None。
+    #[serde(default)]
+    pub commit: Option<String>,
     pub uptime: i64,
 }
 
@@ -547,5 +550,29 @@ mod tests {
         };
         let back: AgentInfo = serde_json::from_str(&serde_json::to_string(&info).unwrap()).unwrap();
         assert_eq!(back.provider_name.as_deref(), Some("alt"));
+    }
+
+    #[test]
+    fn health_commit_optional() {
+        // Legacy gateway (before commit injection) returns no commit field → None.
+        let legacy = r#"{
+            "service": "wing-gateway",
+            "status": "ok",
+            "version": "dev",
+            "uptime": 42
+        }"#;
+        let health: HealthResponse = serde_json::from_str(legacy).unwrap();
+        assert_eq!(health.commit, None);
+
+        // Current gateway reports the build commit.
+        let current = r#"{
+            "service": "wing-gateway",
+            "status": "ok",
+            "version": "0.4.1",
+            "commit": "3e6e472",
+            "uptime": 42
+        }"#;
+        let health: HealthResponse = serde_json::from_str(current).unwrap();
+        assert_eq!(health.commit.as_deref(), Some("3e6e472"));
     }
 }

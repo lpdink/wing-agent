@@ -28,5 +28,8 @@ raw-options = { root = "../.." }
 [tool.hatch.build.hooks.vcs]
 version-file = "wing/_version.py"
 
+# 构建时注入 wing/_build_info.py（版本 + commit hash），见 hatch_build.py
+[tool.hatch.build.hooks.custom]
+
 [tool.hatch.build.targets.wheel]
 packages = ["wing"]

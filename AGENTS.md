@@ -40,6 +40,7 @@ Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+
 ```
 libs/core/wing/
 ├── __init__.py / _version.py        包入口（re-export execute_shell，触发 metrics 订阅）/ 版本号
+├── build_info.py                    构建信息读取口：版本 + commit hash（构建时注入，运行期零 git）
 ├── runtime.py                       WingRuntime — service 层协调者（post() 唯一入站，路由到 Session/CM）
 ├── session.py                       Session — messages + state + metadata（经 SessionStore）
 ├── session_manager.py               SessionManager — 多会话、fork/resume、store registry

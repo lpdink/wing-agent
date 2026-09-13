@@ -173,3 +173,20 @@ MessageLog  = 追加式混合记录 + aux kv（pending compaction 存于此）
 - **不在上下文中施加魔法**：从不注入隐藏 system prompt。
 - **理论最高缓存命中率**：除压缩外绝不破坏缓存前缀；`explicit_cache_mode` 可为支持的 provider（如 DashScope）追加 `cache_control` 标记（PR #17）。
 - 达到 `context_window_tokens` 触发压缩，保留 `keep_recent_tokens`；压缩由 `compactor.py` 的 LLM 摘要策略完成。
+
+## 构建信息注入（commit hash）
+
+`wing status` 报告的 gateway commit 来自**构建/安装时注入**，运行期不做任何 git 调用——发版 wheel 与开发环境 `pip install libs/core` 行为一致：
+
+```
+libs/core/hatch_build.py（hatchling custom build hook，构建/安装时执行）
+  WING_COMMIT_HASH 环境变量（CI 传 github.sha，截短 7 位）
+    → 构建期 git rev-parse HEAD → None（无 git 的构建）
+        │ 写入
+  wing/_build_info.py（生成文件，gitignore；随 wheel 分发）
+        │ 只读（导入时定型 = 进程启动快照）
+  wing/build_info.py ──► /api/health（version + commit）──► wing status · wing start · 启动日志
+```
+
+- 生成文件内容随 commit/版本变化才重写（mtime 稳定）；缺失时 `wing/build_info.py` 返回 None，health 回落到发行包元数据。
+- commit 反映**上次安装/构建时**的 HEAD：改完代码要做集成测试前，重新安装（`pip install libs/core` / `uv sync`）并重启 gateway，`wing status` 才不会显示旧 commit。

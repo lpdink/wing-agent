@@ -20,6 +20,10 @@ pub async fn show_status() {
             println!("Gateway is running");
             println!("  Endpoint: ws://{}:{}/ws", config.host, config.port);
             println!("  Version:  {}", health.version);
+            println!(
+                "  Commit:   {}",
+                health.commit.as_deref().unwrap_or("unknown")
+            );
             println!("  Uptime:   {}", format_duration(health.uptime));
         }
         _ => {

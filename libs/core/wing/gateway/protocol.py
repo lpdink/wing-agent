@@ -346,7 +346,10 @@ class HealthResponse(BaseModel):
 
     service: str = Field(default="wing-gateway", description="服务身份标识")
     status: str = Field(default="ok", description="服务状态")
-    version: str = Field(description="wing-agent 版本号")
+    version: str = Field(description="网关版本号（构建时注入）")
+    commit: str | None = Field(
+        default=None, description="构建时注入的 commit hash（短）；未知为 null"
+    )
     uptime: int = Field(description="Gateway 运行时长（秒）")
 
 

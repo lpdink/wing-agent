@@ -119,6 +119,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.resolve-version.outputs.version }}
+      # 构建时注入 commit hash（hatch_build.py 读取；与 wing-cli 构建同约定）
+      WING_COMMIT_HASH: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
 
