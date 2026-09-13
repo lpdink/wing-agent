@@ -62,7 +62,7 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 面向脚本与外部编排器的非交互子命令，全部走 HTTP；`--json` 输出可直接被 agent 消费：
 
-- `wing run "<prompt>"`：建会话 + 发送 prompt 后**立即返回 session id**（非阻塞）；`wing wait <sid>…` 阻塞至会话进入 idle/inactive（HTTP 轮询 + WS `TurnResult` 双通道，`--timeout` 兜底）；
+- `wing run "<prompt>"`：建会话 + 发送 prompt 后**立即返回 session id**（非阻塞）；`wing wait <sid>…` 阻塞至会话进入 idle/inactive（HTTP 轮询 + WS `TurnResult` 双通道，`--timeout` 兜底）。事件流终止（帧超限 / Close 帧 / 读错误）时**立即报错退出**（stderr 含关闭原因与未完成 session，非零退出码）——不空转、不静默降级为纯 HTTP 轮询；细节见 `gateway/client.rs` 的 `CloseReason`；
 - `wing ps [--all] [--watch]` / `wing info <sid>`：会话列表 / 单会话运行时信息（model、tools、tokens、status）；
 - `wing tail|head <sid> -n N -t <type>`：消息窗口（类 Unix head/tail，按 user/assistant/tool_call/tool_result/reasoning/content 过滤）；
 - `wing models|tools|agents`：系统查询；`wing start|stop|status`：网关守护进程生命周期（默认的 TUI / stdio 启动路径会自动拉起网关）。

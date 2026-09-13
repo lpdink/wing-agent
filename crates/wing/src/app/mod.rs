@@ -2502,13 +2502,20 @@ pub async fn run_app(
                         app.chat_dirty = true;
                     }
                     None => {
-                        // Disconnected.
+                        // Disconnected. Carry the read task's reason into the
+                        // toast so the user can tell "gateway restarted" from
+                        // "this session's payload exceeds the frame limit".
+                        let reason = transport
+                            .as_ref()
+                            .and_then(|t| t.ws.close_reason())
+                            .map(|r| crate::util::osc9::truncate_bytes(&r.describe(), 120));
                         transport = None;
                         app.set_connected(false);
-                        app.show_toast(Toast::persistent(
-                            "⚡ Connection lost — reconnecting...",
-                            ToastKind::Warning,
-                        ));
+                        let text = match reason {
+                            Some(reason) => format!("⚡ Connection lost: {reason} — reconnecting..."),
+                            None => "⚡ Connection lost — reconnecting...".to_string(),
+                        };
+                        app.show_toast(Toast::persistent(text, ToastKind::Warning));
                         app.chat_dirty = true;
                         retry_attempt = 0;
                         retry_at = std::time::Instant::now() + backoff(0);

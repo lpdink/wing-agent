@@ -1,13 +1,19 @@
 //! Gateway WebSocket client — connects to wing-gateway and provides
 //! an async interface for sending requests and receiving events.
 
+use std::fmt;
+use std::sync::Arc;
+use std::sync::OnceLock;
+
 use anyhow::Context;
 use anyhow::Result;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::error::CapacityError;
 
 use crate::protocol::ClientRequest;
 use crate::protocol::ConnectResponse;
@@ -19,6 +25,84 @@ pub struct ConnectionInfo {
     pub client_id: String,
 }
 
+/// Why the event stream ended.
+///
+/// Recorded by the read task when it exits (first writer wins) and exposed via
+/// [`GatewayClient::close_reason`]. Consumers turn a dead stream into a
+/// diagnosable failure instead of silently degrading (see `cmd/wait.rs`), or
+/// into a toast that says *why* the TUI is reconnecting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloseReason {
+    /// A received frame exceeded the client's per-frame limit — e.g. a
+    /// `sync_session` payload bigger than the 16 MiB cap.
+    FrameTooLarge {
+        /// Actual (rejected) frame size in bytes.
+        size: usize,
+        /// Configured maximum frame size in bytes.
+        max_size: usize,
+    },
+    /// The gateway sent a WebSocket Close frame.
+    CloseFrame {
+        /// Close code (RFC 6455 registry value).
+        code: u16,
+        /// Human-readable close reason (may be empty).
+        reason: String,
+    },
+    /// Transport-level read error (protocol violation, reset, …).
+    ReadError {
+        /// Underlying error text (never empty).
+        detail: String,
+    },
+    /// The stream ended without a Close frame (gateway process gone).
+    StreamEnded,
+    /// The local event consumer disappeared (client dropped).
+    ChannelClosed,
+}
+
+impl CloseReason {
+    /// Classify a read-side WebSocket error.
+    fn from_read_error(err: &WsError) -> Self {
+        match err {
+            WsError::Capacity(CapacityError::MessageTooLong { size, max_size }) => {
+                CloseReason::FrameTooLarge {
+                    size: *size,
+                    max_size: *max_size,
+                }
+            }
+            // Normal end of a WebSocket connection without an app-level close
+            // frame being surfaced as a message.
+            WsError::ConnectionClosed | WsError::AlreadyClosed => CloseReason::StreamEnded,
+            other => CloseReason::ReadError {
+                detail: other.to_string(),
+            },
+        }
+    }
+
+    /// One-line, human-readable description (stderr / toast / logs).
+    pub fn describe(&self) -> String {
+        match self {
+            Self::FrameTooLarge { size, max_size } => {
+                format!("frame exceeds the client receive limit ({size} > {max_size} bytes)")
+            }
+            Self::CloseFrame { code, reason } if reason.is_empty() => {
+                format!("gateway sent close frame (code={code})")
+            }
+            Self::CloseFrame { code, reason } => {
+                format!("gateway sent close frame (code={code}, reason={reason:?})")
+            }
+            Self::ReadError { detail } => format!("read error: {detail}"),
+            Self::StreamEnded => "gateway closed the connection".to_string(),
+            Self::ChannelClosed => "local event consumer closed".to_string(),
+        }
+    }
+}
+
+impl fmt::Display for CloseReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.describe())
+    }
+}
+
 /// Gateway WebSocket client.
 pub struct GatewayClient {
     /// Channel for sending requests to the WS write task.
@@ -27,6 +111,8 @@ pub struct GatewayClient {
     rx: mpsc::Receiver<WingEvent>,
     /// Connection info from the initial handshake.
     info: ConnectionInfo,
+    /// Why the read task ended (`None` while it is still running).
+    close_reason: Arc<OnceLock<CloseReason>>,
 }
 
 impl GatewayClient {
@@ -99,6 +185,9 @@ impl GatewayClient {
         // Create channels for async communication with the WS tasks.
         let (tx, mut rx) = mpsc::channel::<ClientRequest>(64);
         let (event_tx, event_rx) = mpsc::channel::<WingEvent>(256);
+        // Shared with the read task: why the read task ended. First write wins
+        // (the read task exits exactly once), reads are lock-free.
+        let close_reason: Arc<OnceLock<CloseReason>> = Arc::new(OnceLock::new());
 
         // Spawn write task.
         tokio::spawn(async move {
@@ -120,9 +209,12 @@ impl GatewayClient {
         });
 
         // Spawn read task.
+        let reason_slot = Arc::clone(&close_reason);
         tokio::spawn(async move {
             let mut last_pressure_warn = std::time::Instant::now();
-            loop {
+            // Every exit carries a reason — consumers (`wing wait`, the TUI
+            // reconnect toast) must be able to say *why* the stream died.
+            let reason = loop {
                 tokio::select! {
                     // Zero-traffic shutdown: `event_rx` lives inside
                     // GatewayClient, so dropping the client closes the channel
@@ -130,9 +222,11 @@ impl GatewayClient {
                     // (never subscribed, hence nothing but pings ever arrives)
                     // would keep this task and its socket alive forever,
                     // leaking an fd per abandoned client.
-                    _ = event_tx.closed() => break,
+                    _ = event_tx.closed() => break CloseReason::ChannelClosed,
                     msg = ws_stream.next() => {
-                        let Some(msg_result) = msg else { break };
+                        let Some(msg_result) = msg else {
+                            break CloseReason::StreamEnded;
+                        };
                         match msg_result {
                             Ok(Message::Text(text)) => {
                                 match serde_json::from_str::<WingEvent>(&text) {
@@ -161,7 +255,7 @@ impl GatewayClient {
                                             tracing::debug!(
                                                 "event receiver dropped, stopping read task"
                                             );
-                                            break;
+                                            break CloseReason::ChannelClosed;
                                         }
                                     }
                                     Err(e) => {
@@ -179,7 +273,13 @@ impl GatewayClient {
                             }
                             Ok(Message::Close(frame)) => {
                                 tracing::info!("gateway sent close frame: {frame:?}");
-                                break;
+                                break CloseReason::CloseFrame {
+                                    code: frame.as_ref().map(|f| u16::from(f.code)).unwrap_or(0),
+                                    reason: frame
+                                        .as_ref()
+                                        .map(|f| f.reason.to_string())
+                                        .unwrap_or_default(),
+                                };
                             }
                             Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {
                                 // Handled by tungstenite internally.
@@ -188,26 +288,46 @@ impl GatewayClient {
                                 tracing::debug!("unexpected message type: {other:?}");
                             }
                             Err(e) => {
-                                tracing::error!("WebSocket read error: {e}");
-                                break;
+                                let reason = CloseReason::from_read_error(&e);
+                                tracing::error!("WebSocket read error ({reason}): {e}");
+                                break reason;
                             }
                         }
                     }
                 }
+            };
+            // Abnormal ends stay visible at the default `wing=warn` filter;
+            // normal ones (the local consumer went away) stay at debug.
+            match &reason {
+                CloseReason::StreamEnded | CloseReason::ChannelClosed => {
+                    tracing::debug!("read task exiting: {reason}");
+                }
+                _ => tracing::warn!("read task exiting: {reason}"),
             }
-            tracing::debug!("read task exiting");
+            let _ = reason_slot.set(reason);
         });
 
         Ok(Self {
             tx,
             rx: event_rx,
             info,
+            close_reason,
         })
     }
 
     /// Returns the client_id from the initial handshake.
     pub fn client_id(&self) -> &str {
         &self.info.client_id
+    }
+
+    /// Why the event stream ended, or `None` while the read task is running.
+    ///
+    /// Stable across calls: the first reason recorded by the read task is the
+    /// only one ever returned. Callers use it to fail fast with context
+    /// (`wing wait`) or to explain a disconnect (TUI toast) instead of
+    /// degrading silently.
+    pub fn close_reason(&self) -> Option<&CloseReason> {
+        self.close_reason.get()
     }
 
     /// Send a message to the agent.
@@ -257,5 +377,102 @@ impl GatewayClient {
     /// Returns `None` if the connection is closed.
     pub async fn recv_event(&mut self) -> Option<WingEvent> {
         self.rx.recv().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_too_large_is_classified_with_sizes() {
+        // The exact error the 22 MB `sync_session` frame produced.
+        let err = WsError::Capacity(CapacityError::MessageTooLong {
+            size: 22_151_988,
+            max_size: 16_777_216,
+        });
+        let reason = CloseReason::from_read_error(&err);
+        assert_eq!(
+            reason,
+            CloseReason::FrameTooLarge {
+                size: 22_151_988,
+                max_size: 16_777_216,
+            }
+        );
+        let text = reason.describe();
+        assert!(text.contains("22151988"), "{text}");
+        assert!(text.contains("16777216"), "{text}");
+        assert!(
+            !text.contains('\n'),
+            "describe() must stay one line: {text}"
+        );
+    }
+
+    #[test]
+    fn closed_connection_maps_to_stream_ended() {
+        assert_eq!(
+            CloseReason::from_read_error(&WsError::ConnectionClosed),
+            CloseReason::StreamEnded
+        );
+        assert_eq!(
+            CloseReason::from_read_error(&WsError::AlreadyClosed),
+            CloseReason::StreamEnded
+        );
+    }
+
+    #[test]
+    fn io_error_keeps_detail() {
+        let err = WsError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset by peer",
+        ));
+        let reason = CloseReason::from_read_error(&err);
+        match &reason {
+            CloseReason::ReadError { detail } => {
+                assert!(detail.contains("connection reset by peer"), "{detail}");
+            }
+            other => panic!("expected ReadError, got {other:?}"),
+        }
+        assert!(reason.describe().contains("connection reset by peer"));
+    }
+
+    #[test]
+    fn describe_covers_every_variant() {
+        let cases = [
+            (
+                CloseReason::FrameTooLarge {
+                    size: 1,
+                    max_size: 2,
+                },
+                "1 > 2",
+            ),
+            (
+                CloseReason::CloseFrame {
+                    code: 1000,
+                    reason: "bye".into(),
+                },
+                "code=1000",
+            ),
+            (
+                CloseReason::CloseFrame {
+                    code: 4001,
+                    reason: String::new(),
+                },
+                "code=4001",
+            ),
+            (
+                CloseReason::ReadError {
+                    detail: "boom".into(),
+                },
+                "boom",
+            ),
+            (CloseReason::StreamEnded, "closed the connection"),
+            (CloseReason::ChannelClosed, "consumer closed"),
+        ];
+        for (reason, needle) in cases {
+            let text = reason.describe();
+            assert!(text.contains(needle), "{reason:?} → {text:?}");
+            assert_eq!(text, reason.to_string());
+        }
     }
 }
