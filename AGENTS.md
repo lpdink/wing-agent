@@ -146,7 +146,8 @@ crates/wing/src/
 │   ├── popup_state.rs               Popup + 候选缓存 + 去重
 │   └── constants.rs                 协议常量（本地命令、工具名等 magic string）
 ├── ui/                              UI 组件
-│   ├── chat_view.rs                 Chat 视图（宽度感知虚拟化 + 滚动条）
+│   ├── chat_view.rs                 Chat 视图（宽度感知虚拟化）
+│   ├── scrollbar.rs                 overlay 滚动条（几何 / 命中测试 / 拖拽状态机 / 绘制）
 │   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存
 │   ├── panel.rs                     选择面板共享渲染（窗口数学与内核一致）
 │   ├── header.rs / status_bar.rs / spinner.rs / toast.rs
