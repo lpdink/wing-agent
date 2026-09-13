@@ -181,12 +181,16 @@ pub struct MarkdownTheme {
     pub base: Style,
     pub dimmed: Style,
     pub heading_prefix: Style,
-    /// Diff addition lines (+).
+    /// Diff addition lines (+): marker color.
     pub diff_add: Style,
-    /// Diff deletion lines (-).
+    /// Diff deletion lines (-): marker color.
     pub diff_del: Style,
     /// Diff hunk headers (@@).
     pub diff_hunk: Style,
+    /// Diff addition row background (code text keeps syntax colors).
+    pub diff_add_bg: Style,
+    /// Diff deletion row background.
+    pub diff_del_bg: Style,
 }
 
 impl Default for MarkdownTheme {
@@ -222,6 +226,8 @@ impl MarkdownTheme {
             diff_add: Style::new().fg(p.success),
             diff_del: Style::new().fg(p.danger),
             diff_hunk: Style::new().fg(p.accent).bold(),
+            diff_add_bg: Style::new().bg(p.diff_add_bg),
+            diff_del_bg: Style::new().bg(p.diff_del_bg),
         }
     }
 }
