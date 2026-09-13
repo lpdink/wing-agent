@@ -15,12 +15,14 @@ use ratatui::widgets::Widget;
 use ratatui::widgets::Wrap;
 use unicode_width::UnicodeWidthStr;
 
-use super::selection::ContentPoint;
 use super::selection::Grapheme;
 use super::selection::RenderedRow;
 use super::selection::Selection;
+use super::selection::SelectionPoint;
+use super::selection::SelectionRegion;
 use super::selection::extract_text;
 use super::selection::grapheme_width;
+use super::selection::row_span;
 
 use crate::config::ThemePalette;
 use crate::render::Renderable;
@@ -682,7 +684,7 @@ impl ChatView {
     /// clamp against the content height keeps the coordinates meaningful when
     /// the content is shorter than the band (the blank rows below it are not
     /// content).
-    pub fn content_point_at(&self, column: u16, row: u16) -> Option<ContentPoint> {
+    pub fn content_point_at(&self, column: u16, row: u16) -> Option<SelectionPoint> {
         let area = self.geometry.area;
         if area.width == 0 || area.height == 0 {
             return None;
@@ -690,10 +692,10 @@ impl ChatView {
         let row = row.clamp(area.y, area.bottom() - 1);
         let column = column.clamp(area.x, area.right() - 1);
         let vrow = self.geometry.scroll_offset + (row - area.y) as usize;
-        Some(ContentPoint {
-            vrow: vrow.min(self.last_total.saturating_sub(1)),
-            col: column - area.x,
-        })
+        Some(SelectionPoint::chat(
+            vrow.min(self.last_total.saturating_sub(1)),
+            column - area.x,
+        ))
     }
 
     /// Screen row that showed content row `vrow` in the last frame
@@ -722,9 +724,9 @@ impl ChatView {
     /// coordinates were mapped through; rows outside it are left untouched, and
     /// a click never reaches here (no drag event), so "press and release
     /// without moving = no selection" is unaffected.
-    pub fn snap_focus_right(&self, point: ContentPoint) -> ContentPoint {
+    pub fn snap_focus_right(&self, point: SelectionPoint) -> SelectionPoint {
         let Some(row) = point
-            .vrow
+            .row
             .checked_sub(self.geometry.scroll_offset)
             .and_then(|index| self.visible_rows.get(index))
         else {
@@ -733,10 +735,7 @@ impl ChatView {
         for grapheme in &row.graphemes {
             let end = grapheme.col.saturating_add(grapheme.width);
             if point.col >= grapheme.col && point.col < end {
-                return ContentPoint {
-                    vrow: point.vrow,
-                    col: end.max(row.inset),
-                };
+                return SelectionPoint::chat(point.row, end.max(row.inset));
             }
         }
         point
@@ -761,17 +760,18 @@ impl ChatView {
         if area.width == 0 || area.height == 0 {
             return;
         }
-        // Nothing to paint for a click / released selection (`bounds` is only
-        // `Some` for a non-empty drag).
-        if selection.bounds().is_none() {
+        // Nothing to paint for a click / released selection (`bounds_in` is
+        // only `Some` for a non-empty drag) — and a composer selection never
+        // paints into the chat band: each region owns its own bounds.
+        let Some(bounds) = selection.bounds_in(SelectionRegion::Chat) else {
             return;
-        }
+        };
         // Iterate the *band* rows (bounded by the terminal height), not the
         // selection rows: an edge drag can span thousands of content rows,
         // while only the visible ones can be painted anyway.
         for row in area.y..area.bottom() {
             let vrow = self.geometry.scroll_offset + (row - area.y) as usize;
-            let Some((from, to)) = selection.row_span(vrow, area.width) else {
+            let Some((from, to)) = row_span(bounds, vrow, area.width) else {
                 continue;
             };
             for grapheme in buffer_row_graphemes(buf, row, area) {
@@ -865,7 +865,7 @@ impl ChatView {
     /// `None` when nothing could be extracted (empty / all-blank selection,
     /// or the rows are not part of the snapshot) — in that case there is
     /// nothing to copy and no feedback is shown.
-    pub fn selected_text(&self, bounds: (ContentPoint, ContentPoint)) -> Option<String> {
+    pub fn selected_text(&self, bounds: (SelectionPoint, SelectionPoint)) -> Option<String> {
         extract_text(&self.visible_rows, self.geometry.scroll_offset, bounds)
     }
 
@@ -2623,7 +2623,7 @@ mod tests {
     }
 
     /// A selection covering `bounds` (press + drag), for the paint tests.
-    fn selection_over(bounds: (ContentPoint, ContentPoint)) -> Selection {
+    fn selection_over(bounds: (SelectionPoint, SelectionPoint)) -> Selection {
         let mut selection = Selection::default();
         selection.begin(bounds.0);
         selection.drag_to(bounds.1);
@@ -2665,16 +2665,16 @@ mod tests {
         // into the content — this conversation is only three rows tall, so a
         // row further down the band maps to its last row.
         let point = view.content_point_at(7, 4).expect("inside the band");
-        assert_eq!((point.vrow, point.col), (2, 5));
+        assert_eq!((point.row, point.col), (2, 5));
         assert!(view.contains_screen(7, 4));
 
         // Pointer outside the band clamps to the nearest edge instead of
         // failing — edge drags (and their auto-scroll) depend on this. The
         // row clamps twice: into the band, then into the content (the blank
         // rows below a short conversation are not content).
-        assert_eq!(view.content_point_at(0, 0).map(|p| p.vrow), Some(0));
+        assert_eq!(view.content_point_at(0, 0).map(|p| p.row), Some(0));
         assert_eq!(view.content_point_at(0, 0).map(|p| p.col), Some(0));
-        assert_eq!(view.content_point_at(99, 99).map(|p| p.vrow), Some(2));
+        assert_eq!(view.content_point_at(99, 99).map(|p| p.row), Some(2));
         assert_eq!(view.content_point_at(99, 99).map(|p| p.col), Some(29));
         assert!(!view.contains_screen(1, 4), "left of the band");
         assert!(!view.contains_screen(7, 11), "below the band");
@@ -2699,7 +2699,7 @@ mod tests {
         // Pinned to the bottom: the first visible row is not content row 0.
         let first = view.geometry().scroll_offset;
         assert_eq!(view.screen_row_of(0), None);
-        assert_eq!(view.content_point_at(0, 0).map(|p| p.vrow), Some(first));
+        assert_eq!(view.content_point_at(0, 0).map(|p| p.row), Some(first));
         assert_eq!(view.screen_row_of(first), Some(0));
 
         // Scroll up five rows: the mapping follows the new frame, so the same
@@ -2707,7 +2707,7 @@ mod tests {
         view.scroll_up(5);
         let _ = render_view_in(&mut view, Rect::new(0, 0, 40, 10), band);
         assert_eq!(view.geometry().scroll_offset, first - 5);
-        assert_eq!(view.content_point_at(0, 0).map(|p| p.vrow), Some(first - 5));
+        assert_eq!(view.content_point_at(0, 0).map(|p| p.row), Some(first - 5));
     }
 
     #[test]
@@ -2719,10 +2719,7 @@ mod tests {
         let before = buf.clone();
 
         // Row 1 of the user cell is the text row ("hello world" at column 2).
-        let bounds = (
-            ContentPoint { vrow: 1, col: 2 },
-            ContentPoint { vrow: 1, col: 13 },
-        );
+        let bounds = (SelectionPoint::chat(1, 2), SelectionPoint::chat(1, 13));
         view.paint_selection(&mut buf, &selection_over(bounds));
 
         assert_eq!(
@@ -2754,10 +2751,7 @@ mod tests {
         // Text starts at column 2; "你好" occupies columns 2..6 (two 2-wide
         // graphemes). Selecting only the first cell of "好" must still paint
         // the whole character.
-        let bounds = (
-            ContentPoint { vrow: 1, col: 2 },
-            ContentPoint { vrow: 1, col: 5 },
-        );
+        let bounds = (SelectionPoint::chat(1, 2), SelectionPoint::chat(1, 5));
         view.paint_selection(&mut buf, &selection_over(bounds));
         assert_eq!(
             reversed_columns(&buf, 1),
@@ -2780,10 +2774,7 @@ mod tests {
 
         // Greedy bounds covering the whole content — only the band may be
         // painted, and only up to the band's own columns.
-        let bounds = (
-            ContentPoint { vrow: 0, col: 0 },
-            ContentPoint { vrow: 0, col: 40 },
-        );
+        let bounds = (SelectionPoint::chat(0, 0), SelectionPoint::chat(0, 40));
         view.paint_selection(&mut buf, &selection_over(bounds));
         for y in buf.area.y..buf.area.bottom() {
             for x in buf.area.x..buf.area.right() {
@@ -2802,6 +2793,23 @@ mod tests {
     }
 
     #[test]
+    fn test_paint_selection_ignores_a_composer_selection() {
+        let mut view = ChatView::new();
+        view.push(ChatCell::UserMessage("hello".into()));
+        let band = Rect::new(0, 0, 20, 6);
+        let mut buf = render_view_in(&mut view, Rect::new(0, 0, 20, 6), band);
+        let before = buf.clone();
+
+        // A selection anchored in the other region has no chat bounds: the
+        // two coordinate spaces never share a highlight.
+        let mut selection = Selection::default();
+        selection.begin(SelectionPoint::composer(0, 0));
+        selection.drag_to(SelectionPoint::composer(0, 5));
+        view.paint_selection(&mut buf, &selection);
+        assert_eq!(buf, before, "a composer selection must not paint here");
+    }
+
+    #[test]
     fn test_capture_and_selected_text_from_the_rendered_frame() {
         let mut view = ChatView::new();
         view.push(ChatCell::UserMessage("hello world".into()));
@@ -2809,10 +2817,7 @@ mod tests {
         let buf = render_view_in(&mut view, Rect::new(0, 0, 30, 8), band);
         view.capture_visible_rows(&buf);
 
-        let text = view.selected_text((
-            ContentPoint { vrow: 1, col: 2 },
-            ContentPoint { vrow: 1, col: 13 },
-        ));
+        let text = view.selected_text((SelectionPoint::chat(1, 2), SelectionPoint::chat(1, 13)));
         assert_eq!(text.as_deref(), Some("hello world"));
     }
 
@@ -2825,10 +2830,7 @@ mod tests {
         view.capture_visible_rows(&buf);
 
         // Columns 2..10 cover "你好世界" (four 2-wide graphemes).
-        let text = view.selected_text((
-            ContentPoint { vrow: 1, col: 2 },
-            ContentPoint { vrow: 1, col: 10 },
-        ));
+        let text = view.selected_text((SelectionPoint::chat(1, 2), SelectionPoint::chat(1, 10)));
         assert_eq!(text.as_deref(), Some("你好世界"));
         assert!(
             !text.as_deref().unwrap().contains(' '),
@@ -2843,10 +2845,7 @@ mod tests {
         let _ = render_view_in(&mut view, Rect::new(0, 0, 30, 8), Rect::new(0, 0, 30, 8));
         // No capture (no drag in flight) → nothing to copy.
         assert_eq!(
-            view.selected_text((
-                ContentPoint { vrow: 0, col: 0 },
-                ContentPoint { vrow: 1, col: 5 },
-            )),
+            view.selected_text((SelectionPoint::chat(0, 0), SelectionPoint::chat(1, 5),)),
             None
         );
     }

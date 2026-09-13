@@ -46,8 +46,8 @@ use crate::ui::popup::command::candidate_request_for;
 use crate::ui::popup::command::is_must_select_command;
 use crate::ui::popup::command::parse_slash_input;
 use crate::ui::popup::selection::SelectionPopup;
-use crate::ui::selection::ContentPoint;
 use crate::ui::selection::Selection;
+use crate::ui::selection::SelectionPoint;
 use crate::ui::spinner::WorkingIndicatorWidget;
 use crate::ui::status_bar::StatusBar;
 use crate::ui::status_bar::StatusData;
@@ -759,13 +759,11 @@ impl App {
         // would be stale by exactly one step.)
         if let Some(focus) = self.selection.focus() {
             let vrow = focus
-                .vrow
+                .row
                 .saturating_add_signed(direction as isize)
                 .min(self.chat.content_height().saturating_sub(1));
-            self.selection.drag_to(ContentPoint {
-                vrow,
-                col: focus.col,
-            });
+            self.selection
+                .drag_to(SelectionPoint::chat(vrow, focus.col));
         }
         self.selection_autoscroll_at = Some(std::time::Instant::now() + SELECTION_AUTOSCROLL_DELAY);
         true
@@ -4869,17 +4867,17 @@ mod tests {
         app.handle_mouse(press((band.x + 2, band.y + 4)));
         app.handle_mouse(drag((band.x + 2, band.bottom() - 1)));
         let before = app.selection.bounds().expect("a drag produced bounds");
-        let (anchor_row, focus_before) = (before.0.vrow, before.1.vrow);
+        let (anchor_row, focus_before) = (before.0.row, before.1.row);
 
         assert!(app.tick_selection_autoscroll());
         let after = app.selection.bounds().expect("still selected");
-        let focus_after = after.1.vrow;
+        let focus_after = after.1.row;
         assert!(
             focus_after > focus_before,
             "the focus follows the rows scrolling by: {focus_before} -> {focus_after}"
         );
         assert_eq!(
-            after.0.vrow, anchor_row,
+            after.0.row, anchor_row,
             "the anchor is content-anchored and does not move"
         );
 
