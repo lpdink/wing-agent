@@ -54,6 +54,14 @@ pub struct InputArea {
     pub(crate) paste_counter: usize,
     /// Maximum number of input lines (configurable).
     pub(crate) max_lines: usize,
+    /// The rect the widget rendered into on the last frame.
+    ///
+    /// Recorded at render time — like [`Self::vertical_scroll`], which the
+    /// render also updates — because mouse events arrive *between* frames: hit
+    /// testing has to describe the screen the user is actually pointing at.
+    /// Empty before the first frame, which makes every hit test fail instead of
+    /// guessing.
+    rendered_area: Rect,
 }
 
 impl InputArea {
@@ -72,6 +80,7 @@ impl InputArea {
             pending_pastes: Vec::new(),
             paste_counter: 0,
             max_lines,
+            rendered_area: Rect::default(),
         }
     }
 
@@ -90,6 +99,12 @@ impl InputArea {
     /// Number of lines.
     pub fn line_count(&self) -> usize {
         self.lines.len()
+    }
+
+    /// The rect the widget rendered into on the last frame (see the field
+    /// docs).
+    pub fn rendered_area(&self) -> Rect {
+        self.rendered_area
     }
 
     /// Desired height for layout (visual row count, width-aware).
@@ -242,10 +257,10 @@ impl InputArea {
         if h == 0 {
             return;
         }
-        let text_width = available_width.saturating_sub(PREFIX_WIDTH) as usize;
-        if text_width == 0 {
-            return;
-        }
+        // Same expression the widget renders (and the pointer mapping resolves)
+        // with: a collapsed text area still wraps at one column, so the window
+        // this computes describes the rows that were really drawn.
+        let text_width = (available_width.saturating_sub(PREFIX_WIDTH) as usize).max(1);
         let vis_rows = wrap::build_visual_rows(&self.lines, text_width);
         let (vis_row, _) = wrap::logical_to_visual(&vis_rows, self.cursor_row, self.cursor_col);
 

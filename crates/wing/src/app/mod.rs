@@ -19,7 +19,6 @@ use anyhow::Result;
 use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
-use ratatui::layout::Rect;
 
 use self::transport::GatewayEndpoint;
 use self::transport::Transport;
@@ -183,13 +182,6 @@ pub struct App {
     /// rebuilds its timer arm on every iteration — a relative sleep would be
     /// starved by streaming events. `None` while no drag rests on an edge.
     selection_autoscroll_at: Option<std::time::Instant>,
-    /// The composer's rect as laid out by the last frame.
-    ///
-    /// Mouse events arrive between frames, so hit testing has to describe the
-    /// screen the user is pointing at — same contract as
-    /// `ChatView::geometry()`. `Rect::default()` (empty) before the first
-    /// frame, which makes every hit test fail instead of guessing.
-    composer_rect: Rect,
     /// Whether the app should exit.
     pub should_quit: bool,
     /// Pending side-effect intents. Drained by runner after each draw cycle.
@@ -307,7 +299,6 @@ impl App {
             selection: Selection::default(),
             selection_guard: None,
             selection_autoscroll_at: None,
-            composer_rect: Rect::default(),
             should_quit: false,
             intents: Vec::new(),
             visible_height: 20,
@@ -677,10 +668,11 @@ impl App {
     ///
     /// Like `ChatView::contains_screen`, the rect comes from the last render —
     /// mouse events arrive between frames, so hit testing has to describe the
-    /// screen the user is pointing at. A collapsed or not-yet-rendered rect
+    /// screen the user is pointing at. The widget records it (`InputArea` owns
+    /// the geometry it drew into); a collapsed or not-yet-rendered rect
     /// (`Rect::default()`) accepts nothing.
     fn composer_contains(&self, column: u16, row: u16) -> bool {
-        let area = self.composer_rect;
+        let area = self.input.rendered_area();
         area.width > 0
             && area.height > 0
             && column >= area.x
@@ -717,7 +709,8 @@ impl App {
         if self.composer_pointer_blocked() {
             return MouseOutcome::Ignored;
         }
-        let Some(point) = pointer::point(&self.input, self.composer_rect, column, row) else {
+        let Some(point) = pointer::point(&self.input, self.input.rendered_area(), column, row)
+        else {
             return MouseOutcome::Ignored;
         };
         self.selection.begin(point);
@@ -735,7 +728,8 @@ impl App {
         if !self.selection.is_press_active() {
             return false;
         }
-        let Some(point) = pointer::focus(&self.input, self.composer_rect, column, row) else {
+        let Some(point) = pointer::focus(&self.input, self.input.rendered_area(), column, row)
+        else {
             return false;
         };
         self.selection.drag_to(point);
@@ -749,7 +743,7 @@ impl App {
     /// (`bounds_in` is `None` for zero width), so it falls through to the
     /// cursor placement; a real drag copies the draft fragment it covered.
     fn composer_release(&mut self, column: u16, row: u16) -> MouseOutcome {
-        let Some(hit) = pointer::hit(&self.input, self.composer_rect, column, row) else {
+        let Some(hit) = pointer::hit(&self.input, self.input.rendered_area(), column, row) else {
             self.cancel_selection();
             return MouseOutcome::Immediate;
         };
@@ -758,11 +752,9 @@ impl App {
         let dragged = self.selection.is_dragged() || self.selection.anchor() != Some(hit.point);
         if !dragged {
             self.cancel_selection();
-            self.input.set_cursor_from_visual(
-                self.composer_rect.width,
-                hit.vis_row,
-                hit.display_col,
-            );
+            let area = self.input.rendered_area();
+            self.input
+                .set_cursor_from_visual(area.width, hit.vis_row, hit.display_col);
             return MouseOutcome::Immediate;
         }
         self.selection_guard = None;
@@ -2773,12 +2765,11 @@ impl App {
             );
             idx += 1;
 
-            // Input area — always visible; record its rect for cursor
-            // placement and for the composer's pointer mapping (mouse events
-            // arrive between frames, so hit testing works off the last frame's
-            // rect — same contract as the chat band's geometry).
+            // Input area — always visible; the widget records the rect it drew
+            // into (for cursor placement and for the composer's pointer mapping:
+            // mouse events arrive between frames, so hit testing works off the
+            // last frame's rect — same contract as the chat band's geometry).
             let input_rect = chunks[idx];
-            self.composer_rect = input_rect;
             frame.render_widget(InputAreaWidget::new(&mut self.input, &palette), input_rect);
             idx += 1;
 
@@ -4740,7 +4731,7 @@ mod tests {
         let mut app = app_with_message();
         let mut terminal = test_terminal(40, 12);
         draw(&mut app, &mut terminal);
-        let composer = app.composer_rect;
+        let composer = app.input.rendered_area();
         let at = (composer.x + 4, composer.y);
         assert!(app.composer_contains(at.0, at.1));
         assert!(
@@ -4780,7 +4771,7 @@ mod tests {
         let mut app = app_with_draft("hello world");
         let mut terminal = test_terminal(40, 12);
         draw(&mut app, &mut terminal);
-        let composer = app.composer_rect;
+        let composer = app.input.rendered_area();
         assert_eq!(app.input.line_count(), 1);
 
         assert_eq!(
@@ -4831,7 +4822,7 @@ mod tests {
         let mut app = app_with_draft("abcdefghijklmnopqrstuvwx");
         let mut terminal = test_terminal(20, 12);
         draw(&mut app, &mut terminal);
-        let composer = app.composer_rect;
+        let composer = app.input.rendered_area();
         assert_eq!(composer.height, 2, "the draft wraps into two visual rows");
 
         let from = (composer.x + PREFIX_WIDTH + 2, composer.y);
@@ -4868,7 +4859,7 @@ mod tests {
         let mut app = app_with_draft("abcdefghijklmnopqrstuvwx");
         let mut terminal = test_terminal(20, 12);
         draw(&mut app, &mut terminal);
-        let composer = app.composer_rect;
+        let composer = app.input.rendered_area();
         assert_eq!(composer.height, 2);
 
         // Press on the second row, drag up into the chat band: the pointer
@@ -4889,7 +4880,7 @@ mod tests {
         let mut app = app_with_draft("hello world");
         let mut terminal = test_terminal(40, 12);
         draw(&mut app, &mut terminal);
-        let composer = app.composer_rect;
+        let composer = app.input.rendered_area();
         // `set_text` leaves the cursor at the end, so the click is a visible move.
         assert_eq!((app.input.cursor_row, app.input.cursor_col), (0, 11));
 
@@ -4919,7 +4910,7 @@ mod tests {
         let mut app = app_with_draft("你好世界");
         let mut terminal = test_terminal(40, 12);
         draw(&mut app, &mut terminal);
-        let composer = app.composer_rect;
+        let composer = app.input.rendered_area();
         // "世" occupies the fifth and sixth cell of the text area; either cell
         // resolves to the position before it (a char index has no half-cell
         // precision).
@@ -4949,7 +4940,7 @@ mod tests {
         app.input.set_text(&draft);
         let mut terminal = test_terminal(20, 12);
         draw(&mut app, &mut terminal);
-        let composer = app.composer_rect;
+        let composer = app.input.rendered_area();
         assert!(
             app.input.vertical_scroll > 0,
             "the window scrolled to keep the cursor visible"
@@ -5012,7 +5003,7 @@ mod tests {
             arm(&mut app);
             app.drain_intents();
             draw(&mut app, &mut terminal);
-            let composer = app.composer_rect;
+            let composer = app.input.rendered_area();
             assert!(app.composer_contains(composer.x + PREFIX_WIDTH, composer.y));
 
             let at = (composer.x + PREFIX_WIDTH + 4, composer.y);
@@ -5107,7 +5098,7 @@ mod tests {
             let mut app = app_with_draft("hello world");
             let mut terminal = test_terminal(40, 12);
             draw(&mut app, &mut terminal);
-            let composer = app.composer_rect;
+            let composer = app.input.rendered_area();
             app.handle_mouse(press((composer.x + PREFIX_WIDTH, composer.y)));
             app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 4, composer.y)));
             assert!(app.selection.is_press_active(), "{label}: drag in flight");
@@ -5153,7 +5144,7 @@ mod tests {
         let mut app = app_with_draft("hello world");
         let mut terminal = test_terminal(40, 12);
         draw(&mut app, &mut terminal);
-        let composer = app.composer_rect;
+        let composer = app.input.rendered_area();
 
         app.handle_mouse(press((composer.x + PREFIX_WIDTH, composer.y)));
         app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 4, composer.y)));
@@ -5182,7 +5173,7 @@ mod tests {
         let mut app = app_with_draft("hello world");
         let mut terminal = test_terminal(40, 12);
         draw(&mut app, &mut terminal);
-        let composer = app.composer_rect;
+        let composer = app.input.rendered_area();
 
         app.handle_mouse(press((composer.x + PREFIX_WIDTH, composer.y)));
         app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 4, composer.y)));

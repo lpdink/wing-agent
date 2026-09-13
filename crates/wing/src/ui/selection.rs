@@ -40,10 +40,13 @@ pub enum SelectionRegion {
 
 /// A point in the owning region's content coordinates.
 ///
-/// Ordering is row-major (`row` first, then `col`), which is what
-/// [`Selection::bounds`] uses to sort anchor and focus. Only points of the
-/// *same* region are ever compared: `row` / `col` mean different things per
-/// region (see the module docs).
+/// Within one region the derived ordering is row-major (`row` first, then
+/// `col`), which is what [`Selection::bounds`] sorts anchor and focus by.
+/// Points of *different* regions are never ordered against each other — that
+/// state is ruled out by construction ([`Selection::bounds`] rejects it and
+/// [`Selection::drag_to`] drops foreign points) — and they could not be
+/// meaningfully compared anyway, since `row` / `col` mean something else in
+/// each region (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SelectionPoint {
     /// Region the point belongs to.
@@ -274,6 +277,8 @@ pub fn row_span(
     width: u16,
 ) -> Option<(u16, u16)> {
     let (start, end) = bounds;
+    debug_assert_eq!(start.region, SelectionRegion::Chat);
+    debug_assert_eq!(end.region, SelectionRegion::Chat);
     if vrow < start.row || vrow > end.row {
         return None;
     }
@@ -310,6 +315,8 @@ pub fn extract_text(
     bounds: (SelectionPoint, SelectionPoint),
 ) -> Option<String> {
     let (start, end) = bounds;
+    debug_assert_eq!(start.region, SelectionRegion::Chat);
+    debug_assert_eq!(end.region, SelectionRegion::Chat);
     if rows.is_empty() {
         return None;
     }

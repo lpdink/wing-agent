@@ -165,6 +165,8 @@ pub fn selected_text(
     bounds: (SelectionPoint, SelectionPoint),
 ) -> Option<String> {
     let (start, end) = bounds;
+    debug_assert_eq!(start.region, SelectionRegion::Composer);
+    debug_assert_eq!(end.region, SelectionRegion::Composer);
     let mut lines: Vec<String> = Vec::new();
     for row in start.row..=end.row {
         let Some(line) = input.lines.get(row) else {
