@@ -74,8 +74,6 @@ pub struct LayoutConfig {
     pub max_input_lines: usize,
     /// Maximum visible rows in selection popup.
     pub max_popup_rows: usize,
-    /// Context lines around diff hunks.
-    pub diff_context: usize,
     /// Maximum tool result output lines.
     pub tool_output_max: usize,
 }
@@ -85,7 +83,6 @@ impl Default for LayoutConfig {
         Self {
             max_input_lines: 10,
             max_popup_rows: 8,
-            diff_context: 3,
             tool_output_max: 10,
         }
     }

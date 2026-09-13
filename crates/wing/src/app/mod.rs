@@ -1768,10 +1768,12 @@ impl App {
                 path,
                 old_text,
                 new_text,
+                old_start_line,
+                new_start_line,
                 tool_call_id,
                 ..
             } => {
-                let diff = DiffView::new(path, old_text, new_text);
+                let diff = DiffView::new(path, old_text, new_text, old_start_line, new_start_line);
                 // Anchor the diff directly after the ToolCall cell that
                 // produced it — concurrent edits complete out of order, so
                 // appending would interleave diffs arbitrarily. Unknown id
@@ -2961,6 +2963,85 @@ mod tests {
         // — here tail and anchored coincide, so assert the adjacency explicitly).
         let kinds = cell_kinds(&app);
         assert_eq!(kinds, vec!["user", "tool_call", "diff"]);
+    }
+
+    #[test]
+    fn test_direct_diff_event_renders_window_with_absolute_lines() {
+        // The live `diff_content` branch consumes the windowed payload the
+        // same way replay does: window rows verbatim, absolute gutter numbers.
+        let mut app = test_app();
+        app.handle_event(WingEvent::DiffContent {
+            path: "main.rs".into(),
+            old_text: Some("line 7\nline 8\nline 9\nline 10\nline 11".into()),
+            new_text: "line 7\nline 8\nline 9\nLINE TEN\nline 11".into(),
+            old_start_line: 7,
+            new_start_line: 7,
+            tool_call_id: "tc-edit".into(),
+            meta: crate::protocol::EventMeta {
+                created_at: "2026-01-01T00:00:00".into(),
+                session_id: None,
+                request_id: "r1".into(),
+            },
+        });
+
+        let ChatCell::Diff(diff) = app.chat.cells[0].cell() else {
+            panic!("expected a Diff cell");
+        };
+        assert_eq!((diff.old_start_line, diff.new_start_line), (7, 7));
+        let text: String = diff
+            .to_lines(&crate::config::ThemePalette::default(), 80)
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("@@ -7,5 +7,5 @@"), "{text}");
+        assert!(text.contains("    7   7 │   line 7"), "{text}");
+        assert!(text.contains("       10 │ + LINE TEN"), "{text}");
+    }
+
+    #[test]
+    fn test_direct_diff_event_repeats_anchor_under_one_tool_call() {
+        // `replace_all` sends one event per match position with the same
+        // tool_call_id: each lands after its ToolCall (and after the previous
+        // diff sibling), preserving emission order.
+        let mut app = test_app();
+        app.handle_event(WingEvent::ToolCall {
+            tool_name: "Edit".into(),
+            tool_args: serde_json::json!({"path": "f.txt"}),
+            tool_call_id: "tc-all".into(),
+            meta: crate::protocol::EventMeta {
+                created_at: "2026-01-01T00:00:00".into(),
+                session_id: None,
+                request_id: "r0".into(),
+            },
+        });
+        for (i, line) in [10usize, 20, 30].into_iter().enumerate() {
+            app.handle_event(WingEvent::DiffContent {
+                path: "f.txt".into(),
+                old_text: Some(format!("old {i}")),
+                new_text: format!("NEW {i}"),
+                old_start_line: line,
+                new_start_line: line,
+                tool_call_id: "tc-all".into(),
+                meta: crate::protocol::EventMeta {
+                    created_at: "2026-01-01T00:00:00".into(),
+                    session_id: None,
+                    request_id: format!("r{}", i + 1),
+                },
+            });
+        }
+
+        assert_eq!(cell_kinds(&app), vec!["tool_call", "diff", "diff", "diff"]);
+        let starts: Vec<usize> = app
+            .chat
+            .cells
+            .iter()
+            .filter_map(|c| match c.cell() {
+                ChatCell::Diff(d) => Some(d.old_start_line),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts, vec![10, 20, 30]);
     }
 
     #[test]
