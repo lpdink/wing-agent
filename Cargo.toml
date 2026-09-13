@@ -31,7 +31,8 @@ syntect = "5"
 two-face = "0.5"
 
 # Diff
-similar = "3"
+# `inline` powers word-level emphasis inside a changed line.
+similar = { version = "3", features = ["inline"] }
 
 # Logging
 tracing = "0.1"

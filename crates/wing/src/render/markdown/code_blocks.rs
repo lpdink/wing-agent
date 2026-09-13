@@ -7,6 +7,8 @@ use ratatui::style::Style;
 
 use super::parsing::{flush_current_line, push_blank_line};
 use super::types::{MarkdownLine, MarkdownSegment, MarkdownTheme, SegmentKind};
+use crate::render::diff_highlight::DiffHighlighters;
+use crate::render::diff_highlight::DiffSide;
 use crate::render::syntax::highlight_code_lines;
 
 /// Tracks the state of an in-progress fenced code block.
@@ -25,6 +27,9 @@ pub(crate) struct CodeBlockRenderEnv<'a> {
     pub(crate) pending_list_prefix: &'a mut Option<String>,
     pub(crate) base_style: Style,
     pub(crate) theme: &'a MarkdownTheme,
+    /// Available render width — diff rows pad their tinted background to it.
+    /// None = unknown (no padding).
+    pub(crate) width: Option<u16>,
     /// Render code with syntect highlighting + gutters. False = plain
     /// single-color code (the Thinking profile).
     pub(crate) highlight: bool,
@@ -154,8 +159,10 @@ fn render_code_block(state: &CodeBlockState, env: &CodeBlockRenderEnv<'_>) -> Ve
             lines.push(line);
         }
     } else if is_diff {
-        // Diff coloring with file summary detection.
+        // Diff coloring: file summaries + one pass per side so the code keeps
+        // its syntax colors under a tinted add/delete row background.
         let diff_blocks = group_diff_by_file(&source_lines);
+        let highlight = env.highlight;
 
         for block in &diff_blocks {
             // Emit file summary line if we have a path.
@@ -167,23 +174,63 @@ fn render_code_block(state: &CodeBlockState, env: &CodeBlockRenderEnv<'_>) -> Ve
                 lines.push(line);
             }
 
+            // One old/new highlighter pair for this file: a hunk can sit
+            // inside a construct that only exists in one revision, and
+            // context lines belong to both (so they advance both).
+            let mut highlighters = highlight.then(|| {
+                DiffHighlighters::for_file(block.path.as_deref().unwrap_or_default(), None)
+            });
+
             // Emit diff lines.
             for src_line in &block.lines {
                 let mut line = build_prefix(env);
-                line.push_segment(SegmentKind::Border, border_style, "│ ");
-                let trimmed = src_line.trim_start();
-                let style = if trimmed.is_empty() {
-                    env.theme.code_block
-                } else if trimmed.starts_with('+') {
-                    env.theme.diff_add
-                } else if trimmed.starts_with('-') {
-                    env.theme.diff_del
-                } else if trimmed.starts_with("@@") {
-                    env.theme.diff_hunk
-                } else {
-                    env.theme.dimmed
+                let row = split_diff_row(src_line);
+
+                // Hunk header keeps its own (uncolored, unfit for tint) look.
+                if row.marker == Some('@') {
+                    line.push_segment(SegmentKind::Border, border_style, "│ ");
+                    line.push_segment(SegmentKind::CodeBlock, env.theme.diff_hunk, row.content);
+                    lines.push(line);
+                    continue;
+                }
+
+                let (tint, marker_style) = match row.side {
+                    Some(DiffSide::Insert) => (env.theme.diff_add_bg, env.theme.diff_add),
+                    Some(DiffSide::Delete) => (env.theme.diff_del_bg, env.theme.diff_del),
+                    _ => (Style::default(), env.theme.code_block),
                 };
-                line.push_segment(SegmentKind::CodeBlock, style, src_line);
+                let tinted = matches!(row.side, Some(DiffSide::Insert | DiffSide::Delete));
+
+                line.push_segment(SegmentKind::Border, border_style.patch(tint), "│ ");
+                if let Some(marker) = row.marker {
+                    line.push_segment(
+                        SegmentKind::CodeBlock,
+                        marker_style.patch(tint),
+                        &format!("{marker} "),
+                    );
+                }
+                let styled = highlighters.as_mut().and_then(|hl| {
+                    hl.line(row.side.unwrap_or(DiffSide::Context), row.content, true)
+                });
+                match styled {
+                    Some(spans) => {
+                        for (style, text) in spans {
+                            line.push_segment(SegmentKind::CodeBlock, style.patch(tint), &text);
+                        }
+                    }
+                    None => {
+                        line.push_segment(
+                            SegmentKind::CodeBlock,
+                            env.theme.code_block.patch(tint),
+                            row.content,
+                        );
+                    }
+                }
+
+                // Rows tinted as a band: pad so the background spans the block.
+                if tinted && let Some(width) = env.width {
+                    pad_to_width(&mut line, width as usize, tint);
+                }
                 lines.push(line);
             }
         }
@@ -249,7 +296,8 @@ fn group_diff_by_file<'a>(source_lines: &[&'a str]) -> Vec<DiffFileBlock<'a>> {
         }
 
         // Skip metadata lines (index, ---, +++, new file mode, etc.)
-        if trimmed.starts_with("index ")
+        if trimmed.starts_with('\\')
+            || trimmed.starts_with("index ")
             || trimmed.starts_with("---")
             || trimmed.starts_with("+++")
             || trimmed.starts_with("new file")
@@ -301,6 +349,85 @@ fn group_diff_by_file<'a>(source_lines: &[&'a str]) -> Vec<DiffFileBlock<'a>> {
     }
 
     blocks
+}
+
+/// One unified-diff line, split into its gutter marker and the code it
+/// carries.
+struct DiffRow<'a> {
+    /// Leading marker as written (`+`, `-`, ` `); `@` for a hunk header.
+    marker: Option<char>,
+    /// Revision(s) the line belongs to — `None` when the line is not code
+    /// (hunk header, unrecognized line).
+    side: Option<DiffSide>,
+    /// Code without the marker, or the whole line for hunk headers.
+    content: &'a str,
+}
+
+/// Split a unified-diff line into marker, revision, and content.
+///
+/// `@@ …` opens a hunk header (indented fences included) — but only when
+/// doubled: a context line can start with a single `@` (decorators,
+/// annotations), and that is ordinary code.
+///
+/// `git diff` puts the marker in column 0, and a leading **space is the
+/// context marker**, so it wins over the indented-marker fallback. That
+/// fallback exists for LLM-written fences that indent the whole block: there
+/// a `+`/`-` follows the indentation. Anything else is rendered as-is.
+fn split_diff_row(line: &str) -> DiffRow<'_> {
+    let trimmed = line.trim_start();
+    let indent = line.len() - trimmed.len();
+    let marker_at = |at: usize| match line.as_bytes().get(at) {
+        Some(&b'+') => Some('+'),
+        Some(&b'-') => Some('-'),
+        Some(&b' ') => Some(' '),
+        _ => None,
+    };
+
+    if trimmed.starts_with("@@") {
+        return DiffRow {
+            marker: Some('@'),
+            side: None,
+            content: trimmed,
+        };
+    }
+
+    let at = if marker_at(0).is_some_and(|marker| marker != ' ') {
+        0
+    } else if indent > 0 && matches!(trimmed.as_bytes().first(), Some(b'+' | b'-')) {
+        indent
+    } else if line.starts_with(' ') {
+        0
+    } else {
+        return DiffRow {
+            marker: None,
+            side: None,
+            content: line,
+        };
+    };
+
+    let marker = line.as_bytes()[at] as char;
+    DiffRow {
+        marker: Some(marker),
+        side: side_of(marker),
+        content: &line[at + 1..],
+    }
+}
+
+fn side_of(marker: char) -> Option<DiffSide> {
+    match marker {
+        '+' => Some(DiffSide::Insert),
+        '-' => Some(DiffSide::Delete),
+        ' ' => Some(DiffSide::Context),
+        _ => None,
+    }
+}
+
+/// Pad a diff row with background-tinted spaces so the band spans the block.
+fn pad_to_width(line: &mut MarkdownLine, width: usize, tint: Style) {
+    let used = line.width();
+    if used < width {
+        line.push_segment(SegmentKind::CodeBlock, tint, &" ".repeat(width - used));
+    }
 }
 
 /// Build the prefix segments for a code block line (blockquote + list prefix).
@@ -383,6 +510,63 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         // Only hunk header + change lines, metadata stripped.
         assert_eq!(blocks[0].lines.len(), 3);
+    }
+
+    fn classify(line: &str) -> (Option<char>, Option<DiffSide>, &str) {
+        let row = split_diff_row(line);
+        (row.marker, row.side, row.content)
+    }
+
+    #[test]
+    fn split_diff_row_markers() {
+        // git layout: the marker sits in column 0.
+        assert_eq!(
+            classify("+added"),
+            (Some('+'), Some(DiffSide::Insert), "added")
+        );
+        assert_eq!(
+            classify("-gone"),
+            (Some('-'), Some(DiffSide::Delete), "gone")
+        );
+        assert_eq!(
+            classify(" ctx"),
+            (Some(' '), Some(DiffSide::Context), "ctx")
+        );
+        // A hunk header needs `@@`; hunk headers are not code rows.
+        assert_eq!(
+            classify("@@ -1,3 +1,3 @@"),
+            (Some('@'), None, "@@ -1,3 +1,3 @@")
+        );
+        // Decorators / annotations are ordinary context lines.
+        assert_eq!(
+            classify(" @pytest.fixture"),
+            (Some(' '), Some(DiffSide::Context), "@pytest.fixture")
+        );
+        assert_eq!(classify("@pytest.fixture"), (None, None, "@pytest.fixture"));
+        // Indented fence: the marker sits after the indentation.
+        assert_eq!(
+            classify("    +  added"),
+            (Some('+'), Some(DiffSide::Insert), "  added")
+        );
+        assert_eq!(
+            classify("    -gone"),
+            (Some('-'), Some(DiffSide::Delete), "gone")
+        );
+        assert_eq!(
+            classify("    @@ -1 +1 @@"),
+            (Some('@'), None, "@@ -1 +1 @@")
+        );
+        // …while a leading space stays the context marker of git's layout,
+        // keeping the code's own indentation.
+        assert_eq!(
+            classify("     let x = 1;"),
+            (Some(' '), Some(DiffSide::Context), "    let x = 1;")
+        );
+        // Unmarked line — kept verbatim (rendered as code without a marker).
+        assert_eq!(
+            classify("\\ No newline at end of file"),
+            (None, None, "\\ No newline at end of file")
+        );
     }
 
     #[test]

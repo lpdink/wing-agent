@@ -230,6 +230,7 @@ fn render_markdown_to_lines(
             pending_list_prefix: &mut pending_list_prefix,
             base_style,
             theme,
+            width: available_width,
             highlight: opts.code_highlight,
         };
         if handle_code_block_event(&event, &mut code_block, &mut code_block_env) {
@@ -297,6 +298,7 @@ fn render_markdown_to_lines(
         pending_list_prefix: &mut pending_list_prefix,
         base_style,
         theme,
+        width: available_width,
         highlight: opts.code_highlight,
     };
     finalize_unclosed_code_block(&mut code_block, &mut code_block_env);
@@ -800,6 +802,143 @@ mod tests {
         assert!(text.contains("file.rs"), "file path missing: {text}");
         assert!(text.contains("+1"), "additions missing: {text}");
         assert!(text.contains("-1"), "deletions missing: {text}");
+    }
+
+    /// Fenced diff blocks tint add/delete rows (code keeps syntax colors)
+    /// and pad the band to the available width.
+    #[test]
+    fn diff_code_block_rows_are_tinted() {
+        let md = "```diff\ndiff --git a/file.rs b/file.rs\n@@ -1,3 +1,3 @@\n-old();\n+new();\n context\n```";
+        let palette = dp();
+        let width = 60u16;
+        let lines = render_markdown_with_width(md, Some(width), &palette);
+
+        let add = lines
+            .iter()
+            .find(|l| l.to_string().contains("new()"))
+            .expect("add row");
+        let del = lines
+            .iter()
+            .find(|l| l.to_string().contains("old()"))
+            .expect("delete row");
+
+        let add_bgs: Vec<_> = add.spans.iter().map(|s| s.style.bg).collect();
+        let del_bgs: Vec<_> = del.spans.iter().map(|s| s.style.bg).collect();
+        assert!(
+            add_bgs.contains(&Some(palette.diff_add_bg)),
+            "add row not tinted: {add_bgs:?}"
+        );
+        assert!(
+            del_bgs.contains(&Some(palette.diff_del_bg)),
+            "del row not tinted: {del_bgs:?}"
+        );
+        // Syntax colors survive on the tinted row.
+        let fgs: std::collections::BTreeSet<_> = add
+            .spans
+            .iter()
+            .map(|s| format!("{:?}", s.style.fg))
+            .collect();
+        assert!(fgs.len() >= 2, "no syntax colors on the add row: {fgs:?}");
+        // The tinted band is padded to the available width.
+        let used: usize = add
+            .spans
+            .iter()
+            .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        assert_eq!(used, width as usize, "tinted band not padded to width");
+    }
+
+    fn fenced_diff_text(md: &str) -> String {
+        render_markdown_with_width(md, Some(70), &dp())
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Context rows of a fenced diff are syntax-highlighted (not plain) and
+    /// never tinted.
+    #[test]
+    fn diff_code_block_context_rows_are_highlighted() {
+        let md = "```diff\ndiff --git a/m.rs b/m.rs\n@@ -1,3 +1,3 @@\n-use std::io;\n+use std::fmt;\n pub fn render() {}\n```";
+        let palette = dp();
+        let lines = render_markdown_with_width(md, Some(70), &palette);
+        let ctx = lines
+            .iter()
+            .find(|l| l.to_string().contains("pub fn render"))
+            .expect("context row");
+        let fgs: std::collections::BTreeSet<_> = ctx
+            .spans
+            .iter()
+            .map(|s| format!("{:?}", s.style.fg))
+            .collect();
+        assert!(fgs.len() >= 2, "context row not highlighted: {fgs:?}");
+        assert!(
+            ctx.spans.iter().all(|s| s.style.bg.is_none()),
+            "context row must not be tinted"
+        );
+    }
+
+    /// A context line that starts with a single `@` (decorators, annotations)
+    /// is code — only `@@` opens a hunk header.
+    #[test]
+    fn diff_code_block_decorator_is_not_a_hunk_header() {
+        let md = "```diff\ndiff --git a/t.py b/t.py\n@@ -1,3 +1,3 @@\n import pytest\n @pytest.fixture\n-def test_x():\n+def test_y():\n     pass\n```";
+        let palette = dp();
+        let lines = render_markdown_with_width(md, Some(70), &palette);
+
+        let decorator = lines
+            .iter()
+            .find(|l| l.to_string().contains("@pytest.fixture"))
+            .expect("decorator row");
+        assert!(
+            !decorator
+                .spans
+                .iter()
+                .any(|s| s.style == palette_hunk(&palette)),
+            "decorator line rendered as a hunk header: {decorator:?}"
+        );
+        // …while the real hunk header keeps its style.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.to_string().contains("@@ -1,3 +1,3 @@")
+                    && l.spans.iter().any(|s| s.style == palette_hunk(&palette))),
+            "hunk header lost its style"
+        );
+    }
+
+    fn palette_hunk(palette: &ThemePalette) -> Style {
+        MarkdownTheme::from_palette(palette).diff_hunk
+    }
+
+    /// `\ No newline at end of file` is diff metadata, not code.
+    #[test]
+    fn diff_code_block_skips_no_newline_marker() {
+        let md = "```diff\ndiff --git a/f.txt b/f.txt\n@@ -1 +1 @@\n-old\n+new\n\\ No newline at end of file\n```";
+        let text = fenced_diff_text(md);
+        assert!(!text.contains("No newline"), "metadata leaked: {text}");
+    }
+
+    /// A construct opened in a context line must still color the deleted line
+    /// that continues it (same rule as the diff cell — shared helper).
+    #[test]
+    fn diff_code_block_keeps_old_revision_state() {
+        let md = "```diff\ndiff --git a/m.rs b/m.rs\n@@ -1,4 +1,3 @@\n fn main() {\n     /* note\n-    let removed = 1;\n     */\n }\n```";
+        let lines = render_markdown_with_width(md, Some(70), &dp());
+        let fg_of = |needle: &str| {
+            lines
+                .iter()
+                .find(|l| l.to_string().contains(needle))
+                .and_then(|l| l.spans.iter().find(|s| s.content.contains(needle)))
+                .and_then(|s| s.style.fg)
+        };
+        let comment = fg_of("note").expect("comment row");
+        let removed = fg_of("removed").expect("deleted row");
+        assert_eq!(
+            removed, comment,
+            "deleted line lost the old revision's comment state"
+        );
     }
 
     #[test]
