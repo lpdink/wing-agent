@@ -55,6 +55,42 @@
 
 **已知限制**：选区只覆盖 chat 区域（composer / 状态栏 / 弹层不参与，点击定位光标属 `tui-composer-pointer`）；选择期间滚轮仍可滚动，滚出快照范围的行不参与复制（所见即所得）；拖动期间内容重建（compaction / rewind / 会话切换）会中止选择，需重新拖选；OSC52 在部分终端仍可能「假成功」（无法探测，本地平台命令优先已缓解）；不做词/行粒度、键盘选择、Esc 清除、搜索与滚动条。
 
+## 链接渲染与单击打开（`tui-link-open`）
+
+markdown 链接渲染为 OSC8 超链接，单击（无拖动）打开。模块分工：
+
+| 关注点 | 位置 |
+|---|---|
+| 链接区间（IR → 行内显示列）/ OSC8 纯函数 / `ComposedLines` | `crates/wing/src/render/markdown/links.rs` |
+| 流式渲染同步维护链接（`compose_into` / `lines_and_links`） | `crates/wing/src/render/markdown/stream.rs` |
+| 行缓存携带链接 + 行号是否精确 | `crates/wing/src/ui/cached_cell.rs` |
+| 本帧链接快照 / OSC8 注入 / 命中查询 | `crates/wing/src/ui/chat_view.rs` |
+| 目标解析 / argv / 进程启动 | `crates/wing/src/util/open.rs` + `app/runner.rs`（`AppIntent::OpenLink`） |
+| 点击 vs 拖动分流 | `crates/wing/src/app/mod.rs`（`App::mouse_link`） |
+
+**OSC8 注入方式**：ratatui 0.30 没有任何超链接 API（`Cell` 只有 symbol/style/diff_option），所以序列写进 **`Cell` 的 symbol**：`ESC]8;;URL ST` + 字素 + `ESC]8;; ST`，**逐字素头**注入（宽字符只注入头单元，尾单元是填充空格，写进去会覆盖半个宽字）。两个必须同时做的细节：
+
+1. **`CellDiffOption::ForcedWidth(1)`**：`Cell::cell_width()` 会用 `symbol().cell_width()` 量宽度，而 `BufferDiff` 用它跳过宽字符的尾随单元格（`self.pos += cell_width - 1`）——不 pin 住宽度，一条 URL 长度的 symbol 会让 diff **跳过链接后面的一整行**（屏幕残留旧内容）。ratatui 为此场景预留了 `ForcedWidth`（其文档原文提到转义序列的宽度与屏幕不一致，自带 kitty 占位符测试同款用法）。
+2. **逐字素头自带 open/close**（而不是「首单元开、末单元关」）：diff 只重绘部分单元格时（例如滚动后只有部分格变化），每个被写出的单元格都自带完整序列，终端不会丢掉某个字符的链接属性。代价是链接单元格多 ~`URL 长度 + 12` 字节，仅在实际重绘时产生。
+
+每帧开始时 ratatui 会 `reset()` 下一个 buffer（"each render pass starts from an empty buffer"），所以注入不跨帧残留；同一 URL 的序列逐字节恒定，连续帧的 `Cell` 相等 → **diff 不抖动**。
+
+**链接区间链路**：`MarkdownSegment.link_target`（解析层已产出）→ `line_link_spans()`（列 = 前序段 `unicode-width` 累加）→ 与渲染行平行的 `Vec<Vec<LinkSpan>>`（`ComposedLines`；流式路径在 `compose_into` 里加 2 列前缀偏移，`to_lines` 重放路径同理）→ `ChatViewWidget::render` 逐行映射成**屏幕绝对列**，落到两个消费者：① 本帧 Buffer 注入 OSC8；② `ChatView::frame_links` 快照（`link_at(column, row)`）。
+
+**行号必须精确**：只有当 cell 的每一行显示宽度 ≤ 渲染宽度时（`CellLines::rows_exact`）才建立链接——此时 `Paragraph` 不可能折行，屏幕行号 == cell 内行号，列区间精确。流式 cell 由硬折行保证恒真；`to_lines` 路径按需量一次（只在**有链接**的 cell 上量，随 width+generation 缓存）。不满足时该 cell 只是没有链接（保守降级，不猜列）。**链接目标不使用 `Style` 承载**（不可行：`set_stringn` 会丢掉含控制字符/零宽的字素，URL 的可见字符还会被算进折行列宽）。
+
+**复制仍然干净**：`buffer_row_graphemes` 读 symbol 前先 `strip_osc8`，所以选区快照的宽度不被 URL 撑大、复制文本不含控制字符——**任何从 Buffer 反读文本/宽度的地方都必须先剥序列**。
+
+**点击 vs 拖动**：`Down(Left)` 在 chat band 内先用**本帧快照**查链接（记进 `App::mouse_link`）**再**照旧开始选择（拖动要能选中链接文本）；`Up(Left)` 在「记录了链接且 `is_dragged() == false`」时打开并提前返回（零宽单击本来也不复制，所以不与复制冲突）。`cancel_selection`（焦点丢失 / 结构失效）连 `mouse_link` 一起清——中止的手势不打开任何东西。命中来自按下那一帧，滚动/流式追加都不会让「按下 A、松开 B」。toast 画在 chat band 之上，所以 `render_toast` 返回绘制区域、`ChatView::mask_links` 把被盖住的命中框删掉（看不见的链接不可点）。
+
+**目标解析与打开方式**（`util/open.rs`）：带 scheme（`http` / `https` / `mailto` / `file` …；单个字母 + `:` 视为 Windows 盘符不算 scheme）= URL → 平台默认启动器（macOS `open` / Windows `cmd /c start ""` / Linux `xdg-open`）。其余按本地路径处理：`~` 展开为 `$HOME`、`file://`（含可选 `localhost`）剥离、**相对路径锚定 `current_dir()`（wing CLI 启动目录，不是会话 workspace）**、`#L10` / `#L10C5` / `:10` / `:10:5` 后缀剥离并解析成行（列）；路径先 `canonicalize`（失败则退化为绝对路径）再 `exists()` 检查——不存在就**不启动任何进程**。有行号时先按白名单找支持行跳转的编辑器 CLI（`code -g` / `subl` / `zed`，PATH 探测不用 `which` 子进程），都没有才退回默认程序（文件仍会打开，行号降级——这是「尽量」的诚实边界；`open` / `xdg-open` 都不接受 `path:line`）。
+
+**安全边界**：① 只对 markdown 链接区间触发（消息里出现 `/etc/passwd` 不会变成可点）；② `Command::new(program).args(argv)`，**绝不经过 shell**、不拼字符串执行（`;`、`|`、`$(...)`、空格、引号都只是 argv 里的普通字符）；③ 注入 OSC8 的目标先剥控制字符（`sanitize_osc8_target`，防 markdown 正文反向注入终端序列）——**净化只用于注入，打开时仍用原始目标**；④ 进程输出 `Stdio::piped()` 捕获（raw mode 下继承 stdio 会写坏屏幕，crate 也 deny `print_stdout/stderr`），在 `spawn_blocking` 上跑并 `tokio::time::timeout`（2s）封顶。
+
+**反馈**：成功静默（`tracing::debug!`，打开本身有可见结果）；失败 `Open failed: …` toast + `tracing::warn!`（opener 不存在 / 非零退出并带 stderr / 路径不存在 / 超时）。
+
+**已知限制**：只覆盖 chat 内容里走 markdown 的 cell（assistant 消息与 thinking；Ask 面板 / tool 输出不参与）；`rows_are_exact` 不成立的 cell 不注入（实测不触发）；行号跳转只认白名单编辑器；tmux/zellij 的 OSC8 透传取决于用户配置；不做 hover 自绘下划线/预览。
+
 ## 已知中间态：原生拖选需要 Shift/Option
 
 鼠标上报接管后，终端不再把拖拽交给自身的文本选择——**不按 Shift（macOS 用 Option）的拖选不再选中文本**。这是回退 #28 的已知代价：应用内自研选择（`tui-text-selection`）已恢复 chat 区域的免修饰键体验，同时保留 Shift/Option 原生拖选作为兜底（composer 区域的拖选仍只能用原生方式）。

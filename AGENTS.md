@@ -163,7 +163,7 @@ crates/wing/src/
 │   └── line_utils.rs / renderable.rs
 ├── tui/mod.rs                       终端生命周期（init/restore、crossterm 事件流）
 ├── config/                          TUI 配置（mod / colors / rendering）
-└── util/                            clipboard(OSC52) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）
+└── util/                            clipboard / open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）
 ```
 
 配套：`crates/wing/benches/stream_render.rs`（流式渲染基准）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期）、`crates/wing/examples/reconnect_flow_verify.rs`。
