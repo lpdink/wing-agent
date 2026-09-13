@@ -4,6 +4,7 @@ pub(crate) mod editing;
 pub(crate) mod helpers;
 pub(crate) mod movement;
 pub(crate) mod paste;
+pub mod pointer;
 pub(crate) mod widget;
 pub(crate) mod wrap;
 
@@ -53,6 +54,14 @@ pub struct InputArea {
     pub(crate) paste_counter: usize,
     /// Maximum number of input lines (configurable).
     pub(crate) max_lines: usize,
+    /// The rect the widget rendered into on the last frame.
+    ///
+    /// Recorded at render time — like [`Self::vertical_scroll`], which the
+    /// render also updates — because mouse events arrive *between* frames: hit
+    /// testing has to describe the screen the user is actually pointing at.
+    /// Empty before the first frame, which makes every hit test fail instead of
+    /// guessing.
+    rendered_area: Rect,
 }
 
 impl InputArea {
@@ -71,6 +80,7 @@ impl InputArea {
             pending_pastes: Vec::new(),
             paste_counter: 0,
             max_lines,
+            rendered_area: Rect::default(),
         }
     }
 
@@ -91,6 +101,12 @@ impl InputArea {
         self.lines.len()
     }
 
+    /// The rect the widget rendered into on the last frame (see the field
+    /// docs).
+    pub fn rendered_area(&self) -> Rect {
+        self.rendered_area
+    }
+
     /// Desired height for layout (visual row count, width-aware).
     pub fn height(&self, available_width: u16) -> u16 {
         let text_width = available_width.saturating_sub(PREFIX_WIDTH) as usize;
@@ -108,16 +124,6 @@ impl InputArea {
     }
 
     // ── Cursor helpers ──────────────────────────────────────────
-
-    /// Whether the cursor can move up (not on the first row).
-    pub fn can_move_up(&self) -> bool {
-        self.cursor_row > 0
-    }
-
-    /// Whether the cursor can move down (not on the last row).
-    pub fn can_move_down(&self) -> bool {
-        self.cursor_row < self.lines.len() - 1
-    }
 
     /// Length of the current line in chars.
     pub(crate) fn current_line_len(&self) -> usize {
@@ -251,10 +257,10 @@ impl InputArea {
         if h == 0 {
             return;
         }
-        let text_width = available_width.saturating_sub(PREFIX_WIDTH) as usize;
-        if text_width == 0 {
-            return;
-        }
+        // Same expression the widget renders (and the pointer mapping resolves)
+        // with: a collapsed text area still wraps at one column, so the window
+        // this computes describes the rows that were really drawn.
+        let text_width = (available_width.saturating_sub(PREFIX_WIDTH) as usize).max(1);
         let vis_rows = wrap::build_visual_rows(&self.lines, text_width);
         let (vis_row, _) = wrap::logical_to_visual(&vis_rows, self.cursor_row, self.cursor_col);
 
@@ -266,6 +272,31 @@ impl InputArea {
     }
 
     // ── Cursor screen position ──────────────────────────────────
+
+    /// Move the cursor to the position a visual coordinate points at.
+    ///
+    /// This is the click-to-place-cursor entry point: `vis_row` indexes the
+    /// full visual-row list [`wrap::build_visual_rows`] produces (a row below
+    /// the last one clamps to it), and `vis_col` is a **display column** inside
+    /// the text area — `0` is the first cell after the `> ` prefix, and a value
+    /// past the row's text lands on that row's end. `available_width` is the
+    /// same width the widget is rendered with (`InputAreaWidget`'s `area.width`,
+    /// prefix included), so the wrapping matches the screen exactly.
+    ///
+    /// The mapping is char-granular (see [`wrap::display_col_to_char`]): a
+    /// pointer on a wide character resolves to the position *before* it.
+    pub fn set_cursor_from_visual(&mut self, available_width: u16, vis_row: usize, vis_col: u16) {
+        let text_width = available_width.saturating_sub(PREFIX_WIDTH) as usize;
+        let vis_rows = wrap::build_visual_rows(&self.lines, text_width.max(1));
+        let Some(last) = vis_rows.len().checked_sub(1) else {
+            return;
+        };
+        let row = vis_rows[vis_row.min(last)];
+        let line = &self.lines[row.logical_line];
+        self.cursor_row = row.logical_line;
+        self.cursor_col = wrap::display_col_to_char(line, &row, vis_col as usize);
+        self.desired_col = None;
+    }
 
     /// Get cursor screen position as `(x, y)` relative to `area`.
     ///
@@ -985,5 +1016,112 @@ mod tests {
         let mut input = InputArea::new("");
         input.set_text("abcdefghijklmno"); // 15 chars → 2 visual rows
         assert_eq!(input.height(12), 2);
+    }
+
+    // ── Click-to-place-cursor mapping ──────────────────────
+
+    #[test]
+    fn set_cursor_from_visual_maps_the_first_row() {
+        // Width 80 → text_width 78, single visual row.
+        let mut input = InputArea::new("");
+        input.set_text("hello world");
+        input.set_cursor_from_visual(80, 0, 6);
+        assert_eq!((input.cursor_row, input.cursor_col), (0, 6));
+        // Past the row's text: the row end.
+        input.set_cursor_from_visual(80, 0, 99);
+        assert_eq!((input.cursor_row, input.cursor_col), (0, 11));
+        // Column 0: the row start.
+        input.set_cursor_from_visual(80, 0, 0);
+        assert_eq!((input.cursor_row, input.cursor_col), (0, 0));
+    }
+
+    #[test]
+    fn set_cursor_from_visual_follows_soft_wraps() {
+        // Width 12, prefix 2 → text_width 10: "abcdefghijklmno" = "abcdefghij" | "klmno".
+        let mut input = InputArea::new("");
+        input.set_text("abcdefghijklmno");
+        input.set_cursor_from_visual(12, 0, 3);
+        assert_eq!((input.cursor_row, input.cursor_col), (0, 3));
+        // Second visual row: char offset 10 + 2.
+        input.set_cursor_from_visual(12, 1, 2);
+        assert_eq!((input.cursor_row, input.cursor_col), (0, 12));
+        // The row boundary is shared: end of row 0 == start of row 1.
+        input.set_cursor_from_visual(12, 0, 10);
+        assert_eq!((input.cursor_row, input.cursor_col), (0, 10));
+        input.set_cursor_from_visual(12, 1, 0);
+        assert_eq!((input.cursor_row, input.cursor_col), (0, 10));
+    }
+
+    #[test]
+    fn set_cursor_from_visual_maps_the_logical_row_under_a_wrapped_row() {
+        // Width 12 → text_width 10: "abcdefghijklmno" | "hello".
+        let mut input = InputArea::new("");
+        input.set_text("abcdefghijklmno\nhello");
+        input.set_cursor_from_visual(12, 2, 3);
+        assert_eq!((input.cursor_row, input.cursor_col), (1, 3));
+    }
+
+    #[test]
+    fn set_cursor_from_visual_handles_wide_characters() {
+        // Width 8, prefix 2 → text_width 6: "你好世" | "界".
+        let mut input = InputArea::new("");
+        input.set_text("你好世界");
+        // Either cell of '你' resolves to before it.
+        input.set_cursor_from_visual(8, 0, 0);
+        assert_eq!((input.cursor_row, input.cursor_col), (0, 0));
+        input.set_cursor_from_visual(8, 0, 1);
+        assert_eq!((input.cursor_row, input.cursor_col), (0, 0));
+        // '世' spans columns 4..6 → before it.
+        input.set_cursor_from_visual(8, 0, 5);
+        assert_eq!((input.cursor_row, input.cursor_col), (0, 2));
+        // Second visual row: '界' is char 3.
+        input.set_cursor_from_visual(8, 1, 1);
+        assert_eq!((input.cursor_row, input.cursor_col), (0, 3));
+    }
+
+    #[test]
+    fn set_cursor_from_visual_handles_empty_lines_and_clamps_rows() {
+        let mut input = InputArea::new("");
+        input.set_text("a\n\nb");
+        // The empty logical line is its own visual row.
+        input.set_cursor_from_visual(80, 1, 5);
+        assert_eq!((input.cursor_row, input.cursor_col), (1, 0));
+        // A row below the last one clamps to it.
+        input.set_cursor_from_visual(80, 99, 0);
+        assert_eq!((input.cursor_row, input.cursor_col), (2, 0));
+
+        // An empty draft maps to (0, 0) — the placeholder is not content.
+        let mut input = InputArea::new("placeholder");
+        input.set_cursor_from_visual(80, 0, 4);
+        assert_eq!((input.cursor_row, input.cursor_col), (0, 0));
+    }
+
+    #[test]
+    fn set_cursor_from_visual_uses_the_scrolled_window() {
+        // Width 12, prefix 2 → text_width 10, max_lines 2: the window follows
+        // the cursor, which sits on the last logical line.
+        let mut input = InputArea::with_max_lines(String::new(), 2);
+        input.set_text("one\ntwo\nthree");
+        input.update_vertical_scroll(2, 12);
+        assert_eq!(input.vertical_scroll, 1, "window shows logical lines 1..2");
+        // The caller (the pointer hit test) adds the window offset, so the
+        // row handed in is absolute: window row 1 = visual row 2.
+        input.set_cursor_from_visual(12, 2, 2);
+        assert_eq!((input.cursor_row, input.cursor_col), (2, 2));
+    }
+
+    #[test]
+    fn set_cursor_from_visual_round_trips_with_cursor_screen_pos() {
+        let mut input = InputArea::new("");
+        input.set_text("你好a好你\nsecond line");
+        let area = Rect::new(0, 10, 12, 4);
+        for vis_row in 0..input.height(area.width) as usize {
+            let (x, y) = {
+                input.set_cursor_from_visual(area.width, vis_row, 0);
+                input.cursor_screen_pos(&area)
+            };
+            assert_eq!(y, area.y + vis_row as u16, "row {vis_row} stays on screen");
+            assert_eq!(x, area.x + PREFIX_WIDTH, "column 0 is the row's first cell");
+        }
     }
 }

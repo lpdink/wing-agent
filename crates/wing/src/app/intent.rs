@@ -71,6 +71,11 @@ pub enum AppIntent {
     /// Write text to clipboard via OSC52 escape sequence.
     CopyToClipboard(String),
 
+    /// Open a markdown link target with the system opener (browser for URLs,
+    /// default application for local files). The raw destination is carried
+    /// verbatim — resolution happens in `util::open` on the blocking pool.
+    OpenLink(String),
+
     /// Create a new session via HTTP API.
     CreateSession { workspace: Option<String> },
 

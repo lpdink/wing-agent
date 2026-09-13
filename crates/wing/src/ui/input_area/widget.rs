@@ -31,6 +31,9 @@ impl<'a> InputAreaWidget<'a> {
 
 impl Widget for InputAreaWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        // Record the rect this frame drew into (empty when collapsed) — mouse
+        // events arrive between frames and hit testing reads it back.
+        self.input.rendered_area = area;
         if area.height == 0 || area.width == 0 {
             return;
         }
