@@ -95,7 +95,19 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 **状态事件**（`event/state_change.py`）：`session_init` · `sync_session`（订阅时重放历史）· `session_state_changed`（update / think / yolo 后统一发出）· `interrupted` · `compact_done`。
 
-**其他**（`event/base.py`、`query_response.py`）：`error` · `delivered` · `context_stats` · `branch_targets`。
+**其他**（`event/base.py`、`query_response.py`）：`error` · `notice` · `delivered` · `context_stats` · `branch_targets`。
+
+> `notice`：一次性提醒（`level` + `message`，可带 `attempt` / `max_attempts` / `retry_in_s`），`persist=false` 不落盘、不重放。与 `error` 的边界：`error` 是"真错误"（前端终结 turn / 渲染错误 / 通知），`notice` 不终结 turn（如"LLM 调用失败，N 秒后重试"）。
+
+## 慢消费者回收（写超时）
+
+网关对"不再读取的客户端"有界反制（实测背景：一个读任务死亡的客户端让连接与路由表项永久泄漏，且每个事件都变成一次失败投递 + 一行日志，最高 12,290 行/分钟）：
+
+- 每次投递（`GatewayServer._send_text`，每事件一次 `create_task`，无发送队列）等待写完成的时间上界为 **60s**（`WRITE_TIMEOUT_SECONDS`，硬编码；关闭连接另有 5s 上界 `CLOSE_TIMEOUT_SECONDS`）。
+- 超时或写失败 → **回收该客户端**：从 `clients` / `ws_to_clients` 注销、`event_bus.route_detach_client` 清订阅路由、主动 `close(code=1013)`、attached 的远程工具宿主 `fail_client`（在途调用立即失败）。
+- 回收与 `handle_ws` 的正常断连收尾共用**同一个幂等入口** `GatewayServer.drop_client(ws, reason=…)`；`pop` 语义保证每个客户端最多一次副作用（一行回收日志）。
+- 回收立即生效：投递列表就是路由表，注销后该 client 不再收到任何事件——失败投递与日志洪泛随之停止。
+- 边界：uvicorn 的 WS 写走用户态缓冲，`send_text` 往往立即返回；此时触发回收的是异常分支（连接已死 / ASGI 已关闭），两条分支走同一条回收路径。
 
 ## 鉴权与 RBAC（opt-in，PR #35）
 
