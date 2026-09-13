@@ -4,6 +4,7 @@
 use std::fmt;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -15,6 +16,9 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::CapacityError;
 
+use crate::gateway::chunk::Limits;
+use crate::gateway::chunk::Outcome;
+use crate::gateway::chunk::Reassembler;
 use crate::protocol::ClientRequest;
 use crate::protocol::ConnectResponse;
 use crate::protocol::WingEvent;
@@ -57,6 +61,14 @@ pub enum CloseReason {
     StreamEnded,
     /// The local event consumer disappeared (client dropped).
     ChannelClosed,
+    /// Chunked frame reassembly failed: malformed envelope, non-contiguous or
+    /// duplicated fragments, buffer cap exceeded, or a fragmented event that
+    /// never completed. The caller (TUI / `wing wait`) reports it and follows
+    /// the normal reconnect + resubscribe path.
+    ReassemblyFailed {
+        /// Human-readable reason (never empty).
+        detail: String,
+    },
 }
 
 impl CloseReason {
@@ -93,6 +105,9 @@ impl CloseReason {
             Self::ReadError { detail } => format!("read error: {detail}"),
             Self::StreamEnded => "gateway closed the connection".to_string(),
             Self::ChannelClosed => "local event consumer closed".to_string(),
+            Self::ReassemblyFailed { detail } => {
+                format!("chunk reassembly failed: {detail}")
+            }
         }
     }
 }
@@ -122,6 +137,19 @@ impl GatewayClient {
     /// If `api_key` is provided and non-empty, the WS handshake carries
     /// an `Authorization: Bearer <key>` header.
     pub async fn connect(url: &str, api_key: Option<&str>) -> Result<Self> {
+        Self::connect_with_limits(url, api_key, Limits::default()).await
+    }
+
+    /// Same as [`GatewayClient::connect`] with injectable reassembly limits.
+    ///
+    /// Test seam: the production limits (64 MiB window, 30 s idle timeout) are
+    /// too slow to exercise in a test; the state machine itself is limit-agnostic.
+    #[doc(hidden)]
+    pub async fn connect_with_limits(
+        url: &str,
+        api_key: Option<&str>,
+        limits: Limits,
+    ) -> Result<Self> {
         tracing::info!("connecting to gateway: {url}");
 
         // Let tungstenite build the proper WS handshake request from the URL
@@ -212,9 +240,17 @@ impl GatewayClient {
         let reason_slot = Arc::clone(&close_reason);
         tokio::spawn(async move {
             let mut last_pressure_warn = std::time::Instant::now();
+            // Chunked-frame reassembly lives here (transport layer): the app
+            // only ever sees complete events. See `gateway::chunk`.
+            let mut reassembler = Reassembler::new(limits);
             // Every exit carries a reason — consumers (`wing wait`, the TUI
             // reconnect toast) must be able to say *why* the stream died.
             let reason = loop {
+                // Only armed while a fragmented event is open; a window that
+                // never closes must fail instead of stalling the stream.
+                let reassembly_deadline = reassembler
+                    .deadline()
+                    .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600));
                 tokio::select! {
                     // Zero-traffic shutdown: `event_rx` lives inside
                     // GatewayClient, so dropping the client closes the channel
@@ -223,51 +259,68 @@ impl GatewayClient {
                     // would keep this task and its socket alive forever,
                     // leaking an fd per abandoned client.
                     _ = event_tx.closed() => break CloseReason::ChannelClosed,
+                    _ = tokio::time::sleep_until(reassembly_deadline),
+                        if reassembler.is_assembling() =>
+                    {
+                        let detail = reassembler.timeout_detail();
+                        tracing::error!("chunk reassembly timed out: {detail}");
+                        break CloseReason::ReassemblyFailed { detail };
+                    }
                     msg = ws_stream.next() => {
                         let Some(msg_result) = msg else {
                             break CloseReason::StreamEnded;
                         };
                         match msg_result {
                             Ok(Message::Text(text)) => {
-                                match serde_json::from_str::<WingEvent>(&text) {
-                                    Ok(event) => {
-                                        tracing::debug!(
-                                            event_type = %event.event_type(),
-                                            "received event"
-                                        );
-                                        // Channel pressure: warn once per 10 s when >90% full.
-                                        let capacity = event_tx.max_capacity();
-                                        let used = capacity.saturating_sub(event_tx.capacity());
-                                        if used >= capacity * 9 / 10
-                                            && last_pressure_warn.elapsed()
-                                                > std::time::Duration::from_secs(10)
-                                        {
-                                            last_pressure_warn = std::time::Instant::now();
-                                            tracing::warn!(
-                                                "event channel pressure: {}/{} ({}%) — \
-                                                 consider a slower model or incremental rendering",
-                                                used,
-                                                capacity,
-                                                used * 100 / capacity,
+                                // Complete events only: a fragmented payload is
+                                // reassembled (and held back in arrival order)
+                                // before anything reaches the application.
+                                match reassembler.on_text(&text) {
+                                    Outcome::Deliver(events) => {
+                                        let mut consumer_gone = false;
+                                        for event in events {
+                                            tracing::debug!(
+                                                event_type = %event.event_type(),
+                                                "received event"
                                             );
+                                            // Channel pressure: warn once per 10 s when >90% full.
+                                            let capacity = event_tx.max_capacity();
+                                            let used = capacity.saturating_sub(event_tx.capacity());
+                                            if used >= capacity * 9 / 10
+                                                && last_pressure_warn.elapsed()
+                                                    > Duration::from_secs(10)
+                                            {
+                                                last_pressure_warn = std::time::Instant::now();
+                                                tracing::warn!(
+                                                    "event channel pressure: {}/{} ({}%) — \
+                                                     consider a slower model or incremental rendering",
+                                                    used,
+                                                    capacity,
+                                                    used * 100 / capacity,
+                                                );
+                                            }
+                                            if event_tx.send(event).await.is_err() {
+                                                consumer_gone = true;
+                                                break;
+                                            }
                                         }
-                                        if event_tx.send(event).await.is_err() {
+                                        if consumer_gone {
                                             tracing::debug!(
                                                 "event receiver dropped, stopping read task"
                                             );
                                             break CloseReason::ChannelClosed;
                                         }
                                     }
-                                    Err(e) => {
-                                        tracing::warn!("failed to parse event: {e}, raw: {text}");
-                                        // Try to at least extract the type for debugging.
-                                        if let Ok(val) =
-                                            serde_json::from_str::<serde_json::Value>(&text)
-                                            && let Some(t) =
-                                                val.get("type").and_then(|v| v.as_str())
-                                        {
-                                            tracing::warn!("unparseable event type: {t}");
-                                        }
+                                    Outcome::Pending => {
+                                        tracing::debug!(
+                                            "chunk fragment received, waiting for the last frame"
+                                        );
+                                    }
+                                    Outcome::Fail(detail) => {
+                                        tracing::error!(
+                                            "chunk reassembly failed: {detail}"
+                                        );
+                                        break CloseReason::ReassemblyFailed { detail };
                                     }
                                 }
                             }
@@ -468,6 +521,12 @@ mod tests {
             ),
             (CloseReason::StreamEnded, "closed the connection"),
             (CloseReason::ChannelClosed, "consumer closed"),
+            (
+                CloseReason::ReassemblyFailed {
+                    detail: "chunk index out of sequence".into(),
+                },
+                "chunk reassembly failed: chunk index out of sequence",
+            ),
         ];
         for (reason, needle) in cases {
             let text = reason.describe();
