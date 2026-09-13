@@ -15,6 +15,8 @@ use ratatui::widgets::Widget;
 use ratatui::widgets::Wrap;
 use unicode_width::UnicodeWidthStr;
 
+use ratatui::buffer::CellDiffOption;
+
 use super::selection::ContentPoint;
 use super::selection::Grapheme;
 use super::selection::RenderedRow;
@@ -24,8 +26,16 @@ use super::selection::grapheme_width;
 
 use crate::config::ThemePalette;
 use crate::render::Renderable;
-use crate::render::markdown::render_markdown_with_width;
+use crate::render::markdown::ComposedLines;
+use crate::render::markdown::LinkSpan;
+use crate::render::markdown::compose_lines;
+use crate::render::markdown::osc8_close;
+use crate::render::markdown::osc8_open;
+use crate::render::markdown::render_markdown_lines;
 use crate::render::markdown::render_plain;
+use crate::render::markdown::sanitize_osc8_target;
+use crate::render::markdown::strip_osc8;
+use crate::render::markdown::symbol_width;
 use crate::render::renderable::CellContext;
 
 use crate::app::ask_panel::AskPanel;
@@ -84,6 +94,20 @@ pub enum ChatCell {
 }
 
 impl ChatCell {
+    /// Render this cell to lines **plus their markdown link spans**.
+    ///
+    /// Cells without markdown links (everything but assistant messages and
+    /// thinking blocks) return [`ComposedLines::plain`] — the spans exist so
+    /// the widget can inject OSC8 hyperlinks and hit-test clicks without ever
+    /// re-deriving what the renderer produced (see `tui-link-open`).
+    pub fn render_lines(&self, width: u16, ctx: &CellContext<'_>) -> ComposedLines {
+        match self {
+            Self::AssistantMessage(text) => assistant_message_lines(text, width, ctx.palette),
+            Self::Thinking(block) => block.render_lines(ctx.palette, ctx.thinking_mode, width),
+            _ => ComposedLines::plain(self.to_lines(width, ctx)),
+        }
+    }
+
     /// Render this cell to lines, width-aware for full-width elements.
     pub fn to_lines(&self, width: u16, ctx: &CellContext<'_>) -> Vec<Line<'static>> {
         let palette = ctx.palette;
@@ -107,25 +131,7 @@ impl ChatCell {
                 Self::user_message_lines(text, style)
             }
             Self::AssistantMessage(text) => {
-                // Reserve 2 columns for the `⦁ ` / `  ` line prefix so tables
-                // balance to fit and downstream wrapping never breaks a row.
-                let md_width = Some(width.saturating_sub(2));
-                let md_lines = render_markdown_with_width(text, md_width, palette);
-                let bullet_style = Style::default().fg(palette.text);
-                let mut lines = Vec::new();
-                for (i, line) in md_lines.iter().enumerate() {
-                    if i == 0 {
-                        let mut spans = vec![Span::styled("⦁ ", bullet_style)];
-                        spans.extend(line.spans.clone());
-                        lines.push(Line::from(spans));
-                    } else {
-                        let mut spans = vec![Span::raw("  ")];
-                        spans.extend(line.spans.clone());
-                        lines.push(Line::from(spans));
-                    }
-                }
-                lines.push(Line::from(""));
-                lines
+                assistant_message_lines(text, width, palette).into_lines()
             }
             Self::SystemMessage(text) => {
                 let label = Style::default().fg(palette.accent);
@@ -186,6 +192,31 @@ impl ChatCell {
     }
 }
 
+/// Assistant message lines: markdown prefixed with `⦁ ` / `  `, plus the link
+/// spans of every rendered line (shifted by the 2-column prefix).
+///
+/// Reserves 2 columns for the prefix so tables balance to fit and downstream
+/// wrapping never breaks a row.
+fn assistant_message_lines(text: &str, width: u16, palette: &ThemePalette) -> ComposedLines {
+    let md_width = Some(width.saturating_sub(2));
+    let md_lines = render_markdown_lines(text, md_width, palette);
+    let bullet_style = Style::default().fg(palette.text);
+    let mut composed = compose_lines(
+        &md_lines,
+        2,
+        |i| {
+            if i == 0 {
+                Span::styled("⦁ ", bullet_style)
+            } else {
+                Span::raw("  ")
+            }
+        },
+        |_kind, style| style,
+    );
+    composed.push_blank();
+    composed
+}
+
 impl Renderable for ChatCell {
     fn render(&self, area: Rect, buf: &mut Buffer, ctx: &CellContext<'_>) {
         Paragraph::new(self.to_lines(area.width, ctx))
@@ -238,6 +269,17 @@ pub struct ChatGeometry {
     pub scroll_offset: usize,
 }
 
+/// One link of the last rendered frame, in **absolute screen columns**.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameLink {
+    /// First screen column of the link text (inclusive).
+    pub start: u16,
+    /// One past the last screen column of the link text (exclusive).
+    pub end: u16,
+    /// The markdown destination, as written (sanitised only for injection).
+    pub target: String,
+}
+
 /// Scrollable chat view with scrollbar indicator.
 pub struct ChatView {
     pub(crate) cells: Vec<CachedCell>,
@@ -275,6 +317,13 @@ pub struct ChatView {
     rebuilds: u64,
     /// Geometry of the last render (see [`ChatGeometry`]).
     geometry: ChatGeometry,
+    /// Links of the last rendered frame, per screen row (absolute columns).
+    ///
+    /// Rebuilt from scratch on every render: a press lands between frames, so
+    /// the hit test has to answer from the frame the user was looking at —
+    /// same "WYSIWYG" contract as the selection's row snapshot. Rows without
+    /// links have no entry.
+    frame_links: Vec<(u16, Vec<FrameLink>)>,
     /// Graphemes of the visible chat rows as of the last *drag* frame.
     ///
     /// Copy-on-select is WYSIWYG: the release event lands between frames, so
@@ -298,6 +347,7 @@ impl ChatView {
             last_total: 0,
             rebuilds: 0,
             geometry: ChatGeometry::default(),
+            frame_links: Vec::new(),
             visible_rows: Vec::new(),
         }
     }
@@ -656,6 +706,42 @@ impl ChatView {
     /// Geometry of the last render — see [`ChatGeometry`].
     pub fn geometry(&self) -> ChatGeometry {
         self.geometry
+    }
+
+    /// Link target at a screen position of the last rendered frame.
+    ///
+    /// `None` when the position is not inside a link (or the frame had
+    /// none) — a click there is a no-op, never a guessed open.
+    pub fn link_at(&self, column: u16, row: u16) -> Option<&str> {
+        self.frame_links
+            .iter()
+            .find(|(r, _)| *r == row)
+            .and_then(|(_, links)| {
+                links
+                    .iter()
+                    .find(|link| column >= link.start && column < link.end)
+            })
+            .map(|link| link.target.as_str())
+    }
+
+    /// Links of the last rendered frame (test seam / diagnostics).
+    pub fn frame_links(&self) -> &[(u16, Vec<FrameLink>)] {
+        &self.frame_links
+    }
+
+    /// Drop the link hit boxes covered by `area` (an overlay painted on top of
+    /// the chat after this frame's links were recorded).
+    ///
+    /// Only used for the toast: it is drawn over the chat band, and a hit box
+    /// whose text is no longer visible would open a link the user cannot see.
+    pub fn mask_links(&mut self, area: Rect) {
+        self.frame_links.retain_mut(|(row, links)| {
+            if *row < area.y || *row >= area.bottom() {
+                return true;
+            }
+            links.retain(|link| link.end <= area.x || link.start >= area.right());
+            !links.is_empty()
+        });
     }
 
     /// Whether a screen position lies inside the chat band of the last frame.
@@ -1289,7 +1375,10 @@ fn buffer_row_graphemes(buf: &Buffer, row: u16, area: Rect) -> Vec<Grapheme> {
     let mut graphemes = Vec::new();
     let mut x = area.x;
     while x < area.right() {
-        let symbol = buf[(x, row)].symbol().to_string();
+        // Links ride in the cell symbol (see `inject_osc8`) — measure and copy
+        // the *displayed* text, or the URL would inflate the width and leak
+        // control characters into the clipboard.
+        let symbol = strip_osc8(buf[(x, row)].symbol()).into_owned();
         let width = grapheme_width(&symbol).min(area.right() - x);
         graphemes.push(Grapheme {
             col: x - area.x,
@@ -1313,6 +1402,7 @@ impl Widget for ChatViewWidget<'_> {
             // A collapsed band cannot be selected — clear the mapping so the
             // app's hit test rejects every press instead of using a stale rect.
             self.view.geometry = ChatGeometry::default();
+            self.view.frame_links.clear();
             return;
         }
 
@@ -1361,6 +1451,11 @@ impl Widget for ChatViewWidget<'_> {
             area,
             scroll_offset: scroll,
         };
+
+        // Links of this frame: screen row -> intervals (absolute columns).
+        // Collected while the cells render and installed at the end, so a
+        // half-rendered frame can never be hit-tested.
+        let mut frame_links: Vec<(u16, Vec<FrameLink>)> = Vec::new();
 
         // Virtualized rendering: header + cells.
         let view_end = scroll + visible;
@@ -1443,7 +1538,14 @@ impl Widget for ChatViewWidget<'_> {
             // already ≤ width — blit the visible slice directly, no
             // Paragraph wrap Composer, no to_vec clone.
             if cached.is_prewrapped(content_area.width, &self.ctx) {
-                let lines = cached.compute_lines(content_area.width, &self.ctx);
+                let cell = cached.compute_cell_lines(content_area.width, &self.ctx);
+                let rows_exact = cell.rows_exact;
+                let cell_links = if rows_exact {
+                    cell.links.to_vec()
+                } else {
+                    Vec::new()
+                };
+                let lines = cell.lines;
                 let skip_lines = skip.min(lines.len());
                 let end = (skip_lines + cell_visible).min(lines.len());
                 for (row_in_cell, line) in lines[skip_lines..end].iter().enumerate() {
@@ -1455,6 +1557,17 @@ impl Widget for ChatViewWidget<'_> {
                     );
                     line.render(row, buf);
                 }
+                if rows_exact {
+                    place_links(
+                        &mut frame_links,
+                        buf,
+                        &cell_links,
+                        content_area,
+                        skip_lines,
+                        render_y,
+                        cell_visible,
+                    );
+                }
                 render_y += cell_visible as u16;
                 if render_y >= content_area.bottom() {
                     break;
@@ -1462,7 +1575,14 @@ impl Widget for ChatViewWidget<'_> {
                 continue;
             }
 
-            let cell_lines = cached.compute_lines(content_area.width, &self.ctx).to_vec();
+            let cell = cached.compute_cell_lines(content_area.width, &self.ctx);
+            let rows_exact = cell.rows_exact;
+            let cell_links = if rows_exact {
+                cell.links.to_vec()
+            } else {
+                Vec::new()
+            };
+            let cell_lines = cell.lines.to_vec();
 
             // User messages (normal / pending / discarded): fill full-width
             // background before text rendering.
@@ -1512,11 +1632,123 @@ impl Widget for ChatViewWidget<'_> {
                 .scroll((skip as u16, 0))
                 .render(cell_area, buf);
 
+            // The user-message branch above owns its own padding rows, so link
+            // placement is confined to the plain cells (which is where markdown
+            // links can appear anyway).
+            if rows_exact {
+                place_links(
+                    &mut frame_links,
+                    buf,
+                    &cell_links,
+                    content_area,
+                    skip,
+                    render_y,
+                    cell_visible,
+                );
+            }
+
             render_y += cell_visible as u16;
             if render_y >= content_area.bottom() {
                 break;
             }
         }
+
+        // Install this frame's links (the hit test reads them between frames).
+        self.view.frame_links = frame_links;
+    }
+}
+
+/// Record and inject the links of one cell's visible rows.
+///
+/// `first_line` is the cell's line index at the top of `first_row` (the blit
+/// path passes the skip it blitted from; the `Paragraph` path its scroll
+/// offset) — valid only because the caller checked `rows_exact`, i.e. every
+/// line occupies exactly one screen row. Link columns are shifted into screen
+/// space here, so both the hit test and the OSC8 injection work on absolute
+/// columns.
+fn place_links(
+    frame_links: &mut Vec<(u16, Vec<FrameLink>)>,
+    buf: &mut Buffer,
+    cell_links: &[Vec<LinkSpan>],
+    area: Rect,
+    first_line: usize,
+    first_row: u16,
+    visible: usize,
+) {
+    if cell_links.is_empty() {
+        return;
+    }
+    for offset in 0..visible {
+        let Some(spans) = cell_links.get(first_line + offset) else {
+            break;
+        };
+        if spans.is_empty() {
+            continue;
+        }
+        let row = first_row + offset as u16;
+        if row >= area.bottom() {
+            break;
+        }
+        let mut links = Vec::with_capacity(spans.len());
+        for span in spans {
+            let start = area.x.saturating_add(span.start);
+            let end = area.x.saturating_add(span.end).min(area.right());
+            if start >= end {
+                continue;
+            }
+            inject_osc8(buf, row, start, end, &span.target);
+            links.push(FrameLink {
+                start,
+                end,
+                target: span.target.clone(),
+            });
+        }
+        if !links.is_empty() {
+            frame_links.push((row, links));
+        }
+    }
+}
+
+/// Put an OSC8 hyperlink on every grapheme head cell of `start..end`.
+///
+/// ratatui has no hyperlink API, so the sequence rides in the cell symbol —
+/// the one string the crossterm backend prints verbatim. Two details make that
+/// safe:
+///
+/// * `CellDiffOption::ForcedWidth(1)`: `Cell::cell_width()` otherwise measures
+///   the symbol (URL included) and `BufferDiff` uses that width to skip the
+///   cells *after* a wide one — a 40-character URL would make the diff skip the
+///   rest of the line.
+/// * every head cell carries its own open/close pair, so a partial repaint can
+///   never leave a cell without its hyperlink (the alternative — open on the
+///   first cell, close on the last — breaks when the diff re-emits a middle
+///   cell only).
+///
+/// Wide graphemes are injected once, at the head cell: the terminal applies the
+/// sequence to the whole glyph, and writing anything into the filler cells
+/// would print a space over its right half.
+fn inject_osc8(buf: &mut Buffer, row: u16, start: u16, end: u16, target: &str) {
+    let open = osc8_open(&sanitize_osc8_target(target));
+    let close = osc8_close();
+    let end = end.min(buf.area.right());
+    if row >= buf.area.bottom() {
+        return;
+    }
+    let mut x = start;
+    while x < end {
+        let width = symbol_width(buf[(x, row)].symbol());
+        if width == 0 {
+            // A zero-width cell (or a malformed one) cannot advance the
+            // cursor — bail instead of looping forever.
+            break;
+        }
+        let symbol = buf[(x, row)].symbol().to_string();
+        let cell = &mut buf[(x, row)];
+        cell.set_symbol(&format!("{open}{symbol}{close}"))
+            .set_diff_option(CellDiffOption::ForcedWidth(
+                std::num::NonZeroU16::new(1).expect("1 is non-zero"),
+            ));
+        x += width;
     }
 }
 
@@ -2884,5 +3116,405 @@ mod tests {
         view.scroll_down(0, band.height as usize);
         assert_eq!(view.scroll_position(), before);
         assert!(view.is_at_bottom(), "release at the bottom re-arms follow");
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+    use crate::config::LayoutConfig;
+    use crate::config::ThemePalette;
+    use crate::render::markdown::osc8_close;
+    use crate::render::markdown::osc8_open;
+    use crate::render::markdown::sanitize_osc8_target;
+    use crate::render::markdown::strip_osc8;
+    use crate::render::renderable::CellContext;
+
+    fn render(view: &mut ChatView, width: u16, height: u16) -> Buffer {
+        let (palette, layout) = (ThemePalette::default(), LayoutConfig::default());
+        let ctx = CellContext {
+            palette: &palette,
+            thinking_mode: crate::config::rendering::ThinkingMode::Visible,
+            layout: &layout,
+        };
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        ChatViewWidget::new(view, ctx).render(area, &mut buf);
+        buf
+    }
+
+    /// A row's displayed text — hyperlinks stripped, wide-grapheme filler
+    /// cells skipped (exactly what the user reads).
+    fn row_text(buf: &Buffer, row: u16) -> String {
+        buffer_row_graphemes(buf, row, buf.area)
+            .iter()
+            .map(|g| g.symbol.as_str())
+            .collect()
+    }
+
+    fn find_row(buf: &Buffer, needle: &str) -> u16 {
+        (buf.area.y..buf.area.bottom())
+            .find(|&y| row_text(buf, y).contains(needle))
+            .unwrap_or_else(|| panic!("row not found: {needle}"))
+    }
+
+    /// Columns of a row whose symbol carries an OSC8 sequence.
+    fn linked_columns(buf: &Buffer, row: u16) -> Vec<u16> {
+        (buf.area.x..buf.area.right())
+            .filter(|&x| buf[(x, row)].symbol().contains("\u{1b}]8;;"))
+            .collect()
+    }
+
+    /// Displayed text of the columns `start..end` of a row.
+    fn columns_text(buf: &Buffer, row: u16, start: u16, end: u16) -> String {
+        (start..end)
+            .map(|x| strip_osc8(buf[(x, row)].symbol()).into_owned())
+            .collect()
+    }
+
+    /// The single link of `view`'s last frame.
+    fn only_link(view: &ChatView) -> (u16, FrameLink) {
+        let mut iter = view.frame_links().iter();
+        let (row, links) = iter.next().expect("frame has a link");
+        assert!(iter.next().is_none(), "expected exactly one linked row");
+        assert_eq!(links.len(), 1, "expected exactly one link per row");
+        (*row, links[0].clone())
+    }
+
+    #[test]
+    fn assistant_links_render_as_osc8_and_are_hit_testable() {
+        let mut view = ChatView::new();
+        view.push(ChatCell::AssistantMessage(
+            "see [docs](https://example.com) now".into(),
+        ));
+        let buf = render(&mut view, 60, 6);
+
+        // Remote targets are displayed after the label (existing markdown
+        // rule) and the whole displayed run belongs to the link.
+        let row = find_row(&buf, "see docs (https://example.com) now");
+        let (link_row, link) = only_link(&view);
+        assert_eq!(link_row, row);
+        assert_eq!(link.start, 6, "`⦁ ` + `see ` precede the link");
+        assert_eq!(
+            columns_text(&buf, row, link.start, link.end),
+            "docs (https://example.com)"
+        );
+        assert_eq!(link.target, "https://example.com");
+
+        // Every column of the run is hyperlinked, each cell self-contained.
+        assert_eq!(
+            linked_columns(&buf, row),
+            (link.start..link.end).collect::<Vec<_>>()
+        );
+        for x in link.start..link.end {
+            let symbol = buf[(x, row)].symbol();
+            assert!(
+                symbol.starts_with(&osc8_open("https://example.com")),
+                "{symbol:?}"
+            );
+            assert!(symbol.ends_with(&osc8_close()), "{symbol:?}");
+        }
+        // ...and nothing outside it.
+        assert_eq!(buf[(0, row)].symbol(), "⦁");
+        assert!(!buf[(5, row)].symbol().contains('\u{1b}'));
+        assert!(!buf[(link.end, row)].symbol().contains('\u{1b}'));
+        for other in buf.area.y..buf.area.bottom() {
+            if other != row {
+                assert!(linked_columns(&buf, other).is_empty());
+            }
+        }
+
+        assert_eq!(view.link_at(link.start, row), Some("https://example.com"));
+        assert_eq!(view.link_at(link.end - 1, row), Some("https://example.com"));
+        assert_eq!(view.link_at(link.start - 1, row), None, "the space before");
+        assert_eq!(view.link_at(link.end, row), None);
+        assert_eq!(view.link_at(link.start, row + 1), None, "other rows");
+    }
+
+    #[test]
+    fn cells_without_links_carry_no_sequences() {
+        let mut view = ChatView::new();
+        view.push(ChatCell::AssistantMessage("plain text".into()));
+        let buf = render(&mut view, 40, 6);
+        for row in buf.area.y..buf.area.bottom() {
+            assert!(linked_columns(&buf, row).is_empty());
+        }
+        assert!(view.frame_links().is_empty());
+        assert_eq!(view.link_at(0, 0), None);
+    }
+
+    #[test]
+    fn injected_link_cells_survive_text_extraction() {
+        let mut view = ChatView::new();
+        view.push(ChatCell::AssistantMessage(
+            "see [docs](https://example.com) now".into(),
+        ));
+        let buf = render(&mut view, 60, 6);
+        let row = find_row(&buf, "see docs");
+        let graphemes = buffer_row_graphemes(&buf, row, buf.area);
+        let text: String = graphemes.iter().map(|g| g.symbol.as_str()).collect();
+        assert!(
+            !text.contains('\u{1b}'),
+            "extraction leaked escapes: {text:?}"
+        );
+        assert!(text.contains("see docs (https://example.com) now"));
+        let d = graphemes.iter().find(|g| g.symbol == "d").expect("`d`");
+        assert_eq!(d.width, 1, "the URL must not inflate the measured width");
+    }
+
+    #[test]
+    fn wide_link_text_injects_one_sequence_per_grapheme_head() {
+        let mut view = ChatView::new();
+        view.push(ChatCell::AssistantMessage(
+            "见 [你好](https://example.com)".into(),
+        ));
+        let buf = render(&mut view, 60, 6);
+        let row = find_row(&buf, "你好");
+        let (_, link) = only_link(&view);
+        // `⦁ ` (2) + `见` (2) + space (1) => 你好 starts at column 5, and the
+        // filler column of each wide grapheme stays untouched.
+        assert_eq!(link.start, 5);
+        let linked = linked_columns(&buf, row);
+        assert_eq!(
+            &linked[..3],
+            &[5, 7, 9],
+            "wide graphemes are injected at their head cell only"
+        );
+        assert_eq!(
+            linked.len(),
+            (link.end - link.start) as usize - 2,
+            "the two wide graphemes contribute one head cell per two columns"
+        );
+        // The displayed text is unchanged (filler columns read back as spaces
+        // and are skipped by the grapheme walk).
+        assert!(row_text(&buf, row).contains("见 你好 (https://example.com)"));
+        for col in [5u16, 7, 9] {
+            assert_eq!(
+                view.link_at(col, row),
+                Some("https://example.com"),
+                "col {col}"
+            );
+            assert_eq!(
+                view.link_at(col + 1, row),
+                Some("https://example.com"),
+                "filler"
+            );
+        }
+        assert_eq!(view.link_at(4, row), None, "the space before the link");
+    }
+
+    #[test]
+    fn link_cells_set_forced_width_so_the_diff_does_not_skip_following_cells() {
+        use ratatui::buffer::CellDiffOption;
+        use std::num::NonZeroU16;
+
+        let mut view = ChatView::new();
+        view.push(ChatCell::AssistantMessage(
+            "see [docs](https://example.com/a/very/long/path) now".into(),
+        ));
+        let buf = render(&mut view, 80, 6);
+        let row = find_row(&buf, "now");
+        let linked = linked_columns(&buf, row);
+        assert!(!linked.is_empty());
+        for x in &linked {
+            assert_eq!(
+                buf[(*x, row)].diff_option,
+                CellDiffOption::ForcedWidth(NonZeroU16::new(1).unwrap()),
+                "cell {x} must pin its diff width to 1"
+            );
+        }
+        // The cells after the link must still show up in the diff output — a
+        // symbol whose measured width includes the URL would make `BufferDiff`
+        // skip them (`self.pos += cell_width - 1`).
+        let diff = Buffer::empty(buf.area).diff(&buf);
+        let tail_x = row_text(&buf, row).find("now").expect("tail") as u16;
+        assert!(
+            diff.iter().any(|(x, y, _)| *y == row && *x == tail_x),
+            "the cell after the link is missing from the diff"
+        );
+    }
+
+    #[test]
+    fn injecting_links_keeps_width_wrap_and_height_unchanged() {
+        let text = "para one with [a link](https://example.com/x) and more words to wrap around";
+        let mut with = ChatView::new();
+        with.push(ChatCell::AssistantMessage(text.into()));
+        let mut without = ChatView::new();
+        without.push(ChatCell::AssistantMessage(text.into()));
+
+        let buf = render(&mut with, 40, 12);
+        let plain = render(&mut without, 40, 12);
+        for row in buf.area.y..buf.area.bottom() {
+            assert_eq!(row_text(&buf, row), row_text(&plain, row), "row {row}");
+        }
+        assert_eq!(with.content_height(), without.content_height());
+        assert!(!with.frame_links().is_empty());
+    }
+
+    #[test]
+    fn consecutive_frames_produce_identical_link_cells() {
+        let mut view = ChatView::new();
+        view.push(ChatCell::AssistantMessage(
+            "see [docs](https://example.com) now".into(),
+        ));
+        let first = render(&mut view, 60, 6);
+        let second = render(&mut view, 60, 6);
+        assert_eq!(first, second, "a stable frame must not jitter the diff");
+    }
+
+    #[test]
+    fn scrolled_frame_moves_the_link_hit_box() {
+        // Four messages above the linked one and two below: the link sits in
+        // the middle of the band, so it stays visible across a 2-row scroll.
+        let mut view = ChatView::new();
+        for i in 0..4 {
+            view.push(ChatCell::UserMessage(format!("above {i}")));
+        }
+        view.push(ChatCell::AssistantMessage(
+            "[docs](https://example.com)".into(),
+        ));
+        for i in 0..2 {
+            view.push(ChatCell::UserMessage(format!("below {i}")));
+        }
+        render(&mut view, 40, 12);
+        let (row, link) = only_link(&view);
+        assert_eq!(view.link_at(link.start, row), Some("https://example.com"));
+
+        // Scroll up two rows: the content (and the hit box) move down.
+        view.scroll_up(2);
+        render(&mut view, 40, 12);
+        let (new_row, new_link) = only_link(&view);
+        assert_eq!(new_row, row + 2, "the link row follows the scroll");
+        assert_eq!(new_link.start, link.start, "the column is content-anchored");
+        assert_eq!(
+            view.link_at(link.start, new_row),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            view.link_at(link.start, row),
+            None,
+            "the stale screen position is no longer a link"
+        );
+    }
+
+    #[test]
+    fn collapsed_band_clears_links() {
+        let mut view = ChatView::new();
+        view.push(ChatCell::AssistantMessage(
+            "[docs](https://example.com)".into(),
+        ));
+        render(&mut view, 40, 6);
+        assert!(!view.frame_links().is_empty());
+        render(&mut view, 40, 0);
+        assert!(view.frame_links().is_empty());
+        assert_eq!(view.link_at(2, 2), None);
+    }
+
+    #[test]
+    fn inject_osc8_sanitises_the_target() {
+        let target = "https://e\u{1b}]8;;evil\u{7}.com";
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 1));
+        buf.set_stringn(0, 0, "docs", 8, Style::default());
+        inject_osc8(&mut buf, 0, 0, 4, target);
+
+        let expected = osc8_open(&sanitize_osc8_target(target));
+        for x in 0..4u16 {
+            let symbol = buf[(x, 0)].symbol();
+            assert!(symbol.starts_with(&expected), "{symbol:?}");
+            assert!(symbol.ends_with(&osc8_close()), "{symbol:?}");
+            assert_eq!(strip_osc8(symbol), columns_text(&buf, 0, x, x + 1));
+        }
+        // Only our own sequences survive: one opener, one closer, no BEL.
+        let symbol = buf[(0, 0)].symbol();
+        assert_eq!(symbol.matches("\u{1b}]8;;").count(), 2, "{symbol:?}");
+        assert!(!symbol.contains('\u{7}'), "{symbol:?}");
+    }
+
+    #[test]
+    fn inject_osc8_is_bounded_and_skips_filler_cells() {
+        // A wide grapheme at column 0 followed by a normal one: injecting the
+        // wide cell must not touch its filler column.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 6, 1));
+        buf.set_stringn(0, 0, "你a", 6, Style::default());
+        inject_osc8(&mut buf, 0, 0, 3, "https://example.com");
+        assert!(buf[(0, 0)].symbol().contains("\u{1b}]8;;"));
+        assert_eq!(buf[(1, 0)].symbol(), " ", "filler cell stays untouched");
+        assert!(buf[(2, 0)].symbol().contains("\u{1b}]8;;"));
+        // Out-of-range columns are clamped, never panicking.
+        inject_osc8(&mut buf, 0, 0, u16::MAX, "https://example.com");
+        inject_osc8(&mut buf, 5, 0, 6, "https://example.com");
+        inject_osc8(&mut buf, 9, 0, 6, "https://example.com");
+    }
+
+    #[test]
+    fn streaming_cell_links_survive_finalize_and_match_the_replay_path() {
+        let mut view = ChatView::new();
+        view.push(ChatCell::AssistantMessage(String::new()));
+        view.append_to_last_assistant("see [docs](https://example.com)");
+        render(&mut view, 60, 6);
+        let (row, link) = only_link(&view);
+        assert_eq!(view.link_at(link.start, row), Some("https://example.com"));
+
+        view.finalize_streams();
+        render(&mut view, 60, 6);
+        let (final_row, final_link) = only_link(&view);
+        assert_eq!(
+            view.link_at(final_link.start, final_row),
+            Some("https://example.com")
+        );
+
+        // The replayed (`to_lines`) path agrees with the streamed one.
+        let mut replayed = ChatView::new();
+        replayed.push(ChatCell::AssistantMessage(
+            "see [docs](https://example.com)".into(),
+        ));
+        render(&mut replayed, 60, 6);
+        assert_eq!(replayed.frame_links(), view.frame_links());
+    }
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::*;
+
+    fn link(start: u16, end: u16) -> FrameLink {
+        FrameLink {
+            start,
+            end,
+            target: "https://example.com".into(),
+        }
+    }
+
+    #[test]
+    fn mask_links_drops_covered_rows_and_clips_columns() {
+        let mut view = ChatView::new();
+        view.frame_links = vec![
+            (3, vec![link(0, 4), link(8, 12)]),
+            (4, vec![link(0, 20)]),
+            (9, vec![link(2, 6)]),
+        ];
+
+        view.mask_links(Rect::new(6, 4, 10, 1)); // row 4, columns 6..16
+        assert_eq!(
+            view.frame_links().len(),
+            2,
+            "the fully covered row is dropped"
+        );
+        assert_eq!(view.link_at(2, 4), None, "the covered row has no link left");
+        assert_eq!(view.link_at(2, 9), Some("https://example.com"), "untouched");
+        assert_eq!(view.link_at(0, 3), Some("https://example.com"));
+        assert_eq!(view.link_at(10, 3), Some("https://example.com"));
+
+        view.mask_links(Rect::new(8, 3, 5, 2)); // rows 3..5, columns 8..13
+        assert_eq!(view.link_at(0, 3), Some("https://example.com"), "outside");
+        assert_eq!(view.link_at(8, 3), None, "inside the mask");
+        assert_eq!(view.link_at(2, 9), Some("https://example.com"), "other row");
+    }
+
+    #[test]
+    fn masking_an_empty_frame_is_a_no_op() {
+        let mut view = ChatView::new();
+        view.mask_links(Rect::new(0, 0, 10, 10));
+        assert!(view.frame_links().is_empty());
     }
 }

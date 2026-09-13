@@ -65,6 +65,7 @@ use ratatui::text::{Line, Span};
 use syntect::easy::HighlightLines;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use super::links::{LinkSpan, compose_lines, line_link_spans};
 use super::types::{
     MarkdownLine, MarkdownSegment, MarkdownTheme, SegmentKind, thinking_segment_style,
 };
@@ -241,6 +242,11 @@ pub struct StreamingRender {
     /// Cell-final lines: promoted closed blocks + separators, then the
     /// tail and one trailing cell blank (managed by `sync`).
     flat: Vec<Line<'static>>,
+    /// Link spans of every `flat` line (parallel; empty when a line has no
+    /// link). The markdown target is dropped by `Line::from`, so it travels
+    /// beside the lines — the widget needs it to inject OSC8 and to hit-test
+    /// clicks (`tui-link-open`).
+    links: Vec<Vec<LinkSpan>>,
     /// Length of the promoted (immutable) prefix of `flat` — including the
     /// open fenced block's composed lines (top border + completed body
     /// lines), which are stable in exactly the same sense.
@@ -272,6 +278,7 @@ impl StreamingRender {
                 closed: Vec::new(),
             },
             flat: Vec::new(),
+            links: Vec::new(),
             stable_len: 0,
             pending_sep: false,
             width: None,
@@ -314,20 +321,31 @@ impl StreamingRender {
     /// every line is guaranteed ≤ `width` display columns (over-wide
     /// lines are hard-wrapped) — ready for direct blitting.
     pub fn lines(&mut self, width: u16, palette: &ThemePalette) -> &[Line<'static>] {
+        self.lines_and_links(width, palette).0
+    }
+
+    /// [`lines`](Self::lines) plus the link spans of every returned line.
+    ///
+    /// Both slices are index-aligned (`links[i]` belongs to `lines[i]`).
+    pub fn lines_and_links(
+        &mut self,
+        width: u16,
+        palette: &ThemePalette,
+    ) -> (&[Line<'static>], &[Vec<LinkSpan>]) {
         if self.finalized && self.width == Some(width) {
-            return &self.flat;
+            return (&self.flat, &self.links);
         }
         if self.width != Some(width) {
             // First render at this width (or a width change): full
             // deterministic rebuild from the buffer.
             self.rebuild(width, palette);
-            return &self.flat;
+            return (&self.flat, &self.links);
         }
         if !self.dirty {
-            return &self.flat;
+            return (&self.flat, &self.links);
         }
         self.sync(width, palette);
-        &self.flat
+        (&self.flat, &self.links)
     }
 
     /// Height in terminal rows — valid after the latest `lines()` call.
@@ -340,9 +358,11 @@ impl StreamingRender {
     ///
     /// After finalize the cell must not receive further deltas.
     pub fn finalize(&mut self, width: u16, palette: &ThemePalette) {
-        let lines = full_lines(&self.buf, width, self.profile, palette);
+        let (lines, links) = full_lines_with_links(&self.buf, width, self.profile, palette);
         self.flat = lines;
+        self.links = links;
         self.stable_len = self.flat.len();
+        debug_assert_eq!(self.links.len(), self.flat.len());
         self.pending_sep = false;
         self.code_tail = None;
         self.code_flat = None;
@@ -391,15 +411,22 @@ impl StreamingRender {
         // 0) A closed block invalidates the open fenced block's composed
         //    region (below it is promoted, which re-renders it whole).
         if !self.split.closed.is_empty() {
-            drop_code_flat(&mut self.flat, &mut self.stable_len, &mut self.code_flat);
+            drop_code_flat(
+                &mut self.flat,
+                &mut self.links,
+                &mut self.stable_len,
+                &mut self.code_flat,
+            );
         }
 
         // 1) Promote newly-closed blocks (in order).
         self.flat.truncate(self.stable_len);
+        self.links.truncate(self.stable_len);
         let closed = std::mem::take(&mut self.split.closed);
         for block in closed {
             let emitted_sep = if self.pending_sep {
                 self.flat.push(sep_line(self.profile, palette));
+                self.links.push(Vec::new());
                 self.pending_sep = false;
                 true
             } else {
@@ -428,10 +455,18 @@ impl StreamingRender {
                 self.pending_sep = sep && !emitted_sep;
                 continue;
             }
-            compose_into(&mut self.flat, md_lines, width, palette, self.profile);
+            compose_into(
+                &mut self.flat,
+                &mut self.links,
+                md_lines,
+                width,
+                palette,
+                self.profile,
+            );
             self.pending_sep = sep;
         }
         self.stable_len = self.flat.len();
+        debug_assert_eq!(self.links.len(), self.flat.len());
 
         // 2) Render the active tail (doc-end semantics: trailing blanks
         // trimmed, matching the full render at the same text).
@@ -454,14 +489,24 @@ impl StreamingRender {
             // so the next sync's truncate keeps it.
             if !md_lines.is_empty() && self.pending_sep {
                 self.flat.push(sep_line(self.profile, palette));
+                self.links.push(Vec::new());
                 self.pending_sep = false;
                 self.stable_len += 1;
             }
-            compose_into(&mut self.flat, md_lines, width, palette, self.profile);
+            compose_into(
+                &mut self.flat,
+                &mut self.links,
+                md_lines,
+                width,
+                palette,
+                self.profile,
+            );
         }
 
         // 3) Cell trailing blank (matches the non-streaming cell renders).
         self.flat.push(Line::from(""));
+        self.links.push(Vec::new());
+        debug_assert_eq!(self.links.len(), self.flat.len());
     }
 
     /// Sync the tail when it is an unclosed fenced code block backed by a
@@ -484,7 +529,12 @@ impl StreamingRender {
             // most log10(n) times per block).
             rewrite_gutters(&mut cache, number_width);
             cache.gutter_width = number_width;
-            drop_code_flat(&mut self.flat, &mut self.stable_len, &mut self.code_flat);
+            drop_code_flat(
+                &mut self.flat,
+                &mut self.links,
+                &mut self.stable_len,
+                &mut self.code_flat,
+            );
         }
 
         if self.code_flat.is_none() {
@@ -493,12 +543,14 @@ impl StreamingRender {
             // then the top border — both stable from here on.
             if self.pending_sep {
                 self.flat.push(sep_line(profile, palette));
+                self.links.push(Vec::new());
                 self.pending_sep = false;
                 self.stable_len += 1;
             }
             let start = self.flat.len();
             compose_into(
                 &mut self.flat,
+                &mut self.links,
                 std::iter::once(code_top_border(has_language, cache.lang.as_deref(), &theme)),
                 width,
                 palette,
@@ -515,6 +567,7 @@ impl StreamingRender {
         if composed < cache.rendered.len() {
             compose_into(
                 &mut self.flat,
+                &mut self.links,
                 cache.rendered[composed..].iter().cloned(),
                 width,
                 palette,
@@ -531,10 +584,18 @@ impl StreamingRender {
         if let Some(partial) = partial {
             let number = cache.rendered.len() + 1;
             let md = render_code_line_stateless(partial, &cache, number, number_width, &theme);
-            compose_into(&mut self.flat, std::iter::once(md), width, palette, profile);
+            compose_into(
+                &mut self.flat,
+                &mut self.links,
+                std::iter::once(md),
+                width,
+                palette,
+                profile,
+            );
         }
         compose_into(
             &mut self.flat,
+            &mut self.links,
             std::iter::once(code_bottom_border(&theme)),
             width,
             palette,
@@ -542,6 +603,7 @@ impl StreamingRender {
         );
 
         self.code_tail = Some(cache);
+        debug_assert_eq!(self.links.len(), self.flat.len());
     }
 
     /// Apply the fence-on-own-line normalization to unchecked bytes.
@@ -811,6 +873,7 @@ impl StreamingRender {
 /// tail must read the buffer while appending lines.
 fn compose_into<I>(
     flat: &mut Vec<Line<'static>>,
+    links: &mut Vec<Vec<LinkSpan>>,
     md_lines: I,
     width: u16,
     palette: &ThemePalette,
@@ -829,6 +892,7 @@ fn compose_into<I>(
         .last()
         .is_some_and(|l| l.spans.iter().all(|s| s.content.trim().is_empty()));
     let mut out = Vec::new();
+    let mut out_links = Vec::new();
     for (i, md_line) in md_lines.into_iter().enumerate() {
         if flat_ends_blank && i == 0 && md_line.segments.is_empty() && !flat.is_empty() {
             // Dedup: the previous content already ended this blank run.
@@ -845,6 +909,8 @@ fn compose_into<I>(
             (Profile::Content, false) => Span::raw("  "),
         };
         spans.push(prefix);
+        // Same 2-column prefix on every line — the link columns shift by it.
+        out_links.push(shift_spans(line_link_spans(&md_line), PREFIX_WIDTH));
         for seg in md_line.segments {
             let style = match profile {
                 Profile::Thinking => thinking_segment_style(seg.kind, seg.style, thinking_style),
@@ -854,8 +920,24 @@ fn compose_into<I>(
         }
         out.push(Line::from(spans));
     }
-    let wrapped = hard_wrap_lines(out, limit);
+    let (wrapped, wrapped_links) = hard_wrap_lines_with_links(out, out_links, limit);
     flat.extend(wrapped);
+    links.extend(wrapped_links);
+}
+
+/// Cell line prefix width (`⦁ ` / `  `) — links shift by this many columns.
+const PREFIX_WIDTH: u16 = 2;
+
+/// Shift link columns right by `by` (the cell prefix).
+fn shift_spans(spans: Vec<LinkSpan>, by: u16) -> Vec<LinkSpan> {
+    spans
+        .into_iter()
+        .map(|span| LinkSpan {
+            start: span.start.saturating_add(by),
+            end: span.end.saturating_add(by),
+            target: span.target,
+        })
+        .collect()
 }
 
 /// Drop the open fenced block's composed lines (invalidated by a
@@ -863,11 +945,13 @@ fn compose_into<I>(
 /// caller can hold the buffer borrow that triggered the invalidation.
 fn drop_code_flat(
     flat: &mut Vec<Line<'static>>,
+    links: &mut Vec<Vec<LinkSpan>>,
     stable_len: &mut usize,
     code_flat: &mut Option<CodeFlat>,
 ) {
     if let Some(cf) = code_flat.take() {
         flat.truncate(cf.start);
+        links.truncate(cf.start);
         *stable_len = (*stable_len).min(cf.start);
     }
 }
@@ -897,6 +981,17 @@ pub fn full_lines(
     profile: Profile,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
+    full_lines_with_links(text, width, profile, palette).0
+}
+
+/// [`full_lines`] plus the link spans of every line (see
+/// [`StreamingRender::lines_and_links`]).
+pub fn full_lines_with_links(
+    text: &str,
+    width: u16,
+    profile: Profile,
+    palette: &ThemePalette,
+) -> (Vec<Line<'static>>, Vec<Vec<LinkSpan>>) {
     let opts = RenderOpts {
         code_highlight: profile.code_highlight(),
         trim_trailing_blank: true,
@@ -906,28 +1001,26 @@ pub fn full_lines(
     let bullet_style = Style::default().fg(palette.text);
     let limit = width as usize;
 
-    let mut out = Vec::with_capacity(md.len() + 1);
-    for (i, md_line) in md.into_iter().enumerate() {
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(md_line.segments.len() + 1);
-        let prefix = match (profile, i == 0) {
-            (Profile::Thinking, true) => Span::styled("⦁ ".to_string(), thinking_style),
+    let composed = compose_lines(
+        &md,
+        PREFIX_WIDTH,
+        |i| match (profile, i == 0) {
+            (Profile::Thinking, true) => Span::styled("\u{2981} ".to_string(), thinking_style),
             (Profile::Thinking, false) => Span::styled("  ".to_string(), thinking_style),
-            (Profile::Content, true) => Span::styled("⦁ ".to_string(), bullet_style),
+            (Profile::Content, true) => Span::styled("\u{2981} ".to_string(), bullet_style),
             (Profile::Content, false) => Span::raw("  "),
-        };
-        spans.push(prefix);
-        for seg in md_line.segments {
-            let style = match profile {
-                Profile::Thinking => thinking_segment_style(seg.kind, seg.style, thinking_style),
-                Profile::Content => seg.style,
-            };
-            spans.push(Span::styled(seg.text, style));
-        }
-        out.push(Line::from(spans));
-    }
-    let mut lines = hard_wrap_lines(out, limit);
+        },
+        |kind, style| match profile {
+            Profile::Thinking => thinking_segment_style(kind, style, thinking_style),
+            Profile::Content => style,
+        },
+    );
+    let (mut lines, mut links) =
+        hard_wrap_lines_with_links(composed.lines().to_vec(), composed.links().to_vec(), limit);
     lines.push(Line::from(""));
-    lines
+    links.push(Vec::new());
+    debug_assert_eq!(lines.len(), links.len());
+    (lines, links)
 }
 
 // ============================================================
@@ -1367,14 +1460,34 @@ fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 ///
 /// Continuation lines drop leading spaces (break-at-space semantics) and
 /// never re-emit the cell prefix.
+#[cfg(test)]
 fn hard_wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    hard_wrap_lines_with_links(lines, Vec::new(), width).0
+}
+
+/// [`hard_wrap_lines`] keeping the link spans aligned with the output rows.
+///
+/// A line that fits keeps its spans unchanged (the common case — prose is
+/// pre-wrapped upstream, so links are not split here). A line that has to be
+/// split loses its spans: the split re-flows the text at arbitrary character
+/// boundaries, and guessing where a link's text landed would risk pointing a
+/// click at the wrong target — the link simply stays inactive on those rows.
+fn hard_wrap_lines_with_links(
+    lines: Vec<Line<'static>>,
+    links: Vec<Vec<LinkSpan>>,
+    width: usize,
+) -> (Vec<Line<'static>>, Vec<Vec<LinkSpan>>) {
+    let mut links = links;
+    links.resize(lines.len(), Vec::new());
     if width == 0 {
-        return lines;
+        return (lines, links);
     }
     let mut out = Vec::with_capacity(lines.len());
-    for line in lines {
+    let mut out_links = Vec::with_capacity(lines.len());
+    for (line, line_links) in lines.into_iter().zip(links) {
         if line_width(&line) <= width {
             out.push(line);
+            out_links.push(line_links);
             continue;
         }
         let mut cur: Vec<Span<'static>> = Vec::new();
@@ -1392,6 +1505,7 @@ fn hard_wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>
                         cur.push(Span::styled(std::mem::take(&mut chunk), span.style));
                     }
                     out.push(Line::from(std::mem::take(&mut cur)));
+                    out_links.push(Vec::new());
                     cur_w = 0;
                     skipping_spaces = true;
                 }
@@ -1410,9 +1524,11 @@ fn hard_wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>
         }
         if !cur.is_empty() {
             out.push(Line::from(cur));
+            out_links.push(Vec::new());
         }
     }
-    out
+    debug_assert_eq!(out.len(), out_links.len());
+    (out, out_links)
 }
 
 fn line_width(line: &Line<'_>) -> usize {

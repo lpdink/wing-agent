@@ -16,6 +16,8 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::config::rendering::ThinkingMode;
 use crate::render::Renderable;
+use crate::render::markdown::ComposedLines;
+use crate::render::markdown::LinkSpan;
 use crate::render::markdown::stream::{Profile, StreamingRender};
 use crate::render::renderable::CellContext;
 use crate::ui::chat_view::ChatCell;
@@ -58,7 +60,24 @@ struct CachedHeight {
 struct CachedLines {
     width: u16,
     generation: u64,
-    lines: Vec<Line<'static>>,
+    /// Lines + their markdown link spans. The spans ride along so the render
+    /// loop can inject OSC8 and hit-test clicks without re-rendering the cell
+    /// (`tui-link-open`).
+    composed: ComposedLines,
+    /// Whether each line maps to exactly one screen row (`Paragraph` cannot
+    /// wrap any of them), i.e. whether the link spans' row arithmetic holds.
+    /// Only meaningful when the composed lines carry links.
+    rows_exact: bool,
+}
+
+/// What the chat view needs to render a cell: its lines, their link spans and
+/// whether screen row == line index.
+pub struct CellLines<'a> {
+    pub lines: &'a [Line<'static>],
+    /// Index-aligned with `lines`.
+    pub links: &'a [Vec<LinkSpan>],
+    /// Row arithmetic is exact (see [`CachedLines::rows_exact`]).
+    pub rows_exact: bool,
 }
 
 impl CachedCell {
@@ -235,12 +254,16 @@ impl CachedCell {
         }
         if let Some(mut stream) = self.stream.take() {
             stream.finalize(width, ctx.palette);
-            let lines = stream.lines(width, ctx.palette).to_vec();
-            let height = lines.len();
+            let (lines, links) = stream.lines_and_links(width, ctx.palette);
+            let composed = ComposedLines::new(lines.to_vec(), links.to_vec());
+            let height = composed.len();
             self.cached_lines = Some(CachedLines {
                 width,
                 generation: self.generation,
-                lines,
+                composed,
+                // A finalized stream renders pre-wrapped lines (every line was
+                // hard-wrapped to the width), so the row maths is exact.
+                rows_exact: true,
             });
             self.cached_height = Some(CachedHeight {
                 width,
@@ -261,14 +284,27 @@ impl CachedCell {
     /// Width-aware: invalidates cache when width changes (for full-width elements
     /// like Separator and UserMessage card).
     pub fn compute_lines(&mut self, width: u16, ctx: &CellContext<'_>) -> &[Line<'static>] {
+        self.compute_cell_lines(width, ctx).lines
+    }
+
+    /// [`compute_lines`](Self::compute_lines) plus the link spans of every
+    /// line (index-aligned with them) and whether the row maths is exact.
+    pub fn compute_cell_lines(&mut self, width: u16, ctx: &CellContext<'_>) -> CellLines<'_> {
         if self.pending_finalize {
             self.run_finalize(width, ctx);
         }
         if self.stream_render_active(ctx) {
-            let stream = self.stream.as_mut().expect("checked active");
-            let lines = stream.lines(width, ctx.palette);
+            // Order matters: the flag is written before the borrow that
+            // produces the returned slices is taken.
             self.prewrapped_width = Some(width);
-            return lines;
+            let stream = self.stream.as_mut().expect("checked active");
+            let (lines, links) = stream.lines_and_links(width, ctx.palette);
+            // Streaming lines are hard-wrapped to the width by construction.
+            return CellLines {
+                lines,
+                links,
+                rows_exact: true,
+            };
         }
         let cached_valid = self
             .cached_lines
@@ -276,17 +312,25 @@ impl CachedCell {
             .is_some_and(|c| c.generation == self.generation && c.width == width);
 
         if !cached_valid {
-            let lines = self.cell.to_lines(width, ctx);
+            let composed = self.cell.render_lines(width, ctx);
             self.cached_lines = Some(CachedLines {
                 width,
                 generation: self.generation,
-                lines,
+                composed,
+                // A finalized stream renders pre-wrapped lines (every line was
+                // hard-wrapped to the width), so the row maths is exact.
+                rows_exact: true,
             });
             // Lines from `to_lines` are not pre-wrapped — never blit them.
             self.prewrapped_width = None;
         }
 
-        &self.cached_lines.as_ref().unwrap().lines
+        let cached = self.cached_lines.as_ref().expect("just ensured");
+        CellLines {
+            lines: cached.composed.lines(),
+            links: cached.composed.links(),
+            rows_exact: cached.rows_exact,
+        }
     }
 
     /// Width-aware height, using cache when possible.
