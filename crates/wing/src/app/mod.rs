@@ -686,10 +686,16 @@ impl App {
         // A press that never moved is a click: open the link recorded at press
         // time instead of copying (a click copies nothing anyway — the
         // selection is zero-width — so this only decides *what* the click
-        // does). A drag keeps the selection semantics.
+        // does). A drag keeps the selection semantics. "Never moved" is
+        // checked both ways — no `Drag` event *and* the pointer back on the
+        // anchor — so a click that lost its motion events (tmux, a terminal
+        // that drops `?1002`) cannot open a link the user dragged away from.
+        let release_point = self.chat.content_point_at(column, row);
         let clicked_link = self.mouse_link.take();
         if let Some(target) = clicked_link
             && !self.selection.is_dragged()
+            && release_point.is_some()
+            && release_point == self.selection.anchor()
         {
             // Restore the follow contract from the current position, exactly
             // like the copy path below.
@@ -703,7 +709,7 @@ impl App {
         // the `unfollow` from the press cannot leave the view stuck in reading
         // mode.
         self.chat.scroll_down(0, self.visible_height);
-        let bounds = match self.chat.content_point_at(column, row) {
+        let bounds = match release_point {
             Some(point) => {
                 // Include the character under the pointer (reference
                 // behaviour) — but only for a real drag: a plain click must
@@ -4554,6 +4560,36 @@ mod tests {
         app
     }
 
+    /// App whose chat is taller than the band, with a link in the middle — so
+    /// scrolling really moves the content under the pointer.
+    fn app_with_scrollable_link() -> App {
+        let mut app = test_app();
+        app.chat.set_header(Vec::new());
+        for i in 0..4 {
+            app.chat.push(ChatCell::UserMessage(format!("above {i}")));
+        }
+        app.chat.push(ChatCell::AssistantMessage(
+            "[docs](https://example.com)".into(),
+        ));
+        for i in 0..2 {
+            app.chat.push(ChatCell::UserMessage(format!("below {i}")));
+        }
+        app
+    }
+
+    /// Targets of the `OpenLink` intents drained so far (ignores clipboard
+    /// intents: pressing, scrolling the view and releasing is a *selection*
+    /// sweep — pre-existing behaviour — but it must never open a link).
+    fn open_intents(app: &mut App) -> Vec<String> {
+        app.drain_intents()
+            .into_iter()
+            .filter_map(|intent| match intent {
+                AppIntent::OpenLink(target) => Some(target),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The link's hit box in the drawn frame.
     fn link_box(app: &App) -> ((u16, u16), (u16, u16)) {
         let (row, links) = app
@@ -4675,21 +4711,75 @@ mod tests {
 
     #[test]
     fn test_link_click_uses_the_press_frame_snapshot() {
-        // The recorded target must survive content that scrolls in between:
-        // the pointer stays put, the text under it moves.
+        // The target is the one recorded at press time: the frame in between
+        // shows a *different* link under the same pointer, and the click still
+        // opens what the user pressed on.
         let mut app = app_with_link();
         let mut terminal = test_terminal(60, 12);
         draw(&mut app, &mut terminal);
-        let (start, _) = link_box(&app);
+        let (at, _) = link_box(&app);
 
-        assert_eq!(app.handle_mouse(press(start)), MouseOutcome::Immediate);
-        app.chat.scroll_up(3);
+        assert_eq!(app.handle_mouse(press(at)), MouseOutcome::Immediate);
+        app.chat.cells[0].mutate(|cell| {
+            *cell = ChatCell::AssistantMessage("see [docs](https://changed.example) now".into());
+        });
         draw(&mut app, &mut terminal);
-        assert_eq!(app.handle_mouse(release(start)), MouseOutcome::Immediate);
+        assert_eq!(app.handle_mouse(release(at)), MouseOutcome::Immediate);
         match app.drain_intents().as_slice() {
             [AppIntent::OpenLink(target)] => assert_eq!(target, "https://example.com"),
             other => panic!("expected the pressed link, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_release_off_the_anchor_is_not_a_click() {
+        // Both halves of "never moved": no drag event *and* the pointer back on
+        // the anchor. A release elsewhere (here: the same column after the view
+        // scrolled, and a plain different column) opens nothing.
+        let mut app = app_with_scrollable_link();
+        let mut terminal = test_terminal(60, 12);
+        draw(&mut app, &mut terminal);
+        let (at, _) = link_box(&app);
+
+        assert_eq!(app.handle_mouse(press(at)), MouseOutcome::Immediate);
+        app.chat.scroll_up(2);
+        draw(&mut app, &mut terminal);
+        assert_eq!(app.handle_mouse(release(at)), MouseOutcome::Immediate);
+        assert!(
+            open_intents(&mut app).is_empty(),
+            "the content under the pointer changed: not a click"
+        );
+
+        // Back at the bottom (the link is in place again): a release on a
+        // different column is rejected by the anchor check.
+        app.chat.scroll_down(2, app.visible_height);
+        draw(&mut app, &mut terminal);
+        let ((start, row), _) = link_box(&app);
+        assert_eq!(
+            app.handle_mouse(press((start, row))),
+            MouseOutcome::Immediate
+        );
+        assert_eq!(
+            app.handle_mouse(release((start + 6, row))),
+            MouseOutcome::Immediate
+        );
+        assert!(open_intents(&mut app).is_empty());
+
+        // The unchanged press/release pair is still a click (control).
+        draw(&mut app, &mut terminal);
+        let ((start, row), _) = link_box(&app);
+        assert_eq!(
+            app.handle_mouse(press((start, row))),
+            MouseOutcome::Immediate
+        );
+        assert_eq!(
+            app.handle_mouse(release((start, row))),
+            MouseOutcome::Immediate
+        );
+        assert_eq!(
+            open_intents(&mut app),
+            vec!["https://example.com".to_string()]
+        );
     }
 
     #[test]

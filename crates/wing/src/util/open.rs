@@ -18,6 +18,13 @@
 //! * a `#L10` / `#L10C5` / `:10` / `:10:5` suffix on a local target is a line
 //!   (and column) reference: it is stripped from the path and, when a
 //!   line-capable editor CLI is on `PATH`, used to jump to that line.
+//!
+//! Known limits (deliberate, see the `tui-link-open` change): `~user/x` is not
+//! expanded (only `~` / `~/…`); a `file://` URL with a real host
+//! (`file://nas/share/x`) is reported instead of guessed;
+//! [`Env::has_executable`] looks for the bare program name, so on Windows a
+//! `.cmd` shim (`code.cmd`) is not detected and the line jump degrades to
+//! opening the file.
 
 use std::ffi::OsString;
 use std::io;
@@ -28,16 +35,17 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 
-use crate::render::markdown::links::extract_hidden_location_suffix;
 use crate::render::markdown::links::is_local_path_like_link;
+use crate::render::markdown::links::trailing_location_suffix;
 
 /// How long we are willing to wait for the opener to return.
 ///
-/// `open` / `xdg-open` hand off in well under a second; a launcher that has not
-/// returned by then is either wedged or waiting on something we cannot see, and
-/// blocking the event loop for it would be worse than not knowing (the run loop
-/// awaits this intent serially — see `app::runner`).
-const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// The run loop awaits this intent serially, so this doubles as the worst-case
+/// UI freeze: matched to the clipboard probe's bound (`app::runner`) rather
+/// than to how long a slow launcher may take. `open` / `xdg-open` hand off in
+/// well under a second; anything slower is treated as launched-and-slow (the
+/// caller only logs the timeout).
+const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// A parsed link destination.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +58,25 @@ pub enum OpenTarget {
         line: Option<u32>,
         column: Option<u32>,
     },
+    /// A target we refuse to open, with the reason.
+    ///
+    /// `file://nas/share/x` is the case that matters: its authority is a host,
+    /// and treating the rest as a relative path would quietly open a different
+    /// file (or nothing) under the launch directory. Silence is worse than an
+    /// error here.
+    Unsupported(String),
+}
+
+/// The `file://` form this resolver understands: no authority, or `localhost`.
+fn local_file_url_body(raw: &str) -> Option<&str> {
+    let rest = raw.strip_prefix("file://")?;
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() || authority.eq_ignore_ascii_case("localhost") {
+        // `/tmp/x` after the authority, or `file:///tmp/x` (empty authority).
+        return Some(&rest[authority_end..]);
+    }
+    None
 }
 
 /// The exact program + argv to run.
@@ -198,16 +225,39 @@ pub fn classify(raw: &str) -> Option<OpenTarget> {
         return None;
     }
     if looks_like_path(raw) {
-        let (path_part, line, column) = split_location_suffix(raw);
-        let path = path_part?;
-        return Some(OpenTarget::File { path, line, column });
+        let (body, line, column) = split_location_suffix(raw);
+        let body = body?;
+        if raw.starts_with("file://") {
+            let body = body.to_string_lossy().into_owned();
+            return match local_file_url_body(&body) {
+                Some(rest) => Some(OpenTarget::File {
+                    path: PathBuf::from(rest),
+                    line,
+                    column,
+                }),
+                None => Some(OpenTarget::Unsupported(format!(
+                    "`{raw}`: only `file:///path` and `file://localhost/path` are supported"
+                ))),
+            };
+        }
+        return Some(OpenTarget::File {
+            path: body,
+            line,
+            column,
+        });
     }
     Some(OpenTarget::Url(raw.to_string()))
 }
 
-/// Strip the location suffix and turn it into `(line, column)`.
+/// Strip the location suffix and turn it into `(body, line, column)`.
+///
+/// The suffix probe is [`trailing_location_suffix`] (ungated on purpose): a bare
+/// relative destination like `src/main.rs:10` is classified as a path by
+/// [`looks_like_path`] but never matches the renderer's "local path" rule, so
+/// the gated helper would leave the `:10` glued to the filename and the
+/// existence check would fail on a file whose name is a lie.
 fn split_location_suffix(raw: &str) -> (Option<PathBuf>, Option<u32>, Option<u32>) {
-    let (stripped, line, column) = match extract_hidden_location_suffix(raw) {
+    let (stripped, line, column) = match trailing_location_suffix(raw) {
         Some(suffix) => {
             let body = &raw[..raw.len() - suffix.len()];
             parse_location_suffix(&suffix)
@@ -216,15 +266,7 @@ fn split_location_suffix(raw: &str) -> (Option<PathBuf>, Option<u32>, Option<u32
         }
         None => (Some(raw), None, None),
     };
-    let Some(path) = stripped else {
-        return (None, None, None);
-    };
-    // `file://` (with an optional `localhost` authority) is a plain path.
-    let path = path
-        .strip_prefix("file://localhost")
-        .or_else(|| path.strip_prefix("file://"))
-        .unwrap_or(path);
-    (Some(PathBuf::from(path)), line, column)
+    (stripped.map(PathBuf::from), line, column)
 }
 
 /// `#L10` / `#L10C5` / `:10` / `:10:5` → `(line, column)`.
@@ -258,6 +300,7 @@ pub fn plan(raw: &str, env: &Env) -> Result<OpenPlan> {
     let target = classify(raw).with_context(|| format!("unusable link target: {raw:?}"))?;
     match target {
         OpenTarget::Url(url) => Ok(url_plan(&url)),
+        OpenTarget::Unsupported(reason) => bail!("{reason}"),
         OpenTarget::File { path, line, column } => {
             let path = resolve_path(&path, env)?;
             if !path.exists() {
@@ -494,6 +537,86 @@ mod tests {
                 other => panic!("{raw} classified as {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn bare_relative_targets_still_have_their_line_suffix_split_off() {
+        // `src/main.rs:10` is classified as a path (no scheme) but never matches
+        // the renderer's "local path" rule, so the gated suffix helper would
+        // leave `:10` glued to the file name and every such link would report
+        // "no such file".
+        for (raw, path, line, column) in [
+            ("src/main.rs:10", "src/main.rs", Some(10), None),
+            ("src/main.rs:10:5", "src/main.rs", Some(10), Some(5)),
+            ("src/main.rs#L10", "src/main.rs", Some(10), None),
+            ("README.md", "README.md", None, None),
+        ] {
+            match classify(raw) {
+                Some(OpenTarget::File {
+                    path: got,
+                    line: got_line,
+                    column: got_column,
+                }) => {
+                    assert_eq!(got, PathBuf::from(path), "path of {raw}");
+                    assert_eq!(got_line, line, "line of {raw}");
+                    assert_eq!(got_column, column, "column of {raw}");
+                }
+                other => panic!("{raw} classified as {other:?}"),
+            }
+        }
+
+        // And it really opens the file (not `main.rs:10`).
+        let dir = std::env::temp_dir().join(format!("wing-open-bare-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let file = dir.join("src/main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let mut env = env_with(&[]);
+        env.cwd = dir.clone();
+        let plan = plan("src/main.rs:10", &env).unwrap();
+        assert_eq!(plan.args.last().unwrap(), &canon(&file).into_os_string());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_urls_with_a_host_are_reported_instead_of_guessed() {
+        // The rest of `file://nas/share/x` is not a path we can resolve: joining
+        // it to the launch directory would open something else entirely.
+        let target = classify("file://nas/share/x").expect("classified");
+        assert!(
+            matches!(target, OpenTarget::Unsupported(_)),
+            "expected a refusal, got {target:?}"
+        );
+        let err = plan("file://nas/share/x", &env_with(&[])).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("file:///path"), "{text}");
+        assert!(text.contains("file://nas/share/x"), "{text}");
+
+        // The two supported spellings keep working.
+        for (raw, path) in [
+            ("file:///tmp/x.rs", "/tmp/x.rs"),
+            ("file://localhost/tmp/x.rs", "/tmp/x.rs"),
+        ] {
+            match classify(raw) {
+                Some(OpenTarget::File { path: got, .. }) => {
+                    assert_eq!(got, PathBuf::from(path), "{raw}")
+                }
+                other => panic!("{raw} classified as {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_unsupported_target_never_reaches_the_runner() {
+        struct CountingRunner(RefCell<usize>);
+        impl OpenerRunner for CountingRunner {
+            fn run(&self, _plan: &OpenPlan) -> io::Result<()> {
+                *self.0.borrow_mut() += 1;
+                Ok(())
+            }
+        }
+        let runner = CountingRunner(RefCell::new(0));
+        assert!(open_with(&runner, "file://nas/share/x", &env_with(&[])).is_err());
+        assert_eq!(*runner.0.borrow(), 0);
     }
 
     #[test]
