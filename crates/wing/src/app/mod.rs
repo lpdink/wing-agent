@@ -19,6 +19,7 @@ use anyhow::Result;
 use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
+use ratatui::layout::Rect;
 
 use self::transport::GatewayEndpoint;
 use self::transport::Transport;
@@ -46,6 +47,7 @@ use crate::ui::popup::command::candidate_request_for;
 use crate::ui::popup::command::is_must_select_command;
 use crate::ui::popup::command::parse_slash_input;
 use crate::ui::popup::selection::SelectionPopup;
+use crate::ui::scrollbar;
 use crate::ui::selection::ContentPoint;
 use crate::ui::selection::Selection;
 use crate::ui::spinner::WorkingIndicatorWidget;
@@ -230,6 +232,13 @@ pub struct App {
     pub(crate) goal: Option<goal::GoalState>,
     /// TUI 启动时的工作目录，用于 /new 创建 session 时传递 workspace。
     launch_workspace: Option<String>,
+    /// The chat viewport rect of the last frame. The overlay scrollbar is
+    /// both painted and hit-tested against this rect only — no cross-frame
+    /// cache, so a resize cannot leave the bar interactive where it is not
+    /// drawn.
+    chat_area: Rect,
+    /// Overlay scrollbar interaction state (hover / drag).
+    scrollbar: scrollbar::ScrollbarState,
 }
 
 // ---------------------------------------------------------------------------
@@ -305,6 +314,10 @@ impl App {
             connected: true,
             goal: None,
             launch_workspace,
+            // Zero-sized until the first draw records the real chat viewport:
+            // no bar, no hit testing, before anything is on screen.
+            chat_area: Rect::default(),
+            scrollbar: scrollbar::ScrollbarState::default(),
         }
     }
 
@@ -559,10 +572,11 @@ impl App {
     /// reachable while the AskUserQuestion panel / model picker / command
     /// popup is open (plain Up/Down stay with the focused widget).
     ///
-    /// Left press / drag / release drive the in-app text selection, but only
-    /// when the press lands inside the chat band — a press anywhere else
-    /// (status bar, composer, popups) is ignored, exactly like `Moved` (hover,
-    /// taken over by the scrollbar change) and horizontal wheel.
+    /// Left press / drag / release are claimed by whoever owns the position
+    /// they land on: the overlay scrollbar on its own track, the chat band
+    /// everywhere else (a drag selection; a press outside the band starts
+    /// nothing). Horizontal wheel (`ScrollLeft` / `ScrollRight`) is not a chat
+    /// gesture at all and stays ignored.
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> MouseOutcome {
         use crossterm::event::MouseButton;
         use crossterm::event::MouseEventKind;
@@ -577,11 +591,16 @@ impl App {
                     .scroll_down(WHEEL_SCROLL_LINES, self.visible_height);
                 MouseOutcome::Immediate
             }
-            MouseEventKind::Down(MouseButton::Left) => {
-                self.selection_press(mouse.column, mouse.row)
-            }
-            // A drag is a flood of motion events — coalesce it.
+            // Hover belongs to the overlay scrollbar alone — it is the only
+            // thing that reacts to motion today.
+            MouseEventKind::Moved => self.hover_scrollbar(mouse.column, mouse.row),
+            MouseEventKind::Down(MouseButton::Left) => self.press_mouse(mouse.column, mouse.row),
             MouseEventKind::Drag(MouseButton::Left) => {
+                // An in-flight bar drag owns the motion; everything else is
+                // the selection's flood.
+                if self.scrollbar.dragging {
+                    return self.drag_scrollbar(mouse.row);
+                }
                 if self.selection_drag(mouse.column, mouse.row) {
                     MouseOutcome::Coalesced
                 } else {
@@ -589,10 +608,101 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                if self.scrollbar.dragging {
+                    return self.release_scrollbar(mouse.column, mouse.row);
+                }
                 self.selection_release(mouse.column, mouse.row)
             }
             _ => MouseOutcome::Ignored,
         }
+    }
+
+    /// Left press: the overlay scrollbar claims presses on its own track, the
+    /// chat band owns every other position (a press there starts a drag
+    /// selection).
+    ///
+    /// A press off the bar also drops whatever hover / drag look the bar kept
+    /// — the same cleanup a focus loss performs — so the outcome cannot be the
+    /// selection's alone: the repaint the bar asks for wins over the
+    /// selection's "nothing to see" verdict.
+    fn press_mouse(&mut self, column: u16, row: u16) -> MouseOutcome {
+        if let Some(geom) = self.scrollbar_at(column, row) {
+            return self.grab_scrollbar(&geom, row);
+        }
+        let bar_repaint = self.clear_scrollbar_interaction();
+        match self.selection_press(column, row) {
+            MouseOutcome::Ignored if bar_repaint => MouseOutcome::Immediate,
+            outcome => outcome,
+        }
+    }
+
+    /// Grab the bar at a pressed row: the track jumps there, and the grip is
+    /// taken at that same row so the drag that follows keeps it.
+    ///
+    /// The grab also lights the bar up: "the user is manipulating the bar" is
+    /// the visual contract, and without any-motion reporting (multiplexers)
+    /// the press is the only event that can say so.
+    fn grab_scrollbar(&mut self, geom: &scrollbar::ScrollbarGeometry, row: u16) -> MouseOutcome {
+        let was_active = self.scrollbar.is_active();
+        self.scrollbar.dragging = true;
+        self.scrollbar.hovered = true;
+        self.scrollbar.grip = scrollbar::grip_at(geom, row);
+        if self.scroll_to_row(geom, row) || !was_active {
+            MouseOutcome::Immediate
+        } else {
+            MouseOutcome::Ignored
+        }
+    }
+
+    /// Drag with the grip held: re-target continuously, through the shared
+    /// follow contract. The column is ignored on purpose — the row is what
+    /// maps onto the track, so a drag that wanders off the bar still scrolls.
+    fn drag_scrollbar(&mut self, row: u16) -> MouseOutcome {
+        let Some(geom) = self.scrollbar_geometry() else {
+            // The bar vanished mid-drag (the content stopped overflowing):
+            // the interaction state cannot outlive it.
+            return if self.clear_scrollbar_interaction() {
+                MouseOutcome::Coalesced
+            } else {
+                MouseOutcome::Ignored
+            };
+        };
+        if self.scroll_to_row(&geom, row) {
+            // A drag is a flood of motion events — coalesced by the frame gate.
+            MouseOutcome::Coalesced
+        } else {
+            MouseOutcome::Ignored
+        }
+    }
+
+    /// Release ends the bar drag; the pointer stays where it was released, so
+    /// the hover look follows it.
+    fn release_scrollbar(&mut self, column: u16, row: u16) -> MouseOutcome {
+        self.scrollbar.dragging = false;
+        self.scrollbar.hovered = self.scrollbar_at(column, row).is_some();
+        MouseOutcome::Immediate
+    }
+
+    /// Pointer motion: the overlay scrollbar is the only hover owner.
+    ///
+    /// A hover that stays put reports nothing at all — motion is a flood, and
+    /// an event that changes nothing must not wake the frame gate.
+    fn hover_scrollbar(&mut self, column: u16, row: u16) -> MouseOutcome {
+        let Some(geom) = self.scrollbar_geometry() else {
+            // No bar this frame (content fits, or nothing has been drawn yet):
+            // drop any stale look now instead of waiting for the next draw.
+            return if self.clear_scrollbar_interaction() {
+                MouseOutcome::Coalesced
+            } else {
+                MouseOutcome::Ignored
+            };
+        };
+        let hovered = scrollbar::hit(&geom, column, row);
+        if hovered == self.scrollbar.hovered {
+            return MouseOutcome::Ignored;
+        }
+        self.scrollbar.hovered = hovered;
+        MouseOutcome::Coalesced
     }
 
     /// Left press inside the chat band: start a drag selection.
@@ -603,7 +713,7 @@ impl App {
         if !self.chat.contains_screen(column, row) {
             return MouseOutcome::Ignored;
         }
-        let Some(point) = self.chat.content_point_at(column, row) else {
+        let Some(point) = self.selectable_point_at(column, row) else {
             return MouseOutcome::Ignored;
         };
         self.selection.begin(point);
@@ -628,13 +738,16 @@ impl App {
         if !self.selection.is_press_active() {
             return false;
         }
-        let Some(point) = self.chat.content_point_at(column, row) else {
+        let Some(point) = self.selectable_point_at(column, row) else {
             return false;
         };
         // The pointer selects the character it rests on (reference behaviour):
-        // snap the focus to the right edge of that grapheme. A click never gets
-        // here, so "press and release without moving = no selection" holds.
-        self.selection.drag_to(self.chat.snap_focus_right(point));
+        // snap the focus to the right edge of that grapheme — and then off the
+        // overlay bar's column, so the copy never ends on a bar glyph. A click
+        // never gets here, so "press and release without moving = no selection"
+        // holds.
+        self.selection
+            .drag_to(self.off_the_bar(self.chat.snap_focus_right(point)));
         let area = self.chat.geometry().area;
         let direction = if row <= area.y {
             -1
@@ -676,14 +789,14 @@ impl App {
         // the `unfollow` from the press cannot leave the view stuck in reading
         // mode.
         self.chat.scroll_down(0, self.visible_height);
-        let bounds = match self.chat.content_point_at(column, row) {
+        let bounds = match self.selectable_point_at(column, row) {
             Some(point) => {
                 // Include the character under the pointer (reference
                 // behaviour) — but only for a real drag: a plain click must
                 // stay zero-width, and snapping it would select one character.
                 let point = if self.selection.is_dragged() || self.selection.anchor() != Some(point)
                 {
-                    self.chat.snap_focus_right(point)
+                    self.off_the_bar(self.chat.snap_focus_right(point))
                 } else {
                     point
                 };
@@ -724,6 +837,34 @@ impl App {
             pending: self.chat.pending_len(),
             width: self.terminal_width,
             rebuilds: self.chat.structure_epoch(),
+        }
+    }
+
+    /// Map a pointer position onto **selectable** chat content.
+    ///
+    /// Everything [`ChatView::content_point_at`] does, plus the overlay bar's
+    /// column: the bar is chrome painted *over* the content's last column, so
+    /// while it exists that column is neither readable nor selectable — letting
+    /// a drag end on it would put a `│` in the copied text and invert the bar.
+    /// Without the bar (content fits) the whole band is selectable as usual.
+    fn selectable_point_at(&self, column: u16, row: u16) -> Option<ContentPoint> {
+        Some(self.off_the_bar(self.chat.content_point_at(column, row)?))
+    }
+
+    /// Clamp a content point off the overlay bar's column, if the bar is drawn
+    /// this frame. See [`Self::selectable_point_at`].
+    fn off_the_bar(&self, point: ContentPoint) -> ContentPoint {
+        let Some(geom) = self.scrollbar_geometry() else {
+            return point;
+        };
+        let area = self.chat.geometry().area;
+        let bar_col = geom.column.saturating_sub(area.x);
+        if point.col < bar_col {
+            return point;
+        }
+        ContentPoint {
+            col: bar_col.saturating_sub(1),
+            ..point
         }
     }
 
@@ -769,6 +910,41 @@ impl App {
         }
         self.selection_autoscroll_at = Some(std::time::Instant::now() + SELECTION_AUTOSCROLL_DELAY);
         true
+    }
+
+    /// Geometry of the overlay scrollbar for the current frame state
+    /// (`None` = content fits, or nothing has been drawn yet).
+    fn scrollbar_geometry(&self) -> Option<scrollbar::ScrollbarGeometry> {
+        scrollbar::geometry(
+            self.chat_area,
+            self.chat.content_height(),
+            self.chat.scroll_position(),
+        )
+    }
+
+    /// The bar as a claim on a pointer position: the geometry when the pointer
+    /// is on the bar itself, `None` when there is no bar or the pointer missed
+    /// it. Nothing outside the bar is ever the bar's.
+    fn scrollbar_at(&self, column: u16, row: u16) -> Option<scrollbar::ScrollbarGeometry> {
+        let geom = self.scrollbar_geometry()?;
+        scrollbar::hit(&geom, column, row).then_some(geom)
+    }
+
+    /// Move the chat to the position under a pointer row, through the shared
+    /// follow contract (see `ChatView::scroll_to`). Returns whether anything
+    /// visible changed, so the 16ms frame gate can be bypassed only when the
+    /// view really moved.
+    fn scroll_to_row(&mut self, geom: &scrollbar::ScrollbarGeometry, row: u16) -> bool {
+        let target = scrollbar::offset_for_row(geom, row, self.scrollbar.grip);
+        let before = (self.chat.scroll_position(), self.chat.is_at_bottom());
+        self.chat.scroll_to(target, geom.viewport_height);
+        before != (self.chat.scroll_position(), self.chat.is_at_bottom())
+    }
+
+    /// Drop hover / drag state (content stopped overflowing, a press missed
+    /// the bar, or the window lost focus). Returns whether it changed.
+    fn clear_scrollbar_interaction(&mut self) -> bool {
+        self.scrollbar.clear()
     }
 
     /// Push a side-effect intent for the runner to execute after draw.
@@ -2519,9 +2695,12 @@ impl App {
 
     /// Draw the UI.
     ///
-    /// Generic over the backend so tests can drive it with a `TestBackend` and
-    /// assert on the very frame the user would see (highlight cells, text
-    /// snapshot) — production always passes the crossterm terminal.
+    /// Generic over the backend so tests can drive it with a
+    /// `ratatui::backend::TestBackend` and assert on the very frame the user
+    /// would see. The selection highlight, its text snapshot and the
+    /// scrollbar's clipping / place in the overlay order are all frame-level
+    /// properties, not unit properties of the painters; production always
+    /// passes the crossterm terminal.
     fn draw<B>(&mut self, terminal: &mut ratatui::Terminal<B>) -> Result<()>
     where
         B: ratatui::backend::Backend,
@@ -2593,12 +2772,29 @@ impl App {
 
             // Chat view — the scrollable viewport only.
             chat_height = chunks[1].height;
+            self.chat_area = chunks[1];
             let ctx = crate::render::renderable::CellContext {
                 palette: &palette,
                 thinking_mode,
                 layout: &layout,
             };
             frame.render_widget(ChatViewWidget::new(&mut self.chat, ctx), chunks[1]);
+
+            // Overlay scrollbar. Painted after the chat widget (so it
+            // overprints the content's rightmost column) and before the
+            // toast (so a toast is never hidden by it). It takes no layout
+            // width — the chat cells were wrapped without knowing about it.
+            // `self.chat` now holds this frame's content height and the
+            // effective scroll offset (auto-scroll / clamp included).
+            if let Some(geom) = self.scrollbar_geometry() {
+                scrollbar::paint(frame.buffer_mut(), &geom, self.scrollbar, &palette);
+            } else {
+                // No bar this frame (content fits, or nothing drawn yet):
+                // drop the interaction state now instead of waiting for the
+                // next mouse event, so a later overflow cannot resurrect a
+                // stale hover / drag look.
+                self.clear_scrollbar_interaction();
+            }
 
             // Fixed composer block below the chat viewport.
             let mut idx = 2;
@@ -2781,11 +2977,15 @@ pub async fn run_app(
                         app.input_dirty = true;
                     }
                     TermEvent::Mouse(mouse) => {
-                        // One-shot mouse actions (a wheel notch, a press, a
-                        // release) draw right away — bypassing the 16 ms frame
-                        // gate, like keys do. Drags are a flood: they only mark
-                        // the chat dirty, so the redraw (and the visible-row
-                        // snapshot it takes) is coalesced to the frame rate.
+                        // Discrete gestures (a wheel notch, a press, a
+                        // release) are direct user actions: draw right away,
+                        // bypassing the 16 ms frame gate, like keys do.
+                        // Pointer motion and drags arrive in bursts (~100 Hz
+                        // on a trackpad) and only mark the chat dirty, so the
+                        // frame gate coalesces them. Events that change
+                        // nothing (a hover that stays put, a drag that lands
+                        // on the same position) ask for no redraw at all — so
+                        // their floods never force one.
                         match app.handle_mouse(mouse) {
                             MouseOutcome::Ignored => {}
                             MouseOutcome::Coalesced => app.chat_dirty = true,
@@ -2829,6 +3029,13 @@ pub async fn run_app(
                                 title::title_idle(dir.as_deref())
                             };
                             app.push_intent(AppIntent::SetTitle(title));
+                        } else {
+                            // The button-up of an in-flight scrollbar drag may
+                            // be delivered to whatever window took the focus —
+                            // drop the interaction so the bar does not stay
+                            // stuck in its dragged look (and so stray drag
+                            // events stop moving the view).
+                            app.clear_scrollbar_interaction();
                         }
                     }
                     TermEvent::Tick => {
@@ -4234,6 +4441,432 @@ mod tests {
         );
     }
 
+    // ── Overlay scrollbar ────────────────────────────────────────────────
+
+    /// Did the gesture ask for a redraw?
+    ///
+    /// The scrollbar tests assert on *what changed*, not on how urgently the
+    /// frame should be repainted — the outcome's kind is the frame gate's
+    /// concern (see [`MouseOutcome`]).
+    fn redrew(outcome: MouseOutcome) -> bool {
+        outcome != MouseOutcome::Ignored
+    }
+
+    fn row_text(buf: &ratatui::buffer::Buffer) -> String {
+        (buf.area.x..buf.area.right())
+            .map(|x| buf[(x, buf.area.y)].symbol())
+            .collect()
+    }
+
+    /// App with a chat viewport (the rect `draw` would have recorded) and a
+    /// content height that overflows it — i.e. the scrollbar exists.
+    fn app_with_scrollbar(area: Rect, content: usize, offset: usize) -> App {
+        let mut app = test_app();
+        app.chat_area = area;
+        app.visible_height = area.height as usize;
+        app.chat.last_total = content;
+        app.chat.scroll_offset = offset;
+        app.chat.scroll_up(0); // reading state, offset unchanged
+        app
+    }
+
+    #[test]
+    fn test_scrollbar_track_click_jumps_and_syncs_the_info_separator() {
+        // Chat area offset from the origin, so geometry offsets are covered.
+        let area = Rect::new(0, 1, 80, 20);
+        let mut app = app_with_scrollbar(area, 100, 0);
+        let geom = app.scrollbar_geometry().expect("content overflows");
+        assert_eq!(geom.column, 79, "rightmost column of the chat area");
+
+        // Click the very bottom of the track → end of the history.
+        assert!(
+            redrew(app.handle_mouse(press((geom.column, geom.track_bottom)))),
+            "a track click is a view change"
+        );
+        assert_eq!(app.chat.scroll_position(), geom.max_scroll());
+        assert!(app.chat.is_at_bottom(), "the bottom edge re-arms follow");
+
+        // The info separator renders from the same state, so the frame that
+        // follows the click already shows the new position.
+        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 80, 1));
+        let sep_area = Rect::new(0, 0, 80, 1);
+        render_info_separator(
+            None,
+            &TurnUsage::default(),
+            app.chat.content_height(),
+            app.visible_height,
+            app.chat.scroll_position(),
+            &app.palette,
+            sep_area,
+            &mut buf,
+        );
+        let rendered = row_text(&buf);
+        assert!(rendered.contains("100/100"), "pos/total:\n{rendered}");
+        assert!(rendered.contains("100%"), "percent:\n{rendered}");
+
+        // Click the top of the track → back to the beginning, reading state.
+        assert!(redrew(
+            app.handle_mouse(press((geom.column, geom.track_top)))
+        ));
+        assert_eq!(app.chat.scroll_position(), 0);
+        assert!(!app.chat.is_at_bottom());
+    }
+
+    #[test]
+    fn test_scrollbar_drag_keeps_the_grab_point_and_clamps_outside_the_track() {
+        let area = Rect::new(0, 0, 80, 20);
+        let mut app = app_with_scrollbar(area, 100, 40);
+        let geom = app.scrollbar_geometry().expect("content overflows");
+
+        // Grab the last row of the thumb: pressing must not jump.
+        let grab_row = geom.thumb_top + geom.thumb_height() - 1;
+        assert!(redrew(app.handle_mouse(press((geom.column, grab_row)))));
+        assert_eq!(app.chat.scroll_position(), 40, "no jump when grabbing");
+
+        // Dragged far above the chat area → clamped to the top, still dragging.
+        assert!(redrew(app.handle_mouse(drag((geom.column, 0)))));
+        assert_eq!(app.chat.scroll_position(), 0);
+
+        // …and far below it → clamped to the bottom, follow re-armed.
+        assert!(redrew(app.handle_mouse(drag((geom.column, 9999)))));
+        assert_eq!(app.chat.scroll_position(), geom.max_scroll());
+        assert!(app.chat.is_at_bottom());
+
+        // The column is ignored while dragging (the row is what maps).
+        assert!(redrew(app.handle_mouse(drag((0, geom.track_top)))));
+        assert_eq!(app.chat.scroll_position(), 0);
+
+        // Release on the bar: the drag ends, but the pointer still hovers it.
+        assert!(redrew(
+            app.handle_mouse(release((geom.column, geom.track_top)))
+        ));
+        assert!(!app.scrollbar.dragging, "release ends the drag");
+        assert!(app.scrollbar.hovered, "the pointer is still on the bar");
+
+        // A bare drag (no press) must not move anything afterwards.
+        assert!(!redrew(app.handle_mouse(drag((geom.column, 9999)))));
+        assert_eq!(app.chat.scroll_position(), 0);
+
+        // Moving off the bar drops the hover look again.
+        assert!(redrew(
+            app.handle_mouse(hover((geom.column - 1, geom.track_top)))
+        ));
+        assert!(!app.scrollbar.is_active());
+    }
+
+    #[test]
+    fn test_scrollbar_hover_lights_up_only_on_its_own_column() {
+        let area = Rect::new(0, 0, 80, 20);
+        let mut app = app_with_scrollbar(area, 100, 40);
+        let geom = app.scrollbar_geometry().expect("content overflows");
+
+        // Moving onto the bar column lights it up (the caller draws at once).
+        assert!(redrew(app.handle_mouse(hover((geom.column, 5)))));
+        assert!(app.scrollbar.is_active());
+        // The exact same cell again changes nothing → no redraw.
+        assert!(!redrew(app.handle_mouse(hover((geom.column, 5)))));
+        // One column to the left is chat content, not the bar.
+        assert!(redrew(app.handle_mouse(hover((geom.column - 1, 5)))));
+        assert!(!app.scrollbar.is_active());
+        // …and a row outside the chat area is not the bar either.
+        assert!(!redrew(
+            app.handle_mouse(hover((geom.column, geom.track_bottom + 1)))
+        ));
+        // Hovering never scrolls.
+        assert_eq!(app.chat.scroll_position(), 40);
+        assert!(!app.chat.is_at_bottom());
+    }
+
+    #[test]
+    fn test_wheel_over_the_scrollbar_still_scrolls_the_chat() {
+        let area = Rect::new(0, 0, 80, 20);
+        let mut app = app_with_scrollbar(area, 100, 40);
+        let geom = app.scrollbar_geometry().expect("content overflows");
+
+        // Pointer rests on the bar: it is lit up, and the wheel still belongs
+        // to the chat view (the wheel arm is matched before the bar sees the
+        // event — the bar has no wheel handling at all).
+        assert!(redrew(app.handle_mouse(hover((geom.column, 5)))));
+        assert!(app.scrollbar.is_active());
+        assert!(redrew(app.handle_mouse(mouse_at(
+            crossterm::event::MouseEventKind::ScrollUp,
+            (geom.column, 5)
+        ))));
+        assert_eq!(app.chat.scroll_position(), 37, "3 lines per notch");
+        assert!(redrew(app.handle_mouse(mouse_at(
+            crossterm::event::MouseEventKind::ScrollDown,
+            (geom.column, 5)
+        ))));
+        assert_eq!(app.chat.scroll_position(), 40);
+
+        // Same while dragging: the wheel is not swallowed either.
+        app.handle_mouse(press((geom.column, geom.thumb_top)));
+        app.handle_mouse(mouse_at(
+            crossterm::event::MouseEventKind::ScrollDown,
+            (geom.column, 5),
+        ));
+        assert_eq!(
+            app.chat.scroll_position(),
+            43,
+            "the wheel re-targets the chat"
+        );
+    }
+
+    #[test]
+    fn test_scrollbar_is_absent_when_the_content_fits() {
+        let area = Rect::new(0, 0, 80, 20);
+        // Exactly one screen of content: no bar, so the rightmost column is
+        // plain chat text and none of the mouse gestures do anything.
+        let mut app = app_with_scrollbar(area, 20, 0);
+        assert!(app.scrollbar_geometry().is_none());
+        let column = area.right() - 1;
+        for event in [
+            hover((column, 3)),
+            press((column, 3)),
+            drag((column, 19)),
+            release((column, 19)),
+        ] {
+            assert!(
+                !redrew(app.handle_mouse(event)),
+                "{:?} must be a no-op",
+                event.kind
+            );
+        }
+        assert_eq!(app.chat.scroll_position(), 0);
+
+        // Content grows → the bar appears; the state is dropped again as soon
+        // as it stops overflowing (clear / compaction).
+        app.chat.last_total = 100;
+        assert!(redrew(app.handle_mouse(hover((column, 3)))));
+        assert!(app.scrollbar.is_active());
+        app.chat.last_total = 5;
+        assert!(
+            redrew(app.handle_mouse(hover((column, 3)))),
+            "cleanup is a redraw"
+        );
+        assert!(!app.scrollbar.is_active(), "no bar, no interaction state");
+    }
+
+    #[test]
+    fn test_scrollbar_press_missing_the_bar_clears_the_state() {
+        let area = Rect::new(0, 0, 80, 20);
+        let mut app = app_with_scrollbar(area, 100, 40);
+        let geom = app.scrollbar_geometry().expect("content overflows");
+
+        app.handle_mouse(hover((geom.column, 5)));
+        assert!(app.scrollbar.is_active());
+        // A press one column to the left (chat content) drops the hover look
+        // instead of starting a drag.
+        assert!(redrew(app.handle_mouse(press((geom.column - 1, 5)))));
+        assert!(!app.scrollbar.is_active());
+        assert_eq!(app.chat.scroll_position(), 40, "the press did not scroll");
+    }
+
+    #[test]
+    fn test_clear_scrollbar_interaction_is_idempotent() {
+        // Focus loss path: the button-up may be delivered elsewhere.
+        let area = Rect::new(0, 0, 80, 20);
+        let mut app = app_with_scrollbar(area, 100, 40);
+        let geom = app.scrollbar_geometry().expect("content overflows");
+
+        app.handle_mouse(press((geom.column, geom.thumb_top)));
+        assert!(app.scrollbar.is_active());
+        assert!(app.clear_scrollbar_interaction());
+        assert!(!app.scrollbar.is_active());
+        assert!(
+            !app.clear_scrollbar_interaction(),
+            "cleaning up twice is a no-op"
+        );
+        // The stray drag that follows cannot move the view any more.
+        let before = app.chat.scroll_position();
+        assert!(!redrew(app.handle_mouse(drag((geom.column, 9999)))));
+        assert_eq!(app.chat.scroll_position(), before);
+    }
+
+    #[test]
+    fn test_scrollbar_works_while_a_panel_is_open() {
+        let mut app = test_app();
+        app.handle_event(sync_event(
+            vec![],
+            None,
+            vec![],
+            vec![serde_json::json!({
+                "type": "ask",
+                "tool_call_id": "ask-scrollbar",
+                "questions": [{
+                    "id": "q1",
+                    "header": "H",
+                    "question": "which?",
+                    "options": [{"label": "a"}, {"label": "b"}],
+                }],
+            })],
+            None,
+        ));
+        assert_eq!(app.ask_panels.len(), 1);
+
+        let area = Rect::new(0, 0, 80, 20);
+        app.chat_area = area;
+        app.visible_height = area.height as usize;
+        app.chat.last_total = 100;
+        app.chat.scroll_offset = 40;
+        app.chat.scroll_up(0);
+        let geom = app.scrollbar_geometry().expect("content overflows");
+        let cursor_before = app.ask_panels.front().unwrap().states[0].cursor;
+
+        app.handle_mouse(press((geom.column, geom.track_bottom)));
+        assert_eq!(app.chat.scroll_position(), geom.max_scroll());
+        assert_eq!(
+            app.ask_panels.front().unwrap().states[0].cursor,
+            cursor_before,
+            "the bar must not touch panel state"
+        );
+        assert_eq!(app.ask_panels.len(), 1, "panel stays open");
+    }
+
+    // ── Overlay scrollbar: whole-frame checks through a real Terminal ────
+
+    /// The frame as text (one line per row), for assertion messages.
+    fn frame_text(buf: &ratatui::buffer::Buffer) -> String {
+        (buf.area.y..buf.area.bottom())
+            .map(|row| {
+                let line: String = (buf.area.x..buf.area.right())
+                    .map(|x| buf[(x, row)].symbol())
+                    .collect();
+                format!("{row:>2} |{line}|\n")
+            })
+            .collect()
+    }
+
+    /// Bar glyphs are unambiguous outside the chat (`│` is shared with every
+    /// border, `┃` / `█` are not).
+    fn is_bar_glyph(symbol: &str) -> bool {
+        matches!(symbol, "┃" | "█")
+    }
+
+    /// A chat long enough to overflow the viewport, drawn through ratatui's
+    /// `TestBackend`.
+    fn draw_frame(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
+        app.draw(&mut terminal).expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    fn long_chat_app() -> App {
+        let mut app = test_app();
+        for i in 0..40 {
+            app.chat
+                .push(ChatCell::AssistantMessage(format!("msg {i}")));
+        }
+        app
+    }
+
+    /// Whole-frame contract: the bar owns the chat area's rightmost column,
+    /// one glyph per chat row, and nothing else in the frame.
+    #[test]
+    fn test_draw_paints_the_scrollbar_only_on_the_chat_areas_last_column() {
+        let mut app = long_chat_app();
+        let buf = draw_frame(&mut app, 80, 24);
+        let chat = app.chat_area;
+        let column = chat.right() - 1;
+        assert!(chat.height > 3, "chat viewport: {chat:?}");
+        assert_eq!(column, 79, "the chat spans the full width");
+
+        // Every chat row carries a bar glyph on the chat area's last column…
+        for row in chat.y..chat.bottom() {
+            let symbol = buf[(column, row)].symbol();
+            assert!(
+                matches!(symbol, "│" | "┃" | "█"),
+                "row {row} must carry the bar, got {symbol:?}\n{}",
+                frame_text(&buf)
+            );
+        }
+        // …the composer rows below it keep their own content (the info
+        // separator paints a rule across the whole row)…
+        assert_eq!(
+            buf[(column, chat.bottom())].symbol(),
+            "─",
+            "info separator row\n{}",
+            frame_text(&buf)
+        );
+        assert!(
+            !matches!(buf[(column, 0)].symbol(), "│" | "┃" | "█"),
+            "status bar row must not look like the bar\n{}",
+            frame_text(&buf)
+        );
+        // …and no other cell of the frame carries a bar-only glyph.
+        for row in buf.area.y..buf.area.bottom() {
+            for x in buf.area.x..buf.area.right() {
+                if is_bar_glyph(buf[(x, row)].symbol()) {
+                    assert_eq!(
+                        x,
+                        column,
+                        "bar glyph outside the chat column at ({x},{row})\n{}",
+                        frame_text(&buf)
+                    );
+                }
+            }
+        }
+    }
+
+    /// The bar is painted before the toast, but the toast keeps a one-column
+    /// right margin — they share rows and never the bar's column, so a frame
+    /// with both must show both.
+    #[test]
+    fn test_draw_keeps_the_bar_and_the_toast_in_the_same_frame() {
+        let mut app = long_chat_app();
+        app.toast = Some(Toast::info(
+            "hello toast",
+            std::time::Duration::from_secs(30),
+        ));
+        let buf = draw_frame(&mut app, 80, 24);
+        let chat = app.chat_area;
+        let column = chat.right() - 1;
+
+        let rendered = frame_text(&buf);
+        assert!(rendered.contains("hello toast"), "toast text:\n{rendered}");
+        // The toast sits at y = 1 (below the status bar); the bar rows it
+        // spans must still carry the bar, i.e. the overlay pass that draws the
+        // toast does not erase it.
+        for row in chat.y..chat.y + 3 {
+            assert!(
+                matches!(buf[(column, row)].symbol(), "│" | "┃" | "█"),
+                "the bar must survive the toast pass on row {row}\n{rendered}"
+            );
+        }
+        // The toast's own border column is untouched by the bar (row 2 is a
+        // vertical border row; row 1 is the top border corner).
+        let toast_border = 80 - 2;
+        assert_eq!(
+            buf[(toast_border, 2)].symbol(),
+            "│",
+            "toast right border\n{rendered}"
+        );
+    }
+
+    /// Spec: the interaction state is dropped in the same frame the bar
+    /// disappears with, not on the next mouse event.
+    #[test]
+    fn test_draw_clears_the_scrollbar_state_when_the_bar_disappears() {
+        let mut app = long_chat_app();
+        draw_frame(&mut app, 80, 24);
+        let geom = app.scrollbar_geometry().expect("content overflows");
+        app.handle_mouse(hover((geom.column, geom.track_top)));
+        app.handle_mouse(press((geom.column, geom.thumb_top)));
+        assert!(app.scrollbar.is_active());
+
+        // Content shrinks below the viewport (clear / compaction): the next
+        // frame must drop the highlight without waiting for a mouse event.
+        app.chat.clear();
+        app.chat.push(ChatCell::AssistantMessage("short".into()));
+        draw_frame(&mut app, 80, 24);
+        assert!(
+            !app.scrollbar.is_active(),
+            "the frame that hides the bar clears its interaction state"
+        );
+    }
+
     #[test]
     fn test_wheel_scrolls_chat_while_ask_panel_is_open() {
         let mut app = test_app();
@@ -4630,6 +5263,10 @@ mod tests {
             crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
             at,
         )
+    }
+
+    fn hover(at: (u16, u16)) -> crossterm::event::MouseEvent {
+        mouse_at(crossterm::event::MouseEventKind::Moved, at)
     }
 
     /// App whose chat holds one user message and no header, so the rendered
@@ -5160,6 +5797,123 @@ mod tests {
         }
         assert_eq!(app.chat.scroll_position(), offset);
         assert_eq!(app.selection.bounds(), focus, "the selection is untouched");
+    }
+
+    // ── Scrollbar × text selection: two gestures, one chat band ─────────
+
+    /// A press on the bar is the bar's, even though the bar sits inside the
+    /// chat band: it drags the view, starts no selection and copies nothing.
+    /// The selection machinery is back in charge as soon as the drag is over.
+    #[test]
+    fn test_press_on_the_bar_drags_the_bar_and_starts_no_selection() {
+        let mut app = app_with_tall_message();
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let band = app.chat.geometry().area;
+        let geom = app.scrollbar_geometry().expect("content overflows");
+        assert_eq!(geom.column, band.right() - 1, "the bar owns the last column");
+        assert!(app.chat.is_at_bottom(), "pinned to the bottom on load");
+
+        // Press the top of the track: the view jumps, the bar is grabbed, and
+        // the drag freeze / copy path is never entered.
+        assert_eq!(
+            app.handle_mouse(press((geom.column, geom.track_top))),
+            MouseOutcome::Immediate
+        );
+        assert!(app.scrollbar.dragging);
+        assert_eq!(app.chat.scroll_position(), 0);
+        assert!(!app.chat.is_at_bottom(), "a track click leaves the follow state");
+        assert!(
+            !app.selection.is_press_active(),
+            "a bar press must not start a selection"
+        );
+        draw(&mut app, &mut terminal);
+        assert!(
+            reversed_cells(&terminal).is_empty(),
+            "a bar press paints no highlight"
+        );
+
+        // The drag keeps the grip and re-targets the track.
+        assert_eq!(
+            app.handle_mouse(drag((geom.column, geom.track_bottom))),
+            MouseOutcome::Coalesced
+        );
+        assert_eq!(app.chat.scroll_position(), geom.max_scroll());
+        assert!(app.chat.is_at_bottom(), "the bottom edge re-arms follow");
+        assert!(!app.selection.is_press_active());
+
+        // Release ends the drag: nothing was selected, so nothing is copied.
+        assert_eq!(
+            app.handle_mouse(release((geom.column, geom.track_bottom))),
+            MouseOutcome::Immediate
+        );
+        assert!(!app.scrollbar.dragging);
+        assert!(app.drain_intents().is_empty(), "a bar drag copies nothing");
+
+        // The band is the selection's again right after the bar let go.
+        assert_eq!(
+            app.handle_mouse(press((band.x + 2, band.y + 1))),
+            MouseOutcome::Immediate
+        );
+        assert!(app.selection.is_press_active(), "the next press selects");
+        assert!(!app.scrollbar.dragging);
+    }
+
+    /// A press beside the bar belongs to the chat band: it starts a drag
+    /// selection and never moves the view. A drag that wanders over the bar's
+    /// column is still the selection's — the bar only claims presses that land
+    /// on the bar itself — and the copied span stops short of the bar, so no
+    /// bar glyph can end up in the text.
+    #[test]
+    fn test_press_beside_the_bar_selects_and_leaves_the_bar_alone() {
+        let mut app = app_with_tall_message();
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let band = app.chat.geometry().area;
+        let geom = app.scrollbar_geometry().expect("content overflows");
+        let row = band.y + 1;
+        let offset = app.chat.scroll_position();
+
+        assert_eq!(
+            app.handle_mouse(press((band.x + 2, row))),
+            MouseOutcome::Immediate,
+            "two columns in is chat content"
+        );
+        assert!(app.selection.is_press_active());
+        assert!(!app.scrollbar.dragging, "the press is not a bar drag");
+        assert_eq!(
+            app.chat.scroll_position(),
+            offset,
+            "starting a selection never scrolls"
+        );
+        draw(&mut app, &mut terminal);
+
+        // The drag crosses the bar column: still the selection's flood, and
+        // still no scrolling.
+        assert_eq!(
+            app.handle_mouse(drag((geom.column, row))),
+            MouseOutcome::Coalesced
+        );
+        assert!(!app.scrollbar.dragging);
+        assert_eq!(app.chat.scroll_position(), offset, "the drag never scrolls");
+        draw(&mut app, &mut terminal);
+
+        // Release copies the span — the bar's own column is chrome, so the
+        // text never picks up its glyph.
+        assert_eq!(
+            app.handle_mouse(release((geom.column, row))),
+            MouseOutcome::Immediate
+        );
+        match app.drain_intents().as_slice() {
+            [AppIntent::CopyToClipboard(text)] => {
+                assert!(
+                    text.contains("line-") || text.contains("msg"),
+                    "copied from the chat band: {text:?}"
+                );
+                assert!(!text.contains('│'), "a bar glyph must not be copied: {text:?}");
+            }
+            other => panic!("expected exactly one clipboard intent, got {other:?}"),
+        }
     }
 
     #[tokio::test]

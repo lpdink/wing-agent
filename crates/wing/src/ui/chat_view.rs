@@ -1,4 +1,7 @@
-//! Chat view — scrollable area for conversation cells with scrollbar.
+//! Chat view — scrollable area for conversation cells.
+//!
+//! The scroll offset / follow state live here; the bar drawn beside it is an
+//! overlay owned by `ui::scrollbar` + `App`.
 //!
 //! Uses width-aware virtualization with CachedCell for height caching.
 //! Each cell's height is computed via `Paragraph::line_count(width)` and
@@ -252,7 +255,8 @@ pub struct ChatGeometry {
     pub scroll_offset: usize,
 }
 
-/// Scrollable chat view with scrollbar indicator.
+/// Scrollable chat view — the viewport the overlay scrollbar (`ui::scrollbar`)
+/// tracks (scroll offset + follow state).
 pub struct ChatView {
     pub(crate) cells: Vec<CachedCell>,
     /// Cached wrap-aware line count per cell (mirrors cells.len()).
@@ -883,6 +887,23 @@ impl ChatView {
         extract_text(&self.visible_rows, self.geometry.scroll_offset, bounds)
     }
 
+    /// Set an absolute scroll offset in lines — the scrollbar's track click
+    /// and thumb drag.
+    ///
+    /// The follow contract applies to this entry as well: any offset above the
+    /// bottom edge leaves the follow state (the user chose where to read),
+    /// and reaching the bottom edge re-arms it (dragging the bar all the way
+    /// down behaves like rolling the wheel to the end). The bottom edge comes
+    /// from `last_total`, so the judgement does not wait for the next render.
+    /// Like every other scroll entry it lifts the drag freeze, see
+    /// [`Self::unfollow`].
+    pub fn scroll_to(&mut self, offset: usize, viewport_h: usize) {
+        self.follow_frozen = false;
+        let max_scroll = self.last_total.saturating_sub(viewport_h);
+        self.scroll_offset = offset.min(max_scroll);
+        self.auto_scroll = self.scroll_offset >= max_scroll;
+    }
+
     /// Total content height from the last render (header + cells).
     /// `0` before the first render.
     pub fn content_height(&self) -> usize {
@@ -1286,7 +1307,8 @@ fn push_row_insets(
     *vrow = end;
 }
 
-/// Widget for rendering the chat view with scrollbar.
+/// Widget for rendering the chat viewport (content only — the overlay
+/// scrollbar is painted separately by `App::draw`).
 pub struct ChatViewWidget<'a> {
     view: &'a mut ChatView,
     ctx: CellContext<'a>,
@@ -2111,6 +2133,53 @@ mod tests {
             rendered.contains("msg 39"),
             "followed content must be visible:\n{rendered}"
         );
+    }
+
+    /// `scroll_to` (the scrollbar's track click / thumb drag) is an absolute
+    /// offset entry, but it obeys the same follow contract as the relative
+    /// ones: leaving the bottom starts reading, reaching it re-arms follow.
+    #[test]
+    fn test_scroll_to_follows_the_shared_contract() {
+        let mut view = ChatView::new();
+        for i in 0..20 {
+            view.push(ChatCell::AssistantMessage(format!("msg {i}")));
+        }
+        render_view(&mut view, 40, 10);
+        let bottom = view.content_height() - 10;
+        assert!(view.is_at_bottom());
+
+        // Anywhere above the bottom → reading.
+        view.scroll_to(5, 10);
+        assert_eq!(view.scroll_position(), 5);
+        assert!(!view.is_at_bottom(), "a jump off the bottom starts reading");
+        for i in 20..30 {
+            view.push(ChatCell::AssistantMessage(format!("msg {i}")));
+        }
+        render_view(&mut view, 40, 10);
+        assert_eq!(view.scroll_position(), 5, "streaming must not pull it back");
+
+        // The bottom edge re-arms follow, exactly like scrolling down to it.
+        view.scroll_to(bottom + 100, 10);
+        assert_eq!(view.scroll_position(), view.content_height() - 10);
+        assert!(view.is_at_bottom(), "the bottom edge re-arms follow");
+        for i in 30..40 {
+            view.push(ChatCell::AssistantMessage(format!("msg {i}")));
+        }
+        render_view(&mut view, 40, 10);
+        assert!(view.is_at_bottom());
+        assert_eq!(view.scroll_position(), view.content_height() - 10);
+    }
+
+    /// Content that fits: `scroll_to` is a no-op at offset 0 and the view
+    /// stays in the follow state (there is no "reading" position to hold).
+    #[test]
+    fn test_scroll_to_clamps_when_the_content_fits() {
+        let mut view = ChatView::new();
+        view.push(ChatCell::AssistantMessage("short".into()));
+        render_view(&mut view, 40, 10);
+        view.scroll_to(7, 10);
+        assert_eq!(view.scroll_position(), 0);
+        assert!(view.is_at_bottom());
     }
 
     /// The render pass must record the content height so `scroll_down`
