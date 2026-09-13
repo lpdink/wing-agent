@@ -49,7 +49,7 @@
 
 - 双方都按**本地日期**一天一个文件：`wing_YYYY-MM-DD.log`，append 模式打开——网关 / TUI 重启绝不截断或分裂日志；启动与每次轮转时 prune 7 天前的文件（含遗留命名）。
 - 后端日志在 `~/.wing/core/logs/`（`new.log` 始终指向活跃后端日志）；TUI 日志在 `~/.wing/tui/logs/`（命名相同，**无**符号链接）。
-- 日志初始化是显式的：网关 CLI（`wing-gateway` → `wing.common.logger.setup_logger`）与 TUI（`util/logging.rs`）在启动时挂 handler。**import `wing` 没有任何日志副作用**——测试与脚本永远不会在 `~/.wing` 创建文件。
+- 日志初始化是显式的：网关 CLI（`wing-gateway` → `wing.common.logger.setup_logger`）与 `wing` 二进制（`cmd::dispatch` 入口统一初始化，TUI / stdio / 全部编排子命令共用同一份 `util/logging.rs`，幂等）在启动时挂 handler。**import `wing` 没有任何日志副作用**——测试与脚本永远不会在 `~/.wing` 创建文件。
 - 后端每行格式 `YYYY-MM-DD HH:MM:SS - LEVEL - path:line - message`；TUI 由 tracing 输出（本地时间，`RUST_LOG` 可覆盖级别，默认 `wing=warn`）。
 - 前后端一律使用本地时间，时间范围 grep 可直接工作：
 

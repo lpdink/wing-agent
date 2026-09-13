@@ -215,6 +215,13 @@ pub enum Command {
 
 /// Dispatch CLI command.
 pub async fn dispatch(cli: Cli) -> ExitCode {
+    // Logging is initialized for **every** path — TUI, stdio and all
+    // orchestration subcommands — from this single entry point. Without it the
+    // CLI failed silently: e.g. a dead WS read task in `wing wait` only left a
+    // tracing event that nobody was subscribed to (no subscriber = no file, no
+    // stderr). Idempotent, so the TUI / stdio paths keep calling it too.
+    let _log_guard = init_logging();
+
     // stdio mode takes priority over subcommands.
     if cli.is_stdio_mode() {
         return dispatch_stdio(cli).await;
