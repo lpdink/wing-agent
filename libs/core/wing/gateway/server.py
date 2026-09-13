@@ -31,6 +31,7 @@ from wing.event_bus import event_bus
 from wing.runtime import WingRuntime
 
 from .app import create_app
+from .frames import HARD_LIMIT_BYTES, Frame, build_frames
 from .remote_tools import RemoteToolManager
 
 DEFAULT_PORT = 32523
@@ -153,28 +154,32 @@ class GatewayServer:
             return
 
         payload = json.dumps(wire_dump(event))
+        # 切分也在 eager 阶段完成（与序列化同理）：帧内容定型后再交给 task，
+        # 不依赖任何延迟序列化的时序。小载荷原样单帧，零额外开销。
+        frames = build_frames(payload, event.type)
 
         if target.scope == "global":
             # 发给所有 ws（跳过不收事件的 tool host）
             for cid, ws in list(self._client_to_ws.items()):
                 if not self._receives_events(cid):
                     continue
-                try:
-                    asyncio.get_running_loop().create_task(self._send_text(ws, payload))
-                except RuntimeError:
-                    pass
+                self._schedule_send(ws, frames, event.type)
 
         elif target.scope == "client":
             # 发给指定 client_ids 的 ws
             for cid in target.client_ids:
                 ws = self._client_to_ws.get(cid)
                 if ws is not None and self._receives_events(cid):
-                    try:
-                        asyncio.get_running_loop().create_task(
-                            self._send_text(ws, payload)
-                        )
-                    except RuntimeError:
-                        pass
+                    self._schedule_send(ws, frames, event.type)
+
+    def _schedule_send(self, ws: WebSocket, frames: list[Frame], of_type: str) -> None:
+        """调度一个事件的投递（每事件一次 task，同一事件的帧在该 task 内按序发出）。"""
+        try:
+            asyncio.get_running_loop().create_task(
+                self._send_frames(ws, frames, of_type)
+            )
+        except RuntimeError:
+            pass  # 无运行中的事件循环（进程收尾）——与既有行为一致
 
     def _receives_events(self, client_id: str) -> bool:
         """client 是否接收事件。tool_runtime（attached 且 receives_events=False）
@@ -225,13 +230,39 @@ class GatewayServer:
             # 回收路径绝不能因为对端不读而挂住。
             log.debug(f"Failed to close recycled client {client_id}: {e}")
 
-    async def _send_text(self, ws: WebSocket, data: str) -> None:
+    async def _send_frames(
+        self, ws: WebSocket, frames: list[Frame], of_type: str
+    ) -> None:
+        """一个事件的投递单元：同一事件的帧在**同一个 task 内**按序发出。
+
+        硬上限（16 MiB，= 客户端单帧上限）是最终契约：任何仍超限的帧在这里
+        被拦截丢弃 + 一行 WARN（应用层照常 emit，丢的只是这一帧；不新增计数
+        指标）。切分正常时每帧 ≤ 软上限，本分支是安全网而非控制流。
+
+        客户端被回收后（写超时 / 写失败）立即停止剩余帧——不产生二次回收、
+        不产生重复失败日志。
+        """
+        client_id = self._ws_to_client.get(ws, "unknown")
+        for frame in frames:
+            if frame.size > HARD_LIMIT_BYTES:
+                log.warning(
+                    f"Dropping oversized frame for client {client_id}: "
+                    f"type={of_type} size={frame.size} > {HARD_LIMIT_BYTES}"
+                )
+                continue
+            if not await self._send_text(ws, frame.text):
+                return
+
+    async def _send_text(self, ws: WebSocket, data: str) -> bool:
         """异步发送文本到 ws——有界等待，超时/失败即回收该客户端。
 
-        投递模型未变（每事件一次 create_task）。这里的上界是"无限期"与
-        "有限期"的分界：写超时（或写失败）后该 client 从路由表消失，后续
-        事件不再投递（`_on_event` 的投递列表就是路由表），因此不会再有
-        失败投递与日志洪泛。
+        投递模型未变（每事件一次 create_task，帧逐次发送）。这里的上界是
+        "无限期"与"有限期"的分界：写超时（或写失败）后该 client 从路由表
+        消失，后续事件不再投递（`_on_event` 的投递列表就是路由表），因此不会
+        再有失败投递与日志洪泛。
+
+        返回该客户端是否**仍然有效**：False 表示已被回收，调用方（分片发送
+        循环）不应继续尝试投递剩余帧。
 
         边界说明：uvicorn 的 WS 实现把未写完的数据放进用户态缓冲，
         `send_text` 往往立即返回——此时真正触发回收的是异常分支（连接已死 /
@@ -239,6 +270,7 @@ class GatewayServer:
         """
         try:
             await asyncio.wait_for(ws.send_text(data), timeout=WRITE_TIMEOUT_SECONDS)
+            return True
         except TimeoutError:
             log.error(
                 f"Dropping slow client: send blocked for >{WRITE_TIMEOUT_SECONDS:.0f}s"
@@ -246,6 +278,8 @@ class GatewayServer:
             await self._recycle_client(
                 ws, f"write timeout after {WRITE_TIMEOUT_SECONDS:.0f}s"
             )
+            return False
         except Exception as e:
             log.error(f"Failed to send to client: {e}")
             await self._recycle_client(ws, f"send failed: {e}")
+            return False

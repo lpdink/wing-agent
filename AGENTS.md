@@ -30,6 +30,7 @@ Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+
 3. 中断后上下文必须自洽：每个带 `tool_calls` 的 assistant 消息必须跟齐每个 call_id 的 tool 消息；未终结（半截参数）的 tool 块一律剔除。
 4. 工具不必跑在 gateway 进程内：远程工具 = 普通 `Tool` + 注入的 dispatch 闭包（`gateway/remote_tools.py`），核心保持网络无关。
 5. 运行期改工具集（`POST /api/session/update`）需 KV cache 保护：链空冷切换；链非空冻结 declared 视图 + 注入 System Reminder（策略归 `ContextManager`）。
+6. 任何出网 WS 帧 ≤ 16 MiB（= 客户端默认上限）：超 8 MiB 的载荷由 gateway 在 wire 出口切分（`_chunk` 信封）、客户端在读任务内合并还原，应用层只见完整事件。
 
 ## 项目结构
 
