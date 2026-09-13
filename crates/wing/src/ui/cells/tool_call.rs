@@ -514,12 +514,27 @@ impl ToolCallBlock {
             }
         }
 
-        // Edit streaming: render live diff preview (old_string red, new_string green).
+        // Edit streaming: live diff preview, styled like the final DiffView —
+        // `-` rows on the delete tint, `+` rows on the add tint, with the new
+        // text syntax-highlighted. Bands are text-wide only: this layer has no
+        // width budget (the preview is transient and replaced by the real diff
+        // cell once the tool result lands).
         if status == ToolStatus::Streaming && renderer == ToolRenderer::Edit {
-            let danger = Style::default().fg(palette.danger);
             let dim_style = Style::default().fg(palette.dim);
+            let del_tint = Style::default().bg(palette.diff_del_bg);
+            let add_tint = Style::default().bg(palette.diff_add_bg);
+            let del_marker = Style::default().fg(palette.danger).bold().patch(del_tint);
+            let add_marker = Style::default().fg(palette.success).bold().patch(add_tint);
+            let del_text = del_tint;
+            let old_collapsed = |line: &str| {
+                Line::from(vec![
+                    Span::styled("    ", Style::default().patch(del_tint)),
+                    Span::styled("- ", del_marker),
+                    Span::styled(line.to_string(), del_text),
+                ])
+            };
 
-            // old_string lines (red, no syntax highlight).
+            // old_string lines (delete tint, no syntax highlight).
             if !self.edit_old_lines.is_empty() {
                 let total = self.edit_old_lines.len();
                 if total > EDIT_STREAM_MAX_OLD_LINES {
@@ -530,10 +545,7 @@ impl ToolCallBlock {
                         "KEEP*2 must be < MAX_OLD to avoid overlap/underflow"
                     );
                     for line in &self.edit_old_lines[..keep] {
-                        lines.push(Line::from(vec![
-                            Span::styled("    ", dim_style),
-                            Span::styled(format!("- {line}"), danger),
-                        ]));
+                        lines.push(old_collapsed(line));
                     }
                     let omitted = total - keep * 2;
                     lines.push(Line::from(Span::styled(
@@ -541,22 +553,16 @@ impl ToolCallBlock {
                         dim_style,
                     )));
                     for line in &self.edit_old_lines[total - keep..] {
-                        lines.push(Line::from(vec![
-                            Span::styled("    ", dim_style),
-                            Span::styled(format!("- {line}"), danger),
-                        ]));
+                        lines.push(old_collapsed(line));
                     }
                 } else {
                     for line in &self.edit_old_lines {
-                        lines.push(Line::from(vec![
-                            Span::styled("    ", dim_style),
-                            Span::styled(format!("- {line}"), danger),
-                        ]));
+                        lines.push(old_collapsed(line));
                     }
                 }
             }
 
-            // new_string lines (green, syntax highlighted).
+            // new_string lines (add tint, syntax highlighted).
             if let Some(ref cache) = self.stream_highlight {
                 let total = cache.highlighted_lines.len();
                 let show_count = total.min(EDIT_STREAM_MAX_NEW_LINES);
@@ -567,12 +573,13 @@ impl ToolCallBlock {
                         dim_style,
                     )));
                 }
-                let success = Style::default().fg(palette.success);
                 for hl_line in &cache.highlighted_lines[start..] {
-                    let mut spans: Vec<Span<'static>> =
-                        vec![Span::styled("    ", dim_style), Span::styled("+ ", success)];
+                    let mut spans: Vec<Span<'static>> = vec![
+                        Span::styled("    ", add_tint),
+                        Span::styled("+ ", add_marker),
+                    ];
                     for seg in &hl_line.segments {
-                        spans.push(Span::styled(seg.text.clone(), seg.style));
+                        spans.push(Span::styled(seg.text.clone(), seg.style.patch(add_tint)));
                     }
                     lines.push(Line::from(spans));
                 }
@@ -1287,6 +1294,48 @@ mod tests {
         assert!(text.contains("- fn old() {}"), "old_string: {text}");
         assert!(text.contains("+ fn new()"), "new_string first line: {text}");
         assert!(text.contains("+ }"), "new_string last line: {text}");
+    }
+
+    /// Streaming preview rows use the same add/delete tints as the final
+    /// DiffView: the `-` row on the delete tint, the `+` row on the add tint
+    /// (code text keeps its syntax colors).
+    #[test]
+    fn test_edit_streaming_rows_are_tinted() {
+        let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_tint".into());
+        block.append_args_fragment(
+            r#"{"path": "src/main.rs", "old_string": "fn old() {}", "new_string": "fn new() {}"}"#,
+        );
+        let palette = p();
+        let lines = block.to_lines(&palette, 10);
+
+        let del = lines
+            .iter()
+            .find(|l| l.to_string().contains("- fn old()"))
+            .expect("delete row");
+        let add = lines
+            .iter()
+            .find(|l| l.to_string().contains("+ fn new()"))
+            .expect("add row");
+
+        assert!(
+            del.spans
+                .iter()
+                .all(|s| s.style.bg == Some(palette.diff_del_bg)),
+            "delete row not tinted: {:?}",
+            del.spans.iter().map(|s| s.style.bg).collect::<Vec<_>>()
+        );
+        assert!(
+            add.spans
+                .iter()
+                .all(|s| s.style.bg == Some(palette.diff_add_bg)),
+            "add row not tinted: {:?}",
+            add.spans.iter().map(|s| s.style.bg).collect::<Vec<_>>()
+        );
+        // Syntax colors survive on the tinted content span.
+        assert!(
+            add.spans.iter().skip(2).any(|s| s.style.fg.is_some()),
+            "no syntax colors on the add row"
+        );
     }
 
     #[test]
