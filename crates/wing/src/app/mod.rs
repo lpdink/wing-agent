@@ -6978,7 +6978,7 @@ mod tests {
         assert_eq!(app.selection.bounds(), focus, "the selection is untouched");
     }
 
-    // ── Scrollbar × text selection: two gestures, one chat band ─────────
+    // ── Scrollbar × text selection × links: three gestures, one band ────
 
     /// A press on the bar is the bar's, even though the bar sits inside the
     /// chat band: it drags the view, starts no selection and copies nothing.
@@ -7043,6 +7043,105 @@ mod tests {
         );
         assert!(app.selection.is_press_active(), "the next press selects");
         assert!(!app.scrollbar.dragging);
+    }
+
+    /// A link label that fills the assistant content width exactly, so the
+    /// link's last column is the bar's own column: the cell prefix is two
+    /// columns and the prose is pre-wrapped to `band width - 2`, so the label
+    /// has to be `band width - 2` columns wide and sit on a row of its own.
+    ///
+    /// Filler above overflows the band (the bar needs something to scroll) and
+    /// the link cell is last, so the row stays on screen while the view is
+    /// pinned to the bottom.
+    fn app_with_link_at_the_bar_column() -> App {
+        let label = "01234567890123456789012345678901234567"; // 38 columns
+        assert_eq!(label.len(), 38, "40-wide band minus the two-column prefix");
+        let mut app = test_app();
+        app.chat.set_header(Vec::new());
+        for i in 0..4 {
+            app.chat.push(ChatCell::UserMessage(format!("filler {i}")));
+        }
+        app.chat.push(ChatCell::AssistantMessage(format!(
+            "see [{label}](https://example.com)"
+        )));
+        app
+    }
+
+    /// The bar takes the press, so the link it covers cannot be opened by
+    /// clicking the bar — the interaction PR 90's notes flagged ("hand the bar
+    /// column to the link masking") is solved by dispatch order instead: the
+    /// bar column never reaches the chat click path at all.
+    #[test]
+    fn test_press_on_the_bar_never_opens_the_link_under_it() {
+        let mut app = app_with_link_at_the_bar_column();
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let geom = app.scrollbar_geometry().expect("content overflows");
+        let (row, links) = app
+            .chat
+            .frame_links()
+            .first()
+            .expect("frame has a link")
+            .clone();
+        let link = &links[0];
+        assert_eq!(
+            link.end - 1,
+            geom.column,
+            "the link must reach the bar's column for this test to mean anything"
+        );
+
+        assert_eq!(
+            app.handle_mouse(press((geom.column, row))),
+            MouseOutcome::Immediate
+        );
+        assert!(app.scrollbar.dragging, "the press belongs to the bar");
+        assert!(
+            app.mouse_link.is_none(),
+            "a bar press must not record the link underneath"
+        );
+        assert_eq!(
+            app.handle_mouse(release((geom.column, row))),
+            MouseOutcome::Immediate
+        );
+        assert!(!app.scrollbar.dragging);
+        assert!(
+            app.drain_intents().is_empty(),
+            "the bar drag opens nothing and copies nothing"
+        );
+    }
+
+    /// …while the column left of the bar is still the link's: the bar claims
+    /// exactly one column, not the neighbourhood.
+    #[test]
+    fn test_click_beside_the_bar_still_opens_the_link() {
+        let mut app = app_with_link_at_the_bar_column();
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let geom = app.scrollbar_geometry().expect("content overflows");
+        let (row, links) = app
+            .chat
+            .frame_links()
+            .first()
+            .expect("frame has a link")
+            .clone();
+        let link = &links[0];
+
+        // The visible part of the link, one column short of the bar.
+        let at = (geom.column - 1, row);
+        assert!(
+            link.start <= at.0 && link.end - 1 >= at.0,
+            "inside the link"
+        );
+        assert_eq!(app.handle_mouse(press(at)), MouseOutcome::Immediate);
+        assert!(
+            !app.scrollbar.dragging,
+            "off the bar, the bar stays out of it"
+        );
+        assert_eq!(app.handle_mouse(release(at)), MouseOutcome::Immediate);
+        match app.drain_intents().as_slice() {
+            [AppIntent::OpenLink(target)] => assert_eq!(target, "https://example.com"),
+            other => panic!("expected exactly one open intent, got {other:?}"),
+        }
     }
 
     /// A press beside the bar belongs to the chat band: it starts a drag
