@@ -9,6 +9,7 @@ from wing.agent import ToolContext, current_tool_call_id
 from wing.event import DiffContentEvent
 from wing.schema import ToolError
 from wing.tool_registry import tool_registry
+from wing.tools.diff_window import build_diff_events, find_all
 from wing.tools.utils import resolve_path as _resolve_path
 
 
@@ -49,7 +50,10 @@ async def write_file(path: str, content: str, ctx: ToolContext) -> str:
         byte_count = len(content.encode("utf-8"))
         new_lines = len(content.splitlines())
 
-        # Emit DiffContentEvent for frontend diff rendering
+        # Emit DiffContentEvent for frontend diff rendering.
+        # Write keeps the full payload (not windowed): `old_text=None` for a
+        # new file (all green), the whole old content on overwrite. Both
+        # windows start at line 1, so the default start lines apply.
         ctx.emit(
             DiffContentEvent(
                 session_id=ctx.session_id,
@@ -137,9 +141,11 @@ async def edit_file(
 
     # 原子替换
     if replace_all:
+        positions = find_all(content, old_string)
         new_content = content.replace(old_string, new_string)
     else:
         pos = content.find(old_string)
+        positions = [pos]
         new_content = content[:pos] + new_string + content[pos + len(old_string) :]
 
     tmp = f"{path}.tmp.{os.getpid()}"
@@ -151,16 +157,18 @@ async def edit_file(
         os.unlink(tmp) if os.path.exists(tmp) else None
         raise ToolError(f"edit: write failed: {e}")
 
-    # 成功：emit DiffContentEvent（传完整文件内容，非仅变更块）
-    ctx.emit(
-        DiffContentEvent(
-            session_id=ctx.session_id,
-            path=path,
-            old_text=content,
-            new_text=new_content,
-            tool_call_id=current_tool_call_id() or "",
-        )
-    )
+    # 成功：emit DiffContentEvent（每个匹配位置一个窗口，非整份文件）
+    for event in build_diff_events(
+        session_id=ctx.session_id,
+        path=path,
+        tool_call_id=current_tool_call_id() or "",
+        old_content=content,
+        new_content=new_content,
+        old_len=len(old_string),
+        new_len=len(new_string),
+        positions=positions,
+    ):
+        ctx.emit(event)
 
     # 计算统计信息
     total_old_lines = len(content.splitlines())
@@ -172,7 +180,7 @@ async def edit_file(
             f"  file: {total_old_lines} → {total_new_lines} lines"
         )
 
-    pos = content.find(old_string)
+    pos = positions[0]
     old_lines = len(old_string.splitlines())
     new_lines = len(new_string.splitlines())
     line_no = content[:pos].count("\n") + 1

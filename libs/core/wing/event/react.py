@@ -176,12 +176,24 @@ class DiffContentEvent(WingEvent):
     并发工具调用场景下事件乱序到达，前端据此把 diff 锚定到对应
     ToolCall cell 之后，而非追加到聊天尾部。取自 agent.py 的
     current_tool_call_id()（exec_tool_calls 为每个 gather task 设置）。
+
+    **载荷是窗口**：Edit / BetterEdit 的 old_text/new_text 只携带变更区域
+    ± 上下文行（``tools/diff_window.py`` 的 ``DIFF_CONTEXT_LINES``），而非
+    整份文件；``replace_all`` 每个匹配位置一条事件（同一 tool_call_id）。
+    窗口首行在各自修订版中的 1 起绝对行号见 old_start_line/new_start_line
+    ——前端据此渲染 gutter 行号与 ``@@`` 头（见
+    openspec/changes/diff-payload-window）。
+
+    Write / 新建文件保持全量：``old_text=None`` 表示新文件（全绿），此时
+    old 侧无行号，old_start_line 无意义（留 1）。
     """
 
     type: Literal["diff_content"] = "diff_content"
     path: str
     old_text: str | None = None  # None 表示新文件（全绿）
     new_text: str
+    old_start_line: int = 1  # 窗口首行在旧修订版中的 1 起绝对行号
+    new_start_line: int = 1  # 窗口首行在新修订版中的 1 起绝对行号
     tool_call_id: str = ""
 
 
