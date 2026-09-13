@@ -2308,7 +2308,16 @@ impl App {
     }
 
     /// Draw the UI.
-    fn draw(&mut self, terminal: &mut WingTerminal) -> Result<()> {
+    ///
+    /// Generic over the backend so the whole frame can be asserted in tests
+    /// through `ratatui::backend::TestBackend` — the scrollbar's clipping and
+    /// its place in the overlay order are frame-level properties, not unit
+    /// properties of the painter.
+    fn draw<B>(&mut self, terminal: &mut ratatui::Terminal<B>) -> Result<()>
+    where
+        B: ratatui::backend::Backend,
+        B::Error: std::error::Error + Send + Sync + 'static,
+    {
         // Out-of-band terminal disturbance (focus regain / resize) — see
         // `needs_full_redraw`. Reset the back buffer so this draw repaints
         // the whole screen and resyncs with the terminal.
@@ -2379,6 +2388,12 @@ impl App {
             // effective scroll offset (auto-scroll / clamp included).
             if let Some(geom) = self.scrollbar_geometry() {
                 scrollbar::paint(frame.buffer_mut(), &geom, self.scrollbar, &palette);
+            } else {
+                // No bar this frame (content fits, or nothing drawn yet):
+                // drop the interaction state now instead of waiting for the
+                // next mouse event, so a later overflow cannot resurrect a
+                // stale hover / drag look.
+                self.clear_scrollbar_interaction();
             }
 
             // Fixed composer block below the chat viewport.
@@ -4107,6 +4122,150 @@ mod tests {
             "the bar must not touch panel state"
         );
         assert_eq!(app.ask_panels.len(), 1, "panel stays open");
+    }
+
+    // ── Overlay scrollbar: whole-frame checks through a real Terminal ────
+
+    /// The frame as text (one line per row), for assertion messages.
+    fn frame_text(buf: &ratatui::buffer::Buffer) -> String {
+        (buf.area.y..buf.area.bottom())
+            .map(|row| {
+                let line: String = (buf.area.x..buf.area.right())
+                    .map(|x| buf[(x, row)].symbol())
+                    .collect();
+                format!("{row:>2} |{line}|\n")
+            })
+            .collect()
+    }
+
+    /// Bar glyphs are unambiguous outside the chat (`│` is shared with every
+    /// border, `┃` / `█` are not).
+    fn is_bar_glyph(symbol: &str) -> bool {
+        matches!(symbol, "┃" | "█")
+    }
+
+    /// A chat long enough to overflow the viewport, drawn through ratatui's
+    /// `TestBackend`.
+    fn draw_frame(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
+        app.draw(&mut terminal).expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    fn long_chat_app() -> App {
+        let mut app = test_app();
+        for i in 0..40 {
+            app.chat
+                .push(ChatCell::AssistantMessage(format!("msg {i}")));
+        }
+        app
+    }
+
+    /// Whole-frame contract: the bar owns the chat area's rightmost column,
+    /// one glyph per chat row, and nothing else in the frame.
+    #[test]
+    fn test_draw_paints_the_scrollbar_only_on_the_chat_areas_last_column() {
+        let mut app = long_chat_app();
+        let buf = draw_frame(&mut app, 80, 24);
+        let chat = app.chat_area;
+        let column = chat.right() - 1;
+        assert!(chat.height > 3, "chat viewport: {chat:?}");
+        assert_eq!(column, 79, "the chat spans the full width");
+
+        // Every chat row carries a bar glyph on the chat area's last column…
+        for row in chat.y..chat.bottom() {
+            let symbol = buf[(column, row)].symbol();
+            assert!(
+                matches!(symbol, "│" | "┃" | "█"),
+                "row {row} must carry the bar, got {symbol:?}\n{}",
+                frame_text(&buf)
+            );
+        }
+        // …the composer rows below it keep their own content (the info
+        // separator paints a rule across the whole row)…
+        assert_eq!(
+            buf[(column, chat.bottom())].symbol(),
+            "─",
+            "info separator row\n{}",
+            frame_text(&buf)
+        );
+        assert!(
+            !matches!(buf[(column, 0)].symbol(), "│" | "┃" | "█"),
+            "status bar row must not look like the bar\n{}",
+            frame_text(&buf)
+        );
+        // …and no other cell of the frame carries a bar-only glyph.
+        for row in buf.area.y..buf.area.bottom() {
+            for x in buf.area.x..buf.area.right() {
+                if is_bar_glyph(buf[(x, row)].symbol()) {
+                    assert_eq!(
+                        x,
+                        column,
+                        "bar glyph outside the chat column at ({x},{row})\n{}",
+                        frame_text(&buf)
+                    );
+                }
+            }
+        }
+    }
+
+    /// The bar is painted before the toast, but the toast keeps a one-column
+    /// right margin — they share rows and never the bar's column, so a frame
+    /// with both must show both.
+    #[test]
+    fn test_draw_keeps_the_bar_and_the_toast_in_the_same_frame() {
+        let mut app = long_chat_app();
+        app.toast = Some(Toast::info(
+            "hello toast",
+            std::time::Duration::from_secs(30),
+        ));
+        let buf = draw_frame(&mut app, 80, 24);
+        let chat = app.chat_area;
+        let column = chat.right() - 1;
+
+        let rendered = frame_text(&buf);
+        assert!(rendered.contains("hello toast"), "toast text:\n{rendered}");
+        // The toast sits at y = 1 (below the status bar); the bar rows it
+        // spans must still carry the bar, i.e. the overlay pass that draws the
+        // toast does not erase it.
+        for row in chat.y..chat.y + 3 {
+            assert!(
+                matches!(buf[(column, row)].symbol(), "│" | "┃" | "█"),
+                "the bar must survive the toast pass on row {row}\n{rendered}"
+            );
+        }
+        // The toast's own border column is untouched by the bar (row 2 is a
+        // vertical border row; row 1 is the top border corner).
+        let toast_border = 80 - 2;
+        assert_eq!(
+            buf[(toast_border, 2)].symbol(),
+            "│",
+            "toast right border\n{rendered}"
+        );
+    }
+
+    /// Spec: the interaction state is dropped in the same frame the bar
+    /// disappears with, not on the next mouse event.
+    #[test]
+    fn test_draw_clears_the_scrollbar_state_when_the_bar_disappears() {
+        let mut app = long_chat_app();
+        draw_frame(&mut app, 80, 24);
+        let geom = app.scrollbar_geometry().expect("content overflows");
+        app.handle_mouse(hover(geom.column, geom.track_top));
+        app.handle_mouse(press(geom.column, geom.thumb_top));
+        assert!(app.scrollbar.is_active());
+
+        // Content shrinks below the viewport (clear / compaction): the next
+        // frame must drop the highlight without waiting for a mouse event.
+        app.chat.clear();
+        app.chat.push(ChatCell::AssistantMessage("short".into()));
+        draw_frame(&mut app, 80, 24);
+        assert!(
+            !app.scrollbar.is_active(),
+            "the frame that hides the bar clears its interaction state"
+        );
     }
 
     #[test]
