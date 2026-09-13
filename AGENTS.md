@@ -157,6 +157,7 @@ crates/wing/src/
 │   ├── markdown/                    types / parsing / code_blocks / tables / links / wrap（CJK UAX#14）
 │   │   └── stream.rs                StreamingRender — 增量渲染（稳定前缀 + 活动尾部；Thinking 跳过 fence 归一化）
 │   ├── syntax.rs                    syntect 高亮（two-face 主题）
+│   ├── diff_highlight.rs            diff 双修订版高亮（old/new 两路状态机：删除行→old，其余→new，context 行两路都要推进）
 │   └── line_utils.rs / renderable.rs
 ├── tui/mod.rs                       终端生命周期（init/restore、crossterm 事件流）
 ├── config/                          TUI 配置（mod / colors / rendering）

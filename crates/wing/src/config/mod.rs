@@ -14,7 +14,7 @@ use serde::Serialize;
 use self::colors::parse_color;
 use self::rendering::RenderingConfig;
 
-/// Semantic color palette — 9 slots covering all UI components.
+/// Semantic color palette — one slot per UI role.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ColorsConfig {
@@ -24,7 +24,7 @@ pub struct ColorsConfig {
     pub text: String,
     /// Thinking: agent reasoning content (more prominent than dim).
     pub thinking: String,
-    /// Tool result: tool call output, diff context (secondary data).
+    /// Tool result: tool call output (secondary data).
     pub tool_result: String,
     /// Secondary text: bullets, borders, gutters, separators.
     pub dim: String,
@@ -36,6 +36,14 @@ pub struct ColorsConfig {
     pub danger: String,
     /// Surface: user message background.
     pub surface: String,
+    /// Background tint for diff additions (text keeps syntax colors).
+    pub diff_add_bg: String,
+    /// Background tint for diff deletions.
+    pub diff_del_bg: String,
+    /// Background tint for changed words inside an added line.
+    pub diff_add_bg_strong: String,
+    /// Background tint for changed words inside a deleted line.
+    pub diff_del_bg_strong: String,
 }
 
 impl Default for ColorsConfig {
@@ -50,6 +58,10 @@ impl Default for ColorsConfig {
             warning: "yellow".into(),
             danger: "red".into(),
             surface: "#343541".into(),
+            diff_add_bg: "#16381f".into(),
+            diff_del_bg: "#47242c".into(),
+            diff_add_bg_strong: "#1f5230".into(),
+            diff_del_bg_strong: "#66323c".into(),
         }
     }
 }
@@ -163,6 +175,14 @@ pub struct ThemePalette {
     pub warning: Color,
     pub danger: Color,
     pub surface: Color,
+    /// Diff addition row background.
+    pub diff_add_bg: Color,
+    /// Diff deletion row background.
+    pub diff_del_bg: Color,
+    /// Word-level emphasis background inside an added line.
+    pub diff_add_bg_strong: Color,
+    /// Word-level emphasis background inside a deleted line.
+    pub diff_del_bg_strong: Color,
 }
 
 impl Default for ThemePalette {
@@ -185,6 +205,16 @@ impl ThemePalette {
             warning: resolve_color(&cfg.warning, &defaults.warning),
             danger: resolve_color(&cfg.danger, &defaults.danger),
             surface: resolve_color(&cfg.surface, &defaults.surface),
+            diff_add_bg: resolve_color(&cfg.diff_add_bg, &defaults.diff_add_bg),
+            diff_del_bg: resolve_color(&cfg.diff_del_bg, &defaults.diff_del_bg),
+            diff_add_bg_strong: resolve_color(
+                &cfg.diff_add_bg_strong,
+                &defaults.diff_add_bg_strong,
+            ),
+            diff_del_bg_strong: resolve_color(
+                &cfg.diff_del_bg_strong,
+                &defaults.diff_del_bg_strong,
+            ),
         }
     }
 }
@@ -225,6 +255,10 @@ mod tests {
         assert_eq!(p.warning, Color::Yellow);
         assert_eq!(p.danger, Color::Red);
         assert_eq!(p.surface, Color::Rgb(52, 53, 65));
+        assert_eq!(p.diff_add_bg, Color::Rgb(0x16, 0x38, 0x1f));
+        assert_eq!(p.diff_del_bg, Color::Rgb(0x47, 0x24, 0x2c));
+        assert_eq!(p.diff_add_bg_strong, Color::Rgb(0x1f, 0x52, 0x30));
+        assert_eq!(p.diff_del_bg_strong, Color::Rgb(0x66, 0x32, 0x3c));
     }
 
     #[test]
@@ -239,6 +273,17 @@ mod tests {
         assert_eq!(p.dim, Color::Gray);
         // Untouched defaults
         assert_eq!(p.text, Color::White);
+    }
+
+    /// A pre-redesign config (no diff tints) still loads: the new keys carry
+    /// their defaults instead of failing the parse.
+    #[test]
+    fn test_legacy_config_without_diff_tints() {
+        let yaml = "colors:\n  accent: cyan\n  danger: red\n";
+        let cfg: ColorsConfig = serde_yaml::from_str(yaml).unwrap();
+        let p = ThemePalette::from_config(&cfg);
+        assert_eq!(p.danger, Color::Red);
+        assert_eq!(p.diff_add_bg, Color::Rgb(0x16, 0x38, 0x1f));
     }
 
     #[test]

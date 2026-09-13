@@ -125,6 +125,48 @@ pub fn new_highlighter(lang: &str) -> Option<HighlightLines<'static>> {
     Some(HighlightLines::new(syntax, theme))
 }
 
+/// Build a stateful highlighter for a file, resolving the language from the
+/// file name (extension or, for extension-less files, the name itself —
+/// `Makefile`, `Dockerfile`, `.gitignore`) and falling back to the first
+/// line (shebangs) when the name does not resolve.
+///
+/// `first_line` is the file's first line when the caller has the content at
+/// hand; `None` skips that fallback. Returns None when nothing matches.
+pub fn new_highlighter_for_file(
+    path: &str,
+    first_line: Option<&str>,
+) -> Option<HighlightLines<'static>> {
+    let ss = syntax_set();
+    let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let syntax = ss
+        // Extension, then syntax name (case-insensitive) — this is what
+        // resolves `Makefile` / `Dockerfile` / `.gitignore`.
+        .find_syntax_by_token(basename)
+        .or_else(|| {
+            let ext = basename.rsplit_once('.')?.1;
+            if ext.is_empty() {
+                None
+            } else {
+                ss.find_syntax_by_extension(ext)
+            }
+        })
+        .or_else(|| first_line.and_then(|line| ss.find_syntax_by_first_line(line)))?;
+    let theme = &theme_set().themes["base16-ocean.dark"];
+    Some(HighlightLines::new(syntax, theme))
+}
+
+/// Advance a highlighter's parse/highlight state over `line` WITHOUT building
+/// styled output.
+///
+/// `HighlightLines::highlight_line` returns borrowed slices, so skipping the
+/// `(Style, String)` conversion saves one allocation per syntect op — this is
+/// the cheap path for lines whose rendering is not needed (collapsed context,
+/// or the old revision's side of an unchanged line).
+pub fn advance_line(highlighter: &mut HighlightLines<'static>, line: &str) {
+    // Parse errors leave the state where it was, matching `highlight_line_with`.
+    let _ = highlighter.highlight_line(line, syntax_set());
+}
+
 /// Highlight a single line, ADVANCING the highlighter state.
 ///
 /// The state is positioned "after the previous line" — highlighting line N
@@ -181,6 +223,21 @@ mod tests {
         let lines = result.unwrap();
         assert_eq!(lines.len(), 1);
         assert!(!lines[0].segments.is_empty());
+    }
+
+    /// Extension-less files resolve by file name, then by the first line.
+    #[test]
+    fn test_highlighter_for_file() {
+        assert!(new_highlighter_for_file("Makefile", None).is_some());
+        assert!(new_highlighter_for_file("docker/Dockerfile", None).is_some());
+        assert!(new_highlighter_for_file("src/main.rs", None).is_some());
+        assert!(
+            new_highlighter_for_file("scripts/zzz-no-language", Some("#!/usr/bin/env python3"))
+                .is_some(),
+            "shebang should resolve the language"
+        );
+        assert!(new_highlighter_for_file("scripts/zzz-no-language", None).is_none());
+        assert!(new_highlighter_for_file("data.zzzq", None).is_none());
     }
 
     #[test]

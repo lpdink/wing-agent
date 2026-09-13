@@ -140,7 +140,7 @@ impl ChatCell {
             }
             Self::Thinking(block) => block.to_lines(palette, ctx.thinking_mode, width),
             Self::ToolCall(block) => block.to_lines(palette, ctx.layout.tool_output_max),
-            Self::Diff(view) => view.to_lines(palette, ctx.layout.diff_context),
+            Self::Diff(view) => view.to_lines(palette, ctx.layout.diff_context, width),
             Self::Todo(msg) => msg.to_lines(palette),
             Self::Ask(msg) => msg.to_lines(palette, width),
             Self::ModelPicker(panel) => model_picker_lines(panel, palette),
