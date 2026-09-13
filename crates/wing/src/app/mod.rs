@@ -105,6 +105,28 @@ async fn selection_autoscroll_tick(active: bool) {
     }
 }
 
+/// Structural fingerprint of the chat content at the moment a drag started.
+///
+/// A text selection is anchored to *content* rows, which only survive while
+/// the structure is stable: adding / removing cells, promoting a pending
+/// message, rebuilding the whole content (session switch, compaction, rewind)
+/// or changing the width all move rows under the anchor. Streamed text growth
+/// does not — it rewrites an existing cell without moving anything — so it
+/// must NOT show up here, otherwise every streaming delta would abort a drag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectionGuard {
+    /// Number of committed cells.
+    cells: usize,
+    /// Number of pending (sent, not yet accepted) messages.
+    pending: usize,
+    /// Terminal width the anchor's columns were measured against.
+    width: u16,
+    /// Content rebuild counter (`ChatView::structure_epoch`) — catches session
+    /// switches / compaction / rewind even when the rebuilt content ends up
+    /// with the same cell count.
+    rebuilds: u64,
+}
+
 /// Application state.
 pub struct App {
     pub status: StatusData,
@@ -115,11 +137,10 @@ pub struct App {
     /// release). Anchored in content coordinates — see
     /// [`crate::ui::selection`].
     selection: Selection,
-    /// Structure fingerprint captured when the drag started:
-    /// `(cells, pending, terminal width)`. Any change means virtual rows may
-    /// have shifted under the anchor, so the selection is aborted; pure
-    /// content appends (streaming) leave it untouched.
-    selection_guard: Option<(usize, usize, u16)>,
+    /// Structure fingerprint captured when the drag started. Any change means
+    /// virtual rows may have shifted under the anchor, so the selection is
+    /// aborted; pure content appends (streaming) leave it untouched.
+    selection_guard: Option<SelectionGuard>,
     /// Whether the app should exit.
     pub should_quit: bool,
     /// Pending side-effect intents. Drained by runner after each draw cycle.
@@ -638,13 +659,14 @@ impl App {
         self.chat.scroll_down(0, self.visible_height);
     }
 
-    /// Structural fingerprint of the chat content, see [`Self::selection_guard`].
-    fn selection_fingerprint(&self) -> (usize, usize, u16) {
-        (
-            self.chat.len(),
-            self.chat.pending_len(),
-            self.terminal_width,
-        )
+    /// Structural fingerprint of the chat content, see [`SelectionGuard`].
+    fn selection_fingerprint(&self) -> SelectionGuard {
+        SelectionGuard {
+            cells: self.chat.len(),
+            pending: self.chat.pending_len(),
+            width: self.terminal_width,
+            rebuilds: self.chat.structure_epoch(),
+        }
     }
 
     /// Whether the drag edge auto-scroll is currently armed (the run loop
@@ -4514,9 +4536,9 @@ mod tests {
 
     #[test]
     fn test_structural_change_aborts_the_selection() {
-        // Width (resize), cell count and pending count all shift virtual rows
-        // under the anchor — the selection must be dropped, not pointed at
-        // different text.
+        // Width (resize), cell count, pending count and a full content rebuild
+        // all shift virtual rows under the anchor — the selection must be
+        // dropped, not pointed at different text.
         let cases: Vec<(&str, Box<dyn Fn(&mut App)>)> = vec![
             (
                 "width",
@@ -4535,6 +4557,19 @@ mod tests {
                 "pending count",
                 Box::new(|app: &mut App| {
                     app.chat.push_pending("req-1".into(), "queued".into());
+                }),
+            ),
+            (
+                "rebuild",
+                Box::new(|app: &mut App| {
+                    // Session switch / compaction / rewind replay: same cell
+                    // count, completely different content.
+                    let text = (0..30)
+                        .map(|i| format!("other-{i}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    app.chat.clear();
+                    app.chat.push(ChatCell::UserMessage(text));
                 }),
             ),
         ];

@@ -259,6 +259,11 @@ pub struct ChatView {
     /// Used by `scroll_down` to detect the bottom edge and re-arm
     /// auto-scroll immediately, without waiting for the next render pass.
     pub(crate) last_total: usize,
+    /// Counts full content rebuilds ([`Self::clear`]: session switch,
+    /// compaction re-sync, rewind replay). A selection is anchored to content
+    /// rows, so a rebuild invalidates it even when the rebuilt list happens to
+    /// end up with the same number of cells — see `App::selection_guard`.
+    rebuilds: u64,
     /// Geometry of the last render (see [`ChatGeometry`]).
     geometry: ChatGeometry,
     /// Graphemes of the visible chat rows as of the last *drag* frame.
@@ -281,6 +286,7 @@ impl ChatView {
             auto_scroll: true,
             header_lines: Vec::new(),
             last_total: 0,
+            rebuilds: 0,
             geometry: ChatGeometry::default(),
             visible_rows: Vec::new(),
         }
@@ -750,7 +756,10 @@ impl ChatView {
         self.scroll_offset
     }
 
-    /// Clear all cells.
+    /// Clear all cells — a content rebuild (session switch, compaction
+    /// re-sync, rewind replay). Bumps [`Self::structure_epoch`] so an
+    /// in-flight text selection is dropped even if the rebuilt content ends
+    /// up with the same cell count.
     pub fn clear(&mut self) {
         self.cells.clear();
         self.cell_heights.clear();
@@ -758,6 +767,12 @@ impl ChatView {
         self.pending_heights.clear();
         self.scroll_offset = 0;
         self.auto_scroll = true;
+        self.rebuilds = self.rebuilds.wrapping_add(1);
+    }
+
+    /// Number of full content rebuilds so far ([`Self::clear`]).
+    pub fn structure_epoch(&self) -> u64 {
+        self.rebuilds
     }
 
     /// Return the raw text of the last assistant message, if any.
