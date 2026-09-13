@@ -21,7 +21,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 
 use crate::config::ThemePalette;
 
@@ -120,7 +120,8 @@ pub fn geometry(
 
     let max_scroll = content_height - viewport;
     let track_h = area.height;
-    let proportional = (viewport as u64 * track_h as u64 / content_height as u64) as u16;
+    let proportional = ((viewport as u64 * track_h as u64 + content_height as u64 / 2)
+        / content_height as u64) as u16;
     let thumb_h = proportional.max(MIN_THUMB_HEIGHT).min(track_h);
     let travel = track_h - thumb_h;
 
@@ -197,9 +198,19 @@ pub fn offset_for_row(geom: &ScrollbarGeometry, row: u16, grip: u16) -> usize {
 ///
 /// Called after the chat widget (so the bar overprints the content's
 /// rightmost column) and before the toast (so a toast is never hidden by the
-/// bar). Styles are merged into the existing cells — a background from the
-/// content underneath survives, which keeps the overlay from punching a
-/// differently-coloured hole in the chat.
+/// bar; the toast keeps a one-column right margin, so the two share rows but
+/// never the bar's column).
+///
+/// Only the symbol, the foreground colour and the weight are written; the
+/// background is inherited from the cell underneath on purpose, so the
+/// overlay does not punch a differently-coloured hole in the chat. The
+/// modifiers are *assigned* rather than merged (see below), because
+/// `Cell::set_style` is additive and a `DIM` hint or a `BOLD` heading under
+/// the bar would otherwise leak into its weight, line by line.
+///
+/// Not handled: when a double-width grapheme (CJK) ends exactly on the bar's
+/// column, the bar replaces the grapheme's trailing half cell, so the
+/// terminal renders a clipped wide glyph for that row.
 pub fn paint(
     buf: &mut Buffer,
     geom: &ScrollbarGeometry,
@@ -207,17 +218,15 @@ pub fn paint(
     palette: &ThemePalette,
 ) {
     let active = state.is_active();
-    let track_style = Style::default().fg(if active {
-        palette.tool_result
+    let track_fg = if active {
+        palette.thinking
     } else {
         palette.dim
-    });
-    let thumb_style = if active {
-        Style::default()
-            .fg(palette.accent)
-            .add_modifier(Modifier::BOLD)
+    };
+    let thumb_fg = if active {
+        palette.accent
     } else {
-        Style::default().fg(palette.thinking)
+        palette.thinking
     };
     // A cell cannot get wider, so "thicker" is expressed through the glyph
     // weight: hairline track → heavy vertical thumb → solid block while the
@@ -226,14 +235,19 @@ pub fn paint(
 
     for row in geom.track_top..=geom.track_bottom {
         let in_thumb = row >= geom.thumb_top && row <= geom.thumb_bottom;
-        let (glyph, style) = if in_thumb {
-            (thumb_glyph, thumb_style)
+        let (glyph, fg, bold) = if in_thumb {
+            (thumb_glyph, thumb_fg, active)
         } else {
-            ("│", track_style)
+            ("│", track_fg, false)
         };
         if let Some(cell) = buf.cell_mut((geom.column, row)) {
             cell.set_symbol(glyph);
-            cell.set_style(style);
+            cell.set_fg(fg);
+            cell.modifier = if bold {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            };
         }
     }
 }
@@ -517,8 +531,12 @@ mod tests {
         assert!(hot_thumb.style().add_modifier.contains(Modifier::BOLD));
         assert_eq!(
             hot_track.style().fg,
-            Some(idle.tool_result),
-            "the track brightens too"
+            Some(idle.thinking),
+            "the track brightens too (dim → thinking, visible in the default palette)"
+        );
+        assert_ne!(
+            idle.dim, idle.thinking,
+            "the default palette distinguishes them"
         );
 
         // Dragging looks the same as hovering (the pointer is on the bar).
@@ -550,5 +568,49 @@ mod tests {
             Color::Rgb(1, 2, 3),
             "style merge: the overlay must not punch a hole in the content"
         );
+    }
+
+    #[test]
+    fn test_paint_does_not_inherit_the_content_weights() {
+        // `Cell::set_style` is additive, so a dim hint or a bold heading under
+        // the bar would otherwise change the bar's own weight line by line.
+        let area = Rect::new(0, 0, 8, 6);
+        let geom = geometry(area, 100, 0).expect("content overflows");
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 6));
+        for row in 0..6 {
+            buf[(7, row)].modifier = Modifier::DIM | Modifier::BOLD;
+        }
+
+        paint(&mut buf, &geom, ScrollbarState::default(), &palette());
+        for row in 0..6 {
+            assert_eq!(
+                buf[(7, row)].modifier,
+                Modifier::empty(),
+                "row {row}: the idle bar owns its weight"
+            );
+        }
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 6));
+        for row in 0..6 {
+            buf[(7, row)].modifier = Modifier::DIM | Modifier::BOLD;
+        }
+        paint(
+            &mut buf,
+            &geom,
+            ScrollbarState {
+                dragging: true,
+                grip: 0,
+                ..Default::default()
+            },
+            &palette(),
+        );
+        for row in 0..6 {
+            let expected = if buf[(7, row)].symbol() == "█" {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            };
+            assert_eq!(buf[(7, row)].modifier, expected, "row {row}");
+        }
     }
 }

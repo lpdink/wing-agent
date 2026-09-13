@@ -1,4 +1,7 @@
-//! Chat view — scrollable area for conversation cells with scrollbar.
+//! Chat view — scrollable area for conversation cells.
+//!
+//! The scroll offset / follow state live here; the bar drawn beside it is an
+//! overlay owned by `ui::scrollbar` + `App`.
 //!
 //! Uses width-aware virtualization with CachedCell for height caching.
 //! Each cell's height is computed via `Paragraph::line_count(width)` and
@@ -950,7 +953,8 @@ pub(crate) fn render_info_separator(
     }
 }
 
-/// Widget for rendering the chat view with scrollbar.
+/// Widget for rendering the chat viewport (content only — the overlay
+/// scrollbar is painted separately by `App::draw`).
 pub struct ChatViewWidget<'a> {
     view: &'a mut ChatView,
     ctx: CellContext<'a>,

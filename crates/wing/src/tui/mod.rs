@@ -283,6 +283,11 @@ mod tests {
     const LEAVE_BYTES: &str =
         "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l\x1b[?2004l\x1b[?1004l\x1b[?25h";
 
+    /// Stub environment lookup (`std::env` is not readable in a deterministic
+    /// test), so both multiplexer branches are covered regardless of how the
+    /// suite happens to be run.
+    type EnvLookup = fn(&str) -> Option<String>;
+
     /// No multiplexer, a plain terminal: the hover-capable variant.
     fn plain_env(_: &str) -> Option<String> {
         None
@@ -335,7 +340,7 @@ mod tests {
         // tmux / zellij / screen forward every pointer movement, which is
         // exactly the event flood `?1003` would create → button motion only.
         // Hover degrades; clicks, drags and the wheel still work.
-        let cases: [(fn(&str) -> Option<String>, &str); 3] = [
+        let cases: [(EnvLookup, &str); 3] = [
             (tmux_env, "xterm-256color"),
             (plain_env, "tmux-256color"),
             (plain_env, "screen.xterm"),
