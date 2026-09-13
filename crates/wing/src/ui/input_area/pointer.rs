@@ -159,7 +159,12 @@ pub fn paint_selection(buf: &mut Buffer, input: &InputArea, area: Rect, selectio
 /// is a display fold, not a newline in the draft, so a selection that spans one
 /// copies a single line (unlike the chat band, whose copy is what the renderer
 /// produced). Nothing is trimmed — the composer has no padding, so whitespace
-/// is content; an empty range yields `None` (nothing to copy, no feedback).
+/// is content.
+///
+/// A selection that contributes no characters at all yields `None`: it may
+/// still span several rows (dragging from the end of a line to the start of the
+/// next one), but everything it covers is line breaks — copying a bare `\n`
+/// and claiming `Copied!` would contradict "an empty selection copies nothing".
 pub fn selected_text(
     input: &InputArea,
     bounds: (SelectionPoint, SelectionPoint),
@@ -185,7 +190,7 @@ pub fn selected_text(
         };
         lines.push(chars[from.min(to)..to].iter().collect());
     }
-    if lines.is_empty() {
+    if lines.is_empty() || lines.iter().all(String::is_empty) {
         return None;
     }
     Some(lines.join("\n"))
@@ -455,6 +460,49 @@ mod tests {
             ),
         );
         assert_eq!(text.as_deref(), Some("  "));
+    }
+
+    #[test]
+    fn test_selected_text_rejects_line_break_only_ranges() {
+        let mut input = InputArea::new("");
+        input.set_text("ab\n");
+        // From the end of the first line to the start of the empty second one:
+        // the range is non-empty but contributes no characters at all.
+        assert_eq!(
+            selected_text(
+                &input,
+                (
+                    SelectionPoint::composer(0, 2),
+                    SelectionPoint::composer(1, 0)
+                )
+            ),
+            None
+        );
+
+        input.set_text("ab\n\ncd");
+        assert_eq!(
+            selected_text(
+                &input,
+                (
+                    SelectionPoint::composer(0, 2),
+                    SelectionPoint::composer(2, 0)
+                )
+            ),
+            None,
+            "a span of nothing but line breaks is not a copyable selection"
+        );
+        // A range that does carry characters keeps its empty middle line.
+        assert_eq!(
+            selected_text(
+                &input,
+                (
+                    SelectionPoint::composer(0, 1),
+                    SelectionPoint::composer(2, 1)
+                )
+            )
+            .as_deref(),
+            Some("b\n\nc")
+        );
     }
 
     #[test]
