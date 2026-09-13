@@ -7,9 +7,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass
-from typing import AsyncIterator
+
+from wing.common.logger import log
 
 
 @dataclass
@@ -84,6 +87,44 @@ async def parse_sse_stream(
             if event.data == "[DONE]":
                 return
             yield event
+
+
+# 响应体闲置阈值（秒）：两次读取之间超过它即判定停滞。硬编码——没有按部署
+# 差异取值的依据：健康的生成即便很慢也持续吐 token，而"响应头已到、随后
+# 一字不发"只可能是坏连接或上游卡死。停滞抛 TimeoutError，交由既有 with_retry
+# 重试（不另写重试逻辑）。
+STREAM_IDLE_TIMEOUT = 120.0
+
+
+async def lines_with_idle_timeout(
+    lines: AsyncIterator[str],
+    *,
+    timeout: float = STREAM_IDLE_TIMEOUT,
+    context: str = "LLM stream",
+) -> AsyncGenerator[str]:
+    """逐行透传 `lines`，但两次读取之间的间隔不得超过 `timeout` 秒。
+
+    闲置超时抛 `TimeoutError`（内建类型，与 timeout_total / timeout_first_chunk
+    的失败同类）；正常结束（含 `StopAsyncIteration`）不抛。调用方负责在
+    finally 里 `aclose()` 响应体——超时后底层流可能仍停在读中。
+
+    `context` 只用于日志与异常文案（响应头已收到，必须说清是谁的响应体停滞）。
+    """
+    while True:
+        try:
+            line = await asyncio.wait_for(anext(lines), timeout=timeout)
+        except StopAsyncIteration:
+            return
+        except TimeoutError:
+            # 响应头超时（timeout_first_chunk）走不到这里：本函数只包响应体读取。
+            log.error(
+                f"{context}: no data for {timeout:.0f}s after response header — "
+                f"treating the stream as stalled"
+            )
+            raise TimeoutError(
+                f"{context} stalled: no data for {timeout:.0f}s after response header"
+            ) from None
+        yield line
 
 
 def parse_json_event(event: SSEEvent) -> dict | None:

@@ -27,7 +27,12 @@ from wing.provider.base import (
 )
 from wing.provider.errors import ProviderStreamError, raise_with_body
 from wing.provider.http import make_http_timeout
-from wing.provider.sse import parse_json_event, parse_sse_stream
+from wing.provider.sse import (
+    STREAM_IDLE_TIMEOUT,
+    lines_with_idle_timeout,
+    parse_json_event,
+    parse_sse_stream,
+)
 from wing.schema import (
     LLMResponse,
     LLMUsage,
@@ -576,9 +581,15 @@ class AnthropicProvider(ModelProvider):
             )
             await raise_with_body(resp)
         except asyncio.TimeoutError:
-            log.error(f"LLM first chunk timeout after {self.timeout_first_chunk}s")
+            # 只包住 send(stream=True)：等价于"响应头超时"，不是首 token 超时
+            # ——响应体自身的停滞由 lines_with_idle_timeout 判定。
+            log.error(
+                f"LLM response header timeout after {self.timeout_first_chunk}s "
+                f"(no response to the streaming request)"
+            )
             raise TimeoutError(
-                f"LLM first chunk timeout after {self.timeout_first_chunk}s"
+                f"LLM response header timeout after {self.timeout_first_chunk}s "
+                f"(no response to the streaming request)"
             )
 
         # 累积状态装入 caller 持有的容器（每次尝试重置——重试重传时
@@ -589,10 +600,16 @@ class AnthropicProvider(ModelProvider):
 
         request_id = resp.headers.get("request-id", "")
         first_chunk_rt_ms = (time.monotonic() - t0) * 1000
-        log.info("[DONE] anthropic stream connected")
+        log.info("[DONE] anthropic response header received")
 
         try:
-            async for event in parse_sse_stream(resp.aiter_lines()):
+            async for event in parse_sse_stream(
+                lines_with_idle_timeout(
+                    resp.aiter_lines(),
+                    timeout=STREAM_IDLE_TIMEOUT,
+                    context=f"anthropic {model}",
+                )
+            ):
                 data = parse_json_event(event)
                 if data is None:
                     continue
