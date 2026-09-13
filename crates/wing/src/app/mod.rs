@@ -42,14 +42,16 @@ use crate::ui::input_area::InputAction;
 use crate::ui::input_area::InputArea;
 use crate::ui::input_area::InputAreaWidget;
 use crate::ui::input_area::cursor_screen_pos;
+use crate::ui::input_area::pointer;
 use crate::ui::popup::ActivePopup;
 use crate::ui::popup::command::candidate_request_for;
 use crate::ui::popup::command::is_must_select_command;
 use crate::ui::popup::command::parse_slash_input;
 use crate::ui::popup::selection::SelectionPopup;
 use crate::ui::scrollbar;
-use crate::ui::selection::ContentPoint;
 use crate::ui::selection::Selection;
+use crate::ui::selection::SelectionPoint;
+use crate::ui::selection::SelectionRegion;
 use crate::ui::spinner::WorkingIndicatorWidget;
 use crate::ui::status_bar::StatusBar;
 use crate::ui::status_bar::StatusData;
@@ -106,26 +108,44 @@ async fn selection_autoscroll_tick(deadline: Option<std::time::Instant>) {
     }
 }
 
-/// Structural fingerprint of the chat content at the moment a drag started.
+/// Structural fingerprint of the region a drag started in.
 ///
-/// A text selection is anchored to *content* rows, which only survive while
-/// the structure is stable: adding / removing cells, promoting a pending
-/// message, rebuilding the whole content (session switch, compaction, rewind)
-/// or changing the width all move rows under the anchor. Streamed text growth
-/// does not — it rewrites an existing cell without moving anything — so it
-/// must NOT show up here, otherwise every streaming delta would abort a drag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SelectionGuard {
-    /// Number of committed cells.
-    cells: usize,
-    /// Number of pending (sent, not yet accepted) messages.
-    pending: usize,
-    /// Terminal width the anchor's columns were measured against.
-    width: u16,
-    /// Content rebuild counter (`ChatView::structure_epoch`) — catches session
-    /// switches / compaction / rewind even when the rebuilt content ends up
-    /// with the same cell count.
-    rebuilds: u64,
+/// A selection is anchored to *content* coordinates, which only survive while
+/// that content is stable — and the two regions have different notions of
+/// "stable":
+///
+/// * `Chat` — rows move when cells appear / vanish / are promoted, when the
+///   whole content is rebuilt (session switch, compaction, rewind) or when the
+///   width changes. Streamed text growth does not (it rewrites an existing cell
+///   without moving anything), so it must NOT show up here, otherwise every
+///   streaming delta would abort a drag.
+/// * `Composer` — logical positions survive scrolling and re-wrapping, but not
+///   a single edit: the draft is the copy source, so inserting / deleting /
+///   pasting / submitting has to drop a highlight that would otherwise point at
+///   text the user has just changed. A width change re-wraps the draft and
+///   invalidates the pointer ↔ text correspondence, so it counts too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SelectionGuard {
+    /// Chat band: cell structure, content rebuilds and the frame width.
+    Chat {
+        /// Number of committed cells.
+        cells: usize,
+        /// Number of pending (sent, not yet accepted) messages.
+        pending: usize,
+        /// Terminal width the anchor's columns were measured against.
+        width: u16,
+        /// Content rebuild counter (`ChatView::structure_epoch`) — catches
+        /// session switches / compaction / rewind even when the rebuilt
+        /// content ends up with the same cell count.
+        rebuilds: u64,
+    },
+    /// Composer: the draft itself plus the width it was wrapped against.
+    Composer {
+        /// Current draft text (`InputArea::text`).
+        text: String,
+        /// Terminal width the visual rows were computed against.
+        width: u16,
+    },
 }
 
 /// How a handled mouse event wants the next frame to happen.
@@ -150,13 +170,13 @@ pub struct App {
     pub chat: ChatView,
     pub input: InputArea,
     pub session_id: String,
-    /// In-app text selection over the chat band (drag select, copy on
-    /// release). Anchored in content coordinates — see
-    /// [`crate::ui::selection`].
+    /// In-app text selection — anchored in the *content* coordinates of the
+    /// region it started in (chat band or composer), see
+    /// [`crate::ui::selection`] and [`SelectionRegion`].
     selection: Selection,
-    /// Structure fingerprint captured when the drag started. Any change means
-    /// virtual rows may have shifted under the anchor, so the selection is
-    /// aborted; pure content appends (streaming) leave it untouched.
+    /// Structure / content fingerprint captured when the drag started. Any
+    /// change means the coordinates may have moved under the anchor, so the
+    /// selection is aborted; streamed chat text growth leaves it untouched.
     selection_guard: Option<SelectionGuard>,
     /// Absolute deadline of the next drag edge auto-scroll step.
     ///
@@ -572,10 +592,14 @@ impl App {
     /// reachable while the AskUserQuestion panel / model picker / command
     /// popup is open (plain Up/Down stay with the focused widget).
     ///
-    /// Left press / drag / release are claimed by whoever owns the position
-    /// they land on: the overlay scrollbar on its own track, the chat band
-    /// everywhere else (a drag selection; a press outside the band starts
-    /// nothing). Horizontal wheel (`ScrollLeft` / `ScrollRight`) is not a chat
+    /// Left press / drag / release are claimed in order of ownership: the
+    /// overlay scrollbar on its own track first — the bar overprints the chat
+    /// band's last column, so it has to win there — and otherwise whichever
+    /// region the press landed in (see [`App::mouse_press`]): the chat band
+    /// keeps its drag-to-copy contract, the composer adds click-to-place-
+    /// cursor. A press outside both regions (status bar, popups) is ignored,
+    /// exactly like `Moved` (hover, owned by the scrollbar) and horizontal
+    /// wheel. Horizontal wheel (`ScrollLeft` / `ScrollRight`) is not a chat
     /// gesture at all and stays ignored.
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> MouseOutcome {
         use crossterm::event::MouseButton;
@@ -594,14 +618,14 @@ impl App {
             // Hover belongs to the overlay scrollbar alone — it is the only
             // thing that reacts to motion today.
             MouseEventKind::Moved => self.hover_scrollbar(mouse.column, mouse.row),
-            MouseEventKind::Down(MouseButton::Left) => self.press_mouse(mouse.column, mouse.row),
+            MouseEventKind::Down(MouseButton::Left) => self.mouse_press(mouse.column, mouse.row),
             MouseEventKind::Drag(MouseButton::Left) => {
                 // An in-flight bar drag owns the motion; everything else is
-                // the selection's flood.
+                // the selection's flood — a drag, so coalesced by the gate.
                 if self.scrollbar.dragging {
                     return self.drag_scrollbar(mouse.row);
                 }
-                if self.selection_drag(mouse.column, mouse.row) {
+                if self.mouse_drag(mouse.column, mouse.row) {
                     MouseOutcome::Coalesced
                 } else {
                     MouseOutcome::Ignored
@@ -611,28 +635,9 @@ impl App {
                 if self.scrollbar.dragging {
                     return self.release_scrollbar(mouse.column, mouse.row);
                 }
-                self.selection_release(mouse.column, mouse.row)
+                self.mouse_release(mouse.column, mouse.row)
             }
             _ => MouseOutcome::Ignored,
-        }
-    }
-
-    /// Left press: the overlay scrollbar claims presses on its own track, the
-    /// chat band owns every other position (a press there starts a drag
-    /// selection).
-    ///
-    /// A press off the bar also drops whatever hover / drag look the bar kept
-    /// — the same cleanup a focus loss performs — so the outcome cannot be the
-    /// selection's alone: the repaint the bar asks for wins over the
-    /// selection's "nothing to see" verdict.
-    fn press_mouse(&mut self, column: u16, row: u16) -> MouseOutcome {
-        if let Some(geom) = self.scrollbar_at(column, row) {
-            return self.grab_scrollbar(&geom, row);
-        }
-        let bar_repaint = self.clear_scrollbar_interaction();
-        match self.selection_press(column, row) {
-            MouseOutcome::Ignored if bar_repaint => MouseOutcome::Immediate,
-            outcome => outcome,
         }
     }
 
@@ -705,11 +710,194 @@ impl App {
         MouseOutcome::Coalesced
     }
 
+    /// Left press: start a selection in the region the pointer landed in —
+    /// unless the overlay scrollbar claims it first.
+    ///
+    /// The bar overprints the chat band's last column, so a press there is the
+    /// bar's (it is also the only way to drag the bar). Everything else goes
+    /// to the regions: the composer is checked first — it is the only region
+    /// that reacts to a plain click (it places the cursor), and it is guarded
+    /// by the modal panels (see [`Self::composer_pointer_blocked`]) — and the
+    /// chat band owns the rest, ignoring presses outside its rect.
+    ///
+    /// A press off the bar also drops whatever hover / drag look the bar kept
+    /// — the same cleanup a focus loss performs — so the outcome cannot be the
+    /// region's alone: the repaint the bar asks for wins over the selection's
+    /// "nothing to see" verdict.
+    fn mouse_press(&mut self, column: u16, row: u16) -> MouseOutcome {
+        if let Some(geom) = self.scrollbar_at(column, row) {
+            return self.grab_scrollbar(&geom, row);
+        }
+        let bar_repaint = self.clear_scrollbar_interaction();
+        let outcome = if self.composer_contains(column, row) {
+            self.composer_press(column, row)
+        } else {
+            self.chat_selection_press(column, row)
+        };
+        match outcome {
+            MouseOutcome::Ignored if bar_repaint => MouseOutcome::Immediate,
+            outcome => outcome,
+        }
+    }
+
+    /// Drag: extend the selection in the region it started in.
+    ///
+    /// The pointer is mapped into *that* region's space (clamped to its band,
+    /// see the region handlers), so a drag that leaves the region keeps
+    /// producing meaningful coordinates instead of switching spaces.
+    fn mouse_drag(&mut self, column: u16, row: u16) -> bool {
+        match self.selection.region() {
+            Some(SelectionRegion::Composer) => self.composer_drag(column, row),
+            // `None` means no press is active (a stray drag), and the chat
+            // handler reports that the same way.
+            Some(SelectionRegion::Chat) | None => self.chat_selection_drag(column, row),
+        }
+    }
+
+    /// Release: finish the selection and copy whatever it covered.
+    ///
+    /// The fingerprint is re-checked here as well: a structural change can
+    /// land in the same loop iteration (the intent runs right after the draw),
+    /// so a release must never copy from content that no longer matches the
+    /// coordinates the anchor was taken in.
+    fn mouse_release(&mut self, column: u16, row: u16) -> MouseOutcome {
+        if !self.selection.is_press_active() {
+            return MouseOutcome::Ignored;
+        }
+        if self.selection_guard.as_ref() != Some(&self.selection_fingerprint()) {
+            self.cancel_selection();
+            return MouseOutcome::Immediate;
+        }
+        match self.selection.region() {
+            Some(SelectionRegion::Composer) => self.composer_release(column, row),
+            Some(SelectionRegion::Chat) => self.chat_selection_release(column, row),
+            None => MouseOutcome::Ignored,
+        }
+    }
+
+    /// Whether a screen position lies inside the composer's rect of the last
+    /// frame.
+    ///
+    /// Like `ChatView::contains_screen`, the rect comes from the last render —
+    /// mouse events arrive between frames, so hit testing has to describe the
+    /// screen the user is pointing at. The widget records it (`InputArea` owns
+    /// the geometry it drew into); a collapsed or not-yet-rendered rect
+    /// (`Rect::default()`) accepts nothing.
+    fn composer_contains(&self, column: u16, row: u16) -> bool {
+        let area = self.input.rendered_area();
+        area.width > 0
+            && area.height > 0
+            && column >= area.x
+            && column < area.right()
+            && row >= area.y
+            && row < area.bottom()
+    }
+
+    /// Whether a keyboard-owning modal currently owns the composer pointer
+    /// rules.
+    ///
+    /// The AskUserQuestion panel (and the legacy ask menu), the `/model` panel
+    /// and the command candidate popup own the keyboard while they are up:
+    /// their own inline editors are typing into the draft and their keys
+    /// rewrite it. Placing the cursor — or worse, copying a fragment — under
+    /// such a modal would race that flow, so composer pointer interaction is
+    /// ignored outright.
+    ///
+    /// A popup only counts when it really takes over, which is not the same as
+    /// `ActivePopup::is_active()`: a slash command that matches no candidate
+    /// (`/zzz`) or whose candidates have not arrived yet leaves an *armed but
+    /// invisible* popup (height 0 ⇒ it draws nothing, and plain keys already
+    /// fall through to the composer). Blocking on that would swallow clicks in
+    /// a completely idle-looking UI, so only a **visible** popup
+    /// (`height() > 0`) counts — plus the itemless must-select case, whose
+    /// Enter has to stay intercepted instead of reaching the composer.
+    ///
+    /// The chat band's drag selection and the wheel are **not** affected
+    /// (rolling history while a panel is open has to keep working).
+    fn composer_pointer_blocked(&self) -> bool {
+        !self.ask_panels.is_empty()
+            || self.ask_selections.front().is_some()
+            || self.model_panel.is_some()
+            || self.popup.active.height() > 0
+            || self.popup.active.is_must_select_empty()
+    }
+
+    /// Left press inside the composer: arm a drag selection.
+    ///
+    /// The cursor is **not** moved here: a press cannot know yet whether it
+    /// becomes a click (→ place the cursor) or a drag (→ select and copy) —
+    /// the reference behaviour, and the same reason the chat press only
+    /// records an anchor.
+    fn composer_press(&mut self, column: u16, row: u16) -> MouseOutcome {
+        if self.composer_pointer_blocked() {
+            return MouseOutcome::Ignored;
+        }
+        let Some(point) = pointer::point(&self.input, self.input.rendered_area(), column, row)
+        else {
+            return MouseOutcome::Ignored;
+        };
+        self.selection.begin(point);
+        // No `chat.unfollow()` here: the composer selection has nothing to do
+        // with the chat's follow contract, and no edge auto-scroll either — a
+        // composer press even disarms a stale chat deadline.
+        self.selection_guard = Some(self.selection_fingerprint());
+        self.selection_autoscroll_at = None;
+        MouseOutcome::Immediate
+    }
+
+    /// Drag inside the composer: extend the selection, including the character
+    /// under the pointer (the mirror of `ChatView::snap_focus_right`).
+    fn composer_drag(&mut self, column: u16, row: u16) -> bool {
+        if !self.selection.is_press_active() {
+            return false;
+        }
+        let Some(point) = pointer::focus(&self.input, self.input.rendered_area(), column, row)
+        else {
+            return false;
+        };
+        self.selection.drag_to(point);
+        true
+    }
+
+    /// Release inside the composer: place the cursor for a click, copy for a
+    /// drag.
+    ///
+    /// A click (press + release, no motion) never produced a selection
+    /// (`bounds_in` is `None` for zero width), so it falls through to the
+    /// cursor placement; a real drag copies the draft fragment it covered.
+    fn composer_release(&mut self, column: u16, row: u16) -> MouseOutcome {
+        let Some(hit) = pointer::hit(&self.input, self.input.rendered_area(), column, row) else {
+            self.cancel_selection();
+            return MouseOutcome::Immediate;
+        };
+        // The composer decides click vs. drag **positionally**: a motion event
+        // that stayed on the same cell (trackpad jitter inside one character)
+        // is still a click, and dragging away and back onto the anchor is a
+        // zero-width selection, not a one-character copy. The chat band also
+        // ORs in `is_dragged()` because its mapping can snap within a grapheme;
+        // here the character under the pointer is the only thing that matters.
+        let dragged = self.selection.anchor() != Some(hit.point);
+        if !dragged {
+            self.cancel_selection();
+            let area = self.input.rendered_area();
+            self.input
+                .set_cursor_from_visual(area.width, hit.vis_row, hit.display_col);
+            return MouseOutcome::Immediate;
+        }
+        self.selection_guard = None;
+        let bounds = self.selection.release(hit.focus());
+        let Some(text) = bounds.and_then(|bounds| pointer::selected_text(&self.input, bounds))
+        else {
+            return MouseOutcome::Immediate;
+        };
+        self.push_intent(AppIntent::CopyToClipboard(text));
+        MouseOutcome::Immediate    }
+
     /// Left press inside the chat band: start a drag selection.
     ///
     /// Returns `Ignored` (no redraw, no state) when the press is outside the
     /// chat band or before the first frame has established the geometry.
-    fn selection_press(&mut self, column: u16, row: u16) -> MouseOutcome {
+    fn chat_selection_press(&mut self, column: u16, row: u16) -> MouseOutcome {
         if !self.chat.contains_screen(column, row) {
             return MouseOutcome::Ignored;
         }
@@ -721,7 +909,7 @@ impl App {
         // viewport to the bottom edge and re-arms `auto_scroll` whenever the
         // offset sits there, so streaming content would otherwise yank the view
         // (and the highlighted rows) away. Released again by
-        // `selection_release` → `scroll_down(0, …)`.
+        // `chat_selection_release` → `scroll_down(0, …)`.
         self.chat.unfollow();
         self.selection_guard = Some(self.selection_fingerprint());
         self.selection_autoscroll_at = None;
@@ -734,7 +922,7 @@ impl App {
     /// keeps producing content coordinates — that is what makes the pointer
     /// resting on the top / bottom row scroll the view and extend the
     /// selection.
-    fn selection_drag(&mut self, column: u16, row: u16) -> bool {
+    fn chat_selection_drag(&mut self, column: u16, row: u16) -> bool {
         if !self.selection.is_press_active() {
             return false;
         }
@@ -770,18 +958,7 @@ impl App {
     /// after this call), the follow contract is restored from the current
     /// scroll position, and a non-empty selection is pushed as a clipboard
     /// intent. A zero-width selection (plain click) copies nothing.
-    fn selection_release(&mut self, column: u16, row: u16) -> MouseOutcome {
-        if !self.selection.is_press_active() {
-            return MouseOutcome::Ignored;
-        }
-        // Structural changes are normally caught by the next draw, but a
-        // rebuild can land in the same loop iteration (the intent runs right
-        // after the draw) — re-check here so the copy never comes from content
-        // that no longer exists on screen.
-        if self.selection_guard != Some(self.selection_fingerprint()) {
-            self.cancel_selection();
-            return MouseOutcome::Immediate;
-        }
+    fn chat_selection_release(&mut self, column: u16, row: u16) -> MouseOutcome {
         self.selection_guard = None;
         self.selection_autoscroll_at = None;
         // Re-arm the follow state iff the viewport is still at the bottom edge
@@ -818,25 +995,36 @@ impl App {
     ///
     /// Used when a drag can no longer be trusted: the release will never
     /// arrive (focus loss) or the content moved under the anchor (structural
-    /// change). Lifting the freeze is part of the contract — otherwise the
-    /// view would stay in reading mode forever.
+    /// change). Lifting the freeze is part of the chat contract — otherwise the
+    /// view would stay in reading mode forever — while a composer selection has
+    /// no follow state to restore.
     fn cancel_selection(&mut self) {
         if !self.selection.is_press_active() {
             return;
         }
+        let region = self.selection.region();
         self.selection.cancel();
         self.selection_guard = None;
         self.selection_autoscroll_at = None;
-        self.chat.scroll_down(0, self.visible_height);
+        if region == Some(SelectionRegion::Chat) {
+            self.chat.scroll_down(0, self.visible_height);
+        }
     }
 
-    /// Structural fingerprint of the chat content, see [`SelectionGuard`].
+    /// Fingerprint of the region the current selection is anchored in, see
+    /// [`SelectionGuard`].
     fn selection_fingerprint(&self) -> SelectionGuard {
-        SelectionGuard {
-            cells: self.chat.len(),
-            pending: self.chat.pending_len(),
-            width: self.terminal_width,
-            rebuilds: self.chat.structure_epoch(),
+        match self.selection.region() {
+            Some(SelectionRegion::Composer) => SelectionGuard::Composer {
+                text: self.input.text(),
+                width: self.terminal_width,
+            },
+            _ => SelectionGuard::Chat {
+                cells: self.chat.len(),
+                pending: self.chat.pending_len(),
+                width: self.terminal_width,
+                rebuilds: self.chat.structure_epoch(),
+            },
         }
     }
 
@@ -847,13 +1035,13 @@ impl App {
     /// while it exists that column is neither readable nor selectable — letting
     /// a drag end on it would put a `│` in the copied text and invert the bar.
     /// Without the bar (content fits) the whole band is selectable as usual.
-    fn selectable_point_at(&self, column: u16, row: u16) -> Option<ContentPoint> {
+    fn selectable_point_at(&self, column: u16, row: u16) -> Option<SelectionPoint> {
         Some(self.off_the_bar(self.chat.content_point_at(column, row)?))
     }
 
     /// Clamp a content point off the overlay bar's column, if the bar is drawn
     /// this frame. See [`Self::selectable_point_at`].
-    fn off_the_bar(&self, point: ContentPoint) -> ContentPoint {
+    fn off_the_bar(&self, point: SelectionPoint) -> SelectionPoint {
         let Some(geom) = self.scrollbar_geometry() else {
             return point;
         };
@@ -862,7 +1050,7 @@ impl App {
         if point.col < bar_col {
             return point;
         }
-        ContentPoint {
+        SelectionPoint {
             col: bar_col.saturating_sub(1),
             ..point
         }
@@ -900,13 +1088,11 @@ impl App {
         // would be stale by exactly one step.)
         if let Some(focus) = self.selection.focus() {
             let vrow = focus
-                .vrow
+                .row
                 .saturating_add_signed(direction as isize)
                 .min(self.chat.content_height().saturating_sub(1));
-            self.selection.drag_to(ContentPoint {
-                vrow,
-                col: focus.col,
-            });
+            self.selection
+                .drag_to(SelectionPoint::chat(vrow, focus.col));
         }
         self.selection_autoscroll_at = Some(std::time::Instant::now() + SELECTION_AUTOSCROLL_DELAY);
         true
@@ -2730,13 +2916,14 @@ impl App {
             self.terminal_width = area.width;
 
             // A selection is anchored to *content* coordinates, which only
-            // survive while the content structure is stable. Adding / removing
-            // / promoting cells or changing the width shifts the virtual rows
-            // under the anchor — abort instead of pointing the highlight at
-            // different text. Streamed text growth does not (it never moves an
-            // existing row), so it keeps the selection alive.
+            // survive while the content is stable: adding / removing /
+            // promoting cells or changing the width shifts the virtual rows
+            // under a chat anchor, editing the draft moves the text under a
+            // composer anchor. Abort instead of pointing the highlight at
+            // different text. Streamed chat text growth does not (it never
+            // moves an existing row), so it keeps the selection alive.
             if self.selection.is_press_active()
-                && self.selection_guard != Some(self.selection_fingerprint())
+                && self.selection_guard.as_ref() != Some(&self.selection_fingerprint())
             {
                 self.cancel_selection();
             }
@@ -2824,7 +3011,10 @@ impl App {
             );
             idx += 1;
 
-            // Input area — always visible; record its rect for cursor placement.
+            // Input area — always visible; the widget records the rect it drew
+            // into (for cursor placement and for the composer's pointer mapping:
+            // mouse events arrive between frames, so hit testing works off the
+            // last frame's rect — same contract as the chat band's geometry).
             let input_rect = chunks[idx];
             frame.render_widget(InputAreaWidget::new(&mut self.input, &palette), input_rect);
             idx += 1;
@@ -2857,18 +3047,33 @@ impl App {
             }
 
             // In-app text selection — painted after the toast (the selection
-            // sits above every overlay) and clipped to *this* frame's chat
-            // band. It is a pure `Buffer` patch: merging `REVERSED` into the
-            // cell styles the widgets just produced, so no cell / widget code
-            // has to know about selections and the background colors survive.
+            // sits above every overlay) and clipped to *this* frame's rect of
+            // the region that owns it. It is a pure `Buffer` patch: merging
+            // `REVERSED` into the cell styles the widgets just produced, so no
+            // cell / widget code has to know about selections and the
+            // background colors survive.
             //
-            // The same pass snapshots the visible rows: the release event
+            // The chat pass also snapshots the visible rows: the release event
             // lands between frames, so the copy must come from the frame the
-            // user was actually looking at.
+            // user was actually looking at. The composer needs no snapshot —
+            // its wrapping is ours, so the copy comes from the draft itself.
             if self.selection.is_press_active() {
-                self.chat
-                    .paint_selection(frame.buffer_mut(), &self.selection);
-                self.chat.capture_visible_rows(frame.buffer_mut());
+                match self.selection.region() {
+                    Some(SelectionRegion::Chat) => {
+                        self.chat
+                            .paint_selection(frame.buffer_mut(), &self.selection);
+                        self.chat.capture_visible_rows(frame.buffer_mut());
+                    }
+                    Some(SelectionRegion::Composer) => {
+                        pointer::paint_selection(
+                            frame.buffer_mut(),
+                            &self.input,
+                            input_rect,
+                            &self.selection,
+                        );
+                    }
+                    None => {}
+                }
             }
         })?;
 
@@ -3202,6 +3407,7 @@ mod tests {
     use super::*;
     use crate::app::selection_panel::SelectionPanel;
     use crate::config::AppConfig;
+    use crate::ui::input_area::helpers::PREFIX_WIDTH;
     use crate::ui::popup::command::SessionCandidate;
 
     /// Create a minimal App for command dispatch testing.
@@ -5387,32 +5593,705 @@ mod tests {
     }
 
     #[test]
-    fn test_press_outside_the_chat_band_never_starts_a_selection() {
+    fn test_press_outside_the_interactive_regions_never_starts_a_selection() {
         let mut app = app_with_message();
         let mut terminal = test_terminal(40, 12);
         draw(&mut app, &mut terminal);
         let band = app.chat.geometry().area;
 
-        // Status bar (row 0), composer (last row): both outside the band.
-        for at in [(band.x + 2, 0), (band.x + 2, 11), (0, band.y + 1)] {
-            if app.chat.contains_screen(at.0, at.1) {
-                continue;
-            }
+        // The status bar belongs to neither region: the press is ignored, no
+        // selection starts, and the following drag / release stay inert.
+        let status = (band.x + 2, 0);
+        assert!(!app.chat.contains_screen(status.0, status.1));
+        assert!(!app.composer_contains(status.0, status.1));
+        assert_eq!(
+            app.handle_mouse(press(status)),
+            MouseOutcome::Ignored,
+            "press at {status:?} is ignored"
+        );
+        assert!(!app.selection.is_press_active());
+        assert_eq!(
+            app.handle_mouse(drag((band.x + 5, band.y + 1))),
+            MouseOutcome::Ignored
+        );
+        assert_eq!(
+            app.handle_mouse(release((band.x + 5, band.y + 1))),
+            MouseOutcome::Ignored
+        );
+        assert!(app.drain_intents().is_empty());
+    }
+
+    #[test]
+    fn test_press_in_the_composer_starts_a_composer_selection() {
+        let mut app = app_with_message();
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let composer = app.input.rendered_area();
+        let at = (composer.x + 4, composer.y);
+        assert!(app.composer_contains(at.0, at.1));
+        assert!(
+            !app.chat.contains_screen(at.0, at.1),
+            "the composer sits below the chat band"
+        );
+
+        assert_eq!(app.handle_mouse(press(at)), MouseOutcome::Immediate);
+        assert_eq!(
+            app.selection.region(),
+            Some(SelectionRegion::Composer),
+            "the press decides the region"
+        );
+        assert!(
+            app.chat.is_at_bottom(),
+            "a composer press must not freeze the chat's follow state"
+        );
+        assert!(
+            app.selection_autoscroll_at.is_none(),
+            "the composer has no edge auto-scroll"
+        );
+    }
+
+    // ── Composer pointer: drag select, click to place the cursor ──────
+
+    /// App with a draft in the composer, no chat header: the composer's row 0
+    /// renders `> ` at the composer's left edge and the draft right after it.
+    fn app_with_draft(draft: &str) -> App {
+        let mut app = test_app();
+        app.chat.set_header(Vec::new());
+        app.input.set_text(draft);
+        app
+    }
+
+    #[test]
+    fn test_composer_drag_selects_and_copies_the_draft() {
+        let mut app = app_with_draft("hello world");
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let composer = app.input.rendered_area();
+        assert_eq!(app.input.line_count(), 1);
+
+        assert_eq!(
+            app.handle_mouse(press((composer.x + PREFIX_WIDTH, composer.y))),
+            MouseOutcome::Immediate,
+            "a press inside the composer starts a selection"
+        );
+        assert_eq!(
+            app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 4, composer.y))),
+            MouseOutcome::Coalesced,
+            "a drag is a flood: coalesced by the frame gate"
+        );
+        draw(&mut app, &mut terminal);
+
+        // The drag frame highlights "hello" — five cells right after the
+        // prefix, and nothing outside the composer (the `> ` prompt included).
+        let reversed = reversed_cells(&terminal);
+        assert_eq!(
+            reversed,
+            (0..5)
+                .map(|dx| (composer.x + PREFIX_WIDTH + dx, composer.y))
+                .collect::<Vec<_>>()
+        );
+
+        assert_eq!(
+            app.handle_mouse(release((composer.x + PREFIX_WIDTH + 4, composer.y))),
+            MouseOutcome::Immediate
+        );
+        match app.drain_intents().as_slice() {
+            [AppIntent::CopyToClipboard(text)] => assert_eq!(text, "hello"),
+            other => panic!("expected exactly one clipboard intent, got {other:?}"),
+        }
+        draw(&mut app, &mut terminal);
+        assert!(
+            reversed_cells(&terminal).is_empty(),
+            "the release must leave no highlight behind"
+        );
+        assert!(
+            app.chat.is_at_bottom(),
+            "the composer selection never freezes the chat's follow state"
+        );
+    }
+
+    #[test]
+    fn test_composer_drag_across_a_soft_wrap_copies_one_line() {
+        // Width 20 → a text area of 18 columns: 24 characters fold into two
+        // visual rows (18 + 6).
+        let mut app = app_with_draft("abcdefghijklmnopqrstuvwx");
+        let mut terminal = test_terminal(20, 12);
+        draw(&mut app, &mut terminal);
+        let composer = app.input.rendered_area();
+        assert_eq!(composer.height, 2, "the draft wraps into two visual rows");
+
+        let from = (composer.x + PREFIX_WIDTH + 2, composer.y);
+        let to = (composer.x + PREFIX_WIDTH + 3, composer.y + 1);
+        app.handle_mouse(press(from));
+        app.handle_mouse(drag(to));
+        draw(&mut app, &mut terminal);
+
+        // The highlight covers the first row from column 2 and the second row
+        // up to column 4.
+        let reversed = reversed_cells(&terminal);
+        assert_eq!(
+            reversed,
+            (2..18)
+                .map(|col| (composer.x + PREFIX_WIDTH + col, composer.y))
+                .chain((0..4).map(|col| (composer.x + PREFIX_WIDTH + col, composer.y + 1)))
+                .collect::<Vec<_>>()
+        );
+
+        app.handle_mouse(release(to));
+        match app.drain_intents().as_slice() {
+            [AppIntent::CopyToClipboard(text)] => assert_eq!(
+                text, "cdefghijklmnopqrstuv",
+                "a soft wrap is a display fold, not a newline in the draft"
+            ),
+            other => panic!("expected exactly one clipboard intent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_composer_drag_beyond_the_region_clamps_to_the_visible_window() {
+        // Width 20 → a text area of 18 columns: 24 characters fold into two
+        // visual rows (18 + 6).
+        let mut app = app_with_draft("abcdefghijklmnopqrstuvwx");
+        let mut terminal = test_terminal(20, 12);
+        draw(&mut app, &mut terminal);
+        let composer = app.input.rendered_area();
+        assert_eq!(composer.height, 2);
+
+        // Press on the second row, drag up into the chat band: the pointer
+        // stays mapped into the press's region and clamps to its first visible
+        // row, so the selection grows to the top of the window.
+        app.handle_mouse(press((composer.x + PREFIX_WIDTH + 3, composer.y + 1)));
+        assert!(app.mouse_drag(composer.x + PREFIX_WIDTH + 1, composer.y - 8));
+        assert_eq!(app.selection.region(), Some(SelectionRegion::Composer));
+        app.handle_mouse(release((composer.x + PREFIX_WIDTH + 1, composer.y - 8)));
+        match app.drain_intents().as_slice() {
+            [AppIntent::CopyToClipboard(text)] => assert_eq!(text, "cdefghijklmnopqrstu"),
+            other => panic!("expected the clamped draft fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_composer_click_places_the_cursor() {
+        let mut app = app_with_draft("hello world");
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let composer = app.input.rendered_area();
+        // `set_text` leaves the cursor at the end, so the click is a visible move.
+        assert_eq!((app.input.cursor_row, app.input.cursor_col), (0, 11));
+
+        let at = (composer.x + PREFIX_WIDTH + 6, composer.y);
+        assert_eq!(app.handle_mouse(press(at)), MouseOutcome::Immediate);
+        assert_eq!(
+            app.handle_mouse(release(at)),
+            MouseOutcome::Immediate,
+            "a press + release without motion is a click"
+        );
+        assert_eq!(
+            (app.input.cursor_row, app.input.cursor_col),
+            (0, 6),
+            "the click places the cursor before the character under it"
+        );
+        assert!(!app.selection.is_press_active());
+        assert!(
+            app.drain_intents().is_empty(),
+            "a click selects nothing and copies nothing"
+        );
+        // The rendered cursor sits exactly where the pointer was.
+        let (cursor_x, cursor_y) = cursor_screen_pos(&app.input, &composer);
+        assert_eq!((cursor_x, cursor_y), at, "the cursor follows the click");
+        draw(&mut app, &mut terminal);
+        assert!(reversed_cells(&terminal).is_empty());
+    }
+
+    #[test]
+    fn test_composer_click_on_a_wide_character_places_the_cursor_before_it() {
+        let mut app = app_with_draft("你好世界");
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let composer = app.input.rendered_area();
+        // "世" occupies the fifth and sixth cell of the text area; either cell
+        // resolves to the position before it (a char index has no half-cell
+        // precision).
+        for column in [4usize, 5] {
+            let at = (composer.x + PREFIX_WIDTH + column as u16, composer.y);
+            app.handle_mouse(press(at));
+            app.handle_mouse(release(at));
+            assert_eq!(
+                (app.input.cursor_row, app.input.cursor_col),
+                (0, 2),
+                "click on cell {column} of 世"
+            );
+            // A char index has no half-cell precision: the right half of a wide
+            // character resolves to its left edge, which is the documented ±1.
+            let (cursor_x, _) = cursor_screen_pos(&app.input, &composer);
+            let delta = (cursor_x as i32 - at.0 as i32).abs();
+            assert!(delta <= 1, "cursor x {cursor_x} vs. click column {}", at.0);
+        }
+        assert!(app.drain_intents().is_empty());
+    }
+
+    #[test]
+    fn test_composer_click_on_a_scrolled_window_places_the_cursor() {
+        // Width 20 → text width 18, max input lines 10 but only 3 fit in the
+        // test layout: the window follows the cursor.
+        let mut app = test_app();
+        app.chat.set_header(Vec::new());
+        let draft = (0..8)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.input.set_text(&draft);
+        let mut terminal = test_terminal(20, 12);
+        draw(&mut app, &mut terminal);
+        let composer = app.input.rendered_area();
+        assert!(
+            app.input.vertical_scroll > 0,
+            "the window scrolled to keep the cursor visible"
+        );
+
+        let window_row = composer.height - 1;
+        let at = (composer.x + PREFIX_WIDTH + 2, composer.y + window_row);
+        app.handle_mouse(press(at));
+        app.handle_mouse(release(at));
+
+        let expected_line = app.input.vertical_scroll + window_row as usize;
+        assert_eq!(app.input.cursor_row, expected_line);
+        assert_eq!(app.input.cursor_col, 2);
+    }
+
+    #[test]
+    fn test_composer_pointer_is_ignored_while_a_modal_owns_the_keyboard() {
+        /// One keyboard-owning modal: a label plus the state that arms it.
+        type Case = (&'static str, Box<dyn Fn(&mut App)>);
+
+        let cases: Vec<Case> = vec![
+            (
+                "ask panel",
+                Box::new(|app: &mut App| {
+                    app.ask_panels.push_back(ask_panel::AskPanel::new(
+                        "ask-1".into(),
+                        vec![AskQuestion {
+                            id: "q1".into(),
+                            header: "H".into(),
+                            question: "which?".into(),
+                            multi_select: false,
+                            options: vec![],
+                            choices: vec![],
+                        }],
+                    ));
+                }),
+            ),
+            (
+                "legacy ask menu",
+                Box::new(|app: &mut App| {
+                    app.ask_selections
+                        .push_back(crate::ui::ask_select::AskSelection::new(
+                            "ask-legacy".into(),
+                            vec!["one".into(), "two".into()],
+                        ));
+                }),
+            ),
+            (
+                "model panel",
+                Box::new(|app: &mut App| {
+                    app.model_sources = vec![model_group("p", &["m1", "m2"])];
+                    app.try_frontend_command("/model");
+                }),
+            ),
+            (
+                "command popup",
+                Box::new(|app: &mut App| {
+                    // The popup is armed by a slash draft (`update_popup` is
+                    // what the key path runs), so this case keeps that draft.
+                    app.input.set_text("/");
+                    app.update_popup();
+                }),
+            ),
+        ];
+
+        for (label, arm) in cases {
+            let mut app = app_with_draft("hello world");
+            let mut terminal = test_terminal(40, 12);
+            draw(&mut app, &mut terminal);
+            arm(&mut app);
+            app.drain_intents();
+            draw(&mut app, &mut terminal);
+            let composer = app.input.rendered_area();
+            assert!(app.composer_contains(composer.x + PREFIX_WIDTH, composer.y));
+
+            let at = (composer.x + PREFIX_WIDTH + 4, composer.y);
+            let cursor_before = (app.input.cursor_row, app.input.cursor_col);
             assert_eq!(
                 app.handle_mouse(press(at)),
                 MouseOutcome::Ignored,
-                "press at {at:?} is ignored"
+                "{label}: the press is ignored"
             );
-            assert!(!app.selection.is_press_active());
+            assert!(
+                !app.selection.is_press_active(),
+                "{label}: no selection starts"
+            );
             assert_eq!(
-                app.handle_mouse(drag((band.x + 5, band.y + 1))),
-                MouseOutcome::Ignored
+                app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 8, composer.y))),
+                MouseOutcome::Ignored,
+                "{label}: the drag is ignored"
             );
             assert_eq!(
-                app.handle_mouse(release((band.x + 5, band.y + 1))),
-                MouseOutcome::Ignored
+                app.handle_mouse(release((composer.x + PREFIX_WIDTH + 8, composer.y))),
+                MouseOutcome::Ignored,
+                "{label}: the release is ignored"
             );
-            assert!(app.drain_intents().is_empty());
+            assert_eq!(
+                (app.input.cursor_row, app.input.cursor_col),
+                cursor_before,
+                "{label}: the cursor stays put"
+            );
+            assert!(app.drain_intents().is_empty(), "{label}: nothing is copied");
+
+            // The chat band keeps its own contract while a panel is open.
+            let band = app.chat.geometry().area;
+            assert_eq!(
+                app.handle_mouse(press((band.x + 2, band.y + 1))),
+                MouseOutcome::Immediate,
+                "{label}: chat drags still work"
+            );
+            assert_eq!(app.selection.region(), Some(SelectionRegion::Chat));
+            app.handle_mouse(release((band.x + 2, band.y + 1)));
+            app.drain_intents();
+        }
+    }
+
+    #[test]
+    fn test_composer_empty_draft_drag_copies_nothing() {
+        // Only the placeholder is on screen: it is not draft content, so a drag
+        // over it selects nothing and copies nothing.
+        let mut app = app_with_draft("");
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let composer = app.input.rendered_area();
+
+        app.handle_mouse(press((composer.x + PREFIX_WIDTH, composer.y)));
+        app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 6, composer.y)));
+        draw(&mut app, &mut terminal);
+        assert!(
+            reversed_cells(&terminal).is_empty(),
+            "the placeholder must not be highlighted"
+        );
+        app.handle_mouse(release((composer.x + PREFIX_WIDTH + 6, composer.y)));
+        assert!(
+            app.drain_intents().is_empty(),
+            "the placeholder must not be copied"
+        );
+    }
+
+    #[test]
+    fn test_composer_drag_over_line_breaks_copies_nothing() {
+        // Dragging from the end of the first line to the start of the empty
+        // second one covers nothing but the line break: no bare `\n` may be
+        // copied and no `Copied!` may be claimed.
+        let mut app = app_with_draft("ab\n");
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let composer = app.input.rendered_area();
+        assert_eq!(
+            composer.height, 2,
+            "the empty second line is a row of its own"
+        );
+
+        let from = (composer.x + PREFIX_WIDTH + 2, composer.y);
+        let to = (composer.x + PREFIX_WIDTH, composer.y + 1);
+        app.handle_mouse(press(from));
+        app.handle_mouse(drag(to));
+        draw(&mut app, &mut terminal);
+        assert!(
+            reversed_cells(&terminal).is_empty(),
+            "a line-break-only span has no cells to highlight"
+        );
+        app.handle_mouse(release(to));
+        assert!(
+            app.drain_intents().is_empty(),
+            "a line-break-only selection copies nothing"
+        );
+    }
+
+    #[test]
+    fn test_composer_same_cell_jitter_is_still_a_click() {
+        let mut app = app_with_draft("hello world");
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let composer = app.input.rendered_area();
+        let at = (composer.x + PREFIX_WIDTH + 6, composer.y);
+        assert_eq!((app.input.cursor_row, app.input.cursor_col), (0, 11));
+
+        // Trackpads report motion inside the same cell: click vs. drag is
+        // decided by position, so a jitter must not become a one-character copy.
+        app.handle_mouse(press(at));
+        assert!(app.mouse_drag(at.0, at.1), "the motion event is tracked");
+        assert_eq!(app.handle_mouse(release(at)), MouseOutcome::Immediate);
+        assert_eq!(
+            (app.input.cursor_row, app.input.cursor_col),
+            (0, 6),
+            "the jitter is a click: the cursor moves"
+        );
+        assert!(app.drain_intents().is_empty(), "the jitter copies nothing");
+
+        // Dragging away and back onto the anchor is a zero-width selection too:
+        // no copy, and the cursor lands on the release point.
+        let mut app = app_with_draft("hello world");
+        draw(&mut app, &mut terminal);
+        app.handle_mouse(press(at));
+        app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 3, composer.y)));
+        app.handle_mouse(drag(at));
+        assert_eq!(app.handle_mouse(release(at)), MouseOutcome::Immediate);
+        assert_eq!((app.input.cursor_row, app.input.cursor_col), (0, 6));
+        assert!(app.drain_intents().is_empty());
+    }
+
+    #[test]
+    fn test_composer_pointer_works_while_an_invisible_popup_is_armed() {
+        // `/zzz` matches no command: the popup stays armed but draws nothing
+        // (height 0) and no longer consumes keys — so it must not block the
+        // composer either, or clicks would die in an idle-looking UI.
+        let mut app = test_app();
+        app.chat.set_header(Vec::new());
+        app.input.set_text("/zzz");
+        app.update_popup();
+        assert!(app.popup.active.is_active(), "the popup is still armed");
+        assert_eq!(app.popup.active.height(), 0, "but it draws nothing");
+        assert!(!app.popup.active.is_must_select_empty());
+
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let composer = app.input.rendered_area();
+        let at = (composer.x + PREFIX_WIDTH + 2, composer.y);
+        assert_eq!(
+            app.handle_mouse(press(at)),
+            MouseOutcome::Immediate,
+            "an invisible popup does not own the composer"
+        );
+        assert_eq!(app.handle_mouse(release(at)), MouseOutcome::Immediate);
+        assert_eq!(
+            (app.input.cursor_row, app.input.cursor_col),
+            (0, 2),
+            "the click placed the cursor"
+        );
+        assert!(app.drain_intents().is_empty());
+    }
+
+    #[test]
+    fn test_composer_pointer_stays_blocked_by_an_itemless_must_select_popup() {
+        // `/session zzz` filters every candidate away, but the popup stays up
+        // (invisible) to intercept Enter: its Enter must not reach the draft,
+        // so the composer pointer stays off-limits as well.
+        let mut app = app_with_draft("/session zzz");
+        app.popup.cache.sessions = vec![SessionCandidate {
+            id: "s1".into(),
+            title: "Test".into(),
+            workspace: "/tmp".into(),
+            status: "idle".into(),
+            last_interaction: "2025-01-01T00:00:00Z".into(),
+        }];
+        app.update_popup();
+        assert_eq!(app.popup.active.height(), 0, "no candidate is visible");
+        assert!(
+            app.popup.active.is_must_select_empty(),
+            "but Enter has to stay intercepted"
+        );
+
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let composer = app.input.rendered_area();
+        let cursor_before = (app.input.cursor_row, app.input.cursor_col);
+        let at = (composer.x + PREFIX_WIDTH + 3, composer.y);
+        assert_eq!(app.handle_mouse(press(at)), MouseOutcome::Ignored);
+        assert_eq!(
+            app.handle_mouse(release(at)),
+            MouseOutcome::Ignored,
+            "the release is a no-op as well"
+        );
+        assert_eq!((app.input.cursor_row, app.input.cursor_col), cursor_before);
+        assert!(app.drain_intents().is_empty());
+    }
+
+    #[test]
+    fn test_wheel_scrolls_the_chat_during_a_composer_selection() {
+        let mut app = app_with_draft("hello world");
+        let text = (0..30)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.chat.push(ChatCell::UserMessage(text));
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let composer = app.input.rendered_area();
+
+        app.handle_mouse(press((composer.x + PREFIX_WIDTH, composer.y)));
+        app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 4, composer.y)));
+        let before = app.chat.scroll_position();
+        assert!(before >= WHEEL_SCROLL_LINES, "the view has room to scroll");
+
+        // The wheel is an independent channel: it scrolls the chat and leaves
+        // the composer selection (and its anchors) alone.
+        assert_eq!(app.handle_mouse(wheel_up()), MouseOutcome::Immediate);
+        assert_eq!(app.chat.scroll_position(), before - WHEEL_SCROLL_LINES);
+        assert!(app.selection.is_press_active());
+        assert_eq!(app.selection.region(), Some(SelectionRegion::Composer));
+
+        app.handle_mouse(release((composer.x + PREFIX_WIDTH + 4, composer.y)));
+        match app.drain_intents().as_slice() {
+            [AppIntent::CopyToClipboard(text)] => assert_eq!(text, "hello"),
+            other => panic!("expected the draft fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_composer_edit_aborts_the_selection() {
+        /// One abort rule: a label plus the mutation that changes the draft.
+        type Case = (&'static str, Box<dyn Fn(&mut App)>);
+
+        let cases: Vec<Case> = vec![
+            (
+                "typing",
+                Box::new(|app: &mut App| {
+                    app.handle_key(key(crossterm::event::KeyCode::Char('x')));
+                }),
+            ),
+            (
+                "paste",
+                Box::new(|app: &mut App| {
+                    app.handle_paste("pasted");
+                }),
+            ),
+            (
+                "submit",
+                Box::new(|app: &mut App| {
+                    app.handle_key(key(crossterm::event::KeyCode::Enter));
+                }),
+            ),
+            (
+                "backspace",
+                Box::new(|app: &mut App| {
+                    app.handle_key(key(crossterm::event::KeyCode::Backspace));
+                }),
+            ),
+            (
+                "draft reset",
+                Box::new(|app: &mut App| {
+                    // Session switch / `/new` restores an empty draft — the
+                    // highlight must not survive into unrelated text.
+                    app.input.clear();
+                }),
+            ),
+            (
+                "width",
+                Box::new(|app: &mut App| {
+                    // Handled by drawing into a differently sized terminal.
+                    let _ = app;
+                }),
+            ),
+        ];
+
+        for (label, mutate) in cases {
+            let mut app = app_with_draft("hello world");
+            let mut terminal = test_terminal(40, 12);
+            draw(&mut app, &mut terminal);
+            let composer = app.input.rendered_area();
+            app.handle_mouse(press((composer.x + PREFIX_WIDTH, composer.y)));
+            app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 4, composer.y)));
+            assert!(app.selection.is_press_active(), "{label}: drag in flight");
+            app.drain_intents();
+
+            if label == "width" {
+                let mut wider = test_terminal(60, 12);
+                draw(&mut app, &mut wider);
+                assert!(
+                    reversed_cells(&wider).is_empty(),
+                    "{label}: the aborted frame must not paint a highlight"
+                );
+                draw(&mut app, &mut terminal);
+            } else {
+                mutate(&mut app);
+                draw(&mut app, &mut terminal);
+            }
+
+            assert!(
+                !app.selection.is_press_active(),
+                "{label}: the selection must be aborted"
+            );
+            assert!(
+                reversed_cells(&terminal).is_empty(),
+                "{label}: the highlight must be cleared"
+            );
+            assert_eq!(
+                app.handle_mouse(release((composer.x + PREFIX_WIDTH + 4, composer.y))),
+                MouseOutcome::Ignored,
+                "{label}: a release after the abort is a no-op"
+            );
+            assert!(
+                !app.drain_intents()
+                    .iter()
+                    .any(|intent| matches!(intent, AppIntent::CopyToClipboard(_))),
+                "{label}: nothing may be copied"
+            );
+        }
+    }
+
+    #[test]
+    fn test_composer_selection_survives_chat_structure_changes() {
+        let mut app = app_with_draft("hello world");
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let composer = app.input.rendered_area();
+
+        app.handle_mouse(press((composer.x + PREFIX_WIDTH, composer.y)));
+        app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 4, composer.y)));
+        // Streaming output, a queued message and a full rebuild: none of it
+        // moves the draft's logical coordinates.
+        app.chat
+            .push(ChatCell::AssistantMessage("streaming".into()));
+        app.chat.push_pending("req-1".into(), "queued".into());
+        app.chat.clear();
+        app.chat.push(ChatCell::UserMessage("rebuilt".into()));
+        draw(&mut app, &mut terminal);
+
+        assert!(
+            app.selection.is_press_active(),
+            "the composer selection is not affected by the chat's structure"
+        );
+        app.handle_mouse(release((composer.x + PREFIX_WIDTH + 4, composer.y)));
+        match app.drain_intents().as_slice() {
+            [AppIntent::CopyToClipboard(text)] => assert_eq!(text, "hello"),
+            other => panic!("expected the draft fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_composer_navigation_keys_keep_the_selection() {
+        let mut app = app_with_draft("hello world");
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        let composer = app.input.rendered_area();
+
+        app.handle_mouse(press((composer.x + PREFIX_WIDTH, composer.y)));
+        app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 4, composer.y)));
+        draw(&mut app, &mut terminal);
+
+        // Moving the cursor is not editing the draft: the selection stays.
+        app.handle_key(key(crossterm::event::KeyCode::Left));
+        app.handle_key(key(crossterm::event::KeyCode::Home));
+        draw(&mut app, &mut terminal);
+        assert!(
+            app.selection.is_press_active(),
+            "navigation keys must not abort the selection"
+        );
+        assert!(
+            !reversed_cells(&terminal).is_empty(),
+            "the highlight is still painted"
+        );
+
+        app.handle_mouse(release((composer.x + PREFIX_WIDTH + 4, composer.y)));
+        match app.drain_intents().as_slice() {
+            [AppIntent::CopyToClipboard(text)] => assert_eq!(text, "hello"),
+            other => panic!("expected the draft fragment, got {other:?}"),
         }
     }
 
@@ -5748,17 +6627,17 @@ mod tests {
         app.handle_mouse(press((band.x + 2, band.y + 4)));
         app.handle_mouse(drag((band.x + 2, band.bottom() - 1)));
         let before = app.selection.bounds().expect("a drag produced bounds");
-        let (anchor_row, focus_before) = (before.0.vrow, before.1.vrow);
+        let (anchor_row, focus_before) = (before.0.row, before.1.row);
 
         assert!(app.tick_selection_autoscroll());
         let after = app.selection.bounds().expect("still selected");
-        let focus_after = after.1.vrow;
+        let focus_after = after.1.row;
         assert!(
             focus_after > focus_before,
             "the focus follows the rows scrolling by: {focus_before} -> {focus_after}"
         );
         assert_eq!(
-            after.0.vrow, anchor_row,
+            after.0.row, anchor_row,
             "the anchor is content-anchored and does not move"
         );
 

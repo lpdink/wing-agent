@@ -74,12 +74,42 @@
 
 **冻结跟随**：按下时 `ChatView::unfollow()` 置 `follow_frozen`（除了清 `auto_scroll`，还**必须**让渲染层不再「偏移在底边就重新武装」——否则按下后必然会画的那一帧就把冻结撤销了，这正是「在最新输出上拖选」的常见场景）。只有滚动入口（`scroll_up` / `scroll_down` / `jump_*`）能解除冻结；松手时 `scroll_down(0, visible_height)` 按「是否仍在底边」恢复，`tick_selection_autoscroll` 每步之后重新 `unfollow()`——仍然完全复用 `tui-scroll-follow` 契约。
 
-**失效规则（保守）**：按下时记录结构指纹 `(cells 数, pending 数, 终端宽度, 重建计数)`，每帧渲染前比对、松手时**再比对一次**（重建可能发生在同一轮循环的 draw 之后），任一变化即中止选择并清高亮（cell 增删 / pending 提升 / compaction / rewind / 会话切换 / 窗口缩放都会命中；最后一项 `rebuilds` 由 `ChatView::clear()` 自增，覆盖「重建后计数恰好相同」的场景）。**纯内容追加（流式 delta、既有 cell 文本增长）不改变指纹，因此不失效**——这是与「total 高度变化即清」的关键区别。焦点丢失（`Focus(false)`，拖拽松手事件永不到达）同样中止。
+**失效规则（保守）**：按下时记录**区域专属**的指纹，每帧渲染前比对、松手时**再比对一次**（重建可能发生在同一轮循环的 draw 之后），任一变化即中止选择并清高亮。chat 选区用 `(cells 数, pending 数, 终端宽度, 重建计数)`（cell 增删 / pending 提升 / compaction / rewind / 会话切换 / 窗口缩放都会命中；最后一项 `rebuilds` 由 `ChatView::clear()` 自增，覆盖「重建后计数恰好相同」的场景；**纯内容追加（流式 delta、既有 cell 文本增长）不改变指纹，因此不失效**——这是与「total 高度变化即清」的关键区别）；composer 选区用 `(草稿文本, 终端宽度)`（任何编辑即中止，见下节）。焦点丢失（`Focus(false)`，拖拽松手事件永不到达）同样中止；`cancel_selection` 按区域恢复——只有 chat 选区会解除跟随冻结。
 
-**与滚动条**：滚动条列的位置（chat 区域最右一列）永远归滚动条，选区映射把它夹掉（见上一节）；只有内容不溢出、没有滚动条时才可选。反过来说，命中滚动条的按下不会启动选区，滚动条的拖动也不会产生复制意图。
+**与滚动条**：滚动条占用的那一列（chat 区域最右一列）在滚动条存在的那些帧里永远归滚动条——命中它的按下走滚动条，选区映射也被夹掉（`App::off_the_bar`）；否则复制出的文本会混进 `│`、高亮也会把滚动条反显。滚动条的拖动同样不产生复制意图。内容不溢出（没有滚动条）时整列照常可选，分派见上文「滚动条只吃按下 / 拖动 / hover」。
 
-**已知限制**：选区只覆盖 chat 区域（composer / 状态栏 / 弹层不参与，点击定位光标属 `tui-composer-pointer`）；选择期间滚轮仍可滚动，滚出快照范围的行不参与复制（所见即所得）；拖动期间内容重建（compaction / rewind / 会话切换）会中止选择，需重新拖选；OSC52 在部分终端仍可能「假成功」（无法探测，本地平台命令优先已缓解）；不做词/行粒度、键盘选择、Esc 清除、搜索；内容溢出时最右一列被滚动条占据，那一列的字选不到也复制不到（取舍见上文）。
+**已知限制**：选择覆盖 chat 区域与 composer（见下一节；状态栏 / 弹层不参与）；选择期间滚轮仍可滚动，滚出快照范围的行不参与复制（所见即所得）；拖动期间内容重建（compaction / rewind / 会话切换）会中止选择，需重新拖选；OSC52 在部分终端仍可能「假成功」（无法探测，本地平台命令优先已缓解）；不做词/行粒度、键盘选择、Esc 清除、搜索；内容溢出时最右一列被滚动条占据，那一列的字选不到也复制不到（取舍见上文）。
+
+## composer 指针（`tui-composer-pointer`）
+
+输入框（composer）与 chat band 共用**同一个**选择状态机，但各自锚定在自己的坐标空间里——一次选择只属于**按下时所在的那个区域**（`SelectionRegion { Chat, Composer }`），跨区域的拖拽一律夹取回原区域的可见带边缘，不做跨区域合并。
+
+| 关注点 | 位置 |
+|---|---|
+| 区域抽象 / 选区状态机（纯逻辑） | `crates/wing/src/ui/selection.rs`（`SelectionRegion` / `SelectionPoint` / `bounds_in`） |
+| 屏幕 ↔ 逻辑命中、高亮 patch、选区文本 | `crates/wing/src/ui/input_area/pointer.rs` |
+| 视觉行 ↔ 逻辑行列换算原语 | `crates/wing/src/ui/input_area/wrap.rs`（`display_col_to_char` / `char_display_offset`） |
+| 单击定位光标 API | `crates/wing/src/ui/input_area/mod.rs`（`InputArea::set_cursor_from_visual`） |
+| 事件接线 / 互斥 / 失效 | `crates/wing/src/app/mod.rs`（`mouse_press` / `mouse_drag` / `mouse_release` → `composer_*` / `chat_selection_*`） |
+
+**坐标模型（与 chat 的关键差异）**：composer 的选区锚定在**逻辑坐标**（逻辑行下标 + 行内 char 下标），每帧用**渲染同一个** `wrap::build_visual_rows`（同样的可用宽度：`input_rect.width - PREFIX_WIDTH`，不足 1 列时按 1 列——`update_vertical_scroll` / `hit` / `paint_selection` / `cursor_screen_pos` 与 widget 全部同源）映射到视觉行列。渲染的 Rect 由 **`InputArea` 自己记录**（`rendered_area`，`InputAreaWidget::render` 每帧回写，与 `ChatView::geometry()` 同一所有权模型：鼠标事件发生在帧之间，命中必须描述用户正看到的那一帧）。chat 必须用「渲染结果快照 + 内容坐标」是因为换行发生在 ratatui `Paragraph::wrap` 内部、脱离渲染就得复刻 `WordWrapper`；composer 的换行是应用自己算的，**模型即权威**——所以复制文本直接从 `lines` 取，且**软换行不插换行符**（只有真正的逻辑行边界才有 `\n`）。逻辑坐标对**纵向滚动与重排免疫**：滚动只改变可见窗口，不改变选区。
+
+**复制内容为空**：只跨了换行、一个字符都没取到的区间（例如从行末拖到下一空行的行首）视为空选区——不复制、不 toast，不产生裸 `\n`。
+
+**屏幕 → 逻辑命中**：`pointer::hit` 把屏幕位置换算成 `ComposerHit { vis_row, display_col, point, on_char }`。行先夹进可见窗口（`vertical_scroll` + 行内偏移）、再夹进视觉行列表（窗口外/内容下方的行 → 最后一个视觉行）；列在 `area.x + PREFIX_WIDTH` 处饱和（点在 `> ` 前缀或更左 → 该视觉行行首），右侧不设上限（超出行文本 → 该视觉行行末）。锚点用 `point`（**指针前插入点**：压在字符的单元格上 → 该字符之前），拖动 / 松手的终点用 `hit.focus()`（`on_char` → `col + 1`，**把指针下的字符整格纳入**）——与 chat 的 `snap_focus_right` 同构，单击不吸附所以「按下不拖动 = 零宽不复制」在两个区域都成立。
+
+**单击定位光标**：按下只记录锚点（此时还不知道是点击还是拖拽），松手时若**未发生位置移动**则把指针换算成光标位置（`InputArea::set_cursor_from_visual(available_width, vis_row, display_col)`）：显示列 → char 下标由 `wrap::display_col_to_char` 完成（宽字符按 char 粒度，任一格都取「字符之前」；显示列超出该视觉行文本 → 行末），并清 `desired_col`。单击不产生选区、不高亮、不复制。**「点击 vs 拖拽」只按位置判定**（`anchor != 终点`，不看 `is_dragged`）：触摸板在同一格内的抖动仍是单击（不会退化成「复制指针下那 1 个字符」），拖出去又拖回锚点 = 零宽；chat 侧因为映射会在字素内吸附，才额外 OR 上 `is_dragged()`。
+
+**高亮**：与 chat 走同一条 Buffer patch 通道（`REVERSED` 合并语义、toast 之后绘制），但按区域分派、各用**本帧**自己那个 Rect 裁剪：composer 的区间由模型换算成显示列 `[x0, x1)`，`x0` 起于 `area.x + PREFIX_WIDTH`（**永不染 `> ` 前缀**），`x1` 夹到 `area.right()`；宽字符按 char 宽度整组覆盖。
+
+**互斥（按下时判定一次）**：AskUserQuestion 面板 / 旧 ask 菜单 / `/model` 面板 / **可见的**命令候选 popup 在键盘接管状态时，落在 composer 内的按下**直接忽略**——不开始选择、不移动光标、不复制（后续 drag / release 自然也是 no-op）。这些状态下草稿正被面板的内联输入框与按键改写，指针交互进去只会与它们竞争；**滚轮与 chat band 的拖选不受影响**。
+
+「键盘接管」按**是否真的占用键盘 / 屏幕**判定，而不是 `ActivePopup::is_active()`：后者只表示「不是 `None`」，而**无候选（不可见）**的 popup 是常态可达（`/zzz` 无匹配命令、`/session abc` 过滤后为空、候选尚未 fetch 回来）——它们高度为 0（不绘制、不产生布局位移），按键也已经直接放行给 composer，此时再拦指针只会让「看起来空闲」的界面点不动。因此条件是 `popup.active.height() > 0 || popup.active.is_must_select_empty()`：前者保证「有可见 popup 才有布局位移」，后者保留 must-select 命令（`/fork` `/rewind` `/agents` `/session` `/ss`）在无候选时对 Enter 的拦截——**输入了无匹配候选的 must-select 命令（如 `/session abc`）时，输入框内的点击 / 拖选仍不生效**（Enter 会被 popup 吃掉，指针交互没有意义）。
+
+**失效与冻结**：composer 选区用「草稿文本 + 终端宽度」指纹——键盘输入 / 退格 / 删除 / 粘贴 / 提交 / 草稿恢复（`/new`、会话切换）**任一内容变化即中止并清高亮**（每帧渲染前与松手时各比对一次）；纯导航键（←→↑↓ / Home/End）不改变文本，因此**不中止**。chat 侧的结构变化（cell 增删 / 重建）**不影响** composer 选区，反之亦然。composer 选区**不触碰** `chat.unfollow()`，也**不武装**边缘自动滚动定时器（输入框最多 `max_lines` 行，可见窗口外的行不参与选择）。
+
+**已知限制**：must-select 命令在「无匹配候选」时输入框内的点击 / 拖选不生效（见上）；输入框内不做边缘自动滚动（草稿超过 `max_lines` 时窗口外的视觉行无法拖选）；placeholder（空输入时显示的提示文案）不是内容——在它上面拖选不产生选区、不复制；粘贴占位符行按屏幕文本复制（`[Pasted text #N …]`，与所见一致）；宽字符单击取「字符之前」（char 下标没有半格精度）。
 
 ## 已知中间态：原生拖选需要 Shift/Option
 
-鼠标上报接管后，终端不再把拖拽交给自身的文本选择——**不按 Shift（macOS 用 Option）的拖选不再选中文本**。这是回退 #28 的已知代价：应用内自研选择（`tui-text-selection`）已恢复 chat 区域的免修饰键体验，同时保留 Shift/Option 原生拖选作为兜底（composer 区域的拖选仍只能用原生方式）。
+鼠标上报接管后，终端不再把拖拽交给自身的文本选择——**不按 Shift（macOS 用 Option）的拖选不再选中文本**。这是回退 #28 的已知代价：应用内自研选择（`tui-text-selection` + `tui-composer-pointer`）已恢复 **chat 区域与 composer** 的免修饰键体验，同时保留 Shift/Option 原生拖选作为兜底（状态栏与弹层区域仍只能用原生方式）。

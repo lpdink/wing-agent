@@ -148,12 +148,12 @@ crates/wing/src/
 │   └── constants.rs                 协议常量（本地命令、工具名等 magic string）
 ├── ui/                              UI 组件
 │   ├── chat_view.rs                 Chat 视图（宽度感知虚拟化）
-│   ├── selection.rs                 文本选择状态机（内容坐标锚定 / 区间有序化 / 快照取文本，纯逻辑）
+│   ├── selection.rs                 文本选择状态机（区域标签 / 内容坐标锚定 / 区间有序化 / 快照取文本，纯逻辑）
 │   ├── scrollbar.rs                 overlay 滚动条（几何 / 命中测试 / 拖拽状态机 / 绘制）
 │   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存
 │   ├── panel.rs                     选择面板共享渲染（窗口数学与内核一致）
 │   ├── header.rs / status_bar.rs / spinner.rs / toast.rs
-│   ├── input_area/                  Composer（editing / movement / wrap / paste / widget / helpers）
+│   ├── input_area/                  Composer（editing / movement / wrap / 指针映射与高亮 pointer / paste / widget / helpers）
 │   ├── popup/                       command（斜杠命令 + 候选项）/ selection（通用可选列表）
 │   ├── ask_select.rs                旧版必选选择器（Bash 确认）
 │   └── cells/                       Chat cell 渲染（tool_call / thinking / todo_msg / ask_msg / diff_view / model_picker）

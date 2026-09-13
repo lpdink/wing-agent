@@ -1,15 +1,22 @@
 //! Text selection state machine — pure logic, no IO.
 //!
-//! The selection is anchored in **content coordinates**: `vrow` is a virtual
-//! row of the chat's continuous content space (header + cells + pending
-//! messages) and `col` is a column inside the chat band. The screen mapping
-//! lives in [`crate::ui::chat_view`] (it needs the frame geometry), the
-//! highlight patch and the clipboard copy live in the `app` layer.
+//! A selection lives in **one region** at a time ([`SelectionRegion`]), and its
+//! points are anchored in that region's *content* coordinates:
+//!
+//! * `Chat` — `row` is a virtual row of the chat's continuous content space
+//!   (header + cells + pending messages) and `col` a column inside the band.
+//!   The screen mapping lives in [`crate::ui::chat_view`] (it needs the frame
+//!   geometry).
+//! * `Composer` — `row` is a logical line of the draft and `col` a char index
+//!   inside it; the visual-row mapping lives in
+//!   [`crate::ui::input_area::pointer`].
 //!
 //! Why content coordinates: appending content (the streaming case) never
-//! moves an existing row, so an anchored selection does not drift while the
-//! turn streams on. Anything that *does* move rows (resize, compaction,
-//! rewind, session switch) is handled by aborting the selection — see
+//! moves an existing chat row, and scrolling / re-wrapping never moves an
+//! existing composer position — so an anchored selection does not drift while
+//! the turn streams on or the view scrolls. Anything that *does* move the
+//! coordinates (resize, compaction, rewind, session switch, an edit of the
+//! draft) is handled by aborting the selection — see
 //! `App::selection_fingerprint`.
 //!
 //! Granularity is characters only: word / line selection (double / triple
@@ -18,16 +25,57 @@
 
 use unicode_width::UnicodeWidthStr;
 
-/// A point in chat content coordinates.
+/// Which interactive region a selection belongs to.
 ///
-/// Ordering is row-major (`vrow` first, then `col`), which is what
-/// [`Selection::bounds`] uses to sort anchor and focus.
+/// A selection is anchored in the region its press landed in and never mixes
+/// the two coordinate spaces: a drag that leaves the region is clamped into
+/// that region's visible band (see the app's pointer handlers).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ContentPoint {
-    /// Virtual row in the chat content space.
-    pub vrow: usize,
-    /// Column inside the chat band (0-based, content-relative).
+pub enum SelectionRegion {
+    /// The scrollable chat band (content coordinates, see [`SelectionPoint`]).
+    Chat,
+    /// The composer — the multi-line draft input (logical coordinates).
+    Composer,
+}
+
+/// A point in the owning region's content coordinates.
+///
+/// Within one region the derived ordering is row-major (`row` first, then
+/// `col`), which is what [`Selection::bounds`] sorts anchor and focus by.
+/// Points of *different* regions are never ordered against each other — that
+/// state is ruled out by construction ([`Selection::bounds`] rejects it and
+/// [`Selection::drag_to`] drops foreign points) — and they could not be
+/// meaningfully compared anyway, since `row` / `col` mean something else in
+/// each region (see the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SelectionPoint {
+    /// Region the point belongs to.
+    pub region: SelectionRegion,
+    /// `Chat`: content virtual row. `Composer`: logical line index.
+    pub row: usize,
+    /// `Chat`: column inside the chat band (0-based). `Composer`: char index
+    /// inside the logical line.
     pub col: u16,
+}
+
+impl SelectionPoint {
+    /// A point in the chat band's content space.
+    pub fn chat(vrow: usize, col: u16) -> Self {
+        Self {
+            region: SelectionRegion::Chat,
+            row: vrow,
+            col,
+        }
+    }
+
+    /// A point in the composer's logical space.
+    pub fn composer(line: usize, col: u16) -> Self {
+        Self {
+            region: SelectionRegion::Composer,
+            row: line,
+            col,
+        }
+    }
 }
 
 /// One rendered grapheme as it appears in a chat row.
@@ -57,11 +105,11 @@ pub struct RenderedRow {
     pub inset: u16,
 }
 
-/// Drag selection over the chat content.
+/// Drag selection over one region's content.
 #[derive(Debug, Default, Clone)]
 pub struct Selection {
-    anchor: Option<ContentPoint>,
-    focus: Option<ContentPoint>,
+    anchor: Option<SelectionPoint>,
+    focus: Option<SelectionPoint>,
     /// A left button is down and this selection owns the drag.
     press_active: bool,
     /// The pointer moved since the press (a `Drag` event arrived).
@@ -72,13 +120,17 @@ pub struct Selection {
     /// under the pointer when the user really dragged).
     dragged: bool,
     /// Edge auto-scroll direction: -1 up, 0 stopped, 1 down.
+    ///
+    /// Chat only: the composer is at most `max_lines` tall and has no edge
+    /// scrolling, so its drags never arm this.
     auto_scroll: i8,
 }
 
 impl Selection {
     /// Start a selection at `at`. Any previous state is dropped (a new press
-    /// always starts from scratch).
-    pub fn begin(&mut self, at: ContentPoint) {
+    /// always starts from scratch), including the region: the point's region
+    /// decides which space this selection lives in.
+    pub fn begin(&mut self, at: SelectionPoint) {
         self.anchor = Some(at);
         self.focus = Some(at);
         self.press_active = true;
@@ -86,9 +138,17 @@ impl Selection {
         self.auto_scroll = 0;
     }
 
-    /// Extend the selection to `at`. Ignored unless a press is active.
-    pub fn drag_to(&mut self, at: ContentPoint) {
+    /// Extend the selection to `at`. Ignored unless a press is active, and
+    /// ignored when `at` belongs to another region: the app maps the pointer
+    /// into the region the press started in, so a foreign region would be a
+    /// bug — dropping it keeps the two coordinate spaces from ever mixing.
+    pub fn drag_to(&mut self, at: SelectionPoint) {
         if !self.press_active {
+            return;
+        }
+        if let Some(anchor) = self.anchor
+            && anchor.region != at.region
+        {
             return;
         }
         self.focus = Some(at);
@@ -101,7 +161,7 @@ impl Selection {
     /// Clearing here is what makes "release = no highlight, no residue" true
     /// by construction — nothing can outlive the release, so there is no Esc
     /// interaction and no cross-frame state to maintain.
-    pub fn release(&mut self, at: ContentPoint) -> Option<(ContentPoint, ContentPoint)> {
+    pub fn release(&mut self, at: SelectionPoint) -> Option<(SelectionPoint, SelectionPoint)> {
         if !self.press_active {
             self.reset();
             return None;
@@ -137,18 +197,27 @@ impl Selection {
     }
 
     /// The press position (the fixed end of the selection), if any.
-    pub fn anchor(&self) -> Option<ContentPoint> {
+    pub fn anchor(&self) -> Option<SelectionPoint> {
         self.anchor
+    }
+
+    /// The region this selection is anchored in, if any.
+    ///
+    /// This is the switch the app uses to map the pointer, to paint the
+    /// highlight and to pick the invalidation rules — one selection, one
+    /// region.
+    pub fn region(&self) -> Option<SelectionRegion> {
+        self.anchor.map(|anchor| anchor.region)
     }
 
     /// Ordered selection bounds, or `None` when the selection is empty.
     ///
     /// A zero-width selection (anchor == focus, i.e. a plain click) yields
     /// `None`: nothing is highlighted and nothing is copied.
-    pub fn bounds(&self) -> Option<(ContentPoint, ContentPoint)> {
+    pub fn bounds(&self) -> Option<(SelectionPoint, SelectionPoint)> {
         let anchor = self.anchor?;
         let focus = self.focus?;
-        if anchor == focus {
+        if anchor == focus || anchor.region != focus.region {
             return None;
         }
         Some(if anchor < focus {
@@ -158,10 +227,16 @@ impl Selection {
         })
     }
 
-    /// Column span selected on content row `vrow` (half-open, content
-    /// columns), `width` being the chat band width.
-    pub fn row_span(&self, vrow: usize, width: u16) -> Option<(u16, u16)> {
-        row_span(self.bounds()?, vrow, width)
+    /// Ordered bounds, but only when the selection lives in `region`.
+    ///
+    /// Each region's painter / copier asks for its own bounds, so a highlight
+    /// can never be drawn (or a text extracted) through the wrong coordinate
+    /// mapping.
+    pub fn bounds_in(&self, region: SelectionRegion) -> Option<(SelectionPoint, SelectionPoint)> {
+        if self.region() != Some(region) {
+            return None;
+        }
+        self.bounds()
     }
 
     /// Arm / re-arm the edge auto-scroll for `dir` (-1 up, 1 down); `0`
@@ -186,27 +261,29 @@ impl Selection {
     /// The edge auto-scroll shifts it by the line the view just scrolled: the
     /// pointer never moved, so the content under it is the previous focus
     /// shifted along.
-    pub fn focus(&self) -> Option<ContentPoint> {
+    pub fn focus(&self) -> Option<SelectionPoint> {
         self.focus
     }
 }
 
-/// Column span of ordered `bounds` on row `vrow` (half-open, content
-/// columns), clamped to `width`.
+/// Column span of ordered `bounds` on content row `vrow` (half-open, content
+/// columns), clamped to `width`. Chat coordinates only ([`SelectionRegion::Chat`]).
 ///
 /// Rows outside the bounds yield `None`; the first / last row contribute
 /// their own columns, rows in between are fully covered.
 pub fn row_span(
-    bounds: (ContentPoint, ContentPoint),
+    bounds: (SelectionPoint, SelectionPoint),
     vrow: usize,
     width: u16,
 ) -> Option<(u16, u16)> {
     let (start, end) = bounds;
-    if vrow < start.vrow || vrow > end.vrow {
+    debug_assert_eq!(start.region, SelectionRegion::Chat);
+    debug_assert_eq!(end.region, SelectionRegion::Chat);
+    if vrow < start.row || vrow > end.row {
         return None;
     }
-    let from = if vrow == start.vrow { start.col } else { 0 };
-    let to = if vrow == end.vrow { end.col } else { width };
+    let from = if vrow == start.row { start.col } else { 0 };
+    let to = if vrow == end.row { end.col } else { width };
     let from = from.min(width);
     let to = to.min(width);
     if from >= to {
@@ -235,25 +312,27 @@ pub fn row_span(
 pub fn extract_text(
     rows: &[RenderedRow],
     scroll_offset: usize,
-    bounds: (ContentPoint, ContentPoint),
+    bounds: (SelectionPoint, SelectionPoint),
 ) -> Option<String> {
     let (start, end) = bounds;
+    debug_assert_eq!(start.region, SelectionRegion::Chat);
+    debug_assert_eq!(end.region, SelectionRegion::Chat);
     if rows.is_empty() {
         return None;
     }
     // Only the rows the snapshot actually holds can contribute text (an edge
     // drag may span far more content rows than were ever on screen).
-    let first = start.vrow.max(scroll_offset);
-    let last = end.vrow.min(scroll_offset + rows.len() - 1);
+    let first = start.row.max(scroll_offset);
+    let last = end.row.min(scroll_offset + rows.len() - 1);
     let mut lines: Vec<String> = Vec::new();
     for vrow in first..=last {
         let row = &rows[vrow - scroll_offset];
-        let from = if vrow == start.vrow {
+        let from = if vrow == start.row {
             start.col.max(row.inset)
         } else {
             row.inset
         };
-        let to = if vrow == end.vrow { end.col } else { u16::MAX };
+        let to = if vrow == end.row { end.col } else { u16::MAX };
         let mut line = String::new();
         for grapheme in &row.graphemes {
             let grapheme_end = grapheme.col.saturating_add(grapheme.width);
@@ -287,8 +366,19 @@ pub fn grapheme_width(symbol: &str) -> u16 {
 mod tests {
     use super::*;
 
-    fn p(vrow: usize, col: u16) -> ContentPoint {
-        ContentPoint { vrow, col }
+    fn p(vrow: usize, col: u16) -> SelectionPoint {
+        SelectionPoint::chat(vrow, col)
+    }
+
+    /// A composer point in logical coordinates.
+    fn q(line: usize, col: u16) -> SelectionPoint {
+        SelectionPoint::composer(line, col)
+    }
+
+    /// Row span of the chat selection over `vrow`, through the free function
+    /// `ChatView::paint_selection` uses.
+    fn span(sel: &Selection, vrow: usize, width: u16) -> Option<(u16, u16)> {
+        row_span(sel.bounds().expect("bounds"), vrow, width)
     }
 
     fn grapheme(col: u16, width: u16, symbol: &str) -> Grapheme {
@@ -428,9 +518,9 @@ mod tests {
         let mut sel = Selection::default();
         sel.begin(p(5, 3));
         sel.drag_to(p(5, 8));
-        assert_eq!(sel.row_span(5, 20), Some((3, 8)));
-        assert_eq!(sel.row_span(4, 20), None);
-        assert_eq!(sel.row_span(6, 20), None);
+        assert_eq!(span(&sel, 5, 20), Some((3, 8)));
+        assert_eq!(span(&sel, 4, 20), None);
+        assert_eq!(span(&sel, 6, 20), None);
     }
 
     #[test]
@@ -438,10 +528,10 @@ mod tests {
         let mut sel = Selection::default();
         sel.begin(p(5, 3));
         sel.drag_to(p(8, 4));
-        assert_eq!(sel.row_span(5, 20), Some((3, 20)), "first row: to the edge");
-        assert_eq!(sel.row_span(6, 20), Some((0, 20)), "middle row: full width");
-        assert_eq!(sel.row_span(7, 20), Some((0, 20)));
-        assert_eq!(sel.row_span(8, 20), Some((0, 4)), "last row: from the left");
+        assert_eq!(span(&sel, 5, 20), Some((3, 20)), "first row: to the edge");
+        assert_eq!(span(&sel, 6, 20), Some((0, 20)), "middle row: full width");
+        assert_eq!(span(&sel, 7, 20), Some((0, 20)));
+        assert_eq!(span(&sel, 8, 20), Some((0, 4)), "last row: from the left");
     }
 
     #[test]
@@ -449,15 +539,65 @@ mod tests {
         let mut sel = Selection::default();
         sel.begin(p(0, 30));
         sel.drag_to(p(1, 40));
-        assert_eq!(sel.row_span(0, 10), None, "start past the row width");
-        assert_eq!(sel.row_span(1, 10), Some((0, 10)), "end clamps to width");
+        assert_eq!(span(&sel, 0, 10), None, "start past the row width");
+        assert_eq!(span(&sel, 1, 10), Some((0, 10)), "end clamps to width");
     }
 
     #[test]
     fn test_row_span_zero_width_is_none() {
         let mut sel = Selection::default();
         sel.begin(p(0, 5));
-        assert_eq!(sel.row_span(0, 10), None);
+        assert_eq!(sel.bounds(), None, "a press alone selects nothing");
+        assert_eq!(row_span((p(0, 5), p(0, 5)), 0, 10), None);
+    }
+
+    // ── 区域 ────────────────────────────────────────────────
+
+    #[test]
+    fn test_region_comes_from_the_anchor_point() {
+        let mut sel = Selection::default();
+        assert_eq!(sel.region(), None, "no selection, no region");
+
+        sel.begin(p(3, 4));
+        assert_eq!(sel.region(), Some(SelectionRegion::Chat));
+
+        // A new press starts a fresh selection, region included.
+        sel.begin(q(1, 2));
+        assert_eq!(sel.region(), Some(SelectionRegion::Composer));
+        sel.cancel();
+        assert_eq!(sel.region(), None);
+    }
+
+    #[test]
+    fn test_bounds_in_matches_only_the_owning_region() {
+        let mut sel = Selection::default();
+        sel.begin(q(1, 2));
+        sel.drag_to(q(1, 5));
+        assert_eq!(
+            sel.bounds_in(SelectionRegion::Composer),
+            Some((q(1, 2), q(1, 5)))
+        );
+        assert_eq!(
+            sel.bounds_in(SelectionRegion::Chat),
+            None,
+            "a composer selection has no chat bounds — the mappings must not mix"
+        );
+    }
+
+    #[test]
+    fn test_drag_from_another_region_is_ignored() {
+        let mut sel = Selection::default();
+        sel.begin(p(3, 4));
+        sel.drag_to(q(1, 5));
+        assert_eq!(
+            sel.bounds(),
+            None,
+            "a foreign-region point must not become the focus"
+        );
+        assert_eq!(sel.anchor(), Some(p(3, 4)));
+
+        sel.drag_to(p(3, 9));
+        assert_eq!(sel.bounds(), Some((p(3, 4), p(3, 9))));
     }
 
     // ── 文本抽取 ────────────────────────────────────────────
