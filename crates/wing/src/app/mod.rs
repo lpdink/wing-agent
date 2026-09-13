@@ -7144,6 +7144,46 @@ mod tests {
         }
     }
 
+    /// Without a bar the whole band is selectable: the bar-column clamp is
+    /// conditional, so a label that ends in the band's last column is copied
+    /// whole. (A clamp that forgot the "only while the bar is drawn" guard
+    /// would silently drop that last character.)
+    #[test]
+    fn test_last_column_is_selectable_when_the_content_fits() {
+        let label = "01234567890123456789012345678901234567"; // 38 columns
+        let mut app = test_app();
+        app.chat.set_header(Vec::new());
+        app.chat.push(ChatCell::AssistantMessage(label.to_string()));
+        let mut terminal = test_terminal(40, 12);
+        draw(&mut app, &mut terminal);
+        assert!(
+            app.scrollbar_geometry().is_none(),
+            "one row of content fits the band"
+        );
+        let band = app.chat.geometry().area;
+        let row = band.y;
+
+        // Two columns in: the `⦁ ` cell prefix is chrome, the label is not.
+        assert_eq!(
+            app.handle_mouse(press((band.x + 2, row))),
+            MouseOutcome::Immediate
+        );
+        draw(&mut app, &mut terminal);
+        assert_eq!(
+            app.handle_mouse(drag((band.right() - 1, row))),
+            MouseOutcome::Coalesced
+        );
+        draw(&mut app, &mut terminal);
+        assert_eq!(
+            app.handle_mouse(release((band.right() - 1, row))),
+            MouseOutcome::Immediate
+        );
+        match app.drain_intents().as_slice() {
+            [AppIntent::CopyToClipboard(text)] => assert_eq!(text, label),
+            other => panic!("expected exactly one clipboard intent, got {other:?}"),
+        }
+    }
+
     /// A press beside the bar belongs to the chat band: it starts a drag
     /// selection and never moves the view. A drag that wanders over the bar's
     /// column is still the selection's — the bar only claims presses that land
