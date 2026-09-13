@@ -156,6 +156,13 @@ pub struct App {
     /// virtual rows may have shifted under the anchor, so the selection is
     /// aborted; pure content appends (streaming) leave it untouched.
     selection_guard: Option<SelectionGuard>,
+    /// Markdown link under the pointer at press time.
+    ///
+    /// Recorded from the *frame the user pressed on* (never recomputed at
+    /// release, which would hit whatever scrolled under the pointer in the
+    /// meantime) and opened only when the gesture turns out to be a click —
+    /// a drag is a selection, not an open.
+    mouse_link: Option<String>,
     /// Absolute deadline of the next drag edge auto-scroll step.
     ///
     /// Absolute (not "sleep 50 ms from now") because the run loop's `select!`
@@ -278,6 +285,7 @@ impl App {
             session_id,
             selection: Selection::default(),
             selection_guard: None,
+            mouse_link: None,
             selection_autoscroll_at: None,
             should_quit: false,
             intents: Vec::new(),
@@ -606,6 +614,10 @@ impl App {
         let Some(point) = self.chat.content_point_at(column, row) else {
             return MouseOutcome::Ignored;
         };
+        // Link hit test first, from the frame the user is looking at. It only
+        // *records* — a press still begins a selection so dragging across a
+        // link selects its text.
+        self.mouse_link = self.chat.link_at(column, row).map(str::to_owned);
         self.selection.begin(point);
         // Freeze follow for the duration of the drag: the render pins the
         // viewport to the bottom edge and re-arms `auto_scroll` whenever the
@@ -671,6 +683,21 @@ impl App {
         }
         self.selection_guard = None;
         self.selection_autoscroll_at = None;
+        // A press that never moved is a click: open the link recorded at press
+        // time instead of copying (a click copies nothing anyway — the
+        // selection is zero-width — so this only decides *what* the click
+        // does). A drag keeps the selection semantics.
+        let clicked_link = self.mouse_link.take();
+        if let Some(target) = clicked_link
+            && !self.selection.is_dragged()
+        {
+            // Restore the follow contract from the current position, exactly
+            // like the copy path below.
+            self.chat.scroll_down(0, self.visible_height);
+            self.selection.cancel();
+            self.push_intent(AppIntent::OpenLink(target));
+            return MouseOutcome::Immediate;
+        }
         // Re-arm the follow state iff the viewport is still at the bottom edge
         // (`n = 0` only judges — it never moves). This runs for clicks too, so
         // the `unfollow` from the press cannot leave the view stuck in reading
@@ -708,6 +735,9 @@ impl App {
     /// change). Lifting the freeze is part of the contract — otherwise the
     /// view would stay in reading mode forever.
     fn cancel_selection(&mut self) {
+        // A recorded link must not survive an aborted gesture either — a
+        // release after a focus loss / structural change opens nothing.
+        self.mouse_link = None;
         if !self.selection.is_press_active() {
             return;
         }
@@ -2623,7 +2653,13 @@ impl App {
             if let Some(ref toast) = self.toast
                 && !toast.is_expired()
             {
-                render_toast(toast, area, frame.buffer_mut(), &palette);
+                let toast_area = render_toast(toast, area, frame.buffer_mut(), &palette);
+                // The toast paints over the chat band (top-right, below the
+                // status bar): its cells are gone, so the link hit boxes under
+                // it must go too.
+                if let Some(toast_area) = toast_area {
+                    self.chat.mask_links(toast_area);
+                }
             }
 
             // In-app text selection — painted after the toast (the selection
@@ -4505,6 +4541,179 @@ mod tests {
 
         draw(&mut app, &mut terminal);
         assert!(reversed_cells(&terminal).is_empty());
+    }
+
+    /// App whose chat holds one assistant message with a markdown link, so the
+    /// link's screen row / column can be read back from the frame map.
+    fn app_with_link() -> App {
+        let mut app = test_app();
+        app.chat.set_header(Vec::new());
+        app.chat.push(ChatCell::AssistantMessage(
+            "see [docs](https://example.com) now".into(),
+        ));
+        app
+    }
+
+    /// The link's hit box in the drawn frame.
+    fn link_box(app: &App) -> ((u16, u16), (u16, u16)) {
+        let (row, links) = app
+            .chat
+            .frame_links()
+            .first()
+            .expect("frame has a link")
+            .clone();
+        let link = &links[0];
+        ((link.start, row), (link.end - 1, row))
+    }
+
+    #[test]
+    fn test_click_on_a_link_opens_it_without_copying() {
+        let mut app = app_with_link();
+        let mut terminal = test_terminal(60, 12);
+        draw(&mut app, &mut terminal);
+        let (start, _end) = link_box(&app);
+
+        assert_eq!(app.handle_mouse(press(start)), MouseOutcome::Immediate);
+        assert_eq!(app.handle_mouse(release(start)), MouseOutcome::Immediate);
+        match app.drain_intents().as_slice() {
+            [AppIntent::OpenLink(target)] => assert_eq!(target, "https://example.com"),
+            other => panic!("expected exactly one open intent, got {other:?}"),
+        }
+        assert!(
+            app.chat.is_at_bottom(),
+            "a click must not leave the view unfollowed"
+        );
+        draw(&mut app, &mut terminal);
+        assert!(
+            reversed_cells(&terminal).is_empty(),
+            "no highlight for a click"
+        );
+    }
+
+    #[test]
+    fn test_drag_across_a_link_selects_instead_of_opening() {
+        let mut app = app_with_link();
+        let mut terminal = test_terminal(60, 12);
+        draw(&mut app, &mut terminal);
+        let (start, (end, row)) = link_box(&app);
+
+        assert_eq!(app.handle_mouse(press(start)), MouseOutcome::Immediate);
+        draw(&mut app, &mut terminal);
+        assert_eq!(
+            app.handle_mouse(drag((end, row))),
+            MouseOutcome::Coalesced,
+            "a drag stays coalesced, even on a link"
+        );
+        draw(&mut app, &mut terminal);
+        assert_eq!(
+            app.handle_mouse(release((end, row))),
+            MouseOutcome::Immediate
+        );
+
+        match app.drain_intents().as_slice() {
+            [AppIntent::CopyToClipboard(text)] => {
+                assert!(
+                    text.contains("docs"),
+                    "expected the link text, got {text:?}"
+                );
+            }
+            other => panic!("expected exactly one clipboard intent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_click_outside_a_link_does_nothing() {
+        let mut app = app_with_link();
+        let mut terminal = test_terminal(60, 12);
+        draw(&mut app, &mut terminal);
+        let band = app.chat.geometry().area;
+        let ((start, row), _) = link_box(&app);
+
+        // The bullet prefix sits left of the link, plain text right of it.
+        for at in [(band.x, row), (band.x + 1, row), (start - 1, row)] {
+            assert_eq!(
+                app.handle_mouse(press(at)),
+                MouseOutcome::Immediate,
+                "{at:?}"
+            );
+            assert_eq!(app.handle_mouse(release(at)), MouseOutcome::Immediate);
+            assert!(
+                app.drain_intents().is_empty(),
+                "a click at {at:?} must not do anything"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cancelled_gesture_never_opens_the_link() {
+        // Focus loss aborts the gesture; the release that follows must be a
+        // no-op even though it lands on the link.
+        let mut app = app_with_link();
+        let mut terminal = test_terminal(60, 12);
+        draw(&mut app, &mut terminal);
+        let (start, _) = link_box(&app);
+
+        assert_eq!(app.handle_mouse(press(start)), MouseOutcome::Immediate);
+        app.cancel_selection();
+        assert_eq!(app.handle_mouse(release(start)), MouseOutcome::Ignored);
+        assert!(app.drain_intents().is_empty());
+
+        // ...and a structural change (width) does the same through the draw.
+        assert_eq!(app.handle_mouse(press(start)), MouseOutcome::Immediate);
+        let mut resized = test_terminal(30, 12);
+        draw(&mut app, &mut resized);
+        assert_eq!(
+            app.handle_mouse(release(start)),
+            MouseOutcome::Ignored,
+            "the width change aborted the gesture"
+        );
+        assert!(
+            app.drain_intents().is_empty(),
+            "aborted selection opens nothing"
+        );
+    }
+
+    #[test]
+    fn test_link_click_uses_the_press_frame_snapshot() {
+        // The recorded target must survive content that scrolls in between:
+        // the pointer stays put, the text under it moves.
+        let mut app = app_with_link();
+        let mut terminal = test_terminal(60, 12);
+        draw(&mut app, &mut terminal);
+        let (start, _) = link_box(&app);
+
+        assert_eq!(app.handle_mouse(press(start)), MouseOutcome::Immediate);
+        app.chat.scroll_up(3);
+        draw(&mut app, &mut terminal);
+        assert_eq!(app.handle_mouse(release(start)), MouseOutcome::Immediate);
+        match app.drain_intents().as_slice() {
+            [AppIntent::OpenLink(target)] => assert_eq!(target, "https://example.com"),
+            other => panic!("expected the pressed link, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wheel_over_a_link_still_scrolls() {
+        let mut app = app_with_link();
+        let mut terminal = test_terminal(60, 12);
+        draw(&mut app, &mut terminal);
+        let ((start, row), _) = link_box(&app);
+        let before = app.chat.scroll_position();
+
+        app.chat.scroll_up(5);
+        let scrolled = app.chat.scroll_position();
+        assert_eq!(scrolled, before, "content fits: nothing to scroll");
+        assert_eq!(
+            app.handle_mouse(mouse_at(
+                crossterm::event::MouseEventKind::ScrollUp,
+                (start, row)
+            )),
+            MouseOutcome::Immediate
+        );
+        assert!(
+            app.drain_intents().is_empty(),
+            "the wheel never opens a link"
+        );
     }
 
     #[test]
