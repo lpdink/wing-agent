@@ -52,6 +52,9 @@ pub enum ChatCell {
     AssistantMessage(String),
     /// System message.
     SystemMessage(String),
+    /// Warning message — a `notice` event rendered as a yellow system
+    /// message. Unlike `ErrorMessage` it does **not** imply the turn ended.
+    WarningMessage(String),
     /// Error message.
     ErrorMessage(String),
     /// Reasoning/thinking block (always expanded).
@@ -125,6 +128,17 @@ impl ChatCell {
                 let mut lines = vec![Line::from(Span::styled("⦁ system", label))];
                 for line in render_plain(text) {
                     lines.push(Span::styled(line.to_string(), body).into());
+                }
+                lines.push(Line::from(""));
+                lines
+            }
+            Self::WarningMessage(text) => {
+                // A notice (e.g. "retrying in 6s") — yellow, but explicitly not
+                // an error: the turn is still running.
+                let warning = Style::default().fg(palette.warning);
+                let mut lines = vec![Line::from(Span::styled("⦁ warning", warning.bold()))];
+                for line in render_plain(text) {
+                    lines.push(Span::styled(line.to_string(), warning).into());
                 }
                 lines.push(Line::from(""));
                 lines

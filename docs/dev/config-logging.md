@@ -26,7 +26,7 @@
 
 | 键 | 说明 |
 |----|------|
-| `providers` | LLM provider 列表（**必填**）。每项声明 `protocol: openai \| anthropic`、`base_url`、`api_key`，以及超时（`timeout_first_chunk` / `timeout_total`）、重试（`max_retries` / `max_retry_delay`）、`explicit_cache_mode`、`reasoning_effort`、`extra_body` 等；Anthropic 需 `max_tokens` / `anthropic_version`，可配 `models` 静态列表跳过远端查询 |
+| `providers` | LLM provider 列表（**必填**）。每项声明 `protocol: openai \| anthropic`、`base_url`、`api_key`，以及超时（`timeout_first_chunk` = **响应头**超时、`timeout_total` = 总时长；另有硬编码 120s 的**响应体停滞**判定，见 `provider/sse.py` 的 `STREAM_IDLE_TIMEOUT`——响应头到达后两次读取间隔超过它即判停滞并走 `with_retry`）、重试（`max_retries` / `max_retry_delay`）、`explicit_cache_mode`、`reasoning_effort`、`extra_body` 等；Anthropic 需 `max_tokens` / `anthropic_version`，可配 `models` 静态列表跳过远端查询 |
 | `agents` | Agent 模板列表（**必填**）：`model`（+ `provider` 引用）、`default`、`system_prompt`、`tools`、`context_window_tokens` / `keep_recent_tokens`、`skills` / `rules` glob |
 | `hooks` | Hook 文件 glob |
 | `safe_command_patterns` | Bash 自动放行的正则（白名单外的命令默认拦截） |

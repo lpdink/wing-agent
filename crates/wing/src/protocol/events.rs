@@ -157,6 +157,31 @@ pub enum WingEvent {
         meta: EventMeta,
     },
 
+    /// One-shot notice (retry in progress, degradation, …).
+    ///
+    /// Mirrors `wing/event/base.py::NoticeEvent`. It is **not** an error and
+    /// **not** an end-of-turn signal: the TUI renders it as a system message
+    /// and keeps the turn running (unlike `Error`, which finishes the turn).
+    /// Broadcast-only (`persist=false`) — never replayed from history.
+    #[serde(rename = "notice")]
+    Notice {
+        /// `info` | `warning` | `error` (unknown values degrade to `info`).
+        #[serde(default = "default_notice_level")]
+        level: String,
+        #[serde(default)]
+        message: String,
+        /// Retry progress (1-based attempt); absent for other notices.
+        #[serde(default)]
+        attempt: Option<i64>,
+        #[serde(default)]
+        max_attempts: Option<i64>,
+        /// Backoff before the next attempt, in seconds.
+        #[serde(default)]
+        retry_in_s: Option<f64>,
+        #[serde(flatten)]
+        meta: EventMeta,
+    },
+
     // ---- react ----
     /// Assistant text output (streaming chunks).
     #[serde(rename = "text")]
@@ -492,12 +517,18 @@ fn default_permission_mode() -> String {
     "default".into()
 }
 
+/// Missing `level` on a notice degrades to the weakest signal.
+fn default_notice_level() -> String {
+    "info".into()
+}
+
 impl WingEvent {
     /// Returns the `type` discriminator string for this event.
     pub fn event_type(&self) -> &'static str {
         match self {
             Self::Error { .. } => "error",
             Self::Delivered { .. } => "delivered",
+            Self::Notice { .. } => "notice",
             Self::Text { .. } => "text",
             Self::Reasoning { .. } => "reasoning",
             Self::ToolCall { .. } => "tool_call",
@@ -528,6 +559,7 @@ impl WingEvent {
         match self {
             Self::Error { meta, .. }
             | Self::Delivered { meta, .. }
+            | Self::Notice { meta, .. }
             | Self::Text { meta, .. }
             | Self::Reasoning { meta, .. }
             | Self::ToolCall { meta, .. }
@@ -625,6 +657,70 @@ mod tests {
                 assert_eq!(agent, None);
             }
             _ => panic!("expected SessionStateChanged"),
+        }
+    }
+
+    #[test]
+    fn deserialize_notice_event() {
+        // Full shape (retry notice).
+        let json = r#"{
+            "type": "notice",
+            "level": "warning",
+            "message": "generate 调用失败 (1/3): TimeoutError: stalled, 6s 后重试",
+            "attempt": 1,
+            "max_attempts": 3,
+            "retry_in_s": 6.0,
+            "created_at": "2025-01-01T00:00:00",
+            "session_id": "abc123",
+            "request_id": "req-notice"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match &event {
+            WingEvent::Notice {
+                level,
+                message,
+                attempt,
+                max_attempts,
+                retry_in_s,
+                ..
+            } => {
+                assert_eq!(level, "warning");
+                assert!(message.contains("stalled"));
+                assert_eq!(*attempt, Some(1));
+                assert_eq!(*max_attempts, Some(3));
+                assert_eq!(*retry_in_s, Some(6.0));
+            }
+            other => panic!("expected Notice, got {other:?}"),
+        }
+        assert_eq!(event.event_type(), "notice");
+        assert_eq!(event.session_id(), Some("abc123"));
+    }
+
+    #[test]
+    fn deserialize_notice_event_minimal() {
+        // Only the level/message matter — every other field must be optional
+        // (older/newer gateways, null-stripped wire frames).
+        let json = r#"{
+            "type": "notice",
+            "message": "degraded",
+            "created_at": "2025-01-01T00:00:00",
+            "request_id": "req5"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match &event {
+            WingEvent::Notice {
+                level,
+                attempt,
+                max_attempts,
+                retry_in_s,
+                ..
+            } => {
+                assert_eq!(level, "info", "missing level degrades to info");
+                assert_eq!(*attempt, None);
+                assert_eq!(*max_attempts, None);
+                assert_eq!(*retry_in_s, None);
+            }
+            other => panic!("expected Notice, got {other:?}"),
         }
     }
 

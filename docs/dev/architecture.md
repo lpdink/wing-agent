@@ -115,6 +115,8 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 **provider accumulator 协议**：`ModelProvider.generate(..., accumulator=)` 接受 caller 注入的不透明容器（`StreamAccumulator`），每次尝试（含重试）开始时填充新状态——取消后 caller 仍可经 `snapshot_blocks()` 读取已累积内容。`with_retry` 只捕 `Exception`（CancelledError 是 BaseException），取消直通，不会被重试吞掉（`test_with_retry.py` 钉死）。
 
+**三段超时口径（响应头 / 响应体停滞 / 总时长）**：`timeout_first_chunk` 只包住 `send(stream=True)` 即**响应头**，`timeout_total` 是总时长；响应体自身的停滞由 `provider/sse.py` 的 `lines_with_idle_timeout()` 判定——**硬编码 120s**（`STREAM_IDLE_TIMEOUT`，无配置项），两次读取间隔超过它即判停滞并抛 `TimeoutError`，交由既有 `with_retry` 重试（不另写重试逻辑）。两个 provider 的响应体循环共用它。日志文案与新事件口径：收到响应头记 `response header received`（不再谎称 `stream call connected`），重试通知走 `notice` 事件（见下节）。
+
 **stop_reason 捕获**：两个 provider 均在最终 usage 携带协议原值（`end_turn`/`max_tokens`/`tool_use`/`stop`/`length`），传导进 `Message.stop_reason`（**唯一落盘审计位置**）与 `LLMCallMetricsEvent.stop_reason`（仅用于直播——该事件 persist=false，不落盘；metrics_registry 经 event_bus 聚合进独立的 metrics.json）。Anthropic 的 max_tokens 砍在 tool args 中间时，未终结的 tool 块从权威块数组剔除（半截 tool_use 不再被当作完整调用执行）；该剔除与未提交投影共用同一实现（`_ordered_finalized_blocks`）。
 
 合成结果同时发射与正常完成相同的 `ToolCallResultEvent` / `ToolResultTurnEvent`：TUI 据此翻转 cell 状态（Bash 计时器仅在 cell 为 Pending 时前进，结果事件使其冻结——修复了打断后计时器不停的存量问题），stdio 模式据此输出 user turn 消息。
@@ -132,7 +134,9 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 **落盘只存事实，不存副本**：`persist=true` 事件（diff/ask/interrupted/error/compact_done）在完整产生时即时落盘进链；流式 delta（`persist=false`）纯广播——不落盘、不进任何内存缓冲，其内容由轮提交时的 Message 记录承载。`tool_call_result` / `llm_call_metrics` 是 Message 孪生（`role="tool"` Message / `Message.usage` + `Message.stop_reason`），已停止落盘（事件本身保留：metrics_registry 与 TUI 直播经 event_bus 依赖）；`turn_result` 保留落盘但 `result` 字段（最终文本孪生）经 `disk_exclude` 排除出磁盘记录（wire 帧仍携带，stdio 消费）。
 
-**persist 分流原则**：`WingEvent.persist` 是 `ClassVar[bool]`（非 pydantic 字段——旧的 `Field(exclude=True)` 会被子类重声明静默击穿），基类默认 true。判据两条同时成立：**是事实**（读回来仍成立，非一次性信号）**且无 Message 孪生**。false 仅限（a）流式 delta，（b）与 Message 完全孪生且体积可观的事件（AssistantTurn/ToolResultTurn/ToolCall/ToolCallResult/LLMCallMetrics），（c）可从权威状态实时重建的协议/查询事件（Sync/SessionInit/ContextStats/BranchTargets/Delivered/SessionStateChanged）。
+**persist 分流原则**：`WingEvent.persist` 是 `ClassVar[bool]`（非 pydantic 字段——旧的 `Field(exclude=True)` 会被子类重声明静默击穿），基类默认 true。判据两条同时成立：**是事实**（读回来仍成立，非一次性信号）**且无 Message 孪生**。false 仅限（a）流式 delta，（b）与 Message 完全孪生且体积可观的事件（AssistantTurn/ToolResultTurn/ToolCall/ToolCallResult/LLMCallMetrics），（c）可从权威状态实时重建的协议/查询事件（Sync/SessionInit/ContextStats/BranchTargets/Delivered/SessionStateChanged），（d）一次性通知（`notice`——如「LLM 调用失败，N 秒后重试」）。
+
+**error 与 notice 的语义边界**：`error` = 真错误（前端终结 turn、渲染错误单元、未聚焦时 OSC 9 通知）；`notice` = 提醒（`level` + `message`，不终结 turn、不发通知、不落盘）。重试通知走 `notice`——重试中的 turn 并没有结束，而 `error` 在前端是「这一轮结束了」的**终结信号**（曾把「会自愈的失败」误报成真错误：spinner 停、耗时停、状态错位）。
 
 **三个序列化边界，三套剥离规则**（不可用一个 `model_dump(exclude_none)` 打通——`Message._serialize_flat` 是 wrap 序列化器，`content`/`reasoning_content`/`tool_calls` 在内层 handler 之后才注入）：磁盘记录（`TrackedList._to_record`：字典推导剥 null + 剥 target + disk_exclude）、WS 直播帧与 SyncSession 载荷（`event/__init__.py::wire_dump`：剥 null + 剥 `parent_uuid`/`unzip_last_uuid`/`role`/`target`，保留 `uuid`）。`serialize_event` 是 `wire_dump` 的别名——一套规则，无分散实现。
 

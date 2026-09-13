@@ -17,9 +17,10 @@ from .base import (
     DeliveredEvent,
     ErrorEvent,
     EventTarget,
-    WingEvent,
+    NoticeEvent,
     SessionInfo,
     SessionStatus,
+    WingEvent,
 )
 from .query_response import (
     BranchTargetInfo,
@@ -75,6 +76,7 @@ WingEventUnion = (
     | SessionStateChangedEvent
     | ContextStatsEvent
     | BranchTargetsEvent
+    | NoticeEvent
 )
 
 # 事件类型注册表：type 字面量 → 事件类。
@@ -82,6 +84,7 @@ WingEventUnion = (
 # （TrackedList.load）。未知 type 跳过——前向容忍。
 EVENT_TYPES: dict[str, type[WingEvent]] = {
     "error": ErrorEvent,
+    "notice": NoticeEvent,
     "text": TextEvent,
     "reasoning": ReasoningEvent,
     "tool_call": ToolCallEvent,
@@ -161,6 +164,7 @@ __all__ = [
     "SessionInfo",
     "SessionStatus",
     "ErrorEvent",
+    "NoticeEvent",
     "DeliveredEvent",
     # react
     "TextEvent",
