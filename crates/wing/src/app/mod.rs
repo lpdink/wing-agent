@@ -649,13 +649,10 @@ impl App {
         }
     }
 
-    /// Grab the bar at a pressed row.
-    ///
-    /// A press on the **thumb** keeps its position (the drag that follows is
-    /// relative, see [`scrollbar::offset_for_drag`]); a press on the bare
-    /// **track** jumps proportionally, so that gesture stays the coarse "get
-    /// near the place" one. The drag is anchored at whatever the press landed
-    /// on, so a jump can be fine-tuned without lifting the button.
+    /// Grab the bar at a pressed row: the track jumps there, and the grip is
+    /// taken at that same row so the drag that follows keeps it — the thumb
+    /// stays under the pointer for the whole gesture (a press on the thumb
+    /// itself is therefore a no-op: it keeps the position it already has).
     ///
     /// The grab also lights the bar up: "the user is manipulating the bar" is
     /// the visual contract, and without any-motion reporting (multiplexers)
@@ -665,23 +662,18 @@ impl App {
         self.scrollbar.dragging = true;
         self.scrollbar.hovered = true;
         self.scrollbar.grip = scrollbar::grip_at(geom, row);
-        let jumped = !scrollbar::hit_thumb(geom, row) && self.scroll_to_row(geom, row);
-        self.scrollbar.drag_from = Some((
-            row.clamp(geom.track_top, geom.track_bottom),
-            self.chat.scroll_position(),
-        ));
-        if jumped || !was_active {
+        if self.scroll_to_row(geom, row) || !was_active {
             MouseOutcome::Immediate
         } else {
             MouseOutcome::Ignored
         }
     }
 
-    /// Drag with the grip held: one pointer row moves the view [`WHEEL_SCROLL_LINES`]
-    /// lines (one wheel notch), relative to where the press landed — the
-    /// pointer's row is clamped into the track, and the column is ignored on
-    /// purpose, so a drag that wanders off the bar keeps moving instead of
-    /// stalling.
+    /// Drag with the grip held: re-target continuously so the thumb keeps
+    /// following the pointer 1:1 (the mapping is proportional, see
+    /// [`scrollbar::offset_for_row`]). The column is ignored on purpose — the
+    /// row is what maps onto the track, so a drag that wanders off the bar
+    /// still scrolls.
     fn drag_scrollbar(&mut self, row: u16) -> MouseOutcome {
         let Some(geom) = self.scrollbar_geometry() else {
             // The bar vanished mid-drag (the content stopped overflowing):
@@ -692,13 +684,7 @@ impl App {
                 MouseOutcome::Ignored
             };
         };
-        let Some(origin) = self.scrollbar.drag_from else {
-            // A drag without a press cannot mean anything (`mouse_press` owns
-            // the anchor).
-            return MouseOutcome::Ignored;
-        };
-        let target = scrollbar::offset_for_drag(&geom, origin, row, WHEEL_SCROLL_LINES);
-        if self.scroll_to_offset(&geom, target) {
+        if self.scroll_to_row(&geom, row) {
             // A drag is a flood of motion events — coalesced by the frame gate.
             MouseOutcome::Coalesced
         } else {
@@ -710,7 +696,6 @@ impl App {
     /// the hover look follows it.
     fn release_scrollbar(&mut self, column: u16, row: u16) -> MouseOutcome {
         self.scrollbar.dragging = false;
-        self.scrollbar.drag_from = None;
         self.scrollbar.hovered = self.scrollbar_at(column, row).is_some();
         MouseOutcome::Immediate
     }
@@ -1172,17 +1157,12 @@ impl App {
         scrollbar::hit(&geom, column, row).then_some(geom)
     }
 
-    /// Move the chat to the position under a pointer row — the *coarse* jump a
-    /// press on the bare track performs, through the shared follow contract
-    /// (see `ChatView::scroll_to`). Returns whether anything visible changed,
-    /// so the 16ms frame gate can be bypassed only when the view really moved.
+    /// Move the chat to the position under a pointer row, through the shared
+    /// follow contract (see `ChatView::scroll_to`). Returns whether anything
+    /// visible changed, so the 16ms frame gate can be bypassed only when the
+    /// view really moved.
     fn scroll_to_row(&mut self, geom: &scrollbar::ScrollbarGeometry, row: u16) -> bool {
         let target = scrollbar::offset_for_row(geom, row, self.scrollbar.grip);
-        self.scroll_to_offset(geom, target)
-    }
-
-    /// Move the chat to an absolute offset through the same follow contract.
-    fn scroll_to_offset(&mut self, geom: &scrollbar::ScrollbarGeometry, target: usize) -> bool {
         let before = (self.chat.scroll_position(), self.chat.is_at_bottom());
         self.chat.scroll_to(target, geom.viewport_height);
         before != (self.chat.scroll_position(), self.chat.is_at_bottom())
@@ -4791,12 +4771,12 @@ mod tests {
         assert!(!app.chat.is_at_bottom());
     }
 
-    /// Dragging the thumb is the *fine* gesture: one pointer row is one wheel
-    /// notch, anchored at the press, and the row clamps into the track (so a
-    /// drag that leaves the chat area keeps moving instead of accelerating).
-    /// Reaching an arbitrary position stays the press's job.
+    /// Dragging the thumb keeps it 1:1 with the pointer (the mapping is
+    /// proportional — see `scrollbar::offset_for_row`), and the row clamps into
+    /// the track so a drag that leaves the chat area keeps dragging along the
+    /// extremes instead of jumping or stalling.
     #[test]
-    fn test_scrollbar_drag_moves_the_wheel_step_per_pointer_row() {
+    fn test_scrollbar_drag_follows_the_pointer_and_clamps_outside_the_track() {
         let area = Rect::new(0, 0, 80, 20);
         let mut app = app_with_scrollbar(area, 100, 40);
         let geom = app.scrollbar_geometry().expect("content overflows");
@@ -4806,38 +4786,18 @@ mod tests {
         assert!(redrew(app.handle_mouse(press((geom.column, grab_row)))));
         assert_eq!(app.chat.scroll_position(), 40, "no jump when grabbing");
 
-        // One row down = 3 lines (one wheel notch), not a proportional jump.
-        assert!(redrew(app.handle_mouse(drag((geom.column, grab_row + 1)))));
-        assert_eq!(app.chat.scroll_position(), 43);
-        assert!(redrew(app.handle_mouse(drag((geom.column, grab_row + 2)))));
-        assert_eq!(app.chat.scroll_position(), 46);
+        // Dragged far above the chat area → clamped to the top, still dragging.
+        assert!(redrew(app.handle_mouse(drag((geom.column, 0)))));
+        assert_eq!(app.chat.scroll_position(), 0);
 
-        // The column is ignored while dragging (the row is what maps): the
-        // extreme of the track is as far as this gesture goes.
-        let to_bottom = geom.track_bottom as usize - grab_row as usize;
-        assert!(redrew(app.handle_mouse(drag((0, geom.track_bottom)))));
-        assert_eq!(app.chat.scroll_position(), 40 + 3 * to_bottom);
-        assert!(
-            !redrew(app.handle_mouse(drag((geom.column, 9999)))),
-            "a row outside the track is the same target, so nothing changes"
-        );
-        assert_eq!(
-            app.chat.scroll_position(),
-            40 + 3 * to_bottom,
-            "a row outside the track clamps, it does not accelerate"
-        );
-        assert!(
-            !app.chat.is_at_bottom(),
-            "one drag cannot cover a whole long session — the jump does that"
-        );
-
-        // The press still jumps proportionally: the bottom of the track is the
-        // end of the history, follow re-armed.
-        assert!(redrew(
-            app.handle_mouse(press((geom.column, geom.track_bottom)))
-        ));
+        // …and far below it → clamped to the bottom, follow re-armed.
+        assert!(redrew(app.handle_mouse(drag((geom.column, 9999)))));
         assert_eq!(app.chat.scroll_position(), geom.max_scroll());
         assert!(app.chat.is_at_bottom());
+
+        // The column is ignored while dragging (the row is what maps).
+        assert!(redrew(app.handle_mouse(drag((0, geom.track_top)))));
+        assert_eq!(app.chat.scroll_position(), 0);
 
         // Release on the bar: the drag ends, but the pointer still hovers it.
         assert!(redrew(
@@ -4848,7 +4808,7 @@ mod tests {
 
         // A bare drag (no press) must not move anything afterwards.
         assert!(!redrew(app.handle_mouse(drag((geom.column, 9999)))));
-        assert_eq!(app.chat.scroll_position(), geom.max_scroll());
+        assert_eq!(app.chat.scroll_position(), 0);
 
         // Moving off the bar drops the hover look again.
         assert!(redrew(
@@ -7242,22 +7202,15 @@ mod tests {
             "a bar press paints no highlight"
         );
 
-        // The drag is the fine gesture: three lines per pointer row, no
-        // selection involved.
+        // The drag keeps the thumb under the pointer (proportional), and no
+        // selection is involved either way.
         assert_eq!(
-            app.handle_mouse(drag((geom.column, geom.track_top + 1))),
+            app.handle_mouse(drag((geom.column, geom.track_bottom))),
             MouseOutcome::Coalesced
-        );
-        assert_eq!(app.chat.scroll_position(), 3, "one pointer row = one notch");
-        assert!(!app.selection.is_press_active());
-
-        // Pressing the bare track at its end jumps to the end, follow re-armed.
-        assert_eq!(
-            app.handle_mouse(press((geom.column, geom.track_bottom))),
-            MouseOutcome::Immediate
         );
         assert_eq!(app.chat.scroll_position(), geom.max_scroll());
         assert!(app.chat.is_at_bottom(), "the bottom edge re-arms follow");
+        assert!(!app.selection.is_press_active());
 
         // Release ends the drag: nothing was selected, so nothing is copied.
         assert_eq!(
