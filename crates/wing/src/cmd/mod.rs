@@ -408,18 +408,16 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     let mut terminal = tui::init_terminal()?;
 
     // Set up panic hook to restore terminal on panic.
+    //
+    // The teardown itself is `tui::leave_sequence` (mouse reporting off before
+    // leaving the alternate screen) — the same sequence the clean-exit path
+    // writes, so a panic can never leave the terminal reporting mice to the
+    // shell. Failures are ignored: a dead terminal must not re-panic.
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = crossterm::terminal::disable_raw_mode();
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            tui::DisableMouseReporting,
-            crossterm::terminal::LeaveAlternateScreen,
-            crossterm::event::DisableBracketedPaste,
-            crossterm::event::DisableFocusChange,
-            crossterm::terminal::SetTitle(""),
-            crossterm::cursor::Show
-        );
+        let _ = tui::leave_sequence(&mut std::io::stdout());
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(""));
         original_hook(panic_info);
     }));
 

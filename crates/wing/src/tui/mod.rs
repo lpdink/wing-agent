@@ -43,6 +43,8 @@ pub enum TermEvent {
 // (drag) events in SGR encoding — no hover event flood, and the full
 // `MouseEvent` (kind / modifiers / 0-based column & row) reaches the app,
 // which is what later changes (text selection, scrollbar) build on.
+// `?1003` (hover / any-motion) is to be turned on here and nowhere else —
+// the scrollbar change is the one that needs it.
 //
 // Alternate scroll (DECSET 1007) is deliberately NOT used: it makes the
 // terminal translate the wheel into plain Up/Down keys, which are
@@ -74,6 +76,8 @@ impl Command for EnableMouseReporting {
 /// Disable mouse reporting. The modes are turned off high-bit first, so the
 /// terminal never ends up in a state where motion events are still enabled
 /// while SGR encoding is already off.
+///
+/// `pub` so the panic hook (`cmd`) can share the one teardown sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisableMouseReporting;
 
@@ -95,37 +99,57 @@ impl Command for DisableMouseReporting {
     }
 }
 
-/// Initialize the terminal for TUI rendering.
-pub fn init_terminal() -> Result<WingTerminal> {
-    crossterm::terminal::enable_raw_mode()?;
-    let mut stdout = io::stdout();
+/// Write the sequence that enters TUI mode: alternate screen, mouse
+/// reporting, bracketed paste, focus reporting, hide cursor.
+///
+/// This is the *only* place that decides the setup order — `init_terminal`
+/// must not write these commands ad hoc. The exact bytes are asserted by
+/// `test_enter_sequence_is_exact`, so reordering the arguments here is a
+/// test failure, not a silent behavior change.
+pub fn enter_sequence(w: &mut impl io::Write) -> io::Result<()> {
     crossterm::execute!(
-        stdout,
+        w,
         EnterAlternateScreen,
         EnableMouseReporting,
         EnableBracketedPaste,
         EnableFocusChange,
         crossterm::cursor::Hide
     )?;
-    let backend = CrosstermBackend::new(stdout);
-    let terminal = Terminal::new(backend)?;
-    Ok(terminal)
+    Ok(())
 }
 
-/// Restore the terminal to its original state.
+/// Write the sequence that leaves TUI mode: mouse reporting off *first*, then
+/// the alternate screen, bracketed paste, focus reporting, show cursor.
 ///
-/// Mouse reporting is disabled *before* leaving the alternate screen, so the
-/// teardown order mirrors the setup order in reverse: an interrupted restore
-/// can never leave the terminal forwarding mouse reports to the shell.
-pub fn restore_terminal(terminal: &mut WingTerminal) -> Result<()> {
+/// Ordering is load-bearing: an interrupted teardown must never leave the
+/// terminal forwarding mouse reports to the shell. Shared by the clean-exit
+/// path and the panic hook (both are byte-asserted by
+/// `test_leave_sequence_is_exact`).
+pub fn leave_sequence(w: &mut impl io::Write) -> io::Result<()> {
     crossterm::execute!(
-        terminal.backend_mut(),
+        w,
         DisableMouseReporting,
         LeaveAlternateScreen,
         DisableBracketedPaste,
         DisableFocusChange,
         crossterm::cursor::Show
     )?;
+    Ok(())
+}
+
+/// Initialize the terminal for TUI rendering.
+pub fn init_terminal() -> Result<WingTerminal> {
+    crossterm::terminal::enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    enter_sequence(&mut stdout)?;
+    let backend = CrosstermBackend::new(stdout);
+    let terminal = Terminal::new(backend)?;
+    Ok(terminal)
+}
+
+/// Restore the terminal to its original state.
+pub fn restore_terminal(terminal: &mut WingTerminal) -> Result<()> {
+    leave_sequence(terminal.backend_mut())?;
     crossterm::terminal::disable_raw_mode()?;
     Ok(())
 }
@@ -202,21 +226,103 @@ pub fn is_quit_key(key: &KeyEvent) -> bool {
 mod tests {
     use super::*;
 
+    /// The exact bytes of each path, spelled out once so that reordering or
+    /// extending a sequence is a test failure rather than a silent change.
+    const ENTER_BYTES: &str =
+        "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?25l";
+    const LEAVE_BYTES: &str =
+        "\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?1049l\x1b[?2004l\x1b[?1004l\x1b[?25h";
+
     fn ansi_of(cmd: impl Command) -> String {
         let mut out = String::new();
         cmd.write_ansi(&mut out).expect("write_ansi into a String");
         out
     }
 
-    /// Parse `\x1b[?<n><h|l>` sequences into `(mode, enabled)` pairs.
+    /// Parse `\x1b[?<n><h|l>` sequences into `(mode, enabled)` pairs. Panics on
+    /// a segment that does not parse, so a truncated or unexpected sequence
+    /// cannot pass by being silently dropped.
     fn parse_modes(seq: &str) -> Vec<(u32, bool)> {
         seq.split("\x1b[?")
             .skip(1)
-            .filter_map(|chunk| {
-                let (digits, flag) = chunk.split_at(chunk.len().checked_sub(1)?);
-                Some((digits.parse().ok()?, flag == "h"))
+            .map(|chunk| {
+                let (digits, flag) =
+                    chunk.split_at(chunk.len().checked_sub(1).expect("empty mode segment"));
+                let mode = digits.parse().expect("mode number");
+                let enabled = match flag {
+                    "h" => true,
+                    "l" => false,
+                    other => panic!("unexpected mode flag {other:?} in {chunk:?}"),
+                };
+                (mode, enabled)
             })
             .collect()
+    }
+
+    #[test]
+    fn test_enter_sequence_is_exact() {
+        // `init_terminal` consumes this function, so the assertion covers the
+        // real setup path: alt screen → mouse → paste → focus → hide cursor.
+        let mut out = Vec::new();
+        enter_sequence(&mut out).expect("write enter sequence");
+        assert_eq!(String::from_utf8(out).unwrap(), ENTER_BYTES);
+    }
+
+    #[test]
+    fn test_leave_sequence_is_exact() {
+        // Both `restore_terminal` and the panic hook consume this function.
+        // Mouse reporting must be off *before* `?1049l` leaves the alternate
+        // screen — that ordering lives here and nowhere else.
+        let mut out = Vec::new();
+        leave_sequence(&mut out).expect("write leave sequence");
+        assert_eq!(String::from_utf8_lossy(&out), LEAVE_BYTES);
+
+        // Restoring twice just writes the same constant sequence again
+        // (idempotent teardown; `disable_raw_mode` is a no-op when off).
+        leave_sequence(&mut out).expect("write leave sequence again");
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            format!("{LEAVE_BYTES}{LEAVE_BYTES}")
+        );
+    }
+
+    #[test]
+    fn test_sequences_leave_out_forbidden_modes() {
+        // ?1003 (any-motion) floods the event loop with hover events,
+        // ?1015 is RXVT coordinates (we want SGR / 1006 only) and ?1007
+        // (alternate scroll) turns the wheel into arrow keys.
+        for seq in [ENTER_BYTES, LEAVE_BYTES] {
+            for forbidden in ["?1003", "?1015", "?1007"] {
+                assert!(
+                    !seq.contains(forbidden),
+                    "{seq:?} must not touch {forbidden}"
+                );
+            }
+        }
+        assert_eq!(
+            parse_modes(ENTER_BYTES),
+            vec![
+                (1049, true),
+                (1000, true),
+                (1002, true),
+                (1006, true),
+                (2004, true),
+                (1004, true),
+                (25, false),
+            ]
+        );
+        assert_eq!(
+            parse_modes(LEAVE_BYTES),
+            vec![
+                (1006, false),
+                (1002, false),
+                (1000, false),
+                (1049, false),
+                (2004, false),
+                (1004, false),
+                (25, true),
+            ]
+        );
     }
 
     #[test]
@@ -228,28 +334,6 @@ mod tests {
         assert_eq!(
             ansi_of(DisableMouseReporting),
             "\x1b[?1006l\x1b[?1002l\x1b[?1000l"
-        );
-    }
-
-    #[test]
-    fn test_mouse_reporting_leaves_out_forbidden_modes() {
-        // ?1003 (any-motion) floods the event loop with hover events,
-        // ?1015 is RXVT coordinates (we want SGR / 1006 only) and ?1007
-        // (alternate scroll) turns the wheel into arrow keys.
-        for seq in [
-            ansi_of(EnableMouseReporting),
-            ansi_of(DisableMouseReporting),
-        ] {
-            for forbidden in ["?1003", "?1015", "?1007"] {
-                assert!(
-                    !seq.contains(forbidden),
-                    "{seq:?} must not touch {forbidden}"
-                );
-            }
-        }
-        assert_eq!(
-            parse_modes(&ansi_of(EnableMouseReporting)),
-            vec![(1000, true), (1002, true), (1006, true)]
         );
     }
 
@@ -267,8 +351,11 @@ mod tests {
 
     #[test]
     fn test_term_event_mouse_keeps_coordinates_and_modifiers() {
-        // The event layer must not flatten mouse events into a direction-only
-        // enum: selection / scrollbar need kind, modifiers and 0-based coords.
+        // Type guard only: it fails to compile if the payload stops carrying
+        // the full `MouseEvent` (kind / modifiers / 0-based coords), which is
+        // what selection & scrollbar build on. The actual forwarding in
+        // `spawn_event_stream` is not unit-testable without a pty — it was
+        // verified by a pty probe recorded in the commit that added it.
         let event = TermEvent::Mouse(crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::ScrollUp,
             column: 42,
