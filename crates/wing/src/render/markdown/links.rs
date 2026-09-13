@@ -22,6 +22,14 @@ use ratatui::text::Span;
 
 use super::types::SegmentKind;
 
+/// Width of the per-line cell prefix (`⦁ ` / `  ` / `? `) that every cell
+/// renderer prepends before the markdown content.
+///
+/// Link columns are measured inside the markdown line, so they must be shifted
+/// by this much before they can address screen columns — the streaming engine,
+/// the assistant cell and the thinking cell all use the same prefix.
+pub(crate) const CELL_PREFIX_WIDTH: u16 = 2;
+
 /// A link inside one rendered line.
 ///
 /// `start..end` is a half-open range of **display columns relative to the line
@@ -92,7 +100,9 @@ pub fn sanitize_osc8_target(raw: &str) -> String {
 }
 
 fn is_control_char(c: char) -> bool {
-    c.is_control() || matches!(c, '\u{7f}'..='\u{9f}')
+    // `char::is_control` is Unicode `Cc`: C0, DEL and C1 — exactly the set that
+    // can terminate or forge an escape sequence.
+    c.is_control()
 }
 
 /// Remove every OSC8 sequence from a rendered symbol.
@@ -194,11 +204,6 @@ impl ComposedLines {
         &self.links
     }
 
-    /// Link spans of one rendered line.
-    pub fn links_at(&self, line: usize) -> &[LinkSpan] {
-        self.links.get(line).map_or(&[], Vec::as_slice)
-    }
-
     /// Whether any line carries a link.
     pub fn has_links(&self) -> bool {
         self.links.iter().any(|l| !l.is_empty())
@@ -217,14 +222,6 @@ impl ComposedLines {
 
     pub fn into_lines(self) -> Vec<Line<'static>> {
         self.lines
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.lines.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.lines.len()
     }
 }
 
@@ -296,19 +293,31 @@ pub(crate) fn label_segments_have_location_suffix(segments: &[MarkdownSegment]) 
 
 /// Extract a hidden location suffix from a local file link destination.
 ///
-/// For links like `[text](./file.rs#L10)`, returns `Some("#L10")`.
+/// For links like `[text](./file.rs#L10)`, returns `Some("#L10")`. Gated on
+/// "looks like a local path" so a URL keeps its own `#fragment` / `:port`;
+/// callers that already know they hold a path ask [`trailing_location_suffix`]
+/// directly.
 pub(crate) fn extract_hidden_location_suffix(dest_url: &str) -> Option<String> {
-    if !is_local_path_like_link(dest_url) {
-        return None;
-    }
+    is_local_path_like_link(dest_url)
+        .then(|| trailing_location_suffix(dest_url))
+        .flatten()
+}
+
+/// Extract a trailing location suffix, whatever the destination looks like.
+///
+/// Same patterns as [`extract_hidden_location_suffix`] (`#L10`, `#L10C5`,
+/// `:10`, `:10:5`) without the local-path gate — the opener needs them for bare
+/// relative forms like `src/main.rs:10`, which never look like a path to the
+/// renderer.
+pub(crate) fn trailing_location_suffix(raw: &str) -> Option<String> {
     // Look for hash location suffix like #L10, #L10C5.
-    if let Some((_, fragment)) = dest_url.rsplit_once('#')
+    if let Some((_, fragment)) = raw.rsplit_once('#')
         && is_hash_location_suffix(fragment)
     {
         return Some(format!("#{fragment}"));
     }
     // Look for colon location suffix like :10, :10:5.
-    if let Some(suffix) = extract_colon_suffix(dest_url) {
+    if let Some(suffix) = extract_colon_suffix(raw) {
         return Some(suffix);
     }
     None

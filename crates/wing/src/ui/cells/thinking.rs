@@ -15,6 +15,7 @@ use crate::config::rendering::ThinkingMode;
 use crate::render::markdown::ComposedLines;
 use crate::render::markdown::RenderOpts;
 use crate::render::markdown::compose_lines;
+use crate::render::markdown::links::CELL_PREFIX_WIDTH;
 use crate::render::markdown::render_markdown_lines_with;
 use crate::render::markdown::types::thinking_segment_style;
 use ratatui::style::Style;
@@ -89,7 +90,7 @@ impl ThinkingBlock {
         );
         let mut composed = compose_lines(
             &md_lines,
-            2,
+            CELL_PREFIX_WIDTH,
             |i| {
                 let prefix = if i == 0 { "⦁ " } else { "  " };
                 Span::styled(prefix.to_string(), thinking_style)

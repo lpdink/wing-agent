@@ -29,6 +29,7 @@ use crate::render::Renderable;
 use crate::render::markdown::ComposedLines;
 use crate::render::markdown::LinkSpan;
 use crate::render::markdown::compose_lines;
+use crate::render::markdown::links::CELL_PREFIX_WIDTH;
 use crate::render::markdown::osc8_close;
 use crate::render::markdown::osc8_open;
 use crate::render::markdown::render_markdown_lines;
@@ -203,7 +204,7 @@ fn assistant_message_lines(text: &str, width: u16, palette: &ThemePalette) -> Co
     let bullet_style = Style::default().fg(palette.text);
     let mut composed = compose_lines(
         &md_lines,
-        2,
+        CELL_PREFIX_WIDTH,
         |i| {
             if i == 0 {
                 Span::styled("⦁ ", bullet_style)
@@ -732,8 +733,11 @@ impl ChatView {
     /// Drop the link hit boxes covered by `area` (an overlay painted on top of
     /// the chat after this frame's links were recorded).
     ///
-    /// Only used for the toast: it is drawn over the chat band, and a hit box
-    /// whose text is no longer visible would open a link the user cannot see.
+    /// A hit box whose text is no longer visible would open a link the user
+    /// cannot see. Today the only overlay over the chat band is the toast; the
+    /// scrollbar column (`tui-scrollbar`) will be the next one — when it lands,
+    /// its column must be masked here too (it paints over the last columns of
+    /// every row, including link text), or clicks on it will open links.
     pub fn mask_links(&mut self, area: Rect) {
         self.frame_links.retain_mut(|(row, links)| {
             if *row < area.y || *row >= area.bottom() {
@@ -1540,11 +1544,7 @@ impl Widget for ChatViewWidget<'_> {
             if cached.is_prewrapped(content_area.width, &self.ctx) {
                 let cell = cached.compute_cell_lines(content_area.width, &self.ctx);
                 let rows_exact = cell.rows_exact;
-                let cell_links = if rows_exact {
-                    cell.links.to_vec()
-                } else {
-                    Vec::new()
-                };
+                let cell_links = links_for_frame(&cell);
                 let lines = cell.lines;
                 let skip_lines = skip.min(lines.len());
                 let end = (skip_lines + cell_visible).min(lines.len());
@@ -1577,11 +1577,7 @@ impl Widget for ChatViewWidget<'_> {
 
             let cell = cached.compute_cell_lines(content_area.width, &self.ctx);
             let rows_exact = cell.rows_exact;
-            let cell_links = if rows_exact {
-                cell.links.to_vec()
-            } else {
-                Vec::new()
-            };
+            let cell_links = links_for_frame(&cell);
             let cell_lines = cell.lines.to_vec();
 
             // User messages (normal / pending / discarded): fill full-width
@@ -1655,6 +1651,19 @@ impl Widget for ChatViewWidget<'_> {
 
         // Install this frame's links (the hit test reads them between frames).
         self.view.frame_links = frame_links;
+    }
+}
+
+/// The link table to place for one cell.
+///
+/// Cloned only when the cell actually has something to place (and its rows are
+/// exact), so a frame full of cells without links allocates nothing — the
+/// returned vector is `Vec::new()` (capacity 0) in that case.
+fn links_for_frame(cell: &crate::ui::cached_cell::CellLines<'_>) -> Vec<Vec<LinkSpan>> {
+    if cell.rows_exact && cell.has_links() {
+        cell.links.to_vec()
+    } else {
+        Vec::new()
     }
 }
 
@@ -3336,19 +3345,204 @@ mod link_tests {
 
     #[test]
     fn injecting_links_keeps_width_wrap_and_height_unchanged() {
-        let text = "para one with [a link](https://example.com/x) and more words to wrap around";
+        // Same visible text, one side markdown-linked. The comparison is only
+        // meaningful because the other side really has no links — otherwise it
+        // is the same input rendered twice and every assertion holds trivially.
+        let linked = "para one with [a link](https://example.com/x) and more words to wrap around";
+        let plain_text =
+            "para one with a link (https://example.com/x) and more words to wrap around";
         let mut with = ChatView::new();
-        with.push(ChatCell::AssistantMessage(text.into()));
+        with.push(ChatCell::AssistantMessage(linked.into()));
         let mut without = ChatView::new();
-        without.push(ChatCell::AssistantMessage(text.into()));
+        without.push(ChatCell::AssistantMessage(plain_text.into()));
 
         let buf = render(&mut with, 40, 12);
         let plain = render(&mut without, 40, 12);
+        assert!(
+            plain
+                .area
+                .positions()
+                .all(|p| !plain[p].symbol().contains("\u{1b}]8;;")),
+            "the reference frame must be link-free for this to be a comparison"
+        );
+        assert!(without.frame_links().is_empty());
+        assert!(!with.frame_links().is_empty());
         for row in buf.area.y..buf.area.bottom() {
             assert_eq!(row_text(&buf, row), row_text(&plain, row), "row {row}");
         }
         assert_eq!(with.content_height(), without.content_height());
-        assert!(!with.frame_links().is_empty());
+        assert_eq!(with.scroll_position(), without.scroll_position());
+    }
+
+    /// The click-invariant behind `place_links`: every row of the frame map
+    /// really shows the link text it claims.
+    fn assert_link_rows_show_their_text(view: &ChatView, buf: &Buffer) {
+        for (row, links) in view.frame_links() {
+            let text = row_text(buf, *row);
+            for _link in links {
+                assert!(
+                    text.contains("docs") || text.contains("example.com"),
+                    "row {row} carries a hit box but shows {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_fitting_code_line_keeps_its_link_on_the_right_row() {
+        let mut view = ChatView::new();
+        view.push(ChatCell::AssistantMessage(
+            "```rust\nlet x = 1;\n```\ntail [docs](https://example.com) end".into(),
+        ));
+        let buf = render(&mut view, 40, 12);
+        assert!(!view.frame_links().is_empty(), "code that fits keeps links");
+        assert_link_rows_show_their_text(&view, &buf);
+        let (row, _) = only_link(&view);
+        assert!(row_text(&buf, row).contains("docs"), "row {row}");
+    }
+
+    #[test]
+    fn an_overwide_code_line_puts_the_cell_off_limits() {
+        // `Paragraph` wraps the over-wide code line into two screen rows, so
+        // screen row != line index from there on: the link later in the same
+        // cell would be injected and hit-tested on the *code* rows. The cell
+        // must produce no links at all instead (B1).
+        let mut view = ChatView::new();
+        view.push(ChatCell::AssistantMessage(
+            "```rust\nlet some_extremely_long_variable_name_that_exceeds_terminal_width_by_a_lot = 1;\n```\ntail [docs](https://example.com) end".into(),
+        ));
+        let buf = render(&mut view, 40, 12);
+        assert!(
+            view.frame_links().is_empty(),
+            "a cell whose rows are not exact must place no links: {:?}",
+            view.frame_links()
+        );
+        let code_row = find_row(&buf, "some_extremely_long_variable_name");
+        assert!(
+            linked_columns(&buf, code_row).is_empty(),
+            "no sequence may land on code text"
+        );
+        for row in buf.area.y..buf.area.bottom() {
+            assert!(
+                linked_columns(&buf, row).is_empty(),
+                "row {row} was injected"
+            );
+        }
+        // The link text itself still renders (only the link is dropped).
+        assert!(row_text(&buf, find_row(&buf, "tail docs")).contains("docs"));
+    }
+
+    #[test]
+    fn an_overwide_indented_code_line_puts_the_cell_off_limits() {
+        // Indented code is exempt from the IR prose wrapper for the same reason
+        // fenced code is, so it reaches `Paragraph` over-wide and breaks the row
+        // arithmetic just like the fenced case.
+        let mut view = ChatView::new();
+        view.push(ChatCell::AssistantMessage(format!(
+            "    {}\n\ntail [docs](https://example.com) end",
+            "let y = 1; // ".to_string() + &"z".repeat(60)
+        )));
+        let buf = render(&mut view, 40, 12);
+        assert!(
+            view.frame_links().is_empty(),
+            "indented code row shifted the mapping: {:?}",
+            view.frame_links()
+        );
+        for row in buf.area.y..buf.area.bottom() {
+            assert!(
+                linked_columns(&buf, row).is_empty(),
+                "row {row} was injected"
+            );
+        }
+        // Prose (a *wrapped* long unbreakable run) is hard-broken by the IR
+        // wrapper instead, so it keeps its links — pin that difference.
+        let mut prose = ChatView::new();
+        prose.push(ChatCell::AssistantMessage(format!(
+            "{}[docs](https://example.com)",
+            "x".repeat(60)
+        )));
+        render(&mut prose, 40, 12);
+        assert!(
+            !prose.frame_links().is_empty(),
+            "the IR wrapper hard-breaks long prose, so its rows stay exact"
+        );
+    }
+
+    #[test]
+    fn links_for_frame_allocates_nothing_without_links() {
+        let cell = ComposedLines::plain(vec![Line::from("plain")]);
+        let links: Vec<Vec<LinkSpan>> = Vec::new();
+        let cell_lines = crate::ui::cached_cell::CellLines {
+            lines: cell.lines(),
+            links: &links,
+            rows_exact: true,
+        };
+        assert!(!cell_lines.has_links());
+        let table = links_for_frame(&cell_lines);
+        assert!(table.is_empty() && table.capacity() == 0, "no allocation");
+
+        // A row whose lines are not exact is skipped even when it has links.
+        let with_link = ComposedLines::new(
+            vec![Line::from("docs")],
+            vec![vec![LinkSpan {
+                start: 0,
+                end: 4,
+                target: "https://example.com".into(),
+            }]],
+        );
+        let cell_lines = crate::ui::cached_cell::CellLines {
+            lines: with_link.lines(),
+            links: with_link.links(),
+            rows_exact: false,
+        };
+        assert!(cell_lines.has_links());
+        assert!(links_for_frame(&cell_lines).is_empty(), "inexact rows");
+    }
+
+    #[test]
+    fn paint_selection_keeps_the_link_sequences() {
+        // Spec: selecting a link must leave both the highlight and the
+        // hyperlink in place (the patch merges styles, it never rewrites the
+        // symbol).
+        let mut view = ChatView::new();
+        view.push(ChatCell::AssistantMessage(
+            "see [docs](https://example.com) now".into(),
+        ));
+        let mut buf = render(&mut view, 60, 6);
+        let (row, link) = only_link(&view);
+        let selection = Selection::default();
+        let mut selection = {
+            let mut s = selection;
+            s.begin(ContentPoint {
+                vrow: row as usize,
+                col: 0,
+            });
+            s.drag_to(ContentPoint {
+                vrow: row as usize,
+                col: link.end,
+            });
+            s
+        };
+        view.paint_selection(&mut buf, &selection);
+        selection.cancel();
+
+        let reversed: Vec<u16> = (buf.area.x..buf.area.right())
+            .filter(|&x| buf[(x, row)].modifier.contains(Modifier::REVERSED))
+            .collect();
+        assert!(!reversed.is_empty());
+        let mut still_linked = 0;
+        for x in link.start..link.end {
+            assert!(
+                buf[(x, row)].symbol().contains("\u{1b}]8;;"),
+                "column {x} lost its hyperlink under the highlight"
+            );
+            if buf[(x, row)].modifier.contains(Modifier::REVERSED) {
+                still_linked += 1;
+            }
+        }
+        assert!(still_linked > 0, "highlighted link cells keep the sequence");
+        // Text extraction is unaffected by either.
+        assert!(!row_text(&buf, row).contains('\u{1b}'));
     }
 
     #[test]

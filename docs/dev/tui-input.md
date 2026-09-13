@@ -77,19 +77,19 @@ markdown 链接渲染为 OSC8 超链接，单击（无拖动）打开。模块�
 
 **链接区间链路**：`MarkdownSegment.link_target`（解析层已产出）→ `line_link_spans()`（列 = 前序段 `unicode-width` 累加）→ 与渲染行平行的 `Vec<Vec<LinkSpan>>`（`ComposedLines`；流式路径在 `compose_into` 里加 2 列前缀偏移，`to_lines` 重放路径同理）→ `ChatViewWidget::render` 逐行映射成**屏幕绝对列**，落到两个消费者：① 本帧 Buffer 注入 OSC8；② `ChatView::frame_links` 快照（`link_at(column, row)`）。
 
-**行号必须精确**：只有当 cell 的每一行显示宽度 ≤ 渲染宽度时（`CellLines::rows_exact`）才建立链接——此时 `Paragraph` 不可能折行，屏幕行号 == cell 内行号，列区间精确。流式 cell 由硬折行保证恒真；`to_lines` 路径按需量一次（只在**有链接**的 cell 上量，随 width+generation 缓存）。不满足时该 cell 只是没有链接（保守降级，不猜列）。**链接目标不使用 `Style` 承载**（不可行：`set_stringn` 会丢掉含控制字符/零宽的字素，URL 的可见字符还会被算进折行列宽）。
+**行号必须精确**：只有当 cell 的每一行显示宽度 ≤ 渲染宽度时（`CellLines::rows_exact`）才建立链接——此时 `Paragraph` 不可能折行，屏幕行号 == cell 内行号，列区间精确。两个取值来源：① 流式 cell 由 `stream.rs` 的硬折行保证恒真；② `to_lines`（冻结/replay/resize 之后）在**有链接时**逐行量一次（`!composed.has_links() || composed.rows_are_exact(width)`），随 width+generation 缓存。**真的会不成立**：IR 层的 UAX #14 预折行只作用于 prose，代码块与缩进代码是显式豁免的（`wrap.rs::is_prose_line`），所以「同一 cell 里有一个超宽代码行 + 后面有链接」时 `Paragraph` 会把代码行折成两屏行，之后的行号整体错位。此时该 cell **一个链接都不建立**（`rows_are_exact == false`）——宁可链接点不开，也不能把命中框和 OSC8 注入到代码文本上（保守降级，不猜列）。单测：`an_overwide_code_line_puts_the_cell_off_limits` / `an_overwide_indented_code_line_puts_the_cell_off_limits` / `a_fitting_code_line_keeps_its_link_on_the_right_row`。**链接目标不使用 `Style` 承载**（不可行：`set_stringn` 会丢掉含控制字符/零宽的字素，URL 的可见字符还会被算进折行列宽）。
 
 **复制仍然干净**：`buffer_row_graphemes` 读 symbol 前先 `strip_osc8`，所以选区快照的宽度不被 URL 撑大、复制文本不含控制字符——**任何从 Buffer 反读文本/宽度的地方都必须先剥序列**。
 
-**点击 vs 拖动**：`Down(Left)` 在 chat band 内先用**本帧快照**查链接（记进 `App::mouse_link`）**再**照旧开始选择（拖动要能选中链接文本）；`Up(Left)` 在「记录了链接且 `is_dragged() == false`」时打开并提前返回（零宽单击本来也不复制，所以不与复制冲突）。`cancel_selection`（焦点丢失 / 结构失效）连 `mouse_link` 一起清——中止的手势不打开任何东西。命中来自按下那一帧，滚动/流式追加都不会让「按下 A、松开 B」。toast 画在 chat band 之上，所以 `render_toast` 返回绘制区域、`ChatView::mask_links` 把被盖住的命中框删掉（看不见的链接不可点）。
+**点击 vs 拖动**：`Down(Left)` 在 chat band 内先用**本帧快照**查链接（记进 `App::mouse_link`）**再**照旧开始选择（拖动要能选中链接文本）；`Up(Left)` 在「记录了链接且 `is_dragged() == false` 且释放点 == 按下点（`selection.anchor()`）」时打开并提前返回（零宽单击本来也不复制，所以不与复制冲突）。两个条件都查是刻意的：终端丢 motion 事件时不能靠「没收到 `Drag`」把一次真实的拖拽当成单击（reference 的 `isClick = !dragged && anchor == point` 同款）。`cancel_selection`（焦点丢失 / 结构失效）连 `mouse_link` 一起清——中止的手势不打开任何东西。命中来自按下那一帧，滚动/流式追加都不会让「按下 A、松开 B」。toast 画在 chat band 之上，所以 `render_toast` 返回绘制区域、`ChatView::mask_links` 把被盖住的命中框删掉（看不见的链接不可点）——**下一个会盖住 chat band 的是 `tui-scrollbar` 的滚动条列**，落地时必须把那一列也交给 `mask_links`（否则点滚动条会打开它盖住的链接）。
 
 **目标解析与打开方式**（`util/open.rs`）：带 scheme（`http` / `https` / `mailto` / `file` …；单个字母 + `:` 视为 Windows 盘符不算 scheme）= URL → 平台默认启动器（macOS `open` / Windows `cmd /c start ""` / Linux `xdg-open`）。其余按本地路径处理：`~` 展开为 `$HOME`、`file://`（含可选 `localhost`）剥离、**相对路径锚定 `current_dir()`（wing CLI 启动目录，不是会话 workspace）**、`#L10` / `#L10C5` / `:10` / `:10:5` 后缀剥离并解析成行（列）；路径先 `canonicalize`（失败则退化为绝对路径）再 `exists()` 检查——不存在就**不启动任何进程**。有行号时先按白名单找支持行跳转的编辑器 CLI（`code -g` / `subl` / `zed`，PATH 探测不用 `which` 子进程），都没有才退回默认程序（文件仍会打开，行号降级——这是「尽量」的诚实边界；`open` / `xdg-open` 都不接受 `path:line`）。
 
-**安全边界**：① 只对 markdown 链接区间触发（消息里出现 `/etc/passwd` 不会变成可点）；② `Command::new(program).args(argv)`，**绝不经过 shell**、不拼字符串执行（`;`、`|`、`$(...)`、空格、引号都只是 argv 里的普通字符）；③ 注入 OSC8 的目标先剥控制字符（`sanitize_osc8_target`，防 markdown 正文反向注入终端序列）——**净化只用于注入，打开时仍用原始目标**；④ 进程输出 `Stdio::piped()` 捕获（raw mode 下继承 stdio 会写坏屏幕，crate 也 deny `print_stdout/stderr`），在 `spawn_blocking` 上跑并 `tokio::time::timeout`（2s）封顶。
+**安全边界**：① 只对 markdown 链接区间触发（消息里出现 `/etc/passwd` 不会变成可点）；② `Command::new(program).args(argv)`，**绝不经过 shell**、不拼字符串执行（`;`、`|`、`$(...)`、空格、引号都只是 argv 里的普通字符）；③ 注入 OSC8 的目标先剥控制字符（`sanitize_osc8_target`，防 markdown 正文反向注入终端序列）——**净化只用于注入，打开时仍用原始目标**；④ 进程输出 `Stdio::piped()` 捕获（raw mode 下继承 stdio 会写坏屏幕，crate 也 deny `print_stdout/stderr`），在 `spawn_blocking` 上跑并 `tokio::time::timeout`（500ms，与剪贴板探针同款上限——run loop 是串行 await，这个上限就是最坏 UI 冻结时长）封顶。
 
 **反馈**：成功静默（`tracing::debug!`，打开本身有可见结果）；失败 `Open failed: …` toast + `tracing::warn!`（opener 不存在 / 非零退出并带 stderr / 路径不存在 / 超时）。
 
-**已知限制**：只覆盖 chat 内容里走 markdown 的 cell（assistant 消息与 thinking；Ask 面板 / tool 输出不参与）；`rows_are_exact` 不成立的 cell 不注入（实测不触发）；行号跳转只认白名单编辑器；tmux/zellij 的 OSC8 透传取决于用户配置；不做 hover 自绘下划线/预览。
+**已知限制**：只覆盖 chat 内容里走 markdown 的 cell（assistant 消息与 thinking；Ask 面板 / tool 输出不参与）；**同一 cell 里出现超宽代码行/缩进代码行时该 cell 全部链接失效**（`rows_are_exact`，见上，宁可没有链接也不错行）；行号跳转只认白名单编辑器；`~user/x` 不展开、Windows 上 `.cmd` shim（PATHEXT）探测不到 → 只降级行号（`util/open.rs` 模块注释同样登记）；`file://` 只支持空 authority 与 `localhost`（`file://nas/share/x` 明确报错而不是拼到启动目录下）；tmux/zellij 的 OSC8 透传取决于用户配置；不做 hover 自绘下划线/预览。
 
 ## 已知中间态：原生拖选需要 Shift/Option
 

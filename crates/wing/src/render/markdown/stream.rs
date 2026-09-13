@@ -926,7 +926,7 @@ fn compose_into<I>(
 }
 
 /// Cell line prefix width (`⦁ ` / `  `) — links shift by this many columns.
-const PREFIX_WIDTH: u16 = 2;
+const PREFIX_WIDTH: u16 = super::links::CELL_PREFIX_WIDTH;
 
 /// Shift link columns right by `by` (the cell prefix).
 fn shift_spans(spans: Vec<LinkSpan>, by: u16) -> Vec<LinkSpan> {

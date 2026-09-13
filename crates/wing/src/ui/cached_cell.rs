@@ -64,9 +64,10 @@ struct CachedLines {
     /// loop can inject OSC8 and hit-test clicks without re-rendering the cell
     /// (`tui-link-open`).
     composed: ComposedLines,
-    /// Whether each line maps to exactly one screen row (`Paragraph` cannot
-    /// wrap any of them), i.e. whether the link spans' row arithmetic holds.
-    /// Only meaningful when the composed lines carry links.
+    /// Whether each line maps to exactly one screen row, i.e. whether the link
+    /// spans' row arithmetic holds (see where it is computed for the one case
+    /// that breaks it). Always meaningful for link-bearing lines; `true` for
+    /// line sets without links (nothing to place).
     rows_exact: bool,
 }
 
@@ -78,6 +79,15 @@ pub struct CellLines<'a> {
     pub links: &'a [Vec<LinkSpan>],
     /// Row arithmetic is exact (see [`CachedLines::rows_exact`]).
     pub rows_exact: bool,
+}
+
+impl CellLines<'_> {
+    /// Whether any line carries a link — the render loop's gate for the
+    /// per-frame link work (no allocation, no clone: a cell without links
+    /// stays free).
+    pub fn has_links(&self) -> bool {
+        self.links.iter().any(|line| !line.is_empty())
+    }
 }
 
 impl CachedCell {
@@ -256,7 +266,7 @@ impl CachedCell {
             stream.finalize(width, ctx.palette);
             let (lines, links) = stream.lines_and_links(width, ctx.palette);
             let composed = ComposedLines::new(lines.to_vec(), links.to_vec());
-            let height = composed.len();
+            let height = composed.lines().len();
             self.cached_lines = Some(CachedLines {
                 width,
                 generation: self.generation,
@@ -313,13 +323,19 @@ impl CachedCell {
 
         if !cached_valid {
             let composed = self.cell.render_lines(width, ctx);
+            // The row arithmetic is what the link hit boxes depend on: a line
+            // wider than the render area is wrapped by `Paragraph` into two
+            // screen rows, and every link row after it would land on the wrong
+            // text. Markdown pre-wraps prose, but code blocks and indented code
+            // are exempt (`wrap::is_prose_line`), so an over-wide code line in
+            // the same cell really does break the mapping — measure and refuse
+            // rather than point a click at code.
+            let rows_exact = !composed.has_links() || composed.rows_are_exact(width);
             self.cached_lines = Some(CachedLines {
                 width,
                 generation: self.generation,
                 composed,
-                // A finalized stream renders pre-wrapped lines (every line was
-                // hard-wrapped to the width), so the row maths is exact.
-                rows_exact: true,
+                rows_exact,
             });
             // Lines from `to_lines` are not pre-wrapped — never blit them.
             self.prewrapped_width = None;
