@@ -23,7 +23,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/session/create` | 创建新 session（可选 `backend: file\|memory`，默认 file；`workspace`、`template` 等） |
-| POST | `/api/session/resume` | 恢复已有 session（默认还原 template_name 与 workspace） |
+| POST | `/api/session/resume` | 恢复已有 session（还原 template_name、workspace 与模型绑定；模型记录优先于模板默认） |
 | POST | `/api/session/fork` | 从指定消息 uuid 分叉；新 session 含该消息及之前全部消息，继承源 backend |
 | POST | `/api/session/subscribe` | 将某 client 订阅到 session 事件（触发 SyncSession 重放） |
 | POST | `/api/session/unsubscribe` | 取消订阅 |

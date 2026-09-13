@@ -25,7 +25,13 @@ from pydantic import BaseModel, ConfigDict
 class SessionMetadata(BaseModel):
     """Session 持久元数据。全字段可选，序列化时排除 None。
 
-    TODO(future): 持久化更多动态状态（model、thinking、yolo 等）——
+    model_name / provider_name 记录会话的模型绑定，二者成对写入、成对读取
+    （任一为 None 视为无记录）。写入时机是**显式模型动作**——模型切换、
+    模板切换、创建 override、fork 快照；resume 时记录优先于模板默认模型，
+    是模型选择跨进程重启的唯一恢复来源。model_name 与 AgentInfo.model_name
+    同义（当前生效模型的裸名）。
+
+    TODO(future): 持久化更多动态状态（thinking、yolo 等）——
     可动态切换的状态将来都应可恢复，届时在此扩展字段。
     """
 
@@ -36,6 +42,8 @@ class SessionMetadata(BaseModel):
     last_interaction: str | None = None
     forked_from: str | None = None
     template_name: str | None = None
+    model_name: str | None = None
+    provider_name: str | None = None
 
 
 class SessionSummary(BaseModel):

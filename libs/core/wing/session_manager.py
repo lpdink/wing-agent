@@ -273,7 +273,8 @@ class SessionManager:
 
         新 session 继承源 session 的后端。消息与元数据均经由源 session
         所属 store 写入：元数据（workspace/forked_from/template_name/
-        last_interaction）一次写全——fork 的正确性由 store 单一所有者保证。
+        model_name+provider_name 快照/last_interaction）一次写全——fork 的
+        正确性由 store 单一所有者保证。
         """
         source = self._sessions.get(session_id)
         if source is None:
@@ -300,12 +301,17 @@ class SessionManager:
             new_messages.extend_detached(remapped)
 
         # 一次写全元数据——fork bug 的结构性修复
+        # 模型记录是**快照**：子 session 的 agent 由源 agent 反向抽取模板构造
+        # （生效模型=源此刻模型），metadata 记录同一对值，重启后 resume 才
+        # 不会偏离 fork 时用户看到的模型。
         store.save_metadata(
             new_session_id,
             SessionMetadata(
                 workspace=source.session_workspace,
                 forked_from=session_id,
                 template_name=source.template_name,
+                model_name=source.agent.model,
+                provider_name=source.agent.model_provider.name,
                 last_interaction=datetime.now().isoformat(),
             ),
         )

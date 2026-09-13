@@ -21,7 +21,8 @@
 | **SessionStore** | 会话持久化的**唯一**所有者（ABC，`store/base.py`）。backend：`file` / `memory`，建会话时选。 |
 | **MessageLog** | 追加式混合记录 + aux kv（`store/base.py`）。pending compaction 存于 aux。newest.json 快照已移除（重放由混合日志承担）。 |
 | **TrackedList** | 纯内存链拓扑引擎（uuid/parentUuid），ChainNode 家族混排（Message + 事件节点），I/O 全委托 MessageLog（`common/tracked_list.py`）。 |
-| **SessionMetadata** | 会话元数据模型（workspace、forked_from、template_name、last_interaction…）。 |
+| **SessionMetadata** | 会话元数据模型（workspace、forked_from、template_name、model_name/provider_name、last_interaction…）。 |
+| **模型绑定持久化** | `model_name` + `provider_name` 成对记录会话的当前模型，写入时机是**显式动作**（模型切换、模板切换、创建 override、fork 快照；未动过模型的 session 不写）。resume 时记录优先于模板默认模型；记录的 provider 不可解析则回落模板默认并打 warning，记录保留。进程存活期间前端渲染与后端使用同源于 agent，本机制解决的是重启后的还原。 |
 
 ## 事件系统
 
