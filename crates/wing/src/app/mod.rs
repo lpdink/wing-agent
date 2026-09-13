@@ -73,10 +73,11 @@ use crate::config::ThemePalette;
 /// Threshold for wide-mode status bar (shows cumulative usage details).
 const WIDE_THRESHOLD: u16 = 100;
 
-/// Lines scrolled per wheel event. Terminals report one wheel event per
-/// notch / gesture step (trackpad momentum arrives as many events), so the
-/// per-event step is a deliberate hand-tuned value — larger than the 1-line
-/// keyboard step, smaller than a page.
+/// Lines scrolled per wheel event. Carried over from before alternate scroll
+/// (#28) and validated then; per-event step is deliberately larger than the
+/// 1-line keyboard step and smaller than a page. Real-terminal feel
+/// (trackpad momentum vs. wheel notches) is calibrated by hand — see the
+/// change's Open Questions.
 const WHEEL_SCROLL_LINES: usize = 3;
 
 /// Application state.
@@ -472,24 +473,30 @@ impl App {
         self.update_popup();
     }
 
-    /// Handle a mouse event.
+    /// Handle a mouse event. Returns `true` when the view actually changed
+    /// (the caller then draws immediately, like it does for keys).
     ///
     /// The wheel is an input channel of its own: it always scrolls the chat
     /// view and is never consumed by a panel or popup, so history stays
     /// reachable while the AskUserQuestion panel / model picker / command
-    /// popup is open (plain Up/Down stay with the focused widget). Other
-    /// mouse events are ignored for now — press / drag / release are taken
-    /// over by the in-app text selection follow-up.
-    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+    /// popup is open (plain Up/Down stay with the focused widget).
+    ///
+    /// Everything else is ignored for now: press / drag / release are taken
+    /// over by the in-app text selection follow-up, `Moved` by the scrollbar,
+    /// and horizontal wheel (`ScrollLeft` / `ScrollRight`) is not a chat
+    /// gesture at all.
+    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> bool {
         match mouse.kind {
             crossterm::event::MouseEventKind::ScrollUp => {
                 self.chat.scroll_up(WHEEL_SCROLL_LINES);
+                true
             }
             crossterm::event::MouseEventKind::ScrollDown => {
                 self.chat
                     .scroll_down(WHEEL_SCROLL_LINES, self.visible_height);
+                true
             }
-            _ => {}
+            _ => false,
         }
     }
 
@@ -2434,8 +2441,15 @@ pub async fn run_app(
                         app.input_dirty = true;
                     }
                     TermEvent::Mouse(mouse) => {
-                        app.handle_mouse(mouse);
-                        app.mark_dirty();
+                        // A wheel notch is a direct user action: draw right
+                        // away (bypassing the 16ms frame gate) instead of
+                        // waiting for the next event or the ≤100ms tick. Events
+                        // that change nothing (drag / release / hover, handled
+                        // by follow-up changes) leave the flags alone, so their
+                        // floods never force redraws.
+                        if app.handle_mouse(mouse) {
+                            app.input_dirty = true;
+                        }
                     }
                     TermEvent::Paste(text) => {
                         app.handle_paste(&text);
@@ -3583,7 +3597,7 @@ mod tests {
         assert!(app.chat.is_at_bottom());
 
         // Wheel up: 3 lines per event, leaves the follow state.
-        app.handle_mouse(wheel_up());
+        assert!(app.handle_mouse(wheel_up()), "the wheel changed the view");
         assert_eq!(app.chat.scroll_offset, 77);
         assert!(!app.chat.is_at_bottom(), "wheel up starts reading history");
 
@@ -3618,26 +3632,34 @@ mod tests {
         let mut app = test_app();
         app.visible_height = 20;
         app.chat.last_total = 100;
-        app.chat.scroll_up(0); // leave the bottom, offset unchanged (0)
+        app.chat.scroll_offset = 50;
+        app.chat.scroll_up(0); // leave the bottom without moving the offset
+
         for kind in [
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
             crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
             crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
             crossterm::event::MouseEventKind::Moved,
+            crossterm::event::MouseEventKind::ScrollLeft,
+            crossterm::event::MouseEventKind::ScrollRight,
         ] {
-            app.handle_mouse(wheel(kind));
+            assert!(
+                !app.handle_mouse(wheel(kind)),
+                "{kind:?} must report no view change"
+            );
         }
         assert_eq!(
-            app.chat.scroll_offset, 0,
-            "press/drag/release must not scroll (selection lands in a follow-up change)"
+            app.chat.scroll_offset, 50,
+            "press/drag/release/hover/horizontal wheel must not scroll the chat"
+        );
+        assert!(
+            !app.chat.is_at_bottom(),
+            "non-wheel events must not re-arm the follow state either"
         );
     }
 
     #[test]
     fn test_wheel_scrolls_chat_while_ask_panel_is_open() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-
         let mut app = test_app();
         app.handle_event(sync_event(
             vec![],
@@ -3673,7 +3695,7 @@ mod tests {
         assert_eq!(app.ask_panels.len(), 1, "panel stays open");
 
         // Plain Down still belongs to the panel (not to chat scrolling).
-        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(crossterm::event::KeyCode::Down));
         assert_eq!(app.chat.scroll_offset, 53);
         assert_ne!(
             app.ask_panels.front().unwrap().states[0].cursor,
@@ -3780,7 +3802,8 @@ mod tests {
         let mut app = test_app();
         app.visible_height = 20;
         app.chat.last_total = 100;
-        app.chat.scroll_up(5); // reading history
+        app.chat.scroll_offset = 60;
+        app.chat.scroll_up(5); // reading history: offset 55
         app.input.set_text("first\nsecond");
         let area = ratatui::layout::Rect::new(0, 0, 40, 4);
         assert_eq!(app.input.cursor_screen_pos(&area).1, 1, "cursor on line 2");
@@ -3791,7 +3814,7 @@ mod tests {
             0,
             "Up belongs to the composer"
         );
-        assert_eq!(app.chat.scroll_offset, 0, "chat must not scroll");
+        assert_eq!(app.chat.scroll_offset, 55, "chat must not scroll");
         assert!(!app.chat.is_at_bottom());
     }
 
@@ -3823,6 +3846,20 @@ mod tests {
             crossterm::event::KeyModifiers::CONTROL,
         ));
         assert!(app.chat.is_at_bottom());
+
+        // PageDown walks back to the bottom edge and re-arms as well
+        // (page = visible_height - 2 = 18).
+        app.chat.scroll_down(100, app.visible_height); // offset 80, follow armed
+        assert!(app.chat.is_at_bottom());
+        app.handle_key(key(crossterm::event::KeyCode::PageUp));
+        assert_eq!(app.chat.scroll_offset, 62);
+        assert!(!app.chat.is_at_bottom(), "PageUp leaves the follow state");
+        app.handle_key(key(crossterm::event::KeyCode::PageDown));
+        assert_eq!(app.chat.scroll_offset, 80, "one page reaches the bottom");
+        assert!(
+            app.chat.is_at_bottom(),
+            "PageDown to the bottom re-arms the follow state"
+        );
     }
 
     #[test]
