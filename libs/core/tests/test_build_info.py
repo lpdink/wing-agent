@@ -39,19 +39,42 @@ hatch_build = _load_hatch_build()
 def _run_initialize(
     root: Path,
     monkeypatch: pytest.MonkeyPatch,
-    commit: str,
+    commit: str | None,
     *,
     version: str = "0.4.1.dev9+g3e6e47256",
 ) -> dict[str, list[str]]:
-    """在假项目根上跑一次钩子 initialize，返回 build_data。"""
+    """在假项目根上跑一次钩子 initialize，返回 build_data。
+
+    ``commit=None`` 表示"解析不到"：清掉环境变量，且 root 不在 git 仓库内。
+    """
     (root / "wing").mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("WING_COMMIT_HASH", commit)
+    if commit is None:
+        monkeypatch.delenv("WING_COMMIT_HASH", raising=False)
+    else:
+        monkeypatch.setenv("WING_COMMIT_HASH", commit)
     metadata = MagicMock()
     metadata.version = version
     hook = hatch_build.BuildInfoHook(str(root), {}, None, metadata, "", "wheel")
     build_data: dict[str, list[str]] = {"artifacts": []}
     hook.initialize("editable", build_data)
     return build_data
+
+
+def _git(args: list[str], cwd: Path) -> None:
+    """在测试里跑 git——提交者身份显式给定，不依赖全局配置。"""
+    subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        },
+    )
 
 
 class TestResolveCommit:
@@ -92,6 +115,34 @@ class TestResolveCommit:
         """无环境变量且不在 git 仓库（如从 sdist 构建）→ None。"""
         monkeypatch.delenv("WING_COMMIT_HASH", raising=False)
         assert hatch_build.resolve_commit(tmp_path) is None
+
+    def test_repo_ownership_gate(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """只采信跟踪了包目录的仓库 HEAD——vendored/sdist 场景不误采祖先仓库。"""
+        monkeypatch.delenv("WING_COMMIT_HASH", raising=False)
+        _git(["init", "-q"], tmp_path)
+        (tmp_path / "other.txt").write_text("x", encoding="utf-8")
+        _git(["add", "other.txt"], tmp_path)
+        _git(["commit", "-qm", "init"], tmp_path)
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+        pkg = tmp_path / "pkg"
+        (pkg / "wing").mkdir(parents=True)
+        (pkg / "wing" / "__init__.py").write_text("", encoding="utf-8")
+
+        # 包目录未被该仓库跟踪（vendored 拷贝 / sdist 解包）→ None，
+        # 而不是祖先仓库那个无关的 HEAD。
+        assert hatch_build.resolve_commit(pkg) is None
+        # 被跟踪（入 index 即可，无须提交）→ 正常采信并截短。
+        _git(["add", "pkg/wing/__init__.py"], tmp_path)
+        assert hatch_build.resolve_commit(pkg) == head[:7]
 
 
 class TestRenderBuildInfo:
@@ -153,6 +204,47 @@ class TestBuildInfoHook:
         assert "def5678" in (tmp_path / "wing/_build_info.py").read_text(
             encoding="utf-8"
         )
+
+    @staticmethod
+    def test_keeps_existing_commit_when_unresolvable(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """解析不到 commit（如从 sdist 构建 wheel）→ 保留上游构建注入的 commit。"""
+        _run_initialize(tmp_path, monkeypatch, "abc1234")
+        _run_initialize(tmp_path, monkeypatch, None, version="0.4.2")
+        text = (tmp_path / "wing/_build_info.py").read_text(encoding="utf-8")
+        assert "commit: str | None = 'abc1234'" in text
+        assert "'0.4.2'" in text  # version 仍随本次构建刷新
+
+    @staticmethod
+    def test_none_commit_written_without_previous_value(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """既解析不到、也没有旧值 → 写 None（展示为 unknown）。"""
+        _run_initialize(tmp_path, monkeypatch, None)
+        text = (tmp_path / "wing/_build_info.py").read_text(encoding="utf-8")
+        assert "commit: str | None = None" in text
+
+
+class TestReadExistingCommit:
+    """read_existing_commit：只认自家渲染格式，异常输入一律 None。"""
+
+    def test_reads_rendered_value(self, tmp_path: Path) -> None:
+        target = tmp_path / "_build_info.py"
+        target.write_text(
+            hatch_build.render_build_info("0.4.1", "abc1234"), encoding="utf-8"
+        )
+        assert hatch_build.read_existing_commit(target) == "abc1234"
+
+    def test_none_malformed_and_missing_return_none(self, tmp_path: Path) -> None:
+        target = tmp_path / "_build_info.py"
+        target.write_text(
+            hatch_build.render_build_info("0.4.1", None), encoding="utf-8"
+        )
+        assert hatch_build.read_existing_commit(target) is None
+        target.write_text("commit: str | None = ???\n", encoding="utf-8")
+        assert hatch_build.read_existing_commit(target) is None
+        assert hatch_build.read_existing_commit(tmp_path / "missing.py") is None
 
 
 class TestBuildInfoReader:

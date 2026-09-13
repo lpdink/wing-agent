@@ -181,12 +181,15 @@ MessageLog  = 追加式混合记录 + aux kv（pending compaction 存于此）
 ```
 libs/core/hatch_build.py（hatchling custom build hook，构建/安装时执行）
   WING_COMMIT_HASH 环境变量（CI 传 github.sha，截短 7 位）
-    → 构建期 git rev-parse HEAD → None（无 git 的构建）
+    → 构建期 git rev-parse HEAD（仅采信跟踪了包目录的仓库）
+    → 保留旧值（sdist 构建）→ None
         │ 写入
   wing/_build_info.py（生成文件，gitignore；随 wheel 分发）
         │ 只读（导入时定型 = 进程启动快照）
   wing/build_info.py ──► /api/health（version + commit）──► wing status · wing start · 启动日志
 ```
 
-- 生成文件内容随 commit/版本变化才重写（mtime 稳定）；缺失时 `wing/build_info.py` 返回 None，health 回落到发行包元数据。
-- commit 反映**上次安装/构建时**的 HEAD：改完代码要做集成测试前，重新安装（`pip install libs/core` / `uv sync`）并重启 gateway，`wing status` 才不会显示旧 commit。
+- 生成文件内容随 commit/版本变化才重写（mtime 稳定）；解析不到 commit 时保留已注入的旧值（从 sdist 构建 wheel 不会把上游 commit 冲成 None）。
+- 生成文件缺失时 `wing/build_info.py` 返回 None，health 回落到发行包元数据。
+- commit 反映**上次安装/构建时**的 HEAD：改完代码要做集成测试前，重新安装并重启 gateway，`wing status` 才不会显示旧 commit。
+  - `pip install libs/core`（in-tree 构建）会重跑钩子；uv workspace 里必须用 **`uv sync --reinstall-package wing-gateway`**——普通 `uv sync` 只看 `libs/core/pyproject.toml` 的 mtime 决定是否复用 editable 构建缓存，源码改了、提交了都不重跑钩子，生成文件停在上一次构建的 commit（实测）。
