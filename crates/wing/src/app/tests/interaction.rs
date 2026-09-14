@@ -287,7 +287,7 @@ fn test_release_off_the_anchor_is_not_a_click() {
 
     // Back at the bottom (the link is in place again): a release on a
     // different column is rejected by the anchor check.
-    app.chat.scroll_down(2, app.visible_height);
+    app.chat.scroll_down(2, app.geometry.chat_height());
     draw(&mut app, &mut terminal);
     let ((start, row), _) = link_box(&app);
     assert_eq!(

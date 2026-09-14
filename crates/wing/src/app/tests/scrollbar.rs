@@ -7,11 +7,12 @@ use super::support::*;
 use crate::app::*;
 use crate::ui::chat_view::ChatCell;
 use crate::ui::status_bar::TurnUsage;
+use ratatui::layout::Rect;
 
 #[test]
 fn test_wheel_scrolls_three_lines_and_rearms_at_bottom() {
     let mut app = test_app();
-    app.visible_height = 20;
+    set_chat_height(&mut app, 20);
     app.chat.last_total = 100;
     app.chat.scroll_offset = 80; // bottom edge == max_scroll (80)
     app.chat.jump_bottom();
@@ -42,7 +43,7 @@ fn test_wheel_scrolls_three_lines_and_rearms_at_bottom() {
 #[test]
 fn test_wheel_up_clamps_at_top_and_stays_unpinned() {
     let mut app = test_app();
-    app.visible_height = 20;
+    set_chat_height(&mut app, 20);
     app.chat.last_total = 100;
     app.chat.scroll_offset = 1;
     for _ in 0..5 {
@@ -55,7 +56,7 @@ fn test_wheel_up_clamps_at_top_and_stays_unpinned() {
 #[test]
 fn test_non_wheel_mouse_events_are_ignored() {
     let mut app = test_app();
-    app.visible_height = 20;
+    set_chat_height(&mut app, 20);
     app.chat.last_total = 100;
     app.chat.scroll_offset = 50;
     app.chat.scroll_up(0); // leave the bottom without moving the offset
@@ -109,8 +110,7 @@ fn row_text(buf: &ratatui::buffer::Buffer) -> String {
 /// content height that overflows it — i.e. the scrollbar exists.
 fn app_with_scrollbar(area: Rect, content: usize, offset: usize) -> App {
     let mut app = test_app();
-    app.chat_area = area;
-    app.visible_height = area.height as usize;
+    app.geometry.record_chat_band(area);
     app.chat.last_total = content;
     app.chat.scroll_offset = offset;
     app.chat.scroll_up(0); // reading state, offset unchanged
@@ -141,7 +141,7 @@ fn test_scrollbar_track_click_jumps_and_syncs_the_info_separator() {
         None,
         &TurnUsage::default(),
         app.chat.content_height(),
-        app.visible_height,
+        app.geometry.chat_height(),
         app.chat.scroll_position(),
         &app.palette,
         sep_area,
@@ -356,8 +356,7 @@ fn test_scrollbar_works_while_a_panel_is_open() {
     assert_eq!(app.ask_panels.len(), 1);
 
     let area = Rect::new(0, 0, 80, 20);
-    app.chat_area = area;
-    app.visible_height = area.height as usize;
+    app.geometry.record_chat_band(area);
     app.chat.last_total = 100;
     app.chat.scroll_offset = 40;
     app.chat.scroll_up(0);
@@ -585,7 +584,7 @@ fn long_chat_app() -> App {
 fn test_draw_paints_the_scrollbar_only_on_the_chat_areas_last_column() {
     let mut app = long_chat_app();
     let buf = draw_frame(&mut app, 80, 24);
-    let chat = app.chat_area;
+    let chat = app.geometry.chat_band();
     let column = chat.right() - 1;
     assert!(chat.height > 3, "chat viewport: {chat:?}");
     assert_eq!(column, 79, "the chat spans the full width");
@@ -649,7 +648,7 @@ fn test_draw_keeps_chat_content_out_of_the_scrollbar_gutter() {
         "content must overflow for the gutter check to mean anything"
     );
 
-    let chat = app.chat_area;
+    let chat = app.geometry.chat_band();
     let bar_column = chat.right() - 1;
     let content_right = chat.right() - scrollbar::SCROLLBAR_GUTTER;
     for row in chat.y..chat.bottom() {
@@ -682,7 +681,7 @@ fn test_draw_keeps_the_bar_and_the_toast_in_the_same_frame() {
         std::time::Duration::from_secs(30),
     ));
     let buf = draw_frame(&mut app, 80, 24);
-    let chat = app.chat_area;
+    let chat = app.geometry.chat_band();
     let column = chat.right() - 1;
 
     let rendered = frame_text(&buf);
@@ -749,7 +748,7 @@ fn test_wheel_scrolls_chat_while_ask_panel_is_open() {
     ));
     assert_eq!(app.ask_panels.len(), 1);
 
-    app.visible_height = 20;
+    set_chat_height(&mut app, 20);
     app.chat.last_total = 100;
     app.chat.scroll_offset = 50;
     app.chat.scroll_up(0); // leave auto-scroll
@@ -781,7 +780,7 @@ fn test_wheel_scrolls_chat_while_model_panel_is_open() {
     app.drain_intents();
     assert!(app.model_panel.is_some());
 
-    app.visible_height = 20;
+    set_chat_height(&mut app, 20);
     app.chat.last_total = 100;
     app.chat.scroll_offset = 50;
     app.chat.scroll_up(0); // leave auto-scroll
@@ -804,7 +803,7 @@ fn test_wheel_scrolls_chat_while_command_popup_is_open() {
     app.handle_key(key(crossterm::event::KeyCode::Char('/')));
     assert!(app.popup.active.has_items(), "slash opens the popup");
 
-    app.visible_height = 20;
+    set_chat_height(&mut app, 20);
     app.chat.last_total = 100;
     app.chat.scroll_offset = 50;
     app.chat.scroll_up(0); // leave auto-scroll

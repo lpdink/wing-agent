@@ -147,7 +147,7 @@ fn test_model_panel_swallows_keys_but_lets_page_keys_scroll() {
     assert!(app.input.text().is_empty());
     assert!(app.model_panel.is_some());
     // PageUp/PageDown still scroll the chat.
-    app.visible_height = 20;
+    set_chat_height(&mut app, 20);
     app.chat.scroll_offset = 50;
     app.chat.scroll_up(0); // leave auto-scroll
     app.handle_key(key(crossterm::event::KeyCode::PageUp));
@@ -158,7 +158,7 @@ fn test_model_panel_swallows_keys_but_lets_page_keys_scroll() {
 #[test]
 fn test_scroll_down_rearms_autoscroll_at_bottom() {
     let mut app = test_app();
-    app.visible_height = 20;
+    set_chat_height(&mut app, 20);
     app.chat.last_total = 100;
     app.chat.scroll_offset = 75;
     app.chat.scroll_up(0); // leave the bottom: auto_scroll=false, offset 75
@@ -176,7 +176,7 @@ fn test_scroll_down_rearms_autoscroll_at_bottom() {
 #[test]
 fn test_plain_arrows_never_scroll_the_chat() {
     let mut app = test_app();
-    app.visible_height = 20;
+    set_chat_height(&mut app, 20);
     app.chat.last_total = 100;
     app.chat.scroll_offset = 80;
     app.chat.scroll_up(5); // reading history: offset 75, auto_scroll=false
@@ -196,7 +196,7 @@ fn test_plain_arrows_never_scroll_the_chat() {
 #[test]
 fn test_plain_up_moves_composer_cursor_while_reading() {
     let mut app = test_app();
-    app.visible_height = 20;
+    set_chat_height(&mut app, 20);
     app.chat.last_total = 100;
     app.chat.scroll_offset = 60;
     app.chat.scroll_up(5); // reading history: offset 55
@@ -217,7 +217,7 @@ fn test_plain_up_moves_composer_cursor_while_reading() {
 #[test]
 fn test_keyboard_scroll_keys_follow_the_same_contract() {
     let mut app = test_app();
-    app.visible_height = 20;
+    set_chat_height(&mut app, 20);
     app.chat.last_total = 100;
     app.chat.scroll_offset = 80;
     app.chat.jump_bottom();
@@ -245,7 +245,7 @@ fn test_keyboard_scroll_keys_follow_the_same_contract() {
 
     // PageDown walks back to the bottom edge and re-arms as well
     // (page = visible_height - 2 = 18).
-    app.chat.scroll_down(100, app.visible_height); // offset 80, follow armed
+    app.chat.scroll_down(100, app.geometry.chat_height()); // offset 80, follow armed
     assert!(app.chat.is_at_bottom());
     app.handle_key(key(crossterm::event::KeyCode::PageUp));
     assert_eq!(app.chat.scroll_offset, 62);
@@ -665,7 +665,7 @@ fn test_page_keys_still_scroll_the_chat_while_a_popup_is_up() {
         ("visible candidates", app_with_visible_popup()),
         ("armed but empty", app_with_invisible_popup()),
     ] {
-        app.visible_height = 20;
+        set_chat_height(&mut app, 20);
         app.chat.last_total = 100;
         app.chat.scroll_offset = 80;
         app.chat.jump_bottom();
@@ -698,7 +698,7 @@ fn test_ctrl_arrows_step_the_chat_only_when_the_popup_declines_them() {
     // selection; with no candidates the popup declines it and the chat steps
     // one line down.
     let mut app = app_with_visible_popup();
-    app.visible_height = 20;
+    set_chat_height(&mut app, 20);
     app.chat.last_total = 100;
     app.chat.scroll_offset = 80;
     app.chat.jump_bottom();
@@ -711,7 +711,7 @@ fn test_ctrl_arrows_step_the_chat_only_when_the_popup_declines_them() {
     );
 
     let mut app = app_with_invisible_popup();
-    app.visible_height = 20;
+    set_chat_height(&mut app, 20);
     app.chat.last_total = 100;
     app.chat.scroll_offset = 80;
     app.chat.jump_bottom();
@@ -787,7 +787,7 @@ fn test_page_keys_reach_the_chat_through_both_modals() {
     let mut app = app_with_ask_panel();
     app.model_sources = vec![model_group("p", &["m1"])];
     app.open_model_panel();
-    app.visible_height = 20;
+    set_chat_height(&mut app, 20);
     app.chat.last_total = 100;
     app.chat.scroll_offset = 80;
     app.chat.jump_bottom();

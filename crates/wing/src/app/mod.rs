@@ -9,6 +9,10 @@
 //! * [`modal`] — keyboard ownership, the Escape ladder, panel lifecycles;
 //! * [`goal_lane`] — the App side of the Goal orchestration (state machine in
 //!   [`goal`]).
+//!
+//! The interaction paths live in their own modules too: [`frame`] records the
+//! geometry of the frame just drawn, [`mouse`] routes pointer gestures and
+//! [`selection_session`] owns the drag's lifecycle.
 
 pub mod ask_panel;
 pub mod constants;
@@ -24,6 +28,7 @@ pub mod transport;
 pub mod turn_state;
 
 mod commands;
+mod frame;
 mod goal_lane;
 mod modal;
 mod projection;
@@ -34,7 +39,6 @@ use anyhow::Result;
 use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
-use ratatui::layout::Rect;
 
 use self::transport::GatewayEndpoint;
 use self::transport::Transport;
@@ -64,6 +68,7 @@ use crate::ui::toast::render_toast;
 use crate::util::title;
 use title::AttentionKind;
 
+use self::frame::FrameGeometry;
 use self::popup_state::PopupState;
 use self::render_context::RenderContext;
 use self::turn_state::TurnState;
@@ -190,10 +195,6 @@ pub struct App {
     pub should_quit: bool,
     /// Pending side-effect intents. Drained by runner after each draw cycle.
     intents: Vec<AppIntent>,
-    /// Visible chat area height (updated during draw).
-    visible_height: usize,
-    /// Terminal width (updated during draw).
-    terminal_width: u16,
     /// Force a full repaint on the next draw.
     ///
     /// ratatui is a diff-based renderer: it only repaints cells whose buffer
@@ -254,11 +255,10 @@ pub struct App {
     pub(crate) goal: Option<goal::GoalState>,
     /// TUI 启动时的工作目录，用于 /new 创建 session 时传递 workspace。
     launch_workspace: Option<String>,
-    /// The chat viewport rect of the last frame. The overlay scrollbar is
-    /// both painted and hit-tested against this rect only — no cross-frame
-    /// cache, so a resize cannot leave the bar interactive where it is not
-    /// drawn.
-    chat_area: Rect,
+    /// Geometry of the last drawn frame — the contract every input path
+    /// (mouse, selection, page keys, composer editing width) reads. Written
+    /// by `draw` alone; see [`FrameGeometry`].
+    geometry: FrameGeometry,
     /// Overlay scrollbar interaction state (hover / drag).
     scrollbar: scrollbar::ScrollbarState,
 }
@@ -280,8 +280,6 @@ impl App {
             selection_autoscroll_at: None,
             should_quit: false,
             intents: Vec::new(),
-            visible_height: 20,
-            terminal_width: 80,
             needs_full_redraw: true,
             chat_dirty: false,
             input_dirty: false,
@@ -306,14 +304,14 @@ impl App {
             launch_workspace,
             // Zero-sized until the first draw records the real chat viewport:
             // no bar, no hit testing, before anything is on screen.
-            chat_area: Rect::default(),
+            geometry: FrameGeometry::default(),
             scrollbar: scrollbar::ScrollbarState::default(),
         }
     }
 
     /// Whether the terminal is wide enough for detailed status bar.
     fn is_wide(&self) -> bool {
-        self.terminal_width >= WIDE_THRESHOLD
+        self.geometry.width() >= WIDE_THRESHOLD
     }
 
     /// Mark the UI as changed (coalesced to ~60fps by the frame gate).
@@ -427,7 +425,7 @@ impl App {
             }
             MouseEventKind::ScrollDown => {
                 self.chat
-                    .scroll_down(WHEEL_SCROLL_LINES, self.visible_height);
+                    .scroll_down(WHEEL_SCROLL_LINES, self.geometry.chat_height());
                 MouseOutcome::Immediate
             }
             // Hover belongs to the overlay scrollbar alone — it is the only
@@ -603,13 +601,7 @@ impl App {
     /// the geometry it drew into); a collapsed or not-yet-rendered rect
     /// (`Rect::default()`) accepts nothing.
     fn composer_contains(&self, column: u16, row: u16) -> bool {
-        let area = self.input.rendered_area();
-        area.width > 0
-            && area.height > 0
-            && column >= area.x
-            && column < area.right()
-            && row >= area.y
-            && row < area.bottom()
+        self.geometry.composer_contains(column, row)
     }
 
     /// Left press inside the composer: arm a drag selection.
@@ -770,7 +762,7 @@ impl App {
         {
             // Restore the follow contract from the current position, exactly
             // like the copy path below.
-            self.chat.scroll_down(0, self.visible_height);
+            self.chat.scroll_down(0, self.geometry.chat_height());
             self.selection.cancel();
             self.push_intent(AppIntent::OpenLink(target));
             return MouseOutcome::Immediate;
@@ -779,7 +771,7 @@ impl App {
         // (`n = 0` only judges — it never moves). This runs for clicks too, so
         // the `unfollow` from the press cannot leave the view stuck in reading
         // mode.
-        self.chat.scroll_down(0, self.visible_height);
+        self.chat.scroll_down(0, self.geometry.chat_height());
         let bounds = match release_point {
             Some(point) => {
                 // Include the character under the pointer (reference
@@ -824,7 +816,7 @@ impl App {
         self.selection_guard = None;
         self.selection_autoscroll_at = None;
         if region == Some(SelectionRegion::Chat) {
-            self.chat.scroll_down(0, self.visible_height);
+            self.chat.scroll_down(0, self.geometry.chat_height());
         }
     }
 
@@ -834,12 +826,12 @@ impl App {
         match self.selection.region() {
             Some(SelectionRegion::Composer) => SelectionGuard::Composer {
                 text: self.input.text(),
-                width: self.terminal_width,
+                width: self.geometry.width(),
             },
             _ => SelectionGuard::Chat {
                 cells: self.chat.len(),
                 pending: self.chat.pending_len(),
-                width: self.terminal_width,
+                width: self.geometry.width(),
                 rebuilds: self.chat.structure_epoch(),
             },
         }
@@ -872,7 +864,7 @@ impl App {
         if direction < 0 {
             self.chat.scroll_up(1);
         } else {
-            self.chat.scroll_down(1, self.visible_height);
+            self.chat.scroll_down(1, self.geometry.chat_height());
         }
         // The drag keeps the follow state frozen, even when this step landed
         // exactly on the bottom edge (that judgement happens on release).
@@ -901,19 +893,19 @@ impl App {
     /// Geometry of the overlay scrollbar for the current frame state
     /// (`None` = content fits, or nothing has been drawn yet).
     fn scrollbar_geometry(&self) -> Option<scrollbar::ScrollbarGeometry> {
-        scrollbar::geometry(
-            self.chat_area,
-            self.chat.content_height(),
-            self.chat.scroll_position(),
-        )
+        self.geometry
+            .scrollbar(self.chat.content_height(), self.chat.scroll_position())
     }
 
-    /// The bar as a claim on a pointer position: the geometry when the pointer
-    /// is on the bar itself, `None` when there is no bar or the pointer missed
-    /// it. Nothing outside the bar is ever the bar's.
+    /// The bar as a claim on a pointer position, read through the frame's
+    /// geometry (see [`FrameGeometry::scrollbar_at`]).
     fn scrollbar_at(&self, column: u16, row: u16) -> Option<scrollbar::ScrollbarGeometry> {
-        let geom = self.scrollbar_geometry()?;
-        scrollbar::hit(&geom, column, row).then_some(geom)
+        self.geometry.scrollbar_at(
+            self.chat.content_height(),
+            self.chat.scroll_position(),
+            column,
+            row,
+        )
     }
 
     /// Move the chat to the position under a pointer row, through the shared
@@ -983,7 +975,7 @@ impl App {
 
         terminal.draw(|frame| {
             let area = frame.area();
-            self.terminal_width = area.width;
+            self.geometry.record_area(area);
 
             // A selection is anchored to *content* coordinates, which only
             // survive while the content is stable: adding / removing /
@@ -1031,10 +1023,10 @@ impl App {
             // into the band **minus the scrollbar gutter**, so no cell
             // (markdown text, user-message background, diff tint, tool output)
             // can reach the bar's column however its own width arithmetic
-            // works out. `self.chat_area` keeps the full band: that is what the
-            // bar's geometry and its hit testing are derived from.
+            // works out. The recorded chat band keeps the full width: that is
+            // what the bar's geometry and its hit testing are derived from.
             chat_height = chunks[1].height;
-            self.chat_area = chunks[1];
+            self.geometry.record_chat_band(chunks[1]);
             let ctx = crate::render::renderable::CellContext {
                 palette: &palette,
                 thinking_mode,
@@ -1095,6 +1087,7 @@ impl App {
             // mouse events arrive between frames, so hit testing works off the
             // last frame's rect — same contract as the chat band's geometry).
             let input_rect = chunks[idx];
+            self.geometry.record_composer(input_rect);
             frame.render_widget(InputAreaWidget::new(&mut self.input, &palette), input_rect);
             idx += 1;
 
@@ -1166,8 +1159,6 @@ impl App {
         if self.toast.as_ref().is_some_and(|t| t.is_expired()) {
             self.toast = None;
         }
-
-        self.visible_height = chat_height as usize;
 
         Ok(())
     }

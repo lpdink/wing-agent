@@ -131,6 +131,17 @@ pub(super) fn hover(at: (u16, u16)) -> crossterm::event::MouseEvent {
     mouse_at(crossterm::event::MouseEventKind::Moved, at)
 }
 
+/// Declare the last frame's chat band **height**.
+///
+/// Surrogate for the removed `visible_height` field: the tests below drive the
+/// wheel and the page keys without rendering a frame, and only the band's
+/// height takes part in those paths. The band is recorded zero-wide, so no
+/// pointer position can be claimed by a frame that was never drawn.
+pub(super) fn set_chat_height(app: &mut App, height: u16) {
+    app.geometry
+        .record_chat_band(ratatui::layout::Rect::new(0, 0, 0, height));
+}
+
 /// App whose chat holds one user message and no header, so the rendered
 /// rows are known: row 1 of the chat band holds "hello world" at column 2
 /// (the user cell insets its text by two columns, one padding row on top).

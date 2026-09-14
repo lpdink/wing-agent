@@ -121,7 +121,7 @@ fn test_drag_freezes_follow_across_frames_and_release_keeps_reading() {
         "new content must not yank the frozen view"
     );
     assert!(
-        app.chat.content_height() > app.visible_height,
+        app.chat.content_height() > app.geometry.chat_height(),
         "the content must have outgrown the band"
     );
     assert!(
@@ -365,7 +365,7 @@ fn test_edge_autoscroll_steps_one_line_and_stops_at_the_edge() {
     );
 
     // Reaching the content edge stops the step instead of spinning.
-    app.chat.scroll_down(1000, app.visible_height);
+    app.chat.scroll_down(1000, app.geometry.chat_height());
     let bottom = app.chat.scroll_position();
     assert!(!app.tick_selection_autoscroll(), "nothing left to scroll");
     assert_eq!(app.chat.scroll_position(), bottom, "the view stays put");
@@ -464,13 +464,13 @@ fn test_press_on_the_bar_drags_the_bar_and_starts_no_selection() {
     let band = app.chat.geometry().area;
     let geom = app.scrollbar_geometry().expect("content overflows");
     assert_eq!(
-        app.chat_area.right() - band.right(),
+        app.geometry.chat_band().right() - band.right(),
         scrollbar::SCROLLBAR_GUTTER,
         "the content area is the band minus the gutter"
     );
     assert_eq!(
         geom.column,
-        app.chat_area.right() - 1,
+        app.geometry.chat_band().right() - 1,
         "the bar owns the band's last column, inside that gutter"
     );
     assert!(app.chat.is_at_bottom(), "pinned to the bottom on load");

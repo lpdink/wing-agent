@@ -453,12 +453,12 @@ impl App {
 
     /// The chat viewport owns this key.
     fn handle_chat_scroll_key(&mut self, action: ChatScrollAction) {
-        let page = self.visible_height.saturating_sub(2);
+        let page = self.geometry.chat_height().saturating_sub(2);
         match action {
             ChatScrollAction::PageUp => self.chat.page_up(page),
-            ChatScrollAction::PageDown => self.chat.page_down(page, self.visible_height),
+            ChatScrollAction::PageDown => self.chat.page_down(page, self.geometry.chat_height()),
             ChatScrollAction::LineUp => self.chat.scroll_up(1),
-            ChatScrollAction::LineDown => self.chat.scroll_down(1, self.visible_height),
+            ChatScrollAction::LineDown => self.chat.scroll_down(1, self.geometry.chat_height()),
             ChatScrollAction::Top => self.chat.jump_top(),
             ChatScrollAction::Bottom => self.chat.jump_bottom(),
         }
@@ -466,7 +466,7 @@ impl App {
 
     /// Everything else goes to the input area.
     fn handle_composer_key(&mut self, key: crossterm::event::KeyEvent) {
-        match self.input.handle_key(key, self.terminal_width) {
+        match self.input.handle_key(key, self.geometry.width()) {
             InputAction::Submit(text) => {
                 // Submitting a message pins the view to the bottom so the
                 // sent message and the agent's reply come into view.
