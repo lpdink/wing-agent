@@ -165,6 +165,9 @@ impl App {
             }
             _ => {}
         }
+        // The popup's own rung sits below the Escape check: Esc closes the
+        // popup, while the navigation keys are the popup's — and the "armed but
+        // empty" case gets its own route so its Enter refusal stays explicit.
         if key.code == crossterm::event::KeyCode::Esc {
             return KeyRoute::EscLadder;
         }
