@@ -40,9 +40,26 @@ fn test_draw_records_the_frame_it_laid_out() {
     // Whole frame: the terminal it was drawn into.
     assert_eq!(app.geometry.width(), 80);
 
-    // Chat band: the rect the bar is painted into — the content area the chat
-    // widget recorded, widened by the gutter.
+    // Layout, as an independent fact: status bar row 0, chat band from row 1,
+    // then the info separator, then the composer — nothing else claims rows.
     let band = app.geometry.chat_band();
+    let composer = app.geometry.composer_rect();
+    assert_eq!(band.y, 1, "the band starts right below the status bar");
+    assert_eq!(band.x, 0);
+    assert_eq!(band.width, 80, "the band spans the terminal");
+    assert_eq!(
+        composer.y,
+        band.bottom() + 1,
+        "the info separator is the row right under the band (bottom is exclusive),          the composer the one below it"
+    );
+    assert_eq!(
+        band.height + 1 + 1 + composer.height,
+        24,
+        "status + band + separator + composer fill the terminal"
+    );
+
+    // Chat band vs. the rect the chat widget recorded: the content area plus
+    // the gutter — two independent recorders agreeing on one frame.
     let content = app.chat.geometry().area;
     assert_eq!(band.x, content.x);
     assert_eq!(band.y, content.y);
@@ -54,16 +71,17 @@ fn test_draw_records_the_frame_it_laid_out() {
         "the band's height is what the page keys and the wheel step against"
     );
 
-    // The bar is *derived* from that band: its column is the band's last one
-    // and its track spans the band's rows exactly.
+    // The bar is derived over that band: its column is the terminal's last one
+    // and its track spans the band's rows.
     let geom = app.scrollbar_geometry().expect("content overflows");
-    assert_eq!(geom.column, band.right() - 1);
+    assert_eq!(geom.column, 79, "the terminal's last column");
     assert_eq!(geom.track_top, band.y);
     assert_eq!(geom.track_bottom, band.bottom() - 1);
-    assert_eq!(geom.viewport_height, band.height as usize);
 
-    // Composer: the rect the input widget drew into, to the cell.
-    let composer = app.input.rendered_area();
+    // Composer: the contract's block *is* the rect the widget recorded for
+    // itself — the claim and the pointer mapping read the same screen.
+    assert_eq!(composer, app.input.rendered_area());
+    assert_eq!(composer.width, 80);
     for (x, y) in [
         (composer.x, composer.y),
         (composer.right() - 1, composer.bottom() - 1),
@@ -132,9 +150,64 @@ fn test_unframed_geometry_claims_nothing_and_keeps_the_editor_width() {
     assert!(!app.selection.is_press_active());
     assert!(app.drain_intents().is_empty());
 
-    // …while the composer's editor keeps the canonical width it had before the
-    // first frame (the value the replaced field started with).
+    // The pre-first-frame contract, pinned: the composer's editor keeps the
+    // canonical width it had before the first frame (the value the replaced
+    // field started with) …
     assert_eq!(app.geometry.width(), 80);
+    // … while the band is empty (the replaced `visible_height` started at 20 —
+    // deliberately not carried over, see `FrameGeometry::default`) and the
+    // composer accepts nothing.
+    assert_eq!(app.geometry.chat_height(), 0);
+    assert_eq!(app.geometry.chat_band(), ratatui::layout::Rect::default());
+    assert!(!app.composer_contains(0, 11));
+    assert!(app.scrollbar_geometry().is_none(), "no band, no bar");
+
+    // What the empty band *means* for the paths that read its height. Only the
+    // tests can get here: `run_app` draws before it reads an event, and with no
+    // content yet the two implementations agree anyway (max_scroll == 0).
+    let mut app = test_app();
+    app.chat.last_total = 100;
+    app.chat.scroll_offset = 78;
+    app.chat.scroll_up(0); // reading state, offset unchanged
+
+    // The wheel: up is height-independent, down steps its three lines and
+    // clamps at the *content height* (`max_scroll = last_total - 0`), not at
+    // the 20-row band the replaced field assumed.
+    app.handle_mouse(wheel_up());
+    assert_eq!(app.chat.scroll_position(), 75);
+    app.handle_mouse(wheel_down());
+    assert_eq!(app.chat.scroll_position(), 78);
+    app.chat.scroll_offset = 98;
+    app.handle_mouse(wheel_down());
+    assert_eq!(
+        app.chat.scroll_position(),
+        100,
+        "clamped at the content height"
+    );
+    assert!(
+        app.chat.is_at_bottom(),
+        "the zero-tall bottom edge is the content end"
+    );
+
+    // The page keys: `page = chat_height() - 2` saturates to 0, so a page step
+    // moves nothing in either direction (the follow state is still left behind
+    // — that part does not depend on the height).
+    let mut app = test_app();
+    app.chat.last_total = 100;
+    app.chat.scroll_offset = 90;
+    app.chat.scroll_up(0);
+    app.handle_key(key(crossterm::event::KeyCode::PageUp));
+    assert_eq!(
+        app.chat.scroll_position(),
+        90,
+        "a zero-height page steps nothing"
+    );
+    app.handle_key(key(crossterm::event::KeyCode::PageDown));
+    assert_eq!(app.chat.scroll_position(), 90, "…in either direction");
+    assert!(
+        !app.chat.is_at_bottom(),
+        "and it does not re-arm follow either"
+    );
 }
 
 #[test]
@@ -169,6 +242,12 @@ fn test_pointer_priority_is_declared_once_and_in_order() {
         app.pointer_owner(geom.column, geom.track_top),
         Some(PointerOwner::Scrollbar)
     );
+    assert_eq!(
+        app.pointer_chain(geom.column, geom.track_top)
+            .collect::<Vec<_>>(),
+        vec![PointerOwner::Scrollbar],
+        "the chain holds the claiming owners, in declaration order"
+    );
     // 2. The band elsewhere: the chat (its content rect, gutter excluded).
     assert_eq!(
         app.pointer_owner(content.x, content.y),
@@ -182,6 +261,11 @@ fn test_pointer_priority_is_declared_once_and_in_order() {
     // The gutter's blank column belongs to nobody: the bar owns only its own
     // column, and the chat only its content rect.
     assert_eq!(app.pointer_owner(content.right(), content.y), None);
+    assert_eq!(
+        app.pointer_chain(content.right(), content.y).count(),
+        0,
+        "nobody claims the gutter's blank column"
+    );
     // 3. The composer block, below the band.
     assert_eq!(
         app.pointer_owner(composer.x + 1, composer.y),
@@ -206,6 +290,39 @@ fn test_pointer_priority_is_declared_once_and_in_order() {
         MouseOutcome::Immediate
     );
     assert_eq!(app.selection.region(), Some(SelectionRegion::Composer));
+}
+
+#[test]
+fn test_at_most_one_owner_claims_any_position() {
+    // The invariant behind "the order only decides ties": on the frame that
+    // holds every region at once, no position is claimed twice. If a future
+    // claim starts overlapping another (say the chat band claiming the gutter),
+    // this test goes red and the declaration order becomes load-bearing — which
+    // is exactly what it is declared for.
+    let mut app = app_with_bar_and_draft();
+    let mut terminal = test_terminal(80, 24);
+    draw(&mut app, &mut terminal);
+    assert!(
+        app.scrollbar_geometry().is_some(),
+        "the bar must exist for its claim to take part"
+    );
+
+    let mut claimed = 0usize;
+    for row in 0..24 {
+        for column in 0..80 {
+            let owners: Vec<PointerOwner> = app.pointer_chain(column, row).collect();
+            assert!(
+                owners.len() <= 1,
+                "({column},{row}) is claimed by {owners:?} — the priority order \
+                 would have to decide, and the chain is documented as disjoint"
+            );
+            claimed += owners.len();
+        }
+    }
+    assert!(
+        claimed >= 4,
+        "the frame must claim something (band, bar and composer rows), got {claimed}"
+    );
 }
 
 #[test]

@@ -281,6 +281,13 @@ impl SelectionSession {
 }
 
 impl App {
+    // Two readers, one screen: the *claim* that a press belongs to the composer
+    // reads the frame's geometry (`PointerOwner::Composer`, `mouse.rs`), while
+    // the pointer ↔ text mapping below reads the rect the input widget recorded
+    // for itself (`InputArea::rendered_area`, used for cursor placement too).
+    // Both come from the same laid-out rect and `app::tests::frame` asserts they
+    // are equal, so the two paths cannot describe different frames.
+
     /// Left press inside the composer: arm a drag selection.
     ///
     /// The cursor is **not** moved here: a press cannot know yet whether it

@@ -94,12 +94,30 @@ impl PointerOwner {
 }
 
 impl App {
-    /// The owner of a pointer gesture at this position (`None` = nobody claims
-    /// it, e.g. the status bar).
-    pub(super) fn pointer_owner(&self, column: u16, row: u16) -> Option<PointerOwner> {
+    /// The owners that claim this position, in [`POINTER_PRIORITY`] order.
+    ///
+    /// Today the three claims are pairwise disjoint — the bar's column lives in
+    /// the chat band's gutter, and the composer block sits below the band — so
+    /// the chain is empty or holds a single owner, and the declaration order is
+    /// only observable when two claims *do* overlap. That is exactly what it is
+    /// there for: it decides such a tie, so a future claim (say, a band that
+    /// also claimed the gutter) cannot silently reorder the dispatch. The
+    /// "at most one owner" invariant and the per-position verdicts are pinned
+    /// in `app::tests::frame`.
+    pub(super) fn pointer_chain(
+        &self,
+        column: u16,
+        row: u16,
+    ) -> impl Iterator<Item = PointerOwner> {
         POINTER_PRIORITY
             .into_iter()
-            .find(|owner| owner.claims(self, column, row))
+            .filter(move |owner| owner.claims(self, column, row))
+    }
+
+    /// The owner of a pointer gesture at this position (`None` = nobody claims
+    /// it, e.g. the status bar) — the head of [`Self::pointer_chain`].
+    pub(super) fn pointer_owner(&self, column: u16, row: u16) -> Option<PointerOwner> {
+        self.pointer_chain(column, row).next()
     }
 
     /// Handle a mouse event, reporting how the next frame should happen.
@@ -157,19 +175,26 @@ impl App {
     fn mouse_press(&mut self, column: u16, row: u16) -> MouseOutcome {
         let owner = self.pointer_owner(column, row);
         // The bar first: its column overprints the chat band, so grabbing the
-        // grip under the pointer is the only way to drag it.
+        // grip under the pointer is the only way to drag it. The claim is
+        // consumed once — the geometry it was made through is the one grabbed —
+        // and a bar that is gone by now (a frame moved under the claim) degrades
+        // to "nothing claimed": this is an event path, not a place to panic.
         if owner == Some(PointerOwner::Scrollbar) {
-            let geom = self
-                .scrollbar_at(column, row)
-                .expect("the bar claims the position it was found at");
-            return self.grab_scrollbar(&geom, row);
+            return match self.scrollbar_at(column, row) {
+                Some(geom) => self.grab_scrollbar(&geom, row),
+                None => MouseOutcome::Ignored,
+            };
         }
+        // A press off the bar also drops whatever hover / drag look the bar kept
+        // — the same cleanup a focus loss performs — so the outcome cannot be
+        // the region's alone: the repaint the bar asks for wins over the
+        // selection's "nothing to see" verdict.
         let bar_repaint = self.clear_scrollbar_interaction();
         let outcome = match owner {
             Some(PointerOwner::Composer) => self.composer_press(column, row),
-            // A position outside both regions (status bar, popups) belongs to
-            // nobody: like hover, it changes nothing.
             Some(PointerOwner::Chat) => self.chat_selection_press(column, row),
+            // `Scrollbar` returned above; `None` = nobody claims the position
+            // (status bar, popups) — like hover, it changes nothing.
             Some(PointerOwner::Scrollbar) | None => MouseOutcome::Ignored,
         };
         match outcome {
@@ -216,7 +241,11 @@ impl App {
     }
 
     /// Whether a screen position lies inside the composer's rect of the last
-    /// frame (the claim [`PointerOwner::Composer`] is built on).
+    /// frame.
+    ///
+    /// The named seam of the [`PointerOwner::Composer`] claim, which is
+    /// `composer_contains(…) && !composer_pointer_blocked()` — the position half
+    /// here, the modal guard from the modal lane.
     pub(super) fn composer_contains(&self, column: u16, row: u16) -> bool {
         self.geometry.composer_contains(column, row)
     }

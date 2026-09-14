@@ -21,6 +21,14 @@
 //! offset it was rendered with) is recorded by [`crate::ui::chat_view`] itself
 //! and read back through `ChatView::geometry` / `contains_screen`: one fact,
 //! one writer.
+//!
+//! **One draw writes this in three places** — the terminal area at the top of
+//! the pass (the selection fingerprint must see the *new* width), the chat band
+//! after the layout, the composer block when the input widget is rendered
+//! (the cancellation path must still see the *old* band height). A draw that
+//! fails halfway therefore leaves a mixed frame — a new area with the previous
+//! band — which is exactly what the three loose fields this replaced did; no
+//! reader can observe a frame that was not drawn to completion anyway.
 
 use ratatui::layout::Rect;
 
@@ -33,7 +41,9 @@ use crate::ui::scrollbar::ScrollbarGeometry;
 /// in production reads the geometry of a frame that was never drawn. The
 /// composer's editor is driven without one in the tests, though, and it needs a
 /// width to wrap against; 80 is the value the field this type replaced started
-/// with, kept so those tests keep describing the same editor.
+/// with, kept so those tests keep describing the same editor. It only ever
+/// fills [`FrameGeometry::width`]: the assumed frame's height is not read by
+/// any query (see [`FrameGeometry::default`]).
 const UNFRAMED_WIDTH: u16 = 80;
 
 /// Geometry of the last drawn frame (`Default` = nothing drawn yet).
@@ -55,6 +65,18 @@ pub(super) struct FrameGeometry {
 impl Default for FrameGeometry {
     /// The pre-first-frame state: no band, no composer — and a terminal width
     /// of [`UNFRAMED_WIDTH`], see there.
+    ///
+    /// **The band height falls back to 0** (the `visible_height` field this
+    /// replaced started at 20, which is deliberately *not* carried over: 20 was
+    /// a guess about a frame that had never been laid out, and a recorded
+    /// geometry should not invent one). Any path that reads the viewport height
+    /// before the first frame therefore changes meaning with it: the wheel
+    /// clamps against a zero-tall viewport (`scroll_down` reaches
+    /// `content_height`, `max_scroll == content_height - 0`) and the page keys
+    /// step by zero (`page = 0 - 2` saturates). Production cannot reach any of
+    /// it — `run_app` draws before it reads an event, and with no content yet
+    /// `max_scroll` is 0 either way — so this is a tests-visible contract, and
+    /// `app::tests::frame` pins it.
     fn default() -> Self {
         Self {
             area: Rect::new(0, 0, UNFRAMED_WIDTH, 0),
@@ -100,13 +122,24 @@ impl FrameGeometry {
         self.chat_band.height as usize
     }
 
+    /// The composer block of the last frame.
+    ///
+    /// The widget records the same rect for its own pointer mapping
+    /// ([`crate::ui::input_area::InputArea::rendered_area`]); the two are the
+    /// same value by construction (both come from the rect `draw` laid the
+    /// input area out into) and `app::tests::frame` asserts they are equal, so
+    /// the claim and the mapping can never describe different screens.
+    pub(super) fn composer_rect(&self) -> Rect {
+        self.composer
+    }
+
     /// Whether a screen position lies inside the composer block of the last
     /// frame.
     ///
     /// A zero-sized rect (nothing drawn yet, or a collapsed composer) accepts
     /// nothing — the same "no geometry, no hit" rule the chat band follows.
     pub(super) fn composer_contains(&self, column: u16, row: u16) -> bool {
-        let area = self.composer;
+        let area = self.composer_rect();
         area.width > 0
             && area.height > 0
             && column >= area.x
