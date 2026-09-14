@@ -147,7 +147,7 @@ crates/wing/src/
 │   ├── popup_state.rs               Popup + 候选缓存 + 去重
 │   └── constants.rs                 协议常量（本地命令、工具名等 magic string）
 ├── ui/                              UI 组件
-│   ├── chat_view.rs                 Chat 视图（宽度感知虚拟化）
+│   ├── chat_view/                   Chat 视图：mod（ChatView 结构）· cell（ChatCell 渲染）· model（内容模型）· viewport（滚动·几何·高度缓存·绘制）· frame（帧快照·选择映射）· link（链接表·OSC8）
 │   ├── selection.rs                 文本选择状态机（区域标签 / 内容坐标锚定 / 区间有序化 / 快照取文本，纯逻辑）
 │   ├── scrollbar.rs                 overlay 滚动条（几何 / 命中测试 / 拖拽状态机 / 绘制）
 │   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存
