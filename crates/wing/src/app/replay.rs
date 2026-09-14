@@ -8,11 +8,11 @@
 //! - fact-event nodes (`events`) → [`WingEvent`], the same typed decoder as
 //!   the live stream (unknown types fall back to `Unknown`).
 
-use crate::app::ask_panel::AskPanel;
-use crate::app::constants::TOOL_TODO;
 use crate::protocol::AskQuestion;
 use crate::protocol::SessionMessage;
 use crate::protocol::WingEvent;
+use crate::shared::constants::TOOL_TODO;
+use crate::shared::panels::ask::AskPanel;
 use crate::ui::cells::ask_msg::AskMessage;
 use crate::ui::cells::diff_view::DiffView;
 use crate::ui::cells::thinking::ThinkingBlock;

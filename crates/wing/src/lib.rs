@@ -10,6 +10,7 @@ pub mod config;
 pub mod gateway;
 pub mod protocol;
 pub mod render;
+pub mod shared;
 pub mod stdio;
 pub mod tui;
 pub mod ui;

@@ -36,9 +36,9 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 
-use crate::app::selection_panel::PageKind;
-use crate::app::selection_panel::SelectionPanel;
-use crate::app::selection_panel::wrap_index;
+use super::PageKind;
+use super::SelectionPanel;
+use super::wrap_index;
 use crate::protocol::AskQuestion;
 
 /// Content sent to the backend when the user cancels from the confirm page.
@@ -848,8 +848,8 @@ mod tests {
 
     #[test]
     fn confirm_page_is_a_custom_page_in_navigation_and_window() {
-        use crate::app::selection_panel::PANEL_WINDOW;
-        use crate::app::selection_panel::window_range;
+        use crate::shared::panels::PANEL_WINDOW;
+        use crate::shared::panels::window_range;
 
         let questions: Vec<AskQuestion> = (0..6)
             .map(|i| question(&format!("q{i}"), &format!("Q{i}"), false, &["a", "b"]))

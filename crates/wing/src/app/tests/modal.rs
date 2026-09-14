@@ -9,6 +9,9 @@ use crate::app::modal::KeyRoute;
 use crate::app::modal::ModalOwner;
 use crate::app::*;
 use crate::protocol::AskQuestion;
+use crate::shared::panels::ask::ASK_CANCEL_CONTENT;
+use crate::shared::panels::ask::AskPanel;
+use crate::shared::panels::ask::PanelFinish;
 use crate::ui::chat_view::ChatCell;
 use crate::ui::input_area::helpers::PREFIX_WIDTH;
 use crate::ui::popup::command::SessionCandidate;
@@ -59,7 +62,7 @@ fn test_ask_panel_key_flow_submits_header_answer() {
             ChatCell::Ask(msg) if msg
                 .panel
                 .as_ref()
-                .is_some_and(|p| p.finished == Some(ask_panel::PanelFinish::Submitted))
+                .is_some_and(|p| p.finished == Some(PanelFinish::Submitted))
         )
     });
     assert!(finished, "cell keeps the submitted summary");
@@ -105,7 +108,7 @@ fn test_ask_panel_escape_interrupts_and_cancel_sends_sentinel() {
         AppIntent::SendMessage { content, .. } => Some(content),
         _ => None,
     });
-    assert_eq!(sent.as_deref(), Some(ask_panel::ASK_CANCEL_CONTENT));
+    assert_eq!(sent.as_deref(), Some(ASK_CANCEL_CONTENT));
     assert!(app.ask_panels.is_empty());
 }
 
@@ -284,7 +287,7 @@ fn test_composer_pointer_is_ignored_while_a_modal_owns_the_keyboard() {
         (
             "ask panel",
             Box::new(|app: &mut App| {
-                app.ask_panels.push_back(ask_panel::AskPanel::new(
+                app.ask_panels.push_back(AskPanel::new(
                     "ask-1".into(),
                     vec![AskQuestion {
                         id: "q1".into(),

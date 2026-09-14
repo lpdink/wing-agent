@@ -23,6 +23,7 @@ use super::App;
 use super::AppIntent;
 use super::goal;
 use super::title;
+use crate::shared::goal_role::GoalRole;
 use crate::ui::chat_view::ChatCell;
 use crate::ui::toast::Toast;
 use crate::util::title::AttentionKind;
@@ -114,13 +115,13 @@ impl App {
     }
 
     /// Determine which Goal role a session_id corresponds to.
-    pub(super) fn goal_role_for_session(&self, session_id: Option<&str>) -> Option<goal::GoalRole> {
+    pub(super) fn goal_role_for_session(&self, session_id: Option<&str>) -> Option<GoalRole> {
         let goal = self.goal.as_ref()?;
         let sid = session_id?;
         if sid == self.session_id {
-            Some(goal::GoalRole::Executor)
+            Some(GoalRole::Executor)
         } else if goal.checker_session_id.as_deref() == Some(sid) {
-            Some(goal::GoalRole::Checker)
+            Some(GoalRole::Checker)
         } else {
             None
         }

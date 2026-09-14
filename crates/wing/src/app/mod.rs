@@ -14,17 +14,17 @@
 //! geometry of the frame just drawn, [`mouse`] routes pointer gestures — its
 //! priority chain declared once — and [`selection_session`] owns the drag's
 //! lifecycle (anchor, fingerprint, edge auto-scroll).
+//!
+//! State that the UI renders as well (the selection panels, the goal display
+//! role, the shared magic strings) is neutral and lives in
+//! [`crate::shared`] — this root only orchestrates it.
 
-pub mod ask_panel;
-pub mod constants;
 pub mod goal;
 pub mod intent;
-pub mod model_panel;
 pub mod popup_state;
 pub mod render_context;
 pub mod replay;
 pub mod runner;
-pub mod selection_panel;
 pub mod transport;
 pub mod turn_state;
 
@@ -140,9 +140,9 @@ pub struct App {
     ask_selections: std::collections::VecDeque<crate::ui::ask_select::AskSelection>,
     /// Queued AskUserQuestion panels (multi-question / multi-select asks).
     /// Concurrent asks queue up; the front entry is the active one.
-    ask_panels: std::collections::VecDeque<ask_panel::AskPanel>,
+    ask_panels: std::collections::VecDeque<crate::shared::panels::ask::AskPanel>,
     /// `/model` selection panel (None = closed). Modal while open.
-    model_panel: Option<model_panel::ModelPanel>,
+    model_panel: Option<crate::shared::panels::picker::ModelPanel>,
     /// Last successful `/api/models` response — `/model` opens the panel from
     /// this cache instantly and refreshes in the background.
     model_sources: Vec<wing_api_client::models::ProviderModels>,

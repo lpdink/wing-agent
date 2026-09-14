@@ -5,8 +5,8 @@
 
 use super::support::*;
 use crate::app::commands;
-use crate::app::selection_panel::SelectionPanel;
 use crate::app::*;
+use crate::shared::panels::SelectionPanel;
 use crate::ui::chat_view::ChatCell;
 
 /// Assert that `text` is consumed as a command (not sent to LLM).

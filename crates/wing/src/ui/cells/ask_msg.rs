@@ -4,8 +4,8 @@
 //! - **Panel**: the AskUserQuestion panel — a tab bar (question headers +
 //!   confirm page), one question at a time, single/multi-select options, a
 //!   free-form row with an inline editor, and a footer with the key hints.
-//!   Interaction state lives in `app::ask_panel::AskPanel`; this cell stores
-//!   a render snapshot of it.
+//!   Interaction state lives in `crate::shared::panels::ask::AskPanel`; this
+//!   cell stores a render snapshot of it.
 //! - **Legacy**: a single question with optional plain choices (e.g. the Bash
 //!   dangerous-command confirmation). A `▸` cursor highlights the current
 //!   choice when the ask requires a selection.
@@ -13,14 +13,14 @@
 //! No synthetic identifiers are ever added to options: labels render verbatim
 //! and a chosen option is sent back verbatim.
 
-use crate::app::ask_panel::AskPanel;
-use crate::app::ask_panel::PanelFinish;
-use crate::app::ask_panel::QuestionState;
-use crate::app::ask_panel::UNANSWERED_PLACEHOLDER;
-use crate::app::selection_panel::PANEL_WINDOW;
-use crate::app::selection_panel::window_range;
 use crate::config::ThemePalette;
 use crate::render::markdown::render_markdown_with_width;
+use crate::shared::panels::PANEL_WINDOW;
+use crate::shared::panels::ask::AskPanel;
+use crate::shared::panels::ask::PanelFinish;
+use crate::shared::panels::ask::QuestionState;
+use crate::shared::panels::ask::UNANSWERED_PLACEHOLDER;
+use crate::shared::panels::window_range;
 use crate::ui::panel::Tab;
 use crate::ui::panel::TabState;
 use crate::ui::panel::cursor_span;
@@ -547,7 +547,6 @@ fn wrap_plain(text: &str, max_width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ask_panel::AskPanel;
     use crate::protocol::{AskOption, AskQuestion};
 
     fn p() -> ThemePalette {

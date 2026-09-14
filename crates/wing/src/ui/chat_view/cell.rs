@@ -21,7 +21,6 @@ use ratatui::widgets::Widget;
 use ratatui::widgets::Wrap;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::model_panel::ModelPanel;
 use crate::config::ThemePalette;
 use crate::render::Renderable;
 use crate::render::markdown::ComposedLines;
@@ -30,6 +29,8 @@ use crate::render::markdown::links::CELL_PREFIX_WIDTH;
 use crate::render::markdown::render_markdown_lines;
 use crate::render::markdown::render_plain;
 use crate::render::renderable::CellContext;
+use crate::shared::goal_role::GoalRole;
+use crate::shared::panels::picker::ModelPanel;
 use crate::ui::cached_cell::CachedCell;
 use crate::ui::cells::ask_msg::AskMessage;
 use crate::ui::cells::diff_view::DiffView;
@@ -76,10 +77,7 @@ pub enum ChatCell {
     /// ReAct loop separator.
     Separator,
     /// Goal orchestration separator (marks agent role + round).
-    GoalSeparator {
-        role: crate::app::goal::GoalRole,
-        round: u32,
-    },
+    GoalSeparator { role: GoalRole, round: u32 },
 }
 
 impl ChatCell {

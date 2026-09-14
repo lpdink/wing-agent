@@ -17,8 +17,8 @@
 //! instead of re-deriving "is a modal up?" on its own, so the two input
 //! channels cannot drift apart.
 //!
-//! The panel **state machines** (ask panel questions, model picker pages) live
-//! in `ask_panel.rs` / `model_panel.rs`; what lives here is their App-side
+//! The panel **state machines** (ask panel questions, model picker pages) are
+//! neutral and live in `shared/panels/`; what lives here is their App-side
 //! lifecycle: the queues, the chat-cell mirroring, and the reply/apply paths.
 //!
 //! Call directions: [`super::commands`] calls in for the `/model` picker and
@@ -28,10 +28,13 @@
 
 use super::App;
 use super::AppIntent;
-use super::ask_panel;
 use super::goal;
-use super::model_panel;
 use crate::protocol::AskQuestion;
+use crate::shared::goal_role::GoalRole;
+use crate::shared::panels::ask::AskPanel;
+use crate::shared::panels::ask::PanelAction;
+use crate::shared::panels::picker::ModelPanel;
+use crate::shared::panels::picker::ModelPanelAction;
 use crate::tui::is_quit_key;
 use crate::ui::input_area::InputAction;
 use crate::ui::popup::ActivePopup;
@@ -380,9 +383,9 @@ impl App {
             .ask_panels
             .front_mut()
             .map(|panel| panel.handle_key(key))
-            .unwrap_or(ask_panel::PanelAction::None);
+            .unwrap_or(PanelAction::None);
         self.sync_front_panel();
-        if let ask_panel::PanelAction::Reply(content) = action {
+        if let PanelAction::Reply(content) = action {
             self.finish_ask_panel(content);
         }
     }
@@ -397,17 +400,17 @@ impl App {
             .model_panel
             .as_mut()
             .map(|panel| panel.handle_key(key))
-            .unwrap_or(model_panel::ModelPanelAction::None);
+            .unwrap_or(ModelPanelAction::None);
         match action {
-            model_panel::ModelPanelAction::Apply { provider, model } => {
+            ModelPanelAction::Apply { provider, model } => {
                 self.apply_model_selection(provider, model);
             }
-            model_panel::ModelPanelAction::Cancel => {
+            ModelPanelAction::Cancel => {
                 self.close_model_panel();
             }
             // Navigation keeps the panel open — mirror the new cursor /
             // page into the chat cell.
-            model_panel::ModelPanelAction::None => self.sync_model_panel_cell(),
+            ModelPanelAction::None => self.sync_model_panel_cell(),
         }
     }
 
@@ -430,10 +433,10 @@ impl App {
             && let Some(role) = goal.active_role()
         {
             match role {
-                goal::GoalRole::Executor => {
+                GoalRole::Executor => {
                     self.push_intent(AppIntent::InterruptSession);
                 }
-                goal::GoalRole::Checker => {
+                GoalRole::Checker => {
                     if let Some(checker_id) = &goal.checker_session_id {
                         self.push_intent(AppIntent::GoalInterrupt {
                             session_id: checker_id.clone(),
@@ -634,7 +637,7 @@ impl App {
         required: bool,
     ) {
         if !questions.is_empty() {
-            let panel = ask_panel::AskPanel::new(tool_call_id.to_string(), questions.to_vec());
+            let panel = AskPanel::new(tool_call_id.to_string(), questions.to_vec());
             self.chat.update_ask_panel(tool_call_id, panel.clone());
             self.ask_panels.push_back(panel);
         } else if required && !choices.is_empty() {
@@ -681,11 +684,11 @@ impl App {
             && let Some(role) = goal.active_role()
         {
             let actions = match role {
-                goal::GoalRole::Executor => vec![goal::GoalAction::SendToExecutor {
+                GoalRole::Executor => vec![goal::GoalAction::SendToExecutor {
                     content,
                     tool_call_id: Some(tool_call_id),
                 }],
-                goal::GoalRole::Checker => vec![goal::GoalAction::SendToChecker {
+                GoalRole::Checker => vec![goal::GoalAction::SendToChecker {
                     content,
                     tool_call_id: Some(tool_call_id),
                 }],
@@ -717,8 +720,7 @@ impl App {
         }
         if !self.model_sources.is_empty() {
             // Open now from cache; the fetch below refreshes in place.
-            let panel =
-                model_panel::ModelPanel::new(self.model_sources.clone(), self.current_model_pair());
+            let panel = ModelPanel::new(self.model_sources.clone(), self.current_model_pair());
             self.present_model_panel(panel);
             // The popup yields to the modal panel (never both at once).
             self.popup.active = ActivePopup::None;
@@ -734,7 +736,7 @@ impl App {
 
     /// Show a freshly built picker panel: store it as the interactive state
     /// and render it at the tail of the transcript (like the Ask panel).
-    pub(super) fn present_model_panel(&mut self, panel: model_panel::ModelPanel) {
+    pub(super) fn present_model_panel(&mut self, panel: ModelPanel) {
         self.model_panel_pending = false;
         self.chat.show_model_picker(panel.clone());
         self.model_panel = Some(panel);

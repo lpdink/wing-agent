@@ -1,10 +1,10 @@
 //! Goal lane tests — session identity, roles, actions.
 
 use super::support::*;
-use crate::app::goal;
 use crate::app::*;
 use crate::protocol::EventMeta;
 use crate::protocol::WingEvent;
+use crate::shared::goal_role::GoalRole;
 use crate::ui::chat_view::ChatCell;
 
 /// An app in Goal mode with a created checker session.
@@ -41,12 +41,12 @@ fn test_goal_roles_are_session_scoped() {
     let app = app_in_goal_mode();
     assert_eq!(
         app.goal_role_for_session(Some(&app.session_id.clone())),
-        Some(goal::GoalRole::Executor),
+        Some(GoalRole::Executor),
         "the current session is the executor"
     );
     assert_eq!(
         app.goal_role_for_session(Some("checker-session")),
-        Some(goal::GoalRole::Checker)
+        Some(GoalRole::Checker)
     );
     assert_eq!(
         app.goal_role_for_session(Some("someone-else")),
@@ -223,7 +223,7 @@ fn test_goal_actions_are_translated_into_intents_and_cells() {
 
     app.execute_goal_actions(vec![
         goal::GoalAction::PushSeparator {
-            role: goal::GoalRole::Checker,
+            role: GoalRole::Checker,
             round: 1,
         },
         goal::GoalAction::SendToChecker {
@@ -236,7 +236,7 @@ fn test_goal_actions_are_translated_into_intents_and_cells() {
         matches!(
             app.chat.cells.last().map(|c| c.cell()),
             Some(ChatCell::GoalSeparator {
-                role: goal::GoalRole::Checker,
+                role: GoalRole::Checker,
                 round: 1
             })
         ),
@@ -260,7 +260,7 @@ fn test_ask_answer_routes_to_the_active_goal_role() {
     app.goal
         .as_mut()
         .unwrap()
-        .on_turn_result(goal::GoalRole::Executor, Some("done".into()));
+        .on_turn_result(GoalRole::Executor, Some("done".into()));
     app.register_ask_panel(
         "ask-1",
         &[crate::protocol::AskQuestion {

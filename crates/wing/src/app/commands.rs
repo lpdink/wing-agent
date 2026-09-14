@@ -20,14 +20,14 @@
 
 use super::App;
 use super::AppIntent;
-use super::constants::CLEAR_COMMAND;
-use super::constants::COPY_COMMAND;
-use super::constants::GOAL_COMMAND;
-use super::constants::GOAL_EXIT_COMMAND;
-use super::constants::NEW_COMMAND;
 use super::goal_lane;
-use super::model_panel::ModelPanel;
 use super::title;
+use crate::shared::constants::CLEAR_COMMAND;
+use crate::shared::constants::COPY_COMMAND;
+use crate::shared::constants::GOAL_COMMAND;
+use crate::shared::constants::GOAL_EXIT_COMMAND;
+use crate::shared::constants::NEW_COMMAND;
+use crate::shared::panels::picker::ModelPanel;
 use crate::ui::cells::tool_call::truncate_by_chars;
 use crate::ui::chat_view::ChatCell;
 use crate::ui::popup::command::PopupAction;

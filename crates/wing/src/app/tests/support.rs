@@ -4,10 +4,10 @@
 //! root: the assertions are unchanged, only their file changed.
 
 use crate::app::App;
-use crate::app::model_panel;
 use crate::config::AppConfig;
 use crate::protocol::EventMeta;
 use crate::protocol::WingEvent;
+use crate::shared::panels::picker::ModelPanel;
 use crate::ui::chat_view::ChatCell;
 
 /// Create a minimal App for command dispatch testing.
@@ -56,7 +56,7 @@ pub(super) fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent
 }
 
 /// The rendered picker cell's panel snapshot, if the cell is present.
-pub(super) fn picker_cell(app: &App) -> Option<&model_panel::ModelPanel> {
+pub(super) fn picker_cell(app: &App) -> Option<&ModelPanel> {
     app.chat.cells.iter().find_map(|c| match c.cell() {
         ChatCell::ModelPicker(panel) => Some(panel),
         _ => None,

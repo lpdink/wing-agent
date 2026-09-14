@@ -14,9 +14,9 @@
 
 use ratatui::text::Line;
 
-use crate::app::ask_panel::AskPanel;
-use crate::app::constants::TOOL_BASH;
-use crate::app::model_panel::ModelPanel;
+use crate::shared::constants::TOOL_BASH;
+use crate::shared::panels::ask::AskPanel;
+use crate::shared::panels::picker::ModelPanel;
 use crate::ui::cached_cell::CachedCell;
 use crate::ui::cells::thinking::ThinkingBlock;
 use crate::ui::cells::tool_call::ToolStatus;

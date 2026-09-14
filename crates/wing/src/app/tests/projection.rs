@@ -8,6 +8,7 @@ use crate::app::*;
 use crate::protocol::AskQuestion;
 use crate::protocol::EventMeta;
 use crate::protocol::WingEvent;
+use crate::shared::panels::ask::AskPanel;
 use crate::ui::chat_view::ChatCell;
 
 fn utc_ago(secs: i64) -> String {
@@ -314,7 +315,7 @@ fn test_sync_clears_stale_ask_panels_before_replay() {
     // tool_call_id, swallowing the next ask's answer).
     let mut app = test_app();
     // Simulate a live ask registered before the disconnect.
-    app.ask_panels.push_back(ask_panel::AskPanel::new(
+    app.ask_panels.push_back(AskPanel::new(
         "ask-live".into(),
         vec![AskQuestion {
             id: "q0".into(),

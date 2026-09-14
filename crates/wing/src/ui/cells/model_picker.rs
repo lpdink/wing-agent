@@ -11,11 +11,11 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
 
-use crate::app::model_panel::ModelPanel;
-use crate::app::selection_panel::PANEL_WINDOW;
-use crate::app::selection_panel::SelectionPanel;
-use crate::app::selection_panel::window_range;
 use crate::config::ThemePalette;
+use crate::shared::panels::PANEL_WINDOW;
+use crate::shared::panels::SelectionPanel;
+use crate::shared::panels::picker::ModelPanel;
+use crate::shared::panels::window_range;
 use crate::ui::panel::Tab;
 use crate::ui::panel::TabState;
 use crate::ui::panel::cursor_span;
@@ -80,7 +80,6 @@ pub fn model_picker_lines(panel: &ModelPanel, palette: &ThemePalette) -> Vec<Lin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::model_panel::ModelPanel;
     use wing_api_client::models::ProviderModels;
 
     fn palette() -> ThemePalette {

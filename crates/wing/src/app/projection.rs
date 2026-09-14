@@ -18,14 +18,15 @@
 
 use super::App;
 use super::AppIntent;
-use super::constants::TOOL_BASH;
-use super::constants::TOOL_TODO;
 use super::replay;
 use super::title;
 use super::turn_state;
 use crate::protocol::AgentInfo;
 use crate::protocol::EventMeta;
 use crate::protocol::WingEvent;
+use crate::shared::constants::TOOL_BASH;
+use crate::shared::constants::TOOL_TODO;
+use crate::shared::panels::ask::AskPanel;
 use crate::ui::cells::ask_msg::AskMessage;
 use crate::ui::cells::diff_view::DiffView;
 use crate::ui::cells::todo_msg::TodoMessage;
@@ -332,8 +333,7 @@ impl App {
             } => {
                 if !questions.is_empty() {
                     // Multi-question panel (AskUserQuestion tool).
-                    let panel =
-                        super::ask_panel::AskPanel::new(tool_call_id.clone(), questions.clone());
+                    let panel = AskPanel::new(tool_call_id.clone(), questions.clone());
                     let msg = AskMessage::new_panel(tool_call_id.clone(), panel.clone());
                     self.chat.push(ChatCell::Ask(msg));
                     self.ask_panels.push_back(panel);
