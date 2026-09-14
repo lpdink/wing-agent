@@ -2,7 +2,9 @@
 //!
 //! `app/` orchestrates and `ui/` renders; whatever **both** need lives here,
 //! because neither side owns it. The layer is *neutral*: it holds zero I/O,
-//! never reaches for the App, and never reaches for ratatui.
+//! names nothing above it (`app`, `ui`, `cmd`, `stdio`, `gateway`, `tui`) and
+//! reaches for no render library — `tests/layer_guard.rs` pins all of those
+//! directions on every `cargo test`.
 //!
 //! Two kinds of content live here:
 //!
