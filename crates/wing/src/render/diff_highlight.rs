@@ -130,4 +130,28 @@ mod tests {
         assert!(hl.line(DiffSide::Context, "whatever").is_none());
         assert!(hl.line(DiffSide::Delete, "whatever").is_none());
     }
+
+    /// The reported bug: the first inline comment of a Python file grayed out
+    /// every row below it. Diff rows arrive without a line terminator, and the
+    /// comment's `#` only pops its scope on the terminating `\n`.
+    #[test]
+    fn trailing_comment_does_not_swallow_the_rows_below() {
+        let mut hl = DiffHighlighters::for_file("pty.py", None);
+        let comment = hl
+            .line(DiffSide::Insert, "    a[0] = 0  # iflag")
+            .expect("comment row");
+        let after = hl
+            .line(DiffSide::Insert, "    a[6][termios.VMIN] = 1")
+            .expect("next row");
+
+        let comment_fg = comment
+            .iter()
+            .find(|(_, text)| text.contains('#'))
+            .map(|(style, _)| style.fg)
+            .expect("the comment marker has a span");
+        assert!(
+            after.iter().any(|(style, _)| style.fg != comment_fg),
+            "row below the comment came back comment-colored: {after:?}"
+        );
+    }
 }

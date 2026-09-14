@@ -791,6 +791,30 @@ mod tests {
         );
     }
 
+    /// The reported bug, at the view level: a `.py` file whose first inline
+    /// comment grayed out every row below it. Diff rows carry no line
+    /// terminator, and the comment scope only pops on one.
+    #[test]
+    fn test_trailing_comment_does_not_gray_out_later_rows() {
+        let new =
+            "import pty\n\na[0] = 0  # iflag\na[6][termios.VMIN] = 1\na[6][termios.VTIME] = 0\n";
+        let diff = DiffView::new("pty.py".into(), None, new.into(), 1, 1);
+        let lines = diff.to_lines(&p(), WIDTH);
+
+        // syntect splits both rows into several spans, so the needle has to
+        // fit inside one of them.
+        let fg_of = |needle: &str| {
+            lines
+                .iter()
+                .find(|l| l.to_string().contains(needle))
+                .and_then(|l| l.spans.iter().find(|s| s.content.contains(needle)))
+                .and_then(|s| s.style.fg)
+        };
+        let comment = fg_of("iflag").expect("comment row");
+        let below = fg_of("VMIN").expect("row below the comment");
+        assert_ne!(below, comment, "row below the comment is comment-colored");
+    }
+
     /// Extension-less files resolve their language from the file name (then
     /// the first line), so `Makefile` diffs are not forced into the plain
     /// fallback path.

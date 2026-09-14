@@ -6,7 +6,12 @@
 //!
 //! Provides real syntax highlighting for code blocks using syntect's
 //! easy API (`HighlightLines`). Falls back to plain cyan for unknown languages.
+//!
+//! Every line handed to syntect goes through [`terminated`]: the syntax set is
+//! the "newlines" variant, whose rules are written against the line's
+//! terminator. See that function for what happens without one.
 
+use std::borrow::Cow;
 use std::sync::OnceLock;
 
 use ratatui::style::Color;
@@ -64,11 +69,9 @@ pub fn highlight_single_line(line: &str, lang: &str) -> Option<MarkdownLine> {
     let theme = &ts.themes["base16-ocean.dark"];
     let mut highlighter = HighlightLines::new(syntax, theme);
 
-    let ops = highlighter.highlight_line(line, ss).ok()?;
     let mut result = MarkdownLine::default();
-    for (style, text) in ops {
-        let ratatui_style = convert_syntect_style(style);
-        result.push_segment(SegmentKind::CodeBlock, ratatui_style, text);
+    for (style, text) in highlight_line_with(&mut highlighter, line)? {
+        result.push_segment(SegmentKind::CodeBlock, style, &text);
     }
     Some(result)
 }
@@ -95,15 +98,11 @@ pub fn highlight_code_lines(
     let mut lines = Vec::new();
 
     for raw_line in code.lines() {
-        let ops = match highlighter.highlight_line(raw_line, ss) {
-            Ok(ops) => ops,
-            Err(_) => return None,
-        };
+        let ops = highlight_line_with(&mut highlighter, raw_line)?;
 
         let mut line = MarkdownLine::default();
         for (style, text) in ops {
-            let ratatui_style = convert_syntect_style(style);
-            line.push_segment(SegmentKind::CodeBlock, ratatui_style, text);
+            line.push_segment(SegmentKind::CodeBlock, style, &text);
         }
         lines.push(line);
     }
@@ -155,33 +154,76 @@ pub fn new_highlighter_for_file(
     Some(HighlightLines::new(syntax, theme))
 }
 
+/// `line` with the terminator the syntax definitions expect.
+///
+/// The syntax set is the "newlines" variant (`two_face::syntax::extra_newlines`,
+/// the mode syntect documents as the robust one), so its rules are written with
+/// the terminator in hand — Python's line comment pops on `$\n`, for instance.
+/// A line handed over *without* it leaves the parser inside that construct for
+/// good: the first trailing `# comment` of a file then paints every following
+/// line with comment colors (a diff of a `.py` file losing its highlighting
+/// from its first inline comment onward).
+///
+/// Callers that return syntect's borrowed spans have to strip the appended
+/// terminator again — see [`highlight_line_with`].
+fn terminated(line: &str) -> Cow<'_, str> {
+    if line.ends_with('\n') {
+        return Cow::Borrowed(line);
+    }
+    let mut terminated = String::with_capacity(line.len() + 1);
+    terminated.push_str(line);
+    terminated.push('\n');
+    Cow::Owned(terminated)
+}
+
+/// Drop the terminator [`terminated`] appended, from the spans parsed with it.
+///
+/// The spans partition the parsed line, so the appended `\n` is always the tail
+/// of the last one — a span of its own when the line ends inside a scope.
+fn strip_terminator(spans: &mut Vec<(Style, String)>) {
+    if let Some((_, text)) = spans.last_mut()
+        && text.ends_with('\n')
+    {
+        text.pop();
+        if text.is_empty() {
+            spans.pop();
+        }
+    }
+}
+
 /// Advance a highlighter's parse/highlight state over `line` WITHOUT building
 /// styled output.
 ///
 /// `HighlightLines::highlight_line` returns borrowed slices, so skipping the
 /// `(Style, String)` conversion saves one allocation per syntect op — this is
 /// the cheap path for lines whose rendering is not needed (collapsed context,
-/// or the old revision's side of an unchanged line).
+/// or the old revision's side of an unchanged line). A line that arrives
+/// without its terminator is still copied once, to feed it to the parser.
 pub fn advance_line(highlighter: &mut HighlightLines<'static>, line: &str) {
     // Parse errors leave the state where it was, matching `highlight_line_with`.
-    let _ = highlighter.highlight_line(line, syntax_set());
+    let _ = highlighter.highlight_line(&terminated(line), syntax_set());
 }
 
 /// Highlight a single line, ADVANCING the highlighter state.
 ///
 /// The state is positioned "after the previous line" — highlighting line N
 /// then N+1 with the same highlighter reproduces `highlight_code_lines`
-/// exactly.
+/// exactly. The returned spans carry the caller's line verbatim: the
+/// terminator [`terminated`] appends for the parser is trimmed back off.
 pub fn highlight_line_with(
     highlighter: &mut HighlightLines<'static>,
     line: &str,
 ) -> Option<Vec<(Style, String)>> {
-    let ops = highlighter.highlight_line(line, syntax_set()).ok()?;
-    Some(
-        ops.into_iter()
-            .map(|(style, text)| (convert_syntect_style(style), text.to_string()))
-            .collect(),
-    )
+    let line = terminated(line);
+    let ops = highlighter.highlight_line(&line, syntax_set()).ok()?;
+    let mut spans: Vec<(Style, String)> = ops
+        .into_iter()
+        .map(|(style, text)| (convert_syntect_style(style), text.to_string()))
+        .collect();
+    if matches!(line, Cow::Owned(_)) {
+        strip_terminator(&mut spans);
+    }
+    Some(spans)
 }
 
 fn convert_syntect_style(style: syntect::highlighting::Style) -> Style {
@@ -252,5 +294,78 @@ mod tests {
         let theme = MarkdownTheme::default();
         let result = highlight_code_lines("some text", None, &theme);
         assert!(result.is_none());
+    }
+
+    /// Every caller feeds lines without their terminator (that is what
+    /// `str::lines()` and the diff payloads hand over). The syntax definitions
+    /// are the "newlines" variant, so a line comment parses `# iflag` against
+    /// the terminating `$\n`: without one the parser stayed inside the comment
+    /// context for good and every later line came back comment-colored.
+    #[test]
+    fn test_trailing_line_comment_does_not_leak() {
+        let lines = ["a = 0  # iflag", "b = 1", "c = 2  # oflag", "d = 3"];
+        let mut hl = new_highlighter("python").expect("python syntax");
+
+        for line in lines {
+            let stateful = highlight_line_with(&mut hl, line).expect("highlight");
+            // These are independent statements, so a fresh highlighter is the
+            // ground truth for each of them.
+            let fresh =
+                highlight_line_with(&mut new_highlighter("python").expect("python syntax"), line)
+                    .expect("highlight");
+            assert_eq!(stateful, fresh, "line {line:?} was parsed out of context");
+        }
+    }
+
+    /// The whole-block path (fenced code blocks) is fed by the same helper and
+    /// must render what per-line highlighting produces for the same lines.
+    #[test]
+    fn test_code_block_comment_does_not_leak() {
+        let theme = MarkdownTheme::default();
+        let code = "a = 0  # iflag\nb = 1\n";
+        let block = highlight_code_lines(code, Some("py"), &theme).expect("highlight");
+
+        // These are independent statements, so a fresh highlighter per line is
+        // the ground truth.
+        let fresh: Vec<MarkdownLine> = ["a = 0  # iflag", "b = 1"]
+            .iter()
+            .map(|line| {
+                let mut hl = new_highlighter("python").expect("python syntax");
+                let mut md = MarkdownLine::default();
+                for (style, text) in highlight_line_with(&mut hl, line).expect("highlight") {
+                    md.push_segment(SegmentKind::CodeBlock, style, &text);
+                }
+                md
+            })
+            .collect();
+
+        let shape = |lines: &[MarkdownLine]| -> Vec<Vec<(String, String)>> {
+            lines
+                .iter()
+                .map(|line| {
+                    line.segments
+                        .iter()
+                        .map(|segment| (segment.text.clone(), format!("{:?}", segment.style.fg)))
+                        .collect()
+                })
+                .collect()
+        };
+        assert_eq!(
+            shape(&block),
+            shape(&fresh),
+            "the comment leaked into the rest of the block"
+        );
+    }
+
+    /// The terminator exists for the parser only — renderers get the caller's
+    /// bytes back, terminator or not.
+    #[test]
+    fn test_spans_reproduce_the_line_verbatim() {
+        let mut hl = new_highlighter("rust").expect("rust syntax");
+        for line in ["let x = 1;", "// note", "    ", "", "let y = 2;\n"] {
+            let spans = highlight_line_with(&mut hl, line).expect("highlight");
+            let text: String = spans.iter().map(|(_, text)| text.as_str()).collect();
+            assert_eq!(text, line, "spans must reproduce {line:?}");
+        }
     }
 }
