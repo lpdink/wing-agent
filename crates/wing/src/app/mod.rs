@@ -209,8 +209,9 @@ impl App {
             connected: true,
             goal: None,
             launch_workspace,
-            // Zero-sized until the first draw records the real chat viewport:
-            // no bar, no hit testing, before anything is on screen.
+            // Nothing drawn yet: no band, no composer, no hit testing before
+            // anything is on screen (the terminal width falls back to the
+            // canonical 80 the composer's editor starts with).
             geometry: FrameGeometry::default(),
             scrollbar: scrollbar::ScrollbarState::default(),
         }
@@ -463,10 +464,11 @@ impl App {
             );
             idx += 1;
 
-            // Input area — always visible; the widget records the rect it drew
-            // into (for cursor placement and for the composer's pointer mapping:
-            // mouse events arrive between frames, so hit testing works off the
-            // last frame's rect — same contract as the chat band's geometry).
+            // Input area — always visible; the rect it is laid out into is
+            // recorded in the frame's geometry (the widget keeps its own copy
+            // for cursor placement): mouse events arrive between frames, so
+            // hit testing works off the last frame's rect — the same contract
+            // as the chat band's.
             let input_rect = chunks[idx];
             self.geometry.record_composer(input_rect);
             frame.render_widget(InputAreaWidget::new(&mut self.input, &palette), input_rect);
