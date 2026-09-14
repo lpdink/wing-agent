@@ -77,7 +77,7 @@ pub(super) struct CommandRoute {
 
 impl CommandRoute {
     /// Whether this row claims `text`.
-    fn matches(&self, text: &str) -> bool {
+    pub(super) fn matches(&self, text: &str) -> bool {
         if text == self.name || self.aliases.contains(&text) {
             return true;
         }
@@ -94,7 +94,7 @@ impl CommandRoute {
 ///
 /// Rows are matched in order; names and aliases are unique (pinned by a test),
 /// so no row can shadow another.
-const COMMANDS: &[CommandRoute] = &[
+pub(super) const COMMANDS: &[CommandRoute] = &[
     // ---- Local (frontend-only) commands ----
     CommandRoute {
         name: CLEAR_COMMAND,

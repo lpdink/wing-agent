@@ -4,6 +4,9 @@
 //! root: the assertions are unchanged, only their file changed.
 
 use super::support::*;
+use crate::app::modal::ChatScrollAction;
+use crate::app::modal::KeyRoute;
+use crate::app::modal::ModalOwner;
 use crate::app::*;
 use crate::protocol::AskQuestion;
 use crate::ui::chat_view::ChatCell;
@@ -437,4 +440,210 @@ fn test_composer_pointer_stays_blocked_by_an_itemless_must_select_popup() {
     );
     assert_eq!((app.input.cursor_row, app.input.cursor_col), cursor_before);
     assert!(app.drain_intents().is_empty());
+}
+
+// ── Ownership: one declaration for keyboard, pointer and priority ───────
+
+/// A single question, for building an AskUserQuestion panel.
+fn test_question() -> AskQuestion {
+    AskQuestion {
+        id: "theme".into(),
+        question: "which theme?".into(),
+        header: String::new(),
+        multi_select: false,
+        options: Vec::new(),
+        choices: Vec::new(),
+    }
+}
+
+/// An app with a *visible* command popup armed.
+fn app_with_visible_popup() -> App {
+    let mut app = test_app();
+    app.popup.cache.commands = vec![crate::protocol::CommandInfo {
+        name: "model".into(),
+        aliases: Vec::new(),
+        description: String::new(),
+        params: String::new(),
+    }];
+    app.input.set_text("/mo");
+    app.update_popup();
+    assert!(app.popup.active.height() > 0, "the popup is on screen");
+    app
+}
+
+/// An app with an *invisible* (armed, no candidates) command popup.
+fn app_with_invisible_popup() -> App {
+    let mut app = test_app();
+    app.input.set_text("/zzz");
+    app.update_popup();
+    assert!(app.popup.active.is_active());
+    assert_eq!(app.popup.active.height(), 0);
+    app
+}
+
+/// An app with the `/model` picker open.
+fn app_with_model_panel() -> App {
+    let mut app = test_app();
+    app.model_sources = vec![model_group("p", &["m1"])];
+    app.open_model_panel();
+    assert!(app.model_panel.is_some());
+    app
+}
+
+/// An app with an AskUserQuestion panel queued.
+fn app_with_ask_panel() -> App {
+    let mut app = test_app();
+    app.register_ask_panel("ask-1", &[test_question()], &[], true);
+    assert_eq!(app.ask_panels.len(), 1);
+    app
+}
+
+/// An app with a legacy ask menu queued.
+fn app_with_legacy_ask() -> App {
+    let mut app = test_app();
+    app.ask_selections
+        .push_back(crate::ui::ask_select::AskSelection::new(
+            "ask-2".into(),
+            vec!["y".into(), "n".into()],
+        ));
+    app
+}
+
+#[test]
+fn test_modal_priority_is_declared_in_one_place() {
+    // Each layer added here outranks the previous one — the order is the
+    // declaration order of `ModalOwner`, nothing else.
+    let mut app = app_with_visible_popup();
+    assert_eq!(app.modal_owner(), Some(ModalOwner::Popup));
+
+    app.model_sources = vec![model_group("p", &["m1"])];
+    app.open_model_panel();
+    assert_eq!(
+        app.modal_owner(),
+        Some(ModalOwner::ModelPicker),
+        "the picker outranks the popup"
+    );
+
+    app.register_ask_panel("ask-1", &[test_question()], &[], true);
+    assert_eq!(
+        app.modal_owner(),
+        Some(ModalOwner::AskPanel),
+        "the ask panel outranks the picker"
+    );
+
+    app.ask_selections
+        .push_back(crate::ui::ask_select::AskSelection::new(
+            "ask-2".into(),
+            vec!["y".into()],
+        ));
+    assert_eq!(
+        app.modal_owner(),
+        Some(ModalOwner::AskSelection),
+        "the legacy menu outranks everything"
+    );
+}
+
+#[test]
+fn test_key_routing_of_the_idle_app() {
+    use crossterm::event::KeyModifiers;
+
+    let app = test_app();
+    assert_eq!(app.modal_owner(), None);
+    assert_eq!(
+        app.route_key(&key(crossterm::event::KeyCode::Esc)),
+        KeyRoute::EscLadder
+    );
+    assert_eq!(
+        app.route_key(&key(crossterm::event::KeyCode::PageUp)),
+        KeyRoute::ChatScroll(ChatScrollAction::PageUp)
+    );
+    assert_eq!(
+        app.route_key(&key(crossterm::event::KeyCode::PageDown)),
+        KeyRoute::ChatScroll(ChatScrollAction::PageDown)
+    );
+    assert_eq!(
+        app.route_key(&crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::End,
+            KeyModifiers::CONTROL
+        )),
+        KeyRoute::ChatScroll(ChatScrollAction::Bottom)
+    );
+    assert_eq!(
+        app.route_key(&crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )),
+        KeyRoute::Quit
+    );
+    assert_eq!(
+        app.route_key(&key(crossterm::event::KeyCode::Char('x'))),
+        KeyRoute::Composer
+    );
+    // Plain arrows belong to the composer; the wheel has its own channel.
+    assert_eq!(
+        app.route_key(&key(crossterm::event::KeyCode::Up)),
+        KeyRoute::Composer
+    );
+}
+
+#[test]
+fn test_key_routing_reserves_esc_and_page_keys_for_the_app() {
+    use crossterm::event::KeyCode;
+
+    // A visible popup owns the navigation keys …
+    let app = app_with_visible_popup();
+    assert_eq!(app.route_key(&key(KeyCode::Down)), KeyRoute::PopupNav);
+    assert_eq!(app.route_key(&key(KeyCode::Tab)), KeyRoute::PopupNav);
+    // … but Esc still belongs to the app's ladder (it closes the popup).
+    assert_eq!(app.route_key(&key(KeyCode::Esc)), KeyRoute::EscLadder);
+
+    // An armed-but-empty popup owns the Enter rung instead.
+    let app = app_with_invisible_popup();
+    assert_eq!(app.route_key(&key(KeyCode::Enter)), KeyRoute::PopupEmpty);
+
+    // The ask panel owns everything except the reserved keys.
+    let app = app_with_ask_panel();
+    assert_eq!(app.route_key(&key(KeyCode::Char('x'))), KeyRoute::AskPanel);
+    assert_eq!(app.route_key(&key(KeyCode::Enter)), KeyRoute::AskPanel);
+    assert_eq!(app.route_key(&key(KeyCode::Esc)), KeyRoute::EscLadder);
+    assert_eq!(
+        app.route_key(&key(KeyCode::PageDown)),
+        KeyRoute::ChatScroll(ChatScrollAction::PageDown)
+    );
+
+    // The picker keeps Esc for itself — closing it is not an interrupt.
+    let app = app_with_model_panel();
+    assert_eq!(
+        app.route_key(&key(KeyCode::Char('x'))),
+        KeyRoute::ModelPicker
+    );
+    assert_eq!(app.route_key(&key(KeyCode::Esc)), KeyRoute::ModelPicker);
+    assert_eq!(
+        app.route_key(&key(KeyCode::PageUp)),
+        KeyRoute::ChatScroll(ChatScrollAction::PageUp)
+    );
+
+    // The legacy menu swallows every key, Esc included.
+    let app = app_with_legacy_ask();
+    assert_eq!(app.route_key(&key(KeyCode::Esc)), KeyRoute::AskSelection);
+    assert_eq!(app.route_key(&key(KeyCode::PageUp)), KeyRoute::AskSelection);
+}
+
+#[test]
+fn test_pointer_guard_is_derived_from_modal_ownership() {
+    // No modal: the composer is free.
+    assert!(!test_app().composer_pointer_blocked());
+
+    // An invisible popup owns the Enter rung but cannot eat clicks.
+    let invisible = app_with_invisible_popup();
+    assert_eq!(invisible.modal_owner(), Some(ModalOwner::Popup));
+    assert!(!invisible.composer_pointer_blocked());
+
+    // A visible popup blocks.
+    assert!(app_with_visible_popup().composer_pointer_blocked());
+
+    // Every other modal blocks, visible or not.
+    assert!(app_with_ask_panel().composer_pointer_blocked());
+    assert!(app_with_model_panel().composer_pointer_blocked());
+    assert!(app_with_legacy_ask().composer_pointer_blocked());
 }

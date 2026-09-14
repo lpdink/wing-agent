@@ -6,6 +6,7 @@
 
 mod commands;
 mod core;
+mod goal_lane;
 mod interaction;
 mod modal;
 mod projection;

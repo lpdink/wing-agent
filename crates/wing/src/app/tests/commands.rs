@@ -4,6 +4,7 @@
 //! root: the assertions are unchanged, only their file changed.
 
 use super::support::*;
+use crate::app::commands;
 use crate::app::selection_panel::SelectionPanel;
 use crate::app::*;
 use crate::ui::chat_view::ChatCell;
@@ -405,4 +406,118 @@ fn test_submit_intent_carries_pending_request_id() {
     };
     assert_eq!(request_id, &pending_id);
     assert!(tool_call_id.is_none());
+}
+
+// ── The command table itself ────────────────────────────────────────────
+
+#[test]
+fn test_command_table_names_and_aliases_are_unique() {
+    let mut seen = std::collections::BTreeSet::new();
+    for route in commands::COMMANDS {
+        assert!(seen.insert(route.name), "duplicate spelling {}", route.name);
+        for alias in route.aliases {
+            assert!(seen.insert(*alias), "duplicate spelling {alias}");
+        }
+    }
+}
+
+#[test]
+fn test_command_table_rows_do_not_shadow_each_other() {
+    // The table is matched in order, so a row that claims another row's
+    // spelling would silently make that command unreachable.
+    for (index, route) in commands::COMMANDS.iter().enumerate() {
+        assert_eq!(
+            commands::COMMANDS
+                .iter()
+                .position(|r| r.matches(route.name)),
+            Some(index),
+            "{} must resolve to its own row",
+            route.name
+        );
+        for alias in route.aliases {
+            assert_eq!(
+                commands::COMMANDS.iter().position(|r| r.matches(alias)),
+                Some(index),
+                "{alias} must resolve to the row of {}",
+                route.name
+            );
+        }
+    }
+}
+
+#[test]
+fn test_command_table_keeps_exact_and_argument_spellings_apart() {
+    let find = |name: &str| {
+        commands::COMMANDS
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("{name} is in the table"))
+    };
+
+    // A command without arguments claims its exact spelling only: `/clear `
+    // (or `/clear now`) is a plain message.
+    let clear = find("/clear");
+    assert!(clear.matches("/clear"));
+    assert!(!clear.matches("/clear "));
+    assert!(!clear.matches("/clear now"));
+
+    // An argument-taking command claims both spellings, aliases included.
+    let session = find("/session");
+    assert!(session.matches("/session"));
+    assert!(session.matches("/session sess-1"));
+    assert!(session.matches("/ss sess-1"));
+    assert!(!session.matches("/sessions sess-1"));
+
+    // A prefix that happens to start with another command's name is not that
+    // command (`/goal-exit` is not `/goal`).
+    let goal = find("/goal");
+    assert!(goal.matches("/goal"));
+    assert!(goal.matches("/goal do it"));
+    assert!(!goal.matches("/goal-exit"));
+}
+
+#[test]
+fn test_every_table_row_is_reachable_through_the_router() {
+    // The table is not a parallel list: each row is what the router actually
+    // dispatches on, argument-taking rows included.
+    for route in commands::COMMANDS {
+        let mut app = test_app();
+        let line = if route.takes_args {
+            format!("{} ", route.name)
+        } else {
+            route.name.to_string()
+        };
+        assert!(
+            app.try_frontend_command(&line),
+            "'{line}' must be consumed by the router"
+        );
+    }
+}
+
+#[test]
+fn test_stale_fetch_results_are_discarded() {
+    use crate::app::intent::FetchPayload;
+    use crate::app::intent::FetchResult;
+
+    let mut app = test_app();
+    app.handle_fetch_result(FetchResult {
+        session_id: "some-other-session".into(),
+        payload: FetchPayload::Toast {
+            message: "boom".into(),
+            is_error: true,
+        },
+    });
+    assert!(
+        app.toast.is_none(),
+        "a result addressed to another session must not touch the UI"
+    );
+
+    app.handle_fetch_result(FetchResult {
+        session_id: app.session_id.clone(),
+        payload: FetchPayload::Toast {
+            message: "hello".into(),
+            is_error: false,
+        },
+    });
+    assert!(app.toast.is_some(), "the current session's result lands");
 }
