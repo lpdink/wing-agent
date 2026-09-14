@@ -3,6 +3,9 @@
 //! The bar lives on the **last column of the chat viewport**: it is painted
 //! on top of the content by a buffer patch (like the info separator and the
 //! toast), so it never takes layout width and never reflows the chat cells.
+//! The content keeps clear of it through a gutter that is reserved *statically*
+//! ([`SCROLLBAR_GUTTER`], applied by [`content_area`] in `App::draw`), so the
+//! bar appearing on the first overflow changes nothing that is already drawn.
 //! It only exists while the content overflows the viewport — the same
 //! predicate the info separator's `pos/total · %` indicator uses.
 //!
@@ -31,6 +34,38 @@ use crate::config::ThemePalette;
 /// history in a 10-row viewport); a 1-row thumb is technically visible but
 /// nearly impossible to grab, so the floor is 2 rows.
 pub const MIN_THUMB_HEIGHT: u16 = 2;
+
+/// Columns of the chat band the bar reserves on the right: its own column plus
+/// the blank gap that keeps content clear of it.
+///
+/// **The whole knob.** The bar is painted on the band's rightmost column and
+/// the chat widget is rendered into the band minus this gutter
+/// ([`content_area`]), so every cell stops short of the bar without any
+/// per-cell arithmetic — markdown budgets, the thinking / ask prefixes,
+/// user-message backgrounds, diff tints and tool output all derive their width
+/// from the widget's rect. That matters because a full-width CJK run fills its
+/// wrap budget *exactly*: with no gutter its last glyph ends up under the bar
+/// and is clipped in half by [`paint`].
+///
+/// The number is the whole reservation, not an extra margin on top of one:
+/// `1` is the bar's own column alone (content would end flush against the
+/// bar), `2` — the value in use — adds one blank column of separation, and
+/// every further column is more air.
+pub const SCROLLBAR_GUTTER: u16 = 2;
+
+/// The rect the chat widget is rendered into for a chat band — the band minus
+/// the right-hand gutter.
+///
+/// The **only** reader of [`SCROLLBAR_GUTTER`]: `App::draw` renders the chat
+/// through this while the bar keeps using the full band for its geometry, so
+/// content and bar agree on who owns the rightmost columns without either side
+/// knowing the other's arithmetic.
+pub fn content_area(band: Rect) -> Rect {
+    Rect {
+        width: band.width.saturating_sub(SCROLLBAR_GUTTER),
+        ..band
+    }
+}
 
 /// Screen geometry of the overlay scrollbar for one frame.
 ///
@@ -222,9 +257,9 @@ pub fn offset_for_row(geom: &ScrollbarGeometry, row: u16, grip: u16) -> usize {
 /// `Cell::set_style` is additive and a `DIM` hint or a `BOLD` heading under
 /// the bar would otherwise leak into its weight, line by line.
 ///
-/// Not handled: when a double-width grapheme (CJK) ends exactly on the bar's
-/// column, the bar replaces the grapheme's trailing half cell, so the
-/// terminal renders a clipped wide glyph for that row.
+/// Content never reaches the bar's column: the chat band is rendered one
+/// [`SCROLLBAR_GUTTER`] narrower than the area the bar is painted into, so
+/// even a full-width run ends at least one blank column short of it.
 pub fn paint(
     buf: &mut Buffer,
     geom: &ScrollbarGeometry,

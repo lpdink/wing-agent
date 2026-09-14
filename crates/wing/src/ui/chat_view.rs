@@ -352,16 +352,6 @@ pub struct ChatView {
     /// at. Refreshed only while a drag is in flight ([`Self::capture_visible_rows`]),
     /// so an idle app pays nothing.
     visible_rows: Vec<RenderedRow>,
-    /// Width of the content that a chat selection may cover, in columns
-    /// (`None` = the whole band).
-    ///
-    /// Set by `App` for the frame it belongs to, exactly like
-    /// [`Self::geometry`]: the overlay scrollbar paints *over* the content's
-    /// last column, so while the bar is drawn that column is chrome — a drag
-    /// may cross it, but the highlight must not invert it and the copy must
-    /// not pick up its `│` glyph (nor the padding spaces in front of it, which
-    /// `trim_end` would otherwise keep).
-    content_width: Option<u16>,
 }
 
 impl ChatView {
@@ -380,7 +370,6 @@ impl ChatView {
             geometry: ChatGeometry::default(),
             frame_links: Vec::new(),
             visible_rows: Vec::new(),
-            content_width: None,
         }
     }
 
@@ -862,15 +851,6 @@ impl ChatView {
 
     // ── Text selection: highlight + copy source ─────────────────────────
 
-    /// Set the width of the selectable content for the frame being drawn.
-    ///
-    /// `App` calls this once per frame — `Some(width - 1)` while the overlay
-    /// scrollbar is painted, `None` when the whole band belongs to the content
-    /// (no bar). See [`Self::content_width`].
-    pub fn set_content_width(&mut self, width: Option<u16>) {
-        self.content_width = width;
-    }
-
     /// Paint the highlight for `bounds` into the frame's buffer.
     ///
     /// A pure overlay: the cell styles coming out of the widget render are
@@ -896,8 +876,10 @@ impl ChatView {
         };
         // Iterate the *band* rows (bounded by the terminal height), not the
         // selection rows: an edge drag can span thousands of content rows,
-        // while only the visible ones can be painted anyway.
-        let width = self.selectable_width(area.width);
+        // while only the visible ones can be painted anyway. The band is this
+        // frame's render rect, which already stops short of the scrollbar
+        // gutter (see `ui::scrollbar`), so the highlight cannot reach the bar.
+        let width = area.width;
         for row in area.y..area.bottom() {
             let vrow = self.geometry.scroll_offset + (row - area.y) as usize;
             let Some((from, to)) = row_span(bounds, vrow, width) else {
@@ -914,12 +896,6 @@ impl ChatView {
                 }
             }
         }
-    }
-
-    /// Width of the band a selection may cover this frame, see
-    /// [`Self::content_width`].
-    fn selectable_width(&self, band_width: u16) -> u16 {
-        self.content_width.map_or(band_width, |w| w.min(band_width))
     }
 
     /// Snapshot the visible rows as graphemes — the copy-on-select source.
@@ -1000,12 +976,16 @@ impl ChatView {
     /// `None` when nothing could be extracted (empty / all-blank selection,
     /// or the rows are not part of the snapshot) — in that case there is
     /// nothing to copy and no feedback is shown.
+    ///
+    /// Rows are bounded by the content area of the frame the snapshot came
+    /// from (the band minus the scrollbar gutter), so the copy never picks up
+    /// the bar's `│` glyph or the blank columns in front of it.
     pub fn selected_text(&self, bounds: (SelectionPoint, SelectionPoint)) -> Option<String> {
         extract_text(
             &self.visible_rows,
             self.geometry.scroll_offset,
             bounds,
-            self.content_width,
+            Some(self.geometry.area.width),
         )
     }
 
