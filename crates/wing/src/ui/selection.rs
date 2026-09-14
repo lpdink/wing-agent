@@ -311,11 +311,11 @@ pub fn row_span(
 /// copy, no feedback).
 ///
 /// `content_width` limits every row to the columns that belong to the content
-/// (see [`ChatView::set_content_width`]): rows strictly inside the selection
-/// span run to the end of the band, which is where the overlay scrollbar sits
-/// — without the limit the copy would end in its `│` glyph plus the padding in
-/// front of it. A wide grapheme that *starts* before the limit is still taken
-/// whole.
+/// (the band minus the scrollbar gutter — see `ui::scrollbar`): rows strictly
+/// inside the selection span run to the end of the band, which is where the
+/// overlay bar sits, so without the limit the copy would end in its `│` glyph
+/// plus the padding in front of it. A wide grapheme that *starts* before the
+/// limit is still taken whole.
 pub fn extract_text(
     rows: &[RenderedRow],
     scroll_offset: usize,

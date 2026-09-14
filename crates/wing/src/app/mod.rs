@@ -947,12 +947,10 @@ impl App {
             return false;
         };
         // The pointer selects the character it rests on (reference behaviour):
-        // snap the focus to the right edge of that grapheme — and then off the
-        // overlay bar's column, so the copy never ends on a bar glyph. A click
-        // never gets here, so "press and release without moving = no selection"
-        // holds.
-        self.selection
-            .drag_to(self.off_the_bar(self.chat.snap_focus_right(point)));
+        // snap the focus to the right edge of that grapheme, so the copy takes
+        // it whole. A click never gets here, so "press and release without
+        // moving = no selection" holds.
+        self.selection.drag_to(self.chat.snap_focus_right(point));
         let area = self.chat.geometry().area;
         let direction = if row <= area.y {
             -1
@@ -1011,7 +1009,7 @@ impl App {
                 // stay zero-width, and snapping it would select one character.
                 let point = if self.selection.is_dragged() || self.selection.anchor() != Some(point)
                 {
-                    self.off_the_bar(self.chat.snap_focus_right(point))
+                    self.chat.snap_focus_right(point)
                 } else {
                     point
                 };
@@ -1069,32 +1067,15 @@ impl App {
         }
     }
 
-    /// Map a pointer position onto **selectable** chat content.
+    /// Map a pointer position onto chat content, for the selection.
     ///
-    /// Everything [`ChatView::content_point_at`] does, plus the overlay bar's
-    /// column: the bar is chrome painted *over* the content's last column, so
-    /// while it exists that column is neither readable nor selectable — letting
-    /// a drag end on it would put a `│` in the copied text and invert the bar.
-    /// Without the bar (content fits) the whole band is selectable as usual.
+    /// A name for [`ChatView::content_point_at`] on this side of the seam: the
+    /// band the chat is rendered into already stops short of the scrollbar
+    /// gutter (`ui::scrollbar`), so nothing here has to clamp a point off the
+    /// bar's column — a pointer resting on the bar never reaches this path at
+    /// all (the bar dispatches first, see [`Self::handle_mouse`]).
     fn selectable_point_at(&self, column: u16, row: u16) -> Option<SelectionPoint> {
-        Some(self.off_the_bar(self.chat.content_point_at(column, row)?))
-    }
-
-    /// Clamp a content point off the overlay bar's column, if the bar is drawn
-    /// this frame. See [`Self::selectable_point_at`].
-    fn off_the_bar(&self, point: SelectionPoint) -> SelectionPoint {
-        let Some(geom) = self.scrollbar_geometry() else {
-            return point;
-        };
-        let area = self.chat.geometry().area;
-        let bar_col = geom.column.saturating_sub(area.x);
-        if point.col < bar_col {
-            return point;
-        }
-        SelectionPoint {
-            col: bar_col.saturating_sub(1),
-            ..point
-        }
+        self.chat.content_point_at(column, row)
     }
 
     /// Step the drag edge auto-scroll by one content line.
@@ -2998,7 +2979,12 @@ impl App {
                 chunks[0],
             );
 
-            // Chat view — the scrollable viewport only.
+            // Chat view — the scrollable viewport only. The widget is rendered
+            // into the band **minus the scrollbar gutter**, so no cell
+            // (markdown text, user-message background, diff tint, tool output)
+            // can reach the bar's column however its own width arithmetic
+            // works out. `self.chat_area` keeps the full band: that is what the
+            // bar's geometry and its hit testing are derived from.
             chat_height = chunks[1].height;
             self.chat_area = chunks[1];
             let ctx = crate::render::renderable::CellContext {
@@ -3006,28 +2992,26 @@ impl App {
                 thinking_mode,
                 layout: &layout,
             };
-            frame.render_widget(ChatViewWidget::new(&mut self.chat, ctx), chunks[1]);
+            frame.render_widget(
+                ChatViewWidget::new(&mut self.chat, ctx),
+                scrollbar::content_area(chunks[1]),
+            );
 
-            // Overlay scrollbar. Painted after the chat widget (so it
-            // overprints the content's rightmost column) and before the
-            // toast (so a toast is never hidden by it). It takes no layout
-            // width — the chat cells were wrapped without knowing about it.
-            // `self.chat` now holds this frame's content height and the
-            // effective scroll offset (auto-scroll / clamp included).
+            // Overlay scrollbar. Painted after the chat widget (so it overprints
+            // the gutter's blank columns) and before the toast (so a toast is
+            // never hidden by it). It takes no layout width: the gutter is
+            // reserved unconditionally, so the bar showing up on overflow never
+            // reflows the cells. `self.chat` now holds this frame's content
+            // height and the effective scroll offset (auto-scroll / clamp
+            // included).
             if let Some(geom) = self.scrollbar_geometry() {
                 scrollbar::paint(frame.buffer_mut(), &geom, self.scrollbar, &palette);
-                // The bar's column is chrome for the selection as well: it
-                // must not be inverted by the highlight, and the copy must not
-                // pick up its glyph (see `ChatView::set_content_width`).
-                self.chat.set_content_width(Some(geom.column - chunks[1].x));
             } else {
                 // No bar this frame (content fits, or nothing drawn yet):
                 // drop the interaction state now instead of waiting for the
                 // next mouse event, so a later overflow cannot resurrect a
-                // stale hover / drag look — and give the whole band back to
-                // the selection.
+                // stale hover / drag look.
                 self.clear_scrollbar_interaction();
-                self.chat.set_content_width(None);
             }
 
             // Fixed composer block below the chat viewport.
@@ -5242,6 +5226,50 @@ mod tests {
         }
     }
 
+    /// The gutter is content-free: nothing is drawn in the columns the bar
+    /// reserves, on any row. This is the shape that used to end flush against
+    /// the bar — a user message (full-width background) plus a CJK paragraph
+    /// (no spaces, so the greedy wrap fills every line's budget exactly).
+    #[test]
+    fn test_draw_keeps_chat_content_out_of_the_scrollbar_gutter() {
+        let mut app = test_app();
+        app.chat.push(ChatCell::UserMessage("中文输入框".into()));
+        app.chat.push(ChatCell::AssistantMessage(
+            "这段中文没有空格，每一行都会被换行器顶满，正是以前最后一个字形被滑轮裁掉一半的形态。"
+                .repeat(3),
+        ));
+        for i in 0..20 {
+            app.chat
+                .push(ChatCell::AssistantMessage(format!("pad {i}")));
+        }
+        let buf = draw_frame(&mut app, 80, 24);
+        assert!(
+            app.scrollbar_geometry().is_some(),
+            "content must overflow for the gutter check to mean anything"
+        );
+
+        let chat = app.chat_area;
+        let bar_column = chat.right() - 1;
+        let content_right = chat.right() - scrollbar::SCROLLBAR_GUTTER;
+        for row in chat.y..chat.bottom() {
+            for x in content_right..bar_column {
+                let cell = &buf[(x, row)];
+                assert_eq!(
+                    cell.symbol(),
+                    " ",
+                    "content leaked into the gutter at ({x},{row})\n{}",
+                    frame_text(&buf)
+                );
+                assert_eq!(
+                    cell.bg,
+                    ratatui::style::Color::Reset,
+                    "background leaked into the gutter at ({x},{row})\n{}",
+                    frame_text(&buf)
+                );
+            }
+        }
+    }
+
     /// The bar is painted before the toast, but the toast keeps a one-column
     /// right margin — they share rows and never the bar's column, so a frame
     /// with both must show both.
@@ -7163,9 +7191,9 @@ mod tests {
 
     // ── Scrollbar × text selection × links: three gestures, one band ────
 
-    /// A press on the bar is the bar's, even though the bar sits inside the
-    /// chat band: it drags the view, starts no selection and copies nothing.
-    /// The selection machinery is back in charge as soon as the drag is over.
+    /// A press on the bar is the bar's: it drags the view, starts no selection
+    /// and copies nothing. The selection machinery is back in charge as soon as
+    /// the drag is over.
     #[test]
     fn test_press_on_the_bar_drags_the_bar_and_starts_no_selection() {
         let mut app = app_with_tall_message();
@@ -7174,9 +7202,14 @@ mod tests {
         let band = app.chat.geometry().area;
         let geom = app.scrollbar_geometry().expect("content overflows");
         assert_eq!(
+            app.chat_area.right() - band.right(),
+            scrollbar::SCROLLBAR_GUTTER,
+            "the content area is the band minus the gutter"
+        );
+        assert_eq!(
             geom.column,
-            band.right() - 1,
-            "the bar owns the last column"
+            app.chat_area.right() - 1,
+            "the bar owns the band's last column, inside that gutter"
         );
         assert!(app.chat.is_at_bottom(), "pinned to the bottom on load");
 
@@ -7229,17 +7262,31 @@ mod tests {
         assert!(!app.scrollbar.dragging);
     }
 
+    /// A label of digits that fills the assistant content width **exactly**: the
+    /// band these tests draw at (40 columns) minus the scrollbar gutter, minus
+    /// the two-column `⦁ ` prefix, one cell per grapheme.
+    ///
+    /// Derived from the gutter on purpose — the tests that use it are about the
+    /// *edges* of the content area, so they have to follow that knob instead of
+    /// pinning a column count (a hardcoded length silently stops reaching the
+    /// edge the moment the gutter changes).
+    fn content_filling_label() -> String {
+        let width = 40usize - scrollbar::SCROLLBAR_GUTTER as usize - 2;
+        (0..width)
+            .map(|i| char::from(b'0' + (i % 10) as u8))
+            .collect()
+    }
+
     /// A link label that fills the assistant content width exactly, so the
-    /// link's last column is the bar's own column: the cell prefix is two
-    /// columns and the prose is pre-wrapped to `band width - 2`, so the label
-    /// has to be `band width - 2` columns wide and sit on a row of its own.
+    /// link's last column is the last column the content owns — the gutter and
+    /// the bar share the row right of it. The label sits on a row of its own
+    /// (`see ` plus the label is wider than the content).
     ///
     /// Filler above overflows the band (the bar needs something to scroll) and
     /// the link cell is last, so the row stays on screen while the view is
     /// pinned to the bottom.
-    fn app_with_link_at_the_bar_column() -> App {
-        let label = "01234567890123456789012345678901234567"; // 38 columns
-        assert_eq!(label.len(), 38, "40-wide band minus the two-column prefix");
+    fn app_with_link_at_the_content_edge() -> App {
+        let label = content_filling_label();
         let mut app = test_app();
         app.chat.set_header(Vec::new());
         for i in 0..4 {
@@ -7251,15 +7298,16 @@ mod tests {
         app
     }
 
-    /// The bar takes the press, so the link it covers cannot be opened by
-    /// clicking the bar — the interaction PR 90's notes flagged ("hand the bar
-    /// column to the link masking") is solved by dispatch order instead: the
-    /// bar column never reaches the chat click path at all.
+    /// The bar takes the press at its own column. It sits in the gutter, a
+    /// couple of blank columns right of the content, and the dispatch order
+    /// that makes the bar win (it sees the event before the chat does) still
+    /// has to hold.
     #[test]
-    fn test_press_on_the_bar_never_opens_the_link_under_it() {
-        let mut app = app_with_link_at_the_bar_column();
+    fn test_press_on_the_bar_never_opens_the_link_beside_it() {
+        let mut app = app_with_link_at_the_content_edge();
         let mut terminal = test_terminal(40, 12);
         draw(&mut app, &mut terminal);
+        let content = app.chat.geometry().area;
         let geom = app.scrollbar_geometry().expect("content overflows");
         let (row, links) = app
             .chat
@@ -7270,8 +7318,12 @@ mod tests {
         let link = &links[0];
         assert_eq!(
             link.end - 1,
-            geom.column,
-            "the link must reach the bar's column for this test to mean anything"
+            content.right() - 1,
+            "the link must stop at the content's last column"
+        );
+        assert!(
+            geom.column > content.right(),
+            "the bar's column is right of the content, inside the gutter"
         );
 
         assert_eq!(
@@ -7294,13 +7346,15 @@ mod tests {
         );
     }
 
-    /// …while the column left of the bar is still the link's: the bar claims
-    /// exactly one column, not the neighbourhood.
+    /// …while the content's own last column is still the link's: the bar claims
+    /// the gutter, not the content — a click at the content edge opens the link
+    /// instead of being swallowed by the bar's neighbourhood.
     #[test]
-    fn test_click_beside_the_bar_still_opens_the_link() {
-        let mut app = app_with_link_at_the_bar_column();
+    fn test_click_at_the_content_edge_still_opens_the_link() {
+        let mut app = app_with_link_at_the_content_edge();
         let mut terminal = test_terminal(40, 12);
         draw(&mut app, &mut terminal);
+        let content = app.chat.geometry().area;
         let geom = app.scrollbar_geometry().expect("content overflows");
         let (row, links) = app
             .chat
@@ -7310,8 +7364,9 @@ mod tests {
             .clone();
         let link = &links[0];
 
-        // The visible part of the link, one column short of the bar.
-        let at = (geom.column - 1, row);
+        // The last column the content owns — the gutter starts right of it.
+        let at = (content.right() - 1, row);
+        assert!(at.0 < geom.column, "the content edge is left of the bar");
         assert!(
             link.start <= at.0 && link.end - 1 >= at.0,
             "inside the link"
@@ -7328,13 +7383,13 @@ mod tests {
         }
     }
 
-    /// Without a bar the whole band is selectable: the bar-column clamp is
-    /// conditional, so a label that ends in the band's last column is copied
-    /// whole. (A clamp that forgot the "only while the bar is drawn" guard
-    /// would silently drop that last character.)
+    /// A row that fills the content area is copied whole, bar or no bar: the
+    /// copy bound is the content width, so the last column of the content must
+    /// not be dropped. (A bound that stopped one column early would silently
+    /// lose that character.)
     #[test]
     fn test_last_column_is_selectable_when_the_content_fits() {
-        let label = "01234567890123456789012345678901234567"; // 38 columns
+        let label = content_filling_label();
         let mut app = test_app();
         app.chat.set_header(Vec::new());
         app.chat.push(ChatCell::AssistantMessage(label.to_string()));
@@ -7363,7 +7418,7 @@ mod tests {
             MouseOutcome::Immediate
         );
         match app.drain_intents().as_slice() {
-            [AppIntent::CopyToClipboard(text)] => assert_eq!(text, label),
+            [AppIntent::CopyToClipboard(text)] => assert_eq!(text, &label),
             other => panic!("expected exactly one clipboard intent, got {other:?}"),
         }
     }
