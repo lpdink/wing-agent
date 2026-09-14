@@ -31,6 +31,7 @@ use wing_api_client::GatewayClient as GatewayApiClient;
 use super::common;
 use crate::gateway::CloseReason;
 use crate::gateway::GatewayClient;
+use crate::protocol::SessionMessage;
 use crate::protocol::WingEvent;
 
 /// Per-session result tracked during wait.
@@ -310,15 +311,15 @@ fn ws_stream_ended_error(
 async fn fetch_last_result(http: &GatewayApiClient, sid: &str) -> (String, i64) {
     match http.get_session(sid).await {
         Ok(resp) => {
-            // Find last assistant message with content.
-            for msg in resp.messages.iter().rev() {
-                let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
-                if role == "assistant" {
-                    let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                    if !content.is_empty() {
-                        let count = resp.messages.len() as i64;
-                        return (content.to_string(), count);
-                    }
+            // Find last assistant message with content (decoded through the
+            // shared history mirror — undecodable payloads are skipped).
+            for msg_val in resp.messages.iter().rev() {
+                let Ok(msg) = SessionMessage::from_json(msg_val) else {
+                    continue;
+                };
+                if msg.role == "assistant" && !msg.content.is_empty() {
+                    let count = resp.messages.len() as i64;
+                    return (msg.content, count);
                 }
             }
             (String::new(), resp.messages.len() as i64)

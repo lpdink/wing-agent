@@ -1,78 +1,24 @@
 //! Session replay — parse SyncSession messages into ChatCells.
 //!
 //! Converts the message history from a SyncSessionEvent into
-//! UI cells for display in the chat view.
-
-use serde::Deserialize;
+//! UI cells for display in the chat view. Both payload shapes decode through
+//! the shared handwritten mirrors — no shadow structs live here:
+//!
+//! - message projection (`messages` / `uncommitted`) → [`SessionMessage`];
+//! - fact-event nodes (`events`) → [`WingEvent`], the same typed decoder as
+//!   the live stream (unknown types fall back to `Unknown`).
 
 use crate::app::ask_panel::AskPanel;
 use crate::app::constants::TOOL_TODO;
 use crate::protocol::AskQuestion;
-use crate::protocol::first_line;
+use crate::protocol::SessionMessage;
+use crate::protocol::WingEvent;
 use crate::ui::cells::ask_msg::AskMessage;
 use crate::ui::cells::diff_view::DiffView;
 use crate::ui::cells::thinking::ThinkingBlock;
 use crate::ui::cells::todo_msg::TodoMessage;
 use crate::ui::cells::tool_call::ToolCallBlock;
 use crate::ui::chat_view::{ChatCell, ChatView};
-
-/// A tool call from the assistant's message.
-#[derive(Debug, Deserialize)]
-struct ReplayToolCall {
-    id: String,
-    name: String,
-    #[serde(default)]
-    arguments: serde_json::Value,
-}
-
-/// A message from the session history.
-#[derive(Debug, Deserialize)]
-struct ReplayMessage {
-    role: String,
-    #[serde(default)]
-    content: String,
-    #[serde(default)]
-    reasoning_content: Option<String>,
-    #[serde(default)]
-    tool_calls: Option<Vec<ReplayToolCall>>,
-    #[serde(default)]
-    tool_call_id: Option<String>,
-}
-
-/// A durable event node from the session's mixed chain.
-///
-/// Carries the union of fields across fact-event types (`diff_content`, `ask`);
-/// missing keys default. The backend already filters to fact events, so this
-/// only ever sees renderable payloads.
-#[derive(Debug, Deserialize)]
-struct ReplayEvent {
-    #[serde(rename = "type")]
-    event_type: String,
-    // diff_content
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    old_text: Option<String>,
-    #[serde(default)]
-    new_text: Option<String>,
-    /// Absolute line numbers of the window's first line (absent for
-    /// pre-windowing payloads → 1).
-    #[serde(default = "first_line")]
-    old_start_line: usize,
-    #[serde(default = "first_line")]
-    new_start_line: usize,
-    #[serde(default)]
-    tool_call_id: Option<String>,
-    // ask
-    #[serde(default)]
-    questions: Vec<AskQuestion>,
-    #[serde(default)]
-    question: String,
-    #[serde(default)]
-    choices: Vec<String>,
-    #[serde(default)]
-    required: bool,
-}
 
 /// An `ask` event rendered during replay, returned so the App can register the
 /// answerable state (`AskPanel` / `AskSelection`) that makes the card
@@ -108,60 +54,64 @@ pub struct ReplayedAsk {
 pub fn replay_events(chat: &mut ChatView, events: &[serde_json::Value]) -> Vec<ReplayedAsk> {
     let mut asks: Vec<ReplayedAsk> = Vec::new();
     for ev_val in events {
-        let ev: ReplayEvent = match serde_json::from_value(ev_val.clone()) {
+        // Decoded through the shared WingEvent mirror — the event types the
+        // frontend does not know fall back to `Unknown` via `#[serde(other)]`.
+        let ev = match WingEvent::from_history_value(ev_val) {
             Ok(e) => e,
             Err(e) => {
-                tracing::warn!("Failed to parse replay event: {e}");
+                tracing::warn!("Failed to decode replay event: {e}");
                 continue;
             }
         };
-        match ev.event_type.as_str() {
-            "diff_content" => {
-                let (Some(path), Some(new_text)) = (ev.path, ev.new_text) else {
-                    tracing::warn!(event_type = %ev.event_type, "diff event missing fields");
-                    continue;
-                };
-                let diff = DiffView::new(
-                    path,
-                    ev.old_text,
-                    new_text,
-                    ev.old_start_line,
-                    ev.new_start_line,
-                );
-                let tool_call_id = ev.tool_call_id.unwrap_or_default();
+        match ev {
+            WingEvent::DiffContent {
+                path,
+                old_text,
+                new_text,
+                old_start_line,
+                new_start_line,
+                tool_call_id,
+                ..
+            } => {
+                let diff = DiffView::new(path, old_text, new_text, old_start_line, new_start_line);
                 if let Err(cell) = chat.insert_after_tool_call(&tool_call_id, ChatCell::Diff(diff))
                 {
                     // Unknown anchor — same fallback as the live DiffContent handler.
                     chat.push(*cell);
                 }
             }
-            "ask" => {
+            WingEvent::Ask {
+                tool_call_id,
+                questions,
+                question,
+                choices,
+                required,
+                ..
+            } => {
                 // Reuse the live-path Ask cell construction (panel / choices /
                 // tool_call_id). Only still-pending asks reach here (the
                 // backend filters by live feedback waiters).
-                let tool_call_id = ev.tool_call_id.unwrap_or_default();
-                let msg = if ev.questions.is_empty() {
-                    AskMessage::new_legacy(
-                        tool_call_id.clone(),
-                        ev.question.clone(),
-                        ev.choices.clone(),
-                    )
+                let msg = if questions.is_empty() {
+                    AskMessage::new_legacy(tool_call_id.clone(), question.clone(), choices.clone())
                 } else {
-                    let panel = AskPanel::new(tool_call_id.clone(), ev.questions.clone());
+                    let panel = AskPanel::new(tool_call_id.clone(), questions.clone());
                     AskMessage::new_panel(tool_call_id.clone(), panel)
                 };
                 chat.push(ChatCell::Ask(msg));
                 asks.push(ReplayedAsk {
                     tool_call_id,
-                    questions: ev.questions,
-                    question: ev.question,
-                    choices: ev.choices,
-                    required: ev.required,
+                    questions,
+                    question,
+                    choices,
+                    required,
                 });
             }
             // No renderer for this type → skip (forward tolerant).
             other => {
-                tracing::debug!(event_type = %other, "no replay renderer, skipping");
+                tracing::debug!(
+                    event_type = %other.event_type(),
+                    "no replay renderer, skipping"
+                );
             }
         }
     }
@@ -174,10 +124,13 @@ pub fn replay_events(chat: &mut ChatView, events: &[serde_json::Value]) -> Vec<R
 /// so no batch optimization is needed here.
 pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
     for msg_val in messages {
-        let msg: ReplayMessage = match serde_json::from_value(msg_val.clone()) {
+        // Decoded through the shared SessionMessage mirror: missing optional
+        // fields default, null optional fields count as absent, and a payload
+        // that is not a Message projection is skipped (forward tolerant).
+        let msg = match SessionMessage::from_json(msg_val) {
             Ok(m) => m,
             Err(e) => {
-                tracing::warn!("Failed to parse replay message: {e}");
+                tracing::warn!("Failed to decode replay message: {e}");
                 continue;
             }
         };
@@ -190,24 +143,22 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
             }
             "assistant" => {
                 // Reasoning content (thinking).
-                if let Some(reasoning) = msg.reasoning_content
+                if let Some(reasoning) = &msg.reasoning_content
                     && !reasoning.is_empty()
                 {
                     let mut block = ThinkingBlock::new();
-                    block.append(&reasoning);
+                    block.append(reasoning);
                     chat.push(ChatCell::Thinking(block));
                 }
 
                 // Tool calls.
-                if let Some(tool_calls) = msg.tool_calls {
-                    for tc in tool_calls {
-                        let block = ToolCallBlock::new(
-                            tc.name.clone(),
-                            tc.arguments.clone(),
-                            tc.id.clone(),
-                        );
-                        chat.push(ChatCell::ToolCall(block));
-                    }
+                for tc in msg.tool_calls() {
+                    let block = ToolCallBlock::new(
+                        tc.name.clone(),
+                        tc.arguments.clone().unwrap_or(serde_json::Value::Null),
+                        tc.id.clone(),
+                    );
+                    chat.push(ChatCell::ToolCall(block));
                 }
 
                 // Assistant text content.
@@ -351,6 +302,78 @@ mod tests {
         let messages = vec![json!({"invalid": "message"})];
         replay_messages(&mut chat, &messages);
         assert_eq!(chat.len(), 0); // Should skip invalid messages
+    }
+
+    // ── SessionMessage tolerance (pinned, decoding moved to protocol/) ──
+
+    #[test]
+    fn test_replay_message_missing_fields_default() {
+        // A projection with only a role decodes — every other field defaults
+        // (empty content produces no cell).
+        let mut chat = ChatView::new();
+        let messages = vec![json!({"role": "user"}), json!({"role": "assistant"})];
+        replay_messages(&mut chat, &messages);
+        assert_eq!(chat.len(), 0);
+    }
+
+    #[test]
+    fn test_replay_message_null_optionals_tolerated() {
+        // `tool_calls: null` / `reasoning_content: null` count as absent —
+        // the message still renders its text.
+        let mut chat = ChatView::new();
+        let messages = vec![json!({
+            "role": "assistant",
+            "content": "text",
+            "reasoning_content": null,
+            "tool_calls": null,
+            "tool_call_id": null
+        })];
+        replay_messages(&mut chat, &messages);
+        assert_eq!(chat.len(), 1);
+        assert!(matches!(
+            chat.cells[0].cell(),
+            ChatCell::AssistantMessage(_)
+        ));
+    }
+
+    #[test]
+    fn test_replay_empty_tool_calls_array_renders_no_tool_call() {
+        let mut chat = ChatView::new();
+        let messages = vec![json!({"role": "assistant", "content": "x", "tool_calls": []})];
+        replay_messages(&mut chat, &messages);
+        assert_eq!(chat.len(), 1);
+        assert!(matches!(
+            chat.cells[0].cell(),
+            ChatCell::AssistantMessage(_)
+        ));
+    }
+
+    #[test]
+    fn test_replay_message_without_role_is_skipped() {
+        // No role → empty role → unknown-role skip (the old shadow struct
+        // failed the whole decode here; the visible result is the same).
+        let mut chat = ChatView::new();
+        let messages = vec![json!({"content": "no role here"})];
+        replay_messages(&mut chat, &messages);
+        assert_eq!(chat.len(), 0);
+    }
+
+    #[test]
+    fn test_replay_unknown_role_is_skipped() {
+        let mut chat = ChatView::new();
+        let messages = vec![json!({"role": "system", "content": "skipped"})];
+        replay_messages(&mut chat, &messages);
+        assert_eq!(chat.len(), 0);
+    }
+
+    #[test]
+    fn test_replay_empty_payloads_are_noop() {
+        let mut chat = ChatView::new();
+        let empty: Vec<serde_json::Value> = Vec::new();
+        replay_messages(&mut chat, &empty);
+        let asks = replay_events(&mut chat, &empty);
+        assert_eq!(chat.len(), 0);
+        assert!(asks.is_empty());
     }
 
     #[test]
@@ -596,6 +619,52 @@ mod tests {
         let asks = replay_events(&mut chat, &events);
         assert_eq!(chat.len(), 1, "types without a renderer are skipped");
         assert!(asks.is_empty());
+    }
+
+    #[test]
+    fn test_replay_events_malformed_node_does_not_break_batch() {
+        // A known type with a malformed payload (missing `new_text`) and a
+        // `{}` payload are skipped individually; the valid node still renders.
+        let mut chat = ChatView::new();
+        let messages = vec![json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "tc-edit", "name": "Edit", "arguments": {"path": "main.rs"}}]
+        })];
+        let events = vec![
+            json!({"type": "diff_content", "path": "main.rs"}),
+            json!({}),
+            json!({
+                "type": "diff_content",
+                "path": "main.rs",
+                "old_text": null,
+                "new_text": "fn main() {}",
+                "tool_call_id": "tc-edit"
+            }),
+        ];
+        replay_messages(&mut chat, &messages);
+        replay_events(&mut chat, &events);
+        assert_eq!(chat.len(), 2);
+        assert!(matches!(chat.cells[1].cell(), ChatCell::Diff(_)));
+    }
+
+    #[test]
+    fn test_replay_events_without_meta_still_render() {
+        // Chain records carry the event meta (created_at / request_id), but
+        // replay never reads it — payload-only records decode (tolerance kept
+        // from the old shadow struct, pinned here).
+        let mut chat = ChatView::new();
+        let events = vec![json!({
+            "type": "ask",
+            "tool_call_id": "ask-meta",
+            "question": "proceed?",
+            "choices": ["y", "n"],
+        })];
+        let asks = replay_events(&mut chat, &events);
+        assert_eq!(chat.len(), 1);
+        assert_eq!(asks.len(), 1);
+        assert_eq!(asks[0].tool_call_id, "ask-meta");
+        assert_eq!(asks[0].choices, vec!["y".to_string(), "n".to_string()]);
     }
 
     #[test]

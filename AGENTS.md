@@ -134,6 +134,7 @@ crates/wing/src/
 ├── gateway/client.rs                GatewayClient — WS 连接 + 读写任务
 ├── protocol/                        WingEvent + ClientRequest + ConnectResponse（Python 事件的 Rust 镜像）
 │   ├── events.rs / client_request.rs / connect_response.rs
+│   └── history.rs                   SessionMessage — 会话历史 Message 投影的 typed 镜像
 ├── app/                             App 状态机 + 事件循环
 │   ├── mod.rs                       run_app() 主循环 + handle_event()
 │   ├── runner.rs                    执行 AppIntent（HTTP/WS 副作用）
