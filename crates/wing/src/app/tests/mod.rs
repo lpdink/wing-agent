@@ -6,6 +6,7 @@
 
 mod commands;
 mod core;
+mod frame;
 mod goal_lane;
 mod interaction;
 mod modal;
