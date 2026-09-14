@@ -12,6 +12,11 @@
 //!
 //! Only `impl App` methods and the command handlers themselves live in this
 //! module; the `App` state stays in the composition root ([`super`]).
+//!
+//! Call directions: [`super`] (main loop / fetch results) and [`super::modal`]
+//! (the composer's submit path, popup refresh) call in; this module calls
+//! [`super::modal`] for the `/model` picker and [`super::goal_lane`] for the
+//! `/goal` commands.
 
 use super::App;
 use super::AppIntent;

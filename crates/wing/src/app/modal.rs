@@ -4,9 +4,12 @@
 //! `/model` picker, command candidate popup) plus the composer. This module
 //! declares, **once**, which one owns a key event:
 //!
-//! * [`App::modal_owner`] — the priority stack (declaration order = priority);
+//! * [`App::modal_chain`] — the layers that are up, in priority order (the
+//!   declaration order of [`ModalOwner`] *is* the priority order);
 //! * [`App::route_key`] — the key → owner decision, including the keys the app
-//!   always keeps for itself (Esc, page keys, Ctrl+C);
+//!   always keeps for itself (Esc, page keys, Ctrl+C). A layer that does not
+//!   take a key lets it through to the next one, and the chat keeps its scroll
+//!   keys all the way down;
 //! * [`App::handle_key`] — a thin ladder that dispatches each route to its
 //!   handler.
 //!
@@ -17,6 +20,11 @@
 //! The panel **state machines** (ask panel questions, model picker pages) live
 //! in `ask_panel.rs` / `model_panel.rs`; what lives here is their App-side
 //! lifecycle: the queues, the chat-cell mirroring, and the reply/apply paths.
+//!
+//! Call directions: [`super::commands`] calls in for the `/model` picker and
+//! the composer's submit path; [`super::projection`] calls in for ask
+//! registration; this module calls [`super::commands`] (submit / popup
+//! refresh) and [`super::goal_lane`] (ask answers in goal mode).
 
 use super::App;
 use super::AppIntent;
@@ -123,6 +131,27 @@ fn chat_scroll_action(key: &crossterm::event::KeyEvent) -> Option<ChatScrollActi
 }
 
 impl App {
+    /// Modal layers that are up, highest priority first.
+    ///
+    /// The declaration order of [`ModalOwner`] **is** the priority order, and
+    /// this is the single place where it is materialized: [`App::modal_owner`]
+    /// takes the front, [`App::route_key`] walks the whole chain.
+    fn modal_chain(&self) -> impl Iterator<Item = ModalOwner> {
+        [
+            self.ask_selections
+                .front()
+                .is_some()
+                .then_some(ModalOwner::AskSelection),
+            (!self.ask_panels.is_empty()).then_some(ModalOwner::AskPanel),
+            self.model_panel
+                .is_some()
+                .then_some(ModalOwner::ModelPicker),
+            self.popup.active.is_active().then_some(ModalOwner::Popup),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
     /// Which modal layer owns the keyboard right now (`None` = the composer).
     ///
     /// One declaration for every consumer: the keyboard ladder and the
@@ -131,43 +160,43 @@ impl App {
     /// composer's route), while the pointer guard additionally requires it to
     /// be visible — see [`App::composer_pointer_blocked`].
     pub(super) fn modal_owner(&self) -> Option<ModalOwner> {
-        if self.ask_selections.front().is_some() {
-            return Some(ModalOwner::AskSelection);
-        }
-        if !self.ask_panels.is_empty() {
-            return Some(ModalOwner::AskPanel);
-        }
-        if self.model_panel.is_some() {
-            return Some(ModalOwner::ModelPicker);
-        }
-        if self.popup.active.is_active() {
-            return Some(ModalOwner::Popup);
-        }
-        None
+        self.modal_chain().next()
     }
 
     /// Decide where a key goes — the single place where keyboard ownership is
     /// resolved.
+    ///
+    /// The modal chain is walked in priority order and **a layer that does not
+    /// take the key lets it through to the next one**: the ask panel keeps the
+    /// app-reserved keys (Esc, page keys) for whatever is below it, so a
+    /// `/model` picker sitting underneath still gets its Esc — and the page
+    /// keys still reach the chat.
     pub(super) fn route_key(&self, key: &crossterm::event::KeyEvent) -> KeyRoute {
         if is_quit_key(key) {
             return KeyRoute::Quit;
         }
-        match self.modal_owner() {
-            Some(ModalOwner::AskSelection) => return KeyRoute::AskSelection,
-            Some(ModalOwner::AskPanel) if !app_reserved_key(key) => return KeyRoute::AskPanel,
-            Some(ModalOwner::ModelPicker)
-                if !matches!(
-                    key.code,
-                    crossterm::event::KeyCode::PageUp | crossterm::event::KeyCode::PageDown
-                ) =>
-            {
-                return KeyRoute::ModelPicker;
+        for layer in self.modal_chain() {
+            match layer {
+                ModalOwner::AskSelection => return KeyRoute::AskSelection,
+                ModalOwner::AskPanel if !app_reserved_key(key) => return KeyRoute::AskPanel,
+                ModalOwner::ModelPicker
+                    if !matches!(
+                        key.code,
+                        crossterm::event::KeyCode::PageUp | crossterm::event::KeyCode::PageDown
+                    ) =>
+                {
+                    return KeyRoute::ModelPicker;
+                }
+                // The popup's rungs sit below the Escape rung (Esc closes the
+                // popup) and depend on whether it has candidates — see below.
+                ModalOwner::Popup => break,
+                _ => {}
             }
-            _ => {}
         }
-        // The popup's own rung sits below the Escape check: Esc closes the
-        // popup, while the navigation keys are the popup's — and the "armed but
-        // empty" case gets its own route so its Enter refusal stays explicit.
+        // The popup's own rungs: Esc closes it, the navigation keys are the
+        // popup's, and the "armed but empty" case gets its own route so its
+        // Enter refusal stays explicit. Scroll keys are *not* taken here — the
+        // rungs below the popup handle them via `handle_scroll_or_composer_key`.
         if key.code == crossterm::event::KeyCode::Esc {
             return KeyRoute::EscLadder;
         }
@@ -225,15 +254,19 @@ impl App {
             KeyRoute::AskPanel => self.handle_ask_panel_key(key),
             KeyRoute::ModelPicker => self.handle_model_picker_key(key),
             KeyRoute::EscLadder => {
-                self.reset_quit_counter();
-                self.handle_escape_key();
+                // The Escape that merely closes the popup is the popup's, not
+                // the app's: it leaves the quit gesture alone, exactly like the
+                // modal owners above (pre-lane behaviour).
+                if !self.handle_escape_key() {
+                    self.reset_quit_counter();
+                }
             }
             KeyRoute::PopupNav => {
                 self.reset_quit_counter();
-                // The popup takes only its navigation keys; anything else
-                // falls through to the composer.
+                // The popup takes only its navigation keys; everything else
+                // falls through to the rungs below it.
                 if !self.handle_popup_key(key) {
-                    self.handle_composer_key(key);
+                    self.handle_scroll_or_composer_key(key);
                 }
             }
             KeyRoute::PopupEmpty => {
@@ -251,7 +284,7 @@ impl App {
                 } else {
                     self.popup.active = ActivePopup::None;
                 }
-                self.handle_composer_key(key);
+                self.handle_scroll_or_composer_key(key);
             }
             KeyRoute::ChatScroll(action) => {
                 self.reset_quit_counter();
@@ -262,6 +295,23 @@ impl App {
                 self.handle_composer_key(key);
             }
         }
+    }
+
+    /// The rungs below the popup: the chat viewport keeps its scroll keys, and
+    /// everything else is composer input.
+    ///
+    /// A popup only ever *declines* a key — it takes the navigation keys and
+    /// nothing else, so page keys and Ctrl+Home/End must keep scrolling the
+    /// chat while a candidate list is on screen (the wheel has the same
+    /// contract on the mouse side). This is the old if-chain's order
+    /// (popup → popup-empty → chat scroll → composer), kept explicit because
+    /// the popup rung cannot forward to the chat rung through `route_key`.
+    fn handle_scroll_or_composer_key(&mut self, key: crossterm::event::KeyEvent) {
+        if let Some(action) = chat_scroll_action(&key) {
+            self.handle_chat_scroll_key(action);
+            return;
+        }
+        self.handle_composer_key(key);
     }
 
     /// Ctrl+C — first press warns, second press within 500 ms quits.
@@ -362,14 +412,18 @@ impl App {
     }
 
     /// Escape ladder: close popup if active, otherwise clear/interrupt.
-    fn handle_escape_key(&mut self) {
+    ///
+    /// Returns whether the Escape was the popup's alone: that path is the one
+    /// Escape that does **not** reach the app's own ladder, so its caller must
+    /// leave the Ctrl+C gesture alone (pre-lane behaviour, kept verbatim).
+    fn handle_escape_key(&mut self) -> bool {
         if self.popup.active.is_active() {
             self.popup.active = ActivePopup::None;
-            return;
+            return true;
         }
         if !self.input.text().is_empty() {
             self.input.clear();
-            return;
+            return false;
         }
         // Goal mode: interrupt only the active session.
         if let Some(goal) = &self.goal
@@ -394,6 +448,7 @@ impl App {
             "Interrupting agent...",
             std::time::Duration::from_secs(2),
         ));
+        false
     }
 
     /// The chat viewport owns this key.

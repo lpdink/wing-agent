@@ -515,6 +515,7 @@ fn test_modal_priority_is_declared_in_one_place() {
     // declaration order of `ModalOwner`, nothing else.
     let mut app = app_with_visible_popup();
     assert_eq!(app.modal_owner(), Some(ModalOwner::Popup));
+    assert!(app.composer_pointer_blocked());
 
     app.model_sources = vec![model_group("p", &["m1"])];
     app.open_model_panel();
@@ -523,6 +524,7 @@ fn test_modal_priority_is_declared_in_one_place() {
         Some(ModalOwner::ModelPicker),
         "the picker outranks the popup"
     );
+    assert!(app.composer_pointer_blocked());
 
     app.register_ask_panel("ask-1", &[test_question()], &[], true);
     assert_eq!(
@@ -530,6 +532,8 @@ fn test_modal_priority_is_declared_in_one_place() {
         Some(ModalOwner::AskPanel),
         "the ask panel outranks the picker"
     );
+    // Two modals up at once: the guard stays consistent with the owner.
+    assert!(app.composer_pointer_blocked());
 
     app.ask_selections
         .push_back(crate::ui::ask_select::AskSelection::new(
@@ -541,6 +545,7 @@ fn test_modal_priority_is_declared_in_one_place() {
         Some(ModalOwner::AskSelection),
         "the legacy menu outranks everything"
     );
+    assert!(app.composer_pointer_blocked());
 }
 
 #[test]
@@ -646,4 +651,149 @@ fn test_pointer_guard_is_derived_from_modal_ownership() {
     assert!(app_with_ask_panel().composer_pointer_blocked());
     assert!(app_with_model_panel().composer_pointer_blocked());
     assert!(app_with_legacy_ask().composer_pointer_blocked());
+}
+
+// ── Popup rungs: the chat keeps its scroll keys ─────────────────────────
+
+#[test]
+fn test_page_keys_still_scroll_the_chat_while_a_popup_is_up() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    // A popup only declines a key — it takes the navigation keys and never the
+    // chat's page keys, whether its candidates are visible or not.
+    for (label, mut app) in [
+        ("visible candidates", app_with_visible_popup()),
+        ("armed but empty", app_with_invisible_popup()),
+    ] {
+        app.visible_height = 20;
+        app.chat.last_total = 100;
+        app.chat.scroll_offset = 80;
+        app.chat.jump_bottom();
+
+        app.handle_key(key(KeyCode::PageUp));
+        assert!(
+            !app.chat.is_at_bottom(),
+            "{label}: PageUp leaves the bottom"
+        );
+        let reading = app.chat.scroll_offset;
+        assert!(reading < 80, "{label}: PageUp scrolled the chat");
+
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL));
+        assert_eq!(
+            app.chat.scroll_offset, 0,
+            "{label}: Ctrl+Home jumps to the top"
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
+        assert!(app.chat.is_at_bottom(), "{label}: Ctrl+End re-arms follow");
+    }
+}
+
+#[test]
+fn test_ctrl_arrows_step_the_chat_only_when_the_popup_declines_them() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    // Pre-lane behaviour, kept verbatim: with candidates on screen the popup
+    // matches the arrow key whatever the modifier, so Ctrl+Down moves the popup
+    // selection; with no candidates the popup declines it and the chat steps
+    // one line down.
+    let mut app = app_with_visible_popup();
+    app.visible_height = 20;
+    app.chat.last_total = 100;
+    app.chat.scroll_offset = 80;
+    app.chat.jump_bottom();
+    app.handle_key(key(KeyCode::PageUp)); // the chat keeps its page keys
+    let reading = app.chat.scroll_offset;
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
+    assert_eq!(
+        app.chat.scroll_offset, reading,
+        "the visible popup owns the arrow key"
+    );
+
+    let mut app = app_with_invisible_popup();
+    app.visible_height = 20;
+    app.chat.last_total = 100;
+    app.chat.scroll_offset = 80;
+    app.chat.jump_bottom();
+    app.handle_key(key(KeyCode::PageUp));
+    let reading = app.chat.scroll_offset;
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
+    assert_eq!(
+        app.chat.scroll_offset,
+        reading + 1,
+        "an empty popup declines the key and the chat steps one line"
+    );
+}
+
+#[test]
+fn test_escape_closing_the_popup_leaves_the_quit_gesture_alone() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let ctrl_c = || KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+    // The popup consumed the Escape, not the app: the Ctrl+C double-press pair
+    // survives it (pre-lane behaviour, kept).
+    let mut app = app_with_visible_popup();
+    app.handle_key(ctrl_c());
+    assert_eq!(app.ctrl_c_count, 1);
+    app.handle_key(key(KeyCode::Esc));
+    assert!(!app.popup.active.is_active(), "the popup closed");
+    assert_eq!(app.ctrl_c_count, 1, "the gesture was not reset");
+    app.handle_key(ctrl_c());
+    assert!(app.should_quit, "the second press within 500 ms quits");
+
+    // An Escape that reaches the app's own ladder *does* reset the gesture
+    // (here: clearing the draft).
+    let mut app = app_with_draft("hello");
+    app.handle_key(ctrl_c());
+    assert_eq!(app.ctrl_c_count, 1);
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.ctrl_c_count, 0, "clearing the draft resets the gesture");
+    app.handle_key(ctrl_c());
+    assert!(!app.should_quit, "the pair was broken");
+}
+
+// ── Two modals at once: the chain hands the key over ────────────────────
+
+#[test]
+fn test_escape_with_the_picker_under_an_ask_panel_closes_the_picker() {
+    use crossterm::event::KeyCode;
+
+    // The ask panel keeps Esc for the app, and the picker is the next layer in
+    // the chain: Esc closes the picker and never reaches the interrupt ladder.
+    let mut app = app_with_ask_panel();
+    app.model_sources = vec![model_group("p", &["m1"])];
+    app.open_model_panel();
+    app.drain_intents();
+    assert!(app.model_panel.is_some());
+    assert_eq!(app.ask_panels.len(), 1);
+
+    app.handle_key(key(KeyCode::Esc));
+
+    assert!(app.model_panel.is_none(), "the picker closed");
+    assert_eq!(app.ask_panels.len(), 1, "the ask panel is untouched");
+    assert!(
+        !app.drain_intents()
+            .iter()
+            .any(|i| matches!(i, AppIntent::InterruptSession)),
+        "the picker's Esc is not an interrupt"
+    );
+}
+
+#[test]
+fn test_page_keys_reach_the_chat_through_both_modals() {
+    use crossterm::event::KeyCode;
+
+    // Both modals decline the page keys, so they fall through to the chat.
+    let mut app = app_with_ask_panel();
+    app.model_sources = vec![model_group("p", &["m1"])];
+    app.open_model_panel();
+    app.visible_height = 20;
+    app.chat.last_total = 100;
+    app.chat.scroll_offset = 80;
+    app.chat.jump_bottom();
+
+    app.handle_key(key(KeyCode::PageUp));
+    assert!(!app.chat.is_at_bottom(), "PageUp scrolled the chat");
+    assert!(app.model_panel.is_some(), "the picker stays open");
+    assert_eq!(app.ask_panels.len(), 1, "the ask panel stays open");
 }

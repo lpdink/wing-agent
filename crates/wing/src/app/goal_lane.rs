@@ -13,6 +13,11 @@
 //!
 //! Reading "the whole Goal path" therefore means reading `goal.rs` (decisions)
 //! together with this file (effects).
+//!
+//! Call directions: [`super::commands`] routes `/goal` and `/goal-exit` here,
+//! [`super::modal`] routes ask answers here, [`super::projection`] drives the
+//! state machine with turn results / interrupts; this module only pushes
+//! intents and chat cells (no lane calls back into it).
 
 use super::App;
 use super::AppIntent;

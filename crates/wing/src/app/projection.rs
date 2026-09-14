@@ -11,6 +11,10 @@
 //! `SyncSession`, accept the goal checker session) live here too: they decide
 //! **what the projection is allowed to see**, which is the projection's own
 //! contract.
+//!
+//! Call directions: the main loop ([`super`]) calls in with every event;
+//! projections call out to [`super::modal`] (ask registration) and
+//! [`super::goal_lane`] (roles, actions).
 
 use super::App;
 use super::AppIntent;

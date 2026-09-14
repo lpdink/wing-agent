@@ -3,6 +3,10 @@
 //! Pure logic, no I/O. All methods return `Vec<GoalAction>` which the App
 //! translates into intents (side-effects). This module can be removed entirely
 //! to strip Goal support from the TUI.
+//!
+//! The App-side counterpart — session identity, role resolution, action
+//! execution and the `/goal` commands — lives in [`super::goal_lane`]: read the
+//! two together to follow the whole Goal path (decisions here, effects there).
 
 /// Which agent is involved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
