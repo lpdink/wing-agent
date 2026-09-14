@@ -31,6 +31,7 @@ mod commands;
 mod frame;
 mod goal_lane;
 mod modal;
+mod mouse;
 mod projection;
 
 pub use intent::AppIntent;
@@ -69,6 +70,7 @@ use crate::util::title;
 use title::AttentionKind;
 
 use self::frame::FrameGeometry;
+use self::mouse::MouseOutcome;
 use self::popup_state::PopupState;
 use self::render_context::RenderContext;
 use self::turn_state::TurnState;
@@ -146,22 +148,6 @@ enum SelectionGuard {
         /// Terminal width the visual rows were computed against.
         width: u16,
     },
-}
-
-/// How a handled mouse event wants the next frame to happen.
-///
-/// The wheel, a press and a release are one-shot user actions: they draw
-/// immediately (like keys do, bypassing the frame gate). A drag is a *flood* —
-/// a touchpad emits motion far above the frame rate, and each drag frame
-/// re-snapshots the visible rows — so it is coalesced by the frame gate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MouseOutcome {
-    /// Nothing visible changed; no redraw.
-    Ignored,
-    /// The view changed, but the redraw can wait for the frame gate.
-    Coalesced,
-    /// Direct user action — draw right away.
-    Immediate,
 }
 
 /// Application state.
@@ -396,212 +382,6 @@ impl App {
     /// Clear the active toast (including persistent toasts).
     pub fn clear_toast(&mut self) {
         self.toast = None;
-    }
-
-    /// Handle a mouse event, reporting how the next frame should happen.
-    ///
-    /// The wheel is an input channel of its own: it always scrolls the chat
-    /// view and is never consumed by a panel or popup, so history stays
-    /// reachable while the AskUserQuestion panel / model picker / command
-    /// popup is open (plain Up/Down stay with the focused widget).
-    ///
-    /// Left press / drag / release are claimed in order of ownership: the
-    /// overlay scrollbar on its own track first — the bar overprints the chat
-    /// band's last column, so it has to win there — and otherwise whichever
-    /// region the press landed in (see [`App::mouse_press`]): the chat band
-    /// keeps its drag-to-copy contract, the composer adds click-to-place-
-    /// cursor. A press outside both regions (status bar, popups) is ignored,
-    /// exactly like `Moved` — hover belongs to the scrollbar alone — and
-    /// horizontal wheel (`ScrollLeft` / `ScrollRight`), which is not a chat
-    /// gesture at all.
-    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> MouseOutcome {
-        use crossterm::event::MouseButton;
-        use crossterm::event::MouseEventKind;
-
-        match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                self.chat.scroll_up(WHEEL_SCROLL_LINES);
-                MouseOutcome::Immediate
-            }
-            MouseEventKind::ScrollDown => {
-                self.chat
-                    .scroll_down(WHEEL_SCROLL_LINES, self.geometry.chat_height());
-                MouseOutcome::Immediate
-            }
-            // Hover belongs to the overlay scrollbar alone — it is the only
-            // thing that reacts to motion today.
-            MouseEventKind::Moved => self.hover_scrollbar(mouse.column, mouse.row),
-            MouseEventKind::Down(MouseButton::Left) => self.mouse_press(mouse.column, mouse.row),
-            MouseEventKind::Drag(MouseButton::Left) => {
-                // An in-flight bar drag owns the motion; everything else is
-                // the selection's flood — a drag, so coalesced by the gate.
-                if self.scrollbar.dragging {
-                    return self.drag_scrollbar(mouse.row);
-                }
-                if self.mouse_drag(mouse.column, mouse.row) {
-                    MouseOutcome::Coalesced
-                } else {
-                    MouseOutcome::Ignored
-                }
-            }
-            MouseEventKind::Up(MouseButton::Left) => {
-                if self.scrollbar.dragging {
-                    return self.release_scrollbar(mouse.column, mouse.row);
-                }
-                self.mouse_release(mouse.column, mouse.row)
-            }
-            _ => MouseOutcome::Ignored,
-        }
-    }
-
-    /// Grab the bar at a pressed row: the track jumps there, and the grip is
-    /// taken at that same row so the drag that follows keeps it — the thumb
-    /// stays under the pointer for the whole gesture (a press on the thumb
-    /// itself is therefore a no-op: it keeps the position it already has).
-    ///
-    /// The grab also lights the bar up: "the user is manipulating the bar" is
-    /// the visual contract, and without any-motion reporting (multiplexers)
-    /// the press is the only event that can say so.
-    fn grab_scrollbar(&mut self, geom: &scrollbar::ScrollbarGeometry, row: u16) -> MouseOutcome {
-        let was_active = self.scrollbar.is_active();
-        self.scrollbar.dragging = true;
-        self.scrollbar.hovered = true;
-        self.scrollbar.grip = scrollbar::grip_at(geom, row);
-        if self.scroll_to_row(geom, row) || !was_active {
-            MouseOutcome::Immediate
-        } else {
-            MouseOutcome::Ignored
-        }
-    }
-
-    /// Drag with the grip held: re-target continuously so the thumb keeps
-    /// following the pointer 1:1 (the mapping is proportional, see
-    /// [`scrollbar::offset_for_row`]). The column is ignored on purpose — the
-    /// row is what maps onto the track, so a drag that wanders off the bar
-    /// still scrolls.
-    fn drag_scrollbar(&mut self, row: u16) -> MouseOutcome {
-        let Some(geom) = self.scrollbar_geometry() else {
-            // The bar vanished mid-drag (the content stopped overflowing):
-            // the interaction state cannot outlive it.
-            return if self.clear_scrollbar_interaction() {
-                MouseOutcome::Coalesced
-            } else {
-                MouseOutcome::Ignored
-            };
-        };
-        if self.scroll_to_row(&geom, row) {
-            // A drag is a flood of motion events — coalesced by the frame gate.
-            MouseOutcome::Coalesced
-        } else {
-            MouseOutcome::Ignored
-        }
-    }
-
-    /// Release ends the bar drag; the pointer stays where it was released, so
-    /// the hover look follows it.
-    fn release_scrollbar(&mut self, column: u16, row: u16) -> MouseOutcome {
-        self.scrollbar.dragging = false;
-        self.scrollbar.hovered = self.scrollbar_at(column, row).is_some();
-        MouseOutcome::Immediate
-    }
-
-    /// Pointer motion: the overlay scrollbar is the only hover owner.
-    ///
-    /// A hover that stays put reports nothing at all — motion is a flood, and
-    /// an event that changes nothing must not wake the frame gate.
-    fn hover_scrollbar(&mut self, column: u16, row: u16) -> MouseOutcome {
-        let Some(geom) = self.scrollbar_geometry() else {
-            // No bar this frame (content fits, or nothing has been drawn yet):
-            // drop any stale look now instead of waiting for the next draw.
-            return if self.clear_scrollbar_interaction() {
-                MouseOutcome::Coalesced
-            } else {
-                MouseOutcome::Ignored
-            };
-        };
-        let hovered = scrollbar::hit(&geom, column, row);
-        if hovered == self.scrollbar.hovered {
-            return MouseOutcome::Ignored;
-        }
-        self.scrollbar.hovered = hovered;
-        MouseOutcome::Coalesced
-    }
-
-    /// Left press: start a selection in the region the pointer landed in —
-    /// unless the overlay scrollbar claims it first.
-    ///
-    /// The bar overprints the chat band's last column, so a press there is the
-    /// bar's (it is also the only way to drag the bar). Everything else goes
-    /// to the regions: the composer is checked first — it is the only region
-    /// that reacts to a plain click (it places the cursor), and it is guarded
-    /// by the modal panels (see [`Self::composer_pointer_blocked`]) — and the
-    /// chat band owns the rest, ignoring presses outside its rect.
-    ///
-    /// A press off the bar also drops whatever hover / drag look the bar kept
-    /// — the same cleanup a focus loss performs — so the outcome cannot be the
-    /// region's alone: the repaint the bar asks for wins over the selection's
-    /// "nothing to see" verdict.
-    fn mouse_press(&mut self, column: u16, row: u16) -> MouseOutcome {
-        if let Some(geom) = self.scrollbar_at(column, row) {
-            return self.grab_scrollbar(&geom, row);
-        }
-        let bar_repaint = self.clear_scrollbar_interaction();
-        let outcome = if self.composer_contains(column, row) {
-            self.composer_press(column, row)
-        } else {
-            self.chat_selection_press(column, row)
-        };
-        match outcome {
-            MouseOutcome::Ignored if bar_repaint => MouseOutcome::Immediate,
-            outcome => outcome,
-        }
-    }
-
-    /// Drag: extend the selection in the region it started in.
-    ///
-    /// The pointer is mapped into *that* region's space (clamped to its band,
-    /// see the region handlers), so a drag that leaves the region keeps
-    /// producing meaningful coordinates instead of switching spaces.
-    fn mouse_drag(&mut self, column: u16, row: u16) -> bool {
-        match self.selection.region() {
-            Some(SelectionRegion::Composer) => self.composer_drag(column, row),
-            // `None` means no press is active (a stray drag), and the chat
-            // handler reports that the same way.
-            Some(SelectionRegion::Chat) | None => self.chat_selection_drag(column, row),
-        }
-    }
-
-    /// Release: finish the selection and copy whatever it covered.
-    ///
-    /// The fingerprint is re-checked here as well: a structural change can
-    /// land in the same loop iteration (the intent runs right after the draw),
-    /// so a release must never copy from content that no longer matches the
-    /// coordinates the anchor was taken in.
-    fn mouse_release(&mut self, column: u16, row: u16) -> MouseOutcome {
-        if !self.selection.is_press_active() {
-            return MouseOutcome::Ignored;
-        }
-        if self.selection_guard.as_ref() != Some(&self.selection_fingerprint()) {
-            self.cancel_selection();
-            return MouseOutcome::Immediate;
-        }
-        match self.selection.region() {
-            Some(SelectionRegion::Composer) => self.composer_release(column, row),
-            Some(SelectionRegion::Chat) => self.chat_selection_release(column, row),
-            None => MouseOutcome::Ignored,
-        }
-    }
-
-    /// Whether a screen position lies inside the composer's rect of the last
-    /// frame.
-    ///
-    /// Like `ChatView::contains_screen`, the rect comes from the last render —
-    /// mouse events arrive between frames, so hit testing has to describe the
-    /// screen the user is pointing at. The widget records it (`InputArea` owns
-    /// the geometry it drew into); a collapsed or not-yet-rendered rect
-    /// (`Rect::default()`) accepts nothing.
-    fn composer_contains(&self, column: u16, row: u16) -> bool {
-        self.geometry.composer_contains(column, row)
     }
 
     /// Left press inside the composer: arm a drag selection.
@@ -888,41 +668,6 @@ impl App {
         }
         self.selection_autoscroll_at = Some(std::time::Instant::now() + SELECTION_AUTOSCROLL_DELAY);
         true
-    }
-
-    /// Geometry of the overlay scrollbar for the current frame state
-    /// (`None` = content fits, or nothing has been drawn yet).
-    fn scrollbar_geometry(&self) -> Option<scrollbar::ScrollbarGeometry> {
-        self.geometry
-            .scrollbar(self.chat.content_height(), self.chat.scroll_position())
-    }
-
-    /// The bar as a claim on a pointer position, read through the frame's
-    /// geometry (see [`FrameGeometry::scrollbar_at`]).
-    fn scrollbar_at(&self, column: u16, row: u16) -> Option<scrollbar::ScrollbarGeometry> {
-        self.geometry.scrollbar_at(
-            self.chat.content_height(),
-            self.chat.scroll_position(),
-            column,
-            row,
-        )
-    }
-
-    /// Move the chat to the position under a pointer row, through the shared
-    /// follow contract (see `ChatView::scroll_to`). Returns whether anything
-    /// visible changed, so the 16ms frame gate can be bypassed only when the
-    /// view really moved.
-    fn scroll_to_row(&mut self, geom: &scrollbar::ScrollbarGeometry, row: u16) -> bool {
-        let target = scrollbar::offset_for_row(geom, row, self.scrollbar.grip);
-        let before = (self.chat.scroll_position(), self.chat.is_at_bottom());
-        self.chat.scroll_to(target, geom.viewport_height);
-        before != (self.chat.scroll_position(), self.chat.is_at_bottom())
-    }
-
-    /// Drop hover / drag state (content stopped overflowing, a press missed
-    /// the bar, or the window lost focus). Returns whether it changed.
-    fn clear_scrollbar_interaction(&mut self) -> bool {
-        self.scrollbar.clear()
     }
 
     /// Push a side-effect intent for the runner to execute after draw.
