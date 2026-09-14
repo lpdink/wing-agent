@@ -4,6 +4,7 @@
 //! root: the assertions are unchanged, only their file changed.
 
 use super::support::*;
+use crate::app::selection_session::SELECTION_AUTOSCROLL_DELAY;
 use crate::app::*;
 use crate::ui::chat_view::ChatCell;
 use crate::ui::input_area::helpers::PREFIX_WIDTH;
@@ -371,7 +372,7 @@ fn test_edge_autoscroll_steps_one_line_and_stops_at_the_edge() {
     assert_eq!(app.chat.scroll_position(), bottom, "the view stays put");
     assert_eq!(app.selection.auto_scroll(), 0, "the timer is disarmed");
     assert!(
-        app.selection_autoscroll_at.is_none(),
+        app.selection.deadline().is_none(),
         "the deadline is disarmed"
     );
 
@@ -594,7 +595,7 @@ fn test_press_on_the_bar_never_opens_the_link_beside_it() {
     );
     assert!(app.scrollbar.dragging, "the press belongs to the bar");
     assert!(
-        app.mouse_link.is_none(),
+        app.selection.link().is_none(),
         "a bar press must not record the link underneath"
     );
     assert_eq!(

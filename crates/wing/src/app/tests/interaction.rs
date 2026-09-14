@@ -394,7 +394,7 @@ fn test_press_in_the_composer_starts_a_composer_selection() {
         "a composer press must not freeze the chat's follow state"
     );
     assert!(
-        app.selection_autoscroll_at.is_none(),
+        app.selection.deadline().is_none(),
         "the composer has no edge auto-scroll"
     );
 }

@@ -11,8 +11,9 @@
 //!   [`goal`]).
 //!
 //! The interaction paths live in their own modules too: [`frame`] records the
-//! geometry of the frame just drawn, [`mouse`] routes pointer gestures and
-//! [`selection_session`] owns the drag's lifecycle.
+//! geometry of the frame just drawn, [`mouse`] routes pointer gestures — its
+//! priority chain declared once — and [`selection_session`] owns the drag's
+//! lifecycle (anchor, fingerprint, edge auto-scroll).
 
 pub mod ask_panel;
 pub mod constants;
@@ -33,6 +34,7 @@ mod goal_lane;
 mod modal;
 mod mouse;
 mod projection;
+mod selection_session;
 
 pub use intent::AppIntent;
 
@@ -57,8 +59,6 @@ use crate::ui::input_area::cursor_screen_pos;
 use crate::ui::input_area::pointer;
 use crate::ui::popup::selection::SelectionPopup;
 use crate::ui::scrollbar;
-use crate::ui::selection::Selection;
-use crate::ui::selection::SelectionPoint;
 use crate::ui::selection::SelectionRegion;
 use crate::ui::spinner::WorkingIndicatorWidget;
 use crate::ui::status_bar::StatusBar;
@@ -73,6 +73,8 @@ use self::frame::FrameGeometry;
 use self::mouse::MouseOutcome;
 use self::popup_state::PopupState;
 use self::render_context::RenderContext;
+use self::selection_session::SelectionSession;
+use self::selection_session::selection_autoscroll_tick;
 use self::turn_state::TurnState;
 
 use crate::config::AppConfig;
@@ -88,95 +90,17 @@ const WIDE_THRESHOLD: u16 = 100;
 /// change's Open Questions.
 const WHEEL_SCROLL_LINES: usize = 3;
 
-/// Step interval of the drag edge auto-scroll: one content line per 50 ms
-/// (20 lines/s). Matches the reference implementation's cadence, and is fast
-/// enough to feel continuous without skipping rows. The timer only runs while
-/// the pointer rests on the chat band's top / bottom row — reaching the
-/// content edge stops it (see `App::tick_selection_autoscroll`).
-const SELECTION_AUTOSCROLL_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
-
-/// Timer arm of the run loop's `select!` for the drag edge auto-scroll.
-///
-/// The deadline is **absolute** (`Instant`, set when the drag arms a direction
-/// and pushed forward after every step) because `select!` rebuilds this future
-/// on every loop iteration: a relative `sleep` would restart on each incoming
-/// event and, during streaming (events arrive far faster than the 50 ms tick),
-/// would never complete at all. With `None` the arm parks in `pending()`, so
-/// nothing wakes the loop while no drag sits on an edge.
-async fn selection_autoscroll_tick(deadline: Option<std::time::Instant>) {
-    match deadline {
-        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
-        None => std::future::pending::<()>().await,
-    }
-}
-
-/// Structural fingerprint of the region a drag started in.
-///
-/// A selection is anchored to *content* coordinates, which only survive while
-/// that content is stable — and the two regions have different notions of
-/// "stable":
-///
-/// * `Chat` — rows move when cells appear / vanish / are promoted, when the
-///   whole content is rebuilt (session switch, compaction, rewind) or when the
-///   width changes. Streamed text growth does not (it rewrites an existing cell
-///   without moving anything), so it must NOT show up here, otherwise every
-///   streaming delta would abort a drag.
-/// * `Composer` — logical positions survive scrolling and re-wrapping, but not
-///   a single edit: the draft is the copy source, so inserting / deleting /
-///   pasting / submitting has to drop a highlight that would otherwise point at
-///   text the user has just changed. A width change re-wraps the draft and
-///   invalidates the pointer ↔ text correspondence, so it counts too.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SelectionGuard {
-    /// Chat band: cell structure, content rebuilds and the frame width.
-    Chat {
-        /// Number of committed cells.
-        cells: usize,
-        /// Number of pending (sent, not yet accepted) messages.
-        pending: usize,
-        /// Terminal width the anchor's columns were measured against.
-        width: u16,
-        /// Content rebuild counter (`ChatView::structure_epoch`) — catches
-        /// session switches / compaction / rewind even when the rebuilt
-        /// content ends up with the same cell count.
-        rebuilds: u64,
-    },
-    /// Composer: the draft itself plus the width it was wrapped against.
-    Composer {
-        /// Current draft text (`InputArea::text`).
-        text: String,
-        /// Terminal width the visual rows were computed against.
-        width: u16,
-    },
-}
-
 /// Application state.
 pub struct App {
     pub status: StatusData,
     pub chat: ChatView,
     pub input: InputArea,
     pub session_id: String,
-    /// In-app text selection — anchored in the *content* coordinates of the
-    /// region it started in (chat band or composer), see
+    /// In-app text selection — one gesture, anchored in the *content*
+    /// coordinates of the region it started in (chat band or composer), with
+    /// its fingerprint, press-frame link and edge auto-scroll deadline, see
     /// [`crate::ui::selection`] and [`SelectionRegion`].
-    selection: Selection,
-    /// Structure / content fingerprint captured when the drag started. Any
-    /// change means the coordinates may have moved under the anchor, so the
-    /// selection is aborted; streamed chat text growth leaves it untouched.
-    selection_guard: Option<SelectionGuard>,
-    /// Markdown link under the pointer at press time.
-    ///
-    /// Recorded from the *frame the user pressed on* (never recomputed at
-    /// release, which would hit whatever scrolled under the pointer in the
-    /// meantime) and opened only when the gesture turns out to be a click —
-    /// a drag is a selection, not an open.
-    mouse_link: Option<String>,
-    /// Absolute deadline of the next drag edge auto-scroll step.
-    ///
-    /// Absolute (not "sleep 50 ms from now") because the run loop's `select!`
-    /// rebuilds its timer arm on every iteration — a relative sleep would be
-    /// starved by streaming events. `None` while no drag rests on an edge.
-    selection_autoscroll_at: Option<std::time::Instant>,
+    selection: SelectionSession,
     /// Whether the app should exit.
     pub should_quit: bool,
     /// Pending side-effect intents. Drained by runner after each draw cycle.
@@ -260,10 +184,7 @@ impl App {
             chat,
             input: InputArea::with_max_lines("今天构建什么？".into(), max_input_lines),
             session_id,
-            selection: Selection::default(),
-            selection_guard: None,
-            mouse_link: None,
-            selection_autoscroll_at: None,
+            selection: SelectionSession::default(),
             should_quit: false,
             intents: Vec::new(),
             needs_full_redraw: true,
@@ -384,292 +305,6 @@ impl App {
         self.toast = None;
     }
 
-    /// Left press inside the composer: arm a drag selection.
-    ///
-    /// The cursor is **not** moved here: a press cannot know yet whether it
-    /// becomes a click (→ place the cursor) or a drag (→ select and copy) —
-    /// the reference behaviour, and the same reason the chat press only
-    /// records an anchor.
-    fn composer_press(&mut self, column: u16, row: u16) -> MouseOutcome {
-        if self.composer_pointer_blocked() {
-            return MouseOutcome::Ignored;
-        }
-        let Some(point) = pointer::point(&self.input, self.input.rendered_area(), column, row)
-        else {
-            return MouseOutcome::Ignored;
-        };
-        self.selection.begin(point);
-        // No `chat.unfollow()` here: the composer selection has nothing to do
-        // with the chat's follow contract, and no edge auto-scroll either — a
-        // composer press even disarms a stale chat deadline.
-        self.selection_guard = Some(self.selection_fingerprint());
-        self.selection_autoscroll_at = None;
-        MouseOutcome::Immediate
-    }
-
-    /// Drag inside the composer: extend the selection, including the character
-    /// under the pointer (the mirror of `ChatView::snap_focus_right`).
-    fn composer_drag(&mut self, column: u16, row: u16) -> bool {
-        if !self.selection.is_press_active() {
-            return false;
-        }
-        let Some(point) = pointer::focus(&self.input, self.input.rendered_area(), column, row)
-        else {
-            return false;
-        };
-        self.selection.drag_to(point);
-        true
-    }
-
-    /// Release inside the composer: place the cursor for a click, copy for a
-    /// drag.
-    ///
-    /// A click (press + release, no motion) never produced a selection
-    /// (`bounds_in` is `None` for zero width), so it falls through to the
-    /// cursor placement; a real drag copies the draft fragment it covered.
-    fn composer_release(&mut self, column: u16, row: u16) -> MouseOutcome {
-        let Some(hit) = pointer::hit(&self.input, self.input.rendered_area(), column, row) else {
-            self.cancel_selection();
-            return MouseOutcome::Immediate;
-        };
-        // The composer decides click vs. drag **positionally**: a motion event
-        // that stayed on the same cell (trackpad jitter inside one character)
-        // is still a click, and dragging away and back onto the anchor is a
-        // zero-width selection, not a one-character copy. The chat band also
-        // ORs in `is_dragged()` because its mapping can snap within a grapheme;
-        // here the character under the pointer is the only thing that matters.
-        let dragged = self.selection.anchor() != Some(hit.point);
-        if !dragged {
-            self.cancel_selection();
-            let area = self.input.rendered_area();
-            self.input
-                .set_cursor_from_visual(area.width, hit.vis_row, hit.display_col);
-            return MouseOutcome::Immediate;
-        }
-        self.selection_guard = None;
-        let bounds = self.selection.release(hit.focus());
-        let Some(text) = bounds.and_then(|bounds| pointer::selected_text(&self.input, bounds))
-        else {
-            return MouseOutcome::Immediate;
-        };
-        self.push_intent(AppIntent::CopyToClipboard(text));
-        MouseOutcome::Immediate
-    }
-
-    /// Left press inside the chat band: start a drag selection.
-    ///
-    /// Returns `Ignored` (no redraw, no state) when the press is outside the
-    /// chat band or before the first frame has established the geometry.
-    fn chat_selection_press(&mut self, column: u16, row: u16) -> MouseOutcome {
-        if !self.chat.contains_screen(column, row) {
-            return MouseOutcome::Ignored;
-        }
-        let Some(point) = self.selectable_point_at(column, row) else {
-            return MouseOutcome::Ignored;
-        };
-        // Link hit test first, from the frame the user is looking at. It only
-        // *records* — a press still begins a selection so dragging across a
-        // link selects its text.
-        self.mouse_link = self.chat.link_at(column, row).map(str::to_owned);
-        self.selection.begin(point);
-        // Freeze follow for the duration of the drag: the render pins the
-        // viewport to the bottom edge and re-arms `auto_scroll` whenever the
-        // offset sits there, so streaming content would otherwise yank the view
-        // (and the highlighted rows) away. Released again by
-        // `chat_selection_release` → `scroll_down(0, …)`.
-        self.chat.unfollow();
-        self.selection_guard = Some(self.selection_fingerprint());
-        self.selection_autoscroll_at = None;
-        MouseOutcome::Immediate
-    }
-
-    /// Drag: extend the selection and arm / disarm the edge auto-scroll.
-    ///
-    /// The pointer is clamped into the visible band, so dragging past an edge
-    /// keeps producing content coordinates — that is what makes the pointer
-    /// resting on the top / bottom row scroll the view and extend the
-    /// selection.
-    fn chat_selection_drag(&mut self, column: u16, row: u16) -> bool {
-        if !self.selection.is_press_active() {
-            return false;
-        }
-        let Some(point) = self.selectable_point_at(column, row) else {
-            return false;
-        };
-        // The pointer selects the character it rests on (reference behaviour):
-        // snap the focus to the right edge of that grapheme, so the copy takes
-        // it whole. A click never gets here, so "press and release without
-        // moving = no selection" holds.
-        self.selection.drag_to(self.chat.snap_focus_right(point));
-        let area = self.chat.geometry().area;
-        let direction = if row <= area.y {
-            -1
-        } else if row >= area.bottom() - 1 {
-            1
-        } else {
-            0
-        };
-        self.selection.set_auto_scroll(direction);
-        // Arm / re-arm the *absolute* deadline: a drag that keeps moving along
-        // an edge restarts the 50 ms cadence from now.
-        self.selection_autoscroll_at =
-            (direction != 0).then(|| std::time::Instant::now() + SELECTION_AUTOSCROLL_DELAY);
-        true
-    }
-
-    /// Release: end the selection and copy whatever it covered.
-    ///
-    /// The highlight disappears by construction (the selection state is gone
-    /// after this call), the follow contract is restored from the current
-    /// scroll position, and a non-empty selection is pushed as a clipboard
-    /// intent. A zero-width selection (plain click) copies nothing.
-    fn chat_selection_release(&mut self, column: u16, row: u16) -> MouseOutcome {
-        self.selection_guard = None;
-        self.selection_autoscroll_at = None;
-        // A press that never moved is a click: open the link recorded at press
-        // time instead of copying (a click copies nothing anyway — the
-        // selection is zero-width — so this only decides *what* the click
-        // does). A drag keeps the selection semantics. "Never moved" is
-        // checked both ways — no `Drag` event *and* the pointer back on the
-        // anchor — so a click that lost its motion events (tmux, a terminal
-        // that drops `?1002`) cannot open a link the user dragged away from.
-        let release_point = self.selectable_point_at(column, row);
-        let clicked_link = self.mouse_link.take();
-        if let Some(target) = clicked_link
-            && !self.selection.is_dragged()
-            && release_point.is_some()
-            && release_point == self.selection.anchor()
-        {
-            // Restore the follow contract from the current position, exactly
-            // like the copy path below.
-            self.chat.scroll_down(0, self.geometry.chat_height());
-            self.selection.cancel();
-            self.push_intent(AppIntent::OpenLink(target));
-            return MouseOutcome::Immediate;
-        }
-        // Re-arm the follow state iff the viewport is still at the bottom edge
-        // (`n = 0` only judges — it never moves). This runs for clicks too, so
-        // the `unfollow` from the press cannot leave the view stuck in reading
-        // mode.
-        self.chat.scroll_down(0, self.geometry.chat_height());
-        let bounds = match release_point {
-            Some(point) => {
-                // Include the character under the pointer (reference
-                // behaviour) — but only for a real drag: a plain click must
-                // stay zero-width, and snapping it would select one character.
-                let point = if self.selection.is_dragged() || self.selection.anchor() != Some(point)
-                {
-                    self.chat.snap_focus_right(point)
-                } else {
-                    point
-                };
-                self.selection.release(point)
-            }
-            None => {
-                self.selection.cancel();
-                None
-            }
-        };
-        let Some(text) = bounds.and_then(|bounds| self.chat.selected_text(bounds)) else {
-            return MouseOutcome::Immediate;
-        };
-        self.push_intent(AppIntent::CopyToClipboard(text));
-        MouseOutcome::Immediate
-    }
-
-    /// Abort an in-flight selection and restore the follow state.
-    ///
-    /// Used when a drag can no longer be trusted: the release will never
-    /// arrive (focus loss) or the content moved under the anchor (structural
-    /// change). Lifting the freeze is part of the chat contract — otherwise the
-    /// view would stay in reading mode forever — while a composer selection has
-    /// no follow state to restore.
-    fn cancel_selection(&mut self) {
-        // A recorded link must not survive an aborted gesture either — a
-        // release after a focus loss / structural change opens nothing.
-        self.mouse_link = None;
-        if !self.selection.is_press_active() {
-            return;
-        }
-        let region = self.selection.region();
-        self.selection.cancel();
-        self.selection_guard = None;
-        self.selection_autoscroll_at = None;
-        if region == Some(SelectionRegion::Chat) {
-            self.chat.scroll_down(0, self.geometry.chat_height());
-        }
-    }
-
-    /// Fingerprint of the region the current selection is anchored in, see
-    /// [`SelectionGuard`].
-    fn selection_fingerprint(&self) -> SelectionGuard {
-        match self.selection.region() {
-            Some(SelectionRegion::Composer) => SelectionGuard::Composer {
-                text: self.input.text(),
-                width: self.geometry.width(),
-            },
-            _ => SelectionGuard::Chat {
-                cells: self.chat.len(),
-                pending: self.chat.pending_len(),
-                width: self.geometry.width(),
-                rebuilds: self.chat.structure_epoch(),
-            },
-        }
-    }
-
-    /// Map a pointer position onto chat content, for the selection.
-    ///
-    /// A name for [`ChatView::content_point_at`] on this side of the seam: the
-    /// band the chat is rendered into already stops short of the scrollbar
-    /// gutter (`ui::scrollbar`), so nothing here has to clamp a point off the
-    /// bar's column — a pointer resting on the bar never reaches this path at
-    /// all (the bar dispatches first, see [`Self::handle_mouse`]).
-    fn selectable_point_at(&self, column: u16, row: u16) -> Option<SelectionPoint> {
-        self.chat.content_point_at(column, row)
-    }
-
-    /// Step the drag edge auto-scroll by one content line.
-    ///
-    /// Returns `true` when the frame must be redrawn. The step stops (and
-    /// disarms the deadline) the moment the viewport cannot move any further —
-    /// no busy loop, no timer left behind. The focus travels with the rows
-    /// that scrolled by, so the selection grows while the view moves.
-    fn tick_selection_autoscroll(&mut self) -> bool {
-        let direction = self.selection.auto_scroll();
-        if direction == 0 {
-            self.selection_autoscroll_at = None;
-            return false;
-        }
-        let before = self.chat.scroll_position();
-        if direction < 0 {
-            self.chat.scroll_up(1);
-        } else {
-            self.chat.scroll_down(1, self.geometry.chat_height());
-        }
-        // The drag keeps the follow state frozen, even when this step landed
-        // exactly on the bottom edge (that judgement happens on release).
-        self.chat.unfollow();
-        if self.chat.scroll_position() == before {
-            self.selection.stop_auto_scroll();
-            self.selection_autoscroll_at = None;
-            return false;
-        }
-        // The pointer did not move, but the content under it did: the mapping
-        // still describes the previous frame, so the focus shifts by the same
-        // single line the view just scrolled. (Re-deriving it from the frame
-        // would be stale by exactly one step.)
-        if let Some(focus) = self.selection.focus() {
-            let vrow = focus
-                .row
-                .saturating_add_signed(direction as isize)
-                .min(self.chat.content_height().saturating_sub(1));
-            self.selection
-                .drag_to(SelectionPoint::chat(vrow, focus.col));
-        }
-        self.selection_autoscroll_at = Some(std::time::Instant::now() + SELECTION_AUTOSCROLL_DELAY);
-        true
-    }
-
     /// Push a side-effect intent for the runner to execute after draw.
     fn push_intent(&mut self, intent: AppIntent) {
         self.intents.push(intent);
@@ -729,8 +364,9 @@ impl App {
             // composer anchor. Abort instead of pointing the highlight at
             // different text. Streamed chat text growth does not (it never
             // moves an existing row), so it keeps the selection alive.
-            if self.selection.is_press_active()
-                && self.selection_guard.as_ref() != Some(&self.selection_fingerprint())
+            if self
+                .selection
+                .needs_abort(|region| self.selection_fingerprint(region))
             {
                 self.cancel_selection();
             }
@@ -884,7 +520,7 @@ impl App {
                 match self.selection.region() {
                     Some(SelectionRegion::Chat) => {
                         self.chat
-                            .paint_selection(frame.buffer_mut(), &self.selection);
+                            .paint_selection(frame.buffer_mut(), self.selection.state());
                         self.chat.capture_visible_rows(frame.buffer_mut());
                     }
                     Some(SelectionRegion::Composer) => {
@@ -892,7 +528,7 @@ impl App {
                             frame.buffer_mut(),
                             &self.input,
                             input_rect,
-                            &self.selection,
+                            self.selection.state(),
                         );
                     }
                     None => {}
@@ -1198,7 +834,7 @@ pub async fn run_app(
             // The arm carries no state of its own: the deadline is cleared the
             // moment the selection ends or hits the content edge, so nothing is
             // left spinning (and no busy loop when the view cannot move).
-            _ = selection_autoscroll_tick(app.selection_autoscroll_at) => {
+            _ = selection_autoscroll_tick(app.selection.deadline()) => {
                 if app.tick_selection_autoscroll() {
                     app.input_dirty = true;
                 }

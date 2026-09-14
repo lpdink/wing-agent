@@ -199,10 +199,12 @@ impl App {
     /// so a release must never copy from content that no longer matches the
     /// coordinates the anchor was taken in.
     fn mouse_release(&mut self, column: u16, row: u16) -> MouseOutcome {
-        if !self.selection.is_press_active() {
-            return MouseOutcome::Ignored;
-        }
-        if self.selection_guard.as_ref() != Some(&self.selection_fingerprint()) {
+        // The session's one invalidation rule; a release with no press in
+        // flight is a no-op (`region()` is then `None`).
+        if self
+            .selection
+            .needs_abort(|region| self.selection_fingerprint(region))
+        {
             self.cancel_selection();
             return MouseOutcome::Immediate;
         }
