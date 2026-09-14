@@ -668,6 +668,50 @@ mod tests {
     }
 
     #[test]
+    fn test_replay_events_null_tool_call_id_behaves_like_absent() {
+        // `tool_call_id: null` is normalized to "" (the old decoders read it
+        // as `Option<String>`) — a diff falls back to append, an ask renders
+        // with an empty correlation id, and both match the absent-key runs.
+        let render = |tool_call_id: Option<serde_json::Value>| {
+            let mut chat = ChatView::new();
+            let mut diff = json!({
+                "type": "diff_content",
+                "path": "f.txt",
+                "old_text": null,
+                "new_text": "n",
+            });
+            let mut ask = json!({
+                "type": "ask",
+                "question": "proceed?",
+                "choices": ["y", "n"],
+            });
+            if let Some(id) = tool_call_id {
+                diff["tool_call_id"] = id.clone();
+                ask["tool_call_id"] = id;
+            }
+            let asks = replay_events(&mut chat, &[diff, ask]);
+            let kinds: Vec<&str> = chat
+                .cells
+                .iter()
+                .map(|c| match c.cell() {
+                    ChatCell::Diff(_) => "Diff",
+                    ChatCell::Ask(_) => "Ask",
+                    _ => "?",
+                })
+                .collect();
+            (kinds, asks)
+        };
+
+        let (null_kinds, null_asks) = render(Some(serde_json::Value::Null));
+        let (absent_kinds, absent_asks) = render(None);
+        assert_eq!(null_kinds, vec!["Diff", "Ask"], "null id still renders");
+        assert_eq!(null_kinds, absent_kinds);
+        assert_eq!(null_asks.len(), 1);
+        assert_eq!(null_asks[0].tool_call_id, "");
+        assert_eq!(null_asks[0].tool_call_id, absent_asks[0].tool_call_id);
+    }
+
+    #[test]
     fn test_replay_events_renders_ask_cell_and_returns_it() {
         // 6.14: an ask event renders an Ask cell (reusing the live-path cell
         // construction) and is returned so the App can register the answerable

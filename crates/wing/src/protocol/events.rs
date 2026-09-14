@@ -544,17 +544,21 @@ fn default_notice_level() -> String {
 impl WingEvent {
     /// Decode one session-history event payload (a chain event record).
     ///
-    /// Same rules as the live wire decode, plus the one tolerance replay
-    /// needs: chain payloads always carry the event meta (`created_at` /
-    /// `request_id` — `wire_dump` guarantees it), but replay never reads meta
-    /// and must keep decoding payload-only records — absent or null meta keys
-    /// are backfilled with empty strings. Unknown `type`s still fall back to
-    /// [`WingEvent::Unknown`]; a known `type` whose payload is malformed is an
-    /// error (the caller skips that node).
+    /// Same rules as the live wire decode, plus the tolerance replay needs:
+    /// chain payloads always carry the event meta (`created_at` /
+    /// `request_id` — `wire_dump` guarantees it) and a `tool_call_id` on the
+    /// types that have one, but replay never reads meta, and its renderers
+    /// treat a null `tool_call_id` exactly like an absent one (the decoders
+    /// this replaced declared these fields `Option<String>`). Absent or null
+    /// meta / `tool_call_id` keys are therefore backfilled with empty strings
+    /// — which is also the value `#[serde(default)]` would have produced for
+    /// a missing key. Unknown `type`s still fall back to
+    /// [`WingEvent::Unknown`]; a known `type` whose payload is otherwise
+    /// malformed is an error (the caller skips that node).
     pub fn from_history_value(value: &serde_json::Value) -> Result<Self, serde_json::Error> {
         let mut value = value.clone();
         if let Some(obj) = value.as_object_mut() {
-            for key in ["created_at", "request_id"] {
+            for key in ["created_at", "request_id", "tool_call_id"] {
                 if obj.get(key).is_none_or(serde_json::Value::is_null) {
                     obj.insert(key.to_string(), serde_json::Value::String(String::new()));
                 }
@@ -1297,6 +1301,35 @@ mod tests {
         let event = WingEvent::from_history_value(&value).unwrap();
         assert_eq!(event.event_type(), "ask");
         assert_eq!(event.request_id(), Some(""));
+    }
+
+    #[test]
+    fn history_value_null_tool_call_id_reads_as_absent() {
+        // The renderers treat null `tool_call_id` exactly like an absent one
+        // (the replaced decoders declared it `Option<String>`): both decode to
+        // "" — diff renders with the append fallback, ask keeps an empty id.
+        for event_type in ["diff_content", "ask"] {
+            let mut payload = serde_json::json!({
+                "type": event_type,
+                "tool_call_id": null,
+            });
+            if event_type == "diff_content" {
+                payload["path"] = "f".into();
+                payload["new_text"] = "n".into();
+            }
+            let from_null = WingEvent::from_history_value(&payload).unwrap();
+            payload.as_object_mut().unwrap().remove("tool_call_id");
+            let from_absent = WingEvent::from_history_value(&payload).unwrap();
+
+            let id = |ev: &WingEvent| match ev {
+                WingEvent::DiffContent { tool_call_id, .. }
+                | WingEvent::Ask { tool_call_id, .. } => tool_call_id.clone(),
+                other => panic!("expected diff/ask, got {other:?}"),
+            };
+            assert_eq!(id(&from_null), "");
+            assert_eq!(id(&from_absent), "");
+            assert_eq!(id(&from_null), id(&from_absent), "{event_type}");
+        }
     }
 
     #[test]

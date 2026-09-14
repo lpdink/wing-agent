@@ -11,6 +11,10 @@
 //! fields default, `null` optional fields count as absent, unknown fields are
 //! ignored (forward tolerant), and a payload that is not a Message projection
 //! fails to decode — callers skip it.
+//!
+//! Decode-only on purpose: serializing a mirror would drop unknown fields and
+//! change key order, which would break `wing tail --json` (it emits the raw
+//! payloads verbatim).
 
 use serde::Deserialize;
 

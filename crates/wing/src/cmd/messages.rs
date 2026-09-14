@@ -48,9 +48,12 @@ pub async fn run_head(session_id: &str, n: usize, filter: &str, json: bool) -> E
 /// One fetched history row: the raw payload — printed verbatim by `--json` —
 /// plus its typed view.
 ///
-/// `view` is `None` when the payload is not a Message projection (malformed /
-/// non-object). Such rows only match `all` (or unknown) filters and print with
-/// the `[unknown]` header, mirroring the old field-sniffing behavior.
+/// `view` is `None` when the payload is not a Message projection (non-object,
+/// or any mirrored field with a mismatched type). Such rows match only `all`
+/// (or unknown) filters and print the `[unknown]` header without a body — the
+/// same visible outcome the old sniffing produced for payloads carrying no
+/// role (payloads with a role but a mistyped mirrored field used to print the
+/// real role; the backend projection never produces them).
 struct HistoryRow {
     raw: Value,
     view: Option<SessionMessage>,
@@ -365,6 +368,33 @@ mod tests {
         // `all` (and unknown filters) include it.
         assert_eq!(filter_messages(&msgs, "all").len(), 4);
         assert_eq!(filter_messages(&msgs, "bogus").len(), 4);
+    }
+
+    #[test]
+    fn mistyped_field_drops_row_from_named_filters() {
+        // One mismatched mirrored field (here `uuid`) fails the whole decode:
+        // the row leaves every named filter — even one unrelated to the bad
+        // field (`--type user`) — and prints without a body, so `--json`
+        // selection shrinks with it. The old sniffing rendered the readable
+        // fields instead. Out-of-contract payloads only: `serialize_message`
+        // types every field, so the backend never produces this.
+        let msgs = rows(vec![
+            json!({"role": "user", "content": "hi", "uuid": 5}),
+            json!({"role": "user", "content": "real"}),
+        ]);
+        assert_eq!(filter_messages(&msgs, "user").len(), 1);
+        assert_eq!(filter_messages(&msgs, "all").len(), 2);
+        assert_eq!(header_line(&msgs[0]), "[unknown] ");
+
+        // The same holds for a feature filter when the mistyped field is
+        // unrelated to it: bad `tool_calls` kills a `--type reasoning` match.
+        let msgs = rows(vec![json!({
+            "role": "assistant",
+            "content": "x",
+            "reasoning_content": "r",
+            "tool_calls": "oops"
+        })]);
+        assert_eq!(filter_messages(&msgs, "reasoning").len(), 0);
     }
 
     // ── message_body_lines: field filters slice sections ──
