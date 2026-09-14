@@ -7,9 +7,11 @@
 //! streaming lines are blitted directly, everything else goes through
 //! `Paragraph`.
 //!
-//! This layer knows *how tall* and *where*, never *what* a cell means. The
-//! only cell-type-specific layout it honors is the user-message padding —
-//! because that is where the rows are laid out, not a semantic decision.
+//! This layer knows *how tall* and *where*, never *what* a cell means: the
+//! only cell-type branch is the user-message row layout — full-width
+//! background plus the text inset — which is a layout fact rather than a
+//! semantic decision, and no business field (tool call ids, session state, …)
+//! is ever read here.
 //!
 //! `render_info_separator` lives here too: it paints the scroll position /
 //! usage line that reports this viewport's state.
@@ -367,6 +369,14 @@ impl Widget for ChatViewWidget<'_> {
         // (accumulated starts after header). Pending messages extend the
         // space below all committed cells, so auto-scroll keeps the user's
         // queued submissions in view while the turn streams on above them.
+        //
+        // KEEP IN SYNC with `frame::visible_row_insets`: the copy's per-row
+        // inset table is derived by replaying this walk (header → cells →
+        // pending, advanced by the same cached heights), so a layout change
+        // here without the matching change there puts the padding skip on the
+        // wrong columns — the copy-side test
+        // `frame::tests::snapshot_row_insets_match_the_rendered_rows` is what
+        // turns red in that case.
         let mut accumulated = header_height;
         let cell_count = self.view.cell_heights.len();
         let pending_count = self.view.pending_heights.len();
@@ -460,6 +470,9 @@ impl Widget for ChatViewWidget<'_> {
             // Line.style(bg) only covers text width (ratatui Paragraph limitation),
             // so we pre-fill the cell area with the background color.
             // Text is rendered in an inset area for padding (2 left, 1 top, 1 bottom).
+            //
+            // KEEP IN SYNC with `frame::USER_MESSAGE_INSET`: the copy skips
+            // exactly this many leading columns on these rows.
             if matches!(
                 cached.cell(),
                 ChatCell::UserMessage(_)

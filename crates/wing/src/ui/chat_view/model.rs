@@ -3,10 +3,14 @@
 //!
 //! This is the only place that changes *what* the view holds — pushing cells,
 //! queueing / promoting / discarding pending user messages, anchoring derived
-//! cells under their tool call and the streaming (by-index) mutations. It
-//! knows nothing about scroll state, geometry or rendering: the only viewport
-//! interaction is the app-visible rule that `push_pending` brings the user's
-//! own submission into view.
+//! cells under their tool call and the streaming (by-index) mutations.
+//!
+//! It never **reads** scroll state, geometry or rendering. The only writes to
+//! the viewport state are the three app-visible entries that are part of the
+//! model's own contract: `push_pending` and `show_model_picker` bring the
+//! user's own content into view, and `clear()` resets the viewport for a
+//! rebuilt content list (top of the content, follow re-armed). Everything
+//! else about scrolling belongs to `super::viewport`.
 
 use ratatui::text::Line;
 

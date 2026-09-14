@@ -1,11 +1,13 @@
 //! Chat view — scrollable area for conversation cells.
 //!
-//! Split into four concerns, each with exactly one home:
+//! Split into five concerns, each with exactly one home:
 //!
+//! * **content unit** (`cell`) — [`ChatCell`] and its rendering (what a cell
+//!   looks like, nothing else) plus the pending-message wrapper.
 //! * **content model** (`model`) — the cells, the pending queue, anchored
 //!   insertion and every streaming / by-index mutation. It never reads scroll
-//!   state and never renders; the drawing and the frame state are somebody
-//!   else's business.
+//!   state or rendering; the drawing and the frame state are somebody else's
+//!   business.
 //! * **viewport** (`viewport`) — the scroll offset, the follow contract
 //!   (pinning / freezing), the per-frame geometry, the height cache refresh
 //!   and the widget that draws the band. It knows *how tall* and *where*, not
@@ -18,9 +20,6 @@
 //! * **links** (`link`) — the per-frame link table ([`FrameLink`] hit
 //!   boxes), the click hit test, masking for overlays and the OSC8 injection
 //!   that makes the terminals linkify what the table promises.
-//!
-//! `cell` holds the content unit itself ([`ChatCell`] + its rendering) and
-//! the pending message wrapper.
 //!
 //! The scroll bar drawn beside the band is an overlay owned by
 //! `ui::scrollbar` + `App`; the height cache lives in `ui::cached_cell`.

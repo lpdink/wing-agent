@@ -909,29 +909,65 @@ mod tests {
     }
 
     #[test]
-    fn empty_link_table_never_hits() {
-        let table = LinkTable::new();
-        assert!(table.as_slice().is_empty());
-        assert_eq!(table.link_at(0, 0), None);
+    fn link_table_mask_keeps_the_surviving_rows_in_order() {
+        // The painted mask must not reshuffle what is left: surviving rows keep
+        // their order and their targets, only the covered columns go.
+        let mut table = LinkTable::new();
+        table.push_row(1, vec![frame_link(0, 4, "one")]);
+        table.push_row(4, vec![frame_link(0, 20, "four")]);
+        table.push_row(
+            7,
+            vec![
+                frame_link(0, 4, "seven-left"),
+                frame_link(10, 14, "seven-right"),
+            ],
+        );
+
+        table.mask(Rect::new(0, 4, 30, 1)); // fully covers row 4
+        table.mask(Rect::new(8, 7, 4, 1)); // clips row 7's right span (8..12)
+        assert_eq!(
+            table
+                .as_slice()
+                .iter()
+                .map(|(row, _)| *row)
+                .collect::<Vec<u16>>(),
+            vec![1, 7],
+            "the covered row is gone, the rest keep their order"
+        );
+        assert_eq!(
+            table.link_at(1, 1),
+            Some("one"),
+            "survivors keep their target"
+        );
+        assert_eq!(
+            table.link_at(0, 7),
+            Some("seven-left"),
+            "the unclipped span stays"
+        );
+        assert_eq!(table.link_at(10, 7), None, "the clipped span is gone");
     }
 
     #[test]
-    fn link_table_mask_clips_spans_and_drops_covered_rows() {
+    fn link_table_hit_priority_is_its_insertion_order() {
+        // `link_at` takes the first row with the number and the first span that
+        // contains the column, so the table's order *is* its hit priority (the
+        // frame collector pushes rows in render order, spans left to right).
         let mut table = LinkTable::new();
         table.push_row(
-            3,
-            vec![frame_link(0, 4, "left"), frame_link(8, 12, "right")],
+            2,
+            vec![frame_link(0, 6, "first"), frame_link(4, 10, "second")],
         );
-        table.push_row(4, vec![frame_link(0, 20, "full")]);
-        table.push_row(9, vec![frame_link(2, 6, "other")]);
+        table.push_row(2, vec![frame_link(4, 10, "later-row")]);
 
-        table.mask(Rect::new(6, 4, 10, 1)); // row 4, columns 6..16
-        assert_eq!(table.as_slice().len(), 2, "the covered row is dropped");
-        assert_eq!(table.link_at(2, 4), None);
-
-        table.mask(Rect::new(8, 3, 5, 2)); // rows 3..5, columns 8..13
-        assert_eq!(table.link_at(0, 3), Some("left"), "outside the mask");
-        assert_eq!(table.link_at(8, 3), None, "inside the mask");
-        assert_eq!(table.link_at(2, 9), Some("other"), "untouched row");
+        assert_eq!(
+            table.link_at(5, 2),
+            Some("first"),
+            "overlapping spans: first wins"
+        );
+        assert_eq!(
+            table.link_at(7, 2),
+            Some("second"),
+            "only the first row's span reaches 7"
+        );
     }
 }
