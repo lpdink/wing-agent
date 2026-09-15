@@ -9,6 +9,7 @@ use crate::protocol::AskQuestion;
 use crate::protocol::EventMeta;
 use crate::protocol::WingEvent;
 use crate::shared::panels::ask::AskPanel;
+use crate::shared::panels::ask::PanelMode;
 use crate::ui::chat_view::ChatCell;
 
 fn utc_ago(secs: i64) -> String {
@@ -517,11 +518,87 @@ fn test_sync_replays_pending_ask_answerable() {
     assert_eq!(app.ask_panels.len(), 1);
     assert_eq!(app.ask_panels[0].tool_call_id, "ask-1");
     assert_eq!(app.ask_panels[0].questions[0].options.len(), 2);
+    assert_eq!(app.ask_panels[0].mode, PanelMode::Question);
 }
 
 #[test]
-fn test_sync_replays_legacy_required_ask_selection() {
-    // Legacy single-question required ask → AskSelection registered.
+fn test_live_ask_event_renders_and_registers_a_question_panel() {
+    // The live `WingEvent::Ask` branch normalizes through the same entry as
+    // replay: the AskUserQuestion shape → a registered `Question` panel.
+    let mut app = test_app();
+    app.handle_event(WingEvent::Ask {
+        tool_call_id: "ask-live".into(),
+        questions: vec![AskQuestion {
+            id: "q1".into(),
+            header: "H".into(),
+            question: "proceed?".into(),
+            multi_select: false,
+            options: Vec::new(),
+            choices: vec!["y".into(), "n".into()],
+        }],
+        question: String::new(),
+        choices: Vec::new(),
+        required: false,
+        meta: event_meta(),
+    });
+
+    assert!(cell_kinds(&app).contains(&"ask"), "ask cell rendered");
+    assert_eq!(app.ask_panels.len(), 1);
+    assert_eq!(app.ask_panels[0].mode, PanelMode::Question);
+    assert_eq!(app.ask_panels[0].tool_call_id, "ask-live");
+    assert_eq!(
+        app.ask_panels[0].questions[0].options.len(),
+        2,
+        "legacy choices are normalized into options"
+    );
+}
+
+#[test]
+fn test_live_legacy_required_ask_becomes_a_required_choice_panel() {
+    // The retired Bash confirmation shape (still what the backend sends) is
+    // normalized into a required-choice panel — the same model and reply
+    // channel as every other ask.
+    let mut app = test_app();
+    app.handle_event(WingEvent::Ask {
+        tool_call_id: "ask-bash".into(),
+        questions: Vec::new(),
+        question: "⚠️ Dangerous command detected:\n```bash\nrm -rf /\n```\nProceed?".into(),
+        choices: vec!["y".into(), "n".into(), "yolo".into()],
+        required: true,
+        meta: event_meta(),
+    });
+
+    assert!(cell_kinds(&app).contains(&"ask"), "ask cell rendered");
+    assert_eq!(app.ask_panels.len(), 1, "registered for answering");
+    assert_eq!(app.ask_panels[0].mode, PanelMode::RequiredChoice);
+    assert_eq!(app.ask_panels[0].tool_call_id, "ask-bash");
+    assert_eq!(app.ask_panels[0].questions[0].options.len(), 3);
+}
+
+#[test]
+fn test_live_legacy_non_required_ask_stays_a_static_notice() {
+    // A retired ask that is not required is not something the user can answer:
+    // it renders, but must never take the keyboard or reply.
+    let mut app = test_app();
+    app.handle_event(WingEvent::Ask {
+        tool_call_id: "ask-notice".into(),
+        questions: Vec::new(),
+        question: "heads up".into(),
+        choices: vec!["a".into()],
+        required: false,
+        meta: event_meta(),
+    });
+
+    assert!(cell_kinds(&app).contains(&"ask"), "ask cell rendered");
+    assert!(app.ask_panels.is_empty(), "not registered for answering");
+    assert_eq!(app.modal_owner(), None, "no modal took the keyboard");
+}
+
+#[test]
+fn test_sync_replays_legacy_required_ask_as_a_required_choice_panel() {
+    // A pending retired ask arrives again on resume; replay normalizes it
+    // through the same entry, so the card is answerable — with the bare
+    // option label the backend expects.
     let mut app = test_app();
     let events = vec![serde_json::json!({
         "type": "ask",
@@ -532,8 +609,24 @@ fn test_sync_replays_legacy_required_ask_selection() {
     })];
     app.handle_event(sync_event(vec![], None, vec![], events, None));
     assert!(cell_kinds(&app).contains(&"ask"));
-    assert_eq!(app.ask_selections.len(), 1);
-    assert_eq!(app.ask_selections[0].tool_call_id, "ask-2");
+    assert_eq!(app.ask_panels.len(), 1);
+    assert_eq!(app.ask_panels[0].tool_call_id, "ask-2");
+    assert_eq!(app.ask_panels[0].mode, PanelMode::RequiredChoice);
+    assert_eq!(app.ask_panels[0].questions[0].options[0].label, "yes");
+}
+
+#[test]
+fn test_sync_replays_legacy_non_required_ask_without_registering_it() {
+    let mut app = test_app();
+    let events = vec![serde_json::json!({
+        "type": "ask",
+        "tool_call_id": "ask-3",
+        "question": "heads up",
+        "choices": ["a", "b"],
+    })];
+    app.handle_event(sync_event(vec![], None, vec![], events, None));
+    assert!(cell_kinds(&app).contains(&"ask"), "still displayed");
+    assert!(app.ask_panels.is_empty(), "never answerable");
 }
 
 fn event_meta() -> crate::protocol::EventMeta {

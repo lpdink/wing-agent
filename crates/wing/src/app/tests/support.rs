@@ -7,6 +7,8 @@ use crate::app::App;
 use crate::config::AppConfig;
 use crate::protocol::EventMeta;
 use crate::protocol::WingEvent;
+use crate::shared::panels::ask::AskPanel;
+use crate::shared::panels::ask::AskPayload;
 use crate::shared::panels::picker::ModelPanel;
 use crate::ui::chat_view::ChatCell;
 
@@ -61,6 +63,25 @@ pub(super) fn picker_cell(app: &App) -> Option<&ModelPanel> {
         ChatCell::ModelPicker(panel) => Some(panel),
         _ => None,
     })
+}
+
+/// A normalized required-choice ask panel — the shape the retired Bash
+/// confirmation normalizes into. Built through the same entry the app uses, so
+/// the tests exercise the real model.
+pub(super) fn required_choice_panel(tool_call_id: &str, choices: &[&str]) -> AskPanel {
+    let choices: Vec<String> = choices.iter().map(|c| (*c).to_string()).collect();
+    AskPanel::from_ask(AskPayload {
+        tool_call_id,
+        questions: &[],
+        question: "Proceed?",
+        choices: &choices,
+        required: true,
+    })
+}
+
+/// The Bash dangerous-command confirmation's option set.
+pub(super) fn yes_no_yolo() -> [&'static str; 3] {
+    ["y", "n", "yolo"]
 }
 
 pub(super) fn wheel(kind: crossterm::event::MouseEventKind) -> crossterm::event::MouseEvent {

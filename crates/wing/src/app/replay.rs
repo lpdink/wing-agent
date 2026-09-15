@@ -8,30 +8,17 @@
 //! - fact-event nodes (`events`) → [`WingEvent`], the same typed decoder as
 //!   the live stream (unknown types fall back to `Unknown`).
 
-use crate::protocol::AskQuestion;
 use crate::protocol::SessionMessage;
 use crate::protocol::WingEvent;
 use crate::shared::constants::TOOL_TODO;
 use crate::shared::panels::ask::AskPanel;
+use crate::shared::panels::ask::AskPayload;
 use crate::ui::cells::ask_msg::AskMessage;
 use crate::ui::cells::diff_view::DiffView;
 use crate::ui::cells::thinking::ThinkingBlock;
 use crate::ui::cells::todo_msg::TodoMessage;
 use crate::ui::cells::tool_call::ToolCallBlock;
 use crate::ui::chat_view::{ChatCell, ChatView};
-
-/// An `ask` event rendered during replay, returned so the App can register the
-/// answerable state (`AskPanel` / `AskSelection`) that makes the card
-/// interactive — replay builds the cell, the App owns the reply channel.
-#[derive(Debug, Clone)]
-pub struct ReplayedAsk {
-    pub tool_call_id: String,
-    /// Multi-question payload (empty → legacy single-question form).
-    pub questions: Vec<AskQuestion>,
-    pub question: String,
-    pub choices: Vec<String>,
-    pub required: bool,
-}
 
 /// Replay durable fact-event nodes onto the message-rendered chat view.
 ///
@@ -49,10 +36,10 @@ pub struct ReplayedAsk {
 /// compacted away) falls back to append, mirroring the live-path DiffContent
 /// handler.
 ///
-/// Returns the `ask` events it rendered so the caller can register their
-/// answerable flows.
-pub fn replay_events(chat: &mut ChatView, events: &[serde_json::Value]) -> Vec<ReplayedAsk> {
-    let mut asks: Vec<ReplayedAsk> = Vec::new();
+/// Returns the normalized ask panels it rendered so the caller can register
+/// their answerable flows.
+pub fn replay_events(chat: &mut ChatView, events: &[serde_json::Value]) -> Vec<AskPanel> {
+    let mut asks: Vec<AskPanel> = Vec::new();
     for ev_val in events {
         // Decoded through the shared WingEvent mirror — the event types the
         // frontend does not know fall back to `Unknown` via `#[serde(other)]`.
@@ -88,23 +75,18 @@ pub fn replay_events(chat: &mut ChatView, events: &[serde_json::Value]) -> Vec<R
                 required,
                 ..
             } => {
-                // Reuse the live-path Ask cell construction (panel / choices /
-                // tool_call_id). Only still-pending asks reach here (the
-                // backend filters by live feedback waiters).
-                let msg = if questions.is_empty() {
-                    AskMessage::new_legacy(tool_call_id.clone(), question.clone(), choices.clone())
-                } else {
-                    let panel = AskPanel::new(tool_call_id.clone(), questions.clone());
-                    AskMessage::new_panel(tool_call_id.clone(), panel)
-                };
-                chat.push(ChatCell::Ask(msg));
-                asks.push(ReplayedAsk {
-                    tool_call_id,
-                    questions,
-                    question,
-                    choices,
+                // Same normalization entry as the live path — the retired
+                // shape folds into a panel here too, so the cell rendering and
+                // the registered reply state can never disagree.
+                let panel = AskPanel::from_ask(AskPayload {
+                    tool_call_id: &tool_call_id,
+                    questions: &questions,
+                    question: &question,
+                    choices: &choices,
                     required,
                 });
+                chat.push(ChatCell::Ask(AskMessage::new(panel.clone())));
+                asks.push(panel);
             }
             // No renderer for this type → skip (forward tolerant).
             other => {
@@ -211,6 +193,7 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::panels::ask::PanelMode;
     use serde_json::json;
 
     #[test]
@@ -664,7 +647,12 @@ mod tests {
         assert_eq!(chat.len(), 1);
         assert_eq!(asks.len(), 1);
         assert_eq!(asks[0].tool_call_id, "ask-meta");
-        assert_eq!(asks[0].choices, vec!["y".to_string(), "n".to_string()]);
+        assert_eq!(
+            asks[0].questions[0].options.len(),
+            2,
+            "choices are normalized into options"
+        );
+        assert_eq!(asks[0].mode, PanelMode::Notice, "non-required → static");
     }
 
     #[test]
@@ -732,9 +720,11 @@ mod tests {
     }
 
     #[test]
-    fn test_replay_events_renders_legacy_ask_and_preserves_required() {
-        // Legacy single-question form: question + choices + required flag are
-        // carried through so the App can register an AskSelection.
+    fn test_replay_events_normalizes_legacy_required_ask_into_a_panel() {
+        // The retired single-question form goes through the same normalization
+        // entry as the live path → a required-choice panel that answers with
+        // the bare label. (Replay only sees still-pending asks: the backend
+        // filters by live feedback waiters.)
         let mut chat = ChatView::new();
         let events = vec![json!({
             "type": "ask",
@@ -746,10 +736,32 @@ mod tests {
         let asks = replay_events(&mut chat, &events);
         assert!(matches!(chat.cells[0].cell(), ChatCell::Ask(_)));
         assert_eq!(asks.len(), 1);
-        assert!(asks[0].questions.is_empty(), "legacy form has no questions");
-        assert_eq!(asks[0].question, "dangerous, proceed?");
-        assert_eq!(asks[0].choices, vec!["yes".to_string(), "no".to_string()]);
-        assert!(asks[0].required);
+        assert_eq!(asks[0].mode, PanelMode::RequiredChoice);
+        assert_eq!(asks[0].tool_call_id, "ask-2");
+        assert_eq!(asks[0].questions.len(), 1);
+        assert_eq!(asks[0].questions[0].question, "dangerous, proceed?");
+        assert_eq!(
+            asks[0].questions[0].options[0].label, "yes",
+            "choices become options"
+        );
+        assert!(asks[0].is_interactive(), "required → answerable");
+    }
+
+    #[test]
+    fn test_replay_events_legacy_non_required_ask_is_a_notice() {
+        // A retired ask that was not required stays a static display: it is
+        // rendered, but never registered for answering.
+        let mut chat = ChatView::new();
+        let events = vec![json!({
+            "type": "ask",
+            "tool_call_id": "ask-3",
+            "question": "heads up",
+            "choices": ["a", "b"],
+        })];
+        let asks = replay_events(&mut chat, &events);
+        assert!(matches!(chat.cells[0].cell(), ChatCell::Ask(_)));
+        assert_eq!(asks[0].mode, PanelMode::Notice);
+        assert!(!asks[0].is_interactive());
     }
 
     #[test]

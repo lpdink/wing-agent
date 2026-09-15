@@ -12,6 +12,7 @@ use crate::protocol::AskQuestion;
 use crate::shared::panels::ask::ASK_CANCEL_CONTENT;
 use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::ask::PanelFinish;
+use crate::ui::cells::ask_msg::AskMessage;
 use crate::ui::chat_view::ChatCell;
 use crate::ui::input_area::helpers::PREFIX_WIDTH;
 use crate::ui::popup::command::SessionCandidate;
@@ -59,13 +60,97 @@ fn test_ask_panel_key_flow_submits_header_answer() {
     let finished = app.chat.cells.iter().any(|c| {
         matches!(
             c.cell(),
-            ChatCell::Ask(msg) if msg
-                .panel
-                .as_ref()
-                .is_some_and(|p| p.finished == Some(PanelFinish::Submitted))
+            ChatCell::Ask(msg) if msg.panel.finished == Some(PanelFinish::Submitted)
         )
     });
     assert!(finished, "cell keeps the submitted summary");
+}
+
+#[test]
+fn test_required_choice_panel_answers_with_the_bare_label() {
+    // The retired Bash dangerous-command confirmation, normalized into a
+    // required-choice panel: every option answers with its **bare** label —
+    // exactly what the backend's `_parse_feedback` accepts (`y` / `n` /
+    // `yolo`). A `header: answer` line would be rejected and re-asked forever.
+    use crossterm::event::KeyCode;
+
+    for (index, label) in yes_no_yolo().iter().enumerate() {
+        let mut app = test_app();
+        let panel = required_choice_panel("ask-req", &yes_no_yolo());
+        app.chat.push(ChatCell::Ask(AskMessage::new(panel.clone())));
+        app.register_ask_panel(panel);
+
+        for _ in 0..index {
+            app.handle_key(key(KeyCode::Down));
+        }
+        app.handle_key(key(KeyCode::Enter));
+
+        let sent = app.drain_intents().into_iter().find_map(|i| match i {
+            AppIntent::SendMessage {
+                content,
+                tool_call_id,
+                ..
+            } => Some((content, tool_call_id)),
+            _ => None,
+        });
+        assert_eq!(
+            sent,
+            Some((label.to_string(), Some("ask-req".into()))),
+            "option {index} answers with its bare label"
+        );
+        assert!(app.ask_panels.is_empty(), "panel popped after answering");
+        // The card keeps the answered summary, still without a header prefix.
+        let summary = app.chat.cells.iter().find_map(|c| match c.cell() {
+            ChatCell::Ask(msg) if msg.panel.finished == Some(PanelFinish::Submitted) => {
+                Some(msg.panel.build_response())
+            }
+            _ => None,
+        });
+        assert_eq!(summary.as_deref(), Some(*label));
+    }
+}
+
+#[test]
+fn test_required_choice_panel_keeps_the_app_reserved_keys() {
+    // The retired menu swallowed every key (Esc and the page keys included);
+    // the normalized panel follows the modal lane's rule instead: Esc reaches
+    // the interrupt ladder and the page keys keep scrolling the chat.
+    use crossterm::event::KeyCode;
+
+    let mut app = app_with_required_choice();
+    set_chat_height(&mut app, 20);
+    app.chat.last_total = 100;
+    app.chat.scroll_offset = 80;
+    app.chat.scroll_up(0); // leave the bottom so a page-up is observable
+    let offset = app.chat.scroll_offset;
+
+    app.handle_key(key(KeyCode::PageUp));
+    assert_eq!(app.chat.scroll_offset, offset - 18, "page keys scroll");
+    assert_eq!(app.ask_panels.len(), 1, "the panel stays up");
+
+    app.handle_key(key(KeyCode::Esc));
+    assert!(
+        app.drain_intents()
+            .iter()
+            .any(|i| matches!(i, AppIntent::InterruptSession)),
+        "Esc interrupts the turn"
+    );
+}
+
+#[test]
+fn test_required_choice_panel_consumes_typing() {
+    // No free-form row: typing must not reach the composer nor the panel.
+    use crossterm::event::KeyCode;
+
+    let mut app = app_with_required_choice();
+    app.handle_key(key(KeyCode::Char('x')));
+    assert!(app.input.text().is_empty(), "the composer stays empty");
+    assert_eq!(app.ask_panels.len(), 1);
+    assert_eq!(
+        app.ask_panels[0].answer_value(0),
+        None,
+        "no answer recorded"
+    );
 }
 
 #[test]
@@ -301,13 +386,9 @@ fn test_composer_pointer_is_ignored_while_a_modal_owns_the_keyboard() {
             }),
         ),
         (
-            "legacy ask menu",
+            "required-choice ask panel",
             Box::new(|app: &mut App| {
-                app.ask_selections
-                    .push_back(crate::ui::ask_select::AskSelection::new(
-                        "ask-legacy".into(),
-                        vec!["one".into(), "two".into()],
-                    ));
+                app.register_ask_panel(required_choice_panel("ask-req", &yes_no_yolo()));
             }),
         ),
         (
@@ -496,19 +577,16 @@ fn app_with_model_panel() -> App {
 /// An app with an AskUserQuestion panel queued.
 fn app_with_ask_panel() -> App {
     let mut app = test_app();
-    app.register_ask_panel("ask-1", &[test_question()], &[], true);
+    app.register_ask_panel(AskPanel::new("ask-1".into(), vec![test_question()]));
     assert_eq!(app.ask_panels.len(), 1);
     app
 }
 
-/// An app with a legacy ask menu queued.
-fn app_with_legacy_ask() -> App {
+/// An app with a required-choice panel queued (the retired Bash shape).
+fn app_with_required_choice() -> App {
     let mut app = test_app();
-    app.ask_selections
-        .push_back(crate::ui::ask_select::AskSelection::new(
-            "ask-2".into(),
-            vec!["y".into(), "n".into()],
-        ));
+    app.register_ask_panel(required_choice_panel("ask-2", &yes_no_yolo()));
+    assert_eq!(app.ask_panels.len(), 1);
     app
 }
 
@@ -529,7 +607,7 @@ fn test_modal_priority_is_declared_in_one_place() {
     );
     assert!(app.composer_pointer_blocked());
 
-    app.register_ask_panel("ask-1", &[test_question()], &[], true);
+    app.register_ask_panel(AskPanel::new("ask-1".into(), vec![test_question()]));
     assert_eq!(
         app.modal_owner(),
         Some(ModalOwner::AskPanel),
@@ -538,16 +616,10 @@ fn test_modal_priority_is_declared_in_one_place() {
     // Two modals up at once: the guard stays consistent with the owner.
     assert!(app.composer_pointer_blocked());
 
-    app.ask_selections
-        .push_back(crate::ui::ask_select::AskSelection::new(
-            "ask-2".into(),
-            vec!["y".into()],
-        ));
-    assert_eq!(
-        app.modal_owner(),
-        Some(ModalOwner::AskSelection),
-        "the legacy menu outranks everything"
-    );
+    // Every ask is a panel — the required-choice shape (the retired Bash
+    // confirmation) takes the same top rung, it has no lane of its own.
+    app.register_ask_panel(required_choice_panel("ask-2", &["y"]));
+    assert_eq!(app.modal_owner(), Some(ModalOwner::AskPanel));
     assert!(app.composer_pointer_blocked());
 }
 
@@ -631,10 +703,15 @@ fn test_key_routing_reserves_esc_and_page_keys_for_the_app() {
         KeyRoute::ChatScroll(ChatScrollAction::PageUp)
     );
 
-    // The legacy menu swallows every key, Esc included.
-    let app = app_with_legacy_ask();
-    assert_eq!(app.route_key(&key(KeyCode::Esc)), KeyRoute::AskSelection);
-    assert_eq!(app.route_key(&key(KeyCode::PageUp)), KeyRoute::AskSelection);
+    // The required-choice panel (the retired Bash confirmation) is a panel
+    // like any other: same rung, same reserved keys.
+    let app = app_with_required_choice();
+    assert_eq!(app.route_key(&key(KeyCode::Char('x'))), KeyRoute::AskPanel);
+    assert_eq!(app.route_key(&key(KeyCode::Esc)), KeyRoute::EscLadder);
+    assert_eq!(
+        app.route_key(&key(KeyCode::PageUp)),
+        KeyRoute::ChatScroll(ChatScrollAction::PageUp)
+    );
 }
 
 #[test]
@@ -653,7 +730,7 @@ fn test_pointer_guard_is_derived_from_modal_ownership() {
     // Every other modal blocks, visible or not.
     assert!(app_with_ask_panel().composer_pointer_blocked());
     assert!(app_with_model_panel().composer_pointer_blocked());
-    assert!(app_with_legacy_ask().composer_pointer_blocked());
+    assert!(app_with_required_choice().composer_pointer_blocked());
 }
 
 // ── Popup rungs: the chat keeps its scroll keys ─────────────────────────

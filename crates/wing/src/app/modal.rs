@@ -1,8 +1,8 @@
 //! Modal ownership lane — who owns the keyboard, and the Escape ladder.
 //!
-//! The TUI has four modal layers (legacy ask menu, AskUserQuestion panel,
-//! `/model` picker, command candidate popup) plus the composer. This module
-//! declares, **once**, which one owns a key event:
+//! The TUI has three modal layers (ask panel, `/model` picker, command
+//! candidate popup) plus the composer. This module declares, **once**, which
+//! one owns a key event:
 //!
 //! * [`App::modal_chain`] — the layers that are up, in priority order (the
 //!   declaration order of [`ModalOwner`] *is* the priority order);
@@ -29,7 +29,6 @@
 use super::App;
 use super::AppIntent;
 use super::goal;
-use crate::protocol::AskQuestion;
 use crate::shared::goal_role::GoalRole;
 use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::ask::PanelAction;
@@ -48,10 +47,9 @@ use crate::ui::toast::Toast;
 /// **Declaration order is the priority order** — see [`App::modal_owner`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ModalOwner {
-    /// Legacy ask menu (queue front): swallows every key.
-    AskSelection,
-    /// AskUserQuestion panel (queue front): swallows every key except the ones
-    /// the app reserves (`Esc`, `PageUp` / `PageDown`).
+    /// Ask panel (queue front): swallows every key except the ones the app
+    /// reserves (`Esc`, `PageUp` / `PageDown`). Every ask is a panel — the
+    /// retired menu's own layer is gone.
     AskPanel,
     /// `/model` picker: swallows every key except the page keys.
     ModelPicker,
@@ -81,9 +79,7 @@ pub(super) enum ChatScrollAction {
 pub(super) enum KeyRoute {
     /// Ctrl+C — the double-press quit gesture.
     Quit,
-    /// The legacy ask menu owns every key.
-    AskSelection,
-    /// The AskUserQuestion panel owns the key.
+    /// The ask panel owns the key.
     AskPanel,
     /// The `/model` picker owns the key.
     ModelPicker,
@@ -141,10 +137,6 @@ impl App {
     /// takes the front, [`App::route_key`] walks the whole chain.
     fn modal_chain(&self) -> impl Iterator<Item = ModalOwner> {
         [
-            self.ask_selections
-                .front()
-                .is_some()
-                .then_some(ModalOwner::AskSelection),
             (!self.ask_panels.is_empty()).then_some(ModalOwner::AskPanel),
             self.model_panel
                 .is_some()
@@ -180,7 +172,6 @@ impl App {
         }
         for layer in self.modal_chain() {
             match layer {
-                ModalOwner::AskSelection => return KeyRoute::AskSelection,
                 ModalOwner::AskPanel if !app_reserved_key(key) => return KeyRoute::AskPanel,
                 ModalOwner::ModelPicker
                     if !matches!(
@@ -219,12 +210,11 @@ impl App {
     /// Whether a keyboard-owning modal currently owns the composer pointer
     /// rules.
     ///
-    /// The AskUserQuestion panel (and the legacy ask menu), the `/model` panel
-    /// and the command candidate popup own the keyboard while they are up:
-    /// their own inline editors are typing into the draft and their keys
-    /// rewrite it. Placing the cursor — or worse, copying a fragment — under
-    /// such a modal would race that flow, so composer pointer interaction is
-    /// ignored outright.
+    /// The ask panel, the `/model` panel and the command candidate popup own
+    /// the keyboard while they are up: their own inline editors are typing
+    /// into the draft and their keys rewrite it. Placing the cursor — or worse,
+    /// copying a fragment — under such a modal would race that flow, so
+    /// composer pointer interaction is ignored outright.
     ///
     /// A popup only counts when it really takes over, which is not the same as
     /// `ActivePopup::is_active()`: a slash command that matches no candidate
@@ -253,7 +243,6 @@ impl App {
             // Modal owners keep the Ctrl+C counter untouched: the gesture only
             // counts while the app itself is receiving keys.
             KeyRoute::Quit => self.handle_quit_key(key),
-            KeyRoute::AskSelection => self.handle_ask_selection_key(key),
             KeyRoute::AskPanel => self.handle_ask_panel_key(key),
             KeyRoute::ModelPicker => self.handle_model_picker_key(key),
             KeyRoute::EscLadder => {
@@ -342,42 +331,11 @@ impl App {
         self.ctrl_c_last = None;
     }
 
-    /// Legacy ask menu: capture all keys while active (queue front).
-    fn handle_ask_selection_key(&mut self, key: crossterm::event::KeyEvent) {
-        let Some(ask) = self.ask_selections.front_mut() else {
-            return;
-        };
-        match key.code {
-            crossterm::event::KeyCode::Up => {
-                ask.move_up();
-                let id = ask.tool_call_id.clone();
-                let selected = ask.selected;
-                self.chat.update_ask_selection(&id, selected);
-            }
-            crossterm::event::KeyCode::Down => {
-                ask.move_down();
-                let id = ask.tool_call_id.clone();
-                let selected = ask.selected;
-                self.chat.update_ask_selection(&id, selected);
-            }
-            crossterm::event::KeyCode::Enter => {
-                let choice = ask.current().map(|s| s.to_string());
-                let id = ask.tool_call_id.clone();
-                if let Some(choice) = choice {
-                    self.ask_selections.pop_front();
-                    self.chat.remove_ask(&id);
-                    self.refresh_ask_placeholder();
-                    self.reply_to_ask(choice, id);
-                }
-            }
-            _ => {} // ignore other keys while selection is active
-        }
-    }
-
-    /// AskUserQuestion panel: capture the key (queue front).
+    /// Ask panel: capture the key (queue front).
     ///
-    /// The app-reserved keys (`Esc`, `PageUp` / `PageDown`) never reach this
-    /// handler — [`App::route_key`] keeps them.
+    /// Every ask is a panel now — the Bash confirmation included — so this is
+    /// the only ask key handler. The app-reserved keys (`Esc`,
+    /// `PageUp` / `PageDown`) never reach it: [`App::route_key`] keeps them.
     fn handle_ask_panel_key(&mut self, key: crossterm::event::KeyEvent) {
         let action = self
             .ask_panels
@@ -590,67 +548,42 @@ impl App {
     // Ask panels — queues, chat-cell mirroring, answers
     // -----------------------------------------------------------------------
 
-    /// Clear all queued ask state (selections + panels) and remove their
-    /// cells from chat. Called when a turn ends or is interrupted — the
-    /// backend cancels all feedback waiters at the same time.
+    /// Clear all queued ask state and remove their cells from chat. Called when
+    /// a turn ends or is interrupted — the backend cancels all feedback waiters
+    /// at the same time.
     pub(super) fn clear_ask_state(&mut self) {
-        if self.ask_selections.is_empty() && self.ask_panels.is_empty() {
+        if self.ask_panels.is_empty() {
             return;
-        }
-        for sel in self.ask_selections.drain(..) {
-            self.chat.remove_ask(&sel.tool_call_id);
         }
         for panel in self.ask_panels.drain(..) {
             self.chat.remove_ask(&panel.tool_call_id);
         }
-        self.input.placeholder = "今天构建什么？".into();
+        self.refresh_ask_placeholder();
     }
 
     /// Refresh the input placeholder to reflect the active (front) ask state.
-    ///
-    /// Selection takes precedence over panel: while a selection is active its
-    /// key handler captures all keys, so the panel cannot be answered yet.
     pub(super) fn refresh_ask_placeholder(&mut self) {
-        if self.ask_selections.front().is_some() {
-            self.input.placeholder = "↑↓ select · Enter confirm".into();
-        } else if self.ask_panels.front().is_some() {
+        if self.ask_panels.front().is_some() {
             self.input.placeholder = "Answering above · Esc to interrupt".into();
         } else {
             self.input.placeholder = "今天构建什么？".into();
         }
     }
 
-    /// Register the answerable state for a replayed pending ask.
+    /// Register a normalized ask panel — the single registration entry, shared
+    /// by the live projection and by resume replay.
     ///
-    /// Resume replay builds the Ask *cell* in `replay_events` (chain-ordered
-    /// with diffs); this makes it *interactive* by registering the same reply
-    /// channel the live path uses — an `AskPanel`, or a legacy required
-    /// `AskSelection` — so answering routes to `post(tool_call_id)` and
-    /// resolves the backend waiter. The live `WingEvent::Ask` branch keeps
-    /// its own inline registration; this mirrors only the panel state, not
-    /// the cell push / notification.
-    pub(super) fn register_ask_panel(
-        &mut self,
-        tool_call_id: &str,
-        questions: &[AskQuestion],
-        choices: &[String],
-        required: bool,
-    ) {
-        if !questions.is_empty() {
-            let panel = AskPanel::new(tool_call_id.to_string(), questions.to_vec());
-            self.chat.update_ask_panel(tool_call_id, panel.clone());
+    /// Interactive modes queue up (the front is the keyboard owner; answering
+    /// routes to `post(tool_call_id)` and resolves the backend waiter). A
+    /// [`PanelMode::Notice`](crate::shared::panels::ask::PanelMode::Notice) is
+    /// display-only: it was rendered as a chat cell and must never take keys or
+    /// answer, so it is not registered at all.
+    ///
+    /// The cell is the caller's business: the live path pushes it (and mirrors
+    /// this very panel), replay has already pushed it in chain order.
+    pub(super) fn register_ask_panel(&mut self, panel: AskPanel) {
+        if panel.is_interactive() {
             self.ask_panels.push_back(panel);
-        } else if required && !choices.is_empty() {
-            self.ask_selections
-                .push_back(crate::ui::ask_select::AskSelection::new(
-                    tool_call_id.to_string(),
-                    choices.to_vec(),
-                ));
-            if let Some(front) = self.ask_selections.front()
-                && front.tool_call_id == tool_call_id
-            {
-                self.chat.update_ask_selection(tool_call_id, 0);
-            }
         }
         self.refresh_ask_placeholder();
     }
@@ -674,11 +607,13 @@ impl App {
         self.refresh_ask_placeholder();
     }
 
-    /// Answer a pending ask — the single reply path (panel and legacy menu).
+    /// Answer a pending ask — the single reply path (every ask is a panel).
     ///
-    /// Goal mode routes to the active session (executor/checker), mirroring
-    /// the legacy selection path; otherwise the answer is a normal message
-    /// carrying the ask's `tool_call_id` so the backend resolves its waiter.
+    /// Goal mode routes to the active session (executor/checker); otherwise the
+    /// answer is a normal message carrying the ask's `tool_call_id` so the
+    /// backend resolves its waiter. The content is whatever the panel built:
+    /// `header: answer` lines for `Question` mode, the bare option label
+    /// (`y` / `n` / `yolo`) for `RequiredChoice`.
     fn reply_to_ask(&mut self, content: String, tool_call_id: String) {
         if let Some(goal) = &self.goal
             && let Some(role) = goal.active_role()

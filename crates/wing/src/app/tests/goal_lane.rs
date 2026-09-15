@@ -2,9 +2,11 @@
 
 use super::support::*;
 use crate::app::*;
+use crate::protocol::AskQuestion;
 use crate::protocol::EventMeta;
 use crate::protocol::WingEvent;
 use crate::shared::goal_role::GoalRole;
+use crate::shared::panels::ask::AskPanel;
 use crate::ui::chat_view::ChatCell;
 
 /// An app in Goal mode with a created checker session.
@@ -261,9 +263,9 @@ fn test_ask_answer_routes_to_the_active_goal_role() {
         .as_mut()
         .unwrap()
         .on_turn_result(GoalRole::Executor, Some("done".into()));
-    app.register_ask_panel(
-        "ask-1",
-        &[crate::protocol::AskQuestion {
+    app.register_ask_panel(AskPanel::new(
+        "ask-1".into(),
+        vec![AskQuestion {
             id: "theme".into(),
             question: "which?".into(),
             header: String::new(),
@@ -271,9 +273,7 @@ fn test_ask_answer_routes_to_the_active_goal_role() {
             options: Vec::new(),
             choices: Vec::new(),
         }],
-        &[],
-        true,
-    );
+    ));
     app.drain_intents();
 
     app.finish_ask_panel("y".into());

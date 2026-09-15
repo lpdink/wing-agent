@@ -177,32 +177,12 @@ impl ChatView {
         Ok(())
     }
 
-    /// Update the selection cursor on the Ask cell with the given tool_call_id.
-    ///
-    /// Addressed by id so concurrent Ask cells don't clobber each other.
-    /// Returns true if the cell was found and updated.
-    pub fn update_ask_selection(&mut self, tool_call_id: &str, selected: usize) -> bool {
-        for cell in self.cells.iter_mut().rev() {
-            if let ChatCell::Ask(msg) = cell.cell()
-                && msg.tool_call_id == tool_call_id
-            {
-                cell.mutate(|c| {
-                    if let ChatCell::Ask(msg) = c {
-                        msg.selected = Some(selected);
-                    }
-                });
-                return true;
-            }
-        }
-        false
-    }
-
     /// Remove the Ask cell with the given tool_call_id from the chat view.
     ///
     /// Called after the ask is answered/interrupted to clean up the prompt.
     pub fn remove_ask(&mut self, tool_call_id: &str) {
         let idx = self.cells.iter().position(
-            |c| matches!(c.cell(), ChatCell::Ask(msg) if msg.tool_call_id == tool_call_id),
+            |c| matches!(c.cell(), ChatCell::Ask(msg) if msg.panel.tool_call_id == tool_call_id),
         );
         if let Some(i) = idx {
             self.cells.remove(i);
@@ -216,11 +196,11 @@ impl ChatView {
     pub fn update_ask_panel(&mut self, tool_call_id: &str, panel: AskPanel) {
         for cell in self.cells.iter_mut().rev() {
             if let ChatCell::Ask(msg) = cell.cell()
-                && msg.tool_call_id == tool_call_id
+                && msg.panel.tool_call_id == tool_call_id
             {
                 cell.mutate(|c| {
                     if let ChatCell::Ask(msg) = c {
-                        msg.panel = Some(panel);
+                        msg.panel = panel;
                     }
                 });
                 return;

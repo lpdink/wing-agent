@@ -1,6 +1,5 @@
 //! UI widgets for the TUI.
 
-pub mod ask_select;
 pub mod cached_cell;
 pub mod cells;
 pub mod chat_view;

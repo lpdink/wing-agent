@@ -336,11 +336,7 @@ fn test_the_composer_claim_reads_the_modal_lane_guard() {
     assert_eq!(app.pointer_owner(at.0, at.1), Some(PointerOwner::Composer));
 
     // A keyboard-owning modal: the same position drops out of the chain …
-    app.ask_selections
-        .push_back(crate::ui::ask_select::AskSelection::new(
-            "ask-legacy".into(),
-            vec!["one".into(), "two".into()],
-        ));
+    app.register_ask_panel(required_choice_panel("ask-req", &["one", "two"]));
     draw(&mut app, &mut terminal);
     assert!(
         app.composer_pointer_blocked(),

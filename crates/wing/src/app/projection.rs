@@ -27,6 +27,7 @@ use crate::protocol::WingEvent;
 use crate::shared::constants::TOOL_BASH;
 use crate::shared::constants::TOOL_TODO;
 use crate::shared::panels::ask::AskPanel;
+use crate::shared::panels::ask::AskPayload;
 use crate::ui::cells::ask_msg::AskMessage;
 use crate::ui::cells::diff_view::DiffView;
 use crate::ui::cells::todo_msg::TodoMessage;
@@ -331,41 +332,23 @@ impl App {
                 required,
                 ..
             } => {
-                if !questions.is_empty() {
-                    // Multi-question panel (AskUserQuestion tool).
-                    let panel = AskPanel::new(tool_call_id.clone(), questions.clone());
-                    let msg = AskMessage::new_panel(tool_call_id.clone(), panel.clone());
-                    self.chat.push(ChatCell::Ask(msg));
-                    self.ask_panels.push_back(panel);
-                    self.refresh_ask_placeholder();
-                    let notify_text = questions
-                        .first()
-                        .map(|q| q.question.clone())
-                        .unwrap_or_default();
-                    self.notify_unfocused(notify_text, AttentionKind::Ask);
-                } else {
-                    // Legacy single-question (Bash dangerous command confirmation).
-                    let msg = AskMessage::new_legacy(
-                        tool_call_id.clone(),
-                        question.clone(),
-                        choices.clone(),
-                    );
-                    self.chat.push(ChatCell::Ask(msg));
-                    if required && !choices.is_empty() {
-                        let sel =
-                            crate::ui::ask_select::AskSelection::new(tool_call_id.clone(), choices);
-                        self.ask_selections.push_back(sel);
-                        self.refresh_ask_placeholder();
-                        if let Some(front) = self.ask_selections.front()
-                            && front.tool_call_id == tool_call_id
-                        {
-                            self.chat.update_ask_selection(&tool_call_id, 0);
-                        }
-                    }
-                    self.notify_unfocused(question.clone(), AttentionKind::Ask);
-                }
+                // Normalize once (the retired Bash confirmation folds into a
+                // required-choice panel here) and register through the single
+                // entry — replay does exactly the same, so both paths agree.
+                let panel = AskPanel::from_ask(AskPayload {
+                    tool_call_id: &tool_call_id,
+                    questions: &questions,
+                    question: &question,
+                    choices: &choices,
+                    required,
+                });
+                let notify_text = panel.notify_text();
+                self.chat
+                    .push(ChatCell::Ask(AskMessage::new(panel.clone())));
+                self.register_ask_panel(panel);
+                self.notify_unfocused(notify_text, AttentionKind::Ask);
                 // Bring the ask into view so the user sees it immediately and
-                // understands why Up/Down now navigate the selection menu.
+                // understands why Up/Down now navigate the panel.
                 self.chat.jump_bottom();
             }
 
@@ -643,16 +626,12 @@ impl App {
             });
         }
         // 4. Durable fact events (diff anchored onto cells above; ask
-        //    rendered as an answerable card). replay_events builds the
-        //    ask cells; register their reply state so a resumed pending
-        //    ask is answerable through the same channel as live.
-        for ask in replay::replay_events(&mut self.chat, events) {
-            self.register_ask_panel(
-                &ask.tool_call_id,
-                &ask.questions,
-                &ask.choices,
-                ask.required,
-            );
+        //    rendered as an answerable card). replay_events builds the ask
+        //    cells from the same normalization entry as the live path;
+        //    registering them makes a resumed pending ask answerable
+        //    through the same channel.
+        for panel in replay::replay_events(&mut self.chat, events) {
+            self.register_ask_panel(panel);
         }
 
         tracing::info!(

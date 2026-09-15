@@ -137,7 +137,7 @@ crates/wing/src/
 │   └── history.rs                   SessionMessage — 会话历史 Message 投影的 typed 镜像
 ├── shared/                          中立层：App 与 UI 共享的状态机与词汇（不依赖 app / ui）
 │   ├── panels/mod.rs                选择面板内核（翻页 / 光标 / 窗口 / commit；存储归 adapter）
-│   ├── panels/ask.rs                AskUserQuestion 适配器（Tab 切题 / 多选 / 内联输入 / 确认页）
+│   ├── panels/ask.rs                ask 模型与归一化入口（AskUserQuestion 面板 / Bash 确认的必选形态 / 只读提示）
 │   ├── panels/picker.rs             /model 适配器（provider tab × model 行，Enter 即应用）
 │   ├── goal_role.rs                 GoalRole — goal 展示词汇（状态机仍在 app/goal.rs）
 │   └── constants.rs                 协议常量（本地命令、工具名等 magic string）
@@ -158,7 +158,6 @@ crates/wing/src/
 │   ├── header.rs / status_bar.rs / spinner.rs / toast.rs
 │   ├── input_area/                  Composer（editing / movement / wrap / 指针映射与高亮 pointer / paste / widget / helpers）
 │   ├── popup/                       command（斜杠命令 + 候选项）/ selection（通用可选列表）
-│   ├── ask_select.rs                旧版必选选择器（Bash 确认）
 │   └── cells/                       Chat cell 渲染（tool_call / thinking / todo_msg / ask_msg / diff_view / model_picker）
 ├── render/                          Markdown + 语法高亮
 │   ├── markdown/                    types / parsing / code_blocks / tables / links / wrap（CJK UAX#14）

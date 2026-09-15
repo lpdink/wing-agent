@@ -135,11 +135,9 @@ pub struct App {
     last_tick: std::time::Instant,
     /// Active toast notification (lazy-expired in draw).
     toast: Option<Toast>,
-    /// Queued ask selections (when agent requires a choice from menu).
-    /// Concurrent asks queue up; the front entry is the active one.
-    ask_selections: std::collections::VecDeque<crate::ui::ask_select::AskSelection>,
-    /// Queued AskUserQuestion panels (multi-question / multi-select asks).
-    /// Concurrent asks queue up; the front entry is the active one.
+    /// Queued ask panels (every ask — the retired Bash confirmation included;
+    /// see `AskPanel::from_ask`). Concurrent asks queue up; the front entry is
+    /// the active one.
     ask_panels: std::collections::VecDeque<crate::shared::panels::ask::AskPanel>,
     /// `/model` selection panel (None = closed). Modal while open.
     model_panel: Option<crate::shared::panels::picker::ModelPanel>,
@@ -198,7 +196,6 @@ impl App {
             turn: TurnState::default(),
             last_tick: std::time::Instant::now(),
             toast: None,
-            ask_selections: std::collections::VecDeque::new(),
             ask_panels: std::collections::VecDeque::new(),
             model_panel: None,
             model_sources: Vec::new(),
