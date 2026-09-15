@@ -504,6 +504,8 @@ fn test_sync_three_segment_mixed_order() {
 fn test_sync_replays_pending_ask_answerable() {
     // 6.14: a pending ask replays as an Ask cell AND registers the reply
     // panel, so the user can answer it (resolves the backend waiter).
+    use crossterm::event::KeyCode;
+
     let mut app = test_app();
     let events = vec![serde_json::json!({
         "type": "ask",
@@ -519,6 +521,24 @@ fn test_sync_replays_pending_ask_answerable() {
     assert_eq!(app.ask_panels[0].tool_call_id, "ask-1");
     assert_eq!(app.ask_panels[0].questions[0].options.len(), 2);
     assert_eq!(app.ask_panels[0].mode, PanelMode::Question);
+    // The placeholder says the app is waiting for an answer above.
+    assert_eq!(app.input.placeholder, "Answering above · Esc to interrupt");
+
+    // Answer it through the keys: commit the first option, then Submit — the
+    // reply goes out addressed by the replayed tool_call_id (same channel as
+    // the live path).
+    app.handle_key(key(KeyCode::Enter)); // commit "y" + advance to confirm
+    app.handle_key(key(KeyCode::Enter)); // Submit
+    let sent = app.drain_intents().into_iter().find_map(|i| match i {
+        AppIntent::SendMessage {
+            content,
+            tool_call_id,
+            ..
+        } => Some((content, tool_call_id)),
+        _ => None,
+    });
+    assert_eq!(sent, Some(("q1: y".to_string(), Some("ask-1".into()))));
+    assert!(app.ask_panels.is_empty(), "panel popped after answering");
 }
 
 #[test]

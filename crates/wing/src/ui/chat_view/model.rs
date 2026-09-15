@@ -179,9 +179,16 @@ impl ChatView {
 
     /// Remove the Ask cell with the given tool_call_id from the chat view.
     ///
-    /// Called after the ask is answered/interrupted to clean up the prompt.
+    /// Called when a *queued* (still unanswered) ask is dropped — the turn
+    /// ended or was interrupted and the backend cancelled its waiter.
+    ///
+    /// Searched from the tail, like [`ChatView::update_ask_panel`]: the App
+    /// mirrors into — and therefore drops — the **newest** cell carrying the
+    /// id. A tool call may legitimately reuse its `tool_call_id` (the Bash
+    /// confirmation re-asks after a rejected answer), and a first-match
+    /// removal would strand a stale card behind the live one.
     pub fn remove_ask(&mut self, tool_call_id: &str) {
-        let idx = self.cells.iter().position(
+        let idx = self.cells.iter().rposition(
             |c| matches!(c.cell(), ChatCell::Ask(msg) if msg.panel.tool_call_id == tool_call_id),
         );
         if let Some(i) = idx {
@@ -550,6 +557,53 @@ mod tests {
 
     use super::super::test_support::{buffer_text, make_ctx, render_view, span_texts, test_ctx};
     use crate::ui::cells::tool_call::ToolCallBlock;
+
+    /// A panel carrying one question with the given text (the cell content
+    /// that tells the two same-id cells apart).
+    fn ask_panel(text: &str) -> AskPanel {
+        use crate::protocol::AskQuestion;
+        AskPanel::new(
+            "ask-1".into(),
+            vec![AskQuestion {
+                id: "q".into(),
+                header: String::new(),
+                question: text.into(),
+                multi_select: false,
+                options: vec![],
+                choices: vec![],
+            }],
+        )
+    }
+
+    /// The question texts of the Ask cells, in cell order.
+    fn ask_texts(view: &ChatView) -> Vec<String> {
+        view.cells
+            .iter()
+            .filter_map(|c| match c.cell() {
+                ChatCell::Ask(msg) => Some(msg.panel.questions[0].question.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_ask_cells_are_addressed_from_the_tail() {
+        // A tool call may reuse its `tool_call_id` (the Bash confirmation
+        // re-asks after a rejected answer), leaving two Ask cells with the same
+        // id. The mirror and the removal must both address the **newest** one —
+        // the panel the app actually owns — or the stale card is stranded.
+        use crate::ui::cells::ask_msg::AskMessage;
+
+        let mut view = ChatView::new();
+        view.push(ChatCell::Ask(AskMessage::new(ask_panel("old"))));
+        view.push(ChatCell::Ask(AskMessage::new(ask_panel("new"))));
+
+        view.update_ask_panel("ask-1", ask_panel("mirrored"));
+        assert_eq!(ask_texts(&view), vec!["old", "mirrored"]);
+
+        view.remove_ask("ask-1");
+        assert_eq!(ask_texts(&view), vec!["old"]);
+    }
 
     #[test]
     fn test_chat_view_new() {

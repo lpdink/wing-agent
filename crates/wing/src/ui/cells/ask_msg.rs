@@ -1,7 +1,7 @@
 //! AskMessage — renders agent questions to the user.
 //!
-//! One model ([`AskPanel`]), one renderer ([`to_lines`]), dispatching by
-//! [`PanelMode`]:
+//! One model ([`AskPanel`]), one renderer ([`AskMessage::to_lines`]),
+//! dispatching by [`PanelMode`]:
 //!
 //! - `Question` — the AskUserQuestion panel (tab bar + confirm page, one
 //!   question at a time, single/multi-select, a free-form row with an inline
@@ -49,7 +49,7 @@ const ROW_DESC_INDENT: usize = 5;
 #[derive(Debug, Clone)]
 pub struct AskMessage {
     /// The normalized panel (render snapshot; interactive state is owned by
-    /// the App and mirrored back through [`ChatView::update_ask_panel`]).
+    /// the App and mirrored back through `ChatView::update_ask_panel`).
     pub panel: AskPanel,
 }
 
@@ -140,10 +140,16 @@ fn notice_lines(panel: &AskPanel, palette: &ThemePalette, width: u16) -> Vec<Lin
         .fg(palette.accent)
         .add_modifier(Modifier::BOLD);
 
+    // A notice always carries exactly one question (the normalization entry
+    // synthesizes it); an empty panel renders nothing rather than panicking, so
+    // no externally-built state can take the chat view down.
+    let Some(question) = panel.questions.first() else {
+        return Vec::new();
+    };
+
     // Render question body as markdown with a `? ` marker on the first line.
-    let question = &panel.questions[0].question;
     let md_width = Some(width.saturating_sub(2));
-    let mut md_lines = render_markdown_with_width(question, md_width, palette);
+    let mut md_lines = render_markdown_with_width(&question.question, md_width, palette);
     if let Some(first) = md_lines.first_mut() {
         let marker = Span::styled("?", accent_style);
         let mut spans = vec![marker, Span::raw(" ")];
@@ -156,7 +162,7 @@ fn notice_lines(panel: &AskPanel, palette: &ThemePalette, width: u16) -> Vec<Lin
     // Choices: plain dim suggestions. Deliberately NO synthetic A/B/C
     // letters — the payload never carried them and they must not appear.
     let dim_style = Style::default().fg(palette.dim);
-    for option in &panel.questions[0].options {
+    for option in &question.options {
         md_lines.push(Line::from(vec![
             Span::styled("  • ", dim_style),
             Span::styled(option.label.clone(), dim_style),
@@ -711,6 +717,17 @@ mod tests {
         assert!(!out.contains("Enter confirm"), "no footer: {out}");
         assert!(!out.contains("A."), "no synthetic letters: {out}");
         assert!(!out.contains("B."), "no synthetic letters: {out}");
+    }
+
+    #[test]
+    fn notice_without_questions_renders_nothing() {
+        // Defensive: the normalization entry always synthesizes exactly one
+        // question, but a hand-built panel must not take the chat view down
+        // (it used to index `questions[0]`).
+        let mut panel = notice_panel();
+        panel.questions.clear();
+        let msg = AskMessage::new(panel);
+        assert!(msg.to_lines(&p(), 80).is_empty());
     }
 
     // ── RequiredChoice mode rendering ─────────────────────────────

@@ -67,6 +67,60 @@ fn test_ask_panel_key_flow_submits_header_answer() {
 }
 
 #[test]
+fn test_concurrent_asks_answer_the_front_panel_only() {
+    // Two asks in flight (the backend runs tools concurrently, so a turn can
+    // raise a Bash confirmation and an AskUserQuestion at once). The queue is
+    // strict FIFO — the front panel owns the keyboard, and the reply is
+    // addressed to it alone; the other panel waits untouched.
+    use crossterm::event::KeyCode;
+
+    let mut app = test_app();
+    app.register_ask_panel(AskPanel::new("ask-1".into(), vec![test_question()]));
+    app.register_ask_panel(required_choice_panel("ask-2", &yes_no_yolo()));
+    assert_eq!(app.ask_panels.len(), 2);
+    assert_eq!(
+        app.ask_panels[0].tool_call_id, "ask-1",
+        "arrival order is the queue order (no menu-priority lane any more)"
+    );
+
+    // Answer the front one: type into its free-form row, confirm, submit.
+    app.handle_key(key(KeyCode::Char('h')));
+    app.handle_key(key(KeyCode::Char('i')));
+    app.handle_key(key(KeyCode::Enter)); // confirm the text → confirm page
+    app.handle_key(key(KeyCode::Enter)); // Submit
+
+    let sent = app.drain_intents().into_iter().find_map(|i| match i {
+        AppIntent::SendMessage {
+            content,
+            tool_call_id,
+            ..
+        } => Some((content, tool_call_id)),
+        _ => None,
+    });
+    assert_eq!(sent, Some(("theme: hi".to_string(), Some("ask-1".into()))));
+
+    // The second panel is now the front and was left untouched by the first
+    // answer's keys — cursor, committed row and answer all still pristine.
+    assert_eq!(app.ask_panels.len(), 1);
+    assert_eq!(app.ask_panels[0].tool_call_id, "ask-2");
+    assert_eq!(app.ask_panels[0].states[0].cursor, 0);
+    assert_eq!(app.ask_panels[0].answer_value(0), None);
+
+    // Its own answer is addressed to it (same channel, its own id).
+    app.handle_key(key(KeyCode::Enter));
+    let sent = app.drain_intents().into_iter().find_map(|i| match i {
+        AppIntent::SendMessage {
+            content,
+            tool_call_id,
+            ..
+        } => Some((content, tool_call_id)),
+        _ => None,
+    });
+    assert_eq!(sent, Some(("y".to_string(), Some("ask-2".into()))));
+    assert!(app.ask_panels.is_empty(), "both panels answered");
+}
+
+#[test]
 fn test_required_choice_panel_answers_with_the_bare_label() {
     // The retired Bash dangerous-command confirmation, normalized into a
     // required-choice panel: every option answers with its **bare** label —

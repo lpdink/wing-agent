@@ -91,12 +91,19 @@ pub enum PanelMode {
     /// answers (unanswered ones go out as [`UNANSWERED_PLACEHOLDER`]), a
     /// free-form row, and a reply of `header: answer` lines.
     Question,
-    /// The retired Bash dangerous-command confirmation, normalized: exactly
-    /// one single-select question that MUST be answered — no free-form row and
-    /// no confirm page, `Enter` on an option answers right away. The reply is
-    /// the **bare option label** (`y` / `n` / `yolo`), which is what the
-    /// backend's `_parse_feedback` accepts (see `libs/core/wing/tools/bash.py`);
-    /// a `header: answer` line would be rejected and re-asked forever.
+    /// The retired Bash dangerous-command confirmation, normalized: **exactly
+    /// one** single-select question that MUST be answered — no free-form row
+    /// and no confirm page, `Enter` on an option answers right away (one
+    /// question, one answer). The reply is the **bare option label**
+    /// (`y` / `n` / `yolo`), which is what the backend's `_parse_feedback`
+    /// accepts (see `libs/core/wing/tools/bash.py`); a `header: answer` line
+    /// would be rejected and re-asked forever.
+    ///
+    /// The one-question / single-select shape is pinned by a `debug_assert!` in
+    /// `AskPanel::with_mode`: both the commit (`AskPanel::enter`) and the
+    /// reply read-back ([`AskPanel::build_response`]) go through
+    /// `AskPanel::required_choice_answer`, which is only correct while that
+    /// invariant holds.
     RequiredChoice,
     /// A retired ask that was not required: display-only. The question and its
     /// choices stay visible as plain bullets (the shape's historical look), but
@@ -108,6 +115,11 @@ pub enum PanelMode {
 /// One ask payload, as the gateway sends it (live event or replayed fact
 /// event) — the input vocabulary of [`AskPanel::from_ask`], i.e. the wire
 /// shapes collapsed into the fields the normalization entry reads.
+///
+/// The two shapes are **mutually exclusive**: the backends' two ask producers
+/// fill either `questions` or `question`/`choices`/`required`. When a payload
+/// carries both anyway, `questions` wins and the retired fields are ignored
+/// (see [`AskPanel::from_ask`]).
 #[derive(Debug, Clone, Copy)]
 pub struct AskPayload<'a> {
     /// Correlation id echoed back with the answer (resolves the waiter).
@@ -169,8 +181,10 @@ pub struct AskPanel {
     pub finished: Option<PanelFinish>,
 }
 
-/// Id synthesized for the retired single-question shape (it carries no id).
-/// Required-choice replies are the bare label, so this never reaches the wire.
+/// Id synthesized for the retired single-question shape — it carries no id at
+/// all. It exists for structural completeness (a `AskQuestion` needs one);
+/// nothing reads it back: `RequiredChoice` replies are the bare label and
+/// `Notice` is never answered.
 const LEGACY_QUESTION_ID: &str = "choice";
 
 impl AskPanel {
@@ -215,6 +229,15 @@ impl AskPanel {
 
     fn with_mode(tool_call_id: String, questions: Vec<AskQuestion>, mode: PanelMode) -> Self {
         let questions: Vec<AskQuestion> = questions.into_iter().map(normalize_question).collect();
+        // The required choice is one question answered in place — both the
+        // commit and the reply read-back go through `required_choice_answer`,
+        // which is only correct while this holds. Written as a slice match so a
+        // malformed payload can never make this indexing panic.
+        debug_assert!(
+            mode != PanelMode::RequiredChoice
+                || matches!(questions.as_slice(), [q] if !q.multi_select),
+            "RequiredChoice is exactly one single-select question"
+        );
         let states = questions
             .iter()
             .map(|q| QuestionState {
@@ -313,6 +336,26 @@ impl AskPanel {
         (0..self.questions.len()).all(|qi| self.is_answered(qi))
     }
 
+    /// The page a `RequiredChoice` panel answers on — its only one.
+    ///
+    /// Single-question by construction ([`PanelMode::RequiredChoice`] pins it
+    /// with a `debug_assert!`), so `current` is always 0 there. Both the commit
+    /// (`Self::enter`) and the reply read-back ([`Self::build_response`]) go
+    /// through this accessor, so they cannot end up on different questions.
+    fn choice_index(&self) -> usize {
+        debug_assert!(
+            self.mode != PanelMode::RequiredChoice || self.current == 0,
+            "the required choice is answered on its only page"
+        );
+        self.current
+    }
+
+    /// The answer a `RequiredChoice` panel sends: the bare option label
+    /// committed on the single question (None when there is nothing to pick).
+    fn required_choice_answer(&self) -> Option<String> {
+        self.answer_value(self.choice_index())
+    }
+
     /// Tab labels of the questions left unanswered (for the confirm-page hint).
     pub fn unanswered_headers(&self) -> Vec<&str> {
         self.questions
@@ -333,7 +376,7 @@ impl AskPanel {
     /// - `Notice`: never answered (empty).
     pub fn build_response(&self) -> String {
         match self.mode {
-            PanelMode::RequiredChoice => self.answer_value(0).unwrap_or_default(),
+            PanelMode::RequiredChoice => self.required_choice_answer().unwrap_or_default(),
             PanelMode::Notice => String::new(),
             PanelMode::Question => self
                 .questions
@@ -543,7 +586,7 @@ impl AskPanel {
     fn enter(&mut self) -> PanelAction {
         if self.mode == PanelMode::RequiredChoice {
             self.commit_option();
-            let Some(answer) = self.answer_value(self.current) else {
+            let Some(answer) = self.required_choice_answer() else {
                 return PanelAction::None; // no options to choose from
             };
             self.finished = Some(PanelFinish::Submitted);
@@ -1308,15 +1351,42 @@ mod tests {
     }
 
     #[test]
-    fn required_choice_panel_never_sends_cancel_sentinel() {
-        let mut p = required_panel();
-        // There is no confirm page, so Cancel is unreachable.
-        // The only action is Reply with the label.
-        p.handle_key(key(KeyCode::Down));
-        p.handle_key(key(KeyCode::Enter));
-        // Verify the action content does NOT contain the cancel sentinel.
-        assert_eq!(p.finished, Some(PanelFinish::Submitted));
-        // (No Cancel in finished because there's no Cancel path.)
+    fn required_choice_panel_never_sends_the_cancel_sentinel() {
+        // The cancel sentinel belongs to the AskUserQuestion confirm page; the
+        // required choice has no such page, so no key path may ever produce it.
+        // No key other than Enter answers at all ...
+        for k in [
+            key(KeyCode::Up),
+            key(KeyCode::Down),
+            key(KeyCode::Left),
+            key(KeyCode::Right),
+            ch('x'),
+            ch(' '),
+            key(KeyCode::Tab),
+            key(KeyCode::PageUp),
+            key(KeyCode::PageDown),
+        ] {
+            let mut p = required_panel();
+            assert_eq!(
+                p.handle_key(k),
+                PanelAction::None,
+                "only Enter answers in a required choice"
+            );
+        }
+        // ... and the one reply is the bare label of the highlighted option,
+        // never the sentinel.
+        for (target, expected) in ["y", "n", "yolo"].iter().enumerate() {
+            let mut p = required_panel();
+            for _ in 0..target {
+                assert_eq!(p.handle_key(key(KeyCode::Down)), PanelAction::None);
+            }
+            let action = p.handle_key(key(KeyCode::Enter));
+            assert_eq!(action, PanelAction::Reply((*expected).to_string()));
+            assert!(
+                !matches!(&action, PanelAction::Reply(s) if s == ASK_CANCEL_CONTENT),
+                "the sentinel must stay unreachable in RequiredChoice"
+            );
+        }
     }
 
     // ── Notice interaction tests ──────────────────────────────────
