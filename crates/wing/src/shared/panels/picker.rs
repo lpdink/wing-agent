@@ -24,9 +24,10 @@
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 
-use crate::app::selection_panel::PageKind;
-use crate::app::selection_panel::SelectionPanel;
 use wing_api_client::models::ProviderModels;
+
+use super::PageKind;
+use super::SelectionPanel;
 
 /// Outcome of a key event for the app to act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -438,8 +439,8 @@ mod tests {
 
     #[test]
     fn window_on_long_model_list_centers_the_cursor() {
-        use crate::app::selection_panel::PANEL_WINDOW;
-        use crate::app::selection_panel::window_range;
+        use crate::shared::panels::PANEL_WINDOW;
+        use crate::shared::panels::window_range;
         let many: Vec<String> = (0..8).map(|i| format!("m{i}")).collect();
         let mut panel = ModelPanel::new(
             vec![ProviderModels {

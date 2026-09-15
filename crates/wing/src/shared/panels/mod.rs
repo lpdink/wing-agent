@@ -24,6 +24,13 @@
 //! the entire navigation/commit/refresh contract. `Enter` semantics, confirm
 //! pages, multi-select state and inline editors are adapter concerns; the
 //! kernel MUST NOT contain any of them.
+//!
+//! The adapters live next to the kernel, one per panel: [`ask`] and [`picker`].
+//! Both state machines are neutral (this whole layer is) — the App drives
+//! them, the UI renders them.
+
+pub mod ask;
+pub mod picker;
 
 /// Default number of visibly rendered tabs / option rows.
 pub const PANEL_WINDOW: usize = 5;

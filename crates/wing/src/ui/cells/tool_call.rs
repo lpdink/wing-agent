@@ -24,11 +24,11 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
 
-use crate::app::constants;
 use crate::config::ThemePalette;
 use crate::render::markdown::types::MarkdownLine;
 use crate::render::markdown::types::SegmentKind;
 use crate::render::syntax;
+use crate::shared::constants;
 use crate::ui::cells::todo_msg::TodoMessage;
 use crate::ui::cells::todo_msg::render_todo_items;
 

@@ -3,36 +3,15 @@
 //! Pure logic, no I/O. All methods return `Vec<GoalAction>` which the App
 //! translates into intents (side-effects). This module can be removed entirely
 //! to strip Goal support from the TUI.
+//!
+//! The App-side counterpart — session identity, role resolution, action
+//! execution and the `/goal` commands — lives in [`super::goal_lane`]: read the
+//! two together to follow the whole Goal path (decisions here, effects there).
+//!
+//! The *display vocabulary* (`GoalRole`, shared with the UI) is neutral and
+//! lives in [`crate::shared::goal_role`].
 
-/// Which agent is involved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GoalRole {
-    Executor,
-    Checker,
-}
-
-impl GoalRole {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Executor => "Executor",
-            Self::Checker => "Checker",
-        }
-    }
-
-    pub fn working_verb(&self) -> &'static str {
-        match self {
-            Self::Executor => "working",
-            Self::Checker => "reviewing",
-        }
-    }
-
-    pub fn icon(&self) -> &'static str {
-        match self {
-            Self::Executor => "⚡",
-            Self::Checker => "🔍",
-        }
-    }
-}
+use crate::shared::goal_role::GoalRole;
 
 /// Current phase of the Goal loop.
 #[derive(Debug, Clone, PartialEq, Eq)]

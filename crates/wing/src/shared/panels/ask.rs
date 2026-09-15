@@ -1,13 +1,21 @@
-//! AskPanel — AskUserQuestion adapter on top of the selection-panel kernel.
+//! AskPanel — the one ask model, on top of the selection-panel kernel.
+//!
+//! **Every ask becomes an `AskPanel`.** The gateway sends two wire shapes (the
+//! `questions` form of the AskUserQuestion tool, and the retired
+//! `question`/`choices`/`required` form of the Bash dangerous-command
+//! confirmation); [`AskPanel::from_ask`] is the single normalization entry
+//! that turns either one into a panel, and [`PanelMode`] is the shape it
+//! produced. Live projection and replay both go through it — nothing
+//! downstream branches on the wire shape again.
 //!
 //! Kernel responsibilities ([`SelectionPanel`]): page switching, per-question
 //! cursor memory, single-select commit capture. Adapter responsibilities
 //! (here): multi-select toggles, the inline free-form editor, the confirm page
 //! (registered as a *custom* page — the kernel keeps its tab slot but has no
-//! cursor on it), and reply construction.
+//! cursor on it), and reply construction (mode-dependent, see [`PanelMode`]).
 //!
-//! The panel renders a tab bar (question headers + a final confirm page),
-//! one question at a time with selectable options, and a free-form
+//! `PanelMode::Question` renders a tab bar (question headers + a final confirm
+//! page), one question at a time with selectable options, and a free-form
 //! "Type Something" row. Its key map:
 //!
 //! - `↑`/`↓` — move the option cursor (wraps; the last row is the free-form row)
@@ -20,6 +28,13 @@
 //!   edit the buffer, `↑`/`↓` leave the editor keeping the draft
 //! - `Esc` is NOT consumed here — the app owns it (interrupt) at any time.
 //!
+//! `PanelMode::RequiredChoice` (a retired required ask, normalized) has no
+//! free-form row and no confirm page: `↑`/`↓` move the cursor (wraps) and
+//! `Enter` commits the option under it **and answers right away** — the panel
+//! is a one-shot mandatory choice. Neither mode consumes keys the app reserves
+//! (`Esc`, page keys). `PanelMode::Notice` is display-only: it never reaches
+//! this key handler at all (the app does not register it).
+//!
 //! Answers are **explicit acts only** — browsing (moving the cursor, switching
 //! tabs) never records an answer, so tabs only turn "answered" when the user
 //! actually chose something:
@@ -28,17 +43,19 @@
 //! - multi-select: the toggled options (each toggle is itself an explicit act)
 //! - free-form: the text confirmed with Enter in the editor
 //!
-//! The user may leave questions unanswered: Submit is not gated, unanswered
-//! questions are sent as `(user did not answer)` and the confirm page warns
-//! about them. An empty free-form row never counts as an answer.
+//! In `Question` mode the user may leave questions unanswered: Submit is not
+//! gated, unanswered questions are sent as `(user did not answer)` and the
+//! confirm page warns about them. An empty free-form row never counts as an
+//! answer. In `RequiredChoice` mode there is nothing to submit without an
+//! answer: Enter on an option *is* the answer.
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 
-use crate::app::selection_panel::PageKind;
-use crate::app::selection_panel::SelectionPanel;
-use crate::app::selection_panel::wrap_index;
+use super::PageKind;
+use super::SelectionPanel;
+use super::wrap_index;
 use crate::protocol::AskQuestion;
 
 /// Content sent to the backend when the user cancels from the confirm page.
@@ -63,6 +80,58 @@ pub enum PanelAction {
     None,
     /// Send this content to the backend (resolves the ask feedback waiter).
     Reply(String),
+}
+
+/// Interaction model of a panel — the ask's *shape*, decided once at
+/// normalization time ([`AskPanel::from_ask`]) and read by every consumer
+/// (keys, rendering, reply construction, app registration).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelMode {
+    /// `AskUserQuestion`: one tab per question plus the confirm page, optional
+    /// answers (unanswered ones go out as [`UNANSWERED_PLACEHOLDER`]), a
+    /// free-form row, and a reply of `header: answer` lines.
+    Question,
+    /// The retired Bash dangerous-command confirmation, normalized: **exactly
+    /// one** single-select question that MUST be answered — no free-form row
+    /// and no confirm page, `Enter` on an option answers right away (one
+    /// question, one answer). The reply is the **bare option label**
+    /// (`y` / `n` / `yolo`), which is what the backend's `_parse_feedback`
+    /// accepts (see `libs/core/wing/tools/bash.py`); a `header: answer` line
+    /// would be rejected and re-asked forever.
+    ///
+    /// The one-question / single-select shape is pinned by a `debug_assert!` in
+    /// `AskPanel::with_mode`: both the commit (`AskPanel::enter`) and the
+    /// reply read-back ([`AskPanel::build_response`]) go through
+    /// `AskPanel::required_choice_answer`, which is only correct while that
+    /// invariant holds.
+    RequiredChoice,
+    /// A retired ask that was not required: display-only. The question and its
+    /// choices stay visible as plain bullets (the shape's historical look), but
+    /// the panel is never registered for answering and never sees a key. The
+    /// app keeps rendering it through this same model.
+    Notice,
+}
+
+/// One ask payload, as the gateway sends it (live event or replayed fact
+/// event) — the input vocabulary of [`AskPanel::from_ask`], i.e. the wire
+/// shapes collapsed into the fields the normalization entry reads.
+///
+/// The two shapes are **mutually exclusive**: the backends' two ask producers
+/// fill either `questions` or `question`/`choices`/`required`. When a payload
+/// carries both anyway, `questions` wins and the retired fields are ignored
+/// (see [`AskPanel::from_ask`]).
+#[derive(Debug, Clone, Copy)]
+pub struct AskPayload<'a> {
+    /// Correlation id echoed back with the answer (resolves the waiter).
+    pub tool_call_id: &'a str,
+    /// `AskUserQuestion` shape: 1-4 questions (empty on the retired shape).
+    pub questions: &'a [AskQuestion],
+    /// Retired shape: the question text (empty on the `questions` shape).
+    pub question: &'a str,
+    /// Retired shape: plain-string choices.
+    pub choices: &'a [String],
+    /// Retired shape: `true` = the user must pick one of `choices`.
+    pub required: bool,
 }
 
 /// Per-question interaction state.
@@ -92,7 +161,7 @@ pub struct QuestionState {
     pub edit_cursor: usize,
 }
 
-/// Interactive state for one AskUserQuestion panel.
+/// Interactive state for one ask panel (any [`PanelMode`]).
 #[derive(Debug, Clone)]
 pub struct AskPanel {
     /// Correlation id echoed back when sending the reply.
@@ -101,17 +170,74 @@ pub struct AskPanel {
     pub questions: Vec<AskQuestion>,
     /// Per-question interaction state (parallel to `questions`).
     pub states: Vec<QuestionState>,
-    /// Active tab: `0..questions.len()` = question, `questions.len()` = confirm page.
+    /// Interaction model — set at normalization time, read everywhere else.
+    pub mode: PanelMode,
+    /// Active page: `0..questions.len()` = question, `questions.len()` = confirm
+    /// page (`Question` mode only — the other modes have no confirm page).
     pub current: usize,
     /// Cursor on the confirm page (0 = Submit, 1 = Cancel).
     pub confirm_cursor: usize,
-    /// Set once the panel has been submitted/cancelled (terminal state).
+    /// Set once the panel has been answered/submitted/cancelled (terminal state).
     pub finished: Option<PanelFinish>,
 }
 
+/// Id synthesized for the retired single-question shape — it carries no id at
+/// all. It exists for structural completeness (a `AskQuestion` needs one);
+/// nothing reads it back: `RequiredChoice` replies are the bare label and
+/// `Notice` is never answered.
+const LEGACY_QUESTION_ID: &str = "choice";
+
 impl AskPanel {
+    /// A fresh `AskUserQuestion` panel.
     pub fn new(tool_call_id: String, questions: Vec<AskQuestion>) -> Self {
+        Self::with_mode(tool_call_id, questions, PanelMode::Question)
+    }
+
+    /// **The normalization entry.** Any ask becomes a panel here — the
+    /// `questions` shape as-is, the retired `question`/`choices`/`required`
+    /// shape folded into a single question (required → [`PanelMode::RequiredChoice`],
+    /// otherwise → display-only [`PanelMode::Notice`]). Live projection and
+    /// replay both call this; nothing downstream branches on the wire shape.
+    pub fn from_ask(payload: AskPayload<'_>) -> Self {
+        if !payload.questions.is_empty() {
+            return Self::new(payload.tool_call_id.to_string(), payload.questions.to_vec());
+        }
+        let question = AskQuestion {
+            id: LEGACY_QUESTION_ID.to_string(),
+            header: String::new(),
+            question: payload.question.to_string(),
+            multi_select: false,
+            options: payload
+                .choices
+                .iter()
+                .map(|label| crate::protocol::AskOption {
+                    label: label.clone(),
+                    description: String::new(),
+                })
+                .collect(),
+            choices: Vec::new(),
+        };
+        // Required with something to pick = the mandatory choice menu; anything
+        // else is a plain notice (nothing selectable = nothing to answer).
+        let mode = if payload.required && !question.options.is_empty() {
+            PanelMode::RequiredChoice
+        } else {
+            PanelMode::Notice
+        };
+        Self::with_mode(payload.tool_call_id.to_string(), vec![question], mode)
+    }
+
+    fn with_mode(tool_call_id: String, questions: Vec<AskQuestion>, mode: PanelMode) -> Self {
         let questions: Vec<AskQuestion> = questions.into_iter().map(normalize_question).collect();
+        // The required choice is one question answered in place — both the
+        // commit and the reply read-back go through `required_choice_answer`,
+        // which is only correct while this holds. Written as a slice match so a
+        // malformed payload can never make this indexing panic.
+        debug_assert!(
+            mode != PanelMode::RequiredChoice
+                || matches!(questions.as_slice(), [q] if !q.multi_select),
+            "RequiredChoice is exactly one single-select question"
+        );
         let states = questions
             .iter()
             .map(|q| QuestionState {
@@ -123,10 +249,30 @@ impl AskPanel {
             tool_call_id,
             questions,
             states,
+            mode,
             current: 0,
             confirm_cursor: 0,
             finished: None,
         }
+    }
+
+    /// Whether the app should register this panel for answering. A notice is
+    /// display-only: it must never take the keyboard or reach the backend.
+    pub fn is_interactive(&self) -> bool {
+        self.mode != PanelMode::Notice
+    }
+
+    /// Whether the current question has a free-form row (`Question` mode only).
+    pub fn has_free_form(&self) -> bool {
+        self.mode == PanelMode::Question
+    }
+
+    /// The text to surface in a desktop notification, if any.
+    pub fn notify_text(&self) -> String {
+        self.questions
+            .first()
+            .map(|q| q.question.clone())
+            .unwrap_or_default()
     }
 
     /// Whether the confirm page is active.
@@ -140,8 +286,10 @@ impl AskPanel {
     }
 
     /// Whether the cursor is on the free-form row of the current question.
+    /// Only `Question` mode has a free-form row at all.
     fn on_custom_row(&self) -> bool {
-        !self.on_confirm_page()
+        self.has_free_form()
+            && !self.on_confirm_page()
             && self.states[self.current].cursor >= self.questions[self.current].options.len()
     }
 
@@ -188,6 +336,26 @@ impl AskPanel {
         (0..self.questions.len()).all(|qi| self.is_answered(qi))
     }
 
+    /// The page a `RequiredChoice` panel answers on — its only one.
+    ///
+    /// Single-question by construction ([`PanelMode::RequiredChoice`] pins it
+    /// with a `debug_assert!`), so `current` is always 0 there. Both the commit
+    /// (`Self::enter`) and the reply read-back ([`Self::build_response`]) go
+    /// through this accessor, so they cannot end up on different questions.
+    fn choice_index(&self) -> usize {
+        debug_assert!(
+            self.mode != PanelMode::RequiredChoice || self.current == 0,
+            "the required choice is answered on its only page"
+        );
+        self.current
+    }
+
+    /// The answer a `RequiredChoice` panel sends: the bare option label
+    /// committed on the single question (None when there is nothing to pick).
+    fn required_choice_answer(&self) -> Option<String> {
+        self.answer_value(self.choice_index())
+    }
+
     /// Tab labels of the questions left unanswered (for the confirm-page hint).
     pub fn unanswered_headers(&self) -> Vec<&str> {
         self.questions
@@ -198,21 +366,31 @@ impl AskPanel {
             .collect()
     }
 
-    /// Final reply text: `header: answer` lines, newline-separated.
-    /// Unanswered questions contribute the `(user did not answer)` placeholder
-    /// (the user may submit deliberately with gaps — the confirm page warns).
+    /// Final reply text, in the shape the mode's backend expects:
+    ///
+    /// - `Question`: `header: answer` lines, newline-separated. Unanswered
+    ///   questions contribute the `(user did not answer)` placeholder (the user
+    ///   may submit deliberately with gaps — the confirm page warns).
+    /// - `RequiredChoice`: the committed option's **bare label** — the backend's
+    ///   `_parse_feedback` accepts exactly `y` / `n` / `yolo` and nothing else.
+    /// - `Notice`: never answered (empty).
     pub fn build_response(&self) -> String {
-        self.questions
-            .iter()
-            .enumerate()
-            .map(|(qi, q)| {
-                let answer = self
-                    .answer_value(qi)
-                    .unwrap_or_else(|| UNANSWERED_PLACEHOLDER.to_string());
-                format!("{}: {}", q.tab_label(), answer)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        match self.mode {
+            PanelMode::RequiredChoice => self.required_choice_answer().unwrap_or_default(),
+            PanelMode::Notice => String::new(),
+            PanelMode::Question => self
+                .questions
+                .iter()
+                .enumerate()
+                .map(|(qi, q)| {
+                    let answer = self
+                        .answer_value(qi)
+                        .unwrap_or_else(|| UNANSWERED_PLACEHOLDER.to_string());
+                    format!("{}: {}", q.tab_label(), answer)
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
     }
 
     // ── Cursor / toggles ────────────────────────────────────────
@@ -396,11 +574,24 @@ impl AskPanel {
         PanelAction::None
     }
 
-    /// Enter on the current tab: commit+advance (option row), enter the
-    /// editor (free-form row), or activate the confirm page. Submit is not
-    /// gated — unanswered questions are sent with the placeholder; the
-    /// confirm page has already warned about them.
+    /// Enter on the current page:
+    ///
+    /// - `Question`: commit+advance on an option row, enter the editor on the
+    ///   free-form row, or activate the confirm page. Submit is not gated —
+    ///   unanswered questions are sent with the placeholder; the confirm page
+    ///   has already warned about them.
+    /// - `RequiredChoice`: commit the option under the cursor and answer right
+    ///   away with its bare label (there is no confirm page and no way to
+    ///   submit without an answer).
     fn enter(&mut self) -> PanelAction {
+        if self.mode == PanelMode::RequiredChoice {
+            self.commit_option();
+            let Some(answer) = self.required_choice_answer() else {
+                return PanelAction::None; // no options to choose from
+            };
+            self.finished = Some(PanelFinish::Submitted);
+            return PanelAction::Reply(answer);
+        }
         if self.on_confirm_page() {
             if self.confirm_cursor == 0 {
                 self.finished = Some(PanelFinish::Submitted);
@@ -428,18 +619,26 @@ impl AskPanel {
 }
 
 /// AskPanel as a selection-panel adapter: each question is an options page
-/// (options + the free-form row as its last cursor row); the confirm page is
-/// an adapter-owned *custom* page — the kernel keeps its tab slot and window
-/// position but holds no cursor for it.
+/// (options + the free-form row as its last cursor row, in `Question` mode);
+/// the confirm page (also `Question` mode only) is an adapter-owned *custom*
+/// page — the kernel keeps its tab slot and window position but holds no
+/// cursor for it.
 impl SelectionPanel for AskPanel {
     fn page_count(&self) -> usize {
-        self.questions.len() + 1
+        match self.mode {
+            // No confirm page: a required choice is answered in place.
+            PanelMode::RequiredChoice | PanelMode::Notice => self.questions.len(),
+            PanelMode::Question => self.questions.len() + 1,
+        }
     }
 
     fn page_kind(&self, page: usize) -> PageKind {
         if page < self.questions.len() {
+            let rows = self.questions[page].options.len();
             PageKind::Options {
-                rows: self.questions[page].options.len() + 1,
+                // The free-form row is the last cursor row of a question — but
+                // only when the mode has one.
+                rows: if self.has_free_form() { rows + 1 } else { rows },
             }
         } else {
             PageKind::Custom
@@ -454,7 +653,7 @@ impl SelectionPanel for AskPanel {
         self.current = page;
         // Entering the confirm page resets its Submit/Cancel cursor so that
         // every tab-switch path (move_page, advance) picks it up implicitly.
-        if self.on_confirm_page() {
+        if self.on_confirm_page() && self.mode == PanelMode::Question {
             self.confirm_cursor = 0;
         }
     }
@@ -848,8 +1047,8 @@ mod tests {
 
     #[test]
     fn confirm_page_is_a_custom_page_in_navigation_and_window() {
-        use crate::app::selection_panel::PANEL_WINDOW;
-        use crate::app::selection_panel::window_range;
+        use crate::shared::panels::PANEL_WINDOW;
+        use crate::shared::panels::window_range;
 
         let questions: Vec<AskQuestion> = (0..6)
             .map(|i| question(&format!("q{i}"), &format!("Q{i}"), false, &["a", "b"]))
@@ -961,5 +1160,249 @@ mod tests {
         p.handle_key(key(KeyCode::Backspace));
         p.handle_key(key(KeyCode::Enter)); // confirm empty + advance
         assert_eq!(p.answer_value(0), None);
+    }
+
+    // ── Normalization entry tests ─────────────────────────────────
+
+    #[test]
+    fn from_ask_questions_shape_produces_question_mode() {
+        let questions = vec![question("t", "T", false, &["a", "b"])];
+        let p = AskPanel::from_ask(AskPayload {
+            tool_call_id: "tc-1",
+            questions: &questions,
+            question: "",
+            choices: &[],
+            required: false,
+        });
+        assert_eq!(p.mode, PanelMode::Question);
+        assert_eq!(p.questions.len(), 1);
+        assert!(p.is_interactive());
+    }
+
+    #[test]
+    fn from_ask_required_legacy_produces_required_choice() {
+        let choices = vec!["y".into(), "n".into(), "yolo".into()];
+        let p = AskPanel::from_ask(AskPayload {
+            tool_call_id: "tc-2",
+            questions: &[],
+            question: "Proceed?",
+            choices: &choices,
+            required: true,
+        });
+        assert_eq!(p.mode, PanelMode::RequiredChoice);
+        assert_eq!(p.tool_call_id, "tc-2");
+        assert_eq!(p.questions.len(), 1);
+        assert_eq!(p.questions[0].options.len(), 3);
+        assert_eq!(p.questions[0].options[0].label, "y");
+        assert_eq!(p.questions[0].options[2].label, "yolo");
+        assert!(p.is_interactive());
+    }
+
+    #[test]
+    fn from_ask_non_required_legacy_produces_notice() {
+        let choices = vec!["a".into(), "b".into()];
+        let p = AskPanel::from_ask(AskPayload {
+            tool_call_id: "tc-3",
+            questions: &[],
+            question: "Just so you know",
+            choices: &choices,
+            required: false,
+        });
+        assert_eq!(p.mode, PanelMode::Notice);
+        assert!(!p.is_interactive(), "Notice mode is not interactive");
+    }
+
+    #[test]
+    fn from_ask_empty_choices_with_required_is_notice() {
+        let p = AskPanel::from_ask(AskPayload {
+            tool_call_id: "tc-4",
+            questions: &[],
+            question: "?",
+            choices: &[],
+            required: true,
+        });
+        assert_eq!(
+            p.mode,
+            PanelMode::Notice,
+            "no options means nothing to pick"
+        );
+        assert!(!p.is_interactive());
+    }
+
+    #[test]
+    fn from_ask_preserves_tool_call_id_in_all_modes() {
+        for (mode, tcid) in [
+            ("question", "tc-a"),
+            ("required", "tc-b"),
+            ("notice", "tc-c"),
+        ] {
+            let choices = vec!["y".into()];
+            let p = match mode {
+                "question" => AskPanel::from_ask(AskPayload {
+                    tool_call_id: tcid,
+                    questions: &[question("q", "Q", false, &["a"])],
+                    question: "",
+                    choices: &[],
+                    required: false,
+                }),
+                _ => AskPanel::from_ask(AskPayload {
+                    tool_call_id: tcid,
+                    questions: &[],
+                    question: "?",
+                    choices: &choices,
+                    required: mode == "required",
+                }),
+            };
+            assert_eq!(p.tool_call_id, tcid, "{mode} mode preserves tool_call_id");
+        }
+    }
+
+    // ── RequiredChoice interaction tests ──────────────────────────
+
+    /// Build a required-choice panel with three options for testing.
+    fn required_panel() -> AskPanel {
+        let choices = vec!["y".into(), "n".into(), "yolo".into()];
+        AskPanel::from_ask(AskPayload {
+            tool_call_id: "rc-1",
+            questions: &[],
+            question: "Proceed?",
+            choices: &choices,
+            required: true,
+        })
+    }
+
+    #[test]
+    fn required_choice_enter_answers_with_bare_label_and_finishes() {
+        let mut p = required_panel();
+        // Cursor starts at 0 → "y"
+        let action = p.handle_key(key(KeyCode::Enter));
+        assert_eq!(action, PanelAction::Reply("y".into()));
+        assert_eq!(p.finished, Some(PanelFinish::Submitted));
+    }
+
+    #[test]
+    fn required_choice_cursor_moves_and_enter_answers_selected() {
+        let mut p = required_panel();
+        p.handle_key(key(KeyCode::Down)); // cursor → 1 = "n"
+        let action = p.handle_key(key(KeyCode::Enter));
+        assert_eq!(action, PanelAction::Reply("n".into()));
+        assert_eq!(p.finished, Some(PanelFinish::Submitted));
+    }
+
+    #[test]
+    fn required_choice_yolo_answer_wire_compatible() {
+        let mut p = required_panel();
+        p.handle_key(key(KeyCode::Down)); // 1
+        p.handle_key(key(KeyCode::Down)); // 2 = "yolo"
+        let action = p.handle_key(key(KeyCode::Enter));
+        assert_eq!(action, PanelAction::Reply("yolo".into()));
+    }
+
+    #[test]
+    fn required_choice_cursor_wraps() {
+        let mut p = required_panel();
+        p.handle_key(key(KeyCode::Up)); // wrap to last
+        let action = p.handle_key(key(KeyCode::Enter));
+        assert_eq!(action, PanelAction::Reply("yolo".into()));
+    }
+
+    #[test]
+    fn required_choice_typing_does_not_start_editor() {
+        let mut p = required_panel();
+        p.handle_key(ch('x'));
+        p.handle_key(ch('y'));
+        assert!(!p.editing());
+        // Cursor still at 0, nothing committed.
+        assert_eq!(p.answer_value(0), None);
+    }
+
+    #[test]
+    fn required_choice_no_confirm_page() {
+        let p = required_panel();
+        assert_eq!(p.page_count(), 1, "no confirm page");
+        // ←/→ on a single page is a no-op; the panel stays on page 0.
+        let mut p = p;
+        p.handle_key(key(KeyCode::Left));
+        assert_eq!(p.current, 0);
+        p.handle_key(key(KeyCode::Right));
+        assert_eq!(p.current, 0);
+    }
+
+    #[test]
+    fn required_choice_no_free_form_row() {
+        let p = required_panel();
+        assert!(!p.has_free_form(), "required choice has no free-form row");
+        assert_eq!(
+            p.page_kind(0),
+            PageKind::Options { rows: 3 },
+            "only the 3 options, no custom row"
+        );
+    }
+
+    #[test]
+    fn required_choice_finished_panel_ignores_keys() {
+        let mut p = required_panel();
+        p.handle_key(key(KeyCode::Enter)); // answer "y"
+        assert_eq!(p.finished, Some(PanelFinish::Submitted));
+        let action = p.handle_key(key(KeyCode::Enter));
+        assert_eq!(action, PanelAction::None, "finished panel returns None");
+        let action = p.handle_key(key(KeyCode::Down));
+        assert_eq!(action, PanelAction::None);
+    }
+
+    #[test]
+    fn required_choice_panel_never_sends_the_cancel_sentinel() {
+        // The cancel sentinel belongs to the AskUserQuestion confirm page; the
+        // required choice has no such page, so no key path may ever produce it.
+        // No key other than Enter answers at all ...
+        for k in [
+            key(KeyCode::Up),
+            key(KeyCode::Down),
+            key(KeyCode::Left),
+            key(KeyCode::Right),
+            ch('x'),
+            ch(' '),
+            key(KeyCode::Tab),
+            key(KeyCode::PageUp),
+            key(KeyCode::PageDown),
+        ] {
+            let mut p = required_panel();
+            assert_eq!(
+                p.handle_key(k),
+                PanelAction::None,
+                "only Enter answers in a required choice"
+            );
+        }
+        // ... and the one reply is the bare label of the highlighted option,
+        // never the sentinel.
+        for (target, expected) in ["y", "n", "yolo"].iter().enumerate() {
+            let mut p = required_panel();
+            for _ in 0..target {
+                assert_eq!(p.handle_key(key(KeyCode::Down)), PanelAction::None);
+            }
+            let action = p.handle_key(key(KeyCode::Enter));
+            assert_eq!(action, PanelAction::Reply((*expected).to_string()));
+            assert!(
+                !matches!(&action, PanelAction::Reply(s) if s == ASK_CANCEL_CONTENT),
+                "the sentinel must stay unreachable in RequiredChoice"
+            );
+        }
+    }
+
+    // ── Notice interaction tests ──────────────────────────────────
+
+    #[test]
+    fn notice_is_not_interactive_even_when_required_false() {
+        let p = AskPanel::from_ask(AskPayload {
+            tool_call_id: "n-1",
+            questions: &[],
+            question: "FYI",
+            choices: &["info".into()],
+            required: false,
+        });
+        assert_eq!(p.mode, PanelMode::Notice);
+        assert!(!p.is_interactive());
+        // Calling handle_key on a bare notice panel is fine but never happens
+        // through the App path since the notice is never registered.
     }
 }

@@ -134,28 +134,30 @@ crates/wing/src/
 ├── gateway/client.rs                GatewayClient — WS 连接 + 读写任务
 ├── protocol/                        WingEvent + ClientRequest + ConnectResponse（Python 事件的 Rust 镜像）
 │   ├── events.rs / client_request.rs / connect_response.rs
+│   └── history.rs                   SessionMessage — 会话历史 Message 投影的 typed 镜像
+├── shared/                          中立层：App 与 UI 共享的状态机与词汇（不依赖 app / ui）
+│   ├── panels/mod.rs                选择面板内核（翻页 / 光标 / 窗口 / commit；存储归 adapter）
+│   ├── panels/ask.rs                ask 模型与归一化入口（AskUserQuestion 面板 / Bash 确认的必选形态 / 只读提示）
+│   ├── panels/picker.rs             /model 适配器（provider tab × model 行，Enter 即应用）
+│   ├── goal_role.rs                 GoalRole — goal 展示词汇（状态机仍在 app/goal.rs）
+│   └── constants.rs                 协议常量（本地命令、工具名等 magic string）
 ├── app/                             App 状态机 + 事件循环
 │   ├── mod.rs                       run_app() 主循环 + handle_event()
 │   ├── runner.rs                    执行 AppIntent（HTTP/WS 副作用）
 │   ├── intent.rs / transport.rs     AppIntent 枚举 + 传输抽象（WS+HTTP+client_id 原子单元，含重连退避）
 │   ├── goal.rs                      Goal 编排状态机（executor/checker 循环，纯逻辑无 I/O）
-│   ├── selection_panel.rs           选择面板共享内核（翻页 / 光标 / 窗口 / commit；存储归 adapter）
-│   ├── ask_panel.rs                 AskUserQuestion 适配器（Tab 切题 / 多选 / 内联输入 / 确认页）
-│   ├── model_panel.rs               /model 适配器（provider tab × model 行，Enter 即应用）
 │   ├── replay.rs                    SyncSession 重放 → ChatCells（messages → events 能力分发）
 │   ├── turn_state.rs / render_context.rs   轮次耗时 / 流式目标 cell 跟踪
-│   ├── popup_state.rs               Popup + 候选缓存 + 去重
-│   └── constants.rs                 协议常量（本地命令、工具名等 magic string）
+│   └── popup_state.rs               Popup + 候选缓存 + 去重
 ├── ui/                              UI 组件
-│   ├── chat_view.rs                 Chat 视图（宽度感知虚拟化）
+│   ├── chat_view/                   Chat 视图：mod（ChatView 结构）· cell（ChatCell 渲染）· model（内容模型）· viewport（滚动·几何·高度缓存·绘制）· frame（帧快照·选择映射）· link（链接表·OSC8）
 │   ├── selection.rs                 文本选择状态机（区域标签 / 内容坐标锚定 / 区间有序化 / 快照取文本，纯逻辑）
 │   ├── scrollbar.rs                 overlay 滚动条（几何 / 命中测试 / 拖拽状态机 / 绘制）
 │   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存
-│   ├── panel.rs                     选择面板共享渲染（窗口数学与内核一致）
+│   ├── panel.rs                     选择面板共享渲染（窗口数学取自 shared/panels 内核）
 │   ├── header.rs / status_bar.rs / spinner.rs / toast.rs
 │   ├── input_area/                  Composer（editing / movement / wrap / 指针映射与高亮 pointer / paste / widget / helpers）
 │   ├── popup/                       command（斜杠命令 + 候选项）/ selection（通用可选列表）
-│   ├── ask_select.rs                旧版必选选择器（Bash 确认）
 │   └── cells/                       Chat cell 渲染（tool_call / thinking / todo_msg / ask_msg / diff_view / model_picker）
 ├── render/                          Markdown + 语法高亮
 │   ├── markdown/                    types / parsing / code_blocks / tables / links / wrap（CJK UAX#14）
@@ -168,7 +170,7 @@ crates/wing/src/
 └── util/                            clipboard / open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）
 ```
 
-配套：`crates/wing/benches/stream_render.rs`（流式渲染基准）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期）、`crates/wing/examples/reconnect_flow_verify.rs`。
+配套：`crates/wing/benches/stream_render.rs`（流式渲染基准）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期、layer_guard 分层守门）、`crates/wing/examples/reconnect_flow_verify.rs`。
 
 ### 其他
 

@@ -1,26 +1,29 @@
 //! AskMessage — renders agent questions to the user.
 //!
-//! Two modes:
-//! - **Panel**: the AskUserQuestion panel — a tab bar (question headers +
-//!   confirm page), one question at a time, single/multi-select options, a
-//!   free-form row with an inline editor, and a footer with the key hints.
-//!   Interaction state lives in `app::ask_panel::AskPanel`; this cell stores
-//!   a render snapshot of it.
-//! - **Legacy**: a single question with optional plain choices (e.g. the Bash
-//!   dangerous-command confirmation). A `▸` cursor highlights the current
-//!   choice when the ask requires a selection.
+//! One model ([`AskPanel`]), one renderer ([`AskMessage::to_lines`]),
+//! dispatching by [`PanelMode`]:
+//!
+//! - `Question` — the AskUserQuestion panel (tab bar + confirm page, one
+//!   question at a time, single/multi-select, a free-form row with an inline
+//!   editor, and a footer with the key hints).
+//! - `RequiredChoice` — the retired Bash confirmation, normalized: question
+//!   markdown + selectable option rows (no free-form row, no confirm page, no
+//!   tab bar) + footer. `Enter` on an option answers right away.
+//! - `Notice` — a retired non-required ask: static display with the legacy
+//!   `? ` marker + dim bullets. Not interactive.
 //!
 //! No synthetic identifiers are ever added to options: labels render verbatim
 //! and a chosen option is sent back verbatim.
 
-use crate::app::ask_panel::AskPanel;
-use crate::app::ask_panel::PanelFinish;
-use crate::app::ask_panel::QuestionState;
-use crate::app::ask_panel::UNANSWERED_PLACEHOLDER;
-use crate::app::selection_panel::PANEL_WINDOW;
-use crate::app::selection_panel::window_range;
 use crate::config::ThemePalette;
 use crate::render::markdown::render_markdown_with_width;
+use crate::shared::panels::PANEL_WINDOW;
+use crate::shared::panels::ask::AskPanel;
+use crate::shared::panels::ask::PanelFinish;
+use crate::shared::panels::ask::PanelMode;
+use crate::shared::panels::ask::QuestionState;
+use crate::shared::panels::ask::UNANSWERED_PLACEHOLDER;
+use crate::shared::panels::window_range;
 use crate::ui::panel::Tab;
 use crate::ui::panel::TabState;
 use crate::ui::panel::cursor_span;
@@ -42,59 +45,42 @@ const OPTION_DESC_INDENT: usize = 9;
 /// cursor(2) + number(3) columns.
 const ROW_DESC_INDENT: usize = 5;
 
-/// An agent question: an interactive panel, or a legacy single-question prompt.
+/// An agent question cell — always holds a normalized [`AskPanel`].
 #[derive(Debug, Clone)]
 pub struct AskMessage {
-    /// Correlation id of the Ask event (used to locate this cell when
-    /// updating panel state under concurrent asks).
-    pub tool_call_id: String,
-    /// Interactive AskUserQuestion panel (None → legacy single-question form).
-    pub panel: Option<AskPanel>,
-    pub question: String,
-    pub choices: Vec<String>,
-    /// When Some(i), choice i is highlighted with a ▸ cursor (legacy
-    /// interactive selection menus).
-    pub selected: Option<usize>,
+    /// The normalized panel (render snapshot; interactive state is owned by
+    /// the App and mirrored back through `ChatView::update_ask_panel`).
+    pub panel: AskPanel,
 }
 
 impl AskMessage {
-    /// Create a panel-backed message (AskUserQuestion).
-    pub fn new_panel(tool_call_id: String, panel: AskPanel) -> Self {
-        Self {
-            tool_call_id,
-            panel: Some(panel),
-            question: String::new(),
-            choices: Vec::new(),
-            selected: None,
-        }
-    }
-
-    /// Create a legacy single-question message.
-    pub fn new_legacy(tool_call_id: String, question: String, choices: Vec<String>) -> Self {
-        Self {
-            tool_call_id,
-            panel: None,
-            question,
-            choices,
-            selected: None,
-        }
+    /// Wrap a normalized ask panel into a chat cell.
+    pub fn new(panel: AskPanel) -> Self {
+        Self { panel }
     }
 
     /// Render to lines.
     pub fn to_lines(&self, palette: &ThemePalette, width: u16) -> Vec<Line<'static>> {
-        match &self.panel {
-            Some(panel) => panel_lines(panel, palette, width),
-            None => legacy_lines(&self.question, &self.choices, self.selected, palette, width),
+        match self.panel.mode {
+            PanelMode::Notice => notice_lines(&self.panel, palette, width),
+            _ => panel_lines(&self.panel, palette, width),
         }
     }
 }
 
-// ── Panel rendering ──────────────────────────────────────────────
+// ── Panel rendering (Question + RequiredChoice) ──────────────────
 
+/// Render an interactive panel: tab bar (`Question` only), current page,
+/// or finished summary + footer. See [`PanelMode`] for mode-specific chrome.
 fn panel_lines(panel: &AskPanel, palette: &ThemePalette, width: u16) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(ask_tab_bar(panel, palette));
-    lines.push(Line::from(""));
+
+    // Tab bar: visible only for the multi-question form (it has navigation
+    // targets). A required choice has one question and no confirm page.
+    if panel.mode == PanelMode::Question {
+        lines.push(ask_tab_bar(panel, palette));
+        lines.push(Line::from(""));
+    }
 
     match panel.finished {
         Some(PanelFinish::Submitted) => {
@@ -114,6 +100,7 @@ fn panel_lines(panel: &AskPanel, palette: &ThemePalette, width: u16) -> Vec<Line
         }
         None => {
             if panel.on_confirm_page() {
+                // Confirm page: only on Question mode (required choice skips it).
                 lines.push(Line::from(Span::styled(
                     "Submit your answers?",
                     Style::default()
@@ -144,7 +131,52 @@ fn panel_lines(panel: &AskPanel, palette: &ThemePalette, width: u16) -> Vec<Line
     lines
 }
 
+// ── Notice (static, non-interactive) rendering ───────────────────
+
+/// Retired non-interactive ask: kept as-is — question markdown with the
+/// legacy `? ` marker and dim `• choice` bullets. No cursor, no footer.
+fn notice_lines(panel: &AskPanel, palette: &ThemePalette, width: u16) -> Vec<Line<'static>> {
+    let accent_style = Style::default()
+        .fg(palette.accent)
+        .add_modifier(Modifier::BOLD);
+
+    // A notice always carries exactly one question (the normalization entry
+    // synthesizes it); an empty panel renders nothing rather than panicking, so
+    // no externally-built state can take the chat view down.
+    let Some(question) = panel.questions.first() else {
+        return Vec::new();
+    };
+
+    // Render question body as markdown with a `? ` marker on the first line.
+    let md_width = Some(width.saturating_sub(2));
+    let mut md_lines = render_markdown_with_width(&question.question, md_width, palette);
+    if let Some(first) = md_lines.first_mut() {
+        let marker = Span::styled("?", accent_style);
+        let mut spans = vec![marker, Span::raw(" ")];
+        spans.append(&mut first.spans);
+        *first = Line::from(spans);
+    } else {
+        md_lines.push(Line::from(vec![Span::styled("?", accent_style)]));
+    }
+
+    // Choices: plain dim suggestions. Deliberately NO synthetic A/B/C
+    // letters — the payload never carried them and they must not appear.
+    let dim_style = Style::default().fg(palette.dim);
+    for option in &question.options {
+        md_lines.push(Line::from(vec![
+            Span::styled("  • ", dim_style),
+            Span::styled(option.label.clone(), dim_style),
+        ]));
+    }
+
+    md_lines.push(Line::from(""));
+    md_lines
+}
+
+// ── Tab bar ──────────────────────────────────────────────────────
+
 /// `? 配色方案 > 测试项 > Submit` — question tabs + confirm page, windowed.
+/// Only rendered in `Question` mode.
 fn ask_tab_bar(panel: &AskPanel, palette: &ThemePalette) -> Line<'static> {
     let mut tabs: Vec<Tab> = panel
         .questions
@@ -178,8 +210,11 @@ fn ask_tab_bar(panel: &AskPanel, palette: &ThemePalette) -> Line<'static> {
     tab_bar("? ", &tabs, panel.current, palette)
 }
 
-/// Option rows of the current question, plus the free-form row, windowed to
-/// the shared visible size (the cursor row stays centered while scrolling).
+// ── Option rows ──────────────────────────────────────────────────
+
+/// Option rows of the current question, windowed (the cursor row stays
+/// centered while scrolling). In `RequiredChoice` mode there is no free-form
+/// row — the rows are only the options.
 fn option_rows(
     panel: &AskPanel,
     palette: &ThemePalette,
@@ -189,7 +224,11 @@ fn option_rows(
     let qi = panel.current;
     let q = &panel.questions[qi];
     let st = &panel.states[qi];
-    let rows = q.options.len() + 1;
+    let rows = if panel.has_free_form() {
+        q.options.len() + 1
+    } else {
+        q.options.len()
+    };
     let range = window_range(st.cursor, rows, PANEL_WINDOW);
 
     for i in range {
@@ -281,6 +320,8 @@ fn custom_row(
         );
     }
 }
+
+// ── Confirm page rows ────────────────────────────────────────────
 
 /// Confirm-page rows: Submit / Cancel.
 fn confirm_rows(
@@ -423,79 +464,23 @@ fn edit_spans(
     spans
 }
 
-/// Footer key hints — variant per interaction state.
+/// Footer key hints — variant per mode and interaction state.
 fn footer_hint(panel: &AskPanel) -> &'static str {
-    if panel.on_confirm_page() {
-        "↑↓ select · Enter confirm · ←→ switch · Esc interrupt"
-    } else if panel.editing() {
-        "type · Enter confirm · ←→ move cursor · ↑↓ back to list · Esc interrupt"
-    } else if panel.questions[panel.current].multi_select {
-        "↑↓ select · Space/Tab toggle · Enter next · ←→ switch · Esc interrupt"
-    } else {
-        "↑↓ select · Enter next · ←→ switch · Esc interrupt"
-    }
-}
-
-// ── Legacy rendering ─────────────────────────────────────────────
-
-/// Legacy single-question mode: markdown question + optional choices.
-fn legacy_lines(
-    question: &str,
-    choices: &[String],
-    selected: Option<usize>,
-    palette: &ThemePalette,
-    width: u16,
-) -> Vec<Line<'static>> {
-    let accent_style = Style::default()
-        .fg(palette.accent)
-        .add_modifier(Modifier::BOLD);
-
-    // Render question body as markdown with a `? ` marker on the first line.
-    let md_width = Some(width.saturating_sub(2));
-    let mut md_lines = render_markdown_with_width(question, md_width, palette);
-    if let Some(first) = md_lines.first_mut() {
-        let marker = Span::styled("?", accent_style);
-        let mut spans = vec![marker, Span::raw(" ")];
-        spans.append(&mut first.spans);
-        *first = Line::from(spans);
-    } else {
-        md_lines.push(Line::from(vec![Span::styled("?", accent_style)]));
-    }
-
-    // Choices: interactive ▸ cursor, or plain dim suggestions. Deliberately
-    // NO synthetic A/B/C letters — the user's answer is sent back verbatim,
-    // and letters the model never defined must not look like identifiers.
-    let normal_style = Style::default().fg(palette.text);
-    let dim_style = Style::default().fg(palette.dim);
-    for (i, choice) in choices.iter().enumerate() {
-        if let Some(sel) = selected {
-            let is_selected = i == sel;
-            let (cursor, style) = if is_selected {
-                ("▸ ", accent_style)
+    match panel.mode {
+        PanelMode::RequiredChoice => "↑↓ select · Enter confirm · Esc interrupt",
+        PanelMode::Notice => "",
+        PanelMode::Question => {
+            if panel.on_confirm_page() {
+                "↑↓ select · Enter confirm · ←→ switch · Esc interrupt"
+            } else if panel.editing() {
+                "type · Enter confirm · ←→ move cursor · ↑↓ back to list · Esc interrupt"
+            } else if panel.questions[panel.current].multi_select {
+                "↑↓ select · Space/Tab toggle · Enter next · ←→ switch · Esc interrupt"
             } else {
-                ("  ", dim_style)
-            };
-            md_lines.push(Line::from(vec![
-                Span::styled(cursor, style),
-                Span::styled(
-                    choice.clone(),
-                    if is_selected {
-                        accent_style
-                    } else {
-                        normal_style
-                    },
-                ),
-            ]));
-        } else {
-            md_lines.push(Line::from(vec![
-                Span::styled("  • ", dim_style),
-                Span::styled(choice.clone(), dim_style),
-            ]));
+                "↑↓ select · Enter next · ←→ switch · Esc interrupt"
+            }
         }
     }
-
-    md_lines.push(Line::from(""));
-    md_lines
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -547,8 +532,8 @@ fn wrap_plain(text: &str, max_width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ask_panel::AskPanel;
     use crate::protocol::{AskOption, AskQuestion};
+    use crate::shared::panels::ask::PanelMode;
 
     fn p() -> ThemePalette {
         ThemePalette::default()
@@ -596,7 +581,7 @@ mod tests {
     #[test]
     fn panel_renders_tabs_options_and_free_form_row() {
         let panel = multi_panel();
-        let msg = AskMessage::new_panel("tc".into(), panel);
+        let msg = AskMessage::new(panel);
         let out = text(&msg.to_lines(&p(), 80));
         assert!(out.contains("配色方案 > 测试项 > Submit"), "{out}");
         assert!(out.contains("theme?"), "{out}");
@@ -616,7 +601,7 @@ mod tests {
         let mut panel = multi_panel();
         panel.states[0].cursor = 1;
         panel.states[0].selected = Some(1);
-        let msg = AskMessage::new_panel("tc".into(), panel);
+        let msg = AskMessage::new(panel);
         let out = text(&msg.to_lines(&p(), 80));
         assert!(out.contains("1. ( ) 浅色主题"), "{out}");
         assert!(out.contains("❯ 2. (●) 深色主题"), "{out}");
@@ -626,7 +611,7 @@ mod tests {
     fn multi_select_renders_checkboxes_and_hint() {
         let mut panel = multi_panel();
         panel.current = 1;
-        let msg = AskMessage::new_panel("tc".into(), panel);
+        let msg = AskMessage::new(panel);
         let out = text(&msg.to_lines(&p(), 80));
         assert!(out.contains("(Select all that apply)"), "{out}");
         assert!(out.contains("❯ 1. [ ] 多选交互"), "{out}");
@@ -639,7 +624,7 @@ mod tests {
         let mut panel = multi_panel();
         panel.current = 1;
         panel.states[1].toggles[0] = true;
-        let msg = AskMessage::new_panel("tc".into(), panel);
+        let msg = AskMessage::new(panel);
         let out = text(&msg.to_lines(&p(), 80));
         assert!(out.contains("❯ 1. [x] 多选交互"), "{out}");
     }
@@ -651,7 +636,7 @@ mod tests {
         panel.states[0].editing = true;
         panel.states[0].draft = "深色".into();
         panel.states[0].edit_cursor = 1;
-        let msg = AskMessage::new_panel("tc".into(), panel);
+        let msg = AskMessage::new(panel);
         let out = text(&msg.to_lines(&p(), 80));
         assert!(out.contains("Type Something: 深色"), "{out}");
         assert!(out.contains("type · Enter confirm"), "{out}");
@@ -661,7 +646,7 @@ mod tests {
     fn confirm_page_renders_submit_and_cancel() {
         let mut panel = multi_panel();
         panel.current = 2;
-        let msg = AskMessage::new_panel("tc".into(), panel);
+        let msg = AskMessage::new(panel);
         let out = text(&msg.to_lines(&p(), 80));
         assert!(out.contains("Submit your answers?"), "{out}");
         // Both questions unanswered → the warning lists them with the placeholder.
@@ -682,7 +667,7 @@ mod tests {
         panel.states[0].selected = Some(0);
         panel.states[1].toggles[0] = true;
         panel.current = 2;
-        let msg = AskMessage::new_panel("tc".into(), panel);
+        let msg = AskMessage::new(panel);
         let out = text(&msg.to_lines(&p(), 80));
         assert!(!out.contains("Unanswered"), "{out}");
     }
@@ -693,7 +678,7 @@ mod tests {
         panel.states[0].selected = Some(0);
         panel.states[1].toggles[0] = true;
         panel.finished = Some(PanelFinish::Submitted);
-        let msg = AskMessage::new_panel("tc".into(), panel);
+        let msg = AskMessage::new(panel);
         let out = text(&msg.to_lines(&p(), 80));
         assert!(out.contains("✓ 配色方案: 浅色主题"), "{out}");
         assert!(out.contains("✓ 测试项: 多选交互"), "{out}");
@@ -703,37 +688,103 @@ mod tests {
     fn cancelled_panel_renders_notice() {
         let mut panel = multi_panel();
         panel.finished = Some(PanelFinish::Cancelled);
-        let msg = AskMessage::new_panel("tc".into(), panel);
+        let msg = AskMessage::new(panel);
         let out = text(&msg.to_lines(&p(), 80));
         assert!(out.contains("Cancelled"), "{out}");
     }
 
+    // ── Notice mode rendering (retired non-interactive) ────────────
+
+    fn notice_panel() -> AskPanel {
+        use crate::shared::panels::ask::AskPayload;
+        AskPanel::from_ask(AskPayload {
+            tool_call_id: "n-1",
+            questions: &[],
+            question: "Just so you know",
+            choices: &["yes".into(), "no".into()],
+            required: false,
+        })
+    }
+
     #[test]
-    fn legacy_static_choices_do_not_add_letters() {
-        let msg = AskMessage::new_legacy(
-            "tc".into(),
-            "Proceed?".into(),
-            vec!["yes".into(), "no".into()],
-        );
+    fn notice_renders_static_bullets_and_no_cursor() {
+        let msg = AskMessage::new(notice_panel());
         let out = text(&msg.to_lines(&p(), 80));
-        assert!(out.contains("yes"), "{out}");
-        assert!(out.contains("no"), "{out}");
+        assert!(out.contains("? Just so you know"), "{out}");
+        assert!(out.contains("• yes"), "{out}");
+        assert!(out.contains("• no"), "{out}");
+        assert!(!out.contains("❯"), "no cursor: {out}");
+        assert!(!out.contains("Enter confirm"), "no footer: {out}");
         assert!(!out.contains("A."), "no synthetic letters: {out}");
         assert!(!out.contains("B."), "no synthetic letters: {out}");
     }
 
     #[test]
-    fn legacy_selection_cursor_still_renders() {
-        let mut msg = AskMessage::new_legacy(
-            "tc".into(),
-            "Proceed?".into(),
-            vec!["y".into(), "n".into(), "yolo".into()],
-        );
-        msg.selected = Some(1);
-        let out = text(&msg.to_lines(&p(), 80));
-        assert!(out.contains("▸ n"), "{out}");
-        assert!(!out.contains("▸ y"), "{out}");
+    fn notice_without_questions_renders_nothing() {
+        // Defensive: the normalization entry always synthesizes exactly one
+        // question, but a hand-built panel must not take the chat view down
+        // (it used to index `questions[0]`).
+        let mut panel = notice_panel();
+        panel.questions.clear();
+        let msg = AskMessage::new(panel);
+        assert!(msg.to_lines(&p(), 80).is_empty());
     }
+
+    // ── RequiredChoice mode rendering ─────────────────────────────
+
+    fn required_panel() -> AskPanel {
+        use crate::shared::panels::ask::AskPayload;
+        AskPanel::from_ask(AskPayload {
+            tool_call_id: "rc-1",
+            questions: &[],
+            question: "Proceed?",
+            choices: &["y".into(), "n".into(), "yolo".into()],
+            required: true,
+        })
+    }
+
+    #[test]
+    fn required_choice_renders_options_and_no_tab_bar() {
+        let msg = AskMessage::new(required_panel());
+        let out = text(&msg.to_lines(&p(), 80));
+        // No tab bar.
+        assert!(!out.contains("> Submit"), "no tab bar: {out}");
+        assert!(!out.contains("> choice"), "no tab bar: {out}");
+        // Question body rendered.
+        assert!(out.contains("Proceed?"), "{out}");
+        // Options with cursor + radio.
+        assert!(out.contains("❯ 1. ( ) y"), "{out}");
+        assert!(out.contains("2. ( ) n"), "{out}");
+        assert!(out.contains("3. ( ) yolo"), "{out}");
+        // No free-form row.
+        assert!(!out.contains("Type Something"), "no free-form row: {out}");
+        // Footer.
+        assert!(out.contains("Enter confirm"), "footer: {out}");
+        assert!(out.contains("Esc interrupt"), "footer: {out}");
+    }
+
+    #[test]
+    fn required_choice_finished_renders_bare_label() {
+        let mut panel = required_panel();
+        panel.states[0].selected = Some(2); // "yolo"
+        panel.finished = Some(PanelFinish::Submitted);
+        let msg = AskMessage::new(panel);
+        let out = text(&msg.to_lines(&p(), 80));
+        assert!(out.contains("✓ yolo"), "{out}");
+        assert!(!out.contains("choice:"), "no header prefix: {out}");
+    }
+
+    #[test]
+    fn required_choice_no_tab_bar_no_confirm_page() {
+        let panel = required_panel();
+        assert_eq!(panel.mode, PanelMode::RequiredChoice);
+        let msg = AskMessage::new(panel);
+        let out = text(&msg.to_lines(&p(), 80));
+        assert!(!out.contains("Submit"), "no confirm page: {out}");
+        assert!(!out.contains("回答"), "no Chinese Submit: {out}");
+    }
+
+    // ── Shared helpers ────────────────────────────────────────────
 
     #[test]
     fn wrap_plain_breaks_words_and_cjk() {
@@ -749,7 +800,7 @@ mod tests {
     fn descriptions_wrap_to_the_panel_width() {
         let mut panel = multi_panel();
         panel.questions[0].options[0].description = "一段比较长的描述文字用于验证换行行为".into();
-        let msg = AskMessage::new_panel("tc".into(), panel);
+        let msg = AskMessage::new(panel);
         let out = text(&msg.to_lines(&p(), 20));
         // Description indents under the option label (col 9: cursor+number+radio).
         assert!(out.contains("         一段比较"), "{out}");
@@ -769,7 +820,7 @@ mod tests {
             )],
         );
         panel.states[0].cursor = 5;
-        let msg = AskMessage::new_panel("tc".into(), panel);
+        let msg = AskMessage::new(panel);
         let out = text(&msg.to_lines(&p(), 80));
         for hidden in ["m0", "m1", "m2"] {
             assert!(!out.contains(hidden), "{hidden} above the window: {out}");

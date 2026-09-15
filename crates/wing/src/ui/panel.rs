@@ -1,6 +1,6 @@
 //! Shared rendering for interactive selection panels (Ask, model picker).
 //!
-//! The window math lives in the kernel ([`crate::app::selection_panel`]):
+//! The window math lives in the kernel ([`crate::shared::panels`]):
 //! both panels render at most [`PANEL_WINDOW`] tabs / option rows, the
 //! cursor's slot stays centered while the window scrolls, the window is
 //! pinned at the ends, and there are deliberately no overflow indicator
@@ -15,9 +15,9 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
 
-use crate::app::selection_panel::PANEL_WINDOW;
-use crate::app::selection_panel::window_range;
 use crate::config::ThemePalette;
+use crate::shared::panels::PANEL_WINDOW;
+use crate::shared::panels::window_range;
 
 /// Visual state of one tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
