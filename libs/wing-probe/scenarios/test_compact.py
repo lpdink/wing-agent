@@ -119,6 +119,18 @@ async def test_manual_compact_chain_shape(probe: Probe) -> None:
     # 链上没有任何内容节点复用旧 uuid（新链 = 全新摘要节点 + 事件）。
     assert material["compact_uuid"] not in before.by_uuid
 
+    # 现场转储在场景里同样可用：artifacts 含链副本 + 压缩请求留档 + 事件时间线。
+    artifacts = await probe.dump()
+    assert artifacts == probe.artifacts_path
+    copied = artifacts / "sessions" / session.session_id / "history.jsonl"
+    assert copied.is_file(), sorted(path.name for path in artifacts.iterdir())
+    assert copied.read_text(encoding="utf-8") == after.path.read_text(encoding="utf-8")
+    requests = json.loads((artifacts / "requests.json").read_text(encoding="utf-8"))
+    assert [entry["stream"] for entry in requests] == [True, True, False], requests
+    assert requests[-1]["body"]["messages"][-1]["role"] == "user", requests[-1]["body"]
+    timeline = (artifacts / "timeline.jsonl").read_text(encoding="utf-8")
+    assert '"type": "compact_done"' in timeline, timeline[-400:]
+
 
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
