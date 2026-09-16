@@ -177,6 +177,7 @@ crates/wing/src/
 - `crates/wing-api-client/src/` — 手写 Rust HTTP 客户端：`client.rs`（全部 API 方法）、`models.rs`、`error.rs`、`tool_host.rs`（远程工具宿主，WS 服务循环 + builder）。
 - `libs/wing-sdk/wing_sdk/` — Python 远程工具宿主 SDK：`host.py`（装饰器注册 + WS 循环）、`http_client.py`、`schema.py`、`tools/`（Bash/Read/Write/Edit/Glob/Grep，workspace-bound）。
 - `libs/wing-orch/wing_orch/` — 编排 CLI（后台 Goal，port of `app/goal.rs`）：`cli.py`、`goal.py`、`runner.py`。**目前少用，改动不必同步本节细节。**
+- `libs/wing-probe/` — 确定性集成测试基础设施（假 Provider + driver + observer 断言库）：`wing_probe/`（env / provider / driver / watch / history / files）、`scenarios/`（整机断言场景）、`tests/`（基础设施自测）。**禁止 import `wing`**（AST 门禁强制；允许 `wing_sdk`），一切经公开 HTTP / WS 协议 → [docs/dev/probe-testing.md](docs/dev/probe-testing.md)。
 - `e2e/claude-agent-sdk-integration/` — 用 claude-agent-sdk 跑 wing 的端到端测试（`make test-e2e`）。
 - 测试目录：`libs/core/tests/`（后端 pytest，60 个文件）、`libs/wing-sdk/tests/`、`libs/wing-orch/tests/`。
 - 顶层 `docs/dev/` 为开发者深度文档（中文），`scripts/sync_version.py` 同步版本号。
@@ -195,6 +196,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/http-api.md`](docs/dev/http-api.md) | 完整 HTTP 端点表 + WebSocket 协议 + 鉴权 |
 | [`docs/dev/glossary.md`](docs/dev/glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |
 | [`docs/dev/config-logging.md`](docs/dev/config-logging.md) | WING_HOME 布局、config.yaml 键、日志轮转与查询 |
+| [`docs/dev/probe-testing.md`](docs/dev/probe-testing.md) | 确定性集成测试（wing-probe）：跑法 / 新增断言场景（写代码、不写配置）/ 断言原语速查 / 上下文红线清单与 persist 口径 / 逃生舱约定 |
 
 事实来源优先级：**代码 > docs/dev > AGENTS.md 概述**。若发现不一致，以代码为准并欢迎修正文档。
 
@@ -213,10 +215,13 @@ cargo test
 make check-rust                   # fmt + clippy + test
 
 # All
-make test                         # Python + Rust
+make test                         # Python + Rust（含 test-probe）
+make test-probe                   # 确定性集成场景（wing-probe，离线、无外部 API key）
 make check                        # Python + Rust
 make fmt                          # 格式化全部
 ```
+
+**后端特性测试约定**：开发后端特性（新增 / 修改 `libs/core` 的行为——上下文链、事件、协议、工具、网关等）时，**必须在 `libs/wing-probe/` 下增加真实有效的测试**：断言场景用代码写（`scenarios/`，不写配置文件），经公开 HTTP / WS 协议驱动"真网关 + 假 Provider"；`make test-probe` 与 CI 的 `probe-check` job 会强制其通过。**上下文红线**（compact / rewind / fork 等一切对上下文的操作）的行为变更必须配套红线断言。详见 [docs/dev/probe-testing.md](docs/dev/probe-testing.md)。
 
 ## 分发
 

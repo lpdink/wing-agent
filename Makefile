@@ -1,4 +1,4 @@
-.PHONY: check test test-e2e format fmt run install gateway
+.PHONY: check test test-e2e test-probe format fmt run install gateway
 
 # ── Unified commands (Python + Rust) ─────────────────────────
 
@@ -13,7 +13,7 @@ check: check-python check-rust
 
 fmt: fmt-python fmt-rust
 
-test: test-python test-rust
+test: test-python test-probe test-rust
 
 # ── Python ────────────────────────────────────────────────────
 
@@ -25,6 +25,11 @@ test-python:
 
 test-e2e:
 	CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK=1 WING_SESSIONS_PATH=/tmp/wing-e2e-sessions uv run pytest e2e/claude-agent-sdk-integration/ -v --timeout=120
+
+# 确定性集成测试（假 Provider + 临时 WING_HOME，离线、无外部 API key）。
+# 场景见 libs/wing-probe/scenarios/，说明见 docs/dev/probe-testing.md。
+test-probe:
+	uv run pytest libs/wing-probe/ --timeout=120
 
 check-python:
 	@RUFF_FAILED=0; RUFF_FMT_FAILED=0; TY_FAILED=0; VULTURE_FAILED=0; \
