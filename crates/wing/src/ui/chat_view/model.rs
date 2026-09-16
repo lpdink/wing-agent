@@ -427,15 +427,21 @@ impl ChatView {
     }
 
     /// Append a raw args fragment to a streaming tool call block by index.
+    ///
+    /// O(1) and cache-neutral: the fragment is buffered, and the parse (plus
+    /// the render-cache invalidation it implies) runs at the frame boundary
+    /// — see [`ChatView::flush_tool_args_by_index`] for the eager path.
     pub fn append_tool_args_fragment_by_index(&mut self, index: usize, fragment: &str) {
-        if let Some(cached) = self.cells.get_mut(index)
-            && matches!(cached.cell(), ChatCell::ToolCall(_))
-        {
-            cached.mutate(|cell| {
-                if let ChatCell::ToolCall(block) = cell {
-                    block.append_args_fragment(fragment);
-                }
-            });
+        if let Some(cached) = self.cells.get_mut(index) {
+            cached.append_tool_args_fragment(fragment);
+        }
+    }
+
+    /// Force the deferred args parse for one cell (`is_final` / authoritative
+    /// args). Idempotent — a cell with nothing pending is left untouched.
+    pub fn flush_tool_args_by_index(&mut self, index: usize) {
+        if let Some(cached) = self.cells.get_mut(index) {
+            cached.flush_pending_args();
         }
     }
 
@@ -473,7 +479,7 @@ impl ChatView {
         {
             cached.mutate(|cell| {
                 if let ChatCell::ToolCall(block) = cell {
-                    block.started_at = Some(std::time::Instant::now());
+                    block.start_timer(std::time::Instant::now());
                 }
             });
         }
@@ -497,7 +503,7 @@ impl ChatView {
             {
                 cached.mutate(|cell| {
                     if let ChatCell::ToolCall(block) = cell {
-                        block.started_at = Some(started_at);
+                        block.start_timer(started_at);
                     }
                 });
             }
@@ -513,13 +519,14 @@ impl ChatView {
         }
     }
 
-    /// Invalidate cache on pending Bash tool calls so their elapsed timer
-    /// redraws on the next `compute_lines()` call.
+    /// Refresh pending Bash timers at the frame boundary — invalidating a
+    /// cell only when its *displayed* elapsed value actually moves.
     ///
-    /// The `mutate(|_| {})` call intentionally does nothing to the cell
-    /// content — it only bumps the generation counter to invalidate the
-    /// `CachedCell` render cache, forcing `to_lines()` to recompute with
-    /// the current `Instant::now()`.
+    /// The heartbeat that calls this runs at 100 ms, but the display is
+    /// whole seconds (`format_bash_timer`), so nine out of ten ticks are
+    /// no-ops; invalidating on every tick re-rendered each pending cell
+    /// (full `to_lines` + the height recompute's `to_vec` clone) 10×/s for
+    /// a value that changed 1×/s.
     ///
     /// Pending Bash tools are selected by their authoritative cell status —
     /// there is no separately maintained counter, so a new status-mutating
@@ -532,7 +539,7 @@ impl ChatView {
                 && block.tool_name == TOOL_BASH
                 && block.status == ToolStatus::Pending
             {
-                cached.mutate(|_| {});
+                cached.tick_bash_timer();
             }
         }
     }
@@ -557,6 +564,7 @@ mod tests {
 
     use super::super::test_support::{buffer_text, make_ctx, render_view, span_texts, test_ctx};
     use crate::ui::cells::tool_call::ToolCallBlock;
+    use std::time::Duration;
 
     /// A panel carrying one question with the given text (the cell content
     /// that tells the two same-id cells apart).
@@ -899,11 +907,11 @@ mod tests {
         assert!(!matches!(view.cells[3].cell(), ChatCell::Separator));
     }
 
-    /// Regression: the Bash timer must advance only while the cell is
-    /// Pending. `tick_bash_timers` selects cells by their authoritative
-    /// status, so a pending Bash cell's render cache is invalidated every
-    /// tick (timer advances); once a result flips the status away from
-    /// Pending, ticks stop touching it and the displayed elapsed freezes.
+    /// The Bash timer advances only while the cell is Pending AND the
+    /// displayed whole-second value moved: the heartbeat ticks at 100 ms,
+    /// but a tick inside the same second is a no-op (the display is
+    /// second-granular). Once a result flips the status away from Pending,
+    /// ticks stop touching the cell and the displayed elapsed freezes.
     #[test]
     fn test_bash_timer_freezes_after_result() {
         let mut view = ChatView::new();
@@ -912,13 +920,27 @@ mod tests {
             serde_json::json!({"command": "sleep 5"}),
             "tc-timer".into(),
         );
-        block.started_at = Some(Instant::now());
+        block.start_timer(Instant::now());
         view.push(ChatCell::ToolCall(block));
 
         let idx = view.tool_call_index("tc-timer").unwrap();
 
-        // Pending: every tick invalidates the render cache (timer advances).
+        // Same second — the tick changes nothing the display shows.
         let before = view.cells[idx].generation();
+        view.tick_bash_timers();
+        assert_eq!(view.cells[idx].generation(), before);
+
+        // The second moves (simulated by backdating the start instant): the
+        // next tick invalidates the cache, and the one after it is a no-op
+        // again.
+        view.cells[idx].mutate(|cell| {
+            if let ChatCell::ToolCall(block) = cell {
+                block.started_at = Some(Instant::now() - Duration::from_secs(1));
+            }
+        });
+        let before = view.cells[idx].generation();
+        view.tick_bash_timers();
+        assert_eq!(view.cells[idx].generation(), before + 1);
         view.tick_bash_timers();
         assert_eq!(view.cells[idx].generation(), before + 1);
 
@@ -935,7 +957,8 @@ mod tests {
 
     /// Regression (#54ee2e9): a Bash cell that reaches Pending through the
     /// streaming-finalization path — `update_tool_args_by_index` →
-    /// `set_final_args`, which flips the status itself — must still tick.
+    /// `set_final_args`, which flips the status itself — must still be
+    /// selected by the timer tick.
     ///
     /// The old materialized `pending_bash_count` missed this transition:
     /// `set_final_args` set the status to Pending opaquely, so the separate
@@ -960,10 +983,129 @@ mod tests {
         view.update_tool_args_by_index(idx, serde_json::json!({"command": "sleep 5"}));
         view.set_tool_started_at_by_index(idx);
 
-        // Now Pending — a tick must invalidate the cache so the timer advances.
+        // Now Pending — a tick inside the same second stays a no-op...
+        let before = view.cells[idx].generation();
+        view.tick_bash_timers();
+        assert_eq!(view.cells[idx].generation(), before);
+
+        // ...and the tick that sees the displayed second move invalidates.
+        view.cells[idx].mutate(|cell| {
+            if let ChatCell::ToolCall(block) = cell {
+                block.started_at = Some(Instant::now() - Duration::from_secs(1));
+            }
+        });
         let before = view.cells[idx].generation();
         view.tick_bash_timers();
         assert_eq!(view.cells[idx].generation(), before + 1);
+    }
+
+    /// Acceptance (#98): a burst of args fragments is O(1) per fragment —
+    /// no parse, no cache invalidation. The parse runs once per frame (with
+    /// data), driven by the render path, and an idle frame is free.
+    #[test]
+    fn test_streaming_args_fragments_parse_once_per_frame() {
+        let mut view = ChatView::new();
+        view.push(ChatCell::ToolCall(ToolCallBlock::new_streaming(
+            TOOL_BASH.into(),
+            "tc-o1".into(),
+        )));
+        let idx = view.tool_call_index("tc-o1").unwrap();
+
+        for _ in 0..50 {
+            view.append_tool_args_fragment_by_index(idx, r#"{"command": "echo hi"#);
+        }
+        let before = view.cells[idx].generation();
+        assert_eq!(
+            args_parse_count(&view, idx),
+            0,
+            "fragments must not parse on arrival"
+        );
+        assert_eq!(
+            view.cells[idx].generation(),
+            before,
+            "fragments must not invalidate the render cache"
+        );
+
+        // One frame with the cell in view: exactly one parse + invalidation.
+        render_view(&mut view, 80, 24);
+        assert_eq!(args_parse_count(&view, idx), 1);
+        let after_frame = view.cells[idx].generation();
+        assert_eq!(after_frame, before + 1);
+
+        // A frame with no new fragments: nothing.
+        render_view(&mut view, 80, 24);
+        assert_eq!(args_parse_count(&view, idx), 1);
+        assert_eq!(view.cells[idx].generation(), after_frame);
+    }
+
+    /// The height path is a frame boundary too: heights feed the scroll
+    /// maths, and a cell whose height is already cached takes the early
+    /// return — without the flush there, the stale (pre-fragment) height
+    /// would be handed back as-is.
+    #[test]
+    fn test_compute_height_flushes_deferred_args() {
+        let mut view = ChatView::new();
+        view.push(ChatCell::ToolCall(ToolCallBlock::new_streaming(
+            TOOL_BASH.into(),
+            "tc-height".into(),
+        )));
+        let idx = view.tool_call_index("tc-height").unwrap();
+        let (p, l) = test_ctx();
+        let ctx = make_ctx(&p, &l);
+
+        // Establish the height cache for the empty header.
+        let empty_height = view.cells[idx].compute_height(80, &ctx);
+        assert_eq!(args_parse_count(&view, idx), 0, "nothing appended yet");
+
+        // A wrapping-length command arrives; nothing invalidates the cache
+        // yet (that is the O(1) append contract).
+        let command = "x".repeat(200);
+        view.append_tool_args_fragment_by_index(idx, &format!(r#"{{"command": "{command}"}}"#));
+
+        // Measuring must flush first: the parsed command wraps the header,
+        // so the fresh height grows — a cache hit without the flush would
+        // hand back the stale baseline.
+        let height = view.cells[idx].compute_height(80, &ctx);
+        assert_eq!(args_parse_count(&view, idx), 1, "height must flush");
+        assert!(
+            height > empty_height,
+            "stale height survived the deferred args; got {height}, baseline {empty_height}"
+        );
+    }
+
+    /// `is_final` forces the deferred parse so the completed args
+    /// materialize without waiting for the next frame.
+    #[test]
+    fn test_flush_tool_args_by_index_parses_eagerly() {
+        let mut view = ChatView::new();
+        view.push(ChatCell::ToolCall(ToolCallBlock::new_streaming(
+            TOOL_BASH.into(),
+            "tc-final".into(),
+        )));
+        let idx = view.tool_call_index("tc-final").unwrap();
+
+        view.append_tool_args_fragment_by_index(idx, r#"{"command":"ls -la"}"#);
+        assert_eq!(args_parse_count(&view, idx), 0);
+
+        view.flush_tool_args_by_index(idx);
+        assert_eq!(args_parse_count(&view, idx), 1);
+        if let ChatCell::ToolCall(block) = view.cells[idx].cell() {
+            assert_eq!(block.tool_args["command"], "ls -la");
+        } else {
+            panic!("expected tool call cell");
+        }
+
+        // Idempotent: a cell with nothing pending is left untouched.
+        view.flush_tool_args_by_index(idx);
+        assert_eq!(args_parse_count(&view, idx), 1);
+    }
+
+    /// Parse counter of the deferred args path (the #98 acceptance seam).
+    fn args_parse_count(view: &ChatView, index: usize) -> usize {
+        match view.cells[index].cell() {
+            ChatCell::ToolCall(block) => block.args_parse_count,
+            _ => panic!("expected tool call cell"),
+        }
     }
 
     #[test]

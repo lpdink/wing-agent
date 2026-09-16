@@ -119,17 +119,23 @@ impl CachedCell {
     pub fn mutate<F: FnOnce(&mut ChatCell)>(&mut self, f: F) {
         let text_len_before = self.stream_text_len();
         f(&mut self.cell);
-        self.generation += 1;
-        // The lines will be rebuilt by `to_lines` (which never pre-wraps):
-        // drop the blit fast path here rather than relying on
-        // `update_heights` having refreshed it earlier in the same frame.
-        self.prewrapped_width = None;
+        self.invalidate();
         debug_assert_eq!(
             text_len_before,
             self.stream_text_len(),
             "CachedCell::mutate changed streaming text — streaming cells \
              must only grow via append_stream (stream buffer would desync)"
         );
+    }
+
+    /// Bump the generation and drop the blit fast path — the canonical
+    /// "content changed" invalidation.
+    fn invalidate(&mut self) {
+        self.generation += 1;
+        // The lines will be rebuilt by `to_lines` (which never pre-wraps):
+        // drop the blit fast path here rather than relying on
+        // `update_heights` having refreshed it earlier in the same frame.
+        self.prewrapped_width = None;
     }
 
     /// Text length of a streaming cell (None when not streaming) — the
@@ -209,6 +215,48 @@ impl CachedCell {
     /// stream.
     pub fn is_streaming(&self) -> bool {
         self.stream.is_some()
+    }
+
+    /// Append a streaming tool-args fragment WITHOUT invalidating the
+    /// generation cache.
+    ///
+    /// Appending is O(1); the parse + highlight refresh are deferred to the
+    /// frame boundary ([`Self::flush_pending_args`], driven by the render
+    /// path), so the per-event cost no longer scales with the accumulated
+    /// payload — the O(n²) path that saturated the event channel during
+    /// large Write/Bash streams.
+    pub fn append_tool_args_fragment(&mut self, fragment: &str) {
+        if let ChatCell::ToolCall(block) = &mut self.cell {
+            block.append_args_fragment(fragment);
+        }
+    }
+
+    /// Frame boundary for deferred tool-args work: parse once when
+    /// fragments arrived since the last flush, then invalidate the render
+    /// cache exactly once (the displayed content may have changed).
+    pub fn flush_pending_args(&mut self) -> bool {
+        let parsed = match &mut self.cell {
+            ChatCell::ToolCall(block) => block.flush_pending_args(),
+            _ => false,
+        };
+        if parsed {
+            self.invalidate();
+        }
+        parsed
+    }
+
+    /// Frame boundary for the pending Bash timer: invalidate only when the
+    /// timer's *displayed* value moved (the heartbeat is 100 ms, the
+    /// display is whole seconds).
+    pub fn tick_bash_timer(&mut self) -> bool {
+        let moved = match &mut self.cell {
+            ChatCell::ToolCall(block) => block.tick_timer(),
+            _ => false,
+        };
+        if moved {
+            self.invalidate();
+        }
+        moved
     }
 
     /// Whether the incremental stream is the active RENDER authority at
@@ -300,6 +348,10 @@ impl CachedCell {
     /// [`compute_lines`](Self::compute_lines) plus the link spans of every
     /// line (index-aligned with them) and whether the row maths is exact.
     pub fn compute_cell_lines(&mut self, width: u16, ctx: &CellContext<'_>) -> CellLines<'_> {
+        // Frame boundary: settle deferred streaming work (tool-args parse)
+        // before the caches are consulted — the generation check below must
+        // see the invalidation a flush produces.
+        self.flush_pending_args();
         if self.pending_finalize {
             self.run_finalize(width, ctx);
         }
@@ -359,6 +411,10 @@ impl CachedCell {
     /// before the mutable `cached_height` assignment.  The clone is cheap
     /// (~50–100µs at 124 KB) relative to the saved markdown re‑render.
     pub fn compute_height(&mut self, width: u16, ctx: &CellContext<'_>) -> usize {
+        // Frame boundary — see `compute_cell_lines`. Heights for a
+        // streaming tool cell depend on the parsed args (command line,
+        // preview lines), so the flush must run before the cache check.
+        self.flush_pending_args();
         if self.pending_finalize {
             self.run_finalize(width, ctx);
         }

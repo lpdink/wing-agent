@@ -207,10 +207,13 @@ impl App {
                 self.ctx.current_assistant = None;
 
                 if let Some(idx) = self.chat.tool_call_index(&tool_call_id) {
-                    // Update existing streaming cell
+                    // Update existing streaming cell — O(1) append; the
+                    // parse waits for the frame boundary. `is_final` forces
+                    // a flush so the completed args materialize now.
                     self.chat
                         .append_tool_args_fragment_by_index(idx, &args_fragment);
                     if is_final {
+                        self.chat.flush_tool_args_by_index(idx);
                         self.chat.set_tool_status_by_index(idx, ToolStatus::Pending);
                     }
                 } else {
@@ -218,6 +221,7 @@ impl App {
                     let mut block = ToolCallBlock::new_streaming(tool_name, tool_call_id.clone());
                     block.append_args_fragment(&args_fragment);
                     if is_final {
+                        block.flush_pending_args();
                         block.status = ToolStatus::Pending;
                     }
                     self.chat.push(ChatCell::ToolCall(block));
@@ -245,7 +249,7 @@ impl App {
                         ToolCallBlock::new(tool_name.clone(), tool_args, tool_call_id.clone());
                     // Start timer for Bash tools.
                     if tool_name == TOOL_BASH {
-                        block.started_at = Some(std::time::Instant::now());
+                        block.start_timer(std::time::Instant::now());
                     }
                     self.chat.push(ChatCell::ToolCall(block));
                 }

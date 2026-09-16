@@ -49,3 +49,7 @@ criterion = "0.5"
 name = "stream_render"
 harness = false
 
+[[bench]]
+name = "tool_args_stream"
+harness = false
+
