@@ -342,6 +342,21 @@ pub struct ToolCallBlock {
     /// Raw args text accumulated from streaming fragments. Cleared when
     /// authoritative args arrive (`set_final_args`) to release memory.
     args_buffer: String,
+    /// Whether `args_buffer` holds fragments not yet parsed into
+    /// `tool_args` / the streaming caches. Fragments append in O(1); the
+    /// parse runs once per frame via [`Self::flush_pending_args`] — a
+    /// per-fragment parse would be O(accumulated payload) per event.
+    args_dirty: bool,
+    /// The whole-second value of the pending Bash timer that the render
+    /// cache currently materializes. [`Self::tick_timer`] invalidates
+    /// only when the *displayed* value moves: the heartbeat runs at
+    /// 100 ms, but the display (`format_bash_timer`) is second-granular.
+    timer_shown_secs: Option<u64>,
+    /// Test seam: how many times the deferred args parse actually ran
+    /// (the acceptance counter for the O(1)-append contract — it must
+    /// track frames, not fragments).
+    #[cfg(test)]
+    pub(crate) args_parse_count: usize,
 }
 
 impl ToolCallBlock {
@@ -357,6 +372,10 @@ impl ToolCallBlock {
             edit_old_lines: Vec::new(),
             todo_stream: None,
             args_buffer: String::new(),
+            args_dirty: false,
+            timer_shown_secs: None,
+            #[cfg(test)]
+            args_parse_count: 0,
         }
     }
 
@@ -374,6 +393,10 @@ impl ToolCallBlock {
             edit_old_lines: Vec::new(),
             todo_stream: None,
             args_buffer: String::new(),
+            args_dirty: false,
+            timer_shown_secs: None,
+            #[cfg(test)]
+            args_parse_count: 0,
         }
     }
 
@@ -387,10 +410,29 @@ impl ToolCallBlock {
         };
     }
 
-    /// Append a raw args fragment (ToolCallStreamEvent) and re-parse the
-    /// accumulated buffer for rendering.
+    /// Append a raw args fragment (ToolCallStreamEvent). O(1): the text is
+    /// pushed and marked dirty — the parse, the highlight refresh and the
+    /// render-cache invalidation are deferred to the frame boundary
+    /// ([`Self::flush_pending_args`], called once per frame per cell).
+    ///
+    /// Parsing per fragment re-parses the whole accumulated buffer
+    /// (O(payload) per event, O(n²) per stream) and invalidates the cell's
+    /// render cache every event — the exact cost that filled the event
+    /// channel during large Write/Bash streams.
     pub fn append_args_fragment(&mut self, fragment: &str) {
         self.args_buffer.push_str(fragment);
+        self.args_dirty = true;
+    }
+
+    /// Frame-boundary flush: parse everything appended since the last
+    /// flush and refresh the streaming caches. Returns whether a parse ran
+    /// (i.e. the cell's rendered content may have changed) so the caller
+    /// can invalidate its render cache exactly once per frame.
+    pub fn flush_pending_args(&mut self) -> bool {
+        if !self.args_dirty {
+            return false;
+        }
+        self.args_dirty = false;
         let parsed = crate::util::partial_json::parse_streaming_json(&self.args_buffer);
         // Tool args are always a JSON object; ignore malformed non-object partials.
         let args = match parsed {
@@ -398,6 +440,40 @@ impl ToolCallBlock {
             _ => serde_json::Value::Object(serde_json::Map::new()),
         };
         self.apply_args(args);
+        #[cfg(test)]
+        {
+            self.args_parse_count += 1;
+        }
+        true
+    }
+
+    /// Start the execution timer at `at` and record the value the render
+    /// cache will materialize for it (see [`Self::tick_timer`]).
+    pub fn start_timer(&mut self, at: Instant) {
+        self.started_at = Some(at);
+        self.timer_shown_secs = Some(at.elapsed().as_secs());
+    }
+
+    /// Advance the pending Bash timer if its *displayed* value has moved
+    /// since the cache last materialized it. Returns whether the cell must
+    /// be invalidated.
+    ///
+    /// The heartbeat that drives this runs at 100 ms, but the display
+    /// (`format_bash_timer`) is whole seconds, so a tick that lands inside
+    /// the same second is a no-op — invalidating on every tick re-rendered
+    /// the cell 10×/s for a value that changed 1×/s.
+    pub fn tick_timer(&mut self) -> bool {
+        let shown = self.started_at.map(|s| s.elapsed().as_secs());
+        if shown == self.timer_shown_secs {
+            return false;
+        }
+        // `started_at` cleared (no timer displayed) — nothing to redraw.
+        if shown.is_none() {
+            self.timer_shown_secs = None;
+            return false;
+        }
+        self.timer_shown_secs = shown;
+        true
     }
 
     /// Set authoritative parsed args (execution start), transition to
@@ -406,6 +482,7 @@ impl ToolCallBlock {
     pub fn set_final_args(&mut self, args: serde_json::Value) {
         self.status = ToolStatus::Pending;
         self.args_buffer = String::new();
+        self.args_dirty = false;
         self.stream_highlight = None;
         self.edit_old_lines.clear();
         self.todo_stream = None;
@@ -766,6 +843,15 @@ mod tests {
             .map(|l| l.to_string())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Mirror the production frame flow for a streaming cell: the fragment
+    /// appends in O(1), then the frame-boundary flush parses it. Tests that
+    /// are about *rendering* use this; tests about the deferral itself call
+    /// the two steps separately.
+    fn stream_args(block: &mut ToolCallBlock, fragment: &str) {
+        block.append_args_fragment(fragment);
+        block.flush_pending_args();
     }
 
     #[test]
@@ -1134,8 +1220,12 @@ mod tests {
     #[test]
     fn test_append_args_fragment() {
         let mut block = ToolCallBlock::new_streaming("Bash".into(), "tc_s3".into());
-        // Fragments accumulate and are partial-parsed for rendering.
+        // Fragments accumulate in O(1); the parse waits for the frame
+        // boundary — nothing is visible to readers until the flush.
         block.append_args_fragment(r#"{"command": "ls"#);
+        assert!(block.args_dirty);
+        block.flush_pending_args();
+        assert!(!block.args_dirty);
         let text = lines_text(&block.to_lines(&p(), 10));
         assert!(
             text.contains("ls"),
@@ -1143,7 +1233,30 @@ mod tests {
         );
 
         block.append_args_fragment(r#" -la"}"#);
+        block.flush_pending_args();
         assert_eq!(block.tool_args["command"], "ls -la");
+    }
+
+    /// The acceptance counter for the O(1) contract: appends never parse;
+    /// a flush parses exactly once; an idle flush (no new fragments) does
+    /// nothing. This is what keeps `parse_streaming_json` at ≤ frames per
+    /// cell instead of one call per fragment.
+    #[test]
+    fn test_append_is_o1_and_parses_once_per_flush() {
+        let mut block = ToolCallBlock::new_streaming("Write".into(), "tc_s6".into());
+        for _ in 0..100 {
+            block.append_args_fragment(r#"{"path": "/tmp/f", "content": "x"#);
+        }
+        assert_eq!(block.args_parse_count, 0, "appends must not parse");
+
+        assert!(block.flush_pending_args());
+        assert_eq!(block.args_parse_count, 1);
+        assert!(!block.flush_pending_args(), "idle flush must be a no-op");
+        assert_eq!(block.args_parse_count, 1);
+
+        block.append_args_fragment("y");
+        block.flush_pending_args();
+        assert_eq!(block.args_parse_count, 2, "one parse per frame with data");
     }
 
     #[test]
@@ -1166,6 +1279,7 @@ mod tests {
         // Simulate streaming via raw fragments (backend sends unparsed text).
         block.append_args_fragment(r#"{"path": "/tmp/test.py", "content": "def main"#);
         block.append_args_fragment(r#"():\n    print('hello')"}"#);
+        block.flush_pending_args();
         let text = lines_text(&block.to_lines(&p(), 30));
         assert!(text.contains("Write"), "missing tool name: {text}");
         assert!(
@@ -1272,7 +1386,8 @@ mod tests {
     #[test]
     fn test_edit_streaming_old_string_only() {
         let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e1".into());
-        block.append_args_fragment(
+        stream_args(
+            &mut block,
             r#"{"path": "src/main.rs", "old_string": "fn old() {\n    println!(\"old\");\n}"#,
         );
         let text = lines_text(&block.to_lines(&p(), 10));
@@ -1287,7 +1402,8 @@ mod tests {
     #[test]
     fn test_edit_streaming_both_strings() {
         let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e2".into());
-        block.append_args_fragment(
+        stream_args(
+            &mut block,
             r#"{"path": "src/main.rs", "old_string": "fn old() {}", "new_string": "fn new() {\n    todo!()\n}"#,
         );
         let text = lines_text(&block.to_lines(&p(), 10));
@@ -1302,7 +1418,8 @@ mod tests {
     #[test]
     fn test_edit_streaming_rows_are_tinted() {
         let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_tint".into());
-        block.append_args_fragment(
+        stream_args(
+            &mut block,
             r#"{"path": "src/main.rs", "old_string": "fn old() {}", "new_string": "fn new() {}"}"#,
         );
         let palette = p();
@@ -1342,7 +1459,7 @@ mod tests {
     fn test_edit_streaming_new_string_only() {
         // LLM might emit new_string before old_string.
         let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e3".into());
-        block.append_args_fragment(r#"{"path": "a.rs", "new_string": "hello world"#);
+        stream_args(&mut block, r#"{"path": "a.rs", "new_string": "hello world"#);
         let text = lines_text(&block.to_lines(&p(), 10));
         assert!(
             text.contains("+ hello world"),
@@ -1362,7 +1479,7 @@ mod tests {
             old_string.replace('\n', "\\n")
         );
         let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e4".into());
-        block.append_args_fragment(&fragment);
+        stream_args(&mut block, &fragment);
         let text = lines_text(&block.to_lines(&p(), 10));
         assert!(text.contains("⋮"), "should collapse: {text}");
         assert!(text.contains("- line 1"), "head kept: {text}");
@@ -1373,7 +1490,10 @@ mod tests {
     #[test]
     fn test_edit_streaming_disappears_on_pending() {
         let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e5".into());
-        block.append_args_fragment(r#"{"path": "a.rs", "old_string": "old", "new_string": "new"#);
+        stream_args(
+            &mut block,
+            r#"{"path": "a.rs", "old_string": "old", "new_string": "new"#,
+        );
         // Streaming: preview visible.
         let text = lines_text(&block.to_lines(&p(), 10));
         assert!(text.contains("- old"), "visible during streaming: {text}");
@@ -1398,7 +1518,10 @@ mod tests {
     fn test_edit_streaming_trailing_newline_consistency() {
         // old_string and new_string with trailing \n should produce symmetric lines.
         let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e6".into());
-        block.append_args_fragment(r#"{"path": "a.rs", "old_string": "a\n", "new_string": "b\n"}"#);
+        stream_args(
+            &mut block,
+            r#"{"path": "a.rs", "old_string": "a\n", "new_string": "b\n"}"#,
+        );
         let text = lines_text(&block.to_lines(&p(), 10));
         // Both use split('\n'): "a\n" → ["a", ""], "b\n" → ["b", ""]
         let old_count = text.matches("- ").count();
@@ -1411,7 +1534,10 @@ mod tests {
     fn test_edit_streaming_crlf() {
         // CRLF in old_string: \r should be stripped.
         let mut block = ToolCallBlock::new_streaming("Edit".into(), "tc_e7".into());
-        block.append_args_fragment(r#"{"path": "a.rs", "old_string": "line1\r\nline2\r\n"}"#);
+        stream_args(
+            &mut block,
+            r#"{"path": "a.rs", "old_string": "line1\r\nline2\r\n"}"#,
+        );
         let text = lines_text(&block.to_lines(&p(), 10));
         assert!(text.contains("- line1"), "CRLF stripped: {text}");
         assert!(text.contains("- line2"), "CRLF stripped: {text}");
@@ -1423,7 +1549,8 @@ mod tests {
     #[test]
     fn test_todo_streaming_partial_items() {
         let mut block = ToolCallBlock::new_streaming("TodoWrite".into(), "tc_t1".into());
-        block.append_args_fragment(
+        stream_args(
+            &mut block,
             r#"{"todos": [{"content": "task 1", "status": "completed"}, {"content": "task 2", "status": "in_progress", "activeForm": "Doing task 2"}"#,
         );
         let text = lines_text(&block.to_lines(&p(), 10));
@@ -1438,7 +1565,8 @@ mod tests {
     #[test]
     fn test_todo_streaming_header_stats() {
         let mut block = ToolCallBlock::new_streaming("TodoWrite".into(), "tc_t2".into());
-        block.append_args_fragment(
+        stream_args(
+            &mut block,
             r#"{"todos": [{"content": "a", "status": "completed"}, {"content": "b", "status": "pending"}, {"content": "c", "status": "in_progress"}]}"#,
         );
         let text = lines_text(&block.to_lines(&p(), 10));
@@ -1449,7 +1577,10 @@ mod tests {
     #[test]
     fn test_todo_streaming_disappears_on_pending() {
         let mut block = ToolCallBlock::new_streaming("TodoWrite".into(), "tc_t3".into());
-        block.append_args_fragment(r#"{"todos": [{"content": "x", "status": "pending"}]}"#);
+        stream_args(
+            &mut block,
+            r#"{"todos": [{"content": "x", "status": "pending"}]}"#,
+        );
         let text = lines_text(&block.to_lines(&p(), 10));
         assert!(text.contains("○"), "visible during streaming: {text}");
 
@@ -1462,7 +1593,7 @@ mod tests {
     #[test]
     fn test_todo_streaming_empty_todos() {
         let mut block = ToolCallBlock::new_streaming("TodoWrite".into(), "tc_t4".into());
-        block.append_args_fragment(r#"{"todos": ["#);
+        stream_args(&mut block, r#"{"todos": ["#);
         let text = lines_text(&block.to_lines(&p(), 10));
         // No items yet — just header, no crash.
         assert!(text.contains("TodoWrite"), "tool name: {text}");
