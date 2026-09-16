@@ -104,6 +104,74 @@ def test_dynamic_name_not_flagged() -> None:
     assert scan_source('importlib.import_module(prefix + ".x")\n') == []
 
 
+def test_dunder_import_via_importlib_and_builtins_detected() -> None:
+    """``importlib.__import__`` / ``builtins.__import__`` 是同一入口的写法变体。"""
+    importlib_form = scan_source(
+        'import importlib\nimportlib.__import__("wing.runtime")\n'
+    )
+    assert [v.kind for v in importlib_form] == [KIND_DUNDER_IMPORT]
+    assert importlib_form[0].target == "wing.runtime"
+
+    builtins_form = scan_source('import builtins\nbuiltins.__import__("wing.tools")\n')
+    assert [v.kind for v in builtins_form] == [KIND_DUNDER_IMPORT]
+    assert builtins_form[0].target == "wing.tools"
+
+
+def test_from_import_alias_tracking_detected() -> None:
+    """``from … import … as 别名`` 后的调用仍被检出（词法层改名）。"""
+    aliased_function = scan_source(
+        "from importlib import import_module as im\nim('wing.runtime')\n"
+    )
+    assert [v.kind for v in aliased_function] == [KIND_IMPORT_MODULE]
+    assert aliased_function[0].target == "wing.runtime"
+    assert aliased_function[0].lineno == 2
+
+    aliased_dunder = scan_source(
+        "from builtins import __import__ as imp\nimp('wing.schema')\n"
+    )
+    assert [v.kind for v in aliased_dunder] == [KIND_DUNDER_IMPORT]
+    assert aliased_dunder[0].target == "wing.schema"
+
+
+def test_module_alias_tracking_detected() -> None:
+    """``import importlib as il`` / ``import builtins as b`` 的模块别名同样归一化。"""
+    assert _kinds('import importlib as il\nil.import_module("wing.runtime")\n') == [
+        KIND_IMPORT_MODULE
+    ]
+    assert _kinds('import builtins as b\nb.__import__("wing.runtime")\n') == [
+        KIND_DUNDER_IMPORT
+    ]
+
+
+def test_dynamic_callable_lookup_is_accepted_risk() -> None:
+    """残余风险（design D2 口径）：运行时定名 / 取属性 / 赋值重绑定不在此门禁内。"""
+    assert scan_source("importlib.import_module(''.join(['wi', 'ng.runtime']))\n") == []
+    assert scan_source('importlib.import_module(f"wing.{name}")\n') == []
+    assert scan_source('getattr(importlib, "import_module")("wing.runtime")\n') == []
+    assert (
+        scan_source(
+            "from importlib import import_module\nf = import_module\nf('wing.runtime')\n"
+        )
+        == []
+    )
+
+
+def test_aliases_do_not_create_false_positives() -> None:
+    """别名表不得把允许清单 / 无关调用拖进来。"""
+    source = "\n".join(
+        [
+            "import importlib as il",
+            "import builtins as b",
+            "from importlib import import_module as im",
+            'il.import_module("wing_sdk.host")',
+            'im("wing_probe.provider")',
+            'b.__import__("wing_sdk")',
+            "im(dynamic_name)",
+        ]
+    )
+    assert scan_source(source) == []
+
+
 def test_syntax_error_does_not_crash() -> None:
     assert scan_source("def broken(:\n") == []
 

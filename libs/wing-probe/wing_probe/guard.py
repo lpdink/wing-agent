@@ -4,12 +4,22 @@
 一旦 probe 里出现 ``import wing``，probe 就与实现共享了内部结构，"两边一起改、
 漂移抓不到"的测试退化会重新出现，而且这类退化是静默的（测试照常绿）。
 
-本模块用 AST 扫描（不是正则、不是字符串匹配）检出四种导入形态：
+本模块用 AST 扫描（不是正则、不是字符串匹配）检出以下导入形态：
 
 - ``import wing`` / ``import wing.event``
 - ``from wing.event import …`` / ``from wing import …``
-- ``importlib.import_module("wing.runtime")``（含 ``import_module("wing")``）
-- ``__import__("wing.runtime")``
+- 字符串导入入口：``importlib.import_module("wing.runtime")``、
+  ``importlib.__import__("wing…")``、``__import__("wing…")``、
+  ``builtins.__import__("wing…")``（含 ``name=`` 关键字与纯字面量拼接
+  ``"wing" + ".runtime"``）；
+- **别名追踪**（词法层改名）：``import importlib as il; il.import_module("wing…")``、
+  ``from importlib import import_module as im; im("wing…")``、
+  ``import builtins as b; b.__import__("wing…")``。
+
+**明确接受的残余风险**（design D2 口径）：运行时才能定名的形态——``"".join([...])``、
+f-string、变量、``*args`` 展开、``getattr(importlib, "import_module")``、
+以及赋值重绑定（``f = importlib.import_module; f("wing…")``）。这些需要真正的
+执行或数据流分析，静态门禁不猜；它们是刻意绕过，review 可发现。
 
 允许清单：``wing_probe``（自身）、``wing_sdk``（面向外部宿主的独立包，
 probe driver 的合法入口）与一切第三方包。禁用面是"模块名恰为 ``wing``
@@ -50,14 +60,25 @@ EXCLUDED_DIRS: frozenset[str] = frozenset(
 #: 本包根目录（``libs/wing-probe/``）；仓库内测试用它作扫描根。
 PKG_ROOT: Path = Path(__file__).resolve().parent.parent
 
-#: 检出 JSON 字符串形式导入的函数名（``importlib.import_module`` 等）。
+#: 检出 JSON 字符串形式导入的规范名（``importlib.import_module`` 等）。
+#: ``importlib.__import__`` 与 ``builtins.__import__`` 是同一入口的两个写法，
+#: 一并堵住（零成本，属"静态可写"而非"动态拼接"）。
 _STRING_IMPORT_CALLS: frozenset[str] = frozenset(
     {
         "import_module",
         "importlib.import_module",
+        "importlib.__import__",
         "__import__",
+        "builtins.__import__",
     }
 )
+
+#: 提供字符串导入入口的模块 → 其入口属性名（别名追踪的规范化依据：
+#: ``from importlib import import_module as im`` / ``import importlib as il``）。
+_STRING_IMPORT_SOURCES: dict[str, frozenset[str]] = {
+    "importlib": frozenset({"import_module", "__import__"}),
+    "builtins": frozenset({"__import__"}),
+}
 
 
 @dataclass(frozen=True)
@@ -114,6 +135,49 @@ def _call_name(node: ast.Call) -> str | None:
     return None
 
 
+class ImportAliases:
+    """``import X as y`` / ``from X import f as g`` 的别名表（规范化静态可写的改名形态）。
+
+    只追踪**字符串导入入口**相关的最小集合——`import importlib as il` →
+    ``il`` 视作 ``importlib``；`from importlib import import_module as im` →
+    ``im`` 视作 ``importlib.import_module``。别名表是"词法层改名"，
+    与 `f = importlib.import_module` 这类**赋值重绑定**不同（后者属残余风险，
+    见模块 docstring）。
+    """
+
+    def __init__(self) -> None:
+        self.modules: dict[str, str] = {}
+        """本地模块名 → 规范模块名（``il`` → ``importlib``）。"""
+        self.functions: dict[str, str] = {}
+        """本地函数名 → 规范点分名（``im`` → ``importlib.import_module``）。"""
+
+    def collect(self, tree: ast.AST) -> None:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.asname and alias.name in _STRING_IMPORT_SOURCES:
+                        self.modules[alias.asname] = alias.name
+            elif isinstance(node, ast.ImportFrom):
+                if node.level != 0 or node.module not in _STRING_IMPORT_SOURCES:
+                    continue
+                entries = _STRING_IMPORT_SOURCES[node.module]
+                for alias in node.names:
+                    if alias.name in entries:
+                        # `as` 可选：不带别名时函数名本身已在规范集合里。
+                        self.functions[alias.asname or alias.name] = (
+                            f"{node.module}.{alias.name}"
+                        )
+
+    def resolve(self, dotted: str) -> str:
+        """把点分名按别名表规范化（无别名即原样返回）。"""
+        if dotted in self.functions:
+            return self.functions[dotted]
+        head, separator, rest = dotted.partition(".")
+        if separator and head in self.modules:
+            return f"{self.modules[head]}.{rest}"
+        return dotted
+
+
 def _call_string_arg(node: ast.Call) -> str | None:
     """字符串形式导入的第一个参数（位置参数或 ``name=``）。"""
     if node.args:
@@ -137,6 +201,8 @@ def scan_source(source: str, *, path: str = "<string>") -> list[Violation]:
 
     lines = source.splitlines()
     found: list[Violation] = []
+    aliases = ImportAliases()
+    aliases.collect(tree)
 
     def record(node: ast.AST, kind: str, target: str) -> None:
         lineno = getattr(node, "lineno", 1)
@@ -155,12 +221,17 @@ def scan_source(source: str, *, path: str = "<string>") -> list[Violation]:
                 record(node, KIND_FROM_IMPORT, node.module)
         elif isinstance(node, ast.Call):
             name = _call_name(node)
-            if name not in _STRING_IMPORT_CALLS:
+            if name is None:
+                continue
+            canonical = aliases.resolve(name)
+            if canonical not in _STRING_IMPORT_CALLS:
                 continue
             target = _call_string_arg(node)
             if target is not None and is_forbidden(target):
                 kind = (
-                    KIND_DUNDER_IMPORT if name == "__import__" else KIND_IMPORT_MODULE
+                    KIND_DUNDER_IMPORT
+                    if canonical.endswith("__import__")
+                    else KIND_IMPORT_MODULE
                 )
                 record(node, kind, target)
 

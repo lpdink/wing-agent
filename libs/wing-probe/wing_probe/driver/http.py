@@ -119,6 +119,12 @@ class DriverHttp(GatewayClient):
         http = DriverHttp(env.gateway_url, started_at=env.started_at)
         resp = await http.create_session(workspace=str(tmp))
         http.last_call(path="/api/session/create").status == 200
+
+    **与 ``wing_sdk`` 的耦合**：留档完全依赖上游把出网收敛到 ``_post`` / ``_get``
+    这两个**私有**方法上（本类只覆盖它们）。上游若改名 / 改调用点，留档会**静默
+    全空**（`http.calls` 一直是 `[]`），断言"网关回了什么"的场景随之失真。
+    这不是注释能守住的，由装配层自测兜住：``tests/test_driver_http.py`` 用桩网关
+    调用**公开**方法（``health()`` 等）并断言首个调用确实被留档——上游改缝即红。
     """
 
     def __init__(

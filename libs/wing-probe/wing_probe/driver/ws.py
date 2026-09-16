@@ -109,6 +109,13 @@ def is_chunk_frame(text: str) -> bool:
 
     只用于"要不要尝试按信封解析"的取舍与帧日志标注；判定权威在 ``parse_envelope``
     （它读 ``type`` 字段并校验其余字段）。误报无害：解析结果不是信封即按普通帧走。
+
+    前提假设（潜规则显式化）：只看前 ``_CHUNK_PROBE_CHARS`` 个字符，因此要求
+    网关把 ``type`` 写在帧头——``gateway/frames.py::_head`` 正是这么拼的
+    （``type`` 第一、``data`` 最后）。若字段顺序变化且 ``type`` 掉出头部窗口，
+    合法信封会被当普通事件直投应用层（Rust 侧不做这个探测，直接整帧解析）；
+    这是刻意换来的"每帧不做一次完整 JSON 解析"的成本，改动网关出帧顺序时
+    必须同步这里。
     """
     return _CHUNK_TYPE_RE.search(text, 0, _CHUNK_PROBE_CHARS) is not None
 
@@ -265,6 +272,13 @@ class Reassembler:
             raise ReassemblyError(
                 f"chunk id changed mid-window: {pending.id!r} → {envelope.id!r} "
                 f"(at index {envelope.index})"
+            )
+        elif envelope.count != pending.count:
+            # 与 Rust 侧同序同款（id → count → index）：中途变 count 立即可疑，
+            # 绝不按新值等下去（否则退化成 30s idle 超时，而不是立刻失败）。
+            raise ReassemblyError(
+                f"chunk count changed mid-reassembly (id={pending.id!r}): "
+                f"{pending.count} → {envelope.count}"
             )
         elif envelope.index != pending.next_index:
             if envelope.index == pending.next_index - 1:

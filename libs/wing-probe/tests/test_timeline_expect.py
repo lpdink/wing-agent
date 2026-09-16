@@ -544,6 +544,13 @@ def test_reassembler_releases_buffered_frames_after_the_event() -> None:
             ],
             "chunk id changed mid-window",
         ),
+        (
+            [
+                chunk_frame("ab", index=0, count=3),
+                chunk_frame("cd", index=1, count=2),
+            ],
+            "chunk count changed mid-reassembly",
+        ),
         ([chunk_frame("ab", index=0, count=1)], "out of range"),
         ([chunk_frame("ab", index=0, count=4096)], "out of range"),
     ],
