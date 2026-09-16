@@ -361,6 +361,9 @@ class Driver:
         if existing is not None:
             return existing
         session = Session(self, session_id, response=response, workspace=workspace)
+        # 失败报告末行引用现场转储路径（转储本身由 ``probe.dump()`` / fixture
+        # teardown 落到同一目录，见 design D8）——断言超时时不必重跑即可取现场。
+        session.watch.dump_path = str(self.env.artifacts_path)
         # 先注册路由再订阅：subscribe 会触发 sync_session 重放，事件不能丢。
         self._sessions[session_id] = session
         if subscribe:
