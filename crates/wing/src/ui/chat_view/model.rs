@@ -1038,6 +1038,41 @@ mod tests {
         assert_eq!(view.cells[idx].generation(), after_frame);
     }
 
+    /// The height path is a frame boundary too: heights feed the scroll
+    /// maths, and a cell whose height is already cached takes the early
+    /// return — without the flush there, the stale (pre-fragment) height
+    /// would be handed back as-is.
+    #[test]
+    fn test_compute_height_flushes_deferred_args() {
+        let mut view = ChatView::new();
+        view.push(ChatCell::ToolCall(ToolCallBlock::new_streaming(
+            TOOL_BASH.into(),
+            "tc-height".into(),
+        )));
+        let idx = view.tool_call_index("tc-height").unwrap();
+        let (p, l) = test_ctx();
+        let ctx = make_ctx(&p, &l);
+
+        // Establish the height cache for the empty header.
+        let empty_height = view.cells[idx].compute_height(80, &ctx);
+        assert_eq!(args_parse_count(&view, idx), 0, "nothing appended yet");
+
+        // A wrapping-length command arrives; nothing invalidates the cache
+        // yet (that is the O(1) append contract).
+        let command = "x".repeat(200);
+        view.append_tool_args_fragment_by_index(idx, &format!(r#"{{"command": "{command}"}}"#));
+
+        // Measuring must flush first: the parsed command wraps the header,
+        // so the fresh height grows — a cache hit without the flush would
+        // hand back the stale baseline.
+        let height = view.cells[idx].compute_height(80, &ctx);
+        assert_eq!(args_parse_count(&view, idx), 1, "height must flush");
+        assert!(
+            height > empty_height,
+            "stale height survived the deferred args; got {height}, baseline {empty_height}"
+        );
+    }
+
     /// `is_final` forces the deferred parse so the completed args
     /// materialize without waiting for the next frame.
     #[test]

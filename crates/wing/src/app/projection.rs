@@ -249,7 +249,7 @@ impl App {
                         ToolCallBlock::new(tool_name.clone(), tool_args, tool_call_id.clone());
                     // Start timer for Bash tools.
                     if tool_name == TOOL_BASH {
-                        block.started_at = Some(std::time::Instant::now());
+                        block.start_timer(std::time::Instant::now());
                     }
                     self.chat.push(ChatCell::ToolCall(block));
                 }
