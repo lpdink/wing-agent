@@ -48,6 +48,7 @@ from wing_probe.driver import (
 from wing_probe.env import (
     DEFAULT_AGENT_TOOLS,
     DEFAULT_PROBE_MODEL,
+    DEFAULT_SYSTEM_PROMPT,
     ProbeEnv,
     ProbeEnvError,
     candidate_gateway_binaries,
@@ -161,6 +162,7 @@ __all__ = [
     "DEFAULT_AGENT_TOOLS",
     "DEFAULT_MAX_SIZE",
     "DEFAULT_PROBE_MODEL",
+    "DEFAULT_SYSTEM_PROMPT",
     "DEFAULT_TIMEOUT",
     "DEFAULT_TURN_WITHIN",
     "DEFAULT_WITHIN",

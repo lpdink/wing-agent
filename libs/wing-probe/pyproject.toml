@@ -34,6 +34,13 @@ packages = ["wing_probe"]
 wing-sdk = { workspace = true }
 
 # 局部 pytest 配置：让 `pytest libs/wing-probe/...` 以本目录为 rootdir，
-# 避免与仓库根配置的 rootdir 歧义（asyncio strict 与仓库根一致）。
+# 避免与仓库根配置的 rootdir 歧义。
+#
+# 注意：本目录成为 rootdir 后**根配置不生效**，因此这里与仓库根逐项对齐
+# （`asyncio_mode` 与 `filterwarnings` 同款）——probe 会起 aiohttp / websockets
+# / 网关子进程，asyncio 关闭期的未回收异常不该把场景判红。
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
+filterwarnings = [
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+]

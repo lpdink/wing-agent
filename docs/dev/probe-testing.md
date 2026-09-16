@@ -74,7 +74,7 @@ async def test_bash_write_then_history(probe: Probe) -> None:
     )
     session = await probe.session(model="probe/doc-example", yolo=True)  # ② 建会话（yolo = Bash 免确认）
 
-    result = await session.chat("please write out.txt")   # ③ send + 等本轮 turn_result
+    result = await session.chat("please write out.txt")   # ③ send + 等本轮 turn_result（error 立即失败）
     assert result.data["subtype"] == "success", result.data
 
     session.watch.assert_ordered(                          # ④ 事件（since=0 从时间线起点扫）
@@ -118,7 +118,8 @@ async def test_bash_write_then_history(probe: Probe) -> None:
 - `type` 可以是单个类型名或一组（或语义）；`where` 是谓词 `lambda event: …` 或"字段子集相等"映射 `{"tool_name": "Bash"}`；
 - **时间只能是上限**：`within` 缺省 5s，显式值必须是有限数（`inf` / `None` 被拒绝），`within=0` = 只看当下；断言禁止用 `sleep` 驱动；
 - 事件对象：`event.type` / `event.data`（原始 JSON，不做类型化镜像——防漂移）/ `event.index` / `event.at`（相对 env 启动的单调时钟）/ `event.raw`（重组后的原始载荷）/ `event.frames`（传输层帧数，`>1` 表示经 `_chunk` 信封重组）；
-- 失败报告：期望描述 → 游标后实际时间线 → 第一处分叉 → 原始帧尾部。
+- 失败报告：期望描述 → 游标后实际时间线 → 第一处分叉 → 原始帧尾部；
+- `session.chat(text, within=…)` = 发送 + 等本轮 `turn_result`；若本轮先出现 `error` 事件则**立即失败**（不等满 `within`）——报告复用 `expect` 的渲染：聚焦 error 事件 + 失败前一个事件起的时间线 + 原始帧尾部 + 转储路径。"模型报错导致轮次没结束"因此是零等待的失败，而不是 30s 超时。
 
 ### LLM 请求上下文：`probe.context(model=None, index=0)`
 
@@ -133,6 +134,8 @@ async def test_bash_write_then_history(probe: Probe) -> None:
 | `view.assert_tail_from([...])` | 尾部（保留区）未丢 |
 
 消息规格（`MsgSpec`）三种写法：`{"role": "user", "content": "hi"}` / `"user: hi"` / `MessageView` 对象；映射键允许 `role` / `content` / `tool_call_id` / `name` / `reasoning_content` / `has_tool_calls` / `tool_calls`（拼错的键会报错，不静默通过）。
+
+请求的 system 段来自生成配置里的默认模板 `system_prompt`（`wing_probe.env.DEFAULT_SYSTEM_PROMPT`，**非空**；可用 `render_config_yaml(system_prompt=…)` / `ProbeEnv(system_prompt=…)` 覆盖，`probe.env.system_prompt` 是场景里的对照值）。"system + 摘要"这类前缀断言因此作用在真实的 system 段上，而不是空串上退化。
 
 ### 落盘：`session.history` / `probe.history(session)`
 
@@ -156,7 +159,7 @@ async def test_bash_write_then_history(probe: Probe) -> None:
 | `assert_content(path, contains=… \| equals=… \| matches=…)` | 内容（三者选一；`matches` 走 `re.search` + `MULTILINE`） |
 | `read_text(path)` / `paths(ignore=…)` / `snapshot(ignore=…)` / `assert_snapshot(expected)` | 读取 / 清单 / 快照对账 |
 
-路径按 workspace 解析；越界路径由 `resolve()` 拒绝。
+路径按 workspace 解析；越界路径由 `resolve()` 拒绝。`probe.files` 用 probe 的默认 workspace（`<root>/workspace`，`probe.session()` 不带 `workspace=` 时的目录）；`probe.files_of(session | session_id)` 用该会话自己的目录——只给 session id（或 resume 出来的、句柄不知道目录的会话）时回读 `metadata.json.workspace`，不会静默落到默认 workspace 上。
 
 ## 红线清单与口径声明
 

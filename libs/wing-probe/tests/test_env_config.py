@@ -14,6 +14,7 @@ from aiohttp import web
 
 from wing_probe.env import (
     DEFAULT_AGENT_TOOLS,
+    DEFAULT_SYSTEM_PROMPT,
     DEFAULT_PROBE_MODEL,
     ProbeEnv,
     ProbeEnvError,
@@ -46,6 +47,9 @@ def test_render_config_points_provider_at_fake() -> None:
     assert agent["default"] is True
     assert agent["model"] == DEFAULT_PROBE_MODEL
     assert agent["provider"] == provider["name"]
+    # system prompt 非空：system 段要真的进请求（"system + 摘要/前缀"断言的前提）
+    assert agent["system_prompt"] == DEFAULT_SYSTEM_PROMPT
+    assert agent["system_prompt"].strip()
     assert tuple(agent["tools"]) == DEFAULT_AGENT_TOOLS
     assert agent["skills"] == [] and agent["rules"] == []
 
@@ -69,12 +73,14 @@ def test_render_config_overrides() -> None:
             gateway_port=2,
             model="probe/thing",
             tools=["Bash"],
+            system_prompt="be terse",
             context_window_tokens=1000,
             keep_recent_tokens=100,
         )
     )
     assert config["agents"][0]["model"] == "probe/thing"
     assert config["agents"][0]["tools"] == ["Bash"]
+    assert config["agents"][0]["system_prompt"] == "be terse"
     assert config["agents"][0]["context_window_tokens"] == 1000
     assert config["agents"][0]["keep_recent_tokens"] == 100
 

@@ -23,6 +23,7 @@ from wing_probe import (
     Probe,
     Session,
     Turn,
+    Usage,
     assert_rewind_transition,
     is_event,
 )
@@ -34,10 +35,18 @@ ROOT_MODEL = "probe/rewind-root"
 
 
 async def _three_turns(probe: Probe, model: str) -> Session:
-    """三轮对话（alpha / beta / gamma），返回会话句柄。"""
+    """三轮对话（alpha / beta / gamma），返回会话句柄。
+
+    第 1 轮带 ``usage``（假 Provider 是 usage 的驱动源）——落盘的 assistant 行
+    因此携带 provider 审计字段，rewind 的"复制行不复制 usage / stop_reason"
+    断言才有实证对象（见 :func:`test_middle_rewind_chain_shape_and_draft`）。
+    """
     probe.register(
         model,
-        Turn.of(text="reply one"),
+        Turn.of(
+            text="reply one",
+            usage=Usage(prompt_tokens=1234, completion_tokens=56, cached_tokens=7),
+        ),
         Turn.of(text="reply two"),
         Turn.of(text="reply three"),
         Turn.of(text="reply four"),
@@ -93,6 +102,14 @@ async def test_middle_rewind_chain_shape_and_draft(probe: Probe) -> None:
     assert copy["content"] == source["content"] == "reply one", copy
     assert copy["parent_uuid"] == source["parent_uuid"], copy  # 祖父
     assert copy["parent_uuid"] == messages[0]["uuid"], copy
+
+    # 复制行**不复制** provider 审计字段（usage / stop_reason）——实现的上下文
+    # 事实口径（`HistoryView.message_semantics` 的比较口径同源）。先确认源行
+    # 真的带 usage（否则这条断言是空转），再断言复制行没有它。
+    assert "usage" in source and source["usage"]["prompt_tokens"] == 1234, source
+    assert "usage" not in copy, copy
+    assert "stop_reason" not in copy, copy
+    assert set(copy) <= set(source) - {"usage", "stop_reason"}, sorted(copy)
 
     # 目标及其后续被移出活跃链（但仍留在记录集里）。
     after_chain_uuids = [record["uuid"] for record in chain]

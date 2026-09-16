@@ -53,6 +53,14 @@ DEFAULT_PROBE_MODEL = "probe/default"
 DEFAULT_PROVIDER_NAME = "probe"
 DEFAULT_PROVIDER_API_KEY = "probe-key"
 
+#: 默认模板的 system prompt（**非空**：system 段要真的参与请求组装 / compact /
+#: KV cache 前缀语义，"system + 摘要"这类断言才不是空串上的退化；内容固定，
+#: 场景可直接与 ``probe.system_prompt`` 对照）。
+DEFAULT_SYSTEM_PROMPT = (
+    "You are wing's deterministic probe agent. Answer the user's request directly "
+    "and keep the answer short."
+)
+
 #: 预置 default 模板的工具集（内置工具，无远程宿主依赖）。
 DEFAULT_AGENT_TOOLS: tuple[str, ...] = (
     "Bash",
@@ -163,6 +171,7 @@ def render_config_yaml(
     provider_api_key: str = DEFAULT_PROVIDER_API_KEY,
     model: str = DEFAULT_PROBE_MODEL,
     tools: Sequence[str] = DEFAULT_AGENT_TOOLS,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     context_window_tokens: int = 256_000,
     keep_recent_tokens: int = 50_000,
     log_level: str = "INFO",
@@ -170,7 +179,8 @@ def render_config_yaml(
     """生成 probe 网关配置（providers 指向假 Provider；agents 预置 default）。
 
     base_url 是 OpenAI 兼容根（``http://host:port/v1``）——provider 在其后
-    拼 ``/chat/completions`` 与 ``/models``。
+    拼 ``/chat/completions`` 与 ``/models``。``system_prompt`` 默认非空
+    （见 :data:`DEFAULT_SYSTEM_PROMPT`），空串会让 system 段从请求里消失。
     """
     config: dict[str, Any] = {
         "providers": [
@@ -193,7 +203,7 @@ def render_config_yaml(
                 "model": model,
                 "provider": provider_name,
                 "default": True,
-                "system_prompt": "",
+                "system_prompt": system_prompt,
                 "tools": list(tools),
                 "context_window_tokens": context_window_tokens,
                 "keep_recent_tokens": keep_recent_tokens,
@@ -316,6 +326,7 @@ class ProbeEnv:
         gateway_attempts: int = DEFAULT_GATEWAY_ATTEMPTS,
         model: str = DEFAULT_PROBE_MODEL,
         tools: Sequence[str] = DEFAULT_AGENT_TOOLS,
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         env_overrides: Mapping[str, str] | None = None,
     ) -> None:
         self.root = Path(root).expanduser().resolve()
@@ -326,6 +337,8 @@ class ProbeEnv:
         self.config_path = self.wing_home / "core" / "config.yaml"
         self.model = model
         self.tools = tuple(tools)
+        self.system_prompt = system_prompt
+        """默认模板的 system prompt（非空；场景可与请求里的 system 段对照）。"""
 
         self.provider = FakeProvider(host=DEFAULT_HOST)
         """进程内假 Provider（注册剧本 / 读请求留档）。"""
@@ -384,6 +397,7 @@ class ProbeEnv:
                     gateway_port=port,
                     model=self.model,
                     tools=self.tools,
+                    system_prompt=self.system_prompt,
                 ),
             )
             self._port = port
@@ -533,6 +547,12 @@ class ProbeEnv:
         """优雅停止：``/api/shutdown`` → 等待 → ``terminate`` → ``kill``。
 
         幂等且不抛——失败场景的 teardown 也必须能安全调用。
+
+        ``_stopped`` 是**单向闸门**：一旦停止，同一个 env 实例就报废了——
+        ``stop()`` 之后再次 ``stop()`` 直接返回，``start()`` 也不支持在同一实例上
+        重启（``ProbeEnv`` 的端口 / 子进程 / 假 Provider 状态都不是可重置的）。
+        需要新环境就新建一个 ``ProbeEnv`` / ``Probe``（fixture 每场景一个，正是这条
+        约定的用法）。
         """
         if self._stopped:
             return

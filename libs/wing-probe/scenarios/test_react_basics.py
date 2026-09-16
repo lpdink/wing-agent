@@ -79,7 +79,9 @@ async def test_text_turn_event_order_and_persistence(probe: Probe) -> None:
     view.assert_tool_pairing()
 
     context = probe.context(TEXT_MODEL, 0)
-    assert context.system == "", "probe 网关的 system prompt 为空串（见实施期事实口径）"
+    # system 段实证：生成的默认模板带固定非空 prompt（不是空串退化）。
+    assert context.all_messages[0].role == "system", context.describe()
+    assert context.system == probe.env.system_prompt, context.describe()
     context.assert_prefix_like(["user: hi"])
 
 

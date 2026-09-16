@@ -163,8 +163,9 @@ async def test_request_after_compact(probe: Probe) -> None:
     assert probe.requests.count(REQUEST_MODEL) == 4, probe.requests.summary()
     context = probe.context(REQUEST_MODEL, 3)
 
-    # KV cache 前缀语义：请求前缀恰好是 system（空）+ 摘要节点，随后才是新消息。
+    # KV cache 前缀语义：请求前缀恰好是 system + 摘要节点，随后才是新消息。
     assert context.all_messages[0].role == "system", context.describe()
+    assert context.system == probe.env.system_prompt, context.describe()
     assert context.messages[0].content == compact_node["content"] == COMPACT_CONTENT
     assert context.messages[0].role == "assistant", context.describe()
     context.assert_prefix_like(
