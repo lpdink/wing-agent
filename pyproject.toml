@@ -26,13 +26,20 @@ version-file = "wing_agent/_version.py"
 packages = ["wing_agent"]
 
 [tool.uv.workspace]
-members = ["libs/core", "libs/wing-sdk", "libs/wing-orch", "crates/wing"]
+members = [
+    "libs/core",
+    "libs/wing-sdk",
+    "libs/wing-orch",
+    "libs/wing-probe",
+    "crates/wing",
+]
 
 [tool.uv.sources]
 wing-cli = { workspace = true }
 wing-gateway = { workspace = true }
 wing-sdk = { workspace = true }
 wing-orch = { workspace = true }
+wing-probe = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -47,6 +54,7 @@ dev = [
     "hatchling>=1.27",
     "wing-sdk",
     "wing-orch",
+    "wing-probe",
 ]
 
 [tool.ruff.lint]
