@@ -2,8 +2,20 @@
 name = "wing-gateway"
 dynamic = ["version"]
 description = "General-purpose agent runtime — session, event, context, tools, WebSocket gateway"
+readme = "README.md"
 requires-python = ">=3.12"
+license = "Apache-2.0"
 license-files = []
+keywords = ["agent", "runtime", "llm", "session", "websocket"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
 dependencies = [
     "aioconsole>=0.8.2",
     "fastapi>=0.139.0",
@@ -13,6 +25,13 @@ dependencies = [
     "pyyaml>=6.0.3",
     "uvicorn[standard]>=0.51.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/lpdink/wing-agent"
+Repository = "https://github.com/lpdink/wing-agent"
+Issues = "https://github.com/lpdink/wing-agent/issues"
+Changelog = "https://github.com/lpdink/wing-agent/releases"
+Documentation = "https://github.com/lpdink/wing-agent/blob/develop/docs/zh/README.md"
 
 [project.scripts]
 wing-gateway = "wing.gateway.cli:main"
