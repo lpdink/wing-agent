@@ -282,3 +282,36 @@ async def test_dump_copies_session_files(tmp_path: Path) -> None:
     assert json.loads((copied / "metadata.json").read_text(encoding="utf-8")) == {
         "workspace": str(probe.workspace)
     }
+
+
+# ── 文件断言器解析的 workspace（review N5） ─────────────────
+
+
+def test_files_of_session_id_reads_metadata_workspace(tmp_path: Path) -> None:
+    """只给 session id 时，workspace 从落盘 metadata 回读（不落到默认目录）。"""
+    probe = build_probe(tmp_path)
+    session_dir = probe.env.session_dir(SESSION_ID)
+    write_history(session_dir, [{"uuid": "u1", "role": "user", "content": "hi"}])
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    (session_dir / "metadata.json").write_text(
+        json.dumps({"workspace": str(other)}), encoding="utf-8"
+    )
+
+    files = probe.files_of(SESSION_ID)
+
+    assert files.root == other.resolve()
+    (other / "out.txt").write_text("done\n", encoding="utf-8")
+    files.assert_content("out.txt", equals="done\n")
+
+
+def test_files_of_falls_back_to_default_workspace(tmp_path: Path) -> None:
+    """metadata 缺失 / 无 workspace 时回退默认 workspace（而不是指向不存在目录）。"""
+    probe = build_probe(tmp_path)
+
+    assert probe.files_of(SESSION_ID).root == probe.workspace
+
+    session_dir = probe.env.session_dir(SESSION_ID)
+    session_dir.mkdir(parents=True)
+    (session_dir / "metadata.json").write_text(json.dumps({}), encoding="utf-8")
+    assert probe.files_of(SESSION_ID).root == probe.workspace

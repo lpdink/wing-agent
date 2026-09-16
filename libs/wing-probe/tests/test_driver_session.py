@@ -12,11 +12,13 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
 
 from wing_probe.driver import Driver, Delivery
+from wing_probe.watch import ExpectationError
 
 
 class FakeEnv:
@@ -94,4 +96,62 @@ async def test_events_route_to_session_and_fall_back_to_driver(tmp_path: Path) -
         ("text", {"session_id": "sid-1", "content": "hi"})
     ]
     assert [event.type for event in driver.timeline.all()] == ["notice", "connected"]
+    await driver.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_returns_turn_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``chat`` 正常路径：返回 ``turn_result``（发送后等轮次收口）。"""
+    driver = Driver(FakeEnv(tmp_path))
+    session = await driver.attach("sid-1", subscribe=False)
+
+    async def fake_send(content: str, *, tool_call_id: str | None = None) -> str:
+        session.timeline.append(
+            "turn_result", {"session_id": "sid-1", "subtype": "success"}
+        )
+        return "req-1"
+
+    monkeypatch.setattr(session, "send", fake_send)
+
+    event = await session.chat("hi", within=1.0)
+
+    assert event.type == "turn_result"
+    assert event.data["subtype"] == "success"
+    await driver.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_fails_fast_on_error_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``error`` 事件立即失败（不等满 ``within``），报告仍含聚焦事件与时间线。"""
+    driver = Driver(FakeEnv(tmp_path))
+    session = await driver.attach("sid-1", subscribe=False)
+
+    async def fake_send(content: str, *, tool_call_id: str | None = None) -> str:
+        session.timeline.append("turn_started", {"session_id": "sid-1"})
+        session.timeline.append(
+            "error", {"session_id": "sid-1", "message": "model call failed: boom"}
+        )
+        return "req-1"
+
+    monkeypatch.setattr(session, "send", fake_send)
+
+    started = time.monotonic()
+    with pytest.raises(ExpectationError) as failure:
+        await session.chat("hi", within=30.0)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0, (
+        f"error 必须立即失败，而不是等满 within（耗时 {elapsed:.2f}s）"
+    )
+    report = str(failure.value)
+    assert "the turn ended with an error event" in report
+    assert "model call failed: boom" in report, report
+    assert "timeline 'session sid-1'" in report, report
+    assert "turn_started" in report, "报告必须能看到游标后的完整时间线"
+    assert failure.value.focus is not None
+    assert failure.value.focus.type == "error"
     await driver.close()

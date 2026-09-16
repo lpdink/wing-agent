@@ -40,7 +40,7 @@ from wing_probe.history.invariants import (
     assert_no_transient_records,
     assert_tool_pairing,
 )
-from wing_probe.history.view import HistoryView
+from wing_probe.history.view import HistoryView, read_metadata
 from wing_probe.driver.ws import GatewayWS
 from wing_probe.provider.context import ContextView
 from wing_probe.provider.request_log import LoggedRequest, RequestLog
@@ -262,12 +262,24 @@ class Probe:
         return FileAssertions(self.workspace)
 
     def files_of(self, session: Session | str) -> FileAssertions:
-        """某个会话 workspace 的文件断言器（``session`` 可以是句柄或 session id）。"""
+        """某个会话 workspace 的文件断言器（``session`` 可以是句柄或 session id）。
+
+        句柄优先用其 ``workspace``；只给 session id（或句柄的 workspace 未知，如
+        resume 出来的会话）时回读 ``metadata.json.workspace``——否则会静默指到
+        默认 workspace 上，让文件断言变成假红/假绿。
+        """
         if isinstance(session, Session):
-            root = session.workspace or self.workspace
+            session_id = session.session_id
+            root = session.workspace or self._session_workspace(session_id)
         else:
-            root = self.workspace
-        return FileAssertions(root)
+            root = self._session_workspace(session)
+        return FileAssertions(root or self.workspace)
+
+    def _session_workspace(self, session_id: str) -> Path | None:
+        """从落盘 metadata 读会话 workspace（缺失 / 空值返回 None）。"""
+        metadata = read_metadata(self.env.session_dir(session_id))
+        workspace = (metadata or {}).get("workspace")
+        return Path(str(workspace)).expanduser() if workspace else None
 
     def history(self, session: Session | str) -> HistoryView:
         """会话的 ``history.jsonl`` 视图（``session`` 可以是句柄或 session id）。"""

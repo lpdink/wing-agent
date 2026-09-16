@@ -35,6 +35,12 @@ from wing_probe.driver.ws import (
     GatewayWS,
 )
 from wing_probe.watch.expect import Watcher
+from wing_probe.watch.report import (
+    KIND_EXPECT,
+    Expectation,
+    ExpectationError,
+    format_at,
+)
 from wing_probe.watch.timeline import Clock, Event, FrameLog, Timeline
 
 if TYPE_CHECKING:
@@ -148,11 +154,38 @@ class Session:
     async def chat(self, text: str, *, within: float = DEFAULT_TURN_WITHIN) -> Event:
         """发送消息并等到本轮 ``turn_result``（返回该事件，供断言 subtype / usage）。
 
-        超时报告里能看到游标之后的全部事件（含 ``error``），所以"模型报错导致
-        轮次没结束"这类失败不需要重跑即可定位。
+        **``error`` 立即失败**：``error`` 事件（模型调用失败 / 上下文组装失败）意味着
+        这一轮不会再有 ``turn_result``，等满 ``within`` 只是白烧时间。失败报告复用
+        ``ExpectationError`` 的渲染（聚焦 error 事件 + 游标后完整时间线 + 原始帧尾部
+        + 转储路径），所以"快速失败"不牺牲现场可读性。
         """
         await self.send(text)
-        return await self.watch.expect("turn_result", within=within)
+        event = await self.watch.expect(["turn_result", "error"], within=within)
+        if event.type == "error":
+            raise self._turn_failed(event, within=within)
+        return event
+
+    def _turn_failed(self, event: Event, *, within: float) -> ExpectationError:
+        """把 ``error`` 事件渲染成与 expect 超时同款的失败报告。"""
+        expectation = Expectation(
+            kind=KIND_EXPECT,
+            types=("turn_result",),
+            within=within,
+            detail=(
+                f"the turn ended with an error event (index {event.index}, "
+                f"{format_at(event.at)}) instead of turn_result"
+            ),
+        )
+        return ExpectationError(
+            expectation,
+            timeline=self.timeline,
+            frames=self.frames,
+            focus=event,
+            dump_path=self.watch.dump_path,
+            # 游标已被 expect 推到 error 之后——报告从"失败前的最后一个事件"
+            # 起渲染，error 本身与之后的一切都在，现场不缩水。
+            timeline_cursor=max(event.index - 1, 0),
+        )
 
     async def answer(self, ask: Event | str, text: str) -> str:
         """定向答复一个 ask 事件（``ask`` 可以是事件对象，也可以直接给 tool_call_id）。"""
@@ -344,9 +377,19 @@ class Driver:
         )
 
     async def resume(self, session_id: str, *, subscribe: bool = True) -> Session:
-        """恢复磁盘上的已有会话并订阅它。"""
+        """恢复磁盘上的已有会话并订阅它。
+
+        ``workspace`` 从响应回填（``ResumeSessionResponse.workspace``）——否则
+        句柄不知道工作目录，``probe.files_of(session)`` 会指到默认 workspace。
+        """
         response = await self.http.resume_session(session_id)
-        return await self.attach(session_id, response=response, subscribe=subscribe)
+        workspace = response.get("workspace")
+        return await self.attach(
+            session_id,
+            response=response,
+            workspace=workspace if isinstance(workspace, str) and workspace else None,
+            subscribe=subscribe,
+        )
 
     async def attach(
         self,
@@ -356,9 +399,19 @@ class Driver:
         workspace: str | Path | None = None,
         subscribe: bool = True,
     ) -> Session:
-        """把会话挂进事件路由表（并可选地订阅）——已挂载则原样返回。"""
+        """把会话挂进事件路由表（并可选地订阅）。
+
+        已挂载时**复用句柄**（时间线与已收事件不丢），但刷新可变状态：新给的
+        ``response`` 覆盖旧的（``resume`` / ``fork`` 的响应字段——如 fork 的
+        ``draft``——不能停留在上一次的值上），``workspace`` 只在旧值缺失时回填
+        （不静默改写调用方已确认的目录）。订阅不重复发起（路由已绑定）。
+        """
         existing = self._sessions.get(session_id)
         if existing is not None:
+            if response is not None:
+                existing.response = dict(response)
+            if workspace is not None and existing.workspace is None:
+                existing.workspace = Path(workspace).expanduser().resolve()
             return existing
         session = Session(self, session_id, response=response, workspace=workspace)
         # 失败报告末行引用现场转储路径（转储本身由 ``probe.dump()`` / fixture

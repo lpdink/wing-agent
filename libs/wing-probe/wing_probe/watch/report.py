@@ -145,6 +145,7 @@ class ExpectationError(AssertionError):
         frames: FrameLog | Sequence[Frame] | None = None,
         focus: Event | None = None,
         dump_path: str | None = None,
+        timeline_cursor: int | None = None,
     ) -> None:
         self.expectation = expectation
         self.timeline = timeline
@@ -155,6 +156,7 @@ class ExpectationError(AssertionError):
             frames=frames,
             focus=focus,
             dump_path=dump_path,
+            timeline_cursor=timeline_cursor,
         )
         super().__init__(self.report)
 
@@ -238,12 +240,18 @@ def render_report(
     frames: FrameLog | Sequence[Frame] | None = None,
     focus: Event | None = None,
     dump_path: str | None = None,
+    timeline_cursor: int | None = None,
     event_limit: int = DEFAULT_EVENT_LIMIT,
     frame_limit: int = DEFAULT_FRAME_LIMIT,
     snippet: int = EVENT_SNIPPET,
     frame_snippet: int = FRAME_SNIPPET,
 ) -> str:
-    """完整失败报告（期望 → 聚焦事件 → 时间线 → 原始帧 → 现场转储路径）。"""
+    """完整失败报告（期望 → 聚焦事件 → 时间线 → 原始帧 → 现场转储路径）。
+
+    ``timeline_cursor`` 覆盖时间线分节的起点（默认 = 时间线当前游标）。
+    "在预算之外的路径上失败"（如 ``Session.chat`` 撞上 ``error`` 事件、此时游标
+    已被推进到失败点之后）需要它来把**失败前的上下文**也渲染进报告。
+    """
     sections = [f"ExpectationError: {expectation.summary()}", expectation.render()]
     if focus is not None:
         sections.append(
@@ -251,7 +259,11 @@ def render_report(
             f"(index {focus.index}, {format_at(focus.at)}) ---\n"
             + render_event(focus, snippet=snippet)
         )
-    sections.append(render_timeline(timeline, limit=event_limit, snippet=snippet))
+    sections.append(
+        render_timeline(
+            timeline, cursor=timeline_cursor, limit=event_limit, snippet=snippet
+        )
+    )
     sections.append(render_frames(frames, limit=frame_limit, snippet=frame_snippet))
     if dump_path is not None:
         sections.append(f"--- artifacts: {dump_path} ---")
