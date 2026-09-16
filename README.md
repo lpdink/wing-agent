@@ -7,10 +7,10 @@
 <p align="center">
   <a href="https://pypi.org/project/wing-agent/"><img src="https://img.shields.io/pypi/v/wing-agent" alt="PyPI"></a>
   <a href="https://pypi.org/project/wing-agent/"><img src="https://img.shields.io/pypi/pyversions/wing-agent" alt="Python"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
+  <a href="https://github.com/lpdink/wing-agent/blob/develop/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
 </p>
 
-**[中文文档](docs/zh/README.md)**
+**[中文文档](https://github.com/lpdink/wing-agent/blob/develop/docs/zh/README.md)**
 
 > **⚠️ Experimental** — Expect breaking changes until v1.0.
 
@@ -74,13 +74,13 @@ Frontend config: `~/.wing/tui/config.yaml`
 | `Explorer` | Autonomous code exploration sub-agent (blocking or background) |
 | `BetterEdit` | Anchored `[upto]` edits (experimental) |
 
-Custom tools: **[docs/en/custom-tools.md](docs/en/custom-tools.md)**
+Custom tools: **[docs/en/custom-tools.md](https://github.com/lpdink/wing-agent/blob/develop/docs/en/custom-tools.md)**
 
 ## Magic Commands
 
 Type `/` in the TUI to see available commands.
 
-Full reference: **[docs/en/magic-commands.md](docs/en/magic-commands.md)**
+Full reference: **[docs/en/magic-commands.md](https://github.com/lpdink/wing-agent/blob/develop/docs/en/magic-commands.md)**
 
 ## Headless mode (stdio)
 
@@ -98,13 +98,13 @@ Useful flags: `-m/--model`, `-r/--resume`, `--system-prompt`, `--append-system-p
 
 | Document | English | 中文 |
 |----------|---------|------|
-| Custom Tools | [docs/en/custom-tools.md](docs/en/custom-tools.md) | [docs/zh/custom-tools.md](docs/zh/custom-tools.md) |
-| Magic Commands | [docs/en/magic-commands.md](docs/en/magic-commands.md) | [docs/zh/magic-commands.md](docs/zh/magic-commands.md) |
+| Custom Tools | [docs/en/custom-tools.md](https://github.com/lpdink/wing-agent/blob/develop/docs/en/custom-tools.md) | [docs/zh/custom-tools.md](https://github.com/lpdink/wing-agent/blob/develop/docs/zh/custom-tools.md) |
+| Magic Commands | [docs/en/magic-commands.md](https://github.com/lpdink/wing-agent/blob/develop/docs/en/magic-commands.md) | [docs/zh/magic-commands.md](https://github.com/lpdink/wing-agent/blob/develop/docs/zh/magic-commands.md) |
 
 ## Developing
 
-Start with **[AGENTS.md](AGENTS.md)** (high-density project overview). For mechanism-level deep dives (data flow, full HTTP API, glossary), see **[docs/dev/](docs/dev/)** (中文).
+Start with **[AGENTS.md](https://github.com/lpdink/wing-agent/blob/develop/AGENTS.md)** (high-density project overview). For mechanism-level deep dives (data flow, full HTTP API, glossary), see **[docs/dev/](https://github.com/lpdink/wing-agent/tree/develop/docs/dev/)** (中文).
 
 ## License
 
-[Apache-2.0](LICENSE)
+[Apache-2.0](https://github.com/lpdink/wing-agent/blob/develop/LICENSE)
