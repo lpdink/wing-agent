@@ -103,17 +103,7 @@ def is_message(record: Mapping[str, Any]) -> bool:
     return record.get("role") in MESSAGE_ROLES
 
 
-def iter_messages(records: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
-    """过滤 Message 记录（顺序保留）。"""
-    return [record for record in records if is_message(record)]
-
-
-def iter_events(records: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
-    """过滤事件记录（顺序保留）。"""
-    return [record for record in records if is_event(record)]
-
-
-def record_label(record: Mapping[str, Any], *, position: int | None = None) -> str:
+def _record_label(record: Mapping[str, Any], *, position: int | None = None) -> str:
     """一行式记录标签：``[chain 3] message uuid=abcd1234 role=user``。"""
     kind = "event" if is_event(record) else str(record.get("role") or "unknown")
     uuid = record_uuid(record) or "<no-uuid>"
@@ -133,7 +123,7 @@ def describe_record(
     parts: list[str] = []
     if line is not None:
         parts.append(f"line {line}")
-    parts.append(record_label(record, position=position))
+    parts.append(_record_label(record, position=position))
     parent = record.get("parent_uuid")
     if isinstance(parent, str) and parent:
         parts.append(f"parent={parent}")
@@ -396,34 +386,28 @@ class HistoryView:
 
     # ── 链遍历 ────────────────────────────────────────────
 
-    def _ascend(self, start_uuid: str) -> tuple[list[dict[str, Any]], str | None]:
-        """自 ``start_uuid`` 沿 ``parent_uuid`` 回溯到根。
+    def chain_ending_at(self, uuid: str) -> list[dict[str, Any]]:
+        """以 ``uuid`` 为叶、沿 ``parent_uuid`` 回溯到根的链（根 → uuid 顺序）。
 
-        返回 ``(根 → start 顺序的链, 中断原因)``：中断原因非 None 表示
-        parent 断裂（uuid 缺失）或成环。
+        与实现 ``trace_chain`` 同构：parent 断裂（uuid 不在记录集）或成环时
+        就地截断——**不静默**：``assert_chain_invariants`` 会把这一类拓扑破坏
+        单独报出来（含断裂 uuid 与行号）。
         """
         nodes: list[dict[str, Any]] = []
         seen: set[str] = set()
-        current: str | None = start_uuid
+        current: str | None = uuid
         while isinstance(current, str) and current:
             if current in seen:
-                return list(reversed(nodes)), f"cycle at uuid {current}"
+                break
             seen.add(current)
             node = self.by_uuid.get(current)
             if node is None:
-                return list(reversed(nodes)), f"dangling uuid {current}"
+                break
             nodes.append(node)
             parent = node.get("parent_uuid")
             current = parent if isinstance(parent, str) and parent else None
-        return list(reversed(nodes)), None
-
-    def chain_ending_at(self, uuid: str) -> list[dict[str, Any]]:
-        """以 ``uuid`` 为叶、沿 ``parent_uuid`` 回溯到根的链（根 → uuid 顺序）。"""
-        return self._ascend(uuid)[0]
-
-    def ascend_report(self, uuid: str) -> str | None:
-        """回溯中断原因（None 表示成功到达根）——失败报告素材。"""
-        return self._ascend(uuid)[1]
+        nodes.reverse()
+        return nodes
 
     def active_chain(self) -> list[dict[str, Any]]:
         """活跃链：自 tip 沿 ``parent_uuid`` 回溯（根 → tip 顺序）。
@@ -476,12 +460,6 @@ class HistoryView:
         """活跃链上的事件记录（顺序保留）。"""
         return [record for record in self.active_chain() if is_event(record)]
 
-    def chain_messages(
-        self, chain: Sequence[Mapping[str, Any]]
-    ) -> list[Mapping[str, Any]]:
-        """任意链上的 Message 记录（顺序保留）。"""
-        return iter_messages(chain)
-
     # ── 查询 ──────────────────────────────────────────────
 
     def find(self, uuid: str) -> dict[str, Any] | None:
@@ -497,16 +475,6 @@ class HistoryView:
         if not isinstance(parent, str) or not parent:
             return None
         return self.by_uuid.get(parent)
-
-    def materialized_parents(self) -> dict[str, str]:
-        """``uuid → parent_uuid`` 映射（parent 缺失的根节点不在其中）。"""
-        result: dict[str, str] = {}
-        for record in self.records:
-            uuid = record_uuid(record)
-            parent = record.get("parent_uuid")
-            if uuid is not None and isinstance(parent, str) and parent:
-                result[uuid] = parent
-        return result
 
     def line_of(self, uuid: str) -> int | None:
         """记录的源文件行号（定位用）。"""
@@ -618,12 +586,9 @@ __all__ = [
     "event_semantics",
     "is_event",
     "is_message",
-    "iter_events",
-    "iter_messages",
     "message_semantics",
     "node_semantics",
     "read_metadata",
-    "record_label",
     "record_uuid",
     "semantic_diff",
     "truncate",
