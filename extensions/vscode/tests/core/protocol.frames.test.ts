@@ -85,14 +85,31 @@ describe('remote tool frames', () => {
   });
 
   it('defaults missing tool_call_request arguments to an empty object', () => {
-    expect(decodeToolCallRequest({ call_id: 'c1', name: 'Bash' })).toMatchObject({ arguments: {} });
-    expect(decodeToolCallRequest({ call_id: 'c1' })).toBeNull();
+    expect(decodeToolCallRequest({ type: 'tool_call_request', call_id: 'c1', name: 'Bash' })).toMatchObject({
+      arguments: {},
+    });
+    expect(decodeToolCallRequest({ type: 'tool_call_request', call_id: 'c1' })).toBeNull();
+  });
+
+  it('requires the tool_call_request discriminant (review r1 N2)', () => {
+    // Both ends always write `type`; accepting a typeless frame would hide a
+    // protocol break (and the frame shares the socket with event payloads).
+    expect(decodeToolCallRequest({ call_id: 'c1', name: 'Bash' })).toBeNull();
+    expect(decodeToolCallRequest({ type: 'tool_call_result', call_id: 'c1', name: 'Bash' })).toBeNull();
+    expect(decodeToolCallRequest({ type: 'text', content: 'hi', call_id: 'c1', name: 'Bash' })).toBeNull();
   });
 
   it('decodes and encodes a tool_call_result', () => {
     const frame = { type: 'tool_call_result', call_id: 'c1', result: 'ok', is_error: false } as const;
-    expect(decodeToolCallResult({ call_id: 'c1', result: 'ok' })).toStrictEqual(frame);
+    expect(decodeToolCallResult({ type: 'tool_call_result', call_id: 'c1', result: 'ok' })).toStrictEqual(
+      frame,
+    );
+    expect(decodeToolCallResult({ type: 'tool_call_result', result: 'no call id' })).toBeNull();
     expect(JSON.parse(encodeToolCallResult(frame))).toStrictEqual(frame);
-    expect(decodeToolCallResult({ result: 'no call id' })).toBeNull();
+  });
+
+  it('requires the tool_call_result discriminant (review r1 N2)', () => {
+    expect(decodeToolCallResult({ call_id: 'c1', result: 'ok' })).toBeNull();
+    expect(decodeToolCallResult({ type: 'tool_call_request', call_id: 'c1' })).toBeNull();
   });
 });

@@ -42,6 +42,7 @@ import {
   readJsonArray,
   readStringArray,
   reqBoolean,
+  reqJsonArray,
   reqNumber,
   reqString,
   stringOr,
@@ -73,7 +74,15 @@ export interface EventMeta {
   readonly request_id: string;
   /** Owning session; `null` for the few events emitted before a session exists. */
   readonly session_id: string | null;
-  /** Chain node id; only some events carry it (the ones stdio consumes). */
+  /**
+   * Chain node id.
+   *
+   * `wire_dump` strips it unless the event declares one (the four turn-level
+   * events: assistant_turn / tool_result_turn / turn_result / session_init), so
+   * a missing value decodes to `null` — "unknown", never a fabricated id. (The
+   * Rust mirror does not carry `uuid` on every variant at all; being uniformly
+   * nullable is the additive version of the same tolerance.)
+   */
   readonly uuid: string | null;
 }
 
@@ -512,7 +521,7 @@ const decodeDiffContent: EventDecoder<DiffContentEvent> = (payload, meta) => ({
 const decodeAssistantTurn: EventDecoder<AssistantTurnEvent> = (payload, meta) => ({
   ...meta,
   type: 'assistant_turn',
-  content_blocks: readJsonArray(payload, 'content_blocks').filter(isJsonObject),
+  content_blocks: reqJsonArray(payload, 'content_blocks').filter(isJsonObject),
   model: stringOr(payload, 'model', ''),
   stop_reason: optString(payload, 'stop_reason'),
   usage: optJsonObject(payload, 'usage'),
@@ -570,8 +579,12 @@ const decodeInterrupted: EventDecoder<InterruptedEvent> = (_payload, meta) => ({
 const decodeCompactDone: EventDecoder<CompactDoneEvent> = (payload, meta) => ({
   ...meta,
   type: 'compact_done',
-  original_tokens: numberOr(payload, 'original_tokens', 0),
-  compressed_tokens: numberOr(payload, 'compressed_tokens', 0),
+  // Both token counts are required in Python (`state_change.py`: no default), so
+  // a payload without them is malformed — guessing `0` would show "0 → 0 tokens"
+  // for a compaction that may have saved 90k. Strict fields degrade to
+  // `UnknownWingEvent` instead of inventing numbers (see the policy notes above).
+  original_tokens: reqNumber(payload, 'original_tokens'),
+  compressed_tokens: reqNumber(payload, 'compressed_tokens'),
   model: stringOr(payload, 'model', ''),
 });
 

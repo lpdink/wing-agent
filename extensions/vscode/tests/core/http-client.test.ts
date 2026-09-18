@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { GatewayHttpError } from '../../src/core/errors';
 import {
   COMPACT_HTTP_TIMEOUT_MS,
   DEFAULT_HTTP_TIMEOUT_MS,
@@ -58,7 +59,7 @@ class ScriptedTransport implements HttpTransport {
 }
 
 function makeClient(
-  transport: ScriptedTransport,
+  transport: HttpTransport,
   options: { apiKey?: string | null; baseUrl?: string } = {},
 ): GatewayHttpClient {
   return new GatewayHttpClient({
@@ -535,6 +536,48 @@ describe('error surface', () => {
     expect((error as { rawBody: string }).rawBody).toContain('nope');
   });
 
+  it('reports the real status of a malformed success response (review r1 N4)', async () => {
+    const transport = new ScriptedTransport().reply(202, { nope: true });
+    const error = await makeClient(transport)
+      .health()
+      .catch((cause: unknown) => cause);
+    expect(error).toMatchObject({ kind: 'malformed-response', status: 202 });
+
+    const empty = await makeClient(new ScriptedTransport().reply(204, ''))
+      .health()
+      .catch((cause: unknown) => cause);
+    expect(empty).toMatchObject({ kind: 'malformed-response', status: 204 });
+  });
+
+  it('does not invent a required collection (review r1 S1 class check)', async () => {
+    // Python marks these as required (no `default_factory`), so an absent key is a
+    // malformed response — guessing `[]` would hide a protocol break.
+    const missingSessions = await makeClient(new ScriptedTransport().reply(200, {}))
+      .listSessions()
+      .catch((cause: unknown) => cause);
+    expect(missingSessions).toMatchObject({ kind: 'malformed-response' });
+
+    const missingMessages = await makeClient(new ScriptedTransport().reply(200, { session_id: 's' }))
+      .getSession('s')
+      .catch((cause: unknown) => cause);
+    expect(missingMessages).toMatchObject({ kind: 'malformed-response' });
+
+    const missingTools = await makeClient(
+      new ScriptedTransport().reply(200, {
+        model: 'gpt-5',
+        api_url: '',
+        total_tokens: 0,
+        context_window_tokens: 0,
+        thinking: false,
+        yolo: false,
+        context_stats: { message_count: 0, total_tokens: 0 },
+      }),
+    )
+      .sessionInfo('s')
+      .catch((cause: unknown) => cause);
+    expect(missingTools).toMatchObject({ kind: 'malformed-response' });
+  });
+
   it('reports a non-JSON 2xx body as malformed-response', async () => {
     const transport = new ScriptedTransport().reply(200, 'not json');
     const error = await makeClient(transport)
@@ -543,9 +586,29 @@ describe('error surface', () => {
     expect(error).toMatchObject({ kind: 'malformed-response' });
   });
 
-  it('surfaces a transport failure unchanged', async () => {
+  it('wraps a transport failure in a typed error, keeping the cause (review r1 N5)', async () => {
     const transport = new ScriptedTransport();
-    await expect(makeClient(transport).health()).rejects.toThrowError('no response queued');
+    const error = await makeClient(transport)
+      .health()
+      .catch((cause: unknown) => cause);
+
+    expect(error).toMatchObject({
+      name: 'GatewayHttpError',
+      kind: 'network',
+      status: null,
+      message: expect.stringContaining('no response queued'),
+    });
+    expect((error as { cause: unknown }).cause).toBeInstanceOf(Error);
     expect(transport.count).toBe(1);
+  });
+
+  it('lets a GatewayHttpError from the transport pass through untouched (review r1 N5)', async () => {
+    const timeout = new GatewayHttpError({ kind: 'timeout', message: 'GET /api/health timed out' });
+    const transport: HttpTransport = { request: () => Promise.reject(timeout) };
+
+    const error = await makeClient(transport)
+      .health()
+      .catch((cause: unknown) => cause);
+    expect(error).toBe(timeout);
   });
 });

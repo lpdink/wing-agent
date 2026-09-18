@@ -647,6 +647,108 @@ describe('unknown and malformed payloads never become typed events', () => {
     expect(event).toMatchObject({ type: '_chunk' });
   });
 
+  /**
+   * S1 counter-example (review r1): the Python models mark these scalars
+   * required, so deleting one must degrade the whole payload — a defaulted
+   * number would be a fabricated value (`compact_done` used to report
+   * "0 → 0 tokens" for a compaction that really freed 90k).
+   */
+  it('compact_done without either token count is not a typed event', () => {
+    const complete = {
+      type: 'compact_done',
+      original_tokens: 90_000,
+      compressed_tokens: 12_000,
+      model: 'gpt-5',
+      ...META,
+    };
+    expect(isKnownEvent(decodeWingEvent(complete))).toBe(true);
+
+    const { original_tokens: _original, ...withoutOriginal } = complete;
+    const { compressed_tokens: _compressed, ...withoutCompressed } = complete;
+    expect(isKnownEvent(decodeWingEvent(withoutOriginal))).toBe(false);
+    expect(isKnownEvent(decodeWingEvent(withoutCompressed))).toBe(false);
+    expect(decodeWingEvent(withoutOriginal)).toMatchObject({ type: 'compact_done', raw: withoutOriginal });
+  });
+
+  it('never fabricates a value for a required scalar of any event type', () => {
+    const cases: { readonly payload: Record<string, unknown>; readonly field: string }[] = [
+      { payload: { type: 'text', content: 'hi', ...META }, field: 'content' },
+      { payload: { type: 'reasoning', content: 'hi', ...META }, field: 'content' },
+      {
+        payload: { type: 'compact_done', original_tokens: 1, compressed_tokens: 1, ...META },
+        field: 'original_tokens',
+      },
+      {
+        payload: { type: 'compact_done', original_tokens: 1, compressed_tokens: 1, ...META },
+        field: 'compressed_tokens',
+      },
+      {
+        payload: { type: 'context_stats', message_count: 1, total_tokens: 2, ...META },
+        field: 'message_count',
+      },
+      {
+        payload: { type: 'context_stats', message_count: 1, total_tokens: 2, ...META },
+        field: 'total_tokens',
+      },
+      { payload: { type: 'diff_content', path: '/tmp/a', new_text: 'x', ...META }, field: 'path' },
+      { payload: { type: 'diff_content', path: '/tmp/a', new_text: 'x', ...META }, field: 'new_text' },
+      {
+        payload: { type: 'tool_call', tool_name: 'Bash', tool_args: {}, tool_call_id: 'c1', ...META },
+        field: 'tool_args',
+      },
+      {
+        payload: {
+          type: 'tool_call_result',
+          tool_name: 'Bash',
+          tool_args: {},
+          tool_call_id: 'c1',
+          tool_result: 'x',
+          tool_success: true,
+          ...META,
+        },
+        field: 'tool_result',
+      },
+      {
+        payload: {
+          type: 'llm_call_metrics',
+          prompt_tokens: 1,
+          completion_tokens: 1,
+          cached_tokens: 0,
+          first_chunk_rt_ms: 1,
+          tokens_per_sec: 1,
+          ...META,
+        },
+        field: 'prompt_tokens',
+      },
+      { payload: { type: 'sync_session', session_id: 's', ...META }, field: 'session_id' },
+      // Required *collections* are strict too (no `default_factory` in Python).
+      {
+        payload: { type: 'assistant_turn', uuid: 'u', content_blocks: [], ...META },
+        field: 'content_blocks',
+      },
+      { payload: { type: 'user_message_accepted', content: 'hi', ...META }, field: 'content' },
+      {
+        payload: {
+          type: 'tool_result_turn',
+          uuid: 'u',
+          tool_use_id: 'c1',
+          tool_name: 'Bash',
+          content: 'x',
+          ...META,
+        },
+        field: 'tool_use_id',
+      },
+    ];
+
+    for (const { payload, field } of cases) {
+      const incomplete: Record<string, unknown> = { ...payload };
+      delete incomplete[field];
+      expect(isKnownEvent(decodeWingEvent(incomplete)), `${String(payload['type'])} without ${field}`).toBe(
+        false,
+      );
+    }
+  });
+
   it('non-object payloads degrade to an empty unknown event', () => {
     expect(decodeWingEvent('nope')).toStrictEqual({ type: '', session_id: null, raw: {} });
     expect(decodeWingEvent(null)).toStrictEqual({ type: '', session_id: null, raw: {} });

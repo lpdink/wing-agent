@@ -85,6 +85,10 @@ export function encodeClientRequest(frame: ClientRequest): string {
  * Structural and throw-free on purpose: this runs in the middle of `connect()`
  * and every "not a handshake" case is the same failure (a rejected dial), so the
  * caller only needs `null` — there is no payload worth surfacing.
+ *
+ * `type` is echoed (with the `connected` default) but **not required**: the
+ * handshake is identified by *position* (the first frame after the upgrade), so
+ * requiring the discriminant would only reject gateways that omit it.
  */
 export function decodeConnectResponse(value: unknown): ConnectResponse | null {
   if (!isJsonObject(value)) {
@@ -98,9 +102,17 @@ export function decodeConnectResponse(value: unknown): ConnectResponse | null {
   return { type: typeof type === 'string' ? type : 'connected', client_id: clientId };
 }
 
-/** Decode a `tool_call_request` frame (tool-host side); `null` when unusable. */
+/**
+ * Decode a `tool_call_request` frame (tool-host side); `null` when unusable.
+ *
+ * The discriminant is required (unlike the positional handshake): both ends of
+ * the tool channel always write it (`ToolCallRequest.model_dump_json()` on the
+ * gateway side, an explicit `"type"` in `wing_sdk/host.py`), and the frame
+ * shares the socket with event payloads — a shape-only check would accept any
+ * object that happens to carry `call_id`.
+ */
 export function decodeToolCallRequest(value: unknown): ToolCallRequestFrame | null {
-  if (!isJsonObject(value)) {
+  if (!isJsonObject(value) || value['type'] !== 'tool_call_request') {
     return null;
   }
   const callId = value['call_id'];
@@ -117,9 +129,14 @@ export function decodeToolCallRequest(value: unknown): ToolCallRequestFrame | nu
   };
 }
 
-/** Decode a `tool_call_result` frame (gateway side); `null` when unusable. */
+/**
+ * Decode a `tool_call_result` frame (gateway side); `null` when unusable.
+ *
+ * Same discriminant rule as {@link decodeToolCallRequest} — the tool host always
+ * sends it, so accepting a typeless frame would only hide a protocol break.
+ */
 export function decodeToolCallResult(value: unknown): ToolCallResultFrame | null {
-  if (!isJsonObject(value)) {
+  if (!isJsonObject(value) || value['type'] !== 'tool_call_result') {
     return null;
   }
   const callId = value['call_id'];
