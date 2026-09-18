@@ -178,6 +178,7 @@ crates/wing/src/
 - `libs/wing-sdk/wing_sdk/` — Python 远程工具宿主 SDK：`host.py`（装饰器注册 + WS 循环）、`http_client.py`、`schema.py`、`tools/`（Bash/Read/Write/Edit/Glob/Grep，workspace-bound）。
 - `libs/wing-orch/wing_orch/` — 编排 CLI（后台 Goal，port of `app/goal.rs`）：`cli.py`、`goal.py`、`runner.py`。**目前少用，改动不必同步本节细节。**
 - `libs/wing-probe/` — 确定性集成测试基础设施（假 Provider + driver + observer 断言库）：`wing_probe/`（env / provider / driver / watch / history / files）、`scenarios/`（整机断言场景）、`tests/`（基础设施自测）。**禁止 import `wing`**（AST 门禁强制；允许 `wing_sdk`），一切经公开 HTTP / WS 协议 → [docs/dev/probe-testing.md](docs/dev/probe-testing.md)。
+- `extensions/vscode/` — VSCode 前端（第四个前端形态；TS strict + pnpm 单包四层：`src/core` 网关能力层 / `src/host` 扩展宿主 / `src/webview` React 渲染 / `src/shared` 两侧契约）。层门禁由机制强制：分 tsconfig（DOM/node 隔离）+ ESLint 分区规则 + `tests/layers` 守门测试；`make check`/`make test` 含 `check-ts`/`test-ts`，CI 有 `typescript-check` job → [extensions/vscode/README.md](extensions/vscode/README.md)。
 - `e2e/claude-agent-sdk-integration/` — 用 claude-agent-sdk 跑 wing 的端到端测试（`make test-e2e`）。
 - 测试目录：`libs/core/tests/`（后端 pytest，60 个文件）、`libs/wing-sdk/tests/`、`libs/wing-orch/tests/`。
 - 顶层 `docs/dev/` 为开发者深度文档（中文），`scripts/sync_version.py` 同步版本号。
@@ -215,9 +216,9 @@ cargo test
 make check-rust                   # fmt + clippy + test
 
 # All
-make test                         # Python + Rust（含 test-probe）
+make test                         # Python + Rust + TS（含 test-probe）
 make test-probe                   # 确定性集成场景（wing-probe，离线、无外部 API key）
-make check                        # Python + Rust
+make check                        # Python + Rust + TS（含 extensions/vscode 门禁）
 make fmt                          # 格式化全部
 ```
 

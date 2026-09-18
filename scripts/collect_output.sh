@@ -5,7 +5,7 @@
 # 只能看到最后一组的日志——前面的组过了没有、跑没跑，无从判断，于是常常整轮重跑。
 #
 # 行为：
-#   1. 三组并行执行（组间互不依赖），输出各自收集到独立日志，不刷屏；
+#   1. 各组并行执行（组间互不依赖），输出各自收集到独立日志，不刷屏；
 #   2. 失败组的详情贴在末尾**之前**；
 #   3. 最后一段永远是结论块：逐组状态 + 统计 + 总用时 + 一句话结论。
 # 这样即使 tail 给得很短，也能直接看到「过没过」，不需要重跑。
@@ -20,12 +20,12 @@ cd "$ROOT" || exit 2
 
 case "$MODE" in
   test)
-    LABELS=("python" "probe" "rust")
-    CMDS=("make test-python" "make test-probe" "make test-rust")
+    LABELS=("python" "probe" "rust" "ts")
+    CMDS=("make test-python" "make test-probe" "make test-rust" "make test-ts")
     ;;
   check)
-    LABELS=("python" "rust")
-    CMDS=("make check-python" "make check-rust")
+    LABELS=("python" "rust" "ts")
+    CMDS=("make check-python" "make check-rust" "make check-ts")
     ;;
   *)
     echo "usage: $0 [test|check]" >&2

@@ -1,6 +1,12 @@
-.PHONY: check test test-e2e test-probe format fmt fmt-check fmt-check-python fmt-check-rust run install gateway
+.PHONY: check test test-e2e test-probe format fmt fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts check-ts test-ts run install gateway
 
 # ── Unified commands (Python + Rust) ─────────────────────────
+
+# ── TypeScript (extensions/vscode) ─────────────────────────────
+# 门禁与 CI 的 typescript-check job 等价：先按 lockfile 安装（--prefer-offline：
+# 本地已有 store 时不动网络），再依次跑 eslint / prettier / tsc / vitest。
+# 未接进 `fmt` / `fmt-check`：那两条要在 pre-commit 里保持秒级，而且不该强依赖 node_modules。
+VSCODE_DIR := extensions/vscode
 
 run:
 	cargo run
@@ -19,6 +25,32 @@ fmt-check: fmt-check-python fmt-check-rust
 
 test:
 	bash scripts/collect_output.sh test
+
+check-ts:
+	@(cd $(VSCODE_DIR) && pnpm install --frozen-lockfile --prefer-offline --reporter=silent) || exit 1; \
+	echo "🔍 Running eslint (extensions/vscode)..."; \
+	if ! (cd $(VSCODE_DIR) && pnpm run lint); then echo "❌ eslint failed"; exit 1; fi; \
+	echo "✅ eslint passed"; \
+	echo ""; \
+	echo "🔍 Running prettier --check (extensions/vscode)..."; \
+	if ! (cd $(VSCODE_DIR) && pnpm run format:check); then echo "❌ prettier failed"; exit 1; fi; \
+	echo "✅ prettier passed"; \
+	echo ""; \
+	echo "🔍 Running tsc --noEmit (extensions/vscode)..."; \
+	if ! (cd $(VSCODE_DIR) && pnpm run typecheck); then echo "❌ typecheck failed"; exit 1; fi; \
+	echo "✅ typecheck passed"
+
+test-ts:
+	@(cd $(VSCODE_DIR) && pnpm install --frozen-lockfile --prefer-offline --reporter=silent) || exit 1; \
+	echo "🔍 Running vitest (extensions/vscode)..."; \
+	if ! (cd $(VSCODE_DIR) && pnpm run test); then echo "❌ vitest failed"; exit 1; fi; \
+	echo "✅ vitest passed"
+
+fmt-ts:
+	cd $(VSCODE_DIR) && pnpm run format
+
+fmt-check-ts:
+	cd $(VSCODE_DIR) && pnpm run format:check
 
 # ── Python ────────────────────────────────────────────────────
 

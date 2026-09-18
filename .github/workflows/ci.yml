@@ -75,6 +75,61 @@ jobs:
       - name: Probe scenarios
         run: make test-probe
 
+  # ── TypeScript: lint + format + types + tests + build + package ──
+  typescript-check:
+    name: TypeScript Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extensions/vscode
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      # Version comes from package.json#packageManager; keep it pinned there.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: extensions/vscode/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: extensions/vscode/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: ESLint
+        run: pnpm run lint
+
+      - name: Prettier check
+        run: pnpm run format:check
+
+      - name: Type check (tsc --noEmit)
+        run: pnpm run typecheck
+
+      - name: Unit tests (vitest projects; includes the layer guard)
+        run: pnpm run test
+
+      - name: Build (extension host + webview)
+        run: pnpm run build
+
+      - name: Build webview preview harness
+        run: pnpm run build:preview
+
+      - name: Package (.vsix)
+        run: pnpm run package
+
+      - name: Upload .vsix
+        uses: actions/upload-artifact@v4
+        with:
+          name: wing-vscode-vsix
+          path: extensions/vscode/wing-vscode.vsix
+          if-no-files-found: error
+
   # ── Rust: format + clippy + test ─────────────────────────────
   rust-check:
     name: Rust Check
