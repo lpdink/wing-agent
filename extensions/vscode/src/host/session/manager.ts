@@ -1486,6 +1486,11 @@ export class SessionManager {
  * (the first streamed delta, or a replay cell that reaches the live lane) keeps
  * its head in the `append` / `insert_after` op and delivers the rest through
  * `append_text`. Both forms reconstruct the identical text in the webview.
+ *
+ * `tool_call` cells are deliberately *not* covered here: their `argsText` is
+ * capped at the source (`reducer.ts` `TOOL_ARGS_MAX_CHARS`) because it is a
+ * streaming preview — re-chunking it would still send every byte, which is the
+ * traffic the cap exists to remove (review #109 [P1-2]).
  */
 function sliceTextOp(op: CellPatch): CellPatch[] {
   switch (op.op) {

@@ -291,7 +291,7 @@ describe('streaming tool arguments over the bridge', () => {
     await flushMicrotasks();
     // The webview asked for a snapshot mid-stream (`resync`): the host answers
     // with `hydrate` and the *host-side* buffer keeps accumulating.
-    harness.posted.length = 0;
+    harness.wipe();
     harness.host.onResync(sessionId);
     emitRange(10_000, args.length);
     await flushMicrotasks();
