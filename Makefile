@@ -6,7 +6,16 @@
 # 门禁与 CI 的 typescript-check job 等价：先按 lockfile 安装（--prefer-offline：
 # 本地已有 store 时不动网络），再依次跑 eslint / prettier / tsc / vitest。
 # 未接进 `fmt` / `fmt-check`：那两条要在 pre-commit 里保持秒级，而且不该强依赖 node_modules。
+#
+# 工具链缺失时的行为（评审 #109 [P3-7]）：显式探测 node / pnpm，缺哪一个就打印
+# 可操作的提示再退出 1 —— 而不是让 `pnpm: command not found` 混进结论块里，
+# 让只改 Python 的人以为自己弄坏了什么。`SKIP_TS=1` 是本地逃生舱（CI 不设，
+# 门禁照旧强制），collect_output.sh 会把 ts 组标成 skipped。
 VSCODE_DIR := extensions/vscode
+
+# Node/pnpm 探测 + 提示（单行，避免 make ↔ shell 的续行转义；见 docs/dev/vscode-extension.md §9.3）。
+TS_SKIP_NOTE = echo "⏭️  SKIP_TS=$(SKIP_TS) — TypeScript gates (extensions/vscode) skipped on request."; echo "   CI never sets SKIP_TS: the group stays mandatory there."; exit 0
+TS_TOOLING_CHECK = command -v node >/dev/null 2>&1 || { echo "❌ node not found — the TypeScript gates need Node ≥ 22.12 (vitest 5 / vite 8)."; echo "   Install Node 22 LTS, then re-run; or skip this group with: SKIP_TS=1 make check"; exit 1; }; command -v pnpm >/dev/null 2>&1 || { echo "❌ pnpm not found — this package pins pnpm 11 (packageManager in extensions/vscode/package.json)."; echo "   Enable it with: corepack enable   (corepack ships with Node ≥ 16.13; CI does the same)"; echo "   Or skip the TypeScript group: SKIP_TS=1 make check"; exit 1; }
 
 run:
 	cargo run
@@ -27,7 +36,9 @@ test:
 	bash scripts/collect_output.sh test
 
 check-ts:
-	@(cd $(VSCODE_DIR) && pnpm install --frozen-lockfile --prefer-offline --reporter=silent) || exit 1; \
+	@if [ -n "$(SKIP_TS)" ] && [ "$(SKIP_TS)" != "0" ]; then $(TS_SKIP_NOTE); fi; \
+	$(TS_TOOLING_CHECK); \
+	(cd $(VSCODE_DIR) && pnpm install --frozen-lockfile --prefer-offline --reporter=silent) || exit 1; \
 	echo "🔍 Running eslint (extensions/vscode)..."; \
 	if ! (cd $(VSCODE_DIR) && pnpm run lint); then echo "❌ eslint failed"; exit 1; fi; \
 	echo "✅ eslint passed"; \
@@ -41,7 +52,9 @@ check-ts:
 	echo "✅ typecheck passed"
 
 test-ts:
-	@(cd $(VSCODE_DIR) && pnpm install --frozen-lockfile --prefer-offline --reporter=silent) || exit 1; \
+	@if [ -n "$(SKIP_TS)" ] && [ "$(SKIP_TS)" != "0" ]; then $(TS_SKIP_NOTE); fi; \
+	$(TS_TOOLING_CHECK); \
+	(cd $(VSCODE_DIR) && pnpm install --frozen-lockfile --prefer-offline --reporter=silent) || exit 1; \
 	echo "🔍 Running vitest (extensions/vscode)..."; \
 	if ! (cd $(VSCODE_DIR) && pnpm run test); then echo "❌ vitest failed"; exit 1; fi; \
 	echo "✅ vitest passed"

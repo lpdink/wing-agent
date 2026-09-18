@@ -276,6 +276,26 @@ WS 帧
   每次重发整段 transcript。
 - **长文本**：单条 `append_text` 超过上限（`MAX_PATCH_TEXT_CHUNK`）时拆成多条 patch，保证单帧
   不失控。
+- **流式工具参数（评审 #109 [P1-2]）**：provider 每个 SSE chunk 发一片 `tool_call_stream`，一片
+  一次全量重解析 + 全量回灌是 O(n²)。宿主把累积文本放在 `SessionRecord.toolArgsStream`
+  （host-only，不进桥），**渲染预算**内才更新 cell：首片 / `is_final` / 累积 ≤512 字符（普通调用
+  行为不变）/ 距上次 ≥100ms / 新增 ≥2048 字符 / 距上次 ≥32 片。跨桥的 `argsText` 另有
+  `TOOL_ARGS_MAX_CHARS = 8000` 传输上限——它只是**预览**，权威的完整参数由最终 `tool_call`
+  （parsed `args`）给出，展开卡片优先用后者。跳过某片时宿主模型同样不更新（mirror == host 的
+  不变量因此仍然成立）。
+- **diff 计算闸（评审 #109 [P1-1]）**：后端对 `Write` 发**全量** old/new 文本，Myers 的 trace 是
+  `D × 2(N+M)`（3000 行整体重写实测 ~340MB，6000 行 ~1.19GB）。`lineDiff` 在裁剪公共前后缀之后按
+  `DIFF_MAX_EDIT_LINES = 4000` 设闸，超限退化为「整块 del + 整块 add」（UI 只展示 800 行，看不出
+  区别）；`DIFF_MAX_ROWS = 800` 依旧只管传输窗口——两者独立，别只依赖后者（它的位置在计算之后）。
+- **toast 与会话快照的生命周期（评审 #109 [P2-4]）**：`MAX_TOASTS = 5`，每条按 level 超时自动
+  `dismissToast`（`TOAST_TIMEOUT_MS`：info 4s / warning 8s / error 20s，另有手动关闭按钮）；
+  `applyTabs` 顺手回收不在 tabs 里的 `sessions[id]` 快照（`retainContextWhenHidden` 下这是随窗口
+  线性增长的泄漏）。两种到达顺序（`adopt()` 的 hydrate→tabs、`onReady()` 的 tabs→hydrate）都不会
+  误裁活着的会话。
+- **草稿的一次性令牌（评审 #109 [P2-5]）**：`state.draft` 的采纳判据是宿主单调递增的 `draftSeq`
+  （不再是「值相等」——同一段文本连续两次发送失败时第二次会被吞掉）。网关未连接时 `sendMessage`
+  的早退路径把文本回填（`SessionRecord.setDraft` + `state`），composer 的乐观清空不再是丢输入的
+  窗口。`replyAsk` 不需要回填：ask cell 仍是 `awaiting`，用户可以再点一次。
 - **失败模式**：webview 端不变量（`applyPatch.ts`）——seq 必须恰好 `lastSeq + 1`、寻址的 cell
   必须存在、op 必须匹配 cell 种类；任何一条不满足就 `resync`（报告
   `seq-gap`/`unknown-cell`/`duplicate-cell`/`unsupported-op`/`protocol`），宿主回 `hydrate`。
@@ -325,7 +345,7 @@ webview 意图（`src/shared/bridge.ts` 的 `WebviewToHostMessage`，全部有�
 
 | 产物 | 工具 | 特点 |
 |---|---|---|
-| `out/extension.js`（扩展宿主） | esbuild（`esbuild.mjs`） | CJS、`target: node20`（VS Code 1.100 = Electron 34 / Node 20.19）、`external: vscode`、sourcemap、**不 minify**（宿主日志可读性 > 几 KB） |
+| `out/extension.js`（扩展宿主） | esbuild（`esbuild.mjs`） | CJS、`target: node20`（VS Code 1.100 = Electron 34 / Node 20.19）、`external: vscode`、sourcemap、**不 minify**（宿主日志可读性 > 几 KB）。`ws` 作为 devDependency 被 bundle 进来，作为「宿主没有全局 `WebSocket`（Node 20 就是这样）」的回落实现（评审 #109 [P1-3]；`src/core/transport/socket.ts` 的惰性 `require`） |
 | `dist/webview/{main.js,main.css}` | Vite lib 模式（`vite.config.mts`） | 单 IIFE、**无动态 chunk**、无第三方 origin、无运行期 `fetch`；`main.js` 文件名是宿主契约的一部分 |
 | `out/smoke/smoke.mjs` | esbuild（`esbuild.smoke.mjs`） | smoke 的开发工具产物（不进 `.vsix`） |
 
@@ -413,6 +433,10 @@ Node smoke 进程
   `WING_SMOKE_SKIP=1`）。
 - flags：`--only <substring>`（单跑）、`--keep`（保留现场）、`--list`（列场景）。
 - 环境变量：`WING_SMOKE_SKIP`、`WING_SMOKE_KEEP_COMPRESSION`（A/B 复现用，默认关）、
+  `WING_SMOKE_AUTH_KEY`（生成的 config.yaml 打开 auth 且宿主带 `Authorization: Bearer`——
+  12 个场景因此覆盖真实鉴权中间件的 HTTP + WS 两条路径；默认不设＝无鉴权）、
+  `WING_SMOKE_WS_FALLBACK`（启动前删掉宿主进程的全局 `WebSocket`，12 个场景全部走 bundle 进来的
+  `ws` 回落实现——复现 VS Code 1.100 / Node 20.19 宿主的唯一现实手段，见评审 #109 [P1-3]）、
   `WING_SMOKE_ROOT`、`WING_SMOKE_GATEWAY_PORT`。
 
 12 个场景：`create-subscribe-send-stream`、`tool-call-diff`、`ask-round-trip`、
@@ -431,6 +455,9 @@ Node 宿主进程，不是产品（真实 VSCode/Electron 宿主未观察到）�
 - `make check` / `make test` 的三个/四个分组里，`ts` 组 = `make check-ts` / `make test-ts`
   （先按 lockfile 安装，再 lint/format/typecheck 或 vitest）。分组执行器是
   `scripts/collect_output.sh`。
+- `check-ts` / `test-ts` 开头显式探测 node（≥22.12，vitest 5 / vite 8 的下限）与 pnpm 11，缺工具
+  时打印可操作提示（`corepack enable` / `SKIP_TS=1 make check`）再退出；`SKIP_TS=1` 是本地逃生舱，
+  `collect_output.sh` 会把 ts 组标成「已跳过」而不是「通过」。**CI 不设该变量**，门禁照旧强制。
 - `make fmt` / `make fmt-check` **有意不含 TS**：pre-commit 要秒级、且不该强依赖
   `node_modules`；TS 格式门禁在 `make check-ts` 与 CI 里（另有 `make fmt-ts` / `fmt-check-ts`
   可手动用）。
@@ -480,7 +507,9 @@ pnpm exec vsce ls       # 核对进包清单
 3. **F5 环境风险**：Node 25 / undici 在 `permessage-deflate` 下可能滞留 WS 帧（smoke 用无压缩
    闸门绕过）。真实 VSCode 里若「resume 后历史迟迟不出现」，切一次 Tab 或
    `Wing: Reconnect to Gateway` 会重新推送重放；把 Output → Wing 日志附进报告；
-4. 远程 / SSH / 多机网关不在支持范围；鉴权开启时在设置里填 `wing.apiKey`；
+4. 远程 / SSH / 多机网关不在支持范围；鉴权开启时在设置里填 `wing.apiKey`（`Authorization: Bearer`
+   **header**，不进 URL；明文存储，建议只放 **User** settings——工作区作用域会写进可提交的
+   `.vscode/settings.json`，Settings Sync 也会同步；改用 `context.secrets` 是 follow-up）；
 5. 多工作区窗口只在单测层覆盖（取第一个 folder），真机行为未系统验证。
 
 视觉打磨 follow-up（用户检查点②反馈，**本轮有意不修**，供后续 PR 引用）：thinking/工具卡折叠无
