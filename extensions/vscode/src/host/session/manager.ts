@@ -1,6 +1,7 @@
 import type {
   AskAnswerModel,
   AskCellModel,
+  AssistantCellModel,
   CellModel,
   CellPatch,
   CommandCatalogModel,
@@ -8,9 +9,16 @@ import type {
   PanelsModel,
   SessionId,
   SessionListStatus,
+  SystemLevel,
   UiActionModel,
 } from '../../shared';
-import { MAX_PATCH_TEXT_CHUNK, unhandledVariant } from '../../shared';
+import {
+  FRONTEND_COMMANDS,
+  MAX_PATCH_TEXT_CHUNK,
+  matchCommand,
+  normalizeCommandName,
+  unhandledVariant,
+} from '../../shared';
 import type { CoreLogger, GatewayConnection, GatewayHttpClient, SessionStatus, WingEvent } from '../../core';
 import { GatewayHttpError, createClientRequest, isKnownEvent } from '../../core';
 
@@ -18,7 +26,7 @@ import type { WebviewIntent } from '../bridge';
 import type { EditorActions } from '../editorActions';
 import { SerialQueue } from './queue';
 import type { ReductionEffect } from './reducer';
-import { applyLive, applySync } from './reducer';
+import { applyLive, applySync, pushSystem } from './reducer';
 import { SessionRecord } from './model';
 import { branchRow, buildAskReply } from './derive';
 
@@ -514,6 +522,8 @@ export class SessionManager {
       reasoning_effort?: string;
       yolo?: boolean;
       title?: string;
+      agent?: string;
+      workspace?: string;
     },
     options: { readonly closeModelPicker?: boolean } = {},
   ): Promise<void> {
@@ -552,6 +562,12 @@ export class SessionManager {
     }
     if (fields.title !== undefined) {
       record.explicitTitle = fields.title;
+    }
+    if (fields.agent !== undefined) {
+      meta.agent = fields.agent;
+    }
+    if (fields.workspace !== undefined) {
+      meta.workspace = fields.workspace;
     }
     record.meta = meta;
     record.refreshTitle();
@@ -675,7 +691,7 @@ export class SessionManager {
 
   /** `runPromptCommand`: local commands run here, everything else is a message. */
   private async runPromptCommand(sessionId: SessionId, name: string, argsText: string): Promise<void> {
-    const command = name.startsWith('/') ? name : `/${name}`;
+    const command = normalizeCommandName(name);
     const args = argsText.trim();
     switch (command) {
       case '/new':
@@ -709,12 +725,49 @@ export class SessionManager {
           await this.fork(sessionId, args);
         }
         return;
-      default:
-        // A gateway prompt command (`/init`, …) is just message text — the
-        // backend's prompt-command expansion picks it up (TUI behavior).
+      // ── local (frontend-only) commands: the TUI's `app/commands.rs` table ──
+      case '/context':
+        await this.showContextInfo(sessionId);
+        return;
+      case '/skills':
+        await this.showSkillsInfo(sessionId);
+        return;
+      case '/reload':
+        await this.reloadSystem();
+        return;
+      case '/copy':
+        await this.copyAssistantMessage(sessionId, args);
+        return;
+      case '/title':
+        await this.setOrShowTitle(sessionId, args);
+        return;
+      case '/workdir':
+        await this.setOrShowWorkdir(sessionId, args);
+        return;
+      case '/agents':
+        await this.useAgent(sessionId, args);
+        return;
+      case '/clear':
+        // The transcript is a projection of gateway state, so there is no local
+        // "clear" that survives the next patch or sync; saying so is honest,
+        // sending the word to the model (the old behavior) is not.
+        this.toast(
+          'info',
+          'Clearing the chat view is not supported in the VS Code extension yet — use /new for a fresh session.',
+        );
+        return;
+      default: {
+        // A *frontend* command that reached this point has no implementation:
+        // answer, never leak it to the model as a prompt. Gateway commands
+        // (`/init`, …) are message text — the backend expands them (TUI parity).
+        if (matchCommand(command, FRONTEND_COMMANDS) !== null) {
+          this.toast('info', `${command} is not supported in the VS Code extension yet.`);
+          return;
+        }
         this.sendText(sessionId, `${command}${args === '' ? '' : ` ${args}`}`, {
           requireSubscribed: true,
         });
+      }
     }
   }
 
@@ -770,9 +823,10 @@ export class SessionManager {
   /**
    * Local commands (TUI's frontend command table) — handled without a round trip.
    *
-   * Returns `true` when the text was consumed. `/rewind`, `/fork`, `/ss` and
-   * friends are also reachable through `runPromptCommand`; this check exists so
-   * typing them into the composer works exactly like it does in the TUI.
+   * The table is `FRONTEND_COMMANDS` (shared, pinned against the TUI's
+   * `TUI_ONLY_COMMANDS`): anything in it is consumed here, so the composer path and
+   * the `runPromptCommand` path can never disagree about what is local. A gateway
+   * prompt command (`/init`, …) returns `false` and is sent as a message below.
    */
   private resolveLocalCommand(managed: ManagedSession, text: string): boolean {
     const trimmed = text.trim();
@@ -781,42 +835,11 @@ export class SessionManager {
     }
     const [head, ...rest] = trimmed.split(' ');
     const name = head ?? '';
-    const args = rest.join(' ').trim();
-    switch (name) {
-      case '/new':
-        void this.newSession();
-        return true;
-      case '/ss':
-      case '/session':
-        if (args === '') {
-          void this.openSessionsPanel(managed.record.sessionId);
-        } else {
-          void this.resumeInto(args);
-        }
-        return true;
-      case '/model':
-        void this.openModelPicker(managed.record.sessionId);
-        return true;
-      case '/compact':
-        void this.compact(managed.record.sessionId, args === '' ? null : args);
-        return true;
-      case '/rewind':
-        if (args === '') {
-          void this.openBranchesPanel(managed.record.sessionId, 'rewind');
-        } else {
-          void this.rewind(managed.record.sessionId, args);
-        }
-        return true;
-      case '/fork':
-        if (args === '') {
-          void this.openBranchesPanel(managed.record.sessionId, 'fork');
-        } else {
-          void this.fork(managed.record.sessionId, args);
-        }
-        return true;
-      default:
-        return false;
+    if (matchCommand(name, FRONTEND_COMMANDS) === null) {
+      return false;
     }
+    void this.runPromptCommand(managed.record.sessionId, name, rest.join(' ').trim());
+    return true;
   }
 
   private async interrupt(sessionId: SessionId): Promise<void> {
@@ -829,6 +852,207 @@ export class SessionManager {
       await http.interruptSession(sessionId);
     } catch (error) {
       this.reportFailure('Interrupt failed', error);
+    }
+  }
+
+  // ── local commands (TUI `app/commands.rs` parity) ───────────────────
+
+  /**
+   * `/context` — context window usage + the system prompt.
+   *
+   * Same source and wording as the TUI's `show_context_info`
+   * (`crates/wing/src/app/runner.rs`), rendered as a system cell instead of a
+   * chat message.
+   */
+  private async showContextInfo(sessionId: SessionId): Promise<void> {
+    const managed = this.sessions.get(sessionId);
+    const http = this.deps.http();
+    if (managed === undefined || http === null) {
+      this.toast('warning', 'Context info failed — the session is not available.');
+      return;
+    }
+    try {
+      const info = await http.sessionInfo(sessionId);
+      const lines = [
+        `Messages: ${info.context_stats.message_count}`,
+        `Tokens: ${info.context_stats.total_tokens} / ${info.context_window_tokens}`,
+      ];
+      if (info.system_prompt !== '') {
+        lines.push('', '--- System Prompt ---', info.system_prompt);
+      }
+      this.pushNotice(managed.record, 'info', lines.join('\n'));
+    } catch (error) {
+      this.reportFailure('Context info failed', error);
+    }
+  }
+
+  /** `/skills` — the loaded skills / rules summary (TUI `show_skills_info`). */
+  private async showSkillsInfo(sessionId: SessionId): Promise<void> {
+    const managed = this.sessions.get(sessionId);
+    const http = this.deps.http();
+    if (managed === undefined || http === null) {
+      this.toast('warning', 'Skills info failed — the session is not available.');
+      return;
+    }
+    try {
+      const info = await http.sessionInfo(sessionId);
+      this.pushNotice(
+        managed.record,
+        'info',
+        info.skills_info === '' ? 'No skills loaded.' : info.skills_info,
+      );
+    } catch (error) {
+      this.reportFailure('Skills info failed', error);
+    }
+  }
+
+  /** `/reload` — hot-reload config / hooks / providers (TUI `reload_system`). */
+  private async reloadSystem(): Promise<void> {
+    const http = this.deps.http();
+    if (http === null) {
+      this.toast('warning', 'Not connected — the gateway is not available.');
+      return;
+    }
+    try {
+      const response = await http.reloadSystem();
+      const head = response.ok ? '✅' : '⚠️';
+      const details = response.results.map((result) =>
+        result.ok ? `✅ ${result.name}` : `❌ ${result.name}: ${result.detail ?? 'unknown'}`,
+      );
+      this.toast('info', `${head} Reload: ${details.join(', ')}`);
+    } catch (error) {
+      this.reportFailure('Reload failed', error);
+    }
+  }
+
+  /**
+   * `/copy [N]` — copy the N-th (1-based) or the last assistant message.
+   *
+   * The TUI reads its own chat cells; here the authority is the host record, so
+   * the text is exactly what the transcript shows.
+   */
+  private async copyAssistantMessage(sessionId: SessionId, args: string): Promise<void> {
+    const managed = this.sessions.get(sessionId);
+    if (managed === undefined) {
+      return;
+    }
+    const texts = managed.record.cells
+      .filter((cell): cell is AssistantCellModel => cell.kind === 'assistant')
+      .map((cell) => cell.text);
+    const index = args === '' ? texts.length : Number.parseInt(args, 10);
+    const text = Number.isInteger(index) && index >= 1 ? texts[index - 1] : undefined;
+    if (text === undefined || text === '') {
+      this.toast('warning', 'No assistant message to copy');
+      return;
+    }
+    await this.deps.editor.copyText(text);
+    // TUI parity is "copy silently"; a webview has no visible feedback, so the
+    // extension adds one toast (documented deviation).
+    this.toast('info', 'Copied to clipboard');
+  }
+
+  /** `/title [name]` — set the session title, or show it (TUI `set_or_show_title`). */
+  private async setOrShowTitle(sessionId: SessionId, args: string): Promise<void> {
+    const managed = this.sessions.get(sessionId);
+    if (managed === undefined) {
+      return;
+    }
+    if (args === '') {
+      this.toast('info', `title: ${managed.record.explicitTitle ?? '(not set)'}`);
+      return;
+    }
+    await this.updateSession(sessionId, { title: args });
+  }
+
+  /** `/workdir [path]` — set the workspace, or show it (TUI `set_or_show_workdir`). */
+  private async setOrShowWorkdir(sessionId: SessionId, args: string): Promise<void> {
+    const managed = this.sessions.get(sessionId);
+    if (managed === undefined) {
+      return;
+    }
+    if (args === '') {
+      const workspace = managed.record.meta.workspace;
+      this.toast('info', `workdir: ${workspace === '' ? '(not set)' : workspace}`);
+      return;
+    }
+    await this.updateSession(sessionId, { workspace: args });
+  }
+
+  /**
+   * `/agents [name]` — switch the agent template, or list what is available.
+   *
+   * Bare `/agents` lists instead of opening a picker: the extension has no agents
+   * panel (out of scope), and a toast is the honest version of "here are the
+   * candidates".
+   */
+  private async useAgent(sessionId: SessionId, args: string): Promise<void> {
+    const managed = this.sessions.get(sessionId);
+    const http = this.deps.http();
+    if (managed === undefined || http === null) {
+      this.toast('warning', 'Agents failed — the session is not available.');
+      return;
+    }
+    if (args !== '') {
+      await this.updateSession(sessionId, { agent: args });
+      return;
+    }
+    try {
+      const response = await http.listAgents();
+      if (response.agents.length === 0) {
+        this.toast('info', 'No agent templates available.');
+        return;
+      }
+      const names = response.agents.map((name) =>
+        name === response.default_agent ? `${name} (default)` : name,
+      );
+      this.toast('info', `Agents: ${names.join(', ')}`);
+    } catch (error) {
+      this.reportFailure('Could not list agents', error);
+    }
+  }
+
+  /** Append one host-authored system cell to a session's transcript. */
+  private pushNotice(record: SessionRecord, level: SystemLevel, text: string): void {
+    pushSystem(record, level, text);
+    this.flush(record);
+  }
+
+  /**
+   * Pull the runtime knobs the replay does not carry.
+   *
+   * `sync_session.agent` has model/provider/tools — but **not** `yolo`, `thinking`
+   * or `reasoning_effort`. The TUI fetches `GET /api/session/info` on every
+   * session switch for exactly this reason; without it a resumed session shows
+   * "yolo off" while the backend has it on. Failures stay quiet: the tab works,
+   * the knobs keep their last known value.
+   */
+  private async refreshRuntimeState(managed: ManagedSession): Promise<void> {
+    const http = this.deps.http();
+    const sessionId = managed.record.sessionId;
+    if (http === null || managed.closed || this.disposed) {
+      return;
+    }
+    try {
+      const info = await http.sessionInfo(sessionId);
+      if (managed.closed || this.disposed) {
+        return;
+      }
+      const record = managed.record;
+      record.meta = {
+        ...record.meta,
+        thinking: info.thinking,
+        reasoningEffort: info.reasoning_effort ?? '',
+        yolo: info.yolo,
+        // Fill, never clobber: a model switch that landed while this response was
+        // in flight is newer than the response (the gateway echoes it through
+        // `session_state_changed` and the optimistic update already applied).
+        model: record.meta.model === '' ? info.model : record.meta.model,
+        workspace: info.workdir ?? record.meta.workspace,
+      };
+      record.dirtyState = true;
+      this.flush(record);
+    } catch (error) {
+      this.deps.logger.debug(`could not refresh the runtime state of ${sessionId}`, error);
     }
   }
 
@@ -932,6 +1156,9 @@ export class SessionManager {
       }
       managed.subscribed = true;
       managed.retryAttempt = 0;
+      // `sync_session` (which follows the attach) does not carry yolo / thinking /
+      // effort — fetch the runtime state on the side (TUI parity).
+      void this.refreshRuntimeState(managed);
     } catch (error) {
       if (error instanceof GatewayHttpError && error.isNotFound()) {
         try {
@@ -939,6 +1166,7 @@ export class SessionManager {
           await http.subscribe(managed.record.sessionId, clientId);
           managed.subscribed = true;
           managed.retryAttempt = 0;
+          void this.refreshRuntimeState(managed);
           return;
         } catch (resumeError) {
           this.markGone(managed, resumeError);

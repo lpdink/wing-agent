@@ -183,10 +183,17 @@ describe('new session timing', () => {
     await flushMicrotasks(20);
 
     expect(harness.host.sessionManager.openSessionIds).not.toContain(inFlight);
-    // Structure order per session: create → subscribe → unsubscribe (no
-    // dangling route, no resurrect).
+    // Structure order per session: create → subscribe → runtime probe →
+    // unsubscribe (no dangling route, no resurrect). The runtime probe
+    // (`/api/session/info`) is the yolo/thinking/effort refresh that rides on a
+    // fresh subscription.
     const paths = harness.gateway.httpCalls.slice(callsBefore).map((call) => call.path);
-    expect(paths).toEqual(['/api/session/create', '/api/session/subscribe', '/api/session/unsubscribe']);
+    expect(paths).toEqual([
+      '/api/session/create',
+      '/api/session/subscribe',
+      '/api/session/info',
+      '/api/session/unsubscribe',
+    ]);
     // And a closed session accepts no further events.
     harness.wipe();
     harness.gateway.emit({ type: 'done', session_id: inFlight });

@@ -13,8 +13,8 @@
  * uses (`suggestWidget.ts:235` gives its rows `role='option'`).
  */
 
-import { useCallback, useRef, useState } from 'react';
-import type { KeyboardEvent } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { KeyboardEvent, RefObject } from 'react';
 
 /** One row of a navigable list, as far as navigation is concerned. */
 export interface ListRow {
@@ -166,4 +166,53 @@ export function useListNav(rows: readonly ListRow[], listId: string, options: Li
     setIndex: setRawIndex,
     activate,
   };
+}
+
+/**
+ * New scroll offset that brings a row fully into view.
+ *
+ * Pure so the arithmetic is testable without a layout engine (jsdom has none, and
+ * `scrollIntoView` does not exist there at all). The rule is VS Code's list
+ * `reveal` behavior: scroll the *least* amount — a row above the viewport moves
+ * the viewport up to the row, a row below it moves down just enough, and a row
+ * already visible does not move anything.
+ */
+export function revealScrollTop(
+  scrollTop: number,
+  viewportHeight: number,
+  rowTop: number,
+  rowHeight: number,
+): number {
+  if (rowTop < scrollTop) {
+    return rowTop;
+  }
+  const rowBottom = rowTop + rowHeight;
+  const viewportBottom = scrollTop + viewportHeight;
+  if (rowBottom > viewportBottom) {
+    return scrollTop + (rowBottom - viewportBottom);
+  }
+  return scrollTop;
+}
+
+/**
+ * Keep the highlighted row of a list visible while the keyboard moves through it.
+ *
+ * `listId` is the id prefix the rows were rendered with (`optionId`); the row is
+ * looked up by its own id, so grouped lists (the model panel) work unchanged.
+ */
+export function useRevealIndex(listRef: RefObject<HTMLElement | null>, listId: string, index: number): void {
+  useEffect(() => {
+    const list = listRef.current;
+    if (list === null || index < 0) {
+      return;
+    }
+    const row = list.querySelector<HTMLElement>(`#${optionId(listId, index)}`);
+    if (row === null) {
+      return;
+    }
+    const next = revealScrollTop(list.scrollTop, list.clientHeight, row.offsetTop, row.offsetHeight);
+    if (next !== list.scrollTop) {
+      list.scrollTop = next;
+    }
+  }, [listRef, listId, index]);
 }

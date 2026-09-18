@@ -22,7 +22,7 @@ import { postToHost } from '../../bridge/channel';
 import styles from '../../styles/panels.module.css';
 import { statusLabel } from '../selectors';
 import { PanelEmpty, PanelShell } from './PanelShell';
-import { optionId, useListNav } from './listNav';
+import { optionId, useListNav, useRevealIndex } from './listNav';
 
 export interface SessionPanelProps {
   /** Session the command is issued from (the active one). */
@@ -56,6 +56,8 @@ export function SessionPanel({ sessionId, picker, onClose }: SessionPanelProps):
       onEscape: onClose,
     },
   );
+  // Keyboard navigation must never walk the highlight off-screen.
+  useRevealIndex(listRef, 'session-panel', nav.index);
 
   useEffect(() => {
     listRef.current?.focus();

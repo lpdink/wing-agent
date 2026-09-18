@@ -93,6 +93,8 @@
     "build:extension": "node esbuild.mjs",
     "build:webview": "vite build",
     "build:preview": "vite build --config vite.preview.config.mts",
+    "smoke:gateway": "node esbuild.smoke.mjs && node out/smoke/smoke.mjs",
+    "smoke:list": "node esbuild.smoke.mjs && node out/smoke/smoke.mjs --list",
     "dev:preview": "vite --config vite.preview.config.mts",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.webview.json && tsc --noEmit -p tsconfig.tools.json",

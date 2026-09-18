@@ -49,6 +49,22 @@ export interface FakeSessionState {
   events: Record<string, unknown>[];
   turnStartedAt: string | null;
   agent: Record<string, unknown> | null;
+  /** `GET /api/session/info` runtime status (yolo / thinking / effort / stats). */
+  runtime: FakeRuntimeState;
+}
+
+/** The `/api/session/info` values the host can read but never derives. */
+export interface FakeRuntimeState {
+  model: string;
+  thinking: boolean;
+  reasoningEffort: string | null;
+  yolo: boolean;
+  workdir: string | null;
+  messageCount: number;
+  totalTokens: number;
+  contextWindowTokens: number;
+  skillsInfo: string;
+  systemPrompt: string;
 }
 
 export interface FakeSessionSeed {
@@ -62,6 +78,7 @@ export interface FakeSessionSeed {
   readonly events?: readonly Record<string, unknown>[];
   readonly turnStartedAt?: string | null;
   readonly agent?: Record<string, unknown> | null;
+  readonly runtime?: Partial<FakeRuntimeState>;
 }
 
 /** One fake socket: records what the client sent, and can emit server frames. */
@@ -205,6 +222,19 @@ export class FakeGateway {
       events: [...(seed.events ?? [])],
       turnStartedAt: seed.turnStartedAt ?? null,
       agent: seed.agent ?? null,
+      runtime: {
+        model: 'claude-sonnet-4-6',
+        thinking: false,
+        reasoningEffort: null,
+        yolo: false,
+        workdir: seed.workspace ?? '/workspace',
+        messageCount: (seed.messages ?? []).length,
+        totalTokens: 0,
+        contextWindowTokens: 200_000,
+        skillsInfo: '',
+        systemPrompt: '',
+        ...seed.runtime,
+      },
     };
     this.sessions.set(sessionId, state);
     return state;
@@ -453,9 +483,58 @@ export class FakeGateway {
         return json({ ok: true, draft: state?.draft ?? null });
       }
 
+      case '/api/session/info': {
+        const sessionId = url.searchParams.get('session_id') ?? '';
+        const state = this.sessions.get(sessionId);
+        if (state === undefined) {
+          return { status: 404, body: JSON.stringify({ error: `session '${sessionId}' not found` }) };
+        }
+        const runtime = state.runtime;
+        return json({
+          model: runtime.model,
+          api_url: 'http://fake-provider/v1',
+          tools: ['Bash', 'Read'],
+          total_tokens: runtime.totalTokens,
+          context_window_tokens: runtime.contextWindowTokens,
+          thinking: runtime.thinking,
+          reasoning_effort: runtime.reasoningEffort,
+          yolo: runtime.yolo,
+          session_name: state.name,
+          workdir: runtime.workdir,
+          status: 'idle',
+          context_stats: {
+            message_count: runtime.messageCount,
+            total_tokens: runtime.totalTokens,
+          },
+          skills_info: runtime.skillsInfo,
+          system_prompt: runtime.systemPrompt,
+        });
+      }
+
       case '/api/session/update': {
         const sessionId = asString(body?.['session_id']) ?? '';
         const state = this.sessions.get(sessionId);
+        if (state !== undefined) {
+          if (typeof body?.['yolo'] === 'boolean') {
+            state.runtime.yolo = body['yolo'];
+          }
+          if (typeof body?.['thinking'] === 'boolean') {
+            state.runtime.thinking = body['thinking'];
+          }
+          if (typeof body?.['reasoning_effort'] === 'string') {
+            state.runtime.reasoningEffort = body['reasoning_effort'];
+          }
+          if (typeof body?.['model'] === 'string') {
+            state.runtime.model = body['model'];
+          }
+          if (typeof body?.['title'] === 'string') {
+            state.name = body['title'];
+          }
+          if (typeof body?.['workspace'] === 'string') {
+            state.runtime.workdir = body['workspace'];
+            state.workspace = body['workspace'];
+          }
+        }
         const agent = state?.agent ?? {};
         this.emit({
           type: 'session_state_changed',

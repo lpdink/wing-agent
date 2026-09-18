@@ -9,7 +9,16 @@ import {
   makeShellSession,
   makeWorkingSession,
 } from '../../src/testing/fixtures';
-import { disposeMounted, mountWebview, pushPanels, pushTabs, pushUi, twoTabs } from './harness';
+import {
+  disposeMounted,
+  mountWebview,
+  pushHydrate,
+  pushPanels,
+  pushState,
+  pushTabs,
+  pushUi,
+  twoTabs,
+} from './harness';
 
 /**
  * The composer (step 05).
@@ -219,6 +228,34 @@ describe('composer drafts', () => {
     expect(inputOf(container).value).toBe('draft for B');
   });
 
+  it('adopts a host-restored draft once (rewind / fork / resume)', () => {
+    const mounted = mountWebview([makeShellSession()]);
+    const { container } = mounted;
+
+    // The host ships the restored text inside `state` (a rewind's sync) …
+    pushState(mounted, { ...makeShellSession(), draft: 'second question' });
+    expect(inputOf(container).value).toBe('second question');
+
+    // … and a later state carries `null` (the host consumes it) — typing must not
+    // be cleared by that.
+    fireEvent.change(inputOf(container), { target: { value: 'my own text' } });
+    pushState(mounted, { ...makeShellSession(), draft: null });
+    expect(inputOf(container).value).toBe('my own text');
+  });
+
+  it('adopts a draft delivered in a hydrate (the fork path) and only once', () => {
+    const mounted = mountWebview([makeShellSession()]);
+    const { container } = mounted;
+
+    pushHydrate(mounted, { ...makeShellSession(), draft: 'fork source' });
+    expect(inputOf(container).value).toBe('fork source');
+
+    // A re-hydrate with the same text must not clobber an edited draft.
+    fireEvent.change(inputOf(container), { target: { value: 'fork source edited' } });
+    pushHydrate(mounted, { ...makeShellSession(), draft: 'fork source' });
+    expect(inputOf(container).value).toBe('fork source edited');
+  });
+
   it('forgets the draft of a closed tab', () => {
     const other = makeEmptySession('session-b');
     const mounted = mountWebview([makeShellSession(), other]);
@@ -255,6 +292,29 @@ describe('command candidates', () => {
     expect(text).toContain('/compact');
     // The host's wording wins for a command both sides know.
     expect(text).toContain('Compress the session context');
+  });
+
+  it('keeps the highlighted candidate inside the visible window (checkpoint② #2)', () => {
+    const { container } = mountWebview([base]);
+    const input = inputOf(container);
+    fireEvent.change(input, { target: { value: '/' } });
+
+    const list = within(container).getByTestId('command-candidates');
+    // jsdom does not lay out: give every row a fixed pitch and the list a viewport,
+    // then walk the highlight to the last row.
+    Object.defineProperty(list, 'clientHeight', { value: 60, configurable: true });
+    const rows = within(container).getAllByTestId('command-candidate');
+    rows.forEach((row, index) => {
+      Object.defineProperty(row, 'offsetTop', { value: index * 20, configurable: true });
+      Object.defineProperty(row, 'offsetHeight', { value: 20, configurable: true });
+    });
+
+    fireEvent.keyDown(input, { key: 'End' });
+
+    // Viewport 60 tall; the last row starts at (rows-1)*20 → scrollTop must reach
+    // it minus the last full page.
+    const expected = Math.max(0, (rows.length - 1) * 20 + 20 - 60);
+    expect(list.scrollTop).toBe(expected);
   });
 
   it('filters as the name is typed', () => {
