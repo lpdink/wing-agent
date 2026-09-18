@@ -160,10 +160,14 @@ function applyKnown(record: SessionRecord, event: KnownWingEvent, effects: Reduc
     // ── lifecycle ──────────────────────────────────────────────────
     case 'turn_started': {
       if (!record.turn.active) {
-        record.turn = { ...record.turn, active: true, startedAtMs: record.now() };
+        record.turn = { active: true, startedAtMs: record.now(), lastResult: record.turn.lastResult };
       } else {
         record.turn = { ...record.turn, active: true };
       }
+      // A new turn starts with no usage: without this, a turn that never calls
+      // the model (interrupt, LLM failure, rejected prompt command) would
+      // re-emit the previous turn's numbers as its own metrics cell.
+      record.resetTurnUsage();
       record.metricsEmittedForTurn = false;
       record.clearLastError();
       record.dirtyState = true;
@@ -182,17 +186,17 @@ function applyKnown(record: SessionRecord, event: KnownWingEvent, effects: Reduc
       return;
     case 'done': {
       record.promoteAllPending();
-      finishTurn(record, effects);
+      finishTurn(record);
       return;
     }
     case 'interrupted': {
       record.discardAllPending();
-      finishTurn(record, effects);
+      finishTurn(record);
       effects.push({ kind: 'toast', level: 'info', message: 'Agent interrupted' });
       return;
     }
     case 'error': {
-      finishTurn(record, effects);
+      finishTurn(record);
       const text = event.message === '' ? 'Agent error' : event.message;
       pushSystem(record, 'error', text);
       record.setLastError(text);
@@ -462,14 +466,12 @@ function applyKnown(record: SessionRecord, event: KnownWingEvent, effects: Reduc
     case 'branch_targets': {
       // The gateway re-emits the candidate list after a rewind / fork; refresh
       // the picker when it is open (the rows themselves are not transcript).
-      if (record.panels.branches !== null) {
-        const rows = event.targets.map((target) => branchRow(target));
+      if (record.panels.branchPicker !== null) {
         record.panels = {
           ...record.panels,
-          branches: {
-            mode: record.panels.branches.mode,
-            rows,
-            activeIndex: rows.length > 0 ? 0 : null,
+          branchPicker: {
+            mode: record.panels.branchPicker.mode,
+            rows: event.targets.map((target) => branchRow(target)),
           },
         };
         record.dirtyPanels = true;
@@ -510,7 +512,9 @@ function applyMessageProjection(record: SessionRecord, message: SessionMessage):
     }
     case 'assistant': {
       if (message.reasoning_content !== null && message.reasoning_content !== '') {
-        record.pushCell({
+        // Same push channel as the live lane: a replayed thinking block that
+        // follows a tool call gets the ReAct separator too (replay == live).
+        pushWithSeparator(record, {
           kind: 'thinking',
           id: record.newCellId(),
           createdAt: record.now(),
@@ -538,7 +542,7 @@ function applyMessageProjection(record: SessionRecord, message: SessionMessage):
         record.toolCells.set(cell.toolCallId, cell.id);
       }
       if (message.content !== '') {
-        record.pushCell({
+        pushWithSeparator(record, {
           kind: 'assistant',
           id: record.newCellId(),
           createdAt: record.now(),
@@ -721,10 +725,9 @@ function applyMetaChanges(record: SessionRecord, event: SessionStateChangedEvent
 // ============================================================
 
 /** Turn end (done / interrupted / error): cancel asks, flush metrics, go idle. */
-function finishTurn(record: SessionRecord, _effects: ReductionEffect[]): void {
+function finishTurn(record: SessionRecord): void {
   record.cancelAwaitingAsks();
   closeStreamingText(record);
-  const wasActive = record.turn.active;
   record.turn = { active: false, startedAtMs: 0, lastResult: record.turn.lastResult };
   record.dirtyState = true;
 
@@ -740,7 +743,6 @@ function finishTurn(record: SessionRecord, _effects: ReductionEffect[]): void {
     });
   }
   record.refreshStatus();
-  void wasActive;
 }
 
 /**

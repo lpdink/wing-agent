@@ -219,8 +219,8 @@ describe('fork', () => {
     await flushMicrotasks();
 
     const panels = harness.ofType('panels');
-    expect(panels[panels.length - 1]?.panels.branches?.mode).toBe('fork');
-    expect(panels[panels.length - 1]?.panels.branches?.rows.at(-1)?.current).toBe(true);
+    expect(panels[panels.length - 1]?.panels.branchPicker?.mode).toBe('fork');
+    expect(panels[panels.length - 1]?.panels.branchPicker?.rows.at(-1)?.current).toBe(true);
   });
 });
 

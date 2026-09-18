@@ -1,6 +1,7 @@
 import type {
   AskAnswerModel,
   AskQuestionModel,
+  BranchTargetModel,
   DiffLineModel,
   JsonValue,
   TodoItemModel,
@@ -72,11 +73,26 @@ export function splitLines(text: string): string[] {
 // ── title ─────────────────────────────────────────────────────────────
 
 /**
+ * The first `max` code points, verbatim (no ellipsis).
+ *
+ * This is the backend's `content[:n]` on Python strings — a plain slice, so
+ * the two sides agree character for character.
+ */
+export function sliceCodePoints(text: string, max: number): string {
+  if (max <= 0) {
+    return '';
+  }
+  const points = Array.from(text);
+  return points.length <= max ? text : points.slice(0, max).join('');
+}
+
+/**
  * Tab title: explicit name → first user message → workspace basename.
  *
- * The implicit rule mirrors the backend's `session.py` auto-title
- * (`content[:100]`) and the store's `first_user_message`, so the tab shows the
- * same name the gateway would report — without waiting for a round trip.
+ * The implicit rule is the backend's `session.py` auto-title — a **plain**
+ * `content[:maxLength]` on code points, no ellipsis — so the tab shows exactly
+ * the string the gateway reports (and the string `/ss` rows show), never a
+ * second spelling of the same session.
  */
 export function deriveTitle(input: {
   readonly explicit: string | null;
@@ -89,7 +105,7 @@ export function deriveTitle(input: {
     return input.explicit;
   }
   if (input.firstUserText !== null && input.firstUserText.trim() !== '') {
-    return truncateChars(input.firstUserText.trim(), input.maxLength);
+    return sliceCodePoints(input.firstUserText, input.maxLength);
   }
   const workspace = input.workspace;
   if (workspace !== null && workspace.trim() !== '') {
@@ -548,19 +564,18 @@ export function buildAskReply(
 
 // ── branch targets ────────────────────────────────────────────────────
 
-/** Map a `branch_targets` payload entry into a panel row. */
-export function branchRow(target: BranchTarget): {
-  uuid: string;
-  role: string;
-  preview: string;
-  current: boolean;
-} {
-  const current = target.uuid === 'current';
+/**
+ * Map a `branch_targets` payload entry into a picker row.
+ *
+ * The backend already truncates the content and marks the newest state with
+ * `uuid: 'current'`; the row model normalizes that into `current: true` so no
+ * renderer has to know the sentinel.
+ */
+export function branchRow(target: BranchTarget): BranchTargetModel {
   return {
     uuid: target.uuid,
-    role: target.role,
-    preview: truncateChars(target.content, 100),
-    current,
+    content: target.content,
+    current: target.uuid === 'current',
   };
 }
 

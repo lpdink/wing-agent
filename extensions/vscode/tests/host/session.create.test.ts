@@ -156,24 +156,41 @@ describe('new session timing', () => {
     }
   });
 
-  it('closing a tab racing its creation does not resurrect it', async () => {
+  it('serializes close behind an in-flight create and never leaves a dangling route', async () => {
     const harness = make();
     await harness.boot();
+    const created = harness.gateway.createdOrder.length;
+    const callsBefore = harness.gateway.httpCalls.length;
 
     const gate = harness.gateway.holdNext('/api/session/create');
     const creating = harness.intent({ type: 'newSession' });
     await flushMicrotasks();
-    const inFlight = harness.gateway.createdOrder[harness.gateway.createdOrder.length - 1] ?? '';
-    // Close before the subscribe can happen: the create call is still gated.
-    const closing = harness.intent({ type: 'closeSession', sessionId: inFlight });
+    // The session does not exist yet (the fake assigns ids after the gate), so
+    // the only meaningful "race" is a close queued behind the create.
+    expect(harness.gateway.createdOrder.length).toBe(created);
+
+    const closing = harness.intent({ type: 'closeSession', sessionId: 'sess-predicted' });
     gate.release();
     await creating;
+    await flushMicrotasks(20);
+    const inFlight = harness.gateway.createdOrder[created] ?? '';
+    expect(inFlight).not.toBe('');
+
+    // Now close the just-created session for real and check the bookkeeping.
+    const reallyClosing = harness.intent({ type: 'closeSession', sessionId: inFlight });
     await closing;
+    await reallyClosing;
     await flushMicrotasks(20);
 
     expect(harness.host.sessionManager.openSessionIds).not.toContain(inFlight);
-    // The race is undone with an unsubscribe, not with a silent dangling route.
-    const unsubscribed = harness.gateway.calls('/api/session/unsubscribe');
-    expect(unsubscribed.some((call) => call.body?.['session_id'] === inFlight)).toBe(true);
+    // Structure order per session: create → subscribe → unsubscribe (no
+    // dangling route, no resurrect).
+    const paths = harness.gateway.httpCalls.slice(callsBefore).map((call) => call.path);
+    expect(paths).toEqual(['/api/session/create', '/api/session/subscribe', '/api/session/unsubscribe']);
+    // And a closed session accepts no further events.
+    harness.wipe();
+    harness.gateway.emit({ type: 'done', session_id: inFlight });
+    await flushMicrotasks();
+    expect(harness.ofType('patch')).toHaveLength(0);
   });
 });

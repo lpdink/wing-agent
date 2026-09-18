@@ -1,14 +1,16 @@
 import type {
   AskAnswerModel,
   AskCellModel,
+  CellModel,
   CellPatch,
+  CommandCatalogModel,
   HostToWebviewMessage,
   PanelsModel,
-  PromptCommandModel,
   SessionId,
+  SessionListStatus,
   UiActionModel,
 } from '../../shared';
-import { unhandledVariant } from '../../shared';
+import { MAX_PATCH_TEXT_CHUNK, unhandledVariant } from '../../shared';
 import type { CoreLogger, GatewayConnection, GatewayHttpClient, SessionStatus, WingEvent } from '../../core';
 import { GatewayHttpError, createClientRequest, isKnownEvent } from '../../core';
 
@@ -72,16 +74,13 @@ interface ManagedSession {
   retryAttempt: number;
 }
 
-/** Chunk size for `append_text` ops — one postMessage must stay small. */
-const TEXT_CHUNK = 64 * 1024;
-
 export class SessionManager {
   private readonly sessions = new Map<SessionId, ManagedSession>();
   private order: SessionId[] = [];
   private active: SessionId | null = null;
   private webviewReady = false;
   private initialSessionRequested = false;
-  private commandsCatalog: readonly PromptCommandModel[] | null = null;
+  private commandsCatalog: CommandCatalogModel | null = null;
   private globalNotice: PanelsModel['globalNotice'] = null;
   /** Last notice text already surfaced as a toast (no toast spam on retries). */
   private toastedNotice: string | null = null;
@@ -405,6 +404,7 @@ export class SessionManager {
       });
       const managed = this.adopt(record, { activate: true });
       await this.subscribe(managed);
+      this.clearPicker('sessionPicker');
       return record.sessionId;
     });
   }
@@ -432,6 +432,7 @@ export class SessionManager {
       if (record.draft !== null) {
         this.postState(record);
       }
+      this.clearPicker('branchPicker');
       return record.sessionId;
     });
   }
@@ -448,7 +449,9 @@ export class SessionManager {
       await http.rewindSession(sessionId, targetUuid);
     } catch (error) {
       this.reportFailure('Rewind failed', error);
+      return;
     }
+    this.clearPicker('branchPicker');
   }
 
   /** Close a tab: unsubscribe, forget the view. The session itself survives. */
@@ -524,10 +527,39 @@ export class SessionManager {
       this.reportFailure('Update failed', error);
       return;
     }
-    if (options.closeModelPicker === true && managed.record.panels.modelPicker !== null) {
-      managed.record.panels = { ...managed.record.panels, modelPicker: null };
-      managed.record.dirtyPanels = true;
-      this.postPanels(managed.record);
+    // Optimistic local update (TUI `runner.rs` does the same): the gateway's
+    // `session_state_changed` carries no provider, so a cross-provider model
+    // switch would otherwise leave `meta.provider` stale until the next sync —
+    // and the /model picker's `selected` row depends on it.
+    const record = managed.record;
+    const meta = { ...record.meta };
+    if (fields.model !== undefined) {
+      meta.model = fields.model;
+    }
+    if (fields.provider !== undefined) {
+      meta.provider = fields.provider;
+    }
+    if (fields.thinking !== undefined) {
+      meta.thinking = fields.thinking;
+    }
+    if (fields.reasoning_effort !== undefined) {
+      meta.reasoningEffort = fields.reasoning_effort;
+    }
+    if (fields.yolo !== undefined) {
+      meta.yolo = fields.yolo;
+    }
+    if (fields.title !== undefined) {
+      record.explicitTitle = fields.title;
+    }
+    record.meta = meta;
+    record.refreshTitle();
+    record.dirtyState = true;
+    record.dirtyTabs = true;
+    this.flush(record);
+    if (options.closeModelPicker === true && record.panels.modelPicker !== null) {
+      record.panels = { ...record.panels, modelPicker: null };
+      record.dirtyPanels = true;
+      this.postPanels(record);
     }
   }
 
@@ -544,14 +576,10 @@ export class SessionManager {
         sessionId: info.id,
         title: info.name !== null && info.name !== '' ? info.name : '(untitled)',
         workspace: info.workspace,
-        lastInteraction: info.last_interaction,
         status: historyStatus(info.status),
+        current: info.id === sessionId,
       }));
-      const index = rows.findIndex((row) => row.sessionId === sessionId);
-      managed.record.panels = {
-        ...managed.record.panels,
-        sessions: { rows, activeIndex: index === -1 ? null : index },
-      };
+      managed.record.panels = { ...managed.record.panels, sessionPicker: { rows } };
       managed.record.dirtyPanels = true;
       this.postPanels(managed.record);
     } catch (error) {
@@ -569,10 +597,7 @@ export class SessionManager {
     try {
       const response = await http.sessionBranches(sessionId);
       const rows = response.targets.map((target) => branchRow(target));
-      managed.record.panels = {
-        ...managed.record.panels,
-        branches: { mode, rows, activeIndex: rows.length > 0 ? 0 : null },
-      };
+      managed.record.panels = { ...managed.record.panels, branchPicker: { mode, rows } };
       managed.record.dirtyPanels = true;
       this.postPanels(managed.record);
     } catch (error) {
@@ -609,16 +634,36 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Drop one host-opened picker once its action ran (no stale rows).
+   *
+   * Cleared on **every** session that has it open: a picker is a modal overlay,
+   * and the action's source session (the tab the user typed in) is not always
+   * the session the action targets (`/ss <id>` resumes another session).
+   */
+  private clearPicker(kind: 'sessionPicker' | 'branchPicker'): void {
+    for (const managed of this.all()) {
+      if (managed.record.panels[kind] === null) {
+        continue;
+      }
+      managed.record.panels = { ...managed.record.panels, [kind]: null };
+      managed.record.dirtyPanels = true;
+      this.postPanels(managed.record);
+    }
+  }
+
   private closeOverlays(): void {
     const managed = this.active === null ? undefined : this.sessions.get(this.active);
     if (managed === undefined) {
       return;
     }
+    // The three host-opened overlays; `globalNotice` is not one of them — it
+    // expires on its own (connection state), never on user input.
     managed.record.panels = {
       ...managed.record.panels,
       modelPicker: null,
-      sessions: null,
-      branches: null,
+      sessionPicker: null,
+      branchPicker: null,
     };
     managed.record.dirtyPanels = true;
     this.postPanels(managed.record);
@@ -1085,7 +1130,7 @@ export class SessionManager {
     this.sessions.set(record.sessionId, managed);
     this.order.push(record.sessionId);
     if (this.commandsCatalog !== null) {
-      record.panels = { ...record.panels, commands: this.commandsCatalog };
+      record.panels = { ...record.panels, commandCatalog: this.commandsCatalog };
     }
     if (this.globalNotice !== null) {
       record.panels = { ...record.panels, globalNotice: this.globalNotice };
@@ -1143,14 +1188,19 @@ export class SessionManager {
     }
     try {
       const response = await http.listCommands();
-      this.commandsCatalog = response.commands.map((command) => ({
-        name: command.name,
-        aliases: [...command.aliases],
-        description: command.description,
-        params: command.params,
-      }));
+      this.commandsCatalog = {
+        commands: response.commands.map((command) => ({
+          name: command.name,
+          aliases: [...command.aliases],
+          description: command.description,
+          params: command.params,
+        })),
+      };
       for (const managed of this.all()) {
-        managed.record.panels = { ...managed.record.panels, commands: this.commandsCatalog };
+        managed.record.panels = {
+          ...managed.record.panels,
+          commandCatalog: this.commandsCatalog,
+        };
         managed.record.dirtyPanels = true;
         this.postPanels(managed.record);
       }
@@ -1181,20 +1231,69 @@ export class SessionManager {
   }
 }
 
-/** Split an oversized `append_text` op so one postMessage stays small. */
+/**
+ * Keep one postMessage small: any text a patch carries is sliced to
+ * {@link MAX_PATCH_TEXT_CHUNK}.
+ *
+ * `append_text` is split into several ops; a cell *created* with a long body
+ * (the first streamed delta, or a replay cell that reaches the live lane) keeps
+ * its head in the `append` / `insert_after` op and delivers the rest through
+ * `append_text`. Both forms reconstruct the identical text in the webview.
+ */
 function sliceTextOp(op: CellPatch): CellPatch[] {
-  if (op.op !== 'append_text' || op.text.length <= TEXT_CHUNK) {
-    return [op];
+  switch (op.op) {
+    case 'append_text':
+      return sliceText(op.cellId, op.text);
+    case 'append':
+    case 'insert_after': {
+      const split = spillCellText(op.cell);
+      if (split === null) {
+        return [op];
+      }
+      const head = { ...op, cell: split.head };
+      return [head, ...sliceText(split.head.id, split.tail)];
+    }
+    default:
+      return [op];
+  }
+}
+
+function sliceText(cellId: string, text: string): CellPatch[] {
+  if (text.length <= MAX_PATCH_TEXT_CHUNK) {
+    return [{ op: 'append_text', cellId, text }];
   }
   const parts: CellPatch[] = [];
-  for (let index = 0; index < op.text.length; index += TEXT_CHUNK) {
-    parts.push({ op: 'append_text', cellId: op.cellId, text: op.text.slice(index, index + TEXT_CHUNK) });
+  for (let index = 0; index < text.length; index += MAX_PATCH_TEXT_CHUNK) {
+    parts.push({ op: 'append_text', cellId, text: text.slice(index, index + MAX_PATCH_TEXT_CHUNK) });
   }
   return parts;
 }
 
-/** Gateway session status → the shared history vocabulary (same word, one name). */
-function historyStatus(status: SessionStatus): 'idle' | 'working' | 'waiting-for-input' | 'inactive' {
+/** Split a text-bearing cell whose body exceeds the chunk limit. */
+function spillCellText(cell: CellModel): {
+  readonly head: CellModel;
+  readonly tail: string;
+} | null {
+  switch (cell.kind) {
+    case 'user':
+    case 'assistant':
+    case 'thinking':
+    case 'system': {
+      if (cell.text.length <= MAX_PATCH_TEXT_CHUNK) {
+        return null;
+      }
+      return {
+        head: { ...cell, text: cell.text.slice(0, MAX_PATCH_TEXT_CHUNK) },
+        tail: cell.text.slice(MAX_PATCH_TEXT_CHUNK),
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+/** Gateway session status → the shared picker vocabulary (same word, one name). */
+function historyStatus(status: SessionStatus): SessionListStatus {
   switch (status) {
     case 'idle':
       return 'idle';

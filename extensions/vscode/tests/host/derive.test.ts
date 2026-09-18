@@ -44,11 +44,17 @@ describe('deriveTitle', () => {
     );
   });
 
-  it('falls back to the first user message truncated to 100 chars', () => {
+  it('falls back to the backend rule: a plain `content[:100]`, no ellipsis', () => {
     const long = 'x'.repeat(150);
     const title = deriveTitle({ ...base, explicit: null, firstUserText: long });
     expect(Array.from(title).length).toBe(100);
-    expect(title.endsWith('...')).toBe(true);
+    expect(title).toBe('x'.repeat(100));
+
+    // Code points, not UTF-16 units (the backend slices Python strings).
+    expect(deriveTitle({ ...base, explicit: null, firstUserText: '😀'.repeat(120) })).toBe('😀'.repeat(100));
+    // Untouched below the limit — including leading whitespace, exactly like
+    // the gateway's in-memory title.
+    expect(deriveTitle({ ...base, explicit: null, firstUserText: '  padded' })).toBe('  padded');
   });
 
   it('falls back to the workspace basename and then the fallback string', () => {

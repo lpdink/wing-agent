@@ -438,10 +438,16 @@ export class SessionRecord {
     return true;
   }
 
-  /** Record a finished turn's usage so the reducer can emit a metrics cell. */
+  /** Record one LLM call's usage so the reducer can emit a metrics cell at turn end. */
   recordTurnUsage(usage: TurnUsage, model: string): void {
     this.turnUsage = usage;
     this.turnUsageModel = model;
+  }
+
+  /** Forget the previous turn's usage (a new turn starts empty). */
+  resetTurnUsage(): void {
+    this.turnUsage = null;
+    this.turnUsageModel = '';
   }
 
   /** The metrics cell for the finished turn, if there is anything to report. */

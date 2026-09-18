@@ -83,7 +83,13 @@ export interface TurnViewModel {
   readonly active: boolean;
   /** Epoch ms the current turn started; `0` when idle. */
   readonly startedAtMs: EpochMs;
-  /** Result of the last finished turn; `null` before the first one. */
+  /**
+   * Result of the last finished turn; `null` before the first one.
+   *
+   * Kept across turns (cleared only by `hydrate`): it is the last *finished*
+   * turn's outcome, so it stays valid while a newer turn runs. The UI decides
+   * when to show it.
+   */
   readonly lastResult: TurnResultModel | null;
 }
 
@@ -118,12 +124,12 @@ export interface GlobalNoticeModel {
 }
 
 /**
- * One prompt command (`GET /api/commands`).
+ * One prompt command (mirrors Python `CommandInfo`, `wing/event/base.py`).
  *
- * The catalog feeds the composer's `/`-triggered candidates; it is not a
- * transcript cell. `name` includes the leading `/` (e.g. `/init`).
+ * The catalog feeds the composer's `/`-triggered candidates; it is data, never
+ * an overlay. `name` includes the leading `/` (e.g. `/init`).
  */
-export interface PromptCommandModel {
+export interface CommandInfoModel {
   readonly name: string;
   readonly aliases: readonly string[];
   readonly description: string;
@@ -131,65 +137,76 @@ export interface PromptCommandModel {
   readonly params: string;
 }
 
-/** Gateway-side runtime status of a session in the history list. */
-export type SessionHistoryStatus = 'idle' | 'working' | 'waiting-for-input' | 'inactive';
+/** Prompt-command catalog; `null` on `PanelsModel` means "not fetched yet". */
+export interface CommandCatalogModel {
+  readonly commands: readonly CommandInfoModel[];
+}
 
-/** One row of the session-history picker (`GET /api/session/list`). */
-export interface SessionHistoryRowModel {
+/**
+ * Gateway-side runtime status of a session row.
+ *
+ * Same vocabulary as {@link SessionStatus} plus `inactive` (persisted, not
+ * loaded into the gateway process). The gateway's `waiting` maps to
+ * `waiting-for-input` (one word for one state across the bridge).
+ */
+export type SessionListStatus = 'inactive' | 'idle' | 'working' | 'waiting-for-input';
+
+/** One row of the session picker (`GET /api/session/list` + the `current` flag). */
+export interface SessionCandidateModel {
   readonly sessionId: SessionId;
-  /** Explicit name or first user message (`first_user_message` rule). */
+  /** Explicit name or the backend's `first_user_message` fallback. */
   readonly title: string;
+  /** `null` = unknown. */
   readonly workspace: string | null;
-  /** ISO-8601 string; `null` when the gateway does not report one. */
-  readonly lastInteraction: string | null;
-  /** `inactive` = not loaded into the gateway process (resume to use it). */
-  readonly status: SessionHistoryStatus;
+  readonly status: SessionListStatus;
+  /** True for the session this picker was opened from ("current" row). */
+  readonly current: boolean;
 }
 
-/** Session-history picker (`/ss`). Present in `PanelsModel` means "open". */
-export interface SessionPanelModel {
-  readonly rows: readonly SessionHistoryRowModel[];
-  /** Row index to highlight initially; `null` = the row matching this session. */
-  readonly activeIndex: number | null;
+/** Session picker (`/ss`). Present in `PanelsModel` means "open". */
+export interface SessionPickerModel {
+  readonly rows: readonly SessionCandidateModel[];
 }
 
-/** One rewind / fork candidate (`GET /api/session/branches`). */
-export interface BranchTargetRowModel {
+/**
+ * One rewind / fork target (mirrors `BranchTargetInfo` + the normalized marker).
+ *
+ * The backend's newest-state sentinel (`uuid: 'current'`) is normalized to
+ * `current: true` so renderers never compare magic strings.
+ */
+export interface BranchTargetModel {
   readonly uuid: string;
-  /** `user` for a message, `compact` for a compaction marker. */
-  readonly role: string;
-  /** Host-truncated preview of the node's content. */
-  readonly preview: string;
-  /** True for the backend's `current` sentinel (the newest state; a no-op target). */
+  /** Display text; the gateway already truncates user-message content. */
+  readonly content: string;
+  /** True for the `current` sentinel (the newest state; rewinding to it is a no-op). */
   readonly current: boolean;
 }
 
 /** Rewind / fork picker. Present in `PanelsModel` means "open". */
-export interface BranchPanelModel {
+export interface BranchPickerModel {
   readonly mode: 'rewind' | 'fork';
-  readonly rows: readonly BranchTargetRowModel[];
-  readonly activeIndex: number | null;
+  readonly rows: readonly BranchTargetModel[];
 }
 
 /** Overlay data for the active session. `null` members mean "not shown". */
 export interface PanelsModel {
   readonly modelPicker: ModelPickerModel | null;
   readonly globalNotice: GlobalNoticeModel | null;
-  /** Prompt-command catalog; `null` until the host has fetched it. */
-  readonly commands: readonly PromptCommandModel[] | null;
-  /** Session-history picker; `null` = closed. */
-  readonly sessions: SessionPanelModel | null;
-  /** Rewind / fork picker; `null` = closed. */
-  readonly branches: BranchPanelModel | null;
+  /** Prompt-command catalog; `null` = not fetched yet (data only, never an overlay). */
+  readonly commandCatalog: CommandCatalogModel | null;
+  /** Session picker; non-null = on screen (the host opened it). */
+  readonly sessionPicker: SessionPickerModel | null;
+  /** Rewind / fork picker; non-null = on screen (the host opened it). */
+  readonly branchPicker: BranchPickerModel | null;
 }
 
 /** The `panels` value with nothing open. */
 export const EMPTY_PANELS: PanelsModel = {
   modelPicker: null,
   globalNotice: null,
-  commands: null,
-  sessions: null,
-  branches: null,
+  commandCatalog: null,
+  sessionPicker: null,
+  branchPicker: null,
 };
 
 // ── session state / view ──────────────────────────────────────────────

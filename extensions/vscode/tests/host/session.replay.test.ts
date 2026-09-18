@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
+import type { CellModel } from '../../src/shared';
 import { createHostHarness, flushMicrotasks, textPayload } from './support/harness';
 import type { HostHarness } from './support/harness';
 import { kinds } from './support/mirror';
@@ -20,6 +21,80 @@ afterEach(() => {
     teardown.pop()?.dispose();
   }
 });
+
+/**
+ * Compare two transcripts on everything that is *content*.
+ *
+ * Cell ids and every wall-clock field are dropped: they are per-path by nature
+ * (a replayed tool call has no measured `startedAt`, a replayed thinking block
+ * has no measured duration, and the history carries no failure flag for tool
+ * results either). Anything else differing is a replay ≠ live bug.
+ */
+function stableCells(cells: readonly CellModel[]): unknown[] {
+  return cells.map((cell, index) => {
+    const copy: Record<string, unknown> = { ...cell, id: `#${index}` };
+    if ('createdAt' in copy) {
+      copy['createdAt'] = 0;
+    }
+    if ('startedAt' in copy) {
+      copy['startedAt'] = null;
+      copy['finishedAt'] = null;
+    }
+    if ('durationMs' in copy) {
+      copy['durationMs'] = null;
+    }
+    return copy;
+  });
+}
+
+/** One conversation, twice: once as a live event stream, once as a replay. */
+async function runLiveConversation(): Promise<HostHarness> {
+  const harness = createHostHarness();
+  teardown.push(harness);
+  await harness.boot();
+  const sessionId = harness.gateway.createdOrder[0] ?? '';
+  harness.gateway.emit({
+    type: 'tool_call',
+    tool_name: 'Bash',
+    tool_args: { command: 'ls -la' },
+    tool_call_id: 'tc-1',
+    session_id: sessionId,
+  });
+  harness.gateway.emit({
+    type: 'tool_call_result',
+    tool_name: 'Bash',
+    tool_args: { command: 'ls -la' },
+    tool_call_id: 'tc-1',
+    tool_result: 'file.txt',
+    tool_success: true,
+    model: 'test-model',
+    session_id: sessionId,
+  });
+  harness.gateway.emit(textPayload('after the tool', sessionId));
+  harness.gateway.emit({ type: 'done', session_id: sessionId });
+  await flushMicrotasks();
+  return harness;
+}
+
+async function runReplayedConversation(): Promise<HostHarness> {
+  const harness = createHostHarness();
+  teardown.push(harness);
+  harness.gateway.seedOnCreate = {
+    messages: [
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'tc-1', name: 'Bash', arguments: { command: 'ls -la' } }],
+        uuid: 'm1',
+      },
+      { role: 'tool', tool_call_id: 'tc-1', content: 'file.txt', uuid: 'm2' },
+      { role: 'assistant', content: 'after the tool', uuid: 'm3' },
+    ],
+  };
+  await harness.boot();
+  await flushMicrotasks();
+  return harness;
+}
 
 describe('replay assembly', () => {
   it('rebuilds messages → uncommitted → tools → events and hydrates the webview', async () => {
@@ -69,10 +144,11 @@ describe('replay assembly', () => {
       'thinking', // m2 reasoning
       'tool_call', // m2 tool_calls
       'diff', // events: anchored after tc-edit
+      'separator', // ReAct rule: the uncommitted thinking block follows a tool call
       'thinking', // uncommitted reasoning
       'tool_call', // uncommitted_tools: tc-stream (streaming args)
     ]);
-    const streamed = cells[5];
+    const streamed = cells[6];
     expect(streamed?.kind === 'tool_call' && streamed.argsText).toBe('{"command":"pn');
     expect(streamed?.kind === 'tool_call' && streamed.status).toBe('streaming');
     // Mid-turn replay restores the elapsed-time anchor.
@@ -586,5 +662,100 @@ describe('sync replacement', () => {
     const view = harness.mirror;
     expect(view.errors).toEqual([]);
     expect(view.cells(sessionId)).toEqual(record?.cells);
+  });
+});
+
+describe('replay == live', () => {
+  it('produces the same cells for the same conversation on both lanes', async () => {
+    const live = await runLiveConversation();
+    const replayed = await runReplayedConversation();
+    const liveId = live.gateway.createdOrder[0] ?? '';
+    const replayId = replayed.gateway.createdOrder[0] ?? '';
+
+    const liveCells = live.host.sessionManager.record(liveId)?.cells ?? [];
+    const replayCells = replayed.host.sessionManager.record(replayId)?.cells ?? [];
+
+    // The ReAct separator is part of the transcript (the TUI inserts it in the
+    // shared `push`, so both lanes must agree on it).
+    expect(kinds(liveCells)).toEqual(['tool_call', 'separator', 'assistant']);
+    expect(kinds(replayCells)).toEqual(kinds(liveCells));
+    expect(stableCells(replayCells)).toEqual(stableCells(liveCells));
+  });
+
+  it('produces the same cells when a replayed tool call gains live fragments', async () => {
+    const harness = createHostHarness();
+    teardown.push(harness);
+    harness.gateway.seedOnCreate = {
+      messages: [
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: 'tc-1', name: 'Bash', arguments: { command: 'ls -la' } }],
+          uuid: 'm1',
+        },
+        { role: 'tool', tool_call_id: 'tc-1', content: 'file.txt', uuid: 'm2' },
+      ],
+    };
+    await harness.boot();
+    const sessionId = harness.gateway.createdOrder[0] ?? '';
+    const replayed = stableCells(harness.host.sessionManager.record(sessionId)?.cells ?? []);
+
+    // The continuation arriving as a live event (same order, same content).
+    harness.gateway.emit(textPayload('after the tool', sessionId));
+    await flushMicrotasks();
+
+    const afterEvents = stableCells(harness.host.sessionManager.record(sessionId)?.cells ?? []);
+    expect(afterEvents.slice(0, replayed.length)).toEqual(replayed);
+    expect(kinds(harness.host.sessionManager.record(sessionId)?.cells ?? [])).toEqual([
+      'tool_call',
+      'separator',
+      'assistant',
+    ]);
+  });
+});
+
+describe('turn accounting', () => {
+  it('does not re-emit the previous turn usage for a turn without LLM calls', async () => {
+    const harness = createHostHarness();
+    teardown.push(harness);
+    await harness.boot();
+    const sessionId = harness.gateway.createdOrder[0] ?? '';
+
+    harness.gateway.emit({ type: 'turn_started', session_id: sessionId });
+    harness.gateway.emit({
+      type: 'llm_call_metrics',
+      model: 'test-model',
+      prompt_tokens: 100,
+      completion_tokens: 20,
+      cached_tokens: 80,
+      first_chunk_rt_ms: 120,
+      tokens_per_sec: 30,
+      stop_reason: 'end_turn',
+      session_id: sessionId,
+    });
+    harness.gateway.emit({ type: 'done', session_id: sessionId });
+    await flushMicrotasks();
+    // A second turn that never reached the model (interrupt / LLM failure /
+    // rejected prompt command) must not publish the first turn's numbers.
+    harness.gateway.emit({ type: 'turn_started', session_id: sessionId });
+    harness.gateway.emit({ type: 'interrupted', session_id: sessionId });
+    await flushMicrotasks();
+
+    const metrics = (harness.host.sessionManager.record(sessionId)?.cells ?? []).filter(
+      (cell) => cell.kind === 'metrics',
+    );
+    expect(metrics).toHaveLength(1);
+    expect(metrics[0]?.kind === 'metrics' && metrics[0].usage).toMatchObject({
+      promptTokens: 100,
+      completionTokens: 20,
+      cachedTokens: 80,
+    });
+
+    const totals = harness.host.sessionManager.record(sessionId)?.totals;
+    expect(totals).toMatchObject({
+      promptTokens: 100,
+      completionTokens: 20,
+      cachedTokens: 80,
+    });
   });
 });

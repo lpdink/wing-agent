@@ -43,8 +43,8 @@ describe('command catalog', () => {
 
     expect(harness.gateway.calls('/api/commands')).toHaveLength(1);
     const panels = harness.host.sessionManager.record(sessionId)?.panels;
-    expect(panels?.commands?.map((command) => command.name)).toEqual(['/init', '/review']);
-    expect(lastPanels(harness)?.commands?.[1]?.aliases).toEqual(['/rv']);
+    expect(panels?.commandCatalog?.commands.map((command) => command.name)).toEqual(['/init', '/review']);
+    expect(lastPanels(harness)?.commandCatalog?.commands[1]?.aliases).toEqual(['/rv']);
     expect(harness.ofType('panels').some((message) => message.sessionId === sessionId)).toBe(true);
   });
 
@@ -105,8 +105,27 @@ describe('model picker', () => {
     const update = harness.gateway.calls('/api/session/update');
     expect(update).toHaveLength(1);
     expect(update[0]?.body).toMatchObject({ session_id: sessionId, model: 'gpt-5.2', provider: 'openai' });
-    // Applying a model closes the picker; the meta itself comes from the event.
+    // Applying a model closes the picker.
     expect(lastPanels(harness)?.modelPicker).toBeNull();
+
+    // The gateway's `session_state_changed` carries no provider, so the host
+    // applies the user's choice optimistically (TUI `runner.rs` does the same).
+    const record = harness.host.sessionManager.record(sessionId);
+    expect(record?.meta.model).toBe('gpt-5.2');
+    expect(record?.meta.provider).toBe('openai');
+    const state = harness
+      .ofType('state')
+      .filter((message) => message.state.sessionId === sessionId)
+      .at(-1);
+    expect(state?.state.meta.provider).toBe('openai');
+
+    // Re-opening the picker highlights the new provider's row.
+    await harness.intent({ type: 'openModelPicker', sessionId });
+    await flushMicrotasks();
+    const reopened = lastPanels(harness)?.modelPicker;
+    expect(reopened?.rows.filter((row) => row.selected)).toEqual([
+      { provider: 'openai', model: 'gpt-5.2', selected: true },
+    ]);
   });
 
   it('surfaces a model-list failure as a toast and leaves the panel closed', async () => {
@@ -122,8 +141,8 @@ describe('model picker', () => {
   });
 });
 
-describe('session history panel', () => {
-  it('lists sessions through /ss with the active one highlighted', async () => {
+describe('session picker', () => {
+  it('lists sessions through /ss with the current one flagged', async () => {
     const { harness, sessionId } = await boot();
     harness.gateway.seedSession({ sessionId: 'sess-older', name: 'Older session' });
     harness.gateway.seedSession({
@@ -135,9 +154,14 @@ describe('session history panel', () => {
     await harness.intent({ type: 'runPromptCommand', sessionId, name: '/ss', argsText: '' });
     await flushMicrotasks();
 
-    const panel = lastPanels(harness)?.sessions;
+    // Bare `/ss`: the host fetches the list and opens the picker (the webview
+    // never fabricates rows).
+    expect(harness.gateway.calls('/api/session/list')).toHaveLength(1);
+    const panel = lastPanels(harness)?.sessionPicker;
     expect(panel?.rows.map((row) => row.sessionId)).toEqual([sessionId, 'sess-older', 'sess-yet-older']);
-    expect(panel?.activeIndex).toBe(0);
+    expect(panel?.rows.map((row) => row.current)).toEqual([true, false, false]);
+    expect(panel?.rows.map((row) => row.status)).toEqual(['idle', 'idle', 'idle']);
+    expect(panel?.rows.map((row) => row.workspace)).toEqual(['/workspace', '/workspace', '/workspace']);
     expect(panel?.rows[0]?.title).toBe('(untitled)');
     expect(panel?.rows[1]?.title).toBe('Older session');
     // The gateway's `first_user_message` rule fills the untitled row.
@@ -167,7 +191,8 @@ describe('branch picker refresh', () => {
     const { harness, sessionId } = await boot();
     await harness.intent({ type: 'runPromptCommand', sessionId, name: '/rewind', argsText: '' });
     await flushMicrotasks();
-    expect(lastPanels(harness)?.branches?.mode).toBe('rewind');
+    expect(lastPanels(harness)?.branchPicker?.mode).toBe('rewind');
+    expect(harness.gateway.calls('/api/session/branches')).toHaveLength(1);
 
     harness.wipe();
     harness.gateway.emit({
@@ -180,10 +205,13 @@ describe('branch picker refresh', () => {
     });
     await flushMicrotasks();
 
-    const panel = lastPanels(harness)?.branches;
+    const panel = lastPanels(harness)?.branchPicker;
+    expect(panel?.mode).toBe('rewind');
     expect(panel?.rows.map((row) => row.uuid)).toEqual(['u1', 'current']);
     expect(panel?.rows.map((row) => row.current)).toEqual([false, true]);
-    expect(panel?.rows[0]?.preview).toBe('first user message');
+    expect(panel?.rows[0]?.content).toBe('first user message');
+    // The row model has exactly the contract's fields (no role / preview).
+    expect(Object.keys(panel?.rows[0] ?? {}).sort()).toEqual(['content', 'current', 'uuid']);
   });
 });
 
@@ -248,20 +276,34 @@ describe('control-plane mutations', () => {
     expect(harness.host.sessionManager.record(sessionId)?.status).toBe('idle');
   });
 
-  it('closes every overlay on closeOverlays without touching the draft', async () => {
+  it('closes the three overlays on closeOverlays but keeps the notice', async () => {
     const { harness, sessionId } = await boot();
+    harness.host.sessionManager.setGlobalNotice({
+      level: 'warning',
+      text: 'Gateway connection lost',
+    });
     await harness.intent({ type: 'openModelPicker', sessionId });
     await harness.intent({ type: 'runPromptCommand', sessionId, name: '/ss', argsText: '' });
+    await harness.intent({ type: 'runPromptCommand', sessionId, name: '/rewind', argsText: '' });
     await flushMicrotasks();
     expect(lastPanels(harness)?.modelPicker).not.toBeNull();
-    expect(lastPanels(harness)?.sessions).not.toBeNull();
+    expect(lastPanels(harness)?.sessionPicker).not.toBeNull();
+    expect(lastPanels(harness)?.branchPicker).not.toBeNull();
 
     await harness.intent({ type: 'closeOverlays' });
     await flushMicrotasks();
 
-    expect(lastPanels(harness)?.modelPicker).toBeNull();
-    expect(lastPanels(harness)?.sessions).toBeNull();
-    expect(lastPanels(harness)?.branches).toBeNull();
+    const closed = harness.host.sessionManager.record(sessionId)?.panels;
+    expect(closed?.modelPicker).toBeNull();
+    expect(closed?.sessionPicker).toBeNull();
+    expect(closed?.branchPicker).toBeNull();
+    // The banner is not an overlay: it expires with the connection, not on Esc.
+    expect(lastPanels(harness)?.globalNotice).toEqual({
+      level: 'warning',
+      text: 'Gateway connection lost',
+    });
+    // The catalog is data, not an overlay, and survives too.
+    expect(lastPanels(harness)?.commandCatalog?.commands.length).toBeGreaterThan(0);
   });
 });
 
@@ -316,6 +358,61 @@ describe('editor actions', () => {
   });
 });
 
+describe('pickers close after a choice', () => {
+  it('clears the session picker after resuming the chosen row', async () => {
+    const { harness, sessionId } = await boot();
+    harness.gateway.seedSession({ sessionId: 'sess-older', name: 'Older session' });
+    await harness.intent({ type: 'runPromptCommand', sessionId, name: '/ss', argsText: '' });
+    await flushMicrotasks();
+    expect(lastPanels(harness)?.sessionPicker?.rows.length).toBeGreaterThan(1);
+
+    await harness.intent({
+      type: 'runPromptCommand',
+      sessionId,
+      name: '/ss',
+      argsText: 'sess-older',
+    });
+    await flushMicrotasks(20);
+
+    // Assert on the *source* session's panels: the resumed session pushes its
+    // own (empty) panels, and that would mask a stale picker.
+    const source = harness.host.sessionManager.record(sessionId);
+    expect(source?.panels.sessionPicker).toBeNull();
+    expect(
+      harness
+        .ofType('panels')
+        .some((message) => message.sessionId === sessionId && message.panels.sessionPicker === null),
+    ).toBe(true);
+    expect(harness.host.sessionManager.openSessionIds).toContain('sess-older');
+  });
+
+  it('clears the branch picker after a rewind and after a fork', async () => {
+    const { harness, sessionId } = await boot();
+    await harness.intent({ type: 'runPromptCommand', sessionId, name: '/rewind', argsText: '' });
+    await flushMicrotasks();
+    expect(lastPanels(harness)?.branchPicker?.mode).toBe('rewind');
+
+    await harness.intent({
+      type: 'runPromptCommand',
+      sessionId,
+      name: '/rewind',
+      argsText: 'u1',
+    });
+    await flushMicrotasks(20);
+    expect(harness.host.sessionManager.record(sessionId)?.panels.branchPicker).toBeNull();
+
+    await harness.intent({ type: 'runPromptCommand', sessionId, name: '/fork', argsText: '' });
+    await flushMicrotasks();
+    expect(lastPanels(harness)?.branchPicker?.mode).toBe('fork');
+
+    await harness.intent({ type: 'runPromptCommand', sessionId, name: '/fork', argsText: 'u1' });
+    await flushMicrotasks(20);
+    // The *source* session's picker closes; the forked tab has none.
+    expect(harness.host.sessionManager.record(sessionId)?.panels.branchPicker).toBeNull();
+    expect(harness.gateway.createdOrder.length).toBe(2);
+  });
+});
+
 describe('local commands typed into the composer', () => {
   it('handles /new, /ss and /model without sending a message', async () => {
     const { harness, sessionId } = await boot();
@@ -328,7 +425,7 @@ describe('local commands typed into the composer', () => {
     // No user frames left the client for a local command.
     expect(harness.clientFrames().filter((frame) => frame['session_id'] === sessionId)).toHaveLength(0);
     expect(lastPanels(harness)?.modelPicker).not.toBeNull();
-    expect(lastPanels(harness)?.sessions).not.toBeNull();
+    expect(lastPanels(harness)?.sessionPicker).not.toBeNull();
 
     await harness.intent({ type: 'sendMessage', sessionId, text: '/new' });
     await flushMicrotasks(20);
