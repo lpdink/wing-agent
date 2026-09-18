@@ -21,13 +21,22 @@ interface Mounted {
   dispose(): void;
 }
 
+/**
+ * Fixed clock for both sides of the ping round-trip.
+ *
+ * The bridge measures latency itself (`now()` before send, `now()` after the
+ * pong), so the test must inject the *controller's* clock too — sampling the real
+ * wall clock made the RTT assertion flaky (review r1 [B1]).
+ */
+const FIXED_CLOCK = 1_000;
+
 function mount(sessions = [makeFixtureSession()]): Mounted {
   const container = document.createElement('div');
   document.body.append(container);
-  const bridge = createMockBridge({ sessions, now: () => 1_000 });
+  const bridge = createMockBridge({ sessions, now: () => FIXED_CLOCK });
   let app: { dispose(): void } | undefined;
   act(() => {
-    app = mountApp(container, { transport: bridge.transport });
+    app = mountApp(container, { transport: bridge.transport, now: () => FIXED_CLOCK });
   });
   return {
     container,
@@ -112,7 +121,11 @@ describe('webview app', () => {
 
     fireEvent.click(ui.getByTestId('ping-button'));
 
-    expect(bridge.sentOfType('ping')).toHaveLength(1);
+    // Protocol behaviour: one correlated ping on the wire.
+    const pings = bridge.sentOfType('ping');
+    expect(pings).toHaveLength(1);
+    // UI behaviour: the pong is rendered with the latency the *injected* clock
+    // measures (0ms here) — deterministic, no wall-clock sampling.
     expect(ui.getByTestId('ping-rtt')).toHaveTextContent('pong in 0ms');
   });
 

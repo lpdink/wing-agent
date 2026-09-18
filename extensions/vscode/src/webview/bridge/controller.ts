@@ -4,7 +4,7 @@ import type {
   WebviewToHostMessage,
   WebviewTransport,
 } from '../../shared';
-import { BRIDGE_PROTOCOL_VERSION, isHostToWebviewMessage } from '../../shared';
+import { BRIDGE_PROTOCOL_VERSION, isHostToWebviewMessage, unhandledVariant } from '../../shared';
 
 import type { AppStoreApi } from '../state/store';
 
@@ -25,8 +25,13 @@ import type { AppStoreApi } from '../state/store';
 export interface BridgeControllerOptions {
   readonly transport: WebviewTransport;
   readonly store: AppStoreApi;
-  /** Injectable clock (tests). */
-  readonly now?: () => number;
+  /**
+   * Injectable clock (tests); `undefined` means the wall clock.
+   *
+   * Explicitly `| undefined` so callers can forward an optional value under
+   * `exactOptionalPropertyTypes`.
+   */
+  readonly now?: (() => number) | undefined;
 }
 
 export interface BridgeController {
@@ -123,6 +128,10 @@ export function createBridgeController(options: BridgeControllerOptions): Bridge
         return;
       }
       default:
+        // Compile-time gate: `message` is `never` only while every variant is
+        // handled above (adding one to the union breaks this line). At runtime it
+        // warns instead of throwing — a channel must survive a newer peer.
+        unhandledVariant(message, 'bridge controller');
         return;
     }
   };

@@ -20,6 +20,11 @@ export interface MountOptions {
   readonly transport: WebviewTransport;
   /** Clear the mirror before mounting (default: true). */
   readonly reset?: boolean;
+  /**
+   * Clock used by the bridge (ping round-trips). Injected so tests can assert
+   * latency deterministically instead of racing the wall clock.
+   */
+  readonly now?: () => number;
 }
 
 export interface MountedApp {
@@ -31,7 +36,11 @@ export function mountApp(rootElement: HTMLElement, options: MountOptions): Mount
     resetAppStore();
   }
 
-  const controller = createBridgeController({ transport: options.transport, store: appStore });
+  const controller = createBridgeController({
+    transport: options.transport,
+    store: appStore,
+    now: options.now,
+  });
   setBridgeController(controller);
 
   const root = createRoot(rootElement);
