@@ -1,0 +1,12 @@
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Wing">
+  <!--
+    Monochrome activity-bar mark. Fill color follows VS Code's own guidance for
+    viewsContainers icons (src/vs/workbench/api/browser/viewsExtensionPoint.ts):
+    "have a fill color of 'rgb(215, 218, 224)' or '#d7dae0'".
+  -->
+  <g stroke="#d7dae0" stroke-width="1.8" stroke-linecap="round">
+    <path d="M2.75 18.25C8.2 17.6 13.2 13.9 16.6 8.2" />
+    <path d="M7.5 20.25C12.1 19.3 16.1 16.1 19.1 11.1" />
+    <path d="M13.4 20.9C16.6 20 19.4 17.6 21.25 14.1" />
+  </g>
+</svg>

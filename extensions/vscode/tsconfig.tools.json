@@ -1,0 +1,18 @@
+{
+  "//": "Build/test config files (esbuild, vite, vitest). Kept in their own project so typescript-eslint's projectService finds a project for root-level files. JS is parsed but not type-checked (`checkJs: false`): the build scripts are tiny and shipping checkJs there costs more than it catches. `eslint.config.mjs` is excluded from linting (a config file linting itself is circular).",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": [
+    "esbuild.mjs",
+    "esbuild.smoke.mjs",
+    "vite.config.mts",
+    "vite.preview.config.mts",
+    "vitest.config.mts",
+    "tools/**/*.ts"
+  ]
+}

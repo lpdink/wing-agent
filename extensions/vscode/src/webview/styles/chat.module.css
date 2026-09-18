@@ -1,0 +1,801 @@
+/*
+ * Chat cell styling.
+ *
+ * Values are `--wing-*` tokens (tokens.css, every one sourced to the VS Code chat
+ * sources). The remaining literals are exactly the exceptions README.md lists:
+ * a value inside a rule whose header comment quotes the source line holding it,
+ * geometry that stands in for a codicon we cannot ship, or layout glue.
+ *
+ * Colors are theme variables only — enforced by tests/layers.
+ */
+
+/* ── transcript ──────────────────────────────────────────────────────── */
+
+.transcriptWrapper {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.transcript {
+  flex: 1 1 auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* The transcript owns its scroll position (it re-pins itself to the newest
+   * content): the browser's scroll anchoring would move `scrollTop` on its own
+   * when a block above the viewport shrinks (a thinking cell collapsing), which
+   * is exactly the "lost the bottom" behavior this component prevents. */
+  overflow-anchor: none;
+}
+
+/* Content wrapper: the observed box for "the transcript grew/shrank" (the
+ * scroller itself is viewport-sized, so observing it would prove nothing). */
+.transcriptContent {
+  display: flow-root;
+}
+
+.emptyState {
+  padding: var(--wing-chat-row-padding-y) var(--wing-chat-row-padding-x);
+  margin: 0;
+  color: var(--wing-fg-description);
+}
+
+/* CHAT:3723-3735 (.chat-scroll-down) + CHAT:34-36 (padding: 4px) */
+.scrollDown {
+  position: absolute;
+  right: var(--wing-scroll-down-right);
+  bottom: var(--wing-scroll-down-bottom);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--wing-scroll-down-size);
+  height: var(--wing-scroll-down-size);
+  padding: 4px;
+  border: var(--wing-stroke) solid var(--wing-border-widget);
+  border-radius: 100%;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  background-color: var(--wing-surface-widget);
+  font-family: inherit;
+  font-size: var(--wing-font-body-s);
+  cursor: pointer;
+}
+
+.scrollDown:hover {
+  background-color: var(--vscode-toolbar-hoverBackground, var(--wing-surface-widget));
+}
+
+.scrollDown:focus-visible {
+  outline: var(--wing-stroke) solid var(--wing-focus-border);
+  outline-offset: 1px;
+}
+
+/* ── one row per cell ─────────────────────────────────────────────────
+ * CHAT:3771-3774 — the sidebar form pads every row 5px 16px.
+ */
+
+.row {
+  display: flex;
+  flex-direction: column;
+  padding: var(--wing-chat-row-padding-y) var(--wing-chat-row-padding-x);
+  cursor: default;
+  user-select: text;
+}
+
+/* ── user ────────────────────────────────────────────────────────────── */
+
+/* CHAT:3792-3805 — right-aligned bubble, 90% max width, 8px 12px padding. */
+.userBubble {
+  align-self: flex-end;
+  width: fit-content;
+  max-width: var(--wing-user-bubble-max-width);
+  padding: 8px 12px;
+  margin-bottom: 5px;
+  border-radius: var(--wing-radius-xlarge);
+  background-color: var(--wing-user-bubble-bg);
+  overflow-wrap: anywhere;
+}
+
+/* A discarded message never reached the model — dim it, do not delete it. */
+.row[data-cell-state='discarded'] .userBubble {
+  color: var(--wing-fg-description);
+  text-decoration: line-through;
+}
+
+.row[data-cell-state='pending'] .userBubble {
+  opacity: var(--wing-disabled-opacity);
+}
+
+/* ── thinking ────────────────────────────────────────────────────────── */
+
+.thinking {
+  display: flex;
+  flex-direction: column;
+  color: var(--wing-fg-description);
+}
+
+.disclosureHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--wing-gap-xs);
+  width: fit-content;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.disclosureHeader:focus-visible {
+  outline: var(--wing-stroke) solid var(--wing-focus-border);
+  outline-offset: 1px;
+}
+
+/* CHAT:3285-3308 — 12px chevron, rotate 90deg when expanded, 180ms ease. */
+.chevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--wing-chevron-size);
+  height: var(--wing-chevron-size);
+  color: var(--wing-fg-description);
+  transition:
+    opacity 100ms ease-in-out,
+    transform var(--wing-collapse-duration) var(--wing-collapse-ease);
+}
+
+/* Triangle stands in for the codicon chevron: a webview has no codicon font
+ * unless we ship it (~100KB), so the glyph is drawn with borders inside the same
+ * 12px box. */
+.chevron::before {
+  width: 0;
+  height: 0;
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+  border-left: 4px solid currentColor;
+  content: '';
+}
+
+.chevron[data-expanded='true']::before {
+  transform: rotate(90deg);
+}
+
+/* PARTS/chatThinkingContent.css:30-35 — label at body-s, line-height 1.5em. */
+.thinkingLabel {
+  font-size: var(--wing-font-body-s);
+  line-height: var(--wing-md-line-height);
+}
+
+/* PARTS/chatThinkingContent.css:81-97 + CHAT:124-133 — the streaming shimmer. */
+.thinkingLabel[data-shimmer='true'] {
+  background: linear-gradient(
+    90deg,
+    var(--wing-fg-description) 0%,
+    var(--wing-fg-description) 30%,
+    var(--wing-thinking-shimmer) 50%,
+    var(--wing-fg-description) 70%,
+    var(--wing-fg-description) 100%
+  );
+  background-size: 400% 100%;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: thinking-shimmer var(--wing-thinking-shimmer-duration) linear infinite;
+  will-change: background-position;
+}
+
+@keyframes thinking-shimmer {
+  0% {
+    background-position: 120% 0;
+  }
+
+  100% {
+    background-position: -120% 0;
+  }
+}
+
+/* PARTS/chatThinkingContent.css:121-150 — 5px offset, hairline connector,
+ * collapsed-list padding 0 3px 4px (CHAT:3154-3158 with padding-top: 0). */
+.thinkingBody {
+  margin-left: var(--wing-thinking-indent);
+  padding: var(--wing-thinking-body-padding);
+  border-left: var(--wing-thinking-connector);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinkingLabel[data-shimmer='true'] {
+    animation: none;
+  }
+}
+
+/* ── system ──────────────────────────────────────────────────────────── */
+
+.systemMessage {
+  margin: 0;
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-s);
+  overflow-wrap: anywhere;
+}
+
+.systemMessage[data-level='warning'] {
+  color: var(--wing-fg-warning);
+}
+
+.systemMessage[data-level='error'] {
+  color: var(--wing-fg-error);
+}
+
+/* ── tool call ───────────────────────────────────────────────────────── */
+
+/* CHAT:679-681 — VS Code keeps 14px between consecutive tool invocations inside a
+ * response. We model each cell as its own padded row (5px), so the same 14px
+ * rhythm needs a 4px top margin between two adjacent tool calls. */
+.row[data-cell-kind='tool_call'] + .row[data-cell-kind='tool_call'] {
+  margin-top: calc(var(--wing-tool-row-gap) - 2 * var(--wing-chat-row-padding-y));
+}
+
+.toolRow {
+  display: flex;
+  flex-direction: column;
+}
+
+.toolHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--wing-gap-sm);
+  cursor: pointer;
+}
+
+.toolHeader:focus-visible {
+  outline: var(--wing-stroke) solid var(--wing-focus-border);
+  outline-offset: 1px;
+}
+
+.toolTitle {
+  flex: 0 0 auto;
+  font-size: var(--wing-font-body-s);
+  font-weight: 600;
+}
+
+.toolSubject {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-s);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* CHAT:93-140 — the "working" marker is an animated ellipsis; here it is a
+ * pulsing dot so a compact row keeps a stable width. 6px is geometry, not a
+ * copied constant: a codicon could not be shipped into the webview. */
+.toolGlyph {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 100%;
+  background-color: var(--wing-fg-description);
+  animation: tool-pulse var(--wing-stream-ellipsis-duration) ease-in-out infinite;
+}
+
+.toolGlyphDone {
+  animation: none;
+  background-color: var(--vscode-charts-green, var(--wing-fg-description));
+}
+
+.toolGlyph[data-status='failed'] {
+  background-color: var(--wing-fg-error);
+}
+
+@keyframes tool-pulse {
+  0% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.25;
+  }
+
+  100% {
+    opacity: 1;
+  }
+}
+
+/* PARTS/chatConfirmationWidget.css:120-140 — expanded content is inset 8px. */
+.toolBody {
+  padding: var(--wing-tool-expanded-padding);
+}
+
+/* CHAT:628-640 — bordered output card with a title bar. */
+.toolCard {
+  margin: var(--wing-tool-card-margin);
+  border: var(--wing-stroke) solid var(--wing-border-widget);
+  border-radius: var(--wing-radius-medium);
+  background-color: var(--wing-surface-editor);
+  overflow: hidden;
+}
+
+.toolCardTitle {
+  padding: var(--wing-tool-card-title-padding);
+  border-bottom: var(--wing-stroke) solid var(--wing-border-widget);
+  color: var(--wing-fg-description);
+  background-color: var(--wing-surface-widget);
+  font-size: var(--wing-font-body-s);
+}
+
+.toolCardBody {
+  max-height: var(--wing-tool-output-max-height);
+  padding: var(--wing-tool-card-pad-y) var(--wing-tool-card-pad-x);
+  margin: 0;
+  overflow: auto;
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--wing-font-body-xs);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* CHAT:657-676 (.output-error) */
+.toolCardBody[data-error='true'] {
+  color: var(--wing-fg-error);
+}
+
+.toolCardNote {
+  padding: 0 var(--wing-tool-card-pad-x) var(--wing-tool-card-pad-y);
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-xs);
+}
+
+/* ── diff ────────────────────────────────────────────────────────────── */
+
+.diffCard {
+  margin: var(--wing-tool-card-margin);
+  border: var(--wing-stroke) solid var(--wing-border-widget);
+  border-radius: var(--wing-radius-medium);
+  background-color: var(--wing-surface-editor);
+  overflow: hidden;
+}
+
+.diffHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--wing-gap-md);
+  padding: var(--wing-tool-card-title-padding);
+  border-bottom: var(--wing-stroke) solid var(--wing-border-widget);
+  background-color: var(--wing-surface-widget);
+}
+
+.diffCounts {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--wing-gap-sm);
+  margin-left: auto;
+  font-size: var(--wing-font-body-s);
+}
+
+.diffAdded {
+  color: var(--wing-diff-add-fg);
+}
+
+.diffRemoved {
+  color: var(--wing-diff-del-fg);
+}
+
+.diffOpen {
+  flex: 0 0 auto;
+  height: var(--wing-control-height);
+  padding: 0 var(--wing-control-pad-x);
+  border: var(--wing-stroke) solid var(--wing-border-request);
+  border-radius: var(--wing-radius-small);
+  color: var(--wing-fg-description);
+  background-color: transparent;
+  font-family: inherit;
+  font-size: var(--wing-font-body-s);
+  cursor: pointer;
+}
+
+.diffOpen:hover {
+  background-color: var(--vscode-toolbar-hoverBackground, transparent);
+}
+
+.diffOpen:focus-visible {
+  outline: var(--wing-stroke) solid var(--wing-focus-border);
+  outline-offset: 1px;
+}
+
+.diffBody {
+  overflow-x: auto;
+  padding: var(--wing-pad-y) 0;
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--wing-font-body-s);
+  /* The diff card is not a Monaco editor: let the monospace font pick its own
+   * line height instead of inventing a ratio (the editor computes
+   * GOLDEN_LINE_HEIGHT_RATIO × fontSize, editor/common/config/fontInfo.ts:14). */
+  line-height: normal;
+}
+
+.diffLine {
+  display: flex;
+  align-items: baseline;
+  white-space: pre;
+}
+
+.diffLineNumber {
+  flex: 0 0 var(--wing-diff-gutter-width);
+  min-width: var(--wing-diff-gutter-width);
+  padding-right: var(--wing-gap-sm);
+  color: var(--wing-diff-gutter-fg);
+  text-align: right;
+  user-select: none;
+}
+
+.diffMarker {
+  flex: 0 0 1.2em;
+  color: var(--wing-fg-description);
+  text-align: center;
+  user-select: none;
+}
+
+.diffText {
+  flex: 1 1 auto;
+  padding-right: var(--wing-tool-card-pad-x);
+}
+
+.diffLine[data-diff-kind='add'] {
+  background-color: var(--wing-diff-add-line);
+}
+
+.diffLine[data-diff-kind='del'] {
+  background-color: var(--wing-diff-del-line);
+}
+
+.diffLine[data-diff-kind='hunk'] {
+  color: var(--wing-fg-description);
+  background-color: var(--wing-diff-hunk-bg);
+}
+
+.diffTruncated {
+  padding: var(--wing-pad-y-tight) var(--wing-tool-card-pad-x);
+  color: var(--wing-fg-description);
+  user-select: none;
+}
+
+/* ── todo ────────────────────────────────────────────────────────────── */
+
+/* CHAT:1526-1550 — 4px list gap, 22px rows. */
+.todoList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--wing-todo-list-gap);
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.todoItem {
+  display: flex;
+  align-items: center;
+  gap: var(--wing-todo-item-gap);
+  min-height: var(--wing-todo-item-min-height);
+  padding: var(--wing-todo-item-padding);
+  font-size: var(--wing-font-body-m);
+}
+
+/* Status colors: chatTodoListWidget.ts:101-110 (charts-green / charts-blue /
+ * foreground). Glyphs stand in for the pass/record/circle-outline codicons. */
+.todoGlyph {
+  flex: 0 0 auto;
+  width: 1em;
+  color: var(--vscode-foreground);
+  text-align: center;
+  user-select: none;
+}
+
+.todoGlyph::before {
+  content: '○';
+}
+
+.todoGlyph[data-status='in_progress'] {
+  color: var(--vscode-charts-blue, var(--vscode-foreground));
+}
+
+.todoGlyph[data-status='in_progress']::before {
+  content: '◐';
+}
+
+.todoGlyph[data-status='completed'] {
+  color: var(--vscode-charts-green, var(--vscode-foreground));
+}
+
+.todoGlyph[data-status='completed']::before {
+  content: '✓';
+}
+
+.todoText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.todoItem[data-todo-status='completed'] .todoText {
+  color: var(--wing-fg-description);
+}
+
+/* ── metrics / separator ─────────────────────────────────────────────── */
+
+.metrics {
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-xs);
+}
+
+.separator {
+  display: flex;
+  align-items: center;
+  gap: var(--wing-gap-md);
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-xs);
+}
+
+.separator::before,
+.separator::after {
+  flex: 1 1 auto;
+  border-top: var(--wing-stroke) solid var(--wing-border-widget);
+  content: '';
+}
+
+/* ── file references ─────────────────────────────────────────────────── */
+
+.fileReference {
+  padding: 0;
+  border: 0;
+  color: var(--wing-fg-link);
+  background: none;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: var(--text-link-decoration, none);
+}
+
+.fileReference:hover {
+  color: var(--wing-fg-link-hover);
+  text-decoration: underline;
+}
+
+.fileReference:focus-visible {
+  outline: var(--wing-stroke) solid var(--wing-focus-border);
+  outline-offset: 1px;
+}
+
+.fileReferenceLine {
+  color: var(--wing-fg-description);
+}
+
+/* ── ask / approval ──────────────────────────────────────────────────── */
+
+/* PARTS/chatQuestionCarousel.css:19-30 — outlined card on the panel surface. */
+.askCard {
+  margin: var(--wing-ask-margin);
+  border: var(--wing-stroke) solid
+    var(--vscode-input-border, var(--vscode-chat-requestBorder, var(--vscode-panel-border, transparent)));
+  border-radius: var(--wing-radius-large);
+  background-color: var(--wing-surface-panel);
+  overflow: hidden;
+}
+
+.askQuestionBlock + .askQuestionBlock {
+  border-top: var(--wing-stroke) solid var(--wing-border-request);
+}
+
+/* :74-97 — title row. */
+.askHeader {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--wing-gap-md);
+  padding: var(--wing-ask-title-padding);
+  border-bottom: var(--wing-stroke) solid var(--wing-border-request);
+}
+
+.askTitle {
+  font-size: var(--wing-font-heading3);
+  font-weight: var(--wing-weight-semibold);
+}
+
+/* :192-196 — question body. */
+.askBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--wing-gap-md);
+  padding: var(--wing-ask-body-padding);
+}
+
+.askQuestion {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* :217-279 — option rows. */
+.askOptions {
+  display: flex;
+  flex-direction: column;
+}
+
+.askOption {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--wing-ask-option-gap);
+  padding: var(--wing-ask-option-padding);
+  border-radius: var(--wing-radius-medium);
+  cursor: pointer;
+  user-select: none;
+}
+
+.askOption:hover {
+  background-color: var(--wing-ask-hover-bg);
+}
+
+.askOption[data-selected='true'] {
+  background-color: var(--wing-ask-selected-bg);
+}
+
+.askOptionInput {
+  flex: 0 0 auto;
+  margin-top: var(--wing-checkbox-offset);
+  accent-color: var(--vscode-focusBorder);
+}
+
+.askOptionLabel {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* :243-261 — label at body2, title line-height 1.4, description dimmed. */
+.askOptionTitle {
+  font-size: var(--wing-font-body2);
+  font-weight: var(--wing-weight-semibold);
+  line-height: var(--wing-ask-option-title-line-height);
+  overflow-wrap: anywhere;
+}
+
+.askOptionDescription {
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body2);
+  line-height: var(--wing-ask-option-title-line-height);
+  overflow-wrap: anywhere;
+}
+
+.askInput {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--wing-pad-cell-y) var(--wing-pad-cell-x);
+  border: var(--wing-stroke) solid var(--wing-border-input);
+  border-radius: var(--wing-radius-small);
+  color: var(--wing-input-fg);
+  background-color: var(--wing-input-bg);
+  font-family: inherit;
+  font-size: var(--wing-font-body-s);
+  resize: vertical;
+}
+
+.askInput::placeholder {
+  color: var(--wing-input-placeholder);
+}
+
+.askInput:focus {
+  outline: none;
+  border-color: var(--wing-focus-border);
+}
+
+/* :410-468 — footer row: 4px 8px, hairline on top, 22px buttons. */
+.askFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--wing-gap-md);
+  padding: var(--wing-ask-footer-padding);
+  border-top: var(--wing-stroke) solid var(--wing-border-request);
+}
+
+.askHint {
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-xs);
+}
+
+.askButtons {
+  display: flex;
+  gap: var(--wing-gap-md);
+}
+
+.buttonPrimary,
+.buttonSecondary {
+  height: var(--wing-control-height);
+  padding: 0 var(--wing-control-pad-x);
+  border: var(--wing-stroke) solid transparent;
+  border-radius: var(--wing-radius-small);
+  font-family: inherit;
+  font-size: var(--wing-font-body-s);
+  cursor: pointer;
+}
+
+.buttonPrimary {
+  color: var(--wing-button-fg);
+  background-color: var(--wing-button-bg);
+}
+
+.buttonPrimary:hover:not(:disabled) {
+  background-color: var(--wing-button-bg-hover);
+}
+
+.buttonSecondary {
+  border-color: var(--wing-border-request);
+  color: var(--wing-button-2nd-fg);
+  background-color: var(--wing-button-2nd-bg);
+}
+
+.buttonSecondary:hover:not(:disabled) {
+  background-color: var(--wing-button-2nd-bg-hover);
+}
+
+.buttonPrimary:disabled,
+.buttonSecondary:disabled {
+  opacity: var(--wing-disabled-opacity);
+  cursor: default;
+}
+
+.buttonPrimary:focus-visible,
+.buttonSecondary:focus-visible {
+  outline: var(--wing-stroke) solid var(--wing-focus-border);
+  outline-offset: 1px;
+}
+
+/* ── streaming caret ─────────────────────────────────────────────────── */
+
+/* CHAT:493-537 — an empty inline span whose ::after cycles . → .. → … */
+.streamCaret {
+  display: inline-block;
+  width: var(--wing-stream-caret-width);
+  overflow: hidden;
+  white-space: nowrap;
+  color: var(--wing-fg-description);
+}
+
+.streamCaret::after {
+  content: '';
+  animation: stream-ellipsis steps(4, end) var(--wing-stream-ellipsis-duration) infinite;
+}
+
+@keyframes stream-ellipsis {
+  0% {
+    content: '';
+  }
+
+  25% {
+    content: '.';
+  }
+
+  50% {
+    content: '..';
+  }
+
+  75% {
+    content: '...';
+  }
+
+  100% {
+    content: '';
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toolGlyph {
+    animation: none;
+  }
+
+  .streamCaret::after {
+    animation: none;
+    content: '...';
+  }
+}

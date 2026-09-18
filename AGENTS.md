@@ -178,6 +178,7 @@ crates/wing/src/
 - `libs/wing-sdk/wing_sdk/` — Python 远程工具宿主 SDK：`host.py`（装饰器注册 + WS 循环）、`http_client.py`、`schema.py`、`tools/`（Bash/Read/Write/Edit/Glob/Grep，workspace-bound）。
 - `libs/wing-orch/wing_orch/` — 编排 CLI（后台 Goal，port of `app/goal.rs`）：`cli.py`、`goal.py`、`runner.py`。**目前少用，改动不必同步本节细节。**
 - `libs/wing-probe/` — 确定性集成测试基础设施（假 Provider + driver + observer 断言库）：`wing_probe/`（env / provider / driver / watch / history / files）、`scenarios/`（整机断言场景）、`tests/`（基础设施自测）。**禁止 import `wing`**（AST 门禁强制；允许 `wing_sdk`），一切经公开 HTTP / WS 协议 → [docs/dev/probe-testing.md](docs/dev/probe-testing.md)。
+- `extensions/vscode/` — VSCode 前端（第四个前端形态；TS strict + pnpm 单包四层：`src/core` 网关能力层 / `src/host` 扩展宿主 / `src/webview` React 渲染 / `src/shared` 两侧契约）。层门禁由机制强制：分 tsconfig（DOM/node 隔离）+ ESLint 分区规则 + `tests/layers` 守门测试；`make check`/`make test` 含 `check-ts`/`test-ts`，CI 有 `typescript-check` job → [docs/dev/vscode-extension.md](docs/dev/vscode-extension.md) · [extensions/vscode/README.md](extensions/vscode/README.md)。
 - `e2e/claude-agent-sdk-integration/` — 用 claude-agent-sdk 跑 wing 的端到端测试（`make test-e2e`）。
 - 测试目录：`libs/core/tests/`（后端 pytest，60 个文件）、`libs/wing-sdk/tests/`、`libs/wing-orch/tests/`。
 - 顶层 `docs/dev/` 为开发者深度文档（中文），`scripts/sync_version.py` 同步版本号。
@@ -196,6 +197,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/http-api.md`](docs/dev/http-api.md) | 完整 HTTP 端点表 + WebSocket 协议 + 鉴权 |
 | [`docs/dev/glossary.md`](docs/dev/glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |
 | [`docs/dev/config-logging.md`](docs/dev/config-logging.md) | WING_HOME 布局、config.yaml 键、日志轮转与查询 |
+| [`docs/dev/vscode-extension.md`](docs/dev/vscode-extension.md) | VSCode 扩展（`extensions/vscode/`）：四层分层与数据流、桥协议与归约（重放==直播 / 单 WS 多订阅）、会话时序与多 Tab、连接自愈、构建门禁 / smoke / 打包与验收 |
 | [`docs/dev/probe-testing.md`](docs/dev/probe-testing.md) | 确定性集成测试（wing-probe）：跑法 / 新增断言场景（写代码、不写配置）/ 断言原语速查 / 上下文红线清单与 persist 口径 / 逃生舱约定 |
 
 事实来源优先级：**代码 > docs/dev > AGENTS.md 概述**。若发现不一致，以代码为准并欢迎修正文档。
@@ -215,9 +217,9 @@ cargo test
 make check-rust                   # fmt + clippy + test
 
 # All
-make test                         # Python + Rust（含 test-probe）
+make test                         # Python + Rust + TS（含 test-probe）
 make test-probe                   # 确定性集成场景（wing-probe，离线、无外部 API key）
-make check                        # Python + Rust
+make check                        # Python + Rust + TS（含 extensions/vscode 门禁）
 make fmt                          # 格式化全部
 ```
 

@@ -1,0 +1,43 @@
+# What `vsce package` leaves out of the .vsix.
+#
+# Only build outputs are shipped: `out/extension.js` (extension host) and
+# `dist/webview/{main.js,main.css}` (webview bundle). Everything that fed the
+# build — sources, tests, tooling config, node_modules — stays out.
+#
+# Note: all runtime dependencies are bundled (and therefore declared as
+# devDependencies), so vsce has no production dependency tree to walk here.
+
+# Sources
+src/**
+tests/**
+preview/**
+
+# Dev-only build output (the preview harness is not part of the extension)
+dist/preview/**
+
+# The end-to-end smoke is a developer tool (`pnpm run smoke:gateway`), not a
+# shipped asset: it needs a `wing-gateway` binary and Node >= 22 and never runs
+# inside the extension host.
+out/smoke/**
+
+# Tooling / config
+.vscode/**
+tsconfig*.json
+eslint.config.mjs
+.prettierrc.json
+.prettierignore
+pnpm-lock.yaml
+pnpm-workspace.yaml
+vite.config.mts
+vite.preview.config.mts
+vitest.config.mts
+esbuild.mjs
+esbuild.smoke.mjs
+tools/**
+*.vsix
+
+# Build leftovers
+node_modules/**
+**/*.map
+**/*.ts
+coverage/**

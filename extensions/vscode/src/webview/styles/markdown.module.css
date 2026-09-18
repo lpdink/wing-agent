@@ -1,0 +1,314 @@
+/*
+ * Markdown typography and code blocks.
+ *
+ * Sources: `widget/media/chat.css` (rendered-markdown rules) and
+ * `widget/chatContentParts/media/codeBlockPart.css` (code block chrome). See
+ * tokens.css for the token definitions and their line references; the remaining
+ * literals follow the exception list in README.md (rule-level source comment,
+ * codicon stand-in geometry, layout glue).
+ */
+
+.markdown {
+  font-size: var(--wing-font-body-m);
+  line-height: var(--wing-md-line-height);
+  overflow-wrap: anywhere;
+}
+
+/* CHAT:549-552 + :443-447 — 16px between paragraphs, none after the last. */
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.paragraph {
+  margin: 0 0 var(--wing-md-paragraph-margin) 0;
+}
+
+/* CHAT:457-477 — h1/h2/h3 use the chat ramp; deeper levels stay at body size. */
+.heading {
+  margin: 1.5em 0 0.875em 0;
+  font-weight: 600;
+}
+
+.heading[data-level='1'] {
+  font-size: var(--wing-font-body-xxl);
+}
+
+.heading[data-level='2'] {
+  font-size: var(--wing-font-body-xl);
+}
+
+.heading[data-level='3'] {
+  font-size: var(--wing-font-body-l);
+}
+
+.heading[data-level='4'],
+.heading[data-level='5'],
+.heading[data-level='6'] {
+  font-size: var(--wing-font-body-m);
+}
+
+/* CHAT:348-356 */
+.quote {
+  margin: 0 0 var(--wing-md-paragraph-margin) 0;
+  padding: 0 16px 0 10px;
+  border-left: 5px solid var(--wing-md-quote-border);
+  border-radius: 2px;
+  background: var(--wing-md-quote-bg);
+}
+
+/* CHAT:689-702 — ul 24px, ol 28px */
+.list {
+  margin: 0 0 var(--wing-md-paragraph-margin) 0;
+  padding-inline-start: var(--wing-md-ul-indent);
+}
+
+ol.list {
+  padding-inline-start: var(--wing-md-ol-indent);
+}
+
+.heading + .list {
+  margin-top: 0;
+}
+
+.listItem {
+  margin: var(--wing-md-li-margin) 0;
+}
+
+.listItem > :last-child {
+  margin-bottom: 0;
+}
+
+/* CHAT:362-396 */
+.tableScroll {
+  width: 100%;
+  margin-bottom: var(--wing-md-paragraph-margin);
+  overflow-x: auto;
+}
+
+.table {
+  border: var(--wing-stroke) solid var(--wing-md-table-border);
+  border-collapse: separate;
+  border-spacing: 0;
+  border-radius: var(--wing-radius-medium);
+  overflow: hidden;
+  text-align: left;
+}
+
+.table th,
+.table td {
+  padding: 4px 6px;
+  border-top: none;
+  border-left: none;
+  border-right: var(--wing-stroke) solid var(--wing-md-table-border);
+  border-bottom: var(--wing-stroke) solid var(--wing-md-table-border);
+}
+
+.table th:last-child,
+.table td:last-child {
+  border-right: none;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.table th {
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+
+.table [data-align='center'] {
+  text-align: center;
+}
+
+.table [data-align='right'] {
+  text-align: right;
+}
+
+/* CHAT:449-455 only colours the rule; the spacing reuses the paragraph rhythm
+ * (CHAT:549-552) instead of inventing a margin. */
+.rule {
+  margin: var(--wing-md-paragraph-margin) 0;
+  border: 0;
+  border-top: var(--wing-stroke) solid var(--wing-border-widget);
+}
+
+/* CHAT:743-757 — inline code. */
+.inlineCode {
+  padding: 1px 3px;
+  border: var(--wing-stroke) solid var(--wing-md-code-border);
+  border-radius: var(--wing-radius-small);
+  color: var(--wing-md-code-fg);
+  background-color: var(--wing-md-code-bg);
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--wing-font-body-xs);
+  white-space: pre-wrap;
+}
+
+.link {
+  color: var(--wing-fg-link);
+  text-decoration: var(--text-link-decoration, none);
+}
+
+.link:hover,
+.link:active {
+  color: var(--wing-fg-link-hover);
+  text-decoration: underline;
+}
+
+/* ── code blocks ─────────────────────────────────────────────────────── */
+
+/* codeBlockPart.css:61-82 — bordered card on the code surface. */
+.codeBlock {
+  margin: 0 0 var(--wing-code-margin) 0;
+  border: var(--wing-stroke) solid var(--wing-border-input);
+  border-radius: var(--wing-radius-medium);
+  background-color: var(--wing-surface-code);
+  overflow: hidden;
+}
+
+/* codeBlockPart.css:11-47 — 26px toolbar inside the card. */
+.codeHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--wing-gap-md);
+  height: var(--wing-code-toolbar-height);
+  padding: 0 var(--wing-control-pad-x);
+}
+
+.codeLang {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-s);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* codeBlockPart.css:11-14 + :49-54 — the toolbar is hover/focus-revealed. */
+.codeCopy {
+  flex: 0 0 auto;
+  height: var(--wing-code-action-size);
+  padding: 0 var(--wing-control-pad-x);
+  border: var(--wing-stroke) solid var(--wing-border-request);
+  border-radius: var(--wing-radius-small);
+  color: var(--wing-fg-description);
+  background-color: transparent;
+  font-family: inherit;
+  font-size: var(--wing-font-body-s);
+  opacity: 0;
+  cursor: pointer;
+}
+
+.codeBlock:hover .codeCopy,
+.codeBlock:focus-within .codeCopy {
+  opacity: 1;
+}
+
+.codeCopy:hover {
+  background-color: var(--vscode-toolbar-hoverBackground, transparent);
+}
+
+.codeCopy:focus-visible {
+  outline: var(--wing-stroke) solid var(--wing-focus-border);
+  outline-offset: 1px;
+}
+
+.codeCopy[data-copied='true'] {
+  color: var(--vscode-charts-green, var(--wing-fg-description));
+}
+
+.codePre {
+  margin: 0;
+  padding: 0 0 var(--wing-tool-card-pad-y);
+  overflow-x: auto;
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--wing-font-body-s);
+  /* Code blocks are not Monaco editors: use the font's own line height (see the
+   * note on `.diffBody`). */
+  line-height: normal;
+}
+
+.codeLine {
+  display: block;
+  padding: 0 var(--wing-tool-card-pad-x);
+}
+
+.codeToken {
+  /* Colours come from shiki as inline custom properties; the active VS Code
+   * theme class on <body> picks the variant. */
+  color: var(--shiki-light, inherit);
+  font-style: var(--shiki-italic, normal);
+  font-weight: var(--shiki-bold, normal);
+  text-decoration: var(--shiki-underline, none);
+}
+
+body.vscode-dark .codeToken,
+body.vscode-high-contrast .codeToken {
+  color: var(--shiki-dark, inherit);
+}
+
+/* ── streaming ───────────────────────────────────────────────────────── */
+
+/* PARTS/chatIncrementalRendering/media/chatIncrementalRendering.css:22-30 — new
+ * blocks fade in (600ms ease-out). Applied only while streaming, so a hydrated
+ * transcript appears instantly. */
+.markdown[data-streaming='true'] > * {
+  animation: block-fade var(--wing-stream-fade-duration) ease-out;
+}
+
+@keyframes block-fade {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+.streamCaret {
+  display: inline-block;
+  width: var(--wing-stream-caret-width);
+  overflow: hidden;
+  color: var(--wing-fg-description);
+  white-space: nowrap;
+}
+
+.streamCaret::after {
+  content: '';
+  animation: markdown-ellipsis steps(4, end) var(--wing-stream-ellipsis-duration) infinite;
+}
+
+@keyframes markdown-ellipsis {
+  0% {
+    content: '';
+  }
+
+  25% {
+    content: '.';
+  }
+
+  50% {
+    content: '..';
+  }
+
+  75% {
+    content: '...';
+  }
+
+  100% {
+    content: '';
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .markdown[data-streaming='true'] > * {
+    animation: none;
+  }
+
+  .streamCaret::after {
+    animation: none;
+    content: '...';
+  }
+}

@@ -5,7 +5,7 @@
 # 只能看到最后一组的日志——前面的组过了没有、跑没跑，无从判断，于是常常整轮重跑。
 #
 # 行为：
-#   1. 三组并行执行（组间互不依赖），输出各自收集到独立日志，不刷屏；
+#   1. 各组并行执行（组间互不依赖），输出各自收集到独立日志，不刷屏；
 #   2. 失败组的详情贴在末尾**之前**；
 #   3. 最后一段永远是结论块：逐组状态 + 统计 + 总用时 + 一句话结论。
 # 这样即使 tail 给得很短，也能直接看到「过没过」，不需要重跑。
@@ -20,18 +20,36 @@ cd "$ROOT" || exit 2
 
 case "$MODE" in
   test)
-    LABELS=("python" "probe" "rust")
-    CMDS=("make test-python" "make test-probe" "make test-rust")
+    LABELS=("python" "probe" "rust" "ts")
+    CMDS=("make test-python" "make test-probe" "make test-rust" "make test-ts")
     ;;
   check)
-    LABELS=("python" "rust")
-    CMDS=("make check-python" "make check-rust")
+    LABELS=("python" "rust" "ts")
+    CMDS=("make check-python" "make check-rust" "make check-ts")
     ;;
   *)
     echo "usage: $0 [test|check]" >&2
     exit 2
     ;;
 esac
+
+# SKIP_TS=1（评审 #109 [P3-7]）：本地逃生舱，ts 组不跑。这里把它从组列表里摘掉，
+# 并在结论块里显式标注「已跳过」——否则「没跑」会被读成「跑了且过了」。
+# CI 不设这个变量，门禁照旧强制。
+SKIP_TS="${SKIP_TS:-}"
+TS_SKIPPED=0
+if [ -n "$SKIP_TS" ] && [ "$SKIP_TS" != "0" ]; then
+  TS_SKIPPED=1
+  KEPT_LABELS=()
+  KEPT_CMDS=()
+  for i in "${!LABELS[@]}"; do
+    [ "${LABELS[$i]}" = "ts" ] && continue
+    KEPT_LABELS+=("${LABELS[$i]}")
+    KEPT_CMDS+=("${CMDS[$i]}")
+  done
+  LABELS=(${KEPT_LABELS[@]+"${KEPT_LABELS[@]}"})
+  CMDS=(${KEPT_CMDS[@]+"${KEPT_CMDS[@]}"})
+fi
 
 TMP_BASE="${TMPDIR:-/tmp}"
 LOG_DIR="${TMP_BASE%/}/wing-${MODE}-logs"
@@ -166,6 +184,9 @@ for i in "${!LABELS[@]}"; do
   fi
   printf '  %s %-6s %4ss  %s%s\n' "$icon" "$label" "${DURS[$i]}" "$stat" "$note"
 done
+if [ "$TS_SKIPPED" -eq 1 ]; then
+  printf '  ⏭️  %-6s  —     TypeScript 组已按 SKIP_TS=%s 跳过（CI 不设该变量：那边照旧强制）\n' "ts" "$SKIP_TS"
+fi
 if [ "${#FAILED[@]}" -eq 0 ]; then
   echo "✅ 结论：make $MODE 全部通过，无需重跑。"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

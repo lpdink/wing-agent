@@ -1,0 +1,21 @@
+{
+  "//": "Webview side: src/webview + src/shared + preview harness + component tests. `types: [vite/client]` keeps node globals out — `process`/`Buffer`/`require` are compile errors here, so the renderer cannot depend on the extension host's environment. `vscode` is not in the type set either (and lint/tests ban the import).",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+    "jsx": "react-jsx"
+  },
+  "include": [
+    "src/shared/**/*.ts",
+    "src/testing/**/*.ts",
+    "src/testing/**/*.tsx",
+    "src/webview/**/*.ts",
+    "src/webview/**/*.tsx",
+    "preview/**/*.ts",
+    "preview/**/*.tsx",
+    "tests/setup/**/*.ts",
+    "tests/webview/**/*.ts",
+    "tests/webview/**/*.tsx"
+  ]
+}

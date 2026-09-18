@@ -1,0 +1,143 @@
+{
+  "name": "wing-vscode",
+  "displayName": "Wing",
+  "description": "Wing agent for VS Code — chat with the wing gateway from your sidebar.",
+  "version": "0.1.0",
+  "publisher": "wing-agent",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lpdink/wing-agent.git",
+    "directory": "extensions/vscode"
+  },
+  "private": true,
+  "engines": {
+    "vscode": "^1.100.0",
+    "node": ">=20"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Programming Languages"
+  ],
+  "main": "./out/extension.js",
+  "packageManager": "pnpm@11.14.0",
+  "activationEvents": [
+    "onView:wing.chatView"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "wing",
+          "title": "Wing",
+          "icon": "media/wing.svg"
+        }
+      ]
+    },
+    "views": {
+      "wing": [
+        {
+          "id": "wing.chatView",
+          "name": "Chat",
+          "type": "webview",
+          "contextualTitle": "Wing"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "wing.newSession",
+        "title": "Wing: New Session",
+        "category": "Wing"
+      },
+      {
+        "command": "wing.reconnectGateway",
+        "title": "Wing: Reconnect to Gateway",
+        "category": "Wing"
+      }
+    ],
+    "configuration": {
+      "title": "Wing",
+      "properties": {
+        "wing.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "markdownDescription": "Host of the wing gateway (the `gateway.host` value in `~/.wing/config.yaml`)."
+        },
+        "wing.port": {
+          "type": "number",
+          "default": 32523,
+          "markdownDescription": "Port of the wing gateway (the `gateway.port` value in `~/.wing/config.yaml`)."
+        },
+        "wing.apiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "API key for the gateway (`auth` enabled in `~/.wing/config.yaml`). Leave empty when the gateway has no auth configured.\n\nSent as an `Authorization: Bearer …` header, never in a URL. **Stored as plain text**: prefer **User** settings — a workspace-scoped value is written to `.vscode/settings.json` (easy to commit) and Settings Sync uploads it. Moving it to VS Code's SecretStorage is a follow-up."
+        },
+        "wing.wingPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Full path of the `wing` executable, used to start the gateway automatically. Leave empty to discover it on `PATH`."
+        },
+        "wing.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Start the gateway (`wing start`) when it is not running. The extension probes first, so a gateway you are already using is never restarted."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "pnpm run build:extension && pnpm run build:webview",
+    "build:extension": "node esbuild.mjs",
+    "build:webview": "vite build",
+    "build:preview": "vite build --config vite.preview.config.mts",
+    "smoke:gateway": "node esbuild.smoke.mjs && node out/smoke/smoke.mjs",
+    "smoke:list": "node esbuild.smoke.mjs && node out/smoke/smoke.mjs --list",
+    "dev:preview": "vite --config vite.preview.config.mts",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.webview.json && tsc --noEmit -p tsconfig.tools.json",
+    "lint": "eslint . --max-warnings=0",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "vscode:prepublish": "pnpm run build",
+    "package": "vsce package --out wing-vscode.vsix"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
+    "@types/jsdom": "^30.0.0",
+    "@types/markdown-it": "^14.1.2",
+    "@types/node": "^24.13.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/vscode": "1.100.0",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^6.1.1",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.10.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.12.0",
+    "jsdom": "^30.1.0",
+    "markdown-it": "^14.1.0",
+    "prettier": "^3.9.8",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "shiki": "^4.4.3",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.0",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.1",
+    "ws": "^8.21.3",
+    "zustand": "^5.0.15"
+  }
+}

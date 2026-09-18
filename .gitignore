@@ -12,12 +12,20 @@ build/
 .pytest_cache
 openspec
 
+# Node / TypeScript (extensions/vscode)
+node_modules/
+extensions/vscode/out/
+extensions/vscode/*.vsix
+
 # Rust
 target/
 
 # IDE
 .idea/
 .vscode/
+# …except the extension's dev config: the F5 launch/task definitions are part of the
+# deliverable (see extensions/vscode/README.md), so they must be committed.
+!extensions/vscode/.vscode/
 *.swp
 *.swo
 
