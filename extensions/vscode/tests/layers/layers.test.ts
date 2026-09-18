@@ -50,7 +50,14 @@ const RULES: Record<Layer, LayerRule> = {
   testing: { siblings: true, imports: ['shared'], npm: false, nodeBuiltins: false, vscode: false },
 };
 
-function listFiles(dir: string, extensions: readonly string[]): string[] {
+/**
+ * Files under `dir`.
+ *
+ * Omit `extensions` to list **every** file (used by the coverage assertions, so a
+ * stray `.js`/`.json` cannot slip past them — the matrix enumerates files, not
+ * "the files we happen to parse"; review r2 [N-R2-2]).
+ */
+function listFiles(dir: string, extensions?: readonly string[]): string[] {
   if (!existsSync(dir)) {
     return [];
   }
@@ -59,12 +66,21 @@ function listFiles(dir: string, extensions: readonly string[]): string[] {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       found.push(...listFiles(full, extensions));
-    } else if (extensions.some((extension) => entry.name.endsWith(extension))) {
+    } else if (extensions === undefined || extensions.some((extension) => entry.name.endsWith(extension))) {
       found.push(full);
     }
   }
   return found;
 }
+
+/**
+ * Extensions allowed under `src/`: TypeScript sources, CSS modules and markdown
+ * notes. Deliberately **no** `.js/.jsx/.mjs/.cjs/.mts/.cts`: the whole toolchain
+ * (tsconfig `include`, the ESLint layer zones, the Vite entry, esbuild) is
+ * TypeScript-only, so a JS module there would be invisible to typecheck *and* to
+ * lint even after the matrix learned to parse it.
+ */
+const ALLOWED_SRC_EXTENSIONS = ['.ts', '.tsx', '.css', '.md'];
 
 function layerOf(file: string): Layer | null {
   const relative = path.relative(SRC, file);
@@ -412,6 +428,26 @@ const NAMED_COLOR_PATTERN = new RegExp(`\\b(?:${NAMED_COLORS.join('|')})\\b`, 'i
 /** Properties that take a color but never match {@link COLOR_PROPERTY}. */
 const COLOR_TAKING_PROPERTY = /^(?:border|outline|box-shadow|text-shadow|background)$/;
 
+/**
+ * The color literal hidden in a declaration value, or `null` when the value is
+ * theme-driven.
+ *
+ * `var()` **property names** are blanked out first — `--vscode-charts-orange`
+ * contains the keyword `orange`, and VS Code ships exactly six such variables
+ * (charts.blue/green/orange/purple/red/yellow), which were false positives before
+ * (review r1/r2 [S-R2]). Only the name is removed: a literal *fallback*
+ * (`var(--x, red)` / `var(--x, #ff0000)`) must still be rejected.
+ */
+function colorLiteralIn(value: string): string | null {
+  const withoutVarNames = value.replace(/var\(\s*--[\w-]+/g, 'var(');
+  const literal = LITERAL_COLOR.exec(withoutVarNames);
+  if (literal !== null) {
+    return literal[0];
+  }
+  const named = NAMED_COLOR_PATTERN.exec(withoutVarNames);
+  return named === null ? null : named[0];
+}
+
 function checkCssColors(): CssViolation[] {
   const violations: CssViolation[] = [];
   // preview/ is excluded on purpose: `preview/preview-theme.css` *is* the emulated
@@ -434,8 +470,7 @@ function checkCssColors(): CssViolation[] {
       if (!isColorProperty && !COLOR_TAKING_PROPERTY.test(property)) {
         return;
       }
-      const literal = LITERAL_COLOR.test(value) || NAMED_COLOR_PATTERN.test(value);
-      if (literal) {
+      if (colorLiteralIn(value) !== null) {
         violations.push({
           file: path.relative(PACKAGE_ROOT, file),
           line: index + 1,
@@ -562,6 +597,45 @@ function collectCssModuleUsages(file: string): CssModuleUsage[] {
   }));
 }
 
+describe('color literals', () => {
+  it('accepts theme variables, including the six chart colors', () => {
+    // `--vscode-charts-{blue,green,orange,purple,red,yellow}` are real VS Code
+    // theme ids whose *names* contain a CSS color keyword — they must not be read
+    // as literals (review r2 [S-R2]).
+    const themeDriven = [
+      'var(--vscode-charts-blue)',
+      'var(--vscode-charts-green)',
+      'var(--vscode-charts-orange)',
+      'var(--vscode-charts-purple)',
+      'var(--vscode-charts-red)',
+      'var(--vscode-charts-yellow)',
+      'var(--vscode-panel-border, transparent)',
+      'var(--vscode-editorWarning-foreground, var(--vscode-foreground))',
+      'currentColor',
+    ];
+    for (const value of themeDriven) {
+      expect({ value, literal: colorLiteralIn(value) }).toEqual({ value, literal: null });
+    }
+  });
+
+  it('still rejects literals, including literals used as a var() fallback', () => {
+    const literals = [
+      '#ff0000',
+      '#fff',
+      'rgb(1, 2, 3)',
+      'hsl(1deg 2% 3%)',
+      'color-mix(in srgb, red, blue)',
+      'var(--wing-accent, #ff0000)',
+      'var(--wing-accent, red)',
+      '1px solid white',
+      'var(--vscode-editorWarning-foreground, white)',
+    ];
+    for (const value of literals) {
+      expect({ value, rejected: colorLiteralIn(value) !== null }).toEqual({ value, rejected: true });
+    }
+  });
+});
+
 describe('layering', () => {
   const sourceFiles = listFiles(SRC, ['.ts', '.tsx']);
 
@@ -587,7 +661,9 @@ describe('layering', () => {
   });
 
   it('keeps src/ covered by the matrix: every file lives in a declared layer', () => {
-    const strays = sourceFiles
+    // Every *file*, not just the parsed extensions: a `.js`/`.json`/anything under
+    // src/ must still be inside a declared layer.
+    const strays = listFiles(SRC)
       .map((file) => path.relative(SRC, file))
       .filter((relative) => {
         const [first] = relative.split(path.sep);
@@ -598,6 +674,17 @@ describe('layering', () => {
         (relative) => `src/${relative} — new layer dir needs a rule (or move the file into a declared layer)`,
       ),
     ).toEqual([]);
+  });
+
+  it('keeps src/ TypeScript-only (a JS module here would bypass every gate)', () => {
+    const foreign = listFiles(SRC)
+      .filter((file) => !ALLOWED_SRC_EXTENSIONS.some((extension) => file.endsWith(extension)))
+      .map(
+        (file) =>
+          `${path.relative(PACKAGE_ROOT, file)} — src/ is TypeScript-only (allowed: ${ALLOWED_SRC_EXTENSIONS.join(', ')}); ` +
+          'a JS module would be invisible to typecheck, to the ESLint layer zones and to the bundlers',
+      );
+    expect(foreign).toEqual([]);
   });
 
   it('every CSS-module class read in src/ exists in its stylesheet', () => {
