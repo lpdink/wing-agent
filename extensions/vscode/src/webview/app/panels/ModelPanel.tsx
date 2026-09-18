@@ -20,7 +20,7 @@ import { EFFORT_LEVELS } from '../../../shared';
 import { postToHost } from '../../bridge/channel';
 import styles from '../../styles/panels.module.css';
 import { PanelShell } from './PanelShell';
-import { optionId, useListNav } from './listNav';
+import { optionId, useListNav, useRevealIndex } from './listNav';
 
 /** One rendered row; `selectable` drives both navigation and the click handler. */
 export type ModelPanelRow =
@@ -136,6 +136,8 @@ export function ModelPanel({ sessionId, picker, meta, onClose }: ModelPanelProps
     onSelect: select,
     onEscape: onClose,
   });
+  // Keyboard navigation must never walk the highlight off-screen.
+  useRevealIndex(listRef, 'model-panel', nav.index);
 
   // The panel owns the keyboard while it is open (VS Code's action widget does the
   // same): focus the list, so arrows work without a prior click.

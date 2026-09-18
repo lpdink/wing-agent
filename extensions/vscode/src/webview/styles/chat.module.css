@@ -24,6 +24,17 @@
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
+  /* The transcript owns its scroll position (it re-pins itself to the newest
+   * content): the browser's scroll anchoring would move `scrollTop` on its own
+   * when a block above the viewport shrinks (a thinking cell collapsing), which
+   * is exactly the "lost the bottom" behavior this component prevents. */
+  overflow-anchor: none;
+}
+
+/* Content wrapper: the observed box for "the transcript grew/shrank" (the
+ * scroller itself is viewport-sized, so observing it would prove nothing). */
+.transcriptContent {
+  display: flow-root;
 }
 
 .emptyState {

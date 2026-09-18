@@ -39,7 +39,7 @@ import {
 } from '../../shared';
 import { postToHost } from '../bridge/channel';
 import styles from '../styles/app.module.css';
-import { optionId, useListNav } from './panels/listNav';
+import { optionId, useListNav, useRevealIndex } from './panels/listNav';
 import { selectQueuedMessages } from './selectors';
 
 export interface ComposerProps {
@@ -94,6 +94,9 @@ export function Composer({
     'command-candidates',
     { onSelect: accept },
   );
+  // Arrow keys may walk past the popover's edge — keep the highlighted row visible.
+  const candidateList = useRef<HTMLDivElement>(null);
+  useRevealIndex(candidateList, 'command-candidates', nav.index);
 
   useEffect(() => {
     if (!overlayOpen) {
@@ -214,6 +217,7 @@ export function Composer({
           id="command-candidates"
           aria-label="Commands"
           data-testid="command-candidates"
+          ref={candidateList}
           {...nav.listProps}
         >
           {candidates.map((candidate, index) => (

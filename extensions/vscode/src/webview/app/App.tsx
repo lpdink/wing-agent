@@ -19,7 +19,7 @@
  * must land in the input.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 
 import { postToHost } from '../bridge/channel';
@@ -64,16 +64,6 @@ export function App(): ReactElement {
   const branchPicker = session?.panels.branchPicker ?? null;
   const overlayOpen = modelPicker !== null || sessionPicker !== null || branchPicker !== null;
 
-  // Drafts belong to open tabs: dropping a closed tab's draft keeps the map from
-  // growing for the lifetime of the view.
-  useEffect(() => {
-    setDrafts((previous) => {
-      const open = new Set(tabs.map((tab) => tab.sessionId));
-      const kept = Object.entries(previous).filter(([id]) => open.has(id));
-      return kept.length === Object.keys(previous).length ? previous : Object.fromEntries(kept);
-    });
-  }, [tabs]);
-
   /** Close every host-owned overlay; the host clears the pickers it owns. */
   const closeOverlaysNow = useCallback((): void => {
     postToHost({ type: 'closeOverlays' });
@@ -82,6 +72,45 @@ export function App(): ReactElement {
 
   const sessionId = session?.sessionId ?? null;
   const draft = sessionId === null ? '' : (drafts[sessionId] ?? '');
+
+  /**
+   * The host hands a draft back after resume / rewind / fork (`state.draft`, and
+   * `hydrate` for a fork). It is a **one-shot restore**: the host clears its copy
+   * right after shipping it, so a later `state` carries `null` — which must never
+   * clear what the user is typing. Adoption is therefore "once per session and
+   * value": the adopted value is remembered, a repeat is ignored, and `null` is
+   * never adopted.
+   */
+  const adoptedDrafts = useRef<Record<string, string>>({});
+  const restoredDraft = session?.draft ?? null;
+  useEffect(() => {
+    if (sessionId === null || restoredDraft === null) {
+      return;
+    }
+    if (adoptedDrafts.current[sessionId] === restoredDraft) {
+      return;
+    }
+    adoptedDrafts.current[sessionId] = restoredDraft;
+    setDrafts((previous) =>
+      previous[sessionId] === restoredDraft ? previous : { ...previous, [sessionId]: restoredDraft },
+    );
+  }, [sessionId, restoredDraft]);
+
+  // Drafts belong to open tabs: dropping a closed tab's draft (and its adoption
+  // record) keeps both maps from growing for the lifetime of the view.
+  useEffect(() => {
+    const open = new Set(tabs.map((tab) => tab.sessionId));
+    for (const id of Object.keys(adoptedDrafts.current)) {
+      if (!open.has(id)) {
+        delete adoptedDrafts.current[id];
+      }
+    }
+    setDrafts((previous) => {
+      const kept = Object.entries(previous).filter(([id]) => open.has(id));
+      return kept.length === Object.keys(previous).length ? previous : Object.fromEntries(kept);
+    });
+  }, [tabs]);
+
   const setDraft = useCallback(
     (text: string): void => {
       if (sessionId === null) {

@@ -258,4 +258,107 @@ describe('transcript scrolling', () => {
     ]);
     expect(transcript.scrollTop).toBe(1000);
   });
+
+  /**
+   * The "follow" state must survive height changes that do not come with a host
+   * patch: a cell expanding (the user opening a collapsed tool call) and a
+   * streaming block re-laying out after it collapses (checkpoint② #4).
+   */
+  describe('follows content height changes (no patch involved)', () => {
+    /** Scripted `ResizeObserver`: the test decides when a resize is delivered. */
+    class FakeResizeObserver {
+      static instances: FakeResizeObserver[] = [];
+      readonly targets: Element[] = [];
+      constructor(private readonly callback: () => void) {
+        FakeResizeObserver.instances.push(this);
+      }
+      observe(target: Element): void {
+        this.targets.push(target);
+      }
+      disconnect(): void {
+        this.targets.length = 0;
+      }
+      trigger(): void {
+        this.callback();
+      }
+    }
+
+    function withObserver<T>(run: () => T): T {
+      const previous = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+      (globalThis as { ResizeObserver?: unknown }).ResizeObserver = FakeResizeObserver;
+      FakeResizeObserver.instances = [];
+      try {
+        return run();
+      } finally {
+        (globalThis as { ResizeObserver?: unknown }).ResizeObserver = previous;
+      }
+    }
+
+    function lastObserver(): FakeResizeObserver {
+      const observer = FakeResizeObserver.instances.at(-1);
+      if (observer === undefined) {
+        throw new Error('no ResizeObserver was created');
+      }
+      return observer;
+    }
+
+    it('observes the content wrapper, not the scroller', () => {
+      withObserver(() => {
+        const mounted = mountLong();
+        const content = mounted.container.querySelector('[data-testid="transcript-content"]');
+        expect(lastObserver().targets).toEqual([content]);
+      });
+    });
+
+    it('stays pinned when the content grows without a patch', () => {
+      withObserver(() => {
+        const mounted = mountLong();
+        const { transcript } = mounted;
+        // Pin first (jsdom's first paint has no geometry): a patch is the only
+        // signal the initial mount ever gets.
+        pushPatch(mounted, 'session-a', 1, [
+          { op: 'append', cell: { kind: 'separator', id: 'sep-pin', createdAt: FIXTURE_EPOCH, label: '' } },
+        ]);
+        expect(transcript.scrollTop).toBe(1000);
+
+        // The cell list grew (an expanded tool call); the host sent nothing.
+        Object.defineProperty(transcript, 'scrollHeight', { value: 1600, configurable: true });
+        lastObserver().trigger();
+
+        expect(transcript.scrollTop).toBe(1600);
+        expect(mounted.container.querySelector('[data-testid="scroll-to-bottom"]')).toBeNull();
+      });
+    });
+
+    it('shrinks gracefully when a collapsing block shortens the content', () => {
+      withObserver(() => {
+        const mounted = mountLong();
+        const { transcript } = mounted;
+
+        // A streaming thinking block collapses at turn end: the content gets
+        // shorter, and the browser's own anchoring is off (CSS) so we own the
+        // position. Following stays at the bottom.
+        Object.defineProperty(transcript, 'scrollHeight', { value: 700, configurable: true });
+        lastObserver().trigger();
+
+        expect(transcript.scrollTop).toBe(700);
+      });
+    });
+
+    it('never steals the view back while the user is reading above', () => {
+      withObserver(() => {
+        const mounted = mountLong();
+        const { transcript } = mounted;
+
+        transcript.scrollTop = 100;
+        fireEvent.scroll(transcript);
+        expect(mounted.container.querySelector('[data-testid="scroll-to-bottom"]')).not.toBeNull();
+
+        Object.defineProperty(transcript, 'scrollHeight', { value: 1600, configurable: true });
+        lastObserver().trigger();
+
+        expect(transcript.scrollTop).toBe(100);
+      });
+    });
+  });
 });
