@@ -268,8 +268,9 @@ export function DiffCell({
           {cell.lines.map((line, index) => (
             // Diff rows have no stable identity; the window is replaced wholesale.
             <div key={index} className={styles.diffLine} data-diff-kind={line.kind}>
-              <span className={styles.diffLineNumber}>{line.oldLine ?? ''}</span>
-              <span className={styles.diffLineNumber}>{line.newLine ?? ''}</span>
+              {/* One gutter, inline-diff style: added/context rows show the new
+               * number, deleted rows the old one. */}
+              <span className={styles.diffLineNumber}>{line.newLine ?? line.oldLine ?? ''}</span>
               <span className={styles.diffMarker}>{diffMarker(line.kind)}</span>
               <span className={styles.diffText}>{line.text}</span>
             </div>

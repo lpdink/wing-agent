@@ -104,13 +104,12 @@
 
   /* ── Thinking ────────────────────────────────────────────────────────
    * PARTS/chatThinkingContent.css:11-14 (.chat-thinking-box color: descriptionForeground)
-   * :138-150 (.chat-thinking-collapsible { margin-left: 5px } + .chat-tool-invocation-part padding)
+   * :138-150 (.chat-thinking-collapsible { margin-left: 5px })
    * :121-131 (:not(.chat-used-context-collapsed)::after connector, border-left 1px chat-requestBorder)
    */
   --wing-thinking-indent: 5px;
   --wing-thinking-connector: 1px solid
     var(--vscode-chat-requestBorder, var(--vscode-panel-border, transparent));
-  --wing-thinking-content-padding: 4px 12px 4px 18px;
   /* Shim: PARTS/chatThinkingContent.css:81-97 + CHAT:124-133 (@keyframes chat-thinking-shimmer) */
   --wing-thinking-shimmer: var(--vscode-chat-thinkingShimmer, var(--vscode-descriptionForeground));
   --wing-thinking-shimmer-duration: 2s;
@@ -132,9 +131,6 @@
   --wing-tool-card-margin: 4px 0;
   --wing-tool-card-title-padding: 8px 12px;
   --wing-tool-row-gap: 14px;
-  /* CHAT:657-676 (.output-error { margin: 6px 4px }) */
-  --wing-tool-error-margin: 6px 4px;
-
   /* ── Code block ──────────────────────────────────────────────────────
    * codeBlockPart.css:61-82 (margin 0 0 16px 0, border/radius/surface)
    * codeBlockPart.css:11-47 (.interactive-result-code-block-toolbar) — 26px tall
@@ -142,9 +138,7 @@
    */
   --wing-code-margin: 16px;
   --wing-code-toolbar-height: 26px;
-  --wing-code-toolbar-right: 10px;
-  --wing-code-toolbar-gap: 2px;
-  --wing-code-action-size: 24px;
+  --wing-code-action-size: 24px; /* :39-43 (.monaco-toolbar .action-item { height/width: 24px }) */
 
   /* ── Diff ────────────────────────────────────────────────────────────
    * COLORS:279-287 (diffEditor.insertedLineBackground / removedLineBackground —
@@ -164,7 +158,12 @@
   --wing-diff-del-fg: var(--vscode-chat-linesRemovedForeground, var(--vscode-descriptionForeground));
   --wing-diff-gutter-fg: var(--vscode-editorLineNumber-foreground, var(--vscode-descriptionForeground));
   --wing-diff-hunk-bg: var(--vscode-textBlockQuote-background, transparent);
-  --wing-diff-gutter-width: 2.5em;
+  /* One line-number column (inline-diff gutter semantics: added/context rows show
+   * the new number, deleted rows the old one) sized in characters — the editor
+   * reserves 5 for its own gutter (`lineNumbersMinChars`,
+   * editor/common/config/editorOptions.ts:6407) and the sidebar has less room;
+   * 4 covers every line number a windowed payload can carry. */
+  --wing-diff-gutter-width: 4ch;
 
   /* ── Ask / approval ──────────────────────────────────────────────────
    * PARTS/chatQuestionCarousel.css:19-30 (container), :74-97 (title row),
@@ -182,13 +181,13 @@
     --vscode-list-inactiveSelectionBackground,
     var(--vscode-list-hoverBackground, transparent)
   );
-  /* Disabled controls: chatQuestionCarousel.css:462 (.chat-question-nav-arrow.disabled) */
+  /* Disabled controls: chatQuestionCarousel.css:452 (.chat-question-nav-arrow.disabled) */
   --wing-disabled-opacity: 0.4;
 
   /* Scrollable secondary surfaces:
    * PARTS/chatTerminalToolProgressPart.css:210 (tool output area, 300px)
-   * CHAT:3154-3158 + PARTS/chatThinkingContent.css:144 (thinking list 4px 3px
-   * with padding-top: 0) */
+   * CHAT:3144-3160 (`.chat-used-context-list { padding: 4px 3px }`) together with
+   * PARTS/chatThinkingContent.css:144 (`.chat-thinking-collapsible { padding-top: 0 }`) */
   --wing-tool-output-max-height: 300px;
   --wing-thinking-body-padding: 0 3px 4px;
 

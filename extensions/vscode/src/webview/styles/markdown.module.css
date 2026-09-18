@@ -54,10 +54,14 @@
   background: var(--wing-md-quote-bg);
 }
 
-/* CHAT:689-702 */
+/* CHAT:689-702 — ul 24px, ol 28px */
 .list {
   margin: 0 0 var(--wing-md-paragraph-margin) 0;
   padding-inline-start: var(--wing-md-ul-indent);
+}
+
+ol.list {
+  padding-inline-start: var(--wing-md-ol-indent);
 }
 
 .heading + .list {
@@ -180,7 +184,7 @@
 /* codeBlockPart.css:11-14 + :49-54 — the toolbar is hover/focus-revealed. */
 .codeCopy {
   flex: 0 0 auto;
-  height: 22px;
+  height: var(--wing-code-action-size);
   padding: 0 8px;
   border: var(--wing-stroke) solid var(--wing-border-request);
   border-radius: var(--wing-radius-small);
