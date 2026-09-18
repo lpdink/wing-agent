@@ -17,8 +17,7 @@ Maintainer deep dive (Chinese):
   `target: node20` on purpose — VS Code 1.100 ships Electron 34 / **Node 20.19**. That host has no
   global `WebSocket` (Node only exposes it from 21), so `src/core/transport/socket.ts` falls back to a
   bundled `ws` client; on newer hosts (Node ≥ 22) the global implementation is used and the fallback is
-  never loaded. A connect failure names the runtime it ran on (`node 20.19.x, no global WebSocket
-(using the bundled ws client)`) so a report is actionable.
+  never loaded. A connect failure names the runtime it ran on, so a report is actionable.
 - **To talk to a gateway**: a `wing` installation (`wing start`, or let the extension start it) — the
   same gateway the TUI uses, default `127.0.0.1:32523`.
 
