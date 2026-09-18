@@ -1,0 +1,7 @@
+# Build outputs and dependencies are never formatted.
+node_modules/
+out/
+dist/
+coverage/
+*.vsix
+pnpm-lock.yaml

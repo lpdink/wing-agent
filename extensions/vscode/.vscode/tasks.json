@@ -1,0 +1,23 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "wing: build",
+      "detail": "Bundle the extension host (esbuild) and the webview (vite) once.",
+      "type": "shell",
+      "command": "pnpm",
+      "args": ["run", "build"],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "wing: watch extension host",
+      "detail": "Incremental esbuild for src/host — run alongside `pnpm run dev:preview` while iterating.",
+      "type": "shell",
+      "command": "pnpm",
+      "args": ["run", "watch"],
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+# pnpm 11 project config (single package — this file is pnpm's config surface here).
+#
+# allowBuilds: pnpm 10+ blocks dependency install scripts unless allow-listed.
+#   - esbuild needs its install script to place the platform binary.
+#   - @vscode/vsce-sign is only pulled in by `vsce sign` (we ship an unsigned local
+#     .vsix), so its script stays blocked on purpose.
+#
+# minimumReleaseAgeExclude: the workspace-level npm supply-chain guard refuses
+# packages published very recently; prettier is pinned here so the lockfile stays
+# reproducible with `--frozen-lockfile` on CI as well.
+allowBuilds:
+  esbuild: true
+  '@vscode/vsce-sign': false
+minimumReleaseAgeExclude:
+  - prettier@3.9.8

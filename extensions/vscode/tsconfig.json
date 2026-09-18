@@ -1,0 +1,9 @@
+{
+  "//": "Solution-style root config (the layout the Vite templates use): it carries no options of its own, it only points editors and lint tooling at the real projects. Run the gates with the explicit projects (`pnpm run typecheck` runs all three), never with this file.",
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.node.json" },
+    { "path": "./tsconfig.webview.json" },
+    { "path": "./tsconfig.tools.json" }
+  ]
+}
