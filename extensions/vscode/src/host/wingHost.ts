@@ -322,12 +322,13 @@ export class WingHost {
         void this.sessions.onConnected();
         return;
       case 'reconnecting':
+        // Re-subscribing happens on `connected` only: during the retry window
+        // `clientId` is already null, so an attempt here could only no-op.
         this.sessions.onDisconnected();
         this.sessions.setGlobalNotice({
           level: 'warning',
           text: 'Gateway connection lost — reconnecting…',
         });
-        void this.sessions.onConnected();
         return;
       case 'closed': {
         this.sessions.onDisconnected();
