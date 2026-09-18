@@ -31,7 +31,11 @@ export function AskCell({
   const drafts = answers;
 
   const complete = useMemo(
-    () => cell.questions.every((question) => isAnswered(question, drafts[question.id])),
+    // A question-less ask (malformed host payload) must not be submittable: there
+    // is nothing to answer, and sending `answers: []` would be meaningless noise.
+    () =>
+      cell.questions.length > 0 &&
+      cell.questions.every((question) => isAnswered(question, drafts[question.id])),
     [cell.questions, drafts],
   );
 
@@ -40,6 +44,9 @@ export function AskCell({
   };
 
   const submit = (): void => {
+    if (cell.questions.length === 0) {
+      return;
+    }
     postToHost({
       type: 'answerAsk',
       sessionId,
@@ -58,7 +65,9 @@ export function AskCell({
         data-ask-form="approval"
       >
         <div className={styles.askCard}>
-          <div className={styles.askHeader}>
+          {/* Same announcement pattern as VS Code's confirmation footer
+           * (chatConfirmationWidget.ts:397-398). */}
+          <div className={styles.askHeader} role="status" aria-live="polite">
             <span className={styles.askTitle}>Approval required</span>
           </div>
           <div className={styles.askBody}>
@@ -114,7 +123,7 @@ export function AskCell({
       <div className={styles.askCard}>
         {cell.questions.map((question) => (
           <div key={question.id} className={styles.askQuestionBlock}>
-            <div className={styles.askHeader}>
+            <div className={styles.askHeader} role="status" aria-live="polite">
               <span className={styles.askTitle}>{question.header === '' ? 'Question' : question.header}</span>
             </div>
             <div className={styles.askBody} data-question-id={question.id}>

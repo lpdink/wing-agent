@@ -100,6 +100,35 @@ describe('file references', () => {
     expect(bridge.sentOfType('openFile')).toEqual([{ type: 'openFile', path: 'src/app/main.ts', line: 42 }]);
   });
 
+  it('treats `path:0` as a path without a line number', () => {
+    const { container, bridge } = mountWebview([
+      makeFixtureSession({
+        cells: [
+          {
+            kind: 'tool_call',
+            id: 'tool-zero',
+            createdAt: FIXTURE_EPOCH,
+            toolCallId: 'call-zero',
+            name: 'Read',
+            status: 'success',
+            display: { title: 'Read', subject: 'src/app/main.ts:0' },
+            argsText: '',
+            args: null,
+            result: null,
+            startedAt: FIXTURE_EPOCH,
+            finishedAt: FIXTURE_EPOCH,
+          },
+        ],
+      }),
+    ]);
+
+    fireEvent.click(within(cellElement(container, 'tool-zero')).getByText('src/app/main.ts'));
+
+    expect(bridge.sentOfType('openFile')).toEqual([
+      { type: 'openFile', path: 'src/app/main.ts', line: null },
+    ]);
+  });
+
   it('does not turn a command subject into a link', () => {
     const { container } = mountWebview([
       makeFixtureSession({

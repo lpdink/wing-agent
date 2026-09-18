@@ -43,7 +43,10 @@ function AppHeader(): ReactElement {
         <span className={appStyles.title} data-testid="session-title">
           {session === null ? 'Wing' : session.title}
         </span>
-        <span className={appStyles.status} data-testid="session-status">
+        {/* Announced to assistive tech when the turn state changes — VS Code's chat
+         * loading overlay is a `role="status" aria-live="polite"` region too
+         * (chatEditor.ts:199-202). */}
+        <span className={appStyles.status} data-testid="session-status" role="status" aria-live="polite">
           {session === null ? 'no session' : session.status}
         </span>
       </div>

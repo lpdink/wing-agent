@@ -90,8 +90,10 @@ export function parseFileReference(raw: string): FileReferenceModel | null {
   if (!looksLikePath) {
     return null;
   }
+  // `:0` is not a line number (and neither is a non-numeric suffix): keep the
+  // path, drop the line instead of asking the host to open line 0.
   const line = match[2] === undefined ? null : Number.parseInt(match[2], 10);
-  return { path, line: Number.isNaN(line ?? 0) ? null : line };
+  return { path, line: line === null || Number.isNaN(line) || line <= 0 ? null : line };
 }
 
 /** A clickable file path that asks the host to open the file in an editor tab. */

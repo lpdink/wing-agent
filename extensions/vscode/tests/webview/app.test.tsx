@@ -58,6 +58,14 @@ describe('webview app', () => {
     expect(container.querySelectorAll('[data-cell-kind]')).toHaveLength(makeFixtureSession().cells.length);
   });
 
+  it('announces the turn state to assistive tech', () => {
+    const { container } = mountWebview([makeFixtureSession()]);
+
+    const status = within(container).getByTestId('session-status');
+    expect(status).toHaveAttribute('role', 'status');
+    expect(status).toHaveAttribute('aria-live', 'polite');
+  });
+
   it('shows the empty state when no session is hydrated', () => {
     const { container, bridge } = mountWebview([], { autoHandshake: false });
     const ui = within(container);

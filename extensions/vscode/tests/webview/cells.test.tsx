@@ -283,6 +283,24 @@ describe('ask cell', () => {
     ]);
   });
 
+  it('cannot submit an ask with no questions', () => {
+    const empty = { ...makeApprovalAskCell('ask-empty'), approval: false, questions: [] };
+    const { container, bridge } = mountCells([empty]);
+
+    const submit = within(cellElement(container, 'ask-empty')).getByRole('button', { name: 'Submit' });
+    expect(submit).toBeDisabled();
+
+    fireEvent.click(submit);
+    expect(bridge.sentOfType('answerAsk')).toEqual([]);
+  });
+
+  it('announces the question to assistive tech', () => {
+    const { container } = mountCells([...makeFixtureSession().cells].filter((cell) => cell.kind === 'ask'));
+
+    const header = cellElement(container, 'ask-1').querySelector('[role="status"]');
+    expect(header).toHaveAttribute('aria-live', 'polite');
+  });
+
   it('renders the approval shape as approve/deny', () => {
     const { container, bridge } = mountCells([makeApprovalAskCell('ask-approval')]);
 
