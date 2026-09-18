@@ -24,7 +24,23 @@ describe('preview harness', () => {
 
     const toolbar = document.getElementById('preview-root');
     const buttons = [...(toolbar?.querySelectorAll('button') ?? [])].map((button) => button.textContent);
-    expect(buttons).toEqual(['Stream turn', 'Break stream', 'Toast', 'Reload']);
-    expect(toolbar?.querySelectorAll('option').length).toBeGreaterThanOrEqual(5);
+    // The toolbar is the harness' interface to the protocol paths: streaming,
+    // resync, toasts, and (step 05) the shell's panels and overlays.
+    expect(buttons).toEqual([
+      'Stream turn',
+      'Break stream',
+      'Toast',
+      'Catalogs',
+      'Model panel',
+      'Notice',
+      'Close overlays',
+      'Reload',
+    ]);
+    const fixtures = [...(toolbar?.querySelectorAll('option') ?? [])].map((option) => option.textContent);
+    expect(fixtures).toContain('shell (idle)');
+    expect(fixtures).toContain('shell (working + queue)');
+    expect(fixtures).toContain('shell (model picker open)');
+    expect(fixtures).toContain('two tabs');
+    expect(fixtures.length).toBeGreaterThanOrEqual(9);
   });
 });

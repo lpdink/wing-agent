@@ -1,5 +1,14 @@
-import type { AskCellModel, CellModel, SessionViewModel, TabModel, UserCellModel } from '../shared';
-import { EMPTY_PANELS } from '../shared';
+import type {
+  AskCellModel,
+  BranchCatalogModel,
+  CellModel,
+  CommandCatalogModel,
+  SessionCatalogModel,
+  SessionViewModel,
+  TabModel,
+  UserCellModel,
+} from '../shared';
+import { BRANCH_CURRENT_UUID, EMPTY_PANELS } from '../shared';
 
 /**
  * Fixtures for tests and the preview harness.
@@ -319,4 +328,108 @@ export function makeLongSession(turns = 25): SessionViewModel {
     cells: makeLongCells(turns),
     seq: 0,
   });
+}
+
+// ── scenarios (step 05: the shell) ────────────────────────────────────
+
+/** A command catalog as the host forwards it: gateway prompt commands + a local one. */
+export function makeCommandCatalog(): CommandCatalogModel {
+  return {
+    commands: [
+      { name: 'init', aliases: [], description: 'Initialize AGENTS.md for this workspace', params: '' },
+      { name: 'help', aliases: [], description: 'Show available commands', params: '[command]' },
+      { name: 'compact', aliases: [], description: 'Compress the session context', params: '[focus]' },
+    ],
+  };
+}
+
+/** A session list richer than the open tabs (one session is not loaded at all). */
+export function makeSessionCatalog(currentSessionId = 'session-a'): SessionCatalogModel {
+  return {
+    sessions: [
+      {
+        sessionId: currentSessionId,
+        title: 'Fixture session',
+        workspace: '/workspace',
+        status: 'working',
+        current: true,
+      },
+      {
+        sessionId: 'session-b',
+        title: 'Waiting on approval',
+        workspace: '/workspace/packages/web',
+        status: 'waiting-for-input',
+        current: false,
+      },
+      {
+        sessionId: 'session-c',
+        title: 'Yesterday’s session',
+        workspace: '/workspace/docs',
+        status: 'inactive',
+        current: false,
+      },
+    ],
+  };
+}
+
+/** Rewind / fork targets as `ContextManager.get_branch_targets()` builds them. */
+export function makeBranchCatalog(sessionId = 'session-a'): BranchCatalogModel {
+  return {
+    sessionId,
+    targets: [
+      { uuid: 'uuid-0001-first', content: 'Refactor the session store.' },
+      { uuid: 'uuid-0002-compact', content: '[Compact] Summarised the renderer work' },
+      { uuid: 'uuid-0003-last', content: 'Now wire the composer.' },
+      { uuid: BRANCH_CURRENT_UUID, content: '(current)' },
+    ],
+  };
+}
+
+/** A session whose panels carry all three catalogs (the shell's happy path). */
+export function makeShellSession(overrides: Partial<SessionViewModel> = {}): SessionViewModel {
+  const base = makeFixtureSession({
+    title: 'Shell fixture',
+    panels: {
+      ...EMPTY_PANELS,
+      commandCatalog: makeCommandCatalog(),
+      sessionCatalog: makeSessionCatalog(),
+      branchCatalog: makeBranchCatalog(),
+    },
+  });
+  return { ...base, ...overrides };
+}
+
+/** A session mid-turn: working status, a queued user message, streaming answer. */
+export function makeWorkingSession(overrides: Partial<SessionViewModel> = {}): SessionViewModel {
+  const base = makeShellSession({
+    sessionId: 'session-a',
+    title: 'Working session',
+    status: 'working',
+    cells: [
+      ...makeStreamingCells(),
+      makePendingUserCell('user-queued-1', 'And add a test for the queue state.'),
+    ],
+    turn: { active: true, startedAtMs: FIXTURE_EPOCH, lastResult: null },
+  });
+  return { ...base, ...overrides };
+}
+
+/** A session with the host's model picker open (host-owned overlay). */
+export function makeModelPickerSession(overrides: Partial<SessionViewModel> = {}): SessionViewModel {
+  const base = makeShellSession({
+    title: 'Model picker',
+    panels: {
+      ...EMPTY_PANELS,
+      modelPicker: {
+        sessionId: 'session-a',
+        rows: [
+          { provider: 'anthropic', model: 'claude-sonnet-4', selected: true },
+          { provider: 'anthropic', model: 'claude-opus-4', selected: false },
+          { provider: 'openai', model: 'gpt-5', selected: false },
+        ],
+        activeIndex: null,
+      },
+    },
+  });
+  return { ...base, ...overrides };
 }

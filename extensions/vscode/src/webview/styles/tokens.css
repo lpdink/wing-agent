@@ -266,4 +266,107 @@
   --wing-stream-caret-width: 3em;
   --wing-stream-ellipsis-duration: 1s;
   --wing-stream-fade-duration: 600ms;
+
+  /* ── Composer / status row (step 05) ─────────────────────────────────
+   * CHAT:875-880 (.chat-input-container { background: input-background;
+   *   border: 1px solid input-border; border-radius: cornerRadius-large;
+   *   padding: 0 6px 6px 6px })
+   * CHAT:1588-1590 (.chat-input-container.focused { border-color: focusBorder })
+   * CHAT:1592-1594 (.chat-editor-container { padding: 0 0 0 4px })
+   * CHAT:1661-1666 (.chat-input-toolbars { display: flex; align-items: center;
+   *   gap: 2px; margin-top: 4px })
+   * CHAT:1668-1673 (.chat-secondary-toolbar { display: flex; align-items: center;
+   *   gap: 2px; padding: 0 4px })
+   * CHAT:1735-1741 (.chat-secondary-toolbar .chat-input-picker-item .action-label
+   *   { height: 16px; padding: 3px 8px; border-radius: 4px })
+   * CHAT:1764-1768 (.codicon-chevron-down { font-size: 10px; margin-left: 4px;
+   *   opacity: 0.75 })
+   * CHAT:1093-1097 (the send action { width: 22px; height: 22px })
+   */
+  --wing-input-pad: 0 6px 6px 6px;
+  --wing-input-editor-pad-left: 4px;
+  --wing-input-toolbar-gap: 2px;
+  --wing-input-toolbar-margin-top: 4px;
+  --wing-secondary-toolbar-padding: 0 4px;
+  --wing-chip-height: 16px;
+  --wing-chip-padding: 3px 8px;
+  --wing-chip-radius: var(--vscode-cornerRadius-small, 4px);
+  --wing-chevron-down-size: 10px;
+  --wing-chevron-down-margin: 4px;
+  --wing-chevron-opacity: 0.75;
+  --wing-submit-size: 22px;
+
+  /* ── Tabs (step 05) ──────────────────────────────────────────────────
+   * multieditortabscontrol.css:115-125 (.tab { height: var(--editor-group-tab-height);
+   *   padding-left: 10px }) — `--editor-group-tab-height` is 35px in the workbench
+   *   (editorTabsControl.ts:564-570) and is deliberately **not** copied: the sidebar
+   *   tab strip carries one line of text, so it uses the chat control rhythm instead
+   *   (22px = the send button's size, CHAT:1093-1097).
+   * :418-421 (.tab-actions { width: 28px })
+   * :459-467 (close action { font-size: 16px; padding: 2px; width: 16px; height: 16px })
+   * :478-490 (the dirty indicator replaces the close icon when not hovered)
+   */
+  --wing-tab-height: 22px;
+  --wing-tab-pad-left: 10px;
+  /* MULTI:192-195 (.tab.sizing-fixed { max-width: var(--tab-sizing-fixed-max-width, 160px) }) */
+  --wing-tab-max-width: 160px;
+  --wing-tab-action-size: 16px;
+  --wing-tab-action-padding: 2px;
+  --wing-tab-action-hover-bg: var(--vscode-toolbar-hoverBackground, transparent);
+
+  /* ── Floating panels (step 05) ───────────────────────────────────────
+   * actionWidget.css:6-18 (.action-widget { border: 1px solid editorHoverWidget-border;
+   *   border-radius: cornerRadius-large; background: menu-background; color:
+   *   menu-foreground; padding: 4px; box-shadow: shadow-lg }) — `--vscode-shadow-lg`
+   *   lives on `.monaco-workbench` (workbench/browser/media/style.css:60) and is not a
+   *   registered colour, so a webview never receives it; the registered
+   *   `widget.shadow` colour with the same geometry comes from actionWidget.css:580
+   *   (`box-shadow: 0 2px 8px var(--vscode-widget-shadow)`).
+   * :47-52 (row { padding: 0 12px 0 6px; border-radius: cornerRadius-medium })
+   * :53-57 (focused row { background-color: list-hoverBackground })
+   * :59-66 (group header { color: descriptionForeground; font-weight: 500; font-size: 11px })
+   * :68-80 (separator { border-top: 1px solid editorHoverWidget-border; margin: 4px 6px })
+   * suggest.css:100-116 (row { padding-right: 10px }) + :129-133 (contents { padding-left: 2px })
+   */
+  --wing-overlay-pad: 4px;
+  --wing-overlay-shadow: 0 2px 8px var(--vscode-widget-shadow);
+  --wing-overlay-bg: var(--vscode-menu-background, var(--vscode-editorWidget-background, transparent));
+  --wing-overlay-fg: var(--vscode-menu-foreground, var(--vscode-foreground));
+  --wing-overlay-border: var(--vscode-editorHoverWidget-border, var(--vscode-widget-border, transparent));
+  --wing-list-row-padding: 0 12px 0 6px;
+  --wing-list-row-radius: var(--vscode-cornerRadius-medium, 6px);
+  --wing-list-group-font-size: 11px;
+  --wing-list-group-weight: 500;
+  --wing-list-separator-margin: 4px 6px;
+  --wing-list-hover-bg: var(--vscode-list-hoverBackground, transparent);
+  --wing-candidate-description: var(
+    --vscode-editorSuggestWidget-foreground,
+    var(--vscode-descriptionForeground)
+  );
+
+  /* ── Context usage ring (step 05) ────────────────────────────────────
+   * chatContextUsageWidget.css:6-79 (.chat-context-usage-widget { gap: 4px;
+   *   padding: 3px; border-radius: 5px }; .icon-container 14×14; .progress-bg
+   *   stroke disabledForeground; .progress-arc stroke icon-foreground, stroke-width 4;
+   *   .percentage-label 11px) + chatContextUsageWidget.ts:468-473 (warning 75%, error 90%).
+   */
+  --wing-context-ring-size: 14px;
+  --wing-context-chip-padding: 3px;
+  --wing-context-chip-gap: 4px;
+  --wing-context-chip-radius: 5px;
+  --wing-context-ring-width: 4;
+
+  /* ── Welcome view (step 05) ──────────────────────────────────────────
+   * chatViewWelcome.css:56-215 (icon 40px; title 13px/600 + margin-top 5px; message
+   *   12px, max-width 280px, padding 0 20px, margin 8px auto 0; suggestion cards
+   *   height 20px, padding 0 6px, gap 6px, radius 4px, border chat-requestBorder,
+   *   hover list-hoverBackground, label 12px).
+   */
+  --wing-welcome-icon-size: 40px;
+  --wing-welcome-title-size: 13px;
+  --wing-welcome-message-max-width: 280px;
+  --wing-welcome-message-padding: 0 20px;
+  --wing-welcome-card-height: 20px;
+  --wing-welcome-card-padding: 0 6px;
+  --wing-welcome-card-gap: 6px;
 }

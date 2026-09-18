@@ -1,0 +1,210 @@
+/*
+ * Floating panels (model picker, sessions, branches).
+ *
+ * Geometry and surfaces come from VS Code's action widget — the container behind
+ * the model picker (actionWidget.css:6-18, :47-80, :580) — with the suggestion
+ * widget's `role="option"` rows for the command candidates. Colors are theme
+ * variables only (enforced by tests/layers).
+ */
+
+.layer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+/* actionWidget.css:20-38 (.context-view-block) — transparent click catcher: a click
+ * outside closes, nothing is dimmed. */
+.backdrop {
+  position: absolute;
+  inset: 0;
+}
+
+/* actionWidget.css:6-18 + :580 */
+.panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  max-height: 60vh; /* layout glue (README exception #3): never taller than the view */
+  margin: 0 var(--wing-chat-row-padding-x) var(--wing-gap-md, 8px);
+  padding: var(--wing-overlay-pad);
+  border: var(--wing-stroke, 1px) solid var(--wing-overlay-border);
+  border-radius: var(--wing-radius-large, 8px);
+  color: var(--wing-overlay-fg);
+  background-color: var(--wing-overlay-bg);
+  box-shadow: var(--wing-overlay-shadow);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--wing-gap-xs, 4px);
+  padding: 0 0 var(--wing-overlay-pad) var(--wing-gap-sm, 6px);
+}
+
+.title {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-xs, 0.846em);
+  font-weight: var(--wing-weight-semibold, 600);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.close {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--wing-tab-action-size);
+  height: var(--wing-tab-action-size);
+  padding: var(--wing-tab-action-padding);
+  border: none;
+  border-radius: var(--wing-radius-small, 4px);
+  color: inherit;
+  background: transparent;
+  font-family: inherit;
+  font-size: var(--wing-tab-action-size);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.close:hover {
+  background-color: var(--wing-list-hover-bg);
+}
+
+.close:focus-visible {
+  outline: var(--wing-stroke, 1px) solid var(--wing-focus-border);
+  outline-offset: -1px;
+}
+
+.hint {
+  padding: var(--wing-overlay-pad) var(--wing-gap-sm, 6px) 0;
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-xs, 0.846em);
+}
+
+.empty {
+  padding: var(--wing-gap-md, 8px) var(--wing-gap-sm, 6px);
+  margin: 0;
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-s, 0.923em);
+}
+
+.list:focus {
+  outline: none;
+}
+
+.list:focus-visible {
+  outline: var(--wing-stroke, 1px) solid var(--wing-focus-border);
+  outline-offset: -1px;
+}
+
+.list {
+  overflow-y: auto;
+}
+
+/* actionWidget.css:47-57 (row geometry + focused row background) */
+.option {
+  display: flex;
+  align-items: center;
+  gap: var(--wing-gap-sm, 6px);
+  padding: var(--wing-list-row-padding);
+  border-radius: var(--wing-list-row-radius);
+  cursor: pointer;
+}
+
+.option[data-highlighted='true'] {
+  background-color: var(--wing-list-hover-bg);
+}
+
+.option[data-current='true'] {
+  font-weight: var(--wing-weight-semibold, 600);
+}
+
+.option[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.8;
+}
+
+.optionColumn {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.optionLabel {
+  overflow: hidden;
+  font-size: var(--wing-font-body-s, 0.923em);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* SUGGEST:129-133 (row contents { padding-left: 2px }) + :170-183 (details label). */
+.optionMeta {
+  overflow: hidden;
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-xs, 0.846em);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.optionMeta:first-of-type {
+  padding-left: 2px;
+}
+
+.badge {
+  flex: 0 0 auto;
+  padding: 0 var(--wing-gap-xs, 4px);
+  border-radius: var(--wing-radius-small, 4px);
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-xs, 0.846em);
+}
+
+/* actionWidget.css:59-66 (group header { color: descriptionForeground; font-weight: 500;
+ * font-size: 11px }; :not(:first-of-type) { margin-top: 2px }) */
+.groupHeader {
+  padding: var(--wing-list-row-padding);
+  color: var(--wing-fg-description);
+  font-size: var(--wing-list-group-font-size);
+  font-weight: var(--wing-list-group-weight);
+}
+
+.groupHeader:not(:first-child) {
+  margin-top: 2px;
+}
+
+/* actionWidget.css:68-80 (separator) */
+.separator {
+  margin: var(--wing-list-separator-margin);
+  border-top: var(--wing-stroke, 1px) solid var(--wing-overlay-border);
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-xs, 0.846em);
+}
+
+/* Codicon stand-in (README exception #2): the 6px state dot from the chat rows. */
+.statusDot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 100%;
+  background-color: transparent;
+}
+
+.statusDot[data-status='working'] {
+  background-color: var(--vscode-charts-orange, var(--wing-fg-description));
+}
+
+.statusDot[data-status='waiting-for-input'] {
+  background-color: var(--vscode-charts-yellow, var(--wing-fg-description));
+}
+
+.statusDot[data-status='idle'] {
+  background-color: var(--vscode-charts-green, var(--wing-fg-description));
+}

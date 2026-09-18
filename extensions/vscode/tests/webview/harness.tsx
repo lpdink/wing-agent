@@ -1,5 +1,12 @@
 import { act } from '@testing-library/react';
-import type { CellPatch, SessionViewModel } from '../../src/shared';
+import type {
+  CellPatch,
+  PanelsModel,
+  SessionStateModel,
+  SessionViewModel,
+  TabModel,
+  UiActionModel,
+} from '../../src/shared';
 import { createMockBridge } from '../../src/testing/mockBridge';
 import type { MockBridge } from '../../src/testing/mockBridge';
 import { mountApp } from '../../src/webview/mount';
@@ -90,4 +97,47 @@ export function cellElement(container: HTMLElement, cellId: string): HTMLElement
     throw new Error(`no cell rendered for id ${cellId}`);
   }
   return element;
+}
+
+/** Push overlay data as the host would (`panels`). */
+export function pushPanels(item: Mounted, sessionId: string, panels: PanelsModel): void {
+  act(() => {
+    item.bridge.push({ type: 'panels', sessionId, panels });
+  });
+}
+
+/** Push a one-shot UI action as the host would (`ui`). */
+export function pushUi(item: Mounted, action: UiActionModel): void {
+  act(() => {
+    item.bridge.push({ type: 'ui', action });
+  });
+}
+
+/** Push a full state replacement as the host would (`state`). */
+export function pushState(item: Mounted, state: SessionStateModel): void {
+  act(() => {
+    item.bridge.push({ type: 'state', state });
+  });
+}
+
+/** Push a tab-bar update as the host would (`tabs`). */
+export function pushTabs(item: Mounted, tabs: readonly TabModel[], activeSessionId: string | null): void {
+  act(() => {
+    item.bridge.push({ type: 'tabs', tabs, activeSessionId });
+  });
+}
+
+/** The two-tab fixture every tab-bar test starts from. */
+export function twoTabs(): readonly TabModel[] {
+  return [
+    { sessionId: 'session-a', title: 'Shell fixture', status: 'idle', attention: 'none' },
+    { sessionId: 'session-b', title: 'New session', status: 'idle', attention: 'none' },
+  ];
+}
+
+/** Push a full snapshot as the host would (`hydrate`). */
+export function pushHydrate(item: Mounted, session: SessionViewModel): void {
+  act(() => {
+    item.bridge.push({ type: 'hydrate', session });
+  });
 }

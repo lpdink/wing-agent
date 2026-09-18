@@ -1,14 +1,10 @@
 /*
- * Shell layout.
+ * Shell layout: tab bar · transcript · status row · composer.
  *
- * The shell around the transcript is a step 01 placeholder (header + debug
- * footer); step 05 replaces both with the tab bar, status area and composer. The
- * transcript itself lives in `chat.module.css`.
- *
- * Color rules (enforced by tests/layers.test.ts): every color comes from a
- * `--vscode-*` theme variable (directly or through a `--wing-*` alias). Never a
- * literal — the renderer must follow the user's theme in light / dark /
- * high-contrast.
+ * Values are `--wing-*` tokens (tokens.css, every one sourced to the local VS Code
+ * 1.129.1 sources) or the README exceptions (rule-level source comment, codicon
+ * stand-in geometry, layout glue). Colors are `--vscode-*` theme variables only —
+ * enforced by tests/layers.
  */
 
 .root {
@@ -26,80 +22,340 @@
   line-height: var(--wing-md-line-height, 1.5);
 }
 
-.header {
+/* ── tab bar ─────────────────────────────────────────────────────────────
+ * VSCode editor tabs, at sidebar density: MULTI:115-125 (padding-left 10px),
+ * MULTI:418-421 (.tab-actions width 28px), MULTI:459-467 (close action 16×16),
+ * MULTI:478-490 (dirty dot replaces the close icon when the tab is not hovered).
+ */
+
+.tabBar {
   display: flex;
-  flex-direction: column;
+  flex: 0 0 auto;
+  align-items: center;
   gap: var(--wing-gap-xs, 4px);
-  padding: var(--wing-chat-row-padding-y, 5px) var(--wing-chat-row-padding-x, 16px);
+  padding: var(--wing-pad-y-tight, 2px) var(--wing-gap-xs, 4px);
   border-bottom: var(--wing-stroke, 1px) solid var(--vscode-panel-border, transparent);
 }
 
-.titleRow {
+.tabs {
   display: flex;
-  align-items: center;
-  gap: var(--wing-gap-md, 8px);
+  flex: 1 1 auto;
+  gap: var(--wing-gap-xs, 4px);
+  min-width: 0;
+  overflow-x: auto;
+  /* Chrome/Safari: the strip scrolls with the wheel but shows no bar. */
+  scrollbar-width: none;
 }
 
-.title {
-  flex: 1 1 auto;
+.tabsEmpty {
+  padding: 0 var(--wing-gap-xs, 4px);
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-s, 0.923em);
+}
+
+/* MULTI:115-125 + MULTI:159-166 (inactive/active surfaces) */
+.tab {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--wing-gap-xs, 4px);
+  max-width: var(--wing-tab-max-width);
+  height: var(--wing-tab-height);
+  padding-left: var(--wing-tab-pad-left);
+  border: var(--wing-stroke, 1px) solid transparent;
+  border-radius: var(--wing-radius-small, 4px);
+  color: var(--vscode-tab-inactiveForeground, var(--vscode-foreground));
+  background-color: var(--vscode-tab-inactiveBackground, transparent);
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.tab[data-active='true'] {
+  color: var(--vscode-tab-activeForeground, var(--vscode-foreground));
+  background-color: var(--vscode-tab-activeBackground, transparent);
+}
+
+.tab:hover {
+  background-color: var(--vscode-tab-hoverBackground, var(--wing-tab-action-hover-bg));
+}
+
+.tab:focus-visible {
+  outline: var(--wing-stroke, 1px) solid var(--wing-focus-border);
+  outline-offset: -1px;
+}
+
+.tabLabel {
   overflow: hidden;
-  font-weight: 600;
+  min-width: 0;
+  font-size: var(--wing-font-body-s, 0.923em);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.status {
+/* Codicon stand-in (README exception #2): a 6px status dot, the same geometry the
+ * chat tool rows use. Colors are the chart palette's semantic equivalents. */
+.tabStatusDot {
   flex: 0 0 auto;
-  color: var(--vscode-descriptionForeground);
+  width: 6px;
+  height: 6px;
+  border-radius: 100%;
+  background-color: transparent;
 }
 
-.meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--wing-gap-md, 8px);
-  color: var(--vscode-descriptionForeground);
-  font-size: var(--wing-font-body-s, 0.923em);
+.tabStatusDot[data-status='working'] {
+  background-color: var(--vscode-charts-orange, var(--wing-fg-description));
 }
 
-.footer {
+.tabStatusDot[data-status='waiting-for-input'] {
+  background-color: var(--vscode-charts-yellow, var(--wing-fg-description));
+}
+
+.tabClose {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
-  gap: var(--wing-gap-md, 8px);
-  padding: 4px var(--wing-chat-row-padding-x, 16px);
-  border-top: var(--wing-stroke, 1px) solid var(--vscode-panel-border, transparent);
-  color: var(--vscode-descriptionForeground);
-  font-size: var(--wing-font-body-xs, 0.846em);
-}
-
-.footerSpacer {
-  flex: 1 1 auto;
-}
-
-.button {
-  padding: var(--wing-pad-y-tight, 2px) var(--wing-control-pad-x, 8px);
-  border: var(--wing-stroke, 1px) solid var(--vscode-panel-border, transparent);
+  justify-content: center;
+  width: var(--wing-tab-action-size);
+  height: var(--wing-tab-action-size);
+  padding: var(--wing-tab-action-padding);
+  border: none;
   border-radius: var(--wing-radius-small, 4px);
-  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
-  background-color: var(--vscode-button-secondaryBackground, transparent);
+  color: inherit;
+  background: transparent;
   font-family: inherit;
-  font-size: inherit;
+  font-size: var(--wing-tab-action-size);
+  line-height: 1;
   cursor: pointer;
 }
 
-.button:hover {
-  background-color: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-secondaryBackground));
+/* MULTI:485-490 — the close icon is dim until the tab is hovered/focused/active. */
+.tabClose {
+  position: relative;
+  opacity: 0;
 }
 
-.button:focus-visible {
-  outline: 1px solid var(--vscode-focusBorder);
+.tab:hover .tabClose,
+.tabClose:focus-visible,
+.tab[data-active='true'] .tabClose,
+.tab[data-attention='result'] .tabClose,
+.tab[data-attention='error'] .tabClose {
+  opacity: 0.7;
+}
+
+.tabClose:hover {
+  background-color: var(--vscode-toolbar-hoverBackground, transparent);
+  opacity: 1;
+}
+
+.tabClose:focus-visible {
+  outline: var(--wing-stroke, 1px) solid var(--wing-focus-border);
+  outline-offset: -1px;
+  opacity: 1;
+}
+
+/* MULTI:478-483 — while the pointer is elsewhere the dot stands in for the close
+ * icon, so a background result is visible without hovering. The dot itself is a
+ * codicon stand-in (README exception #2): an 8px disc in place of the icon font. */
+.tabClose .attentionGlyph {
+  display: none;
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 100%;
+  background-color: var(--vscode-charts-green, var(--wing-fg-description));
+}
+
+.tabClose:not(:hover) .attentionGlyph {
+  display: block;
+}
+
+.tabClose:not(:hover) .closeGlyph {
+  display: none;
+}
+
+.attentionGlyph[data-attention='error'] {
+  background-color: var(--vscode-errorForeground, var(--wing-fg-error));
+}
+
+.iconButton {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--wing-tab-height);
+  height: var(--wing-tab-height);
+  padding: 0;
+  border: none;
+  border-radius: var(--wing-radius-small, 4px);
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  background: transparent;
+  font-family: inherit;
+  font-size: var(--wing-font-body-l, 1.077em);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.iconButton:hover {
+  background-color: var(--wing-tab-action-hover-bg);
+}
+
+.iconButton:focus-visible {
+  outline: var(--wing-stroke, 1px) solid var(--wing-focus-border);
+  outline-offset: -1px;
+}
+
+/* Codicon stand-in (README exception #2): a clock face drawn from a ring plus a hand. */
+.historyGlyph {
+  position: relative;
+  width: 10px;
+  height: 10px;
+  border: var(--wing-stroke, 1px) solid currentColor;
+  border-radius: 100%;
+  box-sizing: border-box;
+}
+
+.historyGlyph::after {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  width: var(--wing-stroke, 1px);
+  height: 3px;
+  background-color: currentColor;
+  content: '';
+}
+
+/* ── transcript area ───────────────────────────────────────────────────── */
+
+.waiting {
+  flex: 1 1 auto;
+  padding: var(--wing-chat-row-padding-y) var(--wing-chat-row-padding-x);
+  margin: 0;
+  color: var(--wing-fg-description);
+}
+
+.welcomeHost {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* CHAT:56-215 (welcome view: `div.chat-welcome-view { padding: 12px }`) */
+.welcome {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  text-align: center;
+}
+
+.welcomeIcon {
+  width: var(--wing-welcome-icon-size);
+  height: var(--wing-welcome-icon-size);
+  opacity: 0.85;
+}
+
+.welcomeWordmark {
+  color: var(--wing-fg-description);
+  font-size: var(--wing-welcome-icon-size);
+  font-weight: var(--wing-weight-semibold, 600);
+  line-height: normal;
+}
+
+/* WELCOME:90-101 (.chat-welcome-view-title { font-size: 13px; font-weight: 600;
+ * margin-top: 5px; text-align: center; line-height: normal }) */
+.welcomeTitle {
+  margin: 5px 0 0;
+  font-size: var(--wing-welcome-title-size);
+  font-weight: var(--wing-weight-semibold, 600);
+  line-height: normal;
+}
+
+/* WELCOME:103-118 (.chat-welcome-view-message { text-align: center; max-width: 280px;
+ * padding: 0 20px; margin: 8px auto 0; color: descriptionForeground; font-size: 12px }) */
+.welcomeMessage {
+  max-width: var(--wing-welcome-message-max-width);
+  padding: var(--wing-welcome-message-padding);
+  margin: 8px auto 0;
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-s, 0.923em);
+}
+
+.welcomeSuggestions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--wing-welcome-card-gap);
+  /* Gap between the message and the suggestions: layout glue (README exception #3),
+   * the source positions that row absolutely at the bottom of the view. */
+  margin-top: 16px;
+}
+
+/* CHAT:186-215 — suggestion pill: 20px tall, 0 6px padding, 4px radius, widget surface. */
+.welcomeSuggestion {
+  display: flex;
+  align-items: center;
+  height: var(--wing-welcome-card-height);
+  padding: var(--wing-welcome-card-padding);
+  border: var(--wing-stroke, 1px) solid var(--wing-border-request);
+  border-radius: var(--wing-radius-small, 4px);
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  background-color: var(--wing-surface-widget);
+  font-family: inherit;
+  font-size: var(--wing-font-body-s, 0.923em);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.welcomeSuggestion:hover {
+  background-color: var(--wing-list-hover-bg);
+}
+
+.welcomeSuggestion:focus-visible {
+  outline: var(--wing-stroke, 1px) solid var(--wing-focus-border);
   outline-offset: 1px;
 }
 
+.welcomeHint {
+  /* Rhythm below the suggestions — layout glue (README exception #3). */
+  margin: 16px 0 0;
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-xs, 0.846em);
+}
+
+/* Host-pushed banner (`panels.globalNotice`). */
+.notice {
+  flex: 0 0 auto;
+  padding: var(--wing-pad-y, 4px) var(--wing-chat-row-padding-x);
+  border-top: var(--wing-stroke, 1px) solid var(--vscode-panel-border, transparent);
+  color: var(--vscode-inputValidation-infoForeground, var(--vscode-foreground));
+  background-color: var(--vscode-inputValidation-infoBackground, transparent);
+  font-size: var(--wing-font-body-s, 0.923em);
+}
+
+.notice[data-level='warning'] {
+  color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground));
+  background-color: var(--vscode-inputValidation-warningBackground, transparent);
+  border-top-color: var(--vscode-inputValidation-warningBorder, var(--vscode-panel-border));
+}
+
+.notice[data-level='error'] {
+  color: var(--vscode-inputValidation-errorForeground, var(--vscode-foreground));
+  background-color: var(--vscode-inputValidation-errorBackground, transparent);
+  border-top-color: var(--vscode-inputValidation-errorBorder, var(--vscode-panel-border));
+}
+
+/* ── toasts ────────────────────────────────────────────────────────────── */
+
 .toasts {
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
   gap: var(--wing-gap-xs, 4px);
-  padding: 0 var(--wing-chat-row-padding-x, 16px) 4px;
+  padding: 0 var(--wing-chat-row-padding-x) 4px;
 }
 
 .toast {
@@ -115,4 +371,339 @@
 
 .toast[data-toast-level='error'] {
   border-color: var(--vscode-errorForeground, var(--vscode-panel-border));
+}
+
+/* ── status row (Copilot's secondary toolbar) ────────────────────────────
+ * CHAT:1668-1673 (flex, gap 2px, padding 0 4px) + CHAT:1735-1741 (chip geometry).
+ */
+
+.statusArea {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--wing-input-toolbar-gap);
+  padding: var(--wing-secondary-toolbar-padding);
+  margin-bottom: var(--wing-gap-xs, 4px);
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+}
+
+.chip {
+  display: flex;
+  align-items: center;
+  height: var(--wing-chip-height);
+  padding: var(--wing-chip-padding);
+  border: none;
+  border-radius: var(--wing-chip-radius);
+  color: inherit;
+  background: transparent;
+  font-family: inherit;
+  font-size: var(--wing-font-body-s, 0.923em);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.chip:hover {
+  background-color: var(--wing-list-hover-bg);
+}
+
+.chip:focus-visible {
+  outline: var(--wing-stroke, 1px) solid var(--wing-focus-border);
+  outline-offset: -1px;
+}
+
+.chipStatic {
+  display: flex;
+  align-items: center;
+  height: var(--wing-chip-height);
+  padding: var(--wing-chip-padding);
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-s, 0.923em);
+  white-space: nowrap;
+}
+
+/* CHAT:1747-1762 — a chip's state is shown by colour, not by weight. */
+.chip[data-thinking='off'] {
+  color: var(--wing-fg-description);
+}
+
+.chip[data-kind='yolo'][data-enabled='true'] {
+  color: var(--vscode-charts-orange, var(--vscode-foreground));
+  font-weight: var(--wing-weight-semibold, 600);
+}
+
+/* CHAT:1764-1768 (.codicon-chevron-down) — codicon stand-in: a rotated square. */
+.chipChevron {
+  width: var(--wing-chevron-down-size);
+  height: var(--wing-chevron-down-size);
+  margin-left: var(--wing-chevron-down-margin);
+  opacity: var(--wing-chevron-opacity);
+  border-right: var(--wing-stroke, 1px) solid currentColor;
+  border-bottom: var(--wing-stroke, 1px) solid currentColor;
+  box-sizing: border-box;
+  transform: rotate(45deg) scale(0.7);
+  transform-origin: center;
+}
+
+.statusSpacer {
+  flex: 1 1 auto;
+}
+
+.statusMeta {
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-xs, 0.846em);
+  white-space: nowrap;
+}
+
+/* ── context usage ─────────────────────────────────────────────────────── */
+
+.contextChip {
+  display: flex;
+  align-items: center;
+  gap: var(--wing-context-chip-gap);
+  padding: var(--wing-context-chip-padding);
+  border-radius: var(--wing-context-chip-radius);
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-xs, 0.846em);
+  white-space: nowrap;
+}
+
+.contextRing {
+  width: var(--wing-context-ring-size);
+  height: var(--wing-context-ring-size);
+  flex: 0 0 auto;
+}
+
+/* CONTEXT:41-49 (.progress-bg / .progress-arc) — 4px stroke, arc from the top. */
+.contextRingBg {
+  fill: none;
+  stroke: var(--vscode-disabledForeground, var(--wing-fg-description));
+  stroke-width: var(--wing-context-ring-width);
+  opacity: 0.5;
+}
+
+.contextRingArc {
+  fill: none;
+  stroke: var(--vscode-icon-foreground, var(--vscode-foreground));
+  stroke-width: var(--wing-context-ring-width);
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: center;
+}
+
+.contextChip[data-level='warning'] .contextRingArc {
+  stroke: var(--vscode-editorWarning-foreground, var(--wing-fg-warning));
+}
+
+.contextChip[data-level='error'] .contextRingArc {
+  stroke: var(--vscode-editorError-foreground, var(--wing-fg-error));
+}
+
+/* Announced to screen readers only (the visible equivalent is the tab status dot).
+ * Standard clip pattern; the 1px box is what makes it measurable but invisible
+ * (layout glue, README exception #3). */
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ── composer ────────────────────────────────────────────────────────────
+ * CHAT:875-880 (container) + CHAT:1592-1594 (editor padding) + CHAT:1588-1590
+ * (focused border) + CHAT:1661-1666 (toolbar row) + CHAT:1093-1097 (send 22×22).
+ */
+
+.composerArea {
+  position: relative;
+  flex: 0 0 auto;
+  padding: 0 var(--wing-chat-row-padding-x) var(--wing-gap-md, 8px);
+}
+
+.composer {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: 100%;
+  padding: var(--wing-input-pad);
+  border: var(--wing-stroke, 1px) solid var(--wing-border-input);
+  border-radius: var(--wing-radius-large, 8px);
+  background-color: var(--wing-input-bg);
+  cursor: text;
+}
+
+.composer:focus-within {
+  border-color: var(--wing-focus-border);
+}
+
+.input {
+  box-sizing: border-box;
+  width: 100%;
+  /* Grows with the draft: 3 → 12em (≈ 8 lines at the markdown line-height), then it
+   * scrolls internally. Sizing glue (README exception #3) — VS Code instead lays the
+   * editor out with its own content-height service. */
+  min-height: 3em;
+  max-height: 12em;
+  padding: 6px 0 0 var(--wing-input-editor-pad-left, 4px);
+  border: none;
+  color: var(--wing-input-fg);
+  background: transparent;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  resize: none;
+}
+
+.input:focus {
+  outline: none;
+}
+
+.input::placeholder {
+  color: var(--wing-input-placeholder);
+}
+
+.input:disabled {
+  cursor: default;
+}
+
+.composerToolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--wing-input-toolbar-gap);
+  margin-top: var(--wing-input-toolbar-margin-top);
+}
+
+.composerHint {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-xs, 0.846em);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.submitButton {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--wing-submit-size);
+  height: var(--wing-submit-size);
+  padding: 0;
+  border: none;
+  border-radius: var(--vscode-cornerRadius-circle, 100%);
+  color: var(--wing-button-fg);
+  background-color: var(--wing-button-bg);
+  cursor: pointer;
+}
+
+.submitButton:hover:not(:disabled) {
+  background-color: var(--wing-button-bg-hover);
+}
+
+.submitButton:disabled {
+  opacity: var(--wing-disabled-opacity);
+  cursor: default;
+}
+
+.submitButton:focus-visible {
+  outline: var(--wing-stroke, 1px) solid var(--wing-focus-border);
+  outline-offset: 1px;
+}
+
+/* Codicon stand-ins (README exception #2): an up arrow and a stop square, both in
+ * the button's foreground colour. */
+.sendGlyph {
+  width: 8px;
+  height: 8px;
+  border-top: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+  box-sizing: border-box;
+  transform: rotate(45deg) translate(1px, 1px);
+}
+
+.stopGlyph {
+  width: 8px;
+  height: 8px;
+  border-radius: 1px;
+  background-color: currentColor;
+}
+
+/* Queued (unaccepted) messages: the host marks the cell `pending`, the shell says so
+ * where the next message is typed. */
+.queueBar {
+  display: flex;
+  align-items: center;
+  gap: var(--wing-gap-sm, 6px);
+  padding: 0 var(--wing-gap-xs, 4px) 4px;
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-xs, 0.846em);
+}
+
+.queueLabel {
+  flex: 0 0 auto;
+  font-weight: var(--wing-weight-semibold, 600);
+}
+
+.queueItem {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Command candidates: the suggest widget, anchored above the input.
+ * SUGGEST:9-17 (border editorSuggestWidget-border, bg editorSuggestWidget-background,
+ * radius cornerRadius-large) + SUGGEST:100-116 (row { padding-right: 10px }). */
+.popover {
+  position: absolute;
+  right: var(--wing-chat-row-padding-x);
+  bottom: 100%;
+  left: var(--wing-chat-row-padding-x);
+  z-index: 2;
+  max-height: 40vh; /* layout glue (README exception #3) */
+  padding: var(--wing-overlay-pad);
+  overflow-y: auto;
+  border: var(--wing-stroke, 1px) solid var(--vscode-editorSuggestWidget-border, var(--wing-overlay-border));
+  border-radius: var(--wing-radius-large, 8px);
+  background-color: var(--vscode-editorSuggestWidget-background, var(--wing-overlay-bg));
+  box-shadow: var(--wing-overlay-shadow);
+}
+
+.candidate {
+  display: flex;
+  align-items: baseline;
+  gap: var(--wing-gap-sm, 6px);
+  padding: var(--wing-list-row-padding);
+  border-radius: var(--wing-list-row-radius);
+  cursor: pointer;
+}
+
+.candidate[data-highlighted='true'] {
+  color: var(--vscode-editorSuggestWidget-selectedForeground, var(--wing-overlay-fg));
+  background-color: var(--vscode-editorSuggestWidget-selectedBackground, var(--wing-list-hover-bg));
+}
+
+.candidateName {
+  flex: 0 0 auto;
+  font-size: var(--wing-font-body-s, 0.923em);
+}
+
+.candidateDescription {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--wing-candidate-description);
+  font-size: var(--wing-font-body-xs, 0.846em);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidateParams {
+  flex: 0 0 auto;
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-xs, 0.846em);
+  font-family: var(--vscode-editor-font-family, monospace);
 }

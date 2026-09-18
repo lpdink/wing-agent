@@ -39,6 +39,24 @@ export interface BridgeStatusModel {
   readonly lastPong: { readonly id: string; readonly rttMs: number } | null;
 }
 
+/**
+ * Counters for the interaction-only `ui` actions.
+ *
+ * These actions are *events*, not state: the host asks the webview to focus the
+ * composer / close its overlays / pin the transcript. Nothing about the session
+ * model changes, so the counter (not a boolean) is the right shape — two
+ * consecutive `focusComposer` actions must both be observable, and a component
+ * reacts with `useEffect` on the number.
+ *
+ * Step 05 owns the effects. `scrollToBottom` is carried for completeness; the
+ * transcript already pins itself (step 04), so nothing consumes it today.
+ */
+export interface UiSignalsModel {
+  readonly closeOverlays: number;
+  readonly focusComposer: number;
+  readonly scrollToBottom: number;
+}
+
 export type ApplyOutcome = { readonly ok: true } | { readonly ok: false; readonly reason: ResyncReason };
 
 export interface AppState {
@@ -47,6 +65,7 @@ export interface AppState {
   readonly activeSessionId: SessionId | null;
   readonly toasts: readonly ToastModel[];
   readonly bridge: BridgeStatusModel;
+  readonly uiSignals: UiSignalsModel;
 }
 
 export interface AppActions {
@@ -87,6 +106,7 @@ export function createInitialState(): AppState {
     activeSessionId: null,
     toasts: [],
     bridge: { connection: 'connecting', protocolVersion: BRIDGE_PROTOCOL_VERSION, lastPong: null },
+    uiSignals: { closeOverlays: 0, focusComposer: 0, scrollToBottom: 0 },
   };
 }
 
@@ -164,11 +184,15 @@ export function createAppStore(): AppStoreApi {
         }
         case 'focusComposer':
         case 'scrollToBottom':
-        case 'closeOverlays':
+        case 'closeOverlays': {
           // Interaction-only actions: step 05 owns the effects (composer focus,
-          // scroll pinning, overlay teardown). Applying them is a no-op for the
-          // model, which is exactly why they are not part of `SessionStateModel`.
+          // scroll pinning, overlay teardown). The model does not change — that is
+          // exactly why they are not part of `SessionStateModel` — but each action
+          // is recorded as a counter so a mounted component can react to it.
+          const key = action.kind;
+          set((state) => ({ uiSignals: { ...state.uiSignals, [key]: state.uiSignals[key] + 1 } }));
           return;
+        }
         default:
           // Same gate as the bridge controller: exhaustive at compile time, a
           // warning (never a crash) at runtime.
