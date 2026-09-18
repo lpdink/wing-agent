@@ -403,8 +403,10 @@ export class SessionManager {
         createdAt: '',
       });
       const managed = this.adopt(record, { activate: true });
-      await this.subscribe(managed);
+      // The picker closes as soon as the choice has had its effect: a failed
+      // subscribe must not leave a stale overlay on top of the new tab.
       this.clearPicker('sessionPicker');
+      await this.subscribe(managed);
       return record.sessionId;
     });
   }
@@ -428,11 +430,11 @@ export class SessionManager {
       record.draft = response.draft;
       record.dirtyState = true;
       const managed = this.adopt(record, { activate: true });
+      this.clearPicker('branchPicker');
       await this.subscribe(managed);
       if (record.draft !== null) {
         this.postState(record);
       }
-      this.clearPicker('branchPicker');
       return record.sessionId;
     });
   }

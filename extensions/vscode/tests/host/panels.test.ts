@@ -386,6 +386,27 @@ describe('pickers close after a choice', () => {
     expect(harness.host.sessionManager.openSessionIds).toContain('sess-older');
   });
 
+  it('closes the picker even when the follow-up subscribe fails', async () => {
+    const { harness, sessionId } = await boot();
+    harness.gateway.seedSession({ sessionId: 'sess-older', name: 'Older session' });
+    await harness.intent({ type: 'runPromptCommand', sessionId, name: '/ss', argsText: '' });
+    await flushMicrotasks();
+    // The chosen session exists (resume works) but its replay cannot attach.
+    harness.gateway.httpFailures.set('/api/session/subscribe', { status: 503 });
+
+    await harness.intent({
+      type: 'runPromptCommand',
+      sessionId,
+      name: '/ss',
+      argsText: 'sess-older',
+    });
+    await flushMicrotasks(30);
+
+    expect(harness.host.sessionManager.record(sessionId)?.panels.sessionPicker).toBeNull();
+    // The tab is open and its subscribe is being retried, not silently dropped.
+    expect(harness.host.sessionManager.openSessionIds).toContain('sess-older');
+  });
+
   it('clears the branch picker after a rewind and after a fork', async () => {
     const { harness, sessionId } = await boot();
     await harness.intent({ type: 'runPromptCommand', sessionId, name: '/rewind', argsText: '' });
