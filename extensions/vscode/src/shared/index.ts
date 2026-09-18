@@ -11,6 +11,7 @@
 export * from './bridge';
 export * from './cells';
 export * from './constants';
+export * from './exhaustive';
 export * from './session';
 export * from './types';
 export * from './validate';

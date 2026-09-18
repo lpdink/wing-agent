@@ -13,47 +13,54 @@
 
 import type { HostToWebviewMessage, WebviewToHostMessage } from './bridge';
 
-const HOST_TO_WEBVIEW_TYPES: ReadonlySet<string> = new Set<HostToWebviewMessage['type']>([
-  'hydrate',
-  'patch',
-  'state',
-  'panels',
-  'tabs',
-  'ui',
-  'pong',
-]);
+/**
+ * Known tags, typed as `Record<…['type'], true>` on purpose: a `Set<string>` only
+ * checks the *element* type, so a variant missing from the list compiles fine and
+ * is then silently dropped at runtime (the guard rejects it). A record makes both
+ * a missing and an extra key a compile error, which is what keeps these tables in
+ * lockstep with the unions in `./bridge`.
+ */
+const HOST_TO_WEBVIEW_TYPES: Record<HostToWebviewMessage['type'], true> = {
+  hydrate: true,
+  patch: true,
+  state: true,
+  panels: true,
+  tabs: true,
+  ui: true,
+  pong: true,
+};
 
-const WEBVIEW_TO_HOST_TYPES: ReadonlySet<string> = new Set<WebviewToHostMessage['type']>([
-  'ready',
-  'resync',
-  'ping',
-  'sendMessage',
-  'interrupt',
-  'answerAsk',
-  'approveTool',
-  'newSession',
-  'closeSession',
-  'activateSession',
-  'compact',
-  'setModel',
-  'setThinking',
-  'setEffort',
-  'setYolo',
-  'runPromptCommand',
-  'openModelPicker',
-  'closeOverlays',
-  'openLink',
-  'openFile',
-  'openDiff',
-  'copyText',
-]);
+const WEBVIEW_TO_HOST_TYPES: Record<WebviewToHostMessage['type'], true> = {
+  ready: true,
+  resync: true,
+  ping: true,
+  sendMessage: true,
+  interrupt: true,
+  answerAsk: true,
+  approveTool: true,
+  newSession: true,
+  closeSession: true,
+  activateSession: true,
+  compact: true,
+  setModel: true,
+  setThinking: true,
+  setEffort: true,
+  setYolo: true,
+  runPromptCommand: true,
+  openModelPicker: true,
+  closeOverlays: true,
+  openLink: true,
+  openFile: true,
+  openDiff: true,
+  copyText: true,
+};
 
-function hasType(value: unknown, known: ReadonlySet<string>): boolean {
+function hasType(value: unknown, known: Record<string, true>): boolean {
   if (typeof value !== 'object' || value === null) {
     return false;
   }
   const type: unknown = (value as { type?: unknown }).type;
-  return typeof type === 'string' && known.has(type);
+  return typeof type === 'string' && Object.hasOwn(known, type);
 }
 
 /** True when `value` is a host → webview message this build understands. */

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 
 import { ChatViewProvider } from './chatViewProvider';
-import { log } from './log';
+import { log, logDisposable } from './log';
 
 /**
  * Extension entry point.
@@ -18,6 +18,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     chatView,
+    logDisposable(),
     vscode.window.registerWebviewViewProvider(ChatViewProvider.viewId, chatView, {
       // Keep the DOM (and the composer draft) alive when the user switches away
       // from the sidebar. The bridge does not depend on it: a re-created webview

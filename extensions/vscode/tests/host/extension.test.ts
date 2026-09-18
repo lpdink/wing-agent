@@ -46,8 +46,24 @@ describe('activate', () => {
 
     activate(context);
 
-    expect(context.subscriptions).toHaveLength(2);
+    // provider + log channel + view-provider registration
+    expect(context.subscriptions).toHaveLength(3);
     expect(context.subscriptions[0]).toBeInstanceOf(ChatViewProvider);
+  });
+
+  it('closes the output channel when the extension is deactivated', () => {
+    const context = makeContext();
+
+    activate(context);
+    const channel = mockState.outputChannels[0];
+    expect(channel?.disposed).toBe(false);
+
+    // The host disposes the subscription list on deactivate.
+    for (const subscription of context.subscriptions) {
+      subscription.dispose();
+    }
+
+    expect(channel?.disposed).toBe(true);
   });
 
   it('logs activation to the output channel', () => {
@@ -64,5 +80,7 @@ describe('activate', () => {
 
     expect(() => deactivate()).not.toThrow();
     expect(mockState.viewProviders).toHaveLength(1);
+    // `deactivate` itself stays empty: everything is on the subscription list.
+    expect(context.subscriptions).toHaveLength(3);
   });
 });

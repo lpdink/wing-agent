@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type {
   CellModel,
@@ -16,6 +16,7 @@ import {
   assertNever,
   isHostToWebviewMessage,
   isWebviewToHostMessage,
+  unhandledVariant,
 } from '../../src/shared';
 import {
   makeAllCells,
@@ -163,6 +164,51 @@ function roundTrip<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+/**
+ * One message per variant per direction.
+ *
+ * Kept at module scope so both the exhaustiveness switch *and* the runtime guard
+ * assertions below exercise exactly the same values — a variant added to a union
+ * forces this array to grow (the `assertNever` switches fail to compile
+ * otherwise), and the guards are then checked against it automatically.
+ */
+const FIXTURE_SESSION = makeFixtureSession();
+
+const HOST_MESSAGES: readonly HostToWebviewMessage[] = [
+  { type: 'hydrate', session: FIXTURE_SESSION },
+  { type: 'patch', sessionId: FIXTURE_SESSION.sessionId, seq: 1, patches: [{ op: 'remove', cellId: 'c1' }] },
+  { type: 'state', state: FIXTURE_SESSION },
+  { type: 'panels', sessionId: FIXTURE_SESSION.sessionId, panels: EMPTY_PANELS },
+  { type: 'tabs', tabs: [], activeSessionId: null },
+  { type: 'ui', action: { kind: 'scrollToBottom' } },
+  { type: 'pong', id: 'ping-1', hostTimeMs: 0 },
+];
+
+const WEBVIEW_MESSAGES: readonly WebviewToHostMessage[] = [
+  { type: 'ready', protocolVersion: BRIDGE_PROTOCOL_VERSION },
+  { type: 'resync', sessionId: 's', lastSeq: 3, reason: 'seq-gap' },
+  { type: 'ping', id: 'ping-1' },
+  { type: 'sendMessage', sessionId: 's', text: 'hi' },
+  { type: 'interrupt', sessionId: 's' },
+  { type: 'answerAsk', sessionId: 's', requestId: 'r', answers: [] },
+  { type: 'approveTool', sessionId: 's', requestId: 'r', decision: 'approve' },
+  { type: 'newSession' },
+  { type: 'closeSession', sessionId: 's' },
+  { type: 'activateSession', sessionId: 's' },
+  { type: 'compact', sessionId: 's' },
+  { type: 'setModel', sessionId: 's', provider: 'p', model: 'm' },
+  { type: 'setThinking', sessionId: 's', enabled: true },
+  { type: 'setEffort', sessionId: 's', effort: 'high' },
+  { type: 'setYolo', sessionId: 's', enabled: false },
+  { type: 'runPromptCommand', sessionId: 's', name: '/init', argsText: '' },
+  { type: 'openModelPicker', sessionId: 's' },
+  { type: 'closeOverlays' },
+  { type: 'openLink', href: 'https://example.com' },
+  { type: 'openFile', path: '/tmp/a.ts', line: 3 },
+  { type: 'openDiff', sessionId: 's', cellId: 'c1' },
+  { type: 'copyText', text: 'x' },
+];
+
 describe('shared contract', () => {
   it('exposes a positive protocol version', () => {
     expect(BRIDGE_PROTOCOL_VERSION).toBeGreaterThan(0);
@@ -216,17 +262,8 @@ describe('shared contract', () => {
   });
 
   it('describes every bridge message exhaustively', () => {
-    const session = makeFixtureSession();
-    const hostMessages: HostToWebviewMessage[] = [
-      { type: 'hydrate', session },
-      { type: 'patch', sessionId: session.sessionId, seq: 1, patches: [{ op: 'remove', cellId: 'c1' }] },
-      { type: 'state', state: session },
-      { type: 'panels', sessionId: session.sessionId, panels: EMPTY_PANELS },
-      { type: 'tabs', tabs: [], activeSessionId: null },
-      { type: 'ui', action: { kind: 'scrollToBottom' } },
-      { type: 'pong', id: 'ping-1', hostTimeMs: 0 },
-    ];
-    expect(hostMessages.map(describeHostMessage)).toEqual([
+    const session = FIXTURE_SESSION;
+    expect(HOST_MESSAGES.map(describeHostMessage)).toEqual([
       `hydrate:${session.sessionId}:${session.cells.length}`,
       'patch:1:1',
       'state:idle',
@@ -236,31 +273,7 @@ describe('shared contract', () => {
       'pong:ping-1',
     ]);
 
-    const webviewMessages: WebviewToHostMessage[] = [
-      { type: 'ready', protocolVersion: BRIDGE_PROTOCOL_VERSION },
-      { type: 'resync', sessionId: 's', lastSeq: 3, reason: 'seq-gap' },
-      { type: 'ping', id: 'ping-1' },
-      { type: 'sendMessage', sessionId: 's', text: 'hi' },
-      { type: 'interrupt', sessionId: 's' },
-      { type: 'answerAsk', sessionId: 's', requestId: 'r', answers: [] },
-      { type: 'approveTool', sessionId: 's', requestId: 'r', decision: 'approve' },
-      { type: 'newSession' },
-      { type: 'closeSession', sessionId: 's' },
-      { type: 'activateSession', sessionId: 's' },
-      { type: 'compact', sessionId: 's' },
-      { type: 'setModel', sessionId: 's', provider: 'p', model: 'm' },
-      { type: 'setThinking', sessionId: 's', enabled: true },
-      { type: 'setEffort', sessionId: 's', effort: 'high' },
-      { type: 'setYolo', sessionId: 's', enabled: false },
-      { type: 'runPromptCommand', sessionId: 's', name: '/init', argsText: '' },
-      { type: 'openModelPicker', sessionId: 's' },
-      { type: 'closeOverlays' },
-      { type: 'openLink', href: 'https://example.com' },
-      { type: 'openFile', path: '/tmp/a.ts', line: 3 },
-      { type: 'openDiff', sessionId: 's', cellId: 'c1' },
-      { type: 'copyText', text: 'x' },
-    ];
-    expect(webviewMessages.map(describeWebviewMessage)).toEqual([
+    expect(WEBVIEW_MESSAGES.map(describeWebviewMessage)).toEqual([
       `ready:${BRIDGE_PROTOCOL_VERSION}`,
       'resync:s:seq-gap',
       'ping:ping-1',
@@ -284,6 +297,23 @@ describe('shared contract', () => {
       'openDiff:c1',
       'copyText:1',
     ]);
+  });
+
+  it('accepts every message of both unions with the runtime guards', () => {
+    // Guards are what the transport and the host trust; if a variant is missing
+    // from their tag tables it would be dropped silently (review r1 [S1]).
+    // (`guard` is typed `(value: unknown) => boolean` on purpose: a type predicate
+    // would narrow the negation to `never` and hide the very case under test.)
+    const rejected = (messages: readonly unknown[], guard: (value: unknown) => boolean): string[] =>
+      messages
+        .filter((message) => !guard(message))
+        .map((message) => (message as { type?: unknown }).type)
+        .map(String);
+
+    expect({
+      rejectedHost: rejected(HOST_MESSAGES, isHostToWebviewMessage),
+      rejectedWebview: rejected(WEBVIEW_MESSAGES, isWebviewToHostMessage),
+    }).toEqual({ rejectedHost: [], rejectedWebview: [] });
   });
 
   it('survives a JSON round-trip (no Date / Map / undefined on the wire)', () => {
@@ -311,6 +341,23 @@ describe('shared contract', () => {
       }
     };
     expect(() => walk(makeFixtureSession(), 'session')).not.toThrow();
+  });
+});
+
+describe('exhaustiveness helpers', () => {
+  it('assertNever throws (pure logic: an unhandled variant is a bug)', () => {
+    const value = { kind: 'future-cell' } as unknown as never;
+    expect(() => assertNever(value, 'test context')).toThrowError(/test context: unhandled variant/);
+  });
+
+  it('unhandledVariant only warns (a live channel must survive a newer peer)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const value = { type: 'future-message' } as unknown as never;
+
+    expect(() => unhandledVariant(value, 'bridge controller')).not.toThrow();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('bridge controller'), value);
+
+    warn.mockRestore();
   });
 });
 

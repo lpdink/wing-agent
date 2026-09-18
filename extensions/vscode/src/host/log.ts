@@ -23,3 +23,14 @@ export function disposeLog(): void {
   channel?.dispose();
   channel = undefined;
 }
+
+/**
+ * The channel as a disposable — register it on the extension context so the host
+ * closes the channel on deactivate instead of holding the buffer until the
+ * extension host process exits.
+ */
+export function logDisposable(): vscode.Disposable {
+  return new vscode.Disposable(() => {
+    disposeLog();
+  });
+}

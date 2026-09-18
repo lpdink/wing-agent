@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type * as vscode from 'vscode';
@@ -268,6 +271,27 @@ describe('ChatViewProvider', () => {
   });
 
   it('is registered under the id declared in package.json', () => {
-    expect(CHAT_VIEW_ID).toBe('wing.chatView');
+    // The view only appears if the manifest and the code agree — assert against the
+    // real manifest instead of restating the literal (review r1 [N2]).
+    const manifest = JSON.parse(
+      readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf8'),
+    ) as {
+      activationEvents?: readonly string[];
+      contributes?: {
+        views?: Record<string, readonly { id: string }[]>;
+        viewsContainers?: { activitybar?: readonly { id: string }[] };
+      };
+    };
+
+    const declaredViews = Object.entries(manifest.contributes?.views ?? {}).flatMap(([container, views]) =>
+      views.map((view) => ({ container, id: view.id })),
+    );
+    const ours = declaredViews.filter((view) => view.id === CHAT_VIEW_ID);
+
+    expect(ours).toHaveLength(1);
+    expect(manifest.activationEvents).toContain(`onView:${CHAT_VIEW_ID}`);
+    // The container that owns the view must itself be contributed to the activity bar.
+    const containers = manifest.contributes?.viewsContainers?.activitybar ?? [];
+    expect(containers.map((container) => container.id)).toContain(ours[0]?.container);
   });
 });

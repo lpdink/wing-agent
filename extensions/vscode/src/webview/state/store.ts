@@ -11,7 +11,7 @@ import type {
   TabModel,
   UiActionModel,
 } from '../../shared';
-import { BRIDGE_PROTOCOL_VERSION } from '../../shared';
+import { BRIDGE_PROTOCOL_VERSION, unhandledVariant } from '../../shared';
 
 import { applyCellPatches, isExpectedSeq } from './applyPatch';
 
@@ -170,6 +170,9 @@ export function createAppStore(): AppStoreApi {
           // model, which is exactly why they are not part of `SessionStateModel`.
           return;
         default:
+          // Same gate as the bridge controller: exhaustive at compile time, a
+          // warning (never a crash) at runtime.
+          unhandledVariant(action, 'applyUi');
           return;
       }
     },

@@ -50,16 +50,16 @@
   font-style: italic;
 }
 
-.system-info,
-.system-notice {
+.systemInfo,
+.systemNotice {
   color: var(--vscode-descriptionForeground);
 }
 
-.system-warning {
+.systemWarning {
   color: var(--vscode-editorWarning-foreground, var(--vscode-foreground));
 }
 
-.system-error {
+.systemError {
   color: var(--vscode-editorError-foreground, var(--vscode-foreground));
 }
 

@@ -235,11 +235,182 @@ interface CssViolation {
   readonly declaration: string;
 }
 
-/** Properties whose value must come from the theme, never from a literal. */
+/**
+ * Properties whose value must come from the theme, never from a literal.
+ *
+ * `--*` (custom properties) are included explicitly: `app.module.css` derives
+ * `--wing-*` aliases from `--vscode-*`, and without this a literal could hide
+ * behind a custom property name and reach a real color through `var()`.
+ */
 const COLOR_PROPERTY =
   /(?:^|-)(?:color|background|background-color|border|border-[a-z]+|outline|fill|stroke|box-shadow|text-decoration-color)$/;
 
+/** Literal color syntaxes: hex, the color functions, and `color(…)`. */
 const LITERAL_COLOR = /#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(|\bcolor-mix\(|\bcolor\(/;
+
+/**
+ * CSS named colors (the full keyword set), minus the two that carry theme meaning
+ * rather than a fixed color: `transparent` / `currentColor` are used as legitimate
+ * fallbacks (e.g. `var(--vscode-panel-border, transparent)`).
+ *
+ * Source: CSS Color Module Level 4, "Named colors" (plus the `gray`/`grey`
+ * spellings).
+ */
+const NAMED_COLORS = [
+  'aliceblue',
+  'antiquewhite',
+  'aqua',
+  'aquamarine',
+  'azure',
+  'beige',
+  'bisque',
+  'black',
+  'blanchedalmond',
+  'blue',
+  'blueviolet',
+  'brown',
+  'burlywood',
+  'cadetblue',
+  'chartreuse',
+  'chocolate',
+  'coral',
+  'cornflowerblue',
+  'cornsilk',
+  'crimson',
+  'cyan',
+  'darkblue',
+  'darkcyan',
+  'darkgoldenrod',
+  'darkgray',
+  'darkgreen',
+  'darkgrey',
+  'darkkhaki',
+  'darkmagenta',
+  'darkolivegreen',
+  'darkorange',
+  'darkorchid',
+  'darkred',
+  'darksalmon',
+  'darkseagreen',
+  'darkslateblue',
+  'darkslategray',
+  'darkslategrey',
+  'darkturquoise',
+  'darkviolet',
+  'deeppink',
+  'deepskyblue',
+  'dimgray',
+  'dimgrey',
+  'dodgerblue',
+  'firebrick',
+  'floralwhite',
+  'forestgreen',
+  'fuchsia',
+  'gainsboro',
+  'ghostwhite',
+  'gold',
+  'goldenrod',
+  'gray',
+  'green',
+  'greenyellow',
+  'grey',
+  'honeydew',
+  'hotpink',
+  'indianred',
+  'indigo',
+  'ivory',
+  'khaki',
+  'lavender',
+  'lavenderblush',
+  'lawngreen',
+  'lemonchiffon',
+  'lightblue',
+  'lightcoral',
+  'lightcyan',
+  'lightgoldenrodyellow',
+  'lightgray',
+  'lightgreen',
+  'lightgrey',
+  'lightpink',
+  'lightsalmon',
+  'lightseagreen',
+  'lightskyblue',
+  'lightslategray',
+  'lightslategrey',
+  'lightsteelblue',
+  'lightyellow',
+  'lime',
+  'limegreen',
+  'linen',
+  'magenta',
+  'maroon',
+  'mediumaquamarine',
+  'mediumblue',
+  'mediumorchid',
+  'mediumpurple',
+  'mediumseagreen',
+  'mediumslateblue',
+  'mediumspringgreen',
+  'mediumturquoise',
+  'mediumvioletred',
+  'midnightblue',
+  'mintcream',
+  'mistyrose',
+  'moccasin',
+  'navajowhite',
+  'navy',
+  'oldlace',
+  'olive',
+  'olivedrab',
+  'orange',
+  'orangered',
+  'orchid',
+  'palegoldenrod',
+  'palegreen',
+  'paleturquoise',
+  'palevioletred',
+  'papayawhip',
+  'peachpuff',
+  'peru',
+  'pink',
+  'plum',
+  'powderblue',
+  'purple',
+  'rebeccapurple',
+  'red',
+  'rosybrown',
+  'royalblue',
+  'saddlebrown',
+  'salmon',
+  'sandybrown',
+  'seagreen',
+  'seashell',
+  'sienna',
+  'silver',
+  'skyblue',
+  'slateblue',
+  'slategray',
+  'slategrey',
+  'snow',
+  'springgreen',
+  'steelblue',
+  'tan',
+  'teal',
+  'thistle',
+  'tomato',
+  'turquoise',
+  'violet',
+  'wheat',
+  'white',
+  'whitesmoke',
+  'yellow',
+  'yellowgreen',
+];
+
+const NAMED_COLOR_PATTERN = new RegExp(`\\b(?:${NAMED_COLORS.join('|')})\\b`, 'i');
+
+/** Properties that take a color but never match {@link COLOR_PROPERTY}. */
+const COLOR_TAKING_PROPERTY = /^(?:border|outline|box-shadow|text-shadow|background)$/;
 
 function checkCssColors(): CssViolation[] {
   const violations: CssViolation[] = [];
@@ -248,16 +419,23 @@ function checkCssColors(): CssViolation[] {
   for (const file of listFiles(SRC, ['.css'])) {
     const lines = readFileSync(file, 'utf8').split('\n');
     lines.forEach((line, index) => {
+      const trimmed = line.trimStart();
+      if (trimmed.startsWith('*') || trimmed.startsWith('/*')) {
+        return;
+      }
       const colon = line.indexOf(':');
-      if (colon < 0 || line.trimStart().startsWith('*') || line.trimStart().startsWith('/*')) {
+      if (colon < 0) {
         return;
       }
       const property = line.slice(0, colon).trim();
       const value = line.slice(colon + 1).trim();
-      if (!COLOR_PROPERTY.test(property)) {
+      const isColorProperty =
+        COLOR_PROPERTY.test(property) || (property.startsWith('--') && !isLengthOnly(value));
+      if (!isColorProperty && !COLOR_TAKING_PROPERTY.test(property)) {
         return;
       }
-      if (LITERAL_COLOR.test(value)) {
+      const literal = LITERAL_COLOR.test(value) || NAMED_COLOR_PATTERN.test(value);
+      if (literal) {
         violations.push({
           file: path.relative(PACKAGE_ROOT, file),
           line: index + 1,
@@ -267,6 +445,121 @@ function checkCssColors(): CssViolation[] {
     });
   }
   return violations;
+}
+
+/**
+ * True for a custom property whose value cannot be a color at all (plain lengths):
+ * `--wing-radius: 4px` must not be dragged into the color check.
+ */
+function isLengthOnly(value: string): boolean {
+  return /^[\d.]+(?:px|em|rem|%|fr|vh|vw|ms|s|deg)?(?:\s+[\d.]+(?:px|em|rem|%|fr|vh|vw|ms|s|deg)?)*$/.test(
+    value,
+  );
+}
+
+/** Class names declared by a CSS module (selector `.foo` tokens). */
+function cssModuleClasses(file: string): Set<string> {
+  const source = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const classes = new Set<string>();
+  // Everything between the previous `}`/start and a `{` is a selector list; inside
+  // at-rules the inner selectors are matched by the next iteration.
+  for (const match of source.matchAll(/([^{}]+)\{/g)) {
+    const selector = match[1] ?? '';
+    for (const classMatch of selector.matchAll(/\.([A-Za-z_][\w-]*)/g)) {
+      const name = classMatch[1];
+      if (name !== undefined) {
+        classes.add(name);
+      }
+    }
+  }
+  return classes;
+}
+
+interface CssModuleUsage {
+  readonly importer: string;
+  readonly specifier: string;
+  readonly cssFile: string | null;
+  readonly names: readonly string[];
+}
+
+/**
+ * Every `styles.X` / `styles['X']` read of a CSS-module import in one file.
+ *
+ * `vite/client` types CSS modules as `Record<string, string>`, so a typo yields
+ * `undefined` at runtime and passes typecheck — this is the only thing that
+ * catches it (see review r1: four dangling `system-*` class names).
+ */
+function collectCssModuleUsages(file: string): CssModuleUsage[] {
+  const source = ts.createSourceFile(
+    file,
+    readFileSync(file, 'utf8'),
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ true,
+    file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+
+  /** local binding name → module specifier */
+  const bindings = new Map<string, string>();
+  const collectBindings = (node: ts.Node): void => {
+    if (
+      ts.isImportDeclaration(node) &&
+      node.importClause !== undefined &&
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      node.moduleSpecifier.text.endsWith('.module.css')
+    ) {
+      const specifier = node.moduleSpecifier.text;
+      const { name, namedBindings } = node.importClause;
+      if (name !== undefined) {
+        bindings.set(name.text, specifier);
+      }
+      if (namedBindings !== undefined && ts.isNamespaceImport(namedBindings)) {
+        bindings.set(namedBindings.name.text, specifier);
+      }
+    }
+    ts.forEachChild(node, collectBindings);
+  };
+  collectBindings(source);
+  if (bindings.size === 0) {
+    return [];
+  }
+
+  const usages = new Map<string, Set<string>>();
+  const addName = (specifier: string, name: string): void => {
+    const bucket = usages.get(specifier) ?? new Set<string>();
+    bucket.add(name);
+    usages.set(specifier, bucket);
+  };
+  const collectUsages = (node: ts.Node): void => {
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      bindings.has(node.expression.text)
+    ) {
+      const specifier = bindings.get(node.expression.text);
+      if (specifier !== undefined) {
+        addName(specifier, node.name.text);
+      }
+    } else if (
+      ts.isElementAccessExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      bindings.has(node.expression.text)
+    ) {
+      const argument = node.argumentExpression;
+      const specifier = bindings.get(node.expression.text);
+      if (specifier !== undefined && argument !== undefined && ts.isStringLiteral(argument)) {
+        addName(specifier, argument.text);
+      }
+    }
+    ts.forEachChild(node, collectUsages);
+  };
+  collectUsages(source);
+
+  return [...usages.entries()].map(([specifier, names]) => ({
+    importer: file,
+    specifier,
+    cssFile: resolveRelative(file, specifier),
+    names: [...names].sort(),
+  }));
 }
 
 describe('layering', () => {
@@ -291,6 +584,42 @@ describe('layering', () => {
     expect(
       violations.map((violation) => `${violation.file}: "${violation.specifier}" — ${violation.message}`),
     ).toEqual([]);
+  });
+
+  it('keeps src/ covered by the matrix: every file lives in a declared layer', () => {
+    const strays = sourceFiles
+      .map((file) => path.relative(SRC, file))
+      .filter((relative) => {
+        const [first] = relative.split(path.sep);
+        return first === undefined || !(LAYERS as readonly string[]).includes(first);
+      });
+    expect(
+      strays.map(
+        (relative) => `src/${relative} — new layer dir needs a rule (or move the file into a declared layer)`,
+      ),
+    ).toEqual([]);
+  });
+
+  it('every CSS-module class read in src/ exists in its stylesheet', () => {
+    const missing: string[] = [];
+    for (const file of [...listFiles(SRC, ['.ts', '.tsx'])]) {
+      for (const usage of collectCssModuleUsages(file)) {
+        const importer = path.relative(PACKAGE_ROOT, usage.importer);
+        if (usage.cssFile === null) {
+          missing.push(`${importer}: "${usage.specifier}" does not resolve to a stylesheet`);
+          continue;
+        }
+        const declared = cssModuleClasses(usage.cssFile);
+        for (const name of usage.names) {
+          if (!declared.has(name)) {
+            missing.push(
+              `${importer}: styles.${name} is not declared in ${path.relative(PACKAGE_ROOT, usage.cssFile)}`,
+            );
+          }
+        }
+      }
+    }
+    expect(missing).toEqual([]);
   });
 
   it('keeps every color on a theme variable', () => {

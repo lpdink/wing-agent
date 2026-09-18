@@ -8,6 +8,15 @@ VS Code frontend for the wing agent: a sidebar view that talks to the same gatew
 > host (`src/host`) and the chat UI (`src/webview`) land in the next steps. Placeholder code is marked
 > `SCAFFOLD(01)` — grep for it to see what is temporary.
 
+## Requirements
+
+- **To build/develop**: Node.js ≥ 22 and pnpm 11 (`packageManager` in `package.json` pins the exact version —
+  `corepack enable` is enough). These are _toolchain_ requirements; they say nothing about the VS Code
+  runtime this extension targets.
+- **To run**: VS Code ≥ 1.100 (`engines.vscode`). The extension host bundle is built with `target: node20`
+  on purpose — VS Code 1.100 ships Electron 34 / Node 20.19, so anything newer would risk using APIs the
+  host does not have.
+
 ## Quick start
 
 ```bash
