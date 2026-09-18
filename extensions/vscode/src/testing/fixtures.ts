@@ -213,3 +213,110 @@ export function makeApprovalAskCell(id = 'ask-approval'): AskCellModel {
     ],
   };
 }
+
+// ── scenarios (step 04) ───────────────────────────────────────────────
+
+/** A tool call that failed — the case that must open by itself. */
+export function makeFailedToolCell(id = 'tool-failed'): CellModel {
+  return {
+    kind: 'tool_call',
+    id,
+    createdAt: FIXTURE_EPOCH,
+    toolCallId: 'call-failed',
+    name: 'Bash',
+    status: 'failed',
+    display: { title: 'Bash', subject: 'pnpm run typecheck' },
+    argsText: '{"command":"pnpm run typecheck"}',
+    args: { command: 'pnpm run typecheck' },
+    result: { text: 'error TS2345: Argument of type …', isError: true, truncated: false },
+    startedAt: FIXTURE_EPOCH,
+    finishedAt: FIXTURE_EPOCH + 1200,
+  };
+}
+
+/** A tool call whose arguments are still streaming (partial JSON from the model). */
+export function makeStreamingToolCell(id = 'tool-streaming'): CellModel {
+  return {
+    kind: 'tool_call',
+    id,
+    createdAt: FIXTURE_EPOCH,
+    toolCallId: 'call-streaming',
+    name: 'Edit',
+    status: 'streaming',
+    display: { title: 'Edit', subject: 'src/app/main.ts' },
+    argsText: '{"file_path":"src/app/main.ts","old_str',
+    args: null,
+    result: null,
+    startedAt: FIXTURE_EPOCH,
+    finishedAt: null,
+  };
+}
+
+/** Thinking + answer, both mid-stream — the shape the renderer sees while a turn runs. */
+export function makeStreamingCells(): readonly CellModel[] {
+  return [
+    { kind: 'separator', id: 'sep-live', createdAt: FIXTURE_EPOCH, label: '' },
+    {
+      kind: 'user',
+      id: 'user-live',
+      createdAt: FIXTURE_EPOCH,
+      text: 'Why is the transcript cheap to render?',
+      state: 'accepted',
+    },
+    {
+      kind: 'thinking',
+      id: 'thinking-live',
+      createdAt: FIXTURE_EPOCH + 1,
+      streaming: true,
+      durationMs: null,
+      text: 'Cells are memoized; only the streaming tail re-parses.',
+    },
+    {
+      kind: 'assistant',
+      id: 'assistant-live',
+      createdAt: FIXTURE_EPOCH + 2,
+      streaming: true,
+      // Ends mid-fence on purpose: that is what the renderer sees while a code
+      // block is still arriving.
+      text: 'Because the renderer keeps a stable prefix.\n\n```ts\nconst tail = blocks.at(-1);\n',
+    },
+  ];
+}
+
+/** A transcript with `turns` complete turns (scrolling / memoization traffic). */
+export function makeLongCells(turns = 25): readonly CellModel[] {
+  const cells: CellModel[] = [];
+  for (let turn = 0; turn < turns; turn += 1) {
+    cells.push({
+      kind: 'separator',
+      id: `sep-${turn}`,
+      createdAt: FIXTURE_EPOCH,
+      label: `Turn ${turn + 1}`,
+    });
+    cells.push({
+      kind: 'user',
+      id: `user-${turn}`,
+      createdAt: FIXTURE_EPOCH,
+      text: `Question ${turn + 1}: how does the transcript stay cheap to render?`,
+      state: 'accepted',
+    });
+    cells.push({
+      kind: 'assistant',
+      id: `assistant-${turn}`,
+      createdAt: FIXTURE_EPOCH,
+      streaming: false,
+      text: `Answer ${turn + 1}: cells are memoized by id; only the streaming tail re-renders.`,
+    });
+  }
+  return cells;
+}
+
+/** The long-session fixture (used by the preview harness and the scroll tests). */
+export function makeLongSession(turns = 25): SessionViewModel {
+  return makeFixtureSession({
+    sessionId: 'session-long',
+    title: 'Long session',
+    cells: makeLongCells(turns),
+    seq: 0,
+  });
+}

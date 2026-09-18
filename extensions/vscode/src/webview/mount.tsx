@@ -7,6 +7,7 @@ import { App } from './app/App';
 import { setBridgeController } from './bridge/channel';
 import { createBridgeController } from './bridge/controller';
 import { appStore, resetAppStore } from './state/appStore';
+import './styles/tokens.css';
 
 /**
  * Mounts the app against a transport.

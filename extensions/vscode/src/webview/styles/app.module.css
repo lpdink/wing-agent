@@ -1,5 +1,9 @@
 /*
- * Layout for the scaffold shell.
+ * Shell layout.
+ *
+ * The shell around the transcript is a step 01 placeholder (header + debug
+ * footer); step 05 replaces both with the tab bar, status area and composer. The
+ * transcript itself lives in `chat.module.css`.
  *
  * Color rules (enforced by tests/layers.test.ts): every color comes from a
  * `--vscode-*` theme variable (directly or through a `--wing-*` alias). Never a
@@ -8,15 +12,9 @@
  */
 
 .root {
-  --wing-gap-xs: 4px;
-  --wing-gap-sm: 8px;
-  --wing-gap-md: 12px;
-  --wing-gap-lg: 16px;
-  --wing-radius: 4px;
-  --wing-hairline: 1px solid var(--vscode-panel-border, var(--vscode-widget-border));
-
   display: flex;
   flex-direction: column;
+  /* Viewport glue: the view fills the webview panel (README exception list #3). */
   height: 100vh;
   margin: 0;
   overflow: hidden;
@@ -25,21 +23,21 @@
   font-family: var(--vscode-font-family);
   font-size: var(--vscode-font-size);
   font-weight: var(--vscode-font-weight, normal);
-  line-height: 1.5;
+  line-height: var(--wing-md-line-height, 1.5);
 }
 
 .header {
   display: flex;
   flex-direction: column;
-  gap: var(--wing-gap-xs);
-  padding: var(--wing-gap-sm) var(--wing-gap-md);
-  border-bottom: var(--wing-hairline);
+  gap: var(--wing-gap-xs, 4px);
+  padding: var(--wing-chat-row-padding-y, 5px) var(--wing-chat-row-padding-x, 16px);
+  border-bottom: var(--wing-stroke, 1px) solid var(--vscode-panel-border, transparent);
 }
 
 .titleRow {
   display: flex;
   align-items: center;
-  gap: var(--wing-gap-sm);
+  gap: var(--wing-gap-md, 8px);
 }
 
 .title {
@@ -58,35 +56,19 @@
 .meta {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--wing-gap-sm);
+  gap: var(--wing-gap-md, 8px);
   color: var(--vscode-descriptionForeground);
-  font-size: 0.92em;
-}
-
-.banner {
-  padding: var(--wing-gap-sm) var(--wing-gap-md);
-  border-bottom: var(--wing-hairline);
-  color: var(--vscode-descriptionForeground);
-  background-color: var(--vscode-textBlockQuote-background, transparent);
-}
-
-.transcript {
-  flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
-  gap: var(--wing-gap-md);
-  padding: var(--wing-gap-md);
-  overflow-y: auto;
+  font-size: var(--wing-font-body-s, 0.923em);
 }
 
 .footer {
   display: flex;
   align-items: center;
-  gap: var(--wing-gap-sm);
-  padding: var(--wing-gap-sm) var(--wing-gap-md);
-  border-top: var(--wing-hairline);
+  gap: var(--wing-gap-md, 8px);
+  padding: 4px var(--wing-chat-row-padding-x, 16px);
+  border-top: var(--wing-stroke, 1px) solid var(--vscode-panel-border, transparent);
   color: var(--vscode-descriptionForeground);
-  font-size: 0.92em;
+  font-size: var(--wing-font-body-xs, 0.846em);
 }
 
 .footerSpacer {
@@ -94,9 +76,9 @@
 }
 
 .button {
-  padding: 2px var(--wing-gap-sm);
-  border: var(--wing-hairline);
-  border-radius: var(--wing-radius);
+  padding: var(--wing-pad-y-tight, 2px) var(--wing-control-pad-x, 8px);
+  border: var(--wing-stroke, 1px) solid var(--vscode-panel-border, transparent);
+  border-radius: var(--wing-radius-small, 4px);
   color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
   background-color: var(--vscode-button-secondaryBackground, transparent);
   font-family: inherit;
@@ -113,29 +95,24 @@
   outline-offset: 1px;
 }
 
-.empty {
-  color: var(--vscode-descriptionForeground);
-  font-style: italic;
-}
-
 .toasts {
   display: flex;
   flex-direction: column;
-  gap: var(--wing-gap-xs);
-  padding: 0 var(--wing-gap-md) var(--wing-gap-sm);
+  gap: var(--wing-gap-xs, 4px);
+  padding: 0 var(--wing-chat-row-padding-x, 16px) 4px;
 }
 
 .toast {
-  padding: var(--wing-gap-xs) var(--wing-gap-sm);
-  border: var(--wing-hairline);
-  border-radius: var(--wing-radius);
+  padding: var(--wing-pad-y, 4px) var(--wing-gap-md, 8px);
+  border: var(--wing-stroke, 1px) solid var(--vscode-panel-border, transparent);
+  border-radius: var(--wing-radius-small, 4px);
   background-color: var(--vscode-editorWidget-background, transparent);
 }
 
-.toast-warning {
+.toast[data-toast-level='warning'] {
   border-color: var(--vscode-editorWarning-foreground, var(--vscode-panel-border));
 }
 
-.toast-error {
-  border-color: var(--vscode-editorError-foreground, var(--vscode-panel-border));
+.toast[data-toast-level='error'] {
+  border-color: var(--vscode-errorForeground, var(--vscode-panel-border));
 }

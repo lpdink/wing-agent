@@ -3,13 +3,15 @@
  *
  * Inside VS Code the editor injects these variables; standalone there is nothing
  * to inject them, so the preview copies the values from the default themes.
- * Sources (todo: keep them traceable when adding variables):
- *   - extensions/theme-defaults/themes/dark_modern.json (dark values)
- *   - extensions/theme-defaults/themes/light_modern.json (light values)
- *   - src/vs/platform/theme/common/colors/editorColors.ts (editorWarning/EditorError)
+ * Sources:
+ *   - extensions/theme-defaults/themes/dark_modern.json (workbench colors)
+ *   - src/vs/platform/theme/common/colors/baseColors.ts (error / link / preformat)
+ *   - src/vs/platform/theme/common/colors/chartsColors.ts (charts.green / blue)
+ *   - src/vs/workbench/contrib/chat/common/widget/chatColors.ts (chat.* defaults)
+ *   - src/vs/platform/theme/common/sizes/baseSizes.ts (font / radius / spacing ramp)
  *
  * Product CSS must never hardcode a color (tests/layers.test.ts enforces that);
- * this file is the one documented exception — it is the *emulated editor*.
+ * this file is the one documented exception — it *is* the emulated editor.
  */
 
 :root {
@@ -19,20 +21,51 @@
   --vscode-font-size: 13px;
   --vscode-font-weight: 400;
   --vscode-editor-font-family: Menlo, Monaco, 'Courier New', monospace;
+  --text-link-decoration: none;
+
+  /* baseSizes.ts — size registry (webviews receive these on VS Code ≥ 1.129) */
+  --vscode-fontSize-heading3: 13px;
+  --vscode-fontSize-body1: 13px;
+  --vscode-fontSize-body2: 11px;
+  --vscode-fontSize-label1: 12px;
+  --vscode-fontWeight-regular: 400;
+  --vscode-fontWeight-semiBold: 600;
+  --vscode-cornerRadius-xSmall: 2px;
+  --vscode-cornerRadius-small: 4px;
+  --vscode-cornerRadius-medium: 6px;
+  --vscode-cornerRadius-large: 8px;
+  --vscode-cornerRadius-xLarge: 12px;
+  --vscode-strokeThickness: 1px;
 
   /* dark_modern.json */
   --vscode-foreground: #cccccc;
   --vscode-descriptionForeground: #9d9d9d;
   --vscode-editor-background: #1f1f1f;
   --vscode-sideBar-background: #181818;
+  --vscode-panel-background: #181818;
   --vscode-panel-border: #2b2b2b;
   --vscode-widget-border: #313131;
   --vscode-editorWidget-background: #202020;
   --vscode-textBlockQuote-background: #2b2b2b;
   --vscode-focusBorder: #0078d4;
+  --vscode-input-background: #313131;
+  --vscode-input-foreground: #cccccc;
+  --vscode-input-placeholderForeground: #989898;
   --vscode-button-secondaryBackground: rgb(0 0 0 / 0);
   --vscode-button-secondaryForeground: #cccccc;
   --vscode-button-secondaryHoverBackground: #2b2b2b;
+  --vscode-textLink-foreground: #4daafc;
+  --vscode-textLink-activeForeground: #4daafc;
+  --vscode-textPreformat-foreground: #d0d0d0;
+  --vscode-textPreformat-background: #3c3c3c;
+  --vscode-textPreformat-border: #ffffff1f;
+  --vscode-errorForeground: #f85149;
+  --vscode-editorLineNumber-foreground: #6e7681;
+  --vscode-list-hoverBackground: #2a2d2e;
+  --vscode-list-inactiveSelectionBackground: #37373d;
+  --vscode-toolbar-hoverBackground: rgb(90 93 94 / 31%);
+  --vscode-charts-green: #89d185;
+  --vscode-charts-blue: #75beff;
 
   /* editorColors.ts (dark) */
   --vscode-editorWarning-foreground: #cca700;
@@ -41,6 +74,15 @@
   /* editorColors.ts (dark) — diff decorations */
   --vscode-diffEditor-insertedTextBackground: rgb(21 105 0 / 30%);
   --vscode-diffEditor-removedTextBackground: rgb(255 0 0 / 25%);
+  --vscode-diffEditor-insertedLineBackground: rgb(155 185 85 / 20%);
+  --vscode-diffEditor-removedLineBackground: rgb(255 0 0 / 20%);
+
+  /* chatColors.ts (dark defaults) */
+  --vscode-chat-requestBorder: rgb(255 255 255 / 10%);
+  --vscode-chat-requestBubbleBackground: rgb(38 79 120 / 30%);
+  --vscode-chat-linesAddedForeground: #54b054;
+  --vscode-chat-linesRemovedForeground: #fc6a6a;
+  --vscode-chat-thinkingShimmer: #ffffff;
 }
 
 body {
@@ -61,6 +103,7 @@ body {
 
 #root {
   height: calc(100vh - 40px);
+  max-width: 480px; /* the sidebar width the renderer is designed for */
 }
 
 .preview-label {

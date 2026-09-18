@@ -126,6 +126,41 @@ authoritative one because it resolves the actual import graph instead of pattern
   are dev-only — `**/*.map` is excluded from the `.vsix`) and the price for being able to map a
   minified stack back to `src/`.
 
+- Visual constants live in `src/webview/styles/tokens.css`, each one annotated with the **file and line
+  it was taken from** in the local VS Code 1.129.1 sources (`workbench/contrib/chat/browser/widget/**`).
+  Every spacing / font-size / line-height / radius / colour decision belongs there.
+
+  **Where a CSS module may still use a literal** (the complete exception list — anything else must become
+  a token first):
+
+  1. the declaration is _inside a rule whose header comment already quotes the source line that contains
+     it_ (e.g. `.userBubble { padding: 8px 12px }` under a `CHAT:3792-3805` comment) — the value is
+     sourced at the rule level, not copied by feel;
+  2. pure geometry with no Copilot counterpart, because the webview cannot ship the codicon font: the
+     collapse chevron triangle (`width: 0; height: 0; border-*: 3px/4px`), the tool status dot
+     (`6px`), the todo glyph box (`width: 1em`) and the diff marker column (`1.2em`);
+  3. layout glue that carries no visual decision: `0`, `auto`, `fit-content`, `100%`, `100vh`, `normal`,
+     `inherit`, `1em`, unitless flex factors.
+
+### Chat renderer (`src/webview/chat`)
+
+- `CellView` maps the `CellModel` union to components; it is memoized on `(cell, sessionId)`, so a
+  streamed patch re-renders one cell and leaves the rest of the transcript untouched.
+- Markdown is rendered block by block: `markdown/split.ts` cuts the text at blank lines that are outside
+  a code fence, finished blocks are memoized `MarkdownBlock`s, and only the trailing block re-renders
+  while text keeps arriving (`tests/webview/streaming.test.tsx` asserts both the render and the parse
+  count stay proportional to the tail, not to the answer).
+- Syntax highlighting is shiki with the **JavaScript regex engine** (the wasm engine needs
+  `'wasm-unsafe-eval'` in the webview CSP, which we do not own) and the `dark-plus` / `light-plus`
+  themes — i.e. exactly the Light+/Dark+ token colors that Light Modern/Dark Modern inherit. Both
+  themes ride along as inline `--shiki-*` properties and the stylesheet picks one, so switching the
+  editor theme needs no re-highlight.
+- Interactions always go through the bridge: copying a code block sends `copyText`, clicking a file
+  path sends `openFile`, a diff card sends `openDiff`, and links send `openLink`. The renderer never
+  touches the editor or the clipboard itself.
+- Collapsed/expanded choices are webview-local (`chat/interaction.ts`): a memory-only map keyed by cell
+  id, never part of the protocol.
+
 ## Testing
 
 ```bash
@@ -138,14 +173,17 @@ pnpm run test:watch        # watch mode
   testable headless — no VS Code window, ever.
 - `tests/webview` runs in **jsdom** with `@testing-library/react`; components are mounted through the
   real `mountApp` against the scripted host in `src/testing/mockBridge.ts`.
-- `src/testing/fixtures.ts` has one fixture per cell kind; both tests and the preview harness use it.
+- `src/testing/fixtures.ts` has one fixture per cell kind plus the step 04 scenarios (streaming turn,
+  failed tool call, approval) that both tests and the preview harness use.
 - `tests/artifact/webviewBundle.test.ts` is the build-artifact gate: it builds the webview with the
   real `vite.config.mts` into a temp directory (no `pnpm build` prerequisite), asserts the emitted text
   (no `process.env`, no Node/CJS leftovers, production React _and_ production JSX transform) and then
   executes the bundle through `node:vm` in a jsdom realm that has **no Node globals** — the only gate
   that would have caught the blank-view `ReferenceError` before it reached a real window.
-- The preview harness (`preview/main.tsx`) exposes a toolbar to hydrate fixtures, stream a turn, break
-  the patch stream (resync recovery) and push a UI action — the fastest way to look at renderer changes.
+- The preview harness (`preview/main.tsx`) exposes a toolbar to switch fixtures, stream a turn, break
+  the patch stream (resync recovery) and push a UI action — the fastest way to look at renderer changes
+  without VS Code (`pnpm run dev:preview`, port 5199). `preview/preview-theme.css` emulates the Dark
+  Modern theme variables so the page looks like the real sidebar.
 
 ## Repository integration
 

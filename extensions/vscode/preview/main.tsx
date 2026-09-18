@@ -1,5 +1,13 @@
-import type { CellModel, CellPatch, SessionViewModel } from '../src/shared';
-import { makeEmptySession, makeFixtureSession } from '../src/testing/fixtures';
+import type { CellPatch, SessionViewModel } from '../src/shared';
+import {
+  makeApprovalAskCell,
+  makeEmptySession,
+  makeFailedToolCell,
+  makeFixtureSession,
+  makeLongSession,
+  makeStreamingCells,
+  makeStreamingToolCell,
+} from '../src/testing/fixtures';
 import { createMockBridge } from '../src/testing/mockBridge';
 import { mountApp } from '../src/webview/mount';
 
@@ -17,6 +25,13 @@ import { mountApp } from '../src/webview/mount';
 
 const FIXTURES = {
   'all cells': makeFixtureSession(),
+  'streaming turn': makeFixtureSession({ title: 'Streaming turn', cells: makeStreamingCells(), seq: 0 }),
+  'failed tool': makeFixtureSession({
+    title: 'Tool failure',
+    cells: [makeFailedToolCell(), makeStreamingToolCell()],
+    seq: 0,
+  }),
+  approval: makeFixtureSession({ title: 'Approval', cells: [makeApprovalAskCell()], seq: 0 }),
   empty: makeEmptySession(),
   'long session': makeLongSession(),
 } satisfies Record<string, SessionViewModel>;
@@ -185,27 +200,4 @@ function button(text: string, onClick: () => void): HTMLButtonElement {
   element.textContent = text;
   element.addEventListener('click', onClick);
   return element;
-}
-
-/** A session with enough cells to exercise scrolling / memoization (step 04). */
-function makeLongSession(): SessionViewModel {
-  const cells: CellModel[] = [];
-  for (let turn = 0; turn < 25; turn += 1) {
-    cells.push({ kind: 'separator', id: `sep-${turn}`, createdAt: Date.now(), label: `Turn ${turn + 1}` });
-    cells.push({
-      kind: 'user',
-      id: `user-${turn}`,
-      createdAt: Date.now(),
-      text: `Question ${turn + 1}: how does the transcript stay cheap to render?`,
-      state: 'accepted',
-    });
-    cells.push({
-      kind: 'assistant',
-      id: `assistant-${turn}`,
-      createdAt: Date.now(),
-      streaming: false,
-      text: `Answer ${turn + 1}: cells are memoized by id; only the streaming tail re-renders.`,
-    });
-  }
-  return makeFixtureSession({ sessionId: 'session-long', title: 'Long session', cells, seq: 0 });
 }
