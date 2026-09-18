@@ -11,10 +11,15 @@ import { disposeLog } from '../../src/host/log';
 import { WEBVIEW_ROOT_ID } from '../../src/shared';
 import { mockState } from '../mocks/vscode';
 
+import { createHostHarness, flushMicrotasks } from './support/harness';
+import type { HostHarness } from './support/harness';
+
 /**
- * Headless host tests: the provider is driven through a fake `webview` object, so
- * the whole `resolve → document → ready → hydrate → intent` path is asserted
- * without ever starting VS Code (no GUI).
+ * The chat view provider: document generation plus the bridge plumbing.
+ *
+ * These tests drive the *real* provider on top of the harness host, so the
+ * complete chain (webview message → provider → host → fake gateway → bridge →
+ * webview message) is exercised without a GUI.
  */
 
 interface FakeWebview {
@@ -26,53 +31,82 @@ interface FakeWebview {
   postMessage(message: unknown): Promise<boolean>;
 }
 
-interface Harness {
-  readonly view: vscode.WebviewView;
-  readonly webview: FakeWebview;
-  readonly posted: unknown[];
-  emit(raw: unknown): void;
+interface ProviderHarness extends HostHarness {
+  readonly provider: ChatViewProvider;
+  readonly webviewPosts: unknown[];
+  readonly emit: (raw: unknown) => void;
   readonly receiveDisposed: () => boolean;
 }
 
-function makeHarness(): Harness {
-  const posted: unknown[] = [];
-  let receiveHandler: ((raw: unknown) => void) | null = null;
+function makeWebview(): {
+  webview: FakeWebview;
+  posts: unknown[];
+  readonly emit: (raw: unknown) => void;
+  readonly disposed: () => boolean;
+} {
+  const posts: unknown[] = [];
+  let handler: ((raw: unknown) => void) | null = null;
   let disposed = false;
-
   const webview: FakeWebview = {
     options: undefined,
     html: '',
     cspSource: 'vscode-webview://harness',
     asWebviewUri: (uri) => uri,
-    onDidReceiveMessage: (handler) => {
-      receiveHandler = handler;
+    onDidReceiveMessage: (next) => {
+      handler = next;
       return {
         dispose: () => {
           disposed = true;
-          receiveHandler = null;
+          handler = null;
         },
       };
     },
     postMessage: (message) => {
-      posted.push(message);
+      posts.push(message);
       return Promise.resolve(true);
     },
   };
-
   return {
-    view: { webview } as unknown as vscode.WebviewView,
     webview,
-    posted,
-    emit: (raw) => {
-      receiveHandler?.(raw);
-    },
-    receiveDisposed: () => disposed,
+    posts,
+    emit: (raw) => handler?.(raw),
+    disposed: () => disposed,
   };
 }
 
-/** Narrow one posted message by its discriminant. */
-function postedOfType<T extends string>(posted: readonly unknown[], type: T): Record<string, unknown>[] {
-  return posted.filter(
+const teardown: (() => void)[] = [];
+
+function resolveProvider(): ProviderHarness {
+  const harness = createHostHarness();
+  const view = makeWebview();
+  const provider = new ChatViewProvider(
+    { toString: () => 'file:///extension' } as unknown as vscode.Uri,
+    harness.host,
+  );
+  provider.resolveWebviewView({ webview: view.webview } as unknown as vscode.WebviewView);
+  teardown.push(() => {
+    provider.dispose();
+    harness.host.dispose();
+  });
+  return {
+    ...harness,
+    provider,
+    webviewPosts: view.posts,
+    emit: view.emit,
+    receiveDisposed: view.disposed,
+  };
+}
+
+/** Register a bare host harness for teardown (manual provider tests). */
+function keep(harness: HostHarness): HostHarness {
+  teardown.push(() => {
+    harness.host.dispose();
+  });
+  return harness;
+}
+
+function postsOfType(messages: readonly unknown[], type: string): Record<string, unknown>[] {
+  return messages.filter(
     (message): message is Record<string, unknown> =>
       typeof message === 'object' && message !== null && (message as { type?: unknown }).type === type,
   );
@@ -81,6 +115,18 @@ function postedOfType<T extends string>(posted: readonly unknown[], type: T): Re
 function logLines(): string {
   return mockState.outputChannels.flatMap((channel) => channel.lines).join('\n');
 }
+
+beforeEach(() => {
+  mockState.reset();
+  disposeLog();
+});
+
+afterEach(() => {
+  while (teardown.length > 0) {
+    teardown.pop()?.();
+  }
+  disposeLog();
+});
 
 describe('webview document', () => {
   it('builds a CSP that allows only what the webview needs', () => {
@@ -152,127 +198,146 @@ describe('webview document', () => {
 });
 
 describe('ChatViewProvider', () => {
-  beforeEach(() => {
-    mockState.reset();
-    disposeLog();
-  });
+  it('serves the document with the built assets and no eager traffic', () => {
+    const harness = keep(createHostHarness());
+    const view = makeWebview();
+    const provider = new ChatViewProvider(
+      { toString: () => 'file:///extension' } as unknown as vscode.Uri,
+      harness.host,
+    );
+    provider.resolveWebviewView({ webview: view.webview } as unknown as vscode.WebviewView);
 
-  afterEach(() => {
-    disposeLog();
-  });
-
-  function resolveProvider(): { harness: Harness; provider: ChatViewProvider } {
-    const harness = makeHarness();
-    const provider = new ChatViewProvider({ toString: () => 'file:///extension' } as unknown as vscode.Uri);
-    provider.resolveWebviewView(harness.view);
-    return { harness, provider };
-  }
-
-  it('enables scripts, scopes resources to the extension and sets the document', () => {
-    const { harness } = resolveProvider();
-
-    expect(harness.webview.options).toEqual({
+    // Nothing is posted before the webview says `ready`.
+    expect(view.posts).toHaveLength(0);
+    expect(view.webview.options).toEqual({
       enableScripts: true,
       localResourceRoots: [{ toString: expect.any(Function) }],
     });
-    expect(harness.webview.html).toContain('Content-Security-Policy');
-    expect(harness.webview.html).toContain('file:///extension/dist/webview/main.js');
-    expect(harness.webview.html).toContain('file:///extension/dist/webview/main.css');
+    expect(view.webview.html).toContain('Content-Security-Policy');
+    expect(view.webview.html).toContain('file:///extension/dist/webview/main.js');
+    expect(view.webview.html).toContain('file:///extension/dist/webview/main.css');
+    provider.dispose();
   });
 
-  it('answers ready with the tab list and a full hydrate', () => {
-    const { harness } = resolveProvider();
+  it('answers ready with the tab list and a hydrate after creating the first session', async () => {
+    const harness = resolveProvider();
+    await harness.host.start();
 
     harness.emit({ type: 'ready', protocolVersion: 1 });
+    await flushMicrotasks(20);
 
-    const tabs = postedOfType(harness.posted, 'tabs');
-    const hydrates = postedOfType(harness.posted, 'hydrate');
-    expect(tabs).toHaveLength(1);
-    expect(tabs[0]?.['activeSessionId']).toBe('scaffold-session');
-    expect(hydrates).toHaveLength(1);
-
-    const session = hydrates[0]?.['session'] as
-      { sessionId: string; cells: unknown[]; seq: number } | undefined;
-    expect(session?.sessionId).toBe('scaffold-session');
-    expect(session?.cells.length).toBeGreaterThan(5);
-    expect(session?.seq).toBeGreaterThan(0);
+    expect(postsOfType(harness.webviewPosts, 'tabs').length).toBeGreaterThan(0);
+    const hydrates = postsOfType(harness.webviewPosts, 'hydrate');
+    expect(hydrates.length).toBeGreaterThan(0);
+    const session = hydrates[hydrates.length - 1]?.['session'] as { sessionId: string } | undefined;
+    expect(session?.sessionId).toBe(harness.gateway.createdOrder[0]);
   });
 
-  it('warns (but keeps working) when the webview speaks another protocol version', () => {
-    const { harness } = resolveProvider();
+  it('drives a user message from the webview to the gateway', async () => {
+    const harness = resolveProvider();
+    await harness.host.start();
+    harness.emit({ type: 'ready', protocolVersion: 1 });
+    await flushMicrotasks(20);
+    const sessionId = harness.gateway.createdOrder[0] ?? '';
+
+    harness.emit({ type: 'sendMessage', sessionId, text: 'hello from the webview' });
+    await flushMicrotasks(10);
+
+    const frames = harness.clientFrames().filter((frame) => frame['session_id'] === sessionId);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]?.['content']).toBe('hello from the webview');
+    // The optimistic pending cell went back to the webview.
+    const patches = postsOfType(harness.webviewPosts, 'patch');
+    const appended = patches
+      .flatMap((message) => (message['patches'] as Record<string, unknown>[]) ?? [])
+      .find((patch) => patch['op'] === 'append');
+    expect((appended?.['cell'] as { kind?: string } | undefined)?.kind).toBe('user');
+  });
+
+  it('warns (but keeps working) when the webview speaks another protocol version', async () => {
+    const harness = resolveProvider();
+    await harness.host.start();
 
     harness.emit({ type: 'ready', protocolVersion: 99 });
+    await flushMicrotasks(20);
 
     expect(logLines()).toContain('webview speaks bridge v99');
-    expect(postedOfType(harness.posted, 'hydrate')).toHaveLength(1);
+    expect(postsOfType(harness.webviewPosts, 'tabs').length).toBeGreaterThan(0);
   });
 
   it('answers ping with a pong carrying the same id', () => {
-    const { harness } = resolveProvider();
+    const harness = resolveProvider();
 
     harness.emit({ type: 'ping', id: 'ping-7' });
 
-    const pongs = postedOfType(harness.posted, 'pong');
+    const pongs = postsOfType(harness.webviewPosts, 'pong');
     expect(pongs).toHaveLength(1);
     expect(pongs[0]?.['id']).toBe('ping-7');
     expect(typeof pongs[0]?.['hostTimeMs']).toBe('number');
   });
 
-  it('re-hydrates on resync and records the reason', () => {
-    const { harness } = resolveProvider();
+  it('re-hydrates on resync and records the reason', async () => {
+    const harness = resolveProvider();
+    await harness.host.start();
     harness.emit({ type: 'ready', protocolVersion: 1 });
+    await flushMicrotasks(20);
+    const before = postsOfType(harness.webviewPosts, 'hydrate').length;
+    const sessionId = harness.gateway.createdOrder[0] ?? '';
 
-    harness.emit({ type: 'resync', sessionId: 'scaffold-session', lastSeq: 2, reason: 'seq-gap' });
+    harness.emit({ type: 'resync', sessionId, lastSeq: 2, reason: 'seq-gap' });
+    await flushMicrotasks(10);
 
-    expect(postedOfType(harness.posted, 'hydrate')).toHaveLength(2);
+    expect(postsOfType(harness.webviewPosts, 'hydrate').length).toBe(before + 1);
     expect(logLines()).toContain('resync requested (seq-gap, lastSeq=2)');
   });
 
-  it('logs intents it cannot serve yet instead of silently dropping them', () => {
-    const { harness } = resolveProvider();
-
-    harness.emit({ type: 'sendMessage', sessionId: 'scaffold-session', text: 'hello' });
-
-    expect(logLines()).toContain('intent not implemented in scaffold: sendMessage');
-    expect(harness.posted).toHaveLength(0);
-  });
-
   it('ignores unrecognized messages with a warning', () => {
-    const { harness } = resolveProvider();
+    const harness = resolveProvider();
 
     harness.emit({ type: 'something-else', payload: 1 });
     harness.emit('not-an-object');
 
     expect(logLines()).toContain('ignoring unrecognized webview message');
-    expect(harness.posted).toHaveLength(0);
+    expect(harness.webviewPosts).toHaveLength(0);
   });
 
   it('detaches from the previous webview when the view resolves again', () => {
-    const provider = new ChatViewProvider({ toString: () => 'file:///extension' } as unknown as vscode.Uri);
-    const first = makeHarness();
-    const second = makeHarness();
+    const hostHarness = keep(createHostHarness());
+    const provider = new ChatViewProvider(
+      { toString: () => 'file:///extension' } as unknown as vscode.Uri,
+      hostHarness.host,
+    );
+    const first = makeWebview();
+    const second = makeWebview();
 
-    provider.resolveWebviewView(first.view);
-    provider.resolveWebviewView(second.view);
+    provider.resolveWebviewView({ webview: first.webview } as unknown as vscode.WebviewView);
+    provider.resolveWebviewView({ webview: second.webview } as unknown as vscode.WebviewView);
 
-    expect(first.receiveDisposed()).toBe(true);
+    expect(first.disposed()).toBe(true);
     first.emit({ type: 'ping', id: 'stale' });
-    expect(postedOfType(first.posted, 'pong')).toHaveLength(0);
+    expect(postsOfType(first.posts, 'pong')).toHaveLength(0);
     second.emit({ type: 'ping', id: 'live' });
-    expect(postedOfType(second.posted, 'pong')).toHaveLength(1);
+    expect(postsOfType(second.posts, 'pong')).toHaveLength(1);
+    provider.dispose();
   });
 
   it('disposing the provider detaches the bridge', () => {
-    const { harness, provider } = resolveProvider();
+    const hostHarness = keep(createHostHarness());
+    const view = makeWebview();
+    const provider = new ChatViewProvider(
+      { toString: () => 'file:///extension' } as unknown as vscode.Uri,
+      hostHarness.host,
+    );
+    provider.resolveWebviewView({ webview: view.webview } as unknown as vscode.WebviewView);
+    expect(hostHarness.host.hasSink).toBe(true);
 
     provider.dispose();
 
-    expect(harness.receiveDisposed()).toBe(true);
+    expect(view.disposed()).toBe(true);
+    expect(hostHarness.host.hasSink).toBe(false);
   });
 
   it('is registered under the id declared in package.json', () => {
-    // The view only appears if the manifest and the code agree — assert against the
-    // real manifest instead of restating the literal (review r1 [N2]).
     const manifest = JSON.parse(
       readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf8'),
     ) as {
@@ -290,7 +355,6 @@ describe('ChatViewProvider', () => {
 
     expect(ours).toHaveLength(1);
     expect(manifest.activationEvents).toContain(`onView:${CHAT_VIEW_ID}`);
-    // The container that owns the view must itself be contributed to the activity bar.
     const containers = manifest.contributes?.viewsContainers?.activitybar ?? [];
     expect(containers.map((container) => container.id)).toContain(ours[0]?.container);
   });
