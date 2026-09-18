@@ -114,6 +114,28 @@ authoritative one because it resolves the actual import graph instead of pattern
   bundled at build time.
 - Styling is CSS Modules on VS Code theme variables (`--vscode-*`). Hardcoded colors are rejected by
   the layer guard — visual constants stay traceable.
+- Visual constants live in `src/webview/styles/tokens.css`, each one annotated with the **file and line
+  it was taken from** in the local VS Code 1.129.1 sources (`workbench/contrib/chat/browser/widget/**`).
+  Do not add a value without a source.
+
+### Chat renderer (`src/webview/chat`)
+
+- `CellView` maps the `CellModel` union to components; it is memoized on `(cell, sessionId)`, so a
+  streamed patch re-renders one cell and leaves the rest of the transcript untouched.
+- Markdown is rendered block by block: `markdown/split.ts` cuts the text at blank lines that are outside
+  a code fence, finished blocks are memoized `MarkdownBlock`s, and only the trailing block re-renders
+  while text keeps arriving (`tests/webview/streaming.test.tsx` asserts both the render and the parse
+  count stay proportional to the tail, not to the answer).
+- Syntax highlighting is shiki with the **JavaScript regex engine** (the wasm engine needs
+  `'wasm-unsafe-eval'` in the webview CSP, which we do not own) and the `dark-plus` / `light-plus`
+  themes — i.e. exactly the Light+/Dark+ token colors that Light Modern/Dark Modern inherit. Both
+  themes ride along as inline `--shiki-*` properties and the stylesheet picks one, so switching the
+  editor theme needs no re-highlight.
+- Interactions always go through the bridge: copying a code block sends `copyText`, clicking a file
+  path sends `openFile`, a diff card sends `openDiff`, and links send `openLink`. The renderer never
+  touches the editor or the clipboard itself.
+- Collapsed/expanded choices are webview-local (`chat/interaction.ts`): a memory-only map keyed by cell
+  id, never part of the protocol.
 
 ## Testing
 
@@ -127,9 +149,12 @@ pnpm run test:watch        # watch mode
   headless — no VS Code window, ever.
 - `tests/webview` runs in **jsdom** with `@testing-library/react`; components are mounted through the
   real `mountApp` against the scripted host in `src/testing/mockBridge.ts`.
-- `src/testing/fixtures.ts` has one fixture per cell kind; both tests and the preview harness use it.
-- The preview harness (`preview/main.tsx`) exposes a toolbar to hydrate fixtures, stream a turn, break
-  the patch stream (resync recovery) and push a UI action — the fastest way to look at renderer changes.
+- `src/testing/fixtures.ts` has one fixture per cell kind plus the step 04 scenarios (streaming turn,
+  failed tool call, approval) that both tests and the preview harness use.
+- The preview harness (`preview/main.tsx`) exposes a toolbar to switch fixtures, stream a turn, break
+  the patch stream (resync recovery) and push a UI action — the fastest way to look at renderer changes
+  without VS Code (`pnpm run dev:preview`, port 5199). `preview/preview-theme.css` emulates the Dark
+  Modern theme variables so the page looks like the real sidebar.
 
 ## Repository integration
 

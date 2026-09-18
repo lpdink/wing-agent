@@ -1,0 +1,238 @@
+/*
+ * Visual tokens for the chat renderer.
+ *
+ * Every value below is traceable to the local VS Code 1.129.1 sources; the
+ * comment names the file, the line and the selector it came from. Nothing here is
+ * invented — if a value has no source it does not belong in this file.
+ *
+ * Root paths (shortened in the comments below):
+ *   CHAT   = src/vs/workbench/contrib/chat/browser/widget/media/chat.css
+ *   PARTS  = src/vs/workbench/contrib/chat/browser/widget/chatContentParts/media/
+ *   SIZES  = src/vs/platform/theme/common/sizes/baseSizes.ts
+ *   COLORS = src/vs/platform/theme/common/colors/editorColors.ts
+ *
+ * Color rule (enforced by tests/layers): every color is a `--vscode-*` variable
+ * (optionally with a fallback). Never a literal. `--wing-*` aliases below only
+ * re-export theme variables so component styles read as design tokens.
+ */
+
+:root {
+  /* ── Density ─────────────────────────────────────────────────────────
+   * The sidebar/panel form of the chat view. VS Code pads every row 5px 16px
+   * there (the agents window uses 12px 16px; we render the sidebar).
+   * CHAT:3771-3774 (.interactive-session:not(.chat-widget > .interactive-session)
+   *                 .interactive-item-container { padding: 5px 16px })
+   */
+  --wing-chat-row-padding-y: 5px;
+  --wing-chat-row-padding-x: 16px;
+
+  /* Markdown body ramp — CHAT:6-27 (.interactive-session) */
+  --wing-font-body-xs: 0.846em; /* CHAT:16  --vscode-chat-font-size-body-xs (11px @13px) */
+  --wing-font-body-s: 0.923em; /* CHAT:18  --vscode-chat-font-size-body-s (12px @13px) */
+  --wing-font-body-m: 1em; /* CHAT:20  --vscode-chat-font-size-body-m (13px @13px) */
+  --wing-font-body-l: 1.077em; /* CHAT:22  --vscode-chat-font-size-body-l (14px @13px) */
+
+  /* CHAT:539-543 (.rendered-markdown { line-height: 1.5em }) */
+  --wing-md-line-height: 1.5em;
+
+  /* Paragraph rhythm — CHAT:549-552 (.value > .rendered-markdown p { margin: 0 0 16px 0 })
+   * and CHAT:443-447 (.value > :last-child { margin-bottom: 0 }) */
+  --wing-md-paragraph-margin: 16px;
+
+  /* List indent — CHAT:689-702 (ul { padding-inline-start: 24px } / ol { 28px } / li { margin: 4px 0 }) */
+  --wing-md-ul-indent: 24px;
+  --wing-md-ol-indent: 28px;
+  --wing-md-li-margin: 4px;
+
+  /* ── Radii / strokes (size registry → webview CSS variables) ─────────
+   * SIZES:91-119 (cornerRadius.xSmall 2px / small 4px / medium 6px / large 8px /
+   * xLarge 12px / strokeThickness 1px, all `sizeForAllThemes`).
+   * Fallbacks keep the layout sane on VS Code versions without the size registry.
+   */
+  --wing-radius-medium: var(--vscode-cornerRadius-medium, 6px);
+  --wing-radius-large: var(--vscode-cornerRadius-large, 8px);
+  --wing-radius-xlarge: var(--vscode-cornerRadius-xLarge, 12px);
+  --wing-radius-small: var(
+    --vscode-cornerRadius-small,
+    4px
+  ); /* CHAT:751-754 inline `code` border-radius: 4px */
+  --wing-stroke: var(--vscode-strokeThickness, 1px);
+
+  /* ── Surfaces / lines ──────────────────────────────────────────────── */
+  --wing-border-widget: var(--vscode-widget-border, var(--vscode-panel-border, transparent));
+  --wing-border-request: var(--vscode-chat-requestBorder, var(--vscode-input-border, transparent));
+  --wing-border-input: var(--vscode-input-border, transparent);
+  --wing-surface-editor: var(--vscode-editor-background);
+  --wing-surface-widget: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  --wing-surface-panel: var(--vscode-panel-background, var(--vscode-editor-background));
+  /* The code surface. `interactive-result-editor-background-color` is *not* a
+   * registered theme colour — the chat widget host injects it as an inline
+   * variable and always sets it to the editor background
+   * (chatViewPane.ts:884 / chatEditor.ts:136 / chatQuick.ts:254), and a webview
+   * never receives it, so the fallback is the value that actually applies. */
+  --wing-surface-code: var(
+    --vscode-interactive-result-editor-background-color,
+    var(--vscode-editor-background)
+  );
+  --wing-fg-description: var(--vscode-descriptionForeground);
+  --wing-fg-error: var(--vscode-errorForeground, var(--vscode-editorError-foreground, inherit));
+  --wing-fg-warning: var(--vscode-editorWarning-foreground, inherit);
+  --wing-fg-link: var(--vscode-textLink-foreground, inherit);
+  --wing-fg-link-hover: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground, inherit));
+
+  /* Blockquote — CHAT:348-356 (.rendered-markdown blockquote) */
+  --wing-md-quote-border: var(--vscode-textBlockQuote-border, var(--vscode-panel-border, transparent));
+  --wing-md-quote-bg: var(--vscode-textBlockQuote-background, transparent);
+
+  /* Inline code — CHAT:743-757 (`code` under .interactive-item-container) */
+  --wing-md-code-fg: var(--vscode-textPreformat-foreground, inherit);
+  --wing-md-code-bg: var(--vscode-textPreformat-background, transparent);
+  --wing-md-code-border: var(--vscode-textPreformat-border, transparent);
+
+  /* Tables — CHAT:362-396 (.rendered-markdown table) */
+  --wing-md-table-border: var(--vscode-chat-requestBorder, var(--vscode-input-border, transparent));
+
+  /* ── User bubble ─────────────────────────────────────────────────────
+   * CHAT:3792-3805 (.interactive-item-container.interactive-request
+   *                 .value .rendered-markdown) — right aligned pill.
+   */
+  --wing-user-bubble-bg: var(
+    --vscode-chat-requestBubbleBackground,
+    var(--vscode-textBlockQuote-background, transparent)
+  );
+  --wing-user-bubble-max-width: 90%;
+
+  /* ── Thinking ────────────────────────────────────────────────────────
+   * PARTS/chatThinkingContent.css:11-14 (.chat-thinking-box color: descriptionForeground)
+   * :138-150 (.chat-thinking-collapsible { margin-left: 5px } + .chat-tool-invocation-part padding)
+   * :121-131 (:not(.chat-used-context-collapsed)::after connector, border-left 1px chat-requestBorder)
+   */
+  --wing-thinking-indent: 5px;
+  --wing-thinking-connector: 1px solid
+    var(--vscode-chat-requestBorder, var(--vscode-panel-border, transparent));
+  --wing-thinking-content-padding: 4px 12px 4px 18px;
+  /* Shim: PARTS/chatThinkingContent.css:81-97 + CHAT:124-133 (@keyframes chat-thinking-shimmer) */
+  --wing-thinking-shimmer: var(--vscode-chat-thinkingShimmer, var(--vscode-descriptionForeground));
+  --wing-thinking-shimmer-duration: 2s;
+
+  /* ── Collapsible rows (thinking / tool call) ─────────────────────────
+   * CHAT:3285-3308 (.chat-collapsible-hover-chevron) — 12px, opacity 0 → 1.
+   * PARTS/chatCollapsibleContentPart.css:6-42 — grid 1fr → 0fr, 180ms/140ms.
+   */
+  --wing-chevron-size: 12px;
+  --wing-collapse-duration: 180ms;
+  --wing-collapse-ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ── Tool call ───────────────────────────────────────────────────────
+   * CHAT:617-622 (.tool-input-output-part .input-output { padding: 6px 0 })
+   * CHAT:628-640 (.tool-output-part) — bordered card + title row.
+   * CHAT:679-681 (&:not(:last-child) { margin-bottom: 14px })
+   */
+  --wing-tool-expanded-padding: 6px 0;
+  --wing-tool-card-margin: 4px 0;
+  --wing-tool-card-title-padding: 8px 12px;
+  --wing-tool-row-gap: 14px;
+  /* CHAT:657-676 (.output-error { margin: 6px 4px }) */
+  --wing-tool-error-margin: 6px 4px;
+
+  /* ── Code block ──────────────────────────────────────────────────────
+   * codeBlockPart.css:61-82 (margin 0 0 16px 0, border/radius/surface)
+   * codeBlockPart.css:11-47 (.interactive-result-code-block-toolbar) — 26px tall
+   * pill, 24×24 action items, right: 10px.
+   */
+  --wing-code-margin: 16px;
+  --wing-code-toolbar-height: 26px;
+  --wing-code-toolbar-right: 10px;
+  --wing-code-toolbar-gap: 2px;
+  --wing-code-action-size: 24px;
+
+  /* ── Diff ────────────────────────────────────────────────────────────
+   * COLORS:279-287 (diffEditor.insertedLineBackground / removedLineBackground —
+   * both have light+dark defaults, so webviews receive them; webview theme
+   * export: src/vs/workbench/contrib/webview/browser/themeing.ts:66-72).
+   * Chat counters: PARTS/chatThinkingContent.css:60-71 + chatColors.ts:78-86.
+   */
+  --wing-diff-add-line: var(
+    --vscode-diffEditor-insertedLineBackground,
+    var(--vscode-diffEditor-insertedTextBackground, transparent)
+  );
+  --wing-diff-del-line: var(
+    --vscode-diffEditor-removedLineBackground,
+    var(--vscode-diffEditor-removedTextBackground, transparent)
+  );
+  --wing-diff-add-fg: var(--vscode-chat-linesAddedForeground, var(--vscode-descriptionForeground));
+  --wing-diff-del-fg: var(--vscode-chat-linesRemovedForeground, var(--vscode-descriptionForeground));
+  --wing-diff-gutter-fg: var(--vscode-editorLineNumber-foreground, var(--vscode-descriptionForeground));
+  --wing-diff-hunk-bg: var(--vscode-textBlockQuote-background, transparent);
+  --wing-diff-gutter-width: 2.5em;
+
+  /* ── Ask / approval ──────────────────────────────────────────────────
+   * PARTS/chatQuestionCarousel.css:19-30 (container), :74-97 (title row),
+   * :192-196 (input container), :217-261 (list item), :410-468 (footer row).
+   */
+  --wing-ask-margin: 8px 0;
+  --wing-ask-title-padding: 8px 8px 8px 16px;
+  --wing-ask-body-padding: 8px 16px;
+  --wing-ask-footer-padding: 4px 8px;
+  --wing-ask-option-padding: 6px 8px;
+  --wing-ask-option-gap: 8px;
+  --wing-ask-option-title-line-height: 1.4;
+  --wing-ask-hover-bg: var(--vscode-list-hoverBackground, transparent);
+  --wing-ask-selected-bg: var(
+    --vscode-list-inactiveSelectionBackground,
+    var(--vscode-list-hoverBackground, transparent)
+  );
+  /* Disabled controls: chatQuestionCarousel.css:462 (.chat-question-nav-arrow.disabled) */
+  --wing-disabled-opacity: 0.4;
+
+  /* Scrollable secondary surfaces:
+   * PARTS/chatTerminalToolProgressPart.css:210 (tool output area, 300px)
+   * CHAT:3154-3158 + PARTS/chatThinkingContent.css:144 (thinking list 4px 3px
+   * with padding-top: 0) */
+  --wing-tool-output-max-height: 300px;
+  --wing-thinking-body-padding: 0 3px 4px;
+
+  /* Inputs — VS Code input surface */
+  --wing-input-bg: var(--vscode-input-background, transparent);
+  --wing-input-fg: var(--vscode-input-foreground, inherit);
+  --wing-input-placeholder: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground));
+
+  /* Buttons — VS Code button surfaces */
+  --wing-button-bg: var(--vscode-button-background, var(--vscode-focusBorder));
+  --wing-button-fg: var(--vscode-button-foreground, inherit);
+  --wing-button-bg-hover: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+  --wing-button-2nd-bg: var(--vscode-button-secondaryBackground, transparent);
+  --wing-button-2nd-fg: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  --wing-button-2nd-bg-hover: var(
+    --vscode-button-secondaryHoverBackground,
+    var(--vscode-button-secondaryBackground, transparent)
+  );
+  --wing-focus-border: var(--vscode-focusBorder, transparent);
+
+  /* ── Todo ────────────────────────────────────────────────────────────
+   * CHAT:1526-1550 (.todo-list { gap: 4px }, .todo-item { gap: 6px; min-height: 22px;
+   * padding: 0 3px; border-radius: 2px; font-size: body-m })
+   */
+  --wing-todo-list-gap: 4px;
+  --wing-todo-item-gap: 6px;
+  --wing-todo-item-min-height: 22px;
+  --wing-todo-item-padding: 0 3px;
+
+  /* ── Scroll-to-bottom affordance ─────────────────────────────────────
+   * CHAT:3723-3735 (.chat-scroll-down { bottom: 7px; right: 12px; width: 27px;
+   * height: 27px; border-radius: 100% }) + CHAT:34-36 (padding: 4px).
+   */
+  --wing-scroll-down-bottom: 7px;
+  --wing-scroll-down-right: 12px;
+  --wing-scroll-down-size: 27px;
+
+  /* ── Streaming ───────────────────────────────────────────────────────
+   * CHAT:493-537 (.value.inline-progress — empty span width 11px, `::after`
+   * width 3em) + CHAT:134-140 (@keyframes ellipsis steps(4, end) 1s infinite).
+   * Block fade-in: PARTS/chatIncrementalRendering/media/chatIncrementalRendering.css:22-30
+   * (600ms ease-out).
+   */
+  --wing-stream-caret-width: 3em;
+  --wing-stream-ellipsis-duration: 1s;
+  --wing-stream-fade-duration: 600ms;
+}

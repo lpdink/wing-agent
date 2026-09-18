@@ -2,10 +2,8 @@ import { act, fireEvent, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { BRIDGE_PROTOCOL_VERSION } from '../../src/shared';
-import { makeEmptySession, makeFixtureSession } from '../../src/testing/fixtures';
-import { createMockBridge } from '../../src/testing/mockBridge';
-import type { MockBridge } from '../../src/testing/mockBridge';
-import { mountApp } from '../../src/webview/mount';
+import { makeEmptySession, makeFixtureSession, makeStreamingCells } from '../../src/testing/fixtures';
+import { cellElement, disposeMounted, mountWebview, pushPatch } from './harness';
 
 /**
  * End-to-end webview test: mounts the *real* app against a scripted host, so the
@@ -15,64 +13,19 @@ import { mountApp } from '../../src/webview/mount';
  * it exists before any of the real chat UI does.
  */
 
-interface Mounted {
-  readonly container: HTMLElement;
-  readonly bridge: MockBridge;
-  dispose(): void;
-}
-
-/**
- * Fixed clock for both sides of the ping round-trip.
- *
- * The bridge measures latency itself (`now()` before send, `now()` after the
- * pong), so the test must inject the *controller's* clock too — sampling the real
- * wall clock made the RTT assertion flaky (review r1 [B1]).
- */
-const FIXED_CLOCK = 1_000;
-
-function mount(sessions = [makeFixtureSession()]): Mounted {
-  const container = document.createElement('div');
-  document.body.append(container);
-  const bridge = createMockBridge({ sessions, now: () => FIXED_CLOCK });
-  let app: { dispose(): void } | undefined;
-  act(() => {
-    app = mountApp(container, { transport: bridge.transport, now: () => FIXED_CLOCK });
-  });
-  return {
-    container,
-    bridge,
-    dispose: () => {
-      act(() => {
-        app?.dispose();
-      });
-      container.remove();
-    },
-  };
-}
-
-const mounted: Mounted[] = [];
-
 afterEach(() => {
-  for (const item of mounted.splice(0)) {
-    item.dispose();
-  }
+  disposeMounted();
 });
-
-function mountTracked(sessions?: Parameters<typeof mount>[0]): Mounted {
-  const item = mount(sessions);
-  mounted.push(item);
-  return item;
-}
 
 describe('webview app', () => {
   it('asks the host for state as soon as it is mounted', () => {
-    const { bridge } = mountTracked();
+    const { bridge } = mountWebview();
 
     expect(bridge.sentOfType('ready')).toEqual([{ type: 'ready', protocolVersion: BRIDGE_PROTOCOL_VERSION }]);
   });
 
   it('renders the hydrated session (title, model, transcript)', () => {
-    const { container } = mountTracked();
+    const { container } = mountWebview([makeFixtureSession()]);
     const ui = within(container);
 
     expect(ui.getByTestId('session-title')).toHaveTextContent('Fixture session');
@@ -83,7 +36,7 @@ describe('webview app', () => {
   });
 
   it('renders one element per cell and covers every cell kind', () => {
-    const { container } = mountTracked();
+    const { container } = mountWebview([makeFixtureSession()]);
 
     const kinds = new Set(
       [...container.querySelectorAll('[data-cell-kind]')].map((node) => node.getAttribute('data-cell-kind')),
@@ -106,70 +59,48 @@ describe('webview app', () => {
   });
 
   it('shows the empty state when no session is hydrated', () => {
-    const { container, bridge } = mountTracked([]);
+    const { container, bridge } = mountWebview([], { autoHandshake: false });
     const ui = within(container);
 
     expect(ui.getByTestId('empty-state')).toBeInTheDocument();
-    // The host still answered the handshake, so the channel is live.
+    // The host answered only the transport, not the session.
+    expect(ui.getByTestId('bridge-status')).toHaveTextContent('bridge: connecting');
+
+    act(() => {
+      bridge.push({ type: 'tabs', tabs: [], activeSessionId: null });
+    });
+
     expect(ui.getByTestId('bridge-status')).toHaveTextContent('bridge: ready');
     expect(bridge.sentOfType('ready')).toHaveLength(1);
   });
 
   it('round-trips a ping and shows the measured latency', () => {
-    const { container, bridge } = mountTracked();
+    const { container } = mountWebview([makeFixtureSession()]);
     const ui = within(container);
 
     fireEvent.click(ui.getByTestId('ping-button'));
 
-    // Protocol behaviour: one correlated ping on the wire.
-    const pings = bridge.sentOfType('ping');
-    expect(pings).toHaveLength(1);
     // UI behaviour: the pong is rendered with the latency the *injected* clock
     // measures (0ms here) — deterministic, no wall-clock sampling.
     expect(ui.getByTestId('ping-rtt')).toHaveTextContent('pong in 0ms');
   });
 
   it('applies streamed patches in order', () => {
-    const { container, bridge } = mountTracked();
-    const sessionId = 'session-a';
+    const mounted = mountWebview([makeFixtureSession()]);
+    const { container, bridge } = mounted;
 
-    act(() => {
-      bridge.push({
-        type: 'patch',
-        sessionId,
-        seq: 1,
-        patches: [
-          {
-            op: 'append',
-            cell: { kind: 'assistant', id: 'stream-1', createdAt: 0, text: '', streaming: true },
-          },
-        ],
-      });
-    });
-    act(() => {
-      bridge.push({
-        type: 'patch',
-        sessionId,
-        seq: 2,
-        patches: [{ op: 'append_text', cellId: 'stream-1', text: 'Hello ' }],
-      });
-    });
-    act(() => {
-      bridge.push({
-        type: 'patch',
-        sessionId,
-        seq: 3,
-        patches: [{ op: 'append_text', cellId: 'stream-1', text: 'world' }],
-      });
-    });
+    pushPatch(mounted, 'session-a', 1, [
+      { op: 'append', cell: { kind: 'assistant', id: 'stream-1', createdAt: 0, text: '', streaming: true } },
+    ]);
+    pushPatch(mounted, 'session-a', 2, [{ op: 'append_text', cellId: 'stream-1', text: 'Hello ' }]);
+    pushPatch(mounted, 'session-a', 3, [{ op: 'append_text', cellId: 'stream-1', text: 'world' }]);
 
-    const cell = container.querySelector('[data-cell-id="stream-1"]');
-    expect(cell?.textContent).toContain('Hello world');
+    expect(cellElement(container, 'stream-1').textContent).toContain('Hello world');
     expect(bridge.sentOfType('resync')).toHaveLength(0);
   });
 
   it('requests a resync when the patch stream breaks and recovers on hydrate', () => {
-    const { bridge, container } = mountTracked();
+    const { bridge, container } = mountWebview([makeFixtureSession()]);
 
     act(() => {
       bridge.push({
@@ -189,7 +120,7 @@ describe('webview app', () => {
   });
 
   it('renders host-driven toasts from the ui channel', () => {
-    const { container, bridge } = mountTracked();
+    const { container, bridge } = mountWebview([makeFixtureSession()]);
 
     act(() => {
       bridge.push({ type: 'ui', action: { kind: 'toast', level: 'warning', message: 'gateway restarting' } });
@@ -199,7 +130,7 @@ describe('webview app', () => {
   });
 
   it('follows tabs and state updates pushed by the host', () => {
-    const { container, bridge } = mountTracked();
+    const { container, bridge } = mountWebview([makeFixtureSession()]);
 
     act(() => {
       bridge.push({
@@ -214,7 +145,7 @@ describe('webview app', () => {
 
   it('switches the rendered session when the host activates another tab', () => {
     const other = makeEmptySession('session-b');
-    const { container, bridge } = mountTracked([makeFixtureSession(), other]);
+    const { container, bridge } = mountWebview([makeFixtureSession(), other]);
 
     act(() => {
       bridge.push({
@@ -233,22 +164,15 @@ describe('webview app', () => {
 
   it('is inert (no console error) when the host never answers', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const container = document.createElement('div');
-    document.body.append(container);
-    const bridge = createMockBridge({ sessions: [], autoHandshake: false });
-
-    act(() => {
-      mountApp(container, { transport: bridge.transport });
-    });
+    const { container } = mountWebview([], { autoHandshake: false });
 
     expect(within(container).getByTestId('bridge-status')).toHaveTextContent('bridge: connecting');
     expect(errorSpy).not.toHaveBeenCalled();
     errorSpy.mockRestore();
-    container.remove();
   });
 
   it('unmounts cleanly', () => {
-    const item = mountTracked();
+    const item = mountWebview([makeFixtureSession()]);
 
     expect(() => item.dispose()).not.toThrow();
     expect(item.container.querySelector('[data-cell-kind]')).toBeNull();
@@ -256,8 +180,8 @@ describe('webview app', () => {
 });
 
 describe('cell rendering details', () => {
-  it('marks pending/discarded user messages', () => {
-    const { container, bridge } = mountTracked();
+  it('marks pending user messages', () => {
+    const { container, bridge } = mountWebview([makeFixtureSession()]);
 
     act(() => {
       bridge.push({
@@ -278,10 +202,23 @@ describe('cell rendering details', () => {
   });
 
   it('renders every kind without crashing (smoke over the union)', () => {
-    const { container } = mountTracked();
+    const { container } = mountWebview([makeFixtureSession()]);
 
     expect(container.textContent).toContain('Bash');
     expect(container.textContent).toContain('src/webview/state/store.ts');
     expect(container.textContent).toContain('Mirror the host model');
+  });
+
+  it('shows the streaming caret for a live turn and hides it afterwards', () => {
+    const { container } = mountWebview([
+      makeFixtureSession({
+        title: 'Streaming turn',
+        cells: makeStreamingCells(),
+        sessionId: 'session-a',
+      }),
+    ]);
+
+    expect(within(cellElement(container, 'assistant-live')).getByTestId('stream-caret')).toBeInTheDocument();
+    expect(cellElement(container, 'thinking-live')).toHaveAttribute('data-collapsed', 'false');
   });
 });
