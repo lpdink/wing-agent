@@ -16,7 +16,7 @@
 | `make test-probe` | 全部：基础设施自测 + 场景（= `uv run pytest libs/wing-probe/ --timeout=120`） |
 | `uv run pytest libs/wing-probe/tests/` | 只跑基础设施自测（不起网关，秒级） |
 | `uv run pytest libs/wing-probe/scenarios/test_rewind.py::test_rewind_skips_event_ancestors -v --timeout=120` | 单个场景 |
-| `make test` | 含 probe（`test: test-python test-probe test-rust`） |
+| `make test` | 三组（python / probe / rust）**并行**跑完，末尾统一给结论（失败详情在结论之前）——见 `scripts/collect_output.sh` |
 | CI | `probe-check` job（与 `python-check` / `rust-check` 并列） |
 
 前提：仓库根跑过 `uv sync`（产出 `.venv/bin/wing-gateway`）；全程离线、无外部 API key、不读写 `~/.wing`。

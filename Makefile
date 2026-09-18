@@ -9,14 +9,16 @@ install:
 	cd crates/wing && maturin develop --release
 	uv sync
 
-check: check-python check-rust
+check:
+	bash scripts/collect_output.sh check
 
 fmt: fmt-python fmt-rust
 
 # 与 CI 的格式门禁等价（Ruff format check + cargo fmt --check），供 pre-commit 快速拦截
 fmt-check: fmt-check-python fmt-check-rust
 
-test: test-python test-probe test-rust
+test:
+	bash scripts/collect_output.sh test
 
 # ── Python ────────────────────────────────────────────────────
 
