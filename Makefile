@@ -1,4 +1,4 @@
-.PHONY: check test test-e2e test-probe format fmt run install gateway
+.PHONY: check test test-e2e test-probe format fmt fmt-check fmt-check-python fmt-check-rust run install gateway
 
 # ── Unified commands (Python + Rust) ─────────────────────────
 
@@ -9,11 +9,16 @@ install:
 	cd crates/wing && maturin develop --release
 	uv sync
 
-check: check-python check-rust
+check:
+	bash scripts/collect_output.sh check
 
 fmt: fmt-python fmt-rust
 
-test: test-python test-probe test-rust
+# 与 CI 的格式门禁等价（Ruff format check + cargo fmt --check），供 pre-commit 快速拦截
+fmt-check: fmt-check-python fmt-check-rust
+
+test:
+	bash scripts/collect_output.sh test
 
 # ── Python ────────────────────────────────────────────────────
 
@@ -54,6 +59,9 @@ check-python:
 fmt-python:
 	uv run ruff format libs/
 
+fmt-check-python:
+	uv run ruff format --check libs/
+
 # ── Rust ──────────────────────────────────────────────────────
 
 check-rust:
@@ -78,6 +86,9 @@ check-rust:
 
 fmt-rust:
 	cargo fmt
+
+fmt-check-rust:
+	cargo fmt --check
 
 test-rust:
 	cargo test
