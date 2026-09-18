@@ -841,6 +841,9 @@ function pushSystem(record: SessionRecord, level: SystemLevel, text: string): vo
   });
 }
 
+/** The `pushSystem` above, for producers outside the reduction lanes (host commands). */
+export { pushSystem };
+
 /** Tool results are capped for transport (head + tail, with a marker in between). */
 export function truncateToolResult(text: string): string {
   if (text.length <= TOOL_RESULT_MAX_CHARS) {
