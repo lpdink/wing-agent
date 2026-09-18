@@ -117,16 +117,79 @@ export interface GlobalNoticeModel {
   readonly text: string;
 }
 
+/**
+ * One prompt command (`GET /api/commands`).
+ *
+ * The catalog feeds the composer's `/`-triggered candidates; it is not a
+ * transcript cell. `name` includes the leading `/` (e.g. `/init`).
+ */
+export interface PromptCommandModel {
+  readonly name: string;
+  readonly aliases: readonly string[];
+  readonly description: string;
+  /** Parameter hint (`''` when the command takes none). */
+  readonly params: string;
+}
+
+/** Gateway-side runtime status of a session in the history list. */
+export type SessionHistoryStatus = 'idle' | 'working' | 'waiting-for-input' | 'inactive';
+
+/** One row of the session-history picker (`GET /api/session/list`). */
+export interface SessionHistoryRowModel {
+  readonly sessionId: SessionId;
+  /** Explicit name or first user message (`first_user_message` rule). */
+  readonly title: string;
+  readonly workspace: string | null;
+  /** ISO-8601 string; `null` when the gateway does not report one. */
+  readonly lastInteraction: string | null;
+  /** `inactive` = not loaded into the gateway process (resume to use it). */
+  readonly status: SessionHistoryStatus;
+}
+
+/** Session-history picker (`/ss`). Present in `PanelsModel` means "open". */
+export interface SessionPanelModel {
+  readonly rows: readonly SessionHistoryRowModel[];
+  /** Row index to highlight initially; `null` = the row matching this session. */
+  readonly activeIndex: number | null;
+}
+
+/** One rewind / fork candidate (`GET /api/session/branches`). */
+export interface BranchTargetRowModel {
+  readonly uuid: string;
+  /** `user` for a message, `compact` for a compaction marker. */
+  readonly role: string;
+  /** Host-truncated preview of the node's content. */
+  readonly preview: string;
+  /** True for the backend's `current` sentinel (the newest state; a no-op target). */
+  readonly current: boolean;
+}
+
+/** Rewind / fork picker. Present in `PanelsModel` means "open". */
+export interface BranchPanelModel {
+  readonly mode: 'rewind' | 'fork';
+  readonly rows: readonly BranchTargetRowModel[];
+  readonly activeIndex: number | null;
+}
+
 /** Overlay data for the active session. `null` members mean "not shown". */
 export interface PanelsModel {
   readonly modelPicker: ModelPickerModel | null;
   readonly globalNotice: GlobalNoticeModel | null;
+  /** Prompt-command catalog; `null` until the host has fetched it. */
+  readonly commands: readonly PromptCommandModel[] | null;
+  /** Session-history picker; `null` = closed. */
+  readonly sessions: SessionPanelModel | null;
+  /** Rewind / fork picker; `null` = closed. */
+  readonly branches: BranchPanelModel | null;
 }
 
 /** The `panels` value with nothing open. */
 export const EMPTY_PANELS: PanelsModel = {
   modelPicker: null,
   globalNotice: null,
+  commands: null,
+  sessions: null,
+  branches: null,
 };
 
 // ── session state / view ──────────────────────────────────────────────
@@ -149,6 +212,14 @@ export interface SessionStateModel {
   readonly turn: TurnViewModel;
   /** Last error surfaced for this session (host-truncated); `null` when none. */
   readonly lastError: string | null;
+  /**
+   * Composer text the backend handed back (resume / rewind / fork / sync draft).
+   *
+   * `null` when there is nothing to restore. The webview adopts it only when it
+   * is non-null **and** differs from the last value it adopted — a `state`
+   * message carrying `null` must never clear what the user is typing.
+   */
+  readonly draft: string | null;
   readonly panels: PanelsModel;
   /**
    * Sequence number of the newest content in this snapshot.
