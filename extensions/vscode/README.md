@@ -1,89 +1,111 @@
 # Wing for VS Code (`extensions/vscode`)
 
 VS Code frontend for the wing agent: a sidebar view that talks to the same gateway the TUI talks to
-(HTTP for lifecycle, one WebSocket for the ReAct event stream).
+(HTTP for lifecycle, one WebSocket for the ReAct event stream). It runs the real session host inside
+the extension host — multi-tab sessions, streaming transcript, control plane, approvals and reconnect
+— while the webview stays a pure renderer.
 
-> **Status: shell + chat renderer (steps 04/05) on top of the step 01 scaffold.** The view renders the
-> real transcript, tab bar, status row and composer; the data still comes from the step 01 placeholder
-> session. The gateway client (`src/core`) and the session host (`src/host`) land in the next steps —
-> placeholder code is marked `SCAFFOLD(01)`, grep for it to see what is temporary.
+Maintainer deep dive (Chinese):
+[docs/dev/vscode-extension.md](https://github.com/lpdink/wing-agent/blob/develop/docs/dev/vscode-extension.md).
 
 ## Requirements
 
-- **To build/develop**: Node.js ≥ 22 and pnpm 11 (`packageManager` in `package.json` pins the exact version —
-  `corepack enable` is enough). These are _toolchain_ requirements; they say nothing about the VS Code
-  runtime this extension targets.
-- **To run**: VS Code ≥ 1.100 (`engines.vscode`). The extension host bundle is built with `target: node20`
-  on purpose — VS Code 1.100 ships Electron 34 / Node 20.19, so anything newer would risk using APIs the
-  host does not have.
-
-## Quick start
-
-```bash
-cd extensions/vscode
-pnpm install
-pnpm build
-```
-
-Then open **this folder** (`extensions/vscode`) in VS Code and press <kbd>F5</kbd>.
-
-`F5` starts an _Extension Development Host_ (a second VS Code window) with the extension loaded from
-source:
-
-1. In the new window, click the **Wing** icon in the Activity Bar (left rail).
-2. The **Chat** view opens: the session tab bar, the transcript of the placeholder session (user /
-   assistant / thinking / tool call / diff / todo / ask / metrics cells), the status row and the
-   composer. The status row's rightmost chip reads `ready` — the bridge is up.
-3. Clicking that chip round-trips one message through the host and shows the measured latency — that is
-   the whole bridge working end to end.
-4. Type `/` in the composer to see the command candidates, and try `/ss` (sessions) or `/rewind`
-   (branch targets). Until `src/host` (step 03) supplies the catalogs, the session panel falls back to
-   the open tabs and the branch panel says the targets are not available yet.
-
-Notes:
-
-- `F5` reuses whatever is in `out/` and `dist/`. **Build first**, then press F5. For iterative work run
-  `pnpm run watch` (extension host) and `pnpm run dev:preview` (webview, in a browser) in a terminal.
-- The launch configuration passes `--disable-extensions` so the development window is not affected by
-  other installed extensions; the development extension itself still loads.
-- No gateway is needed for the scaffold. Once `src/core` lands, start it with `wing start` (or let the
-  extension do it) and the sessions appear in the same view.
-
-## Commands
-
-| Command                            | What it does                                                                                        |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `pnpm run build`                   | Bundle everything: extension host → `out/extension.js`, webview → `dist/webview/{main.js,main.css}` |
-| `pnpm run watch`                   | Incremental esbuild for the extension host                                                          |
-| `pnpm run dev:preview`             | Vite dev server for the webview preview harness (no VS Code needed)                                 |
-| `pnpm run build:preview`           | Static build of the preview harness → `dist/preview/`                                               |
-| `pnpm run typecheck`               | `tsc --noEmit` over the three projects (node / webview / tools)                                     |
-| `pnpm run lint`                    | ESLint (type-aware) incl. the layer zones                                                           |
-| `pnpm run format` / `format:check` | Prettier                                                                                            |
-| `pnpm run test`                    | vitest — `node` and `webview` projects, including the layer guard                                   |
-| `pnpm run package`                 | `vsce package` → `wing-vscode.vsix`                                                                 |
-| `make check-ts` / `make test-ts`   | Same gates from the repository root (what CI runs)                                                  |
+- **To build/develop**: Node.js ≥ 22 and pnpm 11 (`packageManager` in `package.json` pins the exact
+  version — `corepack enable` is enough). These are _toolchain_ requirements; they say nothing about
+  the VS Code runtime this extension targets.
+- **To run**: VS Code ≥ 1.100 (`engines.vscode`). The extension host bundle is built with
+  `target: node20` on purpose — VS Code 1.100 ships Electron 34 / Node 20.19, so anything newer would
+  risk using APIs the host does not have.
+- **To talk to a gateway**: a `wing` installation (`wing start`, or let the extension start it) — the
+  same gateway the TUI uses, default `127.0.0.1:32523`.
 
 ## Install the packaged extension
 
 ```bash
-cd extensions/vscode
-pnpm run package                    # → wing-vscode.vsix
-code --install-extension wing-vscode.vsix
+# 1. see what is installed (the previous implementation used the same id)
+code --list-extensions --show-versions | grep wing-agent
+
+# 2. remove the old implementation if present — same id + same version does not
+#    go through VS Code's update semantics
+code --uninstall-extension wing-agent.wing-vscode
+
+# 3. install this package (path is wherever the .vsix was handed to you)
+code --install-extension wing-vscode-0.1.0.vsix
 ```
 
-`pnpm run package` runs the build through `vscode:prepublish`, so the `.vsix` always contains freshly
-built bundles. Only `out/`, `dist/`, `media/` and `LICENSE.txt` are packaged (`src/`, tests, tooling
-config and `node_modules/` are excluded by `.vscodeignore`). `LICENSE.txt` is a copy of the repository
-license — a package must carry its own license file.
+If you skip the uninstall, a same-version reinstall needs `--force`:
+
+```bash
+code --install-extension wing-vscode-0.1.0.vsix --force
+```
+
+Reload the window (`Developer: Reload Window`) after installing. To uninstall:
+
+```bash
+code --uninstall-extension wing-agent.wing-vscode
+```
+
+## Develop
+
+```bash
+cd extensions/vscode
+pnpm install --frozen-lockfile
+pnpm build
+```
+
+Open **this folder** (`extensions/vscode`) in VS Code and press <kbd>F5</kbd>. F5 starts an
+_Extension Development Host_ (a second window) with the extension loaded from source:
+
+1. Click the **Wing** icon in the Activity Bar.
+2. The **Chat** view opens and, if the gateway is reachable, creates a session automatically. With no
+   folder open it says so instead — open a folder first.
+3. Send a message; the transcript streams. The status row shows model / thinking / YOLO / workspace,
+   the context ring and token totals.
+
+Notes:
+
+- F5 reuses whatever is in `out/` and `dist/`. **Build first**, then press F5. For iterative work run
+  `pnpm run watch` (extension host) and `pnpm run dev:preview` (webview in a browser, port 5199) in a
+  terminal.
+- The launch configuration passes `--disable-extensions` so the development window is not affected by
+  other installed extensions; the development extension itself still loads.
+
+## Settings
+
+| Setting          | Default     | What it does                                                                                                                                |
+| ---------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wing.host`      | `127.0.0.1` | Gateway host (mirror of `gateway.host` in `~/.wing/config.yaml` — the extension does not parse that file).                                  |
+| `wing.port`      | `32523`     | Gateway port.                                                                                                                               |
+| `wing.apiKey`    | `""`        | API key for gateways with auth enabled. Leave empty when auth is off.                                                                       |
+| `wing.wingPath`  | `""`        | Full path of the `wing` executable, used for auto-start. Empty = discover on `PATH` / well-known install locations.                         |
+| `wing.autoStart` | `true`      | Start the gateway (`wing start`) when it is not running. The extension probes first, so a gateway you are already using is never restarted. |
+
+Commands: `Wing: New Session`, `Wing: Reconnect to Gateway`.
+
+## Scripts
+
+| Command                            | What it does                                                                                                |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `pnpm run build`                   | Bundle everything: extension host → `out/extension.js`, webview → `dist/webview/{main.js,main.css}`         |
+| `pnpm run watch`                   | Incremental esbuild for the extension host                                                                  |
+| `pnpm run dev:preview`             | Vite dev server for the webview preview harness (http://localhost:5199/, no VS Code needed)                 |
+| `pnpm run build:preview`           | Static build of the preview harness → `dist/preview/`                                                       |
+| `pnpm run typecheck`               | `tsc --noEmit` over the three projects (node / webview / tools)                                             |
+| `pnpm run lint`                    | ESLint (type-aware) incl. the layer zones                                                                   |
+| `pnpm run format` / `format:check` | Prettier                                                                                                    |
+| `pnpm run test`                    | vitest — `node` and `webview` projects, including the layer guard and the build-artifact gate               |
+| `pnpm run smoke:gateway`           | End-to-end smoke: real `wing-gateway` + scripted fake provider (12 scenarios; `--only`, `--keep`, `--list`) |
+| `pnpm run smoke:list`              | List the smoke scenarios without running them                                                               |
+| `pnpm run package`                 | `vsce package` → `wing-vscode.vsix`                                                                         |
+| `make check-ts` / `make test-ts`   | Same gates from the repository root (what CI runs)                                                          |
 
 ## Architecture
 
 ```
 src/shared/   contract types shared by both sides — types, constants, pure helpers. No vscode, no DOM, no node.
-src/core/     gateway capability layer (step 02): protocol mirror, WS/HTTP clients, chunk reassembly, reconnect.
-src/host/     extension host (step 03): view + document, multi-tab orchestration, event reduction, bridge.
-src/webview/  React renderer (steps 04/05): applies host-produced ops, renders the chat shell.
+src/core/     gateway capability layer: protocol mirror, WS/HTTP clients, chunk reassembly, reconnect (the Electron seam).
+src/host/     extension host: WingHost (connection lifecycle) + SessionManager (tabs, control plane, reduction) + bridge.
+src/webview/  React renderer: applies host-produced ops, renders the chat shell.
 src/testing/  fixtures + scripted host (test and preview only).
 preview/      preview harness: the webview app against the scripted host, without VS Code.
 tests/        vitest suites (node + jsdom).
@@ -93,7 +115,11 @@ The rule that ties it together: **the host is the only authority, the webview is
 The host reduces gateway events into a `SessionViewModel` and pushes it into the webview as a full
 `hydrate` plus ordered `patch` batches; the webview applies what it receives and answers `resync` when
 it cannot follow, never guessing. `sync_session` replay and live events travel the same reduction path
-in the host, which is what keeps replayed and live transcripts identical.
+in the host, which is what keeps replayed and live transcripts identical. One WebSocket serves every
+tab (one `client_id`; subscribe on open, unsubscribe on close, resubscribe all after a reconnect).
+
+Host-produced overlays (`panels.modelPicker` / `sessionPicker` / `branchPicker` non-null = on screen;
+`commandCatalog` is data only) — the webview sends intents, never opening panels on its own state.
 
 ### Layering is enforced by three mechanisms
 
@@ -179,10 +205,9 @@ authoritative one because it resolves the actual import graph instead of pattern
 - The status row is Copilot's secondary toolbar: model / thinking / YOLO / workspace chips, the context
   ring (thresholds 75% / 90%, `chatContextUsageWidget.ts:468`), token totals with TTFT, and the channel
   chip (click to ping).
-- Panels: the model picker is host-owned (`panels.modelPicker` non-null = open); the session (`/ss`,
-  history button) and branch (`/rewind`, `/fork`) panels are opened locally — the composer drives them —
-  but render only host data (`panels.{sessionCatalog,branchCatalog,commandCatalog}`), falling back to the
-  open tabs while a catalog is still `null`.
+- Panels are host-owned (`panels.modelPicker` / `panels.sessionPicker` / `panels.branchPicker` non-null
+  = open): the webview sends `openModelPicker` / `runPromptCommand` (`/ss`, `/rewind`, `/fork`) and the
+  host answers with data + open state atomically. `panels.commandCatalog` is data only.
 
 ## Testing
 
@@ -198,15 +223,30 @@ pnpm run test:watch        # watch mode
   real `mountApp` against the scripted host in `src/testing/mockBridge.ts`.
 - `src/testing/fixtures.ts` has one fixture per cell kind plus the step 04 scenarios (streaming turn,
   failed tool call, approval) that both tests and the preview harness use.
-- `tests/artifact/webviewBundle.test.ts` is the build-artifact gate: it builds the webview with the
-  real `vite.config.mts` into a temp directory (no `pnpm build` prerequisite), asserts the emitted text
-  (no `process.env`, no Node/CJS leftovers, production React _and_ production JSX transform) and then
-  executes the bundle through `node:vm` in a jsdom realm that has **no Node globals** — the only gate
-  that would have caught the blank-view `ReferenceError` before it reached a real window.
+- `tests/artifact/webviewBundle.test.ts` is the build-artifact gate (see above).
 - The preview harness (`preview/main.tsx`) exposes a toolbar to switch fixtures, stream a turn, break
   the patch stream (resync recovery) and push a UI action — the fastest way to look at renderer changes
   without VS Code (`pnpm run dev:preview`, port 5199). `preview/preview-theme.css` emulates the Dark
   Modern theme variables so the page looks like the real sidebar.
+
+### End-to-end smoke (`pnpm run smoke:gateway`)
+
+Real gateway, real host, scripted model — no API key, no user state touched:
+
+- a Node process runs the shipped `WingHost` + `SessionManager` + reducer against a **real
+  `wing-gateway` child process** (temporary `WING_HOME`, OS-assigned port, never `32523`) and a
+  **scripted OpenAI-compatible fake provider**; assertions are read off the host UI model through the
+  same `applyCellPatches` the webview uses;
+- 12 scenarios: create→subscribe→send→stream, tool call + diff, Ask round trip, Bash approval
+  (approve / yolo), interrupt, resume replay + runtime state, rewind, fork, multi-tab isolation,
+  reconnect resubscribe, local commands, gateway prompt command;
+- exit codes: `0` pass, `1` fail (dumps the world + gateway log tail), `3` skipped (no `wing-gateway`
+  binary, or `WING_SMOKE_SKIP=1`); `--only <name>` runs one scenario, `--keep` keeps the scratch dir;
+- the gateway binary is resolved as `$WING_GATEWAY_BIN` → repository `.venv` → `PATH`;
+- the smoke connects through a tiny local relay that strips `Sec-WebSocket-Extensions` (no
+  `permessage-deflate`): Node 25's undici can silently stall compressed frames. That is an environment
+  quirk of the smoke process, not of the shipped extension; `WING_SMOKE_KEEP_COMPRESSION=1` keeps
+  compression to reproduce the A/B.
 
 ## Repository integration
 
@@ -219,10 +259,12 @@ pnpm run test:watch        # watch mode
 
 ## Troubleshooting
 
-| Symptom                                        | Cause / fix                                                                                                                                      |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| F5 opens a window without the Wing icon        | `out/extension.js` missing → run `pnpm build`; check the Extension Host log in the development window (Output → Extension Host).                 |
-| View is blank / white                          | Open the webview dev tools (Command Palette → _Developer: Open Webview Developer Tools_) and check the console for CSP or module-loading errors. |
-| Webview console: `main.js.map violates … CSP`  | Harmless: the source map is fetched through `connect-src`, which the document does not open. Maps are dev-only (`**/*.map` is not packaged).     |
-| `pnpm: command not found` inside VS Code tasks | VS Code was launched without your shell `PATH`; run `pnpm build` in a terminal instead of via the task.                                          |
-| `vsce` complains about `@types/vscode`         | `engines.vscode` and `@types/vscode` must stay aligned (currently `^1.100.0` / `1.100.0`).                                                       |
+| Symptom                                        | Cause / fix                                                                                                                                                  |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| F5 opens a window without the Wing icon        | `out/extension.js` missing → run `pnpm build`; check the Extension Host log in the development window (Output → Extension Host).                             |
+| View is blank / white                          | Open the webview dev tools (Command Palette → _Developer: Open Webview Developer Tools_) and check the console for CSP or module-loading errors.             |
+| Webview console: `main.js.map violates … CSP`  | Harmless: the source map is fetched through `connect-src`, which the document does not open. Maps are dev-only (`**/*.map` is not packaged).                 |
+| `pnpm: command not found` inside VS Code tasks | VS Code was launched without your shell `PATH`; run `pnpm build` in a terminal instead of via the task.                                                      |
+| `vsce` complains about `@types/vscode`         | `engines.vscode` and `@types/vscode` must stay aligned (currently `^1.100.0` / `1.100.0`).                                                                   |
+| Gateway unreachable / API key rejected         | Check Output → Wing, then `wing.autoStart` / `wing.wingPath` / `wing.apiKey`; start it manually with `wing start`.                                           |
+| Resume shows no history (rare)                 | Node/undici compressed-frame stall (see smoke note above): switch tab once or run `Wing: Reconnect to Gateway` to re-push the replay; collect Output → Wing. |
