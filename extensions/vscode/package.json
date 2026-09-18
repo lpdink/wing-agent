@@ -44,6 +44,48 @@
           "contextualTitle": "Wing"
         }
       ]
+    },
+    "commands": [
+      {
+        "command": "wing.newSession",
+        "title": "Wing: New Session",
+        "category": "Wing"
+      },
+      {
+        "command": "wing.reconnectGateway",
+        "title": "Wing: Reconnect to Gateway",
+        "category": "Wing"
+      }
+    ],
+    "configuration": {
+      "title": "Wing",
+      "properties": {
+        "wing.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "markdownDescription": "Host of the wing gateway (the `gateway.host` value in `~/.wing/config.yaml`)."
+        },
+        "wing.port": {
+          "type": "number",
+          "default": 32523,
+          "markdownDescription": "Port of the wing gateway (the `gateway.port` value in `~/.wing/config.yaml`)."
+        },
+        "wing.apiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "API key for the gateway. Leave empty when the gateway has no auth configured."
+        },
+        "wing.wingPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Full path of the `wing` executable, used to start the gateway automatically. Leave empty to discover it on `PATH`."
+        },
+        "wing.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Start the gateway (`wing start`) when it is not running. The extension probes first, so a gateway you are already using is never restarted."
+        }
+      }
     }
   },
   "scripts": {

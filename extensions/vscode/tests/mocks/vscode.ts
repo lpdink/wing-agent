@@ -39,7 +39,16 @@ interface MockState {
   outputChannels: RecordedOutputChannel[];
   viewProviders: RecordedViewProviderRegistration[];
   commands: Map<string, (...args: unknown[]) => unknown>;
+  commandCalls: { command: string; args: unknown[] }[];
+  configuration: Map<string, unknown>;
+  textDocumentContentProviders: Map<string, TextDocumentContentProviderLike>;
+  shownDocuments: { uri: unknown; options: unknown }[];
+  clipboardWrites: string[];
   reset(): void;
+}
+
+export interface TextDocumentContentProviderLike {
+  provideTextDocumentContent(uri: UriLike): string;
 }
 
 export const mockState: MockState = {
@@ -47,11 +56,21 @@ export const mockState: MockState = {
   outputChannels: [],
   viewProviders: [],
   commands: new Map(),
+  commandCalls: [],
+  configuration: new Map(),
+  textDocumentContentProviders: new Map(),
+  shownDocuments: [],
+  clipboardWrites: [],
   reset(): void {
     mockState.disposables = [];
     mockState.outputChannels = [];
     mockState.viewProviders = [];
     mockState.commands.clear();
+    mockState.commandCalls = [];
+    mockState.configuration.clear();
+    mockState.textDocumentContentProviders.clear();
+    mockState.shownDocuments = [];
+    mockState.clipboardWrites = [];
   },
 };
 
@@ -134,13 +153,31 @@ export const Uri = {
   file(fsPath: string): UriLike {
     return new UriLike(`file://${fsPath}`);
   },
-  parse(value: string): UriLike {
+  parse(value: string, _strict?: boolean): UriLike {
     return new UriLike(value);
   },
   joinPath(base: UriLike, ...segments: string[]): UriLike {
     return new UriLike(`${base.toString().replace(/\/$/, '')}/${segments.join('/')}`);
   },
 };
+
+/** Minimal `vscode.Position`/`vscode.Range` stand-ins (line numbers are 0-based). */
+export class Position {
+  constructor(
+    readonly line: number,
+    readonly character: number,
+  ) {}
+}
+
+export class Range {
+  readonly start: Position;
+  readonly end: Position;
+
+  constructor(start: Position, end: Position) {
+    this.start = start;
+    this.end = end;
+  }
+}
 
 export const ViewColumn = { Active: -1, Beside: -2, One: 1 } as const;
 
@@ -154,6 +191,11 @@ export const window = {
     const record = Object.assign(registration, { viewId, provider, options });
     mockState.viewProviders.push(record);
     return record;
+  },
+
+  showTextDocument(uri: unknown, options?: unknown): Promise<{ uri: unknown; options: unknown }> {
+    mockState.shownDocuments.push({ uri, options });
+    return Promise.resolve({ uri, options });
   },
 
   createOutputChannel(name: string): RecordedOutputChannel {
@@ -194,25 +236,64 @@ export const commands = {
     return makeDisposable(`command:${command}`);
   },
   executeCommand(command: string, ...args: unknown[]): Promise<unknown> {
+    mockState.commandCalls.push({ command, args });
     return Promise.resolve(mockState.commands.get(command)?.(...args));
   },
 };
 
-interface WorkspaceFolderLike {
+/** One workspace folder (the host only reads `uri.fsPath`). */
+export interface WorkspaceFolderLike {
   uri: UriLike;
   name: string;
   index: number;
 }
 
-export const workspace: { workspaceFolders: WorkspaceFolderLike[] | undefined } = {
-  workspaceFolders: undefined,
+/** `workspace` — folders, configuration (the `wing.*` settings) and content providers. */
+export const workspace = {
+  workspaceFolders: undefined as WorkspaceFolderLike[] | undefined,
+
+  getConfiguration(section?: string): {
+    get<T>(key: string): T | undefined;
+    has(key: string): boolean;
+    update(key: string, value: unknown): Promise<void>;
+  } {
+    const prefix = section === undefined ? '' : `${section}.`;
+    return {
+      get<T>(key: string): T | undefined {
+        return mockState.configuration.get(`${prefix}${key}`) as T | undefined;
+      },
+      has(key: string): boolean {
+        return mockState.configuration.has(`${prefix}${key}`);
+      },
+      update(key: string, value: unknown): Promise<void> {
+        mockState.configuration.set(`${prefix}${key}`, value);
+        return Promise.resolve();
+      },
+    };
+  },
+
+  registerTextDocumentContentProvider(
+    scheme: string,
+    provider: TextDocumentContentProviderLike,
+  ): RecordedDisposable {
+    mockState.textDocumentContentProviders.set(scheme, provider);
+    return makeDisposable(`textDocumentContentProvider:${scheme}`);
+  },
 };
 
 export const env = {
   appName: 'Visual Studio Code',
-  openExternal: (uri: unknown): Promise<boolean> => {
-    void uri;
+  /** URIs handed to `openExternal` (tests assert the OS-browser hand-off). */
+  openedExternal: [] as unknown[],
+  openExternal(uri: unknown): Promise<boolean> {
+    env.openedExternal.push(uri);
     return Promise.resolve(true);
+  },
+  clipboard: {
+    writeText(text: string): Promise<void> {
+      mockState.clipboardWrites.push(text);
+      return Promise.resolve();
+    },
   },
 };
 
