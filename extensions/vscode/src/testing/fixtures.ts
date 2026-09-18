@@ -1,14 +1,18 @@
 import type {
   AskCellModel,
-  BranchCatalogModel,
+  BranchPickerModel,
   CellModel,
   CommandCatalogModel,
-  SessionCatalogModel,
+  ModelPickerModel,
+  SessionPickerModel,
   SessionViewModel,
   TabModel,
   UserCellModel,
 } from '../shared';
 import { BRANCH_CURRENT_UUID, EMPTY_PANELS } from '../shared';
+
+/** Which command a branch picker was opened for. */
+export type BranchPickerMode = BranchPickerModel['mode'];
 
 /**
  * Fixtures for tests and the preview harness.
@@ -332,21 +336,25 @@ export function makeLongSession(turns = 25): SessionViewModel {
 
 // ── scenarios (step 05: the shell) ────────────────────────────────────
 
-/** A command catalog as the host forwards it: gateway prompt commands + a local one. */
+/** A command catalog as the host forwards it: gateway prompt commands + local ones. */
 export function makeCommandCatalog(): CommandCatalogModel {
   return {
     commands: [
-      { name: 'init', aliases: [], description: 'Initialize AGENTS.md for this workspace', params: '' },
-      { name: 'help', aliases: [], description: 'Show available commands', params: '[command]' },
-      { name: 'compact', aliases: [], description: 'Compress the session context', params: '[focus]' },
+      { name: '/init', aliases: [], description: 'Initialize AGENTS.md for this workspace', params: '' },
+      { name: '/help', aliases: ['/h'], description: 'Show available commands', params: '[command]' },
+      { name: '/compact', aliases: [], description: 'Compress the session context', params: '[focus]' },
     ],
   };
 }
 
-/** A session list richer than the open tabs (one session is not loaded at all). */
-export function makeSessionCatalog(currentSessionId = 'session-a'): SessionCatalogModel {
+/**
+ * The host-opened session picker: one row per session the gateway knows, including
+ * sessions that are not open as tabs (that is what makes it a history picker) and one
+ * row whose workspace the gateway does not report (`null`).
+ */
+export function makeSessionPicker(currentSessionId = 'session-a'): SessionPickerModel {
   return {
-    sessions: [
+    rows: [
       {
         sessionId: currentSessionId,
         title: 'Fixture session',
@@ -364,7 +372,7 @@ export function makeSessionCatalog(currentSessionId = 'session-a'): SessionCatal
       {
         sessionId: 'session-c',
         title: 'Yesterday’s session',
-        workspace: '/workspace/docs',
+        workspace: null,
         status: 'inactive',
         current: false,
       },
@@ -372,29 +380,43 @@ export function makeSessionCatalog(currentSessionId = 'session-a'): SessionCatal
   };
 }
 
-/** Rewind / fork targets as `ContextManager.get_branch_targets()` builds them. */
-export function makeBranchCatalog(sessionId = 'session-a'): BranchCatalogModel {
+/**
+ * The host-opened rewind / fork picker.
+ *
+ * The last row is the gateway's `current` sentinel (`context_manager.py:925`),
+ * normalized by the host into `current: true` — it marks "where you are now" and is
+ * not a target.
+ */
+export function makeBranchPicker(mode: BranchPickerMode = 'rewind'): BranchPickerModel {
   return {
-    sessionId,
-    targets: [
-      { uuid: 'uuid-0001-first', content: 'Refactor the session store.' },
-      { uuid: 'uuid-0002-compact', content: '[Compact] Summarised the renderer work' },
-      { uuid: 'uuid-0003-last', content: 'Now wire the composer.' },
-      { uuid: BRANCH_CURRENT_UUID, content: '(current)' },
+    mode,
+    rows: [
+      { uuid: 'uuid-0001-first', content: 'Refactor the session store.', current: false },
+      { uuid: 'uuid-0002-compact', content: '[Compact] Summarised the renderer work', current: false },
+      { uuid: 'uuid-0003-last', content: 'Now wire the composer.', current: false },
+      { uuid: BRANCH_CURRENT_UUID, content: '(current)', current: true },
     ],
   };
 }
 
-/** A session whose panels carry all three catalogs (the shell's happy path). */
+/** The host-opened model picker (mirrors what the gateway's model list produces). */
+export function makeModelPicker(): ModelPickerModel {
+  return {
+    sessionId: 'session-a',
+    rows: [
+      { provider: 'anthropic', model: 'claude-sonnet-4', selected: true },
+      { provider: 'anthropic', model: 'claude-opus-4', selected: false },
+      { provider: 'openai', model: 'gpt-5', selected: false },
+    ],
+    activeIndex: null,
+  };
+}
+
+/** A session whose `panels` carry the command catalog (no overlay open). */
 export function makeShellSession(overrides: Partial<SessionViewModel> = {}): SessionViewModel {
   const base = makeFixtureSession({
     title: 'Shell fixture',
-    panels: {
-      ...EMPTY_PANELS,
-      commandCatalog: makeCommandCatalog(),
-      sessionCatalog: makeSessionCatalog(),
-      branchCatalog: makeBranchCatalog(),
-    },
+    panels: { ...EMPTY_PANELS, commandCatalog: makeCommandCatalog() },
   });
   return { ...base, ...overrides };
 }
@@ -416,20 +438,9 @@ export function makeWorkingSession(overrides: Partial<SessionViewModel> = {}): S
 
 /** A session with the host's model picker open (host-owned overlay). */
 export function makeModelPickerSession(overrides: Partial<SessionViewModel> = {}): SessionViewModel {
-  const base = makeShellSession({
+  return makeShellSession({
     title: 'Model picker',
-    panels: {
-      ...EMPTY_PANELS,
-      modelPicker: {
-        sessionId: 'session-a',
-        rows: [
-          { provider: 'anthropic', model: 'claude-sonnet-4', selected: true },
-          { provider: 'anthropic', model: 'claude-opus-4', selected: false },
-          { provider: 'openai', model: 'gpt-5', selected: false },
-        ],
-        activeIndex: null,
-      },
-    },
+    panels: { ...EMPTY_PANELS, modelPicker: makeModelPicker() },
+    ...overrides,
   });
-  return { ...base, ...overrides };
 }

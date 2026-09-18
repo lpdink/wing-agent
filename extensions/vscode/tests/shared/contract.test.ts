@@ -391,38 +391,41 @@ describe('session view model', () => {
     expect(session.panels.globalNotice).toBeNull();
   });
 
-  it('starts with every panel catalog empty (step 05)', () => {
-    // The three catalogs are additive members of `PanelsModel`: `null` means "the
-    // host has not fetched it", which is the state the shell must handle.
+  it('starts with nothing open and nothing fetched (step 05, interfaces.md)', () => {
+    // `PanelsModel` after the cross-lane freeze: three overlays the host opens
+    // (`modelPicker` / `sessionPicker` / `branchPicker`) and one data-only catalog
+    // (`commandCatalog`). `null` is the "closed"/"not fetched yet" state the shell
+    // must handle for all four.
     const session: SessionViewModel = makeFixtureSession();
+    expect(session.panels.modelPicker).toBeNull();
+    expect(session.panels.globalNotice).toBeNull();
     expect(session.panels.commandCatalog).toBeNull();
-    expect(session.panels.sessionCatalog).toBeNull();
-    expect(session.panels.branchCatalog).toBeNull();
-    expect(EMPTY_PANELS.commandCatalog).toBeNull();
-    expect(EMPTY_PANELS.sessionCatalog).toBeNull();
-    expect(EMPTY_PANELS.branchCatalog).toBeNull();
+    expect(session.panels.sessionPicker).toBeNull();
+    expect(session.panels.branchPicker).toBeNull();
+    expect(EMPTY_PANELS.sessionPicker).toBeNull();
+    expect(EMPTY_PANELS.branchPicker).toBeNull();
   });
 
-  it('keeps a populated catalog JSON-round-trippable (the catalog models are plain data)', () => {
+  it('keeps populated panels JSON-round-trippable (they are plain data)', () => {
     const panels: PanelsModel = {
       ...EMPTY_PANELS,
-      commandCatalog: { commands: [{ name: 'init', aliases: [], description: 'Init', params: '' }] },
-      sessionCatalog: {
-        sessions: [
+      commandCatalog: { commands: [{ name: '/init', aliases: [], description: 'Init', params: '' }] },
+      sessionPicker: {
+        rows: [
           {
             sessionId: 'session-a',
             title: 'Fixture session',
-            workspace: '/workspace',
+            workspace: null,
             status: 'working',
             current: true,
           },
         ],
       },
-      branchCatalog: {
-        sessionId: 'session-a',
-        targets: [
-          { uuid: 'uuid-1', content: 'first user message' },
-          { uuid: BRANCH_CURRENT_UUID, content: '(current)' },
+      branchPicker: {
+        mode: 'fork',
+        rows: [
+          { uuid: 'uuid-1', content: 'first user message', current: false },
+          { uuid: BRANCH_CURRENT_UUID, content: '(current)', current: true },
         ],
       },
     };

@@ -37,11 +37,14 @@ export interface FrontendCommand extends CommandInfoModel {
  *
  * Names and aliases carry the **leading slash** (that is what the user types, what
  * `LOCAL_COMMANDS` already uses, and what `runPromptCommand.name` expects on the
- * wire). `kind: 'intent'` marks the ones the webview maps onto a dedicated bridge
- * message — see `05_webview_shell/design.md` D6 for the full routing table.
+ * wire — see `interfaces.md`).
  *
- * `goal` / `goal-exit` are deliberately absent: Goal orchestration is out of scope
- * for this extension (proposal "Out of Scope").
+ * Wording is ours; the **names and aliases** are a 1:1 mirror of the TUI's
+ * `TUI_ONLY_COMMANDS` (`crates/wing/src/ui/popup/command.rs:59`), minus the two Goal
+ * commands (out of scope for this extension) — `tests/shared/commands.test.ts` pins
+ * that list, so a drift shows up as a failing test.
+ * `kind: 'forward'` rows never reach the switch in the composer's routing table:
+ * the host owns their implementation (`/clear`, `/copy`, `/context`, …).
  */
 export const FRONTEND_COMMANDS: readonly FrontendCommand[] = [
   {
@@ -170,18 +173,52 @@ export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 /** One reasoning effort level. */
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 
+/** A boolean-style argument, classified like the TUI's `parse_bool_arg`. */
+export type BoolArg =
+  /** No argument at all. */
+  | { readonly kind: 'empty' }
+  | { readonly kind: 'on' }
+  | { readonly kind: 'off' }
+  /** Anything else, lowercased for the message. */
+  | { readonly kind: 'other'; readonly value: string };
+
+/**
+ * Classify an `on|off` argument.
+ *
+ * Mirror of the TUI's `parse_bool_arg` (`crates/wing/src/app/commands.rs:51-58`):
+ * `on|true|1` and `off|false|0`, case-insensitive; everything else is `other` and
+ * must **not** be turned into an intent (the caller shows the usage line instead).
+ */
+export function parseBoolArg(raw: string): BoolArg {
+  switch (raw.trim().toLowerCase()) {
+    case '':
+      return { kind: 'empty' };
+    case 'on':
+    case 'true':
+    case '1':
+      return { kind: 'on' };
+    case 'off':
+    case 'false':
+    case '0':
+      return { kind: 'off' };
+    default:
+      return { kind: 'other', value: raw.trim().toLowerCase() };
+  }
+}
+
 /** True when `value` is one of the levels the backend accepts. */
 export function isEffortLevel(value: string): value is EffortLevel {
   return (EFFORT_LEVELS as readonly string[]).includes(value);
 }
 
 /**
- * The `current` branch target's uuid.
+ * The `current` branch target's uuid on the wire.
  *
  * The gateway appends it as the last entry of `get_branch_targets()`
  * (`libs/core/wing/context_manager.py:925`: `{"uuid": "current", "content": "(current)"}`),
- * meaning "the newest state" rather than a message. The rewind/fork panel renders
- * that row as the current point.
+ * meaning "the newest state" rather than a message. The **host** normalizes it into
+ * `BranchTargetModel.current`; the webview renders that flag (the constant stays
+ * here for the host and for the fixtures that build a gateway-shaped list).
  */
 export const BRANCH_CURRENT_UUID = 'current';
 
@@ -258,9 +295,12 @@ export function mergeCommandCatalog(catalog: readonly CommandInfoModel[]): reado
 }
 
 /**
- * Filter commands for the composer's `/` candidates: a case-insensitive match on
- * the name or any alias, exact matches first, then prefix matches, then the rest
- * (the TUI's `filter_commands` ordering, `popup/command.rs:210`).
+ * Filter commands for the composer's `/` candidates.
+ *
+ * Case-insensitive match on the name or any alias, ranked like the TUI's
+ * `filter_commands` (`crates/wing/src/ui/popup/command.rs:210-250`): **exact
+ * matches first, then prefix matches**, nothing else (the TUI has no substring
+ * tier — `/s` must not list `/agents`).
  */
 export function filterCommands(
   commands: readonly CommandInfoModel[],
@@ -270,18 +310,17 @@ export function filterCommands(
   if (needle === '') {
     return commands;
   }
-  const tiers: [CommandInfoModel[], CommandInfoModel[], CommandInfoModel[]] = [[], [], []];
+  const exact: CommandInfoModel[] = [];
+  const prefix: CommandInfoModel[] = [];
   for (const command of commands) {
     const names = [command.name, ...command.aliases].map((name) =>
       normalizeCommandName(name).slice(1).toLowerCase(),
     );
     if (names.includes(needle)) {
-      tiers[0].push(command);
+      exact.push(command);
     } else if (names.some((name) => name.startsWith(needle))) {
-      tiers[1].push(command);
-    } else if (names.some((name) => name.includes(needle))) {
-      tiers[2].push(command);
+      prefix.push(command);
     }
   }
-  return [...tiers[0], ...tiers[1], ...tiers[2]];
+  return [...exact, ...prefix];
 }

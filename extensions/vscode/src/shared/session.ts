@@ -122,9 +122,11 @@ export interface GlobalNoticeModel {
 /**
  * One slash command the host can route.
  *
- * Mirrors the gateway's `CommandInfo` (`libs/core/wing/event/base.py:90`), whose
- * `name` carries **no** leading slash. The webview normalizes both spellings with
- * `normalizeCommandName` (see `src/shared/commands.ts`) before comparing.
+ * Mirrors the gateway's `CommandInfo` (`libs/core/wing/event/base.py:90`), with one
+ * difference frozen by `interfaces.md`: the **name carries the leading slash**
+ * (`'/init'`), because that is what the user types and what `runPromptCommand.name`
+ * travels as. `normalizeCommandName` (`src/shared/commands.ts`) tolerates the bare
+ * spelling on the way in.
  */
 export interface CommandInfoModel {
   readonly name: string;
@@ -154,26 +156,27 @@ export interface CommandCatalogModel {
  */
 export type SessionListStatus = 'inactive' | 'idle' | 'working' | 'waiting-for-input';
 
-/** One row of the `/ss` (session) picker. Mirrors `SessionInfo` (`event/base.py:57`). */
+/** One row of the session picker. Mirrors `SessionInfo` (`event/base.py:57`) + `current`. */
 export interface SessionCandidateModel {
   readonly sessionId: string;
-  /** Host-derived title (never empty — falls back to the session id). */
+  /** Host-derived title (never empty — the host falls back to the session id). */
   readonly title: string;
-  /** Session working directory; `''` when unknown. */
-  readonly workspace: string;
+  /** Session working directory; `null` when unknown. */
+  readonly workspace: string | null;
   readonly status: SessionListStatus;
-  /** True for the session this catalog was fetched for (rendered as "current"). */
+  /** True for the session the picker was opened from (rendered as "current"). */
   readonly current: boolean;
 }
 
 /**
- * Session catalog (`GET /api/session/list`).
+ * Session picker (`GET /api/session/list`), host-opened.
  *
- * `null` means "not fetched yet"; the session panel then falls back to the open
- * tabs, which the host streams on every change anyway.
+ * Non-`null` on {@link PanelsModel} means **on screen** (the host opened it in
+ * response to a bare `/ss`), exactly like `modelPicker`. The webview keeps no local
+ * open/close state for it.
  */
-export interface SessionCatalogModel {
-  readonly sessions: readonly SessionCandidateModel[];
+export interface SessionPickerModel {
+  readonly rows: readonly SessionCandidateModel[];
 }
 
 /**
@@ -181,40 +184,43 @@ export interface SessionCatalogModel {
  *
  * Mirrors `BranchTargetInfo` (`libs/core/wing/event/query_response.py:27`). The
  * gateway appends a final `{ uuid: 'current', content: '(current)' }` entry that
- * represents the newest state (`context_manager.py:925`) — the webview marks it as
- * the current point instead of a target.
+ * stands for the newest state (`context_manager.py:925`); the host normalizes it
+ * into `current: true`, and the panel renders it as the current point instead of a
+ * target (see `BRANCH_CURRENT_UUID` in `src/shared/commands.ts`).
  */
 export interface BranchTargetModel {
   readonly uuid: string;
   /** Display label (the gateway truncates user messages to 100 chars). */
   readonly content: string;
+  /** True for the newest-state sentinel (`uuid === 'current'` before normalization). */
+  readonly current: boolean;
 }
 
-/** Rewind / fork targets for one session (`GET /api/session/branches`). */
-export interface BranchCatalogModel {
-  /** The session these targets belong to — the panel only renders it for that session. */
-  readonly sessionId: SessionId;
-  readonly targets: readonly BranchTargetModel[];
+/** Rewind / fork picker (`GET /api/session/branches`), host-opened. */
+export interface BranchPickerModel {
+  readonly mode: 'rewind' | 'fork';
+  readonly rows: readonly BranchTargetModel[];
 }
 
 /**
- * Overlay data for the active session.
+ * Overlay data for the active session (frozen in `interfaces.md`).
  *
  * Two kinds of member live here, and the difference matters:
  *
- * - **host-opened overlays** (`modelPicker`, `globalNotice`): non-`null` means
- *   "the host wants this on screen";
- * - **catalogs** (`commandCatalog`, `sessionCatalog`, `branchCatalog`): non-`null`
- *   means "the host has this data"; whether the panel is *open* is webview-local
- *   state (the overlays are driven by the composer, whose draft the host cannot
- *   see). The webview never derives catalog contents.
+ * - **overlays** (`modelPicker`, `sessionPicker`, `branchPicker`, `globalNotice`):
+ *   non-`null` means **on screen**. The host owns open/close for all of them — the
+ *   webview asks (an intent, or `runPromptCommand` for `/ss` `/rewind` `/fork`) and
+ *   renders whatever comes back. It keeps no local open state, so data and
+ *   visibility always arrive together (no empty flash, no stale rows).
+ * - **catalog** (`commandCatalog`): data only, never an overlay. `null` means "not
+ *   fetched yet"; the composer then falls back to its own `FRONTEND_COMMANDS` table.
  */
 export interface PanelsModel {
   readonly modelPicker: ModelPickerModel | null;
   readonly globalNotice: GlobalNoticeModel | null;
   readonly commandCatalog: CommandCatalogModel | null;
-  readonly sessionCatalog: SessionCatalogModel | null;
-  readonly branchCatalog: BranchCatalogModel | null;
+  readonly sessionPicker: SessionPickerModel | null;
+  readonly branchPicker: BranchPickerModel | null;
 }
 
 /** The `panels` value with nothing open and nothing fetched. */
@@ -222,8 +228,8 @@ export const EMPTY_PANELS: PanelsModel = {
   modelPicker: null,
   globalNotice: null,
   commandCatalog: null,
-  sessionCatalog: null,
-  branchCatalog: null,
+  sessionPicker: null,
+  branchPicker: null,
 };
 
 // ── session state / view ──────────────────────────────────────────────

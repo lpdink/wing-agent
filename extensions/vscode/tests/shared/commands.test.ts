@@ -4,6 +4,7 @@ import type { CommandInfoModel } from '../../src/shared';
 import {
   BRANCH_CURRENT_UUID,
   EFFORT_LEVELS,
+  parseBoolArg,
   FRONTEND_COMMANDS,
   filterCommands,
   isEffortLevel,
@@ -139,6 +140,22 @@ describe('mergeCommandCatalog', () => {
   });
 });
 
+describe('parseBoolArg', () => {
+  it('mirrors the TUI table (on|true|1 · off|false|0 · other), case-insensitively', () => {
+    // `crates/wing/src/app/commands.rs:51-58`.
+    expect(parseBoolArg('')).toEqual({ kind: 'empty' });
+    expect(parseBoolArg('  ')).toEqual({ kind: 'empty' });
+    expect(parseBoolArg('on')).toEqual({ kind: 'on' });
+    expect(parseBoolArg('TRUE')).toEqual({ kind: 'on' });
+    expect(parseBoolArg(' 1 ')).toEqual({ kind: 'on' });
+    expect(parseBoolArg('off')).toEqual({ kind: 'off' });
+    expect(parseBoolArg('False')).toEqual({ kind: 'off' });
+    expect(parseBoolArg('0')).toEqual({ kind: 'off' });
+    expect(parseBoolArg('Bogus')).toEqual({ kind: 'other', value: 'bogus' });
+    expect(parseBoolArg('2')).toEqual({ kind: 'other', value: '2' });
+  });
+});
+
 describe('filterCommands', () => {
   const commands = mergeCommandCatalog([
     { name: 'init', aliases: [], description: 'Initialize', params: '' },
@@ -149,10 +166,17 @@ describe('filterCommands', () => {
     expect(filterCommands(commands, '/')).toHaveLength(commands.length);
   });
 
-  it('ranks exact matches above prefix matches above the rest', () => {
-    const filtered = filterCommands(commands, 'in');
-    // `/init` is a prefix match; nothing exact.
-    expect(filtered[0]?.name).toBe('init');
+  it('ranks an exact alias match above the prefix matches of other commands', () => {
+    // `/t` is an exact alias of `/think` *and* a prefix of `/title`: the exact tier
+    // must win (swapping the tiers makes this fail — review r1 N4).
+    const filtered = filterCommands(commands, 't');
+    expect(filtered.map((command) => command.name)).toEqual(['/think', '/title']);
+  });
+
+  it('does not fall back to substring matching (TUI parity)', () => {
+    // `/s` must not drag in `/agents` just because the word contains an `s`.
+    const filtered = filterCommands(commands, 's');
+    expect(filtered.map((command) => normalizeCommandName(command.name))).toEqual(['/session', '/skills']);
   });
 
   it('matches aliases too', () => {
