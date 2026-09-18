@@ -2,9 +2,10 @@
  * Floating panels (model picker, sessions, branches).
  *
  * Geometry and surfaces come from VS Code's action widget — the container behind
- * the model picker (actionWidget.css:6-18, :47-80, :580) — with the suggestion
- * widget's `role="option"` rows for the command candidates. Colors are theme
- * variables only (enforced by tests/layers).
+ * the model picker (ACTION:6-18, ACTION:57-87, ACTION:580) — with the suggestion
+ * widget's `role="option"` rows for the command candidates (SUGGEST:105-133).
+ * Aliases are defined in `tokens.css`; colors are theme variables only (enforced by
+ * tests/layers).
  */
 
 .layer {
@@ -16,14 +17,14 @@
   justify-content: flex-end;
 }
 
-/* actionWidget.css:20-38 (.context-view-block) — transparent click catcher: a click
- * outside closes, nothing is dimmed. */
+/* ACTION:20-38 (.context-view-block) — transparent click catcher: a click outside
+ * closes, nothing is dimmed. */
 .backdrop {
   position: absolute;
   inset: 0;
 }
 
-/* actionWidget.css:6-18 + :580 */
+/* ACTION:6-18 + ACTION:580 */
 .panel {
   position: relative;
   display: flex;
@@ -108,7 +109,7 @@
   overflow-y: auto;
 }
 
-/* actionWidget.css:47-57 (row geometry + focused row background) */
+/* ACTION:57-67 (row geometry + focused row background) */
 .option {
   display: flex;
   align-items: center;
@@ -167,7 +168,7 @@
   font-size: var(--wing-font-body-xs, 0.846em);
 }
 
-/* actionWidget.css:59-66 (group header { color: descriptionForeground; font-weight: 500;
+/* ACTION:72-76 (group header { color: descriptionForeground; font-weight: 500;
  * font-size: 11px }; :not(:first-of-type) { margin-top: 2px }) */
 .groupHeader {
   padding: var(--wing-list-row-padding);
@@ -180,7 +181,7 @@
   margin-top: 2px;
 }
 
-/* actionWidget.css:68-80 (separator) */
+/* ACTION:82-87 (separator) */
 .separator {
   margin: var(--wing-list-separator-margin);
   border-top: var(--wing-stroke, 1px) solid var(--wing-overlay-border);
@@ -207,4 +208,9 @@
 
 .statusDot[data-status='idle'] {
   background-color: var(--vscode-charts-green, var(--wing-fg-description));
+}
+
+/* `inactive` = on disk, not loaded: a muted dot instead of an invisible one. */
+.statusDot[data-status='inactive'] {
+  background-color: var(--wing-fg-description);
 }

@@ -24,11 +24,9 @@ import { statusLabel, tabLabel } from './selectors';
 export interface TabBarProps {
   readonly tabs: readonly TabModel[];
   readonly activeSessionId: string | null;
-  /** Open the sessions panel (the history entry point). */
-  readonly onOpenHistory: () => void;
 }
 
-export function TabBar({ tabs, activeSessionId, onOpenHistory }: TabBarProps): ReactElement {
+export function TabBar({ tabs, activeSessionId }: TabBarProps): ReactElement {
   return (
     <div className={styles.tabBar} data-testid="tab-bar">
       {/* Scrollable strip: the `+` and history buttons stay put on the right. */}
@@ -55,7 +53,15 @@ export function TabBar({ tabs, activeSessionId, onOpenHistory }: TabBarProps): R
         data-testid="history-button"
         aria-label="Session history"
         title="Session history"
-        onClick={onOpenHistory}
+        // The history entry point is the `/ss` command: the host fetches the list and
+        // opens the picker (`interfaces.md`). The webview never opens it itself, and
+        // with no session there is nothing to ask about.
+        disabled={activeSessionId === null}
+        onClick={() => {
+          if (activeSessionId !== null) {
+            postToHost({ type: 'runPromptCommand', sessionId: activeSessionId, name: '/ss', argsText: '' });
+          }
+        }}
       >
         {/* No codicon font: a clock is drawn from two bars. */}
         <span className={styles.historyGlyph} aria-hidden="true" />
@@ -87,6 +93,12 @@ function Tab({ tab, active }: TabProps): ReactElement {
       tabIndex={active ? 0 : -1}
       onClick={() => postToHost({ type: 'activateSession', sessionId: tab.sessionId })}
       onKeyDown={(event) => {
+        // Only the tab itself activates on Enter/Space. A key event from a child (the
+        // close button) must keep its own meaning — otherwise Enter on `×` would be
+        // swallowed into "activate this tab".
+        if (event.target !== event.currentTarget) {
+          return;
+        }
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
           postToHost({ type: 'activateSession', sessionId: tab.sessionId });
@@ -102,6 +114,16 @@ function Tab({ tab, active }: TabProps): ReactElement {
         title="Close session"
         data-testid="close-tab"
         onClick={(event) => {
+          event.stopPropagation();
+          postToHost({ type: 'closeSession', sessionId: tab.sessionId });
+        }}
+        // Enter/Space must close, not activate: jsdom (and any user agent that does not
+        // synthesize a click) gets the explicit path, the browser gets it twice-safe.
+        onKeyDown={(event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') {
+            return;
+          }
+          event.preventDefault();
           event.stopPropagation();
           postToHost({ type: 'closeSession', sessionId: tab.sessionId });
         }}

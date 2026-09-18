@@ -25,6 +25,7 @@ import { optionId, useListNav } from './listNav';
 /** One rendered row; `selectable` drives both navigation and the click handler. */
 export type ModelPanelRow =
   | { readonly kind: 'group'; readonly selectable: false; readonly label: string }
+  | { readonly kind: 'empty'; readonly selectable: false; readonly label: string }
   | {
       readonly kind: 'model';
       readonly selectable: true;
@@ -65,6 +66,12 @@ export function buildModelRows(
       model: row.model,
       selected: row.selected,
     });
+  }
+
+  if (picker.rows.length === 0) {
+    // Nothing to choose, but the Reasoning controls are still valid — say why the
+    // list is empty instead of showing a heading with nothing under it.
+    rows.push({ kind: 'empty', selectable: false, label: 'No models available.' });
   }
 
   rows.push({ kind: 'separator', selectable: false, label: 'Reasoning' });
@@ -177,6 +184,8 @@ function rowKey(row: ModelPanelRow, index: number): string {
       return 'thinking';
     case 'group':
       return `group:${row.label}`;
+    case 'empty':
+      return `empty:${row.label}`;
     case 'separator':
       return `separator:${row.label}:${index}`;
     default:
@@ -193,11 +202,14 @@ interface ModelRowViewProps {
 
 function ModelRowView({ row, index, highlighted, onActivate }: ModelRowViewProps): ReactElement {
   if (!row.selectable) {
+    const kind = row.kind;
     return (
       <div
-        className={row.kind === 'group' ? styles.groupHeader : styles.separator}
+        className={kind === 'group' ? styles.groupHeader : styles.separator}
         role="presentation"
-        data-testid={row.kind === 'group' ? 'model-panel-group' : undefined}
+        data-testid={
+          kind === 'group' ? 'model-panel-group' : kind === 'empty' ? 'model-panel-empty' : undefined
+        }
       >
         {row.label}
       </div>

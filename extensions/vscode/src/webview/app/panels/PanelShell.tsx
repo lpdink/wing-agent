@@ -8,8 +8,9 @@
  * the click-catching backdrop from the same file (`:20-38`, transparent, closes on
  * click outside, no dimming).
  *
- * The panel is a modal dialog: it traps Escape, moves focus to its list, and hands
- * focus back to the composer when it closes (the caller re-focuses).
+ * The panel is a modal dialog: Escape closes it wherever the focus is inside it (the
+ * close button included — the list is not the only focusable element), it moves focus
+ * to its list on open, and the caller re-focuses the composer when it closes.
  */
 
 import type { ReactElement, ReactNode } from 'react';
@@ -31,7 +32,21 @@ export function PanelShell({ title, testId, onClose, children, hint }: PanelShel
     <div className={styles.layer}>
       {/* Click outside closes, like VS Code's `.context-view-block` (actionWidget.css:20-38). */}
       <div className={styles.backdrop} onMouseDown={onClose} data-testid={`${testId}-backdrop`} />
-      <div className={styles.panel} role="dialog" aria-modal="true" aria-label={title} data-testid={testId}>
+      <div
+        className={styles.panel}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        data-testid={testId}
+        // Escape closes from anywhere inside the panel. The list handles it too (and
+        // stops propagation) so the two never fire together.
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            onClose();
+          }
+        }}
+      >
         <div className={styles.header}>
           <span className={styles.title}>{title}</span>
           <button

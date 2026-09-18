@@ -2,7 +2,13 @@ import { fireEvent, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { EMPTY_PANELS } from '../../src/shared';
-import { makeEmptySession, makeShellSession, makeWorkingSession } from '../../src/testing/fixtures';
+import {
+  makeCommandCatalog,
+  makeEmptySession,
+  makeSessionPicker,
+  makeShellSession,
+  makeWorkingSession,
+} from '../../src/testing/fixtures';
 import { disposeMounted, mountWebview, pushPanels, pushTabs, pushUi, twoTabs } from './harness';
 
 /**
@@ -69,6 +75,42 @@ describe('composer basics', () => {
     expect(send).toBeDisabled();
     fireEvent.change(inputOf(container), { target: { value: 'ok' } });
     expect(send).toBeEnabled();
+  });
+
+  it('never sends while an input method editor is composing', () => {
+    const { container, bridge } = mountWebview([makeShellSession()]);
+    const input = inputOf(container);
+
+    fireEvent.change(input, { target: { value: '你好世界' } });
+    // Chromium marks the keydown that commits a composition both ways.
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 });
+
+    expect(bridge.sentOfType('sendMessage')).toHaveLength(0);
+    expect(input.value).toBe('你好世界');
+
+    // The next Enter (composition finished) sends as usual.
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(bridge.sentOfType('sendMessage')[0]?.text).toBe('你好世界');
+  });
+
+  it('asks the host to close its overlays on Escape', () => {
+    const { container, bridge } = mountWebview([makeShellSession()]);
+
+    fireEvent.keyDown(inputOf(container), { key: 'Escape' });
+
+    expect(bridge.sentOfType('closeOverlays')).toEqual([{ type: 'closeOverlays' }]);
+  });
+
+  it('closes the candidates first, and only then the overlays', () => {
+    const { container, bridge } = mountWebview([makeShellSession()]);
+    const input = inputOf(container);
+
+    fireEvent.change(input, { target: { value: '/re' } });
+    fireEvent.keyDown(input, { key: 'Escape' });
+
+    expect(within(container).queryByTestId('command-candidates')).toBeNull();
+    expect(bridge.sentOfType('closeOverlays')).toHaveLength(0);
   });
 
   it('sends the trimmed text through the button as well', () => {
@@ -294,6 +336,27 @@ describe('command candidates', () => {
     expect(inputOf(container).value).toBe('');
   });
 
+  it('points aria-activedescendant at the highlighted candidate from the combobox', () => {
+    const { container } = mountWebview([makeShellSession()]);
+    const input = inputOf(container);
+
+    fireEvent.change(input, { target: { value: '/re' } });
+    const active = input.getAttribute('aria-activedescendant');
+    expect(active).not.toBeNull();
+    const highlighted = container.querySelector(`#${active ?? ''}`);
+    expect(highlighted).toHaveAttribute('data-highlighted', 'true');
+    expect(highlighted?.textContent).toContain('/re');
+
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    const moved = input.getAttribute('aria-activedescendant');
+    expect(moved).not.toBe(active);
+    expect(container.querySelector(`#${moved ?? ''}`)).toHaveAttribute('data-highlighted', 'true');
+
+    // Closed list: nothing to point at.
+    fireEvent.change(input, { target: { value: '/re ' } });
+    expect(input).not.toHaveAttribute('aria-activedescendant');
+  });
+
   it('falls back to the frontend table while the host has no catalog', () => {
     const { container } = mountWebview([makeShellSession({ panels: EMPTY_PANELS })]);
 
@@ -352,6 +415,25 @@ describe('submission routing', () => {
     ]);
   });
 
+  it('/think accepts the TUI spellings, case-insensitively', () => {
+    // `parse_bool_arg` (`app/commands.rs:51-58`) accepts on|true|1 and off|false|0.
+    expect(submitWith('/think OFF').bridge.sentOfType('setThinking')).toEqual([
+      { type: 'setThinking', sessionId: 'session-a', enabled: false },
+    ]);
+    expect(submitWith('/think 1').bridge.sentOfType('setThinking')).toEqual([
+      { type: 'setThinking', sessionId: 'session-a', enabled: true },
+    ]);
+  });
+
+  it('/think refuses an unknown argument (no intent, keeps the draft, explains)', () => {
+    const mounted = submitWith('/think bogus');
+
+    expect(mounted.bridge.sentOfType('setEffort')).toHaveLength(0);
+    expect(mounted.bridge.sentOfType('setThinking')).toHaveLength(0);
+    expect(inputOf(mounted.container).value).toBe('/think bogus');
+    expect(within(mounted.container).getByTestId('composer-hint')).toHaveTextContent('Usage: /think');
+  });
+
   it('/yolo flips the switch it shows', () => {
     expect(submitWith('/yolo').bridge.sentOfType('setYolo')).toEqual([
       { type: 'setYolo', sessionId: 'session-a', enabled: true },
@@ -359,6 +441,33 @@ describe('submission routing', () => {
     expect(submitWith('/yolo off').bridge.sentOfType('setYolo')).toEqual([
       { type: 'setYolo', sessionId: 'session-a', enabled: false },
     ]);
+  });
+
+  it('/yolo understands the boolean spellings instead of inverting them', () => {
+    // The old bug: anything that was not literally `on` disabled YOLO, so `/yolo TRUE`
+    // turned it *off*.
+    expect(submitWith('/yolo TRUE').bridge.sentOfType('setYolo')).toEqual([
+      { type: 'setYolo', sessionId: 'session-a', enabled: true },
+    ]);
+    expect(submitWith('/yolo 0').bridge.sentOfType('setYolo')).toEqual([
+      { type: 'setYolo', sessionId: 'session-a', enabled: false },
+    ]);
+  });
+
+  it('/yolo refuses an unknown argument', () => {
+    const mounted = submitWith('/yolo maybe');
+
+    expect(mounted.bridge.sentOfType('setYolo')).toHaveLength(0);
+    expect(within(mounted.container).getByTestId('composer-hint')).toHaveTextContent('Usage: /yolo');
+  });
+
+  it('clears the rejection message as soon as the draft changes', () => {
+    const mounted = submitWith('/yolo maybe');
+    expect(within(mounted.container).getByTestId('composer-hint')).toHaveTextContent('Usage: /yolo');
+
+    fireEvent.change(inputOf(mounted.container), { target: { value: '/yolo maybe ' } });
+
+    expect(within(mounted.container).getByTestId('composer-hint')).not.toHaveTextContent('Usage: /yolo');
   });
 
   it('/compact forwards a focus instruction, and compacts without one', () => {
@@ -373,21 +482,72 @@ describe('submission routing', () => {
     ]);
   });
 
-  it('/ss with no argument opens the sessions panel', () => {
-    const { container } = submitWith('/ss');
-    expect(within(container).getByTestId('session-panel')).toBeInTheDocument();
+  it('forwards a bare /ss to the host instead of opening anything locally', () => {
+    const { bridge, container } = submitWith('/ss');
+
+    expect(bridge.sentOfType('runPromptCommand')).toEqual([
+      { type: 'runPromptCommand', sessionId: 'session-a', name: '/ss', argsText: '' },
+    ]);
+    // The host owns the overlay: nothing appears until it answers with `sessionPicker`.
+    expect(within(container).queryByTestId('session-panel')).toBeNull();
   });
 
   it('/ss <id> is forwarded for the host to resume', () => {
     expect(submitWith('/ss session-c').bridge.sentOfType('runPromptCommand')).toEqual([
+      { type: 'runPromptCommand', sessionId: 'session-a', name: '/ss', argsText: 'session-c' },
+    ]);
+    // The long spelling travels as typed too: the host's table knows both.
+    expect(submitWith('/session session-c').bridge.sentOfType('runPromptCommand')).toEqual([
       { type: 'runPromptCommand', sessionId: 'session-a', name: '/session', argsText: 'session-c' },
     ]);
   });
 
-  it('/rewind and /fork open the branch panel in their own mode', () => {
-    expect(within(submitWith('/rewind').container).getByTestId('branch-panel')).toBeInTheDocument();
-    expect(submitWith('/rewind').container.textContent).toContain('Rewind to message');
-    expect(submitWith('/fork').container.textContent).toContain('Fork from message');
+  it('forwards a bare /rewind and /fork the same way', () => {
+    expect(submitWith('/rewind').bridge.sentOfType('runPromptCommand')).toEqual([
+      { type: 'runPromptCommand', sessionId: 'session-a', name: '/rewind', argsText: '' },
+    ]);
+    expect(submitWith('/fork').bridge.sentOfType('runPromptCommand')).toEqual([
+      { type: 'runPromptCommand', sessionId: 'session-a', name: '/fork', argsText: '' },
+    ]);
+    expect(submitWith('/fork').container.textContent).not.toContain('Fork from message');
+  });
+
+  it('forwards /rewind <uuid> so the host can execute it', () => {
+    expect(submitWith('/rewind uuid-9').bridge.sentOfType('runPromptCommand')).toEqual([
+      { type: 'runPromptCommand', sessionId: 'session-a', name: '/rewind', argsText: 'uuid-9' },
+    ]);
+  });
+
+  it('shows the session picker the host opened, ignoring the local tab list', () => {
+    const mounted = mountWebview([
+      makeShellSession({
+        panels: { ...EMPTY_PANELS, commandCatalog: makeCommandCatalog(), sessionPicker: makeSessionPicker() },
+      }),
+    ]);
+
+    expect(within(mounted.container).getByTestId('session-panel')).toBeInTheDocument();
+    expect(within(mounted.container).getAllByTestId('session-row')).toHaveLength(3);
+  });
+
+  it('accepts the first candidate on a bare slash, and sends it as text once dismissed', () => {
+    // Enter with the candidate list open completes (the list is the point of `/`).
+    const accepted = submitWith('/');
+    expect(accepted.bridge.sentOfType('sendMessage')).toHaveLength(0);
+    // The host catalog comes first in the merge, so its first row wins.
+    expect(inputOf(accepted.container).value).toBe('/init ');
+
+    // After Escape the list is gone, so `/` is just text — never a command with an
+    // empty name (review r1, `快速连按` probe).
+    const mounted = mountWebview([makeShellSession()]);
+    const input = inputOf(mounted.container);
+    fireEvent.change(input, { target: { value: '/' } });
+    fireEvent.keyDown(input, { key: 'Escape' });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    expect(mounted.bridge.sentOfType('sendMessage')).toEqual([
+      { type: 'sendMessage', sessionId: 'session-a', text: '/' },
+    ]);
+    expect(mounted.bridge.sentOfType('runPromptCommand')).toHaveLength(0);
   });
 
   it('forwards gateway prompt commands with their leading slash', () => {

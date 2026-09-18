@@ -32,6 +32,8 @@ describe('preview harness', () => {
       'Toast',
       'Catalogs',
       'Model panel',
+      'Session picker',
+      'Branch picker',
       'Notice',
       'Close overlays',
       'Reload',
@@ -40,7 +42,9 @@ describe('preview harness', () => {
     expect(fixtures).toContain('shell (idle)');
     expect(fixtures).toContain('shell (working + queue)');
     expect(fixtures).toContain('shell (model picker open)');
+    expect(fixtures).toContain('shell (session picker open)');
+    expect(fixtures).toContain('shell (branch picker open)');
     expect(fixtures).toContain('two tabs');
-    expect(fixtures.length).toBeGreaterThanOrEqual(9);
+    expect(fixtures.length).toBeGreaterThanOrEqual(11);
   });
 });

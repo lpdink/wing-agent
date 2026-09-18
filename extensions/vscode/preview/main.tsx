@@ -2,14 +2,15 @@ import type { CellPatch, PanelsModel, SessionViewModel } from '../src/shared';
 import { EMPTY_PANELS } from '../src/shared';
 import {
   makeApprovalAskCell,
-  makeBranchCatalog,
+  makeBranchPicker,
   makeCommandCatalog,
   makeEmptySession,
   makeFailedToolCell,
   makeFixtureSession,
   makeLongSession,
+  makeModelPicker,
   makeModelPickerSession,
-  makeSessionCatalog,
+  makeSessionPicker,
   makeShellSession,
   makeStreamingCells,
   makeStreamingToolCell,
@@ -33,8 +34,6 @@ import { mountApp } from '../src/webview/mount';
 const SHELL_PANELS: PanelsModel = {
   ...EMPTY_PANELS,
   commandCatalog: makeCommandCatalog(),
-  sessionCatalog: makeSessionCatalog(),
-  branchCatalog: makeBranchCatalog(),
 };
 
 /** A second session so the tab bar (and tab switching) is part of the preview. */
@@ -61,6 +60,20 @@ const FIXTURES: Record<string, readonly SessionViewModel[]> = {
   'shell (idle)': [makeShellSession()],
   'shell (working + queue)': [makeWorkingSession()],
   'shell (model picker open)': [makeModelPickerSession()],
+  'shell (session picker open)': [
+    makeShellSession({
+      panels: { ...EMPTY_PANELS, commandCatalog: makeCommandCatalog(), sessionPicker: makeSessionPicker() },
+    }),
+  ],
+  'shell (branch picker open)': [
+    makeShellSession({
+      panels: {
+        ...EMPTY_PANELS,
+        commandCatalog: makeCommandCatalog(),
+        branchPicker: makeBranchPicker('rewind'),
+      },
+    }),
+  ],
   'two tabs': [makeShellSession(), SECOND_SESSION],
   'long session': [makeLongSession()],
 };
@@ -230,18 +243,19 @@ toolbar.append(
 
 toolbar.append(
   button('Model panel', () => {
-    pushPanels({
-      ...SHELL_PANELS,
-      modelPicker: {
-        sessionId: current.sessionId,
-        rows: [
-          { provider: 'anthropic', model: 'claude-sonnet-4', selected: true },
-          { provider: 'anthropic', model: 'claude-opus-4', selected: false },
-          { provider: 'openai', model: 'gpt-5', selected: false },
-        ],
-        activeIndex: null,
-      },
-    });
+    pushPanels({ ...SHELL_PANELS, modelPicker: makeModelPicker() });
+  }),
+);
+
+toolbar.append(
+  button('Session picker', () => {
+    pushPanels({ ...SHELL_PANELS, sessionPicker: makeSessionPicker() });
+  }),
+);
+
+toolbar.append(
+  button('Branch picker', () => {
+    pushPanels({ ...SHELL_PANELS, branchPicker: makeBranchPicker('rewind') });
   }),
 );
 

@@ -1,18 +1,22 @@
 /**
  * The webview root: the shell around step 04's transcript.
  *
- * Layout (top to bottom): tab bar · transcript (or welcome / waiting state) · toasts ·
- * status row · composer. Panels float above the shell, anchored to the composer, which
- * is where the input that opens them lives.
+ * Layout (top to bottom): tab bar · transcript (or welcome / waiting state) ·
+ * banners · toasts · status row · composer. Panels float above the shell, anchored to
+ * the composer — but every one of them is **host-opened**: the panels render exactly
+ * while `panels.{modelPicker,sessionPicker,branchPicker}` is non-null (`interfaces.md`),
+ * and the webview keeps no local open/close state for them.
  *
  * What lives *here* and nowhere else is the app's local interaction state — the drafts
- * (one per session, so switching tabs does not lose them), which overlay is open, and
- * the focus token handed to the composer. None of it is part of the bridge contract:
- * the host cannot see a draft, and it must not have to (see `05_webview_shell/design.md`
- * D1 for the full authority table).
+ * (one per session, so switching tabs does not lose them) and the focus token handed to
+ * the composer. None of it is part of the bridge contract: the host cannot see a draft,
+ * and it must not have to (see `05_webview_shell/design.md` D1 for the authority table).
  *
  * The host's `ui` actions are honoured through `uiSignals` (counters, not booleans, so
- * two consecutive actions are two events).
+ * two consecutive actions are two events). The one effect that matters beyond focus is
+ * "the last overlay just closed" → focus the composer: whether the host closed it
+ * (`modelPicker` back to `null`) or the user did (`closeOverlays`), the next keystroke
+ * must land in the input.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -25,7 +29,6 @@ import { TranscriptView } from './TranscriptView';
 import { TabBar } from './TabBar';
 import { StatusArea } from './StatusArea';
 import { Composer } from './Composer';
-import type { ComposerOverlay } from './Composer';
 import { Welcome } from './Welcome';
 import { BranchPanel } from './panels/BranchPanel';
 import { ModelPanel } from './panels/ModelPanel';
@@ -35,22 +38,19 @@ import appStyles from '../styles/app.module.css';
 export function App(): ReactElement {
   const session = useAppStore(selectActiveSession);
   const tabs = useAppStore((state) => state.tabs);
-  const sessions = useAppStore((state) => state.sessions);
   const activeSessionId = useAppStore((state) => state.activeSessionId);
   const toasts = useAppStore((state) => state.toasts);
   const closeOverlays = useAppStore((state) => state.uiSignals.closeOverlays);
   const focusComposer = useAppStore((state) => state.uiSignals.focusComposer);
 
   const [drafts, setDrafts] = useState<Readonly<Record<string, string>>>({});
-  const [overlay, setOverlay] = useState<ComposerOverlay | null>(null);
   /** Bumped to ask the composer for focus (tab switch, host action, overlay close). */
   const [focusNonce, setFocusNonce] = useState(0);
 
-  // The host may ask for the overlays to go away (Escape semantics are shared with
-  // the extension); the counter changes identity on every request.
+  // The host asked for the overlays to go away (Escape semantics are shared with the
+  // extension); the counter changes identity on every request.
   useEffect(() => {
     if (closeOverlays > 0) {
-      setOverlay(null);
       setFocusNonce((nonce) => nonce + 1);
     }
   }, [closeOverlays]);
@@ -58,6 +58,11 @@ export function App(): ReactElement {
   useEffect(() => {
     setFocusNonce((nonce) => nonce + 1);
   }, [activeSessionId, focusComposer]);
+
+  const modelPicker = session?.panels.modelPicker ?? null;
+  const sessionPicker = session?.panels.sessionPicker ?? null;
+  const branchPicker = session?.panels.branchPicker ?? null;
+  const overlayOpen = modelPicker !== null || sessionPicker !== null || branchPicker !== null;
 
   // Drafts belong to open tabs: dropping a closed tab's draft keeps the map from
   // growing for the lifetime of the view.
@@ -69,8 +74,9 @@ export function App(): ReactElement {
     });
   }, [tabs]);
 
-  const closeOverlay = useCallback((): void => {
-    setOverlay(null);
+  /** Close every host-owned overlay; the host clears the pickers it owns. */
+  const closeOverlaysNow = useCallback((): void => {
+    postToHost({ type: 'closeOverlays' });
     setFocusNonce((nonce) => nonce + 1);
   }, []);
 
@@ -86,16 +92,11 @@ export function App(): ReactElement {
     [sessionId],
   );
 
-  const modelPicker = session?.panels.modelPicker ?? null;
   const notice = session?.panels.globalNotice ?? null;
 
   return (
     <div className={appStyles.root}>
-      <TabBar
-        tabs={tabs}
-        activeSessionId={activeSessionId}
-        onOpenHistory={() => setOverlay({ kind: 'sessions' })}
-      />
+      <TabBar tabs={tabs} activeSessionId={activeSessionId} />
 
       {session === null ? (
         <div className={appStyles.waiting} data-testid="empty-state">
@@ -133,45 +134,28 @@ export function App(): ReactElement {
         session={session}
         draft={draft}
         onDraftChange={setDraft}
-        onOpenOverlay={setOverlay}
         focusToken={`${sessionId ?? 'none'}:${focusComposer}:${focusNonce}`}
+        overlayOpen={overlayOpen}
       />
 
+      {/* Every overlay below is rendered because the *host* says so. Closing is also a
+       * host decision: the webview only asks (`closeOverlays`). */}
       {modelPicker === null || session === null ? null : (
         <ModelPanel
           sessionId={session.sessionId}
           picker={modelPicker}
           meta={session.meta}
-          onClose={() => {
-            // A webview-local close cannot clear a host-owned overlay: ask the host.
-            closeOverlay();
-            postToHost({ type: 'closeOverlays' });
-          }}
+          onClose={closeOverlaysNow}
         />
       )}
 
-      {overlay?.kind === 'sessions' && session !== null ? (
-        <SessionPanel
-          sessionId={session.sessionId}
-          catalog={session.panels.sessionCatalog?.sessions ?? null}
-          tabs={tabs}
-          sessions={sessions}
-          onClose={closeOverlay}
-        />
-      ) : null}
+      {sessionPicker === null || session === null ? null : (
+        <SessionPanel sessionId={session.sessionId} picker={sessionPicker} onClose={closeOverlaysNow} />
+      )}
 
-      {overlay?.kind === 'branches' && session !== null ? (
-        <BranchPanel
-          sessionId={session.sessionId}
-          mode={overlay.mode}
-          catalog={
-            session.panels.branchCatalog?.sessionId === session.sessionId
-              ? session.panels.branchCatalog
-              : null
-          }
-          onClose={closeOverlay}
-        />
-      ) : null}
+      {branchPicker === null || session === null ? null : (
+        <BranchPanel sessionId={session.sessionId} picker={branchPicker} onClose={closeOverlaysNow} />
+      )}
     </div>
   );
 }

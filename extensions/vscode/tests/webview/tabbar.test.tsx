@@ -72,12 +72,51 @@ describe('tab bar', () => {
     expect(mounted.bridge.sentOfType('newSession')).toEqual([{ type: 'newSession' }]);
   });
 
-  it('opens the sessions panel from the history button', () => {
+  it('asks the host for the session list from the history button', () => {
     const mounted = mountWebview([makeShellSession()]);
 
     fireEvent.click(within(mounted.container).getByTestId('history-button'));
 
-    expect(within(mounted.container).getByTestId('session-panel')).toBeInTheDocument();
+    // The history entry point is the `/ss` command; the host answers with
+    // `sessionPicker` (interfaces.md) — the webview never opens it itself.
+    expect(mounted.bridge.sentOfType('runPromptCommand')).toEqual([
+      { type: 'runPromptCommand', sessionId: 'session-a', name: '/ss', argsText: '' },
+    ]);
+    expect(within(mounted.container).queryByTestId('session-panel')).toBeNull();
+  });
+
+  it('leaves the history button inert while no session is active', () => {
+    const mounted = mountWebview([], { autoHandshake: false });
+
+    const button = within(mounted.container).getByTestId('history-button');
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(mounted.bridge.sentOfType('runPromptCommand')).toHaveLength(0);
+  });
+
+  it('closes a tab with Enter on its close button (the tab must not swallow it)', () => {
+    const mounted = mountWebview([makeShellSession(), makeEmptySession('session-b')]);
+    pushTabs(mounted, twoTabs(), 'session-a');
+
+    const close = within(mounted.container).getAllByTestId('close-tab')[1]!;
+    fireEvent.keyDown(close, { key: 'Enter' });
+
+    expect(mounted.bridge.sentOfType('closeSession')).toEqual([
+      { type: 'closeSession', sessionId: 'session-b' },
+    ]);
+    // The regression this pins: the parent `role="tab"` handler used to turn that
+    // Enter into "activate this tab" (and preventDefault the button's own activation).
+    expect(mounted.bridge.sentOfType('activateSession')).toHaveLength(0);
+  });
+
+  it('closes a tab with Space on its close button too', () => {
+    const mounted = mountWebview([makeShellSession(), makeEmptySession('session-b')]);
+    pushTabs(mounted, twoTabs(), 'session-a');
+
+    fireEvent.keyDown(within(mounted.container).getAllByTestId('close-tab')[1]!, { key: ' ' });
+
+    expect(mounted.bridge.sentOfType('closeSession')).toHaveLength(1);
+    expect(mounted.bridge.sentOfType('activateSession')).toHaveLength(0);
   });
 
   it('shows the session state on the tab', () => {

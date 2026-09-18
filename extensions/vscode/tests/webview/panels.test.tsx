@@ -3,32 +3,27 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { EMPTY_PANELS } from '../../src/shared';
 import {
-  makeBranchCatalog,
-  makeEmptySession,
+  makeBranchPicker,
+  makeCommandCatalog,
+  makeModelPicker,
   makeModelPickerSession,
-  makeSessionCatalog,
+  makeSessionPicker,
   makeShellSession,
 } from '../../src/testing/fixtures';
-import { disposeMounted, mountWebview, pushPanels, pushTabs, pushUi, twoTabs } from './harness';
+import { disposeMounted, mountWebview, pushPanels, pushUi } from './harness';
 
 /**
- * The four panels (step 05): model, sessions, branches and the command candidates
- * (the last one lives in `composer.test.tsx`).
+ * The four panels (step 05), as frozen by `interfaces.md`.
  *
- * Two ownership rules are asserted here, because they are easy to get wrong:
- * - the model picker is **host-owned**: it appears/disappears with `panels.modelPicker`
- *   and the webview only ever asks the host to close it;
- * - the session and branch panels are opened locally (the composer drives them) but
- *   their **content** always comes from host data.
+ * The rule under test everywhere here: **the host owns the overlays**. A panel is on
+ * screen exactly while its `panels.*` member is non-null, and closing one is a request
+ * (`closeOverlays`) — never a local decision. The command candidates (the fourth
+ * panel) live in `composer.test.tsx`.
  */
 
 afterEach(() => {
   disposeMounted();
 });
-
-function openHistory(mounted: { container: HTMLElement }): void {
-  fireEvent.click(within(mounted.container).getByTestId('history-button'));
-}
 
 function listbox(container: HTMLElement): HTMLElement {
   return within(container).getByRole('listbox');
@@ -44,6 +39,15 @@ function rowByText(container: HTMLElement, text: string): HTMLElement {
   return row;
 }
 
+/** A session whose `panels` carry the catalog plus the given picker (host-opened). */
+function withPicker(
+  picker: Partial<
+    Pick<ReturnType<typeof makeShellSession>['panels'], 'modelPicker' | 'sessionPicker' | 'branchPicker'>
+  >,
+): ReturnType<typeof makeShellSession> {
+  return makeShellSession({ panels: { ...EMPTY_PANELS, commandCatalog: makeCommandCatalog(), ...picker } });
+}
+
 describe('model panel (host-owned)', () => {
   it('is not rendered until the host opens it', () => {
     const { container } = mountWebview([makeShellSession()]);
@@ -52,13 +56,9 @@ describe('model panel (host-owned)', () => {
   });
 
   it('groups rows by provider and marks the current model', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    pushPanels(mounted, 'session-a', {
-      ...EMPTY_PANELS,
-      modelPicker: makeModelPickerSession().panels.modelPicker,
-    });
+    const { container } = mountWebview([makeModelPickerSession()]);
+    const panel = within(container).getByTestId('model-panel');
 
-    const panel = within(mounted.container).getByTestId('model-panel');
     expect(panel).toHaveAttribute('role', 'dialog');
     expect(panel).toHaveAttribute('aria-label', 'Model and reasoning');
     expect(panel).toHaveAttribute('aria-modal', 'true');
@@ -73,11 +73,7 @@ describe('model panel (host-owned)', () => {
   });
 
   it('applies a model on click', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    pushPanels(mounted, 'session-a', {
-      ...EMPTY_PANELS,
-      modelPicker: makeModelPickerSession().panels.modelPicker,
-    });
+    const mounted = mountWebview([makeModelPickerSession()]);
 
     fireEvent.click(rowByText(mounted.container, 'gpt-5'));
 
@@ -87,11 +83,7 @@ describe('model panel (host-owned)', () => {
   });
 
   it('toggles thinking and sets effort from the reasoning section', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    pushPanels(mounted, 'session-a', {
-      ...EMPTY_PANELS,
-      modelPicker: makeModelPickerSession().panels.modelPicker,
-    });
+    const mounted = mountWebview([makeModelPickerSession()]);
 
     fireEvent.click(within(mounted.container).getByTestId('thinking-row'));
     expect(mounted.bridge.sentOfType('setThinking')).toEqual([
@@ -105,24 +97,25 @@ describe('model panel (host-owned)', () => {
   });
 
   it('hides the effort rows while thinking is off', () => {
-    const mounted = mountWebview([
-      makeShellSession({ meta: { ...makeShellSession().meta, thinking: false } }),
-    ]);
-    pushPanels(mounted, 'session-a', {
-      ...EMPTY_PANELS,
-      modelPicker: makeModelPickerSession().panels.modelPicker,
-    });
+    const session = makeModelPickerSession();
+    const mounted = mountWebview([{ ...session, meta: { ...session.meta, thinking: false } }]);
 
     expect(within(mounted.container).queryAllByTestId('effort-row')).toHaveLength(0);
   });
 
+  it('says so when the host has no models, and keeps the reasoning controls', () => {
+    const session = makeShellSession();
+    const mounted = mountWebview([withPicker({ modelPicker: { ...makeModelPicker(), rows: [] } })]);
+    expect(session.panels.modelPicker).toBeNull(); // the base fixture has none open
+
+    expect(within(mounted.container).getByTestId('model-panel-empty')).toHaveTextContent(
+      'No models available.',
+    );
+    expect(within(mounted.container).getByTestId('thinking-row')).toBeInTheDocument();
+  });
+
   it('starts on the row the host asked for', () => {
-    const picker = makeModelPickerSession().panels.modelPicker;
-    const mounted = mountWebview([makeShellSession()]);
-    pushPanels(mounted, 'session-a', {
-      ...EMPTY_PANELS,
-      modelPicker: { ...picker!, activeIndex: 2 },
-    });
+    const mounted = mountWebview([withPicker({ modelPicker: { ...makeModelPicker(), activeIndex: 2 } })]);
 
     const selected = within(mounted.container)
       .getAllByRole('option')
@@ -132,11 +125,7 @@ describe('model panel (host-owned)', () => {
   });
 
   it('moves the highlight over group headers without landing on them', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    pushPanels(mounted, 'session-a', {
-      ...EMPTY_PANELS,
-      modelPicker: makeModelPickerSession().panels.modelPicker,
-    });
+    const mounted = mountWebview([makeModelPickerSession()]);
     const input = within(mounted.container).getByTestId('model-panel-list');
 
     // Row order: group(anthropic) · sonnet(current, highlighted) · opus · group(openai) · gpt-5 · …
@@ -150,24 +139,26 @@ describe('model panel (host-owned)', () => {
     expect(mounted.bridge.sentOfType('setModel')[1]).toMatchObject({ model: 'gpt-5' });
   });
 
-  it('folds its keyboard into Escape → closeOverlays (the host owns the overlay)', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    pushPanels(mounted, 'session-a', {
-      ...EMPTY_PANELS,
-      modelPicker: makeModelPickerSession().panels.modelPicker,
-    });
+  it('asks the host to close on Escape (the host owns the overlay)', () => {
+    const mounted = mountWebview([makeModelPickerSession()]);
 
     fireEvent.keyDown(within(mounted.container).getByTestId('model-panel-list'), { key: 'Escape' });
 
     expect(mounted.bridge.sentOfType('closeOverlays')).toEqual([{ type: 'closeOverlays' }]);
   });
 
+  it('keeps Escape working when the focus is on the panel chrome (not the list)', () => {
+    const mounted = mountWebview([makeModelPickerSession()]);
+
+    within(mounted.container).getByTestId('model-panel-close').focus();
+    fireEvent.keyDown(within(mounted.container).getByTestId('model-panel-close'), { key: 'Escape' });
+
+    expect(mounted.bridge.sentOfType('closeOverlays')).toEqual([{ type: 'closeOverlays' }]);
+  });
+
   it('closes (locally) when the host pushes an empty picker', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    pushPanels(mounted, 'session-a', {
-      ...EMPTY_PANELS,
-      modelPicker: makeModelPickerSession().panels.modelPicker,
-    });
+    const session = makeModelPickerSession();
+    const mounted = mountWebview([session]);
     expect(within(mounted.container).getByTestId('model-panel')).toBeInTheDocument();
 
     pushPanels(mounted, 'session-a', EMPTY_PANELS);
@@ -175,21 +166,32 @@ describe('model panel (host-owned)', () => {
     expect(within(mounted.container).queryByTestId('model-panel')).toBeNull();
   });
 
+  it('returns the focus to the composer when the host closes it', () => {
+    const mounted = mountWebview([makeModelPickerSession()]);
+    expect(within(mounted.container).getByTestId('model-panel-list')).toHaveFocus();
+
+    // The host applies `setModel` and closes the picker itself (03 does the same).
+    pushPanels(mounted, 'session-a', EMPTY_PANELS);
+
+    expect(within(mounted.container).getByTestId('composer-input')).toHaveFocus();
+  });
+
   it('focuses its list so arrows work without a click', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    pushPanels(mounted, 'session-a', {
-      ...EMPTY_PANELS,
-      modelPicker: makeModelPickerSession().panels.modelPicker,
-    });
+    const mounted = mountWebview([makeModelPickerSession()]);
 
     expect(within(mounted.container).getByTestId('model-panel-list')).toHaveFocus();
   });
 });
 
-describe('session panel', () => {
-  it('lists the host catalog with status, workspace and the current marker', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    openHistory(mounted);
+describe('session picker (host-owned)', () => {
+  it('is not rendered until the host opens it', () => {
+    const { container } = mountWebview([makeShellSession()]);
+
+    expect(within(container).queryByTestId('session-panel')).toBeNull();
+  });
+
+  it('renders the rows the host sent, with status, workspace and the current marker', () => {
+    const mounted = mountWebview([withPicker({ sessionPicker: makeSessionPicker() })]);
 
     const panel = within(mounted.container).getByTestId('session-panel');
     const rows = within(panel).getAllByTestId('session-row');
@@ -197,218 +199,189 @@ describe('session panel', () => {
     expect(rows[0]).toHaveAttribute('data-current', 'true');
     expect(rows[0]).toHaveTextContent('Fixture session');
     expect(rows[0]).toHaveTextContent('/workspace');
-    expect(within(panel).getByTestId('session-panel-list')).toHaveAttribute('data-source', 'catalog');
-    // Status dots key off the raw gateway status.
+    expect(rows[2]).toHaveTextContent('Yesterday’s session');
+    expect(rows[2]).toHaveTextContent('No workspace'); // workspace: null
     expect(panel.querySelector('[data-status="waiting-for-input"]')).not.toBeNull();
+    expect(panel.querySelector('[data-status="inactive"]')).not.toBeNull();
     expect(panel.textContent).toContain('Not loaded');
   });
 
-  it('activates an open session and closes', () => {
-    // No catalog: the panel falls back to the open tabs, where "New session" is not
-    // the active one.
-    const mounted = mountWebview([makeShellSession({ panels: EMPTY_PANELS }), makeEmptySession('session-b')]);
-    pushTabs(mounted, twoTabs(), 'session-a');
-    openHistory(mounted);
+  it('starts on the current session', () => {
+    const mounted = mountWebview([withPicker({ sessionPicker: makeSessionPicker() })]);
+    const selected = within(mounted.container)
+      .getAllByRole('option')
+      .filter((option) => option.getAttribute('aria-selected') === 'true');
 
-    fireEvent.click(rowByText(mounted.container, 'New session'));
-
-    expect(mounted.bridge.sentOfType('activateSession')).toEqual([
-      { type: 'activateSession', sessionId: 'session-b' },
-    ]);
-    expect(within(mounted.container).queryByTestId('session-panel')).toBeNull();
+    expect(selected).toHaveLength(1);
+    expect(selected[0]).toHaveTextContent('Fixture session');
   });
 
-  it('asks the host to resume a session that is not open as a tab', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    openHistory(mounted);
+  it('starts at the top when the host marks no current row', () => {
+    const picker = makeSessionPicker();
+    const rows = picker.rows.map((row) => ({ ...row, current: false }));
+    const mounted = mountWebview([withPicker({ sessionPicker: { rows } })]);
+    const selected = within(mounted.container)
+      .getAllByRole('option')
+      .filter((option) => option.getAttribute('aria-selected') === 'true');
+
+    expect(selected[0]).toHaveTextContent('Fixture session');
+  });
+
+  it('resumes the picked session through the host (/ss <id>) and asks to close', () => {
+    const mounted = mountWebview([withPicker({ sessionPicker: makeSessionPicker() })]);
 
     fireEvent.click(rowByText(mounted.container, 'Yesterday’s session'));
 
     expect(mounted.bridge.sentOfType('runPromptCommand')).toEqual([
       { type: 'runPromptCommand', sessionId: 'session-a', name: '/ss', argsText: 'session-c' },
     ]);
+    expect(mounted.bridge.sentOfType('closeOverlays')).toEqual([{ type: 'closeOverlays' }]);
+    expect(mounted.bridge.sentOfType('activateSession')).toHaveLength(0);
   });
 
-  it('falls back to the open tabs while the catalog is missing', () => {
-    const mounted = mountWebview([makeShellSession({ panels: EMPTY_PANELS }), makeEmptySession('session-b')]);
-    pushTabs(mounted, twoTabs(), 'session-a');
-    openHistory(mounted);
-
-    const panel = within(mounted.container).getByTestId('session-panel');
-    expect(within(panel).getByTestId('session-panel-list')).toHaveAttribute('data-source', 'tabs');
-    const rows = within(panel).getAllByTestId('session-row');
-    expect(rows).toHaveLength(2);
-    expect(rows[1]).toHaveTextContent('New session');
-  });
-
-  it('has an empty state when there is nothing to list', () => {
-    const mounted = mountWebview([makeEmptySession('session-a')]);
-    pushPanels(mounted, 'session-a', { ...EMPTY_PANELS, sessionCatalog: { sessions: [] } });
-    pushTabs(mounted, [], 'session-a');
-    openHistory(mounted);
-
-    expect(within(mounted.container).getByTestId('panel-empty')).toHaveTextContent('No sessions yet.');
-  });
-
-  it('navigates with the keyboard and opens with Enter', () => {
-    const mounted = mountWebview([makeShellSession(), makeEmptySession('session-b')]);
-    pushTabs(mounted, twoTabs(), 'session-a');
-    openHistory(mounted);
-
+  it('opens the highlighted row with the keyboard', () => {
+    const mounted = mountWebview([withPicker({ sessionPicker: makeSessionPicker() })]);
     const list = within(mounted.container).getByTestId('session-panel-list');
+
     expect(list).toHaveFocus();
     fireEvent.keyDown(list, { key: 'ArrowDown' });
     fireEvent.keyDown(list, { key: 'Enter' });
 
-    expect(mounted.bridge.sentOfType('activateSession')).toEqual([
-      { type: 'activateSession', sessionId: 'session-b' },
-    ]);
+    expect(mounted.bridge.sentOfType('runPromptCommand')[0]).toMatchObject({
+      name: '/ss',
+      argsText: 'session-b',
+    });
   });
 
-  it('closes on Escape', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    openHistory(mounted);
+  it('falls back to the id when the host sends an empty title', () => {
+    const picker = makeSessionPicker();
+    const mounted = mountWebview([
+      withPicker({ sessionPicker: { rows: [{ ...picker.rows[1]!, title: '' }] } }),
+    ]);
+
+    expect(within(mounted.container).getByTestId('session-row')).toHaveTextContent('session-b');
+  });
+
+  it('has an empty state when the host sends no rows', () => {
+    const mounted = mountWebview([withPicker({ sessionPicker: { rows: [] } })]);
+
+    expect(within(mounted.container).getByTestId('panel-empty')).toHaveTextContent('No sessions yet.');
+  });
+
+  it('asks the host to close on Escape, the close button and the backdrop', () => {
+    const mounted = mountWebview([withPicker({ sessionPicker: makeSessionPicker() })]);
 
     fireEvent.keyDown(within(mounted.container).getByTestId('session-panel-list'), { key: 'Escape' });
-
-    expect(within(mounted.container).queryByTestId('session-panel')).toBeNull();
-  });
-
-  it('closes when the backdrop is clicked', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    openHistory(mounted);
-
+    fireEvent.click(within(mounted.container).getByTestId('session-panel-close'));
     fireEvent.mouseDown(within(mounted.container).getByTestId('session-panel-backdrop'));
 
-    expect(within(mounted.container).queryByTestId('session-panel')).toBeNull();
+    expect(mounted.bridge.sentOfType('closeOverlays')).toHaveLength(3);
   });
 
-  it('gives focus back to the composer when it closes', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    openHistory(mounted);
+  it('stays up until the host clears the picker', () => {
+    const mounted = mountWebview([withPicker({ sessionPicker: makeSessionPicker() })]);
+
     fireEvent.keyDown(within(mounted.container).getByTestId('session-panel-list'), { key: 'Escape' });
 
+    // The webview asked; only the host decides. (The mock host does not answer here.)
+    expect(within(mounted.container).getByTestId('session-panel')).toBeInTheDocument();
+  });
+
+  it('closes when the host clears the picker, and hands back the focus', () => {
+    const mounted = mountWebview([withPicker({ sessionPicker: makeSessionPicker() })]);
+
+    pushPanels(mounted, 'session-a', { ...EMPTY_PANELS, commandCatalog: makeCommandCatalog() });
+
+    expect(within(mounted.container).queryByTestId('session-panel')).toBeNull();
     expect(within(mounted.container).getByTestId('composer-input')).toHaveFocus();
   });
 
-  it('closes when the host asks for it through the ui channel', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    openHistory(mounted);
+  it('closes when the host asks through the ui channel', () => {
+    const mounted = mountWebview([withPicker({ sessionPicker: makeSessionPicker() })]);
 
     pushUi(mounted, { kind: 'closeOverlays' });
+    pushPanels(mounted, 'session-a', { ...EMPTY_PANELS, commandCatalog: makeCommandCatalog() });
 
     expect(within(mounted.container).queryByTestId('session-panel')).toBeNull();
   });
-
-  it('lists sessions pushed after the panel was opened', () => {
-    const mounted = mountWebview([makeShellSession({ panels: EMPTY_PANELS })]);
-    openHistory(mounted);
-    expect(within(mounted.container).getAllByTestId('session-row')).toHaveLength(1);
-
-    pushPanels(mounted, 'session-a', {
-      ...EMPTY_PANELS,
-      sessionCatalog: makeSessionCatalog(),
-    });
-
-    expect(within(mounted.container).getAllByTestId('session-row')).toHaveLength(3);
-  });
 });
 
-describe('branch panel', () => {
-  it('shows the current point as a marked, non-selectable row', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    fireEvent.change(within(mounted.container).getByTestId('composer-input'), {
-      target: { value: '/rewind' },
-    });
-    fireEvent.keyDown(within(mounted.container).getByTestId('composer-input'), { key: 'Enter' });
-
+describe('branch picker (host-owned)', () => {
+  it('renders the mode the host opened it for, with a current-point row', () => {
+    const mounted = mountWebview([withPicker({ branchPicker: makeBranchPicker('fork') })]);
     const panel = within(mounted.container).getByTestId('branch-panel');
+
+    expect(panel).toHaveAttribute('aria-label', 'Fork from message');
+    expect(within(panel).getByTestId('branch-panel-list')).toHaveAttribute('data-mode', 'fork');
     const current = within(panel).getByTestId('branch-current-row');
     expect(current).toHaveAttribute('data-current', 'true');
     expect(current).toHaveAttribute('aria-disabled', 'true');
     expect(current).toHaveTextContent('current');
     expect(within(panel).getAllByTestId('branch-row')).toHaveLength(3);
-    expect(panel).toHaveAttribute('aria-label', 'Rewind to message');
   });
 
-  it('starts on the newest target and applies it with Enter', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    fireEvent.change(within(mounted.container).getByTestId('composer-input'), {
-      target: { value: '/rewind' },
-    });
-    fireEvent.keyDown(within(mounted.container).getByTestId('composer-input'), { key: 'Enter' });
-
-    const list = within(mounted.container).getByTestId('branch-panel-list');
-    const highlighted = within(mounted.container)
+  it('highlights the first target (the sentinel is not a target)', () => {
+    const mounted = mountWebview([withPicker({ branchPicker: makeBranchPicker('rewind') })]);
+    const selected = within(mounted.container)
       .getAllByRole('option')
       .filter((option) => option.getAttribute('aria-selected') === 'true');
-    expect(highlighted).toHaveLength(1);
-    expect(highlighted[0]).toHaveTextContent('Now wire the composer.');
+
+    expect(selected).toHaveLength(1);
+    expect(selected[0]).toHaveTextContent('Refactor the session store.');
+  });
+
+  it('applies the highlighted target with Enter', () => {
+    const mounted = mountWebview([withPicker({ branchPicker: makeBranchPicker('rewind') })]);
+    const list = within(mounted.container).getByTestId('branch-panel-list');
 
     fireEvent.keyDown(list, { key: 'Enter' });
 
     expect(mounted.bridge.sentOfType('runPromptCommand')).toEqual([
-      { type: 'runPromptCommand', sessionId: 'session-a', name: '/rewind', argsText: 'uuid-0003-last' },
+      { type: 'runPromptCommand', sessionId: 'session-a', name: '/rewind', argsText: 'uuid-0001-first' },
     ]);
-    expect(within(mounted.container).queryByTestId('branch-panel')).toBeNull();
+    expect(mounted.bridge.sentOfType('closeOverlays')).toEqual([{ type: 'closeOverlays' }]);
   });
 
-  it('forks instead of rewinding when opened through /fork', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    const input = within(mounted.container).getByTestId('composer-input');
-    fireEvent.change(input, { target: { value: '/fork' } });
-    fireEvent.keyDown(input, { key: 'Enter' });
+  it('forks with the mode the host chose', () => {
+    const mounted = mountWebview([withPicker({ branchPicker: makeBranchPicker('fork') })]);
 
-    expect(within(mounted.container).getByTestId('branch-panel-list')).toHaveAttribute('data-mode', 'fork');
-    fireEvent.click(rowByText(mounted.container, 'Refactor the session store.'));
+    fireEvent.click(rowByText(mounted.container, 'Now wire the composer.'));
 
     expect(mounted.bridge.sentOfType('runPromptCommand')).toEqual([
-      { type: 'runPromptCommand', sessionId: 'session-a', name: '/fork', argsText: 'uuid-0001-first' },
+      { type: 'runPromptCommand', sessionId: 'session-a', name: '/fork', argsText: 'uuid-0003-last' },
     ]);
   });
 
-  it('does not apply the current point when it is clicked', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    const input = within(mounted.container).getByTestId('composer-input');
-    fireEvent.change(input, { target: { value: '/rewind' } });
-    fireEvent.keyDown(input, { key: 'Enter' });
+  it('never applies the current point', () => {
+    const mounted = mountWebview([withPicker({ branchPicker: makeBranchPicker('rewind') })]);
 
     fireEvent.click(within(mounted.container).getByTestId('branch-current-row'));
 
     expect(mounted.bridge.sentOfType('runPromptCommand')).toHaveLength(0);
   });
 
-  it('explains itself when the host has no branch targets', () => {
-    const mounted = mountWebview([makeShellSession({ panels: EMPTY_PANELS })]);
-    const input = within(mounted.container).getByTestId('composer-input');
-    fireEvent.change(input, { target: { value: '/rewind' } });
-    fireEvent.keyDown(input, { key: 'Enter' });
+  it('has an empty state when the host sends no rows', () => {
+    const mounted = mountWebview([withPicker({ branchPicker: { mode: 'fork', rows: [] } })]);
 
-    expect(within(mounted.container).getByTestId('panel-empty')).toHaveTextContent(
-      'Branch targets are not available yet.',
-    );
+    expect(within(mounted.container).getByTestId('panel-empty')).toHaveTextContent('No fork points yet.');
   });
 
-  it('ignores a catalog that belongs to another session', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    pushPanels(mounted, 'session-a', {
-      ...EMPTY_PANELS,
-      branchCatalog: { ...makeBranchCatalog('session-other') },
-    });
-    const input = within(mounted.container).getByTestId('composer-input');
-    fireEvent.change(input, { target: { value: '/rewind' } });
-    fireEvent.keyDown(input, { key: 'Enter' });
+  it('asks the host to close on Escape and on the backdrop', () => {
+    const mounted = mountWebview([withPicker({ branchPicker: makeBranchPicker('rewind') })]);
 
-    expect(within(mounted.container).getByTestId('panel-empty')).toBeInTheDocument();
+    fireEvent.keyDown(within(mounted.container).getByTestId('branch-panel-list'), { key: 'Escape' });
+    fireEvent.mouseDown(within(mounted.container).getByTestId('branch-panel-backdrop'));
+
+    expect(mounted.bridge.sentOfType('closeOverlays')).toHaveLength(2);
   });
 });
 
 describe('panel accessibility', () => {
   it('exposes a dialog with a listbox and its highlighted option', () => {
-    const mounted = mountWebview([makeShellSession()]);
-    openHistory(mounted);
+    const mounted = mountWebview([withPicker({ sessionPicker: makeSessionPicker() })]);
 
-    const dialog = within(mounted.container).getByRole('dialog');
+    const dialog = within(mounted.container).getByTestId('session-panel');
+    expect(dialog).toHaveAttribute('role', 'dialog');
     expect(dialog).toHaveAttribute('aria-modal', 'true');
     expect(listbox(mounted.container)).toHaveAttribute('role', 'listbox');
     const active = listbox(mounted.container).getAttribute('aria-activedescendant');

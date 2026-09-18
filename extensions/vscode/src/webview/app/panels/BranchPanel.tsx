@@ -1,76 +1,71 @@
 /**
- * `/rewind` and `/fork` panel: the branch targets of the active session.
+ * The rewind / fork picker.
  *
- * The gateway builds the list in `ContextManager.get_branch_targets()`
- * (`libs/core/wing/context_manager.py:898-926`): every user message (truncated to
- * 100 chars), every compaction node, and — appended last — a sentinel entry
- * `{ uuid: 'current', content: '(current)' }` that stands for "the newest state".
- * That sentinel is rendered as the **current point**: not selectable (there is
- * nothing to rewind to) but always visible, so the list reads as a timeline.
+ * Host-opened: on screen exactly while `panels.branchPicker` is non-null
+ * (`interfaces.md`), with the `mode` the host opened it for. The rows are the
+ * gateway's branch targets — every user message plus compaction nodes, and the
+ * `current` sentinel that the host normalizes into `current: true`.
  *
- * The same list serves both commands; only the wording and the intent differ
- * (`runPromptCommand` with `/rewind` or `/fork`, matching the TUI where both are
- * commands carrying a message uuid).
+ * The sentinel marks **where the conversation is now**: it is displayed (with its
+ * badge) but not a target, because there is nothing to rewind to. The highlight
+ * therefore starts on the `current` row when the host made it selectable, otherwise
+ * on the first row — the frozen rule from `interfaces.md`.
+ *
+ * Selecting a row is the TUI's `/rewind <uuid>` / `/fork <uuid>`: one
+ * `runPromptCommand`, the host executes it.
  */
 
 import { useEffect, useMemo, useRef } from 'react';
 import type { ReactElement } from 'react';
 
-import type { BranchCatalogModel, BranchTargetModel } from '../../../shared';
-import { BRANCH_CURRENT_UUID } from '../../../shared';
+import type { BranchPickerModel, BranchTargetModel } from '../../../shared';
 import { postToHost } from '../../bridge/channel';
 import styles from '../../styles/panels.module.css';
 import { PanelEmpty, PanelShell } from './PanelShell';
 import { optionId, useListNav } from './listNav';
 
-/** Which command opened the panel. */
-export type BranchMode = 'rewind' | 'fork';
-
-export interface BranchRow {
-  readonly target: BranchTargetModel;
-  /** The gateway's `current` sentinel — shown, but not selectable. */
-  readonly current: boolean;
-}
-
 export interface BranchPanelProps {
+  /** Session the command is issued from (the active one). */
   readonly sessionId: string;
-  readonly mode: BranchMode;
-  readonly catalog: BranchCatalogModel | null;
+  readonly picker: BranchPickerModel;
   readonly onClose: () => void;
 }
 
-const TITLES: Record<BranchMode, string> = {
+const TITLES: Record<BranchPickerModel['mode'], string> = {
   rewind: 'Rewind to message',
   fork: 'Fork from message',
 };
 
-/** Split the gateway's list into selectable targets and the current-point row. */
-export function branchRows(catalog: BranchCatalogModel | null): readonly BranchRow[] {
-  if (catalog === null) {
-    return [];
-  }
-  return catalog.targets.map((target) => ({ target, current: target.uuid === BRANCH_CURRENT_UUID }));
+/** One rendered row: a target, or the current-point sentinel. */
+export interface BranchRow {
+  readonly target: BranchTargetModel;
+  /** The sentinel — shown, marked, not selectable. */
+  readonly sentinel: boolean;
 }
 
-export function BranchPanel({ sessionId, mode, catalog, onClose }: BranchPanelProps): ReactElement {
-  const rows = useMemo(() => branchRows(catalog), [catalog]);
-  const listRef = useRef<HTMLDivElement>(null);
-  const command = mode === 'rewind' ? '/rewind' : '/fork';
+/** Rows with the sentinel flag resolved (pure; exercised by the tests). */
+export function branchRows(picker: BranchPickerModel): readonly BranchRow[] {
+  return picker.rows.map((target) => ({ target, sentinel: target.current }));
+}
 
-  // Default highlight: the newest selectable target (the one right before the
-  // current point) — rewind/fork almost always mean "back to what I just said".
-  const initialIndex = useMemo(() => {
-    for (let index = rows.length - 1; index >= 0; index -= 1) {
-      if (rows[index]?.current !== true) {
-        return index;
-      }
-    }
-    return undefined;
-  }, [rows]);
+/**
+ * Index of the row the highlight starts on; `-1` means "the first selectable row"
+ * (what `useListNav` does). The sentinel is not selectable, so a picker whose only
+ * `current` row is the sentinel starts at the top — the frozen `interfaces.md` rule.
+ */
+export function branchInitialIndex(rows: readonly BranchRow[]): number {
+  const index = rows.findIndex((row) => row.target.current && !row.sentinel);
+  return index >= 0 ? index : -1;
+}
+
+export function BranchPanel({ sessionId, picker, onClose }: BranchPanelProps): ReactElement {
+  const rows = useMemo(() => branchRows(picker), [picker]);
+  const listRef = useRef<HTMLDivElement>(null);
+  const command = picker.mode === 'rewind' ? '/rewind' : '/fork';
 
   const select = (index: number): void => {
     const row = rows[index];
-    if (row === undefined || row.current) {
+    if (row === undefined || row.sentinel) {
       return;
     }
     postToHost({ type: 'runPromptCommand', sessionId, name: command, argsText: row.target.uuid });
@@ -78,9 +73,13 @@ export function BranchPanel({ sessionId, mode, catalog, onClose }: BranchPanelPr
   };
 
   const nav = useListNav(
-    rows.map((row) => ({ selectable: !row.current })),
+    rows.map((row) => ({ selectable: !row.sentinel })),
     'branch-panel',
-    { initialIndex, onSelect: select, onEscape: onClose },
+    {
+      initialIndex: branchInitialIndex(rows),
+      onSelect: select,
+      onEscape: onClose,
+    },
   );
 
   useEffect(() => {
@@ -89,22 +88,22 @@ export function BranchPanel({ sessionId, mode, catalog, onClose }: BranchPanelPr
 
   return (
     <PanelShell
-      title={TITLES[mode]}
+      title={TITLES[picker.mode]}
       testId="branch-panel"
       onClose={onClose}
       hint="↑↓ navigate · Enter apply · Esc close"
     >
       {rows.length === 0 ? (
-        <PanelEmpty text="Branch targets are not available yet." />
+        <PanelEmpty text={picker.mode === 'rewind' ? 'No rewind points yet.' : 'No fork points yet.'} />
       ) : (
         <div
           className={styles.list}
           role="listbox"
-          aria-label={TITLES[mode]}
+          aria-label={TITLES[picker.mode]}
           tabIndex={-1}
           ref={listRef}
           data-testid="branch-panel-list"
-          data-mode={mode}
+          data-mode={picker.mode}
           onKeyDown={nav.onKeyDown}
           {...nav.listProps}
         >
@@ -115,19 +114,19 @@ export function BranchPanel({ sessionId, mode, catalog, onClose }: BranchPanelPr
               role="option"
               id={optionId('branch-panel', index)}
               aria-selected={index === nav.index}
-              aria-disabled={row.current ? 'true' : undefined}
+              aria-disabled={row.sentinel ? 'true' : undefined}
               data-highlighted={index === nav.index ? 'true' : 'false'}
-              data-current={row.current ? 'true' : 'false'}
-              data-testid={row.current ? 'branch-current-row' : 'branch-row'}
+              data-current={row.sentinel ? 'true' : 'false'}
+              data-testid={row.sentinel ? 'branch-current-row' : 'branch-row'}
               onClick={() => nav.activate(index)}
             >
               <span className={styles.optionColumn}>
                 <span className={styles.optionLabel}>{row.target.content}</span>
-                {row.current ? null : (
+                {row.sentinel ? null : (
                   <span className={styles.optionMeta}>{row.target.uuid.slice(0, 8)}</span>
                 )}
               </span>
-              {row.current ? <span className={styles.badge}>current</span> : null}
+              {row.sentinel ? <span className={styles.badge}>current</span> : null}
             </div>
           ))}
         </div>

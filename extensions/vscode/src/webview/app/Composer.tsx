@@ -27,12 +27,14 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ChangeEvent, KeyboardEvent, ReactElement } from 'react';
 
-import type { CommandInfoModel, SessionViewModel } from '../../shared';
+import type { CommandInfoModel, FrontendCommand, SessionViewModel } from '../../shared';
 import {
   filterCommands,
+  isEffortLevel,
   matchCommand,
   mergeCommandCatalog,
   normalizeCommandName,
+  parseBoolArg,
   parseSlashInput,
 } from '../../shared';
 import { postToHost } from '../bridge/channel';
@@ -40,28 +42,34 @@ import styles from '../styles/app.module.css';
 import { optionId, useListNav } from './panels/listNav';
 import { selectQueuedMessages } from './selectors';
 
-/** Which overlay the composer asks the app to open. */
-export type ComposerOverlay =
-  { readonly kind: 'sessions' } | { readonly kind: 'branches'; readonly mode: 'rewind' | 'fork' };
-
 export interface ComposerProps {
   readonly session: SessionViewModel | null;
   readonly draft: string;
   readonly onDraftChange: (text: string) => void;
-  readonly onOpenOverlay: (overlay: ComposerOverlay) => void;
   /** Changes whenever the composer should take focus (mount, tab switch, host action). */
   readonly focusToken: string;
+  /**
+   * True while the host has an overlay on screen.
+   *
+   * The composer must not steal the focus from an open panel — and, just as
+   * importantly, taking it back when the panel closes is *its* job: the host closes
+   * overlays without sending `focusComposer`, so this transition is the only signal
+   * the input gets (otherwise the focus dies with the unmounted panel).
+   */
+  readonly overlayOpen: boolean;
 }
 
 export function Composer({
   session,
   draft,
   onDraftChange,
-  onOpenOverlay,
   focusToken,
+  overlayOpen,
 }: ComposerProps): ReactElement {
   const textarea = useRef<HTMLTextAreaElement>(null);
   const [candidatesDismissed, setCandidatesDismissed] = useState(false);
+  /** Feedback for a submission the composer refused (e.g. a bad `/think` argument). */
+  const [rejection, setRejection] = useState<string | null>(null);
 
   const catalog = session?.panels.commandCatalog?.commands ?? [];
   const merged = mergeCommandCatalog(catalog);
@@ -88,13 +96,17 @@ export function Composer({
   );
 
   useEffect(() => {
-    textarea.current?.focus();
-  }, [focusToken]);
+    if (!overlayOpen) {
+      textarea.current?.focus();
+    }
+  }, [focusToken, overlayOpen]);
 
-  // A different draft means a new candidate list: re-open it (Escape only silences
-  // the list for as long as the user keeps typing that same text).
+  // A different draft means a new candidate list and no stale rejection message:
+  // re-open the list (Escape only silences it for as long as the user keeps typing
+  // that same text).
   useEffect(() => {
     setCandidatesDismissed(false);
+    setRejection(null);
   }, [draft]);
 
   const working = session?.status === 'working';
@@ -122,8 +134,13 @@ export function Composer({
         return;
       }
     }
-    if (dispatch(text, session, onOpenOverlay)) {
+    const outcome = dispatch(text, session);
+    if (outcome.kind === 'sent') {
+      setRejection(null);
       onDraftChange('');
+    } else {
+      // Nothing left the composer: keep the text so the user can fix it, and say why.
+      setRejection(outcome.hint);
     }
   };
 
@@ -131,8 +148,15 @@ export function Composer({
     if (session === null) {
       return;
     }
+    // Input method editors: the Enter that commits a composition must never send the
+    // half-finished candidate list (`isComposing`; Chromium also reports 229). VS Code
+    // gates its own keybindings on the same flag (`keybindingService.ts:282-290`).
+    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
+      return;
+    }
     // Ctrl/Cmd+Escape interrupts — the Cancel action's primary keybinding
-    // (`chatExecuteActions.ts:966`, guarded by `hasActiveRequest` like here).
+    // (CHATEXE:968-976, the chord itself at :970; VS Code guards it with
+    // `hasActiveRequest`, we guard on `working`).
     if (event.key === 'Escape' && (event.ctrlKey || event.metaKey)) {
       if (working) {
         event.preventDefault();
@@ -162,7 +186,12 @@ export function Composer({
       if (candidates.length > 0) {
         event.preventDefault();
         setCandidatesDismissed(true);
+        return;
       }
+      // Nothing local to close: ask the host (it owns every overlay). Harmless when
+      // none is open — the host clears pickers that are already `null`.
+      event.preventDefault();
+      postToHost({ type: 'closeOverlays' });
       return;
     }
     if (event.key === 'Home' || event.key === 'End') {
@@ -214,7 +243,7 @@ export function Composer({
       )}
 
       {queued.length === 0 ? null : (
-        <div className={styles.queueBar} data-testid="queue-bar" aria-label="Queued messages">
+        <div className={styles.queueBar} data-testid="queue-bar" role="status" aria-label="Queued messages">
           <span className={styles.queueLabel}>{`Queued · ${queued.length}`}</span>
           {queued.map((cell) => (
             <span key={cell.id} className={styles.queueItem} title={cell.text}>
@@ -243,12 +272,19 @@ export function Composer({
           aria-expanded={candidates.length > 0}
           aria-controls={candidates.length > 0 ? 'command-candidates' : undefined}
           aria-autocomplete="list"
+          // The focus stays in the textarea, so the highlighted candidate is announced
+          // from the combobox (the listbox carries its own copy for pointer users).
+          {...nav.listProps}
           onChange={(event: ChangeEvent<HTMLTextAreaElement>) => onDraftChange(event.target.value)}
           onKeyDown={onKeyDown}
         />
         <div className={styles.composerToolbar}>
-          <span className={styles.composerHint} data-testid="composer-hint">
-            {hintFor(session, working)}
+          <span
+            className={styles.composerHint}
+            data-testid="composer-hint"
+            data-rejected={rejection === null ? 'false' : 'true'}
+          >
+            {rejection ?? hintFor(session, working)}
           </span>
           {showSend ? (
             <button
@@ -319,33 +355,48 @@ function hintFor(session: SessionViewModel | null, working: boolean): string {
 }
 
 /**
- * Route one submission to exactly one intent (design.md D6).
- *
- * Returns `true` when the draft was consumed (command handled or message sent), so
- * the caller knows whether to clear it. Nothing here decides *what* a command does —
- * it picks the bridge message that the host already understands.
+ * Outcome of a submission: either something left the composer, or it was refused
+ * with a hint the user can act on (never a silent drop).
  */
-export function dispatch(
-  text: string,
-  session: SessionViewModel,
-  onOpenOverlay: (overlay: ComposerOverlay) => void,
-): boolean {
+export type DispatchOutcome = { readonly kind: 'sent' } | { readonly kind: 'invalid'; readonly hint: string };
+
+const USAGE: Record<string, string> = {
+  '/think': 'Usage: /think [on|off|low|medium|high|xhigh|max]',
+  '/yolo': 'Usage: /yolo [on|off]',
+};
+
+/**
+ * Route one submission to exactly one intent (design.md D6, as frozen by
+ * `interfaces.md`).
+ *
+ * The panel commands are *not* handled here: bare `/ss`, `/rewind` and `/fork` are
+ * forwarded as commands, and the host answers by opening `sessionPicker` /
+ * `branchPicker`. Nothing in the webview opens an overlay.
+ *
+ * Commands whose arguments are a closed vocabulary (`/think`, `/yolo`) are validated
+ * before anything is sent — an illegal value must never reach the gateway, and the
+ * user gets a usage line back instead (the TUI behaves the same way,
+ * `crates/wing/src/app/commands.rs:594-652`).
+ */
+export function dispatch(text: string, session: SessionViewModel): DispatchOutcome {
   const parsed = parseSlashInput(text);
-  if (parsed === null) {
+  // A lone `/` is not a command (the candidate list owns that state and may have been
+  // dismissed): it goes to the model as text, exactly like the TUI does.
+  if (parsed === null || normalizeCommandName(parsed.name) === '/') {
     postToHost({ type: 'sendMessage', sessionId: session.sessionId, text });
-    return true;
+    return SENT;
   }
 
   const command = matchCommand(parsed.name);
   if (command === null) {
-    // A gateway prompt command (`/init`, …): the host resolves it.
-    postToHost({
-      type: 'runPromptCommand',
-      sessionId: session.sessionId,
-      name: normalizeCommandName(parsed.name),
-      argsText: parsed.args,
-    });
-    return true;
+    // A gateway prompt command (`/init`, …): the host resolves it. The leading slash
+    // is part of the wire name (`interfaces.md`).
+    return forward(session, normalizeCommandName(parsed.name), parsed.args);
+  }
+
+  // Everything the host owns goes out unchanged: one place, no per-command knowledge.
+  if (isFrontend(command) && command.kind === 'forward') {
+    return forward(session, command.name, parsed.args);
   }
 
   const { sessionId, meta } = session;
@@ -354,67 +405,87 @@ export function dispatch(
   switch (command.name) {
     case '/new':
       postToHost({ type: 'newSession' });
-      return true;
+      return SENT;
     case '/model':
       if (bare) {
         postToHost({ type: 'openModelPicker', sessionId });
       } else {
-        forward(sessionId, command.name, parsed.args);
+        return forward(session, command.name, parsed.args);
       }
-      return true;
+      return SENT;
     case '/session':
-      if (bare) {
-        onOpenOverlay({ kind: 'sessions' });
-      } else {
-        forward(sessionId, command.name, parsed.args);
+    case '/rewind':
+    case '/fork':
+      // Bare or with an id/uuid: the host opens the picker or executes the command.
+      // The **typed** spelling travels (`/ss` stays `/ss`, `interfaces.md`), because
+      // the host's table knows the aliases the same way the TUI's does.
+      return forward(session, parsed.name, parsed.args);
+    case '/think': {
+      const arg = parseBoolArg(parsed.args);
+      switch (arg.kind) {
+        case 'empty':
+          postToHost({ type: 'setThinking', sessionId, enabled: !meta.thinking });
+          return SENT;
+        case 'on':
+          postToHost({ type: 'setThinking', sessionId, enabled: true });
+          return SENT;
+        case 'off':
+          postToHost({ type: 'setThinking', sessionId, enabled: false });
+          return SENT;
+        case 'other':
+          if (isEffortLevel(arg.value)) {
+            postToHost({ type: 'setThinking', sessionId, enabled: true });
+            postToHost({ type: 'setEffort', sessionId, effort: arg.value });
+            return SENT;
+          }
+          return { kind: 'invalid', hint: USAGE['/think'] ?? '' };
+        default:
+          return SENT;
       }
-      return true;
-    case '/think':
-      if (bare) {
-        postToHost({ type: 'setThinking', sessionId, enabled: !meta.thinking });
-      } else if (parsed.args === 'on') {
-        postToHost({ type: 'setThinking', sessionId, enabled: true });
-      } else if (parsed.args === 'off') {
-        postToHost({ type: 'setThinking', sessionId, enabled: false });
-      } else {
-        postToHost({ type: 'setThinking', sessionId, enabled: true });
-        postToHost({ type: 'setEffort', sessionId, effort: parsed.args });
+    }
+    case '/yolo': {
+      const arg = parseBoolArg(parsed.args);
+      switch (arg.kind) {
+        case 'empty':
+          postToHost({ type: 'setYolo', sessionId, enabled: !meta.yolo });
+          return SENT;
+        case 'on':
+          postToHost({ type: 'setYolo', sessionId, enabled: true });
+          return SENT;
+        case 'off':
+          postToHost({ type: 'setYolo', sessionId, enabled: false });
+          return SENT;
+        default:
+          return { kind: 'invalid', hint: USAGE['/yolo'] ?? '' };
       }
-      return true;
-    case '/yolo':
-      if (bare) {
-        postToHost({ type: 'setYolo', sessionId, enabled: !meta.yolo });
-      } else {
-        postToHost({ type: 'setYolo', sessionId, enabled: parsed.args === 'on' });
-      }
-      return true;
+    }
     case '/compact':
       if (bare) {
         postToHost({ type: 'compact', sessionId });
       } else {
-        forward(sessionId, command.name, parsed.args);
+        // The `compact` intent carries no instruction; the command form does.
+        return forward(session, command.name, parsed.args);
       }
-      return true;
-    case '/rewind':
-    case '/fork':
-      if (bare) {
-        onOpenOverlay({ kind: 'branches', mode: command.name === '/rewind' ? 'rewind' : 'fork' });
-      } else {
-        forward(sessionId, command.name, parsed.args);
-      }
-      return true;
+      return SENT;
     default:
-      forward(sessionId, command.name, parsed.args);
-      return true;
+      return forward(session, command.name, parsed.args);
   }
 }
 
-/** `/clear`, `/copy`, `/agents`, … — the host owns them (it has the gateway client). */
-function forward(sessionId: string, name: string, argsText: string): void {
+const SENT: DispatchOutcome = { kind: 'sent' };
+
+/** True when the matched entry really is one of our own table's rows. */
+function isFrontend(command: CommandInfoModel): command is FrontendCommand {
+  return 'kind' in command;
+}
+
+/** `/clear`, `/copy`, `/agents`, `/ss`, `/rewind`, … — the host owns them. */
+function forward(session: SessionViewModel, name: string, argsText: string): DispatchOutcome {
   postToHost({
     type: 'runPromptCommand',
-    sessionId,
+    sessionId: session.sessionId,
     name: normalizeCommandName(name),
     argsText,
   });
+  return SENT;
 }
