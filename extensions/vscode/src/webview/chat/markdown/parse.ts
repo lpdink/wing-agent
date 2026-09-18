@@ -34,7 +34,17 @@ export type MarkdownInline =
 export type MarkdownNode =
   | { readonly kind: 'paragraph'; readonly children: readonly MarkdownInline[] }
   | { readonly kind: 'heading'; readonly level: number; readonly children: readonly MarkdownInline[] }
-  | { readonly kind: 'code'; readonly lang: string; readonly code: string }
+  | {
+      readonly kind: 'code';
+      readonly lang: string;
+      readonly code: string;
+      /**
+       * True when the source carried the closing fence. An *open* fence is still
+       * being streamed, so its content can grow — the code renderer uses this to
+       * defer highlighting until the code is final (see `CodeBlock`).
+       */
+      readonly closed: boolean;
+    }
   | { readonly kind: 'quote'; readonly children: readonly MarkdownNode[] }
   | {
       readonly kind: 'list';
@@ -59,19 +69,24 @@ const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true });
 
 /** Parse one Markdown block into render-ready nodes. Pure: same source → same AST. */
 export function parseMarkdown(source: string): readonly MarkdownNode[] {
-  return parseBlocks(markdown.parse(source, {}), { index: 0 }, null);
+  return parseBlocks(markdown.parse(source, {}), { index: 0, lines: source.split('\n') }, null);
 }
 
-/** Mutable position in the token stream. */
+/** Mutable position in a token stream. */
 interface Cursor {
   index: number;
+}
+
+/** Block-level cursor: it also carries the source lines for fence completeness checks. */
+interface BlockCursor extends Cursor {
+  readonly lines: readonly string[];
 }
 
 /**
  * Parse block tokens until `stop` (a closing token type; `null` = end of input).
  * The stop token itself is consumed.
  */
-function parseBlocks(tokens: readonly Token[], cursor: Cursor, stop: string | null): MarkdownNode[] {
+function parseBlocks(tokens: readonly Token[], cursor: BlockCursor, stop: string | null): MarkdownNode[] {
   const nodes: MarkdownNode[] = [];
 
   while (cursor.index < tokens.length) {
@@ -97,11 +112,19 @@ function parseBlocks(tokens: readonly Token[], cursor: Cursor, stop: string | nu
         break;
       case 'fence':
         cursor.index += 1;
-        nodes.push({ kind: 'code', lang: languageOf(token.info), code: token.content });
+        nodes.push({
+          kind: 'code',
+          lang: languageOf(token.info),
+          // A fence token is emitted for an unterminated fence too (the content
+          // then runs to the end of the input) — look for the closing line.
+          closed: hasClosingFence(cursor.lines, token.map),
+          code: token.content,
+        });
         break;
       case 'code_block':
         cursor.index += 1;
-        nodes.push({ kind: 'code', lang: '', code: token.content });
+        // Indented code blocks have no fence to close.
+        nodes.push({ kind: 'code', lang: '', code: token.content, closed: true });
         break;
       case 'hr':
         cursor.index += 1;
@@ -134,14 +157,14 @@ function parseBlocks(tokens: readonly Token[], cursor: Cursor, stop: string | nu
 }
 
 /** `paragraph_open inline paragraph_close` / `heading_open inline heading_close`. */
-function parseInlineAfter(tokens: readonly Token[], cursor: Cursor): readonly MarkdownInline[] {
+function parseInlineAfter(tokens: readonly Token[], cursor: BlockCursor): readonly MarkdownInline[] {
   const inline = tokens[cursor.index + 1];
   const children = inline !== undefined && inline.type === 'inline' ? (inline.children ?? []) : [];
   cursor.index += inline === undefined ? 1 : 3;
   return parseInline(children);
 }
 
-function parseList(tokens: readonly Token[], cursor: Cursor, open: Token): MarkdownNode {
+function parseList(tokens: readonly Token[], cursor: BlockCursor, open: Token): MarkdownNode {
   const ordered = open.type === 'ordered_list_open';
   const close = ordered ? 'ordered_list_close' : 'bullet_list_close';
   const start = Number.parseInt(open.attrGet('start') ?? '1', 10);
@@ -168,7 +191,7 @@ function parseList(tokens: readonly Token[], cursor: Cursor, open: Token): Markd
   return { kind: 'list', ordered, start: Number.isNaN(start) ? 1 : start, items };
 }
 
-function parseTable(tokens: readonly Token[], cursor: Cursor): MarkdownNode {
+function parseTable(tokens: readonly Token[], cursor: BlockCursor): MarkdownNode {
   const aligns: (string | null)[] = [];
   const head: MarkdownInline[][][] = [];
   const rows: MarkdownInline[][][] = [];
@@ -225,6 +248,34 @@ function parseTable(tokens: readonly Token[], cursor: Cursor): MarkdownNode {
   }
 
   return { kind: 'table', aligns, head, rows };
+}
+
+/** A line made of at least three backticks or tildes, optionally with an info string. */
+const FENCE_MARKER = /^(`{3,}|~{3,})/;
+
+/**
+ * True when the fence that starts at `map[0]` is closed later in the source.
+ *
+ * `map` is markdown-it's `[startLine, endLine]` (end exclusive) and is `null` for
+ * tokens without a source position, which only happens for injected tokens.
+ */
+function hasClosingFence(lines: readonly string[], map: readonly [number, number] | null): boolean {
+  if (map === null) {
+    return true;
+  }
+  const opening = FENCE_MARKER.exec((lines[map[0]] ?? '').trim());
+  if (opening === null) {
+    return true;
+  }
+  const marker = opening[1] ?? '';
+  const char = marker.charAt(0);
+  for (let index = map[0] + 1; index < lines.length; index += 1) {
+    const line = (lines[index] ?? '').trim();
+    if (line.length >= marker.length && line.split('').every((character) => character === char)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** `style="text-align:center"` — the only attribute markdown-it puts on a `th` token. */

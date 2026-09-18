@@ -3,10 +3,21 @@
  *
  * The transcript re-renders the streaming cell on every `append_text` patch. If
  * that meant re-parsing the whole answer, a long reply would cost O(n²). Split
- * the text into *blocks* instead: everything before the last blank line outside a
- * code fence is finished, and only the trailing block ("the active tail") can
- * still change. `MarkdownBlock` memoizes on the block source, so appending is
+ * the text into *blocks* instead: everything before the last complete block
+ * boundary is finished, and only the trailing block ("the active tail") can still
+ * change. `MarkdownBlock` memoizes on the block source, so appending is
  * proportional to the tail, not to the answer.
+ *
+ * ## What counts as a block boundary
+ *
+ * A blank line **that has been terminated by a newline**, outside a code fence.
+ * The "terminated" part is essential: while text is arriving, a trailing `\n`
+ * only means "the next line starts here", and that next line can still grow the
+ * *current* block. Treating the unterminated blank line as a boundary made the
+ * splitter hand out a block that the very next chunk extended — the renderer then
+ * had to take it back and re-create the DOM (and restart its fade-in) several
+ * times per paragraph. With the rule below, `stable(T)` is always a prefix of
+ * `stable(T + chunk)`: a promoted block is final.
  *
  * This mirrors VS Code's chat renderer, which decides whether a fenced block is
  * complete by looking for its closing fence (`chatMarkdownContentPart.ts`, the
@@ -28,7 +39,10 @@ interface FenceState {
 const FENCE_OPEN = /^(`{3,}|~{3,})/;
 
 export interface StreamBlocks {
-  /** Finished blocks, in order. Each is stable: it never changes again. */
+  /**
+   * Finished blocks, in order. Each is **final**: growing the text cannot change
+   * it (it is always a prefix of the next result's `stable`).
+   */
   readonly stable: readonly string[];
   /** The trailing block still being streamed; `''` when the text ends on a boundary. */
   readonly tail: string;
@@ -62,8 +76,8 @@ export function splitStreamingBlocks(text: string): StreamBlocks {
       if (opener !== null) {
         const marker = opener[1] ?? '';
         fence = { char: marker.charAt(0) === '`' ? '`' : '~', size: marker.length };
-      } else if (trimmed === '') {
-        // Boundary between finished blocks (outside fences only).
+      } else if (trimmed === '' && newline !== -1) {
+        // A *terminated* blank line between finished blocks (outside fences only).
         const block = text.slice(blockStart, lineStart);
         if (block.trim() !== '') {
           stable.push(block);

@@ -55,6 +55,72 @@ describe('splitStreamingBlocks', () => {
   });
 });
 
+describe('splitStreamingBlocks (streaming invariant)', () => {
+  /** Deterministic LCG so a failure can be reproduced from its seed. */
+  function makeRandom(seed: number): () => number {
+    let state = (seed * 2654435761) >>> 0;
+    return () => {
+      state = (state * 1664525 + 1013904223) >>> 0;
+      return state / 0x1_0000_0000;
+    };
+  }
+
+  const DOCUMENTS = [
+    '- item 0\n- item 1\n- item 2\n- item 3\n',
+    'first line\nsecond line\n\nnext paragraph\n',
+    'Text with `code` and **bold**.\nAnother hard-wrapped line.\n\n> quote\n',
+    '| a | b |\n| - | - |\n| 1 | 2 |\n\n```ts\nconst a = 1;\n\nconst b = 2;\n```\n\ntrailing\n',
+    '```python\ndef f():\n    return 1\n```\n',
+    'para\n\n\n\nblank lines in between\n\n',
+    '~~~\nunclosed fence\n\nstill inside\n',
+  ];
+
+  it('never retracts or rewrites a block that was already stable (fuzz, 60 seeds)', () => {
+    for (let seed = 1; seed <= 60; seed += 1) {
+      const random = makeRandom(seed);
+      const document = DOCUMENTS[Math.floor(random() * DOCUMENTS.length)] ?? DOCUMENTS[0] ?? '';
+      const chunkSize = 1 + Math.floor(random() * 9);
+      let text = '';
+      let previous: readonly string[] = [];
+
+      while (text.length < document.length) {
+        text = document.slice(0, Math.min(document.length, text.length + chunkSize));
+        const { stable, tail } = splitStreamingBlocks(text);
+
+        // The property: `stable(T)` is always a prefix of `stable(T + chunk)`.
+        expect({ seed, chunk: text.length, stable: stable.slice(0, previous.length) }).toEqual({
+          seed,
+          chunk: text.length,
+          stable: previous,
+        });
+        // …and every block is non-empty (an empty block would be a phantom).
+        expect(stable.every((block) => block.trim() !== '')).toBe(true);
+        expect(tail === '' || !tail.startsWith('\u0000')).toBe(true);
+        previous = stable;
+      }
+    }
+  });
+
+  it('keeps a line-oriented answer live until a terminated blank line arrives', () => {
+    // A trailing `\n` does not end the block…
+    expect(splitStreamingBlocks('- item 0\n')).toEqual({ stable: [], tail: '- item 0\n' });
+    expect(splitStreamingBlocks('- item 0\n- item 1\n')).toEqual({
+      stable: [],
+      tail: '- item 0\n- item 1\n',
+    });
+    // …a terminated blank line does.
+    expect(splitStreamingBlocks('- item 0\n- item 1\n\n')).toEqual({
+      stable: ['- item 0\n- item 1\n'],
+      tail: '',
+    });
+    // …and the promoted block never changes again.
+    expect(splitStreamingBlocks('- item 0\n- item 1\n\n- item 2\n')).toEqual({
+      stable: ['- item 0\n- item 1\n'],
+      tail: '- item 2\n',
+    });
+  });
+});
+
 describe('parseMarkdown', () => {
   it('parses headings, paragraphs and inline emphasis', () => {
     const nodes = parseMarkdown('## Title\n\nsome **bold** and *italic* and ~~gone~~\n');
