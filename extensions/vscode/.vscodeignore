@@ -15,6 +15,11 @@ preview/**
 # Dev-only build output (the preview harness is not part of the extension)
 dist/preview/**
 
+# The end-to-end smoke is a developer tool (`pnpm run smoke:gateway`), not a
+# shipped asset: it needs a `wing-gateway` binary and Node >= 22 and never runs
+# inside the extension host.
+out/smoke/**
+
 # Tooling / config
 .vscode/**
 tsconfig*.json
@@ -27,6 +32,8 @@ vite.config.mts
 vite.preview.config.mts
 vitest.config.mts
 esbuild.mjs
+esbuild.smoke.mjs
+tools/**
 *.vsix
 
 # Build leftovers

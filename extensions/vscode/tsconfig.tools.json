@@ -7,5 +7,12 @@
     "allowJs": true,
     "checkJs": false
   },
-  "include": ["esbuild.mjs", "vite.config.mts", "vite.preview.config.mts", "vitest.config.mts"]
+  "include": [
+    "esbuild.mjs",
+    "esbuild.smoke.mjs",
+    "vite.config.mts",
+    "vite.preview.config.mts",
+    "vitest.config.mts",
+    "tools/**/*.ts"
+  ]
 }
