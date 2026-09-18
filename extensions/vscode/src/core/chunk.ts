@@ -28,7 +28,7 @@
  * {@link ChunkReassembler.deadline}.
  */
 
-import { type WingEvent, decodeWingEvent, isKnownEvent } from './protocol/events';
+import { type WingEvent, decodeWingEvent, isKnownEvent, isKnownEventType } from './protocol/events';
 import { isJsonObject, tryParseJson } from './protocol/json';
 import { type CoreLogger, silentLogger } from './logging';
 import { utf8ByteLength } from './text';
@@ -283,7 +283,19 @@ export class ChunkReassembler {
     const joined = pending.parts.join('');
     const result = tryParseJson(joined);
     const parsed: unknown = result.ok ? result.value : undefined;
-    if (!isJsonObject(parsed) || typeof parsed['type'] !== 'string') {
+    // Closure criterion, mirroring `chunk.rs` (`serde_json::from_str::<WingEvent>`):
+    // the joined payload must be a *well-formed* event. A declared type this build
+    // knows but cannot decode (missing / ill-typed required field) means the
+    // reassembled payload is corrupt — usually a broken `sync_session` replay —
+    // and the correct recovery is to drop the connection so the reconnect path
+    // resynchronises, not to hand the host a replay it silently cannot apply.
+    // Unknown types stay deliverable (forward compatibility): `chunk.rs` has the
+    // same escape hatch through `WingEvent::Unknown`.
+    const malformed =
+      !isJsonObject(parsed) ||
+      typeof parsed['type'] !== 'string' ||
+      (isKnownEventType(parsed['type']) && !isKnownEvent(decodeWingEvent(parsed)));
+    if (malformed) {
       return {
         kind: 'fail',
         detail: `reassembled "${pending.of_type}" payload (id=${pending.id}) is not a valid event`,

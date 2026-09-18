@@ -167,7 +167,7 @@ export function optJsonValue(object: JsonObject, key: string): JsonValue | null 
   return value === undefined ? null : value;
 }
 
-/** Array field as raw JSON values; absent / `null` → `[]`. */
+/** Array field as raw JSON values; absent / `null` → `[]` (Pydantic `default_factory`). */
 export function readJsonArray(object: JsonObject, key: string): readonly unknown[] {
   const value = object[key];
   if (value === undefined || value === null) {
@@ -179,9 +179,32 @@ export function readJsonArray(object: JsonObject, key: string): readonly unknown
   return value;
 }
 
+/**
+ * Array field that Python marks **required** (no `default_factory`): a missing
+ * value is a malformed payload, not an empty list.
+ *
+ * Element-level tolerance is unchanged — the collection itself is just not
+ * optional. Guessing `[]` would be the same "documented strict, implemented
+ * forgiving" trap the scalar helpers avoid.
+ */
+export function reqJsonArray(object: JsonObject, key: string): readonly unknown[] {
+  if (object[key] === undefined || object[key] === null) {
+    throw new ProtocolDecodeError(`required field "${key}" is missing (expected an array)`);
+  }
+  return readJsonArray(object, key);
+}
+
 /** Array of JSON objects; absent / `null` → `[]`. */
 export function readJsonObjectArray(object: JsonObject, key: string): readonly JsonObject[] {
   return readJsonArray(object, key).filter(isJsonObject);
+}
+
+/** Array of strings that Python marks **required** (see {@link reqJsonArray}). */
+export function reqStringArray(object: JsonObject, key: string): readonly string[] {
+  if (object[key] === undefined || object[key] === null) {
+    throw new ProtocolDecodeError(`required field "${key}" is missing (expected an array of strings)`);
+  }
+  return readStringArray(object, key);
 }
 
 /** Array of strings; absent / `null` → `[]`. */

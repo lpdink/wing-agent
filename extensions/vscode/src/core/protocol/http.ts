@@ -24,8 +24,10 @@ import {
   readJsonArray,
   readStringArray,
   reqBoolean,
+  reqJsonArray,
   reqNumber,
   reqString,
+  reqStringArray,
   stringOr,
 } from './json';
 import { type AgentInfo, type BranchTarget, decodeAgentInfo, decodeBranchTarget } from './models';
@@ -426,7 +428,7 @@ export function decodeSessionListResponse(value: unknown): SessionListResponse |
   if (!isJsonObject(value)) {
     return null;
   }
-  return { sessions: decodeEach(readJsonArray(value, 'sessions'), decodeSessionInfo) };
+  return { sessions: decodeEach(reqJsonArray(value, 'sessions'), decodeSessionInfo) };
 }
 
 export function decodeSessionGetResponse(value: unknown): SessionGetResponse | null {
@@ -439,7 +441,7 @@ export function decodeSessionGetResponse(value: unknown): SessionGetResponse | n
     template_name: optString(value, 'template_name'),
     workspace: optString(value, 'workspace'),
     status: enumOr(value, 'status', SESSION_STATUSES, 'idle'),
-    messages: decodeEach(readJsonArray(value, 'messages'), decodeSessionMessage),
+    messages: decodeEach(reqJsonArray(value, 'messages'), decodeSessionMessage),
     agent: decodeAgentInfo(value['agent']),
   };
 }
@@ -452,7 +454,7 @@ export function decodeSessionInfoResponse(value: unknown): SessionInfoResponse |
   return {
     model: reqString(value, 'model'),
     api_url: reqString(value, 'api_url'),
-    tools: readStringArray(value, 'tools'),
+    tools: reqStringArray(value, 'tools'),
     total_tokens: reqNumber(value, 'total_tokens'),
     context_window_tokens: reqNumber(value, 'context_window_tokens'),
     thinking: reqBoolean(value, 'thinking'),

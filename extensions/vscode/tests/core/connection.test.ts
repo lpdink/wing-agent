@@ -355,6 +355,26 @@ describe('failure handling inside a live connection', () => {
     expect(gateway.last.closedWith).not.toBeNull();
   });
 
+  it('reconnects when a reassembled payload is a malformed known type (review r1 N1)', async () => {
+    const gateway = new FakeGateway();
+    gateway.autoHandshake = false;
+    const connection = await connectOk(gateway);
+    const events: WingEvent[] = [];
+    connection.onEvent((event) => events.push(event));
+
+    // `sync_session` is the realistic case: a corrupt replay must be re-fetched
+    // over a fresh connection rather than delivered as an unusable unknown event.
+    const frames = chunkFrames('{"type":"sync_session","messages":[]}', { id: 'broken' });
+    gateway.last.push(frames[0] as string);
+    expect(events).toStrictEqual([]);
+    gateway.last.push(frames[1] as string);
+
+    expect(events).toStrictEqual([]);
+    expect(connection.state.lastError).toMatchObject({ kind: 'reassembly' });
+    expect(connection.state.status).toBe('reconnecting');
+    expect(gateway.last.closedWith).not.toBeNull();
+  });
+
   it('fails the connection when a fragmented event never completes', async () => {
     const gateway = new FakeGateway();
     gateway.autoHandshake = false;

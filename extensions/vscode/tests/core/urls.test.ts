@@ -28,10 +28,30 @@ describe('gatewayUrls', () => {
     expect(gatewayUrls({ host: 'h', port: 1, apiKey: null }).wsUrl).toBe('ws://h:1/ws');
   });
 
-  it('brackets bare IPv6 literals and defaults an empty host', () => {
+  it('brackets only real IPv6 literals and defaults an empty host', () => {
     expect(gatewayUrls({ host: '::1', port: 32523 }).httpBaseUrl).toBe('http://[::1]:32523');
     expect(gatewayUrls({ host: '[::1]', port: 32523 }).httpBaseUrl).toBe('http://[::1]:32523');
+    expect(gatewayUrls({ host: 'fe80::1%en0', port: 32523 }).httpBaseUrl).toBe('http://[fe80::1%en0]:32523');
+    expect(gatewayUrls({ host: '::ffff:127.0.0.1', port: 1 }).httpBaseUrl).toBe(
+      'http://[::ffff:127.0.0.1]:1',
+    );
     expect(gatewayUrls({ host: '  ', port: 9 }).httpBaseUrl).toBe('http://127.0.0.1:9');
+  });
+
+  it('reports a host that carries a port as a configuration error (review r1 N3)', () => {
+    // Bracketing anything containing ":" produced `http://[localhost:8080]:32523`,
+    // an invalid URL that only failed deep in the WS layer with an opaque message.
+    for (const host of ['localhost:8080', '127.0.0.1:32523', 'example.com:', '[::1]:8080']) {
+      expect(() => gatewayUrls({ host, port: 32523 }), host).toThrowError(
+        expect.objectContaining({ name: 'GatewayHttpError', kind: 'config' }),
+      );
+    }
+    // The message must name the offending value and the fix.
+    expect(() => gatewayUrls({ host: 'localhost:8080', port: 32523 })).toThrowError(
+      /host must not contain a port: "localhost:8080"/,
+    );
+    expect(() => gatewayUrls({ host: '[::1]:8080', port: 32523 })).toThrowError(/must not contain a port/);
+    expect(() => gatewayUrls({ host: '[::1', port: 32523 })).toThrowError(/not a valid IPv6 literal/);
   });
 
   it('redacts the key before it can reach a log line', () => {

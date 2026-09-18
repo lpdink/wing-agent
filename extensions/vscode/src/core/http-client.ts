@@ -16,7 +16,7 @@
  *   `GatewayHttpError{kind:'malformed-response'}`, not a cast.
  */
 
-import { GatewayHttpError } from './errors';
+import { GatewayHttpError, describeThrown } from './errors';
 import { type CoreLogger, consoleLogger } from './logging';
 import { type JsonObject, ProtocolDecodeError, jsonBody, tryParseJson } from './protocol/json';
 import {
@@ -66,7 +66,13 @@ import {
   decodeToolsListResponse,
   decodeUpdateSessionResponse,
 } from './protocol/http';
-import { type HttpMethod, type HttpTransport, createFetchTransport } from './transport/http';
+import {
+  type HttpMethod,
+  type HttpTransport,
+  type HttpTransportRequest,
+  type HttpTransportResponse,
+  createFetchTransport,
+} from './transport/http';
 import { normalizeApiKey } from './urls';
 
 /** Default deadline for one HTTP round trip (matches the Rust client's 60 s). */
@@ -372,7 +378,7 @@ export class GatewayHttpClient {
       headers[key] = value;
     }
 
-    const response = await this.transport.request({
+    const response = await this.callTransport(spec, {
       method: spec.method,
       url,
       headers,
@@ -384,16 +390,42 @@ export class GatewayHttpClient {
     if (response.status < 200 || response.status >= 300) {
       throw this.httpError(spec, response.status, response.body);
     }
-    return this.decodeBody(spec, response.body);
+    return this.decodeBody(spec, response.status, response.body);
   }
 
-  private decodeBody<T>(spec: RequestSpec<T>, body: string): T {
+  /**
+   * Perform the round trip, guaranteeing the client's error contract.
+   *
+   * `createFetchTransport` already reports `GatewayHttpError`, but a custom
+   * `HttpTransport` (the host's fake gateway today, an Electron adapter
+   * tomorrow) may throw anything — wrapping here keeps "every failure of this
+   * client is a typed `GatewayHttpError`" true for every transport.
+   */
+  private async callTransport<T>(
+    spec: RequestSpec<T>,
+    request: HttpTransportRequest,
+  ): Promise<HttpTransportResponse> {
+    try {
+      return await this.transport.request(request);
+    } catch (cause) {
+      if (cause instanceof GatewayHttpError) {
+        throw cause;
+      }
+      throw new GatewayHttpError({
+        kind: 'network',
+        message: `${spec.method} ${spec.path} failed: ${describeThrown(cause)}`,
+        cause,
+      });
+    }
+  }
+
+  private decodeBody<T>(spec: RequestSpec<T>, status: number, body: string): T {
     const parsed = tryParseJson(body);
     if (!parsed.ok) {
       throw new GatewayHttpError({
         kind: 'malformed-response',
         message: `${spec.method} ${spec.path} returned a body that is not JSON: ${parsed.error}`,
-        status: 200,
+        status,
         rawBody: body,
       });
     }
@@ -413,7 +445,7 @@ export class GatewayHttpClient {
       throw new GatewayHttpError({
         kind: 'malformed-response',
         message: `${spec.method} ${spec.path} returned an unexpected response shape`,
-        status: 200,
+        status,
         rawBody: body,
       });
     }

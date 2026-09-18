@@ -217,6 +217,27 @@ describe('chunk reassembly — malformed envelopes fail safe', () => {
       'not a valid event',
     );
   });
+
+  it('rejects a reassembled payload that is a malformed *known* type (review r1 N1)', () => {
+    // `chunk.rs` parses the joined payload as a WingEvent: a known type whose
+    // payload does not decode is an error there, and the correct recovery is a
+    // reconnect + resync (a degraded `sync_session` replay would be silently
+    // unusable). This payload declares `text` but carries no `content`.
+    const reassembler = new ChunkReassembler();
+    expectPending(reassembler.onText(chunkEnvelope({ index: 0, data: '{"type":"text"' })));
+    const detail = fail(reassembler.onText(chunkEnvelope({ index: 1, data: '}' })));
+    expect(detail).toContain('not a valid event');
+    expect(reassembler.isAssembling()).toBe(false);
+  });
+
+  it('still delivers a reassembled payload of an unknown type (forward compatibility)', () => {
+    const reassembler = new ChunkReassembler();
+    expectPending(reassembler.onText(chunkEnvelope({ index: 0, data: '{"type":"from_the_f' })));
+    const events = deliver(reassembler.onText(chunkEnvelope({ index: 1, data: 'uture","x":1}' })));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: 'from_the_future' });
+    expect(isKnownEvent(events[0] as never)).toBe(false);
+  });
 });
 
 describe('chunk reassembly — bounds', () => {
