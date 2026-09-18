@@ -435,8 +435,7 @@ export class SessionManager {
         workspace: source.record.meta.workspace === '' ? null : source.record.meta.workspace,
         createdAt: '',
       });
-      record.draft = response.draft;
-      record.dirtyState = true;
+      record.setDraft(response.draft);
       const managed = this.adopt(record, { activate: true });
       this.clearPicker('branchPicker');
       await this.subscribe(managed);
@@ -791,12 +790,17 @@ export class SessionManager {
       (!managed.subscribed || connection === null || connection.state.status !== 'connected')
     ) {
       // TUI parity: never queue. The message did not leave the client, so the
-      // user gets it back in the composer instead of a phantom pending bubble.
+      // text goes back into the composer instead of a phantom pending bubble —
+      // the composer clears optimistically (it cannot know whether the host
+      // forwarded anything), so dropping the text here would lose the user's
+      // input exactly when they need it most.
+      this.returnToComposer(managed.record, text);
       this.toast('warning', 'Not sent — the gateway is not connected.');
       this.postUi({ kind: 'focusComposer' });
       return;
     }
     if (connection === null) {
+      this.returnToComposer(managed.record, text);
       this.toast('warning', 'Not sent — the gateway is not connected.');
       return;
     }
@@ -818,6 +822,18 @@ export class SessionManager {
       this.flush(record);
       this.reportFailure('Send failed', error);
     }
+  }
+
+  /**
+   * Hand text that never left the client back to the composer.
+   *
+   * The draft is a one-shot restore (`state.draft` + `draftSeq`), so it must be
+   * installed through {@link SessionRecord.setDraft} and flushed immediately —
+   * the webview has already cleared its optimistic copy by then.
+   */
+  private returnToComposer(record: SessionRecord, text: string): void {
+    record.setDraft(text);
+    this.flush(record);
   }
 
   /**
@@ -1291,11 +1307,12 @@ export class SessionManager {
 
   /**
    * The draft is a one-shot restore: once the webview has been told about it, a
-   * later `state` must carry `null` so it can never overwrite typing.
+   * later `state` must carry `null` so it can never overwrite typing. The token
+   * (`record.draftSeq`) is *not* consumed here — see `SessionStateModel.draftSeq`.
    */
   private consumeDraft(record: SessionRecord): void {
     if (record.draft !== null) {
-      record.draft = null;
+      record.consumeDraft();
     }
   }
 

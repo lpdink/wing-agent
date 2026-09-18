@@ -1,7 +1,8 @@
-import { fireEvent, within } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { act, fireEvent, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { BRIDGE_PROTOCOL_VERSION, EMPTY_PANELS } from '../../src/shared';
+import { MAX_TOASTS, TOAST_TIMEOUT_MS } from '../../src/webview/state/store';
 import {
   makeEmptySession,
   makeFixtureSession,
@@ -321,5 +322,63 @@ describe('host banners', () => {
     pushUi(mounted, { kind: 'toast', level: 'warning', message: 'gateway restarting' });
 
     expect(within(mounted.container).getByTestId('toasts')).toHaveTextContent('gateway restarting');
+  });
+
+  /**
+   * Review #109 [P2-4]: toasts used to live forever (nothing called
+   * `dismissToast`), filling the `role="log"` region for the life of the window.
+   */
+  it('dismisses a toast on its own after the level deadline', () => {
+    vi.useFakeTimers();
+    try {
+      const mounted = mountWebview([makeFixtureSession()]);
+      pushUi(mounted, { kind: 'toast', level: 'info', message: 'copied to clipboard' });
+      expect(within(mounted.container).getByTestId('toasts')).toHaveTextContent('copied to clipboard');
+
+      act(() => {
+        vi.advanceTimersByTime(TOAST_TIMEOUT_MS.info - 1);
+      });
+      expect(within(mounted.container).getByTestId('toasts')).toHaveTextContent('copied to clipboard');
+
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(within(mounted.container).queryByText('copied to clipboard')).toBeNull();
+      // An empty region is not rendered at all (the shell hides it).
+      expect(within(mounted.container).queryByTestId('toasts')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps an error toast longer and lets the user close it immediately', () => {
+    vi.useFakeTimers();
+    try {
+      const mounted = mountWebview([makeFixtureSession()]);
+      pushUi(mounted, { kind: 'toast', level: 'error', message: 'boom' });
+
+      act(() => {
+        vi.advanceTimersByTime(TOAST_TIMEOUT_MS.warning);
+      });
+      // Still there: errors outlive the shorter levels on purpose.
+      expect(within(mounted.container).getByTestId('toasts')).toHaveTextContent('boom');
+
+      fireEvent.click(within(mounted.container).getByRole('button', { name: /Dismiss: boom/ }));
+      expect(within(mounted.container).queryByTestId('toasts')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never renders more than MAX_TOASTS, newest last', () => {
+    const mounted = mountWebview([makeFixtureSession()]);
+    for (let index = 0; index < MAX_TOASTS + 3; index += 1) {
+      pushUi(mounted, { kind: 'toast', level: 'info', message: `note ${index}` });
+    }
+
+    const toasts = within(mounted.container).getAllByText(/^note \d$/);
+    expect(toasts).toHaveLength(MAX_TOASTS);
+    expect(toasts[0]).toHaveTextContent(`note ${3}`);
+    expect(toasts[MAX_TOASTS - 1]).toHaveTextContent(`note ${MAX_TOASTS + 2}`);
   });
 });

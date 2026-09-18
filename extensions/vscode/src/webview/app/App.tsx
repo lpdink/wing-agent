@@ -23,8 +23,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 
 import { postToHost } from '../bridge/channel';
-import { useAppStore } from '../state/appStore';
+import { appStore, useAppStore } from '../state/appStore';
 import { selectActiveSession } from '../state/store';
+import type { ToastModel } from '../state/store';
+import { TOAST_TIMEOUT_MS } from '../state/store';
 import { TranscriptView } from './TranscriptView';
 import { TabBar } from './TabBar';
 import { StatusArea } from './StatusArea';
@@ -74,27 +76,31 @@ export function App(): ReactElement {
   const draft = sessionId === null ? '' : (drafts[sessionId] ?? '');
 
   /**
-   * The host hands a draft back after resume / rewind / fork (`state.draft`, and
-   * `hydrate` for a fork). It is a **one-shot restore**: the host clears its copy
-   * right after shipping it, so a later `state` carries `null` — which must never
-   * clear what the user is typing. Adoption is therefore "once per session and
-   * value": the adopted value is remembered, a repeat is ignored, and `null` is
-   * never adopted.
+   * The host hands a draft back after resume / rewind / fork (`state.draft` /
+   * `hydrate`), and also when a message never left the client (gateway not
+   * connected). It is a **one-shot restore**: the host clears its copy right
+   * after shipping it, so a later `state` carries `null` — which must never
+   * clear what the user is typing.
+   *
+   * Adoption is keyed on the host's monotone `draftSeq` token, not on the text:
+   * the same text may legitimately be restored twice (two failed sends of the
+   * same message), while a re-delivered `state` must not clobber an edited
+   * draft. `null` is never adopted.
    */
-  const adoptedDrafts = useRef<Record<string, string>>({});
+  const adoptedDrafts = useRef<Record<string, number>>({});
   const restoredDraft = session?.draft ?? null;
+  const restoredDraftSeq = session?.draftSeq ?? 0;
   useEffect(() => {
     if (sessionId === null || restoredDraft === null) {
       return;
     }
-    if (adoptedDrafts.current[sessionId] === restoredDraft) {
+    const adopted = adoptedDrafts.current[sessionId];
+    if (adopted !== undefined && restoredDraftSeq <= adopted) {
       return;
     }
-    adoptedDrafts.current[sessionId] = restoredDraft;
-    setDrafts((previous) =>
-      previous[sessionId] === restoredDraft ? previous : { ...previous, [sessionId]: restoredDraft },
-    );
-  }, [sessionId, restoredDraft]);
+    adoptedDrafts.current[sessionId] = restoredDraftSeq;
+    setDrafts((previous) => ({ ...previous, [sessionId]: restoredDraft }));
+  }, [sessionId, restoredDraft, restoredDraftSeq]);
 
   // Drafts belong to open tabs: dropping a closed tab's draft (and its adoption
   // record) keeps both maps from growing for the lifetime of the view.
@@ -194,10 +200,45 @@ function Toasts(): ReactElement {
   return (
     <div className={appStyles.toasts} data-testid="toasts" role="log">
       {toasts.map((toast) => (
-        <div key={toast.id} className={appStyles.toast} data-toast-level={toast.level}>
-          {toast.message}
-        </div>
+        <Toast key={toast.id} toast={toast} />
       ))}
+    </div>
+  );
+}
+
+/**
+ * One toast, which removes itself after its level's deadline.
+ *
+ * Review #109 [P2-4]: nothing used to call `dismissToast`, so this region grew
+ * for the lifetime of the window. The timer lives in the component (the store
+ * stays timer-free and testable in the node project) and every toast keeps a
+ * manual close button — errors are the ones a user may want to read twice.
+ */
+function Toast({ toast }: { readonly toast: ToastModel }): ReactElement {
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      // Actions are read off the singleton (they are stable, and the hook only
+      // exposes state — see `useAppStore`).
+      appStore.getState().dismissToast(toast.id);
+    }, TOAST_TIMEOUT_MS[toast.level]);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [toast.id, toast.level]);
+
+  return (
+    <div className={appStyles.toast} data-toast-level={toast.level}>
+      <span className={appStyles.toastMessage}>{toast.message}</span>
+      <button
+        type="button"
+        className={appStyles.toastClose}
+        aria-label={`Dismiss: ${toast.message}`}
+        onClick={() => {
+          appStore.getState().dismissToast(toast.id);
+        }}
+      >
+        ✕
+      </button>
     </div>
   );
 }

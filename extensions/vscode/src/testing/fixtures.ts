@@ -174,6 +174,7 @@ export function makeFixtureSession(overrides: Partial<SessionViewModel> = {}): S
     turn: { active: false, startedAtMs: 0, lastResult: null },
     lastError: null,
     draft: null,
+    draftSeq: 0,
     panels: EMPTY_PANELS,
     seq: 0,
     cells: makeAllCells(),

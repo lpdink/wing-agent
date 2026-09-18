@@ -83,6 +83,12 @@ describe('new session timing', () => {
       toasts.map((message) => (message.action.kind === 'toast' ? message.action.message : '')),
     ).toContain('Not sent — the gateway is not connected.');
 
+    // …and the text comes back for the composer (review #109 [P2-5]): the
+    // webview clears optimistically, so a refused send must restore it.
+    const state = harness.ofType('state').at(-1);
+    expect(state?.state.draft).toBe('too early');
+    expect(state?.state.draftSeq).toBeGreaterThan(0);
+
     gate.release();
     await flushMicrotasks(20);
 
@@ -130,6 +136,42 @@ describe('new session timing', () => {
     await harness.intent({ type: 'newSession' });
     expect(harness.gateway.calls('/api/session/create')).toHaveLength(0);
     expect(harness.errors).toContain('Wing: open a folder before starting a session.');
+  });
+
+  /**
+   * Review #109 [P2-5]: the restore path used to be keyed on the *text*, so the
+   * second failure of the same message was swallowed (the user lost the input
+   * again). The host now stamps every install with a fresh token.
+   */
+  it('restores the same text twice (each install gets a new draftSeq)', async () => {
+    const harness = make();
+    await harness.boot();
+    const sessionId = harness.gateway.createdOrder[0] ?? '';
+
+    // Simulate a lost gateway: `subscribed` is cleared, so every send early-
+    // returns without a frame (the connection object is still there — this is
+    // the window between a drop and the reconnect).
+    harness.host.sessionManager.onDisconnected();
+
+    const drafts: { text: string | null; seq: number }[] = [];
+    const collect = (): void => {
+      const state = harness.ofType('state').at(-1);
+      if (state !== undefined) {
+        drafts.push({ text: state.state.draft, seq: state.state.draftSeq });
+      }
+    };
+
+    await harness.intent({ type: 'sendMessage', sessionId, text: 'the same message' });
+    collect();
+    await harness.intent({ type: 'sendMessage', sessionId, text: 'the same message' });
+    collect();
+
+    expect(drafts).toHaveLength(2);
+    expect(drafts.map((entry) => entry.text)).toStrictEqual(['the same message', 'the same message']);
+    // Two installs, two tokens — a value-based dedupe would have kept the webview
+    // from restoring the second one.
+    expect(drafts[1]?.seq).toBeGreaterThan(drafts[0]?.seq ?? 0);
+    expect(harness.clientFrames()).toHaveLength(0);
   });
 
   it('serializes rapid new-session intents into two distinct tabs', async () => {

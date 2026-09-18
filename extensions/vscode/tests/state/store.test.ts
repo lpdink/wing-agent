@@ -4,6 +4,7 @@ import type { SessionViewModel } from '../../src/shared';
 import { EMPTY_PANELS } from '../../src/shared';
 import { createAppStore, createInitialState, selectActiveSession } from '../../src/webview/state/store';
 import type { AppStoreApi } from '../../src/webview/state/store';
+import { MAX_TOASTS, TOAST_TIMEOUT_MS } from '../../src/webview/state/store';
 import { makeEmptySession, makeFixtureSession } from '../../src/testing/fixtures';
 
 /**
@@ -160,6 +161,62 @@ describe('applyTabs', () => {
     expect(store.getState().tabs.map((tab) => tab.sessionId)).toEqual(['b', 'a']);
     expect(store.getState().activeSessionId).toBe('a');
   });
+
+  /**
+   * Review #109 [P2-4]: closing a tab must release its transcript. The webview
+   * survives the whole window (`retainContextWhenHidden`), so an unpruned
+   * snapshot is a leak proportional to everything the session ever rendered.
+   */
+  it('drops the snapshot of a session the host no longer lists', () => {
+    store.getState().hydrate(session);
+    store.getState().hydrate(makeEmptySession('session-b'));
+    expect(Object.keys(store.getState().sessions)).toEqual(['session-a', 'session-b']);
+
+    // The host closed session-a: only b is open.
+    store
+      .getState()
+      .applyTabs([{ sessionId: 'session-b', title: 'B', status: 'idle', attention: 'none' }], 'session-b');
+
+    expect(Object.keys(store.getState().sessions)).toEqual(['session-b']);
+    expect(store.getState().activeSessionId).toBe('session-b');
+  });
+
+  it('can never drop a live session in either host order (hydrate→tabs / tabs→hydrate)', () => {
+    // Order 1: `adopt()` posts the snapshot first, then the tab list (a new tab).
+    store.getState().hydrate(session);
+    store
+      .getState()
+      .applyTabs(
+        [{ sessionId: session.sessionId, title: 'A', status: 'idle', attention: 'none' }],
+        session.sessionId,
+      );
+    expect(store.getState().sessions[session.sessionId]).toBeDefined();
+
+    // Order 2: `onReady()` posts the tab list first, then hydrates each session.
+    const second = createAppStore();
+    second
+      .getState()
+      .applyTabs(
+        [{ sessionId: session.sessionId, title: 'A', status: 'idle', attention: 'none' }],
+        session.sessionId,
+      );
+    second.getState().hydrate(session);
+    expect(second.getState().sessions[session.sessionId]?.cells).toHaveLength(session.cells.length);
+  });
+
+  it('leaves the sessions object alone when nothing was dropped (no needless renders)', () => {
+    store.getState().hydrate(session);
+    const before = store.getState().sessions;
+
+    store
+      .getState()
+      .applyTabs(
+        [{ sessionId: session.sessionId, title: 'A', status: 'idle', attention: 'none' }],
+        session.sessionId,
+      );
+
+    expect(store.getState().sessions).toBe(before);
+  });
 });
 
 describe('applyUi', () => {
@@ -171,6 +228,35 @@ describe('applyUi', () => {
     expect(toasts).toHaveLength(2);
     expect(toasts[0]).toMatchObject({ level: 'error', message: 'boom' });
     expect(new Set(toasts.map((toast) => toast.id)).size).toBe(2);
+  });
+
+  it('keeps two toasts with identical text distinguishable (their own timers)', () => {
+    store.getState().applyUi({ kind: 'toast', level: 'warning', message: 'Not sent' });
+    store.getState().applyUi({ kind: 'toast', level: 'warning', message: 'Not sent' });
+
+    const toasts = store.getState().toasts;
+    expect(toasts).toHaveLength(2);
+    expect(new Set(toasts.map((toast) => toast.id)).size).toBe(2);
+
+    // Dismissing one leaves the other: the ids are what the timers address.
+    store.getState().dismissToast(toasts[0]?.id ?? '');
+    expect(store.getState().toasts).toHaveLength(1);
+  });
+
+  it('keeps only the newest MAX_TOASTS (the region is a live log, not a ledger)', () => {
+    for (let index = 0; index < MAX_TOASTS + 4; index += 1) {
+      store.getState().applyUi({ kind: 'toast', level: 'info', message: `toast ${index}` });
+    }
+
+    const messages = store.getState().toasts.map((toast) => toast.message);
+    expect(messages).toHaveLength(MAX_TOASTS);
+    expect(messages).toEqual(['toast 4', 'toast 5', 'toast 6', 'toast 7', 'toast 8']);
+  });
+
+  it('defines a dismissal deadline per level (errors linger, nothing is immortal)', () => {
+    expect(TOAST_TIMEOUT_MS.info).toBeGreaterThan(0);
+    expect(TOAST_TIMEOUT_MS.warning).toBeGreaterThan(TOAST_TIMEOUT_MS.info);
+    expect(TOAST_TIMEOUT_MS.error).toBeGreaterThan(TOAST_TIMEOUT_MS.warning);
   });
 
   it('dismisses one toast by id', () => {

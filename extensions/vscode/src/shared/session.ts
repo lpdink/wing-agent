@@ -242,13 +242,27 @@ export interface SessionStateModel {
   /** Last error surfaced for this session (host-truncated); `null` when none. */
   readonly lastError: string | null;
   /**
-   * Composer text the backend handed back (resume / rewind / fork / sync draft).
+   * Composer text the backend handed back (resume / rewind / fork / sync draft,
+   * or a message that never left the client).
    *
    * `null` when there is nothing to restore. The webview adopts it only when it
-   * is non-null **and** differs from the last value it adopted — a `state`
-   * message carrying `null` must never clear what the user is typing.
+   * is non-null **and** {@link draftSeq} is newer than the last token it adopted
+   * for that session — a `state` message carrying `null`, a re-delivery of the
+   * same install, or a late out-of-order older one must never clear or clobber
+   * what the user is typing.
    */
   readonly draft: string | null;
+  /**
+   * One-shot token for {@link draft}; monotone per session.
+   *
+   * Bumped by the host every time it *installs* a draft. Value equality was the
+   * old adoption key and it swallowed the second of two identical failures (the
+   * review's [P2-5]); a monotone token makes "a new restore" and "the same
+   * restore delivered again" distinguishable, which is the only thing the
+   * webview needs to know. Additive field: readers that ignore it keep the old
+   * (value-based) behaviour.
+   */
+  readonly draftSeq: number;
   readonly panels: PanelsModel;
   /**
    * Sequence number of the newest content in this snapshot.

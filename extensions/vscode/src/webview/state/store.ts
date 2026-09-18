@@ -33,6 +33,30 @@ export interface ToastModel {
   readonly message: string;
 }
 
+/**
+ * How long a toast stays on screen before it dismisses itself (ms).
+ *
+ * Review #109 [P2-4]: `dismissToast` used to have no production caller, so every
+ * "Compacting context…" / "Copied to clipboard" / "Not sent…" piled up in the
+ * `role="log"` region for the lifetime of the window (`retainContextWhenHidden`
+ * keeps the webview alive) — unreadable after a few dozen, and a screen reader
+ * re-announces the whole region on every push. Errors get longer *and* a manual
+ * close button.
+ */
+export const TOAST_TIMEOUT_MS: Readonly<Record<ToastModel['level'], number>> = {
+  info: 4_000,
+  warning: 8_000,
+  error: 20_000,
+};
+
+/**
+ * Newest N toasts that are kept.
+ *
+ * The same leak as above, with a hard bound so a burst (a retry ladder, a batch
+ * of tool errors) can never grow the DOM without limit.
+ */
+export const MAX_TOASTS = 5;
+
 export interface BridgeStatusModel {
   readonly connection: 'connecting' | 'ready';
   readonly protocolVersion: number;
@@ -171,7 +195,26 @@ export function createAppStore(): AppStoreApi {
     },
 
     applyTabs: (tabs, activeSessionId) => {
-      set({ tabs, activeSessionId });
+      set((state) => {
+        // A closed tab's snapshot is dead weight (review #109 [P2-4]): the
+        // webview lives for the whole window, so its transcript — cells, tool
+        // results, diff rows — would otherwise be retained forever. The host's
+        // tab list is the authority for what is open, and it always announces a
+        // session in the same breath as its snapshot (`adopt` posts hydrate then
+        // tabs; `onReady` posts tabs then hydrates each), so neither order can
+        // drop a live one.
+        const open = new Set(tabs.map((tab) => tab.sessionId));
+        const kept: Record<SessionId, SessionViewModel> = {};
+        let dropped = false;
+        for (const [sessionId, session] of Object.entries(state.sessions)) {
+          if (open.has(sessionId)) {
+            kept[sessionId] = session;
+          } else {
+            dropped = true;
+          }
+        }
+        return dropped ? { tabs, activeSessionId, sessions: kept } : { tabs, activeSessionId };
+      });
     },
 
     applyUi: (action) => {
@@ -179,7 +222,8 @@ export function createAppStore(): AppStoreApi {
         case 'toast': {
           toastSeq += 1;
           const toast: ToastModel = { id: `toast-${toastSeq}`, level: action.level, message: action.message };
-          set((state) => ({ toasts: [...state.toasts, toast] }));
+          // Newest N win: the region is a live log, not a ledger (see MAX_TOASTS).
+          set((state) => ({ toasts: [...state.toasts, toast].slice(-MAX_TOASTS) }));
           return;
         }
         case 'focusComposer':

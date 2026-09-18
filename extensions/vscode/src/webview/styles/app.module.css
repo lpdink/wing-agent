@@ -365,10 +365,37 @@
 }
 
 .toast {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  gap: var(--wing-gap-sm, 6px);
   padding: var(--wing-pad-y, 4px) var(--wing-gap-md, 8px);
   border: var(--wing-stroke, 1px) solid var(--vscode-panel-border, transparent);
   border-radius: var(--wing-radius-small, 4px);
   background-color: var(--vscode-editorWidget-background, transparent);
+}
+
+.toastMessage {
+  flex: 1 1 auto;
+  /* Long gateway messages wrap instead of pushing the close button off-screen. */
+  overflow-wrap: anywhere;
+}
+
+/* The manual close path (toasts also self-dismiss — review #109 [P2-4]). */
+.toastClose {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  opacity: 0.7;
+}
+
+.toastClose:hover,
+.toastClose:focus-visible {
+  opacity: 1;
 }
 
 .toast[data-toast-level='warning'] {

@@ -250,10 +250,44 @@ describe('composer drafts', () => {
     pushHydrate(mounted, { ...makeShellSession(), draft: 'fork source' });
     expect(inputOf(container).value).toBe('fork source');
 
-    // A re-hydrate with the same text must not clobber an edited draft.
+    // A re-hydrate of the *same* install (same token) must not clobber an edited
+    // draft — the host re-sends snapshots on resync/reconnect.
     fireEvent.change(inputOf(container), { target: { value: 'fork source edited' } });
     pushHydrate(mounted, { ...makeShellSession(), draft: 'fork source' });
     expect(inputOf(container).value).toBe('fork source edited');
+  });
+
+  /**
+   * Review #109 [P2-5]: adoption used to be keyed on the text, so the second of
+   * two identical "not sent" failures was dropped and the input was lost again.
+   * The host's `draftSeq` token makes "a new install" explicit.
+   */
+  it('restores the same text twice when the host installs it twice', () => {
+    const mounted = mountWebview([makeShellSession()]);
+    const { container } = mounted;
+
+    // First failed send: the host hands the text back (token 1) …
+    pushState(mounted, { ...makeShellSession(), draft: 'same message', draftSeq: 1 });
+    expect(inputOf(container).value).toBe('same message');
+
+    // … the user presses Enter again (the composer clears optimistically) and the
+    // gateway is still down: the host installs the same text with a new token.
+    fireEvent.change(inputOf(container), { target: { value: '' } });
+    pushState(mounted, { ...makeShellSession(), draft: 'same message', draftSeq: 2 });
+    expect(inputOf(container).value).toBe('same message');
+  });
+
+  it('ignores a stale or re-delivered older install (monotone token)', () => {
+    const mounted = mountWebview([makeShellSession()]);
+    const { container } = mounted;
+
+    pushState(mounted, { ...makeShellSession(), draft: 'newer', draftSeq: 5 });
+    expect(inputOf(container).value).toBe('newer');
+
+    fireEvent.change(inputOf(container), { target: { value: 'typed by hand' } });
+    // An out-of-order older token must not clobber typing.
+    pushState(mounted, { ...makeShellSession(), draft: 'older', draftSeq: 4 });
+    expect(inputOf(container).value).toBe('typed by hand');
   });
 
   it('forgets the draft of a closed tab', () => {
