@@ -4,10 +4,12 @@ import type {
   CellModel,
   CellPatch,
   HostToWebviewMessage,
+  PanelsModel,
   SessionViewModel,
   WebviewToHostMessage,
 } from '../../src/shared';
 import {
+  BRANCH_CURRENT_UUID,
   BRIDGE_PROTOCOL_VERSION,
   EMPTY_PANELS,
   LOCAL_COMMANDS,
@@ -387,5 +389,44 @@ describe('session view model', () => {
     expect(session.seq).toBe(0);
     expect(session.panels.modelPicker).toBeNull();
     expect(session.panels.globalNotice).toBeNull();
+  });
+
+  it('starts with every panel catalog empty (step 05)', () => {
+    // The three catalogs are additive members of `PanelsModel`: `null` means "the
+    // host has not fetched it", which is the state the shell must handle.
+    const session: SessionViewModel = makeFixtureSession();
+    expect(session.panels.commandCatalog).toBeNull();
+    expect(session.panels.sessionCatalog).toBeNull();
+    expect(session.panels.branchCatalog).toBeNull();
+    expect(EMPTY_PANELS.commandCatalog).toBeNull();
+    expect(EMPTY_PANELS.sessionCatalog).toBeNull();
+    expect(EMPTY_PANELS.branchCatalog).toBeNull();
+  });
+
+  it('keeps a populated catalog JSON-round-trippable (the catalog models are plain data)', () => {
+    const panels: PanelsModel = {
+      ...EMPTY_PANELS,
+      commandCatalog: { commands: [{ name: 'init', aliases: [], description: 'Init', params: '' }] },
+      sessionCatalog: {
+        sessions: [
+          {
+            sessionId: 'session-a',
+            title: 'Fixture session',
+            workspace: '/workspace',
+            status: 'working',
+            current: true,
+          },
+        ],
+      },
+      branchCatalog: {
+        sessionId: 'session-a',
+        targets: [
+          { uuid: 'uuid-1', content: 'first user message' },
+          { uuid: BRANCH_CURRENT_UUID, content: '(current)' },
+        ],
+      },
+    };
+
+    expect(JSON.parse(JSON.stringify(panels))).toEqual(panels);
   });
 });

@@ -117,16 +117,113 @@ export interface GlobalNoticeModel {
   readonly text: string;
 }
 
-/** Overlay data for the active session. `null` members mean "not shown". */
+// ── panel catalogs (data the host fetches, the webview renders) ───────
+
+/**
+ * One slash command the host can route.
+ *
+ * Mirrors the gateway's `CommandInfo` (`libs/core/wing/event/base.py:90`), whose
+ * `name` carries **no** leading slash. The webview normalizes both spellings with
+ * `normalizeCommandName` (see `src/shared/commands.ts`) before comparing.
+ */
+export interface CommandInfoModel {
+  readonly name: string;
+  readonly aliases: readonly string[];
+  readonly description: string;
+  /** Parameter hint shown next to the command (`'[focus]'`, `'on|off'`, …). */
+  readonly params: string;
+}
+
+/**
+ * Slash-command catalog (`GET /api/commands` plus the host's own commands).
+ *
+ * `null` on {@link PanelsModel} means "not fetched yet" — not "no commands": the
+ * composer falls back to its own `FRONTEND_COMMANDS` table in that case.
+ */
+export interface CommandCatalogModel {
+  readonly commands: readonly CommandInfoModel[];
+}
+
+/**
+ * Session list status.
+ *
+ * The gateway's vocabulary (`inactive|idle|working|waiting`), mapped by the host
+ * onto the UI's three states plus `inactive` for sessions that are not loaded:
+ * `waiting` is the user's `waiting-for-input`, and `inactive` means "on disk, not
+ * in memory" (so resuming it costs a load).
+ */
+export type SessionListStatus = 'inactive' | 'idle' | 'working' | 'waiting-for-input';
+
+/** One row of the `/ss` (session) picker. Mirrors `SessionInfo` (`event/base.py:57`). */
+export interface SessionCandidateModel {
+  readonly sessionId: string;
+  /** Host-derived title (never empty — falls back to the session id). */
+  readonly title: string;
+  /** Session working directory; `''` when unknown. */
+  readonly workspace: string;
+  readonly status: SessionListStatus;
+  /** True for the session this catalog was fetched for (rendered as "current"). */
+  readonly current: boolean;
+}
+
+/**
+ * Session catalog (`GET /api/session/list`).
+ *
+ * `null` means "not fetched yet"; the session panel then falls back to the open
+ * tabs, which the host streams on every change anyway.
+ */
+export interface SessionCatalogModel {
+  readonly sessions: readonly SessionCandidateModel[];
+}
+
+/**
+ * One rewind / fork target.
+ *
+ * Mirrors `BranchTargetInfo` (`libs/core/wing/event/query_response.py:27`). The
+ * gateway appends a final `{ uuid: 'current', content: '(current)' }` entry that
+ * represents the newest state (`context_manager.py:925`) — the webview marks it as
+ * the current point instead of a target.
+ */
+export interface BranchTargetModel {
+  readonly uuid: string;
+  /** Display label (the gateway truncates user messages to 100 chars). */
+  readonly content: string;
+}
+
+/** Rewind / fork targets for one session (`GET /api/session/branches`). */
+export interface BranchCatalogModel {
+  /** The session these targets belong to — the panel only renders it for that session. */
+  readonly sessionId: SessionId;
+  readonly targets: readonly BranchTargetModel[];
+}
+
+/**
+ * Overlay data for the active session.
+ *
+ * Two kinds of member live here, and the difference matters:
+ *
+ * - **host-opened overlays** (`modelPicker`, `globalNotice`): non-`null` means
+ *   "the host wants this on screen";
+ * - **catalogs** (`commandCatalog`, `sessionCatalog`, `branchCatalog`): non-`null`
+ *   means "the host has this data"; whether the panel is *open* is webview-local
+ *   state (the overlays are driven by the composer, whose draft the host cannot
+ *   see). The webview never derives catalog contents.
+ */
 export interface PanelsModel {
   readonly modelPicker: ModelPickerModel | null;
   readonly globalNotice: GlobalNoticeModel | null;
+  readonly commandCatalog: CommandCatalogModel | null;
+  readonly sessionCatalog: SessionCatalogModel | null;
+  readonly branchCatalog: BranchCatalogModel | null;
 }
 
-/** The `panels` value with nothing open. */
+/** The `panels` value with nothing open and nothing fetched. */
 export const EMPTY_PANELS: PanelsModel = {
   modelPicker: null,
   globalNotice: null,
+  commandCatalog: null,
+  sessionCatalog: null,
+  branchCatalog: null,
 };
 
 // ── session state / view ──────────────────────────────────────────────

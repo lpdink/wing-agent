@@ -10,6 +10,7 @@
 
 export * from './bridge';
 export * from './cells';
+export * from './commands';
 export * from './constants';
 export * from './exhaustive';
 export * from './session';

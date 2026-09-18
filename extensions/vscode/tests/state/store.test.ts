@@ -127,6 +127,7 @@ describe('applyPanels', () => {
 
   it('replaces the overlay payload', () => {
     const outcome = store.getState().applyPanels(session.sessionId, {
+      ...EMPTY_PANELS,
       modelPicker: {
         sessionId: session.sessionId,
         rows: [{ provider: 'p', model: 'm', selected: true }],

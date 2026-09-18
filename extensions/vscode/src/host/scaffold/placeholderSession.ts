@@ -6,6 +6,7 @@
 //
 // Step 03 deletes this file (grep for SCAFFOLD(01)) — nothing else imports it.
 import type { CellModel, SessionViewModel, TabModel } from '../../shared';
+import { EMPTY_PANELS } from '../../shared';
 
 const CREATED_AT = '2026-01-01T00:00:00.000Z';
 const BASE_TIME = Date.UTC(2026, 0, 1, 0, 0, 0);
@@ -154,7 +155,9 @@ export function createPlaceholderSession(): SessionViewModel {
     totals: { promptTokens: 1284, completionTokens: 96, cachedTokens: 1024 },
     turn: { active: false, startedAtMs: 0, lastResult: null },
     lastError: null,
-    panels: { modelPicker: null, globalNotice: null },
+    // Spread instead of a literal so an additive `PanelsModel` member cannot break
+    // this step 01 placeholder (step 05 added three catalogs).
+    panels: EMPTY_PANELS,
     seq: 7,
     cells: PLACEHOLDER_CELLS,
   };
