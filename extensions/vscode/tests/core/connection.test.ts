@@ -541,6 +541,49 @@ describe('reconnectDelayMs', () => {
   });
 });
 
+/**
+ * Review #109 [P3-6]: the API key must not travel in the URL. The connection
+ * hands it to the socket factory as a header instead — and passes *nothing* when
+ * there is no key, so a DOM-shaped `WebSocket` never receives an options object.
+ */
+describe('handshake headers and runtime diagnostics', () => {
+  it('forwards the configured headers to the socket factory', async () => {
+    const gateway = new FakeGateway();
+    await connectOk(gateway, 'c-1', {
+      reconnect: false,
+      headers: { Authorization: 'Bearer secret' },
+    });
+
+    expect(gateway.options).toStrictEqual([{ headers: { Authorization: 'Bearer secret' } }]);
+    // The URL itself carries nothing sensitive.
+    expect(gateway.urls).toStrictEqual([WS_URL]);
+  });
+
+  it('passes no options at all when there is no key', async () => {
+    const gateway = new FakeGateway();
+    await connectOk(gateway, 'c-1', { reconnect: false });
+
+    expect(gateway.options).toStrictEqual([undefined]);
+  });
+
+  it('names the runtime in a connect failure (node version + WebSocket source)', async () => {
+    const gateway = new FakeGateway();
+    gateway.failNextConnect = new Error('no WebSocket implementation available');
+    const connection = makeConnection(gateway, {
+      headers: { Authorization: 'Bearer secret' },
+    });
+
+    const error: unknown = await connection.connect().catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(GatewaySocketError);
+    const message = error instanceof Error ? error.message : '';
+    expect(message).toMatch(
+      /^failed to open ws:\/\/127\.0\.0\.1:32523\/ws: no WebSocket implementation available \[node \d+\.[\d.]+/,
+    );
+    // Neither the URL nor the runtime description may leak the key.
+    expect(message).not.toContain('secret');
+  });
+});
+
 async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();

@@ -1,13 +1,18 @@
+import { once } from 'node:events';
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { WebSocketServer } from 'ws';
 
 import { GatewayHttpError } from '../../src/core/errors';
 import {
   type FetchLike,
   type FetchResponseLike,
   type SocketHandlers,
+  SOCKET_CLOSED,
   attachNativeSocket,
   createFetchTransport,
   createNativeSocketFactory,
+  describeSocketRuntime,
 } from '../../src/core/transport';
 import type { WebSocketLike } from '../../src/core/transport/socket';
 
@@ -17,8 +22,18 @@ import type { WebSocketLike } from '../../src/core/transport/socket';
  * The socket adapter is exercised against a fake `globalThis.WebSocket`, which
  * proves the *event mapping* and, just as importantly, that every listener is
  * removed on close (a leaked listener on a long-lived extension host is a slow
- * memory leak that no other test would catch).
+ * memory leak that no other test would catch). The bundled `ws` fallback gets a
+ * real server (review #109 [P1-3]) — a stub would not prove the handshake works.
  */
+
+/** Minimal deferred, so the fallback test can await the real socket's `open`. */
+function deferred(): { readonly promise: Promise<void>; resolve(): void } {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 class FakeWebSocket implements WebSocketLike {
   static readonly instances: FakeWebSocket[] = [];
@@ -103,6 +118,7 @@ function recordHandlers(): RecordedHandlers {
 
 afterEach(() => {
   FakeWebSocket.instances.length = 0;
+  RecordingWebSocket.options.length = 0;
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -186,17 +202,122 @@ describe('native WebSocket adapter', () => {
     expect(FakeWebSocket.instances[0]?.closedWith).toStrictEqual({ code: 1000, reason: 'bye' });
   });
 
-  it('fails loudly when the runtime has no WebSocket', () => {
-    vi.stubGlobal('WebSocket', undefined);
-    const factory = createNativeSocketFactory();
-    expect(() => factory('ws://x', recordHandlers())).toThrowError(/no global WebSocket implementation/);
-  });
-
   it('uses the global WebSocket when none is injected', () => {
     vi.stubGlobal('WebSocket', FakeWebSocket);
     const handlers = recordHandlers();
     createNativeSocketFactory()('ws://global/ws', handlers);
     expect(FakeWebSocket.instances[0]?.url).toBe('ws://global/ws');
+  });
+});
+
+/** A `WebSocketLike` that records the constructor's second argument. */
+class RecordingWebSocket extends FakeWebSocket {
+  static readonly options: unknown[] = [];
+
+  constructor(url: string, options?: unknown) {
+    super(url);
+    RecordingWebSocket.options.push(options);
+  }
+}
+
+/** Resolve once `predicate` holds (real timers; the fallback test talks to a real server). */
+async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) {
+      throw new Error('timed out waiting for the socket');
+    }
+    await new Promise((resolve) => {
+      setTimeout(resolve, 5);
+    });
+  }
+}
+
+/**
+ * Review #109 [P1-3]: the extension declares `engines.vscode ^1.100.0`
+ * (Electron 34 / Node 20.19) while `globalThis.WebSocket` only appears in Node
+ * 21 — so the default factory must fall back to a **real** WebSocket client, and
+ * a host that *does* have a global must keep using it.
+ */
+describe('socket implementation resolution', () => {
+  it('forwards handshake headers only when the caller supplied them', () => {
+    createNativeSocketFactory({ WebSocketImpl: RecordingWebSocket })('ws://h:1/ws', recordHandlers(), {
+      headers: { Authorization: 'Bearer secret' },
+    });
+    createNativeSocketFactory({ WebSocketImpl: RecordingWebSocket })('ws://h:1/ws', recordHandlers());
+
+    // A DOM-shaped `WebSocket` takes protocols as its second argument, so an
+    // options object must never be passed when there is nothing to send.
+    expect(RecordingWebSocket.options).toStrictEqual([
+      { headers: { Authorization: 'Bearer secret' } },
+      undefined,
+    ]);
+  });
+
+  it('prefers an injected implementation over the global one', () => {
+    let globalConstructions = 0;
+    class GlobalSocket extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        globalConstructions += 1;
+      }
+    }
+    vi.stubGlobal('WebSocket', GlobalSocket);
+    createNativeSocketFactory({ WebSocketImpl: RecordingWebSocket })('ws://injected/ws', recordHandlers());
+
+    expect(RecordingWebSocket.options).toStrictEqual([undefined]);
+    expect(globalConstructions).toBe(0);
+  });
+
+  it('describes the runtime for connect-failure reports (node version included)', () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket);
+    expect(describeSocketRuntime()).toBe(`node ${process.versions.node}, global WebSocket available`);
+
+    vi.stubGlobal('WebSocket', undefined);
+    expect(describeSocketRuntime()).toBe(
+      `node ${process.versions.node}, no global WebSocket (using the bundled ws client)`,
+    );
+  });
+
+  it('connects to a real server through the bundled ws fallback (Node 20 hosts)', async () => {
+    // The exact situation on a VS Code 1.100 host: no global WebSocket at all.
+    vi.stubGlobal('WebSocket', undefined);
+    const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+    try {
+      await once(server, 'listening');
+      const address = server.address();
+      if (address === null || typeof address === 'string') {
+        throw new Error('no server address');
+      }
+      server.on('connection', (socket) => {
+        socket.on('message', (data: unknown) => socket.send(`echo:${String(data)}`));
+      });
+
+      const opened = deferred();
+      const handlers = recordHandlers();
+      const socket = createNativeSocketFactory()(`ws://127.0.0.1:${address.port}/ws`, {
+        ...handlers,
+        onOpen: () => {
+          handlers.onOpen();
+          opened.resolve();
+        },
+      });
+      await opened.promise;
+      expect(handlers.opens).toBe(1);
+
+      socket.send('ping');
+      await waitUntil(() => handlers.messages.length > 0);
+      expect(handlers.messages).toStrictEqual(['echo:ping']);
+
+      socket.close(1000, 'bye');
+      await waitUntil(() => handlers.closes.length > 0);
+      expect(handlers.closes[0]).toStrictEqual({ code: 1000, reason: 'bye', wasClean: true });
+      expect(socket.readyState).toBe(SOCKET_CLOSED);
+    } finally {
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
+    }
   });
 });
 

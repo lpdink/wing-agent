@@ -3,6 +3,7 @@ import type {
   SocketFactory,
   SocketHandlers,
   SocketLike,
+  SocketOpenOptions,
 } from '../../../src/core/transport/socket';
 
 /**
@@ -81,6 +82,8 @@ export class FakeSocket implements SocketLike {
 export class FakeGateway {
   readonly sockets: FakeSocket[] = [];
   readonly urls: string[] = [];
+  /** Third argument of every `factory` call (handshake headers; review #109 [P3-6]). */
+  readonly options: (SocketOpenOptions | undefined)[] = [];
   /** When true (default) every new socket sends its handshake on a microtask. */
   autoHandshake = true;
   /** Throw this instead of creating the next socket (connect failure). */
@@ -89,8 +92,9 @@ export class FakeGateway {
 
   private nextClientId = 1;
 
-  readonly factory: SocketFactory = (url, handlers) => {
+  readonly factory: SocketFactory = (url, handlers, options) => {
     this.urls.push(url);
+    this.options.push(options);
     const failure = this.failNextConnect;
     this.failNextConnect = null;
     if (failure !== null) {

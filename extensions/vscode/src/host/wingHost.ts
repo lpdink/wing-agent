@@ -3,6 +3,7 @@ import {
   DEFAULT_RECONNECT_OPTIONS,
   GatewayConnection,
   GatewayHttpClient,
+  apiKeyHeaders,
   gatewayUrls,
   reconnectDelayMs,
   silentLogger,
@@ -56,9 +57,13 @@ export function createGatewayClients(
   settings: GatewaySettings,
   options: GatewayFactoryOptions = {},
 ): GatewayClients {
-  const urls = gatewayUrls({ host: settings.host, port: settings.port, apiKey: settings.apiKey });
+  const urls = gatewayUrls({ host: settings.host, port: settings.port });
+  // Auth rides in headers, never in the URL (review #109 [P3-6]); the gateway
+  // prefers headers, and both transports here accept them.
+  const headers = apiKeyHeaders(settings.apiKey);
   const connection = new GatewayConnection({
     wsUrl: urls.wsUrl,
+    headers,
     ...(options.socketFactory === undefined ? {} : { socketFactory: options.socketFactory }),
     ...(options.logger === undefined ? {} : { logger: options.logger }),
     ...(options.now === undefined ? {} : { now: options.now }),

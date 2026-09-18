@@ -87,7 +87,13 @@ async function closeSession(context: ScenarioContext, sessionId: string): Promis
 }
 
 async function sessionInfo(gateway: SmokeGateway, sessionId: string): Promise<Record<string, unknown>> {
-  const response = await fetch(`${gateway.baseUrl}/api/session/info?session_id=${sessionId}`);
+  // The scenarios verify the gateway's *own* view with a raw fetch, so they must
+  // authenticate exactly like the host does when `WING_SMOKE_AUTH_KEY` is set
+  // (review #109 [P3-6] — the key travels in a header, never in the URL).
+  const authKey = process.env['WING_SMOKE_AUTH_KEY'];
+  const response = await fetch(`${gateway.baseUrl}/api/session/info?session_id=${sessionId}`, {
+    ...(authKey === undefined || authKey === '' ? {} : { headers: { Authorization: `Bearer ${authKey}` } }),
+  });
   assert(response.ok, `GET /api/session/info failed with ${response.status}`);
   return (await response.json()) as Record<string, unknown>;
 }

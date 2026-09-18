@@ -45,7 +45,9 @@ import {
   type SocketFactory,
   type SocketHandlers,
   type SocketLike,
+  type SocketOpenOptions,
   createNativeSocketFactory,
+  describeSocketRuntime,
 } from './transport/socket';
 
 export type ConnectionStatus =
@@ -77,8 +79,22 @@ export type EventListener = (event: WingEvent) => void;
 export type StateListener = (state: ConnectionState) => void;
 
 export interface GatewayConnectionOptions {
-  /** Full WS URL, e.g. from `gatewayUrls({ host, port, apiKey }).wsUrl`. */
+  /**
+   * Full WS URL, e.g. from `gatewayUrls({ host, port }).wsUrl`.
+   *
+   * Never carries credentials: a key in a query string leaks into every layer
+   * that logs a request line (review #109 [P3-6]) — see {@link headers}.
+   */
   readonly wsUrl: string;
+  /**
+   * Handshake headers (`Authorization: Bearer …` for the gateway's API key).
+   *
+   * Forwarded to the socket factory, which passes them on to implementations
+   * that support them (undici / `ws`). A DOM-shaped `WebSocket` cannot set
+   * headers — that host uses the documented query-parameter form instead
+   * (`wsUrlWithApiKey`), which is why the URL is still redacted in every log.
+   */
+  readonly headers?: Readonly<Record<string, string>>;
   /** Socket seam (tests); defaults to the platform `WebSocket`. */
   readonly socketFactory?: SocketFactory;
   /** `false` disables the supervisor (the host drives retries itself). */
@@ -114,6 +130,7 @@ function deferred<T>(): Deferred<T> {
 export class GatewayConnection {
   private readonly wsUrl: string;
   private readonly socketFactory: SocketFactory;
+  private readonly socketOptions: SocketOpenOptions | undefined;
   private readonly logger: CoreLogger;
   private readonly reconnectOptions: ReconnectOptions | null;
   private readonly handshakeTimeoutMs: number;
@@ -140,6 +157,12 @@ export class GatewayConnection {
   constructor(options: GatewayConnectionOptions) {
     this.wsUrl = options.wsUrl;
     this.socketFactory = options.socketFactory ?? createNativeSocketFactory();
+    // `undefined` (not `{headers: undefined}`) when there is nothing to send:
+    // a DOM `WebSocket` must not receive an options object at all.
+    this.socketOptions =
+      options.headers === undefined || Object.keys(options.headers).length === 0
+        ? undefined
+        : { headers: options.headers };
     this.logger = options.logger ?? consoleLogger;
     this.handshakeTimeoutMs = options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
     this.now = options.now ?? Date.now;
@@ -281,14 +304,17 @@ export class GatewayConnection {
 
     let socket: SocketLike;
     try {
-      socket = this.socketFactory(this.wsUrl, this.handlers(token));
+      socket = this.socketFactory(this.wsUrl, this.handlers(token), this.socketOptions);
     } catch (cause) {
       this.handshake = null;
       this.dialToken = null;
       return Promise.reject(
         new GatewaySocketError({
           kind: 'connect-failed',
-          message: `failed to open ${redactUrl(this.wsUrl)}: ${describeThrown(cause)}`,
+          // The runtime description rides along: "which Node / which WebSocket
+          // implementation" is the first thing a connect bug report needs and
+          // the one thing the user cannot see from the message alone.
+          message: `failed to open ${redactUrl(this.wsUrl)}: ${describeThrown(cause)} [${describeSocketRuntime()}]`,
           cause,
         }),
       );

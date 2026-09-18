@@ -13,7 +13,7 @@
   "private": true,
   "engines": {
     "vscode": "^1.100.0",
-    "node": ">=22"
+    "node": ">=20"
   },
   "categories": [
     "AI",
@@ -73,7 +73,7 @@
         "wing.apiKey": {
           "type": "string",
           "default": "",
-          "markdownDescription": "API key for the gateway. Leave empty when the gateway has no auth configured."
+          "markdownDescription": "API key for the gateway (`auth` enabled in `~/.wing/config.yaml`). Leave empty when the gateway has no auth configured.\n\nSent as an `Authorization: Bearer …` header, never in a URL. **Stored as plain text**: prefer **User** settings — a workspace-scoped value is written to `.vscode/settings.json` (easy to commit) and Settings Sync uploads it. Moving it to VS Code's SecretStorage is a follow-up."
         },
         "wing.wingPath": {
           "type": "string",
@@ -119,6 +119,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@types/vscode": "1.100.0",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^6.1.1",
     "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.28.2",
@@ -136,6 +137,7 @@
     "typescript-eslint": "^8.70.0",
     "vite": "^8.3.0",
     "vitest": "^5.0.1",
+    "ws": "^8.21.3",
     "zustand": "^5.0.15"
   }
 }

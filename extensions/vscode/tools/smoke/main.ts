@@ -122,12 +122,18 @@ async function main(): Promise<number> {
 
   const root = mkdtempSync(path.join(smokeRoot(), 'run-'));
   const provider = new FakeProvider();
+  // `WING_SMOKE_AUTH_KEY=<key>` turns the generated gateway config into an
+  // authenticated one and makes the host send `Authorization: Bearer …`; every
+  // scenario then exercises the real auth middleware on HTTP *and* WS (review
+  // #109 [P3-6]). Unset (default, and CI) keeps the keyless configuration.
+  const authKey = process.env['WING_SMOKE_AUTH_KEY'] ?? null;
   const gateway = new SmokeGateway({
     binary,
     provider,
     model: MODEL,
     root,
     logFile: path.join(root, 'gateway.log'),
+    authKey,
   });
   const unhandled: string[] = [];
   const onUnhandled = (reason: unknown): void => {
@@ -181,11 +187,29 @@ async function main(): Promise<number> {
     line(`  sessions: ${gateway.sessionsPath}`);
     line(`  provider: ${provider.baseUrl}`);
     line(`  model:    ${MODEL}`);
+    if (authKey !== null) {
+      line(`  auth:     enabled (Authorization: Bearer … on HTTP and WS)`);
+    }
+
+    // `WING_SMOKE_WS_FALLBACK=1` deletes the runtime's global WebSocket before the
+    // host boots, which is the situation on a VS Code 1.100 host (Electron 34 /
+    // Node 20.19): every scenario then runs through the *bundled* `ws` client
+    // (review #109 [P1-3]). It proves the bundle, not just the source, can carry
+    // the protocol — the unit test covers the source path.
+    if (process.env['WING_SMOKE_WS_FALLBACK'] === '1') {
+      const deleted = Reflect.deleteProperty(globalThis, 'WebSocket');
+      if (!deleted || globalThis.WebSocket !== undefined) {
+        line('SMOKE FAIL: could not remove the global WebSocket (WING_SMOKE_WS_FALLBACK=1)');
+        return EXIT_FAIL;
+      }
+      line('  ws impl:  bundled ws fallback (global WebSocket deleted)');
+    }
     line('');
 
     world = new SmokeWorld({
       port: proxy.port,
       workspace: gateway.workspace,
+      apiKey: authKey,
       report: (message) => {
         line(`  [${message}]`);
       },

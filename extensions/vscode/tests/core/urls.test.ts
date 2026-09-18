@@ -1,31 +1,43 @@
 import { describe, expect, it } from 'vitest';
 
 import { reconnectDelayMs } from '../../src/core/backoff';
-import { gatewayUrls, normalizeApiKey, redactUrl } from '../../src/core/urls';
+import { apiKeyHeaders, gatewayUrls, normalizeApiKey, redactUrl, wsUrlWithApiKey } from '../../src/core/urls';
 
 /**
- * URL derivation and the reconnect ladder — the two small pure policies the
- * connection and the host both rely on.
+ * URL derivation, auth headers and the reconnect ladder — the small pure
+ * policies the connection and the host both rely on.
  */
 
 describe('gatewayUrls', () => {
-  it('derives the HTTP base and the WS URL from host / port', () => {
+  it('derives the HTTP base and the WS URL from host / port, with no credentials', () => {
     expect(gatewayUrls({ host: '127.0.0.1', port: 32523 })).toStrictEqual({
       httpBaseUrl: 'http://127.0.0.1:32523',
       wsUrl: 'ws://127.0.0.1:32523/ws',
     });
+    // The URLs are not sensitive data any more: a key never reaches them (review
+    // #109 [P3-6] — the gateway takes headers, and the host sends them).
+    expect(gatewayUrls({ host: 'localhost', port: 8080 }).wsUrl).not.toContain('api_key');
   });
 
-  it('adds the API key as a query parameter (the only portable way for WS)', () => {
-    const { wsUrl, httpBaseUrl } = gatewayUrls({ host: 'localhost', port: 8080, apiKey: 'a b&c' });
-    expect(wsUrl).toBe('ws://localhost:8080/ws?api_key=a%20b%26c');
-    expect(httpBaseUrl).toBe('http://localhost:8080');
+  it('keeps the API-key header helper in sync with the gateway priority', () => {
+    // `gateway/auth.py::extract_key_from_headers`: Authorization: Bearer first.
+    expect(apiKeyHeaders('secret')).toStrictEqual({ Authorization: 'Bearer secret' });
+    expect(apiKeyHeaders('  secret  ')).toStrictEqual({ Authorization: 'Bearer secret' });
+    expect(apiKeyHeaders('')).toStrictEqual({});
+    expect(apiKeyHeaders('   ')).toStrictEqual({});
+    expect(apiKeyHeaders(null)).toStrictEqual({});
+    expect(apiKeyHeaders(undefined)).toStrictEqual({});
   });
 
-  it('treats a blank key as no auth and trims real keys', () => {
-    expect(gatewayUrls({ host: 'h', port: 1, apiKey: '   ' }).wsUrl).toBe('ws://h:1/ws');
-    expect(gatewayUrls({ host: 'h', port: 1, apiKey: ' secret ' }).wsUrl).toBe('ws://h:1/ws?api_key=secret');
-    expect(gatewayUrls({ host: 'h', port: 1, apiKey: null }).wsUrl).toBe('ws://h:1/ws');
+  it('offers the query form for hosts that cannot set headers (and escapes it)', () => {
+    expect(wsUrlWithApiKey('ws://localhost:8080/ws', 'a b&c')).toBe(
+      'ws://localhost:8080/ws?api_key=a%20b%26c',
+    );
+    expect(wsUrlWithApiKey('ws://h:1/ws', ' secret ')).toBe('ws://h:1/ws?api_key=secret');
+    expect(wsUrlWithApiKey('ws://h:1/ws?x=1', 'k')).toBe('ws://h:1/ws?x=1&api_key=k');
+    // No key → the URL is returned untouched (never a dangling `?api_key=`).
+    expect(wsUrlWithApiKey('ws://h:1/ws', '   ')).toBe('ws://h:1/ws');
+    expect(wsUrlWithApiKey('ws://h:1/ws', null)).toBe('ws://h:1/ws');
   });
 
   it('brackets only real IPv6 literals and defaults an empty host', () => {

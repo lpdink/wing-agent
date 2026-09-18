@@ -39,6 +39,11 @@ export interface SmokeWorldOptions {
   readonly workspace: string;
   /** Where the host's warnings/errors are reported (they are progress for a human). */
   readonly report: (message: string) => void;
+  /**
+   * `WING_SMOKE_AUTH_KEY` — sent as `Authorization: Bearer …` (header, never a
+   * query parameter: review #109 [P3-6]). `null` keeps the smoke keyless.
+   */
+  readonly apiKey?: string | null;
 }
 
 export class SmokeWorld {
@@ -58,7 +63,7 @@ export class SmokeWorld {
     this.settings = {
       host: '127.0.0.1',
       port: options.port,
-      apiKey: null,
+      apiKey: options.apiKey ?? null,
       wingPath: null,
       // Never let the smoke start anything: the gateway it talks to was started
       // by the smoke itself, and `wing start` would talk to `~/.wing`.

@@ -98,6 +98,8 @@ export function renderConfig(options: {
   readonly providerBaseUrl: string;
   readonly port: number;
   readonly model: string;
+  /** When set, the gateway requires this key on every path (see `WING_SMOKE_AUTH_KEY`). */
+  readonly authKey?: string | null;
 }): string {
   const systemPrompt = 'You are the wing smoke agent. Answer briefly and deterministically.';
   return [
@@ -143,7 +145,14 @@ export function renderConfig(options: {
     '  host: 127.0.0.1',
     `  port: ${options.port}`,
     '  auth:',
-    '    enabled: false',
+    ...(options.authKey === null || options.authKey === undefined
+      ? ['    enabled: false']
+      : [
+          '    enabled: true',
+          '    keys:',
+          `      - key: ${JSON.stringify(options.authKey)}`,
+          '        role: admin',
+        ]),
     'commands:',
     '  paths: []',
     '',
@@ -156,6 +165,15 @@ export interface SmokeGatewayOptions {
   readonly model: string;
   readonly root: string;
   readonly logFile: string;
+  /**
+   * `WING_SMOKE_AUTH_KEY` — when set, the generated config requires it.
+   *
+   * The point is to prove the *header* auth path (review #109 [P3-6]) against
+   * the real gateway: HTTP and WS both carry `Authorization: Bearer …`, so a
+   * green run means a user with `wing.apiKey` set can connect. Default `null`
+   * keeps the smoke on the ordinary no-auth configuration.
+   */
+  readonly authKey?: string | null;
 }
 
 export class SmokeGateway {
@@ -170,6 +188,7 @@ export class SmokeGateway {
   private logFd: number | null = null;
   private readonly binary: GatewayBinary;
   private readonly provider: FakeProvider;
+  private readonly authKey: string | null;
   private portValue = 0;
 
   constructor(options: SmokeGatewayOptions) {
@@ -181,6 +200,7 @@ export class SmokeGateway {
     this.sessionsPath = path.join(options.root, 'sessions');
     this.workspace = path.join(options.root, 'workspace');
     this.logFile = options.logFile;
+    this.authKey = options.authKey ?? null;
   }
 
   get port(): number {
@@ -200,7 +220,12 @@ export class SmokeGateway {
     assertIsolated(this.portValue);
     writeFileSync(
       path.join(this.wingHome, 'core', 'config.yaml'),
-      renderConfig({ providerBaseUrl: this.provider.baseUrl, port: this.portValue, model: this.model }),
+      renderConfig({
+        providerBaseUrl: this.provider.baseUrl,
+        port: this.portValue,
+        model: this.model,
+        authKey: this.authKey,
+      }),
       'utf8',
     );
 
@@ -269,7 +294,13 @@ export class SmokeGateway {
     this.process = null;
     if (child !== null && child.exitCode === null) {
       try {
-        await fetch(`${this.baseUrl}/api/shutdown`, { method: 'POST', body: '{}' });
+        await fetch(`${this.baseUrl}/api/shutdown`, {
+          method: 'POST',
+          body: '{}',
+          // Auth is on when `WING_SMOKE_AUTH_KEY` is set; `/api/shutdown` is not
+          // exempt. A 401 here is harmless (SIGTERM follows) but noisy.
+          ...(this.authKey === null ? {} : { headers: { Authorization: `Bearer ${this.authKey}` } }),
+        });
       } catch {
         // already gone
       }

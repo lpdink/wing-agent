@@ -14,8 +14,11 @@ Maintainer deep dive (Chinese):
   version — `corepack enable` is enough). These are _toolchain_ requirements; they say nothing about
   the VS Code runtime this extension targets.
 - **To run**: VS Code ≥ 1.100 (`engines.vscode`). The extension host bundle is built with
-  `target: node20` on purpose — VS Code 1.100 ships Electron 34 / Node 20.19, so anything newer would
-  risk using APIs the host does not have.
+  `target: node20` on purpose — VS Code 1.100 ships Electron 34 / **Node 20.19**. That host has no
+  global `WebSocket` (Node only exposes it from 21), so `src/core/transport/socket.ts` falls back to a
+  bundled `ws` client; on newer hosts (Node ≥ 22) the global implementation is used and the fallback is
+  never loaded. A connect failure names the runtime it ran on (`node 20.19.x, no global WebSocket
+(using the bundled ws client)`) so a report is actionable.
 - **To talk to a gateway**: a `wing` installation (`wing start`, or let the extension start it) — the
   same gateway the TUI uses, default `127.0.0.1:32523`.
 
@@ -76,11 +79,21 @@ Notes:
 | ---------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `wing.host`      | `127.0.0.1` | Gateway host (mirror of `gateway.host` in `~/.wing/config.yaml` — the extension does not parse that file).                                  |
 | `wing.port`      | `32523`     | Gateway port.                                                                                                                               |
-| `wing.apiKey`    | `""`        | API key for gateways with auth enabled. Leave empty when auth is off.                                                                       |
+| `wing.apiKey`    | `""`        | API key for gateways with auth enabled. Leave empty when auth is off. **Stored as plain text** — see the note below.                        |
 | `wing.wingPath`  | `""`        | Full path of the `wing` executable, used for auto-start. Empty = discover on `PATH` / well-known install locations.                         |
 | `wing.autoStart` | `true`      | Start the gateway (`wing start`) when it is not running. The extension probes first, so a gateway you are already using is never restarted. |
 
 Commands: `Wing: New Session`, `Wing: Reconnect to Gateway`.
+
+### About `wing.apiKey`
+
+- It is sent as an `Authorization: Bearer …` **header**, never in a URL (so proxy logs, access logs and
+  crash reports do not collect it — `src/core/urls.ts` documents the DOM-host exception).
+- It is a **plain-text setting**: a workspace-scoped value lands in `.vscode/settings.json` (easy to
+  commit by accident) and Settings Sync uploads it. Put it in **User** settings, and treat it like any
+  other file-resident secret.
+- Storing it in `context.secrets` (SecretStorage) with the setting kept as a "configured / not
+  configured" switch is a follow-up, not part of this version.
 
 ## Scripts
 
@@ -250,7 +263,9 @@ Real gateway, real host, scripted model — no API key, no user state touched:
 
 ## Repository integration
 
-- `make check` / `make test` include the TypeScript gates (`check-ts` / `test-ts`).
+- `make check` / `make test` include the TypeScript gates (`check-ts` / `test-ts`). Working on Python
+  or Rust only? `SKIP_TS=1 make check` skips that group with an explicit note (needs Node ≥ 22.12 +
+  pnpm 11 otherwise — `corepack enable`); CI never sets it, so the gate stays mandatory there.
 - CI job `typescript-check` runs install → lint → format:check → typecheck → test → build →
   build:preview → package and uploads the `.vsix`.
 - `pnpm install` in CI uses `--frozen-lockfile`; keep `pnpm-lock.yaml` committed.
