@@ -1,10 +1,10 @@
 /*
  * Chat cell styling.
  *
- * Values are either `--wing-*` tokens (see tokens.css, every one sourced to the
- * VS Code chat sources) or plain layout that carries no visual decision
- * (flex/grid/overflow). Anything that would be "a number we made up" belongs in
- * tokens.css with its source instead.
+ * Values are `--wing-*` tokens (tokens.css, every one sourced to the VS Code chat
+ * sources). The remaining literals are exactly the exceptions README.md lists:
+ * a value inside a rule whose header comment quotes the source line holding it,
+ * geometry that stands in for a codicon we cannot ship, or layout glue.
  *
  * Colors are theme variables only — enforced by tests/layers.
  */
@@ -108,7 +108,7 @@
 .disclosureHeader {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--wing-gap-xs);
   width: fit-content;
   padding: 0;
   border: 0;
@@ -235,7 +235,7 @@
 .toolHeader {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--wing-gap-sm);
   cursor: pointer;
 }
 
@@ -261,7 +261,8 @@
 }
 
 /* CHAT:93-140 — the "working" marker is an animated ellipsis; here it is a
- * pulsing dot so a compact row keeps a stable width. */
+ * pulsing dot so a compact row keeps a stable width. 6px is geometry, not a
+ * copied constant: a codicon could not be shipped into the webview. */
 .toolGlyph {
   flex: 0 0 auto;
   width: 6px;
@@ -318,7 +319,7 @@
 
 .toolCardBody {
   max-height: var(--wing-tool-output-max-height);
-  padding: 8px 12px;
+  padding: var(--wing-tool-card-pad-y) var(--wing-tool-card-pad-x);
   margin: 0;
   overflow: auto;
   font-family: var(--vscode-editor-font-family);
@@ -333,7 +334,7 @@
 }
 
 .toolCardNote {
-  padding: 0 12px 8px;
+  padding: 0 var(--wing-tool-card-pad-x) var(--wing-tool-card-pad-y);
   color: var(--wing-fg-description);
   font-size: var(--wing-font-body-xs);
 }
@@ -351,7 +352,7 @@
 .diffHeader {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--wing-gap-md);
   padding: var(--wing-tool-card-title-padding);
   border-bottom: var(--wing-stroke) solid var(--wing-border-widget);
   background-color: var(--wing-surface-widget);
@@ -360,7 +361,7 @@
 .diffCounts {
   display: flex;
   flex: 0 0 auto;
-  gap: 6px;
+  gap: var(--wing-gap-sm);
   margin-left: auto;
   font-size: var(--wing-font-body-s);
 }
@@ -375,8 +376,8 @@
 
 .diffOpen {
   flex: 0 0 auto;
-  height: 22px;
-  padding: 0 8px;
+  height: var(--wing-control-height);
+  padding: 0 var(--wing-control-pad-x);
   border: var(--wing-stroke) solid var(--wing-border-request);
   border-radius: var(--wing-radius-small);
   color: var(--wing-fg-description);
@@ -397,10 +398,13 @@
 
 .diffBody {
   overflow-x: auto;
-  padding: 4px 0;
+  padding: var(--wing-pad-y) 0;
   font-family: var(--vscode-editor-font-family);
   font-size: var(--wing-font-body-s);
-  line-height: 1.4;
+  /* The diff card is not a Monaco editor: let the monospace font pick its own
+   * line height instead of inventing a ratio (the editor computes
+   * GOLDEN_LINE_HEIGHT_RATIO × fontSize, editor/common/config/fontInfo.ts:14). */
+  line-height: normal;
 }
 
 .diffLine {
@@ -412,7 +416,7 @@
 .diffLineNumber {
   flex: 0 0 var(--wing-diff-gutter-width);
   min-width: var(--wing-diff-gutter-width);
-  padding-right: 6px;
+  padding-right: var(--wing-gap-sm);
   color: var(--wing-diff-gutter-fg);
   text-align: right;
   user-select: none;
@@ -427,7 +431,7 @@
 
 .diffText {
   flex: 1 1 auto;
-  padding-right: 12px;
+  padding-right: var(--wing-tool-card-pad-x);
 }
 
 .diffLine[data-diff-kind='add'] {
@@ -444,7 +448,7 @@
 }
 
 .diffTruncated {
-  padding: 2px 12px;
+  padding: var(--wing-pad-y-tight) var(--wing-tool-card-pad-x);
   color: var(--wing-fg-description);
   user-select: none;
 }
@@ -519,7 +523,7 @@
 .separator {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--wing-gap-md);
   color: var(--wing-fg-description);
   font-size: var(--wing-font-body-xs);
 }
@@ -577,21 +581,21 @@
 .askHeader {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: var(--wing-gap-md);
   padding: var(--wing-ask-title-padding);
   border-bottom: var(--wing-stroke) solid var(--wing-border-request);
 }
 
 .askTitle {
-  font-size: var(--vscode-fontSize-heading3, var(--vscode-font-size, 13px));
-  font-weight: var(--vscode-fontWeight-semiBold, 600);
+  font-size: var(--wing-font-heading3);
+  font-weight: var(--wing-weight-semibold);
 }
 
 /* :192-196 — question body. */
 .askBody {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--wing-gap-md);
   padding: var(--wing-ask-body-padding);
 }
 
@@ -626,7 +630,7 @@
 
 .askOptionInput {
   flex: 0 0 auto;
-  margin: 1px 0 0;
+  margin-top: var(--wing-checkbox-offset);
   accent-color: var(--vscode-focusBorder);
 }
 
@@ -639,15 +643,15 @@
 
 /* :243-261 — label at body2, title line-height 1.4, description dimmed. */
 .askOptionTitle {
-  font-size: var(--vscode-fontSize-body2, var(--wing-font-body-xs));
-  font-weight: var(--vscode-fontWeight-semiBold, 600);
+  font-size: var(--wing-font-body2);
+  font-weight: var(--wing-weight-semibold);
   line-height: var(--wing-ask-option-title-line-height);
   overflow-wrap: anywhere;
 }
 
 .askOptionDescription {
   color: var(--wing-fg-description);
-  font-size: var(--vscode-fontSize-body2, var(--wing-font-body-xs));
+  font-size: var(--wing-font-body2);
   line-height: var(--wing-ask-option-title-line-height);
   overflow-wrap: anywhere;
 }
@@ -655,7 +659,7 @@
 .askInput {
   width: 100%;
   box-sizing: border-box;
-  padding: 4px 6px;
+  padding: var(--wing-pad-cell-y) var(--wing-pad-cell-x);
   border: var(--wing-stroke) solid var(--wing-border-input);
   border-radius: var(--wing-radius-small);
   color: var(--wing-input-fg);
@@ -679,7 +683,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--wing-gap-md);
   padding: var(--wing-ask-footer-padding);
   border-top: var(--wing-stroke) solid var(--wing-border-request);
 }
@@ -691,13 +695,13 @@
 
 .askButtons {
   display: flex;
-  gap: 8px;
+  gap: var(--wing-gap-md);
 }
 
 .buttonPrimary,
 .buttonSecondary {
-  height: 22px;
-  padding: 0 8px;
+  height: var(--wing-control-height);
+  padding: 0 var(--wing-control-pad-x);
   border: var(--wing-stroke) solid transparent;
   border-radius: var(--wing-radius-small);
   font-family: inherit;

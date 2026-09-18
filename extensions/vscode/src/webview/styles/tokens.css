@@ -31,9 +31,37 @@
   --wing-font-body-s: 0.923em; /* CHAT:18  --vscode-chat-font-size-body-s (12px @13px) */
   --wing-font-body-m: 1em; /* CHAT:20  --vscode-chat-font-size-body-m (13px @13px) */
   --wing-font-body-l: 1.077em; /* CHAT:22  --vscode-chat-font-size-body-l (14px @13px) */
+  --wing-font-body-xl: 1.231em; /* CHAT:24  --vscode-chat-font-size-body-xl (16px @13px) */
+  --wing-font-body-xxl: 1.538em; /* CHAT:26 --vscode-chat-font-size-body-xxl (20px @13px) */
 
   /* CHAT:539-543 (.rendered-markdown { line-height: 1.5em }) */
   --wing-md-line-height: 1.5em;
+
+  /* Workbench size ramp used by the ask card (SIZES:44 heading3 13px, :52 body2
+   * 11px, :77–79 semiBold 600) — the fallbacks are those registered defaults. */
+  --wing-font-heading3: var(--vscode-fontSize-heading3, 13px);
+  --wing-font-body2: var(--vscode-fontSize-body2, 11px);
+  --wing-weight-semibold: var(--vscode-fontWeight-semiBold, 600);
+
+  /* Spacing scale — each step quotes the chat rule it was taken from. Anything
+   * not on this scale needs its own token with its own source (see below). */
+  --wing-gap-xs: 4px; /* CHAT:3316-3319 (.progress-container { gap: 4px }) */
+  --wing-gap-sm: 6px; /* CHAT:1534-1540 (.todo-item { gap: 6px }) */
+  --wing-gap-md: 8px; /* PARTS/chatConfirmationWidget.css:150-155 (.chat-buttons-container { gap: 8px }) */
+  --wing-pad-y-tight: 2px; /* PARTS/chatConfirmationWidget.css:30-34 (.chat-confirmation-widget-title { padding: 2px 6px 2px 2px }) */
+  --wing-pad-y: 4px; /* CHAT:3144-3160 (.chat-used-context-list { padding: 4px 3px }) */
+  /* PARTS/chatQuestionCarousel.css:465-471 (.chat-question-submit-button
+   * { height: 22px }) — the chat view's only small-control geometry. */
+  --wing-control-height: 22px;
+  --wing-control-pad-x: 8px; /* ::465-471 (.chat-question-submit-button { padding: 0 8px }) */
+  /* PARTS/chatQuestionCarousel.css:273-276 (.chat-question-list-checkbox { margin-top: 1px })
+   * — "title line-height is ~17px, checkbox is 16px: 1px offset" (their comment). */
+  --wing-checkbox-offset: 1px;
+  /* PARTS/chatQuestionCarousel.css:214-223 (.chat-question-list-item { padding: 6px 8px }) /
+   * CHAT:376-382 (table cells { padding: 4px 6px }) — the two inner paddings used
+   * by the ask card's option rows and text field. */
+  --wing-pad-cell-y: 4px;
+  --wing-pad-cell-x: 6px;
 
   /* Paragraph rhythm — CHAT:549-552 (.value > .rendered-markdown p { margin: 0 0 16px 0 })
    * and CHAT:443-447 (.value > :last-child { margin-bottom: 0 }) */
@@ -129,7 +157,10 @@
    */
   --wing-tool-expanded-padding: 6px 0;
   --wing-tool-card-margin: 4px 0;
-  --wing-tool-card-title-padding: 8px 12px;
+  /* CHAT:635-640 (.tool-output-part .output-title { padding: 8px 12px }) — the card's
+   * inner padding, reused for its body so text never touches the border. */
+  --wing-tool-card-pad-y: 8px;
+  --wing-tool-card-pad-x: 12px;
   --wing-tool-row-gap: 14px;
   /* ── Code block ──────────────────────────────────────────────────────
    * codeBlockPart.css:61-82 (margin 0 0 16px 0, border/radius/surface)
@@ -227,7 +258,8 @@
 
   /* ── Streaming ───────────────────────────────────────────────────────
    * CHAT:493-537 (.value.inline-progress — empty span width 11px, `::after`
-   * width 3em) + CHAT:134-140 (@keyframes ellipsis steps(4, end) 1s infinite).
+   * width 3em) + CHAT:102-116 (@keyframes ellipsis) applied by
+   * CHAT:134-140 (.chat-animated-ellipsis::after, steps(4, end) 1s infinite).
    * Block fade-in: PARTS/chatIncrementalRendering/media/chatIncrementalRendering.css:22-30
    * (600ms ease-out).
    */

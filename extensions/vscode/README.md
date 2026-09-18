@@ -116,7 +116,19 @@ authoritative one because it resolves the actual import graph instead of pattern
   the layer guard — visual constants stay traceable.
 - Visual constants live in `src/webview/styles/tokens.css`, each one annotated with the **file and line
   it was taken from** in the local VS Code 1.129.1 sources (`workbench/contrib/chat/browser/widget/**`).
-  Do not add a value without a source.
+  Every spacing / font-size / line-height / radius / colour decision belongs there.
+
+  **Where a CSS module may still use a literal** (the complete exception list — anything else must become
+  a token first):
+
+  1. the declaration is _inside a rule whose header comment already quotes the source line that contains
+     it_ (e.g. `.userBubble { padding: 8px 12px }` under a `CHAT:3792-3805` comment) — the value is
+     sourced at the rule level, not copied by feel;
+  2. pure geometry with no Copilot counterpart, because the webview cannot ship the codicon font: the
+     collapse chevron triangle (`width: 0; height: 0; border-*: 3px/4px`), the tool status dot
+     (`6px`), the todo glyph box (`width: 1em`) and the diff marker column (`1.2em`);
+  3. layout glue that carries no visual decision: `0`, `auto`, `fit-content`, `100%`, `100vh`, `normal`,
+     `inherit`, `1em`, unitless flex factors.
 
 ### Chat renderer (`src/webview/chat`)
 

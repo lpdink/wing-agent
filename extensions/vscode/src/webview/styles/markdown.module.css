@@ -3,7 +3,9 @@
  *
  * Sources: `widget/media/chat.css` (rendered-markdown rules) and
  * `widget/chatContentParts/media/codeBlockPart.css` (code block chrome). See
- * tokens.css for the token definitions and their line references.
+ * tokens.css for the token definitions and their line references; the remaining
+ * literals follow the exception list in README.md (rule-level source comment,
+ * codicon stand-in geometry, layout glue).
  */
 
 .markdown {
@@ -28,11 +30,11 @@
 }
 
 .heading[data-level='1'] {
-  font-size: 1.538em;
+  font-size: var(--wing-font-body-xxl);
 }
 
 .heading[data-level='2'] {
-  font-size: 1.231em;
+  font-size: var(--wing-font-body-xl);
 }
 
 .heading[data-level='3'] {
@@ -123,8 +125,10 @@ ol.list {
   text-align: right;
 }
 
+/* CHAT:449-455 only colours the rule; the spacing reuses the paragraph rhythm
+ * (CHAT:549-552) instead of inventing a margin. */
 .rule {
-  margin: 1em 0;
+  margin: var(--wing-md-paragraph-margin) 0;
   border: 0;
   border-top: var(--wing-stroke) solid var(--wing-border-widget);
 }
@@ -167,9 +171,9 @@ ol.list {
 .codeHeader {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--wing-gap-md);
   height: var(--wing-code-toolbar-height);
-  padding: 0 8px;
+  padding: 0 var(--wing-control-pad-x);
 }
 
 .codeLang {
@@ -185,7 +189,7 @@ ol.list {
 .codeCopy {
   flex: 0 0 auto;
   height: var(--wing-code-action-size);
-  padding: 0 8px;
+  padding: 0 var(--wing-control-pad-x);
   border: var(--wing-stroke) solid var(--wing-border-request);
   border-radius: var(--wing-radius-small);
   color: var(--wing-fg-description);
@@ -216,16 +220,18 @@ ol.list {
 
 .codePre {
   margin: 0;
-  padding: 0 0 8px;
+  padding: 0 0 var(--wing-tool-card-pad-y);
   overflow-x: auto;
   font-family: var(--vscode-editor-font-family);
   font-size: var(--wing-font-body-s);
-  line-height: 1.4;
+  /* Code blocks are not Monaco editors: use the font's own line height (see the
+   * note on `.diffBody`). */
+  line-height: normal;
 }
 
 .codeLine {
   display: block;
-  padding: 0 12px;
+  padding: 0 var(--wing-tool-card-pad-x);
 }
 
 .codeToken {

@@ -14,6 +14,7 @@
 .root {
   display: flex;
   flex-direction: column;
+  /* Viewport glue: the view fills the webview panel (README exception list #3). */
   height: 100vh;
   margin: 0;
   overflow: hidden;
@@ -28,7 +29,7 @@
 .header {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--wing-gap-xs, 4px);
   padding: var(--wing-chat-row-padding-y, 5px) var(--wing-chat-row-padding-x, 16px);
   border-bottom: var(--wing-stroke, 1px) solid var(--vscode-panel-border, transparent);
 }
@@ -36,7 +37,7 @@
 .titleRow {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--wing-gap-md, 8px);
 }
 
 .title {
@@ -55,7 +56,7 @@
 .meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--wing-gap-md, 8px);
   color: var(--vscode-descriptionForeground);
   font-size: var(--wing-font-body-s, 0.923em);
 }
@@ -63,7 +64,7 @@
 .footer {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--wing-gap-md, 8px);
   padding: 4px var(--wing-chat-row-padding-x, 16px);
   border-top: var(--wing-stroke, 1px) solid var(--vscode-panel-border, transparent);
   color: var(--vscode-descriptionForeground);
@@ -75,7 +76,7 @@
 }
 
 .button {
-  padding: 2px 8px;
+  padding: var(--wing-pad-y-tight, 2px) var(--wing-control-pad-x, 8px);
   border: var(--wing-stroke, 1px) solid var(--vscode-panel-border, transparent);
   border-radius: var(--wing-radius-small, 4px);
   color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
@@ -97,12 +98,12 @@
 .toasts {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--wing-gap-xs, 4px);
   padding: 0 var(--wing-chat-row-padding-x, 16px) 4px;
 }
 
 .toast {
-  padding: 4px 8px;
+  padding: var(--wing-pad-y, 4px) var(--wing-gap-md, 8px);
   border: var(--wing-stroke, 1px) solid var(--vscode-panel-border, transparent);
   border-radius: var(--wing-radius-small, 4px);
   background-color: var(--vscode-editorWidget-background, transparent);
