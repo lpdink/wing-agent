@@ -48,6 +48,24 @@ export interface TurnUsage {
   readonly ttftMs: number;
 }
 
+/**
+ * Streaming-arguments state of one in-flight tool call (host-only).
+ *
+ * `text` is every fragment received so far; the two render anchors let the
+ * reducer decide whether a fragment is worth a cell update (and therefore a
+ * bridge message) — see `TOOL_ARGS_RENDER_*` in `reducer.ts`.
+ */
+export interface ToolArgsStreamState {
+  /** Accumulated raw argument text (the partial-JSON parse input). */
+  readonly text: string;
+  /** `text.length` at the last rendered update. */
+  readonly renderedLength: number;
+  /** `now()` of the last rendered update. */
+  readonly renderedAtMs: EpochMs;
+  /** Fragments received since the last rendered update. */
+  readonly fragmentsSinceRender: number;
+}
+
 export interface SessionRecordOptions {
   readonly sessionId: string;
   readonly now: () => number;
@@ -86,6 +104,14 @@ export class SessionRecord {
   lastError: string | null = null;
   /** Backend-restored composer draft, cleared once the webview saw it. */
   draft: string | null = null;
+  /**
+   * One-shot token for {@link draft}: bumped every time the host *installs* a
+   * draft (`setDraft`), never by consumption. The webview adopts a draft only
+   * when the token it sees is newer than the last one it adopted, which is what
+   * lets the *same* text be restored twice (two failed sends) while a re-sent
+   * `state` (or an out-of-order older one) can never clobber typing.
+   */
+  draftSeq = 0;
   panels: PanelsModel = EMPTY_PANELS;
   /** Patch cursor; the manager bumps it exactly when it posts. */
   seq = 0;
@@ -105,6 +131,18 @@ export class SessionRecord {
   turnUsage: TurnUsage | null = null;
   turnUsageModel = '';
   metricsEmittedForTurn = false;
+
+  /**
+   * Streaming tool-argument buffers, keyed by tool call id.
+   *
+   * Host-only state (never serialised, never in a patch): the accumulated text
+   * is the input of the partial-JSON parse, and the render anchors are what turn
+   * "one event per provider chunk" into "one cell update per budget" — see
+   * `reducer.applyToolCallStream`. The *cell* only ever carries a snapshot of
+   * this buffer, which is what keeps `mirror.cells == record.cells` (a skipped
+   * fragment is skipped in the model too, not just on the wire).
+   */
+  private readonly toolArgsStream = new Map<ToolCallId, ToolArgsStreamState>();
 
   /** Host clock (injectable: tests pin every timestamp). */
   now(): EpochMs {
@@ -305,12 +343,16 @@ export class SessionRecord {
     this.toolCells.clear();
     this.pendingRequests.clear();
     this.awaitingAsks.clear();
+    this.toolArgsStream.clear();
     this.lastAssistantCellId = null;
     this.lastThinkingCellId = null;
     this.thinkingStartedAtMs = null;
     this.turnUsage = null;
     this.turnUsageModel = '';
     this.metricsEmittedForTurn = false;
+    // `draftSeq` deliberately survives `clear()`: it is a monotone one-shot
+    // token, and a replay that re-installs a draft must still look "newer" to a
+    // webview that adopted an earlier one (see `SessionStateModel.draftSeq`).
   }
 
   // ── pending user messages ───────────────────────────────────────────
@@ -478,6 +520,26 @@ export class SessionRecord {
     this.dirtyState = true;
   }
 
+  /**
+   * Install a composer draft (resume / rewind / fork / sync, and the "this was
+   * never sent" path) and stamp it with a fresh token.
+   *
+   * `null` only ever *clears* the local copy (the webview already adopted the
+   * text); it does not consume a token, so the next install still counts as new.
+   */
+  setDraft(text: string | null): void {
+    if (text !== null) {
+      this.draftSeq += 1;
+    }
+    this.draft = text;
+    this.dirtyState = true;
+  }
+
+  /** Forget the local copy without burning a token (the webview has the text). */
+  consumeDraft(): void {
+    this.draft = null;
+  }
+
   clearLastError(): void {
     if (this.lastError !== null) {
       this.lastError = null;
@@ -491,6 +553,26 @@ export class SessionRecord {
       this.dirtyState = true;
       this.dirtyTabs = true;
     }
+  }
+
+  // ── streaming tool arguments (host-only) ────────────────────────────
+
+  /** The streaming-args buffer of one in-flight tool call, when there is one. */
+  toolArgsStreamFor(toolCallId: ToolCallId): ToolArgsStreamState | undefined {
+    return this.toolArgsStream.get(toolCallId);
+  }
+
+  /** Install/replace one tool call's streaming-args buffer. */
+  setToolArgsStream(toolCallId: ToolCallId, state: ToolArgsStreamState): void {
+    this.toolArgsStream.set(toolCallId, state);
+  }
+
+  /**
+   * Forget one tool call's buffer — the call is final (`tool_call` / result) or
+   * its cell is gone.
+   */
+  dropToolArgsStream(toolCallId: ToolCallId): void {
+    this.toolArgsStream.delete(toolCallId);
   }
 
   // ── journal / snapshots ─────────────────────────────────────────────
@@ -519,6 +601,7 @@ export class SessionRecord {
       turn: this.turn,
       lastError: this.lastError,
       draft: this.draft,
+      draftSeq: this.draftSeq,
       panels: this.panels,
       seq: this.seq,
     };
@@ -566,6 +649,7 @@ export class SessionRecord {
     this.pendingIds.delete(cell.id);
     if (cell.kind === 'tool_call') {
       this.toolCells.delete(cell.toolCallId);
+      this.toolArgsStream.delete(cell.toolCallId);
     }
     if (cell.kind === 'ask') {
       this.awaitingAsks.delete(cell.requestId);

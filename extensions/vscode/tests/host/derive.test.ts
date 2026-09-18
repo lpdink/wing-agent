@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   ASK_UNANSWERED,
+  DIFF_MAX_EDIT_LINES,
   DIFF_MAX_ROWS,
   buildAskReply,
   buildDiffWindow,
@@ -132,6 +133,113 @@ describe('line diff', () => {
     const rebuiltNew = rows.filter((row) => row.kind !== 'del').map((row) => row.text);
     expect(rebuiltOld).toEqual(oldLines);
     expect(rebuiltNew).toEqual(newLines);
+  });
+});
+
+/**
+ * Review #109 [P1-1]: a whole-file `Write` used to allocate a `D × 2(N+M)`
+ * Myers trace (~340 MB at 3000 lines). The gate degrades to a coarse block; the
+ * tests below pin the degraded branch, the input size it must *not* degrade for,
+ * and the bounds the renderer depends on.
+ */
+describe('large diffs (Myers memory gate)', () => {
+  /** Two completely different files of `n` lines each — the worst case for Myers. */
+  function rewritten(n: number): { old: string[]; new: string[] } {
+    return {
+      old: Array.from({ length: n }, (_, index) => `old line ${index} ${'a'.repeat(40)}`),
+      new: Array.from({ length: n }, (_, index) => `new content ${index} ${'b'.repeat(40)}`),
+    };
+  }
+
+  it('degrades to a coarse del+add block once the gate is exceeded', () => {
+    // Forcing the gate to 0 makes the branch observable on a tiny input: Myers
+    // keeps the shared middle line `b` as context and interleaves the changes,
+    // the coarse script deletes every old line and then adds every new one.
+    expect(lineDiff(['a', 'b', 'c'], ['X', 'b', 'Y'])).toEqual([
+      { kind: 'del', text: 'a' },
+      { kind: 'add', text: 'X' },
+      { kind: 'context', text: 'b' },
+      { kind: 'del', text: 'c' },
+      { kind: 'add', text: 'Y' },
+    ]);
+    expect(lineDiff(['a', 'b', 'c'], ['X', 'b', 'Y'], { maxEditLines: 0 })).toEqual([
+      { kind: 'del', text: 'a' },
+      { kind: 'del', text: 'b' },
+      { kind: 'del', text: 'c' },
+      { kind: 'add', text: 'X' },
+      { kind: 'add', text: 'b' },
+      { kind: 'add', text: 'Y' },
+    ]);
+  });
+
+  it('degraded scripts stay sound (both sides reconstruct)', () => {
+    const { old: oldLines, new: newLines } = rewritten(40);
+    const rows = lineDiff(oldLines, newLines, { maxEditLines: 0 });
+
+    expect(rows.filter((row) => row.kind !== 'add').map((row) => row.text)).toEqual(oldLines);
+    expect(rows.filter((row) => row.kind !== 'del').map((row) => row.text)).toEqual(newLines);
+  });
+
+  it('renders a 3000-line rewrite as one bounded coarse block, in del→add order', () => {
+    const { old: oldLines, new: newLines } = rewritten(3000);
+    const startedAt = Date.now();
+    const rows = lineDiff(oldLines, newLines);
+    const elapsedMs = Date.now() - startedAt;
+
+    // The gate fired: exactly one deletion block followed by one insertion
+    // block, no interleaving and no context row (`myersDiff` would emit context
+    // rows for the lines the two revisions share — here: none of them).
+    expect(oldLines.length + newLines.length).toBeGreaterThan(DIFF_MAX_EDIT_LINES);
+    expect(rows).toHaveLength(6000);
+    expect(rows.slice(0, 3000).every((row) => row.kind === 'del')).toBe(true);
+    expect(rows.slice(3000).every((row) => row.kind === 'add')).toBe(true);
+    // The coarse path is a copy, not a script: it must stay far below the
+    // ~90 ms/340 MB the Myers trace cost on this input (review measurement).
+    expect(elapsedMs).toBeLessThan(500);
+
+    // …and the *window* the cell ships is still capped by DIFF_MAX_ROWS.
+    const window = buildDiffWindow({
+      oldText: oldLines.join('\n'),
+      newText: newLines.join('\n'),
+      oldStartLine: 1,
+      newStartLine: 1,
+      maxRows: DIFF_MAX_ROWS,
+    });
+    expect(window.truncated).toBe(true);
+    expect(window.lines).toHaveLength(DIFF_MAX_ROWS + 1); // hunk header + rows
+  });
+
+  it('keeps the minimal script for a big file with a small edit', () => {
+    // 10 000 identical lines with one changed in the middle: the prefix/suffix
+    // trim leaves a 1×1 middle, so the gate must not fire (a coarse block here
+    // would be a 10 000-row regression).
+    const oldLines = Array.from({ length: 10_000 }, (_, index) => `line ${index}`);
+    const newLines = [...oldLines];
+    newLines[5000] = 'line 5000 changed';
+    const rows = lineDiff(oldLines, newLines);
+
+    expect(rows).toHaveLength(10_001);
+    expect(rows[5000]).toEqual({ kind: 'del', text: 'line 5000' });
+    expect(rows[5001]).toEqual({ kind: 'add', text: 'line 5000 changed' });
+    expect(rows.filter((row) => row.kind === 'context')).toHaveLength(9_999);
+  });
+
+  it('flips to the coarse script exactly when the trimmed middle exceeds the gate', () => {
+    // Same input, two gates: the shared middle line is context in the minimal
+    // script and disappears in the coarse one — an observable branch difference
+    // that does not depend on the shipped threshold value.
+    const half = Array.from({ length: 1_000 }, (_, index) => index);
+    const oldLines = [...half.map((index) => `old ${index}`), 'shared', ...half.map((i) => `older ${i}`)];
+    const newLines = [...half.map((index) => `new ${index}`), 'shared', ...half.map((i) => `newer ${i}`)];
+    const middleLines = oldLines.length + newLines.length;
+
+    const minimal = lineDiff(oldLines, newLines, { maxEditLines: middleLines });
+    const coarse = lineDiff(oldLines, newLines, { maxEditLines: middleLines - 1 });
+
+    expect(minimal.filter((row) => row.kind === 'context')).toStrictEqual([
+      { kind: 'context', text: 'shared' },
+    ]);
+    expect(coarse.some((row) => row.kind === 'context')).toBe(false);
   });
 });
 

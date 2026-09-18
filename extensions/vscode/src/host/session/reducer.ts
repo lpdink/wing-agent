@@ -60,6 +60,38 @@ const TURN_RESULT_TEXT_MAX = 2_000;
 const TOOL_RESULT_MAX_CHARS = 16_000;
 const TOOL_RESULT_TAIL_CHARS = 4_000;
 
+/**
+ * Streaming tool-argument render budget (review #109 [P1-2]).
+ *
+ * A provider emits one `tool_call_stream` fragment per SSE chunk, so a 200 KB
+ * `Write` is ~1000 fragments. Re-parsing the accumulated text and pushing the
+ * whole cell over the bridge for *every* fragment is O(n²): measured at
+ * ~100 MB of bridge traffic and ~0.5 s of host work (see design.md P1-2). While
+ * the model writes the arguments, the title/subject being 100 ms stale is worth
+ * nothing; the authoritative arguments arrive parsed with the final `tool_call`.
+ */
+const TOOL_ARGS_RENDER_INTERVAL_MS = 100;
+/** …or this many new characters, whichever comes first (slow drips still render). */
+const TOOL_ARGS_RENDER_MIN_CHARS = 2_048;
+/** …or this many fragments, so a pinned clock can never freeze the preview. */
+const TOOL_ARGS_RENDER_MAX_FRAGMENTS = 32;
+/**
+ * Below this many characters of accumulated args every fragment still renders.
+ *
+ * Ordinary calls (`Bash`, `Read`, `Glob`, …) are a few hundred characters: the
+ * O(n²) cost is then nothing, and keeping them byte-for-byte as smooth as before
+ * means the budget only changes behaviour for payloads where it matters.
+ */
+const TOOL_ARGS_RENDER_SMALL_CHARS = 512;
+/**
+ * Transport cap for the streaming preview a cell carries.
+ *
+ * The expanded "Arguments" card prefers the parsed `args` (`Cells.tsx`), and the
+ * final `tool_call` provides them in full, so `argsText` is display-only while
+ * it streams — one cell must not push a megabyte per render.
+ */
+const TOOL_ARGS_MAX_CHARS = 8_000;
+
 // ============================================================
 // Live events
 // ============================================================
@@ -103,7 +135,7 @@ export function applySync(record: SessionRecord, sync: SyncSessionEvent): void {
     record.dirtyState = true;
   }
   record.explicitTitle = sync.name;
-  record.draft = sync.draft;
+  record.setDraft(sync.draft);
   record.dirtyState = true;
   record.dirtyTabs = true;
 
@@ -282,6 +314,9 @@ function applyKnown(record: SessionRecord, event: KnownWingEvent, effects: Reduc
     }
     case 'tool_call': {
       closeStreamingText(record);
+      // The authoritative parsed arguments are here: the streaming buffer (and
+      // its capped preview) is done — see `applyToolCallStream`.
+      record.dropToolArgsStream(event.tool_call_id);
       const existing = record.toolCells.get(event.tool_call_id);
       if (existing !== undefined) {
         const cell = record.cellById(existing);
@@ -319,6 +354,7 @@ function applyKnown(record: SessionRecord, event: KnownWingEvent, effects: Reduc
     }
     case 'tool_call_result': {
       closeStreamingText(record);
+      record.dropToolArgsStream(event.tool_call_id);
       // A tool call finishing proves that its ask (a Bash confirmation, an
       // AskUserQuestion) is over — including when another client answered it.
       const askCellId = record.resolveAsk(event.tool_call_id);
@@ -602,26 +638,63 @@ function applyToolCallStream(
   closeStreamingText(record);
   const existing = record.toolCells.get(input.toolCallId);
   const previous = existing === undefined ? undefined : record.cellById(existing);
-  if (previous !== undefined && previous.kind === 'tool_call') {
-    const argsText = previous.argsText + input.fragment;
-    record.update({
-      ...previous,
-      argsText,
-      display: toolDisplay(previous.name, parsePartialJson(argsText)),
-      status: input.isFinal ? 'pending' : previous.status,
+  const streaming = previous !== undefined && previous.kind === 'tool_call' ? previous : null;
+
+  const buffered = record.toolArgsStreamFor(input.toolCallId);
+  const argsText = (buffered?.text ?? '') + input.fragment;
+  const atMs = record.now();
+  // Render budget (review #109 [P1-2]): the first fragment, the last one, every
+  // fragment of a small call, and otherwise one update per interval / N chars /
+  // N fragments. Everything else stays in the buffer — the cell *and* the bridge
+  // stay untouched, so the webview's mirror keeps matching this record exactly.
+  const due =
+    streaming === null ||
+    buffered === undefined ||
+    input.isFinal ||
+    argsText.length <= TOOL_ARGS_RENDER_SMALL_CHARS ||
+    atMs - buffered.renderedAtMs >= TOOL_ARGS_RENDER_INTERVAL_MS ||
+    argsText.length - buffered.renderedLength >= TOOL_ARGS_RENDER_MIN_CHARS ||
+    buffered.fragmentsSinceRender + 1 >= TOOL_ARGS_RENDER_MAX_FRAGMENTS;
+
+  if (!due) {
+    record.setToolArgsStream(input.toolCallId, {
+      ...buffered,
+      text: argsText,
+      fragmentsSinceRender: buffered.fragmentsSinceRender + 1,
     });
     return;
   }
-  const argsText = input.fragment;
+
+  // The parse runs on the full accumulated text (the display must not lie), the
+  // *cell* only carries the capped preview.
+  record.setToolArgsStream(input.toolCallId, {
+    text: argsText,
+    renderedLength: argsText.length,
+    renderedAtMs: atMs,
+    fragmentsSinceRender: 0,
+  });
+  const preview = truncateToolArgs(argsText);
+  const name = streaming === null ? input.toolName : streaming.name;
+  const display = toolDisplay(name, parsePartialJson(argsText));
+
+  if (streaming !== null) {
+    record.update({
+      ...streaming,
+      argsText: preview,
+      display,
+      status: input.isFinal ? 'pending' : streaming.status,
+    });
+    return;
+  }
   const cell: ToolCallCellModel = {
     kind: 'tool_call',
     id: record.newCellId(),
-    createdAt: record.now(),
+    createdAt: atMs,
     toolCallId: input.toolCallId,
     name: input.toolName,
     status: input.isFinal ? 'pending' : 'streaming',
-    display: toolDisplay(input.toolName, parsePartialJson(argsText)),
-    argsText,
+    display,
+    argsText: preview,
     args: null,
     result: null,
     startedAt: null,
@@ -853,6 +926,20 @@ export function truncateToolResult(text: string): string {
   const head = text.slice(0, TOOL_RESULT_MAX_CHARS - TOOL_RESULT_TAIL_CHARS);
   const tail = text.slice(text.length - TOOL_RESULT_TAIL_CHARS);
   return `${head}\n… (${omitted} chars truncated) …\n${tail}`;
+}
+
+/**
+ * Cap the streaming arguments preview a tool cell carries (see
+ * {@link TOOL_ARGS_MAX_CHARS}): head only, with an explicit marker so nobody
+ * mistakes it for the arguments (the parsed, complete ones arrive with the final
+ * `tool_call`).
+ */
+function truncateToolArgs(text: string): string {
+  if (text.length <= TOOL_ARGS_MAX_CHARS) {
+    return text;
+  }
+  const omitted = text.length - TOOL_ARGS_MAX_CHARS;
+  return `${text.slice(0, TOOL_ARGS_MAX_CHARS)}\n… (${omitted} more characters — the complete arguments arrive when the call starts)`;
 }
 
 function numberField(value: JsonValue, key: string): number {

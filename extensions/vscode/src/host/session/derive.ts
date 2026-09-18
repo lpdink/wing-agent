@@ -35,6 +35,12 @@ export const ASK_UNANSWERED = '(user did not answer)';
  * the backend's `content[:100]`.
  */
 export function truncateChars(text: string, maxChars: number): string {
+  // Fast path: UTF-16 length is never below the code-point count, so a short
+  // string needs no array materialisation (this is the hot path when a tool's
+  // arguments carry a large string value).
+  if (text.length <= maxChars) {
+    return text;
+  }
   const chars = Array.from(text);
   if (chars.length <= maxChars) {
     return text;
@@ -224,8 +230,20 @@ export interface DiffRow {
  * `similar::TextDiff::from_lines` (the TUI's diff engine) produces the same
  * shape; determinism matters more than the exact script among equals because
  * the payload is already windowed to a handful of lines.
+ *
+ * **Memory gate (review #109 [P1-1]).** Myers' trace costs `D × 2(N+M)` ints,
+ * and the backend sends `Write` its *whole* `old_text` / `new_text`, so "replace
+ * a 3000-line file" (n = m ≈ 3000, D ≈ 6000) held ~340 MB until this function
+ * returned. Above {@link DIFF_MAX_EDIT_LINES} lines in the trimmed middle the
+ * script therefore degrades to one coarse replacement block (all deletions, then
+ * all insertions): the cell is windowed to `DIFF_MAX_ROWS` rows anyway, so the
+ * user cannot tell the two apart, while the expensive script is never computed.
  */
-export function lineDiff(oldLines: readonly string[], newLines: readonly string[]): DiffRow[] {
+export function lineDiff(
+  oldLines: readonly string[],
+  newLines: readonly string[],
+  options: { readonly maxEditLines?: number } = {},
+): DiffRow[] {
   // Trim the common prefix/suffix first: it keeps the expensive middle small.
   let start = 0;
   while (start < oldLines.length && start < newLines.length && oldLines[start] === newLines[start]) {
@@ -238,17 +256,46 @@ export function lineDiff(oldLines: readonly string[], newLines: readonly string[
     endNew -= 1;
   }
 
-  const rows: DiffRow[] = [];
+  const prefix: DiffRow[] = [];
   for (let index = 0; index < start; index += 1) {
-    rows.push({ kind: 'context', text: oldLines[index] ?? '' });
+    prefix.push({ kind: 'context', text: oldLines[index] ?? '' });
   }
 
   const midOld = oldLines.slice(start, endOld);
   const midNew = newLines.slice(start, endNew);
-  rows.push(...myersDiff(midOld, midNew));
+  const maxEditLines = options.maxEditLines ?? DIFF_MAX_EDIT_LINES;
+  const middle =
+    midOld.length + midNew.length > maxEditLines ? coarseReplace(midOld, midNew) : myersDiff(midOld, midNew);
 
+  const suffix: DiffRow[] = [];
   for (let index = endOld; index < oldLines.length; index += 1) {
-    rows.push({ kind: 'context', text: oldLines[index] ?? '' });
+    suffix.push({ kind: 'context', text: oldLines[index] ?? '' });
+  }
+  // Spread in an array literal (not `push(...)`) — a coarse replacement is
+  // allowed to be large and `push(...huge)` would blow the argument limit.
+  return [...prefix, ...middle, ...suffix];
+}
+
+/**
+ * Cap on the Myers phase (trimmed middle, lines): above it {@link lineDiff}
+ * degrades to a coarse replacement. 4000 lines ≈ 4000·2·4000·4 B ≈ 128 MB of
+ * trace, which is the point where the *script* stops being worth its memory —
+ * a rewrite of that size is never rendered as more than `DIFF_MAX_ROWS` rows.
+ */
+export const DIFF_MAX_EDIT_LINES = 4000;
+
+/**
+ * Whole-block replacement script: every old line deleted, then every new line
+ * added. Linear in the input and still sound (rows minus adds == old, rows minus
+ * dels == new), which is what the windowing/numbering code relies on.
+ */
+function coarseReplace(oldLines: readonly string[], newLines: readonly string[]): DiffRow[] {
+  const rows: DiffRow[] = [];
+  for (const text of oldLines) {
+    rows.push({ kind: 'del', text });
+  }
+  for (const text of newLines) {
+    rows.push({ kind: 'add', text });
   }
   return rows;
 }
@@ -377,6 +424,12 @@ export interface DiffWindowModel {
  * that window (one `@@` header + numbered rows) and only apply a *transport*
  * cap — a `Write` of a large file carries the whole content, and one cell must
  * not turn into a megabyte of bridge traffic (see `truncated`).
+ *
+ * Two independent limits guard the two costs, in this order: {@link lineDiff}'s
+ * `DIFF_MAX_EDIT_LINES` gate bounds the *computation* (a whole-file rewrite is
+ * rendered as one coarse block), and `maxRows` bounds the *payload* the cell
+ * keeps. Neither implies the other — the review's point was that the row cap
+ * alone ran after the expensive part.
  */
 export function buildDiffWindow(input: {
   readonly oldText: string | null;
