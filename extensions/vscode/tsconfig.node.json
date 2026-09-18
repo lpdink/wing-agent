@@ -15,6 +15,7 @@
     "tests/shared/**/*.ts",
     "tests/state/**/*.ts",
     "tests/layers/**/*.ts",
+    "tests/artifact/**/*.ts",
     "tests/mocks/**/*.ts"
   ]
 }

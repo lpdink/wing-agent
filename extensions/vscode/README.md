@@ -112,8 +112,19 @@ authoritative one because it resolves the actual import graph instead of pattern
 - The webview bundle is a single IIFE (`vite.config.mts`, lib mode) and the stylesheet sits next to it:
   no dynamic chunks, no third-party origin, no runtime `fetch`. Everything the renderer needs must be
   bundled at build time.
+- **The bundle must not reference Node globals.** `vite.config.mts` inlines `process.env.NODE_ENV`
+  (Vite does not do that for _lib_ builds) and pins `NODE_ENV=production` so the JSX transform and
+  React's runtime agree; without both, React's CJS entry keeps a `process.env` branch and the view is
+  blank with `ReferenceError: process is not defined` in the webview console.
+  `tests/artifact/webviewBundle.test.ts` builds the bundle with that config and executes it in a DOM
+  without Node globals, so the failure cannot come back unnoticed.
 - Styling is CSS Modules on VS Code theme variables (`--vscode-*`). Hardcoded colors are rejected by
   the layer guard — visual constants stay traceable.
+- The build emits `dist/webview/main.js.map`. DevTools may report
+  `Connecting to …/main.js.map violates … default-src 'none'`: source maps are fetched through
+  `connect-src`, which the document deliberately does not open. It is a harmless console note (maps
+  are dev-only — `**/*.map` is excluded from the `.vsix`) and the price for being able to map a
+  minified stack back to `src/`.
 
 ## Testing
 
@@ -122,12 +133,17 @@ pnpm run test              # all projects
 pnpm run test:watch        # watch mode
 ```
 
-- `tests/{shared,host,core,state,layers}` run in a **node** environment; the `vscode` module is aliased
-  to `tests/mocks/vscode.ts` (a small, recording mock), which is what makes the extension host testable
-  headless — no VS Code window, ever.
+- `tests/{shared,host,core,state,layers,artifact}` run in a **node** environment; the `vscode` module is
+  aliased to `tests/mocks/vscode.ts` (a small, recording mock), which is what makes the extension host
+  testable headless — no VS Code window, ever.
 - `tests/webview` runs in **jsdom** with `@testing-library/react`; components are mounted through the
   real `mountApp` against the scripted host in `src/testing/mockBridge.ts`.
 - `src/testing/fixtures.ts` has one fixture per cell kind; both tests and the preview harness use it.
+- `tests/artifact/webviewBundle.test.ts` is the build-artifact gate: it builds the webview with the
+  real `vite.config.mts` into a temp directory (no `pnpm build` prerequisite), asserts the emitted text
+  (no `process.env`, no Node/CJS leftovers, production React _and_ production JSX transform) and then
+  executes the bundle through `node:vm` in a jsdom realm that has **no Node globals** — the only gate
+  that would have caught the blank-view `ReferenceError` before it reached a real window.
 - The preview harness (`preview/main.tsx`) exposes a toolbar to hydrate fixtures, stream a turn, break
   the patch stream (resync recovery) and push a UI action — the fastest way to look at renderer changes.
 
@@ -146,5 +162,6 @@ pnpm run test:watch        # watch mode
 | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | F5 opens a window without the Wing icon        | `out/extension.js` missing → run `pnpm build`; check the Extension Host log in the development window (Output → Extension Host).                 |
 | View is blank / white                          | Open the webview dev tools (Command Palette → _Developer: Open Webview Developer Tools_) and check the console for CSP or module-loading errors. |
+| Webview console: `main.js.map violates … CSP`  | Harmless: the source map is fetched through `connect-src`, which the document does not open. Maps are dev-only (`**/*.map` is not packaged).     |
 | `pnpm: command not found` inside VS Code tasks | VS Code was launched without your shell `PATH`; run `pnpm build` in a terminal instead of via the task.                                          |
 | `vsce` complains about `@types/vscode`         | `engines.vscode` and `@types/vscode` must stay aligned (currently `^1.100.0` / `1.100.0`).                                                       |
