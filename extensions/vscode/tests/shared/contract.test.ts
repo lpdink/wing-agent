@@ -4,10 +4,12 @@ import type {
   CellModel,
   CellPatch,
   HostToWebviewMessage,
+  PanelsModel,
   SessionViewModel,
   WebviewToHostMessage,
 } from '../../src/shared';
 import {
+  BRANCH_CURRENT_UUID,
   BRIDGE_PROTOCOL_VERSION,
   EMPTY_PANELS,
   LOCAL_COMMANDS,
@@ -387,5 +389,47 @@ describe('session view model', () => {
     expect(session.seq).toBe(0);
     expect(session.panels.modelPicker).toBeNull();
     expect(session.panels.globalNotice).toBeNull();
+  });
+
+  it('starts with nothing open and nothing fetched (step 05, interfaces.md)', () => {
+    // `PanelsModel` after the cross-lane freeze: three overlays the host opens
+    // (`modelPicker` / `sessionPicker` / `branchPicker`) and one data-only catalog
+    // (`commandCatalog`). `null` is the "closed"/"not fetched yet" state the shell
+    // must handle for all four.
+    const session: SessionViewModel = makeFixtureSession();
+    expect(session.panels.modelPicker).toBeNull();
+    expect(session.panels.globalNotice).toBeNull();
+    expect(session.panels.commandCatalog).toBeNull();
+    expect(session.panels.sessionPicker).toBeNull();
+    expect(session.panels.branchPicker).toBeNull();
+    expect(EMPTY_PANELS.sessionPicker).toBeNull();
+    expect(EMPTY_PANELS.branchPicker).toBeNull();
+  });
+
+  it('keeps populated panels JSON-round-trippable (they are plain data)', () => {
+    const panels: PanelsModel = {
+      ...EMPTY_PANELS,
+      commandCatalog: { commands: [{ name: '/init', aliases: [], description: 'Init', params: '' }] },
+      sessionPicker: {
+        rows: [
+          {
+            sessionId: 'session-a',
+            title: 'Fixture session',
+            workspace: null,
+            status: 'working',
+            current: true,
+          },
+        ],
+      },
+      branchPicker: {
+        mode: 'fork',
+        rows: [
+          { uuid: 'uuid-1', content: 'first user message', current: false },
+          { uuid: BRANCH_CURRENT_UUID, content: '(current)', current: true },
+        ],
+      },
+    };
+
+    expect(JSON.parse(JSON.stringify(panels))).toEqual(panels);
   });
 });

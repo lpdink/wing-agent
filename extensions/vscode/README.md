@@ -3,10 +3,10 @@
 VS Code frontend for the wing agent: a sidebar view that talks to the same gateway the TUI talks to
 (HTTP for lifecycle, one WebSocket for the ReAct event stream).
 
-> **Status: scaffold (step 01).** The extension installs, activates and renders a fixture-driven
-> placeholder page through the real webview pipeline. The gateway client (`src/core`), the session
-> host (`src/host`) and the chat UI (`src/webview`) land in the next steps. Placeholder code is marked
-> `SCAFFOLD(01)` — grep for it to see what is temporary.
+> **Status: shell + chat renderer (steps 04/05) on top of the step 01 scaffold.** The view renders the
+> real transcript, tab bar, status row and composer; the data still comes from the step 01 placeholder
+> session. The gateway client (`src/core`) and the session host (`src/host`) land in the next steps —
+> placeholder code is marked `SCAFFOLD(01)`, grep for it to see what is temporary.
 
 ## Requirements
 
@@ -31,11 +31,14 @@ Then open **this folder** (`extensions/vscode`) in VS Code and press <kbd>F5</kb
 source:
 
 1. In the new window, click the **Wing** icon in the Activity Bar (left rail).
-2. The **Chat** view opens. You should see the scaffold page: a session header, a fixture transcript
-   (user / assistant / thinking / tool call / diff / todo / ask / metrics cells) and a footer showing
-   `bridge: ready`, the protocol version and a **Ping host** button.
-3. Pressing **Ping host** round-trips one message through the host and shows the measured latency —
-   that is the whole bridge working end to end.
+2. The **Chat** view opens: the session tab bar, the transcript of the placeholder session (user /
+   assistant / thinking / tool call / diff / todo / ask / metrics cells), the status row and the
+   composer. The status row's rightmost chip reads `ready` — the bridge is up.
+3. Clicking that chip round-trips one message through the host and shows the measured latency — that is
+   the whole bridge working end to end.
+4. Type `/` in the composer to see the command candidates, and try `/ss` (sessions) or `/rewind`
+   (branch targets). Until `src/host` (step 03) supplies the catalogs, the session panel falls back to
+   the open tabs and the branch panel says the targets are not available yet.
 
 Notes:
 
@@ -138,7 +141,9 @@ authoritative one because it resolves the actual import graph instead of pattern
      sourced at the rule level, not copied by feel;
   2. pure geometry with no Copilot counterpart, because the webview cannot ship the codicon font: the
      collapse chevron triangle (`width: 0; height: 0; border-*: 3px/4px`), the tool status dot
-     (`6px`), the todo glyph box (`width: 1em`) and the diff marker column (`1.2em`);
+     (`6px`), the todo glyph box (`width: 1em`), the diff marker column (`1.2em`), and the shell's
+     own stand-ins — the tab/panel state dot (`6px`), the attention dot (`8px`), the history clock
+     (`10px` ring), the send arrow and the stop square (`8px`);
   3. layout glue that carries no visual decision: `0`, `auto`, `fit-content`, `100%`, `100vh`, `normal`,
      `inherit`, `1em`, unitless flex factors.
 
@@ -160,6 +165,24 @@ authoritative one because it resolves the actual import graph instead of pattern
   touches the editor or the clipboard itself.
 - Collapsed/expanded choices are webview-local (`chat/interaction.ts`): a memory-only map keyed by cell
   id, never part of the protocol.
+
+### Shell (`src/webview/app`)
+
+- `App.tsx` owns the only non-protocol state of the shell: the drafts (one per session, dropped when a
+  tab closes), which overlay is open, and the focus token. Everything else it renders is host data.
+- The tab bar follows VS Code's editor tabs (`multiEditorTabsControl.ts:186,893` for the
+  `tablist`/`tab` roles, `multieditortabscontrol.css` for the geometry) at sidebar density: status dot,
+  close button, and a dot that replaces the close icon while a background turn is waiting to be seen.
+- The composer routes a submission to exactly one intent (design.md D6 of step 05). `/` opens the
+  command candidates, which merge the host's catalog with `FRONTEND_COMMANDS` (`src/shared/commands.ts`,
+  a mirror of the TUI's table); an exactly typed command runs, anything else completes first.
+- The status row is Copilot's secondary toolbar: model / thinking / YOLO / workspace chips, the context
+  ring (thresholds 75% / 90%, `chatContextUsageWidget.ts:468`), token totals with TTFT, and the channel
+  chip (click to ping).
+- Panels: the model picker is host-owned (`panels.modelPicker` non-null = open); the session (`/ss`,
+  history button) and branch (`/rewind`, `/fork`) panels are opened locally — the composer drives them —
+  but render only host data (`panels.{sessionCatalog,branchCatalog,commandCatalog}`), falling back to the
+  open tabs while a catalog is still `null`.
 
 ## Testing
 

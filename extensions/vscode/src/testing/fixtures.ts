@@ -1,5 +1,18 @@
-import type { AskCellModel, CellModel, SessionViewModel, TabModel, UserCellModel } from '../shared';
-import { EMPTY_PANELS } from '../shared';
+import type {
+  AskCellModel,
+  BranchPickerModel,
+  CellModel,
+  CommandCatalogModel,
+  ModelPickerModel,
+  SessionPickerModel,
+  SessionViewModel,
+  TabModel,
+  UserCellModel,
+} from '../shared';
+import { BRANCH_CURRENT_UUID, EMPTY_PANELS } from '../shared';
+
+/** Which command a branch picker was opened for. */
+export type BranchPickerMode = BranchPickerModel['mode'];
 
 /**
  * Fixtures for tests and the preview harness.
@@ -319,5 +332,116 @@ export function makeLongSession(turns = 25): SessionViewModel {
     title: 'Long session',
     cells: makeLongCells(turns),
     seq: 0,
+  });
+}
+
+// ── scenarios (step 05: the shell) ────────────────────────────────────
+
+/** A command catalog as the host forwards it: gateway prompt commands + local ones. */
+export function makeCommandCatalog(): CommandCatalogModel {
+  return {
+    commands: [
+      { name: '/init', aliases: [], description: 'Initialize AGENTS.md for this workspace', params: '' },
+      { name: '/help', aliases: ['/h'], description: 'Show available commands', params: '[command]' },
+      { name: '/compact', aliases: [], description: 'Compress the session context', params: '[focus]' },
+    ],
+  };
+}
+
+/**
+ * The host-opened session picker: one row per session the gateway knows, including
+ * sessions that are not open as tabs (that is what makes it a history picker) and one
+ * row whose workspace the gateway does not report (`null`).
+ */
+export function makeSessionPicker(currentSessionId = 'session-a'): SessionPickerModel {
+  return {
+    rows: [
+      {
+        sessionId: currentSessionId,
+        title: 'Fixture session',
+        workspace: '/workspace',
+        status: 'working',
+        current: true,
+      },
+      {
+        sessionId: 'session-b',
+        title: 'Waiting on approval',
+        workspace: '/workspace/packages/web',
+        status: 'waiting-for-input',
+        current: false,
+      },
+      {
+        sessionId: 'session-c',
+        title: 'Yesterday’s session',
+        workspace: null,
+        status: 'inactive',
+        current: false,
+      },
+    ],
+  };
+}
+
+/**
+ * The host-opened rewind / fork picker.
+ *
+ * The last row is the gateway's `current` sentinel (`context_manager.py:925`),
+ * normalized by the host into `current: true` — it marks "where you are now" and is
+ * not a target.
+ */
+export function makeBranchPicker(mode: BranchPickerMode = 'rewind'): BranchPickerModel {
+  return {
+    mode,
+    rows: [
+      { uuid: 'uuid-0001-first', content: 'Refactor the session store.', current: false },
+      { uuid: 'uuid-0002-compact', content: '[Compact] Summarised the renderer work', current: false },
+      { uuid: 'uuid-0003-last', content: 'Now wire the composer.', current: false },
+      { uuid: BRANCH_CURRENT_UUID, content: '(current)', current: true },
+    ],
+  };
+}
+
+/** The host-opened model picker (mirrors what the gateway's model list produces). */
+export function makeModelPicker(): ModelPickerModel {
+  return {
+    sessionId: 'session-a',
+    rows: [
+      { provider: 'anthropic', model: 'claude-sonnet-4', selected: true },
+      { provider: 'anthropic', model: 'claude-opus-4', selected: false },
+      { provider: 'openai', model: 'gpt-5', selected: false },
+    ],
+    activeIndex: null,
+  };
+}
+
+/** A session whose `panels` carry the command catalog (no overlay open). */
+export function makeShellSession(overrides: Partial<SessionViewModel> = {}): SessionViewModel {
+  const base = makeFixtureSession({
+    title: 'Shell fixture',
+    panels: { ...EMPTY_PANELS, commandCatalog: makeCommandCatalog() },
+  });
+  return { ...base, ...overrides };
+}
+
+/** A session mid-turn: working status, a queued user message, streaming answer. */
+export function makeWorkingSession(overrides: Partial<SessionViewModel> = {}): SessionViewModel {
+  const base = makeShellSession({
+    sessionId: 'session-a',
+    title: 'Working session',
+    status: 'working',
+    cells: [
+      ...makeStreamingCells(),
+      makePendingUserCell('user-queued-1', 'And add a test for the queue state.'),
+    ],
+    turn: { active: true, startedAtMs: FIXTURE_EPOCH, lastResult: null },
+  });
+  return { ...base, ...overrides };
+}
+
+/** A session with the host's model picker open (host-owned overlay). */
+export function makeModelPickerSession(overrides: Partial<SessionViewModel> = {}): SessionViewModel {
+  return makeShellSession({
+    title: 'Model picker',
+    panels: { ...EMPTY_PANELS, modelPicker: makeModelPicker() },
+    ...overrides,
   });
 }

@@ -188,7 +188,19 @@ export interface BranchPickerModel {
   readonly rows: readonly BranchTargetModel[];
 }
 
-/** Overlay data for the active session. `null` members mean "not shown". */
+/**
+ * Overlay data for the active session (frozen in `interfaces.md`).
+ *
+ * Two kinds of member live here, and the difference matters:
+ *
+ * - **overlays** (`modelPicker`, `globalNotice`, `sessionPicker`, `branchPicker`):
+ *   non-`null` means **on screen**. The host owns open/close for all of them — the
+ *   webview asks (an intent, or `runPromptCommand` for `/ss` `/rewind` `/fork`) and
+ *   renders whatever comes back. It keeps no local open state, so data and
+ *   visibility always arrive together (no empty flash, no stale rows).
+ * - **catalog** (`commandCatalog`): data only, never an overlay. `null` means "not
+ *   fetched yet"; the composer then falls back to its own `FRONTEND_COMMANDS` table.
+ */
 export interface PanelsModel {
   readonly modelPicker: ModelPickerModel | null;
   readonly globalNotice: GlobalNoticeModel | null;

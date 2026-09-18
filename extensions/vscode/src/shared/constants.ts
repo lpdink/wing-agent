@@ -36,6 +36,10 @@ export type ToolName = (typeof TOOL_NAMES)[keyof typeof TOOL_NAMES];
 /**
  * Frontend-only commands: handled by the host without reaching the gateway.
  * Mirrors `crates/wing/src/shared/constants.rs`.
+ *
+ * Kept as the TUI's mirror; the shell's vocabulary (which includes these three) is
+ * {@link FRONTEND_COMMANDS} in `src/shared/commands.ts`, and only the contract test
+ * reads this constant today.
  */
 export const LOCAL_COMMANDS = {
   new: '/new',

@@ -3,14 +3,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { BRIDGE_PROTOCOL_VERSION } from '../../src/shared';
 import { makeEmptySession, makeFixtureSession, makeStreamingCells } from '../../src/testing/fixtures';
-import { cellElement, disposeMounted, mountWebview, pushPatch } from './harness';
+import { cellElement, disposeMounted, mountWebview, pushPatch, pushState, pushTabs } from './harness';
 
 /**
  * End-to-end webview test: mounts the *real* app against a scripted host, so the
- * assertions cover mount → ready → hydrate → render → intent → patch.
+ * assertions cover mount → ready → hydrate → render → intent → patch through the
+ * whole shell (tab bar, status area, transcript, composer).
  *
- * This is the closest thing to the VS Code view that runs headless, which is why
- * it exists before any of the real chat UI does.
+ * This is the closest thing to the VS Code view that runs headless. The shell
+ * assertions (formerly against step 01's header/footer placeholders) live here too:
+ * everything a user can see about the *session* has a stable anchor.
  */
 
 afterEach(() => {
@@ -24,15 +26,16 @@ describe('webview app', () => {
     expect(bridge.sentOfType('ready')).toEqual([{ type: 'ready', protocolVersion: BRIDGE_PROTOCOL_VERSION }]);
   });
 
-  it('renders the hydrated session (title, model, transcript)', () => {
+  it('renders the hydrated session (tab title, model, context, transcript)', () => {
     const { container } = mountWebview([makeFixtureSession()]);
     const ui = within(container);
 
-    expect(ui.getByTestId('session-title')).toHaveTextContent('Fixture session');
+    expect(ui.getByTestId('tab')).toHaveTextContent('Fixture session');
     expect(ui.getByTestId('session-model')).toHaveTextContent('fixture-model · fixture-provider');
-    expect(ui.getByTestId('session-context')).toHaveTextContent('2048 / 200000 tokens');
-    expect(ui.getByTestId('bridge-status')).toHaveTextContent('bridge: ready');
-    expect(ui.getByTestId('protocol-version')).toHaveTextContent(`protocol v${BRIDGE_PROTOCOL_VERSION}`);
+    expect(ui.getByTestId('session-context')).toHaveTextContent('2.0k / 200.0k');
+    expect(ui.getByTestId('bridge-status')).toHaveTextContent('ready');
+    expect(ui.getByTestId('ping-button')).toHaveAttribute('data-protocol', String(BRIDGE_PROTOCOL_VERSION));
+    expect(ui.getByTestId('transcript')).toBeInTheDocument();
   });
 
   it('renders one element per cell and covers every cell kind', () => {
@@ -72,13 +75,13 @@ describe('webview app', () => {
 
     expect(ui.getByTestId('empty-state')).toBeInTheDocument();
     // The host answered only the transport, not the session.
-    expect(ui.getByTestId('bridge-status')).toHaveTextContent('bridge: connecting');
+    expect(ui.getByTestId('bridge-status')).toHaveTextContent('connecting');
 
     act(() => {
       bridge.push({ type: 'tabs', tabs: [], activeSessionId: null });
     });
 
-    expect(ui.getByTestId('bridge-status')).toHaveTextContent('bridge: ready');
+    expect(ui.getByTestId('bridge-status')).toHaveTextContent('ready');
     expect(bridge.sentOfType('ready')).toHaveLength(1);
   });
 
@@ -90,7 +93,7 @@ describe('webview app', () => {
 
     // UI behaviour: the pong is rendered with the latency the *injected* clock
     // measures (0ms here) — deterministic, no wall-clock sampling.
-    expect(ui.getByTestId('ping-rtt')).toHaveTextContent('pong in 0ms');
+    expect(ui.getByTestId('ping-rtt')).toHaveTextContent('pong 0ms');
   });
 
   it('applies streamed patches in order', () => {
@@ -123,32 +126,25 @@ describe('webview app', () => {
       { type: 'resync', sessionId: 'session-a', lastSeq: 0, reason: 'seq-gap' },
     ]);
     // The mock host answers a resync with a fresh hydrate — the mirror is back in sync.
-    expect(within(container).getByTestId('session-title')).toHaveTextContent('Fixture session');
+    expect(within(container).getByTestId('tab')).toHaveTextContent('Fixture session');
     expect(container.textContent).not.toContain('out of order');
   });
 
-  it('renders host-driven toasts from the ui channel', () => {
-    const { container, bridge } = mountWebview([makeFixtureSession()]);
-
-    act(() => {
-      bridge.push({ type: 'ui', action: { kind: 'toast', level: 'warning', message: 'gateway restarting' } });
-    });
-
-    expect(within(container).getByTestId('toasts')).toHaveTextContent('gateway restarting');
-  });
-
   it('follows tabs and state updates pushed by the host', () => {
-    const { container, bridge } = mountWebview([makeFixtureSession()]);
+    const mounted = mountWebview([makeFixtureSession()]);
 
-    act(() => {
-      bridge.push({
-        type: 'state',
-        state: { ...makeFixtureSession(), status: 'working', title: 'Renamed by host' },
-      });
-    });
+    pushState(mounted, { ...makeFixtureSession(), status: 'working', title: 'Renamed by host' });
+    pushTabs(
+      mounted,
+      [{ sessionId: 'session-a', title: 'Renamed by host', status: 'working', attention: 'none' }],
+      'session-a',
+    );
 
-    expect(within(container).getByTestId('session-title')).toHaveTextContent('Renamed by host');
-    expect(within(container).getByTestId('session-status')).toHaveTextContent('working');
+    const ui = within(mounted.container);
+    expect(ui.getByTestId('tab')).toHaveTextContent('Renamed by host');
+    expect(ui.getByTestId('session-status')).toHaveTextContent('Working');
+    // The tab's own status attribute is what the dot is drawn from.
+    expect(ui.getByTestId('tab')).toHaveAttribute('data-status', 'working');
   });
 
   it('switches the rendered session when the host activates another tab', () => {
@@ -166,7 +162,7 @@ describe('webview app', () => {
       });
     });
 
-    expect(within(container).getByTestId('session-title')).toHaveTextContent('New session');
+    expect(within(container).getByTestId('welcome')).toBeInTheDocument();
     expect(container.querySelectorAll('[data-cell-kind]')).toHaveLength(0);
   });
 
@@ -174,7 +170,7 @@ describe('webview app', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const { container } = mountWebview([], { autoHandshake: false });
 
-    expect(within(container).getByTestId('bridge-status')).toHaveTextContent('bridge: connecting');
+    expect(within(container).getByTestId('bridge-status')).toHaveTextContent('connecting');
     expect(errorSpy).not.toHaveBeenCalled();
     errorSpy.mockRestore();
   });

@@ -1,12 +1,20 @@
-import type { CellPatch, SessionViewModel } from '../src/shared';
+import type { CellPatch, PanelsModel, SessionViewModel } from '../src/shared';
+import { EMPTY_PANELS } from '../src/shared';
 import {
   makeApprovalAskCell,
+  makeBranchPicker,
+  makeCommandCatalog,
   makeEmptySession,
   makeFailedToolCell,
   makeFixtureSession,
   makeLongSession,
+  makeModelPicker,
+  makeModelPickerSession,
+  makeSessionPicker,
+  makeShellSession,
   makeStreamingCells,
   makeStreamingToolCell,
+  makeWorkingSession,
 } from '../src/testing/fixtures';
 import { createMockBridge } from '../src/testing/mockBridge';
 import { mountApp } from '../src/webview/mount';
@@ -23,18 +31,52 @@ import { mountApp } from '../src/webview/mount';
  * recovery), and push a UI action.
  */
 
-const FIXTURES = {
-  'all cells': makeFixtureSession(),
-  'streaming turn': makeFixtureSession({ title: 'Streaming turn', cells: makeStreamingCells(), seq: 0 }),
-  'failed tool': makeFixtureSession({
-    title: 'Tool failure',
-    cells: [makeFailedToolCell(), makeStreamingToolCell()],
-    seq: 0,
-  }),
-  approval: makeFixtureSession({ title: 'Approval', cells: [makeApprovalAskCell()], seq: 0 }),
-  empty: makeEmptySession(),
-  'long session': makeLongSession(),
-} satisfies Record<string, SessionViewModel>;
+const SHELL_PANELS: PanelsModel = {
+  ...EMPTY_PANELS,
+  commandCatalog: makeCommandCatalog(),
+};
+
+/** A second session so the tab bar (and tab switching) is part of the preview. */
+const SECOND_SESSION = makeFixtureSession({
+  sessionId: 'session-b',
+  title: 'Second tab',
+  status: 'waiting-for-input',
+  cells: [makeApprovalAskCell()],
+  seq: 0,
+});
+
+const FIXTURES: Record<string, readonly SessionViewModel[]> = {
+  'all cells': [makeFixtureSession()],
+  'streaming turn': [makeFixtureSession({ title: 'Streaming turn', cells: makeStreamingCells(), seq: 0 })],
+  'failed tool': [
+    makeFixtureSession({
+      title: 'Tool failure',
+      cells: [makeFailedToolCell(), makeStreamingToolCell()],
+      seq: 0,
+    }),
+  ],
+  approval: [makeFixtureSession({ title: 'Approval', cells: [makeApprovalAskCell()], seq: 0 })],
+  empty: [makeEmptySession()],
+  'shell (idle)': [makeShellSession()],
+  'shell (working + queue)': [makeWorkingSession()],
+  'shell (model picker open)': [makeModelPickerSession()],
+  'shell (session picker open)': [
+    makeShellSession({
+      panels: { ...EMPTY_PANELS, commandCatalog: makeCommandCatalog(), sessionPicker: makeSessionPicker() },
+    }),
+  ],
+  'shell (branch picker open)': [
+    makeShellSession({
+      panels: {
+        ...EMPTY_PANELS,
+        commandCatalog: makeCommandCatalog(),
+        branchPicker: makeBranchPicker('rewind'),
+      },
+    }),
+  ],
+  'two tabs': [makeShellSession(), SECOND_SESSION],
+  'long session': [makeLongSession()],
+};
 
 type FixtureName = keyof typeof FIXTURES;
 
@@ -51,11 +93,11 @@ function requireElement(id: string): HTMLElement {
 const toolbar = requireElement('preview-root');
 const appRoot = requireElement('root');
 
-let bridge = createMockBridge({ sessions: [FIXTURES['all cells']] });
+let bridge = createMockBridge({ sessions: FIXTURES['all cells'] ?? [] });
 let app = mountApp(appRoot, { transport: bridge.transport });
 let streamTimer: number | null = null;
 /** Mirror of the session the scripted host is streaming into (kept in sync with `seq`). */
-let current: SessionViewModel = FIXTURES['all cells'];
+let current: SessionViewModel = FIXTURES['all cells']?.[0] ?? makeEmptySession();
 
 function stopStream(): void {
   if (streamTimer !== null) {
@@ -67,9 +109,15 @@ function stopStream(): void {
 function remount(name: FixtureName): void {
   stopStream();
   app.dispose();
-  current = FIXTURES[name];
-  bridge = createMockBridge({ sessions: [current] });
+  const sessions = FIXTURES[name] ?? [];
+  current = sessions[0] ?? makeEmptySession();
+  bridge = createMockBridge({ sessions });
   app = mountApp(appRoot, { transport: bridge.transport });
+}
+
+/** Push the shell's catalogs as the host would. */
+function pushPanels(panels: PanelsModel): void {
+  bridge.push({ type: 'panels', sessionId: current.sessionId, panels });
 }
 
 function pushPatches(patches: readonly CellPatch[]): void {
@@ -89,14 +137,14 @@ toolbar.append(label);
 const select = document.createElement('select');
 select.className = 'preview-select';
 select.dataset['testid'] = 'fixture-select';
-for (const name of Object.keys(FIXTURES) as FixtureName[]) {
+for (const name of Object.keys(FIXTURES)) {
   const option = document.createElement('option');
   option.value = name;
   option.textContent = name;
   select.append(option);
 }
 select.addEventListener('change', () => {
-  remount(select.value as FixtureName);
+  remount(select.value);
 });
 toolbar.append(select);
 
@@ -188,8 +236,47 @@ toolbar.append(
 );
 
 toolbar.append(
+  button('Catalogs', () => {
+    pushPanels(SHELL_PANELS);
+  }),
+);
+
+toolbar.append(
+  button('Model panel', () => {
+    pushPanels({ ...SHELL_PANELS, modelPicker: makeModelPicker() });
+  }),
+);
+
+toolbar.append(
+  button('Session picker', () => {
+    pushPanels({ ...SHELL_PANELS, sessionPicker: makeSessionPicker() });
+  }),
+);
+
+toolbar.append(
+  button('Branch picker', () => {
+    pushPanels({ ...SHELL_PANELS, branchPicker: makeBranchPicker('rewind') });
+  }),
+);
+
+toolbar.append(
+  button('Notice', () => {
+    pushPanels({
+      ...EMPTY_PANELS,
+      globalNotice: { level: 'warning', text: 'Gateway reconnecting (attempt 2)…' },
+    });
+  }),
+);
+
+toolbar.append(
+  button('Close overlays', () => {
+    bridge.push({ type: 'ui', action: { kind: 'closeOverlays' } });
+  }),
+);
+
+toolbar.append(
   button('Reload', () => {
-    remount(select.value as FixtureName);
+    remount(select.value);
   }),
 );
 

@@ -9,7 +9,7 @@ import { build } from 'vite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { BRIDGE_PROTOCOL_VERSION, WEBVIEW_ROOT_ID } from '../../src/shared';
-import { makeEmptySession } from '../../src/testing/fixtures';
+import { makeFixtureSession, makeTab } from '../../src/testing/fixtures';
 
 /**
  * Build-artifact gate: the *bundled* webview, executed in a DOM that has no Node
@@ -73,9 +73,9 @@ const NODE_LEFTOVERS = [
 
 /** What the probe reads back out of the executed document. */
 interface WebviewProbe {
-  readonly pingButtonText: string | null;
-  readonly bridgeStatusText: string | null;
-  readonly sessionTitleText: string | null;
+  readonly emptyStateVisible: boolean;
+  readonly transcriptVisible: boolean;
+  readonly tabTitleText: string | null;
   readonly rootChildCount: number;
 }
 
@@ -193,9 +193,9 @@ function runInWebviewRealm(source: string): ExecutedWebview {
       JSON.parse(
         vm.runInContext(
           `JSON.stringify({
-            pingButtonText: document.querySelector('[data-testid="ping-button"]')?.textContent ?? null,
-            bridgeStatusText: document.querySelector('[data-testid="bridge-status"]')?.textContent ?? null,
-            sessionTitleText: document.querySelector('[data-testid="session-title"]')?.textContent ?? null,
+            emptyStateVisible: document.querySelector('[data-testid="empty-state"]') !== null,
+            transcriptVisible: document.querySelector('[data-testid="transcript"]') !== null,
+            tabTitleText: document.querySelector('[data-testid="tab"]')?.textContent ?? null,
             rootChildCount: document.getElementById(${JSON.stringify(WEBVIEW_ROOT_ID)}).childElementCount,
           })`,
           realm,
@@ -266,13 +266,13 @@ describe('webview bundle artifact', () => {
 });
 
 describe('webview bundle in a document without Node globals', () => {
-  it('mounts the scaffold UI', async () => {
+  it('mounts the app shell', async () => {
     const probe = await waitFor(webviewDocument().probe, isMounted);
 
     expect(probe.rootChildCount).toBeGreaterThan(0);
-    expect(probe.pingButtonText).toBe('Ping host');
-    // No host answered yet — the transport is up, the session is not.
-    expect(probe.bridgeStatusText).toBe('bridge: connecting');
+    // No host traffic yet: the shell waits for the host instead of inventing a session.
+    expect(probe.emptyStateVisible).toBe(true);
+    expect(probe.transcriptVisible).toBe(false);
   });
 
   it('announces the bridge handshake to the host', () => {
@@ -285,12 +285,15 @@ describe('webview bundle in a document without Node globals', () => {
   it('renders a hydrate pushed from the host', async () => {
     const webview = webviewDocument();
     await waitFor(webview.probe, isMounted);
-    const session = makeEmptySession('artifact-session');
+    const session = makeFixtureSession({ sessionId: 'artifact-session' });
+    const tab = makeTab(session);
 
     webview.deliver({ type: 'hydrate', session });
-    const probe = await waitFor(webview.probe, (value) => value.sessionTitleText === session.title);
+    webview.deliver({ type: 'tabs', tabs: [tab], activeSessionId: session.sessionId });
+    const probe = await waitFor(webview.probe, (value) => value.transcriptVisible);
 
-    expect(probe.sessionTitleText).toBe(session.title);
-    expect(probe.bridgeStatusText).toBe('bridge: ready');
+    expect(probe.tabTitleText).toContain(session.title);
+    expect(probe.transcriptVisible).toBe(true);
+    expect(probe.emptyStateVisible).toBe(false);
   });
 });

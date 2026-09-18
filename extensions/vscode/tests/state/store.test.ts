@@ -190,6 +190,31 @@ describe('applyUi', () => {
     store.getState().applyUi({ kind: 'closeOverlays' });
     expect(store.getState().toasts).toEqual(before.toasts);
   });
+
+  it('counts each interaction-only action so components can react to it', () => {
+    // Counters, not booleans: the same action twice is two events (step 05).
+    expect(createInitialState().uiSignals).toEqual({
+      closeOverlays: 0,
+      focusComposer: 0,
+      scrollToBottom: 0,
+    });
+
+    store.getState().applyUi({ kind: 'focusComposer' });
+    store.getState().applyUi({ kind: 'focusComposer' });
+    store.getState().applyUi({ kind: 'closeOverlays' });
+
+    expect(store.getState().uiSignals).toEqual({
+      closeOverlays: 1,
+      focusComposer: 2,
+      scrollToBottom: 0,
+    });
+  });
+
+  it('does not count toasts as interaction signals', () => {
+    store.getState().applyUi({ kind: 'toast', level: 'info', message: 'hello' });
+
+    expect(store.getState().uiSignals).toEqual({ closeOverlays: 0, focusComposer: 0, scrollToBottom: 0 });
+  });
 });
 
 describe('bridge status', () => {
