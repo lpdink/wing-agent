@@ -506,6 +506,10 @@ class WingRuntime:
             failures: list[str] = []
             for session in self.sm.iter_sessions():
                 try:
+                    # 快照遍历期间可能发生逐出/拆解：已不在内存的会话跳过，
+                    # 否则会给已关闭 provider 的 agent 重建 client 且无人回收。
+                    if self.sm.get_session(session.session_id) is None:
+                        continue
                     await session.agent.rebuild_providers()
                     rebuilt += 1
                 except Exception as e:

@@ -170,6 +170,11 @@ class WingAgent:
         """是否有在跑的后台任务。"""
         return bool(self._background_tasks)
 
+    @property
+    def has_pending_input(self) -> bool:
+        """inbox 里是否有待处理输入（已投递、worker 尚未取走）。"""
+        return self._inbox.has_pending
+
     # ── 对外接口 ──
 
     @property

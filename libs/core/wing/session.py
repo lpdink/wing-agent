@@ -222,12 +222,16 @@ class Session:
 
         顺序：先 ``shutdown()``（取消 worker，避免拆解期间还有调用方在用
         provider），再 ``aclose_providers()``（关闭该 agent 拥有的 client 表）。
+        provider 的关闭放在 ``finally``：shutdown 失败（worker 带异常退出）
+        也不能留下"已摘除但没拆干净"的 client——那时已没有人再持有它。
 
         只回收内存态，**不动磁盘**：消息日志已 append+fsync 落盘，元数据
         在该落的时候已落——session 仍可经 resume 完整水合回来。
         """
-        await self._agent.shutdown()
-        await self._agent.aclose_providers()
+        try:
+            await self._agent.shutdown()
+        finally:
+            await self._agent.aclose_providers()
 
     def apply_agent_override(self, override: AgentOverride) -> None:
         """应用 AgentOverride 到当前 session 的 agent。

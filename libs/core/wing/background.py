@@ -49,6 +49,12 @@ class BackgroundScheduler:
         await scheduler.stop()
     """
 
+    #: 最小等待间隔（秒）。job 时长超过 interval 时，`min(deadlines) - clock()`
+    #: 会 ≤ 0，而 `asyncio.wait_for(timeout<=0)` 走特例分支**立即超时**——
+    #: 连已 set 的停止事件也不观察（循环永远进不了 `except` 之外的分支）。
+    #: 加一个下限，保证每轮都真的等待、都能看到停止信号。
+    _MIN_TICK_SECONDS = 0.01
+
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._jobs: dict[str, _Job] = {}
@@ -98,7 +104,12 @@ class BackgroundScheduler:
         log.info(f"BackgroundScheduler started: jobs={list(self._jobs)}")
 
     async def stop(self) -> None:
-        """停止调度循环（幂等；不等待已在执行的 job——job 自己要短）。"""
+        """停止调度循环（幂等）。
+
+        会等待**正在执行**的 job 跑完（`await task` 语义），但不会再触发
+        任何后续轮次——调用方（gateway lifespan shutdown）需要的是
+        "停止后不再有新的 job 启动"。
+        """
         task, self._task = self._task, None
         if task is None:
             return
@@ -106,7 +117,11 @@ class BackgroundScheduler:
         try:
             await task
         except asyncio.CancelledError:
-            pass
+            # 区分两种取消：调度循环自身被取消（如事件循环收尾）→ 吞掉；
+            # 调用方自己被取消（await 被打断，循环其实没停）→ 继续向上传播
+            # （吞掉会让 stop() 在外层取消/超时时假装"正常返回"）。
+            if not task.cancelled():
+                raise
         except Exception as e:  # 循环自身异常也不能从 stop 里逃出去
             log.error(f"BackgroundScheduler loop died with error: {e}")
         log.info("BackgroundScheduler stopped")
@@ -115,11 +130,13 @@ class BackgroundScheduler:
 
     async def _run(self) -> None:
         while True:
+            if self._stop.is_set():
+                return
             deadlines = [job.next_run for job in self._jobs.values()]
             if not deadlines:
                 await self._stop.wait()
                 return
-            wait = max(0.0, min(deadlines) - self._clock())
+            wait = max(self._MIN_TICK_SECONDS, min(deadlines) - self._clock())
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=wait)
                 return  # 收到停止信号

@@ -367,15 +367,18 @@ class SessionManager:
     def evict(self, session_id: str, reason: str) -> bool:
         """摘除会话并异步拆解（幂等；未加载返回 False）。
 
-        摘除（pop）是同步的、在拆解之前——单线程事件循环下即原子，
-        拆解失败不影响「已逐出」这个事实。拆解任务登记在 `_teardowns`
-        里（强引用防 GC，测试可等待其完成）。
+        摘除（pop）是同步的、且发生在拆解协程真正运行之前——单线程事件
+        循环下即原子，拆解失败不影响「已逐出」这个事实。拆解任务登记在
+        `_teardowns` 里（强引用防 GC，测试可等待其完成）。
         """
-        session = self._sessions.pop(session_id, None)
+        session = self._sessions.get(session_id)
         if session is None:
             return False
-        self._last_active.pop(session_id, None)
+        # 先建任务：无运行中的事件循环时在此抛错，状态未被改动（会话保持
+        # 在场），不会留下"已摘除却没拆解"的孤儿对象。
         task = asyncio.create_task(self._teardown(session, reason))
+        self._sessions.pop(session_id, None)
+        self._last_active.pop(session_id, None)
         self._teardowns.add(task)
         task.add_done_callback(self._teardowns.discard)
         return True
@@ -438,12 +441,17 @@ class SessionManager:
     def _blocked_reason(self, session: Session) -> str | None:
         """不可逐出的原因；None = 可以逐出。
 
-        四类：在飞 turn（working / waiting）、后台任务、非持久后端、
-        有订阅的客户端。前两者是正确性（拆解会打断它们），后两者是语义
-        （memory 后端逐出即毁数据；订阅中的会话是用户的工作集）。
+        五类：在飞 turn（working / waiting）、inbox 有待处理输入、后台任务、
+        非持久后端、有订阅的客户端。前三者是正确性（拆解会打断它们），
+        后两者是语义（memory 后端逐出即毁数据；订阅中的会话是用户的工作集）。
         """
         if session.status != "idle":
             return f"status={session.status}"
+        if session.agent.has_pending_input:
+            # 消息已入队但 turn 未开始（status 仍 idle）——直接投递
+            # `agent.post()` 的路径（如后台 Explorer 回传）不经过
+            # SM._post，不会 touch 计时器，只靠 timer 会漏判。
+            return "pending input"
         if session.agent.has_background_work:
             return "background work running"
         if not session.store.durable:

@@ -78,6 +78,16 @@ class Inbox:
             except asyncio.QueueEmpty:
                 break
 
+    @property
+    def has_pending(self) -> bool:
+        """队列里是否有尚未被 worker 取走的输入。
+
+        供会话逐出判定用：消息已入队但 turn 还没开始（worker 尚未
+        `_set_working(True)`），此时 status 仍是 idle——不看队列会误判为
+        「空闲可逐出」并把这条输入连同它将要驱动的那一轮一起掐掉。
+        """
+        return not self._queue.empty()
+
     # ── Feedback waiters ──
 
     @property
