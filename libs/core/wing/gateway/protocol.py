@@ -188,6 +188,25 @@ class InterruptRequest(BaseModel):
     session_id: str = Field(description="目标 session ID")
 
 
+class ReleaseRequest(BaseModel):
+    """逐出（release）session 内存态的请求体。"""
+
+    session_id: str = Field(description="目标 session ID")
+
+
+class ReleaseResponse(BaseModel):
+    """逐出（release）响应。
+
+    released=False（detail="not loaded"）表示会话本就不在内存——幂等，
+    不视为错误：它已经在「逐出」这个目标状态里了。被钉住（忙碌 / 有后台
+    任务 / 被订阅 / 非持久后端）时以 409 拒绝。
+    """
+
+    ok: bool = Field(default=True, description="操作是否成功")
+    released: bool = Field(description="本次调用是否真的把会话逐出了内存")
+    detail: str = Field(description="结果说明（released / not loaded）")
+
+
 class RewindRequest(BaseModel):
     """回退 session 到指定消息节点的请求体。"""
 

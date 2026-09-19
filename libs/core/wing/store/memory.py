@@ -39,6 +39,8 @@ class MemorySessionStore(SessionStore):
     """进程内 session 存储。"""
 
     name = "memory"
+    durable = False
+    """非持久：逐出等于数据销毁（SessionManager 逐出判定据此跳过）。"""
 
     def __init__(self) -> None:
         self._metadata: dict[str, SessionMetadata] = {}

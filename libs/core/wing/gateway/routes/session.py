@@ -26,6 +26,8 @@ from wing.gateway.protocol import (
     ForkSessionResponse,
     InterruptRequest,
     OkResponse,
+    ReleaseRequest,
+    ReleaseResponse,
     ResumeSessionRequest,
     ResumeSessionResponse,
     RewindRequest,
@@ -197,7 +199,10 @@ async def send_message(
     server = _get_server(request)
     request_id = uuid.uuid4().hex
 
-    if server.runtime.get_session_state(body.session_id) is None:
+    # 被逐出（不在内存）的会话按需水合；磁盘上也没有才 404。
+    try:
+        server.runtime.ensure_loaded(body.session_id)
+    except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
 
     await server.runtime.post(
@@ -414,6 +419,30 @@ async def interrupt_session(
     except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
     return OkResponse()
+
+
+@router.post(
+    "/api/session/release",
+    response_model=ReleaseResponse,
+    summary="逐出 session 内存态（release）",
+)
+async def release_session(
+    body: ReleaseRequest,
+    request: Request,
+) -> ReleaseResponse:
+    """逐出（eviction）——只回收内存态，磁盘状态不动。
+
+    忽略空闲时长（不为 TTL 等待），但不忽略钉住条件：忙碌 / 有后台任务 /
+    被订阅 / 非持久后端的会话一律 409 拒绝，附带原因。
+    """
+    server = _get_server(request)
+    try:
+        released, detail = server.runtime.release_session(body.session_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="session not found")
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return ReleaseResponse(ok=True, released=released, detail=detail)
 
 
 @router.post(

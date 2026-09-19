@@ -10,7 +10,7 @@ Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+
 ┌─────────────────────────────┐             ┌─────────────────────────┐               ┌─────────────────────────┐
 │ Frontends（wing 二进制）    │             │ Gateway (FastAPI)       │               │ Runtime (Python)        │
 │ TUI（默认）· ratatui 循环   │──── WS ────►│ GatewayServer           │──── HTTP ────►│ WingRuntime（协调者）   │
-│ stdio（wing -p）· NDJSON    │             │ · routes/session(14)    │               │ ├ SessionManager        │
+│ stdio（wing -p）· NDJSON    │             │ · routes/session(15)    │               │ ├ SessionManager        │
 │ 编排 CLI · run/wait/ps/…    │◄── 事件 ────│ · routes/system(6)      │◄──────────────│ ├ SessionStore          │
 │ Goal loop（TUI 侧）         │             │ · routes/tools · health │               │ ├ ContextManager        │
 │ GatewayClient(WS)+ApiClient │             │ · routes/ws（事件流）   │               │ ├ EventBus              │
@@ -18,8 +18,8 @@ Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+
 └─────────────────────────────┘             └─────────────────────────┘               └─────────────────────────┘
 ```
 
-- **三种前端形态，同一个二进制**：TUI（默认，human-in-the-loop）；stdio（`wing -p`，headless，Claude Code 兼容 NDJSON——把 `wing` alias 为 `claude` 即可接入外部编排器）；编排 CLI（`wing run/wait/ps/info/tail/head` 后台任务，`wing start/stop/status` 网关生命周期）。
-- **协议**：HTTP 承载生命周期 / 查询 / 变更（22 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header / WS query param），TLS 交给反向代理。
+- **三种前端形态，同一个二进制**：TUI（默认，human-in-the-loop）；stdio（`wing -p`，headless，Claude Code 兼容 NDJSON——把 `wing` alias 为 `claude` 即可接入外部编排器）；编排 CLI（`wing run/wait/ps/info/tail/head/release` 后台任务，`wing start/stop/status` 网关生命周期）。
+- **协议**：HTTP 承载生命周期 / 查询 / 变更（23 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header / WS query param），TLS 交给反向代理。
 - **持久化**：`SessionStore` 是会话全部持久状态（metadata、混合 message/event 日志、aux）的唯一所有者；后端 `file`（默认，`~/.wing/core/sessions/`）与 `memory`（进程内）。`TrackedList` 是纯内存链拓扑引擎（uuid/parentUuid），I/O 全部委托 `MessageLog`；SQL 后端是增量实现，非架构改动。
 - **模型调用**：`provider/` 隔离协议差异（OpenAI 兼容 / Anthropic），ReAct 循环对协议无感知。
 
@@ -47,6 +47,8 @@ libs/core/wing/
 ├── session_manager.py               SessionManager — 多会话、fork/resume、store registry
 ├── context_manager.py               上下文窗口跟踪 + 压缩 + rewind
 ├── compactor.py                     压缩策略（LLM 摘要）
+├── background.py                    BackgroundScheduler — 周期任务宿主（逐出 / 未来 dreaming 等）
+├── session_reaper.py                SessionReaper — 空闲会话逐出（触摸订阅 + 扫描）
 ├── agent_template.py                AgentTemplate — 配置 agents: 的 model/tools/prompt/skills/rules
 ├── config.py                        Config 模型 + WING_HOME 解析
 ├── default_config.py                手写默认 config.yaml 模板（事实来源）
@@ -105,7 +107,7 @@ libs/core/wing/
     ├── remote_tools.py              RemoteToolManager — 远程工具宿主连接 + WS 调用分发
     ├── protocol.py                  WS + HTTP Pydantic 模型
     ├── openapi.py                   OpenAPI 元数据
-    └── routes/                      session(14) · system(6) · tools(1) · health(1) · ws（事件传输 + 上行帧）
+    └── routes/                      session(15) · system(6) · tools(1) · health(1) · ws（事件传输 + 上行帧）
 ```
 
 ### 前端：`crates/wing/src/`（Rust，TUI + stdio + 编排 CLI）
@@ -124,6 +126,7 @@ crates/wing/src/
 │   ├── run.rs                       `wing run` 非阻塞启动任务（建会话 + 发 prompt，返回 session id）
 │   ├── wait.rs                      `wing wait` 阻塞至会话 idle（HTTP 轮询 + WS TurnResult）
 │   ├── ps.rs                        `wing ps` / `wing info`（会话列表 / 单会话运行时信息）
+│   ├── release.rs                   `wing release` 逐出会话内存态（显式 eviction，幂等）
 │   ├── messages.rs                  `wing tail` / `wing head`（消息过滤，类 Unix head/tail）
 │   └── query.rs                     `wing models` / `tools` / `agents`（查询端点，表格 / JSON）
 ├── stdio/                           headless 前端（wing -p，Claude 协议）

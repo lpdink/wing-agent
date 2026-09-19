@@ -117,6 +117,18 @@ class EventBus:
     def route_detach_client(self, client_id: str) -> None:
         self._routing.pop(client_id, None)
 
+    def subscribers_of(self, session_id: str) -> set[str]:
+        """订阅了指定 session 的 client_id 集合（逐出钉住判据）。
+
+        路由表里的 client 都是活跃连接（WS 断连时 `route_detach_client`
+        清理），因此"有人订阅"即"有人正在看"。
+        """
+        return {
+            client_id
+            for client_id, sessions in self._routing.items()
+            if session_id in sessions
+        }
+
     @property
     def routing_table(self) -> dict[str, set[str]]:
         return dict(self._routing)

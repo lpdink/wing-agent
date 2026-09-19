@@ -136,6 +136,20 @@ pub struct InterruptRequest {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ReleaseRequest {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseResponse {
+    pub ok: bool,
+    /// 本次调用是否真的把会话逐出了内存（false = 本就不在内存，幂等）。
+    pub released: bool,
+    /// 结果说明（released / not loaded）。
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RewindRequest {
     pub session_id: String,
     pub target_uuid: String,

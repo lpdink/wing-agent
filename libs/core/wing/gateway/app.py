@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
@@ -58,12 +60,27 @@ def create_app(server: GatewayServer) -> FastAPI:
     Returns:
         配置好的 FastAPI app
     """
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        """进程生命周期钩子：启停后台周期任务（uvicorn 自动调用）。
+
+        不启 lifespan（如无上下文的 TestClient）时后台任务完全不跑——
+        单测与嵌入式使用零副作用。
+        """
+        server.start_background()
+        try:
+            yield
+        finally:
+            await server.stop_background()
+
     app = FastAPI(
         title=OPENAPI_METADATA["title"],
         description=OPENAPI_METADATA["description"],
         version=OPENAPI_METADATA["version"],
         servers=OPENAPI_METADATA["servers"],
         openapi_tags=OPENAPI_METADATA["tags"],
+        lifespan=lifespan,
     )
 
     app.state.server = server

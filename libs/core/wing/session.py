@@ -217,6 +217,18 @@ class Session:
         self._initial_status = self._agent.get_status()
         log.info(f"Session {self._session_id}: switched to agent '{template.name}'")
 
+    async def aclose(self) -> None:
+        """释放运行期资源（逐出路径专用）。
+
+        顺序：先 ``shutdown()``（取消 worker，避免拆解期间还有调用方在用
+        provider），再 ``aclose_providers()``（关闭该 agent 拥有的 client 表）。
+
+        只回收内存态，**不动磁盘**：消息日志已 append+fsync 落盘，元数据
+        在该落的时候已落——session 仍可经 resume 完整水合回来。
+        """
+        await self._agent.shutdown()
+        await self._agent.aclose_providers()
+
     def apply_agent_override(self, override: AgentOverride) -> None:
         """应用 AgentOverride 到当前 session 的 agent。
 

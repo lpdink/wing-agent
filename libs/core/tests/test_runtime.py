@@ -117,15 +117,17 @@ class TestContextvarsIsolation:
 
     @pytest.mark.asyncio
     async def test_contextvars_restored_on_missing_session(self, runtime: Any):
-        """post() 给不存在的 session_id 不会导致 contextvars 泄露。"""
+        """post() 给不存在的 session_id（内存与磁盘都没有）抛 LookupError，
+        且 contextvars 不泄露。"""
         # 先设置外部 RequestContext
         token = set_request_context(request_id="outer")
 
-        await runtime.post(
-            "hello",
-            session_id="non-existent-session",
-            client_id="test-client",
-        )
+        with pytest.raises(LookupError):
+            await runtime.post(
+                "hello",
+                session_id="non-existent-session",
+                client_id="test-client",
+            )
 
         # 恢复
         received: list = []
@@ -547,15 +549,15 @@ class TestPostRouting:
         assert True
 
     @pytest.mark.asyncio
-    async def test_session_not_found_logs_error(self, runtime: Any):
-        """不存在的 session_id 不抛异常，只是 log error。"""
-        # 这个方法应该不会抛异常
-        await runtime.post(
-            "hello",
-            session_id="definitely-not-exists",
-            client_id="test-client",
-        )
-        assert True
+    async def test_session_not_found_raises_lookup_error(self, runtime: Any):
+        """不存在的 session_id 抛 LookupError（调用方负责映射错误面：
+        HTTP 404 / WS Error 帧），而不是静默丢弃。"""
+        with pytest.raises(LookupError):
+            await runtime.post(
+                "hello",
+                session_id="definitely-not-exists",
+                client_id="test-client",
+            )
 
 
 # ============================================================

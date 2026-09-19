@@ -147,6 +147,21 @@ tool_result_truncate:
   max_length: 100000  # trigger threshold (chars). null or <0 disables
   keep_chars: 200     # chars to keep at head and tail
 
+# ── Sessions ─────────────────────────────────────────────────
+sessions:
+  # Eviction of idle in-memory sessions (gateway memory hygiene).
+  # A session is evicted only when ALL of these hold: no turn running
+  # (working/waiting), no background work, no client subscribed, and
+  # it has been idle for longer than idle_ttl_seconds. The idle timer
+  # resets on every session state change (any event of that session).
+  # Eviction never touches the disk: an evicted session is re-loaded
+  # on demand (resume / subscribe / send). Use `wing release <sid>`
+  # to evict explicitly.
+  eviction:
+    enabled: true               # false disables the periodic sweep
+    idle_ttl_seconds: 1800      # 30 min of idleness before eviction
+    sweep_interval_seconds: 300 # sweep period (5 min)
+
 # ── Logging ──────────────────────────────────────────────────
 log:
   # Gateway console log level (stdout/stderr of the daemon; the daemon's
