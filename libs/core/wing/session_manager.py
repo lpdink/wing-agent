@@ -16,6 +16,8 @@ wing/session_manager.py — SessionManager
 
 from __future__ import annotations
 
+import asyncio
+import time
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -100,6 +102,12 @@ class SessionManager:
         self._sessions: dict[str, Session] = {}
         self._stores = stores
         self._default_backend = default_backend
+
+        # 逐出（eviction）簿记：空闲计时器 + 在途拆解任务。
+        # `_last_active` 是纯内存管理数据（不是持久状态）——任何会话状态
+        # 变化（事件/操作）都会 touch 刷新；摘除时随会话一起丢弃。
+        self._last_active: dict[str, float] = {}
+        self._teardowns: set[asyncio.Task[None]] = set()
 
         # 从 config 创建 AgentTemplateManager
         config = get_config()
@@ -187,6 +195,7 @@ class SessionManager:
             session.apply_agent_override(agent_override)
 
         self._sessions[sid] = session
+        self.touch(sid)
 
         # 触发 before_session_start hook
         hooks.invoke("before_session_start", session)
@@ -258,6 +267,7 @@ class SessionManager:
             workspace=metadata.workspace if metadata is not None else None,
         )
         self._sessions[resolved] = session
+        self.touch(resolved)
         log.info(f"Session resumed: {resolved}")
         return session
 
@@ -323,8 +333,132 @@ class SessionManager:
             workspace=source.session_workspace,
         )
         self._sessions[new_session_id] = new_session
+        self.touch(new_session_id)
 
         return new_session, draft
+
+    # ============================================================
+    # 外部方法：逐出（eviction）
+    # ============================================================
+
+    def touch(self, session_id: str) -> None:
+        """刷新会话的空闲计时器（任何状态变化都算一次「在场」）。
+
+        由 SessionReaper 的 EventBus 订阅驱动——事件流即会话状态变化的
+        全量来源，无需在各调用点插桩。未加载的 session id 静默忽略。
+        """
+        if session_id in self._sessions:
+            self._last_active[session_id] = time.monotonic()
+
+    def ensure_loaded(self, session_id: str) -> Session:
+        """取会话；不在内存时从磁盘水合（复用 resume 路径）。
+
+        逐出后的入口都应经此取会话：被逐出不再是「会话不存在」，
+        只是「不在内存」——磁盘上也没有才 LookupError。
+
+        Raises:
+            LookupError: 内存与磁盘都没有该会话
+        """
+        session = self._sessions.get(session_id)
+        if session is not None:
+            return session
+        return self.resume_session(session_id)
+
+    def evict(self, session_id: str, reason: str) -> bool:
+        """摘除会话并异步拆解（幂等；未加载返回 False）。
+
+        摘除（pop）是同步的、且发生在拆解协程真正运行之前——单线程事件
+        循环下即原子，拆解失败不影响「已逐出」这个事实。拆解任务登记在
+        `_teardowns` 里（强引用防 GC，测试可等待其完成）。
+        """
+        session = self._sessions.get(session_id)
+        if session is None:
+            return False
+        # 先建任务：无运行中的事件循环时在此抛错，状态未被改动（会话保持
+        # 在场），不会留下"已摘除却没拆解"的孤儿对象。
+        task = asyncio.create_task(self._teardown(session, reason))
+        self._sessions.pop(session_id, None)
+        self._last_active.pop(session_id, None)
+        self._teardowns.add(task)
+        task.add_done_callback(self._teardowns.discard)
+        return True
+
+    async def _teardown(self, session: Session, reason: str) -> None:
+        """拆解会话运行期资源并记一行日志（异常不逃逸）。"""
+        try:
+            await session.aclose()
+        except Exception as e:
+            log.error(f"Session teardown failed ({session.session_id}): {e}")
+        log.info(f"Session evicted: {session.session_id} ({reason})")
+
+    def evict_idle_sessions(
+        self, ttl_seconds: float, now: float | None = None
+    ) -> list[str]:
+        """逐出所有「空闲超过 ttl 且未被钉住」的会话，返回 id 列表。
+
+        同步完成「决策 + 摘除」；拆解异步收尾。`now` 可注入（单测用假时钟）。
+        """
+        current = time.monotonic() if now is None else now
+        evicted: list[str] = []
+        for session_id, session in list(self._sessions.items()):
+            if self._blocked_reason(session) is not None:
+                continue
+            last_active = self._last_active.get(session_id, current)
+            idle = current - last_active
+            if idle < ttl_seconds:
+                continue
+            if self.evict(session_id, reason=f"idle {int(idle)}s"):
+                evicted.append(session_id)
+        return evicted
+
+    def release_session(self, session_id: str) -> tuple[bool, str]:
+        """显式逐出（用户主动 release）：忽略空闲时长，不忽略钉住条件。
+
+        Returns:
+            (released, detail)：released=False 表示会话本就不在内存（幂等，
+            不是错误——它已经在「逐出」这个目标状态里了）。
+
+        Raises:
+            LookupError: 内存与磁盘都没有该会话
+            RuntimeError: 被钉住（忙碌 / 有后台任务 / 被订阅 / 非持久后端）
+        """
+        session = self._sessions.get(session_id)
+        if session is None:
+            if self._resolve_with_store(session_id) is None:
+                raise LookupError(f"Session not found: {session_id}")
+            return False, "not loaded"
+        blocker = self._blocked_reason(session)
+        if blocker is not None:
+            raise RuntimeError(f"session cannot be released: {blocker}")
+        self.evict(session_id, reason="released")
+        return True, "released"
+
+    async def wait_teardowns(self) -> None:
+        """等待全部在途拆解完成（测试与收尾路径用）。"""
+        while self._teardowns:
+            await asyncio.gather(*list(self._teardowns), return_exceptions=True)
+
+    def _blocked_reason(self, session: Session) -> str | None:
+        """不可逐出的原因；None = 可以逐出。
+
+        五类：在飞 turn（working / waiting）、inbox 有待处理输入、后台任务、
+        非持久后端、有订阅的客户端。前三者是正确性（拆解会打断它们），
+        后两者是语义（memory 后端逐出即毁数据；订阅中的会话是用户的工作集）。
+        """
+        if session.status != "idle":
+            return f"status={session.status}"
+        if session.agent.has_pending_input:
+            # 消息已入队但 turn 未开始（status 仍 idle）——直接投递
+            # `agent.post()` 的路径（如后台 Explorer 回传）不经过
+            # SM._post，不会 touch 计时器，只靠 timer 会漏判。
+            return "pending input"
+        if session.agent.has_background_work:
+            return "background work running"
+        if not session.store.durable:
+            return f"non-durable store '{session.store.name}'"
+        if event_bus.subscribers_of(session.session_id):
+            return "subscribed"
+        return None
 
     # ============================================================
     # 外部方法：查询
@@ -397,15 +531,16 @@ class SessionManager:
 
         Contextvars 由 WingRuntime.post() 统一管理，此方法不设置/恢复。
 
+        - 不在内存的会话先按需水合（逐出后仍可投递）
         - / 开头且匹配 prompt 命令 → 展开为纯文本后投递
         - 否则 → 直接投递给 session.post()
+
+        Raises:
+            LookupError: 内存与磁盘都没有该会话（调用方负责映射错误面）
         """
         assert session_id is not None, "session_id is required by WingRuntime"
 
-        session = self._sessions.get(session_id)
-        if session is None:
-            log.error(f"Session not found: {session_id}")
-            return
+        session = self.ensure_loaded(session_id)
 
         # DeliveredEvent（总是 emit）
         event_bus.emit(

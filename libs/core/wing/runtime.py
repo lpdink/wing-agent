@@ -45,6 +45,7 @@ from wing.request_context import (
 from typing import TYPE_CHECKING
 from wing.session import Session
 from wing.session_manager import SessionManager
+from wing.session_reaper import SessionReaper
 from wing.store import FileSessionStore, MemorySessionStore, SessionStore
 
 if TYPE_CHECKING:
@@ -96,6 +97,8 @@ class WingRuntime:
             "memory": MemorySessionStore(),
         }
         self.sm = SessionManager(stores)
+        self.reaper = SessionReaper(self.sm)
+        """空闲会话逐出器（gateway lifespan 负责 attach/detach）。"""
 
     @property
     def template_manager(self) -> AgentTemplateManager:
@@ -165,6 +168,14 @@ class WingRuntime:
         """
         return self.sm.resume_session(session_id)
 
+    def ensure_loaded(self, session_id: str) -> Session:
+        """取会话；不在内存（被逐出 / 未加载）时从磁盘水合。
+
+        Raises:
+            LookupError: 内存与磁盘都没有该会话
+        """
+        return self.sm.ensure_loaded(session_id)
+
     def fork_session(
         self,
         source_session_id: str,
@@ -187,16 +198,38 @@ class WingRuntime:
         return result
 
     # ============================================================
+    # Session 逐出（eviction）
+    # ============================================================
+
+    def release_session(self, session_id: str) -> tuple[bool, str]:
+        """显式逐出会话（忽略空闲时长，不忽略钉住条件）。
+
+        Returns:
+            (released, detail)：released=False 表示会话本就不在内存（幂等）。
+
+        Raises:
+            LookupError: 内存与磁盘都没有该会话
+            RuntimeError: 被钉住（忙碌 / 有后台任务 / 被订阅 / 非持久后端）
+        """
+        return self.sm.release_session(session_id)
+
+    async def reap_idle_sessions(self) -> list[str]:
+        """扫描一轮并逐出空闲会话（BackgroundScheduler 的 job 入口）。"""
+        return await self.reaper.sweep()
+
+    # ============================================================
     # 订阅管理
     # ============================================================
 
     def subscribe(self, client_id: str, session_id: str) -> None:
         """订阅 session 事件。
 
+        不在内存的会话按需水合（被逐出的会话重新订阅即恢复直播）。
+
         Raises:
             LookupError: session 不存在
         """
-        session = self._require_session(session_id)
+        session = self.sm.ensure_loaded(session_id)
         event_bus.route_attach(client_id, session_id)
         self._push_sync(client_id, session)
 
@@ -473,6 +506,10 @@ class WingRuntime:
             failures: list[str] = []
             for session in self.sm.iter_sessions():
                 try:
+                    # 快照遍历期间可能发生逐出/拆解：已不在内存的会话跳过，
+                    # 否则会给已关闭 provider 的 agent 重建 client 且无人回收。
+                    if self.sm.get_session(session.session_id) is None:
+                        continue
                     await session.agent.rebuild_providers()
                     rebuilt += 1
                 except Exception as e:

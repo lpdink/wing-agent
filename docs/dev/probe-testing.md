@@ -103,6 +103,16 @@ async def test_bash_write_then_history(probe: Probe) -> None:
 
 模型名建议加注释锚定用途；`session.watch` 的游标随 `chat()` 推进会消耗已消费事件——需要回看整轮顺序时用 `since=0` 或 `since=<进入本轮前的 cursor>`。
 
+**环境旋钮**：需要非标准网关配置的场景（例如把逐出 TTL 压到秒级、把上下文窗口调小），用 `@pytest.mark.probe_env(...)` 给 `ProbeEnv` 传启动参数（kwargs 原样透传给 `Probe.start`；缺省不打标记＝标准 probe 配置）：
+
+```python
+FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds": 0.5}}
+
+@pytest.mark.probe_env(sessions=FAST_EVICTION)   # → config.yaml 的 sessions: 段
+```
+
+确定性来自配置而不是等待运气：把阈值压到秒级、断言仍走"轮询到状态翻转（带超时）"。
+
 ## 断言原语速查
 
 ### 事件时间线：`session.watch`（游标模型）
@@ -169,7 +179,7 @@ async def test_bash_write_then_history(probe: Probe) -> None:
 2. `tool_pairing`（`assert_tool_pairing`）：每个带 `tool_calls` 的 assistant 消息，其每个 `call_id` 都有配对 tool 消息（未终结的半截参数块一律剔除）；
 3. `no_transient_records`（`assert_no_transient_records`）：流式 delta / 瞬态事件不得出现在 `history.jsonl`。
 
-**红线过渡断言**（场景里显式调用）：`assert_compact_transition`（手动/后台压缩的链形状）、`assert_rewind_transition`（复制行 / 事件节点跳过 / 回退到根）、`assert_fork_of`（uuid 重映射 + 事件随行 + metadata 快照）。
+**红线过渡断言**（场景里显式调用）：`assert_compact_transition`（手动/后台压缩的链形状）、`assert_rewind_transition`（复制行 / 事件节点跳过 / 回退到根）、`assert_fork_of`（uuid 重映射 + 事件随行 + metadata 快照）。会话逐出（`scenarios/test_session_eviction.py`）不需要专用 helper——它断言的是"什么都不该变"（逐出/水合前后记录集指纹一致），红线直接由场景内的指纹对比 + 内置不变量承担。
 
 **口径**（与 spec 一致，比 spec 严的部分在此声明）：
 

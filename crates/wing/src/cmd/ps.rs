@@ -113,7 +113,16 @@ async fn fetch_sessions() -> Result<Vec<SessionInfo>> {
 async fn fetch_session_info(session_id: &str) -> Result<SessionInfoResponse> {
     let (host, port) = common::ensure_gateway().await?;
     let http = common::create_api_client(&host, port)?;
-    Ok(http.get_session_info(session_id).await?)
+    // 被逐出（不在内存）的会话 404——先 resume 水合再取，与 `wing tail`
+    // 的 404→resume 是同一条惯例（逐出 ≠ 不存在）。
+    match http.get_session_info(session_id).await {
+        Ok(info) => Ok(info),
+        Err(e) if e.is_not_found() => {
+            http.resume_session(session_id).await?;
+            Ok(http.get_session_info(session_id).await?)
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn print_sessions_table(sessions: &[SessionInfo]) {

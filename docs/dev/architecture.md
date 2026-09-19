@@ -105,6 +105,25 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 | rewind | `POST /api/session/rewind` | 丢弃指定消息之后的内容 |
 | compact | `POST /api/session/compact` | 委托 `ContextManager.do_manual_compact()` |
 | interrupt | `POST /api/session/interrupt` | 委托 `Session.agent.interrupt()`；打断对账见下 |
+| release | `POST /api/session/release` | 逐出内存态（显式 eviction）；钉住条件不满足时 409 |
+
+### 会话逐出（eviction）
+
+**内存态是缓存**：`SessionManager._sessions` 是"在场会话"的工作集，磁盘（`history.jsonl` + `metadata.json`）是唯一事实来源。逐出 = 让该会话经历一次"gateway 重启"——只回收运行期资源（worker task + provider client），磁盘一概不动。
+
+| 维度 | 口径 |
+|------|------|
+| 判定 | 三条全过才逐出：`status == idle`（working / waiting 钉住）、inbox 无待处理输入、无 client 订阅（EventBus 路由表）、空闲时长 > `sessions.eviction.idle_ttl_seconds` |
+| 硬条件 | inbox 有待处理输入不逐出（`agent.post()` 直投路径不 touch 计时器）；有后台任务（后台 Explorer）不逐出——拆解会关掉它共享的 provider；memory 后端不逐出（逐出 = 数据销毁） |
+| 计时 | `touch` = 任何携带该 session_id 的事件（`SessionReaper` 订阅 EventBus）——"会话状态变化即重置计时器"；create / resume 初始化 |
+| 触发 | `BackgroundScheduler`（gateway lifespan 启停）周期扫描（`sweep_interval_seconds`，启动时读取）；`release` 立即判定（忽略空闲时长，不忽略钉住条件） |
+| 拆解 | pop 同步原子摘除 → `Session.aclose()`（`agent.shutdown()` + `aclose_providers()`，顺序固定）异步收尾 |
+| 水合 | 被逐出 ≠ 不存在：`resume` / `subscribe` / `send`（HTTP 与 WS 上行）按需水合；空会话（无消息、无磁盘痕迹）逐出后不可恢复 |
+| 可见痕迹 | `/api/session/list` 的 `status: inactive` 是主信号；此外 `session/get` / `info` / `branches` 对已逐出会话回 404（`wing tail` / `head` / `info` 内部 404→resume），`release` 返回 `not loaded` |
+
+`BackgroundScheduler`（`wing/background.py`）是通用周期任务宿主（单 task 顺序执行、job 异常隔离、start/stop 显式），逐出只是第一个 job——将来的后台机制（dreaming 等）直接 `add_job`。`SessionReaper`（`wing/session_reaper.py`）只做"触摸订阅 + 一次扫描"，不依赖调度器即可单测。
+
+**不做的**（刻意缺席）：容量上限 / LRU（只有 TTL）；逐出以外的入口不自动水合（`session/get`、`info`、`branches` 对已逐出会话仍 404——`wing tail` 的 404→resume 是既有惯例，需要时按同一模式补）；动态状态（tools 热切换的冻结声明集、thinking / yolo）不落盘，逐出后按模板默认重建（与重启同语义）。
 
 ### 中断提交语义
 

@@ -258,6 +258,20 @@ impl GatewayClient {
         self.post_json("/api/session/interrupt", &body).await
     }
 
+    /// 逐出（release）session 内存态：只回收内存，磁盘状态不动。
+    ///
+    /// 忽略空闲时长（不为 TTL 等待），但不忽略钉住条件——忙碌 / 被订阅 /
+    /// 非持久后端的会话由网关以 409 拒绝（`ApiClientError` 带出原因）。
+    pub async fn release_session(
+        &self,
+        session_id: &str,
+    ) -> Result<ReleaseResponse, ApiClientError> {
+        let body = ReleaseRequest {
+            session_id: session_id.to_owned(),
+        };
+        self.post_json("/api/session/release", &body).await
+    }
+
     /// 回退 session 到指定消息节点。
     pub async fn rewind_session(
         &self,

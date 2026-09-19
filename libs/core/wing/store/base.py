@@ -99,6 +99,13 @@ class SessionStore(ABC):
     实现：FileSessionStore（现有文件布局）、MemorySessionStore（不落盘）。
     """
 
+    durable: bool = True
+    """持久性：True = 状态跨进程存活（逐出后可水合回来）。
+
+    MemorySessionStore 置 False——对它而言"逐出"等于数据销毁，
+    SessionManager 的逐出判定会跳过非持久后端的会话。
+    """
+
     @property
     @abstractmethod
     def name(self) -> str:

@@ -18,17 +18,17 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 ## HTTP 端点
 
-### Session（`routes/session.py`，14 个）
+### Session（`routes/session.py`，15 个）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/session/create` | 创建新 session（可选 `backend: file\|memory`，默认 file；`workspace`、`template` 等） |
-| POST | `/api/session/resume` | 恢复已有 session（还原 template_name、workspace 与模型绑定；模型记录优先于模板默认） |
+| POST | `/api/session/resume` | 恢复已有 session（还原 template_name、workspace 与模型绑定；模型记录优先于模板默认；也是被逐出会话的显式水合入口） |
 | POST | `/api/session/fork` | 从指定消息 uuid 分叉；新 session 含该消息及之前全部消息，继承源 backend |
-| POST | `/api/session/subscribe` | 将某 client 订阅到 session 事件（触发 SyncSession 重放） |
+| POST | `/api/session/subscribe` | 将某 client 订阅到 session 事件（触发 SyncSession 重放；不在内存的会话先按需水合） |
 | POST | `/api/session/unsubscribe` | 取消订阅 |
-| POST | `/api/session/send` | 发送用户消息，驱动 agent loop |
-| GET | `/api/session/list` | 列出所有 session（跨 store 聚合） |
+| POST | `/api/session/send` | 发送用户消息，驱动 agent loop（不在内存的会话先按需水合，磁盘上也没有才 404） |
+| GET | `/api/session/list` | 列出所有 session（跨 store 聚合）；`status: inactive` = 不在内存（未加载 / 已逐出） |
 | GET | `/api/session/get` | 获取 session 详情 |
 | GET | `/api/session/info` | 运行时状态，含 `context_stats`、`skills_info`、`reasoning_effort` |
 | GET | `/api/session/branches` | 可回退 / 分叉的消息节点 |
@@ -36,6 +36,19 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | POST | `/api/session/compact` | 手动压缩上下文，可带 `instruction` 侧重指令（条件插入压缩 prompt，无指令时 prompt 不变） |
 | POST | `/api/session/interrupt` | 中断当前任务（Esc 键） |
 | POST | `/api/session/rewind` | 回退到指定消息 uuid |
+| POST | `/api/session/release` | 逐出 session 内存态（只回收内存，磁盘不动）：忽略空闲时长，不忽略钉住条件——忙碌 / inbox 有待处理输入 / 有后台任务 / 被订阅 / 非持久后端以 409 拒绝；本就不在内存返回 `released: false`（幂等） |
+
+> **会话逐出（eviction）**：空闲会话（无 turn 在跑、inbox 无待处理输入、无后台任务、
+> 无人订阅且超过 `sessions.eviction.idle_ttl_seconds`）会被后台周期任务逐出内存——
+> 只回收 worker 与 provider client，`history.jsonl` / `metadata.json` 一概不动。
+> `resume` / `subscribe` / `send` 按需水合；`session/get`、`info`、`branches` 不
+> 自动水合，对已逐出会话仍回 404（`wing tail` / `head` / `info` 内部按 404→resume
+> 惯例处理；`/api/session/list` 的 `status: inactive` 是逐出的可观测痕迹）。
+> `wing release <sid>` 是对应的显式操作。
+>
+> 边界：**空会话**（从未发言 → 磁盘无痕迹）一旦被逐出即不可恢复——它没有可水合
+> 的状态，此后 `release` / `send` / `subscribe` 都回 404（不是幂等 `not loaded`）。
+> 空会话只来自"TUI 启动即建会话"这类场景，回收它正是逐出的目的。
 
 ### System（`routes/system.py`，6 个）
 

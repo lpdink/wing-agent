@@ -87,6 +87,12 @@ class WingAgent:
         # ── Interrupt hooks ──
         self._interrupt_hooks: dict[str, Callable[[], None]] = {}
 
+        # ── 后台任务登记 ──
+        # tool 侧发起、生命周期长于当前 turn 的工作（如后台 Explorer）。
+        # 供逐出判定使用：有后台任务的会话一律钉住——拆解会关掉它正在
+        # 用的 provider。任务结束自动注销。
+        self._background_tasks: set[asyncio.Task] = set()
+
         # ── Worker 生命周期 ──
         self._working: bool = False
         # 当前 turn 的开始时刻（UTC）——working 状态期间有效，供 resume 的
@@ -146,6 +152,28 @@ class WingAgent:
 
     def unregister_interrupt_hook(self, hook_id: str) -> None:
         self._interrupt_hooks.pop(hook_id, None)
+
+    # ── 后台任务 ──
+
+    def register_background(self, task: asyncio.Task) -> None:
+        """登记后台任务（任务结束自动注销）。
+
+        供 tool 侧登记"生命周期长于当前 turn"的工作（如后台 Explorer）：
+        turn 结束后会话仍是 idle，但后台任务还在用本 agent 的 provider，
+        逐出会把它掐死。登记即钉住（``has_background_work``）。
+        """
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    @property
+    def has_background_work(self) -> bool:
+        """是否有在跑的后台任务。"""
+        return bool(self._background_tasks)
+
+    @property
+    def has_pending_input(self) -> bool:
+        """inbox 里是否有待处理输入（已投递、worker 尚未取走）。"""
+        return self._inbox.has_pending
 
     # ── 对外接口 ──
 

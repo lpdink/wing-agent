@@ -62,8 +62,30 @@ class LogConfig(BaseModel):
     level: str = "WARNING"
 
 
+class EvictionConfig(BaseModel):
+    """空闲会话逐出（eviction）配置。
+
+    逐出只回收内存态（worker / provider client），磁盘状态一概不动：
+    被逐出的会话在下一次被需要时按需水合（resume / subscribe / send）。
+    钉住条件（不逐出）见 SessionManager._blocked_reason。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    """总开关。关闭后 reaper 不扫描（调试 / 保守回滚用）。"""
+
+    idle_ttl_seconds: float = Field(default=1800.0, gt=0)
+    """空闲时长阈值（秒）：无订阅且超过该时长即逐出。"""
+
+    sweep_interval_seconds: float = Field(default=300.0, gt=0)
+    """扫描周期（秒）。启动时读取，热重载不改变已注册 job 的间隔。"""
+
+
 class SessionsConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
+
+    eviction: EvictionConfig = Field(default_factory=EvictionConfig)
 
     def resolved_path(self) -> Path:
         """Session storage path.

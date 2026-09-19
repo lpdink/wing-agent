@@ -42,9 +42,6 @@ _EXPLORER_SYSTEM_PROMPT = (
 
 _TIMEOUT_SECONDS = 1200  # 20 minutes
 
-# Track active background tasks for potential cleanup.
-_active_explorers: set[asyncio.Task] = set()
-
 
 @tool_registry.register(name="Explorer", add_purpose=True)
 async def explorer_agent(
@@ -118,8 +115,9 @@ async def explorer_agent(
                 host,
             )
         )
-        _active_explorers.add(task)
-        task.add_done_callback(_active_explorers.discard)
+        # 登记到宿主 agent：后台 Explorer 跑完前，宿主会话被视为忙碌
+        # （逐出会关掉共享的 provider，把 explorer 掐死）。
+        host.register_background(task)
 
         return (
             f"Explorer task '{name}' launched in background (session: {sub_sid}). "

@@ -90,6 +90,9 @@ min_confidence = 70
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
+markers = [
+    "probe_env(**kwargs): 覆盖 ProbeEnv 启动参数（scenarios/conftest.py 的 probe fixture 消费）",
+]
 filterwarnings = [
     "ignore::pytest.PytestUnraisableExceptionWarning",
 ]

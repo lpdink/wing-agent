@@ -21,6 +21,7 @@ mod discover;
 pub mod messages;
 pub mod ps;
 pub mod query;
+mod release;
 pub mod run;
 pub(crate) mod start;
 mod status;
@@ -179,6 +180,16 @@ pub enum Command {
         session_id: String,
     },
 
+    /// Evict sessions from gateway memory (idle ones only; disk state is kept).
+    ///
+    /// Releases the in-memory state (worker + provider clients) of idle
+    /// sessions immediately, without waiting for the idle TTL. Busy or
+    /// subscribed sessions are refused with 409.
+    Release {
+        /// Session IDs to release (space-separated).
+        session_ids: Vec<String>,
+    },
+
     /// Show last N messages from a session (like `tail`).
     Tail {
         /// Session ID.
@@ -281,6 +292,9 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
             } => crate::cmd::wait::run_wait(&session_ids, timeout, cli.json).await,
             Command::Ps { all } => crate::cmd::ps::run_ps(all, cli.json, cli.watch).await,
             Command::Info { session_id } => crate::cmd::ps::run_info(&session_id, cli.json).await,
+            Command::Release { session_ids } => {
+                crate::cmd::release::run(&session_ids, cli.json).await
+            }
             Command::Tail {
                 session_id,
                 n,

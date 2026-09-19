@@ -23,9 +23,10 @@ from datetime import datetime, timezone
 from fastapi import WebSocket
 import uvicorn
 
+from wing.background import BackgroundScheduler
 from wing.build_info import get_commit
 from wing.common.logger import log
-from wing.config import AuthConfig, load_config
+from wing.config import AuthConfig, get_config, load_config
 from wing.event import WingEvent, wire_dump
 from wing.event_bus import event_bus
 from wing.runtime import WingRuntime
@@ -79,6 +80,15 @@ class GatewayServer:
         self._client_to_ws: dict[str, WebSocket] = {}  # client_id → ws
         self._ws_to_client: dict[WebSocket, str] = {}  # ws → client_id
         self._remote_tools = RemoteToolManager()  # 远程工具连接与调用中枢
+        # 后台周期任务宿主（首个 job：空闲会话逐出）。interval 在启动时
+        # 读取一次——config 热重载不改变已注册 job 的间隔；TTL 每个 sweep
+        # 都从当前 config 读，热重载即时生效。
+        self._background = BackgroundScheduler()
+        self._background.add_job(
+            "session-eviction",
+            get_config().sessions.eviction.sweep_interval_seconds,
+            self.runtime.reap_idle_sessions,
+        )
         self._app = create_app(self)
         self._started_at = datetime.now(timezone.utc)
 
@@ -116,6 +126,21 @@ class GatewayServer:
     def remote_tools(self) -> RemoteToolManager:
         """远程工具管理器，供 routes（ws / tools）访问。"""
         return self._remote_tools
+
+    @property
+    def background(self) -> BackgroundScheduler:
+        """后台周期任务宿主（lifespan 启停；测试可读 job 表）。"""
+        return self._background
+
+    def start_background(self) -> None:
+        """启动后台周期任务（gateway lifespan startup 调用）。"""
+        self.runtime.reaper.attach()
+        self._background.start()
+
+    async def stop_background(self) -> None:
+        """停止后台周期任务（gateway lifespan shutdown 调用）。"""
+        await self._background.stop()
+        self.runtime.reaper.detach()
 
     def start(self) -> None:
         """启动服务器（阻塞）。"""

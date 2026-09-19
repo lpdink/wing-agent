@@ -91,9 +91,17 @@ def pytest_terminal_summary(terminalreporter: Any) -> None:
 
 @pytest_asyncio.fixture
 async def probe(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator[Probe]:
-    """一个场景的 probe 门面（自举 + teardown 不变量 + 失败转储）。"""
+    """一个场景的 probe 门面（自举 + teardown 不变量 + 失败转储）。
+
+    **环境旋钮**：测试可打 ``@pytest.mark.probe_env(<kwargs>)`` 覆盖 ``ProbeEnv``
+    的启动参数（kwargs 原样透传给 ``Probe.start``）——例如逐出场景用
+    ``sessions={"eviction": {"idle_ttl_seconds": 1.0}}`` 把 TTL 压到秒级。
+    缺省不打标记＝标准 probe 配置。
+    """
     mode = dump_mode()
-    instance = await Probe.start(tmp_path / "probe")
+    marker = request.node.get_closest_marker("probe_env")
+    env_kwargs = dict(marker.kwargs) if marker is not None else {}
+    instance = await Probe.start(tmp_path / "probe", **env_kwargs)
     try:
         yield instance
     finally:

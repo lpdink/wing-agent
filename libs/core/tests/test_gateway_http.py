@@ -50,6 +50,9 @@ def mock_runtime():
     # resume_session 默认返回 mock session
     runtime.resume_session.return_value = mock_session
 
+    # ensure_loaded（逐出/水合入口）默认返回 mock session
+    runtime.ensure_loaded.return_value = mock_session
+
     # fork_session 默认返回 (new_session, draft)
     new_session = MagicMock()
     new_session.session_id = "forked-session-id"
@@ -435,13 +438,67 @@ class TestSessionSend:
         assert "request_id" in data
 
     def test_send_session_not_found(self, client: TestClient, mock_runtime):
-        """Session 不存在返回 404。"""
-        mock_runtime.get_session_state.return_value = None
+        """Session 不存在（内存与磁盘都没有）返回 404。"""
+        mock_runtime.ensure_loaded.side_effect = LookupError("session not found")
         resp = client.post(
             "/api/session/send",
             json={"session_id": "xxx", "content": "hello"},
         )
         assert resp.status_code == 404
+
+    def test_send_hydrates_evicted_session(self, client: TestClient, mock_runtime):
+        """被逐出（不在内存）的会话按需水合后照常投递。"""
+        resp = client.post(
+            "/api/session/send",
+            json={"session_id": "evicted-session-id", "content": "hello"},
+        )
+        assert resp.status_code == 200
+        mock_runtime.ensure_loaded.assert_called_with("evicted-session-id")
+
+
+# ============================================================
+# 6.9 Session Release（逐出内存态）
+# ============================================================
+
+
+class TestSessionRelease:
+    """POST /api/session/release 测试。"""
+
+    def test_release_ok(self, client: TestClient, mock_runtime):
+        """逐出成功 → released=true。"""
+        mock_runtime.release_session.return_value = (True, "released")
+        resp = client.post(
+            "/api/session/release", json={"session_id": "test-session-id"}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data == {"ok": True, "released": True, "detail": "released"}
+
+    def test_release_not_loaded_is_idempotent(self, client: TestClient, mock_runtime):
+        """会话本就不在内存 → 200 + released=false（幂等，不是错误）。"""
+        mock_runtime.release_session.return_value = (False, "not loaded")
+        resp = client.post(
+            "/api/session/release", json={"session_id": "test-session-id"}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["released"] is False
+
+    def test_release_unknown_session_404(self, client: TestClient, mock_runtime):
+        """内存与磁盘都没有该会话 → 404。"""
+        mock_runtime.release_session.side_effect = LookupError("session not found")
+        resp = client.post("/api/session/release", json={"session_id": "xxx"})
+        assert resp.status_code == 404
+
+    def test_release_pinned_session_409(self, client: TestClient, mock_runtime):
+        """被钉住（忙碌 / 被订阅 / 非持久后端）→ 409，附原因。"""
+        mock_runtime.release_session.side_effect = RuntimeError(
+            "session cannot be released: status=working"
+        )
+        resp = client.post(
+            "/api/session/release", json={"session_id": "test-session-id"}
+        )
+        assert resp.status_code == 409
+        assert "status=working" in resp.json()["detail"]
 
 
 # ============================================================

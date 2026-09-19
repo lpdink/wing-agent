@@ -37,7 +37,7 @@
 | `gateway` | `host` / `port` / `remote_tool_timeout` / `auth`（opt-in API key：`enabled` + `keys[{key, role}]`，角色 `admin` / `tool_runtime`） |
 | `commands.paths` | prompt 命令（`/xxx` 展开）的 glob 列表，每个 .md（frontmatter: name / description / aliases，正文 `$ARGUMENTS` 占位）定义一个命令 |
 | `user_agent.preset` | HTTP User-Agent 预设（`opencode` / `qwen-code`） |
-| `sessions` | 会话存储路径解析（env 覆盖优先） |
+| `sessions` | 会话存储路径解析（env 覆盖优先）+ `eviction`（空闲会话逐出：`enabled` / `idle_ttl_seconds`（默认 1800）/ `sweep_interval_seconds`（默认 300，启动时读取）） |
 
 ## TUI 配置（`~/.wing/tui/config.yaml`）
 
