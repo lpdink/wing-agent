@@ -22,7 +22,7 @@ import pytest
 from wing.config import ProviderConfig
 from wing.provider.anthropic import AnthropicProvider
 from wing.provider.openai_compat import OpenAICompatProvider
-from wing.provider.sse import STREAM_IDLE_TIMEOUT, lines_with_idle_timeout
+from wing.provider.transport import STREAM_IDLE_TIMEOUT, lines_with_idle_timeout
 
 # 测试阈值：毫秒级，绝不真的等 120 秒。
 FAST = 0.05

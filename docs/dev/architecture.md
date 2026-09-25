@@ -136,7 +136,7 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 **provider accumulator 协议**：`ModelProvider.generate(..., accumulator=)` 接受 caller 注入的不透明容器（`StreamAccumulator`），每次尝试（含重试）开始时填充新状态——取消后 caller 仍可经 `snapshot_blocks()` 读取已累积内容。`with_retry` 只捕 `Exception`（CancelledError 是 BaseException），取消直通，不会被重试吞掉（`test_with_retry.py` 钉死）。
 
-**三段超时口径（响应头 / 响应体停滞 / 总时长）**：`timeout_first_chunk` 只包住 `send(stream=True)` 即**响应头**，`timeout_total` 是总时长；响应体自身的停滞由 `provider/sse.py` 的 `lines_with_idle_timeout()` 判定——**硬编码 120s**（`STREAM_IDLE_TIMEOUT`，无配置项），两次读取间隔超过它即判停滞并抛 `TimeoutError`，交由既有 `with_retry` 重试（不另写重试逻辑）。两个 provider 的响应体循环共用它。日志文案与新事件口径：收到响应头记 `response header received`（不再谎称 `stream call connected`），重试通知走 `notice` 事件（见下节）。
+**三段超时口径（响应头 / 响应体停滞 / 总时长）**：`timeout_first_chunk` 只包住 `send(stream=True)` 即**响应头**，`timeout_total` 是总时长；响应体自身的停滞由 `provider/transport.py` 的 `lines_with_idle_timeout()` 判定——**硬编码 120s**（`STREAM_IDLE_TIMEOUT`，无配置项），两次读取间隔超过它即判停滞并抛 `TimeoutError`，交由既有 `with_retry` 重试（不另写重试逻辑）。两个 provider 的响应体循环共用它。日志文案与新事件口径：收到响应头记 `response header received`（不再谎称 `stream call connected`），重试通知走 `notice` 事件（见下节）。
 
 **stop_reason 捕获**：两个 provider 均在最终 usage 携带协议原值（`end_turn`/`max_tokens`/`tool_use`/`stop`/`length`），传导进 `Message.stop_reason`（**唯一落盘审计位置**）与 `LLMCallMetricsEvent.stop_reason`（仅用于直播——该事件 persist=false，不落盘；metrics_registry 经 event_bus 聚合进独立的 metrics.json）。Anthropic 的 max_tokens 砍在 tool args 中间时，未终结的 tool 块从权威块数组剔除（半截 tool_use 不再被当作完整调用执行）；该剔除与未提交投影共用同一实现（`_ordered_finalized_blocks`）。
 

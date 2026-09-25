@@ -3,7 +3,12 @@
 
 import pytest
 
-from wing.provider.sse import SSEEvent, SSEParser, parse_json_event, parse_sse_stream
+from wing.provider.transport import (
+    SSEEvent,
+    SSEParser,
+    parse_json_event,
+    parse_sse_stream,
+)
 
 
 class TestSSEParser:

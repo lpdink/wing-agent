@@ -527,7 +527,7 @@ class TestStreamPerIndexAndErrors:
     @pytest.mark.asyncio
     async def test_stream_error_event_raises(self):
         """流中 error 事件抛 ProviderStreamError（触发重试，截断轮次不提交）。"""
-        from wing.provider.errors import ProviderStreamError
+        from wing.provider.transport import ProviderStreamError
 
         events = [
             {
@@ -556,7 +556,7 @@ class TestStreamPerIndexAndErrors:
     @pytest.mark.asyncio
     async def test_http_error_carries_body(self):
         """4xx 响应 body 进异常消息（max_tokens 超限等关键信息的所在）。"""
-        from wing.provider.errors import ProviderHTTPError, raise_with_body
+        from wing.provider.transport import ProviderHTTPError, raise_with_body
 
         class _ErrResponse:
             is_error = True
