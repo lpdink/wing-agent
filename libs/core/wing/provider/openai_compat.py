@@ -151,7 +151,7 @@ class OpenAICompatProvider(ModelProvider):
         与 `snapshot_blocks` 判定互斥：snapshot 只取 `final_tool_calls`
         （finish_reason=tool_calls 时解析入列并 clear pending），仍在 `pending`
         中的即未终结调用。`args_fragment` 搬运原始 args 文本累积，后端不解析。
-        非空还兼作 ReActLoop 的截断检测信号（流结束时仍有 pending ⇒ 流被切断）。
+        截断检测走 `unfinished_tool_calls()`（不做 id 过滤的计数口径）。
         """
         state = accumulator.state if accumulator is not None else None
         if not isinstance(state, _OAIStreamState):
@@ -169,6 +169,13 @@ class OpenAICompatProvider(ModelProvider):
                 )
             )
         return views
+
+    def unfinished_tool_calls(self, accumulator: StreamAccumulator | None) -> int:
+        """未终结 tool call 计数——截断检测；含无 id 的半截调用（无盲区）。"""
+        state = accumulator.state if accumulator is not None else None
+        if not isinstance(state, _OAIStreamState):
+            return 0
+        return len(state.pending)
 
     async def list_models(self) -> list[str]:
         if self._config.models:

@@ -25,7 +25,14 @@ from wing.agent.react_loop import InvalidGenerationError, ReActLoop
 from wing.event import NoticeEvent
 from wing.event_bus import event_bus
 from wing.provider.base import PendingToolView, StreamAccumulator
-from wing.schema import LLMResponse, Message, TextBlock, ThinkingBlock, ToolUseBlock
+from wing.schema import (
+    LLMResponse,
+    LLMUsage,
+    Message,
+    TextBlock,
+    ThinkingBlock,
+    ToolUseBlock,
+)
 
 #: 重试参数注入：0 退避、小次数（避免真实等待）；生产默认口径为
 #: 10 次、3s 起步指数退避、封顶 180s（见 ReActLoop._config 注释）。
@@ -39,6 +46,16 @@ def cleanup_event_bus():
     yield
     event_bus._subscribers.clear()
     event_bus._routing.clear()
+
+
+class _Ctx:
+    """_TurnAccumulator 桩：记录 usage 记账调用。"""
+
+    def __init__(self) -> None:
+        self.usage_calls: list = []
+
+    def record_usage(self, usage: Any) -> None:
+        self.usage_calls.append(usage)
 
 
 class _FakeCM:
@@ -96,6 +113,10 @@ class _FakeProvider:
             PendingToolView(tool_call_id=f"u{i}", tool_name="Read", args_fragment="{")
             for i in range(count)
         ]
+
+    def unfinished_tool_calls(self, accumulator: StreamAccumulator) -> int:
+        state = accumulator.state if accumulator is not None else None
+        return state.unfinished if isinstance(state, _FakeState) else 0
 
 
 def _make_loop(cm: _FakeCM, provider: _FakeProvider) -> ReActLoop:
@@ -159,7 +180,7 @@ class TestInvalidGenerationRetry:
         provider = _FakeProvider([_empty(), _text("hi")])
         loop = _make_loop(cm, provider)
 
-        msg = await loop._call_llm_validated(provider, model="m")
+        msg = await loop._call_llm_validated(_Ctx(), provider, model="m")
 
         assert msg.content == "hi"
         assert provider.calls == 2
@@ -177,7 +198,7 @@ class TestInvalidGenerationRetry:
         provider = _FakeProvider([_thinking_only(), _text("hi")])
         loop = _make_loop(cm, provider)
 
-        msg = await loop._call_llm_validated(provider, model="m")
+        msg = await loop._call_llm_validated(_Ctx(), provider, model="m")
 
         assert msg.content == "hi"
         assert provider.calls == 2
@@ -190,7 +211,7 @@ class TestInvalidGenerationRetry:
         provider = _FakeProvider([_attempt(_tool_call()["chunks"], unfinished=1)])
         loop = _make_loop(cm, provider)
 
-        msg = await loop._call_llm_validated(provider, model="m")
+        msg = await loop._call_llm_validated(_Ctx(), provider, model="m")
 
         assert msg.tool_calls is not None and msg.tool_calls[0].name == "Bash"
         assert provider.calls == 1
@@ -200,17 +221,27 @@ class TestInvalidGenerationRetry:
     async def test_content_with_truncated_tool_call_commits_content_then_retries(
         self,
     ):
-        """规则 3：content 提交（tool call 不提交）→ 重试。"""
+        """规则 3：content 提交（tool call 不提交）→ 重试；被丢弃尝试的 usage 计入 turn 账。"""
         cm = _FakeCM()
         provider = _FakeProvider(
             [
-                _attempt(_text("pre")["chunks"], unfinished=1),
+                _attempt(
+                    [
+                        LLMResponse(
+                            content="pre",
+                            usage=LLMUsage(prompt_tokens=7, completion_tokens=3),
+                        ),
+                        LLMResponse(content_blocks=[TextBlock(text="pre")]),
+                    ],
+                    unfinished=1,
+                ),
                 _text("done"),
             ]
         )
         loop = _make_loop(cm, provider)
+        ctx = _Ctx()
 
-        msg = await loop._call_llm_validated(provider, model="m")
+        msg = await loop._call_llm_validated(ctx, provider, model="m")
 
         assert msg.content == "done"
         assert provider.calls == 2
@@ -219,6 +250,8 @@ class TestInvalidGenerationRetry:
         assert committed.role == "assistant"
         assert committed.content == "pre"
         assert committed.tool_calls is None  # 未收敛的 tool call 不提交
+        # 被丢弃尝试的 usage 照常记账（token 真花掉了）
+        assert [u.prompt_tokens for u in ctx.usage_calls if u] == [7]
 
     @pytest.mark.asyncio
     async def test_content_without_tool_attempt_ends_normally(self):
@@ -227,7 +260,7 @@ class TestInvalidGenerationRetry:
         provider = _FakeProvider([_text("final")])
         loop = _make_loop(cm, provider)
 
-        msg = await loop._call_llm_validated(provider, model="m")
+        msg = await loop._call_llm_validated(_Ctx(), provider, model="m")
 
         assert msg.content == "final"
         assert provider.calls == 1
@@ -242,7 +275,7 @@ class TestInvalidGenerationRetry:
         loop._config = SimpleNamespace(max_retries=1, max_retry_delay=0.0)
 
         with pytest.raises(InvalidGenerationError):
-            await loop._call_llm_validated(provider, model="m")
+            await loop._call_llm_validated(_Ctx(), provider, model="m")
 
         assert provider.calls == 2  # 1 次 + 1 次重试
         assert cm.added == []
@@ -255,6 +288,19 @@ class TestInvalidGenerationRetry:
         loop = _make_loop(cm, provider)
 
         with pytest.raises(RuntimeError, match="boom"):
-            await loop._call_llm_validated(provider, model="m")
+            await loop._call_llm_validated(_Ctx(), provider, model="m")
 
         assert provider.calls == 1
+
+    @pytest.mark.asyncio
+    async def test_stream_without_authoritative_blocks_is_retried(self):
+        """流未正常结束（无权威块数组，Anthropic 在 message_stop 前被切断）→ 同判无效并重试。"""
+        cm = _FakeCM()
+        provider = _FakeProvider([_attempt([]), _text("hi")])
+        loop = _make_loop(cm, provider)
+
+        msg = await loop._call_llm_validated(_Ctx(), provider, model="m")
+
+        assert msg.content == "hi"
+        assert provider.calls == 2
+        assert cm.added == []

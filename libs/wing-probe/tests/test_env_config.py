@@ -39,8 +39,9 @@ def test_render_config_points_provider_at_fake() -> None:
     assert provider["protocol"] == "openai"
     assert provider["base_url"] == "http://127.0.0.1:45123/v1"
     assert provider["api_key"] == "probe-key"
-    # 重试 / 退避不进首批：一次请求 = 一次剧本消费
-    assert provider["max_retries"] == 0
+    # 重试有界且可数：语义重试场景需要它 >0（一次逻辑调用 ≈ 1+max_retries 次消费）
+    assert provider["max_retries"] == 2
+    assert provider["max_retry_delay"] == 1.0
 
     agent = config["agents"][0]
     assert agent["name"] == "default"

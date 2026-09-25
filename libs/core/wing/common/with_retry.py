@@ -16,7 +16,7 @@ DEFAULT_MAX_DELAY = 180.0
 
 
 def _emit_retry_event(
-    attempt: int, max_retries: int, fn_name: str, exc: Exception, delay: float
+    attempt: int, max_retries: int, subject: str, exc: Exception, delay: float
 ) -> None:
     """通过 EventBus 向前端发送重试通知。
 
@@ -37,7 +37,7 @@ def _emit_retry_event(
             NoticeEvent(
                 level="warning",
                 message=(
-                    f"{fn_name} 调用失败 ({attempt + 1}/{max_retries}): "
+                    f"{subject} 调用失败 ({attempt + 1}/{max_retries}): "
                     f"{error_detail}, {delay:.0f}s 后重试"
                 ),
                 attempt=attempt + 1,
@@ -75,6 +75,7 @@ def with_retry(
     base_delay: float = 3.0,
     max_delay: float | None = None,
     retry_on: tuple[type[Exception], ...] | None = None,
+    label: str | None = None,
 ) -> Callable:
     """指数退避重试装饰器 - 支持普通 async 函数和 async generators。
 
@@ -88,10 +89,12 @@ def with_retry(
     retry_on: 仅重试这些异常类型（isinstance 判定）；None（默认）重试全部
         ``Exception``。用于只应重试特定语义错误的调用方——避免与外层
         （如 provider 的传输重试）叠加放大重试次数。
+    label: 通知 / 日志里的可读主体名（如「模型生成」）；None 时用函数名。
     """
 
     def decorator(func: Callable) -> Callable:
         fn_name = getattr(func, "__name__", repr(func))
+        subject = label or fn_name
         if inspect.iscoroutinefunction(func):
 
             @wraps(func)
@@ -110,10 +113,10 @@ def with_retry(
                         if attempt == resolved_retries:
                             raise last_exc
                         log.error(
-                            f"call {fn_name} failed (attempt {attempt + 1}): {type(e).__name__}: {e}, retrying..."
+                            f"call {subject} failed (attempt {attempt + 1}): {type(e).__name__}: {e}, retrying..."
                         )
                         delay = min(base_delay * (2**attempt), resolved_max_delay)
-                        _emit_retry_event(attempt, resolved_retries, fn_name, e, delay)
+                        _emit_retry_event(attempt, resolved_retries, subject, e, delay)
                         await asyncio.sleep(delay)
                 raise last_exc  # ty: ignore # unreachable
 
@@ -140,10 +143,10 @@ def with_retry(
                     if attempt == resolved_retries:
                         raise last_exc
                     log.error(
-                        f"call {fn_name} failed (attempt {attempt + 1}): {type(e).__name__}: {e}, retrying..."
+                        f"call {subject} failed (attempt {attempt + 1}): {type(e).__name__}: {e}, retrying..."
                     )
                     delay = min(base_delay * (2**attempt), resolved_max_delay)
-                    _emit_retry_event(attempt, resolved_retries, fn_name, e, delay)
+                    _emit_retry_event(attempt, resolved_retries, subject, e, delay)
                     await asyncio.sleep(delay)
 
         return async_gen_wrapper

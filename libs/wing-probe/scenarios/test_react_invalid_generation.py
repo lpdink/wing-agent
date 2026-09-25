@@ -60,7 +60,9 @@ async def test_empty_generation_retries_then_succeeds(probe: Probe) -> None:
     notices = session.watch.events("notice")
     assert len(notices) == 1, [e.type for e in session.timeline.all()]
     assert notices[0].data["attempt"] == 1, notices[0].data
-    assert notices[0].data["max_attempts"] >= 2, notices[0].data
+    # 重试口径跟随 provider 配置（probe 配置 max_retries=2）——接线验证：
+    # 若未接线，这里会是 with_retry 默认的 10。
+    assert notices[0].data["max_attempts"] == 2, notices[0].data
     session.watch.assert_never("error")
 
     # 空轮不落链：历史只有正常的 user/assistant。
@@ -110,6 +112,7 @@ async def test_truncated_tool_call_keeps_content_and_retries(probe: Probe) -> No
     notices = session.watch.events("notice")
     assert len(notices) == 1, [e.type for e in session.timeline.all()]
     assert notices[0].data["attempt"] == 1, notices[0].data
+    assert notices[0].data["max_attempts"] == 2, notices[0].data  # 跟随 provider 配置
     session.watch.assert_never("error")
 
     # 被截断的调用从未执行（只有补发的一次真实 tool_call）；补发的调用落盘成功。

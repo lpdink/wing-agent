@@ -129,3 +129,31 @@ class TestOpenAIStreamSnapshot:
         if state.stop_reason is None and choice is not None:
             state.stop_reason = choice.get("finish_reason")
         assert state.stop_reason == "length"
+
+
+class TestUnfinishedToolCallCount:
+    """截断检测计数：含无 id 的半截调用（投影会跳过它们，计数不能有盲区）。"""
+
+    def test_anthropic_counts_id_less_pending(self):
+        provider = AnthropicProvider.__new__(AnthropicProvider)
+        state = _StreamState()
+        state.pending_tools[0] = PendingCall(args_buffer='{"pa')  # 无 id
+        acc = provider.create_accumulator()
+        acc.state = state
+        assert provider.unfinished_tool_calls(acc) == 1
+        assert provider.pending_tool_calls(acc) == []  # 投影仍跳过无 id（无法锚定）
+
+    def test_openai_counts_id_less_pending(self):
+        provider = OpenAICompatProvider.__new__(OpenAICompatProvider)
+        state = _OAIStreamState()
+        state.pending[0] = PendingCall(args_buffer='{"pa')  # 无 id
+        acc = provider.create_accumulator()
+        acc.state = state
+        assert provider.unfinished_tool_calls(acc) == 1
+        assert provider.pending_tool_calls(acc) == []
+
+    def test_zero_when_never_started(self):
+        provider = OpenAICompatProvider.__new__(OpenAICompatProvider)
+        assert provider.unfinished_tool_calls(None) == 0
+        acc = provider.create_accumulator()
+        assert provider.unfinished_tool_calls(acc) == 0

@@ -181,7 +181,7 @@ class AnthropicProvider(ModelProvider):
         与 `_ordered_finalized_blocks` 共用同一状态且判定互斥：凡 index 仍在
         `pending_tools` 中的块即未终结（snapshot 跳过它们），这里恰恰取出它们。
         `args_fragment` 搬运原始 args 文本累积（`args_buffer`），后端不解析。
-        非空还兼作 ReActLoop 的截断检测信号（流结束时仍有 pending ⇒ 流被切断）。
+        截断检测走 `unfinished_tool_calls()`（不做 id 过滤的计数口径）。
         """
         state = accumulator.state if accumulator is not None else None
         if not isinstance(state, _StreamState):
@@ -199,6 +199,13 @@ class AnthropicProvider(ModelProvider):
                 )
             )
         return views
+
+    def unfinished_tool_calls(self, accumulator: StreamAccumulator | None) -> int:
+        """未终结 tool call 计数——截断检测；含无 id 的半截调用（无盲区）。"""
+        state = accumulator.state if accumulator is not None else None
+        if not isinstance(state, _StreamState):
+            return 0
+        return len(state.pending_tools)
 
     async def list_models(self) -> list[str]:
         if self._config.models:
@@ -382,10 +389,11 @@ class AnthropicProvider(ModelProvider):
                         }
                     )
 
-        # 合并连续的 user 消息：Anthropic Messages API 要求 user/assistant
-        # 严格交替，连续同角色返回 400。wing 的真实产生路径：tool 消息序列化为
-        # user（tool_result）后，紧跟 steer 注入的 user 消息。
-        merged = self._merge_consecutive_user(anthropic_msgs)
+        # 合并连续同角色消息：Anthropic Messages API 要求 user/assistant
+        # 严格交替，连续同角色返回 400。两个真实产生路径：tool 消息序列化为
+        # user（tool_result）后紧跟 steer 注入的 user 消息；无效轮次重试续跑
+        # （截断轮的 content 与重试轮的 tool call 相邻两条 assistant）。
+        merged = self._merge_consecutive_messages(anthropic_msgs)
         return "\n\n".join(system_parts), merged
 
     def _serialize_assistant(self, msg: Message) -> list[dict]:
@@ -432,14 +440,21 @@ class AnthropicProvider(ModelProvider):
         return blocks
 
     @staticmethod
-    def _merge_consecutive_user(msgs: list[dict]) -> list[dict]:
-        """合并连续的 user 消息（tool_result 后紧跟 user 文本的情况）。"""
+    def _merge_consecutive_messages(msgs: list[dict]) -> list[dict]:
+        """合并连续同角色消息（user-user / assistant-assistant）。
+
+        只 extend content 块数组，块内容（含 thinking 签名）原样保留：
+        - assistant-assistant：无效轮次重试续跑——截断轮的 content 与重试轮
+          的 tool call 是两条相邻 assistant，合并恰好还原「text + tool_use
+          同一条」的未截断形态；
+        - user-user：tool_result 后紧跟 steer 注入的 user 文本。
+        """
         if not msgs:
             return msgs
         merged: list[dict] = [msgs[0]]
         for msg in msgs[1:]:
             prev = merged[-1]
-            if msg["role"] == "user" and prev["role"] == "user":
+            if msg["role"] == prev["role"]:
                 # 合并 content blocks
                 prev["content"].extend(msg["content"])
             else:

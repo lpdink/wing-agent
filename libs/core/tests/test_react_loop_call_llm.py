@@ -2,7 +2,8 @@
 
 LLMCaller 已并入 ReActLoop：chunk 流消费、流式事件发射、Message 组装是
 loop 的内部职责（实际模型调用在 provider.generate）。provider 未产出权威
-content_blocks（流未正常结束）→ 报错，截断轮次 MUST NOT 作为成功 turn 提交。
+content_blocks（流未正常结束）→ 抛 InvalidGenerationError（无效轮次，交由
+_call_llm_validated 有界重试），截断轮次 MUST NOT 作为成功 turn 提交。
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from wing.agent.event_sink import AgentEventSink
-from wing.agent.react_loop import ReActLoop
+from wing.agent.react_loop import InvalidGenerationError, ReActLoop
 from wing.event import LLMCallMetricsEvent
 from wing.event_bus import event_bus
 from wing.schema import LLMResponse, LLMUsage, TextBlock, ThinkingBlock, ToolUseBlock
@@ -78,10 +79,10 @@ class TestCallLlmContract:
         assert msg.tool_calls is not None and msg.tool_calls[0].name == "Bash"
 
     @pytest.mark.asyncio
-    async def test_missing_blocks_raises_no_flat_fallback(self):
-        """provider 未产出块数组（流截断）→ 报错，无扁平兜底。"""
+    async def test_missing_blocks_raises_invalid_generation(self):
+        """provider 未产出块数组（流截断）→ InvalidGenerationError（无效轮次，无扁平兜底）。"""
         provider = _FakeProvider([LLMResponse(content="partial")])
-        with pytest.raises(RuntimeError, match="content_blocks"):
+        with pytest.raises(InvalidGenerationError, match="content_blocks"):
             await _make_loop()._call_llm(provider, [], "m", None)  # ty: ignore[invalid-argument-type]
 
     @pytest.mark.asyncio

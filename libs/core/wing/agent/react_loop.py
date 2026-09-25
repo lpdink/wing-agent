@@ -113,12 +113,13 @@ class ReActLoop:
         self._current_tools = current_tools
         self._stream = stream
         self._set_working = set_working
-        # 运行时可变配置（由 WingAgent 设置）
+        # 运行时可变配置（由 WingAgent 在构造与 provider 切换时同步）
         self.max_turns: int | None = None
         self.steer: bool = get_config().steer
         # `with_retry` 参数解析源（装饰器经实例的 `_config` 读取
-        # max_retries / max_retry_delay）。None → 默认口径：10 次重试、
-        # 3s 起步指数退避、封顶 180s；测试注入小值以避免真实等待。
+        # max_retries / max_retry_delay）：WingAgent 同步当前 provider 的
+        # `provider.config`；None → 默认口径（10 次重试、3s 起步指数退避、
+        # 封顶 180s）。测试可注入小值以避免真实等待。
         self._config: object | None = None
         # 当前一轮 LLM 调用的流累积状态（未提交内容的唯一权威）。
         # _call_llm 入口新建并登记，轮提交/中断补提交/turn 收口后置空。
@@ -237,7 +238,9 @@ class ReActLoop:
         provider = self._current_provider()
 
         # LLM 调用（含轮有效性校验与无效重试，见 _call_llm_validated）
-        assistant_msg = await self._call_llm_validated(provider=provider, model=model)
+        assistant_msg = await self._call_llm_validated(
+            ctx, provider=provider, model=model
+        )
 
         # Emit turn-level AssistantTurnEvent
         self._sink.assistant_turn(assistant_msg, model)
@@ -295,9 +298,9 @@ class ReActLoop:
 
     # ── 生成有效性（无效轮次重试）─────────────────
 
-    @with_retry(retry_on=(InvalidGenerationError,))
+    @with_retry(label="模型生成", retry_on=(InvalidGenerationError,))
     async def _call_llm_validated(
-        self, provider: "ModelProvider", model: str
+        self, ctx: "_TurnAccumulator", provider: "ModelProvider", model: str
     ) -> Message:
         """一次 LLM 生成 + 轮有效性校验；无效则抛错交给装饰器有界重试。
 
@@ -312,10 +315,19 @@ class ReActLoop:
         3. 有 content 但存在未收敛的 tool call（流被截断）→ content 提交、
            tool call 不提交（与 provider 剔除口径一致），然后重试。
         4. 有 content 且无 tool call 尝试 → 正常收尾，不重试。
+        另：流未正常结束（无权威块数组）时 `_call_llm` 抛同型异常，一并
+        落入重试（如 Anthropic 在 message_stop 前被切断）。
 
         每次尝试重新取 `get_messages_for_llm`——规则 3 的重试请求必须带上
         刚提交的 content。无效尝试置空 `_current_acc`：被丢弃的内容不进
-        未提交投影（中途订阅者不会看到将被重试覆盖的内容）。
+        未提交投影（中途订阅者不会看到将被重试覆盖的内容），其 usage 照常
+        计入 turn 账（token 真花掉了；provider 未产出块数组的尝试除外——
+        该路径无 usage 可读）。
+
+        已知边界（待真实 Anthropic 环境验证后决策）：规则 3 的重试请求以
+        已提交的 assistant 消息结尾（续跑语义）——OpenAI 兼容协议即
+        continuation；Anthropic 开 thinking 时 prefill 可能被拒（则该轮
+        重试失败、走错误路径，内容不丢）。
         """
         llm_result = await self._cm.get_messages_for_llm(
             model=model,
@@ -331,6 +343,8 @@ class ReActLoop:
 
         if assistant_msg.tool_calls:
             return assistant_msg
+
+        ctx.record_usage(assistant_msg.usage)
 
         if not (assistant_msg.content or "").strip():
             self._current_acc = None
@@ -352,10 +366,10 @@ class ReActLoop:
     def _has_unfinished_tool_calls(self, provider: "ModelProvider") -> bool:
         """本轮流结束时是否残留未终结的 tool call（截断检测）。
 
-        复用未提交投影 API：`pending_tool_calls()` 非空即证明流被截断——
-        tool 块已开始输出但从未收到终结信号。sync 路径无累积状态，恒为空。
+        计数口径（`unfinished_tool_calls`）含无 id 的半截调用——不依赖
+        投影 API 的 id 过滤。sync 路径无累积状态，恒为 0。
         """
-        return bool(provider.pending_tool_calls(self._current_acc))
+        return provider.unfinished_tool_calls(self._current_acc) > 0
 
     async def _call_llm(
         self,
@@ -450,7 +464,10 @@ class ReActLoop:
             raise
 
         if content_blocks is None:
-            raise RuntimeError(
+            # 流未正常结束（无权威块数组）：无效轮次——由 _call_llm_validated
+            # 的有界重试收口（Anthropic 在 message_stop 前被切断即此形态）。
+            self._current_acc = None
+            raise InvalidGenerationError(
                 "provider did not emit authoritative content_blocks "
                 "(stream ended without a complete block array)"
             )

@@ -316,6 +316,43 @@ class TestRetryOnFilter:
         assert obj.calls == 3
 
 
+class TestRetryLabel:
+    """`label`：通知 / 日志的可读主体名（None 时用函数名）。"""
+
+    def test_notice_uses_label(self):
+        from wing.event import NoticeEvent
+        from wing.event_bus import event_bus
+
+        events: list = []
+        event_bus.subscribe(events.append)
+        try:
+            provider = FakeProvider(
+                config=FakeConfig(max_retries=1, max_retry_delay=0.01)
+            )
+
+            class Callable_:
+                def __init__(self):
+                    self._config = provider._config
+                    self.calls = 0
+
+                @with_retry(label="模型生成")
+                async def run(self):
+                    self.calls += 1
+                    if self.calls < 2:
+                        raise RuntimeError("boom")
+                    return "ok"
+
+            obj = Callable_()
+            with mock.patch("wing.common.with_retry.asyncio.sleep", new=_noop_sleep):
+                assert asyncio.run(obj.run()) == "ok"
+
+            notices = [e for e in events if isinstance(e, NoticeEvent)]
+            assert len(notices) == 1
+            assert notices[0].message.startswith("模型生成 调用失败 (1/1)")
+        finally:
+            event_bus._subscribers.clear()
+
+
 class TestConfigFields:
     """ProviderConfig 暴露可配置重试字段。"""
 
