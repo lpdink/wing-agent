@@ -145,7 +145,9 @@ class ModelProvider(ABC):
 
         与 `snapshot_blocks()` 覆盖互斥：snapshot 只含已终结块（未终结 tool
         块被丢弃），本投影补齐那部分——携带原始 args 文本累积，后端不解析。
-        用于中途订阅者看到带半截参数的活工具卡。基类默认返回空列表。
+        用于中途订阅者看到带半截参数的活工具卡。另一消费者是 ReActLoop 的
+        无效轮次判定（非空 ⇒ 流被截断，见 `_call_llm_validated`）。
+        基类默认返回空列表。
         """
         return []
 

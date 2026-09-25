@@ -181,6 +181,7 @@ class AnthropicProvider(ModelProvider):
         与 `_ordered_finalized_blocks` 共用同一状态且判定互斥：凡 index 仍在
         `pending_tools` 中的块即未终结（snapshot 跳过它们），这里恰恰取出它们。
         `args_fragment` 搬运原始 args 文本累积（`args_buffer`），后端不解析。
+        非空还兼作 ReActLoop 的截断检测信号（流结束时仍有 pending ⇒ 流被切断）。
         """
         state = accumulator.state if accumulator is not None else None
         if not isinstance(state, _StreamState):
@@ -550,7 +551,8 @@ class AnthropicProvider(ModelProvider):
         yield LLMResponse(
             content="".join(text_parts) or None,
             reasoning_content="".join(reasoning_parts) or None,
-            # 空响应 → 空块数组（合法空 turn，与 OpenAI 路径统一）
+            # 空响应 → 空块数组（合法协议输出，与 OpenAI 路径统一；
+            # 轮有效性由 ReActLoop 判定——空数组会被判无效并重试）
             content_blocks=blocks,
             tool_calls=tool_calls or None,
             usage=LLMUsage(
@@ -819,7 +821,8 @@ class AnthropicProvider(ModelProvider):
 
         未被 content_block_stop 终结的 tool 块（max_tokens 砍在参数中间）
         从块数组中剔除——半截 tool_use 不产生工具调用。零信息块过滤后为
-        空数组时原样输出 []（合法空 turn，与 OpenAI 路径统一）——None 保留
+        空数组时原样输出 []（合法协议输出，与 OpenAI 路径统一；轮有效性由
+        ReActLoop 判定——空数组会被判无效并重试）——None 保留
         给「流未正常结束」的契约违反信号。
         """
         # Anthropic 的 input_tokens 仅为非缓存部分（含兜底/增量源）；

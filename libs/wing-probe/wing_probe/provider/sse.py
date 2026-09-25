@@ -84,7 +84,8 @@ def stream_frames(
     """一轮的完整 SSE 帧序列（含 usage 末帧与 ``[DONE]``）。
 
     帧序：role 空帧 → thinking 分片 → text 分片 → tool_calls 增量分片
-    → finish_reason 帧 → usage 帧 → ``[DONE]``。
+    → finish_reason 帧（``turn.truncated`` 时跳过——流被上游切断，无终结
+    信号）→ usage 帧 → ``[DONE]``。
     """
     payloads: list[dict[str, Any]] = [
         chunk_payload(
@@ -132,15 +133,16 @@ def stream_frames(
                     delta={"tool_calls": [entry]},
                 )
             )
-    payloads.append(
-        chunk_payload(
-            completion_id=completion_id,
-            created=created,
-            model=model,
-            delta={},
-            finish_reason=turn.finish_reason,
+    if not turn.truncated:
+        payloads.append(
+            chunk_payload(
+                completion_id=completion_id,
+                created=created,
+                model=model,
+                delta={},
+                finish_reason=turn.finish_reason,
+            )
         )
-    )
     payloads.append(
         chunk_payload(
             completion_id=completion_id,

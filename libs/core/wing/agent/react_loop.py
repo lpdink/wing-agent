@@ -4,6 +4,11 @@
 职责单一：drain inbox → hook → add message → while loop（LLM → tools →
 steer → commit）→ emit TurnResult/Done。不持有工具执行、LLM 调用、
 事件发射的实现细节——全部委托给注入的协作者。
+
+轮有效性：单轮 LLM 生成若“不进入下一次 ReAct 且不合法”（无 content 且无
+收敛的 tool call，或 content 在但 tool call 起了头全未收敛），视为无效轮次
+——交给 `with_retry` 有界重试，绝不作为成功 turn 提交。判据与提交口径见
+`_call_llm_validated`。
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from wing.common.logger import log
+from wing.common.with_retry import with_retry
 from wing.config import get_config
 from wing.hook_registry import hooks
 from wing.request_context import reset_request_context, set_request_context
@@ -32,6 +38,18 @@ if TYPE_CHECKING:
     from wing.context_manager import ContextManager
     from wing.provider.base import ModelProvider, StreamAccumulator
     from wing.schema import Tool
+
+
+class InvalidGenerationError(RuntimeError):
+    """本轮生成无效——不进入下一次 ReAct 且不合法。
+
+    判据（见 `ReActLoop._call_llm_validated`）：
+    - 无 content（reasoning 不算）且无收敛的 tool call（全空 / 只有 reasoning）；
+    - 有 content，但 tool call 起了头、一个都没收敛（流被上游截断）。
+
+    抛出后由 `with_retry(retry_on=(InvalidGenerationError,))` 有界重试；
+    重试耗尽沿 run_turn 错误路径上报——无效轮次绝不作为成功 turn 提交。
+    """
 
 
 @dataclass
@@ -98,6 +116,10 @@ class ReActLoop:
         # 运行时可变配置（由 WingAgent 设置）
         self.max_turns: int | None = None
         self.steer: bool = get_config().steer
+        # `with_retry` 参数解析源（装饰器经实例的 `_config` 读取
+        # max_retries / max_retry_delay）。None → 默认口径：10 次重试、
+        # 3s 起步指数退避、封顶 180s；测试注入小值以避免真实等待。
+        self._config: object | None = None
         # 当前一轮 LLM 调用的流累积状态（未提交内容的唯一权威）。
         # _call_llm 入口新建并登记，轮提交/中断补提交/turn 收口后置空。
         # 未提交投影（uncommitted_message / uncommitted_tools）按需快照它，
@@ -214,18 +236,8 @@ class ReActLoop:
         model = self._current_model()
         provider = self._current_provider()
 
-        # LLM 调用
-        llm_result = await self._cm.get_messages_for_llm(
-            model=model,
-            model_provider=provider,
-            current_tools=self._current_tools,
-        )
-        assistant_msg = await self._call_llm(
-            provider=provider,
-            messages=llm_result.messages,
-            model=model,
-            tools=llm_result.tools,
-        )
+        # LLM 调用（含轮有效性校验与无效重试，见 _call_llm_validated）
+        assistant_msg = await self._call_llm_validated(provider=provider, model=model)
 
         # Emit turn-level AssistantTurnEvent
         self._sink.assistant_turn(assistant_msg, model)
@@ -280,6 +292,70 @@ class ReActLoop:
         if not pending_tool_calls:
             return False
         return True
+
+    # ── 生成有效性（无效轮次重试）─────────────────
+
+    @with_retry(retry_on=(InvalidGenerationError,))
+    async def _call_llm_validated(
+        self, provider: "ModelProvider", model: str
+    ) -> Message:
+        """一次 LLM 生成 + 轮有效性校验；无效则抛错交给装饰器有界重试。
+
+        有效性规则（上游「空响应 / 截断」的容错——判定放 loop 层而非
+        provider：无效重试需要在重试前把已生成的 content 提交进链，provider
+        层的整轮重发做不到）：
+
+        1. 有任一已收敛（provider 已终结）的 tool call → 有效，绝不重试；
+           其余未收敛调用随现状剔除，不阻塞自然进入下一轮。
+        2. 无收敛 tool call 且无 content → 无效（含全空与只有 reasoning 的
+           情况——reasoning 不作为收尾依据），不提交任何内容，重试。
+        3. 有 content 但存在未收敛的 tool call（流被截断）→ content 提交、
+           tool call 不提交（与 provider 剔除口径一致），然后重试。
+        4. 有 content 且无 tool call 尝试 → 正常收尾，不重试。
+
+        每次尝试重新取 `get_messages_for_llm`——规则 3 的重试请求必须带上
+        刚提交的 content。无效尝试置空 `_current_acc`：被丢弃的内容不进
+        未提交投影（中途订阅者不会看到将被重试覆盖的内容）。
+        """
+        llm_result = await self._cm.get_messages_for_llm(
+            model=model,
+            model_provider=provider,
+            current_tools=self._current_tools,
+        )
+        assistant_msg = await self._call_llm(
+            provider=provider,
+            messages=llm_result.messages,
+            model=model,
+            tools=llm_result.tools,
+        )
+
+        if assistant_msg.tool_calls:
+            return assistant_msg
+
+        if not (assistant_msg.content or "").strip():
+            self._current_acc = None
+            raise InvalidGenerationError(
+                "模型本轮未产出 content，也没有收敛的 tool call"
+                "（空响应 / 流被截断；reasoning 不作为收尾依据）"
+            )
+
+        if self._has_unfinished_tool_calls(provider):
+            self._cm.add_messages([assistant_msg])
+            self._current_acc = None
+            raise InvalidGenerationError(
+                "模型本轮有 content 但 tool call 未收敛（流被截断）："
+                "content 已提交，未收敛的 tool call 未提交"
+            )
+
+        return assistant_msg
+
+    def _has_unfinished_tool_calls(self, provider: "ModelProvider") -> bool:
+        """本轮流结束时是否残留未终结的 tool call（截断检测）。
+
+        复用未提交投影 API：`pending_tool_calls()` 非空即证明流被截断——
+        tool 块已开始输出但从未收到终结信号。sync 路径无累积状态，恒为空。
+        """
+        return bool(provider.pending_tool_calls(self._current_acc))
 
     async def _call_llm(
         self,

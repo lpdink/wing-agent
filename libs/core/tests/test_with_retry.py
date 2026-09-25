@@ -266,6 +266,56 @@ class TestRetryConfigurable:
         assert obj.calls == 3
 
 
+class TestRetryOnFilter:
+    """`retry_on`：只重试指定异常类型，其余直通。"""
+
+    def test_filtered_exception_not_retried(self):
+        provider = FakeProvider(config=FakeConfig(max_retries=5, max_retry_delay=0.01))
+
+        class OnlySemantic(Exception):
+            pass
+
+        class Callable_:
+            def __init__(self):
+                self._config = provider._config
+                self.calls = 0
+
+            @with_retry(retry_on=(OnlySemantic,))
+            async def run(self):
+                self.calls += 1
+                raise RuntimeError("transport")
+
+        obj = Callable_()
+        with mock.patch("wing.common.with_retry.asyncio.sleep", new=_noop_sleep):
+            with pytest.raises(RuntimeError, match="transport"):
+                asyncio.run(obj.run())
+        assert obj.calls == 1  # 不在过滤名单 → 不重试
+
+    def test_filtered_exception_retried(self):
+        provider = FakeProvider(config=FakeConfig(max_retries=3, max_retry_delay=0.01))
+
+        class OnlySemantic(Exception):
+            pass
+
+        class Callable_:
+            def __init__(self):
+                self._config = provider._config
+                self.calls = 0
+
+            @with_retry(retry_on=(OnlySemantic,))
+            async def run(self):
+                self.calls += 1
+                if self.calls < 3:
+                    raise OnlySemantic("semantic")
+                return "ok"
+
+        obj = Callable_()
+        with mock.patch("wing.common.with_retry.asyncio.sleep", new=_noop_sleep):
+            result = asyncio.run(obj.run())
+        assert result == "ok"
+        assert obj.calls == 3
+
+
 class TestConfigFields:
     """ProviderConfig 暴露可配置重试字段。"""
 

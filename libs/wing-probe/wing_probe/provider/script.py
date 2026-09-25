@@ -124,6 +124,10 @@ class Turn:
     ``finish`` 为 None 时自动判定（有 tool_calls → ``tool_calls``，否则 ``stop``）。
     ``chunk`` 是 thinking / text 的分片粒度（字符数）；``delay`` 是分片之间的
     等待秒数（首帧不等待——服务端要尽快把响应头交出去）。
+
+    ``truncated=True``：模拟上游截断——流在 finish 帧之前被切断（tool call
+    已开始输出但没有终结信号；「网关在非法 JSON 工具调用处直接截断」的形态）。
+    与 ``finish`` 互斥。
     """
 
     thinking: str | None = None
@@ -133,6 +137,7 @@ class Turn:
     finish: str | None = None
     chunk: int | None = None
     delay: float = 0.0
+    truncated: bool = False
 
     def __post_init__(self) -> None:
         self.tool_calls = list(self.tool_calls)
@@ -140,6 +145,11 @@ class Turn:
             raise ValueError(f"Turn.chunk must be >= 1 or None, got {self.chunk}")
         if self.delay < 0:
             raise ValueError(f"Turn.delay must be >= 0, got {self.delay}")
+        if self.truncated and self.finish is not None:
+            raise ValueError(
+                "Turn.truncated cannot declare finish "
+                "(a truncated stream is cut before the finish frame)"
+            )
 
     @classmethod
     def of(
@@ -152,6 +162,7 @@ class Turn:
         finish: str | None = None,
         chunk: int | None = None,
         delay: float = 0.0,
+        truncated: bool = False,
     ) -> Turn:
         """关键字形式构造（可读性优先，与 design 示例一致）。"""
         return cls(
@@ -162,6 +173,7 @@ class Turn:
             finish=finish,
             chunk=chunk,
             delay=delay,
+            truncated=truncated,
         )
 
     @property
@@ -201,6 +213,8 @@ class Turn:
             parts.append(f"chunk={self.chunk}")
         if self.delay:
             parts.append(f"delay={self.delay}")
+        if self.truncated:
+            parts.append("truncated")
         return f"Turn({', '.join(parts)})"
 
 
