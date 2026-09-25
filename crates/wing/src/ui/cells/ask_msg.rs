@@ -475,9 +475,12 @@ fn footer_hint(panel: &AskPanel) -> &'static str {
             } else if panel.editing() {
                 "type · Enter confirm · ←→ move cursor · ↑↓ back to list · Esc interrupt"
             } else if panel.questions[panel.current].multi_select {
-                "↑↓ select · Space/Tab toggle · Enter next · ←→ switch · Esc interrupt"
+                // 措辞分工：↑↓ 只移动光标，选中由 Space/Tab 完成——曾用
+                // `↑↓ select` 与 `Space/Tab toggle` 并列，用户误以为光标
+                // 移过去即选中，Enter 推进后零作答提交（#112）。
+                "↑↓ move · Space/Tab select · Enter next · ←→ switch · Esc interrupt"
             } else {
-                "↑↓ select · Enter next · ←→ switch · Esc interrupt"
+                "↑↓ move · Enter next · ←→ switch · Esc interrupt"
             }
         }
     }
@@ -590,7 +593,7 @@ mod tests {
         assert!(out.contains("2. ( ) 深色主题"), "{out}");
         assert!(out.contains("3. Type Something"), "{out}");
         assert!(out.contains("Enter a custom response"), "{out}");
-        assert!(out.contains("↑↓ select · Enter next"), "{out}");
+        assert!(out.contains("↑↓ move · Enter next"), "{out}");
         // No synthetic letters anywhere.
         assert!(!out.contains("A."), "{out}");
         assert!(!out.contains("B."), "{out}");
@@ -616,7 +619,10 @@ mod tests {
         assert!(out.contains("(Select all that apply)"), "{out}");
         assert!(out.contains("❯ 1. [ ] 多选交互"), "{out}");
         assert!(out.contains("2. [ ] 代码预览"), "{out}");
-        assert!(out.contains("Space/Tab toggle"), "{out}");
+        assert!(
+            out.contains("↑↓ move · Space/Tab select · Enter next"),
+            "{out}"
+        );
     }
 
     #[test]
