@@ -19,13 +19,13 @@ from wing.provider.base import (
     StreamAccumulator,
     parse_tool_args,
 )
-from wing.provider.errors import raise_with_body
-from wing.provider.http import make_http_timeout
-from wing.provider.sse import (
+from wing.provider.transport import (
     STREAM_IDLE_TIMEOUT,
     lines_with_idle_timeout,
+    make_http_timeout,
     parse_json_event,
     parse_sse_stream,
+    raise_with_body,
 )
 from wing.schema import (
     ContentBlock,

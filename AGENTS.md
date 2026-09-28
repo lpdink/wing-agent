@@ -66,10 +66,9 @@ libs/core/wing/
 │   └── tool_context.py              ToolContext Protocol — 工具收到的窄接口（ctx）
 ├── provider/                        模型调用层（协议隔离）
 │   ├── base.py                      ModelProvider ABC + StreamAccumulator + parse_tool_args（容错，永不抛）
+│   ├── transport.py                 HTTP/SSE 传输管道与错误面（SSE 行解析 / 空闲超时 / httpx 构造 / raise_with_body）
 │   ├── openai_compat.py             OpenAI 兼容协议（httpx 流式 + 重试）
 │   ├── anthropic.py                 Anthropic Messages API（thinking blocks、x-api-key）
-│   ├── sse.py                       两个协议共用的 SSE 行解析
-│   ├── http.py / errors.py          httpx 构造 / 带 body 的错误面（raise_with_body）
 │   └── __init__.py                  create_provider() + provider registry（并发聚合模型列表）
 ├── store/                           SessionStore — 会话持久状态唯一所有者
 │   ├── base.py                      SessionStore / MessageLog ABC + SessionMetadata
