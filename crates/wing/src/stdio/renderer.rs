@@ -212,6 +212,12 @@ impl StdioRenderer {
                 meta,
                 ..
             } => {
+                // `content` deliberately lands in two protocol fields:
+                // `message.content[0]` (the tool_result block) and
+                // `tool_use_result` — the SDK's per-tool metadata slot, which
+                // wing fills with its own flat shape rather than the native
+                // CLI's tool-specific payload. Two contract slots, one
+                // rendering: no consumer in this repo reads both.
                 let msg = UserMessage {
                     msg_type: "user".into(),
                     message: crate::stdio::ndjson::UserMessageInner {

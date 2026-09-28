@@ -176,6 +176,12 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
                     }
                 });
 
+                // Known limitation: the stored projection carries no failure
+                // flag (`serialize_message` emits role / content / uuid /
+                // reasoning_content / tool_calls / tool_call_id only), so a
+                // replayed result always renders as success — a failed call
+                // that was resumed loses its red state. Honest fix: the
+                // projection carries the fact (same for the VSCode lane).
                 chat.set_tool_result_by_index(idx, msg.content, true);
 
                 if let Some(cell) = todo_cell {
@@ -246,6 +252,9 @@ mod tests {
         if let ChatCell::ToolCall(block) = chat.cells[0].cell() {
             assert_eq!(block.tool_name, "Read");
             assert!(block.result.is_some());
+            // The projection carries no failure flag, so replay always lands
+            // on Success (see the note at the `set_tool_result_by_index`
+            // call) — live is the only lane that can show Failed.
             assert_eq!(
                 block.status,
                 crate::ui::cells::tool_call::ToolStatus::Success

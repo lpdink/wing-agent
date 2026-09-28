@@ -597,14 +597,28 @@ function applyMessageProjection(record: SessionRecord, message: SessionMessage):
       // so pairing is strictly by id.
       const cellId = record.toolCells.get(toolCallId);
       const cell = cellId === undefined ? undefined : record.cellById(cellId);
+      const result = truncateToolResult(message.content);
       if (cell === undefined || cell.kind !== 'tool_call') {
-        pushSystem(record, 'info', `Tool result (orphan): ${truncateToolResult(message.content)}`);
+        pushSystem(record, 'info', `Tool result (orphan): ${result}`);
         return;
       }
       record.update({
         ...cell,
         status: 'success',
-        result: { text: truncateToolResult(message.content), isError: false, truncated: false },
+        // `truncated` is derived from the text this lane received, like the
+        // live lane derives it from the event payload, so the webview's
+        // "Output truncated" note survives a resume for results over this
+        // layer's cap (16k).
+        //
+        // Known limitations, both from facts the projection does not carry
+        // (honest fix is a projection field, not a frontend guess):
+        // - above the backend's `tool_result_truncate.max_length` (100k) only
+        //   head/marker/tail is stored, so replay shows ~450 chars where live
+        //   showed 16k + note; the backend's marker in the text is the notice;
+        // - no failure flag: every replayed result renders as success
+        //   (`isError: false`, `status: 'success'`) and a resumed failure
+        //   loses its red state. The TUI replay has the same gap.
+        result: { text: result, isError: false, truncated: result !== message.content },
         finishedAt: record.now(),
       });
       if (cell.name === 'TodoWrite') {

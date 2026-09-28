@@ -67,8 +67,10 @@ class ToolCallStreamEvent(WingEvent):
 
 class ToolCallResultEvent(WingEvent):
     type: Literal["tool_call_result"] = "tool_call_result"
-    # tool Message 的逐字节孪生，无代码从磁盘读回——停止落盘（事件本身保留：
-    # 3 个 metrics handler + TUI 直播路径依赖，走 event_bus 而非读回磁盘）。
+    # tool Message 的孪生：≤ tool_result_truncate.max_length 时逐字节相同，
+    # 超限时事件带全量、入链 Message 是存储截断版（head/marker/tail）。无代码
+    # 从磁盘读回——停止落盘（事件本身保留：3 个 metrics handler + TUI 直播
+    # 路径依赖，走 event_bus 而非读回磁盘）。
     persist: ClassVar[bool] = False
     tool_name: str
     tool_args: dict[str, Any]
