@@ -195,7 +195,7 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 ## 已知取舍（与二批范围）
 
 - **env 是 function 级**（design D10）：每个场景一个新 tmp + 新网关进程 + 新假 Provider，正确性优先；实测 14 场景约 8s（约 0.25s/场景启动），暂不构成压力。场景数量显著增长后再走优化路径（session 级共享网关 + 按 model 名分域的剧本），`Probe` 与 `ProbeEnv` 分离就是为了那时只改 fixture 作用域；
-- **二批**：Anthropic 协议路径、远程工具宿主（`wing-sdk` 对接）、中断（interrupt）提交语义、性能/时延断言、后台自动压缩（`_apply_pending_compact`）、全事件类型 × `persist` 矩阵；
+- **二批**：Anthropic 协议路径、远程工具宿主（`wing-sdk` 对接）、中断（interrupt）的**工具执行期**提交语义（流式打断已覆盖：`scenarios/test_interrupt.py`）、性能/时延断言、后台自动压缩（`_apply_pending_compact`）、全事件类型 × `persist` 矩阵；
 - 兜底：`make test-probe` 传 `--timeout=120`（另有场景级 `@pytest.mark.timeout(120)`），网关进程在 teardown 走 `/api/shutdown` → `terminate` → `kill`；
 - 网关重试 / 退避不进首批（探测配置显式 `max_retries=0`），保证"一次请求 = 一次剧本消费"可数。
 

@@ -135,7 +135,9 @@ async def _execute_command(command: str, ctx: ToolContext, timeout: int) -> str:
             start_new_session=True,
         )
 
-        hook_id = ctx.register_interrupt_hook(lambda: kill_process_group(process))
+        hook_id = ctx.register_interrupt_hook(
+            lambda: kill_process_group(process), label=f"Bash pid={process.pid}"
+        )
         try:
             try:
                 await asyncio.wait_for(process.wait(), timeout=timeout)

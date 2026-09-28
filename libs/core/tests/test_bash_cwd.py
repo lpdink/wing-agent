@@ -39,7 +39,7 @@ class _MockAgent:
     def set_cwd(self, path: Path | None) -> None:
         self._cwd = path
 
-    def register_interrupt_hook(self, hook) -> str:
+    def register_interrupt_hook(self, hook, label: str = "") -> str:
         import uuid
 
         hook_id = uuid.uuid4().hex
