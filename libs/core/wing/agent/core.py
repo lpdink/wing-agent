@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -23,6 +24,13 @@ from wing.provider import create_provider
 from wing.provider.base import ModelProvider
 from wing.schema import Message, Tool
 
+from .cancel_watch import (
+    InterruptLockWatch,
+    log_cancel_snapshot,
+    stack_trace,
+    task_label,
+    watch_undead_task,
+)
 from .event_sink import AgentEventSink
 from .inbox import Inbox
 from .react_loop import ReActLoop
@@ -87,7 +95,9 @@ class WingAgent:
         self._loop.max_turns = max_turns
 
         # ── Interrupt hooks ──
-        self._interrupt_hooks: dict[str, Callable[[], None]] = {}
+        # hook_id → (label, hook)：label 只用于日志归因（如 "Bash pid=12345"），
+        # interrupt 触发时与 pid 的对应关系直接可读，不用再从 history 反推。
+        self._interrupt_hooks: dict[str, tuple[str, Callable[[], None]]] = {}
 
         # ── 后台任务登记 ──
         # tool 侧发起、生命周期长于当前 turn 的工作（如后台 Explorer）。
@@ -102,6 +112,11 @@ class WingAgent:
         # resume 时刻重算）。与 _working 同生命周期（_set_working 维护）。
         self._turn_started_at: datetime | None = None
         self._interrupt_lock = asyncio.Lock()
+        # interrupt 可观测性（纯观测，不改变控制流；细节见 cancel_watch.py）：
+        # 锁等待/持有超阈值告警、cancel 后 worker 不死看门狗、循环边界 cancelling 留痕。
+        self._interrupt_lock_watch = InterruptLockWatch()
+        self._cancel_watchdogs: set[asyncio.Task] = set()
+        self._last_cancelling_traced = 0
         self._worker = asyncio.create_task(self._run())
 
     # ── ToolContext Protocol 实现 ──
@@ -147,9 +162,10 @@ class WingAgent:
         """
         self._sink._emit(event)
 
-    def register_interrupt_hook(self, hook: Callable[[], None]) -> str:
+    def register_interrupt_hook(self, hook: Callable[[], None], label: str = "") -> str:
+        """注册 interrupt hook；``label`` 为日志归因说明（如 "Bash pid=12345"）。"""
         hook_id = uuid.uuid4().hex
-        self._interrupt_hooks[hook_id] = hook
+        self._interrupt_hooks[hook_id] = (label, hook)
         return hook_id
 
     def unregister_interrupt_hook(self, hook_id: str) -> None:
@@ -341,8 +357,20 @@ class WingAgent:
         """接收用户消息或 feedback。"""
         await self._inbox.post(content, request_id, role, tool_call_id)
 
-    async def interrupt(self) -> None:
-        """中断 Agent：触发 hooks、清理 inbox、等待旧 worker 补提交后重建。"""
+    async def interrupt(self, request_id: str | None = None) -> None:
+        """中断 Agent：触发 hooks、清理 inbox、等待旧 worker 补提交后重建。
+
+        request_id 仅用于日志关联（网关端点生成并透传），不参与任何控制流。
+        分段耗时日志见 cancel_watch 模块文档（L1/L2/L3/L5/L6）。
+        """
+        tag = f"{self.session_id} req={(request_id or '-')[:8]}"
+        started = time.monotonic()
+        log.info(
+            f"interrupt start [{tag}]: hooks={len(self._interrupt_hooks)} "
+            f"lock_waiters={self._interrupt_lock_watch.waiters} "
+            f"worker={task_label(self._worker)}"
+        )
+
         # 触发所有 interrupt hooks（如杀子进程）
         self._fire_interrupt_hooks()
 
@@ -353,18 +381,31 @@ class WingAgent:
         self._inbox.clear()
 
         # 取消旧 worker 并等待补提交
-        async with self._interrupt_lock:
+        async with self._interrupt_lock_watch.hold(self._interrupt_lock, tag):
             old = self._worker
+            log_cancel_snapshot(old, context=tag)
             old.cancel()
+            self._watch_cancelled_worker(old, tag)
+            cancelled_at = time.monotonic()
+            outcome = "completed"
             try:
                 await old
             except asyncio.CancelledError:
-                pass
+                outcome = "cancelled"
             except Exception:
-                log.exception("old worker died with error during interrupt")
+                outcome = "error"
+                log.exception(f"old worker died with error during interrupt [{tag}]")
             finally:
                 self._worker = asyncio.create_task(self._run())
-        log.info("Agent interrupted and reset")
+                log.info(
+                    f"interrupt old worker retired [{tag}]: outcome={outcome} "
+                    f"waited={int((time.monotonic() - cancelled_at) * 1000)}ms "
+                    f"done={old.done()} cancelling={old.cancelling()}"
+                )
+        log.info(
+            f"Agent interrupted and reset [{tag}] "
+            f"total={int((time.monotonic() - started) * 1000)}ms"
+        )
 
     async def shutdown(self) -> None:
         """显式关闭 Agent：不重建 worker。
@@ -412,15 +453,67 @@ class WingAgent:
             self._turn_started_at = None
 
     def _fire_interrupt_hooks(self) -> None:
-        for hook_id, hook in list(self._interrupt_hooks.items()):
+        """触发 interrupt hooks（如杀子进程），逐条记录 label 以便归因。"""
+        hooks = list(self._interrupt_hooks.items())
+        labels = ", ".join(label or "(unlabeled)" for _, (label, _) in hooks) or "none"
+        log.info(
+            f"interrupt hooks [{self.session_id}]: firing {len(hooks)} hook(s): "
+            f"{labels}"
+        )
+        for hook_id, (label, hook) in hooks:
             try:
                 hook()
             except Exception as e:
-                log.error(f"interrupt hook {hook_id} failed: {e}")
+                log.error(
+                    f"interrupt hook {hook_id} ({label or 'unlabeled'}) failed: {e}"
+                )
+
+    def _watch_cancelled_worker(self, old: asyncio.Task, tag: str) -> None:
+        """L2：cancel 后复查旧 worker 是否真死（纯观测任务，不改变控制流）。"""
+        watchdog = asyncio.create_task(
+            watch_undead_task(old, context=tag, extra=self._worker_diag),
+            name=f"cancel-watchdog:{tag}",
+        )
+        self._cancel_watchdogs.add(watchdog)
+        watchdog.add_done_callback(self._cancel_watchdogs.discard)
+
+    def _worker_diag(self) -> str:
+        """看门狗 dump 的 agent 侧补充现场。"""
+        return (
+            f"agent: working={self._working} status={self.status} "
+            f"pending_input={self._inbox.has_pending} "
+            f"feedback_waiters={self._inbox.has_waiters} "
+            f"new_worker={task_label(self._worker)}"
+        )
+
+    def _trace_cancelling(self) -> None:
+        """L7：worker 在每轮循环边界汇报 `cancelling()` 簿记。
+
+        cancel「已投递但未死」时，下一轮迭代边界立刻留痕（INFO，含栈顶）；
+        正常情况只有 DEBUG（文件日志始终落 DEBUG，取证时按 session 抓取）。
+        """
+        try:
+            cancelling = self._worker.cancelling()
+        except Exception:  # noqa: BLE001 - 观测不得外溢
+            return
+        if cancelling == self._last_cancelling_traced:
+            log.debug(
+                f"worker loop boundary [{self.session_id}]: cancelling={cancelling}"
+            )
+            return
+        previous, self._last_cancelling_traced = (
+            self._last_cancelling_traced,
+            cancelling,
+        )
+        log.info(
+            f"worker loop boundary [{self.session_id}]: cancelling "
+            f"{previous} -> {cancelling} stack=[{stack_trace(self._worker)}]"
+        )
 
     async def _run(self) -> None:
         """主循环：持续 drain inbox 并处理。"""
         while True:
+            self._trace_cancelling()
             try:
                 await self._loop.run_turn()
             except asyncio.CancelledError:

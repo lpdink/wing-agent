@@ -306,18 +306,21 @@ class WingRuntime:
         self._emit_context_stats(session)
         return original, compressed
 
-    async def interrupt_session(self, session_id: str) -> None:
+    async def interrupt_session(
+        self, session_id: str, request_id: str | None = None
+    ) -> None:
         """中断 session 当前 agent 任务。
 
         agent.interrupt() 内部 await 旧 worker 完成补提交（流式半截
         reasoning/text 的 partial Message 已落盘），之后 InterruptedEvent
         才落盘+广播——链序保证事件在 partial Message 之后。
+        request_id 仅用于日志关联（网关端点生成并透传）。
 
         Raises:
             LookupError: session 不存在
         """
         session = self._require_session(session_id)
-        await session.agent.interrupt()
+        await session.agent.interrupt(request_id=request_id)
         self._emit_session_event(
             InterruptedEvent(session_id=session.session_id),
             session=session,

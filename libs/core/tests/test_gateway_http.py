@@ -1110,13 +1110,17 @@ class TestSessionInterrupt:
     """POST /api/session/interrupt 测试。"""
 
     def test_interrupt_ok(self, client: TestClient, mock_runtime):
-        """正常中断。"""
+        """正常中断（request_id 为端点生成的日志关联值，透传给 runtime）。"""
         mock_runtime.interrupt_session = AsyncMock(return_value=None)
 
         resp = client.post("/api/session/interrupt", json={"session_id": "test-id"})
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
-        mock_runtime.interrupt_session.assert_called_once_with("test-id")
+        mock_runtime.interrupt_session.assert_called_once()
+        args, kwargs = mock_runtime.interrupt_session.call_args
+        assert args == ("test-id",)
+        assert isinstance(kwargs.get("request_id"), str)
+        assert kwargs["request_id"]
 
     def test_interrupt_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""

@@ -16,13 +16,14 @@ Policy (kept in sync with the TUI frontend, see docs/dev/config-logging.md):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import sys
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 _LOGGER_NAME = "wing"
 RETENTION_DAYS = 7
@@ -160,6 +161,64 @@ class _DailyFileHandler(logging.Handler):
                 pass
             self._stream = None
         super().close()
+
+
+def _format_loop_exception(context: dict[str, object]) -> str:
+    """asyncio 异常上下文的单行摘要（task / future / handle 等关键键在内）。"""
+    parts = [f"message={context.get('message')!r}"]
+    for key in ("task", "future", "handle", "protocol", "transport"):
+        value = context.get(key)
+        if value is None:
+            continue
+        text = repr(value)
+        parts.append(f"{key}={text if len(text) <= 200 else text[:200] + '…'}")
+    return "asyncio unhandled: " + " ".join(parts)
+
+
+class _LoopExceptionLogger:
+    """loop 异常处理器：落一条 wing 日志（带 traceback）后转发给原处理器。
+
+    同时充当"已安装"标记（`isinstance` 判定）——重复安装不叠处理器。
+    """
+
+    def __init__(self, previous: Any) -> None:
+        self._previous = previous
+
+    def __call__(
+        self, loop: asyncio.AbstractEventLoop, context: dict[str, Any]
+    ) -> None:
+        try:
+            exception = context.get("exception")
+            log.error(
+                _format_loop_exception(context),
+                exc_info=exception if isinstance(exception, BaseException) else None,
+            )
+        except Exception:  # noqa: BLE001 - 日志不得外溢
+            pass
+        if self._previous is not None:
+            self._previous(loop, context)
+        else:
+            loop.default_exception_handler(context)
+
+
+def install_loop_exception_logger() -> None:
+    """把 asyncio 的未处理异常转写进 wing 日志（gateway 启动时调用）。
+
+    默认处理器只把 "Task exception was never retrieved" / "Task was
+    destroyed but it is pending" 这类暗角信息打到 stderr——网关是守护进程，
+    stderr 无人收尸，信息随之丢失。这里先落一条 wing 日志（带 traceback），
+    再把 context 原样交给原处理器（stderr 行为不变）。幂等；不在运行中的
+    事件循环内调用时静默跳过（库导入不得有副作用）。
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    previous = loop.get_exception_handler()
+    if isinstance(previous, _LoopExceptionLogger):
+        return  # 已安装（幂等：重复调用不叠处理器）
+    loop.set_exception_handler(_LoopExceptionLogger(previous))
 
 
 def setup_logger(
