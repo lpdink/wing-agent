@@ -18,7 +18,10 @@
 //!
 //! Tool results print as a **500-char peek** — that is the tool-result
 //! section's single rendering definition, shared by `all` and `tool_result`.
-//! `--json` is the full-fidelity path: it emits the raw payloads untouched.
+//! `--json` prints the stored payloads verbatim; note the backend caps
+//! results over `tool_result_truncate.max_length` (100k) *before* storing
+//! them, so beyond that cap even the payload is the head/marker/tail form
+//! (the full text lives in the temp file its marker names).
 //!
 //! | `--type`       | Condition                                  | Printed sections |
 //! |----------------|--------------------------------------------|------------------|
@@ -481,8 +484,8 @@ mod tests {
         // excluded, a tool message is its result section and nothing else
         // (hence exactly the 3 result lines: blank, `← id`, truncated body).
         // Pinning the whole body — not just a copy count — is the point: a
-        // second renderer would necessarily add lines. Full payloads stay
-        // reachable via `--json`.
+        // second renderer would necessarily add lines. `--json` prints the
+        // stored payload verbatim (the module docs carry the caps).
         let long = "x".repeat(600);
         let msg = decoded(json!({
             "role": "tool",
@@ -498,12 +501,13 @@ mod tests {
 
     #[test]
     fn body_lines_tool_result_is_never_routed_through_the_text_section() {
-        // Section × tool-message matrix: `all` was the only section that
-        // rendered the text copy, so it is the only one whose output may
-        // change. Every section renders the result at most once, and only the
-        // two tool-result sections render it at all — the named field filters
-        // (reasoning / content / tool_call) were and stay empty for a tool
-        // message.
+        // Section × tool-message matrix. Two levels meet here: at the render
+        // level the `Content` section used to print the text copy too (the
+        // guard this commit added suppresses it — that is the `Content` row's
+        // 1 → 0), while the *visible* output only changed for `all` / unknown
+        // filter values, because `--type content` selects assistant messages
+        // and so never reaches a tool row. Every section renders the result
+        // at most once, and only the two tool-result sections render it.
         let msg = decoded(tool_result_msg());
         for section in [
             SectionFilter::All,

@@ -687,7 +687,7 @@ describe('replay == live', () => {
     // 100k storage cap, so both lanes see the same text and both must report
     // `truncated: true` — replay used to hardcode `false`, and the webview's
     // "Output truncated" note then vanished after a resume. (Above the
-    // backend cap the lanes legitimately differ: see the next test.)
+    // backend cap the lanes differ — a known limitation, see the next test.)
     const long = 'x'.repeat(20_000);
 
     const live = createHostHarness();
@@ -774,6 +774,41 @@ describe('replay == live', () => {
     const result = cell?.kind === 'tool_call' ? cell.result : null;
     expect(result?.text).toBe(stored);
     expect(result?.truncated).toBe(false);
+  });
+
+  it('replays a failed tool result as success (the projection carries no flag)', async () => {
+    // Pinned known limitation: `serialize_message` emits no failure flag, so
+    // replay cannot tell a failed result from a successful one and the live
+    // lane's error styling is lost on resume (the TUI replay has the same
+    // gap). Documented rather than guessed from the payload text — an honest
+    // fix means the projection carries the fact.
+    const replayed = createHostHarness();
+    teardown.push(replayed);
+    replayed.gateway.seedOnCreate = {
+      messages: [
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: 'tc-fail', name: 'Bash', arguments: { command: 'false' } }],
+          uuid: 'm1',
+        },
+        // What the backend stores for a failed call (tool_executor.py).
+        {
+          role: 'tool',
+          tool_call_id: 'tc-fail',
+          content: "Error executing tool 'Bash': exit code 1",
+          uuid: 'm2',
+        },
+      ],
+    };
+    await replayed.boot();
+    await flushMicrotasks();
+
+    const id = replayed.gateway.createdOrder[0] ?? '';
+    const cell = replayed.host.sessionManager.record(id)?.cells[0];
+    const result = cell?.kind === 'tool_call' ? cell.result : null;
+    expect(result?.isError).toBe(false);
+    expect(cell?.kind === 'tool_call' ? cell.status : null).toBe('success');
   });
 
   it('produces the same cells when a replayed tool call gains live fragments', async () => {

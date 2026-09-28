@@ -605,14 +605,19 @@ function applyMessageProjection(record: SessionRecord, message: SessionMessage):
       record.update({
         ...cell,
         status: 'success',
-        // `truncated` is derived from the text this lane received, exactly
-        // like the live lane derives it from the event payload — so the
-        // webview's "Output truncated" note survives a resume for results
-        // over this layer's cap (16k). One band differs by construction:
-        // the backend caps results over `tool_result_truncate.max_length`
-        // (100k) *before* storing them, so a replayed result there is the
-        // stored head/marker/tail text (flag stays false — this layer did
-        // not cap it) and the backend's own marker is the honest notice.
+        // `truncated` is derived from the text this lane received, like the
+        // live lane derives it from the event payload, so the webview's
+        // "Output truncated" note survives a resume for results over this
+        // layer's cap (16k).
+        //
+        // Known limitations, both from facts the projection does not carry
+        // (honest fix is a projection field, not a frontend guess):
+        // - above the backend's `tool_result_truncate.max_length` (100k) only
+        //   head/marker/tail is stored, so replay shows ~450 chars where live
+        //   showed 16k + note; the backend's marker in the text is the notice;
+        // - no failure flag: every replayed result renders as success
+        //   (`isError: false`, `status: 'success'`) and a resumed failure
+        //   loses its red state. The TUI replay has the same gap.
         result: { text: result, isError: false, truncated: result !== message.content },
         finishedAt: record.now(),
       });
