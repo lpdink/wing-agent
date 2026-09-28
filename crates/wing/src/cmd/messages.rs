@@ -16,6 +16,10 @@
 //! message's `content` *is* its tool result and renders through the
 //! tool-result section only, so `all` shows every result exactly once.
 //!
+//! Tool results print as a **500-char peek** — that is the tool-result
+//! section's single rendering definition, shared by `all` and `tool_result`.
+//! `--json` is the full-fidelity path: it emits the raw payloads untouched.
+//!
 //! | `--type`       | Condition                                  | Printed sections |
 //! |----------------|--------------------------------------------|------------------|
 //! | `all` (default)| All messages                               | everything       |
@@ -476,7 +480,9 @@ mod tests {
         // `all` reuses the tool-result renderer verbatim — header/separator
         // excluded, a tool message is its result section and nothing else
         // (hence exactly the 3 result lines: blank, `← id`, truncated body).
-        // Full payloads stay reachable via `--json`.
+        // Pinning the whole body — not just a copy count — is the point: a
+        // second renderer would necessarily add lines. Full payloads stay
+        // reachable via `--json`.
         let long = "x".repeat(600);
         let msg = decoded(json!({
             "role": "tool",
@@ -488,6 +494,32 @@ mod tests {
         assert_eq!(lines.len(), 3, "{lines:?}");
         assert!(!lines.join("\n").contains(&long), "no untruncated copy");
         assert!(lines[2].ends_with("..."), "{:?}", lines[2]);
+    }
+
+    #[test]
+    fn body_lines_tool_result_is_never_routed_through_the_text_section() {
+        // Section × tool-message matrix: `all` was the only section that
+        // rendered the text copy, so it is the only one whose output may
+        // change. Every section renders the result at most once, and only the
+        // two tool-result sections render it at all — the named field filters
+        // (reasoning / content / tool_call) were and stay empty for a tool
+        // message.
+        let msg = decoded(tool_result_msg());
+        for section in [
+            SectionFilter::All,
+            SectionFilter::Reasoning,
+            SectionFilter::Content,
+            SectionFilter::ToolCall,
+            SectionFilter::ToolResult,
+        ] {
+            let joined = message_body_lines(&msg, section).join("\n");
+            let renders_result = matches!(section, SectionFilter::All | SectionFilter::ToolResult);
+            assert_eq!(
+                joined.matches("file-a").count(),
+                usize::from(renders_result),
+                "{section:?} rendered the wrong number of copies: {joined}"
+            );
+        }
     }
 
     #[test]

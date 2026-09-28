@@ -682,6 +682,62 @@ describe('replay == live', () => {
     expect(stableCells(replayCells)).toEqual(stableCells(liveCells));
   });
 
+  it('keeps the truncated flag of a capped tool result on both lanes', async () => {
+    // Results over the 16k cap are stored capped-with-marker, and the flag
+    // drives the webview's "Output truncated" note. Replay used to hardcode
+    // `truncated: false`, so the note vanished after a resume.
+    const long = 'x'.repeat(20_000);
+
+    const live = createHostHarness();
+    teardown.push(live);
+    await live.boot();
+    const liveId = live.gateway.createdOrder[0] ?? '';
+    live.gateway.emit({
+      type: 'tool_call',
+      tool_name: 'Bash',
+      tool_args: { command: 'cat big.log' },
+      tool_call_id: 'tc-long',
+      session_id: liveId,
+    });
+    live.gateway.emit({
+      type: 'tool_call_result',
+      tool_name: 'Bash',
+      tool_args: { command: 'cat big.log' },
+      tool_call_id: 'tc-long',
+      tool_result: long,
+      tool_success: true,
+      model: 'test-model',
+      session_id: liveId,
+    });
+    await flushMicrotasks();
+
+    const replayed = createHostHarness();
+    teardown.push(replayed);
+    replayed.gateway.seedOnCreate = {
+      messages: [
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: 'tc-long', name: 'Bash', arguments: { command: 'cat big.log' } }],
+          uuid: 'm1',
+        },
+        { role: 'tool', tool_call_id: 'tc-long', content: long, uuid: 'm2' },
+      ],
+    };
+    await replayed.boot();
+    await flushMicrotasks();
+
+    const resultOf = (harness: HostHarness) => {
+      const id = harness.gateway.createdOrder[0] ?? '';
+      const cell = harness.host.sessionManager.record(id)?.cells[0];
+      return cell?.kind === 'tool_call' ? cell.result : null;
+    };
+
+    const liveResult = resultOf(live);
+    expect(liveResult?.truncated).toBe(true);
+    expect(resultOf(replayed)).toEqual(liveResult);
+  });
+
   it('produces the same cells when a replayed tool call gains live fragments', async () => {
     const harness = createHostHarness();
     teardown.push(harness);

@@ -597,14 +597,18 @@ function applyMessageProjection(record: SessionRecord, message: SessionMessage):
       // so pairing is strictly by id.
       const cellId = record.toolCells.get(toolCallId);
       const cell = cellId === undefined ? undefined : record.cellById(cellId);
+      const result = truncateToolResult(message.content);
       if (cell === undefined || cell.kind !== 'tool_call') {
-        pushSystem(record, 'info', `Tool result (orphan): ${truncateToolResult(message.content)}`);
+        pushSystem(record, 'info', `Tool result (orphan): ${result}`);
         return;
       }
       record.update({
         ...cell,
         status: 'success',
-        result: { text: truncateToolResult(message.content), isError: false, truncated: false },
+        // `truncated` is derived exactly like the live lane
+        // (`tool_call_result`): replay == live, so the webview's "Output
+        // truncated" note survives a resume too.
+        result: { text: result, isError: false, truncated: result !== message.content },
         finishedAt: record.now(),
       });
       if (cell.name === 'TodoWrite') {
