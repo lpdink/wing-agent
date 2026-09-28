@@ -12,7 +12,9 @@
 //!
 //! Role filters select messages and print all their sections; field filters
 //! additionally restrict printing to that section only (e.g. `content`
-//! prints text without leaking reasoning):
+//! prints text without leaking reasoning). Sections never overlap: a tool
+//! message's `content` *is* its tool result and renders through the
+//! tool-result section only, so `all` shows every result exactly once.
 //!
 //! | `--type`       | Condition                                  | Printed sections |
 //! |----------------|--------------------------------------------|------------------|
@@ -191,8 +193,16 @@ impl SectionFilter {
 }
 
 /// Body lines of one message under a section filter (header/separator excluded).
+///
+/// Sections are disjoint — every piece of a message renders exactly once. In
+/// particular a tool message carries no assistant text: its `content` *is* the
+/// tool result, so it renders through the tool-result section only. Rendering
+/// it as text as well printed every tool result twice in the default `all`
+/// view (`--type tool_result` was unaffected, which is what kept the overlap
+/// invisible).
 fn message_body_lines(msg: &SessionMessage, section: SectionFilter) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
+    let is_tool_result = msg.role == "tool";
 
     let reasoning = msg.reasoning_content.as_deref().unwrap_or("");
     if !reasoning.is_empty() && matches!(section, SectionFilter::All | SectionFilter::Reasoning) {
@@ -200,7 +210,10 @@ fn message_body_lines(msg: &SessionMessage, section: SectionFilter) -> Vec<Strin
         lines.push(reasoning.to_string());
     }
 
-    if !msg.content.is_empty() && matches!(section, SectionFilter::All | SectionFilter::Content) {
+    if !is_tool_result
+        && !msg.content.is_empty()
+        && matches!(section, SectionFilter::All | SectionFilter::Content)
+    {
         lines.push(String::new());
         lines.push(msg.content.clone());
     }
@@ -219,7 +232,7 @@ fn message_body_lines(msg: &SessionMessage, section: SectionFilter) -> Vec<Strin
         }
     }
 
-    if msg.role == "tool" && matches!(section, SectionFilter::All | SectionFilter::ToolResult) {
+    if is_tool_result && matches!(section, SectionFilter::All | SectionFilter::ToolResult) {
         let tool_call_id = msg.tool_call_id.as_deref().unwrap_or("");
         lines.push(String::new());
         lines.push(format!("  ← {tool_call_id}"));
@@ -435,6 +448,46 @@ mod tests {
         let joined = lines.join("\n");
         assert!(joined.contains("← tc1"));
         assert!(joined.contains("file-a"));
+    }
+
+    #[test]
+    fn body_lines_all_renders_tool_result_once() {
+        // Regression: the default `all` view printed a tool message's content
+        // twice — once as the text section (full copy) and once as the tool
+        // result. A tool message has no assistant text: its content *is* the
+        // result, so the result section is its only renderer.
+        let msg = decoded(tool_result_msg());
+        let all = message_body_lines(&msg, SectionFilter::All);
+        let joined = all.join("\n");
+        assert_eq!(
+            joined.matches("file-a").count(),
+            1,
+            "tool result must render exactly once: {joined}"
+        );
+        assert_eq!(joined.matches("file-b").count(), 1, "{joined}");
+        assert!(joined.contains("← tc1"), "{joined}");
+        // Byte-identical to the dedicated `--type tool_result` view: one
+        // rendering definition per section, no extra copy smuggled into `all`.
+        assert_eq!(all, message_body_lines(&msg, SectionFilter::ToolResult));
+    }
+
+    #[test]
+    fn body_lines_all_truncates_long_tool_result_once() {
+        // `all` reuses the tool-result renderer verbatim — header/separator
+        // excluded, a tool message is its result section and nothing else
+        // (hence exactly the 3 result lines: blank, `← id`, truncated body).
+        // Full payloads stay reachable via `--json`.
+        let long = "x".repeat(600);
+        let msg = decoded(json!({
+            "role": "tool",
+            "uuid": "u3",
+            "tool_call_id": "tc1",
+            "content": long,
+        }));
+        let lines = message_body_lines(&msg, SectionFilter::All);
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(!lines.join("\n").contains(&long), "no untruncated copy");
+        assert!(lines[2].ends_with("..."), "{:?}", lines[2]);
     }
 
     #[test]
