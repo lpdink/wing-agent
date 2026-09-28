@@ -58,9 +58,13 @@ def _usage() -> LLMUsage:
 
 
 async def _mock_generate(*args: Any, **kwargs: Any):
-    """Mock LLM generate: 返回一条纯文本响应（无 tool calls），结束 turn。"""
+    """Mock LLM generate: 返回一条纯文本响应（无 tool calls），结束 turn。
+
+    契约合规：最终 chunk 必须携带权威 content_blocks（无效轮次会触发重试）。
+    """
     yield LLMResponse(
         content="ok",
+        content_blocks=[TextBlock(text="ok")],
         usage=_usage(),
     )
 

@@ -13,7 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from wing.event_bus import event_bus
-from wing.schema import LLMResponse, LLMUsage
+from wing.schema import LLMResponse, LLMUsage, TextBlock
 
 
 @pytest.fixture(autouse=True)
@@ -35,9 +35,13 @@ def runtime():
 
 
 async def _mock_generate(*args: Any, **kwargs: Any):
-    """Mock LLM generate: 返回一条纯文本响应（无 tool calls），结束 turn。"""
+    """Mock LLM generate: 返回一条纯文本响应（无 tool calls），结束 turn。
+
+    契约合规：最终 chunk 必须携带权威 content_blocks（无效轮次会触发重试）。
+    """
     yield LLMResponse(
         content="ok",
+        content_blocks=[TextBlock(text="ok")],
         usage=LLMUsage(prompt_tokens=10, completion_tokens=5),
     )
 

@@ -73,6 +73,8 @@ class WingAgent:
             stream=stream,
             set_working=self._set_working,
         )
+        # 重试口径跟随当前 provider 的配置（构造与切换时同步；见 ReActLoop._config）
+        self._loop._config = model_provider.config
 
         # ── 工具集 ──
         self._tools: dict[str, Tool] = self._bind_tools(tools or [])
@@ -281,6 +283,7 @@ class WingAgent:
         self.model = model
         self.model_provider = provider
         self._providers[provider.name] = provider
+        self._loop._config = provider.config  # 重试口径跟随 provider 配置
 
     def get_or_create_provider(self, name: str) -> ModelProvider:
         """按 name 获取缓存的 provider client，缺失时创建并缓存（创建即拥有）。"""
@@ -321,6 +324,7 @@ class WingAgent:
         old_providers = list(self._providers.values())
         self._providers = {active_name: new_provider}
         self.model_provider = new_provider
+        self._loop._config = new_provider.config  # 重试口径跟随 provider 配置
         for provider in old_providers:
             await provider.aclose()
 

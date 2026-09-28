@@ -306,6 +306,39 @@ class TestAnthropicReplay:
             await p.aclose()
 
     @pytest.mark.asyncio
+    async def test_consecutive_assistants_merged_from_invalid_round_retry(self):
+        """无效轮重试续跑产生的相邻 assistant（content 条 + tool_use 条）合并为一条。
+
+        产生路径：截断轮 content 提交后重试，重试轮补发 tool call——两条相邻
+        assistant 若原样发出会违反 Anthropic 严格交替（连续同角色 400）。
+        合并只 extend 块数组，恰好还原「text + tool_use 同一条」的未截断形态。
+        """
+        p = _make_anthropic()
+        try:
+            _, am = p._serialize_messages(
+                [
+                    Message(role="user", content="go"),
+                    Message(role="assistant", content="let me check"),
+                    Message(
+                        role="assistant",
+                        content_blocks=[
+                            ToolUseBlock(id="t1", name="Bash", input={"cmd": "ls"})
+                        ],
+                    ),
+                    Message(role="tool", tool_call_id="t1", content="ok"),
+                ]
+            )
+            # 两条 assistant 合并；tool_result 跟在合并后的 assistant 之后。
+            assert [m["role"] for m in am] == ["user", "assistant", "user"]
+            blocks = am[1]["content"]
+            assert [b["type"] for b in blocks] == ["text", "tool_use"]
+            assert blocks[0]["text"] == "let me check"
+            assert blocks[1]["id"] == "t1"
+            assert am[2]["content"][0]["tool_use_id"] == "t1"
+        finally:
+            await p.aclose()
+
+    @pytest.mark.asyncio
     async def test_cache_control_last_block_isomorphic(self):
         """cache_control 打在最后一个 block 上（与 OpenAI 路径同构，不规避 thinking）。"""
         msgs = [

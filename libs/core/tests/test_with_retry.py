@@ -266,6 +266,93 @@ class TestRetryConfigurable:
         assert obj.calls == 3
 
 
+class TestRetryOnFilter:
+    """`retry_on`：只重试指定异常类型，其余直通。"""
+
+    def test_filtered_exception_not_retried(self):
+        provider = FakeProvider(config=FakeConfig(max_retries=5, max_retry_delay=0.01))
+
+        class OnlySemantic(Exception):
+            pass
+
+        class Callable_:
+            def __init__(self):
+                self._config = provider._config
+                self.calls = 0
+
+            @with_retry(retry_on=(OnlySemantic,))
+            async def run(self):
+                self.calls += 1
+                raise RuntimeError("transport")
+
+        obj = Callable_()
+        with mock.patch("wing.common.with_retry.asyncio.sleep", new=_noop_sleep):
+            with pytest.raises(RuntimeError, match="transport"):
+                asyncio.run(obj.run())
+        assert obj.calls == 1  # 不在过滤名单 → 不重试
+
+    def test_filtered_exception_retried(self):
+        provider = FakeProvider(config=FakeConfig(max_retries=3, max_retry_delay=0.01))
+
+        class OnlySemantic(Exception):
+            pass
+
+        class Callable_:
+            def __init__(self):
+                self._config = provider._config
+                self.calls = 0
+
+            @with_retry(retry_on=(OnlySemantic,))
+            async def run(self):
+                self.calls += 1
+                if self.calls < 3:
+                    raise OnlySemantic("semantic")
+                return "ok"
+
+        obj = Callable_()
+        with mock.patch("wing.common.with_retry.asyncio.sleep", new=_noop_sleep):
+            result = asyncio.run(obj.run())
+        assert result == "ok"
+        assert obj.calls == 3
+
+
+class TestRetryLabel:
+    """`label`：通知 / 日志的可读主体名（None 时用函数名）。"""
+
+    def test_notice_uses_label(self):
+        from wing.event import NoticeEvent
+        from wing.event_bus import event_bus
+
+        events: list = []
+        event_bus.subscribe(events.append)
+        try:
+            provider = FakeProvider(
+                config=FakeConfig(max_retries=1, max_retry_delay=0.01)
+            )
+
+            class Callable_:
+                def __init__(self):
+                    self._config = provider._config
+                    self.calls = 0
+
+                @with_retry(label="模型生成")
+                async def run(self):
+                    self.calls += 1
+                    if self.calls < 2:
+                        raise RuntimeError("boom")
+                    return "ok"
+
+            obj = Callable_()
+            with mock.patch("wing.common.with_retry.asyncio.sleep", new=_noop_sleep):
+                assert asyncio.run(obj.run()) == "ok"
+
+            notices = [e for e in events if isinstance(e, NoticeEvent)]
+            assert len(notices) == 1
+            assert notices[0].message.startswith("模型生成 调用失败 (1/1)")
+        finally:
+            event_bus._subscribers.clear()
+
+
 class TestConfigFields:
     """ProviderConfig 暴露可配置重试字段。"""
 

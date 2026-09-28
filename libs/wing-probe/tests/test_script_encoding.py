@@ -226,6 +226,37 @@ def test_cut_validation() -> None:
         Turn.of(text="x", delay=-1.0)
 
 
+def test_truncated_turn_omits_finish_frame() -> None:
+    """截断轮：tool call 增量照常输出，但无 finish 帧（无终结信号）。"""
+    turn = Turn.of(
+        text="let me check",
+        tool_calls=[ToolCall("Bash", {"command": "ls"})],
+        truncated=True,
+    )
+    frames = encode(turn)
+
+    assert frames[-1] is None, "last frame must be [DONE]"
+    # 无 finish 帧：没有任何帧带 finish_reason
+    for frame in frames:
+        if frame is None:
+            continue
+        for choice in frame["choices"]:
+            assert choice["finish_reason"] is None, frame
+    # tool call 增量与 text 已经输出（截断发生在收尾之前）
+    assert content_of(frames) == "let me check"
+    assert len(tool_fragments(frames)) == 1
+
+
+def test_truncated_conflicts_with_finish() -> None:
+    with pytest.raises(ValueError, match="truncated"):
+        Turn.of(text="x", finish="stop", truncated=True)
+
+
+def test_turn_describe_mentions_truncated() -> None:
+    assert "truncated" in Turn.of(text="x", truncated=True).describe()
+    assert "truncated" not in Turn.of(text="x").describe()
+
+
 def test_frames_carry_delay_between_chunks() -> None:
     turn = Turn.of(text="abcd", chunk=2, delay=0.25)
     frames = stream_frames(

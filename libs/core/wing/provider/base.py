@@ -95,6 +95,14 @@ class ModelProvider(ABC):
         """协议类型（来自 config，如 "openai" / "anthropic"）。"""
         return self._config.protocol
 
+    @property
+    def config(self) -> "ProviderConfig":
+        """创建时固化的 provider 配置（只读）。
+
+        供协作方消费配置口径（如 ReActLoop 的重试参数解析）。
+        """
+        return self._config
+
     @abstractmethod
     def generate(
         self,
@@ -146,8 +154,20 @@ class ModelProvider(ABC):
         与 `snapshot_blocks()` 覆盖互斥：snapshot 只含已终结块（未终结 tool
         块被丢弃），本投影补齐那部分——携带原始 args 文本累积，后端不解析。
         用于中途订阅者看到带半截参数的活工具卡。基类默认返回空列表。
+
+        截断检测不走本投影（无 id 的调用投影不出来）——用
+        `unfinished_tool_calls()` 计数口径。
         """
         return []
+
+    def unfinished_tool_calls(self, accumulator: "StreamAccumulator | None") -> int:
+        """流结束时**未终结**的 tool call 数（截断检测）。
+
+        与 `pending_tool_calls()` 同源但口径更宽：不做投影过滤——无 id 的
+        半截调用也计入（检测无盲区）。非零 ⇒ 流被截断（tool 块已开始输出
+        但从未收到终结信号），上层据此判定无效轮次。基类默认 0（无累积语义）。
+        """
+        return 0
 
     async def aclose(self) -> None:
         """释放 provider 持有的资源。

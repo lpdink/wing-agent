@@ -73,9 +73,10 @@ DEFAULT_AGENT_TOOLS: tuple[str, ...] = (
     "TodoWrite",
 )
 
-#: 网关重试 / 退避不进首批（design D9）：探测配置显式关闭重试，保证
-#: "一次请求 = 一次剧本消费"的可数性。
-PROBE_MAX_RETRIES = 0
+#: 网关重试次数：语义重试场景（无效轮次）需要它 >0；保持有界、可数
+#: （一次逻辑调用的剧本消费上界 = 1 + max_retries）。退避压到 1s
+#: （``max_retry_delay``）保证场景快。
+PROBE_MAX_RETRIES = 2
 
 
 class ProbeEnvError(RuntimeError):

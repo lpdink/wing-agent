@@ -138,6 +138,8 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 **三段超时口径（响应头 / 响应体停滞 / 总时长）**：`timeout_first_chunk` 只包住 `send(stream=True)` 即**响应头**，`timeout_total` 是总时长；响应体自身的停滞由 `provider/sse.py` 的 `lines_with_idle_timeout()` 判定——**硬编码 120s**（`STREAM_IDLE_TIMEOUT`，无配置项），两次读取间隔超过它即判停滞并抛 `TimeoutError`，交由既有 `with_retry` 重试（不另写重试逻辑）。两个 provider 的响应体循环共用它。日志文案与新事件口径：收到响应头记 `response header received`（不再谎称 `stream call connected`），重试通知走 `notice` 事件（见下节）。
 
+**无效轮次与自动重试**：单轮生成若「不进入下一次 ReAct 且不合法」——（a）无 content 且无收敛（已终结）的 tool call（含全空与只有 reasoning——reasoning 不作为收尾依据），或（b）有 content、tool call 起了头但一个都没收敛（流被上游截断，如网关在非法 JSON 工具调用处直接切断；流未正常结束、无权威块数组的形态——如 Anthropic 在 `message_stop` 前被切断——同判）——判定为**无效轮次**（`ReActLoop._call_llm_validated`，抛 `InvalidGenerationError`）：（a）不提交任何内容；（b）提交 content、不提交 tool call（与 provider 剔除未收敛块的口径一致）。随后交给 `with_retry(retry_on=(InvalidGenerationError,), label="模型生成")` 有界重试（参数经 `ReActLoop._config` 跟随**当前 provider 配置**的 `max_retries` / `max_retry_delay`；重试通知走 `notice`）。**有任一收敛 tool call 则永不重试**（自然进入下一轮）。截断检测用 `unfinished_tool_calls()` 计数（含无 id 的半截调用，无盲区）；`retry_on` 过滤保证语义重试不与 provider 层的传输重试叠加放大；无效尝试置空 `_current_acc`（被丢弃的内容不进未提交投影），其 usage 照常计入 turn 账。重试耗尽沿 turn 错误路径上报（`turn_result` error + `error` 事件）：无效轮次绝不作为成功 turn 提交。规则（b）会在链上产生相邻 assistant 消息——Anthropic 序列化器按既有交替规则**合并连续同角色消息**（等价于未截断时「text + tool_use 同一条」的形态）；已知边界：该轮的重试请求以 assistant 结尾（续跑语义），Anthropic 开 thinking 时 prefill 是否被拒待真实环境验证（被拒则该轮重试失败、内容不丢）。
+
 **stop_reason 捕获**：两个 provider 均在最终 usage 携带协议原值（`end_turn`/`max_tokens`/`tool_use`/`stop`/`length`），传导进 `Message.stop_reason`（**唯一落盘审计位置**）与 `LLMCallMetricsEvent.stop_reason`（仅用于直播——该事件 persist=false，不落盘；metrics_registry 经 event_bus 聚合进独立的 metrics.json）。Anthropic 的 max_tokens 砍在 tool args 中间时，未终结的 tool 块从权威块数组剔除（半截 tool_use 不再被当作完整调用执行）；该剔除与未提交投影共用同一实现（`_ordered_finalized_blocks`）。
 
 合成结果同时发射与正常完成相同的 `ToolCallResultEvent` / `ToolResultTurnEvent`：TUI 据此翻转 cell 状态（Bash 计时器仅在 cell 为 Pending 时前进，结果事件使其冻结——修复了打断后计时器不停的存量问题），stdio 模式据此输出 user turn 消息。
@@ -151,7 +153,7 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 **未提交内容的单一权威 = provider accumulator**：turn 进行中"已生成但未提交"的内容只有一处权威——caller（`ReActLoop`）持有的流累积状态（`_current_acc`，一轮 LLM 调用生命周期：`_call_llm` 入口新建、轮提交/中断补提交/turn 收口后置空）。对外两个覆盖互斥的投影，按需快照、不缓存副本：
 
 - `snapshot_blocks(acc)`：**已终结**块（text/thinking 任意长度保留，未终结 tool 块剔除）——中断补提交与未提交 Message 投影**同源**（resume 与打断变成同一个操作）。
-- `pending_tool_calls(acc)`：**未终结** tool 调用的原始 args 文本（`PendingToolView`）——活工具卡渲染素材，后端不解析半截 JSON（局部解析在客户端 `partial_json.rs`）。
+- `pending_tool_calls(acc)`：**未终结** tool 调用的原始 args 文本（`PendingToolView`）——活工具卡渲染素材，后端不解析半截 JSON（局部解析在客户端 `partial_json.rs`）。截断检测走 `unfinished_tool_calls(acc)` 计数口径（含无 id 的半截调用，见上节「无效轮次与自动重试」）。
 
 **落盘只存事实，不存副本**：`persist=true` 事件（diff/ask/interrupted/error/compact_done）在完整产生时即时落盘进链；流式 delta（`persist=false`）纯广播——不落盘、不进任何内存缓冲，其内容由轮提交时的 Message 记录承载。`tool_call_result` / `llm_call_metrics` 是 Message 孪生（`role="tool"` Message / `Message.usage` + `Message.stop_reason`），已停止落盘（事件本身保留：metrics_registry 与 TUI 直播经 event_bus 依赖）；`turn_result` 保留落盘但 `result` 字段（最终文本孪生）经 `disk_exclude` 排除出磁盘记录（wire 帧仍携带，stdio 消费）。
 
