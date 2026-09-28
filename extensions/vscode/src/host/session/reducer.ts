@@ -605,9 +605,14 @@ function applyMessageProjection(record: SessionRecord, message: SessionMessage):
       record.update({
         ...cell,
         status: 'success',
-        // `truncated` is derived exactly like the live lane
-        // (`tool_call_result`): replay == live, so the webview's "Output
-        // truncated" note survives a resume too.
+        // `truncated` is derived from the text this lane received, exactly
+        // like the live lane derives it from the event payload — so the
+        // webview's "Output truncated" note survives a resume for results
+        // over this layer's cap (16k). One band differs by construction:
+        // the backend caps results over `tool_result_truncate.max_length`
+        // (100k) *before* storing them, so a replayed result there is the
+        // stored head/marker/tail text (flag stays false — this layer did
+        // not cap it) and the backend's own marker is the honest notice.
         result: { text: result, isError: false, truncated: result !== message.content },
         finishedAt: record.now(),
       });

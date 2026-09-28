@@ -683,9 +683,11 @@ describe('replay == live', () => {
   });
 
   it('keeps the truncated flag of a capped tool result on both lanes', async () => {
-    // Results over the 16k cap are stored capped-with-marker, and the flag
-    // drives the webview's "Output truncated" note. Replay used to hardcode
-    // `truncated: false`, so the note vanished after a resume.
+    // A 20k result is over this layer's 16k cap but *under* the backend's
+    // 100k storage cap, so both lanes see the same text and both must report
+    // `truncated: true` — replay used to hardcode `false`, and the webview's
+    // "Output truncated" note then vanished after a resume. (Above the
+    // backend cap the lanes legitimately differ: see the next test.)
     const long = 'x'.repeat(20_000);
 
     const live = createHostHarness();
@@ -736,6 +738,42 @@ describe('replay == live', () => {
     const liveResult = resultOf(live);
     expect(liveResult?.truncated).toBe(true);
     expect(resultOf(replayed)).toEqual(liveResult);
+  });
+
+  it('replays a backend-capped tool result verbatim (the full text is not in history)', async () => {
+    // The backend caps results over `tool_result_truncate.max_length` (100k
+    // by default) *before* storing them: the live event carries the full
+    // text, the stored message only head + marker + tail. Replay cannot
+    // recover the rest, so it renders the stored text as-is and `truncated`
+    // stays false — this layer capped nothing, and the backend's own marker
+    // inside the text is the notice. Pinned so the flag is not "fixed" by
+    // sniffing that marker: doing it honestly would need the projection to
+    // carry the fact.
+    const head = 'h'.repeat(200);
+    const tail = 't'.repeat(200);
+    const stored = `${head}\n... [truncated, original length: 120000 chars, full result saved to /tmp/wing_truncated_x.txt]\n${tail}`;
+
+    const replayed = createHostHarness();
+    teardown.push(replayed);
+    replayed.gateway.seedOnCreate = {
+      messages: [
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: 'tc-big', name: 'Bash', arguments: { command: 'cat huge.log' } }],
+          uuid: 'm1',
+        },
+        { role: 'tool', tool_call_id: 'tc-big', content: stored, uuid: 'm2' },
+      ],
+    };
+    await replayed.boot();
+    await flushMicrotasks();
+
+    const id = replayed.gateway.createdOrder[0] ?? '';
+    const cell = replayed.host.sessionManager.record(id)?.cells[0];
+    const result = cell?.kind === 'tool_call' ? cell.result : null;
+    expect(result?.text).toBe(stored);
+    expect(result?.truncated).toBe(false);
   });
 
   it('produces the same cells when a replayed tool call gains live fragments', async () => {
