@@ -361,7 +361,8 @@ class WingAgent:
         """中断 Agent：触发 hooks、清理 inbox、等待旧 worker 补提交后重建。
 
         request_id 仅用于日志关联（网关端点生成并透传），不参与任何控制流。
-        分段耗时日志见 cancel_watch 模块文档（L1/L2/L3/L5/L6）。
+        中断各阶段（entry / 锁 / cancel 快照 / worker 退休 / 总耗时）的日志
+        与判读方式见 cancel_watch 模块文档。
         """
         tag = f"{self.session_id} req={(request_id or '-')[:8]}"
         started = time.monotonic()
@@ -387,20 +388,25 @@ class WingAgent:
             old.cancel()
             self._watch_cancelled_worker(old, tag)
             cancelled_at = time.monotonic()
-            outcome = "completed"
+            # await_result 只描述 `await old` 的出口（returned / cancelled /
+            # error）——CancelledError 无法区分「old 被取消」与「本协程自己被
+            # 取消」，老 worker 自身的终态由 cancelled= / done= 给出。
+            await_result = "returned"
             try:
                 await old
             except asyncio.CancelledError:
-                outcome = "cancelled"
+                await_result = "cancelled"
             except Exception:
-                outcome = "error"
+                await_result = "error"
                 log.exception(f"old worker died with error during interrupt [{tag}]")
             finally:
                 self._worker = asyncio.create_task(self._run())
                 log.info(
-                    f"interrupt old worker retired [{tag}]: outcome={outcome} "
+                    f"interrupt old worker retired [{tag}]: "
+                    f"await_result={await_result} "
                     f"waited={int((time.monotonic() - cancelled_at) * 1000)}ms "
-                    f"done={old.done()} cancelling={old.cancelling()}"
+                    f"done={old.done()} cancelled={old.cancelled()} "
+                    f"cancelling={old.cancelling()}"
                 )
         log.info(
             f"Agent interrupted and reset [{tag}] "
@@ -469,7 +475,7 @@ class WingAgent:
                 )
 
     def _watch_cancelled_worker(self, old: asyncio.Task, tag: str) -> None:
-        """L2：cancel 后复查旧 worker 是否真死（纯观测任务，不改变控制流）。"""
+        """cancel 后复查旧 worker 是否真死（纯观测任务，不改变控制流）。"""
         watchdog = asyncio.create_task(
             watch_undead_task(old, context=tag, extra=self._worker_diag),
             name=f"cancel-watchdog:{tag}",
@@ -487,7 +493,7 @@ class WingAgent:
         )
 
     def _trace_cancelling(self) -> None:
-        """L7：worker 在每轮循环边界汇报 `cancelling()` 簿记。
+        """worker 在每轮循环边界汇报 `cancelling()` 簿记。
 
         cancel「已投递但未死」时，下一轮迭代边界立刻留痕（INFO，含栈顶）；
         正常情况只有 DEBUG（文件日志始终落 DEBUG，取证时按 session 抓取）。

@@ -10,7 +10,7 @@
   - 锁等待 / 持有超阈值的周期 WARNING；
   - interrupt 的分段日志与 hook label（pid 归因）；
   - worker 循环边界的 cancelling 留痕（投递未死的下一次迭代立刻可见）；
-  - asyncio 未处理异常的兜底日志（L8）。
+  - asyncio 未处理异常的兜底日志。
 """
 
 from __future__ import annotations
@@ -23,8 +23,10 @@ from typing import Any
 import pytest
 
 from wing.agent.cancel_watch import (
+    FRAME_WALK_LIMIT,
     InterruptLockWatch,
     log_cancel_snapshot,
+    stack_trace,
     watch_undead_task,
 )
 from wing.common.logger import install_loop_exception_logger
@@ -57,8 +59,102 @@ async def _enter_lock(watch: InterruptLockWatch, lock: asyncio.Lock, tag: str) -
         return
 
 
+async def _suspended_stack(coro: Any) -> str:
+    """跑起一个协程、等它挂起，返回全量栈链字符串（然后取消它）。"""
+    task = asyncio.create_task(coro)
+    await asyncio.sleep(0.02)
+    text = stack_trace(task, depth=None)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    return text
+
+
+class TestStackChainCoverage:
+    """栈链覆盖：协程 / async generator / Task / gather 分叉 / 超长链。"""
+
+    @pytest.mark.asyncio
+    async def test_follows_async_generator_frames(self) -> None:
+        """`async for` over async generator：经 asend 包装器下钻到生成器帧。
+
+        这是流式轮里 worker 最常见的挂起形状——`react_loop` 的
+        `async for chunk in provider.generate(...)` 必须能一路看到 SSE 读。
+        """
+
+        async def stream():
+            yield 1
+            await asyncio.sleep(30)
+            yield 2
+
+        async def consumer() -> None:
+            async for _ in stream():
+                pass
+
+        text = await _suspended_stack(consumer())
+        assert ":consumer" in text and ":stream" in text, text
+
+    @pytest.mark.asyncio
+    async def test_follows_awaited_task_frames(self) -> None:
+        """`await <Task>`：经 FutureIter 包装器下钻到被等任务的协程帧。"""
+
+        async def inner() -> None:
+            await asyncio.sleep(30)
+
+        async def outer() -> None:
+            await asyncio.ensure_future(inner())
+
+        text = await _suspended_stack(outer())
+        assert ":outer" in text and ":inner" in text, text
+
+    @pytest.mark.asyncio
+    async def test_descends_single_child_gather(self) -> None:
+        """单 child 的 gather：下钻到 child 的协程帧。"""
+
+        async def child() -> None:
+            await asyncio.sleep(30)
+
+        async def joiner() -> None:
+            await asyncio.gather(child())
+
+        text = await _suspended_stack(joiner())
+        assert ":joiner" in text and ":child" in text, text
+
+    @pytest.mark.asyncio
+    async def test_marks_multi_child_gather_without_guessing(self) -> None:
+        """多个 child 的 gather：只标注 `<gather ×N>`，不猜哪条分支（顺序不定）。"""
+
+        async def child() -> None:
+            await asyncio.sleep(30)
+
+        async def joiner() -> None:
+            await asyncio.gather(child(), child())
+
+        text = await _suspended_stack(joiner())
+        assert "<gather ×2>" in text, text
+
+    @pytest.mark.asyncio
+    async def test_deep_chain_keeps_innermost_frames(self) -> None:
+        """超长链（> FRAME_WALK_LIMIT）保留**最内层**——真正的暂停点在链末端。
+
+        截断方向搞反会让日志丢掉的恰好是取证要的那一端（layer00 是唯一的
+        `await asyncio.sleep`，必须留下；最外的 layer74 应当被截掉）。
+        """
+        depth = FRAME_WALK_LIMIT + 8
+        src = "async def layer00():\n    await asyncio.sleep(30)\n"
+        for i in range(1, depth):
+            src += f"async def layer{i:02d}():\n    await layer{i - 1:02d}()\n"
+        src += f"async def entry():\n    await layer{depth - 1:02d}()\n"
+        namespace: dict[str, Any] = {"asyncio": asyncio}
+        exec(src, namespace)  # noqa: S102 - 合成超长挂起链，测试专用
+
+        text = await _suspended_stack(namespace["entry"]())
+        assert ":layer00" in text, text  # 最内层（真暂停点）保留
+        assert f":layer{depth - 1:02d}" not in text, text  # 最外层被截掉
+        assert text.count(" <- ") == FRAME_WALK_LIMIT - 1, text.count(" <- ")
+
+
 class TestCancelSnapshot:
-    """L1：cancel 前的 worker 快照。"""
+    """cancel 前的 worker 快照。"""
 
     @pytest.mark.asyncio
     async def test_reports_fut_waiter_type_and_stack(self, wing_logs) -> None:
@@ -103,7 +199,7 @@ class TestCancelSnapshot:
 
 
 class TestUndeadWatchdog:
-    """L2：cancel 后 worker 未死的看门狗。"""
+    """cancel 后 worker 未死的看门狗。"""
 
     @pytest.mark.asyncio
     async def test_dumps_worker_that_swallowed_cancel(self, wing_logs) -> None:
@@ -163,7 +259,7 @@ class TestUndeadWatchdog:
 
 
 class TestInterruptLockWatch:
-    """L3：interrupt 锁的等待 / 持有告警（锁语义保持不变）。"""
+    """interrupt 锁的等待 / 持有告警（锁语义保持不变）。"""
 
     @pytest.mark.asyncio
     async def test_acquire_and_release_logged(self, wing_logs) -> None:
@@ -248,6 +344,135 @@ class TestInterruptLockWatch:
         assert not lock.locked()
         assert watch.holder is None
 
+    def test_warn_backoff_doubles_and_caps(self) -> None:
+        """告警间隔翻倍并封顶（死锁长期化时把日志量压到可控，但不静默）。"""
+        assert InterruptLockWatch._backoff(5.0, 60.0) == 10.0
+        assert InterruptLockWatch._backoff(40.0, 60.0) == 60.0
+        assert InterruptLockWatch._backoff(60.0, 60.0) == 60.0
+
+    @pytest.mark.asyncio
+    async def test_held_warnings_back_off(self, wing_logs) -> None:
+        """行为面：退避生效后 0.2s 窗口内的告警条数显著少于固定间隔。"""
+        watch = InterruptLockWatch(
+            warn_after=0.02, warn_interval=0.02, warn_max_interval=0.04
+        )
+        lock = asyncio.Lock()
+
+        async with watch.hold(lock, "sess-backoff"):
+            await asyncio.sleep(0.2)
+
+        warnings = [
+            record.message
+            for record in wing_logs.records
+            if "interrupt lock held [sess-backoff]" in record.message
+        ]
+        assert len(warnings) >= 2, warnings
+        assert len(warnings) <= 7, warnings  # 固定 0.02s 间隔会到 9~10 条
+
+
+class TestInterruptWatchdogWiring:
+    """看门狗与 `interrupt()` 的接线（不是绕过接线直接调 `watch_undead_task`）。"""
+
+    @pytest.mark.asyncio
+    async def test_watchdog_dumps_worker_that_swallows_cancel(
+        self, runtime, wing_logs
+    ) -> None:
+        """吞掉 cancel 的 worker：interrupt 挂住 + 看门狗在 T+1s 交出全量现场。
+
+        这就是事故签名本身：`await old` 不返回、锁仍被占，而看门狗给出
+        worker 的完整状态（cancelling / 栈 / agent 现场）供事后判读。
+        """
+        session = runtime.create_session()
+        agent = session.agent
+        swallowed = asyncio.Event()
+
+        async def stubborn() -> None:
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                swallowed.set()
+                await asyncio.sleep(30)  # 模拟"cancel 被吞"：协程继续活着
+
+        agent._worker.cancel()
+        await asyncio.sleep(0)
+        agent._worker = asyncio.create_task(stubborn(), name="Task-stubborn")
+        await asyncio.sleep(0)
+
+        interrupt_task = asyncio.create_task(agent.interrupt(request_id="cafe"))
+        await asyncio.wait_for(swallowed.wait(), timeout=2.0)
+        assert not interrupt_task.done()  # 事故签名：interrupt 挂住了
+        assert agent._interrupt_lock.locked()
+
+        # 看门狗按真实计划表在 T+1s 复查并 dump（真实 schedule，不注入）。
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 5.0
+        while "worker still alive at T+1s" not in wing_logs.text:
+            assert loop.time() < deadline, wing_logs.text[-2000:]
+            await asyncio.sleep(0.05)
+
+        text = wing_logs.text
+        assert "cancel watchdog" in text
+        assert "cancelling=1" in text
+        assert "fut_waiter=" in text
+        assert "agent: working=" in text and "new_worker=" in text
+        assert agent._cancel_watchdogs  # 看门狗在册（未被 GC 掐死）
+
+        # 收尾：二次 cancel 杀死 worker → interrupt 收口；取消看门狗 → 登记表清空。
+        agent._worker.cancel()
+        await asyncio.wait_for(interrupt_task, timeout=5.0)
+        for watchdog in list(agent._cancel_watchdogs):
+            watchdog.cancel()
+        deadline = loop.time() + 2.0
+        while agent._cancel_watchdogs:
+            assert loop.time() < deadline, agent._cancel_watchdogs
+            await asyncio.sleep(0.01)
+
+        await agent.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_interrupt_reports_worker_error_outcome(
+        self, runtime, wing_logs
+    ) -> None:
+        """old worker 带异常死掉：日志给出 await_result=error 与异常现场。"""
+        session = runtime.create_session()
+        agent = session.agent
+
+        async def boom() -> None:
+            raise RuntimeError("worker exploded")
+
+        agent._worker.cancel()
+        await asyncio.sleep(0)
+        agent._worker = asyncio.create_task(boom())
+        await asyncio.sleep(
+            0
+        )  # 让 boom 抛出来并终结（异常在 interrupt 的 await 处被取回）
+
+        await agent.interrupt(request_id="beef")
+        await agent.shutdown()
+
+        text = wing_logs.text
+        assert "old worker died with error during interrupt" in text
+        assert "await_result=error" in text
+        assert "cancelled=False" in text
+
+    @pytest.mark.asyncio
+    async def test_retired_line_names_the_await_exit(self, runtime, wing_logs) -> None:
+        """正常收口：await_result=cancelled 且 cancelled=True（老 worker 自身被取消）。"""
+        session = runtime.create_session()
+        agent = session.agent
+        await asyncio.sleep(0)  # worker 挂到 inbox.get
+
+        await agent.interrupt(request_id="f00d")
+        await agent.shutdown()
+
+        retired = next(
+            line
+            for line in wing_logs.text.splitlines()
+            if "old worker retired [" in line
+        )
+        assert "await_result=cancelled" in retired, retired
+        assert "done=True cancelled=True" in retired, retired
+
 
 class TestAgentInterruptLogs:
     """agent 侧分段日志：start → hooks → lock → cancel → retired → reset。"""
@@ -279,7 +504,7 @@ class TestAgentInterruptLogs:
         assert ":run_turn <- " in text and ":_run" in text
         assert "interrupt lock acquired [" in text
         assert "interrupt old worker retired [" in text
-        assert "outcome=cancelled" in text
+        assert "await_result=cancelled" in text
         assert "Agent interrupted and reset [" in text
 
         await agent.shutdown()
@@ -288,7 +513,7 @@ class TestAgentInterruptLogs:
     async def test_worker_loop_boundary_traces_cancelling(
         self, runtime, wing_logs
     ) -> None:
-        """L7：cancel 记账（cancelling 0→1）在循环边界以 INFO 留痕。"""
+        """cancel 记账（cancelling 0→1）在循环边界以 INFO 留痕。"""
         session = runtime.create_session()
         agent = session.agent
         await asyncio.sleep(0)  # 空闲 worker 走到第一个循环边界
@@ -306,7 +531,7 @@ class TestAgentInterruptLogs:
 
 
 class TestLoopExceptionLogger:
-    """L8：asyncio 未处理异常的兜底日志（转发给原处理器）。"""
+    """asyncio 未处理异常的兜底日志（转发给原处理器）。"""
 
     @pytest.mark.asyncio
     async def test_logs_and_chains_to_previous_handler(self, wing_logs) -> None:

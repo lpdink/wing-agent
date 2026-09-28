@@ -12,21 +12,32 @@ session 不返回"），而会话本身毫发无损（CancelledError 从未进�
 本模块只做观测：读取 task 状态、写日志，不改变任何控制流；观测自身的异常
 一律吞掉（取证手段不得成为新的故障源）。三件工具，按取证决定性排序：
 
-- :func:`log_cancel_snapshot`（L1）：cancel 前打 worker 快照——**栈顶 +
+- :func:`log_cancel_snapshot`：cancel 前打 worker 快照——**栈链 +
   `_fut_waiter` 类型**是判别器。类型三分支指向完全不同的吞没路径：
   `Future`（asyncio.Queue / httpx 读 / sleep）、`_GatheringFuture`（gather）、
   `Task`（在等另一个 task）。
-- :func:`watch_undead_task`（L2）：cancel 后 T+1/5/15s 复查 worker 是否真死，
-  未死则全量 dump（含完整栈）。**换了暂停点继续跑** = cancel 已投递后被某帧
+- :func:`watch_undead_task`：cancel 后 T+1/5/15s 复查 worker 是否真死，
+  未死则全量 dump（含完整栈链）。**换了暂停点继续跑** = cancel 已投递后被某帧
   吞掉；**纹丝不动** = 从未投递。
-- :class:`InterruptLockWatch`（L3）：等锁 / 持锁超过阈值时周期 WARNING——
+- :class:`InterruptLockWatch`：等锁 / 持锁超过阈值时周期 WARNING——
   把"死锁已经发生"从用户发现提前到日志发现。
+
+栈链的覆盖范围（读日志须知）：沿协程等待链下钻 **协程 / async generator /
+generator / Task / 单 child 的 gather**；`await Future`（httpx 读、队列 get、
+sleep 等）在链末端只留下 `fut_waiter=` 字段（Future 本身没有帧）。链上出现
+`<gather ×N>` 标记表示该处有 N 个并行 child、只标注不下钻。CPython 包装器
+（`async for` 的 `async_generator_asend`、`FutureIter`）经 GC referents 兜底
+下钻——`Task.get_stack()` 在 3.12 只给任务自身协程的顶层帧，只靠它看不到
+真正的暂停点。
 """
 
 from __future__ import annotations
 
 import asyncio
+import gc
 import time
+import types
+from collections import deque
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -40,11 +51,24 @@ UNDEAD_WATCH_SCHEDULE: tuple[float, ...] = (1.0, 5.0, 15.0)
 #: 单行快照里取样的栈帧数（全量 dump 不受此限）。
 STACK_DEPTH = 4
 
-#: 沿 await 链下钻的深度上限（防御异常形状的链）。
+#: 沿等待链下钻的深度上限——保留**最内层**（真正的暂停点），防御异常形状的链。
 FRAME_WALK_LIMIT = 64
 
 #: 单字段 repr / repr 化的截断长度（一条日志不放论文）。
 REPR_LIMIT = 200
+
+#: 无帧的 CPython 包装器：唯一 awaitable 引用只在 GC referents 里（见 `_descend`）。
+_REFERENT_WRAPPERS = frozenset(
+    {"async_generator_asend", "async_generator_athrow", "FutureIter"}
+)
+
+#: GC referents 兜底只认这些类型，避免误抓无关引用。
+_AWAITABLE_TYPES: tuple[type, ...] = (
+    asyncio.Future,
+    types.CoroutineType,
+    types.AsyncGeneratorType,
+    types.GeneratorType,
+)
 
 
 def _short(text: str, limit: int = REPR_LIMIT) -> str:
@@ -70,56 +94,110 @@ def _frame_location(frame: Any) -> str:
         return "?"
 
 
-def _await_chain_frames(obj: Any, limit: int = FRAME_WALK_LIMIT) -> list[Any]:
-    """沿 `cr_await` / `ag_await` 链收集挂起帧（最外层在前）。
+def _frame_of(obj: Any) -> Any | None:
+    """协程 / async generator / generator 的当前帧；其余对象返回 None。"""
+    return (
+        getattr(obj, "cr_frame", None)
+        or getattr(obj, "ag_frame", None)
+        or getattr(obj, "gi_frame", None)
+    )
 
-    `Task.get_stack()` 只给任务自身协程的顶层帧（CPython 3.12 实测），看不到
-    `_run → run_turn → inbox.get → queue.get` 这条真正的暂停点链——而这条链正是
-    lldb 取证时看到的内容。这里手动下钻补齐；链上对象形状不认识时自然终止。
+
+def _await_attr(obj: Any) -> Any | None:
+    """协程族对象正在等待的下一跳（`await` / `async for` 的目标）。"""
+    return (
+        getattr(obj, "cr_await", None)
+        or getattr(obj, "ag_await", None)
+        or getattr(obj, "gi_yieldfrom", None)
+    )
+
+
+def _referent_awaitable(obj: Any) -> Any | None:
+    """无帧包装器的唯一 awaitable 引用（asend / FutureIter）。
+
+    这两类对象不暴露 await 目标：`async_generator_asend` 的引用表实测为
+    `[async_generator]`，`FutureIter` 为 `[FutureIter 类型, Future/Task]`。
+    只在**恰好一个**候选时下钻；多候选（如 gather 的多个 child）不猜。
     """
-    frames: list[Any] = []
+    try:
+        candidates = [
+            ref for ref in gc.get_referents(obj) if isinstance(ref, _AWAITABLE_TYPES)
+        ]
+    except Exception:  # noqa: BLE001 - 观测不得外溢
+        return None
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _descend(obj: Any) -> tuple[Any | None, str | None]:
+    """下钻一层：返回 (下一跳, 标记)。标记用于无法下钻但必须标注的分叉点。"""
+    nxt = _await_attr(obj)
+    if nxt is not None:
+        return nxt, None
+    if isinstance(obj, asyncio.Task):
+        try:
+            return obj.get_coro(), None
+        except Exception:  # noqa: BLE001
+            return None, None
+    children = getattr(obj, "_children", None)  # asyncio.gather 的 _GatheringFuture
+    if children is not None:
+        try:
+            kids = list(children)
+        except Exception:  # noqa: BLE001
+            return None, None
+        if len(kids) == 1:
+            return kids[0], None
+        return None, f"<gather ×{len(kids)}>"
+    if type(obj).__name__ in _REFERENT_WRAPPERS:
+        return _referent_awaitable(obj), None
+    return None, None
+
+
+def _await_chain(receiver: Any, limit: int) -> list[Any]:
+    """沿等待链收集步骤（帧对象或标记字符串），最外层在前。
+
+    `deque(maxlen=limit)` 保证超长链时保留**最内层**（真正的暂停点）——
+    lldb 现场关心的是链末端，而不是任务自身协程的入口帧。
+    """
+    steps: deque[Any] = deque(maxlen=limit)
     seen: set[int] = set()
-    current = obj
-    while current is not None and len(frames) < limit:
-        if id(current) in seen:
-            break  # 自环（防御性）
+    current = receiver
+    while current is not None and id(current) not in seen:
         seen.add(id(current))
-        frame = (
-            getattr(current, "cr_frame", None)
-            or getattr(current, "ag_frame", None)
-            or getattr(current, "gi_frame", None)
-        )
+        frame = _frame_of(current)
         if frame is not None:
-            frames.append(frame)
-        current = (
-            getattr(current, "cr_await", None)
-            or getattr(current, "ag_await", None)
-            or getattr(current, "gi_yieldfrom", None)
-        )
-    return frames
+            steps.append(frame)
+        nxt, marker = _descend(current)
+        if marker is not None:
+            steps.append(marker)
+        current = nxt
+    return list(steps)
 
 
 def stack_trace(task: asyncio.Task[Any], *, depth: int | None = STACK_DEPTH) -> str:
-    """任务栈（最内层在前）；无法取栈时给描述性占位，绝不抛。
+    """任务栈链（最内层在前）；无法取栈时给描述性占位，绝不抛。
 
     `depth=None` 取全量；已完成任务取不到帧（`get_stack` 抛 RuntimeError，
-    `get_coro` 的帧已析构）。
+    `get_coro` 的帧已析构）。覆盖范围见模块文档——`await Future` 的末端
+    由 `fut_waiter=` 字段承担。
     """
     try:
-        frames = _await_chain_frames(task.get_coro())
-    except Exception:
-        frames = []
-    if not frames:
+        steps = _await_chain(task.get_coro(), FRAME_WALK_LIMIT)
+    except Exception:  # noqa: BLE001
+        steps = []
+    if not steps:
         # 正在执行的任务：cr_frame 取不到（协程在跑），get_stack 给实时调用栈。
         try:
-            frames = task.get_stack()
+            steps = list(task.get_stack())
         except Exception as e:
             return f"<unavailable: {type(e).__name__}>"
-    if not frames:
+    if not steps:
         return "<no frames: task not started / already done>"
     if depth is not None:
-        frames = frames[-depth:]
-    return " <- ".join(_frame_location(f) for f in reversed(frames))
+        steps = steps[-depth:]
+    return " <- ".join(
+        step if isinstance(step, str) else _frame_location(step)
+        for step in reversed(steps)
+    )
 
 
 def fut_waiter_field(task: asyncio.Task[Any]) -> str:
@@ -150,7 +228,7 @@ def task_summary(task: asyncio.Task[Any]) -> str:
 
 
 def log_cancel_snapshot(task: asyncio.Task[Any], *, context: str) -> None:
-    """L1：`cancel()` 之前的 worker 快照（INFO，单行）。
+    """`cancel()` 之前的 worker 快照（INFO，单行）——本条同时充当 cancel issued 标记。
 
     Args:
         task: 即将被 cancel 的 worker。
@@ -197,11 +275,15 @@ async def watch_undead_task(
     extra: Callable[[], str] | None = None,
     schedule: tuple[float, ...] = UNDEAD_WATCH_SCHEDULE,
 ) -> None:
-    """L2：cancel 后的看门狗——到点复查 worker 是否已死，未死则全量 dump。
+    """cancel 后的看门狗——到点复查 worker 是否已死，未死则全量 dump。
 
     到点前一直等 worker 结束（`asyncio.wait` 不打断它、不消费它的异常）。
     worker 在第一个到点时刻前死亡（绝大多数情况）时整个看门狗零日志、
     零额外开销。最后一次复查后退出——不常驻、不重试 cancel。
+
+    注意：看门狗与被观测的 worker 跑在同一个事件循环里——**连看门狗也完全
+    没有输出**时，签名是"日志停在 interrupt start 之后"，指向循环被同步调用
+    卡住一类的问题，而不是 cancel 丢失。
     """
 
     async def _wait_until(at: float, since: float) -> bool:
@@ -231,16 +313,30 @@ class InterruptLockWatch:
 
     `hold()` 是 `async with lock` 的可观测替身——锁语义（FIFO 等待、释放时机、
     异常传播）与裸上下文管理器完全一致；观测不参与任何控制决策。
+    告警间隔按 `warn_interval → warn_max_interval` 翻倍退避：死锁持续时间越
+    长越安静（封顶 60s，每 waiter 每小时 ≤60 条），但不会静默。
     """
 
-    def __init__(self, *, warn_after: float = 5.0, warn_interval: float = 5.0) -> None:
+    def __init__(
+        self,
+        *,
+        warn_after: float = 5.0,
+        warn_interval: float = 5.0,
+        warn_max_interval: float = 60.0,
+    ) -> None:
         self._warn_after = warn_after
         self._warn_interval = warn_interval
+        self._warn_max_interval = warn_max_interval
         self._holder: str | None = None
         self._held_since = 0.0
         self._waiters = 0
         # 周期告警协程的强引用（asyncio 只持弱引用——不接住会被 GC 掐死）。
         self._monitors: set[asyncio.Task[Any]] = set()
+
+    @staticmethod
+    def _backoff(interval: float, cap: float) -> float:
+        """下一次告警的间隔（翻倍、封顶）。纯函数，单独锁定。"""
+        return min(interval * 2, cap)
 
     @property
     def waiters(self) -> int:
@@ -309,6 +405,7 @@ class InterruptLockWatch:
     async def _warn_while_waiting(self, tag: str) -> None:
         """等锁超过 `warn_after` 后周期告警（典型现场：持锁者卡在 `await old`）。"""
         started = time.monotonic()
+        interval = self._warn_interval
         try:
             await asyncio.sleep(self._warn_after)
             while True:
@@ -317,7 +414,8 @@ class InterruptLockWatch:
                     f"{time.monotonic() - started:.1f}s behind "
                     f"{self.holder_desc()} (waiters={self._waiters})"
                 )
-                await asyncio.sleep(self._warn_interval)
+                interval = self._backoff(interval, self._warn_max_interval)
+                await asyncio.sleep(interval)
         except asyncio.CancelledError:
             return
         except Exception:  # noqa: BLE001 - 观测不得外溢
@@ -325,6 +423,7 @@ class InterruptLockWatch:
 
     async def _warn_while_holding(self, tag: str) -> None:
         """持锁超过 `warn_after` 后周期告警（典型现场：`await old` 永不返回）。"""
+        interval = self._warn_interval
         try:
             await asyncio.sleep(self._warn_after)
             while True:
@@ -333,7 +432,8 @@ class InterruptLockWatch:
                     f"{time.monotonic() - self._held_since:.1f}s — holder stuck? "
                     f"(waiters={self._waiters})"
                 )
-                await asyncio.sleep(self._warn_interval)
+                interval = self._backoff(interval, self._warn_max_interval)
+                await asyncio.sleep(interval)
         except asyncio.CancelledError:
             return
         except Exception:  # noqa: BLE001 - 观测不得外溢

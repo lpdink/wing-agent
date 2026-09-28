@@ -162,10 +162,11 @@ async def test_interrupt_leaves_forensic_log_lines(probe: Probe) -> None:
         "Agent interrupted and reset [",
         "interrupt done: session_id=",
     )
-    assert "outcome=cancelled" in text
+    assert "await_result=cancelled" in text
     # cancel 快照一行给出判读三件套：cancelling 簿记（快照先于 cancel，必为 0）、
     # fut_waiter 类型（吞没路径判别器）与 worker 暂停点栈。
     snapshot = next(line for line in text.splitlines() if "cancel snapshot [" in line)
     assert "done=False cancelling=0" in snapshot, snapshot
-    assert "fut_waiter=Future(pending)" in snapshot, snapshot
+    # 类型而非具体状态：读侧实现细节（httpx/Queue）变化不应让本断言变红。
+    assert "fut_waiter=Future(" in snapshot, snapshot
     assert "stack=[" in snapshot, snapshot

@@ -63,6 +63,7 @@ libs/core/wing/
 │   ├── tool_executor.py             工具并发分发（asyncio.gather）+ 中断拆卸
 │   ├── event_sink.py                AgentEventSink — 唯一事件发射出口 + persist 分流
 │   ├── inbox.py                     消息队列（drain-and-merge）+ feedback waiters
+│   ├── cancel_watch.py              interrupt 取证：cancel 快照 / 不死看门狗 / 锁争用告警
 │   └── tool_context.py              ToolContext Protocol — 工具收到的窄接口（ctx）
 ├── provider/                        模型调用层（协议隔离）
 │   ├── base.py                      ModelProvider ABC + StreamAccumulator + parse_tool_args（容错，永不抛）
