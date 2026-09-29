@@ -16,8 +16,8 @@
 //! text, reasoning, assistant text, tool calls, tool results — and `--type`
 //! selects elements from it. Selection is "the message carries the
 //! element", never message-level purity: a message carrying tool calls
-//! still yields its text/reasoning, and a tool-only message yields nothing
-//! outside `tool_call` / `all`. Output strips to the selected element in
+//! still yields its text/reasoning, and a tool-only message yields no
+//! text/reasoning anywhere. Output strips to the selected element in
 //! **both** modes — a filter must filter, whether the consumer is a human
 //! reading text or an agent piping `--json`. Sections never overlap: a tool
 //! message's `content` *is* its tool result and renders through the
@@ -189,8 +189,10 @@ fn is_named_filter(filter: &str) -> bool {
 /// Which sections of a message `print_messages` renders.
 ///
 /// `--type` has two kinds of filters:
-/// - **role filters** (`all`, `user`, `assistant`) select *messages* and print
-///   every section of them;
+/// - **role filters** select *messages*: `all` / `assistant` print every
+///   section of them (for an assistant message that *is* its element set),
+///   `user` prints the user text section only — anything else on a user
+///   message is foreign, so text and `--json` agree;
 /// - **field filters** (`reasoning`, `content`, `tool_call`, `tool_result`)
 ///   select messages *and* restrict printing to that section only — filtering
 ///   `content` must not leak reasoning, which is what this enum enforces
@@ -207,6 +209,8 @@ enum SectionFilter {
 impl SectionFilter {
     fn from_filter(filter: &str) -> Self {
         match filter {
+            // `user` prints its element — the user text.
+            "user" => Self::Content,
             "reasoning" => Self::Reasoning,
             "content" => Self::Content,
             "tool_call" => Self::ToolCall,
@@ -286,24 +290,32 @@ fn json_payload(selected: &[&HistoryRow], filter: &str) -> Vec<Value> {
 /// selected element(s) — the machine counterpart of `message_body_lines`
 /// (text and `--json` must filter alike).
 ///
-/// Every record carries `uuid`; element fields appear exactly when the
-/// element exists, mirroring the projection's omit-when-falsy style.
+/// Key stability: every record carries `uuid` (`null` when the payload has
+/// none, matching the projection) and — for filters selecting text — a
+/// `content` key even when empty (the projection always emits `content`).
+/// `reasoning_content` / `tool_calls` / `tool_call_id` appear only when the
+/// message carries them.
 fn element_record(msg: &SessionMessage, filter: &str) -> Value {
     let mut record = Map::new();
     record.insert(
         "uuid".to_string(),
-        Value::String(msg.uuid.clone().unwrap_or_default()),
+        match msg.uuid.clone() {
+            Some(uuid) => Value::String(uuid),
+            None => Value::Null,
+        },
     );
 
     match filter {
-        "user" | "content" => insert_non_empty(&mut record, "content", &msg.content),
+        "user" | "content" => {
+            record.insert("content".to_string(), Value::String(msg.content.clone()));
+        }
         "reasoning" => insert_non_empty(
             &mut record,
             "reasoning_content",
             msg.reasoning_content.as_deref().unwrap_or(""),
         ),
         "assistant" => {
-            insert_non_empty(&mut record, "content", &msg.content);
+            record.insert("content".to_string(), Value::String(msg.content.clone()));
             insert_non_empty(
                 &mut record,
                 "reasoning_content",
@@ -324,7 +336,7 @@ fn element_record(msg: &SessionMessage, filter: &str) -> Value {
                 "tool_call_id",
                 msg.tool_call_id.as_deref().unwrap_or(""),
             );
-            insert_non_empty(&mut record, "content", &msg.content);
+            record.insert("content".to_string(), Value::String(msg.content.clone()));
         }
         _ => {} // named filters only — `all` keeps raw payloads
     }
@@ -746,7 +758,10 @@ mod tests {
     }
 
     #[test]
-    fn element_record_omits_absent_elements() {
+    fn element_record_keeps_uuid_and_content_keys_stable() {
+        // `uuid` is always present (`null` when the payload has none) and
+        // text filters always carry `content` (even empty) — projection
+        // style; other element fields appear only when carried.
         let only_calls = decoded(json!({
             "role": "assistant",
             "uuid": "u4",
@@ -762,8 +777,26 @@ mod tests {
             element_record(&only_calls, "assistant"),
             json!({
                 "uuid": "u4",
+                "content": "",
                 "tool_calls": [{"id": "t", "name": "Bash", "arguments": null}]
             })
+        );
+        // An empty tool result keeps its `content` key ("" — not omitted).
+        let empty_result = decoded(json!({
+            "role": "tool",
+            "uuid": "t2",
+            "tool_call_id": "call_2",
+            "content": ""
+        }));
+        assert_eq!(
+            element_record(&empty_result, "tool_result"),
+            json!({"uuid": "t2", "tool_call_id": "call_2", "content": ""})
+        );
+        // uuid absent → null (matching the raw payload), not "".
+        let no_uuid = decoded(json!({"role": "user", "content": "hi"}));
+        assert_eq!(
+            element_record(&no_uuid, "user"),
+            json!({"uuid": null, "content": "hi"})
         );
     }
 
@@ -789,6 +822,64 @@ mod tests {
             all[1],
             json!({"role": "user", "uuid": "u2", "content": "hi"})
         );
+        assert_eq!(json_payload(&filter_messages(&msgs, "bogus"), "bogus"), all);
+    }
+
+    #[test]
+    fn text_and_json_agree_on_the_selected_elements() {
+        // The core contract: one filter yields the same element set in text
+        // and in `--json`. Sentinels make element presence checkable on both
+        // sides; the `user` row pins the foreign-section case (a user
+        // message's reasoning must leak nowhere).
+        let cases: &[(&str, Value, &[&str])] = &[
+            ("content", assistant_msg(), &["the answer"]),
+            ("reasoning", assistant_msg(), &["thinking hard"]),
+            ("tool_call", assistant_msg(), &["tc_bash"]),
+            (
+                "assistant",
+                assistant_msg(),
+                &["the answer", "thinking hard", "tc_bash"],
+            ),
+            ("tool_result", tool_result_msg(), &["tc1", "file-a"]),
+            (
+                "user",
+                json!({
+                    "role": "user",
+                    "uuid": "u5",
+                    "content": "user text",
+                    "reasoning_content": "user-side reasoning"
+                }),
+                &["user text"],
+            ),
+        ];
+        let sentinels = [
+            "the answer",
+            "thinking hard",
+            "tc_bash",
+            "tc1",
+            "file-a",
+            "user text",
+            "user-side reasoning",
+        ];
+        for (filter, value, expected) in cases {
+            let msg = decoded(value.clone());
+            let text = message_body_lines(&msg, SectionFilter::from_filter(filter)).join("\n");
+            let record = element_record(&msg, filter).to_string();
+            assert!(!record.contains("\"role\""), "{filter}: {record}");
+            for sentinel in sentinels {
+                let want = expected.contains(&sentinel);
+                assert_eq!(
+                    want,
+                    text.contains(sentinel),
+                    "{filter}/{sentinel} in text:\n{text}"
+                );
+                assert_eq!(
+                    want,
+                    record.contains(sentinel),
+                    "{filter}/{sentinel} in json:\n{record}"
+                );
+            }
+        }
     }
 
     // ── header + raw payload stability ──────────────
@@ -847,9 +938,11 @@ mod tests {
             SectionFilter::from_filter("tool_result"),
             SectionFilter::ToolResult
         );
-        // Role filters (and unknown values) keep full-message rendering.
+        // `all` / unknown values keep full-message rendering; `assistant`
+        // renders the message's own sections (= its element set); `user`
+        // prints the user text section only, mirroring `element_record`.
         assert_eq!(SectionFilter::from_filter("all"), SectionFilter::All);
-        assert_eq!(SectionFilter::from_filter("user"), SectionFilter::All);
+        assert_eq!(SectionFilter::from_filter("user"), SectionFilter::Content);
         assert_eq!(SectionFilter::from_filter("assistant"), SectionFilter::All);
         assert_eq!(SectionFilter::from_filter("bogus"), SectionFilter::All);
     }
