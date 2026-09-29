@@ -1,5 +1,6 @@
 import type {
   AskCellModel,
+  CellId,
   CellModel,
   EpochMs,
   JsonValue,
@@ -176,6 +177,10 @@ export function applySync(record: SessionRecord, sync: SyncSessionEvent): void {
       applyKnown(record, event, dropped);
     }
   }
+  // 5. …and the cleanup the two-pass order requires: an event-anchored cell
+  //    (a diff) lands *behind* the separator the message pass inserted before
+  //    it existed — a position the live lane can never build.
+  dropStaleSeparators(record);
 
   record.refreshTitle();
   record.refreshStatus();
@@ -547,13 +552,17 @@ function applyMessageProjection(record: SessionRecord, message: SessionMessage):
       return;
     }
     case 'assistant': {
-      // Cell order mirrors the live stream (reasoning → text → tool calls),
-      // NOT the projection's field order: the model streams its text first and
-      // the tool calls after, and `pushWithSeparator` inserts the ReAct
-      // separator whenever a text/thinking cell follows a ToolCall. Pushing the
-      // calls before the text put every "now doing X" sentence below its own
-      // tool cards and dragged the separator in between the announcement and
-      // the calls.
+      // Cell order mirrors the live stream (reasoning → text → tool calls):
+      // the model streams its text first and the tool calls after, and
+      // `pushWithSeparator` inserts the ReAct separator whenever a
+      // text/thinking cell follows a ToolCall. Pushing the calls first put
+      // every "now doing X" sentence below its own tool cards, with the
+      // separator in between.
+      //
+      // Known limitation (needs a projection change to fix): the payload
+      // flattens `content_blocks` into content + tool_calls, so text emitted
+      // *after* a tool_use inside one message cannot be recovered — this
+      // order restores the streaming shape the projection can still express.
       if (message.reasoning_content !== null && message.reasoning_content !== '') {
         // Same push channel as the live lane: a replayed thinking block that
         // follows a tool call gets the ReAct separator too (replay == live).
@@ -857,6 +866,37 @@ function pushWithSeparator(record: SessionRecord, cell: CellModel): void {
     record.pushCell({ kind: 'separator', id: record.newCellId(), createdAt: record.now(), label: '' });
   }
   record.pushCell(cell);
+}
+
+/**
+ * Drop the ReAct separators that no longer sit directly after a ToolCall.
+ *
+ * `pushWithSeparator` only ever inserts a separator in that position, so any
+ * other one is a replay artifact: the message pass runs before the events
+ * pass, so an anchored diff lands *behind* the separator that was inserted
+ * before it existed — the live lane, where the diff already sits on the tool
+ * card when the next round's text arrives, never grows one. Called at the end
+ * of the replay assembly to keep a resumed transcript cell-for-cell equal to
+ * the live one.
+ */
+function dropStaleSeparators(record: SessionRecord): void {
+  let afterToolCall = false;
+  const stale: CellId[] = [];
+  for (const cell of record.cells) {
+    if (cell.kind === 'tool_call') {
+      afterToolCall = true;
+    } else if (cell.kind === 'separator') {
+      if (!afterToolCall) {
+        stale.push(cell.id);
+      }
+      afterToolCall = false;
+    } else {
+      afterToolCall = false;
+    }
+  }
+  for (const id of stale) {
+    record.remove(id);
+  }
 }
 
 /** Finalize the current streaming text anchors (streaming=false, thinking duration). */

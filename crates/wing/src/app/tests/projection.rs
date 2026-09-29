@@ -151,6 +151,7 @@ fn cell_kinds(app: &App) -> Vec<&'static str> {
             ChatCell::Diff(_) => "diff",
             ChatCell::Ask(_) => "ask",
             ChatCell::Todo(_) => "todo",
+            ChatCell::Separator => "separator",
             _ => "other",
         })
         .collect()
@@ -498,6 +499,165 @@ fn test_sync_three_segment_mixed_order() {
         kinds,
         vec!["user", "tool_call", "diff", "tool_call", "diff"]
     );
+}
+
+#[test]
+fn test_replay_matches_live_cell_sequence_across_two_rounds() {
+    // Live-vs-replay parity for the common shape: two rounds that each
+    // announce their tool calls in text. The TUI's own tests above assert the
+    // replay sequence; this one drives the *live* handlers as well, so a drift
+    // in the shared `push` rule (separator placement included) cannot slip
+    // through one-sided assertions.
+    let meta = crate::protocol::EventMeta {
+        created_at: "2026-01-01T00:00:00".into(),
+        session_id: None,
+        request_id: "r".into(),
+    };
+
+    let mut live = test_app();
+    live.handle_event(WingEvent::Reasoning {
+        content: "turn one".into(),
+        meta: meta.clone(),
+    });
+    live.handle_event(WingEvent::Text {
+        content: "Listing the directory.".into(),
+        meta: meta.clone(),
+    });
+    live.handle_event(WingEvent::ToolCall {
+        tool_name: "Bash".into(),
+        tool_args: serde_json::json!({"command": "ls"}),
+        tool_call_id: "tc-ls".into(),
+        meta: meta.clone(),
+    });
+    live.handle_event(WingEvent::ToolCallResult {
+        tool_name: "Bash".into(),
+        tool_args: serde_json::json!({"command": "ls"}),
+        tool_call_id: "tc-ls".into(),
+        tool_result: "a.txt".into(),
+        tool_success: true,
+        model: "test-model".into(),
+        meta: meta.clone(),
+    });
+    live.handle_event(WingEvent::Reasoning {
+        content: "turn two".into(),
+        meta: meta.clone(),
+    });
+    live.handle_event(WingEvent::Text {
+        content: "Now reading a.txt.".into(),
+        meta: meta.clone(),
+    });
+    live.handle_event(WingEvent::ToolCall {
+        tool_name: "Read".into(),
+        tool_args: serde_json::json!({"path": "a.txt"}),
+        tool_call_id: "tc-read".into(),
+        meta,
+    });
+
+    let mut replayed = test_app();
+    replayed.handle_event(sync_event(
+        vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "Listing the directory.",
+                "reasoning_content": "turn one",
+                "tool_calls": [{"id": "tc-ls", "name": "Bash", "arguments": {"command": "ls"}}],
+            }),
+            serde_json::json!({"role": "tool", "tool_call_id": "tc-ls", "content": "a.txt"}),
+            serde_json::json!({
+                "role": "assistant",
+                "content": "Now reading a.txt.",
+                "reasoning_content": "turn two",
+                "tool_calls": [{"id": "tc-read", "name": "Read", "arguments": {"path": "a.txt"}}],
+            }),
+        ],
+        None,
+        vec![],
+        vec![],
+        None,
+    ));
+
+    assert_eq!(
+        cell_kinds(&live),
+        vec![
+            "thinking",
+            "assistant",
+            "tool_call",
+            "separator", // turn boundary
+            "thinking",
+            "assistant",
+            "tool_call",
+        ]
+    );
+    assert_eq!(cell_kinds(&replayed), cell_kinds(&live));
+}
+
+#[test]
+fn test_replay_matches_live_cell_sequence_after_an_anchored_diff() {
+    // Replay ≠ live parity for the diff case: resume runs the message pass
+    // (and its ReAct separator) before the events pass anchors the diff, so
+    // the separator is born where live — the diff already sitting on the
+    // tool card when the next round's text arrives — never grows one.
+    let meta = crate::protocol::EventMeta {
+        created_at: "2026-01-01T00:00:00".into(),
+        session_id: None,
+        request_id: "r".into(),
+    };
+
+    // Live: tool call → its diff → the next round's reasoning + text.
+    let mut live = test_app();
+    live.handle_event(WingEvent::ToolCall {
+        tool_name: "Edit".into(),
+        tool_args: serde_json::json!({"path": "a.rs"}),
+        tool_call_id: "tc-edit".into(),
+        meta: meta.clone(),
+    });
+    live.handle_event(WingEvent::DiffContent {
+        path: "a.rs".into(),
+        old_text: Some("old".into()),
+        new_text: "new".into(),
+        old_start_line: 1,
+        new_start_line: 1,
+        tool_call_id: "tc-edit".into(),
+        meta: meta.clone(),
+    });
+    live.handle_event(WingEvent::Reasoning {
+        content: "turn two".into(),
+        meta: meta.clone(),
+    });
+    live.handle_event(WingEvent::Text {
+        content: "Now verify.".into(),
+        meta,
+    });
+
+    // Replay: the same conversation through SyncSession.
+    let mut replayed = test_app();
+    replayed.handle_event(sync_event(
+        vec![
+            serde_json::json!({
+                "role": "assistant", "content": "",
+                "tool_calls": [{"id": "tc-edit", "name": "Edit", "arguments": {"path": "a.rs"}}],
+            }),
+            serde_json::json!({"role": "tool", "tool_call_id": "tc-edit", "content": "ok"}),
+            serde_json::json!({
+                "role": "assistant",
+                "content": "Now verify.",
+                "reasoning_content": "turn two",
+            }),
+        ],
+        None,
+        vec![],
+        vec![serde_json::json!({
+            "type": "diff_content", "path": "a.rs", "old_text": "old",
+            "new_text": "new", "tool_call_id": "tc-edit",
+        })],
+        None,
+    ));
+
+    assert_eq!(
+        cell_kinds(&live),
+        vec!["tool_call", "diff", "thinking", "assistant"]
+    );
+    assert_eq!(cell_kinds(&replayed), cell_kinds(&live));
 }
 
 #[test]

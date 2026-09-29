@@ -38,6 +38,11 @@ use crate::ui::chat_view::{ChatCell, ChatView};
 ///
 /// Returns the normalized ask panels it rendered so the caller can register
 /// their answerable flows.
+///
+/// Closes the replay assembly by dropping the separators this two-pass order
+/// made stale ([`ChatView::drop_stale_separators`]): the events pass anchors
+/// derived cells (diffs) *behind* the separator the message pass inserted, a
+/// position live can never produce.
 pub fn replay_events(chat: &mut ChatView, events: &[serde_json::Value]) -> Vec<AskPanel> {
     let mut asks: Vec<AskPanel> = Vec::new();
     for ev_val in events {
@@ -97,6 +102,9 @@ pub fn replay_events(chat: &mut ChatView, events: &[serde_json::Value]) -> Vec<A
             }
         }
     }
+    // The message pass may have inserted a separator that this pass then
+    // slipped a diff behind — live never has one (see the method).
+    chat.drop_stale_separators();
     asks
 }
 
@@ -125,12 +133,18 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
             }
             "assistant" => {
                 // Cell order mirrors the live stream (reasoning → text → tool
-                // calls), NOT the projection's field order: the model streams
-                // its text first and the tool calls after, and `push` inserts
-                // the ReAct separator whenever a text/thinking cell follows a
-                // ToolCall. Pushing the calls before the text put every "now
-                // doing X" sentence below its own tool cards and dragged the
-                // separator in between the announcement and the calls.
+                // calls): the model streams its text first and the tool calls
+                // after, and `push` inserts the ReAct separator whenever a
+                // text/thinking cell follows a ToolCall. Pushing the calls
+                // first put every "now doing X" sentence below its own tool
+                // cards and dragged the separator in between the announcement
+                // and the calls.
+                //
+                // Known limitation (needs a projection change to fix): the
+                // payload flattens `content_blocks` into content + tool_calls,
+                // so text emitted *after* a tool_use inside one message cannot
+                // be recovered — this order restores the streaming shape the
+                // projection can still express.
 
                 // Reasoning content (thinking).
                 if let Some(reasoning) = &msg.reasoning_content
@@ -253,11 +267,10 @@ mod tests {
 
     #[test]
     fn test_replay_assistant_cell_order_matches_live_stream() {
-        // The projection lists `tool_calls` before `content`, but the live
-        // lane renders in stream order: reasoning → text → tool calls. A text
-        // that announces its tool calls must sit ABOVE them — replaying in
-        // field order put every "now doing X" sentence below its own tool
-        // cards.
+        // The live lane renders in stream order: reasoning → text → tool
+        // calls. Replay used to push the calls first (the order its own code
+        // happened to list them in), so a text that announces its tool calls
+        // sat BELOW them.
         let mut chat = ChatView::new();
         let messages = vec![json!({
             "role": "assistant",

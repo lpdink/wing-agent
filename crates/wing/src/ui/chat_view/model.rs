@@ -257,6 +257,34 @@ impl ChatView {
         false
     }
 
+    /// Drop the ReAct separators that no longer sit directly after a ToolCall.
+    ///
+    /// [`ChatView::push`] only ever inserts a separator in that position, so
+    /// any other one is a replay artifact: resume renders the message
+    /// projections first (separator inserted — the diff was not anchored yet)
+    /// and applies the fact events afterwards, which slips the diff *behind*
+    /// the separator. Live, where the diff is already anchored when the next
+    /// round's text arrives, never grows it. Called at the end of the replay
+    /// assembly to restore cell-for-cell parity.
+    pub fn drop_stale_separators(&mut self) {
+        let mut after_tool_call = false;
+        self.cells.retain(|cell| match cell.cell() {
+            ChatCell::ToolCall(_) => {
+                after_tool_call = true;
+                true
+            }
+            ChatCell::Separator => {
+                let keep = after_tool_call;
+                after_tool_call = false;
+                keep
+            }
+            _ => {
+                after_tool_call = false;
+                true
+            }
+        });
+    }
+
     /// Get the number of cells.
     pub fn len(&self) -> usize {
         self.cells.len()
