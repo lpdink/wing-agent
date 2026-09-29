@@ -144,11 +144,10 @@ describe('replay assembly', () => {
       'thinking', // m2 reasoning
       'tool_call', // m2 tool_calls
       'diff', // events: anchored after tc-edit
-      'separator', // ReAct rule: the uncommitted thinking block follows a tool call
-      'thinking', // uncommitted reasoning
+      'thinking', // uncommitted reasoning — behind the diff, so no separator
       'tool_call', // uncommitted_tools: tc-stream (streaming args)
     ]);
-    const streamed = cells[6];
+    const streamed = cells[cells.length - 1];
     expect(streamed?.kind === 'tool_call' && streamed.argsText).toBe('{"command":"pn');
     expect(streamed?.kind === 'tool_call' && streamed.status).toBe('streaming');
     // Mid-turn replay restores the elapsed-time anchor.
@@ -680,6 +679,177 @@ describe('replay == live', () => {
     expect(kinds(liveCells)).toEqual(['tool_call', 'separator', 'assistant']);
     expect(kinds(replayCells)).toEqual(kinds(liveCells));
     expect(stableCells(replayCells)).toEqual(stableCells(liveCells));
+  });
+
+  it('replays the assistant text above the tool calls it announces (stream order)', async () => {
+    // The live lane renders in stream order: reasoning → text → tool calls.
+    // Replay used to push the calls first (the order its own code happened to
+    // list them in), putting every "now doing X" sentence below its own tool
+    // cards, with the ReAct separator in between.
+    const live = createHostHarness();
+    teardown.push(live);
+    await live.boot();
+    const liveId = live.gateway.createdOrder[0] ?? '';
+    live.gateway.emit({ type: 'turn_started', session_id: liveId });
+    live.gateway.emit({ type: 'reasoning', content: 'let me look', session_id: liveId });
+    live.gateway.emit(textPayload('Reading the file now.', liveId));
+    live.gateway.emit({
+      type: 'tool_call',
+      tool_name: 'Read',
+      tool_args: { path: 'main.rs' },
+      tool_call_id: 'tc-read',
+      session_id: liveId,
+    });
+    live.gateway.emit({
+      type: 'tool_call_result',
+      tool_name: 'Read',
+      tool_args: { path: 'main.rs' },
+      tool_call_id: 'tc-read',
+      tool_result: 'fn main() {}',
+      tool_success: true,
+      model: 'test-model',
+      session_id: liveId,
+    });
+    await flushMicrotasks();
+
+    const replayed = createHostHarness();
+    teardown.push(replayed);
+    replayed.gateway.seedOnCreate = {
+      messages: [
+        {
+          role: 'assistant',
+          content: 'Reading the file now.',
+          reasoning_content: 'let me look',
+          tool_calls: [{ id: 'tc-read', name: 'Read', arguments: { path: 'main.rs' } }],
+          uuid: 'm1',
+        },
+        { role: 'tool', tool_call_id: 'tc-read', content: 'fn main() {}', uuid: 'm2' },
+      ],
+    };
+    await replayed.boot();
+    await flushMicrotasks();
+
+    const liveCells = live.host.sessionManager.record(liveId)?.cells ?? [];
+    const replayId = replayed.gateway.createdOrder[0] ?? '';
+    const replayCells = replayed.host.sessionManager.record(replayId)?.cells ?? [];
+
+    expect(kinds(liveCells)).toEqual(['thinking', 'assistant', 'tool_call']);
+    expect(kinds(replayCells)).toEqual(kinds(liveCells));
+    expect(stableCells(replayCells)).toEqual(stableCells(liveCells));
+  });
+
+  it('keeps replay == live when a tool card carries an anchored diff', async () => {
+    // Resume anchors the diff in the events pass — after the message pass
+    // already grew the turn separator. Live, where the diff sits on the tool
+    // card before the next round's text arrives, never grows it.
+    const live = createHostHarness();
+    teardown.push(live);
+    await live.boot();
+    const liveId = live.gateway.createdOrder[0] ?? '';
+    live.gateway.emit({
+      type: 'tool_call',
+      tool_name: 'Edit',
+      tool_args: { path: 'a.ts' },
+      tool_call_id: 'tc-edit',
+      session_id: liveId,
+    });
+    live.gateway.emit({
+      type: 'diff_content',
+      path: 'a.ts',
+      old_text: 'old',
+      new_text: 'new',
+      old_start_line: 1,
+      new_start_line: 1,
+      tool_call_id: 'tc-edit',
+      session_id: liveId,
+    });
+    live.gateway.emit({
+      type: 'tool_call_result',
+      tool_name: 'Edit',
+      tool_args: { path: 'a.ts' },
+      tool_call_id: 'tc-edit',
+      tool_result: 'ok',
+      tool_success: true,
+      model: 'test-model',
+      session_id: liveId,
+    });
+    live.gateway.emit({ type: 'reasoning', content: 'turn two', session_id: liveId });
+    live.gateway.emit(textPayload('Now verify.', liveId));
+    live.gateway.emit({ type: 'done', session_id: liveId });
+    await flushMicrotasks();
+
+    const replayed = createHostHarness();
+    teardown.push(replayed);
+    replayed.gateway.seedOnCreate = {
+      messages: [
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: 'tc-edit', name: 'Edit', arguments: { path: 'a.ts' } }],
+          uuid: 'm1',
+        },
+        { role: 'tool', tool_call_id: 'tc-edit', content: 'ok', uuid: 'm2' },
+        { role: 'assistant', content: 'Now verify.', reasoning_content: 'turn two', uuid: 'm3' },
+      ],
+      events: [
+        {
+          type: 'diff_content',
+          path: 'a.ts',
+          old_text: 'old',
+          new_text: 'new',
+          tool_call_id: 'tc-edit',
+        },
+      ],
+    };
+    await replayed.boot();
+    await flushMicrotasks();
+
+    const liveCells = live.host.sessionManager.record(liveId)?.cells ?? [];
+    const replayId = replayed.gateway.createdOrder[0] ?? '';
+    const replayCells = replayed.host.sessionManager.record(replayId)?.cells ?? [];
+
+    expect(kinds(liveCells)).toEqual(['tool_call', 'diff', 'thinking', 'assistant']);
+    expect(kinds(replayCells)).toEqual(kinds(liveCells));
+    expect(stableCells(replayCells)).toEqual(stableCells(liveCells));
+  });
+
+  it('replays the ReAct separator between turns, not inside the announcing message', async () => {
+    // Two turns, each announcing its tool calls in text. The only separator
+    // is the turn boundary — no second one between a sentence and its calls.
+    const replayed = createHostHarness();
+    teardown.push(replayed);
+    replayed.gateway.seedOnCreate = {
+      messages: [
+        {
+          role: 'assistant',
+          content: 'Listing the directory.',
+          reasoning_content: 'turn one',
+          tool_calls: [{ id: 'tc-ls', name: 'Bash', arguments: { command: 'ls' } }],
+          uuid: 'm1',
+        },
+        { role: 'tool', tool_call_id: 'tc-ls', content: 'a.txt', uuid: 'm2' },
+        {
+          role: 'assistant',
+          content: 'Now reading a.txt.',
+          reasoning_content: 'turn two',
+          tool_calls: [{ id: 'tc-read', name: 'Read', arguments: { path: 'a.txt' } }],
+          uuid: 'm3',
+        },
+      ],
+    };
+    await replayed.boot();
+    await flushMicrotasks();
+
+    const id = replayed.gateway.createdOrder[0] ?? '';
+    expect(kinds(replayed.host.sessionManager.record(id)?.cells ?? [])).toEqual([
+      'thinking',
+      'assistant',
+      'tool_call',
+      'separator', // turn boundary — before the next turn's thinking
+      'thinking',
+      'assistant',
+      'tool_call',
+    ]);
   });
 
   it('keeps the truncated flag of a capped tool result on both lanes', async () => {
