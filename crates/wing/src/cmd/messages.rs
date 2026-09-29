@@ -4,41 +4,49 @@
 //! `tail` shows the last N, `head` shows the first N.
 //!
 //! Decoding lives in the shared typed mirror (`protocol::SessionMessage`);
-//! filtering and text printing run on the typed view, while `--json` emits the
-//! raw payloads verbatim (typed serialization would drop unknown fields and
-//! change key order).
+//! filtering and printing run on the typed view. `--json` emits stripped
+//! element records (`{uuid, …selected fields}`) for named filters and the
+//! raw payloads verbatim for `all` (typed serialization would drop unknown
+//! fields and change key order, so neither path round-trips through the
+//! mirror).
 //!
-//! # Filter types
+//! # Filter types: flat elements
 //!
-//! Role filters select messages and print all their sections; field filters
-//! additionally restrict printing to that section only (e.g. `content`
-//! prints text without leaking reasoning). Sections never overlap: a tool
+//! `head` / `tail` treat the log as a flat sequence of elements — user
+//! text, reasoning, assistant text, tool calls, tool results — and `--type`
+//! selects elements from it. Selection is "the message carries the
+//! element", never message-level purity: a message carrying tool calls
+//! still yields its text/reasoning, and a tool-only message yields nothing
+//! outside `tool_call` / `all`. Output strips to the selected element in
+//! **both** modes — a filter must filter, whether the consumer is a human
+//! reading text or an agent piping `--json`. Sections never overlap: a tool
 //! message's `content` *is* its tool result and renders through the
 //! tool-result section only, so `all` shows every result exactly once.
 //!
-//! Tool results print as a **500-char peek** — that is the tool-result
-//! section's single rendering definition, shared by `all` and `tool_result`.
-//! `--json` prints the stored payloads verbatim; note the backend caps
-//! results over `tool_result_truncate.max_length` (100k) *before* storing
-//! them, so beyond that cap even the payload is the head/marker/tail form
-//! (the full text lives in the temp file its marker names).
+//! | `--type`       | Selected elements                                     |
+//! |----------------|-------------------------------------------------------|
+//! | `all` (default)| Every message, unfiltered (`--json`: payloads verbatim)|
+//! | `user`         | User-message text                                      |
+//! | `assistant`    | A message's own elements (reasoning + text + tool calls)|
+//! | `tool_call`    | Tool calls (each line carries its call id)             |
+//! | `tool_result`  | Tool results                                           |
+//! | `reasoning`    | Non-empty `reasoning_content`                          |
+//! | `content`      | Assistant text                                         |
 //!
-//! | `--type`       | Condition                                  | Printed sections |
-//! |----------------|--------------------------------------------|------------------|
-//! | `all` (default)| All messages                               | everything       |
-//! | `user`         | `role == "user"`                           | everything       |
-//! | `assistant`    | `role == "assistant"`                      | everything       |
-//! | `tool_call`    | Assistant messages with `tool_calls`       | tool calls only  |
-//! | `tool_result`  | `role == "tool"`                           | tool result only |
-//! | `reasoning`    | Messages with non-empty `reasoning_content`| reasoning only   |
-//! | `content`      | Assistant with text content, no tool_calls | text only        |
+//! Tool results print as a **500-char peek** in text mode — that is the
+//! tool-result section's single text rendering, shared by `all` and
+//! `tool_result`; `--json` carries the stored content in full. Note the
+//! backend caps results over `tool_result_truncate.max_length` (100k)
+//! *before* storing them, so beyond that cap even the payload is the
+//! head/marker/tail form (the full text lives in the temp file its marker
+//! names).
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::process::ExitCode;
 
 use anyhow::Result;
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 
 use crate::protocol::SessionMessage;
 
@@ -54,8 +62,9 @@ pub async fn run_head(session_id: &str, n: usize, filter: &str, json: bool) -> E
     run_messages(session_id, n, filter, json, /* from_head = */ true).await
 }
 
-/// One fetched history row: the raw payload — printed verbatim by `--json` —
-/// plus its typed view.
+/// One fetched history row: the raw payload — emitted verbatim by `--json`
+/// under `all` — plus its typed view. Named filters build stripped element
+/// records from `view` instead.
 ///
 /// `view` is `None` when the payload is not a Message projection (non-object,
 /// or any mirrored field with a mismatched type). Such rows match only `all`
@@ -100,8 +109,7 @@ async fn run_messages(
             };
 
             if json {
-                let raw: Vec<&Value> = selected.iter().map(|row| &row.raw).collect();
-                common::print_json_compact(&raw);
+                common::print_json_compact(&json_payload(&selected, filter));
             } else {
                 print_messages(&selected, filter);
             }
@@ -149,10 +157,7 @@ fn filter_messages<'a>(rows: &'a [HistoryRow], filter: &str) -> Vec<&'a HistoryR
 
 fn matches_filter(row: &HistoryRow, filter: &str) -> bool {
     let Some(msg) = &row.view else {
-        return !matches!(
-            filter,
-            "user" | "assistant" | "tool_call" | "tool_result" | "reasoning" | "content"
-        );
+        return !is_named_filter(filter);
     };
     match filter {
         "user" => msg.role == "user",
@@ -165,9 +170,20 @@ fn matches_filter(row: &HistoryRow, filter: &str) -> bool {
             .reasoning_content
             .as_deref()
             .is_some_and(|r| !r.is_empty()),
-        "content" => msg.role == "assistant" && !msg.content.is_empty() && !msg.has_tool_calls(),
+        // "Carries text" — never "is pure text": a message with tool calls
+        // still yields its content (output strips the calls, not the message).
+        "content" => msg.role == "assistant" && !msg.content.is_empty(),
         _ => true, // "all" or unknown
     }
+}
+
+/// Whether `filter` names a real filter (`all` / unknown values stay
+/// unfiltered; undecodable rows match only those).
+fn is_named_filter(filter: &str) -> bool {
+    matches!(
+        filter,
+        "user" | "assistant" | "tool_call" | "tool_result" | "reasoning" | "content"
+    )
 }
 
 /// Which sections of a message `print_messages` renders.
@@ -177,7 +193,8 @@ fn matches_filter(row: &HistoryRow, filter: &str) -> bool {
 ///   every section of them;
 /// - **field filters** (`reasoning`, `content`, `tool_call`, `tool_result`)
 ///   select messages *and* restrict printing to that section only — filtering
-///   `content` must not leak reasoning, which is what this enum enforces.
+///   `content` must not leak reasoning, which is what this enum enforces
+///   (`element_record` enforces the same for `--json`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SectionFilter {
     All,
@@ -227,15 +244,16 @@ fn message_body_lines(msg: &SessionMessage, section: SectionFilter) -> Vec<Strin
 
     if matches!(section, SectionFilter::All | SectionFilter::ToolCall) {
         for tc in msg.tool_calls() {
-            // Absent `arguments` prints as `()`, explicit null as `(null)` —
-            // the distinction the typed mirror keeps on purpose.
+            // The call id prints so call and result (`← id`) lines can be
+            // matched. Absent `arguments` prints as `()`, explicit null as
+            // `(null)` — the distinction the typed mirror keeps on purpose.
             let args = tc
                 .arguments
                 .as_ref()
                 .map(|v| v.to_string())
                 .unwrap_or_default();
             lines.push(String::new());
-            lines.push(format!("  → {}({args})", tc.name));
+            lines.push(format!("  → [{}] {}({args})", tc.id, tc.name));
         }
     }
 
@@ -249,6 +267,94 @@ fn message_body_lines(msg: &SessionMessage, section: SectionFilter) -> Vec<Strin
     }
 
     lines
+}
+
+/// The `--json` payload for the selected rows: stripped element records for
+/// named filters, raw payloads (verbatim) for `all` / unknown values.
+fn json_payload(selected: &[&HistoryRow], filter: &str) -> Vec<Value> {
+    if is_named_filter(filter) {
+        selected
+            .iter()
+            .filter_map(|row| row.view.as_ref().map(|msg| element_record(msg, filter)))
+            .collect()
+    } else {
+        selected.iter().map(|row| row.raw.clone()).collect()
+    }
+}
+
+/// One `--json` record for a named filter: the message stripped to the
+/// selected element(s) — the machine counterpart of `message_body_lines`
+/// (text and `--json` must filter alike).
+///
+/// Every record carries `uuid`; element fields appear exactly when the
+/// element exists, mirroring the projection's omit-when-falsy style.
+fn element_record(msg: &SessionMessage, filter: &str) -> Value {
+    let mut record = Map::new();
+    record.insert(
+        "uuid".to_string(),
+        Value::String(msg.uuid.clone().unwrap_or_default()),
+    );
+
+    match filter {
+        "user" | "content" => insert_non_empty(&mut record, "content", &msg.content),
+        "reasoning" => insert_non_empty(
+            &mut record,
+            "reasoning_content",
+            msg.reasoning_content.as_deref().unwrap_or(""),
+        ),
+        "assistant" => {
+            insert_non_empty(&mut record, "content", &msg.content);
+            insert_non_empty(
+                &mut record,
+                "reasoning_content",
+                msg.reasoning_content.as_deref().unwrap_or(""),
+            );
+            if msg.has_tool_calls() {
+                record.insert("tool_calls".to_string(), tool_calls_value(msg));
+            }
+        }
+        "tool_call" => {
+            if msg.has_tool_calls() {
+                record.insert("tool_calls".to_string(), tool_calls_value(msg));
+            }
+        }
+        "tool_result" => {
+            insert_non_empty(
+                &mut record,
+                "tool_call_id",
+                msg.tool_call_id.as_deref().unwrap_or(""),
+            );
+            insert_non_empty(&mut record, "content", &msg.content);
+        }
+        _ => {} // named filters only — `all` keeps raw payloads
+    }
+
+    Value::Object(record)
+}
+
+fn insert_non_empty(record: &mut Map<String, Value>, key: &str, value: &str) {
+    if !value.is_empty() {
+        record.insert(key.to_string(), Value::String(value.to_string()));
+    }
+}
+
+/// The message's `tool_calls` in projection shape. `arguments` is always
+/// present (`null` when absent): the mirror keeps absent apart from explicit
+/// null for the text renderer, while the projection — and so the json — has
+/// the single null form.
+fn tool_calls_value(msg: &SessionMessage) -> Value {
+    Value::Array(
+        msg.tool_calls()
+            .iter()
+            .map(|tc| {
+                json!({
+                    "id": tc.id,
+                    "name": tc.name,
+                    "arguments": tc.arguments.clone().unwrap_or(Value::Null),
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Header line for one row: `[role] uuid`.
@@ -341,13 +447,21 @@ mod tests {
     }
 
     #[test]
-    fn filter_content_excludes_tool_call_messages() {
+    fn filter_content_includes_tool_call_messages() {
+        // Element-wise selection: carrying tool calls does not disqualify a
+        // message from yielding its text — the old purity rule ("no
+        // tool_calls") silently dropped every tool-call turn's narration.
+        // Tool-only messages still pass no `content`: there is no text to
+        // strip.
         let msgs = rows(vec![
             assistant_msg(),
             json!({"role": "assistant", "content": "plain"}),
+            json!({
+                "role": "assistant",
+                "tool_calls": [{"id": "t", "name": "Bash"}]
+            }),
         ]);
-        // The kitchen-sink message has tool_calls → excluded from "content".
-        assert_eq!(filter_messages(&msgs, "content").len(), 1);
+        assert_eq!(filter_messages(&msgs, "content").len(), 2);
     }
 
     #[test]
@@ -359,14 +473,14 @@ mod tests {
 
     #[test]
     fn filter_tool_call_requires_non_empty_array() {
-        // Absent / null / [] are all "no tool call" — such messages fall to
-        // the "content" filter instead.
+        // Absent / null / [] are all "no tool call" — those messages yield
+        // their text under "content" like any other text-bearing message.
         let empty = json!({"role": "assistant", "content": "x", "tool_calls": []});
         let null = json!({"role": "assistant", "content": "x", "tool_calls": null});
         let absent = json!({"role": "assistant", "content": "x"});
         let msgs = rows(vec![empty, null, absent, assistant_msg()]);
         assert_eq!(filter_messages(&msgs, "tool_call").len(), 1);
-        assert_eq!(filter_messages(&msgs, "content").len(), 3);
+        assert_eq!(filter_messages(&msgs, "content").len(), 4);
     }
 
     #[test]
@@ -384,7 +498,7 @@ mod tests {
         assert_eq!(filter_messages(&msgs, "tool_call").len(), 1);
         assert_eq!(filter_messages(&msgs, "tool_result").len(), 1);
         assert_eq!(filter_messages(&msgs, "reasoning").len(), 1);
-        assert_eq!(filter_messages(&msgs, "content").len(), 0);
+        assert_eq!(filter_messages(&msgs, "content").len(), 1);
         // `all` (and unknown filters) include it.
         assert_eq!(filter_messages(&msgs, "all").len(), 4);
         assert_eq!(filter_messages(&msgs, "bogus").len(), 4);
@@ -444,7 +558,7 @@ mod tests {
     fn body_lines_tool_call_only() {
         let lines = message_body_lines(&decoded(assistant_msg()), SectionFilter::ToolCall);
         let joined = lines.join("\n");
-        assert!(joined.contains("→ bash"));
+        assert!(joined.contains("→ [tc_bash] bash"));
         assert!(!joined.contains("thinking hard"));
         assert!(!joined.contains("the answer"));
     }
@@ -484,8 +598,8 @@ mod tests {
         // excluded, a tool message is its result section and nothing else
         // (hence exactly the 3 result lines: blank, `← id`, truncated body).
         // Pinning the whole body — not just a copy count — is the point: a
-        // second renderer would necessarily add lines. `--json` prints the
-        // stored payload verbatim (the module docs carry the caps).
+        // second renderer would necessarily add lines. `--json` carries the
+        // stored content in full (the module docs carry the caps).
         let long = "x".repeat(600);
         let msg = decoded(json!({
             "role": "tool",
@@ -532,13 +646,13 @@ mod tests {
         let joined = lines.join("\n");
         assert!(joined.contains("thinking hard"));
         assert!(joined.contains("the answer"));
-        assert!(joined.contains("→ bash"));
+        assert!(joined.contains("→ [tc_bash] bash"));
     }
 
     #[test]
     fn body_lines_tool_args_absent_vs_null() {
-        // Byte-level behavior kept from the sniffing era: absent `arguments`
-        // prints `()`, explicit null prints `(null)`.
+        // Text keeps the sniffing-era split: absent `arguments` prints `()`,
+        // explicit null prints `(null)`.
         let absent = decoded(json!({
             "role": "assistant",
             "tool_calls": [{"id": "a", "name": "Bash"}]
@@ -549,8 +663,25 @@ mod tests {
         }));
         let lines =
             |msg: &SessionMessage| message_body_lines(msg, SectionFilter::ToolCall).join("\n");
-        assert!(lines(&absent).contains("→ Bash()"), "{}", lines(&absent));
-        assert!(lines(&null).contains("→ Bash(null)"), "{}", lines(&null));
+        assert!(
+            lines(&absent).contains("→ [a] Bash()"),
+            "{}",
+            lines(&absent)
+        );
+        assert!(
+            lines(&null).contains("→ [a] Bash(null)"),
+            "{}",
+            lines(&null)
+        );
+        // Json carries the projection's single null form for both.
+        assert_eq!(
+            element_record(&absent, "tool_call")["tool_calls"][0]["arguments"],
+            json!(null)
+        );
+        assert_eq!(
+            element_record(&null, "tool_call")["tool_calls"][0]["arguments"],
+            json!(null)
+        );
     }
 
     #[test]
@@ -561,6 +692,103 @@ mod tests {
         assert_eq!(msg.content, "");
         assert!(!msg.has_tool_calls());
         assert!(message_body_lines(&msg, SectionFilter::All).is_empty());
+    }
+
+    // ── element_record / json_payload: machine output filters too ──
+
+    #[test]
+    fn element_record_strips_to_the_selected_element() {
+        let msg = decoded(assistant_msg());
+        assert_eq!(
+            element_record(&msg, "content"),
+            json!({"uuid": "u1", "content": "the answer"})
+        );
+        assert_eq!(
+            element_record(&msg, "reasoning"),
+            json!({"uuid": "u1", "reasoning_content": "thinking hard"})
+        );
+        assert_eq!(
+            element_record(&msg, "tool_call"),
+            json!({
+                "uuid": "u1",
+                "tool_calls": [{"id": "tc_bash", "name": "bash", "arguments": {"cmd": "ls"}}]
+            })
+        );
+        // `assistant` keeps the message's own elements — no foreign sections.
+        assert_eq!(
+            element_record(&msg, "assistant"),
+            json!({
+                "uuid": "u1",
+                "reasoning_content": "thinking hard",
+                "content": "the answer",
+                "tool_calls": [{"id": "tc_bash", "name": "bash", "arguments": {"cmd": "ls"}}]
+            })
+        );
+    }
+
+    #[test]
+    fn element_record_for_tool_and_user_rows() {
+        assert_eq!(
+            element_record(&decoded(tool_result_msg()), "tool_result"),
+            json!({
+                "uuid": "u2",
+                "tool_call_id": "tc1",
+                "content": "file-a\nfile-b"
+            })
+        );
+        assert_eq!(
+            element_record(
+                &decoded(json!({"role": "user", "uuid": "u3", "content": "hi"})),
+                "user"
+            ),
+            json!({"uuid": "u3", "content": "hi"})
+        );
+    }
+
+    #[test]
+    fn element_record_omits_absent_elements() {
+        let only_calls = decoded(json!({
+            "role": "assistant",
+            "uuid": "u4",
+            "tool_calls": [{"id": "t", "name": "Bash"}]
+        }));
+        assert_eq!(
+            element_record(&only_calls, "reasoning"),
+            json!({"uuid": "u4"})
+        );
+        // Absent `arguments` is the projection's null form in json (the
+        // `()` / `(null)` split is text-renderer-only).
+        assert_eq!(
+            element_record(&only_calls, "assistant"),
+            json!({
+                "uuid": "u4",
+                "tool_calls": [{"id": "t", "name": "Bash", "arguments": null}]
+            })
+        );
+    }
+
+    #[test]
+    fn json_payload_strips_named_filters_and_keeps_all_verbatim() {
+        let msgs = rows(vec![
+            assistant_msg(),
+            json!({"role": "user", "uuid": "u2", "content": "hi"}),
+        ]);
+        // Named filters: stripped records — no `role`, no foreign sections.
+        assert_eq!(
+            json_payload(&filter_messages(&msgs, "content"), "content"),
+            vec![json!({"uuid": "u1", "content": "the answer"})]
+        );
+        assert_eq!(
+            json_payload(&filter_messages(&msgs, "user"), "user"),
+            vec![json!({"uuid": "u2", "content": "hi"})]
+        );
+        // `all` (and unknown values): raw payloads, untouched.
+        let all = json_payload(&filter_messages(&msgs, "all"), "all");
+        assert_eq!(all[0], assistant_msg());
+        assert_eq!(
+            all[1],
+            json!({"role": "user", "uuid": "u2", "content": "hi"})
+        );
     }
 
     // ── header + raw payload stability ──────────────
@@ -585,8 +813,9 @@ mod tests {
 
     #[test]
     fn raw_payload_is_kept_verbatim_for_json() {
-        // `--json` prints the raw payloads, so unknown fields survive and the
-        // serialized array matches the fetched one byte for byte.
+        // `--json` under `all` prints the raw payloads, so unknown fields
+        // survive and the serialized array matches the fetched one byte for
+        // byte (named filters build stripped records instead — see above).
         let fetched = vec![
             json!({"role": "assistant", "content": "x", "usage": {"in": 1}}),
             json!({"role": "user", "content": "y"}),
@@ -595,7 +824,7 @@ mod tests {
 
         let msgs = rows(fetched);
         let selected = filter_messages(&msgs, "all");
-        let raw: Vec<&Value> = selected.iter().map(|row| &row.raw).collect();
+        let raw = json_payload(&selected, "all");
         assert_eq!(serde_json::to_string(&raw).unwrap(), fetched_json);
         assert!(serde_json::to_string(&raw).unwrap().contains("\"usage\""));
     }

@@ -281,7 +281,7 @@ ls "$STEP"/design.md "$STEP"/task.md        # 必须存在
 ### 7.4 巡检与逃生舱
 
 - 全局巡检：`wing ps --json | jq '.[] | {id, status, last_interaction}'`（默认已过滤 `inactive`；状态取值：`working` / `idle` / `waiting` / `inactive`）；
-- 看某人正在干什么：`wing tail <sid> -n 10 -t tool_call`（工具调用一览）、`-t content`（结论）、`-t reasoning`（思路）、`-t user`（你派发时给的 prompt）；
+- 看某人正在干什么：`wing tail <sid> -n 10 -t tool_call`（工具调用一览）、`-t content`（助手正文）、`-t reasoning`（思路）、`-t user`（你派发时给的 prompt）；
 - **识别"假忙"**：`wing tail <sid> -n 10 -t tool_call` 看最近工具调用是否在原地打转（同一条命令 / 同一个文件反复出现、报错反复重试）→ 别干等：interrupt，然后 `-r` 直接点破（「你已经连续 3 次因为 X 失败，换成 Y 试试」）；
 - **卡死逃生舱**（长时间 `working` 却无新增消息，或状态是 `waiting`）：
 

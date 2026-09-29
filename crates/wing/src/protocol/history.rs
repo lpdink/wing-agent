@@ -13,8 +13,9 @@
 //! fails to decode — callers skip it.
 //!
 //! Decode-only on purpose: serializing a mirror would drop unknown fields and
-//! change key order, which would break `wing tail --json` (it emits the raw
-//! payloads verbatim).
+//! change key order, which would break `wing tail --json --type all` (raw
+//! payloads verbatim); named filters hand-build stripped records from the
+//! typed view.
 
 use serde::Deserialize;
 
@@ -26,8 +27,9 @@ use serde::Deserialize;
 /// prints `()` vs `(null)`.
 ///
 /// Decode-only on purpose — serializing this mirror would drop unknown fields
-/// and change key order, which would break `wing tail --json` (it emits the
-/// raw payloads).
+/// and change key order, which would break `wing tail --json --type all` (raw
+/// payloads verbatim); named filters hand-build stripped records from the
+/// typed view.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SessionToolCall {
     pub id: String,
