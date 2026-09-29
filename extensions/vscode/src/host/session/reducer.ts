@@ -547,6 +547,13 @@ function applyMessageProjection(record: SessionRecord, message: SessionMessage):
       return;
     }
     case 'assistant': {
+      // Cell order mirrors the live stream (reasoning → text → tool calls),
+      // NOT the projection's field order: the model streams its text first and
+      // the tool calls after, and `pushWithSeparator` inserts the ReAct
+      // separator whenever a text/thinking cell follows a ToolCall. Pushing the
+      // calls before the text put every "now doing X" sentence below its own
+      // tool cards and dragged the separator in between the announcement and
+      // the calls.
       if (message.reasoning_content !== null && message.reasoning_content !== '') {
         // Same push channel as the live lane: a replayed thinking block that
         // follows a tool call gets the ReAct separator too (replay == live).
@@ -557,6 +564,15 @@ function applyMessageProjection(record: SessionRecord, message: SessionMessage):
           text: message.reasoning_content,
           streaming: false,
           durationMs: null,
+        });
+      }
+      if (message.content !== '') {
+        pushWithSeparator(record, {
+          kind: 'assistant',
+          id: record.newCellId(),
+          createdAt: record.now(),
+          text: message.content,
+          streaming: false,
         });
       }
       for (const call of message.tool_calls) {
@@ -576,15 +592,6 @@ function applyMessageProjection(record: SessionRecord, message: SessionMessage):
         };
         record.pushCell(cell);
         record.toolCells.set(cell.toolCallId, cell.id);
-      }
-      if (message.content !== '') {
-        pushWithSeparator(record, {
-          kind: 'assistant',
-          id: record.newCellId(),
-          createdAt: record.now(),
-          text: message.content,
-          streaming: false,
-        });
       }
       return;
     }

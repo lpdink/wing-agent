@@ -109,7 +109,7 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
         // Decoded through the shared SessionMessage mirror: missing optional
         // fields default, null optional fields count as absent, and a payload
         // that is not a Message projection is skipped (forward tolerant).
-        let msg = match SessionMessage::from_json(msg_val) {
+        let mut msg = match SessionMessage::from_json(msg_val) {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!("Failed to decode replay message: {e}");
@@ -124,6 +124,14 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
                 }
             }
             "assistant" => {
+                // Cell order mirrors the live stream (reasoning → text → tool
+                // calls), NOT the projection's field order: the model streams
+                // its text first and the tool calls after, and `push` inserts
+                // the ReAct separator whenever a text/thinking cell follows a
+                // ToolCall. Pushing the calls before the text put every "now
+                // doing X" sentence below its own tool cards and dragged the
+                // separator in between the announcement and the calls.
+
                 // Reasoning content (thinking).
                 if let Some(reasoning) = &msg.reasoning_content
                     && !reasoning.is_empty()
@@ -131,6 +139,12 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
                     let mut block = ThinkingBlock::new();
                     block.append(reasoning);
                     chat.push(ChatCell::Thinking(block));
+                }
+
+                // Assistant text content (`mem::take`: the calls are still
+                // borrowed from `msg` below).
+                if !msg.content.is_empty() {
+                    chat.push(ChatCell::AssistantMessage(std::mem::take(&mut msg.content)));
                 }
 
                 // Tool calls.
@@ -141,11 +155,6 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
                         tc.id.clone(),
                     );
                     chat.push(ChatCell::ToolCall(block));
-                }
-
-                // Assistant text content.
-                if !msg.content.is_empty() {
-                    chat.push(ChatCell::AssistantMessage(msg.content));
                 }
             }
             "tool" => {
@@ -226,6 +235,91 @@ mod tests {
             chat.cells[1].cell(),
             ChatCell::AssistantMessage(_)
         ));
+    }
+
+    /// Cell names for order assertions (replay-vs-live parity).
+    fn cell_kinds(chat: &ChatView) -> Vec<&'static str> {
+        chat.cells
+            .iter()
+            .map(|c| match c.cell() {
+                ChatCell::Thinking(_) => "thinking",
+                ChatCell::AssistantMessage(_) => "assistant",
+                ChatCell::ToolCall(_) => "tool_call",
+                ChatCell::Separator => "separator",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_replay_assistant_cell_order_matches_live_stream() {
+        // The projection lists `tool_calls` before `content`, but the live
+        // lane renders in stream order: reasoning → text → tool calls. A text
+        // that announces its tool calls must sit ABOVE them — replaying in
+        // field order put every "now doing X" sentence below its own tool
+        // cards.
+        let mut chat = ChatView::new();
+        let messages = vec![json!({
+            "role": "assistant",
+            "reasoning_content": "let me look",
+            "content": "Reading the file now.",
+            "tool_calls": [{
+                "id": "tc1",
+                "name": "Read",
+                "arguments": {"path": "main.rs"}
+            }]
+        })];
+        replay_messages(&mut chat, &messages);
+
+        assert_eq!(
+            cell_kinds(&chat),
+            vec!["thinking", "assistant", "tool_call"]
+        );
+        assert!(
+            matches!(
+                chat.cells[1].cell(),
+                ChatCell::AssistantMessage(text) if text == "Reading the file now."
+            ),
+            "the announcement must sit directly above the calls it announces"
+        );
+    }
+
+    #[test]
+    fn test_replay_react_separator_lands_between_turns_not_inside_a_message() {
+        // Two turns, each announcing its tool calls in text. The only ReAct
+        // separator is the one before the second turn's thinking block — the
+        // buggy call-then-text order grew a second one between each sentence
+        // and the calls it announced.
+        let mut chat = ChatView::new();
+        let messages = vec![
+            json!({
+                "role": "assistant",
+                "reasoning_content": "turn one",
+                "content": "Listing the directory.",
+                "tool_calls": [{"id": "tc1", "name": "Bash", "arguments": {"command": "ls"}}]
+            }),
+            json!({"role": "tool", "tool_call_id": "tc1", "content": "a.txt"}),
+            json!({
+                "role": "assistant",
+                "reasoning_content": "turn two",
+                "content": "Now reading a.txt.",
+                "tool_calls": [{"id": "tc2", "name": "Read", "arguments": {"path": "a.txt"}}]
+            }),
+        ];
+        replay_messages(&mut chat, &messages);
+
+        assert_eq!(
+            cell_kinds(&chat),
+            vec![
+                "thinking",
+                "assistant",
+                "tool_call",
+                "separator", // turn boundary — before the next turn's thinking
+                "thinking",
+                "assistant",
+                "tool_call",
+            ]
+        );
     }
 
     #[test]

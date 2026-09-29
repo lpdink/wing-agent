@@ -682,6 +682,102 @@ describe('replay == live', () => {
     expect(stableCells(replayCells)).toEqual(stableCells(liveCells));
   });
 
+  it('replays the assistant text above the tool calls it announces (stream order)', async () => {
+    // The projection lists `tool_calls` before `content`, but the live lane
+    // renders in stream order: reasoning → text → tool calls. Replaying in
+    // field order put every "now doing X" sentence below its own tool cards,
+    // with the ReAct separator in between.
+    const live = createHostHarness();
+    teardown.push(live);
+    await live.boot();
+    const liveId = live.gateway.createdOrder[0] ?? '';
+    live.gateway.emit({ type: 'turn_started', session_id: liveId });
+    live.gateway.emit({ type: 'reasoning', content: 'let me look', session_id: liveId });
+    live.gateway.emit(textPayload('Reading the file now.', liveId));
+    live.gateway.emit({
+      type: 'tool_call',
+      tool_name: 'Read',
+      tool_args: { path: 'main.rs' },
+      tool_call_id: 'tc-read',
+      session_id: liveId,
+    });
+    live.gateway.emit({
+      type: 'tool_call_result',
+      tool_name: 'Read',
+      tool_args: { path: 'main.rs' },
+      tool_call_id: 'tc-read',
+      tool_result: 'fn main() {}',
+      tool_success: true,
+      model: 'test-model',
+      session_id: liveId,
+    });
+    await flushMicrotasks();
+
+    const replayed = createHostHarness();
+    teardown.push(replayed);
+    replayed.gateway.seedOnCreate = {
+      messages: [
+        {
+          role: 'assistant',
+          content: 'Reading the file now.',
+          reasoning_content: 'let me look',
+          tool_calls: [{ id: 'tc-read', name: 'Read', arguments: { path: 'main.rs' } }],
+          uuid: 'm1',
+        },
+        { role: 'tool', tool_call_id: 'tc-read', content: 'fn main() {}', uuid: 'm2' },
+      ],
+    };
+    await replayed.boot();
+    await flushMicrotasks();
+
+    const liveCells = live.host.sessionManager.record(liveId)?.cells ?? [];
+    const replayId = replayed.gateway.createdOrder[0] ?? '';
+    const replayCells = replayed.host.sessionManager.record(replayId)?.cells ?? [];
+
+    expect(kinds(liveCells)).toEqual(['thinking', 'assistant', 'tool_call']);
+    expect(kinds(replayCells)).toEqual(kinds(liveCells));
+    expect(stableCells(replayCells)).toEqual(stableCells(liveCells));
+  });
+
+  it('replays the ReAct separator between turns, not inside the announcing message', async () => {
+    // Two turns, each announcing its tool calls in text. The only separator
+    // is the turn boundary — no second one between a sentence and its calls.
+    const replayed = createHostHarness();
+    teardown.push(replayed);
+    replayed.gateway.seedOnCreate = {
+      messages: [
+        {
+          role: 'assistant',
+          content: 'Listing the directory.',
+          reasoning_content: 'turn one',
+          tool_calls: [{ id: 'tc-ls', name: 'Bash', arguments: { command: 'ls' } }],
+          uuid: 'm1',
+        },
+        { role: 'tool', tool_call_id: 'tc-ls', content: 'a.txt', uuid: 'm2' },
+        {
+          role: 'assistant',
+          content: 'Now reading a.txt.',
+          reasoning_content: 'turn two',
+          tool_calls: [{ id: 'tc-read', name: 'Read', arguments: { path: 'a.txt' } }],
+          uuid: 'm3',
+        },
+      ],
+    };
+    await replayed.boot();
+    await flushMicrotasks();
+
+    const id = replayed.gateway.createdOrder[0] ?? '';
+    expect(kinds(replayed.host.sessionManager.record(id)?.cells ?? [])).toEqual([
+      'thinking',
+      'assistant',
+      'tool_call',
+      'separator', // turn boundary — before the next turn's thinking
+      'thinking',
+      'assistant',
+      'tool_call',
+    ]);
+  });
+
   it('keeps the truncated flag of a capped tool result on both lanes', async () => {
     // A 20k result is over this layer's 16k cap but *under* the backend's
     // 100k storage cap, so both lanes see the same text and both must report
