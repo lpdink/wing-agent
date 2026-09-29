@@ -198,7 +198,8 @@ pub enum Command {
         #[arg(short = 'n', long, default_value = "10")]
         n: usize,
         /// Filter by type: all|user|assistant|tool_call|tool_result|reasoning|content
-        /// (tool results print as a 500-char peek; --json prints the stored payload verbatim).
+        /// (named filters strip to the selected section in both text and --json
+        /// output; tool results print as a 500-char peek in text mode).
         #[arg(short = 't', long, default_value = "all")]
         filter: String,
     },
@@ -211,7 +212,8 @@ pub enum Command {
         #[arg(short = 'n', long, default_value = "10")]
         n: usize,
         /// Filter by type: all|user|assistant|tool_call|tool_result|reasoning|content
-        /// (tool results print as a 500-char peek; --json prints the stored payload verbatim).
+        /// (named filters strip to the selected section in both text and --json
+        /// output; tool results print as a 500-char peek in text mode).
         #[arg(short = 't', long, default_value = "all")]
         filter: String,
     },
