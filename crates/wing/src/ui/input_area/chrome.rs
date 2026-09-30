@@ -13,8 +13,19 @@
 //! ╭─ ⠋ Working... (12s) · Esc to interrupt ────────────────────╮
 //! │ ❯ explain the event flow of the gateway                   │
 //! │   and where the resume path hooks in                      │
-//! ╰─ ~/ws/wing · 1.2k in · 340 out · 42.5 t/s ───────── 87% ───╯
+//! ╰─ ~/ws/wing · 1.2k in · 340 out · 42.5 t/s ──────── 87% ───╯
 //! ```
+//!
+//! The card **floats**: it keeps [`CARD_MARGIN`] columns of air on each side
+//! (the layout turns the composer block into [`card_area`] before anything
+//! else looks at it) and its body is filled with the user-message `surface`
+//! tint — the draft reads as the message it is about to become, and the
+//! transcript above stays the only full-bleed thing on screen. The frame
+//! itself has two levels: **quiet** (dark gray) while the card has nothing to
+//! send or another layer owns the keyboard, and **lit** — corners and side
+//! edges in `accent` — while the draft is the composer's to send. A held
+//! keyboard also ghosts the draft, so "typing will not land here" is visible
+//! before a key is pressed.
 //!
 //! **One geometry, one writer.** [`Chrome`] is the single description of where
 //! the card's columns are; the widget, the wrap width, the cursor placement and
@@ -47,6 +58,31 @@ pub const BORDER_ROWS: u16 = 2;
 /// degrades to a bare text area (no borders, no rails) instead of drawing a
 /// box the draft cannot live in.
 const MIN_CARD_WIDTH: u16 = 12;
+/// Columns of air the floating card keeps on each side of its block.
+pub const CARD_MARGIN: u16 = 1;
+/// Width assumed before the first frame is drawn.
+///
+/// Nothing in production reads the chrome of a frame that was never laid out —
+/// the run loop draws before it can deliver a key — but the editor is driven
+/// without one in the tests, and it needs columns to wrap against. 80 is the
+/// width the pre-first-frame geometry falls back to (see
+/// `app::frame::UNFRAMED_WIDTH`, which points here), so "no frame yet" behaves
+/// the same on both sides.
+pub const UNFRAMED_WIDTH: u16 = 80;
+
+/// The card's rect inside the composer block the layout allocated.
+///
+/// **The one place the float happens**: `App::draw` asks the composer for its
+/// height with this rect's width, records this rect as the composer's, and
+/// renders the widget into it — so the height request, the editor's wrap width
+/// and the frame all describe the same columns.
+pub fn card_area(block: Rect) -> Rect {
+    Rect {
+        x: block.x.saturating_add(CARD_MARGIN),
+        width: block.width.saturating_sub(CARD_MARGIN * 2),
+        ..block
+    }
+}
 
 /// Column geometry of a composer laid out into an area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,27 +179,47 @@ impl MetaRail<'_> {
     }
 }
 
-/// Paint the frame: the four borders plus the two rails. The text rows are
-/// left blank for the widget's own pass — this only lays the card down.
+/// Paint the card: the tinted body, the four borders and the two rails. The
+/// text rows are left blank for the widget's own pass.
+///
+/// `lit` is the frame's volume: the corners and the side edges take the accent
+/// (a draft that is the composer's to send), while the rules keep their quiet
+/// gray — a lit silhouette, not a slab of color.
 pub(super) fn paint(
     buf: &mut Buffer,
     area: Rect,
     chrome: Chrome,
     activity: Option<&ActivityRail<'_>>,
     meta: &MetaRail<'_>,
+    lit: bool,
     palette: &ThemePalette,
 ) {
     if !chrome.card {
         return;
     }
     let dim = Style::default().fg(palette.dim);
+    let edge = if lit {
+        Style::default().fg(palette.accent)
+    } else {
+        dim
+    };
     let top_y = area.y;
     let bottom_y = area.bottom() - 1;
 
+    // Body: the user-message tint, whole block (borders included), so the card
+    // reads as one surface. Content painted after this keeps it: every span
+    // below sets a foreground only, and `Cell::set_style` merges.
+    let tint = Style::default().bg(palette.surface);
+    for y in top_y..area.bottom() {
+        for x in area.x..area.right() {
+            buf[(x, y)].set_style(tint);
+        }
+    }
+
     // Vertical borders, every text row.
     for y in (top_y + 1)..bottom_y {
-        buf.set_span(area.x, y, &Span::styled("│", dim), 1);
-        buf.set_span(area.right() - 1, y, &Span::styled("│", dim), 1);
+        buf.set_span(area.x, y, &Span::styled("│", edge), 1);
+        buf.set_span(area.right() - 1, y, &Span::styled("│", edge), 1);
     }
 
     // Top border: the activity rail (or a plain rule while idle).
@@ -179,6 +235,7 @@ pub(super) fn paint(
             right_corner: '╮',
             items: activity_items,
             right: Vec::new(),
+            corner_style: edge,
         },
         palette,
     );
@@ -195,6 +252,7 @@ pub(super) fn paint(
             right_corner: '╯',
             items,
             right,
+            corner_style: edge,
         },
         palette,
     );
@@ -208,6 +266,8 @@ struct RailLine {
     items: Vec<Vec<Span<'static>>>,
     /// Trailing read-out, kept whole (it is short and it is reserved first).
     right: Vec<Span<'static>>,
+    /// Style of the two corner glyphs — the card's edge color.
+    corner_style: Style,
 }
 
 /// Render one border row: `╭─ <items> ───── <right> ─╮`.
@@ -224,29 +284,18 @@ fn rail(buf: &mut Buffer, area: Rect, y: u16, line: RailLine, palette: &ThemePal
         right_corner,
         items,
         right,
+        corner_style,
     } = line;
-    let width = area.width as usize;
-    if width == 0 {
-        return;
-    }
     let dim = Style::default().fg(palette.dim);
-    if width < 3 {
-        // Degenerate: not even a corner pair fits — draw what does.
-        let text: String = std::iter::once(left_corner)
-            .chain(std::iter::once(right_corner))
-            .take(width)
-            .collect();
-        buf.set_span(area.x, y, &Span::styled(text, dim), width as u16);
-        return;
-    }
-
-    // Inner width, minus the two corners.
-    let inner = width - 2;
+    // Inner width, minus the two corners. Saturating throughout: the caller
+    // draws rails only for a card (>= MIN_CARD_WIDTH), and a squeezed one must
+    // still stay inside its own row rather than underflow.
+    let inner = (area.width as usize).saturating_sub(2);
     // `─ ` … ` ` on the left, ` ` … ` ─` on the right: 3 cells of framing.
     const FRAME: usize = 3;
 
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(items.len() * 2 + right.len() + 4);
-    spans.push(Span::styled(left_corner.to_string(), dim));
+    spans.push(Span::styled(left_corner.to_string(), corner_style));
 
     // The right block first: it is short, and losing it would lose the scroll
     // read-out that is the whole point of reporting the position here.
@@ -292,7 +341,7 @@ fn rail(buf: &mut Buffer, area: Rect, y: u16, line: RailLine, palette: &ThemePal
         spans.extend(right);
         spans.push(Span::styled(" ─", dim));
     }
-    spans.push(Span::styled(right_corner.to_string(), dim));
+    spans.push(Span::styled(right_corner.to_string(), corner_style));
 
     let mut x = area.x;
     for span in spans {
@@ -386,7 +435,7 @@ fn meta_spans(
             Style::default().fg(palette.accent),
         )]);
     }
-    items.extend(meta.usage.items());
+    items.extend(meta.usage.items(palette));
     if meta.total_lines > 0 && meta.visible_height < meta.total_lines {
         let pos = format!(
             "{}/{}",
@@ -408,12 +457,9 @@ fn scroll_percent(meta: &MetaRail<'_>) -> Option<u8> {
     if meta.total_lines == 0 || meta.visible_height >= meta.total_lines {
         return None;
     }
+    // Overflowing by construction (the guard above): `max_scroll >= 1`.
     let max_scroll = meta.total_lines - meta.visible_height;
-    Some(if max_scroll == 0 {
-        100
-    } else {
-        ((meta.scroll_offset.min(max_scroll) as f32 / max_scroll as f32) * 100.0).round() as u8
-    })
+    Some(((meta.scroll_offset.min(max_scroll) as f32 / max_scroll as f32) * 100.0).round() as u8)
 }
 
 /// `$HOME/…` → `~/…` (the path the rail shows, not the one the session uses).
@@ -498,7 +544,15 @@ mod tests {
             visible_height: 0,
             scroll_offset: 0,
         };
-        paint(&mut buf, area, Chrome::of(area), None, &meta, &palette());
+        paint(
+            &mut buf,
+            area,
+            Chrome::of(area),
+            None,
+            &meta,
+            false,
+            &palette(),
+        );
 
         let top = row_text(&buf, 0);
         assert_eq!(
@@ -555,6 +609,7 @@ mod tests {
             Chrome::of(area),
             Some(&activity),
             &bare(&usage),
+            false,
             &palette(),
         );
         let top = row_text(&buf, 0);
@@ -581,6 +636,7 @@ mod tests {
             Chrome::of(area),
             Some(&activity),
             &bare(&usage),
+            false,
             &palette(),
         );
         for y in 0..3 {
@@ -590,6 +646,110 @@ mod tests {
         let top = row_text(&buf, 0);
         assert!(top.starts_with('╭'), "{top}");
         assert!(top.ends_with('╮'), "{top}");
+    }
+
+    /// The meta rail with every number a turn can report.
+    fn busy_rail(usage: &TurnUsage) -> MetaRail<'_> {
+        MetaRail {
+            workdir: Some("/Users/someone/ws/wing".into()),
+            usage,
+            total_lines: 200,
+            visible_height: 20,
+            scroll_offset: 90,
+        }
+    }
+
+    fn busy_usage() -> TurnUsage {
+        TurnUsage {
+            prompt_tokens: 1200,
+            completion_tokens: 340,
+            cached_tokens: 800,
+            tokens_per_sec: 42.5,
+            ttft_ms: 320.0,
+        }
+    }
+
+    /// Paint just the bottom border and return it as text.
+    fn meta_row(width: u16, meta: &MetaRail<'_>) -> String {
+        let area = Rect::new(0, 0, width, 3);
+        let mut buf = Buffer::empty(area);
+        paint(
+            &mut buf,
+            area,
+            Chrome::of(area),
+            None,
+            meta,
+            false,
+            &palette(),
+        );
+        row_text(&buf, 2)
+    }
+
+    #[test]
+    fn meta_items_are_dropped_whole_when_the_border_runs_out() {
+        let usage = busy_usage();
+        let meta = busy_rail(&usage);
+
+        // Wide enough for everything: the workdir, all five numbers and both
+        // ends of the scroll read-out.
+        let wide = meta_row(120, &meta);
+        for expected in [
+            "/Users/someone/ws/wing",
+            "1.2k in",
+            "340 out",
+            "66.7% cache",
+            "42.5 t/s",
+            "320ms ttft",
+            "110/200",
+            "50%",
+        ] {
+            assert!(wide.contains(expected), "missing {expected:?} in:\n{wide}");
+        }
+
+        // Narrower: whole items leave from the tail, most expendable first,
+        // and the separator goes with them — never a dangling ` · `.
+        let narrow = meta_row(74, &meta);
+        assert!(!narrow.contains("ttft"), "{narrow}");
+        assert!(!narrow.contains(" · ╯"), "no dangling separator:\n{narrow}");
+
+        // Narrower still: the trailing percentage survives every cut (it is
+        // reserved before the leading items are laid out).
+        for width in [30, 40, 50, 60] {
+            let row = meta_row(width, &meta);
+            assert!(
+                row.contains('%') && row.ends_with("─╯"),
+                "width {width} loses the scroll read-out:\n{row}"
+            );
+            assert_eq!(row.chars().count(), width as usize, "width {width}: {row}");
+        }
+
+        // At 20 columns only the workdir (clipped to the room the reserved
+        // percentage leaves) and that percentage remain.
+        let tiny = meta_row(20, &meta);
+        assert_eq!(tiny, "╰─ /Users/so  50% ─╯");
+    }
+
+    #[test]
+    fn the_rail_only_keeps_what_fits_whole() {
+        let usage = TurnUsage {
+            prompt_tokens: 900,
+            ..TurnUsage::default()
+        };
+        let meta = MetaRail {
+            workdir: None,
+            usage: &usage,
+            total_lines: 0,
+            visible_height: 0,
+            scroll_offset: 0,
+        };
+        // Inner room = width - 2 - 3 (framing): the item fits at 14 columns,
+        // and at the minimum card width it is clipped rather than dropped —
+        // the leading item is the rail's subject, not a number among many.
+        assert!(meta_row(14, &meta).starts_with("╰─ 900 in"));
+        assert!(
+            meta_row(MIN_CARD_WIDTH, &meta).starts_with("╰─ 900"),
+            "clipped"
+        );
     }
 
     #[test]
@@ -603,6 +763,7 @@ mod tests {
             Chrome::of(area),
             None,
             &bare(&usage),
+            false,
             &palette(),
         );
         let top = row_text(&buf, 0);

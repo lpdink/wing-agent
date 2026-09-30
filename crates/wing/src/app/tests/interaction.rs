@@ -447,10 +447,10 @@ fn test_composer_drag_selects_and_copies_the_draft() {
 
 #[test]
 fn test_composer_drag_across_a_soft_wrap_copies_one_line() {
-    // Width 24 → a text area of 18 columns (the card's frame takes 6): 24
-    // characters fold into two visual rows (18 + 6).
+    // Width 26 → a text area of 18 columns (the float takes 2, the card's
+    // frame 6): 24 characters fold into two visual rows (18 + 6).
     let mut app = app_with_draft("abcdefghijklmnopqrstuvwx");
-    let mut terminal = test_terminal(24, 12);
+    let mut terminal = test_terminal(26, 12);
     draw(&mut app, &mut terminal);
     let (tx, ty, rows) = composer_text(&app);
     assert_eq!(rows, 2, "the draft wraps into two visual rows");
@@ -484,10 +484,10 @@ fn test_composer_drag_across_a_soft_wrap_copies_one_line() {
 
 #[test]
 fn test_composer_drag_beyond_the_region_clamps_to_the_visible_window() {
-    // Width 24 → a text area of 18 columns (the card's frame takes 6): 24
-    // characters fold into two visual rows (18 + 6).
+    // Width 26 → a text area of 18 columns (the float takes 2, the card's
+    // frame 6): 24 characters fold into two visual rows (18 + 6).
     let mut app = app_with_draft("abcdefghijklmnopqrstuvwx");
-    let mut terminal = test_terminal(24, 12);
+    let mut terminal = test_terminal(26, 12);
     draw(&mut app, &mut terminal);
     let (tx, ty, rows) = composer_text(&app);
     assert_eq!(rows, 2);
@@ -502,6 +502,38 @@ fn test_composer_drag_beyond_the_region_clamps_to_the_visible_window() {
     match app.drain_intents().as_slice() {
         [AppIntent::CopyToClipboard(text)] => assert_eq!(text, "cdefghijklmnopqrstu"),
         other => panic!("expected the clamped draft fragment, got {other:?}"),
+    }
+}
+
+/// A gesture that started in the draft keeps meaning the draft when the
+/// pointer overshoots onto the card's own frame: the border is not text, but
+/// it is not a hole either — releasing on it must still finish the selection
+/// (a drag that never leaves the card is the common case, and the card is
+/// only three rows tall for a one-line draft).
+#[test]
+fn test_composer_release_on_the_card_frame_still_copies() {
+    let mut app = app_with_draft("hello world");
+    let mut terminal = test_terminal(40, 12);
+    draw(&mut app, &mut terminal);
+    let composer = app.input.rendered_area();
+    let (tx, ty, _rows) = composer_text(&app);
+
+    for (label, row) in [
+        ("the meta rail", composer.bottom() - 1),
+        ("the top rail", composer.y),
+        ("above the card", composer.y - 1),
+        ("below the card", composer.bottom()),
+    ] {
+        app.selection = Default::default();
+        app.handle_mouse(press((tx, ty)));
+        app.handle_mouse(drag((tx + 4, row)));
+        app.handle_mouse(release((tx + 4, row)));
+        match app.drain_intents().as_slice() {
+            [AppIntent::CopyToClipboard(text)] => {
+                assert_eq!(text, "hello", "{label}: the selection survived")
+            }
+            other => panic!("{label}: expected the draft fragment, got {other:?}"),
+        }
     }
 }
 

@@ -40,11 +40,12 @@ use crate::ui::scrollbar::ScrollbarGeometry;
 /// The run loop draws before it can deliver a key or a mouse event, so nothing
 /// in production reads the geometry of a frame that was never drawn. The
 /// composer's editor is driven without one in the tests, though, and it needs a
-/// width to wrap against; 80 is the value the field this type replaced started
-/// with, kept so those tests keep describing the same editor. It only ever
-/// fills [`FrameGeometry::width`]: the assumed frame's height is not read by
-/// any query (see [`FrameGeometry::default`]).
-const UNFRAMED_WIDTH: u16 = 80;
+/// width to wrap against — the same assumption lives in
+/// [`crate::ui::input_area::chrome::UNFRAMED_WIDTH`], which the editor reads
+/// for itself, so both sides of "no frame yet" describe one editor. It only
+/// ever fills [`FrameGeometry::width`]: the assumed frame's height is not read
+/// by any query (see [`FrameGeometry::default`]).
+const UNFRAMED_WIDTH: u16 = crate::ui::input_area::chrome::UNFRAMED_WIDTH;
 
 /// Geometry of the last drawn frame (`Default` = nothing drawn yet).
 ///
@@ -58,7 +59,7 @@ pub(super) struct FrameGeometry {
     /// scrollbar gutter (the bar paints and hit-tests over this rect; the chat
     /// widget itself renders into the band minus the gutter).
     chat_band: Rect,
-    /// The composer block (input area) of the last frame.
+    /// The composer's card (the floating block's frame) of the last frame.
     composer: Rect,
 }
 

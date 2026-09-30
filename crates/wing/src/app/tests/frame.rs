@@ -83,7 +83,11 @@ fn test_draw_records_the_frame_it_laid_out() {
     // Composer: the contract's block *is* the rect the widget recorded for
     // itself — the claim and the pointer mapping read the same screen.
     assert_eq!(composer, app.input.rendered_area());
-    assert_eq!(composer.width, 80);
+    assert_eq!(
+        (composer.x, composer.width),
+        (crate::ui::input_area::chrome::CARD_MARGIN, 80 - 2),
+        "the card floats inside its block: one column of air on each side"
+    );
     for (x, y) in [
         (composer.x, composer.y),
         (composer.right() - 1, composer.bottom() - 1),

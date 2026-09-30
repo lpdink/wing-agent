@@ -29,6 +29,8 @@ pub struct ComposerWidget<'a> {
     /// Top rail content: `None` while idle (the border is then a plain rule).
     activity: Option<ActivityRail<'a>>,
     meta: MetaRail<'a>,
+    /// Whether another layer owns the keyboard (see [`Self::keyboard_held`]).
+    keyboard_held: bool,
 }
 
 impl<'a> ComposerWidget<'a> {
@@ -43,7 +45,17 @@ impl<'a> ComposerWidget<'a> {
             palette,
             activity,
             meta,
+            keyboard_held: false,
         }
+    }
+
+    /// A panel (ask / model picker) owns the keyboard: the draft is frozen
+    /// behind it, so the card *ghosts* — the text goes quiet, nothing promises
+    /// that typing lands here — instead of looking ready for a keystroke it
+    /// will never get.
+    pub fn keyboard_held(mut self, held: bool) -> Self {
+        self.keyboard_held = held;
+        self
     }
 }
 
@@ -65,18 +77,30 @@ impl Widget for ComposerWidget<'_> {
         let vis_rows = wrap::build_visual_rows(&self.input.lines, text_area_w.max(1));
 
         // Update vertical scroll.
-        self.input
-            .update_vertical_scroll(chrome.text_rows, area.width);
+        self.input.update_vertical_scroll(chrome);
 
-        // The frame first: the draft is painted into the rows it leaves.
+        // The frame first: the draft is painted into the rows it leaves. The
+        // card is *lit* while the draft is the composer's to send — a held
+        // keyboard or an empty draft leaves it quiet.
+        let lit = !self.keyboard_held && !self.input.is_empty();
         chrome::paint(
             buf,
             area,
             chrome,
             self.activity.as_ref(),
             &self.meta,
+            lit,
             self.palette,
         );
+
+        // A held draft is not editable right now: it is drawn the way the
+        // chat draws text that is not active (dim), so the state is visible
+        // without a word of explanation.
+        let draft_style = if self.keyboard_held {
+            Style::default().fg(self.palette.dim)
+        } else {
+            Style::default().fg(self.palette.text)
+        };
 
         let first_row_y = area.y + chrome.top_row();
         let visible_rows = chrome.text_rows as usize;
@@ -92,10 +116,10 @@ impl Widget for ComposerWidget<'_> {
             // logical line only; every other row keeps the text alignment.
             // It lights up as soon as there is something to send.
             if chrome.card && vr.logical_line == 0 && vr.char_start == 0 {
-                let style = if self.input.is_empty() {
-                    Style::default().fg(self.palette.dim)
-                } else {
+                let style = if lit {
                     Style::default().fg(self.palette.accent)
+                } else {
+                    Style::default().fg(self.palette.dim)
                 };
                 buf.set_span(
                     area.x + chrome::PROMPT_X,
@@ -138,10 +162,10 @@ impl Widget for ComposerWidget<'_> {
 
             let clipped = truncate_by_width(vis_text, text_area_w);
 
-            let style = if is_placeholder_line(line_text) {
+            let style = if is_placeholder_line(line_text) && !self.keyboard_held {
                 Style::default().fg(self.palette.accent)
             } else {
-                Style::default().fg(self.palette.text)
+                draft_style
             };
 
             buf.set_line(

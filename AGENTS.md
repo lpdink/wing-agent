@@ -159,7 +159,7 @@ crates/wing/src/
 │   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存
 │   ├── panel.rs                     选择面板共享渲染（窗口数学取自 shared/panels 内核）
 │   ├── header.rs / status_bar.rs / spinner.rs / toast.rs
-│   ├── input_area/                  Composer 卡片（chrome 边框·活动栏·元信息栏 / widget / editing / movement / wrap / 指针映射与高亮 pointer / paste / helpers）
+│   ├── input_area/                  Composer 悬浮卡片（chrome：悬浮几何·底色·活动栏·元信息栏 / widget / editing / movement / wrap / 指针映射与高亮 pointer / paste / helpers）
 │   ├── popup/                       command（斜杠命令 + 候选项）/ selection（通用可选列表）
 │   └── cells/                       Chat cell 渲染（tool_call / thinking / todo_msg / ask_msg / diff_view / model_picker）
 ├── render/                          Markdown + 语法高亮

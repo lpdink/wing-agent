@@ -369,14 +369,18 @@ impl App {
                 self.cancel_selection();
             }
 
-            // Layout: status (1) | chat (fill) | composer card | [popup].
+            // Layout: status (1) | chat (fill) | composer block | [popup].
             // The composer is a fixed block below the scrollable chat
             // viewport — it stays in view regardless of the chat scroll
             // position. The card carries the frame, the draft and both rails
             // (activity + meta): the rows the working indicator and the info
             // separator used to take are inside it, so a running turn costs no
-            // row at all.
-            let composer_h = self.input.height(area.width);
+            // row at all. The card *floats* inside its block (see
+            // `chrome::card_area`), so the height is asked for in the columns
+            // the card will really get — the request and the wrapping it
+            // produces have to describe the same frame.
+            let card_w = crate::ui::input_area::chrome::card_area(area).width;
+            let composer_h = self.input.height(card_w);
             let popup_h = self.popup.height();
             let mut constraints = vec![
                 Constraint::Length(1),          // status bar
@@ -456,20 +460,23 @@ impl App {
                 visible_height: chat_height as usize,
                 scroll_offset: self.chat.scroll_position(),
             };
-            let input_rect = chunks[2];
+            let input_rect = crate::ui::input_area::chrome::card_area(chunks[2]);
+            let keyboard_held = self.composer_typing_blocked();
             self.geometry.record_composer(input_rect);
             frame.render_widget(
-                ComposerWidget::new(&mut self.input, &palette, activity, meta),
+                ComposerWidget::new(&mut self.input, &palette, activity, meta)
+                    .keyboard_held(keyboard_held),
                 input_rect,
             );
 
-            // Pop-down command popup (below the composer).
+            // Pop-down command popup — below the composer and floated with it,
+            // so the list hangs off the card instead of the screen edge.
             if popup_h > 0
                 && let Some((rows, state, filter)) = self.popup.active.render_data()
             {
                 frame.render_widget(
                     SelectionPopup::new(rows, state, filter, &palette),
-                    chunks[3],
+                    crate::ui::input_area::chrome::card_area(chunks[3]),
                 );
             }
 

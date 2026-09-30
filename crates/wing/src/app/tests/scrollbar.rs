@@ -550,9 +550,8 @@ fn scrolling_linked_cjk_keeps_the_terminal_in_step() {
 
 // ── Overlay scrollbar: whole-frame checks through a real Terminal ────
 
-/// The frame as text (one line per row), for assertion messages.
-/// Bar glyphs are unambiguous outside the chat (`│` is shared with every
-/// border, `┃` / `█` are not).
+/// Bar glyphs that no other widget draws: `│` is shared with every border
+/// (the composer card's included), `┃` / `█` are the bar's alone.
 fn is_bar_glyph(symbol: &str) -> bool {
     matches!(symbol, "┃" | "█")
 }
@@ -596,10 +595,17 @@ fn test_draw_paints_the_scrollbar_only_on_the_chat_areas_last_column() {
             frame_text(&buf)
         );
     }
-    // …the composer rows below it keep their own content (the card's rounded
-    // corner closes the row, it does not carry the bar)…
+    // …the composer rows below it keep their own content (the floating card's
+    // rounded corner closes the row, it does not carry the bar)…
     assert_eq!(
         buf[(column, chat.bottom())].symbol(),
+        " ",
+        "the card's right margin, not the bar\n{}",
+        frame_text(&buf)
+    );
+    let composer = app.geometry.composer_rect();
+    assert_eq!(
+        buf[(composer.right() - 1, composer.y)].symbol(),
         "╮",
         "the composer's top border\n{}",
         frame_text(&buf)

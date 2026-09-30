@@ -57,11 +57,14 @@ impl ComposerHit {
 /// Resolve a screen position into the composer's visual *and* logical
 /// coordinates.
 ///
-/// The pointer is clamped (not rejected): the row is clamped into the visible
-/// window and then into the visual-row list, and the column saturates at the
-/// text area's left edge — so a drag that leaves the composer keeps producing
-/// meaningful positions, exactly like the chat band's mapping. `None` before
-/// the first frame (no rect yet) or when the rect is collapsed.
+/// The pointer is **clamped, never rejected** (except by the frame itself —
+/// see [`press_hit`]): a point on the card's rails and a point outside the
+/// composer alike resolve to the nearest text row, the row is clamped into the
+/// visible window and then into the visual-row list, and the column saturates
+/// at the text area's left edge — so a drag that leaves the region keeps
+/// producing meaningful positions, exactly like the chat band's mapping.
+/// `None` only before the first frame (no rect yet) or when the rect is
+/// collapsed.
 pub fn hit(input: &InputArea, area: Rect, column: u16, row: u16) -> Option<ComposerHit> {
     if area.width == 0 || area.height == 0 {
         return None;
@@ -72,20 +75,16 @@ pub fn hit(input: &InputArea, area: Rect, column: u16, row: u16) -> Option<Compo
     let vis_rows = wrap::build_visual_rows(&input.lines, text_width.max(1));
     let last = vis_rows.len().checked_sub(1)?;
 
-    // A pointer *outside* the composer clamps into its text band (a drag that
-    // leaves the region keeps producing positions — the chat band's contract);
-    // a pointer *on* the card's rails is nobody's, so a click on the frame is
-    // inert instead of dropping a cursor under it.
-    let row_in_area = if row < area.y {
+    // Rows on the rails and rows off the card both clamp into the text band:
+    // the frame is not text, but a pointer that crosses it still *means* a
+    // position in the draft (a release on the border must not throw the
+    // selection away).
+    let row_in_area = if row < area.y + chrome.top_row() {
         chrome.top_row()
-    } else if row >= area.bottom() {
+    } else if row >= area.bottom() - u16::from(chrome.card) {
         area.height - 1 - u16::from(chrome.card)
     } else {
-        let row = row - area.y;
-        if chrome.card && (row == 0 || row >= area.height - 1) {
-            return None;
-        }
-        row
+        row - area.y
     };
     let visible = row_in_area.saturating_sub(chrome.top_row()) as usize;
     let vis_row = (input.vertical_scroll + visible).min(last);
@@ -100,6 +99,22 @@ pub fn hit(input: &InputArea, area: Rect, column: u16, row: u16) -> Option<Compo
         point: SelectionPoint::composer(row.logical_line, col as u16),
         on_char: col < row.char_end,
     })
+}
+
+/// Resolve a **press** into the composer, rejecting the card's frame.
+///
+/// The composer is claimed by its whole block (see `PointerOwner::Composer`),
+/// but the frame is not text: a press that lands on a rail does nothing — no
+/// cursor, no selection — instead of dropping a cursor under a border the user
+/// aimed at. Drags and releases go through [`hit`], which clamps: a gesture
+/// that *started* in the draft keeps meaning the draft even when the pointer
+/// overshoots onto the border.
+pub fn press_hit(input: &InputArea, area: Rect, column: u16, row: u16) -> Option<ComposerHit> {
+    let chrome = Chrome::of(area);
+    if chrome.card && (row < area.y + chrome.top_row() || row >= area.bottom() - 1) {
+        return None;
+    }
+    hit(input, area, column, row)
 }
 
 /// Logical position for a press / click (no character snapping).
@@ -274,8 +289,7 @@ mod tests {
         assert!(!found.on_char);
     }
 
-    #[test]
-    fn test_hit_clamps_the_left_edge_and_ignores_the_frame() {
+    fn test_hit_clamps_the_left_edge() {
         let mut input = InputArea::new("");
         input.set_text("hi");
         let area = composer_area(24, 1);
@@ -286,12 +300,37 @@ mod tests {
             assert_eq!(found.display_col, 0);
             assert_eq!(found.point, SelectionPoint::composer(0, 0));
         }
-        // The rails are not text: a press on them is nobody's.
-        assert!(hit(&input, area, 5, area.y).is_none(), "top rail");
+    }
+
+    #[test]
+    fn test_hit_clamps_the_rails_but_a_press_does_not() {
+        let mut input = InputArea::new("");
+        input.set_text("hi");
+        let area = composer_area(24, 1);
+        let (top, bottom) = (area.y, area.bottom() - 1);
+
+        // The mapping never rejects: a gesture that crosses the frame still
+        // means a position in the draft (a release on the border must not
+        // throw the selection away) — the top rail resolves to the first text
+        // row, the meta rail to the last one.
+        let found = hit(&input, area, TEXT_X, top).expect("clamped onto the top rail");
+        assert_eq!(found.vis_row, 0);
+        assert_eq!(found.point, SelectionPoint::composer(0, 0));
+        let found = hit(&input, area, 25, bottom).expect("clamped onto the meta rail");
+        assert_eq!(
+            found.point,
+            SelectionPoint::composer(0, 2),
+            "the row is kept, the column past the text lands on the row end"
+        );
+
+        // A *press* on the rails is nobody's: the frame is not text, so it
+        // places no cursor and starts no selection.
+        assert!(press_hit(&input, area, TEXT_X, top).is_none(), "top rail");
         assert!(
-            hit(&input, area, 5, area.bottom() - 1).is_none(),
+            press_hit(&input, area, TEXT_X, bottom).is_none(),
             "meta rail"
         );
+        assert!(press_hit(&input, area, TEXT_X, TEXT_Y).is_some());
     }
 
     #[test]
@@ -307,7 +346,7 @@ mod tests {
         // With a scrolled window the screen row is an offset into it.
         let mut input = InputArea::with_max_lines(String::new(), 2);
         input.set_text("one\ntwo\nthree");
-        input.update_vertical_scroll(2, area.width);
+        input.update_vertical_scroll(Chrome::of(area));
         assert_eq!(input.vertical_scroll, 1);
         let found = hit(&input, area, TEXT_X + 2, TEXT_Y + 1).expect("second window row");
         assert_eq!(found.vis_row, 2);

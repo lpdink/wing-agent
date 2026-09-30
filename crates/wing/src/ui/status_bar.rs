@@ -280,12 +280,14 @@ impl TurnUsage {
     ///
     /// The composer's meta rail joins them with ` · ` and drops whole entries
     /// from the tail when the border runs out of room — so the order below is
-    /// also the order things disappear in on a narrow terminal.
-    pub fn items(&self) -> Vec<Vec<Span<'static>>> {
+    /// also the order things disappear in on a narrow terminal. The entries
+    /// take the palette's secondary color, exactly like the rail's own rules
+    /// and read-outs: one row, one idea of "quiet".
+    pub fn items(&self, palette: &crate::config::ThemePalette) -> Vec<Vec<Span<'static>>> {
         if self.is_empty() {
             return Vec::new();
         }
-        let dim = Style::default().add_modifier(Modifier::DIM);
+        let dim = Style::default().fg(palette.dim);
         let mut items: Vec<Vec<Span<'static>>> = Vec::new();
 
         items.push(vec![Span::styled(
@@ -333,7 +335,11 @@ mod tests {
     fn test_turn_usage_empty() {
         let usage = TurnUsage::default();
         assert!(usage.is_empty());
-        assert!(usage.items().is_empty());
+        assert!(
+            usage
+                .items(&crate::config::ThemePalette::default())
+                .is_empty()
+        );
     }
 
     #[test]
@@ -346,7 +352,7 @@ mod tests {
             ttft_ms: 320.0,
         };
         let items: Vec<String> = usage
-            .items()
+            .items(&crate::config::ThemePalette::default())
             .iter()
             .map(|item| item.iter().map(|s| s.content.as_ref()).collect())
             .collect();
@@ -371,7 +377,7 @@ mod tests {
             ..TurnUsage::default()
         };
         let items: Vec<String> = usage
-            .items()
+            .items(&crate::config::ThemePalette::default())
             .iter()
             .map(|item| item.iter().map(|s| s.content.as_ref()).collect())
             .collect();

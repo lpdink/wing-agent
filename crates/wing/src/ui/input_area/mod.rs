@@ -110,6 +110,21 @@ impl InputArea {
         self.rendered_area
     }
 
+    /// The chrome of the composer as it was last laid out.
+    ///
+    /// Everything that wraps or maps the draft reads *this*, never the width
+    /// the layout asked for: a composer the terminal squeezed is drawn with
+    /// the chrome of the area it actually got, and the editor has to re-wrap
+    /// with the same columns the screen shows.
+    pub fn chrome(&self) -> Chrome {
+        if self.rendered_area.width == 0 {
+            // No frame yet: the assumed width, not a collapsed canvas (see
+            // [`chrome::UNFRAMED_WIDTH`]).
+            return Chrome::for_width(chrome::UNFRAMED_WIDTH);
+        }
+        Chrome::of(self.rendered_area)
+    }
+
     /// Screen position of the text area's first cell in the last frame —
     /// inside the card's frame, right of the prompt glyph.
     pub fn text_origin(&self) -> (u16, u16) {
@@ -121,6 +136,11 @@ impl InputArea {
     }
 
     /// Desired height for layout (the card's frame + its visual rows).
+    ///
+    /// `available_width` is the width of the **card** (see
+    /// [`chrome::card_area`]) — the request has to be made in the columns the
+    /// card will really be laid out into, or the frame it asks for does not
+    /// match the wrapping it will get.
     pub fn height(&self, available_width: u16) -> u16 {
         let chrome = Chrome::for_width(available_width);
         let text_width = chrome.text_width as usize;
@@ -159,7 +179,7 @@ impl InputArea {
     // ── Key event handling ──────────────────────────────────────
 
     /// Handle a key event, returning the desired action.
-    pub fn handle_key(&mut self, key: KeyEvent, available_width: u16) -> InputAction {
+    pub fn handle_key(&mut self, key: KeyEvent, chrome: Chrome) -> InputAction {
         let mods = key.modifiers;
         let has_shift = mods.contains(KeyModifiers::SHIFT);
         let has_alt = mods.contains(KeyModifiers::ALT);
@@ -215,11 +235,11 @@ impl InputArea {
                 InputAction::None
             }
             KeyCode::Up => {
-                self.move_up(available_width);
+                self.move_up(chrome);
                 InputAction::None
             }
             KeyCode::Down => {
-                self.move_down(available_width);
+                self.move_down(chrome);
                 InputAction::None
             }
             KeyCode::Home => {
@@ -268,15 +288,15 @@ impl InputArea {
     // ── Scroll management ───────────────────────────────────────
 
     /// Update vertical scroll to keep cursor's visual row visible.
-    pub(crate) fn update_vertical_scroll(&mut self, visible_height: u16, available_width: u16) {
-        let h = visible_height as usize;
+    pub(crate) fn update_vertical_scroll(&mut self, chrome: Chrome) {
+        let h = chrome.text_rows as usize;
         if h == 0 {
             return;
         }
-        // Same expression the widget renders (and the pointer mapping resolves)
-        // with: a collapsed text area still wraps at one column, so the window
-        // this computes describes the rows that were really drawn.
-        let text_width = (Chrome::for_width(available_width).text_width as usize).max(1);
+        // The rendered chrome's own width: the window this computes describes
+        // the rows that were really drawn (a collapsed text area still wraps at
+        // one column).
+        let text_width = (chrome.text_width as usize).max(1);
         let vis_rows = wrap::build_visual_rows(&self.lines, text_width);
         let (vis_row, _) = wrap::logical_to_visual(&vis_rows, self.cursor_row, self.cursor_col);
 
@@ -295,15 +315,14 @@ impl InputArea {
     /// full visual-row list [`wrap::build_visual_rows`] produces (a row below
     /// the last one clamps to it), and `vis_col` is a **display column** inside
     /// the text area — `0` is the first cell after the prompt glyph, and a
-    /// value past the row's text lands on that row's end. `available_width` is
-    /// the same width the widget is rendered with (`ComposerWidget`'s
-    /// `area.width`, the card's frame included), so the wrapping matches the
+    /// value past the row's text lands on that row's end. `chrome` is the one
+    /// the widget rendered with ([`Self::chrome`]), so the wrapping matches the
     /// screen exactly.
     ///
     /// The mapping is char-granular (see [`wrap::display_col_to_char`]): a
     /// pointer on a wide character resolves to the position *before* it.
-    pub fn set_cursor_from_visual(&mut self, available_width: u16, vis_row: usize, vis_col: u16) {
-        let text_width = Chrome::for_width(available_width).text_width as usize;
+    pub fn set_cursor_from_visual(&mut self, chrome: Chrome, vis_row: usize, vis_col: u16) {
+        let text_width = chrome.text_width as usize;
         let vis_rows = wrap::build_visual_rows(&self.lines, text_width.max(1));
         let Some(last) = vis_rows.len().checked_sub(1) else {
             return;
@@ -368,6 +387,12 @@ mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
 
+    /// The chrome of a `width`-column card — what the tests hand the editor.
+    /// Same columns as a real area of that width: one text row, frame included.
+    fn chrome(width: u16) -> Chrome {
+        Chrome::for_width(width)
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -422,8 +447,8 @@ mod tests {
     #[test]
     fn insert_char_basic() {
         let mut input = InputArea::new("");
-        input.handle_key(key(KeyCode::Char('h')), 80);
-        input.handle_key(key(KeyCode::Char('i')), 80);
+        input.handle_key(key(KeyCode::Char('h')), chrome(80));
+        input.handle_key(key(KeyCode::Char('i')), chrome(80));
         assert_eq!(input.text(), "hi");
     }
 
@@ -433,7 +458,7 @@ mod tests {
         input.set_text("hello world");
         input.cursor_row = 0;
         input.cursor_col = 5;
-        input.handle_key(key_with(KeyCode::Enter, KeyModifiers::SHIFT), 80);
+        input.handle_key(key_with(KeyCode::Enter, KeyModifiers::SHIFT), chrome(80));
         assert_eq!(input.lines(), ["hello", " world"]);
         assert_eq!(input.cursor_row, 1);
         assert_eq!(input.cursor_col, 0);
@@ -443,7 +468,7 @@ mod tests {
     fn insert_newline_at_end() {
         let mut input = InputArea::new("");
         input.set_text("hello");
-        input.handle_key(key_with(KeyCode::Enter, KeyModifiers::ALT), 80);
+        input.handle_key(key_with(KeyCode::Enter, KeyModifiers::ALT), chrome(80));
         assert_eq!(input.lines(), ["hello", ""]);
         assert_eq!(input.cursor_row, 1);
         assert_eq!(input.cursor_col, 0);
@@ -454,7 +479,10 @@ mod tests {
         let mut input = InputArea::new("");
         input.set_text("hello");
         input.cursor_col = 0;
-        input.handle_key(key_with(KeyCode::Char('j'), KeyModifiers::CONTROL), 80);
+        input.handle_key(
+            key_with(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            chrome(80),
+        );
         assert_eq!(input.lines(), ["", "hello"]);
         assert_eq!(input.cursor_row, 1);
         assert_eq!(input.cursor_col, 0);
@@ -475,7 +503,7 @@ mod tests {
     fn backspace_within_line() {
         let mut input = InputArea::new("");
         input.set_text("abc");
-        input.handle_key(key(KeyCode::Backspace), 80);
+        input.handle_key(key(KeyCode::Backspace), chrome(80));
         assert_eq!(input.text(), "ab");
     }
 
@@ -556,7 +584,7 @@ mod tests {
     fn up_down_basic() {
         let mut input = InputArea::new("");
         input.set_text("hello\nhi");
-        input.move_up(80);
+        input.move_up(chrome(80));
         assert_eq!(input.cursor_row, 0);
         assert_eq!(input.cursor_col, 2); // clamped
     }
@@ -565,10 +593,10 @@ mod tests {
     fn up_down_desired_col() {
         let mut input = InputArea::new("");
         input.set_text("long line\nhi\nlong line");
-        input.move_up(80);
+        input.move_up(chrome(80));
         assert_eq!(input.cursor_row, 1);
         assert_eq!(input.cursor_col, 2);
-        input.move_up(80);
+        input.move_up(chrome(80));
         assert_eq!(input.cursor_row, 0);
         assert_eq!(input.cursor_col, 9);
     }
@@ -578,7 +606,7 @@ mod tests {
         let mut input = InputArea::new("");
         input.set_text("hello");
         input.cursor_col = 3;
-        input.move_up(80);
+        input.move_up(chrome(80));
         assert_eq!(input.cursor_row, 0);
         assert_eq!(input.cursor_col, 3);
     }
@@ -588,7 +616,7 @@ mod tests {
         let mut input = InputArea::new("");
         input.set_text("hello");
         input.cursor_col = 2;
-        input.move_down(80);
+        input.move_down(chrome(80));
         assert_eq!(input.cursor_row, 0);
         assert_eq!(input.cursor_col, 2);
     }
@@ -610,7 +638,7 @@ mod tests {
     fn enter_submits() {
         let mut input = InputArea::new("");
         input.set_text("hello");
-        let action = input.handle_key(key(KeyCode::Enter), 80);
+        let action = input.handle_key(key(KeyCode::Enter), chrome(80));
         assert_eq!(action, InputAction::Submit("hello".into()));
         assert_eq!(input.text(), "");
     }
@@ -618,7 +646,7 @@ mod tests {
     #[test]
     fn enter_empty_does_nothing() {
         let mut input = InputArea::new("");
-        let action = input.handle_key(key(KeyCode::Enter), 80);
+        let action = input.handle_key(key(KeyCode::Enter), chrome(80));
         assert_eq!(action, InputAction::None);
     }
 
@@ -626,7 +654,7 @@ mod tests {
     fn shift_enter_inserts_newline() {
         let mut input = InputArea::new("");
         input.set_text("hello");
-        let action = input.handle_key(key_with(KeyCode::Enter, KeyModifiers::SHIFT), 80);
+        let action = input.handle_key(key_with(KeyCode::Enter, KeyModifiers::SHIFT), chrome(80));
         assert_eq!(action, InputAction::None);
         assert_eq!(input.line_count(), 2);
     }
@@ -635,7 +663,7 @@ mod tests {
     fn alt_enter_inserts_newline() {
         let mut input = InputArea::new("");
         input.set_text("hello");
-        let action = input.handle_key(key_with(KeyCode::Enter, KeyModifiers::ALT), 80);
+        let action = input.handle_key(key_with(KeyCode::Enter, KeyModifiers::ALT), chrome(80));
         assert_eq!(action, InputAction::None);
         assert_eq!(input.line_count(), 2);
     }
@@ -644,7 +672,10 @@ mod tests {
     fn ctrl_j_inserts_newline() {
         let mut input = InputArea::new("");
         input.set_text("hello");
-        let action = input.handle_key(key_with(KeyCode::Char('j'), KeyModifiers::CONTROL), 80);
+        let action = input.handle_key(
+            key_with(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            chrome(80),
+        );
         assert_eq!(action, InputAction::None);
         assert_eq!(input.line_count(), 2);
     }
@@ -653,16 +684,16 @@ mod tests {
     fn up_down_via_keys() {
         let mut input = InputArea::new("");
         input.set_text("a\nb");
-        input.handle_key(key(KeyCode::Up), 80);
+        input.handle_key(key(KeyCode::Up), chrome(80));
         assert_eq!(input.cursor_row, 0);
-        input.handle_key(key(KeyCode::Down), 80);
+        input.handle_key(key(KeyCode::Down), chrome(80));
         assert_eq!(input.cursor_row, 1);
     }
 
     #[test]
     fn esc_returns_escape() {
         let mut input = InputArea::new("");
-        let action = input.handle_key(key(KeyCode::Esc), 80);
+        let action = input.handle_key(key(KeyCode::Esc), chrome(80));
         assert_eq!(action, InputAction::Escape);
     }
 
@@ -755,7 +786,10 @@ mod tests {
     fn ctrl_m_inserts_newline() {
         let mut input = InputArea::new("");
         input.set_text("hello");
-        let action = input.handle_key(key_with(KeyCode::Char('m'), KeyModifiers::CONTROL), 80);
+        let action = input.handle_key(
+            key_with(KeyCode::Char('m'), KeyModifiers::CONTROL),
+            chrome(80),
+        );
         assert_eq!(action, InputAction::None);
         assert_eq!(input.line_count(), 2);
     }
@@ -764,7 +798,7 @@ mod tests {
     fn raw_cr_as_enter_submits() {
         let mut input = InputArea::new("");
         input.set_text("hello");
-        let action = input.handle_key(key(KeyCode::Char('\r')), 80);
+        let action = input.handle_key(key(KeyCode::Char('\r')), chrome(80));
         assert_eq!(action, InputAction::Submit("hello".into()));
     }
 
@@ -772,7 +806,7 @@ mod tests {
     fn raw_lf_as_enter_submits() {
         let mut input = InputArea::new("");
         input.set_text("hello");
-        let action = input.handle_key(key(KeyCode::Char('\n')), 80);
+        let action = input.handle_key(key(KeyCode::Char('\n')), chrome(80));
         assert_eq!(action, InputAction::Submit("hello".into()));
     }
 
@@ -830,7 +864,7 @@ mod tests {
         input.insert_paste_placeholder("big text\nmore text\nend".into());
         // Move up to the line before the placeholder.
         while input.cursor_row > 0 {
-            input.move_up(80);
+            input.move_up(chrome(80));
         }
         // Move to end of line so delete_forward merges with the placeholder.
         input.move_end();
@@ -849,7 +883,7 @@ mod tests {
         ];
         input.cursor_row = 2;
         input.cursor_col = 0;
-        input.move_up(80);
+        input.move_up(chrome(80));
         assert_eq!(input.cursor_row, 0); // skipped placeholder
     }
 
@@ -863,7 +897,7 @@ mod tests {
         ];
         input.cursor_row = 0;
         input.cursor_col = 5;
-        input.move_down(80);
+        input.move_down(chrome(80));
         assert_eq!(input.cursor_row, 2); // skipped placeholder
     }
 
@@ -1029,7 +1063,7 @@ mod tests {
         input.set_text("abcdefghijklmnopqrst"); // 20 chars, fits in 78
         input.cursor_col = 15;
         // Up should be no-op (only one visual row).
-        input.move_up(80);
+        input.move_up(chrome(80));
         assert_eq!(input.cursor_row, 0);
         assert_eq!(input.cursor_col, 15);
     }
@@ -1042,7 +1076,7 @@ mod tests {
         input.set_text("abcdefghijklmno");
         input.cursor_col = 12; // in second visual row
         // Up should move to first visual row, same column.
-        input.move_up(16);
+        input.move_up(chrome(16));
         assert_eq!(input.cursor_row, 0);
         assert_eq!(input.cursor_col, 2); // desired col = 2 (12 - 10), clamped
     }
@@ -1055,7 +1089,7 @@ mod tests {
         input.cursor_row = 0;
         input.cursor_col = 5;
         // Down from first line's only visual row → second line.
-        input.move_down(16);
+        input.move_down(chrome(16));
         assert_eq!(input.cursor_row, 1);
         assert_eq!(input.cursor_col, 5);
     }
@@ -1068,7 +1102,7 @@ mod tests {
         let mut input = InputArea::new("");
         input.set_text("你好世界");
         input.cursor_col = 3; // "界" in second visual row (vis_col = 0)
-        input.move_up(12);
+        input.move_up(chrome(12));
         assert_eq!(input.cursor_row, 0);
         // desired_col = 0 (first col of VR1), so cursor goes to col 0 ("你")
         assert_eq!(input.cursor_col, 0);
@@ -1089,13 +1123,13 @@ mod tests {
         // Width 80 → text_width 78, single visual row.
         let mut input = InputArea::new("");
         input.set_text("hello world");
-        input.set_cursor_from_visual(80, 0, 6);
+        input.set_cursor_from_visual(chrome(80), 0, 6);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 6));
         // Past the row's text: the row end.
-        input.set_cursor_from_visual(80, 0, 99);
+        input.set_cursor_from_visual(chrome(80), 0, 99);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 11));
         // Column 0: the row start.
-        input.set_cursor_from_visual(80, 0, 0);
+        input.set_cursor_from_visual(chrome(80), 0, 0);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 0));
     }
 
@@ -1104,15 +1138,15 @@ mod tests {
         // Width 16 → text_width 10: "abcdefghijklmno" = "abcdefghij" | "klmno".
         let mut input = InputArea::new("");
         input.set_text("abcdefghijklmno");
-        input.set_cursor_from_visual(16, 0, 3);
+        input.set_cursor_from_visual(chrome(16), 0, 3);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 3));
         // Second visual row: char offset 10 + 2.
-        input.set_cursor_from_visual(16, 1, 2);
+        input.set_cursor_from_visual(chrome(16), 1, 2);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 12));
         // The row boundary is shared: end of row 0 == start of row 1.
-        input.set_cursor_from_visual(16, 0, 10);
+        input.set_cursor_from_visual(chrome(16), 0, 10);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 10));
-        input.set_cursor_from_visual(16, 1, 0);
+        input.set_cursor_from_visual(chrome(16), 1, 0);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 10));
     }
 
@@ -1121,7 +1155,7 @@ mod tests {
         // Width 16 → text_width 10: "abcdefghijklmno" | "hello".
         let mut input = InputArea::new("");
         input.set_text("abcdefghijklmno\nhello");
-        input.set_cursor_from_visual(16, 2, 3);
+        input.set_cursor_from_visual(chrome(16), 2, 3);
         assert_eq!((input.cursor_row, input.cursor_col), (1, 3));
     }
 
@@ -1131,15 +1165,15 @@ mod tests {
         let mut input = InputArea::new("");
         input.set_text("你好世界");
         // Either cell of '你' resolves to before it.
-        input.set_cursor_from_visual(12, 0, 0);
+        input.set_cursor_from_visual(chrome(12), 0, 0);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 0));
-        input.set_cursor_from_visual(12, 0, 1);
+        input.set_cursor_from_visual(chrome(12), 0, 1);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 0));
         // '世' spans columns 4..6 → before it.
-        input.set_cursor_from_visual(12, 0, 5);
+        input.set_cursor_from_visual(chrome(12), 0, 5);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 2));
         // Second visual row: '界' is char 3.
-        input.set_cursor_from_visual(12, 1, 1);
+        input.set_cursor_from_visual(chrome(12), 1, 1);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 3));
     }
 
@@ -1148,15 +1182,15 @@ mod tests {
         let mut input = InputArea::new("");
         input.set_text("a\n\nb");
         // The empty logical line is its own visual row.
-        input.set_cursor_from_visual(80, 1, 5);
+        input.set_cursor_from_visual(chrome(80), 1, 5);
         assert_eq!((input.cursor_row, input.cursor_col), (1, 0));
         // A row below the last one clamps to it.
-        input.set_cursor_from_visual(80, 99, 0);
+        input.set_cursor_from_visual(chrome(80), 99, 0);
         assert_eq!((input.cursor_row, input.cursor_col), (2, 0));
 
         // An empty draft maps to (0, 0) — the placeholder is not content.
         let mut input = InputArea::new("placeholder");
-        input.set_cursor_from_visual(80, 0, 4);
+        input.set_cursor_from_visual(chrome(80), 0, 4);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 0));
     }
 
@@ -1166,11 +1200,11 @@ mod tests {
         // cursor, which sits on the last logical line.
         let mut input = InputArea::with_max_lines(String::new(), 2);
         input.set_text("one\ntwo\nthree");
-        input.update_vertical_scroll(2, 16);
+        input.update_vertical_scroll(Chrome::of(Rect::new(0, 0, 16, 2 + chrome::BORDER_ROWS)));
         assert_eq!(input.vertical_scroll, 1, "window shows logical lines 1..2");
         // The caller (the pointer hit test) adds the window offset, so the
         // row handed in is absolute: window row 1 = visual row 2.
-        input.set_cursor_from_visual(16, 2, 2);
+        input.set_cursor_from_visual(chrome(16), 2, 2);
         assert_eq!((input.cursor_row, input.cursor_col), (2, 2));
     }
 
@@ -1182,7 +1216,7 @@ mod tests {
         let chrome = Chrome::of(area);
         for vis_row in 0..chrome.text_rows as usize {
             let (x, y) = {
-                input.set_cursor_from_visual(area.width, vis_row, 0);
+                input.set_cursor_from_visual(chrome, vis_row, 0);
                 input.cursor_screen_pos(&area)
             };
             assert_eq!(
