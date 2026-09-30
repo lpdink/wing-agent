@@ -27,6 +27,21 @@ def atomic_write_text(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """原子写入二进制文件：tmp + fsync + replace。自动创建父目录。
+
+    与 atomic_write_text 同一语义，供媒体字节等二进制载荷复用（内容寻址
+    写入必须要么完整可见、要么不可见，不能留下半截文件被当成有效对象）。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".tmp.{os.getpid()}")
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def atomic_write_json(path: Path, data: Any, *, indent: int | None = None) -> None:
     """原子写入 JSON 文件：tmp + fsync + rename。自动创建父目录。"""
     atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=indent))

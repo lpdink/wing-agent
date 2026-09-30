@@ -9,7 +9,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from wing.store.base import MessageLog, SessionMetadata, SessionStore, SessionSummary
+from wing.store.base import (
+    MessageLog,
+    SessionMetadata,
+    SessionStore,
+    SessionSummary,
+    validate_media_id,
+)
 
 
 class MemoryMessageLog(MessageLog):
@@ -45,6 +51,9 @@ class MemorySessionStore(SessionStore):
     def __init__(self) -> None:
         self._metadata: dict[str, SessionMetadata] = {}
         self._logs: dict[str, MemoryMessageLog] = {}
+        self._media: dict[str, bytes] = {}
+        """媒体池：实例级共享（同一 store 的多个会话读写同一字典，与 file
+        后端"同一 root 共享 .media"语义一致）。durable=False 决定它不跨进程。"""
 
     # ── metadata ──────────────────────────────
 
@@ -65,6 +74,17 @@ class MemorySessionStore(SessionStore):
             message_log = MemoryMessageLog()
             self._logs[session_id] = message_log
         return message_log
+
+    # ── 媒体字节 ──────────────────────────────
+
+    def write_media(self, media_id: str, data: bytes) -> None:
+        """写入媒体字节（幂等：内容寻址下同名即同内容，首写即终值）。"""
+        validate_media_id(media_id)
+        self._media.setdefault(media_id, data)
+
+    def read_media(self, media_id: str) -> bytes | None:
+        validate_media_id(media_id)
+        return self._media.get(media_id)
 
     # ── 查询 ──────────────────────────────────
 
