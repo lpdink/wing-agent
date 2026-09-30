@@ -34,15 +34,21 @@ struct FlatSeg {
 
 /// Whether a line is prose that should be width-wrapped.
 ///
-/// Code blocks (`CodeBlock`/`Gutter`) and decorative chrome (`Border`) are laid
-/// out by their own renderers and must not be re-wrapped; everything else
-/// (`Text`/`Heading`/`InlineCode`/`Link`/`Marker`) is prose.
+/// Code blocks (`CodeBlock`/`Gutter`), decorative chrome (`Border`) and math
+/// grids (`Math`) are laid out by their own renderers and must not be
+/// re-wrapped; everything else (`Text`/`Heading`/`InlineCode`/`Link`/`Marker`)
+/// is prose. A math line is fitted to the same width budget by the engine
+/// before it reaches us, and breaking a formula grid at a UAX #14 opportunity
+/// would tear `∑`/`√` layouts apart.
 pub(crate) fn is_prose_line(line: &MarkdownLine) -> bool {
     !line.segments.is_empty()
         && line.segments.iter().all(|s| {
             !matches!(
                 s.kind,
-                SegmentKind::CodeBlock | SegmentKind::Gutter | SegmentKind::Border
+                SegmentKind::CodeBlock
+                    | SegmentKind::Gutter
+                    | SegmentKind::Border
+                    | SegmentKind::Math
             )
         })
 }
@@ -396,6 +402,16 @@ mod tests {
         mixed.push_segment(SegmentKind::Text, Style::new(), "run ");
         mixed.push_segment(SegmentKind::InlineCode, Style::new(), "cargo build");
         assert!(is_prose_line(&mixed));
+
+        // A math grid is laid out by the engine — never re-wrapped here.
+        let mut math = MarkdownLine::default();
+        math.push_segment(SegmentKind::Math, Style::new(), "∑ x² = ───");
+        assert!(!is_prose_line(&math));
+        let mut inline_math = MarkdownLine::default();
+        inline_math.push_segment(SegmentKind::Text, Style::new(), "so ");
+        inline_math.push_segment(SegmentKind::Math, Style::new(), "x²");
+        inline_math.push_segment(SegmentKind::Text, Style::new(), " holds");
+        assert!(!is_prose_line(&inline_math));
     }
 
     #[test]

@@ -3293,6 +3293,7 @@ dependencies = [
  "unicode-width",
  "url",
  "wing-api-client",
+ "wing-math",
 ]
 
 [[package]]

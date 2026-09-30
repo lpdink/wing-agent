@@ -152,6 +152,64 @@ fn shapes() -> Vec<(&'static str, String)> {
             "indented_block_then_paragraph",
             "before\n\n    indented prose line\nimmediately after\n\nend\n".into(),
         ),
+        // --- math (LaTeX) shapes ---
+        // The formulas themselves must render (character grids, equal in both
+        // profiles); everything the engine declines must stay the source, and
+        // code / currency must not become math.
+        (
+            "math_inline",
+            "Before $x^2 + y^2 = z^2$ and $\\alpha + \\beta$ and $\\mathbb{R}^n$ after.\n\nNext paragraph.".into(),
+        ),
+        (
+            "math_inline_multiline_source",
+            // `render_inline` refuses (the fraction is 3 rows): the source is
+            // shown, the sentence keeps rendering around it.
+            "A fraction $\\frac{a}{b}$ inline and $\\sum_{i=1}^{n} i$ too.\n\nafter".into(),
+        ),
+        (
+            "math_display_multiline",
+            "intro\n\n$$\n\\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}\n$$\n\nafter".into(),
+        ),
+        (
+            "math_display_inline_in_paragraph",
+            "the identity $$e^{i\\pi} + 1 = 0$$ is famous\n\nafter".into(),
+        ),
+        (
+            "math_paren_bracket_delimiters",
+            "inline \\(a^2 + b^2\\) and a display:\n\n\\[\nE = mc^2\n\\]\n\nafter".into(),
+        ),
+        (
+            "math_bare_align",
+            "The system:\n\n\\begin{align}\nf(x) &= x^2 + 2x + 1 \\\\\n     &= (x+1)^2\n\\end{align}\n\nafter".into(),
+        ),
+        (
+            "math_cases_matrix",
+            "$$\nf(x) = \\begin{cases}\n1 & x > 0 \\\\\n0 & x = 0\n\\end{cases}\n$$\n\n$$\n\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}\n$$\n\nafter".into(),
+        ),
+        (
+            "math_degraded_source",
+            "\\begin{tikzcd} a \\arrow[r] & b \\end{tikzcd}\n\n$\\ce{2H2O}$ and $\\dfrac{a}{b}$.\n\nafter".into(),
+        ),
+        (
+            "math_currency_and_code",
+            "it costs $100 and $200 total\n\n```sh\necho \"$HOME and $PATH\"\n```\n\ninline `$x$` and `\\(y\\)` stay code.\n\nafter".into(),
+        ),
+        (
+            "math_overwide_display",
+            format!("$$\n{}\n$$\n\nafter\n", "a".repeat(200)),
+        ),
+        (
+            "math_unclosed_delimiters",
+            "cost $x + 1\n\nstarts \\(y + 2 and never closes\n\nafter".into(),
+        ),
+        // The formula itself is the ACTIVE TAIL (no trailing block closes it):
+        // this is the shape that exercises the incremental tail path with
+        // math, not just the promoted-block path.
+        (
+            "math_display_tail",
+            "intro\n\n$$\n\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}\n$$".into(),
+        ),
+        ("math_inline_tail", "the answer is $x^2 + y^2$".into()),
     ]
 }
 
@@ -237,6 +295,40 @@ fn reconcile_matrix_shapes() {
     }
 }
 
+/// Math shapes across EVERY chunk size in 1..=64.
+///
+/// A `$` / `\(` / `\begin{` split at any byte is the case the incremental
+/// engine is most likely to get wrong (the delimiter normalization depends on
+/// where the slice boundary fell), so the math shapes get the full chunk
+/// sweep instead of the matrix's three sizes.
+#[test]
+fn reconcile_math_shapes_every_chunk_size() {
+    let math_shapes: Vec<(&'static str, String)> = shapes()
+        .into_iter()
+        .filter(|(name, _)| name.starts_with("math_"))
+        .collect();
+    assert!(
+        math_shapes.len() >= 8,
+        "math shapes missing from `shapes()`: {}",
+        math_shapes.len()
+    );
+    for (name, corpus) in math_shapes {
+        for &profile in PROFILES {
+            for chunk in 1..=64usize {
+                let chunks = chunk_stream(&corpus, chunk);
+                reconcile(
+                    name,
+                    &corpus,
+                    &chunks,
+                    80,
+                    profile,
+                    &format!("chunk={chunk}B"),
+                );
+            }
+        }
+    }
+}
+
 /// Reconcile the full generated corpora (streamed at coarser chunks to
 /// keep runtime sane) — the bench workloads themselves must converge.
 #[test]
@@ -290,6 +382,19 @@ fn reconcile_prefixes() {
         "indented_closing_fence_tilde",
         "crlf_document",
         "crlf_unclosed_fence",
+        // Math converges per prefix too: an unterminated `\(` is literal in
+        // both the streamed prefix and the reference of that prefix, and the
+        // rewrite only fires once the closing delimiter has arrived.
+        "math_inline",
+        "math_inline_multiline_source",
+        "math_display_multiline",
+        "math_display_inline_in_paragraph",
+        "math_paren_bracket_delimiters",
+        "math_bare_align",
+        "math_currency_and_code",
+        "math_unclosed_delimiters",
+        "math_display_tail",
+        "math_inline_tail",
     ];
     let palette = ThemePalette::default();
     for (name, corpus) in shapes() {

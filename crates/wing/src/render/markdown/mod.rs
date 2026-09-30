@@ -22,6 +22,7 @@
 
 pub(crate) mod code_blocks;
 pub(crate) mod links;
+pub(crate) mod math;
 pub(crate) mod parsing;
 pub mod profile;
 pub mod stream;
@@ -66,6 +67,7 @@ use ratatui::text::Line;
 use tables::TableBuffer;
 
 use crate::config::ThemePalette;
+use crate::config::rendering::MathMode;
 
 /// Code-block rendering options.
 ///
@@ -85,6 +87,14 @@ pub struct RenderOpts {
     /// (paragraph/heading/list/table ends push one; code/HTML do not) —
     /// the block promotion pops it and re-emits it lazily instead.
     pub trim_trailing_blank: bool,
+    /// Whether formulas are rendered (see [`MathMode`]).
+    ///
+    /// `Text` — the default — enables pulldown's math parsing *and* the
+    /// delimiter normalization that feeds it; `Off` leaves the source
+    /// untouched, which is exactly the pre-math rendering. Callers that have
+    /// a palette derive this from it ([`RenderOpts::with_math`]); the
+    /// streaming engine and the reference render both do, so the two agree.
+    pub math: MathMode,
 }
 
 impl Default for RenderOpts {
@@ -101,7 +111,14 @@ impl RenderOpts {
             profile,
             prose_depth: PROSE_DEPTH_LIMIT,
             trim_trailing_blank,
+            math: MathMode::Text,
         }
+    }
+
+    /// Set the math mode (usually `palette.math_mode`).
+    pub fn with_math(mut self, math: MathMode) -> Self {
+        self.math = math;
+        self
     }
 }
 
@@ -130,12 +147,21 @@ pub fn render_markdown_with_width(
 ///
 /// Used by callers that need element-aware post-processing — e.g. the
 /// thinking block recolors prose segments while preserving code colors.
+///
+/// The math mode comes from `palette` (the palette is the render layer's
+/// config carrier, see [`RenderOpts::math`]), so every one of these
+/// convenience callers honours `rendering.math`.
 pub fn render_markdown_lines(
     text: &str,
     width: Option<u16>,
     palette: &ThemePalette,
 ) -> Vec<MarkdownLine> {
-    render_markdown_lines_with(text, width, palette, RenderOpts::default())
+    render_markdown_lines_with(
+        text,
+        width,
+        palette,
+        RenderOpts::default().with_math(palette.math_mode),
+    )
 }
 
 /// [`render_markdown_lines`] with explicit code-block rendering options.
@@ -253,8 +279,26 @@ fn render_markdown_to_lines(
     available_width: Option<u16>,
     opts: RenderOpts,
 ) -> Vec<MarkdownLine> {
-    let parser_options =
+    // Math delimiters pulldown does not know (`\(…\)`, `\[…\]`, a bare
+    // `\begin{align}…\end{align}`) are rewritten into `$…$` / `$$…$$` before
+    // parsing. Pure text rewrite, so every entry point that shares this
+    // function — the full render, a streaming slice, a re-parsed prose
+    // block — normalizes identically (see `math`). The rule itself belongs
+    // to `Profile` (like the fence and indentation rules); `rendering.math
+    // = off` is the config switch that turns the whole math path off.
+    let math_on = opts.math == MathMode::Text && opts.profile.normalizes_math_delimiters();
+    let normalized = if math_on {
+        math::normalize_delimiters(source)
+    } else {
+        Cow::Borrowed(source)
+    };
+    let source: &str = &normalized;
+
+    let mut parser_options =
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
+    if math_on {
+        parser_options |= Options::ENABLE_MATH;
+    }
     let parser = Parser::new_ext(source, parser_options);
 
     let mut lines = Vec::new();
@@ -320,6 +364,11 @@ fn render_markdown_to_lines(
                 );
             }
             Event::SoftBreak | Event::HardBreak => ctx.flush_line(),
+            // Math. Both arms must exist BEFORE `ENABLE_MATH` is turned on:
+            // the catch-all below is `_ => {}`, so an unhandled math event
+            // would silently drop the formula.
+            Event::InlineMath(src) => math::inline(&src, &mut ctx),
+            Event::DisplayMath(src) => math::display(&src, &mut ctx),
             Event::Rule => {
                 ctx.flush_line();
                 let mut line = MarkdownLine::default();

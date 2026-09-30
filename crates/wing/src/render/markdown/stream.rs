@@ -77,12 +77,18 @@
 //! next block starts, so a trailing blank never dangles at the end of the
 //! stream (matching the full render's trailing-blank trim).
 //!
-//! **Thinking vs Content.** The two profiles differ in exactly two rendering
-//! rules — both owned by [`Profile`]: inline ```` normalization (skipped for
-//! reasoning, which discusses fences in prose) and indented (4-space) blocks
-//! (prose for reasoning, code for assistant content). Fenced blocks render
+//! **Thinking vs Content.** The three rendering rules `Profile` owns are the
+//! only place the profiles differ, plus one shared rule: inline ````
+//! normalization (skipped for reasoning, which discusses fences in prose),
+//! indented (4-space) blocks (prose for reasoning, code for assistant
+//! content) — and math delimiter normalization (`\(…\)` / `\[…\]` / a bare
+//! AMS environment → `$…$` / `$$…$$`, see `super::math`), which applies to
+//! both profiles and is therefore also safe per slice: it only fires on a
+//! complete, code-free span inside one blank-line-delimited block, and a
+//! slice boundary IS a blank line or a fence. Fenced blocks render
 //! identically: highlight, gutter, borders. The cell compose is what
-//! recolors reasoning prose (`thinking_segment_style`).
+//! recolors reasoning prose (`thinking_segment_style`); math keeps its own
+//! color in both.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -1051,7 +1057,9 @@ pub fn full_lines_with_links(
     profile: Profile,
     palette: &ThemePalette,
 ) -> (Vec<Line<'static>>, Vec<Vec<LinkSpan>>) {
-    let opts = RenderOpts::new(profile, true);
+    // The math mode travels with the palette, so the reference render and
+    // the incremental engine always agree on it (see `RenderOpts::math`).
+    let opts = RenderOpts::new(profile, true).with_math(palette.math_mode);
     let md = render_markdown_lines_with(text, Some(width.saturating_sub(2)), palette, opts);
     let thinking_style = Style::default().fg(palette.thinking);
     let bullet_style = Style::default().fg(palette.text);
@@ -1096,7 +1104,7 @@ fn render_generic(
         slice,
         Some(width.saturating_sub(2)),
         palette,
-        RenderOpts::new(profile, true),
+        RenderOpts::new(profile, true).with_math(palette.math_mode),
     )
 }
 
@@ -1115,7 +1123,7 @@ fn render_block(
         slice,
         Some(width.saturating_sub(2)),
         palette,
-        RenderOpts::new(profile, false),
+        RenderOpts::new(profile, false).with_math(palette.math_mode),
     )
 }
 
@@ -1477,7 +1485,7 @@ fn line_is_blank(line: &str) -> bool {
     line.trim().is_empty()
 }
 
-fn indent_of(line: &str) -> usize {
+pub(crate) fn indent_of(line: &str) -> usize {
     let mut n = 0;
     for b in line.bytes() {
         match b {
@@ -1491,7 +1499,7 @@ fn indent_of(line: &str) -> usize {
 
 /// If the line opens a fenced code block, return
 /// `(fence_char, fence_len, info)`.
-fn fence_open(line: &str) -> Option<(u8, usize, &str)> {
+pub(crate) fn fence_open(line: &str) -> Option<(u8, usize, &str)> {
     let indent = indent_of(line);
     if indent >= 4 {
         return None;
@@ -1540,7 +1548,7 @@ fn fence_close_len(line: &str) -> Option<usize> {
     }
 }
 
-fn is_fence_close(line: &str, fence_char: u8, fence_len: usize) -> bool {
+pub(crate) fn is_fence_close(line: &str, fence_char: u8, fence_len: usize) -> bool {
     let Some(run) = fence_close_len(line) else {
         return false;
     };

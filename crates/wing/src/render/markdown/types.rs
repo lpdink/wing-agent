@@ -40,6 +40,9 @@ pub enum SegmentKind {
     Border,
     /// Code block line-number gutter.
     Gutter,
+    /// Math (LaTeX) content: a rendered formula or, when the engine declines
+    /// to render it, the formula's source between its delimiters.
+    Math,
 }
 
 // ============================================================
@@ -175,6 +178,9 @@ pub struct MarkdownTheme {
     pub code: Style,
     pub code_block: Style,
     pub code_block_gutter: Style,
+    /// Rendered math grids and their literal fallback (see
+    /// [`crate::render::markdown::math`]).
+    pub math: Style,
     pub link: Style,
     pub blockquote: Style,
     pub border: Style,
@@ -217,6 +223,7 @@ impl MarkdownTheme {
             code: Style::new().fg(p.accent),
             code_block: Style::new().fg(p.accent),
             code_block_gutter: Style::new().fg(p.dim),
+            math: Style::new().fg(p.math),
             link: Style::new().fg(p.accent).underlined(),
             blockquote: Style::new().fg(p.success),
             border: Style::new().fg(p.dim),
@@ -265,6 +272,9 @@ impl<'a> From<&'a MarkdownLine> for Line<'a> {
 /// elements inherit the thinking foreground while everything else (bold,
 /// italic, dim, background, underline color) is preserved untouched.
 ///
+/// Math is structural like code — a rendered formula (and its source
+/// fallback) keeps the math color in both profiles.
+///
 /// Lives at the render layer (not in the thinking cell) so the streaming
 /// renderer can share the exact same recolor semantics.
 pub fn thinking_segment_style(kind: SegmentKind, original: Style, thinking_style: Style) -> Style {
@@ -273,7 +283,8 @@ pub fn thinking_segment_style(kind: SegmentKind, original: Style, thinking_style
         | SegmentKind::CodeBlock
         | SegmentKind::Link
         | SegmentKind::Border
-        | SegmentKind::Gutter => original,
+        | SegmentKind::Gutter
+        | SegmentKind::Math => original,
         SegmentKind::Text | SegmentKind::Heading | SegmentKind::Marker => Style {
             fg: thinking_style.fg,
             ..original
@@ -427,11 +438,37 @@ mod tests {
         let theme = MarkdownTheme::default();
         // Spot check a few key styles.
         assert_eq!(theme.code.fg, Some(Color::Cyan));
+        assert_eq!(theme.math.fg, Some(Color::Cyan));
         assert!(
             theme
                 .h1
                 .add_modifier
                 .contains(ratatui::style::Modifier::BOLD)
+        );
+    }
+
+    /// The math slot follows the palette (it is a real theme color, not a
+    /// hardcoded one), and the thinking recolor keeps it: a formula stays
+    /// the math color inside reasoning, like code does.
+    #[test]
+    fn theme_math_follows_palette_and_survives_thinking_recolor() {
+        let palette = ThemePalette {
+            math: Color::Magenta,
+            accent: Color::Blue,
+            ..ThemePalette::default()
+        };
+        let theme = MarkdownTheme::from_palette(&palette);
+        assert_eq!(theme.math.fg, Some(Color::Magenta));
+        assert_eq!(theme.code.fg, Some(Color::Blue));
+
+        for kind in [SegmentKind::Math, SegmentKind::InlineCode] {
+            let recolored = thinking_segment_style(kind, theme.math, Style::new().fg(Color::Gray));
+            assert_eq!(recolored.fg, Some(Color::Magenta), "{kind:?}");
+        }
+        // Prose still takes the thinking foreground.
+        assert_eq!(
+            thinking_segment_style(SegmentKind::Text, theme.base, Style::new().fg(Color::Gray)).fg,
+            Some(Color::Gray)
         );
     }
 }
