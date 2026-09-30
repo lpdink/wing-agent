@@ -53,6 +53,7 @@ libs/core/wing/
 ├── config.py                        Config 模型 + WING_HOME 解析
 ├── default_config.py                手写默认 config.yaml 模板（事实来源）
 ├── schema.py                        Tool / ToolParam / Message 等核心 schema
+├── media.py                         图片媒体纯函数层（id/格式/尺寸/信封/请求期投影）
 ├── tool_registry.py                 ToolRegistry — 命名空间感知注册表 + ToolRef 解析
 ├── event_bus.py                     EventBus — 全局单例事件路由
 ├── hook_registry.py                 Hook 扩展点（before_session_start / before_user_message / before_tool_call / after_tool_call）
@@ -68,6 +69,7 @@ libs/core/wing/
 ├── provider/                        模型调用层（协议隔离）
 │   ├── base.py                      ModelProvider ABC + StreamAccumulator + parse_tool_args（容错，永不抛）
 │   ├── transport.py                 HTTP/SSE 传输管道与错误面（SSE 行解析 / 空闲超时 / httpx 构造 / raise_with_body）
+│   ├── media.py                     请求期媒体投影与序列化原语（两协议共用）
 │   ├── openai_compat.py             OpenAI 兼容协议（httpx 流式 + 重试）
 │   ├── anthropic.py                 Anthropic Messages API（thinking blocks、x-api-key）
 │   └── __init__.py                  create_provider() + provider registry（并发聚合模型列表）
@@ -80,7 +82,7 @@ libs/core/wing/
 │   ├── react.py / state_change.py / query_response.py
 │   └── __init__.py                  EVENT_TYPES / FACT_EVENTS 注册表 + wire_dump（WS 帧规则）
 ├── tools/                           内置工具
-│   ├── bash.py / file.py / search.py   Bash · Read/Write/Edit · Glob/Grep
+│   ├── bash.py / file.py / read_image.py / search.py   Bash · Read/Write/Edit · ReadImage · Glob/Grep
 │   ├── ask_user.py / todo.py           AskUserQuestion · TodoWrite
 │   ├── explorer.py                     Explorer 子 agent（只读工具集，可 run_in_background）
 │   ├── experimental.py                 BetterEdit（实验，[upto] 锚点）

@@ -94,6 +94,8 @@ def plan_for_request(
     - max_image_bytes 取 provider 配置的单图兜底上限。
 
     返回值按消息序 × 消息内出现序排列，消费方按 ``message_index`` 对齐消息。
+    ``role == "system"`` 的消息上的 media 不参与投影（两协议忽略：不发图也
+    不加占位，见 ``wing.media.plan_request_media``）。
     """
     if policy is None:
         policy = resolve_media_policy()

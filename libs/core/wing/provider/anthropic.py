@@ -403,6 +403,8 @@ class AnthropicProvider(ModelProvider):
 
         for i, msg in enumerate(messages):
             if msg.role == "system":
+                # system 段只承载文本：其 media 被投影层忽略（不发图也不加占位），
+                # 与 openai 路径行为一致——见 wing.media.plan_request_media。
                 if msg.content:
                     system_parts.append(msg.content)
                 continue

@@ -14,6 +14,7 @@ history、从不进工具文本——模型在请求期按引用"看到"图片�
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import stat as stat_module
@@ -26,6 +27,7 @@ from wing.media import (
     format_image_envelope,
     format_size,
     image_dimensions,
+    is_apple_cgbi_png,
     media_id,
     sniff_image_mime,
 )
@@ -56,7 +58,8 @@ async def read_image(path: str, ctx: ToolContext) -> ToolOutput:
     Returns:
         A single-line envelope `[image: PATH | FORMAT WxH | SIZE | id ID | mtime MTIME]`
         with the image attached, or an actionable error (no vision
-        capability / unsupported format / too large / empty / corrupt header).
+        capability / unsupported format / too large / empty / corrupt
+        header / Apple CgBI variant needing conversion).
     """
     resolved = _resolve_path(path, ctx)
 
@@ -110,6 +113,17 @@ async def read_image(path: str, ctx: ToolContext) -> ToolOutput:
 
     dims = image_dimensions(data, mime)
     if dims is None:
+        if is_apple_cgbi_png(data):
+            # CgBI 是 Apple 的非标准 PNG 变体（IHDR 在偏移 28）：文件本身合法
+            # 可显示，只是尺寸无法按标准布局解析——归因必须准确（"损坏"是错的），
+            # 并给出可照抄的转换命令（sips 能读 CgBI）。
+            raise ToolError(
+                f"ReadImage: {resolved}: Apple CgBI PNG variant — dimensions "
+                f"cannot be read by this tool (non-standard layout: the CgBI "
+                f"chunk precedes IHDR). Convert it first, e.g.: "
+                f"sips -s format png {shlex.quote(resolved)} "
+                f"--out {shlex.quote(resolved + '.png')}"
+            )
         raise ToolError(
             f"ReadImage: {resolved}: image header is truncated or corrupt "
             f"(cannot parse {_short_mime(mime)} dimensions)"
@@ -194,7 +208,9 @@ def _no_vision_message(ctx: ToolContext) -> str:
         "  providers:",
         f"    - name: {unique.name if unique is not None else _UNKNOWN_PROVIDER}",
         "      models:",
-        f"        - name: {model}",
+        # model 名可能含 YAML 元字符（`:` / `#` / 前导 `*` 等）——裸插值会产
+        # 出不可解析的片段；json.dumps 的双引号标量是合法 YAML（转义由它保证）。
+        f"        - name: {json.dumps(model)}",
         "          capabilities: {vision: true}",
     ]
     if unique is not None:

@@ -824,6 +824,71 @@ class TestPlanForRequest:
         )
         assert [p.kept for p in plans] == [False, False, True]
 
+    def test_system_message_media_is_not_projected(self):
+        """system 消息的 media 不产生任何 plan：既不保留，也不占位（两协议共同语义）。"""
+        data = png_bytes(4, 4, b"sys")
+        msgs = [
+            Message(role="system", content="s", media=[make_ref(data)]),
+            Message(role="user", content="q"),
+        ]
+        assert (
+            plan_for_request(msgs, provider_cfg=openai_cfg(), model=VISION_MODEL) == []
+        )
+
+
+########## system 消息的 media：两协议统一忽略
+
+
+class TestSystemMessageMediaIgnored:
+    """`Message.media` 挂在 system 消息上时两协议行为对齐：不发图、也不加占位（N1）。
+
+    当前不可达（ReadImage 只写 tool 消息，`Message.media` 注明「仅 tool，预留
+    user」）——本组测试是未来扩展（user 贴图等）的对齐锚点：任何协议都不得把
+    image part / 占位文本发射进 system 段。
+    """
+
+    @staticmethod
+    def _messages(data: bytes) -> list[Message]:
+        return [
+            Message(role="system", content="sys", media=[make_ref(data)]),
+            Message(role="user", content="q"),
+            Message(role="assistant", content="a"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_openai_system_message_carries_no_image_or_placeholder(self):
+        """openai：system content 仍是裸字符串——无 image part、无占位。"""
+        data = png_bytes(4, 4, b"sys-openai")
+        body = await openai_body(self._messages(data), media=make_media(data))
+        assert body["messages"][0] == {"role": "system", "content": "sys"}
+        wire = json.dumps(body)
+        assert "image_url" not in wire
+        for placeholder in (
+            NO_VISION_PLACEHOLDER,
+            TOO_LARGE_PLACEHOLDER,
+            BUDGET_PLACEHOLDER,
+            UNAVAILABLE_PLACEHOLDER,
+        ):
+            assert placeholder not in wire
+
+    @pytest.mark.asyncio
+    async def test_anthropic_system_text_carries_no_image_or_placeholder(self):
+        """anthropic：system 段只取文本——无 image block、无占位 block。"""
+        data = png_bytes(4, 4, b"sys-anthropic")
+        system_text, am = await anthropic_messages(
+            self._messages(data), media=make_media(data)
+        )
+        assert system_text == "sys"
+        wire = json.dumps(am)
+        assert '"type": "image"' not in wire
+        for placeholder in (
+            NO_VISION_PLACEHOLDER,
+            TOO_LARGE_PLACEHOLDER,
+            BUDGET_PLACEHOLDER,
+            UNAVAILABLE_PLACEHOLDER,
+        ):
+            assert placeholder not in wire
+
 
 ########## 压缩剥离
 

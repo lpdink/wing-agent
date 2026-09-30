@@ -86,6 +86,19 @@ def image_dimensions(data: bytes, mime: str) -> tuple[int, int] | None:
     return None
 
 
+def is_apple_cgbi_png(data: bytes) -> bool:
+    """是否 Apple CgBI 变体 PNG（非标准：签名后紧跟 ``CgBI`` chunk）。
+
+    该类文件的 IHDR 出现在偏移 28 而不是 16，标准 PNG 布局解析器一律失败；
+    但文件本身完全合法可显示——读图链路据此给出"变体需转换"的准确指引，
+    而不是误报"头部截断或损坏"。
+
+    刻意**不**尝试解析 CgBI 的尺寸：其字节序是 Apple 私有约定，没有可验证的
+    规范来源（见 docs/dev/media-images.md「已知边界」）。只识别、不解析。
+    """
+    return data.startswith(_PNG_SIG) and data[12:16] == b"CgBI"
+
+
 def _png_dimensions(data: bytes) -> tuple[int, int] | None:
     # PNG: sig(8) + chunk length(4) + "IHDR"(4) + width(4) + height(4)，均大端。
     if len(data) < 24 or data[12:16] != b"IHDR":
@@ -342,6 +355,11 @@ def plan_request_media(
 ) -> list[MediaPlan]:
     """请求期图片投影：确定性、无状态、不读字节，丢弃恒为最旧优先。
 
+    ``role == "system"`` 的消息上的 media 一律**不参与投影**（既不发图也不加
+    占位）：两个协议都不允许 system 携带图片（openai 的 system content 只允许
+    文本 part，anthropic 的 system 段只取文本）——忽略是两协议的共同语义，
+    "占位"文案的语义（被丢弃 / 不可用）与之无关。
+
     算法（严格按任务书，按序）：
 
     0. ``vision=False`` → 全部 ``no_vision``（模型不读图，工具早已拒绝，
@@ -364,6 +382,9 @@ def plan_request_media(
     """
     plans: list[MediaPlan] = []
     for msg_index, msg in enumerate(messages):
+        if msg.role == "system":
+            # 见 docstring：system 消息的 media 一律忽略（两协议共同语义）。
+            continue
         for ref in msg.media or []:
             plans.append(MediaPlan(message_index=msg_index, ref=ref))
 

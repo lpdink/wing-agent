@@ -18,6 +18,7 @@ from wing.media import (
     encoded_len,
     format_image_envelope,
     image_dimensions,
+    is_apple_cgbi_png,
     media_id,
     plan_request_media,
     sniff_image_mime,
@@ -237,6 +238,26 @@ class TestDimensions:
     def test_zero_size_rejected(self):
         assert image_dimensions(png_bytes(0, 10), "image/png") is None
         assert image_dimensions(gif_bytes(10, 0), "image/gif") is None
+
+    def test_apple_cgbi_png_is_recognized_but_not_parsed(self):
+        """CgBI 变体（IHDR 在偏移 28）：标准解析失败，但识别为 Apple 变体（S1）。"""
+        cgbi = (
+            b"\x89PNG\r\n\x1a\n"
+            + struct.pack(">I", 4)
+            + b"CgBI"
+            + b"PROF"  # CgBI chunk payload（内容不参与判定）
+            + b"\x00\x00\x00\x00"  # chunk CRC（内容不参与判定）
+            + b"\x00" * 16
+        )
+        assert image_dimensions(cgbi, "image/png") is None
+        assert is_apple_cgbi_png(cgbi) is True
+
+    def test_cgbi_predicate_needs_png_signature(self):
+        """谓词自洽：签名 + 偏移 12 的 "CgBI" 两条都满足才算 CgBI。"""
+        assert is_apple_cgbi_png(png_bytes(4, 4)) is False
+        assert is_apple_cgbi_png(b"") is False
+        assert is_apple_cgbi_png(b"\x89PNG\r\n\x1a\n") is False
+        assert is_apple_cgbi_png(b"\x00" * 12 + b"CgBI" + b"\x00" * 8) is False
 
 
 ########## 信封 / 尺寸估算

@@ -42,7 +42,8 @@ openai: followup(默认) / inline      anthropic: inline(默认) / followup
   文案给出开启方法（config 片段）并在归属明确时点名同 provider 的 vision 模型。
 - 失败一律 `ToolError`（错误文案回灌模型，面向"下一步怎么做"）：
   文件不存在 / 权限 / 是目录 / 空文件 / 超过 `images.max_bytes`（附 `sips -Z 1568` 降采样示例）/
-  不支持的格式（附 `sips -s format png` 转换示例）/ 头部截断损坏 / 会话未挂媒体存储。
+  不支持的格式（附 `sips -s format png` 转换示例）/ 头部截断损坏 /
+  Apple CgBI 变体（IHDR 不在标准偏移，同样是"转换后重读"指引，不误报损坏）/ 会话未挂媒体存储。
 - 成功返回单行**信封**（模型唯一可见的文本）：沿用 `format_size` 的人类可读字节数：
 
   ```
@@ -135,6 +136,9 @@ def plan_request_media(messages, *, policy: MediaPolicy, vision: bool,
 5) kept → 线格式发射；dropped → 原文本块不动，其后追加固定占位文本块
 ```
 
+- `role == "system"` 的消息上的 media 一律**忽略**（既不投影为图、也不追加占位）：两个
+  协议都不允许 system 携带图片（openai 的 system content 只允许文本 part，anthropic 的
+  system 段只取文本）——"占位"文案的语义是"被丢弃 / 不可用"，与协议不承载无关。
 - `encoded_len(n) = 4*ceil(n/3)`（base64 后的精确长度）——所以投影不需要读字节，纯元数据运算。
 - 单图兜底 `image_max_bytes` 是 provider 级配置（如 Anthropic 5 MiB）：超过的图片位在请求期
   降级为占位，避免"读图时合法、换 provider 后 400 打死整次请求"。
@@ -218,6 +222,10 @@ providers:
 - **Files API / file_id 引用模式未做**（DeepSeek Files API 这类"先上传再引用"的上游优化）。
 - **DSH 式持久 offload 决策 + 请求失败自愈重试未做**：投影是无状态纯函数，失败不做重试调整。
 - 不做 EXIF 方向修正、动画 GIF 多帧解析（只读头部尺寸）、图片自动重编码。
+- **Apple CgBI 变体 PNG 不解析尺寸**：CgBI 是 Apple 的非标准 PNG（`CgBI` chunk 排在
+  IHDR 之前，IHDR 位于偏移 28），标准布局解析器读不到尺寸——`ReadImage` 识别该特征并报
+  "Apple CgBI variant … convert it first"（附 `sips -s format png` 示例），**不**误报
+  "truncated or corrupt"。其私有字节序刻意不解析（无可验证的规范来源）。
 - 用户侧贴图（composer paste / stdin 图片输入）、远程工具（`wing-sdk` / `tool_host.rs`）返回
   图片、`GET /api/media/{id}` 端点、TUI/VSCode 像素渲染（kitty/iTerm2 协议、webview）均不在本期。
 - `vision: auto` 名字启发式**刻意不做**（未声明 = text-only）。
@@ -242,6 +250,9 @@ providers:
 | `test_compact_request_strips_media`（红线） | 压缩请求（非流式）无 image part 也无占位；压缩后仍可续跑 |
 | `test_fork_keeps_media_usable` | 子会话请求图片仍为 image part；存储对象唯一（引用池共享、无拷贝） |
 | `test_legacy_history_without_media_resumes` | 逐出 → 裁掉 `history.jsonl` 的 `media` 键 → resume 续跑成功；请求无图无占位 |
+| `test_provider_image_max_bytes_degrades_too_large` | `provider_extra={"image_max_bytes": 100}`：工具仍成功入库（`tool_media` 带引用、对象文件在），请求期该位为 `too_large` 占位、整条无 image part |
+| `test_images_max_bytes_refuses_read_without_writing` | `images={"max_bytes": 100}`：读时拒绝（文案含大小与上限 + `images.max_bytes`）；`.media` 目录不存在（零写入）；请求无图无占位 |
+| `test_missing_media_object_degrades_to_unavailable` | 删除 `.media/<id[:2]>/<id>` 对象后再发一轮：该位为 `UNAVAILABLE` 占位、请求成功、无 error 事件 |
 
 跑法：
 

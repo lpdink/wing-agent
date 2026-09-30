@@ -335,6 +335,9 @@ class OpenAICompatProvider(ModelProvider):
                 # 连续 tool 段结束——图片挂段后（即当前消息之前）。
                 flush_pending()
 
+            # system 消息的 media 一律忽略（投影层已剔除，见 plan_request_media）：
+            # 本协议 system content 只允许文本 part——此处 slots 恒为空，不发图
+            # 也不加占位，与 anthropic 路径行为一致。
             slots = message_slots(plans.get(i, []), media=self._media, cache=cache)
             base = msg.to_openai()
             move_kept = delivery == "followup" and msg.role == "tool"

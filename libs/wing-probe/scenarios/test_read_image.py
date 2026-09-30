@@ -1,7 +1,9 @@
-"""read-image 链路 probe 场景（step 06）。
+"""read-image 链路 probe 场景（step 06 / 07）。
 
-覆盖 8 条：正向读图（默认 followup）/ inline 形态 / 能力门禁 / 换模型降级（红线）/
-高水位量子驱逐（红线）/ 压缩剥离（红线）/ fork 后媒体可用 / 存量回放兼容。
+覆盖 11 条：正向读图（默认 followup）/ inline 形态 / 能力门禁 / 换模型降级（红线）/
+高水位量子驱逐（红线）/ 压缩剥离（红线）/ fork 后媒体可用 / 存量回放兼容 /
+provider `image_max_bytes` 请求期降级 / `images.max_bytes` 读时拒绝 /
+字节缺失降级（UNAVAILABLE 占位）。
 
 断言只锚定四个取证面：**事件时间线**（WS 事件 data）、**假 Provider 请求留档**
 （`probe.context` / `probe.request`）、**history.jsonl**（独立解析）、**文件系统**
@@ -80,6 +82,10 @@ FAST_EVICTION: dict[str, Any] = {
 
 #: 高水位量子驱逐场景的 images 配置（4 张图 → 计数超 1 → 按量子 2 批量丢最旧）。
 EVICTION_IMAGES: dict[str, Any] = {"max_images": 3, "count_quantum": 2}
+
+#: 单图字节上限场景的旋钮值：64×64 的 `png()` 输出 197 B —— 超过 cap 且两端都
+#: < 1 KiB（`format_size` 走 "N bytes" 字面形态，断言不依赖 KB 舍入）。
+IMAGE_BYTES_CAP = 100
 
 #: 状态翻转的轮询预算（TTL 1s + 扫描 0.5s，留足抖动余量）。
 POLL_DEADLINE = 20.0
@@ -700,3 +706,157 @@ async def test_legacy_history_without_media_resumes(probe: Probe) -> None:
     assert not any(placeholder_texts(m) for m in messages_of(context.body))
     view.assert_chain_invariants()
     view.assert_tool_pairing()
+
+
+# ── 场景 9：provider image_max_bytes（请求期兜底降级） ──────────────
+
+
+@pytest.mark.probe_env(
+    models=[VISION_SPEC], provider_extra={"image_max_bytes": IMAGE_BYTES_CAP}
+)
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_provider_image_max_bytes_degrades_too_large(probe: Probe) -> None:
+    """provider `image_max_bytes`：工具照常入库，请求期该位降级为 too_large 占位。
+
+    与 `images.max_bytes`（读时拒绝）互补：这条链路只在请求期生效——工具仍是
+    `tool_success=true` 且带引用、字节照常落盘，序列化层用占位文本替换图片
+    （原信封 part 一个字节都不动）。
+    """
+    data = png(64, 64, tint=0x99)
+    assert len(data) > IMAGE_BYTES_CAP, len(data)  # 前提：图片确实超过 cap
+    path = write_image(probe, "cap.png", data)
+    envelope = envelope_text(path, data, 64, 64)
+    ref = expected_ref("cap.png", data, 64, 64)
+
+    probe.register(
+        VISION_MODEL,
+        Turn.of(tool_calls=[ToolCall("ReadImage", {"path": "cap.png"})]),
+        Turn.of(text="noted"),
+    )
+    session = await probe.session(model=VISION_MODEL, tools=["ReadImage"])
+    result = await session.chat("look")
+    assert result.data["subtype"] == "success", result.data
+
+    # ① 工具侧不受影响：成功事件、引用照带、字节照常入内容寻址池。
+    call_events = session.watch.events(
+        "tool_call_result", where={"tool_name": "ReadImage"}
+    )
+    assert len(call_events) == 1, [event.index for event in call_events]
+    call_event = call_events[0]
+    assert call_event.data["tool_success"] is True, call_event.data
+    assert call_event.data["tool_result"] == envelope, call_event.data["tool_result"]
+    assert call_event.data["tool_media"] == [ref], call_event.data["tool_media"]
+    object_path = media_object_path(probe, ref["id"])
+    assert object_path.is_file(), sorted(
+        item.relative_to(probe.env.sessions_path).as_posix()
+        for item in probe.env.sessions_path.rglob("*")
+    )
+    assert media_id(object_path.read_bytes()) == ref["id"]
+
+    # ② 请求期降级：原信封 part 不动，其后追加 too_large 占位；整条请求无 image part。
+    context = probe.context(VISION_MODEL, 1)
+    tools = tool_messages(context.body)
+    assert len(tools) == 1, context.describe()
+    parts = content_parts(tools[0])
+    assert [part["type"] for part in parts] == ["text", "text"], parts
+    assert parts[0]["text"] == envelope, parts[0]
+    assert parts[1]["text"] == PLACEHOLDER_TOO_LARGE, parts
+    assert not bearer_messages(context.body), context.describe()
+
+
+# ── 场景 10：images.max_bytes（读时拒绝 + 零写入） ─────────────────
+
+
+@pytest.mark.probe_env(models=[VISION_SPEC], images={"max_bytes": IMAGE_BYTES_CAP})
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_images_max_bytes_refuses_read_without_writing(probe: Probe) -> None:
+    """`images.max_bytes`：超限图片在工具层被拒（文案含大小与上限）；媒体池零写入。"""
+    data = png(64, 64, tint=0xAA)
+    assert len(data) > IMAGE_BYTES_CAP, len(data)
+    write_image(probe, "too-big.png", data)
+
+    probe.register(
+        VISION_MODEL,
+        Turn.of(tool_calls=[ToolCall("ReadImage", {"path": "too-big.png"})]),
+        Turn.of(text="understood"),
+    )
+    session = await probe.session(model=VISION_MODEL, tools=["ReadImage"])
+    result = await session.chat("look")
+    assert result.data["subtype"] == "success", result.data
+
+    call_events = session.watch.events(
+        "tool_call_result", where={"tool_name": "ReadImage"}
+    )
+    assert len(call_events) == 1, [event.index for event in call_events]
+    call_event = call_events[0]
+    assert call_event.data["tool_success"] is False, call_event.data
+    message = call_event.data["tool_result"]
+    # 文案把"实际大小 / 上限 / 配置键"都点名（两端 < 1 KiB → "N bytes" 形态）。
+    assert (
+        f"{len(data)} bytes exceeds the {IMAGE_BYTES_CAP} bytes per-image limit"
+        in message
+    ), message
+    assert "images.max_bytes" in message, message
+    assert call_event.data["tool_media"] == [], call_event.data
+
+    # 拒绝发生在入库之前：媒体池目录整个不存在（零写入）。
+    assert not (probe.env.sessions_path / ".media").exists()
+
+    # 请求里也没有 image part / 占位（工具没产出引用，请求链上无任何媒体）。
+    for entry in probe.requests_for(VISION_MODEL):
+        body = json.dumps(entry.body)
+        assert "image_url" not in body, entry.describe()
+        for placeholder in PLACEHOLDERS:
+            assert placeholder not in body, (entry.describe(), placeholder)
+
+
+# ── 场景 11：字节缺失降级（UNAVAILABLE 占位） ─────────────────────
+
+
+@pytest.mark.probe_env(models=[VISION_SPEC])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_missing_media_object_degrades_to_unavailable(probe: Probe) -> None:
+    """存储故障：删除 `.media` 对象后，下一轮该位为 UNAVAILABLE 占位且请求照常完成。
+
+    路径：读图入库（基线请求确认图片确实在线上）→ `unlink()` 内容寻址对象 →
+    再发一轮 → 序列化层读到缺失 → WARN + 占位（不抛、不打断请求）。
+    """
+    data = png(2, 4, tint=0xBB)
+    path = write_image(probe, "gone.png", data)
+    envelope = envelope_text(path, data, 2, 4)
+    ref_id = media_id(data)
+
+    probe.register(
+        VISION_MODEL,
+        Turn.of(tool_calls=[ToolCall("ReadImage", {"path": "gone.png"})]),
+        Turn.of(text="seen"),
+        Turn.of(text="still fine"),
+    )
+    session = await probe.session(model=VISION_MODEL, tools=["ReadImage"])
+    await session.chat("look")
+
+    # 基线：图片以 image part 发射（否则"降级"断言没有意义）。
+    before = probe.context(VISION_MODEL, 1)
+    assert len(bearer_messages(before.body)) == 1, before.describe()
+
+    # 存储故障：对象文件被删除（工具早已把它写进内容寻址池）。
+    object_path = media_object_path(probe, ref_id)
+    assert object_path.is_file(), object_path
+    object_path.unlink()
+
+    # 再发一轮：该位降级为 UNAVAILABLE 占位，原信封文本不动，请求照常完成。
+    result = await session.chat("again")
+    assert result.data["subtype"] == "success", result.data
+    session.watch.assert_never("error")
+
+    context = probe.context(VISION_MODEL, 2)
+    assert not bearer_messages(context.body), context.describe()
+    tools = tool_messages(context.body)
+    assert len(tools) == 1, context.describe()
+    parts = content_parts(tools[0])
+    assert [part["type"] for part in parts] == ["text", "text"], parts
+    assert parts[0]["text"] == envelope, parts[0]
+    assert parts[1]["text"] == PLACEHOLDER_UNAVAILABLE, parts

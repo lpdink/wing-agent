@@ -20,6 +20,7 @@ from typing import cast
 
 import pytest
 import pytest_asyncio
+import yaml
 
 from wing.agent import ToolContext
 from wing.config import ModelCapabilities, ModelSpec
@@ -106,6 +107,18 @@ def _ctx(
     media: MediaAccess | None = None,
 ) -> ToolContext:
     return cast(ToolContext, _StubCtx(vision=vision, model=model, media=media))
+
+
+def _example_yaml_snippet(msg: str) -> str:
+    """从门禁文案里取出可照抄的 config.yaml 片段（剥掉文案的两空格缩进）。"""
+    lines = msg.splitlines()
+    start = lines.index("  providers:")
+    end = next(
+        index
+        for index in range(start, len(lines))
+        if lines[index].strip().startswith("capabilities:")
+    )
+    return "\n".join(line[2:] for line in lines[start : end + 1])
 
 
 ########## 1. 视觉能力门禁（在 I/O 之前）
@@ -223,12 +236,37 @@ class TestVisionGate:
             await read_image(str(image), ctx=_ctx(vision=False, model="ghost-model"))
         msg = str(ei.value)
         assert "ghost-model" in msg
-        assert "- name: ghost-model" in msg  # 示例用同一模型名
+        assert '- name: "ghost-model"' in msg  # 示例用同一模型名（YAML 引用形态）
         # 占位不是合法 provider 名（不会被照抄成真实配置），并有 Note 说明
         assert "- name: <your-provider>" in msg
         assert "not declared by any provider" in msg
         assert "the provider this session actually uses" in msg
         assert "Alternatively" not in msg
+
+    @pytest.mark.asyncio
+    async def test_example_yaml_survives_metachar_model_names(
+        self, tmp_path: Path, _mock_config
+    ):
+        """模型名含 YAML 元字符（`:` / `#` / 前导 `*`）时示例片段仍可解析（N2）。
+
+        裸插值会让 `- name: openai:gpt-4o` 这类行直接语法错误（或把 `#` 后
+        截断），模型照抄即拿到配置错误——引用形态必须让它逐字可解析。
+        """
+        image = tmp_path / "shot.png"
+        write_image(image, png_bytes(4, 4))
+
+        for model in ("openai:gpt-4o", "a #b", "*star"):
+            with pytest.raises(ToolError) as ei:
+                await read_image(str(image), ctx=_ctx(vision=False, model=model))
+            snippet = _example_yaml_snippet(str(ei.value))
+            assert yaml.safe_load(snippet) == {
+                "providers": [
+                    {
+                        "name": "<your-provider>",
+                        "models": [{"name": model, "capabilities": {"vision": True}}],
+                    }
+                ]
+            }
 
 
 ########## 2. 成功路径
@@ -424,6 +462,42 @@ class TestFileValidation:
 
         with pytest.raises(ToolError, match="truncated or corrupt"):
             await read_image(str(image), ctx=_ctx(vision=True))
+
+    @pytest.mark.asyncio
+    async def test_apple_cgbi_png_reports_variant_not_corrupt(self, tmp_path: Path):
+        """Apple CgBI 变体：报"变体需转换"，绝不误报"损坏"（S1）。
+
+        CgBI = 签名后紧跟 CgBI chunk（IHDR 在偏移 28）——文件合法可显示，
+        只是标准布局解析器读不到尺寸。归因必须指向变体本身 + 转换命令。
+        """
+        image = tmp_path / "apple.png"
+        image.write_bytes(
+            b"\x89PNG\r\n\x1a\n"
+            + struct.pack(">I", 4)
+            + b"CgBI"
+            + b"PROF"  # CgBI chunk payload
+            + b"\x00\x00\x00\x00"  # chunk CRC
+            + b"\x00" * 16
+        )
+
+        with pytest.raises(ToolError) as ei:
+            await read_image(str(image), ctx=_ctx(vision=True))
+
+        msg = str(ei.value)
+        assert "CgBI" in msg
+        assert "Apple" in msg
+        assert "truncated or corrupt" not in msg
+        # 转换示例必须可照抄（路径 shell 引用）
+        argv = shlex.split(msg.split("e.g.:", 1)[1].strip())
+        assert argv == [
+            "sips",
+            "-s",
+            "format",
+            "png",
+            str(image),
+            "--out",
+            str(image) + ".png",
+        ]
 
     @pytest.mark.asyncio
     async def test_empty_file(self, tmp_path: Path):
