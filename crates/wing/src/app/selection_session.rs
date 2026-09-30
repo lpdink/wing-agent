@@ -295,10 +295,14 @@ impl App {
     /// the reference behaviour, and the same reason the chat press only
     /// records an anchor.
     pub(super) fn composer_press(&mut self, column: u16, row: u16) -> MouseOutcome {
-        let Some(point) = pointer::point(&self.input, self.input.rendered_area(), column, row)
+        // `press_hit`, not `point`: a press on the card's frame is nobody's
+        // (the draft's rows are the only ones that place a cursor), while a
+        // drag that started here keeps its clamping mapping below.
+        let Some(hit) = pointer::press_hit(&self.input, self.input.rendered_area(), column, row)
         else {
             return MouseOutcome::Ignored;
         };
+        let point = hit.point;
         // No `chat.unfollow()` here: the composer selection has nothing to do
         // with the chat's follow contract, and no edge auto-scroll either — a
         // composer press even disarms a stale chat deadline (`begin`).
@@ -341,9 +345,9 @@ impl App {
         let dragged = self.selection.anchor() != Some(hit.point);
         if !dragged {
             self.cancel_selection();
-            let area = self.input.rendered_area();
+            let chrome = self.input.chrome();
             self.input
-                .set_cursor_from_visual(area.width, hit.vis_row, hit.display_col);
+                .set_cursor_from_visual(chrome, hit.vis_row, hit.display_col);
             return MouseOutcome::Immediate;
         }
         let bounds = self.selection.release(hit.focus());

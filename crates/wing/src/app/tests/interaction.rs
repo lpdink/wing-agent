@@ -6,7 +6,6 @@
 use super::support::*;
 use crate::app::*;
 use crate::ui::chat_view::ChatCell;
-use crate::ui::input_area::helpers::PREFIX_WIDTH;
 
 #[test]
 fn test_drag_select_copies_the_selected_text() {
@@ -376,7 +375,8 @@ fn test_press_in_the_composer_starts_a_composer_selection() {
     let mut terminal = test_terminal(40, 12);
     draw(&mut app, &mut terminal);
     let composer = app.input.rendered_area();
-    let at = (composer.x + 4, composer.y);
+    let (_tx, ty, _rows) = composer_text(&app);
+    let at = (composer.x + 4, ty);
     assert!(app.composer_contains(at.0, at.1));
     assert!(
         !app.chat.contains_screen(at.0, at.1),
@@ -406,16 +406,16 @@ fn test_composer_drag_selects_and_copies_the_draft() {
     let mut app = app_with_draft("hello world");
     let mut terminal = test_terminal(40, 12);
     draw(&mut app, &mut terminal);
-    let composer = app.input.rendered_area();
+    let (tx, ty, _rows) = composer_text(&app);
     assert_eq!(app.input.line_count(), 1);
 
     assert_eq!(
-        app.handle_mouse(press((composer.x + PREFIX_WIDTH, composer.y))),
+        app.handle_mouse(press((tx, ty))),
         MouseOutcome::Immediate,
         "a press inside the composer starts a selection"
     );
     assert_eq!(
-        app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 4, composer.y))),
+        app.handle_mouse(drag((tx + 4, ty))),
         MouseOutcome::Coalesced,
         "a drag is a flood: coalesced by the frame gate"
     );
@@ -424,15 +424,10 @@ fn test_composer_drag_selects_and_copies_the_draft() {
     // The drag frame highlights "hello" — five cells right after the
     // prefix, and nothing outside the composer (the `> ` prompt included).
     let reversed = reversed_cells(&terminal);
-    assert_eq!(
-        reversed,
-        (0..5)
-            .map(|dx| (composer.x + PREFIX_WIDTH + dx, composer.y))
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(reversed, (0..5).map(|dx| (tx + dx, ty)).collect::<Vec<_>>());
 
     assert_eq!(
-        app.handle_mouse(release((composer.x + PREFIX_WIDTH + 4, composer.y))),
+        app.handle_mouse(release((tx + 4, ty))),
         MouseOutcome::Immediate
     );
     match app.drain_intents().as_slice() {
@@ -452,16 +447,16 @@ fn test_composer_drag_selects_and_copies_the_draft() {
 
 #[test]
 fn test_composer_drag_across_a_soft_wrap_copies_one_line() {
-    // Width 20 → a text area of 18 columns: 24 characters fold into two
-    // visual rows (18 + 6).
+    // Width 26 → a text area of 18 columns (the float takes 2, the card's
+    // frame 6): 24 characters fold into two visual rows (18 + 6).
     let mut app = app_with_draft("abcdefghijklmnopqrstuvwx");
-    let mut terminal = test_terminal(20, 12);
+    let mut terminal = test_terminal(26, 12);
     draw(&mut app, &mut terminal);
-    let composer = app.input.rendered_area();
-    assert_eq!(composer.height, 2, "the draft wraps into two visual rows");
+    let (tx, ty, rows) = composer_text(&app);
+    assert_eq!(rows, 2, "the draft wraps into two visual rows");
 
-    let from = (composer.x + PREFIX_WIDTH + 2, composer.y);
-    let to = (composer.x + PREFIX_WIDTH + 3, composer.y + 1);
+    let from = (tx + 2, ty);
+    let to = (tx + 3, ty + 1);
     app.handle_mouse(press(from));
     app.handle_mouse(drag(to));
     draw(&mut app, &mut terminal);
@@ -472,8 +467,8 @@ fn test_composer_drag_across_a_soft_wrap_copies_one_line() {
     assert_eq!(
         reversed,
         (2..18)
-            .map(|col| (composer.x + PREFIX_WIDTH + col, composer.y))
-            .chain((0..4).map(|col| (composer.x + PREFIX_WIDTH + col, composer.y + 1)))
+            .map(|col| (tx + col, ty))
+            .chain((0..4).map(|col| (tx + col, ty + 1)))
             .collect::<Vec<_>>()
     );
 
@@ -489,24 +484,56 @@ fn test_composer_drag_across_a_soft_wrap_copies_one_line() {
 
 #[test]
 fn test_composer_drag_beyond_the_region_clamps_to_the_visible_window() {
-    // Width 20 → a text area of 18 columns: 24 characters fold into two
-    // visual rows (18 + 6).
+    // Width 26 → a text area of 18 columns (the float takes 2, the card's
+    // frame 6): 24 characters fold into two visual rows (18 + 6).
     let mut app = app_with_draft("abcdefghijklmnopqrstuvwx");
-    let mut terminal = test_terminal(20, 12);
+    let mut terminal = test_terminal(26, 12);
     draw(&mut app, &mut terminal);
-    let composer = app.input.rendered_area();
-    assert_eq!(composer.height, 2);
+    let (tx, ty, rows) = composer_text(&app);
+    assert_eq!(rows, 2);
 
     // Press on the second row, drag up into the chat band: the pointer
     // stays mapped into the press's region and clamps to its first visible
     // row, so the selection grows to the top of the window.
-    app.handle_mouse(press((composer.x + PREFIX_WIDTH + 3, composer.y + 1)));
-    assert!(app.mouse_drag(composer.x + PREFIX_WIDTH + 1, composer.y - 8));
+    app.handle_mouse(press((tx + 3, ty + 1)));
+    assert!(app.mouse_drag(tx + 1, ty - 8));
     assert_eq!(app.selection.region(), Some(SelectionRegion::Composer));
-    app.handle_mouse(release((composer.x + PREFIX_WIDTH + 1, composer.y - 8)));
+    app.handle_mouse(release((tx + 1, ty - 8)));
     match app.drain_intents().as_slice() {
         [AppIntent::CopyToClipboard(text)] => assert_eq!(text, "cdefghijklmnopqrstu"),
         other => panic!("expected the clamped draft fragment, got {other:?}"),
+    }
+}
+
+/// A gesture that started in the draft keeps meaning the draft when the
+/// pointer overshoots onto the card's own frame: the border is not text, but
+/// it is not a hole either — releasing on it must still finish the selection
+/// (a drag that never leaves the card is the common case, and the card is
+/// only three rows tall for a one-line draft).
+#[test]
+fn test_composer_release_on_the_card_frame_still_copies() {
+    let mut app = app_with_draft("hello world");
+    let mut terminal = test_terminal(40, 12);
+    draw(&mut app, &mut terminal);
+    let composer = app.input.rendered_area();
+    let (tx, ty, _rows) = composer_text(&app);
+
+    for (label, row) in [
+        ("the meta rail", composer.bottom() - 1),
+        ("the top rail", composer.y),
+        ("above the card", composer.y - 1),
+        ("below the card", composer.bottom()),
+    ] {
+        app.selection = Default::default();
+        app.handle_mouse(press((tx, ty)));
+        app.handle_mouse(drag((tx + 4, row)));
+        app.handle_mouse(release((tx + 4, row)));
+        match app.drain_intents().as_slice() {
+            [AppIntent::CopyToClipboard(text)] => {
+                assert_eq!(text, "hello", "{label}: the selection survived")
+            }
+            other => panic!("{label}: expected the draft fragment, got {other:?}"),
+        }
     }
 }
 
@@ -516,10 +543,11 @@ fn test_composer_click_places_the_cursor() {
     let mut terminal = test_terminal(40, 12);
     draw(&mut app, &mut terminal);
     let composer = app.input.rendered_area();
+    let (tx, ty, _rows) = composer_text(&app);
     // `set_text` leaves the cursor at the end, so the click is a visible move.
     assert_eq!((app.input.cursor_row, app.input.cursor_col), (0, 11));
 
-    let at = (composer.x + PREFIX_WIDTH + 6, composer.y);
+    let at = (tx + 6, ty);
     assert_eq!(app.handle_mouse(press(at)), MouseOutcome::Immediate);
     assert_eq!(
         app.handle_mouse(release(at)),
@@ -549,11 +577,12 @@ fn test_composer_click_on_a_wide_character_places_the_cursor_before_it() {
     let mut terminal = test_terminal(40, 12);
     draw(&mut app, &mut terminal);
     let composer = app.input.rendered_area();
+    let (tx, ty, _rows) = composer_text(&app);
     // "世" occupies the fifth and sixth cell of the text area; either cell
     // resolves to the position before it (a char index has no half-cell
     // precision).
     for column in [4usize, 5] {
-        let at = (composer.x + PREFIX_WIDTH + column as u16, composer.y);
+        let at = (tx + column as u16, ty);
         app.handle_mouse(press(at));
         app.handle_mouse(release(at));
         assert_eq!(
@@ -583,14 +612,14 @@ fn test_composer_click_on_a_scrolled_window_places_the_cursor() {
     app.input.set_text(&draft);
     let mut terminal = test_terminal(20, 12);
     draw(&mut app, &mut terminal);
-    let composer = app.input.rendered_area();
+    let (tx, ty, rows) = composer_text(&app);
     assert!(
         app.input.vertical_scroll > 0,
         "the window scrolled to keep the cursor visible"
     );
 
-    let window_row = composer.height - 1;
-    let at = (composer.x + PREFIX_WIDTH + 2, composer.y + window_row);
+    let window_row = rows - 1;
+    let at = (tx + 2, ty + window_row);
     app.handle_mouse(press(at));
     app.handle_mouse(release(at));
 
@@ -606,16 +635,16 @@ fn test_composer_empty_draft_drag_copies_nothing() {
     let mut app = app_with_draft("");
     let mut terminal = test_terminal(40, 12);
     draw(&mut app, &mut terminal);
-    let composer = app.input.rendered_area();
+    let (tx, ty, _rows) = composer_text(&app);
 
-    app.handle_mouse(press((composer.x + PREFIX_WIDTH, composer.y)));
-    app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 6, composer.y)));
+    app.handle_mouse(press((tx, ty)));
+    app.handle_mouse(drag((tx + 6, ty)));
     draw(&mut app, &mut terminal);
     assert!(
         reversed_cells(&terminal).is_empty(),
         "the placeholder must not be highlighted"
     );
-    app.handle_mouse(release((composer.x + PREFIX_WIDTH + 6, composer.y)));
+    app.handle_mouse(release((tx + 6, ty)));
     assert!(
         app.drain_intents().is_empty(),
         "the placeholder must not be copied"
@@ -630,14 +659,11 @@ fn test_composer_drag_over_line_breaks_copies_nothing() {
     let mut app = app_with_draft("ab\n");
     let mut terminal = test_terminal(40, 12);
     draw(&mut app, &mut terminal);
-    let composer = app.input.rendered_area();
-    assert_eq!(
-        composer.height, 2,
-        "the empty second line is a row of its own"
-    );
+    let (tx, ty, rows) = composer_text(&app);
+    assert_eq!(rows, 2, "the empty second line is a row of its own");
 
-    let from = (composer.x + PREFIX_WIDTH + 2, composer.y);
-    let to = (composer.x + PREFIX_WIDTH, composer.y + 1);
+    let from = (tx + 2, ty);
+    let to = (tx, ty + 1);
     app.handle_mouse(press(from));
     app.handle_mouse(drag(to));
     draw(&mut app, &mut terminal);
@@ -657,8 +683,8 @@ fn test_composer_same_cell_jitter_is_still_a_click() {
     let mut app = app_with_draft("hello world");
     let mut terminal = test_terminal(40, 12);
     draw(&mut app, &mut terminal);
-    let composer = app.input.rendered_area();
-    let at = (composer.x + PREFIX_WIDTH + 6, composer.y);
+    let (tx, ty, _rows) = composer_text(&app);
+    let at = (tx + 6, ty);
     assert_eq!((app.input.cursor_row, app.input.cursor_col), (0, 11));
 
     // Trackpads report motion inside the same cell: click vs. drag is
@@ -678,7 +704,7 @@ fn test_composer_same_cell_jitter_is_still_a_click() {
     let mut app = app_with_draft("hello world");
     draw(&mut app, &mut terminal);
     app.handle_mouse(press(at));
-    app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 3, composer.y)));
+    app.handle_mouse(drag((tx + 3, ty)));
     app.handle_mouse(drag(at));
     assert_eq!(app.handle_mouse(release(at)), MouseOutcome::Immediate);
     assert_eq!((app.input.cursor_row, app.input.cursor_col), (0, 6));
@@ -695,10 +721,10 @@ fn test_wheel_scrolls_the_chat_during_a_composer_selection() {
     app.chat.push(ChatCell::UserMessage(text));
     let mut terminal = test_terminal(40, 12);
     draw(&mut app, &mut terminal);
-    let composer = app.input.rendered_area();
+    let (tx, ty, _rows) = composer_text(&app);
 
-    app.handle_mouse(press((composer.x + PREFIX_WIDTH, composer.y)));
-    app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 4, composer.y)));
+    app.handle_mouse(press((tx, ty)));
+    app.handle_mouse(drag((tx + 4, ty)));
     let before = app.chat.scroll_position();
     assert!(before >= WHEEL_SCROLL_LINES, "the view has room to scroll");
 
@@ -709,7 +735,7 @@ fn test_wheel_scrolls_the_chat_during_a_composer_selection() {
     assert!(app.selection.is_press_active());
     assert_eq!(app.selection.region(), Some(SelectionRegion::Composer));
 
-    app.handle_mouse(release((composer.x + PREFIX_WIDTH + 4, composer.y)));
+    app.handle_mouse(release((tx + 4, ty)));
     match app.drain_intents().as_slice() {
         [AppIntent::CopyToClipboard(text)] => assert_eq!(text, "hello"),
         other => panic!("expected the draft fragment, got {other:?}"),
@@ -767,9 +793,9 @@ fn test_composer_edit_aborts_the_selection() {
         let mut app = app_with_draft("hello world");
         let mut terminal = test_terminal(40, 12);
         draw(&mut app, &mut terminal);
-        let composer = app.input.rendered_area();
-        app.handle_mouse(press((composer.x + PREFIX_WIDTH, composer.y)));
-        app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 4, composer.y)));
+        let (tx, ty, _rows) = composer_text(&app);
+        app.handle_mouse(press((tx, ty)));
+        app.handle_mouse(drag((tx + 4, ty)));
         assert!(app.selection.is_press_active(), "{label}: drag in flight");
         app.drain_intents();
 
@@ -795,7 +821,7 @@ fn test_composer_edit_aborts_the_selection() {
             "{label}: the highlight must be cleared"
         );
         assert_eq!(
-            app.handle_mouse(release((composer.x + PREFIX_WIDTH + 4, composer.y))),
+            app.handle_mouse(release((tx + 4, ty))),
             MouseOutcome::Ignored,
             "{label}: a release after the abort is a no-op"
         );

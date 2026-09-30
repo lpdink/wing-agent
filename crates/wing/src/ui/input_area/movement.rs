@@ -1,7 +1,7 @@
 //! Cursor movement operations for InputArea.
 
 use super::InputArea;
-use super::helpers::PREFIX_WIDTH;
+use super::chrome::Chrome;
 use super::helpers::is_placeholder_line;
 use super::wrap;
 
@@ -92,9 +92,9 @@ impl InputArea {
         }
     }
 
-    /// Build visual rows for movement computation.
-    fn visual_rows(&self, available_width: u16) -> Vec<wrap::VisualRow> {
-        let text_width = available_width.saturating_sub(PREFIX_WIDTH) as usize;
+    /// Build visual rows for movement computation (the rendered chrome).
+    fn visual_rows(&self, chrome: Chrome) -> Vec<wrap::VisualRow> {
+        let text_width = chrome.text_width as usize;
         wrap::build_visual_rows(&self.lines, text_width.max(1))
     }
 
@@ -123,8 +123,8 @@ impl InputArea {
         // None → all rows in that direction are placeholders — no-op.
     }
 
-    pub(crate) fn move_up(&mut self, available_width: u16) {
-        let vis_rows = self.visual_rows(available_width);
+    pub(crate) fn move_up(&mut self, chrome: Chrome) {
+        let vis_rows = self.visual_rows(chrome);
         let (vis_row, vis_col) =
             wrap::logical_to_visual(&vis_rows, self.cursor_row, self.cursor_col);
         let desired = self.desired_col.unwrap_or(vis_col);
@@ -136,8 +136,8 @@ impl InputArea {
         self.move_to_visual_row(&vis_rows, vis_row - 1, desired, Direction::Up);
     }
 
-    pub(crate) fn move_down(&mut self, available_width: u16) {
-        let vis_rows = self.visual_rows(available_width);
+    pub(crate) fn move_down(&mut self, chrome: Chrome) {
+        let vis_rows = self.visual_rows(chrome);
         let (vis_row, vis_col) =
             wrap::logical_to_visual(&vis_rows, self.cursor_row, self.cursor_col);
         let desired = self.desired_col.unwrap_or(vis_col);

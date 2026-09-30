@@ -276,37 +276,45 @@ impl TurnUsage {
         self.prompt_tokens == 0 && self.completion_tokens == 0
     }
 
-    /// Render as a compact one-liner.
-    pub fn to_spans(&self) -> Vec<Span<'static>> {
+    /// One entry per number, most useful first.
+    ///
+    /// The composer's meta rail joins them with ` · ` and drops whole entries
+    /// from the tail when the border runs out of room — so the order below is
+    /// also the order things disappear in on a narrow terminal. The entries
+    /// take the palette's secondary color, exactly like the rail's own rules
+    /// and read-outs: one row, one idea of "quiet".
+    pub fn items(&self, palette: &crate::config::ThemePalette) -> Vec<Vec<Span<'static>>> {
         if self.is_empty() {
             return Vec::new();
         }
-        let dim = Style::default().add_modifier(Modifier::DIM);
-        let mut spans: Vec<Span<'static>> = Vec::new();
+        let dim = Style::default().fg(palette.dim);
+        let mut items: Vec<Vec<Span<'static>>> = Vec::new();
 
-        spans.push(Span::styled(
+        items.push(vec![Span::styled(
             format!("{} in", fmt_tokens(self.prompt_tokens)),
             dim,
-        ));
-        spans.push(Span::styled(" · ", dim));
-        spans.push(Span::styled(
+        )]);
+        items.push(vec![Span::styled(
             format!("{} out", fmt_tokens(self.completion_tokens)),
             dim,
-        ));
+        )]);
         if self.cached_tokens > 0 && self.prompt_tokens > 0 {
             let hit_rate = self.cached_tokens as f64 / self.prompt_tokens as f64 * 100.0;
-            spans.push(Span::styled(" · ", dim));
-            spans.push(Span::styled(format!("{hit_rate:.1}% cache"), dim));
+            items.push(vec![Span::styled(format!("{hit_rate:.1}% cache"), dim)]);
         }
         if self.tokens_per_sec > 0.0 {
-            spans.push(Span::styled(" · ", dim));
-            spans.push(Span::styled(format!("{:.1} t/s", self.tokens_per_sec), dim));
+            items.push(vec![Span::styled(
+                format!("{:.1} t/s", self.tokens_per_sec),
+                dim,
+            )]);
         }
         if self.ttft_ms > 0.0 {
-            spans.push(Span::styled(" · ", dim));
-            spans.push(Span::styled(format!("{:.0}ms ttft", self.ttft_ms), dim));
+            items.push(vec![Span::styled(
+                format!("{:.0}ms ttft", self.ttft_ms),
+                dim,
+            )]);
         }
-        spans
+        items
     }
 }
 
@@ -327,11 +335,15 @@ mod tests {
     fn test_turn_usage_empty() {
         let usage = TurnUsage::default();
         assert!(usage.is_empty());
-        assert!(usage.to_spans().is_empty());
+        assert!(
+            usage
+                .items(&crate::config::ThemePalette::default())
+                .is_empty()
+        );
     }
 
     #[test]
-    fn test_turn_usage_renders() {
+    fn test_turn_usage_items_are_ordered_by_usefulness() {
         let usage = TurnUsage {
             prompt_tokens: 1200,
             completion_tokens: 340,
@@ -339,14 +351,37 @@ mod tests {
             tokens_per_sec: 42.5,
             ttft_ms: 320.0,
         };
-        let spans = usage.to_spans();
-        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("1.2k in"), "got: {text}");
-        assert!(text.contains("340 out"), "got: {text}");
-        // 800/1200 = 66.67%
-        assert!(text.contains("66.7% cache"), "got: {text}");
-        assert!(text.contains("42.5 t/s"), "got: {text}");
-        assert!(text.contains("320ms ttft"), "got: {text}");
+        let items: Vec<String> = usage
+            .items(&crate::config::ThemePalette::default())
+            .iter()
+            .map(|item| item.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(
+            items,
+            vec![
+                "1.2k in",
+                "340 out",
+                // 800/1200 = 66.67%
+                "66.7% cache",
+                "42.5 t/s",
+                "320ms ttft",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_turn_usage_items_skip_what_the_turn_never_reported() {
+        let usage = TurnUsage {
+            prompt_tokens: 900,
+            completion_tokens: 12,
+            ..TurnUsage::default()
+        };
+        let items: Vec<String> = usage
+            .items(&crate::config::ThemePalette::default())
+            .iter()
+            .map(|item| item.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(items, vec!["900 in", "12 out"]);
     }
 
     #[test]

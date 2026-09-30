@@ -25,9 +25,11 @@
 //! `ui::scrollbar` + `App`; the height cache lives in `ui::cached_cell`.
 //!
 //! **Public API**: the split keeps `crate::ui::chat_view::{ChatCell, ChatView,
-//! ChatViewWidget, ChatGeometry, FrameLink, PendingMessage,
-//! render_info_separator}` exactly as they were — names, signatures and paths.
-//! `app/**` is not allowed to notice this refactor.
+//! ChatViewWidget, ChatGeometry, FrameLink, PendingMessage}` exactly as they
+//! were — names, signatures and paths. `app/**` is not allowed to notice this
+//! refactor. (The scroll / usage read-out that used to live here as
+//! `render_info_separator` is now the composer's meta rail — see
+//! `ui::input_area::chrome`.)
 //!
 //! Width-aware virtualization: each cell's height comes from [`CachedCell`]
 //! (generation-invalidated cache), and the widget walks the cells that
@@ -47,7 +49,6 @@ pub use cell::PendingMessage;
 pub use link::FrameLink;
 pub use viewport::ChatGeometry;
 pub use viewport::ChatViewWidget;
-pub(crate) use viewport::render_info_separator;
 
 use ratatui::text::Line;
 

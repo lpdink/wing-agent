@@ -223,8 +223,10 @@ pub(super) fn reversed_cells(
     cells
 }
 
-/// App with a draft in the composer, no chat header: the composer's row 0
-/// renders `> ` at the composer's left edge and the draft right after it.
+/// App with a draft in the composer, no chat header: the draft is the only
+/// content the chat lacks, so a frame assertion reads the card alone.
+/// [`composer_text`] returns the cell the draft starts at (`❯ ` is left of
+/// it, the card's border left of that).
 pub(super) fn app_with_draft(draft: &str) -> App {
     let mut app = test_app();
     app.chat.set_header(Vec::new());
@@ -243,4 +245,27 @@ pub(super) fn app_with_tall_message() -> App {
         .join("\n");
     app.chat.push(ChatCell::UserMessage(text));
     app
+}
+
+/// The composer's text area in the last drawn frame: `(x, y, rows)`.
+///
+/// The card's frame is not text: a pointer on it is inert and the draft never
+/// lives there, so tests that click or type into the composer address this —
+/// the card's own rect stays `InputArea::rendered_area`.
+pub(super) fn composer_text(app: &App) -> (u16, u16, u16) {
+    let chrome = crate::ui::input_area::chrome::Chrome::of(app.input.rendered_area());
+    let (x, y) = app.input.text_origin();
+    (x, y, chrome.text_rows)
+}
+
+/// The whole frame as text, one numbered row per line (assertion messages).
+pub(super) fn frame_text(buf: &ratatui::buffer::Buffer) -> String {
+    (buf.area.y..buf.area.bottom())
+        .map(|row| {
+            let line: String = (buf.area.x..buf.area.right())
+                .map(|x| buf[(x, row)].symbol())
+                .collect();
+            format!("{row:>2} |{line}|\n")
+        })
+        .collect()
 }

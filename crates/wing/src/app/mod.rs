@@ -51,16 +51,16 @@ use crate::tui::TermEvent;
 use crate::tui::WingTerminal;
 use crate::ui::chat_view::ChatView;
 use crate::ui::chat_view::ChatViewWidget;
-use crate::ui::chat_view::render_info_separator;
 use crate::ui::header::build_header_lines;
+use crate::ui::input_area::ActivityRail;
+use crate::ui::input_area::ComposerWidget;
 use crate::ui::input_area::InputArea;
-use crate::ui::input_area::InputAreaWidget;
+use crate::ui::input_area::MetaRail;
 use crate::ui::input_area::cursor_screen_pos;
 use crate::ui::input_area::pointer;
 use crate::ui::popup::selection::SelectionPopup;
 use crate::ui::scrollbar;
 use crate::ui::selection::SelectionRegion;
-use crate::ui::spinner::WorkingIndicatorWidget;
 use crate::ui::status_bar::StatusBar;
 use crate::ui::status_bar::StatusData;
 use crate::ui::toast::Toast;
@@ -369,21 +369,24 @@ impl App {
                 self.cancel_selection();
             }
 
-            // Layout: status (1) | chat (fill) | [working] | info bar | input | [popup].
-            // The composer (working line + info separator + input + popup) is a
-            // fixed block below the scrollable chat viewport — it stays in view
-            // regardless of the chat scroll position.
-            let input_h = self.input.height(area.width);
+            // Layout: status (1) | chat (fill) | composer block | [popup].
+            // The composer is a fixed block below the scrollable chat
+            // viewport — it stays in view regardless of the chat scroll
+            // position. The card carries the frame, the draft and both rails
+            // (activity + meta): the rows the working indicator and the info
+            // separator used to take are inside it, so a running turn costs no
+            // row at all. The card *floats* inside its block (see
+            // `chrome::card_area`), so the height is asked for in the columns
+            // the card will really get — the request and the wrapping it
+            // produces have to describe the same frame.
+            let card_w = crate::ui::input_area::chrome::card_area(area).width;
+            let composer_h = self.input.height(card_w);
             let popup_h = self.popup.height();
             let mut constraints = vec![
-                Constraint::Length(1), // status bar
-                Constraint::Min(3),    // chat view (min 3 rows)
+                Constraint::Length(1),          // status bar
+                Constraint::Min(3),             // chat view (min 3 rows)
+                Constraint::Length(composer_h), // composer card
             ];
-            if self.turn.working {
-                constraints.push(Constraint::Length(1)); // working indicator
-            }
-            constraints.push(Constraint::Length(1)); // info separator
-            constraints.push(Constraint::Length(input_h)); // input area
             if popup_h > 0 {
                 constraints.push(Constraint::Length(popup_h)); // pop-down command popup
             }
@@ -433,51 +436,47 @@ impl App {
                 self.clear_scrollbar_interaction();
             }
 
-            // Fixed composer block below the chat viewport.
-            let mut idx = 2;
-
-            // Working indicator (when a turn is running).
-            if self.turn.working {
-                if let Some(started_at) = self.turn.started_at {
-                    frame.render_widget(
-                        WorkingIndicatorWidget::new(&self.turn.spinner, started_at, &palette)
-                            .with_role_label(goal_role_label.as_deref()),
-                        chunks[idx],
-                    );
-                }
-                idx += 1;
-            }
-
-            // Info separator (workdir · usage · scroll position).
-            render_info_separator(
-                self.status.workdir.as_deref(),
-                &self.turn.usage,
-                self.chat.content_height(),
-                chat_height as usize,
-                self.chat.scroll_position(),
-                &palette,
-                chunks[idx],
-                frame.buffer_mut(),
-            );
-            idx += 1;
-
-            // Input area — always visible; the rect it is laid out into is
-            // recorded in the frame's geometry (the widget keeps its own copy
-            // for cursor placement): mouse events arrive between frames, so
-            // hit testing works off the last frame's rect — the same contract
-            // as the chat band's.
-            let input_rect = chunks[idx];
+            // The composer card — always visible; the rect it is laid out into
+            // is recorded in the frame's geometry (the widget keeps its own
+            // copy for cursor placement): mouse events arrive between frames,
+            // so hit testing works off the last frame's rect — the same
+            // contract as the chat band's. The two rails carry what used to be
+            // rows of their own: what the agent is doing (top) and where the
+            // session stands — workdir, this turn's usage, scroll position
+            // (bottom).
+            let activity = if self.turn.working {
+                self.turn.started_at.map(|started_at| ActivityRail {
+                    spinner: &self.turn.spinner,
+                    started_at,
+                    role: goal_role_label.as_deref(),
+                })
+            } else {
+                None
+            };
+            let meta = MetaRail {
+                workdir: self.status.workdir.as_deref(),
+                usage: &self.turn.usage,
+                total_lines: self.chat.content_height(),
+                visible_height: chat_height as usize,
+                scroll_offset: self.chat.scroll_position(),
+            };
+            let input_rect = crate::ui::input_area::chrome::card_area(chunks[2]);
+            let keyboard_held = self.composer_typing_blocked();
             self.geometry.record_composer(input_rect);
-            frame.render_widget(InputAreaWidget::new(&mut self.input, &palette), input_rect);
-            idx += 1;
+            frame.render_widget(
+                ComposerWidget::new(&mut self.input, &palette, activity, meta)
+                    .keyboard_held(keyboard_held),
+                input_rect,
+            );
 
-            // Pop-down command popup (below the input).
+            // Pop-down command popup — below the composer and floated with it,
+            // so the list hangs off the card instead of the screen edge.
             if popup_h > 0
                 && let Some((rows, state, filter)) = self.popup.active.render_data()
             {
                 frame.render_widget(
                     SelectionPopup::new(rows, state, filter, &palette),
-                    chunks[idx],
+                    crate::ui::input_area::chrome::card_area(chunks[3]),
                 );
             }
 

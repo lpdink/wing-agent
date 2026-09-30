@@ -237,6 +237,20 @@ impl App {
         }
     }
 
+    /// Whether another layer is taking the composer's *keys* right now.
+    ///
+    /// Not the same question as [`App::composer_pointer_blocked`]: the command
+    /// popup swallows only its navigation keys and lets everything else
+    /// through, so typing still lands in the draft while a candidate list is up
+    /// — the card must not go quiet for it. The ask panel and the model picker
+    /// swallow every key, and then it must: the draft is frozen behind them.
+    pub(super) fn composer_typing_blocked(&self) -> bool {
+        matches!(
+            self.modal_owner(),
+            Some(ModalOwner::AskPanel | ModalOwner::ModelPicker)
+        )
+    }
+
     /// Handle a terminal key event.
     pub(super) fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         match self.route_key(&key) {
@@ -427,7 +441,10 @@ impl App {
 
     /// Everything else goes to the input area.
     fn handle_composer_key(&mut self, key: crossterm::event::KeyEvent) {
-        match self.input.handle_key(key, self.geometry.width()) {
+        // The *rendered* chrome, not the terminal width: the draft wraps at the
+        // columns the card really has (the float and any squeeze included).
+        let chrome = self.input.chrome();
+        match self.input.handle_key(key, chrome) {
             InputAction::Submit(text) => {
                 // Submitting a message pins the view to the bottom so the
                 // sent message and the agent's reply come into view.

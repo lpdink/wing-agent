@@ -7,17 +7,16 @@ use super::support::*;
 use crate::app::selection_session::SELECTION_AUTOSCROLL_DELAY;
 use crate::app::*;
 use crate::ui::chat_view::ChatCell;
-use crate::ui::input_area::helpers::PREFIX_WIDTH;
 
 #[test]
 fn test_composer_selection_survives_chat_structure_changes() {
     let mut app = app_with_draft("hello world");
     let mut terminal = test_terminal(40, 12);
     draw(&mut app, &mut terminal);
-    let composer = app.input.rendered_area();
+    let (tx, ty, _rows) = composer_text(&app);
 
-    app.handle_mouse(press((composer.x + PREFIX_WIDTH, composer.y)));
-    app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 4, composer.y)));
+    app.handle_mouse(press((tx, ty)));
+    app.handle_mouse(drag((tx + 4, ty)));
     // Streaming output, a queued message and a full rebuild: none of it
     // moves the draft's logical coordinates.
     app.chat
@@ -31,7 +30,7 @@ fn test_composer_selection_survives_chat_structure_changes() {
         app.selection.is_press_active(),
         "the composer selection is not affected by the chat's structure"
     );
-    app.handle_mouse(release((composer.x + PREFIX_WIDTH + 4, composer.y)));
+    app.handle_mouse(release((tx + 4, ty)));
     match app.drain_intents().as_slice() {
         [AppIntent::CopyToClipboard(text)] => assert_eq!(text, "hello"),
         other => panic!("expected the draft fragment, got {other:?}"),
@@ -43,10 +42,10 @@ fn test_composer_navigation_keys_keep_the_selection() {
     let mut app = app_with_draft("hello world");
     let mut terminal = test_terminal(40, 12);
     draw(&mut app, &mut terminal);
-    let composer = app.input.rendered_area();
+    let (tx, ty, _rows) = composer_text(&app);
 
-    app.handle_mouse(press((composer.x + PREFIX_WIDTH, composer.y)));
-    app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 4, composer.y)));
+    app.handle_mouse(press((tx, ty)));
+    app.handle_mouse(drag((tx + 4, ty)));
     draw(&mut app, &mut terminal);
 
     // Moving the cursor is not editing the draft: the selection stays.
@@ -62,7 +61,7 @@ fn test_composer_navigation_keys_keep_the_selection() {
         "the highlight is still painted"
     );
 
-    app.handle_mouse(release((composer.x + PREFIX_WIDTH + 4, composer.y)));
+    app.handle_mouse(release((tx + 4, ty)));
     match app.drain_intents().as_slice() {
         [AppIntent::CopyToClipboard(text)] => assert_eq!(text, "hello"),
         other => panic!("expected the draft fragment, got {other:?}"),
