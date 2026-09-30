@@ -45,12 +45,12 @@ use std::sync::Arc;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Rect, Size};
-use ratatui::style::Style;
 
 use crate::config::rendering::ImagesMode;
 use crate::render::markdown::ImageEntry;
 use crate::render::markdown::ImageOpts;
 use crate::render::markdown::ImageShape;
+use crate::render::markdown::images::CAPTION_MARKER;
 use crate::ui::chat_view::FrameImage;
 use crate::ui::image::ImageState;
 use crate::ui::image::ImageStore;
@@ -168,8 +168,11 @@ impl Images {
     ///
     /// The session workdir arrives asynchronously (session info) and can change
     /// (`/workdir`, session switch), so this is called once per frame and does
-    /// nothing when the value is unchanged. A change rebuilds the options —
-    /// cells invalidate, their anchors re-resolve against the new root.
+    /// nothing when the value is unchanged. A change restarts the metadata
+    /// table: its keys were resolved against the *old* root, so a relative path
+    /// may now name a different file (or none). Entries for absolute markdown
+    /// paths go too — re-probing them costs one header read each, and "one
+    /// workspace, one table" is the invariant that keeps the two in step.
     pub(crate) fn set_workspace(&mut self, workspace: Option<&str>) -> bool {
         if self.store.is_none() {
             return false;
@@ -181,6 +184,7 @@ impl Images {
         };
         if changed {
             self.workspace = workspace.map(PathBuf::from);
+            self.known.clear();
             self.rebuild_opts();
         }
         changed
@@ -304,6 +308,17 @@ impl Images {
             if mask.is_some_and(|mask| frame.area.intersects(mask)) {
                 continue;
             }
+            // The picture is painted over its caption — the box's first row *is*
+            // the caption row (`▢ alt · W×H`, truncated to the box). Verifying
+            // that here is the narrow form of "the anchor is where the row
+            // arithmetic says it is": a mismatch (a row metric that drifted from
+            // the renderer) leaves the caption in place instead of covering
+            // someone else's text. Skipped when the box starts above the band —
+            // there the caption row is scrolled away and the check is
+            // unanswerable; the rows we would cover are clipped anyway.
+            if frame.offset.1 >= 0 && !caption_at(frame.area, buf) {
+                continue;
+            }
             let ImageState::Ready(image) = self.request(&frame.path, frame.target) else {
                 // Pending / unavailable: the caption is the fallback, and it is
                 // already on screen — never blank the box.
@@ -361,8 +376,24 @@ fn clear_uncovered_caption(frame: &FrameImage, covered: Rect, buf: &mut Buffer) 
     let from = covered.right().max(buf.area.x);
     let to = frame.area.right().min(buf.area.right());
     for x in from..to {
-        buf.set_string(x, row, " ", Style::default());
+        // The symbol only: the row keeps whatever style it was rendered with
+        // (a background tint stays a background tint — this is a patch, not a
+        // reset).
+        buf[(x, row)].set_symbol(" ");
     }
+}
+
+/// Whether `area`'s top-left cell holds the anchor's caption marker.
+///
+/// The caption is the anchor's first row and its first grapheme is
+/// [`CAPTION_MARKER`]; the box's left column is where the caption text starts
+/// (the 2-column cell prefix sits to its left), so this is an exact check of
+/// "the picture goes here, over this caption".
+fn caption_at(area: Rect, buf: &Buffer) -> bool {
+    if area.x >= buf.area.right() || area.y >= buf.area.bottom() {
+        return false;
+    }
+    buf[(area.x, area.y)].symbol().starts_with(CAPTION_MARKER)
 }
 
 #[cfg(test)]

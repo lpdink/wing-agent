@@ -84,6 +84,57 @@ struct CachedLines {
     /// that breaks it). Always meaningful for link-bearing lines; `true` for
     /// line sets without links (nothing to place).
     rows_exact: bool,
+    /// Wrapped screen row of each anchored line, for cells whose lines do not
+    /// map one row each — the picture placement's own arithmetic, which is
+    /// per-anchor rather than per-cell (see [`image_rows_in_wrapped_rows`]).
+    /// Empty when the line index *is* the row index.
+    image_rows: Vec<(usize, usize)>,
+}
+
+/// The wrapped screen row of every anchored line, for a cell whose lines do not
+/// map one row each (the caller only asks then — otherwise the index *is* the
+/// row).
+///
+/// A line's screen row is its index **as long as every line above it fits the
+/// width**: the widget renders a cell through a wrapping `Paragraph` whose
+/// `scroll` is measured in rows, so an over-wide line above an anchor pushes it
+/// down by the extra rows it wrapped into. Counting that per anchor — instead of
+/// refusing the whole cell when *any* line is over-wide — is what lets a picture
+/// after a long code line draw normally.
+///
+/// The rows come from [`wrapped_rows`], i.e. from the same `Paragraph` metric
+/// the layout uses, so this cannot drift from what is rendered.
+fn image_rows_in_wrapped_rows(
+    lines: &[Line<'static>],
+    anchors: &[Vec<ImageSpan>],
+    width: u16,
+) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut rows = 0usize;
+    for (index, line) in lines.iter().enumerate() {
+        if let Some(span) = anchors.get(index).and_then(|spans| spans.first()) {
+            out.push((span.line, rows));
+        }
+        rows += wrapped_rows(line, width);
+    }
+    out
+}
+
+/// The screen rows one line occupies inside the widget's wrapping `Paragraph`.
+///
+/// A line that fits is one row (that is the whole point of `rows_exact`); an
+/// over-wide one is measured by `Paragraph` itself — the very same call
+/// [`CachedCell::lines_height`] uses for the cell's height, so the row index the
+/// picture is placed at is the row the line is really rendered at. No
+/// re-implementation of the wrapper, and no cross-line state to reproduce
+/// (`WordWrapper` resets per input line).
+fn wrapped_rows(line: &Line<'static>, width: u16) -> usize {
+    if width == 0 || line.width() <= usize::from(width) {
+        return 1;
+    }
+    Paragraph::new(vec![line.clone()])
+        .wrap(Wrap { trim: false })
+        .line_count(width)
 }
 
 /// What the chat view needs to render a cell: its lines, their link spans and
@@ -120,9 +171,13 @@ pub struct CellFrame<'a> {
     pub links: &'a [Vec<LinkSpan>],
     /// Index-aligned with `lines`.
     pub images: &'a [Vec<ImageSpan>],
-    /// Row arithmetic is exact (see [`CachedLines::rows_exact`]) — an anchor's
-    /// geometry is only valid while this holds.
+    /// Row arithmetic is exact (see [`CachedLines::rows_exact`]) — the link
+    /// boxes' and OSC8 injection's precondition.
     pub rows_exact: bool,
+    /// The screen row of every anchored line, in the **wrapped** rows the
+    /// widget renders with — empty when the line index *is* the row index (see
+    /// [`CellFrame::image_row`]).
+    pub image_rows: &'a [(usize, usize)],
 }
 
 impl CellFrame<'_> {
@@ -134,6 +189,22 @@ impl CellFrame<'_> {
     /// Whether any line carries an image anchor.
     pub fn has_images(&self) -> bool {
         self.images.iter().any(|line| !line.is_empty())
+    }
+
+    /// The row (relative to the cell's first rendered row) at which the anchor
+    /// on `line` starts.
+    ///
+    /// `line` itself unless an over-wide line above it was wrapped into extra
+    /// rows by the widget's `Paragraph` — the cell-level `rows_exact` flag is
+    /// *not* what the picture needs (an over-wide line **below** an anchor
+    /// leaves the anchor's own rows perfectly exact), so the walk is done per
+    /// anchor instead of refusing the whole cell. See
+    /// [`image_rows_in_wrapped_rows`].
+    pub fn image_row(&self, line: usize) -> usize {
+        self.image_rows
+            .iter()
+            .find(|(anchor_line, _)| *anchor_line == line)
+            .map_or(line, |(_, row)| *row)
     }
 }
 
@@ -471,6 +542,9 @@ impl CachedCell {
                 // A finalized stream renders pre-wrapped lines (every line was
                 // hard-wrapped to the width), so the row maths is exact.
                 rows_exact: true,
+                // …and it is rendered line by line (the blit path), so an
+                // anchor's row *is* its line index — no wrapped-row walk.
+                image_rows: Vec::new(),
             });
             self.cached_height = Some(CachedHeight {
                 width,
@@ -530,12 +604,14 @@ impl CachedCell {
             let rendered = stream.composed(width, ctx.palette);
             self.image_candidates =
                 image_candidates_of(rendered.links, rendered.images, ctx.images);
-            // Streaming lines are hard-wrapped to the width by construction.
+            // Streaming lines are hard-wrapped to the width by construction, and
+            // blitted line by line: the line index *is* the screen row.
             return CellFrame {
                 lines: rendered.lines,
                 links: rendered.links,
                 images: rendered.images,
                 rows_exact: true,
+                image_rows: &[],
             };
         }
         let cached_valid = self
@@ -554,6 +630,19 @@ impl CachedCell {
             // cell really does break the mapping — measure and refuse rather
             // than point a click or a picture at the wrong rows.
             let rows_exact = !composed.has_spans() || composed.rows_are_exact(width);
+            // The pictures' own row arithmetic: an over-wide line above an
+            // anchor wraps into extra rows and pushes it down, and the widget's
+            // `Paragraph` scroll counts rows — so the anchor's screen row is the
+            // wrapped one, not its line index. Only the inexact case needs the
+            // walk: when every line fits, the index *is* the row
+            // (`CellFrame::image_row` falls back to it).
+            let needs_row_walk =
+                !rows_exact && composed.images().iter().any(|spans| !spans.is_empty());
+            let image_rows = if needs_row_walk {
+                image_rows_in_wrapped_rows(composed.lines(), composed.images(), width)
+            } else {
+                Vec::new()
+            };
             // Discover the pictures this cell may want drawn while its lines
             // are being built (the harvest rides the same invalidation).
             self.image_candidates =
@@ -563,6 +652,7 @@ impl CachedCell {
                 generation: self.generation,
                 composed,
                 rows_exact,
+                image_rows,
             });
             // Lines from `to_lines` are not pre-wrapped — never blit them.
             self.prewrapped_width = None;
@@ -574,6 +664,7 @@ impl CachedCell {
             links: cached.composed.links(),
             images: cached.composed.images(),
             rows_exact: cached.rows_exact,
+            image_rows: &cached.image_rows,
         }
     }
 

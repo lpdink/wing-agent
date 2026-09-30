@@ -48,6 +48,7 @@ use crate::ui::chat_view::FrameImage;
 use crate::ui::image::CellPixels;
 use crate::ui::image::ImageProtocol;
 use crate::ui::image::ImageSupport;
+use crate::ui::scrollbar;
 use crate::ui::toast::Toast;
 
 /// The kitty placeholder symbol every painted cell of an image carries.
@@ -183,6 +184,16 @@ fn placeholder_rect(buf: &Buffer) -> Option<Rect> {
         rect.height = bottom - rect.y;
     }
     Some(rect)
+}
+
+/// First screen row whose text contains `needle`.
+fn row_with(buf: &Buffer, needle: &str) -> Option<u16> {
+    (buf.area.y..buf.area.bottom()).find(|&y| {
+        (buf.area.x..buf.area.right())
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
+            .contains(needle)
+    })
 }
 
 fn buffer_text(buf: &Buffer) -> String {
@@ -401,6 +412,213 @@ fn the_caption_tail_outside_the_picture_is_cleared() {
             "the caption's tail still shows at column {x}"
         );
     }
+}
+
+/// A cell that also holds an **over-wide line** still draws its picture.
+///
+/// The widget renders such a cell through a wrapping `Paragraph` whose scroll is
+/// measured in rows, so the anchor's screen row is the *wrapped* one — the
+/// cell-level row-arithmetic flag (`rows_exact`) is the link layer's
+/// precondition, not the picture's. The picture must land exactly on the caption
+/// row, which the paint pass re-checks before covering it.
+#[test]
+fn a_picture_after_an_over_wide_line_lands_on_its_wrapped_row() {
+    let dir = TempDir::new("wrapped-row");
+    let plot = dir.file("plot.png");
+    write_png(&plot, 800, 600);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
+    app.chat.push(ChatCell::AssistantMessage(format!(
+        "```\n{}\n```\n\n![plot](plot.png)",
+        "a".repeat(200)
+    )));
+    // Tall enough that the whole cell (code line + anchor box) is on screen.
+    let mut term = test_terminal(60, 120);
+
+    // The caption renders before the picture does (the encode is requested by the
+    // paint pass that finds it missing): record where it really is.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let caption_row = loop {
+        let buf = frame(&mut app, &mut term);
+        if let Some(row) = row_with(&buf, "▢")
+            && !has_placeholder(&buf)
+        {
+            break row;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the caption"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    };
+
+    // The fixture is the inexact shape: the code line wraps into extra rows, so
+    // the cell's line index is not the screen row — and the anchor's own row is
+    // still known (`CellFrame::image_row`).
+    let (anchor_line, anchor_row) = {
+        let (palette, layout) = (app.palette(), app.config.layout.clone());
+        let width = scrollbar::content_area(app.geometry.chat_band()).width;
+        let ctx = crate::render::renderable::CellContext {
+            palette: &palette,
+            thinking_mode: app.config.rendering.thinking,
+            layout: &layout,
+            images: app.images.opts(),
+        };
+        let frame = app.chat.cells[0].compute_cell_frame(width, &ctx);
+        assert!(!frame.rows_exact, "the fixture must be the inexact shape");
+        let span = frame
+            .images
+            .iter()
+            .flatten()
+            .next()
+            .cloned()
+            .expect("the anchor exists");
+        (span.line, frame.image_row(span.line))
+    };
+    assert!(
+        anchor_row > anchor_line,
+        "the over-wide line above the anchor must push it down: {anchor_row} vs {anchor_line}"
+    );
+    let content = app.chat.geometry().area;
+    assert_eq!(
+        i32::from(content.y) + i32::try_from(anchor_row).expect("fits"),
+        i32::from(caption_row),
+        "the anchor's wrapped row is where the caption renders"
+    );
+
+    // …and the picture covers exactly that row — not the line index, which would
+    // be inside the code block above.
+    draw_until(&mut app, &mut term, "the picture", |_, buf| {
+        has_placeholder(buf)
+    });
+    let recorded = app.chat.frame_images().first().cloned().expect("recorded");
+    let painted = placeholder_rect(term.backend().buffer()).expect("placeholders");
+    assert_eq!(i32::from(painted.y), i32::from(caption_row));
+    assert_eq!(painted.x, content.x + 2);
+    assert_eq!(
+        recorded.offset,
+        (2, i16::try_from(anchor_row).expect("fits"))
+    );
+}
+
+/// The same cell shape with the over-wide line *below* the anchor: the anchor's
+/// own rows are exact, so nothing may suppress it either.
+#[test]
+fn a_picture_before_an_over_wide_line_is_drawn_too() {
+    let dir = TempDir::new("wrapped-row-after");
+    let plot = dir.file("plot.png");
+    write_png(&plot, 800, 600);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
+    app.chat.push(ChatCell::AssistantMessage(format!(
+        "![plot](plot.png)\n\n```\n{}\n```",
+        "a".repeat(200)
+    )));
+    let mut term = test_terminal(60, 120);
+    draw_until(&mut app, &mut term, "the picture", |_, buf| {
+        has_placeholder(buf)
+    });
+    let content = app.chat.geometry().area;
+    let recorded = app.chat.frame_images().first().cloned().expect("recorded");
+    assert_eq!(recorded.offset, (2, 0), "the anchor opens the cell");
+    assert_eq!(
+        placeholder_rect(term.backend().buffer()).expect("placeholders"),
+        recorded.area
+    );
+    assert_eq!(recorded.area.x, content.x + 2);
+}
+
+/// The paint pass covers a box only when its top-left cell really holds the
+/// caption: the check that keeps a drifted row metric from painting a picture
+/// over someone else's text.
+#[test]
+fn a_box_that_does_not_start_on_its_caption_is_not_painted() {
+    let dir = TempDir::new("caption-check");
+    let plot = dir.file("plot.png");
+    write_png(&plot, 800, 600);
+    let mut images = Images::new(ImagesMode::Auto, kitty(), None);
+    assert!(images.set_workspace(Some(dir.path().to_str().expect("utf-8 temp path"))));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !images.sync(std::slice::from_ref(&plot)) {
+        assert!(Instant::now() < deadline, "timed out waiting for the probe");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let clip = Rect::new(0, 0, 40, 10);
+    let image = FrameImage {
+        area: Rect::new(2, 0, 38, 5),
+        offset: (2, 0),
+        target: Size::new(38, 5),
+        path: plot.clone(),
+    };
+
+    // Over the caption, once the encode lands, the picture is painted.
+    let mut right = Buffer::empty(clip);
+    right.set_string(2, 0, "▢ plot · 800×600", Style::default());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        images.sync(std::slice::from_ref(&plot));
+        let mut attempt = right.clone();
+        images.paint(std::slice::from_ref(&image), clip, None, &mut attempt);
+        if has_placeholder(&attempt) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the encode"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    // The very same request — the encode is warm now — over a box whose origin
+    // is ordinary text leaves the buffer alone.
+    let mut wrong = Buffer::empty(clip);
+    wrong.set_string(2, 0, "not a caption at all", Style::default());
+    let untouched = wrong.clone();
+    images.paint(std::slice::from_ref(&image), clip, None, &mut wrong);
+    assert_eq!(wrong, untouched, "the picture must not cover plain text");
+
+    // …and neither does a box one row off (its origin is a cover row, not the
+    // caption): a drifted row metric must not turn into a picture over the
+    // caption's neighbours.
+    let mut shifted = right.clone();
+    images.paint(
+        std::slice::from_ref(&FrameImage {
+            // The box the widget would record if it thought the anchor sat one
+            // row lower: area and offset move together.
+            area: Rect::new(2, 1, 38, 4),
+            offset: (2, 1),
+            ..image.clone()
+        }),
+        clip,
+        None,
+        &mut shifted,
+    );
+    assert_eq!(
+        shifted, right,
+        "a box that starts below its caption must not be painted"
+    );
+}
+
+/// A `--dump`-style config keeps its meaning across a parse: `Off` is the only
+/// way to turn pictures off, and a value that fell back to `auto` would turn
+/// them back on silently.
+#[test]
+fn a_rendering_config_round_trips_through_its_dump() {
+    let config = crate::config::AppConfig {
+        rendering: crate::config::rendering::RenderingConfig {
+            thinking: crate::config::rendering::ThinkingMode::Hidden,
+            images: ImagesMode::Off,
+        },
+        ..crate::config::AppConfig::default()
+    };
+    let dumped = config.to_yaml();
+    assert!(dumped.contains("Off"), "{dumped}");
+    let parsed: crate::config::AppConfig =
+        serde_yaml::from_str(&dumped).expect("the dump parses back");
+    assert_eq!(parsed.rendering.images, ImagesMode::Off, "{dumped}");
+    assert_eq!(
+        parsed.rendering.thinking,
+        crate::config::rendering::ThinkingMode::Hidden,
+        "{dumped}"
+    );
 }
 
 // ── 2. the degradation ladder ───────────────────────────────────
@@ -643,6 +861,37 @@ fn a_content_rebuild_forgets_a_deleted_picture() {
     let buf = frame(&mut app, &mut term);
     assert_eq!(buf, baseline, "a deleted picture is the link path again");
     assert!(!buffer_text(&buf).contains('▢'));
+}
+
+/// A workspace change (`/workdir`, a session switch) restarts the metadata
+/// table: its keys were resolved against the old root, so a relative path may
+/// now name a different file — or no file at all.
+#[test]
+fn a_workspace_change_restarts_the_metadata_table() {
+    let first = TempDir::new("ws-first");
+    let plot = first.file("plot.png");
+    write_png(&plot, 800, 600);
+    let second = TempDir::new("ws-second");
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(first.path()));
+    app.chat
+        .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
+    let mut term = test_terminal(60, 48);
+    draw_until(&mut app, &mut term, "the picture", |_, buf| {
+        has_placeholder(buf)
+    });
+    assert_eq!(app.images.opts().shapes().len(), 1);
+
+    // The session now works somewhere else — where `plot.png` does not exist.
+    app.status.workdir = Some(second.path().to_string_lossy().into_owned());
+    draw_until(&mut app, &mut term, "the table restart", |app, _| {
+        app.images.opts().shapes().is_empty()
+    });
+    let buf = frame(&mut app, &mut term);
+    assert!(!has_placeholder(&buf), "the old picture must not survive");
+    assert!(
+        !buffer_text(&buf).contains('▢'),
+        "and neither must its box: the path resolves to a missing file now"
+    );
 }
 
 // ── 3. overlay masking ──────────────────────────────────────────

@@ -487,10 +487,14 @@ impl Widget for ChatViewWidget<'_> {
 
 /// Record the picture requests of one cell's visible anchors.
 ///
-/// Gated exactly like the link placement: `rows_exact` is the row arithmetic's
-/// precondition (an over-wide line wraps into two screen rows and every anchor
-/// row below it would land on the wrong text), and an anchor is only recorded
-/// when its box meets the cell's visible window.
+/// Deliberately **not** gated on the cell-level `rows_exact`: that flag is the
+/// *link* layer's precondition (its spans are turned into absolute columns and
+/// rows for hit tests and OSC8 injection), while a picture only needs the rows
+/// above it — `CellFrame::image_row` gives the anchor's true screen row, so an
+/// over-wide line elsewhere in the cell no longer suppresses the picture. What
+/// remains is the visibility test: an anchor is recorded when its box meets the
+/// cell's visible window (the app's paint pass re-checks the box's top-left cell
+/// against the caption before covering it — see `app::images`).
 fn record_frame_images(
     out: &mut Vec<FrameImage>,
     cell: &crate::ui::cached_cell::CellFrame<'_>,
@@ -499,11 +503,12 @@ fn record_frame_images(
     render_y: u16,
     cell_visible: usize,
 ) {
-    if !cell.rows_exact || !cell.has_images() {
+    if !cell.has_images() {
         return;
     }
     for span in cell.images.iter().flatten() {
-        if let Some(frame) = frame_image_for(span, band, skip, render_y, cell_visible) {
+        let row = cell.image_row(span.line);
+        if let Some(frame) = frame_image_for(span, row, band, skip, render_y, cell_visible) {
             out.push(frame);
         }
     }

@@ -319,7 +319,13 @@ impl App {
             self.status.workdir.as_deref(),
             self.launch_workspace.as_deref(),
         );
-        self.images.set_workspace(workdir.or(launch));
+        if self.images.set_workspace(workdir.or(launch)) {
+            // The cells' candidate lists were resolved against the *old* root:
+            // feeding them now would put the paths we just dropped straight back
+            // into the table. The render re-derives them (its options changed,
+            // so every cell re-renders) and the frame's second pass feeds those.
+            return true;
+        }
         // A content rebuild (session switch / compaction / rewind) may name
         // files that changed on disk: re-read them rather than trusting the memo.
         self.images.set_structure_epoch(self.chat.structure_epoch());

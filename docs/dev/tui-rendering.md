@@ -126,9 +126,10 @@ cargo run -q -p wing --example render_probe -- --images --workspace . \
 
 | 环节 | 规则 |
 |---|---|
-| 记录 | `rows_exact && has_images()` 时，每个可见锚点记一条 `FrameImage { area, offset, target, path }`：`area` = 锚点盒子 ∩ band（垂直裁、宽度不裁），`offset` = 盒子左上角相对 band 的**带符号**偏移（图上滚为负），`target` = **整个盒子** `(cols, rows)`（不是可见部分，滚动不重编码） |
+| 记录 | 每个可见锚点记一条 `FrameImage { area, offset, target, path }`：`area` = 锚点盒子 ∩ band（垂直裁、宽度不裁），`offset` = 盒子左上角相对 band 的**带符号**偏移（图上滚为负），`target` = **整个盒子** `(cols, rows)`（不是可见部分，滚动不重编码） |
+| 行号 | 锚点的屏幕行 = 它的**行号**，除非它上面有超宽行——`Paragraph` 把它们折成多行、`scroll` 又是按行算的，所以此时要用包装后的行号（`CellFrame::image_row`，超宽行由 ratatui 自己的 `Paragraph::line_count` 量，不是我们重写折行）。**下面**有超宽行不影响锚点自己的行，因此「cell 里有一行很长的代码」不再让整张图消失（`rows_exact` 是**链接层**的门，不是图片的） |
 | 编码目标 | `target` 进 `ImageStore` 的 cache key（连同文件 canonical + mtime + 终端 cell 像素）→ 宽度/布局变化自动重编码 |
-| 画 | `app` 在**所有 overlay 之后**（toast 之后、选择高亮之前）调 `paint`：一次 `request` → `Ready` 才画；`Pending` / `Unavailable` 什么都不写（caption 就是兜底，**永不**画空白）；图固定在盒子左上，图内等比缩放留白由 `ratatui-image` 的 `Resize::Fit` 决定 |
+| 画 | `app` 在**所有 overlay 之后**（toast 之后、选择高亮之前）调 `paint`：先核对盒子左上角那一格**确实是 caption 的 `▢`**（行号算错就宁可留 caption，也不盖别人的字），再一次 `request` → `Ready` 才画；`Pending` / `Unavailable` 什么都不写（caption 就是兜底，**永不**画空白）；图固定在盒子左上，图内等比缩放留白由 `ratatui-image` 的 `Resize::Fit` 决定 |
 | 遮挡 | band 之外（status / composer / popup / 滚动条 gutter）天然画不到——`paint` 的 area 就是 band 的**内容矩形**；toast 覆盖到的图**整张**不画（协议载荷在逐 cell 里，局部覆盖会断图）；拖拽选择进行中**整帧**不画图（FrameSnapshot 抓的是文本） |
 | 三态 | `Ready` 画 / `Pending` 保持 caption（worker 完成后唤醒重绘）/ `Unavailable` 保持 caption |
 | 失效 | `terminal.clear()`、resize、focus 重新获得（= `needs_full_redraw`）→ `ImageStore::invalidate()`（终端可能已丢弃我们发过的图）；元数据迟到 → `CachedCell` 高度缓存失效、行数重算 |
@@ -164,5 +165,6 @@ wing                                   # 起 TUI（网关没起就先 wing start
 | 「代码块颜色不对 / 没高亮」 | `--kinds` 看是否真有 `C`；没语言标签的围栏本来就是单色 |
 | 「reasoning 颜色和正文不同」 | 预期行为：正文用 thinking 色，代码/链接/边框保留主题色 |
 | 「这段 `![]()` 怎么没变成图 / 图怎么没占位」 | 第五节的四道闸：模式是否 `Anchor`、路径是否被拒、`--shape` 表里有没有这条路径、图片是否独占一行（`--kinds` 看该行是不是 `I`） |
-| 「占位有了，但图没出来」 | 终端是否支持图形协议（启动时探测一次，`rendering.images` 是否为 `off`）；文件是否真的存在/可解码（探测失败 → 退回链接路径）；是不是正被 toast 盖着或正在拖拽选择（那两档刻意不画） |
+| 「占位有了，但图没出来」 | 终端是否支持图形协议（启动时探测一次，`rendering.images` 是否为 `off`）；文件是否真的存在/可解码（探测失败 → 退回链接路径）；是不是正被 toast 盖着或正在拖拽选择（那两档刻意不画）；换过工作目录（`/workdir`、会话切换）后相对路径要重新探测 |
+| 「只有 caption、下面一片空白」 | 现在只可能是「这行没被画出来且没有其它解释」以外的原因——即图片此刻不可用（探测失败/编码中/终端不支持）。行号算术不再造成空白：超宽行只影响它**上面**的锚点，且那种情况的图会被画在包装后的正确行上 |
 | 「图占了 36 行，太多了」 | `MAX_ANCHOR_ROWS`（`images.rs`）：长图的上限保护；调它等于改布局契约，需同步矩阵 |

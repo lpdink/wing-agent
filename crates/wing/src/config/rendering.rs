@@ -14,9 +14,17 @@ pub enum ThinkingMode {
 }
 
 impl<'de> Deserialize<'de> for ThinkingMode {
+    /// Accepts the spelling [`Serialize`] produces as well as the lowercase one.
+    ///
+    /// `Serialize` writes the variant name (`Visible` / `Hidden`) because the
+    /// config is also dumped (`wing tui --dump-config`): a value that does not
+    /// parse back would be silently replaced by the default, so "dump, keep,
+    /// reload" has to round-trip. Matching is case-insensitive — that is a
+    /// strict superset of what was accepted before, so no existing config file
+    /// changes meaning.
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
-        match s.as_str() {
+        match s.to_ascii_lowercase().as_str() {
             "visible" => Ok(Self::Visible),
             "hidden" => Ok(Self::Hidden),
             other => {
@@ -43,9 +51,12 @@ pub enum ImagesMode {
 }
 
 impl<'de> Deserialize<'de> for ImagesMode {
+    /// Case-insensitive, so the value [`Serialize`] writes (`Off` / `Auto`,
+    /// as seen in a `--dump-config` dump) parses back to the same variant —
+    /// otherwise dumping and reloading would silently turn images back on.
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
-        match s.as_str() {
+        match s.to_ascii_lowercase().as_str() {
             "off" => Ok(Self::Off),
             "auto" => Ok(Self::Auto),
             other => {
@@ -95,6 +106,32 @@ mod tests {
         assert_eq!(parse("auto"), ImagesMode::Auto);
         // A typo must not disable a feature silently in either direction.
         assert_eq!(parse("OFF!"), ImagesMode::Auto);
+    }
+
+    /// Both keys must round-trip through their own dump: the config is written
+    /// with `Serialize` (`wing tui --dump-config`) and read back with
+    /// `Deserialize`, and a value that does not parse is silently replaced by
+    /// the default (which would turn a deliberately disabled feature back on).
+    #[test]
+    fn rendering_modes_round_trip_through_a_dump() {
+        for thinking in [ThinkingMode::Visible, ThinkingMode::Hidden] {
+            for images in [ImagesMode::Off, ImagesMode::Auto] {
+                let config = RenderingConfig { thinking, images };
+                let dumped = serde_yaml::to_string(&config).expect("dump");
+                let parsed: RenderingConfig = serde_yaml::from_str(&dumped).expect("parse back");
+                assert_eq!(parsed.thinking, thinking, "thinking round-trip: {dumped}");
+                assert_eq!(parsed.images, images, "images round-trip: {dumped}");
+            }
+        }
+        // The dump really spells the variant names (not the lowercase input
+        // form) — that is what makes the round-trip test above meaningful.
+        let dumped = serde_yaml::to_string(&RenderingConfig {
+            thinking: ThinkingMode::Hidden,
+            images: ImagesMode::Off,
+        })
+        .expect("dump");
+        assert!(dumped.contains("Hidden"), "{dumped}");
+        assert!(dumped.contains("Off"), "{dumped}");
     }
 
     #[test]
