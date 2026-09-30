@@ -1133,9 +1133,24 @@ interface Fence {
   readonly size: number;
 }
 
-/** Whether the line opens a code fence (````` / `~~~`, ≥3, ≤3 spaces of indent). */
+/** A fence line's marker run, at the start of the content after its indentation. */
+const FENCE_RUN = /^(`{3,}|~{3,})/;
+
+/**
+ * Whether the line opens a code fence (`\`\`\`` / `~~~`, ≥3 markers).
+ *
+ * Up to three columns of indentation are allowed, and four or more is an indented
+ * code block instead (CommonMark, and the TUI's `fence_open`). Getting this wrong
+ * is not cosmetic: a fence the scan does not see lets a `<div>` *inside* it open
+ * an HTML block, which then swallows the formulas after the fence (review r2
+ * [S1]).
+ */
 function opensFence(content: string): Fence | null {
-  const marker = FENCE_MARKER.exec(content);
+  const indent = indentWidth(content);
+  if (indent.columns >= 4) {
+    return null;
+  }
+  const marker = FENCE_RUN.exec(content.slice(indent.bytes));
   if (marker === null) {
     return null;
   }
@@ -1143,16 +1158,27 @@ function opensFence(content: string): Fence | null {
   return { char: run.charAt(0), size: run.length };
 }
 
-/** Whether the line closes `fence`: same marker, at least as long, nothing else. */
+/**
+ * Whether the line closes `fence`: same marker, at least as long, nothing else —
+ * with the same up-to-three-columns allowance as {@link opensFence}, so a fence
+ * opened at the document margin is still closed by an indented one (its container
+ * may indent it, and an unclosed fence would make the scan swallow everything
+ * after it).
+ */
 function closesFence(content: string, fence: Fence): boolean {
-  if (content.charAt(0) !== fence.char) {
+  const indent = indentWidth(content);
+  if (indent.columns >= 4) {
+    return false;
+  }
+  const run = content.slice(indent.bytes);
+  if (run.charAt(0) !== fence.char) {
     return false;
   }
   let size = 0;
-  while (content.charAt(size) === fence.char) {
+  while (run.charAt(size) === fence.char) {
     size += 1;
   }
-  return size >= fence.size && content.slice(size).trim() === '';
+  return size >= fence.size && run.slice(size).trim() === '';
 }
 
 /**

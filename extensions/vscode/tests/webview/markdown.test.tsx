@@ -183,6 +183,11 @@ describe('parseMarkdown', () => {
 });
 
 describe('math syntax (parseMarkdown)', () => {
+  /** Whether any node of the tree is a formula — what the fence / HTML-block tests ask. */
+  function mathNodes(nodes: readonly unknown[]): boolean {
+    return JSON.stringify(nodes).includes('"kind":"math"');
+  }
+
   /** The inline children of the first paragraph — the shape most assertions want. */
   function inline(source: string): readonly MarkdownInline[] {
     const paragraph = parseMarkdown(source)[0];
@@ -641,6 +646,64 @@ describe('math syntax (parseMarkdown)', () => {
       { kind: 'code', lang: '', closed: true, code: '<div>\n' },
       { kind: 'paragraph', children: [{ kind: 'math', tex: 'x', source: '$$x$$', display: true }] },
     ]);
+  });
+
+  it('tracks a fence indented by one to three columns', () => {
+    // CommonMark — and the TUI's `fence_open`, which bails at four columns —
+    // allows up to three. A fence the scan does not see lets a `<div>` *inside*
+    // it open an HTML block, which then swallows the formulas after the fence
+    // (review r2 [S1]); four columns is an indented code block instead.
+    const fenced = (pad: string, info: string, body: string): string =>
+      `${pad}\`\`\`${info}\n${body}\n${pad}\`\`\`\n${pad}\\(x\\)\n`;
+
+    for (const pad of [' ', '  ', '   ']) {
+      expect(mathNodes(parseMarkdown(fenced(pad, '', `${pad}<div>`))), `indent ${pad.length}`).toBe(true);
+    }
+    // An info string is not part of the marker.
+    expect(mathNodes(parseMarkdown(fenced('  ', 'ts', '  <div>')))).toBe(true);
+    // A `$$` block after the fence is recognized too (the replacer is a function:
+    // `$$` in a replacement string means a literal `$`).
+    const block = fenced('  ', '', '  <div>').replace('\\(x\\)', () => '$$\nx\n$$');
+    expect(block).toContain('  $$');
+    expect(mathNodes(parseMarkdown(block))).toBe(true);
+    // Four columns: an indented code block, so there is no fence to track and
+    // nothing to recognize (the TUI's renderer does the same).
+    expect(mathNodes(parseMarkdown(fenced('    ', '', '    <div>')))).toBe(false);
+  });
+
+  it('closes a fence with an indented marker', () => {
+    // The other half of the same rule: an opener at the margin closed by an
+    // indented marker. Missing it leaves the fence open, the following tag line
+    // is read as fence body, and the formula that should have been swallowed
+    // gets recognized — the reverse error of the test above (review r2 [S1]:
+    // the two halves have to move together).
+    for (const closer of ['  ```', '   ```']) {
+      expect(mathNodes(parseMarkdown(`\`\`\`\n<div>\n${closer}\n<div>\n\\(x\\)\n`))).toBe(false);
+    }
+  });
+
+  it('bounds the inline HTML tag scan', () => {
+    // `tagSpans` looks at most `MAX_MATH_CHARS` past a `<` for its `>`, and the
+    // whole scan is charged against `MAX_SCAN_WORK` — both are only visible on a
+    // block that is nothing but tags, and both are what keeps a flood of `<a`
+    // from walking the block once per tag (review r2 [N2]).
+    const beyondWindow = `prose <a ${'x'.repeat(8_300)} \\(y\\)> more\n`;
+    expect(mathNodes(parseMarkdown(beyondWindow))).toBe(true);
+    // Within the window the tag is a region: nothing inside it is a formula.
+    expect(mathNodes(parseMarkdown(`prose <a title="${'x'.repeat(20)} \\(y\\)">t</a> more\n`))).toBe(false);
+
+    const filler = (): string => `prose <a ${'x'.repeat(8_400)}>\n`;
+    const tag = 'prose <b title="\\(y\\)">t</b> more\n';
+    expect(mathNodes(parseMarkdown(filler().repeat(2) + tag))).toBe(false);
+    // 130 × ~8.4 kB runs out the 1 MiB budget: the tag after it is never scanned,
+    // so the formula inside it stays prose — and no character is lost either way.
+    expect(mathNodes(parseMarkdown(filler().repeat(130) + tag))).toBe(true);
+  });
+
+  it('tracks a fence inside a list item or a quote', () => {
+    expect(mathNodes(parseMarkdown('1. item\n\n   ```\n   <div>\n   ```\n   \\(x\\)\n'))).toBe(true);
+    expect(mathNodes(parseMarkdown('- ```\n  <div>\n  ```\n  \\(x\\)\n'))).toBe(true);
+    expect(mathNodes(parseMarkdown('>   ```\n>   <div>\n>   ```\n>   \\(x\\)\n'))).toBe(true);
   });
 
   // ── the normalizer's purity guards ──────────────────────────────────
