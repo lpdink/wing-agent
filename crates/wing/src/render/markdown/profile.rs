@@ -1,9 +1,9 @@
 //! Rendering profile — which kind of cell text belongs to.
 //!
 //! Reasoning (`Thinking`) and assistant content (`Content`) run through the
-//! same markdown pipeline and produce the same code blocks; they differ in
-//! exactly two rendering rules, both modeled here so the full renderer and
-//! the streaming engine cannot drift apart:
+//! same markdown pipeline and produce the same code blocks. Three rules are
+//! owned here so the full renderer and the streaming engine cannot drift
+//! apart:
 //!
 //! - **Inline fence normalization** (`text:```rust` → a real fence): only
 //!   `Content`. Reasoning discusses code fences in prose, so normalizing
@@ -12,6 +12,15 @@
 //!   (CommonMark: an indented block *is* code); `Thinking` renders them as
 //!   prose, because reasoning uses indentation for nesting — models indent
 //!   sub-thoughts far more often than they write unfenced code.
+//! - **Math delimiter normalization** (`\(…\)` → `$…$`, `\[…\]` → `$$…$$`,
+//!   a bare `\begin{align}…\end{align}` → `$$…$$`): **the same in both
+//!   profiles**. It is a source rewrite done before parsing (see
+//!   [`super::math`]), which is what makes it safe to apply to a streaming
+//!   slice as well as to the whole document; a formula is a formula whether
+//!   the model wrote it in reasoning or in the answer, and the rule only
+//!   fires on a *complete*, code-free span — an unterminated `\(` or one
+//!   that spans a blank line stays the literal text it is today, so it
+//!   cannot swallow prose either way.
 //!
 //! Everything else (fenced code blocks, highlighting, gutters) is shared: a
 //! code block looks the same in both profiles, only the surrounding prose is
@@ -49,5 +58,37 @@ impl Profile {
     /// code blocks.
     pub fn indented_blocks_are_prose(self) -> bool {
         matches!(self, Profile::Thinking)
+    }
+
+    /// Whether math delimiters pulldown does not understand are normalized
+    /// before parsing (`\(…\)` → `$…$`, `\[…\]` → `$$…$$`, a bare
+    /// `\begin{align}…\end{align}` → `$$…$$`).
+    ///
+    /// The same in both profiles — see the module docs for why this rule is
+    /// still owned by `Profile`. Turning math *off* is a config decision
+    /// (`rendering.math`), so the renderer ANDs this with
+    /// [`crate::config::rendering::MathMode`].
+    pub fn normalizes_math_delimiters(self) -> bool {
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rule table the docs describe (and the handoff asks for):
+    /// two per-profile differences, one shared normalization rule.
+    #[test]
+    fn rule_table_matches_the_docs() {
+        for profile in [Profile::Content, Profile::Thinking] {
+            // Rule 3 is shared: it applies to both profiles.
+            assert!(profile.normalizes_math_delimiters(), "{profile:?}");
+        }
+        // Rule 1 and rule 2 are the two differences.
+        assert!(Profile::Content.normalizes_inline_fences());
+        assert!(!Profile::Thinking.normalizes_inline_fences());
+        assert!(Profile::Thinking.indented_blocks_are_prose());
+        assert!(!Profile::Content.indented_blocks_are_prose());
     }
 }

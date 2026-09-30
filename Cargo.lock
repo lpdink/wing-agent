@@ -3722,6 +3722,7 @@ dependencies = [
  "unicode-width",
  "url",
  "wing-api-client",
+ "wing-math",
 ]
 
 [[package]]
@@ -3738,6 +3739,13 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+]
+
+[[package]]
+name = "wing-math"
+version = "0.0.0"
+dependencies = [
+ "unicode-width",
 ]
 
 [[package]]

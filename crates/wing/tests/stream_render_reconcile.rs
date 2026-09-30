@@ -152,6 +152,203 @@ fn shapes() -> Vec<(&'static str, String)> {
             "indented_block_then_paragraph",
             "before\n\n    indented prose line\nimmediately after\n\nend\n".into(),
         ),
+        // --- math (LaTeX) shapes ---
+        // The formulas themselves must render (character grids, equal in both
+        // profiles); everything the engine declines must stay the source, and
+        // code / currency must not become math.
+        (
+            "math_inline",
+            "Before $x^2 + y^2 = z^2$ and $\\alpha + \\beta$ and $\\mathbb{R}^n$ after.\n\nNext paragraph.".into(),
+        ),
+        (
+            "math_inline_multiline_source",
+            // `render_inline` refuses (the fraction is 3 rows): the source is
+            // shown, the sentence keeps rendering around it.
+            "A fraction $\\frac{a}{b}$ inline and $\\sum_{i=1}^{n} i$ too.\n\nafter".into(),
+        ),
+        (
+            "math_display_multiline",
+            "intro\n\n$$\n\\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}\n$$\n\nafter".into(),
+        ),
+        (
+            "math_display_inline_in_paragraph",
+            "the identity $$e^{i\\pi} + 1 = 0$$ is famous\n\nafter".into(),
+        ),
+        (
+            "math_paren_bracket_delimiters",
+            "inline \\(a^2 + b^2\\) and a display:\n\n\\[\nE = mc^2\n\\]\n\nafter".into(),
+        ),
+        (
+            "math_bare_align",
+            "The system:\n\n\\begin{align}\nf(x) &= x^2 + 2x + 1 \\\\\n     &= (x+1)^2\n\\end{align}\n\nafter".into(),
+        ),
+        (
+            "math_cases_matrix",
+            "$$\nf(x) = \\begin{cases}\n1 & x > 0 \\\\\n0 & x = 0\n\\end{cases}\n$$\n\n$$\n\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}\n$$\n\nafter".into(),
+        ),
+        (
+            "math_degraded_source",
+            "\\begin{tikzcd} a \\arrow[r] & b \\end{tikzcd}\n\n$\\ce{2H2O}$ and $\\dfrac{a}{b}$.\n\nafter".into(),
+        ),
+        (
+            "math_currency_and_code",
+            "it costs $100 and $200 total\n\n```sh\necho \"$HOME and $PATH\"\n```\n\ninline `$x$` and `\\(y\\)` stay code.\n\nafter".into(),
+        ),
+        (
+            "math_overwide_display",
+            format!("$$\n{}\n$$\n\nafter\n", "a".repeat(200)),
+        ),
+        (
+            "math_unclosed_delimiters",
+            "cost $x + 1\n\nstarts \\(y + 2 and never closes\n\nafter".into(),
+        ),
+        // The formula itself is the ACTIVE TAIL (no trailing block closes it):
+        // this is the shape that exercises the incremental tail path with
+        // math, not just the promoted-block path.
+        (
+            "math_display_tail",
+            "intro\n\n$$\n\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}\n$$".into(),
+        ),
+        ("math_inline_tail", "the answer is $x^2 + y^2$".into()),
+        // --- review r1: regions pulldown does not parse as text ---
+        (
+            "math_link_destination",
+            "see [a](http://x/\\(y\\)) and [b](http://x/\\(y\\) \"t \\(z\\)\") here\n\nafter".into(),
+        ),
+        (
+            // NOTE: no `[ref]` USE — a reference-style link resolves at document
+            // scope, so it renders literally while streaming (see the module
+            // header). The destination itself is covered by the unit and
+            // integration tests in `math.rs` / `math_render.rs`.
+            "math_reference_definition",
+            "[ref]: http://x/\\(y\\) \"title \\(z\\)\"\n\nuse \\(a\\)\n\nafter".into(),
+        ),
+        (
+            "math_html_block",
+            "<div>\n\\(x\\) and \\begin{align}a\\end{align}\n</div>\n\nafter \\(b\\)".into(),
+        ),
+        (
+            "math_autolink",
+            "link <http://x/\\(y\\)> and text \\(z\\)\n\nafter".into(),
+        ),
+        // --- review r1: code regions behind a block prefix (S2) ---
+        (
+            "math_quoted_tilde_fence",
+            "> ~~~\n> \\begin{align}a\\end{align}\n> ~~~\n\nafter \\(x\\)\n".into(),
+        ),
+        (
+            "math_quoted_fence_blank_inside",
+            // The blank line is fence body; a slice cut there would render the
+            // rest as prose (the splitter's `PrefixedFence` exists for this).
+            "> ~~~\n> a\n\n> \\(x\\)\n> ~~~\n\nafter\n".into(),
+        ),
+        (
+            "math_quoted_indented_code",
+            ">     \\(x\\)\n\nafter".into(),
+        ),
+        (
+            "math_list_fence",
+            "- ```\n  \\(x\\)\n  ```\n\nafter\n".into(),
+        ),
+        // --- review r1: inline math must not break prose wrapping (B1) ---
+        (
+            "math_inline_long_paragraph",
+            "the quick brown fox $x^2$ jumps over the lazy dog and then keeps running far \
+             beyond the right margin of a narrow cell so we can see how wrapping behaves \
+             when a formula sits in the middle of prose, 并且中文也需要在边界处折行。\n\nafter".into(),
+        ),
+        (
+            "math_inline_overwide",
+            format!("Sum: $a_1{} end\n\nafter\n", " + a_2 + a_3 + a_4 + a_5 + a_6".repeat(3)),
+        ),
+        // --- review r2: tabs (the panic) and prefixed-fence closure ---
+        (
+            // A tab is four COLUMNS but one byte: the shape helpers must not
+            // slice at a column count (this input used to panic).
+            "math_tab_indented_lines",
+            "\t- 中文项目\n\n\tx\n\n> \t\n\npara\n\t🙂x\n".into(),
+        ),
+        (
+            // A prefix-less fence line after a `> ~~~` fence is a NEW top-level
+            // fence (CommonMark), not that fence's closer.
+            "math_quoted_fence_bare_closer",
+            "> ~~~\n> a\n~~~\n\nafter\n".into(),
+        ),
+        (
+            "math_quoted_fence_bare_closer_no_blank",
+            "> ~~~\n> a\n~~~\nafter\n".into(),
+        ),
+        (
+            "math_quoted_fence_bare_closer_after_blank",
+            "> ~~~\n> a\n\n~~~   \n\nafter\n".into(),
+        ),
+        (
+            "math_quoted_fence_bare_closer_after_quoted",
+            "> ~~~\n> a\n\n> b\n~~~\n\nafter\n".into(),
+        ),
+        // NOTE: the backtick variant of the shape above is NOT here — a quoted
+        // backtick fence goes through `ensure_fences_on_own_line`, whose
+        // insertion lands differently depending on the chunk boundary. Both
+        // this build and the `a946327` baseline diverge from the reference for
+        // one chunk size (5), so it is pre-existing noise, registered in
+        // `docs/dev/tui-rendering.md` §4 instead of asserted here.
+        (
+            "math_list_fence_prefixed_closer",
+            "- ~~~\n  a\n  ~~~\n\nafter\n".into(),
+        ),
+        (
+            "math_list_fence_bare_line",
+            "- ~~~\n  a\n~~~\n\nafter\n".into(),
+        ),
+        (
+            // The destination on the line after the definition.
+            "math_reference_definition_wrapped",
+            "[a b]:\n  http://x/\\(y\\) \"t \\(z\\)\"\n\nuse \\(a\\)\n\nafter\n".into(),
+        ),
+        // --- review r3: the swallowed content carries a formula, so a wrong
+        // fence model would show up as a code-content rewrite (resting state
+        // != reference) instead of staying invisible ---
+        (
+            "math_bare_closer_swallows_formula",
+            "> ~~~\n> a\n~~~\n\n\\(x\\) after\n".into(),
+        ),
+        (
+            "math_bare_closer_swallows_formula_after_blank",
+            "> ~~~\n> a\n\n~~~\n\n\\(x\\) after\n".into(),
+        ),
+        (
+            "math_list_fence_interrupted_by_quote",
+            // The item's content is interrupted inside the fence, so the
+            // parser re-reads the indented fence line as a NEW top-level fence.
+            "- ~~~\n> \n  ~~~\n\n\\[z\\] after\n".into(),
+        ),
+        (
+            "math_list_fence_closed_then_formula",
+            // An intact item: the closer really ends the fence, so what
+            // follows is prose and gets rewritten.
+            "- ~~~\n  a\n  ~~~\n\n\\(x\\) after\n".into(),
+        ),
+        (
+            "math_list_item_fence_with_blanks",
+            "- ```\n  \n  \n\n\n  ```\n```\n\n\\(x\\) after\ntext \\(a\\)\n".into(),
+        ),
+        (
+            // NOTE: `  - ``` … > ``` ` (an item fence followed by a quote +
+            // backtick fence) is NOT here: the backtick fence goes through
+            // `ensure_fences_on_own_line`, whose insertion lands differently
+            // depending on the chunk boundary — both this build and the
+            // `a946327` baseline diverge from the reference for some chunk
+            // sizes (different ones), so it is pre-existing noise registered
+            // in `docs/dev/tui-rendering.md` §4.
+            "math_list_fence_then_top_fence",
+            // Tilde fences: the backtick variants of these container shapes go
+            // through `ensure_fences_on_own_line` (see the NOTE above).
+            "- ~~~\n  a\n~~~\n\n\\(x\\) after\n".into(),
+        ),
+        (
+            "math_list_continuation_fence",
+            "- item\n  ~~~\n  body\n  ~~~\n\n\\(x\\) after\n".into(),
+        ),
     ]
 }
 
@@ -237,6 +434,40 @@ fn reconcile_matrix_shapes() {
     }
 }
 
+/// Math shapes across EVERY chunk size in 1..=64.
+///
+/// A `$` / `\(` / `\begin{` split at any byte is the case the incremental
+/// engine is most likely to get wrong (the delimiter normalization depends on
+/// where the slice boundary fell), so the math shapes get the full chunk
+/// sweep instead of the matrix's three sizes.
+#[test]
+fn reconcile_math_shapes_every_chunk_size() {
+    let math_shapes: Vec<(&'static str, String)> = shapes()
+        .into_iter()
+        .filter(|(name, _)| name.starts_with("math_"))
+        .collect();
+    assert!(
+        math_shapes.len() >= 8,
+        "math shapes missing from `shapes()`: {}",
+        math_shapes.len()
+    );
+    for (name, corpus) in math_shapes {
+        for &profile in PROFILES {
+            for chunk in 1..=64usize {
+                let chunks = chunk_stream(&corpus, chunk);
+                reconcile(
+                    name,
+                    &corpus,
+                    &chunks,
+                    80,
+                    profile,
+                    &format!("chunk={chunk}B"),
+                );
+            }
+        }
+    }
+}
+
 /// Reconcile the full generated corpora (streamed at coarser chunks to
 /// keep runtime sane) — the bench workloads themselves must converge.
 #[test]
@@ -290,6 +521,43 @@ fn reconcile_prefixes() {
         "indented_closing_fence_tilde",
         "crlf_document",
         "crlf_unclosed_fence",
+        // Math converges per prefix too: an unterminated `\(` is literal in
+        // both the streamed prefix and the reference of that prefix, and the
+        // rewrite only fires once the closing delimiter has arrived.
+        "math_inline",
+        "math_inline_multiline_source",
+        "math_display_multiline",
+        "math_display_inline_in_paragraph",
+        "math_paren_bracket_delimiters",
+        "math_bare_align",
+        "math_currency_and_code",
+        "math_unclosed_delimiters",
+        "math_display_tail",
+        "math_inline_tail",
+        "math_link_destination",
+        "math_reference_definition",
+        "math_quoted_tilde_fence",
+        "math_quoted_fence_blank_inside",
+        "math_quoted_indented_code",
+        "math_list_fence",
+        "math_inline_long_paragraph",
+        "math_inline_overwide",
+        "math_tab_indented_lines",
+        "math_quoted_fence_bare_closer",
+        "math_quoted_fence_bare_closer_no_blank",
+        "math_quoted_fence_bare_closer_after_blank",
+        "math_quoted_fence_bare_closer_after_quoted",
+        "math_quoted_backtick_fence_bare_closer",
+        "math_list_fence_prefixed_closer",
+        "math_list_fence_bare_line",
+        "math_reference_definition_wrapped",
+        "math_bare_closer_swallows_formula",
+        "math_bare_closer_swallows_formula_after_blank",
+        "math_list_fence_interrupted_by_quote",
+        "math_list_fence_closed_then_formula",
+        "math_list_item_fence_with_blanks",
+        "math_list_fence_then_top_fence",
+        "math_list_continuation_fence",
     ];
     let palette = ThemePalette::default();
     for (name, corpus) in shapes() {

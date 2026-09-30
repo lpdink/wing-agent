@@ -14,8 +14,8 @@
 //! - **`--kinds` view**: the markdown IR before composition, one line per
 //!   segment run annotated with its [`SegmentKind`] (`T` prose, `H` heading,
 //!   `i` inline code, `C` code block, `L` link, `M` marker, `B` border,
-//!   `G` gutter) — this is the view that answers "why is this line rendered
-//!   as code?".
+//!   `G` gutter, `$` math) — this is the view that answers "why is this line
+//!   rendered as code?".
 //!
 //! `--chunk` drives the incremental `StreamingRender` (the production
 //! streaming path) instead of the one-shot full render, and `--check`
@@ -44,6 +44,7 @@ use std::io::{IsTerminal, Read, Write};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use wing::config::ThemePalette;
+use wing::config::rendering::MathMode;
 use wing::render::markdown::Profile;
 use wing::render::markdown::render_markdown_lines_with;
 use wing::render::markdown::stream::{StreamingRender, full_lines};
@@ -66,6 +67,8 @@ INPUT:
 RENDER:
     -p, --profile <P>       thinking | content    (default: thinking)
     -w, --width <N>         render width in columns (default: 120)
+        --math <M>          text | off            (default: text; off = the
+                            pre-math behavior: LaTeX source is left verbatim)
         --chunk <N>         drive the streaming engine in N-byte chunks (production path)
         --no-finalize       keep the streaming engine's live state (skip the turn-end reconcile)
         --check             after --chunk, compare the resting (and finalized) state
@@ -85,6 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut field = "reasoning".to_string();
     let mut profile = Profile::Thinking;
     let mut width: u16 = 120;
+    let mut math = MathMode::Text;
     let mut chunk: Option<usize> = None;
     let mut finalize = true;
     let mut check = false;
@@ -112,6 +116,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
             }
             "-w" | "--width" => width = next_value(&mut args, "--width")?.parse()?,
+            "--math" => {
+                math = match next_value(&mut args, "--math")?.as_str() {
+                    "text" => MathMode::Text,
+                    "off" => MathMode::Off,
+                    other => return Err(format!("unknown math mode {other:?}").into()),
+                };
+            }
             "--chunk" => chunk = Some(next_value(&mut args, "--chunk")?.parse()?),
             "--no-finalize" => finalize = false,
             "--check" => check = true,
@@ -141,13 +152,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let text = load_text(file, jsonl, index, &field)?;
-    let palette = ThemePalette::default();
+    let palette = ThemePalette {
+        math_mode: math,
+        ..ThemePalette::default()
+    };
     let mut out = std::io::stdout();
 
     writeln!(
         out,
         "\u{2500}\u{2500} render_probe: profile={profile:?} width={width} \
-         chars={} lines={} {}",
+         chars={} lines={} math={math:?} {}",
         text.chars().count(),
         text.lines().count(),
         if kinds { "view=kinds" } else { "view=composed" },
@@ -183,7 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if kinds {
         // IR view: the markdown layer without the cell compose (prefix / hard
         // wrap), so kinds stay attached to the lines that produced them.
-        let opts = RenderOpts::new(profile, true);
+        let opts = RenderOpts::new(profile, true).with_math(math);
         let md = render_markdown_lines_with(&text, Some(width.saturating_sub(2)), &palette, opts);
         print_ir(&mut out, &md, range, plain)?;
         return Ok(());
@@ -357,6 +371,7 @@ fn kind_letter(kind: SegmentKind) -> char {
         SegmentKind::Marker => 'M',
         SegmentKind::Border => 'B',
         SegmentKind::Gutter => 'G',
+        SegmentKind::Math => '$',
     }
 }
 

@@ -85,7 +85,7 @@ impl ThinkingBlock {
             &self.content,
             md_width,
             palette,
-            RenderOpts::new(Profile::Thinking, true),
+            RenderOpts::new(Profile::Thinking, true).with_math(palette.math_mode),
         );
         let mut composed = compose_lines(
             &md_lines,

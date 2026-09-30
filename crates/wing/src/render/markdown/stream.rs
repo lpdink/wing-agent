@@ -77,12 +77,18 @@
 //! next block starts, so a trailing blank never dangles at the end of the
 //! stream (matching the full render's trailing-blank trim).
 //!
-//! **Thinking vs Content.** The two profiles differ in exactly two rendering
-//! rules — both owned by [`Profile`]: inline ```` normalization (skipped for
-//! reasoning, which discusses fences in prose) and indented (4-space) blocks
-//! (prose for reasoning, code for assistant content). Fenced blocks render
+//! **Thinking vs Content.** The three rendering rules `Profile` owns are the
+//! only place the profiles differ, plus one shared rule: inline ````
+//! normalization (skipped for reasoning, which discusses fences in prose),
+//! indented (4-space) blocks (prose for reasoning, code for assistant
+//! content) — and math delimiter normalization (`\(…\)` / `\[…\]` / a bare
+//! AMS environment → `$…$` / `$$…$$`, see `super::math`), which applies to
+//! both profiles and is therefore also safe per slice: it only fires on a
+//! complete, code-free span inside one blank-line-delimited block, and a
+//! slice boundary IS a blank line or a fence. Fenced blocks render
 //! identically: highlight, gutter, borders. The cell compose is what
-//! recolors reasoning prose (`thinking_segment_style`).
+//! recolors reasoning prose (`thinking_segment_style`); math keeps its own
+//! color in both.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -112,10 +118,37 @@ enum Mode {
     Paragraph,
     /// Open list slice — blank lines stay (loose lists), lazy
     /// continuations stay; closes on non-list content after a blank.
-    List { blank_seen: bool },
+    ///
+    /// `fence` is the fence running *inside* the item (`- ~~~`, `  ``` `):
+    /// while it is open nothing may be cut — the normalization scanner is
+    /// inside that fence too, and a cut there would make the two disagree
+    /// about which lines are code (review r3).
+    List {
+        blank_seen: bool,
+        fence: Option<FenceTrack>,
+    },
     /// Open fenced code block. Blank lines are content; closes only on a
     /// matching (or longer) fence line.
-    FencedCode { fence_char: u8, fence_len: usize },
+    ///
+    /// The track is [`FenceTrack`] — the shared state machine; this mode only
+    /// adds the slice bookkeeping around it.
+    FencedCode(FenceTrack),
+    /// A fence that carries a block prefix (`> ~~~`, `- ~~~`): the parser
+    /// still reads it as a code block (prefixes are resolved first), so the
+    /// slice must not cut at the blank lines inside it — a slice starting
+    /// inside a fence body would render its content as prose.
+    ///
+    /// It deliberately does NOT use the fenced-code path: `FencedCode` drives
+    /// the line-level code cache, which expects a bare fence (language on the
+    /// opener line, no prefix in the body). A prefixed fence stays one
+    /// paragraph-ish slice and renders through the generic path, which is
+    /// exactly what the document-level render does with those lines.
+    PrefixedFence {
+        track: FenceTrack,
+        /// Mode to return to when the fence closes: a list slice keeps its
+        /// blank bookkeeping.
+        resume_list: bool,
+    },
     /// Open indented (4-space) code block. Closes on a non-blank line
     /// indented fewer than 4 spaces.
     IndentedCode,
@@ -497,7 +530,7 @@ impl StreamingRender {
         // trimmed, matching the full render at the same text).
         let tail_start = self.split.tail_start;
         let mode = self.split.mode.clone();
-        if matches!(mode, Mode::FencedCode { .. }) && self.code_tail.is_some() {
+        if matches!(mode, Mode::FencedCode(_)) && self.code_tail.is_some() {
             // Cached (non-diff) fenced code: append only newly completed
             // body lines — the block's earlier lines stay in the prefix.
             self.sync_fenced_tail(tail_start, width, palette);
@@ -752,13 +785,21 @@ impl StreamingRender {
                 self.split.tail_start = line_start;
                 if let Some((fc, fl, info)) = fence_open(line) {
                     self.open_code_cache(fc, fl, info);
-                    self.split.mode = Mode::FencedCode {
-                        fence_char: fc,
-                        fence_len: fl,
-                    };
+                    self.split.mode = Mode::FencedCode(FenceTrack::plain(fc, fl));
                 } else if list_marker_len(line).is_some() {
+                    // The line opens a list item — and possibly the item's own
+                    // fence (`- ~~~`), which the List mode then has to keep
+                    // track of (see `Mode::List`).
                     self.split.list_item_has_content = false;
-                    self.split.mode = Mode::List { blank_seen: false };
+                    self.split.mode = Mode::List {
+                        blank_seen: false,
+                        fence: fence_opener(line),
+                    };
+                } else if let Some(track) = prefixed_fence_open(line) {
+                    self.split.mode = Mode::PrefixedFence {
+                        track,
+                        resume_list: false,
+                    };
                 } else if indent_of(line) >= 4 {
                     self.split.mode = Mode::IndentedCode;
                 } else {
@@ -777,18 +818,58 @@ impl StreamingRender {
                     // mode for the line-level code cache).
                     self.close_slice(line_start);
                     self.open_code_cache(fc, fl, info);
-                    self.split.mode = Mode::FencedCode {
-                        fence_char: fc,
-                        fence_len: fl,
+                    self.split.mode = Mode::FencedCode(FenceTrack::plain(fc, fl));
+                    return true;
+                }
+                if let Some(track) = prefixed_fence_open(line) {
+                    // A `> ~~~` / `- ~~~` fence: keep it (and the blank lines
+                    // of its body) inside this slice — see `PrefixedFence`.
+                    self.split.mode = Mode::PrefixedFence {
+                        track,
+                        resume_list: false,
                     };
                     return true;
                 }
                 self.split.mode = Mode::Paragraph;
                 true
             }
-            Mode::List { blank_seen } => {
+            Mode::List { blank_seen, fence } => {
+                if let Some(track) = fence {
+                    // A fence opened inside the item is still running: the
+                    // scanner is inside it too, so nothing may be cut here.
+                    let (next, step) = track.step(line);
+                    match step {
+                        FenceStep::Body => {
+                            self.split.mode = Mode::List {
+                                blank_seen,
+                                fence: Some(next),
+                            };
+                            return true;
+                        }
+                        FenceStep::Closes => {
+                            // The closer is item content: consumed here, and
+                            // the item goes on.
+                            self.split.mode = Mode::List {
+                                blank_seen,
+                                fence: None,
+                            };
+                            return true;
+                        }
+                        FenceStep::OpensTopLevel => {
+                            let (fc, fl, info) = fence_open(line)
+                                .expect("FenceStep::OpensTopLevel implies a fence opener");
+                            self.close_slice(line_start);
+                            self.open_code_cache(fc, fl, info);
+                            self.split.mode = Mode::FencedCode(FenceTrack::plain(fc, fl));
+                            return true;
+                        }
+                    }
+                }
                 if line_is_blank(line) {
-                    self.split.mode = Mode::List { blank_seen: true };
+                    self.split.mode = Mode::List {
+                        blank_seen: true,
+                        fence: None,
+                    };
                     return true;
                 }
                 if indent_of(line) == 0
@@ -805,9 +886,15 @@ impl StreamingRender {
                     // body as prose.
                     self.close_slice(line_start);
                     self.open_code_cache(fc, fl, info);
-                    self.split.mode = Mode::FencedCode {
-                        fence_char: fc,
-                        fence_len: fl,
+                    self.split.mode = Mode::FencedCode(FenceTrack::plain(fc, fl));
+                    return true;
+                }
+                if let Some(track) = prefixed_fence_open(line) {
+                    // A fence inside the item: blank lines in its body are
+                    // content, not a list separator.
+                    self.split.mode = Mode::PrefixedFence {
+                        track,
+                        resume_list: true,
                     };
                     return true;
                 }
@@ -821,11 +908,17 @@ impl StreamingRender {
                 let empty_item_continuation = blank_seen && !self.split.list_item_has_content;
                 if marker {
                     self.split.list_item_has_content = false;
-                    self.split.mode = Mode::List { blank_seen: false };
+                    self.split.mode = Mode::List {
+                        blank_seen: false,
+                        fence: fence_opener(line),
+                    };
                     true
                 } else if indented || lazy || empty_item_continuation {
                     self.split.list_item_has_content = true;
-                    self.split.mode = Mode::List { blank_seen: false };
+                    self.split.mode = Mode::List {
+                        blank_seen: false,
+                        fence: fence_opener(line),
+                    };
                     true
                 } else {
                     self.close_slice(line_start);
@@ -833,21 +926,54 @@ impl StreamingRender {
                     false
                 }
             }
-            Mode::FencedCode {
-                fence_char,
-                fence_len,
-            } => {
-                if is_fence_close(line, fence_char, fence_len) {
+            Mode::FencedCode(track) => {
+                let (track, step) = track.step(line);
+                if step == FenceStep::Closes {
                     self.close_slice(line_start + line.len() + 1);
                     self.split.mode = Mode::Gap;
                     // The cache moved into the closed block.
                     return true;
                 }
-                self.split.mode = Mode::FencedCode {
-                    fence_char,
-                    fence_len,
-                };
+                self.split.mode = Mode::FencedCode(track);
                 true
+            }
+            Mode::PrefixedFence { track, resume_list } => {
+                let (next, step) = track.step(line);
+                match step {
+                    FenceStep::Closes => {
+                        // The fence ends and the container it lives in keeps
+                        // going.
+                        self.split.mode = if resume_list {
+                            Mode::List {
+                                blank_seen: true,
+                                fence: None,
+                            }
+                        } else {
+                            Mode::Paragraph
+                        };
+                        true
+                    }
+                    FenceStep::OpensTopLevel => {
+                        // The container ended here and this line starts a new
+                        // top-level fence. Keep the parser's reading: the line
+                        // is that fence's OPENER and is consumed here.
+                        let (fc, fl, info) = fence_open(line)
+                            .expect("FenceStep::OpensTopLevel implies a fence opener");
+                        self.close_slice(line_start);
+                        self.open_code_cache(fc, fl, info);
+                        self.split.mode = Mode::FencedCode(FenceTrack::plain(fc, fl));
+                        true
+                    }
+                    // Blank lines and prefixed body lines are fence body, not
+                    // a block separator.
+                    FenceStep::Body => {
+                        self.split.mode = Mode::PrefixedFence {
+                            track: next,
+                            resume_list,
+                        };
+                        true
+                    }
+                }
             }
             Mode::IndentedCode => {
                 if line_is_blank(line) {
@@ -1051,7 +1177,9 @@ pub fn full_lines_with_links(
     profile: Profile,
     palette: &ThemePalette,
 ) -> (Vec<Line<'static>>, Vec<Vec<LinkSpan>>) {
-    let opts = RenderOpts::new(profile, true);
+    // The math mode travels with the palette, so the reference render and
+    // the incremental engine always agree on it (see `RenderOpts::math`).
+    let opts = RenderOpts::new(profile, true).with_math(palette.math_mode);
     let md = render_markdown_lines_with(text, Some(width.saturating_sub(2)), palette, opts);
     let thinking_style = Style::default().fg(palette.thinking);
     let bullet_style = Style::default().fg(palette.text);
@@ -1096,7 +1224,7 @@ fn render_generic(
         slice,
         Some(width.saturating_sub(2)),
         palette,
-        RenderOpts::new(profile, true),
+        RenderOpts::new(profile, true).with_math(palette.math_mode),
     )
 }
 
@@ -1115,7 +1243,7 @@ fn render_block(
         slice,
         Some(width.saturating_sub(2)),
         palette,
-        RenderOpts::new(profile, false),
+        RenderOpts::new(profile, false).with_math(palette.math_mode),
     )
 }
 
@@ -1477,7 +1605,7 @@ fn line_is_blank(line: &str) -> bool {
     line.trim().is_empty()
 }
 
-fn indent_of(line: &str) -> usize {
+pub(crate) fn indent_of(line: &str) -> usize {
     let mut n = 0;
     for b in line.bytes() {
         match b {
@@ -1489,14 +1617,158 @@ fn indent_of(line: &str) -> usize {
     n
 }
 
+/// Number of leading whitespace **bytes** (spaces and tabs) — i.e. the byte
+/// offset of the first non-whitespace character.
+///
+/// Distinct from [`indent_of`], which returns **columns** (a tab counts as
+/// four): the two agree only up to three columns of spaces — and those are
+/// exactly the cases in which the shape helpers below are allowed to look past
+/// the indentation. Anything that *slices* a line must use this one; anything
+/// that compares indentation against CommonMark's limits (≤3 for a fence or a
+/// list marker, ≥4 for an indented block) must use `indent_of`.
+fn indent_bytes(line: &str) -> usize {
+    line.bytes()
+        .take_while(|&b| b == b' ' || b == b'\t')
+        .count()
+}
+
+/// The fenced-code state of a line sequence.
+///
+/// **Single source of truth** for "which lines are code": the streaming
+/// splitter (slice boundaries) and the math normalization scanner (rewrite
+/// suppression) both drive this type. They used to carry two hand-written
+/// copies of the same rules, and the copies drifted — the scanner kept
+/// treating a prefix-less fence line as a closer while the splitter already
+/// knew it opens a new top-level fence (review r3), which rewrote code-block
+/// content in the final render.
+///
+/// The rules below are the only place that decides; add a caller, not a copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FenceTrack {
+    char: u8,
+    len: usize,
+    /// The fence was opened behind a block prefix (`> ~~~`, `- ``` `). The
+    /// parser resolves the prefix first, so such a fence ends when its
+    /// container ends — not when some unrelated fence line shows up.
+    prefixed: bool,
+    /// The innermost container is a list item: there an indented, prefix-less
+    /// fence line is item content (the item's fence closer), not a new
+    /// top-level block.
+    list: bool,
+    /// Byte offset where the container's content starts (`- ` → 2). Only
+    /// meaningful for a list item.
+    content_col: usize,
+    /// A line that cannot be item content was seen (less indented than
+    /// `content_col`): the item's content was interrupted, so an indented
+    /// prefix-less fence line can no longer be read as its closer — the
+    /// parser opens a new top-level fence there instead.
+    container_gone: bool,
+}
+
+/// What a line does to a running fence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FenceStep {
+    /// Body of the running fence (blank lines included).
+    Body,
+    /// The line closes the running fence.
+    Closes,
+    /// The container the fence lives in ends here, and the line opens a NEW
+    /// top-level fence which swallows what follows (CommonMark).
+    OpensTopLevel,
+}
+
+impl FenceTrack {
+    /// A fence opened by the line itself (`~~~`, `  ``` `).
+    pub(crate) fn plain(char: u8, len: usize) -> Self {
+        Self {
+            char,
+            len,
+            prefixed: false,
+            list: false,
+            content_col: 0,
+            container_gone: false,
+        }
+    }
+
+    /// A fence opened behind a block prefix (`content_col` = where the
+    /// container's content starts).
+    fn behind_prefix(char: u8, len: usize, list: bool, content_col: usize) -> Self {
+        Self {
+            char,
+            len,
+            prefixed: true,
+            list,
+            content_col,
+            container_gone: false,
+        }
+    }
+
+    /// What `line` does to this fence, and the track for the next line.
+    pub(crate) fn step(mut self, line: &str) -> (Self, FenceStep) {
+        if self.list && !line.trim().is_empty() && indent_of(line) < self.content_col {
+            // A non-blank line that is not the item's content: whatever the
+            // parser does with it, the item's fence can no longer be closed by
+            // an indented line (see `container_gone`). Blank lines are fence
+            // body, not content that interrupts the item.
+            self.container_gone = true;
+        }
+        if !self.prefixed {
+            // A plain fence: only a matching fence line (indent ≤3) ends it.
+            let step = if is_fence_close(line, self.char, self.len) {
+                FenceStep::Closes
+            } else {
+                FenceStep::Body
+            };
+            return (self, step);
+        }
+        let start = content_start(line);
+        if start > 0 {
+            // Still carrying a block prefix: only such a line can live in the
+            // fence's container, so only such a line can close it.
+            let step = if is_fence_close(&line[start..], self.char, self.len) {
+                FenceStep::Closes
+            } else {
+                FenceStep::Body
+            };
+            return (self, step);
+        }
+        // No prefix left. Inside an intact list item an indented line is still
+        // item content, so there an indented fence line is the item's OWN
+        // closer (`- ~~~ … \n  ~~~`).
+        if self.list && !self.container_gone && indent_of(line) >= self.content_col {
+            let step = if is_fence_close(line, self.char, self.len) {
+                FenceStep::Closes
+            } else {
+                FenceStep::Body
+            };
+            return (self, step);
+        }
+        // The container ended here. A fence opener starts a NEW top-level
+        // fence which swallows what follows (CommonMark); anything else is
+        // (conservatively) still body, so nothing inside gets rewritten.
+        if fence_open(line).is_some() {
+            return (self, FenceStep::OpensTopLevel);
+        }
+        (self, FenceStep::Body)
+    }
+}
+
+/// The fence `line` opens, if any — a plain opener or one behind a block
+/// prefix (`> ~~~`, `- ``` `, indented or not).
+pub(crate) fn fence_opener(line: &str) -> Option<FenceTrack> {
+    if let Some((fc, fl, _)) = fence_open(line) {
+        return Some(FenceTrack::plain(fc, fl));
+    }
+    prefixed_fence_open(line)
+}
+
 /// If the line opens a fenced code block, return
 /// `(fence_char, fence_len, info)`.
-fn fence_open(line: &str) -> Option<(u8, usize, &str)> {
-    let indent = indent_of(line);
-    if indent >= 4 {
+pub(crate) fn fence_open(line: &str) -> Option<(u8, usize, &str)> {
+    if indent_of(line) >= 4 {
         return None;
     }
-    let rest = &line[indent..];
+    let rest = &line[indent_bytes(line)..];
     let b = rest.as_bytes();
     if b.is_empty() {
         return None;
@@ -1519,11 +1791,10 @@ fn fence_open(line: &str) -> Option<(u8, usize, &str)> {
 /// Fence-close run length if the line consists only of fence chars
 /// (≥1 run), else None.
 fn fence_close_len(line: &str) -> Option<usize> {
-    let indent = indent_of(line);
-    if indent >= 4 {
+    if indent_of(line) >= 4 {
         return None;
     }
-    let rest = &line[indent..];
+    let rest = &line[indent_bytes(line)..];
     let b = rest.as_bytes();
     if b.is_empty() {
         return None;
@@ -1540,7 +1811,21 @@ fn fence_close_len(line: &str) -> Option<usize> {
     }
 }
 
-fn is_fence_close(line: &str, fence_char: u8, fence_len: usize) -> bool {
+/// A fence opener that carries a block prefix (`> ~~~`, `- ``` `): the
+/// parser resolves the prefix first, so this is a fence in the document even
+/// though the line does not start with the fence run. Returns
+/// `(fence_char, run length)`.
+pub(crate) fn prefixed_fence_open(line: &str) -> Option<FenceTrack> {
+    let (start, list) = prefix(line);
+    let content = &line[start..];
+    if content.len() == line.len() {
+        return None; // a bare fence — the caller handles those
+    }
+    let (fc, fl, _) = fence_open(content)?;
+    Some(FenceTrack::behind_prefix(fc, fl, list, start))
+}
+
+pub(crate) fn is_fence_close(line: &str, fence_char: u8, fence_len: usize) -> bool {
     let Some(run) = fence_close_len(line) else {
         return false;
     };
@@ -1553,8 +1838,10 @@ fn is_fence_close(line: &str, fence_char: u8, fence_len: usize) -> bool {
 /// Split a fence opener line into (info, rest-after-info) — used for
 /// language extraction.
 fn split_fence_line(opener: &str) -> (&str, &str) {
-    let indent = indent_of(opener);
-    let rest = &opener[indent..];
+    // Callers only pass lines `fence_open` accepted (≤3 columns), where the
+    // two indentation measures coincide; using the byte offset keeps the
+    // slice safe by construction.
+    let rest = &opener[indent_bytes(opener)..];
     let b = rest.as_bytes();
     if b.is_empty() {
         return ("", "");
@@ -1564,6 +1851,57 @@ fn split_fence_line(opener: &str) -> (&str, &str) {
     (&rest[run..], "")
 }
 
+/// Byte offset where the line's **content** starts, after the block prefixes
+/// pulldown resolves before deciding what the line is: blockquote markers
+/// (`>` chains, each with an optional following space) and list markers.
+///
+/// Only the *shape* helpers use it (`fence_open` / `indent_of`): a fence or
+/// an indented block after a `>` or a `- ` is still a fence / indented block
+/// to the parser, and everything that must not be rewritten inside one (see
+/// the math delimiter normalization) has to agree with the parser.
+///
+/// Returns 0 for a plain line, and never runs past the line's end.
+pub(crate) fn content_start(line: &str) -> usize {
+    prefix(line).0
+}
+
+/// The block prefix in front of a line's content: `(byte offset, innermost
+/// container is a list item)`.
+///
+/// One walk, so `content_start` and the list-item question can never disagree.
+pub(crate) fn prefix(line: &str) -> (usize, bool) {
+    let mut off = 0usize;
+    let mut list = false;
+    loop {
+        let rest = &line[off..];
+        // ≥4 columns of indentation is an indented block: what follows is code
+        // content, never a `>` or a list marker. This is also the only case in
+        // which `indent_of`'s result is NOT a byte offset (a tab is four
+        // columns but one byte), so returning here keeps every slice below on
+        // a character boundary.
+        if indent_of(rest) >= 4 {
+            return (off, list);
+        }
+        let after = &rest[indent_bytes(rest)..];
+        if after.starts_with('>') {
+            list = false;
+            off += indent_bytes(rest) + 1;
+            if line[off..].starts_with(' ') {
+                off += 1;
+            }
+            continue;
+        }
+        if let Some(len) = list_marker_len(after) {
+            // `list_marker_len` counts the indent it skipped (byte-equal to
+            // the column count, since it bails at four columns).
+            list = true;
+            off += len;
+            continue;
+        }
+        return (off, list);
+    }
+}
+
 /// Length of the list marker prefix (indent + marker + following space),
 /// or None when the line doesn't start a list item.
 fn list_marker_len(line: &str) -> Option<usize> {
@@ -1571,7 +1909,7 @@ fn list_marker_len(line: &str) -> Option<usize> {
     if indent >= 4 {
         return None;
     }
-    let rest = &line[indent..];
+    let rest = &line[indent_bytes(line)..];
     let b = rest.as_bytes();
     if b.is_empty() {
         return None;
@@ -1716,6 +2054,119 @@ mod tests {
         assert_eq!(fence_close_len("`````"), Some(5));
         assert_eq!(fence_close_len("``` tail"), None);
         assert_eq!(fence_close_len("text"), None);
+    }
+
+    /// The shared fence rules (review r3): both the splitter and the math
+    /// scanner drive `FenceTrack::step`, so these assertions pin the single
+    /// source of truth. A prefix-less fence line after a PREFIXED fence is a
+    /// new top-level fence, not that fence's closer — the rule the math
+    /// scanner used to get wrong (it rewrote code-block content).
+    #[test]
+    fn fence_track_step_rules() {
+        let step = |track: FenceTrack, line: &str| track.step(line).1;
+
+        let plain = FenceTrack::plain(b'~', 3);
+        // A plain fence closes on a matching fence line (indent ≤3), also when
+        // it is longer; a prefixed fence line is body.
+        assert_eq!(step(plain, "~~~"), FenceStep::Closes);
+        assert_eq!(step(plain, "   ~~~~"), FenceStep::Closes);
+        assert_eq!(step(plain, "~~~ tail"), FenceStep::Body);
+        assert_eq!(step(plain, "> ~~~"), FenceStep::Body);
+        assert_eq!(step(plain, "    ~~~"), FenceStep::Body);
+        assert_eq!(step(plain, ""), FenceStep::Body);
+
+        let quoted = prefixed_fence_open("> ~~~").unwrap();
+        // Only a line that still carries the container's prefix can close it.
+        assert_eq!(step(quoted, "> ~~~"), FenceStep::Closes);
+        assert_eq!(step(quoted, "> text"), FenceStep::Body);
+        assert_eq!(step(quoted, ">     x"), FenceStep::Body);
+        // A prefix-less fence line ends the container: it opens a NEW
+        // top-level fence (it does not close this one).
+        assert_eq!(step(quoted, "~~~"), FenceStep::OpensTopLevel);
+        assert_eq!(step(quoted, "~~~python"), FenceStep::OpensTopLevel);
+        assert_eq!(step(quoted, "  ```"), FenceStep::OpensTopLevel); // wrong char, still a fence line
+        assert_eq!(step(quoted, "```"), FenceStep::OpensTopLevel);
+
+        let listed = prefixed_fence_open("- ~~~").unwrap();
+        // Inside the item an indented line is item content: there the item's
+        // own fence closer is just that.
+        assert_eq!(step(listed, "  ~~~"), FenceStep::Closes);
+        assert_eq!(step(listed, "  text"), FenceStep::Body);
+        // At column 0 the item ended: a fence line starts a new top-level
+        // fence.
+        assert_eq!(step(listed, "~~~"), FenceStep::OpensTopLevel);
+
+        // Blank lines are fence body: they neither close the fence nor end
+        // the item (review r3: a fence body with blanks must keep its closer).
+        let (listed, s) = listed.step("");
+        assert_eq!(s, FenceStep::Body);
+        assert_eq!(step(listed, "  ~~~"), FenceStep::Closes);
+
+        // …but once a non-blank line that cannot be item content showed up, the
+        // item's fence is over as well: an indented fence line is then a NEW
+        // top-level fence, exactly as the parser reads it (review r3: the
+        // corpus case `- ~~~\n> \n  ~~~\n\n\(x\) T`).
+        let (listed, s) = listed.step("> ");
+        assert_eq!(s, FenceStep::Body);
+        assert_eq!(step(listed, "  ~~~"), FenceStep::OpensTopLevel);
+    }
+
+    /// `content_start` must never slice at a **column** count: `indent_of`
+    /// reports a tab as four columns, and `&line[4..]` is not a character
+    /// boundary in general (review r2 / B1: this panicked the TUI on any
+    /// tab-indented line that reached the streaming splitter).
+    #[test]
+    fn content_start_is_tab_safe() {
+        // Plain prefixes still resolve.
+        assert_eq!(content_start("- item"), 2);
+        assert_eq!(content_start("> quoted"), 2);
+        assert_eq!(content_start("> > nested"), 4);
+        assert_eq!(content_start("1. ordered"), 3);
+        assert_eq!(content_start("text"), 0);
+
+        // A tab is four COLUMNS: the line is an indented block, so no prefix
+        // is stripped — and, crucially, nothing is sliced at column 4.
+        for line in [
+            "\tx",
+            "\t- 中文项目",
+            "\t- ",
+            "  \t中文注释",
+            "\t🙂x",
+            "\t中文",
+            "\t- item",
+            "    x",
+            "    - x",
+        ] {
+            assert_eq!(content_start(line), 0, "{line:?}");
+        }
+        // A tab INSIDE a container: the prefix is resolved, then the tab makes
+        // what follows an indented block (no further stripping) — and the
+        // offset stays a byte offset.
+        assert_eq!(content_start("> \t"), 2);
+        assert_eq!(indent_of(&"> \t"[content_start("> \t")..]), 4);
+        // …and the same lines still go through the shape helpers unharmed.
+        for line in ["\tx", "\t- 中文项目", "  \t中文注释", "\t🙂x"] {
+            assert!(fence_open(&line[content_start(line)..]).is_none());
+            assert!(fence_open(line).is_none());
+            assert!(prefixed_fence_open(line).is_none());
+            assert_eq!(indent_of(&line[content_start(line)..]) >= 4, true);
+        }
+        // A prefixed fence behind a prefix is still found (that is the r1 S2
+        // fix, which must survive the tab-safety change).
+        assert_eq!(
+            prefixed_fence_open("> ~~~").map(|t| (t.char, t.len, t.prefixed, t.list)),
+            Some((b'~', 3, true, false))
+        );
+        assert_eq!(
+            prefixed_fence_open("- ```").map(|t| (t.char, t.len, t.prefixed, t.list)),
+            Some((b'`', 3, true, true))
+        );
+        assert_eq!(
+            prefixed_fence_open("> - ~~~").map(|t| (t.char, t.len, t.list)),
+            Some((b'~', 3, true)),
+            "the innermost container is the list item"
+        );
+        assert_eq!(prefixed_fence_open("~~~"), None);
     }
 
     #[test]

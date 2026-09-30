@@ -180,6 +180,7 @@ crates/wing/src/
 ### 其他
 
 - `crates/wing-api-client/src/` — 手写 Rust HTTP 客户端：`client.rs`（全部 API 方法）、`models.rs`、`error.rs`、`tool_host.rs`（远程工具宿主，WS 服务循环 + builder）。
+- `crates/wing-math/` — LaTeX 数学子集 → 终端字符网格（借鉴内联 `term-maths` + `rust-latex-parser`，附出处/许可）：窄接口 `render_inline` / `render_display` / `render_block`，`None` = 「不该由引擎渲染，请显示源码」。接线（事件、定界符归一化、降级）在 `crates/wing/src/render/markdown/math.rs` → [docs/dev/tui-rendering.md](docs/dev/tui-rendering.md) 第二节·五。
 - `libs/wing-sdk/wing_sdk/` — Python 远程工具宿主 SDK：`host.py`（装饰器注册 + WS 循环）、`http_client.py`、`schema.py`、`tools/`（Bash/Read/Write/Edit/Glob/Grep，workspace-bound）。
 - `libs/wing-orch/wing_orch/` — 编排 CLI（后台 Goal，port of `app/goal.rs`）：`cli.py`、`goal.py`、`runner.py`。**目前少用，改动不必同步本节细节。**
 - `libs/wing-probe/` — 确定性集成测试基础设施（假 Provider + driver + observer 断言库）：`wing_probe/`（env / provider / driver / watch / history / files）、`scenarios/`（整机断言场景）、`tests/`（基础设施自测）。**禁止 import `wing`**（AST 门禁强制；允许 `wing_sdk`），一切经公开 HTTP / WS 协议 → [docs/dev/probe-testing.md](docs/dev/probe-testing.md)。

@@ -1,0 +1,11 @@
+[package]
+name = "wing-math"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "LaTeX math subset to terminal character-grid renderer (vendored term-maths + rust-latex-parser)"
+
+[dependencies]
+# 唯一依赖：字符显示宽度记账。工作区已有，零新增第三方 crate。
+unicode-width = { workspace = true }
