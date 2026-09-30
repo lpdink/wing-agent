@@ -189,6 +189,20 @@ impl ModelPanel {
             .map_or(&[], |group| group.models.as_slice())
     }
 
+    /// Display label for a row on the active provider page: the model's
+    /// declared `display_name` when present (non-empty), otherwise its call
+    /// name. Rendering-only — Apply / cursor / mark keep resolving by the
+    /// call name (`models()`), so the identity layer never sees this.
+    pub fn label_at(&self, row: usize) -> &str {
+        let Some(group) = self.sources.get(self.current_page()) else {
+            return "";
+        };
+        let Some(name) = group.models.get(row) else {
+            return "";
+        };
+        group.label_for(name)
+    }
+
     /// Cursor row on the active provider.
     pub fn cursor(&self) -> usize {
         self.cursor_at(self.current_page())
@@ -250,6 +264,30 @@ mod tests {
         ProviderModels {
             provider: provider.into(),
             models: models.iter().map(|m| m.to_string()).collect(),
+            model_details: vec![],
+        }
+    }
+
+    /// Provider group carrying `display_name` declarations for the given
+    /// model names — the display layer's input.
+    fn group_with_labels(
+        provider: &str,
+        models: &[&str],
+        labels: &[(&str, &str)],
+    ) -> ProviderModels {
+        use wing_api_client::models::ModelDetail;
+        ProviderModels {
+            provider: provider.into(),
+            models: models.iter().map(|m| m.to_string()).collect(),
+            model_details: labels
+                .iter()
+                .map(|(name, label)| ModelDetail {
+                    name: (*name).to_string(),
+                    display_name: Some((*label).to_string()),
+                    description: None,
+                    capabilities: Default::default(),
+                })
+                .collect(),
         }
     }
 
@@ -375,6 +413,60 @@ mod tests {
         assert_eq!(panel.current_page(), 0, "back to the full page");
     }
 
+    // ── Display labels (display_name) ───────────────────────────
+
+    #[test]
+    fn label_at_prefers_display_name_and_falls_back_to_call_name() {
+        let sources = vec![group_with_labels(
+            "qoder",
+            &["dfmodel", "bare"],
+            &[("dfmodel", "DeepSeek-Flash")],
+        )];
+        let panel = ModelPanel::new(sources, None);
+        assert_eq!(panel.label_at(0), "DeepSeek-Flash");
+        assert_eq!(
+            panel.label_at(1),
+            "bare",
+            "uncovered model falls back to its call name"
+        );
+    }
+
+    #[test]
+    fn label_at_tolerates_empty_page_and_out_of_range_row() {
+        let panel = ModelPanel::new(vec![group("empty", &[])], None);
+        assert_eq!(panel.label_at(0), "");
+        assert_eq!(panel.label_at(99), "");
+        let panel = ModelPanel::new(vec![], None);
+        assert_eq!(panel.label_at(0), "");
+    }
+
+    /// The identity layer is untouched: with display names present, the
+    /// cursor and the applied pair still resolve by the call name.
+    #[test]
+    fn apply_uses_call_name_even_when_display_names_exist() {
+        let mut panel = ModelPanel::new(
+            vec![group_with_labels(
+                "qoder",
+                &["dfmodel", "other"],
+                &[("dfmodel", "DeepSeek-Flash")],
+            )],
+            Some(("qoder", "dfmodel")),
+        );
+        assert_eq!(
+            panel.label_at(panel.cursor()),
+            "DeepSeek-Flash",
+            "row renders the display name"
+        );
+        assert_eq!(
+            panel.handle_key(key(KeyCode::Enter)),
+            ModelPanelAction::Apply {
+                provider: "qoder".into(),
+                model: "dfmodel".into(),
+            },
+            "Apply carries the call name, never the display name"
+        );
+    }
+
     // ── Esc / other keys ────────────────────────────────────────
 
     #[test]
@@ -446,6 +538,7 @@ mod tests {
             vec![ProviderModels {
                 provider: "p".into(),
                 models: many,
+                model_details: vec![],
             }],
             None,
         );

@@ -82,6 +82,7 @@ pub(super) fn model_group(
     wing_api_client::models::ProviderModels {
         provider: provider.into(),
         models: models.iter().map(|m| m.to_string()).collect(),
+        model_details: vec![],
     }
 }
 

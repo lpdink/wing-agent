@@ -41,21 +41,50 @@ async fn fetch_models() -> Result<ModelsResponse> {
 }
 
 fn print_models(resp: &ModelsResponse) {
+    print!("{}", format_models(resp));
+}
+
+/// Maximum characters of a model `description` shown in the table.
+/// Same spirit as `print_tools`' 40-char cap; model blurbs run a bit longer.
+const MODEL_DESCRIPTION_MAX_CHARS: usize = 60;
+
+/// Render the `wing models` table.
+///
+/// Row shape: `  {name}` + ` ({display_name})` when the gateway declared a
+/// display name distinct from the call name + the truncated description.
+/// Display only — the call name stays the first, authoritative column.
+fn format_models(resp: &ModelsResponse) -> String {
     if resp.providers.is_empty() {
-        println!("No models configured.");
-        return;
+        return "No models configured.\n".to_string();
     }
+    let mut out = String::new();
     for group in &resp.providers {
-        println!("Provider: {}", group.provider);
+        out.push_str(&format!("Provider: {}\n", group.provider));
         if group.models.is_empty() {
-            println!("  (no models)");
+            out.push_str("  (no models)\n");
         } else {
             for model in &group.models {
-                println!("  {model}");
+                let label = group.label_for(model);
+                let mut line = if label == model {
+                    format!("  {model}")
+                } else {
+                    format!("  {model} ({label})")
+                };
+                if let Some(desc) = group
+                    .detail_for(model)
+                    .and_then(|detail| detail.description.as_deref())
+                    .filter(|desc| !desc.trim().is_empty())
+                {
+                    line.push_str("  ");
+                    line.push_str(&common::truncate_chars(desc, MODEL_DESCRIPTION_MAX_CHARS));
+                }
+                out.push_str(&line);
+                out.push('\n');
             }
         }
-        println!();
+        out.push('\n');
     }
+    out
 }
 
 // ============================================================
@@ -151,5 +180,128 @@ fn print_agents(resp: &AgentsResponse) {
             ""
         };
         println!("  {name}{marker}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wing_api_client::models::{ModelDetail, ProviderModels};
+
+    fn group(provider: &str, models: &[&str], details: Vec<ModelDetail>) -> ProviderModels {
+        ProviderModels {
+            provider: provider.into(),
+            models: models.iter().map(|m| m.to_string()).collect(),
+            model_details: details,
+        }
+    }
+
+    fn detail(name: &str, display_name: Option<&str>, description: Option<&str>) -> ModelDetail {
+        ModelDetail {
+            name: name.into(),
+            display_name: display_name.map(str::to_string),
+            description: description.map(str::to_string),
+            capabilities: Default::default(),
+        }
+    }
+
+    #[test]
+    fn format_models_legacy_response_prints_call_names_only() {
+        let resp = ModelsResponse {
+            providers: vec![group("qoder", &["dfmodel", "gpt-x"], vec![])],
+        };
+        assert_eq!(
+            format_models(&resp),
+            "Provider: qoder\n  dfmodel\n  gpt-x\n\n"
+        );
+    }
+
+    #[test]
+    fn format_models_adds_display_name_and_description() {
+        let resp = ModelsResponse {
+            providers: vec![group(
+                "qoder",
+                &["dfmodel", "bare"],
+                vec![detail(
+                    "dfmodel",
+                    Some("DeepSeek-Flash"),
+                    Some("深度求索正式版模型"),
+                )],
+            )],
+        };
+        assert_eq!(
+            format_models(&resp),
+            "Provider: qoder\n  dfmodel (DeepSeek-Flash)  深度求索正式版模型\n  bare\n\n"
+        );
+    }
+
+    #[test]
+    fn format_models_truncates_long_descriptions() {
+        let long = "x".repeat(100);
+        let resp = ModelsResponse {
+            providers: vec![group(
+                "p",
+                &["m"],
+                vec![detail("m", None, Some(long.as_str()))],
+            )],
+        };
+        let expected_desc = "x".repeat(MODEL_DESCRIPTION_MAX_CHARS - 3) + "...";
+        assert_eq!(
+            format_models(&resp),
+            format!("Provider: p\n  m  {expected_desc}\n\n")
+        );
+    }
+
+    #[test]
+    fn format_models_skips_redundant_or_empty_display_names() {
+        // display_name 与调用名相同 / 为空串 → 不重复展示；无 description 不补尾巴。
+        let resp = ModelsResponse {
+            providers: vec![group(
+                "p",
+                &["same", "empty"],
+                vec![
+                    detail("same", Some("same"), None),
+                    detail("empty", Some(""), None),
+                ],
+            )],
+        };
+        assert_eq!(format_models(&resp), "Provider: p\n  same\n  empty\n\n");
+    }
+
+    #[test]
+    fn format_models_skips_whitespace_only_description() {
+        // 纯空白 description 不是有效值——补在行尾只会多出一串尾部空格。
+        let resp = ModelsResponse {
+            providers: vec![group(
+                "p",
+                &["blank"],
+                vec![detail("blank", None, Some("   "))],
+            )],
+        };
+        assert_eq!(format_models(&resp), "Provider: p\n  blank\n\n");
+        // 带内容、两端有空白仍然展示（只做判定，不改写声明的值）。
+        let resp = ModelsResponse {
+            providers: vec![group(
+                "p",
+                &["padded"],
+                vec![detail("padded", None, Some(" 说明 "))],
+            )],
+        };
+        assert_eq!(format_models(&resp), "Provider: p\n  padded   说明 \n\n");
+    }
+
+    #[test]
+    fn format_models_empty_and_providerless_responses() {
+        assert_eq!(
+            format_models(&ModelsResponse { providers: vec![] }),
+            "No models configured.\n"
+        );
+        let empty_group = ModelsResponse {
+            providers: vec![group("p", &[], vec![])],
+        };
+        assert_eq!(
+            format_models(&empty_group),
+            "Provider: p\n  (no models)\n\n"
+        );
     }
 }
