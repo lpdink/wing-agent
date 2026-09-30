@@ -16,9 +16,11 @@ from wing_probe.env import (
     DEFAULT_AGENT_TOOLS,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_PROBE_MODEL,
+    LOOPBACK_HOSTS,
     ProbeEnv,
     ProbeEnvError,
     log_section,
+    merge_no_proxy,
     read_log_tail,
     render_config_yaml,
     repo_root,
@@ -382,3 +384,67 @@ def test_env_render_config_passes_models_and_images(tmp_path: Path) -> None:
         {"name": "probe/vision", "capabilities": {"vision": True}},
     ]
     assert config["images"] == {"max_images": 4}
+
+
+def test_render_config_provider_extra_merges_into_provider() -> None:
+    """provider_extra 的键值合进 providers[0]（provider 级透传旋钮）。"""
+    baseline = yaml.safe_load(
+        render_config_yaml(provider_base_url="http://127.0.0.1:1/v1", gateway_port=2)
+    )
+    configured = yaml.safe_load(
+        render_config_yaml(
+            provider_base_url="http://127.0.0.1:1/v1",
+            gateway_port=2,
+            provider_extra={"image_delivery": "inline"},
+        )
+    )
+    assert "image_delivery" not in baseline["providers"][0]
+    assert configured["providers"][0]["image_delivery"] == "inline"
+    # 合并只增不改：假 Provider 接线键原样保留。
+    for key in ("protocol", "base_url", "api_key", "models"):
+        assert configured["providers"][0].get(key) == baseline["providers"][0].get(key)
+
+
+def test_env_render_config_passes_provider_extra(tmp_path: Path) -> None:
+    """ProbeEnv 的 provider_extra 参数进入生成的配置文本（probe_env 标记透传的落点）。"""
+    env = ProbeEnv(tmp_path, provider_extra={"image_delivery": "followup"})
+    config = yaml.safe_load(env._render_config(45124))
+    assert config["providers"][0]["image_delivery"] == "followup"
+
+
+def test_merge_no_proxy_keeps_existing_and_adds_loopback() -> None:
+    """NO_PROXY 合并：既有条目不丢、loopback 补齐、`*` 原样保留。"""
+    expected_default = ",".join(LOOPBACK_HOSTS)
+    assert merge_no_proxy(None) == expected_default
+    assert merge_no_proxy("") == expected_default
+    assert merge_no_proxy("example.com") == f"example.com,{expected_default}"
+    assert merge_no_proxy("127.0.0.1") == expected_default
+    assert merge_no_proxy("*") == "*"
+
+
+def test_env_vars_carry_loopback_no_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """网关子进程环境带 loopback NO_PROXY（子进程 httpx 也要绕开代理）。"""
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    env = ProbeEnv(tmp_path).env_vars()
+    assert "127.0.0.1" in env["NO_PROXY"] and "localhost" in env["NO_PROXY"]
+    assert env["no_proxy"] == env["NO_PROXY"]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_health_ignores_env_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """环境 / 系统代理不得劫持 loopback：health 检查直连本地应用（trust_env=False）。"""
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")  # 死代理：走它必失败
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9")
+    runner, port = await _start_health_app(200)
+    try:
+        await wait_for_health(
+            f"http://127.0.0.1:{port}/api/health", timeout=5.0, interval=0.01
+        )
+    finally:
+        await runner.cleanup()

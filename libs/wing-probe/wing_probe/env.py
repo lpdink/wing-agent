@@ -48,6 +48,12 @@ HEALTH_REQUEST_TIMEOUT = 2.0
 LOG_TAIL_LINES = 40
 LOG_TAIL_CHARS = 4000
 
+#: loopback 主机名：probe 的 HTTP 客户端只连本机网关 / 假 Provider，必须绕过
+#: 环境与系统代理——`urllib.request.getproxies()` 会把 macOS 系统代理（scutil）
+#: 喂给 httpx，连 `127.0.0.1` 也被送进代理（表现为 health 502，整组场景假红）。
+#: 这不是"要不要走外网"的取舍：probe 的语义就是本机闭环。
+LOOPBACK_HOSTS: tuple[str, ...] = ("127.0.0.1", "localhost")
+
 #: agents[].model 占位（场景经 AgentOverride 覆盖为真实 probe 模型）。
 DEFAULT_PROBE_MODEL = "probe/default"
 DEFAULT_PROVIDER_NAME = "probe"
@@ -95,6 +101,23 @@ def reserve_port(host: str = DEFAULT_HOST) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind((host, 0))
         return int(sock.getsockname()[1])
+
+
+def merge_no_proxy(existing: str | None) -> str:
+    """把 loopback 主机并入 ``NO_PROXY`` 值（保留既有条目，重复不追加）。
+
+    网关子进程继承它——子进程里的 httpx（provider 调用假 Provider）同样要绕开
+    环境 / 系统代理（见 :data:`LOOPBACK_HOSTS`）。``*`` 视为全豁免，原样保留。
+    """
+    entries: list[str] = [
+        item.strip() for item in (existing or "").split(",") if item.strip()
+    ]
+    covered = set(entries)
+    if "*" not in covered:
+        for host in LOOPBACK_HOSTS:
+            if host not in covered:
+                entries.append(host)
+    return ",".join(entries)
 
 
 # ── 网关二进制解析 ──────────────────────────────────────────────
@@ -173,6 +196,7 @@ def render_config_yaml(
     model: str = DEFAULT_PROBE_MODEL,
     models: Sequence[str | Mapping[str, Any]] | None = None,
     images: Mapping[str, Any] | None = None,
+    provider_extra: Mapping[str, Any] | None = None,
     tools: Sequence[str] = DEFAULT_AGENT_TOOLS,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     context_window_tokens: int = 256_000,
@@ -190,6 +214,10 @@ def render_config_yaml(
     ``providers[0].models``；None = 不写该键，保持旧配置形态）。``images`` 是
     顶层 ``images:`` 段的原文（None = 不写）。``sessions`` 是透传给配置
     ``sessions:`` 段的原文（None = 用默认值；逐出场景靠它把 TTL 压到秒级）。
+    ``provider_extra`` 是 provider 级透传旋钮：键值合进 ``providers[0]``
+    （None = 不合并，缺省输出与既有形态逐字节一致）——用于覆盖协议级行为
+    （如 ``image_delivery: inline``）。**谨慎**：覆盖 ``base_url`` 等接线键会
+    断开假 Provider，属场景自伤。
     """
     provider: dict[str, Any] = {
         "name": provider_name,
@@ -205,6 +233,8 @@ def render_config_yaml(
     }
     if models is not None:
         provider["models"] = list(models)
+    if provider_extra is not None:
+        provider.update(provider_extra)
     config: dict[str, Any] = {
         "providers": [provider],
         "agents": [
@@ -291,7 +321,8 @@ async def wait_for_health(
     """
     deadline = time.monotonic() + timeout
     timeout_ctx = httpx.Timeout(HEALTH_REQUEST_TIMEOUT)
-    async with httpx.AsyncClient(timeout=timeout_ctx) as client:
+    # trust_env=False：只连 loopback，绕开环境 / 系统代理（见 LOOPBACK_HOSTS）。
+    async with httpx.AsyncClient(timeout=timeout_ctx, trust_env=False) as client:
         while True:
             if process is not None and process.poll() is not None:
                 raise ProbeEnvError(
@@ -341,6 +372,7 @@ class ProbeEnv:
         model: str = DEFAULT_PROBE_MODEL,
         models: Sequence[str | Mapping[str, Any]] | None = None,
         images: Mapping[str, Any] | None = None,
+        provider_extra: Mapping[str, Any] | None = None,
         tools: Sequence[str] = DEFAULT_AGENT_TOOLS,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         env_overrides: Mapping[str, str] | None = None,
@@ -357,6 +389,10 @@ class ProbeEnv:
         """provider 静态模型声明（元素 str 或 dict；None = 不写 models 键）。"""
         self.images = dict(images) if images is not None else None
         """顶层 images: 段原文（None = 不写该段，用配置缺省值）。"""
+        self.provider_extra = (
+            dict(provider_extra) if provider_extra is not None else None
+        )
+        """provider 级透传键（合进 providers[0]；None = 不合并）。"""
         self.tools = tuple(tools)
         self.system_prompt = system_prompt
         """默认模板的 system prompt（非空；场景可与请求里的 system 段对照）。"""
@@ -446,6 +482,7 @@ class ProbeEnv:
             model=self.model,
             models=self.models,
             images=self.images,
+            provider_extra=self.provider_extra,
             tools=self.tools,
             system_prompt=self.system_prompt,
             sessions=self._sessions_config,
@@ -487,11 +524,17 @@ class ProbeEnv:
         return self._gateway_bin
 
     def env_vars(self) -> dict[str, str]:
-        """网关子进程环境：显式指向 tmp（防外部环境污染，design D7）。"""
+        """网关子进程环境：显式指向 tmp（防外部环境污染，design D7）。
+
+        同时把 loopback 并入 ``NO_PROXY``：子进程的 httpx 打假 Provider 时同样
+        绕开环境 / 系统代理（见 :data:`LOOPBACK_HOSTS`）。
+        """
         env = dict(os.environ)
         env["WING_HOME"] = str(self.wing_home)
         env["WING_SESSIONS_PATH"] = str(self.sessions_path)
         env["PYTHONUNBUFFERED"] = "1"
+        env["NO_PROXY"] = merge_no_proxy(env.get("NO_PROXY"))
+        env["no_proxy"] = env["NO_PROXY"]
         env.update(self._env_overrides)
         return env
 
@@ -596,7 +639,9 @@ class ProbeEnv:
         """POST /api/shutdown（best effort：连接已被回收时静默继续走 terminate）。"""
         url = f"{self.gateway_url}/api/shutdown"
         try:
-            async with httpx.AsyncClient(timeout=HEALTH_REQUEST_TIMEOUT) as client:
+            async with httpx.AsyncClient(
+                timeout=HEALTH_REQUEST_TIMEOUT, trust_env=False
+            ) as client:
                 await client.post(url, json={})
         except httpx.HTTPError as exc:
             _log.debug("probe shutdown request failed (%s): %s", url, exc)
