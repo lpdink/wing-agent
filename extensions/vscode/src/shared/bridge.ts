@@ -12,12 +12,13 @@
  * | `tabs` | global | Tab bar contents + active tab. |
  * | `ui` | global | One-shot UI actions (toast, focus, …). Never part of the model. |
  * | `pong` | global | Reply to `ping` (channel diagnostics). |
+ * | `images` | global | Reply to `resolveImages`: markdown image sources resolved to webview-loadable URIs (or `null`). |
  *
  * ## Direction 2 — webview → host
  *
- * `ready` / `resync` / `ping` are protocol-level; everything else is a user
- * intent. The webview never mutates its own model in response to an intent — it
- * waits for the host's `state` / `patch`.
+ * `ready` / `resync` / `ping` / `resolveImages` are protocol-level; everything
+ * else is a user intent. The webview never mutates its own model in response to an
+ * intent — it waits for the host's `state` / `patch`.
  *
  * ## Application rules (webview side)
  *
@@ -70,6 +71,21 @@ export type UiActionModel =
   /** Close every overlay (Escape semantics). */
   | { readonly kind: 'closeOverlays' };
 
+/**
+ * One answer to a `resolveImages` request.
+ *
+ * `uri` is `null` when the host refuses the source (remote URL, path outside the
+ * workspace, not an image, no workspace folder, …) *and* when it could not be
+ * turned into a resource the webview is allowed to load. Both cases mean the same
+ * thing to the renderer: keep the existing link rendering.
+ */
+export interface ResolvedImageModel {
+  /** The markdown `src` exactly as asked, so the reply is self-describing. */
+  readonly src: string;
+  /** `webview.asWebviewUri` result, or `null` for "not renderable". */
+  readonly uri: string | null;
+}
+
 /** Messages the host posts into the webview. */
 export type HostToWebviewMessage =
   | { readonly type: 'hydrate'; readonly session: SessionViewModel }
@@ -84,7 +100,9 @@ export type HostToWebviewMessage =
   | { readonly type: 'panels'; readonly sessionId: SessionId; readonly panels: PanelsModel }
   | { readonly type: 'tabs'; readonly tabs: readonly TabModel[]; readonly activeSessionId: SessionId | null }
   | { readonly type: 'ui'; readonly action: UiActionModel }
-  | { readonly type: 'pong'; readonly id: string; readonly hostTimeMs: number };
+  | { readonly type: 'pong'; readonly id: string; readonly hostTimeMs: number }
+  /** One per `resolveImages` request, in request order. */
+  | { readonly type: 'images'; readonly images: readonly ResolvedImageModel[] };
 
 /** Discriminants of {@link HostToWebviewMessage}. */
 export type HostToWebviewMessageType = HostToWebviewMessage['type'];
@@ -118,6 +136,16 @@ export type WebviewToHostMessage =
     }
   /** Channel diagnostics; the host answers with `pong`. */
   | { readonly type: 'ping'; readonly id: string }
+  /**
+   * Ask the host to resolve local image paths into webview-loadable URIs.
+   *
+   * Protocol-level (the *view* answers it, like `pong` — no session involved): the
+   * mapping only depends on the workspace root and this document's resource
+   * scope, both of which are host-side knowledge. Batched on purpose — one paint
+   * of a transcript produces one message, not one per image. Unknown/refused
+   * sources come back as `uri: null` and keep the existing link rendering.
+   */
+  | { readonly type: 'resolveImages'; readonly srcs: readonly string[] }
   /** Send a user message (host assigns the request id + creates the pending cell). */
   | { readonly type: 'sendMessage'; readonly sessionId: SessionId; readonly text: string }
   /** Interrupt the running turn. */

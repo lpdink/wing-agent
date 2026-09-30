@@ -2,6 +2,7 @@ import { render } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import { MarkdownText } from '../../src/webview/chat/Markdown';
+import type { MarkdownInline } from '../../src/webview/chat/markdown/parse';
 import { parseMarkdown } from '../../src/webview/chat/markdown/parse';
 import { splitStreamingBlocks } from '../../src/webview/chat/markdown/split';
 import { highlightCode } from '../../src/webview/chat/markdown/highlight';
@@ -178,6 +179,94 @@ describe('parseMarkdown', () => {
       throw new Error('expected a paragraph');
     }
     expect(paragraph.children).toEqual([{ kind: 'text', text: '<script>alert(1)</script>' }]);
+  });
+});
+
+describe('math syntax (parseMarkdown)', () => {
+  /** The inline children of the first paragraph — the shape most assertions want. */
+  function inline(source: string): readonly MarkdownInline[] {
+    const paragraph = parseMarkdown(source)[0];
+    if (paragraph?.kind !== 'paragraph') {
+      throw new Error(`expected a paragraph, got ${paragraph?.kind ?? 'nothing'}`);
+    }
+    return paragraph.children;
+  }
+
+  it('parses `$…$` into an inline formula with its literal source', () => {
+    expect(inline('before $\\frac{a}{b}$ after')).toEqual([
+      { kind: 'text', text: 'before ' },
+      { kind: 'math', tex: '\\frac{a}{b}', source: '$\\frac{a}{b}$', display: false },
+      { kind: 'text', text: ' after' },
+    ]);
+  });
+
+  it('parses `$$…$$` on one line as a display formula inside the paragraph', () => {
+    expect(inline('$$x^2$$')).toEqual([{ kind: 'math', tex: 'x^2', source: '$$x^2$$', display: true }]);
+  });
+
+  it('parses a `$$` block as a block node spanning several lines', () => {
+    const nodes = parseMarkdown(
+      'text\n\ntext\n$$\n\\begin{aligned}\na &= b\\\\\nc &= d\n\\end{aligned}\n$$\nafter\n',
+    );
+
+    expect(nodes.map((node) => node.kind)).toEqual(['paragraph', 'paragraph', 'math', 'paragraph']);
+    const math = nodes[2];
+    expect(math).toMatchObject({
+      kind: 'math',
+      display: true,
+      tex: '\\begin{aligned}\na &= b\\\\\nc &= d\n\\end{aligned}',
+      source: '$$\n\\begin{aligned}\na &= b\\\\\nc &= d\n\\end{aligned}\n$$',
+    });
+  });
+
+  it('lets a `$$` block interrupt a paragraph without a blank line', () => {
+    const nodes = parseMarkdown('a line right above\n$$\nx\n$$\nbelow\n');
+
+    expect(nodes.map((node) => node.kind)).toEqual(['paragraph', 'math', 'paragraph']);
+  });
+
+  it('parses the LaTeX delimiters `\\(…\\)` and `\\[…\\]`', () => {
+    expect(inline('\\(\\alpha+\\)')).toEqual([
+      { kind: 'math', tex: '\\alpha+', source: '\\(\\alpha+\\)', display: false },
+    ]);
+    expect(inline('\\[\\alpha\\]')).toEqual([
+      { kind: 'math', tex: '\\alpha', source: '\\[\\alpha\\]', display: true },
+    ]);
+  });
+
+  it('keeps `$` inside code spans and fences literal', () => {
+    expect(inline('`$x$`')).toEqual([{ kind: 'code', text: '$x$' }]);
+    expect(parseMarkdown('```\n$\\frac{1}{2}$\n```\n')[0]).toMatchObject({
+      kind: 'code',
+      code: '$\\frac{1}{2}$\n',
+    });
+  });
+
+  it('does not mistake currency or a digit suffix for a formula', () => {
+    expect(inline('costs $100 and $200 total')).toEqual([
+      { kind: 'text', text: 'costs $100 and $200 total' },
+    ]);
+    expect(inline('$x$1')).toEqual([{ kind: 'text', text: '$x$1' }]);
+    expect(inline('a \\$5 note')).toEqual([{ kind: 'text', text: 'a $5 note' }]);
+  });
+
+  it('leaves unterminated or empty formulas as text (never drops content)', () => {
+    expect(inline('$\\frac{1}{2}')).toEqual([{ kind: 'text', text: '$\\frac{1}{2}' }]);
+    // An unterminated `$$` opener stays literal — including the text after it.
+    expect(inline('$$\nstill open')).toEqual([
+      { kind: 'text', text: '$$' },
+      { kind: 'break', hard: false },
+      { kind: 'text', text: 'still open' },
+    ]);
+    // An empty formula is not a formula: `$$` alone, or `$$` … `$$` with no body.
+    expect(parseMarkdown('$$\n$$\n')[0]).toMatchObject({ kind: 'paragraph' });
+    expect(inline('$$$$')).toEqual([{ kind: 'text', text: '$$$$' }]);
+  });
+
+  it('keeps `\\$` escapes inside a formula from ending it early', () => {
+    expect(inline('$\\$5 + \\$7$')).toEqual([
+      { kind: 'math', tex: '\\$5 + \\$7', source: '$\\$5 + \\$7$', display: false },
+    ]);
   });
 });
 

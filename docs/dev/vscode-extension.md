@@ -13,8 +13,9 @@
 ## 1. 边界（先读这个）
 
 **做**：多 Tab 会话（新建 / 切换 / 关闭 / resume / fork）、完整对话渲染（streaming / thinking /
-工具调用 / diff / todo / Ask / 审批）、控制面（模型、think/effort、yolo、中断、compact、rewind、
-fork、prompt 命令）、连接自愈（探活 + 一次自动拉起 + 断线重连重订阅重放）。
+工具调用 / diff / todo / Ask / 审批 / **Markdown 公式（KaTeX）与工作区内的本地图片**）、控制面
+（模型、think/effort、yolo、中断、compact、rewind、fork、prompt 命令）、连接自愈（探活 + 一次自动
+拉起 + 断线重连重订阅重放）。
 
 **不做**（Out of Scope，别顺手加）：
 
@@ -358,8 +359,10 @@ webview 意图（`src/shared/bridge.ts` 的 `WebviewToHostMessage`，全部有�
 ### 8.2 Webview 运行时的硬规则
 
 - CSP：`default-src 'none'` + 白名单（`img-src`/`font-src`/`style-src` 给 `cspSource`，
-  `script-src 'nonce-…'` 单次 nonce）。宿主生成文档（`src/host/html.ts` 纯函数），bootstrap
-  值 `window.__WING_BOOTSTRAP__` 内联且 HTML 转义。
+  `script-src 'nonce-…'` 单次 nonce）。`font-src` 还带 `data:`：Vite 的 **lib** 构建会把所有资源
+  内联（KaTeX 的 60 个字体文件因此以 `data:font/…` 形式进 `main.css`），去掉它公式会退回系统字体；
+  `tests/artifact/webviewBundle.test.ts` 钉住这个前提。宿主生成文档（`src/host/html.ts` 纯函数），
+  bootstrap 值 `window.__WING_BOOTSTRAP__` 内联且 HTML 转义。
 - **bundle 不得引用 Node 全局**。`vite.config.mts` 显式内联 `process.env.NODE_ENV` 并把
   `NODE_ENV=production` 钉死。Vite 的 **lib** 构建不做这个替换，漏掉时 React 的 CJS 入口会留
   一条 `process.env` 分支 → 真实窗口里白屏 + `ReferenceError: process is not defined`。
@@ -387,6 +390,24 @@ TypeScript 与源码，看不到 bundler 实际吐出的字节。这个测试：
 - 迭代：`pnpm run watch`（宿主增量）+ `pnpm run dev:preview`（webview 在浏览器里，5199）。
 - preview harness 有工具栏：切 fixture、流式一轮、打断 patch 流（验证 resync）、推 UI 动作——
   不启动 VS Code 就能看渲染改动的首选路径。
+
+### 8.5 Markdown 的公式与本地图片
+
+两个渲染期能力，都在 `src/webview/chat/markdown/` 里，**不经后端、不碰会话模型**：
+
+| 能力 | 入口 | 行为 |
+|---|---|---|
+| 公式 | `parse.ts`（`math_inline` / `math_block` 两条自研规则）→ `render.tsx#MathView` → `math.ts` | `$…$`、`$$…$$`、`\(…\)`、`\[…\]`；代码跨度/围栏内不解析、`$100 and $200` 不误判；KaTeX 以 `trust: false`（HTML 扩展不可用）+ `throwOnError` 渲染，失败时**显示原始文本**（绝不吞公式），HTML 按 `(display, tex)` 记忆化 |
+| 本地图片 | `render.tsx#MarkdownImage` → `chat/markdown/image.ts`（缓存 + 批量请求）→ `webview.asWebviewUri` | `![alt](path)`：宿主用 `src/host/images.ts`（纯函数、零 I/O）把路径解析到工作区，再 `asWebviewUri`；远程 URL / `..` 越界 / 非图片扩展名一律拒绝 |
+
+- 通道：`resolveImages`（webview → host，协议级，和 `ping` 同级）→ `images`（host → webview，
+  `{ src, uri \| null }`）。webview 侧是"未问 / 可加载 / 拒绝"三态缓存，一次绘制只发一条消息。
+- **降级只有一档**：任何一种"不能显示"（被拒绝、还没答复、`<img>` 加载失败）都退回今天的行为——
+  指向源地址的链接（alt 兜底、点击交给编辑器），不会有空框。
+- `localResourceRoots` = 扩展根 + `workspaceFolders[0]`（多根窗口也只给第一个，与 `openFile` 的
+  `resolvePath` 同口径）。
+- KaTeX 的字体以 `data:` URI 内联在 `main.css` 里（见 §8.2 的 CSP 说明），所以公式不需要任何
+  运行期网络/资源请求。
 
 ## 9. 测试
 
@@ -514,7 +535,11 @@ pnpm exec vsce ls       # 核对进包清单
 4. 远程 / SSH / 多机网关不在支持范围；鉴权开启时在设置里填 `wing.apiKey`（`Authorization: Bearer`
    **header**，不进 URL；明文存储，建议只放 **User** settings——工作区作用域会写进可提交的
    `.vscode/settings.json`，Settings Sync 也会同步；改用 `context.secrets` 是 follow-up）；
-5. 多工作区窗口只在单测层覆盖（取第一个 folder），真机行为未系统验证。
+5. 多工作区窗口只在单测层覆盖（取第一个 folder），真机行为未系统验证；
+6. 对话里的本地图片同样只认第一个 folder：多根窗口的其它 folder、以及「会话 workdir ≠ folder」的
+   场景，图片会退回链接（与 `openFile` 的既有口径一致）；
+7. 公式 `$$…$$` 之间出现**空行**时，流式分块器（`markdown/split.ts` 的「空行＝块边界」）会把它切成
+   两块，于是退回字面量文本；非流式路径（`MarkdownText`，如用户消息）没有这个问题。
 
 视觉打磨 follow-up（用户检查点②反馈，**本轮有意不修**，供后续 PR 引用）：thinking/工具卡折叠无
 过渡动画、长 thinking 收起高度跳变；代码块从纯文本到 shiki 着色的跳变；流式表格宽度抖动；diff
@@ -543,6 +568,8 @@ pnpm exec vsce ls       # 核对进包清单
 | 加一个本地命令 | `src/shared/commands.ts`（名字与 kind）+ 宿主 `runPromptCommand` 分支 + `tests/shared/commands.test.ts`（命令表被测试钉死） |
 | 改桥协议 / 面板字段 | `src/shared/bridge.ts`/`session.ts` + `tests/shared/contract.test.ts`，两侧同步——`interfaces.md` 的教训：单侧私改必冲突 |
 | 调视觉 | `src/webview/styles/tokens.css`（先溯源到本机 VS Code 源码再改；硬编码颜色会被门禁拒绝） |
+| 改公式的定界符/语法 | `src/webview/chat/markdown/parse.ts`（`math_inline` / `math_block`）+ `tests/webview/markdown.test.tsx` |
+| 改图片的可加载范围 | `src/host/images.ts`（策略）+ `src/host/chatViewProvider.ts`（`localResourceRoots`）+ 两侧测试 |
 | 加 smoke 场景 | `tools/smoke/scenarios.ts`（剧本 + 断言都在代码里，不写配置） |
 | 动连接策略 | 先读 §7 与 `WingHost`/`launcher.ts` 的注释；策略是「探活优先、一次拉起、不猜」 |
 

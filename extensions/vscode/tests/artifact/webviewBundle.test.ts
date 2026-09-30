@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +42,8 @@ import { makeFixtureSession, makeTab } from '../../src/testing/fixtures';
 const PACKAGE_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 /** The bundle file name is part of the host contract (`src/host/chatViewProvider.ts`). */
 const BUNDLE_FILE_NAME = 'main.js';
+/** Idem for the stylesheet (see the `assetFileNames` rule in `vite.config.mts`). */
+const STYLE_FILE_NAME = 'main.css';
 
 /**
  * Strings that only exist in React's development build.
@@ -92,6 +94,12 @@ interface BuiltBundle {
   readonly bytes: number;
 }
 
+/** The built stylesheet: text plus where it lives (for relative `url()` checks). */
+interface BuiltStyle {
+  readonly source: string;
+  readonly path: string;
+}
+
 /** A jsdom document that is running the bundle. */
 interface ExecutedWebview {
   /** Messages the bundle pushed through `acquireVsCodeApi()` so far. */
@@ -106,6 +114,7 @@ interface ExecutedWebview {
 
 let outDir: string;
 let built: BuiltBundle;
+let builtStyle: BuiltStyle;
 let executed: ExecutedWebview | undefined;
 
 beforeAll(async () => {
@@ -123,6 +132,8 @@ beforeAll(async () => {
 
   const source = readFileSync(path.join(outDir, BUNDLE_FILE_NAME), 'utf8');
   built = { source, bytes: Buffer.byteLength(source) };
+  const stylePath = path.join(outDir, STYLE_FILE_NAME);
+  builtStyle = { source: readFileSync(stylePath, 'utf8'), path: stylePath };
 }, 120_000);
 
 afterAll(() => {
@@ -239,7 +250,6 @@ describe('webview bundle artifact', () => {
     expect(built.bytes).toBeGreaterThan(100_000);
     expect(occurrences(built.source, 'acquireVsCodeApi')).not.toEqual([]);
   });
-
   it('never reads process.env', () => {
     // The whole point of the `define` block in vite.config.mts. Which entry React's
     // CJS shim picks, and whether the value is inlined at all, is decided here.
@@ -262,6 +272,35 @@ describe('webview bundle artifact', () => {
   it('is built from production React', () => {
     const devMarkers = REACT_DEV_MARKERS.filter((needle) => built.source.includes(needle));
     expect(devMarkers).toEqual([]);
+  });
+});
+
+/**
+ * Stylesheet assertions.
+ *
+ * The CSP (`src/host/html.ts`) allows `data:` fonts because Vite's **library** build
+ * inlines every asset — KaTeX's 60 `woff2/woff/ttf` files end up inside `main.css`
+ * instead of next to it. That is a bundler behaviour the CSP depends on, so it is
+ * asserted here: if a future Vite stops inlining, this suite fails and the CSP can
+ * shrink back to `${cspSource}` (the second assertion guards the other half — a
+ * relative URL that no longer resolves would silently break the formulas).
+ */
+describe('webview stylesheet artifact', () => {
+  /** Every `url(…)` target in the stylesheet, in order. */
+  function styleUrls(): string[] {
+    return [...builtStyle.source.matchAll(/url\((["']?)([^"')]+)\1\)/g)].map((match) => match[2] ?? '');
+  }
+
+  it('carries the KaTeX fonts inline (the reason `font-src` allows `data:`)', () => {
+    expect(builtStyle.source).toContain('data:font/woff2');
+    expect(builtStyle.source).not.toContain('url(fonts/');
+  });
+
+  it('references no file the build did not emit', () => {
+    const missing = styleUrls()
+      .filter((url) => !url.startsWith('data:') && !url.startsWith('#'))
+      .filter((url) => !existsSync(path.resolve(path.dirname(builtStyle.path), url)));
+    expect(missing).toEqual([]);
   });
 });
 

@@ -28,12 +28,14 @@ const HOST_TO_WEBVIEW_TYPES: Record<HostToWebviewMessage['type'], true> = {
   tabs: true,
   ui: true,
   pong: true,
+  images: true,
 };
 
 const WEBVIEW_TO_HOST_TYPES: Record<WebviewToHostMessage['type'], true> = {
   ready: true,
   resync: true,
   ping: true,
+  resolveImages: true,
   sendMessage: true,
   interrupt: true,
   answerAsk: true,

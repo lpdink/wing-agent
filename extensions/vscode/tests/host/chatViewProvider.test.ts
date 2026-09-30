@@ -9,7 +9,7 @@ import { ChatViewProvider, CHAT_VIEW_ID } from '../../src/host/chatViewProvider'
 import { buildContentSecurityPolicy, buildWebviewHtml, createNonce } from '../../src/host/html';
 import { disposeLog } from '../../src/host/log';
 import { WEBVIEW_ROOT_ID } from '../../src/shared';
-import { mockState } from '../mocks/vscode';
+import { Uri, mockState, workspace as mockedWorkspace } from '../mocks/vscode';
 
 import { createHostHarness, flushMicrotasks } from './support/harness';
 import type { HostHarness } from './support/harness';
@@ -33,12 +33,14 @@ interface FakeWebview {
 
 interface ProviderHarness extends HostHarness {
   readonly provider: ChatViewProvider;
+  /** The webview the provider resolved (its `options` carry the resource roots). */
+  readonly webview: FakeWebview;
   readonly webviewPosts: unknown[];
   readonly emit: (raw: unknown) => void;
   readonly receiveDisposed: () => boolean;
 }
 
-function makeWebview(): {
+function makeWebview(options: { asWebviewUri?: (uri: unknown) => unknown } = {}): {
   webview: FakeWebview;
   posts: unknown[];
   readonly emit: (raw: unknown) => void;
@@ -51,7 +53,9 @@ function makeWebview(): {
     options: undefined,
     html: '',
     cspSource: 'vscode-webview://harness',
-    asWebviewUri: (uri) => uri,
+    // Identity by default: assertions can read the path back off the URI the host
+    // built (VS Code's real one is opaque and version-specific).
+    asWebviewUri: options.asWebviewUri ?? ((uri) => uri),
     onDidReceiveMessage: (next) => {
       handler = next;
       return {
@@ -76,9 +80,9 @@ function makeWebview(): {
 
 const teardown: (() => void)[] = [];
 
-function resolveProvider(): ProviderHarness {
+function resolveProvider(options: { asWebviewUri?: (uri: unknown) => unknown } = {}): ProviderHarness {
   const harness = createHostHarness();
-  const view = makeWebview();
+  const view = makeWebview(options);
   const provider = new ChatViewProvider(
     { toString: () => 'file:///extension' } as unknown as vscode.Uri,
     harness.host,
@@ -91,6 +95,7 @@ function resolveProvider(): ProviderHarness {
   return {
     ...harness,
     provider,
+    webview: view.webview,
     webviewPosts: view.posts,
     emit: view.emit,
     receiveDisposed: view.disposed,
@@ -134,6 +139,9 @@ describe('webview document', () => {
     expect(csp).toContain("default-src 'none'");
     expect(csp).toContain("script-src 'nonce-N1'");
     expect(csp).toContain('img-src vscode-webview://abc data:');
+    // KaTeX's fonts arrive inlined as `data:font/…` (Vite's library build inlines
+    // every asset), so `font-src` needs `data:` next to the webview origin.
+    expect(csp).toContain('font-src vscode-webview://abc data:');
     expect(csp).toContain('style-src vscode-webview://abc');
     // No remote code, and no connect-src escape hatch.
     expect(csp).not.toContain('http://');
@@ -275,7 +283,6 @@ describe('ChatViewProvider', () => {
     expect(pongs[0]?.['id']).toBe('ping-7');
     expect(typeof pongs[0]?.['hostTimeMs']).toBe('number');
   });
-
   it('re-hydrates on resync and records the reason', async () => {
     const harness = resolveProvider();
     await harness.host.start();
@@ -357,5 +364,97 @@ describe('ChatViewProvider', () => {
     expect(manifest.activationEvents).toContain(`onView:${CHAT_VIEW_ID}`);
     const containers = manifest.contributes?.viewsContainers?.activitybar ?? [];
     expect(containers.map((container) => container.id)).toContain(ours[0]?.container);
+  });
+});
+
+/**
+ * Image resolution: the one place where the host turns a path the model wrote into
+ * something the webview may load. The path policy itself is covered by
+ * `tests/host/images.test.ts`; here it is the wiring — resource roots, the answer,
+ * and the fact that a refusal is silent (the webview keeps its link).
+ */
+describe('image resolution', () => {
+  /** The window's first folder, as `activate`/`extension.ts` see it. */
+  function openWorkspace(fsPath: string): void {
+    mockedWorkspace.workspaceFolders = [{ uri: Uri.file(fsPath), name: 'project', index: 0 }];
+  }
+
+  afterEach(() => {
+    mockedWorkspace.workspaceFolders = undefined;
+  });
+
+  /** `localResourceRoots` as strings — the only thing the extension host observes. */
+  function rootsOf(harness: ProviderHarness): string[] {
+    const options = harness.webview.options as { localResourceRoots: { toString(): string }[] };
+    return options.localResourceRoots.map((root) => root.toString());
+  }
+
+  it('grants the workspace folder as a resource root when one is open', () => {
+    openWorkspace('/workspace/project');
+    const harness = resolveProvider();
+
+    expect(rootsOf(harness)).toEqual(['file:///extension', 'file:///workspace/project']);
+  });
+
+  it('keeps the extension as the only root while no folder is open', () => {
+    const harness = resolveProvider();
+
+    expect(rootsOf(harness)).toEqual(['file:///extension']);
+  });
+
+  it('answers resolveImages with a URI per source, and null for refusals', () => {
+    openWorkspace('/workspace/project');
+    const harness = resolveProvider();
+
+    harness.emit({
+      type: 'resolveImages',
+      srcs: ['plot.png', '../outside.png', 'notes.md', 'https://example.com/x.png'],
+    });
+
+    const images = postsOfType(harness.webviewPosts, 'images');
+    expect(images).toHaveLength(1);
+    expect(images[0]?.['images']).toEqual([
+      { src: 'plot.png', uri: 'file:///workspace/project/plot.png' },
+      { src: '../outside.png', uri: null },
+      { src: 'notes.md', uri: null },
+      { src: 'https://example.com/x.png', uri: null },
+    ]);
+  });
+
+  it('refuses everything while no folder is open', () => {
+    const harness = resolveProvider();
+
+    harness.emit({ type: 'resolveImages', srcs: ['plot.png'] });
+
+    expect(postsOfType(harness.webviewPosts, 'images')).toEqual([
+      { type: 'images', images: [{ src: 'plot.png', uri: null }] },
+    ]);
+  });
+
+  it('turns a throwing asWebviewUri into a refusal instead of losing the batch', () => {
+    openWorkspace('/workspace/project');
+    const harness = resolveProvider({
+      asWebviewUri: (uri) => {
+        if (String(uri).includes('boom.png')) {
+          throw new Error('outside localResourceRoots');
+        }
+        return uri;
+      },
+    });
+
+    harness.emit({ type: 'resolveImages', srcs: ['boom.png', 'plot.png'] });
+
+    expect(postsOfType(harness.webviewPosts, 'images')[0]?.['images']).toEqual([
+      { src: 'boom.png', uri: null },
+      { src: 'plot.png', uri: 'file:///workspace/project/plot.png' },
+    ]);
+  });
+
+  it('answers an empty request with an empty batch (never a stray message)', () => {
+    const harness = resolveProvider();
+
+    harness.emit({ type: 'resolveImages', srcs: [] });
+
+    expect(postsOfType(harness.webviewPosts, 'images')).toEqual([{ type: 'images', images: [] }]);
   });
 });

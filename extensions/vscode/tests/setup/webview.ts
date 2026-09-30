@@ -5,6 +5,7 @@ import { afterEach } from 'vitest';
 
 import { setBridgeController } from '../../src/webview/bridge/channel';
 import { resetCollapseOverrides } from '../../src/webview/chat/interaction';
+import { resetImageUris } from '../../src/webview/chat/markdown/image';
 import { resetAppStore } from '../../src/webview/state/appStore';
 
 /**
@@ -13,12 +14,13 @@ import { resetAppStore } from '../../src/webview/state/appStore';
  * The webview keeps one app-wide store and one mounted controller (that is what a
  * webview document is), so tests must tear both down between cases — otherwise
  * state leaks from one assertion to the next. The renderer's interaction state
- * (expand/collapse choices) is module-level for the same reason and is reset with
- * them.
+ * (expand/collapse choices) and the image URI cache are module-level for the same
+ * reason and are reset with them.
  */
 afterEach(() => {
   cleanup();
   setBridgeController(null);
   resetAppStore();
   resetCollapseOverrides();
+  resetImageUris();
 });

@@ -156,6 +156,36 @@ ol.list {
   text-decoration: underline;
 }
 
+/* ── formulas ────────────────────────────────────────────────────────── */
+
+/* KaTeX lays the formula out itself (`katex.min.css`, imported by
+ * `chat/markdown/math.ts`); the only thing it does not do is keep a wide display
+ * formula inside the transcript, so the wrapper owns that. */
+.mathDisplay {
+  display: block;
+  overflow-x: auto;
+}
+
+/* A formula KaTeX refused is shown verbatim, in the code font so it reads as
+ * source rather than prose. */
+.mathSource {
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--wing-font-body-s);
+  overflow-wrap: anywhere;
+}
+
+/* ── images ──────────────────────────────────────────────────────────── */
+
+/* Layout glue only: never wider than the transcript, height from the file's own
+ * aspect ratio. `vertical-align: bottom` keeps an inline image on the text
+ * baseline instead of adding the descender gap. */
+.markdownImage {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--wing-radius-small);
+  vertical-align: bottom;
+}
+
 /* ── code blocks ─────────────────────────────────────────────────────── */
 
 /* codeBlockPart.css:61-82 — bordered card on the code surface. */

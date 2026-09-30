@@ -5,8 +5,16 @@ import { isWebviewToHostMessage } from '../shared';
 
 import { log } from './log';
 
-/** A user intent (every webview message that is not protocol bookkeeping). */
-export type WebviewIntent = Exclude<WebviewToHostMessage, { type: 'ready' | 'resync' | 'ping' }>;
+/**
+ * A user intent (every webview message that is not protocol bookkeeping).
+ *
+ * `resolveImages` is protocol-level like `ping`: the *view* answers it, no session
+ * is involved, and `host/session/**` must never see it.
+ */
+export type WebviewIntent = Exclude<
+  WebviewToHostMessage,
+  { type: 'ready' | 'resync' | 'ping' | 'resolveImages' }
+>;
 
 export interface HostBridgeHandlers {
   /** The webview mounted and wants its initial state. */
@@ -15,6 +23,8 @@ export interface HostBridgeHandlers {
   onResync(message: Extract<WebviewToHostMessage, { type: 'resync' }>): void;
   /** Channel diagnostics — answer with `pong`. */
   onPing(id: string): void;
+  /** Image sources to turn into webview URIs — answer with `images`. */
+  onResolveImages(message: Extract<WebviewToHostMessage, { type: 'resolveImages' }>): void;
   /** Everything else the user asked for. */
   onIntent(intent: WebviewIntent): void;
 }
@@ -71,6 +81,9 @@ export class HostBridge implements vscode.Disposable {
         return;
       case 'ping':
         this.handlers.onPing(raw.id);
+        return;
+      case 'resolveImages':
+        this.handlers.onResolveImages(raw);
         return;
       default:
         this.handlers.onIntent(raw);

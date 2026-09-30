@@ -104,6 +104,8 @@ function describeHostMessage(message: HostToWebviewMessage): string {
       return `ui:${message.action.kind}`;
     case 'pong':
       return `pong:${message.id}`;
+    case 'images':
+      return `images:${message.images.map((image) => `${image.src}=${image.uri ?? 'null'}`).join(',')}`;
     default:
       return assertNever(message, 'describeHostMessage');
   }
@@ -118,6 +120,8 @@ function describeWebviewMessage(message: WebviewToHostMessage): string {
       return `resync:${message.sessionId}:${message.reason}`;
     case 'ping':
       return `ping:${message.id}`;
+    case 'resolveImages':
+      return `resolveImages:${message.srcs.join('|')}`;
     case 'sendMessage':
       return `send:${message.text}`;
     case 'interrupt':
@@ -184,12 +188,20 @@ const HOST_MESSAGES: readonly HostToWebviewMessage[] = [
   { type: 'tabs', tabs: [], activeSessionId: null },
   { type: 'ui', action: { kind: 'scrollToBottom' } },
   { type: 'pong', id: 'ping-1', hostTimeMs: 0 },
+  {
+    type: 'images',
+    images: [
+      { src: 'plot.png', uri: 'vscode-webview://abc/plot.png' },
+      { src: 'https://example.com/x.png', uri: null },
+    ],
+  },
 ];
 
 const WEBVIEW_MESSAGES: readonly WebviewToHostMessage[] = [
   { type: 'ready', protocolVersion: BRIDGE_PROTOCOL_VERSION },
   { type: 'resync', sessionId: 's', lastSeq: 3, reason: 'seq-gap' },
   { type: 'ping', id: 'ping-1' },
+  { type: 'resolveImages', srcs: ['plot.png', 'docs/../plot.png'] },
   { type: 'sendMessage', sessionId: 's', text: 'hi' },
   { type: 'interrupt', sessionId: 's' },
   { type: 'answerAsk', sessionId: 's', requestId: 'r', answers: [] },
@@ -273,12 +285,14 @@ describe('shared contract', () => {
       'tabs:0:null',
       'ui:scrollToBottom',
       'pong:ping-1',
+      'images:plot.png=vscode-webview://abc/plot.png,https://example.com/x.png=null',
     ]);
 
     expect(WEBVIEW_MESSAGES.map(describeWebviewMessage)).toEqual([
       `ready:${BRIDGE_PROTOCOL_VERSION}`,
       'resync:s:seq-gap',
       'ping:ping-1',
+      'resolveImages:plot.png|docs/../plot.png',
       'send:hi',
       'interrupt:s',
       'answerAsk:r:0',
@@ -325,6 +339,18 @@ describe('shared contract', () => {
     expect(JSON.stringify(roundTripped)).toBe(JSON.stringify(session));
     // The empty session is the "new tab" shape a host sends right after create.
     expect(roundTrip(makeEmptySession())).toEqual(makeEmptySession());
+  });
+
+  it('keeps image resolutions bridge-safe (`uri: null` is meaningful, not an omitted key)', () => {
+    // The renderer distinguishes "unavailable" from "not asked yet" by the *value*,
+    // so a `undefined` that JSON drops would turn a refusal into a pending state
+    // (and a second request). `null` must survive verbatim.
+    const message = HOST_MESSAGES.find((candidate) => candidate.type === 'images');
+    expect(message?.images).toEqual([
+      { src: 'plot.png', uri: 'vscode-webview://abc/plot.png' },
+      { src: 'https://example.com/x.png', uri: null },
+    ]);
+    expect(JSON.parse(JSON.stringify(message))).toEqual(message);
   });
 
   it('has no undefined values anywhere in a session snapshot', () => {

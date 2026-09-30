@@ -5,6 +5,7 @@ import { BRIDGE_PROTOCOL_VERSION, EMPTY_PANELS } from '../../src/shared';
 import { makeFixtureSession } from '../../src/testing/fixtures';
 import { createMockBridge } from '../../src/testing/mockBridge';
 import { createBridgeController } from '../../src/webview/bridge/controller';
+import { imageUri, resetImageUris } from '../../src/webview/chat/markdown/image';
 import { createAppStore } from '../../src/webview/state/store';
 import type { AppStoreApi } from '../../src/webview/state/store';
 
@@ -37,6 +38,9 @@ function setup(options: { autoHandshake?: boolean } = {}): {
 beforeEach(() => {
   store = createAppStore();
   clock = 1_000;
+  // The image cache is document state like the store (and `tests/setup/webview.ts`
+  // only runs for the jsdom project, where this file is not).
+  resetImageUris();
 });
 
 describe('start', () => {
@@ -162,6 +166,26 @@ describe('message handling', () => {
     bridge.push({ type: 'ui', action: { kind: 'toast', level: 'warning', message: 'gateway restarting' } });
 
     expect(store.getState().toasts.map((toast) => toast.message)).toEqual(['gateway restarting']);
+  });
+
+  it('routes image resolutions to the renderer cache, not the session model', () => {
+    const { controller, bridge } = setup();
+    controller.start();
+
+    bridge.push({
+      type: 'images',
+      images: [
+        { src: 'plot.png', uri: 'vscode-webview://abc/plot.png' },
+        { src: 'https://example.com/x.png', uri: null },
+      ],
+    });
+
+    // The URI is renderer-local state (same for every tab), so it must not create
+    // a session, touch the store's model, or look like a protocol violation.
+    expect(imageUri('plot.png')).toBe('vscode-webview://abc/plot.png');
+    expect(imageUri('https://example.com/x.png')).toBeNull();
+    expect(store.getState().sessions[session.sessionId]).toBeUndefined();
+    expect(bridge.sentOfType('resync')).toHaveLength(0);
   });
 
   it('resyncs the active session when a payload is unrecognizable', () => {

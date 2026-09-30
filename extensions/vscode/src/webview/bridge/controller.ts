@@ -6,6 +6,7 @@ import type {
 } from '../../shared';
 import { BRIDGE_PROTOCOL_VERSION, isHostToWebviewMessage, unhandledVariant } from '../../shared';
 
+import { acceptImageUris } from '../chat/markdown/image';
 import type { AppStoreApi } from '../state/store';
 
 /**
@@ -125,6 +126,13 @@ export function createBridgeController(options: BridgeControllerOptions): Bridge
         if (sentAt !== undefined) {
           store.getState().notePong(message.id, Math.max(0, now() - sentAt));
         }
+        return;
+      }
+      case 'images': {
+        // Renderer-local state, not part of the session model: image URIs are the
+        // same for every tab in this document, so they bypass the store entirely
+        // (`chat/markdown/image.ts`).
+        acceptImageUris(message.images);
         return;
       }
       default:
