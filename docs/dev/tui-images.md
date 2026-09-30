@@ -62,7 +62,7 @@ I/O），所以由 app lane 检查：
 
 事件循环  Images::freshness_deadline(now) → 排程；None 时 select 臂彻底停车
           到点 → Images::poll_freshness(now)：
-              对目标集逐条 fs::metadata（唯一 I/O）→ 与基线比较
+              对目标集逐条 fs::metadata（这一层唯一的 I/O）→ 与基线比较
               基线 = store 记住的版本（ImageMeta 的 bytes + mtime）
                      └ 没有可用答案时（探测在飞 / 已判不可用）退回 lane 自己上次看到的 stamp
               变了 → ImageStore::refresh(path)（丢该路径的元数据 memo）→ mark_dirty()
@@ -87,7 +87,7 @@ I/O），所以由 app lane 检查：
 链接」：那样这条路径会立刻离开目标集（链接不产生锚点），于是再也不会被重新探测，图就死到下次内容重建。
 硬重置仍然是内容重建（会话切换 / 压缩 / rewind / `/clear`）。
 
-**边界**：比较的是 `(bytes, mtime)`；同尺寸 + 同 mtime 的原地重写（纳秒粒度下不会发生）看不见。
+**边界**：比较的是 `(bytes, mtime)`（同尺寸改写的判别全靠时间戳，见 `a_same_size_rewrite_is_seen`）；同尺寸 **+ 同 mtime** 的原地重写（纳秒粒度下不会发生）看不见。检查自身只做 `stat`；当 store 的元数据 memo 刚好被 256 上限清空时，`meta()` 会顺手把该路径重新入队探测（I/O 仍不在帧里，只是「一次 stat」要读成「一次 stat + 可能的探测入队」）。
 `fs::metadata` 在本地文件系统是微秒级；网络文件系统上可能慢——这是「秒级 × 个位数条」的已知代价。
 `app::tests::images` 覆盖：重写可见、无变化不重编码、节流生效、屏幕外的图不检查、退化后恢复
 （5 条用例，逐条有变异实验证明判别力）。
@@ -103,6 +103,7 @@ I/O），所以由 app lane 检查：
 | 元数据 memo | `MAX_META_ENTRIES` | 256 | 整表丢弃，下一帧重新探测 |
 | 失败 memo | `MAX_FAILED_ENTRIES` | 64 | 整表丢弃（按 target 尺寸记账，防 resize 风暴磨爆） |
 | 锚点行数 | `MAX_ANCHOR_ROWS`（`render/markdown/images.rs`） | 36 | 盒子封顶，图在盒内等比缩放留白 |
+| app 元数据表（`Images::known`） | 无上限（随会话引用过的**不同图片数**增长） | — | 一代内容内**只增不减**（见 [`tui-rendering.md`](tui-rendering.md) 第五节：缩表会让锚点在链接/锚点之间振荡）；内容重建（`structure_epoch`）整表清空。实测 120 张 = 120 条（`a_hundred_pictures_stay_within_the_cache_budget` 的断言） |
 
 **压力验证**（`app/tests/images.rs::a_hundred_pictures_stay_within_the_cache_budget`）：120 张不同图片、
 整屏滚动若干步，每一步断言 `cached ≤ 8`、`cached_bytes ≤ 24 MiB`、`memo ≤ 256`、`failed ≤ 64`、
@@ -121,6 +122,7 @@ worker 存活、可见图全部画出。变异实验（把 LRU 上限改成永�
 | 元数据迟到（探测完成） | 表变 → `ImageOpts` 换新 → `CachedCell` 高度缓存失效 → 行数重算 | `Images::sync` |
 | 内容重建（会话切换 / 压缩重同步 / rewind / `/clear`） | `ImageStore::reset()`（丢 memo + 编码）+ 清空元数据表 → 下一帧按新内容重新探测 | `Images::set_structure_epoch` |
 | 文件被重写（同一会话内） | 新鲜度检查 → `refresh(path)` → 重新探测 + 重编码 | `Images::poll_freshness`（第四节） |
+| 文件被删除 / 写坏（正在显示） | 同一条通路：图消失、盒子 + caption 保留（此刻不可用），文件回来 1 s 内自愈；硬重置是内容重建 | 同上 |
 | 图片行掉出视口 | 不画（不失效）：再滚回来直接命中缓存 | `Images::paint` 与几何 |
 
 ## 七、遮挡与选择（图写在哪里、什么时候不写）
@@ -150,6 +152,8 @@ worker 存活、可见图全部画出。变异实验（把 LRU 上限改成永�
 | `first_encode/1920x1080` | **9.07 ms** | 同上（1920×1080 的图） |
 | `freshness/1` | **0.89 µs** | 一次检查 1 个路径（memo 查表 + 1 次 `stat`） |
 | `freshness/8` | **7.1 µs** | 同屏 8 张图时，每秒一次 |
+
+口径：bench 走 `ChatView` + `ImageStore` + `paint`（公共 API），不含 `App::draw` 里每帧一次的 `Images::observe_visible`（`pub(crate)`，进不了 bench 目标；独立探针在 debug 构建下对 8 个锚点测得 2.09 µs/帧 ≈ 261 ns/锚点，相对这张表是噪声级）。
 
 结论：图片通道不是帧预算风险（8 张同屏 ≈ 33.5 µs，与同内容的链接路径基线 34.2 µs 同阶；每多一张 ≈ 3.6 µs）；
 真正的成本在**首次编码**（毫秒级，一次性，发生在写入之后的第一个窗口）；新鲜度检查每秒最多几微秒。
@@ -186,6 +190,7 @@ wing                                        # 起 TUI（网关没起就先 wing 
 3. 滚动 / 翻页：图跟着文本走，超出视口的部分不画；滚回来不重新编码（不闪）。
 4. 改窗口大小：一瞬 caption 后按新宽度重画；拖拽选择期间整帧只有文本（复制到的是 caption），松开后回来。
 5. 写一条空文件 / 一个 >16 MiB 的假 `.png`：那一行**保持链接文本**，不多占行、不空白。
+   已经显示出来的图再被删掉：图消失、盒子与 `▢ alt · W×H` caption 保留（不空白、也不退回链接），文件写回后 1 s 内自愈；要它变回链接需要一次内容重建（会话切换 / 压缩 / rewind）。
 6. 退出 TUI 后终端无残留（图不留在屏幕上）。
 
 对照例（同机同内容，应逐 cell 等于今天）：`~/.wing/tui/config.yaml` 里 `rendering.images: off`，或换
@@ -197,7 +202,7 @@ Alacritty 这类没有图形协议的终端 → 同一行只显示 `销售趋势
 |---|---|
 | 图没出来，只有链接文本 | 终端是否支持图形协议（启动探测一次）；`rendering.images` 是不是 `off`；文件是否存在/可解码（`file plot.png`）；相对路径是否落在当前 workdir（`/workdir`、会话切换后相对路径要重新探测） |
 | 有 `▢` 盒子但没有图 | 图此刻不可用：编码中（毫秒级，稍等）、编码失败（截断/坏文件）、正被 toast 盖着、正在拖拽选择。看第五节的阶梯，盒子存在本身就说明元数据是好的 |
-| 重写了同一个文件，图还是旧的 | 是否在 1 s 窗口内（第四节）；文件是否同尺寸 + 同 mtime；路径拼写是否一致（相对/绝对都会归一化到同一个 key） |
+| 重写了同一个文件，图还是旧的 | 是否在 1 s 窗口内（第四节）；**是否同尺寸 + 同 mtime**（同尺寸的判别全靠时间戳，用例 `a_same_size_rewrite_is_seen`）；路径拼写是否一致（相对/绝对都会归一化到同一个 key） |
 | 图占了 36 行 | `MAX_ANCHOR_ROWS` 的封顶（长图）；调它等于改布局契约，要同步流式矩阵 |
 | 图跑到别的文字上 / 半张图 | 不该发生：`paint` 前会核对 caption；请带着 `cargo test -p wing --lib app::tests::images` 的输出报 issue |
 | 图在滚动时闪 / 每次滚动都重编码 | `target` 只跟随盒子（宽度/行数），不跟随滚动位置——出现重编码说明盒子变了（窗口宽度变了？） |

@@ -38,6 +38,7 @@ use ratatui::style::Style;
 use super::support::draw;
 use super::support::test_terminal;
 use crate::app::App;
+use crate::app::image_freshness_tick;
 use crate::app::images::FRESHNESS_INTERVAL;
 use crate::app::images::Images;
 use crate::config::AppConfig;
@@ -117,6 +118,51 @@ fn write_truncated_png(path: &Path, px_w: u32, px_h: u32) {
     let mut bytes = fs::read(path).expect("read the fixture");
     bytes.truncate(50);
     fs::write(path, bytes).expect("truncate the fixture");
+}
+
+/// Write a flat PNG of the given size and colour.
+///
+/// Two of these with **different** colours and the same dimensions are the
+/// fixture pair of `a_same_size_rewrite_is_seen`; see [`pad_to`] for how their
+/// lengths are made to match.
+fn write_flat_png(path: &Path, px_w: u32, px_h: u32, rgb: [u8; 3]) {
+    let image = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(px_w, px_h, |_, _| {
+        image::Rgb(rgb)
+    }));
+    image
+        .save_with_format(path, image::ImageFormat::Png)
+        .expect("write the fixture");
+}
+
+/// Grow `path` to exactly `len` bytes by appending padding after the PNG's
+/// `IEND` chunk.
+///
+/// Every decoder on this path stops reading at `IEND` — the header probe and
+/// the full decode both do (verified: the fixture decodes to the same
+/// dimensions and pixels with 4 KiB of trailing bytes), and real-world files
+/// carry appended metadata the same way. That is what lets this test build two
+/// *different* pictures of the very same byte length, which is the shape of a
+/// rewrite the byte count cannot reveal.
+fn pad_to(path: &Path, len: u64) {
+    let mut bytes = fs::read(path).expect("read the fixture");
+    let current = bytes.len() as u64;
+    assert!(
+        current < len,
+        "the fixture already exceeds its target length ({current} >= {len})"
+    );
+    bytes.resize(len as usize, b'Z');
+    fs::write(path, bytes).expect("pad the fixture");
+}
+
+/// The kitty transmit sequence the picture's anchor cell carries.
+///
+/// The payload rides in the box's top-left cell, once, and it embeds the
+/// **image id** — which `ui/image/encode.rs` mints fresh for every encoding
+/// (a process-local counter, deterministic). A different sequence at the same
+/// cell is therefore proof that a *new* image was encoded and sent, rather than
+/// the old protocol being painted again.
+fn transmit_sequence(buf: &Buffer, area: Rect) -> String {
+    buf[(area.x, area.y)].symbol().to_string()
 }
 
 /// An app whose picture lane is wired to an injected capability, with no
@@ -1541,6 +1587,154 @@ fn a_hundred_pictures_stay_within_the_cache_budget() {
         app.images.opts().shapes().len(),
         COUNT as usize,
         "every picture the session names has a shape once the view has been laid out"
+    );
+}
+
+/// The **same-size** rewrite: new pixels, identical byte length.
+///
+/// This is the case that makes the timestamp half of the freshness comparison
+/// load-bearing — the byte count cannot tell the two versions apart — and it is
+/// what "the model redrew the same chart" looks like whenever the encoder lands
+/// on the same size. The fixture pair is built by [`pad_to`] (two different
+/// pictures, padded to the same length) and the test asserts its own
+/// preconditions, so it cannot silently degrade into the size-changed case that
+/// `a_rewritten_picture_is_re_read_on_the_next_freshness_tick` already covers.
+#[test]
+fn a_same_size_rewrite_is_seen() {
+    const PIXELS: (u32, u32) = (40, 12);
+    let dir = TempDir::new("same-size");
+    let plot = dir.file("plot.png");
+    write_flat_png(&plot, PIXELS.0, PIXELS.1, [10, 20, 30]);
+    let base = fs::metadata(&plot).expect("stat the fixture").len();
+    pad_to(&plot, base + 4096);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
+    app.chat
+        .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
+    let mut term = test_terminal(60, 48);
+    draw_until(&mut app, &mut term, "the picture", |_, buf| {
+        has_placeholder(buf)
+    });
+
+    // The baseline check, before anything moves: it records what the store read.
+    let now = Instant::now();
+    assert!(!tick(&mut app, now), "the baseline check");
+    let before = app.chat.frame_images().first().cloned().expect("recorded");
+    let before_bytes = fs::read(&plot).expect("read the fixture");
+    let before_len = before_bytes.len() as u64;
+    let before_mtime = fs::metadata(&plot)
+        .expect("stat the fixture")
+        .modified()
+        .expect("mtime");
+    let before_transmission = transmit_sequence(term.backend().buffer(), before.area);
+
+    // Different pixels, same dimensions, padded to the very same length, one
+    // minute later.
+    let replacement = dir.file("replacement.png");
+    write_flat_png(&replacement, PIXELS.0, PIXELS.1, [200, 100, 50]);
+    pad_to(&replacement, before_len);
+    fs::copy(&replacement, &plot).expect("replace the picture");
+    let handle = fs::OpenOptions::new()
+        .write(true)
+        .open(&plot)
+        .expect("open the fixture to set its timestamp");
+    handle
+        .set_times(fs::FileTimes::new().set_modified(before_mtime + Duration::from_secs(60)))
+        .expect("set the mtime");
+
+    // The fixture's own guards: the content moved, the size did not.
+    let after_bytes = fs::read(&plot).expect("read the fixture");
+    assert_ne!(after_bytes, before_bytes, "the pixels must change");
+    assert_eq!(
+        after_bytes.len() as u64,
+        before_len,
+        "the fixture must keep the byte length — that is the whole point"
+    );
+    assert_ne!(
+        fs::metadata(&plot)
+            .expect("stat the fixture")
+            .modified()
+            .expect("mtime"),
+        before_mtime,
+        "and move the timestamp instead"
+    );
+
+    assert!(
+        tick(&mut app, now + FRESHNESS_INTERVAL),
+        "a rewrite that only the timestamp can reveal must still be seen"
+    );
+
+    // The stale transmission is dropped (not repainted) …
+    let buf = frame(&mut app, &mut term);
+    assert!(
+        !has_placeholder(&buf),
+        "the old encoding must not be repainted"
+    );
+
+    // … and the picture comes back as a *new* transmission: same box, same
+    // cells, different image id — so the file really was read again.
+    draw_until(&mut app, &mut term, "the new picture", |_, buf| {
+        has_placeholder(buf)
+    });
+    let recovered = app.chat.frame_images().first().cloned().expect("recorded");
+    assert_eq!(
+        recovered.area, before.area,
+        "the same dimensions must lay out the same box"
+    );
+    assert_ne!(
+        transmit_sequence(term.backend().buffer(), recovered.area),
+        before_transmission,
+        "the picture must be a fresh encoding, not the old protocol reused"
+    );
+}
+
+/// The freshness timer arm itself: armed with a deadline it fires, parked on
+/// `None` it never wakes the loop.
+///
+/// Same contract (and same shape) as the selection auto-scroll arm's test: the
+/// `None` half is what makes "a session with nothing anchored costs this lane
+/// nothing" true, and an arm that returned immediately from `None` would spin
+/// the event loop at the frame rate.
+#[tokio::test]
+async fn test_image_freshness_timer_fires_only_when_armed() {
+    // Armed with a deadline already reached: the arm completes on its own.
+    tokio::select! {
+        () = image_freshness_tick(Some(std::time::Instant::now())) => {}
+        () = tokio::time::sleep(FRESHNESS_INTERVAL * 20) => {
+            panic!("an armed timer must fire");
+        }
+    }
+
+    // Parked: it never completes — the loop stays idle instead of polling.
+    let parked = tokio::time::timeout(FRESHNESS_INTERVAL * 3, image_freshness_tick(None)).await;
+    assert!(
+        parked.is_err(),
+        "a parked timer must not wake the event loop"
+    );
+}
+
+/// `select!` rebuilds the arm on every loop iteration, so the deadline has to be
+/// absolute: a relative sleep would be pushed back by every key press and stream
+/// event and, during a busy turn, would never fire.
+#[tokio::test]
+async fn test_image_freshness_deadline_survives_busy_iterations() {
+    let step = std::time::Duration::from_millis(30);
+    let stop = std::time::Instant::now() + step * 10;
+    let mut deadline = Some(std::time::Instant::now());
+    let mut fires = 0;
+    while std::time::Instant::now() < stop {
+        tokio::select! {
+            () = image_freshness_tick(deadline) => {
+                fires += 1;
+                deadline = Some(std::time::Instant::now() + step);
+            }
+            // An event far more frequent than the interval: the arm is dropped
+            // and rebuilt with the *same* deadline.
+            () = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
+        }
+    }
+    assert!(
+        fires >= 3,
+        "the absolute deadline must keep firing despite frequent iterations, got {fires}"
     );
 }
 
