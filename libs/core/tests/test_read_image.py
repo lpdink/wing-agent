@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import builtins
 import hashlib
+import io
 import os
+import shlex
 import stat as stat_module
 import struct
 from pathlib import Path
@@ -112,7 +114,7 @@ def _ctx(
 class TestVisionGate:
     @pytest.mark.asyncio
     async def test_refuses_before_any_file_io(self, tmp_path: Path):
-        """vision=false → ToolError 且零副作用：不 stat、不 open、不写媒体。"""
+        """vision=false → ToolError 且零副作用：所有已知 I/O 入口都被禁止。"""
         image = tmp_path / "shot.png"
         write_image(image, png_bytes(800, 600))
         spy = _SpyMedia()
@@ -120,9 +122,30 @@ class TestVisionGate:
         def _forbidden(*_args, **_kwargs):
             raise AssertionError("file I/O happened before the vision gate")
 
+        # 覆盖面 = 实现可能用到的每一个 I/O 入口（现实现只用 os.stat + open）。
+        # 未来若重构成 Path.read_bytes / io.open，这组 spy 同样会拦截。
+        forbidden_io = (
+            (os, "stat"),
+            (os, "lstat"),
+            (os, "open"),
+            (os, "listdir"),
+            (os, "scandir"),
+            (os.path, "exists"),
+            (os.path, "getsize"),
+            (builtins, "open"),
+            (io, "open"),
+            (Path, "open"),
+            (Path, "stat"),
+            (Path, "read_bytes"),
+            (Path, "read_text"),
+            (Path, "exists"),
+            (Path, "is_file"),
+            (Path, "is_dir"),
+        )
+
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(os, "stat", _forbidden)
-            mp.setattr(builtins, "open", _forbidden)
+            for target, name in forbidden_io:
+                mp.setattr(target, name, _forbidden)
             with pytest.raises(ToolError) as ei:
                 await read_image(str(image), ctx=_ctx(vision=False, media=spy.access))
 
@@ -139,7 +162,7 @@ class TestVisionGate:
     async def test_message_suggests_vision_sibling_in_same_provider(
         self, tmp_path: Path, _mock_config
     ):
-        """同 provider 声明了 vision 的兄弟模型被点名；没有则整句省略。"""
+        """恰好一个 provider 声明该模型：写它的名字，点名 vision 兄弟；没有兄弟则省略建议。"""
         _mock_config.providers[0].models = [
             ModelSpec(name="text-model"),
             ModelSpec(name="vision-model", capabilities=ModelCapabilities(vision=True)),
@@ -152,6 +175,8 @@ class TestVisionGate:
         msg = str(ei.value)
         assert "vision-model" in msg
         assert "- name: default" in msg  # provider 名（配置里的 providers[0].name）
+        assert "<your-provider>" not in msg
+        assert "Note:" not in msg
 
         # 没有 vision 兄弟 → 不出现建议句
         _mock_config.providers[0].models = [ModelSpec(name="text-model")]
@@ -160,10 +185,35 @@ class TestVisionGate:
         assert "Alternatively" not in str(ei2.value)
 
     @pytest.mark.asyncio
+    async def test_multi_provider_same_name_omits_attribution(
+        self, tmp_path: Path, _mock_config
+    ):
+        """同名模型挂在多个 provider：不指认归属（无法判定活跃者），示例用中性占位。"""
+        _mock_config.providers[0].models = [ModelSpec(name="shared-model")]
+        _mock_config.providers[1].models = [
+            ModelSpec(name="shared-model"),
+            ModelSpec(name="alt-vision", capabilities=ModelCapabilities(vision=True)),
+        ]
+        image = tmp_path / "shot.png"
+        write_image(image, png_bytes(4, 4))
+
+        with pytest.raises(ToolError) as ei:
+            await read_image(str(image), ctx=_ctx(vision=False, model="shared-model"))
+        msg = str(ei.value)
+        assert "- name: <your-provider>" in msg
+        assert "declared by several providers" in msg
+        assert "the provider this session actually uses" in msg
+        # 不能把模型引向一个可能非活跃的 provider / 其 vision 兄弟
+        assert "- name: default" not in msg
+        assert "- name: alt" not in msg
+        assert "alt-vision" not in msg
+        assert "Alternatively" not in msg
+
+    @pytest.mark.asyncio
     async def test_gate_is_reachable_without_config_provider_match(
         self, tmp_path, _mock_config
     ):
-        """模型不在任何 provider 声明里（如 CLI override）→ 用占位 provider 名，仍拒绝。"""
+        """模型不在任何 provider 声明里（如 CLI override）→ 中性占位 + Note，仍拒绝。"""
         _mock_config.providers[0].models = []
         _mock_config.providers[1].models = []
         image = tmp_path / "shot.png"
@@ -174,7 +224,11 @@ class TestVisionGate:
         msg = str(ei.value)
         assert "ghost-model" in msg
         assert "- name: ghost-model" in msg  # 示例用同一模型名
-        assert "<provider>" in msg
+        # 占位不是合法 provider 名（不会被照抄成真实配置），并有 Note 说明
+        assert "- name: <your-provider>" in msg
+        assert "not declared by any provider" in msg
+        assert "the provider this session actually uses" in msg
+        assert "Alternatively" not in msg
 
 
 ########## 2. 成功路径
@@ -284,6 +338,30 @@ class TestMaxBytes:
         assert spy.writes[0][1] == data
 
     @pytest.mark.asyncio
+    async def test_downscale_hint_shell_quotes_path(self, tmp_path: Path, _mock_config):
+        """含空格 / CJK 的路径在示例命令里被 shell 引用，可直接复制执行（S1）。"""
+        _mock_config.images.max_bytes = 64
+        spaced = tmp_path / "工作 目录"
+        spaced.mkdir()
+        image = spaced / "截图 shot.png"
+        write_image(image, png_bytes(4, 4), total_size=128)
+
+        with pytest.raises(ToolError) as ei:
+            await read_image(str(image), ctx=_ctx(vision=True))
+
+        msg = str(ei.value)
+        # 按 shell 词法拆出的 argv 必须恰好是 6 个 token（未引用会被拆成 10 个）
+        argv = shlex.split(msg.split("e.g.:", 1)[1].strip())
+        assert argv == [
+            "sips",
+            "-Z",
+            "1568",
+            str(image),
+            "--out",
+            str(image) + ".small.png",
+        ]
+
+    @pytest.mark.asyncio
     async def test_growth_between_stat_and_read_still_rejected(
         self, tmp_path: Path, monkeypatch, _mock_config
     ):
@@ -315,6 +393,29 @@ class TestFileValidation:
         msg = str(ei.value)
         assert "not a supported image" in msg
         assert "sips -s format png" in msg
+
+    @pytest.mark.asyncio
+    async def test_conversion_hint_shell_quotes_path(self, tmp_path: Path):
+        """格式转换示例命令同样对路径做 shell 引用（S1）。"""
+        spaced = tmp_path / "工作 目录"
+        spaced.mkdir()
+        image = spaced / "notes.bin"
+        image.write_bytes(b"\x00\x01\x02\x03" * 8)
+
+        with pytest.raises(ToolError) as ei:
+            await read_image(str(image), ctx=_ctx(vision=True))
+
+        msg = str(ei.value)
+        argv = shlex.split(msg.split("e.g.:", 1)[1].strip())
+        assert argv == [
+            "sips",
+            "-s",
+            "format",
+            "png",
+            str(image),
+            "--out",
+            str(image) + ".png",
+        ]
 
     @pytest.mark.asyncio
     async def test_corrupt_header(self, tmp_path: Path):
