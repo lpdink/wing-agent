@@ -68,6 +68,7 @@
     `parse_equation_with_depth(input, max_depth)`，`parse_atom` / `parse_sequence_until_ex`
     各包一层深度计数。上游没有上界，brace-free 的深嵌套（`\left(\left(…`、`\frac \frac …`）
     会递归到爆栈（debug + 2 MiB 栈实测 abort）。`parse_equation` 语义不变（无上界）。
+    该入口还额外返回**消费的字符数**，供上层判断"输入有没有被静默丢掉一段"。
 13. **`cargo fmt`**：所有内联文件都跑了 `cargo fmt`（仓库门禁要求 `cargo fmt --check`
     干净），因此与上游原文存在**纯空白**差异。
 
@@ -99,7 +100,7 @@ rustfmt --edition 2024 --quiet /tmp/term-maths-1.0.0/src/layout.rs
 | `src/grid/latex_renderer.rs` | 8 | 模块路径 |
 | `src/grid/mod.rs` | 23 | 模块路径 + 移除三个未内联后端 |
 | `src/grid/layout.rs` | 74 | 模块路径 + `center_accent` + `build_delimiter` 提权 + `layout_seq` 一次性拼装 + `layout_binom` 修正 + `layout_sqrt` 空被开方数 |
-| `src/latex/parser.rs` | 178 | 模块路径 + 4 处 `collapsible_if` + `·` 间隔 + 命名算子空格 + `parse_group_atom` 跳空白 + 递归深度闸 |
+| `src/latex/parser.rs` | 183 | 模块路径 + 4 处 `collapsible_if` + `·` 间隔 + 命名算子空格 + `parse_group_atom` 跳空白 + 递归深度闸 |
 
 上游测试随源码内联（`parser.rs` / `rendered_block.rs` / `mathfont.rs` 文件内的
 `#[cfg(test)] mod tests`），两个集成测试也整体迁移到 `tests/upstream_robustness.rs`

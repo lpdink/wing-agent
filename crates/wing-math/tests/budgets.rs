@@ -15,8 +15,10 @@ use wing_math::{render_block, render_display};
 
 /// 源码长度上限。
 const MAX_SOURCE_CHARS: usize = 8192;
-/// 花括号嵌套上限（review r1 的 S2：debug + 2 MiB 栈下 ~195 层就会栈溢出，取 64 留余量）。
-const MAX_BRACE_DEPTH: usize = 64;
+/// 花括号嵌套上限（`guard::MAX_BRACE_DEPTH`；review r3 把它与解析器递归闸对齐到 47）。
+const MAX_BRACE_DEPTH: usize = 47;
+/// 解析器递归深度上限（`api::MAX_PARSE_DEPTH`；一层结构 ≈ 2 个深度单位）。
+const MAX_PARSE_DEPTH: usize = 96;
 /// 行分隔符数量上限（每个 `\\` 至少一行）。
 const MAX_ROW_SEPARATORS: usize = 256;
 
@@ -70,6 +72,12 @@ fn brace_depth_budget() {
     };
     assert!(render_block(&nested(20)).is_some());
     assert!(render_block(&nested(50)).is_none());
+
+    // 花括号闸与解析器闸的边界必须对得上：47 层过、48 层拒（实测深度 96 / 98）
+    assert!(render_block(&format!("{}x{}", "{".repeat(47), "}".repeat(47))).is_some());
+    assert!(render_block(&format!("{}x{}", "{".repeat(48), "}".repeat(48))).is_none());
+    // 只有左括号（不配平）同样是拒绝
+    assert!(render_block(&"{".repeat(MAX_PARSE_DEPTH)).is_none());
 
     // 极限附近不得栈溢出（review r2 的 S1）
     for depth in [8, 32, 63, 64, 200] {
@@ -211,11 +219,22 @@ fn long_flat_formulas_are_not_quadratic() {
 
 #[test]
 fn max_depth_inputs_survive_a_small_stack() {
-    // review r1 的 S2 / r2 的 S1：debug 构建 + 2 MiB 线程栈下，嵌套 `\frac` 到 ~195 层、
-    // `\left(` 到 250 层就会 stack overflow（不可捕获的 abort）。深度闸必须在**解析
-    // 过程中**就置位（不用等排版），让"上限附近 + 远超上限"的输入在 1 MiB 栈里也能跑完。
+    // review r1 的 S2 / r2 的 S1 / r3 的 S1：debug 构建 + 小线程栈下，深嵌套会把
+    // 解析器与排版递归到 stack overflow（不可捕获的 abort）。深度闸必须在**解析过程中**
+    // 就置位（不用等排版），让"上限附近 + 远超上限"的输入在小栈里也能跑完。
+    //
+    // 栈尺寸怎么定的（debug、子进程二分实测最小可用栈，见 `api::MAX_PARSE_DEPTH`）：
+    //
+    // | 输入 | 最小可用线程栈 |
+    // |---|---|
+    // | `\frac ` / `\sqrt ` 链 ×1364（最坏闸门路径） | 689 KiB |
+    // | `\hat ` / `\mathbb ` 链 ×1364 | 625 KiB |
+    // | 嵌套分式 ×40（真的渲染） | 353 KiB |
+    //
+    // 取 1.5 MiB ≈ 2.2x 余量：既是有效的回归哨兵（栈需求翻倍就会红），又不会因为
+    // rustc 版本的帧大小微调就抖动。1 MiB 实测也过（1.49x），512 KiB 不行。
     let handle = std::thread::Builder::new()
-        .stack_size(1024 * 1024)
+        .stack_size(1536 * 1024)
         .spawn(|| {
             for depth in [
                 MAX_BRACE_DEPTH - 1,

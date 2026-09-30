@@ -552,3 +552,158 @@ fn none_for_invalid_delimiter_after_left_or_right() {
         ["/\\", "ab"]
     );
 }
+
+// ── review r3 的 B1 / N1–N3 回归 ─────────────────────────────────────
+
+#[test]
+fn none_when_an_environment_row_exceeds_its_capacity() {
+    // B1（r3）：`cases` 是上游托管环境，每行只有 2 个槽位（value + condition）。
+    // 第 3 个 `&` 之后的列没有消费者，上游直接 break → 后半段静默消失。
+    for src in [
+        r"\begin{cases} a & b & c \end{cases}",
+        r"\begin{cases} a & b & c & d \end{cases}",
+        r"\begin{cases} a & b \\ c & d & e \end{cases}",
+        r"\begin{cases} 中 & 文 & 字 \end{cases}",
+        // 真实语料形态：模型的"说明列"写法
+        r"\begin{cases} 1 & x>0 & \text{正} \\ 0 & x\le 0 & \text{非正} \end{cases}",
+        // 穿透到我们的托管层（整条必须降级，而不是少一列）
+        r"\begin{align} x &= \begin{cases} a & b & c \end{cases} \end{align}",
+        r"\begin{matrix} \begin{cases} a & b & c \end{cases} & d \end{matrix}",
+        r"\left( \begin{cases} a & b & c \end{cases} \right)",
+    ] {
+        assert_eq!(render_inline(src), None, "must degrade (inline): {src}");
+        assert_eq!(render_display(src, 400), None, "must degrade: {src}");
+        assert!(render_block(src).is_none(), "must degrade: {src}");
+    }
+
+    // 正面：容量之内照常；`matrix` / `array` / 我们托管的 `align` 都**不受** 2 列限制
+    let cases = render_display(r"\begin{cases} a & b \\ c & d \end{cases}", 200)
+        .expect("two-column cases must render");
+    let text = cases.to_plain_text();
+    for needle in ["a", "b", "c", "d"] {
+        assert!(text.contains(needle), "cases 丢了内容: {needle}");
+    }
+    for src in [
+        r"\begin{pmatrix} a & b & c \\ d & e & f \end{pmatrix}",
+        r"\begin{array}{ccc} a & b & c \\ d & e & f \end{array}",
+        r"\begin{align} a &= b & c &= d \end{align}",
+        r"\begin{cases} \text{a & b} & x>0 \end{cases}",
+        r"\begin{cases} \begin{matrix} a & b \end{matrix} & x>0 \end{cases}",
+    ] {
+        assert!(
+            render_display(src, 300).is_some(),
+            "unlimited-column shape must render: {src}"
+        );
+    }
+}
+
+#[test]
+fn none_when_a_separator_is_swallowed_as_a_command_argument() {
+    // r3 收尾时 fuzz 找到的同类漏网：`\\` 紧跟在"无花括号参数"的命令后面时，
+    // 上游会把它当成那个命令的**参数**（不再当行分隔符），于是行/列计数与实际消费
+    // 不一致、后面的整段消失（`\begin{cases} 1 &\frac 2 \\ 3 & 4 \end{cases}`
+    // 的 `4` 就这样没了）。兜底判据是"解析器必须消费完输入"。
+    // 真会丢内容的形态：`cases` 每行只有 2 个槽位，`\\` 被 `\frac` / `\sqrt` 当成
+    // 参数之后，`& 4` 这一段既不是行分隔也不是合法条件 → 整段消失。
+    for src in [
+        r"\begin{cases} 1 &\frac 2 \\ 3 & 4 \end{cases}",
+        r"\begin{cases} 1 & \sqrt \\ 2 & 3 \end{cases}",
+        r"\begin{cases} 1 & \hat \\ 2 & 3 \end{cases}",
+    ] {
+        assert_eq!(render_inline(src), None, "must degrade (inline): {src}");
+        assert_eq!(render_display(src, 400), None, "must degrade: {src}");
+        assert!(render_block(src).is_none(), "must degrade: {src}");
+    }
+
+    // 同一形态在"列数无上限"的环境里没有内容丢失（`matrix` 会把多出来的格子照单全收），
+    // 所以它们照常渲染 —— 这条同时钉住"兜底判据不能误伤合法输入"。
+    for src in [
+        r"\begin{pmatrix} 1 & \hat \\ 2 & 3 \end{pmatrix}",
+        r"\begin{matrix} 1 & \hat \\ 2 & 3 \end{matrix}",
+    ] {
+        let m = render_display(src, 200).unwrap_or_else(|| panic!("must render: {src}"));
+        let text = m.to_plain_text();
+        for needle in ['1', '2', '3'] {
+            assert!(text.contains(needle), "{src}: 丢了 {needle}");
+        }
+    }
+
+    // 正常写法（参数带花括号）照常
+    for src in [
+        r"\begin{cases} 1 &\frac{2}{3} \\ 4 & 5 \end{cases}",
+        r"\begin{align} 1 &= \frac{2}{3} \\ 4 &= 5 \end{align}",
+    ] {
+        assert!(
+            render_display(src, 200).is_some(),
+            "braced arguments must render: {src}"
+        );
+    }
+}
+
+#[test]
+fn text_groups_may_nest_and_keep_their_separators() {
+    // N1（r3）：`\text{…}` 里再嵌花括号时，上游是"原文照读 + 计深"，
+    // 所以里面的 `&` 仍然是普通字符，不该被当成没人消费的分隔符。
+    for src in [r"\text{a {b & c}}", r"\text{a {b} c}", r"\text{a & b}"] {
+        assert!(
+            render_inline(src).is_some(),
+            "literal text must render: {src}"
+        );
+    }
+    assert_eq!(
+        render_inline(r"\text{a {b & c}}").as_deref(),
+        Some("a {b & c}")
+    );
+}
+
+#[test]
+fn delimiters_must_be_real_delimiter_tokens() {
+    // N3（r3）：上游把"紧跟 `\left`/`\right` 的任意单字符"当定界符逐行画出来，
+    // `\right文` 会凭空多画一个 `文`。我们现在只认真正的定界符记号。
+    for src in [
+        r"\left( x \right中",
+        r"\left中 x \right)",
+        r"\left.中\ge中文\sqrt[3]\mid\right文字\label",
+    ] {
+        assert_eq!(render_display(src, 300), None, "must degrade: {src}");
+    }
+    // 合法定界符一律照常
+    for src in [
+        r"\left( x \right)",
+        r"\left[ x \right]",
+        r"\left| x \right|",
+        r"\left\{ x \right\}",
+        r"\left\| x \right\|",
+        r"\left. x \right.",
+        r"\left< x \right>",
+        r"\left\langle x \right\rangle",
+        r"\left\lfloor x \right\rfloor",
+        r"\left\lceil x \right\rceil",
+    ] {
+        assert!(
+            render_display(src, 80).is_some(),
+            "valid delimiter must render: {src}"
+        );
+    }
+}
+
+#[test]
+fn array_spec_must_be_understood_or_degrade() {
+    // N2（r3）：`array` 的列格式串里出现我们看不懂的东西（`p{2cm}` / 嵌套组里的内容）
+    // 时，忽略它等于静默丢内容 → 整条降级。
+    for src in [
+        r"\begin{array}{{cc} 中 }& 1 \\ x & y \end{array}",
+        r"\begin{array}{p{2cm}} a \end{array}",
+        r"\begin{array}{@{}c@{}} a \end{array}",
+    ] {
+        assert!(render_block(src).is_none(), "must degrade: {src}");
+    }
+    for src in [
+        r"\begin{array}{cc} a & b \end{array}",
+        r"\begin{array}{|c|c|} a & b \end{array}",
+        r"\begin{array}{lcr} a & b & c \end{array}",
+        r"\begin{array}{} a \end{array}",
+    ] {
+        assert!(render_block(src).is_some(), "must render: {src}");
+    }
+}

@@ -117,6 +117,39 @@ pub(crate) fn delimiter_command_char(name: &str) -> Option<char> {
     DELIMS.iter().find(|(n, _)| *n == name).map(|(_, c)| *c)
 }
 
+/// `\left` / `\right` 后面**允许**的定界符字符（review r3 的 N3）。
+///
+/// 上游把"紧跟 `\left` 的任意单个字符"都当定界符并逐行画出来，于是
+/// `\right文字` 会凭空多画一个 `文`（fuzz 里的"内容增益"）。LaTeX 本身要求定界符是
+/// 定界符记号（括号 / 竖线 / 箭头 / `.`），字母与 CJK 不是；这类输入的正确处理是
+/// 降级为源码字面量，而不是画出奇怪的东西。
+///
+/// 集合 = ASCII 括号与常用记号 + [`DELIMS`] 的全部取值 + 常见 Unicode 定界符。
+pub(crate) fn is_delimiter_char(c: char) -> bool {
+    matches!(
+        c,
+        '(' | ')' | '[' | ']' | '{' | '}' | '|' | '.' | '/' | '<' | '>'
+    ) || matches!(
+        c,
+        '‖' | '⟨'
+            | '⟩'
+            | '⌊'
+            | '⌋'
+            | '⌈'
+            | '⌉'
+            | '⌜'
+            | '⌝'
+            | '⌞'
+            | '⌟'
+            | '↑'
+            | '↓'
+            | '⇑'
+            | '⇓'
+            | '⦇'
+            | '⦈'
+    )
+}
+
 /// 归一化入口。输入是"公式正文"（不含 markdown 的 `$`），输出可交给
 /// [`crate::latex::parse_equation`]。
 pub(crate) fn normalize(src: &str) -> String {

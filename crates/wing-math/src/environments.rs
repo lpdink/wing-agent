@@ -153,7 +153,8 @@ fn strip_preamble(
     match kind {
         EnvKind::Array => {
             let (spec, next) = brace_arg(body, i).ok_or(Reject::UnsupportedEnvironment)?;
-            Ok((body[next..].to_vec(), parse_array_spec(&spec)))
+            let cols = parse_array_spec(&spec).ok_or(Reject::UnsupportedEnvironment)?;
+            Ok((body[next..].to_vec(), cols))
         }
         EnvKind::AlignPairs if takes_count_arg(name) => {
             if body.get(i) == Some(&'{') {
@@ -168,15 +169,21 @@ fn strip_preamble(
 }
 
 /// `{lcr}` → 逐列对齐（`|` `@{}` 等间距/分隔记号一律忽略）。
-fn parse_array_spec(spec: &str) -> Vec<ColAlign> {
-    spec.chars()
-        .filter_map(|c| match c {
-            'l' => Some(ColAlign::Left),
-            'c' => Some(ColAlign::Center),
-            'r' => Some(ColAlign::Right),
-            _ => None,
-        })
-        .collect()
+fn parse_array_spec(spec: &str) -> Option<Vec<ColAlign>> {
+    let mut cols = Vec::new();
+    for c in spec.chars() {
+        match c {
+            'l' => cols.push(ColAlign::Left),
+            'c' => cols.push(ColAlign::Center),
+            'r' => cols.push(ColAlign::Right),
+            // 列间距线：我们不做间距，忽略是安全的
+            '|' | ' ' | '\t' => {}
+            // 其它（`p{2cm}` / `@{}` / `*{}` / 嵌套组里的内容…）我们既不理解、
+            // 也无法渲染 —— 忽略就等于静默丢内容（review r3 的 N2），整条降级
+            _ => return None,
+        }
+    }
+    Some(cols)
 }
 
 /// 排列规则：给定类别与列号（0-based），返回该列的对齐。

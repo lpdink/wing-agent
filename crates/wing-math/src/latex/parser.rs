@@ -30,10 +30,14 @@
 //      上游没有这个上界：brace-free 的深嵌套（`\left(\left(…`、`\hat \hat …`）
 //      会让解析器与排版递归到爆栈（debug + 2 MiB 栈实测 abort）。
 //      `parse_equation` 保持原语义（无上界），新入口供上层适配层做"排版前闸门"。
-//   8. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt
+//   8. `parse_equation_with_depth` 额外返回**消费的字符数**（`parser.pos`）：
+//      上游在 `&` / `\\` / `}` / `\right` / `\end` 处会直接 `break`，剩下的输入被静默
+//      丢掉。上层用它做"输入必须被完整消费"的兜底判据（review r3 的 B1 收尾：
+//      `\\` 被当成 `\frac` 的第二个参数时，`cases` 后面整段消失）。
+//   9. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt
 //      处理，因此有纯空白差异；已用「先 rustfmt 上游文件、再与本文件逐行 diff」核对，
 //      除上述改动外逐字一致（核对脚本见 crate 根 NOTICE 的「内联保真度」一节）。
-//   除以上八点外与上游逐字一致（含文件内联测试）。
+//   除以上九点外与上游逐字一致（含文件内联测试）。
 // ---------------------------------------------------------------------------
 
 //! The parser. Turns LaTeX math strings into [`EqNode`] trees.
@@ -127,15 +131,20 @@ pub fn parse_equation(input: &str) -> EqNode {
 
 /// 本地改动（见文件头）：带**递归深度上界**的解析。
 ///
-/// 返回 `(AST, 是否超深)`。超深时 AST 是残缺的（超出部分的节点是空 `Text`），调用方
+/// 返回 `(AST, 是否超深, 消费的字符数)`。超深时 AST 是残缺的（超出部分的节点是空
+/// `Text`），调用方
 /// **必须**丢弃它——这是给上层适配层用的"排版前闸门"：brace-free 的深嵌套
 /// （`\left(\left(…`、`\hat \hat …`、`\frac \frac …`）不产生任何花括号，
 /// 光看括号深度拦不住，只有解析器自己知道递归到多深。
-pub fn parse_equation_with_depth(input: &str, max_depth: usize) -> (EqNode, bool) {
+pub fn parse_equation_with_depth(input: &str, max_depth: usize) -> (EqNode, bool, usize) {
     let mut parser = EqParser::new(input);
     parser.max_depth = max_depth;
     let node = parser.parse_sequence();
-    (node, parser.depth_exceeded)
+    // 第三个返回值：解析器**消费掉的字符数**。上游在 `&` / `\\` / `}` / `\right` /
+    // `\end` 处会直接 `break`，剩下的输入被静默丢掉；调用方用它做"输入被完整消费"
+    // 的兜底判据（review r3 的 B1：`\begin{cases} 1 &\frac 2 \\ 3 & 4 \end{cases}`
+    // 里 `\\` 被 `\frac` 当成了第二个参数，`& 4` 整段消失）。
+    (node, parser.depth_exceeded, parser.pos)
 }
 
 pub struct EqParser {

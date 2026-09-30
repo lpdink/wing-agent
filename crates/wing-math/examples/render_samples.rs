@@ -50,8 +50,8 @@ const INLINE_SAMPLES: &[&str] = &[
 /// 应当降级为源码字面量的样例（`render_display` 返回 `None`）。
 const DEGRADED_SAMPLES: &[(&str, &str)] = &[
     (r"\ce{2H2O}", "mhchem 不支持"),
-    (r"a \\ b", "顶层行分隔符会被上游静默截断"),
-    (r"a & b", "顶层列分隔符会被上游静默截断"),
+    (r"a \\ b", "**任意深度**的行分隔符都会被上游静默截断"),
+    (r"a & b", "**任意深度**的列分隔符都会被上游静默截断"),
     (r"\left( x + y", "定界符不成对"),
     (r"\begin{unknown} x \end{unknown}", "未知环境"),
     (r"\begin{align} a &= b", "环境没有闭合"),
@@ -180,7 +180,9 @@ fn main() {
 
     println!();
     println!("=== 引擎拒绝判据（都会返 None 的输入类别）===");
-    println!("  空输入 / 顶层 `&` / 顶层 `\\\\` / 环境或定界符不配对 / 未知命令 / 超宽 / 预算超限");
+    println!(
+        "  空输入 / 任意深度的游离 `&` / `\\` / `cases` 行超 2 列 / 环境或定界符不配对 / 未知命令 / 超宽 / 预算超限"
+    );
     check_contracts();
 
     fn check_contracts() {

@@ -39,6 +39,9 @@ pub(crate) struct Structure {
     pub row_separator_count: usize,
     /// 环境体内的 `&` 总数 —— 每个至少产生一列。
     pub column_separator_count: usize,
+    /// 某个环境的一行列数**超过它的容量**（`cases` 每行 2 列）：多出来的列没有消费者，
+    /// 上游会直接 `break` 丢掉后半段（review r3 的 B1）。
+    pub environment_row_overflow: bool,
     /// 花括号配平（每个 `}` 都有对应的 `{`，且没有跨过环境边界）。
     ///
     /// 不配平意味着上游 parser 会把剩下的输入当成组内容一路吃掉（或者把组外的内容
@@ -68,6 +71,7 @@ impl Default for Structure {
             unmanaged_row_sep: false,
             row_separator_count: 0,
             column_separator_count: 0,
+            environment_row_overflow: false,
             // `balanced_*` 是"没能证明不配对"的正面属性，默认视为成立，
             // 由扫描过程置 false。
             balanced_braces: true,
@@ -143,13 +147,72 @@ pub(crate) fn brace_arg(chars: &[char], i: usize) -> Option<(String, usize)> {
 /// `\text{…}` 的原文里（字面字符）、或环境体里（上游的 `matrix`/`cases`，或我们自己的
 /// `align` 家族）。其它任何位置、任何深度出现 → 整条降级。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ctx {
+enum CtxKind {
     /// 普通花括号组（命令参数、分组）：里面的 `&` / `\\` 没人消费
     Brace,
     /// `\text{…}` 的字面文本组：`&` / `\\` 是普通字符
     Text,
-    /// 环境体：分隔符由上游或我们消费
-    Env,
+    /// 环境体：分隔符由上游或我们消费。`capacity` 是该环境**每行的列容量**。
+    Env { capacity: usize },
+}
+
+/// 上下文栈里的一项：环境还要记本行已经用掉几个槽位。
+#[derive(Debug, Clone, Copy)]
+struct CtxEntry {
+    kind: CtxKind,
+    /// 本行已消费的 `&` 数（只对 `Env` 有意义；`\\` 与 `\end` 归零）
+    row_cols: usize,
+}
+
+impl CtxEntry {
+    fn brace() -> Self {
+        Self {
+            kind: CtxKind::Brace,
+            row_cols: 0,
+        }
+    }
+
+    fn text() -> Self {
+        Self {
+            kind: CtxKind::Text,
+            row_cols: 0,
+        }
+    }
+
+    fn env(name: &str) -> Self {
+        Self {
+            kind: CtxKind::Env {
+                capacity: env_row_capacity(name),
+            },
+            row_cols: 0,
+        }
+    }
+
+    fn is_env(&self) -> bool {
+        matches!(self.kind, CtxKind::Env { .. })
+    }
+
+    fn is_text(&self) -> bool {
+        matches!(self.kind, CtxKind::Text)
+    }
+}
+
+/// 上游托管环境的**每行列容量**（review r3 的 B1）。
+///
+/// 这个数字必须与上游 parser 的实际消费者一致，否则多出来的列会被静默丢掉：
+///
+/// | 环境 | 每行容量 | 上游消费者 |
+/// |---|---|---|
+/// | `matrix` / `pmatrix` / `bmatrix` / `vmatrix` / `Vmatrix` / `Bmatrix` | 无上限 | `parse_matrix_body` 把一行里的 `&` 全部消费（`loop { cell; if '&' { advance; continue } }`） |
+/// | `cases` | **2** | `parse_cases_body` 每行只取 value + **一个** condition，第 3 个 `&` 处 `break`，剩下的输入被上层丢掉 |
+///
+/// 我们自己的托管层（`align` 家族 / `array`）不走这里：`split_top_level` 切出的**每一格
+/// 都会被渲染**，所以是无上限的（总量另有 [`crate::guard::MAX_COL_SEPARATORS`] 兜底）。
+fn env_row_capacity(name: &str) -> usize {
+    match name.trim_end_matches('*') {
+        "cases" => 2,
+        _ => usize::MAX,
+    }
 }
 
 /// 全量扫描：结构信息 + 顶层环境跨度。
@@ -159,7 +222,7 @@ enum Ctx {
 pub(crate) fn scan(chars: &[char]) -> Structure {
     let mut st = Structure::default();
     // 花括号 / 环境上下文栈
-    let mut ctx: Vec<Ctx> = Vec::new();
+    let mut ctx: Vec<CtxEntry> = Vec::new();
     // (环境名, `\begin` 下标, body 起点)
     let mut env_stack: Vec<(String, usize, usize)> = Vec::new();
     // 刚读到 `\text`，下一个 `{` 是字面文本组
@@ -171,18 +234,21 @@ pub(crate) fn scan(chars: &[char]) -> Structure {
         expect_text_group = false;
         match chars[i] {
             '{' => {
-                ctx.push(if consumed_text_flag {
-                    Ctx::Text
+                // `\text{…}` 里再嵌花括号时**仍然是字面文本**（上游 `parse_text_block`
+                // 原文照读 + 计深），所以 Text 上下文里压的还是 Text（review r3 的 N1）
+                let in_text = ctx.last().is_some_and(|c| c.is_text());
+                ctx.push(if consumed_text_flag || in_text {
+                    CtxEntry::text()
                 } else {
-                    Ctx::Brace
+                    CtxEntry::brace()
                 });
-                let depth = ctx.iter().filter(|c| **c != Ctx::Env).count();
+                let depth = ctx.iter().filter(|c| !c.is_env()).count();
                 st.max_brace_depth = st.max_brace_depth.max(depth);
                 i += 1;
             }
             '}' => {
                 match ctx.last() {
-                    Some(Ctx::Brace) | Some(Ctx::Text) => {
+                    Some(c) if !c.is_env() => {
                         ctx.pop();
                     }
                     // `}` 越过了环境边界（或没有对应的 `{`）
@@ -191,10 +257,19 @@ pub(crate) fn scan(chars: &[char]) -> Structure {
                 i += 1;
             }
             '&' => {
-                match ctx.last() {
-                    Some(Ctx::Env) => st.column_separator_count += 1,
+                match ctx.last_mut() {
+                    Some(entry) if entry.is_env() => {
+                        st.column_separator_count += 1;
+                        entry.row_cols += 1;
+                        if let CtxKind::Env { capacity } = entry.kind {
+                            // 本行用掉的槽位 = `&` 数 + 1（第一个格子不算 `&`）
+                            if entry.row_cols + 1 > capacity {
+                                st.environment_row_overflow = true;
+                            }
+                        }
+                    }
                     // `\text{…}` 里的 `&` 是普通字符
-                    Some(Ctx::Text) => {}
+                    Some(entry) if entry.is_text() => {}
                     _ => st.unmanaged_column_sep = true,
                 }
                 i += 1;
@@ -202,9 +277,13 @@ pub(crate) fn scan(chars: &[char]) -> Structure {
             '\\' => {
                 // 行分隔符 `\\`：注意它也可能出现在 `\\[3pt]` 里，这里只关心是否存在。
                 if chars.get(i + 1) == Some(&'\\') {
-                    match ctx.last() {
-                        Some(Ctx::Env) => st.row_separator_count += 1,
-                        Some(Ctx::Text) => {}
+                    match ctx.last_mut() {
+                        Some(entry) if entry.is_env() => {
+                            st.row_separator_count += 1;
+                            // 换行 → 本行的列计数归零
+                            entry.row_cols = 0;
+                        }
+                        Some(entry) if entry.is_text() => {}
                         _ => st.unmanaged_row_sep = true,
                     }
                     i += 2;
@@ -247,7 +326,7 @@ pub(crate) fn scan(chars: &[char]) -> Structure {
                             }
                             "begin" => match brace_arg(chars, after) {
                                 Some((env, after_arg)) => {
-                                    ctx.push(Ctx::Env);
+                                    ctx.push(CtxEntry::env(&env));
                                     env_stack.push((env, i, after_arg));
                                     i = after_arg;
                                     continue;
@@ -260,7 +339,7 @@ pub(crate) fn scan(chars: &[char]) -> Structure {
                             },
                             "end" => match brace_arg(chars, after) {
                                 Some((env, after_arg)) => {
-                                    if matches!(ctx.last(), Some(Ctx::Env)) {
+                                    if ctx.last().is_some_and(|c| c.is_env()) {
                                         ctx.pop();
                                     } else {
                                         st.balanced_envs = false;
@@ -304,7 +383,7 @@ pub(crate) fn scan(chars: &[char]) -> Structure {
     if !env_stack.is_empty() {
         st.balanced_envs = false;
     }
-    if ctx.iter().any(|c| *c != Ctx::Env) {
+    if ctx.iter().any(|c| !c.is_env()) {
         st.balanced_braces = false;
     }
     st
@@ -324,7 +403,9 @@ fn skip_delimiter(chars: &[char], i: usize) -> Option<usize> {
     }
     let &c = chars.get(j)?;
     if c != '\\' {
-        return Some(j + 1);
+        // 任意单字符都曾是上游的定界符（`\right文` 会多画一个 `文`），我们只认
+        // 真正的定界符记号（review r3 的 N3）
+        return crate::normalize::is_delimiter_char(c).then_some(j + 1);
     }
     // `\<单个非字母字符>`：`\{` `\}` `\|` 是定界符，其它（`\,` `\ ` …）不是
     if let Some((name, after)) = command_at(chars, j) {
@@ -537,5 +618,93 @@ mod tests {
         let parts = split_top_level(&c, true);
         assert_eq!(parts.len(), 2);
         assert_eq!(slice(&c, &parts[0]), r"\frac{a}{b} ");
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    fn scan_str(s: &str) -> Structure {
+        scan(&s.chars().collect::<Vec<char>>())
+    }
+
+    #[test]
+    fn cases_row_capacity_is_two_columns() {
+        // 2 列（1 个 `&`）：正常
+        let ok = scan_str(r"\begin{cases} a & b \\ c & d \end{cases}");
+        assert!(!ok.environment_row_overflow);
+        assert_eq!(ok.column_separator_count, 2);
+        assert_eq!(ok.row_separator_count, 1);
+
+        // 3 列（一行里 2 个 `&`）：超容量
+        assert!(scan_str(r"\begin{cases} a & b & c \end{cases}").environment_row_overflow);
+        // 第 2 行超容量同样要抓
+        assert!(scan_str(r"\begin{cases} a & b \\ c & d & e \end{cases}").environment_row_overflow);
+        // 4 列
+        assert!(scan_str(r"\begin{cases} a & b & c & d \end{cases}").environment_row_overflow);
+        // 跨行重新计数：第 1 行 1 个、第 2 行 1 个 → 正常
+        assert!(!scan_str(r"\begin{cases} a & b \\ c & d \end{cases}").environment_row_overflow);
+        // 行分隔符归零：第 1 行 2 个（超），但第 2 行只有 1 个
+        assert!(scan_str(r"\begin{cases} a & b & c \\ d & e \end{cases}").environment_row_overflow);
+    }
+
+    #[test]
+    fn unlimited_environments_are_not_capacity_checked() {
+        // `matrix` 家族：上游把一行里的 `&` 全部消费 → 无上限
+        for src in [
+            r"\begin{matrix} a & b & c & d \end{matrix}",
+            r"\begin{pmatrix} a & b & c \end{pmatrix}",
+            r"\begin{bmatrix} a & b & c \end{bmatrix}",
+            r"\begin{vmatrix} a & b & c \end{vmatrix}",
+            r"\begin{Vmatrix} a & b & c \end{Vmatrix}",
+        ] {
+            assert!(!scan_str(src).environment_row_overflow, "{src}");
+        }
+        // 我们自己的托管层（切分后每格都会渲染）也不受 2 列限制
+        for src in [
+            r"\begin{align} a &= b & c &= d \end{align}",
+            r"\begin{array}{cccc} a & b & c & d \end{array}",
+        ] {
+            assert!(!scan_str(src).environment_row_overflow, "{src}");
+        }
+    }
+
+    #[test]
+    fn text_contexts_do_not_count_towards_capacity() {
+        // `\text{…}` 里的 `&` 是普通字符，不占槽位
+        let st = scan_str(r"\begin{cases} \text{a & b} & c \end{cases}");
+        assert!(!st.environment_row_overflow);
+        // 里面再嵌花括号也是字面文本（review r3 的 N1）
+        let st = scan_str(r"\begin{cases} \text{a {b & c}} & d \end{cases}");
+        assert!(!st.environment_row_overflow);
+        // 只数到 cases 行里那一个 `&`：`\text{…}` 里的两个都不算
+        assert_eq!(st.column_separator_count, 1);
+    }
+
+    #[test]
+    fn delimiter_must_be_a_real_delimiter_token() {
+        // 合法定界符：跳过它，不算未配平的花括号
+        for src in [
+            r"\left\{ x \right\}",
+            r"\left( x \right)",
+            r"\left. x \right|",
+            r"\left\langle x \right\rangle",
+        ] {
+            let st = scan_str(src);
+            assert!(!st.unmanaged_delimiter, "{src}");
+            assert!(st.balanced_braces, "{src}");
+            assert_eq!(st.left_count, 1, "{src}");
+            assert_eq!(st.right_count, 1, "{src}");
+        }
+        // 裸反斜杠 / 字母 / CJK 都不是定界符（review r3 的 N3）
+        for src in [
+            r"\left\unknowncmd x \right)",
+            r"\left( x \right中",
+            r"\left中 x \right)",
+            r"\left",
+        ] {
+            assert!(scan_str(src).unmanaged_delimiter, "{src}");
+        }
     }
 }

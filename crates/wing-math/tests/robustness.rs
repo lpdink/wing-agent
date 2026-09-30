@@ -576,3 +576,98 @@ fn structural_fuzz_keeps_the_contract() {
         assert_contracts(&src);
     }
 }
+
+/// 骨架里的内容用**数字**标记：命令名（`\begin{cases}` / `\frac` / `\text`…）里
+/// 一个数字都没有，所以"源里的每个数字都必须出现在渲染结果里"是一条**真正的
+/// 内容不丢判据**（review r3 的 [B1] 就是被它抓住的：`cases` 第 3 列消失）。
+const CONTENT_SKELETONS: &[&str] = &[
+    r"\begin{cases} 1 & 2 \end{cases}",
+    r"\begin{cases} 1 & 2 \\ 3 & 4 \end{cases}",
+    r"\begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix}",
+    r"\begin{array}{cc} 1 & 2 \\ 3 & 4 \end{array}",
+    r"\begin{align} 1 &= 2 \\ 3 &= 4 \end{align}",
+    r"\frac{1}{2} = 3",
+    r"\sqrt{1} + \hat{2}",
+    r"\left\{ 1 \right. + 2",
+    r"\text{1 & 2}",
+    r"\begin{cases} \frac{1}{2} & 3 \end{cases}",
+];
+
+/// 注入记号：覆盖"会静默截断 / 会改变上下文"的全部形状。
+const INJECTIONS: &[&str] = &[
+    "&",
+    r"\\",
+    "{",
+    "}",
+    "$",
+    "|",
+    "(",
+    ")",
+    ".",
+    r"\right",
+    r"\left(",
+    r"\ce",
+    r"\text{",
+    r"\alpha",
+    "+",
+    " ",
+    r"\begin{matrix}",
+    r"\end{matrix}",
+    r"\begin{cases}",
+    r"\end{cases}",
+];
+
+#[test]
+fn exhaustive_skeleton_injection_keeps_content() {
+    let mut checked = 0usize;
+    for skeleton in CONTENT_SKELETONS {
+        let base: Vec<char> = skeleton.chars().collect();
+        let markers: Vec<char> = base
+            .iter()
+            .copied()
+            .filter(|c| c.is_ascii_digit())
+            .collect();
+        assert!(!markers.is_empty(), "骨架必须有数字标记: {skeleton}");
+
+        for pos in 0..=base.len() {
+            for injection in INJECTIONS {
+                let mut src: String = base[..pos].iter().collect();
+                src.push_str(injection);
+                src.push_str(&base[pos..].iter().collect::<String>());
+
+                // 注入不会引入数字，所以数字总数必须守恒
+                let expected = markers.len();
+                assert_eq!(
+                    src.chars().filter(|c| c.is_ascii_digit()).count(),
+                    expected,
+                    "注入改变了标记数（测试自身的问题）: {src}"
+                );
+
+                if let Some(m) = render_display(&src, 400) {
+                    let text = m.to_plain_text();
+                    for d in '0'..='9' {
+                        let want = src.chars().filter(|c| *c == d).count();
+                        let got = text.chars().filter(|c| *c == d).count();
+                        assert_eq!(
+                            got, want,
+                            "静默丢内容（数字 {d} 数量不符）: {src:?} ->\n{text}"
+                        );
+                    }
+                    checked += 1;
+                }
+                if let Some(inline) = render_inline(&src) {
+                    for d in '0'..='9' {
+                        let want = src.chars().filter(|c| *c == d).count();
+                        let got = inline.chars().filter(|c| *c == d).count();
+                        assert_eq!(
+                            got, want,
+                            "行内静默丢内容（数字 {d}）: {src:?} -> {inline:?}"
+                        );
+                    }
+                }
+                assert_contracts(&src);
+            }
+        }
+    }
+    assert!(checked > 100, "正面样本太少（{checked}）");
+}

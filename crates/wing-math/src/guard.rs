@@ -14,6 +14,10 @@
 //! 3. **网格被污染**：结果里出现控制字符（`\n` / `\t`）或整块只有空白，
 //!    见 [`check_output`]。
 //!
+//! 还有一条"有人消费但**槽位不够**"的形态：`cases` 每行只有 2 个槽位，第 3 个 `&`
+//! 之后的列会被上游丢掉（review r3 的 B1）。判据在 [`check_source`]（
+//! [`Structure::environment_row_overflow`]）。
+//!
 //! 另外这里集中放**预算闸**常量：上游排版是纯 CPU + 线性分配，正常公式毫秒级，但仍要
 //! 给"恶意/畸形输入"设上界，避免一次渲染吃掉整屏内存或爆栈。
 
@@ -25,10 +29,15 @@ pub(crate) const MAX_SOURCE_CHARS: usize = 8192;
 
 /// 花括号嵌套深度上限。上游是递归下降 parser + 递归排版，深度直接等于调用栈深度。
 ///
-/// **实测依据**（review r1 的 S2）：debug 构建 + 2 MiB 线程栈（`cargo test` 测试线程 /
-/// `std::thread` 默认）下，嵌套 `\frac{…}{1}` 到 ~195 层就会 stack overflow（不可捕获的
-/// abort）。取 64 留 3 倍余量；真实公式的嵌套深度远小于此（连分式/嵌套矩阵通常 < 20）。
-pub(crate) const MAX_BRACE_DEPTH: usize = 64;
+/// **取值口径**（review r1 的 S2 + r3 的 S1）：真正的兜底闸是解析器的递归深度
+/// （[`crate::api::MAX_PARSE_DEPTH`] = 96），而**每层花括号在解析器里占 2 个深度单位**
+/// （一个 atom + 它的序列），所以花括号闸取 `96 / 2 = 48` 减去顶层 sequence 的 2 个单位
+/// → **47**：实测 `{`×47 的解析深度正好 96（刚好通过），`{`×48 = 98 会被解析器闸挡住。
+/// 这条闸只是更早、更廉价的短路（扫描阶段就能拒，不必建 AST），两者不会互相打架。
+///
+/// 历史依据：debug + 2 MiB 线程栈下嵌套 `\frac{…}{1}` ~195 层就 stack overflow
+/// （不可捕获的 abort）；真实公式的嵌套深度远小于此（连分式/嵌套矩阵通常 < 10）。
+pub(crate) const MAX_BRACE_DEPTH: usize = 47;
 
 /// 渲染结果的高度上限（行）。
 pub(crate) const MAX_HEIGHT: usize = 256;
@@ -56,6 +65,10 @@ pub(crate) enum Reject {
     UnmanagedColumnSeparator,
     /// 出现没人消费的 `\\`（同上）。
     UnmanagedRowSeparator,
+    /// 某环境一行的列数超过它的容量（`cases` 每行 2 列）——多出来的列没有消费者。
+    EnvironmentRowOverflow,
+    /// 解析器没有消费完输入：剩下的部分会被上游静默丢掉（最后一道兜底判据）。
+    UnconsumedInput,
     /// 花括号不配平。
     UnbalancedBraces,
     /// `\begin{X}` / `\end{X}` 不配对或名字不一致。
@@ -94,6 +107,9 @@ pub(crate) fn check_source(chars: &[char], st: &Structure) -> Result<(), Reject>
     }
     if st.unmanaged_row_sep {
         return Err(Reject::UnmanagedRowSeparator);
+    }
+    if st.environment_row_overflow {
+        return Err(Reject::EnvironmentRowOverflow);
     }
     if !st.balanced_braces {
         return Err(Reject::UnbalancedBraces);
