@@ -360,7 +360,8 @@ webview 意图（`src/shared/bridge.ts` 的 `WebviewToHostMessage`，全部有�
 
 - CSP：`default-src 'none'` + 白名单（`img-src`/`font-src`/`style-src` 给 `cspSource`，
   `script-src 'nonce-…'` 单次 nonce）。`font-src` 还带 `data:`：Vite 的 **lib** 构建会把所有资源
-  内联（KaTeX 的 60 个字体文件因此以 `data:font/…` 形式进 `main.css`），去掉它公式会退回系统字体；
+  内联（KaTeX 的字体因此以 `data:font/…` 形式进 `main.css`），去掉它公式会退回系统字体；构建期只保留
+  woff2 源（`tools/fonts.mts`，另两段格式 Chromium 永不取，删掉后 CSS 从 1.5 MB 降到 ~0.41 MB），
   `tests/artifact/webviewBundle.test.ts` 钉住这个前提。宿主生成文档（`src/host/html.ts` 纯函数），
   bootstrap 值 `window.__WING_BOOTSTRAP__` 内联且 HTML 转义。
 - **bundle 不得引用 Node 全局**。`vite.config.mts` 显式内联 `process.env.NODE_ENV` 并把
@@ -397,17 +398,47 @@ TypeScript 与源码，看不到 bundler 实际吐出的字节。这个测试：
 
 | 能力 | 入口 | 行为 |
 |---|---|---|
-| 公式 | `parse.ts`（`math_inline` / `math_block` 两条自研规则）→ `render.tsx#MathView` → `math.ts` | `$…$`、`$$…$$`、`\(…\)`、`\[…\]`；代码跨度/围栏内不解析、`$100 and $200` 不误判；KaTeX 以 `trust: false`（HTML 扩展不可用）+ `throwOnError` 渲染，失败时**显示原始文本**（绝不吞公式），HTML 按 `(display, tex)` 记忆化 |
+| 公式 | `parse.ts`（`math_inline` / `math_block` 两条自研规则）→ `render.tsx#MathView` → `math.ts` | `$…$`、`$$…$$`、`\(…\)`、`\[…\]`；代码跨度/围栏内不解析、`$100 and $200` 不误判；KaTeX 以 `trust: false`（HTML 扩展不可用）+ `throwOnError` 渲染，失败时**显示原始文本**（绝不吞公式）；输入有上界（`MAX_MATH_CHARS = 8192`，超限同样走原文降级）且 `maxSize: 10` 夹住 `\rule` 这类超大盒子；HTML 按 `(display, tex)` 记忆化 |
 | 本地图片 | `render.tsx#MarkdownImage` → `chat/markdown/image.ts`（缓存 + 批量请求）→ `webview.asWebviewUri` | `![alt](path)`：宿主用 `src/host/images.ts`（纯函数、零 I/O）把路径解析到工作区，再 `asWebviewUri`；远程 URL / `..` 越界 / 非图片扩展名一律拒绝 |
 
 - 通道：`resolveImages`（webview → host，协议级，和 `ping` 同级）→ `images`（host → webview，
-  `{ src, uri \| null }`）。webview 侧是"未问 / 可加载 / 拒绝"三态缓存，一次绘制只发一条消息。
+  `{ src, uri \| null }`）。webview 侧是"未问 / 可加载 / 拒绝"三态缓存，一次绘制只发一批（协议上限
+  `RESOLVE_IMAGES_MAX_SRCS = 64` 条/次，超出的分后续批）。宿主**只按 tag 校验**（`shared/validate.ts`），
+  但这条消息的载荷会被遍历，所以 `readImageSources` 额外做形状检查：畸形载荷被丢弃并记日志，
+  绝不抛异常。
 - **降级只有一档**：任何一种"不能显示"（被拒绝、还没答复、`<img>` 加载失败）都退回今天的行为——
   指向源地址的链接（alt 兜底、点击交给编辑器），不会有空框。
 - `localResourceRoots` = 扩展根 + `workspaceFolders[0]`（多根窗口也只给第一个，与 `openFile` 的
   `resolvePath` 同口径）。
 - KaTeX 的字体以 `data:` URI 内联在 `main.css` 里（见 §8.2 的 CSP 说明），所以公式不需要任何
-  运行期网络/资源请求。
+  运行期网络/资源请求；构建期只保留 woff2 源（`tools/fonts.mts`），三段格式里另外两段 Chromium
+  永远不会取。
+
+#### 公式语法的两个用户可见副作用（**不是 bug，但要知情**）
+
+1. **`$…$` 采用 pandoc 口径**：开定界符后不能是空白、闭定界符前不能是空白且后面不能接数字。
+   因此 `$100 and $200` 是正文，但**散文里成对的 `$` 仍可能被当成公式**，例如
+   `set $PATH=$HOME` 会渲染出公式 `PATH=`、`Ranges 1..$n and 2..$m` 会渲染出 `n and 2..`。
+   想避免就把 `$` 转义成 `\$`（`\$` 在公式内外都是字面美元号）。必要时也可以整体关掉这条渲染
+   （回退方案见 design.md「变更说明」）。
+2. **`\(…\)` / `\[…\]` 会被当作公式**：这两个形态今天分别渲染成 `(x)`（反斜杠被 markdown 转义吃掉）
+   与 `[x]`；本渲染器把它们当 LaTeX 定界符，**既有文档的显示会变化**（与 TUI 侧的最终口径见下）。
+
+#### 与 TUI 侧（步骤 02）的语法对齐状态
+
+TUI 的公式接线尚未落地，因此这里只登记本 webview lane 的**实测**语义，等 02 定稿后统一收口
+（改动集中在 `parse.ts` 的两条规则 + `tests/webview/markdown.test.tsx`）：
+
+| 语义点 | 本 lane 的行为 |
+|---|---|
+| `\(…\)` / `\[…\]` | 支持（行内；`\[`/`\]` 独占行时走块规则）。pulldown-cmark 的 `ENABLE_MATH` 不支持这两种，TUI 侧要靠 profile 归一化补；若 TUI 不补，本 lane 更宽 |
+| `$` 守卫 | pandoc `tex_math_dollars` 口径（开定界符后非空白；闭定界符前非空白且其后不接数字） |
+| `$$x$$` 单行 | 行内位置上的显示公式；`$$` 独占行的块形式要求整行 trim 后恰为 `$$`（闭合行同理），内容为空不成立 |
+| 未闭合 / 空公式 | 一律退回字面量（含 `$$`、`$$ $$`、`$$$$`），不吞内容 |
+| 转义 | `\$` = 字面 `$`；公式内 `\` 转义下一个字符；**闭合定界符优先于转义**（`\)` 能闭合 `\(`） |
+| 多行行内公式 | 开定界符后直接换行 ⇒ 不成立；换行出现在内容内部 ⇒ 成立（TUI 若严格「行内＝单行」，这里会分叉） |
+| 代码跨度/围栏 | 一律不解析（markdown-it 的 `backticks` / `fence` 先消费） |
+| `$$$x$$$` | `tex="$x"` + 文本 `$`（不丢字符，形态怪，不必对齐） |
 
 ## 9. 测试
 
@@ -539,7 +570,11 @@ pnpm exec vsce ls       # 核对进包清单
 6. 对话里的本地图片同样只认第一个 folder：多根窗口的其它 folder、以及「会话 workdir ≠ folder」的
    场景，图片会退回链接（与 `openFile` 的既有口径一致）；
 7. 公式 `$$…$$` 之间出现**空行**时，流式分块器（`markdown/split.ts` 的「空行＝块边界」）会把它切成
-   两块，于是退回字面量文本；非流式路径（`MarkdownText`，如用户消息）没有这个问题。
+   两块，于是退回字面量文本；非流式路径（`MarkdownText`，如用户消息）没有这个问题；
+8. 公式与 TUI 侧的语法口径尚未完全对齐（`\(…\)` / `\[…\]`、`$` 守卫细节、多行行内公式等），
+   清单见 §8.5，等步骤 02 落地后由调度者收口；
+9. `$…$` 是 pandoc 口径，散文里成对的 `$` 可能被渲染成公式（`set $PATH=$HOME` → 公式 `PATH=`），
+   见 §8.5 的两个用户可见副作用；用 `\$` 转义可避免。
 
 视觉打磨 follow-up（用户检查点②反馈，**本轮有意不修**，供后续 PR 引用）：thinking/工具卡折叠无
 过渡动画、长 thinking 收起高度跳变；代码块从纯文本到 shiki 着色的跳变；流式表格宽度抖动；diff

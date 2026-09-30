@@ -1,6 +1,7 @@
 import { act, fireEvent, render } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { RESOLVE_IMAGES_MAX_SRCS } from '../../src/shared';
 import { FIXTURE_EPOCH, makeFixtureSession } from '../../src/testing/fixtures';
 
 import { createMockBridge } from '../../src/testing/mockBridge';
@@ -8,6 +9,7 @@ import type { MockBridgeOptions } from '../../src/testing/mockBridge';
 import { MarkdownText } from '../../src/webview/chat/Markdown';
 import { setBridgeController } from '../../src/webview/bridge/channel';
 import { createBridgeController } from '../../src/webview/bridge/controller';
+import { imageUri } from '../../src/webview/chat/markdown/image';
 import { createAppStore } from '../../src/webview/state/store';
 
 import { cellElement, disposeMounted, mountWebview } from './harness';
@@ -82,6 +84,23 @@ describe('MarkdownImage', () => {
 
     expect(bridge.sentOfType('resolveImages')).toEqual([{ type: 'resolveImages', srcs: ['plot.png'] }]);
     expect(bridge.sentOfType('resolveImages')).toHaveLength(1);
+  });
+
+  it('sends follow-up requests when a paint carries more images than one may hold', async () => {
+    const bridge = connectHost();
+    const total = RESOLVE_IMAGES_MAX_SRCS + 3;
+    const images = Array.from({ length: total }, (_value, index) => `![x](${index}.png)`);
+
+    render(<MarkdownText text={images.join(' ')} />);
+    await flush();
+
+    // The host walks the list, so the protocol caps one request (see
+    // `RESOLVE_IMAGES_MAX_SRCS`); the renderer must not lose the tail.
+    const requests = bridge.sentOfType('resolveImages');
+    expect(requests.map((request) => request.srcs.length)).toEqual([RESOLVE_IMAGES_MAX_SRCS, 3]);
+    expect(requests[0]?.srcs[0]).toBe('0.png');
+    expect(requests[1]?.srcs[2]).toBe(`${total - 1}.png`);
+    expect(imageUri(`${total - 1}.png`)).toBe(`mock-resource://workspace/${total - 1}.png`);
   });
 
   it('keeps the link when the host refuses the source', async () => {

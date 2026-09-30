@@ -12,6 +12,7 @@
  */
 
 import type { HostToWebviewMessage, WebviewToHostMessage } from './bridge';
+import { MAX_IMAGE_SRC_CHARS, RESOLVE_IMAGES_MAX_SRCS } from './bridge';
 
 /**
  * Known tags, typed as `Record<…['type'], true>` on purpose: a `Set<string>` only
@@ -73,4 +74,41 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
 /** True when `value` is a webview → host message this build understands. */
 export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMessage {
   return hasType(value, WEBVIEW_TO_HOST_TYPES);
+}
+
+/**
+ * The usable payload of a `resolveImages` message, or `null` when it is malformed.
+ *
+ * Every other guard here stops at the discriminant, because both sides ship in the
+ * same VSIX and agree on shapes. This one looks *inside*, because `resolveImages` is
+ * the only webview message whose fields the host iterates (`srcs.map(…)`): a
+ * `postMessage` that claims to be one but carries something else must be dropped with
+ * a log line, never walked into a `TypeError` (the module doc's "ignore + log, never
+ * guess" rule).
+ *
+ * Inside a well-formed envelope it is deliberately forgiving — entries that are not
+ * strings, entries longer than {@link MAX_IMAGE_SRC_CHARS} and entries past
+ * {@link RESOLVE_IMAGES_MAX_SRCS} are dropped while the rest of the batch is still
+ * answered, because a dropped source is invisible by design (the renderer keeps its
+ * link either way).
+ */
+export function readImageSources(value: unknown): readonly string[] | null {
+  if (typeof value !== 'object' || value === null) {
+    return null;
+  }
+  const srcs: unknown = (value as { srcs?: unknown }).srcs;
+  if (!Array.isArray(srcs)) {
+    return null;
+  }
+
+  const usable: string[] = [];
+  for (const src of srcs as readonly unknown[]) {
+    if (usable.length >= RESOLVE_IMAGES_MAX_SRCS) {
+      break;
+    }
+    if (typeof src === 'string' && src.length <= MAX_IMAGE_SRC_CHARS) {
+      usable.push(src);
+    }
+  }
+  return usable;
 }

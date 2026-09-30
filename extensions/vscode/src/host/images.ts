@@ -1,5 +1,7 @@
 import path from 'node:path';
 
+import { MAX_IMAGE_SRC_CHARS } from '../shared';
+
 /**
  * Image path policy for the transcript.
  *
@@ -30,9 +32,6 @@ const IMAGE_EXTENSIONS: ReadonlySet<string> = new Set([
   '.apng',
 ]);
 
-/** Longer than any path a model writes on purpose (and a cheap message-size guard). */
-const MAX_SOURCE_LENGTH = 1024;
-
 /** `scheme:` — `https:`, `data:`, `vscode-*:`, … never a local file. */
 const SCHEME = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 
@@ -55,7 +54,9 @@ const WINDOWS_DRIVE = /^[a-zA-Z]:(?:[\\/]|%5c)/i;
  */
 export function resolveWorkspaceImage(root: string | null, src: string): string | null {
   const source = decodeSource(src.trim());
-  if (source === '' || source.length > MAX_SOURCE_LENGTH || hasControlCharacter(source)) {
+  // The same length the protocol allows (`shared/bridge.ts`): a source that is too
+  // long to travel is too long to be a path a model wrote on purpose.
+  if (source === '' || source.length > MAX_IMAGE_SRC_CHARS || hasControlCharacter(source)) {
     return null;
   }
   // A remote URL is a link, not an image — the CSP forbids the former anyway.

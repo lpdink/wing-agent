@@ -296,6 +296,26 @@ describe('webview stylesheet artifact', () => {
     expect(builtStyle.source).not.toContain('url(fonts/');
   });
 
+  it('keeps only the woff2 source of each font', () => {
+    // `tools/fonts.mts` strips the woff/truetype copies at build time (Chromium never
+    // fetches them, and a library build inlines all three — ~1.0 MB of the
+    // stylesheet). It is a text transform, so the *result* is the assertion: one
+    // source per face, no other format left, and a stylesheet that still parses.
+    const faces = builtStyle.source.match(/@font-face[^{]*\{[^}]*\}/g) ?? [];
+    const occurrences = (needle: string): number => builtStyle.source.split(needle).length - 1;
+
+    expect(faces).toHaveLength(20);
+    expect(
+      faces.filter((face) => (face.match(/url\(/g) ?? []).length !== 1 || !face.includes('woff2')),
+    ).toEqual([]);
+    expect(builtStyle.source).not.toContain('data:font/ttf');
+    expect(builtStyle.source).not.toContain('data:font/woff;');
+    expect(builtStyle.source).not.toContain('truetype');
+    // The transform must not mangle the rest: balanced braces, and our own CSS there.
+    expect(occurrences('{')).toBe(occurrences('}'));
+    expect(builtStyle.source).toContain('markdownImage');
+  });
+
   it('references no file the build did not emit', () => {
     const missing = styleUrls()
       .filter((url) => !url.startsWith('data:') && !url.startsWith('#'))

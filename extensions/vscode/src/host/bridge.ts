@@ -1,7 +1,7 @@
 import type * as vscode from 'vscode';
 
 import type { HostToWebviewMessage, WebviewToHostMessage } from '../shared';
-import { isWebviewToHostMessage } from '../shared';
+import { isWebviewToHostMessage, readImageSources } from '../shared';
 
 import { log } from './log';
 
@@ -82,9 +82,18 @@ export class HostBridge implements vscode.Disposable {
       case 'ping':
         this.handlers.onPing(raw.id);
         return;
-      case 'resolveImages':
-        this.handlers.onResolveImages(raw);
+      case 'resolveImages': {
+        // The only message whose payload we walk: a malformed one is dropped (with a
+        // line in the log) instead of throwing inside `srcs.map(…)`. See
+        // `readImageSources`.
+        const srcs = readImageSources(raw);
+        if (srcs === null) {
+          log().warn(`[bridge] ignoring malformed resolveImages payload: ${safeDescribe(raw)}`);
+          return;
+        }
+        this.handlers.onResolveImages({ type: 'resolveImages', srcs });
         return;
+      }
       default:
         this.handlers.onIntent(raw);
     }

@@ -8,7 +8,7 @@ import type * as vscode from 'vscode';
 import { ChatViewProvider, CHAT_VIEW_ID } from '../../src/host/chatViewProvider';
 import { buildContentSecurityPolicy, buildWebviewHtml, createNonce } from '../../src/host/html';
 import { disposeLog } from '../../src/host/log';
-import { WEBVIEW_ROOT_ID } from '../../src/shared';
+import { RESOLVE_IMAGES_MAX_SRCS, WEBVIEW_ROOT_ID } from '../../src/shared';
 import { Uri, mockState, workspace as mockedWorkspace } from '../mocks/vscode';
 
 import { createHostHarness, flushMicrotasks } from './support/harness';
@@ -448,6 +448,55 @@ describe('image resolution', () => {
       { src: 'boom.png', uri: null },
       { src: 'plot.png', uri: 'file:///workspace/project/plot.png' },
     ]);
+  });
+
+  it('ignores a payload it cannot walk instead of throwing', () => {
+    const harness = resolveProvider();
+
+    // The tag guard accepts all of these (`validate.ts` checks discriminants), so the
+    // *payload* is what has to be checked: `srcs.map(…)` on any of them used to throw
+    // a TypeError out of the message handler and take the channel with it.
+    const malformed: readonly unknown[] = [
+      { type: 'resolveImages' },
+      { type: 'resolveImages', srcs: undefined },
+      { type: 'resolveImages', srcs: null },
+      { type: 'resolveImages', srcs: 'plot.png' },
+      { type: 'resolveImages', srcs: 42 },
+      { type: 'resolveImages', srcs: { 0: 'plot.png' } },
+    ];
+
+    for (const message of malformed) {
+      expect(() => {
+        harness.emit(message);
+      }).not.toThrow();
+    }
+
+    expect(postsOfType(harness.webviewPosts, 'images')).toHaveLength(0);
+    expect(logLines()).toContain('ignoring malformed resolveImages payload');
+  });
+
+  it('drops unusable entries but still answers the rest of a batch', () => {
+    openWorkspace('/workspace/project');
+    const harness = resolveProvider();
+
+    harness.emit({ type: 'resolveImages', srcs: ['plot.png', 42, null, {}, `${'a'.repeat(2000)}.png`] });
+
+    expect(postsOfType(harness.webviewPosts, 'images')[0]?.['images']).toEqual([
+      { src: 'plot.png', uri: 'file:///workspace/project/plot.png' },
+    ]);
+  });
+
+  it('bounds how many sources one request can make the host walk', () => {
+    openWorkspace('/workspace/project');
+    const harness = resolveProvider();
+    const srcs = Array.from({ length: RESOLVE_IMAGES_MAX_SRCS + 5 }, (_value, index) => `img${index}.png`);
+
+    harness.emit({ type: 'resolveImages', srcs });
+
+    const answered = postsOfType(harness.webviewPosts, 'images')[0]?.['images'] as
+      readonly { src: string }[] | undefined;
+    expect(answered).toHaveLength(RESOLVE_IMAGES_MAX_SRCS);
+    expect(answered?.[0]?.src).toBe('img0.png');
   });
 
   it('answers an empty request with an empty batch (never a stray message)', () => {

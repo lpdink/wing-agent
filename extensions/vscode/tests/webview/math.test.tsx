@@ -3,7 +3,7 @@ import katex from 'katex';
 import { describe, expect, it, vi } from 'vitest';
 
 import { MarkdownText } from '../../src/webview/chat/Markdown';
-import { renderMathHtml, resetMathCache } from '../../src/webview/chat/markdown/math';
+import { MAX_MATH_CHARS, renderMathHtml, resetMathCache } from '../../src/webview/chat/markdown/math';
 
 /**
  * Formulas: the KaTeX boundary and the React wiring.
@@ -34,6 +34,29 @@ describe('renderMathHtml', () => {
     expect(renderMathHtml('\\frac{1}{', false)).toBeNull();
     expect(renderMathHtml('\\notarealcommand{', false)).toBeNull();
     expect(renderMathHtml('a^{b', false)).toBeNull();
+  });
+
+  it('refuses formulas longer than the budget (they degrade to the source)', () => {
+    // KaTeX layout is superlinear and synchronous (measured: 8k → 9 ms, 16k → 55 ms,
+    // 32k → 283 ms, 100k → 1.8 s on the webview's main thread), so the render path
+    // has an input bound. The value is the TUI lane's per-formula budget
+    // (`crates/wing-math/src/guard.rs`); both lanes must agree on it.
+    expect(MAX_MATH_CHARS).toBe(8192);
+    expect(renderMathHtml('x'.repeat(MAX_MATH_CHARS), false)).not.toBeNull();
+    expect(renderMathHtml('x'.repeat(MAX_MATH_CHARS + 1), false)).toBeNull();
+    expect(renderMathHtml('x'.repeat(100_000), false)).toBeNull();
+  });
+
+  it('caps user-specified sizes so the result cannot blow up the layout', () => {
+    const host = document.createElement('div');
+    host.innerHTML = renderMathHtml('\\rule{100000em}{100000em}', false) ?? '';
+
+    const styles = [...host.querySelectorAll('[style]')].map(
+      (element) => element.getAttribute('style') ?? '',
+    );
+    expect(styles.length).toBeGreaterThan(0);
+    expect(styles.filter((style) => style.includes('100000em'))).toEqual([]);
+    expect(styles.some((style) => style.includes('10em'))).toBe(true);
   });
 
   it('memoizes one formula per (display, tex) pair', () => {
@@ -107,6 +130,16 @@ describe('MathView', () => {
     expect(container.querySelector('[data-testid="md-math-source"]')?.textContent).toBe('$\\frac{1}{$');
     expect(container.textContent).toContain('broken');
     expect(container.textContent).toContain('here');
+  });
+
+  it('shows an over-long formula as its source instead of laying it out', () => {
+    // A machine-generated dump is not worth freezing the sidebar for (see
+    // MAX_MATH_CHARS); it must still be *visible*, not dropped.
+    const tex = 'x'.repeat(MAX_MATH_CHARS + 100);
+    const { container } = render(<MarkdownText text={`$${tex}$`} />);
+
+    expect(container.querySelector('.katex')).toBeNull();
+    expect(container.querySelector('[data-testid="md-math-source"]')?.textContent).toBe(`$${tex}$`);
   });
 
   it('keeps `$` inside code spans and fences literal', () => {

@@ -205,6 +205,18 @@ export type WebviewToHostMessage =
   /** Copy text to the clipboard (webviews cannot do it reliably themselves). */
   | { readonly type: 'copyText'; readonly text: string };
 
+/**
+ * Caps for one `resolveImages` request.
+ *
+ * Every other message on this channel is only *dispatched*; this one is *walked* by
+ * the host (`srcs.map(…)`), so the protocol — not just the view — has to publish a
+ * size. `MAX_IMAGE_SRC_CHARS` is also the markdown source limit the path policy
+ * refuses beyond (`host/images.ts`), so a source that fits the wire always reaches
+ * the same verdict as one the view skipped.
+ */
+export const RESOLVE_IMAGES_MAX_SRCS = 64;
+export const MAX_IMAGE_SRC_CHARS = 1024;
+
 /** Discriminants of {@link WebviewToHostMessage}. */
 export type WebviewToHostMessageType = WebviewToHostMessage['type'];
 

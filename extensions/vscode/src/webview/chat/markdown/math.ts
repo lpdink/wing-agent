@@ -13,16 +13,47 @@
  * at the call site; `tests/webview/math.test.tsx` pins it.
  *
  * The stylesheet rides along with the bundle: Vite inlines `katex.min.css` into
- * `main.css` and rewrites its `url(fonts/…)` references to the emitted
- * `dist/webview/assets/*` files, which the CSP already allows (`font-src
- * ${cspSource}`). `katex-swap.min.css` (`font-display: swap`) is the documented
- * alternative — not used here because the fonts ship with the extension itself
- * (same origin, no network), where the default `block` is invisible, while `swap`
- * would show formulas in a fallback face first.
+ * `main.css`, and — since its library build inlines *assets* as well — the fonts end
+ * up inside that stylesheet as `data:font/…` URIs instead of as
+ * `dist/webview/assets/*` files. That is exactly why the webview CSP allows `data:`
+ * for fonts (`src/host/html.ts`, docs §8.2), and `tests/artifact/webviewBundle.test.ts`
+ * pins the premise. Only the woff2 source of each font survives the build
+ * (`tools/fonts.mts`): Chromium never fetches the woff/truetype copies.
+ *
+ * The input is bounded on purpose (see {@link MAX_MATH_CHARS} and `maxSize`): a
+ * formula is rendered synchronously on the webview's main thread, and a model can
+ * produce text of any length.
  */
 
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
+
+/**
+ * Longest formula that goes to KaTeX, in characters.
+ *
+ * KaTeX layout is synchronous *and superlinear* in the input size (measured on this
+ * machine, katex 0.18.9, plain text input: 1k → 3 ms, 4k → 4 ms, 8k → 9 ms,
+ * 16k → 55 ms, 32k → 283 ms, 65k → 1.4 s, 100k → 1.8 s), and it runs inside a React
+ * render — the whole sidebar is frozen for the duration. Anything longer degrades to
+ * the literal source, the same path a KaTeX refusal takes (no content is lost, the
+ * reader sees the TeX).
+ *
+ * 8192 is not arbitrary: it is the budget the TUI lane puts on one formula
+ * (`crates/wing-math/src/guard.rs`, `MAX_SOURCE_CHARS`), and it keeps a single render
+ * at ~10 ms. Real formulas are orders of magnitude smaller — this only catches
+ * machine-generated dumps.
+ */
+export const MAX_MATH_CHARS = 8192;
+
+/**
+ * Cap for user-specified sizes (`\rule{…}`, `\hspace{…}` …), in ems.
+ *
+ * KaTeX's default is `Infinity`, so `\rule{100000em}{100000em}` produces a box that
+ * big — and a box that big is a layout problem for the transcript. 10em is well past
+ * anything a real formula uses (KaTeX's own documentation recommends a finite value
+ * for untrusted input).
+ */
+const MAX_SIZE_EM = 10;
 
 /**
  * One formula, keyed by `display` + TeX.
@@ -40,6 +71,12 @@ const cache = new Map<string, string | null>();
 
 /** KaTeX HTML for one formula, or `null` when KaTeX refuses it (caller renders `source`). */
 export function renderMathHtml(tex: string, display: boolean): string | null {
+  // Before the cache: an over-long formula is never rendered *and* never becomes a
+  // cache key (the key is the full source).
+  if (tex.length > MAX_MATH_CHARS) {
+    return null;
+  }
+
   const key = `${display ? 'D' : 'I'}\u0000${tex}`;
   const cached = cache.get(key);
   if (cached !== undefined) {
@@ -73,6 +110,9 @@ function renderUncached(tex: string, display: boolean): string | null {
       strict: 'ignore',
       // Explicitly off: no `\href`, no `\htmlClass`, no `\includegraphics`.
       trust: false,
+      // Bound the *result* as well as the input: user-specified sizes are capped, so
+      // a `\rule` cannot push a 100000em box into the transcript.
+      maxSize: MAX_SIZE_EM,
     });
   } catch (error) {
     // Unsupported commands / unbalanced braces are normal model output: the caller

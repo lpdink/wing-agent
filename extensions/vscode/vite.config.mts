@@ -3,6 +3,8 @@ import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
+import { woff2OnlyFonts } from './tools/fonts.mts';
+
 /**
  * Pin the environment this config is written for, before Vite reads it.
  *
@@ -65,6 +67,14 @@ const define = {
 };
 
 /**
+ * `plugins` — `woff2OnlyFonts()` first: it runs before Vite's own CSS pipeline and
+ * strips the woff/truetype copies out of KaTeX's `@font-face` rules. Chromium only
+ * fetches the woff2 ones, and a library build inlines every asset as base64, so
+ * keeping all three would add ~1.0 MB of dead payload to `main.css` (see
+ * `tools/fonts.mts`; the emitted stylesheet is asserted in `tests/artifact/`).
+ */
+
+/**
  * Webview bundle → `dist/webview/main.js` + `dist/webview/main.css`.
  *
  * Format is **IIFE**, not ESM, on purpose: the webview's CSP is
@@ -79,7 +89,7 @@ const define = {
  */
 export default defineConfig({
   define,
-  plugins: [react()],
+  plugins: [woff2OnlyFonts(), react()],
   build: {
     outDir: 'dist/webview',
     emptyOutDir: true,

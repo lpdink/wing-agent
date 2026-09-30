@@ -15,6 +15,7 @@
  */
 
 import type { ResolvedImageModel } from '../../../shared';
+import { RESOLVE_IMAGES_MAX_SRCS } from '../../../shared';
 
 import { postToHost } from '../../bridge/channel';
 
@@ -81,7 +82,10 @@ function flush(): void {
   scheduled = false;
   const srcs = pending;
   pending = [];
-  if (srcs.length > 0) {
-    postToHost({ type: 'resolveImages', srcs });
+  // One request carries at most `RESOLVE_IMAGES_MAX_SRCS` sources (the host walks the
+  // list, so the protocol caps it): a transcript with more images sends follow-up
+  // batches instead of losing the tail.
+  for (let start = 0; start < srcs.length; start += RESOLVE_IMAGES_MAX_SRCS) {
+    postToHost({ type: 'resolveImages', srcs: srcs.slice(start, start + RESOLVE_IMAGES_MAX_SRCS) });
   }
 }

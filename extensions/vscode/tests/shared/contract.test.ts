@@ -13,11 +13,14 @@ import {
   BRIDGE_PROTOCOL_VERSION,
   EMPTY_PANELS,
   LOCAL_COMMANDS,
+  MAX_IMAGE_SRC_CHARS,
+  RESOLVE_IMAGES_MAX_SRCS,
   SESSION_TITLE_MAX_LENGTH,
   TOOL_NAMES,
   assertNever,
   isHostToWebviewMessage,
   isWebviewToHostMessage,
+  readImageSources,
   unhandledVariant,
 } from '../../src/shared';
 import {
@@ -404,6 +407,58 @@ describe('bridge guards', () => {
     expect(isWebviewToHostMessage({ type: 'platform-message', payload: {} })).toBe(false);
     expect(isWebviewToHostMessage(42)).toBe(false);
     expect(isWebviewToHostMessage(undefined)).toBe(false);
+  });
+});
+
+describe('readImageSources', () => {
+  it('reads a well-formed request verbatim (order preserved, duplicates kept)', () => {
+    expect(readImageSources({ type: 'resolveImages', srcs: ['a.png', 'b.png', 'a.png'] })).toEqual([
+      'a.png',
+      'b.png',
+      'a.png',
+    ]);
+    expect(readImageSources({ type: 'resolveImages', srcs: [] })).toEqual([]);
+  });
+
+  it('returns null for a payload the host must not walk', () => {
+    // `null` means "log and ignore" — the alternative is a `TypeError` inside
+    // `srcs.map(…)`, which is what this guard exists to prevent.
+    const malformed: readonly unknown[] = [
+      undefined,
+      null,
+      42,
+      'resolveImages',
+      {},
+      { type: 'resolveImages' },
+      { type: 'resolveImages', srcs: undefined },
+      { type: 'resolveImages', srcs: null },
+      { type: 'resolveImages', srcs: 'plot.png' },
+      { type: 'resolveImages', srcs: 42 },
+      { type: 'resolveImages', srcs: { 0: 'plot.png' } },
+    ];
+    for (const value of malformed) {
+      expect({ value, sources: readImageSources(value) }).toEqual({ value, sources: null });
+    }
+  });
+
+  it('drops entries the host cannot use and keeps the rest of the batch', () => {
+    const long = 'a'.repeat(MAX_IMAGE_SRC_CHARS + 1);
+    expect(readImageSources({ type: 'resolveImages', srcs: ['ok.png', 7, null, {}, long] })).toEqual([
+      'ok.png',
+    ]);
+    // The boundary is inclusive: a source of exactly the cap travels.
+    expect(readImageSources({ type: 'resolveImages', srcs: ['a'.repeat(MAX_IMAGE_SRC_CHARS)] })).toHaveLength(
+      1,
+    );
+  });
+
+  it('caps one batch so the host cannot be asked to walk an unbounded list', () => {
+    const many = Array.from({ length: RESOLVE_IMAGES_MAX_SRCS + 10 }, (_value, index) => `${index}.png`);
+    const sources = readImageSources({ type: 'resolveImages', srcs: many });
+
+    expect(sources).toHaveLength(RESOLVE_IMAGES_MAX_SRCS);
+    expect(sources?.[0]).toBe('0.png');
+    expect(sources?.[RESOLVE_IMAGES_MAX_SRCS - 1]).toBe(`${RESOLVE_IMAGES_MAX_SRCS - 1}.png`);
   });
 });
 
