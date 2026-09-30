@@ -24,45 +24,56 @@ pub(crate) struct EnvSpan {
     pub end: usize,
 }
 
-/// 一次全量扫描得到的顶层结构信息。
+/// 一次全量扫描得到的结构信息。
 ///
 /// "顶层" 的判据统一为：**花括号深度 0 且环境嵌套深度 0**（行/列分隔符单独统计，见
 /// [`Structure::row_separator_count`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Structure {
-    /// 顶层出现 `&`（上游 parser 会在这里 break，静默丢掉后半段）。
-    pub top_level_column_sep: bool,
-    /// 顶层出现 `\\`（同上，上游把它当行分隔符 break）。
-    pub top_level_row_sep: bool,
-    /// 花括号深度 0 的 `\\` 总数（含环境内部的）—— 每个至少产生一行。
+    /// 出现**没人消费**的 `&`（不在环境体 / `\text{…}` 里）：上游 parser 会在这里
+    /// `break`，静默丢掉后半段。**任意花括号深度**都算。
+    pub unmanaged_column_sep: bool,
+    /// 出现**没人消费**的 `\\`（同上）。
+    pub unmanaged_row_sep: bool,
+    /// 环境体内的 `\\` 总数 —— 每个至少产生一行。
     pub row_separator_count: usize,
-    /// 花括号深度 0 的 `&` 总数（含环境内部的）—— 每个至少产生一列。
+    /// 环境体内的 `&` 总数 —— 每个至少产生一列。
     pub column_separator_count: usize,
+    /// 花括号配平（每个 `}` 都有对应的 `{`，且没有跨过环境边界）。
+    ///
+    /// 不配平意味着上游 parser 会把剩下的输入当成组内容一路吃掉（或者把组外的内容
+    /// 当成组内），是"静默丢内容"的另一个入口。
+    pub balanced_braces: bool,
     /// 源码以孤立的反斜杠结尾（`x + \`）：上游会把裸 `\` 渲染出来。
     pub dangling_backslash: bool,
-    /// 所有 `\begin{X}` 都有配对的、同名的 `\end{X}`。
+    /// `\begin{X}` / `\end{X}` 全部配对且名字一致。
     pub balanced_envs: bool,
+    /// `\left` / `\right` 后面跟着的**不是**合法定界符（裸反斜杠）—— 上游会把 `\`
+    /// 当定界符逐行画出来，输出里于是出现没渲染的 LaTeX。
+    pub unmanaged_delimiter: bool,
     /// 顶层（非嵌套）环境跨度，按出现顺序。
     pub envs: Vec<EnvSpan>,
     /// `\left` 计数。
     pub left_count: usize,
     /// `\right` 计数。
     pub right_count: usize,
-    /// 最大花括号嵌套深度。
+    /// 最大花括号嵌套深度（不含环境层级）。
     pub max_brace_depth: usize,
 }
 
 impl Default for Structure {
     fn default() -> Self {
         Self {
-            top_level_column_sep: false,
-            top_level_row_sep: false,
+            unmanaged_column_sep: false,
+            unmanaged_row_sep: false,
             row_separator_count: 0,
             column_separator_count: 0,
-            dangling_backslash: false,
-            // `balanced_envs` 是"没能证明不配对"的正面属性，默认视为成立，
+            // `balanced_*` 是"没能证明不配对"的正面属性，默认视为成立，
             // 由扫描过程置 false。
+            balanced_braces: true,
+            dangling_backslash: false,
             balanced_envs: true,
+            unmanaged_delimiter: false,
             envs: Vec::new(),
             left_count: 0,
             right_count: 0,
@@ -124,45 +135,77 @@ pub(crate) fn brace_arg(chars: &[char], i: usize) -> Option<(String, usize)> {
     None
 }
 
-/// 全量扫描：顶层结构信息 + 顶层环境跨度。
+/// 扫描时的嵌套上下文 —— 决定 `&` / `\\` 是否"有主"。
 ///
-/// 不返回 `Result`：所有异常都体现在 [`Structure`] 的字段里（`balanced_envs` /
-/// 计数不等），由 [`crate::guard`] 决定怎么拒绝。
+/// 上游 parser 在**任意深度**遇到 `&` / `\\` 都会 `break` 并丢掉后半段，所以判据不能
+/// 只看"花括号深度 0"（review r2 的 B1：`x + { y & z }` 曾经返回 `Some("x + y")`）。
+/// 我们的规则是：**分隔符只允许出现在它真正会被消费的地方** ——
+/// `\text{…}` 的原文里（字面字符）、或环境体里（上游的 `matrix`/`cases`，或我们自己的
+/// `align` 家族）。其它任何位置、任何深度出现 → 整条降级。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ctx {
+    /// 普通花括号组（命令参数、分组）：里面的 `&` / `\\` 没人消费
+    Brace,
+    /// `\text{…}` 的字面文本组：`&` / `\\` 是普通字符
+    Text,
+    /// 环境体：分隔符由上游或我们消费
+    Env,
+}
+
+/// 全量扫描：结构信息 + 顶层环境跨度。
+///
+/// 不返回 `Result`：所有异常都体现在 [`Structure`] 的字段里，由 [`crate::guard`] 决定
+/// 怎么拒绝（顺序也有讲究：先报"会丢内容"的，再报"形状不对"的）。
 pub(crate) fn scan(chars: &[char]) -> Structure {
     let mut st = Structure::default();
-    let mut brace_depth = 0usize;
+    // 花括号 / 环境上下文栈
+    let mut ctx: Vec<Ctx> = Vec::new();
     // (环境名, `\begin` 下标, body 起点)
-    let mut stack: Vec<(String, usize, usize)> = Vec::new();
+    let mut env_stack: Vec<(String, usize, usize)> = Vec::new();
+    // 刚读到 `\text`，下一个 `{` 是字面文本组
+    let mut expect_text_group = false;
 
     let mut i = 0usize;
     while i < chars.len() {
+        let consumed_text_flag = expect_text_group;
+        expect_text_group = false;
         match chars[i] {
             '{' => {
-                brace_depth += 1;
-                st.max_brace_depth = st.max_brace_depth.max(brace_depth);
+                ctx.push(if consumed_text_flag {
+                    Ctx::Text
+                } else {
+                    Ctx::Brace
+                });
+                let depth = ctx.iter().filter(|c| **c != Ctx::Env).count();
+                st.max_brace_depth = st.max_brace_depth.max(depth);
                 i += 1;
             }
             '}' => {
-                brace_depth = brace_depth.saturating_sub(1);
+                match ctx.last() {
+                    Some(Ctx::Brace) | Some(Ctx::Text) => {
+                        ctx.pop();
+                    }
+                    // `}` 越过了环境边界（或没有对应的 `{`）
+                    _ => st.balanced_braces = false,
+                }
                 i += 1;
             }
             '&' => {
-                if brace_depth == 0 {
-                    st.column_separator_count += 1;
-                    if stack.is_empty() {
-                        st.top_level_column_sep = true;
-                    }
+                match ctx.last() {
+                    Some(Ctx::Env) => st.column_separator_count += 1,
+                    // `\text{…}` 里的 `&` 是普通字符
+                    Some(Ctx::Text) => {}
+                    _ => st.unmanaged_column_sep = true,
                 }
                 i += 1;
             }
             '\\' => {
                 // 行分隔符 `\\`：注意它也可能出现在 `\\[3pt]` 里，这里只关心是否存在。
                 if chars.get(i + 1) == Some(&'\\') {
-                    if brace_depth == 0 {
-                        st.row_separator_count += 1;
-                        if stack.is_empty() {
-                            st.top_level_row_sep = true;
-                        }
+                    match ctx.last() {
+                        Some(Ctx::Env) => st.row_separator_count += 1,
+                        Some(Ctx::Text) => {}
+                        _ => st.unmanaged_row_sep = true,
                     }
                     i += 2;
                     continue;
@@ -176,11 +219,36 @@ pub(crate) fn scan(chars: &[char]) -> Structure {
                 match command_at(chars, i) {
                     Some((name, after)) => {
                         match name.as_str() {
-                            "left" => st.left_count += 1,
-                            "right" => st.right_count += 1,
+                            "left" | "right" => {
+                                if name == "left" {
+                                    st.left_count += 1;
+                                } else {
+                                    st.right_count += 1;
+                                }
+                                // `\left` / `\right` 会吃掉一个定界符记号：只有它不是
+                                // 裸反斜杠时，上游才不会把 `\` 当定界符画出来
+                                match skip_delimiter(chars, after) {
+                                    Some(next) => i = next,
+                                    None => {
+                                        st.unmanaged_delimiter = true;
+                                        i = after;
+                                    }
+                                }
+                                continue;
+                            }
+                            "text" => {
+                                let mut j = after;
+                                while j < chars.len() && chars[j] == ' ' {
+                                    j += 1;
+                                }
+                                expect_text_group = chars.get(j) == Some(&'{');
+                                i = after;
+                                continue;
+                            }
                             "begin" => match brace_arg(chars, after) {
                                 Some((env, after_arg)) => {
-                                    stack.push((env, i, after_arg));
+                                    ctx.push(Ctx::Env);
+                                    env_stack.push((env, i, after_arg));
                                     i = after_arg;
                                     continue;
                                 }
@@ -192,10 +260,15 @@ pub(crate) fn scan(chars: &[char]) -> Structure {
                             },
                             "end" => match brace_arg(chars, after) {
                                 Some((env, after_arg)) => {
-                                    match stack.pop() {
+                                    if matches!(ctx.last(), Some(Ctx::Env)) {
+                                        ctx.pop();
+                                    } else {
+                                        st.balanced_envs = false;
+                                    }
+                                    match env_stack.pop() {
                                         Some((open, start, body_start)) if open == env => {
                                             // 只有最外层配对才登记成"顶层环境"
-                                            if stack.is_empty() {
+                                            if env_stack.is_empty() {
                                                 st.envs.push(EnvSpan {
                                                     name: env,
                                                     start,
@@ -228,10 +301,36 @@ pub(crate) fn scan(chars: &[char]) -> Structure {
         }
     }
 
-    if !stack.is_empty() {
+    if !env_stack.is_empty() {
         st.balanced_envs = false;
     }
+    if ctx.iter().any(|c| *c != Ctx::Env) {
+        st.balanced_braces = false;
+    }
     st
+}
+
+/// 跳过 `\left` / `\right` 后面的定界符记号，返回其后的下标。
+///
+/// 合法形态：一个普通字符（`(` `)` `[` `]` `|` `.` …），或一个定界符命令
+/// （`\{` `\}` `\|` / `\lbrace` `\rVert` …；归一化本该把它们改写成字面字符，
+/// 这里兜底）。**裸反斜杠不是合法定界符** —— 上游会把它当定界符逐行画出来，
+/// 结果就是输出里出现没渲染的 LaTeX（review r2 的 B2）。
+fn skip_delimiter(chars: &[char], i: usize) -> Option<usize> {
+    let mut j = i;
+    // 上游 `parse_command` 会吃掉命令后的一个空格
+    while j < chars.len() && chars[j] == ' ' {
+        j += 1;
+    }
+    let &c = chars.get(j)?;
+    if c != '\\' {
+        return Some(j + 1);
+    }
+    // `\<单个非字母字符>`：`\{` `\}` `\|` 是定界符，其它（`\,` `\ ` …）不是
+    if let Some((name, after)) = command_at(chars, j) {
+        return crate::normalize::delimiter_command_char(&name).map(|_| after);
+    }
+    matches!(chars.get(j + 1), Some('{') | Some('}') | Some('|')).then_some(j + 2)
 }
 
 /// 在 `chars` 内按顶层分隔符切分，返回每段的下标区间。
@@ -337,16 +436,16 @@ mod tests {
     #[test]
     fn scan_flags_top_level_separators() {
         let st = scan(&chars(r"a & b"));
-        assert!(st.top_level_column_sep);
-        assert!(!st.top_level_row_sep);
+        assert!(st.unmanaged_column_sep);
+        assert!(!st.unmanaged_row_sep);
 
         let st = scan(&chars(r"a \\ b"));
-        assert!(st.top_level_row_sep);
+        assert!(st.unmanaged_row_sep);
 
         // 环境内部的 `&` / `\\` 不算顶层
         let st = scan(&chars(r"\begin{cases} a & b \\ c & d \end{cases}"));
-        assert!(!st.top_level_column_sep);
-        assert!(!st.top_level_row_sep);
+        assert!(!st.unmanaged_column_sep);
+        assert!(!st.unmanaged_row_sep);
         assert!(st.balanced_envs);
         assert_eq!(st.envs.len(), 1);
         assert_eq!(st.envs[0].name, "cases");
@@ -399,7 +498,7 @@ mod tests {
         // 花括号内的分隔符不计入（它们是 `\text{...}` 之类的字面内容）
         let st = scan(&chars(r"\text{a & b}"));
         assert_eq!(st.column_separator_count, 0);
-        assert!(!st.top_level_column_sep);
+        assert!(!st.unmanaged_column_sep);
     }
 
     #[test]

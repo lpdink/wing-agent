@@ -24,10 +24,14 @@
 //   5. `layout_binom`：上游 `above(&top, &bot, baseline - 1)` 在 `top` 为空块时
 //      `0 - 1` 下溢 panic（`\binom{}{}`，debug 直接 abort），且堆叠块与定界符块基线
 //      不一致，`\binom{n}{k}` 被画成错位三行。改为纯堆叠 + 基线归中。
-//   6. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt
+//   6. `layout_sqrt`：空被开方数（`\sqrt{}`）直接返回空块。上游会让 `body_h == 0`
+//      走进"多行"分支，生成基线 = 1、高度 = 1 的块（**基线越界**），`beside` 按基线
+//      对齐时把整块下推一行，于是 `= \sqrt{}` 变成 2 行、`\begin{align} a &= \sqrt{}`
+//      多出一个空行。
+//   7. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt
 //      处理，因此有纯空白差异；已用「先 rustfmt 上游文件、再与本文件逐行 diff」核对，
 //      除上述改动外逐字一致（核对脚本见 crate 根 NOTICE 的「内联保真度」一节）。
-//   除以上六点外与上游逐字一致。
+//   除以上七点外与上游逐字一致。
 // ---------------------------------------------------------------------------
 
 use crate::latex::{AccentKind, EqNode, MathFontKind, MatrixKind};
@@ -525,6 +529,16 @@ fn layout_sqrt(body: &EqNode) -> RenderedBlock {
     let body_block = layout(body);
     let body_h = body_block.height();
     let body_w = body_block.width();
+
+    // 本地改动（见文件头）：空被开方数（`\sqrt{}`）直接返回空块。
+    //
+    // 上游会带着 `body_h == 0` 走进下面的"多行"分支，生成只有一行 overline 的块，
+    // 而基线算成 `1 + 0 = 1` —— **等于高度**，越界。`beside` 按基线对齐时会把整块
+    // 往下推一行，于是 `= \sqrt{}` 渲染成 2 行（首行全空）、`\begin{align} a &= \sqrt{}`
+    // 多出一个空行。空块在 `beside` / `above` 里本来就会被忽略，语义与"没有这一项"一致。
+    if body_h == 0 {
+        return RenderedBlock::empty();
+    }
 
     // Single-row body:   ___
     //                   √abc

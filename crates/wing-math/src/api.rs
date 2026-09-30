@@ -15,16 +15,18 @@
 //! | 条件 | 说明 |
 //! |---|---|
 //! | 归一化后为空 / 渲染结果只有空白 | 没有可渲染的东西（`\sqrt{}` / `\,` 也归这一类） |
-//! | 源码 > 8192 字符 / 花括号嵌套 > 64 层 | 预算闸（深度上限留了栈溢出余量） |
-//! | `\\` > 256 个 或 `&` > 256 个 | 结果必然超预算，在排版**之前**拒绝 |
-//! | 顶层 `&` 或 `\\` | 上游会静默截断（丢内容），必须拒绝 |
+//! | `&` / `\\` 出现在**没人消费**的地方 | 上游会在任意花括号深度静默截断（丢内容），任何深度都拒绝；只有环境体与 `\text{…}` 例外 |
+//! | 花括号不配平 | 同上（上游会把组内/组外内容互相吃掉） |
 //! | `\begin{X}` / `\end{X}` 不配对 | 同上 |
+//! | `\left` / `\right` 后不是合法定界符 | 上游会把裸 `\` 当定界符画出来 |
 //! | ≥ 2 个顶层多行环境 | 组合语义未定义 |
 //! | 多行环境的单元格 / 前后缀渲染失败 | **整条降级**，绝不用空格占位（内容会丢） |
 //! | `\left` / `\right` 计数不等 | 定界符必然错位 |
 //! | 源码以孤立的反斜杠结尾（`x + \`） | 上游会把它原样渲染出来 |
-//! | AST 里出现 `\` | 有命令没被渲染（`\ce` / `\dfrac` / 未支持环境…） |
+//! | AST 里出现 `\`（文本节点 / 定界符） | 有命令没被渲染（`\ce` / `\dfrac` / 未支持环境…） |
 //! | 结果里出现控制字符 | 会破坏"行内单行 / 显示按网格行"的契约 |
+//! | 源码 > 8192 字符 / 花括号嵌套 > 64 层 / **解析递归深度 > 128** | 预算闸；后两条覆盖 brace-free 的深嵌套（`\left(\left(…`），见 [`MAX_PARSE_DEPTH`] |
+//! | `\\` > 256 个 或 `&` > 256 个（环境体内） | 结果必然超预算，在排版**之前**拒绝 |
 //! | `render_inline`：结果不是单行 | 多行块塞不进行内 |
 //! | `render_display`：宽度 > `max_width` / 高度或面积超预算 | 装不下 |
 //!
@@ -37,12 +39,33 @@ use crate::environments::{is_multiline, render_multiline_env};
 use crate::grid::layout::layout;
 use crate::grid::rendered_block::RenderedBlock;
 use crate::guard::{self, Reject};
-use crate::latex::parse_equation;
+use crate::latex::parse_equation_with_depth;
 use crate::normalize::normalize;
 use crate::scan::scan;
 
 /// 多行环境的最大嵌套深度（单元格里再套环境）。
 const MAX_ENV_DEPTH: usize = 8;
+
+/// 解析器递归深度上界（review r2 的 S1）。
+///
+/// 花括号深度拦不住 **brace-free** 的嵌套（`\left(\left(…`、`\hat \hat …`、
+/// `\frac \frac …`、`\sqrt \sqrt …`），那些链既没有 `{` 也不产生任何结构信号，却会
+/// 让 parser / layout 递归到爆栈。所以闸门放在解析器自己的递归计数上（它覆盖**所有**
+/// 会递归的构造），并且**在排版之前**判定：`parse_equation_with_depth` 一旦置位就
+/// 直接拒绝，AST 与排版都不跑。
+///
+/// 标定（本机 release，解析器深度计数）：
+///
+/// | 输入 | 解析深度 | 说明 |
+/// |---|---|---|
+/// | 真实公式（二次方程 / `cases` / 矩阵套分式） | 7–11 | 正常输入的量级 |
+/// | `x^{x^{…}}` × 62 | 125 | 接近上限 |
+/// | `\left(` × 64 / 200 / 250 | 129 / 401 / 501 | 250 在 debug + 2 MiB 栈下 abort |
+/// | `\frac{…}{1}` × 32 / 64 / 195 | 98 / 194 / 587 | 195 在 debug + 2 MiB 栈下 abort |
+/// | `\sqrt ` / `\hat ` 链 × 200 | 202 | — |
+///
+/// 取 128：真实公式有 10 倍以上余量，而"实测能跑"的最深输入（401）还有 3 倍余量。
+const MAX_PARSE_DEPTH: usize = 128;
 
 /// 显示公式的渲染结果：等宽字符网格。
 ///
@@ -192,7 +215,11 @@ pub(crate) fn render_block_at(src: &str, depth: usize) -> Result<RenderedBlock, 
     let block = match structure.envs.first() {
         Some(span) if is_multiline(&span.name) => render_multiline_env(&chars, span, depth)?,
         _ => {
-            let ast = parse_equation(&normalized);
+            let (ast, too_deep) = parse_equation_with_depth(&normalized, MAX_PARSE_DEPTH);
+            if too_deep {
+                // 越界的 AST 是残缺的：既不能渲染，也不能拿它做泄漏判断
+                return Err(Reject::TooDeep);
+            }
             guard::check_ast(&ast)?;
             layout(&ast)
         }

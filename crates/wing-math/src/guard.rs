@@ -50,12 +50,14 @@ pub(crate) enum Reject {
     Empty,
     /// 源码超长。
     TooLong,
-    /// 花括号嵌套过深。
+    /// 结构嵌套过深（花括号深度 / 解析器递归深度）。
     TooDeep,
-    /// 顶层 `&`（`scan::Structure::top_level_column_sep`）。
-    TopLevelColumnSep,
-    /// 顶层 `\\`（`scan::Structure::top_level_row_sep`）。
-    TopLevelRowSep,
+    /// 出现没人消费的 `&`（不在环境体 / `\text{}` 里），任何花括号深度都算。
+    UnmanagedColumnSeparator,
+    /// 出现没人消费的 `\\`（同上）。
+    UnmanagedRowSeparator,
+    /// 花括号不配平。
+    UnbalancedBraces,
     /// `\begin{X}` / `\end{X}` 不配对或名字不一致。
     UnbalancedEnvironment,
     /// 出现两个及以上顶层环境（组合语义未定义）。
@@ -64,9 +66,11 @@ pub(crate) enum Reject {
     UnsupportedEnvironment,
     /// `\left` / `\right` 计数不等。
     UnbalancedDelimiter,
+    /// `\left` / `\right` 后面不是合法定界符（裸反斜杠会被上游当定界符画出来）。
+    UnsupportedDelimiter,
     /// 源码以孤立的反斜杠结尾（上游会把裸 `\` 渲染出来）。
     IncompleteInput,
-    /// 有命令没被渲染、原样漏出来（AST 里出现 `\name` 文本节点）。
+    /// 有命令没被渲染、原样漏出来（AST 里出现 `\` 文本 / 定界符）。
     LeakedCommand,
     /// 渲染结果里出现控制字符（`\n` / `\t` …）——会破坏"单行 / 网格行"契约。
     ControlCharacter,
@@ -81,52 +85,68 @@ pub(crate) enum Reject {
 }
 
 /// 输入侧结构自检：在**归一化之后、解析之前**调用。
+///
+/// 检查顺序有意为之：先报"会静默丢内容"的（红线），再报预算，最后报形状。
 pub(crate) fn check_source(chars: &[char], st: &Structure) -> Result<(), Reject> {
+    // ── 红线：会静默丢内容的形状 ──
+    if st.unmanaged_column_sep {
+        return Err(Reject::UnmanagedColumnSeparator);
+    }
+    if st.unmanaged_row_sep {
+        return Err(Reject::UnmanagedRowSeparator);
+    }
+    if !st.balanced_braces {
+        return Err(Reject::UnbalancedBraces);
+    }
+    if !st.balanced_envs {
+        return Err(Reject::UnbalancedEnvironment);
+    }
+    if st.unmanaged_delimiter {
+        return Err(Reject::UnsupportedDelimiter);
+    }
+    if st.dangling_backslash {
+        return Err(Reject::IncompleteInput);
+    }
+    if st.left_count != st.right_count {
+        return Err(Reject::UnbalancedDelimiter);
+    }
+    if st.envs.len() > 1 {
+        return Err(Reject::MultipleEnvironments);
+    }
+
+    // ── 预算闸（同样在解析与排版之前） ──
     if chars.len() > MAX_SOURCE_CHARS {
         return Err(Reject::TooLong);
     }
     if st.max_brace_depth > MAX_BRACE_DEPTH {
         return Err(Reject::TooDeep);
     }
-    // 行/列分隔符数量是"结果必然超预算"的廉价上界，放在这里可以先拒绝再排版
     if st.row_separator_count > MAX_ROW_SEPARATORS {
         return Err(Reject::TooTall);
     }
     if st.column_separator_count > MAX_COL_SEPARATORS {
         return Err(Reject::TooManyCells);
     }
-    if st.dangling_backslash {
-        return Err(Reject::IncompleteInput);
-    }
-    if st.top_level_column_sep {
-        return Err(Reject::TopLevelColumnSep);
-    }
-    if st.top_level_row_sep {
-        return Err(Reject::TopLevelRowSep);
-    }
-    if !st.balanced_envs {
-        return Err(Reject::UnbalancedEnvironment);
-    }
-    if st.envs.len() > 1 {
-        return Err(Reject::MultipleEnvironments);
-    }
-    if st.left_count != st.right_count {
-        return Err(Reject::UnbalancedDelimiter);
-    }
     Ok(())
 }
 
 /// 泄漏自检：**在 AST 上**判断有没有命令没被渲染。
 ///
-/// 上游渲染器本身只在一处产出反斜杠字形：`\hat` 的 `/\`、`/‾‾\` 几何（见
-/// `grid/layout.rs::layout_accent`）。所以"输出文本里有 `\`"并不等于泄漏（review r1 的
-/// S1：`\hat{ab}` 曾被自己的字形误伤成 `None`）。真正的泄漏只发生在 AST 层：
+/// 上游渲染器本身会产出反斜杠字形的地方有两处：
+/// 1. `\hat` 的 `/\`、`/‾‾\` 几何（见 `grid/layout.rs::layout_accent`）；
+/// 2. `\left` / `\right` 的定界符字符（`Delimited { left, right }`）。
 ///
-/// - `\unknowncmd` / 未支持环境 → `EqNode::Text("\\name")`（上游 `parse_command` 的兜底）；
-/// - `\text{...}` 里用户自己写的反斜杠 → `EqNode::TextBlock`。
+/// 所以"输出文本里有 `\`"并不等于泄漏（review r1 的 S1：`\hat{ab}` 曾被自己的字形误伤）。
+/// 真正的泄漏只在 AST 层可判定，且必须**穷尽每个节点类型与每个字段**：
 ///
-/// 于是判据改成"AST 里出现 `\`"：解析器不会把输入里的 `\` 原样放进 `Text`（`\` 一律走
-/// `parse_command`），所以 AST 里有反斜杠 ⟺ 有东西没被渲染。
+/// - `Text` / `TextBlock` 里的 `\`：上游 `parse_command` 对未知命令的兜底
+///   `format!("\\{}", name)`（含未支持环境的 `Text("\begin{env}")`）与用户写在
+///   `\text{…}` 里的反斜杠；
+/// - `Delimited.left` / `Delimited.right` 里的 `\`：`\left` 后面跟了非法定界符时，
+///   上游把裸 `\` 当成定界符（review r2 的 B2）。
+///
+/// 这里的 `match` **刻意不写 `_` 兜底分支**：上游 AST 一旦增删变体，编译就会失败，
+/// 逼着人回来补判据（防止再出现"漏了一个节点类型"的回归）。
 pub(crate) fn check_ast(node: &crate::latex::EqNode) -> Result<(), Reject> {
     use crate::latex::EqNode;
     let mut stack = vec![node];
@@ -136,6 +156,16 @@ pub(crate) fn check_ast(node: &crate::latex::EqNode) -> Result<(), Reject> {
                 if s.contains('\\') {
                     return Err(Reject::LeakedCommand);
                 }
+            }
+            EqNode::Delimited {
+                left,
+                right,
+                content,
+            } => {
+                if left.contains('\\') || right.contains('\\') {
+                    return Err(Reject::LeakedCommand);
+                }
+                stack.push(content);
             }
             EqNode::Seq(nodes) => stack.extend(nodes.iter()),
             EqNode::Sup(a, b) | EqNode::Sub(a, b) | EqNode::Frac(a, b) | EqNode::Binom(a, b) => {
@@ -162,7 +192,6 @@ pub(crate) fn check_ast(node: &crate::latex::EqNode) -> Result<(), Reject> {
                 }
             }
             EqNode::MathFont { content, .. } => stack.push(content),
-            EqNode::Delimited { content, .. } => stack.push(content),
             EqNode::Matrix { rows, .. } => stack.extend(rows.iter().flatten()),
             EqNode::Cases { rows } => {
                 for (v, c) in rows {
@@ -225,6 +254,7 @@ pub(crate) fn check_output(block: &RenderedBlock) -> Result<(), Reject> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::latex::EqNode;
     use crate::scan::scan;
 
     fn src(s: &str) -> (Vec<char>, Structure) {
@@ -253,8 +283,8 @@ mod tests {
 
     #[test]
     fn rejects_top_level_separators() {
-        assert_eq!(verdict(r"a \\ b"), Err(Reject::TopLevelRowSep));
-        assert_eq!(verdict(r"a & b"), Err(Reject::TopLevelColumnSep));
+        assert_eq!(verdict(r"a \\ b"), Err(Reject::UnmanagedRowSeparator));
+        assert_eq!(verdict(r"a & b"), Err(Reject::UnmanagedColumnSeparator));
     }
 
     #[test]
@@ -288,8 +318,18 @@ mod tests {
 
     #[test]
     fn rejects_deep_nesting() {
-        let deep = "{".repeat(MAX_BRACE_DEPTH + 1);
+        // 只有左括号：先撞上"花括号不配平"（会丢内容，优先报）
+        let unbalanced = "{".repeat(MAX_BRACE_DEPTH + 1);
+        assert_eq!(verdict(&unbalanced), Err(Reject::UnbalancedBraces));
+
+        // 配平但更深：撞深度闸
+        let deep = format!(
+            "{}x{}",
+            "{".repeat(MAX_BRACE_DEPTH + 1),
+            "}".repeat(MAX_BRACE_DEPTH + 1)
+        );
         assert_eq!(verdict(&deep), Err(Reject::TooDeep));
+
         // 上限本身可以通过
         let ok = format!(
             "{}x{}",
@@ -344,6 +384,44 @@ mod tests {
         // `\text{...}` 里的反斜杠同样属于"没被渲染"
         assert_eq!(
             check_ast(&parse_equation(r"\text{\alpha}")),
+            Err(Reject::LeakedCommand)
+        );
+
+        // review r2 的 B2：`\left` / `\right` 的定界符字符串也是"渲染器会产出的 `\`"
+        // 之一，必须单独检查（只进 content 不看 left/right 就是漏网）。
+        let delimited = parse_equation(r"\left\unknowncmd y \right)");
+        assert_eq!(check_ast(&delimited), Err(Reject::LeakedCommand));
+        // 逐字段确认：只看 left / 只看 right 都能命中
+        assert_eq!(
+            check_ast(&EqNode::Delimited {
+                left: "\\".to_string(),
+                right: ")".to_string(),
+                content: Box::new(EqNode::Text("x".to_string())),
+            }),
+            Err(Reject::LeakedCommand)
+        );
+        assert_eq!(
+            check_ast(&EqNode::Delimited {
+                left: "(".to_string(),
+                right: "\\".to_string(),
+                content: Box::new(EqNode::Text("x".to_string())),
+            }),
+            Err(Reject::LeakedCommand)
+        );
+        // 合法定界符（含 `\hat` 的几何字形路径）不受影响
+        assert_eq!(
+            check_ast(&EqNode::Delimited {
+                left: "(".to_string(),
+                right: ")".to_string(),
+                content: Box::new(EqNode::Text("x".to_string())),
+            }),
+            Ok(())
+        );
+        // 嵌套深处也要能查到（遍历是栈式的，不是只看第一层）
+        assert_eq!(
+            check_ast(&parse_equation(
+                r"\frac{1}{\sqrt{\left\unknowncmd y \right)}}"
+            )),
             Err(Reject::LeakedCommand)
         );
     }

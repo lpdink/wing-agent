@@ -397,3 +397,182 @@ fn control_characters_are_neutralised() {
         }
     }
 }
+
+// ── 结构性 fuzz：0 panic / 0 abort / 0 静默丢内容 ─────────────────────
+
+/// 只由"裸字母"和**不含 a/b/c 的命令**组成的 token 表。
+///
+/// 这样"字母数守恒"就是一个**真正的内容不丢判据**：源里每个 `a`/`b`/`c` 都必须出现在
+/// 渲染结果里（命令名本身不含这几个字母，不会把统计搞脏）。
+const LOSSLESS_TOKENS: &[&str] = &[
+    "a",
+    "b",
+    "c",
+    "+",
+    "{",
+    "}",
+    "&",
+    " ",
+    "\\left\\{",
+    "\\right.",
+    "\\sqrt",
+    "\\tilde",
+    "\\overline",
+    "^2",
+    "_1",
+    "\\ ",
+];
+
+/// 结构链 token：覆盖会递归的构造（含 brace-free 的那些）。
+const CHAIN_TOKENS: &[&str] = &[
+    r"\left(",
+    r"\right)",
+    r"\frac",
+    r"\hat",
+    r"\sqrt",
+    r"\overline",
+    r"\vec",
+    r"\mathbb",
+    r"\mathcal",
+    r"\begin{cases}",
+    r"\end{cases}",
+    r"\begin{pmatrix}",
+    r"\end{pmatrix}",
+    "{",
+    "}",
+    "a",
+    "b",
+    "&",
+    r"\\",
+    " ",
+    r"\unknowncmd",
+    r"\text{",
+    "x^",
+    "_",
+    "$",
+];
+
+fn count_char(s: &str, c: char) -> usize {
+    s.chars().filter(|x| *x == c).count()
+}
+
+/// 通用契约断言（与 `exercise` 同源，但对 fuzz 更严格）。
+fn assert_contracts(src: &str) {
+    if let Some(inline) = render_inline(src) {
+        assert!(!inline.contains('\n'), "inline 多行: {src:?}");
+        assert!(
+            !inline.chars().any(|c| c.is_control()),
+            "inline 含控制字符: {src:?}"
+        );
+    }
+    if let Some(m) = render_display(src, 200) {
+        assert_eq!(m.height(), m.lines().len(), "行数账目不一致: {src:?}");
+        assert!(m.width() <= 200, "超宽: {src:?}");
+        assert!(m.baseline() < m.height(), "基线越界: {src:?}");
+        for line in m.lines() {
+            assert!(
+                !line.chars().any(|c| c.is_control()) && !line.contains('\n'),
+                "网格行含控制字符 / 内嵌换行: {src:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn structural_fuzz_keeps_the_contract() {
+    // 确定性伪随机
+    let mut state: u64 = 0x853C49E6748FEA9B;
+    let mut next = move |m: usize| {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((state >> 33) as usize) % m
+    };
+
+    // 1) 小输入（含危险字符）—— 2 万组
+    let alphabet: Vec<char> = "\\{}$^_&+-*/()[]|<>=.,;:!?'\"`~ abcxyz019α∑∫中\n\t"
+        .chars()
+        .collect();
+    for _ in 0..20_000 {
+        let len = 1 + next(24);
+        let src: String = (0..len).map(|_| alphabet[next(alphabet.len())]).collect();
+        assert_contracts(&src);
+    }
+
+    // 2) 结构链（brace-free 嵌套 + 环境 + 分隔符）—— 2 万组
+    for _ in 0..20_000 {
+        let len = 1 + next(12);
+        let src: String = (0..len)
+            .map(|_| CHAIN_TOKENS[next(CHAIN_TOKENS.len())])
+            .collect();
+        assert_contracts(&src);
+    }
+
+    // 3) **内容不丢**：源里的每个 `a`/`b`/`c` 必须出现在渲染结果里 —— 2 万组
+    for _ in 0..20_000 {
+        let len = 1 + next(10);
+        let src: String = (0..len)
+            .map(|_| LOSSLESS_TOKENS[next(LOSSLESS_TOKENS.len())])
+            .collect();
+        assert_contracts(&src);
+        if let Some(m) = render_display(&src, 400) {
+            let text = m.to_plain_text();
+            for ch in ['a', 'b', 'c'] {
+                assert_eq!(
+                    count_char(&text, ch),
+                    count_char(&src, ch),
+                    "静默丢内容（{ch} 数量不符）: {src:?} ->\n{text}"
+                );
+            }
+        }
+        if let Some(inline) = render_inline(&src) {
+            for ch in ['a', 'b', 'c'] {
+                assert_eq!(
+                    count_char(&inline, ch),
+                    count_char(&src, ch),
+                    "行内静默丢内容（{ch}）: {src:?} -> {inline:?}"
+                );
+            }
+        }
+    }
+
+    // 4) 畸形输入：把合法公式随机破坏（插入 / 删除 / 替换）—— 2 万组
+    let seeds: &[&str] = &[
+        r"\frac{-b \pm \sqrt{b^2-4ac}}{2a}",
+        r"\begin{align} a &= b \\ c &= d \end{align}",
+        r"f(x) = \begin{cases} x^2 & x>0 \\ 0 & x\le 0 \end{cases}",
+        r"\left\{ \begin{aligned} a &= b \\ c &= d \end{aligned} \right.",
+        r"\hat{H}\psi = E\psi \quad \log p(x)",
+    ];
+    let mutability: Vec<char> = "\\{}$^_&+-{}()[]".chars().collect();
+    for _ in 0..20_000 {
+        let mut src = seeds[next(seeds.len())].to_string();
+        match next(3) {
+            0 => {
+                let pos = next(src.chars().count().max(1));
+                let ch = mutability[next(mutability.len())];
+                src.insert_str(
+                    src.char_indices()
+                        .nth(pos)
+                        .map(|(i, _)| i)
+                        .unwrap_or(src.len()),
+                    &ch.to_string(),
+                );
+            }
+            1 => {
+                let pos = next(src.chars().count());
+                if let Some((i, c)) = src.char_indices().nth(pos) {
+                    src.replace_range(i..i + c.len_utf8(), "");
+                }
+            }
+            _ => {
+                let pos = next(src.chars().count());
+                let ch = mutability[next(mutability.len())];
+                if let Some((i, c)) = src.char_indices().nth(pos) {
+                    src.replace_range(i..i + c.len_utf8(), &ch.to_string());
+                }
+            }
+        }
+        assert_contracts(&src);
+    }
+}

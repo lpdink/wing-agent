@@ -16,7 +16,9 @@
 //   3. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt
 //      处理，因此有纯空白差异；已用「先 rustfmt 上游文件、再与本文件逐行 diff」核对，
 //      除上述改动外逐字一致（核对脚本见 crate 根 NOTICE 的「内联保真度」一节）。
-//   除以上三点外与上游逐字一致（含文件内联测试）。
+//   4. 额外导出 `parse_equation_with_depth`（本地新增的带深度上界入口），
+//      见 `parser.rs` 的改动说明。
+//   除以上四点外与上游逐字一致（含文件内联测试）。
 // ---------------------------------------------------------------------------
 
 //! # rust-latex-parser
@@ -79,4 +81,5 @@ pub mod ast;
 pub mod parser;
 
 pub use ast::{AccentKind, EqMetrics, EqNode, MathFontKind, MatrixKind};
-pub use parser::{latex_to_unicode, parse_equation};
+// 本地改动（见文件头）：额外导出带深度上界的解析入口，供上层做"排版前闸门"。
+pub use parser::{latex_to_unicode, parse_equation, parse_equation_with_depth};

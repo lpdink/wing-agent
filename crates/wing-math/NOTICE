@@ -61,7 +61,14 @@
 9. **命名算子空格补回**（`src/latex/parser.rs`）：`\log p(x)` 不再渲染成 `logp(x)`。
 10. **`parse_group_atom` 跳过参数前空白**（`src/latex/parser.rs`）：`\frac{X} {Y}`
     （多行公式折行后的形状）不再丢分母。
-11. **`cargo fmt`**：所有内联文件都跑了 `cargo fmt`（仓库门禁要求 `cargo fmt --check`
+11. **`layout_sqrt` 空被开方数**（`src/grid/layout.rs`）：`\sqrt{}` 直接返回空块。
+    上游会生成基线越界（基线 = 高度 = 1）的块，`beside` 按基线对齐时把整块下推一行，
+    于是 `= \sqrt{}` 变 2 行、环境单元格多出一个空行。
+12. **递归深度闸**（`src/latex/parser.rs` + `src/latex/mod.rs`）：新增
+    `parse_equation_with_depth(input, max_depth)`，`parse_atom` / `parse_sequence_until_ex`
+    各包一层深度计数。上游没有上界，brace-free 的深嵌套（`\left(\left(…`、`\frac \frac …`）
+    会递归到爆栈（debug + 2 MiB 栈实测 abort）。`parse_equation` 语义不变（无上界）。
+13. **`cargo fmt`**：所有内联文件都跑了 `cargo fmt`（仓库门禁要求 `cargo fmt --check`
     干净），因此与上游原文存在**纯空白**差异。
 
 ## 内联保真度（如何复核"除上述改动外逐字一致"）
@@ -78,19 +85,21 @@ rustfmt --edition 2024 --quiet /tmp/term-maths-1.0.0/src/layout.rs
 #    —— 差异应当**只有**上面「我们改了什么」列出的那几条
 ```
 
-实测（本步骤交付时，差异行数 = 去掉出处头后与 rustfmt 过的上游文件的 `diff` 行数）：
+实测（本步骤交付时，差异行数 = 去掉出处头后与 rustfmt 过的上游文件的 `diff` 行数。
+**这个数字对方法敏感**：是否对 `use` 行做路径归一化、`rustfmt` 的版本都会让它上下浮动
+几行；关键是**差异内容**逐条能对应到上面的改动清单）：
 
 | 内联文件 | 差异行数 | 差异内容 |
 |---|---|---|
 | `src/grid/rendered_block.rs` | **0** | 逐字一致 |
-| `src/latex/mod.rs` | 2 | 模块路径 |
+| `src/latex/mod.rs` | 5 | 模块路径 |
 | `src/latex/ast.rs` | 4 | 模块路径 + doc 示例路径 |
 | `src/grid/mathfont.rs` | 2 | 模块路径 |
 | `src/grid/renderer.rs` | 6 | 模块路径 |
 | `src/grid/latex_renderer.rs` | 8 | 模块路径 |
 | `src/grid/mod.rs` | 23 | 模块路径 + 移除三个未内联后端 |
-| `src/grid/layout.rs` | 64 | 模块路径 + `center_accent` + `build_delimiter` 提权 + `layout_seq` 一次性拼装 + `layout_binom` 修正 |
-| `src/latex/parser.rs` | 116 | 模块路径 + 4 处 `collapsible_if` + `·` 间隔 + 命名算子空格 + `parse_group_atom` 跳空白 |
+| `src/grid/layout.rs` | 74 | 模块路径 + `center_accent` + `build_delimiter` 提权 + `layout_seq` 一次性拼装 + `layout_binom` 修正 + `layout_sqrt` 空被开方数 |
+| `src/latex/parser.rs` | 178 | 模块路径 + 4 处 `collapsible_if` + `·` 间隔 + 命名算子空格 + `parse_group_atom` 跳空白 + 递归深度闸 |
 
 上游测试随源码内联（`parser.rs` / `rendered_block.rs` / `mathfont.rs` 文件内的
 `#[cfg(test)] mod tests`），两个集成测试也整体迁移到 `tests/upstream_robustness.rs`

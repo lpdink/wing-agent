@@ -430,3 +430,125 @@ fn wide_characters_in_scripts_do_not_break_column_alignment() {
         m.to_plain_text()
     );
 }
+
+// ── review r2 的 B1/B2 回归 ─────────────────────────────────────────
+
+#[test]
+fn none_for_separators_outside_managed_regions_at_any_depth() {
+    // B1（r2）：上游 parser 在**任意花括号深度**遇到 `&` / `\\` 都会 break 并丢掉
+    // 后半段，所以判据不能只看"花括号深度 0"。下面每一条在修复前都会返回
+    // "少了内容但看起来正常"的网格。
+    for src in [
+        r"x + { y & z }",
+        r"x + { y \\ z }",
+        r"{a & b}",
+        r"{{a & b}}",
+        "x + { y & z",
+        r"\frac{a & b}{c}",
+        r"f(x) = \left\{ x^2 & x > 0 \\ 0 & x \le 0 \right.",
+        r"\begin{align} \frac{a}{ &= b \\ c &= d \end{align}",
+        r"\begin{align} a &= \frac{a}{ \\ c &= d \end{align}",
+        r"\left( \begin{align} a &= \frac{a}{ \\ c &= d \end{align} \right)",
+    ] {
+        assert_eq!(render_inline(src), None, "must degrade (inline): {src}");
+        assert_eq!(render_display(src, 400), None, "must degrade: {src}");
+        assert!(render_block(src).is_none(), "must degrade: {src}");
+    }
+
+    // 大范围丢失形态：输入 250 字符 → 修复前输出 5 字符
+    let bulk = format!("x + {{ y & {}", "z + ".repeat(60));
+    assert_eq!(render_display(&bulk, 400), None);
+
+    // 未经配平的花括号同样拒绝（上游会把组外的内容当成组内一路吃掉）
+    for src in [r"{a}", r"{{a}}", r"\frac{a}{b}"] {
+        assert!(
+            render_block(src).is_some(),
+            "balanced braces must render: {src}"
+        );
+    }
+    for src in [r"{a", r"a}", r"{{a}", r"\frac{a}{b"] {
+        assert!(render_block(src).is_none(), "unbalanced braces: {src}");
+    }
+}
+
+#[test]
+fn managed_regions_still_accept_separators() {
+    // B1 的反面：分隔符出现在"有主"的地方必须照常工作
+    for (src, needles) in [
+        (
+            r"\begin{cases} a & b \\ c & d \end{cases}",
+            &["a", "b", "c", "d"][..],
+        ),
+        (
+            r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}",
+            &["a", "b", "c", "d"],
+        ),
+        (
+            r"\begin{array}{cc} a & b \\ c & d \end{array}",
+            &["a", "b", "c", "d"],
+        ),
+        (
+            r"\begin{align} a &= b \\ c &= d \end{align}",
+            &["a", "b", "c", "d"],
+        ),
+    ] {
+        let m = render_display(src, 200).unwrap_or_else(|| panic!("must render: {src}"));
+        let text = m.to_plain_text();
+        for needle in needles {
+            assert!(text.contains(needle), "{src}: missing {needle}");
+        }
+    }
+
+    // `\text{…}` 里的 `&` 是普通字符
+    assert_eq!(
+        render_inline(r"f(x) = \text{a & b}").as_deref(),
+        Some("f(x) = a & b")
+    );
+    // 环境套在 `\left…\right` 里也照常
+    assert!(render_display(r"\left\{ \begin{matrix} a & b \end{matrix} \right.", 200).is_some());
+    // align 单元格里再嵌 cases
+    assert!(
+        render_display(
+            r"\begin{align} f &= \begin{cases} 1 & x>0 \\ 0 & x\le 0 \end{cases} \end{align}",
+            200
+        )
+        .is_some()
+    );
+}
+
+#[test]
+fn none_for_invalid_delimiter_after_left_or_right() {
+    // B2（r2）：`\left` 后接非法定界符时上游会把裸 `\` 当定界符画出来，
+    // 输出里于是出现没渲染的 LaTeX 命令。
+    for src in [
+        r"\left\right",
+        r"\left\unknowncmd y \right)",
+        r"\left\frac x \right)",
+        r"\left\ce x \right)",
+        r"\left\alpha x \right)",
+        r"$\left\right$",
+        r"\begin{align} a &= \left\unknowncmd b \right) \\ c &= d \end{align}",
+    ] {
+        assert_eq!(render_inline(src), None, "must degrade: {src}");
+        assert_eq!(render_display(src, 400), None, "must degrade: {src}");
+    }
+
+    // 合法定界符（含 `\left\{` / `\left\|` 归一化后的形态）照常
+    for src in [
+        r"\left( x \right)",
+        r"\left\{ x \right\}",
+        r"\left\| x \right\|",
+        r"\left. x \right|",
+        r"\left[ x \right]",
+    ] {
+        assert!(
+            render_display(src, 80).is_some(),
+            "valid delimiters must render: {src}"
+        );
+    }
+    // `\hat` 的几何字形仍被豁免（防止有人再改回"输出含 `\` 即拒"）
+    assert_eq!(
+        render_display(r"\hat{ab}", 80).unwrap().lines(),
+        ["/\\", "ab"]
+    );
+}

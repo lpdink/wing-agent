@@ -311,6 +311,15 @@ fn render_cell(src: &str, depth: usize) -> Result<Option<RenderedBlock>, Reject>
             if block.height() == 0 {
                 return Ok(None);
             }
+            // 渲染出来只有空白（`\sqrt{}` / `\,` 这类）：交给 Empty 语义处理，
+            // 不能让它在网格里留下一行空白（review r2 的 N2）
+            if !block
+                .cells()
+                .iter()
+                .any(|row| row.iter().any(|c| c.trim() != ""))
+            {
+                return Ok(None);
+            }
             Ok(Some(block))
         }
         // 真·空内容（`\,`、`{}` 之类）：占位但不贡献高度，不算丢内容

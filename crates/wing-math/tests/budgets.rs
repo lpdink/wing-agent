@@ -38,33 +38,29 @@ fn source_length_budget() {
 
 #[test]
 fn brace_depth_budget() {
-    let deep = format!(
+    // 配平且在上限之内：可渲染
+    let ok = format!(
         "{}x{}",
-        "{".repeat(MAX_BRACE_DEPTH),
-        "}".repeat(MAX_BRACE_DEPTH)
+        "{".repeat(MAX_BRACE_DEPTH - 4),
+        "}".repeat(MAX_BRACE_DEPTH - 4)
     );
     assert!(
-        render_block(&deep).is_some(),
-        "depth at the limit must render"
+        render_block(&ok).is_some(),
+        "depth under the limit must render"
     );
 
+    // 只有左括号：不配平（会丢内容）→ 拒绝
+    assert!(render_block(&"{".repeat(MAX_BRACE_DEPTH + 1)).is_none());
+
+    // 配平但超深：撞深度闸（花括号闸与解析器递归闸两道）
     let too_deep = format!(
         "{}x{}",
-        "{".repeat(MAX_BRACE_DEPTH + 1),
-        "}".repeat(MAX_BRACE_DEPTH + 1)
+        "{".repeat(MAX_BRACE_DEPTH + 4),
+        "}".repeat(MAX_BRACE_DEPTH + 4)
     );
     assert!(render_block(&too_deep).is_none());
 
-    // 只有左括号也必须被挡（同样是递归深度）
-    assert!(render_block(&"{".repeat(MAX_BRACE_DEPTH + 1)).is_none());
-
-    // 极限附近不得栈溢出（review r1 的 S2：debug + 小栈下 ~195 层会 abort）
-    for depth in [MAX_BRACE_DEPTH - 1, MAX_BRACE_DEPTH, MAX_BRACE_DEPTH + 1] {
-        let src = format!("{}x{}", "{".repeat(depth), "}".repeat(depth));
-        let _ = render_block(&src);
-    }
-
-    // 嵌套分式同属"深度"问题
+    // 嵌套分式：受解析器递归深度闸约束（标定见 `api.rs::MAX_PARSE_DEPTH`）
     let nested = |levels: usize| {
         let mut src = "x".to_string();
         for _ in 0..levels {
@@ -72,8 +68,45 @@ fn brace_depth_budget() {
         }
         src
     };
-    assert!(render_block(&nested(MAX_BRACE_DEPTH)).is_some());
-    assert!(render_block(&nested(MAX_BRACE_DEPTH + 1)).is_none());
+    assert!(render_block(&nested(20)).is_some());
+    assert!(render_block(&nested(50)).is_none());
+
+    // 极限附近不得栈溢出（review r2 的 S1）
+    for depth in [8, 32, 63, 64, 200] {
+        let src = format!("{}x{}", "{".repeat(depth), "}".repeat(depth));
+        let _ = render_block(&src);
+    }
+}
+
+#[test]
+fn brace_free_chains_hit_the_depth_gate_before_layout() {
+    // review r2 的 S1：`\left(` / `\frac ` / `\sqrt ` / `\hat ` 这类**不带花括号**的
+    // 链式嵌套没有花括号信号，必须由解析器的递归深度闸拦下来，而且要在排版之前。
+    let chains: &[(&str, String, String)] = &[
+        ("\\left(", "\\left(".repeat(250), String::new()),
+        ("\\frac ", "\\frac ".repeat(250), String::new()),
+        ("\\sqrt ", "\\sqrt ".repeat(300), "x".to_string()),
+        ("\\hat ", "\\hat ".repeat(400), String::new()),
+        ("\\mathbb ", "\\mathbb ".repeat(400), String::new()),
+        ("\\overline ", "\\overline ".repeat(400), String::new()),
+        // 接近 8192 字符上限的最坏形态
+        ("\\frac ", "\\frac ".repeat(1364), String::new()),
+    ];
+    for (label, head, tail) in chains {
+        let src = format!("{head}{tail}");
+        assert!(src.chars().count() <= MAX_SOURCE_CHARS, "{label}");
+        let start = Instant::now();
+        assert!(render_block(&src).is_none(), "{label} should be rejected");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "{label}: rejecting took {elapsed:?}（应当远在排版之前）"
+        );
+    }
+
+    // 预算之内的链照常可用
+    assert!(render_block(&("\\sqrt ".repeat(30) + "x")).is_some());
+    assert!(render_block(&("\\frac ".repeat(30) + "x y")).is_some());
 }
 
 #[test]
@@ -178,9 +211,9 @@ fn long_flat_formulas_are_not_quadratic() {
 
 #[test]
 fn max_depth_inputs_survive_a_small_stack() {
-    // review r1 的 S2：debug 构建 + 2 MiB 线程栈下，嵌套 `\frac` 到 ~195 层会
-    // stack overflow（不可捕获的 abort）。深度闸必须在**解析之前**挡住更深的输入，
-    // 让"预算允许的最深输入"在 1 MiB 栈里也能跑完。
+    // review r1 的 S2 / r2 的 S1：debug 构建 + 2 MiB 线程栈下，嵌套 `\frac` 到 ~195 层、
+    // `\left(` 到 250 层就会 stack overflow（不可捕获的 abort）。深度闸必须在**解析
+    // 过程中**就置位（不用等排版），让"上限附近 + 远超上限"的输入在 1 MiB 栈里也能跑完。
     let handle = std::thread::Builder::new()
         .stack_size(1024 * 1024)
         .spawn(|| {
@@ -205,6 +238,17 @@ fn max_depth_inputs_survive_a_small_stack() {
                     sqrt = format!(r"\sqrt{{{}}}", sqrt);
                 }
                 let _ = render_block(&sqrt);
+            }
+
+            // brace-free 链（r2 的 S1 主角）
+            for depth in [32usize, 64, 129, 250, 1000] {
+                let _ = render_block(&"\\left(".repeat(depth));
+                let _ = render_block(&("\\frac ".repeat(depth) + "x y"));
+                let _ = render_block(&("\\sqrt ".repeat(depth) + "x"));
+                let _ = render_block(&("\\hat ".repeat(depth) + "x"));
+                let _ = render_block(&("\\mathbb ".repeat(depth) + "x"));
+                let _ = render_block(&("\\overline ".repeat(depth) + "x"));
+                let _ = render_block(&("\\text ".repeat(depth) + "x"));
             }
         })
         .expect("spawn");

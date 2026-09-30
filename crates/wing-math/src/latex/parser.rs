@@ -24,10 +24,16 @@
 //   6. `parse_group_atom` 先跳过参数前的空白：LaTeX 允许 `\frac {a} {b}`，上游不跳
 //      空格会把第二个参数解析成一个空格，`\frac{X} {Y}` 的分母因此消失、`{Y}` 被挤到
 //      最后一行（多行公式折行经控制字符归一化后正好是这个形状）。
-//   7. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt
+//   7. 递归深度闸 + `parse_equation_with_depth`（本项目新增）：`parse_atom` /
+//      `parse_sequence_until_ex` 各包一层深度计数，越界即置位并立刻返回空节点
+//      （`parse_atom` 越界时会吃掉一个字符，保证调用方的 `while pos < len` 前进）。
+//      上游没有这个上界：brace-free 的深嵌套（`\left(\left(…`、`\hat \hat …`）
+//      会让解析器与排版递归到爆栈（debug + 2 MiB 栈实测 abort）。
+//      `parse_equation` 保持原语义（无上界），新入口供上层适配层做"排版前闸门"。
+//   8. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt
 //      处理，因此有纯空白差异；已用「先 rustfmt 上游文件、再与本文件逐行 diff」核对，
 //      除上述改动外逐字一致（核对脚本见 crate 根 NOTICE 的「内联保真度」一节）。
-//   除以上七点外与上游逐字一致（含文件内联测试）。
+//   除以上八点外与上游逐字一致（含文件内联测试）。
 // ---------------------------------------------------------------------------
 
 //! The parser. Turns LaTeX math strings into [`EqNode`] trees.
@@ -116,13 +122,29 @@ pub fn big_op_symbol(name: &str) -> &'static str {
 /// let tree = parse_equation("\\int_0^\\infty e^{-x^2} dx = \\sqrt{\\pi}");
 /// ```
 pub fn parse_equation(input: &str) -> EqNode {
+    parse_equation_with_depth(input, usize::MAX).0
+}
+
+/// 本地改动（见文件头）：带**递归深度上界**的解析。
+///
+/// 返回 `(AST, 是否超深)`。超深时 AST 是残缺的（超出部分的节点是空 `Text`），调用方
+/// **必须**丢弃它——这是给上层适配层用的"排版前闸门"：brace-free 的深嵌套
+/// （`\left(\left(…`、`\hat \hat …`、`\frac \frac …`）不产生任何花括号，
+/// 光看括号深度拦不住，只有解析器自己知道递归到多深。
+pub fn parse_equation_with_depth(input: &str, max_depth: usize) -> (EqNode, bool) {
     let mut parser = EqParser::new(input);
-    parser.parse_sequence()
+    parser.max_depth = max_depth;
+    let node = parser.parse_sequence();
+    (node, parser.depth_exceeded)
 }
 
 pub struct EqParser {
     chars: Vec<char>,
     pos: usize,
+    /// 本地改动（见文件头）：当前递归深度 / 上界 / 是否越界。
+    depth: usize,
+    max_depth: usize,
+    depth_exceeded: bool,
 }
 
 impl EqParser {
@@ -130,7 +152,24 @@ impl EqParser {
         Self {
             chars: input.chars().collect(),
             pos: 0,
+            depth: 0,
+            max_depth: usize::MAX,
+            depth_exceeded: false,
         }
+    }
+
+    /// 进入一层递归：超过上界就置位并让调用方立刻返回空节点（不再向下递归）。
+    fn enter(&mut self) -> bool {
+        self.depth += 1;
+        if self.depth > self.max_depth {
+            self.depth_exceeded = true;
+            return false;
+        }
+        true
+    }
+
+    fn leave(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
     }
 
     fn peek(&self) -> Option<char> {
@@ -154,8 +193,22 @@ impl EqParser {
     }
 
     fn parse_sequence_until_ex(&mut self, stop_on_paren: bool, stop_on_right: bool) -> EqNode {
+        // 本地改动（见文件头）：递归深度闸 —— 超深立刻返回空节点，不再向下递归。
+        if !self.enter() {
+            return EqNode::Text(String::new());
+        }
+        let node = self.parse_sequence_body(stop_on_paren, stop_on_right);
+        self.leave();
+        node
+    }
+
+    fn parse_sequence_body(&mut self, stop_on_paren: bool, stop_on_right: bool) -> EqNode {
         let mut nodes = Vec::new();
         while self.pos < self.chars.len() {
+            // 本地改动（见文件头）：已越界就直接收工（结果会被上层的深度闸丢弃）
+            if self.depth_exceeded {
+                break;
+            }
             let ch = match self.peek() {
                 Some(c) => c,
                 None => break,
@@ -304,6 +357,19 @@ impl EqParser {
     }
 
     fn parse_atom(&mut self) -> EqNode {
+        // 本地改动（见文件头）：递归深度闸（`\hat \hat …` 这类链只走 parse_atom）。
+        // 越界时必须**吃掉一个字符**：调用方的 `while pos < len` 循环依赖"每个 atom
+        // 至少前进一格"，原地返回会让它死循环。
+        if !self.enter() {
+            self.advance();
+            return EqNode::Text(String::new());
+        }
+        let node = self.parse_atom_inner();
+        self.leave();
+        node
+    }
+
+    fn parse_atom_inner(&mut self) -> EqNode {
         match self.peek() {
             None => EqNode::Text(String::new()),
             Some('{') => {
