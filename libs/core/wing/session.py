@@ -524,6 +524,17 @@ class Session:
         except OSError as e:
             log.warning(f"Session {self._session_id}: state not persisted ({e})")
 
+    def reapply_provider_options(self) -> None:
+        """把记录在案的 provider 级开关贴到**当前** provider 实例上（公开入口）。
+
+        适用于 provider 实例被换掉的第三条路径：`/api/system/reload` 第 4 步
+        对在场会话调 `agent.rebuild_providers()` 按新配置重建 provider——
+        provider 级 extra_body 状态（thinking / reasoning_effort）随之归零，
+        不重贴就会静默退回配置默认（请求前缀漂移，且与 metadata 记录失配，
+        直到下次逐出 / resume 才被纠正）。
+        """
+        self._reapply_recorded_provider_options()
+
     def sync_tools_record(self) -> None:
         """把**当前生效**的工具集快照进 metadata 并落盘（fork 专用）。
 

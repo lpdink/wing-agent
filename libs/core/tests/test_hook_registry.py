@@ -45,6 +45,18 @@ class TestHookRegistrySync:
         result = hooks.invoke("before_user_message", "hello")
         assert result == "hello"
 
+    def test_off_removes_handler_idempotently(self):
+        """off 与 on 对称：摘除已注册 handler，重复摘除返回 False。"""
+        registry = HookRegistry()
+
+        def handler(content=None, **ctx):
+            return content
+
+        registry.on("before_user_message")(handler)
+        assert registry.off("before_user_message", handler) is True
+        assert registry.off("before_user_message", handler) is False
+        assert registry.handlers("before_user_message") == []
+
     def test_pipeline_chains_handlers_in_registration_order(self):
         """多个 handler 按注册顺序串联执行"""
         hooks = HookRegistry()

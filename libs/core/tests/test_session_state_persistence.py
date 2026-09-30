@@ -166,8 +166,26 @@ class TestCreateOverridePersists:
                 == "From override.\n<os>probe</os>"
             )
         finally:
-            # 注册表没有公开的逐 handler 注销口，测试直接摘除（清空全局会波及其他用例）
-            hooks._handlers.get("before_session_start", []).remove(hook_inject)
+            assert hooks.off("before_session_start", hook_inject)
+
+
+class TestProviderRebuildReapply:
+    """provider 实例被换掉后（reload 的 rebuild_providers）重贴记录开关。"""
+
+    @pytest.mark.asyncio
+    async def test_rebuild_then_reapply_restores_recorded_switches(self, sm):
+        session = sm.create_session()
+        await session.update_state(thinking=False, reasoning_effort="low")
+        assert session.agent.model_provider.thinking is False
+
+        # reload 第 4 步：按新配置重建 provider 实例（provider 级状态归零）
+        await session.agent.rebuild_providers()
+        assert session.agent.model_provider.thinking is True  # 配置默认
+
+        # 重贴记录值（runtime 在 rebuild 之后调用）
+        session.reapply_provider_options()
+        assert session.agent.model_provider.thinking is False
+        assert session.agent.model_provider.reasoning_effort == "low"
 
 
 class TestHookFiringFollowsSessionId:
@@ -221,7 +239,7 @@ class TestHookFiringFollowsSessionId:
                 == "From override.\n<os>probe</os>\n<os>probe</os>"
             )
         finally:
-            hooks._handlers.get("before_session_start", []).remove(hook_inject)
+            assert hooks.off("before_session_start", hook_inject)
 
 
 class TestTemplateSwitch:

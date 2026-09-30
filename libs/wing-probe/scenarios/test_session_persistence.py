@@ -261,3 +261,43 @@ async def test_dynamic_state_and_overrides_survive_rehydrate(probe: Probe) -> No
 
     # 前缀身份逐项对账：水合前后的请求共享全部旧消息（含 system 段与 tools）
     _assert_prefix_identity(before_req, after_req, shared=3)
+
+
+REBUILD_MODEL = "probe/persist-rebuild"
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_recorded_switches_survive_provider_rebuild(probe: Probe) -> None:
+    """`/api/system/reload` 换掉 provider 实例后，记录在案的开关重贴（前缀不漂移）。
+
+    reload 第 4 步按新配置重建活跃 provider：provider 级 extra_body 状态
+    （thinking / reasoning_effort）随之归零——不重贴就会悄悄退回配置默认，
+    下一次请求的前缀与前一轮不一致（"重建后前缀漂移"的第三条路径），
+    且与 metadata 记录失配。
+    """
+    probe.register(
+        REBUILD_MODEL,
+        Turn.of(text="reply one"),
+        Turn.of(text="reply two"),
+    )
+    session = await probe.session(model=REBUILD_MODEL)
+    http = probe.driver_required.http
+    await http.update_session(
+        session.session_id, thinking=False, reasoning_effort="low"
+    )
+    await session.chat("alpha")
+
+    before_req = probe.request(REBUILD_MODEL, 0)
+    assert before_req.body.get("enable_thinking") is False, before_req.body
+    assert before_req.body.get("reasoning_effort") == "low", before_req.body
+
+    reload_result = await http.reload()
+    assert reload_result.get("ok") is True, reload_result
+
+    await session.chat("beta")
+    after_req = probe.request(REBUILD_MODEL, 1)
+    # 前缀身份：system / tools 声明 / 处理开关 / 全部旧消息逐项一致
+    _assert_prefix_identity(
+        before_req, after_req, shared=len(before_req.context().messages)
+    )

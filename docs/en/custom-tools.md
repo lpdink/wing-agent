@@ -122,6 +122,7 @@ Hook handlers form a pipeline: each handler receives the value from the previous
 
 - Inject through `session.context_manager.append_to_system_prompt(text)`: the result is persisted with the session (`metadata.append_system_prompt`) and restored byte-for-byte on `resume`. Mutating the system prompt through other entry points is not recorded, so the prefix changes after a restart.
 - **Hooks must be idempotent**: `before_session_start` also fires on `fork`, and the child already inherits the source's appended content — a non-idempotent hook stacks another copy on every fork (and persists it). Mechanism-level dedup / single-injection points will come with the hook system rework (see issue #131).
+- **Upgrading from an older version (breaking change)**: `session.context_manager.inject_system_prompts` (a list) became `append_system_prompt` (a string) plus `append_to_system_prompt(text)`. The old spelling raises `AttributeError`, which the hook framework swallows (only a warning is logged) — the injection fails **silently**, so update `~/.wing/hooks/*.py` accordingly (the hooks shipped in this repository are already updated).
 
 ### Writing a Hook
 

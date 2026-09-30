@@ -156,6 +156,10 @@ More detail in: "{dir}/SKILL.md" """
         hook（如 workspace_env_inject 注入环境信息）与 AgentOverride
         共用本入口；多片段按追加顺序以换行连接，结果整体随会话持久化。
         空串忽略（None 语义的字符串形态）。
+
+        约定：**写入端规范化（strip / 丢弃空串），还原端原样赋值**（Session
+        直接把持久化值写回 `append_system_prompt`）——还原必须逐字节，不能再
+        规整一次，否则落盘值与请求前缀会漂移。新增写入入口请同样走本方法。
         """
         stripped = text.strip()
         if not stripped:

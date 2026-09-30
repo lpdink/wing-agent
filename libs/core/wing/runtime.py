@@ -515,6 +515,10 @@ class WingRuntime:
                     if self.sm.get_session(session.session_id) is None:
                         continue
                     await session.agent.rebuild_providers()
+                    # provider 实例换了：记录在案的 provider 级开关（thinking /
+                    # reasoning_effort）重贴，否则 reload 后 live 悄悄退回配置
+                    # 默认、请求前缀随之漂移（Session 持有记录，见其 docstring）。
+                    session.reapply_provider_options()
                     rebuilt += 1
                 except Exception as e:
                     failures.append(f"{session.session_id}: {e}")
