@@ -253,6 +253,51 @@ class TestRewind:
         assert rewind_entry["role"] == "assistant"
         assert rewind_entry["parent_uuid"] == msgs[0].uuid  # 祖父 uuid
 
+    def test_rewind_to_first_message_after_compact_keeps_region_reachable(
+        self, tmp_dir
+    ):
+        """回退到压缩后的第一条消息：回退行带上 unzip，压缩前区间不消失。
+
+        回退行复制的是目标的 parent——parent 是压缩节点时，`unzip_last_uuid`
+        是"被压缩区间在哪"的唯一编码，丢了会让压缩前区间（乃至整段历史）从
+        /rewind、/fork 候选里消失。
+        """
+        cm = _make_cm(tmp_dir)
+        msgs = [
+            Message(role="user", content="old1"),
+            Message(role="assistant", content="old2"),
+        ]
+        cm.add_messages(msgs)
+
+        compact_node = Message(
+            role="assistant", content="[Compact] summary", parent_uuid=None
+        )
+        compact_node.uuid = "cu"
+        compact_node.unzip_last_uuid = msgs[1].uuid
+        first = Message(role="user", content="first post compact", parent_uuid="cu")
+        first.uuid = "u2"
+        cm._messages.append_detached(compact_node)
+        cm._messages.append_detached(first)
+        cm._messages.set_tip("u2")
+        assert [target["content"] for target in cm.get_branch_targets()] == [
+            "old1",
+            "[Compact] [Compact] summary",
+            "first post compact",
+            "(current)",
+        ]
+
+        draft = cm.rewind("u2")
+        assert draft == "first post compact"
+
+        rewind_entry = _read_history(tmp_dir / "test-session")[-1]
+        assert rewind_entry["content"] == "[Compact] summary"
+        assert rewind_entry["unzip_last_uuid"] == msgs[1].uuid  # ty: ignore[invalid-argument-type]
+        assert [target["content"] for target in cm.get_branch_targets()] == [
+            "old1",
+            "[Compact] [Compact] summary",
+            "(current)",
+        ]
+
     def test_rewind_context_window(self, tmp_dir):
         """rewind 后上下文窗口从回退行重建。"""
         cm = _make_cm(tmp_dir)

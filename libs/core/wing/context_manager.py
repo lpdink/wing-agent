@@ -886,7 +886,9 @@ More detail in: "{dir}/SKILL.md" """
             parent_msg = self._messages.find(parent_uuid)
             assert isinstance(parent_msg, Message)
 
-            # 构造回退行
+            # 构造回退行——`unzip_last_uuid` 必须跟着走：parent 是压缩节点时，
+            # 它是"被压缩区间在哪"的唯一编码，丢了会让压缩前区间（乃至整段
+            # 历史）从 /rewind、/fork 候选里消失（回退到压缩后第一条消息即触发）。
             rewind_msg = Message(
                 role=parent_msg.role,
                 content=parent_msg.content,
@@ -895,6 +897,7 @@ More detail in: "{dir}/SKILL.md" """
                 tool_calls=parent_msg.tool_calls,
                 tool_call_id=parent_msg.tool_call_id,
                 parent_uuid=parent_msg.parent_uuid,  # 祖父 uuid
+                unzip_last_uuid=parent_msg.unzip_last_uuid,
             )
             rewind_msg.uuid = str(uuid.uuid4())
 
