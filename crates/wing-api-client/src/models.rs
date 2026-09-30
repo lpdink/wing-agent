@@ -402,6 +402,19 @@ where
     Ok(Option::<ModelCapabilities>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+/// 向量字段的宽容解码：`null` 与缺省等价（空表）。
+///
+/// 缺键由字段级 `#[serde(default)]` 覆盖；显式 null 需要这一层，否则会抛
+/// "invalid type: null, expected a sequence" 把整条 `/api/models` 响应打死
+/// （真实生产者不会发 null，但中间代理 / 测试替身可能）。
+fn deserialize_vec_or_default<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// 单个 provider 的可用模型（嵌套模型列表条目）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderModels {
@@ -409,7 +422,7 @@ pub struct ProviderModels {
     #[serde(default)]
     pub models: Vec<String>,
     /// 模型展示详情（追加属性；旧网关不返回时为缺省空表，且可能只覆盖部分模型）。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub model_details: Vec<ModelDetail>,
 }
 
@@ -419,14 +432,14 @@ impl ProviderModels {
         self.model_details.iter().find(|detail| detail.name == name)
     }
 
-    /// 展示名：优先该模型声明的 `display_name`（非空），缺省 / 空串 / 未声明
-    /// 一律回落调用名 `name`。
+    /// 展示名：优先该模型声明的 `display_name`（去空白后非空），缺省 / 空串 /
+    /// 纯空白 / 未声明一律回落调用名 `name`。
     ///
     /// 展示层专用——任何 Apply / 匹配 / 上报都必须使用 `name`（身份层）。
     pub fn label_for<'a>(&'a self, name: &'a str) -> &'a str {
         self.detail_for(name)
             .and_then(|detail| detail.display_name.as_deref())
-            .filter(|label| !label.is_empty())
+            .filter(|label| !label.trim().is_empty())
             .unwrap_or(name)
     }
 }
@@ -724,5 +737,48 @@ mod tests {
         assert!(empty.providers.is_empty());
         let no_providers: ModelsResponse = serde_json::from_str("{}").unwrap();
         assert!(no_providers.providers.is_empty());
+    }
+
+    /// `model_details: null` 与缺省等价（空表）——整条响应仍可解析，`models` 不受影响。
+    #[test]
+    fn model_details_null_decodes_as_empty() {
+        let json = r#"{
+            "providers": [{
+                "provider": "qoder",
+                "models": ["dfmodel"],
+                "model_details": null
+            }]
+        }"#;
+        let resp: ModelsResponse = serde_json::from_str(json).unwrap();
+        let group = &resp.providers[0];
+        assert!(group.model_details.is_empty());
+        assert_eq!(group.models, vec!["dfmodel"]);
+        assert_eq!(group.label_for("dfmodel"), "dfmodel", "回落调用名");
+    }
+
+    /// 纯空白 `display_name` 与缺省等价（渲染成空白行会让模型名消失）。
+    #[test]
+    fn label_for_ignores_whitespace_only_display_name() {
+        let json = r#"{
+            "providers": [{
+                "provider": "p",
+                "models": ["a", "b"],
+                "model_details": [
+                    {"name": "a", "display_name": "   "},
+                    {"name": "b", "display_name": "\t\n "}
+                ]
+            }]
+        }"#;
+        let resp: ModelsResponse = serde_json::from_str(json).unwrap();
+        let group = &resp.providers[0];
+        assert_eq!(group.label_for("a"), "a");
+        assert_eq!(group.label_for("b"), "b");
+        // 带内容但两端有空白仍然有效（只做判定，不改写声明的值）。
+        let resp: ModelsResponse = serde_json::from_str(
+            r#"{"providers":[{"provider":"p","models":["c"],
+                 "model_details":[{"name":"c","display_name":" DeepSeek-Flash "}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(resp.providers[0].label_for("c"), " DeepSeek-Flash ");
     }
 }

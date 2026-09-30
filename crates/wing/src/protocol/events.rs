@@ -193,8 +193,9 @@ fn default_role() -> String {
 /// 事件镜像；`SessionMessage`（history 投影）本期保持原样，改动面收敛在
 /// 单文件内。
 ///
-/// 容忍策略：整个 `tool_media` 键在旧网关上缺席；`name` 还可能缺键或为
-/// null（wire 序列化会剥掉 null 字段）。
+/// 容忍策略：整个 `tool_media` 键在旧网关上缺席；`name` 还可能缺键、也可能
+/// 为 `null`（wire 只剥离顶层 null，嵌套 null 原样在线）。条目级容错见
+/// `deserialize_tool_media`。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMediaRef {
     /// 图片字节的 sha256 hex——即存储 id。
@@ -208,6 +209,34 @@ pub struct SessionMediaRef {
     /// 展示名（basename，不含目录）；旧载荷上缺席。
     #[serde(default)]
     pub name: Option<String>,
+}
+
+/// `tool_media` 的宽容解码，两层：
+///
+/// - `null` / 缺席 / 非数组形状 → 空表（旧网关只发缺键；中间代理可能发 null）；
+/// - 数组里单条畸形（缺字段 / 类型不符）→ **只跳过该条**，保留其余合法条目
+///   与整帧事件——一条坏数据不应让 `tool_call_result` 整帧消失（卡片会永远
+///   停在 Pending、结果行不出现）。
+fn deserialize_tool_media<'de, D>(deserializer: D) -> Result<Vec<SessionMediaRef>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(serde_json::Value::Array(items)) = raw else {
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .into_iter()
+        .filter_map(
+            |item| match serde_json::from_value::<SessionMediaRef>(item) {
+                Ok(media) => Some(media),
+                Err(err) => {
+                    tracing::warn!(error = %err, "skipping malformed tool_media entry");
+                    None
+                }
+            },
+        )
+        .collect())
 }
 
 // ============================================================
@@ -320,8 +349,8 @@ pub enum WingEvent {
         #[serde(default)]
         model: String,
         /// 工具产生的媒体引用（如 ReadImage 的图片）——追加属性。
-        /// 旧网关不返回该键：缺省为空表，渲染路径完全不感知。
-        #[serde(default)]
+        /// 旧网关不返回该键；null / 单条畸形都容忍（见 `deserialize_tool_media`）。
+        #[serde(default, deserialize_with = "deserialize_tool_media")]
         tool_media: Vec<SessionMediaRef>,
         #[serde(flatten)]
         meta: EventMeta,
@@ -1214,7 +1243,7 @@ mod tests {
             other => panic!("expected ToolCallResult, got {other:?}"),
         }
 
-        // 新网关：name 为 null / 缺席都要容忍（wire 序列化会剥掉 null）。
+        // 新网关：name 为 null / 缺席都要容忍（wire 只剥离顶层 null，嵌套 null 原样在线）。
         let null_name = r#"{
             "type": "tool_call_result",
             "tool_name": "ReadImage",
@@ -1238,6 +1267,76 @@ mod tests {
                 assert_eq!(tool_media[0].name, None, "explicit null degrades to None");
                 assert_eq!(tool_media[1].name, None, "absent key degrades to None");
                 assert_eq!(tool_media[1].mime, "image/webp");
+            }
+            other => panic!("expected ToolCallResult, got {other:?}"),
+        }
+    }
+
+    /// `tool_media: null` / 非数组形状 → 空表；整帧照常解析。
+    #[test]
+    fn deserialize_tool_media_null_and_non_array_decode_as_empty() {
+        for media in ["null", "42", "{}", r#""nope""#] {
+            let json = format!(
+                r#"{{
+                    "type": "tool_call_result",
+                    "tool_name": "ReadImage",
+                    "tool_args": {{}},
+                    "tool_call_id": "tc_img_3",
+                    "tool_result": "…",
+                    "tool_success": true,
+                    "tool_media": {media},
+                    "created_at": "2025-01-01T00:00:00",
+                    "session_id": "abc",
+                    "request_id": "req23"
+                }}"#
+            );
+            match serde_json::from_str::<WingEvent>(&json).unwrap() {
+                WingEvent::ToolCallResult { tool_media, .. } => {
+                    assert!(tool_media.is_empty(), "tool_media={media}");
+                }
+                other => panic!("expected ToolCallResult, got {other:?}"),
+            }
+        }
+    }
+
+    /// 单条畸形只跳过该条：合法条目与整帧都必须保留。
+    #[test]
+    fn deserialize_tool_media_skips_only_malformed_entries() {
+        let json = r#"{
+            "type": "tool_call_result",
+            "tool_name": "ReadImage",
+            "tool_args": {},
+            "tool_call_id": "tc_img_4",
+            "tool_result": "[image: ok]",
+            "tool_success": true,
+            "tool_media": [
+                {"id": "good", "mime": "image/png", "bytes": 10,
+                 "width": 20, "height": 30, "name": "ok.png"},
+                {"id": "no-width", "mime": "image/png", "bytes": 1, "height": 3},
+                {"id": "bytes-str", "mime": "image/png", "bytes": "1",
+                 "width": 2, "height": 3},
+                {"id": "width-overflow", "mime": "image/png", "bytes": 1,
+                 "width": 4294967296, "height": 3},
+                7,
+                {"id": "last", "mime": "image/gif", "bytes": 5,
+                 "width": 6, "height": 7, "name": null}
+            ],
+            "created_at": "2025-01-01T00:00:00",
+            "session_id": "abc",
+            "request_id": "req24"
+        }"#;
+        match serde_json::from_str::<WingEvent>(json).unwrap() {
+            WingEvent::ToolCallResult {
+                tool_result,
+                tool_media,
+                ..
+            } => {
+                assert_eq!(tool_result, "[image: ok]", "结果行不能被吞掉");
+                assert_eq!(tool_media.len(), 2, "只保留两条合法条目");
+                assert_eq!(tool_media[0].id, "good");
+                assert_eq!(tool_media[0].name.as_deref(), Some("ok.png"));
+                assert_eq!(tool_media[1].id, "last");
+                assert_eq!(tool_media[1].name, None);
             }
             other => panic!("expected ToolCallResult, got {other:?}"),
         }

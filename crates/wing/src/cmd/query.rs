@@ -73,7 +73,7 @@ fn format_models(resp: &ModelsResponse) -> String {
                 if let Some(desc) = group
                     .detail_for(model)
                     .and_then(|detail| detail.description.as_deref())
-                    .filter(|desc| !desc.is_empty())
+                    .filter(|desc| !desc.trim().is_empty())
                 {
                     line.push_str("  ");
                     line.push_str(&common::truncate_chars(desc, MODEL_DESCRIPTION_MAX_CHARS));
@@ -266,6 +266,28 @@ mod tests {
             )],
         };
         assert_eq!(format_models(&resp), "Provider: p\n  same\n  empty\n\n");
+    }
+
+    #[test]
+    fn format_models_skips_whitespace_only_description() {
+        // 纯空白 description 不是有效值——补在行尾只会多出一串尾部空格。
+        let resp = ModelsResponse {
+            providers: vec![group(
+                "p",
+                &["blank"],
+                vec![detail("blank", None, Some("   "))],
+            )],
+        };
+        assert_eq!(format_models(&resp), "Provider: p\n  blank\n\n");
+        // 带内容、两端有空白仍然展示（只做判定，不改写声明的值）。
+        let resp = ModelsResponse {
+            providers: vec![group(
+                "p",
+                &["padded"],
+                vec![detail("padded", None, Some(" 说明 "))],
+            )],
+        };
+        assert_eq!(format_models(&resp), "Provider: p\n  padded   说明 \n\n");
     }
 
     #[test]

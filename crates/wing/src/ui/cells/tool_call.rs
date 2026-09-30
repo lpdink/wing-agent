@@ -7,13 +7,14 @@
 //! Header examples:
 //!   ⦁ Bash(ls -la) 3s/30s
 //!   ⦁ Read(wing/src/main.rs)
+//!   ⦁ ReadImage(shot.png)   — basename only
 //!   ⦁ Glob(src/**/*.ts, **/*.py)
 //!   ⦁ AskUserQuestion
 //!
 //! Result strategies:
 //!   Hidden    — success result suppressed (Read, Write, Edit, Glob, Grep)
 //!   Full      — result shown in full (AskUserQuestion)
-//!   Truncated — head/tail with ellipsis (Bash, fallback)
+//!   Truncated — head/tail with ellipsis (Bash, ReadImage, fallback)
 //!   Failed    — always truncated to 50 chars
 
 use std::time::Instant;
@@ -284,7 +285,7 @@ impl ToolRenderer {
                 let name = args
                     .get("path")
                     .and_then(|v| v.as_str())
-                    .map(|p| truncate_path_segments(p, 1))
+                    .map(read_image_basename)
                     .unwrap_or_default();
                 if name.is_empty() {
                     String::new()
@@ -745,6 +746,23 @@ fn truncate_path_segments(path: &str, n: usize) -> String {
     segments[segments.len() - n..].join("/")
 }
 
+/// Basename for the ReadImage card title.
+///
+/// The model occasionally emits padded strings or Windows-style paths, so
+/// this is stricter than `truncate_path_segments(_, 1)`: whitespace is
+/// trimmed, `\` normalized to `/`, then the last segment is taken
+/// (`/abs/dir/` → `dir`, mirroring POSIX `basename`). Empty when no usable
+/// segment is left — the caller then renders no parentheses.
+fn read_image_basename(path: &str) -> String {
+    let normalized = path.trim().replace('\\', "/");
+    normalized
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// Collapse a multi-line command into a single line without truncation.
 ///
 /// Replaces `\r\n` and `\n` with `⏎`. The full command is preserved —
@@ -994,6 +1012,44 @@ mod tests {
         assert!(
             !text.contains("/Users/abiter"),
             "directories stay out of the header: {text}"
+        );
+    }
+
+    #[test]
+    fn test_read_image_basename_edges() {
+        assert_eq!(read_image_basename("/abs/dir/shot.png"), "shot.png");
+        assert_eq!(
+            read_image_basename("/abs/dir/"),
+            "dir",
+            "trailing slash → POSIX basename"
+        );
+        assert_eq!(read_image_basename("C:\\Users\\x\\shot.png"), "shot.png");
+        assert_eq!(read_image_basename("  /a/b/shot.png  "), "shot.png");
+        assert_eq!(read_image_basename("/"), "");
+        assert_eq!(read_image_basename("   "), "");
+        assert_eq!(read_image_basename(""), "");
+    }
+
+    #[test]
+    fn test_read_image_header_normalizes_backslashes_and_whitespace() {
+        let block = ToolCallBlock::new(
+            "ReadImage".into(),
+            json!({"path": "  C:\\Users\\x\\shot.png  "}),
+            "tc_ri5".into(),
+        );
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(
+            text.contains("ReadImage(shot.png)"),
+            "windows path / padding normalized: {text}"
+        );
+
+        // 纯空白路径：没有可用末段 → 无括号、不渲染空白。
+        let blank = ToolCallBlock::new("ReadImage".into(), json!({"path": "   "}), "tc_ri6".into());
+        let text = lines_text(&blank.to_lines(&p(), 10));
+        assert!(text.contains("ReadImage"), "missing tool name: {text}");
+        assert!(
+            !text.contains("ReadImage("),
+            "blank path must not produce empty parens: {text}"
         );
     }
 
