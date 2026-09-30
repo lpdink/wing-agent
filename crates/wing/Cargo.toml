@@ -25,6 +25,8 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+ratatui-image = { workspace = true }
+image = { workspace = true }
 pulldown-cmark = { workspace = true }
 syntect = { workspace = true }
 two-face = { workspace = true }
@@ -44,6 +46,8 @@ wing-api-client = { path = "../wing-api-client" }
 [dev-dependencies]
 pretty_assertions = "1"
 criterion = "0.5"
+# Integration tests build their own PNG fixtures through the same decoder the library uses.
+image = { workspace = true }
 
 [[bench]]
 name = "stream_render"
