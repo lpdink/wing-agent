@@ -210,7 +210,8 @@ class AnthropicProvider(ModelProvider):
 
     async def list_models(self) -> list[str]:
         if self._config.models:
-            return sorted(self._config.models)
+            # 静态声明短路：字符串 / 对象两种形态统一取实际调用名（排序保持现状）。
+            return sorted(self._config.model_names())
         try:
             resp = await self._client.get("/v1/models")
             await raise_with_body(resp)

@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from wing.agent_template import AgentTemplate
+from wing.config import ModelCapabilities, ModelSpec
 from wing.event import SessionInitEvent, SessionStateChangedEvent, SyncSessionEvent
 from wing.event_bus import event_bus
 from wing.gateway.protocol import AgentOverride
@@ -242,6 +243,44 @@ class TestDegradation:
         restored = _restart(root).resume_session(sid)
 
         assert restored.agent.model == "not-in-list"
+        assert any("static model list" in r.getMessage() for r in wing_logs)
+
+    @pytest.mark.asyncio
+    async def test_object_declared_model_restores_without_warning(
+        self, sm, root, wing_logs, _mock_config
+    ):
+        """对象形态声明：模型在列表内（按实际调用名）时正常还原、不告警。"""
+        _mock_config.providers[0].models = [
+            ModelSpec(
+                name="qwen3-max",
+                display_name="Qwen3 Max",
+                capabilities=ModelCapabilities(vision=True),
+            )
+        ]
+
+        session = sm.create_session()
+        sid = session.session_id
+        await session.update_state(model="qwen3-max")
+
+        restored = _restart(root).resume_session(sid)
+
+        assert restored.agent.model == "qwen3-max"
+        assert not [r for r in wing_logs if "static model list" in r.getMessage()]
+
+    @pytest.mark.asyncio
+    async def test_object_declared_model_not_in_list_restores_with_warning(
+        self, sm, root, wing_logs, _mock_config
+    ):
+        """对象形态声明：不在列表内仍只 warning 不阻断（与字符串形态同语义）。"""
+        _mock_config.providers[0].models = [ModelSpec(name="other-model")]
+
+        session = sm.create_session()
+        sid = session.session_id
+        await session.update_state(model="qwen3-max")
+
+        restored = _restart(root).resume_session(sid)
+
+        assert restored.agent.model == "qwen3-max"
         assert any("static model list" in r.getMessage() for r in wing_logs)
 
     @pytest.mark.asyncio

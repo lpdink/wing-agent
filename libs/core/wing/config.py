@@ -16,6 +16,45 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+class ModelCapabilities(BaseModel):
+    """模型能力声明（models 对象形态的 capabilities 字段）。
+
+    未声明 = 全 false（安全默认）；不做名字启发式。frozen：声明是配置事实，
+    运行期只读，同时可被 provider 层投影安全共享（无需复制）。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+    """extra="ignore"：未来新增能力（audio 等）时旧版本忽略未知键而非拒绝配置。"""
+
+    vision: bool = False
+    """是否接受图片输入（本期唯一能力）。"""
+
+
+class ModelSpec(BaseModel):
+    """models 列表项的对象形态（新声明协议）。
+
+    字符串形态（存量）等价于只有 name 的 ModelSpec——两种形态经
+    ProviderConfig.model_names() / find_model() 统一出口消费。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+    """extra="ignore"：未来新增字段由新版本消费，旧版本忽略未知键。"""
+
+    name: str
+    """实际调用名（传给 provider.generate 的值）。"""
+    display_name: str | None = None
+    """展示名（人类可读；缺省由前端回落 name）。"""
+    description: str | None = None
+    capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
+
+    @field_validator("name")
+    @classmethod
+    def _name_non_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("model name must be non-empty")
+        return v
+
+
 class ProviderConfig(BaseModel):
     """单个 LLM provider 配置。"""
 
@@ -41,8 +80,16 @@ class ProviderConfig(BaseModel):
     """透传到 request body 的额外字段（平铺合并到顶层）。"""
     anthropic_version: str = "2023-06-01"
     """Anthropic API 版本 header（仅 anthropic 协议使用）。"""
-    models: list[str] = Field(default_factory=list)
-    """静态模型列表。配置后不再请求远端 GET /models。"""
+    models: list[str | ModelSpec] = Field(default_factory=list)
+    """静态模型列表（字符串 = 存量形态；对象 = 带展示元信息与能力声明）。
+
+    配置后不再请求远端 GET /models。消费方用 model_names() / find_model()
+    取实际调用名，不要直接翻元素类型。
+    """
+    image_delivery: Literal["inline", "followup"] | None = None
+    """图片投递形态。None = 按协议默认（openai → followup；anthropic → inline）。"""
+    image_max_bytes: int | None = None
+    """单图请求期兜底上限（字节）；超过的图片位降级为占位文本。None = 不设。"""
 
     @field_validator("name")
     @classmethod
@@ -52,6 +99,54 @@ class ProviderConfig(BaseModel):
         if not re.match(r"^[a-zA-Z0-9_-]+$", v):
             raise ValueError(f"provider name must match ^[a-zA-Z0-9_-]+$, got: '{v}'")
         return v
+
+    @field_validator("image_max_bytes")
+    @classmethod
+    def _image_max_bytes_positive(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            raise ValueError(f"image_max_bytes must be > 0 when set, got: {v}")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_model_declarations(self) -> "ProviderConfig":
+        """同一 provider 内实际调用名不得重复（对象/字符串混排也查）。
+
+        重复声明在运行期表现为「同一模型两套能力/展示」，属配置错误，必须在
+        解析期报错。
+        """
+        names = self.model_names()
+        if len(names) != len(set(names)):
+            seen: set[str] = set()
+            for n in names:
+                if n in seen:
+                    raise ValueError(f"duplicate model name: '{n}'")
+                seen.add(n)
+        return self
+
+    def model_names(self) -> list[str]:
+        """按声明序返回实际调用名（字符串与对象两种形态的统一出口）。"""
+        return [m if isinstance(m, str) else m.name for m in self.models]
+
+    def find_model(self, name: str) -> ModelSpec | None:
+        """按名查声明；字符串形态包装为等价 ModelSpec，未声明返回 None。"""
+        for m in self.models:
+            if isinstance(m, str):
+                if m == name:
+                    return ModelSpec(name=m)
+            elif m.name == name:
+                return m
+        return None
+
+
+def resolve_model_capabilities(
+    provider_cfg: ProviderConfig, model: str
+) -> ModelCapabilities:
+    """解析模型的能力声明（读图门禁与请求期投影的唯一入口）。
+
+    未声明（含字符串形态 / 不在列表内）= 全 false 的安全默认；不做名字启发式。
+    """
+    spec = provider_cfg.find_model(model)
+    return spec.capabilities if spec is not None else ModelCapabilities()
 
 
 class UserAgentConfig(BaseModel):
@@ -134,6 +229,27 @@ class ToolResultTruncateConfig(BaseModel):
         return v
 
 
+class ImagesConfig(BaseModel):
+    """图片读入与请求期保留预算配置（read-image）。
+
+    数值全部 > 0：count_quantum / evict_quantum_bytes 是请求期投影算法的
+    除数（0 会除零）；高水位为 0 会让所有图被丢，属误配而非「关闭」。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    max_bytes: int = Field(default=8_388_608, gt=0)
+    """单图原始字节上限（ReadImage 读时拒绝 + 降采样提示）。"""
+    max_images: int = Field(default=32, gt=0)
+    """计数高水位：超出时从最旧开始按 count_quantum 批量驱逐。"""
+    count_quantum: int = Field(default=8, gt=0)
+    """计数驱逐量子（每次超限批量丢这么多张，KV-cache 友好）。"""
+    request_budget_bytes: int = Field(default=37_748_736, gt=0)
+    """请求内图片 base64 编码后累计高水位（36 MiB ≈ DeepSeek 48 MiB 的 75%）。"""
+    evict_quantum_bytes: int = Field(default=18_874_368, gt=0)
+    """字节驱逐量子（= 预算一半，与 DSH 同构）。"""
+
+
 class ApiKeyEntry(BaseModel):
     """Single API key with an identity role.
 
@@ -212,6 +328,7 @@ class Config(BaseModel):
     tool_result_truncate: ToolResultTruncateConfig = Field(
         default_factory=ToolResultTruncateConfig
     )
+    images: ImagesConfig = Field(default_factory=ImagesConfig)
 
     @model_validator(mode="after")
     def _validate_config(self) -> "Config":

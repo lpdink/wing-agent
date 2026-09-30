@@ -362,3 +362,25 @@ class TestResetConfig:
                 assert config_module._config is None
         finally:
             os.unlink(temp_path)
+
+
+class TestDefaultConfigTemplate:
+    """手写模板与 Config 的 SYNC 守门（模板是事实来源，必须能被直接解析）。"""
+
+    def test_template_parses_into_valid_config(self):
+        from wing.default_config import DEFAULT_CONFIG_YAML
+
+        config = Config(**yaml.safe_load(DEFAULT_CONFIG_YAML))
+        # 新增字段在模板里落位（images 段 / 模型声明的两种形态示例）
+        assert config.images.max_bytes == 8_388_608
+        assert config.images.max_images == 32
+        assert config.providers[0].models == []
+        assert config.providers[0].model_names() == []
+
+    def test_template_keeps_image_option_documented(self):
+        """image_delivery / image_max_bytes / capabilities.vision 在模板注释里可见。"""
+        from wing.default_config import DEFAULT_CONFIG_YAML
+
+        assert "image_delivery" in DEFAULT_CONFIG_YAML
+        assert "image_max_bytes" in DEFAULT_CONFIG_YAML
+        assert "vision: true" in DEFAULT_CONFIG_YAML

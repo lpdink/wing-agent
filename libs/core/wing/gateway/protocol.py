@@ -556,12 +556,35 @@ class CommandsResponse(BaseModel):
     )
 
 
+class ModelCapabilities(BaseModel):
+    """模型能力声明（GET /api/models 透出；未声明 = 全 false）。"""
+
+    vision: bool = Field(default=False, description="是否接受图片输入")
+
+
+class ModelDetail(BaseModel):
+    """单条模型声明的详情（与同组 ``models`` 逐项同序对应）。"""
+
+    name: str = Field(description="实际调用名")
+    display_name: str | None = Field(
+        default=None, description="展示名（可空，前端回落 name）"
+    )
+    description: str | None = Field(default=None, description="模型描述")
+    capabilities: ModelCapabilities = Field(
+        default_factory=ModelCapabilities, description="能力声明"
+    )
+
+
 class ProviderModels(BaseModel):
     """单个 provider 的可用模型（嵌套模型列表条目）。"""
 
     provider: str = Field(description="Provider 名称")
     models: list[str] = Field(
         default_factory=list, description="该 provider 的模型名列表"
+    )
+    model_details: list[ModelDetail] = Field(
+        default_factory=list,
+        description="模型声明详情；与 models 逐项同序同名（追加属性，可为空）",
     )
 
 
