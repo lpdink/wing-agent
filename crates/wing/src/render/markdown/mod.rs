@@ -30,6 +30,7 @@ pub mod types;
 pub(crate) mod wrap;
 
 // Re-export the public API.
+pub use profile::PROSE_DEPTH_LIMIT;
 pub use profile::Profile;
 pub use types::MarkdownLine;
 pub use types::MarkdownSegment;
@@ -74,6 +75,9 @@ use crate::config::ThemePalette;
 pub struct RenderOpts {
     /// Which cell the text belongs to.
     pub profile: Profile,
+    /// Remaining nesting budget for indented-as-prose blocks — see
+    /// [`PROSE_DEPTH_LIMIT`]. Only the renderer decrements it.
+    pub prose_depth: u8,
     /// Trim trailing blank lines (doc-end semantics). The streaming
     /// renderer disables this when rendering a PROMOTED block: the
     /// presence of the renderer's own trailing blank line is exactly the
@@ -85,9 +89,18 @@ pub struct RenderOpts {
 
 impl Default for RenderOpts {
     fn default() -> Self {
+        Self::new(Profile::Content, true)
+    }
+}
+
+impl RenderOpts {
+    /// Options for `profile`, with doc-end trimming per `trim_trailing_blank`
+    /// and a fresh prose-nesting budget.
+    pub fn new(profile: Profile, trim_trailing_blank: bool) -> Self {
         Self {
-            profile: Profile::Content,
-            trim_trailing_blank: true,
+            profile,
+            prose_depth: PROSE_DEPTH_LIMIT,
+            trim_trailing_blank,
         }
     }
 }
@@ -423,35 +436,19 @@ mod tests {
 
     /// Render `md` under `profile`, flattening to (kind, text) pairs.
     fn profile_pairs(md: &str, profile: Profile) -> Vec<(SegmentKind, String)> {
-        render_markdown_lines_with(
-            md,
-            None,
-            &dp(),
-            RenderOpts {
-                profile,
-                trim_trailing_blank: true,
-            },
-        )
-        .into_iter()
-        .flat_map(|line| line.segments)
-        .map(|seg| (seg.kind, seg.text))
-        .collect()
+        render_markdown_lines_with(md, None, &dp(), RenderOpts::new(profile, true))
+            .into_iter()
+            .flat_map(|line| line.segments)
+            .map(|seg| (seg.kind, seg.text))
+            .collect()
     }
 
     fn joined_plain(md: &str, profile: Profile) -> String {
-        render_markdown_lines_with(
-            md,
-            None,
-            &dp(),
-            RenderOpts {
-                profile,
-                trim_trailing_blank: true,
-            },
-        )
-        .iter()
-        .map(|line| line.to_plain())
-        .collect::<Vec<_>>()
-        .join("\n")
+        render_markdown_lines_with(md, None, &dp(), RenderOpts::new(profile, true))
+            .iter()
+            .map(|line| line.to_plain())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
@@ -514,6 +511,39 @@ mod tests {
                 .iter()
                 .all(|(kind, _)| *kind != SegmentKind::CodeBlock)
         );
+    }
+
+    #[test]
+    fn profile_thinking_indented_prose_recursion_is_bounded() {
+        // Every nesting level re-parses the block, so the budget caps what a
+        // degenerate stream can cost: past it the block renders as a code
+        // block again (one parser per level would be O(depth × text) per
+        // frame while streaming, and a stack overflow the TUI cannot catch).
+        let depth = usize::from(PROSE_DEPTH_LIMIT) + 4;
+        let text = format!("before\n\n{}deep\n", "    ".repeat(depth));
+        let pairs = profile_pairs(&text, Profile::Thinking);
+        assert!(
+            pairs
+                .iter()
+                .any(|(kind, _)| *kind == SegmentKind::CodeBlock),
+            "expected the code-block fallback past the budget: {pairs:?}"
+        );
+
+        // Within the budget the same shape is prose — no code chrome at all.
+        let text = format!("before\n\n{}deep\n", "    ".repeat(2));
+        let pairs = profile_pairs(&text, Profile::Thinking);
+        assert!(
+            pairs.iter().all(|(kind, _)| !matches!(
+                kind,
+                SegmentKind::CodeBlock | SegmentKind::Border | SegmentKind::Gutter
+            )),
+            "within the budget the block is prose: {pairs:?}"
+        );
+
+        // Absurd depth stays cheap and does not recurse per level.
+        let text = format!("{}deep\n", "    ".repeat(2000));
+        let lines = profile_pairs(&text, Profile::Thinking);
+        assert!(!lines.is_empty());
     }
 
     #[test]

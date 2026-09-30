@@ -17,6 +17,18 @@
 //! code block looks the same in both profiles, only the surrounding prose is
 //! recolored by the cell compose (see [`super::thinking_segment_style`]).
 
+/// Nesting budget for indented-as-prose blocks (see
+/// [`Profile::indented_blocks_are_prose`]).
+///
+/// Each nesting level re-parses the block's text with the remaining budget
+/// minus one, so a degenerate stream (thousands of indent levels in one
+/// block) would otherwise cost O(depth × text) per frame while streaming and
+/// recurse one parser deep per level — a stack overflow the TUI cannot catch.
+/// Real reasoning nests a handful of levels at most; past the budget the
+/// block renders as a code block again, which is what it looks like at that
+/// indentation anyway.
+pub const PROSE_DEPTH_LIMIT: u8 = 8;
+
 /// Which cell a text slice belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Profile {

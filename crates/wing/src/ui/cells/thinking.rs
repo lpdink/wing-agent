@@ -85,10 +85,7 @@ impl ThinkingBlock {
             &self.content,
             md_width,
             palette,
-            RenderOpts {
-                profile: Profile::Thinking,
-                trim_trailing_blank: true,
-            },
+            RenderOpts::new(Profile::Thinking, true),
         );
         let mut composed = compose_lines(
             &md_lines,

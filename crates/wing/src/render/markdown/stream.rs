@@ -608,13 +608,17 @@ impl StreamingRender {
         self.stable_len = self.flat.len();
 
         // Transient: the provisional tail (a trailing blank run and/or the
-        // in-flight partial line — see `fill_code_cache`), rendered
-        // statelessly (the stateful highlighter cannot be cloned, and
-        // advancing it on a line that may still be retracted would corrupt
-        // the sequence), then the bottom border.
+        // in-flight partial line — see `fill_code_cache`), rendered through a
+        // highlighter owned by this sync (the committed one must not advance
+        // on lines that may still be retracted; one instance for the whole
+        // run also keeps multi-line constructs closer to their committed
+        // colors, and avoids re-scanning the syntax set per line), then the
+        // bottom border.
+        let mut pending_hl = cache.lang.as_deref().and_then(new_highlighter);
         for (i, line) in pending.iter().enumerate() {
             let number = cache.rendered.len() + i + 1;
-            let md = render_code_line_stateless(line, &cache, number, number_width, &theme);
+            let md =
+                render_code_line_stateless(line, number, number_width, &theme, pending_hl.as_mut());
             compose_into(
                 &mut self.flat,
                 &mut self.links,
@@ -1047,10 +1051,7 @@ pub fn full_lines_with_links(
     profile: Profile,
     palette: &ThemePalette,
 ) -> (Vec<Line<'static>>, Vec<Vec<LinkSpan>>) {
-    let opts = RenderOpts {
-        profile,
-        trim_trailing_blank: true,
-    };
+    let opts = RenderOpts::new(profile, true);
     let md = render_markdown_lines_with(text, Some(width.saturating_sub(2)), palette, opts);
     let thinking_style = Style::default().fg(palette.thinking);
     let bullet_style = Style::default().fg(palette.text);
@@ -1091,11 +1092,12 @@ fn render_generic(
     profile: Profile,
     palette: &ThemePalette,
 ) -> Vec<MarkdownLine> {
-    let opts = RenderOpts {
-        profile,
-        trim_trailing_blank: true,
-    };
-    render_markdown_lines_with(slice, Some(width.saturating_sub(2)), palette, opts)
+    render_markdown_lines_with(
+        slice,
+        Some(width.saturating_sub(2)),
+        palette,
+        RenderOpts::new(profile, true),
+    )
 }
 
 /// Render a PROMOTED block with `trim_trailing_blank: false`: the
@@ -1109,11 +1111,12 @@ fn render_block(
     profile: Profile,
     palette: &ThemePalette,
 ) -> Vec<MarkdownLine> {
-    let opts = RenderOpts {
-        profile,
-        trim_trailing_blank: false,
-    };
-    render_markdown_lines_with(slice, Some(width.saturating_sub(2)), palette, opts)
+    render_markdown_lines_with(
+        slice,
+        Some(width.saturating_sub(2)),
+        palette,
+        RenderOpts::new(profile, false),
+    )
 }
 
 /// Fenced-code borders (top carries the language label, bottom is fixed).
@@ -1336,10 +1339,16 @@ fn trim_trailing_code_endings(body: &str) -> &str {
     &body[..end]
 }
 
-/// Whether a body line is blank for the reference renderer: nothing but the
-/// `\r` of a CRLF ending that pulldown normalizes away.
+/// Whether a body line is blank for the reference renderer: empty, or
+/// nothing but the single `\r` of a CRLF ending that pulldown normalizes
+/// away.
+///
+/// Exactly one, not "any run of them": pulldown strips only the `\r` that
+/// sits right before the `\n` (`append_code_text` appends the preceding
+/// `\r`s as content), so `"\r\r\n"` is a body line `"\r"` in the
+/// reference and must not be treated as a droppable blank line.
 fn code_line_is_blank(line: &str) -> bool {
-    line.bytes().all(|b| b == b'\r')
+    line.is_empty() || line == "\r"
 }
 
 /// Byte offset in the BODY just past the last line that can never move
@@ -1413,14 +1422,15 @@ fn render_code_line_stateful(
     md
 }
 
-/// Render one PARTIAL (incomplete) body line without touching the
-/// highlighter state.
+/// Render one PROVISIONAL body line with a caller-owned highlighter (see
+/// `sync_fenced_tail`): the committed highlighter's state must not advance on
+/// a line that can still be retracted, so the provisional run gets its own.
 fn render_code_line_stateless(
     line: &str,
-    cache: &CodeCache,
     number: usize,
     number_width: usize,
     theme: &MarkdownTheme,
+    highlighter: Option<&mut HighlightLines<'static>>,
 ) -> MarkdownLine {
     let mut md = MarkdownLine::default();
     if number_width > 0 {
@@ -1431,11 +1441,8 @@ fn render_code_line_stateless(
         );
     }
     md.push_segment(SegmentKind::Border, theme.border, "│ ");
-    // Stateless approximation: fresh highlight context for the in-flight
-    // line. Transient only (see doc comment above).
-    if cache.highlighter.is_some()
-        && let Some(mut hl) = cache.lang.as_deref().and_then(new_highlighter)
-        && let Some(ops) = highlight_line_with(&mut hl, line)
+    if let Some(hl) = highlighter
+        && let Some(ops) = highlight_line_with(hl, line)
     {
         for (style, text) in ops {
             md.push_segment(SegmentKind::CodeBlock, style, &text);
@@ -1792,6 +1799,10 @@ mod tests {
             ("let x = 1;\r\n\r\nlet y\r\n", 3, &[]),
             ("let x = 1;\r\nlet y = 2;\r", 1, &["let y = 2;\r"]),
             ("let x = 1;\r\n\r\n`", 1, &["", "`"]),
+            // A run of bare `\r`s is content: pulldown normalizes only the
+            // `\r` adjacent to the `\n`, so this is one body line `"\r"`.
+            ("\r\r\n", 1, &[]),
+            ("let x = 1;\r\r\n", 1, &[]),
             // The trailing blank run is provisional: it is not final until a
             // non-empty line follows, because the reference renderer trims
             // it the moment the closing fence arrives (the mid-line "```"

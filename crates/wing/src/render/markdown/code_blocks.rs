@@ -95,7 +95,10 @@ fn finalize_code_block(
         env.base_style,
     );
     if let Some(state) = code_block.take() {
-        let rendered = if state.prose {
+        // The prose branch re-parses the block per nesting level, so it runs
+        // on a budget (`PROSE_DEPTH_LIMIT`): past it the block renders as a
+        // code block again instead of recursing deeper.
+        let rendered = if state.prose && env.opts.prose_depth > 0 {
             render_prose_block(&state.buffer, env)
         } else {
             render_code_block(&state, env)
@@ -119,6 +122,7 @@ fn render_prose_block(text: &str, env: &mut CodeBlockRenderEnv<'_>) -> Vec<Markd
         env.theme,
         env.width,
         RenderOpts {
+            prose_depth: env.opts.prose_depth - 1,
             trim_trailing_blank: false,
             ..env.opts
         },

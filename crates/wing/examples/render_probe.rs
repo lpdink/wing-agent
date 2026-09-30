@@ -183,10 +183,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if kinds {
         // IR view: the markdown layer without the cell compose (prefix / hard
         // wrap), so kinds stay attached to the lines that produced them.
-        let opts = RenderOpts {
-            profile,
-            trim_trailing_blank: true,
-        };
+        let opts = RenderOpts::new(profile, true);
         let md = render_markdown_lines_with(&text, Some(width.saturating_sub(2)), &palette, opts);
         print_ir(&mut out, &md, range, plain)?;
         return Ok(());
