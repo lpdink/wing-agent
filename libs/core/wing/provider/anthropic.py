@@ -733,7 +733,12 @@ class AnthropicProvider(ModelProvider):
             call = state.pending_tools.get(idx)
             if call is None:
                 return None
-            call.args_buffer += delta.get("partial_json", "")
+            partial_json = delta.get("partial_json", "")
+            # tool 参数增量同样是解码产出：纯 tool call 响应（无 text /
+            # thinking）不打点则 decode TPS 恒为 0。
+            if state.first_token_ts is None and partial_json:
+                state.first_token_ts = time.monotonic()
+            call.args_buffer += partial_json
             fragment = call.args_buffer[call.emitted_len :]
             if not fragment or not call.id:
                 return None
