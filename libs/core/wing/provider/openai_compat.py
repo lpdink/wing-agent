@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import TYPE_CHECKING, AsyncIterator, cast
 
 import httpx
 
@@ -18,6 +18,13 @@ from wing.provider.base import (
     PendingToolView,
     StreamAccumulator,
     parse_tool_args,
+)
+from wing.provider.media import (
+    FOLLOWUP_GUIDE_TEXT,
+    group_plans_by_message,
+    message_slots,
+    plan_for_request,
+    resolve_image_delivery,
 )
 from wing.provider.transport import (
     STREAM_IDLE_TIMEOUT,
@@ -31,6 +38,7 @@ from wing.schema import (
     ContentBlock,
     LLMResponse,
     LLMUsage,
+    MediaRef,
     Message,
     PendingCall,
     TextBlock,
@@ -251,7 +259,7 @@ class OpenAICompatProvider(ModelProvider):
         tools: list[Tool] | None,
         stream: bool,
     ) -> dict:
-        openai_messages = [m.to_openai() for m in messages]
+        openai_messages = self._serialize_messages(messages, model)
         if self.explicit_cache_mode:
             self._apply_cache_control(openai_messages)
 
@@ -279,6 +287,83 @@ class OpenAICompatProvider(ModelProvider):
             body["prompt_cache_key"] = self._session_id
 
         return body
+
+    def _serialize_messages(self, messages: list[Message], model: str) -> list[dict]:
+        """序列化请求消息（含请求期媒体投影：能力降级 / 高水位驱逐 / 线格式）。
+
+        无媒体的消息走 ``to_openai()`` 快路径——与引入媒体前的请求体逐字节
+        一致，且不触碰全局配置。有媒体时按 ``image_delivery`` 发射：
+
+        - ``inline``：图片留在原消息的 content 数组里（``image_url`` data URL）；
+        - ``followup``（openai 协议默认）：**连续 tool 消息段**内的保留图片
+          汇总成一条 user 消息，插在该段之后（即下一个非 tool 消息之前）；
+          多 tool call 多图只出一条、顺序 == tool 消息顺序 × 消息内顺序。
+
+        被丢弃 / 字节缺失的图片位：不改原文本块，只在其后追加一个占位文本
+        part（保留消息的字节在驱逐前后完全一致 → 前缀 cache 最大复用）。
+        """
+        if not any(m.media for m in messages):
+            return [m.to_openai() for m in messages]
+
+        delivery = resolve_image_delivery(self._config)
+        plans = group_plans_by_message(
+            plan_for_request(messages, provider_cfg=self._config, model=model)
+        )
+        cache: dict[str, str | None] = {}
+        out: list[dict] = []
+        pending: list[dict] = []  # followup：待汇总到段后 user 消息的 image_url parts
+
+        def flush_pending() -> None:
+            """把当前连续 tool 段积累的图片落到一条 user 消息（段后位置）。"""
+            if not pending:
+                return
+            out.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": FOLLOWUP_GUIDE_TEXT},
+                        *pending,
+                    ],
+                }
+            )
+            pending.clear()
+
+        for i, msg in enumerate(messages):
+            if delivery == "followup" and msg.role != "tool":
+                # 连续 tool 段结束——图片挂段后（即当前消息之前）。
+                flush_pending()
+
+            slots = message_slots(msg, plans.get(i, []), media=self._media, cache=cache)
+            base = msg.to_openai()
+            move_kept = delivery == "followup" and msg.role == "tool"
+            extra: list[dict] = []
+            for slot in slots:
+                if slot.b64 is None:
+                    extra.append({"type": "text", "text": slot.placeholder})
+                elif move_kept:
+                    pending.append(self._image_part(slot.ref, slot.b64))
+                else:
+                    extra.append(self._image_part(slot.ref, slot.b64))
+            if extra:
+                # content 数组化：原文本保持为独立 part（一个字节都不改），
+                # 追加物随后——空原文不发射空 text part。
+                base["content"] = (
+                    [{"type": "text", "text": base["content"]}]
+                    if base["content"]
+                    else []
+                ) + extra
+            out.append(base)
+
+        flush_pending()
+        return out
+
+    @staticmethod
+    def _image_part(ref: MediaRef, b64: str) -> dict:
+        """图片位 → OpenAI content part（data URL，base64 内联）。"""
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:{ref.mime};base64,{b64}"},
+        }
 
     # ─── Non-streaming ────────────────────────────────────────────
 
@@ -543,7 +628,13 @@ class OpenAICompatProvider(ModelProvider):
 
     @staticmethod
     def _apply_cache_control(openai_messages: list[dict]) -> None:
-        """为最后一条消息的最后一个 content block 追加 cache_control 标记。"""
+        """为最后一条消息的最后一个 content block 追加 cache_control 标记。
+
+        最后一个 part 是图片（``image_url``）时回退到其前面最后一个非图片
+        part（即 text part）——cache_control 是 OpenAI 兼容网关的非标准扩展
+        字段，不落在图片上；整条消息没有任何非图片 part（纯图消息）时跳过
+        本次标记（实际路径不可达：inline/followup 的图片消息恒带文本 part）。
+        """
         if not openai_messages:
             return
         last_msg = openai_messages[-1]
@@ -559,4 +650,8 @@ class OpenAICompatProvider(ModelProvider):
                 }
             ]
         elif isinstance(content, list):
-            last_msg["content"][-1]["cache_control"] = {"type": "ephemeral"}
+            for part in cast("list[dict]", content):
+                if part.get("type") == "image_url":
+                    continue
+                part["cache_control"] = {"type": "ephemeral"}
+                return
