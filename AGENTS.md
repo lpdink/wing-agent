@@ -150,14 +150,16 @@ crates/wing/src/
 │   ├── runner.rs                    执行 AppIntent（HTTP/WS 副作用）
 │   ├── intent.rs / transport.rs     AppIntent 枚举 + 传输抽象（WS+HTTP+client_id 原子单元，含重连退避）
 │   ├── goal.rs                      Goal 编排状态机（executor/checker 循环，纯逻辑无 I/O）
+│   ├── images.rs                   图片 lane：能力/配置门 · ImageStore 持有 · 元数据表 · 帧末绘制（遮挡与选择门）· 新鲜度检查（1s 节流 · 可注入时钟）
 │   ├── replay.rs                    SyncSession 重放 → ChatCells（messages → events 能力分发）
 │   ├── turn_state.rs / render_context.rs   轮次耗时 / 流式目标 cell 跟踪
 │   └── popup_state.rs               Popup + 候选缓存 + 去重
 ├── ui/                              UI 组件
-│   ├── chat_view/                   Chat 视图：mod（ChatView 结构）· cell（ChatCell 渲染）· model（内容模型）· viewport（滚动·几何·高度缓存·绘制）· frame（帧快照·选择映射）· link（链接表·OSC8）
+│   ├── chat_view/                   Chat 视图：mod（ChatView 结构）· cell（ChatCell 渲染）· model（内容模型）· viewport（滚动·几何·高度缓存·绘制）· frame（帧快照·选择映射）· link（链接表·OSC8）· image（图片放置表与候选路径）
 │   ├── selection.rs                 文本选择状态机（区域标签 / 内容坐标锚定 / 区间有序化 / 快照取文本，纯逻辑）
 │   ├── scrollbar.rs                 overlay 滚动条（几何 / 命中测试 / 拖拽状态机 / 绘制）
-│   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存
+│   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存 + CellFrame 投影（链接 / 图片锚点侧信道）
+│   ├── image/                       终端图形（唯一 door to ratatui-image/image）：probe（能力探测·可注入）· store（worker+LRU+epoch + 上限：文件/像素/缓存张数与字节/memo）· place（paint 原语）
 │   ├── panel.rs                     选择面板共享渲染（窗口数学取自 shared/panels 内核）
 │   ├── welcome/                     开屏欢迎屏：mod（状态·宽度阶梯·扫光时钟）· art（像素 W + 半格渐变）
 │   ├── status_bar.rs / spinner.rs / toast.rs
@@ -165,7 +167,7 @@ crates/wing/src/
 │   ├── popup/                       command（斜杠命令 + 候选项）/ selection（通用可选列表）
 │   └── cells/                       Chat cell 渲染（tool_call / thinking / todo_msg / ask_msg / diff_view / model_picker）
 ├── render/                          Markdown + 语法高亮
-│   ├── markdown/                    types / parsing / code_blocks / tables / links / wrap（CJK UAX#14）
+│   ├── markdown/                    types / parsing / code_blocks / tables / links / wrap（CJK UAX#14）/ images（图片锚点）/ math（公式渲染）
 │   │   └── stream.rs                StreamingRender — 增量渲染（稳定前缀 + 活动尾部；Thinking 跳过 fence 归一化）
 │   ├── syntax.rs                    syntect 高亮（two-face 主题）
 │   ├── diff_highlight.rs            diff 双修订版高亮（old/new 两路状态机：删除行→old，其余→new，context 行两路都要推进）
@@ -175,7 +177,7 @@ crates/wing/src/
 └── util/                            clipboard / open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）
 ```
 
-配套：`crates/wing/benches/stream_render.rs`（流式渲染基准）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期、layer_guard 分层守门）、`crates/wing/examples/`（reconnect_flow_verify；welcome_preview 开屏预览）。
+配套：`crates/wing/benches/stream_render.rs`（流式渲染基准）、`crates/wing/benches/image_frame.rs`（图片：每帧/滚动/首次编码/新鲜度检查）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期、layer_guard 分层守门）、`crates/wing/examples/`（reconnect_flow_verify；welcome_preview 开屏预览）。
 
 ### 其他
 
@@ -203,6 +205,8 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/http-api.md`](docs/dev/http-api.md) | 完整 HTTP 端点表 + WebSocket 协议 + 鉴权 |
 | [`docs/dev/glossary.md`](docs/dev/glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |
 | [`docs/dev/config-logging.md`](docs/dev/config-logging.md) | WING_HOME 布局、config.yaml 键、日志轮转与查询 |
+| [`docs/dev/tui-rendering.md`](docs/dev/tui-rendering.md) | TUI markdown 渲染：`render_probe` 调试入口、Content/Thinking 两个 profile 的差异、公式（`$…$` / `$$…$$` / AMS 环境）渲染与定界符归一化、流式静息态 == 参考渲染的不变量、已知边界、图片锚点的行数纯函数与路径策略 |
+| [`docs/dev/tui-images.md`](docs/dev/tui-images.md) | TUI 图片能力：两档阶梯（可渲染 / 存量链接）、探测与配置、三态、资源上限与压力验证、**新鲜度**（重写同一路径 ≤1s 换图）、失效触发点、遮挡与选择、性能数字、真机验收清单、症状→先看哪里 |
 | [`docs/dev/vscode-extension.md`](docs/dev/vscode-extension.md) | VSCode 扩展（`extensions/vscode/`）：四层分层与数据流、桥协议与归约（重放==直播 / 单 WS 多订阅）、会话时序与多 Tab、连接自愈、构建门禁 / smoke / 打包与验收 |
 | [`docs/dev/probe-testing.md`](docs/dev/probe-testing.md) | 确定性集成测试（wing-probe）：跑法 / 新增断言场景（写代码、不写配置）/ 断言原语速查 / 上下文红线清单与 persist 口径 / 逃生舱约定 |
 

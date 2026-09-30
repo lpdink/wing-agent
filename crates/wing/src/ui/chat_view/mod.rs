@@ -37,6 +37,7 @@
 
 mod cell;
 mod frame;
+mod image;
 mod link;
 mod model;
 mod viewport;
@@ -46,6 +47,7 @@ mod test_support;
 
 pub use cell::ChatCell;
 pub use cell::PendingMessage;
+pub use image::FrameImage;
 pub use link::FrameLink;
 pub use viewport::ChatGeometry;
 pub use viewport::ChatViewWidget;
@@ -109,6 +111,11 @@ pub struct ChatView {
     /// the hit test has to answer from the frame the user was looking at —
     /// same "WYSIWYG" contract as the selection's row snapshot.
     frame_links: LinkTable,
+    /// Pictures of the last rendered frame, in anchor order — the app's paint
+    /// pass resolves and draws them (see [`FrameImage`]). Rebuilt from scratch
+    /// on every render, like [`ChatView::frame_links`]: a picture the frame did
+    /// not lay out must not be painted.
+    frame_images: Vec<FrameImage>,
     /// Graphemes of the visible chat rows as of the last *drag* frame — the
     /// copy-on-select source (see [`FrameSnapshot`]).
     ///
@@ -134,6 +141,7 @@ impl ChatView {
             rebuilds: 0,
             geometry: ChatGeometry::default(),
             frame_links: LinkTable::new(),
+            frame_images: Vec::new(),
             snapshot: FrameSnapshot::default(),
         }
     }

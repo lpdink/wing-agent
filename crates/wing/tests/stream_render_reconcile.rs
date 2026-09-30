@@ -6,6 +6,11 @@
 //! (reasoning and assistant content differ in the parse rules `Profile`
 //! owns, not in the reference they reconcile against).
 //!
+//! The same holds with image anchors enabled: the incremental engine's
+//! resting state must agree with the reference render on the **anchors** too
+//! (`line`/`column`/`cols`/`rows`, i.e. the geometry the drawing layer
+//! consumes), not just on the text and the link spans.
+//!
 //! Scope of the assertion: the **last frame before `finalize()`**, i.e.
 //! the state the incremental engine leaves after every chunk has been
 //! pushed and synced. Transient mid-stream deviations are allowed by
@@ -27,8 +32,11 @@ use common::{chunk_stream, random_chunks};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use wing::config::ThemePalette;
+use wing::render::markdown::ImageEntry;
+use wing::render::markdown::ImageOpts;
+use wing::render::markdown::ImageShape;
 use wing::render::markdown::Profile;
-use wing::render::markdown::stream::{StreamingRender, full_lines};
+use wing::render::markdown::stream::{StreamingRender, full_lines, full_render};
 
 // ============================================================
 // Corpus shapes — handcrafted markdown forms the splitter must survive
@@ -140,6 +148,13 @@ fn shapes() -> Vec<(&'static str, String)> {
         (
             "indented_fence_in_list",
             "- item one\n  ```rust\n  let x = 1;\n  ```\n\nafter\n".into(),
+        ),
+        // Image anchors: the `Off` matrix renders these through the link
+        // path (an image is a link there — the pre-anchor behaviour), while
+        // `reconcile_matrix_images` runs the same corpus with `Anchor` mode.
+        (
+            "images_link_path",
+            "A paragraph with an image inline ![inline](./plots/a.png) and text after.\n\n![standalone](./plots/a.png)\n\n| chart | note |\n|---|---|\n| ![cell](./plots/a.png) | x |\n\n- ![listed](./plots/a.png)\n\n> ![quoted](./plots/a.png)\n".into(),
         ),
         // Indented blocks: code for content, prose for reasoning (see
         // `Profile`) — the nested re-parse must agree with the reference in
@@ -373,21 +388,57 @@ fn describe(pairs: &[(String, Style)]) -> String {
 }
 
 fn reconcile(name: &str, corpus: &str, chunks: &[&str], width: u16, profile: Profile, extra: &str) {
+    reconcile_with(
+        name,
+        corpus,
+        chunks,
+        width,
+        profile,
+        ImageOpts::default(),
+        extra,
+    );
+}
+
+/// [`reconcile`] with image anchors configured: text, link spans **and**
+/// anchor geometry must all match the reference render.
+fn reconcile_with(
+    name: &str,
+    corpus: &str,
+    chunks: &[&str],
+    width: u16,
+    profile: Profile,
+    images: ImageOpts,
+    extra: &str,
+) {
     let palette = ThemePalette::default();
-    let mut sr = StreamingRender::new(profile);
+    let mut sr = StreamingRender::with_images(profile, images.clone());
     for chunk in chunks {
         sr.push(chunk);
         // Sync every chunk — exactly what the UI does per frame.
         let _ = sr.lines(width, &palette);
     }
-    let streaming: Vec<Line<'static>> = sr.lines(width, &palette).to_vec();
-    let reference = full_lines(corpus, width, profile, &palette);
+    let rendered = sr.composed(width, &palette);
+    let streaming: Vec<Line<'static>> = rendered.lines.to_vec();
+    let streaming_links = rendered.links.to_vec();
+    let streaming_images = rendered.images.to_vec();
+    let reference = full_render(corpus, width, profile, &palette, &images);
+    let (reference_lines, reference_links, reference_images) = reference.into_parts();
     pretty_assertions::assert_eq!(
         span_pairs(&streaming),
-        span_pairs(&reference),
+        span_pairs(&reference_lines),
         "profile={profile:?} shape={name} width={width} {extra}\nstreaming:\n{}\nfull:\n{}",
         describe(&span_pairs(&streaming)),
-        describe(&span_pairs(&reference)),
+        describe(&span_pairs(&reference_lines)),
+    );
+    pretty_assertions::assert_eq!(
+        streaming_links,
+        reference_links,
+        "links profile={profile:?} shape={name} width={width} {extra}"
+    );
+    pretty_assertions::assert_eq!(
+        streaming_images,
+        reference_images,
+        "anchors profile={profile:?} shape={name} width={width} {extra}"
     );
 }
 
@@ -466,6 +517,200 @@ fn reconcile_math_shapes_every_chunk_size() {
             }
         }
     }
+}
+
+// ============================================================
+// Image anchors
+// ============================================================
+
+/// Corpus shapes with anchors actually produced (standalone images with
+/// metadata), plus the shapes that must keep the link path under the same
+/// options.
+fn image_shapes() -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "image_standalone",
+            "before the image\n\n![销售趋势](./plots/a.png)\n\nafter the image\n".into(),
+        ),
+        (
+            "image_two_anchors",
+            "![one](./plots/a.png)\n\na paragraph\n\n![two](./plots/b.png)\n".into(),
+        ),
+        (
+            "image_wide_and_tall",
+            "![wide](./plots/wide.png)\n\n![tall](./plots/tall.png)\n".into(),
+        ),
+        (
+            "image_between_blocks",
+            "para\n\n![a](./plots/a.png)\n\n```rust\nlet x = 1;\n```\n\n![b](./plots/a.png)\n\nafter\n".into(),
+        ),
+        (
+            "image_in_the_middle_of_a_paragraph",
+            "text ![inline](./plots/a.png) tail\n\n![standalone](./plots/a.png)\n".into(),
+        ),
+        (
+            "image_in_fence_and_list",
+            "```markdown\n![in fence](./plots/a.png)\n```\n\n- ![listed](./plots/a.png)\n\n> ![quoted](./plots/a.png)\n".into(),
+        ),
+        (
+            "image_unknown_path",
+            "![missing](./plots/missing.png)\n\n![known](./plots/a.png)\n".into(),
+        ),
+        (
+            "image_trailing",
+            "intro\n\n![last](./plots/a.png)".into(),
+        ),
+        (
+            "image_at_the_top",
+            "![first](./plots/a.png)\n\ntext after\n".into(),
+        ),
+        (
+            "image_then_heading",
+            "![a](./plots/a.png)\n\n# Heading\n\nbody\n".into(),
+        ),
+    ]
+}
+
+/// The metadata table the image matrix renders with: `/ws` is the workspace,
+/// `plots/a.png` is a 4:3 image (30 rows at width 80) and the extremes cover
+/// the cap and the floor.
+fn image_opts() -> ImageOpts {
+    let root = std::path::PathBuf::from("/ws");
+    ImageOpts::anchor(
+        Some(root.clone()),
+        vec![
+            ImageEntry::new(root.join("plots/a.png"), ImageShape::new(800, 600)),
+            ImageEntry::new(root.join("plots/b.png"), ImageShape::new(1600, 900)),
+            ImageEntry::new(root.join("plots/wide.png"), ImageShape::new(2000, 100)),
+            ImageEntry::new(root.join("plots/tall.png"), ImageShape::new(300, 4000)),
+        ],
+    )
+}
+
+/// Narrow widths (1..=6 columns).
+///
+/// The main matrix starts at 40 columns, which is where a chat cell normally
+/// lives — but nothing in the layout enforces a minimum width (a tmux pane can
+/// be one column wide), and the hard wrap is at its most aggressive there: a
+/// 2-column cell prefix alone fills a 1-column row, so *ordinary* rows end up
+/// looking exactly like an anchor's blank cover rows. That is what broke the
+/// blank-line dedup at width 1 (the streaming resting state grew a blank line
+/// the reference render does not have), so the narrow band is asserted
+/// explicitly, for every shape and with anchors on and off.
+#[test]
+fn reconcile_matrix_narrow_widths() {
+    const NARROW: &[u16] = &[1, 2, 3, 4, 5, 6];
+    let images = image_opts();
+    // Not vacuous on either side of the band: width 1 cannot hold an anchor
+    // (the markdown width is the cell width minus the 2-column prefix), while
+    // the top of the band still produces them.
+    assert!(
+        !full_render(
+            "![a](./plots/a.png)",
+            1,
+            Profile::Content,
+            &ThemePalette::default(),
+            &images
+        )
+        .has_images(),
+        "width 1 must not produce anchors"
+    );
+    assert!(
+        full_render(
+            "![a](./plots/a.png)",
+            6,
+            Profile::Content,
+            &ThemePalette::default(),
+            &images
+        )
+        .has_images(),
+        "the narrow band must still exercise anchors"
+    );
+    for (name, corpus) in shapes().into_iter().chain(image_shapes()) {
+        for &profile in PROFILES {
+            for &width in NARROW {
+                for &chunk in &[1usize, 16] {
+                    let chunks = chunk_stream(&corpus, chunk);
+                    let extra = format!("narrow chunk={chunk}B width={width}");
+                    reconcile(name, &corpus, &chunks, width, profile, &extra);
+                    reconcile_with(
+                        name,
+                        &corpus,
+                        &chunks,
+                        width,
+                        profile,
+                        images.clone(),
+                        &format!("{extra} images=anchor"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// With anchors enabled, the incremental engine must converge to the
+/// reference render including the anchor geometry — every chunk size, width
+/// and profile.
+#[test]
+fn reconcile_matrix_images() {
+    let images = image_opts();
+    for (name, corpus) in image_shapes() {
+        for &profile in PROFILES {
+            for &chunk in CHUNK_SIZES {
+                for &width in WIDTHS {
+                    let chunks = chunk_stream(&corpus, chunk);
+                    reconcile_with(
+                        name,
+                        &corpus,
+                        &chunks,
+                        width,
+                        profile,
+                        images.clone(),
+                        &format!("chunk={chunk}B images=anchor"),
+                    );
+                }
+            }
+            for &seed in &[1u64, 2, 3] {
+                for &width in WIDTHS {
+                    let chunks = random_chunks(&corpus, seed, 97);
+                    reconcile_with(
+                        name,
+                        &corpus,
+                        &chunks,
+                        width,
+                        profile,
+                        images.clone(),
+                        &format!("random-seed={seed} images=anchor"),
+                    );
+                }
+            }
+        }
+    }
+    // The image shapes must also hold on the link path (the same corpus with
+    // images off), and they must actually produce anchors in the anchoring
+    // runs — otherwise the matrix above is vacuous.
+    for (name, corpus) in image_shapes() {
+        let chunks = chunk_stream(&corpus, 16);
+        reconcile(name, &corpus, &chunks, 80, Profile::Content, "images=off");
+    }
+    let anchored: usize = full_render(
+        &image_shapes()
+            .iter()
+            .map(|(_, corpus)| corpus.clone())
+            .collect::<String>(),
+        80,
+        Profile::Content,
+        &ThemePalette::default(),
+        &image_opts(),
+    )
+    .images()
+    .iter()
+    .flatten()
+    .count();
+    assert!(
+        anchored >= 8,
+        "the image corpus must produce anchors, got {anchored}"
+    );
 }
 
 /// Reconcile the full generated corpora (streamed at coarser chunks to

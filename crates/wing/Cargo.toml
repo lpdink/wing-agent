@@ -58,3 +58,7 @@ harness = false
 name = "tool_args_stream"
 harness = false
 
+[[bench]]
+name = "image_frame"
+harness = false
+

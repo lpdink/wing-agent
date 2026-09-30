@@ -34,9 +34,14 @@ struct FlatSeg {
 
 /// Whether a line is prose that should be width-wrapped.
 ///
-/// Code blocks (`CodeBlock`/`Gutter`) and decorative chrome (`Border`) are laid
-/// out by their own renderers and must not be re-wrapped; everything else
-/// (`Text`/`Heading`/`InlineCode`/`Link`/`Marker`) is prose.
+/// Whether a line is prose that should be width-wrapped.
+///
+/// Code blocks (`CodeBlock`/`Gutter`), decorative chrome (`Border`) and image
+/// anchors (`Image`) are laid out by their own renderers and must not be
+/// re-wrapped; everything else (`Text`/`Heading`/`InlineCode`/`Link`/`Marker`)
+/// is prose. Wrapping an anchor's caption would invalidate the box geometry
+/// the side channel carries, so an `Image` line never reaches `wrap_prose_line`
+/// (the caption is already truncated to the render width when it is built).
 ///
 /// Math is prose *unless the line is a math block line* — a pure grid row,
 /// which the engine already fitted to the width and whose `∑`/`√` layouts a
@@ -53,7 +58,10 @@ pub(crate) fn is_prose_line(line: &MarkdownLine) -> bool {
     let mut has_content = false;
     for segment in &line.segments {
         match segment.kind {
-            SegmentKind::CodeBlock | SegmentKind::Gutter | SegmentKind::Border => return false,
+            SegmentKind::CodeBlock
+            | SegmentKind::Gutter
+            | SegmentKind::Border
+            | SegmentKind::Image => return false,
             SegmentKind::Math => has_math = true,
             _ if !segment.is_whitespace() => has_content = true,
             _ => {}

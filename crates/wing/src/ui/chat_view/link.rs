@@ -117,9 +117,9 @@ impl ChatView {
 /// Cloned only when the cell actually has something to place (and its rows are
 /// exact), so a frame full of cells without links allocates nothing — the
 /// returned vector is `Vec::new()` (capacity 0) in that case.
-pub(super) fn links_for_frame(cell: &crate::ui::cached_cell::CellLines<'_>) -> Vec<Vec<LinkSpan>> {
-    if cell.rows_exact && cell.has_links() {
-        cell.links.to_vec()
+pub(super) fn links_for_frame(rows_exact: bool, links: &[Vec<LinkSpan>]) -> Vec<Vec<LinkSpan>> {
+    if rows_exact && links.iter().any(|line| !line.is_empty()) {
+        links.to_vec()
     } else {
         Vec::new()
     }
@@ -650,15 +650,8 @@ mod tests {
 
     #[test]
     fn links_for_frame_allocates_nothing_without_links() {
-        let cell = ComposedLines::plain(vec![Line::from("plain")]);
         let links: Vec<Vec<LinkSpan>> = Vec::new();
-        let cell_lines = crate::ui::cached_cell::CellLines {
-            lines: cell.lines(),
-            links: &links,
-            rows_exact: true,
-        };
-        assert!(!cell_lines.has_links());
-        let table = links_for_frame(&cell_lines);
+        let table = links_for_frame(true, &links);
         assert!(table.is_empty() && table.capacity() == 0, "no allocation");
 
         // A row whose lines are not exact is skipped even when it has links.
@@ -670,13 +663,11 @@ mod tests {
                 target: "https://example.com".into(),
             }]],
         );
-        let cell_lines = crate::ui::cached_cell::CellLines {
-            lines: with_link.lines(),
-            links: with_link.links(),
-            rows_exact: false,
-        };
-        assert!(cell_lines.has_links());
-        assert!(links_for_frame(&cell_lines).is_empty(), "inexact rows");
+        assert!(!links_for_frame(true, with_link.links()).is_empty());
+        assert!(
+            links_for_frame(false, with_link.links()).is_empty(),
+            "inexact rows"
+        );
     }
 
     #[test]
