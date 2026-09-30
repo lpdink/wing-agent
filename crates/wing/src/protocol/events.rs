@@ -186,6 +186,30 @@ fn default_role() -> String {
     "user".into()
 }
 
+/// 一条媒体引用（`tool_call_result` 追加的 `tool_media` 项）——镜像
+/// Python `wing.schema.MediaRef` 的投影。
+///
+/// 放在 `protocol/events.rs` 而非 `protocol/history.rs`：唯一消费点是 WS
+/// 事件镜像；`SessionMessage`（history 投影）本期保持原样，改动面收敛在
+/// 单文件内。
+///
+/// 容忍策略：整个 `tool_media` 键在旧网关上缺席；`name` 还可能缺键或为
+/// null（wire 序列化会剥掉 null 字段）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMediaRef {
+    /// 图片字节的 sha256 hex——即存储 id。
+    pub id: String,
+    /// `image/png` | `image/jpeg` | `image/webp` | `image/gif`。
+    pub mime: String,
+    /// 原始字节数。
+    pub bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    /// 展示名（basename，不含目录）；旧载荷上缺席。
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 // ============================================================
 // WingEvent — the main event enum
 // ============================================================
@@ -295,6 +319,10 @@ pub enum WingEvent {
         tool_success: bool,
         #[serde(default)]
         model: String,
+        /// 工具产生的媒体引用（如 ReadImage 的图片）——追加属性。
+        /// 旧网关不返回该键：缺省为空表，渲染路径完全不感知。
+        #[serde(default)]
+        tool_media: Vec<SessionMediaRef>,
         #[serde(flatten)]
         meta: EventMeta,
     },
@@ -1116,6 +1144,102 @@ mod tests {
                 assert!(!is_final);
             }
             _ => panic!("expected ToolCallStream"),
+        }
+    }
+
+    // ── tool_call_result 追加字段 tool_media（读图） ─────────────
+
+    #[test]
+    fn deserialize_tool_call_result_with_media() {
+        let json = r#"{
+            "type": "tool_call_result",
+            "tool_name": "ReadImage",
+            "tool_args": {"path": "/tmp/shot.png"},
+            "tool_call_id": "tc_img_1",
+            "tool_result": "[image: /tmp/shot.png | png 2880x1800 | 2.4 MB | id 9f3c1a2b | mtime 1789000000]",
+            "tool_success": true,
+            "tool_media": [
+                {"id": "9f3c1a2bde44", "mime": "image/png", "bytes": 123456,
+                 "width": 2880, "height": 1800, "name": "shot.png"}
+            ],
+            "created_at": "2025-01-01T00:00:00",
+            "session_id": "abc123",
+            "request_id": "req20"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event_type(), "tool_call_result");
+        match event {
+            WingEvent::ToolCallResult {
+                tool_name,
+                tool_media,
+                ..
+            } => {
+                assert_eq!(tool_name, "ReadImage");
+                assert_eq!(tool_media.len(), 1);
+                let media = &tool_media[0];
+                assert_eq!(media.id, "9f3c1a2bde44");
+                assert_eq!(media.mime, "image/png");
+                assert_eq!(media.bytes, 123456);
+                assert_eq!(media.width, 2880);
+                assert_eq!(media.height, 1800);
+                assert_eq!(media.name.as_deref(), Some("shot.png"));
+            }
+            _ => panic!("expected ToolCallResult"),
+        }
+    }
+
+    #[test]
+    fn deserialize_tool_call_result_tolerates_missing_or_null_media_fields() {
+        // 旧网关：整个 tool_media 键缺席 → 空表，其余字段照旧可用。
+        let legacy = r#"{
+            "type": "tool_call_result",
+            "tool_name": "Bash",
+            "tool_args": {},
+            "tool_call_id": "tc_old",
+            "tool_result": "ok",
+            "tool_success": true,
+            "created_at": "2025-01-01T00:00:00",
+            "session_id": "abc",
+            "request_id": "req21"
+        }"#;
+        match serde_json::from_str::<WingEvent>(legacy).unwrap() {
+            WingEvent::ToolCallResult {
+                tool_result,
+                tool_media,
+                ..
+            } => {
+                assert_eq!(tool_result, "ok");
+                assert!(tool_media.is_empty(), "missing key decodes to no media");
+            }
+            other => panic!("expected ToolCallResult, got {other:?}"),
+        }
+
+        // 新网关：name 为 null / 缺席都要容忍（wire 序列化会剥掉 null）。
+        let null_name = r#"{
+            "type": "tool_call_result",
+            "tool_name": "ReadImage",
+            "tool_args": {},
+            "tool_call_id": "tc_img_2",
+            "tool_result": "…",
+            "tool_success": true,
+            "tool_media": [
+                {"id": "aa", "mime": "image/gif", "bytes": 7,
+                 "width": 1, "height": 2, "name": null},
+                {"id": "bb", "mime": "image/webp", "bytes": 8,
+                 "width": 3, "height": 4}
+            ],
+            "created_at": "2025-01-01T00:00:00",
+            "session_id": "abc",
+            "request_id": "req22"
+        }"#;
+        match serde_json::from_str::<WingEvent>(null_name).unwrap() {
+            WingEvent::ToolCallResult { tool_media, .. } => {
+                assert_eq!(tool_media.len(), 2);
+                assert_eq!(tool_media[0].name, None, "explicit null degrades to None");
+                assert_eq!(tool_media[1].name, None, "absent key degrades to None");
+                assert_eq!(tool_media[1].mime, "image/webp");
+            }
+            other => panic!("expected ToolCallResult, got {other:?}"),
         }
     }
 

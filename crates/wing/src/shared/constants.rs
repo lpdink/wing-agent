@@ -29,6 +29,7 @@ pub const GOAL_EXIT_COMMAND: &str = "/goal-exit";
 
 pub const TOOL_BASH: &str = "Bash";
 pub const TOOL_READ: &str = "Read";
+pub const TOOL_READ_IMAGE: &str = "ReadImage";
 pub const TOOL_WRITE: &str = "Write";
 pub const TOOL_EDIT: &str = "Edit";
 pub const TOOL_GLOB: &str = "Glob";

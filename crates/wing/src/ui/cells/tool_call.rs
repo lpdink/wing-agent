@@ -216,6 +216,9 @@ pub enum ResultStrategy {
 enum ToolRenderer {
     Bash,
     Read,
+    /// ReadImage — like Read's family, but the image envelope is shown as a
+    /// regular (single-line) result and the header shows the basename only.
+    ReadImage,
     Write,
     Edit,
     Glob,
@@ -233,6 +236,7 @@ impl ToolRenderer {
         match name {
             constants::TOOL_BASH => Self::Bash,
             constants::TOOL_READ => Self::Read,
+            constants::TOOL_READ_IMAGE => Self::ReadImage,
             constants::TOOL_WRITE => Self::Write,
             constants::TOOL_EDIT => Self::Edit,
             constants::TOOL_GLOB => Self::Glob,
@@ -272,6 +276,20 @@ impl ToolRenderer {
                     String::new()
                 } else {
                     format!("({path})")
+                }
+            }
+            // ReadImage: basename only — the envelope carries the absolute
+            // path, and the card header is one short line.
+            Self::ReadImage => {
+                let name = args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(|p| truncate_path_segments(p, 1))
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    String::new()
+                } else {
+                    format!("({name})")
                 }
             }
             Self::Glob | Self::Grep => {
@@ -314,7 +332,11 @@ impl ToolRenderer {
                 ResultStrategy::Hidden
             }
             Self::AskUser => ResultStrategy::Full,
-            Self::Bash | Self::Fallback => ResultStrategy::Truncated,
+            // ReadImage: the envelope is a single text line the user should
+            // see (mime / dimensions / size / id). Truncated keeps it visible
+            // whole for short results and still folds head/tail if a future
+            // envelope grows into multiple lines.
+            Self::Bash | Self::ReadImage | Self::Fallback => ResultStrategy::Truncated,
         }
     }
 }
@@ -955,6 +977,66 @@ mod tests {
             !text.contains("file contents"),
             "result should be hidden: {text}"
         );
+    }
+
+    #[test]
+    fn test_read_image_header_uses_basename() {
+        let block = ToolCallBlock::new(
+            "ReadImage".into(),
+            json!({"path": "/Users/abiter/shots/retina-shot.png"}),
+            "tc_ri1".into(),
+        );
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(
+            text.contains("ReadImage(retina-shot.png)"),
+            "header must show the basename: {text}"
+        );
+        assert!(
+            !text.contains("/Users/abiter"),
+            "directories stay out of the header: {text}"
+        );
+    }
+
+    #[test]
+    fn test_read_image_success_shows_envelope() {
+        let mut block = ToolCallBlock::new(
+            "ReadImage".into(),
+            json!({"path": "/tmp/shot.png"}),
+            "tc_ri2".into(),
+        );
+        let envelope =
+            "[image: /tmp/shot.png | png 2880x1800 | 2.4 MB | id 9f3c1a2b | mtime 1789000000]";
+        block.set_result(envelope.into(), true);
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(
+            text.contains(&format!("└ {envelope}")),
+            "the single-line envelope must be visible: {text}"
+        );
+    }
+
+    #[test]
+    fn test_read_image_missing_path_has_no_parens() {
+        let block = ToolCallBlock::new("ReadImage".into(), json!({}), "tc_ri3".into());
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(text.contains("ReadImage"), "missing tool name: {text}");
+        assert!(
+            !text.contains("()"),
+            "empty parens should not appear: {text}"
+        );
+    }
+
+    #[test]
+    fn test_read_image_failure_truncated_like_other_tools() {
+        let mut block = ToolCallBlock::new(
+            "ReadImage".into(),
+            json!({"path": "/tmp/x.png"}),
+            "tc_ri4".into(),
+        );
+        let long_error = "error: not an image ".to_string() + &"x".repeat(100);
+        block.set_result(long_error, false);
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(text.contains("error: not an image"), "{text}");
+        assert!(text.contains("..."), "failure truncates: {text}");
     }
 
     #[test]
