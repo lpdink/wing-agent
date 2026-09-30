@@ -586,7 +586,7 @@ impl ChatView {
 mod tests {
     use super::*;
     use crate::config::rendering::ThinkingMode;
-    use crate::render::markdown::stream::Profile;
+    use crate::render::markdown::Profile;
     use crate::render::renderable::CellContext;
     use std::time::Instant;
 

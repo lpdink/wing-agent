@@ -3,7 +3,8 @@
 //! For every (corpus shape × chunk size × width) combination, the
 //! incremental `StreamingRender` output must equal the reference full
 //! render ([`full_lines`]) span by span (text + style) — for BOTH profiles
-//! (Thinking renders code plain; Content keeps highlighting).
+//! (reasoning and assistant content differ in the parse rules `Profile`
+//! owns, not in the reference they reconcile against).
 //!
 //! Scope of the assertion: the **last frame before `finalize()`**, i.e.
 //! the state the incremental engine leaves after every chunk has been
@@ -26,7 +27,8 @@ use common::{chunk_stream, random_chunks};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use wing::config::ThemePalette;
-use wing::render::markdown::stream::{Profile, StreamingRender, full_lines};
+use wing::render::markdown::Profile;
+use wing::render::markdown::stream::{StreamingRender, full_lines};
 
 // ============================================================
 // Corpus shapes — handcrafted markdown forms the splitter must survive
@@ -89,6 +91,66 @@ fn shapes() -> Vec<(&'static str, String)> {
         (
             "crlf_unclosed_fence",
             "intro\r\n\r\n```rust\r\nlet x = 1;\r\nlet y = 2;\r\n".into(),
+        ),
+        // --- streaming/reference reconciliations found on real sessions ---
+        // A blank line right before the closing fence is dropped by the
+        // reference (its body is `trim_end_matches('\n')`d); the code cache
+        // must hold it as provisional until a non-empty line follows, or a
+        // chunk boundary between the blank line and the closer leaves an
+        // extra body line in the resting state.
+        ("fence_body_ends_blank", "```rust\nlet x = 1;\n\n```\n\nafter\n".into()),
+        (
+            "fence_body_ends_blanks",
+            "intro\n\n```\nline one\n\n\n```\n\nafter\n".into(),
+        ),
+        // A BARE fence that interrupts a list slice: the fence line is the
+        // opener and must not be reprocessed as its own closer (it has no
+        // info string, so a closer check matches it), or the splitter
+        // promotes an empty block and renders the body as prose.
+        (
+            "list_then_bare_fence",
+            "- item one\n- item two\n\n```\nlet x = 1;\n```\n\nafter the block\n".into(),
+        ),
+        (
+            "list_immediately_then_bare_fence",
+            "- item one\n- item two\n```\nlet x = 1;\n```\n\nafter\n".into(),
+        ),
+        // An indented block that RESOLVES to nothing (an empty list item):
+        // the tail separator before it must not survive the collapse, and at
+        // the top of a cell the collapsed block's own blank line keeps the
+        // first-line prefix.
+        ("indented_block_empty_item", "intro\n\n    1.\n\n    2.\n".into()),
+        (
+            "indented_block_empty_item_first",
+            "    -  \n\npara\n".into(),
+        ),
+        // CRLF: `\r\n` endings trim like `\n` (pulldown hands the reference
+        // an LF-normalized copy), and a bare `\r` is content — the reference
+        // renders it.
+        (
+            "crlf_fence_body_ends_blank",
+            "```rust\r\nlet x = 1;\r\n\r\n```\r\n\r\nafter\r\n".into(),
+        ),
+        (
+            "crlf_partial_line_keeps_cr",
+            "```rust\r\nlet x = 1;\r\nlet y = 2;\r".into(),
+        ),
+        // An indented fence belongs to the list item it sits in: cutting it
+        // out of the item's slice loses the list continuation prefix.
+        (
+            "indented_fence_in_list",
+            "- item one\n  ```rust\n  let x = 1;\n  ```\n\nafter\n".into(),
+        ),
+        // Indented blocks: code for content, prose for reasoning (see
+        // `Profile`) — the nested re-parse must agree with the reference in
+        // both profiles, including its markdown structure.
+        (
+            "indented_block_with_markdown",
+            "note:\n\n    a nested **thought** with `code`\n\n    - bullet one\n    - bullet two\n\nafter\n".into(),
+        ),
+        (
+            "indented_block_then_paragraph",
+            "before\n\n    indented prose line\nimmediately after\n\nend\n".into(),
         ),
     ]
 }

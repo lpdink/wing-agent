@@ -12,16 +12,26 @@
 //! 5. `links.rs` provides link URL display logic
 //! 6. `types.rs` defines the intermediate `MarkdownLine`/`MarkdownSegment` types
 //! 7. This module orchestrates the event loop and provides the public API
+//!
+//! ## Debugging
+//!
+//! `cargo run -p wing --example render_probe -- <FILE>` renders arbitrary
+//! text through this pipeline (and through `stream::StreamingRender` with
+//! `--chunk`, reconciling the two with `--check`). The debugging workflow and
+//! the list of accepted boundaries live in `docs/dev/tui-rendering.md`.
 
 pub(crate) mod code_blocks;
 pub(crate) mod links;
 pub(crate) mod parsing;
+pub mod profile;
 pub mod stream;
 pub(crate) mod tables;
 pub mod types;
 pub(crate) mod wrap;
 
 // Re-export the public API.
+pub use profile::PROSE_DEPTH_LIMIT;
+pub use profile::Profile;
 pub use types::MarkdownLine;
 pub use types::MarkdownSegment;
 pub use types::MarkdownTheme;
@@ -59,13 +69,15 @@ use crate::config::ThemePalette;
 
 /// Code-block rendering options.
 ///
-/// The streaming Thinking profile renders code blocks plain (no syntect
-/// highlight, no gutter) — both while streaming and in its final reconcile
-/// render, so the visual stays consistent across the whole turn.
+/// [`Profile`] carries the reasoning-vs-content rendering rules (see its
+/// module docs); code blocks themselves render identically in both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RenderOpts {
-    /// Render fenced code with syntect highlighting + line-number gutters.
-    pub code_highlight: bool,
+    /// Which cell the text belongs to.
+    pub profile: Profile,
+    /// Remaining nesting budget for indented-as-prose blocks — see
+    /// [`PROSE_DEPTH_LIMIT`]. Only the renderer decrements it.
+    pub prose_depth: u8,
     /// Trim trailing blank lines (doc-end semantics). The streaming
     /// renderer disables this when rendering a PROMOTED block: the
     /// presence of the renderer's own trailing blank line is exactly the
@@ -77,9 +89,18 @@ pub struct RenderOpts {
 
 impl Default for RenderOpts {
     fn default() -> Self {
+        Self::new(Profile::Content, true)
+    }
+}
+
+impl RenderOpts {
+    /// Options for `profile`, with doc-end trimming per `trim_trailing_blank`
+    /// and a fresh prose-nesting budget.
+    pub fn new(profile: Profile, trim_trailing_blank: bool) -> Self {
         Self {
-            code_highlight: true,
-            trim_trailing_blank: true,
+            profile,
+            prose_depth: PROSE_DEPTH_LIMIT,
+            trim_trailing_blank,
         }
     }
 }
@@ -127,11 +148,10 @@ pub fn render_markdown_lines_with(
     let theme = MarkdownTheme::from_palette(palette);
     let base_style = theme.base;
 
-    // Pre-process: ensure code fences are on their own line.
-    // Reasoning (non-highlight) text often contains inline ``` references
-    // (e.g. `（```rust）`). Normalizing these would create spurious code
-    // blocks — skip for the Thinking profile.
-    let text = if opts.code_highlight {
+    // Pre-process: ensure code fences are on their own line. Reasoning text
+    // often contains inline ``` references (e.g. `（```rust）`); normalizing
+    // them would create spurious code blocks (see `Profile`).
+    let text = if opts.profile.normalizes_inline_fences() {
         ensure_fences_on_own_line(text)
     } else {
         text.into()
@@ -156,7 +176,10 @@ pub fn render_markdown_lines_with(
 /// causing the fence to be treated as literal text.
 ///
 /// This preprocessor inserts a newline before ``` if:
-/// - It's not already at line start
+/// - It's not already at line start, and everything before it on the line is
+///   not blank either (a blank prefix means the fence IS line-start — up to
+///   3 spaces of indent are legal — or an indented code block; inserting a
+///   newline there would tear the indentation off the fence and its body)
 /// - It looks like a fence (followed by \n, EOF, or alphanumeric lang tag)
 fn ensure_fences_on_own_line(text: &str) -> Cow<'_, str> {
     // Fast path: no ``` in text.
@@ -170,8 +193,8 @@ fn ensure_fences_on_own_line(text: &str) -> Cow<'_, str> {
     let mut needs_alloc = false;
 
     for (i, _) in text.match_indices("```") {
-        // Already at line start — nothing to do.
-        if i == 0 || bytes[i - 1] == b'\n' {
+        // Already at line start (blank prefix included) — nothing to do.
+        if i == 0 || bytes[i - 1] == b'\n' || fence_prefix_is_blank(bytes, i) {
             continue;
         }
 
@@ -199,6 +222,20 @@ fn ensure_fences_on_own_line(text: &str) -> Cow<'_, str> {
     } else {
         Cow::Borrowed(text)
     }
+}
+
+/// Whether everything before byte offset `at` on that line is blank — the
+/// fence there is already a line-start fence (≤3 spaces of indent are legal)
+/// or an indented code block, so it must not be normalized.
+pub(crate) fn fence_prefix_is_blank(bytes: &[u8], at: usize) -> bool {
+    let line_start = bytes[..at]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|pos| pos + 1)
+        .unwrap_or(0);
+    bytes[line_start..at]
+        .iter()
+        .all(|&b| b == b' ' || b == b'\t')
 }
 
 /// Render plain text (no markdown parsing) to lines.
@@ -243,7 +280,8 @@ fn render_markdown_to_lines(
             base_style,
             theme,
             width: available_width,
-            highlight: opts.code_highlight,
+            opts,
+            render_markdown: render_markdown_to_lines,
         };
         if handle_code_block_event(&event, &mut code_block, &mut code_block_env) {
             blockquote_depth = code_block_env.blockquote_depth;
@@ -263,6 +301,7 @@ fn render_markdown_to_lines(
             base_style,
             available_width,
             code_block: &mut code_block,
+            indented_prose: opts.profile.indented_blocks_are_prose(),
             active_table: &mut active_table,
             link_state: &mut link_state,
         };
@@ -311,7 +350,8 @@ fn render_markdown_to_lines(
         base_style,
         theme,
         width: available_width,
-        highlight: opts.code_highlight,
+        opts,
+        render_markdown: render_markdown_to_lines,
     };
     finalize_unclosed_code_block(&mut code_block, &mut code_block_env);
 
@@ -388,6 +428,165 @@ mod tests {
             SegmentKind::Link
         );
         assert_eq!(find_segment(&pairs, "see "), SegmentKind::Text);
+    }
+
+    // ============================================================
+    // Profile semantics (reasoning vs assistant content)
+    // ============================================================
+
+    /// Render `md` under `profile`, flattening to (kind, text) pairs.
+    fn profile_pairs(md: &str, profile: Profile) -> Vec<(SegmentKind, String)> {
+        render_markdown_lines_with(md, None, &dp(), RenderOpts::new(profile, true))
+            .into_iter()
+            .flat_map(|line| line.segments)
+            .map(|seg| (seg.kind, seg.text))
+            .collect()
+    }
+
+    fn joined_plain(md: &str, profile: Profile) -> String {
+        render_markdown_lines_with(md, None, &dp(), RenderOpts::new(profile, true))
+            .iter()
+            .map(|line| line.to_plain())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn profile_content_keeps_indented_blocks_as_code() {
+        // CommonMark: a 4-space indented block IS code. Assistant content is
+        // a plain document and keeps that reading.
+        let pairs = profile_pairs("before\n\n    indented line\n\nafter", Profile::Content);
+        assert_eq!(
+            find_segment(&pairs, "indented line"),
+            SegmentKind::CodeBlock
+        );
+        assert_eq!(find_segment(&pairs, "┌"), SegmentKind::Border);
+    }
+
+    #[test]
+    fn profile_thinking_renders_indented_blocks_as_prose() {
+        // Reasoning indents to nest sub-thoughts, not to write code: the
+        // block renders as prose, de-indented and markdown-parsed like the
+        // surrounding text.
+        let text = "before\n\n    indented **prose** with `code`\n    second line\n\nafter";
+        let pairs = profile_pairs(text, Profile::Thinking);
+        assert!(
+            pairs.iter().all(|(kind, _)| !matches!(
+                kind,
+                SegmentKind::CodeBlock | SegmentKind::Gutter | SegmentKind::Border
+            )),
+            "thinking rendered code chrome for an indented block: {pairs:?}"
+        );
+        assert_eq!(find_segment(&pairs, "indented "), SegmentKind::Text);
+        assert_eq!(find_segment(&pairs, "code"), SegmentKind::InlineCode);
+        assert_eq!(find_segment(&pairs, "second line"), SegmentKind::Text);
+        assert_eq!(find_segment(&pairs, "after"), SegmentKind::Text);
+        // De-indented: the nesting offset is dropped, and the paragraphs keep
+        // their blank-line separation.
+        let plain = joined_plain(text, Profile::Thinking);
+        assert!(
+            plain.contains("\nindented ") && plain.contains("\nsecond line"),
+            "indentation not dropped: {plain:?}"
+        );
+        assert_eq!(
+            joined_plain("    one\n\n    two\n", Profile::Thinking),
+            "one\n\ntwo",
+            "interior blank lines separate paragraphs"
+        );
+    }
+
+    #[test]
+    fn profile_thinking_indented_list_stays_a_list() {
+        // A list inside an indented region is prose structure, not code.
+        let pairs = profile_pairs("note:\n\n    - first\n    - second\n", Profile::Thinking);
+        assert_eq!(find_segment(&pairs, "first"), SegmentKind::Text);
+        assert!(
+            pairs
+                .iter()
+                .any(|(kind, text)| *kind == SegmentKind::Marker && text.contains('•')),
+            "list marker lost: {pairs:?}"
+        );
+        assert!(
+            pairs
+                .iter()
+                .all(|(kind, _)| *kind != SegmentKind::CodeBlock)
+        );
+    }
+
+    #[test]
+    fn profile_thinking_indented_prose_recursion_is_bounded() {
+        // Every nesting level re-parses the block, so the budget caps what a
+        // degenerate stream can cost: past it the block renders as a code
+        // block again (one parser per level would be O(depth × text) per
+        // frame while streaming, and a stack overflow the TUI cannot catch).
+        let depth = usize::from(PROSE_DEPTH_LIMIT) + 4;
+        let text = format!("before\n\n{}deep\n", "    ".repeat(depth));
+        let pairs = profile_pairs(&text, Profile::Thinking);
+        assert!(
+            pairs
+                .iter()
+                .any(|(kind, _)| *kind == SegmentKind::CodeBlock),
+            "expected the code-block fallback past the budget: {pairs:?}"
+        );
+
+        // Within the budget the same shape is prose — no code chrome at all.
+        let text = format!("before\n\n{}deep\n", "    ".repeat(2));
+        let pairs = profile_pairs(&text, Profile::Thinking);
+        assert!(
+            pairs.iter().all(|(kind, _)| !matches!(
+                kind,
+                SegmentKind::CodeBlock | SegmentKind::Border | SegmentKind::Gutter
+            )),
+            "within the budget the block is prose: {pairs:?}"
+        );
+
+        // Absurd depth stays cheap and does not recurse per level.
+        let text = format!("{}deep\n", "    ".repeat(2000));
+        let lines = profile_pairs(&text, Profile::Thinking);
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn profile_normalizes_inline_fences_only_for_content() {
+        // `text:```lang` on one line is normalized into a fence for content;
+        // reasoning discusses fences in prose, so the backticks stay literal.
+        let md = "run this:```rust\nlet x = 1;";
+        let content = profile_pairs(md, Profile::Content);
+        assert!(
+            content
+                .iter()
+                .any(|(kind, text)| *kind == SegmentKind::CodeBlock && text.contains("let")),
+            "content did not normalize the inline fence: {content:?}"
+        );
+        let thinking = profile_pairs(md, Profile::Thinking);
+        assert!(
+            thinking
+                .iter()
+                .all(|(kind, _)| *kind != SegmentKind::CodeBlock),
+            "reasoning normalized an inline fence: {thinking:?}"
+        );
+    }
+
+    #[test]
+    fn profile_fenced_blocks_render_the_same_in_both() {
+        // The alignment contract: a fenced block (highlighting, gutter,
+        // borders) is profile-independent — only prose is recolored, and that
+        // happens later, in the cell compose.
+        let md = "text\n\n```rust\nlet x = 1;\n```\n";
+        let pairs = |profile| profile_pairs(md, profile);
+        assert_eq!(
+            pairs(Profile::Thinking),
+            pairs(Profile::Content),
+            "a fenced code block must render identically in both profiles"
+        );
+        // Both sides must really be highlighted, or the equality is trivial:
+        // syntect splits the line into per-token segments.
+        let code = pairs(Profile::Thinking)
+            .into_iter()
+            .filter(|(kind, _)| *kind == SegmentKind::CodeBlock)
+            .map(|(_, text)| text)
+            .collect::<Vec<_>>();
+        assert!(code.len() >= 2, "line was not token-split: {code:?}");
     }
 
     #[test]

@@ -18,7 +18,8 @@ use crate::config::rendering::ThinkingMode;
 use crate::render::Renderable;
 use crate::render::markdown::ComposedLines;
 use crate::render::markdown::LinkSpan;
-use crate::render::markdown::stream::{Profile, StreamingRender};
+use crate::render::markdown::Profile;
+use crate::render::markdown::stream::StreamingRender;
 use crate::render::renderable::CellContext;
 use crate::ui::chat_view::ChatCell;
 
