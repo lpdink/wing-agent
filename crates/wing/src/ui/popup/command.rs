@@ -67,6 +67,12 @@ static TUI_ONLY_COMMANDS: LazyLock<Vec<CommandInfo>> = LazyLock::new(|| {
             params: "[N]".into(),
         },
         CommandInfo {
+            name: "tips".into(),
+            aliases: vec![],
+            description: "List every startup tip".into(),
+            params: String::new(),
+        },
+        CommandInfo {
             name: "new".into(),
             aliases: vec![],
             description: "Create new session".into(),
@@ -164,6 +170,13 @@ static TUI_ONLY_COMMANDS: LazyLock<Vec<CommandInfo>> = LazyLock::new(|| {
         },
     ]
 });
+
+/// The bare names of the TUI-only fallback table (tests keep it in step with
+/// the command router — see `app::tests::commands`).
+#[cfg(test)]
+pub(crate) fn tui_only_names() -> Vec<&'static str> {
+    TUI_ONLY_COMMANDS.iter().map(|c| c.name.as_str()).collect()
+}
 
 /// Check if a bare name (without `/`) matches a TUI-only command (case-insensitive).
 pub fn is_tui_only_command(bare_name: &str) -> bool {
@@ -457,6 +470,7 @@ mod tests {
         assert!(!rows.iter().any(|r| r.name == "/h")); // alias NOT shown
         assert!(rows.iter().any(|r| r.name == "/model"));
         assert!(rows.iter().any(|r| r.name == "/clear")); // TUI-only
+        assert!(rows.iter().any(|r| r.name == "/tips")); // TUI-only
     }
 
     #[test]

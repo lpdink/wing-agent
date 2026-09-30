@@ -550,7 +550,7 @@ fn content_filling_label() -> String {
 fn app_with_link_at_the_content_edge() -> App {
     let label = content_filling_label();
     let mut app = test_app();
-    app.chat.set_header(Vec::new());
+    app.clear_welcome();
     for i in 0..4 {
         app.chat.push(ChatCell::UserMessage(format!("filler {i}")));
     }
@@ -653,7 +653,7 @@ fn test_click_at_the_content_edge_still_opens_the_link() {
 fn test_last_column_is_selectable_when_the_content_fits() {
     let label = content_filling_label();
     let mut app = test_app();
-    app.chat.set_header(Vec::new());
+    app.clear_welcome();
     app.chat.push(ChatCell::AssistantMessage(label.to_string()));
     let mut terminal = test_terminal(40, 12);
     draw(&mut app, &mut terminal);

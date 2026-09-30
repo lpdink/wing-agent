@@ -200,7 +200,7 @@ pub(super) fn set_chat_height(app: &mut App, height: u16) {
 /// (the user cell insets its text by two columns, one padding row on top).
 pub(super) fn app_with_message() -> App {
     let mut app = test_app();
-    app.chat.set_header(Vec::new());
+    app.clear_welcome();
     app.chat.push(ChatCell::UserMessage("hello world".into()));
     app
 }
@@ -229,7 +229,7 @@ pub(super) fn reversed_cells(
 /// it, the card's border left of that).
 pub(super) fn app_with_draft(draft: &str) -> App {
     let mut app = test_app();
-    app.chat.set_header(Vec::new());
+    app.clear_welcome();
     app.input.set_text(draft);
     app
 }
@@ -238,7 +238,7 @@ pub(super) fn app_with_draft(draft: &str) -> App {
 /// auto-scroll have somewhere to go.
 pub(super) fn app_with_tall_message() -> App {
     let mut app = test_app();
-    app.chat.set_header(Vec::new());
+    app.clear_welcome();
     let text = (0..30)
         .map(|i| format!("line-{i}"))
         .collect::<Vec<_>>()

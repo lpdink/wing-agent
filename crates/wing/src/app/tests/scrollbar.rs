@@ -513,7 +513,7 @@ impl ratatui::backend::Backend for TerminalSim {
 /// reproduced the artifact in the wild.
 fn app_with_chinese_links() -> App {
     let mut app = test_app();
-    app.chat.set_header(Vec::new());
+    app.clear_welcome();
     for i in 0..3 {
         app.chat
             .push(ChatCell::AssistantMessage(format!("above {i}")));

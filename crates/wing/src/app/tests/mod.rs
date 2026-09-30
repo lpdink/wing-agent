@@ -15,3 +15,4 @@ mod projection;
 mod scrollbar;
 mod selection;
 mod support;
+mod welcome;

@@ -36,6 +36,7 @@ fn test_frontend_commands_consumed() {
         "/new",
         "/copy",
         "/copy 1",
+        "/tips",
         "/goal do something",
         "/goal-exit",
     ] {
@@ -409,6 +410,24 @@ fn test_submit_intent_carries_pending_request_id() {
 }
 
 // ── The command table itself ────────────────────────────────────────────
+
+/// Every command the router owns must be completable.
+///
+/// `/tips` 上线时漏掉的正是这条：路由表（`COMMANDS`）和补全兜底表
+/// （`TUI_ONLY_COMMANDS`）是两份手写清单，新增一条命令只改前者，用户就永远
+/// 看不到它 —— 表单靠人来同步迟早会漏，所以钉成断言。
+#[test]
+fn test_every_routed_command_is_offered_by_completion() {
+    let offered = crate::ui::popup::command::tui_only_names();
+    for route in commands::COMMANDS {
+        let bare = route.name.trim_start_matches('/');
+        assert!(
+            offered.contains(&bare),
+            "`{}` 能执行却不在补全表里（TUI_ONLY_COMMANDS 少了 `{bare}`）",
+            route.name
+        );
+    }
+}
 
 #[test]
 fn test_command_table_names_and_aliases_are_unique() {

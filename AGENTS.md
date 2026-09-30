@@ -143,6 +143,7 @@ crates/wing/src/
 │   ├── panels/ask.rs                ask 模型与归一化入口（AskUserQuestion 面板 / Bash 确认的必选形态 / 只读提示）
 │   ├── panels/picker.rs             /model 适配器（provider tab × model 行，Enter 即应用）
 │   ├── goal_role.rs                 GoalRole — goal 展示词汇（状态机仍在 app/goal.rs）
+│   ├── tips.rs                      开屏提示池（欢迎屏轮换一条 + /tips 面板全量）
 │   └── constants.rs                 协议常量（本地命令、工具名等 magic string）
 ├── app/                             App 状态机 + 事件循环
 │   ├── mod.rs                       run_app() 主循环 + handle_event()
@@ -158,7 +159,8 @@ crates/wing/src/
 │   ├── scrollbar.rs                 overlay 滚动条（几何 / 命中测试 / 拖拽状态机 / 绘制）
 │   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存
 │   ├── panel.rs                     选择面板共享渲染（窗口数学取自 shared/panels 内核）
-│   ├── header.rs / status_bar.rs / spinner.rs / toast.rs
+│   ├── welcome/                     开屏欢迎屏：mod（状态·宽度阶梯·扫光时钟）· art（像素 W + 半格渐变）
+│   ├── status_bar.rs / spinner.rs / toast.rs
 │   ├── input_area/                  Composer 悬浮卡片（chrome：悬浮几何·活动栏·元信息栏 / model：段 + 粘贴 chip 注册表 / widget / editing / movement / wrap / 指针映射与高亮 pointer / paste / helpers）
 │   ├── popup/                       command（斜杠命令 + 候选项）/ selection（通用可选列表）
 │   └── cells/                       Chat cell 渲染（tool_call / thinking / todo_msg / ask_msg / diff_view / model_picker）
@@ -173,7 +175,7 @@ crates/wing/src/
 └── util/                            clipboard / open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）
 ```
 
-配套：`crates/wing/benches/stream_render.rs`（流式渲染基准）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期、layer_guard 分层守门）、`crates/wing/examples/reconnect_flow_verify.rs`。
+配套：`crates/wing/benches/stream_render.rs`（流式渲染基准）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期、layer_guard 分层守门）、`crates/wing/examples/`（reconnect_flow_verify；welcome_preview 开屏预览）。
 
 ### 其他
 
