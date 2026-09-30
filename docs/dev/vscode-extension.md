@@ -436,10 +436,17 @@ webview 用规则**就地识别、不改输入**（未识别的 span 就是普�
 |---|---|
 | `$…$` | pulldown 的两条规则：开定界符后非空白、闭定界符前非空白。**没有** pandoc 的「闭定界符后不接数字」——`$x$1` 在两边都是公式 `x` 紧跟文本 `1` |
 | `$$…$$` | 单行（行内位置的显示公式）+「整行 `$$` 与闭合行」的跨行块；显示定界符不设空白规则（`$$ \frac{a}{b} $$` 合法） |
-| `\(…\)` / `\[…\]` | 行内 / 显示；span 内不得含反引号或 `$`（否则退回普通文本，内部的 `` `…` `` / `$…$` 各自成 token）、不得与已有 `$` 相邻、超过 8192 或跨空行不再识别；每块另有 1 MiB 的搜索预算（TUI 的 `MAX_SCAN_WORK`） |
+| `\(…\)` / `\[…\]` | 行内 / 显示；span 内不得含反引号或 `$`（否则退回普通文本，内部的 `` `…` `` / `$…$` 各自成 token）、不得与已有 `$` 相邻、超过 8192 不再识别（闭定界符必须**完整落在**窗口内，与 TUI 的 `find` 同口径）；每块另有 1 MiB 的搜索预算（TUI 的 `MAX_SCAN_WORK`）。跨空行：流式分块器把空行当块边界，两边一致；非流式路径（`MarkdownText`）会跨，见 §11 条目 7 |
 | 裸环境 | `\begin{ENV}…\end{ENV}`（不套 `$$`）→ 显示公式；同名嵌套计数配对；白名单外 / 未闭合 / body 含 `` ` `` 或 `$` → 原样字面量 |
-| 不透明区 | 代码跨度、围栏（含 `>`、列表前缀）、缩进代码块；行内 HTML 标签与 autolink；链接/图片的 destination 与 title；链接引用定义行；HTML 块。数学识别一律不进这些区域 |
+| 不透明区 | 代码跨度、围栏（含 `>`、列表前缀）、缩进代码块；行内 HTML 标签与 autolink（`<…>` 整段，含属性值；内部含代码跨度时按代码跨度切开）；链接/图片的 destination 与 title；链接引用定义行；HTML 块。数学识别一律不进这些区域 |
+| HTML 块判定 | 按**文档行**判定（与 TUI 的 `content_start` 同口径：剥 `>` 链与列表标记，≤3 前导空格），tag 行起、下一个空行止、围栏内的行不算。因此 `# <div> \(x\)`、`| <div> \(x\) |` 里的公式照常识别（该文档行不是以 `<` 开头），而 `<div>` 之后的 `\(x\)` 不识别；判定的开关是「这一行是不是 HTML 块的成员」，不是「这一块的文本以 `<` 开头」 |
 | 降级 | 未识别 → 字面量（走 markdown 自己的转义，与 TUI 输出相同）；KaTeX 失败 / 超预算 → **完整源码**（定界符在内、逐字符），绝不空串、绝不半截 |
+
+**搜索预算**（两条 `MAX_SCAN_WORK`、一条窗口，都是「与 TUI 同量级」的硬上界，不是启发式）：
+`\(` / `\[` / 裸环境的候选搜索按**每个 inline 块**计费 1 MiB，块规则的闭合行走按**每个文档**计费
+1 MiB，超预算后新候选不再识别（退回文本，内容不丢）；`\(…\)` / `\[…\]` 的窗口是 8192 个
+code unit，闭定界符必须完整落在窗口内。三条都实测过：`\(x` × 20k 与 `\[` 每行 × 10k 这类 04 基线上
+的平方级输入从 1.3–1.4 s 降到 5–8 ms（数字与命令见任务 `08_vscode_alignment/design.md`）。
 
 **裸环境白名单**（与 TUI 的 `MATH_ENVS` 同一张表；每项接受末尾 `*`）：
 `align` `aligned` `alignat` `alignedat` `flalign` `split` `eqnarray` `gather` `multline` `center`
@@ -458,6 +465,9 @@ webview 用规则**就地识别、不改输入**（未识别的 span 就是普�
 | 渲染器覆盖面 | 引擎不同（wing_math vs KaTeX）：同一公式可能一边渲染、一边回退源码（例：TUI 引擎不渲染某些 `cases`，KaTeX 不渲染行内 `align`） |
 | 退化 `$` 串 | `$a$$$b$` 这类没有真实用法的输入，pulldown 的分隔符栈与「左到右扫描」可能给出不同切分；两边都不丢内容 |
 | 8192 的单位 | TUI 按字节、webview 按 UTF-16 code unit（值相同，CJK 密集输入下 TUI 更早降级） |
+| 退化显示定界符的节点类型 | `$$$$`、`$$ $$`、`$$\n$$` 这类空/退化串：两边都退回字面量，但 TUI 的归一化会先把它们还原成 `$…$` 再失败，webview 保留原始 `$$`（显示字符与内容一致，只有节点/字形层面不同） |
+| 链接 destination 折行 | 链接目标被折到下一行的写法（CommonMark 允许）下，webview 不识别折行部分里的公式，TUI 的逐行扫描会识别；不影响数学识别口径本身（两边的 destination 都不进识别区） |
+| `\\end{name}` 的语义 | `\begin{align}a\end{align}b` 这种「环境外又有 `\end`」：TUI 按同名配对取到第一个 `\end{align}` 为止，webview 同；差异在 body 里出现**另一个** `\end{...}` 时（TUI 只看名字匹配，webview 亦同），以及 `\end` 后紧跟文本时的边界处理——两边都可能回退成字面量，内容不丢 |
 
 ## 9. 测试
 
@@ -478,7 +488,7 @@ webview 用规则**就地识别、不改输入**（未识别的 span 就是普�
 
 ```bash
 cd extensions/vscode
-pnpm run test          # 全量（49 文件 / 826 用例）
+pnpm run test          # 全量（49 文件 / 834 用例）
 pnpm run typecheck     # tsc --noEmit × 3 projects
 pnpm run lint          # eslint（含层门禁 zone）
 pnpm run format:check  # prettier
@@ -589,8 +599,9 @@ pnpm exec vsce ls       # 核对进包清单
 6. 对话里的本地图片同样只认第一个 folder：多根窗口的其它 folder、以及「会话 workdir ≠ folder」的
    场景，图片会退回链接（与 `openFile` 的既有口径一致）；
 7. 公式 `$$…$$` 之间出现**空行**时，流式分块器（`markdown/split.ts` 的「空行＝块边界」）会把它切成
-   两块，于是退回字面量文本；非流式路径（`MarkdownText`，如用户消息）没有这个问题。TUI 侧同样
-   不跨空行（归一化窗口的既定语义），两边一致；
+   两块，于是退回字面量文本；非流式路径（`MarkdownText`，如用户消息）没有这个问题（会跨空行）。
+   TUI 的流式归一化窗口也以空行为界，流式下两边一致；非流式下 TUI 的 `render_probe` 同样会跨
+   （归一化器工作在整段文本上），所以「两边一致」只在流式成立；
 8. 公式的识别口径已对齐 TUI 侧（见 §8.5 的两张表），**有意差异**也都登记在那里；
 9. 散文里成对的 `$` 可能被渲染成公式（`set $PATH=$HOME` → 公式 `PATH=`），见 §8.5 的用户可见
    副作用；用 `\$` 转义可避免。
@@ -633,7 +644,7 @@ pnpm exec vsce ls       # 核对进包清单
 # 工程门禁（extensions/vscode 内）
 pnpm install --frozen-lockfile --prefer-offline
 pnpm run typecheck && pnpm run lint && pnpm run format:check
-pnpm run test                 # 826 用例
+pnpm run test                 # 834 用例
 pnpm run build && pnpm run build:preview
 pnpm run package              # → wing-vscode.vsix
 pnpm run smoke:gateway        # 12 场景（真网关 + 假 Provider）

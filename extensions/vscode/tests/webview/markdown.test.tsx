@@ -310,6 +310,44 @@ describe('math syntax (parseMarkdown)', () => {
     expect(inline('\\begin{gather}\na = b\n\\end{gather}')[0]).toMatchObject({ kind: 'math', display: true });
   });
 
+  it('recognizes every environment on the whitelist, one by one', () => {
+    // The list is the TUI's `MATH_ENVS` (docs/dev/tui-rendering.md §2.5). It is
+    // asserted entry by entry on purpose: a sampled test cannot tell a missing
+    // entry from a working one (review r1 [S4]).
+    const environments = [
+      'align',
+      'aligned',
+      'alignat',
+      'alignedat',
+      'flalign',
+      'split',
+      'eqnarray',
+      'gather',
+      'multline',
+      'center',
+      'equation',
+      'displaymath',
+      'array',
+      'cases',
+      'matrix',
+      'pmatrix',
+      'bmatrix',
+      'Bmatrix',
+      'vmatrix',
+      'Vmatrix',
+    ];
+    expect(environments).toHaveLength(20);
+    for (const name of environments) {
+      const source = `\\begin{${name}}\na = b\n\\end{${name}}`;
+      expect(inline(source), name).toEqual([{ kind: 'math', tex: source, source, display: true }]);
+      // …and the starred variant is the same environment.
+      const starred = `\\begin{${name}*}\na = b\n\\end{${name}*}`;
+      expect(inline(starred), `${name}*`).toEqual([
+        { kind: 'math', tex: starred, source: starred, display: true },
+      ]);
+    }
+  });
+
   it('leaves an unknown or unterminated environment exactly as written', () => {
     expect(inline('\\begin{tikzcd} a \\arrow[r] & b \\end{tikzcd}')).toEqual([
       { kind: 'text', text: '\\begin{tikzcd} a \\arrow[r] & b \\end{tikzcd}' },
@@ -487,7 +525,11 @@ describe('math syntax (parseMarkdown)', () => {
 
   it('keeps an inline HTML tag / autolink opaque, but not the prose between tags', () => {
     // Attribute values live inside `<…>`: never a formula (the TUI's
-    // `skip_inline_html`).
+    // `skip_inline_html`). This is the `inTag` guard on its own — the tag is in
+    // the middle of the line, so the line-level rules cannot cover it.
+    expect(inline('text <a title="\\(y\\)">t</a> x')).toEqual([
+      { kind: 'text', text: 'text <a title="(y)">t</a> x' },
+    ]);
     expect(inline('<a href="http://x/\\(y\\)">label</a>').some((child) => child.kind === 'math')).toBe(false);
     expect(inline('code: <https://example.com/\\(y\\)>').some((child) => child.kind === 'math')).toBe(false);
     // Between two tags the text is prose — the TUI renders the formula too.
@@ -500,6 +542,15 @@ describe('math syntax (parseMarkdown)', () => {
     expect(inline('a <- \\(x\\)')).toEqual([
       { kind: 'text', text: 'a <- ' },
       { kind: 'math', tex: 'x', source: '\\(x\\)', display: false },
+    ]);
+    // A `<…>` that *crosses* a code span is not a tag: the code span is consumed
+    // first (the TUI's scan does the same), so the formula between them is real.
+    expect(inline('`a <b` \\(x\\) `c>`')).toEqual([
+      { kind: 'code', text: 'a <b' },
+      { kind: 'text', text: ' ' },
+      { kind: 'math', tex: 'x', source: '\\(x\\)', display: false },
+      { kind: 'text', text: ' ' },
+      { kind: 'code', text: 'c>' },
     ]);
   });
 
@@ -514,6 +565,34 @@ describe('math syntax (parseMarkdown)', () => {
     }
   });
 
+  it('recognizes math in a heading or table cell whose text starts with a tag', () => {
+    // The line is `# <div> …` / `| <div> … |` — a *document* line that does not
+    // start with `<`, so there is no HTML block (the TUI's rule, and what this
+    // webview did before formulas): the formula in the same line is real. Judging
+    // this on the block's own text instead would hide it (review r1 [S1]).
+    const heading = parseMarkdown('# <div> \\(x\\)\n')[0];
+    expect(heading).toMatchObject({ kind: 'heading', level: 1 });
+    expect(heading?.kind === 'heading' ? heading.children.at(-1) : null).toEqual({
+      kind: 'math',
+      tex: 'x',
+      source: '\\(x\\)',
+      display: false,
+    });
+
+    const quoted = parseMarkdown('> # <div> \\(x\\)\n')[0];
+    expect(quoted).toMatchObject({ kind: 'quote' });
+
+    const table = parseMarkdown('| a |\n| --- |\n| <div> \\(x\\) |\n')[0];
+    expect(table).toMatchObject({ kind: 'table' });
+    expect(JSON.stringify(table)).toContain('"kind":"math"');
+
+    const listed = parseMarkdown('- | a |\n  | --- |\n  | <div> \\(x\\) |\n')[0];
+    expect(JSON.stringify(listed)).toContain('"kind":"math"');
+
+    // …and the same tag *at the start of a document line* is still an HTML block.
+    expect(JSON.stringify(parseMarkdown('<div> \\(x\\)\n'))).not.toContain('"kind":"math"');
+  });
+
   it('accepts whitespace around a `$$` block delimiter line', () => {
     // The closer line is compared after trimming, without allocating (the block
     // rule walks lines with that comparison).
@@ -523,6 +602,45 @@ describe('math syntax (parseMarkdown)', () => {
     });
     // …and an opener that never closes stays one paragraph, verbatim.
     expect(parseMarkdown('\\[\nunclosed x\n\\[\nmore\n')[0]).toMatchObject({ kind: 'paragraph' });
+  });
+
+  it('stops recognizing once a block has spent its search budget', () => {
+    // `MAX_SCAN_WORK` bounds one block's closer searches (the TUI's rule): the
+    // first ~120 unterminated `\(` spans are searched (and cost the budget), and
+    // from there on a new span is not recognized at all. Without the budget this
+    // document walks itself once per span.
+    const filler = 'x'.repeat(9_000);
+    const span = `\\(${filler}`;
+    const withinBudget = `${span.repeat(120)}\\(x\\)`;
+    const overBudget = `${span.repeat(130)}\\(x\\)`;
+
+    expect(JSON.stringify(inline(withinBudget))).toContain('"tex":"x"');
+    const worn = inline(overBudget);
+    expect(worn.some((child) => child.kind === 'math' && child.tex === 'x')).toBe(false);
+    // Nothing is lost either way: the last span is there, as text.
+    expect(worn.at(-1)).toMatchObject({ kind: 'text' });
+  });
+
+  it('stops walking for a block closer once that budget is spent', () => {
+    // A `$$` / `\[` block walks its lines looking for a line that is exactly the
+    // closer, and those walks are charged against the same `MAX_SCAN_WORK` — a
+    // document with megabytes of lines between opener and closer is left to the
+    // paragraph rule instead of walking itself once per opener (review r1 [S3]).
+    const filler = 'x'.repeat(9_000);
+    const between = (count: number): string => Array.from({ length: count }, () => filler).join('\n');
+
+    expect(parseMarkdown(`\\[\n${between(100)}\n\\]\n`)[0]).toMatchObject({ kind: 'math', display: true });
+    expect(parseMarkdown(`\\[\n${between(130)}\n\\]\n`)[0]).toMatchObject({ kind: 'paragraph' });
+  });
+
+  it('does not let a tag inside a fenced code block open an HTML block', () => {
+    // The document scan skips fenced lines: the `<div>` here is code, so the
+    // paragraph right after the fence (no blank line in between) still has its
+    // formula.
+    expect(parseMarkdown('```\n<div>\n```\n$$x$$\n')).toEqual([
+      { kind: 'code', lang: '', closed: true, code: '<div>\n' },
+      { kind: 'paragraph', children: [{ kind: 'math', tex: 'x', source: '$$x$$', display: true }] },
+    ]);
   });
 
   // ── the normalizer's purity guards ──────────────────────────────────
@@ -575,6 +693,26 @@ describe('math syntax (parseMarkdown)', () => {
         items: [[{ kind: 'paragraph', children: [{ kind: 'text', text: 'y) b' }] }]],
       },
     ]);
+  });
+
+  it('uses the same 8192-character window as the TUI for `\\(…\\)` and `\\[…\\]`', () => {
+    // The closer has to fit *inside* the window, not merely start in it — the
+    // TUI searches a same-size slice with `find`. One character matters at the
+    // boundary, and the review checked exactly this (r1 [N2]).
+    const fits = 'a'.repeat(8190);
+    expect(inline(`\\(${fits}\\)`)[0]).toMatchObject({ kind: 'math', tex: fits });
+    expect(inline(`\\[${fits}\\]`)[0]).toMatchObject({ kind: 'math', tex: fits });
+
+    const over = 'a'.repeat(8191);
+    expect(inline(`\\(${over}\\)`)[0]).toMatchObject({ kind: 'text' });
+    expect(inline(`\\[${over}\\]`)[0]).toMatchObject({ kind: 'text' });
+  });
+
+  it('never drops a character when a span is too long to recognize', () => {
+    // What is shown is markdown's own escaping of the source (the TUI prints the
+    // same): `\(` → `(`, `\)` → `)`, and every `a` is there.
+    const long = 'a'.repeat(10_000);
+    expect(inline(`\\(x${long}x\\)`)).toEqual([{ kind: 'text', text: `(x${long}x)` }]);
   });
 });
 

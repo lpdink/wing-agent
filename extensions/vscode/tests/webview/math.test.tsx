@@ -196,6 +196,18 @@ describe('MathView', () => {
     expect(href.querySelector('[href]')).toBeNull();
   });
 
+  it('renders a formula inside an HTML block as text, never through KaTeX', () => {
+    // The line starts an HTML block: the TUI prints it verbatim and the webview
+    // keeps markdown's escaping (`\(x\)` → `(x)`), but no formula is built —
+    // the masked path never reaches KaTeX at all (review r1 [S1]).
+    const { container } = render(<MarkdownText text={'<div>\n\\(x\\)\n</div>\n'} />);
+
+    expect(container.querySelector('[data-testid="md-math"]')).toBeNull();
+    expect(container.querySelector('.katex')).toBeNull();
+    expect(container.textContent).toContain('<div>');
+    expect(container.textContent).toContain('(x)');
+  });
+
   it('shows an over-long formula as its source instead of laying it out', () => {
     // A machine-generated dump is not worth freezing the sidebar for (see
     // MAX_MATH_CHARS); it must still be *visible*, not dropped.

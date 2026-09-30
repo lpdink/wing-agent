@@ -18,6 +18,7 @@
 import MarkdownIt from 'markdown-it';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateBlock from 'markdown-it/lib/rules_block/state_block.mjs';
+import type StateCore from 'markdown-it/lib/rules_core/state_core.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 
 import { MAX_MATH_CHARS } from './math';
@@ -105,13 +106,49 @@ const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true });
 // - block: the `alt` chain is what lets `$$` interrupt a paragraph (i.e. start
 //   display math right after a line of text, without a blank line).
 markdown.inline.ruler.before('escape', 'math_inline', mathInline);
+// The core `inline` rule is replaced so a block that sits inside an HTML block is
+// parsed with those offsets masked (`inlinePass`); keeping it in the pipeline is
+// what lets `linkify` / `text_join` still run over its children.
+markdown.core.ruler.at('inline', inlinePass);
 markdown.block.ruler.before('fence', 'math_block', mathBlock, {
   alt: ['paragraph', 'reference', 'blockquote', 'list'],
 });
 
+/**
+ * Parser environment: markdown-it threads it through every rule, which is how
+ * the two math guards that need *document* context get it (an inline rule only
+ * ever sees its own block's text, and a block rule only the line it is asked
+ * about).
+ */
+interface MathEnv {
+  /**
+   * The block-level answers, per document line (see {@link documentLines}).
+   * `null` when the source cannot contain either kind at all.
+   */
+  readonly lines: DocumentLines | null;
+  /**
+   * Set while a block is re-parsed because part of it is opaque: offsets inside
+   * that block's text where nothing is recognized as a formula (see
+   * {@link maskRanges}).
+   */
+  mathOpaque?: readonly (readonly [number, number])[];
+}
+
+/**
+ * Per document line, computed once per parse: inside an HTML block (sticky to
+ * the next blank line), or a definition-shaped line (that line only).
+ */
+interface DocumentLines {
+  /** `true` from a tag-like line to the next blank line. */
+  readonly html: readonly boolean[];
+  /** `true` on a `[label]: url` line — its destination is a URL, not prose. */
+  readonly definitions: readonly boolean[];
+}
+
 /** Parse one Markdown block into render-ready nodes. Pure: same source → same AST. */
 export function parseMarkdown(source: string): readonly MarkdownNode[] {
-  return parseBlocks(markdown.parse(source, {}), { index: 0, lines: source.split('\n') }, null);
+  const env: MathEnv = { lines: documentLines(source) };
+  return parseBlocks(markdown.parse(source, env), { index: 0, lines: source.split('\n') }, null);
 }
 
 /** Mutable position in a token stream. */
@@ -437,8 +474,9 @@ function parseInlineRange(tokens: readonly Token[], cursor: Cursor): readonly Ma
  *    `image` rules consume `](url "title")` as a whole, so a `\(` inside a URL
  *    cannot be mistaken for a formula (pinned by a test).
  *
- * Everything else on the TUI's opaque list is handled by {@link isOpaque}: HTML
- * blocks, inline HTML tags / autolinks, and link reference definition lines.
+ * Everything else on the TUI's opaque list is handled outside this rule: HTML
+ * blocks (a document-level pass, `documentLines`) and inline HTML tags /
+ * autolinks (`isInTag`) — see the "opaque regions" section at the bottom.
  *
  * Guards, mirroring the TUI normalizer rule by rule:
  *
@@ -523,7 +561,14 @@ const work = new WeakMap<StateInline, number>();
 const disarmed = new WeakSet<StateInline>();
 
 function mathInline(state: StateInline, silent: boolean): boolean {
-  if (isOpaque(state, state.pos)) {
+  const opaque = (state.env as MathEnv | undefined)?.mathOpaque;
+  if (opaque !== undefined && inSpans(opaque, state.pos)) {
+    // Inside an HTML block, or on a definition-shaped line: see
+    // `maskRanges`.
+    return false;
+  }
+  if (isInTag(state, state.pos)) {
+    // Inside an inline HTML tag (`<a title="…">`) or an autolink: opaque.
     return false;
   }
   const code = state.src.charCodeAt(state.pos);
@@ -756,9 +801,12 @@ function mathBlock(state: StateBlock, startLine: number, endLine: number, silent
   if (opening === null) {
     return false;
   }
-  if (insideHtmlBlock(state, startLine)) {
+  const env = state.env as MathEnv | undefined;
+  if (env?.lines?.html[startLine] === true) {
     // `<div>` … blank line is HTML: markdown is not parsed there, so the TUI
-    // shows these lines verbatim and so do we.
+    // shows these lines verbatim and so do we. The flags are computed once per
+    // document (see `documentLines`), which is what makes this O(1) — the
+    // paragraph terminator asks about every line of a paragraph.
     return false;
   }
   const closer = opening === '$$' ? '$$' : '\\]';
@@ -766,13 +814,25 @@ function mathBlock(state: StateBlock, startLine: number, endLine: number, silent
     return false; // no line can close it — do not walk the block at all
   }
 
+  // The line walk shares the parser's work budget with the inline searches
+  // (`MAX_SCAN_WORK`): a document of thousands of never-closed `$$` lines must
+  // not walk itself once per opener. Past the budget the opener is left to the
+  // paragraph rule, which pairs `$$` in a single paragraph anyway. The budget is
+  // read and written once per walk — a `WeakMap` access per line would cost more
+  // than the comparisons it guards.
+  let budget = MAX_SCAN_WORK - (blockWork.get(state) ?? 0);
   let closeLine = -1;
   for (let line = startLine + 1; line < endLine; line += 1) {
+    budget -= lineEnd(state, line) - lineStart(state, line) + 1;
+    if (budget <= 0) {
+      break;
+    }
     if (lineEquals(state, line, closer)) {
       closeLine = line;
       break;
     }
   }
+  blockWork.set(state, MAX_SCAN_WORK - budget);
   // Unterminated, or empty content: not a formula (yet).
   if (closeLine <= startLine + 1) {
     return false;
@@ -820,119 +880,35 @@ function lineText(state: StateBlock, line: number): string {
   return state.src.slice(lineStart(state, line), lineEnd(state, line));
 }
 
-/**
- * Whether `line` is inside an HTML block: the walk goes back to the previous
- * blank line looking for the line that starts one (a block rule only sees the
- * line it is asked about, hence the backward direction). A blank line ends the
- * block, so text after it is markdown again — the TUI's rule.
- *
- * Three things keep it cheap: nothing is walked when the document has no `<`
- * (the common case), the walk is allocation-free and gives up after
- * {@link MAX_MATH_CHARS} characters, and a query for the line right after the
- * last one only has to look at that line ({@link HtmlWalk}) — which is what
- * makes a document full of `$$` lines linear instead of quadratic. Past a bound
- * the line counts as ordinary text: at worst a formula is recognized where the
- * TUI would have shown it literally, and no content is ever lost either way.
- */
-function insideHtmlBlock(state: StateBlock, line: number): boolean {
-  if (!hasTagStart(state)) {
-    return false; // no `<` anywhere: nothing can start an HTML block
-  }
-  const src = state.src;
-  const start = lineStart(state, line);
-  const end = lineEnd(state, line);
-  const cached = WALKS.get(state);
-  if (cached !== undefined && cached.line === line - 1) {
-    // The paragraph terminator probes ask about consecutive lines. The cached
-    // `tagLine` covers the lines above; only the new one is unknown.
-    if (isBlankRange(src, start, end)) {
-      WALKS.set(state, { line, tagLine: -1 }); // a blank line starts a new run
-      return false;
-    }
-    const tagLine = startsHtmlBlock(src, start, end) ? line : cached.tagLine;
-    WALKS.set(state, { line, tagLine });
-    return tagLine !== -1;
-  }
-
-  let budget = MAX_MATH_CHARS;
-  let tagLine = -1;
-  for (let at = line; at >= 0 && budget > 0; at -= 1) {
-    const from = lineStart(state, at);
-    const to = lineEnd(state, at);
-    budget -= to - from;
-    if (isBlankRange(src, from, to)) {
-      break; // the run starts above this line; whatever is above is another block
-    }
-    if (tagLine === -1 && startsHtmlBlock(src, from, to)) {
-      tagLine = at;
-    }
-  }
-  WALKS.set(state, { line, tagLine });
-  return tagLine !== -1;
-}
-
-/**
- * The last HTML-block walk, so the next line can be checked on its own.
- *
- * `tagLine` is the nearest line at or above `line`, in the same run, that starts
- * an HTML block (`-1` when there is none). Extending it assumes the lines above
- * are still read the same way — they are, unless the parser entered another
- * container between two *consecutive* queries, which cannot happen (a container
- * start is itself a line).
- */
-interface HtmlWalk {
-  readonly line: number;
-  readonly tagLine: number;
-}
-
-const WALKS = new WeakMap<StateBlock, HtmlWalk>();
-
-/** Whether `[start, end)` holds only whitespace. */
-function isBlankRange(src: string, start: number, end: number): boolean {
-  for (let at = start; at < end; at += 1) {
-    if (!isWhitespace(src.charCodeAt(at))) {
-      return false;
-    }
-  }
-  return true;
-}
-
-/** Whether the document contains a `<` at all (constant per parser state). */
-function hasTagStart(state: StateBlock): boolean {
-  const cached = TAGS.get(state);
-  if (cached !== undefined) {
-    return cached;
-  }
-  const value = state.src.includes('<');
-  TAGS.set(state, value);
-  return value;
-}
+const CLOSERS = new WeakMap<StateBlock, Map<string, boolean>>();
 
 /**
  * Whether a line *could* equal `closer` (ignoring surrounding whitespace): a
  * *necessary* condition, used to skip the line walk when the closer does not
  * occur in the source at all — a document of thousands of never-closed `\[`
  * lines must not walk itself once per line. The answer depends only on the
- * untouched source, which never changes while a document is parsed.
+ * untouched source, which never changes while a document is parsed — and it is
+ * asked once per candidate line, so both answers are cached (a negative answer
+ * alone would leave a full-source `includes` per line, which is the quadratic
+ * the budget is meant to avoid).
  */
 function mightHaveCloser(state: StateBlock, closer: string): boolean {
-  let missing = CLOSERS.get(state);
-  if (missing === undefined) {
-    missing = new Set<string>();
-    CLOSERS.set(state, missing);
+  let found = CLOSERS.get(state);
+  if (found === undefined) {
+    found = new Map<string, boolean>();
+    CLOSERS.set(state, found);
   }
-  if (missing.has(closer)) {
-    return false;
+  const cached = found.get(closer);
+  if (cached !== undefined) {
+    return cached;
   }
-  if (state.src.includes(closer)) {
-    return true;
-  }
-  missing.add(closer);
-  return false;
+  const value = state.src.includes(closer);
+  found.set(closer, value);
+  return value;
 }
 
-const TAGS = new WeakMap<StateBlock, boolean>();
-const CLOSERS = new WeakMap<StateBlock, Set<string>>();
+/** Bytes already spent from the block-level budget, per parser state. */
+const blockWork = new WeakMap<StateBlock, number>();
 
 /**
  * Whether line `line`'s content is exactly `text`, ignoring surrounding
@@ -979,7 +955,9 @@ function pushMath(state: StateInline, silent: boolean, source: string, tex: stri
  * could never close `\(`.
  */
 function findCloser(src: string, from: number, limit: number, closer: string): number {
-  for (let pos = from; pos < limit; pos += 1) {
+  // The delimiter has to fit inside the window, not merely start in it: the TUI
+  // searches a `hay` slice of the same size and `find` needs the whole closer.
+  for (let pos = from; pos + closer.length <= limit; pos += 1) {
     if (src.startsWith(closer, pos)) {
       return pos;
     }
@@ -1002,134 +980,378 @@ function isWhitespace(code: number): boolean {
 // ── opaque regions ────────────────────────────────────────────────────
 
 /**
- * Regions of one inline block (a paragraph, a heading, a table cell …) where
- * math must not be recognized — the TUI normalizer's opaque list, expressed
- * against markdown-it's own token boundaries:
+ * Where math must not be recognized — the TUI normalizer's opaque list,
+ * expressed against markdown-it's own structures. Three kinds, three mechanisms:
  *
- * - **HTML block**: a line whose content starts with a tag (`<div>`, `<!--`,
- *   `<?…`, `<!DOCTYPE`) is opaque to the end of the block, which is the next
- *   blank line — markdown-it hands the inline parser one block at a time, so
- *   "the rest of the block" is the whole tail here. `html: false` means this is
- *   about *text that looks like* HTML; nothing is parsed as markup.
- * - **Inline HTML tag / autolink**: `<a href="…">`, `<http://…>` — everything
- *   between the `<` and its `>` is opaque, while the prose between two tags is
- *   not (`before <b>\(x\)</b> after` still recognizes `\(x\)`, as the TUI does).
- * - **Link reference definition line**: `[label]: url "title"` — the destination
- *   is a URL, not prose. The block parser consumes a *real* definition before any
- *   inline rule runs; this covers the definition-shaped line inside a paragraph,
- *   where the TUI's check is line-based too.
- *
- * Code spans and fenced/indented code need no entry (markdown-it turns them into
- * `code_inline` / `fence` / `code_block` tokens before any inline rule runs), and
- * neither do link destinations and titles (the `link` / `image` rules consume
- * them whole). Tests pin both.
+ * - **HTML block** (`<div>` … to the next blank line, `<!--`, `<?…`): opaque to
+ *   math. The TUI decides this on the *document* line (after stripping `>` /
+ *   list prefixes); so does {@link documentLines}, computed once per parse, read
+ *   by the block rule directly and turned into per-block offsets by
+ *   {@link maskRanges} for the blocks `inlinePass` parses. The TUI leaves the
+ *   whole region verbatim; with `html: false` the webview still parses markdown
+ *   inside it — it only refuses to see formulas there.
+ * - **Inline HTML tag / autolink** (`<a href="…">`, `<http://…>`): everything
+ *   between the `<` and its `>` — attribute values included — is opaque, while
+ *   the prose between two tags is not (`before <b>\(x\)</b> after` still
+ *   recognizes `\(x\)`, as the TUI does). See {@link tagSpans}.
+ * - **Code spans** and fenced/indented code blocks, **link destinations and
+ *   titles**, and reference definitions need no entry here: markdown-it turns
+ *   them into `code_inline` / `fence` / `code_block` tokens, or consumes them
+ *   inside the `link` / `image` / `reference` rules, before any inline rule runs
+ *   (tests pin both).
  */
-interface OpaqueRegions {
-  /** Offset each line of the block starts at (ascending). */
-  readonly lineStarts: readonly number[];
-  /** Per line: `true` when math must not be recognized anywhere on that line. */
-  readonly lines: readonly boolean[];
-  /** `[start, end)` of every inline HTML tag / autolink in the block. */
-  readonly tags: readonly (readonly [number, number])[];
+
+/**
+ * The block-level answers for every document line, computed once per parse.
+ *
+ * The TUI's scan sees raw lines and strips the block prefixes itself
+ * (`content_start`), so the same is done here: a block rule likewise only ever
+ * sees whole document lines, and the two frontends then agree on inputs like
+ * `> <div>` or `- <div>`. HTML blocks are decided per line
+ * (`is_html_block_start`) and sticky to the next blank line, with fenced code
+ * skipped — a `<div>` inside a fence is code, not an HTML block.
+ *
+ * `null` when the source has no `<` and no `[`: nothing can be an HTML block or
+ * a definition line.
+ */
+function documentLines(source: string): DocumentLines | null {
+  if (!source.includes('<') && !source.includes('[')) {
+    return null;
+  }
+  const html: boolean[] = [];
+  const definitions: boolean[] = [];
+  let inHtmlBlock = false;
+  let fence: Fence | null = null;
+  let at = 0;
+  for (;;) {
+    const newline = source.indexOf('\n', at);
+    const end = newline === -1 ? source.length : newline;
+    const line = source.slice(at, end);
+    const content = line.slice(contentOffset(line));
+    let opaque = false;
+    if (fence !== null) {
+      // Fenced code: its lines are code, never an HTML block start.
+      if (closesFence(content, fence)) {
+        fence = null;
+      }
+    } else if (content.trim() === '') {
+      inHtmlBlock = false; // a blank line ends the HTML block
+    } else if (inHtmlBlock) {
+      opaque = true;
+    } else {
+      const opened = opensFence(content);
+      if (opened !== null) {
+        fence = opened;
+      } else if (startsHtmlBlock(content)) {
+        inHtmlBlock = true;
+        opaque = true;
+      }
+    }
+    html.push(opaque);
+    definitions.push(!opaque && isReferenceDefinition(content));
+    if (newline === -1) {
+      break;
+    }
+    at = newline + 1;
+  }
+  return { html, definitions };
+}
+
+/**
+ * Parse every block's inline content — markdown-it's own core `inline` rule,
+ * with one addition: a block that sits inside an HTML block (or on a
+ * definition-shaped line) is parsed with those offsets masked, so the formulas
+ * there stay ordinary text (see {@link maskRanges}).
+ *
+ * This has to run *inside* the core pipeline: the rules after it (`linkify`,
+ * `text_join`) expect the children it produced, and re-parsing a masked block
+ * afterwards would quietly skip them.
+ */
+function inlinePass(state: StateCore): void {
+  const env = state.env as MathEnv;
+  for (const token of state.tokens) {
+    if (token.type !== 'inline') {
+      continue;
+    }
+    // The mask is set per block (empty for the blocks that have nothing opaque
+    // in them), because the inline parser threads this very `env` down into
+    // nested parses (link labels).
+    env.mathOpaque = maskRanges(token, env.lines);
+    state.md.inline.parse(token.content, state.md, state.env, (token.children ??= []));
+  }
+  delete env.mathOpaque;
+}
+
+/**
+ * The offsets of one block's text that must not be read as math: the rest of the
+ * block once its line run is inside an HTML block, plus each definition-shaped
+ * line on its own.
+ *
+ * The block's own line numbers come from `token.map` and the text lines map to
+ * it one-to-one (markdown-it hands every block its content with the container
+ * prefixes already stripped), which is why this can work on document lines — and
+ * that is what keeps a heading's `# <div>` or a table cell's `| <div>` from
+ * looking like an HTML block.
+ */
+function maskRanges(token: Token, lines: DocumentLines | null): readonly (readonly [number, number])[] {
+  const map = token.map;
+  if (lines === null || map === null) {
+    return [];
+  }
+  const [from, to] = map;
+  const ranges: (readonly [number, number])[] = [];
+  for (let line = from; line < to && line < lines.html.length; line += 1) {
+    const index = line - from;
+    if (lines.html[line] === true) {
+      // Sticky: the rest of the line run is inside the HTML block.
+      ranges.push([lineOffset(token.content, index), token.content.length]);
+      break;
+    }
+    if (lines.definitions[line] === true) {
+      ranges.push([lineOffset(token.content, index), lineOffset(token.content, index + 1)]);
+    }
+  }
+  return ranges;
+}
+
+/** Offset where the `index`-th line of `content` starts (0-based). */
+function lineOffset(content: string, index: number): number {
+  let at = 0;
+  for (let line = 0; line < index; line += 1) {
+    const newline = content.indexOf('\n', at);
+    if (newline === -1) {
+      return content.length;
+    }
+    at = newline + 1;
+  }
+  return at;
+}
+
+/** Open code fence: its marker character and run length. */
+interface Fence {
+  readonly char: string;
+  readonly size: number;
+}
+
+/** Whether the line opens a code fence (````` / `~~~`, ≥3, ≤3 spaces of indent). */
+function opensFence(content: string): Fence | null {
+  const marker = FENCE_MARKER.exec(content);
+  if (marker === null) {
+    return null;
+  }
+  const run = marker[1] ?? '';
+  return { char: run.charAt(0), size: run.length };
+}
+
+/** Whether the line closes `fence`: same marker, at least as long, nothing else. */
+function closesFence(content: string, fence: Fence): boolean {
+  if (content.charAt(0) !== fence.char) {
+    return false;
+  }
+  let size = 0;
+  while (content.charAt(size) === fence.char) {
+    size += 1;
+  }
+  return size >= fence.size && content.slice(size).trim() === '';
+}
+
+/**
+ * Offset of a line's content, past the block prefixes pulldown resolves before
+ * deciding what a line is — `>` chains and list markers — the TUI's
+ * `content_start`. Four or more columns of indentation are an indented code
+ * block: nothing after them is a prefix.
+ */
+function contentOffset(line: string): number {
+  let at = 0;
+  for (;;) {
+    const rest = line.slice(at);
+    const indent = indentWidth(rest);
+    if (indent.columns >= 4) {
+      return at;
+    }
+    const after = rest.slice(indent.bytes);
+    if (after.startsWith('>')) {
+      at += indent.bytes + 1;
+      if (line.charAt(at) === ' ') {
+        at += 1;
+      }
+      continue;
+    }
+    const marker = listMarkerLength(after);
+    if (marker > 0) {
+      at += indent.bytes + marker;
+      continue;
+    }
+    return at;
+  }
+}
+
+/** Leading whitespace of `line`: columns (a tab is four) and bytes. */
+function indentWidth(line: string): { readonly columns: number; readonly bytes: number } {
+  let columns = 0;
+  let bytes = 0;
+  while (bytes < line.length) {
+    const char = line.charAt(bytes);
+    if (char === ' ') {
+      columns += 1;
+    } else if (char === '\t') {
+      columns += 4;
+    } else {
+      break;
+    }
+    bytes += 1;
+  }
+  return { columns, bytes };
+}
+
+/**
+ * Length of a list marker prefix (`- `, `+ `, `* `, `12. `, `7) `), or `0` — the
+ * TUI's `list_marker_len`. The indentation in front of the marker is handled by
+ * the caller.
+ */
+function listMarkerLength(line: string): number {
+  const char = line.charAt(0);
+  if (char === '-' || char === '+' || char === '*') {
+    if (line.length === 1) {
+      return 1;
+    }
+    return line.charAt(1) === ' ' ? 2 : 0;
+  }
+  let digits = 0;
+  while (digits < line.length && line.charAt(digits) >= '0' && line.charAt(digits) <= '9') {
+    digits += 1;
+  }
+  if (digits === 0 || digits > 9) {
+    return 0;
+  }
+  const after = line.charAt(digits);
+  if (after !== '.' && after !== ')') {
+    return 0;
+  }
+  if (line.length === digits + 1) {
+    return digits + 1;
+  }
+  return line.charAt(digits + 1) === ' ' ? digits + 2 : 0;
+}
+
+/**
+ * Whether a line's content starts an HTML block: `<` + a tag character, with up
+ * to three leading spaces (CommonMark's allowance). This mirrors the TUI's
+ * `is_html_block_start`; the prefixes a block can carry (`> `, list markers) are
+ * stripped by {@link contentOffset} first.
+ */
+function startsHtmlBlock(content: string): boolean {
+  let at = 0;
+  while (at < content.length && at < 3 && content.charCodeAt(at) === 0x20) {
+    at += 1;
+  }
+  return content.charCodeAt(at) === 0x3c /* < */ && isTagStart(content.charCodeAt(at + 1));
+}
+
+/** Whether `pos` sits inside one of the inline HTML tags of this block. */
+function isInTag(state: StateInline, pos: number): boolean {
+  let spans = TAGS.get(state);
+  if (spans === undefined) {
+    spans = tagSpans(state.src);
+    TAGS.set(state, spans);
+  }
+  return inSpans(spans, pos);
 }
 
 /**
  * One entry per inline block: `StateInline` objects are created per block and
  * short-lived, so the cache costs nothing and the callers stay pure.
  */
-const REGIONS = new WeakMap<StateInline, OpaqueRegions>();
-
-/** Whether `pos` sits in one of the regions above. */
-function isOpaque(state: StateInline, pos: number): boolean {
-  const regions = regionsOf(state);
-  if (inTag(regions, pos)) {
-    return true;
-  }
-  return regions.lines[lineAt(regions, pos)] === true;
-}
-
-function regionsOf(state: StateInline): OpaqueRegions {
-  const cached = REGIONS.get(state);
-  if (cached !== undefined) {
-    return cached;
-  }
-
-  const src = state.src;
-  const lineStarts: number[] = [];
-  const lines: boolean[] = [];
-  let inHtmlBlock = false;
-  let at = 0;
-  for (;;) {
-    lineStarts.push(at);
-    const newline = src.indexOf('\n', at);
-    const end = newline === -1 ? src.length : newline;
-    const content = src.slice(at, end).replace(/^ {0,3}/, '');
-    if (content.trim() === '') {
-      inHtmlBlock = false; // a blank line ends the HTML block
-      lines.push(false);
-    } else if (inHtmlBlock) {
-      lines.push(true);
-    } else if (startsHtmlBlock(src, at, end)) {
-      inHtmlBlock = true;
-      lines.push(true);
-    } else {
-      lines.push(isReferenceDefinition(content));
-    }
-    if (newline === -1) {
-      break;
-    }
-    at = newline + 1;
-  }
-
-  const regions: OpaqueRegions = { lineStarts, lines, tags: tagSpans(src) };
-  REGIONS.set(state, regions);
-  return regions;
-}
+const TAGS = new WeakMap<StateInline, readonly (readonly [number, number])[]>();
 
 /**
  * `[start, end)` of every inline HTML tag or autolink in `src`.
  *
  * A `<` only opens a region when a tag character follows (so `a <- b`, `x < y`
  * and an unclosed `<` are ordinary text — the TUI's rule), and the region runs to
- * the first `>`, which is what makes an attribute value opaque too.
+ * the first `>`, which is what makes an attribute value opaque too. Code spans
+ * are skipped on the way (the TUI consumes them first): in
+ * `` `a <b` \(x\) `c>` `` the `<` and the `>` are in different code spans, and
+ * the formula between them is prose.
+ *
+ * Both the per-`<` lookahead and the whole scan are bounded (the same
+ * {@link MAX_MATH_CHARS} window and {@link MAX_SCAN_WORK} budget the span rules
+ * use): a block that is nothing but `<a` must not scan itself once per tag.
  */
 function tagSpans(src: string): readonly (readonly [number, number])[] {
   const spans: (readonly [number, number])[] = [];
+  let budget = MAX_SCAN_WORK;
   let cursor = 0;
-  for (;;) {
-    const open = src.indexOf('<', cursor);
+  while (cursor < src.length && budget > 0) {
+    const open = nextTagChar(src, cursor);
     if (open === -1) {
-      return spans;
+      break;
     }
+    if (src.charCodeAt(open) === 0x60 /* ` */) {
+      const after = skipCodeSpan(src, open);
+      if (after === -1) {
+        break; // an unterminated code span: nothing after it is a region
+      }
+      budget -= after - open;
+      cursor = after;
+      continue;
+    }
+    const limit = Math.min(src.length, open + 1 + MAX_MATH_CHARS);
     const close = isTagStart(src.charCodeAt(open + 1)) ? src.indexOf('>', open + 1) : -1;
-    if (close === -1) {
+    if (close === -1 || close >= limit) {
+      budget -= limit - open;
       cursor = open + 1;
       continue;
     }
     spans.push([open, close + 1]);
+    budget -= close + 1 - open;
     cursor = close + 1;
   }
+  return spans;
 }
 
-/** Index of the line containing `pos` (binary search over the line starts). */
-function lineAt(regions: OpaqueRegions, pos: number): number {
-  const starts = regions.lineStarts;
-  let low = 0;
-  let high = starts.length - 1;
-  while (low < high) {
-    const mid = (low + high + 1) >> 1;
-    if ((starts[mid] ?? 0) <= pos) {
-      low = mid;
-    } else {
-      high = mid - 1;
-    }
+/** The first `<` or `` ` `` at or after `from`, or `-1`. */
+function nextTagChar(src: string, from: number): number {
+  const lt = src.indexOf('<', from);
+  const tick = src.indexOf('`', from);
+  if (lt === -1) {
+    return tick;
   }
-  return low;
+  if (tick === -1) {
+    return lt;
+  }
+  return Math.min(lt, tick);
+}
+
+/**
+ * Offset just past the code span opening at `at`, or `-1` when its backtick run
+ * never closes — the TUI's `skip_code_span`.
+ */
+function skipCodeSpan(src: string, at: number): number {
+  let run = 0;
+  while (src.charCodeAt(at + run) === 0x60 /* ` */) {
+    run += 1;
+  }
+  const needle = '`'.repeat(run);
+  let from = at + run;
+  for (;;) {
+    const close = src.indexOf(needle, from);
+    if (close === -1) {
+      return -1;
+    }
+    let size = 0;
+    while (src.charCodeAt(close + size) === 0x60 /* ` */) {
+      size += 1;
+    }
+    if (size === run) {
+      return close + run;
+    }
+    from = close + size;
+  }
 }
 
 /** Whether `pos` is inside one of the tag spans (binary search). */
-function inTag(regions: OpaqueRegions, pos: number): boolean {
-  const spans = regions.tags;
+function inSpans(spans: readonly (readonly [number, number])[], pos: number): boolean {
   let low = 0;
   let high = spans.length - 1;
   while (low <= high) {
@@ -1159,22 +1381,6 @@ function isTagStart(code: number): boolean {
     code === 0x21 /* ! */ ||
     code === 0x3f /* ? */
   );
-}
-
-/**
- * Whether a line's content (`[start, end)`) starts an HTML block: `<` + a tag
- * character, with up to three leading spaces (CommonMark's allowance). This
- * mirrors the TUI's `is_html_block_start`; the prefixes a block can carry (`> `,
- * list markers) are stripped by markdown-it before any rule sees the content.
- */
-function startsHtmlBlock(src: string, start: number, end: number): boolean {
-  let at = start;
-  let spaces = 0;
-  while (at < end && spaces < 3 && src.charCodeAt(at) === 0x20) {
-    at += 1;
-    spaces += 1;
-  }
-  return src.charCodeAt(at) === 0x3c /* < */ && isTagStart(src.charCodeAt(at + 1));
 }
 
 /**
