@@ -9,6 +9,7 @@ import {
   isKnownEventType,
   KNOWN_EVENT_TYPES,
 } from '../../src/core/protocol/events';
+import { isTurnInFlight } from '../../src/core/protocol/models';
 
 /**
  * Protocol mirror tests — one payload per event type, asserted **field by field**
@@ -493,6 +494,7 @@ describe('sync_session — the replay payload', () => {
   const payload = {
     type: 'sync_session',
     session_id: 'sess-9',
+    status: 'idle',
     messages: [
       { role: 'user', content: 'hello', uuid: 'm1' },
       {
@@ -581,10 +583,38 @@ describe('sync_session — the replay payload', () => {
     expect(facts[1]).toMatchObject({ type: 'compact_done', original_tokens: 10, compressed_tokens: 5 });
   });
 
+  it('decodes the snapshot status — the statement of whether a turn runs', () => {
+    expect(syncSession({ ...payload, status: 'working' }).status).toBe('working');
+    expect(syncSession({ ...payload, status: 'waiting' }).status).toBe('waiting');
+    expect(syncSession({ ...payload, status: 'idle' }).status).toBe('idle');
+    expect(isTurnInFlight('working')).toBe(true);
+    expect(isTurnInFlight('waiting')).toBe(true);
+    expect(isTurnInFlight('idle')).toBe(false);
+    expect(isTurnInFlight('inactive')).toBe(false);
+  });
+
+  it('requires the status: missing or unknown is a decode error', () => {
+    // The snapshot MUST state the turn state (CLI and gateway ship as one
+    // version) — decoding it to a default is exactly the inference the field
+    // exists to remove, and reading `sync.status` afterwards would be a lie.
+    const missing = decodeWingEvent({
+      type: 'sync_session',
+      session_id: 's',
+      messages: [],
+      ...META,
+    });
+    expect(isKnownEvent(missing)).toBe(false);
+    expect(missing).toMatchObject({ type: 'sync_session' });
+
+    const unknown = decodeWingEvent({ ...payload, status: 'compacting' });
+    expect(isKnownEvent(unknown)).toBe(false);
+  });
+
   it('keeps an unknown replay fact as an unknown event (forward compatible)', () => {
     const event = syncSession({
       type: 'sync_session',
       session_id: 's',
+      status: 'idle',
       messages: [],
       events: [{ type: 'from_the_future', payload: 1, ...META }],
       ...META,
@@ -597,6 +627,7 @@ describe('sync_session — the replay payload', () => {
     const event = syncSession({
       type: 'sync_session',
       session_id: 's',
+      status: 'idle',
       messages: ['not-a-message', { role: 'user', content: 'ok' }],
       ...META,
     });

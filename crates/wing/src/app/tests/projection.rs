@@ -7,6 +7,7 @@ use super::support::*;
 use crate::app::*;
 use crate::protocol::AskQuestion;
 use crate::protocol::EventMeta;
+use crate::protocol::SessionStatus;
 use crate::protocol::WingEvent;
 use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::ask::PanelMode;
@@ -159,8 +160,8 @@ fn cell_kinds(app: &App) -> Vec<&'static str> {
 
 #[test]
 fn test_sync_midturn_restores_working_and_elapsed() {
-    // 6.13: uncommitted non-null → working; elapsed from turn_started_at
-    // (not recounted from the resume moment).
+    // Content in flight (status: working) → working; elapsed from
+    // turn_started_at (not recounted from the resume moment).
     let mut app = test_app();
     let uncommitted = serde_json::json!({
         "role": "assistant",
@@ -183,6 +184,163 @@ fn test_sync_midturn_restores_working_and_elapsed() {
     );
     // uncommitted rendered via replay_messages (assistant cell present)
     assert!(cell_kinds(&app).contains(&"assistant"));
+}
+
+#[test]
+fn test_sync_working_status_with_empty_projections_restores_working() {
+    // The regression: the turn is in flight but nothing is finalized yet — the
+    // first LLM call of a round is still in flight (TTFT / compaction await) or
+    // we are exactly at a round boundary. `uncommitted` / `uncommitted_tools`
+    // are empty in *both* phases, yet the snapshot says `working`; taking
+    // "empty projection" for "idle" left the spinner / title / timer off while
+    // live events kept arriving.
+    let mut app = test_app();
+    let _ = app.drain_intents();
+    app.handle_event(sync_event_with_status(
+        SessionStatus::Working,
+        vec![serde_json::json!({"role": "user", "content": "hi"})],
+        None,
+        vec![],
+        vec![],
+        Some(utc_ago(5)),
+    ));
+
+    assert!(
+        app.turn.working,
+        "a working status must enter working state even with empty projections"
+    );
+    let started = app.turn.started_at.expect("started_at set");
+    let elapsed = started.elapsed().as_secs();
+    assert!(
+        (3..=7).contains(&elapsed),
+        "elapsed should reflect turn_started_at (~5s), got {elapsed}s"
+    );
+    // The terminal title switched to the working frame (spinner glyph + wing).
+    let title = app.drain_intents().into_iter().find_map(|i| match i {
+        AppIntent::SetTitle(t) => Some(t),
+        _ => None,
+    });
+    let title = title.expect("working resume sets the title");
+    assert!(
+        title.starts_with('⠋') && title.ends_with("wing"),
+        "title should carry a spinner frame, got: {title}"
+    );
+}
+
+#[test]
+fn test_sync_waiting_status_restores_working() {
+    // A pending ask: the turn is in flight, blocked on user input. Live parity
+    // — the live path keeps the spinner up while the ask panel is open.
+    let mut app = test_app();
+    app.handle_event(sync_event_with_status(
+        SessionStatus::Waiting,
+        vec![],
+        None,
+        vec![],
+        vec![],
+        Some(utc_ago(2)),
+    ));
+
+    assert!(app.turn.working, "waiting is a turn in flight");
+}
+
+#[test]
+fn test_sync_idle_status_beats_content_presence() {
+    // The status is authoritative: a snapshot that says `idle` must not enter
+    // working just because a projection is present (the content is still
+    // replayed — it is the *turn state* that follows the status).
+    let mut app = test_app();
+    app.handle_event(sync_event_with_status(
+        SessionStatus::Idle,
+        vec![],
+        Some(serde_json::json!({"role": "assistant", "content": "committed elsewhere"})),
+        vec![],
+        vec![],
+        None,
+    ));
+
+    assert!(!app.turn.working, "idle status wins over content presence");
+    assert!(app.turn.started_at.is_none());
+    assert!(
+        cell_kinds(&app).contains(&"assistant"),
+        "content still replays"
+    );
+}
+
+#[test]
+fn test_sync_idle_status_clears_the_previous_turns_working_state() {
+    // The mirror image of the regression: a full view replacement under a
+    // running turn (session switch / reconnect) with an idle snapshot. The
+    // previous session's `Done` never arrives (foreign-session events are
+    // filtered), so the snapshot has to clear spinner / elapsed / title.
+    let mut app = test_app();
+    app.handle_event(turn_started_event());
+    assert!(app.turn.working, "turn started");
+    let _ = app.drain_intents();
+
+    app.handle_event(sync_event_with_status(
+        SessionStatus::Idle,
+        vec![],
+        None,
+        vec![],
+        vec![],
+        None,
+    ));
+
+    assert!(!app.turn.working, "idle snapshot must clear working state");
+    assert!(app.turn.started_at.is_none(), "elapsed anchor cleared");
+    let title = app.drain_intents().into_iter().find_map(|i| match i {
+        AppIntent::SetTitle(t) => Some(t),
+        _ => None,
+    });
+    assert_eq!(
+        title.as_deref(),
+        Some("☾ wing"),
+        "title must go back to idle"
+    );
+}
+
+#[test]
+fn test_sync_titles_use_the_new_sessions_workdir() {
+    // The title carries the workdir suffix: when a sync restates the turn state
+    // it must be the *new* session's label — the metadata travels in the same
+    // snapshot and is restored before the title is composed (an idle sync has
+    // no spinner tick to self-correct on).
+    let mut app = test_app();
+    app.handle_event(turn_started_event());
+    let _ = app.drain_intents();
+
+    let mut sync = sync_event_with_status(SessionStatus::Idle, vec![], None, vec![], vec![], None);
+    if let WingEvent::SyncSession { agent, .. } = &mut sync {
+        *agent = Some(Box::new(crate::protocol::AgentInfo {
+            model_name: "test-model".into(),
+            system_prompt: None,
+            tools: vec![],
+            skills: vec![],
+            rules: vec![],
+            workspace: Some("/home/me/other-project".into()),
+            provider_name: None,
+        }));
+    }
+    app.handle_event(sync);
+
+    let title = app
+        .drain_intents()
+        .into_iter()
+        .find_map(|i| match i {
+            AppIntent::SetTitle(t) => Some(t),
+            _ => None,
+        })
+        .expect("idle title restored");
+    assert_eq!(
+        title, "☾ wing [other-project]",
+        "title must use the new session's workdir"
+    );
+    assert_eq!(
+        app.status.workdir.as_deref(),
+        Some("/home/me/other-project"),
+        "the snapshot's metadata is restored"
+    );
 }
 
 #[test]

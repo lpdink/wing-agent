@@ -366,6 +366,7 @@ mod tests {
         json!({
             "type": "sync_session",
             "session_id": "s1",
+            "status": "idle",
             "messages": [{"role": "assistant", "content": "x".repeat(pad)}],
             "created_at": META.0,
             "request_id": META.1,

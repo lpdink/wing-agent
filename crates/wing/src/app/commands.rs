@@ -404,8 +404,8 @@ impl App {
                 self.update_popup();
             }
             FetchPayload::SessionList(resp) => {
+                use crate::protocol::SessionStatus;
                 use crate::ui::popup::command::SessionCandidate;
-                use crate::ui::popup::selection::SessionStatus;
 
                 // Normalize a path for workdir comparison (strip trailing slashes).
                 let norm = |p: &str| {
@@ -442,7 +442,8 @@ impl App {
                 // ③ 保持后端时间降序。
                 candidates.sort_by_key(|c| {
                     let ws_mismatch = !ws_matches(&c.workspace);
-                    (ws_mismatch, SessionStatus::parse(&c.status).rank())
+                    let status = SessionStatus::parse(&c.status).unwrap_or(SessionStatus::Inactive);
+                    (ws_mismatch, status.rank())
                 });
 
                 self.popup.cache.sessions = candidates;

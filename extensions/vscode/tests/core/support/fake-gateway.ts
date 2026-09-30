@@ -177,6 +177,7 @@ export function syncSessionPayload(pad: number, sessionId = 'sess-1'): string {
   return JSON.stringify({
     type: 'sync_session',
     session_id: sessionId,
+    status: 'idle',
     messages: [{ role: 'assistant', content: 'x'.repeat(pad), uuid: 'm1' }],
     uncommitted: null,
     uncommitted_tools: [],

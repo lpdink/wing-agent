@@ -30,16 +30,19 @@ import {
   reqStringArray,
   stringOr,
 } from './json';
-import { type AgentInfo, type BranchTarget, decodeAgentInfo, decodeBranchTarget } from './models';
+import {
+  type AgentInfo,
+  type BranchTarget,
+  type SessionStatus,
+  SESSION_STATUSES,
+  decodeAgentInfo,
+  decodeBranchTarget,
+} from './models';
 import { type SessionMessage, decodeSessionMessage } from './history';
 
 // ============================================================
 // Shared
 // ============================================================
-
-/** `SessionStatus` (`wing/event/base.py`) — the backend's runtime status vocabulary. */
-export const SESSION_STATUSES = ['inactive', 'idle', 'working', 'waiting'] as const;
-export type SessionStatus = (typeof SESSION_STATUSES)[number];
 
 /** `wing/event/base.py::SessionInfo` — one row of the session list. */
 export interface SessionInfo {

@@ -165,7 +165,11 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 **rewind/fork/compact 凭链序免费工作**：事件是链节点——set_tip 后边界外事件移出活跃链；fork 拷贝混合链前缀（事件随行）；compact 后被压缩区间的事件与消息一并离开活跃链（被压缩的 diff 自然不再重放，无孤儿处理）。
 
-**中途订阅完整视图**：`_push_sync` 的 SyncSessionEvent 携带四组重放素材——`messages`（已提交 Message 投影）+ `uncommitted`（**单个**未提交 assistant Message 投影，已终结块）+ `uncommitted_tools`（未终结调用的原始 args 片段）+ `events`（活跃链上的**事实类**事件，按链序），外加 `turn_started_at`（恢复 working 已耗时）。前端组装顺序 **messages → uncommitted → uncommitted_tools → events → live 流**：`messages` 与 `uncommitted` 走同一条 `replay_messages` 路径，`uncommitted_tools` 走既有 live `ToolCallStream` 分支（客户端局部解析），`events` 最后锚定。这个顺序让"diff 渲染在其 ToolCall 卡片之前"的缺陷结构性消失——产生 diff 的 tool_use 是已终结块，必在 `uncommitted` 投影里先建出锚点 cell。`events` 的下发过滤归属后端单点（`FACT_EVENTS` + pending ask 谓词，见下）。
+**中途订阅完整视图**：`_push_sync` 的 SyncSessionEvent 是**状态 + 素材**：`status`（快照时刻的运行状态 idle / working / waiting，**权威**）+ `turn_started_at`（恢复 working 已耗时）+ 四组重放素材——`messages`（已提交 Message 投影）+ `uncommitted`（**单个**未提交 assistant Message 投影，已终结块）+ `uncommitted_tools`（未终结调用的原始 args 片段）+ `events`（活跃链上的**事实类**事件，按链序）。前端组装顺序 **messages → uncommitted → uncommitted_tools → events → live 流**：`messages` 与 `uncommitted` 走同一条 `replay_messages` 路径，`uncommitted_tools` 走既有 live `ToolCallStream` 分支（客户端局部解析），`events` 最后锚定。这个顺序让"diff 渲染在其 ToolCall 卡片之前"的缺陷结构性消失——产生 diff 的 tool_use 是已终结块，必在 `uncommitted` 投影里先建出锚点 cell。`events` 的下发过滤归属后端单点（`FACT_EVENTS` + pending ask 谓词，见下）。
+
+**working 状态由 `status` 回答，MUST NOT 由内容反推**：中途订阅者听不到已经过去的 `turn_started`（一次性 live 事件，`persist=false` 不落盘、不重放，`Done` 之前不会再有第二个），所以"在不在跑"必须由快照显式给出。"有未提交内容 ⇒ working"只是**单向**成立：一轮 LLM 调用在飞行、尚未吐出任何已终结块时（首帧未到——含 TTFT 与 `get_messages_for_llm` 里 await 后台 compact 的窗口；以及每个多轮 turn 都要穿过的**轮边界**）两个投影都是空的，而 turn 确在 working。旧实现据内容推断，这两个相位下 resume/join 会把 working 读成 idle——spinner 不转、标题不切、耗时不计，live 事件却照常渲染（它们不经过 `turn.working`）。`status` 取自 `Session.status`（优先级 waiting > working > idle），前端把 working / waiting 都当"turn 在飞行"（与直播一致：ask 挂起时 spinner 照转），idle / inactive 则清掉残留的 working（视图被切会话 / 重连替换时，上一轮的 `Done` 已被跨会话过滤吃掉）。
+
+**没有"回落推断"这条路径**：`status` 必填且取值严格（Python 必填字段 + 两端解码期 fail-fast）——CLI 与网关同版本升级，字段缺失 / 取值未知即协议错误，不在前端猜。两端也不读 `turn_started_at` 判状态（它是耗时锚点，不是生命周期标志）。
 
 **pending ask 重放**：`AskEvent` 落盘，但已答的 ask 不再是关于当下的事实（重放会渲染活的 Ask 卡，回答找不到 waiter 进虚空）。后端用 `Inbox._feedback_waiters` 的键集合（`pending_ask_ids()`）作权威待答集合，`get_active_events()` 据此只下发仍挂起的 ask；前端重放渲染 Ask cell 并注册可答状态（归一化入口 `AskPanel::from_ask` 产出的唯一模型），用户回答走既有通道 resolve waiter。
 

@@ -23,6 +23,7 @@ use super::title;
 use super::turn_state;
 use crate::protocol::AgentInfo;
 use crate::protocol::EventMeta;
+use crate::protocol::SessionStatus;
 use crate::protocol::WingEvent;
 use crate::shared::constants::TOOL_BASH;
 use crate::shared::constants::TOOL_TODO;
@@ -413,6 +414,7 @@ impl App {
                 uncommitted,
                 uncommitted_tools,
                 events,
+                status,
                 turn_started_at,
                 draft,
                 name,
@@ -425,6 +427,7 @@ impl App {
                     uncommitted.as_ref(),
                     &uncommitted_tools,
                     &events,
+                    status,
                     turn_started_at.as_deref(),
                     draft,
                     name,
@@ -505,6 +508,12 @@ impl App {
     /// → replay in the chain order that makes diff anchoring structural
     /// (messages → uncommitted → uncommitted tools → fact events) → draft /
     /// name / agent snapshot.
+    ///
+    /// The working state comes from the snapshot's **status** — it is read, not
+    /// inferred. A new subscriber cannot hear the past `turn_started` (a
+    /// once-only live event, not replayed), and an empty uncommitted projection
+    /// does not mean idle: between rounds, or while the first LLM call is still
+    /// in flight, a turn runs with nothing finalized to project.
     #[allow(clippy::too_many_arguments)]
     fn apply_sync_session(
         &mut self,
@@ -513,6 +522,7 @@ impl App {
         uncommitted: Option<&serde_json::Value>,
         uncommitted_tools: &[serde_json::Value],
         events: &[serde_json::Value],
+        status: SessionStatus,
         turn_started_at: Option<&str>,
         draft: Option<String>,
         name: Option<String>,
@@ -538,6 +548,11 @@ impl App {
         // top of the chat, mirrored on every sync (connect / resume /
         // switch / fork) — counts only; details stay behind /skills
         // so the sync payload carries lists, not rendered blobs.
+        //
+        // The same snapshot is the session's own metadata, restored *before*
+        // the turn state below: the terminal title carries the workdir suffix,
+        // and it must already be the new session's label when that title is
+        // composed (a session switch with no tick to self-correct on).
         if let Some(agent_info) = &agent {
             let line = format!(
                 "loaded {} skills, {} rules · /skills for details",
@@ -545,6 +560,9 @@ impl App {
                 agent_info.rules.len()
             );
             self.chat.push(ChatCell::SystemMessage(line));
+            self.status.model = agent_info.model_name.clone();
+            self.status.provider = agent_info.provider_name.clone();
+            self.status.workdir = agent_info.workspace.clone();
         }
 
         // Ask flows are session-scoped interactive state, not rendered
@@ -563,9 +581,14 @@ impl App {
         // the spinner / Bash timers / terminal title reflect an
         // in-progress turn (a mid-turn resume). `turn_started_at`
         // restores the real elapsed instead of recounting from resume.
+        //
+        // The snapshot states the turn state and we read it: no inference, no
+        // fallback. `status` decides in both directions — `working` / `waiting`
+        // enter it, `idle` / `inactive` clear a stale one (the view can be
+        // replaced under a running turn by a switch / reconnect, and the past
+        // turn's `Done` is filtered out as a foreign session's event).
         let turn_instant = turn_started_at.and_then(turn_state::instant_from_utc_iso);
-        let mid_turn = uncommitted.is_some() || !uncommitted_tools.is_empty();
-        if mid_turn {
+        if status.turn_in_flight() {
             self.turn.start();
             if let Some(instant) = turn_instant {
                 self.turn.started_at = Some(instant);
@@ -574,6 +597,11 @@ impl App {
                 title::title_working(self.turn.spinner.frame_str(), self.dir_label().as_deref());
             self.turn.last_title = Some(working_title.clone());
             self.push_intent(AppIntent::SetTitle(working_title));
+        } else if self.turn.working {
+            self.finish_turn();
+            self.push_intent(AppIntent::SetTitle(title::title_idle(
+                self.dir_label().as_deref(),
+            )));
         }
 
         // Replay order: messages → uncommitted → uncommitted_tools →
@@ -643,7 +671,7 @@ impl App {
             has_uncommitted = uncommitted.is_some(),
             uncommitted_tools_count = uncommitted_tools.len(),
             event_count = events.len(),
-            mid_turn,
+            status = ?status,
             has_draft = draft.is_some(),
             "session replayed"
         );
@@ -658,13 +686,9 @@ impl App {
             self.status.session_name = Some(session_name);
         }
 
-        // Restore model + provider + workdir from agent snapshot.
-        if let Some(agent_info) = agent {
-            self.status.model = agent_info.model_name;
-            self.status.provider = agent_info.provider_name;
-            self.status.workdir = agent_info.workspace;
-        }
-
+        // Model / provider / workdir came with the snapshot (restored at the
+        // top of this function — the title needs the workdir before it is
+        // composed).
         self.refresh_copy_candidates();
     }
 

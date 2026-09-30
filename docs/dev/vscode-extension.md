@@ -111,6 +111,10 @@ extensions/vscode/
 - 网关的 `sync_session` 重放与 live 事件走**同一条归约路径**（`reducer.ts` 的 `applySync` /
   `applyLive` 共享同一套模型变更），这是「重放路径 vs 活跃路径渲染不一致」一类 bug 的结构性
   解药（R1 返修记录里叫 S1「重放 ≠ 直播」，缺一个 ReAct separator 就会分叉）。
+- 「在不在跑」由快照的 `status` 回答（idle / working / waiting），**不由内容反推**：一轮 LLM
+  调用在飞行（首帧未到、轮边界）时 uncommitted 投影为空而 turn 仍在 working——按内容推断会把
+  它读成 idle（Tab 不转、耗时不计，live 事件却照常渲染）。`status` 必填且严格：CLI 与网关同
+  版本升级，缺字段 / 未知取值是解码错误（不猜、不回落）。
 - 派生单元不重放：`sync_session` 只重放**事实**（Message 投影 + FACT_EVENTS），metrics 这类
   展示单元格直播时有、重放后没有。所以「重放后的 cells 数 ≤ 直播时」是正确行为，测试断言写
   「内容在、不重复」，不写「逐 cell 相等」。

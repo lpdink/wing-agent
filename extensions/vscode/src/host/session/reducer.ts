@@ -17,7 +17,7 @@ import type {
   SyncSessionEvent,
   WingEvent,
 } from '../../core';
-import { isKnownEvent } from '../../core';
+import { isKnownEvent, isTurnInFlight } from '../../core';
 
 import type { SessionRecord } from './model';
 import {
@@ -140,16 +140,25 @@ export function applySync(record: SessionRecord, sync: SyncSessionEvent): void {
   record.dirtyState = true;
   record.dirtyTabs = true;
 
-  // Mid-turn restore: the uncommitted projection proves the agent is still
-  // running; `turn_started_at` restores the real elapsed time.
-  const midTurn = sync.uncommitted !== null || sync.uncommitted_tools.length > 0;
-  if (midTurn) {
+  // Mid-turn restore: the snapshot *states* the turn state and we read it — no
+  // inference, no fallback. A new subscriber can never hear the already-past
+  // `turn_started`, and an empty uncommitted projection is *not* an idle signal
+  // (a first LLM call still in flight, or a round boundary, projects no content
+  // while the turn runs). `turn_started_at` restores the real elapsed time.
+  if (isTurnInFlight(sync.status)) {
     record.turn = {
       active: true,
       startedAtMs: parseIsoMs(sync.turn_started_at) ?? record.now(),
       lastResult: record.turn.lastResult,
     };
     record.metricsEmittedForTurn = false;
+    record.dirtyState = true;
+  } else if (record.turn.active) {
+    // The other direction of the same statement: a reconnect can replace the
+    // view after the turn ended (its `done` was missed) — an idle snapshot
+    // clears the stale running state instead of leaving the tab spinning
+    // forever.
+    record.turn = { active: false, startedAtMs: 0, lastResult: record.turn.lastResult };
     record.dirtyState = true;
   }
 

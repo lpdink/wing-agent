@@ -8,7 +8,12 @@
   uncommitted       单个未提交 assistant Message 投影（已终结块，可为 null）
   uncommitted_tools 未终结 tool 调用的原始 args 片段
   events            活跃链上的**事实类**事件（FACT_EVENTS + pending ask 过滤）
+  status            快照时刻的 session 运行状态（idle / working / waiting，权威）
   turn_started_at   当前 turn 开始时刻（UTC ISO），供前端恢复已耗时
+
+`status` 是"turn 在不在飞行"的唯一权威：中途订阅者听不到已经过去的
+`turn_started`（一次性 live 事件），而内容投影为空**不等于** idle——一轮 LLM
+调用在飞行（首帧未到、轮边界）时 uncommitted / uncommitted_tools 都是空的。
 
 关键结构前提（P1-1 修复）：产生 diff 的 tool_use 块是**已终结**块，因此出现在
 uncommitted 投影里——diff 事件（events）重放时其锚点 ToolCall cell 已由
@@ -98,7 +103,32 @@ class TestMidTurnSubscribe:
         assert sync.uncommitted_tools == []
         # 链上无事实事件
         assert sync.events == []
-        # turn 进行中：携带开始时刻
+        # turn 进行中：状态权威 + 开始时刻
+        assert sync.status == "working"
+        assert sync.turn_started_at is not None
+
+        await agent.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_subscribe_before_first_chunk_reports_working(self, runtime):
+        """回归：turn 已 working 但一轮 LLM 调用尚未吐出任何块。
+
+        相位边界（前端曾据此推断 idle）：首帧未到 / 轮边界——内容投影两项皆空，
+        但 turn 确在飞行。`status` 是权威：working；`turn_started_at` 供恢复耗时。
+        """
+        session = runtime.create_session()
+        agent = session.agent
+
+        agent.context_manager.add_message(Message(role="user", content="question"))
+        agent._set_working(True)  # turn 已开始，accumulator 尚未建立任何内容
+
+        events = _collect()
+        runtime.subscribe("client-late", session.session_id)
+
+        sync = next(e for e in events if isinstance(e, SyncSessionEvent))
+        assert sync.uncommitted is None
+        assert sync.uncommitted_tools == []
+        assert sync.status == "working"  # ← 内容为空 ≠ 不在跑
         assert sync.turn_started_at is not None
 
         await agent.shutdown()
@@ -131,6 +161,7 @@ class TestMidTurnSubscribe:
         ]
         # 只有半截调用（无已终结块）→ Message 投影为 null
         assert sync.uncommitted is None
+        assert sync.status == "working"
 
         await agent.shutdown()
 
@@ -195,6 +226,7 @@ class TestMidTurnSubscribe:
         sync = next(e for e in events if isinstance(e, SyncSessionEvent))
         assert sync.uncommitted is None
         assert sync.uncommitted_tools == []
+        assert sync.status == "idle"
         assert sync.turn_started_at is None
         assert sync.events == []
 
@@ -287,6 +319,8 @@ class TestPendingAskFiltering:
         sync = next(e for e in events if isinstance(e, SyncSessionEvent))
         assert [e["type"] for e in sync.events] == ["ask"]
         assert sync.events[0]["tool_call_id"] == "ask-1"
+        # 挂起的 ask ⇒ waiting（优先级 waiting > working > idle）
+        assert sync.status == "waiting"
 
         await agent.shutdown()
 

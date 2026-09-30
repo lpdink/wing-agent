@@ -362,6 +362,7 @@ class WingRuntime:
                         pending_ask_ids=agent.pending_ask_ids()
                     )
                 ],
+                status=session.status,
                 turn_started_at=turn_started_at,
                 agent=None,
                 draft=draft,
@@ -593,8 +594,10 @@ class WingRuntime:
         uncommitted（单个未提交 assistant Message 投影）、uncommitted_tools
         （未终结 tool 调用的原始 args 片段）、events（活跃链事实事件，按链序）
         ——中途订阅者据此获得与从始至终订阅一致的完整视图，组装顺序为
-        messages → uncommitted → uncommitted_tools → events。turn_started_at
-        供前端恢复 working 已耗时。
+        messages → uncommitted → uncommitted_tools → events。快照同时是
+        **状态**：status（快照时刻的运行状态，前端据此进入 working——内容投影
+        为空 ≠ 不在跑，一轮 LLM 调用在飞行时两者都空）与 turn_started_at
+        （恢复 working 已耗时）。
         """
         client_target = EventTarget(scope="client", client_ids=[client_id])
         from wing.event import serialize_event
@@ -617,6 +620,7 @@ class WingRuntime:
                         pending_ask_ids=agent.pending_ask_ids()
                     )
                 ],
+                status=session.status,
                 turn_started_at=turn_started_at,
                 agent=session.to_agent_info(),
                 name=session.session_name,

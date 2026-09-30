@@ -149,6 +149,25 @@ export function enumOr<T extends string>(
   return allowed.some((candidate) => candidate === value) ? (value as T) : fallback;
 }
 
+/**
+ * Required string field restricted to a known set — anything else (missing,
+ * `null`, or a value outside `allowed`) is a decode error.
+ *
+ * Deliberately *not* `enumOr` with a fallback: a field the consumer must act on
+ * (e.g. the session status a snapshot states) cannot be papered over with a
+ * default — reading a fallback as an answer is how "we don't know" turns into a
+ * wrong behaviour.
+ */
+export function reqEnum<T extends string>(object: JsonObject, key: string, allowed: readonly T[]): T {
+  const value = reqString(object, key);
+  if (!allowed.some((candidate) => candidate === value)) {
+    throw new ProtocolDecodeError(
+      `field "${key}" must be one of ${allowed.join(' / ')} (got ${JSON.stringify(value)})`,
+    );
+  }
+  return value as T;
+}
+
 /** Nullable JSON object field. */
 export function optJsonObject(object: JsonObject, key: string): JsonObject | null {
   const value = object[key];

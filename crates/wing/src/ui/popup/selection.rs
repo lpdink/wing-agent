@@ -16,6 +16,7 @@ use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::ThemePalette;
+use crate::protocol::SessionStatus;
 use crate::render::markdown::truncate_to_display_width;
 
 /// Maximum rows to show before scrolling (single-line popups).
@@ -24,30 +25,10 @@ const MAX_VISIBLE_ROWS: usize = 8;
 /// Maximum rich (double-line) rows to show before scrolling (session popup).
 const MAX_VISIBLE_RICH_ROWS: usize = 6;
 
-/// Session 运行时状态（与后端 `SessionStatus` 对应）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionStatus {
-    /// 在磁盘、未被 resume。
-    Inactive,
-    /// 已 resume、空闲。
-    Idle,
-    /// agent 正在处理 turn。
-    Working,
-    /// agent 阻塞在 ask / need_feedback，等待用户反馈。
-    Waiting,
-}
-
+/// Presentation of [`SessionStatus`] in the session picker (the vocabulary
+/// itself lives in the protocol layer — one definition, shared with the event
+/// projections).
 impl SessionStatus {
-    /// 从后端字符串解析；未知值（含空串，旧网关）降级为 Inactive。
-    pub fn parse(s: &str) -> Self {
-        match s {
-            "idle" => Self::Idle,
-            "working" => Self::Working,
-            "waiting" => Self::Waiting,
-            _ => Self::Inactive,
-        }
-    }
-
     /// 状态图标：inactive/idle/working 为实心圆点，waiting 为非 emoji 的 `?`。
     pub fn icon(self) -> &'static str {
         match self {
@@ -59,10 +40,10 @@ impl SessionStatus {
     /// 状态图标颜色。
     pub fn color(self) -> Color {
         match self {
-            Self::Inactive => Color::DarkGray,
-            Self::Idle => Color::White,
             Self::Working => Color::Yellow,
             Self::Waiting => Color::Magenta,
+            Self::Idle => Color::White,
+            Self::Inactive => Color::DarkGray,
         }
     }
 
@@ -596,17 +577,6 @@ mod tests {
         assert_eq!(popup_height(&rows, MAX_VISIBLE_RICH_ROWS), 6);
         // Capped by max_visible: 2 rich rows × 2 = 4.
         assert_eq!(popup_height(&rows, 2), 4);
-    }
-
-    #[test]
-    fn test_session_status_from_str() {
-        assert_eq!(SessionStatus::parse("idle"), SessionStatus::Idle);
-        assert_eq!(SessionStatus::parse("working"), SessionStatus::Working);
-        assert_eq!(SessionStatus::parse("waiting"), SessionStatus::Waiting);
-        assert_eq!(SessionStatus::parse("inactive"), SessionStatus::Inactive);
-        // Unknown / empty (old gateway) degrades to Inactive.
-        assert_eq!(SessionStatus::parse(""), SessionStatus::Inactive);
-        assert_eq!(SessionStatus::parse("bogus"), SessionStatus::Inactive);
     }
 
     #[test]
