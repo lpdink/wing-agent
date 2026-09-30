@@ -270,6 +270,9 @@ class OpenAICompatProvider(ModelProvider):
             body["reasoning_effort"] = self.reasoning_effort
 
         # prompt_cache_key（显式缓存模式）
+        # 已知限制：key 是**本会话**的 session id——fork 出的子会话用自己的
+        # id，若上游按 key 隔离缓存，父→子无法复用同一前缀的缓存块
+        # （见 docs/dev/architecture.md「压缩与缓存哲学」的已知边界）。
         if self.explicit_cache_mode and self._session_id:
             body["prompt_cache_key"] = self._session_id
 

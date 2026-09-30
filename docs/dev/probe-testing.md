@@ -103,12 +103,16 @@ async def test_bash_write_then_history(probe: Probe) -> None:
 
 模型名建议加注释锚定用途；`session.watch` 的游标随 `chat()` 推进会消耗已消费事件——需要回看整轮顺序时用 `since=0` 或 `since=<进入本轮前的 cursor>`。
 
-**环境旋钮**：需要非标准网关配置的场景（例如把逐出 TTL 压到秒级、把上下文窗口调小），用 `@pytest.mark.probe_env(...)` 给 `ProbeEnv` 传启动参数（kwargs 原样透传给 `Probe.start`；缺省不打标记＝标准 probe 配置）：
+**环境旋钮**：需要非标准网关配置的场景（例如把逐出 TTL 压到秒级、把上下文窗口调小、加载 hook），用 `@pytest.mark.probe_env(...)` 给 `ProbeEnv` 传启动参数（kwargs 原样透传给 `Probe.start`；缺省不打标记＝标准 probe 配置）：
 
 ```python
 FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds": 0.5}}
 
 @pytest.mark.probe_env(sessions=FAST_EVICTION)   # → config.yaml 的 sessions: 段
+
+# hooks: 透传 config.yaml 的 hooks: glob；相对路径按**网关进程 cwd**（env.root）解析。
+# 惯例：场景在 reload 前把 hook 文件写进 <root>/hooks/，再 POST /api/system/reload
+@pytest.mark.probe_env(hooks=["hooks/*.py"])
 ```
 
 确定性来自配置而不是等待运气：把阈值压到秒级、断言仍走"轮询到状态翻转（带超时）"。
@@ -179,7 +183,9 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 2. `tool_pairing`（`assert_tool_pairing`）：每个带 `tool_calls` 的 assistant 消息，其每个 `call_id` 都有配对 tool 消息（未终结的半截参数块一律剔除）；
 3. `no_transient_records`（`assert_no_transient_records`）：流式 delta / 瞬态事件不得出现在 `history.jsonl`。
 
-**红线过渡断言**（场景里显式调用）：`assert_compact_transition`（手动/后台压缩的链形状）、`assert_rewind_transition`（复制行 / 事件节点跳过 / 回退到根）、`assert_fork_of`（uuid 重映射 + 事件随行 + metadata 快照）。会话逐出（`scenarios/test_session_eviction.py`）不需要专用 helper——它断言的是"什么都不该变"（逐出/水合前后记录集指纹一致），红线直接由场景内的指纹对比 + 内置不变量承担。
+**红线过渡断言**（场景里显式调用）：`assert_compact_transition`（手动/后台压缩的链形状）、`assert_rewind_transition`（复制行 / 事件节点跳过 / 回退到根）、`assert_fork_of`（子链 = 源**活跃链**前缀 + uuid 重映射 + 事件随行 + metadata 快照；压缩节点是边界，被压缩区间不随 fork 走）。会话逐出（`scenarios/test_session_eviction.py`）不需要专用 helper——它断言的是"什么都不该变"（逐出/水合前后记录集指纹一致），红线直接由场景内的指纹对比 + 内置不变量承担。
+
+**前缀身份红线**（KV cache 语义；`scenarios/test_session_persistence.py` + `scenarios/test_fork.py::test_fork_after_compact_keeps_source_prefix`）：一次请求的"前缀" = `system` 段（含 `append_system_prompt`）+ `tools` 声明 + 处理开关（`enable_thinking` / `preserve_thinking` / `reasoning_effort`）+ 消息。会话重建（fork 子会话、逐出后水合 resume）后这些必须逐字节复现——场景直接对账**假 Provider 留档的原始请求体**（`probe.request(...).body`），而不是只看链形状：fork 后的 live 上下文与文件视图可能不一致，只有请求体能抓住"已摘要历史被复活""hook 注入丢失"这类回归。消息比较走 `ContextView` 的 role + 归一化 content（各自请求的最后一条会被 `cache_control` 标记序列化成块数组——那是标记位置差异，不是 token 差异）。
 
 **口径**（与 spec 一致，比 spec 严的部分在此声明）：
 

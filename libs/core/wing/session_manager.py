@@ -35,9 +35,10 @@ from wing.event import (
 )
 from wing.event_bus import event_bus
 from wing.magic_command.prompt_commands import expand_prompt_command
-from wing.schema import ChainNode, Message
+from wing.schema import ChainNode, Message, Tool
 from wing.session import Session
 from wing.store import SessionMetadata, SessionStore
+from wing.tool_registry import ToolRef
 
 if TYPE_CHECKING:
     from wing.gateway.protocol import AgentOverride
@@ -65,6 +66,16 @@ def _remap_chain_uuids(nodes: list[ChainNode]) -> list[ChainNode]:
             node.unzip_last_uuid = uuid_map.get(node.unzip_last_uuid)
 
     return copies
+
+
+def _tool_refs(tools: list[Tool]) -> list[str]:
+    """把 Tool 列表投影为可持久化的 ref 列表（"Bash" / "client.Read"）。
+
+    与 WingAgent.set_tools() 接受的引用格式一致——ref 可在任何进程
+    经 tool_registry.resolve() 还原；闭包 / dispatch 闭包不可持久化，
+    这正是"只存引用不存对象"的原因。
+    """
+    return [str(ToolRef(namespace=t.namespace, name=t.name)) for t in tools]
 
 
 class SessionManager:
@@ -199,6 +210,9 @@ class SessionManager:
 
         # 触发 before_session_start hook
         hooks.invoke("before_session_start", session)
+        # hook 注入的追加系统提示词（环境信息等）随创建落盘：resume/fork
+        # 重建 CM 时恢复同一系统提示词，否则前缀变化会碎掉会话的 KV cache。
+        session.sync_append_system_prompt()
 
         log.info(f"Session created: {sid} (template={template.name})")
         return session
@@ -279,9 +293,9 @@ class SessionManager:
         """从指定 session 的 target_uuid 处 fork 出新 session。
 
         新 session 继承源 session 的后端。消息与元数据均经由源 session
-        所属 store 写入：元数据（workspace/forked_from/template_name/
-        model_name+provider_name 快照/last_interaction）一次写全——fork 的
-        正确性由 store 单一所有者保证。
+        所属 store 写入：元数据一次写全（workspace / forked_from /
+        template_name / 模型快照 / 系统提示词与动态状态快照 /
+        last_interaction）——fork 的正确性由 store 单一所有者保证。
         """
         source = self._sessions.get(session_id)
         if source is None:
@@ -311,6 +325,13 @@ class SessionManager:
         # 模型记录是**快照**：子 session 的 agent 由源 agent 反向抽取模板构造
         # （生效模型=源此刻模型），metadata 记录同一对值，重启后 resume 才
         # 不会偏离 fork 时用户看到的模型。
+        #
+        # 提示词与动态状态同属快照：系统提示词（替换值 + 追加值）、工具集、
+        # thinking / effort / yolo / max_turns 全部按源会话此刻的**有效状态**
+        # 写全——子会话重启后（resume）复现 fork 时刻的请求前缀，与源会话
+        # 逐字节一致，fork 不碎 KV cache。append_system_prompt 取 live 值
+        # （而非源 metadata）：兼容"落盘字段引入前创建的存量会话"，hook 注入
+        # 的环境信息此刻只存在于内存。
         store.save_metadata(
             new_session_id,
             SessionMetadata(
@@ -319,6 +340,15 @@ class SessionManager:
                 template_name=source.template_name,
                 model_name=source.agent.model,
                 provider_name=source.agent.model_provider.name,
+                system_prompt=source.context_manager.setin_system_prompt or None,
+                append_system_prompt=(
+                    source.context_manager.append_system_prompt or None
+                ),
+                tools=_tool_refs(source.agent.tools),
+                thinking=source.agent.model_provider.thinking,
+                reasoning_effort=source.agent.model_provider.reasoning_effort,
+                yolo=source.agent.yolo,
+                max_turns=source.agent.max_turns,
                 last_interaction=datetime.now().isoformat(),
             ),
         )

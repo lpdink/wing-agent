@@ -106,8 +106,12 @@ More detail in: "{dir}/SKILL.md" """
         self._rules_prompt = self._load_rules()
         self._skills_cache: dict[str, AgentSkill] = self._load_all_skills()
         self._skills_prompt = self._build_skills_prompt()
-        # 由外部（hook）注入的系统提示词片段
-        self.inject_system_prompts: list[str] = []
+        # 追加系统提示词（hook 注入的环境信息 + AgentOverride.append_system_prompt
+        # 的合并结果）。命名对齐 CLI `--append-system-prompt` / AgentOverride。
+        # 它是**会话级持久状态**（metadata.append_system_prompt）：由 Session 在
+        # 构造时恢复、在 create/update 后落盘——fork/resume 重建 CM 绝不丢失，
+        # 否则系统提示词变化会从第 0 个 token 起碎掉 KV cache 前缀。
+        self.append_system_prompt: str = ""
 
         # ── 异步 compact 状态 ──────────────────────
         self._pending_compact_task: asyncio.Task[None] | None = None
@@ -119,9 +123,12 @@ More detail in: "{dir}/SKILL.md" """
         # 由 on_tools_changed() 管理。冻结策略：链非空时不动（保护 KV prefix cache），
         # compaction 时自动同步（cache 已碎）。Agent 不持有此状态。
         self._declared_tools: list[Tool] = []
-        # 显式标志区分「未初始化」和「合法为空」。不持久化——resume/重建 agent
-        # 时新 CM 走 init 路径（_declared_initialized=False）直接设置声明集，
-        # 不会误触热切换注入 reminder。
+        # 显式标志区分「未初始化」和「合法为空」。声明集**有意不持久化**：
+        # resume/重建 agent 时新 CM 走 init 路径（_declared_initialized=False）
+        # 直接采用当前可执行集，不会误触热切换注入 reminder。代价是「热切换
+        # 工具后又重启」会改变 tools 声明（前缀碎裂一次）——远程工具与动态
+        # 工具切换尚无系统化设计，先按最简单语义处理（已知限制，见
+        # docs/dev/architecture.md）。
         self._declared_initialized: bool = False
 
     @property
@@ -131,15 +138,32 @@ More detail in: "{dir}/SKILL.md" """
 
     @property
     def system_prompt(self) -> Message:
-        """构造完整系统提示词，按顺序拼接：inject + system_prompt + rules + skills"""
-        parts = list(self.inject_system_prompts)
+        """构造完整系统提示词，按顺序拼接：system_prompt + append + rules + skills"""
+        parts = []
         if self.setin_system_prompt:
             parts.append(self.setin_system_prompt)
+        if self.append_system_prompt:
+            parts.append(self.append_system_prompt)
         if self._rules_prompt:
             parts.append(self._rules_prompt)
         if self._skills_prompt:
             parts.append(self._skills_prompt)
         return Message(role="system", content="\n\n".join(parts))
+
+    def append_to_system_prompt(self, text: str) -> None:
+        """追加系统提示词片段——append_system_prompt 的唯一写入入口。
+
+        hook（如 workspace_env_inject 注入环境信息）与 AgentOverride
+        共用本入口；多片段按追加顺序以换行连接，结果整体随会话持久化。
+        空串忽略（None 语义的字符串形态）。
+        """
+        stripped = text.strip()
+        if not stripped:
+            return
+        if self.append_system_prompt:
+            self.append_system_prompt = f"{self.append_system_prompt}\n{stripped}"
+        else:
+            self.append_system_prompt = stripped
 
     # ── 工具声明集管理 ─────────────────────────────
 
@@ -147,6 +171,16 @@ More detail in: "{dir}/SKILL.md" """
     def declared_tools(self) -> list[Tool]:
         """当前 LLM 可见工具集（冻结视图）。"""
         return list(self._declared_tools)
+
+    def reset_declared_tools(self) -> None:
+        """把声明集复位为「未初始化」——resume / fork 重建 agent 专用。
+
+        声明集不持久化：重建后它必须**跟随可执行集**（on_tools_changed 的
+        init 冷路径直接设置），而不是被当作热切换冻结并注入 System Reminder
+        ——那会往重建后的链里塞一条重启前不存在的 reminder 消息，前缀与
+        重启前不同（KV cache 碎裂）。
+        """
+        self._declared_initialized = False
 
     def on_tools_changed(self, new_tools: list[Tool]) -> None:
         """工具集变更通知——由 Agent.set_tools() 调用。
@@ -865,19 +899,26 @@ More detail in: "{dir}/SKILL.md" """
         return draft
 
     def extract_subchain(self, target_uuid: str) -> tuple[list[ChainNode], str | None]:
-        """提取 target_uuid 之前的完整子链（不含目标消息），用于 fork 到新 session。
+        """提取 target_uuid 之前的活跃子链（不含目标消息），用于 fork 到新 session。
 
         返回混合链前缀（Message + 事件节点）——事件随 fork 拷贝到新 session，
         diff 等视图在新 session 重放时可见。
 
-        - target = "current" → 复制整个完整链（walk_full_chain），draft 为空字符串
-        - 其他 → 用 find() 定位 target，用 walk_full_chain(from_uuid=target.parent_uuid)
-          构建完整子链（包含压缩节点，保留拓扑结构）
+        链口径 = **活跃链**（trace_chain，与 get_context_window 同源）：
+        - target = "current" → 复制整个活跃链，draft 为空字符串
+        - 其他 → 用 find() 定位 target，从 target.parent_uuid 沿 parent_uuid
+          回溯到活跃链的根
+
+        压缩节点是活跃链的根（parent_uuid=None + unzip_last_uuid 指向被压缩区）：
+        回溯到此为止——子链 = [摘要节点, ...tail]，与源会话的请求前缀逐字节一致
+        （fork 不碎 KV cache）。**被压缩区间不随 fork 走**：它已不在活跃上下文里，
+        捞回来（walk_full_chain 的展示口径会沿 unzip_last_uuid 回溯）只会让子会话
+        的上下文与源会话分叉、复活已摘要掉的历史。
 
         返回 (subchain_nodes, draft_content)，draft 为目标消息的 content。
         """
         if target_uuid == "current":
-            return self._messages.walk_full_chain(), ""
+            return self._messages.trace_chain(), ""
 
         # 用 find() 定位 target
         target = self._messages.find(target_uuid)
@@ -888,11 +929,11 @@ More detail in: "{dir}/SKILL.md" """
 
         draft = target.content or ""
 
-        # 从 target 的 parent 开始构建完整子链
+        # 从 target 的 parent 开始构建活跃子链
         if target.parent_uuid is None:
             return [], draft
 
-        subchain = self._messages.walk_full_chain(from_uuid=target.parent_uuid)
+        subchain = self._messages.trace_chain(from_uuid=target.parent_uuid)
         return subchain, draft
 
     def get_branch_targets(self) -> list[dict]:

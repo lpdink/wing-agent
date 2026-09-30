@@ -269,3 +269,67 @@ async def test_fork_isolation_and_evolution_equivalence(probe: Probe) -> None:
     assert "child-next" not in json.dumps(source_context.body), (
         source_context.describe()
     )
+
+
+COMPACT_FORK_MODEL = "probe/fork-after-compact"
+COMPACT_FORK_SUMMARY = "Task: answer the user. State: two turns done."
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_fork_after_compact_keeps_source_prefix(probe: Probe) -> None:
+    """compact 后 fork：子会话请求前缀 = 源活跃链前缀，压缩前区间不复活（红线）。
+
+    WHEN 会话压缩（整窗 → 摘要节点）后 fork at ``current``
+    THEN 断言通过：子链 = 源活跃链（摘要节点起）的重映射副本；子会话首个请求
+    与源会话请求共享前缀（system + 摘要 + tail），且**不出现**压缩前区间的任何
+    内容——它是"子会话上下文与源会话分叉、KV cache 不命中 + 复活已摘要历史"
+    的回归点（旧实现按 ``walk_full_chain`` 把被压缩区间捞回子链）。
+    """
+    probe.register(
+        COMPACT_FORK_MODEL,
+        Turn.of(text="reply one"),
+        Turn.of(text="reply two"),
+        Turn.of(text=f"<summary>{COMPACT_FORK_SUMMARY}</summary>"),
+        Turn.of(text="post compact reply"),
+        Turn.of(text="child reply"),
+    )
+    session = await probe.session(model=COMPACT_FORK_MODEL)
+    await session.chat("alpha")
+    await session.chat("beta")
+    await session.compact()
+    await session.watch.expect("compact_done", within=15)
+    await session.chat("gamma")
+
+    source = probe.history(session)
+    compact_node = source.messages()[0]
+    assert compact_node["content"].startswith("[Compact]"), compact_node
+
+    child = await session.fork("current")
+    child_view = probe.history(child)
+    assert_fork_of(source, child_view, "current")
+    await child.chat("child-next")
+
+    # 子链 = 源活跃链（摘要 + tail），压缩前区间不随 fork 走
+    assert [message["content"] for message in child_view.messages()] == [
+        compact_node["content"],
+        "gamma",
+        "post compact reply",
+    ], child_view.describe()
+
+    # 请求级红线：子会话请求与源会话请求共享前缀（system + 摘要），
+    # 且压缩前区间（alpha / beta / reply one / reply two）一个都不出现。
+    source_ctx = probe.context(COMPACT_FORK_MODEL, 3)  # 源会话 "gamma" 请求
+    child_ctx = probe.context(COMPACT_FORK_MODEL, 4)  # 子会话 "child-next" 请求
+    assert source_ctx.system == child_ctx.system, (
+        source_ctx.describe(),
+        child_ctx.describe(),
+    )
+    assert source_ctx.messages[0].content == child_ctx.messages[0].content, (
+        source_ctx.describe(),
+        child_ctx.describe(),
+    )
+    child_body = json.dumps(child_ctx.body, ensure_ascii=False)
+    for compressed in ("alpha", "beta", "reply one", "reply two"):
+        assert compressed not in child_body, (compressed, child_ctx.describe())
+    assert "gamma" in child_body and "child-next" in child_body, child_ctx.describe()

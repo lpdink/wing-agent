@@ -99,9 +99,9 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 | 操作 | 端点 | 要点 |
 |------|------|------|
-| create | `POST /api/session/create` | 选 `backend: file\|memory` |
-| resume | `POST /api/session/resume` | 还原 template_name + workspace + 模型绑定（metadata 的 model_name/provider_name 优先于模板默认，见 glossary） |
-| fork | `POST /api/session/fork` | 写完整 metadata（workspace/forked_from/template + 源生效模型快照），继承源 backend；uuid 重映射在深拷贝上进行 |
+| create | `POST /api/session/create` | 选 `backend: file\|memory`；`before_session_start` hook 跑完后把追加系统提示词落盘 |
+| resume | `POST /api/session/resume` | 还原 template_name + workspace + 模型绑定 + 提示词与动态状态（metadata 记录优先于模板/配置默认，见 glossary「持久会话状态」） |
+| fork | `POST /api/session/fork` | 写完整 metadata（workspace/forked_from/template + 源生效状态快照：模型 / 提示词 / 工具 / 开关），继承源 backend；子链 = 源活跃链前缀（uuid 重映射在深拷贝上进行） |
 | rewind | `POST /api/session/rewind` | 丢弃指定消息之后的内容 |
 | compact | `POST /api/session/compact` | 委托 `ContextManager.do_manual_compact()` |
 | interrupt | `POST /api/session/interrupt` | 委托 `Session.agent.interrupt()`；打断对账见下 |
@@ -205,7 +205,14 @@ MessageLog  = 追加式混合记录 + aux kv（pending compaction 存于此）
 
 - **不在上下文中施加魔法**：从不注入隐藏 system prompt。
 - **理论最高缓存命中率**：除压缩外绝不破坏缓存前缀；`explicit_cache_mode` 可为支持的 provider（如 DashScope）追加 `cache_control` 标记（PR #17）。
+- **前缀身份 = 会话状态**：一次请求的"前缀"不止消息——`system` 段（含 `append_system_prompt`）、`tools` 声明、影响服务端处理的开关（`enable_thinking` / `preserve_thinking` / `reasoning_effort`）都参与缓存身份。因此这些会话级状态全部持久化在 `metadata.json`（`system_prompt` / `append_system_prompt` / `tools` / `thinking` / `reasoning_effort` / `yolo` / `max_turns`），resume / fork 重建 agent 后逐字节复现——否则重建后的请求从第 0 个 token 起就与重建前不同，整个上下文无法命中缓存。`append_system_prompt` 由 `before_session_start` hook（如 workspace_env_inject）与 `AgentOverride.append_system_prompt` 共用同一字段写入、随创建落盘；fork 按源会话此刻的有效值快照。
+- **fork 的链口径 = 活跃链**：`extract_subchain` 走 `trace_chain`（与 `get_context_window` 同源）——压缩节点是边界（被压缩区间不随 fork 走），子会话的请求前缀与源会话逐字节一致；`walk_full_chain` 是展示口径（`/fork` 候选列表、跨压缩边界回溯），不是上下文口径。
 - 达到 `context_window_tokens` 触发压缩，保留 `keep_recent_tokens`；压缩由 `compactor.py` 的 LLM 摘要策略完成。
+
+**KV cache 的已知边界（有意不处理）**：
+
+- **冻结声明集不持久化**：热切换工具（`session/update` 的 `tools`）会把 `_declared_tools` 冻结在旧集合以保护**本进程**的前缀，但重启后 resume 直接采用当前可执行集——"热切换工具后又重启"会改变 `tools` 声明（前缀碎裂一次）。远程工具与动态工具切换尚无系统化设计（工具将整体迁出网关），按最简单语义处理。
+- **`prompt_cache_key = session_id`**（`explicit_cache_mode`，PR #17）：fork 子会话以自己的 session id 作为 key，上游若按该 key 隔离缓存，则父→子无法复用同一前缀的缓存块。fork 复用父会话缓存的诉求登记为已知限制，暂不处理。
 
 ## 构建信息注入（commit hash）
 

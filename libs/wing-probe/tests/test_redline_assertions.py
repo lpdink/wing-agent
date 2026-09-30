@@ -793,6 +793,41 @@ def test_fork_current_copies_whole_chain(tmp_path: Path) -> None:
     assert material["chain_length"] == 5
 
 
+def test_fork_after_compact_excludes_compressed_region(tmp_path: Path) -> None:
+    """compact 后 fork：期望前缀 = 源**活跃链**，被压缩区间不随 fork 走。
+
+    旧口径（``full_chain`` 跨压缩边界）会把压缩前区间也当作期望前缀——
+    那正是"fork 复活已摘要历史、请求前缀与源会话分叉"的 bug 形状。
+    （子会话 live ``_data`` 的复活由场景级请求断言兜底：文件视图只看得见
+    活跃链，看不见 live 链。）
+    """
+    source_records = background_compact_after(compact_before())
+    write_session(tmp_path, SOURCE_SESSION, source_records, SOURCE_METADATA)
+    source = view_of(tmp_path, SOURCE_SESSION)
+    active = source.active_chain()
+    assert [record["uuid"] for record in active] == ["c1", "x1", "x2", "x3"], (
+        source.describe()
+    )
+
+    mapping = {"c1": "cc1", "x1": "cx1", "x2": "cx2", "x3": "cx3"}
+    child_records = [record for record in source_records if record["uuid"] in mapping]
+    write_session(
+        tmp_path, "sess-child", remap(child_records, mapping), child_metadata()
+    )
+    child = view_of(tmp_path, "sess-child")
+
+    material = assert_fork_of(source, child, "current")
+    # 期望前缀 = 活跃链（4 节点）；压缩前区间（u1..a3）不在期望里
+    assert material["chain_length"] == 4
+    assert [record["uuid"] for record in child.active_chain()] == [
+        "cc1",
+        "cx1",
+        "cx2",
+        "cx3",
+    ]
+    child.assert_chain_invariants()
+
+
 def test_fork_without_metadata_check(tmp_path: Path) -> None:
     source_records = fork_source()
     write_session(tmp_path, SOURCE_SESSION, source_records)

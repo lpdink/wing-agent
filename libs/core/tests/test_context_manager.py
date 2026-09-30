@@ -112,6 +112,26 @@ class TestBasicMessageManagement:
         assert "helpful assistant" in (llm_msgs[0].content or "")
         assert llm_msgs[1].content == "hello"
 
+    def test_append_system_prompt_composition_order(self, tmp_dir):
+        """append_system_prompt 拼在 base 之后、rules/skills 之前。"""
+        cm = _make_cm(tmp_dir)
+        cm.setin_system_prompt = "BASE"
+        cm._rules_prompt = "RULES"
+        cm._skills_prompt = "SKILLS"
+
+        cm.append_to_system_prompt("  first  ")
+        cm.append_to_system_prompt("")  # 空串忽略（None 语义的字符串形态）
+        cm.append_to_system_prompt("second")
+
+        assert cm.append_system_prompt == "first\nsecond"
+        assert cm.system_prompt.content == "BASE\n\nfirst\nsecond\n\nRULES\n\nSKILLS"
+
+    def test_append_system_prompt_empty_parts_skipped(self, tmp_dir):
+        """append / rules / skills 为空时不留下空段（拼接不产生多余分隔符）。"""
+        cm = _make_cm(tmp_dir)
+        cm.setin_system_prompt = "BASE"
+        assert cm.system_prompt.content == "BASE"
+
     def test_get_context_window(self, tmp_dir):
         cm = _make_cm(tmp_dir)
         cm.add_message(Message(role="user", content="hello"))
@@ -467,7 +487,7 @@ class TestFork:
         assert _contents(subchain) == ["hello", "hi"]
 
     def test_extract_subchain_current_with_compact(self, tmp_dir):
-        """extract_subchain('current') 返回完整链，包含压缩节点。"""
+        """extract_subchain('current') 返回活跃链：压缩前区间不复活。"""
         cm = _make_cm(tmp_dir)
         msgs = [
             Message(role="user", content="old1"),
@@ -490,20 +510,22 @@ class TestFork:
         cm._messages.append_detached(relinked)
         cm._messages.set_tip("rt")
 
-        # walk_full_chain: [old1(u1), old2(u2), compact(cu), tail1(rt)]
+        # 活跃链 = [compact(cu), tail1(rt)]（被压缩区间不在活跃上下文里）
         subchain, draft = cm.extract_subchain("current")
         assert draft == ""
-        assert len(subchain) == 4
-        assert _contents(subchain)[:2] == ["old1", "old2"]
-        assert _contents(subchain)[-1] == "tail1"
-        assert subchain[2].uuid == "cu"
-        assert subchain[2].parent_uuid is None
-        assert subchain[2].unzip_last_uuid == msgs[1].uuid
-        assert subchain[3].uuid == "rt"
-        assert subchain[3].parent_uuid == "cu"
+        assert _contents(subchain) == ["[Compact] summary", "tail1"]
+        assert subchain[0].uuid == "cu"
+        assert subchain[0].parent_uuid is None
+        assert subchain[0].unzip_last_uuid == msgs[1].uuid
+        assert subchain[1].uuid == "rt"
+        assert subchain[1].parent_uuid == "cu"
 
-    def test_fork_with_compact_preserves_topology(self, tmp_dir):
-        """fork 后新 session 活跃链保留 compact 节点。"""
+    def test_fork_with_compact_preserves_active_chain(self, tmp_dir):
+        """fork 后新 session 的活跃链 = 源会话活跃链（compact 节点 + 保留区）。
+
+        被压缩区间必须**不**随 fork 走：否则子会话上下文与源会话分叉
+        （前缀不一致 → KV cache 不命中）、复活已摘要掉的历史。
+        """
         cm = _make_cm(tmp_dir)
         msgs = [
             Message(role="user", content="old1"),
@@ -538,22 +560,20 @@ class TestFork:
         new_tl = TrackedList(store.open_log(new_session_id))
         new_tl.extend_detached(remapped)
 
-        # 重新加载新 session
-        reloaded = TrackedList.load(store.open_log(new_session_id), Message)
+        # live 活跃链 = 源活跃链（compact + tail1），没有复活压缩前区间
+        assert _contents(new_tl.active_chain) == ["[Compact] summary", "tail1"]
 
-        # 新活跃链应与原活跃链长度一致（compact + tail1）
+        # 重新加载新 session（resume 路径）得到同一条链——live 与 reload 一致
+        reloaded = TrackedList.load(store.open_log(new_session_id), Message)
         new_active = reloaded.active_chain
         assert len(new_active) == original_len
-        # 第一条是 compact 节点
-        assert new_active[0].parent_uuid is None
-        assert new_active[0].unzip_last_uuid is not None
-        # 第二条的 parent 指向 compact
-        assert new_active[1].parent_uuid == new_active[0].uuid
-        assert new_active[1].content == "tail1"
-
-        # history.jsonl 有 4 条（old1, old2, compact, tail1）
+        assert _contents(new_active) == ["[Compact] summary", "tail1"]
+        # history.jsonl 只有活跃链 2 条（compact + tail1）
         entries = _read_history(tmp_dir / new_session_id)
-        assert len(entries) == 4
+        assert len(entries) == 2
+        # 压缩节点的 unzip_last_uuid 指向被压缩区间（不在子会话记录里）：
+        # uuid 重映射时无从映射 → 清空（不留悬空引用；子会话里它是普通根节点）
+        assert entries[0].get("unzip_last_uuid") is None
 
     def test_extract_subchain_to_compressed_message(self, tmp_dir):
         """extract_subchain 可以定位到被压缩的消息。"""

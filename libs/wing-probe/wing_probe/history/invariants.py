@@ -28,10 +28,12 @@
   ``parent_uuid`` 指向祖父（可能是事件节点）；target 及其后续不在活跃链但仍在
   记录集。target 上方只有事件（或无节点）时，实现写入哨兵节点
   ``role="system"`` / ``content="[rewind_to_root]"``（parent 为空）。
-- fork：子链 == ``walk_full_chain(from_uuid=at.parent_uuid)`` 的重映射副本
-  （``uuid`` / ``parent_uuid`` / ``unzip_last_uuid`` 全量重映射、事件随行）；
+- fork：子链 == 源**活跃链**（trace_chain 口径，``chain_ending_at(at.parent_uuid)``）
+  在 fork 点之前的前缀的重映射副本（``uuid`` / ``parent_uuid`` /
+  ``unzip_last_uuid`` 全量重映射、事件随行）；压缩节点是活跃链的根，被压缩
+  区间**不**随 fork 走（子会话上下文与源会话请求前缀一致，KV cache 不碎）；
   ``metadata.json`` 一次写全 ``forked_from`` / ``workspace`` / ``template_name`` /
-  ``model_name`` / ``provider_name``（模型快照）。
+  ``model_name`` / ``provider_name``（模型快照）以及系统提示词与动态状态快照。
 """
 
 from __future__ import annotations
@@ -1170,9 +1172,10 @@ def assert_fork_of(
 
     断言（``child`` 须是 fork 之后、子 session 后续演进之前的快照）：
 
-    - 子链 == 源链中 ``at_uuid`` 之前的完整前缀（语义逐节点等价、不含
-      ``at_uuid`` 自身）：期望值按实现的 ``walk_full_chain(from_uuid=at.parent)``
-      口径取自源视图（含压缩节点、跨压缩边界）；
+    - 子链 == 源**活跃链**中 ``at_uuid`` 之前的前缀（语义逐节点等价、不含
+      ``at_uuid`` 自身）：期望值按实现的 ``trace_chain(from_uuid=at.parent_uuid)``
+      口径取自源视图（``chain_ending_at``；压缩节点是活跃链的根，被压缩区间
+      不在期望里——fork 不复活它）；
     - uuid 全量重映射：子链 uuid 与源记录集**无交集**，且映射保持 parent 关系；
     - 事件记录随行拷贝（**前缀窗口内**的事件类型序列 + 载荷逐项等价，
       剔除链拓扑与 ``ts``；子 session 后续自产事件不算"没随行"）；
@@ -1208,10 +1211,13 @@ def assert_fork_of(
     source_chain = source.active_chain()
     source_uuids = set(source.by_uuid)
 
-    # ── 期望前缀（镜像 extract_subchain 的 walk 口径） ──
+    # ── 期望前缀（镜像 extract_subchain 的活跃链口径） ──
+    # fork 子链 = 源**活跃链**（trace_chain，与 get_context_window 同源）在
+    # fork 点之前的前缀：压缩节点是活跃链的根（parent_uuid=None），被压缩区间
+    # 不随 fork 走——子会话上下文与源会话请求前缀一致（KV cache 不碎）。
     if at_uuid == CURRENT_SENTINEL:
         expected_draft: str | None = ""
-        expected = source.full_chain()
+        expected = source_chain
     else:
         at = source.by_uuid.get(at_uuid)
         if at is None:
@@ -1242,7 +1248,7 @@ def assert_fork_of(
         expected_draft = at.get("content") if isinstance(at.get("content"), str) else ""
         parent = at.get("parent_uuid")
         expected = (
-            source.full_chain(parent) if isinstance(parent, str) and parent else []
+            source.chain_ending_at(parent) if isinstance(parent, str) and parent else []
         )
 
     child_chain = child.active_chain()
