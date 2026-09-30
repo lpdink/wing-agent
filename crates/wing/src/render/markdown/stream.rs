@@ -1617,6 +1617,23 @@ pub(crate) fn indent_of(line: &str) -> usize {
     n
 }
 
+/// Leading whitespace measured in **columns**, with tabs advanced to the next
+/// multiple of 4 — CommonMark's tab handling (§2.2). Use this whenever an
+/// indentation is compared against something, and [`indent_bytes`] whenever a
+/// line is sliced: the two are different coordinate systems and mixing them is
+/// the defect class of review r4/r5.
+pub(crate) fn indent_columns(line: &str) -> usize {
+    let mut col = 0usize;
+    for c in line.chars() {
+        match c {
+            ' ' => col += 1,
+            '\t' => col = (col / 4 + 1) * 4,
+            _ => break,
+        }
+    }
+    col
+}
+
 /// Number of leading whitespace **bytes** (spaces and tabs) — i.e. the byte
 /// offset of the first non-whitespace character.
 ///
@@ -1651,14 +1668,10 @@ pub(crate) struct FenceTrack {
     /// parser resolves the prefix first, so such a fence ends when its
     /// container ends — not when some unrelated fence line shows up.
     prefixed: bool,
-    /// The innermost list item's `(marker indent, content offset)` — `- ` → 2,
-    /// `- > ~~~` → 2 for the item's own column. `None` = no list item in the
-    /// container chain.
-    item_col: Option<usize>,
-    /// The marker indent of that item (`- a` → 0): a marker at the same or a
-    /// shallower indent is a (possibly new) sibling item, a deeper one is a
-    /// nested list.
-    item_indent: usize,
+    /// The innermost list item's `(marker indent, content column)` — both in
+    /// COLUMNS (tabs advanced to the next multiple of 4), so they can be
+    /// compared with `indent_columns`. `None` = no list item in the chain.
+    item_col: Option<(usize, usize)>,
     /// The tracked item has seen a non-blank content line since its marker.
     ///
     /// An EMPTY item ends at a blank line, so an indented, prefix-less fence
@@ -1696,7 +1709,6 @@ impl FenceTrack {
             len,
             prefixed: false,
             item_col: None,
-            item_indent: 0,
             item_has_content: false,
             seen_blank: false,
             container_gone: false,
@@ -1705,17 +1717,12 @@ impl FenceTrack {
 
     /// A fence opened behind a block prefix (`content_col` = where the
     /// container's content starts).
-    fn behind_prefix(char: u8, len: usize, item: Option<(usize, usize)>) -> Self {
-        let (item_indent, item_col) = match item {
-            Some((indent, col)) => (indent, Some(col)),
-            None => (0, None),
-        };
+    fn behind_prefix(char: u8, len: usize, p: Prefix) -> Self {
         Self {
             char,
             len,
             prefixed: true,
-            item_col,
-            item_indent,
+            item_col: p.item,
             // The fence line itself is the item's content.
             item_has_content: true,
             seen_blank: false,
@@ -1730,33 +1737,27 @@ impl FenceTrack {
         // below are for the next line.
         let had_content = self.item_has_content;
         let blank_before = self.seen_blank;
-        if let Some(item_col) = self.item_col
+        if let Some((item_indent, item_col)) = self.item_col
             && !blank
-            && indent_of(line) < item_col
+            && indent_columns(line) < item_col
         {
             // A non-blank line that is not the item's content. Two cases:
             //
-            // * a NEW LIST ITEM MARKER (`- a`, `1. b`, `  - c`): the list
-            //   container is still alive — the marker opens another item, whose
-            //   indented lines are that item's content (`- ~~~\n- a\n  ~~~` is
-            //   item 1's empty fence + item 2's empty fence, NOT a top-level
-            //   fence). Adopt the new item's content column and stay put;
-            // * anything else (a paragraph line, a quote, …): the item's
-            //   content was interrupted, so an indented fence line can no
-            //   longer be its closer (see `container_gone`).
+            // * a LIST ITEM MARKER (`- a`, `1. b`, `  - c`, `1. `): this item
+            //   ended — a nested list would have to be indented at least at
+            //   this item's content column, and the line is less indented than
+            //   that. The marker opens a NEW item, whose own content column
+            //   governs what follows (`1. ~~~` + `  - c` + `   ~~~`: the last
+            //   line at column 3 is below the new item's column 4, so it is a
+            //   top-level fence, exactly as the parser reads it). Adopt it;
+            // * anything else (a paragraph line, a quote, …): the content was
+            //   interrupted, so an indented fence line can no longer be the
+            //   item's closer (see `container_gone`).
             //
             // Blank lines are fence body, not content that interrupts the item.
             if let Some(len) = list_marker_len(line) {
-                // A marker at the same or a shallower indent is a (possibly
-                // new) sibling item: the container is that item now, with its
-                // own content column (`1. ` → 3, so an indented fence line at
-                // column 2 is then a NEW top-level fence, exactly as the parser
-                // reads it). A deeper marker opens a nested list, which leaves
-                // this item's column alone.
-                if indent_of(line) <= self.item_indent {
-                    self.item_col = Some(len);
-                    self.item_indent = indent_of(line);
-                }
+                let p = prefix(line);
+                self.item_col = p.item.or(Some((item_indent, item_col)));
                 // Whether the new item carries content on its marker line.
                 self.item_has_content = line.get(len..).is_some_and(|rest| !rest.trim().is_empty());
                 self.container_gone = false;
@@ -1794,9 +1795,9 @@ impl FenceTrack {
         // No prefix left. Inside an intact list item an indented line is still
         // item content, so there an indented fence line is the item's OWN
         // closer (`- ~~~ … \n  ~~~`).
-        if let Some(item_col) = self.item_col
+        if let Some((_, item_col)) = self.item_col
             && !self.container_gone
-            && indent_of(line) >= item_col
+            && indent_columns(line) >= item_col
             // An empty item ended at the blank line: the fence line that
             // follows is a new top-level fence (see `item_has_content`).
             && (had_content || !blank_before)
@@ -1881,13 +1882,13 @@ fn fence_close_len(line: &str) -> Option<usize> {
 /// though the line does not start with the fence run. Returns
 /// `(fence_char, run length)`.
 pub(crate) fn prefixed_fence_open(line: &str) -> Option<FenceTrack> {
-    let (start, item) = prefix(line);
-    let content = &line[start..];
+    let p = prefix(line);
+    let content = &line[p.bytes..];
     if content.len() == line.len() {
         return None; // a bare fence — the caller handles those
     }
     let (fc, fl, _) = fence_open(content)?;
-    Some(FenceTrack::behind_prefix(fc, fl, item))
+    Some(FenceTrack::behind_prefix(fc, fl, p))
 }
 
 pub(crate) fn is_fence_close(line: &str, fence_char: u8, fence_len: usize) -> bool {
@@ -1916,77 +1917,91 @@ fn split_fence_line(opener: &str) -> (&str, &str) {
     (&rest[run..], "")
 }
 
-/// Byte offset where the line's **content** starts, after the block prefixes
-/// pulldown resolves before deciding what the line is: blockquote markers
-/// (`>` chains, each with an optional following space) and list markers.
+/// The block prefix in front of a line's content, in **both** coordinate
+/// systems — one walk, so nothing can disagree about where the content starts:
 ///
-/// Only the *shape* helpers use it (`fence_open` / `indent_of`): a fence or
-/// an indented block after a `>` or a `- ` is still a fence / indented block
-/// to the parser, and everything that must not be rewritten inside one (see
-/// the math delimiter normalization) has to agree with the parser.
+/// ```text
+/// Prefix { bytes, columns, quotes, item: Option<(marker columns, content columns)> }
+/// ```
 ///
-/// Returns 0 for a plain line, and never runs past the line's end.
-pub(crate) fn content_start(line: &str) -> usize {
-    prefix(line).0
+/// * `bytes` — where to slice (the callers that need a `&str`);
+/// * `columns` — where the content *is*, with tabs advanced to the next
+///   multiple of 4 (CommonMark §2.2): indentation comparisons must use this,
+///   never `bytes` (mixing them was the defect class of review r4/r5);
+/// * `quotes` — how many `>` markers the chain has (an HTML block ends when its
+///   own chain does, so it needs this);
+/// * `item` — the innermost list item's content columns, from which the
+///   fence tracker derives the item's content column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) struct Prefix {
+    pub(crate) bytes: usize,
+    pub(crate) columns: usize,
+    pub(crate) quotes: usize,
+    pub(crate) item: Option<(usize, usize)>,
 }
 
-/// The block prefix in front of a line's content:
-/// `(byte offset, (innermost list marker's indent, its content offset))`.
-///
-/// One walk, so `content_start` and the list-item questions can never disagree.
-/// `None` = no list item in the container chain.
-pub(crate) fn prefix(line: &str) -> (usize, Option<(usize, usize)>) {
+/// Alias for callers that replace the pre-`Prefix` helper.
+pub(crate) fn content_start(line: &str) -> usize {
+    prefix(line).bytes
+}
+
+pub(crate) fn prefix(line: &str) -> Prefix {
+    let mut out = Prefix::default();
     let mut off = 0usize;
-    let mut item = None;
+    let mut col = 0usize;
     loop {
         let rest = &line[off..];
         // ≥4 columns of indentation is an indented block: what follows is code
         // content, never a `>` or a list marker. This is also the only case in
-        // which `indent_of`'s result is NOT a byte offset (a tab is four
-        // columns but one byte), so returning here keeps every slice below on
-        // a character boundary.
-        if indent_of(rest) >= 4 {
-            return (off, item);
+        // which the two coordinate systems differ by more than nothing at all,
+        // so returning here keeps every slice below on a character boundary.
+        if indent_columns(rest) >= 4 {
+            out.bytes = off;
+            out.columns = col;
+            return out;
         }
+        let rest_col = col + indent_columns(rest);
         let after = &rest[indent_bytes(rest)..];
         if after.starts_with('>') {
-            // A quote does not undo an enclosing list item (`- > ~~~`).
+            out.quotes += 1;
             off += indent_bytes(rest) + 1;
+            col = rest_col + 1;
             if line[off..].starts_with(' ') {
                 off += 1;
+                col += 1;
             }
             continue;
         }
-        if let Some(len) = list_marker_len(after) {
-            // `list_marker_len` counts the indent it skipped (byte-equal to
-            // the column count, since it bails at four columns) — and the
-            // offset right after the marker+space is exactly where this item's
-            // content starts.
-            item = Some((off, off + indent_bytes(rest) + len));
-            off += indent_bytes(rest) + len;
+        if let Some((content_bytes, content_col)) = list_marker_bounds(after, rest_col) {
+            // The offset right after the marker's padding is exactly where this
+            // item's content starts (in bytes *and* in columns).
+            out.item = Some((rest_col, content_col));
+            off += indent_bytes(rest) + content_bytes;
+            col = content_col;
             continue;
         }
-        return (off, item);
+        out.bytes = off;
+        out.columns = col;
+        return out;
     }
 }
 
 /// Length of the list marker prefix (indent + marker + following space),
 /// or None when the line doesn't start a list item.
 fn list_marker_len(line: &str) -> Option<usize> {
-    let indent = indent_of(line);
-    if indent >= 4 {
+    if indent_columns(line) >= 4 {
         return None;
     }
     let rest = &line[indent_bytes(line)..];
-    let (_, content) = list_marker_bounds(rest)?;
-    Some(indent + content)
+    let (content, _) = list_marker_bounds(rest, indent_columns(line))?;
+    Some(indent_bytes(line) + content)
 }
 
 /// `(end of the marker, start of the item's content)` for the list marker at
 /// the very start of `s` — CommonMark §5.2: 1–4 spaces of padding after the
 /// marker make the content start after them, otherwise (no space, or 5+) after
 /// the first space.
-fn list_marker_bounds(s: &str) -> Option<(usize, usize)> {
+fn list_marker_bounds(s: &str, col0: usize) -> Option<(usize, usize)> {
     let b = s.as_bytes();
     let marker = match *b.first()? {
         b'-' | b'*' | b'+' => 1,
@@ -1999,17 +2014,44 @@ fn list_marker_bounds(s: &str) -> Option<(usize, usize)> {
         }
         _ => return None,
     };
-    let spaces = b[marker..]
-        .iter()
-        .take_while(|&&c| c == b' ' || c == b'\t')
-        .count();
-    if spaces == 0 {
-        // A marker must be followed by whitespace (or end the line): `-item`
-        // is a paragraph, not a list item (CommonMark §5.2).
-        return (marker == b.len()).then_some((marker, marker));
+    // Padding is measured in COLUMNS with tabs advanced to the next multiple of
+    // 4 (CommonMark §5.2 + tab handling): `-\titem` has 3 columns of padding,
+    // `  - \titem` has 5 and therefore starts its content after one space — a
+    // tab counted as a single byte would put the item's content column in the
+    // wrong place and turn an indented code block into a paragraph
+    // (review r5 / S3).
+    let marker_end_col = col0 + marker;
+    let mut at = marker;
+    let mut col = marker_end_col;
+    let mut pad_cols = 0usize;
+    while let Some(&c) = b.get(at) {
+        match c {
+            b' ' => {
+                col += 1;
+                pad_cols += 1;
+                at += 1;
+            }
+            b'\t' => {
+                let next = (col / 4 + 1) * 4;
+                pad_cols += next - col;
+                col = next;
+                at += 1;
+            }
+            _ => break,
+        }
     }
-    let pad = if spaces <= 4 { spaces } else { 1 };
-    Some((marker, marker + pad))
+    if pad_cols == 0 {
+        // A marker must be followed by whitespace (or end the line): `-item`
+        // is a paragraph, not a list item.
+        return (marker == b.len()).then_some((marker, marker_end_col));
+    }
+    if pad_cols <= 4 || at == b.len() {
+        Some((at, col))
+    } else {
+        // 5+ columns of padding: the content begins after the first whitespace
+        // character (the rest is content — usually an indented code block).
+        Some((marker + 1, marker_end_col + 1))
+    }
 }
 
 fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -2235,20 +2277,45 @@ mod tests {
             Some((b'~', 3, true, None))
         );
         assert_eq!(
-            prefixed_fence_open("- ```").map(|t| (
-                t.char,
-                t.len,
-                t.prefixed,
-                t.item_col,
-                t.item_indent
-            )),
-            Some((b'`', 3, true, Some(2), 0))
+            prefixed_fence_open("- ```").map(|t| (t.char, t.len, t.prefixed, t.item_col)),
+            Some((b'`', 3, true, Some((0, 2))))
         );
         assert_eq!(
-            prefixed_fence_open("> - ~~~").map(|t| (t.char, t.len, t.item_col, t.item_indent)),
-            Some((b'~', 3, Some(4), 2)),
-            "the list item's own content column, not the fence's offset"
+            prefixed_fence_open("> - ~~~").map(|t| (t.char, t.len, t.item_col)),
+            Some((b'~', 3, Some((2, 4)))),
+            "the list item's own (marker indent, content column), not the fence's offset"
         );
+        // Columns, not bytes: a tab advances to the next multiple of 4, so the
+        // item's content column is 8 — an indented code block, as the parser
+        // reads it (review r5 / S3).
+        assert_eq!(
+            prefixed_fence_open("  - \titem").map(|t| t.item_col),
+            None,
+            "`item` is the item's content, not a fence — but the walk still sees the item"
+        );
+        // Columns, not bytes: `" \t"` is 5 COLUMNS of padding, so the content
+        // starts after the first whitespace character (the tab, byte 4) — its
+        // own 4 columns of indent make it an indented code block, exactly as
+        // the parser reads it (review r5 / S3).
+        assert_eq!(
+            prefix("  - \titem"),
+            Prefix {
+                bytes: 4,
+                columns: 4,
+                quotes: 0,
+                item: Some((2, 4)),
+            }
+        );
+        assert_eq!(indent_columns("\titem"), 4);
+        assert_eq!(
+            prefix("  -     x").bytes,
+            4,
+            "5 columns of padding → one space"
+        );
+        assert_eq!(prefix("  -     x").columns, 4);
+        // 3 columns of padding (`-\t` from column 1 → 4) keep the content at
+        // its real position.
+        assert_eq!(prefix("-\titem").item, Some((0, 4)));
         assert_eq!(prefixed_fence_open("~~~"), None);
     }
 

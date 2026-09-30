@@ -124,7 +124,8 @@ const PIECES: &[&str] = &[
 /// only shows up when the *next* line is a fence opener, and a list-item fence
 /// only when a marker/blank follows).
 fn structured_corpus() -> Vec<String> {
-    const PREFIXES: &[&str] = &["", "> ", "- ", "1. ", "  - ", "\t"];
+    // `  - \t` / `-\t` put a tab after the marker (column vs byte padding).
+    const PREFIXES: &[&str] = &["", "> ", "- ", "1. ", "  - ", "\t", "  - \t", "-\t"];
     const OPENERS: &[&str] = &[
         "~~~",
         "```",
@@ -146,7 +147,7 @@ fn structured_corpus() -> Vec<String> {
     // the empty-item and definition-continuation rules only differ with blanks
     // in play.
     const GAPS: &[&str] = &["", "\n", "\n  \n\n"];
-    const CLOSERS: &[&str] = &["", "  ~~~", "~~~", "> ~~~", "    ~~~~"];
+    const CLOSERS: &[&str] = &["", "  ~~~", "~~~", "> ~~~", "    ~~~~", "   ~~~"];
     const TAILS: &[&str] = &["\\(x\\) after", "$$z$$"];
     let mut docs = Vec::new();
     for prefix in PREFIXES {
@@ -294,6 +295,59 @@ fn prose_delimiters_are_always_rewritten() {
         over_protected.is_empty(),
         "prose delimiters were left unrewritten:\n{}",
         over_protected.join("\n")
+    );
+}
+
+/// Regions whose content the parser emits as plain `Text` — a whole-line HTML
+/// block — are invisible to the segment criterion above, so they get a direct
+/// one: for a document that is **entirely** non-prose, the rendered text must
+/// be the same with math on and off (no rewrite anywhere).
+///
+/// This is where review r5/S1's HTML variant lives:
+/// `<b>\n~~~~\n- a\n\\(x\\)\n` is one HTML block, so `\\(x\\)` must stay
+/// verbatim.
+#[test]
+fn monolithic_non_prose_documents_are_never_rewritten() {
+    const DOCS: &[&str] = &[
+        // HTML block (type 7) swallowing a fence line and a list marker.
+        "<b>\n~~~~\n- a\n\\(x\\)\n",
+        "<b>\n```\n> q\n\\(x\\)\n",
+        // Type 6 / type 1 blocks.
+        "<div>\n~~~\n- a\n\\(x\\)\n",
+        "<pre>\n~~~~\n1. b\n\\(x\\)\n",
+        // A code block that never closes, an indented code block, a reference
+        // definition.
+        "```\n\\(x\\)\n",
+        "    \\(x\\)\n",
+        "[ref]: http://x/\\(y\\)\n",
+        // …including inside a container.
+        "> <b>\n> ~~~\n> - a\n> \\(x\\)\n",
+    ];
+    let text = |doc: &str, math: MathMode| {
+        render(doc, Profile::Content, math)
+            .iter()
+            .flat_map(|l| l.segments.iter())
+            .map(|s| s.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    for doc in DOCS {
+        assert_eq!(
+            text(doc, MathMode::Text),
+            text(doc, MathMode::Off),
+            "{doc:?}: a non-prose document was rewritten"
+        );
+    }
+    // …while the same delimiters in prose are rewritten (the assertion above
+    // must not be vacuously true).
+    assert_ne!(
+        text("\\(x\\)\n", MathMode::Text),
+        text("\\(x\\)\n", MathMode::Off)
+    );
+    assert_ne!(
+        text("<b>\n~~~~\n- a\n\\(x\\)\n\n\\(y\\)\n", MathMode::Text),
+        text("<b>\n~~~~\n- a\n\\(x\\)\n\n\\(y\\)\n", MathMode::Off),
+        "the prose after the block ends must still be rewritten"
     );
 }
 

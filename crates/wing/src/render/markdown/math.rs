@@ -303,11 +303,13 @@ struct Scan<'a> {
     /// next line, indented or not).
     ref_def_dest_missing: bool,
     /// The HTML block currently running, if any — while it runs markdown is
-    /// not parsed, so nothing inside may be rewritten. The `usize` is the block
-    /// prefix length of the line that opened it: an HTML block cannot outlive
-    /// its container (`> <div>` ends when the `>` chain stops, and the line
-    /// after it is markdown again).
-    in_html_block: Option<(HtmlBlock, usize)>,
+    /// not parsed, so nothing inside may be rewritten.
+    ///
+    /// The [`HtmlContainer`] is the container the block lives in: an HTML block
+    /// cannot outlive its container (`> <div>` ends when the `>` chain stops),
+    /// but a *top-level* block keeps its content verbatim — `- a` or `> q`
+    /// inside it are block content, not containers (review r5 / S1).
+    in_html_block: Option<(HtmlBlock, HtmlContainer)>,
     /// The scan has met an unpaired `$$` in the current block.
     ///
     /// A rewrite inserts `$$`, and a stray `$$` would then pair with the
@@ -431,7 +433,7 @@ impl<'a> Scan<'a> {
                     line_start = next;
                     continue;
                 }
-                if let Some((block, block_prefix)) = self.in_html_block {
+                if let Some((block, container)) = self.in_html_block {
                     // Inside an HTML block markdown is not parsed. Types 1–5
                     // end on the line containing their marker, 6–7 at the next
                     // blank line — and the container ends the block too.
@@ -442,9 +444,12 @@ impl<'a> Scan<'a> {
                         line_start = next;
                         continue;
                     }
-                    if prefix(line).0 != block_prefix {
+                    if !container.holds(&prefix(line)) {
                         // The container ended: the block is over and THIS line
                         // is markdown again (`> <div>` + `~~~` opens a fence).
+                        // A line that merely *carries a prefix* (`- a` inside a
+                        // top-level block) does not end anything — HTML block
+                        // content is verbatim.
                         self.in_html_block = None;
                     } else {
                         i = next;
@@ -510,7 +515,7 @@ impl<'a> Scan<'a> {
                     // Types 2–5 can end on the very line that opens them
                     // (`<!-- c -->`), in which case the block is that line.
                     if !html_block_ends(block, content) {
-                        self.in_html_block = Some((block, prefix(line).0));
+                        self.in_html_block = Some((block, HtmlContainer::of(&prefix(line))));
                     }
                     i = next;
                     line_start = next;
@@ -1021,6 +1026,33 @@ fn html_block_start(content: &str, at_block_start: bool) -> Option<HtmlBlock> {
         return Some(HtmlBlock::Blank);
     }
     None
+}
+
+/// The container an HTML block lives in (CommonMark's `containers` stack): the
+/// block ends with its container, not with every line that happens to carry
+/// some prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HtmlContainer {
+    /// How many `>` markers the chain had when the block opened.
+    quotes: usize,
+    /// The list item's content column, when the block lives in one.
+    item_col: Option<usize>,
+}
+
+impl HtmlContainer {
+    fn of(prefix: &crate::render::markdown::stream::Prefix) -> Self {
+        Self {
+            quotes: prefix.quotes,
+            item_col: prefix.item.map(|(_, col)| col),
+        }
+    }
+
+    /// Whether `line` is still inside this container: the `>` chain and the
+    /// item's content column must both still be satisfied (an HTML block inside
+    /// a list item needs its content indented like any other item content).
+    fn holds(&self, prefix: &crate::render::markdown::stream::Prefix) -> bool {
+        prefix.quotes >= self.quotes && self.item_col.is_none_or(|col| prefix.columns >= col)
+    }
 }
 
 /// Whether `line` ends the HTML block (its end condition is satisfied

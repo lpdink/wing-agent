@@ -86,7 +86,12 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 
 > 历史：这三条规则原先在 splitter 与归一化器里各写了一份，两份漂移导致**代码块内容被改写**（`\(x\)` → `$x$`）——现在没有第二份可漂移。
 
-`math.rs` 里剩下两类「不是正文」的判定（HTML 块、引用定义）也被收成**具名函数**：`html_block_start` / `html_block_ends`（对应 CommonMark §4.6 的类型 1–7 与各自的结束条件）、`reference_definition` / `ref_def_continuation` / `looks_like_title`（对应 §4.7）。这一类「扫描器的块结构模型」是历史上反复漂移的地方，回归由 `crates/wing/tests/markdown_math_drift.rs` 守着：**任何**被归一化改写的字符都不得落在代码跨度/围栏/HTML 块/引用定义/链接目标里（对比 `rendering.math = text` 与 `= off` 的 code/link 段文本），语料 ≥2 万份（含定向交叉组合），把任一启发式改回旧形态都会变红。
+`math.rs` 里剩下两类「不是正文」的判定（HTML 块、引用定义）也被收成**具名函数**：`html_block_start` / `html_block_ends`（对应 CommonMark §4.6 的类型 1–7 与各自的结束条件）、`reference_definition` / `ref_def_continuation` / `looks_like_title`（对应 §4.7）。这一类「扫描器的块结构模型」是历史上反复漂移的地方，回归由 `crates/wing/tests/markdown_math_drift.rs` 守着，判据两层：
+
+1. **段级**：`rendering.math = text` 与 `= off` 两个视图下，`CodeBlock` / `InlineCode` / `Link` 段的文本必须逐字节相同（覆盖代码跨度、围栏、缩进代码、链接与图片目标）；
+2. **文档级**：整篇都是非正文的文档（HTML 块、未闭合围栏、缩进代码块、引用定义），两个视图的**渲染文本**必须相同——HTML 块内容在 IR 里是 `Text` 段，段级判据看不见它，这条补上。
+
+语料 ≥2.1 万份（随机 + 定向交叉组合），把任一启发式改回旧形态都会变红（实测：HTML 判定、引用定义闸门、空 item 规则、marker padding、列表标记分支、HTML 容器边界 六处）。
 
 **症状 → 先看哪里**：公式没渲染（显示源码）= 引擎判 `None`（`--kinds` 看 `$` 是否落在该行；超宽就换大宽度或看 `--range`）；公式**整段消失** = B 级缺陷（事件没接线），先用 `--kinds` 确认 `$` 段在不在；**代码块里的 `\(` 变成了 `$`** = 围栏状态机问题（检查 `FenceTrack::step` 的规则与调用方是否都在用它）。
 
@@ -115,8 +120,9 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 | 容器里的反引号围栏（`> ``` `、`- ``` …`、`  - ``` …`）在**某些 chunk 边界**下静息态 ≠ 参考 | 根因是 `ensure_fences_on_own_line`：`> ` / `- ` 不是空白前缀，行首 `> ``` ` 会被当成「粘在文字后的围栏」而插入换行；插入发生在 `push` 里，**某个切片可能先被 promoted、插入还没落地**，于是切片文本与参考的归一化文本不同。分歧点随 profile / 形状 / chunk 漂移（实测 `> ~~~
 > a
 ~~~` + 公式：content chunk=5 双方都分歧；`  - ``` … > ``` ` 这类形状：双方都在 thinking 全 chunk 分歧、本实现另有 content chunk=7 的零星分歧） | 既有噪声（`a946327` 同样分歧，只是组合不同），`finalize()` 收敛；`stream_render_reconcile` 因此不放这些形状（tilde 围栏的同类形状在矩阵里） |
-| 列表标记后跟 tab（`-\t~~~`、`1.\t~~~`） | `list_marker_bounds` 已把 tab 当 marker 后的空白（CommonMark 允许），但 marker 的**列**与**字节**在含 tab 时不再等价（见下一条） | 已修（r4），仅 tab 的对齐近似 |
-| `FenceTrack` 里的 `item_col` 是字节偏移、比较对象 `indent_of` 是列数 | 能进入 list marker 的前缀只含 ASCII + ≤3 空格，两者逐字节相等；含 tab 的 marker 行是唯一例外（近似，方向保守） | 潜在隐患（审查 r3/N6），已注释钉死 |
+| 列表标记后的 tab（`-\t~~~`、`  - \titem`） | r4 曾把 tab 当 1 字节 padding，导致 item 内容列算错（缩进代码块被当段落 → 内容被改写）；r5 起 `list_marker_bounds` 按 **CommonMark 的列**计算（tab 推进到下一个 4 的倍数），`prefix()` 同时给出字节偏移与列号，`FenceTrack::item_col` 用列 | 已修（r5） |
+| `indent_of`（旧助手）把 tab 一律记 4 列 | `indent_of` 只看「是否 ≥4 列 / ==0 / ≥2」，在含 tab 的边角形态（如 4 空格 + tab）与真实列号有偏差；需要精确列号的地方（`prefix`/`FenceTrack`）已改用 `indent_columns` | 残留近似（仅影响 ≤3 列守卫的边角），登记 |
+| HTML 块跨流式切片边界时，静息帧把块内的围栏行渲染成代码块 | 切片器不建模 HTML 块，块内的围栏行会被切到新切片；`<b>\n~~~~\n- a\n\\(x\\)` 实测在 `94ac0be`（无 math）基线上同样分歧 → 与 math 无关的既有噪声，`finalize()` 收敛 | 既有（b0 级），矩阵不放该形状（`math_html_block_swallows_fence_and_marker` 用的是会收敛的变体） |
 | 行内 HTML 里的 `$` 被当数学（`<code>$x$</code>` → `x`） | `ENABLE_MATH` 的固有语义，且基线本来就在行内 HTML 里解析 markdown（`<span>*em*</span>` → `em`）；仅在显示公式跨标签时才会吃掉标签（`<b>$$…</b> and <i>…$$`） | 输入歧义（与既有语义一致） |
 | 公式网格的最后一行是空行时，cell 末尾看不到那一行 | 文档级 `trim_trailing_blank` 会把末尾空行与块分隔空行合并（对任何块的末尾空行都一样）；被合并的是空行，视觉无损失 | 文档级空行语义 |
 

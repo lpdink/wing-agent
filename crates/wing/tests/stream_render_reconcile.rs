@@ -407,6 +407,26 @@ fn shapes() -> Vec<(&'static str, String)> {
             "math_reference_definition_wrapped_then_fence",
             "[ref]:\n  http://x\n  ~~~\n\n\\(x\\) T\n".into(),
         ),
+        // --- review r5: three boundary rules in the shared primitives ---
+        (
+            // An HTML block swallows a fence line: a line that merely carries a
+            // prefix (`- a`) does not end the block (the block's *container*
+            // does).
+            "math_html_block_swallows_fence_and_marker",
+            "- \n    code \\(x\\)\n<b>\n~~~~\n- a\n\\(x\\)\n".into(),
+        ),
+        (
+            // A marker deeper than the item's marker but above its content
+            // column ends the item: the next fence line is top-level.
+            "math_list_fence_deeper_marker",
+            "1. ~~~\n  - c\n   ~~~\n\n\\(x\\) after\n".into(),
+        ),
+        (
+            // A tab after the marker is a COLUMN, not a byte: the item's
+            // content is an indented code block.
+            "math_list_marker_tab_padding",
+            "  - \titem\n    \tcont \\(e\\)\n".into(),
+        ),
     ]
 }
 
@@ -628,6 +648,9 @@ fn reconcile_prefixes() {
         "math_html_block_in_quote_then_fence",
         "math_reference_definition_then_fence",
         "math_reference_definition_wrapped_then_fence",
+        "math_html_block_swallows_fence_and_marker",
+        "math_list_fence_deeper_marker",
+        "math_list_marker_tab_padding",
     ];
     let palette = ThemePalette::default();
     for (name, corpus) in shapes() {
