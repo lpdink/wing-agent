@@ -227,6 +227,11 @@ providers:
 `libs/wing-probe/scenarios/test_read_image.py`（真网关 + 假 Provider + 公开协议；断言锚定
 事件时间线 / 请求留档 / `history.jsonl` / 文件系统）：
 
+> `@pytest.mark.probe_env(models=…)` 只声明 provider 的**静态模型列表**（能力 / 展示元信息，
+> 即 `/api/models` 与 `resolve_model_capabilities` 的数据源），**不改 agent 默认模型**——
+> 场景必须显式 `probe.session(model=…)`。否则请求会打到 agent 模板里的占位模型
+> （`probe/default`），而假 Provider 的剧本按 model 名路由，表现为 5xx 或断言对不上。
+
 | 场景 | 断言要点 |
 |------|----------|
 | `test_positive_read_default_followup` | `tool_call_result.tool_media` 逐字段 == 文件事实；信封文本 == 工具结果；请求中图片在全部 tool 消息之后的 user 消息里、data URL 解码 == 文件；history 有引用、**无 base64**；`.media/<id[:2]>/<id>` 落盘且 sha256 == id |

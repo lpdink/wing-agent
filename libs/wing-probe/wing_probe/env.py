@@ -103,16 +103,22 @@ def reserve_port(host: str = DEFAULT_HOST) -> int:
         return int(sock.getsockname()[1])
 
 
-def merge_no_proxy(existing: str | None) -> str:
-    """把 loopback 主机并入 ``NO_PROXY`` 值（保留既有条目，重复不追加）。
+def merge_no_proxy(*values: str | None) -> str:
+    """把 loopback 主机并入 ``NO_PROXY`` 值（多来源取并集，保留既有条目，重复不追加）。
 
-    网关子进程继承它——子进程里的 httpx（provider 调用假 Provider）同样要绕开
-    环境 / 系统代理（见 :data:`LOOPBACK_HOSTS`）。``*`` 视为全豁免，原样保留。
+    调用方把 ``NO_PROXY`` / ``no_proxy`` 两个拼写都传进来——环境里两种拼写各占
+    一半，只读其中一种会让另一种的既有条目丢失。网关子进程继承合并结果：子进程
+    里的 httpx（provider 调用假 Provider）同样要绕开环境 / 系统代理（见
+    :data:`LOOPBACK_HOSTS`）。``*`` 视为全豁免，原样保留。
     """
-    entries: list[str] = [
-        item.strip() for item in (existing or "").split(",") if item.strip()
-    ]
-    covered = set(entries)
+    entries: list[str] = []
+    covered: set[str] = set()
+    for value in values:
+        for item in (value or "").split(","):
+            entry = item.strip()
+            if entry and entry not in covered:
+                covered.add(entry)
+                entries.append(entry)
     if "*" not in covered:
         for host in LOOPBACK_HOSTS:
             if host not in covered:
@@ -533,7 +539,7 @@ class ProbeEnv:
         env["WING_HOME"] = str(self.wing_home)
         env["WING_SESSIONS_PATH"] = str(self.sessions_path)
         env["PYTHONUNBUFFERED"] = "1"
-        env["NO_PROXY"] = merge_no_proxy(env.get("NO_PROXY"))
+        env["NO_PROXY"] = merge_no_proxy(env.get("NO_PROXY"), env.get("no_proxy"))
         env["no_proxy"] = env["NO_PROXY"]
         env.update(self._env_overrides)
         return env

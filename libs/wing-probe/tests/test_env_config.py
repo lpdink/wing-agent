@@ -414,12 +414,30 @@ def test_env_render_config_passes_provider_extra(tmp_path: Path) -> None:
 
 def test_merge_no_proxy_keeps_existing_and_adds_loopback() -> None:
     """NO_PROXY 合并：既有条目不丢、loopback 补齐、`*` 原样保留。"""
-    expected_default = ",".join(LOOPBACK_HOSTS)
-    assert merge_no_proxy(None) == expected_default
-    assert merge_no_proxy("") == expected_default
-    assert merge_no_proxy("example.com") == f"example.com,{expected_default}"
-    assert merge_no_proxy("127.0.0.1") == expected_default
+    default = ",".join(LOOPBACK_HOSTS)
+    assert merge_no_proxy(None) == default
+    assert merge_no_proxy("") == default
+    assert merge_no_proxy("example.com") == f"example.com,{default}"
+    assert merge_no_proxy("127.0.0.1") == default
     assert merge_no_proxy("*") == "*"
+    # 多来源（NO_PROXY + no_proxy 两种拼写）取并集，重复不追加。
+    assert merge_no_proxy("example.com", "corp.example.com") == (
+        f"example.com,corp.example.com,{default}"
+    )
+    assert merge_no_proxy("example.com", "example.com") == f"example.com,{default}"
+    assert merge_no_proxy(None, "corp.example.com") == f"corp.example.com,{default}"
+
+
+def test_env_vars_keep_lowercase_no_proxy_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """小写 `no_proxy` 的既有条目不得被覆写丢掉（只设小写拼写的那一半环境）。"""
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.setenv("no_proxy", "corp.example.com")
+    env = ProbeEnv(tmp_path).env_vars()
+    assert env["NO_PROXY"] == env["no_proxy"]
+    assert "corp.example.com" in env["NO_PROXY"], env["NO_PROXY"]
+    assert "127.0.0.1" in env["NO_PROXY"] and "localhost" in env["NO_PROXY"]
 
 
 def test_env_vars_carry_loopback_no_proxy(

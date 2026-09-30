@@ -48,6 +48,10 @@ TEXT_SPEC: dict[str, Any] = {
 }
 
 # ── 协议常量（frozen strings；见 wing/media.py 与 wing/provider/media.py） ──
+#
+# 这里按**字面量**断言：AST 门禁（`wing_probe/guard.py`）禁止 probe 侧
+# `import wing`，实现常量不可导入——本文件是外部实现，字面量即线上的事实。
+# 每条与实现逐字节相同；任何漂移（含单字符）都会让本文件变红。
 
 PLACEHOLDER_NO_VISION = "(image omitted: this model does not accept image input)"
 PLACEHOLDER_BUDGET = (
@@ -55,8 +59,17 @@ PLACEHOLDER_BUDGET = (
     "re-read the file to attach it again)"
 )
 PLACEHOLDER_TOO_LARGE = "(image omitted: exceeds this provider's per-image size limit)"
+PLACEHOLDER_UNAVAILABLE = (
+    "(image unavailable: stored image bytes could not be read; "
+    "re-read the file to attach it again)"
+)
 PLACEHOLDERS = frozenset(
-    {PLACEHOLDER_NO_VISION, PLACEHOLDER_BUDGET, PLACEHOLDER_TOO_LARGE}
+    {
+        PLACEHOLDER_NO_VISION,
+        PLACEHOLDER_BUDGET,
+        PLACEHOLDER_TOO_LARGE,
+        PLACEHOLDER_UNAVAILABLE,
+    }
 )
 FOLLOWUP_GUIDE = "Images read by the preceding tool results are attached below."
 
