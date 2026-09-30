@@ -1,7 +1,7 @@
 //! Cursor movement operations for InputArea.
 
 use super::InputArea;
-use super::helpers::PREFIX_WIDTH;
+use super::chrome::Chrome;
 use super::helpers::is_placeholder_line;
 use super::wrap;
 
@@ -94,7 +94,7 @@ impl InputArea {
 
     /// Build visual rows for movement computation.
     fn visual_rows(&self, available_width: u16) -> Vec<wrap::VisualRow> {
-        let text_width = available_width.saturating_sub(PREFIX_WIDTH) as usize;
+        let text_width = Chrome::for_width(available_width).text_width as usize;
         wrap::build_visual_rows(&self.lines, text_width.max(1))
     }
 

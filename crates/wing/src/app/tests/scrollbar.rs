@@ -100,9 +100,30 @@ fn redrew(outcome: MouseOutcome) -> bool {
     outcome != MouseOutcome::Ignored
 }
 
-fn row_text(buf: &ratatui::buffer::Buffer) -> String {
-    (buf.area.x..buf.area.right())
-        .map(|x| buf[(x, buf.area.y)].symbol())
+/// The composer's bottom border, rendered from the app's live chat state.
+///
+/// The rail carries the very numbers the bar is dragged against, so the frame
+/// that follows a drag already shows the new position.
+fn render_meta_rail(app: &App) -> String {
+    use crate::ui::input_area::ComposerWidget;
+    use crate::ui::input_area::InputArea;
+    use crate::ui::input_area::MetaRail;
+    use ratatui::widgets::Widget;
+
+    let area = Rect::new(0, 0, 80, 3); // top border, one text row, meta rail
+    let mut input = InputArea::new("");
+    let usage = TurnUsage::default();
+    let meta = MetaRail {
+        workdir: None,
+        usage: &usage,
+        total_lines: app.chat.content_height(),
+        visible_height: app.geometry.chat_height(),
+        scroll_offset: app.chat.scroll_position(),
+    };
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    ComposerWidget::new(&mut input, &app.palette, None, meta).render(area, &mut buf);
+    (area.x..area.right())
+        .map(|x| buf[(x, area.bottom() - 1)].symbol())
         .collect()
 }
 
@@ -133,23 +154,11 @@ fn test_scrollbar_track_click_jumps_and_syncs_the_info_separator() {
     assert_eq!(app.chat.scroll_position(), geom.max_scroll());
     assert!(app.chat.is_at_bottom(), "the bottom edge re-arms follow");
 
-    // The info separator renders from the same state, so the frame that
+    // The composer's meta rail renders from the same state, so the frame that
     // follows the click already shows the new position.
-    let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 80, 1));
-    let sep_area = Rect::new(0, 0, 80, 1);
-    render_info_separator(
-        None,
-        &TurnUsage::default(),
-        app.chat.content_height(),
-        app.geometry.chat_height(),
-        app.chat.scroll_position(),
-        &app.palette,
-        sep_area,
-        &mut buf,
-    );
-    let rendered = row_text(&buf);
-    assert!(rendered.contains("100/100"), "pos/total:\n{rendered}");
-    assert!(rendered.contains("100%"), "percent:\n{rendered}");
+    let rail = render_meta_rail(&app);
+    assert!(rail.contains("100/100"), "pos/total:\n{rail}");
+    assert!(rail.contains("100%"), "percent:\n{rail}");
 
     // Click the top of the track → back to the beginning, reading state.
     assert!(redrew(
@@ -542,17 +551,6 @@ fn scrolling_linked_cjk_keeps_the_terminal_in_step() {
 // ── Overlay scrollbar: whole-frame checks through a real Terminal ────
 
 /// The frame as text (one line per row), for assertion messages.
-fn frame_text(buf: &ratatui::buffer::Buffer) -> String {
-    (buf.area.y..buf.area.bottom())
-        .map(|row| {
-            let line: String = (buf.area.x..buf.area.right())
-                .map(|x| buf[(x, row)].symbol())
-                .collect();
-            format!("{row:>2} |{line}|\n")
-        })
-        .collect()
-}
-
 /// Bar glyphs are unambiguous outside the chat (`│` is shared with every
 /// border, `┃` / `█` are not).
 fn is_bar_glyph(symbol: &str) -> bool {
@@ -598,12 +596,12 @@ fn test_draw_paints_the_scrollbar_only_on_the_chat_areas_last_column() {
             frame_text(&buf)
         );
     }
-    // …the composer rows below it keep their own content (the info
-    // separator paints a rule across the whole row)…
+    // …the composer rows below it keep their own content (the card's rounded
+    // corner closes the row, it does not carry the bar)…
     assert_eq!(
         buf[(column, chat.bottom())].symbol(),
-        "─",
-        "info separator row\n{}",
+        "╮",
+        "the composer's top border\n{}",
         frame_text(&buf)
     );
     assert!(
@@ -611,8 +609,10 @@ fn test_draw_paints_the_scrollbar_only_on_the_chat_areas_last_column() {
         "status bar row must not look like the bar\n{}",
         frame_text(&buf)
     );
-    // …and no other cell of the frame carries a bar-only glyph.
-    for row in buf.area.y..buf.area.bottom() {
+    // …and no other *chat* row carries a bar-only glyph. The composer's rows
+    // are excluded on purpose: its card draws its own borders there, and the
+    // bar never reaches below the band.
+    for row in buf.area.y..chat.bottom() {
         for x in buf.area.x..buf.area.right() {
             if is_bar_glyph(buf[(x, row)].symbol()) {
                 assert_eq!(

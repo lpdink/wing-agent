@@ -1,20 +1,11 @@
-//! Spinner state and working-indicator widget.
+//! Spinner state.
 //!
-//! Ships the MiniDot frame sequence and a [`WorkingIndicatorWidget`] that
-//! composes spinner glyph + "Working..." text + elapsed timer into one row.
-//! Frame timing is driven externally via [`SpinnerState::tick`].
+//! Ships the MiniDot frame sequence and the elapsed-time formatting the
+//! composer's activity rail reads (`ui::input_area::chrome` draws the glyph,
+//! the "Working..." label and the timer into the card's top border). Frame
+//! timing is driven externally via [`SpinnerState::tick`].
 
 use std::time::Duration;
-use std::time::Instant;
-
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::style::Style;
-use ratatui::text::Line;
-use ratatui::text::Span;
-use ratatui::widgets::Widget;
-
-use crate::config::ThemePalette;
 
 /// MiniDot braille frames (12 FPS, ~83ms interval).
 const MINIDOT_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -67,10 +58,11 @@ impl Default for SpinnerState {
     }
 }
 
-// ---- Working Indicator Widget ----
-
 /// Format elapsed seconds into compact human-friendly form.
-fn fmt_elapsed(elapsed_secs: u64) -> String {
+///
+/// Read by the composer's activity rail, which prints it next to the label:
+/// `⠋ Working... (1m 05s · Esc to interrupt)`.
+pub(crate) fn fmt_elapsed(elapsed_secs: u64) -> String {
     if elapsed_secs < 60 {
         return format!("{elapsed_secs}s");
     }
@@ -83,64 +75,6 @@ fn fmt_elapsed(elapsed_secs: u64) -> String {
     let minutes = (elapsed_secs % 3600) / 60;
     let seconds = elapsed_secs % 60;
     format!("{hours}h {minutes:02}m {seconds:02}s")
-}
-
-/// One-row widget: `⠋ Working... (3s · Esc to interrupt)`
-pub struct WorkingIndicatorWidget<'a> {
-    spinner: &'a SpinnerState,
-    started_at: Instant,
-    palette: &'a ThemePalette,
-    /// Optional role label for Goal mode (e.g. "Executor working", "Checker reviewing").
-    role_label: Option<&'a str>,
-}
-
-impl<'a> WorkingIndicatorWidget<'a> {
-    pub fn new(spinner: &'a SpinnerState, started_at: Instant, palette: &'a ThemePalette) -> Self {
-        Self {
-            spinner,
-            started_at,
-            palette,
-            role_label: None,
-        }
-    }
-
-    /// Set the role label (Goal mode).
-    pub fn with_role_label(mut self, label: Option<&'a str>) -> Self {
-        self.role_label = label;
-        self
-    }
-}
-
-impl Widget for WorkingIndicatorWidget<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        if area.height == 0 || area.width == 0 {
-            return;
-        }
-
-        let elapsed = self.started_at.elapsed().as_secs();
-        let dim = Style::default().fg(self.palette.dim);
-        let accent = Style::default().fg(self.palette.accent);
-
-        let mut spans = vec![Span::styled(self.spinner.frame_str().to_string(), accent)];
-        if let Some(label) = self.role_label {
-            spans.push(Span::styled(
-                format!(" {label}..."),
-                Style::default().fg(self.palette.text),
-            ));
-        } else {
-            spans.push(Span::styled(
-                " Working...",
-                Style::default().fg(self.palette.text),
-            ));
-        }
-        if elapsed > 0 {
-            spans.push(Span::styled(format!(" ({})", fmt_elapsed(elapsed)), dim));
-        }
-        spans.push(Span::styled(" · ", dim));
-        spans.push(Span::styled("Esc to interrupt", dim));
-
-        buf.set_line(area.x, area.y, &Line::from(spans), area.width);
-    }
 }
 
 #[cfg(test)]

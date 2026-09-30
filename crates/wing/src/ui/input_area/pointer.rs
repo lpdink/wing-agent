@@ -18,7 +18,7 @@ use ratatui::style::Modifier;
 use ratatui::style::Style;
 
 use super::InputArea;
-use super::helpers::PREFIX_WIDTH;
+use super::chrome::Chrome;
 use super::wrap;
 use crate::ui::selection::Selection;
 use crate::ui::selection::SelectionPoint;
@@ -31,7 +31,8 @@ pub struct ComposerHit {
     /// the value [`super::InputArea::set_cursor_from_visual`] wants).
     pub vis_row: usize,
     /// Display column inside the text area: `0` is the first cell after the
-    /// `> ` prefix. Values past the row's text point into its trailing blank.
+    /// prompt glyph, in the card's own columns. Values past the row's text
+    /// point into its trailing blank.
     pub display_col: u16,
     /// Logical position the pointer resolves to: the insertion point at or
     /// before the character whose cells cover it.
@@ -65,14 +66,30 @@ pub fn hit(input: &InputArea, area: Rect, column: u16, row: u16) -> Option<Compo
     if area.width == 0 || area.height == 0 {
         return None;
     }
-    let text_width = area.width.saturating_sub(PREFIX_WIDTH) as usize;
+    let chrome = Chrome::of(area);
+    let text_width = chrome.text_width as usize;
     // Same expression the widget renders with, so the rows are identical.
     let vis_rows = wrap::build_visual_rows(&input.lines, text_width.max(1));
     let last = vis_rows.len().checked_sub(1)?;
 
-    let visible = (row.clamp(area.y, area.bottom() - 1) - area.y) as usize;
+    // A pointer *outside* the composer clamps into its text band (a drag that
+    // leaves the region keeps producing positions — the chat band's contract);
+    // a pointer *on* the card's rails is nobody's, so a click on the frame is
+    // inert instead of dropping a cursor under it.
+    let row_in_area = if row < area.y {
+        chrome.top_row()
+    } else if row >= area.bottom() {
+        area.height - 1 - u16::from(chrome.card)
+    } else {
+        let row = row - area.y;
+        if chrome.card && (row == 0 || row >= area.height - 1) {
+            return None;
+        }
+        row
+    };
+    let visible = row_in_area.saturating_sub(chrome.top_row()) as usize;
     let vis_row = (input.vertical_scroll + visible).min(last);
-    let display_col = column.saturating_sub(area.x).saturating_sub(PREFIX_WIDTH);
+    let display_col = column.saturating_sub(area.x).saturating_sub(chrome.text_x);
 
     let row = vis_rows[vis_row];
     let line = &input.lines[row.logical_line];
@@ -100,10 +117,10 @@ pub fn focus(input: &InputArea, area: Rect, column: u16, row: u16) -> Option<Sel
 ///
 /// Same channel as the chat band's highlight: a merge (`REVERSED` only, the
 /// underlying fg/bg survive) applied after every widget has rendered, clipped
-/// to *this* frame's composer rect — the `> ` prefix and everything outside the
-/// composer are never touched. The selected char range is turned into display
-/// columns per visual row with the model's own widths, so a wide character is
-/// covered whole (both of its cells).
+/// to *this* frame's composer rect — the card's frame, the prompt glyph and
+/// everything outside the composer are never touched. The selected char range
+/// is turned into display columns per visual row with the model's own widths,
+/// so a wide character is covered whole (both of its cells).
 ///
 /// Does nothing unless the selection belongs to the composer
 /// ([`Selection::bounds_in`]) — a chat selection can never paint here.
@@ -114,9 +131,12 @@ pub fn paint_selection(buf: &mut Buffer, input: &InputArea, area: Rect, selectio
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let text_width = area.width.saturating_sub(PREFIX_WIDTH) as usize;
+    let chrome = Chrome::of(area);
+    let text_width = chrome.text_width as usize;
     let vis_rows = wrap::build_visual_rows(&input.lines, text_width.max(1));
-    for (visible, screen_row) in (area.y..area.bottom()).enumerate() {
+    let first_row = area.y + chrome.top_row();
+    let last_row = first_row + chrome.text_rows;
+    for (visible, screen_row) in (first_row..last_row).enumerate() {
         let Some(row) = vis_rows.get(input.vertical_scroll + visible) else {
             continue;
         };
@@ -141,13 +161,13 @@ pub fn paint_selection(buf: &mut Buffer, input: &InputArea, area: Rect, selectio
         }
         let from_x = area
             .x
-            .saturating_add(PREFIX_WIDTH)
+            .saturating_add(chrome.text_x)
             .saturating_add(wrap::char_display_offset(line, row, from) as u16);
         let to_x = area
             .x
-            .saturating_add(PREFIX_WIDTH)
+            .saturating_add(chrome.text_x)
             .saturating_add(wrap::char_display_offset(line, row, to) as u16);
-        for x in from_x..to_x.min(area.right()) {
+        for x in from_x..to_x.min(area.right().saturating_sub(u16::from(chrome.card))) {
             buf[(x, screen_row)].set_style(Style::default().add_modifier(Modifier::REVERSED));
         }
     }
@@ -200,12 +220,21 @@ pub fn selected_text(
 mod tests {
     use super::*;
     use crate::config::ThemePalette;
-    use crate::ui::input_area::InputAreaWidget;
+    use crate::ui::input_area::ComposerWidget;
+    use crate::ui::input_area::MetaRail;
+    use crate::ui::status_bar::TurnUsage;
     use ratatui::widgets::Widget;
 
-    /// The rect the app hands the widget: two columns of prefix are inside it.
-    fn composer_area() -> Rect {
-        Rect::new(0, 10, 30, 3)
+    /// Column of the first draft cell: the frame's border, its padding and the
+    /// prompt glyph are left of it.
+    const TEXT_X: u16 = 4;
+    /// Row of the first draft row: the frame's top border is above it.
+    const TEXT_Y: u16 = 11;
+
+    /// The rect the app hands the widget for a composer `text_width` columns
+    /// and `rows` text rows wide (the card's frame included).
+    fn composer_area(text_width: u16, rows: u16) -> Rect {
+        Rect::new(0, 10, text_width + TEXT_X + 2, rows + 2)
     }
 
     fn reversed_columns(buf: &Buffer, row: u16) -> Vec<u16> {
@@ -214,11 +243,12 @@ mod tests {
             .collect()
     }
 
-    /// Render the input area into a full-screen buffer and return it.
+    /// Render the composer into a full-screen buffer and return it.
     fn render(input: &mut InputArea, area: Rect) -> Buffer {
         let palette = ThemePalette::default();
+        let usage = TurnUsage::default();
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 16));
-        InputAreaWidget::new(input, &palette).render(area, &mut buf);
+        ComposerWidget::new(input, &palette, None, MetaRail::bare(&usage)).render(area, &mut buf);
         buf
     }
 
@@ -226,81 +256,84 @@ mod tests {
     fn test_hit_resolves_the_text_column() {
         let mut input = InputArea::new("");
         input.set_text("hello world");
-        let area = composer_area();
-        // Column 2 is the `> ` prefix end → the first character.
-        let found = hit(&input, area, 2, 10).expect("inside the composer");
+        let area = composer_area(24, 1);
+        // The first text column is the draft's first character.
+        let found = hit(&input, area, TEXT_X, TEXT_Y).expect("inside the composer");
         assert_eq!(found.vis_row, 0);
         assert_eq!(found.display_col, 0);
         assert_eq!(found.point, SelectionPoint::composer(0, 0));
         assert!(found.on_char, "the pointer rests on 'h'");
 
-        let found = hit(&input, area, 8, 10).expect("inside the composer");
+        let found = hit(&input, area, TEXT_X + 6, TEXT_Y).expect("inside the composer");
         assert_eq!(found.display_col, 6);
         assert_eq!(found.point, SelectionPoint::composer(0, 6), "before 'w'");
 
         // Past the text: the row's end, not a character.
-        let found = hit(&input, area, 25, 10).expect("inside the composer");
+        let found = hit(&input, area, 25, TEXT_Y).expect("inside the composer");
         assert_eq!(found.point, SelectionPoint::composer(0, 11));
         assert!(!found.on_char);
     }
 
     #[test]
-    fn test_hit_clamps_the_prefix_and_the_row() {
+    fn test_hit_clamps_the_left_edge_and_ignores_the_frame() {
         let mut input = InputArea::new("");
         input.set_text("hi");
-        let area = composer_area();
-        // On the prefix (or left of the area): the row start.
-        for column in [0, 1] {
-            let found = hit(&input, area, column, 10).expect("inside the composer");
+        let area = composer_area(24, 1);
+        // On the frame, the padding or the prompt glyph (or left of the area):
+        // the row start.
+        for column in [0, 1, 2, 3] {
+            let found = hit(&input, area, column, TEXT_Y).expect("inside the composer");
             assert_eq!(found.display_col, 0);
             assert_eq!(found.point, SelectionPoint::composer(0, 0));
         }
-        // Below the content: clamped to the last visible row.
-        let found = hit(&input, area, 3, 15).expect("below the composer");
-        assert_eq!(found.vis_row, 0, "only one visual row exists");
-        assert_eq!(found.point, SelectionPoint::composer(0, 1));
+        // The rails are not text: a press on them is nobody's.
+        assert!(hit(&input, area, 5, area.y).is_none(), "top rail");
+        assert!(
+            hit(&input, area, 5, area.bottom() - 1).is_none(),
+            "meta rail"
+        );
     }
 
     #[test]
     fn test_hit_follows_soft_wraps_and_the_scroll_window() {
-        // Width 12 → text width 10: "abcdefghij" | "klmno".
+        // Text width 10: "abcdefghij" | "klmno".
         let mut input = InputArea::new("");
         input.set_text("abcdefghijklmno");
-        let area = Rect::new(0, 10, 12, 2);
-        let found = hit(&input, area, 2 + 2, 11).expect("second visual row");
+        let area = composer_area(10, 2);
+        let found = hit(&input, area, TEXT_X + 2, TEXT_Y + 1).expect("second visual row");
         assert_eq!(found.vis_row, 1);
         assert_eq!(found.point, SelectionPoint::composer(0, 12));
 
         // With a scrolled window the screen row is an offset into it.
         let mut input = InputArea::with_max_lines(String::new(), 2);
         input.set_text("one\ntwo\nthree");
-        input.update_vertical_scroll(2, 12);
+        input.update_vertical_scroll(2, area.width);
         assert_eq!(input.vertical_scroll, 1);
-        let found = hit(&input, area, 2 + 2, 11).expect("second window row");
+        let found = hit(&input, area, TEXT_X + 2, TEXT_Y + 1).expect("second window row");
         assert_eq!(found.vis_row, 2);
         assert_eq!(found.point, SelectionPoint::composer(2, 2));
     }
 
     #[test]
     fn test_hit_handles_wide_characters() {
-        // Width 8 → text width 6: "你好世" | "界".
+        // Text width 6: "你好世" | "界".
         let mut input = InputArea::new("");
         input.set_text("你好世界");
-        let area = Rect::new(0, 10, 8, 2);
+        let area = composer_area(6, 2);
         // Either cell of '你' is on that character.
-        let found = hit(&input, area, 2, 10).expect("first cell");
+        let found = hit(&input, area, TEXT_X, TEXT_Y).expect("first cell");
         assert!(found.on_char);
         assert_eq!(found.point, SelectionPoint::composer(0, 0));
         assert_eq!(found.focus(), SelectionPoint::composer(0, 1), "includes 你");
-        let found = hit(&input, area, 3, 10).expect("second cell");
+        let found = hit(&input, area, TEXT_X + 1, TEXT_Y).expect("second cell");
         assert!(found.on_char);
         assert_eq!(found.point, SelectionPoint::composer(0, 0));
-        // '世' occupies columns 4..6.
-        let found = hit(&input, area, 2 + 5, 10).expect("wide character");
+        // '世' occupies display columns 4..6 of the text area.
+        let found = hit(&input, area, TEXT_X + 5, TEXT_Y).expect("wide character");
         assert_eq!(found.point, SelectionPoint::composer(0, 2));
         assert_eq!(found.focus(), SelectionPoint::composer(0, 3));
         // Past the row's text: no character to include.
-        let found = hit(&input, area, 2 + 6, 10).expect("row end");
+        let found = hit(&input, area, TEXT_X + 6, TEXT_Y).expect("row end");
         assert!(!found.on_char);
         assert_eq!(found.focus(), SelectionPoint::composer(0, 3));
     }
@@ -316,7 +349,7 @@ mod tests {
     #[test]
     fn test_empty_draft_has_nothing_to_hit() {
         let input = InputArea::new("今天构建什么？");
-        let found = hit(&input, composer_area(), 6, 10).expect("inside the composer");
+        let found = hit(&input, composer_area(24, 1), TEXT_X + 2, TEXT_Y).expect("inside it");
         assert!(!found.on_char, "the placeholder is not content");
         assert_eq!(found.point, SelectionPoint::composer(0, 0));
         assert_eq!(
@@ -330,7 +363,7 @@ mod tests {
     fn test_paint_selection_covers_only_the_selected_cells() {
         let mut input = InputArea::new("");
         input.set_text("hello world");
-        let area = composer_area();
+        let area = composer_area(24, 1);
         let mut buf = render(&mut input, area);
         let before = buf.clone();
 
@@ -339,12 +372,16 @@ mod tests {
         selection.drag_to(SelectionPoint::composer(0, 5));
         paint_selection(&mut buf, &input, area, &selection);
 
-        // Columns 2..7 are "hello" (the prefix is at 0..2 and stays untouched).
-        assert_eq!(reversed_columns(&buf, 10), (2..7).collect::<Vec<_>>());
+        // Columns 4..9 are "hello" — the frame and the prompt glyph stay
+        // untouched.
+        assert_eq!(
+            reversed_columns(&buf, TEXT_Y),
+            (TEXT_X..TEXT_X + 5).collect::<Vec<_>>()
+        );
         // Every other cell is bit-for-bit unchanged.
         for y in 0..16u16 {
             for x in 0..40u16 {
-                if y == 10 && (2..7).contains(&x) {
+                if y == TEXT_Y && (TEXT_X..TEXT_X + 5).contains(&x) {
                     continue;
                 }
                 assert_eq!(buf[(x, y)], before[(x, y)], "cell ({x},{y}) changed");
@@ -354,18 +391,18 @@ mod tests {
 
     #[test]
     fn test_paint_selection_includes_wide_characters_whole() {
-        // Width 8 → text width 6: "你好世" | "界".
+        // Text width 6: "你好世" | "界".
         let mut input = InputArea::new("");
         input.set_text("你好世界");
-        let area = Rect::new(0, 10, 8, 2);
+        let area = composer_area(6, 2);
         let mut buf = render(&mut input, area);
 
         let mut selection = Selection::default();
         selection.begin(SelectionPoint::composer(0, 0));
         selection.drag_to(SelectionPoint::composer(0, 2));
         paint_selection(&mut buf, &input, area, &selection);
-        // '你' (2..4) and '好' (4..6) — both cells of each.
-        assert_eq!(reversed_columns(&buf, 10), vec![2, 3, 4, 5]);
+        // '你' (4..6) and '好' (6..8) — both cells of each.
+        assert_eq!(reversed_columns(&buf, TEXT_Y), vec![4, 5, 6, 7]);
 
         // A selection on the second visual row paints there, not above it.
         let mut buf = render(&mut input, area);
@@ -373,15 +410,15 @@ mod tests {
         selection.begin(SelectionPoint::composer(0, 3));
         selection.drag_to(SelectionPoint::composer(0, 4));
         paint_selection(&mut buf, &input, area, &selection);
-        assert!(reversed_columns(&buf, 10).is_empty());
-        assert_eq!(reversed_columns(&buf, 11), vec![2, 3]);
+        assert!(reversed_columns(&buf, TEXT_Y).is_empty());
+        assert_eq!(reversed_columns(&buf, TEXT_Y + 1), vec![4, 5]);
     }
 
     #[test]
     fn test_paint_selection_paints_every_row_of_a_multi_line_selection() {
         let mut input = InputArea::new("");
         input.set_text("ab\ncdef");
-        let area = composer_area();
+        let area = composer_area(24, 2);
         let mut buf = render(&mut input, area);
 
         let mut selection = Selection::default();
@@ -389,16 +426,27 @@ mod tests {
         selection.drag_to(SelectionPoint::composer(1, 3));
         paint_selection(&mut buf, &input, area, &selection);
 
-        assert_eq!(reversed_columns(&buf, 10), vec![3], "row 0: from 'b' on");
-        assert_eq!(reversed_columns(&buf, 11), vec![2, 3, 4], "row 1: to 'd'");
-        assert!(reversed_columns(&buf, 12).is_empty());
+        assert_eq!(
+            reversed_columns(&buf, TEXT_Y),
+            vec![TEXT_X + 1],
+            "row 0: from 'b' on"
+        );
+        assert_eq!(
+            reversed_columns(&buf, TEXT_Y + 1),
+            vec![TEXT_X, TEXT_X + 1, TEXT_X + 2],
+            "row 1: to 'd'"
+        );
+        assert!(
+            reversed_columns(&buf, TEXT_Y + 2).is_empty(),
+            "the meta rail"
+        );
     }
 
     #[test]
     fn test_paint_selection_ignores_a_chat_selection() {
         let mut input = InputArea::new("");
         input.set_text("hello");
-        let area = composer_area();
+        let area = composer_area(24, 1);
         let mut buf = render(&mut input, area);
         let before = buf.clone();
 

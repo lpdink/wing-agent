@@ -133,7 +133,7 @@ pub fn visual_to_logical(vis_rows: &[VisualRow], vis_row: usize, vis_col: usize)
 /// This is the pointer-facing inverse of [`char_display_offset`]: the column is
 /// measured from the row's first cell (`0` is the row's first character), which
 /// is exactly what a mouse column gives after subtracting the area origin and
-/// the `> ` prefix.
+/// the text area's inset.
 ///
 /// The result is the insertion point **at or before** the character whose cells
 /// cover `display_col` — a char index has no half-cell precision, so landing on

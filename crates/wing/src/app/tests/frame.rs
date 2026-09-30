@@ -41,7 +41,9 @@ fn test_draw_records_the_frame_it_laid_out() {
     assert_eq!(app.geometry.width(), 80);
 
     // Layout, as an independent fact: status bar row 0, chat band from row 1,
-    // then the info separator, then the composer — nothing else claims rows.
+    // then the composer card — nothing else claims rows. The card's own top
+    // border is the boundary against the chat (the info separator is gone:
+    // its read-out rides the card's bottom border).
     let band = app.geometry.chat_band();
     let composer = app.geometry.composer_rect();
     assert_eq!(band.y, 1, "the band starts right below the status bar");
@@ -49,13 +51,13 @@ fn test_draw_records_the_frame_it_laid_out() {
     assert_eq!(band.width, 80, "the band spans the terminal");
     assert_eq!(
         composer.y,
-        band.bottom() + 1,
-        "the info separator is the row right under the band (bottom is exclusive),          the composer the one below it"
+        band.bottom(),
+        "the composer's top border is the row right under the band"
     );
     assert_eq!(
-        band.height + 1 + 1 + composer.height,
+        band.height + 1 + composer.height,
         24,
-        "status + band + separator + composer fill the terminal"
+        "status + band + composer fill the terminal"
     );
 
     // Chat band vs. the rect the chat widget recorded: the content area plus
@@ -126,9 +128,10 @@ fn test_geometry_is_rebuilt_by_every_frame() {
     );
     assert_eq!(shorter.y, wide_band.y, "still right below the status bar");
     assert_eq!(app.geometry.chat_height(), shorter.height as usize);
-    assert!(
-        app.input.rendered_area().y > shorter.bottom(),
-        "the composer sits below the band"
+    assert_eq!(
+        app.input.rendered_area().y,
+        shorter.bottom(),
+        "the composer starts where the band ends"
     );
     assert_eq!(
         app.geometry.width(),
@@ -266,7 +269,9 @@ fn test_pointer_priority_is_declared_once_and_in_order() {
         0,
         "nobody claims the gutter's blank column"
     );
-    // 3. The composer block, below the band.
+    // 3. The composer block, below the band (the card's frame included: a
+    //    press on it belongs to the composer — the mapping inside is what
+    //    decides there is no text under it).
     assert_eq!(
         app.pointer_owner(composer.x + 1, composer.y),
         Some(PointerOwner::Composer)
@@ -285,8 +290,9 @@ fn test_pointer_priority_is_declared_once_and_in_order() {
     assert!(!app.selection.is_press_active());
     app.handle_mouse(release((geom.column, geom.track_top)));
 
+    let (text_x, text_y) = app.input.text_origin();
     assert_eq!(
-        app.handle_mouse(press((composer.x + 1, composer.y))),
+        app.handle_mouse(press((text_x + 1, text_y))),
         MouseOutcome::Immediate
     );
     assert_eq!(app.selection.region(), Some(SelectionRegion::Composer));
@@ -432,9 +438,9 @@ fn test_the_invalidation_rule_is_one_predicate() {
     // text under the anchor, nothing else does.
     let mut app = app_with_draft("hello world");
     draw(&mut app, &mut terminal);
-    let composer = app.input.rendered_area();
-    app.handle_mouse(press((composer.x + 3, composer.y)));
-    app.handle_mouse(drag((composer.x + 7, composer.y)));
+    let (text_x, text_y) = app.input.text_origin();
+    app.handle_mouse(press((text_x + 3, text_y)));
+    app.handle_mouse(drag((text_x + 7, text_y)));
     assert!(
         !app.selection
             .needs_abort(|region| app.selection_fingerprint(region)),

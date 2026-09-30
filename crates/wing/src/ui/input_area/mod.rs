@@ -1,5 +1,6 @@
-//! Input area widget — multi-line text input at the bottom.
+//! Composer — the multi-line text input at the bottom, drawn as a card.
 
+pub(crate) mod chrome;
 pub(crate) mod editing;
 pub(crate) mod helpers;
 pub(crate) mod movement;
@@ -14,10 +15,12 @@ use crossterm::event::KeyModifiers;
 use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthChar;
 
-use helpers::PREFIX_WIDTH;
+use chrome::Chrome;
 
 // Re-exports for external use.
-pub use widget::InputAreaWidget;
+pub use chrome::ActivityRail;
+pub use chrome::MetaRail;
+pub use widget::ComposerWidget;
 pub use widget::cursor_screen_pos;
 
 /// Actions the input area wants the app to take.
@@ -107,15 +110,28 @@ impl InputArea {
         self.rendered_area
     }
 
-    /// Desired height for layout (visual row count, width-aware).
+    /// Screen position of the text area's first cell in the last frame —
+    /// inside the card's frame, right of the prompt glyph.
+    pub fn text_origin(&self) -> (u16, u16) {
+        let chrome = Chrome::of(self.rendered_area);
+        (
+            self.rendered_area.x + chrome.text_x,
+            self.rendered_area.y + chrome.top_row(),
+        )
+    }
+
+    /// Desired height for layout (the card's frame + its visual rows).
     pub fn height(&self, available_width: u16) -> u16 {
-        let text_width = available_width.saturating_sub(PREFIX_WIDTH) as usize;
-        if text_width == 0 {
-            return 1;
-        }
-        let vis = wrap::build_visual_rows(&self.lines, text_width);
-        let count = vis.len();
-        count.clamp(1, self.max_lines) as u16
+        let chrome = Chrome::for_width(available_width);
+        let text_width = chrome.text_width as usize;
+        let rows = if text_width == 0 {
+            1
+        } else {
+            wrap::build_visual_rows(&self.lines, text_width)
+                .len()
+                .clamp(1, self.max_lines) as u16
+        };
+        chrome.height_for(rows)
     }
 
     /// Check if all lines are empty/whitespace.
@@ -260,7 +276,7 @@ impl InputArea {
         // Same expression the widget renders (and the pointer mapping resolves)
         // with: a collapsed text area still wraps at one column, so the window
         // this computes describes the rows that were really drawn.
-        let text_width = (available_width.saturating_sub(PREFIX_WIDTH) as usize).max(1);
+        let text_width = (Chrome::for_width(available_width).text_width as usize).max(1);
         let vis_rows = wrap::build_visual_rows(&self.lines, text_width);
         let (vis_row, _) = wrap::logical_to_visual(&vis_rows, self.cursor_row, self.cursor_col);
 
@@ -278,15 +294,16 @@ impl InputArea {
     /// This is the click-to-place-cursor entry point: `vis_row` indexes the
     /// full visual-row list [`wrap::build_visual_rows`] produces (a row below
     /// the last one clamps to it), and `vis_col` is a **display column** inside
-    /// the text area — `0` is the first cell after the `> ` prefix, and a value
-    /// past the row's text lands on that row's end. `available_width` is the
-    /// same width the widget is rendered with (`InputAreaWidget`'s `area.width`,
-    /// prefix included), so the wrapping matches the screen exactly.
+    /// the text area — `0` is the first cell after the prompt glyph, and a
+    /// value past the row's text lands on that row's end. `available_width` is
+    /// the same width the widget is rendered with (`ComposerWidget`'s
+    /// `area.width`, the card's frame included), so the wrapping matches the
+    /// screen exactly.
     ///
     /// The mapping is char-granular (see [`wrap::display_col_to_char`]): a
     /// pointer on a wide character resolves to the position *before* it.
     pub fn set_cursor_from_visual(&mut self, available_width: u16, vis_row: usize, vis_col: u16) {
-        let text_width = available_width.saturating_sub(PREFIX_WIDTH) as usize;
+        let text_width = Chrome::for_width(available_width).text_width as usize;
         let vis_rows = wrap::build_visual_rows(&self.lines, text_width.max(1));
         let Some(last) = vis_rows.len().checked_sub(1) else {
             return;
@@ -302,7 +319,8 @@ impl InputArea {
     ///
     /// Returns absolute coordinates suitable for `MoveTo(x, y)`.
     pub fn cursor_screen_pos(&self, area: &Rect) -> (u16, u16) {
-        let text_width = area.width.saturating_sub(PREFIX_WIDTH) as usize;
+        let chrome = Chrome::of(*area);
+        let text_width = chrome.text_width as usize;
         let vis_rows = wrap::build_visual_rows(&self.lines, text_width.max(1));
         let (vis_row, vis_col) =
             wrap::logical_to_visual(&vis_rows, self.cursor_row, self.cursor_col);
@@ -317,13 +335,28 @@ impl InputArea {
             .map(|c| c.width().unwrap_or(0))
             .sum();
 
-        let x = area
-            .x
-            .saturating_add(PREFIX_WIDTH)
-            .saturating_add(col_display as u16);
+        // The cursor lives in the text area: right of the frame's chrome and
+        // inside it — a draft cell can never land on a border. The one column
+        // past the text (the card's right padding) is allowed: a cursor at the
+        // end of a full row sits there instead of jumping a row early.
+        let text_x = area.x.saturating_add(chrome.text_x);
+        let right_edge = area
+            .right()
+            .saturating_sub(1 + u16::from(chrome.card))
+            .min(text_x.saturating_add(chrome.text_width));
+        let x = text_x.saturating_add(col_display as u16).min(right_edge);
         let visible_row = vis_row.saturating_sub(self.vertical_scroll);
-        let y = area.y.saturating_add(visible_row as u16);
-        (x.min(area.x + area.width.saturating_sub(1)), y)
+        let y = area
+            .y
+            .saturating_add(chrome.top_row())
+            .saturating_add(visible_row as u16);
+        (
+            x,
+            y.min(
+                area.bottom()
+                    .saturating_sub(if chrome.card { 2 } else { 1 }),
+            ),
+        )
     }
 }
 
@@ -351,7 +384,7 @@ mod tests {
         assert_eq!(input.lines(), [""]);
         assert_eq!(input.text(), "");
         assert_eq!(input.line_count(), 1);
-        assert_eq!(input.height(80), 1);
+        assert_eq!(input.height(80), 1 + chrome::BORDER_ROWS);
     }
 
     #[test]
@@ -681,14 +714,15 @@ mod tests {
     #[test]
     fn height_single_line() {
         let input = InputArea::new("");
-        assert_eq!(input.height(80), 1);
+        // One text row inside the card's frame.
+        assert_eq!(input.height(80), 1 + chrome::BORDER_ROWS);
     }
 
     #[test]
     fn height_multi_line() {
         let mut input = InputArea::new("");
         input.set_text("a\nb\nc");
-        assert_eq!(input.height(80), 3);
+        assert_eq!(input.height(80), 3 + chrome::BORDER_ROWS);
     }
 
     #[test]
@@ -696,7 +730,23 @@ mod tests {
         let mut input = InputArea::new("");
         let text: String = (0..20).map(|i| format!("{}\n", i)).collect();
         input.set_text(&text);
-        assert_eq!(input.height(80), MAX_INPUT_LINES as u16);
+        assert_eq!(
+            input.height(80),
+            MAX_INPUT_LINES as u16 + chrome::BORDER_ROWS
+        );
+    }
+
+    #[test]
+    fn height_drops_the_frame_when_it_would_not_fit() {
+        // Too narrow for a card: bare text rows, and `Chrome::of` agrees with
+        // the height the app would lay out.
+        let mut input = InputArea::new("");
+        input.set_text("a\nb");
+        let width = 8;
+        assert_eq!(input.height(width), 2);
+        let laid_out = Rect::new(0, 0, width, input.height(width));
+        assert!(!Chrome::of(laid_out).card);
+        assert_eq!(Chrome::of(laid_out).text_rows, 2);
     }
 
     // ── Additional tests ─────────────────────────────────────
@@ -939,8 +989,8 @@ mod tests {
         let input = InputArea::new("");
         let area = Rect::new(0, 10, 80, 3);
         let (x, y) = input.cursor_screen_pos(&area);
-        assert_eq!(y, 10); // first visible row
-        assert_eq!(x, 2); // PREFIX_WIDTH offset
+        assert_eq!(y, 11); // first text row (the top border is above it)
+        assert_eq!(x, 4); // inside the frame, right of the prompt glyph
     }
 
     #[test]
@@ -949,17 +999,31 @@ mod tests {
         input.set_text("a\nb");
         input.cursor_row = 1;
         input.cursor_col = 1;
-        let area = Rect::new(0, 10, 80, 3);
+        let area = Rect::new(0, 10, 80, 4);
         let (x, y) = input.cursor_screen_pos(&area);
-        assert_eq!(y, 11); // second visible row
-        assert_eq!(x, 3); // PREFIX_WIDTH + 1 char
+        assert_eq!(y, 12); // second text row
+        assert_eq!(x, 5); // first text column + 1 char
+    }
+
+    #[test]
+    fn cursor_screen_pos_never_lands_on_the_frame() {
+        // Width 12 → a text area of 6 columns, filled to the last cell.
+        let mut input = InputArea::new("");
+        input.set_text("abcdef");
+        input.cursor_col = 6;
+        let area = Rect::new(0, 10, 12, 3);
+        assert_eq!(
+            input.cursor_screen_pos(&area),
+            (10, 11),
+            "the end of a full row sits in the card's padding, not on its border"
+        );
     }
 
     // ── Word-wrap navigation tests ─────────────────────────
 
     #[test]
     fn wrap_up_down_within_long_line() {
-        // Width 80, prefix 2 → text_width 78.
+        // Width 80 → text_width 74.
         // 20 chars fits in one visual row.
         let mut input = InputArea::new("");
         input.set_text("abcdefghijklmnopqrst"); // 20 chars, fits in 78
@@ -972,39 +1036,39 @@ mod tests {
 
     #[test]
     fn wrap_up_down_across_visual_rows() {
-        // Width 12, prefix 2 → text_width 10.
+        // Width 16 → text_width 10.
         // "abcdefghijklmno" = 15 chars → 2 visual rows (10 + 5)
         let mut input = InputArea::new("");
         input.set_text("abcdefghijklmno");
         input.cursor_col = 12; // in second visual row
         // Up should move to first visual row, same column.
-        input.move_up(12);
+        input.move_up(16);
         assert_eq!(input.cursor_row, 0);
         assert_eq!(input.cursor_col, 2); // desired col = 2 (12 - 10), clamped
     }
 
     #[test]
     fn wrap_down_to_next_logical_line() {
-        // Width 12, prefix 2 → text_width 10.
+        // Width 16 → text_width 10.
         let mut input = InputArea::new("");
         input.set_text("abcdefghij\nhello"); // "abcdefghij" = 10 chars = 1 vis row
         input.cursor_row = 0;
         input.cursor_col = 5;
         // Down from first line's only visual row → second line.
-        input.move_down(12);
+        input.move_down(16);
         assert_eq!(input.cursor_row, 1);
         assert_eq!(input.cursor_col, 5);
     }
 
     #[test]
     fn wrap_cjk_boundary() {
-        // Width 8, prefix 2 → text_width 6.
+        // Width 12 → text_width 6.
         // "你好世界" = 4 CJK chars × 2 width = 8 display cols.
         // text_width 6: "你好世" = 6 cols, "界" = 2 cols → 2 visual rows.
         let mut input = InputArea::new("");
         input.set_text("你好世界");
         input.cursor_col = 3; // "界" in second visual row (vis_col = 0)
-        input.move_up(8);
+        input.move_up(12);
         assert_eq!(input.cursor_row, 0);
         // desired_col = 0 (first col of VR1), so cursor goes to col 0 ("你")
         assert_eq!(input.cursor_col, 0);
@@ -1012,10 +1076,10 @@ mod tests {
 
     #[test]
     fn wrap_height_reflects_visual_rows() {
-        // Width 12, prefix 2 → text_width 10.
+        // Width 16 → text_width 10.
         let mut input = InputArea::new("");
         input.set_text("abcdefghijklmno"); // 15 chars → 2 visual rows
-        assert_eq!(input.height(12), 2);
+        assert_eq!(input.height(16), 2 + chrome::BORDER_ROWS);
     }
 
     // ── Click-to-place-cursor mapping ──────────────────────
@@ -1037,45 +1101,45 @@ mod tests {
 
     #[test]
     fn set_cursor_from_visual_follows_soft_wraps() {
-        // Width 12, prefix 2 → text_width 10: "abcdefghijklmno" = "abcdefghij" | "klmno".
+        // Width 16 → text_width 10: "abcdefghijklmno" = "abcdefghij" | "klmno".
         let mut input = InputArea::new("");
         input.set_text("abcdefghijklmno");
-        input.set_cursor_from_visual(12, 0, 3);
+        input.set_cursor_from_visual(16, 0, 3);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 3));
         // Second visual row: char offset 10 + 2.
-        input.set_cursor_from_visual(12, 1, 2);
+        input.set_cursor_from_visual(16, 1, 2);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 12));
         // The row boundary is shared: end of row 0 == start of row 1.
-        input.set_cursor_from_visual(12, 0, 10);
+        input.set_cursor_from_visual(16, 0, 10);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 10));
-        input.set_cursor_from_visual(12, 1, 0);
+        input.set_cursor_from_visual(16, 1, 0);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 10));
     }
 
     #[test]
     fn set_cursor_from_visual_maps_the_logical_row_under_a_wrapped_row() {
-        // Width 12 → text_width 10: "abcdefghijklmno" | "hello".
+        // Width 16 → text_width 10: "abcdefghijklmno" | "hello".
         let mut input = InputArea::new("");
         input.set_text("abcdefghijklmno\nhello");
-        input.set_cursor_from_visual(12, 2, 3);
+        input.set_cursor_from_visual(16, 2, 3);
         assert_eq!((input.cursor_row, input.cursor_col), (1, 3));
     }
 
     #[test]
     fn set_cursor_from_visual_handles_wide_characters() {
-        // Width 8, prefix 2 → text_width 6: "你好世" | "界".
+        // Width 12 → text_width 6: "你好世" | "界".
         let mut input = InputArea::new("");
         input.set_text("你好世界");
         // Either cell of '你' resolves to before it.
-        input.set_cursor_from_visual(8, 0, 0);
+        input.set_cursor_from_visual(12, 0, 0);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 0));
-        input.set_cursor_from_visual(8, 0, 1);
+        input.set_cursor_from_visual(12, 0, 1);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 0));
         // '世' spans columns 4..6 → before it.
-        input.set_cursor_from_visual(8, 0, 5);
+        input.set_cursor_from_visual(12, 0, 5);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 2));
         // Second visual row: '界' is char 3.
-        input.set_cursor_from_visual(8, 1, 1);
+        input.set_cursor_from_visual(12, 1, 1);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 3));
     }
 
@@ -1098,15 +1162,15 @@ mod tests {
 
     #[test]
     fn set_cursor_from_visual_uses_the_scrolled_window() {
-        // Width 12, prefix 2 → text_width 10, max_lines 2: the window follows
-        // the cursor, which sits on the last logical line.
+        // Width 16 → text_width 10, max_lines 2: the window follows the
+        // cursor, which sits on the last logical line.
         let mut input = InputArea::with_max_lines(String::new(), 2);
         input.set_text("one\ntwo\nthree");
-        input.update_vertical_scroll(2, 12);
+        input.update_vertical_scroll(2, 16);
         assert_eq!(input.vertical_scroll, 1, "window shows logical lines 1..2");
         // The caller (the pointer hit test) adds the window offset, so the
         // row handed in is absolute: window row 1 = visual row 2.
-        input.set_cursor_from_visual(12, 2, 2);
+        input.set_cursor_from_visual(16, 2, 2);
         assert_eq!((input.cursor_row, input.cursor_col), (2, 2));
     }
 
@@ -1114,14 +1178,23 @@ mod tests {
     fn set_cursor_from_visual_round_trips_with_cursor_screen_pos() {
         let mut input = InputArea::new("");
         input.set_text("你好a好你\nsecond line");
-        let area = Rect::new(0, 10, 12, 4);
-        for vis_row in 0..input.height(area.width) as usize {
+        let area = Rect::new(0, 10, 16, 4);
+        let chrome = Chrome::of(area);
+        for vis_row in 0..chrome.text_rows as usize {
             let (x, y) = {
                 input.set_cursor_from_visual(area.width, vis_row, 0);
                 input.cursor_screen_pos(&area)
             };
-            assert_eq!(y, area.y + vis_row as u16, "row {vis_row} stays on screen");
-            assert_eq!(x, area.x + PREFIX_WIDTH, "column 0 is the row's first cell");
+            assert_eq!(
+                y,
+                area.y + chrome.top_row() + vis_row as u16,
+                "row {vis_row} stays on screen"
+            );
+            assert_eq!(
+                x,
+                area.x + chrome.text_x,
+                "column 0 is the row's first cell"
+            );
         }
     }
 }

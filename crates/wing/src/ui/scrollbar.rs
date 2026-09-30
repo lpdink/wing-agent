@@ -1,13 +1,13 @@
 //! Overlay scrollbar — geometry, hit testing and painting.
 //!
 //! The bar lives on the **last column of the chat viewport**: it is painted
-//! on top of the content by a buffer patch (like the info separator and the
-//! toast), so it never takes layout width and never reflows the chat cells.
+//! on top of the content by a buffer patch (like the toast), so it never takes
+//! layout width and never reflows the chat cells.
 //! The content keeps clear of it through a gutter that is reserved *statically*
 //! ([`SCROLLBAR_GUTTER`], applied by [`content_area`] in `App::draw`), so the
 //! bar appearing on the first overflow changes nothing that is already drawn.
 //! It only exists while the content overflows the viewport — the same
-//! predicate the info separator's `pos/total · %` indicator uses.
+//! predicate the composer's meta rail uses for its `pos/total · %` read-out.
 //!
 //! Everything geometric is a pure function over `(area, content, offset)`, so
 //! the edge cases that matter in practice (content that exactly fits, a thumb

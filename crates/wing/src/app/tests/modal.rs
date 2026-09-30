@@ -14,7 +14,6 @@ use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::ask::PanelFinish;
 use crate::ui::cells::ask_msg::AskMessage;
 use crate::ui::chat_view::ChatCell;
-use crate::ui::input_area::helpers::PREFIX_WIDTH;
 use crate::ui::popup::command::SessionCandidate;
 
 #[test]
@@ -344,12 +343,16 @@ fn test_plain_up_moves_composer_cursor_while_reading() {
     app.chat.scroll_up(5); // reading history: offset 55
     app.input.set_text("first\nsecond");
     let area = ratatui::layout::Rect::new(0, 0, 40, 4);
-    assert_eq!(app.input.cursor_screen_pos(&area).1, 1, "cursor on line 2");
+    assert_eq!(
+        app.input.cursor_screen_pos(&area).1,
+        2,
+        "cursor on line 2 (below the card's top border)"
+    );
 
     app.handle_key(key(crossterm::event::KeyCode::Up));
     assert_eq!(
         app.input.cursor_screen_pos(&area).1,
-        0,
+        1,
         "Up belongs to the composer"
     );
     assert_eq!(app.chat.scroll_offset, 55, "chat must not scroll");
@@ -470,10 +473,10 @@ fn test_composer_pointer_is_ignored_while_a_modal_owns_the_keyboard() {
         arm(&mut app);
         app.drain_intents();
         draw(&mut app, &mut terminal);
-        let composer = app.input.rendered_area();
-        assert!(app.composer_contains(composer.x + PREFIX_WIDTH, composer.y));
+        let (tx, ty, _rows) = composer_text(&app);
+        assert!(app.composer_contains(tx, ty));
 
-        let at = (composer.x + PREFIX_WIDTH + 4, composer.y);
+        let at = (tx + 4, ty);
         let cursor_before = (app.input.cursor_row, app.input.cursor_col);
         assert_eq!(
             app.handle_mouse(press(at)),
@@ -485,12 +488,12 @@ fn test_composer_pointer_is_ignored_while_a_modal_owns_the_keyboard() {
             "{label}: no selection starts"
         );
         assert_eq!(
-            app.handle_mouse(drag((composer.x + PREFIX_WIDTH + 8, composer.y))),
+            app.handle_mouse(drag((tx + 8, ty))),
             MouseOutcome::Ignored,
             "{label}: the drag is ignored"
         );
         assert_eq!(
-            app.handle_mouse(release((composer.x + PREFIX_WIDTH + 8, composer.y))),
+            app.handle_mouse(release((tx + 8, ty))),
             MouseOutcome::Ignored,
             "{label}: the release is ignored"
         );
@@ -529,8 +532,8 @@ fn test_composer_pointer_works_while_an_invisible_popup_is_armed() {
 
     let mut terminal = test_terminal(40, 12);
     draw(&mut app, &mut terminal);
-    let composer = app.input.rendered_area();
-    let at = (composer.x + PREFIX_WIDTH + 2, composer.y);
+    let (tx, ty, _rows) = composer_text(&app);
+    let at = (tx + 2, ty);
     assert_eq!(
         app.handle_mouse(press(at)),
         MouseOutcome::Immediate,
@@ -567,9 +570,9 @@ fn test_composer_pointer_stays_blocked_by_an_itemless_must_select_popup() {
 
     let mut terminal = test_terminal(40, 12);
     draw(&mut app, &mut terminal);
-    let composer = app.input.rendered_area();
+    let (tx, ty, _rows) = composer_text(&app);
     let cursor_before = (app.input.cursor_row, app.input.cursor_col);
-    let at = (composer.x + PREFIX_WIDTH + 3, composer.y);
+    let at = (tx + 3, ty);
     assert_eq!(app.handle_mouse(press(at)), MouseOutcome::Ignored);
     assert_eq!(
         app.handle_mouse(release(at)),

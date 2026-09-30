@@ -5,9 +5,6 @@ use unicode_width::UnicodeWidthChar;
 /// Maximum number of lines the input area supports.
 pub const MAX_INPUT_LINES: usize = 10;
 
-/// Width of the line prefix (`"> "` or `"  "`).
-pub const PREFIX_WIDTH: u16 = 2;
-
 /// Prefix for paste placeholder lines.
 pub const PASTE_PLACEHOLDER_PREFIX: &str = "[Pasted text #";
 

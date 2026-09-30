@@ -47,7 +47,6 @@ pub use cell::PendingMessage;
 pub use link::FrameLink;
 pub use viewport::ChatGeometry;
 pub use viewport::ChatViewWidget;
-pub(crate) use viewport::render_info_separator;
 
 use ratatui::text::Line;
 

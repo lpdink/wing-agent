@@ -5,6 +5,7 @@
 //! only the fixtures shared by more than one file.
 
 mod commands;
+mod composer;
 mod core;
 mod frame;
 mod goal_lane;

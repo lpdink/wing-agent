@@ -13,22 +13,18 @@
 //! semantic decision, and no business field (tool call ids, session state, …)
 //! is ever read here.
 //!
-//! `render_info_separator` lives here too: it paints the scroll position /
-//! usage line that reports this viewport's state.
+//! The scroll position / usage read-out this viewport's state feeds lives in
+//! the composer's meta rail (`ui::input_area::chrome`) — it is part of the
+//! input card's bottom border, not of the band.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
 use ratatui::style::Style;
-use ratatui::text::Line;
-use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::widgets::Wrap;
 
-use crate::config::ThemePalette;
 use crate::render::renderable::CellContext;
-use crate::ui::status_bar::TurnUsage;
 
 use super::ChatCell;
 use super::ChatView;
@@ -180,87 +176,6 @@ impl ChatView {
         for (i, msg) in self.pending.iter_mut().enumerate() {
             self.pending_heights[i] = msg.cell.compute_height(width, ctx);
         }
-    }
-}
-
-/// Collapse the user's home directory prefix to `~` for compact display.
-fn collapse_home(path: &str) -> String {
-    use std::sync::OnceLock;
-    static HOME: OnceLock<Option<String>> = OnceLock::new();
-    let home = HOME.get_or_init(|| std::env::var("HOME").ok().filter(|h| !h.is_empty()));
-    if let Some(home) = home
-        && let Some(rest) = path.strip_prefix(home.as_str())
-    {
-        return format!("~{rest}");
-    }
-    path.to_string()
-}
-
-/// Render the info separator line: a `─` rule carrying workdir, per-turn
-/// usage and scroll position — the classic scroll indicator, now living in
-/// a fixed layout block right above the composer input.
-///
-/// Layout: `─[workdir · usage · pos/total] ───── [percent%] ─`
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn render_info_separator(
-    workdir: Option<&str>,
-    usage: &TurnUsage,
-    total_lines: usize,
-    visible_height: usize,
-    scroll_offset: usize,
-    palette: &ThemePalette,
-    area: Rect,
-    buf: &mut Buffer,
-) {
-    if area.height == 0 || area.width == 0 {
-        return;
-    }
-    let dim = Style::default().add_modifier(Modifier::DIM);
-
-    // Fill the entire row with `─` as background.
-    let sep = "─".repeat(area.width as usize);
-    Span::styled(sep, dim).render(area, buf);
-
-    // Right side: scroll percentage (only when content overflows).
-    let mut pct_w: u16 = 0;
-    if total_lines > 0 && visible_height < total_lines {
-        let max_scroll = total_lines.saturating_sub(visible_height);
-        let percent = if max_scroll == 0 {
-            100
-        } else {
-            ((scroll_offset.min(max_scroll) as f32 / max_scroll as f32) * 100.0).round() as u8
-        };
-        let pct_text = format!(" {percent}% ");
-        pct_w = pct_text.len() as u16;
-        let pct_x = area.right().saturating_sub(pct_w + 1);
-        Span::styled(pct_text, dim).render(Rect::new(pct_x, area.y, pct_w, 1), buf);
-    }
-
-    // Left side: workdir + usage + scroll position.
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    if let Some(wd) = workdir {
-        spans.push(Span::styled(
-            collapse_home(wd),
-            Style::default().fg(palette.accent),
-        ));
-    }
-    let usage_spans = usage.to_spans();
-    if !usage_spans.is_empty() {
-        if !spans.is_empty() {
-            spans.push(Span::styled(" · ", dim));
-        }
-        spans.extend(usage_spans);
-    }
-    if total_lines > 0 && visible_height < total_lines {
-        if !spans.is_empty() {
-            spans.push(Span::styled(" · ", dim));
-        }
-        let pos_text = format!("{}/{}", scroll_offset + visible_height, total_lines);
-        spans.push(Span::styled(pos_text, dim));
-    }
-    if !spans.is_empty() {
-        let left_w = area.width.saturating_sub(pct_w + 2);
-        Line::from(spans).render(Rect::new(area.x + 1, area.y, left_w, 1), buf);
     }
 }
 
@@ -681,29 +596,6 @@ mod tests {
             first_row.trim().is_empty(),
             "top padding row should be blank, got: {first_row:?}"
         );
-    }
-
-    #[test]
-    fn test_info_separator_contains_workdir_and_usage() {
-        let (p, _l) = test_ctx();
-        let usage = TurnUsage {
-            prompt_tokens: 1200,
-            completion_tokens: 340,
-            cached_tokens: 800,
-            tokens_per_sec: 42.5,
-            ttft_ms: 320.0,
-        };
-        let area = Rect::new(0, 0, 120, 1);
-        let mut buf = Buffer::empty(area);
-        render_info_separator(Some("/tmp/ws"), &usage, 100, 20, 80, &p, area, &mut buf);
-        let rendered = buffer_text(&buf);
-        assert!(rendered.contains("/tmp/ws"), "workdir:\n{rendered}");
-        assert!(rendered.contains("1.2k in"), "input tokens:\n{rendered}");
-        assert!(rendered.contains("340 out"), "output tokens:\n{rendered}");
-        assert!(rendered.contains("66.7% cache"), "cache hit:\n{rendered}");
-        assert!(rendered.contains("320ms ttft"), "ttft:\n{rendered}");
-        assert!(rendered.contains("100/100"), "scroll pos:\n{rendered}");
-        assert!(rendered.contains("100%"), "scroll percent:\n{rendered}");
     }
 
     /// Follow contract: pinned → new content follows; scrolled up → the

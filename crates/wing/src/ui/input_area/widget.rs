@@ -1,4 +1,5 @@
-//! InputAreaWidget — renders the input area in the terminal with word-wrap.
+//! ComposerWidget — renders the composer card in the terminal: the frame, the
+//! two rails and the word-wrapped draft.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -9,7 +10,10 @@ use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
 use super::InputArea;
-use super::helpers::PREFIX_WIDTH;
+use super::chrome;
+use super::chrome::ActivityRail;
+use super::chrome::Chrome;
+use super::chrome::MetaRail;
 use super::helpers::char_to_byte;
 use super::helpers::is_placeholder_line;
 use super::helpers::truncate_by_width;
@@ -17,19 +21,33 @@ use super::wrap;
 use crate::config::ThemePalette;
 use crate::render::markdown::truncate_to_display_width;
 
-/// Render the input area (multi-line with word-wrap).
-pub struct InputAreaWidget<'a> {
+/// The composer — the card holding the draft, its activity rail and its meta
+/// rail (see [`chrome`] for the shape).
+pub struct ComposerWidget<'a> {
     input: &'a mut InputArea,
     palette: &'a ThemePalette,
+    /// Top rail content: `None` while idle (the border is then a plain rule).
+    activity: Option<ActivityRail<'a>>,
+    meta: MetaRail<'a>,
 }
 
-impl<'a> InputAreaWidget<'a> {
-    pub fn new(input: &'a mut InputArea, palette: &'a ThemePalette) -> Self {
-        Self { input, palette }
+impl<'a> ComposerWidget<'a> {
+    pub fn new(
+        input: &'a mut InputArea,
+        palette: &'a ThemePalette,
+        activity: Option<ActivityRail<'a>>,
+        meta: MetaRail<'a>,
+    ) -> Self {
+        Self {
+            input,
+            palette,
+            activity,
+            meta,
+        }
     }
 }
 
-impl Widget for InputAreaWidget<'_> {
+impl Widget for ComposerWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         // Record the rect this frame drew into (empty when collapsed) — mouse
         // events arrive between frames and hit testing reads it back.
@@ -38,47 +56,62 @@ impl Widget for InputAreaWidget<'_> {
             return;
         }
 
-        let text_area_w = area.width.saturating_sub(PREFIX_WIDTH);
-        let text_width = text_area_w as usize;
+        let chrome = Chrome::of(area);
+        // Every width below is the one the wrapping was computed with, so the
+        // drawn rows and the pointer mapping cannot disagree.
+        let text_area_w = chrome.text_width as usize;
 
         // Build visual rows.
-        let vis_rows = wrap::build_visual_rows(&self.input.lines, text_width.max(1));
+        let vis_rows = wrap::build_visual_rows(&self.input.lines, text_area_w.max(1));
 
         // Update vertical scroll.
-        self.input.update_vertical_scroll(area.height, area.width);
+        self.input
+            .update_vertical_scroll(chrome.text_rows, area.width);
 
-        let visible_rows = area.height as usize;
+        // The frame first: the draft is painted into the rows it leaves.
+        chrome::paint(
+            buf,
+            area,
+            chrome,
+            self.activity.as_ref(),
+            &self.meta,
+            self.palette,
+        );
+
+        let first_row_y = area.y + chrome.top_row();
+        let visible_rows = chrome.text_rows as usize;
         let start_vis = self.input.vertical_scroll;
         let end_vis = (start_vis + visible_rows).min(vis_rows.len());
 
-        // Track which logical line's first visual row we've rendered
-        // (for prefix: "> " on first vis row of logical line 0, "  " otherwise).
         for (display_idx, vis_idx) in (start_vis..end_vis).enumerate() {
-            let y = area.y + display_idx as u16;
+            let y = first_row_y + display_idx as u16;
             let vr = &vis_rows[vis_idx];
             let line_text = &self.input.lines[vr.logical_line];
 
-            // Prefix: "> " for first visual row of first logical line,
-            // "  " for all other visual rows.
-            let prefix = if vr.logical_line == 0 && vr.char_start == 0 {
-                "> "
-            } else {
-                "  "
-            };
-            buf.set_line(
-                area.x,
-                y,
-                &Line::from(Span::styled(prefix, Style::default().fg(self.palette.dim))),
-                PREFIX_WIDTH,
-            );
+            // The prompt glyph opens the draft — first visual row of the first
+            // logical line only; every other row keeps the text alignment.
+            // It lights up as soon as there is something to send.
+            if chrome.card && vr.logical_line == 0 && vr.char_start == 0 {
+                let style = if self.input.is_empty() {
+                    Style::default().fg(self.palette.dim)
+                } else {
+                    Style::default().fg(self.palette.accent)
+                };
+                buf.set_span(
+                    area.x + chrome::PROMPT_X,
+                    y,
+                    &Span::styled(chrome::PROMPT, style),
+                    2,
+                );
+            }
 
-            let text_x = area.x + PREFIX_WIDTH;
+            let text_x = area.x + chrome.text_x;
 
             // Empty first line → show placeholder.
             if vr.logical_line == 0 && vr.char_start == 0 && self.input.is_empty() {
                 let placeholder_w = self.input.placeholder.width();
-                let placeholder = if placeholder_w > text_area_w as usize {
-                    truncate_to_display_width(&self.input.placeholder, text_area_w as usize)
+                let placeholder = if placeholder_w > text_area_w {
+                    truncate_to_display_width(&self.input.placeholder, text_area_w)
                 } else {
                     self.input.placeholder.clone()
                 };
@@ -89,7 +122,7 @@ impl Widget for InputAreaWidget<'_> {
                         placeholder,
                         Style::default().fg(self.palette.dim),
                     )),
-                    text_area_w,
+                    chrome.text_width,
                 );
                 continue;
             }
@@ -103,7 +136,7 @@ impl Widget for InputAreaWidget<'_> {
                 continue;
             }
 
-            let clipped = truncate_by_width(vis_text, text_area_w as usize);
+            let clipped = truncate_by_width(vis_text, text_area_w);
 
             let style = if is_placeholder_line(line_text) {
                 Style::default().fg(self.palette.accent)
@@ -115,7 +148,7 @@ impl Widget for InputAreaWidget<'_> {
                 text_x,
                 y,
                 &Line::from(Span::styled(clipped, style)),
-                text_area_w,
+                chrome.text_width,
             );
         }
     }
