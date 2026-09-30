@@ -364,6 +364,7 @@ impl InputArea {
             &self.pastes,
             &row,
             vis_col as usize,
+            text_width,
         );
         self.cursor_row = row.logical_line;
         self.cursor_col = point.point;
@@ -983,6 +984,48 @@ mod tests {
     }
 
     #[test]
+    fn backspace_merging_lines_keeps_a_chip_whole() {
+        let mut input = InputArea::new("");
+        input.set_text("see ");
+        input.insert_paste("x\ny".into());
+        input.insert_newline();
+        input.insert_str("tail");
+        // Cursor at the start of the second line: Backspace merges the lines —
+        // the chip at the end of the first one stays whole, payload included.
+        input.cursor_row = 1;
+        input.cursor_col = 0;
+        input.backspace();
+        let chip = "[Pasted text #1 +1 lines]";
+        assert_eq!(input.lines(), [format!("see {chip}tail")]);
+        assert_eq!(
+            (input.cursor_row, input.cursor_col),
+            (0, 4 + chip.chars().count()),
+            "the cursor lands at the chip's trailing edge"
+        );
+        assert_eq!(input.pastes.payload(1), Some("x\ny"));
+        assert_eq!(input.expand_and_get_text(), "see x\nytail");
+    }
+
+    #[test]
+    fn delete_merging_lines_keeps_a_chip_whole() {
+        let mut input = InputArea::new("");
+        input.set_text("see ");
+        input.insert_newline();
+        input.insert_paste("x\ny".into());
+        input.insert_str("tail");
+        // Cursor at the end of the first line: Delete merges the next line in —
+        // the chip that opens it stays whole, payload included.
+        input.cursor_row = 0;
+        input.cursor_col = 4;
+        input.delete_forward();
+        let chip = "[Pasted text #1 +1 lines]";
+        assert_eq!(input.lines(), [format!("see {chip}tail")]);
+        assert_eq!((input.cursor_row, input.cursor_col), (0, 4));
+        assert_eq!(input.pastes.payload(1), Some("x\ny"));
+        assert_eq!(input.expand_and_get_text(), "see x\nytail");
+    }
+
+    #[test]
     fn chip_numbers_are_never_reused() {
         let mut input = InputArea::new("");
         input.insert_paste("first\npaste\nx".into());
@@ -1123,6 +1166,23 @@ mod tests {
             input.text(),
             "[Pasted text #1 +2 lines][Pasted text #2 +2 lines]"
         );
+        // Both payloads are still there, and each expands in its own place.
+        assert_eq!(
+            input.expand_and_get_text(),
+            "first big paste\nline2\nline3second big paste\nline2\nline3"
+        );
+
+        // With text between them, the expansion keeps the order of the draft.
+        let mut input = InputArea::new("");
+        input.insert_paste("A\nA".into());
+        input.insert_str(" mid"); // a paste's trailing whitespace is trimmed
+        input.insert_char(' ');
+        input.insert_paste("B\nB".into());
+        assert_eq!(
+            input.lines(),
+            ["[Pasted text #1 +1 lines] mid [Pasted text #2 +1 lines]"]
+        );
+        assert_eq!(input.expand_and_get_text(), "A\nA mid B\nB");
     }
 
     #[test]

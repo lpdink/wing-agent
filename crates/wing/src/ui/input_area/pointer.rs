@@ -91,6 +91,7 @@ pub fn hit(input: &InputArea, area: Rect, column: u16, row: u16) -> Option<Compo
         &input.pastes,
         &row,
         display_col as usize,
+        text_width,
     );
     Some(ComposerHit {
         vis_row,

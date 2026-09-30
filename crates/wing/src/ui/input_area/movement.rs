@@ -60,9 +60,21 @@ impl InputArea {
     /// Navigate to a target visual row, resolving the desired column back to a
     /// logical position. A column that lands on a chip resolves to the chip's
     /// leading edge, like the pointer's hit test.
-    fn move_to_visual_row(&mut self, vis_rows: &[wrap::VisualRow], target: usize, desired: usize) {
+    fn move_to_visual_row(
+        &mut self,
+        vis_rows: &[wrap::VisualRow],
+        target: usize,
+        desired: usize,
+        text_width: usize,
+    ) {
         let row = vis_rows[target];
-        let point = model::column_point(&self.lines[row.logical_line], &self.pastes, &row, desired);
+        let point = model::column_point(
+            &self.lines[row.logical_line],
+            &self.pastes,
+            &row,
+            desired,
+            text_width,
+        );
         self.cursor_row = row.logical_line;
         self.cursor_col = point.point.min(self.current_line_len());
         self.desired_col = Some(desired);
@@ -77,7 +89,7 @@ impl InputArea {
             return; // At top: no-op.
         }
 
-        self.move_to_visual_row(&vis_rows, vis_row - 1, desired);
+        self.move_to_visual_row(&vis_rows, vis_row - 1, desired, chrome.text_width as usize);
     }
 
     pub(crate) fn move_down(&mut self, chrome: Chrome) {
@@ -89,7 +101,7 @@ impl InputArea {
             return; // At bottom: no-op.
         }
 
-        self.move_to_visual_row(&vis_rows, vis_row + 1, desired);
+        self.move_to_visual_row(&vis_rows, vis_row + 1, desired, chrome.text_width as usize);
     }
 
     pub(crate) fn move_home(&mut self) {

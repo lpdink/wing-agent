@@ -612,6 +612,42 @@ fn app_with_visible_popup() -> App {
     app
 }
 
+/// Completing a command rewrites the draft, so a chip in its arguments must
+/// keep standing for the pasted text: submitting the completed command sends
+/// the payload, never the chip's label.
+#[test]
+fn test_completing_a_command_keeps_the_paste_in_its_arguments() {
+    let mut app = test_app();
+    app.popup.cache.commands = vec![crate::protocol::CommandInfo {
+        name: "help".into(),
+        aliases: Vec::new(),
+        description: String::new(),
+        params: String::new(),
+    }];
+    app.input.set_text("/he ");
+    app.input.insert_str("1\n2\n3\n4"); // >2 lines: a chip in the arguments
+    app.update_popup();
+    assert!(app.popup.active.height() > 0, "the popup is on screen");
+    app.drain_intents();
+
+    app.handle_key(key(crossterm::event::KeyCode::Enter));
+
+    match app.drain_intents().as_slice() {
+        [AppIntent::SendMessage { content, .. }] => {
+            assert!(content.starts_with("/help "), "{content:?}");
+            assert!(
+                content.contains("1\n2\n3\n4"),
+                "the payload is what gets sent: {content:?}"
+            );
+            assert!(
+                !content.contains("[Pasted text"),
+                "the label was sent instead: {content:?}"
+            );
+        }
+        other => panic!("expected the completed command to be sent, got {other:?}"),
+    }
+}
+
 /// An app with an *invisible* (armed, no candidates) command popup.
 fn app_with_invisible_popup() -> App {
     let mut app = test_app();

@@ -208,17 +208,29 @@ pub struct ColumnPoint {
 }
 
 /// Resolve a display column inside `row` (of `line`) to the draft.
+///
+/// `visible_cols` is how many display columns the row was really drawn into
+/// (the text area's width). A chip wider than that is clipped, and the columns
+/// past the clip are the blank past the row's text — exactly as on any other
+/// row: they resolve to the row's end (never inside the over-wide chip, whose
+/// hidden half is not a place the cursor may go), and they do not count as
+/// being on the chip.
 pub fn column_point(
     line: &[Segment],
     pastes: &Pastes,
     row: &wrap::VisualRow,
     display_col: usize,
+    visible_cols: usize,
 ) -> ColumnPoint {
     let flat = flat(line, pastes);
-    let col = wrap::display_col_to_char(&flat, row, display_col);
+    let col = if display_col >= visible_cols {
+        row.char_end
+    } else {
+        wrap::display_col_to_char(&flat, row, display_col)
+    };
     for (span, _) in chip_spans(line, pastes) {
         let start = wrap::char_display_offset(&flat, row, span.start);
-        let end = wrap::char_display_offset(&flat, row, span.end);
+        let end = wrap::char_display_offset(&flat, row, span.end).min(visible_cols);
         if (start..end).contains(&display_col) {
             // The whole chip is the unit under the pointer — a chip never
             // wraps, so both edges live in this very row.
@@ -739,22 +751,54 @@ mod tests {
             display_width: flat.chars().count(),
         };
         // On the text: the char at or before the column, focus one further.
-        let point = column_point(&line, &pastes, &row, 1);
+        let point = column_point(&line, &pastes, &row, 1, row.display_width);
         assert_eq!((point.point, point.focus, point.on_char), (1, 2, true));
         // On the chip: the whole chip is the unit — point before it, focus
         // after it.
         let chip_len = pastes.chip(1).chars().count();
-        let point = column_point(&line, &pastes, &row, 2 + chip_len / 2);
+        let point = column_point(&line, &pastes, &row, 2 + chip_len / 2, row.display_width);
         assert_eq!(
             (point.point, point.focus, point.on_char),
             (2, 2 + chip_len, true)
         );
-        let point = column_point(&line, &pastes, &row, 2 + chip_len - 1);
+        let point = column_point(&line, &pastes, &row, 2 + chip_len - 1, row.display_width);
         assert_eq!((point.point, point.focus), (2, 2 + chip_len));
         // Past the row's text: nothing to include.
-        let point = column_point(&line, &pastes, &row, 99);
+        let point = column_point(&line, &pastes, &row, 99, row.display_width);
         assert!(!point.on_char);
         assert_eq!(point.point, point.focus);
+    }
+
+    #[test]
+    fn column_point_ignores_the_hidden_half_of_a_clipped_chip() {
+        let pastes = registry(&["a\nb"]);
+        let line: Line = vec![Segment::Paste(1)];
+        let flat = flat(&line, &pastes);
+        let chip_len = pastes.chip(1).chars().count();
+        let row = wrap::VisualRow {
+            logical_line: 0,
+            char_start: 0,
+            char_end: chip_len,
+            display_width: chip_len,
+        };
+        // The row was drawn into 10 columns: the chip is clipped at 10.
+        let visible = 10;
+        // Inside what was drawn: the whole chip is the unit under the pointer.
+        let point = column_point(&line, &pastes, &row, 0, visible);
+        assert_eq!(
+            (point.point, point.focus, point.on_char),
+            (0, chip_len, true)
+        );
+        let point = column_point(&line, &pastes, &row, visible - 1, visible);
+        assert_eq!(point.point, 0, "the last drawn cell is still the chip");
+
+        // Past the clip (the card's padding): the blank past the row's text,
+        // like on any other row — the cursor lands at the row's end, after
+        // the chip, never *inside* its hidden half.
+        let point = column_point(&line, &pastes, &row, visible, visible);
+        assert!(!point.on_char);
+        assert_eq!(point.point, chip_len, "the row's end");
+        assert_eq!(point.focus, point.point);
     }
 
     #[test]

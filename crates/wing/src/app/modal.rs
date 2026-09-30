@@ -512,7 +512,12 @@ impl App {
                             let row = &rows[state.selected];
                             let typed_cmd = format!("/{}", filter);
                             if typed_cmd != row.name {
-                                let original = self.input.text();
+                                // The draft is rewritten, so its *expanded*
+                                // text is what has to survive: a chip in the
+                                // arguments stands for the pasted text, not
+                                // for its label (the label would be sent as
+                                // the command's argument).
+                                let original = self.input.expand_and_get_text();
                                 let args = original.find(' ').map(|p| &original[p..]).unwrap_or("");
                                 self.input.set_text(&format!("{}{}", row.name, args));
                             }
