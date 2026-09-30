@@ -38,16 +38,23 @@ use ratatui::style::Style;
 use super::support::draw;
 use super::support::test_terminal;
 use crate::app::App;
+use crate::app::images::FRESHNESS_INTERVAL;
 use crate::app::images::Images;
 use crate::config::AppConfig;
 use crate::config::rendering::ImagesMode;
 use crate::render::markdown::ImageShape;
+use crate::render::markdown::MAX_ANCHOR_ROWS;
 use crate::render::markdown::anchor_rows;
 use crate::ui::chat_view::ChatCell;
 use crate::ui::chat_view::FrameImage;
 use crate::ui::image::CellPixels;
+use crate::ui::image::DEFAULT_CACHE_BYTES;
+use crate::ui::image::DEFAULT_CACHE_ENTRIES;
+use crate::ui::image::DEFAULT_FILE_BYTES;
 use crate::ui::image::ImageProtocol;
 use crate::ui::image::ImageSupport;
+use crate::ui::image::MAX_FAILED_ENTRIES;
+use crate::ui::image::MAX_META_ENTRIES;
 use crate::ui::scrollbar;
 use crate::ui::toast::Toast;
 
@@ -1094,5 +1101,495 @@ fn the_layout_height_matches_what_is_drawn() {
         app.chat.cells[0].compute_height(narrowed, &ctx),
         usize::from(anchor.rows) + 1,
         "the layout sums the box the drawing pass was handed"
+    );
+}
+
+// ── 7. freshness: a rewritten picture must come back ────────────
+
+/// One freshness tick — the event loop's timer arm, with the clock handed in.
+///
+/// The lane takes `now` as an argument precisely so this can be a synthetic
+/// instant: the interval is exercised without a single `sleep`.
+fn tick(app: &mut App, at: Instant) -> bool {
+    app.poll_image_freshness(at)
+}
+
+/// Whether `(x, y)` carries a painted part of a picture.
+fn painted_at(buf: &Buffer, x: u16, y: u16) -> bool {
+    x < buf.area.right() && y < buf.area.bottom() && buf[(x, y)].symbol().contains(PLACEHOLDER)
+}
+
+/// The whole rewrite story: the model regenerates `plot.png` in place, the lane
+/// notices within its window, and the *new* header re-lays the box out.
+#[test]
+fn a_rewritten_picture_is_re_read_on_the_next_freshness_tick() {
+    let dir = TempDir::new("rewrite");
+    let plot = dir.file("plot.png");
+    write_png(&plot, 800, 600);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
+    app.chat
+        .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
+    let mut term = test_terminal(122, 48);
+    draw_until(&mut app, &mut term, "the picture", |_, buf| {
+        has_placeholder(buf)
+    });
+
+    let content = app.chat.geometry().area;
+    let cols = content.width - 2;
+    let before = app.chat.frame_images().first().cloned().expect("recorded");
+    assert_eq!(
+        before.target,
+        Size::new(cols, anchor_rows(cols, ImageShape::new(800, 600)))
+    );
+    assert_eq!(before.target.height, MAX_ANCHOR_ROWS, "the tall fixture");
+
+    // The first check has nothing to report: it records what the files look
+    // like (the store's own version, which is what the picture was made from).
+    let now = Instant::now();
+    assert!(!tick(&mut app, now), "an unchanged file is not a change");
+    let stats = app.images.stats().expect("lane");
+    assert_eq!(stats.cached, 1, "and nothing was dropped");
+    assert_eq!(stats.in_flight, 0, "and nothing was queued");
+
+    // The second generation of the same chart, written to the same path.
+    write_png(&plot, 2000, 20);
+    assert!(
+        tick(&mut app, now + FRESHNESS_INTERVAL),
+        "the rewrite is seen"
+    );
+
+    // The very next frame has no picture (the memo is gone, the probe is in
+    // flight) but the box is still there — a caption, never a blank hole.
+    let buf = frame(&mut app, &mut term);
+    assert!(!has_placeholder(&buf), "the old encoding must not survive");
+    assert!(buffer_text(&buf).contains('▢'), "the caption holds the box");
+
+    draw_until(&mut app, &mut term, "the new picture", |_, buf| {
+        has_placeholder(buf)
+    });
+    let after = app.chat.frame_images().first().cloned().expect("recorded");
+    assert_eq!(
+        after.target,
+        Size::new(cols, anchor_rows(cols, ImageShape::new(2000, 20))),
+        "the new header re-laid the box out (a pure function of the shape)"
+    );
+    assert_eq!(after.target.height, 1, "the wide sliver");
+    assert_ne!(after.target.height, before.target.height);
+    let painted = placeholder_rect(term.backend().buffer()).expect("placeholders");
+    assert_eq!(painted, after.area, "drawn where the new box says");
+}
+
+/// The other half of the contract: an unchanged file is not a change — no
+/// re-probe, no re-encode, not one cell of the frame moves.
+#[test]
+fn an_unchanged_picture_is_not_re_encoded() {
+    let dir = TempDir::new("no-change");
+    let plot = dir.file("plot.png");
+    write_png(&plot, 800, 600);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
+    app.chat
+        .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
+    let mut term = test_terminal(60, 48);
+    draw_until(&mut app, &mut term, "the picture", |_, buf| {
+        has_placeholder(buf)
+    });
+    let painted = frame(&mut app, &mut term);
+
+    let now = Instant::now();
+    assert!(!tick(&mut app, now), "the baseline check");
+    assert!(
+        !tick(&mut app, now + FRESHNESS_INTERVAL * 4),
+        "four windows later the file still says the same thing"
+    );
+
+    let after = frame(&mut app, &mut term);
+    assert_eq!(after, painted, "the frame is byte for byte unchanged");
+    let stats = app.images.stats().expect("lane");
+    assert_eq!(stats.cached, 1, "the encoding was never dropped");
+    assert_eq!(stats.in_flight, 0, "and never re-queued");
+}
+
+/// The throttle: a check costs a `stat` per watched picture, so it happens at
+/// most once per window — a rewrite inside the window waits for the next one.
+#[test]
+fn the_freshness_check_is_throttled_to_its_interval() {
+    let dir = TempDir::new("throttle");
+    let plot = dir.file("plot.png");
+    write_png(&plot, 800, 600);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
+    app.chat
+        .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
+    let mut term = test_terminal(60, 48);
+    draw_until(&mut app, &mut term, "the picture", |_, buf| {
+        has_placeholder(buf)
+    });
+
+    let now = Instant::now();
+    assert!(
+        !tick(&mut app, now),
+        "the first window only records the baseline"
+    );
+
+    write_png(&plot, 2000, 20);
+    assert!(
+        !tick(&mut app, now + FRESHNESS_INTERVAL / 2),
+        "inside the window the rewrite is not looked for"
+    );
+    // …and the picture is still the old one, which is the point of the throttle
+    // being a *bound* and not a promise of instant freshness.
+    let buf = frame(&mut app, &mut term);
+    assert!(has_placeholder(&buf), "the old encoding is still on screen");
+
+    assert!(
+        tick(&mut app, now + FRESHNESS_INTERVAL),
+        "past the window the check runs and sees the rewrite"
+    );
+}
+
+/// The target set is what is **on screen**: a picture scrolled out of the
+/// viewport is not watched (and parks the timer arm), and scrolling back brings
+/// it into the next window.
+#[test]
+fn off_screen_pictures_are_not_watched() {
+    let dir = TempDir::new("off-screen");
+    let plot = dir.file("plot.png");
+    write_png(&plot, 800, 600);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
+    app.chat
+        .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
+    let mut term = test_terminal(122, 30);
+    draw_until(&mut app, &mut term, "the picture", |_, buf| {
+        has_placeholder(buf)
+    });
+
+    // A tall trailing message makes the band scrollable; five rows down is past
+    // the 36-row box's top but still inside it, so scroll well past the box.
+    app.chat.push(ChatCell::AssistantMessage(
+        (0..60)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ));
+    frame(&mut app, &mut term);
+    let band = app.geometry.chat_band();
+    app.chat.scroll_to(40, band.height as usize);
+    frame(&mut app, &mut term);
+    assert!(
+        app.chat.frame_images().is_empty(),
+        "the box is off screen, so no anchor is recorded"
+    );
+    assert_eq!(
+        app.images.freshness_deadline(Instant::now()),
+        None,
+        "nothing on screen is nothing to watch: the arm parks"
+    );
+
+    // A rewrite while it is off screen is deliberately not looked for …
+    let now = Instant::now();
+    write_png(&plot, 2000, 20);
+    assert!(!tick(&mut app, now + FRESHNESS_INTERVAL * 2));
+
+    // … and scrolling back puts it in the target set again: the next window
+    // re-reads it, and the box follows the new header.
+    app.chat.scroll_to(0, band.height as usize);
+    frame(&mut app, &mut term);
+    assert!(
+        app.images
+            .freshness_deadline(now + FRESHNESS_INTERVAL * 2)
+            .is_some(),
+        "a visible anchor schedules the check"
+    );
+    assert!(
+        tick(&mut app, now + FRESHNESS_INTERVAL * 3),
+        "the rewrite is seen"
+    );
+    draw_until(&mut app, &mut term, "the new shape", |app, _| {
+        app.chat
+            .frame_images()
+            .first()
+            .is_some_and(|frame| frame.target.height == 1)
+    });
+}
+
+/// A rewrite that lands mid-write (here: a truncated file, the shape a
+/// non-atomic save has for a few milliseconds) does not strand the picture: the
+/// box keeps the shape the last good probe read — a caption, exactly like the
+/// encode-failure case — and the next window picks the finished file up.
+#[test]
+fn a_degraded_picture_keeps_its_box_and_recovers() {
+    let dir = TempDir::new("degraded");
+    let plot = dir.file("plot.png");
+    write_png(&plot, 800, 600);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
+    app.chat
+        .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
+    let mut term = test_terminal(60, 48);
+    draw_until(&mut app, &mut term, "the picture", |_, buf| {
+        has_placeholder(buf)
+    });
+    let before = app.chat.frame_images().first().cloned().expect("recorded");
+
+    // The file is emptied (the truncate half of a rewrite).
+    fs::write(&plot, b"").expect("truncate the fixture");
+    let now = Instant::now();
+    assert!(tick(&mut app, now + FRESHNESS_INTERVAL));
+    draw_until(&mut app, &mut term, "the failed re-probe", |app, _| {
+        let stats = app.images.stats().expect("lane");
+        stats.memo > 0 && stats.known_meta == 0
+    });
+    let buf = frame(&mut app, &mut term);
+    assert!(!has_placeholder(&buf), "an empty file has nothing to draw");
+    let after = app.chat.frame_images().first().cloned().expect("recorded");
+    assert_eq!(
+        after.target, before.target,
+        "the box keeps the shape of the last good probe"
+    );
+    assert!(
+        buffer_text(&buf).contains('▢'),
+        "the caption is what explains the box"
+    );
+    assert!(
+        app.images
+            .opts()
+            .shapes()
+            .iter()
+            .any(|entry| entry.path == plot),
+        "and the path stays in the table, which is what keeps it watched"
+    );
+
+    // The write finishes: the next window sees a version that differs from the
+    // one we last observed, and the picture comes back.
+    write_png(&plot, 800, 600);
+    assert!(tick(&mut app, now + FRESHNESS_INTERVAL * 2));
+    draw_until(&mut app, &mut term, "the recovered picture", |_, buf| {
+        has_placeholder(buf)
+    });
+    let recovered = app.chat.frame_images().first().cloned().expect("recorded");
+    assert_eq!(recovered.target, before.target, "same picture, same box");
+}
+
+/// The end-to-end limits: everything the store refuses at the *metadata* stage
+/// renders exactly like the picture lane never existed — the link path, cell
+/// for cell, no reserved rows, no half-drawn box.
+#[test]
+fn pathological_files_are_cell_for_cell_the_baseline() {
+    let dir = TempDir::new("pathological");
+    // Empty, not an image, larger than the file ceiling (a sparse file: the
+    // probe must refuse it from the stat alone, never read a byte of it), and
+    // simply missing.
+    fs::write(dir.file("empty.png"), b"").expect("empty fixture");
+    fs::write(dir.file("liar.png"), b"this is not a png\n").expect("liar fixture");
+    let huge = std::fs::File::create(dir.file("huge.png")).expect("huge fixture");
+    huge.set_len(DEFAULT_FILE_BYTES + 1).expect("sparse length");
+    let text =
+        "![empty](empty.png)\n\n![liar](liar.png)\n\n![huge](huge.png)\n\n![missing](missing.png)";
+
+    let mut off = app_with_images(ImagesMode::Off, kitty(), Some(dir.path()));
+    off.chat.push(ChatCell::AssistantMessage(text.into()));
+    let mut off_term = test_terminal(60, 40);
+    let baseline = frame(&mut off, &mut off_term);
+
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
+    app.chat.push(ChatCell::AssistantMessage(text.into()));
+    let mut term = test_terminal(60, 40);
+    draw_until(&mut app, &mut term, "every probe to fail", |app, _| {
+        app.images.stats().expect("lane").memo >= 4
+    });
+    let buf = frame(&mut app, &mut term);
+    assert_eq!(buf, baseline, "a refused picture is the link path again");
+    assert!(!has_placeholder(&buf));
+    assert!(!buffer_text(&buf).contains('▢'), "no reserved box either");
+    assert!(
+        app.images.opts().shapes().is_empty(),
+        "a refused path never enters the metadata table"
+    );
+    assert_eq!(
+        app.chat.content_height(),
+        off.chat.content_height(),
+        "and it costs no rows"
+    );
+}
+
+/// The two extreme shapes: a 1×5000 sliver (the row cap) and an 8000×100 strip
+/// (a single row). Both are *valid* pictures, so both are drawn — inside the
+/// bounds the pure row function gives, without a panic anywhere.
+#[test]
+fn extreme_aspect_ratios_stay_inside_the_bounds() {
+    let dir = TempDir::new("extreme");
+    write_png(&dir.file("sliver.png"), 1, 5000);
+    write_png(&dir.file("strip.png"), 8000, 100);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
+    app.chat.push(ChatCell::AssistantMessage(
+        "![sliver](sliver.png)\n\n![strip](strip.png)".into(),
+    ));
+    let mut term = test_terminal(60, 48);
+    // Both boxes are on screen, and both encodings have landed (the first
+    // placeholder to appear is the *fast* one; the 8000-pixel-wide strip takes
+    // longer to decode and encode).
+    draw_until(&mut app, &mut term, "both pictures", |app, buf| {
+        let frames = app.chat.frame_images();
+        frames.len() == 2
+            && frames
+                .iter()
+                .all(|frame| painted_at(buf, frame.area.x, frame.area.y))
+    });
+
+    let cols = app.chat.geometry().area.width - 2;
+    let frames = app.chat.frame_images().to_vec();
+    assert_eq!(frames.len(), 2, "one box per anchor");
+    assert_eq!(
+        frames[0].target,
+        Size::new(cols, anchor_rows(cols, ImageShape::new(1, 5000)))
+    );
+    assert_eq!(
+        frames[0].target.height, MAX_ANCHOR_ROWS,
+        "the sliver is capped, not unbounded"
+    );
+    assert_eq!(
+        frames[1].target,
+        Size::new(cols, anchor_rows(cols, ImageShape::new(8000, 100)))
+    );
+    assert_eq!(frames[1].target.height, 1, "the strip is one row");
+    let buf = term.backend().buffer();
+    assert!(
+        painted_at(buf, frames[0].area.x, frames[0].area.y),
+        "the sliver's box is drawn"
+    );
+    assert!(
+        painted_at(buf, frames[1].area.x, frames[1].area.y),
+        "the strip's box is drawn"
+    );
+}
+
+/// A long session: a hundred-odd distinct pictures, scrolled through. The
+/// caches stay inside their published budgets at every step, the picture on
+/// screen is drawn, and nothing panics or leaks a worker.
+#[test]
+fn a_hundred_pictures_stay_within_the_cache_budget() {
+    const COUNT: u32 = 120;
+    let dir = TempDir::new("pressure");
+    // Wide, short pictures: one-row boxes at this width. Each cell is a
+    // picture plus two text rows, so a 30-row band holds a handful of anchors
+    // at a time — the shape the LRU (eight entries) is sized for.
+    let body = (0..COUNT)
+        .map(|index| {
+            let name = format!("figure-{index:03}.png");
+            write_png(&dir.file(&name), 1400 + index * 10, 20);
+            format!("![figure {index}]({name})\n\ntext {index} line one\ntext {index} line two")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
+    app.chat.push(ChatCell::AssistantMessage(body));
+    let mut term = test_terminal(60, 30);
+    // The band is only known once a frame has been drawn, and the content
+    // height only once the cells have been laid out.
+    frame(&mut app, &mut term);
+    let band = app.geometry.chat_band();
+    let height = app.chat.content_height();
+    let budget = (DEFAULT_CACHE_ENTRIES, DEFAULT_CACHE_BYTES);
+
+    let mut steps = 0;
+    let mut painted_any = false;
+    for offset in (0..height).step_by(15) {
+        app.chat.scroll_to(offset, band.height as usize);
+        // Every anchor the frame recorded must end up drawn: the whole point of
+        // scrolling through a long session is that the picture that is visible
+        // is the picture that gets encoded, whatever the cache did before.
+        draw_until(&mut app, &mut term, "the step's pictures", |app, buf| {
+            app.chat
+                .frame_images()
+                .iter()
+                .all(|frame| painted_at(buf, frame.area.x, frame.area.y))
+        });
+        let buf = frame(&mut app, &mut term);
+        let stats = app.images.stats().expect("lane");
+        assert!(
+            stats.cached <= budget.0,
+            "the LRU grew past its entry budget at row {offset}: {stats:?}"
+        );
+        assert!(
+            stats.cached_bytes <= budget.1,
+            "the LRU grew past its byte budget at row {offset}: {stats:?}"
+        );
+        assert!(
+            stats.memo <= MAX_META_ENTRIES,
+            "the metadata memo grew past its bound at row {offset}: {stats:?}"
+        );
+        assert!(
+            stats.failed <= MAX_FAILED_ENTRIES,
+            "the failure memo grew past its bound at row {offset}: {stats:?}"
+        );
+        assert!(stats.worker_alive, "the worker died at row {offset}");
+        let frames = app.chat.frame_images();
+        assert!(
+            !frames.is_empty(),
+            "the fixture must put an anchor on screen at row {offset}"
+        );
+        for anchor in frames {
+            assert!(
+                painted_at(&buf, anchor.area.x, anchor.area.y),
+                "the picture at row {offset} was not drawn"
+            );
+            painted_any = true;
+        }
+        steps += 1;
+    }
+    assert!(steps > 10, "the fixture must scroll ({steps} steps)");
+    assert!(painted_any, "the fixture must show pictures");
+    assert_eq!(
+        app.images.opts().shapes().len(),
+        COUNT as usize,
+        "every picture the session names has a shape once the view has been laid out"
+    );
+}
+
+/// A window resize (`Resize` sets `needs_full_redraw`) re-encodes for the new
+/// box: the terminal lost the picture, and the layout it lost it in is gone too.
+#[test]
+fn a_resize_re_encodes_for_the_new_box() {
+    let dir = TempDir::new("resize");
+    let plot = dir.file("plot.png");
+    write_png(&plot, 800, 600);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
+    app.chat
+        .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
+    let mut term = test_terminal(122, 48);
+    draw_until(&mut app, &mut term, "the picture", |_, buf| {
+        has_placeholder(buf)
+    });
+    let wide = app.chat.frame_images().first().cloned().expect("recorded");
+    let wide_cols = app.chat.geometry().area.width - 2;
+    assert_eq!(
+        wide.target,
+        Size::new(wide_cols, anchor_rows(wide_cols, ImageShape::new(800, 600)))
+    );
+
+    // Exactly what `TermEvent::Resize` does: a new window size and a full
+    // redraw. The backend is the source of truth for the size (`autoresize`
+    // picks it up on the next draw), which is also why the app cannot miss it.
+    term.backend_mut().resize(60, 48);
+    app.needs_full_redraw = true;
+    let buf = frame(&mut app, &mut term);
+    assert!(!has_placeholder(&buf), "the invalidated protocol is gone");
+    draw_until(&mut app, &mut term, "the re-encode", |_, buf| {
+        has_placeholder(buf)
+    });
+
+    let narrow = app.chat.frame_images().first().cloned().expect("recorded");
+    let cols = app.chat.geometry().area.width - 2;
+    assert!(cols < wide_cols, "the fixture must narrow the content");
+    assert_eq!(
+        narrow.target,
+        Size::new(cols, anchor_rows(cols, ImageShape::new(800, 600))),
+        "the box — and so the encode target — follows the new width"
+    );
+    assert_ne!(narrow.target, wide.target);
+    let painted = placeholder_rect(term.backend().buffer()).expect("placeholders");
+    assert_eq!(painted, narrow.area, "drawn into the new box");
+    assert_eq!(
+        app.images.stats().expect("lane").cached,
+        1,
+        "one encoding, for the new target"
     );
 }

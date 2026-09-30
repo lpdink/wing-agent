@@ -333,6 +333,24 @@ impl App {
         self.images.sync(&candidates)
     }
 
+    /// The picture lane's freshness check — the event loop's half of
+    /// [`images::Images::poll_freshness`].
+    ///
+    /// Called from the run loop when the lane says a check is due, **never**
+    /// from [`App::draw`]: it `stat`s the pictures on screen, and a picture
+    /// whose file changed drops the store's memo, which the next frame's
+    /// `sync` turns into a fresh header probe and a new encoding. Disabled
+    /// lanes (no protocol / `rendering.images: off`) short-circuit here, so
+    /// "off" still reads no file.
+    ///
+    /// `now` is injected so the throttle can be tested without sleeping.
+    fn poll_image_freshness(&mut self, now: std::time::Instant) -> bool {
+        if !self.images.is_enabled() {
+            return false;
+        }
+        self.images.poll_freshness(now)
+    }
+
     /// Frame-gated draw decision.
     ///
     /// WS stream events (deltas, tool updates, …) only mark the chat
@@ -640,9 +658,15 @@ impl App {
             // the image), and a drag selection keeps the frame text-only — its
             // snapshot copies the visible rows and the row content must not
             // change under the finger.
+            //
+            // The frame's placement table is recorded before those gates: it is
+            // also the freshness lane's target set, and a picture that is on
+            // screen but suppressed *this* frame is still worth keeping in step
+            // with its file (see `Images::observe_visible`).
+            let clip = self.chat.geometry().area;
+            let recorded = self.chat.frame_images();
+            self.images.observe_visible(recorded);
             if !self.selection.is_press_active() {
-                let clip = self.chat.geometry().area;
-                let recorded = self.chat.frame_images();
                 self.images
                     .paint(recorded, clip, toast_area, frame.buffer_mut());
             }
@@ -717,6 +741,21 @@ async fn welcome_sweep_tick(deadline: Option<std::time::Instant>) {
 /// [`MIN_FRAME_INTERVAL`] has elapsed since the last draw.
 fn draw_gate(elapsed_since_last_draw: std::time::Duration) -> bool {
     elapsed_since_last_draw >= MIN_FRAME_INTERVAL
+}
+
+/// Timer arm of the run loop's `select!` for the picture freshness check.
+///
+/// Same absolute-deadline contract as the other timer arms: `select!` rebuilds
+/// the future on every loop iteration, so a relative sleep would be pushed back
+/// by every key press and stream event — the deadline has to come from the
+/// lane's own clock (`last_check + FRESHNESS_INTERVAL`). `None` (nothing
+/// anchored, or no pictures at all) parks, so this lane costs an idle session
+/// nothing.
+async fn image_freshness_tick(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+        None => std::future::pending::<()>().await,
+    }
 }
 
 /// Run the main application loop.
@@ -1037,6 +1076,18 @@ pub async fn run_app(
             Some(result) = fetch_rx.recv() => {
                 app.handle_fetch_result(result);
                 app.chat_dirty = true;
+            }
+            // Picture freshness: re-`stat` the pictures on screen at the lane's
+            // own cadence and drop the store's memo for the ones whose file
+            // changed (see `Images::poll_freshness`). This arm is why a
+            // rewrite is noticed even in a session that draws no frames — the
+            // model's last tool call ends, the loop goes idle, and the check
+            // still runs. Nothing changed → no repaint: the frame is only
+            // marked dirty when a file really moved.
+            _ = image_freshness_tick(app.images.freshness_deadline(std::time::Instant::now())) => {
+                if app.poll_image_freshness(std::time::Instant::now()) {
+                    app.mark_dirty();
+                }
             }
             // The image worker finished something (a header probe, an encode):
             // the next draw polls it into place. `chat_dirty` rather than

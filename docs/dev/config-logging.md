@@ -50,7 +50,7 @@
 | `thinking` | `visible` / `hidden` | `visible` | reasoning 正文是否展开 |
 | `images` | `off` / `auto`（大小写不敏感） | `auto` | markdown 本地图片：`auto` = 启动时探测终端图形协议（kitty/sixel/iTerm2），支持就画真图；`off` 或探测失败 = 今天的链接路径（不探测、不读盘、零开销） |
 
-非法的 `rendering.images` 值回退到 `auto` 并在 TUI 日志里 warn 一行；路径策略（workspace 相对 / 越界 / 远程 URL 一律退回链接路径）见 [`tui-rendering.md`](tui-rendering.md) 第五节。两个键都**大小写不敏感**：`wing tui --dump-config` 写出的 `Off` / `Hidden`（`Serialize` 的变体名）读得回来，dump → 改 → 回填不会把开关悄悄改回默认。diff 的上下文行数不是前端配置——窗口由后端随载荷下发（见 `diff-payload-window`），前端按给定内容逐行渲染。
+非法的 `rendering.images` 值回退到 `auto` 并在 TUI 日志里 warn 一行；路径策略（workspace 相对 / 越界 / 远程 URL 一律退回链接路径）见 [`tui-rendering.md`](tui-rendering.md) 第五节，能力阶梯 / 资源上限 / 失效触发点 / **文件重写的新鲜度检查（1 s 窗口）** / 性能数字见 [`tui-images.md`](tui-images.md)。两个键都**大小写不敏感**：`wing tui --dump-config` 写出的 `Off` / `Hidden`（`Serialize` 的变体名）读得回来，dump → 改 → 回填不会把开关悄悄改回默认。diff 的上下文行数不是前端配置——窗口由后端随载荷下发（见 `diff-payload-window`），前端按给定内容逐行渲染。
 
 > `gateway.host/port` 只影响独立启动 `wing-gateway` 的场景；Rust TUI 读的是 backend config，不会读 TUI config 里的网关地址。
 

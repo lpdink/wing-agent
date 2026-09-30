@@ -38,10 +38,33 @@
 //! [`Images::sync`] and [`Images::request`] are hash lookups into the store's
 //! memo and LRU; every file read, decode and protocol encode happens on the
 //! store's worker thread (see [`crate::ui::image`]).
+//!
+//! # Freshness: a picture that is rewritten must come back
+//!
+//! The store never re-`stat`s a path on its own (that would be I/O on the
+//! render path), so "the model overwrote `plot.png`" is invisible until
+//! somebody says so. [`Images::poll_freshness`] is that somebody — the only
+//! file I/O this lane does, kept **out** of the render path:
+//!
+//! ```text
+//! App::draw ── observe_visible(frame_images)   ← the target set: what is on screen
+//!                                                     │
+//! event loop ── freshness_deadline(now) ──────────────┤  parks when nothing is anchored
+//!            └─ poll_freshness(now)  ─── fs::metadata ─┘  1/s, bounded by the frame's
+//!                  └─ ImageStore::refresh(path)             own placement table
+//!                       └─ next frame's sync re-probes → new header → new encode
+//! ```
+//!
+//! Three properties are the contract (and the tests): **bounded** (one entry
+//! per visible anchor, deduped), **throttled** ([`FRESHNESS_INTERVAL`], with
+//! the clock injected so the tests need no sleeping), and **not on the render
+//! path** (the check runs from the event loop, never from `draw`).
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Rect, Size};
@@ -58,6 +81,57 @@ use crate::ui::image::ImageStoreConfig;
 use crate::ui::image::ImageSupport;
 use crate::ui::image::MetaState;
 use crate::ui::image::paint as paint_image;
+
+/// How often the freshness lane may re-`stat` the pictures that are on screen.
+///
+/// One second is the task's own bound ("at most once a second") and is well
+/// below the cadence at which a rewrite becomes interesting: a model that
+/// regenerates a chart writes the file during a tool call, and the check that
+/// follows a second later re-reads it. A shorter interval multiplies `stat`
+/// calls for no visible gain (the re-probe + re-encode behind it are the slow
+/// half); a longer one starts to feel like the picture never updates.
+pub(crate) const FRESHNESS_INTERVAL: Duration = Duration::from_secs(1);
+
+/// One path's file version, as the lane last saw it.
+///
+/// The pair is exactly what [`ImageMeta`](crate::ui::image::ImageMeta) carries,
+/// so "the version the store read" and "the version on disk" are comparable
+/// without re-reading anything.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Stamp {
+    /// The path did not `stat` (gone, unreadable, a dangling symlink). A
+    /// version in its own right: a file that *appears* is a change, which is
+    /// what makes a deleted-then-restored picture recover.
+    Missing,
+    /// Byte length and modification time — the same identity the store's cache
+    /// key is built from.
+    File {
+        bytes: u64,
+        mtime: Option<SystemTime>,
+    },
+}
+
+impl Stamp {
+    /// What `path` looks like right now — the lane's single `stat`.
+    fn read(path: &Path) -> Self {
+        match fs::metadata(path) {
+            Ok(stat) => Self::File {
+                bytes: stat.len(),
+                mtime: stat.modified().ok(),
+            },
+            Err(_) => Self::Missing,
+        }
+    }
+
+    /// The version a store probe observed: a `Known` metadata *is* "these
+    /// bytes, this mtime".
+    fn of_meta(meta: &crate::ui::image::ImageMeta) -> Self {
+        Self::File {
+            bytes: meta.bytes,
+            mtime: meta.mtime,
+        }
+    }
+}
 
 /// The App's image lane — see the module docs.
 pub(crate) struct Images {
@@ -80,6 +154,18 @@ pub(crate) struct Images {
     /// The chat structure epoch this lane last saw (see
     /// [`Images::set_structure_epoch`]).
     epoch: u64,
+    /// What the freshness lane last saw on disk for the paths it watches. The
+    /// fallback baseline for a path whose store answer is not a usable one (a
+    /// probe in flight, or a path that degraded) — see
+    /// [`Images::poll_freshness`]. Pruned to the watch set every frame.
+    stamps: BTreeMap<PathBuf, Stamp>,
+    /// The pictures the last frame put on screen, in anchor order and deduped:
+    /// the freshness lane's target set. Bounded by the frame's own placement
+    /// table (one entry per visible anchor), so the work per check does not
+    /// grow with the session.
+    watch: Vec<PathBuf>,
+    /// When the last freshness check ran. `None` = never checked.
+    last_check: Option<Instant>,
     /// The options handed to the render layer — `Off` while disabled, otherwise
     /// `Anchor(workspace, known)`.
     opts: ImageOpts,
@@ -97,6 +183,9 @@ impl Images {
             workspace: None,
             known: BTreeMap::new(),
             epoch: 0,
+            stamps: BTreeMap::new(),
+            watch: Vec::new(),
+            last_check: None,
             opts: ImageOpts::off().clone(),
         }
     }
@@ -131,6 +220,9 @@ impl Images {
             workspace: None,
             known: BTreeMap::new(),
             epoch: 0,
+            stamps: BTreeMap::new(),
+            watch: Vec::new(),
+            last_check: None,
             opts: ImageOpts::off().clone(),
         };
         lane.rebuild_opts();
@@ -251,6 +343,107 @@ impl Images {
             self.rebuild_opts();
         }
         table_changed || polled
+    }
+
+    /// Record the pictures the frame just laid out: the freshness lane's target
+    /// set.
+    ///
+    /// Called once per frame, **before** the drawing gates — a picture
+    /// suppressed by a toast or by a drag selection is still on screen, and
+    /// still worth keeping in step with its file. Deduped here (a session that
+    /// shows one picture in three cells watches one path) and pruned here too,
+    /// so a path that left the screen keeps no baseline and the two structures
+    /// stay the same size.
+    pub(crate) fn observe_visible(&mut self, frames: &[FrameImage]) {
+        if self.store.is_none() {
+            return;
+        }
+        self.watch.clear();
+        for frame in frames {
+            if !self.watch.contains(&frame.path) {
+                self.watch.push(frame.path.clone());
+            }
+        }
+        let watch = &self.watch;
+        self.stamps.retain(|path, _| watch.contains(path));
+    }
+
+    /// When the next freshness check is due, or `None` when there is nothing to
+    /// watch — the lane is off, or no picture is on screen.
+    ///
+    /// The event loop parks its timer arm on `None`, so a session with nothing
+    /// anchored pays exactly zero wake-ups for this lane; with pictures on
+    /// screen it wakes at most once per [`FRESHNESS_INTERVAL`], and only marks
+    /// the frame dirty when a file really changed.
+    pub(crate) fn freshness_deadline(&self, now: Instant) -> Option<Instant> {
+        if self.store.is_none() || self.watch.is_empty() {
+            return None;
+        }
+        Some(match self.last_check {
+            // Never checked: due now. The first check is the one that records
+            // what the files look like.
+            None => now,
+            Some(last) => last + FRESHNESS_INTERVAL,
+        })
+    }
+
+    /// Re-`stat` the pictures on screen and drop the store's memo for the ones
+    /// whose file changed — the freshness half of the lane.
+    ///
+    /// * **Bounded**: the target set is [`Images::watch`], one deduped entry
+    ///   per visible anchor, so a session with a thousand pictures costs the
+    ///   same as one with two.
+    /// * **Throttled**: at most one check per [`FRESHNESS_INTERVAL`]. `now` is
+    ///   the caller's clock — the event loop passes `Instant::now()`, the tests
+    ///   a synthetic instant, so the interval is testable without sleeping.
+    /// * **I/O lives here and nowhere else**: one `fs::metadata` per watched
+    ///   path, from the event loop — never from the render path, never from
+    ///   [`crate::ui::image::paint`].
+    ///
+    /// The baseline a path is compared against is the version the **store**
+    /// read (its memoised [`ImageMeta`](crate::ui::image::ImageMeta)) whenever
+    /// it has one: that is what the picture on screen was encoded from, so a
+    /// rewrite that raced the first check is still caught. When the store has
+    /// no usable answer — a probe is in flight, or the path degraded into
+    /// `Unavailable` — the lane falls back to its own last-seen stamp, which is
+    /// what makes a mid-write file (truncated, empty, half a header) recover
+    /// once the write finishes instead of staying broken until a content
+    /// rebuild.
+    ///
+    /// Returns whether anything was refreshed: the caller redraws, and the
+    /// ordinary `sync` → probe → `poll` path turns it into a fresh header, a
+    /// re-laid-out box and a new encoding.
+    pub(crate) fn poll_freshness(&mut self, now: Instant) -> bool {
+        if self.watch.is_empty() {
+            return false;
+        }
+        if self
+            .last_check
+            .is_some_and(|last| now.saturating_duration_since(last) < FRESHNESS_INTERVAL)
+        {
+            return false;
+        }
+        self.last_check = Some(now);
+        let Some(store) = self.store.as_mut() else {
+            return false;
+        };
+        let mut changed = false;
+        for path in &self.watch {
+            let baseline = match store.meta(path) {
+                MetaState::Known(meta) => Some(Stamp::of_meta(&meta)),
+                // No usable answer (in flight, or degraded): what we last saw
+                // is the only baseline that keeps a broken path recoverable.
+                _ => self.stamps.get(path).copied(),
+            };
+            // The one `stat` of the whole check, and the only I/O on this lane.
+            let current = Stamp::read(path);
+            if baseline.is_some_and(|baseline| baseline != current) {
+                store.refresh(path);
+                changed = true;
+            }
+            self.stamps.insert(path.clone(), current);
+        }
+        changed
     }
 
     /// The picture for one anchor, or why there is none.
@@ -450,5 +643,70 @@ mod tests {
         let before = buf.clone();
         images.paint(&[], clip, None, &mut buf);
         assert_eq!(buf, before);
+    }
+
+    /// A `FrameImage` with only the fields the freshness lane reads.
+    fn frame_image(path: &str) -> FrameImage {
+        FrameImage {
+            area: Rect::new(2, 0, 10, 4),
+            offset: (2, 0),
+            target: Size::new(10, 4),
+            path: PathBuf::from(path),
+        }
+    }
+
+    #[test]
+    fn the_freshness_timer_is_armed_only_while_a_picture_is_on_screen() {
+        let support =
+            ImageSupport::from_parts(ImageProtocol::Kitty, CellPixels::new(10, 20), false);
+        let mut images = Images::new(ImagesMode::Auto, support, None);
+        let now = Instant::now();
+        images.observe_visible(&[]);
+        assert_eq!(
+            images.freshness_deadline(now),
+            None,
+            "nothing on screen is nothing to check: the timer arm parks"
+        );
+
+        let frame = frame_image("/ws/plot.png");
+        images.observe_visible(&[frame.clone(), frame]);
+        assert_eq!(images.watch.len(), 1, "one target per path, not per anchor");
+        assert_eq!(
+            images.freshness_deadline(now),
+            Some(now),
+            "a picture on screen with no check yet is due now"
+        );
+        images.last_check = Some(now);
+        assert_eq!(
+            images.freshness_deadline(now),
+            Some(now + FRESHNESS_INTERVAL),
+            "and then it waits out the window"
+        );
+    }
+
+    #[test]
+    fn the_freshness_bookkeeping_is_bounded_by_the_screen() {
+        let support =
+            ImageSupport::from_parts(ImageProtocol::Kitty, CellPixels::new(10, 20), false);
+        let mut images = Images::new(ImagesMode::Auto, support, None);
+        images
+            .stamps
+            .insert(PathBuf::from("/ws/old.png"), Stamp::Missing);
+        images.observe_visible(&[frame_image("/ws/plot.png")]);
+        assert!(
+            images.stamps.is_empty(),
+            "a path that left the screen keeps no baseline: the two sets stay \
+             the same size, and neither grows with the session"
+        );
+    }
+
+    #[test]
+    fn a_disabled_lane_never_schedules_or_runs_a_check() {
+        let mut images = Images::disabled();
+        let now = Instant::now();
+        images.observe_visible(&[frame_image("/ws/plot.png")]);
+        assert_eq!(images.freshness_deadline(now), None);
+        assert!(!images.poll_freshness(now), "and it stats nothing");
+        assert!(images.stamps.is_empty());
     }
 }
