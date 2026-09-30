@@ -244,10 +244,44 @@ mod tests {
             SegmentKind::Link,
             SegmentKind::Border,
             SegmentKind::Gutter,
+            // Math and image anchors are structural like code: a formula or a
+            // caption keeps its own color inside reasoning.
+            SegmentKind::Math,
+            SegmentKind::Image,
         ] {
             let out = thinking_segment_style(kind, original, Style::default().fg(Color::Gray));
             assert_eq!(out, original, "kind {kind:?} should keep its style");
         }
+    }
+
+    /// The thinking cell reads the math mode off the palette (like the
+    /// assistant-message cell and the streaming engine): `off` leaves the
+    /// LaTeX source verbatim inside reasoning too.
+    #[test]
+    fn test_thinking_follows_the_palette_math_mode() {
+        use crate::config::rendering::MathMode;
+
+        let mut block = ThinkingBlock::new();
+        block.append("the energy is $E = m c^2$ here");
+
+        let on: String = block
+            .to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off())
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(on.contains("c²"), "math on renders the grid: {on}");
+
+        let mut off_palette = p();
+        off_palette.math_mode = MathMode::Off;
+        let off: String = block
+            .to_lines(&off_palette, ThinkingMode::Visible, 80, ImageOpts::off())
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(off.contains("$E = m c^2$"), "math off stays literal: {off}");
+        assert!(!off.contains("c²"), "math off: {off}");
     }
 
     #[test]

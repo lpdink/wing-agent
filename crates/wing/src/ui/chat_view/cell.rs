@@ -215,7 +215,11 @@ fn assistant_message_lines(
         text,
         md_width,
         palette,
-        RenderOpts::new(Profile::Content, true).with_images(images),
+        // The math mode travels with the palette (L1) and the image options
+        // with the frame (L4) — the content cell honours both.
+        RenderOpts::new(Profile::Content, true)
+            .with_math(palette.math_mode)
+            .with_images(images),
     );
     let bullet_style = Style::default().fg(palette.text);
     let mut composed = compose_lines(
@@ -331,5 +335,36 @@ mod tests {
                 .contains(Modifier::CROSSED_OUT)
         );
         assert_eq!(style_of(&normal).fg, Some(palette.text));
+    }
+
+    /// The assistant-message cell reads the math mode off the palette, like
+    /// every other render path: `off` must leave the LaTeX source verbatim
+    /// here too (the cell builds its own `RenderOpts`, so a hardcoded mode
+    /// would silently diverge from the streaming engine and the thinking
+    /// cell).
+    #[test]
+    fn test_assistant_message_follows_the_palette_math_mode() {
+        use crate::config::rendering::MathMode;
+
+        let (mut palette, layout) = test_ctx();
+        let md = "energy is $E = m c^2$ here";
+        let render = |palette: &ThemePalette| {
+            let ctx = make_ctx(palette, &layout);
+            ChatCell::AssistantMessage(md.into())
+                .to_lines(80, &ctx)
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let on = render(&palette);
+        assert!(on.contains("c²"), "math on renders the grid: {on}");
+        assert!(!on.contains("$E = m c^2$"), "math on: {on}");
+
+        palette.math_mode = MathMode::Off;
+        let off = render(&palette);
+        assert!(off.contains("$E = m c^2$"), "math off stays literal: {off}");
+        assert!(!off.contains("c²"), "math off: {off}");
     }
 }
