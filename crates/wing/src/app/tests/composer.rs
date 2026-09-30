@@ -237,6 +237,61 @@ fn test_a_held_keyboard_ghosts_the_draft() {
     assert_eq!(buf[(text_x - 2, text_y)].fg, palette.accent);
 }
 
+/// A large paste leaves a chip *inline*: the text around it keeps its line,
+/// the cursor keeps typing after it, and only the chip carries the accent.
+#[test]
+fn test_a_paste_chip_sits_inline_in_the_draft() {
+    let mut app = app_with_draft("see ");
+    app.input.insert_str("1\n2\n3\n4"); // >2 lines: a chip
+    let (buf, composer) = draw_frame(&mut app, 60, 10);
+    let (text_x, text_y, _) = composer_text(&app);
+    let palette = crate::config::ThemePalette::default();
+
+    let width = composer.width as usize;
+    let content = "│ ❯ see [Pasted text #1 +3 lines]";
+    assert_eq!(
+        card_row(&buf, composer, composer.y + 1),
+        format!("{content}{}│", " ".repeat(pad(width, content))),
+        "the chip stays on the draft's own row:\n{}",
+        frame_text(&buf)
+    );
+    assert_eq!(composer.height, 1 + 2, "and it adds no row of its own");
+
+    // "see " is draft text, the chip is a chip (the accent is its only mark).
+    assert_eq!(buf[(text_x, text_y)].fg, palette.text, "the typed text");
+    let chip_x = text_x + "see ".chars().count() as u16;
+    assert_eq!(buf[(chip_x, text_y)].fg, palette.accent, "the chip");
+    assert_eq!(
+        buf[(chip_x + 1, text_y)].fg,
+        palette.accent,
+        "the whole label, not its first cell"
+    );
+}
+
+/// A chip that does not fit the row moves to the next one *whole*: the label
+/// is never torn in half. (A chip wider than the row itself overflows and is
+/// clipped — the label's start still says what it is.)
+#[test]
+fn test_a_paste_chip_never_breaks_in_half() {
+    let mut app = app_with_draft("see ");
+    app.input.insert_str("1\n2\n3\n4");
+    // Width 24 → a 16-column text area: "see " + the 25-char chip cannot fit.
+    let (buf, composer) = draw_frame(&mut app, 24, 11);
+    assert_eq!(composer.height, 2 + 2, "the chip opens a row of its own");
+
+    let first = card_row(&buf, composer, composer.y + 1);
+    let second = card_row(&buf, composer, composer.y + 2);
+    assert!(first.starts_with("│ ❯ see"), "{first}");
+    assert!(
+        second.starts_with("│   [Pasted text #1"),
+        "the label starts on the second row: {second}"
+    );
+    assert!(
+        !first.contains("[Pasted"),
+        "nothing of the label is left behind: {first}"
+    );
+}
+
 /// A squeezed composer (the terminal is too short for the whole layout) gets
 /// fewer rows than the height request asked for, so the card degrades to a
 /// bare text area — and the editor must wrap at *those* columns. The chrome
