@@ -152,16 +152,19 @@ class SessionManager:
     def create_session(
         self,
         template_name: str | None = None,
-        session_id: str | None = None,
         workspace: str | None = None,
         agent_override: AgentOverride | None = None,
         backend: str | None = None,
     ) -> Session:
-        """创建新 session。
+        """创建新 session（session id 一律由后端生成）。
+
+        **不接受调用方指定 session_id**：id 由后端生成，客户端不得自造；访问
+        既有会话只能走 :meth:`resume_session`（同一个 session id，换入内存）。
+        这条边界同时定义了 hook 语义：`before_session_start` 属于"创建新
+        session"，resume 不触发（session id 未变）。
 
         Args:
             template_name: Agent 模板名称，None 时使用默认模板
-            session_id: 指定 session_id（磁盘恢复场景），None 时自动生成
             workspace: 工作目录
             agent_override: AgentOverride 参数覆盖（None 字段不覆盖 template 值）
             backend: 存储后端名称（如 file/memory），None 时使用默认后端
@@ -188,18 +191,11 @@ class SessionManager:
         else:
             template = self._template_manager.default
 
-        # 生成或使用传入的 session_id
-        sid = session_id if session_id is not None else self._generate_session_id()
-        # 「是否既有会话（磁盘恢复）」必须在构造之前判定：构造路径（override /
-        # 状态还原）可能已经写过 metadata，之后 store.exists 无法区分。
-        restored_existing = store.exists(sid)
+        # session id 由后端生成（调用方无法指定——见 docstring 的边界）
+        sid = self._generate_session_id()
 
         # 创建 TrackedList（经 store 打开消息日志；混合链：Message + 事件）
-        messages: TrackedList[ChainNode] = (
-            TrackedList.load(store.open_log(sid), Message)
-            if session_id is not None
-            else TrackedList(store.open_log(sid))
-        )
+        messages: TrackedList[ChainNode] = TrackedList(store.open_log(sid))
 
         session = Session.from_template(
             template=template,
@@ -216,13 +212,10 @@ class SessionManager:
         self._sessions[sid] = session
         self.touch(sid)
 
-        # 触发 before_session_start hook——**仅新建会话**。恢复既有会话
-        # （`session_id` 的磁盘恢复场景）走 resume 语义：hook 注入的追加系统
-        # 提示词已随会话持久化、由构造还原，再跑一次 hook 只会在记录之上叠加
-        # 同一段内容（系统段漂移 + token 膨胀）。
-        if not restored_existing:
-            hooks.invoke("before_session_start", session)
-        # 新建时把 hook 注入落盘；恢复时记录已在磁盘上（sync 幂等跳过）。
+        # 触发 before_session_start hook（创建新 session = session id 变化，
+        # 见 docstring），随后把 hook 注入落盘：resume 重建 CM 时恢复同一
+        # 系统提示词（前缀身份不因换入内存而漂移）。
+        hooks.invoke("before_session_start", session)
         session.sync_append_system_prompt()
 
         log.info(f"Session created: {sid} (template={template.name})")
@@ -337,12 +330,15 @@ class SessionManager:
         # （生效模型=源此刻模型），metadata 记录同一对值，重启后 resume 才
         # 不会偏离 fork 时用户看到的模型。
         #
-        # 提示词与动态状态同属快照——子会话重启后（resume）复现 fork 时刻的
-        # 请求前缀，与源会话逐字节一致，fork 不碎 KV cache。口径分两类：
+        # 提示词与动态状态同属快照——子会话 resume 时复现 fork 时刻的行为
+        # （live 与重启后一致）。注意 fork 本身不承诺与源会话的前缀身份：
+        # session id 变化 + before_session_start 在新会话上重跑（见下）。口径分两类：
         # - 提示词 / 工具集 / yolo / max_turns 取 **live 有效值**：子会话的
         #   agent 由 AgentTemplate.from_agent 按 live 构造，记录必须与之一致，
-        #   否则子会话 live 与 resume 分叉；append_system_prompt 取 live 值
-        #   还兼容"落盘字段引入前创建的存量会话"（hook 注入只存在于内存）。
+        #   否则子会话 live 与 resume 分叉；append_system_prompt 先按 live 值
+        #   写入（子会话构造时继承，也兼容"落盘字段引入前创建的存量会话"——
+        #   hook 注入只存在于内存），随后 before_session_start 在子会话上生效、
+        #   sync 把注入后的结果覆盖落盘。
         # - thinking / reasoning_effort 取**显式记录**（可能为 None）：派生
         #   默认值（provider 协议默认）固化进记录会让子会话请求体带上源会话
         #   没有的显式配置（前缀身份被破坏），跨协议切模型时更会把一种协议的
@@ -377,6 +373,15 @@ class SessionManager:
             store=store,
             workspace=source.session_workspace,
         )
+        # fork 也是"创建新 session"（session id 变化）：before_session_start
+        # 在子会话上生效——hook 注入的环境信息属于"这个新 session"。子会话已
+        # 继承源的追加内容（上面的 metadata 快照 + 构造时还原），不自幂等的
+        # hook 会在其上再叠一层（钩子自身的问题，钩子系统重做时收口）；子会话
+        # 的 session id 变化本就让上游缓存无法复用（见 docs/dev/architecture.md
+        # 「压缩与缓存哲学」）。注入结果随子会话落盘，resume 时逐字节复现。
+        hooks.invoke("before_session_start", new_session)
+        new_session.sync_append_system_prompt()
+
         self._sessions[new_session_id] = new_session
         self.touch(new_session_id)
 

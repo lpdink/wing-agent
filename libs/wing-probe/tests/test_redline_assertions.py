@@ -1087,7 +1087,7 @@ def test_fork_reports_unverifiable_snapshot_fields(tmp_path: Path) -> None:
     # 快照字段中源侧缺记录的项全部如实列出（按 FORK_SNAPSHOT_FIELDS 顺序）
     expected = [field for field in FORK_SNAPSHOT_FIELDS if field not in source_meta]
     assert material["unverifiable_metadata_fields"] == expected
-    assert {"model_name", "provider_name", "append_system_prompt"} <= set(expected)
+    assert {"model_name", "provider_name", "system_prompt"} <= set(expected)
 
 
 def test_fork_unknown_target(tmp_path: Path) -> None:

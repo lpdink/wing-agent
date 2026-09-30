@@ -118,19 +118,23 @@ def _prefix_flags(body: dict) -> dict:
     }
 
 
-def _assert_prefix_identity(
+def _assert_env_identity(source_req: LoggedRequest, actual_req: LoggedRequest) -> None:
+    """tools 声明与处理开关逐字段一致（不随会话重建 / 换入内存漂移的部分）。"""
+    assert actual_req.body["tools"] == source_req.body["tools"], "tools 声明必须一致"
+    assert _prefix_flags(actual_req.body) == _prefix_flags(source_req.body), (
+        "处理开关必须一致"
+    )
+
+
+def _assert_message_prefix(
     source_req: LoggedRequest, actual_req: LoggedRequest, *, shared: int
 ) -> None:
-    """共享前缀逐项对账：system / tools 声明 / 处理开关 / 前 ``shared`` 条消息。
+    """前 ``shared`` 条（非 system）消息逐项一致。
 
-    消息按 ``ContextView`` 的 role + 归一化 content 比较（不逐字节比 JSON）：
+    按 ``ContextView`` 的 role + 归一化 content 比较（不逐字节比 JSON）：
     ``cache_control`` 标记会把**各自请求的最后一条**消息的 content 序列化成
     块数组——那是标记位置差异，不是 token 差异（前缀缓存比较的是文本）。
     """
-    sbody, cbody = source_req.body, actual_req.body
-    assert cbody["messages"][0] == sbody["messages"][0], "system 段必须逐字节一致"
-    assert cbody["tools"] == sbody["tools"], "tools 声明必须一致"
-    assert _prefix_flags(cbody) == _prefix_flags(sbody), "处理开关必须一致"
     sctx, cctx = source_req.context(), actual_req.context()
     for position in range(shared):
         left, right = sctx.messages[position], cctx.messages[position]
@@ -139,6 +143,21 @@ def _assert_prefix_identity(
             left.summary(),
             right.summary(),
         )
+
+
+def _assert_prefix_identity(
+    source_req: LoggedRequest, actual_req: LoggedRequest, *, shared: int
+) -> None:
+    """共享前缀逐项对账：system / tools 声明 / 处理开关 / 前 ``shared`` 条消息。
+
+    适用于**同一 session id** 的重建（逐出后水合 resume）：system 段必须逐字节
+    一致。fork 是新会话（见场景内注释），system 段按定义可以不同。
+    """
+    assert actual_req.body["messages"][0] == source_req.body["messages"][0], (
+        "system 段必须逐字节一致"
+    )
+    _assert_env_identity(source_req, actual_req)
+    _assert_message_prefix(source_req, actual_req, shared=shared)
 
 
 @pytest.mark.probe_env(hooks=["hooks/*.py"])
@@ -165,15 +184,21 @@ async def test_hook_injected_append_survives_fork_and_rehydrate(probe: Probe) ->
     first = probe.context(HOOK_MODEL, 0)
     assert HOOK_MARKER in (first.system or ""), first.describe()
 
-    # fork：子会话与源会话共享 [system, alpha, reply one, beta] 前缀（前 3 条
-    # 非 system 消息逐项一致——第 4 条开始分叉：源是 beta，子会话是 child-next）
+    # fork = 创建新 session（session id 变化）→ before_session_start 在子会话上
+    # 重新生效：system 段 = 继承的源内容 + 本次注入（hook 不自幂等时会叠一层，
+    # 属可接受——钩子系统重做时收口）。消息层前缀 / tools / 开关不受影响。
     child = await session.fork("current")
     child_view = probe.history(child)
     assert_fork_of(probe.history(session), child_view, "current")
     await child.chat("child-next")
     source_req = probe.request(HOOK_MODEL, 1)  # 源会话 "beta" 请求
     child_req = probe.request(HOOK_MODEL, 2)  # 子会话 "child-next" 请求
-    _assert_prefix_identity(source_req, child_req, shared=3)
+    _assert_env_identity(source_req, child_req)
+    _assert_message_prefix(source_req, child_req, shared=3)
+    source_system = source_req.body["messages"][0]["content"]
+    child_system = child_req.body["messages"][0]["content"]
+    assert child_system.startswith(source_system), (source_system, child_system)
+    assert HOOK_MARKER in child_system, child_system
 
     # 逐出水合（resume 重建 agent）：同一会话的下一轮请求仍同前缀
     await _evict(probe, child.session_id)

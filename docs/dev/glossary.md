@@ -47,8 +47,9 @@
 | **ContextManager** | 上下文窗口跟踪 + 压缩 + 回退（`context_manager.py`）。 |
 | **Compactor** | 压缩策略（LLM 摘要）（`compactor.py`）。 |
 | **缓存前缀** | 核心哲学：除压缩外绝不破坏 prompt 缓存前缀，追求理论最高命中率。**前缀身份 = 会话状态**：system 段（含 append_system_prompt）、tools 声明、处理开关都算，全部随会话持久化。 |
-| **append_system_prompt** | 追加系统提示词：`before_session_start` hook 注入（如 workspace / OS 信息）+ `AgentOverride.append_system_prompt`（CLI `--append-system-prompt`）的合并结果；持久化在 `metadata.json`，resume / fork 复现同一 system 段（重建 agent 不碎缓存前缀）。 |
-| **持久会话状态** | `metadata.json` 记录的会话级状态：模型绑定、`system_prompt` / `append_system_prompt`、`tools` 覆盖、`thinking` / `reasoning_effort` / `yolo` / `max_turns`。显式动作写入、resume 优先于模板/配置、fork 按 fork 时刻有效值一次写全（快照；`thinking` / `reasoning_effort` 只拷显式记录，不固化 provider 派生默认）。 |
+| **append_system_prompt** | 追加系统提示词：`before_session_start` hook 注入（如 workspace / OS 信息）+ `AgentOverride.append_system_prompt`（CLI `--append-system-prompt`）的合并结果；持久化在 `metadata.json`，resume 时逐字节还原（不触发 hook）。fork 属新会话：子会话先继承该值、hook 再注入一次。 |
+| **持久会话状态** | `metadata.json` 记录的会话级状态：模型绑定、`system_prompt` / `append_system_prompt`、`tools` 覆盖、`thinking` / `reasoning_effort` / `yolo` / `max_turns`。显式动作写入、resume 优先于模板/配置、fork 按 fork 时刻的有效值一次写全（快照；`thinking` / `reasoning_effort` 只拷显式记录，不固化 provider 派生默认）。 |
+| **before_session_start 触发条件** | 只看 **session id 是否变化**：create / fork（新 id）触发，resume（同一 id 换入内存）不触发。 |
 | **reasoning_effort** | 推理强度 `low/medium/high/xhigh/max`，经 extra_body 发送；`/think` 命令可切换。 |
 
 ## 工具（PR #34）

@@ -96,9 +96,10 @@ class Session:
         if self._metadata.workspace:
             self._agent.set_cwd(Path(self._metadata.workspace).resolve())
 
-        # 持久状态还原（重启后 resume 的核心动作）：模型绑定 / 系统提示词 /
-        # 工具集 / 动态开关——构造时统一应用，覆盖 resume、fork 子会话构造与
-        # 「带 session_id 的 create 恢复」三条路径。记录存在时优先于模板默认。
+        # 持久状态还原：模型绑定 / 系统提示词 / 工具集 / 动态开关——构造时
+        # 统一应用，覆盖 resume（重启 / 逐出后水合）与 fork 子会话构造两条
+        # 路径（session id 已是既有的、记录已在磁盘上）。记录存在时优先于
+        # 模板默认。
         self._restore_persisted_state()
 
         self._initial_status = self._agent.get_status()

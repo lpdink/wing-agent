@@ -185,7 +185,7 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 **红线过渡断言**（场景里显式调用）：`assert_compact_transition`（手动/后台压缩的链形状）、`assert_rewind_transition`（复制行 / 事件节点跳过 / 回退到根）、`assert_fork_of`（子链 = 源**活跃链**前缀 + uuid 重映射 + 事件随行 + metadata 快照；压缩节点是边界，被压缩区间不随 fork 走）。会话逐出（`scenarios/test_session_eviction.py`）不需要专用 helper——它断言的是"什么都不该变"（逐出/水合前后记录集指纹一致），红线直接由场景内的指纹对比 + 内置不变量承担。
 
-**前缀身份红线**（KV cache 语义；`scenarios/test_session_persistence.py` + `scenarios/test_fork.py::test_fork_after_compact_keeps_source_prefix`）：一次请求的"前缀" = `system` 段（含 `append_system_prompt`）+ `tools` 声明 + 处理开关（`enable_thinking` / `preserve_thinking` / `reasoning_effort`）+ 消息。会话重建（fork 子会话、逐出后水合 resume）后这些必须逐字节复现——场景直接对账**假 Provider 留档的原始请求体**（`probe.request(...).body`），而不是只看链形状：fork 后的 live 上下文与文件视图可能不一致，只有请求体能抓住"已摘要历史被复活""hook 注入丢失"这类回归。消息比较走 `ContextView` 的 role + 归一化 content（各自请求的最后一条会被 `cache_control` 标记序列化成块数组——那是标记位置差异，不是 token 差异）。
+**前缀身份红线**（KV cache 语义；`scenarios/test_session_persistence.py` + `scenarios/test_fork.py::test_fork_after_compact_keeps_source_prefix`）：一次请求的"前缀" = `system` 段（含 `append_system_prompt`）+ `tools` 声明 + 处理开关（`enable_thinking` / `preserve_thinking` / `reasoning_effort`）+ 消息。会话重建后这些必须逐字节复现——**适用面是同一个 session id 的重建**（逐出后水合 resume、网关重启后 restore）；fork 是新会话（session id 变化 → `prompt_cache_key` 变化，且 `before_session_start` 会在子会话上重新注入），只对账消息层前缀与 tools / 开关。场景直接对账**假 Provider 留档的原始请求体**（`probe.request(...).body`），而不是只看链形状：fork 后的 live 上下文与文件视图可能不一致，只有请求体能抓住"已摘要历史被复活""hook 注入丢失"这类回归。消息比较走 `ContextView` 的 role + 归一化 content（各自请求的最后一条会被 `cache_control` 标记序列化成块数组——那是标记位置差异，不是 token 差异）。
 
 **口径**（与 spec 一致，比 spec 严的部分在此声明）：
 

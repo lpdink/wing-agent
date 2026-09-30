@@ -170,11 +170,11 @@ class TestCreateOverridePersists:
             hooks._handlers.get("before_session_start", []).remove(hook_inject)
 
 
-class TestHookInjectionIsCreationOnly:
-    """before_session_start 只在建立新会话时触发；恢复既有会话不重复注入。"""
+class TestHookFiringFollowsSessionId:
+    """hook 语义：session id 变化（create / fork）触发；resume（同 id）不触发。"""
 
     @pytest.mark.asyncio
-    async def test_recovering_existing_session_does_not_reappend(self, sm, root):
+    async def test_create_and_fork_fire_resume_does_not(self, sm, root):
         calls: list[str] = []
 
         def hook_inject(session, **ctx):  # noqa: ANN001 - hook 契约签名
@@ -187,25 +187,38 @@ class TestHookInjectionIsCreationOnly:
                 agent_override=AgentOverride(append_system_prompt="From override.")
             )
             sid = session.session_id
+            assert calls == [sid], "create（新 session）必须触发 hook"
             assert (
                 session.context_manager.append_system_prompt
                 == "From override.\n<os>probe</os>"
             )
-            assert calls == [sid]
 
-            # 同一 session_id 的磁盘恢复：走 resume 语义，hook 不再触发
-            recovered = sm.create_session(session_id=sid)
+            # fork = 创建新 session（session id 变化）→ hook 生效；
+            # 子会话先继承源的追加内容，再叠加本次注入（hook 不自幂等所致）
+            child, _ = sm.fork_session(sid, "current")
+            assert child is not None
+            child_sid = child.session_id
+            assert child_sid != sid
+            assert calls == [sid, child_sid], "fork（新 session id）必须触发 hook"
             assert (
-                recovered.context_manager.append_system_prompt
-                == "From override.\n<os>probe</os>"
+                child.context_manager.append_system_prompt
+                == "From override.\n<os>probe</os>\n<os>probe</os>"
             )
-            assert calls == [sid], "恢复既有会话不得重跑 before_session_start"
 
-            # 记录也没被叠加（重启后仍逐字节一致）
-            restored = _restart(root).resume_session(sid)
+            # resume（同一个 session id，只是换入内存）→ hook 不触发；
+            # 追加内容由持久记录还原（不叠加、不丢失）
+            for resumed in (sm.resume_session(sid), _restart(root).resume_session(sid)):
+                assert (
+                    resumed.context_manager.append_system_prompt
+                    == "From override.\n<os>probe</os>"
+                )
+            assert calls == [sid, child_sid], "resume 不得重跑 before_session_start"
+
+            # 子会话重启后与 fork 时刻逐字节一致（注入结果已落盘）
+            child_restored = _restart(root).resume_session(child_sid)
             assert (
-                restored.context_manager.append_system_prompt
-                == "From override.\n<os>probe</os>"
+                child_restored.context_manager.append_system_prompt
+                == "From override.\n<os>probe</os>\n<os>probe</os>"
             )
         finally:
             hooks._handlers.get("before_session_start", []).remove(hook_inject)
