@@ -242,11 +242,10 @@ describe('math syntax (parseMarkdown)', () => {
     });
   });
 
-  it('does not mistake currency or a digit suffix for a formula', () => {
+  it('does not mistake currency for a formula', () => {
     expect(inline('costs $100 and $200 total')).toEqual([
       { kind: 'text', text: 'costs $100 and $200 total' },
     ]);
-    expect(inline('$x$1')).toEqual([{ kind: 'text', text: '$x$1' }]);
     expect(inline('a \\$5 note')).toEqual([{ kind: 'text', text: 'a $5 note' }]);
   });
 
@@ -266,6 +265,315 @@ describe('math syntax (parseMarkdown)', () => {
   it('keeps `\\$` escapes inside a formula from ending it early', () => {
     expect(inline('$\\$5 + \\$7$')).toEqual([
       { kind: 'math', tex: '\\$5 + \\$7', source: '$\\$5 + \\$7$', display: false },
+    ]);
+  });
+
+  // ── the TUI lane's identification rules ─────────────────────────────
+  //
+  // Everything below is aligned with `crates/wing/src/render/markdown/math.rs`
+  // and its tables in `docs/dev/tui-rendering.md` §2.5 (see
+  // `docs/dev/vscode-extension.md` §8.5 for the user-facing summary and the
+  // differences that stay). The TUI lane reaches the same spans by *rewriting
+  // the source text* before parsing; here the rules recognize them directly and
+  // never touch the input — an unrecognized span is ordinary markdown text.
+
+  it('wraps a bare AMS environment (no `$$`) as display math', () => {
+    const source = '\\begin{align}\nf(x) &= x^2 \\\\\n&= (x+1)^2\n\\end{align}';
+    expect(inline(source)).toEqual([
+      // `tex` and `source` are the same text: the environment as written is what
+      // KaTeX gets (it supports `align` in display mode) and what a refusal
+      // falls back to.
+      { kind: 'math', tex: source, source, display: true },
+    ]);
+  });
+
+  it('recognizes an environment inside a sentence, leaving the prose around it', () => {
+    expect(inline('f(x) = \\begin{cases}1 & x > 0\\end{cases} done')).toEqual([
+      { kind: 'text', text: 'f(x) = ' },
+      {
+        kind: 'math',
+        tex: '\\begin{cases}1 & x > 0\\end{cases}',
+        source: '\\begin{cases}1 & x > 0\\end{cases}',
+        display: true,
+      },
+      { kind: 'text', text: ' done' },
+    ]);
+  });
+
+  it('accepts the starred variants and the matrix family', () => {
+    expect(inline('\\begin{align*}a\\end{align*}')[0]).toMatchObject({
+      kind: 'math',
+      display: true,
+      tex: '\\begin{align*}a\\end{align*}',
+    });
+    expect(inline('\\begin{pmatrix}a & b\\end{pmatrix}')[0]).toMatchObject({ kind: 'math', display: true });
+    expect(inline('\\begin{gather}\na = b\n\\end{gather}')[0]).toMatchObject({ kind: 'math', display: true });
+  });
+
+  it('leaves an unknown or unterminated environment exactly as written', () => {
+    expect(inline('\\begin{tikzcd} a \\arrow[r] & b \\end{tikzcd}')).toEqual([
+      { kind: 'text', text: '\\begin{tikzcd} a \\arrow[r] & b \\end{tikzcd}' },
+    ]);
+    expect(inline('\\begin{align}\na &= b\n')).toEqual([
+      { kind: 'text', text: '\\begin{align}' },
+      { kind: 'break', hard: false },
+      { kind: 'text', text: 'a &= b' },
+    ]);
+  });
+
+  it('counts same-name nesting before closing', () => {
+    const source = '\\begin{array}{l}\\begin{array}{l}a\\end{array}\\end{array}';
+    expect(inline(source)).toEqual([{ kind: 'math', tex: source, source, display: true }]);
+  });
+
+  it('refuses an environment body that carries code or a formula of its own', () => {
+    // The TUI bails on a backtick or a `$` inside the span, and both sides then
+    // render the inner construct as what it is.
+    expect(inline('\\begin{align}a `b` b\\end{align}')).toEqual([
+      { kind: 'text', text: '\\begin{align}a ' },
+      { kind: 'code', text: 'b' },
+      { kind: 'text', text: ' b\\end{align}' },
+    ]);
+    expect(inline('\\begin{align}x $y$ z\\end{align}')).toEqual([
+      { kind: 'text', text: '\\begin{align}x ' },
+      { kind: 'math', tex: 'y', source: '$y$', display: false },
+      { kind: 'text', text: ' z\\end{align}' },
+    ]);
+  });
+
+  it('refuses an environment or `\\(…\\)` that touches an existing `$`', () => {
+    // The TUI's `fuses_with_dollar`: an inserted `$$` next to a `$` that is
+    // already there would re-pair it.
+    expect(inline('\\begin{align}a\\end{align}$')).toEqual([
+      { kind: 'text', text: '\\begin{align}a\\end{align}$' },
+    ]);
+    expect(inline('\\(x\\)$$\\\\(y\\\\)')).toEqual([{ kind: 'text', text: '(x)$$\\(y\\)' }]);
+  });
+
+  it('leaves a span longer than the budget as text (the TUI does the same)', () => {
+    const long = `\\(x${'a'.repeat(10_000)}x\\)`;
+    const children = inline(long);
+    expect(children.some((child) => child.kind === 'math')).toBe(false);
+    // No content is lost: markdown's own escaping turns `\(` / `\)` into the
+    // parens, exactly as it does in the TUI for a span its normalizer refuses.
+    expect(children).toEqual([{ kind: 'text', text: `(x${'a'.repeat(10_000)}x)` }]);
+    expect(inline(`\\begin{align}${'a'.repeat(9_000)}\\end{align}`)).toEqual([
+      { kind: 'text', text: `\\begin{align}${'a'.repeat(9_000)}\\end{align}` },
+    ]);
+  });
+
+  it('keeps a `$…$` span of any length a formula (pulldown pairs it too)', () => {
+    // Not the same rule as the LaTeX delimiters: pulldown pairs `$…$` whatever
+    // its length, and the TUI degrades at *render* time — so does this side
+    // (`math.ts` refuses it and `MathView` shows the complete source).
+    const tex = 'y'.repeat(9_000);
+    expect(inline(`$${tex}$`)).toEqual([{ kind: 'math', tex, source: `$${tex}$`, display: false }]);
+  });
+
+  // ── opaque regions ──────────────────────────────────────────────────
+
+  it('never recognizes math inside code spans, fences or indented code', () => {
+    expect(inline('use `\\(x\\)` here but \\(y\\) there')).toEqual([
+      { kind: 'text', text: 'use ' },
+      { kind: 'code', text: '\\(x\\)' },
+      { kind: 'text', text: ' here but ' },
+      { kind: 'math', tex: 'y', source: '\\(y\\)', display: false },
+      { kind: 'text', text: ' there' },
+    ]);
+    expect(parseMarkdown('```latex\n\\(x\\)\n```\n')[0]).toMatchObject({ kind: 'code' });
+    expect(parseMarkdown('before\n\n    \\(x\\)\n\nafter\n')).toEqual([
+      { kind: 'paragraph', children: [{ kind: 'text', text: 'before' }] },
+      { kind: 'code', lang: '', code: '\\(x\\)\n', closed: true },
+      { kind: 'paragraph', children: [{ kind: 'text', text: 'after' }] },
+    ]);
+  });
+
+  it('keeps a fence behind a block prefix opaque (and a lazy line prose)', () => {
+    // `> ~~~` and `- ``` ` are fences to the parser, so their content is code —
+    // the TUI strips the prefix to decide, markdown-it resolves it itself.
+    const quoted = parseMarkdown('> ~~~\n> \\(x\\)\n> ~~~\n');
+    expect(quoted[0]).toMatchObject({ kind: 'quote' });
+    expect(parseMarkdown('- ```\n  \\(x\\)\n  ```\n')[0]).toMatchObject({
+      kind: 'list',
+    });
+    // A 4-space line below paragraph text is a lazy continuation, not code.
+    expect(inline('text\n    \\(x\\)')).toEqual([
+      { kind: 'text', text: 'text' },
+      { kind: 'break', hard: false },
+      { kind: 'math', tex: 'x', source: '\\(x\\)', display: false },
+    ]);
+  });
+
+  it('leaves link and image destinations (and titles) untouched', () => {
+    // The URL is what a click opens; a formula there would also break it. The
+    // `\(` in the destination is not math — `link` rule territory, never ours.
+    expect(inline('[a](http://x/\\(y\\))')).toEqual([
+      { kind: 'link', href: 'http://x/(y)', children: [{ kind: 'text', text: 'a' }] },
+    ]);
+    expect(inline('[a](http://x/(y)/\\(z\\))')).toEqual([
+      { kind: 'link', href: 'http://x/(y)/(z)', children: [{ kind: 'text', text: 'a' }] },
+    ]);
+    expect(inline('[a](http://x/\\(y\\) "t \\(z\\)")')).toEqual([
+      { kind: 'link', href: 'http://x/(y)', children: [{ kind: 'text', text: 'a' }] },
+    ]);
+    expect(inline('![img](http://x/\\(y\\) "t \\(z\\)")')).toEqual([
+      { kind: 'image', src: 'http://x/(y)', alt: 'img' },
+    ]);
+    // …while the *label* is prose and still normalizes (`[\\(x\\)](…)`).
+    expect(inline('[\\(x\\)](http://e/\\(y\\))')).toEqual([
+      {
+        kind: 'link',
+        href: 'http://e/(y)',
+        children: [{ kind: 'math', tex: 'x', source: '\\(x\\)', display: false }],
+      },
+    ]);
+  });
+
+  it('leaves a link reference definition line alone', () => {
+    // The block parser consumes the definition (destination + title) before any
+    // inline rule runs; the TUI's line-based rule reaches the same conclusion.
+    expect(parseMarkdown('[ref]: http://x/\\(y\\) "title \\(z\\)"\n\nuse \\(a\\)\n')).toEqual([
+      {
+        kind: 'paragraph',
+        children: [
+          { kind: 'text', text: 'use ' },
+          { kind: 'math', tex: 'a', source: '\\(a\\)', display: false },
+        ],
+      },
+    ]);
+  });
+
+  it('keeps HTML blocks out of math recognition', () => {
+    // A tag-like line opens an opaque region to the next blank line, exactly
+    // like the TUI's HTML block. `html: false` means this is text, not markup —
+    // markdown's own escaping still applies (`\(` → `(`), which is what this
+    // webview did before formulas existed.
+    expect(inline('<div>\n\\(x\\)\n</div>')).toEqual([
+      { kind: 'text', text: '<div>' },
+      { kind: 'break', hard: false },
+      { kind: 'text', text: '(x)' },
+      { kind: 'break', hard: false },
+      { kind: 'text', text: '</div>' },
+    ]);
+    expect(inline('text\n<div>\n\\(x\\)')).toEqual([
+      { kind: 'text', text: 'text' },
+      { kind: 'break', hard: false },
+      { kind: 'text', text: '<div>' },
+      { kind: 'break', hard: false },
+      { kind: 'text', text: '(x)' },
+    ]);
+    // The block starts after a blank line (the run boundary is above the tag,
+    // not below it) …
+    expect(parseMarkdown('text\n\n<div>\n$$\nx\n$$\n')[1]).toMatchObject({ kind: 'paragraph' });
+    // … and a formula *after* the HTML region (a blank line away) is a formula.
+    expect(parseMarkdown('<b>t</b>\n\n$$\nx\n$$\n')[1]).toMatchObject({ kind: 'math' });
+    expect(inline('<!-- c -->\n\\(x\\)')[0]).toEqual({ kind: 'text', text: '<!-- c -->' });
+    // …and the block rule for a standalone `$$` obeys the same region.
+    expect(parseMarkdown('<div>\n$$\nx\n$$\n')).toEqual([
+      {
+        kind: 'paragraph',
+        children: [
+          { kind: 'text', text: '<div>' },
+          { kind: 'break', hard: false },
+          { kind: 'text', text: '$$' },
+          { kind: 'break', hard: false },
+          { kind: 'text', text: 'x' },
+          { kind: 'break', hard: false },
+          { kind: 'text', text: '$$' },
+        ],
+      },
+    ]);
+  });
+
+  it('keeps an inline HTML tag / autolink opaque, but not the prose between tags', () => {
+    // Attribute values live inside `<…>`: never a formula (the TUI's
+    // `skip_inline_html`).
+    expect(inline('<a href="http://x/\\(y\\)">label</a>').some((child) => child.kind === 'math')).toBe(false);
+    expect(inline('code: <https://example.com/\\(y\\)>').some((child) => child.kind === 'math')).toBe(false);
+    // Between two tags the text is prose — the TUI renders the formula too.
+    expect(inline('before <b>\\(x\\)</b> after')).toEqual([
+      { kind: 'text', text: 'before <b>' },
+      { kind: 'math', tex: 'x', source: '\\(x\\)', display: false },
+      { kind: 'text', text: '</b> after' },
+    ]);
+    // A stray `<` is not a region: comparisons and arrows stay prose.
+    expect(inline('a <- \\(x\\)')).toEqual([
+      { kind: 'text', text: 'a <- ' },
+      { kind: 'math', tex: 'x', source: '\\(x\\)', display: false },
+    ]);
+  });
+
+  it('keeps the HTML-block region inside a quote or a list item too', () => {
+    // Prefixes are the parser's business (it strips `>` and list markers before
+    // the block rule looks at a line), so `> <div>` opens an HTML block just
+    // like a bare `<div>` does.
+    for (const source of ['> <div>\n> $$\n> x\n> $$\n', '- <div>\n  $$\n  x\n  $$\n']) {
+      const nodes = parseMarkdown(source);
+      expect(JSON.stringify(nodes)).not.toContain('"kind":"math"');
+      expect(JSON.stringify(nodes)).toContain('$$');
+    }
+  });
+
+  it('accepts whitespace around a `$$` block delimiter line', () => {
+    // The closer line is compared after trimming, without allocating (the block
+    // rule walks lines with that comparison).
+    expect(parseMarkdown('$$\n  x  \n  $$  \n')[0]).toMatchObject({
+      kind: 'math',
+      display: true,
+    });
+    // …and an opener that never closes stays one paragraph, verbatim.
+    expect(parseMarkdown('\\[\nunclosed x\n\\[\nmore\n')[0]).toMatchObject({ kind: 'paragraph' });
+  });
+
+  // ── the normalizer's purity guards ──────────────────────────────────
+
+  it('treats `$x$1` as a formula followed by `1`', () => {
+    // pulldown-cmark has no "the closer must not be followed by a digit" rule
+    // (that is pandoc's), so the TUI renders `x` — and so does this side now.
+    expect(inline('$x$1 and 2')).toEqual([
+      { kind: 'math', tex: 'x', source: '$x$', display: false },
+      { kind: 'text', text: '1 and 2' },
+    ]);
+  });
+
+  it('stops recognizing LaTeX delimiters after an unpaired `$$`', () => {
+    // Positional rule (the TUI's `stray_display_delim`): the rest of the block
+    // is left alone, so an inserted `$$` cannot re-pair the stray one.
+    expect(inline('stray $$ here and \\(x\\)')).toEqual([{ kind: 'text', text: 'stray $$ here and (x)' }]);
+    // A single `$` does not disarm (`$100` in prose is common).
+    expect(inline('costs $100 and \\(x\\)')).toEqual([
+      { kind: 'text', text: 'costs $100 and ' },
+      { kind: 'math', tex: 'x', source: '\\(x\\)', display: false },
+    ]);
+  });
+
+  it('does not recognize a span carrying code or a nested formula', () => {
+    expect(inline('\\(a `b` c\\)')).toEqual([
+      { kind: 'text', text: '(a ' },
+      { kind: 'code', text: 'b' },
+      { kind: 'text', text: ' c)' },
+    ]);
+    expect(inline('\\(a $b$ c\\)')).toEqual([
+      { kind: 'text', text: '(a ' },
+      { kind: 'math', tex: 'b', source: '$b$', display: false },
+      { kind: 'text', text: ' c)' },
+    ]);
+  });
+
+  it('does not recognize a whitespace-only or block-crossing span', () => {
+    // `\(   \)` has nothing to render; the TUI leaves it alone and both sides
+    // show markdown's escaped form.
+    expect(inline('\\(   \\)')).toEqual([{ kind: 'text', text: '(   )' }]);
+    // A span may not cross a blank line (it would be a different block here and
+    // outside the TUI's span window there).
+    expect(parseMarkdown('a \\(x\n\n+ y\\) b\n')).toEqual([
+      { kind: 'paragraph', children: [{ kind: 'text', text: 'a (x' }] },
+      {
+        kind: 'list',
+        ordered: false,
+        start: 1,
+        items: [[{ kind: 'paragraph', children: [{ kind: 'text', text: 'y) b' }] }]],
+      },
     ]);
   });
 });

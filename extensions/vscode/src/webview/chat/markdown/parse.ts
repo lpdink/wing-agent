@@ -20,6 +20,8 @@ import type Token from 'markdown-it/lib/token.mjs';
 import type StateBlock from 'markdown-it/lib/rules_block/state_block.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 
+import { MAX_MATH_CHARS } from './math';
+
 // ── AST ───────────────────────────────────────────────────────────────
 
 export type MarkdownInline =
@@ -412,63 +414,327 @@ function parseInlineRange(tokens: readonly Token[], cursor: Cursor): readonly Ma
 // ── math ──────────────────────────────────────────────────────────────
 
 /**
- * Inline formulas: `$…$`, `$$…$$`, `\(…\)`, `\[…\]`.
+ * Formulas: `$…$`, `$$…$$`, `\(…\)`, `\[…\]` and bare AMS environments
+ * (`\begin{align}…\end{align}`).
  *
- * Three things make this safe in a markdown-it plugin:
+ * The rules are aligned with the TUI lane, whose implementation is authoritative:
+ * `crates/wing/src/render/markdown/math.rs` and the tables in
+ * `docs/dev/tui-rendering.md` §2.5. The two pipelines apply them differently —
+ * the TUI rewrites the source text before parsing (pulldown-cmark knows nothing
+ * about `\(`, `\[` or a bare environment), while here the rules recognize the
+ * same spans *without touching the input*: an unrecognized span is ordinary
+ * text, so nothing can be rewritten or lost. This rule is safe in a markdown-it
+ * plugin for four reasons:
  *
  * 1. **`$` and `\` are already terminator characters** for markdown-it's `text`
  *    rule, so this rule is reached at every candidate position;
  * 2. **code spans never reach it** — the `backticks` rule consumes a whole span
  *    (and fenced/indented code is a block token), so `` `$x$` `` stays literal;
  * 3. **`\(` is only reachable because this rule runs before `escape`** (see the
- *    registration above).
+ *    registration above) — otherwise markdown's own escape handling would eat
+ *    the backslash;
+ * 4. **link destinations and titles never reach it either**: the `link` /
+ *    `image` rules consume `](url "title")` as a whole, so a `\(` inside a URL
+ *    cannot be mistaken for a formula (pinned by a test).
  *
- * Guards: a single `$` follows pandoc's `tex_math_dollars` rules (the opener must
- * not be followed by whitespace, the closer must not be preceded by whitespace and
- * must not be followed by a digit), which is what keeps prose like
- * `costs $100 and $200` text. The two-character delimiters are unambiguous enough
- * to skip those guards — `$$ \frac{a}{b} $$` is a legitimate spelling.
+ * Everything else on the TUI's opaque list is handled by {@link isOpaque}: HTML
+ * blocks, inline HTML tags / autolinks, and link reference definition lines.
+ *
+ * Guards, mirroring the TUI normalizer rule by rule:
+ *
+ * - a single `$` follows pulldown's two rules: the opener must not be followed
+ *   by whitespace, the closer must not be preceded by one. That is what keeps
+ *   `costs $100 and $200` text; there is deliberately **no** "closer must not be
+ *   followed by a digit" guard — pulldown has none (`$x$1` *is* the formula `x`
+ *   followed by `1`), and pandoc's extra guard would be narrower than the TUI;
+ * - `\(…\)`, `\[…\]` and a bare environment must not carry code or `$`-math of
+ *   their own, must not touch an existing `$`, and must close within
+ *   {@link MAX_MATH_CHARS} (the TUI's `bail_on_nested` / `fuses_with_dollar` /
+ *   `MAX_SPAN` rules);
+ * - they also stop being recognized after an unpaired `$$` in the same block,
+ *   and their closer searches are charged against a per-block budget (the TUI's
+ *   positional and work-budget rules — {@link disarmed} and
+ *   {@link MAX_SCAN_WORK}).
+ *
+ * Degradation is identical on both sides: a span the rules do not recognize is
+ * ordinary markdown text (with markdown's own escaping — exactly what the TUI
+ * shows for a span its normalizer refuses), and a recognized formula that KaTeX
+ * refuses or cannot fit falls back to its **complete source** (`math.ts`) —
+ * never to half a formula.
  */
+
+/** Delimiters whose formulas are display formulas. */
+const DISPLAY_MARKUP: ReadonlySet<string> = new Set(['$$', '\\[']);
+
+/**
+ * Environments a bare `\begin{ENV}` is recognized for — the TUI's `MATH_ENVS`
+ * list (a trailing `*` is a variant of the name, stripped before the lookup).
+ * An environment outside this list stays exactly as the model wrote it, which is
+ * what its unrenderable content would degrade to anyway.
+ */
+const MATH_ENVS: ReadonlySet<string> = new Set([
+  // Multiline environments adapted by the TUI's engine.
+  'align',
+  'aligned',
+  'alignat',
+  'alignedat',
+  'flalign',
+  'split',
+  'eqnarray',
+  'gather',
+  'multline',
+  'center',
+  'equation',
+  'displaymath',
+  'array',
+  // Environments the vendored parser renders.
+  'cases',
+  'matrix',
+  'pmatrix',
+  'bmatrix',
+  'Bmatrix',
+  'vmatrix',
+  'Vmatrix',
+]);
+
+/**
+ * Bytes of closer-searching one inline block may spend — the TUI normalizer's
+ * `MAX_SCAN_WORK`. Without it a block made of thousands of unterminated `\(`
+ * would scan to the span limit at every one of them (quadratically); past the
+ * budget the remaining LaTeX delimiters in that block stay literal, which is
+ * always an allowed degradation. `$…$` / `$$…$$` are not charged: they are
+ * unbounded in pulldown too, and the pattern cannot blow up (measured).
+ */
+const MAX_SCAN_WORK = 1 << 20;
+
+/** Bytes charged per inline block, keyed by the (per-block) parser state. */
+const work = new WeakMap<StateInline, number>();
+
+/**
+ * Inline blocks in which an unpaired `$$` has been met.
+ *
+ * From that point on the LaTeX-delimited forms stay literal: an inserted `$$`
+ * would pair with the stray one, so the TUI normalizer refuses to rewrite there
+ * and this side refuses to recognize there — both frontends then show the same
+ * literal text. The rule is positional on purpose (it depends on what the scan
+ * has already seen, never on a look-ahead) and a *single* `$` does not trigger
+ * it: `$100` in prose is common and cannot pair with a `$$`.
+ */
+const disarmed = new WeakSet<StateInline>();
+
 function mathInline(state: StateInline, silent: boolean): boolean {
-  const opening = mathOpeningAt(state.src, state.pos);
-  if (opening === null) {
+  if (isOpaque(state, state.pos)) {
     return false;
   }
+  const code = state.src.charCodeAt(state.pos);
+  if (code === 0x5c /* \ */) {
+    return latexFormula(state, silent);
+  }
+  if (code === 0x24 /* $ */) {
+    return dollarFormula(state, silent);
+  }
+  return false;
+}
 
-  const contentStart = state.pos + opening.open.length;
-  if (contentStart >= state.posMax) {
+/**
+ * `$…$` (inline) and `$$…$$` (display).
+ *
+ * Display delimiters pair on their own rules — no whitespace constraints:
+ * `$$ \frac{a}{b} $$` is a legitimate spelling, and pulldown agrees.
+ */
+function dollarFormula(state: StateInline, silent: boolean): boolean {
+  const src = state.src;
+  const pos = state.pos;
+  const display = src.charCodeAt(pos + 1) === 0x24; /* $ */
+  const closer = display ? '$$' : '$';
+  const contentStart = pos + closer.length;
+  if (!display && isWhitespace(src.charCodeAt(contentStart))) {
+    return false; // `$ x$`, `$100 …`: pulldown opens only after a non-blank
+  }
+  const close = findCloser(src, contentStart, state.posMax, closer);
+  if (close < contentStart) {
+    // Never closed in this block. An unpaired `$$` disarms the rest of the block
+    // for the LaTeX forms (see `disarmed`); a lone `$` does not.
+    if (display) {
+      disarm(state);
+    }
     return false;
   }
-  if (opening.open === '$' && isWhitespace(state.src.charCodeAt(contentStart))) {
-    return false;
-  }
-
-  const close = findMathClose(state.src, contentStart, state.posMax, opening);
-  if (close <= contentStart) {
-    return false; // no closer
-  }
-  const tex = state.src.slice(contentStart, close);
+  const tex = src.slice(contentStart, close);
   if (tex.trim() === '') {
     return false; // `$$`, `$$$$`, `$$ $$` — an empty formula is not a formula
   }
-  if (opening.open === '$') {
-    if (isWhitespace(state.src.charCodeAt(close - 1))) {
-      return false;
-    }
-    if (isDigit(state.src.charCodeAt(close + opening.close.length))) {
-      return false;
-    }
+  if (!display && isWhitespace(src.charCodeAt(close - 1))) {
+    return false; // `$100 and $200`: the closer follows the last character
   }
-
-  const end = close + opening.close.length;
-  if (!silent) {
-    const token = state.push('math_inline', 'math', 0);
-    token.markup = opening.open;
-    token.content = tex;
-    token.info = state.src.slice(state.pos, end);
-  }
+  const end = close + closer.length;
+  pushMath(state, silent, src.slice(pos, end), tex, display ? '$$' : '$');
   state.pos = end;
   return true;
+}
+
+/**
+ * The three dialects pulldown does not know and the TUI normalizes into `$…$` /
+ * `$$…$$`: `\(…\)` (inline), `\[…\]` (display) and a bare environment (display).
+ */
+function latexFormula(state: StateInline, silent: boolean): boolean {
+  if (disarmed.has(state)) {
+    return false;
+  }
+  const src = state.src;
+  const pos = state.pos;
+  const next = src.charCodeAt(pos + 1);
+  if (next === 0x28 /* ( */) {
+    return delimitedFormula(state, silent, '\\)', false);
+  }
+  if (next === 0x5b /* [ */) {
+    return delimitedFormula(state, silent, '\\]', true);
+  }
+  if (next === 0x62 /* b */ && src.startsWith('\\begin{', pos)) {
+    return bareEnvironment(state, silent);
+  }
+  return false;
+}
+
+/** `\(…\)` / `\[…\]` — the same rules, one closing delimiter apart. */
+function delimitedFormula(state: StateInline, silent: boolean, closer: string, display: boolean): boolean {
+  const src = state.src;
+  const pos = state.pos;
+  const contentStart = pos + 2;
+  const limit = searchLimit(state, contentStart);
+  const close = limit < 0 ? -1 : findCloser(src, contentStart, limit, closer);
+  if (close < 0) {
+    return false; // never closed within the block / the span budget
+  }
+  const inner = src.slice(contentStart, close);
+  if (inner.trim() === '') {
+    return false; // `\(   \)` has nothing to render (the TUI leaves it alone)
+  }
+  if (spansCodeOrMath(inner)) {
+    // A code span or a formula of its own: the TUI bails there, and the outcome
+    // is the same — the delimiters stay literal and the inner `` `…` `` / `$…$`
+    // renders as what it is.
+    return false;
+  }
+  const end = close + 2;
+  if (fusesWithDollar(src, pos, end)) {
+    return false; // `\(x\)$$`: the delimiters would fuse into the existing `$`
+  }
+  pushMath(state, silent, src.slice(pos, end), inner, display ? '\\[' : '\\(');
+  state.pos = end;
+  return true;
+}
+
+/** A bare `\begin{ENV}…\end{ENV}` — display math, exactly as in the TUI. */
+function bareEnvironment(state: StateInline, silent: boolean): boolean {
+  const src = state.src;
+  const pos = state.pos;
+  const nameStart = pos + '\\begin{'.length;
+  const nameEnd = src.indexOf('}', nameStart);
+  if (nameEnd === -1) {
+    return false;
+  }
+  const name = src.slice(nameStart, nameEnd);
+  if (!MATH_ENVS.has(name.replace(/\*+$/, ''))) {
+    return false; // an unknown environment stays exactly as it was written
+  }
+  const close = findEnvironmentEnd(state, nameEnd + 1, name);
+  if (close < 0) {
+    return false;
+  }
+  const end = close + `\\end{${name}}`.length;
+  if (fusesWithDollar(src, pos, end)) {
+    return false;
+  }
+  const source = src.slice(pos, end);
+  // The environment *is* a display formula (that is how the TUI spells it after
+  // normalization), so it carries the display markup for the AST mapper.
+  pushMath(state, silent, source, source, '$$');
+  state.pos = end;
+  return true;
+}
+
+/**
+ * Offset of the `\end{name}` matching the `\begin{name}` whose body starts at
+ * `from`, or `-1` — the TUI's `find_env_end`.
+ *
+ * Same-name nesting is counted (`array` inside `array`); the walk stays inside
+ * the span budget and refuses a body carrying code (`` ` ``) or `$`-math of its
+ * own. Escaped characters are skipped, so an `\\end{name}` is not the closer.
+ */
+function findEnvironmentEnd(state: StateInline, from: number, name: string): number {
+  const src = state.src;
+  const limit = searchLimit(state, from);
+  if (limit < 0) {
+    return -1;
+  }
+  const begin = `\\begin{${name}}`;
+  const end = `\\end{${name}}`;
+  let depth = 0;
+  let at = from;
+  while (at < limit) {
+    if (src.startsWith(end, at)) {
+      if (depth === 0) {
+        return at;
+      }
+      depth -= 1;
+      at += end.length;
+      continue;
+    }
+    if (src.startsWith(begin, at)) {
+      depth += 1;
+      at += begin.length;
+      continue;
+    }
+    const code = src.charCodeAt(at);
+    if (code === 0x60 /* ` */ || code === 0x24 /* $ */) {
+      return -1;
+    }
+    at += code === 0x5c /* \ */ ? 2 : 1;
+  }
+  return -1;
+}
+
+/**
+ * End of the window a closer may be found in: the end of the block, or
+ * {@link MAX_MATH_CHARS} characters on.
+ *
+ * `8192` is the render gate's own budget (`math.ts`, the "show the source
+ * instead" threshold) and the TUI normalizer's `MAX_SPAN`: a span that would not
+ * fit it could not be laid out anyway, so it stays literal text — the same thing
+ * the TUI shows for it. The window is charged against {@link MAX_SCAN_WORK};
+ * `-1` means the block's budget is spent and nothing more is recognized.
+ */
+function searchLimit(state: StateInline, from: number): number {
+  const limit = Math.min(state.posMax, from + MAX_MATH_CHARS);
+  return charge(state, limit - from) ? limit : -1;
+}
+
+/** Pay `bytes` from the block's search budget; `false` once it is spent. */
+function charge(state: StateInline, bytes: number): boolean {
+  const spent = (work.get(state) ?? 0) + bytes;
+  work.set(state, spent);
+  return spent <= MAX_SCAN_WORK;
+}
+
+/** Remember that this block met an unpaired `$$` (see {@link disarmed}). */
+function disarm(state: StateInline): void {
+  disarmed.add(state);
+}
+
+/**
+ * Whether the delimiters a rewrite would insert at `[start, end)` would fuse
+ * with a `$` that is already there — the TUI's `fuses_with_dollar`. Sources that
+ * put a `$` right next to a delimiter are left alone instead; showing the source
+ * is always allowed.
+ */
+function fusesWithDollar(src: string, start: number, end: number): boolean {
+  return (start > 0 && src.charCodeAt(start - 1) === 0x24) || src.charCodeAt(end) === 0x24;
+}
+
+/** True when a span carries code or `$`-math of its own (the TUI bails there). */
+function spansCodeOrMath(inner: string): boolean {
+  return inner.includes('`') || inner.includes('$');
 }
 
 /**
@@ -482,16 +748,27 @@ function mathInline(state: StateInline, silent: boolean): boolean {
  * formula renders as text while it streams, and its content is never dropped.
  */
 function mathBlock(state: StateBlock, startLine: number, endLine: number, silent: boolean): boolean {
-  const opener = lineText(state, startLine).trim();
-  const opening = opener === '$$' ? '$$' : opener === '\\[' ? '\\[' : null;
+  const opening = lineEquals(state, startLine, '$$')
+    ? '$$'
+    : lineEquals(state, startLine, '\\[')
+      ? '\\['
+      : null;
   if (opening === null) {
     return false;
   }
+  if (insideHtmlBlock(state, startLine)) {
+    // `<div>` … blank line is HTML: markdown is not parsed there, so the TUI
+    // shows these lines verbatim and so do we.
+    return false;
+  }
   const closer = opening === '$$' ? '$$' : '\\]';
+  if (!mightHaveCloser(state, closer)) {
+    return false; // no line can close it — do not walk the block at all
+  }
 
   let closeLine = -1;
   for (let line = startLine + 1; line < endLine; line += 1) {
-    if (lineText(state, line).trim() === closer) {
+    if (lineEquals(state, line, closer)) {
       closeLine = line;
       break;
     }
@@ -543,43 +820,167 @@ function lineText(state: StateBlock, line: number): string {
   return state.src.slice(lineStart(state, line), lineEnd(state, line));
 }
 
-/** Delimiters whose formulas are display formulas. */
-const DISPLAY_MARKUP: ReadonlySet<string> = new Set(['$$', '\\[']);
-
-interface MathOpening {
-  /** The delimiter as written (`$`, `$$`, `\(`, `\[`). */
-  readonly open: string;
-  readonly close: string;
-}
-
-/** The formula opening at `pos`, or `null` when this position does not start one. */
-function mathOpeningAt(src: string, pos: number): MathOpening | null {
-  if (src.charCodeAt(pos) === 0x24 /* $ */) {
-    return src.charCodeAt(pos + 1) === 0x24 ? { open: '$$', close: '$$' } : { open: '$', close: '$' };
+/**
+ * Whether `line` is inside an HTML block: the walk goes back to the previous
+ * blank line looking for the line that starts one (a block rule only sees the
+ * line it is asked about, hence the backward direction). A blank line ends the
+ * block, so text after it is markdown again — the TUI's rule.
+ *
+ * Three things keep it cheap: nothing is walked when the document has no `<`
+ * (the common case), the walk is allocation-free and gives up after
+ * {@link MAX_MATH_CHARS} characters, and a query for the line right after the
+ * last one only has to look at that line ({@link HtmlWalk}) — which is what
+ * makes a document full of `$$` lines linear instead of quadratic. Past a bound
+ * the line counts as ordinary text: at worst a formula is recognized where the
+ * TUI would have shown it literally, and no content is ever lost either way.
+ */
+function insideHtmlBlock(state: StateBlock, line: number): boolean {
+  if (!hasTagStart(state)) {
+    return false; // no `<` anywhere: nothing can start an HTML block
   }
-  if (src.charCodeAt(pos) === 0x5c /* \ */) {
-    const next = src.charCodeAt(pos + 1);
-    if (next === 0x28 /* ( */) {
-      return { open: '\\(', close: '\\)' };
+  const src = state.src;
+  const start = lineStart(state, line);
+  const end = lineEnd(state, line);
+  const cached = WALKS.get(state);
+  if (cached !== undefined && cached.line === line - 1) {
+    // The paragraph terminator probes ask about consecutive lines. The cached
+    // `tagLine` covers the lines above; only the new one is unknown.
+    if (isBlankRange(src, start, end)) {
+      WALKS.set(state, { line, tagLine: -1 }); // a blank line starts a new run
+      return false;
     }
-    if (next === 0x5b /* [ */) {
-      return { open: '\\[', close: '\\]' };
+    const tagLine = startsHtmlBlock(src, start, end) ? line : cached.tagLine;
+    WALKS.set(state, { line, tagLine });
+    return tagLine !== -1;
+  }
+
+  let budget = MAX_MATH_CHARS;
+  let tagLine = -1;
+  for (let at = line; at >= 0 && budget > 0; at -= 1) {
+    const from = lineStart(state, at);
+    const to = lineEnd(state, at);
+    budget -= to - from;
+    if (isBlankRange(src, from, to)) {
+      break; // the run starts above this line; whatever is above is another block
+    }
+    if (tagLine === -1 && startsHtmlBlock(src, from, to)) {
+      tagLine = at;
     }
   }
-  return null;
+  WALKS.set(state, { line, tagLine });
+  return tagLine !== -1;
 }
 
 /**
- * Index of the closing delimiter in `[from, max)`, or `-1`.
+ * The last HTML-block walk, so the next line can be checked on its own.
+ *
+ * `tagLine` is the nearest line at or above `line`, in the same run, that starts
+ * an HTML block (`-1` when there is none). Extending it assumes the lines above
+ * are still read the same way — they are, unless the parser entered another
+ * container between two *consecutive* queries, which cannot happen (a container
+ * start is itself a line).
+ */
+interface HtmlWalk {
+  readonly line: number;
+  readonly tagLine: number;
+}
+
+const WALKS = new WeakMap<StateBlock, HtmlWalk>();
+
+/** Whether `[start, end)` holds only whitespace. */
+function isBlankRange(src: string, start: number, end: number): boolean {
+  for (let at = start; at < end; at += 1) {
+    if (!isWhitespace(src.charCodeAt(at))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Whether the document contains a `<` at all (constant per parser state). */
+function hasTagStart(state: StateBlock): boolean {
+  const cached = TAGS.get(state);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const value = state.src.includes('<');
+  TAGS.set(state, value);
+  return value;
+}
+
+/**
+ * Whether a line *could* equal `closer` (ignoring surrounding whitespace): a
+ * *necessary* condition, used to skip the line walk when the closer does not
+ * occur in the source at all — a document of thousands of never-closed `\[`
+ * lines must not walk itself once per line. The answer depends only on the
+ * untouched source, which never changes while a document is parsed.
+ */
+function mightHaveCloser(state: StateBlock, closer: string): boolean {
+  let missing = CLOSERS.get(state);
+  if (missing === undefined) {
+    missing = new Set<string>();
+    CLOSERS.set(state, missing);
+  }
+  if (missing.has(closer)) {
+    return false;
+  }
+  if (state.src.includes(closer)) {
+    return true;
+  }
+  missing.add(closer);
+  return false;
+}
+
+const TAGS = new WeakMap<StateBlock, boolean>();
+const CLOSERS = new WeakMap<StateBlock, Set<string>>();
+
+/**
+ * Whether line `line`'s content is exactly `text`, ignoring surrounding
+ * whitespace — allocation-free, because the block rule walks lines with it.
+ */
+function lineEquals(state: StateBlock, line: number, text: string): boolean {
+  const src = state.src;
+  let start = lineStart(state, line);
+  let end = lineEnd(state, line);
+  while (start < end && isWhitespace(src.charCodeAt(start))) {
+    start += 1;
+  }
+  while (end > start && isWhitespace(src.charCodeAt(end - 1))) {
+    end -= 1;
+  }
+  if (end - start !== text.length) {
+    return false;
+  }
+  for (let at = 0; at < text.length; at += 1) {
+    if (src.charCodeAt(start + at) !== text.charCodeAt(at)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Push the `math_inline` token the AST mapper turns into a `math` node. */
+function pushMath(state: StateInline, silent: boolean, source: string, tex: string, markup: string): void {
+  if (silent) {
+    return;
+  }
+  const token = state.push('math_inline', 'math', 0);
+  token.markup = markup;
+  token.content = tex;
+  token.info = source;
+}
+
+/**
+ * Index of the closing delimiter in `[from, limit)`, or `-1`.
  *
  * Inside a formula a backslash escapes the next character (`\$` is a dollar sign,
  * `\\` is LaTeX's line break), so those pairs are skipped — but the closing
  * delimiter is matched *first*, otherwise `\)` (which starts with a backslash)
  * could never close `\(`.
  */
-function findMathClose(src: string, from: number, max: number, opening: MathOpening): number {
-  for (let pos = from; pos < max; pos += 1) {
-    if (src.startsWith(opening.close, pos)) {
+function findCloser(src: string, from: number, limit: number, closer: string): number {
+  for (let pos = from; pos < limit; pos += 1) {
+    if (src.startsWith(closer, pos)) {
       return pos;
     }
     if (src.charCodeAt(pos) === 0x5c /* \ */) {
@@ -589,11 +990,208 @@ function findMathClose(src: string, from: number, max: number, opening: MathOpen
   return -1;
 }
 
-/** Space, tab or newline — `charCodeAt` past the end is `NaN`, which is not one. */
+/**
+ * Space, tab, newline or form feed — pulldown's `is_ascii_whitespace` (the two
+ * `$` guards come from there). `charCodeAt` past the end is `NaN`, which is not
+ * one.
+ */
 function isWhitespace(code: number): boolean {
-  return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d;
+  return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d;
 }
 
-function isDigit(code: number): boolean {
-  return code >= 0x30 && code <= 0x39;
+// ── opaque regions ────────────────────────────────────────────────────
+
+/**
+ * Regions of one inline block (a paragraph, a heading, a table cell …) where
+ * math must not be recognized — the TUI normalizer's opaque list, expressed
+ * against markdown-it's own token boundaries:
+ *
+ * - **HTML block**: a line whose content starts with a tag (`<div>`, `<!--`,
+ *   `<?…`, `<!DOCTYPE`) is opaque to the end of the block, which is the next
+ *   blank line — markdown-it hands the inline parser one block at a time, so
+ *   "the rest of the block" is the whole tail here. `html: false` means this is
+ *   about *text that looks like* HTML; nothing is parsed as markup.
+ * - **Inline HTML tag / autolink**: `<a href="…">`, `<http://…>` — everything
+ *   between the `<` and its `>` is opaque, while the prose between two tags is
+ *   not (`before <b>\(x\)</b> after` still recognizes `\(x\)`, as the TUI does).
+ * - **Link reference definition line**: `[label]: url "title"` — the destination
+ *   is a URL, not prose. The block parser consumes a *real* definition before any
+ *   inline rule runs; this covers the definition-shaped line inside a paragraph,
+ *   where the TUI's check is line-based too.
+ *
+ * Code spans and fenced/indented code need no entry (markdown-it turns them into
+ * `code_inline` / `fence` / `code_block` tokens before any inline rule runs), and
+ * neither do link destinations and titles (the `link` / `image` rules consume
+ * them whole). Tests pin both.
+ */
+interface OpaqueRegions {
+  /** Offset each line of the block starts at (ascending). */
+  readonly lineStarts: readonly number[];
+  /** Per line: `true` when math must not be recognized anywhere on that line. */
+  readonly lines: readonly boolean[];
+  /** `[start, end)` of every inline HTML tag / autolink in the block. */
+  readonly tags: readonly (readonly [number, number])[];
+}
+
+/**
+ * One entry per inline block: `StateInline` objects are created per block and
+ * short-lived, so the cache costs nothing and the callers stay pure.
+ */
+const REGIONS = new WeakMap<StateInline, OpaqueRegions>();
+
+/** Whether `pos` sits in one of the regions above. */
+function isOpaque(state: StateInline, pos: number): boolean {
+  const regions = regionsOf(state);
+  if (inTag(regions, pos)) {
+    return true;
+  }
+  return regions.lines[lineAt(regions, pos)] === true;
+}
+
+function regionsOf(state: StateInline): OpaqueRegions {
+  const cached = REGIONS.get(state);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const src = state.src;
+  const lineStarts: number[] = [];
+  const lines: boolean[] = [];
+  let inHtmlBlock = false;
+  let at = 0;
+  for (;;) {
+    lineStarts.push(at);
+    const newline = src.indexOf('\n', at);
+    const end = newline === -1 ? src.length : newline;
+    const content = src.slice(at, end).replace(/^ {0,3}/, '');
+    if (content.trim() === '') {
+      inHtmlBlock = false; // a blank line ends the HTML block
+      lines.push(false);
+    } else if (inHtmlBlock) {
+      lines.push(true);
+    } else if (startsHtmlBlock(src, at, end)) {
+      inHtmlBlock = true;
+      lines.push(true);
+    } else {
+      lines.push(isReferenceDefinition(content));
+    }
+    if (newline === -1) {
+      break;
+    }
+    at = newline + 1;
+  }
+
+  const regions: OpaqueRegions = { lineStarts, lines, tags: tagSpans(src) };
+  REGIONS.set(state, regions);
+  return regions;
+}
+
+/**
+ * `[start, end)` of every inline HTML tag or autolink in `src`.
+ *
+ * A `<` only opens a region when a tag character follows (so `a <- b`, `x < y`
+ * and an unclosed `<` are ordinary text — the TUI's rule), and the region runs to
+ * the first `>`, which is what makes an attribute value opaque too.
+ */
+function tagSpans(src: string): readonly (readonly [number, number])[] {
+  const spans: (readonly [number, number])[] = [];
+  let cursor = 0;
+  for (;;) {
+    const open = src.indexOf('<', cursor);
+    if (open === -1) {
+      return spans;
+    }
+    const close = isTagStart(src.charCodeAt(open + 1)) ? src.indexOf('>', open + 1) : -1;
+    if (close === -1) {
+      cursor = open + 1;
+      continue;
+    }
+    spans.push([open, close + 1]);
+    cursor = close + 1;
+  }
+}
+
+/** Index of the line containing `pos` (binary search over the line starts). */
+function lineAt(regions: OpaqueRegions, pos: number): number {
+  const starts = regions.lineStarts;
+  let low = 0;
+  let high = starts.length - 1;
+  while (low < high) {
+    const mid = (low + high + 1) >> 1;
+    if ((starts[mid] ?? 0) <= pos) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return low;
+}
+
+/** Whether `pos` is inside one of the tag spans (binary search). */
+function inTag(regions: OpaqueRegions, pos: number): boolean {
+  const spans = regions.tags;
+  let low = 0;
+  let high = spans.length - 1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const span = spans[mid];
+    if (span === undefined) {
+      return false;
+    }
+    if (pos < span[0]) {
+      high = mid - 1;
+    } else if (pos >= span[1]) {
+      low = mid + 1;
+    } else {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** `<` + a tag character opens an HTML tag: `<div>`, `</p>`, `<!--`, `<?xml`. */
+function isTagStart(code: number): boolean {
+  return (
+    (code >= 0x30 && code <= 0x39) /* 0-9 */ ||
+    (code >= 0x41 && code <= 0x5a) /* A-Z */ ||
+    (code >= 0x61 && code <= 0x7a) /* a-z */ ||
+    code === 0x2f /* / */ ||
+    code === 0x21 /* ! */ ||
+    code === 0x3f /* ? */
+  );
+}
+
+/**
+ * Whether a line's content (`[start, end)`) starts an HTML block: `<` + a tag
+ * character, with up to three leading spaces (CommonMark's allowance). This
+ * mirrors the TUI's `is_html_block_start`; the prefixes a block can carry (`> `,
+ * list markers) are stripped by markdown-it before any rule sees the content.
+ */
+function startsHtmlBlock(src: string, start: number, end: number): boolean {
+  let at = start;
+  let spaces = 0;
+  while (at < end && spaces < 3 && src.charCodeAt(at) === 0x20) {
+    at += 1;
+    spaces += 1;
+  }
+  return src.charCodeAt(at) === 0x3c /* < */ && isTagStart(src.charCodeAt(at + 1));
+}
+
+/**
+ * Whether the line is a link reference definition (`[label]: url "title"`) — the
+ * TUI's `is_reference_definition`, line-based like there. Only the line itself is
+ * opaque: a title wrapped onto the next line is rare, and treating the whole
+ * block as opaque would cost more than it protects.
+ */
+function isReferenceDefinition(content: string): boolean {
+  const text = content.replace(/^ {0,3}/, '');
+  if (text.charAt(0) !== '[') {
+    return false;
+  }
+  const close = text.indexOf(']');
+  // `]` missing, or a label carrying whitespace: not a definition.
+  if (close === -1 || /\s/.test(text.slice(1, close))) {
+    return false;
+  }
+  return text.charAt(close + 1) === ':';
 }

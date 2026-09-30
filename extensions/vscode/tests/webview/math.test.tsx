@@ -2,7 +2,7 @@ import { render } from '@testing-library/react';
 import katex from 'katex';
 import { describe, expect, it, vi } from 'vitest';
 
-import { MarkdownText } from '../../src/webview/chat/Markdown';
+import { MarkdownStream, MarkdownText } from '../../src/webview/chat/Markdown';
 import { MAX_MATH_CHARS, renderMathHtml, resetMathCache } from '../../src/webview/chat/markdown/math';
 
 /**
@@ -130,6 +130,70 @@ describe('MathView', () => {
     expect(container.querySelector('[data-testid="md-math-source"]')?.textContent).toBe('$\\frac{1}{$');
     expect(container.textContent).toContain('broken');
     expect(container.textContent).toContain('here');
+  });
+
+  it('renders a bare AMS environment as a display formula', () => {
+    const { container } = render(<MarkdownText text={'\\begin{align}\na &= b\n\\end{align}\n'} />);
+
+    const math = container.querySelector('[data-testid="md-math"]');
+    expect(math?.getAttribute('data-display')).toBe('true');
+    expect(math?.querySelector('.katex-display')).not.toBeNull();
+  });
+
+  it('falls back to the environment source when KaTeX refuses it', () => {
+    // `\notacommand` is not a macro: the layout fails and the reader still sees
+    // exactly what the model wrote — the TUI lane's degradation rule, verbatim.
+    const source = '\\begin{align}\\notacommand{x}\\end{align}';
+    const { container } = render(<MarkdownText text={source} />);
+
+    expect(container.querySelector('.katex')).toBeNull();
+    expect(container.querySelector('[data-testid="md-math-source"]')?.textContent).toBe(source);
+  });
+
+  it('shows an over-long `\\(…\\)` as ordinary text, with every character', () => {
+    // Beyond the span budget the LaTeX delimiters are not recognized at all
+    // (the TUI's normalizer refuses them too), so this is plain markdown text:
+    // `\(` and `\)` go through markdown's own escaping — which is exactly what
+    // the TUI prints for that input — and nothing is dropped.
+    const filler = 'a'.repeat(10_000);
+    const { container } = render(<MarkdownText text={`\\(x${filler}x\\)`} />);
+
+    expect(container.querySelector('[data-testid="md-math"]')).toBeNull();
+    expect(container.querySelector('[data-testid="md-math-source"]')).toBeNull();
+    expect(container.textContent).toBe(`(x${filler}x)`);
+  });
+
+  it('turns an environment into a formula only once it is complete', () => {
+    // The streaming path: while `\end{align}` is still missing the block is
+    // text; when it arrives the very same block becomes a formula. No text is
+    // ever dropped on the way (`md-math-source` is the same fallback).
+    const { container, rerender } = render(<MarkdownStream text={'\\begin{align}\na &= b\n'} streaming />);
+    expect(container.querySelector('[data-testid="md-math"]')).toBeNull();
+    expect(container.textContent).toContain('a &= b');
+
+    rerender(<MarkdownStream text={'\\begin{align}\na &= b\n\\end{align}\n'} streaming={false} />);
+    // KaTeX rendered it (the raw TeX also appears inside its MathML annotation,
+    // which is why this asserts on the elements, not on the text).
+    expect(container.querySelector('[data-testid="md-math"]')?.querySelector('.katex')).not.toBeNull();
+    expect(container.querySelector('[data-testid="md-math-source"]')).toBeNull();
+  });
+
+  it('cannot turn an environment into markup either (parsed DOM)', () => {
+    // The new path (a bare environment) goes through the same `trust: false`
+    // KaTeX entry point: assert on the parsed tree, not on the string.
+    const dom = (text: string): HTMLElement => {
+      const { container } = render(<MarkdownText text={text} />);
+      return container;
+    };
+
+    const payload = '\\begin{align}\\text{<img src=x onerror=alert(1)>}\\end{align}';
+    const text = dom(payload);
+    expect(text.querySelector('img')).toBeNull();
+    expect(text.textContent).toContain('<img src=x onerror=alert(1)>');
+
+    const href = dom('\\begin{align}\\href{javascript:alert(1)}{x}\\end{align}');
+    expect(href.querySelector('a')).toBeNull();
+    expect(href.querySelector('[href]')).toBeNull();
   });
 
   it('shows an over-long formula as its source instead of laying it out', () => {
