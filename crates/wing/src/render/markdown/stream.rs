@@ -90,7 +90,7 @@ use syntect::easy::HighlightLines;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::images::{
-    ImageAnchor, ImageOpts, ImageSpan, cover_span, image_side_channel, is_cover_span,
+    ImageAnchor, ImageOpts, ImageSpan, cover_span, image_side_channel, row_is_cover_row,
 };
 use super::links::{ComposedLines, LinkSpan, compose_lines, line_link_spans};
 use super::profile::Profile;
@@ -1014,11 +1014,19 @@ fn compose_into<I>(
     let cell_first_pending = flat.is_empty();
     // "Did the previous content already end this blank run?" — a markdown
     // blank line, not an anchor cover row (which is blank-looking but is part
-    // of the anchor block above it).
-    let flat_ends_blank = flat.lines.last().is_some_and(|line| {
-        !line.spans.iter().any(is_cover_span)
-            && line.spans.iter().all(|s| s.content.trim().is_empty())
-    });
+    // of the anchor block above it). The cover-row exception is structural
+    // (the row is inside an anchor's row range), never a content test: at
+    // narrow widths a hard-wrapped prefix row is a lone space too.
+    let flat_ends_blank = match flat.lines.len().checked_sub(1) {
+        Some(last) => {
+            !row_is_cover_row(&flat.images, last)
+                && flat.lines[last]
+                    .spans
+                    .iter()
+                    .all(|span| span.content.trim().is_empty())
+        }
+        None => false,
+    };
     let mut out = Vec::new();
     let mut out_links = Vec::new();
     // Image anchors, riding on their caption row so the hard wrap below can

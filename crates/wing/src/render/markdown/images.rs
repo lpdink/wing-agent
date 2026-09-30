@@ -192,6 +192,14 @@ impl ImageOpts {
     ///
     /// `workspace = None` means "relative paths are rejected" — the table's
     /// keys are then absolute paths only.
+    ///
+    /// Table contract: every key is the output of [`resolve_image_path`] for
+    /// the destination as written in the markdown, and **a path appears at
+    /// most once**. A duplicate is a caller bug (a directory scan that
+    /// re-registers the same file): the lookup answers with the first row, so
+    /// the result stays deterministic, but the contract is "one row per path".
+    /// Keep the table scoped to what the view is about to draw rather than to
+    /// "every image in the workspace" — see [`shape_for`](Self::shape_for).
     pub fn anchor(workspace: Option<PathBuf>, shapes: Vec<ImageEntry>) -> Self {
         Self {
             mode: ImageMode::Anchor,
@@ -221,6 +229,13 @@ impl ImageOpts {
     }
 
     /// The shape recorded for `path` (an exact match of the resolved form).
+    ///
+    /// A linear scan: the table is expected to be the handful of images of one
+    /// screen (the caller reuses its own probe cache to build it once per
+    /// layout/metadata change, not once per image per frame), and the markdown
+    /// renderer asks at most once per image per parse — with the streaming
+    /// engine, once per image per *block*, not per frame. Duplicate rows answer
+    /// with the first one (see [`anchor`](Self::anchor)).
     pub fn shape_for(&self, path: &Path) -> Option<ImageShape> {
         self.shapes
             .iter()
@@ -523,14 +538,31 @@ pub(crate) fn cover_span() -> ratatui::text::Span<'static> {
     ratatui::text::Span::raw(COVER_CELL)
 }
 
-/// Whether a composed span is an anchor cover row's.
+/// Whether a composed row is one of an anchor's cover rows.
 ///
 /// The streaming compose dedups a batch's leading blank line against the
-/// previous content ("did the last line already end this blank run?"). A
-/// cover row *looks* blank but is not a markdown blank line — swallowing the
+/// previous content ("did the last row already end this blank run?"). A cover
+/// row *looks* blank but is not a markdown blank line — swallowing the
 /// separator that follows an anchor block would drop a line from the stream.
-pub(crate) fn is_cover_span(span: &ratatui::text::Span<'_>) -> bool {
-    span.content == COVER_CELL
+///
+/// The judgment is **structural**, derived from the anchor side channel: the
+/// row is inside an anchor's row range but is not the anchor's caption row.
+/// It must not be a content test ("is this span a space?"): at narrow widths a
+/// hard wrap turns the 2-column cell prefix into ordinary rows whose only span
+/// *is* a space, and a content test mistakes them for cover rows — which drops
+/// the dedup and adds a blank line to the streaming resting state.
+///
+/// The scan is bounded by [`MAX_ANCHOR_ROWS`]: an anchor covering `last` starts
+/// at most that many rows above it, and its side-channel entry lives on its
+/// caption row.
+pub(crate) fn row_is_cover_row(images: &[Vec<ImageSpan>], last: usize) -> bool {
+    let from = last.saturating_sub(usize::from(MAX_ANCHOR_ROWS));
+    images
+        .get(from..=last)
+        .unwrap_or_default()
+        .iter()
+        .flatten()
+        .any(|span| span.line < last && span.rows_range().contains(&last))
 }
 
 /// Build the per-line anchor side channel for the rows described by `tags`.

@@ -48,6 +48,15 @@ pub(crate) struct LinkState {
     /// `![alt](path)` rather than `[text](url)` — only images can become
     /// anchors.
     pub(crate) is_image: bool,
+    /// `lines.len()` when the label opened.
+    ///
+    /// A label that spans a line break (a soft break inside a multi-line alt,
+    /// `![l1\nl2](a.png)`) flushes the line it started on, so the anchor would
+    /// land on the label's *last* line with only the last line's text as alt —
+    /// the earlier lines stay behind as ordinary link text. Anchoring is
+    /// refused in that case (the mismatch is visible here): the image keeps
+    /// the link path.
+    pub(crate) lines_at_start: usize,
 }
 
 // ============================================================
@@ -245,13 +254,24 @@ impl MarkdownContext<'_> {
     /// `current_kind()` is the enclosing element) and after the image's own
     /// destination segments were appended (so the recorded segment count is
     /// the line's final one for a standalone image).
-    fn try_image_anchor(&mut self, destination: &str, label_start_segment_idx: usize, alt: String) {
+    fn try_image_anchor(
+        &mut self,
+        destination: &str,
+        label_start_segment_idx: usize,
+        lines_at_start: usize,
+        alt: String,
+    ) {
         if !self.images.is_enabled() {
             return;
         }
         // Alone on its line: the label is the line's first segment (nothing
         // before it — no text, no block prefix) …
         if label_start_segment_idx != 0 {
+            return;
+        }
+        // … and it is all on one line (a multi-line alt flushes the line it
+        // started on; see `LinkState::lines_at_start`).
+        if self.lines.len() != lines_at_start {
             return;
         }
         // … at the top level: not in a table cell or code block, no block
@@ -357,6 +377,7 @@ pub(crate) fn handle_start_tag(tag: &Tag<'_>, ctx: &mut MarkdownContext<'_>) {
                 hidden_location_suffix: links::extract_hidden_location_suffix(dest_url),
                 label_start_segment_idx,
                 is_image: matches!(tag, Tag::Image { .. }),
+                lines_at_start: ctx.lines.len(),
             });
             ctx.push_style(ctx.theme.link);
             ctx.push_kind(SegmentKind::Link);
@@ -460,6 +481,7 @@ pub(crate) fn handle_end_tag(tag: TagEnd, ctx: &mut MarkdownContext<'_>) {
                     hidden_location_suffix,
                     label_start_segment_idx,
                     is_image,
+                    lines_at_start,
                 } = link;
                 // The alt text as written, captured before the destination /
                 // location-suffix segments are appended below.
@@ -509,7 +531,12 @@ pub(crate) fn handle_end_tag(tag: TagEnd, ctx: &mut MarkdownContext<'_>) {
                 ctx.pop_style();
                 ctx.pop_kind();
                 if is_image {
-                    ctx.try_image_anchor(&destination, label_start_segment_idx, alt);
+                    ctx.try_image_anchor(
+                        &destination,
+                        label_start_segment_idx,
+                        lines_at_start,
+                        alt,
+                    );
                 }
             } else {
                 ctx.pop_style();

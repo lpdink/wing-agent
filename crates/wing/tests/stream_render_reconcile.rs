@@ -356,6 +356,67 @@ fn image_opts() -> ImageOpts {
     )
 }
 
+/// Narrow widths (1..=6 columns).
+///
+/// The main matrix starts at 40 columns, which is where a chat cell normally
+/// lives — but nothing in the layout enforces a minimum width (a tmux pane can
+/// be one column wide), and the hard wrap is at its most aggressive there: a
+/// 2-column cell prefix alone fills a 1-column row, so *ordinary* rows end up
+/// looking exactly like an anchor's blank cover rows. That is what broke the
+/// blank-line dedup at width 1 (the streaming resting state grew a blank line
+/// the reference render does not have), so the narrow band is asserted
+/// explicitly, for every shape and with anchors on and off.
+#[test]
+fn reconcile_matrix_narrow_widths() {
+    const NARROW: &[u16] = &[1, 2, 3, 4, 5, 6];
+    let images = image_opts();
+    // Not vacuous on either side of the band: width 1 cannot hold an anchor
+    // (the markdown width is the cell width minus the 2-column prefix), while
+    // the top of the band still produces them.
+    assert!(
+        !full_render(
+            "![a](./plots/a.png)",
+            1,
+            Profile::Content,
+            &ThemePalette::default(),
+            &images
+        )
+        .has_images(),
+        "width 1 must not produce anchors"
+    );
+    assert!(
+        full_render(
+            "![a](./plots/a.png)",
+            6,
+            Profile::Content,
+            &ThemePalette::default(),
+            &images
+        )
+        .has_images(),
+        "the narrow band must still exercise anchors"
+    );
+    for (name, corpus) in shapes().into_iter().chain(image_shapes()) {
+        for &profile in PROFILES {
+            for &width in NARROW {
+                for &chunk in &[1usize, 16] {
+                    let chunks = chunk_stream(&corpus, chunk);
+                    let extra = format!("narrow chunk={chunk}B width={width}");
+                    reconcile(name, &corpus, &chunks, width, profile, &extra);
+                    reconcile_with(
+                        name,
+                        &corpus,
+                        &chunks,
+                        width,
+                        profile,
+                        images.clone(),
+                        &format!("{extra} images=anchor"),
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// With anchors enabled, the incremental engine must converge to the
 /// reference render including the anchor geometry — every chunk size, width
 /// and profile.

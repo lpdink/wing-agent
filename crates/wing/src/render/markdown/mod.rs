@@ -1566,6 +1566,45 @@ mod tests {
     }
 
     #[test]
+    fn a_multi_line_alt_degrades_to_the_link_path() {
+        // A soft break inside the label flushes the line the image started on,
+        // so an anchor would land on the label's last line with only that
+        // line's text as alt (and the earlier lines would stay behind as link
+        // text). The image keeps the link path instead.
+        for md in [
+            "![l1\nl2](./plot.png)",
+            "![l1  \nl2](./plot.png)",
+            "text ![l1\nl2](./plot.png)",
+        ] {
+            let lines = render_with(md, Some(80), content_opts(&plot_opts()));
+            assert!(
+                lines.iter().all(|line| line.image.is_none()),
+                "multi-line alt anchored: {md:?}"
+            );
+            let off = render_with(md, Some(80), RenderOpts::new(Profile::Content, true));
+            assert_eq!(fingerprint(&off), fingerprint(&lines), "{md:?}");
+        }
+        // A single-line label with the same text still anchors.
+        let single = render_with("![l1 l2](./plot.png)", Some(80), content_opts(&plot_opts()));
+        assert_eq!(single.iter().filter(|l| l.image.is_some()).count(), 1);
+    }
+
+    #[test]
+    fn a_duplicate_metadata_entry_takes_the_first_row() {
+        // The table is keyed by resolved path; duplicates are the caller's bug
+        // but the outcome is deterministic (first row wins) — see
+        // `ImageOpts::shape_for`.
+        let opts = image_opts(&[("plot.png", 800, 600), ("plot.png", 1600, 900)]);
+        let lines = render_with("![alt](./plot.png)", Some(80), content_opts(&opts));
+        let anchor = lines
+            .iter()
+            .find_map(|line| line.image.as_deref())
+            .expect("anchor");
+        assert_eq!(anchor.shape, ImageShape::new(800, 600));
+        assert_eq!(anchor.rows, 30);
+    }
+
+    #[test]
     fn anchor_paths_must_pass_the_policy() {
         // Every rejected destination degrades to the link path, and the
         // rendering is then exactly the "off" rendering.
