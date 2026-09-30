@@ -156,10 +156,25 @@ fn an_enabled_terminal_reports_metadata_then_paints_the_image() {
     assert!(matches!(store.request(&path, target), ImageState::Ready(_)));
     assert_eq!(store.stats().in_flight, 0);
     assert_eq!(store.stats().cached, 1);
+    assert!(store.stats().worker_alive);
 
-    // Invalidation is the caller's answer to `terminal.clear()` / resize / font change.
+    // Invalidation is the caller's answer to `terminal.clear()` / resize / font change: it
+    // drops the encodings *and* revokes the handles the caller is still holding, because the
+    // transmit sequence is one-shot and the terminal may have thrown the image away.
     store.invalidate();
+    assert!(!image.is_current(), "the handed-out image must be revoked");
+    let mut revoked = Buffer::empty(area);
+    assert_eq!(paint(&image, area, (0, 0), &mut revoked), None);
     assert!(matches!(store.request(&path, target), ImageState::Pending));
+
+    poll_until(&mut store, "the re-encode", |store| {
+        matches!(store.request(&path, target), ImageState::Ready(_))
+    });
+    let ImageState::Ready(fresh) = store.request(&path, target) else {
+        panic!("expected a fresh image");
+    };
+    assert!(fresh.is_current());
+    assert!(paint(&fresh, area, (0, 0), &mut revoked).is_some());
 }
 
 #[test]

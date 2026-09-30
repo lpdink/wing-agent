@@ -66,7 +66,8 @@ pub enum Unavailable {
     /// The file could not be opened or read (permissions, I/O error).
     Unreadable,
     /// The header did not parse: not an image, corrupt, or a format whose codec is not
-    /// compiled in (`image` is built with png + jpeg only).
+    /// compiled in (`image` is built with png + jpeg only). Also what a decoder *panic* is
+    /// reported as — the worker catches it and fails this one image (see [`super::store`]).
     NotAnImage,
     /// The header parsed but the pixel count exceeds [`Limits::pixels`] — refusing to
     /// allocate is the only safe answer for a 100000×100000 header.
@@ -76,8 +77,17 @@ pub enum Unavailable {
         /// Header height in pixels.
         px_h: u32,
     },
-    /// The terminal protocol encoder rejected the decoded image.
+    /// The terminal protocol encoder rejected the decoded image (a panic in the encoder is
+    /// reported this way too).
     EncodeFailed,
+    /// The worker thread is gone: no further probe or encode will ever be answered.
+    ///
+    /// Distinct from [`Unavailable::Disabled`] on purpose — the terminal *can* draw, but this
+    /// store cannot produce anything any more (a job panicked past the guard, or the host's
+    /// waker panicked and the process is in a bad state). The pipeline never pretends to be
+    /// healthy: this reason is sticky and observable, and the caller's fallback is the same
+    /// text rendering as everywhere else.
+    WorkerFailed,
 }
 
 impl fmt::Display for Unavailable {
@@ -95,6 +105,7 @@ impl fmt::Display for Unavailable {
                 write!(f, "image is too large ({px_w}x{px_h} pixels)")
             }
             Self::EncodeFailed => f.write_str("terminal encoder rejected the image"),
+            Self::WorkerFailed => f.write_str("the image pipeline stopped working"),
         }
     }
 }
@@ -286,6 +297,7 @@ mod tests {
             Unavailable::NotAnImage,
             Unavailable::TooManyPixels { px_w: 1, px_h: 2 },
             Unavailable::EncodeFailed,
+            Unavailable::WorkerFailed,
         ];
         for reason in reasons {
             assert!(!reason.to_string().is_empty());

@@ -21,12 +21,19 @@
 //!
 //! Dropping the store drops the job sender, so the worker's `recv()` fails and the thread
 //! exits after finishing whatever it was doing. There is no daemon and nothing to join.
+//!
+//! The reverse direction is guarded too: if the worker ever goes away (a panic that escaped a
+//! job guard, or a host waker that aborts the process's threads), the store notices — a failed
+//! send or a closed result channel — and every later call answers
+//! [`Unavailable::WorkerFailed`] instead of waiting forever for an answer that cannot come.
+//! The pipeline never pretends to be healthy; it degrades to the caller's text rendering,
+//! with the reason attached.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::SystemTime;
 
@@ -63,6 +70,13 @@ pub const DEFAULT_PIXELS: u64 = 16_000_000;
 /// dropped wholesale when it grows past this. Re-probing is cheap and only costs a frame.
 pub const MAX_META_ENTRIES: usize = 256;
 
+/// Upper bound on memoised encode failures.
+///
+/// Keyed by target size, so a resize storm against one broken file can mint arbitrarily many
+/// entries; like the metadata memo this is dropped wholesale rather than LRU'd (a failure only
+/// costs one failed request before it is memoised again).
+pub const MAX_FAILED_ENTRIES: usize = 64;
+
 /// Store policy: what to cache and what to refuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
@@ -97,6 +111,10 @@ pub struct ImageStoreConfig {
     /// The host uses it to wake its event loop (e.g. by poking a tokio channel) instead of
     /// polling on a timer. `None` means "poll [`ImageStore::poll`] every frame", which is
     /// always correct, just up to one frame later.
+    ///
+    /// It runs **on the worker thread**, so it must be cheap — a `send` or a `notify`, never a
+    /// redraw or a lock held across work. A panic in it is caught (the pipeline survives it),
+    /// but it still costs a wake-up and prints to stderr.
     pub waker: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
@@ -135,6 +153,12 @@ pub struct StoreStats {
     pub memo: usize,
     /// Memoised metadata entries whose header parsed successfully.
     pub known_meta: usize,
+    /// Memoised encode failures (bounded by [`MAX_FAILED_ENTRIES`]).
+    pub failed: usize,
+    /// Whether a worker is running. `false` means there is none: the terminal is disabled
+    /// (requests answer [`Unavailable::Disabled`]) or the worker died (they answer
+    /// [`Unavailable::WorkerFailed`]).
+    pub worker_alive: bool,
 }
 
 /// Identity of an encoded image: the file (by canonical path and mtime, so a rewrite is a
@@ -262,12 +286,13 @@ pub struct ImageStore {
     cache: Cache,
     in_flight: HashSet<EncodeKey>,
     failed: HashMap<EncodeKey, Unavailable>,
-    /// Bumped by every invalidation; results tagged with an older value are dropped.
-    generation: u64,
-    /// Same counter, shared with the worker so stale queued jobs can be skipped outright.
-    shared_generation: Arc<AtomicU64>,
+    /// The generation counter: bumped by `invalidate` / `reset`, shared with the worker (so
+    /// stale queued *encodes* can be skipped) and with every [`ReadyImage`] it hands out (so a
+    /// superseded protocol can never be painted, see [`super::place`]).
+    generation: Arc<AtomicU64>,
     seq: u64,
-    /// `None` when there is no worker (disabled terminal, or the thread could not start).
+    /// `None` when there is no worker: a disabled terminal, a thread that could not start, or
+    /// a worker that has died. The store never queues into a dead channel.
     jobs: Option<Sender<Job>>,
     done: Receiver<Done>,
 }
@@ -281,12 +306,12 @@ impl ImageStore {
     /// A store with explicit limits and an optional wake callback.
     pub fn with_config(support: ImageSupport, config: ImageStoreConfig) -> Self {
         let (done_tx, done) = mpsc::channel();
-        let shared_generation = Arc::new(AtomicU64::new(0));
+        let generation = Arc::new(AtomicU64::new(0));
         let jobs = if support.is_enabled() {
             let (job_tx, job_rx) = mpsc::channel::<Job>();
             let worker = Worker {
                 done: done_tx,
-                generation: Arc::clone(&shared_generation),
+                generation: Arc::clone(&generation),
                 support: support.clone(),
                 limits: config.limits,
                 waker: config.waker,
@@ -306,8 +331,7 @@ impl ImageStore {
             cache: Cache::default(),
             in_flight: HashSet::new(),
             failed: HashMap::new(),
-            generation: 0,
-            shared_generation,
+            generation,
             seq: 0,
             jobs,
             done,
@@ -319,12 +343,31 @@ impl ImageStore {
         &self.support
     }
 
-    /// Whether this store can do anything at all.
+    /// Why this store cannot do anything, if it cannot.
     ///
-    /// False for a disabled terminal *and* for the (pathological) case where the worker
-    /// thread could not be started — in both cases no work is queued and no file is read.
-    fn can_work(&self) -> bool {
-        self.support.is_enabled() && self.jobs.is_some()
+    /// A disabled terminal is [`Unavailable::Disabled`]; a store whose worker is gone is
+    /// [`Unavailable::WorkerFailed`] — the terminal could draw, this process cannot produce
+    /// anything any more. Either way: no job is queued and no file is read.
+    fn unavailable(&self) -> Option<Unavailable> {
+        if !self.support.is_enabled() {
+            return Some(Unavailable::Disabled);
+        }
+        if self.jobs.is_none() {
+            return Some(Unavailable::WorkerFailed);
+        }
+        None
+    }
+
+    /// The current generation (epoch) of encodings handed out by this store.
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    /// The worker is gone (its channel closed, or a send failed): stop pretending we can
+    /// produce anything. Sticky — the pipeline reports the failure instead of hanging in
+    /// `Pending` forever.
+    fn mark_worker_failed(&mut self) {
+        self.jobs = None;
     }
 
     /// Non-blocking metadata lookup. The first call queues a header probe and answers
@@ -333,12 +376,14 @@ impl ImageStore {
     /// When the terminal cannot show images this is [`Unavailable::Disabled`] without I/O —
     /// callers keep their existing rendering and never pay for a probe they cannot use.
     pub fn meta(&mut self, path: &Path) -> MetaState {
-        if !self.can_work() {
-            return MetaState::Unavailable(Unavailable::Disabled);
+        if let Some(reason) = self.unavailable() {
+            return MetaState::Unavailable(reason);
         }
         match self.step(path) {
             Step::Probe => {
-                self.enqueue_probe(path);
+                if self.enqueue_probe(path).is_none() {
+                    return MetaState::Unavailable(Unavailable::WorkerFailed);
+                }
                 MetaState::Unknown
             }
             Step::Waiting => MetaState::Unknown,
@@ -351,16 +396,23 @@ impl ImageStore {
     ///
     /// Repeat calls within the same frame are free: a path already being probed or encoded
     /// answers [`ImageState::Pending`] without queueing a second job.
+    ///
+    /// `target` is part of the cache identity, so asking for a new size every frame would
+    /// queue one encode per size. Derive it from the layout (which changes on resize) and call
+    /// [`ImageStore::invalidate`] when the layout does; there is no per-path back pressure —
+    /// the generation gate makes queued stale encodes cheap, not free.
     pub fn request(&mut self, path: &Path, target: Size) -> ImageState {
-        if !self.can_work() {
-            return ImageState::Unavailable(Unavailable::Disabled);
+        if let Some(reason) = self.unavailable() {
+            return ImageState::Unavailable(reason);
         }
         if target.width == 0 || target.height == 0 {
             return ImageState::Unavailable(Unavailable::NoSpace);
         }
         match self.step(path) {
             Step::Probe => {
-                self.enqueue_probe(path);
+                if self.enqueue_probe(path).is_none() {
+                    return ImageState::Unavailable(Unavailable::WorkerFailed);
+                }
                 ImageState::Pending
             }
             Step::Waiting => ImageState::Pending,
@@ -376,7 +428,9 @@ impl ImageStore {
                 if self.in_flight.contains(&key) {
                     return ImageState::Pending;
                 }
-                self.enqueue_encode(path, target, key);
+                if self.enqueue_encode(path, target, key).is_none() {
+                    return ImageState::Unavailable(Unavailable::WorkerFailed);
+                }
                 ImageState::Pending
             }
         }
@@ -389,8 +443,18 @@ impl ImageStore {
     /// frame, whether or not a [`ImageStoreConfig::waker`] is installed.
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
-        while let Ok(done) = self.done.try_recv() {
-            changed |= self.absorb(done);
+        loop {
+            match self.done.try_recv() {
+                Ok(done) => changed |= self.absorb(done),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    // The worker's result channel closed: it is dead, and every future
+                    // request must say so instead of waiting for an answer that cannot come.
+                    changed |= self.jobs.is_some();
+                    self.mark_worker_failed();
+                    break;
+                }
+            }
         }
         changed
     }
@@ -403,7 +467,18 @@ impl ImageStore {
     /// a kitty image has been transmitted and would never send it again — so the only correct
     /// answer is to throw the protocols away and re-encode on the next request.
     ///
-    /// Metadata is kept: a resize does not change what is on disk.
+    /// Images already handed out are revoked with them: they carry the store's generation
+    /// stamp and [`super::place::paint`] draws nothing for a stale one, so a caller that kept
+    /// a handle cannot resurrect a protocol the terminal has dropped.
+    ///
+    /// Metadata is kept: a resize does not change what is on disk. Probes that were already
+    /// queued are answered rather than dropped, so a path cannot be stranded in `Pending` by
+    /// an invalidation that raced its probe.
+    ///
+    /// This is deliberately all-or-nothing: there is no per-image "re-transmit this one"
+    /// operation, because everything here shares one generation. A viewport holds a handful
+    /// of images and re-encoding them costs milliseconds, so the whole-store clear is the
+    /// accepted price (a per-path variant would need per-path generations to be sound).
     pub fn invalidate(&mut self) {
         self.cache.clear();
         self.failed.clear();
@@ -411,7 +486,8 @@ impl ImageStore {
     }
 
     /// [`ImageStore::invalidate`] plus dropping the metadata memo, so the next probe re-reads
-    /// the file. Use when the caller knows the files on disk may have been replaced.
+    /// the file. Use when the caller knows the files on disk may have been replaced. Like
+    /// `invalidate`, it revokes every image already handed out.
     pub fn reset(&mut self) {
         self.invalidate();
         self.metas.clear();
@@ -421,9 +497,29 @@ impl ImageStore {
     ///
     /// This is how an mtime change is noticed: the store never re-`stat`s a path on its own
     /// (that would be I/O on the render path), so the caller announces the change.
+    ///
+    /// The memo is keyed by the caller's path (`Path` equality is component-wise, so `./` and
+    /// trailing-slash spellings are the same key, but a relative and an absolute spelling are
+    /// not): pass the path the way [`ImageStore::meta`] was called. Refresh also drops every
+    /// other spelling that was *already probed* for the same canonical file, so refreshing
+    /// either of two known spellings forgets both.
+    ///
+    /// Unlike [`ImageStore::invalidate`] this is a *single-path* operation: it does not
+    /// revoke any image the terminal is still showing (the pixels are unchanged), it only
+    /// makes the next probe re-read the file.
     pub fn refresh(&mut self, path: &Path) {
-        self.metas.remove(path);
-        self.bump_generation();
+        // Drop the caller's spelling and — when we know it — every other spelling of the same
+        // file, so refreshing `./plot.png` also drops the memo of `plot.png`.
+        let canonical = self.metas.get(path).map(|slot| slot.canonical.clone());
+        self.metas.retain(|key, slot| {
+            if key.as_path() == path {
+                return false;
+            }
+            match &canonical {
+                Some(canonical) => &slot.canonical != canonical,
+                None => true,
+            }
+        });
     }
 
     /// Cache/worker counters.
@@ -438,6 +534,8 @@ impl ImageStore {
                 .values()
                 .filter(|slot| matches!(slot.state, MetaSlotState::Known(_)))
                 .count(),
+            failed: self.failed.len(),
+            worker_alive: self.jobs.is_some(),
         }
     }
 
@@ -467,10 +565,12 @@ impl ImageStore {
         }
     }
 
-    fn enqueue_probe(&mut self, path: &Path) {
-        let Some(jobs) = self.jobs.as_ref() else {
-            return;
-        };
+    /// Queue a header probe. `None` means the worker is gone (the slot, if any, is left
+    /// `Pending` — but from then on every call short-circuits to
+    /// [`Unavailable::WorkerFailed`]).
+    #[must_use]
+    fn enqueue_probe(&mut self, path: &Path) -> Option<()> {
+        let jobs = self.jobs.as_ref()?;
         self.seq += 1;
         let seq = self.seq;
         if self.metas.len() >= MAX_META_ENTRIES {
@@ -486,35 +586,44 @@ impl ImageStore {
                 state: MetaSlotState::Pending,
             },
         );
-        let _ = jobs.send(Job {
-            generation: self.generation,
+        let job = Job {
+            generation: self.generation(),
             kind: JobKind::Probe {
                 path: path.to_path_buf(),
                 seq,
             },
-        });
+        };
+        if jobs.send(job).is_err() {
+            self.mark_worker_failed();
+            return None;
+        }
+        Some(())
     }
 
-    fn enqueue_encode(&mut self, path: &Path, target: Size, key: EncodeKey) {
-        let Some(jobs) = self.jobs.as_ref() else {
-            return;
-        };
+    /// Queue an encode. `None` means the worker is gone.
+    #[must_use]
+    fn enqueue_encode(&mut self, path: &Path, target: Size, key: EncodeKey) -> Option<()> {
+        let jobs = self.jobs.as_ref()?;
         self.in_flight.insert(key.clone());
-        let _ = jobs.send(Job {
-            generation: self.generation,
+        let job = Job {
+            generation: self.generation(),
             kind: JobKind::Encode {
                 path: path.to_path_buf(),
                 target,
                 key,
             },
-        });
+        };
+        if jobs.send(job).is_err() {
+            self.in_flight.clear();
+            self.mark_worker_failed();
+            return None;
+        }
+        Some(())
     }
 
     fn bump_generation(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
+        self.generation.fetch_add(1, Ordering::Relaxed);
         self.in_flight.clear();
-        self.shared_generation
-            .store(self.generation, Ordering::Relaxed);
     }
 
     /// Apply one finished job. Returns whether the store changed.
@@ -542,7 +651,7 @@ impl ImageStore {
                 true
             }
             Outcome::Encoded { key, result } => {
-                if done.generation != self.generation {
+                if done.generation != self.generation() {
                     // The terminal was invalidated while this was encoding; the protocol is
                     // no longer allowed to be shown (it would never be re-transmitted).
                     return false;
@@ -551,14 +660,23 @@ impl ImageStore {
                 match result {
                     Ok(protocol) => {
                         let kind = self.support.protocol().unwrap_or(ImageProtocol::Kitty);
-                        let image = ReadyImage::new(protocol, kind);
+                        let image = ReadyImage::new(
+                            protocol,
+                            kind,
+                            Arc::clone(&self.generation),
+                            done.generation,
+                        );
                         let bytes = self.footprint_bytes(image.size());
                         self.cache.put(key, image, bytes, &self.limits);
                         true
                     }
                     Err(reason) => {
                         // Keyed by target size: retrying the same size would fail the same
-                        // way, but a re-layout (or an invalidation) may succeed.
+                        // way, but a re-layout (or an invalidation) may succeed. Bounded like
+                        // the metadata memo — a resize storm must not grow this without end.
+                        if self.failed.len() >= MAX_FAILED_ENTRIES {
+                            self.failed.clear();
+                        }
                         self.failed.insert(key, reason);
                         true
                     }
@@ -593,12 +711,16 @@ struct Worker {
 impl Worker {
     fn run(self, jobs: &Receiver<Job>) {
         while let Ok(job) = jobs.recv() {
-            if job.generation != self.generation.load(Ordering::Relaxed) {
-                // Invalidated while queued: the UI thread has already re-requested whatever
-                // it still needs, so encoding this would be wasted work.
+            let generation = job.generation;
+            let stale = generation != self.generation.load(Ordering::Relaxed);
+            // A stale *encode* is dropped: the UI thread has already re-requested whatever it
+            // still needs, so encoding this would be wasted work. A stale *probe* is not,
+            // and must never be: it is a pure read whose answer is still the truth, and
+            // `absorb` arbitrates it by sequence — dropping it would leave the path stuck in
+            // `Pending` forever after an `invalidate()` that raced the queue.
+            if stale && matches!(job.kind, JobKind::Encode { .. }) {
                 continue;
             }
-            let generation = job.generation;
             let outcome = self.execute(job.kind);
             if self
                 .done
@@ -612,7 +734,9 @@ impl Worker {
                 break;
             }
             if let Some(waker) = &self.waker {
-                waker();
+                // The host's callback runs on this thread: a panic in it must cost a wake-up,
+                // not the whole pipeline.
+                let _ = guard(std::panic::AssertUnwindSafe(|| waker()));
             }
         }
     }
@@ -620,11 +744,15 @@ impl Worker {
     fn execute(&self, kind: JobKind) -> Outcome {
         match kind {
             JobKind::Probe { path, seq } => {
-                let result = meta::probe(&path, &self.limits);
+                // A decoder that panics on a hostile or corrupt file must fail this one
+                // image, not kill the thread that serves every image.
+                let result = guard(|| meta::probe(&path, &self.limits))
+                    .unwrap_or(Err(Unavailable::NotAnImage));
                 Outcome::Probed { path, seq, result }
             }
             JobKind::Encode { path, target, key } => {
-                let result = self.encode(&path, target);
+                let result =
+                    guard(|| self.encode(&path, target)).unwrap_or(Err(Unavailable::EncodeFailed));
                 Outcome::Encoded { key, result }
             }
         }
@@ -642,11 +770,20 @@ impl Worker {
     }
 }
 
+/// Run `f`, turning a panic into `None` instead of unwinding into the worker thread.
+///
+/// Decoding and encoding are upstream code paths fed by arbitrary files: a panic there is a
+/// bug in a dependency, and the blast radius must be one image, not the whole graphics layer.
+fn guard<T>(f: impl FnOnce() -> T) -> Option<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
+}
+
 // `ImageProtocol` is used in `absorb`; keep the import local to that path.
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
@@ -1057,6 +1194,81 @@ mod tests {
     }
 
     #[test]
+    fn refresh_drops_every_spelling_of_the_same_file() {
+        let dir = TempDir::new("store-refresh-spelling");
+        let path = fixture(&dir, "plot.png", 40, 30);
+        // `…/dir/sub/../plot.png`: a different memo key (`Path` equality is component-wise,
+        // so a `./` would collapse), the same file once resolved.
+        let sub = dir.path().join("sub");
+        fs::create_dir_all(&sub).expect("mkdir");
+        let alias = sub.join("..").join("plot.png");
+        assert_ne!(alias, path, "the two spellings must be different keys");
+        let mut store = store_with(ImageProtocol::Kitty, Limits::default(), None);
+
+        for spelling in [&path, &alias] {
+            assert_eq!(store.meta(spelling), MetaState::Unknown);
+        }
+        pump_until(&mut store, "both spellings", |store| {
+            matches!(store.meta(&path), MetaState::Known(_))
+                && matches!(store.meta(&alias), MetaState::Known(_))
+        });
+        assert_eq!(store.stats().memo, 2);
+
+        // Refreshing one spelling drops the other too: the memo keys differ, the canonical
+        // path does not.
+        store.refresh(&alias);
+        assert_eq!(store.stats().memo, 0);
+        assert_eq!(store.meta(&path), MetaState::Unknown);
+    }
+
+    #[test]
+    fn refresh_leaves_unrelated_paths_alone() {
+        let dir = TempDir::new("store-refresh-others");
+        let first = fixture(&dir, "first.png", 40, 30);
+        let second = fixture(&dir, "second.png", 40, 30);
+        let mut store = store_with(ImageProtocol::Kitty, Limits::default(), None);
+        let target = Size::new(4, 2);
+
+        ready(&mut store, &first, target);
+        let image = ready(&mut store, &second, target);
+        store.refresh(&first);
+        // An image the terminal is still showing must survive a refresh of another file:
+        // the pixels did not change, and a stale mark would cost a needless re-encode.
+        assert_eq!(store.stats().memo, 1);
+        assert!(image.is_current());
+        assert!(matches!(
+            store.request(&second, target),
+            ImageState::Ready(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_resolve_and_dangling_ones_are_missing() {
+        let dir = TempDir::new("store-symlink");
+        let target = fixture(&dir, "plot.png", 40, 30);
+        let link = dir.path().join("link.png");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let dangling = dir.path().join("dangling.png");
+        std::os::unix::fs::symlink(dir.path().join("gone.png"), &dangling).expect("symlink");
+
+        let mut store = store_with(ImageProtocol::Kitty, Limits::default(), None);
+        assert_eq!(store.meta(&link), MetaState::Unknown);
+        assert_eq!(store.meta(&dangling), MetaState::Unknown);
+        pump_until(&mut store, "both links", |store| {
+            store.meta(&link) != MetaState::Unknown && store.meta(&dangling) != MetaState::Unknown
+        });
+        let MetaState::Known(meta) = store.meta(&link) else {
+            panic!("a symlink to a real file is a normal image");
+        };
+        assert_eq!((meta.px_w, meta.px_h), (40, 30));
+        assert_eq!(
+            store.meta(&dangling),
+            MetaState::Unavailable(Unavailable::Missing)
+        );
+    }
+
+    #[test]
     fn the_store_can_be_moved_by_the_app_loop() {
         // Not a requirement of this layer (it is designed as single-owner UI state), but the
         // whole pipeline — protocols, worker channels, waker — is `Send`, so the App can hold
@@ -1119,24 +1331,341 @@ mod tests {
     }
 
     #[test]
-    fn the_worker_skips_jobs_from_an_invalidated_generation() {
+    fn the_worker_skips_an_invalidated_encode() {
         let dir = TempDir::new("store-worker-stale");
         let path = fixture(&dir, "plot.png", 40, 30);
         let generation = Arc::new(AtomicU64::new(0));
         let (jobs, done, handle) = spawn_worker(Arc::clone(&generation));
 
-        // The store was invalidated (generation 1) while this job was still queued.
+        // The store was invalidated (generation 1) while this encode was still queued: the UI
+        // thread has already re-requested it, so encoding now would be wasted work.
         generation.store(1, Ordering::Relaxed);
         jobs.send(Job {
             generation: 0,
-            kind: JobKind::Probe { path, seq: 1 },
+            kind: JobKind::Encode {
+                path: path.clone(),
+                target: Size::new(4, 2),
+                key: EncodeKey {
+                    canonical: path,
+                    mtime: None,
+                    target: Size::new(4, 2),
+                    cell: CELL,
+                },
+            },
         })
         .expect("send");
         drop(jobs);
         handle.join().expect("worker exit");
         assert!(
             done.try_recv().is_err(),
-            "an invalidated job must not be executed"
+            "an invalidated encode must not be executed"
         );
+    }
+
+    #[test]
+    fn the_worker_never_skips_a_queued_probe() {
+        // A probe is a pure read whose answer is still the truth, and it is the *only* thing
+        // that can move a path out of `Pending`: dropping one because the generation moved
+        // would strand that path forever (see `an_invalidation_does_not_strand_a_queued_probe`).
+        let dir = TempDir::new("store-worker-probe");
+        let path = fixture(&dir, "plot.png", 40, 30);
+        let generation = Arc::new(AtomicU64::new(0));
+        let (jobs, done, handle) = spawn_worker(Arc::clone(&generation));
+
+        generation.store(3, Ordering::Relaxed);
+        jobs.send(Job {
+            generation: 0,
+            kind: JobKind::Probe { path, seq: 9 },
+        })
+        .expect("send");
+        drop(jobs);
+        handle.join().expect("worker exit");
+        match done
+            .try_recv()
+            .expect("the probe must still be answered")
+            .outcome
+        {
+            Outcome::Probed { seq, result, .. } => {
+                assert_eq!(seq, 9);
+                assert!(result.is_ok());
+            }
+            other => panic!(
+                "expected a probe result, got a {} outcome",
+                match other {
+                    Outcome::Probed { .. } => "probe",
+                    Outcome::Encoded { .. } => "encode",
+                }
+            ),
+        }
+    }
+
+    /// A waker that parks the worker until the test releases it, so a race can be staged
+    /// deterministically instead of hoping the worker is still busy.
+    struct Brake {
+        entered: Receiver<()>,
+        release: Sender<()>,
+        active: Arc<AtomicBool>,
+    }
+
+    impl Brake {
+        fn new() -> (Arc<dyn Fn() + Send + Sync>, Self) {
+            let (entered_tx, entered) = mpsc::channel();
+            let (release, release_rx) = mpsc::channel::<()>();
+            let release_rx = Arc::new(Mutex::new(release_rx));
+            let active = Arc::new(AtomicBool::new(true));
+            let waker: Arc<dyn Fn() + Send + Sync> = {
+                let active = Arc::clone(&active);
+                Arc::new(move || {
+                    if !active.load(AtomicOrdering::SeqCst) {
+                        return;
+                    }
+                    let _ = entered_tx.send(());
+                    if let Ok(guard) = release_rx.lock() {
+                        let _ = guard.recv();
+                    }
+                })
+            };
+            (
+                waker,
+                Self {
+                    entered,
+                    release,
+                    active,
+                },
+            )
+        }
+
+        /// Wait until the worker is parked inside the waker.
+        fn wait_until_parked(&self) {
+            self.entered
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the worker never reached the waker");
+        }
+
+        /// Let the worker run freely from now on.
+        fn disarm(&self) {
+            self.active.store(false, AtomicOrdering::SeqCst);
+            let _ = self.release.send(());
+        }
+    }
+
+    #[test]
+    fn an_invalidation_does_not_strand_a_queued_probe() {
+        // Regression for review r1 / B1: a probe waiting behind a long job while the caller
+        // calls `invalidate()` (resize, `terminal.clear()`, font change — all normal) used to
+        // be dropped by the generation gate with nobody left to answer it: the path stayed
+        // `Pending` for the rest of the session.
+        let dir = TempDir::new("store-probe-race");
+        let first = fixture(&dir, "first.png", 40, 30);
+        let second = fixture(&dir, "second.png", 60, 30);
+        let (waker, brake) = Brake::new();
+        let mut store = store_with(ImageProtocol::Kitty, Limits::default(), Some(waker));
+
+        // Park the worker on the first probe's wake-up: the second path's work is now queued.
+        assert_eq!(store.meta(&first), MetaState::Unknown);
+        brake.wait_until_parked();
+
+        assert_eq!(store.meta(&second), MetaState::Unknown);
+        store.invalidate();
+
+        brake.disarm();
+        pump_until(&mut store, "the queued probe to be answered", |store| {
+            store.meta(&second) != MetaState::Unknown
+        });
+        assert_eq!(
+            store.meta(&second),
+            MetaState::Known(
+                meta::probe(&second, &Limits::default())
+                    .expect("probe")
+                    .meta
+            )
+        );
+        // And the path is fully usable again, not just "no longer Unknown".
+        let image = ready(&mut store, &second, Size::new(6, 3));
+        assert_eq!(image.protocol(), ImageProtocol::Kitty);
+    }
+
+    #[test]
+    fn a_refresh_does_not_strand_a_queued_probe() {
+        // Same shape as the invalidation race, driven by `refresh` of an unrelated path.
+        let dir = TempDir::new("store-probe-refresh");
+        let first = fixture(&dir, "first.png", 40, 30);
+        let second = fixture(&dir, "second.png", 60, 30);
+        let (waker, brake) = Brake::new();
+        let mut store = store_with(ImageProtocol::Kitty, Limits::default(), Some(waker));
+
+        assert_eq!(store.meta(&first), MetaState::Unknown);
+        brake.wait_until_parked();
+        assert_eq!(store.meta(&second), MetaState::Unknown);
+
+        store.refresh(&first);
+
+        brake.disarm();
+        pump_until(&mut store, "the queued probe to be answered", |store| {
+            store.meta(&second) != MetaState::Unknown
+        });
+        // 60x30 px at a 10x20 cell is 6x2 cells; asking for a 6x3 target does not stretch it.
+        let image = ready(&mut store, &second, Size::new(6, 3));
+        assert_eq!(image.size(), Size::new(6, 2));
+    }
+
+    #[test]
+    fn a_dead_worker_is_reported_instead_of_staying_pending() {
+        // Review r1 / S1: when the worker's channels close (a panic past the guards, or any
+        // early exit), every request must say so instead of waiting forever for an answer.
+        let dir = TempDir::new("store-worker-dead");
+        let path = fixture(&dir, "plot.png", 40, 30);
+
+        // The job channel has no receiver: exactly what the store sees once the worker is gone.
+        let (jobs, done) = mpsc::channel::<Done>();
+        drop(done);
+        let mut store = store_with(ImageProtocol::Kitty, Limits::default(), None);
+        store.jobs = Some({
+            let (orphan, receiver) = mpsc::channel::<Job>();
+            drop(receiver);
+            orphan
+        });
+        // The real worker is still around for a moment (its sender was just replaced), so the
+        // store's first send is what discovers the failure.
+        assert!(matches!(
+            store.meta(&path),
+            MetaState::Unavailable(Unavailable::WorkerFailed)
+        ));
+        assert!(!store.stats().worker_alive);
+        assert_eq!(
+            store.meta(&path),
+            MetaState::Unavailable(Unavailable::WorkerFailed)
+        );
+        assert!(matches!(
+            store.request(&path, Size::new(4, 2)),
+            ImageState::Unavailable(Unavailable::WorkerFailed)
+        ));
+        assert_eq!(store.stats().in_flight, 0, "nothing may be left in flight");
+        let _ = jobs;
+    }
+
+    #[test]
+    fn a_closed_result_channel_is_reported_by_poll() {
+        // The other half of the detection: the worker's result channel closing is what
+        // `poll()` sees when the thread is gone.
+        let dir = TempDir::new("store-poll-dead");
+        let path = fixture(&dir, "plot.png", 40, 30);
+        let mut store = store_with(ImageProtocol::Kitty, Limits::default(), None);
+        // Replace the store's result channel with one whose worker end is already gone.
+        let (orphan_tx, orphan_rx) = mpsc::channel::<Done>();
+        drop(orphan_tx);
+        store.done = orphan_rx;
+
+        assert!(store.poll(), "the death of the worker is a change");
+        assert!(!store.stats().worker_alive);
+        assert!(matches!(
+            store.meta(&path),
+            MetaState::Unavailable(Unavailable::WorkerFailed)
+        ));
+        assert!(!store.poll(), "the death is reported once, not every frame");
+    }
+
+    #[test]
+    fn a_panicking_waker_does_not_kill_the_pipeline() {
+        // The host's callback runs on the worker thread; a panic in it used to take the whole
+        // graphics layer down with it (review r1 / S1).
+        let dir = TempDir::new("store-waker-panic");
+        let path = fixture(&dir, "plot.png", 60, 30);
+        let waker: Arc<dyn Fn() + Send + Sync> = Arc::new(|| panic!("host waker blew up"));
+        let mut store = store_with(ImageProtocol::Kitty, Limits::default(), Some(waker));
+
+        let image = ready(&mut store, &path, Size::new(6, 3));
+        assert_eq!(image.size(), Size::new(6, 2));
+        assert!(store.stats().worker_alive, "the worker survived the panic");
+        assert!(matches!(
+            store.request(&path, Size::new(6, 3)),
+            ImageState::Ready(_)
+        ));
+    }
+
+    #[test]
+    fn the_guard_turns_a_panic_into_a_per_item_failure() {
+        // The mechanism behind "a decoder panic costs one image, not the worker".
+        assert_eq!(guard(|| 7), Some(7));
+        assert_eq!(guard(|| panic!("decoder exploded")), None);
+    }
+
+    #[test]
+    fn an_image_is_revoked_by_invalidation() {
+        let dir = TempDir::new("store-revoked");
+        let path = fixture(&dir, "plot.png", 300, 100);
+        let mut store = store_with(ImageProtocol::Kitty, Limits::default(), None);
+        let target = Size::new(20, 5);
+
+        let before = ready(&mut store, &path, target);
+        assert!(before.is_current());
+        store.invalidate();
+        assert!(
+            !before.is_current(),
+            "an image from before the invalidation must be stale"
+        );
+
+        // The store hands out a fresh, current one — and the old handle stays dead.
+        let after = ready(&mut store, &path, target);
+        assert!(after.is_current());
+        assert!(!before.is_current());
+    }
+
+    #[test]
+    fn encode_failures_are_bounded() {
+        // A file whose header parses but whose pixels do not: the signature and IHDR of a
+        // valid png, and no image data at all.
+        let dir = TempDir::new("store-failed-bound");
+        let valid = dir.path().join("valid.png");
+        write_png_fixture(&valid, 200, 200);
+        let truncated = dir.path().join("truncated.png");
+        let bytes = fs::read(&valid).expect("read");
+        // 50 bytes: past the PNG signature + IHDR (so the header parses at 200x200), deep
+        // inside the missing image data (so the decode cannot).
+        assert!(
+            bytes.len() > 50,
+            "the fixture must be longer than its header"
+        );
+        fs::write(&truncated, &bytes[..50]).expect("write");
+
+        let mut store = store_with(ImageProtocol::Kitty, Limits::default(), None);
+        assert!(
+            matches!(store.meta(&truncated), MetaState::Unknown),
+            "the header is still readable"
+        );
+        pump_until(&mut store, "the header", |store| {
+            matches!(store.meta(&truncated), MetaState::Known(_))
+        });
+
+        // Hammer it with distinct target sizes: every key fails, and the memo must not grow
+        // without end.
+        for step in 0..(MAX_FAILED_ENTRIES as u16 + 8) {
+            let target = Size::new(4 + step, 2 + step % 5);
+            assert!(matches!(
+                store.request(&truncated, target),
+                ImageState::Pending
+            ));
+            pump_until(&mut store, "the failed encode", |store| {
+                !matches!(store.request(&truncated, target), ImageState::Pending)
+            });
+        }
+        assert!(
+            store.stats().failed <= MAX_FAILED_ENTRIES,
+            "the failure memo grew past its bound: {}",
+            store.stats().failed
+        );
+        // A brand-new target is enqueued first and only then reported as a failure.
+        let target = Size::new(99, 9);
+        assert!(matches!(
+            store.request(&truncated, target),
+            ImageState::Pending
+        ));
+        pump_until(&mut store, "the refusal", |store| {
+            !matches!(store.request(&truncated, target), ImageState::Pending)
+        });
+        let ImageState::Unavailable(reason) = store.request(&truncated, target) else {
+            panic!("expected a failure");
+        };
+        assert!(!reason.to_string().is_empty());
     }
 }

@@ -14,9 +14,11 @@
 //!                --Resize::resize----> exact pixels = actual × cell_pixels (padded, never upscaled)
 //! ```
 //!
-//! `Resize::Fit(None)` never upscales: a 16×16 icon stays 16×16 pixels and occupies fewer
-//! cells than the box it was given. That is deliberate — blowing a small image up to fill its
-//! reserved block would lie about its resolution.
+//! `Resize::Fit(None)` never grows the **cell footprint**: a 16×16 icon in a 10×20 cell is a
+//! 2×1-cell image, however large the box it was given. (The pixels themselves are scaled to a
+//! whole number of cells — that same icon is encoded as 20×20 pixels, at most one cell of
+//! upscaling, with the remainder padded transparent.) That is deliberate: reporting a small
+//! image as a big block would lie about its resolution and waste the reserved rows.
 //!
 //! # Why sixel is row-sliced
 //!
@@ -66,8 +68,9 @@ pub(crate) fn decode(path: &Path) -> Result<DynamicImage, Unavailable> {
 
 /// Encode an already-decoded image for `protocol`, targeting `target` cells.
 ///
-/// Never upscales: the result's `size()` is `≤ target` on both axes. Worker-thread only
-/// (the encoders are CPU-bound).
+/// The result's cell `size()` is `≤ target` on both axes, aspect ratio preserved: the cell
+/// footprint never grows, while the pixels are scaled to whole cells (see the module docs).
+/// Worker-thread only (the encoders are CPU-bound).
 pub(crate) fn encode(
     image: DynamicImage,
     target: Size,
@@ -195,13 +198,32 @@ mod tests {
     }
 
     #[test]
-    fn fit_never_upscales_a_small_image() {
+    fn fit_never_grows_the_cell_footprint() {
         // 16x16 pixels at a 10x20 cell is 2x1 cells, well inside a 40x20 target.
         let (_dir, path) = fixture("encode-small", 16, 16);
         let image = decode(&path).expect("decode");
         let encoded =
             encode(image, Size::new(40, 20), ImageProtocol::Kitty, CELL, false).expect("encode");
         assert_eq!(encoded.size(), Size::new(2, 1));
+
+        // The pixels, though, are scaled to fill those cells exactly: the 16x16 icon is
+        // transmitted as 20x20 pixels (2 cells x 10px wide, 1 cell x 20px tall). That is
+        // padding to whole cells, not upscaling the image — at most one cell of slack.
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::widgets::Widget;
+        let area = Rect::new(0, 0, 2, 1);
+        let mut buf = Buffer::empty(area);
+        ratatui_image::sliced::SlicedImage::new(
+            &encoded,
+            ratatui_image::sliced::SignedPosition::from((0, 0)),
+        )
+        .render(area, &mut buf);
+        let anchor = buf[(0, 0)].symbol();
+        assert!(
+            anchor.contains("s=20,v=20"),
+            "expected the image to be scaled to whole cells, got {anchor:?}"
+        );
     }
 
     #[test]
