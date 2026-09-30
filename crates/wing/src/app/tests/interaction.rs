@@ -651,6 +651,99 @@ fn test_composer_empty_draft_drag_copies_nothing() {
     );
 }
 
+/// A chip is one unit to the pointer too: a click anywhere on its cells puts
+/// the cursor *before* it (like a wide character), and a click past it lands
+/// after the whole label.
+#[test]
+fn test_composer_click_on_a_chip_resolves_to_its_edge() {
+    let mut app = app_with_draft("see ");
+    app.input.insert_str("1\n2\n3\n4");
+    let chip_len = "[Pasted text #1 +3 lines]".chars().count() as u16;
+    let mut terminal = test_terminal(60, 12);
+    draw(&mut app, &mut terminal);
+    let (tx, ty, _) = composer_text(&app);
+    assert_eq!(
+        app.input.cursor_col,
+        4 + chip_len as usize,
+        "after the chip"
+    );
+
+    // On the label's last cell still means "before the whole chip".
+    let at = (tx + 4 + chip_len - 1, ty);
+    app.handle_mouse(press(at));
+    app.handle_mouse(release(at));
+    assert_eq!(
+        (app.input.cursor_row, app.input.cursor_col),
+        (0, 4),
+        "the chip is not entered from the pointer either"
+    );
+
+    // Past its trailing edge: the insertion point after the chip.
+    let at = (tx + 4 + chip_len + 1, ty);
+    app.handle_mouse(press(at));
+    app.handle_mouse(release(at));
+    assert_eq!(
+        (app.input.cursor_row, app.input.cursor_col),
+        (0, 4 + chip_len as usize)
+    );
+}
+
+/// Dragging across a chip copies the label the screen shows — whole: a drag
+/// that starts inside the label still includes all of it, and one that ends
+/// on it stops at its trailing edge.
+#[test]
+fn test_composer_drag_over_a_chip_copies_the_whole_label() {
+    let chip = "[Pasted text #1 +3 lines]";
+    let chip_len = chip.chars().count() as u16;
+
+    // From the text before the chip to a cell inside the label.
+    let mut app = app_with_draft("see ");
+    app.input.insert_str("1\n2\n3\n4");
+    let mut terminal = test_terminal(60, 12);
+    draw(&mut app, &mut terminal);
+    let (tx, ty, _) = composer_text(&app);
+    app.handle_mouse(press((tx, ty)));
+    app.handle_mouse(drag((tx + 4 + 8, ty)));
+    draw(&mut app, &mut terminal);
+    app.handle_mouse(release((tx + 4 + 8, ty)));
+    match app.drain_intents().as_slice() {
+        [AppIntent::CopyToClipboard(text)] => {
+            assert_eq!(text, &format!("see {chip}"), "the label comes whole");
+        }
+        other => panic!("expected the draft fragment, got {other:?}"),
+    }
+
+    // From inside the label to its trailing edge: exactly the label.
+    let mut app = app_with_draft("see ");
+    app.input.insert_str("1\n2\n3\n4");
+    let mut terminal = test_terminal(60, 12);
+    draw(&mut app, &mut terminal);
+    let (tx, ty, _) = composer_text(&app);
+    app.handle_mouse(press((tx + 4 + 10, ty)));
+    app.handle_mouse(drag((tx + 4 + chip_len, ty)));
+    draw(&mut app, &mut terminal);
+    app.handle_mouse(release((tx + 4 + chip_len, ty)));
+    match app.drain_intents().as_slice() {
+        [AppIntent::CopyToClipboard(text)] => assert_eq!(text, chip),
+        other => panic!("expected exactly the chip label, got {other:?}"),
+    }
+}
+
+/// Backspace deletes a chip whole — the keyboard's side of the same rule.
+#[test]
+fn test_composer_backspace_removes_a_chip_whole() {
+    let mut app = app_with_draft("see ");
+    app.input.insert_str("1\n2\n3\n4");
+    app.handle_key(key(crossterm::event::KeyCode::Backspace));
+    assert_eq!(app.input.text(), "see ");
+    assert_eq!((app.input.cursor_row, app.input.cursor_col), (0, 4));
+    assert_eq!(
+        app.input.pastes.payload(1),
+        None,
+        "the payload goes with the chip"
+    );
+}
+
 #[test]
 fn test_composer_drag_over_line_breaks_copies_nothing() {
     // Dragging from the end of the first line to the start of the empty

@@ -19,6 +19,7 @@ use ratatui::style::Style;
 
 use super::InputArea;
 use super::chrome::Chrome;
+use super::model;
 use super::wrap;
 use crate::ui::selection::Selection;
 use crate::ui::selection::SelectionPoint;
@@ -35,23 +36,17 @@ pub struct ComposerHit {
     /// point into its trailing blank.
     pub display_col: u16,
     /// Logical position the pointer resolves to: the insertion point at or
-    /// before the character whose cells cover it.
+    /// before the character whose cells cover it — and for the cells of a
+    /// paste chip, the point before the whole chip (see
+    /// [`super::model::column_point`]).
     pub point: SelectionPoint,
-    /// Whether the pointer actually rests on one of the cells of a character
-    /// (as opposed to the blank past the row's text, or an empty line).
+    /// The drag endpoint for this hit: the unit under the pointer is included
+    /// whole (a chip in its entirety) — the composer mirror of
+    /// `ChatView::snap_focus_right`.
+    pub focus: SelectionPoint,
+    /// Whether the pointer actually rests on a character or chip (as opposed
+    /// to the blank past the row's text, or an empty line).
     pub on_char: bool,
-}
-
-impl ComposerHit {
-    /// The drag focus for this hit: the character under the pointer is included
-    /// — the composer mirror of `ChatView::snap_focus_right`.
-    pub fn focus(&self) -> SelectionPoint {
-        if self.on_char {
-            SelectionPoint::composer(self.point.row, self.point.col + 1)
-        } else {
-            self.point
-        }
-    }
 }
 
 /// Resolve a screen position into the composer's visual *and* logical
@@ -72,7 +67,7 @@ pub fn hit(input: &InputArea, area: Rect, column: u16, row: u16) -> Option<Compo
     let chrome = Chrome::of(area);
     let text_width = chrome.text_width as usize;
     // Same expression the widget renders with, so the rows are identical.
-    let vis_rows = wrap::build_visual_rows(&input.lines, text_width.max(1));
+    let vis_rows = wrap::build_visual_rows(&input.lines, &input.pastes, text_width.max(1));
     let last = vis_rows.len().checked_sub(1)?;
 
     // Rows on the rails and rows off the card both clamp into the text band:
@@ -91,13 +86,18 @@ pub fn hit(input: &InputArea, area: Rect, column: u16, row: u16) -> Option<Compo
     let display_col = column.saturating_sub(area.x).saturating_sub(chrome.text_x);
 
     let row = vis_rows[vis_row];
-    let line = &input.lines[row.logical_line];
-    let col = wrap::display_col_to_char(line, &row, display_col as usize);
+    let point = model::column_point(
+        &input.lines[row.logical_line],
+        &input.pastes,
+        &row,
+        display_col as usize,
+    );
     Some(ComposerHit {
         vis_row,
         display_col,
-        point: SelectionPoint::composer(row.logical_line, col as u16),
-        on_char: col < row.char_end,
+        point: SelectionPoint::composer(row.logical_line, point.point as u16),
+        focus: SelectionPoint::composer(row.logical_line, point.focus as u16),
+        on_char: point.on_char,
     })
 }
 
@@ -122,10 +122,10 @@ pub fn point(input: &InputArea, area: Rect, column: u16, row: u16) -> Option<Sel
     hit(input, area, column, row).map(|hit| hit.point)
 }
 
-/// Logical position for a drag endpoint: includes the character under the
-/// pointer (see [`ComposerHit::focus`]).
+/// Logical position for a drag endpoint: includes the unit under the pointer
+/// (see [`ComposerHit::focus`]).
 pub fn focus(input: &InputArea, area: Rect, column: u16, row: u16) -> Option<SelectionPoint> {
-    hit(input, area, column, row).map(|hit| hit.focus())
+    hit(input, area, column, row).map(|hit| hit.focus)
 }
 
 /// Paint the composer's selection highlight into the frame's buffer.
@@ -148,7 +148,7 @@ pub fn paint_selection(buf: &mut Buffer, input: &InputArea, area: Rect, selectio
     }
     let chrome = Chrome::of(area);
     let text_width = chrome.text_width as usize;
-    let vis_rows = wrap::build_visual_rows(&input.lines, text_width.max(1));
+    let vis_rows = wrap::build_visual_rows(&input.lines, &input.pastes, text_width.max(1));
     let first_row = area.y + chrome.top_row();
     let last_row = first_row + chrome.text_rows;
     for (visible, screen_row) in (first_row..last_row).enumerate() {
@@ -159,7 +159,7 @@ pub fn paint_selection(buf: &mut Buffer, input: &InputArea, area: Rect, selectio
         if row.logical_line < start.row || row.logical_line > end.row {
             continue;
         }
-        let line = &input.lines[row.logical_line];
+        let line = model::flat(&input.lines[row.logical_line], &input.pastes);
         // The selected char range, intersected with this visual row.
         let from = if row.logical_line == start.row {
             (start.col as usize).max(row.char_start)
@@ -177,11 +177,11 @@ pub fn paint_selection(buf: &mut Buffer, input: &InputArea, area: Rect, selectio
         let from_x = area
             .x
             .saturating_add(chrome.text_x)
-            .saturating_add(wrap::char_display_offset(line, row, from) as u16);
+            .saturating_add(wrap::char_display_offset(&line, row, from) as u16);
         let to_x = area
             .x
             .saturating_add(chrome.text_x)
-            .saturating_add(wrap::char_display_offset(line, row, to) as u16);
+            .saturating_add(wrap::char_display_offset(&line, row, to) as u16);
         for x in from_x..to_x.min(area.right().saturating_sub(u16::from(chrome.card))) {
             buf[(x, screen_row)].set_style(Style::default().add_modifier(Modifier::REVERSED));
         }
@@ -212,7 +212,9 @@ pub fn selected_text(
         let Some(line) = input.lines.get(row) else {
             continue;
         };
-        let chars: Vec<char> = line.chars().collect();
+        // The draft's own projection: a chip copies as the visible chip text
+        // (`[Pasted text #1 …]`), which is exactly what is on screen.
+        let chars: Vec<char> = model::flat(line, &input.pastes).chars().collect();
         let from = if row == start.row {
             (start.col as usize).min(chars.len())
         } else {
@@ -364,18 +366,18 @@ mod tests {
         let found = hit(&input, area, TEXT_X, TEXT_Y).expect("first cell");
         assert!(found.on_char);
         assert_eq!(found.point, SelectionPoint::composer(0, 0));
-        assert_eq!(found.focus(), SelectionPoint::composer(0, 1), "includes 你");
+        assert_eq!(found.focus, SelectionPoint::composer(0, 1), "includes 你");
         let found = hit(&input, area, TEXT_X + 1, TEXT_Y).expect("second cell");
         assert!(found.on_char);
         assert_eq!(found.point, SelectionPoint::composer(0, 0));
         // '世' occupies display columns 4..6 of the text area.
         let found = hit(&input, area, TEXT_X + 5, TEXT_Y).expect("wide character");
         assert_eq!(found.point, SelectionPoint::composer(0, 2));
-        assert_eq!(found.focus(), SelectionPoint::composer(0, 3));
+        assert_eq!(found.focus, SelectionPoint::composer(0, 3));
         // Past the row's text: no character to include.
         let found = hit(&input, area, TEXT_X + 6, TEXT_Y).expect("row end");
         assert!(!found.on_char);
-        assert_eq!(found.focus(), SelectionPoint::composer(0, 3));
+        assert_eq!(found.focus, SelectionPoint::composer(0, 3));
     }
 
     #[test]
@@ -393,8 +395,7 @@ mod tests {
         assert!(!found.on_char, "the placeholder is not content");
         assert_eq!(found.point, SelectionPoint::composer(0, 0));
         assert_eq!(
-            found.focus(),
-            found.point,
+            found.focus, found.point,
             "nothing is dragged into the selection"
         );
     }

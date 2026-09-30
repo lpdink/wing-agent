@@ -350,7 +350,7 @@ impl App {
                 .set_cursor_from_visual(chrome, hit.vis_row, hit.display_col);
             return MouseOutcome::Immediate;
         }
-        let bounds = self.selection.release(hit.focus());
+        let bounds = self.selection.release(hit.focus);
         let Some(text) = bounds.and_then(|bounds| pointer::selected_text(&self.input, bounds))
         else {
             return MouseOutcome::Immediate;

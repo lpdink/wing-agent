@@ -3,6 +3,7 @@
 pub(crate) mod chrome;
 pub(crate) mod editing;
 pub(crate) mod helpers;
+pub(crate) mod model;
 pub(crate) mod movement;
 pub(crate) mod paste;
 pub mod pointer;
@@ -16,6 +17,8 @@ use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthChar;
 
 use chrome::Chrome;
+use model::Line;
+use model::Pastes;
 
 // Re-exports for external use.
 pub use chrome::ActivityRail;
@@ -36,25 +39,26 @@ pub enum InputAction {
 
 /// Multi-line text input.
 ///
-/// Text is stored as `Vec<String>` (one element per line, no embedded newlines).
-/// Cursor position is `(row, col)` where `col` is a char-based index.
+/// Text is stored as lines of [`model::Segment`]s (no embedded newlines):
+/// literal text, plus the chips of large pastes. Cursor position is
+/// `(row, col)` where `col` is a char index into the line's flat projection —
+/// a chip counts as its visible text (see [`model`]), and the cursor never
+/// rests inside one.
 pub struct InputArea {
     /// Lines of text. Always has at least one element.
-    pub(crate) lines: Vec<String>,
+    pub(crate) lines: Vec<Line>,
     /// Cursor row (0-based, index into `lines`).
     pub(crate) cursor_row: usize,
     /// Cursor column (0-based, char index within the current line).
     pub(crate) cursor_col: usize,
-    /// Desired column for Up/Down navigation.
+    /// Sticky display column for Up/Down navigation.
     pub(crate) desired_col: Option<usize>,
     /// Placeholder text shown when empty.
     pub(crate) placeholder: String,
     /// Vertical scroll offset (first visible visual row index).
     pub(crate) vertical_scroll: usize,
-    /// Pending paste contents: (placeholder_text, full_original_text).
-    pub(crate) pending_pastes: Vec<(String, String)>,
-    /// Paste counter for generating unique #N in placeholders.
-    pub(crate) paste_counter: usize,
+    /// The pastes the draft's chips stand for (expanded on submit).
+    pub(crate) pastes: Pastes,
     /// Maximum number of input lines (configurable).
     pub(crate) max_lines: usize,
     /// The rect the widget rendered into on the last frame.
@@ -74,14 +78,13 @@ impl InputArea {
 
     pub fn with_max_lines(placeholder: String, max_lines: usize) -> Self {
         Self {
-            lines: vec![String::new()],
+            lines: vec![Vec::new()],
             cursor_row: 0,
             cursor_col: 0,
             desired_col: None,
             placeholder,
             vertical_scroll: 0,
-            pending_pastes: Vec::new(),
-            paste_counter: 0,
+            pastes: Pastes::default(),
             max_lines,
             rendered_area: Rect::default(),
         }
@@ -90,13 +93,23 @@ impl InputArea {
     // ── Content access ──────────────────────────────────────────
 
     /// Get current text as a single string (lines joined by `\n`).
+    ///
+    /// Chips show up as their visible text; the text that is *submitted* has
+    /// them expanded ([`Self::expand_and_get_text`]).
     pub fn text(&self) -> String {
-        self.lines.join("\n")
+        self.lines
+            .iter()
+            .map(|line| model::flat(line, &self.pastes))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
-    /// Get lines.
-    pub fn lines(&self) -> &[String] {
-        &self.lines
+    /// Get the draft's lines as plain text (chips as their chip text).
+    pub fn lines(&self) -> Vec<String> {
+        self.lines
+            .iter()
+            .map(|line| model::flat(line, &self.pastes))
+            .collect()
     }
 
     /// Number of lines.
@@ -147,7 +160,7 @@ impl InputArea {
         let rows = if text_width == 0 {
             1
         } else {
-            wrap::build_visual_rows(&self.lines, text_width)
+            wrap::build_visual_rows(&self.lines, &self.pastes, text_width)
                 .len()
                 .clamp(1, self.max_lines) as u16
         };
@@ -156,14 +169,16 @@ impl InputArea {
 
     /// Check if all lines are empty/whitespace.
     pub(crate) fn is_empty(&self) -> bool {
-        self.lines.iter().all(|l| l.trim().is_empty())
+        self.lines
+            .iter()
+            .all(|line| model::flat(line, &self.pastes).trim().is_empty())
     }
 
     // ── Cursor helpers ──────────────────────────────────────────
 
     /// Length of the current line in chars.
     pub(crate) fn current_line_len(&self) -> usize {
-        self.lines[self.cursor_row].chars().count()
+        model::flat_len(&self.lines[self.cursor_row], &self.pastes)
     }
 
     /// Last valid row index.
@@ -180,6 +195,21 @@ impl InputArea {
 
     /// Handle a key event, returning the desired action.
     pub fn handle_key(&mut self, key: KeyEvent, chrome: Chrome) -> InputAction {
+        let action = self.dispatch_key(key, chrome);
+        // The cursor never rests inside a chip: the arrows step over one and
+        // every edit keeps the position at a segment edge (see [`model`]). A
+        // regression here would let typing corrupt a chip's label, so it is
+        // worth catching at the key that did it rather than in a later test.
+        debug_assert!(
+            !model::inside_chip(&self.lines[self.cursor_row], &self.pastes, self.cursor_col),
+            "cursor at ({}, {}) landed inside a chip",
+            self.cursor_row,
+            self.cursor_col
+        );
+        action
+    }
+
+    fn dispatch_key(&mut self, key: KeyEvent, chrome: Chrome) -> InputAction {
         let mods = key.modifiers;
         let has_shift = mods.contains(KeyModifiers::SHIFT);
         let has_alt = mods.contains(KeyModifiers::ALT);
@@ -257,32 +287,31 @@ impl InputArea {
     // ── Text manipulation ───────────────────────────────────────
 
     /// Set the text (used for draft restoration / popup completion).
+    ///
+    /// The text is taken literally: it can never grow a live chip, even if it
+    /// spells one out — chips belong to the draft that inserted them, and this
+    /// one has no payloads.
     pub fn set_text(&mut self, text: &str) {
         self.lines = if text.is_empty() {
-            vec![String::new()]
+            vec![Vec::new()]
         } else {
-            text.split('\n').map(String::from).collect()
+            text.split('\n').map(model::text_line).collect()
         };
-        if self.lines.is_empty() {
-            self.lines.push(String::new());
-        }
         self.cursor_row = self.lines.len() - 1;
         self.cursor_col = self.current_line_len();
         self.desired_col = None;
         self.vertical_scroll = 0;
-        self.pending_pastes.clear();
-        self.paste_counter = 0;
+        self.pastes.clear();
     }
 
     /// Clear input and reset cursor.
     pub fn clear(&mut self) {
-        self.lines = vec![String::new()];
+        self.lines = vec![Vec::new()];
         self.cursor_row = 0;
         self.cursor_col = 0;
         self.desired_col = None;
         self.vertical_scroll = 0;
-        self.pending_pastes.clear();
-        self.paste_counter = 0;
+        self.pastes.clear();
     }
 
     // ── Scroll management ───────────────────────────────────────
@@ -297,7 +326,7 @@ impl InputArea {
         // the rows that were really drawn (a collapsed text area still wraps at
         // one column).
         let text_width = (chrome.text_width as usize).max(1);
-        let vis_rows = wrap::build_visual_rows(&self.lines, text_width);
+        let vis_rows = wrap::build_visual_rows(&self.lines, &self.pastes, text_width);
         let (vis_row, _) = wrap::logical_to_visual(&vis_rows, self.cursor_row, self.cursor_col);
 
         if vis_row < self.vertical_scroll {
@@ -319,18 +348,25 @@ impl InputArea {
     /// the widget rendered with ([`Self::chrome`]), so the wrapping matches the
     /// screen exactly.
     ///
-    /// The mapping is char-granular (see [`wrap::display_col_to_char`]): a
-    /// pointer on a wide character resolves to the position *before* it.
+    /// The mapping is char-granular: a pointer on a wide character resolves to
+    /// the position *before* it ([`wrap::display_col_to_char`]), and one on a
+    /// paste chip to the position before the whole chip
+    /// ([`model::column_point`]) — the same unit-snapping the hit test reports.
     pub fn set_cursor_from_visual(&mut self, chrome: Chrome, vis_row: usize, vis_col: u16) {
         let text_width = chrome.text_width as usize;
-        let vis_rows = wrap::build_visual_rows(&self.lines, text_width.max(1));
+        let vis_rows = wrap::build_visual_rows(&self.lines, &self.pastes, text_width.max(1));
         let Some(last) = vis_rows.len().checked_sub(1) else {
             return;
         };
         let row = vis_rows[vis_row.min(last)];
-        let line = &self.lines[row.logical_line];
+        let point = model::column_point(
+            &self.lines[row.logical_line],
+            &self.pastes,
+            &row,
+            vis_col as usize,
+        );
         self.cursor_row = row.logical_line;
-        self.cursor_col = wrap::display_col_to_char(line, &row, vis_col as usize);
+        self.cursor_col = point.point;
         self.desired_col = None;
     }
 
@@ -340,12 +376,12 @@ impl InputArea {
     pub fn cursor_screen_pos(&self, area: &Rect) -> (u16, u16) {
         let chrome = Chrome::of(*area);
         let text_width = chrome.text_width as usize;
-        let vis_rows = wrap::build_visual_rows(&self.lines, text_width.max(1));
+        let vis_rows = wrap::build_visual_rows(&self.lines, &self.pastes, text_width.max(1));
         let (vis_row, vis_col) =
             wrap::logical_to_visual(&vis_rows, self.cursor_row, self.cursor_col);
 
         // Compute display width of the visual column portion.
-        let line = &self.lines[self.cursor_row];
+        let line = model::flat(&self.lines[self.cursor_row], &self.pastes);
         let vr = &vis_rows[vis_row.min(vis_rows.len() - 1)];
         let col_display: usize = line
             .chars()
@@ -811,176 +847,213 @@ mod tests {
     }
 
     #[test]
-    fn clear_resets_paste_counter() {
+    fn clear_restarts_the_chip_numbering() {
         let mut input = InputArea::new("");
-        input.paste_counter = 5;
+        input.insert_paste("a\nb\nc".into());
+        assert_eq!(input.lines(), ["[Pasted text #1 +2 lines]"]);
         input.clear();
-        assert_eq!(input.paste_counter, 0);
+        input.insert_paste("a\nb".into());
+        assert_eq!(input.lines(), ["[Pasted text #1 +1 lines]"]);
     }
 
     #[test]
-    fn set_text_clears_pending_pastes() {
+    fn set_text_takes_its_text_literally() {
         let mut input = InputArea::new("");
-        input.pending_pastes.push(("a".into(), "b".into()));
-        input.set_text("new");
-        assert!(input.pending_pastes.is_empty());
-    }
-
-    #[test]
-    fn placeholder_line_readonly() {
-        let mut input = InputArea::new("");
-        input.lines = vec!["[Pasted text #1 +5 lines]".into(), String::new()];
-        input.cursor_row = 0;
+        input.insert_paste("big\npaste\ntext".into());
+        input.set_text("[Pasted text #1 +2 lines]");
+        assert_eq!(
+            input.pastes.payload(1),
+            None,
+            "a restored draft holds no payloads"
+        );
+        // …so the look-alike is ordinary text: Delete takes one character at
+        // a time, not the whole string.
         input.cursor_col = 0;
-        input.insert_char('x'); // should be ignored
-        assert_eq!(input.lines[0], "[Pasted text #1 +5 lines]");
-    }
-
-    #[test]
-    fn placeholder_on_new_line_after_text() {
-        let mut input = InputArea::new("");
-        input.set_text("hello");
-        input.insert_paste_placeholder("big text\nmore text\nend".into());
-        assert!(input.lines.len() >= 2);
-        assert!(input.lines.iter().any(|l| l.starts_with("[Pasted text")));
-    }
-
-    #[test]
-    fn insert_newline_on_placeholder_inserts_after() {
-        let mut input = InputArea::new("");
-        input.lines = vec!["[Pasted text #1 +5 lines]".into(), String::new()];
-        input.cursor_row = 0;
-        input.cursor_col = 0;
-        input.insert_newline();
-        assert_eq!(input.lines.len(), 3);
-        assert_eq!(input.lines[0], "[Pasted text #1 +5 lines]");
-        assert_eq!(input.lines[1], "");
-    }
-
-    #[test]
-    fn delete_placeholder_line_cleans_pending() {
-        let mut input = InputArea::new("");
-        input.set_text("hello");
-        input.insert_paste_placeholder("big text\nmore text\nend".into());
-        // Move up to the line before the placeholder.
-        while input.cursor_row > 0 {
-            input.move_up(chrome(80));
-        }
-        // Move to end of line so delete_forward merges with the placeholder.
-        input.move_end();
-        // Forward-delete: at end of "hello", next line is placeholder → removes it.
         input.delete_forward();
-        assert!(input.pending_pastes.is_empty());
+        assert_eq!(input.text(), "Pasted text #1 +2 lines]");
     }
 
     #[test]
-    fn move_up_skips_placeholder() {
+    fn a_chip_is_inserted_inline_and_the_cursor_stays_after_it() {
         let mut input = InputArea::new("");
-        input.lines = vec![
-            "hello".into(),
-            "[Pasted text #1 +5 lines]".into(),
-            String::new(),
-        ];
-        input.cursor_row = 2;
-        input.cursor_col = 0;
-        input.move_up(chrome(80));
-        assert_eq!(input.cursor_row, 0); // skipped placeholder
+        input.set_text("see ");
+        input.insert_paste("a\nb\nc".into());
+        let chip = "[Pasted text #1 +2 lines]";
+        assert_eq!(input.lines(), [format!("see {chip}")]);
+        assert_eq!(input.cursor_row, 0);
+        assert_eq!(input.cursor_col, 4 + chip.chars().count());
+        // Typing continues on the same line, right after the chip.
+        input.insert_char('!');
+        assert_eq!(input.lines(), [format!("see {chip}!")]);
     }
 
     #[test]
-    fn move_down_skips_placeholder() {
+    fn a_chip_inserts_mid_line_without_reflowing_the_text() {
         let mut input = InputArea::new("");
-        input.lines = vec![
-            "hello".into(),
-            "[Pasted text #1 +5 lines]".into(),
-            String::new(),
-        ];
-        input.cursor_row = 0;
-        input.cursor_col = 5;
-        input.move_down(chrome(80));
-        assert_eq!(input.cursor_row, 2); // skipped placeholder
+        input.set_text("AB");
+        input.cursor_col = 1;
+        input.insert_paste("1\n2".into());
+        let chip = "[Pasted text #1 +1 lines]";
+        assert_eq!(input.lines(), [format!("A{chip}B")]);
+        assert_eq!(input.cursor_col, 1 + chip.chars().count());
     }
 
     #[test]
-    fn move_left_skips_consecutive_placeholders() {
+    fn typing_at_a_chip_edge_never_enters_it() {
         let mut input = InputArea::new("");
-        input.lines = vec![
-            "hello".into(),
-            "[Pasted text #1]".into(),
-            "[Pasted text #2]".into(),
-            String::new(),
-        ];
-        input.cursor_row = 3;
-        input.cursor_col = 0;
+        input.set_text("see ");
+        input.insert_paste("a\nb\nc".into());
+        let chip = "[Pasted text #1 +2 lines]";
+        // At the leading edge: the text lands before the chip.
+        input.cursor_col = 4;
+        input.insert_char('<');
+        assert_eq!(input.lines(), [format!("see <{chip}")]);
+        // At the trailing edge: after it.
+        input.cursor_col = 5 + chip.chars().count();
+        input.insert_char('>');
+        assert_eq!(input.lines(), [format!("see <{chip}>")]);
+    }
+
+    #[test]
+    fn backspace_removes_a_chip_whole() {
+        let mut input = InputArea::new("");
+        input.set_text("see ");
+        input.insert_paste("a\nb\nc".into());
+        input.backspace();
+        assert_eq!(input.lines(), ["see "]);
+        assert_eq!(input.cursor_col, 4, "the cursor lands where the chip was");
+        assert_eq!(
+            input.pastes.payload(1),
+            None,
+            "the payload goes with the chip"
+        );
+        // …and the next backspace is a plain character again.
+        input.backspace();
+        assert_eq!(input.lines(), ["see"]);
+    }
+
+    #[test]
+    fn delete_removes_a_chip_whole() {
+        let mut input = InputArea::new("");
+        input.set_text("see ");
+        input.insert_paste("a\nb\nc".into());
+        input.cursor_col = 4;
+        input.delete_forward();
+        assert_eq!(input.lines(), ["see "]);
+        assert_eq!(input.pastes.payload(1), None);
+    }
+
+    #[test]
+    fn arrows_step_over_a_chip() {
+        let mut input = InputArea::new("");
+        input.set_text("ab");
+        input.insert_paste("x\ny".into());
+        let end = input.cursor_col;
         input.move_left();
-        assert_eq!(input.cursor_row, 0); // skipped both placeholders
-    }
-
-    #[test]
-    fn move_right_skips_consecutive_placeholders() {
-        let mut input = InputArea::new("");
-        input.lines = vec![
-            "hello".into(),
-            "[Pasted text #1]".into(),
-            "[Pasted text #2]".into(),
-            String::new(),
-        ];
-        input.cursor_row = 0;
-        input.cursor_col = 5;
+        assert_eq!(input.cursor_col, 2, "left lands before the chip");
         input.move_right();
-        assert_eq!(input.cursor_row, 3); // skipped both placeholders
+        assert_eq!(input.cursor_col, end, "right steps over it whole");
     }
 
     #[test]
-    fn paste_201_chars_triggers_placeholder() {
+    fn a_newline_never_splits_a_chip() {
+        let mut input = InputArea::new("");
+        input.set_text("ab");
+        input.insert_paste("x\ny".into());
+        input.cursor_col = 2;
+        input.insert_newline();
+        assert_eq!(input.lines(), ["ab", "[Pasted text #1 +1 lines]"]);
+        assert_eq!((input.cursor_row, input.cursor_col), (1, 0));
+    }
+
+    #[test]
+    fn vertical_movement_onto_a_chip_lands_before_it() {
+        let mut input = InputArea::new("");
+        input.set_text("hi");
+        input.insert_paste("x\ny".into()); // "hi[Pasted text #1 +1 lines]"
+        input.insert_newline();
+        input.insert_str("zebra");
+        assert_eq!((input.cursor_row, input.cursor_col), (1, 5));
+        input.move_up(chrome(80));
+        assert_eq!(
+            (input.cursor_row, input.cursor_col),
+            (0, 2),
+            "a column inside the chip resolves to its leading edge"
+        );
+    }
+
+    #[test]
+    fn chip_numbers_are_never_reused() {
+        let mut input = InputArea::new("");
+        input.insert_paste("first\npaste\nx".into());
+        assert_eq!(input.lines(), ["[Pasted text #1 +2 lines]"]);
+        input.cursor_col = 0;
+        input.delete_forward();
+        input.insert_paste("second\npaste\ny".into());
+        assert_eq!(
+            input.lines(),
+            ["[Pasted text #2 +2 lines]"],
+            "the freed number is not handed out again"
+        );
+    }
+
+    #[test]
+    fn enter_submits_the_expanded_paste() {
+        let mut input = InputArea::new("");
+        input.insert_str("1\n2\n3\n4\n5");
+        let action = input.handle_key(key(KeyCode::Enter), chrome(80));
+        assert_eq!(action, InputAction::Submit("1\n2\n3\n4\n5".into()));
+    }
+
+    #[test]
+    fn paste_201_chars_becomes_a_chip() {
         let mut input = InputArea::new("");
         let long_text = "x".repeat(201);
         input.insert_str(&long_text);
-        assert!(input.lines.iter().any(|l| l.starts_with("[Pasted text")));
+        assert!(input.lines().iter().any(|l| l.starts_with("[Pasted text")));
     }
 
     #[test]
-    fn paste_200_chars_no_placeholder() {
+    fn paste_200_chars_stays_text() {
         let mut input = InputArea::new("");
         let text = "x".repeat(200);
         input.insert_str(&text);
-        assert!(!input.lines.iter().any(|l| l.starts_with("[Pasted text")));
+        assert!(!input.lines().iter().any(|l| l.starts_with("[Pasted text")));
     }
 
     #[test]
-    fn paste_3_lines_triggers_placeholder() {
+    fn paste_3_lines_becomes_a_chip() {
         let mut input = InputArea::new("");
         input.insert_str("a\nb\nc\nd");
-        assert!(input.lines.iter().any(|l| l.starts_with("[Pasted text")));
+        assert!(input.lines().iter().any(|l| l.starts_with("[Pasted text")));
     }
 
     #[test]
-    fn paste_2_lines_no_placeholder() {
+    fn paste_2_lines_stays_text() {
         let mut input = InputArea::new("");
         input.insert_str("a\nb");
-        assert!(!input.lines.iter().any(|l| l.starts_with("[Pasted text")));
+        assert!(!input.lines().iter().any(|l| l.starts_with("[Pasted text")));
     }
 
     #[test]
     fn paste_preserves_leading_whitespace() {
         let mut input = InputArea::new("");
         input.insert_str("  hello\n  world");
-        assert_eq!(input.lines[0], "  hello");
-        assert_eq!(input.lines[1], "  world");
+        assert_eq!(input.lines()[0], "  hello");
+        assert_eq!(input.lines()[1], "  world");
     }
 
     #[test]
-    fn paste_rejected_at_max_lines() {
+    fn paste_at_max_lines_still_lands_on_the_last_line() {
         let mut input = InputArea::new("");
         // Fill to MAX_INPUT_LINES.
         for _ in 0..MAX_INPUT_LINES {
             input.insert_newline();
         }
-        let before = input.line_count();
-        input.insert_str("should not appear");
-        // Line count should not exceed MAX_INPUT_LINES.
-        assert!(input.line_count() <= MAX_INPUT_LINES);
-        let _ = before;
+        // A single-line paste adds no line, so the cap does not reject it.
+        input.insert_str("should appear");
+        assert_eq!(input.line_count(), MAX_INPUT_LINES);
+        assert!(input.text().ends_with("should appear"));
     }
 
     #[test]
@@ -996,26 +1069,24 @@ mod tests {
     }
 
     #[test]
-    fn submit_expands_placeholder() {
+    fn submit_expands_the_chip() {
         let mut input = InputArea::new("");
-        input.set_text("hello");
-        input.insert_paste_placeholder("expanded content".into());
-        // Submit should expand placeholder.
-        let text = input.expand_and_get_text();
-        assert!(text.contains("expanded content"));
+        input.set_text("hello ");
+        input.insert_paste("expanded\ncontent\nhere".into());
+        assert_eq!(input.expand_and_get_text(), "hello expanded\ncontent\nhere");
+        // The draft still shows the chip.
+        assert_eq!(input.lines(), ["hello [Pasted text #1 +2 lines]"]);
     }
 
     #[test]
     fn multiple_pastes_numbered() {
         let mut input = InputArea::new("");
-        input.insert_paste_placeholder("first big paste\nline2\nline3".into());
-        input.insert_paste_placeholder("second big paste\nline2\nline3".into());
-        let placeholder_count = input
-            .lines
-            .iter()
-            .filter(|l| l.starts_with("[Pasted text"))
-            .count();
-        assert_eq!(placeholder_count, 2);
+        input.insert_paste("first big paste\nline2\nline3".into());
+        input.insert_paste("second big paste\nline2\nline3".into());
+        assert_eq!(
+            input.text(),
+            "[Pasted text #1 +2 lines][Pasted text #2 +2 lines]"
+        );
     }
 
     #[test]

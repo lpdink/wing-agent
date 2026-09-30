@@ -14,9 +14,7 @@ use super::chrome;
 use super::chrome::ActivityRail;
 use super::chrome::Chrome;
 use super::chrome::MetaRail;
-use super::helpers::char_to_byte;
-use super::helpers::is_placeholder_line;
-use super::helpers::truncate_by_width;
+use super::model;
 use super::wrap;
 use crate::config::ThemePalette;
 use crate::render::markdown::truncate_to_display_width;
@@ -74,7 +72,8 @@ impl Widget for ComposerWidget<'_> {
         let text_area_w = chrome.text_width as usize;
 
         // Build visual rows.
-        let vis_rows = wrap::build_visual_rows(&self.input.lines, text_area_w.max(1));
+        let vis_rows =
+            wrap::build_visual_rows(&self.input.lines, &self.input.pastes, text_area_w.max(1));
 
         // Update vertical scroll.
         self.input.update_vertical_scroll(chrome);
@@ -110,7 +109,6 @@ impl Widget for ComposerWidget<'_> {
         for (display_idx, vis_idx) in (start_vis..end_vis).enumerate() {
             let y = first_row_y + display_idx as u16;
             let vr = &vis_rows[vis_idx];
-            let line_text = &self.input.lines[vr.logical_line];
 
             // The prompt glyph opens the draft — first visual row of the first
             // logical line only; every other row keeps the text alignment.
@@ -151,29 +149,30 @@ impl Widget for ComposerWidget<'_> {
                 continue;
             }
 
-            // Extract the visual row's text slice from the logical line.
-            let byte_start = char_to_byte(line_text, vr.char_start);
-            let byte_end = char_to_byte(line_text, vr.char_end);
-            let vis_text = &line_text[byte_start..byte_end];
-
-            if vis_text.is_empty() {
+            // Extract the visual row's runs from the logical line: the text
+            // around a chip is drawn as text, the chip as the one *thing* it
+            // is — the accent is what tells a paste from typing.
+            let runs = model::runs(
+                &self.input.lines[vr.logical_line],
+                &self.input.pastes,
+                vr.char_start..vr.char_end,
+            );
+            if runs.is_empty() {
                 continue;
             }
-
-            let clipped = truncate_by_width(vis_text, text_area_w);
-
-            let style = if is_placeholder_line(line_text) && !self.keyboard_held {
-                Style::default().fg(self.palette.accent)
-            } else {
+            let chip_style = if self.keyboard_held {
                 draft_style
+            } else {
+                Style::default().fg(self.palette.accent)
             };
+            let spans: Vec<Span> = runs
+                .into_iter()
+                .map(|(text, is_chip)| {
+                    Span::styled(text, if is_chip { chip_style } else { draft_style })
+                })
+                .collect();
 
-            buf.set_line(
-                text_x,
-                y,
-                &Line::from(Span::styled(clipped, style)),
-                chrome.text_width,
-            );
+            buf.set_line(text_x, y, &Line::from(spans), chrome.text_width);
         }
     }
 }
