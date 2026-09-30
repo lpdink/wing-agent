@@ -115,6 +115,32 @@ fn shapes() -> Vec<(&'static str, String)> {
             "list_immediately_then_bare_fence",
             "- item one\n- item two\n```\nlet x = 1;\n```\n\nafter\n".into(),
         ),
+        // An indented block that RESOLVES to nothing (an empty list item):
+        // the tail separator before it must not survive the collapse, and at
+        // the top of a cell the collapsed block's own blank line keeps the
+        // first-line prefix.
+        ("indented_block_empty_item", "intro\n\n    1.\n\n    2.\n".into()),
+        (
+            "indented_block_empty_item_first",
+            "    -  \n\npara\n".into(),
+        ),
+        // CRLF: `\r\n` endings trim like `\n` (pulldown hands the reference
+        // an LF-normalized copy), and a bare `\r` is content — the reference
+        // renders it.
+        (
+            "crlf_fence_body_ends_blank",
+            "```rust\r\nlet x = 1;\r\n\r\n```\r\n\r\nafter\r\n".into(),
+        ),
+        (
+            "crlf_partial_line_keeps_cr",
+            "```rust\r\nlet x = 1;\r\nlet y = 2;\r".into(),
+        ),
+        // An indented fence belongs to the list item it sits in: cutting it
+        // out of the item's slice loses the list continuation prefix.
+        (
+            "indented_fence_in_list",
+            "- item one\n  ```rust\n  let x = 1;\n  ```\n\nafter\n".into(),
+        ),
         // Indented blocks: code for content, prose for reasoning (see
         // `Profile`) — the nested re-parse must agree with the reference in
         // both profiles, including its markdown structure.

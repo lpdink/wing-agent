@@ -163,7 +163,10 @@ pub fn render_markdown_lines_with(
 /// causing the fence to be treated as literal text.
 ///
 /// This preprocessor inserts a newline before ``` if:
-/// - It's not already at line start
+/// - It's not already at line start, and everything before it on the line is
+///   not blank either (a blank prefix means the fence IS line-start — up to
+///   3 spaces of indent are legal — or an indented code block; inserting a
+///   newline there would tear the indentation off the fence and its body)
 /// - It looks like a fence (followed by \n, EOF, or alphanumeric lang tag)
 fn ensure_fences_on_own_line(text: &str) -> Cow<'_, str> {
     // Fast path: no ``` in text.
@@ -177,8 +180,8 @@ fn ensure_fences_on_own_line(text: &str) -> Cow<'_, str> {
     let mut needs_alloc = false;
 
     for (i, _) in text.match_indices("```") {
-        // Already at line start — nothing to do.
-        if i == 0 || bytes[i - 1] == b'\n' {
+        // Already at line start (blank prefix included) — nothing to do.
+        if i == 0 || bytes[i - 1] == b'\n' || fence_prefix_is_blank(bytes, i) {
             continue;
         }
 
@@ -206,6 +209,20 @@ fn ensure_fences_on_own_line(text: &str) -> Cow<'_, str> {
     } else {
         Cow::Borrowed(text)
     }
+}
+
+/// Whether everything before byte offset `at` on that line is blank — the
+/// fence there is already a line-start fence (≤3 spaces of indent are legal)
+/// or an indented code block, so it must not be normalized.
+pub(crate) fn fence_prefix_is_blank(bytes: &[u8], at: usize) -> bool {
+    let line_start = bytes[..at]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|pos| pos + 1)
+        .unwrap_or(0);
+    bytes[line_start..at]
+        .iter()
+        .all(|&b| b == b' ' || b == b'\t')
 }
 
 /// Render plain text (no markdown parsing) to lines.

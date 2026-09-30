@@ -36,6 +36,21 @@
 //! stable-prefix model, so this is accepted rather than fixed (see the
 //! `shapes()` note in `tests/stream_render_reconcile.rs`).
 //!
+//! Known limit — list interrupting a paragraph: a list marker on the line
+//! right after paragraph text (`para` / `- item`) opens a list in pulldown,
+//! but the splitter keeps the line inside the paragraph slice (it only looks
+//! for fences and blank lines while a paragraph is open). The slice still
+//! renders correctly — the marker is inside it — but content that belongs to
+//! the item (an indented continuation paragraph) is then sliced as an
+//! indented block, which renders it with paragraph blanks the doc-context
+//! parse suppresses inside list items. Visible as extra blank lines while
+//! streaming; `finalize()` converges.
+//!
+//! Known limit — lazy continuation after a promoted block: a line that the
+//! doc-context parse reads as a list item's lazy continuation (indented, no
+//! blank line before it) is its own slice here, so it parses as a plain
+//! paragraph and loses the item's continuation prefix until `finalize()`.
+//!
 //! Known limit — nested fences: CommonMark has no nested code fences, so a
 //! model that wraps a fenced draft in another fence (`Draft:` + ```` ```markdown ````
 //! … ```bash … ``` … ```` ``` ````) gets a spec-mandated pairing: one bare
@@ -244,6 +259,13 @@ pub struct StreamingRender {
     /// Separator pending after the last promoted block — emitted when the
     /// next block starts (never dangles at stream end).
     pending_sep: bool,
+    /// Whether the last composed line is a TAIL separator — a separator the
+    /// current frame emitted before the active tail. Unlike a promoted
+    /// block's separator the tail can collapse to nothing on the next sync
+    /// (an indented block that resolves to an empty list item, a list item
+    /// still being typed), so the line is provisional: it is dropped and the
+    /// pending flag restored before the tail is re-rendered.
+    tail_sep: bool,
     /// Rendering width; None until the first `lines()` call.
     width: Option<u16>,
     /// Live code cache for the tail when it is an unclosed fenced block.
@@ -271,6 +293,7 @@ impl StreamingRender {
             links: Vec::new(),
             stable_len: 0,
             pending_sep: false,
+            tail_sep: false,
             width: None,
             code_tail: None,
             code_flat: None,
@@ -354,6 +377,7 @@ impl StreamingRender {
         self.stable_len = self.flat.len();
         debug_assert_eq!(self.links.len(), self.flat.len());
         self.pending_sep = false;
+        self.tail_sep = false;
         self.code_tail = None;
         self.code_flat = None;
         self.split.reset();
@@ -412,11 +436,22 @@ impl StreamingRender {
         // 1) Promote newly-closed blocks (in order).
         self.flat.truncate(self.stable_len);
         self.links.truncate(self.stable_len);
+        if std::mem::take(&mut self.tail_sep) {
+            // The tail is about to be re-rendered and may have collapsed
+            // since — re-derive the separator instead of keeping the last
+            // frame's.
+            self.pending_sep = true;
+        }
         let closed = std::mem::take(&mut self.split.closed);
         for block in closed {
             let emitted_sep = if self.pending_sep {
-                self.flat.push(sep_line(self.profile, palette));
-                self.links.push(Vec::new());
+                push_separator(
+                    &mut self.flat,
+                    &mut self.links,
+                    width,
+                    palette,
+                    self.profile,
+                );
                 self.pending_sep = false;
                 true
             } else {
@@ -478,10 +513,15 @@ impl StreamingRender {
             // the moment it is emitted — fold it into the stable prefix
             // so the next sync's truncate keeps it.
             if !md_lines.is_empty() && self.pending_sep {
-                self.flat.push(sep_line(self.profile, palette));
-                self.links.push(Vec::new());
+                push_separator(
+                    &mut self.flat,
+                    &mut self.links,
+                    width,
+                    palette,
+                    self.profile,
+                );
                 self.pending_sep = false;
-                self.stable_len += 1;
+                self.tail_sep = true;
             }
             compose_into(
                 &mut self.flat,
@@ -532,8 +572,7 @@ impl StreamingRender {
             // after promotion / gutter growth): the block's separator,
             // then the top border — both stable from here on.
             if self.pending_sep {
-                self.flat.push(sep_line(profile, palette));
-                self.links.push(Vec::new());
+                push_separator(&mut self.flat, &mut self.links, width, palette, profile);
                 self.pending_sep = false;
                 self.stable_len += 1;
             }
@@ -616,7 +655,7 @@ impl StreamingRender {
     /// line-start code blocks in reasoning are still detected by the splitter
     /// via [`fence_open`].
     fn normalize_fences(&mut self) {
-        if self.profile == Profile::Thinking {
+        if !self.profile.normalizes_inline_fences() {
             self.norm_cursor = self.buf.len().saturating_sub(2);
             return;
         }
@@ -641,7 +680,8 @@ impl StreamingRender {
                 at >= self.split.scan,
                 "fence insertion below the splitter cursor would shift its offsets"
             );
-            let at_line_start = at == 0 || bytes[at - 1] == b'\n';
+            let at_line_start =
+                at == 0 || bytes[at - 1] == b'\n' || super::fence_prefix_is_blank(bytes, at);
             let after = &bytes[(at + 3).min(bytes.len())..];
             let looks_like_fence =
                 after.is_empty() || after[0] == b'\n' || after[0].is_ascii_alphanumeric();
@@ -747,14 +787,18 @@ impl StreamingRender {
                     self.split.mode = Mode::List { blank_seen: true };
                     return true;
                 }
-                if let Some((fc, fl, info)) = fence_open(line) {
-                    // A column-0 fence ends the list. The line is the
-                    // OPENER and is consumed here — returning it to the
-                    // FencedCode mode would make the splitter read it as
-                    // its own closer again (a bare fence has no info
-                    // string, so `is_fence_close` matches it), which
-                    // promotes an empty block and renders the whole body
-                    // as prose.
+                if indent_of(line) == 0
+                    && let Some((fc, fl, info)) = fence_open(line)
+                {
+                    // A column-0 fence ends the list (an indented fence stays
+                    // inside the item — pulldown keeps it there, and a slice
+                    // cut out of the item would lose the list continuation
+                    // prefix). The line is the OPENER and is consumed here —
+                    // returning it to the FencedCode mode would make the
+                    // splitter read it as its own closer again (a bare fence
+                    // has no info string, so `is_fence_close` matches it),
+                    // which promotes an empty block and renders the whole
+                    // body as prose.
                     self.close_slice(line_start);
                     self.open_code_cache(fc, fl, info);
                     self.split.mode = Mode::FencedCode {
@@ -765,6 +809,7 @@ impl StreamingRender {
                 }
                 let marker = list_marker_len(line).is_some();
                 let indented = indent_of(line) >= 2;
+
                 let lazy = !blank_seen;
                 // pulldown keeps post-blank column-0 text inside an EMPTY
                 // list item (lazy continuation) — match it so the slice
@@ -948,13 +993,31 @@ fn drop_code_flat(
     }
 }
 
-/// The separator blank line between blocks — the full renderer emits an
-/// empty MarkdownLine, which the cell compose prefixes with two spaces.
-fn sep_line(profile: Profile, palette: &ThemePalette) -> Line<'static> {
-    match profile {
-        Profile::Thinking => Line::from(Span::styled("  ", Style::default().fg(palette.thinking))),
-        Profile::Content => Line::from(Span::raw("  ")),
-    }
+/// Emit the separator blank line between blocks.
+///
+/// The full renderer emits an empty `MarkdownLine` and lets the cell compose
+/// prefix it, so the separator is composed the same way instead of being
+/// hand-built: at the top of a cell it takes the first-line prefix (`⦁ `)
+/// exactly like the reference, a block that collapsed into its own blank
+/// line (an indented block resolving to an empty list item) reproduces the
+/// reference's line, and every other position stays the usual two-space
+/// indent. Free function so callers can hold a buffer borrow (the fenced
+/// tail) while composing.
+fn push_separator(
+    flat: &mut Vec<Line<'static>>,
+    links: &mut Vec<Vec<LinkSpan>>,
+    width: u16,
+    palette: &ThemePalette,
+    profile: Profile,
+) {
+    compose_into(
+        flat,
+        links,
+        std::iter::once(MarkdownLine::default()),
+        width,
+        palette,
+        profile,
+    );
 }
 
 // ============================================================
@@ -1117,10 +1180,12 @@ fn code_slice_parts<'a>(slice: &'a str, cache: &mut CodeCache) -> (&'a str, bool
     (body_trimmed, has_language)
 }
 
-/// Drop a trailing `\r` from a body line: pulldown normalizes CRLF line
-/// endings out of code text, and the full renderer therefore never shows
-/// one — a CRLF stream would otherwise diverge on every line (and on the
-/// span comparison in the reconcile matrix).
+/// Drop the trailing `\r` of a NEWLINE-TERMINATED body line: pulldown
+/// normalizes CRLF endings out of the code text, so the reference never
+/// shows that byte — a CRLF stream would otherwise diverge on every line
+/// (and on the span comparison in the reconcile matrix). A bare `\r` with
+/// no line feed after it is content and must NOT be stripped: `str::lines`
+/// keeps it, so it survives into the reference render.
 fn strip_cr(line: &str) -> &str {
     line.strip_suffix('\r').unwrap_or(line)
 }
@@ -1180,31 +1245,36 @@ fn code_number_width(cache: &CodeCache, total_lines: usize) -> usize {
 ///   last line is the in-flight partial one).
 /// - It is not an EMPTY line with nothing but the trailing newline run
 ///   after it. The reference renderer trims that run
-///   (`trim_end_matches('\n')`), so a blank line that is currently the last
-///   thing in the body disappears the moment the closing fence — or the
-///   doc end — arrives. Committing it early leaves one body line the
-///   reference does not have until `finalize`: the "extra empty line inside
-///   a streaming code block" bug, visible whenever a chunk boundary lands
-///   between the blank line and the closing fence (the cache saw the blank
-///   line as an interior line before the fence closed the block).
+///   (`trim_end_matches('\n')`, CRLF pairs first — see `strip_cr`), so a
+///   blank line that is currently the last thing in the body disappears the
+///   moment the closing fence — or the doc end — arrives. Committing it
+///   early leaves one body line the reference does not have until
+///   `finalize`: the "extra empty line inside a streaming code block" bug,
+///   visible whenever a chunk boundary lands between the blank line and the
+///   closing fence (the cache saw the blank line as an interior line before
+///   the fence closed the block).
 ///
 /// Everything after the last final line — the trailing blank run plus, when
 /// the body is mid-line, the partial line — is returned as `pending` and
 /// re-rendered by the caller every sync (statelessly, since a line that can
 /// still be retracted must not advance the highlighter state). Cost stays
-/// O(final lines added): the byte cursor only moves forward, and the
-/// pending tail is a blank run (normally empty or a line or two).
+/// O(final lines added): the byte cursor only moves forward, while the
+/// pending tail is re-rendered and bounded by the blank run the model has
+/// emitted so far (normally empty or a line or two, and each line is a
+/// fresh stateless highlight — see [`render_code_line_stateless`]).
 fn fill_code_cache<'a>(
     cache: &mut CodeCache,
     body_trimmed: &'a str,
     theme: &MarkdownTheme,
 ) -> (Vec<&'a str>, usize) {
     // `trimmed` drops the trailing newline run — exactly the bytes the
-    // reference renderer drops — so the last line inside it is complete
-    // whenever the body ends with a newline.
-    let trimmed = body_trimmed.trim_end_matches('\n');
+    // reference renderer drops, except that the bytes here are the RAW body
+    // (pulldown hands the reference an LF-normalized copy), so CRLF endings
+    // are trimmed as units. A bare `\r` is content, not an ending: the
+    // reference keeps it (`str::lines` leaves it alone, see `strip_cr`).
+    let trimmed = trim_trailing_code_endings(body_trimmed);
     let complete_tail = body_trimmed.ends_with('\n');
-    let final_end = final_line_end(trimmed, complete_tail);
+    let final_end = final_line_end(body_trimmed, trimmed.len(), complete_tail);
     let mut off = cache.scan_off;
     while off < final_end {
         let end = body_trimmed[off..]
@@ -1223,50 +1293,93 @@ fn fill_code_cache<'a>(
     // line's terminator is the body's trailing newline run) — clamp it into
     // `trimmed` for the pending slice.
     let pending_src = &trimmed[final_end.min(trimmed.len())..];
-    let mut pending: Vec<&str> = if pending_src.is_empty() {
+    let raw: Vec<&str> = if pending_src.is_empty() {
         Vec::new()
     } else {
-        pending_src.split('\n').map(strip_cr).collect()
+        pending_src.split('\n').collect()
     };
-    if !complete_tail && let Some(last) = pending.last() {
-        // pulldown emits no text for an unterminated trailing line of 1–3
-        // spaces (EOF handling), so the reference render has no such line —
-        // match it, or a stream paused on a blank line would show one body
-        // line the reference lacks. A ≥4-space run and anything containing
-        // other bytes (tabs included) are kept.
-        let spaces_only = last.bytes().all(|b| b == b' ');
-        if spaces_only && last.len() < 4 {
-            pending.pop();
+    let mut pending: Vec<&str> = Vec::with_capacity(raw.len());
+    for (i, line) in raw.iter().enumerate() {
+        if i + 1 < raw.len() || complete_tail {
+            // Newline-terminated: the `\r` of a CRLF ending is not content.
+            pending.push(strip_cr(line));
+            continue;
+        }
+        // The in-flight partial line — pulldown emits no text for an
+        // unterminated trailing line of 1–3 spaces at EOF, so the reference
+        // has no such line either; anything else (a ≥4-space run, tabs, a
+        // lone `\r`) is kept verbatim, un-stripped.
+        if !(line.bytes().all(|b| b == b' ') && line.len() < 4) {
+            pending.push(line);
         }
     }
     let total = cache.rendered.len() + pending.len();
     (pending, total)
 }
 
-/// Byte offset (in `trimmed`) just past the last line that can never move
-/// again: the last COMPLETE, non-empty line's terminator. 0 when there is
-/// none (every line is still provisional). The offset may land one past
-/// `trimmed` — the last line's terminator is then the body's trailing
-/// newline run — so callers clamp before slicing.
+/// The body without its trailing newline run — the bytes the reference
+/// renderer drops (`trim_end_matches('\n')` on the LF-normalized code text).
+///
+/// Scanned from the END so mixed endings work out: a `\n` is consumed, and a
+/// `\r` right in front of a consumed `\n` is part of that CRLF ending and
+/// goes with it (`\r\n\n` = one CRLF line ending plus an empty line). A
+/// trailing `\r` with no line feed after it is content and stops the scan.
+fn trim_trailing_code_endings(body: &str) -> &str {
+    let bytes = body.as_bytes();
+    let mut end = bytes.len();
+    while end > 0 && bytes[end - 1] == b'\n' {
+        end -= 1;
+        if end > 0 && bytes[end - 1] == b'\r' {
+            end -= 1;
+        }
+    }
+    &body[..end]
+}
+
+/// Whether a body line is blank for the reference renderer: nothing but the
+/// `\r` of a CRLF ending that pulldown normalizes away.
+fn code_line_is_blank(line: &str) -> bool {
+    line.bytes().all(|b| b == b'\r')
+}
+
+/// Byte offset in the BODY just past the last line that can never move
+/// again: the last COMPLETE, non-blank line's terminator. 0 when there is
+/// none (every line is still provisional). The offset may land past
+/// `trimmed_len` — the last line's terminator then belongs to the body's
+/// trailing newline run — so callers clamp before slicing `trimmed`.
+///
+/// Offsets are body coordinates on purpose: CRLF endings make the body
+/// longer than `trimmed` while its terminators stay `\n` bytes (the `\r`
+/// in front of one is content to `code_line_is_blank`), and the cache's
+/// byte cursor lives in body coordinates.
 ///
 /// `body_ends_with_newline` says whether the last line of `trimmed` is
 /// terminated by the newline that starts the body's trailing run (the
 /// reference keeps it), or is the in-flight partial line (it does not).
-fn final_line_end(trimmed: &str, body_ends_with_newline: bool) -> usize {
-    // Walk the lines backwards: `end` is the current line's exclusive end
-    // (a terminator index), `terminated` whether that terminator exists in
-    // the body.
-    let mut end = trimmed.len();
+fn final_line_end(body: &str, trimmed_len: usize, body_ends_with_newline: bool) -> usize {
+    // Walk the lines backwards: `line_end` is the current line's exclusive
+    // end (a terminator index), `terminated` whether that terminator exists
+    // in the body.
+    let mut line_end = if body_ends_with_newline {
+        // The first newline at or after the trimmed text is this line's
+        // terminator (CRLF or LF alike).
+        body[trimmed_len..]
+            .find('\n')
+            .map(|rel| trimmed_len + rel)
+            .expect("a terminated last line has a newline")
+    } else {
+        body.len()
+    };
     let mut terminated = body_ends_with_newline;
     loop {
-        let start = trimmed[..end].rfind('\n').map(|p| p + 1).unwrap_or(0);
-        if terminated && start < end {
-            return end + 1;
+        let start = body[..line_end].rfind('\n').map(|p| p + 1).unwrap_or(0);
+        if terminated && !code_line_is_blank(&body[start..line_end]) {
+            return line_end + 1;
         }
         if start == 0 {
             return 0;
         }
-        end = start - 1;
+        line_end = start - 1;
         terminated = true;
     }
 }
@@ -1669,9 +1782,16 @@ mod tests {
             ("let x = 1;\n\t", 1, &["\t"]),
             ("let x = 1;\n  `", 1, &["  `"]),
             ("let x = 1;\nlet y = 2;", 1, &["let y = 2;"]),
-            ("let x = 1;\r\nlet y = 2;\r", 1, &["let y = 2;"]),
             ("let x = 1;\n\n", 1, &[]),
             ("let x = 1;\n\nlet y", 1, &["", "let y"]),
+            // CRLF: `\r\n` endings are trimmed as units, and only
+            // newline-terminated lines lose their `\r` — an unterminated
+            // trailing `\r` is content (the reference renders it, probed
+            // against `full_lines`).
+            ("let x = 1;\r\n\r\n", 1, &[]),
+            ("let x = 1;\r\n\r\nlet y\r\n", 3, &[]),
+            ("let x = 1;\r\nlet y = 2;\r", 1, &["let y = 2;\r"]),
+            ("let x = 1;\r\n\r\n`", 1, &["", "`"]),
             // The trailing blank run is provisional: it is not final until a
             // non-empty line follows, because the reference renderer trims
             // it the moment the closing fence arrives (the mid-line "```"

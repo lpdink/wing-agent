@@ -12,9 +12,10 @@
 //! - **composed view** (default): `full_lines` / `StreamingRender` output —
 //!   exactly what the chat cell shows (prefix, thinking recolor, hard wrap).
 //! - **`--kinds` view**: the markdown IR before composition, one line per
-//!   segment run annotated with its [`SegmentKind`] (`T` prose, `C` code
-//!   block, `B` border, `G` gutter, `M` marker, …) — this is the view that
-//!   answers "why is this line rendered as code?".
+//!   segment run annotated with its [`SegmentKind`] (`T` prose, `H` heading,
+//!   `i` inline code, `C` code block, `L` link, `M` marker, `B` border,
+//!   `G` gutter) — this is the view that answers "why is this line rendered
+//!   as code?".
 //!
 //! `--chunk` drives the incremental `StreamingRender` (the production
 //! streaming path) instead of the one-shot full render, and `--check`
@@ -156,9 +157,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if chunk.is_none() {
             return Err("--check needs --chunk (it reconciles the streaming path)".into());
         }
-        let report = check_streaming(&text, chunk.unwrap_or(1), width, profile, &palette);
+        let (report, diverged) =
+            check_streaming(&text, chunk.unwrap_or(1), width, profile, &palette);
         for line in report {
             writeln!(out, "{line}")?;
+        }
+        // Usable as a gate: the exit code carries the verdict.
+        if diverged {
+            std::process::exit(1);
         }
         return Ok(());
     }
@@ -246,14 +252,16 @@ fn print_ir(
 }
 
 /// Stream the text and reconcile the incremental resting state against the
-/// reference full render — the TUI's turn-end invariant.
+/// reference full render — the TUI's turn-end invariant. Returns the report
+/// lines and whether anything diverged (the caller turns that into the exit
+/// code).
 fn check_streaming(
     text: &str,
     chunk: usize,
     width: u16,
     profile: Profile,
     palette: &ThemePalette,
-) -> Vec<String> {
+) -> (Vec<String>, bool) {
     let mut out = Vec::new();
     let mut stream = StreamingRender::new(profile);
     for piece in chunks_of(text, chunk) {
@@ -267,7 +275,9 @@ fn check_streaming(
         resting.len(),
         reference.len()
     ));
-    out.extend(diff_summary(&resting, &reference, "resting"));
+    let resting_diff = diff_summary(&resting, &reference, "resting");
+    let resting_diverged = diverged(&resting, &reference);
+    out.extend(resting_diff);
 
     stream.finalize(width, palette);
     let finalized = stream.lines(width, palette).to_vec();
@@ -277,7 +287,19 @@ fn check_streaming(
         reference.len()
     ));
     out.extend(diff_summary(&finalized, &reference, "finalized"));
-    out
+    (out, resting_diverged || diverged(&finalized, &reference))
+}
+
+/// Whether two renders differ in any line's text or styles.
+fn diverged(a: &[Line<'static>], b: &[Line<'static>]) -> bool {
+    a.len() != b.len()
+        || a.iter().zip(b).any(|(x, y)| {
+            x.spans.len() != y.spans.len()
+                || x.spans
+                    .iter()
+                    .zip(&y.spans)
+                    .any(|(p, q)| p.content != q.content || p.style != q.style)
+        })
 }
 
 /// First mismatches (line text + styles) between two renders.
