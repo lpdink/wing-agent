@@ -9,8 +9,10 @@ impl InputArea {
     /// Large pastes (>2 lines or >200 chars) leave a *chip* standing for them
     /// — inserted at the cursor like any other text, so the draft keeps its
     /// line structure and the user keeps typing where they were.
+    /// A paste that does not fit the draft's line budget is chipped too: a
+    /// chip costs no line, so a paste that cannot be spliced in whole is kept
+    /// whole instead of being cut off.
     /// Multi-line paste preserves line structure for small pastes.
-    /// Pasted content is truncated to respect `MAX_INPUT_LINES`.
     pub fn insert_str(&mut self, s: &str) {
         // Sanitize: strip \r, skip pure whitespace.
         let cleaned: String = s.chars().filter(|&c| c != '\r').collect();
@@ -19,21 +21,15 @@ impl InputArea {
             return;
         }
 
-        let line_count = cleaned.split('\n').count();
+        let parts: Vec<&str> = cleaned.split('\n').collect();
         let char_count = cleaned.chars().count();
 
-        // Trigger a chip for large pastes.
-        if line_count > 2 || char_count > 200 {
+        // Leave a chip for large pastes — and for ones the draft has no room
+        // for.
+        let fits = parts.len() - 1 <= self.max_lines.saturating_sub(self.lines.len());
+        if parts.len() > 2 || char_count > 200 || !fits {
             self.insert_paste(cleaned.to_string());
             return;
-        }
-
-        let mut parts: Vec<&str> = cleaned.split('\n').collect();
-
-        // Truncate multi-line paste to respect MAX_INPUT_LINES.
-        let available_new_lines = self.max_lines.saturating_sub(self.lines.len());
-        if parts.len() > 1 && parts.len() - 1 > available_new_lines {
-            parts.truncate(available_new_lines + 1);
         }
 
         if parts.len() == 1 {

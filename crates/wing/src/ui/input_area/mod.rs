@@ -1010,7 +1010,11 @@ mod tests {
         let mut input = InputArea::new("");
         let long_text = "x".repeat(201);
         input.insert_str(&long_text);
-        assert!(input.lines().iter().any(|l| l.starts_with("[Pasted text")));
+        // A single-line paste carries no line count (`+0 lines` is a count of
+        // nothing), and submitting gives the text back untouched.
+        assert_eq!(input.lines(), ["[Pasted text #1]"]);
+        let action = input.handle_key(key(KeyCode::Enter), chrome(80));
+        assert_eq!(action, InputAction::Submit(long_text));
     }
 
     #[test]
@@ -1057,15 +1061,47 @@ mod tests {
     }
 
     #[test]
-    fn paste_truncated_at_max_lines() {
+    fn a_large_paste_at_max_lines_becomes_a_chip() {
         let mut input = InputArea::new("");
-        input.set_text("start");
+        // Fill to MAX_INPUT_LINES, then paste a 15-line block: it cannot be
+        // spliced in, and it is far past the chip threshold anyway.
+        for _ in 0..MAX_INPUT_LINES {
+            input.insert_newline();
+        }
         let multi = (0..15)
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
             .join("\n");
         input.insert_str(&multi);
-        assert!(input.line_count() <= MAX_INPUT_LINES);
+        assert_eq!(input.line_count(), MAX_INPUT_LINES);
+        assert_eq!(
+            input.lines()[MAX_INPUT_LINES - 1],
+            "[Pasted text #1 +14 lines]"
+        );
+        assert!(input.expand_and_get_text().ends_with(&multi));
+    }
+
+    #[test]
+    fn a_two_line_paste_that_does_not_fit_becomes_a_chip() {
+        let mut input = InputArea::new("");
+        for _ in 0..MAX_INPUT_LINES {
+            input.insert_newline();
+        }
+        // Two lines are below the size threshold, but the draft has no room
+        // for them: the paste is kept whole as a chip rather than cut off.
+        input.insert_str("one\ntwo");
+        assert_eq!(input.line_count(), MAX_INPUT_LINES, "no line is added");
+        assert_eq!(
+            input.lines()[MAX_INPUT_LINES - 1],
+            "[Pasted text #1 +1 lines]"
+        );
+        assert!(input.expand_and_get_text().ends_with("one\ntwo"));
+
+        // With room, the same paste keeps its lines instead.
+        let mut input = InputArea::new("");
+        input.set_text("start");
+        input.insert_str("one\ntwo");
+        assert_eq!(input.lines(), ["startone", "two"]);
     }
 
     #[test]

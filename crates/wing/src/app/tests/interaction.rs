@@ -729,6 +729,24 @@ fn test_composer_drag_over_a_chip_copies_the_whole_label() {
     }
 }
 
+/// Delete (forward) deletes a chip whole from its leading edge — the mirror
+/// of Backspace from the trailing one.
+#[test]
+fn test_composer_delete_removes_a_chip_whole() {
+    let mut app = app_with_draft("see ");
+    app.input.insert_str("1\n2\n3\n4");
+    // The cursor sits right after the chip; step before it and delete.
+    app.input.cursor_col = "see ".chars().count();
+    app.handle_key(key(crossterm::event::KeyCode::Delete));
+    assert_eq!(app.input.text(), "see ");
+    assert_eq!((app.input.cursor_row, app.input.cursor_col), (0, 4));
+    assert_eq!(
+        app.input.pastes.payload(1),
+        None,
+        "the payload goes with the chip"
+    );
+}
+
 /// Backspace deletes a chip whole — the keyboard's side of the same rule.
 #[test]
 fn test_composer_backspace_removes_a_chip_whole() {

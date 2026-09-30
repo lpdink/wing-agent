@@ -38,11 +38,25 @@ pub(crate) enum Segment {
 /// One draft line.
 pub(crate) type Line = Vec<Segment>;
 
-/// The pastes a draft still holds: chip number → payload text.
+/// One pending paste: the text behind a chip, and the label the chip shows.
+#[derive(Debug)]
+struct Paste {
+    /// The text the chip expands to on submit.
+    text: String,
+    /// The chip's visible text, computed once at insertion.
+    ///
+    /// The payload never changes, while the label is read on every frame,
+    /// keystroke and hit test (`flat` / `segment_len` / `runs`) — scanning a
+    /// multi-megabyte paste per read would make the composer slower the more
+    /// there is to hide, which is the one thing a chip is for.
+    label: String,
+}
+
+/// The pastes a draft still holds: chip number → its text and label.
 #[derive(Debug, Default)]
 pub(crate) struct Pastes {
     next_number: PasteNumber,
-    payloads: BTreeMap<PasteNumber, String>,
+    entries: BTreeMap<PasteNumber, Paste>,
 }
 
 impl Pastes {
@@ -55,41 +69,52 @@ impl Pastes {
     /// the draft starts the count over.
     pub fn add(&mut self, text: String) -> PasteNumber {
         self.next_number += 1;
-        self.payloads.insert(self.next_number, text);
+        let label = chip_label(self.next_number, &text);
+        self.entries.insert(self.next_number, Paste { text, label });
         self.next_number
     }
 
     /// Drop the payload of a chip that is gone from the draft.
     pub fn remove(&mut self, number: PasteNumber) {
-        self.payloads.remove(&number);
+        self.entries.remove(&number);
     }
 
     /// The text a chip expands to on submit.
     pub fn payload(&self, number: PasteNumber) -> Option<&str> {
-        self.payloads.get(&number).map(String::as_str)
+        self.entries.get(&number).map(|paste| paste.text.as_str())
     }
 
     /// Forget every payload and restart the numbering.
     pub fn clear(&mut self) {
-        self.payloads.clear();
+        self.entries.clear();
         self.next_number = 0;
     }
 
-    /// A chip's visible text.
-    ///
-    /// Single-line pastes carry no line count: `+0 lines` would be a count of
-    /// nothing — the chip still stands for a large paste (that is why it is
-    /// one), it just does not span lines.
-    pub fn chip(&self, number: PasteNumber) -> String {
-        let extra = self
-            .payload(number)
-            .map(|text| text.split('\n').count().saturating_sub(1))
-            .unwrap_or(0);
-        if extra == 0 {
-            format!("[Pasted text #{number}]")
-        } else {
-            format!("[Pasted text #{number} +{extra} lines]")
-        }
+    /// A chip's visible text (cached — see [`Paste::label`]).
+    pub fn chip(&self, number: PasteNumber) -> &str {
+        self.entries
+            .get(&number)
+            .map_or(CHIP_WITHOUT_PASTE, |paste| paste.label.as_str())
+    }
+}
+
+/// The fallback label of a chip whose payload is gone — a state the model
+/// maintains against (a chip and its payload are inserted and dropped
+/// together), so it only ever shows up in a defensive read.
+const CHIP_WITHOUT_PASTE: &str = "[Pasted text #?]";
+
+/// The label a chip shows: `[Pasted text #N +M lines]`, `M` being the lines
+/// the paste adds.
+///
+/// Single-line pastes carry no count: `+0 lines` would be a count of nothing —
+/// the chip still stands for a large paste (that is why it is one), it just
+/// does not span lines.
+fn chip_label(number: PasteNumber, text: &str) -> String {
+    let extra = text.split('\n').count().saturating_sub(1);
+    if extra == 0 {
+        format!("[Pasted text #{number}]")
+    } else {
+        format!("[Pasted text #{number} +{extra} lines]")
     }
 }
 
@@ -108,7 +133,7 @@ pub fn flat(line: &[Segment], pastes: &Pastes) -> String {
     for segment in line {
         match segment {
             Segment::Text(text) => out.push_str(text),
-            Segment::Paste(number) => out.push_str(&pastes.chip(*number)),
+            Segment::Paste(number) => out.push_str(pastes.chip(*number)),
         }
     }
     out
@@ -131,7 +156,7 @@ pub fn expanded(line: &[Segment], pastes: &Pastes) -> String {
                 Some(text) => out.push_str(text),
                 // A payload-less chip cannot happen; the chip itself is a
                 // better answer than dropping the segment silently.
-                None => out.push_str(&pastes.chip(*number)),
+                None => out.push_str(pastes.chip(*number)),
             },
         }
     }
@@ -227,7 +252,7 @@ pub fn runs(line: &[Segment], pastes: &Pastes, range: Range<usize>) -> Vec<(Stri
             };
             let run = match segment {
                 Segment::Text(text) => (slice(text), false),
-                Segment::Paste(number) => (slice(&pastes.chip(*number)), true),
+                Segment::Paste(number) => (slice(pastes.chip(*number)), true),
             };
             out.push(run);
         }
@@ -495,6 +520,14 @@ mod tests {
     }
 
     #[test]
+    fn a_chip_without_a_payload_reads_as_unknown() {
+        let mut pastes = registry(&["a\nb"]);
+        assert_eq!(pastes.chip(1), "[Pasted text #1 +1 lines]");
+        pastes.remove(1);
+        assert_eq!(pastes.chip(1), "[Pasted text #?]", "a defensive read");
+    }
+
+    #[test]
     fn chip_text_carries_the_line_count_it_adds() {
         let pastes = registry(&["one line", "a\nb\nc"]);
         assert_eq!(pastes.chip(1), "[Pasted text #1]");
@@ -736,7 +769,8 @@ mod tests {
         let pieces = runs(&line, &pastes, 0..len);
         assert_eq!(pieces.len(), 3);
         assert_eq!(pieces[0], ("ab".to_string(), false));
-        assert_eq!(pieces[1], (pastes.chip(1), true));
+        assert_eq!(pieces[1], (pastes.chip(1).to_string(), true));
+        assert!(pieces[1].1, "the run is a chip");
         assert_eq!(pieces[2], ("cd".to_string(), false));
         // A range inside the text takes only that slice.
         assert_eq!(runs(&line, &pastes, 1..2), vec![("b".to_string(), false)]);
