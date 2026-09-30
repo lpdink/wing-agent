@@ -18,10 +18,16 @@
 //      这一种输入，其余路径一字未动（见函数旁注释）。
 //   3. `build_delimiter` 由私有改为 `pub(crate)`（逻辑未改），供
 //      `crate::environments` 生成拉伸定界符。
-//   4. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt
+//   4. `layout_seq` 改为一次性拼装（`crate::compose::beside_all`）：上游对每个子节点
+//      反复 `beside`，第 k 步复制前 k 块拼出的整个网格，长公式退化成 O(n²)
+//      （实测 2000 项单行公式 release 282 ms）。语义逐格等价（对拍见 compose 单测）。
+//   5. `layout_binom`：上游 `above(&top, &bot, baseline - 1)` 在 `top` 为空块时
+//      `0 - 1` 下溢 panic（`\binom{}{}`，debug 直接 abort），且堆叠块与定界符块基线
+//      不一致，`\binom{n}{k}` 被画成错位三行。改为纯堆叠 + 基线归中。
+//   6. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt
 //      处理，因此有纯空白差异；已用「先 rustfmt 上游文件、再与本文件逐行 diff」核对，
 //      除上述改动外逐字一致（核对脚本见 crate 根 NOTICE 的「内联保真度」一节）。
-//   除以上四点外与上游逐字一致。
+//   除以上六点外与上游逐字一致。
 // ---------------------------------------------------------------------------
 
 use crate::latex::{AccentKind, EqNode, MathFontKind, MatrixKind};
@@ -200,21 +206,24 @@ fn layout_seq(children: &[EqNode]) -> RenderedBlock {
     // Flatten nested Seqs so we can handle spacing uniformly.
     let flat = flatten_seq(children);
     // Collapse consecutive whitespace-like nodes into a single space.
-    let mut result = RenderedBlock::empty();
+    //
+    // 本地改动（见文件头）：上游这里对每个子节点反复调用 `RenderedBlock::beside`，
+    // 第 k 步都要复制"前 k 块拼出来的整个网格"，长公式退化成 O(n²)（实测 2000 项
+    // 单行公式 release 282 ms）。改成先收集再一次性拼装，语义逐格等价。
+    let mut parts: Vec<RenderedBlock> = Vec::with_capacity(flat.len());
     let mut prev_was_space = false;
     for child in &flat {
         if is_space_like(child) {
             if !prev_was_space {
                 prev_was_space = true;
-                result = result.beside(&RenderedBlock::from_char(' '));
+                parts.push(RenderedBlock::from_char(' '));
             }
             continue;
         }
         prev_was_space = false;
-        let block = layout(child);
-        result = result.beside(&block);
+        parts.push(layout(child));
     }
-    result
+    crate::compose::beside_all(&parts)
 }
 
 /// Trim leading/trailing whitespace from a node.
@@ -913,14 +922,25 @@ fn layout_binom(top: &EqNode, bottom: &EqNode) -> RenderedBlock {
     let top_block = layout(top);
     let bot_block = layout(bottom);
 
-    let inner_width = top_block.width().max(bot_block.width());
+    // 本地改动（见文件头）：上游写成
+    //   `let baseline = top_centered.height(); above(&top, &bot, baseline - 1)`
+    // 有两个问题：
+    //   1. `top` 为空块（`\binom{}{}`）时 `height() == 0` → `0 - 1` 下溢 panic（debug）；
+    //   2. 堆叠块的基线与定界符块的基线（`h/2`）不一致，`beside` 会把内容与括号
+    //      错开一行（`\binom{n}{k}` 画成 `⎛ ⎞` / `⎝n⎠` / ` k`）。
+    // 这里改成：先纯上下堆叠（空块自动跳过），再把基线统一放到中线，与定界符对齐。
+    if top_block.is_empty() && bot_block.is_empty() {
+        return RenderedBlock::empty();
+    }
+
+    let inner_width = top_block.width().max(bot_block.width()).max(1);
     let top_centered = top_block.center_in(inner_width);
     let bot_centered = bot_block.center_in(inner_width);
 
-    let baseline = top_centered.height();
-    let stacked = RenderedBlock::above(&top_centered, &bot_centered, baseline - 1);
-
+    let stacked = RenderedBlock::above(&top_centered, &bot_centered, 0);
     let h = stacked.height();
+    let stacked = RenderedBlock::new(stacked.cells().to_vec(), h / 2);
+
     let left = build_delimiter("(", h);
     let right = build_delimiter(")", h);
     left.beside(&stacked).beside(&right)

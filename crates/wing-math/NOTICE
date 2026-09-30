@@ -53,8 +53,16 @@
    `\hat{abc}` 这类单字形 accent 在奇数余量时不再左偏一列。
 5. **`build_delimiter` 提权**（`src/grid/layout.rs`）：`fn` → `pub(crate) fn`，逻辑未改，
    供 `crate::environments` 生成拉伸定界符。
-6. **`cargo fmt`**：所有内联文件都跑了 `cargo fmt`（仓库门禁要求 `cargo fmt --check`
-   干净），因此与上游原文存在**纯空白**差异。
+6. **`layout_seq` 一次性拼装**（`src/grid/layout.rs`）：上游对每个子节点反复 `beside`，
+   长公式退化成 O(n²)；改用 `crate::compose::beside_all`（语义逐格等价，有对拍测试）。
+7. **`layout_binom` 修正**（`src/grid/layout.rs`）：空首参数时 `0 - 1` 下溢 panic；
+   且堆叠块与定界符块基线不一致导致括号错行。
+8. **`is_spaced_operator` 加入 `·`**（`src/latex/parser.rs`）：`a \cdot b` 不再渲染成 `a ·b`。
+9. **命名算子空格补回**（`src/latex/parser.rs`）：`\log p(x)` 不再渲染成 `logp(x)`。
+10. **`parse_group_atom` 跳过参数前空白**（`src/latex/parser.rs`）：`\frac{X} {Y}`
+    （多行公式折行后的形状）不再丢分母。
+11. **`cargo fmt`**：所有内联文件都跑了 `cargo fmt`（仓库门禁要求 `cargo fmt --check`
+    干净），因此与上游原文存在**纯空白**差异。
 
 ## 内联保真度（如何复核"除上述改动外逐字一致"）
 
@@ -81,8 +89,8 @@ rustfmt --edition 2024 --quiet /tmp/term-maths-1.0.0/src/layout.rs
 | `src/grid/renderer.rs` | 6 | 模块路径 |
 | `src/grid/latex_renderer.rs` | 8 | 模块路径 |
 | `src/grid/mod.rs` | 23 | 模块路径 + 移除三个未内联后端 |
-| `src/latex/parser.rs` | 91 | 模块路径 + 4 处 `collapsible_if` 折叠 |
-| `src/grid/layout.rs` | 32 | 模块路径 + `center_accent` + `build_delimiter` 提权 |
+| `src/grid/layout.rs` | 64 | 模块路径 + `center_accent` + `build_delimiter` 提权 + `layout_seq` 一次性拼装 + `layout_binom` 修正 |
+| `src/latex/parser.rs` | 116 | 模块路径 + 4 处 `collapsible_if` + `·` 间隔 + 命名算子空格 + `parse_group_atom` 跳空白 |
 
 上游测试随源码内联（`parser.rs` / `rendered_block.rs` / `mathfont.rs` 文件内的
 `#[cfg(test)] mod tests`），两个集成测试也整体迁移到 `tests/upstream_robustness.rs`

@@ -83,7 +83,34 @@ const DELIMS: &[(&str, char)] = &[
 ///
 /// 上游 `latex_to_unicode` 覆盖 130+ 符号，但 `\mid`（条件概率 `P(A \mid B)` 里的竖线）
 /// 与 `\lt` / `\gt` 不在其中，会走未知命令兜底漏成字面量。这三个是纯别名，重写零风险。
-const SYMBOL_ALIASES: &[(&str, char)] = &[("mid", '|'), ("lt", '<'), ("gt", '>')];
+///
+/// `N13`（review r1 的 N1）：`\ldots` / `\dots` 上游一律映射成中线点 `⋯`，但 LaTeX 语义
+/// 是"基线省略号" `…`（`\cdots` 才是中线点）。这里把前两者改写成 `…`。
+const SYMBOL_ALIASES: &[(&str, char)] = &[
+    ("mid", '|'),
+    ("lt", '<'),
+    ("gt", '>'),
+    ("ldots", '…'),
+    ("dots", '…'),
+];
+
+/// `N14`：源码里的**控制字符**（review r1 的 B3）。
+///
+/// `\n` / `\t` 之类会作为普通字符进入网格，破坏"行内结果单行 / 显示结果是字符网格"的契约，
+/// 而 LLM 输出的多行公式是常态。这里统一折叠成**一个空格**（换行在数学表达式里等价于
+/// 空白）。`\r\n` 折叠后也只留一个空格。
+const CONTROL_TO_SPACE: &[char] = &[
+    '\n', '\r', '\t', '\u{000b}', '\u{000c}', '\u{0085}', '\u{2028}', '\u{2029}', '\u{00a0}',
+];
+
+/// `N14` 的第二类：**零宽格式字符**，肉眼不可见、只会在宽度记账里制造噪声，直接删掉。
+const ZERO_WIDTH_TO_DROP: &[char] = &[
+    '\u{200b}', // ZERO WIDTH SPACE
+    '\u{200c}', // ZERO WIDTH NON-JOINER
+    '\u{200d}', // ZERO WIDTH JOINER
+    '\u{feff}', // ZERO WIDTH NO-BREAK SPACE / BOM
+    '\u{00ad}', // SOFT HYPHEN
+];
 
 /// 定界符命令名 → 字面字符（`lbrace` → `{`，`lVert` → `‖` …）。
 pub(crate) fn delimiter_command_char(name: &str) -> Option<char> {
@@ -93,11 +120,39 @@ pub(crate) fn delimiter_command_char(name: &str) -> Option<char> {
 /// 归一化入口。输入是"公式正文"（不含 markdown 的 `$`），输出可交给
 /// [`crate::latex::parse_equation`]。
 pub(crate) fn normalize(src: &str) -> String {
-    let chars: Vec<char> = src.chars().collect();
+    let chars: Vec<char> = sanitize(src).chars().collect();
     let (start, end) = strip_wrapping(&chars, 0, chars.len());
     let mut out = String::with_capacity(end - start);
     rewrite(&chars, start, end, &mut out);
     out.trim().to_string()
+}
+
+/// `N14`：控制字符 → 空格、零宽字符 → 删除。**必须在任何扫描之前做**，否则
+/// `\n` 会以普通字符的身份进入 parser 与网格（review r1 的 B3）。
+fn sanitize(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut pending_space = false;
+    for ch in src.chars() {
+        if ZERO_WIDTH_TO_DROP.contains(&ch) {
+            continue;
+        }
+        if CONTROL_TO_SPACE.contains(&ch) || ch.is_control() {
+            // 连续控制字符折叠成一个空格（`\r\n` 只留一个）
+            if !pending_space && !out.is_empty() {
+                pending_space = true;
+            }
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(ch);
+    }
+    if pending_space {
+        out.push(' ');
+    }
+    out
 }
 
 /// `N1`：剥掉完整包裹源码的 `$$…$$` / `$…$` / `\[…\]` / `\(…\)`（最多两层）。
@@ -432,6 +487,53 @@ mod tests {
     fn n12_symbol_aliases() {
         assert_eq!(n(r"P(A \mid B)"), "P(A | B)");
         assert_eq!(n(r"a \lt b \gt c"), "a < b > c");
+    }
+
+    #[test]
+    fn n13_ellipsis_aliases() {
+        assert_eq!(n(r"a \ldots b"), "a … b");
+        assert_eq!(n(r"a \dots b"), "a … b");
+        // 中线点保持上游行为
+        assert_eq!(n(r"a \cdots b"), r"a \cdots b");
+    }
+
+    #[test]
+    fn n14_control_characters_become_spaces() {
+        assert_eq!(n("a\nb"), "a b");
+        assert_eq!(n("a\r\nb"), "a b");
+        assert_eq!(n("a\tb"), "a b");
+        assert_eq!(n("a\n\n\nb"), "a b");
+        assert_eq!(n("x = 1\n"), "x = 1");
+        assert_eq!(n("\n x = 1"), "x = 1");
+        assert_eq!(n("a\u{000b}b\u{000c}c"), "a b c");
+    }
+
+    #[test]
+    fn n14_zero_width_characters_are_dropped() {
+        assert_eq!(n("a\u{200b}b"), "ab");
+        assert_eq!(n("a\u{feff}b"), "ab");
+        assert_eq!(n("a\u{00ad}b"), "ab");
+        // 只剩零宽字符 → 空
+        assert_eq!(n("\u{200b}"), "");
+    }
+
+    #[test]
+    fn n14_never_leaves_control_characters_behind() {
+        for src in [
+            "a\nb",
+            "a\tb",
+            "a\rb",
+            "\u{0}b",
+            "a\u{1}b",
+            "x = \\frac{1}{2}\n",
+            "\n\n",
+        ] {
+            let out = n(src);
+            assert!(
+                !out.chars().any(|c| c.is_control()),
+                "control char survived: {src:?} -> {out:?}"
+            );
+        }
     }
 
     #[test]

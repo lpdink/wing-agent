@@ -14,17 +14,22 @@
 //!
 //! | 条件 | 说明 |
 //! |---|---|
-//! | 归零后为空 / 全空白 | 没有可渲染的东西 |
-//! | 源码 > 8192 字符 / 花括号嵌套 > 256 层 | 预算闸 |
+//! | 归一化后为空 / 渲染结果只有空白 | 没有可渲染的东西（`\sqrt{}` / `\,` 也归这一类） |
+//! | 源码 > 8192 字符 / 花括号嵌套 > 64 层 | 预算闸（深度上限留了栈溢出余量） |
+//! | `\\` > 256 个 或 `&` > 256 个 | 结果必然超预算，在排版**之前**拒绝 |
 //! | 顶层 `&` 或 `\\` | 上游会静默截断（丢内容），必须拒绝 |
 //! | `\begin{X}` / `\end{X}` 不配对 | 同上 |
 //! | ≥ 2 个顶层多行环境 | 组合语义未定义 |
+//! | 多行环境的单元格 / 前后缀渲染失败 | **整条降级**，绝不用空格占位（内容会丢） |
 //! | `\left` / `\right` 计数不等 | 定界符必然错位 |
-//! | 输出里出现 `\` | 有命令没被渲染、原样漏出来（`\ce` / `\dfrac` / 未支持环境…） |
+//! | 源码以孤立的反斜杠结尾（`x + \`） | 上游会把它原样渲染出来 |
+//! | AST 里出现 `\` | 有命令没被渲染（`\ce` / `\dfrac` / 未支持环境…） |
+//! | 结果里出现控制字符 | 会破坏"行内单行 / 显示按网格行"的契约 |
 //! | `render_inline`：结果不是单行 | 多行块塞不进行内 |
 //! | `render_display`：宽度 > `max_width` / 高度或面积超预算 | 装不下 |
 //!
-//! `Some` 的保证：**输出里不含 `\`**，即"没有把没渲染的东西原样吐出来"。
+//! `Some` 的保证：**没有未渲染的命令被原样吐出来**（AST 层判定；注意 `\hat` 的几何
+//! 字形本身含反斜杠，所以这条不能说成"输出不含 `\`"），且主体符号不丢。
 
 use unicode_width::UnicodeWidthStr;
 
@@ -169,7 +174,7 @@ fn render_block_checked(src: &str) -> Result<RenderedBlock, Reject> {
 ///
 /// 供 `environments` 渲染单元格 / 前后缀时调用：单元格内容与顶层公式享受**完全相同**的
 /// 归一化、自检与降级语义（所以 `\begin{align}` 里嵌 `\begin{aligned}` 也能被处理，
-/// 而内层出现未支持命令时同样会被输出泄漏自检挡住）。
+/// 而内层出现未支持命令时同样会把理由上抛、让整条公式降级为字面量）。
 pub(crate) fn render_block_at(src: &str, depth: usize) -> Result<RenderedBlock, Reject> {
     if depth > MAX_ENV_DEPTH {
         return Err(Reject::TooDeep);
@@ -185,10 +190,12 @@ pub(crate) fn render_block_at(src: &str, depth: usize) -> Result<RenderedBlock, 
     guard::check_source(&chars, &structure)?;
 
     let block = match structure.envs.first() {
-        Some(span) if is_multiline(&span.name) => {
-            render_multiline_env(&chars, span, depth).ok_or(Reject::UnbalancedEnvironment)?
+        Some(span) if is_multiline(&span.name) => render_multiline_env(&chars, span, depth)?,
+        _ => {
+            let ast = parse_equation(&normalized);
+            guard::check_ast(&ast)?;
+            layout(&ast)
         }
-        _ => layout(&parse_equation(&normalized)),
     };
     let block = clamp_baseline(block);
 

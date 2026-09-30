@@ -26,13 +26,20 @@ pub(crate) struct EnvSpan {
 
 /// 一次全量扫描得到的顶层结构信息。
 ///
-/// "顶层" 的判据统一为：**花括号深度 0 且环境嵌套深度 0**。
+/// "顶层" 的判据统一为：**花括号深度 0 且环境嵌套深度 0**（行/列分隔符单独统计，见
+/// [`Structure::row_separator_count`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Structure {
     /// 顶层出现 `&`（上游 parser 会在这里 break，静默丢掉后半段）。
     pub top_level_column_sep: bool,
     /// 顶层出现 `\\`（同上，上游把它当行分隔符 break）。
     pub top_level_row_sep: bool,
+    /// 花括号深度 0 的 `\\` 总数（含环境内部的）—— 每个至少产生一行。
+    pub row_separator_count: usize,
+    /// 花括号深度 0 的 `&` 总数（含环境内部的）—— 每个至少产生一列。
+    pub column_separator_count: usize,
+    /// 源码以孤立的反斜杠结尾（`x + \`）：上游会把裸 `\` 渲染出来。
+    pub dangling_backslash: bool,
     /// 所有 `\begin{X}` 都有配对的、同名的 `\end{X}`。
     pub balanced_envs: bool,
     /// 顶层（非嵌套）环境跨度，按出现顺序。
@@ -50,6 +57,9 @@ impl Default for Structure {
         Self {
             top_level_column_sep: false,
             top_level_row_sep: false,
+            row_separator_count: 0,
+            column_separator_count: 0,
+            dangling_backslash: false,
             // `balanced_envs` 是"没能证明不配对"的正面属性，默认视为成立，
             // 由扫描过程置 false。
             balanced_envs: true,
@@ -136,17 +146,31 @@ pub(crate) fn scan(chars: &[char]) -> Structure {
                 brace_depth = brace_depth.saturating_sub(1);
                 i += 1;
             }
-            '&' if brace_depth == 0 && stack.is_empty() => {
-                st.top_level_column_sep = true;
+            '&' => {
+                if brace_depth == 0 {
+                    st.column_separator_count += 1;
+                    if stack.is_empty() {
+                        st.top_level_column_sep = true;
+                    }
+                }
                 i += 1;
             }
             '\\' => {
                 // 行分隔符 `\\`：注意它也可能出现在 `\\[3pt]` 里，这里只关心是否存在。
                 if chars.get(i + 1) == Some(&'\\') {
-                    if brace_depth == 0 && stack.is_empty() {
-                        st.top_level_row_sep = true;
+                    if brace_depth == 0 {
+                        st.row_separator_count += 1;
+                        if stack.is_empty() {
+                            st.top_level_row_sep = true;
+                        }
                     }
                     i += 2;
+                    continue;
+                }
+                // 孤立的反斜杠（后面什么都没有）：上游会把它当未知命令兜底成裸 `\`
+                if i + 1 >= chars.len() {
+                    st.dangling_backslash = true;
+                    i += 1;
                     continue;
                 }
                 match command_at(chars, i) {
@@ -364,6 +388,25 @@ mod tests {
     fn scan_tracks_brace_depth() {
         let st = scan(&chars(r"{{x}}"));
         assert_eq!(st.max_brace_depth, 2);
+    }
+
+    #[test]
+    fn scan_counts_separators_outside_braces() {
+        let st = scan(&chars(r"\begin{cases} a & b \\ c & d \end{cases}"));
+        assert_eq!(st.column_separator_count, 2);
+        assert_eq!(st.row_separator_count, 1);
+
+        // 花括号内的分隔符不计入（它们是 `\text{...}` 之类的字面内容）
+        let st = scan(&chars(r"\text{a & b}"));
+        assert_eq!(st.column_separator_count, 0);
+        assert!(!st.top_level_column_sep);
+    }
+
+    #[test]
+    fn scan_detects_dangling_backslash() {
+        assert!(scan(&chars(r"x + \")).dangling_backslash);
+        assert!(!scan(&chars(r"x + \ ")).dangling_backslash);
+        assert!(!scan(&chars(r"\frac{a}{b}")).dangling_backslash);
     }
 
     #[test]

@@ -1,19 +1,21 @@
 //! 自检与降级判据（本项目自研，非上游代码）。
 //!
-//! 上游引擎有两条会让结果"看起来正常但实际错了"的路径，本模块把它们变成**可判定**的
+//! 上游引擎有三条会让结果"看起来正常但实际错了"的路径，本模块把它们变成**可判定**的
 //! 拒绝理由：
 //!
 //! 1. **静默截断（输入侧）**：顶层 `\\` / `&` 会让上游 parser 直接 `break`，输出里连
 //!    一个 `\` 都不会留下（实测 `a \\ b` → `a `）。这类问题只能在输入侧发现，所以有
-//!    [`check_source`]；它建立在 [`crate::scan::scan`] 的结构信息上。
-//! 2. **命令泄漏（输出侧）**：上游渲染器本身**从不产生 `\`**，正文里的 `\` 只可能来自
-//!    `parse_command` 的未知命令兜底 `format!("\\{}", name)`（含未支持环境的
-//!    `Text("\begin{env}")`）。所以"输出里有 `\`" ⟺ "有东西没被渲染、原样漏出来了"，
-//!    一条判据覆盖 `\ce` / `\dfrac` / `\colon` / `\begin{align}` 残留等全部情况，
+//!    [`check_source`]；它建立在 [`crate::scan::scan`] 的结构信息上（顺带把行/列分隔符
+//!    数量、花括号深度、孤立反斜杠这些"必然超预算 / 必然出错"的信号前移到解析之前）。
+//! 2. **命令泄漏（AST 侧）**：上游渲染器渲染未知命令时会兜底成 `\name` 文本节点
+//!    （含未支持环境的 `Text("\begin{env}")`）。判据是 AST 里出现 `\`，见 [`check_ast`]。
+//!    **不能**改成"输出文本里有 `\`"——`\hat` 的几何字形（`/\`、`/‾‾\`）自带反斜杠，
+//!    那样会把正常渲染误判成泄漏。
+//! 3. **网格被污染**：结果里出现控制字符（`\n` / `\t`）或整块只有空白，
 //!    见 [`check_output`]。
 //!
 //! 另外这里集中放**预算闸**常量：上游排版是纯 CPU + 线性分配，正常公式毫秒级，但仍要
-//! 给"恶意/畸形输入"设上界，避免一次渲染吃掉整屏内存。
+//! 给"恶意/畸形输入"设上界，避免一次渲染吃掉整屏内存或爆栈。
 
 use crate::grid::rendered_block::RenderedBlock;
 use crate::scan::Structure;
@@ -21,12 +23,22 @@ use crate::scan::Structure;
 /// 源码字符数上限。单条公式的合理上界；上游实测 10000 项输入也不慢，但要有界。
 pub(crate) const MAX_SOURCE_CHARS: usize = 8192;
 
-/// 花括号嵌套深度上限。上游是递归下降 parser，深度直接等于调用栈深度。
-/// 上游自带 200 层测试（实测无栈溢出），这里留一倍余量。
-pub(crate) const MAX_BRACE_DEPTH: usize = 256;
+/// 花括号嵌套深度上限。上游是递归下降 parser + 递归排版，深度直接等于调用栈深度。
+///
+/// **实测依据**（review r1 的 S2）：debug 构建 + 2 MiB 线程栈（`cargo test` 测试线程 /
+/// `std::thread` 默认）下，嵌套 `\frac{…}{1}` 到 ~195 层就会 stack overflow（不可捕获的
+/// abort）。取 64 留 3 倍余量；真实公式的嵌套深度远小于此（连分式/嵌套矩阵通常 < 20）。
+pub(crate) const MAX_BRACE_DEPTH: usize = 64;
 
 /// 渲染结果的高度上限（行）。
 pub(crate) const MAX_HEIGHT: usize = 256;
+
+/// 行分隔符（`\\`）数量上限。每个顶层 `\\` 至少产生一行，超过它结果必然超 [`MAX_HEIGHT`]，
+/// 所以在源码扫描阶段就能拒绝，不必先排版（S2：把预算闸前移）。
+pub(crate) const MAX_ROW_SEPARATORS: usize = MAX_HEIGHT;
+
+/// 列分隔符（`&`）数量上限。同上，超过它结果必然超宽。
+pub(crate) const MAX_COL_SEPARATORS: usize = 256;
 
 /// 渲染结果的单元格总数上限（宽 × 高），防内存爆炸。
 pub(crate) const MAX_CELLS: usize = 262_144;
@@ -34,7 +46,7 @@ pub(crate) const MAX_CELLS: usize = 262_144;
 /// 拒绝理由。所有 `None` 都能对应到这里的一条，便于单测钉住判据边界。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reject {
-    /// 归一化后没有可渲染内容。
+    /// 归一化后没有可渲染内容（含"渲染出来只有空白"）。
     Empty,
     /// 源码超长。
     TooLong,
@@ -48,15 +60,21 @@ pub(crate) enum Reject {
     UnbalancedEnvironment,
     /// 出现两个及以上顶层环境（组合语义未定义）。
     MultipleEnvironments,
+    /// 环境适配层处理不了（空 body / 参数畸形 / 前后缀里还剩环境或定界符）。
+    UnsupportedEnvironment,
     /// `\left` / `\right` 计数不等。
     UnbalancedDelimiter,
-    /// 渲染输出里出现 `\`：有命令没被渲染、原样漏出来了。
+    /// 源码以孤立的反斜杠结尾（上游会把裸 `\` 渲染出来）。
+    IncompleteInput,
+    /// 有命令没被渲染、原样漏出来（AST 里出现 `\name` 文本节点）。
     LeakedCommand,
+    /// 渲染结果里出现控制字符（`\n` / `\t` …）——会破坏"单行 / 网格行"契约。
+    ControlCharacter,
     /// 结果宽度超过调用方给的 `max_width`。
     TooWide,
-    /// 结果高度超预算。
+    /// 结果高度（或源码里的行分隔符数量）超预算。
     TooTall,
-    /// 结果单元格总数超预算。
+    /// 结果单元格总数超预算，或源码里的列分隔符数量超预算。
     TooManyCells,
     /// 行内渲染结果不是单行。
     NotSingleLine,
@@ -69,6 +87,16 @@ pub(crate) fn check_source(chars: &[char], st: &Structure) -> Result<(), Reject>
     }
     if st.max_brace_depth > MAX_BRACE_DEPTH {
         return Err(Reject::TooDeep);
+    }
+    // 行/列分隔符数量是"结果必然超预算"的廉价上界，放在这里可以先拒绝再排版
+    if st.row_separator_count > MAX_ROW_SEPARATORS {
+        return Err(Reject::TooTall);
+    }
+    if st.column_separator_count > MAX_COL_SEPARATORS {
+        return Err(Reject::TooManyCells);
+    }
+    if st.dangling_backslash {
+        return Err(Reject::IncompleteInput);
     }
     if st.top_level_column_sep {
         return Err(Reject::TopLevelColumnSep);
@@ -88,11 +116,82 @@ pub(crate) fn check_source(chars: &[char], st: &Structure) -> Result<(), Reject>
     Ok(())
 }
 
-/// 输出侧泄漏自检 + 结果预算闸。
-pub(crate) fn check_output(block: &RenderedBlock) -> Result<(), Reject> {
-    if block.cells().iter().flatten().any(|c| c.contains('\\')) {
-        return Err(Reject::LeakedCommand);
+/// 泄漏自检：**在 AST 上**判断有没有命令没被渲染。
+///
+/// 上游渲染器本身只在一处产出反斜杠字形：`\hat` 的 `/\`、`/‾‾\` 几何（见
+/// `grid/layout.rs::layout_accent`）。所以"输出文本里有 `\`"并不等于泄漏（review r1 的
+/// S1：`\hat{ab}` 曾被自己的字形误伤成 `None`）。真正的泄漏只发生在 AST 层：
+///
+/// - `\unknowncmd` / 未支持环境 → `EqNode::Text("\\name")`（上游 `parse_command` 的兜底）；
+/// - `\text{...}` 里用户自己写的反斜杠 → `EqNode::TextBlock`。
+///
+/// 于是判据改成"AST 里出现 `\`"：解析器不会把输入里的 `\` 原样放进 `Text`（`\` 一律走
+/// `parse_command`），所以 AST 里有反斜杠 ⟺ 有东西没被渲染。
+pub(crate) fn check_ast(node: &crate::latex::EqNode) -> Result<(), Reject> {
+    use crate::latex::EqNode;
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        match n {
+            EqNode::Text(s) | EqNode::TextBlock(s) => {
+                if s.contains('\\') {
+                    return Err(Reject::LeakedCommand);
+                }
+            }
+            EqNode::Seq(nodes) => stack.extend(nodes.iter()),
+            EqNode::Sup(a, b) | EqNode::Sub(a, b) | EqNode::Frac(a, b) | EqNode::Binom(a, b) => {
+                stack.push(a);
+                stack.push(b);
+            }
+            EqNode::SupSub(a, b, c) => {
+                stack.push(a);
+                stack.push(b);
+                stack.push(c);
+            }
+            EqNode::Sqrt(a) | EqNode::Accent(a, _) => stack.push(a),
+            EqNode::BigOp { lower, upper, .. } => {
+                if let Some(l) = lower {
+                    stack.push(l);
+                }
+                if let Some(u) = upper {
+                    stack.push(u);
+                }
+            }
+            EqNode::Limit { lower, .. } => {
+                if let Some(l) = lower {
+                    stack.push(l);
+                }
+            }
+            EqNode::MathFont { content, .. } => stack.push(content),
+            EqNode::Delimited { content, .. } => stack.push(content),
+            EqNode::Matrix { rows, .. } => stack.extend(rows.iter().flatten()),
+            EqNode::Cases { rows } => {
+                for (v, c) in rows {
+                    stack.push(v);
+                    if let Some(c) = c {
+                        stack.push(c);
+                    }
+                }
+            }
+            EqNode::Brace { content, label, .. } => {
+                stack.push(content);
+                if let Some(l) = label {
+                    stack.push(l);
+                }
+            }
+            EqNode::StackRel {
+                base, annotation, ..
+            } => {
+                stack.push(base);
+                stack.push(annotation);
+            }
+            EqNode::Space(_) => {}
+        }
     }
+    Ok(())
+}
+
+/// 输出侧自检 + 结果预算闸。
+pub(crate) fn check_output(block: &RenderedBlock) -> Result<(), Reject> {
     if block.height() == 0 || block.width() == 0 {
         return Err(Reject::Empty);
     }
@@ -101,6 +200,24 @@ pub(crate) fn check_output(block: &RenderedBlock) -> Result<(), Reject> {
     }
     if block.width().saturating_mul(block.height()) > MAX_CELLS {
         return Err(Reject::TooManyCells);
+    }
+    let mut has_visible = false;
+    for row in block.cells() {
+        for cell in row {
+            for ch in cell.chars() {
+                // 控制字符会破坏"单行 / 每行一个网格行"的契约（review r1 的 B3）
+                if ch.is_control() {
+                    return Err(Reject::ControlCharacter);
+                }
+                if ch != ' ' {
+                    has_visible = true;
+                }
+            }
+        }
+    }
+    if !has_visible {
+        // 全空白结果（`\sqrt{}` / `\,`）：渲染出来等于没有，交给上层显示源码
+        return Err(Reject::Empty);
     }
     Ok(())
 }
@@ -173,17 +290,91 @@ mod tests {
     fn rejects_deep_nesting() {
         let deep = "{".repeat(MAX_BRACE_DEPTH + 1);
         assert_eq!(verdict(&deep), Err(Reject::TooDeep));
+        // 上限本身可以通过
+        let ok = format!(
+            "{}x{}",
+            "{".repeat(MAX_BRACE_DEPTH),
+            "}".repeat(MAX_BRACE_DEPTH)
+        );
+        assert_eq!(verdict(&ok), Ok(()));
     }
 
     #[test]
-    fn detects_leaked_commands_in_output() {
-        // 未知命令会被上游兜底成 `\name` 字面量
+    fn rejects_too_many_row_or_column_separators() {
+        let rows = format!(
+            r"\begin{{array}}{{c}} {} \end{{array}}",
+            vec!["1"; MAX_ROW_SEPARATORS + 2].join(r" \\ ")
+        );
+        assert_eq!(verdict(&rows), Err(Reject::TooTall));
+
+        let cols = format!(
+            r"\begin{{array}}{{c}} {} \end{{array}}",
+            vec!["1"; MAX_COL_SEPARATORS + 2].join(" & ")
+        );
+        assert_eq!(verdict(&cols), Err(Reject::TooManyCells));
+    }
+
+    #[test]
+    fn rejects_dangling_backslash() {
+        assert_eq!(verdict(r"x + \"), Err(Reject::IncompleteInput));
+        // `\ `（反斜杠 + 空格）是合法的空格命令，不算孤立反斜杠
+        assert_eq!(verdict(r"x + \ "), Ok(()));
+    }
+
+    #[test]
+    fn ast_leak_check_is_precise() {
+        use crate::latex::parse_equation;
+        // 未知命令会被兜底成 `\name` 文本节点
         assert_eq!(
-            check_output(&crate::grid::render(r"\ce{2H2O}")),
+            check_ast(&parse_equation(r"\ce{2H2O}")),
             Err(Reject::LeakedCommand)
         );
-        // 正常公式不会有反斜杠
-        assert_eq!(check_output(&crate::grid::render(r"\frac{a}{b}")), Ok(()));
+        assert_eq!(
+            check_ast(&parse_equation(r"\begin{unknown} x \end{unknown}")),
+            Err(Reject::LeakedCommand)
+        );
+        assert_eq!(
+            check_ast(&parse_equation(r"\unknowncmd{1}")),
+            Err(Reject::LeakedCommand)
+        );
+        // 正常公式没有反斜杠
+        assert_eq!(check_ast(&parse_equation(r"\frac{a}{b}")), Ok(()));
+        assert_eq!(check_ast(&parse_equation(r"\hat{ab}")), Ok(()));
+        assert_eq!(check_ast(&parse_equation(r"\{x\}")), Ok(()));
+        // `\text{...}` 里的反斜杠同样属于"没被渲染"
+        assert_eq!(
+            check_ast(&parse_equation(r"\text{\alpha}")),
+            Err(Reject::LeakedCommand)
+        );
+    }
+
+    #[test]
+    fn rejects_blank_and_control_character_output() {
+        // 全空白结果（`\sqrt{}` / `\,`）等于没渲染
+        assert_eq!(
+            check_output(&crate::grid::render(r"\sqrt{}")),
+            Err(Reject::Empty)
+        );
+        assert_eq!(
+            check_output(&crate::grid::render(r"\,")),
+            Err(Reject::Empty)
+        );
+
+        let with_newline = RenderedBlock::new(vec![vec!["a\nb".to_string()]], 0);
+        assert_eq!(check_output(&with_newline), Err(Reject::ControlCharacter));
+        let with_tab = RenderedBlock::new(vec![vec!["a".to_string(), "\t".to_string()]], 0);
+        assert_eq!(check_output(&with_tab), Err(Reject::ControlCharacter));
+    }
+
+    #[test]
+    fn output_check_does_not_mistake_hat_geometry_for_a_leak() {
+        // `\hat{ab}` 的渲染结果自带 `\` 字形（`/\`），它必须能通过输出侧自检
+        let block = crate::grid::render(r"\hat{ab}");
+        assert!(
+            format!("{block}").contains('\\'),
+            "geometry should contain a backslash"
+        );
+        assert_eq!(check_output(&block), Ok(()));
     }
 
     #[test]

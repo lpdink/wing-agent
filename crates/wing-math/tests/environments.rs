@@ -6,7 +6,7 @@
 //! 所有用例都经公开 API（`render_display`），并顺带断言"输出里没有 `\`"。
 
 use unicode_width::UnicodeWidthStr;
-use wing_math::render_display;
+use wing_math::{render_display, render_inline};
 
 fn lines(src: &str) -> Vec<String> {
     render_display(src, 200)
@@ -243,4 +243,99 @@ fn multiline_environment_is_not_silently_truncated() {
         );
     }
     assert!(!text.contains('\\'), "leaked command in\n{text}");
+}
+
+// ── review r1 的 B1 / N2 回归 ────────────────────────────────────────
+
+#[test]
+fn failed_cell_degrades_the_whole_formula_instead_of_blanking_it() {
+    // B1 红线：单元格渲染失败必须让整条公式降级为 None（上层显示源码字面量），
+    // 绝不允许把那一格替换成空格（= 静默丢内容）。
+    for (src, lost) in [
+        (
+            r"\begin{align} a &= \ce{2H2O} \\ c &= d \end{align}",
+            r"\ce",
+        ),
+        (
+            r"\begin{align} \unknowncmd{1} &= b \end{align}",
+            r"\unknowncmd",
+        ),
+        (
+            r"\begin{align} a &= \widehat{xyz} \\ c &= d \end{align}",
+            r"\widehat",
+        ),
+        (
+            r"\begin{array}{c} \substack{i} \\ b \end{array}",
+            r"\substack",
+        ),
+    ] {
+        assert_eq!(render_display(src, 400), None, "must degrade: {src}");
+        assert!(
+            wing_math::render_block(src).is_none(),
+            "must degrade: {src}"
+        );
+        assert!(
+            render_inline(src).is_none(),
+            "must degrade (never a blank line): {src}"
+        );
+        let _ = lost;
+    }
+}
+
+#[test]
+fn failed_prefix_or_suffix_degrades_the_whole_formula() {
+    for src in [
+        r"\ce{2H2O} \begin{aligned} a &= b \end{aligned}",
+        r"\begin{aligned} a &= b \end{aligned} \unknowncmd{x}",
+        r"\pmod{n} \begin{gather} a \end{gather}",
+    ] {
+        assert_eq!(render_display(src, 400), None, "must degrade: {src}");
+    }
+}
+
+#[test]
+fn deep_nesting_degrades_instead_of_returning_a_blank_line() {
+    // B1 最恶性形态：9 层 `aligned` 嵌套原来返回 w=0/h=1 的空行
+    let deep = |levels: usize| {
+        format!(
+            "{}a &= b{}",
+            r"\begin{aligned} ".repeat(levels),
+            r" \end{aligned}".repeat(levels)
+        )
+    };
+    assert_eq!(render_display(&deep(9), 400), None);
+    assert!(render_display(&deep(3), 400).is_some());
+}
+
+#[test]
+fn empty_environment_body_degrades() {
+    assert_eq!(render_display(r"\begin{align}\end{align}", 80), None);
+    assert_eq!(render_display(r"\begin{align} & \end{align}", 80), None);
+}
+
+#[test]
+fn wide_characters_align_columns_in_environments() {
+    // N2：宽字符 + 上下标时列要对齐
+    let src = r"\begin{align} x^{中} &= b \\ c &= d \end{align}";
+    let out = lines(src);
+    let eq_columns: Vec<usize> = out.iter().filter_map(|l| l.find('=')).collect();
+    assert_eq!(eq_columns.len(), 2, "{out:#?}");
+    assert_eq!(eq_columns[0], eq_columns[1], "misaligned:\n{out:#?}");
+    assert_rectangular(src);
+}
+
+#[test]
+fn cjk_text_cells_keep_display_width_columns() {
+    let src = r"\begin{array}{cc} \text{中文} & b \\ c & d \end{array}";
+    assert_rectangular(src);
+    let out = lines(src);
+    assert_eq!(out.len(), 2);
+}
+
+#[test]
+fn binom_inside_environment_is_aligned() {
+    let src = r"\begin{align} \binom{n}{k} &= x \\ y &= z \end{align}";
+    let out = lines(src);
+    assert!(out.iter().any(|l| l.contains("⎛n⎞")), "{out:#?}");
+    assert_rectangular(src);
 }

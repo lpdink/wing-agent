@@ -251,3 +251,182 @@ fn some_results_keep_the_intended_symbols() {
         assert_no_leak(&text);
     }
 }
+
+// ── review r1 的 B/S 回归 ───────────────────────────────────────────
+
+#[test]
+fn none_when_a_cell_fails_to_render() {
+    // B1：单元格渲染失败绝不能退化成空格（内容静默丢失），必须整条降级
+    for src in [
+        r"\begin{align} a &= \ce{2H2O} \\ c &= d \end{align}",
+        r"\begin{align} \unknowncmd{1} &= b \end{align}",
+        r"\begin{align} a &= \widehat{xyz} \\ c &= d \end{align}",
+        r"\begin{align} a &= b \substack{i} \end{align}",
+        r"\begin{aligned} x &= \frac{a}{b} \\ y &= \pmod{n} \end{aligned}",
+    ] {
+        assert_eq!(render_display(src, 400), None, "should degrade: {src}");
+        assert!(render_block(src).is_none(), "should degrade: {src}");
+    }
+}
+
+#[test]
+fn none_when_prefix_or_suffix_fails_to_render() {
+    // B1：前后缀渲染失败同样必须整条降级（之前会静默丢掉前缀）
+    for src in [
+        r"\ce{2H2O} \begin{aligned} a &= b \end{aligned}",
+        r"\begin{aligned} a &= b \end{aligned} \unknowncmd{x}",
+        r"\widehat{xyz} \begin{array}{c} a \end{array}",
+    ] {
+        assert_eq!(render_display(src, 400), None, "should degrade: {src}");
+    }
+}
+
+#[test]
+fn none_when_environment_nesting_exceeds_the_budget() {
+    // B1 的最恶性形态：超深嵌套原来会返回一个空行（公式整体消失）
+    let deep = |levels: usize| {
+        format!(
+            "{}a &= b{}",
+            r"\begin{aligned} ".repeat(levels),
+            r" \end{aligned}".repeat(levels)
+        )
+    };
+    assert_eq!(render_display(&deep(9), 400), None);
+    assert_eq!(render_display(&deep(12), 400), None);
+    // 预算之内的嵌套照常工作
+    let m = render_display(&deep(3), 400).unwrap();
+    assert!(m.to_plain_text().contains("a  = b"));
+}
+
+#[test]
+fn control_characters_never_break_the_row_contract() {
+    // B3：`\n` / `\t` 归一化成空格；单行与网格行契约必须成立
+    assert_eq!(render_inline("a\nb").as_deref(), Some("a b"));
+    assert_eq!(render_inline("x + \tb").as_deref(), Some("x + b"));
+    assert_eq!(render_inline("a\r\nb").as_deref(), Some("a b"));
+
+    for src in [
+        "a\nb",
+        "x + \tb",
+        "x = \\frac{-b \\pm \\sqrt{b^2-4ac}}\n{2a}",
+        "\\int_0^\\infty\ne^{-x^2} dx = \\frac{\\sqrt{\\pi}}{2}",
+        "f(x) = \\begin{cases}\nx^2 & x > 0 \\\\\n0 & x \\le 0\n\\end{cases}",
+        "$$\nx + 1\n$$",
+    ] {
+        // 行内结果必须单行、无控制字符
+        if let Some(text) = render_inline(src) {
+            assert!(
+                !text.contains('\n'),
+                "newline survived in {src:?} -> {text:?}"
+            );
+            assert!(!text.contains('\t'), "tab survived in {src:?} -> {text:?}");
+            assert!(
+                !text.chars().any(|c| c.is_control()),
+                "control char survived in {src:?}"
+            );
+        }
+        // 显示结果：每个网格行内部不得含控制字符，且行数账目自洽
+        if let Some(m) = render_display(src, 400) {
+            for line in m.lines() {
+                assert!(
+                    !line.chars().any(|c| c.is_control()),
+                    "control char inside a grid row for {src:?}: {line:?}"
+                );
+            }
+            assert_eq!(
+                m.height(),
+                m.lines().len(),
+                "height must match the number of grid rows for {src:?}"
+            );
+            assert_eq!(
+                m.to_plain_text().lines().count(),
+                m.height(),
+                "grid rows must be exactly the newline-joined lines for {src:?}"
+            );
+        }
+    }
+
+    // 换行折在 `\frac` 参数之间（多行公式的常态）也要正确渲染
+    let m = render_display("x = \\frac{-b \\pm \\sqrt{b^2-4ac}}\n{2a}", 400).unwrap();
+    assert!(m.to_plain_text().contains("2a"), "{}", m.to_plain_text());
+}
+
+#[test]
+fn hat_geometry_is_not_mistaken_for_a_leak() {
+    // S1：`\hat` 一族画出来的反斜杠字形不能被泄漏自检误伤
+    for (src, needle) in [
+        (r"\hat{a}", "^"),
+        (r"\hat{ab}", "/\\"),
+        (r"\hat{abc}", "/\\"),
+        (r"\hat{abcd}", "‾"),
+        (r"\hat{\theta}", "^"),
+        (r"\hat{H}\psi", "^"),
+    ] {
+        let m = render_display(src, 80).unwrap_or_else(|| panic!("expected Some for {src}"));
+        assert!(
+            m.to_plain_text().contains(needle),
+            "{src}: missing {needle:?} in\n{}",
+            m.to_plain_text()
+        );
+    }
+}
+
+#[test]
+fn none_for_blank_results() {
+    // N3：渲染出来只有空白等于没渲染
+    for src in [r"\sqrt{}", r"\,", r"\!", r"\ ", r"{}"] {
+        assert_eq!(render_display(src, 80), None, "should degrade: {src}");
+    }
+}
+
+#[test]
+fn named_operators_keep_the_space_before_their_argument() {
+    // S3：`\log p` 不能粘成 `logp`
+    for (src, expected) in [
+        (r"\log p(x)", "log p(x)"),
+        (r"\sin x", "sin x"),
+        (r"\det A", "det A"),
+        (r"\max f(x)", "max f(x)"),
+        (r"\ln x", "ln x"),
+    ] {
+        assert_eq!(render_inline(src).as_deref(), Some(expected), "for {src}");
+    }
+    // 运算符两侧的间距
+    assert_eq!(render_inline(r"a \cdot b").as_deref(), Some("a · b"));
+    // 带下标的算子（`\log_2`）是"极限式"排版（下标另起一行），这里只验证内容不丢
+    let m = render_display(r"\log_2 n", 80).unwrap();
+    let text = m.to_plain_text();
+    assert!(text.contains("log"), "{text}");
+    assert!(text.contains('2'), "{text}");
+    assert!(text.contains('n'), "{text}");
+    // `\lim` 后面的空格来自源码，不能被重复补一次
+    let m = render_display(r"\lim_{n \to \infty} \frac{1}{n}", 80).unwrap();
+    assert_eq!(m.lines()[1], " lim  ───");
+}
+
+#[test]
+fn binom_is_rendered_as_a_stacked_pair_inside_the_parentheses() {
+    // S4：`\binom{n}{k}` 的括号要与内容同行
+    let m = render_display(r"\binom{n}{k}", 80).unwrap();
+    assert_eq!(m.lines(), ["⎛n⎞", "⎝k⎠"]);
+
+    // B2：空参数不得 panic，也不得画出错位形状
+    assert_eq!(render_display(r"\binom{}{}", 80), None);
+    assert!(render_display(r"\binom{}{b}", 80).is_some());
+    assert!(render_display(r"\binom{a}{}", 80).is_some());
+    assert!(render_display(r"\binom{a}{b}", 80).is_some());
+}
+
+#[test]
+fn wide_characters_in_scripts_do_not_break_column_alignment() {
+    // N2：CJK 宽字符 + 上下标时，环境里各行的列要对齐
+    let m = render_display(r"\begin{align} x^{中} &= b \\ c &= d \end{align}", 200).unwrap();
+    let eq_columns: Vec<usize> = m.lines().iter().filter_map(|l| l.find('=')).collect();
+    assert_eq!(eq_columns.len(), 2, "{}", m.to_plain_text());
+    assert_eq!(
+        eq_columns[0],
+        eq_columns[1],
+        "columns misaligned:\n{}",
+        m.to_plain_text()
+    );
+}

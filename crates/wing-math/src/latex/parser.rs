@@ -16,10 +16,18 @@
 //   3. 4 处 `collapsible_if` 机械折叠（let-chains），语义不变 —— 本仓库
 //      `cargo clippy -- -D warnings` 必须干净，改点均在原地标了「本地改动」注释：
 //      `maybe_wrap_op_spacing` / `parse_sequence_until_ex`（两处）/ `parse_command`。
-//   4. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt
+//   4. `is_spaced_operator` 加入 `·`（U+00B7）：`\cdot` 在 LaTeX 里是二元运算符，
+//      上游漏了它，`a \cdot b` 被渲染成 `a ·b`。
+//   5. 命名算子（`\log` `\sin` `\det` `\max` …）后面被吃掉的空格补回来：
+//      上游读完命令名后无条件吃掉一个尾随空格（TeX 控制词惯例），但命名算子后面那个
+//      空格在 LaTeX 里是有语义的，被吃掉后 `\log p(x)` 渲染成 `logp(x)`。
+//   6. `parse_group_atom` 先跳过参数前的空白：LaTeX 允许 `\frac {a} {b}`，上游不跳
+//      空格会把第二个参数解析成一个空格，`\frac{X} {Y}` 的分母因此消失、`{Y}` 被挤到
+//      最后一行（多行公式折行经控制字符归一化后正好是这个形状）。
+//   7. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt
 //      处理，因此有纯空白差异；已用「先 rustfmt 上游文件、再与本文件逐行 diff」核对，
 //      除上述改动外逐字一致（核对脚本见 crate 根 NOTICE 的「内联保真度」一节）。
-//   除以上四点外与上游逐字一致（含文件内联测试）。
+//   除以上七点外与上游逐字一致（含文件内联测试）。
 // ---------------------------------------------------------------------------
 
 //! The parser. Turns LaTeX math strings into [`EqNode`] trees.
@@ -47,6 +55,9 @@ fn is_spaced_operator(ch: char) -> bool {
         '\u{2192}' | '\u{2190}' | '\u{2194}' | '\u{21D2}' | '\u{21D0}' | '\u{21D4}' | // → ← ↔ ⇒ ⇐ ⇔
         '\u{227A}' | '\u{227B}' | '\u{223C}' | '\u{2245}' | '\u{226A}' | '\u{226B}' | // ≺ ≻ ∼ ≅ ≪ ≫
         '\u{221D}' | // ∝
+        // 本地改动（见文件头）：`·`（`\cdot`）在 LaTeX 里是二元运算符，两侧要有间距；
+        // 上游漏了它，`a \cdot b` 被渲染成 `a ·b`。
+        '\u{00B7}' |
         '\u{00B1}' | '\u{2213}' | '\u{00D7}' | '\u{00F7}' // ± ∓ × ÷
     )
 }
@@ -245,6 +256,13 @@ impl EqParser {
     /// Used by sqrt, frac, and other constructs that take arguments.
     /// Tracks paren nesting so `((3x+3))` correctly distinguishes inner visible parens from grouping parens.
     fn parse_group_atom(&mut self) -> EqNode {
+        // 本地改动（见文件头）：LaTeX 允许命令参数前有空白（`\frac {a} {b}` 合法），
+        // 上游不跳空格，于是 `\frac{X} {Y}` 的分母会被解析成一个空格、`{Y}` 变成
+        // 紧随其后的独立分组，渲染成品里分母消失、body 被挤到最后一行。
+        // 多行公式折行（`\frac{X}\n{Y}`）经控制字符归一化后正好是这个形状，所以必须跳过。
+        while self.peek() == Some(' ') {
+            self.advance();
+        }
         if self.peek() == Some('(') {
             self.advance();
             // Parse content, but track nested parens so we only stop
@@ -547,7 +565,9 @@ impl EqParser {
             }
         }
         // Skip one trailing space if present
-        if self.peek() == Some(' ') {
+        // 本地改动（见文件头）：记下"是否吃掉了一个空格"，供命名算子把语义空格补回来。
+        let had_trailing_space = self.peek() == Some(' ');
+        if had_trailing_space {
             self.advance();
         }
 
@@ -689,9 +709,18 @@ impl EqParser {
                 self.advance();
                 lower = Some(self.parse_group_atom());
             }
-            return EqNode::Limit {
+            // 本地改动（见文件头）：上游在读完命令名后无条件吃掉一个尾随空格
+            // （TeX 控制词的惯例），但命名算子（`\log` `\sin` `\det` …）后面那个空格
+            // 在 LaTeX 里是有语义的：算子与它的参数之间必须有间隔。被吃掉后
+            // `\log p(x)` 会渲染成 `logp(x)`（review r1 的 S3）。这里把吃掉的空格补回来。
+            let node = EqNode::Limit {
                 name: name.clone(),
                 lower: lower.map(Box::new),
+            };
+            return if had_trailing_space {
+                EqNode::Seq(vec![node, EqNode::Text(" ".to_string())])
+            } else {
+                node
             };
         }
 

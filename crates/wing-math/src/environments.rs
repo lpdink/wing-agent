@@ -28,8 +28,11 @@
 //! - 前缀/后缀里仍有 `\begin` / `\left` / `\right` → 返回 [`Option::None`]（组合语义
 //!   我们没定义，宁可整条降级）。
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::grid::layout::build_delimiter;
 use crate::grid::rendered_block::RenderedBlock;
+use crate::guard::{self, Reject};
 use crate::normalize::delimiter_command_char;
 use crate::scan::{EnvSpan, brace_arg, command_at, scan, slice, split_top_level};
 
@@ -80,13 +83,15 @@ fn takes_count_arg(name: &str) -> bool {
 /// 渲染 `chars` 里由 `span` 描述的顶层多行环境。
 ///
 /// `chars` 是**归一化之后**的整条公式；`depth` 是当前的环境嵌套深度（单元格递归时会 +1）。
-/// 返回 [`Option::None`] 表示"这个环境我们处理不了"，由调用方降级为源码字面量。
+///
+/// 返回 [`Reject`] 表示"这个环境（或它的某个单元格/前后缀）渲染不了"。**必须整条上抛**：
+/// 单元格渲染失败绝不能退化成"空格占位"——那就是静默丢内容（review r1 的 B1）。
 pub(crate) fn render_multiline_env(
     chars: &[char],
     span: &EnvSpan,
     depth: usize,
-) -> Option<RenderedBlock> {
-    let kind = classify(&span.name)?;
+) -> Result<RenderedBlock, Reject> {
+    let kind = classify(&span.name).ok_or(Reject::UnsupportedEnvironment)?;
 
     let prefix = &chars[..span.start];
     let suffix = &chars[span.end..];
@@ -95,13 +100,13 @@ pub(crate) fn render_multiline_env(
     let (left_delim, prefix) = take_left_delim(prefix);
     let (right_delim, suffix) = take_right_delim(suffix);
     if has_env_or_delim(prefix) || has_env_or_delim(suffix) {
-        return None;
+        return Err(Reject::UnsupportedEnvironment);
     }
 
     let prefix_src = text(prefix);
     let suffix_src = text(suffix);
-    let prefix_block = render_cell(&prefix_src, depth);
-    let suffix_block = render_cell(&suffix_src, depth);
+    let prefix_block = render_cell(&prefix_src, depth)?;
+    let suffix_block = render_cell(&suffix_src, depth)?;
 
     let body: Vec<char> = chars[span.body_start..span.body_end].to_vec();
     let (body, spec) = strip_preamble(&span.name, kind, &body)?;
@@ -118,7 +123,7 @@ pub(crate) fn render_multiline_env(
     }
 
     if left_delim.is_none() && right_delim.is_none() {
-        return Some(block);
+        return Ok(block);
     }
     // 定界符与块同高才不会让 `beside` 多长出一行：统一把基线放到中线
     let height = block.height();
@@ -127,7 +132,7 @@ pub(crate) fn render_multiline_env(
         Some(d) => build_delimiter(&d, height).beside(&block),
         None => block,
     };
-    Some(match right_delim {
+    Ok(match right_delim {
         Some(d) => block.beside(&build_delimiter(&d, height)),
         None => block,
     })
@@ -136,25 +141,29 @@ pub(crate) fn render_multiline_env(
 /// 摘掉 body 的前导参数：`array` 的列格式串、`alignat` 的列数。
 ///
 /// 返回 `(去掉参数后的 body, 列格式)`。
-fn strip_preamble(name: &str, kind: EnvKind, body: &[char]) -> Option<(Vec<char>, Vec<ColAlign>)> {
+fn strip_preamble(
+    name: &str,
+    kind: EnvKind,
+    body: &[char],
+) -> Result<(Vec<char>, Vec<ColAlign>), Reject> {
     let mut i = 0;
     while i < body.len() && body[i].is_whitespace() {
         i += 1;
     }
     match kind {
         EnvKind::Array => {
-            let (spec, next) = brace_arg(body, i)?;
-            Some((body[next..].to_vec(), parse_array_spec(&spec)))
+            let (spec, next) = brace_arg(body, i).ok_or(Reject::UnsupportedEnvironment)?;
+            Ok((body[next..].to_vec(), parse_array_spec(&spec)))
         }
         EnvKind::AlignPairs if takes_count_arg(name) => {
             if body.get(i) == Some(&'{') {
-                let (_, next) = brace_arg(body, i)?;
-                Some((body[next..].to_vec(), Vec::new()))
+                let (_, next) = brace_arg(body, i).ok_or(Reject::UnsupportedEnvironment)?;
+                Ok((body[next..].to_vec(), Vec::new()))
             } else {
-                Some((body.to_vec(), Vec::new()))
+                Ok((body.to_vec(), Vec::new()))
             }
         }
-        _ => Some((body.to_vec(), Vec::new())),
+        _ => Ok((body.to_vec(), Vec::new())),
     }
 }
 
@@ -186,12 +195,14 @@ fn align_of(kind: EnvKind, spec: &[ColAlign], col: usize) -> ColAlign {
 }
 
 /// 把 body 切成网格：`\\` 分行、`&` 分列、每格独立排版、按列对齐堆叠。
+///
+/// 任一单元格渲染失败都会把 [`Reject`] 上抛（**不允许**用空格占位，见 review r1 的 B1）。
 fn build_grid(
     kind: EnvKind,
     spec: &[ColAlign],
     body: &[char],
     depth: usize,
-) -> Option<RenderedBlock> {
+) -> Result<RenderedBlock, Reject> {
     // 1. 分行分列（空行丢弃：末尾的 `\\` 会产生一个空行）
     let mut rows: Vec<Vec<String>> = Vec::new();
     for row_range in split_top_level(body, true) {
@@ -206,18 +217,28 @@ fn build_grid(
         rows.push(cells);
     }
     if rows.is_empty() {
-        return None;
+        return Err(Reject::Empty);
+    }
+    // 早拒绝：行/列数已经超预算时不必再排版（S2：把预算闸前移）
+    if rows.len() > guard::MAX_HEIGHT {
+        return Err(Reject::TooTall);
+    }
+    let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    if ncols == 0 {
+        return Err(Reject::Empty);
+    }
+    if ncols > guard::MAX_COL_SEPARATORS + 1 {
+        return Err(Reject::TooManyCells);
     }
 
-    // 2. 每格独立排版（空单元格保持 None，占位但不贡献高度）
-    let cells: Vec<Vec<Option<RenderedBlock>>> = rows
-        .iter()
-        .map(|row| row.iter().map(|c| render_cell(c, depth + 1)).collect())
-        .collect();
-
-    let ncols = cells.iter().map(|r| r.len()).max().unwrap_or(0);
-    if ncols == 0 {
-        return None;
+    // 2. 每格独立排版（空单元格保持 None，占位但不贡献高度；失败则整条上抛）
+    let mut cells: Vec<Vec<Option<RenderedBlock>>> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let mut rendered = Vec::with_capacity(row.len());
+        for cell in row {
+            rendered.push(render_cell(cell, depth + 1)?);
+        }
+        cells.push(rendered);
     }
 
     // 3. 列宽
@@ -246,43 +267,85 @@ fn build_grid(
                 Some(prev) => prev.beside(&gap).beside(&padded),
             });
         }
-        row_blocks.push(row_block?);
+        row_blocks.push(row_block.ok_or(Reject::Empty)?);
     }
 
     // 5. 竖向堆叠（不留空行）。每个行块在步骤 4 里已被补到网格宽度（单元格补齐 +
     //    列间距），所以 `above` 只做纯粹的上下拼接；宽度不足时它会自行右补空格。
     // 网格基线取**首行**的基线：`aligned` 这类环境在正文里是按第一行对齐的，
     // 这样 `f(x) = \begin{aligned}…` 的前缀会落在第一行而不是中间
-    let baseline = row_blocks.first()?.baseline();
+    let baseline = row_blocks[0].baseline();
     let mut iter = row_blocks.into_iter();
-    let mut grid = iter.next()?;
+    let mut grid = iter.next().ok_or(Reject::Empty)?;
     for block in iter {
         grid = RenderedBlock::above(&grid, &block, grid.height().saturating_sub(1));
     }
 
     let height = grid.height();
     if height == 0 {
-        return None;
+        return Err(Reject::Empty);
     }
-    Some(RenderedBlock::new(
+    Ok(RenderedBlock::new(
         grid.cells().to_vec(),
         baseline.min(height - 1),
     ))
 }
 
-/// 单元格排版：整体 trim + 去掉首尾全空列。
+/// 单元格排版：整体 trim + 去掉首尾全空列 + 行宽归一化。
 ///
 /// 单元格内容**递归走完整管线**（[`crate::api::render_block_at`]），所以它享受与顶层
 /// 公式完全相同的归一化、自检与降级语义，也支持再嵌一层多行环境。
 ///
-/// 返回 `None` 表示这个格子是空的（仍然占列宽，但不贡献高度）。
-fn render_cell(src: &str, depth: usize) -> Option<RenderedBlock> {
+/// 返回：
+/// - `Ok(None)`：格子是空的（仍然占列宽，但不贡献高度）；
+/// - `Ok(Some(block))`：渲染成功；
+/// - `Err(Reject)`：**渲染失败** —— 必须整条上抛，绝不能用空格占位（B1）。
+fn render_cell(src: &str, depth: usize) -> Result<Option<RenderedBlock>, Reject> {
     let src = src.trim();
     if src.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let block = crate::api::render_block_at(src, depth).ok()?;
-    Some(trim_blank_columns(block))
+    match crate::api::render_block_at(src, depth) {
+        Ok(block) => {
+            let block = normalize_row_widths(trim_blank_columns(block));
+            if block.height() == 0 {
+                return Ok(None);
+            }
+            Ok(Some(block))
+        }
+        // 真·空内容（`\,`、`{}` 之类）：占位但不贡献高度，不算丢内容
+        Err(Reject::Empty) => Ok(None),
+        Err(other) => Err(other),
+    }
+}
+
+/// 一行的显示宽度（按 `unicode-width`，CJK 宽字符算 2 列）。
+fn row_width(row: &[String]) -> usize {
+    row.iter().map(|c| UnicodeWidthStr::width(c.as_str())).sum()
+}
+
+/// 让块的每一行都有相同的**显示宽度**（review r1 的 N2）。
+///
+/// 上游 `RenderedBlock` 在宽字符（CJK/emoji）参与组合时，"格数"与"列数"会不一致
+/// （`from_text` 一格一个 `char`，而 `width` 按 `unicode-width` 记账），于是块内各行
+/// 宽度参差，参与 `beside` / `above` 组合时会错列。这里按显示宽度把每行补齐。
+fn normalize_row_widths(block: RenderedBlock) -> RenderedBlock {
+    let widths: Vec<usize> = block.cells().iter().map(|r| row_width(r)).collect();
+    let max = widths.iter().copied().max().unwrap_or(0);
+    if widths.iter().all(|w| *w == max) {
+        return block;
+    }
+    let cells: Vec<Vec<String>> = block
+        .cells()
+        .iter()
+        .zip(&widths)
+        .map(|(row, w)| {
+            let mut row = row.clone();
+            row.extend(std::iter::repeat_n(" ".to_string(), max - w));
+            row
+        })
+        .collect();
+    RenderedBlock::new(cells, block.baseline())
 }
 
 /// `&[char]` → `String`。
@@ -420,7 +483,7 @@ mod tests {
         let chars: Vec<char> = normalized.chars().collect();
         let st = scan(&chars);
         let span = st.envs.first()?;
-        render_multiline_env(&chars, span, 0)
+        render_multiline_env(&chars, span, 0).ok()
     }
 
     fn lines(src: &str) -> Vec<String> {

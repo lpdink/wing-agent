@@ -25,11 +25,12 @@
 //! ```text
 //! src ──normalize──▶ guard(输入侧结构自检) ──▶ latex 解析 + grid 排版
 //!                                             └─▶ environments(多行环境适配)
-//!        ──guard(输出侧泄漏自检)──▶ 预算闸 ──▶ RenderedMath
+//!        ──guard(AST 泄漏自检 + 网格自检 + 预算)──▶ RenderedMath
 //! ```
 //!
 //! 任何一步拿不准就返回 [`Option::None`]，由上层降级为源码字面量 —— **宁可显示原始
-//! LaTeX，也不显示半截公式**。
+//! LaTeX，也不显示半截公式**。这条在**单元格层**同样成立：多行环境里任何一格或前后缀
+//! 渲染失败，整条公式都会降级，不会被替换成空格。
 //!
 //! ## 窄接口
 //!
@@ -45,6 +46,7 @@
 //! assert_eq!(m.width(), 3);
 //! ```
 
+mod compose;
 mod environments;
 mod guard;
 mod normalize;
