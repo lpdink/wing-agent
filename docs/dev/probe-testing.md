@@ -109,6 +109,17 @@ async def test_bash_write_then_history(probe: Probe) -> None:
 FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds": 0.5}}
 
 @pytest.mark.probe_env(sessions=FAST_EVICTION)   # → config.yaml 的 sessions: 段
+
+# 其它常用旋钮（kwargs 原名透传 ProbeEnv；None = 不写该段，保持标准配置）：
+@pytest.mark.probe_env(models=[{"name": "probe/vlm", "capabilities": {"vision": True}}])
+#   → providers[0].models：provider 静态模型声明（str 或对象；能力/展示元信息）。
+#   注意：它**不改 agent 默认模型**，场景仍须显式 probe.session(model=…) 选剧本。
+
+@pytest.mark.probe_env(images={"max_images": 3, "count_quantum": 2})
+#   → 顶层 images: 段：读图保留预算/高水位（压小阈值即得确定性的驱逐断言）。
+
+@pytest.mark.probe_env(provider_extra={"image_delivery": "inline"})
+#   → 合进 providers[0]：provider 级透传旋钮（如覆盖图片投递形态 inline/followup）。
 ```
 
 确定性来自配置而不是等待运气：把阈值压到秒级、断言仍走"轮询到状态翻转（带超时）"。
