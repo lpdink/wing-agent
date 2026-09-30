@@ -55,7 +55,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/commands` | 命令列表（仅返回 `source == "prompt"` 的命令） |
-| GET | `/api/models` | 可用模型列表 |
+| GET | `/api/models` | 可用模型列表（按 provider 分组嵌套：`providers[].models` 是实际调用名；**追加** `model_details: [{name, display_name, description, capabilities: {vision}}]`，与 `models` 逐项同序同名——见 [media-images.md](media-images.md)） |
 | GET | `/api/agents` | 可用 agent 模板列表 |
 | POST | `/api/system/reload` | 重载配置 / hooks / provider / skills / auth（无需重启） |
 | POST | `/api/shutdown` | Gateway 优雅自关闭（返回 200 后延迟自送 SIGTERM） |
