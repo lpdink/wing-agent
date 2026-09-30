@@ -12,6 +12,13 @@
 //! 5. `links.rs` provides link URL display logic
 //! 6. `types.rs` defines the intermediate `MarkdownLine`/`MarkdownSegment` types
 //! 7. This module orchestrates the event loop and provides the public API
+//!
+//! ## Debugging
+//!
+//! `cargo run -p wing --example render_probe -- <FILE>` renders arbitrary
+//! text through this pipeline (and through `stream::StreamingRender` with
+//! `--chunk`, reconciling the two with `--check`). The debugging workflow and
+//! the list of accepted boundaries live in `docs/dev/tui-rendering.md`.
 
 pub(crate) mod code_blocks;
 pub(crate) mod links;
