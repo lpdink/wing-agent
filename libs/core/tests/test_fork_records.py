@@ -84,6 +84,10 @@ def _chain_contents(messages: list[Message]) -> list[str]:
     return [message.content or "" for message in messages]
 
 
+def _raw_metadata(root: Path, session_id: str) -> dict:
+    return json.loads((root / session_id / "metadata.json").read_text(encoding="utf-8"))
+
+
 def _records(root: Path, session_id: str) -> list[dict]:
     path = root / session_id / "history.jsonl"
     if not path.exists():  # 空子会话不创建日志文件
@@ -109,9 +113,10 @@ class TestForkRecordPrefix:
         a = Message(role="user", content="alpha")
         b = Message(role="assistant", content="reply")
         c = Message(role="user", content="beta")
-        session.context_manager.add_messages([a, b, c])  # ty: ignore[invalid-argument-type]
+        session.context_manager.add_messages([a, b, c])
 
-        result = sm.fork_session(session.session_id, c.uuid)  # ty: ignore[invalid-argument-type]
+        assert c.uuid is not None
+        result = sm.fork_session(session.session_id, c.uuid)
         assert result is not None
         child, draft = result
         assert draft == "beta"
@@ -129,7 +134,7 @@ class TestForkRecordPrefix:
     @pytest.mark.asyncio
     async def test_fork_current_copies_all_records(self, sm, root):
         session = sm.create_session()
-        session.context_manager.add_messages(  # ty: ignore[invalid-argument-type]
+        session.context_manager.add_messages(
             [
                 Message(role="user", content="alpha"),
                 Message(role="assistant", content="reply"),
@@ -150,6 +155,59 @@ class TestForkRecordPrefix:
     async def test_unknown_target_returns_none(self, sm):
         session = sm.create_session()
         assert sm.fork_session(session.session_id, "ghost") is None
+
+    @pytest.mark.asyncio
+    async def test_event_target_returns_none(self, sm, root):
+        """事件记录不是对话节点：不能作为 fork 点（恢复旧契约）。"""
+        session = sm.create_session()
+        session.context_manager.add_message(Message(role="user", content="hi"))
+        session.store.open_log(session.session_id).append(
+            [
+                {
+                    "role": "event",
+                    "type": "compact_done",
+                    "uuid": "ev-1",
+                    "parent_uuid": None,
+                }
+            ]
+        )
+        assert sm.fork_session(session.session_id, "ev-1") is None
+
+
+class TestForkToolsRecord:
+    """fork 记录的工具集必须与子会话**实际生效**的一致（含 ref 降级）。"""
+
+    @pytest.mark.asyncio
+    async def test_tools_record_matches_live_after_ref_degradation(
+        self, sm, root, monkeypatch
+    ):
+        from wing.gateway.protocol import AgentOverride
+        from wing.tool_registry import tool_registry
+
+        session = sm.create_session(
+            agent_override=AgentOverride(tools=["Read", "Glob"])
+        )
+        sid = session.session_id
+
+        # 模拟远程工具宿主断连：注册表不再能解析该 ref（源会话 live 仍持有对象）
+        real_resolve = tool_registry.resolve
+        monkeypatch.setattr(
+            tool_registry,
+            "resolve",
+            lambda ref: None if ref == "Glob" else real_resolve(ref),
+        )
+
+        result = sm.fork_session(sid, "current")
+        assert result is not None
+        child, _ = result
+        # live 只剩可解析的；记录与 live 对齐（否则重启后声明集凭空变回 Glob）
+        assert sorted(tool.name for tool in child.agent.tools) == ["Read"]
+        assert _raw_metadata(root, child.session_id)["tools"] == ["Read"]
+
+        restored = SessionManager({"file": FileSessionStore(root)}).resume_session(
+            child.session_id
+        )
+        assert sorted(tool.name for tool in restored.agent.tools) == ["Read"]
 
 
 # ============================================================

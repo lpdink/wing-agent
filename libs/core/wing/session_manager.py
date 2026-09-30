@@ -36,10 +36,9 @@ from wing.event import (
 )
 from wing.event_bus import event_bus
 from wing.magic_command.prompt_commands import expand_prompt_command
-from wing.schema import ChainNode, Message, Tool
-from wing.session import Session
+from wing.schema import ChainNode, Message
+from wing.session import Session, tool_refs
 from wing.store import SessionMetadata, SessionStore
-from wing.tool_registry import ToolRef
 
 if TYPE_CHECKING:
     from wing.gateway.protocol import AgentOverride
@@ -63,12 +62,16 @@ def _fork_slice(
     过（等价于"在压缩点之前分叉"）。
 
     Raises:
-        ValueError: 目标 uuid 不在记录里。
+        ValueError: 目标 uuid 不在记录里，或指向的是事件记录（事件不是对话节点）。
     """
     if target_uuid == "current":
         return list(records), ""
     for index, record in enumerate(records):
         if record.get("uuid") == target_uuid:
+            if record.get("role") == "event":
+                raise ValueError(
+                    f"uuid {target_uuid!r} is an event record, not a Message"
+                )
             content = record.get("content")
             return records[:index], content if isinstance(content, str) else ""
     raise ValueError(f"uuid {target_uuid!r} not found in {len(records)} record(s)")
@@ -97,16 +100,6 @@ def _remap_record_uuids(records: list[dict]) -> list[dict]:
             if isinstance(value, str):
                 clone[key] = uuid_map.get(value)
     return clones
-
-
-def _tool_refs(tools: list[Tool]) -> list[str]:
-    """把 Tool 列表投影为可持久化的 ref 列表（"Bash" / "client.Read"）。
-
-    与 WingAgent.set_tools() 接受的引用格式一致——ref 可在任何进程
-    经 tool_registry.resolve() 还原；闭包 / dispatch 闭包不可持久化，
-    这正是"只存引用不存对象"的原因。
-    """
-    return [str(ToolRef(namespace=t.namespace, name=t.name)) for t in tools]
 
 
 class SessionManager:
@@ -382,7 +375,7 @@ class SessionManager:
                 append_system_prompt=(
                     source.context_manager.append_system_prompt or None
                 ),
-                tools=_tool_refs(source.agent.tools),
+                tools=tool_refs(source.agent.tools),
                 thinking=source.persisted_thinking,
                 reasoning_effort=source.persisted_reasoning_effort,
                 yolo=source.agent.yolo,
@@ -400,17 +393,24 @@ class SessionManager:
             store=store,
             workspace=source.session_workspace,
         )
+        # 先注册 / 刷新计时器再跑 hook（与 create_session 同序）：hook 内 emit 的
+        # 事件能命中 SessionReaper 的 touch 订阅，hook 内查 SM 也能看到子会话。
+        self._sessions[new_session_id] = new_session
+        self.touch(new_session_id)
+
         # fork 也是"创建新 session"（session id 变化）：before_session_start
         # 在子会话上生效——hook 注入的环境信息属于"这个新 session"。子会话已
         # 继承源的追加内容（上面的 metadata 快照 + 构造时还原），不自幂等的
-        # hook 会在其上再叠一层（钩子自身的问题，钩子系统重做时收口）；子会话
-        # 的 session id 变化本就让上游缓存无法复用（见 docs/dev/architecture.md
-        # 「压缩与缓存哲学」）。注入结果随子会话落盘，resume 时逐字节复现。
+        # hook 会在其上再叠一层（钩子自身的问题，钩子系统重做时收口，见
+        # docs/zh/custom-tools.md 的 hook 契约与 issue #131）；子会话的 session
+        # id 变化本就让上游缓存无法复用（见 docs/dev/architecture.md
+        # 「压缩与缓存哲学」）。
         hooks.invoke("before_session_start", new_session)
-        new_session.sync_append_system_prompt()
 
-        self._sessions[new_session_id] = new_session
-        self.touch(new_session_id)
+        # 记录对齐（hook 注入后的 append + **实际生效**的工具集：按 ref 还原可能
+        # 降级——远程宿主断连——记录必须与 live 一致，否则重启后声明集凭空变化）。
+        new_session.sync_append_system_prompt()
+        new_session.sync_tools_record()
 
         return new_session, draft
 

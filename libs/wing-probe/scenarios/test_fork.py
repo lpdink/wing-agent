@@ -337,6 +337,17 @@ async def test_fork_after_compact_keeps_region_out_of_context(probe: Probe) -> N
         "child reply",
     ], probe.history(child).describe()
 
+    # live == 文件：网关**内存态**上下文窗口与 history.jsonl 的活跃链一致
+    # （旧实现 extend_detached 把拷来的列表直接当活跃链，正是在这里分叉：
+    #  文件侧正确、内存侧复活了压缩前区间）。
+    detail = await child.get()
+    live = [(message["role"], message.get("content")) for message in detail["messages"]]
+    on_disk = [
+        (message["role"], message.get("content"))
+        for message in probe.history(child).messages()
+    ]
+    assert live == on_disk, (live, on_disk)
+
     # 请求级红线：子会话请求与源会话请求共享前缀（system + 摘要），
     # 且压缩前区间（alpha / beta / reply one / reply two）一个都不出现。
     source_ctx = probe.context(COMPACT_FORK_MODEL, 3)  # 源会话 "gamma" 请求

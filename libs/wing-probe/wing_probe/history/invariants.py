@@ -499,9 +499,15 @@ def _trace_records(records: Sequence[Mapping[str, Any]]) -> list[Mapping[str, An
         uuid: record for record in records if (uuid := record_uuid(record)) is not None
     }
     chain: list[Mapping[str, Any]] = []
+    seen: set[str] = set()
     last_uuid = record_uuid(records[-1])
     record = by_uuid.get(last_uuid) if last_uuid is not None else None
     while record is not None:
+        uuid = record_uuid(record)
+        if uuid is not None:
+            if uuid in seen:  # 损坏日志成环：停在这里（调用方的链不变量会报错）
+                break
+            seen.add(uuid)
         chain.append(record)
         parent = record.get("parent_uuid")
         record = by_uuid.get(parent) if isinstance(parent, str) else None
@@ -1216,8 +1222,9 @@ def assert_fork_of(
       引用（``parent_uuid`` / ``unzip_last_uuid``）都落在子记录集内部——
       不留悬空 / 跨 session 引用（压缩节点的 unzip 因此仍指向区间末记录）；
     - **活跃链**：子会话活跃链 == 对拷贝记录做 tip 回溯的结果（压缩节点是根，
-      被压缩区间**不上链**——不复活已摘要内容），且 == 对子会话自己记录的
-      回溯结果（live == reload，内存态与加载语义一致）；
+      被压缩区间**不上链**——不复活已摘要内容），且文件视图与自身记录的回溯
+      一致（reload 口径自洽）。**内存态**与文件的一致性由场景承担：请求体
+      断言 + ``/api/session/get`` 的上下文窗口（本 helper 只见文件视图）；
     - ``metadata.json`` 快照：``fork_metadata`` 校验必需字段存在，
       ``forked_from`` 恒等于源 session id，``snapshot_fields`` 与源 metadata
       逐字段对账。
@@ -1243,7 +1250,8 @@ def assert_fork_of(
         对账素材字典（``expected_draft``（fork 的 ``draft`` 应等于它）、
         ``uuid_map``（源 uuid → 子 uuid，按记录逐条配对）、``prefix_length``
         （拷贝的记录前缀条数）、``chain_length``（子会话活跃链长度）、
-        ``trailing_uuids``、``child_metadata``、``unverifiable_metadata_fields``）。
+        ``trailing_uuids``（链级尾部）、``trailing_record_uuids``（记录级尾部）、
+        ``child_metadata``、``unverifiable_metadata_fields``）。
 
     Raises:
         HistoryAssertionError: 链形状或 metadata 断言失败。
@@ -1374,6 +1382,9 @@ def assert_fork_of(
         allow_trailing=False,
     )
     problems += live_problems
+    # 尾部素材：链级（子会话演进上链的部分）优先，链级为空时退回记录级
+    # （被 rewind 停在记录里的分叉）——两者都如实列出，调用方各取所需。
+    trailing_records = trailing
     trailing = chain_trailing or trailing
 
     if problems:
@@ -1450,6 +1461,7 @@ def assert_fork_of(
         "uuid_map": uuid_map,
         "prefix_length": len(expected),
         "chain_length": len(child_chain),
+        "trailing_record_uuids": [record_uuid(record) for record in trailing_records],
         "trailing_uuids": [record_uuid(record) for record in trailing],
         "child_metadata": child_metadata,
         "unverifiable_metadata_fields": unverifiable,

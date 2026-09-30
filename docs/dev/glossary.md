@@ -50,6 +50,7 @@
 | **append_system_prompt** | 追加系统提示词：`before_session_start` hook 注入（如 workspace / OS 信息）+ `AgentOverride.append_system_prompt`（CLI `--append-system-prompt`）的合并结果；持久化在 `metadata.json`，resume 时逐字节还原（不触发 hook）。fork 属新会话：子会话先继承该值、hook 再注入一次。 |
 | **持久会话状态** | `metadata.json` 记录的会话级状态：模型绑定、`system_prompt` / `append_system_prompt`、`tools` 覆盖、`thinking` / `reasoning_effort` / `yolo` / `max_turns`。显式动作写入、resume 优先于模板/配置、fork 按 fork 时刻的有效值一次写全（快照；`thinking` / `reasoning_effort` 只拷显式记录，不固化 provider 派生默认）。 |
 | **before_session_start 触发条件** | 只看 **session id 是否变化**：create / fork（新 id）触发，resume（同一 id 换入内存）不触发。 |
+| **fork 冻结派生值** | fork 把当时的**live 有效值**写进子会话记录（`system_prompt` / `tools` / `yolo` / `max_turns`）——它们可能来自模板/配置：子会话因此不随后续模板/配置变更漂移（源会话会）。这是快照语义的代价，刻意如此。 |
 | **fork 记录前缀** | fork = 拷贝源会话在 fork 点之前的**全部记录**（append 顺序）+ uuid 全量重映射，子会话经加载路径构造；活跃链由 tip 回溯得出（压缩节点即止）——被压缩区间随行（回得去）但不活跃（不复活）。目标消息自身不进拷贝：它由响应里的 `draft` 重新发送。 |
 | **reasoning_effort** | 推理强度 `low/medium/high/xhigh/max`，经 extra_body 发送；`/think` 命令可切换。 |
 

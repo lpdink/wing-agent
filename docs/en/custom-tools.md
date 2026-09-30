@@ -111,12 +111,17 @@ Hooks intercept wing's behavior at defined points. Each point has a specific sig
 
 | Hook Point | When | Signature |
 |------------|------|-----------|
-| `before_session_start` | When a session is created or loaded | `(session, **ctx) -> None` |
+| `before_session_start` | When a **new session is established** (`create` / `fork`; not on `resume` — the same session id is only swapped into memory) | `(session, **ctx) -> None` |
 | `before_user_message` | Before each user message is processed | `(content: str \| None, **ctx) -> str \| None` |
 | `before_tool_call` | Before tool execution | `(tc: ToolCall \| None, **ctx) -> ToolCall \| None` |
 | `after_tool_call` | After tool execution | `(result: str \| None, tool_name: str, **ctx) -> str \| None` |
 
 Hook handlers form a pipeline: each handler receives the value from the previous one. Return `None` to keep the current value unchanged, or return a new value to replace it.
+
+### Appended system prompt and idempotency
+
+- Inject through `session.context_manager.append_to_system_prompt(text)`: the result is persisted with the session (`metadata.append_system_prompt`) and restored byte-for-byte on `resume`. Mutating the system prompt through other entry points is not recorded, so the prefix changes after a restart.
+- **Hooks must be idempotent**: `before_session_start` also fires on `fork`, and the child already inherits the source's appended content — a non-idempotent hook stacks another copy on every fork (and persists it). Mechanism-level dedup / single-injection points will come with the hook system rework (see issue #131).
 
 ### Writing a Hook
 

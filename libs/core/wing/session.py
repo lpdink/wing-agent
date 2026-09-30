@@ -24,8 +24,9 @@ from wing.common.tracked_list import TrackedList
 from wing.config import get_config
 from wing.context_manager import ContextManager
 from wing.provider import create_provider
-from wing.schema import ChainNode, Message
+from wing.schema import ChainNode, Message, Tool
 from wing.store import SessionMetadata, SessionStore
+from wing.tool_registry import ToolRef
 
 if TYPE_CHECKING:
     from wing.agent import WingAgent
@@ -57,6 +58,17 @@ def serialize_message(msg: Message) -> dict:
     if msg.tool_call_id:
         d["tool_call_id"] = msg.tool_call_id
     return d
+
+
+def tool_refs(tools: list[Tool]) -> list[str]:
+    """把 Tool 列表投影为可持久化的 ref 列表（"Bash" / "client.Read"）。
+
+    与 `WingAgent.set_tools()` 接受的引用格式一致——ref 可在任何进程经
+    `tool_registry.resolve()` 还原；闭包 / dispatch 闭包不可持久化，这正是
+    "只存引用不存对象"的原因。会话状态持久化（metadata.tools）与 fork 的
+    工具集对齐共用本投影。
+    """
+    return [str(ToolRef(namespace=t.namespace, name=t.name)) for t in tools]
 
 
 class Session:
@@ -511,6 +523,16 @@ class Session:
             self._save_metadata()
         except OSError as e:
             log.warning(f"Session {self._session_id}: state not persisted ({e})")
+
+    def sync_tools_record(self) -> None:
+        """把**当前生效**的工具集快照进 metadata 并落盘（fork 专用）。
+
+        fork 记录的是源会话的 live refs，但按 ref 还原可能降级（远程工具宿主
+        断连后 registry 里已无该 ref）：记录与 live 不一致会让子会话重启后
+        tools 声明凭空变化——正是本次要消灭的"重建后前缀漂移"。fork 构造完
+        子会话后调用本方法，把记录对齐到实际生效集合。
+        """
+        self._record_state(tools=tool_refs(self._agent.tools))
 
     def sync_append_system_prompt(self) -> None:
         """把 CM 当前 append_system_prompt 快照进 metadata 并落盘。
