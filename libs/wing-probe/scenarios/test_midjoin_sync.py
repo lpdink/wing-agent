@@ -64,8 +64,11 @@ async def test_midjoin_before_first_chunk_reports_working(probe: Probe) -> None:
     AND 新 client 恰好在此窗口订阅
     THEN 快照 ``status == "working"``——尽管 ``uncommitted`` / ``uncommitted_tools``
     都是空的（内容为空 ≠ 不在跑）；``turn_started_at`` 供前端恢复已耗时。
+
+    delay 取 3s 而不是刚够用：这个相位没有别的东西撑着窗口（工具轮的窗口是
+    工具执行时长），"确实落在首帧之前"这条证据必须离机器繁忙时的假红足够远。
     """
-    probe.register(FIRST_CHUNK_MODEL, Turn.of(text="late answer", delay=1.0))
+    probe.register(FIRST_CHUNK_MODEL, Turn.of(text="late answer", delay=3.0))
     session = await probe.session(model=FIRST_CHUNK_MODEL)
 
     await session.send("hi")
@@ -80,10 +83,10 @@ async def test_midjoin_before_first_chunk_reports_working(probe: Probe) -> None:
         sync_at = sync.at
 
     # 确实落在"首个内容块之前"的窗口里：文本流在快照之后才到达。
-    text = await session.watch.expect("text", within=10.0)
+    text = await session.watch.expect("text", within=15.0)
     assert text.at > sync_at, (sync_at, text.at)
 
-    result = await session.watch.expect("turn_result", within=10.0)
+    result = await session.watch.expect("turn_result", within=20.0)
     assert result.data["subtype"] == "success", result.data
 
 

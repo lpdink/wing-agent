@@ -51,6 +51,10 @@ pub struct EventTarget {
 /// call in flight (before its first finalized block) projects no content while
 /// the turn is very much running.
 ///
+/// Strict on purpose: the gateway sends this vocabulary and nothing else (CLI
+/// and gateway ship as one version), so an unknown value is a version mismatch
+/// and fails the decode instead of being papered over.
+///
 /// The same vocabulary describes `/api/session/list` rows ([`Self::parse`] —
 /// the picker renders it); this is the single definition for both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,38 +68,29 @@ pub enum SessionStatus {
     Working,
     /// A turn is in flight, blocked on user input (pending ask).
     Waiting,
-    /// A status this build does not know (newer gateway). Tolerated like every
-    /// other unknown wire value — the caller degrades to the content
-    /// inference instead of dropping the whole replay.
-    #[serde(other)]
-    Unknown,
 }
 
 impl SessionStatus {
-    /// Parse the backend's status string (the session-list row field).
+    /// Parse the session-list row's status string.
     ///
-    /// Unknown values — including the empty string an older gateway may leave
-    /// behind — degrade to [`Self::Unknown`].
-    pub fn parse(raw: &str) -> Self {
+    /// `None` for a value this build does not know: the list is a display-only
+    /// surface, so how to show it is the caller's (rendering) decision — the
+    /// sync payload's `status`, by contrast, is typed strictly.
+    pub fn parse(raw: &str) -> Option<Self> {
         match raw {
-            "inactive" => Self::Inactive,
-            "idle" => Self::Idle,
-            "working" => Self::Working,
-            "waiting" => Self::Waiting,
-            _ => Self::Unknown,
+            "inactive" => Some(Self::Inactive),
+            "idle" => Some(Self::Idle),
+            "working" => Some(Self::Working),
+            "waiting" => Some(Self::Waiting),
+            _ => None,
         }
     }
 
-    /// Whether the snapshot says a turn is in flight.
-    ///
-    /// `None` for [`SessionStatus::Unknown`] — the caller falls back to
-    /// inspecting the uncommitted projections.
-    pub fn turn_in_flight(self) -> Option<bool> {
-        match self {
-            Self::Idle | Self::Inactive => Some(false),
-            Self::Working | Self::Waiting => Some(true),
-            Self::Unknown => None,
-        }
+    /// Whether a turn is in flight — the only question a mid-join subscriber
+    /// asks of the snapshot. `waiting` counts: the turn runs, blocked on a
+    /// pending ask (the live path keeps the spinner up for it too).
+    pub fn turn_in_flight(self) -> bool {
+        matches!(self, Self::Working | Self::Waiting)
     }
 }
 
@@ -408,10 +403,12 @@ pub enum WingEvent {
     // ---- state_change ----
     /// Full session state sync.
     ///
-    /// Carries four replay groups — subscribers MUST assemble in the order
-    /// `messages → uncommitted → uncommitted_tools → events`, then continue
-    /// seamlessly with the live stream. All fields are `#[serde(default)]` so
-    /// older gateways (or null-stripped wire frames) degrade gracefully.
+    /// Carries the turn state (`status`, required) plus four replay groups —
+    /// subscribers MUST assemble the groups in the order `messages →
+    /// uncommitted → uncommitted_tools → events`, then continue seamlessly with
+    /// the live stream. The replay materials are `#[serde(default)]`: a frame
+    /// with nothing in flight / nothing anchored (or a null-stripped wire
+    /// frame) degrades to "replay committed only".
     #[serde(rename = "sync_session")]
     SyncSession {
         #[serde(default)]
@@ -433,18 +430,19 @@ pub enum WingEvent {
         /// replay material for diff views and other message-projection gaps.
         #[serde(default)]
         events: Vec<serde_json::Value>,
-        /// Session status at snapshot time — the authoritative answer to "is a
-        /// turn in flight" (`working` / `waiting` = yes, `idle` = no).
+        /// Session status at snapshot time — `working` / `waiting` mean a turn
+        /// is in flight, `idle` / `inactive` mean none is.
         ///
-        /// A mid-join subscriber MUST take its working state from here: it can
-        /// never hear the already-past `turn_started` (once-only live event,
-        /// never replayed), and emptiness of `uncommitted` /
-        /// `uncommitted_tools` is *not* an idle signal — between rounds, or
-        /// while the first LLM call is still in flight, the turn is running
-        /// with nothing finalized to project. Absent (older gateway) → fall
-        /// back to that content inference.
-        #[serde(default)]
-        status: Option<SessionStatus>,
+        /// A mid-join subscriber takes its turn state from here and nowhere
+        /// else: it can never hear the already-past `turn_started` (once-only
+        /// live event, never replayed), and the uncommitted projections are not
+        /// a substitute — between rounds, or while the first LLM call is still
+        /// in flight, a turn runs with nothing finalized to project.
+        ///
+        /// Required: the snapshot MUST state the turn state (CLI and gateway
+        /// ship as one version, so it is always on the wire; a missing or
+        /// unknown value is a protocol error, not a case to guess around).
+        status: SessionStatus,
         /// When the current turn started (UTC ISO-8601) — restores elapsed time
         /// on resume instead of recounting from the resume moment. Null when no
         /// turn is in progress.
@@ -850,10 +848,11 @@ mod tests {
 
     #[test]
     fn sync_session_agent_provider_name_tolerated_and_roundtripped() {
-        // Old gateway: agent payload without provider_name → None, no error.
+        // An agent payload without provider_name → None, no error.
         let legacy = r#"{
             "type": "sync_session",
             "session_id": "s1",
+            "status": "idle",
             "messages": [],
             "uncommitted": null,
             "uncommitted_tools": [],
@@ -1125,7 +1124,7 @@ mod tests {
     // The backend `wire_dump` strips storage-only fields (role / parent_uuid /
     // unzip_last_uuid / target / persist) and every null-valued field. These
     // lock that the Rust mirror still parses such frames — missing `Option<T>`
-    // fields fall back to None, and SyncSession's new fields default.
+    // fields fall back to None, and SyncSession's replay materials default.
 
     #[test]
     fn deserialize_stripped_text_frame() {
@@ -1202,14 +1201,16 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_sync_session_without_new_fields() {
-        // Backward compat: a SyncSession frame with none of the newer fields
-        // (uncommitted / uncommitted_tools / status / turn_started_at) — older
-        // gateway or all stripped — parses and degrades to "replay committed
-        // only", with no working-state claim.
+    fn deserialize_sync_session_with_all_replay_materials_defaulted() {
+        // The replay materials are all optional within one version: a frame
+        // carrying only committed messages (nothing in flight, nothing
+        // anchored) parses and degrades to "replay committed only". `status` is
+        // not part of that tolerance — it is required (see
+        // `sync_session_status_is_required_and_strict`).
         let json = r#"{
             "type": "sync_session",
             "session_id": "s1",
+            "status": "idle",
             "messages": [{"role": "user", "content": "hi"}],
             "created_at": "2025-01-01T00:00:00",
             "request_id": "req4"
@@ -1222,7 +1223,6 @@ mod tests {
                 uncommitted,
                 uncommitted_tools,
                 events,
-                status,
                 turn_started_at,
                 ..
             } => {
@@ -1231,7 +1231,6 @@ mod tests {
                 assert!(uncommitted.is_none());
                 assert!(uncommitted_tools.is_empty());
                 assert!(events.is_empty());
-                assert!(status.is_none(), "no status → caller falls back");
                 assert!(turn_started_at.is_none());
             }
             _ => panic!("expected SyncSession"),
@@ -1240,16 +1239,13 @@ mod tests {
 
     #[test]
     fn deserialize_sync_session_status() {
-        // The working-state carrier: every known status decodes to its variant
-        // and answers `turn_in_flight`; an unknown one (newer gateway) is
-        // tolerated as `Unknown` (the caller degrades to content inference)
-        // instead of failing the whole replay payload.
+        // The working-state carrier: every status decodes to its variant and
+        // answers `turn_in_flight` (working / waiting are a turn in flight).
         for (raw, expected, in_flight) in [
-            ("idle", SessionStatus::Idle, Some(false)),
-            ("inactive", SessionStatus::Inactive, Some(false)),
-            ("working", SessionStatus::Working, Some(true)),
-            ("waiting", SessionStatus::Waiting, Some(true)),
-            ("compacting", SessionStatus::Unknown, None),
+            ("idle", SessionStatus::Idle, false),
+            ("inactive", SessionStatus::Inactive, false),
+            ("working", SessionStatus::Working, true),
+            ("waiting", SessionStatus::Waiting, true),
         ] {
             let json = format!(
                 r#"{{"type": "sync_session", "session_id": "s1", "status": "{raw}",
@@ -1258,17 +1254,48 @@ mod tests {
             let event: WingEvent = serde_json::from_str(&json).unwrap();
             match event {
                 WingEvent::SyncSession { status, .. } => {
-                    assert_eq!(status, Some(expected), "raw {raw:?}");
-                    assert_eq!(status.and_then(SessionStatus::turn_in_flight), in_flight);
+                    assert_eq!(status, expected, "raw {raw:?}");
+                    assert_eq!(status.turn_in_flight(), in_flight);
                 }
                 _ => panic!("expected SyncSession"),
             }
         }
 
-        // The list endpoint's string vocabulary parses through `parse`.
-        assert_eq!(SessionStatus::parse("working"), SessionStatus::Working);
-        assert_eq!(SessionStatus::parse(""), SessionStatus::Unknown);
-        assert_eq!(SessionStatus::parse("bogus"), SessionStatus::Unknown);
+        // The list endpoint's string vocabulary parses through `parse` (that
+        // surface is display-only, so an unknown value is the caller's call).
+        assert_eq!(
+            SessionStatus::parse("working"),
+            Some(SessionStatus::Working)
+        );
+        assert_eq!(SessionStatus::parse("compacting"), None);
+    }
+
+    #[test]
+    fn sync_session_status_is_required_and_strict() {
+        // The snapshot must *state* the turn state: a payload without the field,
+        // or with a value this build does not know, is a protocol error (CLI and
+        // gateway ship as one version) — it must not silently decode to "idle",
+        // which is exactly the inference this field exists to remove.
+        let missing = r#"{
+            "type": "sync_session",
+            "session_id": "s1",
+            "messages": [],
+            "created_at": "2026-01-01T00:00:00",
+            "request_id": "req"
+        }"#;
+        assert!(
+            serde_json::from_str::<WingEvent>(missing).is_err(),
+            "a sync_session without status must fail to decode"
+        );
+
+        let unknown = missing.replace(
+            "\"messages\": []",
+            "\"messages\": [], \"status\": \"compacting\"",
+        );
+        assert!(
+            serde_json::from_str::<WingEvent>(&unknown).is_err(),
+            "an unknown status must fail to decode"
+        );
     }
 
     #[test]
@@ -1282,6 +1309,7 @@ mod tests {
                 {"tool_call_id": "tc1", "tool_name": "Bash", "args_fragment": "{\"c"}
             ],
             "events": [{"type": "diff_content", "path": "f", "new_text": "x"}],
+            "status": "working",
             "turn_started_at": "2026-01-01T00:00:00+00:00",
             "created_at": "2026-01-01T00:00:00+00:00",
             "request_id": "req5"

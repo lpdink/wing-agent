@@ -36,7 +36,7 @@ import {
   enumOr,
   isJsonObject,
   numberOr,
-  optEnum,
+  reqEnum,
   optJsonObject,
   optNumber,
   optString,
@@ -54,11 +54,12 @@ import {
   decodeSessionMessages,
   decodeUncommittedTools,
 } from './history';
-import { type SessionStatus, SESSION_STATUSES } from './http';
 import {
   type AgentInfo,
   type AskQuestion,
   type BranchTarget,
+  type SessionStatus,
+  SESSION_STATUSES,
   decodeAgentInfo,
   decodeAskQuestion,
   decodeBranchTarget,
@@ -284,11 +285,13 @@ export interface SyncSessionEvent extends EventMeta {
    * flight" ({@link isTurnInFlight}). A mid-join subscriber never hears the
    * already-past `turn_started`, and an empty `uncommitted` projection is *not*
    * an idle signal (an LLM call in flight, or a round boundary, projects no
-   * content while the turn runs). `null` = absent (older gateway) or a status
-   * this build does not know → the consumer falls back to the content
-   * inference.
+   * content while the turn runs).
+   *
+   * Required and strict: the snapshot must state the turn state, so a missing
+   * or unknown value is a decode error (CLI and gateway ship as one version)
+   * rather than something the consumer guesses around.
    */
-  readonly status: SessionStatus | null;
+  readonly status: SessionStatus;
   /** Turn start time (UTC ISO) — restore an in-flight turn's elapsed time. */
   readonly turn_started_at: string | null;
   readonly agent: AgentInfo | null;
@@ -568,7 +571,7 @@ const decodeSyncSession: EventDecoder<SyncSessionEvent> = (payload, meta) => ({
   uncommitted: decodeSingleMessage(payload, 'uncommitted'),
   uncommitted_tools: decodeUncommittedTools(readJsonArray(payload, 'uncommitted_tools')),
   events: decodeEventList(payload, 'events'),
-  status: optEnum(payload, 'status', SESSION_STATUSES),
+  status: reqEnum(payload, 'status', SESSION_STATUSES),
   turn_started_at: optString(payload, 'turn_started_at'),
   agent: decodeAgentInfo(payload['agent']),
   name: optString(payload, 'name'),

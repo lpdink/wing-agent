@@ -224,6 +224,34 @@ describe('replay assembly', () => {
     expect(harness.hydrateFor(sessionId)?.session.turn.active).toBe(false);
   });
 
+  it('drops a sync_session that does not state the status (nothing half-applied)', async () => {
+    // The snapshot must state the turn state; a payload without it is a
+    // protocol error and must not replace the view (a half-applied replay is
+    // worse than a dropped one — the client cannot know what the old one said).
+    const harness = createHostHarness();
+    teardown.push(harness);
+    await harness.boot();
+    const sessionId = harness.gateway.createdOrder[0] ?? '';
+    await harness.ready();
+    const before = harness.hydrateFor(sessionId)?.session.cells.length ?? 0;
+
+    harness.gateway.emit({
+      type: 'sync_session',
+      session_id: sessionId,
+      messages: [{ role: 'user', content: 'never applied', uuid: 'mx' }],
+      created_at: '2026-09-18T08:00:00.000Z',
+      request_id: 'broken',
+    });
+    await flushMicrotasks();
+    await harness.ready();
+
+    const hydrate = harness.hydrateFor(sessionId);
+    expect(hydrate?.session.cells.length).toBe(before);
+    expect(hydrate?.session.cells.some((cell) => cell.kind === 'user' && cell.text === 'never applied')).toBe(
+      false,
+    );
+  });
+
   it('continues a replayed streaming tool call with live fragments (same path)', async () => {
     const harness = createHostHarness();
     teardown.push(harness);

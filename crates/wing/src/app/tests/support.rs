@@ -20,9 +20,11 @@ pub(super) fn test_app() -> App {
 
 /// Build a SyncSession event for the test session.
 ///
-/// `status` is derived the way a well-behaved backend derives it: content in
-/// the projections ⇒ a turn is in flight. Tests that need a specific status
-/// (or an old gateway without one) call [`sync_event_with_status`].
+/// The `status` is derived the way a healthy backend derives it (the snapshot
+/// never contradicts the projections: content ⇒ a turn is in flight) — fixture
+/// convenience, not a product rule: the frontends read the status and never
+/// infer it. Tests that care about a specific status call
+/// [`sync_event_with_status`].
 pub(super) fn sync_event(
     messages: Vec<serde_json::Value>,
     uncommitted: Option<serde_json::Value>,
@@ -36,7 +38,7 @@ pub(super) fn sync_event(
         SessionStatus::Idle
     };
     sync_event_with_status(
-        Some(status),
+        status,
         messages,
         uncommitted,
         uncommitted_tools,
@@ -45,9 +47,9 @@ pub(super) fn sync_event(
     )
 }
 
-/// Build a SyncSession event with an explicit `status` (`None` = old gateway).
+/// Build a SyncSession event with an explicit `status`.
 pub(super) fn sync_event_with_status(
-    status: Option<SessionStatus>,
+    status: SessionStatus,
     messages: Vec<serde_json::Value>,
     uncommitted: Option<serde_json::Value>,
     uncommitted_tools: Vec<serde_json::Value>,

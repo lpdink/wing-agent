@@ -31,6 +31,7 @@ fn oversized_sync_payload() -> String {
     json!({
         "type": "sync_session",
         "session_id": "s1",
+        "status": "idle",
         "messages": [{"role": "assistant", "content": content}],
         "uncommitted": null,
         "uncommitted_tools": [],

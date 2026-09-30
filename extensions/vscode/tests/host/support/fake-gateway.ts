@@ -47,8 +47,8 @@ export interface FakeSessionState {
   uncommitted: Record<string, unknown> | null;
   uncommittedTools: Record<string, unknown>[];
   events: Record<string, unknown>[];
-  /** Snapshot status (`SyncSessionEvent.status`); null = older gateway. */
-  status: string | null;
+  /** Snapshot status (`SyncSessionEvent.status` — required on the wire). */
+  status: string;
   turnStartedAt: string | null;
   agent: Record<string, unknown> | null;
   /** `GET /api/session/info` runtime status (yolo / thinking / effort / stats). */
@@ -78,8 +78,12 @@ export interface FakeSessionSeed {
   readonly uncommitted?: Record<string, unknown> | null;
   readonly uncommittedTools?: readonly Record<string, unknown>[];
   readonly events?: readonly Record<string, unknown>[];
-  /** Snapshot status; omitted → derived from the projections (content ⇒ working). */
-  readonly status?: string | null;
+  /**
+   * Snapshot status; omitted → derived from the projections (a healthy backend
+   * never contradicts them: content ⇒ a turn is in flight). Fixture
+   * convenience, not a product rule — the reducer reads the status only.
+   */
+  readonly status?: string;
   readonly turnStartedAt?: string | null;
   readonly agent?: Record<string, unknown> | null;
   readonly runtime?: Partial<FakeRuntimeState>;

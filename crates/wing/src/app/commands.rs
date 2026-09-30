@@ -442,7 +442,8 @@ impl App {
                 // ③ 保持后端时间降序。
                 candidates.sort_by_key(|c| {
                     let ws_mismatch = !ws_matches(&c.workspace);
-                    (ws_mismatch, SessionStatus::parse(&c.status).rank())
+                    let status = SessionStatus::parse(&c.status).unwrap_or(SessionStatus::Inactive);
+                    (ws_mismatch, status.rank())
                 });
 
                 self.popup.cache.sessions = candidates;

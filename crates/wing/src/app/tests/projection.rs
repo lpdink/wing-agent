@@ -197,7 +197,7 @@ fn test_sync_working_status_with_empty_projections_restores_working() {
     let mut app = test_app();
     let _ = app.drain_intents();
     app.handle_event(sync_event_with_status(
-        Some(SessionStatus::Working),
+        SessionStatus::Working,
         vec![serde_json::json!({"role": "user", "content": "hi"})],
         None,
         vec![],
@@ -233,7 +233,7 @@ fn test_sync_waiting_status_restores_working() {
     // — the live path keeps the spinner up while the ask panel is open.
     let mut app = test_app();
     app.handle_event(sync_event_with_status(
-        Some(SessionStatus::Waiting),
+        SessionStatus::Waiting,
         vec![],
         None,
         vec![],
@@ -251,7 +251,7 @@ fn test_sync_idle_status_beats_content_presence() {
     // replayed — it is the *turn state* that follows the status).
     let mut app = test_app();
     app.handle_event(sync_event_with_status(
-        Some(SessionStatus::Idle),
+        SessionStatus::Idle,
         vec![],
         Some(serde_json::json!({"role": "assistant", "content": "committed elsewhere"})),
         vec![],
@@ -279,7 +279,7 @@ fn test_sync_idle_status_clears_the_previous_turns_working_state() {
     let _ = app.drain_intents();
 
     app.handle_event(sync_event_with_status(
-        Some(SessionStatus::Idle),
+        SessionStatus::Idle,
         vec![],
         None,
         vec![],
@@ -301,30 +301,46 @@ fn test_sync_idle_status_clears_the_previous_turns_working_state() {
 }
 
 #[test]
-fn test_sync_without_status_falls_back_to_content_inference() {
-    // Old gateway (no `status` field): keep the pre-existing inference —
-    // content present ⇒ working; nothing at all ⇒ idle.
+fn test_sync_titles_use_the_new_sessions_workdir() {
+    // The title carries the workdir suffix: when a sync restates the turn state
+    // it must be the *new* session's label — the metadata travels in the same
+    // snapshot and is restored before the title is composed (an idle sync has
+    // no spinner tick to self-correct on).
     let mut app = test_app();
-    app.handle_event(sync_event_with_status(
-        None,
-        vec![],
-        Some(serde_json::json!({"role": "assistant", "content": "partial"})),
-        vec![],
-        vec![],
-        Some(utc_ago(2)),
-    ));
-    assert!(app.turn.working, "no status + content ⇒ working");
+    app.handle_event(turn_started_event());
+    let _ = app.drain_intents();
 
-    let mut idle = test_app();
-    idle.handle_event(sync_event_with_status(
-        None,
-        vec![],
-        None,
-        vec![],
-        vec![],
-        None,
-    ));
-    assert!(!idle.turn.working, "no status + no content ⇒ idle");
+    let mut sync = sync_event_with_status(SessionStatus::Idle, vec![], None, vec![], vec![], None);
+    if let WingEvent::SyncSession { agent, .. } = &mut sync {
+        *agent = Some(Box::new(crate::protocol::AgentInfo {
+            model_name: "test-model".into(),
+            system_prompt: None,
+            tools: vec![],
+            skills: vec![],
+            rules: vec![],
+            workspace: Some("/home/me/other-project".into()),
+            provider_name: None,
+        }));
+    }
+    app.handle_event(sync);
+
+    let title = app
+        .drain_intents()
+        .into_iter()
+        .find_map(|i| match i {
+            AppIntent::SetTitle(t) => Some(t),
+            _ => None,
+        })
+        .expect("idle title restored");
+    assert_eq!(
+        title, "☾ wing [other-project]",
+        "title must use the new session's workdir"
+    );
+    assert_eq!(
+        app.status.workdir.as_deref(),
+        Some("/home/me/other-project"),
+        "the snapshot's metadata is restored"
+    );
 }
 
 #[test]

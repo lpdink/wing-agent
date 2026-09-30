@@ -317,7 +317,9 @@ pub fn filter_session_candidates(candidates: &[SessionCandidate], args: &str) ->
             name: c.id.clone(),
             description: String::new(),
             rich: Some(RichSessionRow {
-                status: SessionStatus::parse(&c.status),
+                // Display-only surface: a value this build does not know
+                // (version mismatch on the list endpoint) shows as inactive.
+                status: SessionStatus::parse(&c.status).unwrap_or(SessionStatus::Inactive),
                 workspace: c.workspace.clone(),
                 last_active: super::selection::format_last_active(&c.last_interaction),
                 title: c.title.clone(),

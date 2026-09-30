@@ -37,13 +37,13 @@ impl SessionStatus {
         }
     }
 
-    /// 状态图标颜色（未知值按 inactive 呈现——不猜）。
+    /// 状态图标颜色。
     pub fn color(self) -> Color {
         match self {
             Self::Working => Color::Yellow,
             Self::Waiting => Color::Magenta,
             Self::Idle => Color::White,
-            Self::Inactive | Self::Unknown => Color::DarkGray,
+            Self::Inactive => Color::DarkGray,
         }
     }
 
@@ -53,7 +53,7 @@ impl SessionStatus {
             Self::Waiting => 0,
             Self::Working => 1,
             Self::Idle => 2,
-            Self::Inactive | Self::Unknown => 3,
+            Self::Inactive => 3,
         }
     }
 }
@@ -586,21 +586,14 @@ mod tests {
         assert_eq!(SessionStatus::Working.icon(), "●");
         // waiting uses a non-emoji glyph, distinct from the dots.
         assert_eq!(SessionStatus::Waiting.icon(), "?");
-        // Unknown (newer gateway) presents like inactive — never a guess.
-        assert_eq!(SessionStatus::Unknown.icon(), "●");
-        assert_eq!(SessionStatus::Unknown.color(), Color::DarkGray);
     }
 
     #[test]
     fn test_session_status_rank_order() {
-        // waiting > working > idle > inactive (unknown sorts with inactive)
+        // waiting > working > idle > inactive
         assert!(SessionStatus::Waiting.rank() < SessionStatus::Working.rank());
         assert!(SessionStatus::Working.rank() < SessionStatus::Idle.rank());
         assert!(SessionStatus::Idle.rank() < SessionStatus::Inactive.rank());
-        assert_eq!(
-            SessionStatus::Unknown.rank(),
-            SessionStatus::Inactive.rank()
-        );
     }
 
     #[test]

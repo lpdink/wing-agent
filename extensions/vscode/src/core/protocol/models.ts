@@ -22,6 +22,25 @@ import {
   stringOr,
 } from './json';
 
+/**
+ * `SessionStatus` (`wing/event/base.py`) — the backend's runtime status
+ * vocabulary, shared by the event mirror (`sync_session.status`) and the HTTP
+ * mirror (session-list rows).
+ */
+export const SESSION_STATUSES = ['inactive', 'idle', 'working', 'waiting'] as const;
+export type SessionStatus = (typeof SESSION_STATUSES)[number];
+
+/**
+ * Whether this status means a turn is in flight.
+ *
+ * `working` and `waiting` both are (waiting = blocked on a pending ask); the
+ * authoritative answer to "is the agent running", never inferred from whether
+ * content is present.
+ */
+export function isTurnInFlight(status: SessionStatus): boolean {
+  return status === 'working' || status === 'waiting';
+}
+
 /** `wing/event/base.py::AgentInfo` — the agent configuration snapshot. */
 export interface AgentInfo {
   readonly model_name: string;
