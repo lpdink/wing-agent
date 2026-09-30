@@ -16,6 +16,8 @@
 //! The pipeline is driven through its public entry points only
 //! (`render_markdown_lines_with`, `full_lines`), which is what the cells use.
 
+mod common;
+
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use wing::config::ThemePalette;
@@ -530,6 +532,99 @@ fn prefixed_code_blocks_are_never_rewritten() {
         plain(&render("- \\(x + 1\\)", CONTENT, 60))
             .join("\n")
             .contains("x + 1")
+    );
+}
+
+// ============================================================
+// 4d. Tab-indented lines (review r2 / B1) and reference definitions (r2 / S2)
+// ============================================================
+
+/// Tab-indented lines must render — and stream — without panicking.
+///
+/// `indent_of` reports a tab as four COLUMNS; using that as a byte offset
+/// (as `content_start` did) sliced inside a multi-byte character and killed
+/// the TUI on the default streaming path. Every input below panicked before
+/// the fix. This drives the real `StreamingRender` byte by byte (chunk 1).
+#[test]
+fn tab_indented_lines_stream_without_panicking() {
+    for md in [
+        "\t- 中文项目\n",
+        "\tx\n",
+        "> \t\n",
+        "para\n\tx\n",
+        "\t🙂x\n",
+        "  \t中文注释\n",
+        "\t中文\n",
+        "\t- item\n",
+        "\t- \n",
+        "\t~~~\n\t\\(x\\)\n\t~~~\n",
+    ] {
+        for profile in [CONTENT, THINKING] {
+            // Full render (reference) …
+            let reference = full_lines(md, 60, profile, &palette());
+            // … and the incremental path, one byte per delta (what the TUI
+            // does), which is where the panic lived.
+            let mut stream = wing::render::markdown::stream::StreamingRender::new(profile);
+            for piece in common::chunk_stream(md, 1) {
+                stream.push(piece);
+                let _ = stream.lines(60, &palette());
+            }
+            let resting = stream.lines(60, &palette()).to_vec();
+            assert!(
+                !reference.is_empty() && !resting.is_empty(),
+                "{md:?}: empty render"
+            );
+            // The incremental state converges on the reference (the input is
+            // promoted by EOF), so the resting frame is the documented one.
+            assert_eq!(
+                resting.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+                reference.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+                "{md:?}"
+            );
+        }
+    }
+}
+
+/// A tab-indented line is an indented block (four columns), exactly as it is
+/// with math off — no prefix is stripped off it.
+#[test]
+fn tab_indented_lines_render_like_the_baseline() {
+    for md in ["\tx\n", "\t- 中文项目\n", "\t\\(x\\)\n", "    \\(x\\)\n"] {
+        assert_eq!(
+            plain(&render(md, CONTENT, 60)),
+            plain(&render_with(md, CONTENT, 60, MathMode::Off)),
+            "{md:?}"
+        );
+    }
+}
+
+/// The reference-definition forms whose destination is a URL — including a
+/// label with spaces and a destination (or title) on the next line.
+#[test]
+fn reference_definitions_keep_their_destination() {
+    for md in [
+        "[a b]: http://x/\\(y\\)\n\nsee [a b]",
+        "[ref]:\n  http://x/\\(y\\)\n\nsee [ref]",
+        "[ref]:\nhttp://x/\\(y\\)\n\nsee [ref]",
+        "[r]: http://x/\\(y\\)\n  \"t \\(z\\)\"\n\nsee [r]",
+        "[r]: <http://x/\\(y\\)>\n\nsee [r]",
+    ] {
+        let with_math = spans(&render(md, CONTENT, 80));
+        let off = spans(&render_with(md, CONTENT, 80, MathMode::Off));
+        assert_eq!(
+            with_math, off,
+            "{md:?}: the definition must not be rewritten"
+        );
+        assert!(
+            !with_math.iter().any(|(_, t)| t.contains('$')),
+            "{md:?}: a `$` leaked into the definition"
+        );
+    }
+    // …and the line AFTER the definition is prose again.
+    assert!(
+        plain(&render("[r]: http://x\n\n\\(y\\) here", CONTENT, 80))
+            .join("\n")
+            .contains("y here")
     );
 }
 

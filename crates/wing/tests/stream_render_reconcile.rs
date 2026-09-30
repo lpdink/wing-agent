@@ -261,6 +261,50 @@ fn shapes() -> Vec<(&'static str, String)> {
             "math_inline_overwide",
             format!("Sum: $a_1{} end\n\nafter\n", " + a_2 + a_3 + a_4 + a_5 + a_6".repeat(3)),
         ),
+        // --- review r2: tabs (the panic) and prefixed-fence closure ---
+        (
+            // A tab is four COLUMNS but one byte: the shape helpers must not
+            // slice at a column count (this input used to panic).
+            "math_tab_indented_lines",
+            "\t- 中文项目\n\n\tx\n\n> \t\n\npara\n\t🙂x\n".into(),
+        ),
+        (
+            // A prefix-less fence line after a `> ~~~` fence is a NEW top-level
+            // fence (CommonMark), not that fence's closer.
+            "math_quoted_fence_bare_closer",
+            "> ~~~\n> a\n~~~\n\nafter\n".into(),
+        ),
+        (
+            "math_quoted_fence_bare_closer_no_blank",
+            "> ~~~\n> a\n~~~\nafter\n".into(),
+        ),
+        (
+            "math_quoted_fence_bare_closer_after_blank",
+            "> ~~~\n> a\n\n~~~   \n\nafter\n".into(),
+        ),
+        (
+            "math_quoted_fence_bare_closer_after_quoted",
+            "> ~~~\n> a\n\n> b\n~~~\n\nafter\n".into(),
+        ),
+        // NOTE: the backtick variant of the shape above is NOT here — a quoted
+        // backtick fence goes through `ensure_fences_on_own_line`, whose
+        // insertion lands differently depending on the chunk boundary. Both
+        // this build and the `a946327` baseline diverge from the reference for
+        // one chunk size (5), so it is pre-existing noise, registered in
+        // `docs/dev/tui-rendering.md` §4 instead of asserted here.
+        (
+            "math_list_fence_prefixed_closer",
+            "- ~~~\n  a\n  ~~~\n\nafter\n".into(),
+        ),
+        (
+            "math_list_fence_bare_line",
+            "- ~~~\n  a\n~~~\n\nafter\n".into(),
+        ),
+        (
+            // The destination on the line after the definition.
+            "math_reference_definition_wrapped",
+            "[a b]:\n  http://x/\\(y\\) \"t \\(z\\)\"\n\nuse \\(a\\)\n\nafter\n".into(),
+        ),
     ]
 }
 
@@ -454,6 +498,15 @@ fn reconcile_prefixes() {
         "math_list_fence",
         "math_inline_long_paragraph",
         "math_inline_overwide",
+        "math_tab_indented_lines",
+        "math_quoted_fence_bare_closer",
+        "math_quoted_fence_bare_closer_no_blank",
+        "math_quoted_fence_bare_closer_after_blank",
+        "math_quoted_fence_bare_closer_after_quoted",
+        "math_quoted_backtick_fence_bare_closer",
+        "math_list_fence_prefixed_closer",
+        "math_list_fence_bare_line",
+        "math_reference_definition_wrapped",
     ];
     let palette = ThemePalette::default();
     for (name, corpus) in shapes() {

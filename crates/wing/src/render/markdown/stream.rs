@@ -903,7 +903,11 @@ impl StreamingRender {
                 fence_len,
                 resume_list,
             } => {
-                if is_fence_close_prefix_aware(line, fence_char, fence_len) {
+                let prefix = content_start(line);
+                if prefix > 0 && is_fence_close(&line[prefix..], fence_char, fence_len) {
+                    // A fence line that still carries the container's prefix
+                    // (`> ~~~` closing a `> ~~~` fence): the fence ends and the
+                    // container it lives in keeps going.
                     self.split.mode = if resume_list {
                         Mode::List { blank_seen: true }
                     } else {
@@ -911,7 +915,29 @@ impl StreamingRender {
                     };
                     return true;
                 }
-                // Blank lines are fence body, not a block separator.
+                if prefix == 0
+                    && let Some((fc, fl, info)) = fence_open(line)
+                    // …except inside a list item: there an *indented* fence
+                    // line is item content, not a new top-level block (the
+                    // List mode rule — pre-`PrefixedFence` — was the same).
+                    && !(resume_list && indent_of(line) > 0)
+                {
+                    // A fence line with NO prefix means the container ended
+                    // here: CommonMark reads it as a NEW, top-level fence that
+                    // swallows what follows — it does not close a `> ~~~`
+                    // fence (that one closes when the quote ends). This is
+                    // exactly what the splitter did before `PrefixedFence`
+                    // existed, so keep doing it.
+                    self.close_slice(line_start);
+                    self.open_code_cache(fc, fl, info);
+                    self.split.mode = Mode::FencedCode {
+                        fence_char: fc,
+                        fence_len: fl,
+                    };
+                    return true;
+                }
+                // Blank lines and prefixed body lines are fence body, not a
+                // block separator.
                 self.split.mode = Mode::PrefixedFence {
                     fence_char,
                     fence_len,
@@ -1561,14 +1587,28 @@ pub(crate) fn indent_of(line: &str) -> usize {
     n
 }
 
+/// Number of leading whitespace **bytes** (spaces and tabs) — i.e. the byte
+/// offset of the first non-whitespace character.
+///
+/// Distinct from [`indent_of`], which returns **columns** (a tab counts as
+/// four): the two agree only up to three columns of spaces — and those are
+/// exactly the cases in which the shape helpers below are allowed to look past
+/// the indentation. Anything that *slices* a line must use this one; anything
+/// that compares indentation against CommonMark's limits (≤3 for a fence or a
+/// list marker, ≥4 for an indented block) must use `indent_of`.
+fn indent_bytes(line: &str) -> usize {
+    line.bytes()
+        .take_while(|&b| b == b' ' || b == b'\t')
+        .count()
+}
+
 /// If the line opens a fenced code block, return
 /// `(fence_char, fence_len, info)`.
 pub(crate) fn fence_open(line: &str) -> Option<(u8, usize, &str)> {
-    let indent = indent_of(line);
-    if indent >= 4 {
+    if indent_of(line) >= 4 {
         return None;
     }
-    let rest = &line[indent..];
+    let rest = &line[indent_bytes(line)..];
     let b = rest.as_bytes();
     if b.is_empty() {
         return None;
@@ -1591,11 +1631,10 @@ pub(crate) fn fence_open(line: &str) -> Option<(u8, usize, &str)> {
 /// Fence-close run length if the line consists only of fence chars
 /// (≥1 run), else None.
 fn fence_close_len(line: &str) -> Option<usize> {
-    let indent = indent_of(line);
-    if indent >= 4 {
+    if indent_of(line) >= 4 {
         return None;
     }
-    let rest = &line[indent..];
+    let rest = &line[indent_bytes(line)..];
     let b = rest.as_bytes();
     if b.is_empty() {
         return None;
@@ -1625,11 +1664,6 @@ pub(crate) fn prefixed_fence_open(line: &str) -> Option<(u8, usize)> {
     Some((fc, fl))
 }
 
-/// [`is_fence_close`] for a prefixed fence's body line.
-pub(crate) fn is_fence_close_prefix_aware(line: &str, fence_char: u8, fence_len: usize) -> bool {
-    is_fence_close(&line[content_start(line)..], fence_char, fence_len)
-}
-
 pub(crate) fn is_fence_close(line: &str, fence_char: u8, fence_len: usize) -> bool {
     let Some(run) = fence_close_len(line) else {
         return false;
@@ -1643,8 +1677,10 @@ pub(crate) fn is_fence_close(line: &str, fence_char: u8, fence_len: usize) -> bo
 /// Split a fence opener line into (info, rest-after-info) — used for
 /// language extraction.
 fn split_fence_line(opener: &str) -> (&str, &str) {
-    let indent = indent_of(opener);
-    let rest = &opener[indent..];
+    // Callers only pass lines `fence_open` accepted (≤3 columns), where the
+    // two indentation measures coincide; using the byte offset keeps the
+    // slice safe by construction.
+    let rest = &opener[indent_bytes(opener)..];
     let b = rest.as_bytes();
     if b.is_empty() {
         return ("", "");
@@ -1668,19 +1704,25 @@ pub(crate) fn content_start(line: &str) -> usize {
     let mut off = 0usize;
     loop {
         let rest = &line[off..];
-        let indent = indent_of(rest);
-        // `indent_of` treats a tab as column 4, but only the byte offset
-        // matters here.
-        let after = &rest[indent..];
+        // ≥4 columns of indentation is an indented block: what follows is code
+        // content, never a `>` or a list marker. This is also the only case in
+        // which `indent_of`'s result is NOT a byte offset (a tab is four
+        // columns but one byte), so returning here keeps every slice below on
+        // a character boundary.
+        if indent_of(rest) >= 4 {
+            return off;
+        }
+        let after = &rest[indent_bytes(rest)..];
         if after.starts_with('>') {
-            off += indent + 1;
+            off += indent_bytes(rest) + 1;
             if line[off..].starts_with(' ') {
                 off += 1;
             }
             continue;
         }
         if let Some(len) = list_marker_len(after) {
-            // `list_marker_len` already counts the indent it skipped.
+            // `list_marker_len` counts the indent it skipped (byte-equal to
+            // the column count, since it bails at four columns).
             off += len;
             continue;
         }
@@ -1695,7 +1737,7 @@ fn list_marker_len(line: &str) -> Option<usize> {
     if indent >= 4 {
         return None;
     }
-    let rest = &line[indent..];
+    let rest = &line[indent_bytes(line)..];
     let b = rest.as_bytes();
     if b.is_empty() {
         return None;
@@ -1840,6 +1882,53 @@ mod tests {
         assert_eq!(fence_close_len("`````"), Some(5));
         assert_eq!(fence_close_len("``` tail"), None);
         assert_eq!(fence_close_len("text"), None);
+    }
+
+    /// `content_start` must never slice at a **column** count: `indent_of`
+    /// reports a tab as four columns, and `&line[4..]` is not a character
+    /// boundary in general (review r2 / B1: this panicked the TUI on any
+    /// tab-indented line that reached the streaming splitter).
+    #[test]
+    fn content_start_is_tab_safe() {
+        // Plain prefixes still resolve.
+        assert_eq!(content_start("- item"), 2);
+        assert_eq!(content_start("> quoted"), 2);
+        assert_eq!(content_start("> > nested"), 4);
+        assert_eq!(content_start("1. ordered"), 3);
+        assert_eq!(content_start("text"), 0);
+
+        // A tab is four COLUMNS: the line is an indented block, so no prefix
+        // is stripped — and, crucially, nothing is sliced at column 4.
+        for line in [
+            "\tx",
+            "\t- 中文项目",
+            "\t- ",
+            "  \t中文注释",
+            "\t🙂x",
+            "\t中文",
+            "\t- item",
+            "    x",
+            "    - x",
+        ] {
+            assert_eq!(content_start(line), 0, "{line:?}");
+        }
+        // A tab INSIDE a container: the prefix is resolved, then the tab makes
+        // what follows an indented block (no further stripping) — and the
+        // offset stays a byte offset.
+        assert_eq!(content_start("> \t"), 2);
+        assert_eq!(indent_of(&"> \t"[content_start("> \t")..]), 4);
+        // …and the same lines still go through the shape helpers unharmed.
+        for line in ["\tx", "\t- 中文项目", "  \t中文注释", "\t🙂x"] {
+            assert!(fence_open(&line[content_start(line)..]).is_none());
+            assert!(fence_open(line).is_none());
+            assert!(prefixed_fence_open(line).is_none());
+            assert_eq!(indent_of(&line[content_start(line)..]) >= 4, true);
+        }
+        // A prefixed fence behind a prefix is still found (that is the r1 S2
+        // fix, which must survive the tab-safety change).
+        assert_eq!(prefixed_fence_open("> ~~~"), Some((b'~', 3)));
+        assert_eq!(prefixed_fence_open("- ```"), Some((b'`', 3)));
+        assert_eq!(prefixed_fence_open("~~~"), None);
     }
 
     #[test]

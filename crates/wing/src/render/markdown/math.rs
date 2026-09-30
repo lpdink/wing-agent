@@ -294,6 +294,13 @@ struct Scan<'a> {
     /// indented line is an indented code block — an indented line below
     /// paragraph text is a lazy continuation and stays prose.
     at_block_start: bool,
+    /// Lines still belonging to the reference definition that just started
+    /// (`[label]:` with its destination and/or title on the following lines).
+    /// 0 = none.
+    ref_def_lines: u8,
+    /// Whether the definition's destination is still missing (it may be on the
+    /// next line, indented or not).
+    ref_def_dest_missing: bool,
     /// Inside an HTML block (a line whose content starts with a tag-like
     /// `<…>`; the block runs to the next blank line, like pulldown's type 6/7
     /// HTML blocks). Markdown is not parsed there, so nothing may be
@@ -325,6 +332,8 @@ impl<'a> Scan<'a> {
             indented: false,
             at_block_start: true,
             in_html_block: false,
+            ref_def_lines: 0,
+            ref_def_dest_missing: false,
             stray_display_delim: false,
         }
     }
@@ -377,11 +386,31 @@ impl<'a> Scan<'a> {
                 if line.trim().is_empty() {
                     self.indented = false;
                     self.in_html_block = false;
+                    self.ref_def_lines = 0;
                     self.at_block_start = true;
                     self.stray_display_delim = false;
                     i = next;
                     line_start = next;
                     continue;
+                }
+                if self.ref_def_lines > 0 {
+                    // The destination and/or the title of the definition above:
+                    // markdown is not parsed here either (the destination is a
+                    // URL — rewriting it would change what a click opens).
+                    let indented = line.starts_with(' ') || line.starts_with('\t');
+                    if self.ref_def_dest_missing || indented {
+                        self.ref_def_lines -= 1;
+                        // The destination is on this line now; a title may
+                        // still follow, but only if this line was indented.
+                        self.ref_def_dest_missing = false;
+                        if !indented {
+                            self.ref_def_lines = 0;
+                        }
+                        i = next;
+                        line_start = next;
+                        continue;
+                    }
+                    self.ref_def_lines = 0;
                 }
                 if self.in_html_block {
                     i = next;
@@ -418,9 +447,13 @@ impl<'a> Scan<'a> {
                     line_start = next;
                     continue;
                 }
-                if is_reference_definition(content) {
+                if let Some(dest_missing) = reference_definition(content) {
                     // `[label]: url "title"` — the destination is a URL, not
-                    // prose: rewriting it would change what a click opens.
+                    // prose: rewriting it would change what a click opens. The
+                    // destination and the title may continue on the next line
+                    // (indented, or — for a missing destination — not).
+                    self.ref_def_dest_missing = dest_missing;
+                    self.ref_def_lines = if dest_missing { 2 } else { 1 };
                     i = next;
                     line_start = next;
                     continue;
@@ -799,23 +832,18 @@ fn is_html_block_start(content: &str) -> bool {
         .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '!' | '?'))
 }
 
-/// Whether the line is a link reference definition (`[label]: url "title"`).
+/// Whether the line opens a link reference definition (`[label]: url`), and
+/// whether the destination is still missing (it may then be on the next line).
 ///
-/// Only the line itself is treated as opaque: a title wrapped onto the next
-/// line is rare, and treating the whole block as opaque would cost more than
-/// it protects.
-fn is_reference_definition(content: &str) -> bool {
-    let Some(rest) = content.strip_prefix('[') else {
-        return false;
-    };
-    let Some(close) = rest.find(']') else {
-        return false;
-    };
-    // `[label]:` — no whitespace inside the label.
-    if rest[..close].chars().any(char::is_whitespace) {
-        return false;
-    }
-    rest[close + 1..].starts_with(':')
+/// The label may contain spaces — CommonMark allows it. A nested `]` inside the
+/// label is not handled: such a line is simply not recognized, i.e. it is
+/// scanned as prose (the conservative direction for a *miss* is the opposite,
+/// so this stays a documented gap rather than a silent one).
+fn reference_definition(content: &str) -> Option<bool> {
+    let rest = content.strip_prefix('[')?;
+    let close = rest.find(']')?;
+    let after = rest[close + 1..].strip_prefix(':')?;
+    Some(after.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -1017,6 +1045,22 @@ mod tests {
     fn reference_definitions_are_left_alone() {
         let src = "[ref]: http://x/\\(y\\) \"title \\(z\\)\"";
         assert_eq!(norm(src), src);
+        // A label may contain spaces (CommonMark), and the destination and/or
+        // the title may sit on the following line(s).
+        for src in [
+            "[a b]: http://x/\\(y\\)",
+            "[a b]:\n  http://x/\\(y\\) \"t \\(z\\)\"",
+            "[ref]:\nhttp://x/\\(y\\)",
+            "[ref]: http://x/\\(y\\)\n  \"t \\(z\\)\"",
+            "[ref]: <http://x/\\(y\\)>",
+        ] {
+            assert_eq!(norm(src), src, "{src:?} must not be rewritten");
+        }
+        // The line after the definition is prose again.
+        assert_eq!(
+            norm("[ref]: http://x\n\\(y\\) here"),
+            "[ref]: http://x\n$y$ here"
+        );
         assert_eq!(
             norm("[ref]: http://x/\\(y\\)\n\nuse \\(a\\)"),
             "[ref]: http://x/\\(y\\)\n\nuse $a$"
