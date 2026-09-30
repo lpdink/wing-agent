@@ -402,7 +402,13 @@ class OpenAICompatProvider(ModelProvider):
                 if content:
                     state.content_chunks.append(content)
 
-                if state.first_token_ts is None and (content or reasoning):
+                # 正文 / 思考 / tool 参数增量都是模型解码产出，都要打点：
+                # 纯 tool call 响应（无正文无思考）缺了 tool 分支，decode
+                # TPS 恒为 0。按原始 delta 判断而非解析产物 deltas——首片
+                # 可能只带 id / name、没有 arguments 片段。
+                if state.first_token_ts is None and (
+                    content or reasoning or delta.get("tool_calls")
+                ):
                     state.first_token_ts = time.monotonic()
 
                 # 终止原因（stop / length / tool_calls）——首个非空值生效
