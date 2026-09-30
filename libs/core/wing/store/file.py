@@ -27,6 +27,7 @@ from wing.store.base import (
     SessionMetadata,
     SessionStore,
     SessionSummary,
+    validate_media_content,
     validate_media_id,
 )
 
@@ -160,10 +161,15 @@ class FileSessionStore(SessionStore):
         return self._root / self._MEDIA_DIR / safe_id[:2] / safe_id
 
     def write_media(self, media_id: str, data: bytes) -> None:
-        """原子写入媒体字节（幂等：内容寻址下已存在即同内容，跳过）。"""
+        """原子写入媒体字节（幂等：内容寻址下已存在即同内容，跳过）。
+
+        首写路径校验 id 与字节一致（内容寻址完整性，review r1 N2）——已存在
+        时跳过（对象内容在首写时已校验过，跳过省一次全量哈希）。
+        """
         path = self._media_path(media_id)
         if path.exists():
             return
+        validate_media_content(media_id, data)
         atomic_write_bytes(path, data)
 
     def read_media(self, media_id: str) -> bytes | None:

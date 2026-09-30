@@ -14,6 +14,7 @@ from wing.store.base import (
     SessionMetadata,
     SessionStore,
     SessionSummary,
+    validate_media_content,
     validate_media_id,
 )
 
@@ -78,9 +79,15 @@ class MemorySessionStore(SessionStore):
     # ── 媒体字节 ──────────────────────────────
 
     def write_media(self, media_id: str, data: bytes) -> None:
-        """写入媒体字节（幂等：内容寻址下同名即同内容，首写即终值）。"""
+        """写入媒体字节（幂等：内容寻址下同名即同内容，首写即终值）。
+
+        首写路径校验 id 与字节一致（内容寻址完整性，review r1 N2）。
+        """
         validate_media_id(media_id)
-        self._media.setdefault(media_id, data)
+        if media_id in self._media:
+            return
+        validate_media_content(media_id, data)
+        self._media[media_id] = data
 
     def read_media(self, media_id: str) -> bytes | None:
         validate_media_id(media_id)

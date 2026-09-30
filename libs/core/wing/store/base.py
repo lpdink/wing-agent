@@ -22,6 +22,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from wing.media import media_id as compute_media_id
+
 _MEDIA_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -37,6 +39,21 @@ def validate_media_id(media_id: str) -> str:
             f"invalid media id: {media_id!r} (expect 64 lowercase hex chars)"
         )
     return media_id
+
+
+def validate_media_content(media_id: str, data: bytes) -> None:
+    """校验媒体 id 与其字节一致（内容寻址完整性）。
+
+    只在**首写路径**调用（对象已存在时跳过——同 id 必然同内容，跳过省一次
+    全量哈希）。不一致说明调用方算错了 id 或传错了 data，必须大声失败：
+    否则读回的字节与引用元数据（id/尺寸）永久错位，且没有任何告警。
+    """
+    actual = compute_media_id(data)
+    if actual != media_id:
+        raise ValueError(
+            f"media content-address mismatch（内容寻址不一致）: "
+            f"id={media_id} 与 sha256(data)={actual} 不符"
+        )
 
 
 class SessionMetadata(BaseModel):
@@ -160,7 +177,10 @@ class SessionStore(ABC):
         """写入媒体字节（内容寻址，幂等：已存在即跳过）。
 
         media_id 必须是 64 位小写 hex 的内容 sha256，否则抛 ValueError
-        （防路径穿越）。I/O 失败由后端抛出（调用方决定是否降级）。
+        （防路径穿越）。**首写路径**还校验 id 与字节一致
+        （``validate_media_content``，内容寻址完整性）；已存在对象直接
+        跳过（同 id 必然同内容，跳过省一次全量哈希）。I/O 失败由后端抛出
+        （调用方决定是否降级）。
         """
 
     @abstractmethod

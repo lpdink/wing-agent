@@ -7,6 +7,7 @@ Session/WingAgent 的 MediaAccess 接线。
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -318,9 +319,10 @@ class TestSessionWiring:
         try:
             assert isinstance(agent.media, MediaAccess)
             media = agent.media
-            mid = "ab" * 32
-            media.write(mid, b"img-bytes")
-            assert media.read(mid) == b"img-bytes"
+            payload = b"img-bytes"
+            mid = hashlib.sha256(payload).hexdigest()
+            media.write(mid, payload)
+            assert media.read(mid) == payload
             assert media.read("cd" * 32) is None
 
             # 初始 provider 与切换/懒创建的 provider 都拿到同一 MediaAccess
@@ -340,10 +342,11 @@ class TestSessionWiring:
         try:
             media = agent.media
             assert media is not None
-            mid = "ab" * 32
-            media.write(mid, b"png-bytes")
+            payload = b"png-bytes"
+            mid = hashlib.sha256(payload).hexdigest()
+            media.write(mid, payload)
             root = Path(os.environ["WING_SESSIONS_PATH"])
-            assert (root / ".media" / mid[:2] / mid).read_bytes() == b"png-bytes"
-            assert FileSessionStore(root).read_media(mid) == b"png-bytes"
+            assert (root / ".media" / mid[:2] / mid).read_bytes() == payload
+            assert FileSessionStore(root).read_media(mid) == payload
         finally:
             await agent.shutdown()

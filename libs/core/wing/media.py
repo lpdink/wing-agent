@@ -200,11 +200,19 @@ _MIME_SHORT = {
 
 
 def _format_size(nbytes: int) -> str:
-    """人类可读字节数（1024 进制；<1 KiB 保留 "N bytes" 字面形态）。"""
+    """人类可读字节数（1024 进制，一位小数）。
+
+    < 1 KiB 保留 "N bytes" 字面形态；KB 级数值四舍五入后若进位到 1024.0
+    （如 1048575 B → "1024.0 KB"）则改用 MB 表达同一数值——同一单位内的
+    数值恒 < 1024（review r1 N3）。图片链路单图上限是 MiB 级配置，不设
+    GB 单位。
+    """
     if nbytes < 1024:
         return f"{nbytes} bytes"
     if nbytes < 1024 * 1024:
-        return f"{nbytes / 1024:.1f} KB"
+        kb = round(nbytes / 1024, 1)
+        if kb < 1024.0:
+            return f"{kb:.1f} KB"
     return f"{nbytes / (1024 * 1024):.1f} MB"
 
 

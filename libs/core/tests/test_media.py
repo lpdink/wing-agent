@@ -266,7 +266,17 @@ class TestEnvelopeAndSizes:
 
     @pytest.mark.parametrize(
         ("nbytes", "expected"),
-        [(512, "512 bytes"), (1024, "1.0 KB"), (2 * 1024 * 1024, "2.0 MB")],
+        [
+            (512, "512 bytes"),
+            (1023, "1023 bytes"),
+            (1024, "1.0 KB"),
+            (1023999, "1000.0 KB"),
+            (1048524, "1023.9 KB"),  # 仍 < 1024 的最大 KB 表示
+            (1048525, "1.0 MB"),  # 四舍五入会进位到 1024.0 KB → 改用 MB
+            (1048575, "1.0 MB"),  # review r1 N3 的边界
+            (1048576, "1.0 MB"),
+            (2 * 1024 * 1024, "2.0 MB"),
+        ],
     )
     def test_envelope_human_readable_size(self, nbytes: int, expected: str):
         ref = _ref(nbytes=nbytes)

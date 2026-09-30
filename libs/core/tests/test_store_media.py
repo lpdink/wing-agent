@@ -14,10 +14,9 @@ from wing.store import (
     SessionMetadata,
     SessionStore,
 )
-from wing.store.base import validate_media_id
+from wing.store.base import validate_media_content, validate_media_id
 
-_GOOD_ID = "ab" * 32  # 64 位小写 hex
-_OTHER_ID = "cd" * 32
+_GOOD_ID = "ab" * 32  # 64 位小写 hex（合法格式，未必是任何内容的 sha256）
 
 _BAD_IDS = [
     "",
@@ -33,6 +32,11 @@ _BAD_IDS = [
 ]
 
 
+def _mid(data: bytes) -> str:
+    """真实内容地址（内容寻址：id 必须等于字节的 sha256）。"""
+    return hashlib.sha256(data).hexdigest()
+
+
 @pytest.fixture(params=["file", "memory"])
 def store(request: pytest.FixtureRequest, tmp_path: Path) -> SessionStore:
     if request.param == "file":
@@ -42,28 +46,32 @@ def store(request: pytest.FixtureRequest, tmp_path: Path) -> SessionStore:
 
 class TestMediaRoundtrip:
     def test_write_read_roundtrip(self, store: SessionStore):
-        store.write_media(_GOOD_ID, b"\x89PNG\r\n\x1a\nbytes")
-        assert store.read_media(_GOOD_ID) == b"\x89PNG\r\n\x1a\nbytes"
+        data = b"\x89PNG\r\n\x1a\nbytes"
+        store.write_media(_mid(data), data)
+        assert store.read_media(_mid(data)) == data
 
     def test_missing_returns_none(self, store: SessionStore):
+        # 合法的 64 位 hex，但没有对应对象
         assert store.read_media(_GOOD_ID) is None
 
     def test_write_is_idempotent(self, store: SessionStore):
         """内容寻址：同 id 重复写入幂等——首写即终值，第二次不报错也不改写。"""
-        store.write_media(_GOOD_ID, b"first")
-        store.write_media(_GOOD_ID, b"second")
-        assert store.read_media(_GOOD_ID) == b"first"
+        data = b"first"
+        store.write_media(_mid(data), data)
+        store.write_media(_mid(data), b"second")
+        assert store.read_media(_mid(data)) == data
 
     def test_multiple_ids_isolated(self, store: SessionStore):
-        store.write_media(_GOOD_ID, b"one")
-        store.write_media(_OTHER_ID, b"two")
-        assert store.read_media(_GOOD_ID) == b"one"
-        assert store.read_media(_OTHER_ID) == b"two"
+        one, two = b"one", b"two"
+        store.write_media(_mid(one), one)
+        store.write_media(_mid(two), two)
+        assert store.read_media(_mid(one)) == one
+        assert store.read_media(_mid(two)) == two
 
     def test_empty_bytes_roundtrip(self, store: SessionStore):
-        empty_id = hashlib.sha256(b"").hexdigest()
-        store.write_media(empty_id, b"")
-        assert store.read_media(empty_id) == b""
+        mid = _mid(b"")
+        store.write_media(mid, b"")
+        assert store.read_media(mid) == b""
 
 
 class TestInvalidIdRejected:
@@ -85,47 +93,82 @@ class TestInvalidIdRejected:
         assert validate_media_id(_GOOD_ID) == _GOOD_ID
 
 
+class TestContentAddressValidation:
+    """首写校验 id 与字节一致（review r1 N2）。"""
+
+    def test_write_rejects_mismatched_content(self, store: SessionStore):
+        with pytest.raises(ValueError, match="内容寻址不一致"):
+            store.write_media(_GOOD_ID, b"bytes-not-matching-the-id")
+
+    def test_rejected_write_leaves_no_object(self, store: SessionStore):
+        with pytest.raises(ValueError):
+            store.write_media(_GOOD_ID, b"mismatch")
+        assert store.read_media(_GOOD_ID) is None
+
+    def test_existing_object_skips_content_check(self, store: SessionStore):
+        """已存在 → 幂等跳过：不做内容校验（首写已校验），不抛不覆盖。"""
+        data = b"first"
+        mid = _mid(data)
+        store.write_media(mid, data)
+        store.write_media(mid, b"different")
+        assert store.read_media(mid) == data
+
+    def test_validator_direct(self):
+        with pytest.raises(ValueError, match="内容寻址不一致"):
+            validate_media_content("0" * 64, b"x")
+        assert validate_media_content(_mid(b"x"), b"x") is None
+
+
 class TestFileMediaLayout:
     def test_layout_path(self, tmp_path: Path):
         root = tmp_path / "sessions"
         store = FileSessionStore(root)
-        mid = hashlib.sha256(b"hello").hexdigest()
-        store.write_media(mid, b"hello")
-        assert (root / ".media" / mid[:2] / mid).read_bytes() == b"hello"
+        data = b"hello"
+        mid = _mid(data)
+        store.write_media(mid, data)
+        assert (root / ".media" / mid[:2] / mid).read_bytes() == data
 
     def test_no_tmp_leftover(self, tmp_path: Path):
         """原子写：落盘后不留 tmp 文件。"""
         root = tmp_path / "sessions"
         store = FileSessionStore(root)
-        store.write_media(_GOOD_ID, b"data")
-        files = sorted(p.name for p in (root / ".media" / _GOOD_ID[:2]).iterdir())
-        assert files == [_GOOD_ID]
+        data = b"data"
+        mid = _mid(data)
+        store.write_media(mid, data)
+        files = sorted(p.name for p in (root / ".media" / mid[:2]).iterdir())
+        assert files == [mid]
 
     def test_shared_pool_across_store_instances(self, tmp_path: Path):
         """同一 root 的多个 store 实例共享媒体池（池按存储根，不按 session）。"""
         root = tmp_path / "sessions"
-        FileSessionStore(root).write_media(_GOOD_ID, b"shared")
-        assert FileSessionStore(root).read_media(_GOOD_ID) == b"shared"
+        data = b"shared"
+        mid = _mid(data)
+        FileSessionStore(root).write_media(mid, data)
+        assert FileSessionStore(root).read_media(mid) == data
 
     def test_unreadable_object_returns_none(self, tmp_path: Path):
         """损坏/不可读对象按"读不到"降级（None + WARN），不抛异常。"""
         root = tmp_path / "sessions"
         store = FileSessionStore(root)
-        store.write_media(_GOOD_ID, b"data")
-        path = root / ".media" / _GOOD_ID[:2] / _GOOD_ID
+        data = b"data"
+        mid = _mid(data)
+        store.write_media(mid, data)
+        path = root / ".media" / mid[:2] / mid
         path.unlink()
         path.mkdir()  # 同名目录：read_bytes 触发 IsADirectoryError
-        assert store.read_media(_GOOD_ID) is None
+        assert store.read_media(mid) is None
 
 
 class TestMemoryMediaPool:
     def test_pool_is_per_instance(self):
         """memory 后端是实例级共享池，不是进程级全局（避免测试/实例串味）。"""
+        data = b"x"
+        mid = _mid(data)
         a = MemorySessionStore()
         b = MemorySessionStore()
-        a.write_media(_GOOD_ID, b"x")
-        assert a.read_media(_GOOD_ID) == b"x"
-        assert b.read_media(_GOOD_ID) is None
+        a.write_media(mid, data)
+        assert a.read_media(mid) == data
+        assert b.read_media(mid) is None
 
 
 class TestMediaNotASession:
@@ -134,9 +177,11 @@ class TestMediaNotASession:
     def test_file_media_dir_not_listed(self, tmp_path: Path):
         root = tmp_path / "sessions"
         store = FileSessionStore(root)
-        store.write_media(_GOOD_ID, b"x")
+        data = b"x"
+        mid = _mid(data)
+        store.write_media(mid, data)
         assert store.list_summaries() == []
-        assert store.exists(_GOOD_ID) is False
+        assert store.exists(mid) is False
 
         store.save_metadata("sid-1", SessionMetadata(session_name="s"))
         store.open_log("sid-1").append([{"role": "user", "content": "hi"}])
@@ -145,16 +190,19 @@ class TestMediaNotASession:
 
     def test_memory_media_does_not_create_session(self):
         store = MemorySessionStore()
-        store.write_media(_GOOD_ID, b"x")
+        data = b"x"
+        store.write_media(_mid(data), data)
         assert store.list_summaries() == []
 
 
 class TestMediaSurvivesSessionLifecycle:
     def test_media_untouched_by_session_metadata_ops(self, store: SessionStore):
         """媒体池独立于会话目录/日志——会话的常规读写不清媒体。"""
+        data = b"image"
+        mid = _mid(data)
         store.save_metadata("sid-1", SessionMetadata(session_name="s"))
         store.open_log("sid-1").append([{"role": "user", "content": "hi"}])
-        store.write_media(_GOOD_ID, b"image")
+        store.write_media(mid, data)
         store.save_metadata("sid-1", SessionMetadata(session_name="renamed"))
         store.open_log("sid-1").append([{"role": "assistant", "content": "yo"}])
-        assert store.read_media(_GOOD_ID) == b"image"
+        assert store.read_media(mid) == data
