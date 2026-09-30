@@ -9,7 +9,7 @@
   ``_apply_pending_compact``（压缩节点 + 重链接 tail），runtime 随后落
   ``compact_done`` 事实事件；
 - rewind：复制行 = target 的最近 Message 祖先内容 + 祖父 parent + 全新 uuid；
-- fork：``extract_subchain``（walk_full_chain 前缀）+ ``_remap_chain_uuids``
+- fork：``_fork_slice``（记录前缀）+ ``_remap_record_uuids``
   （uuid / parent_uuid / unzip 全量重映射）+ fork metadata 快照。
 """
 
@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 from wing_probe.history import (
+    FORK_SNAPSHOT_FIELDS,
     HistoryAssertionError,
     HistoryView,
     assert_compact_transition,
@@ -152,7 +153,11 @@ def view_of(root: Path, session_id: str) -> HistoryView:
 def remap(
     records: Sequence[Mapping[str, Any]], mapping: Mapping[str, str]
 ) -> list[dict[str, Any]]:
-    """模拟 ``_remap_chain_uuids``：深拷贝 + uuid / parent_uuid / unzip 重映射。"""
+    """模拟 ``_remap_chain_uuids``：深拷贝 + uuid / parent_uuid / unzip 重映射。
+
+    与实现同口径：**映射表里没有的引用落到 None**（不留悬空引用）——fork 只带
+    活跃链时，压缩节点的 ``unzip_last_uuid`` 指向被压缩区间（未随行）即被清空。
+    """
     clones = copy.deepcopy([dict(record) for record in records])
     for clone in clones:
         uuid = clone.get("uuid")
@@ -160,10 +165,10 @@ def remap(
             clone["uuid"] = mapping.get(uuid, uuid)
         parent = clone.get("parent_uuid")
         if isinstance(parent, str):
-            clone["parent_uuid"] = mapping.get(parent, parent)
+            clone["parent_uuid"] = mapping.get(parent)
         unzip = clone.get("unzip_last_uuid")
         if isinstance(unzip, str):
-            clone["unzip_last_uuid"] = mapping.get(unzip, unzip)
+            clone["unzip_last_uuid"] = mapping.get(unzip)
     return clones
 
 
@@ -793,6 +798,50 @@ def test_fork_current_copies_whole_chain(tmp_path: Path) -> None:
     assert material["chain_length"] == 5
 
 
+def test_fork_after_compact_keeps_region_out_of_the_chain(tmp_path: Path) -> None:
+    """compact 后 fork：被压缩区间随行走（记录保留）但**不上活跃链**。
+
+    记录口径（append 顺序）：子会话保留压缩前全部记录——用户仍能回到压缩前的
+    User Message；活跃链由 tip 回溯自然停在压缩节点（parent_uuid=None），已摘要
+    内容不复活、请求前缀与源会话一致。压缩节点的 unzip 重映射到子记录集内部
+    （不悬空），fork 候选因此与源会话一致。
+    """
+    source_records = background_compact_after(compact_before())
+    write_session(tmp_path, SOURCE_SESSION, source_records, SOURCE_METADATA)
+    source = view_of(tmp_path, SOURCE_SESSION)
+    assert [record["uuid"] for record in source.active_chain()] == [
+        "c1",
+        "x1",
+        "x2",
+        "x3",
+    ], source.describe()
+
+    mapping = {record["uuid"]: f"c{record['uuid']}" for record in source_records}
+    write_session(
+        tmp_path, "sess-child", remap(source_records, mapping), child_metadata()
+    )
+    child = view_of(tmp_path, "sess-child")
+
+    material = assert_fork_of(source, child, "current")
+    # 期望前缀 = 全部记录（含被压缩区间 u1..a3）
+    assert material["prefix_length"] == len(source_records)
+    region_uuids = {f"c{uuid}" for uuid in ("u1", "a1", "e1", "u2", "a2", "t1", "a3")}
+    assert region_uuids <= {record["uuid"] for record in child.records}, (
+        child.describe()
+    )
+    # 活跃链从压缩节点开始（4 节点）：区间在记录里但不在链上
+    assert [record["uuid"] for record in child.active_chain()] == [
+        "cc1",
+        "cx1",
+        "cx2",
+        "cx3",
+    ]
+    assert material["chain_length"] == 4
+    # 压缩节点的 unzip 指向子记录集内部（重映射后不悬空 → 仍能回到压缩前）
+    assert child.by_uuid["cc1"]["unzip_last_uuid"] == "cu2"
+    child.assert_chain_invariants()
+
+
 def test_fork_without_metadata_check(tmp_path: Path) -> None:
     source_records = fork_source()
     write_session(tmp_path, SOURCE_SESSION, source_records)
@@ -849,8 +898,8 @@ def test_fork_rejects_missing_event(tmp_path: Path) -> None:
     with pytest.raises(HistoryAssertionError) as excinfo:
         assert_fork_of(source, child, "u2")
     text = str(excinfo.value)
-    assert "event records did not follow the fork" in text
-    assert "'diff_content'" in text
+    assert "child records is shorter than source record prefix" in text
+    assert "uuid=e1" in text  # 缺失的记录（源侧事件）被点名
 
 
 def test_fork_rejects_broken_parent_relation(tmp_path: Path) -> None:
@@ -1026,7 +1075,7 @@ def test_fork_snapshot_fields_can_be_narrowed(tmp_path: Path) -> None:
 
 
 def test_fork_reports_unverifiable_snapshot_fields(tmp_path: Path) -> None:
-    """源 metadata 无该字段记录（从未切换过模型）→ 如实报告"无法对账"。"""
+    """源 metadata 无该字段记录（如从未切换过模型 / 未注入追加提示词）→ 如实报告"无法对账"。"""
     source_records = fork_source()
     source_meta = {
         "workspace": SOURCE_METADATA["workspace"],
@@ -1042,7 +1091,10 @@ def test_fork_reports_unverifiable_snapshot_fields(tmp_path: Path) -> None:
     source = view_of(tmp_path, SOURCE_SESSION)
     child = view_of(tmp_path, "sess-child")
     material = assert_fork_of(source, child, "u2")
-    assert material["unverifiable_metadata_fields"] == ["model_name", "provider_name"]
+    # 快照字段中源侧缺记录的项全部如实列出（按 FORK_SNAPSHOT_FIELDS 顺序）
+    expected = [field for field in FORK_SNAPSHOT_FIELDS if field not in source_meta]
+    assert material["unverifiable_metadata_fields"] == expected
+    assert {"model_name", "provider_name", "system_prompt"} <= set(expected)
 
 
 def test_fork_unknown_target(tmp_path: Path) -> None:

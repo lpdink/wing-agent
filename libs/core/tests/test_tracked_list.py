@@ -842,18 +842,18 @@ class TestMixedChain:
         ]
 
     def test_fork_copies_events_with_prefix(self, tmp_dir):
-        """fork（extend_detached 导入混合链前缀）事件随链拷贝。"""
+        """fork（记录前缀拷贝 + 重映射 + 加载）事件随行、拓扑重映射后保持连续。"""
         tl: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir))
         tl.append(Message(role="user", content="q1"))
         tl.append(DiffContentEvent(path="f1", new_text="x"))
         tl.append(Message(role="assistant", content="a1"))
 
-        # fork：深拷贝混合链前缀（模拟 _remap_chain_uuids 后导入）
-        from wing.session_manager import _remap_chain_uuids
+        # fork：记录前缀（含事件）uuid 重映射后写进子日志，再用加载路径构造
+        from wing.session_manager import _remap_record_uuids
 
-        remapped = _remap_chain_uuids(tl.active_chain)
-        forked: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir / "fork"))
-        forked.extend_detached(remapped)
+        forked_log = FileMessageLog(tmp_dir / "fork")
+        forked_log.append(_remap_record_uuids(FileMessageLog(tmp_dir).load_all()))
+        forked: TrackedList[ChainNode] = TrackedList.load(forked_log, Message)
 
         kinds = [type(x).__name__ for x in forked.active_chain]
         assert kinds == ["Message", "DiffContentEvent", "Message"]

@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import asyncio
 import time
 from dataclasses import dataclass, field
@@ -108,7 +110,9 @@ class AnthropicProvider(ModelProvider):
         self.timeout_first_chunk = config.timeout_first_chunk
         self.timeout_total = config.timeout_total
         self.explicit_cache_mode = config.explicit_cache_mode
-        self._extra_body: dict = dict(config.extra_body)
+        # 深拷贝：运行时开关（set_thinking）会改写嵌套的 thinking dict，
+        # 浅拷贝会把改动写穿到全局 ProviderConfig（污染其他会话/进程内重建）。
+        self._extra_body: dict = copy.deepcopy(config.extra_body)
         self._anthropic_version = config.anthropic_version
 
         headers = self._make_headers(config.api_key, self._anthropic_version)

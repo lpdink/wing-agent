@@ -101,19 +101,19 @@ class TestApplyAgentOverride:
 
     @pytest.mark.asyncio
     async def test_override_system_prompt_append(self, runtime: Any):
-        """append_system_prompt 追加到 setin_system_prompt 末尾。"""
+        """append_system_prompt 追加进独立的 append 字段（不并入基础提示词）。"""
         session = runtime.create_session()
-
-        # 先设置一个非空的 system_prompt 以便测试追加
         session.context_manager.setin_system_prompt = "Original prompt."
 
         override = AgentOverride(append_system_prompt="Always respond in Chinese.")
         session.apply_agent_override(override)
 
-        # 实现用 "\n" 连接，所以结果是 "Original prompt.\n" + "Always..."
-        assert (
-            session.context_manager.setin_system_prompt
-            == "Original prompt.\nAlways respond in Chinese."
+        cm = session.context_manager
+        assert cm.setin_system_prompt == "Original prompt."
+        assert cm.append_system_prompt == "Always respond in Chinese."
+        # 组合系统提示词：base + append（append 是独立一段）
+        assert cm.system_prompt.content.startswith(
+            "Original prompt.\n\nAlways respond in Chinese."
         )
 
     @pytest.mark.asyncio
@@ -127,10 +127,10 @@ class TestApplyAgentOverride:
         )
         session.apply_agent_override(override)
 
-        assert (
-            session.context_manager.setin_system_prompt
-            == "Base prompt.\n Extra instruction."
-        )
+        cm = session.context_manager
+        assert cm.setin_system_prompt == "Base prompt."
+        assert cm.append_system_prompt == "Extra instruction."
+        assert cm.system_prompt.content.startswith("Base prompt.\n\nExtra instruction.")
 
     @pytest.mark.asyncio
     async def test_override_tools(self, runtime: Any):

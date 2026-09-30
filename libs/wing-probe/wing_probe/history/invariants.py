@@ -28,10 +28,12 @@
   ``parent_uuid`` 指向祖父（可能是事件节点）；target 及其后续不在活跃链但仍在
   记录集。target 上方只有事件（或无节点）时，实现写入哨兵节点
   ``role="system"`` / ``content="[rewind_to_root]"``（parent 为空）。
-- fork：子链 == ``walk_full_chain(from_uuid=at.parent_uuid)`` 的重映射副本
-  （``uuid`` / ``parent_uuid`` / ``unzip_last_uuid`` 全量重映射、事件随行）；
+- fork：子会话记录 == 源记录的**前缀**（append 顺序，到目标之前为止）的重映射
+  副本（``uuid`` / ``parent_uuid`` / ``unzip_last_uuid`` 全量重映射、事件随行、
+  引用全部落在子记录集内部）；活跃链由 tip 回溯自然得出——压缩节点是根，被压缩
+  区间随行但不进链（子会话仍能回到压缩前的 User Message，而已摘要内容不复活）；
   ``metadata.json`` 一次写全 ``forked_from`` / ``workspace`` / ``template_name`` /
-  ``model_name`` / ``provider_name``（模型快照）。
+  ``model_name`` / ``provider_name``（模型快照）以及系统提示词与动态状态快照。
 """
 
 from __future__ import annotations
@@ -96,11 +98,24 @@ FORK_METADATA_FIELDS: tuple[str, ...] = (
 )
 
 #: 与源 session 的**当前** metadata 交叉对账的快照字段（`forked_from` 恒校验）。
+#:
+#: 收录口径：fork 写入子记录时**必然**等于源侧记录（或源侧无记录 → 跳过对账，
+#: 见 ``unverifiable_metadata_fields``）的字段。刻意不收：
+#: - `append_system_prompt`：fork 是"创建新 session"，`before_session_start`
+#:   在子会话上生效——子记录 = 继承的源 append + 本次 hook 注入，与源记录
+#:   合法不同（hook 不自幂等时会带重复内容）；
+#: - `tools` / `yolo`：子记录取源会话的 **live 有效值**，而源侧存在不落记录
+#:   的 live 变更路径（远程工具 ref 失效降级、Bash 工具的 "always allow"
+#:   打开 yolo）——live 与记录合法漂移，纳入对账会制造假红。
 FORK_SNAPSHOT_FIELDS: tuple[str, ...] = (
     "workspace",
     "template_name",
     "model_name",
     "provider_name",
+    "system_prompt",
+    "thinking",
+    "reasoning_effort",
+    "max_turns",
 )
 
 #: rewind / fork 的"当前状态"哨兵（实现里 target == "current" 有专属语义）。
@@ -469,6 +484,35 @@ def assert_no_transient_records(
 
 
 # ── 过渡断言的公共零件 ────────────────────────────────────
+
+
+def _trace_records(records: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """模拟 ``TrackedList.load`` 的活跃链：从**最后一条记录**沿 parent_uuid 回溯到根。
+
+    这是 fork 断言里"活跃链应当是什么"的判据：fork 原样拷贝记录前缀，子会话
+    加载时自然得到 [压缩节点, ...tail]，压缩节点（parent_uuid 为空）即止——
+    不需要任何遍历设计，也不复活被压缩区间。
+    """
+    if not records:
+        return []
+    by_uuid = {
+        uuid: record for record in records if (uuid := record_uuid(record)) is not None
+    }
+    chain: list[Mapping[str, Any]] = []
+    seen: set[str] = set()
+    last_uuid = record_uuid(records[-1])
+    record = by_uuid.get(last_uuid) if last_uuid is not None else None
+    while record is not None:
+        uuid = record_uuid(record)
+        if uuid is not None:
+            if uuid in seen:  # 损坏日志成环：停在这里（调用方的链不变量会报错）
+                break
+            seen.add(uuid)
+        chain.append(record)
+        parent = record.get("parent_uuid")
+        record = by_uuid.get(parent) if isinstance(parent, str) else None
+    chain.reverse()
+    return chain
 
 
 def _semantic_prefix_problems(
@@ -1166,16 +1210,21 @@ def assert_fork_of(
     snapshot_fields: Sequence[str] = FORK_SNAPSHOT_FIELDS,
     allow_trailing: bool = False,
 ) -> dict[str, Any]:
-    """fork 的链完整性与 metadata 快照对账（spec「fork 断言」、tasks 5.3）。
+    """fork 的记录前缀与 metadata 快照对账（spec「fork 断言」、tasks 5.3）。
 
     断言（``child`` 须是 fork 之后、子 session 后续演进之前的快照）：
 
-    - 子链 == 源链中 ``at_uuid`` 之前的完整前缀（语义逐节点等价、不含
-      ``at_uuid`` 自身）：期望值按实现的 ``walk_full_chain(from_uuid=at.parent)``
-      口径取自源视图（含压缩节点、跨压缩边界）；
-    - uuid 全量重映射：子链 uuid 与源记录集**无交集**，且映射保持 parent 关系；
-    - 事件记录随行拷贝（**前缀窗口内**的事件类型序列 + 载荷逐项等价，
-      剔除链拓扑与 ``ts``；子 session 后续自产事件不算"没随行"）；
+    - **记录**：子记录 == 源记录的**前缀**（append 顺序，到 ``at_uuid`` 之前
+      为止，不含目标自身——它由响应里的 ``draft`` 重新发送），逐条语义等价
+      （剔除链拓扑与 ``ts``）。被压缩区间、rewind 留下的分叉都在前缀里
+      （子会话"回得去"的前提）；
+    - **uuid 全量重映射**：子记录集与源记录集**无交集**、单射，且每个链拓扑
+      引用（``parent_uuid`` / ``unzip_last_uuid``）都落在子记录集内部——
+      不留悬空 / 跨 session 引用（压缩节点的 unzip 因此仍指向区间末记录）；
+    - **活跃链**：子会话活跃链 == 对拷贝记录做 tip 回溯的结果（压缩节点是根，
+      被压缩区间**不上链**——不复活已摘要内容），且文件视图与自身记录的回溯
+      一致（reload 口径自洽）。**内存态**与文件的一致性由场景承担：请求体
+      断言 + ``/api/session/get`` 的上下文窗口（本 helper 只见文件视图）；
     - ``metadata.json`` 快照：``fork_metadata`` 校验必需字段存在，
       ``forked_from`` 恒等于源 session id，``snapshot_fields`` 与源 metadata
       逐字段对账。
@@ -1189,29 +1238,35 @@ def assert_fork_of(
     ``unverifiable_metadata_fields`` 里如实列出。
 
     Args:
-        at_uuid: fork 目标消息 uuid（或哨兵 ``"current"`` = 复制整链）。
+        at_uuid: fork 目标消息 uuid（或哨兵 ``"current"`` = 复制全部记录）。
         check_metadata: 关闭即放弃 metadata 快照守卫（仅用于纯链形状对账，
             场景**不应**使用）。
         require_metadata: 传给 :func:`fork_metadata` 的必需字段。
         snapshot_fields: 与源 metadata 交叉对账的字段
             （默认 :data:`FORK_SNAPSHOT_FIELDS`）。
-        allow_trailing: 放行子链末尾的**计划外 Message**（默认严格）。
+        allow_trailing: 放行子记录 / 子链末尾的**计划外 Message**（默认严格）。
 
     Returns:
         对账素材字典（``expected_draft``（fork 的 ``draft`` 应等于它）、
-        ``uuid_map``（源 uuid → 子 uuid）、``chain_length``、``trailing_uuids``、
+        ``uuid_map``（源 uuid → 子 uuid，按记录逐条配对）、``prefix_length``
+        （拷贝的记录前缀条数）、``chain_length``（子会话活跃链长度）、
+        ``trailing_uuids``（链级尾部）、``trailing_record_uuids``（记录级尾部）、
         ``child_metadata``、``unverifiable_metadata_fields``）。
 
     Raises:
         HistoryAssertionError: 链形状或 metadata 断言失败。
     """
-    source_chain = source.active_chain()
+    source_records = list(source.records)
     source_uuids = set(source.by_uuid)
 
-    # ── 期望前缀（镜像 extract_subchain 的 walk 口径） ──
+    # ── 期望前缀（记录口径：append 顺序，镜像 SessionManager._fork_slice） ──
+    # 子会话记录 = 源记录在 fork 点之前的**全部**记录（不含目标自身：它由
+    # 响应里的 draft 重新发送）。被压缩区间、rewind 留下的分叉都在前缀里
+    # ——这是"子会话仍能回到之前的任何 User Message"的前提；压缩节点靠
+    # parent_uuid=None + unzip_last_uuid 表达"活跃链从这里开始"。
     if at_uuid == CURRENT_SENTINEL:
         expected_draft: str | None = ""
-        expected = source.full_chain()
+        expected = source_records
     else:
         at = source.by_uuid.get(at_uuid)
         if at is None:
@@ -1221,7 +1276,7 @@ def assert_fork_of(
                     [
                         f"at uuid {at_uuid!r} not found in source records "
                         f"({len(source.records)} record(s))",
-                        f"source chain uuids: {[record_uuid(r) for r in source_chain]}",
+                        f"source records: {[record_uuid(r) for r in source_records]}",
                     ],
                     sections=[source.describe()],
                     session_id=child.session_id,
@@ -1240,30 +1295,26 @@ def assert_fork_of(
                 )
             )
         expected_draft = at.get("content") if isinstance(at.get("content"), str) else ""
-        parent = at.get("parent_uuid")
-        expected = (
-            source.full_chain(parent) if isinstance(parent, str) and parent else []
+        index = next(
+            position
+            for position, record in enumerate(source_records)
+            if record_uuid(record) == at_uuid
         )
+        expected = source_records[:index]
 
+    child_records = list(child.records)
     child_chain = child.active_chain()
     problems, trailing = _semantic_prefix_problems(
         expected,
-        child_chain,
-        expected_label="source prefix",
-        actual_label="child chain",
+        child_records,
+        expected_label="source record prefix",
+        actual_label="child records",
         allow_trailing=allow_trailing,
     )
 
-    # ── uuid 全量重映射 ──
-    child_uuids = [record_uuid(record) for record in child.by_uuid.values()]
-    overlap = sorted({uuid for uuid in child_uuids if uuid} & source_uuids)
-    if overlap:
-        problems.append(
-            f"child uuids intersect the source record set ({len(overlap)}): "
-            f"{overlap} —— fork 必须全量重映射 uuid"
-        )
+    # ── uuid 全量重映射（逐条配对） + 链拓扑引用自洽 ──
     uuid_map: dict[str, str] = {}
-    for position, (want, got) in enumerate(zip(expected, child_chain)):
+    for want, got in zip(expected, child_records):
         want_uuid = record_uuid(want)
         got_uuid = record_uuid(got)
         if want_uuid is None or got_uuid is None:
@@ -1271,51 +1322,70 @@ def assert_fork_of(
         if want_uuid in uuid_map:
             problems.append(
                 f"source uuid {want_uuid!r} appears twice in the expected prefix "
-                "(fork 前源链已损坏)"
+                "(fork 前源记录已损坏)"
             )
         uuid_map[want_uuid] = got_uuid
-    mapped_values = [uuid for uuid in uuid_map.values()]
+    child_uuids = {record_uuid(record) for record in child_records}
+    overlap = sorted({uuid for uuid in child_uuids if uuid} & source_uuids)
+    if overlap:
+        problems.append(
+            f"child uuids intersect the source record set ({len(overlap)}): "
+            f"{overlap} —— fork 必须全量重映射 uuid"
+        )
+    mapped_values = list(uuid_map.values())
     if len(set(mapped_values)) != len(mapped_values):
         problems.append(
-            f"child chain reuses uuids for distinct source nodes: {uuid_map} —— "
+            f"child records reuse uuids for distinct source records: {uuid_map} —— "
             "重映射必须是单射"
         )
+    # 链拓扑引用（parent_uuid / unzip_last_uuid）必须整体重映射到子记录集内部：
+    # 前缀口径下所有引用都在前缀里，所以既不该悬空、也不该出现跨 session 引用。
+    for position in range(min(len(expected), len(child_records))):
+        want, got = expected[position], child_records[position]
+        for key in ("parent_uuid", "unzip_last_uuid"):
+            want_ref = want.get(key)
+            got_ref = got.get(key)
+            want_mapped = uuid_map.get(want_ref) if isinstance(want_ref, str) else None
+            if want_mapped != got_ref:
+                problems.append(
+                    f"child records[{position}] "
+                    f"({describe_record(got, position=position)}): "
+                    f"{key}={got_ref!r} != 重映射后的源引用 {want_mapped!r} —— "
+                    "链拓扑引用必须整体重映射（不得留悬空 / 跨 session 引用）"
+                )
+    for position, record in enumerate(child_records):
+        for key in ("parent_uuid", "unzip_last_uuid"):
+            ref = record.get(key)
+            if isinstance(ref, str) and ref not in child_uuids:
+                problems.append(
+                    f"child records[{position}] "
+                    f"({describe_record(record, position=position)}): "
+                    f"{key}={ref!r} 不在子记录集内（悬空引用）—— "
+                    "fork 拷贝的记录前缀必须自洽"
+                )
 
-    # ── parent 关系保持 + 子链闭合 ──
-    for position in range(1, len(child_chain)):
-        parent = child_chain[position].get("parent_uuid")
-        expected_parent = record_uuid(child_chain[position - 1])
-        if parent != expected_parent:
-            problems.append(
-                f"child chain[{position}] "
-                f"({describe_record(child_chain[position], position=position)}): "
-                f"parent_uuid={parent!r} != child chain[{position - 1}].uuid="
-                f"{expected_parent!r} —— parent 关系必须保持"
-            )
-    if child_chain and child_chain[0].get("parent_uuid"):
-        problems.append(
-            f"child chain root ({describe_record(child_chain[0], position=0)}): "
-            f"parent_uuid={child_chain[0].get('parent_uuid')!r} —— "
-            "前缀根节点没有 parent（重映射后应为空）"
-        )
-
-    # ── 事件随行（只对前缀窗口内的事件） ──
-    #
-    # 注意窗口：子 session 在 fork 之后会继续演进、产生自己的事件——那不是
-    # "事件没随行"。事件随行只对 fork 前缀（前 len(expected) 个节点）成立。
-    expected_events = [record for record in expected if is_event(record)]
-    child_events = [
-        record for record in child_chain[: len(expected)] if is_event(record)
-    ]
-    if [record.get("type") for record in expected_events] != [
-        record.get("type") for record in child_events
-    ]:
-        problems.append(
-            f"event records did not follow the fork (前 {len(expected)} 个节点窗口): "
-            f"expected {len(expected_events)} event node(s) "
-            f"({[record.get('type') for record in expected_events]}), got "
-            f"{len(child_events)} ({[record.get('type') for record in child_events]})"
-        )
+    # ── 活跃链：由记录自然得出（tip 回溯），压缩节点是根 → 已摘要内容不复活 ──
+    chain_problems, chain_trailing = _semantic_prefix_problems(
+        _trace_records(expected),
+        child_chain,
+        expected_label="chain implied by the copied records",
+        actual_label="child chain",
+        allow_trailing=allow_trailing,
+    )
+    problems += chain_problems
+    # live == reload：内存活跃链必须等于对**子会话自己的记录**做 tip 回溯的结果
+    live_problems, _ = _semantic_prefix_problems(
+        _trace_records(child_records),
+        child_chain,
+        expected_label="chain implied by child records (reload 口径)",
+        actual_label="child chain (live)",
+        allow_trailing=False,
+    )
+    problems += live_problems
+    # 尾部素材：链级（子会话演进上链的部分）优先，链级为空时退回记录级
+    # （被 rewind 停在记录里的分叉）——两者都如实列出，调用方各取所需。
+    trailing_records = trailing
+    trailing = chain_trailing or trailing
 
     if problems:
         raise HistoryAssertionError(
@@ -1391,6 +1461,7 @@ def assert_fork_of(
         "uuid_map": uuid_map,
         "prefix_length": len(expected),
         "chain_length": len(child_chain),
+        "trailing_record_uuids": [record_uuid(record) for record in trailing_records],
         "trailing_uuids": [record_uuid(record) for record in trailing],
         "child_metadata": child_metadata,
         "unverifiable_metadata_fields": unverifiable,

@@ -80,6 +80,17 @@ class HookRegistry:
         """
         self._handlers.clear()
 
+    def off(self, point: str, fn: Callable) -> bool:
+        """注销 handler（幂等）：返回是否真的摘除。
+
+        与 :meth:`on` 对称的公开入口——测试与动态 hook 管理不必触碰内部结构。
+        """
+        handlers = self._handlers.get(point)
+        if not handlers or fn not in handlers:
+            return False
+        handlers.remove(fn)
+        return True
+
     def invoke(self, point: str, value: Any, **context: Any) -> Any:
         """同步执行 hook 管道。
 
