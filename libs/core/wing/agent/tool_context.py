@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from wing.event import AskEvent, WingEvent
+    from wing.media import MediaAccess
 
 
 @runtime_checkable
@@ -21,6 +22,15 @@ class ToolContext(Protocol):
 
     @property
     def session_id(self) -> str: ...
+
+    @property
+    def media(self) -> MediaAccess | None:
+        """会话媒体读写窄接口（工具写图 / 读图）。
+
+        None = 该 agent 无媒体存储（裸测试构造）——工具必须安全拒绝，
+        不得假定可用。
+        """
+        ...
 
     @property
     def yolo(self) -> bool: ...

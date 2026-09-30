@@ -23,6 +23,7 @@ from wing.common.logger import log
 from wing.common.tracked_list import TrackedList
 from wing.config import get_config
 from wing.context_manager import ContextManager
+from wing.media import MediaAccess
 from wing.provider import create_provider
 from wing.schema import ChainNode, Message
 from wing.store import SessionMetadata, SessionStore
@@ -56,6 +57,9 @@ def serialize_message(msg: Message) -> dict:
         ]
     if msg.tool_call_id:
         d["tool_call_id"] = msg.tool_call_id
+    if msg.media:
+        # 引用式媒体（MediaRef 元数据），绝无 base64——字节在 SessionStore。
+        d["media"] = [ref.model_dump() for ref in msg.media]
     return d
 
 
@@ -138,14 +142,19 @@ class Session:
 
         # 创建 WingAgent
         provider_cfg = get_config().get_provider(template.provider_name)
+        # 会话媒体池：读/写都经窄接口，工具与 provider 序列化不直接触存储。
+        media = MediaAccess(read=store.read_media, write=store.write_media)
         agent = WingAgent(
             model=template.model,
-            model_provider=create_provider(provider_cfg, session_id=session_id),
+            model_provider=create_provider(
+                provider_cfg, session_id=session_id, media=media
+            ),
             stream=True,
             context_manager=context_manager,
             tools=template.resolved_tools,
             max_turns=template.max_turns,
             yolo=template.yolo,
+            media=media,
         )
 
         session = cls(
@@ -192,14 +201,18 @@ class Session:
 
         # 3. 创建新 Agent
         provider_cfg = get_config().get_provider(template.provider_name)
+        media = MediaAccess(read=self._store.read_media, write=self._store.write_media)
         self._agent = WingAgent(
             model=template.model,
-            model_provider=create_provider(provider_cfg, session_id=self._session_id),
+            model_provider=create_provider(
+                provider_cfg, session_id=self._session_id, media=media
+            ),
             stream=True,
             context_manager=self._context_manager,
             tools=template.resolved_tools,
             max_turns=template.max_turns,
             yolo=template.yolo,
+            media=media,
         )
 
         cwd = (

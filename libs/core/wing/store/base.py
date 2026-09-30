@@ -16,10 +16,44 @@ wing/store/base.py — 持久化层抽象。
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
+
+from wing.media import media_id as compute_media_id
+
+_MEDIA_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+def validate_media_id(media_id: str) -> str:
+    """校验 media id 为内容 sha256（64 位小写 hex）并原样返回。
+
+    这是防路径穿越的唯一防线：media id 直接作为存储路径组件，任何其它
+    输入都拒绝——不做"清洗"或"容错"（脏 id 说明调用方逻辑已错，静默归一
+    只会把 bug 藏起来）。
+    """
+    if not isinstance(media_id, str) or _MEDIA_ID_PATTERN.fullmatch(media_id) is None:
+        raise ValueError(
+            f"invalid media id: {media_id!r} (expect 64 lowercase hex chars)"
+        )
+    return media_id
+
+
+def validate_media_content(media_id: str, data: bytes) -> None:
+    """校验媒体 id 与其字节一致（内容寻址完整性）。
+
+    只在**首写路径**调用（对象已存在时跳过——同 id 必然同内容，跳过省一次
+    全量哈希）。不一致说明调用方算错了 id 或传错了 data，必须大声失败：
+    否则读回的字节与引用元数据（id/尺寸）永久错位，且没有任何告警。
+    """
+    actual = compute_media_id(data)
+    if actual != media_id:
+        raise ValueError(
+            f"media content-address mismatch（内容寻址不一致）: "
+            f"id={media_id} 与 sha256(data)={actual} 不符"
+        )
 
 
 class SessionMetadata(BaseModel):
@@ -130,3 +164,29 @@ class SessionStore(ABC):
     @abstractmethod
     def exists(self, session_id: str) -> bool:
         """该 session 是否存在（精确匹配 session id）。"""
+
+    # ── 媒体字节（内容寻址的会话媒体池）──────────
+    #
+    # 媒体池按"存储根"共享：file 后端多个 session 共用 <root>/.media/，
+    # memory 后端同一个 store 实例共享——会话消息只持有 MediaRef 引用，
+    # 字节随会话可恢复性走（durable 后端跨进程存活，memory 后端重启即
+    # 消失，与既有语义一致）。
+
+    @abstractmethod
+    def write_media(self, media_id: str, data: bytes) -> None:
+        """写入媒体字节（内容寻址，幂等：已存在即跳过）。
+
+        media_id 必须是 64 位小写 hex 的内容 sha256，否则抛 ValueError
+        （防路径穿越）。**首写路径**还校验 id 与字节一致
+        （``validate_media_content``，内容寻址完整性）；已存在对象直接
+        跳过（同 id 必然同内容，跳过省一次全量哈希）。I/O 失败由后端抛出
+        （调用方决定是否降级）。
+        """
+
+    @abstractmethod
+    def read_media(self, media_id: str) -> bytes | None:
+        """读取媒体字节。合法 id 但对象缺失返回 None；非法 id 抛 ValueError。
+
+        读取 I/O 失败（权限/损坏）按"读不到"处理：WARN 日志 + 返回 None
+        ——序列化侧据此降级为占位文本，绝不打断模型请求。
+        """
