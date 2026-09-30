@@ -51,7 +51,6 @@ use crate::tui::TermEvent;
 use crate::tui::WingTerminal;
 use crate::ui::chat_view::ChatView;
 use crate::ui::chat_view::ChatViewWidget;
-use crate::ui::header::build_header_lines;
 use crate::ui::input_area::ActivityRail;
 use crate::ui::input_area::ComposerWidget;
 use crate::ui::input_area::InputArea;
@@ -66,6 +65,7 @@ use crate::ui::status_bar::StatusData;
 use crate::ui::toast::Toast;
 use crate::ui::toast::ToastKind;
 use crate::ui::toast::render_toast;
+use crate::ui::welcome::Welcome;
 use crate::util::title;
 use title::AttentionKind;
 
@@ -93,6 +93,9 @@ const WHEEL_SCROLL_LINES: usize = 3;
 /// Application state.
 pub struct App {
     pub status: StatusData,
+    /// 欢迎屏状态（tip 抽签 / 扫光时钟 / 上次构建宽度）。`None` = 已关掉
+    /// （测试要一块干净的顶部，见 [`App::clear_welcome`]）。
+    welcome: Option<Welcome>,
     pub chat: ChatView,
     pub input: InputArea,
     pub session_id: String,
@@ -175,10 +178,20 @@ impl App {
     pub fn new(session_id: String, config: AppConfig, launch_workspace: Option<String>) -> Self {
         let palette = ThemePalette::from_config(&config.colors);
         let max_input_lines = config.layout.max_input_lines;
+        // 欢迎屏：tip 抽签 + 扫光时钟。这里先按"还没有帧"的宽度建一次，只是
+        // 为了让 draw 之前 header 不为空 —— 第一次 draw 一定按真实的内容宽重建
+        //（扫光未定格时 `needs_rebuild` 恒真）。
+        let now = std::time::Instant::now();
+        let mut welcome = Welcome::new(crate::shared::tips::seed_now(), now);
         let mut chat = ChatView::new();
-        chat.set_header(build_header_lines(&palette));
+        chat.set_header(welcome.build(
+            &palette,
+            crate::ui::input_area::chrome::UNFRAMED_WIDTH,
+            now,
+        ));
         Self {
             status: StatusData::default(),
+            welcome: Some(welcome),
             chat,
             input: InputArea::with_max_lines("今天构建什么？".into(), max_input_lines),
             session_id,
@@ -212,6 +225,47 @@ impl App {
             geometry: FrameGeometry::default(),
             scrollbar: scrollbar::ScrollbarState::default(),
         }
+    }
+
+    /// 按当前宽度 / 时刻决定要不要重建欢迎屏 header，要就重建。
+    ///
+    /// 每帧调用：扫光期间逐帧重建（进度在走），定格后只有宽度变了才重建一次
+    /// —— 静态 header 不该每帧重新分配。`welcome == None`（测试关掉了）时
+    /// 什么都不做，header 由调用方自己管。
+    fn sync_welcome(&mut self, palette: &ThemePalette, width: u16, now: std::time::Instant) {
+        let Some(welcome) = self.welcome.as_mut() else {
+            return;
+        };
+        if !welcome.needs_rebuild(width, now) {
+            return;
+        }
+        let lines = welcome.build(palette, width, now);
+        self.chat.set_header(lines);
+    }
+
+    /// 抽中的那条 tip（测试断言首帧文案）。
+    #[cfg(test)]
+    pub(crate) fn tip_text(&self) -> &'static str {
+        self.welcome
+            .as_ref()
+            .map(|w| w.tip().text)
+            .unwrap_or_default()
+    }
+
+    /// 解析后的主题色板（测试要按同一份色板构建 header）。
+    #[cfg(test)]
+    pub(crate) fn palette(&self) -> ThemePalette {
+        ThemePalette::from_config(&self.config.colors)
+    }
+
+    /// 彻底关掉欢迎屏（连 header 一起清空）。
+    ///
+    /// 测试要一块只有消息的干净顶部时用它 —— 只是 `chat.set_header(Vec::new())`
+    /// 挡不住：下一次 draw 的 `sync_welcome` 会把 header 装回去。
+    #[cfg(test)]
+    pub(crate) fn clear_welcome(&mut self) {
+        self.welcome = None;
+        self.chat.set_header(Vec::new());
     }
 
     /// Whether the terminal is wide enough for detailed status bar.
@@ -409,6 +463,16 @@ impl App {
             // what the bar's geometry and its hit testing are derived from.
             chat_height = chunks[1].height;
             self.geometry.record_chat_band(chunks[1]);
+
+            // 欢迎屏 header：宽度档变了、或扫光还在扫，就重建一次 —— 在 chat
+            // widget 之前完成，这一帧画的就是新行。宽度按**内容宽**算：header
+            // 与消息渲染在同一个（减掉滚动条 gutter 的）矩形里，按终端整宽
+            // 构建会让最右一列连同省略号被裁掉。
+            self.sync_welcome(
+                &palette,
+                scrollbar::content_area(chunks[1]).width,
+                std::time::Instant::now(),
+            );
             let ctx = crate::render::renderable::CellContext {
                 palette: &palette,
                 thinking_mode,
@@ -545,6 +609,20 @@ impl App {
 
 /// Minimum spacing between chat-dirty draws (≈60fps frame budget).
 const MIN_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// Timer arm of the run loop's `select!` for the welcome block's opening sweep.
+///
+/// Same absolute-deadline contract as the selection lane's
+/// [`selection_autoscroll_tick`]: `select!` rebuilds the future on every loop
+/// iteration, so a relative sleep would be pushed back by every key / stream
+/// event and the sweep would freeze mid-flight. `None` (swept and settled)
+/// parks in `pending()` — a settled welcome costs the loop nothing.
+async fn welcome_sweep_tick(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+        None => std::future::pending::<()>().await,
+    }
+}
 
 /// Pure frame-gate predicate: a chat-dirty draw is due iff at least
 /// [`MIN_FRAME_INTERVAL`] has elapsed since the last draw.
@@ -836,6 +914,15 @@ pub async fn run_app(
                 if app.tick_selection_autoscroll() {
                     app.input_dirty = true;
                 }
+            }
+            // Welcome sweep: repaint the header at the animation's own cadence
+            // (the 100 ms system tick is too coarse for it) until it settles —
+            // then the arm parks. chat_dirty (not input_dirty): the frame gate
+            // may coalesce it, and no key is waiting on this frame.
+            _ = welcome_sweep_tick(
+                app.welcome.as_ref().and_then(|w| w.next_frame(std::time::Instant::now())),
+            ) => {
+                app.chat_dirty = true;
             }
             // Background fetch results (non-blocking HTTP queries).
             Some(result) = fetch_rx.recv() => {

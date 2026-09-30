@@ -155,6 +155,16 @@ markdown 链接渲染为 OSC8 超链接，单击（无拖动）打开。模块�
 
 **已知限制**：只覆盖 chat 内容里走 markdown 的 cell（assistant 消息与 thinking；Ask 面板 / tool 输出不参与）；**同一 cell 里出现超宽代码行/缩进代码行时该 cell 全部链接失效**（`rows_are_exact`，见上，宁可没有链接也不错行）；行号跳转只认白名单编辑器；`~user/x` 不展开、Windows 上 `.cmd` shim（PATHEXT）探测不到 → 只降级行号（`util/open.rs` 模块注释同样登记）；`file://` 只支持空 authority 与 `localhost`（`file://nas/share/x` 明确报错而不是拼到启动目录下）；tmux/zellij 的 OSC8 透传取决于用户配置；不做 hover 自绘下划线/预览。
 
+## 换行键：Shift+Enter 靠终端协议，Ctrl+J 才是退路
+
+输入区把 `Shift+Enter` / `Alt+Enter` 映射成换行（`ui/input_area/mod.rs`），但**这条映射在多数终端上永远收不到**：传统终端把 `Shift+Enter` 和 `Enter` 都发成 `\r`，应用层无从区分。所以进入 TUI 时 (`tui/mod.rs` 的 `enter_sequence_for`) 会请求一次 kitty 键盘协议（`CSI > 1 u`，只开 `DISAMBIGUATE_ESCAPE_CODES`），支持它的终端（kitty / WezTerm / Ghostty / foot / alacritty …）此后按 CSI-u 上报，`Shift+Enter` 才真的带 SHIFT 修饰键到达；离开时 `CSI < 1 u` 收回（收回失败会让**退出后的 shell** 也收到 CSI-u 编码的按键，所以它在 `leave_sequence` 里排第一）。
+
+三个约束别踩：
+
+* **只在 Unix 上发**：crossterm 的 `PushKeyboardEnhancementFlags` 在 Windows 上无条件返回 `Unsupported`（老控制台 API 没有这个协议），若跟着主序列一起 `?` 会把整个进入序列带崩 —— 单独写、失败即忽略；
+* **不支持的终端什么都不做**：它们忽略这串字节，`Shift+Enter` 退化成 `Enter`。于是 `Ctrl+J` 是必须留的兜底（不依赖任何协议），`shared/tips.rs` 里那条提示就是为此；
+* **tmux 需要 `set -s extended-keys on`**（3.2+）才透传，否则同样是退化成 `Enter`。
+
 ## 已知中间态：原生拖选需要 Shift/Option
 
 鼠标上报接管后，终端不再把拖拽交给自身的文本选择——**不按 Shift（macOS 用 Option）的拖选不再选中文本**。这是回退 #28 的已知代价：应用内自研选择（`tui-text-selection` + `tui-composer-pointer`）已恢复 **chat 区域与 composer** 的免修饰键体验，同时保留 Shift/Option 原生拖选作为兜底（状态栏与弹层区域仍只能用原生方式）。

@@ -9,7 +9,7 @@ Despite the name, there is no backend "magic dispatch" anymore. A slash command 
 | Path | What happens | Examples |
 |------|--------------|---------|
 | **Frontend → HTTP** | The TUI intercepts the command and calls a Gateway HTTP endpoint | `/compact`, `/model`, `/rewind`, `/reload` |
-| **Frontend-local** | Handled entirely in the TUI, never sent to the gateway | `/clear`, `/copy` |
+| **Frontend-local** | Handled entirely in the TUI, never sent to the gateway | `/clear`, `/copy`, `/tips` |
 | **Prompt expansion** | A user `.md` file is expanded (`$ARGUMENTS` replaced) and sent as a normal message | custom `/plan`, etc. |
 
 > **Interrupt is not a slash command** — press **Esc** to interrupt the current agent turn (`POST /api/session/interrupt` under the hood).
@@ -20,6 +20,7 @@ Despite the name, there is no backend "magic dispatch" anymore. A slash command 
 |---------|-------|--------|-------------|
 | `/clear` | | | Clear the chat view |
 | `/copy` | | `[N]` | Copy the last (or Nth) assistant message to clipboard |
+| `/tips` | | | List every startup tip (the welcome block rotates one per launch) |
 | `/new` | | `[name]` | Create a new session |
 | `/session` | `/ss` | `[session_id]` | Switch to a session, or list all sessions |
 | `/fork` | | `<uuid>` | Fork a new session from a specific message |
