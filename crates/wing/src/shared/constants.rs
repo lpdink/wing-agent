@@ -11,6 +11,9 @@ pub const COPY_COMMAND: &str = "/copy";
 /// Clear the chat view.
 pub const CLEAR_COMMAND: &str = "/clear";
 
+/// List every startup tip (the welcome block only rotates one of them).
+pub const TIPS_COMMAND: &str = "/tips";
+
 // ── Session lifecycle commands (handled via HTTP API) ───────────
 
 /// Create a new session.

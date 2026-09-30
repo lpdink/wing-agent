@@ -87,7 +87,7 @@ fn test_click_without_drag_copies_nothing() {
 /// link's screen row / column can be read back from the frame map.
 fn app_with_link() -> App {
     let mut app = test_app();
-    app.chat.set_header(Vec::new());
+    app.clear_welcome();
     app.chat.push(ChatCell::AssistantMessage(
         "see [docs](https://example.com) now".into(),
     ));
@@ -98,7 +98,7 @@ fn app_with_link() -> App {
 /// scrolling really moves the content under the pointer.
 fn app_with_scrollable_link() -> App {
     let mut app = test_app();
-    app.chat.set_header(Vec::new());
+    app.clear_welcome();
     for i in 0..4 {
         app.chat.push(ChatCell::UserMessage(format!("above {i}")));
     }
@@ -604,7 +604,7 @@ fn test_composer_click_on_a_scrolled_window_places_the_cursor() {
     // Width 20 → text width 18, max input lines 10 but only 3 fit in the
     // test layout: the window follows the cursor.
     let mut app = test_app();
-    app.chat.set_header(Vec::new());
+    app.clear_welcome();
     let draft = (0..8)
         .map(|i| format!("line-{i}"))
         .collect::<Vec<_>>()

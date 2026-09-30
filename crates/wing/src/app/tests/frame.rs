@@ -419,7 +419,7 @@ fn test_the_invalidation_rule_is_one_predicate() {
     // Chat non-trigger — streamed text growth rewrites a cell without moving
     // any row, so the fingerprint stays equal.
     let mut app = test_app();
-    app.chat.set_header(Vec::new());
+    app.clear_welcome();
     app.chat.push(ChatCell::AssistantMessage(
         (0..30)
             .map(|i| format!("line-{i}"))

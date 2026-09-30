@@ -22,3 +22,4 @@
 pub mod constants;
 pub mod goal_role;
 pub mod panels;
+pub mod tips;

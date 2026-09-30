@@ -36,6 +36,7 @@ fn test_frontend_commands_consumed() {
         "/new",
         "/copy",
         "/copy 1",
+        "/tips",
         "/goal do something",
         "/goal-exit",
     ] {

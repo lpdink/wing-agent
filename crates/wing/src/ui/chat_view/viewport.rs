@@ -273,7 +273,10 @@ impl Widget for ChatViewWidget<'_> {
                     content_area.width,
                     cell_visible as u16,
                 );
-                Paragraph::new(self.view.header_lines.clone())
+                // Borrowed, not cloned: the welcome block's art is a few
+                // hundred spans, and this runs every frame (60fps while a
+                // turn streams) — the copy would be pure waste.
+                Paragraph::new(self.view.header_lines.as_slice())
                     .scroll((skip as u16, 0))
                     .render(header_area, buf);
                 render_y += cell_visible as u16;

@@ -27,7 +27,9 @@ use crate::shared::constants::COPY_COMMAND;
 use crate::shared::constants::GOAL_COMMAND;
 use crate::shared::constants::GOAL_EXIT_COMMAND;
 use crate::shared::constants::NEW_COMMAND;
+use crate::shared::constants::TIPS_COMMAND;
 use crate::shared::panels::picker::ModelPanel;
+use crate::shared::tips::full_text as tips_full_text;
 use crate::ui::cells::tool_call::truncate_by_chars;
 use crate::ui::chat_view::ChatCell;
 use crate::ui::popup::command::PopupAction;
@@ -112,6 +114,12 @@ pub(super) const COMMANDS: &[CommandRoute] = &[
         aliases: &[],
         takes_args: false,
         handler: create_session,
+    },
+    CommandRoute {
+        name: TIPS_COMMAND,
+        aliases: &[],
+        takes_args: false,
+        handler: show_tips,
     },
     CommandRoute {
         name: COPY_COMMAND,
@@ -487,6 +495,14 @@ fn clear_chat(app: &mut App, _text: &str) -> bool {
         "Chat cleared",
         std::time::Duration::from_secs(2),
     ));
+    true
+}
+
+/// `/tips` — list every startup tip in the chat.
+///
+/// 欢迎屏只轮换显示一条；想看全量就这条命令 —— 两个出口读的是同一个池子。
+fn show_tips(app: &mut App, _text: &str) -> bool {
+    app.chat.push(ChatCell::SystemMessage(tips_full_text()));
     true
 }
 

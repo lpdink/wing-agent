@@ -26,7 +26,13 @@ use super::ChatView;
 use super::PendingMessage;
 
 impl ChatView {
-    /// Set the header lines (wing logo + MOTD).
+    /// The header lines as last set (tests read them back).
+    #[cfg(test)]
+    pub(crate) fn header_lines(&self) -> &[Line<'static>] {
+        &self.header_lines
+    }
+
+    /// Set the header lines (the welcome block — see `ui::welcome`).
     /// These are rendered at the top of the scrollable area and
     /// preserved across `clear()`.
     pub fn set_header(&mut self, lines: Vec<Line<'static>>) {

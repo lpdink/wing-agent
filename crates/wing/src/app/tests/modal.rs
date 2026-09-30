@@ -523,7 +523,7 @@ fn test_composer_pointer_works_while_an_invisible_popup_is_armed() {
     // (height 0) and no longer consumes keys — so it must not block the
     // composer either, or clicks would die in an idle-looking UI.
     let mut app = test_app();
-    app.chat.set_header(Vec::new());
+    app.clear_welcome();
     app.input.set_text("/zzz");
     app.update_popup();
     assert!(app.popup.active.is_active(), "the popup is still armed");
