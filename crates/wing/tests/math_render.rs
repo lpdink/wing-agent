@@ -60,6 +60,15 @@ fn joined_with(md: &str, profile: Profile, width: u16, math: MathMode) -> String
     plain(&render_with(md, profile, width, math)).join("\n")
 }
 
+/// The text of every code span (`InlineCode` / `CodeBlock`) of a render.
+fn code_text(lines: &[MarkdownLine]) -> Vec<String> {
+    spans(lines)
+        .into_iter()
+        .filter(|(kind, _)| matches!(kind, SegmentKind::CodeBlock | SegmentKind::InlineCode))
+        .map(|(_, text)| text)
+        .collect()
+}
+
 /// Every (kind, text) span of a render, in order.
 fn spans(lines: &[MarkdownLine]) -> Vec<(SegmentKind, String)> {
     lines
@@ -266,6 +275,44 @@ fn code_regions_are_never_parsed() {
     // delimiters inside them stay literal.
     let indented = joined("text\n\n    \\(x\\)\n\nafter");
     assert!(indented.contains("\\(x\\)"), "{indented}");
+}
+
+/// Code-block content must survive byte for byte — including when the code
+/// block was opened by a fence line that ends a container (review r3: the
+/// normalization scanner used to read `> ~~~ … \n~~~` as "the fence closed"
+/// while the parser reads the bare fence as a NEW top-level fence, so the
+/// swallowed content was rewritten).
+#[test]
+fn code_after_a_bare_fence_line_is_never_rewritten() {
+    for md in [
+        // The review's reproduction.
+        "> ~~~\n> a\n~~~\n\n\\(x\\) after",
+        "> ~~~\n> a\n\n~~~\n\n\\(x\\) after",
+        "> ~~~\n> a\n~~~   \n\n\\(x\\) after",
+        "para\n> ~~~\n> a\n~~~\n\n\\[y\\] after",
+        // A list item whose content was interrupted inside the fence.
+        "- ~~~\n> \n  ~~~\n\n\\[z\\] after",
+        "  - ```\npara \n  \n\npara ```\n\n\\(x\\) after",
+        // A column-0 fence after an item's fence swallows what follows.
+        "- ```\n  \n  \n\n\n  ```\n```\n\n\\(x\\) after",
+    ] {
+        for mode in [CONTENT, THINKING] {
+            // Only the CODE lines must be untouched: prose around them is
+            // rewritten by design (`\(x\)` → the rendered formula).
+            assert_eq!(
+                code_text(&render(md, mode, 80)),
+                code_text(&render_with(md, mode, 80, MathMode::Off)),
+                "{md:?} ({mode:?}): code content changed"
+            );
+        }
+    }
+    // …while the *prose* around it is still rewritten (the item's fence closed
+    // normally there, so what follows is prose — verified against the parser's
+    // own reading in the `--math off` view).
+    let prose = joined("- ~~~\n  a\n  ~~~\n\n\\(x\\) after");
+    assert!(prose.contains("x after"), "{prose}");
+    let prose = joined("  - ```\npara \n  \n\npara ```\n\n\\(x\\) after");
+    assert!(prose.contains("x after"), "{prose}");
 }
 
 #[test]

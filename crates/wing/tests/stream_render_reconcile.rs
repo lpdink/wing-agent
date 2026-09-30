@@ -305,6 +305,50 @@ fn shapes() -> Vec<(&'static str, String)> {
             "math_reference_definition_wrapped",
             "[a b]:\n  http://x/\\(y\\) \"t \\(z\\)\"\n\nuse \\(a\\)\n\nafter\n".into(),
         ),
+        // --- review r3: the swallowed content carries a formula, so a wrong
+        // fence model would show up as a code-content rewrite (resting state
+        // != reference) instead of staying invisible ---
+        (
+            "math_bare_closer_swallows_formula",
+            "> ~~~\n> a\n~~~\n\n\\(x\\) after\n".into(),
+        ),
+        (
+            "math_bare_closer_swallows_formula_after_blank",
+            "> ~~~\n> a\n\n~~~\n\n\\(x\\) after\n".into(),
+        ),
+        (
+            "math_list_fence_interrupted_by_quote",
+            // The item's content is interrupted inside the fence, so the
+            // parser re-reads the indented fence line as a NEW top-level fence.
+            "- ~~~\n> \n  ~~~\n\n\\[z\\] after\n".into(),
+        ),
+        (
+            "math_list_fence_closed_then_formula",
+            // An intact item: the closer really ends the fence, so what
+            // follows is prose and gets rewritten.
+            "- ~~~\n  a\n  ~~~\n\n\\(x\\) after\n".into(),
+        ),
+        (
+            "math_list_item_fence_with_blanks",
+            "- ```\n  \n  \n\n\n  ```\n```\n\n\\(x\\) after\ntext \\(a\\)\n".into(),
+        ),
+        (
+            // NOTE: `  - ``` … > ``` ` (an item fence followed by a quote +
+            // backtick fence) is NOT here: the backtick fence goes through
+            // `ensure_fences_on_own_line`, whose insertion lands differently
+            // depending on the chunk boundary — both this build and the
+            // `a946327` baseline diverge from the reference for some chunk
+            // sizes (different ones), so it is pre-existing noise registered
+            // in `docs/dev/tui-rendering.md` §4.
+            "math_list_fence_then_top_fence",
+            // Tilde fences: the backtick variants of these container shapes go
+            // through `ensure_fences_on_own_line` (see the NOTE above).
+            "- ~~~\n  a\n~~~\n\n\\(x\\) after\n".into(),
+        ),
+        (
+            "math_list_continuation_fence",
+            "- item\n  ~~~\n  body\n  ~~~\n\n\\(x\\) after\n".into(),
+        ),
     ]
 }
 
@@ -507,6 +551,13 @@ fn reconcile_prefixes() {
         "math_list_fence_prefixed_closer",
         "math_list_fence_bare_line",
         "math_reference_definition_wrapped",
+        "math_bare_closer_swallows_formula",
+        "math_bare_closer_swallows_formula_after_blank",
+        "math_list_fence_interrupted_by_quote",
+        "math_list_fence_closed_then_formula",
+        "math_list_item_fence_with_blanks",
+        "math_list_fence_then_top_fence",
+        "math_list_continuation_fence",
     ];
     let palette = ThemePalette::default();
     for (name, corpus) in shapes() {

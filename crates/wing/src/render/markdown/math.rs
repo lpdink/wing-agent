@@ -41,7 +41,7 @@ use std::borrow::Cow;
 use ratatui::style::Style;
 
 use super::parsing::MarkdownContext;
-use super::stream::{content_start, fence_open, indent_of, is_fence_close};
+use super::stream::{FenceStep, FenceTrack, content_start, fence_opener, indent_of};
 use super::types::{MarkdownLine, SegmentKind};
 
 /// Width assumed for display math when the caller has no content width
@@ -285,8 +285,9 @@ struct Scan<'a> {
     /// Bytes walked by closer searches (see [`MAX_SCAN_WORK`]).
     work: usize,
     exhausted: bool,
-    /// Open fenced code block: (fence char, run length).
-    fence: Option<(u8, usize)>,
+    /// Open fenced code block, as the SHARED [`FenceTrack`] — never a local
+    /// re-implementation of the fence rules.
+    fence: Option<FenceTrack>,
     /// Inside an indented (4-space) code block.
     indented: bool,
     /// Whether the line being scanned starts a block (text start, or right
@@ -373,11 +374,26 @@ impl<'a> Scan<'a> {
                 // `>     x` is an indented block.
                 let line = &self.text[i..line_end];
                 let content = &line[content_start(line)..];
-                if let Some((fc, flen)) = self.fence {
-                    if is_fence_close(content, fc, flen) {
-                        self.fence = None;
-                        self.at_block_start = true;
-                        self.stray_display_delim = false;
+                if let Some(track) = self.fence {
+                    // Which lines are code is decided by the SHARED fence
+                    // state machine (`FenceTrack::step`) — the same one the
+                    // streaming splitter drives, so the slice boundaries and
+                    // this scanner cannot disagree about a fence again
+                    // (review r3).
+                    let (track_next, step) = track.step(line);
+                    match step {
+                        FenceStep::Closes => {
+                            self.fence = None;
+                            self.at_block_start = true;
+                            self.stray_display_delim = false;
+                        }
+                        FenceStep::OpensTopLevel => {
+                            // The container ended and this line opens a new
+                            // top-level fence: everything from here on is code
+                            // until THAT fence closes.
+                            self.fence = fence_opener(line);
+                        }
+                        FenceStep::Body => self.fence = Some(track_next),
                     }
                     i = next;
                     line_start = next;
@@ -417,8 +433,8 @@ impl<'a> Scan<'a> {
                     line_start = next;
                     continue;
                 }
-                if let Some((fc, flen, _)) = fence_open(content) {
-                    self.fence = Some((fc, flen));
+                if let Some(track) = fence_opener(line) {
+                    self.fence = Some(track);
                     i = next;
                     line_start = next;
                     continue;
@@ -793,8 +809,7 @@ impl<'a> Scan<'a> {
         while at < hard {
             let (line_end, next) = self.line_bounds(at);
             let line = &self.text[at..line_end];
-            let content = &line[content_start(line)..];
-            if line.trim().is_empty() || fence_open(content).is_some() {
+            if line.trim().is_empty() || fence_opener(line).is_some() {
                 return self.charge(walked).then(|| at.max(from));
             }
             if next <= at {
