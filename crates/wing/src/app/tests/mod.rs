@@ -9,6 +9,7 @@ mod composer;
 mod core;
 mod frame;
 mod goal_lane;
+mod images;
 mod interaction;
 mod modal;
 mod projection;

@@ -23,6 +23,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 use wing::config::LayoutConfig;
 use wing::config::ThemePalette;
 use wing::config::rendering::ThinkingMode;
+use wing::render::markdown::ImageOpts;
 use wing::render::markdown::Profile;
 use wing::render::markdown::stream::StreamingRender;
 use wing::render::renderable::CellContext;
@@ -506,15 +507,18 @@ impl BaselineCell {
     /// the same output the production cell would produce.
     pub fn render_lines(&self, width: u16) -> Vec<Line<'static>> {
         match self.kind {
-            BaselineKind::Thinking => {
-                self.thinking
-                    .to_lines(&self.palette, ThinkingMode::Visible, width)
-            }
+            BaselineKind::Thinking => self.thinking.to_lines(
+                &self.palette,
+                ThinkingMode::Visible,
+                width,
+                ImageOpts::off(),
+            ),
             BaselineKind::Assistant => {
                 let ctx = CellContext {
                     palette: &self.palette,
                     thinking_mode: ThinkingMode::Visible,
                     layout: &self.layout,
+                    images: ImageOpts::off(),
                 };
                 ChatCell::AssistantMessage(self.text.clone()).to_lines(width, &ctx)
             }

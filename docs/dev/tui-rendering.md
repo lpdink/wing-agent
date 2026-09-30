@@ -63,7 +63,6 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 | 极端混排（CRLF + 缩进围栏 + 纯空格行 + 表格/引用片段）下仍有静息态分歧 | 预存在的切片边界族，`reconcile_matrix_shapes` 只钉住构造良好的形状；`cargo test -p wing --test stream_render_fuzz -- --ignored --nocapture` 可枚举当前数量（默认忽略：契约是「不 panic」，分歧数随修复下降） | 已知噪声，`finalize()` 收敛 |
 | reasoning 里 `（```rust）` 这类行内引用没有变成代码块 | `Thinking` 刻意不做行内围栏归一化（第二节） | profile 语义 |
 | reasoning 里 4 空格缩进的正文没有代码块样式 | `Thinking` 刻意按正文渲染（第二节） | profile 语义 |
-| 图片锚点在**非流式** cell 里没出现（回合结束后 resize 又「消失」） | 非流式路径的 `RenderOpts` 由 cell 侧构造（`ChatCell::render_lines` → `assistant_message_lines` / thinking block），尚未接上图片选项；`CachedCell::set_image_opts` 目前只喂流式引擎 | 接线中（步骤 06）：让 `CellContext` 与 `CachedCell::set_image_opts` 取**同一份** `ImageOpts`，否则流式与终态行数会不一致 |
 
 ## 五、图片锚点（`Anchor` 模式）
 
@@ -121,6 +120,41 @@ cargo run -q -p wing --example render_probe -- --images --workspace . \
 
 `crates/wing/tests/stream_render_reconcile.rs` 的矩阵同时跑 `Off` 与 `Anchor` 两组（文本 + 样式 + 链接 + 锚点几何逐项对账）。
 
+### 绘制契约（谁把图真的画上去）
+
+渲染层只留位；**画**发生在 chat view 的帧内记录 + app 的绘制通道（`ui/chat_view/image.rs`、`app/images.rs`）：
+
+| 环节 | 规则 |
+|---|---|
+| 记录 | `rows_exact && has_images()` 时，每个可见锚点记一条 `FrameImage { area, offset, target, path }`：`area` = 锚点盒子 ∩ band（垂直裁、宽度不裁），`offset` = 盒子左上角相对 band 的**带符号**偏移（图上滚为负），`target` = **整个盒子** `(cols, rows)`（不是可见部分，滚动不重编码） |
+| 编码目标 | `target` 进 `ImageStore` 的 cache key（连同文件 canonical + mtime + 终端 cell 像素）→ 宽度/布局变化自动重编码 |
+| 画 | `app` 在**所有 overlay 之后**（toast 之后、选择高亮之前）调 `paint`：一次 `request` → `Ready` 才画；`Pending` / `Unavailable` 什么都不写（caption 就是兜底，**永不**画空白）；图固定在盒子左上，图内等比缩放留白由 `ratatui-image` 的 `Resize::Fit` 决定 |
+| 遮挡 | band 之外（status / composer / popup / 滚动条 gutter）天然画不到——`paint` 的 area 就是 band 的**内容矩形**；toast 覆盖到的图**整张**不画（协议载荷在逐 cell 里，局部覆盖会断图）；拖拽选择进行中**整帧**不画图（FrameSnapshot 抓的是文本） |
+| 三态 | `Ready` 画 / `Pending` 保持 caption（worker 完成后唤醒重绘）/ `Unavailable` 保持 caption |
+| 失效 | `terminal.clear()`、resize、focus 重新获得（= `needs_full_redraw`）→ `ImageStore::invalidate()`（终端可能已丢弃我们发过的图）；元数据迟到 → `CachedCell` 高度缓存失效、行数重算 |
+
+**一套 opts**：`CellContext.images` 是唯一权威，`CachedCell` 在每次投影（高度 / 帧）前从 ctx 同步给流式引擎与非流式 `RenderOpts`——这是「同一张图在流式与终态行数一致」的机械保证。
+
+**元数据表怎么前进（06 的接线）**：每个 cell 在算出线条时把链接目标过一遍 `resolve_image_path`（与产锚点同一个纯函数）得到候选路径，app 的 lane（`app/images.rs`）对候选调 `ImageStore::meta` 探测头信息并填表。表的生命周期有两条规则：**一个内容代内只增不减**（锚点会吃掉链接 span，缩表会让锚点在链接路径之间振荡）；**内容重建**（会话切换 / 压缩重同步 / rewind / `/clear`，即 `ChatView::structure_epoch` 变化）则整表清空 + `ImageStore::reset()`，下一帧按新内容重新探测——被替换的图按新头信息排版，被删掉的图不再产锚点（没有文件监听，重建就是重新读盘的时机）。`rendering.images = off` / 终端无图形协议 / 探测失败 → 不建 store、不读盘，渲染层拿到的是共享的 `ImageOpts::off()`，逐 cell 等于今天的链接路径。
+
+### 真机验收（有 TTY 的终端）
+
+单测只能验到缓冲区与转义序列层，**出图**必须在真终端里看（Ghostty / kitty / iTerm2 等支持图形协议的终端）：
+
+```bash
+mkdir -p /tmp/wing-img-demo && cd /tmp/wing-img-demo
+cp ~/Desktop/any-shot.png plot.png     # 任意 png/jpg/jpeg/gif/webp/bmp，本地文件（远程 URL 一律走链接路径）
+wing                                   # 起 TUI（网关没起就先 wing start），发一条消息，正文里原样写：
+#   ![销售趋势](./plot.png)
+```
+
+预期：该行变成一个 `▢ 销售趋势 · W×H` 的占位块，随后被真图覆盖（首帧到出图之间隔几帧：探测头信息 → 编码）；
+滚动/翻页时图跟着文本走，超出视口的部分不画；改窗口大小后重编码（一瞬的空白后回来）；
+拖拽选择期间整帧只有文本（复制得到的是 caption），松开后图回来。退出 TUI 后终端无残留。
+
+对照档：同一台机器上 `rendering.images: off`（或换到 Alacritty 这类没有图形协议的终端），同一行只显示
+`销售趋势` 的链接文本——与今天逐 cell 相同。
+
 ## 六、症状 → 先看哪里
 
 | 症状 | 先做 |
@@ -130,4 +164,5 @@ cargo run -q -p wing --example render_probe -- --images --workspace . \
 | 「代码块颜色不对 / 没高亮」 | `--kinds` 看是否真有 `C`；没语言标签的围栏本来就是单色 |
 | 「reasoning 颜色和正文不同」 | 预期行为：正文用 thinking 色，代码/链接/边框保留主题色 |
 | 「这段 `![]()` 怎么没变成图 / 图怎么没占位」 | 第五节的四道闸：模式是否 `Anchor`、路径是否被拒、`--shape` 表里有没有这条路径、图片是否独占一行（`--kinds` 看该行是不是 `I`） |
+| 「占位有了，但图没出来」 | 终端是否支持图形协议（启动时探测一次，`rendering.images` 是否为 `off`）；文件是否真的存在/可解码（探测失败 → 退回链接路径）；是不是正被 toast 盖着或正在拖拽选择（那两档刻意不画） |
 | 「图占了 36 行，太多了」 | `MAX_ANCHOR_ROWS`（`images.rs`）：长图的上限保护；调它等于改布局契约，需同步矩阵 |

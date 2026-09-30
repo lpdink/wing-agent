@@ -11,6 +11,8 @@
 //! (`request_finalize` → the next render installs the full reference
 //! render as the cached lines, flagged `prewrapped`).
 
+use std::path::PathBuf;
+
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
@@ -21,6 +23,7 @@ use crate::render::markdown::ImageOpts;
 use crate::render::markdown::ImageSpan;
 use crate::render::markdown::LinkSpan;
 use crate::render::markdown::Profile;
+use crate::render::markdown::resolve_image_path;
 use crate::render::markdown::stream::StreamingRender;
 use crate::render::renderable::CellContext;
 use crate::ui::chat_view::ChatCell;
@@ -56,6 +59,10 @@ pub struct CachedCell {
     /// its own render authority); this one is what a freshly started stream
     /// is seeded with.
     image_opts: ImageOpts,
+    /// Local image paths the current lines reference — see
+    /// [`CachedCell::image_candidates`]. Rebuilt with the lines, never with
+    /// per-frame work.
+    image_candidates: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy)]
@@ -130,6 +137,43 @@ impl CellFrame<'_> {
     }
 }
 
+/// The local image paths a rendered cell references — the caller's probe list.
+///
+/// Two sources, both already on the rendered lines: the link destinations (an
+/// image on the link path keeps its destination in the line's `LinkSpan`) and
+/// the anchors that were produced (once a picture is anchored, its link span
+/// is replaced by the caption — the side channel is then the only trace left).
+///
+/// Resolution goes through [`resolve_image_path`] — the very function the
+/// markdown layer keys the metadata table with — so a probed path and an
+/// anchor's path can never disagree; nothing here touches the filesystem.
+/// Duplicates are dropped per cell (the app's lane dedupes across cells by
+/// looking every path up in its own table anyway).
+fn image_candidates_of(
+    links: &[Vec<LinkSpan>],
+    anchors: &[Vec<ImageSpan>],
+    opts: &ImageOpts,
+) -> Vec<PathBuf> {
+    if !opts.is_enabled() {
+        return Vec::new();
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut push = |path: PathBuf| {
+        if !out.contains(&path) {
+            out.push(path);
+        }
+    };
+    for span in anchors.iter().flatten() {
+        push(span.path.clone());
+    }
+    for span in links.iter().flatten() {
+        if let Ok(path) = resolve_image_path(opts.workspace(), &span.target) {
+            push(path);
+        }
+    }
+    out
+}
+
 impl CachedCell {
     pub fn new(cell: ChatCell) -> Self {
         Self {
@@ -141,6 +185,7 @@ impl CachedCell {
             prewrapped_width: None,
             pending_finalize: false,
             image_opts: ImageOpts::default(),
+            image_candidates: Vec::new(),
         }
     }
 
@@ -162,9 +207,45 @@ impl CachedCell {
         self.invalidate();
     }
 
+    /// Adopt the render context's image options (idempotent).
+    ///
+    /// This is what keeps the two render paths on **one** set of options: a
+    /// streaming cell gets them through
+    /// [`set_image_opts`](Self::set_image_opts) (which feeds the incremental
+    /// engine), a non-streaming one through `CellContext`'s `images` — both
+    /// sourced from the same value by the projection entry points
+    /// ([`compute_height`](Self::compute_height) /
+    /// [`compute_cell_frame`](Self::compute_cell_frame)) before they read or
+    /// write any cache. Without it, a late-arriving probe could change the
+    /// row count on one path and not the other.
+    fn sync_image_opts(&mut self, images: &ImageOpts) {
+        if self.image_opts == *images {
+            return;
+        }
+        self.set_image_opts(images.clone());
+    }
+
     /// The image options this cell renders with.
     pub fn image_opts(&self) -> &ImageOpts {
         &self.image_opts
+    }
+
+    /// Local image paths the cell's current lines reference.
+    ///
+    /// Every markdown destination that resolves to a drawable local file
+    /// ([`resolve_image_path`]), read off the rendered lines while they were
+    /// built — an image on the link path keeps its destination in the line's
+    /// `LinkSpan`, so the anchors this cell *would* produce are discoverable
+    /// before the metadata table knows their shape. Rebuilt whenever the lines
+    /// are (content, width or image options changed); empty when the lines have
+    /// not been computed yet or images are off.
+    ///
+    /// The caller (the app's image lane) probes these and fills its metadata
+    /// table; that table only grows within a content generation, so a path that
+    /// leaves this list (its anchor replaced the link span) keeps the shape it
+    /// was probed with — see `app::images`.
+    pub fn image_candidates(&self) -> &[PathBuf] {
+        &self.image_candidates
     }
 
     /// Access the inner cell.
@@ -435,6 +516,9 @@ impl CachedCell {
         // before the caches are consulted — the generation check below must
         // see the invalidation a flush produces.
         self.flush_pending_args();
+        // One set of image options for both render paths: adopt the frame's
+        // before anything is cached or returned (see `sync_image_opts`).
+        self.sync_image_opts(ctx.images);
         if self.pending_finalize {
             self.run_finalize(width, ctx);
         }
@@ -444,6 +528,8 @@ impl CachedCell {
             self.prewrapped_width = Some(width);
             let stream = self.stream.as_mut().expect("checked active");
             let rendered = stream.composed(width, ctx.palette);
+            self.image_candidates =
+                image_candidates_of(rendered.links, rendered.images, ctx.images);
             // Streaming lines are hard-wrapped to the width by construction.
             return CellFrame {
                 lines: rendered.lines,
@@ -468,6 +554,10 @@ impl CachedCell {
             // cell really does break the mapping — measure and refuse rather
             // than point a click or a picture at the wrong rows.
             let rows_exact = !composed.has_spans() || composed.rows_are_exact(width);
+            // Discover the pictures this cell may want drawn while its lines
+            // are being built (the harvest rides the same invalidation).
+            self.image_candidates =
+                image_candidates_of(composed.links(), composed.images(), ctx.images);
             self.cached_lines = Some(CachedLines {
                 width,
                 generation: self.generation,
@@ -501,6 +591,10 @@ impl CachedCell {
         // streaming tool cell depend on the parsed args (command line,
         // preview lines), so the flush must run before the cache check.
         self.flush_pending_args();
+        // Heights are what `update_heights` sums into the layout, so they must
+        // come from the same image options the frame will be drawn with —
+        // an anchor's rows move a whole cell's height (see `sync_image_opts`).
+        self.sync_image_opts(ctx.images);
         if self.pending_finalize {
             self.run_finalize(width, ctx);
         }
@@ -583,6 +677,7 @@ mod tests {
             palette,
             thinking_mode: ThinkingMode::Visible,
             layout,
+            images: ImageOpts::off(),
         }
     }
 
@@ -657,6 +752,7 @@ mod tests {
 
     // ── Image anchors through the projection ──────────────────────
 
+    /// The anchor-capable options fixture: one known 800×600 image at `/ws`.
     fn image_opts() -> ImageOpts {
         ImageOpts::anchor(
             Some(std::path::PathBuf::from("/ws")),
@@ -665,6 +761,19 @@ mod tests {
                 crate::render::markdown::ImageShape::new(800, 600),
             )],
         )
+    }
+
+    /// A context carrying explicit image options — the frame's authority (see
+    /// [`CachedCell::sync_image_opts`]).
+    fn image_ctx<'a>(
+        palette: &'a ThemePalette,
+        layout: &'a LayoutConfig,
+        images: &'a ImageOpts,
+    ) -> CellContext<'a> {
+        CellContext {
+            images,
+            ..test_ctx(palette, layout)
+        }
     }
 
     #[test]
@@ -692,9 +801,9 @@ mod tests {
     fn the_cell_frame_projects_the_anchor_geometry() {
         let palette = ThemePalette::default();
         let layout = LayoutConfig::default();
-        let ctx = test_ctx(&palette, &layout);
+        let opts = image_opts();
+        let ctx = image_ctx(&palette, &layout, &opts);
         let mut cell = CachedCell::new(ChatCell::AssistantMessage(String::new()));
-        cell.set_image_opts(image_opts());
         cell.append_stream("before\n\n![销售趋势](./plot.png)\n\nafter");
         cell.request_finalize();
 
@@ -734,44 +843,56 @@ mod tests {
         assert_eq!(again.images.iter().flatten().next(), Some(&anchor));
     }
 
+    /// Late metadata (a header probe finishing) arrives as new frame options:
+    /// the cell adopts them, drops the row count that was computed without
+    /// them, and keeps its text.
     #[test]
     fn late_metadata_invalidates_the_cell_but_keeps_the_text() {
         let palette = ThemePalette::default();
         let layout = LayoutConfig::default();
-        let ctx = test_ctx(&palette, &layout);
+        let off = test_ctx(&palette, &layout);
+        let opts = image_opts();
+        let with_images = image_ctx(&palette, &layout, &opts);
         let mut cell = CachedCell::new(ChatCell::AssistantMessage(String::new()));
         cell.append_stream("![plot](./plot.png)");
-        let before = cell.compute_height(80, &ctx);
+
+        let before = cell.compute_height(80, &off);
         let generation = cell.generation();
-        cell.set_image_opts(image_opts());
+        let after = cell.compute_height(80, &with_images);
         assert!(
             cell.generation() > generation,
-            "metadata change must invalidate"
+            "the metadata change must invalidate the cached lines/height"
         );
-        let after = cell.compute_height(80, &ctx);
         assert!(
             after > before,
             "the anchor must reserve rows: {after} vs {before}"
         );
-        assert!(cell.compute_cell_frame(80, &ctx).has_images());
+        assert!(cell.compute_cell_frame(80, &with_images).has_images());
+        assert!(
+            cell.image_opts().is_enabled(),
+            "the engine adopted the frame's options"
+        );
         // The cell's text is untouched by the metadata change.
         match cell.cell() {
             ChatCell::AssistantMessage(text) => assert_eq!(text, "![plot](./plot.png)"),
             other => panic!("unexpected cell: {other:?}"),
         }
-        // A no-op set does not bump the generation again.
+        // Re-projecting at the same options is a no-op: no generation bump.
         let generation = cell.generation();
-        cell.set_image_opts(image_opts());
+        let _ = cell.compute_height(80, &with_images);
         assert_eq!(cell.generation(), generation);
+        // …and back to no metadata is a *change* again (the render layer falls
+        // back to the link path, so the rows must shrink).
+        assert_eq!(cell.compute_height(80, &off), before);
     }
 
     #[test]
     fn a_streaming_cell_projects_anchors_from_the_engine() {
         let palette = ThemePalette::default();
         let layout = LayoutConfig::default();
-        let ctx = test_ctx(&palette, &layout);
+        let opts = image_opts();
+        let ctx = image_ctx(&palette, &layout, &opts);
         let mut cell = CachedCell::new(ChatCell::AssistantMessage(String::new()));
-        cell.set_image_opts(image_opts());
         cell.append_stream("before\n\n![plot](./plot.png)\n\nafter");
         assert!(cell.is_streaming());
         let frame = cell.compute_cell_frame(80, &ctx);
@@ -787,6 +908,83 @@ mod tests {
         );
         // Streaming lines are pre-wrapped, so their row arithmetic is exact.
         assert!(frame.rows_exact);
+    }
+
+    /// The streaming engine and the reference render must agree about an
+    /// image's rows — they get their options from **one** source (the frame's
+    /// `CellContext`), which is the whole point of `sync_image_opts`.
+    #[test]
+    fn a_streaming_and_a_non_streaming_cell_agree_about_the_same_image() {
+        let palette = ThemePalette::default();
+        let layout = LayoutConfig::default();
+        let opts = image_opts();
+        let ctx = image_ctx(&palette, &layout, &opts);
+        let text = "before\n\n![plot](./plot.png)\n\nafter";
+
+        let mut streaming = CachedCell::new(ChatCell::AssistantMessage(String::new()));
+        streaming.append_stream(text);
+        assert!(streaming.is_streaming());
+        let mut plain = CachedCell::new(ChatCell::AssistantMessage(text.into()));
+
+        let width = 80u16;
+        let (streamed_anchor, streamed_lines) = {
+            let frame = streaming.compute_cell_frame(width, &ctx);
+            (
+                frame.images.iter().flatten().next().cloned(),
+                frame.lines.len(),
+            )
+        };
+        let (plain_anchor, plain_lines) = {
+            let frame = plain.compute_cell_frame(width, &ctx);
+            (
+                frame.images.iter().flatten().next().cloned(),
+                frame.lines.len(),
+            )
+        };
+        assert_eq!(streamed_anchor, plain_anchor, "anchor geometry");
+        assert_eq!(streamed_lines, plain_lines, "line counts");
+        assert_eq!(
+            streaming.compute_height(width, &ctx),
+            plain.compute_height(width, &ctx),
+            "the heights the layout sums must agree"
+        );
+        // Both discovered the same candidate path for the app to probe.
+        assert_eq!(
+            streaming.image_candidates(),
+            vec![std::path::PathBuf::from("/ws/plot.png")]
+        );
+        assert_eq!(plain.image_candidates(), streaming.image_candidates());
+    }
+
+    /// Candidates are the *discovery* channel: a cell whose image is anchored
+    /// keeps reporting the path (its link span was replaced by the caption),
+    /// and an image on the link path reports it too.
+    #[test]
+    fn image_candidates_survive_the_anchor_and_ignore_remote_links() {
+        let palette = ThemePalette::default();
+        let layout = LayoutConfig::default();
+        let opts = image_opts();
+        let ctx = image_ctx(&palette, &layout, &opts);
+
+        let mut anchored = CachedCell::new(ChatCell::AssistantMessage(
+            "![plot](./plot.png)\n\n[remote](https://example.com/x.png) [doc](notes.txt)\n".into(),
+        ));
+        let _ = anchored.compute_cell_frame(80, &ctx);
+        assert_eq!(
+            anchored.image_candidates(),
+            vec![std::path::PathBuf::from("/ws/plot.png")],
+            "the anchored path stays a candidate; remote/non-image links never are"
+        );
+
+        // With images off nothing is discovered, and the same markdown renders
+        // exactly like it did before anchors existed.
+        let off = test_ctx(&palette, &layout);
+        let mut plain = CachedCell::new(ChatCell::AssistantMessage(
+            "![plot](./plot.png)\n\n[remote](https://example.com/x.png) [doc](notes.txt)\n".into(),
+        ));
+        let has_images = plain.compute_cell_frame(80, &off).has_images();
+        assert!(!has_images);
+        assert!(plain.image_candidates().is_empty());
     }
 
     #[test]

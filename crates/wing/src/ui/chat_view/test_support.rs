@@ -28,6 +28,7 @@ pub(super) fn make_ctx<'a>(p: &'a ThemePalette, l: &'a LayoutConfig) -> CellCont
         palette: p,
         thinking_mode: ThinkingMode::Visible,
         layout: l,
+        images: crate::render::markdown::ImageOpts::off(),
     }
 }
 

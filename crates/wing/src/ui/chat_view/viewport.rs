@@ -28,6 +28,8 @@ use crate::render::renderable::CellContext;
 
 use super::ChatCell;
 use super::ChatView;
+use super::FrameImage;
+use super::image::frame_image_for;
 use super::link::LinkTable;
 use super::link::links_for_frame;
 use super::link::place_links;
@@ -199,6 +201,7 @@ impl Widget for ChatViewWidget<'_> {
             // app's hit test rejects every press instead of using a stale rect.
             self.view.geometry = ChatGeometry::default();
             self.view.frame_links = LinkTable::new();
+            self.view.frame_images = Vec::new();
             return;
         }
 
@@ -252,6 +255,11 @@ impl Widget for ChatViewWidget<'_> {
         // Collected while the cells render and installed at the end, so a
         // half-rendered frame can never be hit-tested.
         let mut frame_links = LinkTable::new();
+
+        // Pictures of this frame: one paint request per visible anchor, in
+        // anchor order. Also installed at the end (`frame_images`), and painted
+        // by the app *after* every overlay — see `ui::chat_view::image`.
+        let mut frame_images: Vec<FrameImage> = Vec::new();
 
         // Virtualized rendering: header + cells.
         let view_end = scroll + visible;
@@ -342,9 +350,17 @@ impl Widget for ChatViewWidget<'_> {
             // already ≤ width — blit the visible slice directly, no
             // Paragraph wrap Composer, no to_vec clone.
             if cached.is_prewrapped(content_area.width, &self.ctx) {
-                let cell = cached.compute_cell_lines(content_area.width, &self.ctx);
+                let cell = cached.compute_cell_frame(content_area.width, &self.ctx);
                 let rows_exact = cell.rows_exact;
-                let cell_links = links_for_frame(&cell);
+                let cell_links = links_for_frame(cell.rows_exact, cell.links);
+                record_frame_images(
+                    &mut frame_images,
+                    &cell,
+                    content_area,
+                    skip,
+                    render_y,
+                    cell_visible,
+                );
                 let lines = cell.lines;
                 let skip_lines = skip.min(lines.len());
                 let end = (skip_lines + cell_visible).min(lines.len());
@@ -375,10 +391,18 @@ impl Widget for ChatViewWidget<'_> {
                 continue;
             }
 
-            let cell = cached.compute_cell_lines(content_area.width, &self.ctx);
+            let cell = cached.compute_cell_frame(content_area.width, &self.ctx);
             let rows_exact = cell.rows_exact;
-            let cell_links = links_for_frame(&cell);
+            let cell_links = links_for_frame(cell.rows_exact, cell.links);
             let cell_lines = cell.lines.to_vec();
+            record_frame_images(
+                &mut frame_images,
+                &cell,
+                content_area,
+                skip,
+                render_y,
+                cell_visible,
+            );
 
             // User messages (normal / pending / discarded): fill full-width
             // background before text rendering.
@@ -454,6 +478,34 @@ impl Widget for ChatViewWidget<'_> {
 
         // Install this frame's links (the hit test reads them between frames).
         self.view.frame_links = frame_links;
+        // …and its pictures, in one assignment too: the app's paint pass reads
+        // them right after this render (`frame_images`), and a frame that did
+        // not lay one out must not leave a stale request behind.
+        self.view.frame_images = frame_images;
+    }
+}
+
+/// Record the picture requests of one cell's visible anchors.
+///
+/// Gated exactly like the link placement: `rows_exact` is the row arithmetic's
+/// precondition (an over-wide line wraps into two screen rows and every anchor
+/// row below it would land on the wrong text), and an anchor is only recorded
+/// when its box meets the cell's visible window.
+fn record_frame_images(
+    out: &mut Vec<FrameImage>,
+    cell: &crate::ui::cached_cell::CellFrame<'_>,
+    band: Rect,
+    skip: usize,
+    render_y: u16,
+    cell_visible: usize,
+) {
+    if !cell.rows_exact || !cell.has_images() {
+        return;
+    }
+    for span in cell.images.iter().flatten() {
+        if let Some(frame) = frame_image_for(span, band, skip, render_y, cell_visible) {
+            out.push(frame);
+        }
     }
 }
 
