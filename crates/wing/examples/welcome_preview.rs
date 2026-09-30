@@ -19,7 +19,7 @@
 //! 画的就是 TUI 里那一份：与 `App::sync_welcome` 同一个 `Welcome::build`，
 //! 连样式都原样带出来，不会出现"预览好看、真机不一样"。
 //!
-//! Not part of `cargo test`（examples 只在显式构建时编译）。
+//! `cargo test` 会**编译** example（只是不运行），所以它不会因为没人跑而腐掉。
 
 use std::fmt::Write as _;
 use std::io::Write as _;

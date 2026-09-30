@@ -85,15 +85,33 @@ fn narrow_terminal_drops_the_art_before_the_text() {
         !body.contains('█') && !body.contains('▀') && !body.contains('▄'),
         "窄屏先撤标记：\n{body}"
     );
-    // 任何宽度都不许把行撑破（ChatView 的 Paragraph 不换行，超了就是被切）。
-    for width in [24u16, 60, 79, 80, 120] {
+}
+
+#[test]
+fn welcome_header_fits_the_chat_band() {
+    // 核心不变量：header 与消息渲染在同一个矩形里 —— band 减掉右侧滚动条
+    // gutter —— 而 `Paragraph` 不换行，多一列就是被切一列（省略号首当其冲）。
+    // 断言必须打在**构建出来的行**上：从画完的帧里读，读到的已经是被裁过的。
+    for width in [24u16, 40, 60, 79, 80, 120, 200] {
         let mut app = test_app();
-        let body = frame_body(&mut app, width, 30);
-        for row in body.lines() {
-            let bar = row.split('|').next_back().unwrap_or("");
+        let mut terminal = test_terminal(width, 30);
+        draw(&mut app, &mut terminal);
+
+        let content_width =
+            crate::ui::scrollbar::content_area(app.geometry.chat_band()).width as usize;
+        assert!(
+            content_width < width as usize,
+            "内容区确实比终端窄（gutter 是常量 2）"
+        );
+        for line in app.chat.header_lines() {
+            let used: usize = line
+                .spans
+                .iter()
+                .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
+                .sum();
             assert!(
-                unicode_width::UnicodeWidthStr::width(bar) <= width as usize,
-                "宽 {width} 时行超宽：{row}"
+                used <= content_width,
+                "终端宽 {width}（内容区 {content_width}）时 header 行有 {used} 列：{line:?}"
             );
         }
     }
@@ -116,7 +134,9 @@ fn header_is_rebuilt_while_sweeping_and_frozen_after() {
     app.sync_welcome(&palette, 100, settled + Duration::from_secs(30));
     assert_eq!(frozen, header_text(&app), "定格后不再重建");
 
-    app.sync_welcome(&palette, 70, settled + Duration::from_secs(31));
+    // 40 列会掉出整块布局（标记被撤），header 一定长得不一样；用 70 这种
+    // "同档、文字又刚好不省略"的宽度是测不出重建的。
+    app.sync_welcome(&palette, 40, settled + Duration::from_secs(31));
     assert_ne!(frozen, header_text(&app), "缩放要按新宽度重建");
 }
 

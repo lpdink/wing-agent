@@ -90,9 +90,6 @@ const WIDE_THRESHOLD: u16 = 100;
 /// change's Open Questions.
 const WHEEL_SCROLL_LINES: usize = 3;
 
-/// 欢迎屏首帧用的假想宽度：真正的终端宽度第一次 draw 才知道。
-const FIRST_FRAME_WIDTH: u16 = 80;
-
 /// Application state.
 pub struct App {
     pub status: StatusData,
@@ -181,12 +178,17 @@ impl App {
     pub fn new(session_id: String, config: AppConfig, launch_workspace: Option<String>) -> Self {
         let palette = ThemePalette::from_config(&config.colors);
         let max_input_lines = config.layout.max_input_lines;
-        // 欢迎屏：tip 抽签 + 扫光时钟。首帧的宽度按 80 算 —— 真正的终端宽度
-        // 在第一次 draw 才知道，届时 `sync_welcome` 会按真实宽度重建。
+        // 欢迎屏：tip 抽签 + 扫光时钟。这里先按"还没有帧"的宽度建一次，只是
+        // 为了让 draw 之前 header 不为空 —— 第一次 draw 一定按真实的内容宽重建
+        //（扫光未定格时 `needs_rebuild` 恒真）。
         let now = std::time::Instant::now();
         let mut welcome = Welcome::new(crate::shared::tips::seed_now(), now);
         let mut chat = ChatView::new();
-        chat.set_header(welcome.build(&palette, FIRST_FRAME_WIDTH, now));
+        chat.set_header(welcome.build(
+            &palette,
+            crate::ui::input_area::chrome::UNFRAMED_WIDTH,
+            now,
+        ));
         Self {
             status: StatusData::default(),
             welcome: Some(welcome),
@@ -407,10 +409,6 @@ impl App {
             let area = frame.area();
             self.geometry.record_area(area);
 
-            // 欢迎屏 header：宽度档变了、或扫光还在扫，就重建一次。渲染前完成，
-            // 这一帧画的就是新行（行数不变，滚动位置不受影响）。
-            self.sync_welcome(&palette, area.width, std::time::Instant::now());
-
             // A selection is anchored to *content* coordinates, which only
             // survive while the content is stable: adding / removing /
             // promoting cells or changing the width shifts the virtual rows
@@ -465,6 +463,16 @@ impl App {
             // what the bar's geometry and its hit testing are derived from.
             chat_height = chunks[1].height;
             self.geometry.record_chat_band(chunks[1]);
+
+            // 欢迎屏 header：宽度档变了、或扫光还在扫，就重建一次 —— 在 chat
+            // widget 之前完成，这一帧画的就是新行。宽度按**内容宽**算：header
+            // 与消息渲染在同一个（减掉滚动条 gutter 的）矩形里，按终端整宽
+            // 构建会让最右一列连同省略号被裁掉。
+            self.sync_welcome(
+                &palette,
+                scrollbar::content_area(chunks[1]).width,
+                std::time::Instant::now(),
+            );
             let ctx = crate::render::renderable::CellContext {
                 palette: &palette,
                 thinking_mode,

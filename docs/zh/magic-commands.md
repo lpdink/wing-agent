@@ -9,7 +9,7 @@
 | 路径 | 行为 | 例子 |
 |------|------|------|
 | **前端 → HTTP** | TUI 拦截命令并调用 Gateway 的 HTTP 端点 | `/compact`、`/model`、`/rewind`、`/reload` |
-| **前端本地** | 完全在 TUI 内处理，不发给 gateway | `/clear`、`/copy` |
+| **前端本地** | 完全在 TUI 内处理，不发给 gateway | `/clear`、`/copy`、`/tips` |
 | **Prompt 展开** | 用户 `.md` 文件被展开（替换 `$ARGUMENTS`）后作为普通消息发送 | 自定义 `/plan` 等 |
 
 > **中断不是斜杠命令** —— 按 **Esc** 中断当前 agent 轮次（底层是 `POST /api/session/interrupt`）。
@@ -20,6 +20,7 @@
 |------|------|------|------|
 | `/clear` | | | 清空聊天视图 |
 | `/copy` | | `[N]` | 复制最近（或第 N 条）assistant 消息到剪贴板 |
+| `/tips` | | | 列出全部开屏提示（欢迎屏每次启动只轮换显示其中一条） |
 | `/new` | | `[name]` | 创建新 session |
 | `/session` | `/ss` | `[session_id]` | 切换 session，或列出所有 session |
 | `/fork` | | `<uuid>` | 从指定消息分叉出新 session |

@@ -200,17 +200,19 @@ impl Canvas {
 
     /// 一格的样式：上面那半取像素行 `pixel_row`、下面那半取 `pixel_row + 1`。
     ///
-    /// `█` 走出来是 `▀`：上半像素当前景、下半像素当背景 —— 半格渐变就藏在这里。
+    /// 终端的语义是：**背景铺满整格**，`▀` / `▄` 再用前景画掉其中一半。所以
+    /// 只有上下两个像素都在的格子才配背景色（上半当前景、下半当背景，`█`
+    /// 也因此写成 `▀`，半格渐变就藏在这里）；只画半格的两类格子**必须只用
+    /// 前景** —— 给 `▄` 配背景会把本该透明的上半整格填满，而且填的还是对面
+    /// 那半的颜色。
     fn cell(&self, cell: &Cell, col: usize, pixel_row: usize, sweep: Option<&Sweep>) -> Style {
-        if !cell.upper && !cell.lower {
-            return Style::default();
-        }
-        let upper = self.pixel(col, pixel_row, sweep);
-        let lower = self.pixel(col, pixel_row + 1, sweep);
-        if cell.lower {
-            Style::default().fg(upper).bg(lower)
-        } else {
-            Style::default().fg(upper)
+        match (cell.upper, cell.lower) {
+            (false, false) => Style::default(),
+            (true, true) => Style::default()
+                .fg(self.pixel(col, pixel_row, sweep))
+                .bg(self.pixel(col, pixel_row + 1, sweep)),
+            (true, false) => Style::default().fg(self.pixel(col, pixel_row, sweep)),
+            (false, true) => Style::default().fg(self.pixel(col, pixel_row + 1, sweep)),
         }
     }
 }
@@ -318,6 +320,86 @@ mod tests {
             luma(first) > luma(last),
             "左上应当比右下亮：{first:?} vs {last:?}"
         );
+    }
+
+    /// 终端语义下的墨迹掩码：背景铺满整格，`▀` / `▄` 再补上自己那一半。
+    fn painted_mask(lines: &[Line<'static>]) -> Vec<(String, String)> {
+        lines
+            .iter()
+            .map(|line| {
+                let mut top = String::new();
+                let mut bottom = String::new();
+                for span in &line.spans {
+                    let filled = span.style.bg.is_some();
+                    for ch in span.content.chars() {
+                        let (upper, lower) = match ch {
+                            '▀' => (true, filled),
+                            '▄' => (filled, true),
+                            '█' => (true, true),
+                            _ => (filled, filled),
+                        };
+                        top.push(if upper { '#' } else { '.' });
+                        bottom.push(if lower { '#' } else { '.' });
+                    }
+                }
+                (top, bottom)
+            })
+            .collect()
+    }
+
+    /// 字形自己声明的掩码（`T` = 上半像素，`B` = 下半像素）。
+    fn intended_mask() -> Vec<(String, String)> {
+        WING_ART
+            .iter()
+            .map(|row| {
+                let mut top = String::new();
+                let mut bottom = String::new();
+                for ch in row.chars() {
+                    match ch {
+                        '▀' => {
+                            top.push('#');
+                            bottom.push('.');
+                        }
+                        '▄' => {
+                            top.push('.');
+                            bottom.push('#');
+                        }
+                        '█' => {
+                            top.push('#');
+                            bottom.push('#');
+                        }
+                        _ => {
+                            top.push('.');
+                            bottom.push('.');
+                        }
+                    }
+                }
+                (top, bottom)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn painted_ink_matches_the_glyph() {
+        // 这条订的是"画出来的形状 == 手绘的字形"：`▄` 只许画下半（它若带了
+        // 背景色，终端的背景会铺满整格，本该透明的上半被填上、还填成对面那半
+        // 的颜色）。行尾的透明格会被截掉，所以按画出来的长度前缀比对。
+        let painted = painted_mask(&lines(accent(), None));
+        let intended = intended_mask();
+        assert_eq!(painted.len(), intended.len());
+        for (index, ((painted_top, painted_bottom), (want_top, want_bottom))) in
+            painted.iter().zip(intended.iter()).enumerate()
+        {
+            let width = painted_top.chars().count();
+            assert!(
+                want_top[..width] == *painted_top && want_bottom[..width] == *painted_bottom,
+                "第 {index} 行画出来的墨迹与字形不符（截尾后比对）：\n{painted_top}\n{want_top}\n{painted_bottom}\n{want_bottom}"
+            );
+            assert!(
+                !want_top[width..].contains('#') && !want_bottom[width..].contains('#'),
+                "第 {index} 行有墨迹被截掉"
+            );
+        }
     }
 
     #[test]

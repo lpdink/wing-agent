@@ -258,7 +258,12 @@ fn text_column(
 }
 
 /// 键位提示（一行）。
-const KEYS: &str = "Esc 中断 · Shift+Enter 换行 · Ctrl+C ×2 退出";
+///
+/// 换行写 `Ctrl+J` 而不是 `Shift+Enter`：后者能不能到达取决于终端有没有
+/// 实现 kitty 键盘协议（见 `tui::push_keyboard_enhancement`），在 header 上
+/// 当既成事实写死就是在骗人 —— tips 池里有那条"看终端"的提示，这里只放
+/// 任何终端都成立的键。
+const KEYS: &str = "Esc 中断 · Ctrl+J 换行 · Ctrl+C ×2 退出";
 
 /// 入口提示（一行）。
 ///
@@ -467,7 +472,7 @@ mod tests {
 
         let settled_at = welcome.started + Duration::from_millis(SWEEP_MS);
         welcome.build(&palette, width, settled_at);
-        assert!(!welcome.settled_built || !welcome.animating(settled_at));
+        assert!(welcome.settled_built, "越过 SWEEP_MS 后构建的一定是定格版");
         assert!(
             !welcome.needs_rebuild(width, settled_at + Duration::from_secs(5)),
             "定格后宽度不变就不重建"
@@ -522,12 +527,18 @@ mod tests {
 
     #[test]
     fn dev_builds_show_dev_not_the_placeholder_version() {
+        // 按 CARGO_PKG_VERSION 判定而不是 `cfg!(debug_assertions)`：真正需要
+        // 保护的是"占位版本被当版本号露出去"，而那跟构建 profile 无关。
         let label = version_label();
+        assert_eq!(
+            env!("CARGO_PKG_VERSION") == "0.0.0",
+            label.starts_with("dev"),
+            "占位版本要显示 dev，真版本要显示 vX.Y.Z：{label}"
+        );
         assert!(
-            !label.contains("0.0.0") || !cfg!(debug_assertions),
+            !label.contains("v0.0.0"),
             "占位版本不该露出 v0.0.0：{label}"
         );
-        assert!(label.contains("dev") || label.starts_with('v'), "{label}");
     }
 
     #[test]

@@ -7,17 +7,17 @@
 //! * 只写稳定的能力（快捷键 / 命令 / 工作流），**不写「本次更新了什么」**——
 //!   这正是它取代旧版硬编码 release notes 的原因：敏捷开发下，版本内的
 //!   "新特性" 文案天生会过期，而"Esc 能中断" 不会；
-//! * 长度上限 [`MAX_TIP_WIDTH`]（显示宽度）：欢迎屏单行可读，`/tips` 面板
+//! * 长度上限 [`MAX_TIP_WIDTH`]（显示宽度）：欢迎屏单行可读，`/tips` 清单
 //!   保持一行一条；
-//! * `group` 只影响 `/tips` 面板的分组展示，`WELCOME` 随机抽取不看分组。
+//! * `group` 只影响 `/tips` 清单的分组展示，欢迎屏随机抽取不看分组。
 //!
-//! 这里没有文件 / 网络 I/O、不依赖渲染库 —— 中立层，App（`/tips` 面板文案）
+//! 这里没有文件 / 网络 I/O、不依赖渲染库 —— 中立层，App（`/tips` 的正文）
 //! 和 UI（欢迎屏那一行）共用同一份事实来源。
 
 /// 单条 tip 的显示宽度上限（CJK 记 2 列）。
 pub const MAX_TIP_WIDTH: usize = 36;
 
-/// `/tips` 面板的分组。
+/// `/tips` 清单的分组。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TipGroup {
     Keys,
@@ -26,10 +26,10 @@ pub enum TipGroup {
 }
 
 impl TipGroup {
-    /// 面板里的展示顺序。
+    /// 清单里的展示顺序。
     pub const ALL: [TipGroup; 3] = [TipGroup::Keys, TipGroup::Commands, TipGroup::Workflow];
 
-    /// 分组标题（面板用）。
+    /// 分组标题（清单用）。
     pub fn label(self) -> &'static str {
         match self {
             TipGroup::Keys => "快捷键",
@@ -46,7 +46,7 @@ pub struct Tip {
     pub text: &'static str,
 }
 
-/// 提示池。顺序即 `/tips` 面板内的顺序。
+/// 提示池。顺序即 `/tips` 清单里的顺序。
 pub const TIPS: &[Tip] = &[
     // ── 快捷键 ────────────────────────────────────────────────
     Tip {
@@ -59,7 +59,7 @@ pub const TIPS: &[Tip] = &[
     },
     Tip {
         group: TipGroup::Keys,
-        text: "换行用 Shift+Enter，不行就 Ctrl+J",
+        text: "Shift+Enter 看终端，Ctrl+J 一定行",
     },
     Tip {
         group: TipGroup::Keys,
@@ -136,7 +136,8 @@ pub fn pick(seed: u64) -> &'static Tip {
     &TIPS[(seed % TIPS.len() as u64) as usize]
 }
 
-/// `/tips` 的正文：按分组列出全部提示（欢迎屏只轮换显示其中一条）。
+/// `/tips` 的正文（App 把它作为一条系统消息推给 chat）：按分组列出全部提示
+/// —— 欢迎屏只轮换显示其中一条。
 pub fn full_text() -> String {
     let mut out = format!("可用提示（{} 条）：", TIPS.len());
     for group in TipGroup::ALL {
@@ -165,7 +166,7 @@ mod tests {
 
     #[test]
     fn pool_is_not_empty() {
-        assert!(TIPS.len() >= 12, "池子太小，/tips 面板会很寒酸");
+        assert!(TIPS.len() >= 12, "池子太小，/tips 清单会很寒酸");
     }
 
     #[test]
