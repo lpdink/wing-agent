@@ -122,6 +122,23 @@ enum Mode {
     /// Open fenced code block. Blank lines are content; closes only on a
     /// matching (or longer) fence line.
     FencedCode { fence_char: u8, fence_len: usize },
+    /// A fence that carries a block prefix (`> ~~~`, `- ~~~`): the parser
+    /// still reads it as a code block (prefixes are resolved first), so the
+    /// slice must not cut at the blank lines inside it — a slice starting
+    /// inside a fence body would render its content as prose.
+    ///
+    /// It deliberately does NOT use the fenced-code path: `FencedCode` drives
+    /// the line-level code cache, which expects a bare fence (language on the
+    /// opener line, no prefix in the body). A prefixed fence stays one
+    /// paragraph-ish slice and renders through the generic path, which is
+    /// exactly what the document-level render does with those lines.
+    PrefixedFence {
+        fence_char: u8,
+        fence_len: usize,
+        /// Mode to return to when the fence closes: a list slice keeps its
+        /// blank bookkeeping.
+        resume_list: bool,
+    },
     /// Open indented (4-space) code block. Closes on a non-blank line
     /// indented fewer than 4 spaces.
     IndentedCode,
@@ -765,6 +782,12 @@ impl StreamingRender {
                 } else if list_marker_len(line).is_some() {
                     self.split.list_item_has_content = false;
                     self.split.mode = Mode::List { blank_seen: false };
+                } else if let Some((fc, fl)) = prefixed_fence_open(line) {
+                    self.split.mode = Mode::PrefixedFence {
+                        fence_char: fc,
+                        fence_len: fl,
+                        resume_list: false,
+                    };
                 } else if indent_of(line) >= 4 {
                     self.split.mode = Mode::IndentedCode;
                 } else {
@@ -786,6 +809,16 @@ impl StreamingRender {
                     self.split.mode = Mode::FencedCode {
                         fence_char: fc,
                         fence_len: fl,
+                    };
+                    return true;
+                }
+                if let Some((fc, fl)) = prefixed_fence_open(line) {
+                    // A `> ~~~` / `- ~~~` fence: keep it (and the blank lines
+                    // of its body) inside this slice — see `PrefixedFence`.
+                    self.split.mode = Mode::PrefixedFence {
+                        fence_char: fc,
+                        fence_len: fl,
+                        resume_list: false,
                     };
                     return true;
                 }
@@ -814,6 +847,16 @@ impl StreamingRender {
                     self.split.mode = Mode::FencedCode {
                         fence_char: fc,
                         fence_len: fl,
+                    };
+                    return true;
+                }
+                if let Some((fc, fl)) = prefixed_fence_open(line) {
+                    // A fence inside the item: blank lines in its body are
+                    // content, not a list separator.
+                    self.split.mode = Mode::PrefixedFence {
+                        fence_char: fc,
+                        fence_len: fl,
+                        resume_list: true,
                     };
                     return true;
                 }
@@ -852,6 +895,27 @@ impl StreamingRender {
                 self.split.mode = Mode::FencedCode {
                     fence_char,
                     fence_len,
+                };
+                true
+            }
+            Mode::PrefixedFence {
+                fence_char,
+                fence_len,
+                resume_list,
+            } => {
+                if is_fence_close_prefix_aware(line, fence_char, fence_len) {
+                    self.split.mode = if resume_list {
+                        Mode::List { blank_seen: true }
+                    } else {
+                        Mode::Paragraph
+                    };
+                    return true;
+                }
+                // Blank lines are fence body, not a block separator.
+                self.split.mode = Mode::PrefixedFence {
+                    fence_char,
+                    fence_len,
+                    resume_list,
                 };
                 true
             }
@@ -1548,6 +1612,24 @@ fn fence_close_len(line: &str) -> Option<usize> {
     }
 }
 
+/// A fence opener that carries a block prefix (`> ~~~`, `- ``` `): the
+/// parser resolves the prefix first, so this is a fence in the document even
+/// though the line does not start with the fence run. Returns
+/// `(fence_char, run length)`.
+pub(crate) fn prefixed_fence_open(line: &str) -> Option<(u8, usize)> {
+    let content = &line[content_start(line)..];
+    if content.len() == line.len() {
+        return None; // a bare fence — the caller handles those
+    }
+    let (fc, fl, _) = fence_open(content)?;
+    Some((fc, fl))
+}
+
+/// [`is_fence_close`] for a prefixed fence's body line.
+pub(crate) fn is_fence_close_prefix_aware(line: &str, fence_char: u8, fence_len: usize) -> bool {
+    is_fence_close(&line[content_start(line)..], fence_char, fence_len)
+}
+
 pub(crate) fn is_fence_close(line: &str, fence_char: u8, fence_len: usize) -> bool {
     let Some(run) = fence_close_len(line) else {
         return false;
@@ -1570,6 +1652,40 @@ fn split_fence_line(opener: &str) -> (&str, &str) {
     let fc = b[0];
     let run = rest.bytes().take_while(|&c| c == fc).count();
     (&rest[run..], "")
+}
+
+/// Byte offset where the line's **content** starts, after the block prefixes
+/// pulldown resolves before deciding what the line is: blockquote markers
+/// (`>` chains, each with an optional following space) and list markers.
+///
+/// Only the *shape* helpers use it (`fence_open` / `indent_of`): a fence or
+/// an indented block after a `>` or a `- ` is still a fence / indented block
+/// to the parser, and everything that must not be rewritten inside one (see
+/// the math delimiter normalization) has to agree with the parser.
+///
+/// Returns 0 for a plain line, and never runs past the line's end.
+pub(crate) fn content_start(line: &str) -> usize {
+    let mut off = 0usize;
+    loop {
+        let rest = &line[off..];
+        let indent = indent_of(rest);
+        // `indent_of` treats a tab as column 4, but only the byte offset
+        // matters here.
+        let after = &rest[indent..];
+        if after.starts_with('>') {
+            off += indent + 1;
+            if line[off..].starts_with(' ') {
+                off += 1;
+            }
+            continue;
+        }
+        if let Some(len) = list_marker_len(after) {
+            // `list_marker_len` already counts the indent it skipped.
+            off += len;
+            continue;
+        }
+        return off;
+    }
 }
 
 /// Length of the list marker prefix (indent + marker + following space),

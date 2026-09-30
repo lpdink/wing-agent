@@ -41,7 +41,7 @@ use std::borrow::Cow;
 use ratatui::style::Style;
 
 use super::parsing::MarkdownContext;
-use super::stream::{fence_open, indent_of, is_fence_close};
+use super::stream::{content_start, fence_open, indent_of, is_fence_close};
 use super::types::{MarkdownLine, SegmentKind};
 
 /// Width assumed for display math when the caller has no content width
@@ -84,13 +84,19 @@ const MATH_ENVS: &[&str] = &[
 // ============================================================
 
 /// `Event::InlineMath`: one segment, rendered when the engine can fit it on a
-/// single row (see the module docs for the fallback).
+/// single row *and* that row fits the line (see the module docs for the
+/// fallback).
 pub(crate) fn inline(src: &str, ctx: &mut MarkdownContext<'_>) {
     // Inside a table cell the cell renderer owns the line; a block would
     // desynchronize the row accumulation.
     let text = match wing_math::render_inline(src) {
-        Some(rendered) => rendered,
-        None => format!("${src}$"),
+        Some(rendered) if fits_line(&rendered, ctx) => rendered,
+        // Either the engine would not render it, or what it produced is wider
+        // than the line can hold: show the source. Half a formula (what the
+        // compose's hard wrap would make of an over-wide segment) is never an
+        // option; the source flows through the ordinary prose wrap like any
+        // other text.
+        _ => format!("${src}$"),
     };
     if ctx.active_table.is_some() {
         let text = text.replace('\n', " ");
@@ -150,6 +156,13 @@ fn push_math_block<'a>(ctx: &mut MarkdownContext<'_>, lines: impl Iterator<Item 
 }
 
 /// Append one math line: fresh line + block prefix + the text.
+///
+/// A grid row that renders to nothing keeps its (blank) row — except at the
+/// end of the document, where the document-level trailing-blank trim
+/// (`trim_trailing_blank`) merges it with the block separator, exactly as it
+/// merges any other trailing blank line. For a formula whose last grid row is
+/// empty, the engine's `height()` and the rendered row count can therefore
+/// differ by one; nothing visible is lost.
 fn push_math_line(ctx: &mut MarkdownContext<'_>, text: &str) {
     *ctx.current_line = MarkdownLine::default();
     ctx.ensure_prefix();
@@ -170,6 +183,19 @@ fn math_style(ctx: &MarkdownContext<'_>) -> Style {
     ctx.base_style.patch(ctx.theme.math)
 }
 
+/// Whether an inline formula fits the line it would be written into.
+///
+/// `available_width` is the same content width the prose wrap and the display
+/// grid are fitted to; with no width known (the IR-only callers) anything
+/// fits. Measured with `unicode-width`, so a CJK-wide glyph counts as the two
+/// columns it will occupy.
+fn fits_line(rendered: &str, ctx: &MarkdownContext<'_>) -> bool {
+    let Some(max) = ctx.available_width else {
+        return true;
+    };
+    unicode_width::UnicodeWidthStr::width(rendered) <= usize::from(max)
+}
+
 // ============================================================
 // Delimiter normalization (source pre-pass)
 // ============================================================
@@ -178,32 +204,46 @@ fn math_style(ctx: &MarkdownContext<'_>) -> Style {
 /// `$$` form it does: `\(…\)` → `$…$`, `\[…\]` → `$$…$$`, and a bare
 /// environment (`\begin{align}…\end{align}`) → `$$…$$`.
 ///
-/// Never touches an opaque region:
+/// Never touches a region pulldown does not parse as markdown text:
 ///
-/// - fenced code blocks (``` / ~~~),
+/// - fenced code blocks (``` / ~~~), **including a fence behind a block
+///   prefix (`> ~~~`, `- ``` `)** — the parser resolves the prefix before it
+///   decides what the line is, so a prefix must not hide the region,
 /// - inline code spans (backticks),
 /// - existing `$…$` / `$$…$$` math (so a wrapped environment stays wrapped),
-/// - indented (4-space) code blocks,
+/// - indented (4-space) code blocks, prefix-aware in the same way,
+/// - HTML blocks (`<div>` … to the next blank line) — markdown is not parsed
+///   inside them,
+/// - an inline HTML tag or autolink (`<…>`), and a link / image destination
+///   (`](url "title")`: the destination is what a click (and the OSC8
+///   hyperlink) opens,
+/// - a link reference definition line (`[label]: url "title"`),
 /// - anything whose closing delimiter is missing, or that would cross a blank
 ///   line or a fence — pulldown's own math pairing does not cross a blank
 ///   line either, so leaving the source alone keeps the renderer's output
 ///   identical to the `$`-less literal it is today,
-/// - a block that already holds an unpaired `$$` (inserting `$$` there would
-///   re-pair the stray delimiter and grow the text on every pass).
+/// - a span the scan reaches *after* an unpaired `$$` in the same block
+///   (inserting `$$` there would re-pair the stray delimiter and grow the text
+///   on every pass).
 ///
 /// The rewrite is purely local (a span is rewritten iff its own text is
 /// well-formed), which is what lets the streaming engine normalize a *slice*
 /// and still agree with the reference render of the whole document: slice
 /// boundaries are exactly the blank lines / fences a span may not cross.
 ///
-/// Two more refusals keep the output a pure function of the input rather than
-/// of how often the pass ran — inserting a delimiter must never re-pair a `$`
+/// Two refusals keep the output a pure function of the input rather than of
+/// how often the pass ran — inserting a delimiter must never re-pair a `$`
 /// that is already there:
 ///
 /// - the delimiters a rewrite would insert must not touch an existing `$`
 ///   (`fuses_with_dollar`), or the fused `$$` would change what the next pass
 ///   sees;
-/// - a block that holds an unpaired `$$` is left alone entirely.
+/// - the positional unpaired-`$$` rule above.
+///
+/// Two budgets bound the pass: a span longer than [`MAX_SPAN`] bytes is not
+/// rewritten (the engine's own source budget is smaller), and the pass stops
+/// after [`MAX_SCAN_WORK`] bytes of closer-searching. Past either, the
+/// remaining text is left exactly as it is.
 ///
 /// A span's leading/trailing whitespace is trimmed, because `$` only pairs
 /// against non-whitespace: `\(a \)` written out verbatim as `$a $` would not
@@ -254,14 +294,22 @@ struct Scan<'a> {
     /// indented line is an indented code block — an indented line below
     /// paragraph text is a lazy continuation and stays prose.
     at_block_start: bool,
-    /// The current block contains an unpaired `$$`.
+    /// Inside an HTML block (a line whose content starts with a tag-like
+    /// `<…>`; the block runs to the next blank line, like pulldown's type 6/7
+    /// HTML blocks). Markdown is not parsed there, so nothing may be
+    /// rewritten.
+    in_html_block: bool,
+    /// The scan has met an unpaired `$$` in the current block.
     ///
     /// A rewrite inserts `$$`, and a stray `$$` would then pair with the
-    /// inserted one on the next pass — the text would keep growing. Rather
-    /// than produce delimiters nobody asked for, a block that already holds an
-    /// unpaired `$$` is left alone (the formula degrades to its source, which
-    /// is always allowed). Single `$` deliberately does not set this: `$100`
-    /// in prose is common and cannot pair with an inserted `$$`.
+    /// inserted one on the next pass — the text would keep growing. So from
+    /// that point on the rest of the block is left alone (a formula there
+    /// degrades to its source, which is always allowed); a span *before* the
+    /// stray delimiter is unaffected. The rule is positional on purpose: it is
+    /// decided by what the scan has already seen, never by a look-ahead.
+    ///
+    /// Single `$` deliberately does not set this: `$100` in prose is common
+    /// and cannot pair with an inserted `$$`.
     stray_display_delim: bool,
 }
 
@@ -276,6 +324,7 @@ impl<'a> Scan<'a> {
             fence: None,
             indented: false,
             at_block_start: true,
+            in_html_block: false,
             stray_display_delim: false,
         }
     }
@@ -306,10 +355,17 @@ impl<'a> Scan<'a> {
             }
             let (line_end, next) = self.line_bounds(i);
             if i == line_start {
-                // Line-level state: fences and indented blocks are opaque,
-                // blank lines reset the per-block scan.
+                // Line-level state: fences, indented blocks and HTML blocks
+                // are opaque, blank lines reset the per-block scan.
+                //
+                // Every shape decision is made on the line's CONTENT — the
+                // prefixes pulldown resolves first (`> ` chains, list markers)
+                // do not change what the line is: `> ~~~` is a fence and
+                // `>     x` is an indented block.
+                let line = &self.text[i..line_end];
+                let content = &line[content_start(line)..];
                 if let Some((fc, flen)) = self.fence {
-                    if is_fence_close(&self.text[i..line_end], fc, flen) {
+                    if is_fence_close(content, fc, flen) {
                         self.fence = None;
                         self.at_block_start = true;
                         self.stray_display_delim = false;
@@ -318,33 +374,53 @@ impl<'a> Scan<'a> {
                     line_start = next;
                     continue;
                 }
-                let line = &self.text[i..line_end];
-                if let Some((fc, flen, _)) = fence_open(line) {
-                    self.fence = Some((fc, flen));
-                    i = next;
-                    line_start = next;
-                    continue;
-                }
                 if line.trim().is_empty() {
                     self.indented = false;
+                    self.in_html_block = false;
                     self.at_block_start = true;
                     self.stray_display_delim = false;
                     i = next;
                     line_start = next;
                     continue;
                 }
+                if self.in_html_block {
+                    i = next;
+                    line_start = next;
+                    continue;
+                }
+                if let Some((fc, flen, _)) = fence_open(content) {
+                    self.fence = Some((fc, flen));
+                    i = next;
+                    line_start = next;
+                    continue;
+                }
                 if self.indented {
-                    if indent_of(line) >= 4 {
+                    if indent_of(content) >= 4 {
                         i = next;
                         line_start = next;
                         continue;
                     }
                     self.indented = false;
-                } else if self.at_block_start && indent_of(line) >= 4 {
+                } else if self.at_block_start && indent_of(content) >= 4 {
                     // An indented code block (CommonMark): it can only start
                     // a block, so a lazily continued paragraph line below it
                     // stays prose.
                     self.indented = true;
+                    i = next;
+                    line_start = next;
+                    continue;
+                }
+                if is_html_block_start(content) {
+                    // `<div>`, `<!--`, `<?…`, `<!DOCTYPE` …: pulldown stops
+                    // parsing markdown here (to the next blank line).
+                    self.in_html_block = true;
+                    i = next;
+                    line_start = next;
+                    continue;
+                }
+                if is_reference_definition(content) {
+                    // `[label]: url "title"` — the destination is a URL, not
+                    // prose: rewriting it would change what a click opens.
                     i = next;
                     line_start = next;
                     continue;
@@ -385,12 +461,26 @@ impl<'a> Scan<'a> {
     /// First math-delimiter token at or after `from`, before `line_end`.
     ///
     /// Tokens are the openers of every opaque-or-rewritable region: a
-    /// backtick run, `$`, `\(`, `\[`, `\begin{`.
+    /// backtick run, `$`, `\(`, `\[`, `\begin{`, an inline HTML tag or
+    /// autolink (`<…>`), and a link/image destination (`](…`).
     fn next_token(&self, from: usize, line_end: usize) -> Option<usize> {
         let mut i = from;
         while i < line_end {
             match self.bytes[i] {
                 b'`' | b'$' => return Some(i),
+                // `<div>`, `</p>`, `<!--`, `<http://x/…>`: markdown is not
+                // parsed inside, so a rewrite there would leak `$`s into the
+                // text the user sees.
+                b'<' if self.bytes.get(i + 1).copied().is_some_and(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'/' | b'!' | b'?')
+                }) =>
+                {
+                    return Some(i);
+                }
+                // A link / image destination: `](url "title")`. The
+                // destination string is what a click and the OSC8 hyperlink
+                // use, so it must stay exactly as the author wrote it.
+                b']' if self.bytes.get(i + 1) == Some(&b'(') => return Some(i),
                 // A backslash preceded by another backslash is an escaped
                 // backslash, not a delimiter (`\\\\(x` is a line break, not math).
                 b'\\' if i == 0 || self.bytes[i - 1] != b'\\' => {
@@ -419,6 +509,8 @@ impl<'a> Scan<'a> {
         match self.bytes[at] {
             b'`' => self.skip_code_span(at),
             b'$' => self.skip_dollar_math(at),
+            b'<' => self.skip_inline_html(at),
+            b']' => self.skip_link_destination(at),
             b'\\' => match self.bytes.get(at + 1).copied() {
                 Some(b'(') => self.rewrite(at, "\\(", "\\)", "$", "$"),
                 Some(b'[') => self.rewrite(at, "\\[", "\\]", "$$", "$$"),
@@ -539,6 +631,37 @@ impl<'a> Scan<'a> {
         None
     }
 
+    /// Skip an inline HTML tag / autolink: everything up to its `>`.
+    ///
+    /// An unclosed `<` (a comparison, an arrow — anything with no `>` in the
+    /// block) is not a region and the scan resumes right after it.
+    fn skip_inline_html(&mut self, at: usize) -> Option<usize> {
+        let end = self.span_limit(at + 1)?;
+        let rel = self.text[at + 1..end].find('>')?;
+        Some(at + 1 + rel + 1)
+    }
+
+    /// Skip a link / image destination: `](url "title")`, honouring nested
+    /// parentheses (a URL may contain them).
+    fn skip_link_destination(&mut self, at: usize) -> Option<usize> {
+        let end = self.span_limit(at + 2)?;
+        if !self.charge(end - at) {
+            return None;
+        }
+        let mut depth = 0usize;
+        let mut i = at + 2;
+        while i < end {
+            match self.bytes[i] {
+                b'(' => depth += 1,
+                b')' if depth == 0 => return Some(i + 1),
+                b')' => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
     /// Skip a backtick code span, returning the offset just past its closing
     /// run (the run must have the same length — longer runs do not close).
     fn skip_code_span(&mut self, at: usize) -> Option<usize> {
@@ -637,7 +760,8 @@ impl<'a> Scan<'a> {
         while at < hard {
             let (line_end, next) = self.line_bounds(at);
             let line = &self.text[at..line_end];
-            if line.trim().is_empty() || fence_open(line).is_some() {
+            let content = &line[content_start(line)..];
+            if line.trim().is_empty() || fence_open(content).is_some() {
                 return self.charge(walked).then(|| at.max(from));
             }
             if next <= at {
@@ -660,6 +784,38 @@ impl<'a> Scan<'a> {
         }
         true
     }
+}
+
+/// Whether the line's content opens an HTML block: `<tag`, `</tag`, `<!--`,
+/// `<?…`, `<!DOCTYPE`. Mirrors pulldown's HTML blocks closely enough for the
+/// normalization's purpose — that region must not be rewritten.
+fn is_html_block_start(content: &str) -> bool {
+    let mut chars = content.chars();
+    if chars.next() != Some('<') {
+        return false;
+    }
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '!' | '?'))
+}
+
+/// Whether the line is a link reference definition (`[label]: url "title"`).
+///
+/// Only the line itself is treated as opaque: a title wrapped onto the next
+/// line is rare, and treating the whole block as opaque would cost more than
+/// it protects.
+fn is_reference_definition(content: &str) -> bool {
+    let Some(rest) = content.strip_prefix('[') else {
+        return false;
+    };
+    let Some(close) = rest.find(']') else {
+        return false;
+    };
+    // `[label]:` — no whitespace inside the label.
+    if rest[..close].chars().any(char::is_whitespace) {
+        return false;
+    }
+    rest[close + 1..].starts_with(':')
 }
 
 #[cfg(test)]
@@ -788,6 +944,116 @@ mod tests {
         assert_eq!(norm(src), src);
     }
 
+    // ------------------------------------------------------------
+    // Regions pulldown does not parse as text
+    // ------------------------------------------------------------
+
+    /// Inline HTML tags and autolinks: markdown is not parsed inside `<…>`, so
+    /// a rewrite there would show up as literal `$`s (and would change an
+    /// autolink's URL).
+    ///
+    /// The prose *between* two tags is markdown, exactly as it is for the
+    /// baseline (`<span>*em*</span>` renders emphasis): only the tag itself is
+    /// opaque.
+    #[test]
+    fn inline_html_tags_and_autolinks_are_left_alone() {
+        for src in [
+            "<http://x/\\(y\\)>",
+            "<code>$$\\begin{align}a\\end{align}$$</code>",
+            "<a href=\"http://x/\\(y\\)\">label</a>",
+        ] {
+            assert_eq!(norm(src), src, "{src:?} must not be rewritten");
+        }
+        // Between the tags the text is prose.
+        assert_eq!(
+            norm("before <b>\\(x\\)</b> after"),
+            "before <b>$x$</b> after"
+        );
+        // A stray `<` (comparison, arrow) is not a region: the text after it
+        // still normalizes.
+        assert_eq!(norm("a <- \\(x\\)"), "a <- $x$");
+    }
+
+    /// An HTML block (`<div>` … blank line) is opaque, including the lines
+    /// between its tags.
+    #[test]
+    fn html_blocks_are_left_alone() {
+        let src = "<div>\n\\begin{align}a\\end{align}\n\\(x\\)\n</div>\n";
+        assert_eq!(norm(src), src);
+        // The block ends at the blank line: text after it normalizes again.
+        assert_eq!(
+            norm("<div>\n\\(a\\)\n</div>\n\n\\(b\\)\n"),
+            "<div>\n\\(a\\)\n</div>\n\n$b$\n"
+        );
+        // A tag-like line inside a paragraph starts a block too (pulldown's
+        // type-6 HTML block interrupts a paragraph).
+        assert_eq!(norm("text\n<div>\n\\(x\\)\n"), "text\n<div>\n\\(x\\)\n");
+    }
+
+    /// A link / image destination is a URL: rewriting it would change what the
+    /// click opens and what the OSC8 hyperlink carries.
+    #[test]
+    fn link_destinations_are_left_alone() {
+        assert_eq!(norm("[a](http://x/\\(y\\))"), "[a](http://x/\\(y\\))");
+        assert_eq!(
+            norm("![img](http://x/\\(y\\) \"t \\(z\\)\")"),
+            "![img](http://x/\\(y\\) \"t \\(z\\)\")"
+        );
+        // Nested parens in the URL keep the destination balanced.
+        assert_eq!(
+            norm("[a](http://x/(y)/\\(z\\))"),
+            "[a](http://x/(y)/\\(z\\))"
+        );
+        // …and the label around it still normalizes (it is prose).
+        assert_eq!(
+            norm("[\\(x\\)](http://e/\\(y\\))"),
+            "[$x$](http://e/\\(y\\))"
+        );
+    }
+
+    /// A link reference definition line carries a URL in its destination and
+    /// its title.
+    #[test]
+    fn reference_definitions_are_left_alone() {
+        let src = "[ref]: http://x/\\(y\\) \"title \\(z\\)\"";
+        assert_eq!(norm(src), src);
+        assert_eq!(
+            norm("[ref]: http://x/\\(y\\)\n\nuse \\(a\\)"),
+            "[ref]: http://x/\\(y\\)\n\nuse $a$"
+        );
+        // Not a definition (no colon) — ordinary text.
+        assert_eq!(norm("[ref] \\(a\\)"), "[ref] $a$");
+    }
+
+    // ------------------------------------------------------------
+    // Block prefixes: `>` and list markers
+    // ------------------------------------------------------------
+
+    /// A fence or an indented block after a `>` / a list marker is still a
+    /// fence / indented block to the parser: its content must not be
+    /// rewritten.
+    #[test]
+    fn prefixed_code_regions_are_left_alone() {
+        // Tilde fence inside a blockquote.
+        let src = "> ~~~\n> \\begin{align}a\\end{align}\n> ~~~\n";
+        assert_eq!(norm(src), src);
+        // Indented code inside a blockquote.
+        assert_eq!(norm(">     \\(x\\)\n"), ">     \\(x\\)\n");
+        // Backtick fence inside a list item, and indented code inside one.
+        assert_eq!(
+            norm("- ```\n  \\(x\\)\n  ```\n"),
+            "- ```\n  \\(x\\)\n  ```\n"
+        );
+        assert_eq!(
+            norm("- item\n\n-     \\(x\\)\n"),
+            "- item\n\n-     \\(x\\)\n"
+        );
+        // …but a prefixed line that is NOT code still normalizes.
+        assert_eq!(norm("> \\(x\\)"), "> $x$");
+        assert_eq!(norm("- \\(x\\)"), "- $x$");
+        assert_eq!(norm("> text\n>     \\(x\\)"), "> text\n>     $x$");
+    }
+
     #[test]
     fn indented_code_blocks_are_left_alone() {
         let src = "before\n\n    \\(x\\)\n\nafter";
@@ -898,6 +1164,62 @@ mod tests {
         assert!(matches!(normalize_delimiters(src), Cow::Borrowed(_)));
     }
 
+    // ------------------------------------------------------------
+    // The two safety rules (see `normalize_delimiters`)
+    // ------------------------------------------------------------
+
+    /// Rule 1: a rewrite may not put a delimiter right next to an existing
+    /// `$`.
+    ///
+    /// Without the rule the `\(x\)` rewrite fuses into `$x$$$…`, the stray
+    /// `$$` re-pairs with the inserted one and the text grows on every pass
+    /// (`\(x\)$$\\(y\\)` is the shape that exposed it — deleting
+    /// `fuses_with_dollar` makes this test fail).
+    #[test]
+    fn a_rewrite_never_fuses_with_an_existing_dollar() {
+        for src in [
+            r"\(x\)$$\\(y\\)",
+            r"$$\\(x\\)",
+            r"\(a\)$$",
+            r"\(a\)$b$",
+            r"$$\begin{align}a\end{align}$$",
+            r"\begin{align}a\end{align}$",
+        ] {
+            assert_eq!(norm(src), src, "{src:?} must not be rewritten");
+        }
+        // The rule is about *adjacency*: one column of separation is enough.
+        assert_eq!(norm(r"\(x\) $$"), "$x$ $$");
+        assert_eq!(
+            norm(r"\begin{align}a\end{align} x"),
+            "$$\\begin{align}a\\end{align}$$ x"
+        );
+    }
+
+    /// Rule 2: once the scan meets an unpaired `$$`, the rest of the block is
+    /// left alone — an inserted `$$` would pair with the stray one.
+    ///
+    /// Deleting `stray_display_delim` makes the first two assertions fail: the
+    /// stray `$$` is *before* the span, so only this rule can stop the rewrite
+    /// (the `\(` is not adjacent to any `$`, so rule 1 stays silent).
+    #[test]
+    fn an_unpaired_display_delimiter_disarms_the_rest_of_the_block() {
+        assert_eq!(norm(r"stray $$ here and \(x\)"), r"stray $$ here and \(x\)");
+        assert_eq!(
+            norm(
+                "stray $$
+\\begin{align}a\\end{align}"
+            ),
+            "stray $$
+\\begin{align}a\\end{align}"
+        );
+        // A rewritable span BEFORE the stray delimiter is unaffected (the rule
+        // is positional — see the docs).
+        assert_eq!(norm(r"\(x\) then stray $$ here"), "$x$ then stray $$ here");
+        // A *single* `$` does not disarm it: `$100` in prose cannot pair with
+        // an inserted `$$`, and disarming there would cost the common case.
+        assert_eq!(norm(r"price $100 and \(x\)"), "price $100 and $x$");
+    }
+
     /// Seeded fuzz over the delimiter alphabet: the pass must never panic,
     /// must never change non-delimiter content, and must converge — a second
     /// pass is a no-op in every case except one, where it can wrap a bare
@@ -928,6 +1250,16 @@ mod tests {
             "\\text{中文}",
             " ",
             "\\end{",
+            // The shapes the safety rules exist for (review r1 / S3).
+            "$x$",
+            "\\(x\\)",
+            "$$x$$",
+            "~~~",
+            "> ",
+            "- ",
+            "<div>",
+            "](u)",
+            "[r]: u",
             "a &= b",
             "\\\\",
             "(",

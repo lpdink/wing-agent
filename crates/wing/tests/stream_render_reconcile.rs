@@ -210,6 +210,57 @@ fn shapes() -> Vec<(&'static str, String)> {
             "intro\n\n$$\n\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}\n$$".into(),
         ),
         ("math_inline_tail", "the answer is $x^2 + y^2$".into()),
+        // --- review r1: regions pulldown does not parse as text ---
+        (
+            "math_link_destination",
+            "see [a](http://x/\\(y\\)) and [b](http://x/\\(y\\) \"t \\(z\\)\") here\n\nafter".into(),
+        ),
+        (
+            // NOTE: no `[ref]` USE — a reference-style link resolves at document
+            // scope, so it renders literally while streaming (see the module
+            // header). The destination itself is covered by the unit and
+            // integration tests in `math.rs` / `math_render.rs`.
+            "math_reference_definition",
+            "[ref]: http://x/\\(y\\) \"title \\(z\\)\"\n\nuse \\(a\\)\n\nafter".into(),
+        ),
+        (
+            "math_html_block",
+            "<div>\n\\(x\\) and \\begin{align}a\\end{align}\n</div>\n\nafter \\(b\\)".into(),
+        ),
+        (
+            "math_autolink",
+            "link <http://x/\\(y\\)> and text \\(z\\)\n\nafter".into(),
+        ),
+        // --- review r1: code regions behind a block prefix (S2) ---
+        (
+            "math_quoted_tilde_fence",
+            "> ~~~\n> \\begin{align}a\\end{align}\n> ~~~\n\nafter \\(x\\)\n".into(),
+        ),
+        (
+            "math_quoted_fence_blank_inside",
+            // The blank line is fence body; a slice cut there would render the
+            // rest as prose (the splitter's `PrefixedFence` exists for this).
+            "> ~~~\n> a\n\n> \\(x\\)\n> ~~~\n\nafter\n".into(),
+        ),
+        (
+            "math_quoted_indented_code",
+            ">     \\(x\\)\n\nafter".into(),
+        ),
+        (
+            "math_list_fence",
+            "- ```\n  \\(x\\)\n  ```\n\nafter\n".into(),
+        ),
+        // --- review r1: inline math must not break prose wrapping (B1) ---
+        (
+            "math_inline_long_paragraph",
+            "the quick brown fox $x^2$ jumps over the lazy dog and then keeps running far \
+             beyond the right margin of a narrow cell so we can see how wrapping behaves \
+             when a formula sits in the middle of prose, 并且中文也需要在边界处折行。\n\nafter".into(),
+        ),
+        (
+            "math_inline_overwide",
+            format!("Sum: $a_1{} end\n\nafter\n", " + a_2 + a_3 + a_4 + a_5 + a_6".repeat(3)),
+        ),
     ]
 }
 
@@ -395,6 +446,14 @@ fn reconcile_prefixes() {
         "math_unclosed_delimiters",
         "math_display_tail",
         "math_inline_tail",
+        "math_link_destination",
+        "math_reference_definition",
+        "math_quoted_tilde_fence",
+        "math_quoted_fence_blank_inside",
+        "math_quoted_indented_code",
+        "math_list_fence",
+        "math_inline_long_paragraph",
+        "math_inline_overwide",
     ];
     let palette = ThemePalette::default();
     for (name, corpus) in shapes() {

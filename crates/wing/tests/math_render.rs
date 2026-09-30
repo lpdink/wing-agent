@@ -350,6 +350,190 @@ fn off_and_text_differ_only_where_math_renders() {
 }
 
 // ============================================================
+// 4b. Inline math is prose (wrap regression, review r1 / B1)
+// ============================================================
+
+/// A paragraph that contains an inline formula must wrap exactly like the same
+/// paragraph with the formula's rendered text spelled out as plain text — same
+/// line breaks, same continuation indent.
+///
+/// This is the regression the review caught: while a `Math` segment forced the
+/// whole line out of the prose-wrapper, the line fell through to the compose's
+/// character-level hard wrap (words cut in half, the two-column continuation
+/// indent lost) as soon as it was wider than the cell.
+#[test]
+fn inline_math_keeps_prose_wrapping() {
+    let sentence = "the quick brown fox FMLA jumps over the lazy dog and then keeps running \
+                    far beyond the right margin of a narrow cell so we can see how wrapping \
+                    behaves when a formula sits in the middle of prose, 并且中文也需要在边界处\
+                    折行而不是整段被推下去。";
+    for width in [40u16, 60, 80] {
+        for (math, spelled) in [
+            ("$x^2$", "x²"),
+            ("$\\alpha + \\beta$", "α + β"),
+            // Two formulas in one paragraph.
+            ("$a_i$ and $b_i$", "aᵢ and bᵢ"),
+        ] {
+            let md = sentence.replace("FMLA", math);
+            let spelled_out = sentence.replace("FMLA", spelled);
+            let with_math = plain(&render(&md, CONTENT, width)).join("\n");
+            let without =
+                plain(&render_with(&spelled_out, CONTENT, width, MathMode::Off)).join("\n");
+            assert_eq!(
+                with_math, without,
+                "width={width} formula={math:?}: the math line must wrap like its text"
+            );
+        }
+    }
+    // Sanity: the sentence really does wrap (otherwise the assertion above is
+    // vacuous).
+    let lines = render(&sentence.replace("FMLA", "$x^2$"), CONTENT, 60);
+    assert!(lines.len() >= 3, "expected a wrapped paragraph: {lines:?}");
+}
+
+/// An inline formula whose *rendered* text is wider than the line budget is
+/// shown as its source instead — never cut in half by the hard wrap.
+#[test]
+fn overwide_inline_math_degrades_to_source() {
+    let src = "$a_1 + a_2 + a_3 + a_4 + a_5 + a_6 + a_7 + a_8 + a_9 + a_{10} + a_{11} + a_{12}$";
+    let rendered = wing_math::render_inline(&src[1..src.len() - 1]).expect("engine renders it");
+    assert!(
+        unicode_width::UnicodeWidthStr::width(rendered.as_str()) > 40,
+        "the fixture must be over-wide: {rendered:?}"
+    );
+    let md = format!("Sum: {src} end");
+    let out = plain(&render(&md, CONTENT, 40)).join("\n");
+    assert!(
+        !out.contains(&rendered),
+        "the over-wide formula must not be rendered (it would be cut): {out}"
+    );
+    // The complete source survives (the prose wrap may break it at spaces).
+    let flat: String = out.chars().filter(|c| !c.is_whitespace()).collect();
+    let want: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(flat.contains(&want), "source lost: {out}");
+    // …and the line still wraps like prose (no mid-token cut): every line fits.
+    for line in out.lines() {
+        assert!(
+            unicode_width::UnicodeWidthStr::width(line) <= 40,
+            "line wider than the cell: {line:?}"
+        );
+    }
+}
+
+/// The same gate applies to a formula the engine refuses: the source is shown
+/// and wraps like text (this is what the baseline did with the same string).
+#[test]
+fn overwide_degraded_inline_math_wraps_like_text() {
+    let md = "Sum: $\\ce{2H2O} + \\ce{3H2O} + \\ce{4H2O} + \\ce{5H2O} + \\ce{6H2O}$ end";
+    let with_math = plain(&render(md, CONTENT, 40)).join("\n");
+    let baseline = plain(&render_with(md, CONTENT, 40, MathMode::Off)).join("\n");
+    assert_eq!(
+        with_math, baseline,
+        "a degraded formula must render like plain text"
+    );
+}
+
+// ============================================================
+// 4c. Regions pulldown does not parse as text (review r1 / S1, S2)
+// ============================================================
+
+/// Rewriting a link destination changes the URL the user clicks (and the OSC8
+/// target) — it must be left exactly as written.
+#[test]
+fn link_destinations_are_never_rewritten() {
+    for (md, target) in [
+        ("[a](http://x/\\(y\\))", "http://x/(y)"),
+        ("![img](http://x/\\(y\\))", "http://x/(y)"),
+        ("[a](http://x/\\(y\\) \"t \\(z\\)\")", "http://x/(y)"),
+    ] {
+        let with_math = spans(&render(md, CONTENT, 60));
+        let off = spans(&render_with(md, CONTENT, 60, MathMode::Off));
+        let targets = |pairs: &[(SegmentKind, String)]| -> String {
+            pairs
+                .iter()
+                .filter(|(kind, _)| *kind == SegmentKind::Link)
+                .map(|(_, text)| text.clone())
+                .collect()
+        };
+        assert!(
+            targets(&with_math).contains(target),
+            "{md:?}: {}",
+            targets(&with_math)
+        );
+        assert_eq!(
+            targets(&with_math),
+            targets(&off),
+            "{md:?}: the destination (and its link spans) must not change"
+        );
+        // No `$` ever lands in the link span.
+        assert!(
+            !targets(&with_math).contains('$'),
+            "{md:?}: {}",
+            targets(&with_math)
+        );
+    }
+    // A reference definition's destination is a URL too.
+    let md = "[ref]: http://x/\\(y\\)\n\nsee [ref]";
+    let with_math = spans(&render(md, CONTENT, 60));
+    let off = spans(&render_with(md, CONTENT, 60, MathMode::Off));
+    assert_eq!(
+        with_math, off,
+        "a reference definition must not be rewritten"
+    );
+}
+
+/// An HTML block is opaque: no `$` may appear inside it.
+#[test]
+fn html_blocks_are_never_rewritten() {
+    for md in [
+        "<div>\n\\(x\\)\n</div>",
+        "<div>\n\\begin{align}a\\end{align}\n</div>",
+        "<pre>\n$$\\frac{a}{b}$$\n</pre>",
+    ] {
+        let with_math = plain(&render(md, CONTENT, 60)).join("\n");
+        let off = plain(&render_with(md, CONTENT, 60, MathMode::Off)).join("\n");
+        assert_eq!(
+            with_math, off,
+            "{md:?} must render exactly as it does without math"
+        );
+    }
+}
+
+/// A code block that carries a block prefix (`> ~~~`, `- ``` `) is still a
+/// code block: its content must not be rewritten, and the streaming engine
+/// must render the same thing.
+#[test]
+fn prefixed_code_blocks_are_never_rewritten() {
+    let quoted = "> ~~~\n> \\begin{align}a\\end{align}\n> ~~~";
+    assert_eq!(
+        plain(&render(quoted, CONTENT, 60)).join("\n"),
+        plain(&render_with(quoted, CONTENT, 60, MathMode::Off)).join("\n")
+    );
+    let quoted_indent = ">     \\(x\\)";
+    assert_eq!(
+        plain(&render(quoted_indent, CONTENT, 60)).join("\n"),
+        plain(&render_with(quoted_indent, CONTENT, 60, MathMode::Off)).join("\n"),
+        "a quoted indented code block must render as it does without math"
+    );
+    let list = "- ```\n  \\(x\\)\n  ```";
+    assert_eq!(
+        plain(&render(list, CONTENT, 60)).join("\n"),
+        plain(&render_with(list, CONTENT, 60, MathMode::Off)).join("\n")
+    );
+    // Formulas that are merely *prefixed prose* still render.
+    assert!(
+        plain(&render("> \\(x + 1\\)", CONTENT, 60))
+            .join("\n")
+            .contains("x + 1")
+    );
+    assert!(
+        plain(&render("- \\(x + 1\\)", CONTENT, 60))
+            .join("\n")
+            .contains("x + 1")
+    );
+}
+
+// ============================================================
 // 5. Streaming and the composed view agree
 // ============================================================
 
