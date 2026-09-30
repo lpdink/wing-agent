@@ -21,6 +21,13 @@
 //! streaming path) instead of the one-shot full render, and `--check`
 //! reconciles the two — the invariant the TUI depends on at turn end.
 //!
+//! `--images` turns markdown image anchors on: `![alt](path)` then reserves a
+//! block of rows instead of rendering as a link. The metadata (pixel size)
+//! comes from `--shape <path>=<W>x<H>`, which stands in for the chat view's
+//! header probes — the renderer itself never touches the filesystem. Anchors
+//! are listed after the rendered lines (`line/col/cols/rows path`), which is
+//! the geometry the drawing layer consumes.
+//!
 //! Usage:
 //! ```text
 //! # whole-file diagnostic (reasoning profile)
@@ -44,9 +51,13 @@ use std::io::{IsTerminal, Read, Write};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use wing::config::ThemePalette;
+use wing::render::markdown::ImageEntry;
+use wing::render::markdown::ImageOpts;
+use wing::render::markdown::ImageShape;
 use wing::render::markdown::Profile;
 use wing::render::markdown::render_markdown_lines_with;
-use wing::render::markdown::stream::{StreamingRender, full_lines};
+use wing::render::markdown::resolve_image_path;
+use wing::render::markdown::stream::{StreamingRender, full_render};
 use wing::render::markdown::types::SegmentKind;
 use wing::render::markdown::{MarkdownLine, RenderOpts};
 
@@ -66,6 +77,11 @@ INPUT:
 RENDER:
     -p, --profile <P>       thinking | content    (default: thinking)
     -w, --width <N>         render width in columns (default: 120)
+        --images            render markdown images as anchors (default: link path)
+        --workspace <DIR>   root relative image paths resolve against
+                            (default: the current directory)
+        --shape <P>=<W>x<H> standalone-image metadata, repeatable; P is the
+                            path as written in the markdown (`plot.png=800x600`)
         --chunk <N>         drive the streaming engine in N-byte chunks (production path)
         --no-finalize       keep the streaming engine's live state (skip the turn-end reconcile)
         --check             after --chunk, compare the resting (and finalized) state
@@ -91,6 +107,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut kinds = false;
     let mut range: Option<(usize, usize)> = None;
     let mut plain = false;
+    let mut images = false;
+    let mut workspace: Option<String> = None;
+    let mut shapes: Vec<String> = Vec::new();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -112,6 +131,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
             }
             "-w" | "--width" => width = next_value(&mut args, "--width")?.parse()?,
+            "--images" => images = true,
+            "--workspace" => workspace = Some(next_value(&mut args, "--workspace")?),
+            "--shape" => shapes.push(next_value(&mut args, "--shape")?),
             "--chunk" => chunk = Some(next_value(&mut args, "--chunk")?.parse()?),
             "--no-finalize" => finalize = false,
             "--check" => check = true,
@@ -140,6 +162,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    if !shapes.is_empty() && !images {
+        return Err("--shape needs --images (metadata alone anchors nothing)".into());
+    }
+    let image_opts = build_image_opts(images, workspace.as_deref(), &shapes)?;
+
     let text = load_text(file, jsonl, index, &field)?;
     let palette = ThemePalette::default();
     let mut out = std::io::stdout();
@@ -157,8 +184,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if chunk.is_none() {
             return Err("--check needs --chunk (it reconciles the streaming path)".into());
         }
-        let (report, diverged) =
-            check_streaming(&text, chunk.unwrap_or(1), width, profile, &palette);
+        let (report, diverged) = check_streaming(
+            &text,
+            chunk.unwrap_or(1),
+            width,
+            profile,
+            &palette,
+            &image_opts,
+        );
         for line in report {
             writeln!(out, "{line}")?;
         }
@@ -169,29 +202,103 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let lines: Vec<Line<'static>> = if let Some(chunk) = chunk {
-        let mut stream = StreamingRender::new(profile);
-        for piece in chunks_of(&text, chunk) {
-            stream.push(piece);
-            // Sync every chunk — exactly what the UI does per frame.
-            let _ = stream.lines(width, &palette);
-        }
-        if finalize {
-            stream.finalize(width, &palette);
-        }
-        stream.lines(width, &palette).to_vec()
-    } else if kinds {
-        // IR view: the markdown layer without the cell compose (prefix / hard
-        // wrap), so kinds stay attached to the lines that produced them.
-        let opts = RenderOpts::new(profile, true);
-        let md = render_markdown_lines_with(&text, Some(width.saturating_sub(2)), &palette, opts);
-        print_ir(&mut out, &md, range, plain)?;
-        return Ok(());
-    } else {
-        full_lines(&text, width, profile, &palette)
-    };
+    let (lines, anchors): (Vec<Line<'static>>, Vec<wing::render::markdown::ImageSpan>) =
+        if let Some(chunk) = chunk {
+            let mut stream = StreamingRender::with_images(profile, image_opts.clone());
+            for piece in chunks_of(&text, chunk) {
+                stream.push(piece);
+                // Sync every chunk — exactly what the UI does per frame.
+                let _ = stream.lines(width, &palette);
+            }
+            if finalize {
+                stream.finalize(width, &palette);
+            }
+            let rendered = stream.composed(width, &palette);
+            let anchors = rendered
+                .images
+                .iter()
+                .flat_map(|spans| spans.iter().cloned())
+                .collect::<Vec<_>>();
+            (rendered.lines.to_vec(), anchors)
+        } else if kinds {
+            // IR view: the markdown layer without the cell compose (prefix /
+            // hard wrap), so kinds stay attached to the lines that produced
+            // them.
+            let opts = RenderOpts::new(profile, true).with_images(&image_opts);
+            let md =
+                render_markdown_lines_with(&text, Some(width.saturating_sub(2)), &palette, opts);
+            print_ir(&mut out, &md, range, plain)?;
+            return Ok(());
+        } else {
+            let composed = full_render(&text, width, profile, &palette, &image_opts);
+            let anchors = composed
+                .images()
+                .iter()
+                .flat_map(|spans| spans.iter().cloned())
+                .collect::<Vec<_>>();
+            (composed.into_parts().0, anchors)
+        };
 
     print_lines(&mut out, &lines, range, plain)?;
+    if images {
+        print_anchors(&mut out, &anchors)?;
+    }
+    Ok(())
+}
+
+/// Build the image options from the command line.
+///
+/// The metadata table is a stand-in for the chat view's header probes: each
+/// `--shape` is resolved through the same [`resolve_image_path`] the renderer
+/// uses, so a fixture behaves exactly like production.
+fn build_image_opts(
+    enabled: bool,
+    workspace: Option<&str>,
+    shapes: &[String],
+) -> Result<ImageOpts, Box<dyn std::error::Error>> {
+    if !enabled {
+        return Ok(ImageOpts::default());
+    }
+    let root = workspace
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok());
+    let mut entries = Vec::new();
+    for spec in shapes {
+        let (raw_path, shape) = spec
+            .rsplit_once('=')
+            .ok_or_else(|| format!("--shape wants <path>=<W>x<H>, got {spec:?}"))?;
+        let (px_w, px_h) = shape
+            .split_once(['x', 'X'])
+            .ok_or_else(|| format!("--shape wants <path>=<W>x<H>, got {spec:?}"))?;
+        let resolved = resolve_image_path(root.as_deref(), raw_path)
+            .map_err(|err| format!("--shape {spec:?}: {err}"))?;
+        entries.push(ImageEntry::new(
+            resolved,
+            ImageShape::new(px_w.parse()?, px_h.parse()?),
+        ));
+    }
+    Ok(ImageOpts::anchor(root, entries))
+}
+
+/// Print the anchor geometry of the render (the ui layer's input).
+fn print_anchors(
+    out: &mut impl Write,
+    anchors: &[wing::render::markdown::ImageSpan],
+) -> std::io::Result<()> {
+    writeln!(out, "image anchors: {}", anchors.len())?;
+    for anchor in anchors {
+        writeln!(
+            out,
+            "  line={} col={} cols={} rows={} {}x{} {:?}",
+            anchor.line,
+            anchor.column,
+            anchor.cols,
+            anchor.rows,
+            anchor.px_w,
+            anchor.px_h,
+            anchor.path,
+        )?;
+    }
     Ok(())
 }
 
@@ -258,22 +365,40 @@ fn check_streaming(
     width: u16,
     profile: Profile,
     palette: &ThemePalette,
+    image_opts: &ImageOpts,
 ) -> (Vec<String>, bool) {
     let mut out = Vec::new();
-    let mut stream = StreamingRender::new(profile);
+    let mut stream = StreamingRender::with_images(profile, image_opts.clone());
     for piece in chunks_of(text, chunk) {
         stream.push(piece);
         let _ = stream.lines(width, palette);
     }
     let resting = stream.lines(width, palette).to_vec();
-    let reference = full_lines(text, width, profile, palette);
+    let reference = full_render(text, width, profile, palette, image_opts);
     out.push(format!(
         "resting(before finalize) vs full render: {} lines vs {} lines",
         resting.len(),
-        reference.len()
+        reference.lines().len()
     ));
-    let resting_diff = diff_summary(&resting, &reference, "resting");
-    let resting_diverged = diverged(&resting, &reference);
+    let resting_diff = diff_summary(&resting, reference.lines(), "resting");
+    let resting_diverged = diverged(&resting, reference.lines());
+    let resting_anchors = stream
+        .composed(width, palette)
+        .images
+        .iter()
+        .flat_map(|spans| spans.iter().cloned())
+        .collect::<Vec<_>>();
+    let reference_anchors = reference
+        .images()
+        .iter()
+        .flat_map(|spans| spans.iter().cloned())
+        .collect::<Vec<_>>();
+    out.extend(diff_anchors(
+        &resting_anchors,
+        &reference_anchors,
+        "resting",
+    ));
+    let anchors_diverged = resting_anchors != reference_anchors;
     out.extend(resting_diff);
 
     stream.finalize(width, palette);
@@ -281,10 +406,37 @@ fn check_streaming(
     out.push(format!(
         "after finalize: {} lines vs {} lines",
         finalized.len(),
-        reference.len()
+        reference.lines().len()
     ));
-    out.extend(diff_summary(&finalized, &reference, "finalized"));
-    (out, resting_diverged || diverged(&finalized, &reference))
+    out.extend(diff_summary(&finalized, reference.lines(), "finalized"));
+    (
+        out,
+        resting_diverged || diverged(&finalized, reference.lines()) || anchors_diverged,
+    )
+}
+
+/// First anchor-geometry mismatches between two renders.
+fn diff_anchors(
+    got: &[wing::render::markdown::ImageSpan],
+    want: &[wing::render::markdown::ImageSpan],
+    label: &str,
+) -> Vec<String> {
+    if got == want {
+        return vec![format!("  [{label}] anchors identical ({})", got.len())];
+    }
+    let mut out = vec![format!(
+        "  [{label}] anchors differ: got {} / want {}",
+        got.len(),
+        want.len()
+    )];
+    for i in 0..got.len().max(want.len()) {
+        out.push(format!(
+            "    #{i}: got {:?} / want {:?}",
+            got.get(i),
+            want.get(i)
+        ));
+    }
+    out
 }
 
 /// Whether two renders differ in any line's text or styles.
@@ -357,6 +509,7 @@ fn kind_letter(kind: SegmentKind) -> char {
         SegmentKind::Marker => 'M',
         SegmentKind::Border => 'B',
         SegmentKind::Gutter => 'G',
+        SegmentKind::Image => 'I',
     }
 }
 

@@ -34,15 +34,21 @@ struct FlatSeg {
 
 /// Whether a line is prose that should be width-wrapped.
 ///
-/// Code blocks (`CodeBlock`/`Gutter`) and decorative chrome (`Border`) are laid
-/// out by their own renderers and must not be re-wrapped; everything else
-/// (`Text`/`Heading`/`InlineCode`/`Link`/`Marker`) is prose.
+/// Code blocks (`CodeBlock`/`Gutter`), decorative chrome (`Border`) and image
+/// anchors (`Image`) are laid out by their own renderers and must not be
+/// re-wrapped; everything else (`Text`/`Heading`/`InlineCode`/`Link`/`Marker`)
+/// is prose. Wrapping an anchor's caption would invalidate the box geometry
+/// the side channel carries, so an `Image` line never reaches `wrap_prose_line`
+/// (the caption is already truncated to the render width when it is built).
 pub(crate) fn is_prose_line(line: &MarkdownLine) -> bool {
     !line.segments.is_empty()
         && line.segments.iter().all(|s| {
             !matches!(
                 s.kind,
-                SegmentKind::CodeBlock | SegmentKind::Gutter | SegmentKind::Border
+                SegmentKind::CodeBlock
+                    | SegmentKind::Gutter
+                    | SegmentKind::Border
+                    | SegmentKind::Image
             )
         })
 }

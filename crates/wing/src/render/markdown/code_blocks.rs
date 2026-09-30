@@ -6,6 +6,7 @@
 use ratatui::style::Style;
 
 use super::RenderOpts;
+use super::images::ImageOpts;
 use super::parsing::{flush_current_line, prefix_prose_lines, push_blank_line};
 use super::types::{MarkdownLine, MarkdownSegment, MarkdownTheme, SegmentKind};
 use crate::render::diff_highlight::DiffHighlighters;
@@ -38,12 +39,12 @@ pub(crate) struct CodeBlockRenderEnv<'a> {
     /// Render options of the enclosing document — a prose block re-parses
     /// with the same profile, minus the trailing-blank trim (the block's own
     /// end blank is this block's separator).
-    pub(crate) opts: RenderOpts,
+    pub(crate) opts: RenderOpts<'a>,
     /// The orchestrator's markdown renderer, injected so this module can
     /// re-parse a prose block as a nested document without depending on the
     /// parser (see [`render_prose_block`]).
     pub(crate) render_markdown:
-        fn(&str, Style, &MarkdownTheme, Option<u16>, RenderOpts) -> Vec<MarkdownLine>,
+        fn(&str, Style, &MarkdownTheme, Option<u16>, RenderOpts<'_>) -> Vec<MarkdownLine>,
 }
 
 /// Handle an event while inside a code block.
@@ -124,6 +125,11 @@ fn render_prose_block(text: &str, env: &mut CodeBlockRenderEnv<'_>) -> Vec<Markd
         RenderOpts {
             prose_depth: env.opts.prose_depth - 1,
             trim_trailing_blank: false,
+            // Indented blocks are re-parsed and then spliced in with the
+            // enclosing block's prefix, which shifts every column: an anchor
+            // computed here would be misaligned, so nested renders never
+            // produce one (the image keeps the link path — see `images`).
+            images: ImageOpts::off(),
             ..env.opts
         },
     );
@@ -160,6 +166,7 @@ fn render_code_block(state: &CodeBlockState, env: &CodeBlockRenderEnv<'_>) -> Ve
             border_style,
             label,
         )],
+        ..Default::default()
     });
 
     // Determine if this is a diff block.
@@ -298,6 +305,7 @@ fn render_code_block(state: &CodeBlockState, env: &CodeBlockRenderEnv<'_>) -> Ve
             border_style,
             "└────────",
         )],
+        ..Default::default()
     });
 
     lines

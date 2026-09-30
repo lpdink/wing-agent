@@ -21,6 +21,7 @@
 //! the list of accepted boundaries live in `docs/dev/tui-rendering.md`.
 
 pub(crate) mod code_blocks;
+pub mod images;
 pub(crate) mod links;
 pub(crate) mod parsing;
 pub mod profile;
@@ -37,6 +38,24 @@ pub use types::MarkdownSegment;
 pub use types::MarkdownTheme;
 pub use types::SegmentKind;
 pub use types::thinking_segment_style;
+
+// Image anchors (see `images`): the mode, the caller-supplied metadata and
+// the side channel the ui layer reads.
+pub use images::CELL_ASPECT;
+pub use images::IMAGE_EXTENSIONS;
+pub use images::ImageAnchor;
+pub use images::ImageEntry;
+pub use images::ImageMode;
+pub use images::ImageOpts;
+pub use images::ImageShape;
+pub use images::ImageSpan;
+pub use images::MAX_ANCHOR_ROWS;
+pub use images::MAX_IMAGE_PATH_CHARS;
+pub use images::MIN_ANCHOR_ROWS;
+pub use images::PathReject;
+pub use images::anchor_caption;
+pub use images::anchor_rows;
+pub use images::resolve_image_path;
 
 // Link side channel (see `links`): rendered lines + their link spans.
 pub use links::ComposedLines;
@@ -57,8 +76,9 @@ use std::borrow::Cow;
 
 use code_blocks::{CodeBlockRenderEnv, finalize_unclosed_code_block, handle_code_block_event};
 use parsing::{
-    LinkState, ListState, MarkdownContext, append_text, handle_end_tag, handle_start_tag,
-    inline_code_style, push_blank_line, trim_trailing_blank_lines,
+    LinkState, ListState, MarkdownContext, PendingImage, append_text, finish_pending_image,
+    handle_end_tag, handle_start_tag, inline_code_style, push_blank_line,
+    trim_trailing_blank_lines,
 };
 use pulldown_cmark::{Event, Options, Parser};
 use ratatui::style::Style;
@@ -71,8 +91,12 @@ use crate::config::ThemePalette;
 ///
 /// [`Profile`] carries the reasoning-vs-content rendering rules (see its
 /// module docs); code blocks themselves render identically in both.
+///
+/// The `'a` lifetime is the image metadata's: [`RenderOpts::new`] borrows a
+/// shared "images off" value, so every pre-existing call site keeps compiling
+/// (and keeps the pre-image behaviour) unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RenderOpts {
+pub struct RenderOpts<'a> {
     /// Which cell the text belongs to.
     pub profile: Profile,
     /// Remaining nesting budget for indented-as-prose blocks — see
@@ -85,23 +109,32 @@ pub struct RenderOpts {
     /// (paragraph/heading/list/table ends push one; code/HTML do not) —
     /// the block promotion pops it and re-emits it lazily instead.
     pub trim_trailing_blank: bool,
+    /// Image rendering (mode, workspace root, metadata table) — see
+    /// [`images`](self::images).
+    pub images: &'a ImageOpts,
 }
 
-impl Default for RenderOpts {
+impl Default for RenderOpts<'_> {
     fn default() -> Self {
         Self::new(Profile::Content, true)
     }
 }
 
-impl RenderOpts {
+impl<'a> RenderOpts<'a> {
     /// Options for `profile`, with doc-end trimming per `trim_trailing_blank`
-    /// and a fresh prose-nesting budget.
+    /// and a fresh prose-nesting budget. Images stay off.
     pub fn new(profile: Profile, trim_trailing_blank: bool) -> Self {
         Self {
             profile,
             prose_depth: PROSE_DEPTH_LIMIT,
             trim_trailing_blank,
+            images: ImageOpts::off(),
         }
+    }
+
+    /// The same options with `images` in place of the shared "off" value.
+    pub fn with_images<'b>(self, images: &'b ImageOpts) -> RenderOpts<'b> {
+        RenderOpts { images, ..self }
     }
 }
 
@@ -138,12 +171,17 @@ pub fn render_markdown_lines(
     render_markdown_lines_with(text, width, palette, RenderOpts::default())
 }
 
-/// [`render_markdown_lines`] with explicit code-block rendering options.
+/// [`render_markdown_lines`] with explicit rendering options (code blocks and
+/// image anchors).
+///
+/// Image anchors are produced only when `width` is `Some` (the row count is a
+/// function of the render width) and `opts.images` is in `Anchor` mode with a
+/// metadata table that knows the image — see [`images`](self::images).
 pub fn render_markdown_lines_with(
     text: &str,
     width: Option<u16>,
     palette: &ThemePalette,
-    opts: RenderOpts,
+    opts: RenderOpts<'_>,
 ) -> Vec<MarkdownLine> {
     let theme = MarkdownTheme::from_palette(palette);
     let base_style = theme.base;
@@ -251,7 +289,7 @@ fn render_markdown_to_lines(
     base_style: Style,
     theme: &MarkdownTheme,
     available_width: Option<u16>,
-    opts: RenderOpts,
+    opts: RenderOpts<'_>,
 ) -> Vec<MarkdownLine> {
     let parser_options =
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
@@ -268,6 +306,9 @@ fn render_markdown_to_lines(
     let mut code_block: Option<code_blocks::CodeBlockState> = None;
     let mut active_table: Option<TableBuffer> = None;
     let mut link_state: Option<LinkState> = None;
+    // A completed image that may still become an anchor: it is validated (and
+    // dropped) when the line it sits on is flushed — see `parsing`.
+    let mut pending_image: Option<PendingImage> = None;
 
     for event in parser {
         // Code block events are handled separately.
@@ -304,6 +345,8 @@ fn render_markdown_to_lines(
             indented_prose: opts.profile.indented_blocks_are_prose(),
             active_table: &mut active_table,
             link_state: &mut link_state,
+            pending_image: &mut pending_image,
+            images: opts.images,
         };
 
         match event {
@@ -355,6 +398,9 @@ fn render_markdown_to_lines(
     };
     finalize_unclosed_code_block(&mut code_block, &mut code_block_env);
 
+    // The final line (no trailing newline in the source) can hold the last
+    // image of the document: validate its anchor before pushing.
+    finish_pending_image(&mut pending_image, &mut current_line, opts.images, theme);
     if !current_line.segments.is_empty() {
         lines.push(current_line);
     }
@@ -1238,5 +1284,427 @@ mod tests {
         // Should contain code block border.
         assert!(text.contains("┌"), "missing code block border: {text}");
         assert!(text.contains("let x = 1"), "code content missing: {text}");
+    }
+
+    // ============================================================
+    // Image anchors (see `images`)
+    // ============================================================
+
+    /// A metadata table rooted at `/ws`, keyed by the resolved path.
+    fn image_opts(entries: &[(&str, u32, u32)]) -> ImageOpts {
+        ImageOpts::anchor(
+            Some(std::path::PathBuf::from("/ws")),
+            entries
+                .iter()
+                .map(|(path, px_w, px_h)| {
+                    ImageEntry::new(
+                        std::path::PathBuf::from("/ws").join(path),
+                        ImageShape::new(*px_w, *px_h),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// The plot.png table used by most tests (800×600 → 30 rows at width 80).
+    fn plot_opts() -> ImageOpts {
+        image_opts(&[("plot.png", 800, 600)])
+    }
+
+    /// IR fingerprint: everything a caller can observe on a rendered line,
+    /// plus whether it carries an anchor payload.
+    type Fingerprint = Vec<(SegmentKind, String, Option<String>, Style, bool)>;
+
+    fn fingerprint(lines: &[MarkdownLine]) -> Fingerprint {
+        lines
+            .iter()
+            .flat_map(|line| {
+                let anchored = line.image.is_some();
+                line.segments
+                    .iter()
+                    .map(move |seg| {
+                        (
+                            seg.kind,
+                            seg.text.clone(),
+                            seg.link_target.clone(),
+                            seg.style,
+                            anchored,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn render_with(md: &str, width: Option<u16>, opts: RenderOpts<'_>) -> Vec<MarkdownLine> {
+        render_markdown_lines_with(md, width, &dp(), opts)
+    }
+
+    fn content_opts(images: &ImageOpts) -> RenderOpts<'_> {
+        RenderOpts::new(Profile::Content, true).with_images(images)
+    }
+
+    // ── The two-tier rule: Off (or no metadata) == today ─────────────
+
+    /// Every shape of image usage, so the "off" comparison is not vacuous.
+    const IMAGE_SHAPES: &[&str] = &[
+        "![alt](./plot.png)",
+        "![alt](plot.png)",
+        "text ![alt](plot.png) more",
+        "![](./plot.png)",
+        "![a](./plot.png)![b](./plot.png)",
+        "![remote](https://example.com/x.png)",
+        "![txt](notes.txt)",
+        "![escape](../outside.png)",
+        "- ![alt](./plot.png)\n- second",
+        "> ![alt](./plot.png)",
+        "# ![alt](./plot.png)",
+        "```markdown\n![alt](./plot.png)\n```",
+        "<img src=\"./plot.png\">",
+        "![nested ![inner](./plot.png)](./plot.png)",
+        "![alt](./plot.png)\n\n![b](./plot.png)",
+        "![alt](./plot.png) tail",
+    ];
+
+    #[test]
+    fn off_mode_is_identical_to_anchor_mode_without_metadata() {
+        // D2's rendering-layer landing point: with images off — or on but
+        // without a metadata entry — every image renders through the link
+        // path, span for span.
+        for md in IMAGE_SHAPES {
+            let off = render_with(md, Some(80), RenderOpts::new(Profile::Content, true));
+            let anchor = render_with(md, Some(80), content_opts(ImageOpts::off()));
+            let anchor_with_table = render_with(md, Some(80), content_opts(&image_opts(&[])));
+            assert_eq!(
+                fingerprint(&off),
+                fingerprint(&anchor),
+                "off vs anchor(off) for {md:?}"
+            );
+            assert_eq!(
+                fingerprint(&off),
+                fingerprint(&anchor_with_table),
+                "off vs anchor(no metadata) for {md:?}"
+            );
+            assert!(off.iter().all(|l| l.image.is_none()));
+        }
+    }
+
+    #[test]
+    fn off_mode_renders_an_image_as_a_link() {
+        // The concrete pre-image behaviour, pinned: the alt text is the link
+        // label, a bare relative destination is shown in parentheses, and a
+        // local path is hidden.
+        let pairs = render_with(
+            "![alt](plot.png)",
+            Some(80),
+            RenderOpts::new(Profile::Content, true),
+        );
+        let pairs = pairs
+            .into_iter()
+            .flat_map(|l| l.segments)
+            .map(|s| (s.text, s.link_target, s.kind))
+            .collect::<Vec<_>>();
+        // Adjacent same-style link segments merge, so the label and the
+        // shown destination arrive as one segment.
+        assert_eq!(
+            pairs,
+            vec![(
+                "alt (plot.png)".to_string(),
+                Some("plot.png".to_string()),
+                SegmentKind::Link
+            )]
+        );
+        // A `./` destination is a local path: the URL is hidden.
+        let local = render_with(
+            "![alt](./plot.png)",
+            Some(80),
+            RenderOpts::new(Profile::Content, true),
+        )
+        .into_iter()
+        .flat_map(|l| l.segments)
+        .map(|s| s.text)
+        .collect::<Vec<_>>();
+        assert_eq!(local, vec!["alt".to_string()]);
+    }
+
+    // ── Anchors ───────────────────────────────────────────────────
+
+    #[test]
+    fn a_standalone_image_becomes_an_anchor_line() {
+        let lines = render_with(
+            "before\n\n![销售趋势](./plot.png)\n\nafter",
+            Some(80),
+            content_opts(&plot_opts()),
+        );
+        let anchored = lines
+            .iter()
+            .find(|line| line.image.is_some())
+            .expect("no anchor produced");
+        // One IR line: the caption. The cover rows are expanded at compose
+        // time, so nothing here changes the markdown layer's line count.
+        assert_eq!(anchored.segments.len(), 1);
+        assert_eq!(anchored.segments[0].kind, SegmentKind::Image);
+        assert_eq!(anchored.segments[0].text, "▢ 销售趋势 · 800×600");
+        let anchor = anchored.image.as_deref().expect("payload");
+        assert_eq!(anchor.path, std::path::PathBuf::from("/ws/plot.png"));
+        assert_eq!(anchor.alt, "销售趋势");
+        assert_eq!(anchor.shape, ImageShape::new(800, 600));
+        assert_eq!(anchor.cols, 80);
+        assert_eq!(anchor.rows, 30);
+        // Exactly one anchored line in the document.
+        assert_eq!(lines.iter().filter(|l| l.image.is_some()).count(), 1);
+    }
+
+    #[test]
+    fn anchor_does_not_add_ir_lines() {
+        // The IR stays one line per markdown line: the cover rows exist only
+        // after the compose (which is what keeps every line-count-sensitive
+        // rule of this layer — trailing-blank trimming, blank dedup, the
+        // streaming block separators — untouched).
+        let md = "before\n\n![alt](./plot.png)\n\nafter";
+        let off = render_with(md, Some(80), RenderOpts::new(Profile::Content, true));
+        let on = render_with(md, Some(80), content_opts(&plot_opts()));
+        // Same number of IR lines with and without the anchor — the only
+        // difference is that one line is a caption with a payload.
+        assert_eq!(off.len(), on.len());
+        assert_eq!(
+            off.len(),
+            on.iter().filter(|line| line.image.is_none()).count() + 1
+        );
+    }
+
+    #[test]
+    fn anchor_rows_are_the_pure_function_of_width_and_shape() {
+        for (px_w, px_h) in [(800, 600), (1920, 1080), (400, 400), (800, 6000)] {
+            let opts = image_opts(&[("plot.png", px_w, px_h)]);
+            let shape = ImageShape::new(px_w, px_h);
+            for width in [20u16, 40, 80, 118] {
+                let lines = render_with("![alt](./plot.png)", Some(width), content_opts(&opts));
+                let anchor = lines
+                    .iter()
+                    .find_map(|line| line.image.as_deref())
+                    .expect("anchor");
+                assert_eq!(
+                    anchor.rows,
+                    crate::render::markdown::anchor_rows(width, shape),
+                    "{px_w}x{px_h} at width {width}"
+                );
+                assert_eq!(anchor.cols, width);
+            }
+        }
+    }
+
+    #[test]
+    fn anchor_rows_do_not_depend_on_the_profile() {
+        // The row count is a layout fact, not a rendering rule: both profiles
+        // must agree, or a cell's height would change with the view mode.
+        let md = "![alt](./plot.png)";
+        let content = render_with(md, Some(80), content_opts(&plot_opts()))
+            .into_iter()
+            .find_map(|line| line.image.map(|a| a.rows));
+        let thinking = render_with(
+            md,
+            Some(80),
+            RenderOpts::new(Profile::Thinking, true).with_images(&plot_opts()),
+        )
+        .into_iter()
+        .find_map(|line| line.image.map(|a| a.rows));
+        assert_eq!(content, Some(30));
+        assert_eq!(thinking, Some(30));
+    }
+
+    #[test]
+    fn anchor_uses_the_alt_text_or_the_file_name_in_the_caption() {
+        let lines = render_with("![](./plot.png)", Some(80), content_opts(&plot_opts()));
+        let caption = lines
+            .iter()
+            .find(|line| line.image.is_some())
+            .expect("anchor")
+            .to_plain();
+        assert_eq!(caption, "▢ plot.png · 800×600");
+    }
+
+    #[test]
+    fn anchor_caption_fits_even_a_narrow_render_width() {
+        for width in [4u16, 8, 12, 20] {
+            let lines = render_with(
+                "![一个相当长的中文替代文本](./plot.png)",
+                Some(width),
+                content_opts(&plot_opts()),
+            );
+            let line = lines.iter().find(|l| l.image.is_some()).expect("anchor");
+            assert!(
+                line.width() <= usize::from(width),
+                "caption wider than the render width at {width}: {:?}",
+                line.to_plain()
+            );
+        }
+    }
+
+    #[test]
+    fn anchors_need_a_render_width() {
+        // Without a width there is no row count — the width-less API keeps
+        // the link path (documented in `render_markdown_lines_with`).
+        let lines = render_with("![alt](./plot.png)", None, content_opts(&plot_opts()));
+        assert!(lines.iter().all(|line| line.image.is_none()));
+    }
+
+    #[test]
+    fn anchors_need_metadata_and_a_usable_shape() {
+        for opts in [
+            image_opts(&[]),                        // no entry
+            image_opts(&[("other.png", 800, 600)]), // another path
+            image_opts(&[("plot.png", 0, 600)]),    // degenerate
+            image_opts(&[("plot.png", 800, 0)]),    // degenerate
+        ] {
+            let lines = render_with("![alt](./plot.png)", Some(80), content_opts(&opts));
+            assert!(
+                lines.iter().all(|line| line.image.is_none()),
+                "anchor produced without usable metadata: {opts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn anchor_paths_must_pass_the_policy() {
+        // Every rejected destination degrades to the link path, and the
+        // rendering is then exactly the "off" rendering.
+        for md in [
+            "![alt](https://example.com/plot.png)",
+            "![alt](data:image/png;base64,AAAA)",
+            "![alt](notes.txt)",
+            "![alt](../outside.png)",
+            "![alt](/etc/../etc/plot.png\u{0})",
+            "![alt](~/plot.png)",
+            "![alt](PLOT.TXT)",
+        ] {
+            let off = render_with(md, Some(80), RenderOpts::new(Profile::Content, true));
+            let on = render_with(md, Some(80), content_opts(&plot_opts()));
+            assert_eq!(fingerprint(&off), fingerprint(&on), "{md:?}");
+            assert!(on.iter().all(|line| line.image.is_none()), "{md:?}");
+        }
+        // …while a bare relative path that *does* resolve is anchored.
+        let bare = render_with("![alt](plot.png)", Some(80), content_opts(&plot_opts()));
+        assert_eq!(
+            bare.iter().filter(|line| line.image.is_some()).count(),
+            1,
+            "a workspace-relative path with metadata must anchor"
+        );
+    }
+
+    #[test]
+    fn anchors_are_standalone_top_level_images_only() {
+        // Anything else keeps the link rendering: the anchor box's geometry
+        // is only valid at column 0 of its own line.
+        let cases: &[(&str, &str)] = &[
+            ("leading text", "text ![alt](./plot.png)"),
+            ("trailing text", "![alt](./plot.png) trailing"),
+            ("two on a line", "![a](./plot.png)![b](./plot.png)"),
+            ("list item", "- ![alt](./plot.png)"),
+            ("ordered item", "1. ![alt](./plot.png)"),
+            ("nested list item", "- parent\n  - ![alt](./plot.png)"),
+            ("blockquote", "> ![alt](./plot.png)"),
+            ("nested blockquote", "> > ![alt](./plot.png)"),
+            ("heading", "# ![alt](./plot.png)"),
+            ("inside a link", "[![alt](./plot.png)](./other.png)"),
+            ("table cell", "| h |\n|---|\n| ![alt](./plot.png) |"),
+            ("escaped", "\\![alt](./plot.png)"),
+        ];
+        for (name, md) in cases {
+            let lines = render_with(md, Some(80), content_opts(&plot_opts()));
+            assert!(
+                lines.iter().all(|line| line.image.is_none()),
+                "{name} was anchored: {md:?}"
+            );
+            // …and the rendering is the link path, i.e. today's.
+            let off = render_with(md, Some(80), RenderOpts::new(Profile::Content, true));
+            assert_eq!(fingerprint(&off), fingerprint(&lines), "{name}");
+        }
+    }
+
+    #[test]
+    fn anchors_never_come_from_code_blocks_html_or_nested_prose() {
+        // A fenced block's content is text, an HTML `<img>` is text, and a
+        // nested (indented) prose render has a shifted column space.
+        for md in [
+            "```markdown\n![alt](./plot.png)\n```",
+            "<img src=\"./plot.png\">",
+        ] {
+            let lines = render_with(md, Some(80), content_opts(&plot_opts()));
+            assert!(lines.iter().all(|line| line.image.is_none()), "{md:?}");
+        }
+        // Thinking profile: an indented block is re-parsed as prose and then
+        // prefixed — its images stay links.
+        let thinking = render_with(
+            "note:\n\n    ![alt](./plot.png)\n",
+            Some(80),
+            RenderOpts::new(Profile::Thinking, true).with_images(&plot_opts()),
+        );
+        assert!(
+            thinking.iter().all(|line| line.image.is_none()),
+            "anchored inside a nested prose block: {thinking:?}"
+        );
+    }
+
+    #[test]
+    fn a_second_image_on_the_same_line_drops_the_first_anchor() {
+        // The first image is alone when it closes, but by the time its line is
+        // flushed the second one has joined it — the segment-count check drops
+        // the pending anchor.
+        let lines = render_with(
+            "![a](./plot.png) ![b](./plot.png)",
+            Some(80),
+            content_opts(&plot_opts()),
+        );
+        assert!(lines.iter().all(|line| line.image.is_none()));
+    }
+
+    #[test]
+    fn anchor_boundaries_stay_honest() {
+        // Empty alt, empty path, absurd alt/path, control characters and a
+        // zero-width render: none of them may panic, and each lands on the
+        // side of the rule its metadata allows.
+        let long_alt = "长".repeat(400);
+        let long_path = format!("{}.png", "p".repeat(600));
+        let cases = [
+            // (markdown, should anchor)
+            ("![](./plot.png)", true),
+            ("![alt]()", false),
+            ("![alt](./plot.txt)", false),
+            ("![alt](./plot.png\u{7})", false),
+            (&format!("![{long_alt}](./plot.png)"), true),
+            (&format!("![alt]({long_path})"), false),
+        ];
+        for (md, should_anchor) in cases {
+            let lines = render_with(md, Some(40), content_opts(&plot_opts()));
+            assert_eq!(
+                lines.iter().any(|line| line.image.is_some()),
+                should_anchor,
+                "{md:?}"
+            );
+            // Whatever the verdict, the caption/alt text never overflows.
+            for line in &lines {
+                assert!(line.width() <= 40, "over-wide line for {md:?}");
+            }
+        }
+        // A zero-width render produces no anchor (there is nowhere to draw).
+        let zero = render_with("![alt](./plot.png)", Some(0), content_opts(&plot_opts()));
+        assert!(zero.iter().all(|line| line.image.is_none()));
+    }
+
+    #[test]
+    fn anchors_are_per_document_not_per_cell_prefix() {
+        // Two anchors in one document both carry their own geometry.
+        let lines = render_with(
+            "![a](./plot.png)\n\ntext\n\n![b](./plot.png)",
+            Some(80),
+            content_opts(&plot_opts()),
+        );
+        let anchors = lines
+            .iter()
+            .filter_map(|line| line.image.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(anchors.len(), 2);
+        assert!(anchors.iter().all(|a| a.rows == 30 && a.cols == 80));
     }
 }

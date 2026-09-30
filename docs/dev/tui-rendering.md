@@ -23,7 +23,10 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 |---|---|
 | `--profile thinking\|content` | reasoning 视角 / 助手正文视角（两者只差两条规则，见第二节） |
 | `-w <N>` / `--range A:B` | 渲染宽度 / 只看输出的某几行 |
-| `-k` / `--kinds` | 打印 compose 之前的 IR：每行标出 `T` 正文、`C` 代码块、`B` 边框、`G` 行号、`M` 列表符、`i` 行内代码——**「这行为什么是代码」看这个视图** |
+| `-k` / `--kinds` | 打印 compose 之前的 IR：每行标出 `T` 正文、`C` 代码块、`B` 边框、`G` 行号、`M` 列表符、`i` 行内代码、`I` 图片锚点 caption——**「这行为什么是代码」看这个视图** |
+| `--images` | 打开图片锚点（默认走链接路径，见第六节） |
+| `--workspace <DIR>` | 相对图片路径的解析根（默认当前目录） |
+| `--shape <P>=<W>x<H>` | 独立的图片元数据（可重复，`P` 按 markdown 里写的样子给），替代 chat view 的头信息探测 |
 | `--chunk N` | 按 N 字节喂进 `StreamingRender`（模拟流式） |
 | `--no-finalize` | 保留流式静息态（不跑回合结束的对账渲染） |
 | `--check` | 流式静息态、finalize 后，各自与 `full_lines` 参考渲染逐 span 比对 |
@@ -59,6 +62,58 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 | reasoning 里 `（```rust）` 这类行内引用没有变成代码块 | `Thinking` 刻意不做行内围栏归一化（第二节） | profile 语义 |
 | reasoning 里 4 空格缩进的正文没有代码块样式 | `Thinking` 刻意按正文渲染（第二节） | profile 语义 |
 
+## 六、图片锚点（`Anchor` 模式）
+
+`![alt](path)` 有两档（总任务书 D2 的两档降级），渲染层只负责「留不留位、留几行」：
+
+| 档 | 什么时候 | 渲染成什么 |
+|---|---|---|
+| **链接路径**（存量行为） | 模式 `Off`；或 `Anchor` 但**元数据缺失 / 路径被拒 / 图片不独占一行** | 与今天逐 span 完全相同：alt 当链接文本（远端 URL 会补 ` (url)`），点击用系统查看器打开 |
+| **锚点** | `Anchor` 且上面两条都不成立 | `rows` 行占位：第 0 行是可复制的 caption `▢ {alt 或文件名} · {W}×{H}`，其余是**覆盖行**（图片画在上面；图没画出来时它就是可见兜底） |
+
+**行数是纯函数**（`render/markdown/images.rs`）：
+
+```text
+rows = clamp(round(W / (CELL_ASPECT × R)), MIN_ANCHOR_ROWS, MAX_ANCHOR_ROWS)
+R            = px_w / px_h                （来自图片头，不解码）
+CELL_ASPECT  = 2.0                        （字符格 高:宽 ≈ 2:1，8×16 字体）
+MIN/MAX      = 1 / 36
+W            = markdown 渲染宽 = 单元格宽 − 2 列前缀（也就是锚点盒子的 cols）
+```
+
+`rows` **不得**依赖终端图形能力或像素查询结果：它进 `CachedCell` 的高度缓存，也进第三节的流式不变量，一旦依赖能力就会两边同时打穿。数值示例（`W=118`）：800×600 → 44 → 上限 **36**；1920×1080 → **33**；400×400 → 59 → 36；800×6000 → 442 → 36；2000×20 → **1**。
+
+**元数据从哪来**：渲染层零 I/O。调用方（chat view，背后是 `ui::image::ImageStore` 的头信息探测）把像素尺寸填成 `ImageOpts { mode, workspace, shapes }`，表的键 = `resolve_image_path` 的归一化产物；表里没有这条路径（未知 / 探测失败 / 不是图）就退回链接路径。
+
+**路径策略**（纯词法：不 stat、不 canonicalize、不解析符号链接——这是显示边界不是安全边界）：
+
+- 接受：workspace 相对路径（`.`/`..`/重复分隔符折掉）、绝对路径、`file://`（`file://host/…` 除外）；
+- 拒绝：空、控制字符（防转义注入）、超过 512 字符、远程 scheme（`http:` / `https:` / `data:` / `ftp:` …）、`~`（要读环境变量）、没有 workspace 时的相对路径、`..` 越出 workspace、扩展名不在 `png jpg jpeg gif webp bmp`（大小写不敏感）。
+
+拒绝不是错误：该图片走链接路径。
+
+**侧信道**：`ImageSpan { line, column, cols, rows, path, alt, px_w, px_h }`，与 `LinkSpan` 同构——逐行平行的 `Vec<Vec<ImageSpan>>`，`column` 与 `LinkSpan::start` 同一坐标系（行内显示列，含 2 列 cell 前缀）。它随 `ComposedLines`（缓存态）与 `StreamingRender`（流式态）一路带到 `ui/cached_cell.rs` 的 `CellFrame`（`compute_cell_frame`，`CellLines` 的超集）；`rows_exact == false`（同一 cell 里存在超宽行，见 `tui-link-open` 的同一判据）时行号算术不成立，**不要**按锚点画图。锚点几何 = `Rect(column, line, cols, rows)`，`line` 是 cell 行数组下标，屏幕行号由调用方加 cell 的 y 偏移。
+
+**只在「独占一行的顶层图片」产锚点**——宁可降级也不产出错位的锚点：行内（前后还有文字）、一行多张、列表项/引用块/表格单元格里、标题里、链接里、代码围栏里、HTML `<img>`、缩进（thinking）块里，全部走链接路径。缩进块是「嵌套重解析 + 二次加前缀」，列坐标会整体偏移，因此嵌套渲染显式关了锚点（见 `code_blocks.rs` 的 `ImageOpts::off()`）。
+
+**复现**：
+
+```bash
+# 单次渲染 + 锚点几何（末尾打印 line/col/cols/rows）
+cargo run -q -p wing --example render_probe -- --profile content \
+    --images --workspace . --shape './plot.png=800x600' --plain /tmp/fig.md
+
+# IR 视图：锚点行是 I（payload 只占一行，覆盖行在 compose 里展开）
+cargo run -q -p wing --example render_probe -- --images --workspace . \
+    --shape './plot.png=800x600' --kinds /tmp/fig.md
+
+# 流式对账（含锚点几何）：resting 必须与参考渲染一致
+cargo run -q -p wing --example render_probe -- --images --workspace . \
+    --shape './plot.png=800x600' --chunk 7 --check /tmp/fig.md
+```
+
+`crates/wing/tests/stream_render_reconcile.rs` 的矩阵同时跑 `Off` 与 `Anchor` 两组（文本 + 样式 + 链接 + 锚点几何逐项对账）。
+
 ## 五、症状 → 先看哪里
 
 | 症状 | 先做 |
@@ -67,3 +122,5 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 | 「流式和终态不一样 / 内容闪一下变了」 | `--chunk 1 --check`（分块边界是最容易出问题的地方） |
 | 「代码块颜色不对 / 没高亮」 | `--kinds` 看是否真有 `C`；没语言标签的围栏本来就是单色 |
 | 「reasoning 颜色和正文不同」 | 预期行为：正文用 thinking 色，代码/链接/边框保留主题色 |
+| 「这段 `![]()` 怎么没变成图 / 图怎么没占位」 | 第六节的四道闸：模式是否 `Anchor`、路径是否被拒、`--shape` 表里有没有这条路径、图片是否独占一行（`--kinds` 看该行是不是 `I`） |
+| 「图占了 36 行，太多了」 | `MAX_ANCHOR_ROWS`（`images.rs`）：长图的上限保护；调它等于改布局契约，需同步矩阵 |

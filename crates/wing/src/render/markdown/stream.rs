@@ -89,7 +89,10 @@ use ratatui::text::{Line, Span};
 use syntect::easy::HighlightLines;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::links::{LinkSpan, compose_lines, line_link_spans};
+use super::images::{
+    ImageAnchor, ImageOpts, ImageSpan, cover_span, image_side_channel, is_cover_span,
+};
+use super::links::{ComposedLines, LinkSpan, compose_lines, line_link_spans};
 use super::profile::Profile;
 use super::types::{
     MarkdownLine, MarkdownSegment, MarkdownTheme, SegmentKind, thinking_segment_style,
@@ -228,6 +231,73 @@ struct CodeFlat {
 }
 
 // ============================================================
+// FlatLines — composed lines and their side channels
+// ============================================================
+
+/// The composed lines of a streaming cell, with the side channels that must
+/// stay index-parallel to them: the markdown link spans (OSC8 injection and
+/// click hit-testing) and the image anchors (the drawing layer).
+///
+/// Every mutation goes through this type, so the three vectors cannot drift
+/// apart — a `truncate` that missed one of them would silently misplace every
+/// link and every picture below it.
+#[derive(Default)]
+struct FlatLines {
+    lines: Vec<Line<'static>>,
+    /// `links[i]` belongs to `lines[i]` (empty when the line has no link).
+    links: Vec<Vec<LinkSpan>>,
+    /// `images[i]` belongs to `lines[i]` (empty unless the line opens an
+    /// anchor).
+    images: Vec<Vec<ImageSpan>>,
+}
+
+impl FlatLines {
+    fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.lines.truncate(len);
+        self.links.truncate(len);
+        self.images.truncate(len);
+    }
+
+    /// Append the cell's trailing blank line (no side channels).
+    fn push_blank(&mut self) {
+        self.lines.push(Line::from(""));
+        self.links.push(Vec::new());
+        self.images.push(Vec::new());
+        self.assert_parallel();
+    }
+
+    /// Replace the whole buffer (used by `finalize`).
+    fn set(
+        &mut self,
+        lines: Vec<Line<'static>>,
+        links: Vec<Vec<LinkSpan>>,
+        images: Vec<Vec<ImageSpan>>,
+    ) {
+        self.lines = lines;
+        self.links = links;
+        self.images = images;
+        self.assert_parallel();
+    }
+
+    fn slices(&self) -> (&[Line<'static>], &[Vec<LinkSpan>], &[Vec<ImageSpan>]) {
+        (&self.lines, &self.links, &self.images)
+    }
+
+    fn assert_parallel(&self) {
+        debug_assert_eq!(self.links.len(), self.lines.len());
+        debug_assert_eq!(self.images.len(), self.lines.len());
+    }
+}
+
+// ============================================================
 // StreamingRender
 // ============================================================
 
@@ -244,14 +314,14 @@ pub struct StreamingRender {
     /// for a stream that goes a long way without a newline.
     norm_cursor: usize,
     split: Splitter,
-    /// Cell-final lines: promoted closed blocks + separators, then the
-    /// tail and one trailing cell blank (managed by `sync`).
-    flat: Vec<Line<'static>>,
-    /// Link spans of every `flat` line (parallel; empty when a line has no
-    /// link). The markdown target is dropped by `Line::from`, so it travels
-    /// beside the lines — the widget needs it to inject OSC8 and to hit-test
-    /// clicks (`tui-link-open`).
-    links: Vec<Vec<LinkSpan>>,
+    /// Cell-final lines plus their side channels: promoted closed blocks +
+    /// separators, then the tail and one trailing cell blank (managed by
+    /// `sync`).
+    flat_lines: FlatLines,
+    /// Image options the cell is rendering with — owned, because the engine
+    /// is long-lived and has to notice a metadata change (a late probe
+    /// changes the row count, which forces a rebuild).
+    image_opts: ImageOpts,
     /// Length of the promoted (immutable) prefix of `flat` — including the
     /// open fenced block's composed lines (top border + completed body
     /// lines), which are stable in exactly the same sense.
@@ -278,6 +348,11 @@ pub struct StreamingRender {
 
 impl StreamingRender {
     pub fn new(profile: Profile) -> Self {
+        Self::with_images(profile, ImageOpts::default())
+    }
+
+    /// [`new`](Self::new) with image anchors configured (see [`ImageOpts`]).
+    pub fn with_images(profile: Profile, images: ImageOpts) -> Self {
         Self {
             profile,
             buf: String::new(),
@@ -289,8 +364,8 @@ impl StreamingRender {
                 list_item_has_content: false,
                 closed: Vec::new(),
             },
-            flat: Vec::new(),
-            links: Vec::new(),
+            flat_lines: FlatLines::default(),
+            image_opts: images,
             stable_len: 0,
             pending_sep: false,
             tail_sep: false,
@@ -304,6 +379,25 @@ impl StreamingRender {
 
     pub fn profile(&self) -> Profile {
         self.profile
+    }
+
+    /// The image options this engine renders with.
+    pub fn image_opts(&self) -> &ImageOpts {
+        &self.image_opts
+    }
+
+    /// Adopt new image options.
+    ///
+    /// Metadata arrives asynchronously (a header probe finishing), and it
+    /// changes how many rows an anchor reserves — so a change invalidates
+    /// every composed line and forces a full rebuild at the next render, the
+    /// same mechanism a width change uses.
+    pub fn set_image_opts(&mut self, images: ImageOpts) {
+        if self.image_opts == images {
+            return;
+        }
+        self.image_opts = images;
+        self.width = None;
     }
 
     pub fn is_finalized(&self) -> bool {
@@ -334,7 +428,7 @@ impl StreamingRender {
     /// every line is guaranteed ≤ `width` display columns (over-wide
     /// lines are hard-wrapped) — ready for direct blitting.
     pub fn lines(&mut self, width: u16, palette: &ThemePalette) -> &[Line<'static>] {
-        self.lines_and_links(width, palette).0
+        self.composed(width, palette).lines
     }
 
     /// [`lines`](Self::lines) plus the link spans of every returned line.
@@ -345,25 +439,44 @@ impl StreamingRender {
         width: u16,
         palette: &ThemePalette,
     ) -> (&[Line<'static>], &[Vec<LinkSpan>]) {
+        let rendered = self.composed(width, palette);
+        (rendered.lines, rendered.links)
+    }
+
+    /// The cell's composed lines with **both** side channels: link spans and
+    /// image anchors, both index-aligned with `lines`.
+    ///
+    /// This is the accessor the ui layer wants: [`lines`](Self::lines) and
+    /// [`lines_and_links`](Self::lines_and_links) are narrow views of it.
+    pub fn composed(&mut self, width: u16, palette: &ThemePalette) -> StreamLines<'_> {
         if self.finalized && self.width == Some(width) {
-            return (&self.flat, &self.links);
+            return self.stream_lines();
         }
         if self.width != Some(width) {
             // First render at this width (or a width change): full
             // deterministic rebuild from the buffer.
             self.rebuild(width, palette);
-            return (&self.flat, &self.links);
+            return self.stream_lines();
         }
-        if !self.dirty {
-            return (&self.flat, &self.links);
+        if self.dirty {
+            self.sync(width, palette);
         }
-        self.sync(width, palette);
-        (&self.flat, &self.links)
+        self.stream_lines()
+    }
+
+    /// The current buffer's slices, without syncing.
+    fn stream_lines(&self) -> StreamLines<'_> {
+        let (lines, links, images) = self.flat_lines.slices();
+        StreamLines {
+            lines,
+            links,
+            images,
+        }
     }
 
     /// Height in terminal rows — valid after the latest `lines()` call.
     pub fn height(&self) -> usize {
-        self.flat.len()
+        self.flat_lines.len()
     }
 
     /// Terminal: replace the incremental state with the reference full
@@ -371,11 +484,10 @@ impl StreamingRender {
     ///
     /// After finalize the cell must not receive further deltas.
     pub fn finalize(&mut self, width: u16, palette: &ThemePalette) {
-        let (lines, links) = full_lines_with_links(&self.buf, width, self.profile, palette);
-        self.flat = lines;
-        self.links = links;
-        self.stable_len = self.flat.len();
-        debug_assert_eq!(self.links.len(), self.flat.len());
+        let composed = full_render(&self.buf, width, self.profile, palette, &self.image_opts);
+        let (lines, links, images) = composed.into_parts();
+        self.flat_lines.set(lines, links, images);
+        self.stable_len = self.flat_lines.len();
         self.pending_sep = false;
         self.tail_sep = false;
         self.code_tail = None;
@@ -397,7 +509,8 @@ impl StreamingRender {
     fn rebuild(&mut self, width: u16, palette: &ThemePalette) {
         let buf = std::mem::take(&mut self.buf);
         let profile = self.profile;
-        *self = StreamingRender::new(profile);
+        let images = std::mem::take(&mut self.image_opts);
+        *self = StreamingRender::with_images(profile, images);
         self.buf = buf;
         self.scan();
         // The buffer was already fence-normalized as it was appended.
@@ -426,16 +539,14 @@ impl StreamingRender {
         //    region (below it is promoted, which re-renders it whole).
         if !self.split.closed.is_empty() {
             drop_code_flat(
-                &mut self.flat,
-                &mut self.links,
+                &mut self.flat_lines,
                 &mut self.stable_len,
                 &mut self.code_flat,
             );
         }
 
         // 1) Promote newly-closed blocks (in order).
-        self.flat.truncate(self.stable_len);
-        self.links.truncate(self.stable_len);
+        self.flat_lines.truncate(self.stable_len);
         if std::mem::take(&mut self.tail_sep) {
             // The tail is about to be re-rendered and may have collapsed
             // since — re-derive the separator instead of keeping the last
@@ -445,13 +556,7 @@ impl StreamingRender {
         let closed = std::mem::take(&mut self.split.closed);
         for block in closed {
             let emitted_sep = if self.pending_sep {
-                push_separator(
-                    &mut self.flat,
-                    &mut self.links,
-                    width,
-                    palette,
-                    self.profile,
-                );
+                push_separator(&mut self.flat_lines, width, palette, self.profile);
                 self.pending_sep = false;
                 true
             } else {
@@ -464,7 +569,7 @@ impl StreamingRender {
                     &slice,
                     &MarkdownTheme::from_palette(palette),
                 ),
-                None => render_block(&slice, width, self.profile, palette),
+                None => render_block(&slice, width, self.profile, palette, &self.image_opts),
             };
             // The renderer's trailing blank IS the separator signal.
             let sep = md_lines.last().is_some_and(|l| l.segments.is_empty());
@@ -480,18 +585,11 @@ impl StreamingRender {
                 self.pending_sep = sep && !emitted_sep;
                 continue;
             }
-            compose_into(
-                &mut self.flat,
-                &mut self.links,
-                md_lines,
-                width,
-                palette,
-                self.profile,
-            );
+            compose_into(&mut self.flat_lines, md_lines, width, palette, self.profile);
             self.pending_sep = sep;
         }
-        self.stable_len = self.flat.len();
-        debug_assert_eq!(self.links.len(), self.flat.len());
+        self.stable_len = self.flat_lines.len();
+        self.flat_lines.assert_parallel();
 
         // 2) Render the active tail (doc-end semantics: trailing blanks
         // trimmed, matching the full render at the same text).
@@ -506,37 +604,28 @@ impl StreamingRender {
             // diff fences): re-render the tail slice. Diff fences render
             // through the generic path because their output is whole-block
             // (file summaries, metadata stripping via `group_diff_by_file`).
-            let md_lines = render_generic(&self.buf[tail_start..], width, self.profile, palette);
+            let md_lines = render_generic(
+                &self.buf[tail_start..],
+                width,
+                self.profile,
+                palette,
+                &self.image_opts,
+            );
             // Emit the pending separator only when the tail actually
             // renders content (a blank-run tail keeps it pending — the
             // next block will trigger it). The separator is stable from
             // the moment it is emitted — fold it into the stable prefix
             // so the next sync's truncate keeps it.
             if !md_lines.is_empty() && self.pending_sep {
-                push_separator(
-                    &mut self.flat,
-                    &mut self.links,
-                    width,
-                    palette,
-                    self.profile,
-                );
+                push_separator(&mut self.flat_lines, width, palette, self.profile);
                 self.pending_sep = false;
                 self.tail_sep = true;
             }
-            compose_into(
-                &mut self.flat,
-                &mut self.links,
-                md_lines,
-                width,
-                palette,
-                self.profile,
-            );
+            compose_into(&mut self.flat_lines, md_lines, width, palette, self.profile);
         }
 
         // 3) Cell trailing blank (matches the non-streaming cell renders).
-        self.flat.push(Line::from(""));
-        self.links.push(Vec::new());
-        debug_assert_eq!(self.links.len(), self.flat.len());
+        self.flat_lines.push_blank();
     }
 
     /// Sync the tail when it is an unclosed fenced code block backed by a
@@ -560,8 +649,7 @@ impl StreamingRender {
             rewrite_gutters(&mut cache, number_width);
             cache.gutter_width = number_width;
             drop_code_flat(
-                &mut self.flat,
-                &mut self.links,
+                &mut self.flat_lines,
                 &mut self.stable_len,
                 &mut self.code_flat,
             );
@@ -572,14 +660,13 @@ impl StreamingRender {
             // after promotion / gutter growth): the block's separator,
             // then the top border — both stable from here on.
             if self.pending_sep {
-                push_separator(&mut self.flat, &mut self.links, width, palette, profile);
+                push_separator(&mut self.flat_lines, width, palette, profile);
                 self.pending_sep = false;
                 self.stable_len += 1;
             }
-            let start = self.flat.len();
+            let start = self.flat_lines.len();
             compose_into(
-                &mut self.flat,
-                &mut self.links,
+                &mut self.flat_lines,
                 std::iter::once(code_top_border(has_language, cache.lang.as_deref(), &theme)),
                 width,
                 palette,
@@ -595,8 +682,7 @@ impl StreamingRender {
         let composed = self.code_flat.as_ref().expect("just ensured").body_lines;
         if composed < cache.rendered.len() {
             compose_into(
-                &mut self.flat,
-                &mut self.links,
+                &mut self.flat_lines,
                 cache.rendered[composed..].iter().cloned(),
                 width,
                 palette,
@@ -605,7 +691,7 @@ impl StreamingRender {
             self.code_flat.as_mut().expect("just ensured").body_lines = cache.rendered.len();
         }
         // The composed block prefix (border + completed lines) is stable.
-        self.stable_len = self.flat.len();
+        self.stable_len = self.flat_lines.len();
 
         // Transient: the provisional tail (a trailing blank run and/or the
         // in-flight partial line — see `fill_code_cache`), rendered through a
@@ -620,8 +706,7 @@ impl StreamingRender {
             let md =
                 render_code_line_stateless(line, number, number_width, &theme, pending_hl.as_mut());
             compose_into(
-                &mut self.flat,
-                &mut self.links,
+                &mut self.flat_lines,
                 std::iter::once(md),
                 width,
                 palette,
@@ -629,8 +714,7 @@ impl StreamingRender {
             );
         }
         compose_into(
-            &mut self.flat,
-            &mut self.links,
+            &mut self.flat_lines,
             std::iter::once(code_bottom_border(&theme)),
             width,
             palette,
@@ -638,7 +722,7 @@ impl StreamingRender {
         );
 
         self.code_tail = Some(cache);
-        debug_assert_eq!(self.links.len(), self.flat.len());
+        self.flat_lines.assert_parallel();
     }
 
     /// Apply the fence-on-own-line normalization to unchecked bytes.
@@ -913,8 +997,7 @@ impl StreamingRender {
 /// and a `&mut self.flat` at the same time — the incremental fenced-code
 /// tail must read the buffer while appending lines.
 fn compose_into<I>(
-    flat: &mut Vec<Line<'static>>,
-    links: &mut Vec<Vec<LinkSpan>>,
+    flat: &mut FlatLines,
     md_lines: I,
     width: u16,
     palette: &ThemePalette,
@@ -929,11 +1012,18 @@ fn compose_into<I>(
     // empty flat buffer — the tail is re-composed every frame, so
     // "first" must be positional (flat empty), not a sticky flag.
     let cell_first_pending = flat.is_empty();
-    let flat_ends_blank = flat
-        .last()
-        .is_some_and(|l| l.spans.iter().all(|s| s.content.trim().is_empty()));
+    // "Did the previous content already end this blank run?" — a markdown
+    // blank line, not an anchor cover row (which is blank-looking but is part
+    // of the anchor block above it).
+    let flat_ends_blank = flat.lines.last().is_some_and(|line| {
+        !line.spans.iter().any(is_cover_span)
+            && line.spans.iter().all(|s| s.content.trim().is_empty())
+    });
     let mut out = Vec::new();
     let mut out_links = Vec::new();
+    // Image anchors, riding on their caption row so the hard wrap below can
+    // move them with the line they belong to (see `hard_wrap_lines_with_links`).
+    let mut out_images: Vec<Option<ImageAnchor>> = Vec::new();
     for (i, md_line) in md_lines.into_iter().enumerate() {
         if flat_ends_blank && i == 0 && md_line.segments.is_empty() && !flat.is_empty() {
             // Dedup: the previous content already ended this blank run.
@@ -952,6 +1042,8 @@ fn compose_into<I>(
         spans.push(prefix);
         // Same 2-column prefix on every line — the link columns shift by it.
         out_links.push(shift_spans(line_link_spans(&md_line), PREFIX_WIDTH));
+        let anchor = md_line.image.map(|boxed| *boxed);
+        let anchor_rows = anchor.as_ref().map_or(1, |anchor| anchor.rows);
         for seg in md_line.segments {
             let style = match profile {
                 Profile::Thinking => thinking_segment_style(seg.kind, seg.style, thinking_style),
@@ -960,10 +1052,36 @@ fn compose_into<I>(
             spans.push(Span::styled(seg.text, style));
         }
         out.push(Line::from(spans));
+        out_images.push(anchor);
+        // An anchor's cover rows: the caption row is already pushed, these
+        // are the blank rows the picture is painted over. Never the cell's
+        // first line, so they take the continuation prefix.
+        if anchor_rows > 1 {
+            for _ in 1..anchor_rows {
+                let prefix = match profile {
+                    Profile::Thinking => Span::styled("  ".to_string(), thinking_style),
+                    Profile::Content => Span::raw("  "),
+                };
+                out.push(Line::from(vec![prefix, cover_span()]));
+                out_links.push(Vec::new());
+                out_images.push(None);
+            }
+        }
     }
-    let (wrapped, wrapped_links) = hard_wrap_lines_with_links(out, out_links, limit);
-    flat.extend(wrapped);
-    links.extend(wrapped_links);
+    let (wrapped, wrapped_links, wrapped_images) =
+        hard_wrap_lines_with_links(out, out_links, out_images, limit);
+    let base = flat.len();
+    let wrapped_len = wrapped.len();
+    // The side channel describes the whole buffer (rows = everything up to and
+    // including this batch), with `base` where this batch lands.
+    let side_channel = image_side_channel(&wrapped_images, base + wrapped_len, base, PREFIX_WIDTH);
+    flat.lines.extend(wrapped);
+    flat.links.extend(wrapped_links);
+    // The side channel covers this batch's rows only; everything above `base`
+    // is untouched (and unchanged).
+    flat.images.truncate(base);
+    flat.images.extend(side_channel);
+    flat.assert_parallel();
 }
 
 /// Cell line prefix width (`⦁ ` / `  `) — links shift by this many columns.
@@ -984,15 +1102,9 @@ fn shift_spans(spans: Vec<LinkSpan>, by: u16) -> Vec<LinkSpan> {
 /// Drop the open fenced block's composed lines (invalidated by a
 /// promotion, a gutter-width rewrite, or a rebuild). Free function so the
 /// caller can hold the buffer borrow that triggered the invalidation.
-fn drop_code_flat(
-    flat: &mut Vec<Line<'static>>,
-    links: &mut Vec<Vec<LinkSpan>>,
-    stable_len: &mut usize,
-    code_flat: &mut Option<CodeFlat>,
-) {
+fn drop_code_flat(flat: &mut FlatLines, stable_len: &mut usize, code_flat: &mut Option<CodeFlat>) {
     if let Some(cf) = code_flat.take() {
         flat.truncate(cf.start);
-        links.truncate(cf.start);
         *stable_len = (*stable_len).min(cf.start);
     }
 }
@@ -1007,16 +1119,9 @@ fn drop_code_flat(
 /// reference's line, and every other position stays the usual two-space
 /// indent. Free function so callers can hold a buffer borrow (the fenced
 /// tail) while composing.
-fn push_separator(
-    flat: &mut Vec<Line<'static>>,
-    links: &mut Vec<Vec<LinkSpan>>,
-    width: u16,
-    palette: &ThemePalette,
-    profile: Profile,
-) {
+fn push_separator(flat: &mut FlatLines, width: u16, palette: &ThemePalette, profile: Profile) {
     compose_into(
         flat,
-        links,
         std::iter::once(MarkdownLine::default()),
         width,
         palette,
@@ -1027,6 +1132,20 @@ fn push_separator(
 // ============================================================
 // Reference full render (finalize + reconcile target)
 // ============================================================
+
+/// Borrowed view of a composition: the lines plus both side channels.
+///
+/// Returned by [`StreamingRender::composed`]; the owned counterpart is
+/// [`ComposedLines`] (the cached, non-streaming form).
+#[derive(Clone, Copy, Debug)]
+pub struct StreamLines<'a> {
+    /// The composed lines.
+    pub lines: &'a [Line<'static>],
+    /// Link spans, index-aligned with `lines`.
+    pub links: &'a [Vec<LinkSpan>],
+    /// Image anchors, index-aligned with `lines`.
+    pub images: &'a [Vec<ImageSpan>],
+}
 
 /// The reference full-render pipeline for a streaming cell: markdown
 /// render with profile options → cell compose (prefix + thinking recolor)
@@ -1040,18 +1159,21 @@ pub fn full_lines(
     profile: Profile,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
-    full_lines_with_links(text, width, profile, palette).0
+    full_render(text, width, profile, palette, ImageOpts::off())
+        .into_parts()
+        .0
 }
 
-/// [`full_lines`] plus the link spans of every line (see
-/// [`StreamingRender::lines_and_links`]).
-pub fn full_lines_with_links(
+/// [`full_lines`] with explicit image options — the reference render the
+/// streaming engine reconciles against when anchors are enabled.
+pub fn full_render(
     text: &str,
     width: u16,
     profile: Profile,
     palette: &ThemePalette,
-) -> (Vec<Line<'static>>, Vec<Vec<LinkSpan>>) {
-    let opts = RenderOpts::new(profile, true);
+    images: &ImageOpts,
+) -> ComposedLines {
+    let opts = RenderOpts::new(profile, true).with_images(images);
     let md = render_markdown_lines_with(text, Some(width.saturating_sub(2)), palette, opts);
     let thinking_style = Style::default().fg(palette.thinking);
     let bullet_style = Style::default().fg(palette.text);
@@ -1071,11 +1193,29 @@ pub fn full_lines_with_links(
             Profile::Content => style,
         },
     );
-    let (mut lines, mut links) =
-        hard_wrap_lines_with_links(composed.lines().to_vec(), composed.links().to_vec(), limit);
-    lines.push(Line::from(""));
-    links.push(Vec::new());
-    debug_assert_eq!(lines.len(), links.len());
+    let (lines, links, tags) = hard_wrap_lines_with_links(
+        composed.lines().to_vec(),
+        composed.links().to_vec(),
+        composed.image_tags(),
+        limit,
+    );
+    let images = image_side_channel(&tags, lines.len(), 0, PREFIX_WIDTH);
+    let mut composed = ComposedLines::with_images(lines, links, images);
+    // The cell's trailing blank line (matches the non-streaming renders).
+    composed.push_blank();
+    composed
+}
+
+/// [`full_render`] with image anchors off, plus the link spans of every line
+/// (see [`StreamingRender::lines_and_links`]).
+pub fn full_lines_with_links(
+    text: &str,
+    width: u16,
+    profile: Profile,
+    palette: &ThemePalette,
+) -> (Vec<Line<'static>>, Vec<Vec<LinkSpan>>) {
+    let (lines, links, _images) =
+        full_render(text, width, profile, palette, ImageOpts::off()).into_parts();
     (lines, links)
 }
 
@@ -1091,12 +1231,13 @@ fn render_generic(
     width: u16,
     profile: Profile,
     palette: &ThemePalette,
+    images: &ImageOpts,
 ) -> Vec<MarkdownLine> {
     render_markdown_lines_with(
         slice,
         Some(width.saturating_sub(2)),
         palette,
-        RenderOpts::new(profile, true),
+        RenderOpts::new(profile, true).with_images(images),
     )
 }
 
@@ -1110,12 +1251,13 @@ fn render_block(
     width: u16,
     profile: Profile,
     palette: &ThemePalette,
+    images: &ImageOpts,
 ) -> Vec<MarkdownLine> {
     render_markdown_lines_with(
         slice,
         Some(width.saturating_sub(2)),
         palette,
-        RenderOpts::new(profile, false),
+        RenderOpts::new(profile, false).with_images(images),
     )
 }
 
@@ -1132,6 +1274,7 @@ fn code_top_border(has_language: bool, lang: Option<&str>, theme: &MarkdownTheme
             theme.border,
             label,
         )],
+        ..Default::default()
     }
 }
 
@@ -1142,6 +1285,7 @@ fn code_bottom_border(theme: &MarkdownTheme) -> MarkdownLine {
             theme.border,
             "└────────",
         )],
+        ..Default::default()
     }
 }
 
@@ -1617,32 +1761,47 @@ fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// never re-emit the cell prefix.
 #[cfg(test)]
 fn hard_wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
-    hard_wrap_lines_with_links(lines, Vec::new(), width).0
+    hard_wrap_lines_with_links(lines, Vec::new(), Vec::new(), width).0
 }
 
-/// [`hard_wrap_lines`] keeping the link spans aligned with the output rows.
+/// [`hard_wrap_lines`] keeping the side channels aligned with the output rows.
 ///
 /// A line that fits keeps its spans unchanged (the common case — prose is
 /// pre-wrapped upstream, so links are not split here). A line that has to be
 /// split loses its spans: the split re-flows the text at arbitrary character
 /// boundaries, and guessing where a link's text landed would risk pointing a
 /// click at the wrong target — the link simply stays inactive on those rows.
+///
+/// `images` carries an image anchor **on its caption row** so that the anchor
+/// follows its line through the split: the returned vector is index-aligned
+/// with the output rows, and a split row drops its anchor (a re-flowed anchor
+/// box has no meaningful geometry — it cannot happen in practice, the anchor's
+/// own rows always fit the width).
 fn hard_wrap_lines_with_links(
     lines: Vec<Line<'static>>,
     links: Vec<Vec<LinkSpan>>,
+    images: Vec<Option<ImageAnchor>>,
     width: usize,
-) -> (Vec<Line<'static>>, Vec<Vec<LinkSpan>>) {
+) -> (
+    Vec<Line<'static>>,
+    Vec<Vec<LinkSpan>>,
+    Vec<Option<ImageAnchor>>,
+) {
     let mut links = links;
     links.resize(lines.len(), Vec::new());
+    let mut images = images;
+    images.resize(lines.len(), None);
     if width == 0 {
-        return (lines, links);
+        return (lines, links, images);
     }
     let mut out = Vec::with_capacity(lines.len());
     let mut out_links = Vec::with_capacity(lines.len());
-    for (line, line_links) in lines.into_iter().zip(links) {
+    let mut out_images = Vec::with_capacity(lines.len());
+    for ((line, line_links), line_image) in lines.into_iter().zip(links).zip(images) {
         if line_width(&line) <= width {
             out.push(line);
             out_links.push(line_links);
+            out_images.push(line_image);
             continue;
         }
         let mut cur: Vec<Span<'static>> = Vec::new();
@@ -1661,6 +1820,7 @@ fn hard_wrap_lines_with_links(
                     }
                     out.push(Line::from(std::mem::take(&mut cur)));
                     out_links.push(Vec::new());
+                    out_images.push(None);
                     cur_w = 0;
                     skipping_spaces = true;
                 }
@@ -1680,10 +1840,12 @@ fn hard_wrap_lines_with_links(
         if !cur.is_empty() {
             out.push(Line::from(cur));
             out_links.push(Vec::new());
+            out_images.push(None);
         }
     }
     debug_assert_eq!(out.len(), out_links.len());
-    (out, out_links)
+    debug_assert_eq!(out.len(), out_images.len());
+    (out, out_links, out_images)
 }
 
 fn line_width(line: &Line<'_>) -> usize {
@@ -1699,7 +1861,24 @@ fn line_width(line: &Line<'_>) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use super::super::images::ImageEntry;
     use super::*;
+
+    /// Byte chunks on char boundaries (the probe's splitter).
+    fn chunk_stream(text: &str, size: usize) -> Vec<&str> {
+        let size = size.max(1);
+        let mut chunks = Vec::new();
+        let mut start = 0usize;
+        while start < text.len() {
+            let mut end = (start + size).min(text.len());
+            while end < text.len() && !text.is_char_boundary(end) {
+                end += 1;
+            }
+            chunks.push(&text[start..end]);
+            start = end;
+        }
+        chunks
+    }
 
     #[test]
     fn helpers_fence_detection() {
@@ -1817,6 +1996,196 @@ mod tests {
             assert_eq!(cache.rendered.len(), complete, "lines for {body:?}");
             assert_eq!(total, complete + pending.len());
         }
+    }
+
+    // ── Image anchors through the incremental engine ─────────────
+
+    fn image_opts() -> ImageOpts {
+        ImageOpts::anchor(
+            Some(std::path::PathBuf::from("/ws")),
+            vec![ImageEntry::new(
+                std::path::PathBuf::from("/ws/plot.png"),
+                super::super::images::ImageShape::new(800, 600),
+            )],
+        )
+    }
+
+    /// Every chunk split of the same text must land on the reference render —
+    /// lines, links **and** image anchors.
+    #[test]
+    fn streaming_anchors_match_the_reference_render() {
+        let palette = ThemePalette::default();
+        let text =
+            "before\n\n![销售趋势](./plot.png)\n\nafter the image\n\n![b](./plot.png)\n\nend";
+        let images = image_opts();
+        for profile in [Profile::Thinking, Profile::Content] {
+            for chunk in [1usize, 3, 16, 256] {
+                // Narrow widths are where the caption truncation and the cover
+                // rows have to fit exactly — the anchor's geometry must still
+                // agree with the reference.
+                for width in [4u16, 5, 20, 80] {
+                    let mut sr = StreamingRender::with_images(profile, images.clone());
+                    for piece in chunk_stream(text, chunk) {
+                        sr.push(piece);
+                        let _ = sr.lines(width, &palette);
+                    }
+                    let rendered = sr.composed(width, &palette);
+                    let got = (
+                        rendered.lines.to_vec(),
+                        rendered.links.to_vec(),
+                        rendered.images.to_vec(),
+                    );
+                    let reference = full_render(text, width, profile, &palette, &images);
+                    let want = reference.into_parts();
+                    assert_eq!(
+                        got.0.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+                        want.0.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+                        "profile={profile:?} chunk={chunk} width={width}"
+                    );
+                    assert_eq!(
+                        got.1, want.1,
+                        "links profile={profile:?} chunk={chunk} width={width}"
+                    );
+                    assert_eq!(
+                        got.2, want.2,
+                        "anchors profile={profile:?} chunk={chunk} width={width}"
+                    );
+                    assert_eq!(got.2.iter().flatten().count(), 2);
+                    for line in rendered.lines {
+                        assert!(
+                            line.width() <= usize::from(width),
+                            "over-wide line at width {width}: {line:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// An over-wide line *above* an anchor is hard-wrapped into extra rows:
+    /// the anchor's row index must move with it (the tag rides the line).
+    #[test]
+    fn streaming_anchor_rows_survive_a_wrap_above_them() {
+        let palette = ThemePalette::default();
+        let long = "a".repeat(80);
+        let wrapped = format!("```\n{long}\n```\n\n![b](./plot.png)");
+        let fitting = "```\nshort\n```\n\n![b](./plot.png)";
+        let images = image_opts();
+        let anchor_line = |text: &str, chunk: usize| {
+            let mut sr = StreamingRender::with_images(Profile::Content, images.clone());
+            for piece in chunk_stream(text, chunk) {
+                sr.push(piece);
+                let _ = sr.lines(30, &palette);
+            }
+            let rendered = sr.composed(30, &palette);
+            let got = rendered.images.to_vec();
+            let want = full_render(text, 30, Profile::Content, &palette, &images)
+                .into_parts()
+                .2;
+            assert_eq!(got, want, "chunk={chunk}");
+            let anchor = got.iter().flatten().next().expect("anchor");
+            let caption = &rendered.lines[anchor.line].to_string();
+            assert!(caption.contains('▢'), "caption row: {caption:?}");
+            anchor.line
+        };
+        for chunk in [1usize, 8, 64] {
+            let wrapped_line = anchor_line(&wrapped, chunk);
+            let fitting_line = anchor_line(fitting, chunk);
+            assert!(
+                wrapped_line > fitting_line,
+                "the widened code line must have moved the anchor down \
+                 (wrapped={wrapped_line}, fitting={fitting_line})"
+            );
+        }
+    }
+
+    /// The engine notices a metadata change and rebuilds: a path that was a
+    /// link becomes an anchor (and the row count changes with it).
+    #[test]
+    fn set_image_opts_rebuilds_the_composed_buffer() {
+        let palette = ThemePalette::default();
+        let text = "para\n\n![b](./plot.png)";
+        let mut sr = StreamingRender::new(Profile::Content);
+        for piece in chunk_stream(text, 8) {
+            sr.push(piece);
+        }
+        let before = sr.composed(80, &palette);
+        assert_eq!(before.images.iter().flatten().count(), 0);
+        let link_rows = before.lines.len();
+
+        sr.set_image_opts(image_opts());
+        let after = sr.composed(80, &palette);
+        let anchors = after.images.iter().flatten().collect::<Vec<_>>();
+        assert_eq!(anchors.len(), 1);
+        // The row count is computed from the *markdown* width (cell width
+        // minus the 2-column prefix), which is where the anchor can live.
+        assert_eq!(anchors[0].column, 2);
+        assert_eq!(anchors[0].cols, 78);
+        assert_eq!(
+            anchors[0].rows,
+            super::super::images::anchor_rows(78, super::super::images::ImageShape::new(800, 600))
+        );
+        assert!(
+            after.lines.len() > link_rows,
+            "the anchor must reserve rows"
+        );
+
+        // Setting the same options again is a no-op (no rebuild, no drift).
+        let lines_before: Vec<String> = after.lines.iter().map(|l| l.to_string()).collect();
+        sr.set_image_opts(image_opts());
+        let again = sr.composed(80, &palette);
+        assert_eq!(
+            again
+                .lines
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>(),
+            lines_before
+        );
+    }
+
+    /// `Off` stays byte-identical to the pre-image streaming output.
+    #[test]
+    fn streaming_with_images_off_matches_the_plain_render() {
+        let palette = ThemePalette::default();
+        let text = "text\n\n![b](./plot.png)\n\nmore";
+        let mut plain = StreamingRender::new(Profile::Content);
+        let mut off = StreamingRender::with_images(Profile::Content, ImageOpts::default());
+        for piece in chunk_stream(text, 5) {
+            plain.push(piece);
+            off.push(piece);
+        }
+        let a = plain.composed(80, &palette);
+        let b = off.composed(80, &palette);
+        assert_eq!(a.lines, b.lines);
+        assert_eq!(a.links, b.links);
+        assert_eq!(a.images, b.images);
+        assert!(a.images.iter().all(Vec::is_empty));
+    }
+
+    /// `finalize` installs the reference render — anchors included.
+    #[test]
+    fn finalize_installs_the_reference_anchors() {
+        let palette = ThemePalette::default();
+        let text = "a\n\n![b](./plot.png)\n\nc";
+        let images = image_opts();
+        let mut sr = StreamingRender::with_images(Profile::Content, images.clone());
+        for piece in chunk_stream(text, 4) {
+            sr.push(piece);
+            let _ = sr.lines(60, &palette);
+        }
+        sr.finalize(60, &palette);
+        let got = sr.composed(60, &palette);
+        let (lines, links, anchor_rows) =
+            (got.lines.to_vec(), got.links.to_vec(), got.images.to_vec());
+        let (want_lines, want_links, want_anchors) =
+            full_render(text, 60, Profile::Content, &palette, &images).into_parts();
+        assert_eq!(
+            lines.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+            want_lines.iter().map(|l| l.to_string()).collect::<Vec<_>>()
+        );
+        assert_eq!(links, want_links);
+        assert_eq!(anchor_rows, want_anchors);
     }
 
     #[test]

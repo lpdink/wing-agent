@@ -157,7 +157,7 @@ crates/wing/src/
 │   ├── chat_view/                   Chat 视图：mod（ChatView 结构）· cell（ChatCell 渲染）· model（内容模型）· viewport（滚动·几何·高度缓存·绘制）· frame（帧快照·选择映射）· link（链接表·OSC8）
 │   ├── selection.rs                 文本选择状态机（区域标签 / 内容坐标锚定 / 区间有序化 / 快照取文本，纯逻辑）
 │   ├── scrollbar.rs                 overlay 滚动条（几何 / 命中测试 / 拖拽状态机 / 绘制）
-│   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存
+│   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存 + CellFrame 投影（链接 / 图片锚点侧信道）
 │   ├── panel.rs                     选择面板共享渲染（窗口数学取自 shared/panels 内核）
 │   ├── welcome/                     开屏欢迎屏：mod（状态·宽度阶梯·扫光时钟）· art（像素 W + 半格渐变）
 │   ├── status_bar.rs / spinner.rs / toast.rs
@@ -165,7 +165,7 @@ crates/wing/src/
 │   ├── popup/                       command（斜杠命令 + 候选项）/ selection（通用可选列表）
 │   └── cells/                       Chat cell 渲染（tool_call / thinking / todo_msg / ask_msg / diff_view / model_picker）
 ├── render/                          Markdown + 语法高亮
-│   ├── markdown/                    types / parsing / code_blocks / tables / links / wrap（CJK UAX#14）
+│   ├── markdown/                    types / parsing / code_blocks / tables / links / wrap（CJK UAX#14）/ images（图片锚点）
 │   │   └── stream.rs                StreamingRender — 增量渲染（稳定前缀 + 活动尾部；Thinking 跳过 fence 归一化）
 │   ├── syntax.rs                    syntect 高亮（two-face 主题）
 │   ├── diff_highlight.rs            diff 双修订版高亮（old/new 两路状态机：删除行→old，其余→new，context 行两路都要推进）

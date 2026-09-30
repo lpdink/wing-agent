@@ -7,6 +7,9 @@ use std::cmp::max;
 use pulldown_cmark::{CodeBlockKind, HeadingLevel, Tag, TagEnd};
 
 use super::code_blocks::CodeBlockState;
+use super::images::{
+    ImageAnchor, ImageOpts, ImageShape, anchor_caption, anchor_rows, resolve_image_path,
+};
 use super::links;
 use super::tables::{TableBuffer, render_table};
 use super::types::{MarkdownLine, MarkdownSegment, MarkdownTheme, SegmentKind};
@@ -42,6 +45,65 @@ pub(crate) struct LinkState {
     pub(crate) show_destination: bool,
     pub(crate) hidden_location_suffix: Option<String>,
     pub(crate) label_start_segment_idx: usize,
+    /// `![alt](path)` rather than `[text](url)` — only images can become
+    /// anchors.
+    pub(crate) is_image: bool,
+}
+
+// ============================================================
+// Image anchor state
+// ============================================================
+
+/// A completed image that may become an anchor block.
+///
+/// Recorded at `TagEnd::Image` (path, metadata and row count already checked)
+/// and consumed when the line it sits on ends: an anchor is only valid if
+/// nothing was appended to that line afterwards, which is what
+/// [`PendingImage::line`] verifies. Anything else leaves the line on the
+/// link path — see the module docs of [`super::images`].
+#[derive(Clone, Debug)]
+pub(crate) struct PendingImage {
+    /// The anchor, with its path resolved, its shape known and its rows
+    /// computed.
+    pub(crate) anchor: ImageAnchor,
+    /// The owning line's content when the image closed (see [`line_shape`]).
+    pub(crate) line: (usize, usize),
+}
+
+/// A line's content identity: segment count and total text bytes.
+///
+/// Both are needed: two adjacent images on one line *merge* into a single
+/// segment (same kind, style and link target), so a count alone would not
+/// notice that a second image joined the line — and applying the first
+/// image's anchor would silently drop the second one's text.
+fn line_shape(line: &MarkdownLine) -> (usize, usize) {
+    let bytes = line.segments.iter().map(|segment| segment.text.len()).sum();
+    (line.segments.len(), bytes)
+}
+
+/// Convert a pending image into an anchor block on `line`.
+///
+/// The line's link rendering is replaced by the caption segment plus the
+/// anchor payload. No-op when there is no pending image, or when the line
+/// grew since the image closed (the image shares its line with other
+/// content → the link path stays).
+pub(crate) fn finish_pending_image(
+    pending: &mut Option<PendingImage>,
+    line: &mut MarkdownLine,
+    images: &ImageOpts,
+    theme: &MarkdownTheme,
+) {
+    let Some(pending) = pending.take() else {
+        return;
+    };
+    if !images.is_enabled() || pending.line != line_shape(line) {
+        return;
+    }
+    let anchor = pending.anchor;
+    let caption = anchor_caption(&anchor.alt, &anchor.path, anchor.shape, anchor.cols);
+    line.segments.clear();
+    line.push_segment(SegmentKind::Image, theme.base.patch(theme.dimmed), &caption);
+    line.image = Some(Box::new(anchor));
 }
 
 // ============================================================
@@ -69,6 +131,11 @@ pub(crate) struct MarkdownContext<'a> {
     pub(crate) indented_prose: bool,
     pub(crate) active_table: &'a mut Option<TableBuffer>,
     pub(crate) link_state: &'a mut Option<LinkState>,
+    /// Image anchors in flight (see [`PendingImage`]).
+    pub(crate) pending_image: &'a mut Option<PendingImage>,
+    /// Image mode, workspace root and metadata table — the caller's, never
+    /// read/written here (no I/O on the render path).
+    pub(crate) images: &'a ImageOpts,
 }
 
 impl MarkdownContext<'_> {
@@ -100,6 +167,14 @@ impl MarkdownContext<'_> {
     }
 
     pub(crate) fn flush_line(&mut self) {
+        // A line end is where an in-flight image either becomes an anchor or
+        // falls back to the link rendering.
+        finish_pending_image(
+            self.pending_image,
+            self.current_line,
+            self.images,
+            self.theme,
+        );
         flush_current_line(
             self.lines,
             self.current_line,
@@ -143,6 +218,71 @@ impl MarkdownContext<'_> {
         self.link_state
             .as_ref()
             .map(|link| link.destination.clone())
+    }
+
+    /// Whether the enclosing block contributes segments to the start of the
+    /// line (blockquote bars, a list marker or a list continuation indent).
+    ///
+    /// An anchor's geometry assumes it starts at column 0 of the markdown
+    /// line; anything with a block prefix degrades to the link path.
+    fn has_block_prefix(&self) -> bool {
+        *self.blockquote_depth > 0
+            || self.pending_list_prefix.is_some()
+            || !self.list_continuation_prefix.is_empty()
+    }
+
+    /// Forget an in-flight image (the line it belonged to was consumed by a
+    /// path that does not finish anchors — a table cell).
+    pub(crate) fn clear_pending_image(&mut self) {
+        *self.pending_image = None;
+    }
+
+    /// Try to turn the image that just closed into an anchor.
+    ///
+    /// Every gate here is a *degradation*, not an error: the line keeps the
+    /// link rendering it already has (see the design doc, "standalone images
+    /// only"). Called after the link state's `Link` kind was popped (so
+    /// `current_kind()` is the enclosing element) and after the image's own
+    /// destination segments were appended (so the recorded segment count is
+    /// the line's final one for a standalone image).
+    fn try_image_anchor(&mut self, destination: &str, label_start_segment_idx: usize, alt: String) {
+        if !self.images.is_enabled() {
+            return;
+        }
+        // Alone on its line: the label is the line's first segment (nothing
+        // before it — no text, no block prefix) …
+        if label_start_segment_idx != 0 {
+            return;
+        }
+        // … at the top level: not in a table cell or code block, no block
+        // prefix, and not inside a heading or another link.
+        if self.active_table.is_some() || self.code_block.is_some() || self.has_block_prefix() {
+            return;
+        }
+        if self.current_kind() != SegmentKind::Text {
+            return;
+        }
+        // The row count needs the render width (anchors are not produced by
+        // the width-less API).
+        let Some(width) = self.available_width.filter(|width| *width > 0) else {
+            return;
+        };
+        let Ok(path) = resolve_image_path(self.images.workspace(), destination) else {
+            return;
+        };
+        let Some(shape) = self.images.shape_for(&path).filter(ImageShape::is_usable) else {
+            return;
+        };
+        *self.pending_image = Some(PendingImage {
+            anchor: ImageAnchor {
+                path,
+                alt,
+                shape,
+                cols: width,
+                rows: anchor_rows(width, shape),
+            },
+            line: line_shape(self.current_line),
+        });
     }
 }
 
@@ -216,6 +356,7 @@ pub(crate) fn handle_start_tag(tag: &Tag<'_>, ctx: &mut MarkdownContext<'_>) {
                 show_destination,
                 hidden_location_suffix: links::extract_hidden_location_suffix(dest_url),
                 label_start_segment_idx,
+                is_image: matches!(tag, Tag::Image { .. }),
             });
             ctx.push_style(ctx.theme.link);
             ctx.push_kind(SegmentKind::Link);
@@ -256,6 +397,9 @@ pub(crate) fn handle_start_tag(tag: &Tag<'_>, ctx: &mut MarkdownContext<'_>) {
             }
         }
         Tag::TableCell => {
+            // Table cells are not anchor positions (the cell's line is
+            // re-rendered by the table layout): drop any in-flight image.
+            ctx.clear_pending_image();
             if ctx.active_table.is_none() {
                 ctx.ensure_prefix();
             } else {
@@ -310,31 +454,48 @@ pub(crate) fn handle_end_tag(tag: TagEnd, ctx: &mut MarkdownContext<'_>) {
         }
         TagEnd::Link | TagEnd::Image => {
             if let Some(link) = ctx.link_state.take() {
-                if link.show_destination {
+                let LinkState {
+                    destination,
+                    show_destination,
+                    hidden_location_suffix,
+                    label_start_segment_idx,
+                    is_image,
+                } = link;
+                // The alt text as written, captured before the destination /
+                // location-suffix segments are appended below.
+                let alt = if is_image {
+                    ctx.current_line.segments[label_start_segment_idx..]
+                        .iter()
+                        .map(|segment| segment.text.as_str())
+                        .collect::<String>()
+                } else {
+                    String::new()
+                };
+                if show_destination {
                     let style = ctx.current_style();
                     ctx.current_line.push_segment_with_link(
                         SegmentKind::Link,
                         style,
                         " (",
-                        Some(link.destination.clone()),
+                        Some(destination.clone()),
                     );
                     ctx.current_line.push_segment_with_link(
                         SegmentKind::Link,
                         style,
-                        &link.destination,
-                        Some(link.destination.clone()),
+                        &destination,
+                        Some(destination.clone()),
                     );
                     ctx.current_line.push_segment_with_link(
                         SegmentKind::Link,
                         style,
                         ")",
-                        Some(link.destination),
+                        Some(destination.clone()),
                     );
-                } else if let Some(suffix) = link.hidden_location_suffix.as_deref() {
+                } else if let Some(suffix) = hidden_location_suffix.as_deref() {
                     let label_segments = ctx
                         .current_line
                         .segments
-                        .get(link.label_start_segment_idx..)
+                        .get(label_start_segment_idx..)
                         .unwrap_or(&[]);
                     if !links::label_segments_have_location_suffix(label_segments) {
                         ctx.current_line.push_segment_with_link(
@@ -345,9 +506,15 @@ pub(crate) fn handle_end_tag(tag: TagEnd, ctx: &mut MarkdownContext<'_>) {
                         );
                     }
                 }
+                ctx.pop_style();
+                ctx.pop_kind();
+                if is_image {
+                    ctx.try_image_anchor(&destination, label_start_segment_idx, alt);
+                }
+            } else {
+                ctx.pop_style();
+                ctx.pop_kind();
             }
-            ctx.pop_style();
-            ctx.pop_kind();
         }
         TagEnd::CodeBlock => {} // Handled by code_block module.
         TagEnd::Table => {
@@ -373,6 +540,7 @@ pub(crate) fn handle_end_tag(tag: TagEnd, ctx: &mut MarkdownContext<'_>) {
             }
         }
         TagEnd::TableCell => {
+            ctx.clear_pending_image();
             if let Some(table) = ctx.active_table.as_mut() {
                 let cell = std::mem::take(ctx.current_line);
                 table.current_row.push(cell);
@@ -410,6 +578,10 @@ pub(crate) fn append_text(text: &str, ctx: &mut MarkdownContext<'_>) {
                 ctx.current_line
                     .push_segment_with_link(kind, style, segment, link_target.clone());
             }
+            // A raw newline ends the line without a flush — validate any
+            // in-flight image anchor here too (content appended above already
+            // invalidated it through the segment count).
+            finish_pending_image(ctx.pending_image, ctx.current_line, ctx.images, ctx.theme);
             ctx.lines.push(std::mem::take(ctx.current_line));
             start = idx + 1;
             // Skip consecutive newlines.

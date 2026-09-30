@@ -17,6 +17,8 @@ use ratatui::widgets::{Paragraph, Wrap};
 use crate::config::rendering::ThinkingMode;
 use crate::render::Renderable;
 use crate::render::markdown::ComposedLines;
+use crate::render::markdown::ImageOpts;
+use crate::render::markdown::ImageSpan;
 use crate::render::markdown::LinkSpan;
 use crate::render::markdown::Profile;
 use crate::render::markdown::stream::StreamingRender;
@@ -49,6 +51,11 @@ pub struct CachedCell {
     /// Turn-end reconcile requested: the next `compute_lines` /
     /// `compute_height` installs the full reference render.
     pending_finalize: bool,
+    /// Image options the cell renders with (mode, workspace, metadata) — see
+    /// [`CachedCell::set_image_opts`]. The streaming engine owns a copy (it is
+    /// its own render authority); this one is what a freshly started stream
+    /// is seeded with.
+    image_opts: ImageOpts,
 }
 
 #[derive(Clone, Copy)]
@@ -74,6 +81,9 @@ struct CachedLines {
 
 /// What the chat view needs to render a cell: its lines, their link spans and
 /// whether screen row == line index.
+///
+/// The narrow view of [`CellFrame`] — kept as it is because the link path and
+/// the layout code consume exactly these three things.
 pub struct CellLines<'a> {
     pub lines: &'a [Line<'static>],
     /// Index-aligned with `lines`.
@@ -91,6 +101,35 @@ impl CellLines<'_> {
     }
 }
 
+/// [`CellLines`] plus the cell's image anchors — the superset the drawing
+/// path reads (see [`CachedCell::compute_cell_frame`]).
+///
+/// `images[i]` belongs to `lines[i]`; a line that opens an anchor carries
+/// exactly one entry, whose `rows` cover the lines below it (see
+/// [`ImageSpan`]).
+pub struct CellFrame<'a> {
+    pub lines: &'a [Line<'static>],
+    /// Index-aligned with `lines`.
+    pub links: &'a [Vec<LinkSpan>],
+    /// Index-aligned with `lines`.
+    pub images: &'a [Vec<ImageSpan>],
+    /// Row arithmetic is exact (see [`CachedLines::rows_exact`]) — an anchor's
+    /// geometry is only valid while this holds.
+    pub rows_exact: bool,
+}
+
+impl CellFrame<'_> {
+    /// Whether any line carries a link.
+    pub fn has_links(&self) -> bool {
+        self.links.iter().any(|line| !line.is_empty())
+    }
+
+    /// Whether any line carries an image anchor.
+    pub fn has_images(&self) -> bool {
+        self.images.iter().any(|line| !line.is_empty())
+    }
+}
+
 impl CachedCell {
     pub fn new(cell: ChatCell) -> Self {
         Self {
@@ -101,7 +140,31 @@ impl CachedCell {
             stream: None,
             prewrapped_width: None,
             pending_finalize: false,
+            image_opts: ImageOpts::default(),
         }
+    }
+
+    /// Adopt image options (mode, workspace root, metadata table).
+    ///
+    /// The row count of an image anchor is a function of the metadata, so a
+    /// change (a header probe finishing, the workspace moving, the mode being
+    /// switched by config) invalidates every cached line and height of this
+    /// cell **and** the streaming engine's composed prefix — the next render
+    /// rebuilds both. Cheap when nothing changes: the comparison is structural.
+    pub fn set_image_opts(&mut self, opts: ImageOpts) {
+        if self.image_opts == opts {
+            return;
+        }
+        self.image_opts = opts;
+        if let Some(stream) = self.stream.as_mut() {
+            stream.set_image_opts(self.image_opts.clone());
+        }
+        self.invalidate();
+    }
+
+    /// The image options this cell renders with.
+    pub fn image_opts(&self) -> &ImageOpts {
+        &self.image_opts
     }
 
     /// Access the inner cell.
@@ -203,7 +266,7 @@ impl CachedCell {
             stream.push(delta);
         } else {
             // Invariant: stream.buf == cell text at all times.
-            let mut stream = StreamingRender::new(profile);
+            let mut stream = StreamingRender::with_images(profile, self.image_opts.clone());
             if let Some(seed) = seed.filter(|s| !s.is_empty()) {
                 stream.push(&seed);
             }
@@ -313,8 +376,12 @@ impl CachedCell {
         }
         if let Some(mut stream) = self.stream.take() {
             stream.finalize(width, ctx.palette);
-            let (lines, links) = stream.lines_and_links(width, ctx.palette);
-            let composed = ComposedLines::new(lines.to_vec(), links.to_vec());
+            let rendered = stream.composed(width, ctx.palette);
+            let composed = ComposedLines::with_images(
+                rendered.lines.to_vec(),
+                rendered.links.to_vec(),
+                rendered.images.to_vec(),
+            );
             let height = composed.lines().len();
             self.cached_lines = Some(CachedLines {
                 width,
@@ -349,6 +416,21 @@ impl CachedCell {
     /// [`compute_lines`](Self::compute_lines) plus the link spans of every
     /// line (index-aligned with them) and whether the row maths is exact.
     pub fn compute_cell_lines(&mut self, width: u16, ctx: &CellContext<'_>) -> CellLines<'_> {
+        let frame = self.compute_cell_frame(width, ctx);
+        CellLines {
+            lines: frame.lines,
+            links: frame.links,
+            rows_exact: frame.rows_exact,
+        }
+    }
+
+    /// [`compute_cell_lines`](Self::compute_cell_lines) plus the image anchors
+    /// of every line.
+    ///
+    /// This is the projection the drawing path uses: `images[i]` locates the
+    /// picture a line opens (see [`ImageSpan`]), and `rows_exact` says whether
+    /// the row arithmetic its geometry rests on holds at this width.
+    pub fn compute_cell_frame(&mut self, width: u16, ctx: &CellContext<'_>) -> CellFrame<'_> {
         // Frame boundary: settle deferred streaming work (tool-args parse)
         // before the caches are consulted — the generation check below must
         // see the invalidation a flush produces.
@@ -361,11 +443,12 @@ impl CachedCell {
             // produces the returned slices is taken.
             self.prewrapped_width = Some(width);
             let stream = self.stream.as_mut().expect("checked active");
-            let (lines, links) = stream.lines_and_links(width, ctx.palette);
+            let rendered = stream.composed(width, ctx.palette);
             // Streaming lines are hard-wrapped to the width by construction.
-            return CellLines {
-                lines,
-                links,
+            return CellFrame {
+                lines: rendered.lines,
+                links: rendered.links,
+                images: rendered.images,
                 rows_exact: true,
             };
         }
@@ -376,14 +459,15 @@ impl CachedCell {
 
         if !cached_valid {
             let composed = self.cell.render_lines(width, ctx);
-            // The row arithmetic is what the link hit boxes depend on: a line
-            // wider than the render area is wrapped by `Paragraph` into two
-            // screen rows, and every link row after it would land on the wrong
-            // text. Markdown pre-wraps prose, but code blocks and indented code
-            // are exempt (`wrap::is_prose_line`), so an over-wide code line in
-            // the same cell really does break the mapping — measure and refuse
-            // rather than point a click at code.
-            let rows_exact = !composed.has_links() || composed.rows_are_exact(width);
+            // The row arithmetic is what the link hit boxes and the image
+            // anchors depend on: a line wider than the render area is wrapped
+            // by `Paragraph` into two screen rows, and every link/anchor row
+            // after it would land on the wrong text. Markdown pre-wraps prose,
+            // but code blocks and indented code are exempt
+            // (`wrap::is_prose_line`), so an over-wide code line in the same
+            // cell really does break the mapping — measure and refuse rather
+            // than point a click or a picture at the wrong rows.
+            let rows_exact = !composed.has_spans() || composed.rows_are_exact(width);
             self.cached_lines = Some(CachedLines {
                 width,
                 generation: self.generation,
@@ -395,9 +479,10 @@ impl CachedCell {
         }
 
         let cached = self.cached_lines.as_ref().expect("just ensured");
-        CellLines {
+        CellFrame {
             lines: cached.composed.lines(),
             links: cached.composed.links(),
+            images: cached.composed.images(),
             rows_exact: cached.rows_exact,
         }
     }
@@ -568,6 +653,159 @@ mod tests {
             cell.cached_lines.as_ref().unwrap().generation,
             cell.generation
         );
+    }
+
+    // ── Image anchors through the projection ──────────────────────
+
+    fn image_opts() -> ImageOpts {
+        ImageOpts::anchor(
+            Some(std::path::PathBuf::from("/ws")),
+            vec![crate::render::markdown::ImageEntry::new(
+                std::path::PathBuf::from("/ws/plot.png"),
+                crate::render::markdown::ImageShape::new(800, 600),
+            )],
+        )
+    }
+
+    #[test]
+    fn a_cell_without_image_opts_projects_no_anchors() {
+        let palette = ThemePalette::default();
+        let layout = LayoutConfig::default();
+        let ctx = test_ctx(&palette, &layout);
+        let mut cell = CachedCell::new(ChatCell::AssistantMessage("![plot](./plot.png)".into()));
+        let frame = cell.compute_cell_frame(80, &ctx);
+        assert!(!frame.has_images());
+        assert!(frame.images.iter().all(Vec::is_empty));
+        // …and the cell still renders the alt text through the link path.
+        let text = frame
+            .lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<String>();
+        assert!(text.contains("plot"), "{text:?}");
+        assert!(!text.contains('▢'), "{text:?}");
+    }
+
+    /// The finalized-stream path is the *cached* projection (ComposedLines →
+    /// CellFrame), i.e. the same code path a non-streaming cell uses.
+    #[test]
+    fn the_cell_frame_projects_the_anchor_geometry() {
+        let palette = ThemePalette::default();
+        let layout = LayoutConfig::default();
+        let ctx = test_ctx(&palette, &layout);
+        let mut cell = CachedCell::new(ChatCell::AssistantMessage(String::new()));
+        cell.set_image_opts(image_opts());
+        cell.append_stream("before\n\n![销售趋势](./plot.png)\n\nafter");
+        cell.request_finalize();
+
+        let width = 80u16;
+        let expected_rows = crate::render::markdown::anchor_rows(width - 2, {
+            crate::render::markdown::ImageShape::new(800, 600)
+        });
+        assert!(
+            cell.is_streaming(),
+            "finalize is deferred to the next render"
+        );
+        let (anchor, line_count) = {
+            let frame = cell.compute_cell_frame(width, &ctx);
+            assert!(frame.has_images(), "no anchor in the finalized frame");
+            assert!(frame.rows_exact, "the fixture has no over-wide lines");
+            let anchors = frame.images.iter().flatten().collect::<Vec<_>>();
+            assert_eq!(anchors.len(), 1);
+            let anchor = anchors[0].clone();
+            // The caption is the anchor's first row.
+            assert!(frame.lines[anchor.line].to_string().contains('▢'));
+            (anchor, frame.lines.len())
+        };
+        assert_eq!(anchor.column, 2, "the cell prefix shifts the box");
+        assert_eq!(anchor.cols, width - 2);
+        assert_eq!(anchor.rows, expected_rows);
+        assert_eq!(anchor.path, std::path::PathBuf::from("/ws/plot.png"));
+        assert_eq!(anchor.alt, "销售趋势");
+        assert_eq!(
+            anchor.rows_range().end - anchor.line,
+            usize::from(expected_rows)
+        );
+        // The height counts the whole block (the cache must agree with what
+        // the drawing layer is told).
+        assert_eq!(cell.compute_height(width, &ctx), line_count);
+        // The cached lines are reused: a second frame is identical.
+        let again = cell.compute_cell_frame(width, &ctx);
+        assert_eq!(again.images.iter().flatten().next(), Some(&anchor));
+    }
+
+    #[test]
+    fn late_metadata_invalidates_the_cell_but_keeps_the_text() {
+        let palette = ThemePalette::default();
+        let layout = LayoutConfig::default();
+        let ctx = test_ctx(&palette, &layout);
+        let mut cell = CachedCell::new(ChatCell::AssistantMessage(String::new()));
+        cell.append_stream("![plot](./plot.png)");
+        let before = cell.compute_height(80, &ctx);
+        let generation = cell.generation();
+        cell.set_image_opts(image_opts());
+        assert!(
+            cell.generation() > generation,
+            "metadata change must invalidate"
+        );
+        let after = cell.compute_height(80, &ctx);
+        assert!(
+            after > before,
+            "the anchor must reserve rows: {after} vs {before}"
+        );
+        assert!(cell.compute_cell_frame(80, &ctx).has_images());
+        // The cell's text is untouched by the metadata change.
+        match cell.cell() {
+            ChatCell::AssistantMessage(text) => assert_eq!(text, "![plot](./plot.png)"),
+            other => panic!("unexpected cell: {other:?}"),
+        }
+        // A no-op set does not bump the generation again.
+        let generation = cell.generation();
+        cell.set_image_opts(image_opts());
+        assert_eq!(cell.generation(), generation);
+    }
+
+    #[test]
+    fn a_streaming_cell_projects_anchors_from_the_engine() {
+        let palette = ThemePalette::default();
+        let layout = LayoutConfig::default();
+        let ctx = test_ctx(&palette, &layout);
+        let mut cell = CachedCell::new(ChatCell::AssistantMessage(String::new()));
+        cell.set_image_opts(image_opts());
+        cell.append_stream("before\n\n![plot](./plot.png)\n\nafter");
+        assert!(cell.is_streaming());
+        let frame = cell.compute_cell_frame(80, &ctx);
+        let anchors = frame.images.iter().flatten().collect::<Vec<_>>();
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(
+            anchors[0].line,
+            frame
+                .lines
+                .iter()
+                .position(|l| l.to_string().contains('▢'))
+                .unwrap()
+        );
+        // Streaming lines are pre-wrapped, so their row arithmetic is exact.
+        assert!(frame.rows_exact);
+    }
+
+    #[test]
+    fn an_over_wide_line_makes_the_row_arithmetic_inexact() {
+        // The gate the drawing layer reads: a line the markdown pre-wrap
+        // cannot fix (code, borders) shifts every row below it, so the cell
+        // refuses the row arithmetic for links and anchors alike.
+        let palette = ThemePalette::default();
+        let layout = LayoutConfig::default();
+        let ctx = test_ctx(&palette, &layout);
+        let mut cell = CachedCell::new(ChatCell::AssistantMessage(format!(
+            "```\n{}\n```\n\n[plot](./plot.png)",
+            "a".repeat(80)
+        )));
+        let frame = cell.compute_cell_frame(40, &ctx);
+        assert!(frame.has_links());
+        assert!(!frame.rows_exact, "an over-wide code line must refuse");
+        // An anchor-bearing line set goes through the same gate
+        // (`ComposedLines::has_spans`), see the `links` module tests.
     }
 
     #[test]

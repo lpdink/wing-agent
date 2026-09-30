@@ -40,6 +40,11 @@ pub enum SegmentKind {
     Border,
     /// Code block line-number gutter.
     Gutter,
+    /// An image anchor: the caption line of a `![alt](path)` block, and the
+    /// blank cover rows under it (see [`super::images`]). Never produced in
+    /// [`ImageMode::Off`](super::images::ImageMode::Off), where an image
+    /// renders as a link.
+    Image,
 }
 
 // ============================================================
@@ -98,6 +103,12 @@ impl MarkdownSegment {
 #[derive(Clone, Debug, Default)]
 pub struct MarkdownLine {
     pub segments: Vec<MarkdownSegment>,
+    /// Image anchor payload, present on the anchor's caption line (see
+    /// [`super::images`]). The line stays a single line here; the block's
+    /// cover rows are expanded at compose time, so the markdown layer's
+    /// line-count rules (trailing-blank trimming, blank-line dedup, the
+    /// streaming engine's block separators) never see the block's height.
+    pub image: Option<Box<super::images::ImageAnchor>>,
 }
 
 impl MarkdownLine {
@@ -273,7 +284,8 @@ pub fn thinking_segment_style(kind: SegmentKind, original: Style, thinking_style
         | SegmentKind::CodeBlock
         | SegmentKind::Link
         | SegmentKind::Border
-        | SegmentKind::Gutter => original,
+        | SegmentKind::Gutter
+        | SegmentKind::Image => original,
         SegmentKind::Text | SegmentKind::Heading | SegmentKind::Marker => Style {
             fg: thinking_style.fg,
             ..original
