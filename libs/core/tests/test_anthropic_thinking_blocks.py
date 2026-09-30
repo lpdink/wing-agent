@@ -282,7 +282,8 @@ class TestAnthropicReplay:
                     Message(role="user", content="q1"),
                     ghost,
                     Message(role="user", content="q2"),
-                ]
+                ],
+                "claude-x",
             )
             # 零块 assistant 被丢弃；两个 user 按严格交替规则合并
             assert [m["role"] for m in am] == ["user"]
@@ -299,7 +300,8 @@ class TestAnthropicReplay:
                         ],
                     ),
                     Message(role="tool", tool_call_id="t1", content="ok"),
-                ]
+                ],
+                "claude-x",
             )
             assert [m["role"] for m in am2] == ["user", "assistant", "user"]
         finally:
@@ -326,7 +328,8 @@ class TestAnthropicReplay:
                         ],
                     ),
                     Message(role="tool", tool_call_id="t1", content="ok"),
-                ]
+                ],
+                "claude-x",
             )
             # 两条 assistant 合并；tool_result 跟在合并后的 assistant 之后。
             assert [m["role"] for m in am] == ["user", "assistant", "user"]

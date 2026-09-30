@@ -203,7 +203,14 @@ class Compactor:
         prompt = (
             self._COMPACT_PROMPT_BODY + instruction_block + self._COMPACT_PROMPT_FORMAT
         )
-        messages = full_messages + [Message(role="user", content=prompt)]
+        # 压缩请求纯文本：剥离消息里的媒体引用（浅拷贝，原链消息零改动——
+        # model_copy 不写 uuid/parent_uuid，也不携带 media 字节）。摘要目标是
+        # 文本，连占位都不需要；图片引用留在原消息里，会话继续可用。
+        request_messages = [
+            m.model_copy(update={"media": None}) if m.media else m
+            for m in full_messages
+        ]
+        messages = request_messages + [Message(role="user", content=prompt)]
 
         response = None
         async for item in model_provider.generate(

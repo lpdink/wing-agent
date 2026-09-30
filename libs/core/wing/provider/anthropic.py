@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import TYPE_CHECKING, AsyncIterator, cast
 
 import httpx
 
@@ -24,6 +24,13 @@ from wing.provider.base import (
     PendingToolView,
     StreamAccumulator,
     parse_tool_args,
+)
+from wing.provider.media import (
+    FOLLOWUP_GUIDE_TEXT,
+    group_plans_by_message,
+    message_slots,
+    plan_for_request,
+    resolve_image_delivery,
 )
 from wing.provider.transport import (
     STREAM_IDLE_TIMEOUT,
@@ -37,6 +44,7 @@ from wing.provider.transport import (
 from wing.schema import (
     LLMResponse,
     LLMUsage,
+    MediaRef,
     Message,
     PendingCall,
     TextBlock,
@@ -49,7 +57,7 @@ from wing.schema import (
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
-    from wing.media import MediaAccess
+    from wing.media import MediaAccess, MediaPlan
 
 # 运行时开启 thinking 且用户未配置 budget 时的默认预算。
 # Anthropic 要求 type=enabled 必带 budget_tokens（1024 <= budget < max_tokens）。
@@ -302,7 +310,7 @@ class AnthropicProvider(ModelProvider):
         tools: list[Tool] | None,
         stream: bool,
     ) -> dict:
-        system_text, anthropic_messages = self._serialize_messages(messages)
+        system_text, anthropic_messages = self._serialize_messages(messages, model)
 
         body: dict = {
             "model": model,
@@ -346,8 +354,22 @@ class AnthropicProvider(ModelProvider):
 
         return body
 
-    def _serialize_messages(self, messages: list[Message]) -> tuple[str, list[dict]]:
-        """将 Message 列表转换为 Anthropic 格式。
+    def _serialize_messages(
+        self, messages: list[Message], model: str
+    ) -> tuple[str, list[dict]]:
+        """将 Message 列表转换为 Anthropic 格式（含请求期媒体投影）。
+
+        无媒体的消息与引入媒体前逐字节一致（快路径不触碰全局配置）。有媒体时：
+
+        - ``inline``（anthropic 协议默认）：图片以 ``image`` block 内嵌进该
+          tool_result 的 content 数组（base64 source）；
+        - ``followup``：tool_result 只含文本，图片以 image block 追加进**连续
+          tool 消息段之后**的 user 消息（复用 _merge_consecutive_messages 的
+          合并路径——合并只 extend 外层 content 数组）——图片永远排在全部
+          tool 消息之后，不会插在两条 tool 消息之间。
+
+        被丢弃 / 字节缺失的图片位：不改原文本 block，只在其后追加一个占位
+        text block；缺文本块不发射（Anthropic 拒绝空 text block）。
 
         Returns:
             (system_text, anthropic_messages)
@@ -355,11 +377,41 @@ class AnthropicProvider(ModelProvider):
         system_parts: list[str] = []
         anthropic_msgs: list[dict] = []
 
-        for msg in messages:
+        delivery = resolve_image_delivery(self._config)
+        plans: dict[int, list[MediaPlan]] = {}
+        cache: dict[str, str | None] = {}
+        if any(m.media for m in messages):
+            plans = group_plans_by_message(
+                plan_for_request(messages, provider_cfg=self._config, model=model)
+            )
+        pending_images: list[dict] = []  # followup：待追加的 image blocks
+
+        def flush_pending() -> None:
+            """把当前连续 tool 段积累的图片落到一条 user 消息（段后位置）。"""
+            if not pending_images:
+                return
+            anthropic_msgs.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": FOLLOWUP_GUIDE_TEXT},
+                        *pending_images,
+                    ],
+                }
+            )
+            pending_images.clear()
+
+        for i, msg in enumerate(messages):
             if msg.role == "system":
                 if msg.content:
                     system_parts.append(msg.content)
                 continue
+
+            if delivery == "followup" and msg.role != "tool":
+                # 连续 tool 段结束——图片挂段后（即当前消息之前）。
+                flush_pending()
+
+            slots = message_slots(plans.get(i, []), media=self._media, cache=cache)
 
             if msg.role == "assistant":
                 blocks = self._serialize_assistant(msg)
@@ -373,6 +425,22 @@ class AnthropicProvider(ModelProvider):
 
             elif msg.role == "tool":
                 # tool result → user 消息中的 tool_result block
+                content: str | list[dict] = msg.content or ""
+                extra: list[dict] = []
+                for slot in slots:
+                    if slot.b64 is None:
+                        extra.append({"type": "text", "text": slot.placeholder})
+                    elif delivery == "followup":
+                        # 保留图片搬到段后 user 消息——tool_result 只留文本。
+                        pending_images.append(self._image_block(slot.ref, slot.b64))
+                    else:
+                        extra.append(self._image_block(slot.ref, slot.b64))
+                if extra:
+                    # 数组化：原文本保持为独立 text block（一个字节都不改），
+                    # 追加物随后——空原文不发射空 text block。
+                    content = (
+                        [{"type": "text", "text": msg.content}] if msg.content else []
+                    ) + extra
                 anthropic_msgs.append(
                     {
                         "role": "user",
@@ -380,27 +448,40 @@ class AnthropicProvider(ModelProvider):
                             {
                                 "type": "tool_result",
                                 "tool_use_id": msg.tool_call_id or "",
-                                "content": msg.content or "",
+                                "content": content,
                             }
                         ],
                     }
                 )
 
             elif msg.role == "user":
+                blocks: list[dict] = []
                 if msg.content:
-                    anthropic_msgs.append(
-                        {
-                            "role": "user",
-                            "content": [{"type": "text", "text": msg.content}],
-                        }
-                    )
+                    blocks.append({"type": "text", "text": msg.content})
+                # 预留的 user 媒体位（followup 下无"轮"可挂靠，就地发射）
+                for slot in slots:
+                    if slot.b64 is None:
+                        blocks.append({"type": "text", "text": slot.placeholder})
+                    else:
+                        blocks.append(self._image_block(slot.ref, slot.b64))
+                if blocks:
+                    anthropic_msgs.append({"role": "user", "content": blocks})
 
+        flush_pending()
         # 合并连续同角色消息：Anthropic Messages API 要求 user/assistant
         # 严格交替，连续同角色返回 400。两个真实产生路径：tool 消息序列化为
         # user（tool_result）后紧跟 steer 注入的 user 消息；无效轮次重试续跑
         # （截断轮的 content 与重试轮的 tool call 相邻两条 assistant）。
         merged = self._merge_consecutive_messages(anthropic_msgs)
         return "\n\n".join(system_parts), merged
+
+    @staticmethod
+    def _image_block(ref: MediaRef, b64: str) -> dict:
+        """图片位 → Anthropic image block（base64 source）。"""
+        return {
+            "type": "image",
+            "source": {"type": "base64", "media_type": ref.mime, "data": b64},
+        }
 
     def _serialize_assistant(self, msg: Message) -> list[dict]:
         """将 assistant 消息的 content_blocks 按序一对一映射回 Anthropic block。
@@ -486,6 +567,8 @@ class AnthropicProvider(ModelProvider):
 
         与 OpenAI 路径同构：cache_control 是附加字段，不改写 thinking 字节、
         不影响签名；Anthropic prompt caching 支持 thinking 块携带缓存标记。
+        最后一个 block 是图片时回退到其前面最后一个非图片 block（text /
+        tool_result）——纯图消息（无非图片 block）时跳过本次标记。
         """
         if not anthropic_messages:
             return
@@ -493,7 +576,11 @@ class AnthropicProvider(ModelProvider):
         content = last_msg.get("content")
         if not isinstance(content, list) or not content:
             return
-        content[-1]["cache_control"] = {"type": "ephemeral"}
+        for block in reversed(cast("list[dict]", content)):
+            if block.get("type") == "image":
+                continue
+            block["cache_control"] = {"type": "ephemeral"}
+            return
 
     # ─── Non-streaming ────────────────────────────────────────────
 
