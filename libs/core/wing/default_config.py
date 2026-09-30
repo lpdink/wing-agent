@@ -111,6 +111,7 @@ agents:
     tools:
       - Bash
       - Read
+      - ReadImage
       - Write
       - Edit
       - Glob
