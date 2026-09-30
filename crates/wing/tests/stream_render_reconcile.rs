@@ -90,6 +90,29 @@ fn shapes() -> Vec<(&'static str, String)> {
             "crlf_unclosed_fence",
             "intro\r\n\r\n```rust\r\nlet x = 1;\r\nlet y = 2;\r\n".into(),
         ),
+        // --- streaming/reference reconciliations found on real sessions ---
+        // A blank line right before the closing fence is dropped by the
+        // reference (its body is `trim_end_matches('\n')`d); the code cache
+        // must hold it as provisional until a non-empty line follows, or a
+        // chunk boundary between the blank line and the closer leaves an
+        // extra body line in the resting state.
+        ("fence_body_ends_blank", "```rust\nlet x = 1;\n\n```\n\nafter\n".into()),
+        (
+            "fence_body_ends_blanks",
+            "intro\n\n```\nline one\n\n\n```\n\nafter\n".into(),
+        ),
+        // A BARE fence that interrupts a list slice: the fence line is the
+        // opener and must not be reprocessed as its own closer (it has no
+        // info string, so a closer check matches it), or the splitter
+        // promotes an empty block and renders the body as prose.
+        (
+            "list_then_bare_fence",
+            "- item one\n- item two\n\n```\nlet x = 1;\n```\n\nafter the block\n".into(),
+        ),
+        (
+            "list_immediately_then_bare_fence",
+            "- item one\n- item two\n```\nlet x = 1;\n```\n\nafter\n".into(),
+        ),
     ]
 }
 
