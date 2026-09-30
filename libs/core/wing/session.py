@@ -531,7 +531,7 @@ class Session:
         # 模型时，用户看到的失败来自上游 model not found，看不出与 session
         # 记录有关——这条 warning 是唯一线索。列表为空 = 远端 /models 动态
         # 来源，跳过（避免在构造期发网络请求）。
-        if provider_cfg.models and model not in provider_cfg.models:
+        if provider_cfg.models and model not in provider_cfg.model_names():
             log.warning(
                 f"Session {self._session_id}: recorded model '{model}' is not "
                 f"in provider '{provider_name}' static model list; restoring anyway"

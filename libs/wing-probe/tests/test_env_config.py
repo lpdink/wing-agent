@@ -317,3 +317,68 @@ async def test_wait_for_health_reports_unreachable_url(tmp_path: Path) -> None:
         await wait_for_health(
             f"http://127.0.0.1:{port}/api/health", timeout=0.2, interval=0.05
         )
+
+
+# ── 模型声明与 images 段（阶段 2：model declaration） ──────────────
+
+
+def test_render_config_omits_models_and_images_by_default() -> None:
+    """缺省不写 models / images 键——保持旧配置文本形态（未声明 = 既有行为）。"""
+    config = yaml.safe_load(
+        render_config_yaml(provider_base_url="http://127.0.0.1:1/v1", gateway_port=2)
+    )
+    assert "models" not in config["providers"][0]
+    assert "images" not in config
+
+
+def test_render_config_model_declarations() -> None:
+    """models 原样写进 providers[0].models（元素 str 或 dict）。"""
+    declarations: list[Any] = [
+        "legacy-model",
+        {
+            "name": "probe/vision",
+            "display_name": "Vision",
+            "description": "sees images",
+            "capabilities": {"vision": True},
+        },
+    ]
+    config = yaml.safe_load(
+        render_config_yaml(
+            provider_base_url="http://127.0.0.1:1/v1",
+            gateway_port=2,
+            models=declarations,
+        )
+    )
+    assert config["providers"][0]["models"] == declarations
+
+
+def test_render_config_images_section() -> None:
+    """images 原样写进顶层 images: 段。"""
+    config = yaml.safe_load(
+        render_config_yaml(
+            provider_base_url="http://127.0.0.1:1/v1",
+            gateway_port=2,
+            images={"max_images": 2, "count_quantum": 1, "request_budget_bytes": 1024},
+        )
+    )
+    assert config["images"] == {
+        "max_images": 2,
+        "count_quantum": 1,
+        "request_budget_bytes": 1024,
+    }
+
+
+def test_env_render_config_passes_models_and_images(tmp_path: Path) -> None:
+    """ProbeEnv 的 models / images 参数进入生成的配置文本（probe_env 标记透传的落点）。"""
+    env = ProbeEnv(
+        tmp_path,
+        models=["legacy", {"name": "probe/vision", "capabilities": {"vision": True}}],
+        images={"max_images": 4},
+    )
+    config = yaml.safe_load(env._render_config(45124))
+    assert config["gateway"]["port"] == 45124
+    assert config["providers"][0]["models"] == [
+        "legacy",
+        {"name": "probe/vision", "capabilities": {"vision": True}},
+    ]
+    assert config["images"] == {"max_images": 4}
