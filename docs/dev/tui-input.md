@@ -86,9 +86,9 @@
 
 输入框（composer）与 chat band 共用**同一个**选择状态机，但各自锚定在自己的坐标空间里——一次选择只属于**按下时所在的那个区域**（`SelectionRegion { Chat, Composer }`），跨区域的拖拽一律夹取回原区域的可见带边缘，不做跨区域合并。
 
-**卡片外框**（`tui-composer-card`）：composer 渲染为一张**悬浮卡片**——左右各留 1 列边距（`chrome::card_area` 是唯一的「悬浮」发生地：布局按卡片宽度要高度、记录卡片矩形、把 widget 渲染进它），卡身整块填用户气泡的 `surface` 底色（草稿看起来就是它将变成的那条消息），上边框是**活动栏**（spinner / 耗时 / 中断提示）、下边框是**元信息栏**（workdir / 本轮用量 / 滚动位置）。几何由 `ui/input_area/chrome.rs` 的 `Chrome` **单一描述**（文字区左起 4 列、右留 2 列、上下各 1 行边框），widget、换行宽度、光标落点、指针映射全部读它——指针不可能描述出渲染没画过的一帧；**编辑器读的是渲染出来的那个 chrome**（`InputArea::chrome()`，无帧时回落到 `chrome::UNFRAMED_WIDTH`），所以终端把 composer 压扁时（`Chrome::of` 降级成无框）换行宽度也跟着降级，不会去用一条屏幕上不存在的宽度。原来独立的「working 行 + info separator 行」都折进边框里，所以一轮运行中**不占任何额外行**。
+**卡片外框**（`tui-composer-card`）：composer 渲染为一张**悬浮卡片**——左右各留 1 列边距（`chrome::card_area` 是唯一的「悬浮」发生地：布局按卡片宽度要高度、记录卡片矩形、把 widget 渲染进它），卡身**不填底色**（与终端背景浑然一体，边界靠边框 / 提示符 / 两条轨道划出，见下），上边框是**活动栏**（spinner / 耗时 / 中断提示）、下边框是**元信息栏**（workdir / 本轮用量 / 滚动位置）。几何由 `ui/input_area/chrome.rs` 的 `Chrome` **单一描述**（文字区左起 4 列、右留 2 列、上下各 1 行边框），widget、换行宽度、光标落点、指针映射全部读它——指针不可能描述出渲染没画过的一帧；**编辑器读的是渲染出来的那个 chrome**（`InputArea::chrome()`，无帧时回落到 `chrome::UNFRAMED_WIDTH`），所以终端把 composer 压扁时（`Chrome::of` 降级成无框）换行宽度也跟着降级，不会去用一条屏幕上不存在的宽度。原来独立的「working 行 + info separator 行」都折进边框里，所以一轮运行中**不占任何额外行**。
 
-**两种亮度**：边框有「静（dim）/ 亮（accent）」两档——**亮**当且仅当草稿是 composer 的（非空 **且** 键盘没被面板接管），亮的只是**四个角与左右竖边**（横线保持 dim，是一圈发光轮廓而不是一片色块）；**键盘被接管**（ask 面板 / `/model` 面板真的在吞键，命令候选 popup 只吞导航键、不算）时整个卡片转「幽灵」——草稿与提示符按 dim 绘制、"这里现在不收键盘"在你按下第一个键之前就看得见。判定谓词是 `App::composer_typing_blocked()`（**不是** `composer_pointer_blocked()`，后者的阈值含可见 popup）。
+**唯一的状态信号**：边框与横线恒为 dim 静色（不做强调——「这里有东西可发」由**提示符 `❯`** 表达：非空草稿时 accent、空草稿时 dim）；**键盘被接管**（ask 面板 / `/model` 面板真的在吞键，命令候选 popup 只吞导航键、不算）时整个卡片转「幽灵」——草稿与提示符按 dim 绘制、"这里现在不收键盘"在你按下第一个键之前就看得见。判定谓词是 `App::composer_typing_blocked()`（**不是** `composer_pointer_blocked()`，后者的阈值含可见 popup）。
 
 | 关注点 | 位置 |
 |---|---|

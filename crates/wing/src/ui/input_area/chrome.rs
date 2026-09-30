@@ -18,14 +18,14 @@
 //!
 //! The card **floats**: it keeps [`CARD_MARGIN`] columns of air on each side
 //! (the layout turns the composer block into [`card_area`] before anything
-//! else looks at it) and its body is filled with the user-message `surface`
-//! tint — the draft reads as the message it is about to become, and the
-//! transcript above stays the only full-bleed thing on screen. The frame
-//! itself has two levels: **quiet** (dark gray) while the card has nothing to
-//! send or another layer owns the keyboard, and **lit** — corners and side
-//! edges in `accent` — while the draft is the composer's to send. A held
-//! keyboard also ghosts the draft, so "typing will not land here" is visible
-//! before a key is pressed.
+//! else looks at it) and its body stays on the terminal's own background —
+//! the boundary is the frame, and nothing else. No fill, no glow: the card
+//! blends with the transcript around it and is told apart by its edges, its
+//! prompt glyph and the rails, the way the rest of the TUI is.
+//!
+//! The one state the frame does carry is the keyboard's: while a panel is
+//! swallowing the composer's keys, the draft is ghosted (drawn as inactive
+//! text), so "typing will not land here" is visible before a key is pressed.
 //!
 //! **One geometry, one writer.** [`Chrome`] is the single description of where
 //! the card's columns are; the widget, the wrap width, the cursor placement and
@@ -179,47 +179,28 @@ impl MetaRail<'_> {
     }
 }
 
-/// Paint the card: the tinted body, the four borders and the two rails. The
-/// text rows are left blank for the widget's own pass.
-///
-/// `lit` is the frame's volume: the corners and the side edges take the accent
-/// (a draft that is the composer's to send), while the rules keep their quiet
-/// gray — a lit silhouette, not a slab of color.
+/// Paint the card's frame: the four borders and the two rails. The text rows
+/// are left blank for the widget's own pass — the draft keeps the terminal's
+/// background, like every other line of the UI.
 pub(super) fn paint(
     buf: &mut Buffer,
     area: Rect,
     chrome: Chrome,
     activity: Option<&ActivityRail<'_>>,
     meta: &MetaRail<'_>,
-    lit: bool,
     palette: &ThemePalette,
 ) {
     if !chrome.card {
         return;
     }
     let dim = Style::default().fg(palette.dim);
-    let edge = if lit {
-        Style::default().fg(palette.accent)
-    } else {
-        dim
-    };
     let top_y = area.y;
     let bottom_y = area.bottom() - 1;
 
-    // Body: the user-message tint, whole block (borders included), so the card
-    // reads as one surface. Content painted after this keeps it: every span
-    // below sets a foreground only, and `Cell::set_style` merges.
-    let tint = Style::default().bg(palette.surface);
-    for y in top_y..area.bottom() {
-        for x in area.x..area.right() {
-            buf[(x, y)].set_style(tint);
-        }
-    }
-
     // Vertical borders, every text row.
     for y in (top_y + 1)..bottom_y {
-        buf.set_span(area.x, y, &Span::styled("│", edge), 1);
-        buf.set_span(area.right() - 1, y, &Span::styled("│", edge), 1);
+        buf.set_span(area.x, y, &Span::styled("│", dim), 1);
+        buf.set_span(area.right() - 1, y, &Span::styled("│", dim), 1);
     }
 
     // Top border: the activity rail (or a plain rule while idle).
@@ -235,7 +216,6 @@ pub(super) fn paint(
             right_corner: '╮',
             items: activity_items,
             right: Vec::new(),
-            corner_style: edge,
         },
         palette,
     );
@@ -252,7 +232,6 @@ pub(super) fn paint(
             right_corner: '╯',
             items,
             right,
-            corner_style: edge,
         },
         palette,
     );
@@ -266,8 +245,6 @@ struct RailLine {
     items: Vec<Vec<Span<'static>>>,
     /// Trailing read-out, kept whole (it is short and it is reserved first).
     right: Vec<Span<'static>>,
-    /// Style of the two corner glyphs — the card's edge color.
-    corner_style: Style,
 }
 
 /// Render one border row: `╭─ <items> ───── <right> ─╮`.
@@ -284,7 +261,6 @@ fn rail(buf: &mut Buffer, area: Rect, y: u16, line: RailLine, palette: &ThemePal
         right_corner,
         items,
         right,
-        corner_style,
     } = line;
     let dim = Style::default().fg(palette.dim);
     // Inner width, minus the two corners. Saturating throughout: the caller
@@ -295,7 +271,7 @@ fn rail(buf: &mut Buffer, area: Rect, y: u16, line: RailLine, palette: &ThemePal
     const FRAME: usize = 3;
 
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(items.len() * 2 + right.len() + 4);
-    spans.push(Span::styled(left_corner.to_string(), corner_style));
+    spans.push(Span::styled(left_corner.to_string(), dim));
 
     // The right block first: it is short, and losing it would lose the scroll
     // read-out that is the whole point of reporting the position here.
@@ -341,7 +317,7 @@ fn rail(buf: &mut Buffer, area: Rect, y: u16, line: RailLine, palette: &ThemePal
         spans.extend(right);
         spans.push(Span::styled(" ─", dim));
     }
-    spans.push(Span::styled(right_corner.to_string(), corner_style));
+    spans.push(Span::styled(right_corner.to_string(), dim));
 
     let mut x = area.x;
     for span in spans {
@@ -544,15 +520,7 @@ mod tests {
             visible_height: 0,
             scroll_offset: 0,
         };
-        paint(
-            &mut buf,
-            area,
-            Chrome::of(area),
-            None,
-            &meta,
-            false,
-            &palette(),
-        );
+        paint(&mut buf, area, Chrome::of(area), None, &meta, &palette());
 
         let top = row_text(&buf, 0);
         assert_eq!(
@@ -609,7 +577,6 @@ mod tests {
             Chrome::of(area),
             Some(&activity),
             &bare(&usage),
-            false,
             &palette(),
         );
         let top = row_text(&buf, 0);
@@ -636,7 +603,6 @@ mod tests {
             Chrome::of(area),
             Some(&activity),
             &bare(&usage),
-            false,
             &palette(),
         );
         for y in 0..3 {
@@ -673,15 +639,7 @@ mod tests {
     fn meta_row(width: u16, meta: &MetaRail<'_>) -> String {
         let area = Rect::new(0, 0, width, 3);
         let mut buf = Buffer::empty(area);
-        paint(
-            &mut buf,
-            area,
-            Chrome::of(area),
-            None,
-            meta,
-            false,
-            &palette(),
-        );
+        paint(&mut buf, area, Chrome::of(area), None, meta, &palette());
         row_text(&buf, 2)
     }
 
@@ -763,7 +721,6 @@ mod tests {
             Chrome::of(area),
             None,
             &bare(&usage),
-            false,
             &palette(),
         );
         let top = row_text(&buf, 0);

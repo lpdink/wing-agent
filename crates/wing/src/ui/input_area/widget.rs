@@ -79,19 +79,19 @@ impl Widget for ComposerWidget<'_> {
         // Update vertical scroll.
         self.input.update_vertical_scroll(chrome);
 
-        // The frame first: the draft is painted into the rows it leaves. The
-        // card is *lit* while the draft is the composer's to send — a held
-        // keyboard or an empty draft leaves it quiet.
-        let lit = !self.keyboard_held && !self.input.is_empty();
+        // The frame first: the draft is painted into the rows it leaves.
         chrome::paint(
             buf,
             area,
             chrome,
             self.activity.as_ref(),
             &self.meta,
-            lit,
             self.palette,
         );
+
+        // The prompt glyph is what says "there is something to send": the one
+        // accent the card carries, and only while it can be acted on.
+        let live = !self.keyboard_held && !self.input.is_empty();
 
         // A held draft is not editable right now: it is drawn the way the
         // chat draws text that is not active (dim), so the state is visible
@@ -116,7 +116,7 @@ impl Widget for ComposerWidget<'_> {
             // logical line only; every other row keeps the text alignment.
             // It lights up as soon as there is something to send.
             if chrome.card && vr.logical_line == 0 && vr.char_start == 0 {
-                let style = if lit {
+                let style = if live {
                     Style::default().fg(self.palette.accent)
                 } else {
                     Style::default().fg(self.palette.dim)

@@ -289,6 +289,7 @@ mod tests {
         assert!(!found.on_char);
     }
 
+    #[test]
     fn test_hit_clamps_the_left_edge() {
         let mut input = InputArea::new("");
         input.set_text("hi");

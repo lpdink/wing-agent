@@ -30,13 +30,6 @@ fn pad(width: usize, content: &str) -> usize {
     width - content.chars().count() - 1
 }
 
-/// One row of the frame as text.
-fn row_text(buf: &ratatui::buffer::Buffer, row: u16) -> String {
-    (buf.area.x..buf.area.right())
-        .map(|x| buf[(x, row)].symbol())
-        .collect()
-}
-
 /// One row of the **card** as text (the float's margins excluded).
 fn card_row(buf: &ratatui::buffer::Buffer, composer: ratatui::layout::Rect, row: u16) -> String {
     (composer.x..composer.right())
@@ -170,53 +163,51 @@ fn test_the_meta_rail_carries_the_session_read_out() {
 }
 
 #[test]
-fn test_the_card_floats_on_a_tint() {
+fn test_the_card_keeps_the_terminal_background() {
     let mut app = app_with_draft("hello world");
     let (buf, composer) = draw_frame(&mut app, 40, 10);
     let palette = crate::config::ThemePalette::default();
 
-    // The body carries the user-message tint — the draft reads as the message
-    // it is about to become (and echoes the bubble it will be).
+    // No fill anywhere: the card is a boundary, not a surface. Every cell of
+    // it — frame, rails and the draft between them — stays on whatever
+    // background the terminal has (the float's margins included).
     for y in composer.y..composer.bottom() {
-        for x in composer.x..composer.right() {
+        for x in composer.x - 1..composer.right() + 1 {
             assert_eq!(
                 buf[(x, y)].bg,
-                palette.surface,
-                "({x},{y}) is not on the card's surface"
+                ratatui::style::Color::Reset,
+                "({x},{y}) must not be filled"
             );
         }
     }
-    // …and nothing outside the float is tinted.
+
+    // The frame and its rules are one quiet gray — no accent on the edges,
+    // with or without a draft.
     for y in composer.y..composer.bottom() {
-        assert_ne!(buf[(composer.x - 1, y)].bg, palette.surface);
-        assert_ne!(buf[(composer.right(), y)].bg, palette.surface);
+        assert_eq!(buf[(composer.x, y)].fg, palette.dim, "left edge at {y}");
+        assert_eq!(
+            buf[(composer.right() - 1, y)].fg,
+            palette.dim,
+            "right edge at {y}"
+        );
     }
-}
 
-#[test]
-fn test_the_frame_is_lit_only_while_the_draft_is_the_composers_to_send() {
-    let palette = crate::config::ThemePalette::default();
-    let accent = ratatui::style::Color::from(palette.accent);
-
-    // An empty draft: the card is quiet (the frame's edges keep the dim gray).
-    let mut app = app_with_draft("");
-    let (buf, composer) = draw_frame(&mut app, 40, 10);
+    // The *prompt glyph* is where "there is something to send" lives: the one
+    // accent the card carries, and dim again while the draft is empty.
+    let (text_x, text_y, _) = composer_text(&app);
     assert_eq!(
-        buf[(composer.x, composer.y + 1)].fg,
-        palette.dim,
-        "quiet edge"
+        buf[(text_x - 2, text_y)].fg,
+        palette.accent,
+        "❯ with a draft"
     );
 
-    // A draft: the frame lights up — corners and side edges in the accent —
-    // while the rules stay gray (a lit silhouette, not a slab of color).
-    let mut app = app_with_draft("hello world");
-    let (buf, composer) = draw_frame(&mut app, 40, 10);
-    assert_eq!(buf[(composer.x, composer.y)].fg, accent, "lit corner");
-    assert_eq!(buf[(composer.x, composer.y + 1)].fg, accent, "lit edge");
+    let mut app = app_with_draft("");
+    let (buf, _) = draw_frame(&mut app, 40, 10);
+    let (text_x, text_y, _) = composer_text(&app);
     assert_eq!(
-        buf[(composer.x + 5, composer.y)].fg,
+        buf[(text_x - 2, text_y)].fg,
         palette.dim,
-        "the rule itself stays quiet"
+        "❯ on an empty draft"
     );
 }
 
@@ -227,7 +218,7 @@ fn test_a_held_keyboard_ghosts_the_draft() {
     // must stop looking ready for one.
     app.ask_panels
         .push_back(required_choice_panel("call-1", &["y", "n"]));
-    let (buf, composer) = draw_frame(&mut app, 40, 10);
+    let (buf, _) = draw_frame(&mut app, 40, 10);
     let palette = crate::config::ThemePalette::default();
     let (text_x, text_y, _) = composer_text(&app);
 
@@ -237,18 +228,13 @@ fn test_a_held_keyboard_ghosts_the_draft() {
         palette.dim,
         "the frozen draft is drawn as inactive text"
     );
-    assert_eq!(
-        buf[(composer.x, composer.y + 1)].fg,
-        palette.dim,
-        "and the frame is quiet"
-    );
-
-    // The panel closes: the draft is live again, in the message's own color.
+    // The panel closes: the draft is live again, in the message's own color,
+    // and its glyph takes the accent back.
     app.ask_panels.clear();
-    let (buf, composer) = draw_frame(&mut app, 40, 10);
+    let (buf, _) = draw_frame(&mut app, 40, 10);
     let (text_x, text_y, _) = composer_text(&app);
     assert_eq!(buf[(text_x, text_y)].fg, palette.text);
-    assert_eq!(buf[(composer.x, composer.y + 1)].fg, palette.accent);
+    assert_eq!(buf[(text_x - 2, text_y)].fg, palette.accent);
 }
 
 /// A squeezed composer (the terminal is too short for the whole layout) gets
