@@ -9,7 +9,7 @@
   ``_apply_pending_compact``（压缩节点 + 重链接 tail），runtime 随后落
   ``compact_done`` 事实事件；
 - rewind：复制行 = target 的最近 Message 祖先内容 + 祖父 parent + 全新 uuid；
-- fork：``extract_subchain``（walk_full_chain 前缀）+ ``_remap_chain_uuids``
+- fork：``_fork_slice``（记录前缀）+ ``_remap_record_uuids``
   （uuid / parent_uuid / unzip 全量重映射）+ fork metadata 快照。
 """
 
@@ -798,40 +798,47 @@ def test_fork_current_copies_whole_chain(tmp_path: Path) -> None:
     assert material["chain_length"] == 5
 
 
-def test_fork_after_compact_excludes_compressed_region(tmp_path: Path) -> None:
-    """compact 后 fork：期望前缀 = 源**活跃链**，被压缩区间不随 fork 走。
+def test_fork_after_compact_keeps_region_out_of_the_chain(tmp_path: Path) -> None:
+    """compact 后 fork：被压缩区间随行走（记录保留）但**不上活跃链**。
 
-    旧口径（``full_chain`` 跨压缩边界）会把压缩前区间也当作期望前缀——
-    那正是"fork 复活已摘要历史、请求前缀与源会话分叉"的 bug 形状。
-    （子会话 live ``_data`` 的复活由场景级请求断言兜底：文件视图只看得见
-    活跃链，看不见 live 链。）
+    记录口径（append 顺序）：子会话保留压缩前全部记录——用户仍能回到压缩前的
+    User Message；活跃链由 tip 回溯自然停在压缩节点（parent_uuid=None），已摘要
+    内容不复活、请求前缀与源会话一致。压缩节点的 unzip 重映射到子记录集内部
+    （不悬空），fork 候选因此与源会话一致。
     """
     source_records = background_compact_after(compact_before())
     write_session(tmp_path, SOURCE_SESSION, source_records, SOURCE_METADATA)
     source = view_of(tmp_path, SOURCE_SESSION)
-    active = source.active_chain()
-    assert [record["uuid"] for record in active] == ["c1", "x1", "x2", "x3"], (
-        source.describe()
-    )
+    assert [record["uuid"] for record in source.active_chain()] == [
+        "c1",
+        "x1",
+        "x2",
+        "x3",
+    ], source.describe()
 
-    mapping = {"c1": "cc1", "x1": "cx1", "x2": "cx2", "x3": "cx3"}
-    child_records = [record for record in source_records if record["uuid"] in mapping]
+    mapping = {record["uuid"]: f"c{record['uuid']}" for record in source_records}
     write_session(
-        tmp_path, "sess-child", remap(child_records, mapping), child_metadata()
+        tmp_path, "sess-child", remap(source_records, mapping), child_metadata()
     )
     child = view_of(tmp_path, "sess-child")
 
     material = assert_fork_of(source, child, "current")
-    # 期望前缀 = 活跃链（4 节点）；压缩前区间（u1..a3）不在期望里
-    assert material["chain_length"] == 4
-    # 压缩节点的 unzip 指向被压缩区间（未随行）→ 与实现一致清空（无悬空引用）
-    assert child.by_uuid["cc1"].get("unzip_last_uuid") is None
+    # 期望前缀 = 全部记录（含被压缩区间 u1..a3）
+    assert material["prefix_length"] == len(source_records)
+    region_uuids = {f"c{uuid}" for uuid in ("u1", "a1", "e1", "u2", "a2", "t1", "a3")}
+    assert region_uuids <= {record["uuid"] for record in child.records}, (
+        child.describe()
+    )
+    # 活跃链从压缩节点开始（4 节点）：区间在记录里但不在链上
     assert [record["uuid"] for record in child.active_chain()] == [
         "cc1",
         "cx1",
         "cx2",
         "cx3",
     ]
+    assert material["chain_length"] == 4
+    # 压缩节点的 unzip 指向子记录集内部（重映射后不悬空 → 仍能回到压缩前）
+    assert child.by_uuid["cc1"]["unzip_last_uuid"] == "cu2"
     child.assert_chain_invariants()
 
 
@@ -891,8 +898,8 @@ def test_fork_rejects_missing_event(tmp_path: Path) -> None:
     with pytest.raises(HistoryAssertionError) as excinfo:
         assert_fork_of(source, child, "u2")
     text = str(excinfo.value)
-    assert "event records did not follow the fork" in text
-    assert "'diff_content'" in text
+    assert "child records is shorter than source record prefix" in text
+    assert "uuid=e1" in text  # 缺失的记录（源侧事件）被点名
 
 
 def test_fork_rejects_broken_parent_relation(tmp_path: Path) -> None:

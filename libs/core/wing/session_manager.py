@@ -17,8 +17,9 @@ wing/session_manager.py — SessionManager
 from __future__ import annotations
 
 import asyncio
+import copy
 import time
-import uuid
+from uuid import uuid4
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -44,33 +45,58 @@ if TYPE_CHECKING:
     from wing.gateway.protocol import AgentOverride
 
 
-def _remap_chain_uuids(nodes: list[ChainNode]) -> list[ChainNode]:
-    """深拷贝混合链（Message + 事件节点）并重映射 uuid/parent_uuid/unzip_last_uuid，保持拓扑。
+def _fork_slice(
+    records: list[dict],
+    target_uuid: str,
+) -> tuple[list[dict], str | None]:
+    """切出 fork 的记录前缀（**append 顺序**）与 draft。
 
-    深拷贝确保 fork 不污染源 session 的内存链状态
-    （extract_subchain 返回的是源 TrackedList 中的 live 对象）。
+    - ``"current"`` → 全部记录，draft 为空串；
+    - 其他 → 目标记录**之前**的全部记录（目标自身不进拷贝：它由响应里的
+      draft 重新发送），draft = 目标记录的 content。
 
-    未随之拷入的节点引用会被清空（`uuid_map.get` 缺省 None），不留悬空引用：
-    压缩节点的 `unzip_last_uuid` 指向被压缩区间（fork 只带活跃链，区间不在
-    拷贝里）→ 子会话里它退化为普通根节点（`/fork` 候选列表不再有 `[Compact]`
-    标记；该标记本身不能作为有效 fork 点，仅展示用）。
+    用记录口径（而不是链遍历）是刻意的：被压缩区间的记录原样保留在子会话里
+    （用户仍可回退 / 分叉到压缩前的 User Message），而"活跃链从哪里开始"由
+    压缩节点自身编码（``parent_uuid=None`` + ``unzip_last_uuid``）——子会话
+    加载时沿 parent_uuid 回溯到该节点即止，已摘要内容不会复活。选压缩前的
+    节点时，压缩节点是后来追加的记录，切在前缀之外 → 子会话里压缩仿佛没发生
+    过（等价于"在压缩点之前分叉"）。
+
+    Raises:
+        ValueError: 目标 uuid 不在记录里。
     """
-    copies = [node.model_copy(deep=True) for node in nodes]
+    if target_uuid == "current":
+        return list(records), ""
+    for index, record in enumerate(records):
+        if record.get("uuid") == target_uuid:
+            content = record.get("content")
+            return records[:index], content if isinstance(content, str) else ""
+    raise ValueError(f"uuid {target_uuid!r} not found in {len(records)} record(s)")
 
+
+def _remap_record_uuids(records: list[dict]) -> list[dict]:
+    """深拷贝记录并把链拓扑 uuid 全量重映射到子会话的 uuid 空间。
+
+    重映射 ``uuid`` / ``parent_uuid`` / ``unzip_last_uuid`` 三个键。前缀口径下
+    所有引用都指向前缀内部（parent 必然更早创建、unzip 指向区间末），因此
+    重映射后子记录集自洽：不留悬空引用，也不需要清空任何引用——压缩节点的
+    unzip 指向重映射后的区间末记录，子会话的 fork 候选列表与源会话一致。
+
+    缺省落到 None 是防御：万一出现前缀外的引用，宁可让它成为根节点，也不留
+    跨 session 的引用。
+    """
+    clones = [copy.deepcopy(record) for record in records]
     uuid_map: dict[str, str] = {}
-    for node in copies:
-        if node.uuid:
-            uuid_map[node.uuid] = str(uuid.uuid4())
-
-    for node in copies:
-        if node.uuid:
-            node.uuid = uuid_map.get(node.uuid, str(uuid.uuid4()))
-        if node.parent_uuid:
-            node.parent_uuid = uuid_map.get(node.parent_uuid)
-        if node.unzip_last_uuid:
-            node.unzip_last_uuid = uuid_map.get(node.unzip_last_uuid)
-
-    return copies
+    for clone in clones:
+        uuid = clone.get("uuid")
+        if isinstance(uuid, str):
+            uuid_map[uuid] = str(uuid4())
+    for clone in clones:
+        for key in ("uuid", "parent_uuid", "unzip_last_uuid"):
+            value = clone.get(key)
+            if isinstance(value, str):
+                clone[key] = uuid_map.get(value)
+    return clones
 
 
 def _tool_refs(tools: list[Tool]) -> list[str]:
@@ -296,34 +322,35 @@ class SessionManager:
     ) -> tuple[Session, str | None] | None:
         """从指定 session 的 target_uuid 处 fork 出新 session。
 
-        新 session 继承源 session 的后端。消息与元数据均经由源 session
-        所属 store 写入：元数据一次写全（workspace / forked_from /
-        template_name / 模型快照 / 系统提示词与动态状态快照 /
-        last_interaction）——fork 的正确性由 store 单一所有者保证。
+        **子会话 = 源会话记录的前缀**（append 顺序，见 ``_fork_slice``）：源
+        记录的 uuid 全量重映射后写进子会话自己的日志，再用加载路径构造内存态
+        ——"子会话在内存里就长得像重启后加载出来的样子"，活跃链由 tip 回溯
+        自然得出。被压缩区间的记录随行走（用户仍可回到压缩前的 User Message），
+        但不会进入活跃链。
+
+        元数据一次写全（workspace / forked_from / template_name / 模型快照 /
+        系统提示词与动态状态快照 / last_interaction）；消息与元数据均经由源
+        session 所属 store 写入——fork 的正确性由 store 单一所有者保证。
         """
         source = self._sessions.get(session_id)
         if source is None:
             return None
 
-        cm = source.context_manager
-        try:
-            subchain, draft = cm.extract_subchain(target_uuid)
-        except ValueError:
-            log.warning(f"fork_session: uuid {target_uuid} not found")
-            return None
-
         store = source.store
         new_session_id = self._generate_session_id()
 
-        # 深拷贝 + uuid 重映射（不污染源 session）
-        remapped = _remap_chain_uuids(subchain)
+        # 记录前缀切片（append 顺序）+ uuid 重映射，写进子会话自己的日志
+        records = store.open_log(session_id).load_all()
+        try:
+            copied, draft = _fork_slice(records, target_uuid)
+        except ValueError:
+            log.warning(f"fork_session: uuid {target_uuid} not found")
+            return None
+        child_log = store.open_log(new_session_id)
+        child_log.append(_remap_record_uuids(copied))
 
-        # 写入消息（经 store 打开日志）
-        new_messages: TrackedList[ChainNode] = TrackedList(
-            store.open_log(new_session_id)
-        )
-        if remapped:
-            new_messages.extend_detached(remapped)
+        # 用加载路径构造内存态（同 resume）：活跃链 = tip 回溯，压缩区间不进链
+        new_messages: TrackedList[ChainNode] = TrackedList.load(child_log, Message)
 
         # 一次写全元数据——fork bug 的结构性修复
         # 模型记录是**快照**：子 session 的 agent 由源 agent 反向抽取模板构造

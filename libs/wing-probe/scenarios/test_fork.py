@@ -277,14 +277,16 @@ COMPACT_FORK_SUMMARY = "Task: answer the user. State: two turns done."
 
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
-async def test_fork_after_compact_keeps_source_prefix(probe: Probe) -> None:
-    """compact 后 fork：子会话请求前缀 = 源活跃链前缀，压缩前区间不复活（红线）。
+async def test_fork_after_compact_keeps_region_out_of_context(probe: Probe) -> None:
+    """compact 后 fork：被压缩区间随行走（回得去）但不上链 / 不进请求（红线）。
 
     WHEN 会话压缩（整窗 → 摘要节点）后 fork at ``current``
-    THEN 断言通过：子链 = 源活跃链（摘要节点起）的重映射副本；子会话首个请求
-    与源会话请求共享前缀（system + 摘要 + tail），且**不出现**压缩前区间的任何
-    内容——它是"子会话上下文与源会话分叉、KV cache 不命中 + 复活已摘要历史"
-    的回归点（旧实现按 ``walk_full_chain`` 把被压缩区间捞回子链）。
+    THEN 断言通过：
+    - 子会话**记录**含压缩前区间（fork 候选与源会话一致：仍能回到压缩前的
+      User Message）；
+    - 子会话**活跃链**从摘要节点起：请求里不出现压缩前区间的任何内容
+      （"复活已摘要历史 / 请求前缀与源会话分叉"的回归点——旧实现按
+      ``walk_full_chain`` 把区间捞回活跃链，或在内存里把拷贝列表直接当活跃链）。
     """
     probe.register(
         COMPACT_FORK_MODEL,
@@ -305,17 +307,35 @@ async def test_fork_after_compact_keeps_source_prefix(probe: Probe) -> None:
     compact_node = source.messages()[0]
     assert compact_node["content"].startswith("[Compact]"), compact_node
 
-    child = await session.fork("current")
-    child_view = probe.history(child)
-    assert_fork_of(source, child_view, "current")
-    await child.chat("child-next")
+    source_branches = [
+        target["content"] for target in (await session.branches())["targets"]
+    ]
+    assert "alpha" in source_branches and "beta" in source_branches, source_branches
 
-    # 子链 = 源活跃链（摘要 + tail），压缩前区间不随 fork 走
-    assert [message["content"] for message in child_view.messages()] == [
+    child = await session.fork("current")
+    assert_fork_of(source, probe.history(child), "current")
+
+    # 记录：压缩前区间随行走（可回退 / 可再分叉）
+    child_view = probe.history(child)
+    child_contents = [record.get("content") for record in child_view.records]
+    assert {"alpha", "reply one", "beta", "reply two"} <= set(child_contents), (
+        child_view.describe()
+    )
+    # 回得去：fork 候选与源会话一致（含压缩前的 User Message 与 [Compact] 标记）
+    child_branches = [
+        target["content"] for target in (await child.branches())["targets"]
+    ]
+    assert child_branches == source_branches, (source_branches, child_branches)
+
+    await child.chat("child-next")
+    # 活跃链 = 摘要 + tail + 子会话自己的轮次（压缩前区间不上链）
+    assert [message["content"] for message in probe.history(child).messages()] == [
         compact_node["content"],
         "gamma",
         "post compact reply",
-    ], child_view.describe()
+        "child-next",
+        "child reply",
+    ], probe.history(child).describe()
 
     # 请求级红线：子会话请求与源会话请求共享前缀（system + 摘要），
     # 且压缩前区间（alpha / beta / reply one / reply two）一个都不出现。
@@ -333,3 +353,55 @@ async def test_fork_after_compact_keeps_source_prefix(probe: Probe) -> None:
     for compressed in ("alpha", "beta", "reply one", "reply two"):
         assert compressed not in child_body, (compressed, child_ctx.describe())
     assert "gamma" in child_body and "child-next" in child_body, child_ctx.describe()
+
+
+PRECOMPACT_FORK_MODEL = "probe/fork-pre-compact"
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_fork_at_pre_compact_message_ignores_the_compaction(probe: Probe) -> None:
+    """从压缩前的 User Message fork：子会话里"压缩仿佛没发生过"（红线）。
+
+    WHEN 先压缩，再选压缩前的 user 消息 fork
+    THEN 子会话记录 = 该消息之前的记录（压缩节点是后来追加的 → 被切在前缀之外），
+    活跃链 = 压缩前的链（不带摘要节点），draft = 目标内容——「从任何一条 User
+    Message 都能 fork」的产品语义靠这条保证。
+    """
+    probe.register(
+        PRECOMPACT_FORK_MODEL,
+        Turn.of(text="reply one"),
+        Turn.of(text="reply two"),
+        Turn.of(text=f"<summary>{COMPACT_FORK_SUMMARY}</summary>"),
+        Turn.of(text="post compact reply"),
+    )
+    session = await probe.session(model=PRECOMPACT_FORK_MODEL)
+    await session.chat("alpha")
+    await session.chat("beta")
+    await session.compact()
+    await session.watch.expect("compact_done", within=15)
+    await session.chat("gamma")
+
+    source = probe.history(session)
+    targets = (await session.branches())["targets"]
+    beta = next(target for target in targets if target["content"] == "beta")
+
+    child = await session.fork(beta["uuid"])
+    assert child.response["draft"] == "beta"
+    assert_fork_of(source, probe.history(child), beta["uuid"])
+
+    child_view = probe.history(child)
+    # 活跃链 = 压缩前的链（alpha / reply one），不带摘要节点
+    assert [message["content"] for message in child_view.messages()] == [
+        "alpha",
+        "reply one",
+    ], child_view.describe()
+    contents = [record.get("content") for record in child_view.records]
+    assert not any(
+        isinstance(content, str) and content.startswith("[Compact]")
+        for content in contents
+    ), child_view.describe()
+    assert [target["content"] for target in (await child.branches())["targets"]] == [
+        "alpha",
+        "(current)",
+    ], child_view.describe()

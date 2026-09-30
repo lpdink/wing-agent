@@ -898,48 +898,6 @@ More detail in: "{dir}/SKILL.md" """
         self._messages.set_tip(rewind_msg.uuid)
         return draft
 
-    def extract_subchain(self, target_uuid: str) -> tuple[list[ChainNode], str | None]:
-        """提取 target_uuid 之前的活跃子链（不含目标消息），用于 fork 到新 session。
-
-        返回混合链前缀（Message + 事件节点）——事件随 fork 拷贝到新 session，
-        diff 等视图在新 session 重放时可见。
-
-        链口径 = **活跃链**（trace_chain，与 get_context_window 同源）：
-        - target = "current" → 复制整个活跃链，draft 为空字符串
-        - 其他 → 用 find() 定位 target，从 target.parent_uuid 沿 parent_uuid
-          回溯到活跃链的根
-
-        压缩节点是活跃链的根（parent_uuid=None + unzip_last_uuid 指向被压缩区）：
-        回溯到此为止——子链 = [摘要节点, ...tail]，与源会话的请求前缀逐字节一致
-        （fork 不碎 KV cache）。**被压缩区间不随 fork 走**：它已不在活跃上下文里，
-        捞回来（walk_full_chain 的展示口径会沿 unzip_last_uuid 回溯）只会让子会话
-        的上下文与源会话分叉、复活已摘要掉的历史。
-
-        target 位于被压缩区间时（``find()`` 仍能找到它、``/fork`` 候选列表也列它），
-        回溯沿父链停在压缩前老链的根——子链 = 压缩前前缀（等价于"在压缩点之前
-        分叉"），不含摘要节点。
-
-        返回 (subchain_nodes, draft_content)，draft 为目标消息的 content。
-        """
-        if target_uuid == "current":
-            return self._messages.trace_chain(), ""
-
-        # 用 find() 定位 target
-        target = self._messages.find(target_uuid)
-        if target is None:
-            raise ValueError(f"uuid {target_uuid} not found")
-        if not isinstance(target, Message):
-            raise ValueError(f"uuid {target_uuid} is not a message node")
-
-        draft = target.content or ""
-
-        # 从 target 的 parent 开始构建活跃子链
-        if target.parent_uuid is None:
-            return [], draft
-
-        subchain = self._messages.trace_chain(from_uuid=target.parent_uuid)
-        return subchain, draft
-
     def get_branch_targets(self) -> list[dict]:
         """返回完整链上的 user 消息 + 压缩节点标记 + (current)。
 
