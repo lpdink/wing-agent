@@ -240,8 +240,17 @@ async def read_file(
     if b"\x00" in raw[:8192]:
         import mimetypes
 
+        from wing.media import SUPPORTED_IMAGE_MIMES, sniff_image_mime
+
         mime, _ = mimetypes.guess_type(path)
-        raise ToolError(f"read_file: {path}: Binary file ({mime or 'unknown'})")
+        # 指引只给"确实是支持格式的图片"：以内容 magic bytes 为准；扩展名
+        # 猜出的 mime 命中支持集合时也认（内容判不出但扩展名说是图片，
+        # 让模型去 ReadImage 拿到明确的格式判定）。其它二进制保持原文案。
+        is_image = sniff_image_mime(raw[:64]) is not None or (
+            mime is not None and mime in SUPPORTED_IMAGE_MIMES
+        )
+        hint = " — use ReadImage to view images" if is_image else ""
+        raise ToolError(f"read_file: {path}: Binary file ({mime or 'unknown'}){hint}")
 
     try:
         text = raw.decode("utf-8-sig")

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from wing.common.logger import log
-from wing.config import get_config
+from wing.config import ModelCapabilities, get_config, resolve_model_capabilities
 from wing.event import AskEvent, WingEvent
 from wing.provider import create_provider
 from wing.provider.base import ModelProvider
@@ -139,6 +139,15 @@ class WingAgent:
     def media(self) -> MediaAccess | None:
         """会话媒体读写窄接口（工具经 ctx.media 写图；None = 无媒体存储）。"""
         return self._media
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        """当前模型的能力声明（实时解析，跟随 /model 切换）。
+
+        无缓存：模型名是 agent 状态（self.model），声明是 provider 配置事实
+        （model_provider.config）——两者各自单所有者，交给纯函数合成即可。
+        """
+        return resolve_model_capabilities(self.model_provider.config, self.model)
 
     @property
     def yolo(self) -> bool:

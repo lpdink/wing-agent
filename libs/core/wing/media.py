@@ -34,6 +34,14 @@ def media_id(data: bytes) -> str:
 
 _PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
+SUPPORTED_IMAGE_MIMES: frozenset[str] = frozenset(
+    {"image/png", "image/jpeg", "image/webp", "image/gif"}
+)
+"""读图链路支持的四种格式（= ``sniff_image_mime`` 的值域）。
+
+ReadImage 的报错文案与 Read 的图片指引共用此集合，支持格式列表不出现第二份。
+"""
+
 
 def sniff_image_mime(data: bytes) -> str | None:
     """按 magic bytes 判定图片格式；不认识/太短返回 None。
@@ -199,13 +207,13 @@ _MIME_SHORT = {
 }
 
 
-def _format_size(nbytes: int) -> str:
+def format_size(nbytes: int) -> str:
     """人类可读字节数（1024 进制，一位小数）。
 
     < 1 KiB 保留 "N bytes" 字面形态；KB 级数值四舍五入后若进位到 1024.0
     （如 1048575 B → "1024.0 KB"）则改用 MB 表达同一数值——同一单位内的
     数值恒 < 1024（review r1 N3）。图片链路单图上限是 MiB 级配置，不设
-    GB 单位。
+    GB 单位。信封文本与 ReadImage 的大小报错共用此函数。
     """
     if nbytes < 1024:
         return f"{nbytes} bytes"
@@ -225,7 +233,7 @@ def format_image_envelope(path: str, ref: MediaRef, mtime: int) -> str:
     mime_short = _MIME_SHORT.get(ref.mime, ref.mime)
     return (
         f"[image: {path} | {mime_short} {ref.width}x{ref.height} | "
-        f"{_format_size(ref.bytes)} | id {ref.id[:8]} | mtime {mtime}]"
+        f"{format_size(ref.bytes)} | id {ref.id[:8]} | mtime {mtime}]"
     )
 
 
