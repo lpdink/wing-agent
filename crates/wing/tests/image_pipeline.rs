@@ -19,6 +19,130 @@ use wing::ui::image::{
     CellPixels, ImageProtocol, ImageState, ImageStore, ImageSupport, MetaState, paint,
 };
 
+/// Every item step 05/06 may name through `wing::ui::image::…`.
+///
+/// This is the compile-time half of the hand-off: a missing re-export (or a `pub(crate)` that
+/// should have been `pub`) fails *here*, in CI, instead of in the next step. `use` alone only
+/// checks paths, so each item is also *referenced* in the shape the caller will use it.
+#[test]
+fn the_public_surface_is_reachable_at_the_module_root() {
+    use wing::ui::image::{
+        CellPixels, DEFAULT_CACHE_BYTES, DEFAULT_CACHE_ENTRIES, DEFAULT_DETECT_TIMEOUT,
+        DEFAULT_FILE_BYTES, DEFAULT_PIXELS, ImageMeta, ImageProtocol, ImageState, ImageStore,
+        ImageStoreConfig, ImageSupport, Limits, MAX_FAILED_ENTRIES, MAX_META_ENTRIES, MetaState,
+        ReadyImage, StoreStats, Unavailable, paint,
+    };
+
+    // Constants.
+    let budgets = (
+        DEFAULT_DETECT_TIMEOUT.as_millis(),
+        DEFAULT_CACHE_ENTRIES,
+        DEFAULT_CACHE_BYTES,
+        DEFAULT_FILE_BYTES,
+        DEFAULT_PIXELS,
+        MAX_META_ENTRIES,
+        MAX_FAILED_ENTRIES,
+    );
+    assert_eq!(budgets.0, 500);
+
+    // Functions and methods, with the signatures the caller relies on.
+    let _: fn() -> ImageStore = || ImageStore::new(ImageSupport::disabled());
+    let _: fn(ImageSupport, ImageStoreConfig) -> ImageStore = ImageStore::with_config;
+    let _: fn(&ImageStore) -> &ImageSupport = ImageStore::support;
+    let _: fn(&mut ImageStore, &Path) -> MetaState = ImageStore::meta;
+    let _: fn(&mut ImageStore, &Path, Size) -> ImageState = ImageStore::request;
+    let _: fn(&mut ImageStore) -> bool = ImageStore::poll;
+    let _: fn(&mut ImageStore) = ImageStore::invalidate;
+    let _: fn(&mut ImageStore) = ImageStore::reset;
+    let _: fn(&mut ImageStore, &Path) = ImageStore::refresh;
+    let _: fn(&ImageStore) -> StoreStats = ImageStore::stats;
+    let _: fn(&ReadyImage) -> ImageProtocol = ReadyImage::protocol;
+    let _: fn(&ReadyImage) -> Size = ReadyImage::size;
+    let _: fn(&ReadyImage) -> bool = ReadyImage::is_current;
+    let _: fn(&ReadyImage, Rect, (i16, i16), &mut Buffer) -> Option<Rect> = paint;
+
+    let _: fn(u16, u16) -> CellPixels = CellPixels::new;
+    let _: fn(&CellPixels) -> bool = CellPixels::is_valid;
+    let _: fn(Duration) -> ImageSupport = ImageSupport::detect;
+    let _: fn(ImageProtocol, CellPixels, bool) -> ImageSupport = ImageSupport::from_parts;
+    let _: fn() -> ImageSupport = ImageSupport::disabled;
+    let _: fn(&ImageSupport) -> bool = ImageSupport::is_enabled;
+    let _: fn(&ImageSupport) -> Option<ImageProtocol> = ImageSupport::protocol;
+    let _: fn(&ImageSupport) -> Option<CellPixels> = ImageSupport::cell_pixel_size;
+    let _: fn(&ImageSupport) -> bool = ImageSupport::is_tmux;
+    let _: fn(&ImageProtocol) -> &'static str = ImageProtocol::name;
+    let _: fn(&ImageMeta) -> f64 = ImageMeta::aspect_ratio;
+
+    // Data types, constructed/matched in caller shape (fields and variants are part of the
+    // contract, and `Unavailable` must stay exhaustively matchable for the fallback).
+    let meta = ImageMeta {
+        px_w: 4,
+        px_h: 3,
+        bytes: 16,
+        mtime: None,
+    };
+    assert!(meta.aspect_ratio() > 1.0);
+    let _ = Limits::default();
+    let _ = ImageStoreConfig::default();
+    let _ = ImageStoreConfig {
+        limits: Limits::default(),
+        waker: None,
+    };
+    let plan = match store_plan() {
+        ImageState::Ready(image) => (image.protocol(), image.size()),
+        ImageState::Pending => (ImageProtocol::Kitty, Size::new(0, 0)),
+        ImageState::Unavailable(_) => (ImageProtocol::Sixel, Size::new(0, 0)),
+    };
+    let _ = plan;
+    let _ = match MetaState::Unknown {
+        MetaState::Known(meta) => meta.px_w,
+        MetaState::Unknown => 0,
+        MetaState::Unavailable(reason) => reason.to_string().len() as u32,
+    };
+    let stats = StoreStats {
+        cached: 0,
+        cached_bytes: 0,
+        in_flight: 0,
+        memo: 0,
+        known_meta: 0,
+        failed: 0,
+        worker_alive: true,
+    };
+    assert!(stats.worker_alive);
+    for reason in [
+        Unavailable::Disabled,
+        Unavailable::NoSpace,
+        Unavailable::Missing,
+        Unavailable::NotAFile,
+        Unavailable::Empty,
+        Unavailable::TooLarge { bytes: 1 },
+        Unavailable::Unreadable,
+        Unavailable::NotAnImage,
+        Unavailable::TooManyPixels { px_w: 1, px_h: 1 },
+        Unavailable::EncodeFailed,
+        Unavailable::WorkerFailed,
+    ] {
+        assert!(!reason.to_string().is_empty());
+    }
+    for protocol in [
+        ImageProtocol::Kitty,
+        ImageProtocol::Sixel,
+        ImageProtocol::Iterm2,
+    ] {
+        assert!(!protocol.name().is_empty());
+    }
+    let _ = CellPixels {
+        width: 1,
+        height: 2,
+    };
+}
+
+/// A disabled store always answers `Unavailable`, which is all this helper needs.
+fn store_plan() -> ImageState {
+    let mut store = ImageStore::new(ImageSupport::disabled());
+    store.request(Path::new("/nonexistent.png"), Size::new(1, 1))
+}
+
 const CELL: CellPixels = CellPixels::new(10, 20);
 
 static NEXT_DIR: AtomicU32 = AtomicU32::new(0);

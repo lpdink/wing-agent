@@ -147,7 +147,7 @@ pub struct StoreStats {
     pub cached: usize,
     /// Approximate bytes those images occupy.
     pub cached_bytes: usize,
-    /// Encode jobs queued or running.
+    /// Encode jobs queued or running (and never anything once the worker is gone).
     pub in_flight: usize,
     /// Memoised metadata entries (known or unavailable).
     pub memo: usize,
@@ -368,6 +368,9 @@ impl ImageStore {
     /// `Pending` forever.
     fn mark_worker_failed(&mut self) {
         self.jobs = None;
+        // Nothing is in flight any more: the jobs that were queued or running died with the
+        // worker, and `in_flight` is a diagnostic that must not claim otherwise.
+        self.in_flight.clear();
     }
 
     /// Non-blocking metadata lookup. The first call queues a header probe and answers
@@ -1486,8 +1489,14 @@ mod tests {
     }
 
     #[test]
-    fn a_refresh_does_not_strand_a_queued_probe() {
+    fn a_refresh_racing_a_queued_probe_still_answers_it() {
         // Same shape as the invalidation race, driven by `refresh` of an unrelated path.
+        //
+        // Attribution (review r2 / N12): this one pins the *combination* of both B1 layers —
+        // reviving either layer alone still passes here, which is exactly why it is worth
+        // keeping (it is the user-visible symptom). The single-layer discriminators are
+        // `the_worker_never_skips_a_queued_probe` (probes survive a moved generation) and
+        // `refresh_leaves_unrelated_paths_alone` (refresh does not revoke).
         let dir = TempDir::new("store-probe-refresh");
         let first = fixture(&dir, "first.png", 40, 30);
         let second = fixture(&dir, "second.png", 60, 30);
@@ -1509,6 +1518,14 @@ mod tests {
         assert_eq!(image.size(), Size::new(6, 2));
     }
 
+    /// A job sender whose receiver is already gone: exactly what a store holds once its worker
+    /// has died (or never started).
+    fn orphan_jobs() -> Sender<Job> {
+        let (orphan, receiver) = mpsc::channel::<Job>();
+        drop(receiver);
+        orphan
+    }
+
     #[test]
     fn a_dead_worker_is_reported_instead_of_staying_pending() {
         // Review r1 / S1: when the worker's channels close (a panic past the guards, or any
@@ -1516,15 +1533,8 @@ mod tests {
         let dir = TempDir::new("store-worker-dead");
         let path = fixture(&dir, "plot.png", 40, 30);
 
-        // The job channel has no receiver: exactly what the store sees once the worker is gone.
-        let (jobs, done) = mpsc::channel::<Done>();
-        drop(done);
         let mut store = store_with(ImageProtocol::Kitty, Limits::default(), None);
-        store.jobs = Some({
-            let (orphan, receiver) = mpsc::channel::<Job>();
-            drop(receiver);
-            orphan
-        });
+        store.jobs = Some(orphan_jobs());
         // The real worker is still around for a moment (its sender was just replaced), so the
         // store's first send is what discovers the failure.
         assert!(matches!(
@@ -1541,7 +1551,35 @@ mod tests {
             ImageState::Unavailable(Unavailable::WorkerFailed)
         ));
         assert_eq!(store.stats().in_flight, 0, "nothing may be left in flight");
-        let _ = jobs;
+    }
+
+    #[test]
+    fn a_dead_worker_clears_the_in_flight_count() {
+        // Review r2 / N11: `in_flight` is a diagnostic, and a diagnostic must not claim jobs
+        // that died with the worker.
+        let dir = TempDir::new("store-dead-inflight");
+        let path = fixture(&dir, "plot.png", 400, 200);
+        let other = dir.path().join("other.png");
+        let mut store = store_with(ImageProtocol::Kitty, Limits::default(), None);
+
+        pump_until(&mut store, "metadata", |store| {
+            matches!(store.meta(&path), MetaState::Known(_))
+        });
+        // An encode is queued and its result deliberately not collected (`poll` is what moves
+        // it out of `in_flight`), so the count is exactly 1 when the worker disappears.
+        assert!(matches!(
+            store.request(&path, Size::new(40, 20)),
+            ImageState::Pending
+        ));
+        assert_eq!(store.stats().in_flight, 1);
+
+        store.jobs = Some(orphan_jobs());
+        assert!(matches!(
+            store.request(&other, Size::new(4, 2)),
+            ImageState::Unavailable(Unavailable::WorkerFailed)
+        ));
+        assert_eq!(store.stats().in_flight, 0);
+        assert!(!store.stats().worker_alive);
     }
 
     #[test]

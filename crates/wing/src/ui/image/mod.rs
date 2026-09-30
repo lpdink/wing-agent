@@ -50,5 +50,6 @@ pub use place::{ReadyImage, paint};
 pub use probe::{CellPixels, DEFAULT_DETECT_TIMEOUT, ImageProtocol, ImageSupport};
 pub use store::{
     DEFAULT_CACHE_BYTES, DEFAULT_CACHE_ENTRIES, DEFAULT_FILE_BYTES, DEFAULT_PIXELS, ImageState,
-    ImageStore, ImageStoreConfig, Limits, MAX_META_ENTRIES, MetaState, StoreStats,
+    ImageStore, ImageStoreConfig, Limits, MAX_FAILED_ENTRIES, MAX_META_ENTRIES, MetaState,
+    StoreStats,
 };
