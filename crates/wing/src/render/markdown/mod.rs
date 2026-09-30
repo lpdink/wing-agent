@@ -243,6 +243,8 @@ fn render_markdown_to_lines(
             base_style,
             theme,
             width: available_width,
+            opts,
+            render_markdown: render_markdown_to_lines,
         };
         if handle_code_block_event(&event, &mut code_block, &mut code_block_env) {
             blockquote_depth = code_block_env.blockquote_depth;
@@ -262,6 +264,7 @@ fn render_markdown_to_lines(
             base_style,
             available_width,
             code_block: &mut code_block,
+            indented_prose: opts.profile.indented_blocks_are_prose(),
             active_table: &mut active_table,
             link_state: &mut link_state,
         };
@@ -310,6 +313,8 @@ fn render_markdown_to_lines(
         base_style,
         theme,
         width: available_width,
+        opts,
+        render_markdown: render_markdown_to_lines,
     };
     finalize_unclosed_code_block(&mut code_block, &mut code_block_env);
 
@@ -393,7 +398,6 @@ mod tests {
     // ============================================================
 
     /// Render `md` under `profile`, flattening to (kind, text) pairs.
-    /// Render `md` under `profile`, flattening to (kind, text) pairs.
     fn profile_pairs(md: &str, profile: Profile) -> Vec<(SegmentKind, String)> {
         render_markdown_lines_with(
             md,
@@ -408,6 +412,84 @@ mod tests {
         .flat_map(|line| line.segments)
         .map(|seg| (seg.kind, seg.text))
         .collect()
+    }
+
+    fn joined_plain(md: &str, profile: Profile) -> String {
+        render_markdown_lines_with(
+            md,
+            None,
+            &dp(),
+            RenderOpts {
+                profile,
+                trim_trailing_blank: true,
+            },
+        )
+        .iter()
+        .map(|line| line.to_plain())
+        .collect::<Vec<_>>()
+        .join("\n")
+    }
+
+    #[test]
+    fn profile_content_keeps_indented_blocks_as_code() {
+        // CommonMark: a 4-space indented block IS code. Assistant content is
+        // a plain document and keeps that reading.
+        let pairs = profile_pairs("before\n\n    indented line\n\nafter", Profile::Content);
+        assert_eq!(
+            find_segment(&pairs, "indented line"),
+            SegmentKind::CodeBlock
+        );
+        assert_eq!(find_segment(&pairs, "┌"), SegmentKind::Border);
+    }
+
+    #[test]
+    fn profile_thinking_renders_indented_blocks_as_prose() {
+        // Reasoning indents to nest sub-thoughts, not to write code: the
+        // block renders as prose, de-indented and markdown-parsed like the
+        // surrounding text.
+        let text = "before\n\n    indented **prose** with `code`\n    second line\n\nafter";
+        let pairs = profile_pairs(text, Profile::Thinking);
+        assert!(
+            pairs.iter().all(|(kind, _)| !matches!(
+                kind,
+                SegmentKind::CodeBlock | SegmentKind::Gutter | SegmentKind::Border
+            )),
+            "thinking rendered code chrome for an indented block: {pairs:?}"
+        );
+        assert_eq!(find_segment(&pairs, "indented "), SegmentKind::Text);
+        assert_eq!(find_segment(&pairs, "code"), SegmentKind::InlineCode);
+        assert_eq!(find_segment(&pairs, "second line"), SegmentKind::Text);
+        assert_eq!(find_segment(&pairs, "after"), SegmentKind::Text);
+        // De-indented: the nesting offset is dropped, and the paragraphs keep
+        // their blank-line separation.
+        let plain = joined_plain(text, Profile::Thinking);
+        assert!(
+            plain.contains("\nindented ") && plain.contains("\nsecond line"),
+            "indentation not dropped: {plain:?}"
+        );
+        assert_eq!(
+            joined_plain("    one\n\n    two\n", Profile::Thinking),
+            "one\n\ntwo",
+            "interior blank lines separate paragraphs"
+        );
+    }
+
+    #[test]
+    fn profile_thinking_indented_list_stays_a_list() {
+        // A list inside an indented region is prose structure, not code.
+        let pairs = profile_pairs("note:\n\n    - first\n    - second\n", Profile::Thinking);
+        assert_eq!(find_segment(&pairs, "first"), SegmentKind::Text);
+        assert!(
+            pairs
+                .iter()
+                .any(|(kind, text)| *kind == SegmentKind::Marker && text.contains('•')),
+            "list marker lost: {pairs:?}"
+        );
+        assert!(
+            pairs
+                .iter()
+                .all(|(kind, _)| *kind != SegmentKind::CodeBlock)
+        );
     }
 
     #[test]

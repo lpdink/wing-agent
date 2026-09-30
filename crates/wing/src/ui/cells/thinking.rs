@@ -307,6 +307,30 @@ mod tests {
         );
     }
 
+    /// Reasoning's own rule: indented (4-space) blocks are nesting, not code.
+    #[test]
+    fn test_thinking_renders_indented_blocks_as_prose() {
+        let mut block = ThinkingBlock::new();
+        block.append("a thought:\n\n    a nested **nesting** with `code`\n\nback");
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80);
+        let pairs = span_pairs(&lines);
+        assert!(
+            !pairs
+                .iter()
+                .any(|(text, _)| text.contains('┌') || text.contains('└')),
+            "indented reasoning rendered a code frame: {pairs:?}"
+        );
+        let (_, nested) = find_span(&pairs, "nested ");
+        assert_eq!(nested.fg, Some(Color::Gray), "nested prose fg: {nested:?}");
+        let (_, bold) = find_span(&pairs, "nesting");
+        assert!(
+            bold.add_modifier.contains(Modifier::BOLD) && bold.fg == Some(Color::Gray),
+            "bold keeps its modifier under the thinking fg: {bold:?}"
+        );
+        let (_, inline) = find_span(&pairs, "code");
+        assert_eq!(inline.fg, Some(Color::Cyan), "inline code fg: {inline:?}");
+    }
+
     #[test]
     fn test_thinking_empty() {
         let block = ThinkingBlock::new();

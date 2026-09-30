@@ -9,7 +9,7 @@ use pulldown_cmark::{CodeBlockKind, HeadingLevel, Tag, TagEnd};
 use super::code_blocks::CodeBlockState;
 use super::links;
 use super::tables::{TableBuffer, render_table};
-use super::types::{MarkdownLine, MarkdownTheme, SegmentKind};
+use super::types::{MarkdownLine, MarkdownSegment, MarkdownTheme, SegmentKind};
 
 use ratatui::style::Style;
 
@@ -64,6 +64,9 @@ pub(crate) struct MarkdownContext<'a> {
     pub(crate) base_style: Style,
     pub(crate) available_width: Option<u16>,
     pub(crate) code_block: &'a mut Option<CodeBlockState>,
+    /// Render indented (4-space) blocks as prose — the Thinking profile,
+    /// where indentation is nesting rather than code (see [`super::Profile`]).
+    pub(crate) indented_prose: bool,
     pub(crate) active_table: &'a mut Option<TableBuffer>,
     pub(crate) link_state: &'a mut Option<LinkState>,
 }
@@ -229,6 +232,7 @@ pub(crate) fn handle_start_tag(tag: &Tag<'_>, ctx: &mut MarkdownContext<'_>) {
             *ctx.code_block = Some(CodeBlockState {
                 language,
                 buffer: String::new(),
+                prose: matches!(kind, CodeBlockKind::Indented) && ctx.indented_prose,
             });
         }
         Tag::Table(alignments) => {
@@ -484,16 +488,76 @@ fn ensure_prefix(
     if !current_line.segments.is_empty() {
         return;
     }
+    current_line.segments = block_prefix_segments(
+        blockquote_depth,
+        list_continuation_prefix,
+        pending_list_prefix,
+        base_style,
+    );
+}
 
+/// Segments the enclosing block contributes to a line's start: one
+/// blockquote bar per depth, then the pending list marker (consumed once) or
+/// the list continuation indent.
+fn block_prefix_segments(
+    blockquote_depth: usize,
+    list_continuation_prefix: &str,
+    pending_list_prefix: &mut Option<String>,
+    base_style: Style,
+) -> Vec<MarkdownSegment> {
+    let mut segments = Vec::new();
     for _ in 0..blockquote_depth {
-        current_line.push_segment(SegmentKind::Border, base_style.dim().italic(), "│ ");
+        segments.push(MarkdownSegment::new(
+            SegmentKind::Border,
+            base_style.dim().italic(),
+            "│ ",
+        ));
     }
-
     if let Some(prefix) = pending_list_prefix.take() {
-        current_line.push_segment(SegmentKind::Marker, base_style, &prefix);
+        segments.push(MarkdownSegment::new(
+            SegmentKind::Marker,
+            base_style,
+            &prefix,
+        ));
     } else if !list_continuation_prefix.is_empty() {
-        current_line.push_segment(SegmentKind::Marker, base_style, list_continuation_prefix);
+        segments.push(MarkdownSegment::new(
+            SegmentKind::Marker,
+            base_style,
+            list_continuation_prefix,
+        ));
     }
+    segments
+}
+
+/// Prefix already-rendered lines with the enclosing block's prefix.
+///
+/// Used for a nested render spliced into the current block (an indented
+/// block rendered as prose, see `Profile`): blank lines stay blank — the
+/// paragraph convention — while every content line gets the blockquote bars
+/// and the list continuation indent.
+pub(crate) fn prefix_prose_lines(
+    lines: Vec<MarkdownLine>,
+    blockquote_depth: usize,
+    list_continuation_prefix: &str,
+    pending_list_prefix: &mut Option<String>,
+    base_style: Style,
+) -> Vec<MarkdownLine> {
+    lines
+        .into_iter()
+        .map(|mut line| {
+            if !line.segments.is_empty() {
+                let mut segments = block_prefix_segments(
+                    blockquote_depth,
+                    list_continuation_prefix,
+                    pending_list_prefix,
+                    base_style,
+                );
+                segments.append(&mut line.segments);
+                line.segments = segments;
+            }
+            line
+        })
+        .collect()
 }
 
 fn heading_style(level: HeadingLevel, theme: &MarkdownTheme) -> Style {

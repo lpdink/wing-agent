@@ -5,7 +5,8 @@
 
 use ratatui::style::Style;
 
-use super::parsing::{flush_current_line, push_blank_line};
+use super::RenderOpts;
+use super::parsing::{flush_current_line, prefix_prose_lines, push_blank_line};
 use super::types::{MarkdownLine, MarkdownSegment, MarkdownTheme, SegmentKind};
 use crate::render::diff_highlight::DiffHighlighters;
 use crate::render::diff_highlight::DiffSide;
@@ -16,6 +17,10 @@ use crate::render::syntax::highlight_code_lines;
 pub(crate) struct CodeBlockState {
     pub(crate) language: Option<String>,
     pub(crate) buffer: String,
+    /// Render the buffered text as PROSE instead of a code block — the
+    /// Thinking profile's indented (4-space) blocks, where the indentation
+    /// means nesting, not code (see [`super::Profile`]).
+    pub(crate) prose: bool,
 }
 
 /// Environment for rendering code block content.
@@ -30,6 +35,15 @@ pub(crate) struct CodeBlockRenderEnv<'a> {
     /// Available render width — diff rows pad their tinted background to it.
     /// None = unknown (no padding).
     pub(crate) width: Option<u16>,
+    /// Render options of the enclosing document — a prose block re-parses
+    /// with the same profile, minus the trailing-blank trim (the block's own
+    /// end blank is this block's separator).
+    pub(crate) opts: RenderOpts,
+    /// The orchestrator's markdown renderer, injected so this module can
+    /// re-parse a prose block as a nested document without depending on the
+    /// parser (see [`render_prose_block`]).
+    pub(crate) render_markdown:
+        fn(&str, Style, &MarkdownTheme, Option<u16>, RenderOpts) -> Vec<MarkdownLine>,
 }
 
 /// Handle an event while inside a code block.
@@ -81,12 +95,41 @@ fn finalize_code_block(
         env.base_style,
     );
     if let Some(state) = code_block.take() {
-        let rendered = render_code_block(&state, env);
+        let rendered = if state.prose {
+            render_prose_block(&state.buffer, env)
+        } else {
+            render_code_block(&state, env)
+        };
         env.lines.extend(rendered);
         if append_trailing_blank_line {
             push_blank_line(env.lines);
         }
     }
+}
+
+/// Render a prose block (the Thinking profile's indented blocks): its
+/// (already de-indented) text is re-parsed as a nested markdown document, so
+/// inline code, emphasis, lists and even fenced blocks inside it render the
+/// way the surrounding reasoning prose does, then spliced into the current
+/// block with its prefix applied.
+fn render_prose_block(text: &str, env: &mut CodeBlockRenderEnv<'_>) -> Vec<MarkdownLine> {
+    let nested = (env.render_markdown)(
+        text,
+        env.base_style,
+        env.theme,
+        env.width,
+        RenderOpts {
+            trim_trailing_blank: false,
+            ..env.opts
+        },
+    );
+    prefix_prose_lines(
+        nested,
+        env.blockquote_depth,
+        env.list_continuation_prefix,
+        env.pending_list_prefix,
+        env.base_style,
+    )
 }
 
 /// Render a complete code block with border, optional syntax highlighting,

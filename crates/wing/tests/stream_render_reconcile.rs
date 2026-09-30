@@ -115,6 +115,17 @@ fn shapes() -> Vec<(&'static str, String)> {
             "list_immediately_then_bare_fence",
             "- item one\n- item two\n```\nlet x = 1;\n```\n\nafter\n".into(),
         ),
+        // Indented blocks: code for content, prose for reasoning (see
+        // `Profile`) — the nested re-parse must agree with the reference in
+        // both profiles, including its markdown structure.
+        (
+            "indented_block_with_markdown",
+            "note:\n\n    a nested **thought** with `code`\n\n    - bullet one\n    - bullet two\n\nafter\n".into(),
+        ),
+        (
+            "indented_block_then_paragraph",
+            "before\n\n    indented prose line\nimmediately after\n\nend\n".into(),
+        ),
     ]
 }
 
