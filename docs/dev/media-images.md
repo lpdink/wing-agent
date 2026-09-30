@@ -5,7 +5,7 @@
 
 事实来源：代码 `libs/core/wing/{media.py,schema.py,store/,agent/,provider/,compactor.py}`、
 `libs/core/wing/tools/read_image.py`；整机证据 `libs/wing-probe/scenarios/test_read_image.py`
-（本文末列 8 条场景）。本页只讲 *why* 与不变量，逐行契约以代码为准。
+（本文末列 11 条场景）。本页只讲 *why* 与不变量，逐行契约以代码为准。
 
 ## 链路总览
 
