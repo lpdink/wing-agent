@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 from wing_probe.history import (
+    FORK_SNAPSHOT_FIELDS,
     HistoryAssertionError,
     HistoryView,
     assert_compact_transition,
@@ -152,7 +153,11 @@ def view_of(root: Path, session_id: str) -> HistoryView:
 def remap(
     records: Sequence[Mapping[str, Any]], mapping: Mapping[str, str]
 ) -> list[dict[str, Any]]:
-    """模拟 ``_remap_chain_uuids``：深拷贝 + uuid / parent_uuid / unzip 重映射。"""
+    """模拟 ``_remap_chain_uuids``：深拷贝 + uuid / parent_uuid / unzip 重映射。
+
+    与实现同口径：**映射表里没有的引用落到 None**（不留悬空引用）——fork 只带
+    活跃链时，压缩节点的 ``unzip_last_uuid`` 指向被压缩区间（未随行）即被清空。
+    """
     clones = copy.deepcopy([dict(record) for record in records])
     for clone in clones:
         uuid = clone.get("uuid")
@@ -160,10 +165,10 @@ def remap(
             clone["uuid"] = mapping.get(uuid, uuid)
         parent = clone.get("parent_uuid")
         if isinstance(parent, str):
-            clone["parent_uuid"] = mapping.get(parent, parent)
+            clone["parent_uuid"] = mapping.get(parent)
         unzip = clone.get("unzip_last_uuid")
         if isinstance(unzip, str):
-            clone["unzip_last_uuid"] = mapping.get(unzip, unzip)
+            clone["unzip_last_uuid"] = mapping.get(unzip)
     return clones
 
 
@@ -819,6 +824,8 @@ def test_fork_after_compact_excludes_compressed_region(tmp_path: Path) -> None:
     material = assert_fork_of(source, child, "current")
     # 期望前缀 = 活跃链（4 节点）；压缩前区间（u1..a3）不在期望里
     assert material["chain_length"] == 4
+    # 压缩节点的 unzip 指向被压缩区间（未随行）→ 与实现一致清空（无悬空引用）
+    assert child.by_uuid["cc1"].get("unzip_last_uuid") is None
     assert [record["uuid"] for record in child.active_chain()] == [
         "cc1",
         "cx1",
@@ -1061,7 +1068,7 @@ def test_fork_snapshot_fields_can_be_narrowed(tmp_path: Path) -> None:
 
 
 def test_fork_reports_unverifiable_snapshot_fields(tmp_path: Path) -> None:
-    """源 metadata 无该字段记录（从未切换过模型）→ 如实报告"无法对账"。"""
+    """源 metadata 无该字段记录（如从未切换过模型 / 未注入追加提示词）→ 如实报告"无法对账"。"""
     source_records = fork_source()
     source_meta = {
         "workspace": SOURCE_METADATA["workspace"],
@@ -1077,7 +1084,10 @@ def test_fork_reports_unverifiable_snapshot_fields(tmp_path: Path) -> None:
     source = view_of(tmp_path, SOURCE_SESSION)
     child = view_of(tmp_path, "sess-child")
     material = assert_fork_of(source, child, "u2")
-    assert material["unverifiable_metadata_fields"] == ["model_name", "provider_name"]
+    # 快照字段中源侧缺记录的项全部如实列出（按 FORK_SNAPSHOT_FIELDS 顺序）
+    expected = [field for field in FORK_SNAPSHOT_FIELDS if field not in source_meta]
+    assert material["unverifiable_metadata_fields"] == expected
+    assert {"model_name", "provider_name", "append_system_prompt"} <= set(expected)
 
 
 def test_fork_unknown_target(tmp_path: Path) -> None:

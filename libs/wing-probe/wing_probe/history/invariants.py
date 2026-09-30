@@ -98,11 +98,22 @@ FORK_METADATA_FIELDS: tuple[str, ...] = (
 )
 
 #: 与源 session 的**当前** metadata 交叉对账的快照字段（`forked_from` 恒校验）。
+#:
+#: 收录口径：fork 写入子记录时**必然**等于源侧记录（或源侧无记录 → 跳过对账，
+#: 见 ``unverifiable_metadata_fields``）的字段。`tools` / `yolo` 刻意不收：
+#: 子记录取源会话的 **live 有效值**，而源侧存在不落记录的 live 变更路径
+#: （远程工具 ref 失效降级、Bash 工具的 "always allow" 打开 yolo）——live 与
+#: 记录合法漂移，纳入对账会制造假红。
 FORK_SNAPSHOT_FIELDS: tuple[str, ...] = (
     "workspace",
     "template_name",
     "model_name",
     "provider_name",
+    "system_prompt",
+    "append_system_prompt",
+    "thinking",
+    "reasoning_effort",
+    "max_turns",
 )
 
 #: rewind / fork 的"当前状态"哨兵（实现里 target == "current" 有专属语义）。

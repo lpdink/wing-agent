@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import asyncio
 import time
 from dataclasses import dataclass, field
@@ -77,7 +79,8 @@ class OpenAICompatProvider(ModelProvider):
         self.timeout_first_chunk = config.timeout_first_chunk
         self.timeout_total = config.timeout_total
         self.explicit_cache_mode = config.explicit_cache_mode
-        self._extra_body: dict = dict(config.extra_body)
+        # 深拷贝：与 anthropic 路径同口径——运行时开关不得写穿全局 ProviderConfig。
+        self._extra_body: dict = copy.deepcopy(config.extra_body)
         # 基线默认行为（对齐 develop）：enable_thinking / preserve_thinking 默认
         # 随每个请求发送（用户 extra_body 的显式值优先）。preserve_thinking 尤为
         # 关键——缺它则多轮工具回合间 thinking 被服务端剥离。

@@ -677,6 +677,29 @@ class TestThinkingStatus:
             await p.aclose()
 
     @pytest.mark.asyncio
+    async def test_set_thinking_does_not_mutate_provider_config(self):
+        """set_thinking 不得写穿全局 ProviderConfig（extra_body 深拷贝）。
+
+        嵌套的 thinking dict 若与 config 共享引用，运行时开关会污染同进程
+        其他会话与按配置重建的 provider（review 发现：潜拷贝 + setdefault）。
+        """
+        cfg = ProviderConfig(
+            name="test-anthropic",
+            protocol="anthropic",
+            base_url="https://api.anthropic.com",
+            api_key="sk-test",
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        p = AnthropicProvider(cfg)
+        try:
+            p.set_thinking(True)
+            assert p.thinking is True
+            # 全局配置保持原样（budget 不得渗进 cfg.extra_body）
+            assert cfg.extra_body == {"thinking": {"type": "disabled"}}
+        finally:
+            await p.aclose()
+
+    @pytest.mark.asyncio
     async def test_set_thinking_enable_fills_default_budget(self):
         """无 thinking 配置时启用：补默认预算（type=enabled 必带 budget）。"""
         from wing.provider.anthropic import _DEFAULT_THINKING_BUDGET

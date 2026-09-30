@@ -49,6 +49,11 @@ def _remap_chain_uuids(nodes: list[ChainNode]) -> list[ChainNode]:
 
     深拷贝确保 fork 不污染源 session 的内存链状态
     （extract_subchain 返回的是源 TrackedList 中的 live 对象）。
+
+    未随之拷入的节点引用会被清空（`uuid_map.get` 缺省 None），不留悬空引用：
+    压缩节点的 `unzip_last_uuid` 指向被压缩区间（fork 只带活跃链，区间不在
+    拷贝里）→ 子会话里它退化为普通根节点（`/fork` 候选列表不再有 `[Compact]`
+    标记；该标记本身不能作为有效 fork 点，仅展示用）。
     """
     copies = [node.model_copy(deep=True) for node in nodes]
 
@@ -185,6 +190,9 @@ class SessionManager:
 
         # 生成或使用传入的 session_id
         sid = session_id if session_id is not None else self._generate_session_id()
+        # 「是否既有会话（磁盘恢复）」必须在构造之前判定：构造路径（override /
+        # 状态还原）可能已经写过 metadata，之后 store.exists 无法区分。
+        restored_existing = store.exists(sid)
 
         # 创建 TrackedList（经 store 打开消息日志；混合链：Message + 事件）
         messages: TrackedList[ChainNode] = (
@@ -208,10 +216,13 @@ class SessionManager:
         self._sessions[sid] = session
         self.touch(sid)
 
-        # 触发 before_session_start hook
-        hooks.invoke("before_session_start", session)
-        # hook 注入的追加系统提示词（环境信息等）随创建落盘：resume/fork
-        # 重建 CM 时恢复同一系统提示词，否则前缀变化会碎掉会话的 KV cache。
+        # 触发 before_session_start hook——**仅新建会话**。恢复既有会话
+        # （`session_id` 的磁盘恢复场景）走 resume 语义：hook 注入的追加系统
+        # 提示词已随会话持久化、由构造还原，再跑一次 hook 只会在记录之上叠加
+        # 同一段内容（系统段漂移 + token 膨胀）。
+        if not restored_existing:
+            hooks.invoke("before_session_start", session)
+        # 新建时把 hook 注入落盘；恢复时记录已在磁盘上（sync 幂等跳过）。
         session.sync_append_system_prompt()
 
         log.info(f"Session created: {sid} (template={template.name})")
@@ -326,12 +337,16 @@ class SessionManager:
         # （生效模型=源此刻模型），metadata 记录同一对值，重启后 resume 才
         # 不会偏离 fork 时用户看到的模型。
         #
-        # 提示词与动态状态同属快照：系统提示词（替换值 + 追加值）、工具集、
-        # thinking / effort / yolo / max_turns 全部按源会话此刻的**有效状态**
-        # 写全——子会话重启后（resume）复现 fork 时刻的请求前缀，与源会话
-        # 逐字节一致，fork 不碎 KV cache。append_system_prompt 取 live 值
-        # （而非源 metadata）：兼容"落盘字段引入前创建的存量会话"，hook 注入
-        # 的环境信息此刻只存在于内存。
+        # 提示词与动态状态同属快照——子会话重启后（resume）复现 fork 时刻的
+        # 请求前缀，与源会话逐字节一致，fork 不碎 KV cache。口径分两类：
+        # - 提示词 / 工具集 / yolo / max_turns 取 **live 有效值**：子会话的
+        #   agent 由 AgentTemplate.from_agent 按 live 构造，记录必须与之一致，
+        #   否则子会话 live 与 resume 分叉；append_system_prompt 取 live 值
+        #   还兼容"落盘字段引入前创建的存量会话"（hook 注入只存在于内存）。
+        # - thinking / reasoning_effort 取**显式记录**（可能为 None）：派生
+        #   默认值（provider 协议默认）固化进记录会让子会话请求体带上源会话
+        #   没有的显式配置（前缀身份被破坏），跨协议切模型时更会把一种协议的
+        #   默认值贴到另一种协议上。
         store.save_metadata(
             new_session_id,
             SessionMetadata(
@@ -345,8 +360,8 @@ class SessionManager:
                     source.context_manager.append_system_prompt or None
                 ),
                 tools=_tool_refs(source.agent.tools),
-                thinking=source.agent.model_provider.thinking,
-                reasoning_effort=source.agent.model_provider.reasoning_effort,
+                thinking=source.persisted_thinking,
+                reasoning_effort=source.persisted_reasoning_effort,
                 yolo=source.agent.yolo,
                 max_turns=source.agent.max_turns,
                 last_interaction=datetime.now().isoformat(),

@@ -43,8 +43,12 @@ class SessionMetadata(BaseModel):
     - tools：可执行工具集覆盖（ref 列表，如 "Bash" / "client.Read"）；
     - thinking / reasoning_effort / yolo / max_turns：会话级开关与限额。
 
-    fork 时这些字段按 fork 时刻的**有效状态**一次写全（快照语义，与模型绑定
-    一致）——子会话重启后不会偏离 fork 时的行为。
+    fork 时这些字段一次写全（快照语义，与模型绑定一致）——子会话重启后不会
+    偏离 fork 时的行为：提示词 / 工具集 / yolo / max_turns 取 fork 时刻的
+    **有效值**（子会话 agent 由 `AgentTemplate.from_agent` 按 live 构造，记录
+    必须与之一致）；thinking / reasoning_effort 只拷**显式记录**——固化了
+    provider 派生默认（如 anthropic 未配置 thinking）会让子会话请求体带上源
+    会话没有的显式配置。
     """
 
     model_config = ConfigDict(extra="ignore")

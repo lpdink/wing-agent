@@ -915,6 +915,10 @@ More detail in: "{dir}/SKILL.md" """
         捞回来（walk_full_chain 的展示口径会沿 unzip_last_uuid 回溯）只会让子会话
         的上下文与源会话分叉、复活已摘要掉的历史。
 
+        target 位于被压缩区间时（``find()`` 仍能找到它、``/fork`` 候选列表也列它），
+        回溯沿父链停在压缩前老链的根——子链 = 压缩前前缀（等价于"在压缩点之前
+        分叉"），不含摘要节点。
+
         返回 (subchain_nodes, draft_content)，draft 为目标消息的 content。
         """
         if target_uuid == "current":

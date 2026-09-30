@@ -404,6 +404,22 @@ class Session:
         """该 session 所属的 SessionStore（fork 继承后端、SM 聚合用）。"""
         return self._store
 
+    @property
+    def persisted_thinking(self) -> bool | None:
+        """记录在案的 thinking 开关（None = 无记录，跟随 provider 配置）。
+
+        fork 快照（`SessionManager.fork_session`）取**记录**而非 live 派生值：
+        派生默认（如 anthropic 未配置 thinking 时的 disabled）被固化进子会话
+        记录后，会变成源会话请求体里不存在的显式配置——前缀身份被破坏，
+        跨协议切模型时还会把一种协议的默认值贴到另一种协议上。
+        """
+        return self._metadata.thinking
+
+    @property
+    def persisted_reasoning_effort(self) -> str | None:
+        """记录在案的推理力度（None = 无记录，跟随 provider 配置）。"""
+        return self._metadata.reasoning_effort
+
     # ── metadata 管理 ──────────────────────────────
 
     def _save_metadata(self) -> None:
@@ -518,11 +534,12 @@ class Session:
         显式模型动作的落盘点，也是模型选择跨进程重启的唯一恢复来源。
 
         跨 provider 切换会换上另一个 provider 实例（provider 级 extra_body
-        状态归零）：记录在案的 thinking / effort 等开关重新贴回，避免一次
-        /model 就把会话开关悄悄改回配置默认（同 provider 切模型本就保留）。
+        状态归零）：记录在案的 thinking / reasoning_effort 重新贴回，避免
+        一次 /model 就把会话开关悄悄改回配置默认（同 provider 切模型本就
+        保留）。agent 级状态（yolo / max_turns）不随切换变化，不在此重贴。
         """
         self.agent.set_model(model, self._resolve_provider(provider_name))
-        self._reapply_recorded_options()
+        self._reapply_recorded_provider_options()
         self._persist_model()
 
     def _resolve_provider(self, provider_name: str | None) -> "ModelProvider":
@@ -569,7 +586,11 @@ class Session:
         self._restore_persisted_prompt()
         self._restore_persisted_tools()
         self._restore_persisted_model()
-        self._reapply_recorded_options()
+        # 模型还原可能换上别的 provider 实例：provider 级开关必须落在最终
+        # 活跃的 provider 上；agent 级开关（yolo / max_turns）与 provider
+        # 无关，单独应用（两者口径见各自 docstring）。
+        self._reapply_recorded_provider_options()
+        self._restore_persisted_agent_options()
 
     def _restore_persisted_prompt(self) -> None:
         """还原基础系统提示词替换与追加系统提示词。"""
@@ -583,11 +604,14 @@ class Session:
         """按记录还原可执行工具集（尽力而为）。
 
         ref 可能因远程宿主未连接 / 配置变更而失效：逐个解析、失效的跳过并
-        告警；全部失效或绑定失败时保持模板工具集（宁可多给，不可裸奔——
-        远程工具与动态工具切换尚无系统化设计，先按最简单语义处理）。
+        告警；非空记录全部失效或绑定失败时保持模板工具集（宁可多给，不可
+        裸奔——远程工具与动态工具切换尚无系统化设计，先按最简单语义处理）。
+
+        `None`（无记录）与 `[]`（显式清空工具集）语义不同：后者是用户的
+        显式动作，必须原样还原。
         """
         refs = self._metadata.tools
-        if not refs:
+        if refs is None:
             return
         from wing.tool_registry import tool_registry
 
@@ -598,7 +622,7 @@ class Session:
                 f"Session {self._session_id}: {len(missing)} recorded tool(s) "
                 f"no longer resolvable, skipped: {missing}"
             )
-        if not resolved:
+        if refs and not resolved:
             log.warning(
                 f"Session {self._session_id}: no recorded tool resolves; "
                 "keeping template tools"
@@ -616,18 +640,26 @@ class Session:
                 "keeping template tools"
             )
 
-    def _reapply_recorded_options(self) -> None:
-        """把记录在案的动态开关应用到当前 agent / provider（无记录即默认）。
+    def _reapply_recorded_provider_options(self) -> None:
+        """把记录在案的 **provider 级**开关应用到当前 provider（无记录即默认）。
 
-        构造还原与跨 provider 模型切换共用：换 provider 实例后 provider 级
-        extra_body 状态归零，记录在案的 thinking（enable_thinking）与
+        provider 实例在跨 provider 切换与模型还原时会被换掉（provider 级
+        extra_body 状态归零），记录在案的 thinking（enable_thinking）与
         reasoning_effort 必须重新落上去。
+
+        **只做 provider 级**：yolo / max_turns 是 agent 级状态，不随 provider
+        切换变化——一并重贴会盖掉 live 值（例：Bash 工具的 "always allow"
+        运行时打开 yolo，不产生任何记录）。
         """
         m = self._metadata
         if m.thinking is not None:
             self._agent.model_provider.set_thinking(m.thinking)
         if m.reasoning_effort is not None:
             self._agent.set_reasoning_effort(m.reasoning_effort)
+
+    def _restore_persisted_agent_options(self) -> None:
+        """还原 agent 级开关与限额（构造路径专用；无记录即跟随模板/配置）。"""
+        m = self._metadata
         if m.yolo is not None:
             self._agent.set_yolo(m.yolo)
         if m.max_turns is not None:

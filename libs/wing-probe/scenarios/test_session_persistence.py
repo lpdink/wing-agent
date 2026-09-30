@@ -107,7 +107,11 @@ async def _wait_inactive(probe: Probe, session_id: str) -> None:
 
 
 def _prefix_flags(body: dict) -> dict:
-    """请求里影响服务端处理/缓存身份的开关字段（对账用）。"""
+    """请求里影响服务端处理/缓存身份的开关字段（对账用）。
+
+    键取 OpenAI 兼容协议形态（probe 假 Provider 走的就是它）；anthropic 协议的
+    对应物是 ``thinking``（extra_body 透传），当前 probe 环境不产生该协议请求。
+    """
     return {
         key: body.get(key)
         for key in ("enable_thinking", "preserve_thinking", "reasoning_effort")
@@ -178,7 +182,10 @@ async def test_hook_injected_append_survives_fork_and_rehydrate(probe: Probe) ->
     await hydrated.chat("after-hydrate")
 
     hydrated_req = probe.request(HOOK_MODEL, 3)
-    _assert_prefix_identity(child_req, hydrated_req, shared=3)
+    # 水合前的全部消息都是水合后请求的前缀（含 system / tools / 开关）
+    _assert_prefix_identity(
+        child_req, hydrated_req, shared=len(child_req.context().messages)
+    )
     assert HOOK_MARKER in hydrated_req.body["messages"][0]["content"]
 
 
