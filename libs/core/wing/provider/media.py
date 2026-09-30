@@ -166,7 +166,6 @@ def encode_media_ref(
 
 
 def message_slots(
-    msg: Message,
     plans: Sequence[MediaPlan],
     *,
     media: MediaAccess | None,
@@ -174,7 +173,8 @@ def message_slots(
 ) -> list[MediaSlot]:
     """把一条消息的媒体处置投影成按出现序的 MediaSlot 列表。
 
-    ``plans`` 只含本消息的条目（调用方用 group_plans_by_message 过滤）。
+    ``plans`` 只含本消息的条目（调用方用 group_plans_by_message 按
+    message_index 过滤后传入——本函数不校验消息归属，只按给定顺序处理）。
     kept 位读字节编码（失败 → UNAVAILABLE 占位）；dropped 位取 wing.media
     的三条占位常量之一——原文本块由序列化层负责「不动」，本函数只产出追加物。
     """

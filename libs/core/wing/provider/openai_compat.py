@@ -291,8 +291,10 @@ class OpenAICompatProvider(ModelProvider):
     def _serialize_messages(self, messages: list[Message], model: str) -> list[dict]:
         """序列化请求消息（含请求期媒体投影：能力降级 / 高水位驱逐 / 线格式）。
 
-        无媒体的消息走 ``to_openai()`` 快路径——与引入媒体前的请求体逐字节
-        一致，且不触碰全局配置。有媒体时按 ``image_delivery`` 发射：
+        整条请求任何消息都无媒体时，直接 ``[m.to_openai() ...]`` 返回——与引入
+        媒体前的请求体逐字节一致，且不触碰全局配置。请求内有媒体时按
+        ``image_delivery`` 发射（无媒体的邻座消息仍逐条经 ``to_openai()``，
+        字节不变）：
 
         - ``inline``：图片留在原消息的 content 数组里（``image_url`` data URL）；
         - ``followup``（openai 协议默认）：**连续 tool 消息段**内的保留图片
@@ -333,7 +335,7 @@ class OpenAICompatProvider(ModelProvider):
                 # 连续 tool 段结束——图片挂段后（即当前消息之前）。
                 flush_pending()
 
-            slots = message_slots(msg, plans.get(i, []), media=self._media, cache=cache)
+            slots = message_slots(plans.get(i, []), media=self._media, cache=cache)
             base = msg.to_openai()
             move_kept = delivery == "followup" and msg.role == "tool"
             extra: list[dict] = []
@@ -630,10 +632,11 @@ class OpenAICompatProvider(ModelProvider):
     def _apply_cache_control(openai_messages: list[dict]) -> None:
         """为最后一条消息的最后一个 content block 追加 cache_control 标记。
 
-        最后一个 part 是图片（``image_url``）时回退到其前面最后一个非图片
-        part（即 text part）——cache_control 是 OpenAI 兼容网关的非标准扩展
-        字段，不落在图片上；整条消息没有任何非图片 part（纯图消息）时跳过
-        本次标记（实际路径不可达：inline/followup 的图片消息恒带文本 part）。
+        落点恒为「最后一个 part；仅当它是图片（``image_url``）时回退到其前面
+        最后一个非图片 part」——因此从尾部反向扫描（cache_control 是 OpenAI
+        兼容网关的非标准扩展字段，不落在图片上；从头部正向扫描会把标记提前到
+        第一个非图片 part，缓存前缀变短）；整条消息没有任何非图片 part（纯图
+        消息）时跳过本次标记。
         """
         if not openai_messages:
             return
@@ -650,7 +653,7 @@ class OpenAICompatProvider(ModelProvider):
                 }
             ]
         elif isinstance(content, list):
-            for part in cast("list[dict]", content):
+            for part in reversed(cast("list[dict]", content)):
                 if part.get("type") == "image_url":
                     continue
                 part["cache_control"] = {"type": "ephemeral"}

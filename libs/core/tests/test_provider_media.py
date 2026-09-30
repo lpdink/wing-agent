@@ -517,6 +517,71 @@ class TestOpenAIMediaSerialization:
         assert "cache_control" not in parts[1]
 
     @pytest.mark.asyncio
+    async def test_cache_control_marks_last_part_not_first_non_image(self):
+        """explicit_cache_mode 落点规则（S1 回归）：恒为「最后一个 part；仅当它
+        是图片时回退到其前面最后一个非图片 part」——从头部正向扫描会把标记
+        提前到第一个非图片 part（缓存前缀变短）。
+        """
+        small, big = sized_png(96), sized_png(200)
+        small_ref, big_ref = make_ref(small), make_ref(big)
+        pool = make_media(small, big)
+
+        async def _parts(
+            msg: Message, *, model: str = VISION_MODEL, cap: int | None = None
+        ) -> list[dict]:
+            body = await openai_body(
+                [msg],
+                cfg=openai_cfg(
+                    image_delivery="inline",
+                    explicit_cache_mode=True,
+                    image_max_bytes=cap,
+                ),
+                model=model,
+                media=pool,
+            )
+            return content_parts(body["messages"][0])
+
+        def _marked(parts: list[dict]) -> int | None:
+            marks = [i for i, p in enumerate(parts) if "cache_control" in p]
+            assert len(marks) <= 1, "同一消息最多一个 cache_control 标记"
+            return marks[0] if marks else None
+
+        # 例1 [text, placeholder]：最后 part 是文本 → 标 index 1（正向扫描会错标 0）
+        parts = await _parts(
+            Message(role="tool", tool_call_id="c1", content="env", media=[small_ref]),
+            model=TEXT_MODEL,
+        )
+        assert [p["type"] for p in parts] == ["text", "text"]
+        assert _marked(parts) == 1
+
+        # 例2 [text, image, placeholder]：最后 part 是文本 → 标 index 2（正向扫描会错标 0）
+        parts = await _parts(
+            Message(
+                role="tool",
+                tool_call_id="c1",
+                content="env",
+                media=[small_ref, big_ref],
+            ),
+            cap=96,
+        )
+        assert [p["type"] for p in parts] == ["text", "image_url", "text"]
+        assert _marked(parts) == 2
+
+        # 例3 [text, image]：最后 part 是图片 → 回退到前面最后一个非图片 part（index 0）
+        parts = await _parts(
+            Message(role="tool", tool_call_id="c1", content="env", media=[small_ref])
+        )
+        assert [p["type"] for p in parts] == ["text", "image_url"]
+        assert _marked(parts) == 0
+
+        # 例4 纯图消息（空原文 + 仅保留图片）：无任何非图片 part → 不标记
+        parts = await _parts(
+            Message(role="tool", tool_call_id="c1", content="", media=[small_ref])
+        )
+        assert [p["type"] for p in parts] == ["image_url"]
+        assert _marked(parts) is None
+
+    @pytest.mark.asyncio
     async def test_cache_control_followup_user_message(self):
         """followup：cache_control 落在图片 user 消息的引导文本上，而非图片。"""
         data = png_bytes(4, 4, b"cache2")

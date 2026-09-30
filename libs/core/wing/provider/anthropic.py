@@ -411,7 +411,7 @@ class AnthropicProvider(ModelProvider):
                 # 连续 tool 段结束——图片挂段后（即当前消息之前）。
                 flush_pending()
 
-            slots = message_slots(msg, plans.get(i, []), media=self._media, cache=cache)
+            slots = message_slots(plans.get(i, []), media=self._media, cache=cache)
 
             if msg.role == "assistant":
                 blocks = self._serialize_assistant(msg)
