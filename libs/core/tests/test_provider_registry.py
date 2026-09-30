@@ -11,7 +11,13 @@ from __future__ import annotations
 import pytest
 
 import wing.provider as provider_pkg
-from wing.config import AgentConfig, Config, ProviderConfig
+from wing.config import (
+    AgentConfig,
+    Config,
+    ModelCapabilities,
+    ModelSpec,
+    ProviderConfig,
+)
 from wing.provider import ModelDetail, ProviderModels, _ProviderRegistry
 
 
@@ -118,12 +124,12 @@ class TestProviderRegistry:
                     api_key="k",
                     models=[
                         "legacy",
-                        {
-                            "name": "vision-model",
-                            "display_name": "Vision",
-                            "description": "sees images",
-                            "capabilities": {"vision": True},
-                        },
+                        ModelSpec(
+                            name="vision-model",
+                            display_name="Vision",
+                            description="sees images",
+                            capabilities=ModelCapabilities(vision=True),
+                        ),
                     ],
                 )
             ],

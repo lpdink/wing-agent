@@ -11,6 +11,7 @@ import yaml
 
 from wing.config import (
     Config,
+    ImagesConfig,
     ProviderConfig,
     get_config,
     get_config_path,
@@ -365,7 +366,12 @@ class TestResetConfig:
 
 
 class TestDefaultConfigTemplate:
-    """手写模板与 Config 的 SYNC 守门（模板是事实来源，必须能被直接解析）。"""
+    """手写模板与 Config 的 SYNC 守门（模板是事实来源，必须能被直接解析）。
+
+    Config 是 ``extra="ignore"``：只断言「解析出来的值」挡不住模板漏改或键名
+    拼错（缺键/错键静默回落到默认值，断言恰好全绿）。守门必须比对**键集合**：
+    Config 新增字段而模板漏改、或模板键名写错，都会在这里变红。
+    """
 
     def test_template_parses_into_valid_config(self):
         from wing.default_config import DEFAULT_CONFIG_YAML
@@ -376,6 +382,14 @@ class TestDefaultConfigTemplate:
         assert config.images.max_images == 32
         assert config.providers[0].models == []
         assert config.providers[0].model_names() == []
+
+    def test_template_covers_every_config_field(self):
+        """顶层与 images 段的键集合必须与 Config 模型字段一一对应（SYNC 硬约束）。"""
+        from wing.default_config import DEFAULT_CONFIG_YAML
+
+        raw = yaml.safe_load(DEFAULT_CONFIG_YAML)
+        assert set(raw) == set(Config.model_fields)
+        assert set(raw["images"]) == set(ImagesConfig.model_fields)
 
     def test_template_keeps_image_option_documented(self):
         """image_delivery / image_max_bytes / capabilities.vision 在模板注释里可见。"""

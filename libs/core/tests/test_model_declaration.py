@@ -163,11 +163,16 @@ class TestImagesConfig:
             evict_quantum_bytes=18_874_368,
         )
 
-    def test_overrides_from_mapping(self):
+    def test_overrides(self):
+        """覆盖字段生效、未覆盖字段回落默认。
+
+        dict → ImagesConfig 的强制转换由模板测试（真实 YAML 解析）覆盖，
+        此处用显式对象（ty 门禁不接受裸 dict 传给 pydantic 字段）。
+        """
         config = Config(
             providers=[_provider()],
             agents=[AgentConfig(name="default", model="m", provider="p")],
-            images={"max_bytes": 1024, "max_images": 2},
+            images=ImagesConfig(max_bytes=1024, max_images=2),
         )
         assert config.images.max_bytes == 1024
         assert config.images.max_images == 2
