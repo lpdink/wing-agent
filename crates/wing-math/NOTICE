@@ -1,0 +1,89 @@
+# NOTICE — 借鉴内联（vendored）来源与许可
+
+`crates/wing-math` 是一个**借鉴内联**（source vendoring）的 crate：它的解析与排版能力
+来自下面两个上游 crate 的核心源码，逐字内联到 `src/latex/` 与 `src/grid/` 两个模块树下，
+外面套了一层我们自己的适配与降级保护（`src/api.rs` / `guard.rs` / `normalize.rs` /
+`environments.rs` / `scan.rs`）。
+
+本 crate 自身许可是工作区的 Apache-2.0（见根 `LICENSE`）。内联源码保留其原始许可与版权，
+许可原文随包放在本目录下。
+
+| 模块 | 上游 crate | 版本 | 许可 | 版权 | 许可原文 |
+|---|---|---|---|---|---|
+| `src/latex/` | [`rust-latex-parser`](https://github.com/William-Selna/Rust-LaTeX-Parser) | 0.1.0 | MIT | Copyright (c) 2026 William-Selna | `LICENSE-MIT-rust-latex-parser` |
+| `src/grid/` | crates.io `term-maths` | 1.0.0 | MIT OR Apache-2.0 | Copyright (c) 2026 Jack Geraghty | `LICENSE-MIT` · `LICENSE-APACHE` |
+
+> `term-maths` 的包元数据未声明 `repository`，`homepage` 亦为空；此处记录的发布来源是
+> crates.io 上的 `term-maths 1.0.0`，其 `.cargo_vcs_info.json` 的 git sha1 为
+> `5a2de3b29f1d4cec72c8685b8d52ddfb53519676`。
+> `rust-latex-parser 0.1.0` 的发布 sha1 为 `086d394561465b4154272951f5cd524f77855e99`。
+
+## 内联范围
+
+**内联**（`src/latex/`、`src/grid/`）：
+
+| 我们的路径 | 上游路径 |
+|---|---|
+| `src/latex/mod.rs` | `rust-latex-parser/src/lib.rs` |
+| `src/latex/ast.rs` | `rust-latex-parser/src/ast.rs` |
+| `src/latex/parser.rs` | `rust-latex-parser/src/parser.rs` |
+| `src/grid/mod.rs` | `term-maths/src/lib.rs` |
+| `src/grid/rendered_block.rs` | `term-maths/src/rendered_block.rs` |
+| `src/grid/layout.rs` | `term-maths/src/layout.rs` |
+| `src/grid/mathfont.rs` | `term-maths/src/mathfont.rs` |
+| `src/grid/renderer.rs` | `term-maths/src/renderer.rs` |
+| `src/grid/latex_renderer.rs` | `term-maths/src/latex_renderer.rs` |
+
+**未内联**（不属引擎，或与 UI/FFI 层耦合）：
+`term-maths` 的 `src/crossterm_renderer.rs`、`src/ratatui_widget.rs`、`src/python.rs`（PyO3）、
+`src/bin/stub_gen.rs`、`examples/`。
+
+## 我们改了什么（汇总）
+
+每个内联文件顶部都有逐条的「本地改动」，这里是索引：
+
+1. **模块路径**（`src/latex/*`、`src/grid/*`）：`rust_latex_parser::` → `crate::latex::`、
+   `crate::ast` → `crate::latex::ast`、`crate::xxx` → `crate::grid::xxx`；
+   doc 示例里的 use 路径写成本 crate 的真实路径。
+2. **移除未内联的 feature 分支**（`src/grid/mod.rs`）：`crossterm` / `ratatui` / `python`
+   三个 `#[cfg(feature = ...)]` 模块与 re-export；本 crate 不暴露任何 feature。
+3. **`collapsible_if` 折叠**（`src/latex/parser.rs`，4 处）：为满足本仓库
+   `cargo clippy -- -D warnings`，机械折叠嵌套 `if`，语义不变（原地有「本地改动」注释）。
+4. **accent 居中修正**（`src/grid/layout.rs`）：新增私有 `center_accent`，让
+   `\hat{abc}` 这类单字形 accent 在奇数余量时不再左偏一列。
+5. **`build_delimiter` 提权**（`src/grid/layout.rs`）：`fn` → `pub(crate) fn`，逻辑未改，
+   供 `crate::environments` 生成拉伸定界符。
+6. **`cargo fmt`**：所有内联文件都跑了 `cargo fmt`（仓库门禁要求 `cargo fmt --check`
+   干净），因此与上游原文存在**纯空白**差异。
+
+## 内联保真度（如何复核"除上述改动外逐字一致"）
+
+```bash
+# 1) 取上游源码
+curl -sSL https://static.crates.io/crates/term-maths/term-maths-1.0.0.crate | tar xz -C /tmp
+curl -sSL https://static.crates.io/crates/rust-latex-parser/rust-latex-parser-0.1.0.crate | tar xz -C /tmp
+
+# 2) 用与本仓库同一个 rustfmt 格式化上游文件
+rustfmt --edition 2024 --quiet /tmp/term-maths-1.0.0/src/layout.rs
+
+# 3) 去掉本文件顶部的「来源」注释块后逐行 diff
+#    —— 差异应当**只有**上面「我们改了什么」列出的那几条
+```
+
+实测（本步骤交付时，差异行数 = 去掉出处头后与 rustfmt 过的上游文件的 `diff` 行数）：
+
+| 内联文件 | 差异行数 | 差异内容 |
+|---|---|---|
+| `src/grid/rendered_block.rs` | **0** | 逐字一致 |
+| `src/latex/mod.rs` | 2 | 模块路径 |
+| `src/latex/ast.rs` | 4 | 模块路径 + doc 示例路径 |
+| `src/grid/mathfont.rs` | 2 | 模块路径 |
+| `src/grid/renderer.rs` | 6 | 模块路径 |
+| `src/grid/latex_renderer.rs` | 8 | 模块路径 |
+| `src/grid/mod.rs` | 23 | 模块路径 + 移除三个未内联后端 |
+| `src/latex/parser.rs` | 91 | 模块路径 + 4 处 `collapsible_if` 折叠 |
+| `src/grid/layout.rs` | 32 | 模块路径 + `center_accent` + `build_delimiter` 提权 |
+
+上游测试随源码内联（`parser.rs` / `rendered_block.rs` / `mathfont.rs` 文件内的
+`#[cfg(test)] mod tests`），两个集成测试也整体迁移到 `tests/upstream_robustness.rs`
+与 `tests/upstream_layout.rs`（只改 `use` 路径 + 出处注释），断言一条未改。
