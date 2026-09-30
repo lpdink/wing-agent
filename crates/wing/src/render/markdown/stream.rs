@@ -11,11 +11,14 @@
 //!   rebuild).
 //! - The active tail (the last, unclosed block) is re-rendered each sync,
 //!   so per-frame cost is O(tail), not O(text).
-//! - Fenced code blocks get a line-level cache in both profiles: complete
-//!   body lines render once (Content: stateful syntect `HighlightLines`;
-//!   Thinking: plain single-color), and each sync only renders new lines.
-//!   The composed top border + completed body lines are themselves stable,
-//!   so a giant growing code block stays at O(new lines) per frame.
+//! - Fenced code blocks get a line-level cache: complete body lines render
+//!   once (stateful syntect `HighlightLines`, identical in both profiles),
+//!   and each sync only renders new lines. The composed top border +
+//!   completed body lines are themselves stable, so a giant growing code
+//!   block stays at O(new lines) per frame. A line that can still be
+//!   retracted (the trailing blank run before a closing fence, the in-flight
+//!   partial line) is held back and re-rendered each sync — see
+//!   [`fill_code_cache`].
 //!
 //! Correctness contract: for the same final text and width, the
 //! incremental result is span-identical to [`full_lines`] — the reference
@@ -32,6 +35,15 @@
 //! `finalize()`. Sharing a reference map across slices would defeat the
 //! stable-prefix model, so this is accepted rather than fixed (see the
 //! `shapes()` note in `tests/stream_render_reconcile.rs`).
+//!
+//! Known limit — nested fences: CommonMark has no nested code fences, so a
+//! model that wraps a fenced draft in another fence (`Draft:` + ```` ```markdown ````
+//! … ```bash … ``` … ```` ``` ````) gets a spec-mandated pairing: one bare
+//! fence closes the outer block, the parity of everything after it flips, and
+//! prose can end up inside a code block (or vice versa). No local rule
+//! recovers the author's intent — that needs a global pairing optimization,
+//! which the stable-prefix model cannot honor. Rendering follows CommonMark
+//! exactly here (as any other markdown renderer does).
 //!
 //! Block-boundary rules (see the design doc): fences open/close code
 //! blocks and interrupt paragraphs (code needs its own mode for the line
@@ -50,15 +62,12 @@
 //! next block starts, so a trailing blank never dangles at the end of the
 //! stream (matching the full render's trailing-blank trim).
 //!
-//! **Thinking vs Content fences.** The `Content` profile normalizes inline
-//! ```` to line-level fences (via `ensure_fences_on_own_line` / its
-//! streaming equivalent `normalize_fences`), which lets model output like
-//! `text:```python\ncode```` render as a proper code block. The `Thinking`
-//! profile **skips** this normalization: reasoning text often contains
-//! inline ```` references to discuss code fences themselves (e.g.
-//! `（```rust）`), and normalizing them would create spurious code blocks
-//! with wrong language tags. Genuine line-start code blocks in reasoning
-//! are still detected by the splitter via [`fence_open`] in both profiles.
+//! **Thinking vs Content.** The two profiles differ in exactly two rendering
+//! rules — both owned by [`Profile`]: inline ```` normalization (skipped for
+//! reasoning, which discusses fences in prose) and indented (4-space) blocks
+//! (prose for reasoning, code for assistant content). Fenced blocks render
+//! identically: highlight, gutter, borders. The cell compose is what
+//! recolors reasoning prose (`thinking_segment_style`).
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -66,32 +75,13 @@ use syntect::easy::HighlightLines;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::links::{LinkSpan, compose_lines, line_link_spans};
+use super::profile::Profile;
 use super::types::{
     MarkdownLine, MarkdownSegment, MarkdownTheme, SegmentKind, thinking_segment_style,
 };
 use super::{RenderOpts, render_markdown_lines_with};
 use crate::config::ThemePalette;
 use crate::render::syntax::{highlight_line_with, new_highlighter};
-
-// ============================================================
-// Profile
-// ============================================================
-
-/// Rendering profile of a streaming cell.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Profile {
-    /// Reasoning — code blocks render plain (no syntect, no gutter),
-    /// while streaming AND in the final reconcile render.
-    Thinking,
-    /// Assistant content — code blocks keep syntax highlighting.
-    Content,
-}
-
-impl Profile {
-    fn code_highlight(self) -> bool {
-        matches!(self, Profile::Content)
-    }
-}
 
 // ============================================================
 // Splitter — line state machine over the source buffer
@@ -354,7 +344,7 @@ impl StreamingRender {
     }
 
     /// Terminal: replace the incremental state with the reference full
-    /// render (Content keeps highlighting; Thinking stays plain).
+    /// render for this profile.
     ///
     /// After finalize the cell must not receive further deltas.
     pub fn finalize(&mut self, width: u16, palette: &ThemePalette) {
@@ -852,18 +842,12 @@ impl StreamingRender {
             self.code_tail = None;
             return;
         }
-        // Thinking profile never highlights (plain single-color code).
-        let highlighter = if self.profile.code_highlight() && lang.is_some() {
-            new_highlighter(lang.as_deref().unwrap_or(""))
-        } else {
-            None
-        };
-        let show_gutter = self.profile.code_highlight() && lang.is_some();
-        self.code_tail = Some(CodeCache::new(
-            lang,
-            highlighter,
-            if show_gutter { 3 } else { 0 },
-        ));
+        // Both profiles highlight: a code block renders the same in
+        // reasoning and assistant content. Only the language-less block
+        // (and a language syntect does not know) falls back to plain.
+        let highlighter = lang.as_deref().and_then(new_highlighter);
+        let gutter_width = if lang.is_some() { 3 } else { 0 };
+        self.code_tail = Some(CodeCache::new(lang, highlighter, gutter_width));
     }
 }
 
@@ -1001,7 +985,7 @@ pub fn full_lines_with_links(
     palette: &ThemePalette,
 ) -> (Vec<Line<'static>>, Vec<Vec<LinkSpan>>) {
     let opts = RenderOpts {
-        code_highlight: profile.code_highlight(),
+        profile,
         trim_trailing_blank: true,
     };
     let md = render_markdown_lines_with(text, Some(width.saturating_sub(2)), palette, opts);
@@ -1045,7 +1029,7 @@ fn render_generic(
     palette: &ThemePalette,
 ) -> Vec<MarkdownLine> {
     let opts = RenderOpts {
-        code_highlight: profile.code_highlight(),
+        profile,
         trim_trailing_blank: true,
     };
     render_markdown_lines_with(slice, Some(width.saturating_sub(2)), palette, opts)
@@ -1063,7 +1047,7 @@ fn render_block(
     palette: &ThemePalette,
 ) -> Vec<MarkdownLine> {
     let opts = RenderOpts {
-        code_highlight: profile.code_highlight(),
+        profile,
         trim_trailing_blank: false,
     };
     render_markdown_lines_with(slice, Some(width.saturating_sub(2)), palette, opts)
@@ -1244,9 +1228,7 @@ fn fill_code_cache<'a>(
     } else {
         pending_src.split('\n').map(strip_cr).collect()
     };
-    if !complete_tail
-        && let Some(last) = pending.last()
-    {
+    if !complete_tail && let Some(last) = pending.last() {
         // pulldown emits no text for an unterminated trailing line of 1–3
         // spaces (EOF handling), so the reference render has no such line —
         // match it, or a stream paused on a blank line would show one body

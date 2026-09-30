@@ -16,12 +16,14 @@
 pub(crate) mod code_blocks;
 pub(crate) mod links;
 pub(crate) mod parsing;
+pub mod profile;
 pub mod stream;
 pub(crate) mod tables;
 pub mod types;
 pub(crate) mod wrap;
 
 // Re-export the public API.
+pub use profile::Profile;
 pub use types::MarkdownLine;
 pub use types::MarkdownSegment;
 pub use types::MarkdownTheme;
@@ -59,13 +61,12 @@ use crate::config::ThemePalette;
 
 /// Code-block rendering options.
 ///
-/// The streaming Thinking profile renders code blocks plain (no syntect
-/// highlight, no gutter) — both while streaming and in its final reconcile
-/// render, so the visual stays consistent across the whole turn.
+/// [`Profile`] carries the reasoning-vs-content rendering rules (see its
+/// module docs); code blocks themselves render identically in both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RenderOpts {
-    /// Render fenced code with syntect highlighting + line-number gutters.
-    pub code_highlight: bool,
+    /// Which cell the text belongs to.
+    pub profile: Profile,
     /// Trim trailing blank lines (doc-end semantics). The streaming
     /// renderer disables this when rendering a PROMOTED block: the
     /// presence of the renderer's own trailing blank line is exactly the
@@ -78,7 +79,7 @@ pub struct RenderOpts {
 impl Default for RenderOpts {
     fn default() -> Self {
         Self {
-            code_highlight: true,
+            profile: Profile::Content,
             trim_trailing_blank: true,
         }
     }
@@ -127,11 +128,10 @@ pub fn render_markdown_lines_with(
     let theme = MarkdownTheme::from_palette(palette);
     let base_style = theme.base;
 
-    // Pre-process: ensure code fences are on their own line.
-    // Reasoning (non-highlight) text often contains inline ``` references
-    // (e.g. `（```rust）`). Normalizing these would create spurious code
-    // blocks — skip for the Thinking profile.
-    let text = if opts.code_highlight {
+    // Pre-process: ensure code fences are on their own line. Reasoning text
+    // often contains inline ``` references (e.g. `（```rust）`); normalizing
+    // them would create spurious code blocks (see `Profile`).
+    let text = if opts.profile.normalizes_inline_fences() {
         ensure_fences_on_own_line(text)
     } else {
         text.into()
@@ -243,7 +243,6 @@ fn render_markdown_to_lines(
             base_style,
             theme,
             width: available_width,
-            highlight: opts.code_highlight,
         };
         if handle_code_block_event(&event, &mut code_block, &mut code_block_env) {
             blockquote_depth = code_block_env.blockquote_depth;
@@ -311,7 +310,6 @@ fn render_markdown_to_lines(
         base_style,
         theme,
         width: available_width,
-        highlight: opts.code_highlight,
     };
     finalize_unclosed_code_block(&mut code_block, &mut code_block_env);
 
@@ -388,6 +386,71 @@ mod tests {
             SegmentKind::Link
         );
         assert_eq!(find_segment(&pairs, "see "), SegmentKind::Text);
+    }
+
+    // ============================================================
+    // Profile semantics (reasoning vs assistant content)
+    // ============================================================
+
+    /// Render `md` under `profile`, flattening to (kind, text) pairs.
+    /// Render `md` under `profile`, flattening to (kind, text) pairs.
+    fn profile_pairs(md: &str, profile: Profile) -> Vec<(SegmentKind, String)> {
+        render_markdown_lines_with(
+            md,
+            None,
+            &dp(),
+            RenderOpts {
+                profile,
+                trim_trailing_blank: true,
+            },
+        )
+        .into_iter()
+        .flat_map(|line| line.segments)
+        .map(|seg| (seg.kind, seg.text))
+        .collect()
+    }
+
+    #[test]
+    fn profile_normalizes_inline_fences_only_for_content() {
+        // `text:```lang` on one line is normalized into a fence for content;
+        // reasoning discusses fences in prose, so the backticks stay literal.
+        let md = "run this:```rust\nlet x = 1;";
+        let content = profile_pairs(md, Profile::Content);
+        assert!(
+            content
+                .iter()
+                .any(|(kind, text)| *kind == SegmentKind::CodeBlock && text.contains("let")),
+            "content did not normalize the inline fence: {content:?}"
+        );
+        let thinking = profile_pairs(md, Profile::Thinking);
+        assert!(
+            thinking
+                .iter()
+                .all(|(kind, _)| *kind != SegmentKind::CodeBlock),
+            "reasoning normalized an inline fence: {thinking:?}"
+        );
+    }
+
+    #[test]
+    fn profile_fenced_blocks_render_the_same_in_both() {
+        // The alignment contract: a fenced block (highlighting, gutter,
+        // borders) is profile-independent — only prose is recolored, and that
+        // happens later, in the cell compose.
+        let md = "text\n\n```rust\nlet x = 1;\n```\n";
+        let pairs = |profile| profile_pairs(md, profile);
+        assert_eq!(
+            pairs(Profile::Thinking),
+            pairs(Profile::Content),
+            "a fenced code block must render identically in both profiles"
+        );
+        // Both sides must really be highlighted, or the equality is trivial:
+        // syntect splits the line into per-token segments.
+        let code = pairs(Profile::Thinking)
+            .into_iter()
+            .filter(|(kind, _)| *kind == SegmentKind::CodeBlock)
+            .map(|(_, text)| text)
+            .collect::<Vec<_>>();
+        assert!(code.len() >= 2, "line was not token-split: {code:?}");
     }
 
     #[test]

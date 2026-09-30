@@ -8,11 +8,14 @@
 //! color — with the foreground swapped while everything else (modifiers,
 //! background) is preserved. Code-like and decorative segments (inline
 //! code, code blocks, links, borders, gutters) keep their own theme
-//! colors so they stay distinguishable inside reasoning content.
+//! colors, so a fenced code block in reasoning is indistinguishable from
+//! the same block in assistant content (syntect highlighting, gutter,
+//! diff tints).
 
 use crate::config::ThemePalette;
 use crate::config::rendering::ThinkingMode;
 use crate::render::markdown::ComposedLines;
+use crate::render::markdown::Profile;
 use crate::render::markdown::RenderOpts;
 use crate::render::markdown::compose_lines;
 use crate::render::markdown::links::CELL_PREFIX_WIDTH;
@@ -75,16 +78,15 @@ impl ThinkingBlock {
     fn render_visible(&self, palette: &ThemePalette, width: u16) -> ComposedLines {
         let thinking_style = Style::default().fg(palette.thinking);
         let md_width = Some(width.saturating_sub(2));
-        // Thinking renders code blocks plain — no syntect, no gutter —
-        // permanently (streaming AND final). Keeps the incremental
-        // streaming path stateless and the visual consistent across the
-        // whole turn (no highlight popping in at turn end).
+        // Code blocks render exactly like assistant content (syntect +
+        // gutter); only the prose is recolored to the thinking color — see
+        // `Profile` for what reasoning changes, and what it does not.
         let md_lines = render_markdown_lines_with(
             &self.content,
             md_width,
             palette,
             RenderOpts {
-                code_highlight: false,
+                profile: Profile::Thinking,
                 trim_trailing_blank: true,
             },
         );
@@ -240,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn test_thinking_keeps_code_block_colors() {
+    fn test_thinking_code_block_colors() {
         let mut block = ThinkingBlock::new();
         block.append("like this:\n```\nlet x = 1;\n```");
         let lines = block.to_lines(&p(), ThinkingMode::Visible, 80);
@@ -248,6 +250,61 @@ mod tests {
         // Code block content keeps the accent color, not thinking gray.
         let (_, style) = find_span(&pairs, "let x = 1;");
         assert_eq!(style.fg, Some(Color::Cyan), "code block fg: {style:?}");
+    }
+
+    /// The alignment contract: a fenced code block renders exactly like the
+    /// same block in assistant content — syntect highlighting, line-number
+    /// gutter, borders. Only the surrounding prose is recolored, which is
+    /// what keeps a code block *recognizable* inside reasoning.
+    #[test]
+    fn test_thinking_code_block_matches_content_render() {
+        let text = "here is code:\n\n```rust\nlet x = 1;\nlet y = \"two\";\n```\n\ndone";
+        let mut block = ThinkingBlock::new();
+        block.append(text);
+        let thinking = block.to_lines(&p(), ThinkingMode::Visible, 80);
+        let content = crate::render::markdown::stream::full_lines(
+            text,
+            80,
+            crate::render::markdown::Profile::Content,
+            &p(),
+        );
+
+        // Compare the code block region only: prose differences are by design
+        // (thinking fg), the block itself must be span-identical.
+        let block_region = |lines: &[Line<'static>]| -> Vec<(String, Style)> {
+            let start = lines
+                .iter()
+                .position(|l| l.to_string().contains("┌─ rust ─"))
+                .expect("top border");
+            let end = lines
+                .iter()
+                .position(|l| l.to_string().contains("└────────"))
+                .expect("bottom border");
+            lines[start..=end]
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                // The cell prefix / separator blanks carry the thinking fg by
+                // design; the block's own tokens are what must match.
+                .filter(|s| !s.content.trim().is_empty())
+                .map(|s| (s.content.to_string(), s.style))
+                .collect()
+        };
+        assert_eq!(
+            block_region(&thinking),
+            block_region(&content),
+            "reasoning code block must render like assistant content"
+        );
+        // …and it must really be highlighted, not one flat code color.
+        let mut colors: Vec<String> = block_region(&thinking)
+            .iter()
+            .map(|(_, style)| format!("{:?}", style.fg))
+            .collect();
+        colors.sort_unstable();
+        colors.dedup();
+        assert!(
+            colors.len() >= 3,
+            "expected border + several token colors, got {colors:?}"
+        );
     }
 
     #[test]

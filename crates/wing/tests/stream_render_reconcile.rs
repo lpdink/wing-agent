@@ -3,7 +3,8 @@
 //! For every (corpus shape × chunk size × width) combination, the
 //! incremental `StreamingRender` output must equal the reference full
 //! render ([`full_lines`]) span by span (text + style) — for BOTH profiles
-//! (Thinking renders code plain; Content keeps highlighting).
+//! (reasoning and assistant content differ in the parse rules `Profile`
+//! owns, not in the reference they reconcile against).
 //!
 //! Scope of the assertion: the **last frame before `finalize()`**, i.e.
 //! the state the incremental engine leaves after every chunk has been
@@ -26,7 +27,8 @@ use common::{chunk_stream, random_chunks};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use wing::config::ThemePalette;
-use wing::render::markdown::stream::{Profile, StreamingRender, full_lines};
+use wing::render::markdown::Profile;
+use wing::render::markdown::stream::{StreamingRender, full_lines};
 
 // ============================================================
 // Corpus shapes — handcrafted markdown forms the splitter must survive
