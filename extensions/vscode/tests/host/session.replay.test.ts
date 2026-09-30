@@ -155,6 +155,75 @@ describe('replay assembly', () => {
     expect(hydrate?.session.status).toBe('working');
   });
 
+  it('restores a working turn from the snapshot status alone (empty projections)', async () => {
+    // The regression: the turn is in flight but nothing is finalized yet — the
+    // first LLM call of a round is still in flight, or we are at a round
+    // boundary. Both projections are empty; `status` is the authority, so the
+    // turn (and its elapsed anchor) must still come up. Inferring idle from an
+    // empty projection left the tab spinning-less while live events arrived.
+    const harness = createHostHarness();
+    teardown.push(harness);
+    harness.gateway.seedOnCreate = {
+      messages: [{ role: 'user', content: 'go', uuid: 'm1' }],
+      status: 'working',
+      turnStartedAt: '2026-09-18T08:00:00.000',
+    };
+    await harness.boot();
+    const sessionId = harness.gateway.createdOrder[0] ?? '';
+    const hydrate = harness.hydrateFor(sessionId);
+
+    expect(hydrate?.session.turn.active).toBe(true);
+    expect(hydrate?.session.status).toBe('working');
+    // Naive ISO timestamps are read as UTC (the backend sends UTC).
+    expect(hydrate?.session.turn.startedAtMs).toBe(Date.parse('2026-09-18T08:00:00.000Z'));
+  });
+
+  it('restores a waiting snapshot as a running turn (blocked on an ask)', async () => {
+    const harness = createHostHarness();
+    teardown.push(harness);
+    harness.gateway.seedOnCreate = { status: 'waiting', turnStartedAt: '2026-09-18T08:00:00.000' };
+    await harness.boot();
+    const sessionId = harness.gateway.createdOrder[0] ?? '';
+    expect(harness.hydrateFor(sessionId)?.session.turn.active).toBe(true);
+  });
+
+  it('lets an idle status beat a stale projection (status is authoritative)', async () => {
+    const harness = createHostHarness();
+    teardown.push(harness);
+    harness.gateway.seedOnCreate = {
+      status: 'idle',
+      uncommitted: { role: 'assistant', content: 'partial', uuid: 'm9' },
+    };
+    await harness.boot();
+    const sessionId = harness.gateway.createdOrder[0] ?? '';
+    const hydrate = harness.hydrateFor(sessionId);
+    // The content still replays — only the *turn state* follows the status.
+    expect(hydrate?.session.cells.some((cell) => cell.kind === 'assistant')).toBe(true);
+    expect(hydrate?.session.turn.active).toBe(false);
+  });
+
+  it('clears a stale running turn when the snapshot says idle', async () => {
+    // The mirror image: the turn ran, the tab showed it running, then a
+    // reconnect replays a snapshot taken after the turn ended (its `done` was
+    // missed while disconnected). The idle snapshot has to clear the running
+    // state instead of leaving the tab spinning forever.
+    const harness = createHostHarness();
+    teardown.push(harness);
+    await harness.boot();
+    const sessionId = harness.gateway.createdOrder[0] ?? '';
+    const clientId = harness.gateway.sockets[0]?.clientId ?? '';
+
+    harness.gateway.emit({ type: 'turn_started', session_id: sessionId });
+    await flushMicrotasks();
+    await harness.ready();
+    expect(harness.hydrateFor(sessionId)?.session.turn.active).toBe(true);
+
+    harness.gateway.pushSync(clientId, sessionId);
+    await flushMicrotasks();
+    await harness.ready();
+    expect(harness.hydrateFor(sessionId)?.session.turn.active).toBe(false);
+  });
+
   it('continues a replayed streaming tool call with live fragments (same path)', async () => {
     const harness = createHostHarness();
     teardown.push(harness);

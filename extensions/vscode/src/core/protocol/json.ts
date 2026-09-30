@@ -149,6 +149,22 @@ export function enumOr<T extends string>(
   return allowed.some((candidate) => candidate === value) ? (value as T) : fallback;
 }
 
+/**
+ * Nullable enum field: absent / `null` → `null`, and so is a value outside
+ * `allowed`.
+ *
+ * Deliberately *not* `enumOr` with a fallback: "we don't know this status"
+ * (newer gateway) must stay distinguishable from "idle", so the caller can
+ * degrade to its own inference instead of reading the fallback as an answer.
+ */
+export function optEnum<T extends string>(object: JsonObject, key: string, allowed: readonly T[]): T | null {
+  const value = optString(object, key);
+  if (value === null) {
+    return null;
+  }
+  return allowed.some((candidate) => candidate === value) ? (value as T) : null;
+}
+
 /** Nullable JSON object field. */
 export function optJsonObject(object: JsonObject, key: string): JsonObject | null {
   const value = object[key];

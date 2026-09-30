@@ -44,6 +44,61 @@ pub struct EventTarget {
     pub client_ids: Vec<String>,
 }
 
+/// Session runtime status — mirror of `wing/event/base.py::SessionStatus`.
+///
+/// The *authoritative* answer to "is a turn in flight" — carried by the
+/// `sync_session` snapshot. Never infer that from uncommitted content: an LLM
+/// call in flight (before its first finalized block) projects no content while
+/// the turn is very much running.
+///
+/// The same vocabulary describes `/api/session/list` rows ([`Self::parse`] —
+/// the picker renders it); this is the single definition for both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatus {
+    /// Loaded nowhere — session-list vocabulary, never seen in a sync payload.
+    Inactive,
+    /// Loaded, no turn in flight.
+    Idle,
+    /// A turn is in flight.
+    Working,
+    /// A turn is in flight, blocked on user input (pending ask).
+    Waiting,
+    /// A status this build does not know (newer gateway). Tolerated like every
+    /// other unknown wire value — the caller degrades to the content
+    /// inference instead of dropping the whole replay.
+    #[serde(other)]
+    Unknown,
+}
+
+impl SessionStatus {
+    /// Parse the backend's status string (the session-list row field).
+    ///
+    /// Unknown values — including the empty string an older gateway may leave
+    /// behind — degrade to [`Self::Unknown`].
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "inactive" => Self::Inactive,
+            "idle" => Self::Idle,
+            "working" => Self::Working,
+            "waiting" => Self::Waiting,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Whether the snapshot says a turn is in flight.
+    ///
+    /// `None` for [`SessionStatus::Unknown`] — the caller falls back to
+    /// inspecting the uncommitted projections.
+    pub fn turn_in_flight(self) -> Option<bool> {
+        match self {
+            Self::Idle | Self::Inactive => Some(false),
+            Self::Working | Self::Waiting => Some(true),
+            Self::Unknown => None,
+        }
+    }
+}
+
 /// Agent configuration snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
@@ -378,6 +433,18 @@ pub enum WingEvent {
         /// replay material for diff views and other message-projection gaps.
         #[serde(default)]
         events: Vec<serde_json::Value>,
+        /// Session status at snapshot time — the authoritative answer to "is a
+        /// turn in flight" (`working` / `waiting` = yes, `idle` = no).
+        ///
+        /// A mid-join subscriber MUST take its working state from here: it can
+        /// never hear the already-past `turn_started` (once-only live event,
+        /// never replayed), and emptiness of `uncommitted` /
+        /// `uncommitted_tools` is *not* an idle signal — between rounds, or
+        /// while the first LLM call is still in flight, the turn is running
+        /// with nothing finalized to project. Absent (older gateway) → fall
+        /// back to that content inference.
+        #[serde(default)]
+        status: Option<SessionStatus>,
         /// When the current turn started (UTC ISO-8601) — restores elapsed time
         /// on resume instead of recounting from the resume moment. Null when no
         /// turn is in progress.
@@ -1136,9 +1203,10 @@ mod tests {
 
     #[test]
     fn deserialize_sync_session_without_new_fields() {
-        // Backward compat: a SyncSession frame with none of the new fields
-        // (uncommitted / uncommitted_tools / turn_started_at) — older gateway or
-        // all stripped — parses and degrades to "replay committed only".
+        // Backward compat: a SyncSession frame with none of the newer fields
+        // (uncommitted / uncommitted_tools / status / turn_started_at) — older
+        // gateway or all stripped — parses and degrades to "replay committed
+        // only", with no working-state claim.
         let json = r#"{
             "type": "sync_session",
             "session_id": "s1",
@@ -1154,6 +1222,7 @@ mod tests {
                 uncommitted,
                 uncommitted_tools,
                 events,
+                status,
                 turn_started_at,
                 ..
             } => {
@@ -1162,10 +1231,44 @@ mod tests {
                 assert!(uncommitted.is_none());
                 assert!(uncommitted_tools.is_empty());
                 assert!(events.is_empty());
+                assert!(status.is_none(), "no status → caller falls back");
                 assert!(turn_started_at.is_none());
             }
             _ => panic!("expected SyncSession"),
         }
+    }
+
+    #[test]
+    fn deserialize_sync_session_status() {
+        // The working-state carrier: every known status decodes to its variant
+        // and answers `turn_in_flight`; an unknown one (newer gateway) is
+        // tolerated as `Unknown` (the caller degrades to content inference)
+        // instead of failing the whole replay payload.
+        for (raw, expected, in_flight) in [
+            ("idle", SessionStatus::Idle, Some(false)),
+            ("inactive", SessionStatus::Inactive, Some(false)),
+            ("working", SessionStatus::Working, Some(true)),
+            ("waiting", SessionStatus::Waiting, Some(true)),
+            ("compacting", SessionStatus::Unknown, None),
+        ] {
+            let json = format!(
+                r#"{{"type": "sync_session", "session_id": "s1", "status": "{raw}",
+                     "created_at": "2026-01-01T00:00:00", "request_id": "req"}}"#
+            );
+            let event: WingEvent = serde_json::from_str(&json).unwrap();
+            match event {
+                WingEvent::SyncSession { status, .. } => {
+                    assert_eq!(status, Some(expected), "raw {raw:?}");
+                    assert_eq!(status.and_then(SessionStatus::turn_in_flight), in_flight);
+                }
+                _ => panic!("expected SyncSession"),
+            }
+        }
+
+        // The list endpoint's string vocabulary parses through `parse`.
+        assert_eq!(SessionStatus::parse("working"), SessionStatus::Working);
+        assert_eq!(SessionStatus::parse(""), SessionStatus::Unknown);
+        assert_eq!(SessionStatus::parse("bogus"), SessionStatus::Unknown);
     }
 
     #[test]

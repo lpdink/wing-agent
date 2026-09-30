@@ -10,9 +10,9 @@ use std::sync::LazyLock;
 
 use super::selection::RichSessionRow;
 use super::selection::SelectionRow;
-use super::selection::SessionStatus;
 use super::selection::plain_row;
 use crate::protocol::CommandInfo;
+use crate::protocol::SessionStatus;
 
 /// Action to take when popup candidates need to be fetched.
 ///

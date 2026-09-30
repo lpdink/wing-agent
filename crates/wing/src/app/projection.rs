@@ -23,6 +23,7 @@ use super::title;
 use super::turn_state;
 use crate::protocol::AgentInfo;
 use crate::protocol::EventMeta;
+use crate::protocol::SessionStatus;
 use crate::protocol::WingEvent;
 use crate::shared::constants::TOOL_BASH;
 use crate::shared::constants::TOOL_TODO;
@@ -413,6 +414,7 @@ impl App {
                 uncommitted,
                 uncommitted_tools,
                 events,
+                status,
                 turn_started_at,
                 draft,
                 name,
@@ -425,6 +427,7 @@ impl App {
                     uncommitted.as_ref(),
                     &uncommitted_tools,
                     &events,
+                    status,
                     turn_started_at.as_deref(),
                     draft,
                     name,
@@ -505,6 +508,14 @@ impl App {
     /// → replay in the chain order that makes diff anchoring structural
     /// (messages → uncommitted → uncommitted tools → fact events) → draft /
     /// name / agent snapshot.
+    ///
+    /// The working state comes from the snapshot's **status**, never from
+    /// whether content is present. A new subscriber cannot hear the past
+    /// `turn_started` (a once-only live event, not replayed), and an empty
+    /// uncommitted projection does not mean idle: between rounds, or while the
+    /// first LLM call is still in flight, a turn runs with nothing finalized to
+    /// project. Only when the status is absent (old gateway) do we fall back to
+    /// the content inference.
     #[allow(clippy::too_many_arguments)]
     fn apply_sync_session(
         &mut self,
@@ -513,6 +524,7 @@ impl App {
         uncommitted: Option<&serde_json::Value>,
         uncommitted_tools: &[serde_json::Value],
         events: &[serde_json::Value],
+        status: Option<SessionStatus>,
         turn_started_at: Option<&str>,
         draft: Option<String>,
         name: Option<String>,
@@ -564,7 +576,13 @@ impl App {
         // in-progress turn (a mid-turn resume). `turn_started_at`
         // restores the real elapsed instead of recounting from resume.
         let turn_instant = turn_started_at.and_then(turn_state::instant_from_utc_iso);
-        let mid_turn = uncommitted.is_some() || !uncommitted_tools.is_empty();
+        let mid_turn = match status.and_then(SessionStatus::turn_in_flight) {
+            Some(in_flight) => in_flight,
+            // Old gateway (no status) or a status this build does not know:
+            // degrade to the content inference — it covers the phases that
+            // carry content, which is strictly more than nothing.
+            None => uncommitted.is_some() || !uncommitted_tools.is_empty(),
+        };
         if mid_turn {
             self.turn.start();
             if let Some(instant) = turn_instant {
@@ -574,6 +592,16 @@ impl App {
                 title::title_working(self.turn.spinner.frame_str(), self.dir_label().as_deref());
             self.turn.last_title = Some(working_title.clone());
             self.push_intent(AppIntent::SetTitle(working_title));
+        } else if self.turn.working {
+            // The snapshot is authoritative in **both** directions: replacing
+            // the view under a running turn (session switch / reconnect) must
+            // clear the previous session's working state — spinner, elapsed
+            // anchor and terminal title. Nothing else would: the past turn's
+            // `Done` is filtered out as a foreign session's event.
+            self.finish_turn();
+            self.push_intent(AppIntent::SetTitle(title::title_idle(
+                self.dir_label().as_deref(),
+            )));
         }
 
         // Replay order: messages → uncommitted → uncommitted_tools →

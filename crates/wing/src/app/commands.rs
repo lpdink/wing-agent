@@ -404,8 +404,8 @@ impl App {
                 self.update_popup();
             }
             FetchPayload::SessionList(resp) => {
+                use crate::protocol::SessionStatus;
                 use crate::ui::popup::command::SessionCandidate;
-                use crate::ui::popup::selection::SessionStatus;
 
                 // Normalize a path for workdir comparison (strip trailing slashes).
                 let norm = |p: &str| {

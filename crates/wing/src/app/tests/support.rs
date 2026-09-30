@@ -6,6 +6,7 @@
 use crate::app::App;
 use crate::config::AppConfig;
 use crate::protocol::EventMeta;
+use crate::protocol::SessionStatus;
 use crate::protocol::WingEvent;
 use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::ask::AskPayload;
@@ -18,7 +19,35 @@ pub(super) fn test_app() -> App {
 }
 
 /// Build a SyncSession event for the test session.
+///
+/// `status` is derived the way a well-behaved backend derives it: content in
+/// the projections ⇒ a turn is in flight. Tests that need a specific status
+/// (or an old gateway without one) call [`sync_event_with_status`].
 pub(super) fn sync_event(
+    messages: Vec<serde_json::Value>,
+    uncommitted: Option<serde_json::Value>,
+    uncommitted_tools: Vec<serde_json::Value>,
+    events: Vec<serde_json::Value>,
+    turn_started_at: Option<String>,
+) -> WingEvent {
+    let status = if uncommitted.is_some() || !uncommitted_tools.is_empty() {
+        SessionStatus::Working
+    } else {
+        SessionStatus::Idle
+    };
+    sync_event_with_status(
+        Some(status),
+        messages,
+        uncommitted,
+        uncommitted_tools,
+        events,
+        turn_started_at,
+    )
+}
+
+/// Build a SyncSession event with an explicit `status` (`None` = old gateway).
+pub(super) fn sync_event_with_status(
+    status: Option<SessionStatus>,
     messages: Vec<serde_json::Value>,
     uncommitted: Option<serde_json::Value>,
     uncommitted_tools: Vec<serde_json::Value>,
@@ -31,6 +60,7 @@ pub(super) fn sync_event(
         uncommitted,
         uncommitted_tools,
         events,
+        status,
         turn_started_at,
         agent: None,
         name: None,

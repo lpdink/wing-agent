@@ -41,6 +41,17 @@ import { type SessionMessage, decodeSessionMessage } from './history';
 export const SESSION_STATUSES = ['inactive', 'idle', 'working', 'waiting'] as const;
 export type SessionStatus = (typeof SESSION_STATUSES)[number];
 
+/**
+ * Whether this status means a turn is in flight.
+ *
+ * `working` and `waiting` both are (waiting = blocked on a pending ask); the
+ * authoritative answer to "is the agent running", never inferred from whether
+ * content is present.
+ */
+export function isTurnInFlight(status: SessionStatus): boolean {
+  return status === 'working' || status === 'waiting';
+}
+
 /** `wing/event/base.py::SessionInfo` — one row of the session list. */
 export interface SessionInfo {
   readonly id: string;

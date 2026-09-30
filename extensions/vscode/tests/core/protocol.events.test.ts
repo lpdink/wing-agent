@@ -9,6 +9,7 @@ import {
   isKnownEventType,
   KNOWN_EVENT_TYPES,
 } from '../../src/core/protocol/events';
+import { isTurnInFlight } from '../../src/core/protocol/http';
 
 /**
  * Protocol mirror tests — one payload per event type, asserted **field by field**
@@ -579,6 +580,24 @@ describe('sync_session — the replay payload', () => {
     expect(event.events.map((inner) => inner.type)).toStrictEqual(['interrupted', 'compact_done']);
     const facts = event.events.filter(isKnownEvent);
     expect(facts[1]).toMatchObject({ type: 'compact_done', original_tokens: 10, compressed_tokens: 5 });
+  });
+
+  it('decodes the snapshot status — the authority on a turn in flight', () => {
+    expect(syncSession({ ...payload, status: 'working' }).status).toBe('working');
+    expect(syncSession({ ...payload, status: 'waiting' }).status).toBe('waiting');
+    expect(syncSession({ ...payload, status: 'idle' }).status).toBe('idle');
+    expect(isTurnInFlight('working')).toBe(true);
+    expect(isTurnInFlight('waiting')).toBe(true);
+    expect(isTurnInFlight('idle')).toBe(false);
+    expect(isTurnInFlight('inactive')).toBe(false);
+  });
+
+  it('leaves an absent or unknown status null (older / newer gateway)', () => {
+    // Absent → the consumer degrades to its own inference; an unknown value is
+    // *not* silently read as "idle".
+    const absent = syncSession({ type: 'sync_session', session_id: 's', messages: [], ...META });
+    expect(absent.status).toBeNull();
+    expect(syncSession({ ...payload, status: 'compacting' }).status).toBeNull();
   });
 
   it('keeps an unknown replay fact as an unknown event (forward compatible)', () => {

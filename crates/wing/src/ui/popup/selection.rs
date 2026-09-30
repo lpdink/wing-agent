@@ -16,6 +16,7 @@ use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::ThemePalette;
+use crate::protocol::SessionStatus;
 use crate::render::markdown::truncate_to_display_width;
 
 /// Maximum rows to show before scrolling (single-line popups).
@@ -24,30 +25,10 @@ const MAX_VISIBLE_ROWS: usize = 8;
 /// Maximum rich (double-line) rows to show before scrolling (session popup).
 const MAX_VISIBLE_RICH_ROWS: usize = 6;
 
-/// Session 运行时状态（与后端 `SessionStatus` 对应）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionStatus {
-    /// 在磁盘、未被 resume。
-    Inactive,
-    /// 已 resume、空闲。
-    Idle,
-    /// agent 正在处理 turn。
-    Working,
-    /// agent 阻塞在 ask / need_feedback，等待用户反馈。
-    Waiting,
-}
-
+/// Presentation of [`SessionStatus`] in the session picker (the vocabulary
+/// itself lives in the protocol layer — one definition, shared with the event
+/// projections).
 impl SessionStatus {
-    /// 从后端字符串解析；未知值（含空串，旧网关）降级为 Inactive。
-    pub fn parse(s: &str) -> Self {
-        match s {
-            "idle" => Self::Idle,
-            "working" => Self::Working,
-            "waiting" => Self::Waiting,
-            _ => Self::Inactive,
-        }
-    }
-
     /// 状态图标：inactive/idle/working 为实心圆点，waiting 为非 emoji 的 `?`。
     pub fn icon(self) -> &'static str {
         match self {
@@ -56,13 +37,13 @@ impl SessionStatus {
         }
     }
 
-    /// 状态图标颜色。
+    /// 状态图标颜色（未知值按 inactive 呈现——不猜）。
     pub fn color(self) -> Color {
         match self {
-            Self::Inactive => Color::DarkGray,
-            Self::Idle => Color::White,
             Self::Working => Color::Yellow,
             Self::Waiting => Color::Magenta,
+            Self::Idle => Color::White,
+            Self::Inactive | Self::Unknown => Color::DarkGray,
         }
     }
 
@@ -72,7 +53,7 @@ impl SessionStatus {
             Self::Waiting => 0,
             Self::Working => 1,
             Self::Idle => 2,
-            Self::Inactive => 3,
+            Self::Inactive | Self::Unknown => 3,
         }
     }
 }
@@ -599,31 +580,27 @@ mod tests {
     }
 
     #[test]
-    fn test_session_status_from_str() {
-        assert_eq!(SessionStatus::parse("idle"), SessionStatus::Idle);
-        assert_eq!(SessionStatus::parse("working"), SessionStatus::Working);
-        assert_eq!(SessionStatus::parse("waiting"), SessionStatus::Waiting);
-        assert_eq!(SessionStatus::parse("inactive"), SessionStatus::Inactive);
-        // Unknown / empty (old gateway) degrades to Inactive.
-        assert_eq!(SessionStatus::parse(""), SessionStatus::Inactive);
-        assert_eq!(SessionStatus::parse("bogus"), SessionStatus::Inactive);
-    }
-
-    #[test]
     fn test_session_status_icons() {
         assert_eq!(SessionStatus::Inactive.icon(), "●");
         assert_eq!(SessionStatus::Idle.icon(), "●");
         assert_eq!(SessionStatus::Working.icon(), "●");
         // waiting uses a non-emoji glyph, distinct from the dots.
         assert_eq!(SessionStatus::Waiting.icon(), "?");
+        // Unknown (newer gateway) presents like inactive — never a guess.
+        assert_eq!(SessionStatus::Unknown.icon(), "●");
+        assert_eq!(SessionStatus::Unknown.color(), Color::DarkGray);
     }
 
     #[test]
     fn test_session_status_rank_order() {
-        // waiting > working > idle > inactive
+        // waiting > working > idle > inactive (unknown sorts with inactive)
         assert!(SessionStatus::Waiting.rank() < SessionStatus::Working.rank());
         assert!(SessionStatus::Working.rank() < SessionStatus::Idle.rank());
         assert!(SessionStatus::Idle.rank() < SessionStatus::Inactive.rank());
+        assert_eq!(
+            SessionStatus::Unknown.rank(),
+            SessionStatus::Inactive.rank()
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import Field
 
-from .base import AgentInfo, WingEvent
+from .base import AgentInfo, SessionStatus, WingEvent
 
 
 # ============================================================
@@ -26,6 +26,16 @@ class SyncSessionEvent(WingEvent):
     由 /session 切换、/fork 触发。
     通知前端需要同步（replay）指定 session 的完整上下文。
 
+    状态（快照事实）：
+    status：快照时刻 session 的运行状态（idle / working / waiting），与
+      `/api/session/list` 同一取值域（`inactive` 不会出现——能同步的 session
+      必在内存）。中途订阅者据此进入 working（spinner / 标题 / 计时）；
+      MUST NOT 由 uncommitted / uncommitted_tools 是否为空反推状态——"有未提交
+      内容 ⇒ working" 只单向成立（一轮 LLM 调用在飞行、尚未吐出首个已终结块
+      时两者都空，而 turn 确在 working）。
+    turn_started_at：当前 turn 的开始时刻（UTC ISO 字符串），无进行中 turn 时
+      为 null——前端据此恢复已耗时而非从 resume 时刻重算
+
     四组重放素材，订阅方 MUST 按 `messages → uncommitted → uncommitted_tools
     → events` 的顺序组装，随后无缝衔接 live 流：
 
@@ -37,8 +47,6 @@ class SyncSessionEvent(WingEvent):
       （`[{tool_call_id, tool_name, args_fragment}]`），前端经既有 live
       ToolCallStream 分支局部解析渲染活工具卡
     events：活跃链上的**事实类**事件节点（按链序，过滤规则见 get_active_events）
-    turn_started_at：当前 turn 的开始时刻（UTC ISO 字符串），无进行中 turn 时
-      为 null——前端据此恢复已耗时而非从 resume 时刻重算
     agent：该 session 的 AgentInfo
     name：session 名称
     draft：用户还没发出去的草稿（rewind/fork 时可能有）
@@ -51,6 +59,9 @@ class SyncSessionEvent(WingEvent):
     uncommitted: dict[str, Any] | None = None
     uncommitted_tools: list[dict[str, Any]] = Field(default_factory=list)
     events: list[dict[str, Any]] = Field(default_factory=list)
+    # 无默认值：每个构造点都必须显式给出快照时刻的状态——同步载荷自描述，
+    # 前端不做推断（漏给值应当是构造期的错误，而非静默退化成"不在跑"）。
+    status: SessionStatus
     turn_started_at: str | None = None
     agent: AgentInfo | None = None
     name: str | None = None
