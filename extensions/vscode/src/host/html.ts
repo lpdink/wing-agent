@@ -62,9 +62,13 @@ export function buildContentSecurityPolicy(options: Pick<WebviewHtmlOptions, 'cs
   return [
     "default-src 'none'",
     `img-src ${cspSource} data:`,
-    `font-src ${cspSource}`,
-    // 'unsafe-inline' covers style *attributes* (React sets a few) and VS Code's
-    // own theme variable injection; scripts stay nonce-only.
+    // `data:` is for KaTeX's fonts: Vite's library build inlines every asset (none
+    // of the 60 `woff2/woff/ttf` files it would otherwise emit), so the stylesheet
+    // carries them as `data:font/…` URIs. Without it the formulas fall back to
+    // system fonts. Same scope as `img-src`: local document data only.
+    `font-src ${cspSource} data:`,
+    // 'unsafe-inline' covers style *attributes* (React sets a few, KaTeX sets many)
+    // and VS Code's own theme variable injection; scripts stay nonce-only.
     `style-src ${cspSource} 'unsafe-inline'`,
     `script-src 'nonce-${nonce}'`,
   ].join('; ');

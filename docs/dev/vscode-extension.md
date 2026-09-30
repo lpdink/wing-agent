@@ -13,8 +13,9 @@
 ## 1. 边界（先读这个）
 
 **做**：多 Tab 会话（新建 / 切换 / 关闭 / resume / fork）、完整对话渲染（streaming / thinking /
-工具调用 / diff / todo / Ask / 审批）、控制面（模型、think/effort、yolo、中断、compact、rewind、
-fork、prompt 命令）、连接自愈（探活 + 一次自动拉起 + 断线重连重订阅重放）。
+工具调用 / diff / todo / Ask / 审批 / **Markdown 公式（KaTeX）与工作区内的本地图片**）、控制面
+（模型、think/effort、yolo、中断、compact、rewind、fork、prompt 命令）、连接自愈（探活 + 一次自动
+拉起 + 断线重连重订阅重放）。
 
 **不做**（Out of Scope，别顺手加）：
 
@@ -358,8 +359,11 @@ webview 意图（`src/shared/bridge.ts` 的 `WebviewToHostMessage`，全部有�
 ### 8.2 Webview 运行时的硬规则
 
 - CSP：`default-src 'none'` + 白名单（`img-src`/`font-src`/`style-src` 给 `cspSource`，
-  `script-src 'nonce-…'` 单次 nonce）。宿主生成文档（`src/host/html.ts` 纯函数），bootstrap
-  值 `window.__WING_BOOTSTRAP__` 内联且 HTML 转义。
+  `script-src 'nonce-…'` 单次 nonce）。`font-src` 还带 `data:`：Vite 的 **lib** 构建会把所有资源
+  内联（KaTeX 的字体因此以 `data:font/…` 形式进 `main.css`），去掉它公式会退回系统字体；构建期只保留
+  woff2 源（`tools/fonts.mts`，另两段格式 Chromium 永不取，删掉后 CSS 从 1.5 MB 降到 ~0.41 MB），
+  `tests/artifact/webviewBundle.test.ts` 钉住这个前提。宿主生成文档（`src/host/html.ts` 纯函数），
+  bootstrap 值 `window.__WING_BOOTSTRAP__` 内联且 HTML 转义。
 - **bundle 不得引用 Node 全局**。`vite.config.mts` 显式内联 `process.env.NODE_ENV` 并把
   `NODE_ENV=production` 钉死。Vite 的 **lib** 构建不做这个替换，漏掉时 React 的 CJS 入口会留
   一条 `process.env` 分支 → 真实窗口里白屏 + `ReferenceError: process is not defined`。
@@ -388,6 +392,83 @@ TypeScript 与源码，看不到 bundler 实际吐出的字节。这个测试：
 - preview harness 有工具栏：切 fixture、流式一轮、打断 patch 流（验证 resync）、推 UI 动作——
   不启动 VS Code 就能看渲染改动的首选路径。
 
+### 8.5 Markdown 的公式与本地图片
+
+两个渲染期能力，都在 `src/webview/chat/markdown/` 里，**不经后端、不碰会话模型**：
+
+| 能力 | 入口 | 行为 |
+|---|---|---|
+| 公式 | `parse.ts`（`math_inline` / `math_block` 两条自研规则）→ `render.tsx#MathView` → `math.ts` | `$…$`、`$$…$$`（含跨行块）、`\(…\)`、`\[…\]`、**裸 AMS 环境**（`\begin{align}…\end{align}`）；识别口径与 TUI 侧逐条对齐（见下）；KaTeX 以 `trust: false`（HTML 扩展不可用）+ `throwOnError` 渲染，失败 / 超预算时**显示完整源码**（绝不吞公式）；输入上界 `MAX_MATH_CHARS = 8192`，`maxSize: 10` 夹住 `\rule` 这类超大盒子；结果按 `(display, tex)` 记忆化 |
+| 本地图片 | `render.tsx#MarkdownImage` → `chat/markdown/image.ts`（缓存 + 批量请求）→ `webview.asWebviewUri` | `![alt](path)`：宿主用 `src/host/images.ts`（纯函数、零 I/O）把路径解析到工作区，再 `asWebviewUri`；远程 URL / `..` 越界 / 非图片扩展名一律拒绝 |
+
+- 通道：`resolveImages`（webview → host，协议级，和 `ping` 同级）→ `images`（host → webview，
+  `{ src, uri \| null }`）。webview 侧是"未问 / 可加载 / 拒绝"三态缓存，一次绘制只发一批（协议上限
+  `RESOLVE_IMAGES_MAX_SRCS = 64` 条/次，超出的分后续批）。宿主**只按 tag 校验**（`shared/validate.ts`），
+  但这条消息的载荷会被遍历，所以 `readImageSources` 额外做形状检查：畸形载荷被丢弃并记日志，
+  绝不抛异常。
+- **降级只有一档**：任何一种"不能显示"（被拒绝、还没答复、`<img>` 加载失败）都退回今天的行为——
+  指向源地址的链接（alt 兜底、点击交给编辑器），不会有空框。
+- `localResourceRoots` = 扩展根 + `workspaceFolders[0]`（多根窗口也只给第一个，与 `openFile` 的
+  `resolvePath` 同口径）。
+- KaTeX 的字体以 `data:` URI 内联在 `main.css` 里（见 §8.2 的 CSP 说明），所以公式不需要任何
+  运行期网络/资源请求；构建期只保留 woff2 源（`tools/fonts.mts`），三段格式里另外两段 Chromium
+  永远不会取。
+
+#### 公式语法的两个用户可见副作用（**不是 bug，但要知情**）
+
+1. **`$…$` 采用 pulldown 口径**（与 TUI 侧一致）：开定界符后不能是空白、闭定界符前不能是空白。
+   因此 `$100 and $200` 是正文，但**散文里成对的 `$` 仍可能被当成公式**，例如
+   `set $PATH=$HOME` 会渲染出公式 `PATH=`、`Ranges 1..$n and 2..$m` 会渲染出 `n and 2..`。
+   想避免就把 `$` 转义成 `\$`（`\$` 在公式内外都是字面美元号）。必要时也可以整体关掉这条渲染
+   （回退方案见 design.md「变更说明」）。
+2. **`\(…\)` / `\[…\]` / 裸 AMS 环境会被当作公式**：这两种形态今天分别渲染成 `(x)`（反斜杠被
+   markdown 转义吃掉）与 `[x]`；本渲染器把它们当 LaTeX 定界符，**既有文档的显示会变化**。
+
+#### 与 TUI 侧（步骤 02）的识别口径对齐
+
+TUI 的公式接线是**权威口径**：`crates/wing/src/render/markdown/math.rs` +
+`docs/dev/tui-rendering.md` §2.5（含「定界符归一化清单」）。本 lane 已逐条对齐；两条管线只是
+**实现方式**不同——TUI 在解析前**改写源文本**（pulldown-cmark 不认 `\(` / `\[` / 裸环境），
+webview 用规则**就地识别、不改输入**（未识别的 span 就是普通 markdown 文本，因此不存在
+「被改坏」这一失败模式）。
+
+| 口径 | 两侧一致的规则 |
+|---|---|
+| `$…$` | pulldown 的两条规则：开定界符后非空白、闭定界符前非空白。**没有** pandoc 的「闭定界符后不接数字」——`$x$1` 在两边都是公式 `x` 紧跟文本 `1` |
+| `$$…$$` | 单行（行内位置的显示公式）+「整行 `$$` 与闭合行」的跨行块；显示定界符不设空白规则（`$$ \frac{a}{b} $$` 合法） |
+| `\(…\)` / `\[…\]` | 行内 / 显示；span 内不得含反引号或 `$`（否则退回普通文本，内部的 `` `…` `` / `$…$` 各自成 token）、不得与已有 `$` 相邻、超过 8192 不再识别（闭定界符必须**完整落在**窗口内，与 TUI 的 `find` 同口径）；每块另有 1 MiB 的搜索预算（TUI 的 `MAX_SCAN_WORK`）。跨空行：流式分块器把空行当块边界，两边一致；非流式路径（`MarkdownText`）会跨，见 §11 条目 7 |
+| 裸环境 | `\begin{ENV}…\end{ENV}`（不套 `$$`）→ 显示公式；同名嵌套计数配对；白名单外 / 未闭合 / body 含 `` ` `` 或 `$` → 原样字面量 |
+| 不透明区 | 代码跨度、围栏（含 `>`、列表前缀、**≤3 列缩进**——4 列及以上是缩进代码块，不是围栏，与 TUI 的 `fence_open` 同口径）、缩进代码块；行内 HTML 标签与 autolink（`<…>` 整段，含属性值；内部含代码跨度时按代码跨度切开）；链接/图片的 destination 与 title；链接引用定义行；HTML 块。数学识别一律不进这些区域 |
+| HTML 块判定 | 按**文档行**判定（与 TUI 的 `content_start` 同口径：剥 `>` 链与列表标记，≤3 前导空格），tag 行起、下一个空行止、围栏内的行不算。因此 `# <div> \(x\)`、`| <div> \(x\) |` 里的公式照常识别（该文档行不是以 `<` 开头），而 `<div>` 之后的 `\(x\)` 不识别；判定的开关是「这一行是不是 HTML 块的成员」，不是「这一块的文本以 `<` 开头」 |
+| 降级 | 未识别 → 字面量（走 markdown 自己的转义，与 TUI 输出相同）；KaTeX 失败 / 超预算 → **完整源码**（定界符在内、逐字符），绝不空串、绝不半截 |
+
+**搜索预算**（两条 `MAX_SCAN_WORK`、一条窗口，都是「与 TUI 同量级」的硬上界，不是启发式）：
+`\(` / `\[` / 裸环境的候选搜索按**每个 inline 块**计费 1 MiB，块规则的闭合行走按**每个文档**计费
+1 MiB，超预算后新候选不再识别（退回文本，内容不丢）；`\(…\)` / `\[…\]` 的窗口是 8192 个
+code unit，闭定界符必须完整落在窗口内。三条都实测过：`\(x` × 20k 与 `\[` 每行 × 10k 这类 04 基线上
+的平方级输入从 1.3–1.4 s 降到 5–8 ms（数字与命令见任务 `08_vscode_alignment/design.md`）。
+
+**裸环境白名单**（与 TUI 的 `MATH_ENVS` 同一张表；每项接受末尾 `*`）：
+`align` `aligned` `alignat` `alignedat` `flalign` `split` `eqnarray` `gather` `multline` `center`
+`equation` `displaymath` `array` `cases` `matrix` `pmatrix` `bmatrix` `Bmatrix` `vmatrix` `Vmatrix`。
+
+**有意差异**（介质 / 解析器 / 引擎不同，两条 lane 都知情，不追求逐字符一致）：
+
+| 差异 | 理由 |
+|---|---|
+| 渲染形态 | TUI 是等宽字符网格，webview 是 KaTeX + CSS 流式 |
+| 行内公式宽度 | TUI 有「渲染结果宽于可用宽度就退回源码」的闸（网格需要宽度预算）；webview 交给 CSS 折行，宽度不影响识别 |
+| 降级时的定界符 | TUI 对 `\(x\)` 的降级显示 `$x$`（源已被归一化改写）；webview 显示作者实际写的 `\(x\)` |
+| HTML 块内的其它 markdown | TUI 整块字面量；webview 仍按 markdown 解析（`**bold**` 是粗体，`\(x\)` 经转义显示成 `(x)`），只保证不识别数学——`html: false` 是既有语义（与 VS Code 自带 chat 渲染器同选项），本改动不扩大 |
+| 行内 HTML 里的裸 URL / 散文里的裸 URL | webview 的 `linkify` 会把 `<a href="http://x/">` 里的 URL 变成链接（**既有行为**，本步骤未改）；散文里的裸 URL 更是会被整个吃成链接文本，URL 里写的 `\(…\)` 因此不是公式（例：`see https://example.com/a\(b\) now` → 链接文本含字面 `\(`），而 TUI 的归一化先把 `\(b\)` 改写成 `$b$`、链接被 `$` 截断并渲染出公式 `b`。数学识别两边都不进入 URL/destination，属 linkify 边界差异（review r2 [N4] 登记） |
+| HTML 起始行夹在 `$$…$$` 内部（`$$\n<div>\n$$`） | TUI 的 pulldown 让 HTML 块打断公式（整段字面量）；webview 把该行当公式内容（KaTeX 拒绝 → 逐字显示同样的源码），其后同段落里的公式仍会识别。内容不丢，仅识别范围不同 |
+| 渲染器覆盖面 | 引擎不同（wing_math vs KaTeX）：同一公式可能一边渲染、一边回退源码（例：TUI 引擎不渲染某些 `cases`，KaTeX 不渲染行内 `align`） |
+| 退化 `$` 串 | `$a$$$b$` 这类没有真实用法的输入，pulldown 的分隔符栈与「左到右扫描」可能给出不同切分；两边都不丢内容 |
+| 8192 的单位 | TUI 按字节、webview 按 UTF-16 code unit（值相同，CJK 密集输入下 TUI 更早降级） |
+| 退化显示定界符的节点类型 | `$$$$`、`$$ $$`、`$$\n$$` 这类空/退化串：两边都退回字面量，但 TUI 的归一化会先把它们还原成 `$…$` 再失败，webview 保留原始 `$$`（显示字符与内容一致，只有节点/字形层面不同） |
+| 链接 destination 折行 | 链接目标被折到下一行的写法（CommonMark 允许）下，webview 不识别折行部分里的公式，TUI 的逐行扫描会识别；不影响数学识别口径本身（两边的 destination 都不进识别区） |
+| `\\end{name}` 的语义 | `\begin{align}a\end{align}b` 这种「环境外又有 `\end`」：TUI 按同名配对取到第一个 `\end{align}` 为止，webview 同；差异在 body 里出现**另一个** `\end{...}` 时（TUI 只看名字匹配，webview 亦同），以及 `\end` 后紧跟文本时的边界处理——两边都可能回退成字面量，内容不丢 |
+
 ## 9. 测试
 
 ### 9.1 单元 / 组件（vitest，双 project）
@@ -407,7 +488,7 @@ TypeScript 与源码，看不到 bundler 实际吐出的字节。这个测试：
 
 ```bash
 cd extensions/vscode
-pnpm run test          # 全量（44 文件 / 666 用例）
+pnpm run test          # 全量（49 文件 / 834 用例）
 pnpm run typecheck     # tsc --noEmit × 3 projects
 pnpm run lint          # eslint（含层门禁 zone）
 pnpm run format:check  # prettier
@@ -514,7 +595,16 @@ pnpm exec vsce ls       # 核对进包清单
 4. 远程 / SSH / 多机网关不在支持范围；鉴权开启时在设置里填 `wing.apiKey`（`Authorization: Bearer`
    **header**，不进 URL；明文存储，建议只放 **User** settings——工作区作用域会写进可提交的
    `.vscode/settings.json`，Settings Sync 也会同步；改用 `context.secrets` 是 follow-up）；
-5. 多工作区窗口只在单测层覆盖（取第一个 folder），真机行为未系统验证。
+5. 多工作区窗口只在单测层覆盖（取第一个 folder），真机行为未系统验证；
+6. 对话里的本地图片同样只认第一个 folder：多根窗口的其它 folder、以及「会话 workdir ≠ folder」的
+   场景，图片会退回链接（与 `openFile` 的既有口径一致）；
+7. 公式 `$$…$$` / `\[…\]` 之间出现**空行**时，流式分块器（`markdown/split.ts` 的「空行＝块边界」）
+   会把它切成两块，于是退回字面量文本；TUI 的流式归一化窗口同样以空行为界，**流式下两边一致**。
+   非流式路径（`MarkdownText`，如用户消息）**只有 webview 会跨**（`$$`/`\[` 的块规则不检查空行，
+   04 起既有行为）；TUI 连非流式也不跨（归一化器与 pulldown 都以空行/块为界，实测三例 `[T]` 全字面量）；
+8. 公式的识别口径已对齐 TUI 侧（见 §8.5 的两张表），**有意差异**也都登记在那里；
+9. 散文里成对的 `$` 可能被渲染成公式（`set $PATH=$HOME` → 公式 `PATH=`），见 §8.5 的用户可见
+   副作用；用 `\$` 转义可避免。
 
 视觉打磨 follow-up（用户检查点②反馈，**本轮有意不修**，供后续 PR 引用）：thinking/工具卡折叠无
 过渡动画、长 thinking 收起高度跳变；代码块从纯文本到 shiki 着色的跳变；流式表格宽度抖动；diff
@@ -543,6 +633,8 @@ pnpm exec vsce ls       # 核对进包清单
 | 加一个本地命令 | `src/shared/commands.ts`（名字与 kind）+ 宿主 `runPromptCommand` 分支 + `tests/shared/commands.test.ts`（命令表被测试钉死） |
 | 改桥协议 / 面板字段 | `src/shared/bridge.ts`/`session.ts` + `tests/shared/contract.test.ts`，两侧同步——`interfaces.md` 的教训：单侧私改必冲突 |
 | 调视觉 | `src/webview/styles/tokens.css`（先溯源到本机 VS Code 源码再改；硬编码颜色会被门禁拒绝） |
+| 改公式的定界符/语法 | **先读 §8.5 的两张表**（识别口径以 TUI 侧为准）；实现都在 `src/webview/chat/markdown/parse.ts`（`math_inline` / `math_block` 两条规则 + 不透明区守卫），测试在 `tests/webview/{markdown,math}.test.tsx`；权威口径的实现在 TUI 侧 `crates/wing/src/render/markdown/math.rs`（只读参考） |
+| 改图片的可加载范围 | `src/host/images.ts`（策略）+ `src/host/chatViewProvider.ts`（`localResourceRoots`）+ 两侧测试 |
 | 加 smoke 场景 | `tools/smoke/scenarios.ts`（剧本 + 断言都在代码里，不写配置） |
 | 动连接策略 | 先读 §7 与 `WingHost`/`launcher.ts` 的注释；策略是「探活优先、一次拉起、不猜」 |
 
@@ -552,7 +644,7 @@ pnpm exec vsce ls       # 核对进包清单
 # 工程门禁（extensions/vscode 内）
 pnpm install --frozen-lockfile --prefer-offline
 pnpm run typecheck && pnpm run lint && pnpm run format:check
-pnpm run test                 # 666 用例
+pnpm run test                 # 834 用例
 pnpm run build && pnpm run build:preview
 pnpm run package              # → wing-vscode.vsix
 pnpm run smoke:gateway        # 12 场景（真网关 + 假 Provider）

@@ -1,18 +1,24 @@
 /**
  * Markdown AST → React.
  *
- * The renderer creates every element itself: no `dangerouslySetInnerHTML`, no
- * model-supplied markup. Links hand the URL to the *host* (`openLink`) instead
- * of navigating the webview; code blocks get the copy affordance.
+ * The renderer creates every element itself: no model-supplied markup, no
+ * `innerHTML` built from model text. The single exception is KaTeX (`math.ts`),
+ * which turns a formula into an HTML string — it is injected through
+ * `dangerouslySetInnerHTML` and is safe because `trust: false` leaves TeX no way to
+ * produce markup (the tests pin that). Links hand the URL to the *host*
+ * (`openLink`) instead of navigating the webview; code blocks get the copy
+ * affordance.
  */
 
-import { memo, useMemo } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 
 import { postToHost } from '../../bridge/channel';
 import { useCopyFeedback } from '../interaction';
 import styles from '../../styles/markdown.module.css';
-import type { MarkdownInline, MarkdownNode } from './parse';
+import type { MarkdownInline, MarkdownMath, MarkdownNode } from './parse';
+import { imageUri, requestImage, subscribeImages } from './image';
+import { renderMathHtml } from './math';
 import { highlightCode } from './highlight';
 
 const HEADINGS = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as const;
@@ -82,6 +88,8 @@ function MarkdownNodeView({
     }
     case 'code':
       return <CodeBlock lang={node.lang} code={node.code} live={live} closed={node.closed} />;
+    case 'math':
+      return <MathView node={node} />;
     case 'quote':
       return (
         <blockquote className={styles.quote}>
@@ -199,27 +207,108 @@ function InlineNodeView({ node }: { readonly node: MarkdownInline }): ReactEleme
           <InlineNodes nodes={node.children} />
         </a>
       );
+    case 'math':
+      return <MathView node={node} />;
     case 'image':
-      // Remote images are blocked by the webview CSP (`img-src` covers the webview
-      // origin + data:), so an image becomes a link to itself — the alt text is
-      // still visible and the user can open it in a browser.
-      return (
-        <a
-          className={styles.link}
-          href={node.src}
-          onClick={(event) => {
-            event.preventDefault();
-            postToHost({ type: 'openLink', href: node.src });
-          }}
-        >
-          {node.alt === '' ? node.src : node.alt}
-        </a>
-      );
+      return <MarkdownImage src={node.src} alt={node.alt} />;
     case 'break':
       return <br />;
     default:
       return null;
   }
+}
+
+// ── images ────────────────────────────────────────────────────────────
+
+/**
+ * The image renderer.
+ *
+ * Until the host answers with a webview URI this is exactly what the transcript
+ * always rendered: a link to the source (the alt text, or the path when there is
+ * none) that hands the URL to the editor instead of navigating the webview. The
+ * same fallback covers "the host refused it" (remote URL, outside the workspace, not
+ * an image) and a load failure (`onError`: the file is gone, or is not really an
+ * image) — one path, and never an empty box.
+ */
+function MarkdownImage({ src, alt }: { readonly src: string; readonly alt: string }): ReactElement {
+  // Which source failed to load — remembered *per source*, not as a boolean: while
+  // a block streams, this node can be handed a different `src` (inline nodes are
+  // positional), and a stale "failed" would keep the new image as a link forever.
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const uri = useImageUri(src);
+
+  if (uri === null || failedSrc === src) {
+    return (
+      <a
+        className={styles.link}
+        href={src}
+        onClick={(event) => {
+          event.preventDefault();
+          postToHost({ type: 'openLink', href: src });
+        }}
+      >
+        {alt === '' ? src : alt}
+      </a>
+    );
+  }
+
+  return (
+    <img
+      className={styles.markdownImage}
+      src={uri}
+      alt={alt}
+      data-testid="md-image"
+      onError={() => {
+        setFailedSrc(src);
+      }}
+    />
+  );
+}
+
+/** The resolved URI for `src`, asking the host once on mount. */
+function useImageUri(src: string): string | null {
+  const [uri, setUri] = useState(() => imageUri(src));
+
+  useEffect(() => {
+    // Between render and effect the answer may already have arrived (another cell
+    // asked for the same file): read it again before subscribing.
+    setUri(imageUri(src));
+    requestImage(src);
+    return subscribeImages(() => {
+      setUri(imageUri(src));
+    });
+  }, [src]);
+
+  return uri;
+}
+
+// ── math ──────────────────────────────────────────────────────────────
+
+/**
+ * One formula.
+ *
+ * The injected HTML is KaTeX's, not the model's — `math.ts` documents why that is
+ * safe (`trust: false`, so TeX cannot produce markup) and the tests pin it. A
+ * formula KaTeX refuses falls back to its **literal source**, never to nothing:
+ * a dropped formula is worse than an unrendered one.
+ */
+function MathView({ node }: { readonly node: MarkdownMath }): ReactElement {
+  const html = useMemo(() => renderMathHtml(node.tex, node.display), [node.tex, node.display]);
+  if (html === null) {
+    return (
+      <span className={styles.mathSource} data-testid="md-math-source">
+        {node.source}
+      </span>
+    );
+  }
+  return (
+    <span
+      className={node.display ? styles.mathDisplay : undefined}
+      data-testid="md-math"
+      data-display={node.display ? 'true' : 'false'}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
 }
 
 // ── code blocks ───────────────────────────────────────────────────────
