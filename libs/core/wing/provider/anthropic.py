@@ -49,6 +49,7 @@ from wing.schema import (
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
+    from wing.media import MediaAccess
 
 # 运行时开启 thinking 且用户未配置 budget 时的默认预算。
 # Anthropic 要求 type=enabled 必带 budget_tokens（1024 <= budget < max_tokens）。
@@ -100,9 +101,12 @@ class AnthropicProvider(ModelProvider):
         self,
         config: ProviderConfig,
         session_id: str | None = None,
+        media: MediaAccess | None = None,
     ) -> None:
         self._config = config
         self._session_id = session_id
+        # 会话媒体池（本步骤只持有，序列化在后续步骤接线）。
+        self._media = media
         self.base_url = config.base_url.rstrip("/")
         self.reasoning_effort: str | None = config.reasoning_effort
         self.timeout_first_chunk = config.timeout_first_chunk

@@ -43,6 +43,7 @@ from wing.schema import (
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
+    from wing.media import MediaAccess
 
 
 @dataclass
@@ -69,9 +70,12 @@ class OpenAICompatProvider(ModelProvider):
         self,
         config: ProviderConfig,
         session_id: str | None = None,
+        media: MediaAccess | None = None,
     ) -> None:
         self._config = config
         self._session_id = session_id
+        # 会话媒体池（本步骤只持有，序列化在后续步骤接线）。
+        self._media = media
         self.base_url = config.base_url.rstrip("/")
         self.reasoning_effort: str | None = config.reasoning_effort
         self.timeout_first_chunk = config.timeout_first_chunk

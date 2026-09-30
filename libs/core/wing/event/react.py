@@ -14,7 +14,7 @@ from pydantic import Field
 from .base import WingEvent
 
 if TYPE_CHECKING:
-    from wing.schema import Message, ToolCall
+    from wing.schema import MediaRef, Message, ToolCall
 
 
 class TextEvent(WingEvent):
@@ -78,6 +78,11 @@ class ToolCallResultEvent(WingEvent):
     tool_result: str
     tool_success: bool
     model: str = ""
+    tool_media: list[dict] = Field(default_factory=list)
+    """工具结果携带的图片引用（MediaRef.model_dump() 列表）。
+
+    只服务直播/前端渲染与 probe 断言；字节不进事件（在 SessionStore）。
+    默认空列表——旧前端忽略新字段。"""
 
     @classmethod
     def from_execution(
@@ -87,6 +92,7 @@ class ToolCallResultEvent(WingEvent):
         success: bool,
         model: str,
         session_id: str,
+        media: list[MediaRef] | None = None,
     ) -> Self:
         return cls(
             session_id=session_id,
@@ -96,6 +102,7 @@ class ToolCallResultEvent(WingEvent):
             tool_result=result,
             tool_success=success,
             model=model,
+            tool_media=[m.model_dump() for m in (media or [])],
         )
 
 

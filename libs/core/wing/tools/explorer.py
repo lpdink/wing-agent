@@ -100,6 +100,9 @@ async def explorer_agent(
         stream=False,
         context_manager=cm,
         tools=[t for t in ro_tools if t is not None],
+        # 子 agent 与宿主共享同一媒体池（用户任务：子 agent 写/读的图与
+        # 宿主会话的媒体是同一批对象，不复制字节）。
+        media=host.media,
     )
 
     if run_in_background:
