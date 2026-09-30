@@ -15,6 +15,12 @@ use crossterm::event::EnableFocusChange;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+#[cfg(unix)]
+use crossterm::event::KeyboardEnhancementFlags;
+#[cfg(unix)]
+use crossterm::event::PopKeyboardEnhancementFlags;
+#[cfg(unix)]
+use crossterm::event::PushKeyboardEnhancementFlags;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 use ratatui::Terminal;
@@ -129,7 +135,8 @@ impl Command for DisableMouseReporting {
 }
 
 /// Write the sequence that enters TUI mode: alternate screen, mouse
-/// reporting, bracketed paste, focus reporting, hide cursor.
+/// reporting, bracketed paste, focus reporting, keyboard enhancement, hide
+/// cursor.
 ///
 /// This is the *only* place that decides the setup order — `init_terminal`
 /// must not write these commands ad hoc. The exact bytes are asserted by
@@ -160,8 +167,38 @@ fn enter_sequence_for(
         EnableFocusChange,
         crossterm::cursor::Hide
     )?;
+    push_keyboard_enhancement(w);
     Ok(())
 }
+
+/// 请求终端把有歧义的按键按 kitty 键盘协议（CSI-u）报上来 —— **Shift+Enter
+/// 能不能与 Enter 区分开，全靠这一条**：不支持协议的终端把两者都发成 `\r`，
+/// 输入框只能当成"发送"。
+///
+/// 单独写、失败即忽略，而且只在 Unix 上发：
+/// crossterm 的 `PushKeyboardEnhancementFlags` 在 Windows 上无条件返回
+/// `Unsupported`（老控制台 API 没有这个协议），跟着主序列一起 `?` 会把整个
+/// 进入序列带崩。不支持的终端只是忽略这串字节，退化成"Shift+Enter 等于 Enter"
+/// —— Ctrl+J 仍是任何终端都能用的换行键（见 `shared::tips`）。
+#[cfg(unix)]
+fn push_keyboard_enhancement(w: &mut impl io::Write) {
+    let push = PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES);
+    let _ = crossterm::execute!(w, push);
+}
+
+/// 非 Unix：不发（见 [`push_keyboard_enhancement`]）。
+#[cfg(not(unix))]
+fn push_keyboard_enhancement(_w: &mut impl io::Write) {}
+
+/// [`push_keyboard_enhancement`] 的逆操作。
+#[cfg(unix)]
+fn pop_keyboard_enhancement(w: &mut impl io::Write) {
+    let _ = crossterm::execute!(w, PopKeyboardEnhancementFlags);
+}
+
+/// 非 Unix：没发过就不必收回。
+#[cfg(not(unix))]
+fn pop_keyboard_enhancement(_w: &mut impl io::Write) {}
 
 /// Write the sequence that leaves TUI mode: mouse reporting off *first*, then
 /// the alternate screen, bracketed paste, focus reporting, show cursor.
@@ -171,6 +208,9 @@ fn enter_sequence_for(
 /// path and the panic hook (both are byte-asserted by
 /// `test_leave_sequence_is_exact`).
 pub fn leave_sequence(w: &mut impl io::Write) -> io::Result<()> {
+    // 键盘增强先收回：留着的话退出后连 shell 都会收到 CSI-u 编码的按键。
+    // 丢失败也无所谓（没发过的平台上是空操作），绝不能连累下面这串恢复。
+    pop_keyboard_enhancement(w);
     crossterm::execute!(
         w,
         DisableMouseReporting,
@@ -276,12 +316,30 @@ mod tests {
     ///
     /// `ENTER_BYTES` is the non-multiplexed variant (any-motion on);
     /// `ENTER_BYTES_BUTTON_MOTION_ONLY` is what tmux / zellij / screen get.
-    const ENTER_BYTES: &str =
-        "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?25l";
-    const ENTER_BYTES_BUTTON_MOTION_ONLY: &str =
-        "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?25l";
-    const LEAVE_BYTES: &str =
-        "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l\x1b[?2004l\x1b[?1004l\x1b[?25h";
+    /// 键盘增强（kitty 协议）的 push / pop。放在序列末尾 / 开头：push 失败不
+    /// 影响进入，pop 先发才不会被后面的恢复步骤漏掉。Windows 不发（见
+    /// `push_keyboard_enhancement`）。
+    #[cfg(unix)]
+    const PUSH_KEYBOARD_ENHANCEMENT: &str = "\x1b[>1u";
+    #[cfg(not(unix))]
+    const PUSH_KEYBOARD_ENHANCEMENT: &str = "";
+    #[cfg(unix)]
+    const POP_KEYBOARD_ENHANCEMENT: &str = "\x1b[<1u";
+    #[cfg(not(unix))]
+    const POP_KEYBOARD_ENHANCEMENT: &str = "";
+
+    const ENTER_BYTES: &str = concat!(
+        "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?25l",
+        "\x1b[>1u",
+    );
+    const ENTER_BYTES_BUTTON_MOTION_ONLY: &str = concat!(
+        "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?25l",
+        "\x1b[>1u",
+    );
+    const LEAVE_BYTES: &str = concat!(
+        "\x1b[<1u",
+        "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l\x1b[?2004l\x1b[?1004l\x1b[?25h",
+    );
 
     /// Stub environment lookup (`std::env` is not readable in a deterministic
     /// test), so both multiplexer branches are covered regardless of how the
@@ -304,24 +362,50 @@ mod tests {
         out
     }
 
-    /// Parse `\x1b[?<n><h|l>` sequences into `(mode, enabled)` pairs. Panics on
-    /// a segment that does not parse, so a truncated or unexpected sequence
-    /// cannot pass by being silently dropped.
+    /// Parse `\x1b[?<n><h|l>` sequences into `(mode, enabled)` pairs, skipping
+    /// the kitty keyboard-protocol push / pop (`\x1b[>1u` / `\x1b[<1u`) that
+    /// shares the `ESC [` prefix. Panics on anything else, so a truncated or
+    /// unexpected sequence cannot pass by being silently dropped.
     fn parse_modes(seq: &str) -> Vec<(u32, bool)> {
-        seq.split("\x1b[?")
-            .skip(1)
-            .map(|chunk| {
-                let (digits, flag) =
-                    chunk.split_at(chunk.len().checked_sub(1).expect("empty mode segment"));
-                let mode = digits.parse().expect("mode number");
-                let enabled = match flag {
-                    "h" => true,
-                    "l" => false,
-                    other => panic!("unexpected mode flag {other:?} in {chunk:?}"),
-                };
-                (mode, enabled)
-            })
-            .collect()
+        let mut modes = Vec::new();
+        let mut rest = seq;
+        while let Some(start) = rest.find("\x1b[") {
+            let tail = &rest[start + 2..];
+            match tail.chars().next() {
+                Some('?') => {
+                    let end = tail
+                        .find(['h', 'l'])
+                        .unwrap_or_else(|| panic!("mode flag missing in {tail:?}"));
+                    let mode = tail[1..end].parse().expect("mode number");
+                    modes.push((mode, tail.as_bytes()[end] == b'h'));
+                    rest = &tail[end + 1..];
+                }
+                // kitty 键盘协议：不是模式开关，越过它继续。
+                Some('>' | '<') => {
+                    let end = tail
+                        .find('u')
+                        .unwrap_or_else(|| panic!("kitty sequence unterminated in {tail:?}"));
+                    rest = &tail[end + 1..];
+                }
+                other => panic!("unexpected sequence {other:?} in {rest:?}"),
+            }
+        }
+        modes
+    }
+
+    /// 键盘增强那对字节就是协议本身（CSI `>1u` / `<1u`）—— 字面量在这儿再写
+    /// 一遍，改协议必须连着改测试，不能悄悄漂。
+    #[cfg(unix)]
+    #[test]
+    fn test_keyboard_enhancement_uses_the_kitty_protocol_bytes() {
+        assert!(
+            ENTER_BYTES.ends_with("\x1b[>1u"),
+            "进入序列末尾请求键盘增强：{ENTER_BYTES:?}"
+        );
+        assert!(
+            LEAVE_BYTES.starts_with("\x1b[<1u"),
+            "离开序列先收回键盘增强：{LEAVE_BYTES:?}"
+        );
     }
 
     #[test]

@@ -59,6 +59,10 @@ pub const TIPS: &[Tip] = &[
     },
     Tip {
         group: TipGroup::Keys,
+        text: "换行用 Shift+Enter，不行就 Ctrl+J",
+    },
+    Tip {
+        group: TipGroup::Keys,
         text: "鼠标拖拽选中，松手即复制",
     },
     Tip {

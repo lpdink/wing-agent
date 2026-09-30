@@ -86,14 +86,24 @@ const WHITE: Rgb = (255, 255, 255);
 /// 压暗到 `gradient_dark`。
 const GRADIENT_MID: f32 = 0.55;
 
+/// 高亮端混白多少。三个数（亮端 / 暗端 / 权重）就是整个标记的"力度"旋钮 ——
+/// 太小时看上去仍像一块纯色。
+const GRADIENT_LIGHT_BLEND: f32 = 0.55;
+
+/// 压暗端混黑多少。
+const GRADIENT_DARK_BLEND: f32 = 0.40;
+
+/// 对角线的横向权重（纵向 = 1 - 它）。横向多一点，左上角那束光才明显。
+const GRADIENT_AXIS_X: f32 = 0.60;
+
 /// 高亮端：主题色往白里提一档。
 fn gradient_light(accent: Rgb) -> Rgb {
-    mix(accent, WHITE, 0.45)
+    mix(accent, WHITE, GRADIENT_LIGHT_BLEND)
 }
 
 /// 压暗端：主题色往黑里压一档。
 fn gradient_dark(accent: Rgb) -> Rgb {
-    mix(accent, (0, 0, 0), 0.3)
+    mix(accent, (0, 0, 0), GRADIENT_DARK_BLEND)
 }
 
 /// 两个颜色按 `t`（0 = a，1 = b）线性混合。
@@ -164,7 +174,7 @@ impl Canvas {
     fn diagonal(&self, col: usize, pixel_row: usize) -> f32 {
         let x = col as f32 / (self.width - 1).max(1) as f32;
         let y = pixel_row as f32 / (self.height - 1).max(1) as f32;
-        0.55 * x + 0.45 * y
+        GRADIENT_AXIS_X * x + (1.0 - GRADIENT_AXIS_X) * y
     }
 
     /// 一个像素的颜色：对角线渐变 + 叠扫光高光。
