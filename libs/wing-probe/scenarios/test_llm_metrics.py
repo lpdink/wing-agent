@@ -36,7 +36,13 @@ async def test_tool_call_only_turn_reports_decode_tps(probe: Probe) -> None:
             # 帧间延迟：让"首 token → usage"的 decode 窗口可测（非零）。
             delay=0.02,
         ),
-        Turn.of(text="done", usage=Usage(prompt_tokens=150, completion_tokens=5)),
+        # 对照组：正文轮同样给帧间延迟——decode 窗口可测，不依赖
+        # "两次单调时钟取值落在不同 tick"的隐式假设。
+        Turn.of(
+            text="done",
+            usage=Usage(prompt_tokens=150, completion_tokens=5),
+            delay=0.02,
+        ),
     )
     # yolo：Bash 免确认（本场景断言的是指标事件，不是安全审查）。
     session = await probe.session(model=TPS_MODEL, yolo=True)

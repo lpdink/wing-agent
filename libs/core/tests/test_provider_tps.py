@@ -24,6 +24,7 @@ import pytest
 from wing.config import ProviderConfig
 from wing.provider.anthropic import AnthropicProvider, _StreamState
 from wing.provider.openai_compat import OpenAICompatProvider, _OAIStreamState
+from wing.schema import ToolUseBlock
 
 # ─── SSE 伪造 ────────────────────────────────────────────────────
 
@@ -166,6 +167,9 @@ class TestOpenAIDecodeTps:
         assert usage_tps is not None
         assert usage_tps > 0, usage_tps
         assert blocks is not None
+        assert len(blocks) == 1
+        assert isinstance(blocks[0], ToolUseBlock)
+        assert blocks[0].input == {"cmd": "ls"}
 
     @pytest.mark.asyncio
     async def test_text_stream_still_sets_decode_tps(self):
@@ -237,6 +241,40 @@ class TestAnthropicDecodeTps:
         assert state.first_token_ts is not None, "input_json_delta 必须打点首 token"
         assert final is not None
         assert final.usage.completion_tokens == 12
+        assert final.usage.tokens_per_sec > 0, final.usage.tokens_per_sec
+
+    @pytest.mark.asyncio
+    async def test_tool_use_without_argument_delta_sets_decode_tps(self):
+        """无参工具不下发 input_json_delta：tool_use 块起点打点，TPS 为正。"""
+        events = [
+            {"type": "message_start", "message": {"usage": {"input_tokens": 10}}},
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "tool_use", "id": "t1", "name": "Now"},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use"},
+                "usage": {"output_tokens": 4},
+            },
+            {"type": "message_stop"},
+        ]
+        p = _anthropic_provider()
+        await _replace_client(p, _anthropic_sse(events))
+        acc = p.create_accumulator()
+
+        final = None
+        async for chunk in p._generate_stream({}, "claude-x", accumulator=acc):
+            if chunk.content_blocks is not None:
+                final = chunk
+
+        state = acc.state
+        assert isinstance(state, _StreamState)
+        assert state.first_token_ts is not None, "tool_use 块起点必须打点首 token"
+        assert final is not None
+        assert final.usage.completion_tokens == 4
         assert final.usage.tokens_per_sec > 0, final.usage.tokens_per_sec
 
     @pytest.mark.asyncio

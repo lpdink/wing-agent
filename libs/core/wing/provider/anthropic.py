@@ -686,6 +686,11 @@ class AnthropicProvider(ModelProvider):
                 id=tool_id, name=tool_name, input={}
             )
             state.pending_tools[idx] = PendingCall(id=tool_id, name=tool_name)
+            # 工具名同样是解码产出，且无参工具的部分服务端不下发
+            # input_json_delta（见 parse_tool_args 契约）：块起点打点兜底，
+            # 与 OpenAI 首片 id / name 即打点的口径对齐。
+            if state.first_token_ts is None:
+                state.first_token_ts = time.monotonic()
 
     @staticmethod
     def _on_block_delta(
@@ -733,12 +738,7 @@ class AnthropicProvider(ModelProvider):
             call = state.pending_tools.get(idx)
             if call is None:
                 return None
-            partial_json = delta.get("partial_json", "")
-            # tool 参数增量同样是解码产出：纯 tool call 响应（无 text /
-            # thinking）不打点则 decode TPS 恒为 0。
-            if state.first_token_ts is None and partial_json:
-                state.first_token_ts = time.monotonic()
-            call.args_buffer += partial_json
+            call.args_buffer += delta.get("partial_json", "")
             fragment = call.args_buffer[call.emitted_len :]
             if not fragment or not call.id:
                 return None
