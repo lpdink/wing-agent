@@ -52,6 +52,27 @@
 
 改这块时别破坏这条契约：看不见的东西不花钱，是 idle 循环能被接受的前提。
 
+## 品牌资产（README 页头 / 社交预览）
+
+`assets/` 里的三份 SVG **不是手画的**，是 `cargo run -p wing --example export_logo`
+从同一份数据导出的：网格读 `ui::welcome::art`（终端渲染的那几个网格），渐变读
+`ui::welcome::wordmark::column_color`（终端那套渐变）—— 所以改画之后重跑一次，
+README 与真机不会漂移。
+
+| 文件 | 用途 |
+|------|------|
+| `assets/banner-dark.svg` / `banner-light.svg` | README 页头横版 lockup（`<picture>` 按 `prefers-color-scheme` 切） |
+| `assets/gull.svg` | 站姿 mascot 单只（docs / 图标底稿） |
+| `assets/social-preview.png` | 1280×640 仓库社交预览（Settings → Social preview） |
+
+两条经验值得写下来：
+
+* **大字按 2 倍像素画**（`WORDMARK_PIX`）。1px 笔画的 5 行字体放大到 3 倍以上，
+  笔画之间的空隙会一起放大，字母开始读成虚线 —— 2 倍是散架的临界点。
+* 社交预览 PNG 需要浏览器：`banner-dark.svg` 贴进一个 1280×640 的深色页面，
+  headless Chrome `--screenshot --window-size=1280,640` 截一张即可（页面里的
+  `<img>` 用相对路径时，包装页要放在 `assets/` 里，否则图加载不到）。
+
 ## 改画 / 预览的创作期工作流
 
 帧数据是**定稿导出**，不是运行期生成：创作期用一个矢量光栅器（椭圆 / 胶囊 /

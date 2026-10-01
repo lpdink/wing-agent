@@ -18,7 +18,7 @@ use super::sprite::luminance;
 use super::sprite::mix;
 
 /// 扫光光带半宽（列）。
-const SWEEP_RADIUS: f32 = 6.0;
+pub const SWEEP_RADIUS: f32 = 6.0;
 
 /// 高光混白强度（光带正中）。
 const SWEEP_WHITE: f32 = 0.65;
@@ -34,8 +34,11 @@ pub fn is_light_theme(text: Rgb) -> bool {
     luminance(text) < 0.5
 }
 
-/// 第 `col` 列的渐变基色。
-fn base_at(col: usize, accent: Rgb, light: bool) -> Rgb {
+/// 第 `col` 列的渐变基色（`light` = 亮底主题）。
+///
+/// 公开给品牌资产导出器（`examples/export_logo.rs`）：SVG 里的 wordmark 与终端里
+/// 的必须是同一套渐变，否则 README 与真机漂移。
+pub fn column_color(col: usize, accent: Rgb, light: bool) -> Rgb {
     let t = col as f32 / (WORDMARK_COLS.saturating_sub(1)).max(1) as f32;
     if light {
         mix(accent, (10, 14, 24), LIGHT_THEME_DARK_BLEND * t)
@@ -49,7 +52,7 @@ fn base_at(col: usize, accent: Rgb, light: bool) -> Rgb {
 }
 
 /// 扫光在 `col` 列的高光强度（0 = 不在光带里，1 = 正中）。
-fn sweep_at(col: usize, phase: f32) -> f32 {
+pub fn sweep_at(col: usize, phase: f32) -> f32 {
     let center = phase * (WORDMARK_COLS as f32 + 2.0 * SWEEP_RADIUS) - SWEEP_RADIUS;
     let d = (col as f32 - center).abs();
     if d >= SWEEP_RADIUS {
@@ -84,7 +87,7 @@ pub fn lines(phase: Option<f32>, accent: Rgb, light: bool) -> Vec<Line<'static>>
                 spans.push(Span::raw(" "));
                 continue;
             }
-            let mut rgb = base_at(col, accent, light);
+            let mut rgb = column_color(col, accent, light);
             if let Some(phase) = phase {
                 let s = sweep_at(col, phase);
                 if s > 0.0 {
@@ -152,8 +155,8 @@ mod tests {
     #[test]
     fn light_theme_darkens_the_tail() {
         let accent = (34, 211, 238);
-        let dark_last = base_at(WORDMARK_COLS - 1, accent, false);
-        let light_last = base_at(WORDMARK_COLS - 1, accent, true);
+        let dark_last = column_color(WORDMARK_COLS - 1, accent, false);
+        let light_last = column_color(WORDMARK_COLS - 1, accent, true);
         assert!(
             luminance(light_last) < luminance(dark_last),
             "亮底右端要压暗，否则淡得看不见"
