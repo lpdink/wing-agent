@@ -68,6 +68,8 @@ export function Composer({ record, actions }: ComposerProps): ReactElement {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
   const noTranscriptRef = useRef<HTMLDivElement | null>(null); // unused on web (the transcript scrolls naturally)
+  /** Guard against rapid double-send (review r1 S2). */
+  const sendingRef = useRef(false);
   const turnActive = record.turn.active;
   const yolo = record.meta.yolo;
 
@@ -93,17 +95,22 @@ export function Composer({ record, actions }: ComposerProps): ReactElement {
     }
   }, [state.text, record.sessionId]);
 
-  // Restore draft from sessionStorage on mount.
+  // Restore draft from sessionStorage on mount only.
+  const draftRestoredRef = useRef(false);
   useEffect(() => {
+    if (draftRestoredRef.current) {
+      return;
+    }
+    draftRestoredRef.current = true;
     try {
       const saved = sessionStorage.getItem(`composer:draft:${record.sessionId}`);
       if (saved !== null && saved.length > 0 && record.draft === null) {
         setState((prev) => ({ ...prev, text: saved }));
       }
     } catch {
-      // Ignore.
+      // Ignore storage errors (private browsing, full disk).
     }
-  }, [record.sessionId, record.draft]);
+  }, [record.sessionId]);
 
   // Focus the textarea when a new session opens or turn becomes idle.
   useEffect(() => {
@@ -139,7 +146,7 @@ export function Composer({ record, actions }: ComposerProps): ReactElement {
 
   const submit = useCallback(() => {
     const text = state.text.trim();
-    if (text === '' || turnActive) {
+    if (text === '' || turnActive || sendingRef.current) {
       return;
     }
 
@@ -149,7 +156,10 @@ export function Composer({ record, actions }: ComposerProps): ReactElement {
       if (parsed !== null) {
         const command = matchCommand(parsed.name);
         if (command !== null) {
-          routeCommand(parsed.name, parsed.args, actions);
+          routeCommand(parsed.name, parsed.args, actions, {
+            thinking: record.meta.thinking,
+            yolo: record.meta.yolo,
+          });
           setState((prev) => ({ ...prev, text: '' }));
           setShowCommands(false);
           return;
@@ -157,18 +167,26 @@ export function Composer({ record, actions }: ComposerProps): ReactElement {
       }
     }
 
-    actions.sendText(text);
+    sendingRef.current = true;
+    try {
+      actions.sendText(text);
+    } finally {
+      sendingRef.current = false;
+    }
     setState((prev) => ({ ...prev, text: '' }));
     setShowCommands(false);
-  }, [state.text, turnActive, actions]);
+  }, [state.text, turnActive, actions, record.meta.thinking, record.meta.yolo]);
 
   const handleCommandSelect = useCallback(
     (name: string) => {
-      routeCommand(name, '', actions);
+      routeCommand(name, '', actions, {
+        thinking: record.meta.thinking,
+        yolo: record.meta.yolo,
+      });
       setState((prev) => ({ ...prev, text: '' }));
       setShowCommands(false);
     },
-    [actions],
+    [actions, record.meta.thinking, record.meta.yolo],
   );
 
   const handleKeyDownCommand = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
@@ -263,8 +281,16 @@ export function Composer({ record, actions }: ComposerProps): ReactElement {
  * Route a command to its action.
  *
  * Mirrors `extensions/vscode/src/host/session/manager.ts::runPromptCommand`.
+ *
+ * `currentMeta` is required for toggle commands (`/think`, `/yolo`) that need
+ * the current session state to decide the next value.
  */
-function routeCommand(name: string, args: string, actions: ShellActions): void {
+function routeCommand(
+  name: string,
+  args: string,
+  actions: ShellActions,
+  currentMeta?: { readonly thinking: boolean; readonly yolo: boolean },
+): void {
   const command = normalizeCommandName(name);
   switch (command) {
     case '/new':
@@ -284,11 +310,11 @@ function routeCommand(name: string, args: string, actions: ShellActions): void {
       return;
     case '/think':
     case '/t': {
-      handleThinkCommand(args, actions);
+      handleThinkCommand(args, actions, currentMeta?.thinking ?? false);
       return;
     }
     case '/yolo': {
-      handleYoloCommand(args, actions);
+      handleYoloCommand(args, actions, currentMeta?.yolo ?? false);
       return;
     }
     case '/compact':
@@ -327,11 +353,20 @@ function routeCommand(name: string, args: string, actions: ShellActions): void {
   }
 }
 
-function handleThinkCommand(args: string, actions: ShellActions): void {
+/**
+ * Handle `/think` command — toggle or set thinking mode.
+ *
+ * Semantics (vscode parity):
+ * - No arg → toggle (current on → off, current off → on)
+ * - `on` → enable thinking
+ * - `off` → disable thinking
+ * - effort level (low/medium/high/xhigh/max) → enable with that effort
+ */
+function handleThinkCommand(args: string, actions: ShellActions, currentThinking: boolean): void {
   const boolArg = parseBoolArg(args);
   switch (boolArg.kind) {
     case 'empty':
-      void actions.updateMeta({ thinking: true });
+      void actions.updateMeta({ thinking: !currentThinking });
       return;
     case 'on':
       void actions.updateMeta({ thinking: true });
@@ -347,11 +382,19 @@ function handleThinkCommand(args: string, actions: ShellActions): void {
   }
 }
 
-function handleYoloCommand(args: string, actions: ShellActions): void {
+/**
+ * Handle `/yolo` command — toggle or set YOLO mode.
+ *
+ * Semantics (vscode parity):
+ * - No arg → toggle (current on → off, current off → on)
+ * - `on` → enable YOLO
+ * - `off` → disable YOLO
+ */
+function handleYoloCommand(args: string, actions: ShellActions, currentYolo: boolean): void {
   const boolArg = parseBoolArg(args);
   switch (boolArg.kind) {
     case 'empty':
-      void actions.updateMeta({ yolo: true });
+      void actions.updateMeta({ yolo: !currentYolo });
       return;
     case 'on':
       void actions.updateMeta({ yolo: true });

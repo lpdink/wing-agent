@@ -16,7 +16,7 @@
  *   be forgotten instead of showing a saved state that is not there.
  */
 
-import { useCallback, useEffect, useState, type FormEvent, type ReactElement } from 'react';
+import { useCallback, useState, type FormEvent, type ReactElement } from 'react';
 
 import type { ConnectionView } from '../connection/runtime';
 import { type GatewayScheme, type GatewaySettings, normalizePort } from '../settings/settings';
@@ -90,18 +90,8 @@ export function SettingsDialog({
   const [ignoreCertErrors, setIgnoreCertErrors] = useState(settings.ignoreCertErrors);
   const [error, setError] = useState<string | null>(null);
 
-  // Esc key handling.
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        onClose();
-      }
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [onClose]);
+  // Note: Esc key is handled by Shell's global handler (review r1 N2).
+  // This component only handles overlay click for close.
 
   // Overlay click closes the dialog (click on the overlay background only).
   const handleOverlayClick = useCallback(
