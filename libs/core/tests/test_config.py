@@ -378,7 +378,7 @@ class TestDefaultConfigTemplate:
 
         config = Config(**yaml.safe_load(DEFAULT_CONFIG_YAML))
         # 新增字段在模板里落位（images 段 / 模型声明的两种形态示例）
-        assert config.images.max_bytes == 8_388_608
+        assert config.images.max_bytes == 4_718_592
         assert config.images.max_images == 32
         assert config.providers[0].models == []
         assert config.providers[0].model_names() == []

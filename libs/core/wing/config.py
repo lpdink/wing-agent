@@ -238,8 +238,8 @@ class ImagesConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    max_bytes: int = Field(default=8_388_608, gt=0)
-    """单图原始字节上限（ReadImage 读时拒绝 + 降采样提示）。"""
+    max_bytes: int = Field(default=4_718_592, gt=0)
+    """单图原始字节上限（默认 4.5 MiB；ReadImage 读时拒绝 + 降采样提示）。"""
     max_images: int = Field(default=32, gt=0)
     """计数高水位：超出时从最旧开始按 count_quantum 批量驱逐。"""
     count_quantum: int = Field(default=8, gt=0)

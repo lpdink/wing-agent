@@ -5,7 +5,7 @@
 
 事实来源：代码 `libs/core/wing/{media.py,schema.py,store/,agent/,provider/,compactor.py}`、
 `libs/core/wing/tools/read_image.py`；整机证据 `libs/wing-probe/scenarios/test_read_image.py`
-（本文末列 11 条场景）。本页只讲 *why* 与不变量，逐行契约以代码为准。
+（本文末列 12 条场景）。本页只讲 *why* 与不变量，逐行契约以代码为准。
 
 ## 链路总览
 
@@ -197,7 +197,7 @@ def plan_request_media(messages, *, policy: MediaPolicy, vision: bool,
 
 ```yaml
 images:                       # 顶层段（default_config.py 模板同步维护）
-  max_bytes: 8388608          # 单图原始字节上限（读时拒绝 + 降采样提示）
+  max_bytes: 4718592          # 单图原始字节上限 4.5 MiB（读时拒绝 + 降采样提示）
   max_images: 32              # 请求期计数高水位（超出触发批量驱逐）
   count_quantum: 8            # 计数驱逐量子（每次超限至少丢这么多张）
   request_budget_bytes: 37748736   # 请求期 base64 编码后累计高水位（36 MiB）
@@ -253,6 +253,7 @@ providers:
 | `test_provider_image_max_bytes_degrades_too_large` | `provider_extra={"image_max_bytes": 100}`：工具仍成功入库（`tool_media` 带引用、对象文件在），请求期该位为 `too_large` 占位、整条无 image part |
 | `test_images_max_bytes_refuses_read_without_writing` | `images={"max_bytes": 100}`：读时拒绝（文案含大小与上限 + `images.max_bytes`）；`.media` 目录不存在（零写入）；请求无图无占位 |
 | `test_missing_media_object_degrades_to_unavailable` | 删除 `.media/<id[:2]>/<id>` 对象后再发一轮：该位为 `UNAVAILABLE` 占位、请求成功、无 error 事件 |
+| `test_default_max_bytes_refuses_read_without_writing` | **不注入** `images`（走代码默认值 4.5 MiB）：5 MiB 文件读时拒绝（文案含 `5.0 MB exceeds the 4.5 MB per-image limit`）；`.media` 目录不存在（零写入）；请求无图无占位 |
 
 跑法：
 
