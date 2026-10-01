@@ -54,8 +54,13 @@ const WIDTH: u16 = 120;
 const HEIGHT: u16 = 60;
 /// The terminal's cell size, as `ImageSupport` reports it after detection.
 const CELL: CellPixels = CellPixels::new(10, 20);
-/// Picture size: a 290×20 PNG lands on a four-row box at `WIDTH`.
-const PX: (u32, u32) = (290, 20);
+/// The same cell as the render layer's mirror type — the layout input.
+const LAYOUT_CELL: wing::render::markdown::CellPixels =
+    wing::render::markdown::CellPixels::new(10, 20);
+/// Picture size: a 290×80 PNG lands on a four-row box at `WIDTH`, and the box
+/// **is** the picture (the rows reserved are the fitted footprint — see
+/// `render::fit`). 80 px is what makes it four rows at a 20 px cell.
+const PX: (u32, u32) = (290, 80);
 // ── fixtures ────────────────────────────────────────────────────
 
 static NEXT_DIR: AtomicU32 = AtomicU32::new(0);
@@ -124,7 +129,7 @@ impl Fixture {
             entries.push(ImageEntry::new(path, ImageShape::new(PX.0, PX.1)));
         }
         let opts = if anchors {
-            ImageOpts::anchor(Some(dir.0.clone()), entries)
+            ImageOpts::anchor(Some(dir.0.clone()), entries, LAYOUT_CELL)
         } else {
             ImageOpts::off().clone()
         };

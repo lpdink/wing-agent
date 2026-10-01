@@ -2616,6 +2616,10 @@ mod tests {
 
     // ── Image anchors through the incremental engine ─────────────
 
+    /// The terminal cell these fixtures are laid out for (10×20 px).
+    const TEST_CELL: crate::render::markdown::CellPixels =
+        crate::render::markdown::CellPixels::new(10, 20);
+
     fn image_opts() -> ImageOpts {
         ImageOpts::anchor(
             Some(std::path::PathBuf::from("/ws")),
@@ -2623,6 +2627,7 @@ mod tests {
                 std::path::PathBuf::from("/ws/plot.png"),
                 super::super::images::ImageShape::new(800, 600),
             )],
+            TEST_CELL,
         )
     }
 
@@ -2739,7 +2744,11 @@ mod tests {
         assert_eq!(anchors[0].cols, 78);
         assert_eq!(
             anchors[0].rows,
-            super::super::images::anchor_rows(78, super::super::images::ImageShape::new(800, 600))
+            super::super::images::anchor_rows(
+                78,
+                super::super::images::ImageShape::new(800, 600),
+                TEST_CELL,
+            )
         );
         assert!(
             after.lines.len() > link_rows,

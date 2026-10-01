@@ -24,9 +24,16 @@ pub const DEFAULT_DETECT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// The pixel size of one character cell — the terminal's font size.
 ///
-/// This is a *terminal query* result and must never feed layout math: the number of rows an
-/// image reserves is a pure function of container width, image aspect ratio and a cap
-/// (see the step's design doc, D3). It only decides the resolution the image is encoded at.
+/// A *terminal query* result, probed once at startup. It decides both the
+/// resolution an image is encoded at **and** the number of rows an anchor
+/// reserves: the layout fits the picture into a cell box
+/// ([`crate::render::fit::fit_cells`]) and the encoder fits the same picture
+/// into the same box, so the two cannot disagree about how many rows the box
+/// takes. It reaches the layout through `ImageOpts`
+/// ([`crate::render::markdown::CellPixels`] is that side's minimal mirror of
+/// this type — the layout must not depend on `ui`), together with the image
+/// metadata: both are structural inputs, so a change to either rebuilds the
+/// cached height.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CellPixels {
     /// Cell width in pixels.

@@ -120,7 +120,13 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 | reasoning 里 4 空格缩进的正文没有代码块样式 | `Thinking` 刻意按正文渲染（第二节） | profile 语义 |
 | `$$` / `\begin{align}` 中间有空行的显示公式没渲染（显示源码） | pulldown 的数学配对不跨空行，归一化规则也刻意不跨（第二节·五的规则表）：全量与流式一致地降级为源码，内容不丢 | 定界符语义（第二节·五） |
 | `f(x) = \begin{cases}…\end{cases}` 的 `f(x) =` 留在上一行 | 归一化只包环境本身，不吞前导正文（吞了就得猜公式起点，代价更大） | 定界符语义（第二节·五） |
-| 行内 `e^{x}` / `\sqrt{2}` 没渲染（显示源码） | 引擎布局是 2 行，行内必须单行 → `None` | 引擎契约（`wing-math/src/api.rs`） |
+| 行内 `e^{\pi}` / `\sqrt{2}` 没渲染（显示源码） | 引擎布局是 2 行，行内必须单行 → `None` | 引擎契约（`wing-math/src/api.rs`） |
+| 一条公式里含 ≥ 2 个环境（两个矩阵相乘、`\begin{pmatrix}…\end{pmatrix}^{-1} \begin{pmatrix}…\end{pmatrix}`）没渲染（显示源码） | 引擎一次只渲染一个顶层环境，多个环境之间的拼接语义未定义 → 整条降级 | 引擎契约（`wing-math/src/guard.rs` 的 `MultipleEnvironments`） |
+| 行内 accent（`\vec{v}`、`\hat{y}`、`\hat{H}\psi`）没渲染（显示源码） | accent 是「符号行 + 内容行」的 2 行布局，行内必须单行 → `None`（显示模式照常渲染成网格） | 引擎契约（`wing-math/src/grid/layout.rs::layout_accent`） |
+| 行内带下标的命名算子（`\max_x f(x)`、`\min_y g(y)`）没渲染（显示源码） | 算子名与它的下标上下堆叠成 2 行，行内必须单行 → `None`（显示模式照常渲染成网格） | 引擎契约（`wing-math/src/grid/layout.rs::layout_limit`） |
+| 行内 `x^{d }`（上标大括号里多打了一个空格）没渲染（显示源码） | 上标字形按**字符**逐个查表，而 `extract_flat_text` 不 trim 尾随空白 → `' '` 查不到字形 → 整条 `None`。不带空格的 `x^{d}` 照常渲染（实测三个版本一致，非本轮的回归） | 引擎契约（`wing-math/src/grid/layout.rs::to_superscript_char`） |
+| `cases` 的值单元格不 trim 首尾空白（`matrix` / `array` / `aligned` 都走 `trim_node`） | 上游 `layout_cases` 不调 `trim_node`：`\begin{cases} a & b \end{cases}` 里 `a` 后面的源空格会留下来（渲染成 `{ a   if  b`，`if` 前 3 个空格），同形的 `matrix` 已 trim 到 6 列。单元格里多打的空隙因此只有 `cases` 会看得到 | 既有（`wing-math/src/grid/layout.rs::layout_cases`） |
+| 符号命令后面的源空格现在会保留（`\pi x` → `π x`、`\pi \alpha` → `π α`），公式因此比"LaTeX 语义宽度"宽（`x = \alpha \beta \gamma \delta \epsilon \zeta`：改前 10 列 → 现在 15 列） | 让符号命令与裸词路径（`pi x`）一致；代价是每个这样的空格 +1 列，**正好顶到行宽**的行内公式会从"渲染"翻转为"回退源码"（`fits_line` 判据，见 `crates/wing/src/render/markdown/math.rs`）。下一位是上下标 / 撇号 `'` / 右定界符（`}` `)` `]` 或 `\right`）/ 环境分隔符（`&` `\\` 或环境结束 `\end`）/ 标点时空格照旧被吃掉（不会变宽） | 引擎契约（`wing-math/src/latex/parser.rs::trailing_space_separates_objects`） |
 | 货币 `$` 与代码跨度里的 `$` 被 pulldown 配成一对（`成本是 $100，用 \`$PATH\` 变量` → `$100` 的 `$` 被吞、代码跨度被拆） | pulldown 0.13 的数学配对是全局扫描：先埋 `$` token 再配对，**代码跨度不参与**，所以「先出现一个未配对 `$`，之后代码跨度里再有 `$`」必然错配。D5 的「代码/围栏内不解析」只对**开**定界符成立；`a946327` 起既有（基线 `94ac0be` 无此问题，因为它不解析数学）。修法需在归一化层保护代码跨度里的 `$`（不能简单加反斜杠：代码跨度内反斜杠是字面量），属独立决策 → 留给后续步骤 | pulldown 配对语义（既有） |
 | 两个**货币符号**互相配对（`the price is $5-$10 today` → `the price is 5 -10 today`；`$5 and $10` 有空白则不配对） | 同上一行的配对语义，只是这次没有代码跨度参与：两个 `$` 恰好满足行内数学的两条空白规则，与货币意图无关。修法同上（需要一层「哪些 `$` 是货币」的判定），**不阻塞**、不在本 PR 内处理 | pulldown 配对语义（既有） |
 | 容器里的反引号围栏（`> ``` `、`- ``` …`、`  - ``` …`）在**某些 chunk 边界**下静息态 ≠ 参考 | 根因是 `ensure_fences_on_own_line`：`> ` / `- ` 不是空白前缀，行首 `> ``` ` 会被当成「粘在文字后的围栏」而插入换行；插入发生在 `push` 里，**某个切片可能先被 promoted、插入还没落地**，于是切片文本与参考的归一化文本不同。分歧点随 profile / 形状 / chunk 漂移（实测 `> ~~~
@@ -141,19 +147,36 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 | **链接路径**（存量行为） | 模式 `Off`；或 `Anchor` 但**元数据缺失 / 路径被拒 / 图片不独占一行** | 与今天逐 span 完全相同：alt 当链接文本（远端 URL 会补 ` (url)`），点击用系统查看器打开 |
 | **锚点** | `Anchor` 且上面两条都不成立 | `rows` 行占位：第 0 行是可复制的 caption `▢ {alt 或文件名} · {W}×{H}`，其余是**覆盖行**（图片画在上面；图没画出来时它就是可见兜底） |
 
-**行数是纯函数**（`render/markdown/images.rs`）：
+**盒子 = 图的实际格数**（`render/markdown/images.rs` + `render/fit.rs`）：
 
 ```text
-rows = clamp(round(W / (CELL_ASPECT × R)), MIN_ANCHOR_ROWS, MAX_ANCHOR_ROWS)
-R            = px_w / px_h                （来自图片头，不解码）
-CELL_ASPECT  = 2.0                        （字符格 高:宽 ≈ 2:1，8×16 字体）
-MIN/MAX      = 1 / 36
-W            = markdown 渲染宽 = 单元格宽 − 2 列前缀（也就是锚点盒子的 cols）
+rows = fit_cells(px_w, px_h, (W, MAX_ANCHOR_ROWS), cell).height   ← [1, 36]
+fit_cells: 盒子(cell) × cell 像素 → 像素盒子 → min(原图像素) 夹取 → 等比装填 → ceil 到整格
+W    = markdown 渲染宽 = 单元格宽 − 2 列前缀（也就是锚点盒子的 cols）
+cell = 终端字符格像素（启动探测一次，经 ImageOpts 注入）
+MAX  = 36（装填盒子的高度；fit 不会超过自己的盒子，所以上限天然成立）
 ```
 
-`rows` **不得**依赖终端图形能力或像素查询结果：它进 `CachedCell` 的高度缓存，也进第三节的流式不变量，一旦依赖能力就会两边同时打穿。数值示例（`W=118`）：800×600 → 44 → 上限 **36**；1920×1080 → **33**；400×400 → 59 → 36；800×6000 → 442 → 36；2000×20 → **1**。
+`rows` 就是**编码器画出来的格数**：绘制通道把 `target = (cols, rows)` 交给 `ui/image/encode.rs`，
+两侧调用**同一份** `render::fit::fit_cells`（同一份数学、同一个 cell），所以「预留了几行」与「画了几格」
+不是两份公式凑巧相等，而是同一个函数。512×512 在 cell 10×20、W=140 下是 52×26 格 → 26 行（旧公式按
+「满宽假设」留 36 行，图下面空 10 行）；768×768 → 72×36；1920×1080 → 128×36。更多（`W` 与 cell 的关系、
+验收表）见 [`tui-images.md`](tui-images.md)；`cargo run -q -p wing --example render_probe -- --images
+--shape './plot.png=512x512' --cell 10x20` 可直接复现。
 
-**元数据从哪来**：渲染层零 I/O。调用方（chat view，背后是 `ui::image::ImageStore` 的头信息探测）把像素尺寸填成 `ImageOpts { mode, workspace, shapes }`，表的键 = `resolve_image_path` 的归一化产物；表里没有这条路径（未知 / 探测失败 / 不是图）就退回链接路径。
+**为什么 cell 可以进布局**：旧契约写的是「`rows` 不得依赖终端像素」，理由是高度依赖能力会同时打穿
+`CachedCell` 的高度缓存与第三节的流式不变量——但真正危险的是**不确定**，不是像素本身。修订后的契约里
+cell 是：
+（1）启动探测一次的**常量**（`ImageSupport::detect`，运行期不重探）；
+（2）`ImageOpts` 的**结构相等**字段，与 shape 元数据走同一条注入通道——探测晚到、工作区切换、内容重建
+都会以「options 变了」的形式让 `CachedCell` bump generation、丢掉缓存并重建，高度缓存与「静息态 == 参考
+渲染」两个不变量照旧成立；
+（3）**同一个对象**：`Images` 把 store 的 `ImageSupport` 里的 cell 交给渲染层，编码器用同一个 cell 编码，
+两侧不可能拿到两个终端。
+退化 cell（任一维为 0）不是布局输入：`ImageOpts::anchor` 直接返回共享的 `ImageOpts::off()`（整条锚点路径
+关闭，退回链接路径），绝不猜一个字符格宽高比（旧契约那个写死的 `CELL_ASPECT = 2.0`）。
+
+**元数据从哪来**：渲染层零 I/O。调用方（chat view，背后是 `ui::image::ImageStore` 的头信息探测）把像素尺寸填成 `ImageOpts { mode, workspace, shapes, cell }`，表的键 = `resolve_image_path` 的归一化产物；表里没有这条路径（未知 / 探测失败 / 不是图）就退回链接路径。
 
 **路径策略**（纯词法：不 stat、不 canonicalize、不解析符号链接——这是显示边界不是安全边界）：
 
@@ -176,8 +199,13 @@ W            = markdown 渲染宽 = 单元格宽 − 2 列前缀（也就是锚�
 
 ```bash
 # 单次渲染 + 锚点几何（末尾打印 line/col/cols/rows）
-cargo run -q -p wing --example render_probe -- --profile content \
-    --images --workspace . --shape './plot.png=800x600' --plain /tmp/fig.md
+# `--cell` 缺省 10x20（≈ 8×16 字体）：盒子行数随它变，见上面的公式
+cargo run -q -p wing --example render_probe -- --profile content --images \
+    --workspace . --shape './plot.png=800x600' --cell 10x20 --plain /tmp/fig.md
+
+# 小图（用户实测量：512×512 在 10×20 cell、140 列下应是 52×26 → rows=26，不是 36）
+cargo run -q -p wing --example render_probe -- --images --width 140 \
+    --workspace . --shape './plot.png=512x512' --cell 10x20 --plain /tmp/fig.md
 
 # IR 视图：锚点行是 I（payload 只占一行，覆盖行在 compose 里展开）
 cargo run -q -p wing --example render_probe -- --images --workspace . \

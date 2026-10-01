@@ -762,6 +762,10 @@ mod tests {
     use super::*;
     use crate::config::rendering::ThinkingMode;
     use crate::config::{LayoutConfig, ThemePalette};
+    use crate::render::markdown::CellPixels;
+
+    /// The terminal cell the anchor fixtures are laid out for.
+    const LAYOUT_CELL: CellPixels = CellPixels::new(10, 20);
 
     fn test_ctx<'a>(palette: &'a ThemePalette, layout: &'a LayoutConfig) -> CellContext<'a> {
         CellContext {
@@ -851,6 +855,7 @@ mod tests {
                 std::path::PathBuf::from("/ws/plot.png"),
                 crate::render::markdown::ImageShape::new(800, 600),
             )],
+            LAYOUT_CELL,
         )
     }
 
@@ -899,9 +904,11 @@ mod tests {
         cell.request_finalize();
 
         let width = 80u16;
-        let expected_rows = crate::render::markdown::anchor_rows(width - 2, {
-            crate::render::markdown::ImageShape::new(800, 600)
-        });
+        let expected_rows = crate::render::markdown::anchor_rows(
+            width - 2,
+            crate::render::markdown::ImageShape::new(800, 600),
+            LAYOUT_CELL,
+        );
         assert!(
             cell.is_streaming(),
             "finalize is deferred to the next render"

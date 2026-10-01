@@ -24,20 +24,34 @@
 //! path, which makes "the file does not exist / is not an image / is too
 //! large" the caller's answer rather than something this layer guesses at.
 //!
-//! # The row count is a pure function
+//! # The row count is a pure function of the box, the picture and the cell
 //!
 //! ```text
-//! rows = clamp(round(W / (CELL_ASPECT × R)), MIN_ANCHOR_ROWS, MAX_ANCHOR_ROWS)
-//! R    = px_w / px_h
+//! rows = fit_cells(px_w, px_h, (W, MAX_ANCHOR_ROWS), cell).height
 //! ```
 //!
 //! `W` is the markdown render width (the cell width minus its 2-column
-//! prefix — the anchor's [`ImageSpan::cols`]). The terminal's graphics
-//! capabilities, its cell-pixel size and its pixel queries are deliberately
-//! **not** inputs: the row count feeds `CachedCell`'s height cache and the
-//! streaming engine's "resting state == reference render" invariant, both of
-//! which a capability-dependent height would break. In-box scaling (what the
-//! picture actually occupies inside the box) is the drawing layer's business.
+//! prefix — the anchor's [`ImageSpan::cols`]) and `cell` is the terminal's
+//! character cell in pixels, injected through [`ImageOpts`] exactly like the
+//! shape metadata. The box and the picture that the **drawing layer** encodes
+//! are computed by the same shared function ([`crate::render::fit`]), so the
+//! rows reserved here are the rows the picture actually occupies: a 512×512
+//! image at a 10×20 cell in a 140-column box reserves 26 rows and is drawn
+//! 52×26 cells — instead of reserving the 36 rows an aspect assumption would
+//! have guessed and leaving the bottom blank.
+//!
+//! The cell size is an input, but it is a **stable** one, which is what keeps
+//! the two invariants that a capability-dependent height would break: it is
+//! probed once at startup and rides in `ImageOpts`'s structural equality, so
+//! the same "the options changed, rebuild the cell" path that carries a
+//! late-arriving shape also carries a cell change. `CachedCell`'s height cache
+//! and the streaming engine's "resting state == the reference render"
+//! invariant see the same rows for a given (width, shape, cell) triple, frame
+//! after frame.
+//!
+//! Everything else is deliberately *not* an input: the picture's file, its
+//! decode, the protocol and the terminal's answers beyond the cell size. The
+//! row count is exact arithmetic over three numbers.
 //!
 //! # The anchor block
 //!
@@ -52,31 +66,26 @@
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
+use ratatui::layout::Size;
+
 use super::types::truncate_to_display_width;
+use crate::render::fit::CellPixels;
+use crate::render::fit::fit_cells;
 
 // ============================================================
-// Layout constants (the pure row-count function's inputs)
+// Layout constants (the shared fit's inputs)
 // ============================================================
-
-/// Character-cell aspect assumption: `cell height / cell width`.
-///
-/// Terminal fonts are close to 8×16 px, i.e. a cell is twice as tall as it is
-/// wide — the same assumption `ratatui-image`'s `CellPixels` defaults to. It
-/// only has to be close: the box's row count is what the layout depends on,
-/// and in-box scaling (which absorbs any font error) belongs to the drawing
-/// layer.
-pub const CELL_ASPECT: f64 = 2.0;
 
 /// Fewest rows an anchor may reserve (a single caption row).
 pub const MIN_ANCHOR_ROWS: u16 = 1;
 
-/// Most rows an anchor may reserve.
+/// Most rows an anchor may reserve — the height of the box the picture is
+/// fitted into.
 ///
 /// About one screen on a 40-row terminal: without it an 800×6000 sliver would
-/// reserve `W / (2 × 0.133) ≈ 442` rows at 118 columns and swallow the
-/// viewport. The cap distorts the box's aspect for very tall images; the
-/// drawing layer fits the picture inside the box (letterboxing), so the
-/// distortion costs margin, not correctness.
+/// swallow the viewport. The cap enters through the *box* rather than as a
+/// clamp on a finished number, and since a fit never grows its box, no anchor
+/// can exceed it.
 pub const MAX_ANCHOR_ROWS: u16 = 36;
 
 /// Longest accepted image path, in characters.
@@ -110,9 +119,9 @@ pub enum ImageMode {
 /// Pixel dimensions of one image, as read from its header.
 ///
 /// Deliberately smaller than `ui::image::ImageMeta` (which also carries file
-/// size and mtime): layout needs the aspect ratio and nothing else. The chat
-/// view builds one from a probe result with
-/// `ImageShape::new(meta.px_w, meta.px_h)`.
+/// size and mtime): the layout needs both pixel dimensions — the fit is a
+/// size computation, not a ratio one — and nothing else. The chat view builds
+/// one from a probe result with `ImageShape::new(meta.px_w, meta.px_h)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImageShape {
     /// Image width in pixels.
@@ -125,14 +134,6 @@ impl ImageShape {
     /// A shape from header pixel dimensions.
     pub const fn new(px_w: u32, px_h: u32) -> Self {
         Self { px_w, px_h }
-    }
-
-    /// `px_w / px_h`, with a finite `0.0` for degenerate headers.
-    pub fn aspect_ratio(&self) -> f64 {
-        if self.px_h == 0 {
-            return 0.0;
-        }
-        f64::from(self.px_w) / f64::from(self.px_h)
     }
 
     /// Whether the shape can be laid out at all (both dimensions non-zero).
@@ -160,17 +161,24 @@ impl ImageEntry {
     }
 }
 
-/// Image rendering options: the mode, the workspace root, and the metadata.
+/// Image rendering options: the mode, the workspace root, the metadata, and
+/// the terminal's character cell.
 ///
 /// Owned (not a borrowed view) because [`super::stream::StreamingRender`]
-/// outlives a single render call and has to notice when the metadata changes
-/// (a late-arriving probe changes the row count, which must force a rebuild).
-/// Equality is structural, which is exactly how that change is detected.
+/// outlives a single render call and has to notice when an input changes (a
+/// late-arriving probe, or a cell size, changes the row count, which must
+/// force a rebuild). Equality is structural, which is exactly how that change
+/// is detected — the cell rides the same channel as a shape.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ImageOpts {
     mode: ImageMode,
     workspace: Option<PathBuf>,
     shapes: Vec<ImageEntry>,
+    /// The terminal's character cell in pixels: the unit the anchor's rows and
+    /// the encoder's footprint are both expressed in. Only meaningful in
+    /// [`ImageMode::Anchor`], where it is always valid (see
+    /// [`anchor`](Self::anchor)); zero otherwise.
+    cell: CellPixels,
 }
 
 /// The shared "images are off" options — what [`super::RenderOpts::new`]
@@ -179,6 +187,7 @@ static NO_IMAGES: ImageOpts = ImageOpts {
     mode: ImageMode::Off,
     workspace: None,
     shapes: Vec::new(),
+    cell: CellPixels::new(0, 0),
 };
 
 impl ImageOpts {
@@ -188,10 +197,21 @@ impl ImageOpts {
     }
 
     /// `Anchor` options over `shapes`, resolving relative paths against
-    /// `workspace`.
+    /// `workspace` and sizing the boxes for a character cell of `cell` pixels.
     ///
     /// `workspace = None` means "relative paths are rejected" — the table's
     /// keys are then absolute paths only.
+    ///
+    /// A **degenerate cell** (either dimension zero) is not a layout input:
+    /// the rows cannot be derived from it, and guessing one is the very
+    /// mismatch this contract removes. Such a call answers with the shared
+    /// [`ImageOpts::off`] — the picture keeps the link path — rather than
+    /// reserving a box the encoder could never fill. In production the cell
+    /// comes from [`ImageSupport::cell_pixel_size`], which is only `Some` for a
+    /// non-degenerate cell (`ImageSupport::is_enabled` is false otherwise), so
+    /// this branch is a guard, not a state a running app can reach.
+    ///
+    /// [`ImageSupport::cell_pixel_size`]: crate::ui::image::ImageSupport::cell_pixel_size
     ///
     /// Table contract: every key is the output of [`resolve_image_path`] for
     /// the destination as written in the markdown, and **a path appears at
@@ -200,11 +220,15 @@ impl ImageOpts {
     /// the result stays deterministic, but the contract is "one row per path".
     /// Keep the table scoped to what the view is about to draw rather than to
     /// "every image in the workspace" — see [`shape_for`](Self::shape_for).
-    pub fn anchor(workspace: Option<PathBuf>, shapes: Vec<ImageEntry>) -> Self {
+    pub fn anchor(workspace: Option<PathBuf>, shapes: Vec<ImageEntry>, cell: CellPixels) -> Self {
+        if !cell.is_valid() {
+            return Self::off().clone();
+        }
         Self {
             mode: ImageMode::Anchor,
             workspace,
             shapes,
+            cell,
         }
     }
 
@@ -221,6 +245,15 @@ impl ImageOpts {
     /// The metadata table.
     pub fn shapes(&self) -> &[ImageEntry] {
         &self.shapes
+    }
+
+    /// The character cell every row count is computed against.
+    ///
+    /// Zero-sized when anchors are off; the lane that builds the options is the
+    /// one that owns the terminal capability, so the layout and the encoder are
+    /// handed the same numbers by construction.
+    pub fn cell_pixels(&self) -> CellPixels {
+        self.cell
     }
 
     /// Whether anchors are enabled at all.
@@ -245,28 +278,39 @@ impl ImageOpts {
 }
 
 // ============================================================
-// Row count — the pure function
+// Row count — the shared fit
 // ============================================================
 
 /// Rows an image anchor reserves at markdown width `width`.
 ///
-/// Pure: the inputs are the container width, the pixel aspect ratio and the
-/// constants above. Nothing about the terminal, the file or the moment in
-/// time is an input, so the value is stable across frames, capabilities and
-/// profiling, and repeated calls with the same inputs are identical.
+/// The anchor's box is `width × MAX_ANCHOR_ROWS` cells; the picture is fitted
+/// into it exactly as the drawing layer will fit it, and the rows reserved are
+/// the rows the fit occupies — so the box is the size of the picture, and
+/// nothing is left blank underneath. `cell` is the terminal's character cell in
+/// pixels (see [`ImageOpts`]); the arithmetic itself is
+/// [`crate::render::fit::fit_cells`], shared with `ui/image/encode.rs`.
 ///
-/// Total: a zero width, a degenerate shape (`px_h == 0`) or a non-finite
-/// computation answers [`MIN_ANCHOR_ROWS`] rather than panicking. The parse
-/// layer rejects those cases before they can become an anchor.
-pub fn anchor_rows(width: u16, shape: ImageShape) -> u16 {
-    if width == 0 || !shape.is_usable() {
+/// Off-screen inputs are impossible: the cap is the box the fit is computed
+/// against, and a fit never grows its box, so the answer is already inside
+/// [`MIN_ANCHOR_ROWS`]..=[`MAX_ANCHOR_ROWS`]. The clamp stays as the written
+/// contract; structurally it is an identity here (a degenerate input returns
+/// [`MIN_ANCHOR_ROWS`] above, and the fit's own `max(…, 1)` floors the rest).
+///
+/// Total: a zero width, a degenerate shape (`px_h == 0`) or a degenerate cell
+/// answers [`MIN_ANCHOR_ROWS`] rather than panicking. The parse layer rejects
+/// those cases before they can become an anchor (a degenerate cell switches
+/// anchors off entirely — see [`ImageOpts::anchor`]).
+pub fn anchor_rows(width: u16, shape: ImageShape, cell: CellPixels) -> u16 {
+    if width == 0 || !shape.is_usable() || !cell.is_valid() {
         return MIN_ANCHOR_ROWS;
     }
-    let raw = (f64::from(width) / (CELL_ASPECT * shape.aspect_ratio())).round();
-    if !raw.is_finite() {
-        return MIN_ANCHOR_ROWS;
-    }
-    raw.clamp(f64::from(MIN_ANCHOR_ROWS), f64::from(MAX_ANCHOR_ROWS)) as u16
+    let fitted = fit_cells(
+        shape.px_w,
+        shape.px_h,
+        Size::new(width, MAX_ANCHOR_ROWS),
+        cell,
+    );
+    fitted.height.clamp(MIN_ANCHOR_ROWS, MAX_ANCHOR_ROWS)
 }
 
 // ============================================================
@@ -675,97 +719,275 @@ pub(crate) fn span_for_anchor(anchor: &ImageAnchor, line: usize, column: u16) ->
 mod tests {
     use super::*;
 
-    // ── Row count: the pure function ──────────────────────────────
+    // ── Row count: the shared fit ─────────────────────────────────
 
-    /// The table from the design doc, asserted row by row.
+    /// The terminal every row count here is laid out for: a 10×20 pixel cell
+    /// (an 8×16 font, the fixture the whole module's docs use).
+    const CELL: CellPixels = CellPixels::new(10, 20);
+
+    /// The step's acceptance table, asserted row by row: the layout reserves
+    /// the rows the encoder draws — no more (no blank band), no less.
     #[test]
-    fn anchor_rows_table() {
-        let cases: &[(u32, u32, u16)] = &[
-            // (px_w, px_h, expected rows at width 80)
-            (100, 100, 36),  // R=1.0   raw 40    → MAX
-            (800, 500, 25),  // R=1.6   raw 25
-            (800, 600, 30),  // R=1.333 raw 30
-            (1600, 900, 23), // R=1.778 raw 22.5  → half away from zero
-            (100, 200, 36),  // R=0.5   raw 80    → MAX
-            (50, 1000, 36),  // R=0.05  raw 800   → MAX
-            (1000, 20, 1),   // R=50    raw 0.8   → MIN
-            (128, 256, 36),  // R=0.5   raw 80    → MAX
-            (800, 6000, 36), // R=0.133 raw 300   → MAX
-            (2000, 100, 2),  // R=20    raw 2
-            (400, 100, 10),  // R=4     raw 10
+    fn anchor_rows_are_the_drawn_footprint() {
+        let cases: &[(u32, u32, u16, u16)] = &[
+            // (px_w, px_h, width, expected rows) at a 10×20 cell
+            (512, 512, 140, 26),   // 52×26 — the user's fixture, no blank rows
+            (512, 512, 40, 20),    // 40×20 — width-limited, box filled
+            (768, 768, 140, 36),   // 72×36 — the cap, exactly filled
+            (1920, 1080, 140, 36), // 128×36
+            (1024, 576, 140, 29),  // 103×29
+            (16, 16, 140, 1),      // 2×1 — an icon
+            (100, 10000, 140, 36), // 1×36 — a sliver, capped by the box
         ];
-        for &(px_w, px_h, want) in cases {
+        for &(px_w, px_h, width, want) in cases {
             assert_eq!(
-                anchor_rows(80, ImageShape::new(px_w, px_h)),
+                anchor_rows(width, ImageShape::new(px_w, px_h), CELL),
                 want,
-                "{px_w}x{px_h} at width 80"
+                "{px_w}x{px_h} at width {width}"
             );
         }
     }
 
+    /// The same table over more shapes and widths, with the properties the
+    /// contract promises rather than only the numbers.
     #[test]
-    fn anchor_rows_is_a_pure_function_of_width_and_shape() {
-        let shape = ImageShape::new(800, 600);
-        for width in [1u16, 2, 40, 80, 118, 200] {
-            let first = anchor_rows(width, shape);
-            for _ in 0..8 {
-                assert_eq!(anchor_rows(width, shape), first, "width {width}");
+    fn anchor_rows_stay_inside_the_box_and_the_picture() {
+        for (px_w, px_h) in [
+            (1u32, 1u32),
+            (16, 16),
+            (512, 512),
+            (800, 500),
+            (800, 600),
+            (1600, 900),
+            (1920, 1080),
+            (800, 6000),
+            (2000, 100),
+            (50, 1),
+            (1, 50),
+        ] {
+            for width in [1u16, 2, 40, 80, 118, 200] {
+                let rows = anchor_rows(width, ImageShape::new(px_w, px_h), CELL);
+                assert!(
+                    (MIN_ANCHOR_ROWS..=MAX_ANCHOR_ROWS).contains(&rows),
+                    "{px_w}x{px_h} at width {width} gave {rows}"
+                );
+                // The rows are exactly the height of the shared fit, and the
+                // fit never grows its box or its picture.
+                let fitted = crate::render::fit::fit_cells(
+                    px_w,
+                    px_h,
+                    ratatui::layout::Size::new(width, MAX_ANCHOR_ROWS),
+                    CELL,
+                );
+                assert_eq!(rows, fitted.height, "{px_w}x{px_h} at width {width}");
+                assert!(fitted.height <= MAX_ANCHOR_ROWS);
+                assert!(fitted.width <= width);
             }
         }
-        // Same shape, different container: the row count follows the width.
-        assert!(anchor_rows(40, shape) < anchor_rows(80, shape));
-        assert_eq!(anchor_rows(0, shape), MIN_ANCHOR_ROWS);
     }
 
+    /// The encoder is handed the *box* (`cols × rows`); the layout computes the
+    /// rows from the `MAX_ANCHOR_ROWS` box. The two must agree on the height —
+    /// and the picture must stay inside the columns — for every shape, width
+    /// and cell, not just for the table above.
+    ///
+    /// This is the invariant `ui::image::encode`'s reconciliation asserts with
+    /// real pictures; here it is the arithmetic behind it, over a matrix that
+    /// would be too slow to encode.
     #[test]
-    fn anchor_rows_clamps_at_both_ends_and_stays_total() {
-        // Extremes: 1:50 and 50:1 both land inside the bounds.
-        assert_eq!(anchor_rows(80, ImageShape::new(1, 50)), MAX_ANCHOR_ROWS);
-        assert_eq!(anchor_rows(80, ImageShape::new(50, 1)), MIN_ANCHOR_ROWS);
-        assert_eq!(anchor_rows(80, ImageShape::new(4, 4)), MAX_ANCHOR_ROWS);
-        // Width 1 with a square image rounds to a single row.
-        assert_eq!(anchor_rows(1, ImageShape::new(100, 100)), 1);
-        // Degenerate and hostile shapes stay inside the bounds.
-        assert_eq!(anchor_rows(80, ImageShape::new(0, 100)), MIN_ANCHOR_ROWS);
-        assert_eq!(anchor_rows(80, ImageShape::new(100, 0)), MIN_ANCHOR_ROWS);
-        assert_eq!(anchor_rows(80, ImageShape::new(0, 0)), MIN_ANCHOR_ROWS);
+    fn the_reserved_rows_are_the_height_of_the_box_they_reserve() {
+        let shapes: &[(u32, u32)] = &[
+            (1, 1),
+            (1, 5000),
+            (16, 16),
+            (50, 1),
+            (64, 64),
+            (100, 100),
+            (200, 150),
+            (512, 512),
+            (800, 600),
+            (1600, 900),
+            (1920, 1080),
+            (3840, 2160),
+            (300, 4000),
+            (100, 10000),
+            (2000, 100),
+            (8000, 100),
+        ];
+        let cells = [
+            CellPixels::new(10, 20),
+            CellPixels::new(8, 16),
+            CellPixels::new(12, 24),
+            CellPixels::new(9, 18),
+            CellPixels::new(1, 1),
+            CellPixels::new(40, 5),
+        ];
+        for cell in cells {
+            for &(px_w, px_h) in shapes {
+                for width in [1u16, 2, 3, 7, 40, 80, 118, 220, 1000] {
+                    let shape = ImageShape::new(px_w, px_h);
+                    let rows = anchor_rows(width, shape, cell);
+                    let boxed = fit_cells(px_w, px_h, Size::new(width, rows), cell);
+                    assert_eq!(
+                        boxed.height, rows,
+                        "{px_w}x{px_h} at width {width} with cell {cell:?}: the \
+                         reserved box is {width}x{rows}, the encoder draws {boxed:?}"
+                    );
+                    assert!(
+                        boxed.width <= width,
+                        "{px_w}x{px_h} at width {width} with cell {cell:?}: \
+                         {boxed:?} is wider than the box"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A big picture's rows follow the box (both axes), a small picture's rows
+    /// follow the picture: the two regimes the old aspect assumption conflated.
+    #[test]
+    fn anchor_rows_follow_the_box_when_big_and_the_picture_when_small() {
+        let big = ImageShape::new(1920, 1080);
+        // Wider container, more rows — up to the cap.
+        assert!(anchor_rows(40, big, CELL) < anchor_rows(80, big, CELL));
+        assert_eq!(anchor_rows(200, big, CELL), MAX_ANCHOR_ROWS);
+        // Small pictures are their own size at every width wide enough to hold
+        // them (the old formula gave 36 rows for a square one).
+        let small = ImageShape::new(512, 512);
+        assert_eq!(anchor_rows(140, small, CELL), 26);
+        assert_eq!(anchor_rows(500, small, CELL), 26);
+        // Narrower than the picture: the width binds, and the rows follow.
+        assert_eq!(anchor_rows(40, small, CELL), 20);
+        assert_eq!(anchor_rows(20, small, CELL), 10);
+        // Both pixel dimensions matter, not their ratio: two 1:1 pictures at
+        // the same width and cell reserve five rows and the cap respectively.
+        // (A ratio-based row count would answer the same number for both.)
+        assert_eq!(anchor_rows(140, ImageShape::new(100, 100), CELL), 5);
         assert_eq!(
-            anchor_rows(u16::MAX, ImageShape::new(1, u32::MAX)),
+            anchor_rows(140, ImageShape::new(1000, 1000), CELL),
             MAX_ANCHOR_ROWS
         );
     }
 
     #[test]
-    fn anchor_rows_only_depends_on_width_and_shape() {
-        // The same (width, shape) pair yields the same rows whatever else is
-        // configured: the row count is not a function of the mode, the
-        // workspace, or the metadata table's other entries.
+    fn anchor_rows_is_a_pure_function_of_width_shape_and_cell() {
+        let shape = ImageShape::new(800, 600);
+        for width in [1u16, 2, 40, 80, 118, 200] {
+            let first = anchor_rows(width, shape, CELL);
+            for _ in 0..8 {
+                assert_eq!(anchor_rows(width, shape, CELL), first, "width {width}");
+            }
+        }
+        // The cell is the unit: taller cells mean fewer rows for the same
+        // picture, and it is the same arithmetic the encoder runs.
+        assert!(anchor_rows(80, shape, CellPixels::new(10, 40)) < anchor_rows(80, shape, CELL));
+        assert_eq!(
+            anchor_rows(80, shape, CellPixels::new(10, 20)),
+            anchor_rows(80, shape, CELL)
+        );
+    }
+
+    #[test]
+    fn anchor_rows_is_total_for_degenerate_inputs() {
+        // A zero width, a degenerate shape and a degenerate cell all answer the
+        // minimum instead of panicking or dividing by zero.
+        assert_eq!(
+            anchor_rows(0, ImageShape::new(800, 600), CELL),
+            MIN_ANCHOR_ROWS
+        );
+        assert_eq!(
+            anchor_rows(80, ImageShape::new(0, 100), CELL),
+            MIN_ANCHOR_ROWS
+        );
+        assert_eq!(
+            anchor_rows(80, ImageShape::new(100, 0), CELL),
+            MIN_ANCHOR_ROWS
+        );
+        assert_eq!(
+            anchor_rows(80, ImageShape::new(0, 0), CELL),
+            MIN_ANCHOR_ROWS
+        );
+        for cell in [
+            CellPixels::new(0, 20),
+            CellPixels::new(10, 0),
+            CellPixels::new(0, 0),
+        ] {
+            assert_eq!(
+                anchor_rows(80, ImageShape::new(800, 600), cell),
+                MIN_ANCHOR_ROWS,
+                "{cell:?}"
+            );
+        }
+        // Hostile numbers stay inside the bounds.
+        assert_eq!(
+            anchor_rows(u16::MAX, ImageShape::new(1, u32::MAX), CELL),
+            MAX_ANCHOR_ROWS
+        );
+        assert_eq!(
+            anchor_rows(u16::MAX, ImageShape::new(u32::MAX, 1), CELL),
+            MIN_ANCHOR_ROWS
+        );
+    }
+
+    #[test]
+    fn options_carry_the_cell_and_degrade_without_one() {
         let off = ImageOpts::off();
         assert!(!off.is_enabled());
+        assert_eq!(off.cell_pixels(), CellPixels::new(0, 0));
+
         let opts = ImageOpts::anchor(
             Some(PathBuf::from("/ws")),
             vec![ImageEntry::new("/ws/a.png", ImageShape::new(800, 600))],
+            CELL,
         );
         assert_eq!(opts.mode(), ImageMode::Anchor);
+        assert!(opts.is_enabled());
+        assert_eq!(opts.cell_pixels(), CELL);
         assert_eq!(
             opts.shape_for(Path::new("/ws/a.png")),
             Some(ImageShape::new(800, 600))
         );
         assert_eq!(opts.shape_for(Path::new("/ws/b.png")), None);
         assert_eq!(opts.workspace(), Some(Path::new("/ws")));
-        assert_eq!(anchor_rows(80, ImageShape::new(800, 600)), 30);
+        assert_eq!(
+            anchor_rows(80, ImageShape::new(800, 600), opts.cell_pixels()),
+            30
+        );
         assert_eq!(off.shapes().len(), 0);
+
+        // A degenerate cell is not a layout input: the options fall back to the
+        // shared `Off` value (the link path), table and workspace included.
+        for cell in [
+            CellPixels::new(0, 20),
+            CellPixels::new(10, 0),
+            CellPixels::new(0, 0),
+        ] {
+            let degraded = ImageOpts::anchor(
+                Some(PathBuf::from("/ws")),
+                vec![ImageEntry::new("/ws/a.png", ImageShape::new(800, 600))],
+                cell,
+            );
+            assert_eq!(degraded, *ImageOpts::off(), "{cell:?}");
+            assert!(!degraded.is_enabled(), "{cell:?}");
+            assert_eq!(degraded.cell_pixels(), CellPixels::new(0, 0), "{cell:?}");
+        }
+        // An empty table is *not* a reason to degrade: the mode is the caller's
+        // decision, the table is just what has been probed so far.
+        assert!(
+            ImageOpts::anchor(Some(PathBuf::from("/ws")), Vec::new(), CELL).is_enabled(),
+            "an empty metadata table still renders anchors once a shape arrives"
+        );
     }
 
+    /// The shape gate: a degenerate header (either dimension zero) is not a
+    /// shape, and the row count never divides by it.
     #[test]
-    fn shape_aspect_ratio_is_finite_for_degenerate_headers() {
-        assert!((ImageShape::new(320, 200).aspect_ratio() - 1.6).abs() < 1e-9);
-        assert_eq!(ImageShape::new(100, 0).aspect_ratio(), 0.0);
-        assert!(ImageShape::new(100, 0).aspect_ratio().is_finite());
-        assert!(ImageShape::new(0, 100).aspect_ratio().is_finite());
+    fn a_degenerate_shape_is_not_usable() {
         assert!(!ImageShape::new(100, 0).is_usable());
         assert!(!ImageShape::new(0, 100).is_usable());
+        assert!(!ImageShape::new(0, 0).is_usable());
         assert!(ImageShape::new(1, 1).is_usable());
+        assert!(ImageShape::new(1920, 1080).is_usable());
     }
 
     // ── Path policy ───────────────────────────────────────────────

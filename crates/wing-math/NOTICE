@@ -71,24 +71,45 @@
     该入口还额外返回**消费的字符数**，供上层判断"输入有没有被静默丢掉一段"。
 13. **`cargo fmt`**：所有内联文件都跑了 `cargo fmt`（仓库门禁要求 `cargo fmt --check`
     干净），因此与上游原文存在**纯空白**差异。
+14. **上标字形表补全**（`src/grid/layout.rs::to_superscript_char`）：上游只映射数字 / 符号
+    / `n` / `i`，`x^d` / `W^T` / `x^w` 这类高频写法全部掉进"堆叠"分支（2 行 → 行内
+    `None` → 显示源码）。按 Unicode 数据（逐条码点 + 字符名写在函数里）补齐可得的字形：
+    小写 a–z 的 25 个、大写 19 个，外加 `⊤ → ᵀ`（`^\top` 的行内形态）。**不收** `S X Z`
+    （UCD 里没有常规大写修饰字形）与 `q` / `Y` / `C` / `F` / `Q`（有码位 —— U+107A5、
+    U+107B2 MODIFIER LETTER SMALL CAPITAL Y、U+A7F2 / A7F3 / A7F4，但都在 Latin
+    Extended-F / -D 的补遗里、字体覆盖差）。缺失字形仍返回 `None`（堆叠回退语义不变）。
+15. **符号表 + 二元算子间距**（`src/latex/parser.rs`）：`latex_to_unicode` 补 `\top`（⊤，
+    转置记号）/ `\odot`（⊙）；`is_spaced_operator` 加入带圈 / 星号算子 `⊙ ⊕ ⊗ ∘ ∗ ⋆`
+    （与改动 8 的 `·` 同类：`a ⊕ b` 不再渲染成 `a ⊕b`）。`⊤` 是普通符号，不进间距集。
+16. **符号命令的尾随空格退回输入流**（`src/latex/parser.rs`）：改动 9 只盖到命名算子，
+    符号命令（`\pi` `\top` …）后面被吃掉的空格现在退回输入流 —— `\pi x` 与裸词 `pi x`
+    一致渲染成 `π x`，`w^\top x` → `wᵀ x`（空格落在上标之后，不污染上标参数）。
+    **只在下一位是另一个对象的起点时才退**（`EqParser::trailing_space_separates_objects`，
+    判据会先跳过连续空格）：下一位是 `^` `_` 撇号 / `}` `)` `]` 或 `\right` `\end` /
+    `&` `\\` / 标点时照旧吃掉，否则 `\pi ^2` 会渲染成 `π ²`、`x^{\top }` 会掉回源码、
+    `\left( \alpha \right)` 会多一列、`cases` 单元格会多占一列。
 
 ## 内联保真度（如何复核"除上述改动外逐字一致"）
 
+`layout.rs` 为例（其余文件同形；**口径写死在这里**，上表的数字都用这条命令量，
+`→` 左边是改动前、右边是改动后）：
+
 ```bash
-# 1) 取上游源码
+# 1) 取上游源码（版本见本文件开头「逐字内联」表；`parser.rs` 换用第二行）
 curl -sSL https://static.crates.io/crates/term-maths/term-maths-1.0.0.crate | tar xz -C /tmp
 curl -sSL https://static.crates.io/crates/rust-latex-parser/rust-latex-parser-0.1.0.crate | tar xz -C /tmp
-
-# 2) 用与本仓库同一个 rustfmt 格式化上游文件
 rustfmt --edition 2024 --quiet /tmp/term-maths-1.0.0/src/layout.rs
 
-# 3) 去掉本文件顶部的「来源」注释块后逐行 diff
-#    —— 差异应当**只有**上面「我们改了什么」列出的那几条
+# 2) 去掉本文件顶部的「来源」注释块**及其后的空行**
+#    （出处头的最后一行 = 文件开头第二个「全是 '-' 的注释行」）
+end=$(awk 'NR>1 && /^\/\/ -+$/ {print NR; exit}' crates/wing-math/src/grid/layout.rs)
+tail -n +$((end + 2)) crates/wing-math/src/grid/layout.rs > /tmp/ours.rs
+
+# 3) 与上游逐行 diff，数 `<` / `>` 行 —— 差异应当**只有**上面「我们改了什么」列出的那几条
+diff /tmp/term-maths-1.0.0/src/layout.rs /tmp/ours.rs | grep -c '^[<>]'
 ```
 
-实测（本步骤交付时，差异行数 = 去掉出处头后与 rustfmt 过的上游文件的 `diff` 行数。
-**这个数字对方法敏感**：是否对 `use` 行做路径归一化、`rustfmt` 的版本都会让它上下浮动
-几行；关键是**差异内容**逐条能对应到上面的改动清单）：
+差异行数（口径同上；未列出的其它 `src/**` 文件与上游逐字一致）：
 
 | 内联文件 | 差异行数 | 差异内容 |
 |---|---|---|
@@ -99,8 +120,12 @@ rustfmt --edition 2024 --quiet /tmp/term-maths-1.0.0/src/layout.rs
 | `src/grid/renderer.rs` | 6 | 模块路径 |
 | `src/grid/latex_renderer.rs` | 8 | 模块路径 |
 | `src/grid/mod.rs` | 23 | 模块路径 + 移除三个未内联后端 |
-| `src/grid/layout.rs` | 74 | 模块路径 + `center_accent` + `build_delimiter` 提权 + `layout_seq` 一次性拼装 + `layout_binom` 修正 + `layout_sqrt` 空被开方数 |
-| `src/latex/parser.rs` | 183 | 模块路径 + 4 处 `collapsible_if` + `·` 间隔 + 命名算子空格 + `parse_group_atom` 跳空白 + 递归深度闸 |
+| `src/grid/layout.rs` | 74 → **177** | 模块路径 + `center_accent` + `build_delimiter` 提权 + `layout_seq` 一次性拼装 + `layout_binom` 修正 + `layout_sqrt` 空被开方数 + 上标字形表（改动 14） |
+| `src/latex/parser.rs` | 183 → **260** | 模块路径 + 4 处 `collapsible_if` + `·` / 带圈算子间距（改动 8、15）+ 命名算子与符号命令的空格（改动 9、16，含收窄判据）+ `parse_group_atom` 跳空白 + 递归深度闸 + 符号表补 `⊤`/`⊙`（改动 15） |
+
+步骤 02 复测：`74 → 177` / `183 → 260` 是**同一脚本**量到的改动前 / 改动后值（改动前的
+74 / 183 与上表原本公布的数字逐字一致，即口径没变）。行数只表示"改动量级"，逐条内容以
+上面的索引为准。
 
 上游测试随源码内联（`parser.rs` / `rendered_block.rs` / `mathfont.rs` 文件内的
 `#[cfg(test)] mod tests`），两个集成测试也整体迁移到 `tests/upstream_robustness.rs`

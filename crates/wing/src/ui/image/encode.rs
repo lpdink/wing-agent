@@ -10,9 +10,16 @@
 //! upstream's size policy with the public `Resize`:
 //!
 //! ```text
-//! target (cells) --Resize::size_for--> actual (cells, ≤ target, aspect kept)
-//!                --Resize::resize----> exact pixels = actual × cell_pixels (padded, never upscaled)
+//! target (cells) --fit_cells--------> actual (cells, ≤ target, aspect kept, never upscaled)
+//!                --Resize::resize--> exact pixels = actual × cell_pixels (padded, never upscaled)
 //! ```
+//!
+//! The first step is [`crate::render::fit::fit_cells`], **not** upstream's
+//! `Resize::size_for` — the very same function the markdown layout computes an anchor's row
+//! count with (see `render/markdown/images.rs`). One shared function, one set of inputs, so
+//! "the box reserves `rows`" and "the picture is `size().height` cells tall" cannot drift
+//! apart. `tests` below assert the port still agrees with upstream's `size_for` for every
+//! input, which is what keeps the encoded bytes unchanged by the swap.
 //!
 //! `Resize::Fit(None)` never grows the **cell footprint**: a 16×16 icon in a 10×20 cell is a
 //! 2×1-cell image, however large the box it was given. (The pixels themselves are scaled to a
@@ -48,6 +55,8 @@ use ratatui_image::sliced::SlicedProtocol;
 use super::meta::Unavailable;
 use super::probe::{CellPixels, ImageProtocol};
 use super::store::Limits;
+use crate::render::fit::CellPixels as LayoutCellPixels;
+use crate::render::fit::fit_cells;
 
 /// Kitty image ids. Unique-within-session is all the protocol needs; a counter is
 /// reproducible where `rand::random()` is not, and `rand` is not a dependency this step may
@@ -103,9 +112,10 @@ pub(crate) fn decode(path: &Path, limits: &Limits) -> Result<DynamicImage, Unava
 
 /// Encode an already-decoded image for `protocol`, targeting `target` cells.
 ///
-/// The result's cell `size()` is `≤ target` on both axes, aspect ratio preserved: the cell
-/// footprint never grows, while the pixels are scaled to whole cells (see the module docs).
-/// Worker-thread only (the encoders are CPU-bound).
+/// The result's cell `size()` is `≤ target` on both axes, aspect ratio preserved, and it is
+/// exactly what [`crate::render::fit::fit_cells`] computes for the same numbers — the layout
+/// reserved that many rows for the picture, so they agree by construction. Worker-thread only
+/// (the encoders are CPU-bound).
 pub(crate) fn encode(
     image: DynamicImage,
     target: Size,
@@ -115,7 +125,13 @@ pub(crate) fn encode(
 ) -> Result<SlicedProtocol, Unavailable> {
     let font = ratatui_image::FontSize::new(cell.width, cell.height);
     let resize = Resize::Fit(None);
-    let actual = resize.size_for(&image, font, target);
+    let cell_size = LayoutCellPixels::new(cell.width, cell.height);
+    let actual = fit_cells(image.width(), image.height(), target, cell_size);
+    if actual.width == 0 || actual.height == 0 {
+        // Degenerate target or image (the store refuses a zero-sized target
+        // before queueing) — never hand a zero size to `Resize::resize`.
+        return Err(Unavailable::EncodeFailed);
+    }
     let image = resize.resize(&image, font, actual, None);
 
     if let ImageProtocol::Kitty = protocol {
@@ -360,5 +376,193 @@ mod tests {
             decode(&path, &Limits::default()).unwrap_err(),
             Unavailable::NotAnImage
         );
+    }
+
+    // ── The layout's rows are the encoder's rows ────────────────────
+    //
+    // The contract this step installs: `render::markdown::anchor_rows` reserves
+    // exactly the rows `encode` draws. Both call `fit_cells`, so the two can
+    // only agree — these tests are what makes "only" checkable, and what would
+    // go red if either side went back to its own formula.
+
+    /// The acceptance table of the step, end to end: for every (picture, cell,
+    /// width) the frame hands the encoder `target = (cols, anchor_rows(…))` and
+    /// the encoding comes back that many rows tall — no blank band under the
+    /// picture, no overdraw below the box.
+    #[test]
+    fn the_encoded_height_is_the_reserved_anchor_rows() {
+        // (px_w, px_h, markdown width) at a 10x20 cell, plus a second cell size
+        // for the same shapes (the cell is an input, not a constant).
+        let cases: &[(u32, u32, u16)] = &[
+            (512, 512, 140),   // 52x26 — the user's fixture
+            (512, 512, 40),    // 40x20 — width-limited
+            (768, 768, 140),   // 72x36 — the cap, exactly filled
+            (1920, 1080, 140), // 128x36
+            (1024, 576, 140),  // 103x29
+            (16, 16, 140),     // 2x1 — an icon
+            (100, 10000, 140), // 1x36 — a tall sliver
+            (2000, 100, 140),  // 1 row — a wide banner
+        ];
+        for cell in [CELL, CellPixels::new(8, 16), CellPixels::new(12, 24)] {
+            for &(px_w, px_h, width) in cases {
+                let (_dir, path) = fixture(&format!("fit-{px_w}x{px_h}-{width}"), px_w, px_h);
+                let image = decode(&path, &Limits::default()).expect("decode");
+                assert_eq!((image.width(), image.height()), (px_w, px_h));
+                let rows = crate::render::markdown::anchor_rows(
+                    width,
+                    crate::render::markdown::ImageShape::new(px_w, px_h),
+                    LayoutCellPixels::new(cell.width, cell.height),
+                );
+                let encoded = encode(
+                    image,
+                    Size::new(width, rows),
+                    ImageProtocol::Kitty,
+                    cell,
+                    false,
+                )
+                .unwrap_or_else(|err| panic!("{px_w}x{px_h} into {width}x{rows}: {err}"));
+                // The whole footprint, not just its height: a stretched picture
+                // (the box filled by force) has the right row count and the
+                // wrong size, and that is exactly the bug this contract bans.
+                let expected = fit_cells(
+                    px_w,
+                    px_h,
+                    Size::new(width, rows),
+                    LayoutCellPixels::new(cell.width, cell.height),
+                );
+                assert_eq!(
+                    encoded.size(),
+                    expected,
+                    "{px_w}x{px_h} at width {width} with cell {cell:?}: the layout \
+                     reserved {rows} rows for a {expected:?} footprint"
+                );
+                assert_eq!(
+                    encoded.size().height,
+                    rows,
+                    "{px_w}x{px_h} at width {width} with cell {cell:?}: the layout \
+                     reserved {rows} rows, the encoder drew {}",
+                    encoded.size().height
+                );
+                assert!(
+                    encoded.size().width <= width,
+                    "{px_w}x{px_h} at width {width}: {} columns is wider than the box",
+                    encoded.size().width
+                );
+            }
+        }
+    }
+
+    /// The same contract through the row-sliced protocols (sixel / iTerm2),
+    /// whose `size()` comes from the emitted stack rather than a placeholder.
+    #[test]
+    fn the_row_stack_is_as_tall_as_the_reserved_rows() {
+        let (_dir, path) = fixture("fit-row-stack", 512, 512);
+        for protocol in [ImageProtocol::Sixel, ImageProtocol::Iterm2] {
+            let image = decode(&path, &Limits::default()).expect("decode");
+            let width = 140;
+            let rows = crate::render::markdown::anchor_rows(
+                width,
+                crate::render::markdown::ImageShape::new(512, 512),
+                LayoutCellPixels::new(CELL.width, CELL.height),
+            );
+            let encoded = encode(image, Size::new(width, rows), protocol, CELL, false)
+                .unwrap_or_else(|err| panic!("{protocol:?}: {err}"));
+            assert_eq!(encoded.size().height, rows, "{protocol:?}");
+            let SlicedProtocol::Sliced(row_protocols) = &encoded else {
+                panic!("{protocol:?} is not a row stack");
+            };
+            assert_eq!(row_protocols.len(), usize::from(rows), "{protocol:?}");
+        }
+    }
+
+    /// A degenerate target or cell never reaches `Resize::resize` with a zero
+    /// size (which would panic inside `image`): it is `EncodeFailed`.
+    #[test]
+    fn a_degenerate_target_is_a_failure_not_a_panic() {
+        fn expect_failure(result: Result<SlicedProtocol, Unavailable>, what: &str) {
+            match result {
+                Err(err) => assert_eq!(err, Unavailable::EncodeFailed, "{what}"),
+                Ok(_) => panic!("{what}: expected a failure, got an encoding"),
+            }
+        }
+        let (_dir, path) = fixture("fit-degenerate", 64, 64);
+        let image = decode(&path, &Limits::default()).expect("decode");
+        expect_failure(
+            encode(image, Size::new(0, 4), ImageProtocol::Kitty, CELL, false),
+            "a zero-width target",
+        );
+        let image = decode(&path, &Limits::default()).expect("decode");
+        expect_failure(
+            encode(image, Size::new(4, 0), ImageProtocol::Kitty, CELL, false),
+            "a zero-height target",
+        );
+        // A degenerate cell cannot be constructed through `ImageSupport`
+        // (`from_parts` refuses it), but the encoder type is public enough for a
+        // direct call — it must fail rather than divide by zero.
+        let image = decode(&path, &Limits::default()).expect("decode");
+        expect_failure(
+            encode(
+                image,
+                Size::new(4, 4),
+                ImageProtocol::Kitty,
+                CellPixels::new(0, 20),
+                false,
+            ),
+            "a zero-width cell",
+        );
+    }
+
+    /// The port is upstream's arithmetic: `fit_cells` must agree with
+    /// `Resize::Fit(None)::size_for` for every input the store can admit, so
+    /// swapping the call inside `encode` cannot change an encoded size.
+    ///
+    /// The two `ceil`s are exact integers here and `f32` there; every pixel
+    /// dimension the store can admit is below `2^24` (`Limits::pixels` is
+    /// 16 Mpx), which is precisely the range where the `f32` quotient cannot
+    /// round across an integer boundary — so agreement is by construction, and
+    /// this test is the witness.
+    #[test]
+    fn fit_cells_agrees_with_upstream_size_for() {
+        let resize = Resize::Fit(None);
+        let cases: &[(u32, u32, u16, u16, u16, u16)] = &[
+            // (px_w, px_h, box cols, box rows, cell w, cell h)
+            (512, 512, 140, 36, 10, 20),
+            (512, 512, 40, 20, 10, 20),
+            (16, 16, 140, 36, 10, 20),
+            (800, 600, 80, 30, 10, 20),
+            (400, 100, 20, 20, 10, 20),
+            (1920, 1080, 128, 36, 10, 20),
+            (4000, 4000, 400, 200, 10, 20),
+            (1, 5000, 118, 36, 10, 20),
+            (8000, 100, 118, 36, 10, 20),
+            (100, 100, 10, 10, 1, 1),
+            (3000, 2000, 79, 33, 9, 18),
+            // The store's pixel ceiling, asked at a 1-pixel cell: the widest
+            // quotients the encoder can ever see.
+            (16_000_000, 1, 100, 36, 1, 1),
+            (8000, 2000, 60, 40, 3, 7),
+            // Past `u16::MAX` pixels: the saturation branch, kept for parity.
+            (70000, 100, 7000, 36, 10, 20),
+            (100, 70000, 7000, 36, 10, 20),
+        ];
+        for &(px_w, px_h, cols, rows, cell_w, cell_h) in cases {
+            let image = DynamicImage::ImageRgb8(image::ImageBuffer::from_pixel(
+                px_w,
+                px_h,
+                image::Rgb([7, 8, 9]),
+            ));
+            let font = ratatui_image::FontSize::new(cell_w, cell_h);
+            let upstream = resize.size_for(&image, font, Size::new(cols, rows));
+            let ours = fit_cells(
+                px_w,
+                px_h,
+                Size::new(cols, rows),
+                LayoutCellPixels::new(cell_w, cell_h),
+            );
+            assert_eq!(
+                ours, upstream,
+                "{px_w}x{px_h} into {cols}x{rows} at cell {cell_w}x{cell_h}"
+            );
+        }
     }
 }

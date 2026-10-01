@@ -70,6 +70,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Rect, Size};
 
 use crate::config::rendering::ImagesMode;
+use crate::render::markdown::CellPixels;
 use crate::render::markdown::ImageEntry;
 use crate::render::markdown::ImageOpts;
 use crate::render::markdown::ImageShape;
@@ -529,30 +530,44 @@ impl Images {
 }
 
 impl Images {
-    /// Rebuild the options the render layer reads (mode, workspace, table).
+    /// Rebuild the options the render layer reads (mode, workspace, table, cell).
+    ///
+    /// The cell pixels come from the store's own capability — the same
+    /// `ImageSupport` the encoder encodes with — so the layout's rows and the
+    /// drawn footprint can never be computed from two different terminals.
     fn rebuild_opts(&mut self) {
-        if self.store.is_none() {
+        let Some(store) = self.store.as_ref() else {
             self.opts = ImageOpts::off().clone();
             return;
-        }
+        };
+        // `is_enabled()` guarantees a valid cell; `None` here would mean a
+        // probe-less capability, which `Images::new` never builds.
+        let Some(cell) = store.support().cell_pixel_size() else {
+            self.opts = ImageOpts::off().clone();
+            return;
+        };
         let entries = self
             .known
             .iter()
             .map(|(path, shape)| ImageEntry::new(path.clone(), *shape))
             .collect();
-        self.opts = ImageOpts::anchor(self.workspace.clone(), entries);
+        self.opts = ImageOpts::anchor(
+            self.workspace.clone(),
+            entries,
+            CellPixels::new(cell.width, cell.height),
+        );
     }
 }
 
 /// Blank the part of the anchor's caption row the picture does not cover.
 ///
-/// The box is sized from the image's aspect ratio, but the encoded footprint is
-/// capped by the terminal's cell size: a picture taller than
-/// [`MAX_ANCHOR_ROWS`](crate::render::markdown::MAX_ANCHOR_ROWS) comes back
-/// narrower than the box (fit, not stretched — see [`crate::ui::image`]), and a
-/// long caption would then peek out to the right of the picture. The row is
-/// part of the picture's box, so the picture owns it: everything the picture
-/// did not cover is cleared.
+/// The box reserves exactly the rows the picture occupies, but the two can
+/// still disagree on the **column** axis: a picture whose
+/// [`MAX_ANCHOR_ROWS`](crate::render::markdown::MAX_ANCHOR_ROWS) cap binds (a
+/// tall image) comes back fewer columns wide than the box (fit, not stretched —
+/// see [`crate::ui::image`]), and a long caption would then peek out to the
+/// right of the picture. The row is part of the picture's box, so the picture
+/// owns it: everything the picture did not cover is cleared.
 ///
 /// Only the caption row carries text (the rows below it are blank cover rows),
 /// and only when the box's first row is on screen at all (`offset.1 < 0` means

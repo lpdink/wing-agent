@@ -43,6 +43,7 @@ use crate::app::images::FRESHNESS_INTERVAL;
 use crate::app::images::Images;
 use crate::config::AppConfig;
 use crate::config::rendering::ImagesMode;
+use crate::render::markdown::CellPixels as LayoutCellPixels;
 use crate::render::markdown::ImageShape;
 use crate::render::markdown::MAX_ANCHOR_ROWS;
 use crate::render::markdown::anchor_rows;
@@ -63,6 +64,11 @@ use crate::ui::toast::Toast;
 const PLACEHOLDER: char = '\u{10EEEE}';
 
 const CELL: CellPixels = CellPixels::new(10, 20);
+
+/// The same cell, as the render layer's mirror type — what `anchor_rows`
+/// takes (the two are the same numbers by construction: `Images` hands the
+/// layout the store's own `ImageSupport` cell).
+const LAYOUT_CELL: LayoutCellPixels = LayoutCellPixels::new(10, 20);
 
 fn kitty() -> ImageSupport {
     ImageSupport::from_parts(ImageProtocol::Kitty, CELL, false)
@@ -287,7 +293,7 @@ fn a_ready_image_is_painted_into_its_anchor_box() {
     let content = app.chat.geometry().area;
     let band = app.geometry.chat_band();
     let frame = app.chat.frame_images().first().cloned().expect("recorded");
-    let rows = anchor_rows(content.width - 2, ImageShape::new(800, 600));
+    let rows = anchor_rows(content.width - 2, ImageShape::new(800, 600), LAYOUT_CELL);
 
     // The request: the cell's prefix column, the box at the markdown width,
     // and the whole box as the encode target.
@@ -313,9 +319,68 @@ fn a_ready_image_is_painted_into_its_anchor_box() {
     }
 }
 
+/// The acceptance case behind this contract, at the frame level: a 512×512
+/// picture at a 10×20 cell is **26** rows (52×26 cells), not the 36 rows an
+/// aspect assumption reserved — the box *is* the picture, so the markdown line
+/// after it starts right below it instead of ten rows lower.
+#[test]
+fn a_small_picture_reserves_its_own_rows_and_leaves_no_blank_band() {
+    let dir = TempDir::new("small-box");
+    let plot = dir.file("plot.png");
+    write_png(&plot, 512, 512);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
+    app.chat.push(ChatCell::AssistantMessage(
+        "![plot](plot.png)\n\nrow after the picture".into(),
+    ));
+    let mut term = test_terminal(142, 40);
+    draw_until(&mut app, &mut term, "the picture", |_, buf| {
+        has_placeholder(buf)
+    });
+
+    let buf = term.backend().buffer().clone();
+    let content = app.chat.geometry().area;
+    let cols = content.width - 2;
+    let frame = app.chat.frame_images().first().cloned().expect("recorded");
+    assert_eq!(
+        frame.target,
+        Size::new(cols, 26),
+        "512x512 at a 10x20 cell is 52x26 cells, not a 36-row reservation"
+    );
+    assert_eq!(
+        frame.target.height,
+        anchor_rows(cols, ImageShape::new(512, 512), LAYOUT_CELL),
+        "the reserved rows are the shared fit"
+    );
+    assert!(
+        frame.target.height < MAX_ANCHOR_ROWS,
+        "a picture smaller than the box must not reserve the cap"
+    );
+
+    // The picture covers the box's rows, top to bottom — the reservation is
+    // the drawing. (The box is the full render width; the picture is 52 of
+    // those columns, left-aligned — the column axis is not part of this
+    // contract.)
+    let painted = placeholder_rect(&buf).expect("placeholders");
+    assert_eq!(
+        painted.height, frame.area.height,
+        "the picture fills the box rows"
+    );
+    assert_eq!(painted.height, frame.target.height);
+    assert_eq!(painted.width, 52, "512 px at a 10 px cell is 52 columns");
+    assert_eq!((painted.x, painted.y), (frame.area.x, frame.area.y));
+
+    // …and the next markdown line follows within the renderer's own block
+    // separator (one blank row). Under the old contract this gap was the ten
+    // rows the picture did not fill.
+    let text_row = row_with(&buf, "row after the picture").expect("the following text");
+    let gap = text_row.saturating_sub(painted.bottom());
+    assert!(gap <= 2, "blank band under the picture: {gap} rows");
+}
+
 #[test]
 fn scrolling_moves_the_picture_with_its_box() {
     let dir = TempDir::new("scroll");
+
     let plot = dir.file("plot.png");
     write_png(&plot, 600, 600);
     let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
@@ -380,7 +445,7 @@ fn a_streaming_cell_anchors_with_the_app_options() {
         frame.target,
         Size::new(
             content.width - 2,
-            anchor_rows(content.width - 2, ImageShape::new(800, 600))
+            anchor_rows(content.width - 2, ImageShape::new(800, 600), LAYOUT_CELL)
         ),
         "the streaming engine must lay out the same box as the reference render"
     );
@@ -864,7 +929,9 @@ fn a_pending_encode_leaves_the_caption_untouched() {
 fn a_content_rebuild_re_reads_a_replaced_picture() {
     let dir = TempDir::new("replaced");
     let plot = dir.file("plot.png");
-    write_png(&plot, 800, 600);
+    // Tall enough that the 36-row box caps it: the first generation's box is
+    // the maximum, the second's is a single row.
+    write_png(&plot, 800, 6000);
     let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
     app.chat
         .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
@@ -873,7 +940,7 @@ fn a_content_rebuild_re_reads_a_replaced_picture() {
         has_placeholder(buf)
     });
     let tall = app.chat.frame_images().first().cloned().expect("recorded");
-    assert_eq!(tall.target.height, 36, "the 800×600 cap");
+    assert_eq!(tall.target.height, 36, "the tall fixture's cap");
 
     // The file is replaced by a wide sliver and the session is rebuilt (the
     // epoch `ChatView::clear` bumps — the same one every `/new` / replay does).
@@ -890,7 +957,7 @@ fn a_content_rebuild_re_reads_a_replaced_picture() {
         sliver.target,
         Size::new(
             content.width - 2,
-            anchor_rows(content.width - 2, ImageShape::new(2000, 20))
+            anchor_rows(content.width - 2, ImageShape::new(2000, 20), LAYOUT_CELL)
         ),
         "the rebuilt content must lay the picture out from its new header"
     );
@@ -1128,7 +1195,7 @@ fn the_layout_height_matches_what_is_drawn() {
     // The box the drawing pass got is the box the height reserved: the cell is
     // the anchor's rows plus the blank line every assistant message ends with,
     // and the picture fills the box from the content's very first row.
-    let rows = anchor_rows(content.width - 2, ImageShape::new(800, 600));
+    let rows = anchor_rows(content.width - 2, ImageShape::new(800, 600), LAYOUT_CELL);
     assert_eq!(frame.target.height, rows);
     assert_eq!(app.chat.content_height(), usize::from(rows) + 1);
     assert_eq!(frame.area.y, content.y);
@@ -1155,7 +1222,7 @@ fn the_layout_height_matches_what_is_drawn() {
     assert_eq!(anchor.cols, narrowed - 2);
     assert_eq!(
         anchor.rows,
-        anchor_rows(narrowed - 2, ImageShape::new(800, 600)),
+        anchor_rows(narrowed - 2, ImageShape::new(800, 600), LAYOUT_CELL),
         "the box (and so the encode target) is a function of the width"
     );
     assert_eq!(
@@ -1186,7 +1253,8 @@ fn painted_at(buf: &Buffer, x: u16, y: u16) -> bool {
 fn a_rewritten_picture_is_re_read_on_the_next_freshness_tick() {
     let dir = TempDir::new("rewrite");
     let plot = dir.file("plot.png");
-    write_png(&plot, 800, 600);
+    // Tall enough that the 36-row box caps the first generation's rows.
+    write_png(&plot, 800, 6000);
     let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
     app.chat
         .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
@@ -1200,7 +1268,10 @@ fn a_rewritten_picture_is_re_read_on_the_next_freshness_tick() {
     let before = app.chat.frame_images().first().cloned().expect("recorded");
     assert_eq!(
         before.target,
-        Size::new(cols, anchor_rows(cols, ImageShape::new(800, 600)))
+        Size::new(
+            cols,
+            anchor_rows(cols, ImageShape::new(800, 6000), LAYOUT_CELL)
+        )
     );
     assert_eq!(before.target.height, MAX_ANCHOR_ROWS, "the tall fixture");
 
@@ -1231,7 +1302,10 @@ fn a_rewritten_picture_is_re_read_on_the_next_freshness_tick() {
     let after = app.chat.frame_images().first().cloned().expect("recorded");
     assert_eq!(
         after.target,
-        Size::new(cols, anchor_rows(cols, ImageShape::new(2000, 20))),
+        Size::new(
+            cols,
+            anchor_rows(cols, ImageShape::new(2000, 20), LAYOUT_CELL)
+        ),
         "the new header re-laid the box out (a pure function of the shape)"
     );
     assert_eq!(after.target.height, 1, "the wide sliver");
@@ -1500,7 +1574,10 @@ fn extreme_aspect_ratios_stay_inside_the_bounds() {
     assert_eq!(frames.len(), 2, "one box per anchor");
     assert_eq!(
         frames[0].target,
-        Size::new(cols, anchor_rows(cols, ImageShape::new(1, 5000)))
+        Size::new(
+            cols,
+            anchor_rows(cols, ImageShape::new(1, 5000), LAYOUT_CELL)
+        )
     );
     assert_eq!(
         frames[0].target.height, MAX_ANCHOR_ROWS,
@@ -1508,7 +1585,10 @@ fn extreme_aspect_ratios_stay_inside_the_bounds() {
     );
     assert_eq!(
         frames[1].target,
-        Size::new(cols, anchor_rows(cols, ImageShape::new(8000, 100)))
+        Size::new(
+            cols,
+            anchor_rows(cols, ImageShape::new(8000, 100), LAYOUT_CELL)
+        )
     );
     assert_eq!(frames[1].target.height, 1, "the strip is one row");
     let buf = term.backend().buffer();
@@ -1775,7 +1855,10 @@ fn a_resize_re_encodes_for_the_new_box() {
     let wide_cols = app.chat.geometry().area.width - 2;
     assert_eq!(
         wide.target,
-        Size::new(wide_cols, anchor_rows(wide_cols, ImageShape::new(800, 600)))
+        Size::new(
+            wide_cols,
+            anchor_rows(wide_cols, ImageShape::new(800, 600), LAYOUT_CELL)
+        )
     );
 
     // Exactly what `TermEvent::Resize` does: a new window size and a full
@@ -1794,7 +1877,10 @@ fn a_resize_re_encodes_for_the_new_box() {
     assert!(cols < wide_cols, "the fixture must narrow the content");
     assert_eq!(
         narrow.target,
-        Size::new(cols, anchor_rows(cols, ImageShape::new(800, 600))),
+        Size::new(
+            cols,
+            anchor_rows(cols, ImageShape::new(800, 600), LAYOUT_CELL)
+        ),
         "the box — and so the encode target — follows the new width"
     );
     assert_ne!(narrow.target, wide.target);

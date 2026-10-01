@@ -48,18 +48,12 @@ async def read_image(path: str, ctx: ToolContext) -> ToolOutput:
     file extension). The image bytes are stored in the session media store;
     this tool returns a one-line text envelope instead of the bytes.
 
-    Only works when the current model declares vision capability
-    (`capabilities: {vision: true}` in its config declaration). Otherwise
-    the call is refused without reading the file.
-
     Args:
         path: Image file path (relative paths resolve against the workspace).
 
     Returns:
         A single-line envelope `[image: PATH | FORMAT WxH | SIZE | id ID | mtime MTIME]`
-        with the image attached, or an actionable error (no vision
-        capability / unsupported format / too large / empty / corrupt
-        header / Apple CgBI variant needing conversion).
+        with the image attached.
     """
     resolved = _resolve_path(path, ctx)
 
