@@ -42,7 +42,6 @@ pub use types::thinking_segment_style;
 
 // Image anchors (see `images`): the mode, the caller-supplied metadata and
 // the side channel the ui layer reads.
-pub use images::CELL_ASPECT;
 pub use images::IMAGE_EXTENSIONS;
 pub use images::ImageAnchor;
 pub use images::ImageEntry;
@@ -57,6 +56,10 @@ pub use images::PathReject;
 pub use images::anchor_caption;
 pub use images::anchor_rows;
 pub use images::resolve_image_path;
+
+// The pixel-to-cell fit the row count is computed with (see `render::fit`) —
+// re-exported here because an `ImageOpts` cannot be built without a cell.
+pub use crate::render::fit::CellPixels;
 
 // Link side channel (see `links`): rendered lines + their link spans.
 pub use links::ComposedLines;
@@ -1339,6 +1342,9 @@ mod tests {
     // Image anchors (see `images`)
     // ============================================================
 
+    /// The terminal cell the anchor fixtures are laid out for (10×20 px).
+    const CELL: CellPixels = CellPixels::new(10, 20);
+
     /// A metadata table rooted at `/ws`, keyed by the resolved path.
     fn image_opts(entries: &[(&str, u32, u32)]) -> ImageOpts {
         ImageOpts::anchor(
@@ -1352,6 +1358,7 @@ mod tests {
                     )
                 })
                 .collect(),
+            CELL,
         )
     }
 
@@ -1523,8 +1530,14 @@ mod tests {
     }
 
     #[test]
-    fn anchor_rows_are_the_pure_function_of_width_and_shape() {
-        for (px_w, px_h) in [(800, 600), (1920, 1080), (400, 400), (800, 6000)] {
+    fn anchor_rows_are_the_shared_fit_of_width_shape_and_cell() {
+        for (px_w, px_h) in [
+            (800, 600),
+            (1920, 1080),
+            (400, 400),
+            (800, 6000),
+            (512, 512),
+        ] {
             let opts = image_opts(&[("plot.png", px_w, px_h)]);
             let shape = ImageShape::new(px_w, px_h);
             for width in [20u16, 40, 80, 118] {
@@ -1535,7 +1548,7 @@ mod tests {
                     .expect("anchor");
                 assert_eq!(
                     anchor.rows,
-                    crate::render::markdown::anchor_rows(width, shape),
+                    crate::render::markdown::anchor_rows(width, shape, CELL),
                     "{px_w}x{px_h} at width {width}"
                 );
                 assert_eq!(anchor.cols, width);

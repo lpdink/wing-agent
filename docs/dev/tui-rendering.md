@@ -141,19 +141,36 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 | **链接路径**（存量行为） | 模式 `Off`；或 `Anchor` 但**元数据缺失 / 路径被拒 / 图片不独占一行** | 与今天逐 span 完全相同：alt 当链接文本（远端 URL 会补 ` (url)`），点击用系统查看器打开 |
 | **锚点** | `Anchor` 且上面两条都不成立 | `rows` 行占位：第 0 行是可复制的 caption `▢ {alt 或文件名} · {W}×{H}`，其余是**覆盖行**（图片画在上面；图没画出来时它就是可见兜底） |
 
-**行数是纯函数**（`render/markdown/images.rs`）：
+**盒子 = 图的实际格数**（`render/markdown/images.rs` + `render/fit.rs`）：
 
 ```text
-rows = clamp(round(W / (CELL_ASPECT × R)), MIN_ANCHOR_ROWS, MAX_ANCHOR_ROWS)
-R            = px_w / px_h                （来自图片头，不解码）
-CELL_ASPECT  = 2.0                        （字符格 高:宽 ≈ 2:1，8×16 字体）
-MIN/MAX      = 1 / 36
-W            = markdown 渲染宽 = 单元格宽 − 2 列前缀（也就是锚点盒子的 cols）
+rows = fit_cells(px_w, px_h, (W, MAX_ANCHOR_ROWS), cell).height   ← [1, 36]
+fit_cells: 盒子(cell) × cell 像素 → 像素盒子 → min(原图像素) 夹取 → 等比装填 → ceil 到整格
+W    = markdown 渲染宽 = 单元格宽 − 2 列前缀（也就是锚点盒子的 cols）
+cell = 终端字符格像素（启动探测一次，经 ImageOpts 注入）
+MAX  = 36（装填盒子的高度；fit 不会超过自己的盒子，所以上限天然成立）
 ```
 
-`rows` **不得**依赖终端图形能力或像素查询结果：它进 `CachedCell` 的高度缓存，也进第三节的流式不变量，一旦依赖能力就会两边同时打穿。数值示例（`W=118`）：800×600 → 44 → 上限 **36**；1920×1080 → **33**；400×400 → 59 → 36；800×6000 → 442 → 36；2000×20 → **1**。
+`rows` 就是**编码器画出来的格数**：绘制通道把 `target = (cols, rows)` 交给 `ui/image/encode.rs`，
+两侧调用**同一份** `render::fit::fit_cells`（同一份数学、同一个 cell），所以「预留了几行」与「画了几格」
+不是两份公式凑巧相等，而是同一个函数。512×512 在 cell 10×20、W=140 下是 52×26 格 → 26 行（旧公式按
+「满宽假设」留 36 行，图下面空 10 行）；768×768 → 72×36；1920×1080 → 128×36。更多（`W` 与 cell 的关系、
+验收表）见 [`tui-images.md`](tui-images.md)；`cargo run -q -p wing --example render_probe -- --images
+--shape './plot.png=512x512' --cell 10x20` 可直接复现。
 
-**元数据从哪来**：渲染层零 I/O。调用方（chat view，背后是 `ui::image::ImageStore` 的头信息探测）把像素尺寸填成 `ImageOpts { mode, workspace, shapes }`，表的键 = `resolve_image_path` 的归一化产物；表里没有这条路径（未知 / 探测失败 / 不是图）就退回链接路径。
+**为什么 cell 可以进布局**：旧契约写的是「`rows` 不得依赖终端像素」，理由是高度依赖能力会同时打穿
+`CachedCell` 的高度缓存与第三节的流式不变量——但真正危险的是**不确定**，不是像素本身。修订后的契约里
+cell 是：
+（1）启动探测一次的**常量**（`ImageSupport::detect`，运行期不重探）；
+（2）`ImageOpts` 的**结构相等**字段，与 shape 元数据走同一条注入通道——探测晚到、工作区切换、内容重建
+都会以「options 变了」的形式让 `CachedCell` bump generation、丢掉缓存并重建，高度缓存与「静息态 == 参考
+渲染」两个不变量照旧成立；
+（3）**同一个对象**：`Images` 把 store 的 `ImageSupport` 里的 cell 交给渲染层，编码器用同一个 cell 编码，
+两侧不可能拿到两个终端。
+退化 cell（任一维为 0）不是布局输入：`ImageOpts::anchor` 直接返回共享的 `ImageOpts::off()`（整条锚点路径
+关闭，退回链接路径），绝不猜一个字符格宽高比（旧契约那个写死的 `CELL_ASPECT = 2.0`）。
+
+**元数据从哪来**：渲染层零 I/O。调用方（chat view，背后是 `ui::image::ImageStore` 的头信息探测）把像素尺寸填成 `ImageOpts { mode, workspace, shapes, cell }`，表的键 = `resolve_image_path` 的归一化产物；表里没有这条路径（未知 / 探测失败 / 不是图）就退回链接路径。
 
 **路径策略**（纯词法：不 stat、不 canonicalize、不解析符号链接——这是显示边界不是安全边界）：
 
@@ -176,8 +193,13 @@ W            = markdown 渲染宽 = 单元格宽 − 2 列前缀（也就是锚�
 
 ```bash
 # 单次渲染 + 锚点几何（末尾打印 line/col/cols/rows）
-cargo run -q -p wing --example render_probe -- --profile content \
-    --images --workspace . --shape './plot.png=800x600' --plain /tmp/fig.md
+# `--cell` 缺省 10x20（≈ 8×16 字体）：盒子行数随它变，见上面的公式
+cargo run -q -p wing --example render_probe -- --profile content --images \
+    --workspace . --shape './plot.png=800x600' --cell 10x20 --plain /tmp/fig.md
+
+# 小图（用户实测量：512×512 在 10×20 cell、140 列下应是 52×26 → rows=26，不是 36）
+cargo run -q -p wing --example render_probe -- --images --width 140 \
+    --workspace . --shape './plot.png=512x512' --cell 10x20 --plain /tmp/fig.md
 
 # IR 视图：锚点行是 I（payload 只占一行，覆盖行在 compose 里展开）
 cargo run -q -p wing --example render_probe -- --images --workspace . \

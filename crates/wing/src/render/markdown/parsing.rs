@@ -299,7 +299,7 @@ impl MarkdownContext<'_> {
                 alt,
                 shape,
                 cols: width,
-                rows: anchor_rows(width, shape),
+                rows: anchor_rows(width, shape, self.images.cell_pixels()),
             },
             line: line_shape(self.current_line),
         });

@@ -18,7 +18,7 @@
 | `off` / 终端无图形协议 / 探测失败 | 链接路径（`alt` 文本，点击用系统查看器打开） | `Images::new` 把两层门折叠成一个 `disabled` lane：不建 store、不读盘、不写 buffer |
 | 元数据探测中（`Unknown`） | 链接路径 | 元数据表里还没有这条路径 |
 | 元数据被拒（缺失 / 目录 / 0 字节 / >16 MiB / 超像素 / 非图 / 不可读） | 链接路径 | `Unavailable` 永不进表（`Images::sync` 只收 `Known`） |
-| 元数据已知、编码中 / 编码失败 | 锚点盒子 + caption（`▢ alt · W×H`） | 行数是元数据的纯函数，盒子先占位；**永不**空白 |
+| 元数据已知、编码中 / 编码失败 | 锚点盒子 + caption（`▢ alt · W×H`） | 行数是「形状 + cell」的纯函数（`render/fit.rs`），盒子先占位；**永不**空白 |
 | 元数据已知、重写后重探测失败 | 同上（盒子保留） | 见第四节的「退化自愈」 |
 | `Ready` | 图片覆盖盒子 | `ui::image::paint` 是那个矩形上的**最后一次写** |
 
@@ -102,7 +102,7 @@ I/O），所以由 app lane 检查：
 | 编码缓存（字节） | `DEFAULT_CACHE_BYTES` | 24 MiB | 同上（估算值 = `cells × cell 像素 × 4`；单张超预算时至少保留它自己） |
 | 元数据 memo | `MAX_META_ENTRIES` | 256 | 整表丢弃，下一帧重新探测 |
 | 失败 memo | `MAX_FAILED_ENTRIES` | 64 | 整表丢弃（按 target 尺寸记账，防 resize 风暴磨爆） |
-| 锚点行数 | `MAX_ANCHOR_ROWS`（`render/markdown/images.rs`） | 36 | 盒子封顶，图在盒内等比缩放留白 |
+| 锚点行数 | `MAX_ANCHOR_ROWS`（`render/markdown/images.rs`） | 36 | **装填盒子的高度**：`rows = fit_cells(形状, (cols, 36), cell).height`（`render/fit.rs`，与编码器同一份数学）→ 盒子就是图的实际格数，小图不留白；只有长图会顶到 36 行，此时图比盒子窄，首行右侧由 `clear_uncovered_caption` 清空 |
 | app 元数据表（`Images::known`） | 无上限（随会话引用过的**不同图片数**增长） | — | 一代内容内**只增不减**（见 [`tui-rendering.md`](tui-rendering.md) 第五节：缩表会让锚点在链接/锚点之间振荡）；内容重建（`structure_epoch`）整表清空。实测 120 张 = 120 条（`a_hundred_pictures_stay_within_the_cache_budget` 的断言） |
 
 **上限在读取处也成立**（review #135 [S1]）：`probe` 与真正解码之间隔着一个渲染周期，正是「模型重写同一
@@ -124,8 +124,8 @@ codec 打开而不是收缩声明。`tests/image_pipeline.rs::every_claimed_imag
 worker 存活、可见图全部画出。变异实验（把 LRU 上限改成永不淘汰）→ `cached: 9` 立刻红。
 
 **端到端上限**：空文件 / 非图 / 稀疏超大（`set_len(16 MiB + 1)`，探测不读一个字节）/ 缺失 → 整帧与
-`off` 基线逐 cell 相同、不多占一行；极端宽高比 1×5000（36 行档）与 8000×100（1 行档）→ 盒子等于纯函数
-给出的值、图照常画出。
+`off` 基线逐 cell 相同、不多占一行；极端宽高比 1×5000（36 行档）与 8000×100（1 行档）→ 盒子等于共享装填
+函数（`render/fit.rs::fit_cells`）给出的值、图照常画出。
 
 ## 六、失效触发点（谁让图失效）
 
@@ -148,28 +148,28 @@ worker 存活、可见图全部画出。变异实验（把 LRU 上限改成永�
 - **拖拽选择进行中 → 整帧不画图**：`FrameSnapshot` 抓的是可见行文本，占位符会污染复制内容，且选择期间
   行内容必须稳定；松开后的下一帧恢复。
 - **画之前先自检**：盒子左上角那一格必须确实是 caption 的 `▢`（行号算术漂了宁可留 caption，也不盖别人的字）。
-- 图内宽度小于盒子时（36 行上限导致的长图），盒子首行没被图覆盖的尾部清空——图拥有整个盒子。
+- 图内宽度小于盒子时（36 行上限导致的长图：图比盒子窄），盒子首行没被图覆盖的尾部清空——图拥有整个盒子。
 
 ## 八、性能（`cargo bench --bench image_frame`）
 
-本机实测（Apple silicon，release，120×60 的 band，每张图 290×20 px → 4 行盒子）：
+本机实测（Apple silicon，release，120×60 的 band，每张图 290×80 px → 4 行盒子；盒子 = 图，见第五节）：
 
 | 场景 | 均值 | 读法 |
 |---|---|---|
-| `frame/text`（8 个 cell，图片走链接路径） | **34.2 µs** | 同内容的基线：帧成本由 cell 布局与 blit 主导 |
-| `frame/pictures/1` | **8.4 µs** | 1 个 cell（1 张图） |
-| `frame/pictures/4` | **19.3 µs** | 4 个 cell（4 张图） |
-| `frame/pictures/8` | **33.5 µs** | 8 张同屏：**0.2%** 的 16 ms 帧预算 |
-| `scroll/1 · 4 · 8` | 8.5 · 19.4 · 33.9 µs | 每次滚动一行；滚动一屏（60 行）≈ 2 ms |
-| `first_encode/290x20` | **37.8 µs** | 首次编码（解码 + 协议编码 + 线程往返） |
+| `frame/text`（8 个 cell，图片走链接路径） | **35.2 µs** | 同内容的基线：帧成本由 cell 布局与 blit 主导 |
+| `frame/pictures/1` | **8.8 µs** | 1 个 cell（1 张图） |
+| `frame/pictures/4` | **20.6 µs** | 4 个 cell（4 张图） |
+| `frame/pictures/8` | **36.3 µs** | 8 张同屏：**0.23%** 的 16 ms 帧预算 |
+| `scroll/1 · 4 · 8` | 8.7 · 20.4 · 36.2 µs | 每次滚动一行；滚动一屏（60 行）≈ 2.2 ms |
+| `first_encode/290x20` | **39.1 µs** | 首次编码（解码 + 协议编码 + 线程往返） |
 | `first_encode/800x600` | **3.42 ms** | 一次重编码，用户可见为「一帧 caption」 |
-| `first_encode/1920x1080` | **9.07 ms** | 同上（1920×1080 的图） |
-| `freshness/1` | **0.89 µs** | 一次检查 1 个路径（memo 查表 + 1 次 `stat`） |
-| `freshness/8` | **7.1 µs** | 同屏 8 张图时，每秒一次 |
+| `first_encode/1920x1080` | **9.08 ms** | 同上（1920×1080 的图） |
+| `freshness/1` | **0.90 µs** | 一次检查 1 个路径（memo 查表 + 1 次 `stat`） |
+| `freshness/8` | **7.19 µs** | 同屏 8 张图时，每秒一次 |
 
-口径：bench 走 `ChatView` + `ImageStore` + `paint`（公共 API），不含 `App::draw` 里每帧一次的 `Images::observe_visible`（`pub(crate)`，进不了 bench 目标；独立探针在 debug 构建下对 8 个锚点测得 2.09 µs/帧 ≈ 261 ns/锚点，相对这张表是噪声级）。
+口径：bench 走 `ChatView` + `ImageStore` + `paint`（公共 API），不含 `App::draw` 里每帧一次的 `Images::observe_visible`（`pub(crate)`，进不了 bench 目标；独立探针在 debug 构建下对 8 个锚点测得 2.09 µs/帧 ≈ 261 ns/锚点，相对这张表是噪声级）。`frame/*` 的数字随 fixture 的盒子行数走——本表是 `290×80`（4 行盒子，盒子 = 图）的实测；盒子更小（小图）时被 blit 的格数减少，成本只会更低。
 
-结论：图片通道不是帧预算风险（8 张同屏 ≈ 33.5 µs，与同内容的链接路径基线 34.2 µs 同阶；每多一张 ≈ 3.6 µs）；
+结论：图片通道不是帧预算风险（8 张同屏 ≈ 36.3 µs，与同内容的链接路径基线 35.2 µs 同阶；每多一张 ≈ 3.5 µs）；
 真正的成本在**首次编码**（毫秒级，一次性，发生在写入之后的第一个窗口）；新鲜度检查每秒最多几微秒。
 
 ## 九、已知限制（刻意不做的）

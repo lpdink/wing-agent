@@ -52,6 +52,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use wing::config::ThemePalette;
 use wing::config::rendering::MathMode;
+use wing::render::markdown::CellPixels;
 use wing::render::markdown::ImageEntry;
 use wing::render::markdown::ImageOpts;
 use wing::render::markdown::ImageShape;
@@ -85,6 +86,10 @@ RENDER:
                             (default: the current directory)
         --shape <P>=<W>x<H> standalone-image metadata, repeatable; P is the
                             path as written in the markdown (`plot.png=800x600`)
+        --cell <W>x<H>      character cell size in pixels, the second layout
+                            input (default: 10x20, an 8x16-ish font); the
+                            anchor's rows are the picture fitted into the box
+                            at this cell, exactly as the encoder draws it
         --chunk <N>         drive the streaming engine in N-byte chunks (production path)
         --no-finalize       keep the streaming engine's live state (skip the turn-end reconcile)
         --check             after --chunk, compare the resting (and finalized) state
@@ -114,6 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut images = false;
     let mut workspace: Option<String> = None;
     let mut shapes: Vec<String> = Vec::new();
+    let mut cell: Option<CellPixels> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -145,6 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--images" => images = true,
             "--workspace" => workspace = Some(next_value(&mut args, "--workspace")?),
             "--shape" => shapes.push(next_value(&mut args, "--shape")?),
+            "--cell" => cell = Some(parse_cell(&next_value(&mut args, "--cell")?)?),
             "--chunk" => chunk = Some(next_value(&mut args, "--chunk")?.parse()?),
             "--no-finalize" => finalize = false,
             "--check" => check = true,
@@ -176,7 +183,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !shapes.is_empty() && !images {
         return Err("--shape needs --images (metadata alone anchors nothing)".into());
     }
-    let image_opts = build_image_opts(images, workspace.as_deref(), &shapes)?;
+    if cell.is_some() && !images {
+        return Err("--cell needs --images (the cell is an anchor layout input)".into());
+    }
+    let cell = cell.unwrap_or(DEFAULT_CELL);
+    let image_opts = build_image_opts(images, workspace.as_deref(), &shapes, cell)?;
 
     let text = load_text(file, jsonl, index, &field)?;
     let palette = ThemePalette {
@@ -271,6 +282,7 @@ fn build_image_opts(
     enabled: bool,
     workspace: Option<&str>,
     shapes: &[String],
+    cell: CellPixels,
 ) -> Result<ImageOpts, Box<dyn std::error::Error>> {
     if !enabled {
         return Ok(ImageOpts::default());
@@ -293,7 +305,25 @@ fn build_image_opts(
             ImageShape::new(px_w.parse()?, px_h.parse()?),
         ));
     }
-    Ok(ImageOpts::anchor(root, entries))
+    Ok(ImageOpts::anchor(root, entries, cell))
+}
+
+/// The default character cell: the 10×20 px the acceptance tables are computed
+/// for (close to the usual 8×16 font).
+const DEFAULT_CELL: CellPixels = CellPixels::new(10, 20);
+
+/// `--cell WxH`, with zero dimensions rejected: a degenerate cell is not a
+/// layout input, it switches anchors off (see `ImageOpts::anchor`), and
+/// silently rendering the link path from a typo would be a trap.
+fn parse_cell(spec: &str) -> Result<CellPixels, Box<dyn std::error::Error>> {
+    let (width, height) = spec
+        .split_once(['x', 'X'])
+        .ok_or_else(|| format!("--cell wants <W>x<H>, got {spec:?}"))?;
+    let cell = CellPixels::new(width.parse()?, height.parse()?);
+    if !cell.is_valid() {
+        return Err(format!("--cell {spec:?}: both dimensions must be non-zero").into());
+    }
+    Ok(cell)
 }
 
 /// Print the anchor geometry of the render (the ui layer's input).
