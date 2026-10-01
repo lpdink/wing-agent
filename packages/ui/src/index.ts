@@ -35,6 +35,19 @@
  * allowlist.
  */
 
+// The renderer's token sheet lives **here**, on the barrel every `.` consumer walks
+// through, and not on `mount.tsx`: the sheet is what resolves every `--wing-*` the
+// components below read, and a shell that takes components from the barrel without
+// mounting the app (the web / Electron shells; `apps/web` renders `TranscriptView`
+// directly) must still get it. While the only import sat on `mount.tsx`, bundlers
+// tree-shook that module away for such consumers and the sheet with it — every
+// `var(--wing-*)` resolved to nothing, in production builds only (`vite dev` does no
+// tree-shaking, and the VS Code webview mounts `mountApp`, so neither saw it).
+// `sideEffects: ["**/*.css"]` in package.json keeps this import alive; the
+// `tests/artifacts/consumer-build.test.ts` gate builds both consumer shapes and
+// asserts the emitted CSS carries the definitions and the rules that read them.
+import './styles/tokens.css';
+
 export * from './protocol';
 export * from './bootstrap';
 export * from './mount';
@@ -57,8 +70,11 @@ export * from './app/panels/listNav';
 export * from './chat/AskCell';
 export * from './chat/Cells';
 export * from './chat/CellView';
+export * from './chat/DisclosureRow';
 export * from './chat/FileReference';
 export * from './chat/Markdown';
+export * from './chat/ReasoningRow';
+export * from './chat/TextShimmer';
 // `interaction.ts` and the ported clipboard hook both export `useCopyFeedback`, with
 // different shapes: the renderer's returns the `[copied, report]` tuple its cells
 // drive after the host acknowledged a copy, the card hook owns the clipboard write.
@@ -80,6 +96,12 @@ export * from './chat/markdown/parse';
 // the transcript); the renderer's version stays reachable as `MarkdownCodeBlock`.
 export { CodeBlock as MarkdownCodeBlock, MarkdownNodes } from './chat/markdown/render';
 export * from './chat/markdown/split';
+export * from './ask/ApprovalPanel';
+export * from './ask/QuestionComposer';
+export * from './ask/QuestionReplyView';
+export * from './ask/question-reply';
+export * from './components/Button';
+export * from './components/ConnectionIndicator';
 export * from './components/Pill';
 export * from './components/StateDot';
 export * from './icons';

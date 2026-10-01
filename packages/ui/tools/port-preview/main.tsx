@@ -1,20 +1,37 @@
-// Preview harness for the 06b ports (dev-only; not part of any product build).
+// Preview harness for the ported cards (dev-only; not part of any product build).
 //
-// Renders `CodeBlock` / `CodeToolbar`, `TerminalBlock` and `DiffBlock` — plus a
-// little chrome so light/dark can both be screenshotted — against fake data. The
-// imports reach into `src/` by path on purpose: this page lives inside the package
-// and is not a consumer contract.
+// Renders batch 06b (`CodeBlock` / `CodeToolbar`, `TerminalBlock`, `DiffBlock`) and
+// batch 06c (the process rows, the ask trio, the connection indicator, the atoms) —
+// plus a little chrome so light/dark can both be screenshotted — against fake data.
+//
+// The 06b cards still import their sources by path (they live inside the package and
+// are not a consumer contract); the 06c components come from the **barrel**
+// (`../../src/index`) on purpose: that is how a real shell consumes them, so this
+// page's build is itself evidence that the barrel carries the token sheet (the
+// 06c root cause: a component-only consumer used to lose every `--wing-*` in a
+// production build). Nothing here imports `styles/tokens.css` directly — the barrel
+// provides it, exactly like it does for `apps/web`.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
-import type { DiffCellModel } from '@wing-agent/session';
+import type { AskAnswerModel, AskQuestionModel, DiffCellModel } from '@wing-agent/session';
 
 import { CodeBlock } from '../../src/markdown/CodeBlock';
 import { DiffBlock } from '../../src/tool/DiffBlock';
 import { TerminalBlock } from '../../src/tool/TerminalBlock';
 import type { DiffBlockLabels } from '../../src/tool/DiffBlock';
 import type { TerminalBlockLabels } from '../../src/tool/TerminalBlock';
+import {
+  ApprovalPanel,
+  ConnectionIndicator,
+  DisclosureRow,
+  QuestionComposer,
+  QuestionReplyView,
+  ReasoningRow,
+  StateDot,
+  TextShimmer,
+} from '../../src/index';
 
 import '../../src/styles/design-platform.css';
 import '../../src/styles/base.css';
@@ -123,6 +140,43 @@ const DIFF_CELL: DiffCellModel = {
   ],
 };
 
+const ASK_QUESTIONS: readonly AskQuestionModel[] = [
+  {
+    id: 'database',
+    header: 'Database',
+    question: 'Which database should the service use in production?',
+    multiSelect: false,
+    required: false,
+    options: [
+      { label: 'Postgres (recommended)', description: 'Managed by the platform team' },
+      { label: 'SQLite', description: 'Single file, no server process' },
+      { label: 'DynamoDB', description: 'Serverless, per-request pricing' },
+    ],
+  },
+  {
+    id: 'extras',
+    header: 'Extras',
+    question: 'Which of these should I wire up as well?',
+    multiSelect: true,
+    required: false,
+    options: [
+      { label: 'Metrics', description: 'Prometheus counters' },
+      { label: 'Tracing', description: 'OpenTelemetry spans' },
+    ],
+  },
+];
+
+const ASK_ANSWERS: readonly AskAnswerModel[] = [
+  { questionId: 'database', selected: ['Postgres (recommended)'], text: '' },
+  { questionId: 'extras', selected: ['Metrics'], text: 'and the dashboards' },
+];
+
+const REASONING_TEXT = `The user is asking for a preview page for the ported rows. I should
+render the same components the transcript will use, with the same token tables.
+
+Settled reasoning keeps only its first line beside the title, so this paragraph is
+what a reader sees without expanding the row.`;
+
 const WINDOWED_DIFF_CELL: DiffCellModel = {
   ...DIFF_CELL,
   id: 'diff-2',
@@ -138,10 +192,14 @@ const WINDOWED_DIFF_CELL: DiffCellModel = {
   })),
 };
 
+/** `?section=<id>` renders one section only, so a capture is deterministic. */
+const ONLY_SECTION = new URLSearchParams(location.search).get('section');
+
 function Section({ id, title, children }: { id: string; title: string; children: React.ReactNode }) {
+  if (ONLY_SECTION !== null && ONLY_SECTION !== id) return null;
   return (
-    // The id is a screenshot affordance: `#diff` scrolls the section into view for
-    // a headless capture of one card at a time.
+    // The id is a screenshot/documentation affordance: `?section=diff` narrows the
+    // page to one card so a headless capture of it is reproducible.
     <section className="section" id={id}>
       <h2>{title}</h2>
       {children}
@@ -150,6 +208,13 @@ function Section({ id, title, children }: { id: string; title: string; children:
 }
 
 function App() {
+  // Screenshot affordance: the second reply bubble is opened once so one capture
+  // shows both its collapsed and expanded shapes. Harness chrome only — nothing in
+  // the package does this.
+  useEffect(() => {
+    document.querySelector('.expandTarget button')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  }, []);
+
   const [dark, setDark] = useState(
     () =>
       document.documentElement.dataset.bootDark === 'true' ||
@@ -160,8 +225,8 @@ function App() {
   return (
     <div className="page">
       <header className="topbar">
-        <strong>06b port preview</strong>
-        <span className="hint">CodeBlock · CodeToolbar · TerminalBlock · DiffBlock</span>
+        <strong>port preview</strong>
+        <span className="hint">06b cards · 06c rows · ask · connection</span>
         <button
           type="button"
           className="themeButton"
@@ -216,6 +281,106 @@ function App() {
       <Section id="diff" title="DiffBlock (host-windowed rows, counters, wrap, copy)">
         <DiffBlock cell={DIFF_CELL} labels={DIFF_LABELS} />
         <DiffBlock cell={WINDOWED_DIFF_CELL} labels={DIFF_LABELS} />
+      </Section>
+
+      <Section id="rows" title="Process rows (DisclosureRow · TextShimmer · ReasoningRow)">
+        <div className="rowStack">
+          <DisclosureRow
+            icon={<StateDot state="ongoing" />}
+            title="Bash"
+            open={false}
+            expandable
+            expandOnRowClick={false}
+            running
+            onToggle={() => {}}
+          />
+          <DisclosureRow
+            icon={<StateDot state="done" />}
+            title="Read src/ui/chat_view/cell.rs"
+            open={false}
+            expandable
+            expandOnRowClick={false}
+            onToggle={() => {}}
+          />
+          <DisclosureRow
+            icon={<StateDot state="warning" />}
+            title="Write outside the workspace"
+            open
+            expandable
+            expandOnRowClick
+            onToggle={() => {}}
+          >
+            <div className="rowBody">
+              The sticky header stays reachable while an uncapped body scrolls with the conversation.
+            </div>
+          </DisclosureRow>
+          <p className="shimmerLine">
+            <TextShimmer>Idle text</TextShimmer>
+            {' · '}
+            <TextShimmer active>Running text</TextShimmer>
+          </p>
+        </div>
+        <ReasoningRow text={REASONING_TEXT} streaming collapseKey="preview-streaming" />
+        <ReasoningRow
+          text={REASONING_TEXT}
+          streaming={false}
+          durationMs={4200}
+          collapseKey="preview-settled"
+        />
+        <ReasoningRow text={REASONING_TEXT} streaming={false} durationMs={null} previewEnabled={false} />
+      </Section>
+
+      <Section id="ask" title="Ask (ApprovalPanel · QuestionComposer · QuestionReplyView)">
+        <ApprovalPanel
+          requestId="toolu_preview"
+          toolName="Bash"
+          detail={<code>rm -rf build/ &amp;&amp; pnpm --filter @wing-agent/ui build</code>}
+          state="awaiting"
+          onDecide={() => {}}
+        />
+        <ApprovalPanel requestId="toolu_settled" toolName="Bash" state="answered" onDecide={() => {}} />
+        <QuestionComposer
+          requestId="ask-preview"
+          questions={ASK_QUESTIONS}
+          state="awaiting"
+          onSubmit={() => {}}
+        />
+        <QuestionReplyView questions={ASK_QUESTIONS} answers={ASK_ANSWERS} time={0} />
+        <div className="expandTarget">
+          <QuestionReplyView questions={ASK_QUESTIONS} answers={ASK_ANSWERS} time={0} />
+        </div>
+      </Section>
+
+      <Section id="connection" title="ConnectionIndicator (connecting · disconnected · recovered)">
+        <div className="rowStack rowStackInline">
+          <ConnectionIndicator
+            state="connecting"
+            disconnectedLabel="Disconnected — click to retry"
+            connectingLabel="Reconnecting"
+            recoveredLabel="Reconnected"
+            reconnectActionLabel="Reconnect now"
+            restartActionLabel="Restart the attempt"
+            onReconnect={() => {}}
+          />
+          <ConnectionIndicator
+            state="disconnected"
+            disconnectedLabel="Disconnected — click to retry"
+            connectingLabel="Reconnecting"
+            recoveredLabel="Reconnected"
+            reconnectActionLabel="Reconnect now"
+            restartActionLabel="Restart the attempt"
+            onReconnect={() => {}}
+          />
+          <ConnectionIndicator
+            state="recovered"
+            disconnectedLabel="Disconnected — click to retry"
+            connectingLabel="Reconnecting"
+            recoveredLabel="Reconnected"
+            reconnectActionLabel="Reconnect now"
+            restartActionLabel="Restart the attempt"
+            onReconnect={() => {}}
+          />
+        </div>
       </Section>
     </div>
   );

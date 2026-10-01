@@ -16,9 +16,11 @@
     "./testing": "./src/testing/index.ts",
     "./styles/*": "./src/styles/*"
   },
-  "//sideEffects": "`false` would let a bundler drop the stylesheet imports (CSS is the one import-time effect in this package — every other module only defines types, constants and functions), so the entry names CSS explicitly: consumers can still tree-shake unused components, and `import './styles/*.css'` survives. Verified by the extension's webview bundle artifact test (it reads the emitted `main.css`).",
+  "//sideEffects": "`false` would let a bundler drop the stylesheet imports (CSS is the one import-time effect in this package — every other module only defines types, constants and functions), so the entry names CSS explicitly: consumers can still tree-shake unused components, and `import './styles/*.css'` survives. The barrel (`src/index.ts`) is listed beside the sheets because listing only `**/*.css` declares every *JavaScript* module pure, and Vite 8 / Rolldown then drops a side-effect-only CSS import inside a module that is included merely for its exports — which is exactly what the barrel is for its consumers (`import { TranscriptView } from '@wing-agent/ui'`): the token sheet vanished from production builds while `vite dev` and the webview's `mountApp` path kept it. Any module that gains a plain-sheet import belongs on this list; `tests/artifacts/consumer-build.test.ts` builds the two consumer shapes and goes red if it is missing.",
+  "//sideEffects-mechanism": "Measured with the repository's Vite 8.3.1 (Rolldown 1.2): with `sideEffects: [\"**/*.css\"]`, a module like `src/index.ts` importing `./styles/tokens.css` only keeps the sheet when the CSS import sits in the *entry* module; from any transitively imported module it is dropped. Adding `**/src/index.ts` to this list restores it, and `true`/no-field would too — at the cost of declaring the whole package effectful.",
   "sideEffects": [
-    "**/*.css"
+    "**/*.css",
+    "**/src/index.ts"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.dom.json && tsc --noEmit -p tsconfig.node-probe.json",

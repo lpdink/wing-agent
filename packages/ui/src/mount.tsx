@@ -7,7 +7,6 @@ import { App } from './app/App';
 import { setBridgeController } from './bridge/channel';
 import { createBridgeController } from './bridge/controller';
 import { appStore, resetAppStore } from './state/appStore';
-import './styles/tokens.css';
 
 /**
  * Mounts the app against a transport.
@@ -16,6 +15,11 @@ import './styles/tokens.css';
  * `WebviewTransport` (the VS Code webview channel in the extension's `main.tsx`, a
  * scripted host in the preview harness and in tests, whatever the web/Electron
  * shells bring next) — so every consumer runs literally the same app.
+ *
+ * The token sheet is loaded by the package barrel (`src/index.ts`), **not** here:
+ * this module is only reachable through `mountApp`, and a shell that takes
+ * components from the barrel without mounting the app still needs the sheet — see
+ * the note on the barrel's `import './styles/tokens.css'`.
  */
 
 export interface MountOptions {

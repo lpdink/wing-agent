@@ -2,7 +2,7 @@
  * Portions from DeepSeek Harness (https://github.com/deepseek-ai/deepseek-harness),
  * Copyright (c) 2026 DeepSeek, licensed under the MIT License (see THIRD_PARTY_NOTICES.md).
  * Source: packages/client/ui-theme/src/styles/base.css
- * Modified for Wing: the two markdown/UI font size aliases the ported components read (`--dsw-font-markdown-code-block`, `--dsw-font-xs-13`) are supplied here — upstream they live in `ui-theme/src/styles/gradient-shadow-text.css`, which this batch does not port.
+ * Modified for Wing: the two markdown/UI font size aliases the ported components read (`--dsw-font-markdown-code-block`, `--dsw-font-xs-13`) are supplied here — upstream they live in `ui-theme/src/styles/gradient-shadow-text.css`, which this batch does not port. Port batch 06c adds the `--dsh-content-font-*` content-size axis and the `--dsh-composer-*` / `--dsh-chat-content-width` seat variables from the same upstream sheet and from `ui-conversation/.../ConversationRoot.module.css`, which the 06c disclosure/reasoning/ask sheets read.
  */
 /* Base variables referenced by the token sheets and component CSS but defined
  * upstream (deepsuite theme/global.css) — supplied here so the composite
@@ -38,6 +38,29 @@
 body {
   --dsw-alias-settings-card-fill: var(--dsw-alias-bg-layer-2);
   --dsw-alias-settings-card-stroke: var(--dsw-alias-border-l4);
+
+  /* The content-size axis of the chat surface (upstream:
+     ui-theme/src/styles/gradient-shadow-text.css:56-59, declared on `body` so the
+     derived lengths recompute wherever the shell sets the integer content size —
+     Wing's shells use 14px, which is also the fallback here). Secondaries sit one
+     step under the body size through 14px, then two: 14→13, 15→13, 22→20.
+     `max(13px, …)` selects the delta, not a font-size floor. Port batch 06c reads
+     these in the disclosure/reasoning/ask sheets. */
+  --dsh-content-font-delta: calc(var(--dsh-content-font-size, 14px) - 14px);
+  --dsh-content-font-size-secondary: min(
+    calc(var(--dsh-content-font-size, 14px) - 1px),
+    max(13px, calc(var(--dsh-content-font-size, 14px) - 2px))
+  );
+  --dsh-content-font-delta-secondary: calc(var(--dsh-content-font-size-secondary) - 13px);
+
+  /* The composer/takeover width axis (upstream:
+     ui-conversation/.../ConversationRoot.module.css:355-395 — the seat publishes
+     the shared width and the viewport cap for the panels that sit in it). The
+     ported ask card reads them; a shell that owns a different column rebinds them
+     on its own seat. */
+  --dsh-chat-content-width: min(calc(100% - 32px), 920px);
+  --dsh-composer-side-clearance: 16px;
+  --dsh-composer-text-max-height: 336px;
 }
 
 [data-dsh-automatic-focus]:focus,

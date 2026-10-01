@@ -5,7 +5,9 @@
  * Modified for Wing: the brand family is renamed `--dsw-static-wing-*` and carries Wing's
  * own blue ramp (the welcome gull's navy #1B2338 / slate #3A4763 plus a sky-blue ladder);
  * the light `--dsw-alias-brand-primary-new-colorprimary-new-color` literal now points at
- * that family. Every other static and alias token is unchanged.
+ * that family. Every other static and alias token is unchanged. Port batch 06c appends
+ * the elevation trio (`--dsw-shadow-lv2`, `--dsw-elevation-stroke`, `--dsw-elevation-panel`)
+ * from `gradient-shadow-text.css:5-34`, which the port does not carry as a sheet.
  */
 /* Figma font-weight 510 (an SF Pro variable-font weight) always renders as
    font-weight: 500 in this UI — non-variable webfonts snap intermediate
@@ -430,4 +432,27 @@ html[data-platform='darwin'] body {
 
 html[data-platform='darwin'] body[data-ds-dark-theme] {
   --dsw-specific-menu: rgba(48, 49, 54, 0.94);
+}
+
+/* Elevation trio (port batch 06c): upstream declares these in
+ * ui-theme/src/styles/gradient-shadow-text.css:5-34, which this port does not
+ * carry; the panels ported by 06c (approval card, ask card) read them. Values
+ * verbatim from upstream, including the dark-theme stroke override. */
+body {
+  --dsw-shadow-lv2: 0 4px 12px 0 rgba(0, 0, 0, 0.02), 0 2px 8px 0 rgba(0, 0, 0, 0.04);
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l4);
+}
+
+body[data-ds-dark-theme] {
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l3);
+}
+
+/* The derived elevation values are redeclared per element (upstream comment:
+   inheriting the already-substituted value from `body` would keep a surface's
+   own stroke rebinding from reaching `var(--dsw-elevation-*)`). */
+body,
+body * {
+  --dsw-elevation-stroke: 0 0 0 0.5px var(--dsw-elevation-stroke-color);
+  --dsw-elevation-panel:
+    var(--dsw-elevation-stroke), 0 3px 8px 0 rgba(0, 0, 0, 0.03), 0 0 16px 0 rgba(0, 0, 0, 0.02);
 }

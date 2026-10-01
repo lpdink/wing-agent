@@ -12,9 +12,10 @@ Portions of this software are derived from DeepSeek Harness
 (https://github.com/deepseek-ai/deepseek-harness), Copyright (c) 2026 DeepSeek,
 and are used under the MIT License.
 
-All derived files live in `packages/ui` (step 06b of the wing-app work: theme
-tokens, code cards, terminal output and diffs). Each derived file carries a
-header naming its source path and the modifications made for Wing.
+All derived files live in `packages/ui` (steps 06b and 06c of the wing-app work:
+theme tokens, code cards, terminal output, diffs, the process rows, the ask trio
+and the shared atoms). Each derived file carries a header naming its source path
+and the modifications made for Wing.
 
 ### Derived source files
 
@@ -25,11 +26,19 @@ Theme token sheets — `packages/ui/src/styles/` (from
   is renamed `--dsw-static-wing-*` and carries Wing's own blue ramp (the welcome
   gull's navy `#1B2338` / slate `#3A4763` plus a sky-blue ladder); the light
   `--dsw-alias-brand-primary-new-colorprimary-new-color` literal now points at
-  that family.
+  that family. Port batch 06c appends the elevation trio
+  (`--dsw-shadow-lv2`, `--dsw-elevation-stroke`, `--dsw-elevation-panel`) from
+  `ui-theme/src/styles/gradient-shadow-text.css:5-34`, which the port does not
+  carry as a sheet and the ported approval/ask cards read.
 - `base.css` — modified: the two font aliases the ported components read
   (`--dsw-font-markdown-code-block`, `--dsw-font-xs-13`) are supplied here, since
   the upstream sheet that defines them (`gradient-shadow-text.css`) is not part
-  of this port.
+  of this port. Port batch 06c adds the content-size axis
+  (`--dsh-content-font-delta`, `--dsh-content-font-size-secondary`,
+  `--dsh-content-font-delta-secondary`, from the same sheet) and the seat widths
+  the ported ask card reads (`--dsh-chat-content-width`,
+  `--dsh-composer-side-clearance`, `--dsh-composer-text-max-height`, from
+  `ui-conversation/.../ConversationRoot.module.css`).
 - `scrollbar.css`, `focus.css`, `shiki.css` — copied unchanged (the
   `data-input-modality` rule in `focus.css` is inert until an input-modality port
   lands, and is kept so the behaviour is not silently dropped when it does).
@@ -98,6 +107,90 @@ Tests (kept in-repo as the port's regression suite) — `packages/ui/tests/`:
   components take copy via props rather than a locale), the diff fixtures are
   `DiffCellModel`s rather than before/after text, and the streaming-highlight
   cases are not ported (the streaming session itself is not).
+
+### Derived source files — port batch 06c (process rows, ask trio, connection indicator)
+
+Process rows — `packages/ui/src/chat/`:
+
+- `DisclosureRow.tsx` (+ `DisclosureRow.module.css`) — from
+  `packages/client/ui-primitives/src/`. Modified: the chevrons come from this
+  package's `icons` module instead of the upstream primitives barrel; markup and
+  behaviour are unchanged.
+- `TextShimmer.tsx` (+ `TextShimmer.module.css`) — from
+  `packages/client/ui-primitives/src/`. Modified: `inert` is written as the
+  React 19 boolean attribute (the upstream `{...{ inert: '' }}` spread is the
+  React 18 spelling of the same thing).
+- `ReasoningRow.tsx` (+ `ReasoningRow.module.css`, `accessibility.module.css`)
+  — from `packages/client/ui-chat/src/client/chat/`. Modified: the expanded body
+  renders this package's `MarkdownStream` (the upstream `MarkdownText` belongs
+  to a markdown pipeline this port does not ship); the host slot contract
+  (`useDisclosure` / `usePresentation` / `t()`) is replaced by local or
+  remembered disclosure state, a `previewEnabled` prop and label props.
+
+Ask — `packages/ui/src/ask/`:
+
+- `ApprovalPanel.tsx` (+ `ApprovalPanel.module.css`) — from
+  `packages/client/ui-approval/src/client/`. Modified: the slot/carrier contract
+  (`renderSlot`, `matched`, `pending.answer`, the promise rollback) is replaced
+  by plain props (`detail` is a `ReactNode`, decisions go through `onDecide`),
+  and the copy is a label prop.
+- `QuestionComposer.tsx` (+ `QuestionComposer.module.css`) — from
+  `packages/client/ui-user-questions/src/client/`. Modified: the draft store,
+  the countdown/wait channel, the plan-review takeover, minimize/close and the
+  markdown `detail` are not ported; the per-question cards, the progress pager,
+  single/multi select, the `(recommended)` suffix, the free-form text with IME
+  protection and the submit-time completeness check are, over this package's
+  `AskQuestionModel`.
+- `QuestionReplyView.tsx` (+ `QuestionReplyView.module.css`) — from
+  `packages/client/ui-user-questions/src/client/`. Modified: the slot contract
+  and the locale seat are replaced by props over `AskQuestionModel` /
+  `AskAnswerModel`; the copy control writes the clipboard through this
+  package's clipboard helper; the details hairline is a static token instead of
+  a `color-mix()` (the package's colour gate rejects mix functions; the visual
+  delta is reviewed in the preview screenshots).
+- `question-reply.ts` — from
+  `packages/client/ui-user-questions/src/client/question-reply.ts`. Modified:
+  trimmed to the two pure projections over this package's answer model
+  (`replyAnswerValues`, `replyClipboardText`); the upstream session projection
+  belongs to a runtime this repository does not have, and `t()` is replaced by
+  a labels argument.
+
+Atoms — `packages/ui/src/components/`:
+
+- `Button.tsx` (+ `Button.module.css`) — from
+  `packages/client/ui-primitives/src/`. Modified: unchanged (the `forwardRef`
+  wrapper is kept verbatim; React 19 accepts it).
+- `ConnectionIndicator.tsx` (+ `ConnectionIndicator.module.css`) — from
+  `packages/client/ui-primitives/src/`. Modified: the icons come from this
+  package's `icons` module and the three `color-mix()` hairlines are rewritten
+  onto the nearest static tokens (same colour gate as above); the state/label/
+  reconnect props are unchanged.
+- `icons/index.tsx` (extended) — the same extraction as batch 06b, plus the
+  eight glyphs batch 06c draws (`IconChevronDown/Up/Left/Right`,
+  `IconCloseOutlineRegular`, `IconRefreshOutlineRegular`,
+  `IconEditOutlineRegular`, `IconThinkOutlineRegular`).
+
+Ask/row/atom tests — `packages/ui/tests/`:
+
+- `tests/chat/rows.test.tsx` — from
+  `packages/client/ui-primitives/tests/text-shimmer.client.spec.tsx` and
+  `disclosure-row-styles.client.spec.ts`.
+- `tests/chat/reasoning-row.test.tsx` — from
+  `packages/client/ui-chat/tests/reasoning-row.client.spec.tsx`.
+- `tests/ask/approval-panel.test.tsx` — from `packages/client/ui-approval/tests/`.
+- `tests/ask/question-composer.test.tsx` — from
+  `packages/client/ui-user-questions/tests/question-composer.client.spec.tsx`.
+- `tests/ask/question-reply.test.tsx`, `tests/ask/question-reply.test.ts` —
+  from `packages/client/ui-user-questions/src/client/QuestionReplyView.tsx` and
+  `question-reply.ts` (the trimmed projections' contract).
+- `tests/components/button.test.tsx` — from
+  `packages/client/ui-primitives/tests/atoms.client.spec.tsx` (button cases).
+- `tests/components/connection-indicator.test.tsx` — from
+  `packages/client/ui-primitives/src/ConnectionIndicator.tsx` (the component's
+  own contract: three states, the reconnect sink, the exit transition).
+  Modified (all of the above): rendered through `@wing-agent/ui`'s barrel, the
+  shell-side state mapping and slot contracts are replaced by the props this
+  package ships, and the locale fixtures are English label constants.
 
 ### MIT License
 
