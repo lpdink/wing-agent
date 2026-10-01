@@ -132,10 +132,12 @@ mod tests {
 
     #[test]
     fn sweep_brightens_the_band() {
+        // 口径必须是**求和**：单行最大 luma 恒真是因为渐变亮端（第 0 列）本来
+        // 就是全行最亮，光带中心追不上它 —— 那样扫光坏了测试也不会红。
         let accent = (34, 211, 238);
         let settled = lines(None, accent, false);
         let swept = lines(Some(0.5), accent, false);
-        let luma = |line: &Line<'_>| {
+        let total = |line: &Line<'_>| -> u32 {
             line.spans
                 .iter()
                 .filter_map(|s| s.style.fg)
@@ -143,13 +145,16 @@ mod tests {
                     Color::Rgb(r, g, b) => r as u32 + g as u32 + b as u32,
                     _ => 0,
                 })
-                .max()
-                .unwrap_or(0)
+                .sum()
         };
-        assert!(
-            luma(&swept[0]) >= luma(&settled[0]),
-            "扫光经过时至少不比定格暗"
-        );
+        for row in 0..settled.len() {
+            assert!(
+                total(&swept[row]) > total(&settled[row]),
+                "第 {row} 行：光带扫过时整行应当更亮（{} vs {}）",
+                total(&swept[row]),
+                total(&settled[row])
+            );
+        }
     }
 
     #[test]

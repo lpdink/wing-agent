@@ -1071,10 +1071,13 @@ pub async fn run_app(
                     app.input_dirty = true;
                 }
             }
-            // Welcome sweep: repaint the header at the animation's own cadence
-            // (the 100 ms system tick is too coarse for it) until it settles —
-            // then the arm parks. chat_dirty (not input_dirty): the frame gate
-            // may coalesce it, and no key is waiting on this frame.
+            // Welcome: repaint the header at the animation's own cadence (the
+            // 100 ms system tick is too coarse). While the block is in view the
+            // arm keeps waking — the opening sweep ticks per frame (~25 fps),
+            // then the idle loop wakes on each action deadline (~0.3-0.5/s).
+            // It parks only when the header scrolls out of view (next_frame
+            // returns None). chat_dirty (not input_dirty): the frame gate may
+            // coalesce it, and no key is waiting on this frame.
             _ = welcome_sweep_tick(app.welcome.as_ref().and_then(|w| {
                 w.next_frame(
                     std::time::Instant::now(),

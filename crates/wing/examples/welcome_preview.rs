@@ -125,8 +125,13 @@ fn draw(width: u16, phase: Option<f32>, working: bool, ms: u64, plain: bool, out
     let palette = ThemePalette::default();
     let started = Instant::now();
     let mut welcome = Welcome::new(2, started);
-    let sweep_ms = phase.map_or(SWEEP_MS + 1, |p| (p * SWEEP_MS as f32) as u64);
-    let now = started + Duration::from_millis(sweep_ms.max(ms));
+    // 不给 `--phase` 就是"已定格"：此刻直接按 `--ms` 取帧（早先这里固定钳到
+    // SWEEP_MS + 1，于是 2400ms 之前的帧根本打不出来，标签还显示原值）。
+    let at = match phase {
+        Some(p) => ((p * SWEEP_MS as f32) as u64).max(ms),
+        None => ms,
+    };
+    let now = started + Duration::from_millis(at);
     let lines = welcome.build(&palette, width, now, working, true);
 
     let label = match phase {

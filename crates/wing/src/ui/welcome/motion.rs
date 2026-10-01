@@ -324,7 +324,11 @@ impl Motion {
             .blink
             .next_due(BLINK_SEQ)
             .min(self.flutter.next_due(FLUTTER_SEQ))
-            .min(self.hop.next_due(HOP_SEQ));
+            .min(self.hop.next_due(HOP_SEQ))
+            // 呼吸是常驻平面，必须自己进 tick 源：否则它只在别的动作族到点时被
+            // 「采样」——整轮呼吸会被凭空跳过，或者抬起后挂到下一个无关 deadline
+            // （实测显示时长 110ms~2.8s，设计值 320ms）。
+            .min(self.breath.next_due(BREATH_SEQ));
         if self.land_until > 0 {
             due = due.min(self.land_until);
         }
@@ -378,19 +382,24 @@ mod tests {
     #[test]
     fn blink_fires_and_clears() {
         let mut m = Motion::new(0, 7);
-        let due = m.next_due(false);
-        m.advance(due, false);
-        // 呼吸是常驻平面，lift 随时可能是 1 —— 这里只钉眨眼这一族。
-        assert!(
-            matches!(
-                m.pose(due, false),
+        // 第一个 deadline 可能属于更密的呼吸平面 —— 一路推到真眨眼为止。
+        let mut now = 0u64;
+        let mut blinked_at = None;
+        while now < 12_000 {
+            now = m.next_due(false);
+            m.advance(now, false);
+            if matches!(
+                m.pose(now, false),
                 Pose::Perched {
                     frame: PerchedFrame::Blink,
                     ..
                 }
-            ),
-            "到点闭眼"
-        );
+            ) {
+                blinked_at = Some(now);
+                break;
+            }
+        }
+        let due = blinked_at.expect("12s 内必须眨一次眼");
         let after = due + BLINK_HOLD_MS + 1;
         m.advance(after, false);
         assert!(
@@ -491,6 +500,33 @@ mod tests {
                 lift: 0
             }
         );
+    }
+
+    #[test]
+    fn breath_produces_its_own_ticks() {
+        // 判别式：**相邻 deadline 的最大间隔**。呼吸是最密的平面
+        // （gap 1500~2300 + 两拍 hold 320），它若不在 tick 源里，间隔会跳到
+        // 眨眼 / 抖翅 / 跳的 4~12 秒量级。
+        const MAX_GAP: u64 = BREATH_GAP_MS + BREATH_GAP_JITTER_MS + BREATH_HOLD_MS * 2;
+        let mut m = Motion::new(0, 11);
+        let mut now = 0u64;
+        let mut worst = 0u64;
+        let mut lifts = 0u32;
+        while now < 30_000 {
+            let due = m.next_due(false);
+            assert!(due > now, "deadline 必须严格前进");
+            worst = worst.max(due - now);
+            now = due;
+            m.advance(now, false);
+            if matches!(m.pose(now, false), Pose::Perched { lift, .. } if lift > 0) {
+                lifts += 1;
+            }
+        }
+        assert!(
+            worst <= MAX_GAP,
+            "相邻 deadline 最长 {worst}ms > 呼吸节奏 {MAX_GAP}ms：呼吸没进 tick 源"
+        );
+        assert!(lifts >= 4, "30s 内至少该看到几次呼吸，实际 {lifts}");
     }
 
     #[test]

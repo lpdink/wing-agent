@@ -56,8 +56,19 @@ use motion::Pose;
 /// 开屏扫光时长：扫完永久定格（之后不再为它重建 / 重绘）。
 pub const SWEEP_MS: u64 = 2_400;
 
+/// 扫光帧间隔（≈25fps）。
+///
+/// 扫光期必须**逐帧**排 tick：空闲会话没有别的重绘驱动（100ms 的系统 tick 只在
+/// 干活时才画），而待机的动作 deadline 下界是 `BLINK_GAP_MS = 2600 > SWEEP_MS`
+/// —— 只按动作 deadline 排的话，2.4s 窗口里一次都不会醒，光带从头到尾不出现。
+const FRAME_MS: u64 = 40;
+
 /// 海鸥在 header 里占的终端行数（两个姿态对齐到同一高度，切换不跳版）。
-const ART_TERM_ROWS: usize = 12;
+const ART_TERM_ROWS: usize = 13;
+
+/// 站姿在盒子里默认下移的像素行 —— 头顶余量：抬升（呼吸 / 跳）把整帧上移，
+/// 没有余量就会裁掉头冠的像素行，读起来像被压扁而不是跳起来。
+const PERCHED_TOP_PAD: usize = 2;
 
 /// 海鸥与右侧文字列之间的空列数。
 const ART_GAP: usize = 3;
@@ -69,8 +80,15 @@ const ART_COLS: usize = if PERCHED_IDLE_COLS > FLY_0_COLS {
     FLY_0_COLS
 };
 
-/// 整块布局需要的最小列数：海鸥 + 间隔 + 文字列（最宽一行约 42 列）。
-const FULL_MIN: u16 = (ART_COLS + ART_GAP + 42) as u16;
+/// 整块布局需要的最小列数：海鸥 + 间隔 + 文字预算。
+///
+/// 文字预算刻意压得比"最长一行"窄 —— 键位 / tip / 入口行允许省略，海鸥不能让
+/// 出去：`App::draw` 传进来的是**内容宽**（终端宽减滚动条 gutter 2），这条线要
+/// 让 80 列（多数终端的默认宽）也落在整块档里。
+const FULL_MIN: u16 = (ART_COLS + ART_GAP + TEXT_MIN) as u16;
+
+/// 整块档里右列的文字预算（列）。最长的键位行约 40 列，超出按显示宽度省略。
+const TEXT_MIN: usize = 34;
 
 /// 文字列布局需要的最小列数（再窄就只剩一行 wordmark）。
 const COMPACT_MIN: u16 = 40;
@@ -196,7 +214,9 @@ impl Welcome {
         let ms = self.ms(now);
         let mut due = self.motion.next_due(working);
         if self.sweeping(now) {
-            due = due.min(SWEEP_MS);
+            // 扫光按帧节奏走，并且不越过扫光结束点。
+            let frame = (ms / FRAME_MS + 1) * FRAME_MS;
+            due = due.min(frame.min(SWEEP_MS));
         }
         // 至少往前 1ms：deadline 落在过去会让 select 臂空转。
         Some(self.epoch + Duration::from_millis(due.max(ms.saturating_add(1))))
@@ -274,7 +294,7 @@ impl Welcome {
 
 /// 这一帧的海鸥：姿态 → 字母网格 + 竖直偏移，统一补到 [`ART_TERM_ROWS`] 行。
 fn gull_lines(pose: Pose, accent: sprite::Rgb) -> Vec<Line<'static>> {
-    let (grid, shift, pad_top) = match pose {
+    match pose {
         Pose::Perched { frame, lift } => {
             let grid = match frame {
                 PerchedFrame::Idle => PERCHED_IDLE,
@@ -282,8 +302,18 @@ fn gull_lines(pose: Pose, accent: sprite::Rgb) -> Vec<Line<'static>> {
                 PerchedFrame::Flutter1 => PERCHED_FLUTTER1,
                 PerchedFrame::Flutter2 => PERCHED_FLUTTER2,
             };
-            // lift：0 站定 / 1 呼吸（半格）/ 2 跳起（一格）。
-            (grid, -(lift as i32), 0)
+            // 头顶先补透明行再抬升（lift 0 站定 / 1 呼吸半格 / 2 跳起一格）：
+            // 余量在网格里，抬升因此不裁头冠。
+            let mut padded: Vec<&str> = vec![""; PERCHED_TOP_PAD];
+            padded.extend_from_slice(grid);
+            let rows = padded.len().div_ceil(2);
+            sprite::lines_padded(
+                &padded,
+                accent,
+                -(lift as i32),
+                ART_TERM_ROWS.saturating_sub(rows),
+                ART_TERM_ROWS,
+            )
         }
         Pose::Flying { frame } => {
             let grid = match frame % 6 {
@@ -295,10 +325,16 @@ fn gull_lines(pose: Pose, accent: sprite::Rgb) -> Vec<Line<'static>> {
                 _ => FLY_5,
             };
             let rows = grid.len().div_ceil(2);
-            (grid, 0, ART_TERM_ROWS.saturating_sub(rows))
+            // 居中：飞行姿态比盒子矮，上下各留一点比贴顶好看。
+            sprite::lines_padded(
+                grid,
+                accent,
+                0,
+                ART_TERM_ROWS.saturating_sub(rows) / 2,
+                ART_TERM_ROWS,
+            )
         }
-    };
-    sprite::lines_padded(grid, accent, shift, pad_top, ART_TERM_ROWS)
+    }
 }
 
 /// 右侧文字列：wordmark（3 行）/ 版本 / 空 / 键位 / tip / 入口。
@@ -477,6 +513,7 @@ fn to_rgb(color: ratatui::style::Color) -> sprite::Rgb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_width::UnicodeWidthStr as _;
 
     fn welcome() -> Welcome {
         Welcome::new(3, Instant::now())
@@ -539,6 +576,77 @@ mod tests {
             joined.contains("dev ·") || joined.contains("v0."),
             "版本行得在"
         );
+    }
+
+    #[test]
+    fn sweep_ticks_on_the_frame_cadence() {
+        // 回归点：只按动作 deadline 排 tick 的话，扫光窗口里几乎不醒（待机
+        // deadline 下界 2600ms > SWEEP_MS），光带根本不会出现。
+        let w = welcome();
+        let start = w.epoch;
+        let mut now = start;
+        let mut ticks = 0;
+        let mut worst_gap = 0u128;
+        while let Some(due) = w.next_frame(now, false, true) {
+            if due >= start + Duration::from_millis(SWEEP_MS) {
+                break;
+            }
+            assert!(due > now, "deadline 必须严格递增：now={now:?} due={due:?}");
+            worst_gap = worst_gap.max((due - now).as_millis());
+            ticks += 1;
+            now = due;
+        }
+        assert!(
+            ticks >= (SWEEP_MS / FRAME_MS) as usize - 10,
+            "2.4s 扫光至少该有 ~60 帧，实际 {ticks}"
+        );
+        assert!(
+            worst_gap <= FRAME_MS as u128,
+            "扫光的相邻 tick 间隔最长 {worst_gap}ms > 一帧 {FRAME_MS}ms"
+        );
+    }
+
+    #[test]
+    fn elide_respects_display_width() {
+        // `elide` 服务 dim_line / wordmark_line 热路径：按显示宽度（CJK 记 2 列）
+        // 截断，超宽补 `…`，不超宽原样返回。
+        assert_eq!(elide("abc", 5), "abc");
+        assert_eq!(elide("abcde", 5), "abcde");
+        assert_eq!(elide("abcdef", 5), "abcd…");
+        assert_eq!(elide("中文中文", 5), "中文…");
+        assert_eq!(elide("中文中文", 4), "中…");
+        assert_eq!(elide("abc", 0), "");
+        for width in 0..12usize {
+            assert!(elide("中abc中", width).width() <= width, "width={width}");
+        }
+    }
+
+    #[test]
+    fn dev_builds_show_dev_not_the_placeholder_version() {
+        // 产品不变量：占位版本 0.0.0 是开发构建，绝不能露成 "v0.0.0"（会让人
+        // 以为装错了包）。发版时由 scripts/sync_version.py 换成真版本号。
+        let label = version_label();
+        if env!("CARGO_PKG_VERSION") == "0.0.0" {
+            assert!(label.starts_with("dev · "), "开发构建：{label}");
+        } else {
+            assert!(label.starts_with('v'), "发版构建：{label}");
+        }
+        assert!(
+            label.contains(env!("WING_COMMIT_HASH")),
+            "带 commit：{label}"
+        );
+    }
+
+    #[test]
+    fn tip_is_picked_once_per_process() {
+        // 重建 / 缩放不许换 tip：换行会显得界面在自己抖。
+        let mut w = welcome();
+        let tip = w.tip();
+        let now = Instant::now();
+        for (width, working) in [(120u16, false), (60, true), (30, false), (120, false)] {
+            w.build(&palette(), width, now, working, true);
+            assert!(std::ptr::eq(w.tip(), tip), "tip 不该在重建之间换");
+        }
     }
 
     #[test]
@@ -630,6 +738,38 @@ mod tests {
             .len(),
             ART_TERM_ROWS
         );
+    }
+
+    #[test]
+    fn lift_never_crops_the_sprite() {
+        // 抬升是"整帧上移"：没有头顶余量就会裁掉头冠，读起来像被压扁。
+        // 钉住**源像素总数**（半格渲染里：带背景的格 = 2 像素，只带前景 = 1）——
+        // 抬升只该改变像素落在哪一格，不该让任何像素消失。
+        let accent = (34, 211, 238);
+        let pixels = |lift: u8| -> usize {
+            gull_lines(
+                Pose::Perched {
+                    frame: PerchedFrame::Idle,
+                    lift,
+                },
+                accent,
+            )
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| {
+                        let ink = s.content.chars().filter(|c| *c != ' ').count();
+                        ink * if s.style.bg.is_some() { 2 } else { 1 }
+                    })
+                    .sum::<usize>()
+            })
+            .sum()
+        };
+        let stand = pixels(0);
+        assert!(stand > 200, "站姿该有一整只海鸥的墨迹，实际 {stand}");
+        assert_eq!(pixels(1), stand, "呼吸抬半格丢像素了");
+        assert_eq!(pixels(2), stand, "跳起抬一格丢像素了");
     }
 
     #[test]
