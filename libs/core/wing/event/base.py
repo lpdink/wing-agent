@@ -76,6 +76,10 @@ class AgentInfo(BaseModel):
     model_name 与 provider_name 同源同刻：provider_name 是当前活跃
     ModelProvider 的名称（model/provider 二元组是模型选择的完整身份，
     同名模型跨 provider 时前端据此消歧）。旧数据/降级路径下可为 None。
+
+    model_display_name 是 model_name 在配置声明里的展示名（前端展示层的
+    唯一素材；未声明 / 空串 = None，前端回落 model_name）。展示名不是身份：
+    任何匹配 / 变更仍以 model_name + provider_name 为准。
     """
 
     model_name: str
@@ -85,6 +89,7 @@ class AgentInfo(BaseModel):
     rules: list[str] = Field(default_factory=list)
     workspace: str | None = None
     provider_name: str | None = None
+    model_display_name: str | None = None
 
 
 class CommandInfo(BaseModel):

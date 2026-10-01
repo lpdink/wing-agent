@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from wing.common.logger import log
-from wing.config import ModelCapabilities, get_config, resolve_model_capabilities
+from wing.config import (
+    ModelCapabilities,
+    get_config,
+    resolve_model_capabilities,
+    resolve_model_display_name,
+)
 from wing.event import AskEvent, WingEvent
 from wing.provider import create_provider
 from wing.provider.base import ModelProvider
@@ -148,6 +153,15 @@ class WingAgent:
         （model_provider.config）——两者各自单所有者，交给纯函数合成即可。
         """
         return resolve_model_capabilities(self.model_provider.config, self.model)
+
+    @property
+    def model_display_name(self) -> str | None:
+        """当前模型的展示名（配置声明的投影；未声明 = None）。
+
+        与 capabilities 同款实时解析：展示名不是身份，任何匹配 / 变更仍以
+        model + provider 为准；前端只在展示层消费（缺省回落 self.model）。
+        """
+        return resolve_model_display_name(self.model_provider.config, self.model)
 
     @property
     def yolo(self) -> bool:

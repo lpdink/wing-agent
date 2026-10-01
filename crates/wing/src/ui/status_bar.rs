@@ -24,7 +24,13 @@ fn fmt_tokens(n: i64) -> String {
 /// Application state for the status bar.
 #[derive(Debug, Clone)]
 pub struct StatusData {
+    /// Active model's call name (identity — never rendered as-is while a
+    /// display label is known).
     pub model: String,
+    /// Display label declared for `model` by the gateway config; `None` when
+    /// undeclared / on old gateways. Display-only — identity stays `model` +
+    /// `provider`.
+    pub model_display_name: Option<String>,
     /// Active model provider name (None until known / on old gateways).
     pub provider: Option<String>,
     pub total_tokens: i64,
@@ -52,6 +58,7 @@ impl Default for StatusData {
     fn default() -> Self {
         Self {
             model: "unknown".into(),
+            model_display_name: None,
             provider: None,
             total_tokens: 0,
             context_window_tokens: 0,
@@ -71,14 +78,33 @@ impl Default for StatusData {
 }
 
 impl StatusData {
+    /// Model label for display: the gateway-declared display name when present
+    /// (non-blank), otherwise the call name.
+    ///
+    /// The gateway normalizes "no declaration" to `None`; the blank check is
+    /// the same defense the `/model` picker applies (`label_for`), so a
+    /// whitespace-only label can never blank out the status bar.
+    pub fn model_label(&self) -> &str {
+        self.model_display_name
+            .as_deref()
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or(&self.model)
+    }
+
     /// Apply optional session-state fields from a server event or optimistic update.
     ///
     /// Parameter order mirrors `AppIntent::UpdateSession` field declaration
     /// (`model, agent, title, thinking, reasoning_effort, yolo`) so that
     /// callers destructuring the variant can pass fields through positionally.
+    /// `model_display_name` rides with `model`: it is only consumed when a new
+    /// model value is present, and `None` there means "no declared label"
+    /// (display falls back to the call name) — never "keep the old label",
+    /// which would describe a model that is no longer active.
+    #[allow(clippy::too_many_arguments)] // flat mirror of the session-state fields
     pub fn apply_session_update(
         &mut self,
         model: Option<String>,
+        model_display_name: Option<String>,
         agent: Option<String>,
         title: Option<String>,
         thinking: Option<bool>,
@@ -87,6 +113,7 @@ impl StatusData {
     ) {
         if let Some(m) = model {
             self.model = m;
+            self.model_display_name = model_display_name;
         }
         if let Some(a) = agent {
             self.agent = Some(a);
@@ -135,6 +162,8 @@ impl Widget for StatusBar<'_> {
         let line_y = area.y;
 
         // Build left spans: " Wing · model [· provider] [think]"
+        // The model slot renders the declared display label (falling back to
+        // the call name) — the raw id is never the first thing the user sees.
         let mut spans: Vec<Span<'static>> = vec![
             Span::styled(
                 " Wing",
@@ -143,7 +172,10 @@ impl Widget for StatusBar<'_> {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" · ", dim),
-            Span::styled(d.model.clone(), Style::default().fg(self.palette.text)),
+            Span::styled(
+                d.model_label().to_string(),
+                Style::default().fg(self.palette.text),
+            ),
         ];
 
         // Provider name next to the model — hidden when unknown (old gateway).
@@ -429,5 +461,104 @@ mod tests {
             !out.contains("gpt-4 · "),
             "no provider → no dangling separator, got: {out}"
         );
+    }
+
+    #[test]
+    fn test_status_bar_renders_display_name_not_the_call_name() {
+        // The declared display label is the only model text on screen — the
+        // call name must not appear (it only ever surfaces in the toast).
+        let data = StatusData {
+            model: "dfmodel-2026".into(),
+            model_display_name: Some("DeepSeek-Flash".into()),
+            provider: Some("qoder".into()),
+            ..StatusData::default()
+        };
+        let out = render_left(&data);
+        assert!(
+            out.contains("DeepSeek-Flash · qoder"),
+            "display name must take the model slot, got: {out}"
+        );
+        assert!(
+            !out.contains("dfmodel-2026"),
+            "the raw call name must not leak into the status bar, got: {out}"
+        );
+    }
+
+    #[test]
+    fn test_status_bar_display_name_falls_back_when_absent_or_blank() {
+        let absent = StatusData {
+            model: "plain-model".into(),
+            ..StatusData::default()
+        };
+        assert!(render_left(&absent).contains("plain-model"));
+
+        // Old / other producers may ship a blank label; blank = no label.
+        let blank = StatusData {
+            model: "plain-model".into(),
+            model_display_name: Some("   ".into()),
+            ..StatusData::default()
+        };
+        let out = render_left(&blank);
+        let tokens: Vec<&str> = out.split_whitespace().take(3).collect();
+        assert_eq!(
+            tokens,
+            vec!["Wing", "·", "plain-model"],
+            "blank label must not render, got: {out}"
+        );
+    }
+
+    #[test]
+    fn test_apply_session_update_keeps_display_name_with_its_model() {
+        let mut data = StatusData::default();
+        data.apply_session_update(
+            Some("dfmodel".into()),
+            Some("DeepSeek-Flash".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(data.model, "dfmodel");
+        assert_eq!(data.model_display_name.as_deref(), Some("DeepSeek-Flash"));
+        assert_eq!(data.model_label(), "DeepSeek-Flash");
+    }
+
+    #[test]
+    fn test_apply_session_update_clears_stale_label_on_model_change() {
+        let mut data = StatusData::default();
+        data.apply_session_update(
+            Some("dfmodel".into()),
+            Some("DeepSeek-Flash".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        // Model changes without a declared label: the old label must not
+        // survive and describe the new model.
+        data.apply_session_update(Some("plain".into()), None, None, None, None, None, None);
+        assert_eq!(data.model, "plain");
+        assert_eq!(data.model_display_name, None);
+        assert_eq!(data.model_label(), "plain");
+    }
+
+    #[test]
+    fn test_apply_session_update_without_model_keeps_label() {
+        let mut data = StatusData::default();
+        data.apply_session_update(
+            Some("dfmodel".into()),
+            Some("DeepSeek-Flash".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        // thinking-only update: model untouched → label untouched.
+        data.apply_session_update(None, None, None, None, Some(true), None, None);
+        assert_eq!(data.model, "dfmodel");
+        assert_eq!(data.model_display_name.as_deref(), Some("DeepSeek-Flash"));
     }
 }

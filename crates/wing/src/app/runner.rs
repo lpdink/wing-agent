@@ -656,12 +656,21 @@ fn apply_update_session(
 ) {
     let on_off = |b: bool| if b { "on" } else { "off" };
 
-    // Build toast parts from non-None fields.
+    // Optimistic display label for the new model, resolved from the last
+    // `/api/models` snapshot (the panel that produced this switch rendered
+    // from it). The gateway's `session_state_changed` event overwrites it with
+    // the authoritative declaration right after — same value in practice.
+    let model_display_name = model
+        .as_deref()
+        .and_then(|m| app.model_display_label(provider.as_deref(), m));
+
+    // Build toast parts from non-None fields. The model part goes through the
+    // shared formatter so the display label (and the raw name on its own
+    // line) match the picker's immediate toast exactly.
     let parts: Vec<String> = [
-        model.as_ref().map(|m| match provider.as_deref() {
-            Some(p) => format!("Model: {m} ({p})"),
-            None => format!("Model: {m}"),
-        }),
+        model
+            .as_deref()
+            .map(|m| app.model_switch_toast(provider.as_deref(), m)),
         agent.as_ref().map(|a| format!("Agent: {a}")),
         title.as_ref().map(|t| format!("Title: {t}")),
         thinking.map(|t| format!("Think: {}", on_off(t))),
@@ -675,8 +684,15 @@ fn apply_update_session(
 
     // Apply to local status.
     let affects_list = title.is_some() || workspace.is_some();
-    app.status
-        .apply_session_update(model, agent, title, thinking, reasoning_effort, yolo);
+    app.status.apply_session_update(
+        model,
+        model_display_name,
+        agent,
+        title,
+        thinking,
+        reasoning_effort,
+        yolo,
+    );
     if let Some(p) = provider {
         app.status.provider = Some(p);
     }
@@ -800,5 +816,75 @@ mod tests {
             None,
         );
         assert!(!app.popup.cache.sessions.is_empty());
+    }
+
+    /// Provider group declaring a display name for `dfmodel` — the source the
+    /// close-to-the-panel optimistic label is resolved from.
+    fn labeled_sources() -> wing_api_client::models::ProviderModels {
+        wing_api_client::models::ProviderModels {
+            provider: "qoder".into(),
+            models: vec!["dfmodel".into()],
+            model_details: vec![wing_api_client::models::ModelDetail {
+                name: "dfmodel".into(),
+                display_name: Some("DeepSeek-Flash".into()),
+                description: None,
+                capabilities: Default::default(),
+            }],
+        }
+    }
+
+    #[test]
+    fn test_update_session_toast_and_status_use_the_display_label() {
+        let mut app = app_with_cached_sessions();
+        app.model_sources = vec![labeled_sources()];
+
+        apply_update_session(
+            &mut app,
+            Some("dfmodel".into()),
+            Some("qoder".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let toast = app.toast.as_ref().expect("model switch toast");
+        assert_eq!(toast.message, "Model: DeepSeek-Flash (qoder)\n↳ dfmodel");
+        // The optimistic status carries the label too, so the status bar does
+        // not flash the raw name before the gateway event lands.
+        assert_eq!(app.status.model, "dfmodel");
+        assert_eq!(
+            app.status.model_display_name.as_deref(),
+            Some("DeepSeek-Flash")
+        );
+        assert_eq!(app.status.provider.as_deref(), Some("qoder"));
+    }
+
+    #[test]
+    fn test_update_session_model_without_declaration_keeps_the_toast_single_line() {
+        let mut app = app_with_cached_sessions();
+        app.model_sources = vec![wing_api_client::models::ProviderModels {
+            provider: "p".into(),
+            models: vec!["plain".into()],
+            model_details: vec![],
+        }];
+
+        apply_update_session(
+            &mut app,
+            Some("plain".into()),
+            Some("p".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let toast = app.toast.as_ref().expect("model switch toast");
+        assert_eq!(toast.message, "Model: plain (p)");
+        assert_eq!(app.status.model_display_name, None);
     }
 }

@@ -276,6 +276,7 @@ async def session_info(
     msg_count, total_tok = cm.get_context_stats()
     return SessionInfoResponse(
         model=status["model"],
+        model_display_name=session.agent.model_display_name,
         api_url=status["api_url"],
         tools=status["tools"],
         total_tokens=status["total_tokens"],

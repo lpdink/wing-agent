@@ -600,6 +600,7 @@ class TestSessionInfo:
             "thinking": True,
             "reasoning_effort": "high",
         }
+        mock_session.agent.model_display_name = "GPT-4o Flash"
         mock_session.agent.yolo = False
         mock_session.session_name = "Test Session"
         mock_session.session_workspace = "/tmp/ws"
@@ -617,6 +618,7 @@ class TestSessionInfo:
         assert resp.status_code == 200
         data = resp.json()
         assert data["model"] == "gpt-4o"
+        assert data["model_display_name"] == "GPT-4o Flash"
         assert data["api_url"] == "https://api.openai.com"
         assert data["tools"] == ["Bash", "Read"]
         assert data["total_tokens"] == 1000
@@ -633,7 +635,7 @@ class TestSessionInfo:
         assert data["system_prompt"] == "You are a helpful assistant."
 
     def test_info_no_workspace(self, client: TestClient, mock_runtime):
-        """Session 无 workspace 时 workdir 为 null。"""
+        """Session 无 workspace 时 workdir 为 null；未声明展示名时为 null。"""
         mock_session = MagicMock()
         mock_session.agent.get_status.return_value = {
             "model": "gpt-4o",
@@ -644,6 +646,7 @@ class TestSessionInfo:
             "thinking": False,
             "reasoning_effort": None,
         }
+        mock_session.agent.model_display_name = None
         mock_session.agent.yolo = False
         mock_session.session_name = None
         mock_session.session_workspace = None
@@ -656,6 +659,7 @@ class TestSessionInfo:
         resp = client.get("/api/session/info", params={"session_id": "test-id"})
         assert resp.status_code == 200
         assert resp.json()["workdir"] is None
+        assert resp.json()["model_display_name"] is None
 
     def test_info_includes_status(self, client: TestClient, mock_runtime):
         """info 响应携带运行时 status（如 waiting）。"""
@@ -669,6 +673,7 @@ class TestSessionInfo:
             "thinking": False,
             "reasoning_effort": None,
         }
+        mock_session.agent.model_display_name = None
         mock_session.agent.yolo = False
         mock_session.session_name = None
         mock_session.session_workspace = None

@@ -107,3 +107,42 @@ class TestSessionUpdateState:
         assert session.agent.model_provider.thinking is True
         assert session.agent.model_provider.reasoning_effort == "medium"
         assert session.agent.yolo is True
+
+
+class TestModelDisplayName:
+    """展示名穿透：配置声明 → agent 属性 → AgentInfo（前端展示的唯一素材）。"""
+
+    @pytest.mark.asyncio
+    async def test_agent_and_agent_info_follow_declaration(self, monkeypatch):
+        import wing.config
+
+        from wing.config import AgentConfig, Config, ModelSpec, ProviderConfig
+        from wing.store import MemorySessionStore
+
+        cfg = Config(
+            providers=[
+                ProviderConfig(
+                    name="p",
+                    base_url="http://x",
+                    api_key="k",
+                    models=[
+                        ModelSpec(name="fancy", display_name="Fancy Flash"),
+                        "plain",
+                    ],
+                )
+            ],
+            agents=[AgentConfig(name="default", model="fancy", provider="p")],
+        )
+        # 单例替换（conftest 的 autouse fixture 也走这个口；直接 import 的函数
+        # 读的是模块全局 _config，patch get_config 名字对它们无效）。
+        monkeypatch.setattr(wing.config, "_config", cfg)
+        sm = SessionManager({"memory": MemorySessionStore()}, default_backend="memory")
+        session = sm.create_session()
+        assert session.agent.model_display_name == "Fancy Flash"
+        assert session.to_agent_info().model_display_name == "Fancy Flash"
+
+        # 切到无展示名声明的模型：回落 None（前端回落调用名）。
+        await session.update_state(model="plain")
+        assert session.agent.model == "plain"
+        assert session.agent.model_display_name is None
+        assert session.to_agent_info().model_display_name is None

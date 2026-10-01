@@ -392,6 +392,7 @@ impl App {
             }
             WingEvent::SessionStateChanged {
                 model,
+                model_display_name,
                 thinking,
                 reasoning_effort,
                 yolo,
@@ -401,6 +402,7 @@ impl App {
             } => {
                 self.status.apply_session_update(
                     model,
+                    model_display_name,
                     agent,
                     title,
                     thinking,
@@ -561,6 +563,7 @@ impl App {
             );
             self.chat.push(ChatCell::SystemMessage(line));
             self.status.model = agent_info.model_name.clone();
+            self.status.model_display_name = agent_info.model_display_name.clone();
             self.status.provider = agent_info.provider_name.clone();
             self.status.workdir = agent_info.workspace.clone();
         }

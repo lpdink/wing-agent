@@ -149,6 +149,18 @@ def resolve_model_capabilities(
     return spec.capabilities if spec is not None else ModelCapabilities()
 
 
+def resolve_model_display_name(provider_cfg: ProviderConfig, model: str) -> str | None:
+    """解析模型的展示名（对前端下发 ``model_display_name`` 的唯一出口）。
+
+    未声明（含字符串形态 / 不在列表内）/ 声明为空串或纯空白 = 无展示名
+    （None），前端回落实际调用名。不做名字启发式。
+    """
+    spec = provider_cfg.find_model(model)
+    if spec is None or spec.display_name is None or not spec.display_name.strip():
+        return None
+    return spec.display_name
+
+
 class UserAgentConfig(BaseModel):
     preset: Literal["opencode", "qwen-code"] = "qwen-code"
 

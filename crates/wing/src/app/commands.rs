@@ -327,10 +327,13 @@ impl App {
                 // Update model; clear provider when the model changes, since
                 // Info does not carry provider info and the old provider
                 // may be stale (e.g. the model was changed via another path).
+                // The display label is authoritative here (the gateway
+                // resolved it from the config declaration).
                 if info.model != self.status.model {
                     self.status.provider = None;
                 }
                 self.status.model = info.model;
+                self.status.model_display_name = info.model_display_name;
                 self.status.total_tokens = info.total_tokens;
                 self.status.context_window_tokens = info.context_window_tokens;
                 self.status.thinking = info.thinking;

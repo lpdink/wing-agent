@@ -30,7 +30,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | POST | `/api/session/send` | 发送用户消息，驱动 agent loop（不在内存的会话先按需水合，磁盘上也没有才 404） |
 | GET | `/api/session/list` | 列出所有 session（跨 store 聚合）；`status: inactive` = 不在内存（未加载 / 已逐出） |
 | GET | `/api/session/get` | 获取 session 详情 |
-| GET | `/api/session/info` | 运行时状态，含 `context_stats`、`skills_info`、`reasoning_effort` |
+| GET | `/api/session/info` | 运行时状态，含 `context_stats`、`skills_info`、`reasoning_effort`、`model_display_name`（模型展示名；未声明 = null，前端回落 `model`） |
 | GET | `/api/session/branches` | 可回退 / 分叉的消息节点 |
 | POST | `/api/session/update` | 更新状态：model / agent / title / thinking / reasoning_effort / yolo / workspace / tools（`tools` 全量替换，ref 格式，PR #50） |
 | POST | `/api/session/compact` | 手动压缩上下文，可带 `instruction` 侧重指令（条件插入压缩 prompt，无指令时 prompt 不变） |
@@ -107,6 +107,8 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 > `user_message_accepted`：用户消息被消费进模型上下文的确认（`content` + `origin_request_id`，后者即客户端提交时的 `request_id`）。两个发射点：`run_turn` 入口的 drain-and-merge（先于 `turn_started`）与工具执行后的 steer 注入。产品语义：TUI 把已发送消息挂在底部排队区，收到本事件才上移进聊天历史——消息"往上走"当且仅当它真的被发给了模型。无 `request_id` 的内部投递（如 Explorer 回传）不发射。
 
 **状态事件**（`event/state_change.py`）：`session_init` · `sync_session`（订阅时重放历史）· `session_state_changed`（update / think / yolo 后统一发出）· `interrupted` · `compact_done`。
+
+> **模型展示名**：`sync_session.agent`、`session_state_changed`、`/api/session/info` 三处与 `model` / `model_name` 同刻携带 `model_display_name`（配置声明 `display_name` 的投影；未声明 / 空串 = 缺失或 null）。它是**展示层素材**：前端渲染展示名、缺省回落实际调用名；身份与变更仍以实际调用名 + provider 为准，不做名字反向解析。
 
 **其他**（`event/base.py`、`query_response.py`）：`error` · `notice` · `delivered` · `context_stats` · `branch_targets`。
 
