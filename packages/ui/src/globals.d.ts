@@ -8,8 +8,14 @@
  * `src/host/html.ts`); this declaration only says the renderer may look for it, and
  * a document that never got one degrades to `FALLBACK_BOOTSTRAP`.
  *
- * Per-project declarations: an embedder that injects extra globals declares them in
- * its own project (the extension's `src/webview/globals.d.ts` adds
+ * **Consumers that compile these sources** (this package is source-first, `exports`
+ * points at `src/`) must include this file in their program: an ambient `.d.ts` is
+ * never pulled in by an import. One glob in the consumer's tsconfig — see
+ * `extensions/vscode/tsconfig.webview.json`, which lists the package's declaration
+ * files explicitly.
+ *
+ * Per-project declarations otherwise: an embedder that injects extra globals declares
+ * them in its own project (the extension's `src/webview/globals.d.ts` adds
  * `acquireVsCodeApi`, which exists only inside VS Code).
  */
 

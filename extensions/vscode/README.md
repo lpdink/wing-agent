@@ -126,15 +126,26 @@ packages/session/ @wing-agent/session — session reduction layer: the cell/sess
                   (+ the CellPatch contract), applyLive/applySync (the one path that makes replay == live),
                   the pure derivations (titles, tool rows, diffs, asks, partial JSON) and the command
                   table. Its only dependency is @wing-agent/client; host-side orchestration stays here.
-src/shared/       the host ⇄ webview bridge protocol: message unions, runtime guards, channel constants.
-                  The session model and the command table live in @wing-agent/session (imported, never
-                  redeclared). No vscode, no DOM, no node.
+packages/ui/      @wing-agent/ui — the renderer and the wire contract. Three entries: `.` (the app:
+                  cells / markdown / composer / panels / mirror store / styles), `./protocol` (the
+                  DOM-free host ⇄ view contract: message unions, guards, the WebviewTransport
+                  interface, the patch receiver — imported by the host too) and `./testing` (fixtures
+                  + scripted host, for tests and harnesses only). No vscode, no node.
+src/shared/       this extension's channel constants: theme class names, the mount-point id, the
+                  patch-chunk cap. The wire protocol itself lives in @wing-agent/ui/protocol (the
+                  package cannot import the extension); the session model and the command table live
+                  in @wing-agent/session. No vscode, no DOM, no node.
 src/host/         extension host: WingHost (connection lifecycle) + SessionManager (tabs, control plane, reduction host) + bridge.
-src/webview/      React renderer: applies host-produced ops, renders the chat shell.
-src/testing/      fixtures + scripted host (test and preview only).
-preview/          preview harness: the webview app against the scripted host, without VS Code.
-tests/            vitest suites (node + jsdom).
+src/webview/      thin shell: the entry (`main.tsx`) + the VS Code implementation of the host bridge
+                  (`bridge/vsCodeTransport.ts` via acquireVsCodeApi) + globals.d.ts. It mounts
+                  @wing-agent/ui's app with that transport; no rendering or protocol logic lives here.
+preview/          preview harness: the renderer against the scripted host, without VS Code.
+tests/            vitest suites (node + jsdom): host integration, layer guard, build artifacts, preview.
 ```
+
+Every frontend shares the same seam: `mountApp(root, { transport })` takes a `WebviewTransport`
+(`post` + `subscribe`) — this extension injects the VS Code `postMessage` channel, the preview
+harness injects a scripted one, and the web/Electron shells will bring their own.
 
 The rule that ties it together: **the host is the only authority, the webview is a pure renderer.**
 The host reduces gateway events into a `SessionViewModel` and pushes it into the webview as a full
@@ -148,11 +159,11 @@ Host-produced overlays (`panels.modelPicker` / `sessionPicker` / `branchPicker` 
 
 ### Layering is enforced by three mechanisms
 
-| Mechanism                                                                     | Catches                                                                                                                                                       | Runs in                           |
-| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
-| Split tsconfigs (`lib` / `types` per layer) plus the packages' probe projects | DOM globals in `host`/`shared`; node globals in `webview`/`shared`; and, inside `packages/*`, both directions (a src-only node probe and a DOM probe)         | `pnpm run typecheck`              |
-| ESLint zones (`no-restricted-imports`, `no-restricted-globals`)               | `vscode` outside `host`, `host → webview`, `webview → the gateway layer`, `src/testing` in product code, a deep path into a package, DOM globals in a package | `pnpm run lint`                   |
-| `tests/layers/layers.test.ts`                                                 | the full matrix: static/dynamic imports, re-exports, `require`, node builtins, unresolved paths, hardcoded colors in CSS                                      | `pnpm run test` (`make test`, CI) |
+| Mechanism                                                                     | Catches                                                                                                                                                                                                                 | Runs in                           |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
+| Split tsconfigs (`lib` / `types` per layer) plus the packages' probe projects | DOM globals in `host`/`shared`; node globals in `webview`/`shared`; and, inside `packages/*`, both directions (a src-only node probe and a DOM probe)                                                                   | `pnpm run typecheck`              |
+| ESLint zones (`no-restricted-imports`, `no-restricted-globals`)               | `vscode` outside `host`, `host → webview`, `webview → the gateway layer`, the renderer's app barrel outside the shell, `@wing-agent/ui/testing` in product code, any deep path into a package, DOM globals in a package | `pnpm run lint`                   |
+| `tests/layers/layers.test.ts`                                                 | the full matrix: static/dynamic imports, re-exports, `require`, node builtins, unresolved paths (`packages/ui` runs the CSS colour/module-class checks)                                                                 | `pnpm run test` (`make test`, CI) |
 
 A violating import therefore fails `make check` **and** `make test`; the layer guard test is the
 authoritative one because it resolves the actual import graph instead of pattern matching.
@@ -180,7 +191,7 @@ authoritative one because it resolves the actual import graph instead of pattern
   are dev-only — `**/*.map` is excluded from the `.vsix`) and the price for being able to map a
   minified stack back to `src/`.
 
-- Visual constants live in `src/webview/styles/tokens.css`, each one annotated with the **file and line
+- Visual constants live in `packages/ui/src/styles/tokens.css`, each one annotated with the **file and line
   it was taken from** in the local VS Code 1.129.1 sources (`workbench/contrib/chat/browser/widget/**`).
   Every spacing / font-size / line-height / radius / colour decision belongs there.
 
@@ -198,7 +209,7 @@ authoritative one because it resolves the actual import graph instead of pattern
   3. layout glue that carries no visual decision: `0`, `auto`, `fit-content`, `100%`, `100vh`, `normal`,
      `inherit`, `1em`, unitless flex factors.
 
-### Chat renderer (`src/webview/chat`)
+### Chat renderer (`packages/ui/src/chat`)
 
 - `CellView` maps the `CellModel` union to components; it is memoized on `(cell, sessionId)`, so a
   streamed patch re-renders one cell and leaves the rest of the transcript untouched.
@@ -217,7 +228,7 @@ authoritative one because it resolves the actual import graph instead of pattern
 - Collapsed/expanded choices are webview-local (`chat/interaction.ts`): a memory-only map keyed by cell
   id, never part of the protocol.
 
-### Shell (`src/webview/app`)
+### Shell (`packages/ui/src/app`)
 
 - `App.tsx` owns the only non-protocol state of the shell: the drafts (one per session, dropped when a
   tab closes), which overlay is open, and the focus token. Everything else it renders is host data.
@@ -241,13 +252,16 @@ pnpm run test              # all projects
 pnpm run test:watch        # watch mode
 ```
 
-- `tests/{shared,host,core,state,layers,artifact}` run in a **node** environment; the `vscode` module is
-  aliased to `tests/mocks/vscode.ts` (a small, recording mock), which is what makes the extension host
-  testable headless — no VS Code window, ever.
-- `tests/webview` runs in **jsdom** with `@testing-library/react`; components are mounted through the
-  real `mountApp` against the scripted host in `src/testing/mockBridge.ts`.
-- `src/testing/fixtures.ts` has one fixture per cell kind plus the step 04 scenarios (streaming turn,
-  failed tool call, approval) that both tests and the preview harness use.
+- `tests/{host,layers,artifact}` run in a **node** environment; the `vscode` module is aliased to
+  `tests/mocks/vscode.ts` (a small, recording mock), which is what makes the extension host testable
+  headless — no VS Code window, ever.
+- `tests/webview/preview.test.ts` runs in **jsdom**: it mounts the extension's preview harness, which
+  drives the real renderer from `@wing-agent/ui`.
+- The renderer's own suites (components, the mirror, the wire contract, its layer guard) live in
+  `packages/ui/tests` with two vitest projects — `pnpm --filter @wing-agent/ui run test`.
+- `packages/ui/src/testing/fixtures.ts` has one fixture per cell kind plus the scenarios (streaming
+  turn, failed tool call, approval) that the package's tests, this extension's preview harness and the
+  build-artifact gate all use.
 - `tests/artifact/webviewBundle.test.ts` is the build-artifact gate (see above).
 - The preview harness (`preview/main.tsx`) exposes a toolbar to switch fixtures, stream a turn, break
   the patch stream (resync recovery) and push a UI action — the fastest way to look at renderer changes
