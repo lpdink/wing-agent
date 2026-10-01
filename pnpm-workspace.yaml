@@ -13,8 +13,10 @@ packages:
 
 # allowBuilds: pnpm 10+ blocks dependency install scripts unless allow-listed.
 #   - esbuild needs its install script to place the platform binary.
-#   - electron's postinstall downloads the runtime binary (apps/desktop typechecks
-#     against its bundled types and runs it for `dev` / `--smoke`).
+#   - electron has no install script today: the runtime binary is fetched lazily by
+#     `require('electron')`/`electron .`, i.e. only when the shell is actually run —
+#     typecheck / lint / test / build and CI never need it. The entry is kept so a
+#     version that reinstates a postinstall stays allowed instead of failing install.
 #   - @vscode/vsce-sign is only pulled in by `vsce sign` (we ship an unsigned local
 #     .vsix), so its script stays blocked on purpose.
 #   - electron-winstaller only matters for Windows NSIS installers (transitive dep

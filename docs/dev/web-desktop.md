@@ -40,6 +40,8 @@ apps/desktop/
 `--smoke`：初始化（读配置 → 装证书策略 → 注册协议 → 装菜单/IPC）后**不开窗口**，向 stdout 打一行 JSON
 报告（含 `rendererDocument`，即 `net.fetch('wing-app://app/')` 的真实结果），退出码 `0` = 初始化全绿、
 `1` = 失败（含协议取不到文档）。它不拉网关、不打单实例锁，可安全地在有真实实例运行时执行。
+`rendererDocument` **固定**探 `wing-app://app/`，所以它证明的是「协议骨架可用」，不是「`WING_APP_URL`
+指向的目标可达」。
 
 ## 3. 配置（主进程持有）
 
@@ -51,9 +53,9 @@ apps/desktop/
 | `gatewayBaseUrl` | `http://127.0.0.1:32523` | 网关 origin（http/https，可带路径前缀，无尾斜杠）；对齐 `default_config.py` 的默认端口 |
 | `apiKey` | `null` | `Authorization: Bearer …`；空/空白 → `null`（鉴权未开） |
 | `ignoreCertErrors` | `false` | 自签名证书开关，见 §4 |
-| `certificateWhitelist` | `[]` | `host:port[]`；**没有显式端口的条目会被丢弃**（避免退化成 host 级放行） |
+| `certificateWhitelist` | `[]` | `host:port[]`；**没有显式端口的条目与含 `*` 的通配符条目都会被丢弃**（匹配是精确串相等，避免出现永不命中的惰性条目） |
 | `wingPath` | `null` | 显式 `wing` 可执行文件；`null` = 常见路径 → `PATH` 三级发现 |
-| `autoStart` | `true` | 网关不在时 `wing start` 一次（**只对本地地址**生效） |
+| `autoStart` | `true` | 网关不在时 `wing start` 一次（**只对本地地址**生效，且**只覆盖默认端口**：`wing start` 不带 `--host/--port`，本地非默认端口的网关会在轮询超时后以 `failed` 收场，与 vscode 扩展行为一致） |
 
 读取永不抛：JSON 坏 / 字段类型不对 → 回默认值并把原因记进 `issues`（`--smoke` 报告里可见）。
 写入是 `tmp + rename` 原子写，权限 `0600`（内含 API key）。renderer 通过 IPC 读写（`wing:settings-read` /
@@ -67,14 +69,21 @@ apps/desktop/
 
 - `session.setCertificateVerifyProc` → `allowsIgnoringCertificateHost(hostname, policy)`：**Electron 只暴露
   `hostname`**（实测 Electron 44 的 request 字段：`hostname / certificate / validatedCertificate /
-  isIssuedByKnownRoot / verificationResult / errorCode`），所以这一层是 host 级匹配，`0` = 通过、`-3` = 交回
+  isIssuedByKnownRoot / verificationResult / errorCode`），所以这一层是 **host 级**匹配，`0` = 通过、`-3` = 交回
   Chromium 默认校验（自签被拒）。
 - `app.on('certificate-error')` → `allowsIgnoringCertificate(url, policy)`：有完整 URL，**保持 `host:port`
-  精确匹配**（端口不同一律拒）。
+  精确匹配**（端口不同一律拒）。注意这条对主进程 `net.fetch` 不触发（实测 0 次），所以**主进程与同一 session 的
+  renderer 流量实际只有 host 级判定**：白名单里的 `127.0.0.1:39998` 会连带放行 `https://127.0.0.1:39999`。这是
+  Electron API 的强约束，不是实现取舍——设置面板文案**不要**向用户承诺「端口敏感」。
 
-白名单条目形态 `host:port`（可带 scheme/路径，会被剥掉；支持 `[::1]:8443`）；空列表 + 开关打开 = 什么都不放行，
-启动时会 `console.warn`。**不自动把网关地址塞进白名单**：开启开关时由设置面板写入（`certificateTargetFor(url)`
-导出给 UI 用）。
+白名单条目形态 `host:port`（可带 scheme/路径，会被剥掉；IPv6 支持 `[::1]:8443`，裸写 `::1:8443` 也接受并归一化
+为带括号形态；含 `*` 的通配符条目会被丢弃——匹配是精确串相等）。**IPv6 的 host 形态在两侧不同**：配置文件写
+`[::1]`，`setCertificateVerifyProc` 报 `::1`；比较统一经 `canonicalHost()`（小写 + 去括号），所以两种写法都能
+命中（这是 `[::1]:8443` 曾静默失效的修复点）。
+
+空列表 + 开关打开 = 什么都不放行，启动时会 `console.warn`。**不自动把网关地址塞进白名单**：开启开关时由设置面板
+写入（`certificateTargetFor(url)` 导出给 UI 用）。非法条目（无端口、通配符）在配置归一化阶段就被丢弃，原因会出现在
+`--smoke` 报告的 `configIssues` 里（`certificatePolicy.invalidEntries` 对来自文件的策略恒为空）。
 
 ## 5. `wing-app://` 与 CORS 契约
 

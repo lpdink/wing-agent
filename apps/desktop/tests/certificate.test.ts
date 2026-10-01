@@ -49,10 +49,25 @@ describe('normalizeCertificateEntry', () => {
     expect(normalizeCertificateEntry('[::1]:8443')).toBe('[::1]:8443');
   });
 
+  it('accepts an IPv6 address written without brackets', () => {
+    // `::1:8443` would otherwise be rejected, and a user writing the obvious
+    // spelling would silently lose the entry.
+    expect(normalizeCertificateEntry('::1:8443')).toBe('[::1]:8443');
+    expect(normalizeCertificateEntry('2001:db8::1:9443')).toBe('[2001:db8::1]:9443');
+    // A hex-looking *hostname* is not an IPv6 address and keeps the normal path.
+    expect(normalizeCertificateEntry('abc:8443')).toBe('abc:8443');
+  });
+
   it('rejects entries without an explicit port instead of widening to the whole host', () => {
     expect(normalizeCertificateEntry('localhost')).toBeNull();
     expect(normalizeCertificateEntry('https://wing.local')).toBeNull();
     expect(normalizeCertificateEntry('wing.local:')).toBeNull();
+  });
+
+  it('rejects wildcards: matching is exact, so `*` could only ever be inert', () => {
+    expect(normalizeCertificateEntry('*:8443')).toBeNull();
+    expect(normalizeCertificateEntry('*.local:8443')).toBeNull();
+    expect(normalizeCertificateEntry('https://*.wing.local:8443')).toBeNull();
   });
 
   it('rejects empty, malformed and credential-bearing entries', () => {
@@ -74,10 +89,28 @@ describe('normalizeCertificateEntry', () => {
       hosts: [],
       invalid: ['42', 'null'],
     });
+  });
+
+  it('derives the host view in canonical form (no IPv6 brackets)', () => {
+    // Electron reports `::1` to setCertificateVerifyProc; a bracketed host view
+    // would make every IPv6 entry inert there.
     expect(normalizeCertificateWhitelist(['[::1]:8443'])).toEqual({
       targets: ['[::1]:8443'],
-      hosts: ['[::1]'],
+      hosts: ['::1'],
       invalid: [],
+    });
+    expect(normalizeCertificateWhitelist(['[::1]:8443', '::1:8444', 'https://[::1]:8445/x'])).toEqual({
+      targets: ['[::1]:8443', '[::1]:8444', '[::1]:8445'],
+      hosts: ['::1'],
+      invalid: [],
+    });
+  });
+
+  it('drops wildcard entries as invalid instead of keeping inert literals', () => {
+    expect(normalizeCertificateWhitelist(['*:8443', '*.local:8443', 'ok.local:8443'])).toEqual({
+      targets: ['ok.local:8443'],
+      hosts: ['ok.local'],
+      invalid: ['*:8443', '*.local:8443'],
     });
   });
 });
@@ -171,6 +204,20 @@ describe('allowsIgnoringCertificateHost', () => {
   it('allows the host part of a whitelisted target, case-insensitively', () => {
     expect(allowsIgnoringCertificateHost('127.0.0.1', policy)).toBe(true);
     expect(allowsIgnoringCertificateHost('WING.LOCAL', policy)).toBe(true);
+  });
+
+  it('matches the hostname spelling Electron actually reports for IPv6', () => {
+    // Regression (review r1 S1): `setCertificateVerifyProc` reports `::1`, the
+    // config file spells it `[::1]` — before canonicalization the entry was
+    // accepted by the config and then never matched at runtime.
+    const ipv6 = createCertificatePolicy({
+      ignoreCertErrors: true,
+      certificateWhitelist: ['[::1]:8443', '2001:db8::1:9443'],
+    });
+    expect(allowsIgnoringCertificateHost('::1', ipv6)).toBe(true);
+    expect(allowsIgnoringCertificateHost('[::1]', ipv6)).toBe(true);
+    expect(allowsIgnoringCertificateHost('2001:db8::1', ipv6)).toBe(true);
+    expect(allowsIgnoringCertificateHost('::2', ipv6)).toBe(false);
   });
 
   it('denies hosts that only look similar', () => {

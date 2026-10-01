@@ -153,8 +153,8 @@ function onCertificateError(
 /** Session-level hook: 0 = trust, -3 = fall back to Chromium's own verification. */
 function installCertificateVerifyProc(): void {
   session.defaultSession.setCertificateVerifyProc((request, callback) => {
-    // Electron hands this hook a hostname only (no port, no URL) — see
-    // `CertificatePolicy.hosts` for why the policy carries a host view too.
+    // Electron hands this hook a hostname only (no port, no URL; IPv6 arrives
+    // unbracketed, `::1`) — see `CertificatePolicy.hosts`.
     callback(allowsIgnoringCertificateHost(request.hostname, certificatePolicy) ? 0 : -3);
   });
 }

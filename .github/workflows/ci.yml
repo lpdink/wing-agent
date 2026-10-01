@@ -78,8 +78,10 @@ jobs:
   # ── TypeScript: lint + format + types + tests + build + package ──
   # Root pnpm workspace: one install covers every TS package
   # (extensions/vscode, packages/*, apps/*) — see docs/dev/vscode-extension.md §9.3.
-  # The desktop install pulls the Electron binary (~100 MB): `tsc` needs the types
-  # the package ships, and packaging itself is a developer-machine step.
+  # Nothing here needs the Electron runtime binary: `tsc` reads the `electron.d.ts`
+  # the package ships, and the main-process build is plain esbuild. The binary is
+  # fetched lazily on the first `require('electron')` (i.e. only `dev` / `--smoke` /
+  # packaging), and packaging itself is a developer-machine step.
   typescript-check:
     name: TypeScript Check
     runs-on: ubuntu-latest
