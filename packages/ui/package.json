@@ -31,7 +31,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "preview:port": "vite build --config vite.port-preview.config.mts",
-    "dev:port-preview": "vite --config vite.port-preview.config.mts"
+    "dev:port-preview": "vite --config vite.port-preview.config.mts",
+    "shoot:port": "node tools/port-preview/shoot.mts"
   },
   "//dependencies": "Everything `src/**` imports at runtime, declared here (pnpm does not hoist: a dependency must be declared by the package that uses it). The npm libraries are bundled by the consumer like the workspace packages — but unlike a pure build-time tool they are part of what this package *is*, so they are not devDependencies.",
   "dependencies": {

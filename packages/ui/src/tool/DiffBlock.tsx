@@ -6,7 +6,10 @@
 // `DiffHunk` contract and `diffTotals` are gone; rows map to the card's line classes
 // one-to-one, a windowed (`truncated`) payload appends the `…` row, `+n/−m`
 // counters ride the toolbar's status slot, and the language hint comes from a
-// local extension table instead of the Harness workspace helper.
+// local extension table instead of the Harness workspace helper (that table is
+// exported for the test pinning it to the grammars the highlighter ships). Wing
+// also added two DOM hooks the tests read: `data-testid="diff-body"` on the body
+// and `data-diff-kind` on every row.
 
 import { useCallback, useMemo, useState } from 'react';
 import clsx from 'clsx';
@@ -107,18 +110,29 @@ function copyText(path: string, rows: readonly DiffRow[]): string {
  *
  * The source component reads a full table from the Harness workspace package,
  * which is not a dependency here; this is the short extension map the code cards
- * need, resolved against the grammars the highlighter actually ships
- * (`src/chat/markdown/highlight.ts`) — an unknown extension means "no label".
+ * need. Every value must be a grammar the shared highlighter actually registers
+ * (`src/chat/markdown/highlight.ts`) — a hint the highlighter cannot resolve would
+ * silently fall back to the generic label, which is why the table exists at all.
+ * `tests/tool/diff-block.test.tsx` pins that invariant against
+ * `supportsHighlighting`; an extension the table does not list (or lists to an
+ * unsupported language, which the test rejects) simply yields "no label".
  * @param path - the changed file's path.
  * @returns the language hint, or undefined.
  */
-function languageForPath(path: string): string | undefined {
+export function languageForPath(path: string): string | undefined {
   const extension = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
   return LANGUAGE_BY_EXTENSION[extension];
 }
 
-/** Extensions the shared highlighter has a grammar for. */
-const LANGUAGE_BY_EXTENSION: Record<string, string> = {
+/**
+ * Extensions mapped to grammars the shared highlighter ships.
+ *
+ * Exported for the invariant test only (it is not part of the card's props
+ * contract): `.jsx` and `.md` are deliberately absent — the bundled grammars
+ * register no `jsx` alias (the TSX grammar handles `.tsx` only) and no markdown
+ * grammar is loaded, so listing them would be a silent failure.
+ */
+export const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   bash: 'bash',
   css: 'css',
   diff: 'diff',
@@ -127,8 +141,6 @@ const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   javascript: 'js',
   js: 'js',
   json: 'json',
-  jsx: 'jsx',
-  md: 'markdown',
   py: 'python',
   rs: 'rust',
   sh: 'bash',

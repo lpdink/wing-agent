@@ -79,9 +79,11 @@ Diffs — `packages/ui/src/tool/`:
   `diff` package (`structuredPatch`), the `DiffHunk` contract and `diffTotals`
   are gone; rows map one-to-one onto the card's line classes, a windowed payload
   appends the `…` row, the `+n/−m` counters ride the toolbar's status slot, and
-  the language hint comes from a local extension table. The `path` row class is
+  the language hint comes from a local extension table (exported so a test can pin
+  every entry to a grammar the highlighter actually ships). The `path` row class is
   dropped (the path rides the toolbar's title slot) and `added` / `removed` /
-  `hunk` classes are added.
+  `hunk` classes are added; two data hooks the tests read are Wing additions
+  (`data-testid="diff-body"` on the body, `data-diff-kind` on every row).
 
 Dependency pieces brought in early — `packages/ui/src/components/`,
 `packages/ui/src/icons/`:
@@ -99,14 +101,16 @@ Tests (kept in-repo as the port's regression suite) — `packages/ui/tests/`:
 
 - `tests/tool/ansi.test.ts`, `tests/tool/terminal-block.test.tsx`,
   `tests/tool/diff-block.test.tsx`, `tests/tool/head-tail-cap.test.ts`,
-  `tests/markdown/code-block.test.tsx` — derived from
-  `packages/client/ui-primitives/tests/` (`ansi.client.spec.ts`,
-  `terminal-block.client.spec.tsx`, `diff-block.client.spec.tsx`,
-  `code-block.client.spec.tsx`, `code-card-controls.client.spec.tsx`).
+  `tests/markdown/code-block.test.tsx`, `tests/markdown/use-viewport-highlighting.test.tsx`
+  — derived from `packages/client/ui-primitives/tests/`
+  (`ansi.client.spec.ts`, `terminal-block.client.spec.tsx`,
+  `diff-block.client.spec.tsx`, `code-block.client.spec.tsx`,
+  `code-card-controls.client.spec.tsx`, `highlight-viewport.client.spec.tsx`).
   Modified: the label fixtures are this package's own English constants (the
   components take copy via props rather than a locale), the diff fixtures are
-  `DiffCellModel`s rather than before/after text, and the streaming-highlight
-  cases are not ported (the streaming session itself is not).
+  `DiffCellModel`s rather than before/after text, the streaming-highlight cases are
+  not ported (the streaming session itself is not), and the viewport spec drives
+  this package's `CodeBlock` through a scripted `IntersectionObserver`.
 
 ### Derived source files — port batch 06c (process rows, ask trio, connection indicator)
 

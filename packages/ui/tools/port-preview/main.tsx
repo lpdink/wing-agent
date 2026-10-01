@@ -76,8 +76,10 @@ const TYPESCRIPT_SAMPLE = `export function selectActiveSession(state: AppState):
   return state.sessions.find((session) => session.sessionId === id) ?? null;
 }
 
-// A deliberately long line so the wrap toggle has something to do:
-export const LONG_LINE = 'the quick brown fox jumps over the lazy dog, twice, because once was not enough for a demo';`;
+// A deliberately long line so the wrap toggle has something to do: it wraps onto a
+// second line while wrapping is on, and scrolls sideways (clipped at the card edge)
+// once it is off — the two states the screenshots pin.
+export const LONG_LINE = 'the quick brown fox jumps over the lazy dog, twice, because once was not enough for a demo; then it jumps again, and again, until the card has to decide whether to wrap or to scroll';`;
 
 const PLAIN_SAMPLE = `$ wing ps
 ID                                    NAME             STATUS
@@ -195,6 +197,45 @@ const WINDOWED_DIFF_CELL: DiffCellModel = {
 /** `?section=<id>` renders one section only, so a capture is deterministic. */
 const ONLY_SECTION = new URLSearchParams(location.search).get('section');
 
+/**
+ * How many fences the rendered sections are expected to settle *highlighted*.
+ *
+ * Fixture knowledge, deliberately explicit: the code section's first card is
+ * `lang="ts"` (the highlighter ships that grammar) while the second is a
+ * `lang=""` plain-text card, and no other section renders a fence.
+ */
+const HIGHLIGHTED_FENCES = ONLY_SECTION === null || ONLY_SECTION === 'code' ? 1 : 0;
+
+/**
+ * Publish the readiness signal the screenshot driver waits for.
+ *
+ * A card highlights when it first intersects the viewport
+ * (`useViewportHighlighting`: observer callback → shiki build → re-render), which
+ * lands a frame or two after mount. A capture that fires before that frame shows
+ * the *plain* arm — the race the 06b review caught in the delivered shots — so the
+ * driver polls `document.documentElement.dataset.previewReady` instead of guessing
+ * a delay. Harness chrome; nothing in the package depends on it.
+ */
+function useScreenshotReadiness(): void {
+  useEffect(() => {
+    const ready = (): boolean => document.querySelectorAll('pre.shiki').length >= HIGHLIGHTED_FENCES;
+    if (ready()) {
+      document.documentElement.dataset.previewReady = 'true';
+      return;
+    }
+    const observer = new MutationObserver(() => {
+      if (ready()) {
+        document.documentElement.dataset.previewReady = 'true';
+        observer.disconnect();
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+}
+
 function Section({ id, title, children }: { id: string; title: string; children: React.ReactNode }) {
   if (ONLY_SECTION !== null && ONLY_SECTION !== id) return null;
   return (
@@ -208,6 +249,8 @@ function Section({ id, title, children }: { id: string; title: string; children:
 }
 
 function App() {
+  useScreenshotReadiness();
+
   // Screenshot affordance: the second reply bubble is opened once so one capture
   // shows both its collapsed and expanded shapes. Harness chrome only — nothing in
   // the package does this.

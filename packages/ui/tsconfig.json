@@ -13,6 +13,7 @@
     "tests/**/*.tsx",
     "tools/**/*.ts",
     "tools/**/*.tsx",
+    "tools/**/*.mts",
     "vite.port-preview.config.mts",
     "vitest.config.mts"
   ]

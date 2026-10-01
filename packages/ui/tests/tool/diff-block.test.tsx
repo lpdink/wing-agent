@@ -10,7 +10,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { DiffCellModel, DiffLineModel } from '@wing-agent/session';
 
-import { DEFAULT_DIFF_MAX_LINES, DiffBlock } from '../../src/tool/DiffBlock';
+import { supportsHighlighting } from '../../src/chat/markdown/highlight';
+import { DEFAULT_DIFF_MAX_LINES, DiffBlock, LANGUAGE_BY_EXTENSION } from '../../src/tool/DiffBlock';
 import type { DiffBlockLabels } from '../../src/tool/DiffBlock';
 
 const LABELS: DiffBlockLabels = {
@@ -110,6 +111,19 @@ describe('DiffBlock structure', () => {
   it('falls back to the generic language label for an unknown extension', () => {
     render(<DiffBlock cell={cell([add('x', 1)], { path: 'notes/README' })} labels={LABELS} />);
     expect(screen.getByText('Code')).toBeInTheDocument();
+  });
+
+  it('maps every extension to a grammar the shared highlighter ships', () => {
+    // The invariant behind the table: a hint `supportsHighlighting` rejects is a
+    // silent label failure — the card falls back to "Code" while its own comment
+    // claims the language. `.jsx` / `.md` used to be exactly that (the bundled
+    // grammars register no `jsx` alias and load no markdown grammar); the table no
+    // longer lists them, and this case keeps any future entry honest.
+    const dead = Object.entries(LANGUAGE_BY_EXTENSION)
+      .filter(([, language]) => !supportsHighlighting(language))
+      .map(([extension, language]) => `${extension} -> ${language}`);
+    expect(dead).toEqual([]);
+    expect(Object.keys(LANGUAGE_BY_EXTENSION).length).toBeGreaterThan(10);
   });
 
   it('marks a windowed payload with a final … row', () => {

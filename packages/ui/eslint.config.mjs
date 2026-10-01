@@ -173,10 +173,16 @@ export default tseslint.config(
     languageOptions: { globals: globals.node },
   },
   // The dev-only port preview (`tools/port-preview`) is browser code: it mounts
-  // React into a document and is built by the port-preview Vite config.
+  // React into a document and is built by the port-preview Vite config. Its
+  // screenshot driver is the one Node program in there — it spawns Chrome and
+  // speaks the DevTools protocol over the built-in WebSocket.
   {
     files: ['tools/**/*.ts', 'tools/**/*.tsx'],
     languageOptions: { globals: globals.browser },
+  },
+  {
+    files: ['tools/**/*.mts'],
+    languageOptions: { globals: globals.node },
   },
 
   // ── Tests: relaxed ─────────────────────────────────────────────────────
