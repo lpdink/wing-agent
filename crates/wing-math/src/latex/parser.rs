@@ -37,7 +37,23 @@
 //   9. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt
 //      处理，因此有纯空白差异；已用「先 rustfmt 上游文件、再与本文件逐行 diff」核对，
 //      除上述改动外逐字一致（核对脚本见 crate 根 NOTICE 的「内联保真度」一节）。
-//   除以上九点外与上游逐字一致（含文件内联测试）。
+//  10. 符号表与二元算子间距（步骤 02）：`latex_to_unicode` 补 `\top`（⊤ U+22A4，
+//      转置记号；缺了它 `W^\top` 会走未知命令兜底、被 AST 泄漏自检判成"未渲染"）与
+//      `\odot`（⊙ U+2299）；`is_spaced_operator` 加入带圈 / 星号算子
+//      `⊙ ⊕ ⊗ ∘ ∗ ⋆`（与本地改动 4 的 `·` 同类：它们在 LaTeX 里是二元运算符，
+//      上游漏了间距，`a ⊕ b` 被渲染成 `a ⊕b`）。`⊤` 是普通符号，**不**进间距集。
+//  11. 符号命令的尾随空格退回输入流（步骤 02；r1 的 S1 收窄）：本地改动 5 只把命名
+//      算子的语义空格补回来，符号命令（`\pi` `\top` …）走的是"读完命令名无条件吃掉
+//      一个空格"的上游路径，于是 `\pi x` 渲染成 `πx`，而裸词 `pi x` 是 `π x`（同一
+//      式子两种写法两种结果）。这里把吃掉的空格**退回输入流**（`self.pos -= 1`），
+//      空格由外层序列正常变成 `EqNode::Text(" ")`，于是 `w^\top x` 的上标仍是干净的
+//      `⊤`（→ `ᵀ`）、空格落在 `wᵀ` 与 `x` 之间，而不是被吞进上标参数。
+//      **只在下一位是另一个对象的起点时才退**（判据 + 反例表见
+//      `EqParser::trailing_space_separates_objects`；判据先跳过连续空格）：`\pi ^2` /
+//      `\epsilon _0` 的上下标要挂回符号本身、`x^{\top }` 的右花括号不能把上标挤出
+//      字形路径、`\right` / `\end` 不是（新）对象的起点（那是右定界符 / 环境结束，
+//      同类于 `}`）、`cases` 单元格（不 trim）不能多占一列、标点要贴前一个对象。
+//   除以上十一点外与上游逐字一致（含文件内联测试）。
 // ---------------------------------------------------------------------------
 
 //! The parser. Turns LaTeX math strings into [`EqNode`] trees.
@@ -65,9 +81,11 @@ fn is_spaced_operator(ch: char) -> bool {
         '\u{2192}' | '\u{2190}' | '\u{2194}' | '\u{21D2}' | '\u{21D0}' | '\u{21D4}' | // → ← ↔ ⇒ ⇐ ⇔
         '\u{227A}' | '\u{227B}' | '\u{223C}' | '\u{2245}' | '\u{226A}' | '\u{226B}' | // ≺ ≻ ∼ ≅ ≪ ≫
         '\u{221D}' | // ∝
-        // 本地改动（见文件头）：`·`（`\cdot`）在 LaTeX 里是二元运算符，两侧要有间距；
-        // 上游漏了它，`a \cdot b` 被渲染成 `a ·b`。
-        '\u{00B7}' |
+        // 本地改动（见文件头）：`·`（`\cdot`）与带圈 / 星号算子（`⊙ ⊕ ⊗ ∘ ∗ ⋆`）在
+        // LaTeX 里都是二元运算符，两侧要有间距；上游漏了它们，`a \cdot b` / `a ⊕ b`
+        // 被渲染成 `a ·b` / `a ⊕b`（缺左侧空格）。
+        '\u{00B7}' | '\u{2299}' | '\u{2295}' | '\u{2297}' | // · ⊙ ⊕ ⊗
+        '\u{2218}' | '\u{2217}' | '\u{22C6}' | // ∘ ∗ ⋆
         '\u{00B1}' | '\u{2213}' | '\u{00D7}' | '\u{00F7}' // ± ∓ × ÷
     )
 }
@@ -827,7 +845,77 @@ impl EqParser {
 
         // Greek letter / symbol lookup
         let symbol = latex_to_unicode(&name).unwrap_or_else(|| format!("\\{}", name));
+        // 本地改动（见文件头）：符号命令后面那个空格在 LaTeX 里是**分隔两个对象**的
+        // 语义空格（`\pi x` 该渲染成 `π x`；裸词路径 `pi x` 本来就是这个行为 —— 被吃
+        // 掉之后同一个式子两种写法两种结果）。本地改动 5 对命名算子（`\log p(x)`）做过
+        // 同样的事，这里推广到符号命令；做法是把吃掉的空格**退回输入流**，而不是塞进
+        // 返回的节点里：空格留在输入里，外层序列会照常把它变成 `EqNode::Text(" ")`
+        // （`is_space_like` 视其为空白，与 `Space` 节点的折叠行为一致），
+        // 于是 `w^\top x` 的上标仍然是干净的 `⊤`（→ `ᵀ`），空格落在 `wᵀ` 与 `x` 之间。
+        //
+        // **只在下一位确实是"另一个对象"的起点时才退**（r1 的 S1）：`^` / `_` / 撇号
+        // 要挂在**前面那个原子**上、右定界符与 `&` / `\\` 之后没有对象、标点紧贴前一个
+        // 对象排版 —— 这些形态下退回空格会把本来正确的结果弄坏（`\pi ^2` → `π ²`、
+        // `x^{\top }` 整条掉回源码、`cases` 单元格多一列）。判据见
+        // [`Self::trailing_space_separates_objects`]。
+        if had_trailing_space && self.trailing_space_separates_objects() {
+            self.pos -= 1;
+        }
         maybe_wrap_op_spacing(symbol)
+    }
+
+    /// 刚吃掉的尾随空格要不要退回输入流？（返回 `true` 表示"下一位是另一个对象的起点"）
+    ///
+    /// 本地改动（见文件头）：调用点在 `parse_command` 的符号命令分支，此时 `self.pos`
+    /// 指向那个空格**之后**的第一个字符。下列形态下退回空格是净损失：
+    ///
+    /// | 下一位 | 为什么不能退回 | 例（退回 → 不退回） |
+    /// |---|---|---|
+    /// | `^` `_` `'` | 上下标 / 撇号挂在**前一个原子**上 | `\pi ^2` → `π ²` / `π²` |
+    /// | `}` `)` `]` | 右定界符：回到外层只剩尾随空白 | `x^{\top }` → 源码 / `xᵀ` |
+    /// | `\right` `\end` | 同上（`\right` 闭合 `\left`、`\end` 闭合环境；r2 的 S1） | `\left( \alpha \right)` → `( α )` / `( α)` |
+    /// | `&` `\\` | 环境列 / 行分隔符（`cases` 单元格不 trim） | `cases` 宽 11 / 10 |
+    /// | `,` `;` `:` `.` `!` `?` | 标点紧贴前一个对象排版 | `\pi , x` → `π , x` / `π, x` |
+    /// | 输入结束 | 没有对象可分隔 | `x + \pi ` |
+    ///
+    /// 判据**跳过后续的连续空格**（r2 的 N6）：`\pi  ^2` 这种多打一个空格的写法，只看
+    /// 紧邻那一位的话，退回的空格自己会成为 `^` 的宿主（`π  ²`）。
+    fn trailing_space_separates_objects(&self) -> bool {
+        let mut i = self.pos;
+        while self.chars.get(i) == Some(&' ') {
+            i += 1;
+        }
+        let Some(&next) = self.chars.get(i) else {
+            return false; // 输入结束：那是行尾空白，不是分隔符
+        };
+        if next == '\\'
+            && (self.chars.get(i + 1) == Some(&'\\') // 行分隔符 `\\`
+                || self.is_command_at(i, "right")
+                || self.is_command_at(i, "end"))
+        {
+            return false;
+        }
+        !matches!(
+            next,
+            '^' | '_' | '\'' | '}' | ')' | ']' | '&' | ',' | ';' | ':' | '.' | '!' | '?'
+        )
+    }
+
+    /// `self.chars[pos..]` 是否是命令 `\name`（命令名后不接字母）？
+    ///
+    /// 本地改动（见文件头）：与 [`Self::lookahead_command`] 同一判据，只是从**任意位置**
+    /// 看 —— [`Self::trailing_space_separates_objects`] 要先跳过连续空格，位置不再是
+    /// `self.pos`。
+    fn is_command_at(&self, pos: usize, name: &str) -> bool {
+        if self.chars.get(pos) != Some(&'\\') {
+            return false;
+        }
+        let start = pos + 1;
+        let end = start + name.chars().count();
+        if end > self.chars.len() || !self.chars[start..end].iter().copied().eq(name.chars()) {
+            return false;
+        }
+        end == self.chars.len() || !self.chars[end].is_ascii_alphabetic()
     }
 
     /// Parse \text{...} — consume braces and return raw text (no math parsing).
@@ -1109,6 +1197,7 @@ pub fn latex_to_unicode(name: &str) -> Option<String> {
         "bullet" => '\u{2022}',
         "oplus" => '\u{2295}',
         "otimes" => '\u{2297}',
+        "odot" => '\u{2299}', // 本地改动（见文件头）：`\odot`（⊙）上游缺失，ML 里的逐元素乘高频
         // Relations
         "leq" | "le" => '\u{2264}',
         "geq" | "ge" => '\u{2265}',
@@ -1125,6 +1214,10 @@ pub fn latex_to_unicode(name: &str) -> Option<String> {
         "succ" => '\u{227B}',
         "perp" => '\u{22A5}',
         "parallel" => '\u{2225}',
+        // 本地改动（见文件头）：`\top`（U+22A4 DOWN TACK，转置记号）上游缺失，
+        // `W^\top` / `A^\top` 会走未知命令兜底、被 AST 泄漏自检判成"没渲染的命令"。
+        // 注意它是**普通符号**不是二元算子：不进 `is_spaced_operator`。
+        "top" => '\u{22A4}',
         // Logic & sets
         "forall" => '\u{2200}',
         "exists" => '\u{2203}',
