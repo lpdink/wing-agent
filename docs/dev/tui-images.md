@@ -152,7 +152,9 @@ worker 存活、可见图全部画出。变异实验（把 LRU 上限改成永�
 
 ## 八、性能（`cargo bench --bench image_frame`）
 
-本机实测（Apple silicon，release，120×60 的 band，每张图 290×80 px → 4 行盒子；盒子 = 图，见第五节）：
+本机实测（Apple silicon，release，120×60 的 band；`frame/*`、`scroll/*`、`freshness/*` 用每张图
+`290×80` px → 4 行盒子（盒子 = 图，见第五节），`first_encode/*` 自用自己的 `290×20` / `800×600` /
+`1920×1080` 三张 fixture，与盒子无关）：
 
 | 场景 | 均值 | 读法 |
 |---|---|---|

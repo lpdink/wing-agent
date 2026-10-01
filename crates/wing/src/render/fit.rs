@@ -33,7 +33,11 @@
 //! The result is never larger than the box on either axis and never larger than
 //! the picture's own cell footprint — that is what makes it a *fit*, and it is
 //! why a small picture reserves few rows instead of being letterboxed into a
-//! tall box.
+//! tall box. The single exception is the `u16::MAX` saturation branch inherited
+//! from upstream (see [`fit_area_proportionally`]): it needs **two** absurd
+//! inputs at once (a picture wider than 65535 px *and* a box wider than 65535
+//! px), and it only ever breaks the **column** bound — the height, which is
+//! what the layout reads, is unaffected.
 
 use ratatui::layout::Size;
 
@@ -80,7 +84,14 @@ impl CellPixels {
 ///
 /// The box is in cells and the answer is in cells; the picture's own pixel size
 /// caps it on both axes, so this never upscales (a 16×16 icon in a 10×20 cell
-/// is 2×1 cells however large the box is) and never exceeds the box.
+/// is 2×1 cells however large the box is) and never exceeds the box — with the
+/// single, documented exception of upstream's `u16::MAX` saturation branch
+/// (see [`fit_area_proportionally`]): a picture wider than 65535 px in a box
+/// whose pixel width is *also* past 65535 (≈ 6554 columns at a 10 px cell, or a
+/// 2-column box at an absurd 32k-px cell) answers `u16::MAX` columns, i.e. wider
+/// than its box. The **height** is unaffected either way: that branch does not
+/// move it, and the box's width — the axis that triggers it — is the same on
+/// both sides of the layout/encoder split.
 pub fn fit_cells(px_w: u32, px_h: u32, box_cells: Size, cell: CellPixels) -> Size {
     if px_w == 0 || px_h == 0 || box_cells.width == 0 || box_cells.height == 0 || !cell.is_valid() {
         return Size::ZERO;
@@ -101,8 +112,11 @@ pub fn fit_cells(px_w: u32, px_h: u32, box_cells: Size, cell: CellPixels) -> Siz
 /// Round a pixel extent up to whole cells.
 ///
 /// Integer arithmetic, and total: an extent past `u16::MAX` cells saturates
-/// (what the `as u16` cast in `ratatui-image`'s float version does too), which
-/// the store's 16 Mpx ceiling makes unreachable in production.
+/// (what the `as u16` cast in `ratatui-image`'s float version does too). That
+/// saturation is only reachable together with the branch in
+/// [`fit_area_proportionally`] — the store's 16 Mpx pixel ceiling bounds the
+/// *picture*, but the box's own pixel width can still be the trigger, so the
+/// real bound is "no terminal is 6554 columns wide".
 fn cells_ceil(px: u32, cell_px: u16) -> u16 {
     let cells = u64::from(px).div_ceil(u64::from(cell_px));
     u16::try_from(cells).unwrap_or(u16::MAX)
@@ -113,9 +127,18 @@ fn cells_ceil(px: u32, cell_px: u16) -> u16 {
 ///
 /// A port of `ratatui_image`'s private `fit_area_proportionally` — itself the
 /// `image` crate's `resize_dimensions` (`fill = false`) — including its
-/// `u16::MAX` saturation branch, which is unreachable from here whenever the
-/// picture stays under the store's pixel budget but is kept so that
-/// [`fit_cells`] agrees with the upstream function for *every* input.
+/// `u16::MAX` saturation branch, kept so that [`fit_cells`] agrees with the
+/// upstream function for *every* input (see `ui/image/encode.rs`'s parity test).
+///
+/// The branch triggers when the fitted width itself exceeds 65535 px, which
+/// needs the picture **and** the box to be that wide at once: `nw` is bounded
+/// by `min(box_px_w, px_w)`, so both must be past 65535. It is therefore a guard
+/// against arithmetic no real terminal can produce — a 6554-column terminal at a
+/// 10 px cell, or a picture ≥ 65536 px wide shown in one — and not something the
+/// store's pixel budget rules out on its own (a 100000×3 picture is only
+/// 300 000 px). It answers `u32::MAX` pixels of width, i.e. `u16::MAX` cells,
+/// which can exceed the box: the one documented exception to the axis bound
+/// above.
 fn fit_area_proportionally(width: u32, height: u32, nwidth: u32, nheight: u32) -> (u32, u32) {
     let ratio = f64::min(
         f64::from(nwidth) / f64::from(width),
@@ -255,5 +278,25 @@ mod tests {
         // The row count is unaffected either way: that branch never moves the
         // height, which is the number the layout reads.
         assert_eq!(fitted.height, 5);
+
+        // The trigger is "the picture *and* the box are past 65535 px wide",
+        // not "the picture is big": the same 100000x3 picture in a 1000-column
+        // box never reaches it (its fit is bounded by the box), which is the
+        // other side of the documented exception.
+        assert_eq!(
+            fit_cells(100000, 3, Size::new(1000, 36), CELL),
+            Size::new(1000, 1),
+            "a narrow box keeps the width bound"
+        );
+        // Both sides past 65535 — here through an absurd 32768-px cell in a
+        // 2-column box — and the width exceeds the box: the one input class
+        // that breaks the column bound.
+        let saturated = fit_cells(100000, 3, Size::new(2, 36), CellPixels::new(32768, 32768));
+        assert_eq!(saturated, Size::new(u16::MAX, 1));
+        assert!(
+            saturated.width > 2,
+            "the documented exception: the width may exceed the box here"
+        );
+        assert_eq!(saturated.height, 1, "the height never exceeds the box");
     }
 }

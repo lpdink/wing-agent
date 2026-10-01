@@ -119,9 +119,9 @@ pub enum ImageMode {
 /// Pixel dimensions of one image, as read from its header.
 ///
 /// Deliberately smaller than `ui::image::ImageMeta` (which also carries file
-/// size and mtime): layout needs the aspect ratio and nothing else. The chat
-/// view builds one from a probe result with
-/// `ImageShape::new(meta.px_w, meta.px_h)`.
+/// size and mtime): the layout needs both pixel dimensions — the fit is a
+/// size computation, not a ratio one — and nothing else. The chat view builds
+/// one from a probe result with `ImageShape::new(meta.px_w, meta.px_h)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImageShape {
     /// Image width in pixels.
@@ -134,14 +134,6 @@ impl ImageShape {
     /// A shape from header pixel dimensions.
     pub const fn new(px_w: u32, px_h: u32) -> Self {
         Self { px_w, px_h }
-    }
-
-    /// `px_w / px_h`, with a finite `0.0` for degenerate headers.
-    pub fn aspect_ratio(&self) -> f64 {
-        if self.px_h == 0 {
-            return 0.0;
-        }
-        f64::from(self.px_w) / f64::from(self.px_h)
     }
 
     /// Whether the shape can be laid out at all (both dimensions non-zero).
@@ -301,7 +293,8 @@ impl ImageOpts {
 /// Off-screen inputs are impossible: the cap is the box the fit is computed
 /// against, and a fit never grows its box, so the answer is already inside
 /// [`MIN_ANCHOR_ROWS`]..=[`MAX_ANCHOR_ROWS`]. The clamp is kept as the written
-/// contract.
+/// contract (and it is the guard that makes the lower bound explicit — the fit's
+/// own `max(…, 1)` is one layer down).
 ///
 /// Total: a zero width, a degenerate shape (`px_h == 0`) or a degenerate cell
 /// answers [`MIN_ANCHOR_ROWS`] rather than panicking. The parse layer rejects
@@ -317,10 +310,7 @@ pub fn anchor_rows(width: u16, shape: ImageShape, cell: CellPixels) -> u16 {
         Size::new(width, MAX_ANCHOR_ROWS),
         cell,
     );
-    fitted
-        .height
-        .clamp(MIN_ANCHOR_ROWS, MAX_ANCHOR_ROWS)
-        .max(MIN_ANCHOR_ROWS)
+    fitted.height.clamp(MIN_ANCHOR_ROWS, MAX_ANCHOR_ROWS)
 }
 
 // ============================================================
@@ -869,6 +859,14 @@ mod tests {
         // Narrower than the picture: the width binds, and the rows follow.
         assert_eq!(anchor_rows(40, small, CELL), 20);
         assert_eq!(anchor_rows(20, small, CELL), 10);
+        // Both pixel dimensions matter, not their ratio: two 1:1 pictures at
+        // the same width and cell reserve five rows and the cap respectively.
+        // (A ratio-based row count would answer the same number for both.)
+        assert_eq!(anchor_rows(140, ImageShape::new(100, 100), CELL), 5);
+        assert_eq!(
+            anchor_rows(140, ImageShape::new(1000, 1000), CELL),
+            MAX_ANCHOR_ROWS
+        );
     }
 
     #[test]
@@ -981,15 +979,15 @@ mod tests {
         );
     }
 
+    /// The shape gate: a degenerate header (either dimension zero) is not a
+    /// shape, and the row count never divides by it.
     #[test]
-    fn shape_aspect_ratio_is_finite_for_degenerate_headers() {
-        assert!((ImageShape::new(320, 200).aspect_ratio() - 1.6).abs() < 1e-9);
-        assert_eq!(ImageShape::new(100, 0).aspect_ratio(), 0.0);
-        assert!(ImageShape::new(100, 0).aspect_ratio().is_finite());
-        assert!(ImageShape::new(0, 100).aspect_ratio().is_finite());
+    fn a_degenerate_shape_is_not_usable() {
         assert!(!ImageShape::new(100, 0).is_usable());
         assert!(!ImageShape::new(0, 100).is_usable());
+        assert!(!ImageShape::new(0, 0).is_usable());
         assert!(ImageShape::new(1, 1).is_usable());
+        assert!(ImageShape::new(1920, 1080).is_usable());
     }
 
     // ── Path policy ───────────────────────────────────────────────
