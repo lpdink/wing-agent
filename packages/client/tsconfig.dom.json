@@ -1,0 +1,9 @@
+{
+  "//": "Browser probe: the same sources, typed as a DOM-only program (`types: []` — no node globals, no `@types/node`). Together with `tsconfig.json` (no DOM lib) the two projects pin the package's environment-agnostic promise: it must compile for a Node host AND for a web shell. Deliberately NOT referenced from `tsconfig.json` — typescript-eslint's projectService requires each file to belong to exactly one project.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": []
+  },
+  "include": ["src/**/*.ts"]
+}

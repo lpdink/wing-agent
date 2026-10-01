@@ -1,0 +1,9 @@
+{
+  "//": "Package project: `src/` + `tests/` + the vitest config (so typescript-eslint's projectService can type-check it too). NO DOM lib on purpose — `document` / `window` are a compile error here, which is what keeps the package usable from a Node host (extension host, Electron main). The browser direction is checked by `tsconfig.dom.json`.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts", "vitest.config.mts"]
+}

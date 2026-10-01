@@ -1,0 +1,37 @@
+{
+  "name": "@wing-agent/client",
+  "version": "0.1.0",
+  "//": "The gateway capability layer shared by every host (VS Code extension today; web / Electron tomorrow). Private and never published: the sources ARE the artifact (see `exports`) — bundlers compile them (esbuild for the extension host, Vite for the shells, vitest for tests), so there is no build step to keep in sync. Workspace member of the root pnpm workspace (`pnpm-workspace.yaml`).",
+  "private": true,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lpdink/wing-agent.git",
+    "directory": "packages/client"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.dom.json",
+    "lint": "eslint . --max-warnings=0",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.13.5",
+    "@types/ws": "^8.18.1",
+    "eslint": "^10.10.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.8",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^5.0.1",
+    "ws": "^8.21.3"
+  }
+}
