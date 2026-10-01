@@ -71,6 +71,17 @@
     该入口还额外返回**消费的字符数**，供上层判断"输入有没有被静默丢掉一段"。
 13. **`cargo fmt`**：所有内联文件都跑了 `cargo fmt`（仓库门禁要求 `cargo fmt --check`
     干净），因此与上游原文存在**纯空白**差异。
+14. **上标字形表补全**（`src/grid/layout.rs::to_superscript_char`）：上游只映射数字 / 符号
+    / `n` / `i`，`x^d` / `W^T` / `x^w` 这类高频写法全部掉进"堆叠"分支（2 行 → 行内
+    `None` → 显示源码）。按 Unicode 数据（逐条码点 + 字符名写在函数里）补齐可得的字形：
+    小写 a–z 的 25 个（缺 `q`）、有上标字形的大写 18 个（缺 `C F Q S X Y Z`），外加
+    `⊤ → ᵀ`（`^\top` 的行内形态）。缺失字形仍返回 `None`（堆叠回退语义不变）。
+15. **符号表 + 二元算子间距**（`src/latex/parser.rs`）：`latex_to_unicode` 补 `\top`（⊤，
+    转置记号）/ `\odot`（⊙）；`is_spaced_operator` 加入带圈 / 星号算子 `⊙ ⊕ ⊗ ∘ ∗ ⋆`
+    （与改动 8 的 `·` 同类：`a ⊕ b` 不再渲染成 `a ⊕b`）。`⊤` 是普通符号，不进间距集。
+16. **符号命令的尾随空格退回输入流**（`src/latex/parser.rs`）：改动 9 只盖到命名算子，
+    符号命令（`\pi` `\top` …）后面被吃掉的空格现在退回输入流 —— `\pi x` 与裸词 `pi x`
+    一致渲染成 `π x`，`w^\top x` → `wᵀ x`（空格落在上标之后，不污染上标参数）。
 
 ## 内联保真度（如何复核"除上述改动外逐字一致"）
 
@@ -99,8 +110,12 @@ rustfmt --edition 2024 --quiet /tmp/term-maths-1.0.0/src/layout.rs
 | `src/grid/renderer.rs` | 6 | 模块路径 |
 | `src/grid/latex_renderer.rs` | 8 | 模块路径 |
 | `src/grid/mod.rs` | 23 | 模块路径 + 移除三个未内联后端 |
-| `src/grid/layout.rs` | 74 | 模块路径 + `center_accent` + `build_delimiter` 提权 + `layout_seq` 一次性拼装 + `layout_binom` 修正 + `layout_sqrt` 空被开方数 |
-| `src/latex/parser.rs` | 183 | 模块路径 + 4 处 `collapsible_if` + `·` 间隔 + 命名算子空格 + `parse_group_atom` 跳空白 + 递归深度闸 |
+| `src/grid/layout.rs` | 239* | 模块路径 + `center_accent` + `build_delimiter` 提权 + `layout_seq` 一次性拼装 + `layout_binom` 修正 + `layout_sqrt` 空被开方数 + 上标字形表（改动 14） |
+| `src/latex/parser.rs` | 285* | 模块路径 + 4 处 `collapsible_if` + `·` / 带圈算子间距（改动 8、15）+ 命名算子与符号命令的空格（改动 9、16）+ `parse_group_atom` 跳空白 + 递归深度闸 + 符号表补 `⊤`/`⊙`（改动 15） |
+
+\* 这两个文件在**步骤 02 复测**（同一脚本、本机 `rustfmt 1.9.0-stable`；旧值 74 / 183 来自
+更早一次测量 —— 用同一脚本量改动前的版本得到 135 / 255，说明数字还受 rustfmt 版本与
+`use` 行是否归一化的影响）。行数只表示"改动量级"，逐条内容以上面的索引为准。
 
 上游测试随源码内联（`parser.rs` / `rendered_block.rs` / `mathfont.rs` 文件内的
 `#[cfg(test)] mod tests`），两个集成测试也整体迁移到 `tests/upstream_robustness.rs`

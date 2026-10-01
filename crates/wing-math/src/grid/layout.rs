@@ -31,7 +31,12 @@
 //   7. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt
 //      处理，因此有纯空白差异；已用「先 rustfmt 上游文件、再与本文件逐行 diff」核对，
 //      除上述改动外逐字一致（核对脚本见 crate 根 NOTICE 的「内联保真度」一节）。
-//   除以上七点外与上游逐字一致。
+//   8. `to_superscript_char` 字形表补全（步骤 02）：上游只映射数字 / 符号 / `n` / `i`，
+//      `x^d` / `W^T` / `x^w` 这类高频写法全部掉进"堆叠"分支（2 行 → 行内 `None` →
+//      上层显示源码）。补上 Unicode 里**可得**的上标字形：小写 a–z 的 25 个（缺 `q`）、
+//      有上标字形的大写 18 个（缺 `C F Q S X Y Z`），外加 `⊤ → ᵀ`（`^\top` 的行内形态）。
+//      缺失字形仍返回 `None` → 堆叠回退，语义不变。逐条的码点与字符名写在函数里。
+//   除以上八点外与上游逐字一致。
 // ---------------------------------------------------------------------------
 
 use crate::latex::{AccentKind, EqNode, MathFontKind, MatrixKind};
@@ -85,25 +90,87 @@ fn layout_text(s: &str) -> RenderedBlock {
 }
 
 /// Map a character to its Unicode superscript equivalent, if one exists.
+///
+/// 本地改动（见文件头）：字形表补全。上游只映射数字 / 几个符号 / `n` / `i`，于是
+/// `x^d`、`x^k`、`W^T`、`x^w` 这些高频写法全部掉进"堆叠"分支（2 行 → 行内被上层判成
+/// `None` → 显示源码）。这里按 **Unicode 数据**（字符名 + 码点逐条写在下面）把可得的
+/// 上标字形补齐：小写 a–z 里 Unicode 有上标字形的 25 个（缺 `q`，只有 Latin Extended-F
+/// 的 U+107A5，字体基本没有）+ 有上标字形的大写 18 个（缺 `C F Q S X Y Z`），
+/// 外加 `⊤ → ᵀ`（转置 `^\top` 的行内形态）。
+///
+/// 表中**没有**的字符（`q`、大写 C/F/Q/S/X/Y/Z、希腊字母、汉字…）返回 `None`：调用方
+/// [`try_unicode_superscript`] 随即让出，走既有的"上下标堆叠"布局（行内因此仍是
+/// `None` → 上层显示源码），语义与补全之前完全一致。
 fn to_superscript_char(ch: char) -> Option<char> {
     match ch {
-        '0' => Some('⁰'),
-        '1' => Some('¹'),
-        '2' => Some('²'),
-        '3' => Some('³'),
-        '4' => Some('⁴'),
-        '5' => Some('⁵'),
-        '6' => Some('⁶'),
-        '7' => Some('⁷'),
-        '8' => Some('⁸'),
-        '9' => Some('⁹'),
-        '+' => Some('⁺'),
-        '-' => Some('⁻'),
-        '=' => Some('⁼'),
-        '(' => Some('⁽'),
-        ')' => Some('⁾'),
-        'n' => Some('ⁿ'),
-        'i' => Some('ⁱ'),
+        // ── 数字与符号 ──────────────────────────────────────────────
+        '0' => Some('⁰'), // U+2070 SUPERSCRIPT ZERO
+        '1' => Some('¹'), // U+00B9 SUPERSCRIPT ONE
+        '2' => Some('²'), // U+00B2 SUPERSCRIPT TWO
+        '3' => Some('³'), // U+00B3 SUPERSCRIPT THREE
+        '4' => Some('⁴'), // U+2074 SUPERSCRIPT FOUR
+        '5' => Some('⁵'), // U+2075 SUPERSCRIPT FIVE
+        '6' => Some('⁶'), // U+2076 SUPERSCRIPT SIX
+        '7' => Some('⁷'), // U+2077 SUPERSCRIPT SEVEN
+        '8' => Some('⁸'), // U+2078 SUPERSCRIPT EIGHT
+        '9' => Some('⁹'), // U+2079 SUPERSCRIPT NINE
+        '+' => Some('⁺'), // U+207A SUPERSCRIPT PLUS SIGN
+        '-' => Some('⁻'), // U+207B SUPERSCRIPT MINUS
+        '=' => Some('⁼'), // U+207C SUPERSCRIPT EQUALS SIGN
+        '(' => Some('⁽'), // U+207D SUPERSCRIPT LEFT PARENTHESIS
+        ')' => Some('⁾'), // U+207E SUPERSCRIPT RIGHT PARENTHESIS
+        // ── 小写字母（Unicode 可得的全集，缺 q）────────────────────
+        'a' => Some('ᵃ'), // U+1D43 MODIFIER LETTER SMALL A
+        'b' => Some('ᵇ'), // U+1D47 MODIFIER LETTER SMALL B
+        'c' => Some('ᶜ'), // U+1D9C MODIFIER LETTER SMALL C
+        'd' => Some('ᵈ'), // U+1D48 MODIFIER LETTER SMALL D
+        'e' => Some('ᵉ'), // U+1D49 MODIFIER LETTER SMALL E
+        'f' => Some('ᶠ'), // U+1DA0 MODIFIER LETTER SMALL F
+        'g' => Some('ᵍ'), // U+1D4D MODIFIER LETTER SMALL G
+        'h' => Some('ʰ'), // U+02B0 MODIFIER LETTER SMALL H
+        'i' => Some('ⁱ'), // U+2071 SUPERSCRIPT LATIN SMALL LETTER I
+        'j' => Some('ʲ'), // U+02B2 MODIFIER LETTER SMALL J
+        'k' => Some('ᵏ'), // U+1D4F MODIFIER LETTER SMALL K
+        'l' => Some('ˡ'), // U+02E1 MODIFIER LETTER SMALL L
+        'm' => Some('ᵐ'), // U+1D50 MODIFIER LETTER SMALL M
+        'n' => Some('ⁿ'), // U+207F SUPERSCRIPT LATIN SMALL LETTER N
+        'o' => Some('ᵒ'), // U+1D52 MODIFIER LETTER SMALL O
+        'p' => Some('ᵖ'), // U+1D56 MODIFIER LETTER SMALL P
+        'r' => Some('ʳ'), // U+02B3 MODIFIER LETTER SMALL R
+        's' => Some('ˢ'), // U+02E2 MODIFIER LETTER SMALL S
+        't' => Some('ᵗ'), // U+1D57 MODIFIER LETTER SMALL T
+        'u' => Some('ᵘ'), // U+1D58 MODIFIER LETTER SMALL U
+        'v' => Some('ᵛ'), // U+1D5B MODIFIER LETTER SMALL V
+        'w' => Some('ʷ'), // U+02B7 MODIFIER LETTER SMALL W
+        'x' => Some('ˣ'), // U+02E3 MODIFIER LETTER SMALL X
+        'y' => Some('ʸ'), // U+02B8 MODIFIER LETTER SMALL Y
+        'z' => Some('ᶻ'), // U+1DBB MODIFIER LETTER SMALL Z
+        // ── 大写字母（Unicode 里有上标字形的子集；缺 C F Q S X Y Z）─
+        'A' => Some('ᴬ'), // U+1D2C MODIFIER LETTER CAPITAL A
+        'B' => Some('ᴮ'), // U+1D2E MODIFIER LETTER CAPITAL B
+        'D' => Some('ᴰ'), // U+1D30 MODIFIER LETTER CAPITAL D
+        'E' => Some('ᴱ'), // U+1D31 MODIFIER LETTER CAPITAL E
+        'G' => Some('ᴳ'), // U+1D33 MODIFIER LETTER CAPITAL G
+        'H' => Some('ᴴ'), // U+1D34 MODIFIER LETTER CAPITAL H
+        'I' => Some('ᴵ'), // U+1D35 MODIFIER LETTER CAPITAL I
+        'J' => Some('ᴶ'), // U+1D36 MODIFIER LETTER CAPITAL J
+        'K' => Some('ᴷ'), // U+1D37 MODIFIER LETTER CAPITAL K
+        'L' => Some('ᴸ'), // U+1D38 MODIFIER LETTER CAPITAL L
+        'M' => Some('ᴹ'), // U+1D39 MODIFIER LETTER CAPITAL M
+        'N' => Some('ᴺ'), // U+1D3A MODIFIER LETTER CAPITAL N
+        'O' => Some('ᴼ'), // U+1D3C MODIFIER LETTER CAPITAL O
+        'P' => Some('ᴾ'), // U+1D3E MODIFIER LETTER CAPITAL P
+        'R' => Some('ᴿ'), // U+1D3F MODIFIER LETTER CAPITAL R
+        'T' => Some('ᵀ'), // U+1D40 MODIFIER LETTER CAPITAL T
+        'U' => Some('ᵁ'), // U+1D41 MODIFIER LETTER CAPITAL U
+        'V' => Some('ⱽ'), // U+2C7D MODIFIER LETTER CAPITAL V
+        'W' => Some('ᵂ'), // U+1D42 MODIFIER LETTER CAPITAL W
+        // ── 特例：转置记号 ──────────────────────────────────────────
+        // `\top` 是 ⊤（U+22A4 DOWN TACK）；它在上标位置的行内形态用 ᵀ
+        // （U+1D40 MODIFIER LETTER CAPITAL T）—— 也就是 `W^\top` → `Wᵀ`。
+        // 放在字形表（而不是让符号表直接产出 ᵀ）是为了让正文位置的 `\top` 仍是 ⊤，
+        // 同时 `x^⊤`（用户直接写 Unicode）也能走同一条路。
+        '⊤' => Some('ᵀ'),
         _ => None,
     }
 }
