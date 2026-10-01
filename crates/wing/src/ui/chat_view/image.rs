@@ -144,8 +144,12 @@ pub(super) fn frame_image_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::markdown::CellPixels;
     use crate::render::markdown::ImageShape;
     use crate::render::markdown::anchor_rows;
+
+    /// The terminal cell every box here is laid out for.
+    const CELL: CellPixels = CellPixels::new(10, 20);
 
     /// An 800×600 anchor at markdown width 38 (`cols`), line 4, column 2.
     fn anchor(line: usize, cols: u16) -> ImageSpan {
@@ -153,7 +157,7 @@ mod tests {
             line,
             column: 2,
             cols,
-            rows: anchor_rows(cols, ImageShape::new(800, 600)),
+            rows: anchor_rows(cols, ImageShape::new(800, 600), CELL),
             path: PathBuf::from("/ws/plot.png"),
             alt: "plot".into(),
             px_w: 800,

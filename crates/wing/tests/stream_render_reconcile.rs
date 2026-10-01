@@ -33,6 +33,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use wing::config::ThemePalette;
 use wing::config::rendering::MathMode;
+use wing::render::markdown::CellPixels;
 use wing::render::markdown::ImageEntry;
 use wing::render::markdown::ImageOpts;
 use wing::render::markdown::ImageShape;
@@ -668,6 +669,14 @@ fn image_shapes() -> Vec<(&'static str, String)> {
             "image_at_the_top",
             "![first](./plots/a.png)\n\ntext after\n".into(),
         ),
+        // The picture is smaller than the box used to be: the box is now the
+        // fitted footprint (52×26 cells at width 120, 20×20 at width 40), so
+        // the anchor block shrinks with the header instead of reserving 36
+        // rows — the case the shared row contract exists for.
+        (
+            "image_smaller_than_the_box",
+            "before\n\n![icon](./plots/small.png)\n\nafter\n".into(),
+        ),
         (
             "image_then_heading",
             "![a](./plots/a.png)\n\n# Heading\n\nbody\n".into(),
@@ -694,9 +703,15 @@ fn image_shapes() -> Vec<(&'static str, String)> {
     ]
 }
 
+/// The terminal cell the image matrix is laid out for: 10×20 px, the fixture
+/// every row count in this crate's tests uses.
+const CELL: CellPixels = CellPixels::new(10, 20);
+
 /// The metadata table the image matrix renders with: `/ws` is the workspace,
-/// `plots/a.png` is a 4:3 image (30 rows at width 80) and the extremes cover
-/// the cap and the floor.
+/// `plots/a.png` is a 4:3 image (30 rows at width 80), `plots/small.png` is
+/// **smaller than the box** (the case the row contract exists for: the box is
+/// the picture, not a 36-row reservation) and the extremes cover the cap and
+/// the floor.
 fn image_opts() -> ImageOpts {
     let root = std::path::PathBuf::from("/ws");
     ImageOpts::anchor(
@@ -706,7 +721,9 @@ fn image_opts() -> ImageOpts {
             ImageEntry::new(root.join("plots/b.png"), ImageShape::new(1600, 900)),
             ImageEntry::new(root.join("plots/wide.png"), ImageShape::new(2000, 100)),
             ImageEntry::new(root.join("plots/tall.png"), ImageShape::new(300, 4000)),
+            ImageEntry::new(root.join("plots/small.png"), ImageShape::new(512, 512)),
         ],
+        CELL,
     )
 }
 
@@ -834,6 +851,37 @@ fn reconcile_matrix_images() {
         anchored >= 8,
         "the image corpus must produce anchors, got {anchored}"
     );
+
+    // The small picture is the shape this contract exists for: its box is the
+    // *fitted* footprint at every width, not the 36-row reservation an aspect
+    // assumption would have guessed. Asserted against the shared function the
+    // layout and the encoder both call — a stale formula on either side goes
+    // red here as well as in `ui::image::encode`'s own reconciliation.
+    let small = "before\n\n![icon](./plots/small.png)\n\nafter\n";
+    for &width in WIDTHS {
+        let composed = full_render(
+            small,
+            width,
+            Profile::Content,
+            &ThemePalette::default(),
+            &images,
+        );
+        let anchor = composed
+            .images()
+            .iter()
+            .flatten()
+            .next()
+            .expect("the small picture must anchor")
+            .clone();
+        let want = wing::render::markdown::anchor_rows(width - 2, ImageShape::new(512, 512), CELL);
+        assert_eq!(anchor.rows, want, "small picture at width {width}");
+        assert_eq!(anchor.cols, width - 2, "small picture at width {width}");
+        assert!(
+            want < wing::render::markdown::MAX_ANCHOR_ROWS,
+            "the 512-squared picture is smaller than the box at width {width}: \
+             {want} rows is a reservation, not a fit"
+        );
+    }
 }
 
 /// The review's blocker-B shapes at the chunk sizes the report used
