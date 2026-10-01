@@ -108,7 +108,9 @@ I/O），所以由 app lane 检查：
 **上限在读取处也成立**（review #135 [S1]）：`probe` 与真正解码之间隔着一个渲染周期，正是「模型重写同一
 路径」的高发窗口，所以 `ui/image/encode.rs::decode` 在**同一个 fd** 上复核两道预算——超过 `file_bytes`
 时一个字节都不读、超过像素预算时一个解码缓冲都不分配，失败给出与探测相同的 `TooLarge` /
-`TooManyPixels` → 链接路径（测试：`encode.rs` 的两条复核 + `store.rs::a_file_swapped_after_the_probe_still_hits_the_limits`）。
+`TooManyPixels` → 链接路径。**不是图**的仍然报 `NotAnImage`：头被截断到解码器构造期就失败的（只有
+IHDR 的 30000×30000 PNG 实测如此，33 B / 1.6 ms）走的也是这条，同样不读像素、不分配（测试：
+`encode.rs` 的两条复核 + `store.rs::a_file_swapped_after_the_probe_still_hits_the_limits`）。
 
 **扩展名 ↔ codec 必须逐项对齐**（review #135 [S2]）：`IMAGE_EXTENSIONS`（`png jpg jpeg gif webp bmp`）
 与根 `Cargo.toml` 的 `image` feature 集是同一份能力声明的两半——只开 `png`+`jpeg` 时，`.gif/.webp/.bmp`

@@ -65,8 +65,20 @@ fn next_kitty_id() -> u32 {
 /// disk can have been replaced in between — rewriting the same path is exactly how a model
 /// publishes a new picture. The budgets are therefore enforced *here* as well, on the very
 /// descriptor that gets decoded: a swapped-in oversized file is never read, a swapped-in
-/// giant header never gets an allocation. Both answer with the reason the probe would have
-/// given, so the caller cannot tell which side of the window it hit.
+/// giant header never gets an allocation.
+///
+/// The reasons are the probe's, so the caller cannot tell which side of the window it hit —
+/// with one caveat: a file this path cannot even *construct* a decoder for is `NotAnImage`,
+/// exactly as it would be from the probe. That includes a header truncated so early that the
+/// codec rejects it while reading (an IHDR-only PNG declaring 30000×30000 lands here), which
+/// is still refused before a single pixel is allocated — the gate is the *header read*, not
+/// the verdict's spelling.
+///
+/// The header gate also covers what `ImageReader::decode` used to check for us: that call
+/// ran `image`'s own `max_alloc` guard (512 MiB) over the decoded size, and `into_decoder`
+/// does not. It is not needed here — `Limits::pixels` (16 M px by default) times the fattest
+/// format this build decodes (`Rgba16`, 8 bytes per pixel) is ≤128 MiB, i.e. the stricter of
+/// the two bounds.
 pub(crate) fn decode(path: &Path, limits: &Limits) -> Result<DynamicImage, Unavailable> {
     let file = File::open(path).map_err(|_| Unavailable::Unreadable)?;
     // The size comes off the open descriptor: one `stat`, and no race between

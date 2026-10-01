@@ -316,11 +316,18 @@ impl fmt::Display for PathReject {
 
 /// Whether the workspace containment check below folds ASCII case.
 ///
-/// macOS and Windows default to case-insensitive filesystems; Linux does not.
-/// The path itself is never rewritten — this only decides which spellings count
-/// as *the same* path, and only here: a case-variant spelling still names the
-/// file the filesystem resolves it to, so refusing it would be a false
-/// "escapes the workspace" that costs the user a picture.
+/// macOS and Windows *default* to case-insensitive filesystems; Linux does not.
+/// (A macOS volume can be formatted case-sensitive — the rule is per filesystem,
+/// and the platform default is the only thing a lexical check can follow.)
+///
+/// Exactly one input can tell the two rules apart, and it is the `..` fold:
+/// under `/workspace`, the relative path `../WORKSPACE/a.png` names a file
+/// *inside* the workspace on a case-insensitive filesystem, so refusing it would
+/// be a false "escapes the workspace" that costs the user a picture. A variant
+/// spelling *below* the root is admitted (or refused) identically under both
+/// rules — the joined path carries the workspace's own spelling, byte for byte.
+/// The path itself is never rewritten: this decides only what counts as *the
+/// same* path.
 const CASE_INSENSITIVE_PATHS: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
 /// [`Path::starts_with`] under the platform's case rule (see
@@ -329,7 +336,9 @@ const CASE_INSENSITIVE_PATHS: bool = cfg!(any(target_os = "macos", target_os = "
 ///
 /// Only ASCII case is folded (Unicode folding would need a table this layer has
 /// no business carrying), and symlinks are still compared by their own path:
-/// the boundary here is lexical by design.
+/// the boundary here is lexical by design. Reachable only from the relative
+/// branch of [`resolve_image_path`], i.e. only for paths that `..` folded out of
+/// the workspace; everything else carries the workspace's own spelling.
 fn is_inside(path: &Path, root: &Path) -> bool {
     is_inside_with(path, root, CASE_INSENSITIVE_PATHS)
 }
@@ -912,20 +921,33 @@ mod tests {
 
     #[test]
     fn a_case_variant_spelling_resolves_like_the_platform_allows() {
-        // The same rule, seen from the resolver: the path is never rewritten,
-        // only admitted.
+        // The same rule, seen from the resolver — and the *only* input where it
+        // can decide anything is the `..` fold: the containment check runs on
+        // the relative branch, whose prefix is the workspace's own spelling
+        // (byte for byte), so a variant spelling *below* the root is admitted
+        // under both rules. `../WORKSPACE/a.png` under `/workspace` folds back
+        // onto a *sibling-looking* path that is the same file on a
+        // case-insensitive filesystem and a different one on Linux.
         let w = Some(ws()); // "/workspace"
-        let variant = resolve_image_path(w.as_deref(), "SUB/./Plot.PNG");
-        match variant {
-            Ok(path) => {
-                assert!(CASE_INSENSITIVE_PATHS, "only folded on those platforms");
-                assert_eq!(path, PathBuf::from("/workspace/SUB/Plot.PNG"));
-            }
-            Err(reason) => {
-                assert_eq!(reason, PathReject::EscapesWorkspace);
-                assert!(!CASE_INSENSITIVE_PATHS, "byte comparison on Linux");
-            }
+        let folded = resolve_image_path(w.as_deref(), "../WORKSPACE/a.png");
+        if CASE_INSENSITIVE_PATHS {
+            assert_eq!(
+                folded,
+                Ok(PathBuf::from("/WORKSPACE/a.png")),
+                "the fold is what admits the case-variant spelling of the root"
+            );
+        } else {
+            assert_eq!(
+                folded,
+                Err(PathReject::EscapesWorkspace),
+                "byte comparison: that spelling is outside the workspace"
+            );
         }
+        // Below the root the two rules agree, and the spelling is preserved.
+        assert_eq!(
+            resolve_image_path(w.as_deref(), "SUB/./Plot.PNG"),
+            Ok(PathBuf::from("/workspace/SUB/Plot.PNG"))
+        );
         // Escaping is rejected either way, whatever the platform.
         assert_eq!(
             resolve_image_path(w.as_deref(), "../../etc/a.png"),

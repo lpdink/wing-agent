@@ -158,7 +158,9 @@ W            = markdown 渲染宽 = 单元格宽 − 2 列前缀（也就是锚�
 **路径策略**（纯词法：不 stat、不 canonicalize、不解析符号链接——这是显示边界不是安全边界）：
 
 - 接受：workspace 相对路径（`.`/`..`/重复分隔符折掉）、绝对路径、`file://`（`file://host/…` 除外）；
-- 拒绝：空、控制字符（防转义注入）、超过 512 字符、远程 scheme（`http:` / `https:` / `data:` / `ftp:` …）、`~`（要读环境变量）、没有 workspace 时的相对路径、`..` 越出 workspace（包含判定在大小写不敏感平台折叠 **ASCII** 大小写：macOS/Windows 上 `…/Project/a.png` 与 `…/project/a.png` 是同一个文件，只按平台规则比较、不 stat 也不 canonicalize；见 `images.rs::is_inside`）、扩展名不在 `png jpg jpeg gif webp bmp`（大小写不敏感）。
+- 拒绝：空、控制字符（防转义注入）、超过 512 字符、远程 scheme（`http:` / `https:` / `data:` / `ftp:` …）、`~`（要读环境变量）、没有 workspace 时的相对路径、`..` 越出 workspace、扩展名不在 `png jpg jpeg gif webp bmp`（大小写不敏感）。
+
+**包含判定的大小写规则**（review #135 [N1]）：只在**相对路径**分支上做词法包含检查，而相对路径的前缀就是 workspace 自己的拼写（逐字节相同），所以「根之下的变体拼写」在两种规则下都放行；唯一能看出平台差异的输入是 `..` 折回根的**大小写变体**——大小写不敏感盘上 `../WORKSPACE/a.png` 与 `../workspace/a.png` 是同一个文件，故按平台折叠 **ASCII** 大小写（`images.rs::is_inside`，仍然不 stat、不 canonicalize；绝对路径一律接受，与「链接可打开任意路径」同口径）。
 
 拒绝不是错误：该图片走链接路径。
 
