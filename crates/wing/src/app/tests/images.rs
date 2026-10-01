@@ -184,22 +184,31 @@ fn frame(app: &mut App, term: &mut Terminal<TestBackend>) -> Buffer {
     term.backend().buffer().clone()
 }
 
-/// Draw until `done` holds on the frame just drawn.
+/// Draw until `done` holds on the frame just drawn, and hand that frame's
+/// buffer back.
 ///
 /// The store's worker is a real thread and its results only become visible
 /// through `poll()` at the start of a draw, so waiting *is* drawing in a loop
 /// (the same shape the event loop has, with the waker replaced by this sleep).
+///
+/// **Assert on the returned buffer, never on a frame drawn afterwards.** The
+/// predicate and the buffer describe the same frame; a later frame re-plans
+/// this frame's requests (`Images::paint` → `request`), so a picture that was
+/// drawn a moment ago can be `Pending` in it again — an encode that just landed
+/// can evict the cache entry, and a probe that just landed can add an anchor
+/// whose encode has not started. That is not the thing under test, and it is
+/// exactly what a loaded CI machine makes visible.
 fn draw_until(
     app: &mut App,
     term: &mut Terminal<TestBackend>,
     what: &str,
     mut done: impl FnMut(&App, &Buffer) -> bool,
-) {
+) -> Buffer {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let buf = frame(app, term);
         if done(app, &buf) {
-            return;
+            return buf;
         }
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(2));
@@ -1548,13 +1557,21 @@ fn a_hundred_pictures_stay_within_the_cache_budget() {
         // Every anchor the frame recorded must end up drawn: the whole point of
         // scrolling through a long session is that the picture that is visible
         // is the picture that gets encoded, whatever the cache did before.
-        draw_until(&mut app, &mut term, "the step's pictures", |app, buf| {
-            app.chat
-                .frame_images()
-                .iter()
-                .all(|frame| painted_at(buf, frame.area.x, frame.area.y))
+        //
+        // The step's assertions below read **this** frame (see `draw_until`):
+        // taking one more frame here would re-plan the step's requests, and a
+        // picture that is `Pending` in it — an encode that landed and evicted
+        // the cache entry in between, an anchor whose probe only just answered —
+        // says nothing about the budget under test. The wait demands a
+        // non-empty set as well: `all()` over nothing would return the first
+        // frame and make the step vacuous.
+        let buf = draw_until(&mut app, &mut term, "the step's pictures", |app, buf| {
+            let frames = app.chat.frame_images();
+            !frames.is_empty()
+                && frames
+                    .iter()
+                    .all(|frame| painted_at(buf, frame.area.x, frame.area.y))
         });
-        let buf = frame(&mut app, &mut term);
         let stats = app.images.stats().expect("lane");
         assert!(
             stats.cached <= budget.0,
@@ -1574,10 +1591,6 @@ fn a_hundred_pictures_stay_within_the_cache_budget() {
         );
         assert!(stats.worker_alive, "the worker died at row {offset}");
         let frames = app.chat.frame_images();
-        assert!(
-            !frames.is_empty(),
-            "the fixture must put an anchor on screen at row {offset}"
-        );
         for anchor in frames {
             assert!(
                 painted_at(&buf, anchor.area.x, anchor.area.y),
