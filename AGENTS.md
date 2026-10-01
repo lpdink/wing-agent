@@ -19,6 +19,7 @@ Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+
 ```
 
 - **三种前端形态，同一个二进制**：TUI（默认，human-in-the-loop）；stdio（`wing -p`，headless，Claude Code 兼容 NDJSON——把 `wing` alias 为 `claude` 即可接入外部编排器）；编排 CLI（`wing run/wait/ps/info/tail/head/release` 后台任务，`wing start/stop/status` 网关生命周期）。
+- **图形前端共享一套 TS 公共层**：`packages/client`（网关能力层）、`packages/session`（会话归约）、`packages/ui`（React 渲染组件）；消费者 = `extensions/vscode`（第四个前端）、`apps/web`（移动友好 Web 客户端，第五个）、`apps/desktop`（Electron 壳，第六个）——同一份渲染层与归约，不重复维护。
 - **协议**：HTTP 承载生命周期 / 查询 / 变更（24 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header / WS query param），TLS 交给反向代理。
 - **持久化**：`SessionStore` 是会话全部持久状态（metadata、混合 message/event 日志、aux）的唯一所有者；后端 `file`（默认，`~/.wing/core/sessions/`）与 `memory`（进程内）。`TrackedList` 是纯内存链拓扑引擎（uuid/parentUuid），I/O 全部委托 `MessageLog`；SQL 后端是增量实现，非架构改动。
 - **模型调用**：`provider/` 隔离协议差异（OpenAI 兼容 / Anthropic），ReAct 循环对协议无感知。
@@ -193,7 +194,10 @@ crates/wing/src/
 - `libs/wing-orch/wing_orch/` — 编排 CLI（后台 Goal，port of `app/goal.rs`）：`cli.py`、`goal.py`、`runner.py`。**目前少用，改动不必同步本节细节。**
 - `assets/` — 品牌资产（README 页头 banner 明暗两版、站姿 mascot SVG、社交预览 PNG）：由 `examples/export_logo.rs` 从欢迎屏的同一份像素网格导出，改画后重跑即可，不会漂移。
 - `libs/wing-probe/` — 确定性集成测试基础设施（假 Provider + driver + observer 断言库）：`wing_probe/`（env / provider / driver / watch / history / files）、`scenarios/`（整机断言场景）、`tests/`（基础设施自测）。**禁止 import `wing`**（AST 门禁强制；允许 `wing_sdk`），一切经公开 HTTP / WS 协议 → [docs/dev/probe-testing.md](docs/dev/probe-testing.md)。
-- `extensions/vscode/` — VSCode 前端（第四个前端形态；TS strict + pnpm 单包四层：`src/core` 网关能力层 / `src/host` 扩展宿主 / `src/webview` React 渲染 / `src/shared` 两侧契约）。层门禁由机制强制：分 tsconfig（DOM/node 隔离）+ ESLint 分区规则 + `tests/layers` 守门测试；`make check`/`make test` 含 `check-ts`/`test-ts`，CI 有 `typescript-check` job → [docs/dev/vscode-extension.md](docs/dev/vscode-extension.md) · [extensions/vscode/README.md](extensions/vscode/README.md)。
+- `packages/`（TS 公共层，pnpm workspace）：`packages/client/`（`@wing-agent/client`）网关能力层（环境无关：WS 连接/重连监督、chunk 重组、HTTP 客户端、协议镜像）；`packages/session/`（`@wing-agent/session`）会话归约（重放==直播、cell 模型、命令表）；`packages/ui/`（`@wing-agent/ui`）React 渲染组件（cells / markdown / composer / 面板）+ theme tokens（部分移植自 DeepSeek Harness，MIT，见根 `THIRD_PARTY_NOTICES.md`）。层门禁由机制强制：分 tsconfig 探针（DOM/node 隔离）+ ESLint 分区 + `tests/layers` 守门测试；根 workspace（`pnpm-workspace.yaml`）经 `make check-ts`/`test-ts` 与 CI `typescript-check` job 覆盖。
+- `extensions/vscode/` — VSCode 前端（第四个前端形态；`src/host` 扩展宿主 + `src/webview` 薄壳，消费 `packages/*`）→ [docs/dev/vscode-extension.md](docs/dev/vscode-extension.md) · [extensions/vscode/README.md](extensions/vscode/README.md)。
+- `apps/web/` — 移动友好 Web 客户端（Vite + React；直连网关：连接自愈/重放==直播、transcript、控制面、Ask 往返、工作区图片端点、PWA；截图基建 `pnpm shot`）→ [apps/web/README.md](apps/web/README.md)。
+- `apps/desktop/` — Electron 壳（加载 web 构建；`wing-app://` 协议；网关发现/拉起；设置桥 IPC；自签名证书忽略；未签名打包产 dmg/zip）→ [docs/dev/web-desktop.md](docs/dev/web-desktop.md)。
 - `e2e/claude-agent-sdk-integration/` — 用 claude-agent-sdk 跑 wing 的端到端测试（`make test-e2e`）。
 - 测试目录：`libs/core/tests/`（后端 pytest，60 个文件）、`libs/wing-sdk/tests/`、`libs/wing-orch/tests/`。
 - 顶层 `docs/dev/` 为开发者深度文档（中文），`scripts/sync_version.py` 同步版本号。
@@ -216,6 +220,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/tui-rendering.md`](docs/dev/tui-rendering.md) | TUI markdown 渲染：`render_probe` 调试入口、Content/Thinking 两个 profile 的差异、公式（`$…$` / `$$…$$` / AMS 环境）渲染与定界符归一化、流式静息态 == 参考渲染的不变量、已知边界、图片锚点的行数纯函数与路径策略 |
 | [`docs/dev/tui-images.md`](docs/dev/tui-images.md) | TUI 图片能力：两档阶梯（可渲染 / 存量链接）、探测与配置、三态、资源上限与压力验证、**新鲜度**（重写同一路径 ≤1s 换图）、失效触发点、遮挡与选择、性能数字、真机验收清单、症状→先看哪里 |
 | [`docs/dev/vscode-extension.md`](docs/dev/vscode-extension.md) | VSCode 扩展（`extensions/vscode/`）：四层分层与数据流、桥协议与归约（重放==直播 / 单 WS 多订阅）、会话时序与多 Tab、连接自愈、构建门禁 / smoke / 打包与验收 |
+| [`docs/dev/web-desktop.md`](docs/dev/web-desktop.md) | Web 与桌面壳（`apps/web` / `apps/desktop`）：职责与层门禁、`--smoke` 约定、`<userData>/config.json` 键、忽略自签名证书的判定与 Electron API 限制、`wing-app://` 与 CORS 契约、未签名打包与 ad-hoc 重签名 |
 | [`docs/dev/probe-testing.md`](docs/dev/probe-testing.md) | 确定性集成测试（wing-probe）：跑法 / 新增断言场景（写代码、不写配置）/ 断言原语速查 / 上下文红线清单与 persist 口径 / 逃生舱约定 |
 | [`docs/dev/welcome-mascot.md`](docs/dev/welcome-mascot.md) | 开屏海鸥：字母网格帧数据与品牌调色板、待机/干活两姿态与动作族、可见性门控的重绘成本契约、改画与预览的创作期工作流 |
 
