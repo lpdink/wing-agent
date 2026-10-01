@@ -42,7 +42,7 @@ fn inline_superscripts_for_acceptance_list() {
     inline(r"W^{T}", "Wᵀ");
 }
 
-/// 上标字形表逐条（小写 25 个 + 大写 18 个）：期望字形由表里的**码点**导出并断言（N3）。
+/// 上标字形表逐条（小写 25 个 + 大写 19 个）：期望字形由表里的**码点**导出并断言（N3）。
 #[test]
 fn inline_superscripts_cover_every_available_glyph() {
     // 小写 a–z：Unicode 里有上标字形的 25 个（唯一缺 `q`，见下一个用例）。
@@ -75,10 +75,10 @@ fn inline_superscripts_cover_every_available_glyph() {
         ('y', 0x02B8, "MODIFIER LETTER SMALL Y"),
         ('z', 0x1DBB, "MODIFIER LETTER SMALL Z"),
     ];
-    // 大写：Unicode 里有上标字形的 18 个。不收的是 `S X Y Z`（UCD 里根本没有上标字形）
-    // 与 `C F Q`（有码位：U+A7F2 / U+A7F3 / U+A7F4，MODIFIER LETTER CAPITAL C/F/Q，
-    // Unicode 14 起 —— 新版码位、字体覆盖差，与 `q` 的 U+107A5 同类，故不收）。
-    // 理由详见 `grid/layout.rs` 的注释。
+    // 大写：Unicode 里有上标字形的 19 个。不收的是 `S X Z`（UCD 里没有常规大写修饰
+    // 字形）与 `q` / `Y` / `C` / `F` / `Q`（有码位：U+107A5、U+107B2 MODIFIER LETTER
+    // SMALL CAPITAL Y、U+A7F2 / U+A7F3 / U+A7F4，都在 Latin Extended-F / -D 的补遗里，
+    // Unicode 14 起 —— 字体覆盖差，故不收）。理由详见 `grid/layout.rs` 的注释。
     let uppercase = [
         ('A', 0x1D2C, "MODIFIER LETTER CAPITAL A"),
         ('B', 0x1D2E, "MODIFIER LETTER CAPITAL B"),
@@ -152,10 +152,10 @@ fn missing_superscript_glyphs_still_fall_back_to_stacking() {
         r"x^C",        // 大写 C：有码位 U+A7F2（Unicode 14 起）但字体覆盖差，不收（同 q）
         r"x^F",        // 大写 F：U+A7F3，同上
         r"x^Q",        // 大写 Q：U+A7F4，同上
-        r"x^S",        // 大写 S：UCD 里没有上标字形
-        r"x^X",        // 大写 X：UCD 里没有上标字形
-        r"x^Y",        // 大写 Y：UCD 里没有上标字形
-        r"x^Z",        // 大写 Z：UCD 里没有上标字形
+        r"x^S",        // 大写 S：UCD 里没有常规大写修饰字形
+        r"x^X",        // 大写 X：同上
+        r"x^Y",        // 大写 Y：只有 U+107B2（SMALL CAPITAL Y，新版码位/覆盖差），同 q
+        r"x^Z",        // 大写 Z：同 S / X
         r"e^{\pi}",    // 希腊字母 π：无上标字形
         r"e^{i\pi}",   // 混合：只要有一个字符没有字形就整体回退
         r"x^{\alpha}", // 拉丁命令产出的希腊字母同理
@@ -287,6 +287,13 @@ fn symbol_command_space_does_not_detach_scripts_or_punctuation() {
     inline(r"\pi ; x", "π; x");
     inline(r"\pi . x", "π. x");
     inline(r"\pi : x", "π: x");
+    inline(r"\pi ! x", "π! x");
+    inline(r"\pi ? x", "π? x");
+    // 多打一个空格的形态（`\pi  ^2`）：判据要越过连续空格，否则退回的空格自己成了
+    // `^` 的宿主（r2 的 N6）
+    inline(r"\pi  ^2", "π ²");
+    inline(r"\pi  _2", "π ₂");
+    inline(r"\pi  x", "π x");
     // 输入结束时的尾随空格没有对象可分隔（渲染结果不受影响）
     inline(r"x + \pi ", "x + π");
     // 显示形态：上下标、分式线宽、环境列宽都回到"空格被吃掉"的尺寸
@@ -299,6 +306,43 @@ fn symbol_command_space_does_not_detach_scripts_or_punctuation() {
     // `&` 之后的分隔符形态：`cases` 单元格不 trim（见下一个用例），列宽必须是 10
     let cases = render_display(r"\begin{cases} \pi & a \\ b & c \end{cases}", 40).unwrap();
     assert_eq!(cases.width(), 10, "{:?}", cases.lines());
+}
+
+/// 回归（r2 的 S1）：`\right` / `\end` 与 `}` / `)` / `]` 同类 —— 它们之前也不能退回空格。
+/// 单独的 `\begin{cases} … \end{cases}` 渲染时行尾会被 trim，看不出差异；这里一律用
+/// **后面还跟内容**的组合形态（否则断言会被 trim 掩蔽）。
+#[test]
+fn symbol_command_space_is_not_kept_before_closing_right_or_end() {
+    let delimited = render_display(r"\left( \alpha \right)", 60).unwrap();
+    assert_eq!(delimited.lines(), ["( α)"]);
+    assert_eq!(delimited.width(), 4);
+    let delimited_then_content = render_display(r"\left( \alpha \right) x", 60).unwrap();
+    assert_eq!(delimited_then_content.lines(), ["( α) x"]);
+    assert_eq!(delimited_then_content.width(), 6);
+    let env_then_content = render_display(r"\begin{cases} \pi \end{cases} y", 60).unwrap();
+    assert_eq!(env_then_content.lines(), ["{ π y"]);
+    assert_eq!(env_then_content.width(), 5);
+    let env_cond_then_content =
+        render_display(r"\begin{cases} a & \beta \end{cases} y", 60).unwrap();
+    assert_eq!(env_cond_then_content.lines(), ["{ a   if  β y"]);
+    assert_eq!(env_cond_then_content.width(), 13);
+    // 同前缀的命令不受影响：`\rightarrow` 不是 `\right`（`is_command_at` 与上游
+    // `lookahead_command` 同判据 —— 命令名后不接字母）。这两行钉的是**渲染结果**
+    // （它的间距来自算子表，所以不构成前缀判据的判别实验：前缀写法也测不出差异）。
+    inline(r"\pi \rightarrow x", "π → x");
+    let arrow_in_delimiters =
+        render_display(r"\left( \alpha \rightarrow \beta \right)", 60).unwrap();
+    assert_eq!(arrow_in_delimiters.lines(), ["( α → β)"]);
+    assert_eq!(arrow_in_delimiters.width(), 8);
+}
+
+/// 回归（r2 的 N1）：行分隔符 `\\` 的分支也要有断言 —— 走的是**组合形态**
+/// （`cases` 里 `\pi \\ b`，后面还跟 `+ x`），单独渲染时行尾空白会被 trim 掉、测不出差异。
+#[test]
+fn symbol_command_space_is_not_kept_before_a_row_separator() {
+    let block = render_display(r"\begin{cases} \pi \\ b \end{cases} + x", 60).unwrap();
+    assert_eq!(block.lines(), ["⎧ π", "⎩b  + x"]);
+    assert_eq!(block.width(), 7);
 }
 
 /// 现状登记（N4）：`cases` 的值单元格**不 trim** 首尾空白 —— `matrix` / `array` /

@@ -33,11 +33,12 @@
 //      除上述改动外逐字一致（核对脚本见 crate 根 NOTICE 的「内联保真度」一节）。
 //   8. `to_superscript_char` 字形表补全（步骤 02）：上游只映射数字 / 符号 / `n` / `i`，
 //      `x^d` / `W^T` / `x^w` 这类高频写法全部掉进"堆叠"分支（2 行 → 行内 `None` →
-//      上层显示源码）。补上 Unicode 里**可得**的上标字形：小写 a–z 的 25 个、大写 18 个，
-//      外加 `⊤ → ᵀ`（`^\top` 的行内形态）。**不收**的两类：`S X Y Z` 在 UCD 里根本没有
-//      上标字形；`q`（U+107A5）与 `C F Q`（U+A7F2 / U+A7F3 / U+A7F4，Unicode 14 起）
-//      有码位但属新版码位、字体覆盖差。缺失字形仍返回 `None` → 堆叠回退，语义不变。
-//      逐条的码点与字符名写在函数里。
+//      上层显示源码）。补上 Unicode 里**可得且字体覆盖良好**的上标字形：小写 a–z 的 25 个、
+//      大写 19 个，外加 `⊤ → ᵀ`（`^\top` 的行内形态）。**不收**的两类：`S X Z`
+//      （UCD 里没有常规大写修饰字形）；`q`（U+107A5）、`Y`（U+107B2 MODIFIER LETTER
+//      SMALL CAPITAL Y）、`C F Q`（U+A7F2 / U+A7F3 / U+A7F4）—— 有码位，但都在
+//      Latin Extended-F / -D 的补遗里（Unicode 14 起），字体覆盖差。缺失字形仍返回
+//      `None` → 堆叠回退，语义不变。逐条的码点与字符名写在函数里。
 //   除以上八点外与上游逐字一致。
 // ---------------------------------------------------------------------------
 
@@ -96,13 +97,14 @@ fn layout_text(s: &str) -> RenderedBlock {
 /// 本地改动（见文件头）：字形表补全。上游只映射数字 / 几个符号 / `n` / `i`，于是
 /// `x^d`、`x^k`、`W^T`、`x^w` 这些高频写法全部掉进"堆叠"分支（2 行 → 行内被上层判成
 /// `None` → 显示源码）。这里按 **Unicode 数据**（字符名 + 码点逐条写在下面）把可得的
-/// 上标字形补齐：小写 a–z 里 Unicode 有上标字形的 25 个 + 有上标字形的大写 18 个，
+/// 上标字形补齐：小写 a–z 里 Unicode 有上标字形的 25 个 + 有上标字形的大写 19 个，
 /// 外加 `⊤ → ᵀ`（转置 `^\top` 的行内形态）。**不收**的两类字形：
 ///
-/// - `S` `X` `Y` `Z`：UCD（16.0）里根本没有上标字形；
-/// - `q`（只有 Latin Extended-F 的 U+107A5）、`C` `F` `Q`（U+A7F2 / U+A7F3 / U+A7F4，
-///   MODIFIER LETTER CAPITAL C/F/Q，Unicode 14 起）：码位存在，但都属新版码位、
-///   字体覆盖差（与 `S X Y Z` 那种"数据里没有"是两回事）。
+/// - `S` `X` `Z`：UCD（16.0）里没有常规大写修饰字形（`Y` 只有 U+107B2
+///   MODIFIER LETTER **SMALL CAPITAL** Y，见下一类）；
+/// - `q`（U+107A5）、`Y`（U+107B2）、`C` `F` `Q`（U+A7F2 / U+A7F3 / U+A7F4，
+///   MODIFIER LETTER CAPITAL C/F/Q）：码位存在，但都在 Latin Extended-F / -D 的补遗里
+///   （Unicode 14 起），**字体覆盖差** —— 与 `S X Z` 那种"数据里没有"是两回事。
 ///
 /// 两者都返回 `None` → 堆叠回退；理由是**终端字体**画不出来就等于没渲染。
 ///
@@ -153,7 +155,7 @@ fn to_superscript_char(ch: char) -> Option<char> {
         'x' => Some('ˣ'), // U+02E3 MODIFIER LETTER SMALL X
         'y' => Some('ʸ'), // U+02B8 MODIFIER LETTER SMALL Y
         'z' => Some('ᶻ'), // U+1DBB MODIFIER LETTER SMALL Z
-        // ── 大写字母（UCD 里可得 18 个；S X Y Z 无字形，C F Q 见函数文档）─
+        // ── 大写字母（UCD 里可得 19 个；S X Z 无常规字形，Y / C F Q 见函数文档）─
         'A' => Some('ᴬ'), // U+1D2C MODIFIER LETTER CAPITAL A
         'B' => Some('ᴮ'), // U+1D2E MODIFIER LETTER CAPITAL B
         'D' => Some('ᴰ'), // U+1D30 MODIFIER LETTER CAPITAL D

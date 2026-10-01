@@ -49,9 +49,10 @@
 //      空格由外层序列正常变成 `EqNode::Text(" ")`，于是 `w^\top x` 的上标仍是干净的
 //      `⊤`（→ `ᵀ`）、空格落在 `wᵀ` 与 `x` 之间，而不是被吞进上标参数。
 //      **只在下一位是另一个对象的起点时才退**（判据 + 反例表见
-//      `EqParser::trailing_space_separates_objects`）：`\pi ^2` / `\epsilon _0` 的
-//      上下标要挂回符号本身、`x^{\top }` 的右花括号不能把上标挤出字形路径、
-//      `cases` 单元格（不 trim）不能多占一列、标点要贴前一个对象。
+//      `EqParser::trailing_space_separates_objects`；判据先跳过连续空格）：`\pi ^2` /
+//      `\epsilon _0` 的上下标要挂回符号本身、`x^{\top }` 的右花括号不能把上标挤出
+//      字形路径、`\right` / `\end` 之后没有对象、`cases` 单元格（不 trim）不能多占
+//      一列、标点要贴前一个对象。
 //   除以上十一点外与上游逐字一致（含文件内联测试）。
 // ---------------------------------------------------------------------------
 
@@ -872,20 +873,49 @@ impl EqParser {
     /// |---|---|---|
     /// | `^` `_` `'` | 上下标 / 撇号挂在**前一个原子**上 | `\pi ^2` → `π ²` / `π²` |
     /// | `}` `)` `]` | 右定界符：回到外层只剩尾随空白 | `x^{\top }` → 源码 / `xᵀ` |
+    /// | `\right` `\end` | 同上（`\right` 闭合 `\left`、`\end` 闭合环境；r2 的 S1） | `\left( \alpha \right)` → `( α )` / `( α)` |
     /// | `&` `\\` | 环境列 / 行分隔符（`cases` 单元格不 trim） | `cases` 宽 11 / 10 |
     /// | `,` `;` `:` `.` `!` `?` | 标点紧贴前一个对象排版 | `\pi , x` → `π , x` / `π, x` |
     /// | 输入结束 | 没有对象可分隔 | `x + \pi ` |
+    ///
+    /// 判据**跳过后续的连续空格**（r2 的 N6）：`\pi  ^2` 这种多打一个空格的写法，只看
+    /// 紧邻那一位的话，退回的空格自己会成为 `^` 的宿主（`π  ²`）。
     fn trailing_space_separates_objects(&self) -> bool {
-        let Some(next) = self.peek() else {
+        let mut i = self.pos;
+        while self.chars.get(i) == Some(&' ') {
+            i += 1;
+        }
+        let Some(&next) = self.chars.get(i) else {
             return false; // 输入结束：那是行尾空白，不是分隔符
         };
-        if next == '\\' && self.chars.get(self.pos + 1) == Some(&'\\') {
-            return false; // 行分隔符 `\\`
+        if next == '\\'
+            && (self.chars.get(i + 1) == Some(&'\\') // 行分隔符 `\\`
+                || self.is_command_at(i, "right")
+                || self.is_command_at(i, "end"))
+        {
+            return false;
         }
         !matches!(
             next,
             '^' | '_' | '\'' | '}' | ')' | ']' | '&' | ',' | ';' | ':' | '.' | '!' | '?'
         )
+    }
+
+    /// `self.chars[pos..]` 是否是命令 `\name`（命令名后不接字母）？
+    ///
+    /// 本地改动（见文件头）：与 [`Self::lookahead_command`] 同一判据，只是从**任意位置**
+    /// 看 —— [`Self::trailing_space_separates_objects`] 要先跳过连续空格，位置不再是
+    /// `self.pos`。
+    fn is_command_at(&self, pos: usize, name: &str) -> bool {
+        if self.chars.get(pos) != Some(&'\\') {
+            return false;
+        }
+        let start = pos + 1;
+        let end = start + name.chars().count();
+        if end > self.chars.len() || !self.chars[start..end].iter().copied().eq(name.chars()) {
+            return false;
+        }
+        end == self.chars.len() || !self.chars[end].is_ascii_alphabetic()
     }
 
     /// Parse \text{...} — consume braces and return raw text (no math parsing).
