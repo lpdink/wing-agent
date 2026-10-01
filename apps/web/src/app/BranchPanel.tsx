@@ -18,22 +18,20 @@ export interface BranchPanelProps {
   readonly onClose: () => void;
 }
 
-export function BranchPanel({
-  branchPicker,
-  sessionId,
-  actions,
-  onClose,
-}: BranchPanelProps): ReactElement {
+export function BranchPanel({ branchPicker, sessionId, actions, onClose }: BranchPanelProps): ReactElement {
   const mode = branchPicker.mode;
   const isFork = mode === 'fork';
 
   return (
-    <div className="overlay" role="dialog" aria-modal="true" aria-label={isFork ? 'Fork session' : 'Rewind session'}>
+    <div
+      className="overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label={isFork ? 'Fork session' : 'Rewind session'}
+    >
       <div className="panel-card panel-card--branch">
         <div className="panel-card__head">
-          <h2 className="panel-card__title">
-            {isFork ? 'Fork session at' : 'Rewind session to'}
-          </h2>
+          <h2 className="panel-card__title">{isFork ? 'Fork session at' : 'Rewind session to'}</h2>
           <button type="button" className="button button--ghost panel-card__close" onClick={onClose}>
             Close
           </button>
@@ -71,13 +69,9 @@ export function BranchPanel({
                     }}
                   >
                     <span className="panel-card__row-label">
-                      {target.content.length > 80
-                        ? `${target.content.slice(0, 80)}…`
-                        : target.content}
+                      {target.content.length > 80 ? `${target.content.slice(0, 80)}…` : target.content}
                     </span>
-                    {isCurrent ? (
-                      <span className="panel-card__tag">current</span>
-                    ) : null}
+                    {isCurrent ? <span className="panel-card__tag">current</span> : null}
                   </button>
                 );
               })}

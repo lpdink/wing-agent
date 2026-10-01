@@ -132,8 +132,20 @@ export function SettingsDialog({
   };
 
   return (
-    <div className="overlay" role="dialog" aria-modal="true" aria-label="Gateway settings" onClick={handleOverlayClick}>
-      <form className="dialog" onSubmit={submit} onClick={(event) => { event.stopPropagation(); }}>
+    <div
+      className="overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Gateway settings"
+      onClick={handleOverlayClick}
+    >
+      <form
+        className="dialog"
+        onSubmit={submit}
+        onClick={(event) => {
+          event.stopPropagation();
+        }}
+      >
         <h2 className="dialog__title">Gateway connection</h2>
 
         <p className="dialog__state">
