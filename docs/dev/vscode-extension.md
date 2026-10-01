@@ -32,18 +32,28 @@
 
 仓库是 pnpm workspace（根 `pnpm-workspace.yaml` + 单锁文件），本扩展是其中一个成员；共享的
 TypeScript 包在 `packages/` 下（抽取顺序：`client` → `session` → `ui`，本扩展逐步降为消费方）。
-**网关能力层已不在本包里**——它是 `@wing-agent/client`（`packages/client`），宿主经 workspace
-依赖消费。
+**网关能力层与会话归约层都已不在本包里**——它们是 `@wing-agent/client`（`packages/client`）与
+`@wing-agent/session`（`packages/session`），宿主经 workspace 依赖消费。
 
 ```
 packages/client/  @wing-agent/client —— 网关能力层：协议镜像（显式解码）、WS 连接 + 重连监督、
                   HTTP 客户端、分片重组、退避、错误模型、URL 组装。环境无关（自带双 tsconfig、
                   ESLint zone 与 import 图守门测试）。Web / Electron 壳直接消费同一个包。
+packages/session/ @wing-agent/session —— 会话归约层：cell/session 视图模型（CellModel、
+                  SessionStateModel、PanelsModel……）、SessionRecord（+ CellPatch 契约）、
+                  applyLive / applySync（重放 == 直播的那条归一路径）、纯派生（标题 / 工具行 /
+                  Myers diff + 窗口 / ask 归一化与应答 / todo / 局部 JSON）、命令表
+                  （FRONTEND_COMMANDS 及其解析/匹配/合并）。环境无关（同样自带双 tsconfig、
+                  ESLint zone 与 import 图守门），唯一依赖是 `@wing-agent/client`（事件与
+                  JsonValue 的来处）。
 extensions/vscode/
-├── src/shared/    两侧契约：类型、常量、纯函数（命令匹配、cell 判别联合……）。
-│                  不依赖任何东西（无 npm、无 node、无 vscode、无 DOM）。
+├── src/shared/    宿主 ⇄ webview 的**桥协议**：消息联合（HostToWebviewMessage /
+                  WebviewToHostMessage、CellPatch）、运行期判别（validate.ts）、信道常量
+                  （协议版本、patch 分片上限、webview DOM id）。模型本身在 @wing-agent/session，
+                  这里只 import 不重声明（无 npm、无 node、无 vscode、无 DOM 的约束不变）。
 ├── src/host/      扩展宿主：WingHost（连接生命周期）+ SessionManager（多 Tab 编排 / 控制面 /
-│                  归约宿主）+ reducer/model/derive（事件 → UI 模型）+ bridge + 视图 + 命令 + 设置。
+                  归约宿主；它**留在宿主侧**，因为它的接口就是桥协议与 EditorActions）+ bridge +
+                  视图 + 命令 + 设置。
 ├── src/webview/   React 渲染层：cells、markdown 增量渲染、shiki、外壳（Tab 栏 / composer /
 │                  状态区 / 面板）、bridge 客户端、zustand store。纯渲染，状态由宿主驱动。
 ├── src/testing/   夹具 + scripted host（fixtures.ts / mockBridge.ts）。
@@ -53,19 +63,26 @@ extensions/vscode/
 
 依赖矩阵（`tests/layers/layers.test.ts` 的 `RULES`，权威口径）：
 
-| 层 | 可 import 的自家层 | npm | node builtins | `vscode` | `@wing-agent/client` |
-|---|---|---|---|---|---|
-| `shared` | 同级 | ✗ | ✗ | ✗ | ✗ |
-| `host` | `shared` | ✓ | ✓ | ✓（只有它可以） | ✓（只有它可以） |
-| `webview` | `shared` | ✓ | ✗ | ✗ | ✗ |
-| `testing` | `shared` | ✗ | ✗ | ✗ | ✗ |
+| 层 | 可 import 的自家层 | npm | node builtins | `vscode` | `@wing-agent/client` | `@wing-agent/session` |
+|---|---|---|---|---|---|---|
+| `shared` | 同级 | ✗（session 包除外） | ✗ | ✗ | ✗ | ✓ |
+| `host` | `shared` | ✓ | ✓ | ✓（只有它可以） | ✓（只有它可以） | ✓ |
+| `webview` | `shared` | ✓ | ✗ | ✗ | ✗ | ✓ |
+| `testing` | `shared` | ✗ | ✗ | ✗ | ✗ | ✓ |
 
 网关能力层（原 `src/core`，现 `packages/client` 的 `@wing-agent/client`）对矩阵来说是一个**外部包**：只有 `host` 能
 import（webview 走桥、shared 保持零依赖），这条规则由 `layers.test.ts` 的 `CLIENT_PACKAGE` 分支与
 ESLint 的 `paths` 禁区一起守；包自己那套「环境无关」门禁随包搬到了
 `packages/client/{tsconfig.json,tsconfig.dom.json,eslint.config.mjs,tests/layers.test.ts}`。
 
-`preview/` 只允许 import `preview` 自己、`shared`、`testing`、`webview`。
+会话归约层（`@wing-agent/session`）是**每一层都能 import 的便携包**：`bridge.ts` 的
+`CellPatch` / `SessionStateModel` 类型就来自它，`testing` 的夹具、`webview` 的渲染、`preview`
+的 harness 都建在它上面——挡住任何一层都只能逼出第二份类型定义。两条规则：**只能走桶**
+（`layers.test.ts` 的 `SESSION_PACKAGE` 分支：`@wing-agent/session` 之外的一切路径都红），
+以及包自身的门禁（`packages/session/{tsconfig.json,tsconfig.dom.json,eslint.config.mjs,tests/layers.test.ts}`，
+只允许包内相对导入 + `@wing-agent/client`）。
+
+`preview/` 只允许 import `preview` 自己、`shared`、`testing`、`webview` 与 `@wing-agent/session`。
 
 ### 2.2 数据流（一张图）
 
@@ -86,9 +103,12 @@ ESLint 的 `paths` 禁区一起守；包自己那套「环境无关」门禁随�
   │ src/host         │  ◄──────────────────────────── │  ├ markdown 增量  │
   │ WingHost         │                                │  └ 外壳 / 面板    │
   │ └ SessionManager │                                └──────────────────┘
-  │    └ reducer ──► SessionRecord（cells/state/meta）
+  │    └ pkg/session ──► SessionRecord（cells/state/meta）
   └──────────────────┘
 ```
+
+`SessionManager` 自己一行 I/O 都没有：归约与模型来自 `@wing-agent/session`，网关注入
+（`GatewayConnection` / `GatewayHttpClient`），编辑器动作注入（`EditorActions`），下游是桥。
 
 关键点：**WebSocket 只存在于扩展宿主**。Webview 永远不直接连网关（它的 CSP 里连
 `connect-src` 都没有），一切数据经宿主归约后过桥。
@@ -106,8 +126,10 @@ ESLint 的 `paths` 禁区一起守；包自己那套「环境无关」门禁随�
 3. **`tests/layers/layers.test.ts`**——解析每个源文件的**真实 import 图**（含动态
    `import()`、`require()`、`export ... from`、`import type`），逐条断言上表；还顺带检查
    `src/**` 里没有 `.js/.jsx`（避免"文件存在但 typecheck/lint 都看不见"）、webview CSS 里没有
-   硬编码颜色。它是权威门禁，跑在 `pnpm test` 里。`packages/client/tests/layers.test.ts` 是它在
-   新包里的同构版本（只允许包内相对导入 + 唯一的惰性 `require("ws")` 白名单）。
+   硬编码颜色。它是权威门禁，跑在 `pnpm test` 里。两个包各有同构版本：
+   `packages/client/tests/layers.test.ts`（只允许包内相对导入 + 唯一的惰性 `require("ws")`
+   白名单）与 `packages/session/tests/layers.test.ts`（只允许包内相对导入 + `@wing-agent/client`
+   的桶路径，并断言每个模块都从桶里导出）。
 
 所以「越层」会同时挂 `make check` 与 `make test` 两处——这是有意的冗余。
 
@@ -120,10 +142,17 @@ ESLint 的 `paths` 禁区一起守；包自己那套「环境无关」门禁随�
 
 - cells 归约、状态派生、标题派生全部在宿主完成；webview 只做确定性的 op 应用
   （`src/webview/state/applyPatch.ts` 的 `applyCellPatches`），不猜、不推导、不解析半截 JSON
-  （局部 JSON 解析在宿主 `src/host/session/partial-json.ts`）。
-- 网关的 `sync_session` 重放与 live 事件走**同一条归约路径**（`reducer.ts` 的 `applySync` /
-  `applyLive` 共享同一套模型变更），这是「重放路径 vs 活跃路径渲染不一致」一类 bug 的结构性
-  解药（R1 返修记录里叫 S1「重放 ≠ 直播」，缺一个 ReAct separator 就会分叉）。
+  （局部 JSON 解析在 `@wing-agent/session` 的 `partial-json.ts`）。
+- 网关的 `sync_session` 重放与 live 事件走**同一条归约路径**（`@wing-agent/session` 的
+  `reducer.ts`：`applySync` / `applyLive` 共享同一套模型变更），这是「重放路径 vs 活跃路径渲染
+  不一致」一类 bug 的结构性解药（R1 返修记录里叫 S1「重放 ≠ 直播」，缺一个 ReAct separator
+  就会分叉）。这条不变量在包里有直接断言（`packages/session/tests/reducer.test.ts` 的
+  「replay == live」组），在扩展里有端到端版本（`tests/host/session.replay.test.ts`）。
+
+  > 「归约在包里、编排在宿主里」是 04 步的边界裁定：`SessionRecord` / `applyLive` / `applySync` /
+  > `derive` / `SessionStateModel` 全部可移植，而 `SessionManager` 的接口面就是桥协议与
+  > `EditorActions`（编辑器语义），留在 `src/host/session/manager.ts`。详见任务目录
+  > `04_session_pkg/design.md` D1。
 - 「在不在跑」由快照的 `status` 回答（idle / working / waiting），**不由内容反推**：一轮 LLM
   调用在飞行（首帧未到、轮边界）时 uncommitted 投影为空而 turn 仍在 working——按内容推断会把
   它读成 idle（Tab 不转、耗时不计，live 事件却照常渲染）。`status` 必填且严格：CLI 与网关同
@@ -149,7 +178,7 @@ ESLint 的 `paths` 禁区一起守；包自己那套「环境无关」门禁随�
 
 ### 3.3 overlay 的开合归宿主，catalog 只承载数据
 
-`PanelsModel`（`src/shared/session.ts`）定稿：
+`PanelsModel`（`@wing-agent/session` 的 `session.ts`）定稿：
 
 ```ts
 interface PanelsModel {
@@ -173,7 +202,7 @@ interface PanelsModel {
 
 ### 3.4 标题派生规则（与后端逐字符一致）
 
-`src/host/session/derive.ts#deriveTitle`：
+`@wing-agent/session` 的 `derive.ts#deriveTitle`：
 
 1. 显式名字（`metadata.session_name`）优先；
 2. 否则首条用户消息**按 Unicode 码点直切片 100 个字符，无省略号**——这是后端
@@ -195,7 +224,7 @@ interface PanelsModel {
 ## 4. 时序
 
 `SessionManager` 里所有结构性操作（open / close / resume / fork / resubscribe）过一个串行队列
-（`session/queue.ts`），保证「create 没回来就按了关闭」这类交错不会产生半个会话。
+（`@wing-agent/session` 的 `SerialQueue`），保证「create 没回来就按了关闭」这类交错不会产生半个会话。
 
 ### 4.1 激活
 
@@ -276,7 +305,7 @@ WS 帧
     客户端在读任务内合并还原 —— packages/client 的 chunk.ts；应用层只见完整事件）
      └─ 事件解码（protocol/events.ts，显式解码器，不 `as` 硬塞）
          └─ SessionManager.handleEvent → 按 session_id 找 record
-             └─ reducer.applyLive（或 applySync）
+             └─ @wing-agent/session 的 reducer.applyLive（或 applySync）
                  ├─ 变更 cells（user/assistant/thinking/tool/diff/todo/ask/metrics/system）
                  ├─ 变更 state（status/turn/meta/panels）
                  └─ 产出 journal
@@ -331,7 +360,7 @@ webview 意图（`src/shared/bridge.ts` 的 `WebviewToHostMessage`，全部有�
 
 1. **gateway prompt command**（`GET /api/commands`，如 `/init`）：作为普通消息文本发给后端，
    由后端展开 `$ARGUMENTS` 再给模型；
-2. **frontend command**（`src/shared/commands.ts` 的 `FRONTEND_COMMANDS`，是 TUI
+2. **frontend command**（`@wing-agent/session` 的 `commands.ts` / `FRONTEND_COMMANDS`，是 TUI
    `TUI_ONLY_COMMANDS` 的 1:1 镜像，去掉两条 Goal 命令）：不发模型。`kind: 'intent'` 的走
    专用意图（`/model`、`/think`、`/yolo`、`/ss`…），`kind: 'forward'` 的由宿主
    `runPromptCommand` 处理（`/context`、`/skills`、`/reload`、`/copy`、`/title`、`/workdir`、
@@ -493,8 +522,9 @@ code unit，闭定界符必须完整落在窗口内。三条都实测过：`\(x`
 | `node` | node | `tests/{host,shared,state,layers,artifact}`；`vscode` 模块 alias 到 `tests/mocks/vscode.ts`（记录式小 mock）——这就是扩展宿主可以无头测试的原因 |
 | `webview` | jsdom | `tests/webview/**`，`@testing-library/react`，经真实 `mountApp` 对 `src/testing/mockBridge.ts` 的 scripted host 挂载 |
 
-网关能力层有自己的 vitest（`packages/client/vitest.config.mts`，node 环境，含该包的 import 图守门）；
-根 `pnpm run test` 递归跑全部包的 `test` 脚本，所以两边都在 `make test-ts` 与 CI 里。
+两个包各有自己的 vitest（`packages/client/vitest.config.mts`、`packages/session/vitest.config.mts`，
+都是 node 环境，含各自的 import 图守门与归约层自己的用例）；根 `pnpm run test` 递归跑全部包的
+`test` 脚本，所以三边都在 `make test-ts` 与 CI 里。
 
 - `fake-gateway.ts`（`packages/client/tests` 与 `tests/host` 各一份）是进程内假网关，用来重放「事故复盘」式序列：时序、隔离、
   重放、重连、错误面。
@@ -506,10 +536,14 @@ code unit，闭定界符必须完整落在窗口内。三条都实测过：`\(x`
 
 ```bash
 cd extensions/vscode
-pnpm run test          # 全量（49 文件 / 834 用例）
+pnpm run test          # 全量（38 文件 / 594 用例）
 pnpm run typecheck     # tsc --noEmit × 3 projects
 pnpm run lint          # eslint（含层门禁 zone）
 pnpm run format:check  # prettier
+
+# 仓库根（连同两个包）
+pnpm run test          # 594（扩展）+ 195（client）+ 104（session）
+pnpm run typecheck
 ```
 
 ### 9.2 smoke：真网关 × 真宿主 × 假模型
@@ -653,10 +687,10 @@ pnpm exec vsce ls       # 核对进包清单
 
 | 想做的事 | 从哪开始 |
 |---|---|
-| 加一种 cell 类型 | `src/shared/cells.ts`（联合）→ 宿主 `reducer.ts`/`derive.ts`（怎么产生）→ `src/webview/chat/Cells.tsx` + `CellView.tsx`（怎么画）→ `applyPatch.ts` 若引入新 op |
+| 加一种 cell 类型 | `@wing-agent/session` 的 `cells.ts`（联合）→ 同包的 `reducer.ts`/`derive.ts`（怎么产生）→ `src/webview/chat/Cells.tsx` + `CellView.tsx`（怎么画）→ `applyPatch.ts` 若引入新 op |
 | 加一个 webview 意图 | `src/shared/bridge.ts`（消息联合）→ `src/webview/app/Composer.tsx` 或对应组件（发出）→ `src/host/session/manager.ts`（处理）→ 两侧各自的测试 |
-| 加一个本地命令 | `src/shared/commands.ts`（名字与 kind）+ 宿主 `runPromptCommand` 分支 + `tests/shared/commands.test.ts`（命令表被测试钉死） |
-| 改桥协议 / 面板字段 | `src/shared/bridge.ts`/`session.ts` + `tests/shared/contract.test.ts`，两侧同步——`interfaces.md` 的教训：单侧私改必冲突 |
+| 加一个本地命令 | `@wing-agent/session` 的 `commands.ts`（名字与 kind）+ 宿主 `runPromptCommand` 分支 + `packages/session/tests/commands.test.ts`（命令表被测试钉死） |
+| 改桥协议 / 面板字段 | 桥消息在 `src/shared/bridge.ts`，面板/模型字段在 `@wing-agent/session`；配套 `tests/shared/contract.test.ts` 与 `packages/session/tests/`，两侧同步——`interfaces.md` 的教训：单侧私改必冲突 |
 | 调视觉 | `src/webview/styles/tokens.css`（先溯源到本机 VS Code 源码再改；硬编码颜色会被门禁拒绝） |
 | 改公式的定界符/语法 | **先读 §8.5 的两张表**（识别口径以 TUI 侧为准）；实现都在 `src/webview/chat/markdown/parse.ts`（`math_inline` / `math_block` 两条规则 + 不透明区守卫），测试在 `tests/webview/{markdown,math}.test.tsx`；权威口径的实现在 TUI 侧 `crates/wing/src/render/markdown/math.rs`（只读参考） |
 | 改图片的可加载范围 | `src/host/images.ts`（策略）+ `src/host/chatViewProvider.ts`（`localResourceRoots`）+ 两侧测试 |
@@ -670,6 +704,10 @@ pnpm exec vsce ls       # 核对进包清单
 pnpm install --frozen-lockfile --prefer-offline
 pnpm run typecheck && pnpm run lint && pnpm run format:check
 pnpm run test                 # 全部包的 vitest（含两套层守门）
+
+# 包（cd packages/session）
+pnpm run test          # 104 用例（含包自己的 import 图守门）
+pnpm run typecheck     # tsc --noEmit × 2 projects（无 DOM 主项目 + 无 node 的 DOM 探针）
 
 # 扩展自身（cd extensions/vscode）
 pnpm run test                 # 只跑本扩展（40 文件 / 648 用例）

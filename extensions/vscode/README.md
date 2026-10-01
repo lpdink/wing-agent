@@ -219,7 +219,7 @@ authoritative one because it resolves the actual import graph instead of pattern
   `tablist`/`tab` roles, `multieditortabscontrol.css` for the geometry) at sidebar density: status dot,
   close button, and a dot that replaces the close icon while a background turn is waiting to be seen.
 - The composer routes a submission to exactly one intent (design.md D6 of step 05). `/` opens the
-  command candidates, which merge the host's catalog with `FRONTEND_COMMANDS` (`src/shared/commands.ts`,
+  command candidates, which merge the host's catalog with `FRONTEND_COMMANDS` (`@wing-agent/session`,
   a mirror of the TUI's table); an exactly typed command runs, anything else completes first.
 - The status row is Copilot's secondary toolbar: model / thinking / YOLO / workspace chips, the context
   ring (thresholds 75% / 90%, `chatContextUsageWidget.ts:468`), token totals with TTFT, and the channel
