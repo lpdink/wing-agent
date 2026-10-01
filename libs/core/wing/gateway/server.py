@@ -26,7 +26,7 @@ import uvicorn
 from wing.background import BackgroundScheduler
 from wing.build_info import get_commit
 from wing.common.logger import log
-from wing.config import AuthConfig, get_config, load_config
+from wing.config import AuthConfig, GatewayConfig, get_config, load_config
 from wing.event import WingEvent, wire_dump
 from wing.event_bus import event_bus
 from wing.runtime import WingRuntime
@@ -101,6 +101,15 @@ class GatewayServer:
     def auth_config(self) -> AuthConfig:
         """当前鉴权配置（每次读取最新单例，热重载后立即生效）。"""
         return load_config().gateway.auth
+
+    @property
+    def gateway_config(self) -> GatewayConfig:
+        """当前 gateway 配置段（静态托管 / CORS / 鉴权豁免的读取口）。
+
+        与 `auth_config` 同理走 `load_config()`（每次读最新单例）：`static_dir`
+        的热重载即时生效；`cors_origins` 只在 App 创建时装配中间件栈，热重载不生效。
+        """
+        return load_config().gateway
 
     def _warn_auth_lockout(self) -> None:
         """启动时检查 auth 配置，空 keys 锁死时发出警告。"""

@@ -203,6 +203,7 @@ def render_config_yaml(
     models: Sequence[str | Mapping[str, Any]] | None = None,
     images: Mapping[str, Any] | None = None,
     provider_extra: Mapping[str, Any] | None = None,
+    gateway_extra: Mapping[str, Any] | None = None,
     tools: Sequence[str] = DEFAULT_AGENT_TOOLS,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     context_window_tokens: int = 256_000,
@@ -226,6 +227,11 @@ def render_config_yaml(
     （None = 不合并，缺省输出与既有形态逐字节一致）——用于覆盖协议级行为
     （如 ``image_delivery: inline``）。**谨慎**：覆盖 ``base_url`` 等接线键会
     断开假 Provider，属场景自伤。
+
+    ``gateway_extra`` 是 ``gateway:`` 段的透传旋钮（浅合并；None = 不合并）：
+    静态托管（``static_dir``）、开发期 CORS（``cors_origins``）与鉴权
+    （``auth``）场景靠它注入配置。**谨慎**：覆盖 ``host`` / ``port`` 会断开
+    probe 自己的接线（场景连不上网关）。
 
     ``hooks`` 是透传给配置 ``hooks:`` 段的 glob 列表（默认空 = 不加载 hook）。
     相对路径按**网关进程 cwd** 解析——``ProbeEnv`` 以 ``env.root`` 为 cwd 启动
@@ -273,6 +279,7 @@ def render_config_yaml(
             "host": DEFAULT_HOST,
             "port": gateway_port,
             "auth": {"enabled": False},
+            **dict(gateway_extra or {}),
         },
         "commands": {"paths": []},
     }
@@ -387,6 +394,7 @@ class ProbeEnv:
         models: Sequence[str | Mapping[str, Any]] | None = None,
         images: Mapping[str, Any] | None = None,
         provider_extra: Mapping[str, Any] | None = None,
+        gateway_extra: Mapping[str, Any] | None = None,
         tools: Sequence[str] = DEFAULT_AGENT_TOOLS,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         env_overrides: Mapping[str, str] | None = None,
@@ -408,6 +416,8 @@ class ProbeEnv:
             dict(provider_extra) if provider_extra is not None else None
         )
         """provider 级透传键（合进 providers[0]；None = 不合并）。"""
+        self.gateway_extra = dict(gateway_extra) if gateway_extra is not None else None
+        """gateway 段透传键（合进 gateway；None = 不合并）——静态托管 / CORS / 鉴权场景。"""
         self.tools = tuple(tools)
         self.system_prompt = system_prompt
         """默认模板的 system prompt（非空；场景可与请求里的 system 段对照）。"""
@@ -499,6 +509,7 @@ class ProbeEnv:
             models=self.models,
             images=self.images,
             provider_extra=self.provider_extra,
+            gateway_extra=self.gateway_extra,
             tools=self.tools,
             system_prompt=self.system_prompt,
             sessions=self._sessions_config,

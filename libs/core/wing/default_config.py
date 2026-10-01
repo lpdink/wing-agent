@@ -211,6 +211,22 @@ gateway:
   host: 127.0.0.1
   port: 32523
 
+  # Web build hosting (the `apps/web` bundle). null = disabled: GET / and any
+  # unknown path keep returning 404.
+  # Absolute paths are used as-is; a relative path resolves against this
+  # config's directory ($WING_HOME/core); "~" is expanded.
+  # The directory may not exist yet (web not built): such a gateway still
+  # starts and simply answers 404 — the path is re-resolved per request, so
+  # dropping the bundle in place works without a restart.
+  static_dir: null
+
+  # Development-time CORS. Empty = no CORS middleware at all (same-origin
+  # only). When non-empty, ONLY the listed origins are allowed (methods and
+  # headers are passed through; no credentials — auth uses explicit headers,
+  # not cookies). "*" is rejected on purpose. Read once at startup: changing
+  # this key needs a gateway restart (unlike static_dir).
+  cors_origins: []
+
   # Remote tool call total timeout (seconds). A safety net, NOT a
   # short timeout — remote tools (e.g. Bash) may run for a long time.
   # Connection close is the primary failure signal (in-flight calls

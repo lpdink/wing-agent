@@ -384,12 +384,14 @@ class TestDefaultConfigTemplate:
         assert config.providers[0].model_names() == []
 
     def test_template_covers_every_config_field(self):
-        """顶层与 images 段的键集合必须与 Config 模型字段一一对应（SYNC 硬约束）。"""
+        """顶层与 images / gateway 段的键集合必须与模型字段一一对应（SYNC 硬约束）。"""
         from wing.default_config import DEFAULT_CONFIG_YAML
+        from wing.config import GatewayConfig
 
         raw = yaml.safe_load(DEFAULT_CONFIG_YAML)
         assert set(raw) == set(Config.model_fields)
         assert set(raw["images"]) == set(ImagesConfig.model_fields)
+        assert set(raw["gateway"]) == set(GatewayConfig.model_fields)
 
     def test_template_keeps_image_option_documented(self):
         """image_delivery / image_max_bytes / capabilities.vision 在模板注释里可见。"""
