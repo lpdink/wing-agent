@@ -7,12 +7,14 @@
  *    wide and step 09 can add a manual override by setting `[data-theme]` on the
  *    root. The theme follows `prefers-color-scheme` (the product requirement) —
  *    there is no JS mirror of the media query to drift out of sync (design.md D12).
- * 2. **Two layouts, one source**: a two-column grid on desktop; below 900px the
- *    sidebar becomes a drawer over the main pane (`data-open`), the top bar grows
- *    the "Sessions" toggle, and the safe-area insets of a notched phone are
- *    respected (the `viewport-fit=cover` meta in `index.html`).
+ * 2. **Four breakpoints, one source**: `xs` (0–599px, phone portrait), `sm`
+ *    (600–899px, landscape phone / small tablet), `md` (900–1199px, tablet), `lg`
+ *    (≥1200px, desktop). On xs/sm the sidebar becomes a drawer (`data-open`), the
+ *    composer is fixed to the bottom of the viewport, and touch targets are ≥44 px.
+ *    The safe-area insets of a notched phone are respected everywhere
+ *    (`viewport-fit=cover` meta in `index.html`).
  * 3. **No decoration**: every box on screen belongs to a real control or a real
- *    piece of data (step 08 adds the transcript inside `.pane`).
+ *    piece of data.
  */
 
 :root {
@@ -627,7 +629,19 @@ code {
   gap: 8px;
 }
 
-/* ── mobile: the sidebar becomes a drawer ──────────────────────────── */
+/* ── responsive breakpoint matrix ──────────────────────────────
+ *
+ *   xs  =  0–599 px   phone portrait
+ *   sm  =  600–899 px  phone landscape / small tablet
+ *   md  =  900–1199 px tablet portrait / small desktop
+ *   lg  = ≥1200 px    desktop
+ *
+ * The default styles (outside any @media) target md (the smallest desktop
+ * viewport). xs and sm override with drawer + fixed composer; lg ups the
+ * type size and spacing.
+ * ──────────────────────────────────────────────────────────── */
+
+/* ── xs + sm: phone / small tablet ────────────────────────── */
 
 @media (max-width: 899px) {
   .shell__body {
@@ -636,10 +650,6 @@ code {
 
   .topbar__drawer {
     display: inline-flex;
-  }
-
-  .topbar__address {
-    display: none;
   }
 
   .topbar__subject {
@@ -652,7 +662,8 @@ code {
     bottom: 0;
     left: 0;
     width: min(86vw, 320px);
-    padding-top: env(safe-area-inset-top);
+    padding-top: max(12px, env(safe-area-inset-top));
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
     transform: translateX(-102%);
     transition: transform 0.18s ease;
     box-shadow: var(--shadow);
@@ -674,6 +685,46 @@ code {
 
   .main {
     padding: 12px;
+    /* Make room for the fixed composer at the bottom. The composer is
+       ~52 px tall plus its own safe-area padding. */
+    padding-bottom: calc(52px + env(safe-area-inset-bottom) + 12px);
+  }
+
+  .shell__body {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  .overlay {
+    padding-top: max(16px, env(safe-area-inset-top));
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+  }
+
+  .panel-card {
+    max-height: calc(80dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  }
+
+  /* ── xs-only extras ──────────────────────────────────────── */
+  @media (max-width: 599px) {
+    body {
+      font-size: 15px;
+      line-height: 1.55;
+    }
+  }
+
+  /* ── sm-only extras ──────────────────────────────────────── */
+  @media (min-width: 600px) {
+    .topbar__address {
+      display: inline;
+    }
+  }
+}
+
+/* ── lg: wide desktop ──────────────────────────────────────── */
+
+@media (min-width: 1200px) {
+  body {
+    font-size: 15px;
   }
 }
 
@@ -681,6 +732,62 @@ code {
   .sidebar {
     transition: none;
   }
+}
+
+/* ── touch targets (xs/sm only: all interactive elements get 44 px minimum) */
+
+@media (max-width: 899px) {
+  .session,
+  .panel-card__row,
+  .composer__command,
+  .button,
+  .topbar__drawer {
+    min-height: 44px;
+  }
+
+  .panel-card__row,
+  .button {
+    min-width: 44px;
+  }
+
+  .composer__command {
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+
+  .session {
+    padding: 10px 12px;
+  }
+
+  .composer__send,
+  .composer__interrupt {
+    padding: 10px 16px;
+  }
+
+  /* Ask options: larger tap area for mobile */
+  [data-cell-kind='ask'] button {
+    min-height: 44px;
+    padding: 10px 14px;
+    font-size: 15px;
+  }
+}
+
+/* ── horizontal scroll protection ──────────────────────────── */
+
+pre,
+code,
+.table-wrapper,
+.diff-view,
+[data-testid='code-block'],
+[data-testid='diff-content'] {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}
+
+/* Global guard against accidental horizontal overflow */
+body {
+  overflow-x: hidden;
 }
 
 /* ============================================================
@@ -818,8 +925,50 @@ code {
 }
 
 @keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* ── Composer fixed-bottom (xs/sm: phone) ──────────────────── */
+
+@media (max-width: 899px) {
+  .shell:has(.composer) .main {
+    /* The main pane makes room for the fixed composer above. The composer is
+       ~52 px tall plus its own safe-area padding, and the .main's own padding
+       bottom covers the safe-area-inset-bottom. */
+    padding-bottom: calc(48px + env(safe-area-inset-bottom) + 12px);
+  }
+
+  .composer {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 25;
+    padding: 8px 12px max(12px, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    /* Key for visualViewport: the JS runtime updates bottom when the keyboard
+       appears, so the composer stays above the keyboard. Default = safe area. */
+    box-shadow: 0 -1px 4px rgb(0 0 0 / 8%);
+  }
+
+  .composer[data-keyboard-offset] {
+    bottom: attr(data-keyboard-offset px, 0);
+  }
+
+  .composer__commands {
+    /* The command popup slides up from above the composer. When the keyboard is
+       open, we want it above the keyboard, not behind it. The popup's `bottom`
+       is `100%` (the composer's top), so it naturally stays above. Keep it from
+       going off the top of the viewport with max-height. */
+    max-height: 40vh;
+    bottom: 100%;
+  }
 }
 
 /* ── Overlay panels ──────────────────────────────────────── */
@@ -1028,4 +1177,46 @@ code {
   color: var(--fg);
   font: inherit;
   font-size: 12px;
+}
+
+/* ── PWA install prompt ──────────────────────────────────── */
+
+.install-prompt {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  position: fixed;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  left: 12px;
+  right: 12px;
+  z-index: 60;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 12px 16px;
+}
+
+.install-prompt__text {
+  flex: 1;
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.install-prompt__actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.install-prompt__install {
+  white-space: nowrap;
+}
+
+@media (max-width: 899px) {
+  .install-prompt {
+    bottom: max(60px, calc(env(safe-area-inset-bottom) + 52px));
+    left: 8px;
+    right: 8px;
+  }
 }

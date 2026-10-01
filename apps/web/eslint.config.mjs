@@ -61,7 +61,16 @@ const restricted = (paths = [], patterns = []) => ['error', { paths, patterns }]
 const banned = (globs, message) => ({ group: globs, message });
 
 export default tseslint.config(
-  { ignores: ['dist/**', 'out/**', 'node_modules/**', 'coverage/**', 'eslint.config.mjs'] },
+  {
+    ignores: [
+      'dist/**',
+      'out/**',
+      'node_modules/**',
+      'coverage/**',
+      'eslint.config.mjs',
+      'esbuild.bench.mjs',
+    ],
+  },
 
   js.configs.recommended,
 

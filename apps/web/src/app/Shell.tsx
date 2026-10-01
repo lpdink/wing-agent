@@ -18,11 +18,14 @@ import { BranchPanel } from './BranchPanel';
 import { Composer } from './Composer';
 import { ConnectionBanner } from './ConnectionBanner';
 import { ConnectionStatus } from './ConnectionStatus';
+import { InstallPrompt } from './InstallPrompt';
 import { ModelPanel } from './ModelPanel';
 import { NoticeStack } from './NoticeStack';
 import { SessionList } from './SessionList';
 import { SessionPane } from './SessionPane';
 import { SettingsDialog } from './SettingsDialog';
+
+import { useSwipeToClose } from './useSwipeToClose';
 
 export interface ShellProps {
   readonly snapshot: RuntimeSnapshot;
@@ -43,10 +46,13 @@ export function Shell({ snapshot, actions, location, settingsPersistent = true }
     setDrawerOpen(false);
     setSettingsOpen(true);
   }, []);
-  const selectSession = useCallback((sessionId: string): void => {
-    setDrawerOpen(false);
-    actions.activate(sessionId);
-  }, [actions]);
+  const selectSession = useCallback(
+    (sessionId: string): void => {
+      setDrawerOpen(false);
+      actions.activate(sessionId);
+    },
+    [actions],
+  );
 
   // The model picker is open when `panels.modelPicker` is not null.
   const modelPicker = record?.panels.modelPicker ?? null;
@@ -89,6 +95,10 @@ export function Shell({ snapshot, actions, location, settingsPersistent = true }
     },
     [handleOverlayClose],
   );
+
+  // Swipe-to-close for overlay panels on mobile.
+  const isMobile = globalThis.matchMedia?.('(max-width: 899px)').matches ?? false;
+  const swipeHandlers = useSwipeToClose(handleOverlayClose, isMobile);
 
   return (
     <div ref={shellRef} className="shell" data-phase={connection.phase}>
@@ -150,9 +160,7 @@ export function Shell({ snapshot, actions, location, settingsPersistent = true }
           />
           <SessionPane snapshot={snapshot} onNewSession={actions.newSession} />
 
-          {record !== null ? (
-            <Composer record={record} actions={actions} />
-          ) : null}
+          {record !== null ? <Composer record={record} actions={actions} /> : null}
         </main>
       </div>
 
@@ -174,7 +182,7 @@ export function Shell({ snapshot, actions, location, settingsPersistent = true }
       ) : null}
 
       {modelPicker !== null && record !== null ? (
-        <div className="overlay" onClick={onOverlayClick}>
+        <div className="overlay" onClick={onOverlayClick} {...swipeHandlers}>
           <ModelPanel
             modelPicker={modelPicker}
             thinking={record.meta.thinking}
@@ -186,7 +194,7 @@ export function Shell({ snapshot, actions, location, settingsPersistent = true }
       ) : null}
 
       {branchPicker !== null && record !== null ? (
-        <div className="overlay" onClick={onOverlayClick}>
+        <div className="overlay" onClick={onOverlayClick} {...swipeHandlers}>
           <BranchPanel
             branchPicker={branchPicker}
             sessionId={record.sessionId}
@@ -197,6 +205,7 @@ export function Shell({ snapshot, actions, location, settingsPersistent = true }
       ) : null}
 
       <NoticeStack notices={snapshot.notices} onDismiss={actions.dismissNotice} />
+      <InstallPrompt />
     </div>
   );
 }

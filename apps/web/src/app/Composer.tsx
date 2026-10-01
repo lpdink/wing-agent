@@ -18,6 +18,11 @@
  * Draft persistence: restored from `record.draft` (set by the runtime after a
  * failed send); also backed to `sessionStorage` by sessionId for page refresh
  * resilience.
+ *
+ * Mobile keyboard: on phones the composer is `position: fixed` at the bottom
+ * of the viewport. When the soft keyboard opens, `visualViewport.resize` fires
+ * and the composer's `bottom` is adjusted by the keyboard height so it stays
+ * visible above the keyboard.
  */
 
 import {
@@ -41,6 +46,7 @@ import {
 } from '@wing-agent/session';
 
 import type { ShellActions } from './App';
+import { useVisualViewportOffset } from './useKeyboardOffset';
 
 export interface ComposerProps {
   readonly record: SessionRecord;
@@ -60,8 +66,13 @@ export function Composer({ record, actions }: ComposerProps): ReactElement {
   }));
   const [showCommands, setShowCommands] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composerRef = useRef<HTMLDivElement>(null);
+  const noTranscriptRef = useRef<HTMLDivElement | null>(null); // unused on web (the transcript scrolls naturally)
   const turnActive = record.turn.active;
   const yolo = record.meta.yolo;
+
+  // On mobile: keep the composer above the soft keyboard.
+  useVisualViewportOffset(composerRef, noTranscriptRef);
 
   // Restore draft when it changes (a failed send returns text to the composer).
   useEffect(() => {
@@ -160,21 +171,18 @@ export function Composer({ record, actions }: ComposerProps): ReactElement {
     [actions],
   );
 
-  const handleKeyDownCommand = useCallback(
-    (event: KeyboardEvent<HTMLDivElement>) => {
-      if (event.key === 'Escape') {
-        setShowCommands(false);
-        textareaRef.current?.focus();
-      }
-    },
-    [],
-  );
+  const handleKeyDownCommand = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      setShowCommands(false);
+      textareaRef.current?.focus();
+    }
+  }, []);
 
   const commandFilter = state.text.startsWith('/') ? state.text.slice(1).trimStart() : '';
   const matchedCommands = showCommands ? filterCommands(FRONTEND_COMMANDS, commandFilter) : [];
 
   return (
-    <div className="composer">
+    <div ref={composerRef} className="composer">
       {showCommands && matchedCommands.length > 0 ? (
         <div
           className="composer__commands"
@@ -215,9 +223,7 @@ export function Composer({ record, actions }: ComposerProps): ReactElement {
             setState((prev) => ({ ...prev, composing: false }));
           }}
           disabled={turnActive}
-          placeholder={
-            turnActive ? 'Agent is responding…' : yolo ? 'Message (YOLO mode)…' : 'Message…'
-          }
+          placeholder={turnActive ? 'Agent is responding…' : yolo ? 'Message (YOLO mode)…' : 'Message…'}
           rows={Math.min(Math.max(state.text.split('\n').length, 1), 8)}
           aria-label="Message composer"
         />
