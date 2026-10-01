@@ -1,17 +1,24 @@
 /**
- * The main pane: the open session's live runtime state.
+ * The main pane: the open session's transcript, plus its live runtime state.
  *
- * Until step 08 mounts the transcript here, this is the *real* content of the
- * pane — the same facts `wing info` prints (identity, workspace, model knobs,
- * context usage, message count, last error), all read straight off the
- * `SessionRecord`. It doubles as the "did my session actually come back after a
- * reconnect" answer, which a spinner could not give.
+ * The transcript (step 08) is the pane: the shared renderer's scroller fills the card
+ * and owns the scrolling. The runtime facts step 07 showed here — identity, workspace,
+ * model knobs, context usage, message count, last error, all read straight off the
+ * `SessionRecord` — are still real data (they are what `wing info` prints and what
+ * answers "did my session actually come back after a reconnect"), so they stay, folded
+ * into one `<details>` whose summary names the two things worth a glance (context
+ * usage and message count).
+ *
+ * `key={sessionId}` on the transcript is load-bearing: the renderer's image cache is
+ * document-level and keyed by markdown source, so a session switch has to remount the
+ * rows for their image effects to run again (see `useWebBridge.ts`).
  */
 
 import type { ReactElement } from 'react';
 
 import type { RuntimeSnapshot } from '../connection/runtime';
 import { rowStatusFromModel } from '../sessions/rows';
+import { Transcript } from '../transcript/Transcript';
 
 import { contextPercent, formatTokens, statusLabel } from './labels';
 
@@ -57,57 +64,57 @@ export function SessionPane({ snapshot, onNewSession }: SessionPaneProps): React
         {record.turn.active ? <span className="pane__turn">turn running…</span> : null}
       </header>
 
-      <dl className="facts">
-        <div className="facts__row">
-          <dt>Session</dt>
-          <dd className="facts__mono">{record.sessionId}</dd>
-        </div>
-        <div className="facts__row">
-          <dt>Workspace</dt>
-          <dd className="facts__mono">{workspace ?? '—'}</dd>
-        </div>
-        <div className="facts__row">
-          <dt>Model</dt>
-          <dd>{record.meta.model === '' ? '—' : record.meta.model}</dd>
-        </div>
-        <div className="facts__row">
-          <dt>Agent</dt>
-          <dd>{record.meta.agent === '' ? 'default' : record.meta.agent}</dd>
-        </div>
-        <div className="facts__row">
-          <dt>Thinking</dt>
-          <dd>{thinking}</dd>
-        </div>
-        <div className="facts__row">
-          <dt>YOLO</dt>
-          <dd>{record.meta.yolo ? 'on' : 'off'}</dd>
-        </div>
-        <div className="facts__row">
-          <dt>Context</dt>
-          <dd>
-            {formatTokens(record.context.usedTokens)} / {formatTokens(record.context.windowTokens)}
-            {percent === null ? '' : ` (${percent}%)`}
-          </dd>
-        </div>
-        <div className="facts__row">
-          <dt>Messages</dt>
-          <dd>{record.context.messageCount}</dd>
-        </div>
-        <div className="facts__row">
-          <dt>Total tokens</dt>
-          <dd>
-            {formatTokens(record.totals.promptTokens)} in / {formatTokens(record.totals.completionTokens)} out
-          </dd>
-        </div>
-      </dl>
+      <details className="pane__details">
+        <summary className="pane__summary">
+          <span>Session details</span>
+          <span className="pane__summary-value">
+            {formatTokens(record.context.usedTokens)} / {formatTokens(record.context.windowTokens)} tokens
+            {percent === null ? '' : ` (${percent}%)`} · {record.context.messageCount} messages
+          </span>
+        </summary>
 
-      {record.lastError === null ? null : (
-        <p className="pane__error" role="alert">
-          {record.lastError}
-        </p>
-      )}
+        <dl className="facts">
+          <div className="facts__row">
+            <dt>Session</dt>
+            <dd className="facts__mono">{record.sessionId}</dd>
+          </div>
+          <div className="facts__row">
+            <dt>Workspace</dt>
+            <dd className="facts__mono">{workspace ?? '—'}</dd>
+          </div>
+          <div className="facts__row">
+            <dt>Model</dt>
+            <dd>{record.meta.model === '' ? '—' : record.meta.model}</dd>
+          </div>
+          <div className="facts__row">
+            <dt>Agent</dt>
+            <dd>{record.meta.agent === '' ? 'default' : record.meta.agent}</dd>
+          </div>
+          <div className="facts__row">
+            <dt>Thinking</dt>
+            <dd>{thinking}</dd>
+          </div>
+          <div className="facts__row">
+            <dt>YOLO</dt>
+            <dd>{record.meta.yolo ? 'on' : 'off'}</dd>
+          </div>
+          <div className="facts__row">
+            <dt>Total tokens</dt>
+            <dd>
+              {formatTokens(record.totals.promptTokens)} in / {formatTokens(record.totals.completionTokens)}{' '}
+              out
+            </dd>
+          </div>
+        </dl>
 
-      {/* Step 08 mounts the transcript (cells) inside this section. */}
+        {record.lastError === null ? null : (
+          <p className="pane__error" role="alert">
+            {record.lastError}
+          </p>
+        )}
+      </details>
+
+      <Transcript key={record.sessionId} record={record} version={snapshot.recordVersion} />
     </section>
   );
 }

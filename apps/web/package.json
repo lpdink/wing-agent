@@ -26,6 +26,7 @@
   "dependencies": {
     "@wing-agent/client": "workspace:*",
     "@wing-agent/session": "workspace:*",
+    "@wing-agent/ui": "workspace:*",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

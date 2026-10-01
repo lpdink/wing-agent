@@ -20,6 +20,9 @@ importers:
       '@wing-agent/session':
         specifier: workspace:*
         version: link:../../packages/session
+      '@wing-agent/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
       react:
         specifier: ^19.3.0
         version: 19.3.0

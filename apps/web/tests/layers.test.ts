@@ -30,8 +30,25 @@ const NODE_BUILTINS = new Set([...builtinModules, ...builtinModules.map((name) =
 
 const CLIENT = '@wing-agent/client';
 const SESSION = '@wing-agent/session';
+const UI = '@wing-agent/ui';
+/**
+ * The one allowed subpath beside the barrels: `@wing-agent/ui/protocol` is that
+ * package's declared DOM-free wire contract (its `exports` map has three entries,
+ * and the package's own layer guard enumerates them). Everything else has to go
+ * through the barrel, exactly like `@wing-agent/client` / `@wing-agent/session`.
+ */
+const UI_PROTOCOL = '@wing-agent/ui/protocol';
 
-const SRC_EXTERNALS = [CLIENT, SESSION, 'react', 'react-dom', 'react-dom/client', 'react/jsx-runtime'];
+const SRC_EXTERNALS = [
+  CLIENT,
+  SESSION,
+  UI,
+  UI_PROTOCOL,
+  'react',
+  'react-dom',
+  'react-dom/client',
+  'react/jsx-runtime',
+];
 const TEST_EXTERNALS = [
   ...SRC_EXTERNALS,
   'vitest',
@@ -177,7 +194,9 @@ describe('layer guard: src', () => {
 
   it('keeps the framework-free core free of React', () => {
     const core = sourceFiles.filter((file) =>
-      ['connection', 'settings', 'sessions', 'lib'].some((dir) => isInside(file, path.join(SRC, dir))),
+      ['connection', 'settings', 'sessions', 'lib', 'images', 'bridge'].some((dir) =>
+        isInside(file, path.join(SRC, dir)),
+      ),
     );
     expect(core.length).toBeGreaterThan(3);
     const violations: string[] = [];

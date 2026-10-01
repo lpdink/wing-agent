@@ -12,6 +12,7 @@
     "vite.config.mts",
     "vitest.config.mts",
     "esbuild.shot.mjs",
-    "tests/layers.test.ts"
+    "tests/layers.test.ts",
+    "tests/transcript.theme.test.ts"
   ]
 }

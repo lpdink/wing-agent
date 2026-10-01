@@ -14,6 +14,7 @@ import { App } from './app/App';
 import { GatewayRuntime } from './connection/runtime';
 import { loadSettings, saveSettings } from './settings/settings';
 import { browserSettingsStorage } from './settings/storage';
+import './ui-theme.css';
 import './styles.css';
 
 const storage = browserSettingsStorage();

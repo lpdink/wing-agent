@@ -52,6 +52,8 @@ export interface FakeSession {
   /** Fact events replayed by `sync_session` (decoded as `WingEvent`s). */
   events: Record<string, unknown>[];
   uncommitted: Record<string, unknown> | null;
+  /** Unterminated tool calls of the snapshot (`SyncSessionEvent.uncommitted_tools`). */
+  uncommittedTools: Record<string, unknown>[];
   draft: string | null;
   /** `GET /api/session/info`. */
   runtime: Record<string, unknown>;
@@ -66,6 +68,7 @@ export function makeSession(seed: Partial<FakeSession> & { id: string }): FakeSe
     messages: [],
     events: [],
     uncommitted: null,
+    uncommittedTools: [],
     draft: null,
     runtime: {
       model: 'test-model',
@@ -416,7 +419,7 @@ export class FakeGateway {
       request_id: 'sync-request',
       messages: session.messages,
       uncommitted: session.uncommitted,
-      uncommitted_tools: [],
+      uncommitted_tools: session.uncommittedTools,
       events: session.events,
       status: session.status,
       turn_started_at: null,

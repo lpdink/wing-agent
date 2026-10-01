@@ -25,8 +25,16 @@ import tseslint from 'typescript-eslint';
 
 const CLIENT = '@wing-agent/client';
 const SESSION = '@wing-agent/session';
+const UI = '@wing-agent/ui';
+/**
+ * The one subpath of `@wing-agent/ui` that is allowed alongside the barrels:
+ * `./protocol` is that package's DOM-free wire contract (the extension host imports
+ * it from Node too, and the guard in `packages/ui/tests/layers.test.ts` enumerates it
+ * — a bare `@wing-agent/ui/**` ban would reject it).
+ */
+const UI_PROTOCOL = '@wing-agent/ui/protocol';
 const BARREL_ONLY =
-  'Import workspace packages through their barrel only: a path into the package is not a contract.';
+  'Import workspace packages through their barrel only: a path into the package is not a contract (the one exception is `@wing-agent/ui/protocol`, the DOM-free wire contract).';
 const NODE_BUILTIN =
   'This is the browser bundle: node builtins are unavailable (the screenshot tooling lives in tools/, which has its own tsconfig).';
 const REACT_FREE =
@@ -87,7 +95,7 @@ export default tseslint.config(
         [],
         [
           banned(['node:*'], NODE_BUILTIN),
-          banned([`${CLIENT}/**`, `${SESSION}/**`], BARREL_ONLY),
+          banned([`${CLIENT}/**`, `${SESSION}/**`, `${UI}/**`, `!${UI_PROTOCOL}`], BARREL_ONLY),
           banned(['../tests/**', '../tools/**', '**/tests/**', '**/tools/**'], NO_TESTS),
         ],
       ),
@@ -95,8 +103,18 @@ export default tseslint.config(
   },
   {
     // The framework-free core: React is the renderer's business, not the
-    // runtime's (the snapshot/observer shape is what keeps that true).
-    files: ['src/lib/**/*.ts', 'src/settings/**/*.ts', 'src/sessions/**/*.ts', 'src/connection/**/*.ts'],
+    // runtime's (the snapshot/observer shape is what keeps that true). `images`
+    // (the gateway image adapter: policy / URL / resolver) and `bridge` (the
+    // renderer's intent routing) are plain TypeScript with injected platforms —
+    // they only *talk about* the renderer, they never render.
+    files: [
+      'src/lib/**/*.ts',
+      'src/settings/**/*.ts',
+      'src/sessions/**/*.ts',
+      'src/connection/**/*.ts',
+      'src/images/**/*.ts',
+      'src/bridge/**/*.ts',
+    ],
     rules: {
       'no-restricted-imports': restricted(
         [
@@ -106,7 +124,7 @@ export default tseslint.config(
         [
           banned(['node:*'], NODE_BUILTIN),
           banned(['react', 'react-dom', 'react/**', 'react-dom/**'], REACT_FREE),
-          banned([`${CLIENT}/**`, `${SESSION}/**`], BARREL_ONLY),
+          banned([`${CLIENT}/**`, `${SESSION}/**`, `${UI}/**`, `!${UI_PROTOCOL}`], BARREL_ONLY),
           banned(['../tests/**', '../tools/**', '**/tests/**', '**/tools/**'], NO_TESTS),
         ],
       ),
@@ -125,7 +143,7 @@ export default tseslint.config(
         [
           banned(['node:*'], NODE_BUILTIN),
           banned(['react', 'react-dom', 'react/**', 'react-dom/**'], REACT_FREE),
-          banned([`${CLIENT}/**`, `${SESSION}/**`], BARREL_ONLY),
+          banned([`${CLIENT}/**`, `${SESSION}/**`, `${UI}/**`, `!${UI_PROTOCOL}`], BARREL_ONLY),
           banned(['../tests/**', '../tools/**', '**/tests/**', '**/tools/**'], NO_TESTS),
         ],
       ),

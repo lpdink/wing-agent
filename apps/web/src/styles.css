@@ -408,11 +408,14 @@ code {
 .pane {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  /* No padding or gap of its own: the transcript owns the whole card, and the shared
+     renderer's rows carry the chat padding (5px 16px, the VS Code metric). The head,
+     the details block and the empty state pad themselves. */
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-elevated);
-  padding: 16px;
+  overflow: hidden;
   flex: 1;
   min-height: 0;
 }
@@ -421,6 +424,7 @@ code {
   align-items: flex-start;
   justify-content: flex-start;
   gap: 10px;
+  padding: 16px;
   color: var(--fg-muted);
 }
 
@@ -438,6 +442,35 @@ code {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* The folded runtime facts: one summary line (context usage + message count), the
+   full `wing info` surface one click away. */
+.pane__details {
+  border-bottom: 1px solid var(--border);
+}
+
+.pane__summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 6px 16px;
+  color: var(--fg-muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.pane__summary-value {
+  color: var(--fg-subtle);
+}
+
+.pane__empty {
+  padding: 16px;
+  margin: 0;
+  color: var(--fg-muted);
 }
 
 .pane__title {
@@ -454,6 +487,7 @@ code {
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 6px 24px;
   margin: 0;
+  padding: 4px 16px 12px;
 }
 
 .facts__row {
@@ -480,6 +514,7 @@ code {
 
 .pane__error {
   margin: 0;
+  padding: 0 16px 12px;
   color: var(--error);
 }
 

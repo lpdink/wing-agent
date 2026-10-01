@@ -35,6 +35,15 @@ export interface WorldSession {
   readonly lastInteraction: string | null;
   readonly messages: readonly Record<string, unknown>[];
   readonly events: readonly Record<string, unknown>[];
+  /**
+   * Events pushed *after* the subscribe replay, in order (a live stream).
+   *
+   * The replay is a snapshot; a transcript that only ever rendered snapshots would
+   * never exercise the streaming path (the caret, an assistant cell growing, an
+   * unterminated tool call). Each step is emitted once the previous one's delay has
+   * passed, so a scene ends in a state that does not change any more.
+   */
+  readonly live?: readonly LiveStep[];
   readonly info: {
     readonly model: string;
     readonly thinking: boolean;
@@ -45,6 +54,12 @@ export interface WorldSession {
     readonly windowTokens: number;
     readonly messageCount: number;
   };
+}
+
+/** One step of a session's live script: wait `delayMs`, then push `event`. */
+export interface LiveStep {
+  readonly delayMs: number;
+  readonly event: Record<string, unknown>;
 }
 
 export interface World {
@@ -290,6 +305,7 @@ async function handleApi(
       // The replay rides on the socket, right after the HTTP answer.
       setTimeout(() => {
         context.broadcast(syncPayload(session));
+        scheduleLive(context, session);
         if (context.world.dropAfterSubscribe === true) {
           setTimeout(() => {
             context.drop();
@@ -326,8 +342,61 @@ async function handleApi(
       });
       return;
     }
+    // Step 03's workspace image endpoint: the transcript asks for it, so the fixture
+    // answers the same way (`session_id` + `path`, bytes or a refusal).
+    case 'GET /api/workspace/image': {
+      const sessionId = url.searchParams.get('session_id') ?? '';
+      const path = url.searchParams.get('path') ?? '';
+      const session = sessions.find((candidate) => candidate.id === sessionId);
+      if (session === undefined || path === '') {
+        json(response, { error: 'session not found' }, 404);
+        return;
+      }
+      if (!/\.(png|jpe?g|gif|webp|svg|bmp|ico|avif|apng)$/i.test(path)) {
+        json(response, { error: 'not an image' }, 404);
+        return;
+      }
+      response.writeHead(200, {
+        'content-type': 'image/png',
+        'content-length': CHART_PNG.byteLength,
+        'cache-control': 'no-store',
+      });
+      response.end(CHART_PNG);
+      return;
+    }
     default:
       json(response, { error: 'not found', path: url.pathname }, 404);
+  }
+}
+
+/**
+ * The one image the fixture knows: a 240×72 four-bar chart.
+ *
+ * Generated once (a raw RGBA raster through `zlib.deflateSync`) and inlined as
+ * bytes rather than shipped as a file, so the fixture stays a single module with no
+ * asset paths to get wrong — and a screenshot can show a *real* decoded image
+ * instead of a broken one.
+ */
+const CHART_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAPAAAABICAYAAADIzHiKAAABY0lEQVR42u3TsRGAIBBFQTqyNFsipAo7khkiQqzAzBGO2eAV8OE21daHpJgljyABLAlgSQAv3HHev+bNARbAAlgAC2CAARbAAAtgASyAAQZYAAMMMMACWHH+D2CABbAA9n8AOwCA/R/ADgBggAWwABbA/g9gBwCw/4sAePcDBxhggAEG2H0CDLAAduD2AQwwwAADDDDAAAPsgewTwA4cYIABBhhg9wkwwALYgdsHMMAAAwwwwAADDLAHsk8AO3D77APYAdhnH8AOwD6AAbbPPoAdgH32AewA7LMPYAdgH8AOwD77AHYA9tkHsAOwD2CA7bMPYAdgn30AOwD77APYAdgHsAOwzz6AHYB99gHsAOyzD2AHYB/ADsA++wB2APbZB7ADsA9ggO2zD2AHYJ99ADsA++wD2AHYB7ADsM++/QHnckl66WtvAEsAS5oRwBLAkgCWBLAEsCSAJQEsCWAJYEmL9ACpCmegAaflBQAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+/**
+ * Push a session's live script, one step at a time.
+ *
+ * Each step waits for the previous one, so the total runtime of a scene is the sum
+ * of its delays — and the scene's `ready` predicate can wait for the *last* step's
+ * effect, which is what makes a "mid-stream" screenshot reproducible.
+ */
+function scheduleLive(context: FixtureContext, session: WorldSession): void {
+  const steps = session.live ?? [];
+  let elapsed = 0;
+  for (const step of steps) {
+    elapsed += step.delayMs;
+    setTimeout(() => {
+      context.broadcast(step.event);
+    }, 10 + elapsed);
   }
 }
 

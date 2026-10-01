@@ -155,6 +155,313 @@ const WORKING_WORLD: World = {
   ],
 };
 
+/**
+ * The rich transcript world (step 08): one session whose replay produces every cell
+ * kind the renderer has — user / thinking / assistant markdown (list, table, KaTeX,
+ * a highlighted code block, a workspace image) / two tool calls / a diff / a system
+ * line / todo / an awaiting question form / a Bash approval / the turn's metrics.
+ *
+ * Two scenes photograph it: `transcript` (scrolled to the top — the assistant's
+ * answer) and `transcript-tail` (pinned to the bottom — the cells that ask for
+ * input). `uncommitted_tools` is empty: the streaming path has its own world.
+ */
+const ANSWER_MARKDOWN = [
+  'Found it — the table body is consumed as a paragraph.',
+  '',
+  '**What changes**',
+  '',
+  '- `src/parser.ts` — stop the paragraph at the table boundary',
+  '- `src/wrap.ts` — keep the CJK line breaking intact',
+  '',
+  'The fix keeps inline math like $a^2 + b^2 = c^2$ working, and this display block:',
+  '',
+  '$$\\int_0^1 x^2\\,dx = \\frac{1}{3}$$',
+  '',
+  '```ts',
+  'export function tableBody(tokens: Token[]): Node {',
+  "  return parseParagraph(tokens, { stopAt: 'table' });",
+  '}',
+  '```',
+  '',
+  '| case | before | after |',
+  '| --- | --- | --- |',
+  '| nested table | 1 row | 3 rows |',
+  '| CJK wrap | broken | intact |',
+  '',
+  'The render before the change:',
+  '',
+  '![before the fix](assets/chart.png)',
+].join('\n');
+
+const RICH_WORLD: World = {
+  sessions: [
+    session({
+      id: 'wing-1',
+      name: 'Fix the parser',
+      status: 'waiting',
+      lastInteraction: ago(4 * MINUTE),
+      messages: [
+        message('user', 'The parser chokes on nested tables in the docs — can you take a look?'),
+        message('assistant', '', {
+          reasoning_content:
+            'Check how the table body is consumed before touching the parser, and keep the CJK wrap rules in mind.',
+        }),
+        message('assistant', ANSWER_MARKDOWN),
+        message('assistant', '', {
+          tool_calls: [{ id: 'toolu-read', name: 'Read', arguments: { path: 'src/parser.ts' } }],
+        }),
+        message(
+          'tool',
+          'export function tableBody(tokens: Token[]): Node {\n  return parseParagraph(tokens);\n}',
+          {
+            tool_call_id: 'toolu-read',
+          },
+        ),
+        message('assistant', '', {
+          tool_calls: [
+            {
+              id: 'toolu-edit',
+              name: 'Edit',
+              arguments: {
+                path: 'src/parser.ts',
+                old_str: 'return parseParagraph(tokens);',
+                new_str: "return parseParagraph(tokens, { stopAt: 'table' });",
+              },
+            },
+          ],
+        }),
+        message('tool', 'Edited src/parser.ts (+1 −1)', { tool_call_id: 'toolu-edit' }),
+        message('assistant', '', {
+          tool_calls: [
+            {
+              id: 'toolu-todo',
+              name: 'TodoWrite',
+              arguments: {
+                todos: [
+                  { content: 'Fix the table body parser', status: 'completed' },
+                  { content: 'Keep CJK wrapping intact', status: 'in_progress' },
+                  { content: 'Add a regression test', status: 'pending' },
+                ],
+              },
+            },
+          ],
+        }),
+        message('tool', 'Todos updated', { tool_call_id: 'toolu-todo' }),
+        message('user', 'Right. Fix it without breaking the CJK wrapping.'),
+      ],
+      events: [
+        { type: 'turn_started', session_id: 'wing-1', created_at: ago(3 * MINUTE), request_id: 'r-1' },
+        {
+          type: 'llm_call_metrics',
+          session_id: 'wing-1',
+          created_at: ago(3 * MINUTE),
+          request_id: 'r-2',
+          model: 'glm-4.6',
+          prompt_tokens: 12_480,
+          completion_tokens: 640,
+          cached_tokens: 3_120,
+          first_chunk_rt_ms: 412,
+          tokens_per_sec: 41.2,
+          stop_reason: 'end_turn',
+        },
+        { type: 'done', session_id: 'wing-1', created_at: ago(3 * MINUTE), request_id: 'r-3' },
+        contextStats(10, 12_480, 200_000),
+        {
+          type: 'diff_content',
+          session_id: 'wing-1',
+          created_at: ago(3 * MINUTE),
+          request_id: 'r-4',
+          path: 'src/parser.ts',
+          old_text: 'export function tableBody(tokens: Token[]): Node {\n  return parseParagraph(tokens);\n}',
+          new_text:
+            "export function tableBody(tokens: Token[]): Node {\n  return parseParagraph(tokens, { stopAt: 'table' });\n}",
+          old_start_line: 41,
+          new_start_line: 41,
+          tool_call_id: 'toolu-edit',
+        },
+        {
+          type: 'notice',
+          session_id: 'wing-1',
+          created_at: ago(3 * MINUTE),
+          request_id: 'r-5',
+          level: 'warning',
+          message: 'LLM call retried once (rate limited)',
+          attempt: 1,
+          max_attempts: 3,
+          retry_in_s: 2,
+        },
+        {
+          type: 'ask',
+          session_id: 'wing-1',
+          created_at: ago(2 * MINUTE),
+          request_id: 'r-6',
+          tool_call_id: 'toolu-ask',
+          questions: [
+            {
+              id: 'q1',
+              header: 'Scope',
+              question: 'Which files should the fix touch?',
+              multiSelect: false,
+              options: [
+                { label: 'parser.ts', description: 'the table body parser' },
+                { label: 'wrap.ts', description: 'the CJK wrapper' },
+              ],
+            },
+            {
+              id: 'q2',
+              header: 'Tests',
+              question: 'Add a regression test for the nested case?',
+              multiSelect: false,
+              options: [
+                { label: 'yes', description: 'src/parser.test.ts' },
+                { label: 'no', description: 'keep the change minimal' },
+              ],
+            },
+          ],
+          question: '',
+          choices: [],
+          required: false,
+        },
+        {
+          type: 'ask',
+          session_id: 'wing-1',
+          created_at: ago(2 * MINUTE),
+          request_id: 'r-7',
+          tool_call_id: 'toolu-approve',
+          questions: [],
+          question: 'Bash command needs approval: pnpm test parser',
+          choices: ['Approve', 'Deny'],
+          required: true,
+        },
+      ],
+      info: {
+        model: 'glm-4.6',
+        thinking: true,
+        reasoningEffort: 'high',
+        yolo: false,
+        workdir: WORKSPACE,
+        usedTokens: 12_480,
+        windowTokens: 200_000,
+        messageCount: 10,
+      },
+    }),
+  ],
+};
+
+/**
+ * The live-streaming world: a replay of one short exchange, then two scripted arm
+ * deltas — the state a user actually watches ("the model is writing").
+ *
+ * The script stops mid-answer on purpose: the screenshot then catches a *frozen*
+ * state (an open thinking block that has just closed, an assistant cell still
+ * growing with the caret), and two runs cannot differ.
+ */
+const STREAMING_WORLD: World = {
+  sessions: [
+    session({
+      id: 'wing-1',
+      name: 'Release notes',
+      status: 'working',
+      lastInteraction: ago(20_000),
+      messages: [message('user', 'Write the release notes for v0.2.')],
+      events: [{ type: 'turn_started', session_id: 'wing-1', created_at: ago(15_000), request_id: 'r-live' }],
+      info: {
+        model: 'glm-4.6',
+        thinking: true,
+        reasoningEffort: 'high',
+        yolo: false,
+        workdir: WORKSPACE,
+        usedTokens: 3_100,
+        windowTokens: 200_000,
+        messageCount: 2,
+      },
+      live: [
+        {
+          delayMs: 60,
+          event: {
+            type: 'reasoning',
+            session_id: 'wing-1',
+            created_at: ago(10_000),
+            request_id: 'r-live',
+            content: 'Collect the merged PRs, then group them by area before writing.',
+          },
+        },
+        {
+          delayMs: 90,
+          event: {
+            type: 'text',
+            session_id: 'wing-1',
+            created_at: ago(9_000),
+            request_id: 'r-live',
+            content: '## v0.2 highlights\n\n- Nested tables in the docs are parsed again\n- ',
+          },
+        },
+      ],
+    }),
+  ],
+};
+
+/**
+ * The unterminated-tool world: the model is streaming a `Write` call's arguments.
+ *
+ * The reducer parses the partial JSON for the row's subject and keeps the raw text
+ * for the expanded "Arguments" card — both are visible in this frozen frame, and
+ * the authoritative arguments only arrive with the (never sent) final `tool_call`.
+ */
+const STREAMING_TOOL_WORLD: World = {
+  sessions: [
+    session({
+      id: 'wing-1',
+      name: 'Release notes',
+      status: 'working',
+      lastInteraction: ago(20_000),
+      messages: [
+        message('user', 'Write the release notes for v0.2.'),
+        message('assistant', 'Sure — drafting `docs/release-0.2.md` now.'),
+      ],
+      events: [{ type: 'turn_started', session_id: 'wing-1', created_at: ago(15_000), request_id: 'r-tool' }],
+      info: {
+        model: 'glm-4.6',
+        thinking: true,
+        reasoningEffort: 'high',
+        yolo: false,
+        workdir: WORKSPACE,
+        usedTokens: 3_400,
+        windowTokens: 200_000,
+        messageCount: 3,
+      },
+      live: [
+        {
+          delayMs: 60,
+          event: {
+            type: 'tool_call_stream',
+            session_id: 'wing-1',
+            created_at: ago(8_000),
+            request_id: 'r-tool',
+            tool_call_id: 'toolu-write',
+            tool_name: 'Write',
+            args_fragment: '{"path": "docs/release-0.2.md", "content": "# v0.2\\n\\n',
+            is_final: false,
+          },
+        },
+        {
+          delayMs: 60,
+          event: {
+            type: 'tool_call_stream',
+            session_id: 'wing-1',
+            created_at: ago(7_000),
+            request_id: 'r-tool',
+            tool_call_id: 'toolu-write',
+            tool_name: 'Write',
+            args_fragment: '- nested tables in the docs are parsed again\\n- ',
+            is_final: false,
+          },
+        },
+      ],
+    }),
+  ],
+};
+
 const EMPTY_WORLD: World = { sessions: [] };
 
 /** Settings that point at a port where nothing listens. */
@@ -171,7 +478,87 @@ function deadAddressSeed(context: SceneContext): Record<string, string> {
   };
 }
 
+/** Scroll the transcript to its first row (the assistant's answer, not the tail). */
+async function scrollTranscriptToTop(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const transcript = document.querySelector('[data-testid="transcript"]');
+    if (transcript !== null) {
+      transcript.scrollTop = 0;
+    }
+  });
+}
+
 export const SCENES: readonly ShotScene[] = [
+  {
+    name: 'transcript',
+    title:
+      'Rich transcript, scrolled to the top: user bubble, folded thinking, assistant markdown (list, KaTeX, highlighted code, table) and a workspace image fetched from the gateway',
+    world: RICH_WORLD,
+    viewports: ['desktop', 'mobile'],
+    async ready(page) {
+      await page.getByTestId('transcript').waitFor();
+      // The image is the last thing to arrive (the gateway answers it): waiting for
+      // it is what makes the shot reproducible.
+      await page.getByTestId('md-image').first().waitFor();
+      await page.getByTestId('md-math').first().waitFor();
+    },
+    async interact(page) {
+      await scrollTranscriptToTop(page);
+    },
+  },
+  {
+    name: 'transcript-tail',
+    title:
+      'The same transcript pinned to its newest cells: tool rows, todo list, diff card, system line, the awaiting question form, the Bash approval and the turn metrics',
+    world: RICH_WORLD,
+    viewports: ['desktop', 'mobile'],
+    async ready(page) {
+      await page.getByTestId('transcript').waitFor();
+      await page.getByTestId('md-image').first().waitFor();
+      await page.getByRole('button', { name: 'Approve' }).waitFor();
+    },
+  },
+  {
+    name: 'transcript-dark',
+    title:
+      'The rich transcript under prefers-color-scheme: dark — the theme bridge and the dark syntax colours',
+    world: RICH_WORLD,
+    viewports: ['desktop'],
+    colorScheme: 'dark',
+    async ready(page) {
+      await page.getByTestId('transcript').waitFor();
+      await page.getByTestId('md-image').first().waitFor();
+    },
+    async interact(page) {
+      await scrollTranscriptToTop(page);
+    },
+  },
+  {
+    name: 'streaming',
+    title:
+      'Mid-answer: the assistant cell still streaming (the animated caret), preceded by the thinking block the answer closed',
+    world: STREAMING_WORLD,
+    viewports: ['desktop', 'mobile'],
+    async ready(page) {
+      await page.locator('[data-cell-kind="assistant"][data-streaming="true"]').waitFor();
+      await page.locator('[data-cell-kind="thinking"]').waitFor();
+    },
+  },
+  {
+    name: 'streaming-tool',
+    title:
+      'An unterminated tool call: the row’s subject comes from the partial-JSON parse, the expanded card from the raw streamed arguments',
+    world: STREAMING_TOOL_WORLD,
+    viewports: ['desktop'],
+    async ready(page) {
+      await page.locator('[data-cell-kind="tool_call"][data-cell-status="streaming"]').waitFor();
+    },
+    async interact(page) {
+      // Open the row: the arguments card is the point of this shot.
+      await page.locator('[data-cell-kind="tool_call"] [role="button"]').first().click();
+      await page.getByText('Arguments').waitFor();
+    },
+  },
   {
     name: 'sessions',
     title: 'Connected shell: session list (four sessions, one working), live session state, connection pill',

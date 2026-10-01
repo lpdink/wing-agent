@@ -6,7 +6,14 @@
     "types": ["vite/client"],
     "jsx": "react-jsx"
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts", "tests/**/*.tsx"],
-  "//exclude": "The layering guard is node code (file system reads); tsconfig.tools.json owns every node-side file in this app.",
-  "exclude": ["tests/layers.test.ts"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "tests/**/*.ts",
+    "tests/**/*.tsx",
+    "../../packages/ui/src/**/*.d.ts"
+  ],
+  "//packages/ui": "`@wing-agent/ui` is source-first (its `exports` points at `src/`), so an import pulls its modules in but never its ambient declarations — the explicit glob is the documented requirement of that package (same line in extensions/vscode/tsconfig.webview.json).",
+  "//exclude": "The layering guard and the theme bridge's precondition test are node code (file system reads); tsconfig.tools.json owns every node-side file in this app.",
+  "exclude": ["tests/layers.test.ts", "tests/transcript.theme.test.ts"]
 }

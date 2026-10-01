@@ -37,10 +37,12 @@ import {
   GatewayHttpClient,
   GatewayHttpError,
   GatewaySocketError,
+  createClientRequest,
   isKnownEvent,
   reconnectDelayMs,
   silentLogger,
   wsUrlWithApiKey,
+  type ClientRequest,
   type CoreLogger,
   type ConnectionState,
   type HttpTransport,
@@ -48,7 +50,16 @@ import {
   type SocketFactory,
   type WingEvent,
 } from '@wing-agent/client';
-import { SerialQueue, SessionRecord, applyLive, applySync, type ReductionEffect } from '@wing-agent/session';
+import {
+  SerialQueue,
+  SessionRecord,
+  applyLive,
+  applySync,
+  buildAskReply,
+  type AskAnswerModel,
+  type AskCellModel,
+  type ReductionEffect,
+} from '@wing-agent/session';
 
 import { Notifier } from '../lib/observable';
 import { type GatewaySettings, normalizeSettings } from '../settings/settings';
@@ -88,6 +99,17 @@ export interface Notice {
   readonly level: 'info' | 'warning' | 'error';
   readonly text: string;
 }
+
+/** How an ask reply ended (step 08's Ask wiring; tests and step 09 read it). */
+export type AskReplyOutcome =
+  /** The frame left the socket and the cell is marked answered. */
+  | 'sent'
+  /** There is nothing to answer (the ask is gone / already handled). */
+  | 'gone'
+  /** The reply encoded to nothing — the renderer disabled the button in this case. */
+  | 'empty'
+  /** The socket is down; the user was told. */
+  | 'not-connected';
 
 /** The immutable snapshot React renders. Rebuilt (new identity) on every change. */
 export interface RuntimeSnapshot {
@@ -238,6 +260,107 @@ export class GatewayRuntime {
    */
   get connection(): GatewayConnection | null {
     return this.clients?.connection ?? null;
+  }
+
+  // ── outbound frames (ask replies now; the composer in step 09) ──────
+
+  /**
+   * Send one `ClientRequest` frame on the live socket.
+   *
+   * `false` when there is nothing to send it on (or the socket refused it), which is
+   * the only thing a caller can act on — the frame itself is the caller's business
+   * (`createClientRequest` + `encodeClientRequest` live in `@wing-agent/client`, and
+   * `replyAsk` below is the one user of this method today).
+   */
+  sendClientRequest(frame: ClientRequest): boolean {
+    const connection = this.clients?.connection ?? null;
+    if (connection === null || connection.state.status !== 'connected') {
+      return false;
+    }
+    try {
+      connection.send(frame);
+      return true;
+    } catch (error) {
+      this.logger.warn('could not send to the gateway', error);
+      return false;
+    }
+  }
+
+  /**
+   * Answer the awaiting ask with `requestId` (an `AskUserQuestion`, or the legacy
+   * single question) — the `answerAsk` intent of the renderer, end to end.
+   *
+   * Mirrors `extensions/vscode/src/host/session/manager.ts::answerAsk`: the cell must
+   * still be awaiting (answering something the backend already moved past would put a
+   * stale reply on the wire), the content is `buildAskReply`'s encoding of the
+   * choices, and the reply travels as a `ClientRequest` addressed by
+   * `tool_call_id = requestId` (that is how the gateway resolves the waiter).
+   *
+   * The cell flips to `answered` locally right after a successful send, exactly like
+   * the extension: the backend echoes the authoritative state through its own events,
+   * and a lost socket is reported by the notice rather than by a stuck spinner.
+   */
+  answerAsk(requestId: string, answers: readonly AskAnswerModel[]): AskReplyOutcome {
+    const cell = this.awaitingAsk(requestId);
+    if (cell === null) {
+      this.pushNotice('warning', 'That question is no longer waiting for an answer.');
+      return 'gone';
+    }
+    const content = buildAskReply({ approval: cell.approval, questions: cell.questions }, answers);
+    return this.replyAsk(cell, content, answers);
+  }
+
+  /** Approve / deny a dangerous-command confirmation (`y` / `n`, the backend's words). */
+  approveTool(requestId: string, decision: 'approve' | 'deny'): AskReplyOutcome {
+    const cell = this.awaitingAsk(requestId);
+    if (cell === null) {
+      this.pushNotice('warning', 'That approval is no longer pending.');
+      return 'gone';
+    }
+    const label = decision === 'approve' ? 'y' : 'n';
+    const answers: AskAnswerModel[] = [
+      { questionId: cell.questions[0]?.id ?? 'choice', selected: [label], text: '' },
+    ];
+    return this.replyAsk(cell, label, answers);
+  }
+
+  /** The awaiting ask cell for `requestId`, or `null` (same guard as the extension). */
+  private awaitingAsk(requestId: string): AskCellModel | null {
+    const record = this.active?.record ?? null;
+    if (record === null) {
+      return null;
+    }
+    const cellId = record.awaitingAsks.get(requestId);
+    const cell = cellId === undefined ? undefined : record.cellById(cellId);
+    if (cell === undefined || cell.kind !== 'ask' || cell.state !== 'awaiting') {
+      return null;
+    }
+    return cell;
+  }
+
+  private replyAsk(cell: AskCellModel, content: string, answers: readonly AskAnswerModel[]): AskReplyOutcome {
+    const record = this.active?.record ?? null;
+    if (record === null) {
+      return 'gone';
+    }
+    if (content === '') {
+      this.pushNotice('warning', 'Nothing to send — pick an answer first.');
+      return 'empty';
+    }
+    const frame = createClientRequest({
+      sessionId: record.sessionId,
+      content,
+      toolCallId: cell.requestId,
+    });
+    if (!this.sendClientRequest(frame)) {
+      this.pushNotice('warning', 'Not sent — the gateway is not connected.');
+      return 'not-connected';
+    }
+    record.resolveAsk(cell.requestId);
+    record.update({ ...cell, state: 'answered', answers: [...answers] });
+    record.refreshStatus();
+    this.flush(record);
+    return 'sent';
   }
 
   // ── lifecycle ───────────────────────────────────────────────────────
@@ -961,6 +1084,18 @@ export class GatewayRuntime {
   /** Dismiss one notice from the UI (the automatic expiry is the same path). */
   dismissNotice(id: number): void {
     this.dismissNoticeById(id);
+  }
+
+  /**
+   * User-visible message from outside the runtime's own event lane.
+   *
+   * The transcript bridge uses it for intents a browser cannot carry out
+   * (opening a file / a native diff — see `src/bridge/webBridge.ts`), and step 09's
+   * composer will use it for send failures. Same stack, same TTL, same dismissal as
+   * every other notice.
+   */
+  pushUserNotice(level: Notice['level'], text: string): void {
+    this.pushNotice(level, text);
   }
 
   private reportFailure(prefix: string, error: unknown): void {

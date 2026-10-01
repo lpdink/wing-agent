@@ -13,6 +13,7 @@ import type { GatewaySettings } from '../settings/settings';
 
 import { Shell } from './Shell';
 import { useRuntimeSnapshot } from './useRuntime';
+import { useWebBridge } from './useWebBridge';
 
 /** Everything the shell can *do*; each entry is one runtime call. */
 export interface ShellActions {
@@ -42,6 +43,10 @@ export function App({ runtime, settingsPersistent = true }: AppProps): ReactElem
       runtime.stop();
     };
   }, [runtime]);
+
+  // The renderer's bridge (ask answers, images, links): mounted with the shell, torn
+  // down with it.
+  useWebBridge(runtime);
 
   const actions = useMemo<ShellActions>(
     () => ({

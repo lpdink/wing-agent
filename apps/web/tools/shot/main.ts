@@ -7,13 +7,17 @@
  *
  * Contracts, in the order they are enforced:
  *
- * - the output directory defaults to the task directory
- *   (`$WING_HOME/tasks/wing-app/07_web_shell/shots`), `--out` overrides it;
+ * - the output directory defaults to the *current step's* task directory
+ *   (`$WING_HOME/tasks/wing-app/08_web_transcript/shots` — each step's evidence lives
+ *   with its own design/task documents; 09/11 move this constant on), `--out` overrides it;
  * - every image must be ≤ 2 MiB — the acceptance rule is machine-checked, not
  *   eyeballed;
  * - the browser is the local Chrome (`channel: 'chrome'`) by default, so a fresh
  *   `pnpm install` needs no browser download; `--browser=chromium` uses
  *   Playwright's own build (`pnpm exec playwright install chromium` once);
+ * - every screenshot is taken with CSS animations and transitions disabled: the
+ *   transcript has infinite ones (the streaming caret, the thinking shimmer), and a
+ *   frame in the middle of an animation is not reproducible.
  * - a manifest (scene, viewport, file, bytes, what it shows) is printed and
  *   written to `manifest.json` next to the images.
  *
@@ -51,7 +55,7 @@ function parseArgs(argv: readonly string[]): Cli {
     process.env['WING_HOME'] ?? path.join(os.homedir(), '.wing'),
     'tasks',
     'wing-app',
-    '07_web_shell',
+    '08_web_transcript',
     'shots',
   );
   let only: string[] = [];
@@ -97,7 +101,7 @@ function printUsage(): void {
       'usage: node out/shot/shot.mjs [--only=name[,name]] [--out=DIR] [--browser=chrome|chromium|msedge|none] [--list]',
       '',
       '  --only      render only these scenes (names from --list)',
-      '  --out       output directory (default: $WING_HOME/tasks/wing-app/07_web_shell/shots)',
+      '  --out       output directory (default: $WING_HOME/tasks/wing-app/08_web_transcript/shots)',
       "  --browser   browser channel; `none` uses Playwright's bundled chromium",
       '  --list      print the scenes and exit',
       '',
@@ -206,7 +210,10 @@ async function main(): Promise<void> {
           await first.waitForTimeout(120);
 
           const file = path.join(cli.outDir, fileName(scene, viewportId));
-          await first.screenshot({ path: file });
+          // `animations: 'disabled'` fast-forwards CSS animations and cancels the
+          // infinite ones, so the streaming caret and the thinking shimmer render
+          // the same frame on every run.
+          await first.screenshot({ path: file, animations: 'disabled' });
           const stats = await stat(file);
           if (stats.size > MAX_IMAGE_BYTES) {
             throw new Error(
