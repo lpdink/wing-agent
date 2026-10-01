@@ -16,22 +16,23 @@ import tseslint from 'typescript-eslint';
  */
 
 const VSCODE = 'vscode';
-const VSCODE_MESSAGE =
-  'Only src/host may import "vscode". src/core (Electron seam), src/webview and src/shared must stay portable.';
+const VSCODE_MESSAGE = 'Only src/host may import "vscode". src/webview and src/shared must stay portable.';
+const CLIENT_PACKAGE = '@wing-agent/client';
+const CLIENT_MESSAGE =
+  'Only src/host may import the gateway capability layer: the renderer talks over the bridge, and src/shared stays dependency-free.';
 const HOST_BOUNDARY =
   'src/host must not import the renderer (src/webview): the host talks to it over the bridge only.';
 const WEBVIEW_BOUNDARY =
-  'src/webview must not import host/core code: the renderer only consumes src/shared contract types.';
-const SHARED_BOUNDARY = 'src/shared is dependency-free: no vscode / host / core / webview / node imports.';
-const CORE_BOUNDARY = 'src/core is the portable gateway layer: no vscode, no host, no renderer.';
+  'src/webview must not import host code: the renderer only consumes src/shared contract types.';
+const SHARED_BOUNDARY =
+  'src/shared is dependency-free: no vscode / host / webview / node imports and no packages.';
 const TESTING_BOUNDARY = 'src/testing is test/preview-only; product code must not import it.';
 const NODE_BUILTIN_BOUNDARY =
   'Node builtins are unavailable here: this layer also runs in the webview bundle.';
 
-/** Host / core / renderer / testing layer directories as glob groups. */
+/** Host / renderer / testing layer directories as glob groups. */
 const LAYER_GLOBS = {
   host: ['**/host/**'],
-  core: ['**/core/**'],
   webview: ['**/webview/**'],
   testing: ['**/testing/**'],
 };
@@ -42,10 +43,10 @@ const LAYER_GLOBS = {
  * `group` values are arrays (minimatch patterns over the import string), which is
  * the shape ESLint 10 validates; a bare string is rejected.
  */
-const restricted = ({ banVscode = false, groups = [] }) => [
+const restricted = ({ banVscode = false, paths = [], groups = [] }) => [
   'error',
   {
-    paths: banVscode ? [{ name: VSCODE, message: VSCODE_MESSAGE }] : [],
+    paths: banVscode ? [{ name: VSCODE, message: VSCODE_MESSAGE }, ...paths] : paths,
     patterns: groups.map(([group, message]) => ({ group, message })),
   },
 ];
@@ -92,7 +93,8 @@ export default tseslint.config(
 
   // ── Layer zones ────────────────────────────────────────────────────────
   {
-    // The extension host is the only layer allowed to touch the editor API.
+    // The extension host is the only layer allowed to touch the editor API — and
+    // the only one allowed to speak to the gateway (via @wing-agent/client).
     files: ['src/host/**/*.ts'],
     rules: {
       'no-restricted-imports': restricted({
@@ -104,26 +106,13 @@ export default tseslint.config(
     },
   },
   {
-    files: ['src/core/**/*.ts'],
-    rules: {
-      'no-restricted-imports': restricted({
-        banVscode: true,
-        groups: [
-          [LAYER_GLOBS.host, CORE_BOUNDARY],
-          [LAYER_GLOBS.webview, CORE_BOUNDARY],
-          [LAYER_GLOBS.testing, TESTING_BOUNDARY],
-        ],
-      }),
-    },
-  },
-  {
     files: ['src/shared/**/*.ts'],
     rules: {
       'no-restricted-imports': restricted({
         banVscode: true,
+        paths: [{ name: CLIENT_PACKAGE, message: CLIENT_MESSAGE }],
         groups: [
           [LAYER_GLOBS.host, SHARED_BOUNDARY],
-          [LAYER_GLOBS.core, SHARED_BOUNDARY],
           [LAYER_GLOBS.webview, SHARED_BOUNDARY],
           [['node:*'], NODE_BUILTIN_BOUNDARY],
           [LAYER_GLOBS.testing, TESTING_BOUNDARY],
@@ -136,9 +125,9 @@ export default tseslint.config(
     rules: {
       'no-restricted-imports': restricted({
         banVscode: true,
+        paths: [{ name: CLIENT_PACKAGE, message: CLIENT_MESSAGE }],
         groups: [
           [LAYER_GLOBS.host, WEBVIEW_BOUNDARY],
-          [LAYER_GLOBS.core, WEBVIEW_BOUNDARY],
           [['node:*'], NODE_BUILTIN_BOUNDARY],
           [LAYER_GLOBS.testing, TESTING_BOUNDARY],
         ],
@@ -150,9 +139,9 @@ export default tseslint.config(
     rules: {
       'no-restricted-imports': restricted({
         banVscode: true,
+        paths: [{ name: CLIENT_PACKAGE, message: 'src/testing may only import src/shared.' }],
         groups: [
           [LAYER_GLOBS.host, 'src/testing may only import src/shared.'],
-          [LAYER_GLOBS.core, 'src/testing may only import src/shared.'],
           [LAYER_GLOBS.webview, 'src/testing may only import src/shared.'],
         ],
       }),
@@ -171,7 +160,7 @@ export default tseslint.config(
 
   // ── Environment globals ────────────────────────────────────────────────
   {
-    files: ['src/host/**/*.ts', 'src/core/**/*.ts', 'esbuild.mjs', '*.config.mts'],
+    files: ['src/host/**/*.ts', 'esbuild.mjs', '*.config.mts'],
     languageOptions: { globals: globals.node },
   },
   {

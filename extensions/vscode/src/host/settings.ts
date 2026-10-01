@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 
-import { normalizeApiKey } from '../core';
+import { normalizeApiKey } from '@wing-agent/client';
 
 import { log } from './log';
 

@@ -15,6 +15,10 @@
  */
 
 /** A value that survives structured JSON serialization (bridge-safe). */
+// Structurally identical to `@wing-agent/client`'s own `JsonValue` (packages/client/
+// src/protocol/json.ts): the client package must not import these contract types, and
+// this layer must stay dependency-free — so the two-line definition is mirrored rather
+// than shared. Keep the two in sync (both are aliases, nothing nominal depends on it).
 export type JsonValue =
   string | number | boolean | null | readonly JsonValue[] | { readonly [key: string]: JsonValue };
 

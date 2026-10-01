@@ -23,19 +23,25 @@
 - 图片/文件上传、附件、多模态、`@file` 引用（后端未支持，视觉上也不出现）；
 - VS Code 原生 Chat Participant API（我们做自己的 Webview 视图）；
 - 远程场景（SSH / WSL / Dev Container）、多机网关；
-- Electron / Web 前端本体（只保留 `src/core` 这个接缝）；
+- Electron / Web 前端本体（只保留 `packages/client` 这个接缝）；
 - i18n（UI 文案英文，与 TUI 一致）。
 
 ## 2. 分层与数据流
 
 ### 2.1 四层 + 两个辅助层
 
+仓库是 pnpm workspace（根 `pnpm-workspace.yaml` + 单锁文件），本扩展是其中一个成员；共享的
+TypeScript 包在 `packages/` 下（抽取顺序：`client` → `session` → `ui`，本扩展逐步降为消费方）。
+**网关能力层已不在本包里**——它是 `@wing-agent/client`（`packages/client`），宿主经 workspace
+依赖消费。
+
 ```
+packages/client/  @wing-agent/client —— 网关能力层：协议镜像（显式解码）、WS 连接 + 重连监督、
+                  HTTP 客户端、分片重组、退避、错误模型、URL 组装。环境无关（自带双 tsconfig、
+                  ESLint zone 与 import 图守门测试）。Web / Electron 壳直接消费同一个包。
 extensions/vscode/
 ├── src/shared/    两侧契约：类型、常量、纯函数（命令匹配、cell 判别联合……）。
 │                  不依赖任何东西（无 npm、无 node、无 vscode、无 DOM）。
-├── src/core/      网关能力层：协议镜像（显式解码）、WS 连接 + 重连监督、HTTP 客户端、
-│                  分片重组、退避、错误模型、URL 组装。Electron 直接搬这一层。
 ├── src/host/      扩展宿主：WingHost（连接生命周期）+ SessionManager（多 Tab 编排 / 控制面 /
 │                  归约宿主）+ reducer/model/derive（事件 → UI 模型）+ bridge + 视图 + 命令 + 设置。
 ├── src/webview/   React 渲染层：cells、markdown 增量渲染、shiki、外壳（Tab 栏 / composer /
@@ -47,13 +53,17 @@ extensions/vscode/
 
 依赖矩阵（`tests/layers/layers.test.ts` 的 `RULES`，权威口径）：
 
-| 层 | 可 import 的自家层 | npm | node builtins | `vscode` |
-|---|---|---|---|---|
-| `shared` | 同级 | ✗ | ✗ | ✗ |
-| `core` | `shared` | ✓ | ✓ | ✗ |
-| `host` | `shared`、`core` | ✓ | ✓ | ✓（只有它可以） |
-| `webview` | `shared` | ✓ | ✗ | ✗ |
-| `testing` | `shared` | ✗ | ✗ | ✗ |
+| 层 | 可 import 的自家层 | npm | node builtins | `vscode` | `@wing-agent/client` |
+|---|---|---|---|---|---|
+| `shared` | 同级 | ✗ | ✗ | ✗ | ✗ |
+| `host` | `shared` | ✓ | ✓ | ✓（只有它可以） | ✓（只有它可以） |
+| `webview` | `shared` | ✓ | ✗ | ✗ | ✗ |
+| `testing` | `shared` | ✗ | ✗ | ✗ | ✗ |
+
+网关能力层（原 `src/core`，现 `packages/client` 的 `@wing-agent/client`）对矩阵来说是一个**外部包**：只有 `host` 能
+import（webview 走桥、shared 保持零依赖），这条规则由 `layers.test.ts` 的 `CLIENT_PACKAGE` 分支与
+ESLint 的 `paths` 禁区一起守；包自己那套「环境无关」门禁随包搬到了
+`packages/client/{tsconfig.json,tsconfig.dom.json,eslint.config.mjs,tests/layers.test.ts}`。
 
 `preview/` 只允许 import `preview` 自己、`shared`、`testing`、`webview`。
 
@@ -67,7 +77,7 @@ extensions/vscode/
       │  WS  /ws（ReAct 事件流 + 上行帧）                  │
       │                                                  │
   ┌───┴──────────────┐     桥协议（postMessage）           │
-  │ src/core         │   hydrate / patch / state /        │
+  │ pkg/client       │   hydrate / patch / state /        │
   │ GatewayConnection│   panels / tabs / ui          ┌────┴─────────────┐
   │ GatewayHttpClient│  ────────────────────────────► │ src/webview      │
   └───▲──────────────┘                                │ appStore         │
@@ -88,14 +98,16 @@ extensions/vscode/
 单靠一套都拦不住，这是被 01 的评审逐条确认过的结构：
 
 1. **分 tsconfig 的 `lib`/`types`**（`tsconfig.node.json` 无 DOM、`tsconfig.webview.json` 无
-   node/vscode）——写 `document`/`process` 直接编译错误。它管「用了什么全局」。
+   node/vscode；`packages/client` 另有「无 DOM 的主项目 + 无 node 的 DOM 探针」）——写
+   `document`/`process` 直接编译错误。它管「用了什么全局」。
 2. **ESLint zones**（`eslint.config.mjs` 的 `no-restricted-imports`）——`vscode` 出 `host`、
-   `host → webview`、`webview → host/core`、产品代码引用 `src/testing` 都在编辑时就红。
+   `host → webview`、`webview → 网关能力层（`@wing-agent/client`）`、产品代码引用 `src/testing` 都在编辑时就红。
    它管「常见越层 import」，但表达不了完整矩阵（静态/动态 import、re-export、`require`）。
 3. **`tests/layers/layers.test.ts`**——解析每个源文件的**真实 import 图**（含动态
    `import()`、`require()`、`export ... from`、`import type`），逐条断言上表；还顺带检查
    `src/**` 里没有 `.js/.jsx`（避免"文件存在但 typecheck/lint 都看不见"）、webview CSS 里没有
-   硬编码颜色。它是权威门禁，跑在 `pnpm test` 里。
+   硬编码颜色。它是权威门禁，跑在 `pnpm test` 里。`packages/client/tests/layers.test.ts` 是它在
+   新包里的同构版本（只允许包内相对导入 + 唯一的惰性 `require("ws")` 白名单）。
 
 所以「越层」会同时挂 `make check` 与 `make test` 两处——这是有意的冗余。
 
@@ -195,7 +207,7 @@ extension.activate
         · 死了且 wing.autoStart → 跑一次 `wing start`（20s 上限）→ 轮询探活
         · 取消 autoStart / 找不到 wing → 横幅 + 一次性错误提示
      → GatewayConnection.connect() → WS 连上（connected）
-        · 首连失败：宿主自己的重试阶梯（1s·2ⁿ，封顶 30s；core 只监督"连上过之后"的连接）
+        · 首连失败：宿主自己的重试阶梯（1s·2ⁿ，封顶 30s；能力层只监督"连上过之后"的连接）
         · unauthorized：停止一切重试，提示填 `wing.apiKey`（凭据不会自愈）
   → webview ready → 宿主回 tabs + hydrate
   → 没有任何 Tab 时自动建一个（workspace = 窗口第一个 folder；没有 folder → 明确报错，不建半会话）
@@ -246,7 +258,7 @@ rewind 后 transcript「回退到该消息之前」+ 该消息文本回到输入
 ### 4.5 断线重连
 
 ```
-core 监督（连上过之后）：连接断开 → reconnecting（退避重试，client_id 置空）
+能力层监督（连上过之后）：连接断开 → reconnecting（退避重试，client_id 置空）
   宿主：横幅「Gateway connection lost — reconnecting…」
   （注意：重订阅只发生在 connected 之后——重试窗口里 client_id 是空的，提前订阅只会空转）
 → connected：client_id 更新 → 宿主 onConnected()
@@ -260,8 +272,8 @@ smoke 的 `reconnect-resubscribe` 场景钉死：重连后重放**不重复**、
 
 ```
 WS 帧
- └─ core：单帧 ≤ 16 MiB（网关对 > 8 MiB 的载荷在 wire 出口用 `_chunk` 信封切分，
-    客户端在读任务内合并还原 —— core/chunk.ts；应用层只见完整事件）
+ └─ 能力层：单帧 ≤ 16 MiB（网关对 > 8 MiB 的载荷在 wire 出口用 `_chunk` 信封切分，
+    客户端在读任务内合并还原 —— packages/client 的 chunk.ts；应用层只见完整事件）
      └─ 事件解码（protocol/events.ts，显式解码器，不 `as` 硬塞）
          └─ SessionManager.handleEvent → 按 session_id 找 record
              └─ reducer.applyLive（或 applySync）
@@ -338,7 +350,7 @@ webview 意图（`src/shared/bridge.ts` 的 `WebviewToHostMessage`，全部有�
 - **探活优先**：扩展从不假设「没连上就是没启动」；`GET /api/health` 说活着就什么都不做。
   （`wing start` 只是"通常安全"，探活是唯一诚实的判断。）
 - **一次自动拉起**：每次激活 / 每次手动 reconnect 最多跑一次 `wing start`；不无休止拉起。
-- **首连重试归宿主**：core 的监督从「成功连接过」开始；激活时的连接失败由 `WingHost` 的阶梯
+- **首连重试归宿主**：能力层的监督从「成功连接过」开始；激活时的连接失败由 `WingHost` 的阶梯
   重试。
 - **unauthorized 不重试**：凭据问题重试无意义，配了错误的 `wing.apiKey` 就停在明确提示。
 - 找不到 `wing`：设置项 `wing.wingPath` 可显式指定；否则搜 PATH 与常见安装位置
@@ -350,7 +362,7 @@ webview 意图（`src/shared/bridge.ts` 的 `WebviewToHostMessage`，全部有�
 
 | 产物 | 工具 | 特点 |
 |---|---|---|
-| `out/extension.js`（扩展宿主） | esbuild（`esbuild.mjs`） | CJS、`target: node20`（VS Code 1.100 = Electron 34 / Node 20.19）、`external: vscode`、sourcemap、**不 minify**（宿主日志可读性 > 几 KB）。`ws` 作为 devDependency 被 bundle 进来，作为「宿主没有全局 `WebSocket`（Node 20 就是这样）」的回落实现（评审 #109 [P1-3]；`src/core/transport/socket.ts` 的惰性 `require`） |
+| `out/extension.js`（扩展宿主） | esbuild（`esbuild.mjs`） | CJS、`target: node20`（VS Code 1.100 = Electron 34 / Node 20.19）、`external: vscode`、sourcemap、**不 minify**（宿主日志可读性 > 几 KB）。`ws` 由 `@wing-agent/client` 声明为 devDependency 并被 bundle 进来，作为「宿主没有全局 `WebSocket`（Node 20 就是这样）」的回落实现（评审 #109 [P1-3]；`packages/client/src/transport/socket.ts` 的惰性 `require`） |
 | `dist/webview/{main.js,main.css}` | Vite lib 模式（`vite.config.mts`） | 单 IIFE、**无动态 chunk**、无第三方 origin、无运行期 `fetch`；`main.js` 文件名是宿主契约的一部分 |
 | `out/smoke/smoke.mjs` | esbuild（`esbuild.smoke.mjs`） | smoke 的开发工具产物（不进 `.vsix`） |
 
@@ -478,10 +490,13 @@ code unit，闭定界符必须完整落在窗口内。三条都实测过：`\(x`
 
 | project | 环境 | 覆盖 |
 |---|---|---|
-| `node` | node | `tests/{core,host,shared,state,layers,artifact}`；`vscode` 模块 alias 到 `tests/mocks/vscode.ts`（记录式小 mock）——这就是扩展宿主可以无头测试的原因 |
+| `node` | node | `tests/{host,shared,state,layers,artifact}`；`vscode` 模块 alias 到 `tests/mocks/vscode.ts`（记录式小 mock）——这就是扩展宿主可以无头测试的原因 |
 | `webview` | jsdom | `tests/webview/**`，`@testing-library/react`，经真实 `mountApp` 对 `src/testing/mockBridge.ts` 的 scripted host 挂载 |
 
-- `fake-gateway.ts`（core/host 各一份）是进程内假网关，用来重放「事故复盘」式序列：时序、隔离、
+网关能力层有自己的 vitest（`packages/client/vitest.config.mts`，node 环境，含该包的 import 图守门）；
+根 `pnpm run test` 递归跑全部包的 `test` 脚本，所以两边都在 `make test-ts` 与 CI 里。
+
+- `fake-gateway.ts`（`packages/client/tests` 与 `tests/host` 各一份）是进程内假网关，用来重放「事故复盘」式序列：时序、隔离、
   重放、重连、错误面。
 - `tests/shared/contract.test.ts` 把桥协议、命令表等跨侧契约钉死在测试里（改契约必须改测试，
   防止一侧静默漂移）。
@@ -540,8 +555,14 @@ Node 宿主进程，不是产品（真实 VSCode/Electron 宿主未观察到）�
 
 ### 9.3 仓库级接线
 
+- 仓库根是 pnpm workspace（`pnpm-workspace.yaml`：`extensions/vscode`、`packages/*`、`apps/*`；
+  单锁文件 `pnpm-lock.yaml`，pnpm 自身的 `allowBuilds` / `minimumReleaseAgeExclude` 也在这里）。
+  每个 TS 包自持 `eslint.config.mjs` / tsconfig / vitest config 与
+  `lint`、`format`、`format:check`、`typecheck`、`test` 脚本；根的 `lint` / `format:check` /
+  `typecheck` / `test` / `build` 一律是 `pnpm -r run <script>`（新增包不需要改 Makefile / CI）。
+  共享的只有 `tsconfig.base.json`（严格性基线）与 `.prettierrc.json`。
 - `make check` / `make test` 的三个/四个分组里，`ts` 组 = `make check-ts` / `make test-ts`
-  （先按 lockfile 安装，再 lint/format/typecheck 或 vitest）。分组执行器是
+  （先在根按 lockfile 安装一次，再递归 lint/format/typecheck 或 vitest）。分组执行器是
   `scripts/collect_output.sh`。
 - `check-ts` / `test-ts` 开头显式探测 node（≥22.12，vitest 5 / vite 8 的下限）与 pnpm 11，缺工具
   时打印可操作提示（`corepack enable` / `SKIP_TS=1 make check`）再退出；`SKIP_TS=1` 是本地逃生舱，
@@ -549,9 +570,10 @@ Node 宿主进程，不是产品（真实 VSCode/Electron 宿主未观察到）�
 - `make fmt` / `make fmt-check` **有意不含 TS**：pre-commit 要秒级、且不该强依赖
   `node_modules`；TS 格式门禁在 `make check-ts` 与 CI 里（另有 `make fmt-ts` / `fmt-check-ts`
   可手动用）。
-- CI job `typescript-check`：install（`--frozen-lockfile`，pnpm 版本取自 `package.json`
-  `packageManager`）→ lint → format:check → typecheck → test → build → build:preview → package
-  → 上传 `.vsix` artifact。缓存键是 `extensions/vscode/pnpm-lock.yaml`（**锁文件必须提交**）。
+- CI job `typescript-check`：根 install（`--frozen-lockfile`，pnpm 版本取自根 `package.json`
+  `packageManager`；缓存键是根 `pnpm-lock.yaml`，**锁文件必须提交**）→ lint → format:check →
+  typecheck → test → `pnpm --filter wing-vscode run build` → `build:preview` → `package` →
+  上传 `.vsix` artifact。
 
 ## 10. 打包与安装
 
@@ -644,10 +666,13 @@ pnpm exec vsce ls       # 核对进包清单
 ## 14. 验证命令速查（都实跑过）
 
 ```bash
-# 工程门禁（extensions/vscode 内）
+# 仓库根：安装一次，门禁覆盖全部 TS 包
 pnpm install --frozen-lockfile --prefer-offline
 pnpm run typecheck && pnpm run lint && pnpm run format:check
-pnpm run test                 # 834 用例
+pnpm run test                 # 全部包的 vitest（含两套层守门）
+
+# 扩展自身（cd extensions/vscode）
+pnpm run test                 # 只跑本扩展（40 文件 / 648 用例）
 pnpm run build && pnpm run build:preview
 pnpm run package              # → wing-vscode.vsix
 pnpm run smoke:gateway        # 12 场景（真网关 + 假 Provider）

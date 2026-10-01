@@ -6,7 +6,7 @@ import type {
   SocketFactory,
   SocketHandlers,
   SocketLike,
-} from '../../../src/core';
+} from '@wing-agent/client';
 
 /**
  * In-process fake gateway for `tests/host`.

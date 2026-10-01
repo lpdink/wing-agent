@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 
-import type { CoreLogger } from '../core';
+import type { CoreLogger } from '@wing-agent/client';
 
 /**
  * The extension's output channel.
@@ -40,7 +40,7 @@ export function logDisposable(): vscode.Disposable {
 /**
  * The output channel as a `CoreLogger`.
  *
- * `src/core` cannot import `vscode`, so the host passes this adapter into the
+ * `@wing-agent/client` cannot import `vscode`, so the host passes this adapter into the
  * gateway clients: every connection / protocol diagnostic then lands in the
  * same greppable "Wing" channel as the rest of the host.
  */

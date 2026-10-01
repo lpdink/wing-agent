@@ -23,7 +23,7 @@ import type {
   SessionViewModel,
   TabModel,
 } from '../../src/shared';
-import type { WingEvent } from '../../src/core';
+import type { WingEvent } from '@wing-agent/client';
 import type { WebviewIntent } from '../../src/host/bridge';
 import { WebviewMirror } from '../../tests/host/support/mirror';
 

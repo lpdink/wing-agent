@@ -17,7 +17,7 @@ import {
   truncatePathSegments,
 } from '../../src/host/session/derive';
 import { parsePartialJson } from '../../src/host/session/partial-json';
-import type { AskEvent } from '../../src/core';
+import type { AskEvent } from '@wing-agent/client';
 
 /**
  * The pure derivations — ported from the TUI (`tool_call.rs`, `diff_view.rs`,

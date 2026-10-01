@@ -16,8 +16,8 @@ import type {
   SessionStateChangedEvent,
   SyncSessionEvent,
   WingEvent,
-} from '../../core';
-import { isKnownEvent, isTurnInFlight } from '../../core';
+} from '@wing-agent/client';
+import { isKnownEvent, isTurnInFlight } from '@wing-agent/client';
 
 import type { SessionRecord } from './model';
 import {
@@ -38,7 +38,7 @@ import { parsePartialJson } from './partial-json';
  * `applyLive` (the event stream) drive the same private handlers; the replay's
  * four material groups are assembled in the backend's documented order
  * (`messages → uncommitted → uncommitted_tools → events`) and the `events`
- * group is decoded into real `WingEvent`s by `src/core`, so a diff or an ask
+ * group is decoded into real `WingEvent`s by `@wing-agent/client`, so a diff or an ask
  * that arrives through a replay takes the *same* code path as one that arrives
  * live. That property is what makes "replay vs active rendering diverge" bugs
  * structurally impossible instead of merely unlikely.

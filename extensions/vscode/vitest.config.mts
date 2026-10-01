@@ -6,10 +6,12 @@ import { defineConfig } from 'vitest/config';
 /**
  * Two test projects, matching the two runtimes we ship into:
  *
- * - `node` — host / core / shared / layer-guard / build-artifact logic. `vscode` is
+ * - `node` — host / shared / layer-guard / build-artifact logic. `vscode` is
  *   aliased to `tests/mocks/vscode.ts`, which is what makes host code
  *   headless-testable. `tests/artifact` builds the webview with the real Vite
- *   config and runs the result in a DOM without Node globals.
+ *   config and runs the result in a DOM without Node globals. The gateway
+ *   capability layer is not here: it lives in `packages/client` with its own
+ *   vitest project (`pnpm -r run test` runs both).
  * - `webview` — React components under jsdom, plus the patch reducer under node
  *   (the reducer has no DOM dependency; keep those files in `tests/webview/`
  *   only if they need the DOM).
@@ -24,7 +26,7 @@ export default defineConfig({
         test: {
           name: 'node',
           environment: 'node',
-          include: ['tests/{core,host,shared,layers,state,artifact}/**/*.test.ts'],
+          include: ['tests/{host,shared,layers,state,artifact}/**/*.test.ts'],
           alias: {
             vscode: fileURLToPath(new URL('tests/mocks/vscode.ts', import.meta.url)),
           },

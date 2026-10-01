@@ -3,8 +3,8 @@ import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
-import type { CoreLogger } from '../../core';
-import { silentLogger } from '../../core';
+import type { CoreLogger } from '@wing-agent/client';
+import { silentLogger } from '@wing-agent/client';
 import type { GatewaySettings } from '../settings';
 
 /**

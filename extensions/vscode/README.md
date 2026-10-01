@@ -15,9 +15,10 @@ Maintainer deep dive (Chinese):
   the VS Code runtime this extension targets.
 - **To run**: VS Code ≥ 1.100 (`engines.vscode`). The extension host bundle is built with
   `target: node20` on purpose — VS Code 1.100 ships Electron 34 / **Node 20.19**. That host has no
-  global `WebSocket` (Node only exposes it from 21), so `src/core/transport/socket.ts` falls back to a
-  bundled `ws` client; on newer hosts (Node ≥ 22) the global implementation is used and the fallback is
-  never loaded. A connect failure names the runtime it ran on, so a report is actionable.
+  global `WebSocket` (Node only exposes it from 21), so `@wing-agent/client`'s
+  `transport/socket.ts` falls back to a bundled `ws` client; on newer hosts (Node ≥ 22) the global
+  implementation is used and the fallback is never loaded. A connect failure names the runtime it ran
+  on, so a report is actionable.
 - **To talk to a gateway**: a `wing` installation (`wing start`, or let the extension start it) — the
   same gateway the TUI uses, default `127.0.0.1:32523`.
 
@@ -49,10 +50,12 @@ code --uninstall-extension wing-agent.wing-vscode
 
 ## Develop
 
+Dependencies are installed **once at the repository root** (pnpm workspace, single lockfile); the
+extension is one member of it and consumes `@wing-agent/client` from `packages/`.
+
 ```bash
-cd extensions/vscode
-pnpm install --frozen-lockfile
-pnpm build
+pnpm install --frozen-lockfile    # repository root
+pnpm --filter wing-vscode build   # or: cd extensions/vscode && pnpm build
 ```
 
 Open **this folder** (`extensions/vscode`) in VS Code and press <kbd>F5</kbd>. F5 starts an
@@ -87,7 +90,7 @@ Commands: `Wing: New Session`, `Wing: Reconnect to Gateway`.
 ### About `wing.apiKey`
 
 - It is sent as an `Authorization: Bearer …` **header**, never in a URL (so proxy logs, access logs and
-  crash reports do not collect it — `src/core/urls.ts` documents the DOM-host exception).
+  crash reports do not collect it — `@wing-agent/client`'s `urls.ts` documents the DOM-host exception).
 - It is a **plain-text setting**: a workspace-scoped value lands in `.vscode/settings.json` (easy to
   commit by accident) and Settings Sync uploads it. Put it in **User** settings, and treat it like any
   other file-resident secret.
@@ -113,14 +116,18 @@ Commands: `Wing: New Session`, `Wing: Reconnect to Gateway`.
 
 ## Architecture
 
+The repository is a pnpm workspace (root `pnpm-workspace.yaml`, one lockfile). This extension is one
+member; the shared TypeScript packages live under `packages/`.
+
 ```
-src/shared/   contract types shared by both sides — types, constants, pure helpers. No vscode, no DOM, no node.
-src/core/     gateway capability layer: protocol mirror, WS/HTTP clients, chunk reassembly, reconnect (the Electron seam).
-src/host/     extension host: WingHost (connection lifecycle) + SessionManager (tabs, control plane, reduction) + bridge.
-src/webview/  React renderer: applies host-produced ops, renders the chat shell.
-src/testing/  fixtures + scripted host (test and preview only).
-preview/      preview harness: the webview app against the scripted host, without VS Code.
-tests/        vitest suites (node + jsdom).
+packages/client/  @wing-agent/client — gateway capability layer: protocol mirror, WS/HTTP clients,
+                  chunk reassembly, reconnect. Environment-agnostic (its own tsconfigs + gates).
+src/shared/       contract types shared by both sides — types, constants, pure helpers. No vscode, no DOM, no node.
+src/host/         extension host: WingHost (connection lifecycle) + SessionManager (tabs, control plane, reduction) + bridge.
+src/webview/      React renderer: applies host-produced ops, renders the chat shell.
+src/testing/      fixtures + scripted host (test and preview only).
+preview/          preview harness: the webview app against the scripted host, without VS Code.
+tests/            vitest suites (node + jsdom).
 ```
 
 The rule that ties it together: **the host is the only authority, the webview is a pure renderer.**

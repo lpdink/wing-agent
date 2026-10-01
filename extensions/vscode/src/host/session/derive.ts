@@ -8,7 +8,7 @@ import type {
   TodoItemStatus,
   ToolCallDisplayModel,
 } from '../../shared';
-import type { AskEvent, BranchTarget } from '../../core';
+import type { AskEvent, BranchTarget } from '@wing-agent/client';
 
 import { asArray, asObject } from './partial-json';
 

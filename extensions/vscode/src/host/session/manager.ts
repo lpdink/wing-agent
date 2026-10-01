@@ -19,8 +19,14 @@ import {
   normalizeCommandName,
   unhandledVariant,
 } from '../../shared';
-import type { CoreLogger, GatewayConnection, GatewayHttpClient, SessionStatus, WingEvent } from '../../core';
-import { GatewayHttpError, createClientRequest, isKnownEvent } from '../../core';
+import type {
+  CoreLogger,
+  GatewayConnection,
+  GatewayHttpClient,
+  SessionStatus,
+  WingEvent,
+} from '@wing-agent/client';
+import { GatewayHttpError, createClientRequest, isKnownEvent } from '@wing-agent/client';
 
 import type { WebviewIntent } from '../bridge';
 import type { EditorActions } from '../editorActions';

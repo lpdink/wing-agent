@@ -1,16 +1,14 @@
 {
-  "//": "Extension-host side: src/core + src/host + src/shared + their tests. NO DOM lib and NO DOM types on purpose — using `document`/`window` here is a compile error, which is how `core` stays portable (Electron seam) and `host` stays UI-free.",
+  "//": "Extension-host side: src/host + src/shared + src/testing + their tests. NO DOM lib and NO DOM types on purpose — using `document`/`window` here is a compile error, which is how `host` stays UI-free. The gateway capability layer moved into the `@wing-agent/client` workspace package (its own tsconfigs keep it portable; see packages/client/tsconfig.dom.json).",
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "lib": ["ES2023"],
     "types": ["node", "vscode"]
   },
   "include": [
-    "src/core/**/*.ts",
     "src/host/**/*.ts",
     "src/shared/**/*.ts",
     "src/testing/**/*.ts",
-    "tests/core/**/*.ts",
     "tests/host/**/*.ts",
     "tests/shared/**/*.ts",
     "tests/state/**/*.ts",

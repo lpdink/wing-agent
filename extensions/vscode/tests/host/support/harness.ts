@@ -1,9 +1,9 @@
 import { vi } from 'vitest';
 
 import type { HostToWebviewMessage } from '../../../src/shared';
-import { silentLogger } from '../../../src/core';
-import type { CoreLogger, HttpTransport } from '../../../src/core';
-import { GatewayConnection, GatewayHttpClient } from '../../../src/core';
+import { silentLogger } from '@wing-agent/client';
+import type { CoreLogger, HttpTransport } from '@wing-agent/client';
+import { GatewayConnection, GatewayHttpClient } from '@wing-agent/client';
 import type { WebviewIntent } from '../../../src/host/bridge';
 import type { EditorActions } from '../../../src/host/editorActions';
 import { GatewayLauncher } from '../../../src/host/gateway/launcher';

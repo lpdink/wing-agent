@@ -1,4 +1,10 @@
-import type { ConnectionState, CoreLogger, HttpTransport, SocketFactory, WingEvent } from '../core';
+import type {
+  ConnectionState,
+  CoreLogger,
+  HttpTransport,
+  SocketFactory,
+  WingEvent,
+} from '@wing-agent/client';
 import {
   DEFAULT_RECONNECT_OPTIONS,
   GatewayConnection,
@@ -7,7 +13,7 @@ import {
   gatewayUrls,
   reconnectDelayMs,
   silentLogger,
-} from '../core';
+} from '@wing-agent/client';
 
 import type { GatewaySettings } from './settings';
 import type { GatewayLauncher } from './gateway/launcher';

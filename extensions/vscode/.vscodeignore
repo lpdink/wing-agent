@@ -26,8 +26,6 @@ tsconfig*.json
 eslint.config.mjs
 .prettierrc.json
 .prettierignore
-pnpm-lock.yaml
-pnpm-workspace.yaml
 vite.config.mts
 vite.preview.config.mts
 vitest.config.mts

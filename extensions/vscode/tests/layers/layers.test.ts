@@ -21,11 +21,27 @@ const PACKAGE_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const SRC = path.join(PACKAGE_ROOT, 'src');
 const PREVIEW = path.join(PACKAGE_ROOT, 'preview');
 
-/** Layers of the single-package app, and what each may import. */
-const LAYERS = ['shared', 'core', 'host', 'webview', 'testing'] as const;
+/**
+ * Layers of the extension, and what each may import.
+ *
+ * The gateway capability layer used to be `src/core`; it now lives in the
+ * `@wing-agent/client` workspace package and is treated as an external package
+ * whose only legal importer is `host` (see `CLIENT_PACKAGE` below). Its own
+ * environment-agnostic gates travel with it (`packages/client/tests/layers.test.ts`).
+ */
+const LAYERS = ['shared', 'host', 'webview', 'testing'] as const;
 type Layer = (typeof LAYERS)[number];
 
 const NODE_BUILTINS = new Set([...builtinModules, ...builtinModules.map((name) => `node:${name}`)]);
+
+/**
+ * The extracted gateway capability layer.
+ *
+ * Not a layer directory any more, so the matrix cannot express it: it is checked
+ * separately — only `host` reaches the gateway, the renderer and the contract
+ * types never do (that is exactly what the old `core` rule said).
+ */
+const CLIENT_PACKAGE = '@wing-agent/client';
 
 /** `sibling` = same layer; `external` = npm packages. */
 interface LayerRule {
@@ -40,10 +56,8 @@ const RULES: Record<Layer, LayerRule> = {
   // Contract types: consumed by both the node and the DOM project, so it must be
   // dependency-free (that is also what makes it safe to paste into an Electron app).
   shared: { siblings: true, imports: [], npm: false, nodeBuiltins: false, vscode: false },
-  // Gateway client: Node runtime, no editor, no DOM (Electron seam).
-  core: { siblings: true, imports: ['shared'], npm: true, nodeBuiltins: true, vscode: false },
-  // Extension host: the only layer allowed to talk to VS Code.
-  host: { siblings: true, imports: ['shared', 'core'], npm: true, nodeBuiltins: true, vscode: true },
+  // Extension host: the only layer allowed to talk to VS Code (and to the gateway).
+  host: { siblings: true, imports: ['shared'], npm: true, nodeBuiltins: true, vscode: true },
   // Renderer: receives host-produced models over the bridge; only shared types.
   webview: { siblings: true, imports: ['shared'], npm: true, nodeBuiltins: false, vscode: false },
   // Fixtures + mocks: must stay portable (used by node tests *and* the jsdom ones).
@@ -209,6 +223,19 @@ function checkSpecifier(file: string, specifier: string, violations: Violation[]
         file: relativeTo(file),
         specifier,
         message: 'src/testing is test/preview-only; product code must not import fixtures or mocks',
+      });
+    }
+    return;
+  }
+
+  if (specifier === CLIENT_PACKAGE || specifier.startsWith(`${CLIENT_PACKAGE}/`)) {
+    if (from !== 'host') {
+      violations.push({
+        file: relativeTo(file),
+        specifier,
+        message:
+          `only src/host may import "${CLIENT_PACKAGE}" (the gateway capability layer): ` +
+          'the renderer talks over the bridge, and src/shared stays dependency-free',
       });
     }
     return;

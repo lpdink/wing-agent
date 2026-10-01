@@ -6,8 +6,9 @@
 # 门禁与 CI 的 typescript-check job 等价：先在仓库根按 lockfile 安装一次
 # （--prefer-offline：本地已有 store 时不动网络），再依次跑 eslint / prettier /
 # tsc / vitest —— 四个脚本都是 workspace 聚合（`pnpm -r run …`），覆盖
-# extensions/vscode 与 packages/*（新增包无需改这里，见
-# ~/.wing/tasks/wing-app/02_workspace_client_pkg/design.md §手册）。
+# extensions/vscode 与 packages/*：新增一个 TS 包**不需要改这里**（包自带
+# lint/format:check/typecheck/test 脚本即可），接线说明见
+# docs/dev/vscode-extension.md §9.3。
 # 未接进 `fmt` / `fmt-check`：那两条要在 pre-commit 里保持秒级，而且不该强依赖 node_modules。
 #
 # 工具链缺失时的行为（评审 #109 [P3-7]）：显式探测 node / pnpm，缺哪一个就打印
