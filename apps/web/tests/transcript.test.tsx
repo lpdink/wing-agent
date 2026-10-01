@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { imageUri, resetCollapseOverrides, resetImageUris } from '@wing-agent/ui';
+import { resetCollapseOverrides, resetImageUris } from '@wing-agent/ui';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import { App } from '../src/app/App';
@@ -184,16 +184,6 @@ describe('transcript rendering', () => {
     // …and the answer must survive the switch (a cache reset racing the new answer
     // would leave the transcript with a link where an image belongs).
     await waitFor(() => {
-      // eslint-disable-next-line no-console
-      console.log(
-        'DEBUG',
-        JSON.stringify({
-          uri: imageUri('assets/chart.png'),
-          imgs: document.querySelectorAll('[data-testid="md-image"]').length,
-          at: document.querySelectorAll('[data-cell-kind="assistant"]').length,
-          calls: fetchMock.mock.calls.map((call) => String(call[0]).slice(-32)),
-        }),
-      );
       expect(rows('assistant')[0]?.querySelector('[data-testid="md-image"]')).not.toBeNull();
     });
 
