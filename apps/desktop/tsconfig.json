@@ -1,0 +1,5 @@
+{
+  "//": "Solution-style root config (the layout extensions/vscode uses): it carries no options of its own, it only points editors and typescript-eslint's projectService at the real projects. Run the gates with the explicit projects (`pnpm run typecheck` runs both), never with this file.",
+  "files": [],
+  "references": [{ "path": "./tsconfig.node.json" }, { "path": "./tsconfig.tools.json" }]
+}

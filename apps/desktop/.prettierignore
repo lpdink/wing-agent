@@ -1,0 +1,6 @@
+# Build output
+dist/
+release/
+
+# Web client build (Vite SPA committed as the packaged renderer)
+renderer/

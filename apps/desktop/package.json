@@ -1,0 +1,53 @@
+{
+  "name": "@wing-agent/desktop",
+  "productName": "Wing",
+  "description": "Wing desktop shell — Electron main process around the shared web client.",
+  "author": "wing-agent",
+  "version": "0.1.0",
+  "//": "Private Electron shell (apps/desktop). Ships NO runtime dependencies: the main process only uses electron built-ins and node builtins, and the renderer is the apps/web build dropped into renderer/. devDependencies are the toolchain (esbuild bundles src/ into dist/, electron-builder turns dist/ + renderer/ into the .app). See docs/dev/web-desktop.md and 05_electron_scaffold/design.md.",
+  "private": true,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lpdink/wing-agent.git",
+    "directory": "apps/desktop"
+  },
+  "type": "module",
+  "main": "dist/main.js",
+  "//exports": "The shell's main process is loaded by path (electron-builder `main`), so `exports` only serves workspace consumers: apps/web reuses the frozen preload contract from `src/bridge.ts` (step 10 of the wing-app plan).",
+  "exports": {
+    "./bridge": "./src/bridge.ts"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "node esbuild.mjs && node scripts/copy-web-build.mjs",
+    "dev": "node scripts/dev.mjs",
+    "smoke": "node esbuild.mjs && node scripts/copy-web-build.mjs && electron . --smoke",
+    "smoke:app": "node scripts/smoke-app.mjs",
+    "dist:dir": "node esbuild.mjs && node scripts/copy-web-build.mjs && electron-builder --dir",
+    "dist:mac": "node esbuild.mjs && node scripts/copy-web-build.mjs && electron-builder --mac",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.tools.json",
+    "lint": "eslint . --max-warnings=0",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.13.5",
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.10.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.8",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^5.0.1"
+  }
+}

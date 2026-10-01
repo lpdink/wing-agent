@@ -12,12 +12,14 @@ build/
 .pytest_cache
 openspec
 
-# Node / TypeScript (extensions/vscode)
+# Node / TypeScript (extensions/vscode, apps/desktop)
 node_modules/
 extensions/vscode/out/
 apps/web/out/
 apps/web/dist/
 extensions/vscode/*.vsix
+# electron-builder output (`dist/` above already covers the bundled main process).
+apps/desktop/release/
 
 # Rust
 target/
@@ -39,3 +41,4 @@ Thumbs.db
 ~/.wing/
 libs/wing-sdk/uv.lock
 .wing-orch.json
+.wing/

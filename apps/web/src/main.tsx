@@ -32,6 +32,7 @@ import { App } from './app/App';
 import { GatewayRuntime } from './connection/runtime';
 import { loadSettings, saveSettings } from './settings/settings';
 import { browserSettingsStorage } from './settings/storage';
+import { desktopSettingsStorage, isDesktopShell } from './settings/desktop';
 import { watchColorScheme } from './theme/color-scheme';
 import './ui-theme.css';
 // The transcript's own rows (step 08b): the row chrome, the markdown wrapper and the
@@ -43,7 +44,10 @@ import './styles.css';
 // media query), so the first painted card is already the right scheme.
 watchColorScheme();
 
-const storage = browserSettingsStorage();
+// Settings storage: when running inside the Electron shell, settings are read
+// and written through the preload bridge (IPC → main process config.json).
+// In a plain browser, localStorage is used with a memory fallback.
+const storage = isDesktopShell() ? desktopSettingsStorage() : browserSettingsStorage();
 const runtime = new GatewayRuntime({
   initialSettings: loadSettings(storage),
   onSettingsChange: (settings) => {

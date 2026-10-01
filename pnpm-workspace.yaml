@@ -1,9 +1,11 @@
 # pnpm workspace + project config (single source of truth for the whole repo).
 #
-# `packages:` — every TypeScript package lives here; the three shells (vscode today,
-# web / electron later) are plain members and share one lockfile at the root.
-# `pnpm -r run <script>` (what `make check-ts` / `make test-ts` use) walks this list;
-# a new package needs no other registration — it only has to declare the scripts
+# `packages:` — every TypeScript package lives here: `extensions/vscode` (the VS Code
+# shell), `packages/*` (shared packages: @wing-agent/client today) and `apps/*` (the
+# shell applications: @wing-agent/desktop, @wing-agent/web today). They are plain
+# members and share one lockfile at the root; `pnpm -r run <script>` (what
+# `make check-ts` / `make test-ts` use) walks this list, so a new package needs no
+# other registration — it only has to declare the scripts
 # (lint / format:check / typecheck / test); see docs/dev/vscode-extension.md §9.3.
 packages:
   - 'extensions/vscode'
@@ -12,6 +14,10 @@ packages:
 
 # allowBuilds: pnpm 10+ blocks dependency install scripts unless allow-listed.
 #   - esbuild needs its install script to place the platform binary.
+#   - electron has no install script today: the runtime binary is fetched lazily by
+#     `require('electron')`/`electron .`, i.e. only when the shell is actually run —
+#     typecheck / lint / test / build and CI never need it. The entry is kept so a
+#     version that reinstates a postinstall stays allowed instead of failing install.
 #   - @vscode/vsce-sign is only pulled in by `vsce sign` (we ship an unsigned local
 #     .vsix), so its script stays blocked on purpose.
 #   - playwright's install script downloads browser builds. Blocked on purpose:
@@ -19,6 +25,9 @@ packages:
 #     (`channel: 'chrome'`), so a fresh `pnpm install` stays fast and CI never
 #     downloads ~150 MB it does not use. Install one explicitly when needed:
 #     `pnpm --filter @wing-agent/web exec playwright install chromium`.
+#   - electron-winstaller only matters for Windows NSIS installers (transitive dep
+#     of electron-builder); the desktop shell ships macOS only, so it stays blocked
+#     too — declaring it explicitly keeps `pnpm install` exit 0.
 #
 # minimumReleaseAgeExclude: `minimumReleaseAge` (the guard that refuses packages
 # published very recently) is not enabled today, so this entry is inert — it is kept
@@ -27,7 +36,17 @@ packages:
 # regeneration: the entry said 3.9.8 while the lockfile had moved to 3.9.9).
 allowBuilds:
   esbuild: true
+  electron: true
   '@vscode/vsce-sign': false
   playwright: false
+  electron-winstaller: false
 minimumReleaseAgeExclude:
   - prettier@3.9.9
+
+# overrides: app-builder-lib@26.15.3 declares `@electron/get: ^3.0.0` but its
+# `resolveCacheMode` reads `ElectronDownloadCacheMode`, an export that only exists
+# in @electron/get ≥ 5 — with 3.x every packaging run dies before the .app is
+# written. electron@44 already depends on @electron/get@^5, so this override
+# dedupes to the version the code expects instead of adding another copy.
+overrides:
+  '@electron/get': '^5.1.0'
