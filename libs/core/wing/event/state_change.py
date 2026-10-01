@@ -81,6 +81,9 @@ class SessionStateChangedEvent(WingEvent):
     type: Literal["session_state_changed"] = "session_state_changed"
     persist: ClassVar[bool] = False
     model: str | None = None
+    model_display_name: str | None = None
+    """当前模型的展示名（与 model 同刻下发；未声明 / 无展示名 = 省略，
+    前端回落 model）。"""
     thinking: bool | None = None
     reasoning_effort: str | None = None
     yolo: bool | None = None

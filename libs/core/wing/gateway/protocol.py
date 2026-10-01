@@ -431,7 +431,11 @@ class ContextStatsInfo(BaseModel):
 class SessionInfoResponse(BaseModel):
     """GET /api/session/info 响应——session 运行时状态。"""
 
-    model: str = Field(description="当前模型名称")
+    model: str = Field(description="当前模型名称（实际调用名，身份标识）")
+    model_display_name: str | None = Field(
+        default=None,
+        description="当前模型的展示名（未声明 / 空串 = None，前端回落 model）",
+    )
     api_url: str = Field(description="API 基础 URL")
     tools: list[str] = Field(description="已启用的工具名称列表")
     total_tokens: int = Field(description="当前上下文 token 总数")

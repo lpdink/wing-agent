@@ -49,6 +49,7 @@ def mock_session():
     session.session_name = "Test Session"
     session.template_name = "default"
     session.agent.model = "gpt-4o"
+    session.agent.model_display_name = None
     session.agent.yolo = False
     session.agent.model_provider.thinking = False
     session.agent.model_provider.reasoning_effort = None
@@ -67,9 +68,10 @@ class TestRuntimeUpdateSessionEvents:
     async def test_update_model_emits_event_with_none_for_unchanged_fields(
         self, runtime, mock_session, cleanup_event_bus
     ):
-        """只改 model 时，event 中其他字段为 None。"""
+        """只改 model 时，event 中其他字段为 None；model_display_name 与 model 同刻。"""
         runtime.sm._sessions["test-session"] = mock_session
         mock_session.agent.model = "gpt-4o-mini"
+        mock_session.agent.model_display_name = "Flash Mini"
 
         await runtime.update_session("test-session", model="gpt-4o-mini")
 
@@ -79,6 +81,7 @@ class TestRuntimeUpdateSessionEvents:
         assert len(events) == 1
         event = events[0]
         assert event.model == "gpt-4o-mini"
+        assert event.model_display_name == "Flash Mini"
         assert event.thinking is None
         assert event.yolo is None
         assert event.title is None
@@ -88,6 +91,41 @@ class TestRuntimeUpdateSessionEvents:
         # 这里无客户端订阅，所以 client_ids 为空
         assert event.target.scope == "client"
         assert event.target.client_ids == []
+
+    @pytest.mark.asyncio
+    async def test_update_unchanged_model_fields_do_not_carry_display_name(
+        self, runtime, mock_session, cleanup_event_bus
+    ):
+        """model 未被触碰时（如只切 thinking）不携带展示名——它与 model 同刻发放。"""
+        runtime.sm._sessions["test-session"] = mock_session
+        mock_session.agent.model_provider.thinking = True
+
+        await runtime.update_session("test-session", thinking=True)
+
+        events = [
+            e for e in cleanup_event_bus if isinstance(e, SessionStateChangedEvent)
+        ]
+        assert len(events) == 1
+        assert events[0].model is None
+        assert events[0].model_display_name is None
+
+    @pytest.mark.asyncio
+    async def test_update_without_declared_display_name_sends_none(
+        self, runtime, mock_session, cleanup_event_bus
+    ):
+        """模型无展示名声明（字符串形态 / 未声明）时下发 None，前端回落调用名。"""
+        runtime.sm._sessions["test-session"] = mock_session
+        mock_session.agent.model = "plain-model"
+        mock_session.agent.model_display_name = None
+
+        await runtime.update_session("test-session", model="plain-model")
+
+        events = [
+            e for e in cleanup_event_bus if isinstance(e, SessionStateChangedEvent)
+        ]
+        assert len(events) == 1
+        assert events[0].model == "plain-model"
+        assert events[0].model_display_name is None
 
     @pytest.mark.asyncio
     async def test_update_multi_fields_emits_all_changes(

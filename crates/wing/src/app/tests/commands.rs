@@ -540,3 +540,68 @@ fn test_stale_fetch_results_are_discarded() {
     });
     assert!(app.toast.is_some(), "the current session's result lands");
 }
+
+/// Feed a `FetchPayload::Info` result into the app (the `/api/session/info`
+/// projection path).
+fn feed_info(app: &mut App, model: &str, display_name: Option<&str>) {
+    use crate::app::intent::FetchPayload;
+    use crate::app::intent::FetchResult;
+    use wing_api_client::models::ContextStatsInfo;
+    use wing_api_client::models::SessionInfoResponse;
+
+    let session_id = app.session_id.clone();
+    app.handle_fetch_result(FetchResult {
+        session_id,
+        payload: FetchPayload::Info(Box::new(SessionInfoResponse {
+            model: model.into(),
+            model_display_name: display_name.map(str::to_string),
+            api_url: "http://x".into(),
+            tools: vec![],
+            total_tokens: 0,
+            context_window_tokens: 0,
+            thinking: false,
+            reasoning_effort: None,
+            yolo: false,
+            session_name: None,
+            workdir: None,
+            status: "idle".into(),
+            context_stats: ContextStatsInfo {
+                message_count: 0,
+                total_tokens: 0,
+            },
+            skills_info: String::new(),
+            system_prompt: String::new(),
+        })),
+    });
+}
+
+#[test]
+fn test_info_display_name_prefers_the_gateway_and_falls_back_locally() {
+    let mut app = test_app();
+    app.status.provider = Some("qoder".into());
+    app.status.model = "dfmodel".into();
+    app.model_sources = vec![model_group_with_labels(
+        "qoder",
+        &["dfmodel"],
+        &[("dfmodel", "DeepSeek-Flash")],
+    )];
+
+    // Old gateway (no field): the local snapshot keeps the label on reconnect.
+    feed_info(&mut app, "dfmodel", None);
+    assert_eq!(
+        app.status.model_display_name.as_deref(),
+        Some("DeepSeek-Flash")
+    );
+
+    // Current gateway: the shipped value wins over the local snapshot.
+    feed_info(&mut app, "dfmodel", Some("Gateway Label"));
+    assert_eq!(
+        app.status.model_display_name.as_deref(),
+        Some("Gateway Label")
+    );
+
+    // Undeclared model: no label is invented, the raw name is the fallback.
+    feed_info(&mut app, "mystery", None);
+    assert_eq!(app.status.model, "mystery");
+    assert_eq!(app.status.model_display_name, None);
+}

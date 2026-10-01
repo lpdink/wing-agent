@@ -111,6 +111,10 @@ providers:
   不是校验遗漏（配置校验只做实际调用名去重）。
 - `GET /api/models` 在 `models: [str]` 之外**追加** `model_details: [{name, display_name,
   description, capabilities: {vision}}]`，与 `models` 逐项同序同名（缺 detail 的补最小条目）。
+- **展示名随会话状态下发**：会话 agent 快照（`sync_session.agent` / `GET /api/session/get`）与
+  `session_state_changed`、`GET /api/session/info` 与 `model`（`model_name`）同刻携带
+  `model_display_name`（未声明 / 空串 = 缺失或 null）——前端渲染展示名、缺省回落实际调用名，
+  不必拿调用名去 `/api/models` 里自查；展示名不参与身份（匹配 / 变更仍以实际调用名 + provider 为准）。
 - 存量兼容：旧 config（`models: [str]`）零修改可用；旧前端忽略 `model_details`。
 
 ## 请求期图片投影（核心）

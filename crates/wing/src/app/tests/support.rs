@@ -86,6 +86,30 @@ pub(super) fn model_group(
     }
 }
 
+/// Provider group carrying `display_name` declarations for the given call
+/// names — the display layer's input (the picker renders its rows from it,
+/// and the label fallbacks resolve against it).
+pub(super) fn model_group_with_labels(
+    provider: &str,
+    models: &[&str],
+    labels: &[(&str, &str)],
+) -> wing_api_client::models::ProviderModels {
+    use wing_api_client::models::ModelDetail;
+    wing_api_client::models::ProviderModels {
+        provider: provider.into(),
+        models: models.iter().map(|m| m.to_string()).collect(),
+        model_details: labels
+            .iter()
+            .map(|(name, label)| ModelDetail {
+                name: (*name).to_string(),
+                display_name: Some((*label).to_string()),
+                description: None,
+                capabilities: Default::default(),
+            })
+            .collect(),
+    }
+}
+
 pub(super) fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
     crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
 }

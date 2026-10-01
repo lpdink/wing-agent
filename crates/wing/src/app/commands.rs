@@ -327,10 +327,18 @@ impl App {
                 // Update model; clear provider when the model changes, since
                 // Info does not carry provider info and the old provider
                 // may be stale (e.g. the model was changed via another path).
+                // The display label is resolved before that clearing, and —
+                // when the gateway did not ship one (old gateway) — falls back
+                // to the local `/api/models` snapshot, so a reconnect does not
+                // drop a label that is already known.
+                let model_display_name = info.model_display_name.or_else(|| {
+                    self.model_display_label(self.status.provider.as_deref(), &info.model)
+                });
                 if info.model != self.status.model {
                     self.status.provider = None;
                 }
                 self.status.model = info.model;
+                self.status.model_display_name = model_display_name;
                 self.status.total_tokens = info.total_tokens;
                 self.status.context_window_tokens = info.context_window_tokens;
                 self.status.thinking = info.thinking;

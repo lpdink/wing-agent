@@ -320,6 +320,7 @@ fn test_sync_titles_use_the_new_sessions_workdir() {
             rules: vec![],
             workspace: Some("/home/me/other-project".into()),
             provider_name: None,
+            model_display_name: None,
         }));
     }
     app.handle_event(sync);
@@ -409,6 +410,7 @@ fn test_sync_renders_skills_rules_banner() {
         rules: vec!["AGENTS.md".into()],
         workspace: None,
         provider_name: None,
+        model_display_name: None,
     };
     app.handle_event(sync_event_with_agent(
         Some(agent),
@@ -444,6 +446,136 @@ fn test_sync_without_agent_omits_banner() {
         !cell_kinds(&app).contains(&"system"),
         "no agent info → no banner"
     );
+}
+
+#[test]
+fn test_sync_restores_model_display_name() {
+    // The snapshot's agent carries the declared display label: the status bar
+    // renders it, while `model` keeps the call name (identity).
+    let mut app = test_app();
+    let agent = crate::protocol::AgentInfo {
+        model_name: "dfmodel-2026".into(),
+        system_prompt: None,
+        tools: vec![],
+        skills: vec![],
+        rules: vec![],
+        workspace: None,
+        provider_name: Some("qoder".into()),
+        model_display_name: Some("DeepSeek-Flash".into()),
+    };
+    app.handle_event(sync_event_with_agent(Some(agent), vec![]));
+    assert_eq!(app.status.model, "dfmodel-2026");
+    assert_eq!(
+        app.status.model_display_name.as_deref(),
+        Some("DeepSeek-Flash")
+    );
+    assert_eq!(app.status.model_label(), "DeepSeek-Flash");
+    assert_eq!(app.status.provider.as_deref(), Some("qoder"));
+}
+
+#[test]
+fn test_session_state_changed_prefers_display_name_and_tolerates_absent() {
+    let mut app = test_app();
+    let meta = || crate::protocol::EventMeta {
+        created_at: "2026-01-01T00:00:00+00:00".into(),
+        session_id: Some("test-session".into()),
+        request_id: "r".into(),
+    };
+
+    // New gateway: label travels with the model.
+    app.handle_event(WingEvent::SessionStateChanged {
+        model: Some("dfmodel-2026".into()),
+        model_display_name: Some("DeepSeek-Flash".into()),
+        thinking: None,
+        reasoning_effort: None,
+        yolo: None,
+        title: None,
+        agent: None,
+        meta: meta(),
+    });
+    assert_eq!(app.status.model_label(), "DeepSeek-Flash");
+
+    // Old gateway / undeclared model: model changes, label resets to the call
+    // name (a stale label must not describe the new model).
+    app.handle_event(WingEvent::SessionStateChanged {
+        model: Some("plain-model".into()),
+        model_display_name: None,
+        thinking: Some(true),
+        reasoning_effort: None,
+        yolo: None,
+        title: None,
+        agent: None,
+        meta: meta(),
+    });
+    assert_eq!(app.status.model, "plain-model");
+    assert_eq!(app.status.model_display_name, None);
+    assert_eq!(app.status.model_label(), "plain-model");
+    assert!(app.status.thinking);
+
+    // Model untouched (e.g. yolo toggle): the label stays with its model.
+    app.handle_event(WingEvent::SessionStateChanged {
+        model: None,
+        model_display_name: None,
+        thinking: None,
+        reasoning_effort: None,
+        yolo: Some(true),
+        title: None,
+        agent: None,
+        meta: meta(),
+    });
+    assert_eq!(app.status.model, "plain-model");
+    assert!(app.status.yolo);
+}
+
+#[test]
+fn test_session_state_changed_falls_back_to_the_local_label_when_omitted() {
+    // Old gateway: `/api/models` already ships the declared label, but
+    // `session_state_changed` predates the field. The label the user has
+    // already seen (optimistic toast / status) must not be dropped to the raw
+    // call name just because the event cannot carry it — and no label may be
+    // invented for models the snapshot does not know.
+    let mut app = test_app();
+    app.status.provider = Some("qoder".into());
+    app.model_sources = vec![model_group_with_labels(
+        "qoder",
+        &["dfmodel"],
+        &[("dfmodel", "DeepSeek-Flash")],
+    )];
+    let meta = crate::protocol::EventMeta {
+        created_at: "2026-01-01T00:00:00+00:00".into(),
+        session_id: Some("test-session".into()),
+        request_id: "r".into(),
+    };
+
+    app.handle_event(WingEvent::SessionStateChanged {
+        model: Some("dfmodel".into()),
+        model_display_name: None,
+        thinking: None,
+        reasoning_effort: None,
+        yolo: None,
+        title: None,
+        agent: None,
+        meta: meta.clone(),
+    });
+    assert_eq!(app.status.model, "dfmodel");
+    assert_eq!(
+        app.status.model_display_name.as_deref(),
+        Some("DeepSeek-Flash"),
+        "a known label must survive a gateway that cannot ship it"
+    );
+
+    // The local snapshot has nothing for this model → no invented label.
+    app.handle_event(WingEvent::SessionStateChanged {
+        model: Some("mystery".into()),
+        model_display_name: None,
+        thinking: None,
+        reasoning_effort: None,
+        yolo: None,
+        title: None,
+        agent: None,
+        meta,
+    });
+    assert_eq!(app.status.model_display_name, None);
 }
 
 #[test]

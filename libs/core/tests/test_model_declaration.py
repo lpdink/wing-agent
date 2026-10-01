@@ -22,6 +22,7 @@ from wing.config import (
     ModelSpec,
     ProviderConfig,
     resolve_model_capabilities,
+    resolve_model_display_name,
 )
 from wing.provider.anthropic import AnthropicProvider
 from wing.provider.openai_compat import OpenAICompatProvider
@@ -148,6 +149,36 @@ class TestResolveModelCapabilities:
     def test_no_name_heuristic(self, model):
         """名字带 vl / vision / 4o 也不启发式放行。"""
         assert resolve_model_capabilities(_provider(), model).vision is False
+
+
+class TestResolveModelDisplayName:
+    """展示名解析：声明有空判、未声明回落 None（前端回落调用名）。"""
+
+    def test_declared_display_name(self):
+        cfg = _provider(models=[{"name": "dfmodel", "display_name": "DeepSeek-Flash"}])
+        assert resolve_model_display_name(cfg, "dfmodel") == "DeepSeek-Flash"
+
+    def test_string_form_has_no_display_name(self):
+        cfg = _provider(models=["legacy"])
+        assert resolve_model_display_name(cfg, "legacy") is None
+
+    def test_undeclared_or_missing_display_name_falls_back_to_none(self):
+        cfg = _provider(
+            models=[{"name": "bare"}, {"name": "empty", "display_name": ""}]
+        )
+        assert resolve_model_display_name(cfg, "bare") is None
+        assert resolve_model_display_name(cfg, "empty") is None
+        assert resolve_model_display_name(cfg, "other") is None
+        assert resolve_model_display_name(_provider(), "any") is None
+
+    def test_blank_display_name_is_no_display_name(self):
+        """纯空白与空串等价（前端同样按空白回落）。"""
+        cfg = _provider(models=[{"name": "spaces", "display_name": "   "}])
+        assert resolve_model_display_name(cfg, "spaces") is None
+
+    def test_no_name_heuristic(self):
+        """没有声明就不猜展示名（与能力解析同一口径）。"""
+        assert resolve_model_display_name(_provider(), "DeepSeek-Flash") is None
 
 
 class TestImagesConfig:

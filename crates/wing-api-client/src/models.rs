@@ -36,6 +36,10 @@ pub struct AgentInfo {
     /// 当前活跃 provider 的名称；旧网关/降级路径缺失时为 None。
     #[serde(default)]
     pub provider_name: Option<String>,
+    /// `model_name` 的展示名（网关配置声明）；旧网关 / 未声明时为 None。
+    /// 展示层专用——身份仍是 `model_name` + `provider_name`。
+    #[serde(default)]
+    pub model_display_name: Option<String>,
 }
 
 // ============================================================
@@ -238,6 +242,9 @@ pub struct ContextStatsInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfoResponse {
     pub model: String,
+    /// 当前模型的展示名（未声明 / 旧网关为 None，前端回落 `model`）。
+    #[serde(default)]
+    pub model_display_name: Option<String>,
     pub api_url: String,
     pub tools: Vec<String>,
     pub total_tokens: i64,
@@ -611,7 +618,7 @@ mod tests {
 
     #[test]
     fn agent_info_provider_name_optional() {
-        // Legacy response without provider_name → None.
+        // Legacy response without provider_name / model_display_name → None.
         let legacy = r#"{
             "model_name": "gpt-4",
             "system_prompt": null,
@@ -622,8 +629,9 @@ mod tests {
         }"#;
         let info: AgentInfo = serde_json::from_str(legacy).unwrap();
         assert_eq!(info.provider_name, None);
+        assert_eq!(info.model_display_name, None);
 
-        // Round trip keeps the field.
+        // Round trip keeps the fields.
         let info = AgentInfo {
             model_name: "gpt-4".into(),
             system_prompt: None,
@@ -632,9 +640,44 @@ mod tests {
             rules: vec![],
             workspace: None,
             provider_name: Some("alt".into()),
+            model_display_name: Some("Fancy Flash".into()),
         };
         let back: AgentInfo = serde_json::from_str(&serde_json::to_string(&info).unwrap()).unwrap();
         assert_eq!(back.provider_name.as_deref(), Some("alt"));
+        assert_eq!(back.model_display_name.as_deref(), Some("Fancy Flash"));
+    }
+
+    #[test]
+    fn session_info_display_name_optional() {
+        // New gateway carries the declared display label next to the call name.
+        let json = r#"{
+            "model": "dfmodel-2026",
+            "model_display_name": "DeepSeek-Flash",
+            "api_url": "http://x",
+            "tools": [],
+            "total_tokens": 0,
+            "context_window_tokens": 128000,
+            "thinking": false,
+            "yolo": false,
+            "context_stats": {"message_count": 0, "total_tokens": 0}
+        }"#;
+        let info: SessionInfoResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(info.model, "dfmodel-2026");
+        assert_eq!(info.model_display_name.as_deref(), Some("DeepSeek-Flash"));
+
+        // Old gateway (no field) → None, no error.
+        let legacy = r#"{
+            "model": "gpt-4o",
+            "api_url": "http://x",
+            "tools": [],
+            "total_tokens": 0,
+            "context_window_tokens": 128000,
+            "thinking": false,
+            "yolo": false,
+            "context_stats": {"message_count": 0, "total_tokens": 0}
+        }"#;
+        let info: SessionInfoResponse = serde_json::from_str(legacy).unwrap();
+        assert_eq!(info.model_display_name, None);
     }
 
     #[test]

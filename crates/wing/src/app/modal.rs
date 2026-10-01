@@ -725,6 +725,49 @@ impl App {
         Some((provider, model))
     }
 
+    /// Declared display label for a `(provider, model)` pair, resolved from
+    /// the last `/api/models` snapshot — the same declaration the picker rows
+    /// render. `None` when the pair is unknown **or** the label equals the
+    /// call name (an equal label adds no information and must not be shown
+    /// twice).
+    ///
+    /// With no provider known (reconnect-time fallbacks), the first group
+    /// carrying the call name wins: best effort — same-named models across
+    /// providers are not guaranteed to resolve to the active provider's
+    /// declaration. Everywhere the provider is known it is used verbatim.
+    ///
+    /// Display layer only: this never takes part in apply / matching / any
+    /// identity decision (`ModelPanel::Apply` keeps carrying the call name).
+    pub(super) fn model_display_label(
+        &self,
+        provider: Option<&str>,
+        model: &str,
+    ) -> Option<String> {
+        let group = match provider {
+            Some(p) => self.model_sources.iter().find(|g| g.provider == p),
+            None => self
+                .model_sources
+                .iter()
+                .find(|g| g.models.iter().any(|m| m == model)),
+        }?;
+        let label = group.label_for(model);
+        (label != model).then(|| label.to_string())
+    }
+
+    /// Toast text for a model switch: the display label takes the first line,
+    /// the raw call name follows on its own line — **only** when a declared
+    /// label exists (otherwise there is nothing to add: the first line
+    /// already shows the call name). This is the one place the raw id is
+    /// allowed to reach the screen.
+    pub(super) fn model_switch_toast(&self, provider: Option<&str>, model: &str) -> String {
+        match (self.model_display_label(provider, model), provider) {
+            (Some(label), Some(p)) => format!("Model: {label} ({p})\n↳ {model}"),
+            (Some(label), None) => format!("Model: {label}\n↳ {model}"),
+            (None, Some(p)) => format!("Model: {model} ({p})"),
+            (None, None) => format!("Model: {model}"),
+        }
+    }
+
     /// Apply the pair chosen in the model panel: close it, dispatch the
     /// explicit `(provider, model)` update and give immediate feedback.
     /// Refuses while a turn is running (defense-in-depth — the panel is
@@ -740,10 +783,8 @@ impl App {
             return;
         }
         self.close_model_panel();
-        self.push_intent(AppIntent::set_model(model.clone(), Some(provider.clone())));
-        self.show_toast(Toast::info(
-            format!("Model: {model} ({provider})"),
-            std::time::Duration::from_secs(3),
-        ));
+        let toast = self.model_switch_toast(Some(&provider), &model);
+        self.push_intent(AppIntent::set_model(model, Some(provider)));
+        self.show_toast(Toast::info(toast, std::time::Duration::from_secs(3)));
     }
 }

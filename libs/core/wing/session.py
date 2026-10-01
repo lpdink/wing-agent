@@ -413,6 +413,7 @@ class Session:
             rules=list(cm._rules_files),
             workspace=self._metadata.workspace,
             provider_name=self._agent.model_provider.name,
+            model_display_name=self._agent.model_display_name,
         )
 
     def serialize_messages(self) -> list[dict]:

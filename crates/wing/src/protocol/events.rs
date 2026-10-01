@@ -109,6 +109,11 @@ pub struct AgentInfo {
     /// Active provider name; absent on old gateways (serde → None).
     #[serde(default)]
     pub provider_name: Option<String>,
+    /// Display label declared for `model_name` (gateway config); absent on old
+    /// gateways / undeclared models (serde → None). Display-only — identity
+    /// stays `model_name` + `provider_name`.
+    #[serde(default)]
+    pub model_display_name: Option<String>,
 }
 
 /// A selectable option in an Ask question: label + optional description.
@@ -521,6 +526,10 @@ pub enum WingEvent {
     #[serde(rename = "session_state_changed")]
     SessionStateChanged {
         model: Option<String>,
+        /// Declared display label for `model`; same clock as `model` (absent
+        /// when the model is unchanged / has no declaration).
+        #[serde(default)]
+        model_display_name: Option<String>,
         thinking: Option<bool>,
         reasoning_effort: Option<String>,
         yolo: Option<bool>,
@@ -810,6 +819,7 @@ mod tests {
         match event {
             WingEvent::SessionStateChanged {
                 model,
+                model_display_name,
                 thinking,
                 yolo,
                 title,
@@ -817,10 +827,39 @@ mod tests {
                 ..
             } => {
                 assert_eq!(model, Some("gpt-4o".to_string()));
+                assert_eq!(
+                    model_display_name, None,
+                    "old gateway payload (no field) must deserialize to None"
+                );
                 assert_eq!(thinking, Some(true));
                 assert_eq!(yolo, None);
                 assert_eq!(title, None);
                 assert_eq!(agent, None);
+            }
+            _ => panic!("expected SessionStateChanged"),
+        }
+    }
+
+    #[test]
+    fn deserialize_session_state_changed_with_display_name() {
+        // New gateway: the display label travels with the model value.
+        let json = r#"{
+            "type": "session_state_changed",
+            "model": "dfmodel-2026",
+            "model_display_name": "DeepSeek-Flash",
+            "created_at": "2025-01-01T00:00:00",
+            "session_id": "abc123",
+            "request_id": "req4"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match event {
+            WingEvent::SessionStateChanged {
+                model,
+                model_display_name,
+                ..
+            } => {
+                assert_eq!(model.as_deref(), Some("dfmodel-2026"));
+                assert_eq!(model_display_name.as_deref(), Some("DeepSeek-Flash"));
             }
             _ => panic!("expected SessionStateChanged"),
         }
@@ -905,7 +944,7 @@ mod tests {
 
     #[test]
     fn sync_session_agent_provider_name_tolerated_and_roundtripped() {
-        // An agent payload without provider_name → None, no error.
+        // An agent payload without provider_name / model_display_name → None, no error.
         let legacy = r#"{
             "type": "sync_session",
             "session_id": "s1",
@@ -928,16 +967,21 @@ mod tests {
         let event: WingEvent = serde_json::from_str(legacy).unwrap();
         match event {
             WingEvent::SyncSession { agent, .. } => {
+                let agent = agent.expect("agent snapshot");
                 assert_eq!(
-                    agent.and_then(|a| a.provider_name),
-                    None,
+                    agent.provider_name, None,
                     "missing provider_name must deserialize to None"
+                );
+                assert_eq!(
+                    agent.model_display_name, None,
+                    "missing model_display_name must deserialize to None"
                 );
             }
             _ => panic!("expected SyncSession"),
         }
 
-        // New gateway: provider_name survives a serialize → deserialize round trip.
+        // New gateway: provider_name / model_display_name survive a
+        // serialize → deserialize round trip.
         let info = AgentInfo {
             model_name: "gpt-4".into(),
             system_prompt: None,
@@ -946,10 +990,12 @@ mod tests {
             rules: vec![],
             workspace: None,
             provider_name: Some("dashscope-openai".into()),
+            model_display_name: Some("DeepSeek-Flash".into()),
         };
         let json = serde_json::to_string(&info).unwrap();
         let back: AgentInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back.provider_name.as_deref(), Some("dashscope-openai"));
+        assert_eq!(back.model_display_name.as_deref(), Some("DeepSeek-Flash"));
     }
 
     #[test]

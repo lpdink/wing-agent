@@ -427,11 +427,13 @@ class WingRuntime:
 
         # 计算 event 字段——agent 切换会重置 thinking/reasoning_effort/yolo
         agent_switched = agent is not None
+        model_emitted = model is not None or agent_switched
         self._emit_session_event(
             SessionStateChangedEvent(
                 session_id=session.session_id,
-                model=session.agent.model
-                if model is not None or agent_switched
+                model=session.agent.model if model_emitted else None,
+                model_display_name=session.agent.model_display_name
+                if model_emitted
                 else None,
                 thinking=session.agent.model_provider.thinking
                 if thinking is not None or agent_switched
