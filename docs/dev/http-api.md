@@ -108,7 +108,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 **状态事件**（`event/state_change.py`）：`session_init` · `sync_session`（订阅时重放历史）· `session_state_changed`（update / think / yolo 后统一发出）· `interrupted` · `compact_done`。
 
-> **模型展示名**：`sync_session.agent`、`session_state_changed`、`/api/session/info` 三处与 `model` / `model_name` 同刻携带 `model_display_name`（配置声明 `display_name` 的投影；未声明 / 空串 = 缺失或 null）。它是**展示层素材**：前端渲染展示名、缺省回落实际调用名；身份与变更仍以实际调用名 + provider 为准，不做名字反向解析。
+> **模型展示名**：会话 agent 快照（`sync_session.agent`、`GET /api/session/get.agent`）与 `session_state_changed`、`GET /api/session/info` 与 `model` / `model_name` 同刻携带 `model_display_name`（配置声明 `display_name` 的投影；未声明 / 空串 = 缺失或 null）。它是**展示层素材**：前端渲染展示名、缺省回落实际调用名；身份与变更仍以实际调用名 + provider 为准，不做名字反向解析。
 
 **其他**（`event/base.py`、`query_response.py`）：`error` · `notice` · `delivered` · `context_stats` · `branch_targets`。
 

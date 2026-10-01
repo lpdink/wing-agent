@@ -2,9 +2,10 @@
 
 展示名是**配置声明**（providers[].models[].display_name）——前端（TUI 状态栏 /
 切模型吐司）只消费网关下发的 ``model_display_name``，不拿实际调用名去
-``/api/models`` 里自查。三条出口必须同源同刻：
+``/api/models`` 里自查。四条出口必须同源同刻：
 
 - ``/api/session/info``：``model_display_name`` == 声明值；无声明模型为 null；
+- ``/api/session/get`` 的 agent 快照（与 sync_session 同一个 to_agent_info 出口）；
 - ``sync_session`` 的 agent 快照（订阅重放路径）：``model_name`` /
   ``provider_name`` / ``model_display_name`` 三件套一起下发；
 - ``session_state_changed``（换模型直播路径）：与 ``model`` 同刻下发展示名，
@@ -66,6 +67,11 @@ async def test_display_name_travels_with_session_state(probe: Probe) -> None:
     info = await http.get_session_info(session.session_id)
     assert info["model"] == LABELED_MODEL, info
     assert info["model_display_name"] == DISPLAY_NAME, info
+
+    # ②' 会话详情（get）的 agent 快照是同一个 to_agent_info 出口，也一样携带。
+    detail = await http.get_session(session.session_id)
+    assert detail["agent"]["model_name"] == LABELED_MODEL, detail["agent"]
+    assert detail["agent"]["model_display_name"] == DISPLAY_NAME, detail["agent"]
 
     # ③ 换到无声明展示名的模型：事件与 info 一起回落（字段缺失 / null），
     #    身份字段照常更新——回落由前端做，网关不发空串。

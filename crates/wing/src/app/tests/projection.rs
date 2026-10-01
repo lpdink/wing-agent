@@ -528,6 +528,57 @@ fn test_session_state_changed_prefers_display_name_and_tolerates_absent() {
 }
 
 #[test]
+fn test_session_state_changed_falls_back_to_the_local_label_when_omitted() {
+    // Old gateway: `/api/models` already ships the declared label, but
+    // `session_state_changed` predates the field. The label the user has
+    // already seen (optimistic toast / status) must not be dropped to the raw
+    // call name just because the event cannot carry it — and no label may be
+    // invented for models the snapshot does not know.
+    let mut app = test_app();
+    app.status.provider = Some("qoder".into());
+    app.model_sources = vec![model_group_with_labels(
+        "qoder",
+        &["dfmodel"],
+        &[("dfmodel", "DeepSeek-Flash")],
+    )];
+    let meta = crate::protocol::EventMeta {
+        created_at: "2026-01-01T00:00:00+00:00".into(),
+        session_id: Some("test-session".into()),
+        request_id: "r".into(),
+    };
+
+    app.handle_event(WingEvent::SessionStateChanged {
+        model: Some("dfmodel".into()),
+        model_display_name: None,
+        thinking: None,
+        reasoning_effort: None,
+        yolo: None,
+        title: None,
+        agent: None,
+        meta: meta.clone(),
+    });
+    assert_eq!(app.status.model, "dfmodel");
+    assert_eq!(
+        app.status.model_display_name.as_deref(),
+        Some("DeepSeek-Flash"),
+        "a known label must survive a gateway that cannot ship it"
+    );
+
+    // The local snapshot has nothing for this model → no invented label.
+    app.handle_event(WingEvent::SessionStateChanged {
+        model: Some("mystery".into()),
+        model_display_name: None,
+        thinking: None,
+        reasoning_effort: None,
+        yolo: None,
+        title: None,
+        agent: None,
+        meta,
+    });
+    assert_eq!(app.status.model_display_name, None);
+}
+
+#[test]
 fn test_sync_clock_skew_clamps_elapsed() {
     // 6.13: turn_started_at in the future (clock skew) → clamp to ~zero,
     // no panic / wrap-around to a huge value.

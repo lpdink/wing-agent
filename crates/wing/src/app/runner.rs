@@ -707,6 +707,9 @@ fn apply_update_session(
     }
 
     if !parts.is_empty() {
+        // The picker showed an immediate toast on Enter; this one is the
+        // server-confirmed update (and carries the other fields of a
+        // multi-field intent) — same text, refreshed timer.
         app.show_toast(Toast::info(
             parts.join(" · "),
             std::time::Duration::from_secs(3),

@@ -731,6 +731,11 @@ impl App {
     /// call name (an equal label adds no information and must not be shown
     /// twice).
     ///
+    /// With no provider known (reconnect-time fallbacks), the first group
+    /// carrying the call name wins: best effort — same-named models across
+    /// providers are not guaranteed to resolve to the active provider's
+    /// declaration. Everywhere the provider is known it is used verbatim.
+    ///
     /// Display layer only: this never takes part in apply / matching / any
     /// identity decision (`ModelPanel::Apply` keeps carrying the call name).
     pub(super) fn model_display_label(
