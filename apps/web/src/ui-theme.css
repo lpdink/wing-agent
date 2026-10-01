@@ -1,0 +1,126 @@
+/*
+ * The theme bridge: `--vscode-*` for `@wing-agent/ui`.
+ *
+ * The shared renderer (`@wing-agent/ui`) styles itself with two variable families:
+ * `--wing-*` (its own tokens, imported by the package's barrel) and `--vscode-*` —
+ * the VS Code theme variables its colours are sourced from, which inside an editor
+ * are injected by the host. A web page has no such host, so `apps/web` supplies the
+ * mapping here: **the package is not modified**, the adapter lives in the consumer,
+ * exactly like the bridge controller in `src/bridge/`.
+ *
+ * The third family, `--dsw-*` (the ported design tokens the shared code/tool/ask
+ * cards are drawn with), is *not* mapped here: `main.tsx` imports the package's
+ * `styles/*` token sheets directly, and `src/theme/color-scheme.ts` publishes the
+ * `body[data-ds-dark-theme]` / `body.vscode-dark` attributes those sheets switch on.
+ * That split is the converged shape after step 08b: this file is only the adapter
+ * for the variables a *host* would otherwise inject.
+ *
+ * Two rules of the house:
+ *
+ * 1. **Semantics, not the VS Code palette.** The renderer asks for "the editor
+ *    background", "the description foreground", "the link colour", "the diff
+ *    inserted-line background" — so each one maps onto *this* app's tokens
+ *    (`--bg-elevated`, `--fg-muted`, `--accent`, …), which already flip with
+ *    `prefers-color-scheme` (styles.css). Sizes (font ramp, radii, stroke) are the
+ *    VS Code baseSizes values, because those are geometry the package's own
+ *    `tokens.css` multiplies — not colours.
+ * 2. **Only what the still-mounted renderer reads.** The cells this app did not
+ *    replace (user / system / todo / metrics / separator) and the markdown node
+ *    renderer underneath the shared cards read these; panels/composer surfaces are
+ *    not rendered by this step yet — 09 extends this file when it mounts them.
+ *
+ * The list is derived from the three stylesheets the transcript actually pulls in
+ * (`chat.module.css`, `markdown.module.css`, `tokens.css`).
+ */
+
+:root {
+  /* ── type ramp (VS Code baseSizes.ts, the same values the VS Code preview
+   * harness in extensions/vscode/preview/preview-theme.css uses) ────────── */
+  --vscode-font-family: system-ui, -apple-system, 'Segoe UI', roboto, sans-serif;
+  --vscode-font-weight: 400;
+  --vscode-editor-font-family: var(--mono);
+  --vscode-fontSize-heading3: 13px;
+  --vscode-fontSize-body2: 11px;
+  --vscode-fontWeight-semiBold: 600;
+  --vscode-cornerRadius-xSmall: 2px;
+  --vscode-cornerRadius-small: 4px;
+  --vscode-cornerRadius-medium: 6px;
+  --vscode-cornerRadius-large: 8px;
+  --vscode-cornerRadius-xLarge: 12px;
+  --vscode-strokeThickness: 1px;
+
+  /* ── surfaces & lines ─────────────────────────────────────────────────── */
+  --vscode-foreground: var(--fg);
+  --vscode-descriptionForeground: var(--fg-muted);
+  --vscode-editor-background: var(--bg-elevated);
+  --vscode-editorWidget-background: var(--bg-elevated);
+  --vscode-panel-background: var(--bg-elevated);
+  --vscode-sideBar-background: var(--bg-elevated);
+  /* The renderer reads the chat code surface through this host-injected name
+   * (tokens.css explains why the fallback is the editor background). */
+  --vscode-interactive-result-editor-background-color: var(--bg-elevated);
+  --vscode-widget-border: var(--border);
+  --vscode-panel-border: var(--border);
+  --vscode-editorHoverWidget-border: var(--border);
+  --vscode-widget-shadow: rgb(16 18 22 / 18%);
+  --vscode-shadow-lg: 0 3px 8px rgb(16 18 22 / 24%);
+  --vscode-focusBorder: var(--accent);
+  --vscode-icon-foreground: var(--fg-muted);
+  --vscode-input-border: var(--border);
+
+  /* ── markdown ────────────────────────────────────────────────────────── */
+  --vscode-textLink-foreground: var(--accent);
+  --vscode-textLink-activeForeground: var(--accent);
+  --vscode-textPreformat-foreground: var(--fg);
+  --vscode-textPreformat-background: var(--bg-sunken);
+  --vscode-textPreformat-border: var(--border);
+  --vscode-textBlockQuote-background: var(--bg-sunken);
+  --vscode-textBlockQuote-border: var(--border);
+  --vscode-editorLineNumber-foreground: var(--fg-subtle);
+
+  /* ── status colours (system cells, tool glyphs, todo glyphs) ──────────── */
+  --vscode-errorForeground: var(--error);
+  --vscode-editorError-foreground: var(--error);
+  --vscode-editorWarning-foreground: var(--warn);
+  --vscode-charts-green: var(--ok);
+  --vscode-charts-blue: var(--accent);
+  --vscode-chat-linesAddedForeground: var(--ok);
+  --vscode-chat-linesRemovedForeground: var(--error);
+
+  /* ── transcript chrome ───────────────────────────────────────────────── */
+  --vscode-chat-requestBorder: var(--border);
+  --vscode-chat-requestBubbleBackground: rgb(47 111 237 / 9%);
+  --vscode-chat-thinkingShimmer: var(--fg-subtle);
+  --vscode-list-hoverBackground: var(--bg-sunken);
+  --vscode-list-inactiveSelectionBackground: var(--bg-sunken);
+  --vscode-toolbar-hoverBackground: var(--bg-sunken);
+
+  /* ── ask card / approval buttons ─────────────────────────────────────── */
+  --vscode-input-background: var(--bg);
+  --vscode-input-foreground: var(--fg);
+  --vscode-input-placeholderForeground: var(--fg-subtle);
+  --vscode-button-background: var(--accent);
+  --vscode-button-foreground: var(--accent-fg);
+  --vscode-button-hoverBackground: color-mix(in srgb, var(--accent) 88%, var(--fg));
+  --vscode-button-secondaryBackground: transparent;
+  --vscode-button-secondaryForeground: var(--fg);
+  --vscode-button-secondaryHoverBackground: var(--bg-sunken);
+
+  /* Diff decorations: translucent washes over the card surface, like the editor's. */
+  --vscode-diffEditor-insertedTextBackground: rgb(20 128 74 / 18%);
+  --vscode-diffEditor-insertedLineBackground: rgb(20 128 74 / 10%);
+  --vscode-diffEditor-removedTextBackground: rgb(192 57 43 / 16%);
+  --vscode-diffEditor-removedLineBackground: rgb(192 57 43 / 9%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --vscode-chat-requestBubbleBackground: rgb(111 157 255 / 16%);
+    --vscode-widget-shadow: rgb(0 0 0 / 45%);
+    --vscode-shadow-lg: 0 3px 8px rgb(0 0 0 / 55%);
+    --vscode-diffEditor-insertedTextBackground: rgb(78 195 138 / 22%);
+    --vscode-diffEditor-insertedLineBackground: rgb(78 195 138 / 12%);
+    --vscode-diffEditor-removedTextBackground: rgb(242 119 122 / 20%);
+    --vscode-diffEditor-removedLineBackground: rgb(242 119 122 / 11%);
+  }
+}

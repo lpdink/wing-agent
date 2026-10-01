@@ -1,0 +1,231 @@
+/**
+ * The web shell's bridge controller: `@wing-agent/ui` components → this app.
+ *
+ * The package's renderer talks to its host through one narrow channel
+ * (`postToHost`, `packages/ui/src/bridge/channel.ts`): it *asks* for things and never
+ * touches the app. In VS Code that host is the extension; here it is `GatewayRuntime`
+ * plus a couple of browser APIs. This module is the adapter, and it is deliberately
+ * the **narrow version of the package's own controller**: `createBridgeController`
+ * exists to feed the package's mirror store (`hydrate` / `patch` / `state` / …) and
+ * its `App`, which this shell does not use — the web app reduces the gateway's events
+ * itself (`src/connection/runtime.ts`, step 07) and renders only the transcript.
+ * Implementing the same `BridgeController` interface keeps the seam identical
+ * (`setBridgeController` is the documented injection point).
+ *
+ * Only the intents the transcript can produce are wired (see the table in the step's
+ * `design.md`, D5). Everything else (send, interrupt, panels, …) is step 09's: those
+ * messages cannot be produced yet, so they are logged and dropped rather than guessed
+ * into a half-behaviour.
+ */
+
+import {
+  acceptImageUris,
+  unhandledVariant,
+  type BridgeController,
+  type ToolApprovalDecision,
+  type WebviewToHostMessage,
+} from '@wing-agent/ui';
+import { consoleLogger, type CoreLogger } from '@wing-agent/client';
+import type { AskAnswerModel } from '@wing-agent/session';
+
+import type { ImageResolver } from '../images/resolver';
+
+import { copyTextToClipboard, type ClipboardDocument } from './clipboard';
+
+/** What the bridge needs from the app (implemented by `GatewayRuntime`, D6). */
+export interface WebBridgeHost {
+  /** Answer an awaiting question form. */
+  answerAsk(requestId: string, answers: readonly AskAnswerModel[]): void;
+  /** Approve / deny a dangerous-command confirmation. */
+  approveTool(requestId: string, decision: ToolApprovalDecision): void;
+  /** User-visible message (the runtime's notice stack). */
+  notify(level: 'info' | 'warning' | 'error', text: string): void;
+  // ── control plane (step 09) ────────────────────────────────────────
+  /** Send a user message. */
+  sendMessage(sessionId: string, text: string): void;
+  /** Interrupt the running turn. */
+  interrupt(): void;
+  /** Switch model. */
+  setModel(model: string, provider: string): void;
+  /** Toggle thinking. */
+  setThinking(enabled: boolean): void;
+  /** Set reasoning effort. */
+  setEffort(effort: string): void;
+  /** Toggle YOLO mode. */
+  setYolo(enabled: boolean): void;
+  /** Run a prompt command. */
+  runPromptCommand(name: string, argsText: string): void;
+  /** Open the model picker. */
+  openModelPickerAction(): void;
+  /** Close all overlays. */
+  closeOverlays(): void;
+  /** Compact the session. */
+  compact(): void;
+}
+
+export interface WebBridgeOptions {
+  readonly host: WebBridgeHost;
+  readonly images: ImageResolver;
+  /** Open an http(s) link (defaults to a new tab). */
+  readonly openLink?: (href: string) => void;
+  /**
+   * Copy text to the clipboard.
+   *
+   * Defaults to {@link copyTextToClipboard}: the async clipboard API where the page
+   * is a secure context, the `execCommand` fallback otherwise, and a warning notice
+   * when neither worked (the renderer's own "Copied" feedback cannot know).
+   */
+  readonly copyText?: (text: string) => void;
+  readonly logger?: CoreLogger;
+}
+
+/** http(s) only: a transcript link can also be a local image path (the link fallback). */
+function isExternalLink(href: string): boolean {
+  return /^https?:\/\//i.test(href);
+}
+
+export function createWebBridge(options: WebBridgeOptions): BridgeController {
+  const logger = options.logger ?? consoleLogger;
+  const openLink = options.openLink ?? ((href: string) => void globalThis.open(href, '_blank', 'noopener'));
+  const copyText =
+    options.copyText ??
+    ((text: string) => {
+      void copyTextToClipboard(
+        text,
+        {
+          clipboard: globalThis.navigator?.clipboard ?? null,
+          document: (globalThis.document as unknown as ClipboardDocument | undefined) ?? null,
+        },
+        logger,
+      ).then((outcome) => {
+        if (outcome === 'failed') {
+          // The renderer has already shown "Copied" (its feedback is fire-and-forget):
+          // saying what actually happened is the host's half of the contract.
+          options.host.notify('warning', 'Could not copy — select the text and copy it manually.');
+        }
+      });
+    });
+
+  return {
+    // Nothing to subscribe to (the runtime pushes through React) and nothing to
+    // hand-shake: `ready` exists for a host that has to hydrate a fresh document,
+    // and `ping` probes a channel this app does not use.
+    start: () => undefined,
+    ping: () => undefined,
+    dispose: () => undefined,
+
+    post: (message: WebviewToHostMessage): void => {
+      switch (message.type) {
+        case 'resolveImages': {
+          void options.images
+            .resolve(message.srcs)
+            .then(acceptImageUris)
+            .catch((error: unknown) => {
+              logger.warn('image resolution failed', error);
+            });
+          return;
+        }
+
+        case 'answerAsk': {
+          options.host.answerAsk(message.requestId, message.answers);
+          return;
+        }
+
+        case 'approveTool': {
+          options.host.approveTool(message.requestId, message.decision);
+          return;
+        }
+
+        case 'openLink': {
+          // The image fallback renders the source path as a link; a path cannot be
+          // "opened" in a browser tab, so it stays an inert click (it is already
+          // readable as the link text).
+          if (isExternalLink(message.href)) {
+            openLink(message.href);
+          } else {
+            logger.debug(`ignoring a non-http link "${message.href}"`);
+          }
+          return;
+        }
+
+        case 'copyText': {
+          copyText(message.text);
+          return;
+        }
+
+        case 'openFile': {
+          // No editor in a browser (design.md D7-1): say what the user would open
+          // instead of leaving a dead control.
+          const line = message.line === null ? '' : `:${message.line}`;
+          options.host.notify('info', `Open in your editor: ${message.path}${line}`);
+          return;
+        }
+
+        case 'openDiff': {
+          options.host.notify(
+            'info',
+            'The diff is shown inline here — the editor’s diff view is not available in the browser.',
+          );
+          return;
+        }
+
+        // ── control plane (step 09) ──────────────────────────────────────
+        case 'sendMessage': {
+          options.host.sendMessage(message.sessionId, message.text);
+          return;
+        }
+        case 'interrupt': {
+          options.host.interrupt();
+          return;
+        }
+        case 'setModel': {
+          options.host.setModel(message.model, message.provider);
+          return;
+        }
+        case 'setThinking': {
+          options.host.setThinking(message.enabled);
+          return;
+        }
+        case 'setEffort': {
+          options.host.setEffort(message.effort);
+          return;
+        }
+        case 'setYolo': {
+          options.host.setYolo(message.enabled);
+          return;
+        }
+        case 'runPromptCommand': {
+          options.host.runPromptCommand(message.name, message.argsText);
+          return;
+        }
+        case 'openModelPicker': {
+          options.host.openModelPickerAction();
+          return;
+        }
+        case 'closeOverlays': {
+          options.host.closeOverlays();
+          return;
+        }
+        case 'compact': {
+          options.host.compact();
+          return;
+        }
+        case 'activateSession':
+        case 'closeSession':
+        case 'newSession':
+        case 'ready':
+        case 'resync':
+        case 'ping': {
+          logger.debug(`web bridge: "${message.type}" is not wired; ignored`);
+          return;
+        }
+
+        default:
+          // Compile-time gate: `message` is `never` here only while every variant is
+          // handled above. At runtime a newer renderer must not break the shell.
+          unhandledVariant(message, 'web bridge');
+          return;
+      }
+    },
+  };
+}

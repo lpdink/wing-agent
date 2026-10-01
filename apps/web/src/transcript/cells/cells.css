@@ -1,0 +1,192 @@
+/*
+ * The transcript cells this app draws itself (step 08b).
+ *
+ * Only the rows the shared cards do not own entirely live here: the row chrome every
+ * cell sits in, the markdown wrapper the markdown *node* renderer is embedded in, the
+ * streaming caret, and the two generic tool-output cards (arguments / result) that
+ * have no ported counterpart yet — `JsonBlock` is P1 in the borrow audit.
+ *
+ * Three rules of the house:
+ *
+ * 1. **Geometry comes from the package's tokens.** The row padding, the tool-row gap,
+ *    the card surface and the caret are read from `--wing-*` / `--vscode-*` (which
+ *    the package now loads with its barrel and `ui-theme.css` maps), so a row drawn
+ *    here lines up with a row drawn by the package. The five declarations under
+ *    `.cell` are a transcription of `chat.module.css`'s `.row`; the caret block is a
+ *    transcription of `markdown.module.css`'s `.streamCaret` (the class is not
+ *    reachable across the package boundary).
+ * 2. **The DOM hooks are the old ones.** `data-cell-id` / `data-cell-kind` and the
+ *    per-kind attributes (`data-cell-status`, `data-streaming`, `data-ask-form`, …)
+ *    are what the screenshot scenes, step 09 and the tests read; the swap is not an
+ *    excuse to move them.
+ * 3. **No decoration.** Every box belongs to a real control or real data.
+ */
+
+/* ── row chrome (transcribed from chat.module.css `.row`) ────────────── */
+
+.cell {
+  display: flex;
+  flex-direction: column;
+  padding: var(--wing-chat-row-padding-y) var(--wing-chat-row-padding-x);
+  cursor: default;
+  user-select: text;
+}
+
+/* Consecutive tool rows sit closer together — the package's own rule
+   (`chat.module.css`), restated for the rows this app draws. */
+.cell[data-cell-kind='tool_call'] + .cell[data-cell-kind='tool_call'] {
+  margin-top: calc(var(--wing-tool-row-gap) - 2 * var(--wing-chat-row-padding-y));
+}
+
+/* ── markdown (the wrapper the node renderer is embedded in) ─────────── */
+
+/* A transcription of `markdown.module.css`'s `.markdown`: the shared
+   `MarkdownNodes` renders the blocks, but its container is the package's class —
+   unreachable from here. Four declarations carry the typography; the blocks
+   themselves bring their own margins. */
+.cell__markdown {
+  font-size: var(--wing-font-body-m);
+  line-height: var(--wing-md-line-height);
+  overflow-wrap: anywhere;
+}
+
+.cell__markdown > :last-child {
+  margin-bottom: 0;
+}
+
+/* The streaming caret: an empty inline span whose `::after` cycles
+   `'' → '.' → '..' → '...'` (`markdown.module.css`'s `.streamCaret`, same
+   geometry tokens; the reduced-motion state is the literal `...` the screenshot
+   runs photograph). */
+.cell__caret {
+  display: inline-block;
+  width: var(--wing-stream-caret-width);
+  overflow: hidden;
+  color: var(--wing-fg-description);
+  white-space: nowrap;
+}
+
+.cell__caret::after {
+  content: '';
+  animation: cell-ellipsis steps(4, end) var(--wing-stream-ellipsis-duration) infinite;
+}
+
+@keyframes cell-ellipsis {
+  0% {
+    content: '';
+  }
+
+  25% {
+    content: '.';
+  }
+
+  50% {
+    content: '..';
+  }
+
+  75% {
+    content: '...';
+  }
+
+  100% {
+    content: '';
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cell__caret::after {
+    animation: none;
+    content: '...';
+  }
+}
+
+/* ── tool row body ───────────────────────────────────────────────────── */
+
+/* The subject rides the disclosure row while collapsed (dim, ellipsized, the
+   file-reference link stays clickable); the body is inset like the editor's
+   expanded tool content (`--wing-tool-expanded-padding`, PARTS:120-140). */
+.cell__tool-subject {
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-s);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cell__tool-body {
+  display: flex;
+  flex-direction: column;
+  padding: var(--wing-tool-expanded-padding);
+}
+
+/* CHAT:628-640 — the bordered output card with a title bar, same tokens as the
+   renderer's own card (this is the one the port does not replace yet). */
+.cell__card {
+  margin: var(--wing-tool-card-margin);
+  border: var(--wing-stroke) solid var(--wing-border-widget);
+  border-radius: var(--wing-radius-medium);
+  background-color: var(--wing-surface-editor);
+  overflow: hidden;
+}
+
+.cell__card-title {
+  /* `2px 6px 2px 2px` is the confirmation widget's title inset
+     (PARTS/chatConfirmationWidget.css:30-34, the source of `--wing-pad-y-tight`). */
+  padding: 2px 6px 2px 2px;
+  border-bottom: var(--wing-stroke) solid var(--wing-border-widget);
+  color: var(--wing-fg-description);
+  background-color: var(--wing-surface-widget);
+  font-size: var(--wing-font-body-s);
+}
+
+.cell__card-body {
+  max-height: var(--wing-tool-output-max-height);
+  padding: var(--wing-tool-card-pad-y) var(--wing-tool-card-pad-x);
+  margin: 0;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: var(--wing-font-body-xs);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.cell__card[data-card='result'] .cell__card-body[data-error='true'] {
+  color: var(--wing-fg-error);
+}
+
+.cell__card-note {
+  margin: var(--wing-tool-card-margin);
+  color: var(--wing-fg-description);
+  font-size: var(--wing-font-body-s);
+}
+
+/* The Bash card brings its own surface; it only needs the body's inset. */
+.cell__terminal {
+  margin: var(--wing-tool-card-margin);
+}
+
+/* ── diff row ────────────────────────────────────────────────────────── */
+
+/* `Open diff` is the cell's action, not the card's (borrow card P0-4), so it sits
+   in a small row under the card. */
+.cell__diff-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 2px 0;
+}
+
+.cell__diff-open {
+  border: var(--wing-stroke) solid var(--wing-border-widget);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--wing-fg-description);
+  font: inherit;
+  font-size: var(--wing-font-body-s);
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.cell__diff-open:hover {
+  color: var(--fg);
+}

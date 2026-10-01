@@ -1,0 +1,19 @@
+{
+  "//": "App project: `src/` + `tests/`, with the DOM libs and WITHOUT node types — a browser shell must not reach for a node builtin or `process`. The node side (the screenshot tooling, the build/test configs, the import-graph guard) lives in `tsconfig.tools.json`, which is the mirror image (node types, no DOM). Both are run by `pnpm run typecheck`, exactly like the split in `packages/*` and `extensions/vscode` (see docs/dev/vscode-extension.md §2.3).",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+    "jsx": "react-jsx"
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "tests/**/*.ts",
+    "tests/**/*.tsx",
+    "../../packages/ui/src/**/*.d.ts"
+  ],
+  "//packages/ui": "`@wing-agent/ui` is source-first (its `exports` points at `src/`), so an import pulls its modules in but never its ambient declarations — the explicit glob is the documented requirement of that package (same line in extensions/vscode/tsconfig.webview.json).",
+  "//exclude": "The layering guard and the theme bridge's precondition test are node code (file system reads); tsconfig.tools.json owns every node-side file in this app.",
+  "exclude": ["tests/layers.test.ts", "tests/transcript.theme.test.ts"]
+}

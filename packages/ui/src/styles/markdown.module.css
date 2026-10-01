@@ -273,8 +273,14 @@ ol.list {
   text-decoration: var(--shiki-underline, none);
 }
 
-body.vscode-dark .codeToken,
-body.vscode-high-contrast .codeToken {
+/* `:global()` anchors the *host-published* body class: without it CSS Modules
+ * hashes the ancestor too (`body._vscode-dark_…_276 ._codeToken_…_267`), the
+ * selector matches no document, and dark themes silently kept the light token
+ * colours — in the VS Code webview as well. The descendant stays local (the JSX
+ * reads `styles.codeToken`), so the rule keeps pointing at the emitted class.
+ * `tests/artifacts/consumer-build.test.ts` pins the emitted selector. */
+:global(body.vscode-dark) .codeToken,
+:global(body.vscode-high-contrast) .codeToken {
   color: var(--shiki-dark, inherit);
 }
 

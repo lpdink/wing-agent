@@ -1,7 +1,7 @@
 {
   "name": "@wing-agent/ui",
   "version": "0.1.0",
-  "//": "The renderer shared by every Wing frontend (the VS Code webview today; the web / Electron shells next). It owns the transcript rendering (cells, markdown, composer, panels), the mirror store that follows the host's model, and the host ⇄ view wire contract (`./protocol`). Private and never published: the sources ARE the artifact (see `exports`) — bundlers compile them (Vite for the webview/preview builds, vitest for tests), so there is no build step to keep in sync. Workspace member of the root pnpm workspace (`pnpm-workspace.yaml`). See `docs/dev/vscode-extension.md` §2.1 for the boundaries.",
+  "//": "The renderer shared by every Wing frontend (the VS Code webview today; the web / Electron shells next). It owns the transcript rendering (cells, markdown, composer, panels), the code/tool cards (code blocks, terminal output, diffs), the theme token sheets (`./styles/*`), the mirror store that follows the host's model, and the host ⇄ view wire contract (`./protocol`). Private and never published: the sources ARE the artifact (see `exports`) — bundlers compile them (Vite for the webview/preview builds, vitest for tests), so there is no build step to keep in sync. Workspace member of the root pnpm workspace (`pnpm-workspace.yaml`). See `docs/dev/vscode-extension.md` §2.1 for the boundaries.",
   "private": true,
   "license": "Apache-2.0",
   "repository": {
@@ -9,15 +9,18 @@
     "url": "https://github.com/lpdink/wing-agent.git",
     "directory": "packages/ui"
   },
-  "//exports": "Three public entries, all source-first. `.` is the browser app (DOM + React + CSS). `./protocol` is the DOM-free wire contract the host side consumes too (the extension host imports it from Node, hence no DOM/JSX in that subtree). `./testing` is the fixtures + scripted host, for tests and preview harnesses of any consumer — product code must not import it.",
+  "//exports": "Four public entries, all source-first. `.` is the browser app (DOM + React + CSS). `./protocol` is the DOM-free wire contract the host side consumes too (the extension host imports it from Node, hence no DOM/JSX in that subtree). `./testing` is the fixtures + scripted host, for tests and preview harnesses of any consumer — product code must not import it. `./styles/*` are the plain-CSS theme token sheets the browser shells import once in their entry (`design-platform.css` defines the `--dsw-*` table; `shiki.css` is the code-card palette) — deliberately NOT pulled in by `.`, because the VS Code webview consumes `.` and must keep the host's own theme.",
   "exports": {
     ".": "./src/index.ts",
     "./protocol": "./src/protocol/index.ts",
-    "./testing": "./src/testing/index.ts"
+    "./testing": "./src/testing/index.ts",
+    "./styles/*": "./src/styles/*"
   },
-  "//sideEffects": "`false` would let a bundler drop the stylesheet imports (CSS is the one import-time effect in this package — every other module only defines types, constants and functions), so the entry names CSS explicitly: consumers can still tree-shake unused components, and `import './styles/*.css'` survives. Verified by the extension's webview bundle artifact test (it reads the emitted `main.css`).",
+  "//sideEffects": "`false` would let a bundler drop the stylesheet imports (CSS is the one import-time effect in this package — every other module only defines types, constants and functions), so the entry names CSS explicitly: consumers can still tree-shake unused components, and `import './styles/*.css'` survives. The barrel (`src/index.ts`) is listed beside the sheets because listing only `**/*.css` declares every *JavaScript* module pure, and Vite 8 / Rolldown then drops a side-effect-only CSS import inside a module that is included merely for its exports — which is exactly what the barrel is for its consumers (`import { TranscriptView } from '@wing-agent/ui'`): the token sheet vanished from production builds while `vite dev` and the webview's `mountApp` path kept it. Any module that gains a plain-sheet import belongs on this list; `tests/artifacts/consumer-build.test.ts` builds the two consumer shapes and goes red if it is missing.",
+  "//sideEffects-mechanism": "Measured with the repository's Vite 8.3.1 (Rolldown 1.2): with `sideEffects: [\"**/*.css\"]`, a module like `src/index.ts` importing `./styles/tokens.css` only keeps the sheet when the CSS import sits in the *entry* module; from any transitively imported module it is dropped. Adding `**/src/index.ts` to this list restores it, and `true`/no-field would too — at the cost of declaring the whole package effectful.",
   "sideEffects": [
-    "**/*.css"
+    "**/*.css",
+    "**/src/index.ts"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.dom.json && tsc --noEmit -p tsconfig.node-probe.json",
@@ -26,11 +29,16 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "preview:port": "vite build --config vite.port-preview.config.mts",
+    "dev:port-preview": "vite --config vite.port-preview.config.mts",
+    "shoot:port": "node tools/port-preview/shoot.mts"
   },
   "//dependencies": "Everything `src/**` imports at runtime, declared here (pnpm does not hoist: a dependency must be declared by the package that uses it). The npm libraries are bundled by the consumer like the workspace packages — but unlike a pure build-time tool they are part of what this package *is*, so they are not devDependencies.",
   "dependencies": {
     "@wing-agent/session": "workspace:*",
+    "anser": "^2.3.5",
+    "clsx": "^2.1.1",
     "katex": "^0.18.9",
     "markdown-it": "^14.1.0",
     "react": "^19.3.0",

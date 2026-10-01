@@ -1,0 +1,18 @@
+{
+  "//": "Tooling project: the screenshot infrastructure (`tools/**`), the build/test configs and the import-graph guard — node-only, no DOM. Mirror image of `tsconfig.app.json`; together they are the first of the three layering mechanisms (the others are `eslint.config.mjs` and `tests/layers.test.ts`). `.mjs` is parsed but not type-checked (`checkJs: false`), like the extension's tools project: these are small bundler/build scripts.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": [
+    "tools/**/*.ts",
+    "vite.config.mts",
+    "vitest.config.mts",
+    "esbuild.shot.mjs",
+    "tests/layers.test.ts",
+    "tests/transcript.theme.test.ts"
+  ]
+}

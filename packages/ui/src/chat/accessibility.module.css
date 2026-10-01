@@ -1,0 +1,14 @@
+/*
+ * Portions from DeepSeek Harness (https://github.com/deepseek-ai/deepseek-harness),
+ * Copyright (c) 2026 DeepSeek, licensed under the MIT License (see THIRD_PARTY_NOTICES.md).
+ * Source: packages/client/ui-chat/src/client/chat/accessibility.module.css
+ * Modified for Wing: unchanged.
+ */
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

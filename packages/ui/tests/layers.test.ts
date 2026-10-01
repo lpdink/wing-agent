@@ -52,6 +52,8 @@ const SESSION_PACKAGE = '@wing-agent/session';
  * *data* modules bundled at build time).
  */
 const NPM_ALLOWLIST: readonly string[] = [
+  'anser',
+  'clsx',
   'react',
   'react-dom/client',
   'zustand',
@@ -508,9 +510,21 @@ function colorLiteralIn(value: string): string | null {
   return named === null ? null : named[0];
 }
 
+/**
+ * Sheets that *define* the colour vocabulary rather than consume it: the theme
+ * table (`design-platform.css`) and the shiki palette (`shiki.css`) are where the
+ * literals legitimately live — every other stylesheet must read them through
+ * `var()`. The port batch 06b added them beside the renderer's own sheets, so the
+ * rule moved with them.
+ */
+const COLOR_SOURCE_SHEETS = ['styles/design-platform.css', 'styles/shiki.css'];
+
 function checkCssColors(): CssViolation[] {
   const violations: CssViolation[] = [];
   for (const file of listFiles(SRC, ['.css'])) {
+    if (COLOR_SOURCE_SHEETS.includes(path.relative(SRC, file).split(path.sep).join('/'))) {
+      continue;
+    }
     const lines = readFileSync(file, 'utf8').split('\n');
     lines.forEach((line, index) => {
       const trimmed = line.trimStart();

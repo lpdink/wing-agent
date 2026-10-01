@@ -116,6 +116,12 @@ jobs:
       - name: Build (extension host + webview)
         run: pnpm --filter wing-vscode run build
 
+      # The web client is also a build artifact (step 03's `gateway.static_dir`
+      # serves `apps/web/dist`); building it here keeps a broken Vite build or a
+      # missing entry point from reaching `develop`.
+      - name: Build web client
+        run: pnpm --filter @wing-agent/web run build
+
       - name: Build webview preview harness
         run: pnpm --filter wing-vscode run build:preview
 

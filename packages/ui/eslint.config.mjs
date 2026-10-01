@@ -73,7 +73,7 @@ const restrictedGlobals = (names, message) => [
 ];
 
 export default tseslint.config(
-  { ignores: ['node_modules/**', 'coverage/**', 'eslint.config.mjs'] },
+  { ignores: ['node_modules/**', 'coverage/**', 'dist/**', 'eslint.config.mjs'] },
 
   js.configs.recommended,
 
@@ -137,9 +137,19 @@ export default tseslint.config(
     },
   },
 
+  // ── ANSI parsing ───────────────────────────────────────────────────────
+  {
+    // `no-control-regex` is exactly what this module is about: it matches ESC,
+    // BEL and the other control bytes that a terminal's output carries and that
+    // must never reach the DOM as literal characters. The one file it applies to
+    // is the parser itself; everywhere else the rule stays on.
+    files: ['src/tool/ansi.ts'],
+    rules: { 'no-control-regex': 'off' },
+  },
+
   // ── React ──────────────────────────────────────────────────────────────
   {
-    files: ['src/**/*.tsx'],
+    files: ['src/**/*.tsx', 'tools/**/*.tsx'],
     plugins: { 'react-hooks': reactHooks },
     rules: {
       'react-hooks/rules-of-hooks': 'error',
@@ -153,7 +163,25 @@ export default tseslint.config(
     languageOptions: { globals: globals.browser },
   },
   {
-    files: ['tests/**/*.ts', 'tests/**/*.tsx', 'vitest.config.mts', 'eslint.config.mjs'],
+    files: [
+      'tests/**/*.ts',
+      'tests/**/*.tsx',
+      'vitest.config.mts',
+      'vite.port-preview.config.mts',
+      'eslint.config.mjs',
+    ],
+    languageOptions: { globals: globals.node },
+  },
+  // The dev-only port preview (`tools/port-preview`) is browser code: it mounts
+  // React into a document and is built by the port-preview Vite config. Its
+  // screenshot driver is the one Node program in there — it spawns Chrome and
+  // speaks the DevTools protocol over the built-in WebSocket.
+  {
+    files: ['tools/**/*.ts', 'tools/**/*.tsx'],
+    languageOptions: { globals: globals.browser },
+  },
+  {
+    files: ['tools/**/*.mts'],
     languageOptions: { globals: globals.node },
   },
 
