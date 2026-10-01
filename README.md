@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/banner-light.svg">
+    <img src="assets/banner-dark.svg" alt="wing — pixel seagull mascot and WING wordmark" width="620">
+  </picture>
+</p>
+
 # wing-agent
 
 <p align="center">

@@ -617,6 +617,24 @@ mod tests {
         )
     }
 
+    #[test]
+    fn header_in_view_boundaries() {
+        // 这是"看不见不花钱"那条契约的总闸门（App::sync_welcome 用它决定是否
+        // 短路整条动画时钟）：边界写错不会有别的测试变红。
+        let mut view = ChatView::new();
+        assert!(!view.header_in_view(), "没有 header 就谈不上可见");
+
+        view.set_header((0..5).map(|i| Line::from(format!("h{i}"))).collect());
+        view.scroll_offset = 0;
+        assert!(view.header_in_view(), "顶部：整块在视口里");
+        view.scroll_offset = 4;
+        assert!(view.header_in_view(), "滚到最后一行 header：仍可见");
+        view.scroll_offset = 5;
+        assert!(!view.header_in_view(), "正好滚过头：不可见");
+        view.scroll_offset = 999;
+        assert!(!view.header_in_view(), "滚到底：不可见");
+    }
+
     /// The question texts of the Ask cells, in cell order.
     fn ask_texts(view: &ChatView) -> Vec<String> {
         view.cells

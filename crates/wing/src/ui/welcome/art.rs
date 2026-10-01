@@ -1,453 +1,316 @@
-//! 欢迎屏的像素 "W" 标记。
+//! 海鸥帧数据 —— 创作期光栅器（矢量形状 → 硬边量化 → 外部描边）的定稿导出。
 //!
-//! 字形是手绘的半格像素画：每个字符格装上下两个像素，`▀` 只画上半、`▄` 只画
-//! 下半、`█` 两个都画、空格透明。每格的前景 / 背景各取一个像素的颜色，于是
-//! **颜色也按半格走**——这正是它比"纯色 `█` 拼字" 精致的原因：对角线平滑，
-//! 颜色沿对角线从亮到暗铺开。
-//!
-//! 改字形只需要动 `WING_ART` 这几行字符串（列数 = `ART_COLS`）。
+//! 数据形态与 dsh 的像素鲸鱼同构：字母网格，`.` 透明，字母即调色板键
+//!（见 [`super::sprite::brand`]）。运行期零生成成本；改画只需要改字符串。
+//! 两个姿态：[`PERCHED_*`] 待机（站姿 chibi）、[`FLY_*`] 干活（飞行扇翅）。
 
-use ratatui::style::Color;
-use ratatui::style::Style;
-use ratatui::text::Line;
-use ratatui::text::Span;
-
-use super::Sweep;
-
-/// 字形：7 行 × 26 列。空格 = 透明，`▀` / `▄` / `█` = 上半 / 下半 / 整格像素。
-const WING_ART: &[&str] = &[
-    " ▄█▄                   ▄█▄",
-    " ▀███▄      ▄█▄      ▄███▀",
-    "   ███▄    █████    ▄███",
-    "    ▀███  ███▀███  ███▀",
-    "     ▀███▄███ ███▄███▀",
-    "      ▀█████   █████▀",
-    "        ▀█▀     ▀█▀",
+/// 待机：站姿 chibi 的标准姿势。
+///
+/// 23 像素行 × 29 列（终端行数是布局的事，见 `super`）。
+pub const PERCHED_IDLE: &[&str] = &[
+    ".................OOOO........",
+    "...............OOWWWWOO......",
+    "..............OWWWWWWWWO.....",
+    ".............OWWWWWWWWWWO....",
+    ".............OWWWWWWWWWWO....",
+    "............OWWWWWWWHEWWWO...",
+    ".......OOOOOOWWWWWWWEEWWBOOO.",
+    "......OGGGGWWWWWWWWWWWWWBBBBO",
+    "......OGGGGGGWWWWWWWWWWWMMBO.",
+    "......OWWGGGGGWWWWWWWWWWOOO..",
+    ".....OWWWWGGGGGGGWWWWWWWO....",
+    ".....OWWWWGGGGGGGGWWWWWWO....",
+    "....OWWWWGGGGGGGGGGWWWWWWO...",
+    "....OWWWWDDDGGGGSGWWWWWWWO...",
+    "...OOOWWWDDDSSSSSWWWWWWWO....",
+    "..OWWWWWWDDGGSSSWWWWWWWWO....",
+    ".ODDDDWWWWWWWWWWWWWWWWWO.....",
+    "..ODDDWWWWWWWWWWWWWWWWO......",
+    "...OOOOOOOWWWWWWWWWWOO.......",
+    "..........OOMMWWMMOO.........",
+    "...........OMM..MMO..........",
+    "..........OMMMMMMMMO.........",
+    "...........OOOOOOOO..........",
 ];
 
-/// 标记占用的列数（比最宽的字形行多留一列，右侧文字列的起点因此写死）。
-pub const ART_COLS: usize = 27;
-
-/// 标记占用的行数。
-pub const ART_ROWS: usize = WING_ART.len();
-
-/// 标记与右侧文字列之间的空列数。
-pub const ART_GAP: usize = 3;
-
-/// 一格的墨迹：上半 / 下半像素在不在。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Cell {
-    upper: bool,
-    lower: bool,
-}
-
-impl Cell {
-    /// 字符 → 墨迹。`None` = 未知字符（字形写错了，测试会拦）。
-    fn parse(ch: char) -> Option<Self> {
-        match ch {
-            ' ' => Some(Self {
-                upper: false,
-                lower: false,
-            }),
-            '▀' => Some(Self {
-                upper: true,
-                lower: false,
-            }),
-            '▄' => Some(Self {
-                upper: false,
-                lower: true,
-            }),
-            '█' => Some(Self {
-                upper: true,
-                lower: true,
-            }),
-            _ => None,
-        }
-    }
-
-    /// 该格画出来的字符：整格也走 `▀` —— 上下两个像素各拿一个颜色，格子内部的
-    /// 渐变因此是半格粒度（`█` 会把下半像素的颜色吃掉）。
-    fn glyph(self) -> char {
-        match (self.upper, self.lower) {
-            (true, _) => '▀',
-            (false, true) => '▄',
-            (false, false) => ' ',
-        }
-    }
-}
-
-/// RGB 三元组。
-pub(super) type Rgb = (u8, u8, u8);
-
-/// 纯白——扫光高光的目标色。
-const WHITE: Rgb = (255, 255, 255);
-
-/// 渐变的中间停靠点：对角线位置 0 到它之间从高亮色收敛到主题色，再往后一路
-/// 压暗到 `gradient_dark`。
-const GRADIENT_MID: f32 = 0.55;
-
-/// 高亮端混白多少。三个数（亮端 / 暗端 / 权重）就是整个标记的"力度"旋钮 ——
-/// 太小时看上去仍像一块纯色。
-const GRADIENT_LIGHT_BLEND: f32 = 0.55;
-
-/// 压暗端混黑多少。
-const GRADIENT_DARK_BLEND: f32 = 0.40;
-
-/// 对角线的横向权重（纵向 = 1 - 它）。横向多一点，左上角那束光才明显。
-const GRADIENT_AXIS_X: f32 = 0.60;
-
-/// 高亮端：主题色往白里提一档。
-fn gradient_light(accent: Rgb) -> Rgb {
-    mix(accent, WHITE, GRADIENT_LIGHT_BLEND)
-}
-
-/// 压暗端：主题色往黑里压一档。
-fn gradient_dark(accent: Rgb) -> Rgb {
-    mix(accent, (0, 0, 0), GRADIENT_DARK_BLEND)
-}
-
-/// 两个颜色按 `t`（0 = a，1 = b）线性混合。
-pub(super) fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
-    let t = t.clamp(0.0, 1.0);
-    let lerp = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    (lerp(a.0, b.0), lerp(a.1, b.1), lerp(a.2, b.2))
-}
-
-/// 主题色 → RGB。命名色按 xterm 调色板的近似值展开：渐变需要数值，而
-/// `Color::Rgb` 是 ratatui 唯一能表达中间色的形式。
-pub(super) fn to_rgb(color: Color) -> Rgb {
-    match color {
-        Color::Rgb(r, g, b) => (r, g, b),
-        Color::Black => (0, 0, 0),
-        Color::Red => (205, 49, 49),
-        Color::Green => (13, 188, 121),
-        Color::Yellow => (229, 229, 16),
-        Color::Blue => (36, 114, 200),
-        Color::Magenta => (188, 63, 188),
-        Color::Cyan => (17, 168, 205),
-        Color::Gray => (229, 229, 229),
-        Color::DarkGray => (102, 102, 102),
-        Color::LightRed => (241, 76, 76),
-        Color::LightGreen => (35, 209, 139),
-        Color::LightYellow => (245, 245, 67),
-        Color::LightBlue => (59, 142, 234),
-        Color::LightMagenta => (214, 112, 214),
-        Color::LightCyan => (41, 184, 219),
-        Color::White => (255, 255, 255),
-        // Reset / 索引色没有可用的数值：当作白，渐变退化成单色，不至于画不出来。
-        _ => (255, 255, 255),
-    }
-}
-
-/// 画一帧要用到的常量：渐变的三段色 + 像素尺寸。
+/// [`PERCHED_IDLE`] 的列数。
+pub const PERCHED_IDLE_COLS: usize = 29;
+/// [`PERCHED_IDLE`] 的像素行数。
+pub const PERCHED_IDLE_ROWS: usize = 23;
+/// 待机：闭眼帧。
 ///
-/// 打包成一个值，是为了让"取某一格颜色"只需要坐标 —— 否则每层调用都要把五个
-/// 颜色 / 尺寸参数一路传下去。
-#[derive(Debug, Clone, Copy)]
-struct Canvas {
-    accent: Rgb,
-    light: Rgb,
-    dark: Rgb,
-    /// 像素列数。
-    width: usize,
-    /// 像素行数（= 显示行 × 2）。
-    height: usize,
-}
+/// 23 像素行 × 29 列（终端行数是布局的事，见 `super`）。
+pub const PERCHED_BLINK: &[&str] = &[
+    ".................OOOO........",
+    "...............OOWWWWOO......",
+    "..............OWWWWWWWWO.....",
+    ".............OWWWWWWWWWWO....",
+    ".............OWWWWWWWWWWO....",
+    "............OWWWWWWWWWWWWO...",
+    ".......OOOOOOWWWWWWEEEEWBOOO.",
+    "......OGGGGWWWWWWWWWWWWWBBBBO",
+    "......OGGGGGGWWWWWWWWWWWMMBO.",
+    "......OWWGGGGGWWWWWWWWWWOOO..",
+    ".....OWWWWGGGGGGGWWWWWWWO....",
+    ".....OWWWWGGGGGGGGWWWWWWO....",
+    "....OWWWWGGGGGGGGGGWWWWWWO...",
+    "....OWWWWDDDGGGGSGWWWWWWWO...",
+    "...OOOWWWDDDSSSSSWWWWWWWO....",
+    "..OWWWWWWDDGGSSSWWWWWWWWO....",
+    ".ODDDDWWWWWWWWWWWWWWWWWO.....",
+    "..ODDDWWWWWWWWWWWWWWWWO......",
+    "...OOOOOOOWWWWWWWWWWOO.......",
+    "..........OOMMWWMMOO.........",
+    "...........OMM..MMO..........",
+    "..........OMMMMMMMMO.........",
+    "...........OOOOOOOO..........",
+];
 
-impl Canvas {
-    /// 按主题色铺开三段渐变：高亮（左上）→ 主题色 → 压暗（右下）。
-    fn new(accent: Color) -> Self {
-        let accent = to_rgb(accent);
-        Self {
-            accent,
-            light: gradient_light(accent),
-            dark: gradient_dark(accent),
-            width: ART_COLS,
-            height: ART_ROWS * 2,
-        }
-    }
+/// [`PERCHED_BLINK`] 的列数。
+pub const PERCHED_BLINK_COLS: usize = 29;
+/// [`PERCHED_BLINK`] 的像素行数。
+pub const PERCHED_BLINK_ROWS: usize = 23;
+/// 待机：抖翅第 1 帧。
+///
+/// 23 像素行 × 29 列（终端行数是布局的事，见 `super`）。
+pub const PERCHED_FLUTTER1: &[&str] = &[
+    ".................OOOO........",
+    "...............OOWWWWOO......",
+    "..............OWWWWWWWWO.....",
+    ".............OWWWWWWWWWWO....",
+    ".............OWWWWWWWWWWO....",
+    "............OWWWWWWWHEWWWO...",
+    ".......OOOOOOWWWWWWWEEWWBOOO.",
+    "......OGGGGWWWWWWWWWWWWWBBBBO",
+    "......OGGGGGGWWWWWWWWWWWMMBO.",
+    "......OWWGGGGGWWWWWWWWWWOOO..",
+    ".....OWWWWWGGGWWWWWWWWWWO....",
+    ".....OWWWWGGGGGGGGWWWWWWO....",
+    "....OWWWWWGGGGGGGGWWWWWWWO...",
+    "....OWWWWGGGGGGGGGGWWWWWWO...",
+    "...OOOWWDDDDSSSSSGWWWWWWO....",
+    "..OWWWWWWDDDSSSSWWWWWWWWO....",
+    ".ODDDDWWWWWWGGWWWWWWWWWO.....",
+    "..ODDDWWWWWWWWWWWWWWWWO......",
+    "...OOOOOOOWWWWWWWWWWOO.......",
+    "..........OOMMWWMMOO.........",
+    "...........OMM..MMO..........",
+    "..........OMMMMMMMMO.........",
+    "...........OOOOOOOO..........",
+];
 
-    /// 对角渐变的位置参数（0 = 左上，1 = 右下）。
-    ///
-    /// 竖直方向按**像素行**归一化：半格像素只占半行，这样铺出来的才是视觉上的
-    /// 对角线（不然渐变会明显偏扁）。
-    fn diagonal(&self, col: usize, pixel_row: usize) -> f32 {
-        let x = col as f32 / (self.width - 1).max(1) as f32;
-        let y = pixel_row as f32 / (self.height - 1).max(1) as f32;
-        GRADIENT_AXIS_X * x + (1.0 - GRADIENT_AXIS_X) * y
-    }
+/// [`PERCHED_FLUTTER1`] 的列数。
+pub const PERCHED_FLUTTER1_COLS: usize = 29;
+/// [`PERCHED_FLUTTER1`] 的像素行数。
+pub const PERCHED_FLUTTER1_ROWS: usize = 23;
+/// 待机：抖翅第 2 帧。
+///
+/// 23 像素行 × 29 列（终端行数是布局的事，见 `super`）。
+pub const PERCHED_FLUTTER2: &[&str] = &[
+    ".................OOOO........",
+    "...............OOWWWWOO......",
+    "..............OWWWWWWWWO.....",
+    ".............OWWWWWWWWWWO....",
+    ".............OWWWWWWWWWWO....",
+    "............OWWWWWWWHEWWWO...",
+    ".......OOOOOOWWWWWWWEEWWBOOO.",
+    "......OGGGGWWWWWWWWWWWWWBBBBO",
+    "......OGGGGGGWWWWWWWWWWWMMBO.",
+    "......OWWGGGGGWWWWWWWWWWOOO..",
+    ".....OWWWWWGGGWWWWWWWWWWO....",
+    ".....OWWWWWGGGGGGWWWWWWWO....",
+    "....OWWWWWGGGGGGGGWWWWWWWO...",
+    "....OWWWWGGGGGGGGGGWWWWWWO...",
+    "...OOOWWWDDGGGGGGGGWWWWWO....",
+    "..OWWWWWWDDDSSSSSWWWWWWWO....",
+    ".ODDDDWWWDDDSSSSWWWWWWWO.....",
+    "..ODDDWWWWWWWWWWWWWWWWO......",
+    "...OOOOOOOWWWWWWWWWWOO.......",
+    "..........OOMMWWMMOO.........",
+    "...........OMM..MMO..........",
+    "..........OMMMMMMMMO.........",
+    "...........OOOOOOOO..........",
+];
 
-    /// 一个像素的颜色：对角线渐变 + 叠扫光高光。
-    fn pixel(&self, col: usize, pixel_row: usize, sweep: Option<&Sweep>) -> Color {
-        let t = self.diagonal(col, pixel_row);
-        let mut rgb = if t < GRADIENT_MID {
-            mix(self.light, self.accent, t / GRADIENT_MID)
-        } else {
-            mix(
-                self.accent,
-                self.dark,
-                (t - GRADIENT_MID) / (1.0 - GRADIENT_MID),
-            )
-        };
-        if let Some(sweep) = sweep {
-            let strength = sweep.at(col as f32);
-            if strength > 0.0 {
-                rgb = mix(rgb, WHITE, 0.55 * strength);
-            }
-        }
-        Color::Rgb(rgb.0, rgb.1, rgb.2)
-    }
+/// [`PERCHED_FLUTTER2`] 的列数。
+pub const PERCHED_FLUTTER2_COLS: usize = 29;
+/// [`PERCHED_FLUTTER2`] 的像素行数。
+pub const PERCHED_FLUTTER2_ROWS: usize = 23;
+/// 干活：扇翅循环第 0 帧（共 6，循环播放）。
+///
+/// 21 像素行 × 37 列（终端行数是布局的事，见 `super`）。
+pub const FLY_0: &[&str] = &[
+    "...........OO........................",
+    "..........ODDOO......................",
+    ".........ODDDDDO.....................",
+    ".........ODDDDDWO....................",
+    "..........ODDDWWWO...................",
+    "..........ODDSWWWWO.........OO.......",
+    "...........OWSSWWWWO......OOWWOO.....",
+    "...........OWWSSWWWWO....OWWWWWWO....",
+    "............OWSSSWWWWO..OWWWWEEWWO...",
+    "............OWWSSWWWWWOOWWWWWEEWWOOO.",
+    ".............OWWSSWWWWWWWWWWWEEWBBBBO",
+    ".........OOOOGWWSSSWWWWWWWWWWWWWBMBBO",
+    "........OGGGGGGWWSSSWWWWWWWWWWWWWMOO.",
+    "........OGGGGGGWWWSSSWWWWWWWWWWWWO...",
+    ".....OOOWWWWWWWWWWSSSWWWWWWWWWWWO....",
+    "...OOWWWWWWWWWWWWWWSSWWWWWWWWWOO.....",
+    "..ODDDWWWWWWWWGGGGGGGGGGWWWOOO.......",
+    "..ODDDWWWWWGGGGGGGGGGGGGWWO..........",
+    "..ODDDOOOOGGGGGGGGGGGWWWOO...........",
+    "...OOO....OOOWWWWWWWOOOO.............",
+    ".............OOOOOOO.................",
+];
 
-    /// 一格的样式：上面那半取像素行 `pixel_row`、下面那半取 `pixel_row + 1`。
-    ///
-    /// 终端的语义是：**背景铺满整格**，`▀` / `▄` 再用前景画掉其中一半。所以
-    /// 只有上下两个像素都在的格子才配背景色（上半当前景、下半当背景，`█`
-    /// 也因此写成 `▀`，半格渐变就藏在这里）；只画半格的两类格子**必须只用
-    /// 前景** —— 给 `▄` 配背景会把本该透明的上半整格填满，而且填的还是对面
-    /// 那半的颜色。
-    fn cell(&self, cell: &Cell, col: usize, pixel_row: usize, sweep: Option<&Sweep>) -> Style {
-        match (cell.upper, cell.lower) {
-            (false, false) => Style::default(),
-            (true, true) => Style::default()
-                .fg(self.pixel(col, pixel_row, sweep))
-                .bg(self.pixel(col, pixel_row + 1, sweep)),
-            (true, false) => Style::default().fg(self.pixel(col, pixel_row, sweep)),
-            (false, true) => Style::default().fg(self.pixel(col, pixel_row + 1, sweep)),
-        }
-    }
-}
+/// [`FLY_0`] 的列数。
+pub const FLY_0_COLS: usize = 37;
+/// [`FLY_0`] 的像素行数。
+pub const FLY_0_ROWS: usize = 21;
+/// 干活：扇翅循环第 1 帧（共 6，循环播放）。
+///
+/// 20 像素行 × 37 列（终端行数是布局的事，见 `super`）。
+pub const FLY_1: &[&str] = &[
+    "...........O.........................",
+    "..........ODOO.......................",
+    ".........ODDDWO......................",
+    "........ODDDDDWOO....................",
+    ".........ODDDDWWWO..........OO.......",
+    ".........ODDDWWWWWO.......OOWWOO.....",
+    "..........OWSSWWWWWOO....OWWWWWWO....",
+    "...........OWSSWWWWWWO..OWWWWEEWWO...",
+    "...........OWWSSWWWWWWOOWWWWWEEWWOOO.",
+    "............OWWSSWWWWWWWWWWWWEEWBBBBO",
+    ".........OOOOGWSSSWWWWWWWWWWWWWWBMBBO",
+    "........OGGGGGWWSSSWWWWWWWWWWWWWWMOO.",
+    "........OGGGGGGWWSSSWWWWWWWWWWWWWO...",
+    ".....OOOWWWWWWWWWWSSSWWWWWWWWWWWO....",
+    "...OOWWWWWWWWWWWWWWSSWWWWWWWWWOO.....",
+    "..ODDDWWWWWWWWGGGGGGGGGGWWWOOO.......",
+    "..ODDDWWWWWGGGGGGGGGGGGGWWO..........",
+    "..ODDDOOOOGGGGGGGGGGGWWWOO...........",
+    "...OOO....OOOWWWWWWWOOOO.............",
+    ".............OOOOOOO.................",
+];
 
-/// 画出标记：行尾的透明格截掉，相邻同色的格子合并成一个 span。
-pub(super) fn lines(accent: Color, sweep: Option<&Sweep>) -> Vec<Line<'static>> {
-    let canvas = Canvas::new(accent);
-    let mut out = Vec::with_capacity(ART_ROWS);
-    for (row, raw) in WING_ART.iter().enumerate() {
-        let cells: Vec<Cell> = raw
-            .chars()
-            .map(|c| Cell::parse(c).expect("字形只允许 ' ' / '▀' / '▄' / '█'"))
-            .collect();
-        let ink_end = cells
-            .iter()
-            .rposition(|c| c.upper || c.lower)
-            .map_or(0, |i| i + 1);
+/// [`FLY_1`] 的列数。
+pub const FLY_1_COLS: usize = 37;
+/// [`FLY_1`] 的像素行数。
+pub const FLY_1_ROWS: usize = 20;
+/// 干活：扇翅循环第 2 帧（共 6，循环播放）。
+///
+/// 18 像素行 × 37 列（终端行数是布局的事，见 `super`）。
+pub const FLY_2: &[&str] = &[
+    "..........OOO........................",
+    ".........ODWWOO......................",
+    "........ODDDWWWOO...........OO.......",
+    ".......ODDDDDWWWWO........OOWWOO.....",
+    "........ODDDDWWWWWOO.....OWWWWWWO....",
+    ".........ODSSSWWWWWWOO..OWWWWEEWWO...",
+    "..........OWSSSWWWWWWWOOWWWWWEEWWOOO.",
+    "...........OWSSSWWWWWWWWWWWWWEEWBBBBO",
+    ".........OOOOWSSSSWWWWWWWWWWWWWWBMBBO",
+    "........OGGGGGWSSSSWWWWWWWWWWWWWWMOO.",
+    "........OGGGGGGWSSSSWWWWWWWWWWWWWO...",
+    ".....OOOWWWWWWWWWWSSSWWWWWWWWWWWO....",
+    "...OOWWWWWWWWWWWWWWSSWWWWWWWWWOO.....",
+    "..ODDDWWWWWWWWGGGGGGGGGGWWWOOO.......",
+    "..ODDDWWWWWGGGGGGGGGGGGGWWO..........",
+    "..ODDDOOOOGGGGGGGGGGGWWWOO...........",
+    "...OOO....OOOWWWWWWWOOOO.............",
+    ".............OOOOOOO.................",
+];
 
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        let mut run: Option<(Style, String)> = None;
-        for (col, cell) in cells.iter().enumerate().take(ink_end) {
-            let style = canvas.cell(cell, col, row * 2, sweep);
-            match &mut run {
-                Some((current, text)) if *current == style => text.push(cell.glyph()),
-                Some(_) => {
-                    let (style_done, text) = run.take().expect("run 在手");
-                    spans.push(Span::styled(text, style_done));
-                    run = Some((style, cell.glyph().to_string()));
-                }
-                None => run = Some((style, cell.glyph().to_string())),
-            }
-        }
-        if let Some((style, text)) = run {
-            spans.push(Span::styled(text, style));
-        }
-        out.push(Line::from(spans));
-    }
-    out
-}
+/// [`FLY_2`] 的列数。
+pub const FLY_2_COLS: usize = 37;
+/// [`FLY_2`] 的像素行数。
+pub const FLY_2_ROWS: usize = 18;
+/// 干活：扇翅循环第 3 帧（共 6，循环播放）。
+///
+/// 17 像素行 × 37 列（终端行数是布局的事，见 `super`）。
+pub const FLY_3: &[&str] = &[
+    ".........OO..........................",
+    "........OWWOOO..............OO.......",
+    ".......ODDDWWWOOO.........OOWWOO.....",
+    ".......ODDDDWWWWWOO......OWWWWWWO....",
+    ".......ODDDDDWWWWWWOOO..OWWWWEEWWO...",
+    ".......ODDDSSWWWWWWWWWOOWWWWWEEWWOOO.",
+    "........ODOSSSSWWWWWWWWWWWWWWEEWBBBBO",
+    ".........OOOWSSSWWWWWWWWWWWWWWWWBMBBO",
+    "........OGGGGWSSSSWWWWWWWWWWWWWWWMOO.",
+    "........OGGGGGWSSSSSWWWWWWWWWWWWWO...",
+    ".....OOOWWWWWWWWWSSSSWWWWWWWWWWWO....",
+    "...OOWWWWWWWWWWWWWSSSWWWWWWWWWOO.....",
+    "..ODDDWWWWWWWWGGGWGGGGGGWWWOOO.......",
+    "..ODDDWWWWWGGGGGGGGGGGGGWWO..........",
+    "..ODDDOOOOGGGGGGGGGGGWWWOO...........",
+    "...OOO....OOOWWWWWWWOOOO.............",
+    ".............OOOOOOO.................",
+];
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ratatui::style::Color;
+/// [`FLY_3`] 的列数。
+pub const FLY_3_COLS: usize = 37;
+/// [`FLY_3`] 的像素行数。
+pub const FLY_3_ROWS: usize = 17;
+/// 干活：扇翅循环第 4 帧（共 6，循环播放）。
+///
+/// 16 像素行 × 37 列（终端行数是布局的事，见 `super`）。
+pub const FLY_4: &[&str] = &[
+    "............................OO.......",
+    "..........OOOOO...........OOWWOO.....",
+    ".........OWWWWWOOO.......OWWWWWWO....",
+    "........ODDDDWWWWWOOO...OWWWWEEWWO...",
+    "........ODDDDDWWWWWWWOOOWWWWWEEWWOOO.",
+    "........ODDDDDWWWWWWWWWWWWWWWEEWBBBBO",
+    ".........ODDSSSWWWWWWWWWWWWWWWWWBMBBO",
+    "........OGGGGSSSSSWWWWWWWWWWWWWWWMOO.",
+    "........OGGGGGWSSSSSWWWWWWWWWWWWWO...",
+    ".....OOOWWWWWWWWSSSSSWWWWWWWWWWWO....",
+    "...OOWWWWWWWWWWWWWSSSWWWWWWWWWOO.....",
+    "..ODDDWWWWWWWWGGGWGGGGGGWWWOOO.......",
+    "..ODDDWWWWWGGGGGGGGGGGGGWWO..........",
+    "..ODDDOOOOGGGGGGGGGGGWWWOO...........",
+    "...OOO....OOOWWWWWWWOOOO.............",
+    ".............OOOOOOO.................",
+];
 
-    fn accent() -> Color {
-        Color::Rgb(0, 188, 212)
-    }
+/// [`FLY_4`] 的列数。
+pub const FLY_4_COLS: usize = 37;
+/// [`FLY_4`] 的像素行数。
+pub const FLY_4_ROWS: usize = 16;
+/// 干活：扇翅循环第 5 帧（共 6，循环播放）。
+///
+/// 16 像素行 × 37 列（终端行数是布局的事，见 `super`）。
+pub const FLY_5: &[&str] = &[
+    "............................OO.......",
+    "..........................OOWWOO.....",
+    "............OOOO.........OWWWWWWO....",
+    "...........OWWWWOOOOO...OWWWWEEWWO...",
+    "..........OWDWWWWWWWWOOOWWWWWEEWWOOO.",
+    ".........ODDDDWWWWWWWWWWWWWWWEEWBBBBO",
+    ".........ODDDDDWWWWWWWWWWWWWWWWWBMBBO",
+    "........OGGDDDSSWWWWWWWWWWWWWWWWWMOO.",
+    "........OGGDDWSSSSSWWWWWWWWWWWWWWO...",
+    ".....OOOWWWWWWWSSSSSSWWWWWWWWWWWO....",
+    "...OOWWWWWWWWWWWWSSSSWWWWWWWWWOO.....",
+    "..ODDDWWWWWWWWGGGWWGGGGGWWWOOO.......",
+    "..ODDDWWWWWGGGGGGGGGGGGGWWO..........",
+    "..ODDDOOOOGGGGGGGGGGGWWWOO...........",
+    "...OOO....OOOWWWWWWWOOOO.............",
+    ".............OOOOOOO.................",
+];
 
-    #[test]
-    fn art_rows_are_inside_the_box() {
-        for row in WING_ART {
-            assert!(
-                row.chars().count() <= ART_COLS,
-                "字形行超出 {ART_COLS} 列：{row:?}"
-            );
-        }
-        assert_eq!(ART_ROWS, 7, "布局里的文字列行号跟着字形行数走");
-    }
-
-    #[test]
-    fn art_uses_only_known_glyphs() {
-        for row in WING_ART {
-            for ch in row.chars() {
-                assert!(Cell::parse(ch).is_some(), "未知字形字符 {ch:?} in {row:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn art_has_no_trailing_ink_gaps() {
-        // 每行画出来的宽度都等于最后一个墨迹格 —— 行尾的透明格会被截掉。
-        let lines = lines(accent(), None);
-        assert_eq!(lines.len(), ART_ROWS);
-        let ink = |row: &str| match row.rfind(|c| c != ' ') {
-            Some(byte) => row[..byte].chars().count() + 1,
-            None => 0,
-        };
-        for (line, raw) in lines.iter().zip(WING_ART) {
-            let width: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-            assert_eq!(width, ink(raw), "行宽应当截到最后一个墨迹格");
-        }
-    }
-
-    #[test]
-    fn gradient_is_brighter_at_the_top_left() {
-        let lines = lines(accent(), None);
-        // 行首 / 行尾的透明格没有前景色 —— 取两端第一个着色的 span。
-        let first = lines[0]
-            .spans
-            .iter()
-            .find_map(|s| s.style.fg)
-            .expect("左上角有墨迹");
-        let last = lines[ART_ROWS - 1]
-            .spans
-            .iter()
-            .rev()
-            .find_map(|s| s.style.fg)
-            .expect("右下角有墨迹");
-        let luma = |c: Color| match c {
-            Color::Rgb(r, g, b) => r as u32 + g as u32 + b as u32,
-            other => panic!("渐变出的是 RGB：{other:?}"),
-        };
-        assert!(
-            luma(first) > luma(last),
-            "左上应当比右下亮：{first:?} vs {last:?}"
-        );
-    }
-
-    /// 终端语义下的墨迹掩码：背景铺满整格，`▀` / `▄` 再补上自己那一半。
-    fn painted_mask(lines: &[Line<'static>]) -> Vec<(String, String)> {
-        lines
-            .iter()
-            .map(|line| {
-                let mut top = String::new();
-                let mut bottom = String::new();
-                for span in &line.spans {
-                    let filled = span.style.bg.is_some();
-                    for ch in span.content.chars() {
-                        let (upper, lower) = match ch {
-                            '▀' => (true, filled),
-                            '▄' => (filled, true),
-                            '█' => (true, true),
-                            _ => (filled, filled),
-                        };
-                        top.push(if upper { '#' } else { '.' });
-                        bottom.push(if lower { '#' } else { '.' });
-                    }
-                }
-                (top, bottom)
-            })
-            .collect()
-    }
-
-    /// 字形自己声明的掩码（`T` = 上半像素，`B` = 下半像素）。
-    fn intended_mask() -> Vec<(String, String)> {
-        WING_ART
-            .iter()
-            .map(|row| {
-                let mut top = String::new();
-                let mut bottom = String::new();
-                for ch in row.chars() {
-                    match ch {
-                        '▀' => {
-                            top.push('#');
-                            bottom.push('.');
-                        }
-                        '▄' => {
-                            top.push('.');
-                            bottom.push('#');
-                        }
-                        '█' => {
-                            top.push('#');
-                            bottom.push('#');
-                        }
-                        _ => {
-                            top.push('.');
-                            bottom.push('.');
-                        }
-                    }
-                }
-                (top, bottom)
-            })
-            .collect()
-    }
-
-    #[test]
-    fn painted_ink_matches_the_glyph() {
-        // 这条订的是"画出来的形状 == 手绘的字形"：`▄` 只许画下半（它若带了
-        // 背景色，终端的背景会铺满整格，本该透明的上半被填上、还填成对面那半
-        // 的颜色）。行尾的透明格会被截掉，所以按画出来的长度前缀比对。
-        let painted = painted_mask(&lines(accent(), None));
-        let intended = intended_mask();
-        assert_eq!(painted.len(), intended.len());
-        for (index, ((painted_top, painted_bottom), (want_top, want_bottom))) in
-            painted.iter().zip(intended.iter()).enumerate()
-        {
-            let width = painted_top.chars().count();
-            assert!(
-                want_top[..width] == *painted_top && want_bottom[..width] == *painted_bottom,
-                "第 {index} 行画出来的墨迹与字形不符（截尾后比对）：\n{painted_top}\n{want_top}\n{painted_bottom}\n{want_bottom}"
-            );
-            assert!(
-                !want_top[width..].contains('#') && !want_bottom[width..].contains('#'),
-                "第 {index} 行有墨迹被截掉"
-            );
-        }
-    }
-
-    #[test]
-    fn solid_cells_carry_two_pixel_colors() {
-        // `█` 的格子要同时给出前景（上半）与背景（下半），否则半格渐变没了。
-        let lines = lines(accent(), None);
-        let two_tone = lines
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .any(|s| s.content.contains('▀') && s.style.bg.is_some() && s.style.fg != s.style.bg);
-        assert!(two_tone, "整格像素应当走双色半格");
-    }
-
-    #[test]
-    fn sweep_brightens_the_illuminated_column() {
-        let plain = lines(accent(), None);
-        let lit = lines(
-            accent(),
-            Some(&Sweep {
-                phase: 0.5,
-                span: 60.0,
-            }),
-        );
-        let sum = |lines: &[Line<'static>]| -> u32 {
-            lines
-                .iter()
-                .flat_map(|l| l.spans.iter())
-                .filter_map(|s| s.style.fg)
-                .map(|c| match c {
-                    Color::Rgb(r, g, b) => r as u32 + g as u32 + b as u32,
-                    _ => 0,
-                })
-                .sum()
-        };
-        assert!(sum(&lit) > sum(&plain), "扫光扫过时整体应当更亮");
-    }
-
-    #[test]
-    fn mix_clamps_and_hits_both_ends() {
-        assert_eq!(mix((0, 0, 0), (100, 200, 40), 0.0), (0, 0, 0));
-        assert_eq!(mix((0, 0, 0), (100, 200, 40), 1.0), (100, 200, 40));
-        assert_eq!(mix((0, 0, 0), (100, 200, 40), 5.0), (100, 200, 40));
-        assert_eq!(mix((10, 10, 10), (20, 20, 20), 0.5), (15, 15, 15));
-    }
-
-    #[test]
-    fn named_colors_expand_to_xterm_values() {
-        assert_eq!(to_rgb(Color::Cyan), (17, 168, 205));
-        assert_eq!(to_rgb(Color::Rgb(1, 2, 3)), (1, 2, 3));
-    }
-}
+/// [`FLY_5`] 的列数。
+pub const FLY_5_COLS: usize = 37;
+/// [`FLY_5`] 的像素行数。
+pub const FLY_5_ROWS: usize = 16;
+/// wordmark 像素字 `WING`：5 像素行 × 23 列（`#` = 墨迹）。
+pub const WORDMARK: &[&str] = &[
+    "#.....#.###.#...#..###.",
+    "#.....#..#..##..#.#....",
+    "#..#..#..#..#.#.#.#.##.",
+    "#.#.#.#..#..#..##.#...#",
+    ".#...#..###.#...#..###.",
+];
+/// [`WORDMARK`] 的列数。
+pub const WORDMARK_COLS: usize = 23;

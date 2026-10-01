@@ -49,7 +49,10 @@ fn welcome_header_shows_brand_version_and_tip() {
     let mut app = test_app();
     let body = frame_body(&mut app, 100, 30);
 
-    assert!(body.contains("✦ wing"), "wordmark 在首帧里：\n{body}");
+    assert!(
+        compact(&body).contains("wing·dev"),
+        "文本形态的 brand + 版本在首帧里：\n{body}"
+    );
     assert!(
         body.contains("dev"),
         "开发构建显示 dev 而不是 v0.0.0：\n{body}"
@@ -79,11 +82,34 @@ fn welcome_header_never_carries_the_retired_release_notes() {
 #[test]
 fn narrow_terminal_drops_the_art_before_the_text() {
     let mut app = test_app();
-    let body = frame_body(&mut app, 40, 30);
-    assert!(body.contains("✦ wing"), "窄屏也要有 wordmark：\n{body}");
+    // 60 列：内容宽 60 - gutter 2 = 58 -> Compact 档（撤海鸥、留文字列）。
+    // 40 列会掉到 Minimal（只剩一行 wordmark），那是另一档，下面单独测。
+    let body = frame_body(&mut app, 60, 30);
+    let compacted = compact(&body);
     assert!(
-        !body.contains('█') && !body.contains('▀') && !body.contains('▄'),
-        "窄屏先撤标记：\n{body}"
+        compacted.contains("wing") && compacted.contains("dev·"),
+        "窄屏也要有 wordmark + 版本：\n{body}"
+    );
+    // 海鸥撤了：它的琥珀喙 / 脚是只有海鸥才用的颜色，拿它当海鸥的指纹。
+    let amber = ratatui::style::Color::Rgb(245, 169, 60);
+    let gull_present = app.chat.header_lines().iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.style.fg == Some(amber) || span.style.bg == Some(amber))
+    });
+    assert!(!gull_present, "窄屏先撤海鸥：\n{body}");
+
+    // 最窄档：连文字列也放不下，只剩一行 `wing` + 版本。
+    let mut app = test_app();
+    let body = frame_body(&mut app, 40, 30);
+    let compacted = compact(&body);
+    assert!(
+        compacted.contains("wing") && compacted.contains("dev·"),
+        "最窄档也要有 brand + 版本：\n{body}"
+    );
+    assert!(
+        !compacted.contains("Esc中断"),
+        "最窄档放不下键位行，不该显示：\n{body}"
     );
 }
 
@@ -118,7 +144,7 @@ fn welcome_header_fits_the_chat_band() {
 }
 
 #[test]
-fn header_is_rebuilt_while_sweeping_and_frozen_after() {
+fn header_rebuilds_on_the_sweep_then_only_at_planner_cadence() {
     let mut app = test_app();
     let palette = app.palette();
     let now = std::time::Instant::now();
@@ -131,12 +157,29 @@ fn header_is_rebuilt_while_sweeping_and_frozen_after() {
     let settled = now + Duration::from_millis(crate::ui::welcome::SWEEP_MS + 1);
     app.sync_welcome(&palette, 100, settled);
     let frozen = header_text(&app);
-    app.sync_welcome(&palette, 100, settled + Duration::from_secs(30));
-    assert_eq!(frozen, header_text(&app), "定格后不再重建");
 
-    // 40 列会掉出整块布局（标记被撤），header 一定长得不一样；用 70 这种
+    // 扫光定格后：同一时刻再 sync 不重建。
+    app.sync_welcome(&palette, 100, settled);
+    assert_eq!(frozen, header_text(&app), "定格后同一时刻不重建");
+
+    // 海鸥是常驻 idle 循环，但重绘只发生在规划器的 deadline 上，不是每帧：
+    // 定格后连着一毫秒一毫秒地 sync，header 必须纹丝不动。
+    for step in 1..6u64 {
+        app.sync_welcome(&palette, 100, settled + Duration::from_millis(step));
+        assert_eq!(
+            frozen,
+            header_text(&app),
+            "定格后逐毫秒 sync 不该重建（step={step}）"
+        );
+    }
+    // 而跨过几个 deadline 之后 header 必须变 —— idle 动画真的在走。
+    let alive = settled + Duration::from_secs(6);
+    app.sync_welcome(&palette, 100, alive);
+    assert_ne!(frozen, header_text(&app), "6s 后 idle 动画应当已经动过");
+
+    // 40 列会掉出整块布局（海鸥被撤），header 一定长得不一样；用 70 这种
     // "同档、文字又刚好不省略"的宽度是测不出重建的。
-    app.sync_welcome(&palette, 40, settled + Duration::from_secs(31));
+    app.sync_welcome(&palette, 40, alive);
     assert_ne!(frozen, header_text(&app), "缩放要按新宽度重建");
 }
 
@@ -148,10 +191,10 @@ fn clear_welcome_leaves_a_bare_top() {
         "hello world".into(),
     ));
     let body = frame_body(&mut app, 100, 30);
-    assert!(!body.contains("✦ wing"), "关掉之后不该再画：\n{body}");
+    assert!(!body.contains("wing ·"), "关掉之后不该再画：\n{body}");
     // 下一次 draw 也不会把它装回来（sync_welcome 拿的是 None）。
     let body = frame_body(&mut app, 100, 30);
-    assert!(!body.contains("✦ wing"), "draw 不该复活 header：\n{body}");
+    assert!(!body.contains("wing ·"), "draw 不该复活 header：\n{body}");
 }
 
 #[test]
@@ -186,4 +229,46 @@ fn slash_tips_lists_the_whole_pool() {
     for tip in crate::shared::tips::TIPS {
         assert!(cell.contains(tip.text), "缺 tip：{}", tip.text);
     }
+}
+
+#[test]
+fn scrolling_the_welcome_out_of_view_parks_the_clock() {
+    let mut app = test_app();
+    let palette = app.palette();
+    let now = std::time::Instant::now();
+    // 先跨过扫光，让 block 进入"定格 + idle 循环"状态。
+    let settled = now + Duration::from_millis(crate::ui::welcome::SWEEP_MS + 1);
+    app.sync_welcome(&palette, 100, settled);
+
+    let header_len = app.chat.header_lines().len();
+    assert!(header_len > 0, "欢迎屏在");
+    assert!(
+        app.welcome
+            .as_ref()
+            .expect("welcome 在手")
+            .next_frame(settled, false, true)
+            .is_some(),
+        "可见时 idle 循环有下一个 deadline"
+    );
+
+    // 滚出视口：整条时钟停摆，也不再重建。
+    app.chat.scroll_offset = header_len;
+    assert!(!app.chat.header_in_view());
+    assert!(
+        app.welcome
+            .as_ref()
+            .expect("welcome 在手")
+            .next_frame(settled, false, false)
+            .is_none(),
+        "滚出视口后不该再有 tick"
+    );
+    let hidden = header_text(&app);
+    app.sync_welcome(&palette, 100, settled + Duration::from_secs(5));
+    assert_eq!(hidden, header_text(&app), "滚出视口后不该重建");
+
+    // 滚回顶部：立刻恢复（可见性翻转强制重建一次）。
+    app.chat.scroll_offset = 0;
+    assert!(app.chat.header_in_view());
+    app.sync_welcome(&palette, 100, settled + Duration::from_secs(5));
+    assert_ne!(hidden, header_text(&app), "回到视口要立刻重绘");
 }
