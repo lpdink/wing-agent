@@ -1,12 +1,14 @@
 """文件服务策略单测（`wing/gateway/file_policy.py` + `wing/gateway/static_host.py`）。
 
-纯函数层：不起网关、不碰端口、不读真实 `~/.wing`（`WING_HOME` 用 monkeypatch 指到
-tmp_path）。端点语义（状态码 / 响应头 / 字节）由 wing-probe 场景覆盖，这里只钉住
-**判定**：包含性解析、扩展名白名单、静态根解析、保留路径、缓存头。
+策略层：不起网关、不碰端口、不读真实 `~/.wing`（`WING_HOME` 用 monkeypatch 指到
+tmp_path）。端点语义（状态码 / 响应头 / 字节）由 wing-probe 场景覆盖，这里钉住
+**判定**：包含性解析、扩展名白名单、文件系统错误的兜底、静态根解析、保留路径、
+缓存头。
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -26,6 +28,9 @@ from wing.gateway.file_policy import (
     image_content_type,
     is_within,
     resolve_within_root,
+    safe_file_stat,
+    safe_is_file,
+    safe_stat,
     static_content_type,
 )
 from wing.gateway.static_host import (
@@ -33,6 +38,7 @@ from wing.gateway.static_host import (
     is_public_static_path,
     is_reserved_path,
     resolve_static_root,
+    sensitive_static_root_warning,
     static_hosting_enabled,
 )
 
@@ -189,6 +195,51 @@ class TestIsWithin:
         assert is_within(tmp_path / "a", str(tmp_path))
 
 
+class TestSafeStat:
+    """文件系统错误的兜底：任何 OSError → None / False（绝不抛给调用方）。"""
+
+    def test_regular_file(self, tmp_path: Path) -> None:
+        target = tmp_path / "pic.png"
+        target.write_bytes(b"x")
+        info = safe_stat(target)
+        assert info is not None and info.st_size == 1
+        assert safe_is_file(target)
+
+    def test_missing_is_none(self, tmp_path: Path) -> None:
+        assert safe_stat(tmp_path / "nope.png") is None
+        assert not safe_is_file(tmp_path / "nope.png")
+
+    def test_directory_is_not_file(self, tmp_path: Path) -> None:
+        assert safe_stat(tmp_path) is not None
+        assert safe_file_stat(tmp_path) is None
+        assert not safe_is_file(tmp_path)
+
+    def test_fifo_is_not_file(self, tmp_path: Path) -> None:
+        fifo = tmp_path / "pipe.png"
+        if not hasattr(os, "mkfifo"):  # pragma: no cover - POSIX 之外
+            pytest.skip("mkfifo unavailable")
+        os.mkfifo(fifo)
+        assert safe_stat(fifo) is not None
+        assert not safe_is_file(fifo)
+
+    def test_name_too_long_does_not_raise(self, tmp_path: Path) -> None:
+        """ENAMETOOLONG（`Path.is_file()` 会抛）必须被收敛成"没有这个文件"。"""
+        target = tmp_path / ("x" * 3000) / "pic.png"
+        assert safe_stat(target) is None
+        assert safe_file_stat(target) is None
+        assert not safe_is_file(target)
+
+    def test_unreadable_file_is_visible_to_stat(self, tmp_path: Path) -> None:
+        """权限位不拦 stat：不可读文件在这里仍是"文件"，读失败由调用方的 read 兜底。"""
+        target = tmp_path / "locked.png"
+        target.write_bytes(b"x")
+        target.chmod(0o000)
+        try:
+            assert safe_is_file(target)
+        finally:
+            target.chmod(0o600)
+
+
 # ── 类型表 ───────────────────────────────────────────────────────
 
 
@@ -245,19 +296,65 @@ class TestContentTypes:
 
 
 class TestCacheControl:
-    @pytest.mark.parametrize(
-        "relative",
-        ["assets/app.js", "/assets/app.js", "assets/nested/chunk.css", "assets/"],
-    )
-    def test_assets_are_immutable(self, relative: str) -> None:
-        assert cache_control_for(relative) == CACHE_CONTROL_IMMUTABLE
+    """缓存决策按**解析后**的相对 root 路径：落在 `<root>/assets/**` 才承诺不可变。"""
+
+    def _decide(self, root: Path, request_path: str) -> str:
+        # 路由参数形态：`/{file_path:path}` 捕获到的路径没有前导斜杠。
+        target = resolve_within_root(root, request_path.lstrip("/"))
+        return cache_control_for(target, static_root=root)
+
+    @pytest.fixture
+    def static_root(self, tmp_path: Path) -> Path:
+        root = tmp_path / "dist"
+        (root / "assets" / "nested").mkdir(parents=True)
+        (root / "index.html").write_text("shell")
+        (root / "assets" / "app.js").write_text("js")
+        (root / "assets" / "nested" / "chunk.css").write_text("css")
+        (root / "sub").mkdir()
+        (root / "sub" / "assets").mkdir()
+        (root / "sub" / "assets" / "other.js").write_text("js")
+        return root
 
     @pytest.mark.parametrize(
-        "relative",
-        ["index.html", "", "favicon.ico", "assetsx/app.js", "sub/assets/app.js"],
+        "request_path",
+        [
+            "assets/app.js",
+            "/assets/app.js",
+            "assets/nested/chunk.css",
+            "./assets/app.js",
+        ],
     )
-    def test_everything_else_revalidates(self, relative: str) -> None:
-        assert cache_control_for(relative) == CACHE_CONTROL_NO_CACHE
+    def test_assets_are_immutable(self, static_root: Path, request_path: str) -> None:
+        assert self._decide(static_root, request_path) == CACHE_CONTROL_IMMUTABLE
+
+    @pytest.mark.parametrize(
+        "request_path",
+        [
+            "index.html",
+            "favicon.ico",
+            "assetsx/app.js",
+            "sub/assets/other.js",
+            # S3 回归：编码点段穿回壳（真身不是资产）→ 必须 no-cache，
+            # 否则"一年不可变"的承诺会挂到每次部署都会变的 index.html 上。
+            "assets/../index.html",
+            "assets/nested/../../index.html",
+        ],
+    )
+    def test_everything_else_revalidates(
+        self, static_root: Path, request_path: str
+    ) -> None:
+        assert self._decide(static_root, request_path) == CACHE_CONTROL_NO_CACHE
+
+    def test_assets_symlink_is_still_immutable(self, tmp_path: Path) -> None:
+        """`assets` 是指向根内别处的符号链接：请求路径与解析结果一致 → 仍然不可变。"""
+        root = tmp_path / "dist"
+        (root / "public" / "assets").mkdir(parents=True)
+        (root / "public" / "assets" / "app.js").write_text("js")
+        (root / "assets").symlink_to(
+            root / "public" / "assets", target_is_directory=True
+        )
+
+        assert self._decide(root, "assets/app.js") == CACHE_CONTROL_IMMUTABLE
 
     def test_image_endpoint_never_caches(self) -> None:
         assert CACHE_CONTROL_IMAGE == "no-store"
@@ -273,11 +370,14 @@ class TestReservedPaths:
             "/api",
             "/api/session/list",
             "/ws",
+            "/ws/",
+            "/ws/anything",
             "/docs",
             "/docs/",
             "/docs/oauth2-redirect",
             "/redoc",
             "/openapi.json",
+            "/openapi.json/",
         ],
     )
     def test_reserved(self, path: str) -> None:
@@ -352,6 +452,44 @@ class TestStaticRoot:
         )
 
 
+class TestSensitiveStaticRootWarning:
+    """`static_dir` 指向含敏感文件的目录时给启动警告（只警告、不改行为）。"""
+
+    def test_no_static_dir_no_warning(self) -> None:
+        assert sensitive_static_root_warning(GatewayConfig()) is None
+
+    def test_wing_home_itself_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("WING_HOME", str(tmp_path))
+        (tmp_path / "core").mkdir()
+        warning = sensitive_static_root_warning(GatewayConfig(static_dir="."))
+        assert warning is not None and "static_dir" in warning, warning
+
+    def test_ancestor_of_wing_home_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("WING_HOME", str(tmp_path / "nested"))
+        (tmp_path / "nested" / "core").mkdir(parents=True)
+        assert sensitive_static_root_warning(GatewayConfig(static_dir="..")) is not None
+
+    def test_unrelated_dir_is_silent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("WING_HOME", str(tmp_path / "home"))
+        dist = tmp_path / "dist"
+        dist.mkdir()
+        assert (
+            sensitive_static_root_warning(GatewayConfig(static_dir=str(dist))) is None
+        )
+
+    def test_missing_dir_is_silent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("WING_HOME", str(tmp_path))
+        assert sensitive_static_root_warning(GatewayConfig(static_dir="nope")) is None
+
+
 class TestPublicStaticPath:
     def test_disabled_static_hosting_keeps_everything_protected(self) -> None:
         config = GatewayConfig()
@@ -370,3 +508,4 @@ class TestPublicStaticPath:
         assert not is_public_static_path(config, "/docs")
         assert not is_public_static_path(config, "/openapi.json")
         assert not is_public_static_path(config, "/ws")
+        assert not is_public_static_path(config, "/ws/anything")

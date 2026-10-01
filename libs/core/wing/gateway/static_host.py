@@ -14,24 +14,34 @@ from pathlib import Path
 from typing import Any
 
 from wing.config import get_wing_home
+from wing.gateway.file_policy import is_within
 
 #: 永不 fallback、也永不吐静态文件的**精确**路径（框架路由与协议入口）。
 RESERVED_EXACT: frozenset[str] = frozenset(
     {"/api", "/ws", "/docs", "/redoc", "/openapi.json"}
 )
 
-#: 同上，前缀形态。新增非 `/api` 的 HTTP 端点时必须同步这里——否则该端点会被
-#: 静态托管静默公开（鉴权豁免只看这个清单）。由单测与文档双重钉住。
-RESERVED_PREFIXES: tuple[str, ...] = ("/api/", "/docs/", "/redoc/")
+#: 同上，前缀形态（`/ws/` 也在内：`/ws` 下今天没有 HTTP 路由，但"保留"是子路径
+#: 整体语义——否则 `/ws/anything` 会静默变成 SPA 路径并在 auth 开启时免鉴权）。
+#: 新增非 `/api` 的 HTTP 端点时必须同步这里——否则该端点会被静态托管静默公开
+#: （鉴权豁免只看这个清单）。由单测与文档双重钉住。
+RESERVED_PREFIXES: tuple[str, ...] = ("/api/", "/docs/", "/redoc/", "/ws/")
 
 
 def is_reserved_path(path: str) -> bool:
     """路径是否属于保留前缀（`/api`、`/docs`、`/redoc`、`/openapi.json`、`/ws`）。
 
-    精确匹配 + 前缀匹配两条：`/api` 本身不能漏（否则 `GET /api` 会被 SPA fallback
-    吞成 200 的 HTML），`/api/x` 与 `/apidocs` 必须区分（前缀串比较会误伤）。
+    三条判定：精确匹配、前缀匹配、**保留精确路径的尾斜杠形态**。
+
+    - 精确：`/api` 本身不能漏（否则 `GET /api` 会被 SPA fallback 吞成 200 的 HTML）；
+    - 前缀：`/api/x` 与 `/apidocs` 必须区分（前缀串比较会误伤）；
+    - 尾斜杠：`/openapi.json/` 属于"框架路径的另一种写法"，必须留给 Starlette 的
+      `redirect_slashes` 分支回 307——catch-all 若认领它，重定向就变成 404
+      （`/docs/`、`/api/health/` 由前缀规则天然覆盖，`/openapi.json/` 只能靠这条）。
     """
-    return path in RESERVED_EXACT or path.startswith(RESERVED_PREFIXES)
+    if path in RESERVED_EXACT or path.startswith(RESERVED_PREFIXES):
+        return True
+    return path.endswith("/") and path.rstrip("/") in RESERVED_EXACT
 
 
 def configured_static_dir(gateway_config: Any) -> str | None:
@@ -74,5 +84,31 @@ def is_public_static_path(gateway_config: Any, path: str) -> bool:
 
     条件：静态托管已配置 **且** 路径不在保留前缀内。壳本身不含数据；`/api/*`
     与框架路由（`/docs` 等）维持现状（auth 开启时仍要 key）。
+
+    `path` 必须是**路由路径**（`starlette.routing.get_route_path`，已剥掉
+    `root_path`）：反代挂子路径时用 `request.url.path` 会把 `/prefix/api/...`
+    看成"非 `/api`"→ 放行，是实打实的 fail-open。调用点见 `auth.py`。
     """
     return static_hosting_enabled(gateway_config) and not is_reserved_path(path)
+
+
+def sensitive_static_root_warning(gateway_config: Any) -> str | None:
+    """静态根落在敏感目录（含 `$WING_HOME/core` 的目录树）时的启动警告；None = 无风险。
+
+    静态托管开启后，根目录下的**所有**文件都会变成未鉴权可读（含 auth 开启时）。
+    相对路径的锚点恰好是 `$WING_HOME/core`，因此最顺手的写法
+    （`static_dir: "."`）会把 config.yaml / logs / sessions 一起端出去——
+    `config.yaml` 里就躺着 provider api key。这里只警告，不改行为（运维可能是有意为之）。
+    """
+    root = resolve_static_root(gateway_config)
+    if root is None:
+        return None
+    wing_home = get_wing_home().resolve()
+    if not is_within(wing_home, root):
+        return None
+    return (
+        f"gateway.static_dir resolves to {root}, which contains {wing_home} "
+        "(config.yaml with provider keys / logs / sessions). Every file under "
+        "the static root is publicly readable — even with gateway.auth enabled. "
+        "Point static_dir at the web build directory instead."
+    )

@@ -34,6 +34,7 @@ from wing.runtime import WingRuntime
 from .app import create_app
 from .frames import HARD_LIMIT_BYTES, Frame, build_frames
 from .remote_tools import RemoteToolManager
+from .static_host import sensitive_static_root_warning
 
 DEFAULT_PORT = 32523
 
@@ -121,6 +122,12 @@ class GatewayServer:
                 "rejected with 401. Edit config.yaml and restart to fix."
             )
 
+    def _warn_static_dir_exposure(self) -> None:
+        """启动时检查静态托管根：落在 `$WING_HOME/core` 目录树里就警告（不改行为）。"""
+        warning = sensitive_static_root_warning(self.gateway_config)
+        if warning is not None:
+            log.warning(warning)
+
     @property
     def clients(self) -> dict[str, WebSocket]:
         """client_id → WebSocket 映射，供 routes 访问。"""
@@ -158,6 +165,7 @@ class GatewayServer:
             sys.exit(1)
 
         self._warn_auth_lockout()
+        self._warn_static_dir_exposure()
 
         # Subscribe EventBus
         event_bus.subscribe(self._on_event)

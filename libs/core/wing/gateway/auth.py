@@ -20,6 +20,7 @@ from fastapi import WebSocket
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.routing import get_route_path
 from starlette.types import ASGIApp
 
 from wing.gateway.protocol import error_response
@@ -113,7 +114,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not auth_config.enabled:
             return await call_next(request)
 
-        path = request.url.path
+        # 用**路由路径**（剥掉 root_path）而不是 request.url.path：反代以路径前缀
+        # 暴露网关时（--root-path / 换 ASGI 宿主），`/prefix/api/...` 的 url.path
+        # 不以 `/api/` 开头 → 会被误判成"公开静态资源"→ 鉴权 fail-open。
+        path = get_route_path(request.scope)
         if path in EXEMPT_PATHS:
             return await call_next(request)
 

@@ -51,7 +51,7 @@ gateway:
 
 | 键 | 取值 | 默认 | 说明 |
 |----|------|------|------|
-| `static_dir` | 目录路径 \| `null` | `null` | `apps/web` 构建产物的托管目录。绝对路径按原样；**相对路径按配置所在目录（`$WING_HOME/core`）解析**；`~` 展开。目录不存在 = 未启用（未知路径回 404，网关照常启动）——解析在**每个请求**上发生，产物事后出现即生效、无需重启。行为（缓存头 / SPA fallback / 保留前缀 / 越界）见 [http-api.md](http-api.md#静态托管与开发期-cors) |
+| `static_dir` | 目录路径 \| `null` | `null` | `apps/web` 构建产物的托管目录。绝对路径按原样；**相对路径按配置所在目录（`$WING_HOME/core`）解析**；`~` 展开。目录不存在 = 未启用（未知路径回 404，网关照常启动）——解析在**每个请求**上发生，产物事后出现即生效、无需重启。行为（缓存头 / SPA fallback / 保留前缀 / 越界 / 307 保持）见 [http-api.md](http-api.md#静态托管与开发期-cors)。⚠️ 该目录下**所有**文件都会变成未鉴权可读（auth 开启时也一样）：**不要指向 `$WING_HOME/core` 本身或其祖先**（`static_dir: "."` 就等于把 config.yaml 里的 provider key 端出去）；启动时会对此打一行 WARNING |
 | `cors_origins` | origin 列表 | `[]` | 非空才挂 `CORSMiddleware`，只放行所列 origin（逐项 strip + 去尾斜杠）；**拒绝 `"*"`**。方法与头全放、不开 credentials。中间件栈在启动时装配 → **改了要重启网关** |
 
 > `cors_origins` 里的 origin 是浏览器 `Origin` 头的字面值（`scheme://host[:port]`，无尾斜杠）；

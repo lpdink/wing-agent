@@ -156,18 +156,32 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 配置后网关本身就是 Web 服务器：托管 `apps/web` 的构建产物。
 
 - **命中文件**：原样返回，Content-Type 由扩展名表决定（`application/octet-stream` 兜底）；
-  `Cache-Control`：`/assets/*` → `public, max-age=31536000, immutable`，其余（含 `index.html`）
-  → `no-cache`（带 ETag / Last-Modified 条件重验证）。
-- **未命中（含目录命中）**：SPA fallback 返回 `index.html`。前端路由（`/settings` 这类）
-  因此都能刷新。
+  `Cache-Control`：落在 **`<static_dir>/assets/**`（解析后路径）** 的产物
+  → `public, max-age=31536000, immutable`，其余（含 `index.html`，以及
+  `/assets/../index.html` 这类"URL 看着像资产、真身是壳"的编码形态）→ `no-cache`。
+  > `no-cache` 的实际效果是**每次都回源并全量重发**：网关不实现条件请求
+  > （`If-None-Match` / `If-Modified-Since` → 304），Starlette `FileResponse` 也不实现。
+  > 比"可能拿到旧壳"更保守，代价是每个非 `/assets` 文件每次导航都完整重传。
+- **未命中（含目录命中、名字超长、竞态消失）**：SPA fallback 返回 `index.html`。
+  前端路由（`/settings` 这类）因此都能刷新。
 - **永不 fallback**：`/api`、`/ws`、`/docs`、`/redoc`、`/openapi.json` 及其子路径 → 404
   （否则 SPA 会用 200 的 HTML 吞掉 API 的拼写错误）。前缀比较按分量：`/apidocs` 是普通
   SPA 路径。
-- **越界**（`..`、绝对路径、符号链接逃逸，含 URL 编码形态）→ 403；只服务 `GET` / `HEAD`。
+- **既有语义零回归**：catch-all 只在**匹配层**认领"非保留路径 + GET/HEAD"，因此
+  Starlette 自己的分支照旧生效——`GET /docs/`、`GET /api/health/`、`GET /openapi.json/`
+  等尾随斜杠形态仍是 **307**（指向去斜杠的规范路径，方法保留），`HEAD /api/health` 仍是
+  **405** + `Allow`，未知路径的 `POST` 等仍是 **404**（不是 405）。
+- **越界**（`..`、绝对路径、符号链接逃逸，含 URL 编码形态）→ 403；只服务 `GET` / `HEAD`；
+  存在但本进程读不了的静态文件 → 403（不是 500 / 空 body）。
 - **目录不存在 = 未启用**（404，不报错、网关照常启动）：web 还没构建时配置可以先行；
   解析发生在每个请求上，产物事后出现即生效（无需重启，`/api/system/reload` 之外的直接
   生效路径）。
 - 相对路径按**配置文件所在目录**（`$WING_HOME/core`）解析，`~` 展开。
+- ⚠️ **目录下的所有文件都会变成未鉴权可读**（auth 开启时也一样，见下表）。不要把
+  `static_dir` 指向含敏感文件的目录——最典型的错误是相对路径写成 `.`，那正好是
+  `$WING_HOME/core`（`config.yaml` 里有 provider api key，旁边还有 `logs/` 与
+  `sessions/`）。网关启动时会检测"静态根包含 `$WING_HOME/core`"并打一行 WARNING
+  （只警告、不改行为）。
 
 ### 开发期 CORS（`gateway.cors_origins`，默认关闭）
 
@@ -182,14 +196,17 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 | 路径 | auth 开启 | 说明 |
 |------|-----------|------|
-| 静态资源（`static_dir` 已配置时的非保留路径） | 公开 | web 壳本身不含数据，浏览器要能加载 |
+| 静态资源（`static_dir` 已配置时，**非保留前缀 + GET/HEAD**） | 公开 | 浏览器要能加载 web 壳；"壳不含数据"是**对目录的假设**，运维需保证（见上节 ⚠️） |
 | `/api/*`（含 `/api/workspace/image`） | 需 key | 维持现状 |
 | `/docs`、`/redoc`、`/openapi.json`、`/ws` | 需 key | 不因静态托管被顺带放开 |
 | `/api/health` | 豁免 | 既有约定 |
 
 > 静态资源的"公开"判定只在 `static_dir` **已配置**时成立（判定见
 > `wing/gateway/static_host.py::is_public_static_path`）；新增非 `/api` 的 HTTP 端点时
-> 必须同步保留前缀清单，否则该端点会被静默公开。
+> 必须同步保留前缀清单，否则该端点会被静默公开（单测 `TestRouteRegistration` 会拦）。
+> 判定用的是**路由路径**（`starlette.routing.get_route_path`，已剥掉 `root_path`）：
+> 反向代理以路径前缀暴露网关时，`request.url.path` 会把 `/prefix/api/...` 看成"非
+> `/api`" → 鉴权 fail-open，因此两侧必须同一个口径。
 
 ## 单帧上界与分片（`_chunk`）
 

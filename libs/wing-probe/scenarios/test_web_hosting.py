@@ -3,21 +3,24 @@
 覆盖（spec a 组）：
 
 1. 未配置 `static_dir`：`GET /` 与未知路径维持现状（404 + ErrorResponse 形状），
-   `/api/*` 不受影响；
+   `/api/*` 不受影响；**尾随斜杠 307 与非 GET/HEAD 的 404/405 语义逐条保持**；
 2. 配置 `static_dir`（**相对路径** `"static"` → `$WING_HOME/core/static`）：
    `index.html`（`no-cache`）、`/assets/*`（`immutable` + 正确 Content-Type + 原始字节）、
    未命中与目录命中都 SPA fallback、`/api/unknown` 与保留前缀永不 fallback、
-   `/docs` / `/openapi.json` 仍是框架路由；
+   `/docs` / `/openapi.json` 仍是框架路由、`/ws/*` 也在保留前缀内、
+   编码点段穿回壳时缓存头必须退回 `no-cache`、超长路径与不可读文件都不产生 5xx；
 3. 配置的目录不存在 → 404（web 还没构建也不拖垮网关）；
 4. URL 编码的 `../` 越界 → 403，且拿不到静态根之外的内容（用 `config.yaml` 里的
    provider key 作哨兵字符串）。
 
 断言面是**原始 HTTP**（状态码 + 响应头 + 字节）：静态托管承诺的正是这些，
-driver 的结构化 JSON 通道看不到。
+driver 的结构化 JSON 通道看不到。`raw_http` 不跟随重定向（httpx 默认），
+因此 307 能被直接断言。
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import httpx
@@ -180,6 +183,169 @@ async def test_missing_static_dir_is_plain_404(
     served = await get(raw_http, "/")
     assert served.status_code == 200, served.text
     assert served.text == INDEX_HTML
+
+
+# ── 2b. 尾随斜杠 / 方法语义（默认配置下的既有行为，不能因 catch-all 回归） ──
+
+
+#: 尾随斜杠 → 规范路径（Starlette `redirect_slashes` 既有行为）。
+SLASH_REDIRECTS: tuple[tuple[str, str], ...] = (
+    ("/docs/", "/docs"),
+    ("/docs/oauth2-redirect/", "/docs/oauth2-redirect"),
+    ("/redoc/", "/redoc"),
+    ("/api/health/", "/api/health"),
+    ("/api/session/list/", "/api/session/list"),
+    ("/openapi.json/", "/openapi.json"),
+)
+
+
+async def assert_redirects_and_method_semantics(
+    probe: Probe, http: httpx.AsyncClient, *, label: str, spa_fallback: bool
+) -> None:
+    """尾随斜杠 307 + 方法语义（405/404）——两条配置形态下都要成立。
+
+    `spa_fallback`：静态托管是否开启（决定未知 **GET** 路径是回壳还是 404；
+    非 GET/HEAD 的 404 与保留路径的 307 在两种形态下都一样）。
+    """
+    base = probe.env.gateway_url
+    for path, target in SLASH_REDIRECTS:
+        response = await http.get(path)
+        assert response.status_code == 307, (label, path, response.status_code)
+        assert response.headers["location"] == f"{base}{target}", (
+            label,
+            path,
+            response.headers["location"],
+        )
+
+    # 307（不是 302）：方法原样保留——POST 会被重定向到规范路径再判 405。
+    posted = await http.post("/api/health/")
+    assert posted.status_code == 307, (label, posted.status_code)
+    assert posted.headers["location"] == f"{base}/api/health", label
+
+    # 方法不允许：真实路由的 PARTIAL 匹配负责（catch-all 不认领非 GET/HEAD）。
+    head = await http.head("/api/health")
+    assert head.status_code == 405, (label, head.status_code)
+    assert "GET" in head.headers.get("allow", ""), (label, dict(head.headers))
+    plain = await http.post("/api/health")
+    assert plain.status_code == 405, (label, plain.status_code)
+
+    # 未知路径的非 GET/HEAD 仍是 404（不是 405——catch-all 不该认领它们）。
+    for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
+        response = await http.request(method, "/no/such/path")
+        assert response.status_code == 404, (label, method, response.status_code)
+
+    # 未知 GET 路径：未配置静态托管时 404（形状与 Starlette 兜底一致）；
+    # 配置后回壳（SPA fallback 是托管的本职，不是回归）。
+    unknown = await http.get("/no/such/path")
+    if spa_fallback:
+        assert unknown.status_code == 200, (label, unknown.status_code)
+        assert unknown.text == INDEX_HTML, (label, unknown.text[:80])
+    else:
+        assert unknown.status_code == 404, (label, unknown.status_code)
+        assert unknown.json() == {"error": "not_found", "detail": "Not Found"}, (
+            label,
+            unknown.text,
+        )
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_default_config_keeps_redirect_and_method_semantics(
+    probe: Probe, raw_http: httpx.AsyncClient
+) -> None:
+    """**默认配置（static_dir 未配置）下既有行为零回归**：307 / 405 / 404 逐条保持。
+
+    这是 catch-all 路由最大的回归面：route 级 FULL 匹配会抢在 Starlette 的
+    `redirect_slashes` 与 405 分支之前——本场景是"匹配层门控"这条实现的守门人。
+    """
+    assert probe.env.gateway_url.startswith("http://127.0.0.1:")
+    await assert_redirects_and_method_semantics(
+        probe, raw_http, label="static-off", spa_fallback=False
+    )
+
+
+@pytest.mark.probe_env(gateway_extra={"static_dir": STATIC_DIRNAME})
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_static_hosting_keeps_redirect_and_method_semantics(
+    probe: Probe, raw_http: httpx.AsyncClient
+) -> None:
+    """静态托管开启时同上（保留前缀的判定不因托管打开而改变）。"""
+    write_static(probe, "index.html", INDEX_HTML)
+    await assert_redirects_and_method_semantics(
+        probe, raw_http, label="static-on", spa_fallback=True
+    )
+
+    # `/ws` 的子路径属于保留前缀（N1）：不 fallback、也不被当成 SPA 路径。
+    for path in ("/ws/", "/ws/anything"):
+        response = await get(raw_http, path)
+        assert response.status_code == 404, (path, response.status_code, response.text)
+        assert response.json()["error"] == "not_found", (path, response.text)
+
+
+# ── 2c. 缓存头按解析后路径判定 + 文件系统错误的兜底 ────────────────
+
+
+@pytest.mark.probe_env(gateway_extra={"static_dir": STATIC_DIRNAME})
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_cache_header_follows_the_served_file(
+    probe: Probe, raw_http: httpx.AsyncClient
+) -> None:
+    """`/assets/<编码点段>` 的真身不是资产时，缓存头必须退回 `no-cache`（S3）。
+
+    否则"一年不可变"的承诺会挂到每次部署都会变的 `index.html` 上——正是缓存策略
+    想避免的"拿旧壳"。请求用原始编码串（httpx 不会替我们归一 `%2e%2e`）。
+    """
+    write_static(probe, "index.html", INDEX_HTML)
+    write_static(probe, "assets/app.js", APP_JS)
+
+    baseline = await get(raw_http, "/assets/app.js")
+    assert baseline.status_code == 200, baseline.text
+    assert baseline.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+    for path in ("/assets/%2e%2e%2findex.html", "/assets/%2E%2E%2Findex.html"):
+        response = await get(raw_http, path)
+        assert response.status_code == 200, (path, response.status_code, response.text)
+        assert response.text == INDEX_HTML, (path, response.text[:80])
+        assert response.headers["cache-control"] == "no-cache", (
+            path,
+            dict(response.headers),
+        )
+
+
+@pytest.mark.probe_env(gateway_extra={"static_dir": STATIC_DIRNAME})
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_filesystem_errors_never_500(
+    probe: Probe, raw_http: httpx.AsyncClient
+) -> None:
+    """超长路径与不可读文件都不产生 5xx（S2）：超长 → fallback；不可读 → 403。"""
+    write_static(probe, "index.html", INDEX_HTML)
+    write_static(probe, "assets/app.js", APP_JS)
+
+    # ① ENAMETOOLONG（`Path.is_file()` 会抛）：一次性尝试 → 当作未命中 → SPA fallback。
+    for path in (
+        "/" + "x" * 300 + ".js",
+        "/assets/" + "y" * 3000 + ".js",
+        "/" + "/".join("d" * 10 for _ in range(200)) + "/x.js",
+    ):
+        response = await get(raw_http, path)
+        assert response.status_code == 200, (path[:60], response.status_code)
+        assert response.text == INDEX_HTML, path[:60]
+        assert response.headers["cache-control"] == "no-cache", path[:60]
+
+    # ② 存在但本进程读不了：403（不是 500、也不是空 body 的 200）。
+    if os.geteuid() == 0:  # pragma: no cover - root 无视权限位，断言无意义
+        pytest.skip("running as root: permission bits are not enforced")
+    locked = write_static(probe, "assets/locked.js", APP_JS)
+    locked.chmod(0o000)
+    try:
+        response = await get(raw_http, "/assets/locked.js")
+        assert response.status_code == 403, (response.status_code, response.text[:80])
+        assert response.json()["error"] == "forbidden", response.text
+    finally:
+        locked.chmod(0o644)
 
 
 # ── 3. 越界：URL 编码不可绕过 ─────────────────────────────────────

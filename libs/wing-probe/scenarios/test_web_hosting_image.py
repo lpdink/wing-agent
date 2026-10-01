@@ -6,7 +6,8 @@
   （逐个扩展名钉住白名单映射）；10 MiB 边界（恰好 10 MiB 放行、超过即 413）；
 - 400：缺参 / 空参 / NUL；
 - 403：`..` 穿越（含 URL 编码形态）、符号链接逃逸、跨会话 workspace 隔离；
-- 404：会话不在内存、白名单外扩展名、文件不存在、目录；
+- 404：会话不在内存、白名单外扩展名、文件不存在、目录、**超长路径（ENAMETOOLONG）**、
+  不可读文件；
 - 不实现 Range：带 `Range` 头仍 200 全量（没有 206、没有 Accept-Ranges）。
 
 断言面：状态码 + 响应头 + **原始字节**（图片端点的契约就是这三样），
@@ -17,6 +18,7 @@
 from __future__ import annotations
 
 import base64
+import os
 from pathlib import Path
 from typing import Any
 
@@ -241,6 +243,50 @@ async def test_not_found_cases(probe: Probe, raw_http: httpx.AsyncClient) -> Non
             response.text,
         )
         assert response.json()["error"] == "not_found", (path, response.text)
+
+
+# ── 404：文件系统错误（不产生 5xx） ─────────────────────────────
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_filesystem_errors_are_404_not_500(
+    probe: Probe, raw_http: httpx.AsyncClient
+) -> None:
+    """超长路径与不可读文件都落在 404（冻结契约的取值域内），绝不 500。
+
+    超长路径走 `ENAMETOOLONG`：`Path.is_file()` 不吞它（会冒泡成 500），
+    实现里统一用 `safe_stat` 收敛；不可读文件在 `read_bytes` 处按 OSError 兜底。
+    """
+    session_id, workspace = await new_session(probe, "fs-errors")
+    (workspace / "pic.png").write_bytes(PNG_BYTES)
+
+    long_paths = [
+        "x" * 300 + ".png",
+        "y" * 3000 + ".png",
+        "/".join("d" * 10 for _ in range(200)) + "/deep.png",
+    ]
+    for path in long_paths:
+        response = await image(raw_http, session_id, path)
+        assert response.status_code == 404, (
+            path[:40],
+            response.status_code,
+            response.text,
+        )
+        assert response.json()["error"] == "not_found", (path[:40], response.text)
+
+    # 不可读文件（权限位）：read_bytes 抛 PermissionError → 404（不是 500）。
+    if os.geteuid() == 0:  # pragma: no cover - root 无视权限位，断言无意义
+        pytest.skip("running as root: permission bits are not enforced")
+    locked = workspace / "locked.png"
+    locked.write_bytes(PNG_BYTES)
+    locked.chmod(0o000)
+    try:
+        response = await image(raw_http, session_id, "locked.png")
+        assert response.status_code == 404, (response.status_code, response.text[:80])
+        assert response.json()["error"] == "not_found", response.text
+    finally:
+        locked.chmod(0o644)
 
 
 # ── 413：超过 10 MiB ─────────────────────────────────────────────

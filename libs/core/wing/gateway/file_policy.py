@@ -1,6 +1,6 @@
 # wing/gateway/file_policy.py — 文件服务策略（路径包含性 / 类型白名单 / 缓存头）
 
-"""网关文件服务的**纯策略**层：零 I/O、零全局状态，全部可单测。
+"""网关文件服务的**纯策略**层：路径判定零 I/O（`safe_stat` 是唯一例外，一处 syscall）。
 
 两个使用者共用同一套判定：
 
@@ -10,11 +10,17 @@
 **安全不变量**：请求路径一律先 `realpath` 再与 `realpath(root)` 做**路径分量**
 包含性比较（`Path.relative_to`）。禁止字符串前缀比较（`/ws-evil` 不能骗过 `/ws`），
 也禁止"拼接后直接打开"（符号链接、`..`、绝对路径全部经同一条解析路径收敛）。
+
+**文件系统错误**：`Path.is_file()` 只吞 ENOENT/ENOTDIR/EBADF/ELOOP，超长路径
+（ENAMETOOLONG）会直接抛出——两处 `is_file()` 因此都换成本模块的
+`safe_stat()` / `safe_is_file()`：任何 `OSError` 都收敛成"不是文件"（调用方回
+404 / SPA fallback），绝不把 500 抛给客户端。
 """
 
 from __future__ import annotations
 
 import os
+import stat as stat_module
 from pathlib import Path, PurePath
 from typing import Mapping
 
@@ -79,6 +85,9 @@ STATIC_CONTENT_TYPES: Mapping[str, str] = {
 #: 未知扩展名的兜底（浏览器会按嗅探规则处理，静态托管不额外限制）。
 DEFAULT_STATIC_CONTENT_TYPE = "application/octet-stream"
 
+#: 构建产物目录名（`/assets/*`，内容哈希命名）：可以承诺不可变。
+ASSETS_DIRNAME = "assets"
+
 #: 构建产物（内容哈希命名）：可以承诺不可变。
 CACHE_CONTROL_IMMUTABLE = "public, max-age=31536000, immutable"
 
@@ -99,6 +108,40 @@ class BadPathError(FilePolicyError):
 
 class PathOutsideRootError(FilePolicyError):
     """解析后落在根之外（含符号链接逃逸）→ 调用方映射 403。"""
+
+
+def safe_stat(path: str | os.PathLike[str]) -> os.stat_result | None:
+    """`os.stat` 的兜底形态：任何 `OSError` → None（不抛）。
+
+    `Path.is_file()` 的吞噬名单只有 ENOENT / ENOTDIR / EBADF / ELOOP：超长路径
+    （ENAMETOOLONG）、权限/IO 故障都会冒泡成 500。服务端对"取不到 stat"只有一种
+    合理反应——当作没有这个文件（调用方映射 404 / fallback）。
+    """
+    try:
+        return os.stat(path)
+    except OSError:
+        return None
+
+
+def safe_file_stat(path: str | os.PathLike[str]) -> os.stat_result | None:
+    """普通文件的 `stat`；不是普通文件（目录 / FIFO / 设备）或取不到 → None。
+
+    两个路由都用它做"存在 + 是普通文件（+ 大小）"的一次性判定——静态路由还要把
+    这份 `stat_result` 交给 `FileResponse`（省一次系统调用，并消除检查与 open 之间
+    的竞态窗口）。
+    """
+    info = safe_stat(path)
+    if info is None or not stat_module.S_ISREG(info.st_mode):
+        return None
+    return info
+
+
+def safe_is_file(path: str | os.PathLike[str]) -> bool:
+    """是否是普通文件（`safe_file_stat` 的布尔面）。
+
+    符号链接按 `os.stat` 语义跟随（调用方传入的通常已是 realpath 结果）。
+    """
+    return safe_file_stat(path) is not None
 
 
 def is_within(path: str | os.PathLike[str], root: str | os.PathLike[str]) -> bool:
@@ -153,13 +196,19 @@ def static_content_type(path: str | os.PathLike[str]) -> str:
     return STATIC_CONTENT_TYPES.get(_suffix(path), DEFAULT_STATIC_CONTENT_TYPE)
 
 
-def cache_control_for(relative_path: str) -> str:
-    """静态托管的缓存策略：`/assets/*` 不可变；其余（含 index.html）no-cache。
+def cache_control_for(
+    target: str | os.PathLike[str], *, static_root: str | os.PathLike[str]
+) -> str:
+    """静态托管的缓存策略：**解析后**落在 `<root>/assets/**` 内 → 不可变；其余 no-cache。
 
-    判定用**请求路径**（URL 上的相对路径）而不是 realpath 结果：缓存策略属于
-    「这个 URL 承诺了哪种新鲜度」，与文件在磁盘上的落点无关。
+    判定用解析后的真实路径，不是请求路径的字面首段：`/assets/%2e%2e%2findex.html`
+    的真身是壳（每次部署都变），若按 URL 首段给 `immutable`，等于把"一年不变"的
+    承诺挂到最不该缓存的文件上（反向代理一旦归一化 `%2e%2e`，后果与设计目标相反）。
+    `root/assets` 自身也走 realpath，因此"assets 是指向别处的符号链接"这类布局与
+    请求路径判定的结果一致。
     """
-    parts = PurePath(relative_path.lstrip("/")).parts
-    if parts and parts[0] == "assets":
+    assets_root = os.path.realpath(os.path.join(os.fspath(static_root), ASSETS_DIRNAME))
+    resolved = os.path.realpath(os.fspath(target))
+    if is_within(resolved, assets_root):
         return CACHE_CONTROL_IMMUTABLE
     return CACHE_CONTROL_NO_CACHE

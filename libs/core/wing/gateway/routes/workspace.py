@@ -24,8 +24,6 @@
 
 from __future__ import annotations
 
-import stat
-
 from fastapi import APIRouter, HTTPException, Query, Request
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import Response
@@ -37,6 +35,7 @@ from wing.gateway.file_policy import (
     PathOutsideRootError,
     image_content_type,
     resolve_within_root,
+    safe_file_stat,
 )
 
 router = APIRouter(tags=["workspace"])
@@ -97,16 +96,12 @@ async def read_workspace_image(
     if media_type is None:
         raise HTTPException(status_code=404, detail="not an allowed image extension")
 
-    if not await run_in_threadpool(target.is_file):
+    # 一次 stat 定"存在 + 是普通文件 + 大小"：`Path.is_file()` 不吞
+    # ENAMETOOLONG（超长路径会 500），`safe_file_stat` 把任何 OSError 收敛成 None
+    # ——对客户端就是 404（冻结契约的取值域内）。
+    info = await run_in_threadpool(safe_file_stat, target)
+    if info is None:
         raise HTTPException(status_code=404, detail="image not found")
-
-    try:
-        info = await run_in_threadpool(target.stat)
-    except OSError:
-        # is_file 与 stat 之间文件消失（TOCTOU）：对客户端而言就是"没有"。
-        raise HTTPException(status_code=404, detail="image not found")
-    if not stat.S_ISREG(info.st_mode):
-        raise HTTPException(status_code=404, detail="not a regular file")
     if info.st_size > IMAGE_MAX_BYTES:
         raise HTTPException(
             status_code=413,
@@ -119,6 +114,8 @@ async def read_workspace_image(
     try:
         data = await run_in_threadpool(target.read_bytes)
     except OSError:
+        # 读不了（权限 / IO / 竞态删除）：与"没有"同解——图片是渲染素材，
+        # 前端拿 404 就退回链接路径，不需要区分。
         raise HTTPException(status_code=404, detail="image not found")
     if len(data) > IMAGE_MAX_BYTES:  # stat 与 read 之间的竞态兜底
         raise HTTPException(
