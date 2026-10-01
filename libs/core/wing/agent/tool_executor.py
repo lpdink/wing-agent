@@ -20,7 +20,7 @@ from typing import Any
 from wing.common.logger import log
 from wing.config import get_config, get_wing_home
 from wing.hook_registry import hooks
-from wing.schema import Message, ToolCall, ToolError
+from wing.schema import Message, ToolCall, ToolError, ToolOutput
 
 from .event_sink import AgentEventSink
 
@@ -90,13 +90,27 @@ class ToolExecutor:
             token = _current_tool_call_id.set(tc.id)
             try:
                 result = await self._execute_one(tc, model)
-                result = _maybe_truncate(result)
+                if isinstance(result, ToolOutput):
+                    # 截断只作用文本信封——media 是引用元数据（字节在存储层），
+                    # 截断它没有任何意义。
+                    content = _maybe_truncate(result.content)
+                    media = result.media
+                else:
+                    content = _maybe_truncate(result)
+                    media = []
             except Exception as e:
                 log.error(f"exec_tool_calls: unexpected error in tool '{tc.name}': {e}")
-                result = f"Error executing tool '{tc.name}': {e}"
+                content = f"Error executing tool '{tc.name}': {e}"
+                media = []
             finally:
                 _current_tool_call_id.reset(token)
-            return Message(role="tool", tool_call_id=tc.id, content=result)
+            # media 为空时置 None：无媒体消息的落盘记录与引入 media 之前完全一致。
+            return Message(
+                role="tool",
+                tool_call_id=tc.id,
+                content=content,
+                media=media or None,
+            )
 
         tasks = [asyncio.create_task(_exec_one(tc)) for tc in pending_tool_calls]
         try:
@@ -142,8 +156,13 @@ class ToolExecutor:
             log.info(f"exec_tool_calls: interrupted ({synthesized} synthesized)")
             raise InterruptedToolResults(results, original=cancel_err) from None
 
-    async def _execute_one(self, tc: ToolCall, model: str) -> str:
-        """执行单个工具调用：非法参数短路 → hook → 参数过滤 → 调用。"""
+    async def _execute_one(self, tc: ToolCall, model: str) -> str | ToolOutput:
+        """执行单个工具调用：非法参数短路 → hook → 参数过滤 → 调用。
+
+        工具可返回 ``str``（存量，零改动）或 ``ToolOutput``（文本 + 媒体
+        引用）。``after_tool_call`` hook 只接收/改写文本，media 原样透传。
+        返回约定：带 media 时返回 ``ToolOutput``，否则返回 ``str``。
+        """
         self._sink.tool_started(tc)
 
         # 参数 JSON 解析失败（provider 已容错并置 arguments_error）：不执行
@@ -192,21 +211,28 @@ class ToolExecutor:
                 if inspect.iscoroutinefunction(tool.function)
                 else tool.function(**call_args)
             )
-            result_str = str(result)
+            if isinstance(result, ToolOutput):
+                content = result.content
+                media = list(result.media)
+            else:
+                content = str(result)
+                media = []
 
-            # Hook: after_tool_call
+            # Hook: after_tool_call（只见文本——media 是引用元数据，hook 无权改写）
             modified_result = await hooks.invoke_async(
                 "after_tool_call",
-                result_str,
+                content,
                 tool_name=tc.name,
                 tool_args=tc.arguments,
                 tool_call_id=tc.id,
             )
             if modified_result is not None:
-                result_str = modified_result
+                content = modified_result
 
-            self._sink.tool_finished(tc, result_str, success=True, model=model)
-            return result_str
+            self._sink.tool_finished(
+                tc, content, success=True, model=model, media=media
+            )
+            return ToolOutput(content=content, media=media) if media else content
         except ToolError as e:
             result = str(e)
             self._sink.tool_finished(tc, result, success=False, model=model)

@@ -8,8 +8,24 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
+
+
+def _tmp_path(path: Path) -> Path:
+    """落盘临时文件名：pid + 线程 id 双层唯一。
+
+    tmp 名一旦只按 pid 唯一，同进程多线程并发写同一路径就会撞名：两个线程
+    打开同一个 tmp，先到者 os.replace 把它改名走，后到者 os.replace 找不到
+    源文件抛 FileNotFoundError（review r1 S1，实测 3/4 线程必现）。存活的
+    线程 id 互不相同，且本模块是同步函数（同线程内不存在交错），故 pid +
+    tid 组合足以覆盖进程内并发；跨进程由 pid 区分。
+
+    不用 tempfile.mkstemp：它把临时文件建成 0600，os.replace 后最终文件会
+    继承该权限，与既有落盘语义（open 受 umask 影响，通常 0644）不一致。
+    """
+    return path.with_name(f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}")
 
 
 def atomic_write_text(path: Path, text: str) -> None:
@@ -19,9 +35,24 @@ def atomic_write_text(path: Path, text: str) -> None:
     os.rename 会因目标存在而失败，而 metadata.json 等文件会被反复覆盖）。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".tmp.{os.getpid()}")
+    tmp = _tmp_path(path)
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """原子写入二进制文件：tmp + fsync + replace。自动创建父目录。
+
+    与 atomic_write_text 同一语义，供媒体字节等二进制载荷复用（内容寻址
+    写入必须要么完整可见、要么不可见，不能留下半截文件被当成有效对象）。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _tmp_path(path)
+    with open(tmp, "wb") as f:
+        f.write(data)
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)

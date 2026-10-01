@@ -467,7 +467,7 @@ async def test_server_streams_script_over_http() -> None:
         )
         assert provider.port > 0, "port=0 由 OS 分配后读回真实端口"
         async with httpx.AsyncClient(
-            base_url=provider.base_url, timeout=10.0
+            base_url=provider.base_url, timeout=10.0, trust_env=False
         ) as client:
             response = await client.post("/chat/completions", json=request_body())
             assert response.status_code == 200
@@ -492,7 +492,7 @@ async def test_server_supports_non_streaming_compaction_call() -> None:
     async with running_provider() as provider:
         provider.register(MODEL, Script(Turn.of(text="<summary>done</summary>")))
         async with httpx.AsyncClient(
-            base_url=provider.base_url, timeout=10.0
+            base_url=provider.base_url, timeout=10.0, trust_env=False
         ) as client:
             response = await client.post(
                 "/chat/completions", json=request_body(stream=False)
@@ -511,7 +511,7 @@ async def test_server_error_report_for_unknown_and_exhausted_scripts() -> None:
     async with running_provider() as provider:
         provider.register(MODEL, Script(Turn.of(text="only one")))
         async with httpx.AsyncClient(
-            base_url=provider.base_url, timeout=10.0
+            base_url=provider.base_url, timeout=10.0, trust_env=False
         ) as client:
             ok = await client.post("/chat/completions", json=request_body())
             assert ok.status_code == 200

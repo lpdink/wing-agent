@@ -16,6 +16,7 @@ from wing.schema import LLMResponse, Message, Tool
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
+    from wing.media import MediaAccess
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,11 @@ class ModelProvider(ABC):
     """模型调用 provider 基类。"""
 
     _config: ProviderConfig
+    _media: MediaAccess | None = None
+    """会话媒体池读写窄接口（序列化图片时按 id 读字节）。
+
+    由 create_provider 注入；None = 无媒体存储（registry 的仅列表 client、
+    测试构造的裸 provider）。构造器各自把它存进来（见协议实现）。"""
     thinking: bool = True
     reasoning_effort: str | None = None
 

@@ -9,6 +9,8 @@ history.jsonl 的混合日志承担，遗留快照文件不读不写不删）：
     ├── history.jsonl        append-only 混合记录（Message + 事件，每行一条 dict + ts）
     ├── <aux-key>.json       aux kv（如 pending_compact.json）
     └── subagents/           子 agent 历史（explorer 工具产物）
+
+    <root>/.media/<id[:2]>/<id>   会话媒体池（内容寻址，跨 session 共享）
 """
 
 from __future__ import annotations
@@ -18,9 +20,16 @@ import os
 from pathlib import Path
 from typing import Any
 
-from wing.common.fs import atomic_write_json
+from wing.common.fs import atomic_write_bytes, atomic_write_json
 from wing.common.logger import log
-from wing.store.base import MessageLog, SessionMetadata, SessionStore, SessionSummary
+from wing.store.base import (
+    MessageLog,
+    SessionMetadata,
+    SessionStore,
+    SessionSummary,
+    validate_media_content,
+    validate_media_id,
+)
 
 
 class FileMessageLog(MessageLog):
@@ -99,6 +108,7 @@ class FileSessionStore(SessionStore):
     name = "file"
 
     _METADATA = "metadata.json"
+    _MEDIA_DIR = ".media"
 
     def __init__(self, root: Path | str) -> None:
         self._root = Path(root)
@@ -139,6 +149,39 @@ class FileSessionStore(SessionStore):
 
     def open_log(self, session_id: str) -> FileMessageLog:
         return FileMessageLog(self._session_dir(session_id))
+
+    # ── 媒体字节 ──────────────────────────────
+
+    def _media_path(self, media_id: str) -> Path:
+        """内容寻址路径：<root>/.media/<id[:2]>/<id>（两级散列，防单目录膨胀）。
+
+        id 校验必须发生在拼接路径之前——它是文件名本身，脏 id 即路径穿越。
+        """
+        safe_id = validate_media_id(media_id)
+        return self._root / self._MEDIA_DIR / safe_id[:2] / safe_id
+
+    def write_media(self, media_id: str, data: bytes) -> None:
+        """原子写入媒体字节（幂等：内容寻址下已存在即同内容，跳过）。
+
+        首写路径校验 id 与字节一致（内容寻址完整性，review r1 N2）——已存在
+        时跳过（对象内容在首写时已校验过，跳过省一次全量哈希）。
+        """
+        path = self._media_path(media_id)
+        if path.exists():
+            return
+        validate_media_content(media_id, data)
+        atomic_write_bytes(path, data)
+
+    def read_media(self, media_id: str) -> bytes | None:
+        path = self._media_path(media_id)
+        if not path.exists():
+            return None
+        try:
+            return path.read_bytes()
+        except OSError as e:
+            # 损坏/权限问题按"读不到"降级（序列化侧转占位文本），不打断请求。
+            log.warning(f"Failed to read media '{media_id}' at {path}: {e}")
+            return None
 
     # ── 查询 ──────────────────────────────────
 

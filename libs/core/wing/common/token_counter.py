@@ -59,5 +59,16 @@ class TokenCounter:
 
     @classmethod
     def estimate_message(cls, msg: Message) -> int:
-        """估算单条消息的 token 数（基于 repr）。"""
-        return cls.count(repr(msg))
+        """估算单条消息的 token 数（基于 repr + 图片项）。
+
+        图片项按 ``ceil(w*h/750)``（``wing.media.estimate_image_tokens``）
+        对 ``msg.media`` 的**全部出现**累加——保守口径（视觉 token 内联在
+        token 序列中，实际消耗与 provider 有关），宁可略高估以驱动
+        compaction 提前触发。
+        """
+        from wing.media import estimate_image_tokens
+
+        total = cls.count(repr(msg))
+        for ref in msg.media or []:
+            total += estimate_image_tokens(ref)
+        return total

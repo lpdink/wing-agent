@@ -12,7 +12,7 @@
 │   │   ├── wing_YYYY-MM-DD.log            网关运行时日志（按本地日期，append；恒 DEBUG）
 │   │   ├── new.log → wing_YYYY-MM-DD.log  指向活跃后端日志的符号链接（仅后端；每次轮转 / setup 刷新）
 │   │   └── gateway.log                    网关守护进程 stdout/stderr（uvicorn 错误、traceback；append）
-│   ├── sessions/       会话持久化（metadata + history.jsonl + aux / metrics.json）
+│   ├── sessions/       会话持久化（metadata + history.jsonl + aux / metrics.json）；.media/ 为跨会话共享的图片媒体池（内容寻址）
 │   ├── metrics.json    全局指标（LLM / 工具调用 / 压缩，按天聚合）
 │   └── metrics_experimental.json  BetterEdit 实验审计
 └── tui/
@@ -26,13 +26,14 @@
 
 | 键 | 说明 |
 |----|------|
-| `providers` | LLM provider 列表（**必填**）。每项声明 `protocol: openai \| anthropic`、`base_url`、`api_key`，以及超时（`timeout_first_chunk` = **响应头**超时、`timeout_total` = 总时长；另有硬编码 120s 的**响应体停滞**判定，见 `provider/transport.py` 的 `STREAM_IDLE_TIMEOUT`——响应头到达后两次读取间隔超过它即判停滞并走 `with_retry`）、重试（`max_retries` / `max_retry_delay`）、`explicit_cache_mode`、`reasoning_effort`、`extra_body` 等；Anthropic 需 `max_tokens` / `anthropic_version`，可配 `models` 静态列表跳过远端查询 |
+| `providers` | LLM provider 列表（**必填**）。每项声明 `protocol: openai \| anthropic`、`base_url`、`api_key`，以及超时（`timeout_first_chunk` = **响应头**超时、`timeout_total` = 总时长；另有硬编码 120s 的**响应体停滞**判定，见 `provider/transport.py` 的 `STREAM_IDLE_TIMEOUT`——响应头到达后两次读取间隔超过它即判停滞并走 `with_retry`）、重试（`max_retries` / `max_retry_delay`）、`explicit_cache_mode`、`reasoning_effort`、`extra_body` 等；Anthropic 需 `max_tokens` / `anthropic_version`。`models` 静态列表跳过远端查询，元素为字符串（存量）或对象（`name` = 实际调用名 / `display_name` / `description` / `capabilities: {vision: true}`；未声明 = text-only，键名拼错静默忽略）。图片相关：`image_delivery`（`inline \| followup`，缺省按协议：openai → followup、anthropic → inline）、`image_max_bytes`（单图请求期兜底，见 [media-images.md](media-images.md)） |
 | `agents` | Agent 模板列表（**必填**）：`model`（+ `provider` 引用）、`default`、`system_prompt`、`tools`、`context_window_tokens` / `keep_recent_tokens`、`skills` / `rules` glob |
 | `hooks` | Hook 文件 glob |
 | `safe_command_patterns` | Bash 自动放行的正则（白名单外的命令默认拦截） |
 | `yolo` | 完全跳过危险命令审查 |
 | `steer` | steer 模式开关 |
 | `tool_result_truncate` | 超长工具结果截断（`max_length` / `keep_chars`，头尾保留 + 全文落临时文件） |
+| `images` | 图片读入与请求期保留预算（`max_bytes` 8388608 / `max_images` 32 / `count_quantum` 8 / `request_budget_bytes` 37748736 / `evict_quantum_bytes` 18874368，全部 > 0）——读图链路与投影算法见 [media-images.md](media-images.md) |
 | `log.level` | 网关**控制台**级别（守护进程 stdout/stderr，被 `gateway.log` 捕获）；每日文件日志恒为 DEBUG |
 | `gateway` | `host` / `port` / `remote_tool_timeout` / `auth`（opt-in API key：`enabled` + `keys[{key, role}]`，角色 `admin` / `tool_runtime`） |
 | `commands.paths` | prompt 命令（`/xxx` 展开）的 glob 列表，每个 .md（frontmatter: name / description / aliases，正文 `$ARGUMENTS` 占位）定义一个命令 |

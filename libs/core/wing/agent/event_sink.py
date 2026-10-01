@@ -44,7 +44,7 @@ from wing.request_context import get_request_context
 
 if TYPE_CHECKING:
     from wing.event import WingEvent
-    from wing.schema import LLMUsage, Message, ToolCall
+    from wing.schema import LLMUsage, MediaRef, Message, ToolCall
 
 
 class AgentEventSink:
@@ -155,12 +155,22 @@ class AgentEventSink:
         self._emit(ToolCallEvent.from_tool_call(tc, self._session_id))
 
     def tool_finished(
-        self, tc: ToolCall, result: str, *, success: bool, model: str
+        self,
+        tc: ToolCall,
+        result: str,
+        *,
+        success: bool,
+        model: str,
+        media: list[MediaRef] | None = None,
     ) -> None:
-        """一次调用发射 ToolCallResultEvent + ToolResultTurnEvent。"""
+        """一次调用发射 ToolCallResultEvent + ToolResultTurnEvent。
+
+        media 只进 ToolCallResultEvent（tool_media 字段）——ToolResultTurnEvent
+        是 Claude SDK 兼容形状（纯文本），不扩展。
+        """
         self._emit(
             ToolCallResultEvent.from_execution(
-                tc, result, success, model, self._session_id
+                tc, result, success, model, self._session_id, media=media
             )
         )
         self._emit(

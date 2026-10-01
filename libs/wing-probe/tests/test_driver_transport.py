@@ -338,3 +338,24 @@ async def test_attach_refreshes_response_without_losing_events(tmp_path: Path) -
 def test_chunk_type_constant_matches_gateway() -> None:
     """信封 type 常量的线上值（防止与网关/文档漂移）。"""
     assert CHUNK_TYPE == "_chunk"
+
+
+@pytest.mark.asyncio
+async def test_http_client_ignores_env_proxy(
+    stub_gateway: StubGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """loopback 直连不得被环境代理劫持（trust_env=False）。
+
+    没有这条缝时，CI / 本机代理（含 macOS 系统代理经 ``getproxies()``）会把
+    ``127.0.0.1`` 的请求也送进代理，表现为整组场景假红。
+    """
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")  # 死代理：走它必失败
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9")
+    http = DriverHttp(stub_gateway.url, started_at=0.0)
+
+    response = await http.health()
+
+    assert response == {"status": "ok"}
+    assert len(http.calls) == 1
+    await http.close()

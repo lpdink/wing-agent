@@ -110,6 +110,17 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 @pytest.mark.probe_env(sessions=FAST_EVICTION)   # → config.yaml 的 sessions: 段
 
+# 其它常用旋钮（kwargs 原名透传 ProbeEnv；None = 不写该段，保持标准配置）：
+@pytest.mark.probe_env(models=[{"name": "probe/vlm", "capabilities": {"vision": True}}])
+#   → providers[0].models：provider 静态模型声明（str 或对象；能力/展示元信息）。
+#   注意：它**不改 agent 默认模型**，场景仍须显式 probe.session(model=…) 选剧本。
+
+@pytest.mark.probe_env(images={"max_images": 3, "count_quantum": 2})
+#   → 顶层 images: 段：读图保留预算/高水位（压小阈值即得确定性的驱逐断言）。
+
+@pytest.mark.probe_env(provider_extra={"image_delivery": "inline"})
+#   → 合进 providers[0]：provider 级透传旋钮（如覆盖图片投递形态 inline/followup）。
+
 # hooks: 透传 config.yaml 的 hooks: glob；相对路径按**网关进程 cwd**（env.root）解析。
 # 惯例：场景在 reload 前把 hook 文件写进 <root>/hooks/，再 POST /api/system/reload
 @pytest.mark.probe_env(hooks=["hooks/*.py"])

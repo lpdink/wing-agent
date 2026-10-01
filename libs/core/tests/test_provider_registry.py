@@ -11,8 +11,14 @@ from __future__ import annotations
 import pytest
 
 import wing.provider as provider_pkg
-from wing.config import AgentConfig, Config, ProviderConfig
-from wing.provider import ProviderModels, _ProviderRegistry
+from wing.config import (
+    AgentConfig,
+    Config,
+    ModelCapabilities,
+    ModelSpec,
+    ProviderConfig,
+)
+from wing.provider import ModelDetail, ProviderModels, _ProviderRegistry
 
 
 class _FakeProvider:
@@ -98,7 +104,52 @@ class TestProviderRegistry:
         # 不 mock create_provider——真实 provider 的 list_models 见静态 models
         # 直接返回，不发 HTTP（base_url 不可达也不会报错，证明未请求）
         result = await _ProviderRegistry().list_all_models()
-        assert result == [ProviderModels(provider="static", models=["a", "b"])]
+        # 字符串声明解析为等价 ModelSpec：details 只带 name（能力全 false）
+        assert result == [
+            ProviderModels(
+                provider="static",
+                models=["a", "b"],
+                model_details=[ModelDetail(name="a"), ModelDetail(name="b")],
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_model_details_aligned_with_models(self, monkeypatch):
+        """details 与 models 逐项同序同名：声明带元信息，远端发现最小化。"""
+        cfg = Config(
+            providers=[
+                ProviderConfig(
+                    name="p1",
+                    base_url="http://x",
+                    api_key="k",
+                    models=[
+                        "legacy",
+                        ModelSpec(
+                            name="vision-model",
+                            display_name="Vision",
+                            description="sees images",
+                            capabilities=ModelCapabilities(vision=True),
+                        ),
+                    ],
+                )
+            ],
+            agents=[AgentConfig(name="default", model="m", provider="p1")],
+        )
+        fakes = {"p1": _FakeProvider("p1", ["remote-only", "vision-model"])}
+        monkeypatch.setattr("wing.config.get_config", lambda: cfg)
+        monkeypatch.setattr(provider_pkg, "create_provider", lambda c: fakes[c.name])
+
+        result = await _ProviderRegistry().list_all_models()
+
+        assert len(result) == 1
+        group = result[0]
+        assert group.models == ["remote-only", "vision-model"]
+        assert [d.name for d in group.model_details] == ["remote-only", "vision-model"]
+        remote, declared = group.model_details
+        assert remote == ModelDetail(name="remote-only")  # 未声明 → 最小条目
+        assert declared.display_name == "Vision"
+        assert declared.description == "sees images"
+        assert declared.capabilities.vision is True
 
     @pytest.mark.asyncio
     async def test_reset_closes_all_clients(self, monkeypatch):

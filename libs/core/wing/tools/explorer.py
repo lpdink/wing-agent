@@ -1,7 +1,7 @@
 # wing/tools/explorer.py
 """Explorer — read-only sub-agent tool for code exploration.
 
-Creates a lightweight sub-agent with Read/Glob/Grep tools only.
+Creates a lightweight sub-agent with Read/ReadImage/Glob/Grep tools only.
 By default runs in foreground (blocking) — the tool waits for the sub-agent
 to finish and returns results directly. Set run_in_background=true to launch
 asynchronously and get notified via inbox when complete.
@@ -34,11 +34,17 @@ _EXPLORER_SYSTEM_PROMPT = (
     "accurately.\n\n"
     "Guidelines:\n"
     "- Focus on the specific task described in the user message\n"
-    "- Use Read, Glob, and Grep tools to gather information\n"
+    "- Use Read, ReadImage, Glob, and Grep tools to gather information\n"
     "- Report findings in a clear, structured format\n"
     "- Include relevant file paths and line numbers\n"
     "- Do not speculate — only report what you actually find"
 )
+
+_READONLY_TOOL_NAMES = ("Read", "ReadImage", "Glob", "Grep")
+"""Explorer 子 agent 的只读工具集。
+
+ReadImage 对无视觉能力的模型会自行拒绝（门禁在工具内），此处无需特判。
+"""
 
 _TIMEOUT_SECONDS = 1200  # 20 minutes
 
@@ -52,7 +58,7 @@ async def explorer_agent(
 ) -> str:
     """Launch a read-only Explorer sub-agent to investigate code or files.
 
-    The Explorer has access to Read, Glob, and Grep tools only.
+    The Explorer has access to Read, ReadImage, Glob, and Grep tools only.
 
     By default this tool blocks until the Explorer finishes and returns
     results directly. Set run_in_background=true to launch asynchronously
@@ -93,13 +99,16 @@ async def explorer_agent(
         compactor=host.context_manager.compactor,
     )
 
-    ro_tools = [tool_registry.resolve(n) for n in ("Read", "Glob", "Grep")]
+    ro_tools = [tool_registry.resolve(n) for n in _READONLY_TOOL_NAMES]
     sub_agent = WingAgent(
         model=host.model,
         model_provider=host.model_provider,
         stream=False,
         context_manager=cm,
         tools=[t for t in ro_tools if t is not None],
+        # 子 agent 与宿主共享同一媒体池（用户任务：子 agent 写/读的图与
+        # 宿主会话的媒体是同一批对象，不复制字节）。
+        media=host.media,
     )
 
     if run_in_background:

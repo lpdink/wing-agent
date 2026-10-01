@@ -993,13 +993,29 @@ class TestSystemModels:
     """GET /api/models 测试——嵌套响应，经 runtime 转发（路由不感知 config）。"""
 
     def test_list_models_ok(self, client: TestClient, mock_runtime):
-        """正常获取模型列表（按 provider 分组嵌套）。"""
-        from wing.provider import ProviderModels
+        """正常获取模型列表（按 provider 分组嵌套 + 逐项对应的 model_details）。"""
+        from wing.provider import ModelCapabilities, ModelDetail, ProviderModels
 
         mock_runtime.list_models = AsyncMock(
             return_value=[
-                ProviderModels(provider="default", models=["gpt-4o", "gpt-4o-mini"]),
-                ProviderModels(provider="claude", models=["claude-opus-4"]),
+                ProviderModels(
+                    provider="default",
+                    models=["gpt-4o", "gpt-4o-mini"],
+                    model_details=[
+                        ModelDetail(
+                            name="gpt-4o",
+                            display_name="GPT-4o",
+                            description="flagship",
+                            capabilities=ModelCapabilities(vision=True),
+                        ),
+                        ModelDetail(name="gpt-4o-mini", display_name="GPT-4o mini"),
+                    ],
+                ),
+                ProviderModels(
+                    provider="claude",
+                    models=["claude-opus-4"],
+                    model_details=[ModelDetail(name="claude-opus-4")],
+                ),
             ]
         )
 
@@ -1007,10 +1023,59 @@ class TestSystemModels:
         assert resp.status_code == 200
         assert resp.json() == {
             "providers": [
-                {"provider": "default", "models": ["gpt-4o", "gpt-4o-mini"]},
-                {"provider": "claude", "models": ["claude-opus-4"]},
+                {
+                    "provider": "default",
+                    "models": ["gpt-4o", "gpt-4o-mini"],
+                    "model_details": [
+                        {
+                            "name": "gpt-4o",
+                            "display_name": "GPT-4o",
+                            "description": "flagship",
+                            "capabilities": {"vision": True},
+                        },
+                        {
+                            "name": "gpt-4o-mini",
+                            "display_name": "GPT-4o mini",
+                            "description": None,
+                            "capabilities": {"vision": False},
+                        },
+                    ],
+                },
+                {
+                    "provider": "claude",
+                    "models": ["claude-opus-4"],
+                    "model_details": [
+                        {
+                            "name": "claude-opus-4",
+                            "display_name": None,
+                            "description": None,
+                            "capabilities": {"vision": False},
+                        }
+                    ],
+                },
             ]
         }
+
+    def test_list_models_details_padded_to_match_models(
+        self, client: TestClient, mock_runtime
+    ):
+        """producer 未给 detail（或无详情）时边界补最小条目——逐项一致是接口契约。"""
+        from wing.provider import ProviderModels
+
+        mock_runtime.list_models = AsyncMock(
+            return_value=[
+                ProviderModels(provider="legacy", models=["a", "b"]),
+            ]
+        )
+
+        resp = client.get("/api/models")
+        assert resp.status_code == 200
+        group = resp.json()["providers"][0]
+        assert group["models"] == ["a", "b"]
+        assert [d["name"] for d in group["model_details"]] == ["a", "b"]
+        assert all(
+            d["capabilities"] == {"vision": False} for d in group["model_details"]
+        )
 
     def test_list_models_empty(self, client: TestClient, mock_runtime):
         """无 provider 时返回空分组列表。"""
