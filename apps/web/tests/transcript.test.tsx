@@ -190,6 +190,64 @@ describe('transcript rendering', () => {
     runtime.stop();
   });
 
+  it('drops an image answer that lands after the session switched (review r1 S1)', async () => {
+    // The race: session-1's image is still loading when the user switches. Its answer
+    // arrives afterwards and must not overwrite the new session's picture — the
+    // renderer's cache is keyed by the markdown source alone, so an unfenced answer
+    // would show the previous workspace's file here.
+    let releaseSlow!: () => void; // assigned synchronously by the executor below
+    const slow = new Promise<void>((resolve) => {
+      releaseSlow = resolve;
+    });
+    let call = 0;
+    fetchMock.mockImplementation(async () => {
+      call += 1;
+      if (call === 1) {
+        await slow; // the previous session's answer, still in flight
+      }
+      return imageResponse();
+    });
+    // Distinct object URLs per answer, so "which answer won" is visible in the DOM.
+    const created: string[] = [];
+    (URL as unknown as { createObjectURL: (blob: Blob) => string }).createObjectURL = (blob: Blob) => {
+      const uri = `blob:image-${created.length + 1}-${blob.type}`;
+      created.push(uri);
+      return uri;
+    };
+
+    const other = richSession({ id: 'session-2', name: 'Second workspace', workspace: '/tmp/other' });
+    const gateway = new FakeGateway({ sessions: [richSession(), other] });
+    const runtime = buildRuntime(gateway);
+    render(<App runtime={runtime} />);
+    await screen.findByTestId('transcript');
+    // Session-1's request is out (and stuck in the gateway).
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(await screen.findByRole('button', { name: /Second workspace/ }));
+    await waitFor(() => {
+      expect(rows('assistant')[0]?.querySelector('[data-testid="md-image"]')).not.toBeNull();
+    });
+    const shown = rows('assistant')[0]?.querySelector('[data-testid="md-image"]')?.getAttribute('src');
+    expect(shown).toBe(created[0]);
+
+    // The stale answer lands now.
+    releaseSlow();
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+    await new Promise((resolve) => {
+      setTimeout(resolve, 50);
+    });
+
+    expect(rows('assistant')[0]?.querySelector('[data-testid="md-image"]')?.getAttribute('src')).toBe(shown);
+    // …and it was fenced *before* it became an object URL: nothing was created for it.
+    expect(created).toEqual([shown]);
+
+    runtime.stop();
+  });
+
   it('keeps the link when the gateway refuses the image', async () => {
     const { runtime } = await mount();
 

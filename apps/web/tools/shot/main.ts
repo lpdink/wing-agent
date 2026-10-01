@@ -15,9 +15,13 @@
  * - the browser is the local Chrome (`channel: 'chrome'`) by default, so a fresh
  *   `pnpm install` needs no browser download; `--browser=chromium` uses
  *   Playwright's own build (`pnpm exec playwright install chromium` once);
- * - every screenshot is taken with CSS animations and transitions disabled: the
- *   transcript has infinite ones (the streaming caret, the thinking shimmer), and a
- *   frame in the middle of an animation is not reproducible.
+ * - every screenshot is taken with CSS animations and transitions disabled (`animations:
+ *   'disabled'`): the transcript has infinite ones (the streaming caret, the thinking
+ *   shimmer), and a frame in the middle of an animation is not reproducible;
+ * - the context also asks for `prefers-reduced-motion: reduce`, which is the state the
+ *   renderer supports *without* animation — the streaming caret becomes a literal `...`
+ *   (`chat.module.css`'s reduced-motion rule) instead of an empty span waiting on a
+ *   frozen animation, so a "mid-stream" screenshot shows something readable.
  * - a manifest (scene, viewport, file, bytes, what it shows) is printed and
  *   written to `manifest.json` next to the images.
  *
@@ -188,6 +192,9 @@ async function main(): Promise<void> {
           browserContext = await browser.newContext({
             viewport: { width: viewport.width, height: viewport.height },
             colorScheme: scene.colorScheme ?? 'light',
+            // The renderer's animations are frozen for the shot (see the module doc):
+            // reduced motion is the one state its stylesheet renders without them.
+            reducedMotion: 'reduce',
             deviceScaleFactor: 1,
             locale: 'en-US',
             timezoneId: 'UTC',

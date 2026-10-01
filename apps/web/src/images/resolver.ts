@@ -23,6 +23,20 @@
  * cached as `null`). The one case that is deliberately left unanswered is "there is
  * no session to ask about": an empty answer leaves the source unknown, so the next
  * mount asks again — which is what a session switch produces.
+ *
+ * ## Epochs: answers that belong to a session nobody is looking at any more
+ *
+ * `clear()` is the session switch (see `src/app/useWebBridge.ts`), and a fetch that
+ * was in flight when it happened must not come back: the renderer's own image cache
+ * is document-level and keyed by the markdown source *alone*, so a late answer for
+ * `assets/chart.png` would overwrite the new session's picture with the old
+ * workspace's file — silently, and for as long as the switch lasts. A fetch cannot be
+ * cancelled, so it is *fenced*: every `clear()` bumps a document epoch, an in-flight
+ * load records the epoch it started under, and a result that comes back under an
+ * older one is dropped — nothing is encoded, nothing is cached, nothing is handed to
+ * the renderer (the object URL that was never created cannot leak either). The same
+ * fence is what keeps a stale answer from being written back into the cache after it
+ * was cleared.
  */
 
 import type { ResolvedImageModel } from '@wing-agent/ui';
@@ -75,20 +89,21 @@ export interface ImageResolver {
 
 export const DEFAULT_MAX_IMAGE_ENTRIES = 64;
 
+/**
+ * "This answer belongs to a cleared document" — a sentinel, so it can never be
+ * confused with a real answer (`null` is the *refusal*, which the renderer caches as
+ * final).
+ */
+const STALE = Symbol('stale-image-answer');
+
 export function createImageResolver(options: ImageResolverOptions): ImageResolver {
   const maxEntries = Math.max(1, options.maxEntries ?? DEFAULT_MAX_IMAGE_ENTRIES);
   /** `session + src` → object URL or `null` (refused). Insertion order = LRU order. */
   const cache = new Map<string, string | null>();
   /** `session + src` → in-flight load, so two asks for one source fetch once. */
-  const inFlight = new Map<string, Promise<string | null>>();
-
-  const load = async (url: string, apiKey: string | null): Promise<string | null> => {
-    const image = await options.platform.load(url, { apiKey });
-    if (image === null) {
-      return null;
-    }
-    return options.platform.encode(image);
-  };
+  const inFlight = new Map<string, Promise<string | null | typeof STALE>>();
+  /** Bumped by `clear()`; a load that started under another epoch is dropped. */
+  let epoch = 0;
 
   const remember = (key: string, uri: string | null): void => {
     cache.delete(key);
@@ -106,7 +121,7 @@ export function createImageResolver(options: ImageResolverOptions): ImageResolve
     }
   };
 
-  const resolveOne = async (target: ImageTarget, src: string): Promise<string | null> => {
+  const resolveOne = async (target: ImageTarget, src: string): Promise<string | null | typeof STALE> => {
     const path = workspaceImagePath(src);
     if (path === null) {
       return null;
@@ -119,10 +134,31 @@ export function createImageResolver(options: ImageResolverOptions): ImageResolve
     if (existing !== undefined) {
       return existing;
     }
-    const pending = load(workspaceImageUrl(target.baseUrl, target.sessionId, path), target.apiKey)
-      .catch((): string | null => null)
+    const startedEpoch = epoch;
+    const pending: Promise<string | null | typeof STALE> = options.platform
+      .load(workspaceImageUrl(target.baseUrl, target.sessionId, path), { apiKey: target.apiKey })
+      // A failed load is a *refusal* (`null`, final for this document) — unless the
+      // document moved on, which the fence right after decides.
+      .catch((): null => null)
+      .then((image): string | null | typeof STALE => {
+        // The document moved on while this was in flight — see the module doc. The
+        // result is dropped *before* it becomes an object URL or a cache entry, so a
+        // stale answer can neither be cached (N4) nor reach the renderer (S1) — and
+        // there is no object URL to leak, not even for a stale failure.
+        if (epoch !== startedEpoch) {
+          return STALE;
+        }
+        return image === null ? null : options.platform.encode(image);
+      })
       .then((uri) => {
-        inFlight.delete(key);
+        // Only drop the in-flight entry if it is still *this* load: a `clear()` plus a
+        // new ask for the same key may have registered a newer one in the meantime.
+        if (inFlight.get(key) === pending) {
+          inFlight.delete(key);
+        }
+        if (uri === STALE) {
+          return STALE;
+        }
         remember(key, uri);
         return uri;
       });
@@ -139,12 +175,17 @@ export function createImageResolver(options: ImageResolverOptions): ImageResolve
         return [];
       }
       const answers = await Promise.all(
-        srcs.map(async (src): Promise<ResolvedImageModel> => ({ src, uri: await resolveOne(target, src) })),
+        srcs.map(async (src) => ({ src, uri: await resolveOne(target, src) })),
       );
-      return answers;
+      // A fenced answer is simply absent: the renderer keeps the link (it has no
+      // answer) and the source is *not* cached as refused, so a later mount may ask
+      // again — which is exactly what the session switch's remount does.
+      return answers.filter((answer): answer is ResolvedImageModel => answer.uri !== STALE);
     },
 
     clear(): void {
+      // Fence off everything already in flight (module doc) before dropping the caches.
+      epoch += 1;
       for (const uri of cache.values()) {
         if (uri !== null) {
           options.platform.release(uri);

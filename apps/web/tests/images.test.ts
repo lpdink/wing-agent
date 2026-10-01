@@ -189,6 +189,90 @@ describe('image resolver', () => {
     expect(fake.loads).toHaveLength(1);
   });
 
+  it('drops an answer that was in flight when the document was cleared', async () => {
+    // The race the review found (S1): a slow answer for session-1 lands *after* the
+    // switch to session-2. It must not be cached, must not be handed to the renderer
+    // (whose cache is keyed by the markdown source alone, so it would show session-1's
+    // file in session-2's transcript) and must not leave an object URL behind.
+    const fake = fakePlatform();
+    // `!`: the executor below runs synchronously, so it is assigned before any use —
+    // TS's control-flow analysis cannot see that through the promise.
+    let releaseSlow!: () => void;
+    const slow = new Promise<void>((resolve) => {
+      releaseSlow = resolve;
+    });
+    let call = 0;
+    const platform: ImagePlatform = {
+      ...fake.platform,
+      load: async (url, options) => {
+        call += 1;
+        if (call === 1) {
+          await slow; // session-1's answer: slow
+        }
+        return fake.platform.load(url, options);
+      },
+    };
+    let sessionId = 'session-1';
+    const resolver = createImageResolver({
+      target: () => ({ ...TARGET, sessionId }),
+      platform,
+    });
+
+    const inFlight = resolver.resolve(['assets/chart.png']);
+    // The switch: same call `useWebBridge` makes, in the same order.
+    sessionId = 'session-2';
+    resolver.clear();
+
+    await expect(resolver.resolve(['assets/chart.png'])).resolves.toEqual([
+      { src: 'assets/chart.png', uri: 'blob:image-1' },
+    ]);
+
+    releaseSlow();
+    await expect(inFlight).resolves.toEqual([]); // fenced: no answer at all
+
+    // The stale answer did not overwrite the live one…
+    await expect(resolver.resolve(['assets/chart.png'])).resolves.toEqual([
+      { src: 'assets/chart.png', uri: 'blob:image-1' },
+    ]);
+    expect(fake.loads).toHaveLength(2);
+    // …and it was never encoded, so there is nothing to revoke.
+    expect(fake.encodes).toHaveLength(1);
+  });
+
+  it('does not write a stale failure back into the cache either', async () => {
+    // The other half of N4: the fence must hold for a *refusal* too, or a cleared
+    // document would keep a stale "this source does not load" answer around.
+    const loads: string[] = [];
+    // `!`: the executor runs synchronously, so this is assigned before any use — TS
+    // cannot see that through the promise.
+    let releaseSlow!: () => void;
+    const slow = new Promise<void>((resolve) => {
+      releaseSlow = resolve;
+    });
+    const platform: ImagePlatform = {
+      load: async (url) => {
+        loads.push(url);
+        await slow;
+        return null; // every load fails, slowly
+      },
+      encode: () => 'blob:never-encoded',
+      release: () => undefined,
+    };
+    let sessionId = 'session-1';
+    const resolver = createImageResolver({ target: () => ({ ...TARGET, sessionId }), platform });
+
+    const inFlight = resolver.resolve(['broken.png']);
+    sessionId = 'session-2';
+    resolver.clear();
+    releaseSlow();
+    await expect(inFlight).resolves.toEqual([]); // fenced
+
+    // Nothing was cached, so the new session's ask is a fresh load (and *this* one is
+    // the refusal the renderer remembers).
+    await expect(resolver.resolve(['broken.png'])).resolves.toEqual([{ src: 'broken.png', uri: null }]);
+    expect(loads).toHaveLength(2);
+  });
+
   it('re-asks when the session changes (the cache is per workspace)', async () => {
     const fake = fakePlatform();
     let sessionId = 'session-1';

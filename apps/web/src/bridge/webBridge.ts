@@ -30,6 +30,8 @@ import type { AskAnswerModel } from '@wing-agent/session';
 
 import type { ImageResolver } from '../images/resolver';
 
+import { copyTextToClipboard, type ClipboardDocument } from './clipboard';
+
 /** What the bridge needs from the app (implemented by `GatewayRuntime`, D6). */
 export interface WebBridgeHost {
   /** Answer an awaiting question form. */
@@ -45,7 +47,13 @@ export interface WebBridgeOptions {
   readonly images: ImageResolver;
   /** Open an http(s) link (defaults to a new tab). */
   readonly openLink?: (href: string) => void;
-  /** Copy text to the clipboard (defaults to `navigator.clipboard`). */
+  /**
+   * Copy text to the clipboard.
+   *
+   * Defaults to {@link copyTextToClipboard}: the async clipboard API where the page
+   * is a secure context, the `execCommand` fallback otherwise, and a warning notice
+   * when neither worked (the renderer's own "Copied" feedback cannot know).
+   */
   readonly copyText?: (text: string) => void;
   readonly logger?: CoreLogger;
 }
@@ -61,8 +69,19 @@ export function createWebBridge(options: WebBridgeOptions): BridgeController {
   const copyText =
     options.copyText ??
     ((text: string) => {
-      void globalThis.navigator?.clipboard?.writeText(text).catch((error: unknown) => {
-        logger.warn('could not write to the clipboard', error);
+      void copyTextToClipboard(
+        text,
+        {
+          clipboard: globalThis.navigator?.clipboard ?? null,
+          document: (globalThis.document as unknown as ClipboardDocument | undefined) ?? null,
+        },
+        logger,
+      ).then((outcome) => {
+        if (outcome === 'failed') {
+          // The renderer has already shown "Copied" (its feedback is fire-and-forget):
+          // saying what actually happened is the host's half of the contract.
+          options.host.notify('warning', 'Could not copy — select the text and copy it manually.');
+        }
       });
     });
 
