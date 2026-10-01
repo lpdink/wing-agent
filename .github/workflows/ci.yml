@@ -76,12 +76,11 @@ jobs:
         run: make test-probe
 
   # ── TypeScript: lint + format + types + tests + build + package ──
+  # Root pnpm workspace: one install covers every TS package
+  # (extensions/vscode, packages/*) — see docs/dev/vscode-extension.md §9.3.
   typescript-check:
     name: TypeScript Check
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: extensions/vscode
 
     steps:
       - uses: actions/checkout@v4
@@ -91,13 +90,13 @@ jobs:
       # Version comes from package.json#packageManager; keep it pinned there.
       - uses: pnpm/action-setup@v4
         with:
-          package_json_file: extensions/vscode/package.json
+          package_json_file: package.json
 
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: pnpm
-          cache-dependency-path: extensions/vscode/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -115,13 +114,13 @@ jobs:
         run: pnpm run test
 
       - name: Build (extension host + webview)
-        run: pnpm run build
+        run: pnpm --filter wing-vscode run build
 
       - name: Build webview preview harness
-        run: pnpm run build:preview
+        run: pnpm --filter wing-vscode run build:preview
 
       - name: Package (.vsix)
-        run: pnpm run package
+        run: pnpm --filter wing-vscode run package
 
       - name: Upload .vsix
         uses: actions/upload-artifact@v4

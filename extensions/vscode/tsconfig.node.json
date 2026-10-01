@@ -1,6 +1,6 @@
 {
   "//": "Extension-host side: src/core + src/host + src/shared + their tests. NO DOM lib and NO DOM types on purpose — using `document`/`window` here is a compile error, which is how `core` stays portable (Electron seam) and `host` stays UI-free.",
-  "extends": "./tsconfig.base.json",
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "lib": ["ES2023"],
     "types": ["node", "vscode"]

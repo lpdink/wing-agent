@@ -1,5 +1,14 @@
-# pnpm 11 project config (single package — this file is pnpm's config surface here).
+# pnpm workspace + project config (single source of truth for the whole repo).
 #
+# `packages:` — every TypeScript package lives here; the three shells (vscode today,
+# web / electron later) are plain members and share one lockfile at the root.
+# `pnpm -r run <script>` (what `make check-ts` / `make test-ts` use) walks this list;
+# a new package needs no other registration (see 02_workspace_client_pkg/design.md §手册).
+packages:
+  - 'extensions/vscode'
+  - 'packages/*'
+  - 'apps/*'
+
 # allowBuilds: pnpm 10+ blocks dependency install scripts unless allow-listed.
 #   - esbuild needs its install script to place the platform binary.
 #   - @vscode/vsce-sign is only pulled in by `vsce sign` (we ship an unsigned local

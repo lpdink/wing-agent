@@ -1,0 +1,20 @@
+{
+  "name": "wing-workspace",
+  "//": "Root of the pnpm workspace. Private: it aggregates the TypeScript packages (extensions/vscode today; packages/* and apps/* next) and owns the single lockfile. See docs/dev/vscode-extension.md §9.3.",
+  "private": true,
+  "packageManager": "pnpm@11.14.0",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "lint": "pnpm -r run lint",
+    "format": "prettier --write package.json pnpm-workspace.yaml tsconfig.base.json .prettierrc.json && pnpm -r run format",
+    "format:check": "prettier --check package.json pnpm-workspace.yaml tsconfig.base.json .prettierrc.json && pnpm -r run format:check",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "build": "pnpm -r run build"
+  },
+  "devDependencies": {
+    "prettier": "^3.9.8"
+  }
+}
