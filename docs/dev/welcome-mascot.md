@@ -30,8 +30,11 @@
 测试可复算）。语义借自 dsh 的 `whaleIdle.ts`：**每个动作族独立一条平面**
 （眨眼 / 抖翅 / 跳各管各的 deadline），"眨眼落在抖翅中途"天然成立。
 
-* 待机（`Pose::Perched`）：`Idle / Blink / Flutter1 / Flutter2` + `hop`（离地 =
-  标准姿势整帧上抬 2 像素行，不额外存帧）；
+* 待机（`Pose::Perched`）：`Idle / Blink / Flutter1 / Flutter2` + `lift`
+  （0 站定 / 1 呼吸 / 2 跳；抬升 = 标准姿势整帧上移 1 或 2 像素行，不额外存帧）；
+  **呼吸是常驻平面**（每 ~1.9s 抬半格 ~320ms）—— 没有它待机就是"每几秒一闪的
+  静态图"，用户实测原话"等了半天才看到动画"。节奏常数刻意比 web 宠物密
+  （dsh 鲸鱼同款教训：终端 settled header 上按 web 节奏会 visibly stalls）；
 * 干活（`Pose::Flying`）：`FLY_0..FLY_5` 六帧扇翅循环，90ms/帧；
 * `working` 翻转时重新播种对面那档的节奏 —— 落回站姿不会"一落地就连眨三下"。
 

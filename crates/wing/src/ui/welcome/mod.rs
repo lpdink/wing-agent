@@ -172,6 +172,9 @@ impl Welcome {
             return false;
         }
         let ms = self.ms(now);
+        // 先推进规划器再问姿态：姿态变化是 advance 的**产物**，不推进就永远
+        // 看到旧姿态 -> 不重建 -> 不 advance 的死锁（真 TUI 里动画会定格）。
+        self.motion.advance(ms, working);
         let pose = self.motion.pose(ms, working);
         let rebuild = self.built_width != width
             || !self.built_visible
@@ -272,14 +275,15 @@ impl Welcome {
 /// 这一帧的海鸥：姿态 → 字母网格 + 竖直偏移，统一补到 [`ART_TERM_ROWS`] 行。
 fn gull_lines(pose: Pose, accent: sprite::Rgb) -> Vec<Line<'static>> {
     let (grid, shift, pad_top) = match pose {
-        Pose::Perched { frame, hop } => {
+        Pose::Perched { frame, lift } => {
             let grid = match frame {
                 PerchedFrame::Idle => PERCHED_IDLE,
                 PerchedFrame::Blink => PERCHED_BLINK,
                 PerchedFrame::Flutter1 => PERCHED_FLUTTER1,
                 PerchedFrame::Flutter2 => PERCHED_FLUTTER2,
             };
-            (grid, if hop { -2 } else { 0 }, 0)
+            // lift：0 站定 / 1 呼吸（半格）/ 2 跳起（一格）。
+            (grid, -(lift as i32), 0)
         }
         Pose::Flying { frame } => {
             let grid = match frame % 6 {
@@ -604,7 +608,7 @@ mod tests {
             gull_lines(
                 Pose::Perched {
                     frame: PerchedFrame::Idle,
-                    hop: false
+                    lift: 0
                 },
                 accent
             )
@@ -619,7 +623,7 @@ mod tests {
             gull_lines(
                 Pose::Perched {
                     frame: PerchedFrame::Idle,
-                    hop: true
+                    lift: 2
                 },
                 accent
             )

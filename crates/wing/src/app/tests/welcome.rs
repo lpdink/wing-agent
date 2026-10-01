@@ -129,7 +129,7 @@ fn welcome_header_fits_the_chat_band() {
 }
 
 #[test]
-fn header_is_rebuilt_while_sweeping_and_frozen_after() {
+fn header_rebuilds_on_the_sweep_then_only_at_planner_cadence() {
     let mut app = test_app();
     let palette = app.palette();
     let now = std::time::Instant::now();
@@ -142,12 +142,29 @@ fn header_is_rebuilt_while_sweeping_and_frozen_after() {
     let settled = now + Duration::from_millis(crate::ui::welcome::SWEEP_MS + 1);
     app.sync_welcome(&palette, 100, settled);
     let frozen = header_text(&app);
-    app.sync_welcome(&palette, 100, settled + Duration::from_secs(30));
-    assert_eq!(frozen, header_text(&app), "定格后不再重建");
 
-    // 40 列会掉出整块布局（标记被撤），header 一定长得不一样；用 70 这种
+    // 扫光定格后：同一时刻再 sync 不重建。
+    app.sync_welcome(&palette, 100, settled);
+    assert_eq!(frozen, header_text(&app), "定格后同一时刻不重建");
+
+    // 海鸥是常驻 idle 循环，但重绘只发生在规划器的 deadline 上，不是每帧：
+    // 定格后连着一毫秒一毫秒地 sync，header 必须纹丝不动。
+    for step in 1..6u64 {
+        app.sync_welcome(&palette, 100, settled + Duration::from_millis(step));
+        assert_eq!(
+            frozen,
+            header_text(&app),
+            "定格后逐毫秒 sync 不该重建（step={step}）"
+        );
+    }
+    // 而跨过几个 deadline 之后 header 必须变 —— idle 动画真的在走。
+    let alive = settled + Duration::from_secs(6);
+    app.sync_welcome(&palette, 100, alive);
+    assert_ne!(frozen, header_text(&app), "6s 后 idle 动画应当已经动过");
+
+    // 40 列会掉出整块布局（海鸥被撤），header 一定长得不一样；用 70 这种
     // "同档、文字又刚好不省略"的宽度是测不出重建的。
-    app.sync_welcome(&palette, 40, settled + Duration::from_secs(31));
+    app.sync_welcome(&palette, 40, alive);
     assert_ne!(frozen, header_text(&app), "缩放要按新宽度重建");
 }
 
@@ -159,10 +176,10 @@ fn clear_welcome_leaves_a_bare_top() {
         "hello world".into(),
     ));
     let body = frame_body(&mut app, 100, 30);
-    assert!(!body.contains("✦ wing"), "关掉之后不该再画：\n{body}");
+    assert!(!body.contains("wing ·"), "关掉之后不该再画：\n{body}");
     // 下一次 draw 也不会把它装回来（sync_welcome 拿的是 None）。
     let body = frame_body(&mut app, 100, 30);
-    assert!(!body.contains("✦ wing"), "draw 不该复活 header：\n{body}");
+    assert!(!body.contains("wing ·"), "draw 不该复活 header：\n{body}");
 }
 
 #[test]
