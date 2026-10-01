@@ -23,6 +23,25 @@ export interface ShellActions {
   readonly reconnect: () => void;
   readonly applySettings: (settings: GatewaySettings) => void;
   readonly dismissNotice: (id: Notice['id']) => void;
+  // ── control plane (step 09) ────────────────────────────────────────
+  readonly sendText: (text: string) => boolean;
+  readonly interrupt: () => Promise<void>;
+  readonly openModelPicker: () => Promise<void>;
+  readonly openBranchesPanel: (mode: 'rewind' | 'fork') => Promise<void>;
+  readonly compact: (instruction?: string | null) => Promise<void>;
+  readonly closeOverlays: () => void;
+  readonly fork: (sourceSessionId: string, targetUuid: string) => Promise<string | null>;
+  readonly rewind: (targetUuid: string) => Promise<void>;
+  readonly updateMeta: (fields: {
+    model?: string;
+    provider?: string;
+    thinking?: boolean;
+    reasoning_effort?: string;
+    yolo?: boolean;
+    title?: string;
+    agent?: string;
+    workspace?: string;
+  }) => Promise<void>;
 }
 
 export interface AppProps {
@@ -68,6 +87,15 @@ export function App({ runtime, settingsPersistent = true }: AppProps): ReactElem
       dismissNotice: (id) => {
         runtime.dismissNotice(id);
       },
+      sendText: (text) => runtime.sendText(text),
+      interrupt: () => runtime.interrupt(),
+      openModelPicker: () => runtime.openModelPicker(),
+      openBranchesPanel: (mode) => runtime.openBranchesPanel(mode),
+      compact: (instruction) => runtime.compact(instruction ?? null),
+      closeOverlays: () => runtime.closeOverlays(),
+      fork: (sourceSessionId, targetUuid) => runtime.fork(sourceSessionId, targetUuid),
+      rewind: (targetUuid) => runtime.rewind(targetUuid),
+      updateMeta: (fields) => runtime.updateMeta(fields),
     }),
     [runtime],
   );

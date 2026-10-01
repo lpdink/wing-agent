@@ -55,6 +55,7 @@ import {
   SessionRecord,
   applyLive,
   applySync,
+  branchRow,
   buildAskReply,
   type AskAnswerModel,
   type AskCellModel,
@@ -1168,6 +1169,274 @@ export class GatewayRuntime {
   private notify(): void {
     this.snapshot = this.buildSnapshot();
     this.notifier.notify();
+  }
+
+  // ── control plane (step 09) ─────────────────────────────────────────
+
+  /**
+   * Send one user message — the composer's core path.
+   *
+   * Mirrors `extensions/vscode/src/host/session/manager.ts::sendText`, without the
+   * `resolveLocalCommand` step (that happens in the composer's submit path).
+   *
+   * Returns `true` when the frame left the socket. On failure the text is returned
+   * to the composer via `setDraft` (vscode parity — see `returnToComposer`).
+   */
+  sendText(text: string): boolean {
+    const managed = this.active;
+    const connection = this.clients?.connection ?? null;
+    if (managed === null || connection === null || connection.state.status !== 'connected') {
+      this.returnToComposer(text);
+      this.pushNotice('warning', 'Not sent — the gateway is not connected.');
+      return false;
+    }
+    const frame = createClientRequest({ sessionId: managed.record.sessionId, content: text });
+    const record = managed.record;
+    record.addPendingUser(frame.request_id, text);
+    record.refreshTitle();
+    record.dirtyTabs = true;
+    this.flush(record);
+    try {
+      connection.send(frame);
+      return true;
+    } catch (error) {
+      record.removePending(frame.request_id);
+      record.refreshTitle();
+      record.dirtyTabs = true;
+      this.flush(record);
+      this.reportFailure('Send failed', error);
+      return false;
+    }
+  }
+
+  /** Return text to the composer (vscode's `returnToComposer`). */
+  private returnToComposer(text: string): void {
+    const managed = this.active;
+    if (managed === null) {
+      return;
+    }
+    managed.record.setDraft(text);
+    this.flush(managed.record);
+  }
+
+  /** Interrupt the running turn. */
+  async interrupt(): Promise<void> {
+    const http = this.clients?.http ?? null;
+    const sessionId = this.active?.record.sessionId ?? null;
+    if (http === null || sessionId === null) {
+      this.pushNotice('warning', 'Not connected — the gateway is not available.');
+      return;
+    }
+    try {
+      await http.interruptSession(sessionId);
+    } catch (error) {
+      this.reportFailure('Interrupt failed', error);
+    }
+  }
+
+  /** Open the model picker — fetch models and set `panels.modelPicker`. */
+  async openModelPicker(): Promise<void> {
+    const managed = this.active;
+    const http = this.clients?.http ?? null;
+    if (managed === null || http === null) {
+      return;
+    }
+    try {
+      const response = await http.listModels();
+      const model = managed.record.meta.model;
+      const provider = managed.record.meta.provider;
+      const rows = response.providers.flatMap((group) =>
+        group.models.map((name) => ({
+          provider: group.provider,
+          model: name,
+          selected: name === model && group.provider === provider,
+        })),
+      );
+      managed.record.panels = {
+        ...managed.record.panels,
+        modelPicker: { sessionId: managed.record.sessionId, rows, activeIndex: null },
+      };
+      managed.record.dirtyPanels = true;
+      this.flush(managed.record);
+    } catch (error) {
+      this.reportFailure('Could not list models', error);
+    }
+  }
+
+  /** Open the branch picker for fork or rewind mode. */
+  async openBranchesPanel(mode: 'rewind' | 'fork'): Promise<void> {
+    const managed = this.active;
+    const http = this.clients?.http ?? null;
+    if (managed === null || http === null) {
+      return;
+    }
+    try {
+      const response = await http.sessionBranches(managed.record.sessionId);
+      const rows = response.targets.map((target) => branchRow(target));
+      managed.record.panels = { ...managed.record.panels, branchPicker: { mode, rows } };
+      managed.record.dirtyPanels = true;
+      this.flush(managed.record);
+    } catch (error) {
+      this.reportFailure('Could not list branches', error);
+    }
+  }
+
+  /** Compact the session context. */
+  async compact(instruction: string | null = null): Promise<void> {
+    const http = this.clients?.http ?? null;
+    const sessionId = this.active?.record.sessionId ?? null;
+    if (http === null || sessionId === null) {
+      this.pushNotice('warning', 'Not connected — the gateway is not available.');
+      return;
+    }
+    this.pushNotice('info', 'Compacting context…');
+    try {
+      const response = await http.compactSession(sessionId, instruction);
+      this.pushNotice(
+        'info',
+        `Context compacted: ${response.original_tokens} → ${response.compressed_tokens} tokens`,
+      );
+    } catch (error) {
+      this.reportFailure('Compact failed', error);
+    }
+  }
+
+  /** Close all overlays (Esc / overlay click). */
+  closeOverlays(): void {
+    const managed = this.active;
+    if (managed === null) {
+      return;
+    }
+    managed.record.panels = {
+      ...managed.record.panels,
+      modelPicker: null,
+      sessionPicker: null,
+      branchPicker: null,
+    };
+    managed.record.dirtyPanels = true;
+    this.flush(managed.record);
+  }
+
+  /** Fork the session at a target uuid — creates a new session, subscribes to it. */
+  async fork(sourceSessionId: string, targetUuid: string): Promise<string | null> {
+    return this.structure.run(async () => {
+      const http = this.clients?.http ?? null;
+      const source = this.active;
+      if (http === null || source === null) {
+        this.pushNotice('warning', 'Fork failed — the session is not available.');
+        return null;
+      }
+      const sourceSession = source;
+      try {
+        const response = await http.forkSession(sourceSessionId, targetUuid);
+        const record = new SessionRecord({
+          sessionId: response.session_id,
+          now: this.now,
+          workspace: sourceSession.record.meta.workspace === '' ? null : sourceSession.record.meta.workspace,
+          createdAt: '',
+        });
+        record.setDraft(response.draft);
+        await this.releaseActive();
+        this.adopt(record);
+        await this.subscribeActive();
+        if (record.draft !== null) {
+          this.flush(record);
+        }
+        void this.refreshSessions();
+        return record.sessionId;
+      } catch (error) {
+        this.reportFailure('Fork failed', error);
+        return null;
+      }
+    });
+  }
+
+  /** Rewind to a target uuid — the gateway answers with a sync_session replacement. */
+  async rewind(targetUuid: string): Promise<void> {
+    const managed = this.active;
+    const http = this.clients?.http ?? null;
+    if (managed === null || http === null) {
+      this.pushNotice('warning', 'Rewind failed — the session is not available.');
+      return;
+    }
+    try {
+      await http.rewindSession(managed.record.sessionId, targetUuid);
+    } catch (error) {
+      this.reportFailure('Rewind failed', error);
+    }
+    this.closeOverlays();
+  }
+
+  /**
+   * Update session metadata on the gateway.
+   *
+   * Mirrors `extensions/vscode/src/host/session/manager.ts::updateSession`:
+   * optimistic local update for fields the gateway echoes through
+   * `session_state_changed`.
+   */
+  async updateMeta(fields: {
+    model?: string;
+    provider?: string;
+    thinking?: boolean;
+    reasoning_effort?: string;
+    yolo?: boolean;
+    title?: string;
+    agent?: string;
+    workspace?: string;
+  }): Promise<void> {
+    const managed = this.active;
+    const http = this.clients?.http ?? null;
+    if (managed === null || http === null) {
+      this.pushNotice('warning', 'Update failed — the session is not available.');
+      return;
+    }
+    const sessionId = managed.record.sessionId;
+    try {
+      await http.updateSession({ session_id: sessionId, ...fields });
+    } catch (error) {
+      this.reportFailure('Update failed', error);
+      return;
+    }
+    // Optimistic local update (vscode parity).
+    const record = managed.record;
+    const meta = { ...record.meta };
+    if (fields.model !== undefined) {
+      meta.model = fields.model;
+    }
+    if (fields.provider !== undefined) {
+      meta.provider = fields.provider;
+    }
+    if (fields.thinking !== undefined) {
+      meta.thinking = fields.thinking;
+    }
+    if (fields.reasoning_effort !== undefined) {
+      meta.reasoningEffort = fields.reasoning_effort;
+    }
+    if (fields.yolo !== undefined) {
+      meta.yolo = fields.yolo;
+    }
+    if (fields.title !== undefined) {
+      record.explicitTitle = fields.title;
+    }
+    if (fields.agent !== undefined) {
+      meta.agent = fields.agent;
+    }
+    if (fields.workspace !== undefined) {
+      meta.workspace = fields.workspace;
+    }
+    record.meta = meta;
+    record.refreshTitle();
+    record.dirtyState = true;
+    record.dirtyTabs = true;
+    this.flush(record);
+    if (fields.model !== undefined || fields.provider !== undefined) {
+      // Close the model picker on model selection (vscode parity).
+      if (record.panels.modelPicker !== null) {
+        record.panels = { ...record.panels, modelPicker: null };
+        record.dirtyPanels = true;
+        this.flush(record);
+      }
+    }
   }
 
   /** Release every timer and socket (tests + an unmounting root). */

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/unbound-method */
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import { imageUri, resetImageUris } from '@wing-agent/ui';
@@ -17,10 +18,20 @@ import type { ImageResolver } from '../src/images/resolver';
 
 interface Harness {
   readonly bridge: ReturnType<typeof createWebBridge>;
-  readonly host: {
+  readonly host: WebBridgeHost & {
     readonly answerAsk: Mock<WebBridgeHost['answerAsk']>;
     readonly approveTool: Mock<WebBridgeHost['approveTool']>;
     readonly notify: Mock<WebBridgeHost['notify']>;
+    readonly sendMessage: Mock<WebBridgeHost['sendMessage']>;
+    readonly interrupt: Mock<WebBridgeHost['interrupt']>;
+    readonly setModel: Mock<WebBridgeHost['setModel']>;
+    readonly setThinking: Mock<WebBridgeHost['setThinking']>;
+    readonly setEffort: Mock<WebBridgeHost['setEffort']>;
+    readonly setYolo: Mock<WebBridgeHost['setYolo']>;
+    readonly runPromptCommand: Mock<WebBridgeHost['runPromptCommand']>;
+    readonly openModelPickerAction: Mock<WebBridgeHost['openModelPickerAction']>;
+    readonly closeOverlays: Mock<WebBridgeHost['closeOverlays']>;
+    readonly compact: Mock<WebBridgeHost['compact']>;
   };
   readonly resolve: ReturnType<typeof vi.fn>;
   readonly openLink: ReturnType<typeof vi.fn>;
@@ -33,6 +44,16 @@ function harness(): Harness {
     answerAsk: vi.fn<WebBridgeHost['answerAsk']>(),
     approveTool: vi.fn<WebBridgeHost['approveTool']>(),
     notify: vi.fn<WebBridgeHost['notify']>(),
+    sendMessage: vi.fn<WebBridgeHost['sendMessage']>(),
+    interrupt: vi.fn<WebBridgeHost['interrupt']>(),
+    setModel: vi.fn<WebBridgeHost['setModel']>(),
+    setThinking: vi.fn<WebBridgeHost['setThinking']>(),
+    setEffort: vi.fn<WebBridgeHost['setEffort']>(),
+    setYolo: vi.fn<WebBridgeHost['setYolo']>(),
+    runPromptCommand: vi.fn<WebBridgeHost['runPromptCommand']>(),
+    openModelPickerAction: vi.fn<WebBridgeHost['openModelPickerAction']>(),
+    closeOverlays: vi.fn<WebBridgeHost['closeOverlays']>(),
+    compact: vi.fn<WebBridgeHost['compact']>(),
   };
   const resolve = vi.fn<ImageResolver['resolve']>(() => Promise.resolve([]));
   const openLink = vi.fn();
@@ -127,12 +148,16 @@ describe('web bridge', () => {
 
   it('drops the intents of later steps loudly in the log, never by guessing', () => {
     const h = harness();
+    // sendMessage and interrupt are wired in step 09, so only ready and ping
+    // (which are not wired on web) log a debug message.
     h.bridge.post({ type: 'sendMessage', sessionId: 's-1', text: 'hello' });
     h.bridge.post({ type: 'interrupt', sessionId: 's-1' });
     h.bridge.post({ type: 'ready', protocolVersion: 1 });
     h.bridge.post({ type: 'ping', id: 'ping-1' });
 
-    expect(h.debug).toHaveBeenCalledTimes(4);
+    expect(h.debug).toHaveBeenCalledTimes(2);
+    expect(h.host.sendMessage).toHaveBeenCalled();
+    expect(h.host.interrupt).toHaveBeenCalled();
     expect(h.host.answerAsk).not.toHaveBeenCalled();
     expect(h.host.notify).not.toHaveBeenCalled();
   });

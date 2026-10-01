@@ -114,7 +114,21 @@ describe('the bridge’s copy intent', () => {
     // "the page cannot copy" state, and the renderer's own "Copied" label lies about it.
     const notify = vi.fn();
     const bridge = createWebBridge({
-      host: { answerAsk: vi.fn(), approveTool: vi.fn(), notify },
+      host: {
+        answerAsk: vi.fn(),
+        approveTool: vi.fn(),
+        notify,
+        sendMessage: vi.fn(),
+        interrupt: vi.fn(),
+        setModel: vi.fn(),
+        setThinking: vi.fn(),
+        setEffort: vi.fn(),
+        setYolo: vi.fn(),
+        runPromptCommand: vi.fn(),
+        openModelPickerAction: vi.fn(),
+        closeOverlays: vi.fn(),
+        compact: vi.fn(),
+      },
       images: { resolve: () => Promise.resolve([]), clear: () => undefined },
       logger: { debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
     });

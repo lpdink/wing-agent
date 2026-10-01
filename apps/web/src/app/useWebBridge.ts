@@ -59,6 +59,38 @@ export function useWebBridge(runtime: GatewayRuntime): void {
         notify: (level, text) => {
           runtime.pushUserNotice(level, text);
         },
+        sendMessage: (_sessionId, text) => {
+          runtime.sendText(text);
+        },
+        interrupt: () => {
+          void runtime.interrupt();
+        },
+        setModel: (model, provider) => {
+          void runtime.updateMeta({ model, provider });
+        },
+        setThinking: (enabled) => {
+          void runtime.updateMeta({ thinking: enabled });
+        },
+        setEffort: (effort) => {
+          void runtime.updateMeta({ thinking: true, reasoning_effort: effort });
+        },
+        setYolo: (enabled) => {
+          void runtime.updateMeta({ yolo: enabled });
+        },
+        runPromptCommand: (_name, _argsText) => {
+          // Handled by the composer / ShellActions routing — this bridge
+          // channel is for the renderer's own intents.
+          runtime.pushUserNotice('info', `${_name} — use the composer directly.`);
+        },
+        openModelPickerAction: () => {
+          void runtime.openModelPicker();
+        },
+        closeOverlays: () => {
+          runtime.closeOverlays();
+        },
+        compact: () => {
+          void runtime.compact();
+        },
       },
     });
     setBridgeController(controller);

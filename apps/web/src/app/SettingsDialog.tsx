@@ -16,7 +16,7 @@
  *   be forgotten instead of showing a saved state that is not there.
  */
 
-import { useState, type FormEvent, type ReactElement } from 'react';
+import { useCallback, useEffect, useState, type FormEvent, type ReactElement } from 'react';
 
 import type { ConnectionView } from '../connection/runtime';
 import { type GatewayScheme, type GatewaySettings, normalizePort } from '../settings/settings';
@@ -90,6 +90,29 @@ export function SettingsDialog({
   const [ignoreCertErrors, setIgnoreCertErrors] = useState(settings.ignoreCertErrors);
   const [error, setError] = useState<string | null>(null);
 
+  // Esc key handling.
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [onClose]);
+
+  // Overlay click closes the dialog (click on the overlay background only).
+  const handleOverlayClick = useCallback(
+    (event: React.MouseEvent): void => {
+      if (event.target === event.currentTarget) {
+        onClose();
+      }
+    },
+    [onClose],
+  );
+
   const preview = previewEndpoints({ scheme, host, port, apiKey: null, ignoreCertErrors }, location);
   // With an empty host the app uses the page's own origin: the scheme and the port
   // are then not "settings", they are whatever served this page (design.md D3).
@@ -119,8 +142,8 @@ export function SettingsDialog({
   };
 
   return (
-    <div className="overlay" role="dialog" aria-modal="true" aria-label="Gateway settings">
-      <form className="dialog" onSubmit={submit}>
+    <div className="overlay" role="dialog" aria-modal="true" aria-label="Gateway settings" onClick={handleOverlayClick}>
+      <form className="dialog" onSubmit={submit} onClick={(event) => { event.stopPropagation(); }}>
         <h2 className="dialog__title">Gateway connection</h2>
 
         <p className="dialog__state">

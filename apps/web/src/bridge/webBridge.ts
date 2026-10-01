@@ -40,6 +40,27 @@ export interface WebBridgeHost {
   approveTool(requestId: string, decision: ToolApprovalDecision): void;
   /** User-visible message (the runtime's notice stack). */
   notify(level: 'info' | 'warning' | 'error', text: string): void;
+  // ── control plane (step 09) ────────────────────────────────────────
+  /** Send a user message. */
+  sendMessage(sessionId: string, text: string): void;
+  /** Interrupt the running turn. */
+  interrupt(): void;
+  /** Switch model. */
+  setModel(model: string, provider: string): void;
+  /** Toggle thinking. */
+  setThinking(enabled: boolean): void;
+  /** Set reasoning effort. */
+  setEffort(effort: string): void;
+  /** Toggle YOLO mode. */
+  setYolo(enabled: boolean): void;
+  /** Run a prompt command. */
+  runPromptCommand(name: string, argsText: string): void;
+  /** Open the model picker. */
+  openModelPickerAction(): void;
+  /** Close all overlays. */
+  closeOverlays(): void;
+  /** Compact the session. */
+  compact(): void;
 }
 
 export interface WebBridgeOptions {
@@ -148,24 +169,54 @@ export function createWebBridge(options: WebBridgeOptions): BridgeController {
           return;
         }
 
-        // ── Not wired in this step — nothing can emit them yet (09 does) ──────
-        case 'ready':
-        case 'sendMessage':
-        case 'interrupt':
-        case 'newSession':
+        // ── control plane (step 09) ──────────────────────────────────────
+        case 'sendMessage': {
+          options.host.sendMessage(message.sessionId, message.text);
+          return;
+        }
+        case 'interrupt': {
+          options.host.interrupt();
+          return;
+        }
+        case 'setModel': {
+          options.host.setModel(message.model, message.provider);
+          return;
+        }
+        case 'setThinking': {
+          options.host.setThinking(message.enabled);
+          return;
+        }
+        case 'setEffort': {
+          options.host.setEffort(message.effort);
+          return;
+        }
+        case 'setYolo': {
+          options.host.setYolo(message.enabled);
+          return;
+        }
+        case 'runPromptCommand': {
+          options.host.runPromptCommand(message.name, message.argsText);
+          return;
+        }
+        case 'openModelPicker': {
+          options.host.openModelPickerAction();
+          return;
+        }
+        case 'closeOverlays': {
+          options.host.closeOverlays();
+          return;
+        }
+        case 'compact': {
+          options.host.compact();
+          return;
+        }
         case 'activateSession':
         case 'closeSession':
-        case 'setModel':
-        case 'setThinking':
-        case 'setEffort':
-        case 'setYolo':
-        case 'runPromptCommand':
-        case 'openModelPicker':
-        case 'compact':
-        case 'closeOverlays':
+        case 'newSession':
+        case 'ready':
         case 'resync':
         case 'ping': {
-          logger.debug(`web bridge: "${message.type}" belongs to a later step; ignored`);
+          logger.debug(`web bridge: "${message.type}" is not wired; ignored`);
           return;
         }
 

@@ -8,14 +8,17 @@
  * *data* comes from the runtime snapshot.
  */
 
-import { useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 
 import type { RuntimeSnapshot } from '../connection/runtime';
 import type { PageLocation } from '../settings/urls';
 
 import type { ShellActions } from './App';
+import { BranchPanel } from './BranchPanel';
+import { Composer } from './Composer';
 import { ConnectionBanner } from './ConnectionBanner';
 import { ConnectionStatus } from './ConnectionStatus';
+import { ModelPanel } from './ModelPanel';
 import { NoticeStack } from './NoticeStack';
 import { SessionList } from './SessionList';
 import { SessionPane } from './SessionPane';
@@ -32,20 +35,63 @@ export interface ShellProps {
 export function Shell({ snapshot, actions, location, settingsPersistent = true }: ShellProps): ReactElement {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const shellRef = useRef<HTMLDivElement>(null);
 
   const connection = snapshot.connection;
   const record = snapshot.record;
-  const openSettings = (): void => {
+  const openSettings = useCallback((): void => {
     setDrawerOpen(false);
     setSettingsOpen(true);
-  };
-  const selectSession = (sessionId: string): void => {
+  }, []);
+  const selectSession = useCallback((sessionId: string): void => {
     setDrawerOpen(false);
     actions.activate(sessionId);
-  };
+  }, [actions]);
+
+  // The model picker is open when `panels.modelPicker` is not null.
+  const modelPicker = record?.panels.modelPicker ?? null;
+  const branchPicker = record?.panels.branchPicker ?? null;
+
+  // Global Escape: close any open overlay.
+  const handleOverlayClose = useCallback((): void => {
+    if (settingsOpen) {
+      setSettingsOpen(false);
+      return;
+    }
+    if (modelPicker !== null || branchPicker !== null) {
+      actions.closeOverlays();
+      return;
+    }
+  }, [settingsOpen, modelPicker, branchPicker, actions]);
+
+  // Global Escape key handler.
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        handleOverlayClose();
+      }
+    };
+    const el = shellRef.current;
+    if (el !== null) {
+      el.addEventListener('keydown', handleKeyDown);
+      return () => {
+        el.removeEventListener('keydown', handleKeyDown);
+      };
+    }
+  }, [handleOverlayClose]);
+
+  // Close overlays on overlay background click.
+  const onOverlayClick = useCallback(
+    (event: React.MouseEvent): void => {
+      if (event.target === event.currentTarget) {
+        handleOverlayClose();
+      }
+    },
+    [handleOverlayClose],
+  );
 
   return (
-    <div className="shell" data-phase={connection.phase}>
+    <div ref={shellRef} className="shell" data-phase={connection.phase}>
       <header className="topbar">
         <button
           type="button"
@@ -103,9 +149,14 @@ export function Shell({ snapshot, actions, location, settingsPersistent = true }
             onReconnect={actions.reconnect}
           />
           <SessionPane snapshot={snapshot} onNewSession={actions.newSession} />
+
+          {record !== null ? (
+            <Composer record={record} actions={actions} />
+          ) : null}
         </main>
       </div>
 
+      {/* ── Overlays ──────────────────────────────────────────────── */}
       {settingsOpen ? (
         <SettingsDialog
           settings={snapshot.settings}
@@ -120,6 +171,29 @@ export function Shell({ snapshot, actions, location, settingsPersistent = true }
             setSettingsOpen(false);
           }}
         />
+      ) : null}
+
+      {modelPicker !== null && record !== null ? (
+        <div className="overlay" onClick={onOverlayClick}>
+          <ModelPanel
+            modelPicker={modelPicker}
+            thinking={record.meta.thinking}
+            reasoningEffort={record.meta.reasoningEffort}
+            actions={actions}
+            onClose={actions.closeOverlays}
+          />
+        </div>
+      ) : null}
+
+      {branchPicker !== null && record !== null ? (
+        <div className="overlay" onClick={onOverlayClick}>
+          <BranchPanel
+            branchPicker={branchPicker}
+            sessionId={record.sessionId}
+            actions={actions}
+            onClose={actions.closeOverlays}
+          />
+        </div>
       ) : null}
 
       <NoticeStack notices={snapshot.notices} onDismiss={actions.dismissNotice} />
