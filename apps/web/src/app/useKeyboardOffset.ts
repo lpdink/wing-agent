@@ -63,14 +63,17 @@ export function useVisualViewportOffset(
     }
 
     vv.addEventListener('resize', handleResize);
-    window.addEventListener('orientationchange', () => {
+
+    const onOrientationChange = (): void => {
       setTimeout(() => {
         layoutHeight.current = window.innerHeight;
       }, 100);
-    });
+    };
+    window.addEventListener('orientationchange', onOrientationChange);
 
     return () => {
       vv.removeEventListener('resize', handleResize);
+      window.removeEventListener('orientationchange', onOrientationChange);
     };
   }, [handleResize]);
 

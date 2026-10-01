@@ -957,10 +957,6 @@ body {
     box-shadow: 0 -1px 4px rgb(0 0 0 / 8%);
   }
 
-  .composer[data-keyboard-offset] {
-    bottom: attr(data-keyboard-offset px, 0);
-  }
-
   .composer__commands {
     /* The command popup slides up from above the composer. When the keyboard is
        open, we want it above the keyboard, not behind it. The popup's `bottom`
