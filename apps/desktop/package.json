@@ -22,12 +22,12 @@
     "node": ">=22.12"
   },
   "scripts": {
-    "build": "node esbuild.mjs",
+    "build": "node esbuild.mjs && node scripts/copy-web-build.mjs",
     "dev": "node scripts/dev.mjs",
-    "smoke": "node esbuild.mjs && electron . --smoke",
+    "smoke": "node esbuild.mjs && node scripts/copy-web-build.mjs && electron . --smoke",
     "smoke:app": "node scripts/smoke-app.mjs",
-    "dist:dir": "node esbuild.mjs && electron-builder --dir",
-    "dist:mac": "node esbuild.mjs && electron-builder --mac",
+    "dist:dir": "node esbuild.mjs && node scripts/copy-web-build.mjs && electron-builder --dir",
+    "dist:mac": "node esbuild.mjs && node scripts/copy-web-build.mjs && electron-builder --mac",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.tools.json",
     "lint": "eslint . --max-warnings=0",
     "lint:fix": "eslint . --fix",

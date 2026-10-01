@@ -2,55 +2,16 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- `viewport-fit=cover` is what makes `env(safe-area-inset-*)` real on notched phones. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#101216" media="(prefers-color-scheme: dark)" />
     <title>Wing</title>
-    <style>
-      :root {
-        color-scheme: dark;
-      }
-      body {
-        margin: 0;
-        padding: 48px;
-        background: #0b0b0f;
-        color: #d8d8de;
-        font:
-          14px/1.6 ui-sans-serif,
-          -apple-system,
-          'Segoe UI',
-          sans-serif;
-      }
-      main {
-        max-width: 640px;
-        margin: 0 auto;
-      }
-      h1 {
-        font-size: 18px;
-        font-weight: 600;
-        letter-spacing: 0.02em;
-      }
-      code {
-        background: #1a1a22;
-        border-radius: 4px;
-        padding: 1px 5px;
-        font-size: 12px;
-      }
-      p {
-        color: #9a9aa6;
-      }
-    </style>
+    <script type="module" crossorigin src="/assets/index-sRs8Qx6a.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DxP7QNm_.css">
   </head>
   <body>
-    <main>
-      <h1>Wing desktop shell</h1>
-      <p>
-        This placeholder is served over the <code>wing-app://app/</code> protocol. The real interface arrives
-        with the shared web client build, which replaces this directory.
-      </p>
-      <p>
-        The main process is already wired: gateway discovery and start-up, the JSON configuration in the user
-        data directory, the self-signed-certificate policy, and the
-        <code>window.wingDesktop</code> bridge.
-      </p>
-    </main>
+    <div id="root"></div>
   </body>
 </html>

@@ -1,7 +1,6 @@
 # Web 与桌面壳（apps/web · apps/desktop）
 
-> 本文档当前覆盖 **桌面壳 `apps/desktop`**（`wing-app` 计划的 step 05 交付）。
-> `apps/web`（移动友好 Web 客户端）与两者的共享层章节由后续步骤（07–11）补充；
+> 本文档覆盖 **桌面壳 `apps/desktop`**（Electron 薄壳）与 **Web 客户端 `apps/web`**（移动友好 Web 客户端）。
 > 公共 TS 包见 [vscode-extension.md](vscode-extension.md) §9.3。
 
 ## 1. 形态与职责
@@ -19,8 +18,14 @@ apps/desktop/
 ├── src/gateway/launcher.ts  probe → `wing start` 一次 → 轮询（移植自 vscode 扩展）
 ├── src/web-document.ts   serveWebDocument：wing-app:// 的静态服务
 ├── src/menu.ts           最小菜单模板
-├── renderer/             prod 静态根（当前为占位页；step 10 换成 web 构建）
-└── scripts/{dev,smoke-app,after-pack}.mjs
+├── renderer/             prod 静态根（由 step 10 填入 `apps/web` 的构建产物替代占位页）
+├── scripts/
+│   ├── dev.mjs           dev 启动脚本
+│   ├── smoke-app.mjs     打包产物 smoke 运行器
+│   ├── after-pack.mjs    ad-hoc 重签名
+│   ├── copy-web-build.mjs  将 `apps/web/dist/` 复制到 `renderer/`（Step 10 新增）
+│   └── verify-cert.mjs   证书端到端验证（开发机工具，Step 10 新增）
+└── ...
 ```
 
 层门禁：**electron 的值导入只允许 `src/main.ts` / `src/preload.ts`**，由 `eslint.config.mjs` 与
@@ -114,8 +119,31 @@ codeCache` 注册（必须在 `app.ready` 之前），`serveWebDocument` 负责�
 产物未签名/未公证：经浏览器下载会被打 quarantine，首次打开需「右键 → 打开」或用
 `xattr -dr com.apple.quarantine Wing.app`。打包不进 CI（无签名、无 GUI），由开发机产出。
 
-## 7. 边界（留给后续步骤）
+## 7. 设置桥（renderer ↔ 主进程 IPC，Step 10）
+
+web 客户端 (`apps/web`) 通过 `SettingsStorage` 接口读写设置。在浏览器中，默认使用 `localStorage`；在 Electron 壳中，检测到 `window.wingDesktop` 桥时自动切换到 `desktopSettingsStorage`（`apps/web/src/settings/desktop.ts`），该适配器将设置读写经 IPC 委托给主进程的 `config.json`。
+
+**web 侧改动（最小且隔离）**：
+- `apps/web/src/settings/desktop.ts` — `SettingsStorage` 实现的 Electron 适配器，转换 `GatewaySettings` 与 `DesktopConfig` 格式
+- `apps/web/src/settings/desktop.test.ts` — 15 条单测覆盖转换、缓存、持久化
+- `apps/web/src/main.tsx` — 检测 `isDesktopShell()` 后使用 `desktopSettingsStorage()` 替代 `browserSettingsStorage()`
+
+**转换映射**：
+| 浏览器设置 (GatewaySettings) | 桌面配置 (DesktopConfig) |
+|---|---|
+| `scheme` + `host` + `port` → | `gatewayBaseUrl` (完整 URL) |
+| `apiKey` | `apiKey` |
+| `ignoreCertErrors` | `ignoreCertErrors` |
+| — | `certificateWhitelist` (桌面独有，保留不变) |
+| — | `wingPath` (桌面独有，保留不变) |
+| — | `autoStart` (桌面独有，保留不变) |
+
+浏览器 fallback 逻辑不变（`localStorage` → memory fallback）。
+
+## 8. 边界（Step 10 更新）
 
 - 窗口 UI、菜单完整集、托盘、多窗口、自动更新、代码签名/公证：**不做**（proposal Out of Scope）。
-- GUI 行为（窗口渲染、真实 web 构建、自签网关在 renderer 里的开/关两态、`wss://`）留 step 10 / 集成期验收；
-  本步用纯函数单测 + `--smoke` 把协议与管道钉住。
+- GUI 行为（窗口渲染、真实 web 构建中的 fetch/wss 证书管线）留集成期验收；本步 `--smoke` + 单测 + dist:dir 已将协议与管道钉住。
+- 证书端到端验证脚本：`node apps/desktop/scripts/verify-cert.mjs`（开发机工具，需要打包产物，不开 GUI）。
+- 打包：`dist:mac` 仍不进 CI，由开发机手动运行。
+- VSCode 扩展的 webview 设置（`wing.host`/`wing.port`/`wing.apiKey`）与 desktop / web 设置各自独立存储，不做同步。

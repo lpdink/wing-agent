@@ -33,7 +33,9 @@ const restricted = (paths) => ['error', { paths }];
 const ELECTRON_PATH = { name: ELECTRON, message: ELECTRON_BOUNDARY_MESSAGE };
 
 export default tseslint.config(
-  { ignores: ['node_modules/**', 'dist/**', 'release/**', 'coverage/**', 'eslint.config.mjs'] },
+  {
+    ignores: ['node_modules/**', 'dist/**', 'release/**', 'renderer/**', 'coverage/**', 'eslint.config.mjs'],
+  },
 
   js.configs.recommended,
 

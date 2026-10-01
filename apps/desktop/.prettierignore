@@ -1,5 +1,6 @@
-# Dependencies and build output are never formatted.
-node_modules/
+# Build output
 dist/
 release/
-coverage/
+
+# Web client build (Vite SPA committed as the packaged renderer)
+renderer/
