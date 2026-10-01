@@ -1,10 +1,11 @@
 # `@wing-agent/web`
 
 The mobile-friendly web client: a Vite + React shell that talks to the wing gateway
-directly. Steps 07–08 of `wing-app` — the shell, the connection layer, the session list,
-the screenshot infrastructure and the **transcript** (every cell kind, rendered by the
-shared `@wing-agent/ui` components). The control plane / composer (09) and the mobile
-polish + PWA (11) build on top of it.
+directly. Steps 07–08b of `wing-app` — the shell, the connection layer, the session list,
+the screenshot infrastructure, the **transcript** (the ported code/tool/ask cards, the
+`--dsw-*` theme tables, the `ConnectionIndicator`), and the theme adapter (`--vscode-*`
+bridge). The control plane / composer (09) and the mobile polish + PWA (11) build on top
+of it.
 
 ## Run it
 
@@ -31,32 +32,45 @@ src/sessions   ← the session list as rows (pure derivation)
 src/images     ← the workspace image adapter: source policy, gateway URL, three-state resolver
 src/bridge     ← the renderer's intents (`@wing-agent/ui`) routed to this app
 src/connection ← GatewayRuntime: connection supervision, subscription, event reduction, ask replies
+src/theme      ← the dark-mode switch (`data-ds-dark-theme` + `vscode-dark` on body) for the token sheets
 src/app        ← React: the shell, the session list, the settings dialog, notices, the bridge hook
-src/transcript ← React: the transcript container (the shared renderer's rows)
+src/transcript ← React: the transcript container + the web's own cell dispatch (cells/)
 tests/         ← vitest (node project: the framework-free core; dom project: the shell)
 tools/shot/    ← the screenshot fixture gateway + runner (node, bundled by esbuild)
 ```
 
-## The transcript (step 08)
+## The transcript (step 08b)
 
-The transcript is the shared renderer: `Transcript` renders `@wing-agent/ui`'s
-`TranscriptView`, whose `CellView` dispatches every cell kind to the same component the
-VS Code webview mounts. What lives here is only what the package cannot own:
+The transcript is the shared renderer's **scroller** (`TranscriptView` from the package)
+but the web's **own cells** — the dispatch in `src/transcript/cells/CellView.tsx` replaces
+the renderer's markdown fences, thinking blocks, tool rows, diff cards and ask forms with
+the ported wing-app cards (`CodeBlock`, `TerminalBlock`, `DiffBlock`, `ReasoningRow`,
+`DisclosureRow`, `ApprovalPanel` / `QuestionComposer` / `QuestionReplyView`). The package
+components still render the unchanged kinds (user / system / todo / metrics / separator).
+The switch is an optional `renderCell` seam on `TranscriptView` (step 08b's one exceptional
+change to `packages/`).
 
-- **the projection**: `record` + `recordVersion` (step 07's snapshot) → `record.viewModel()`,
-  memoized on the version;
+What lives here is what the package cannot own:
+
+- **the projection**: `record` + `recordVersion` → `record.viewModel()`, memoized on the
+  version, plus the session `workspace` (close over it so the cell memo stays stable);
+- **the cell renderer** (`src/transcript/cells/`): the web's dispatch, plus the markdown
+  node renderer that substitutes the ported `CodeBlock` for top-level fences while
+  delegating every other node back to the package's `MarkdownNodes` (known boundary:
+  nested fences inside quotes / lists keep the old card — see `design.md`);
 - **the adapter** (`src/bridge/webBridge.ts`, injected by `src/app/useWebBridge.ts`):
   `resolveImages` → the gateway's image endpoint, `answerAsk` / `approveTool` → a
-  `ClientRequest` on the socket (`GatewayRuntime.answerAsk`), `openLink` / `copyText` →
-  the browser, `openFile` / `openDiff` → a notice (there is no editor to open — see the
-  step's `design.md` D7 for the full list of differences from the webview);
-- **the image adapter** (`src/images/`): the markdown source is pre-filtered exactly like
-  the extension host's policy, fetched from `GET /api/workspace/image` _with the API key_
-  (an `<img>` cannot send a header, and the bytes are what decides "image or link" before
-  the renderer sees anything), and turned into a `blob:` object URL with an LRU lifetime;
-- **the theme bridge** (`src/ui-theme.css`): the package reads `--vscode-*`, so this app
-  maps them onto its own tokens — plus the renderer's own token layer, which the bundler
-  would otherwise tree-shake (see the `wing-ui-tokens.css` alias in `vite.config.mts`).
+  `ClientRequest` on the socket, `openLink` / `copyText` → the browser, `openFile` /
+  `openDiff` → a notice (there is no editor to open — see `design.md` D7); the new cards'
+  own copy controls write the browser clipboard through the package's `clipboard.ts`;
+- **the image adapter** (`src/images/`): unchanged from step 08 — the markdown source is
+  pre-filtered, fetched from `GET /api/workspace/image` _with the API key_, and turned
+  into a `blob:` object URL with an LRU lifetime;
+- **the theme bridge** (`src/ui-theme.css`): now only the `--vscode-*` mapping (the
+  renderer's own `--wing-*` layer is loaded by the package's barrel — step 06c's fix
+  made the alias unnecessary). The `--dsw-*` design tables are imported from the package's
+  `./styles/*` seam in `src/main.tsx`, and `src/theme/color-scheme.ts` publishes the
+  `body[data-ds-dark-theme]` / `body.vscode-dark` attributes those tables switch on.
 
 Dependencies only ever point downwards. Three mechanisms keep that honest: the split
 tsconfigs (`tsconfig.app.json` has no node types, `tsconfig.tools.json` has no DOM),
@@ -77,7 +91,7 @@ pnpm --filter @wing-agent/web shot --out=/tmp/shots           # another director
 > argument. `tools/shot/main.ts` now skips a bare `--`, so both spellings work — but
 > the commands above are the documented ones (and what the gates run).
 
-- Output defaults to `$WING_HOME/tasks/wing-app/08_web_transcript/shots` (task evidence,
+- Output defaults to `$WING_HOME/tasks/wing-app/08b_ui_swap/shots` (task evidence,
   not committed; each step points this constant at its own directory) and each image must
   be ≤ 2 MiB — the runner fails if it is not.
 - Scenes are code (`tools/shot/scenes.ts`): a fixture world + viewports + an optional
