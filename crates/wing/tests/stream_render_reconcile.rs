@@ -364,6 +364,84 @@ fn shapes() -> Vec<(&'static str, String)> {
             "math_list_continuation_fence",
             "- item\n  ~~~\n  body\n  ~~~\n\n\\(x\\) after\n".into(),
         ),
+        // --- review r4: the shapes that were still diverging (the matrix goes
+        // red on the pre-fix code for each of them) ---
+        (
+            // A NEW ITEM MARKER inside the same list: the indented fence line
+            // is the new item's content, not a top-level fence.
+            "math_list_fence_new_item_marker",
+            "- ~~~\n- a\n  ~~~\n\n\\(x\\) after\n".into(),
+        ),
+        (
+            "math_list_fence_new_empty_item",
+            "- ~~~\n- \n  ~~~\n\n\\(x\\) after\n".into(),
+        ),
+        (
+            // An empty item ends at a blank line: the fence line that follows
+            // blanks is a NEW top-level fence and swallows what follows.
+            "math_list_fence_empty_item_blanks",
+            "  - ~~~~\n- \n  \n  \n\n  ~~~~\n\n\\(x\\) after\n".into(),
+        ),
+        (
+            // A different list type (`1. `) has a different content column.
+            "math_list_fence_other_marker_type",
+            "- ~~~\n1. b\n  ~~~\n\n\\(x\\) after\n".into(),
+        ),
+        (
+            "math_list_fence_quote_nested_marker",
+            "- > ~~~\n  - c\n  ~~~\n\n\\(x\\) after\n".into(),
+        ),
+        (
+            // Inline HTML (`<3`, `<b>…</b>`) is NOT an HTML block: the fence
+            // line after it must still open a fence.
+            "math_inline_html_then_fence",
+            "<3\n~~~\n\n\\(x\\) T\n".into(),
+        ),
+        (
+            "math_inline_html_tag_then_fence",
+            "<b>bold</b>\n~~~\n\n\\(x\\) T\n".into(),
+        ),
+        (
+            "math_html_comment_then_fence",
+            "<!-- c -->\n~~~\n\n\\(x\\) T\n".into(),
+        ),
+        (
+            "math_html_processing_then_fence",
+            "x\n<?php y ?>\n~~~\n\n\\(x\\) T\n".into(),
+        ),
+        (
+            "math_html_block_in_quote_then_fence",
+            "> <div>\n  ~~~\n\n\\(x\\) after\n".into(),
+        ),
+        (
+            // A reference definition is only continued by a real title.
+            "math_reference_definition_then_fence",
+            "[ref]: http://x\n  ~~~\n\n\\(x\\) T\n".into(),
+        ),
+        (
+            "math_reference_definition_wrapped_then_fence",
+            "[ref]:\n  http://x\n  ~~~\n\n\\(x\\) T\n".into(),
+        ),
+        // --- review r5: three boundary rules in the shared primitives ---
+        (
+            // An HTML block swallows a fence line: a line that merely carries a
+            // prefix (`- a`) does not end the block (the block's *container*
+            // does).
+            "math_html_block_swallows_fence_and_marker",
+            "- \n    code \\(x\\)\n<b>\n~~~~\n- a\n\\(x\\)\n".into(),
+        ),
+        (
+            // A marker deeper than the item's marker but above its content
+            // column ends the item: the next fence line is top-level.
+            "math_list_fence_deeper_marker",
+            "1. ~~~\n  - c\n   ~~~\n\n\\(x\\) after\n".into(),
+        ),
+        (
+            // A tab after the marker is a COLUMN, not a byte: the item's
+            // content is an indented code block.
+            "math_list_marker_tab_padding",
+            "  - \titem\n    \tcont \\(e\\)\n".into(),
+        ),
     ]
 }
 
@@ -803,6 +881,21 @@ fn reconcile_prefixes() {
         "math_list_item_fence_with_blanks",
         "math_list_fence_then_top_fence",
         "math_list_continuation_fence",
+        "math_list_fence_new_item_marker",
+        "math_list_fence_new_empty_item",
+        "math_list_fence_empty_item_blanks",
+        "math_list_fence_other_marker_type",
+        "math_list_fence_quote_nested_marker",
+        "math_inline_html_then_fence",
+        "math_inline_html_tag_then_fence",
+        "math_html_comment_then_fence",
+        "math_html_processing_then_fence",
+        "math_html_block_in_quote_then_fence",
+        "math_reference_definition_then_fence",
+        "math_reference_definition_wrapped_then_fence",
+        "math_html_block_swallows_fence_and_marker",
+        "math_list_fence_deeper_marker",
+        "math_list_marker_tab_padding",
     ];
     let palette = ThemePalette::default();
     for (name, corpus) in shapes() {

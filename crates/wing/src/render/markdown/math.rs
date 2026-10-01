@@ -41,7 +41,7 @@ use std::borrow::Cow;
 use ratatui::style::Style;
 
 use super::parsing::MarkdownContext;
-use super::stream::{FenceStep, FenceTrack, content_start, fence_opener, indent_of};
+use super::stream::{FenceStep, FenceTrack, content_start, fence_opener, indent_of, prefix};
 use super::types::{MarkdownLine, SegmentKind};
 
 /// Width assumed for display math when the caller has no content width
@@ -302,11 +302,14 @@ struct Scan<'a> {
     /// Whether the definition's destination is still missing (it may be on the
     /// next line, indented or not).
     ref_def_dest_missing: bool,
-    /// Inside an HTML block (a line whose content starts with a tag-like
-    /// `<…>`; the block runs to the next blank line, like pulldown's type 6/7
-    /// HTML blocks). Markdown is not parsed there, so nothing may be
-    /// rewritten.
-    in_html_block: bool,
+    /// The HTML block currently running, if any — while it runs markdown is
+    /// not parsed, so nothing inside may be rewritten.
+    ///
+    /// The [`HtmlContainer`] is the container the block lives in: an HTML block
+    /// cannot outlive its container (`> <div>` ends when the `>` chain stops),
+    /// but a *top-level* block keeps its content verbatim — `- a` or `> q`
+    /// inside it are block content, not containers (review r5 / S1).
+    in_html_block: Option<(HtmlBlock, HtmlContainer)>,
     /// The scan has met an unpaired `$$` in the current block.
     ///
     /// A rewrite inserts `$$`, and a stray `$$` would then pair with the
@@ -332,7 +335,7 @@ impl<'a> Scan<'a> {
             fence: None,
             indented: false,
             at_block_start: true,
-            in_html_block: false,
+            in_html_block: None,
             ref_def_lines: 0,
             ref_def_dest_missing: false,
             stray_display_delim: false,
@@ -353,6 +356,37 @@ impl<'a> Scan<'a> {
         }
         out.push_str(&self.text[at..]);
         Cow::Owned(out)
+    }
+
+    /// Whether `line` is absorbed by the running reference definition.
+    fn ref_def_continuation(&mut self, line: &str) -> bool {
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+        if fence_opener(line).is_some() {
+            // A fence line interrupts the definition (it is a block start).
+            return false;
+        }
+        if self.ref_def_dest_missing {
+            // The destination: any non-blank line the block parser still reads
+            // as part of the definition.
+            if line.trim().is_empty() {
+                return false;
+            }
+            self.ref_def_lines -= 1;
+            self.ref_def_dest_missing = false;
+            if !indented {
+                self.ref_def_lines = 0;
+            } else {
+                // A title may still follow, but only on an indented line.
+                self.ref_def_lines = self.ref_def_lines.min(1);
+            }
+            return true;
+        }
+        // Only a real title may continue the definition.
+        if !indented || !looks_like_title(line.trim()) {
+            return false;
+        }
+        self.ref_def_lines = 0;
+        true
     }
 
     fn run(&mut self) {
@@ -399,9 +433,34 @@ impl<'a> Scan<'a> {
                     line_start = next;
                     continue;
                 }
-                if line.trim().is_empty() {
+                if let Some((block, container)) = self.in_html_block {
+                    // Inside an HTML block markdown is not parsed. Types 1–5
+                    // end on the line containing their marker, 6–7 at the next
+                    // blank line — and the container ends the block too.
+                    if html_block_ends(block, content) {
+                        // The end line still belongs to the block.
+                        self.in_html_block = None;
+                        i = next;
+                        line_start = next;
+                        continue;
+                    }
+                    if !container.holds(&prefix(line)) {
+                        // The container ended: the block is over and THIS line
+                        // is markdown again (`> <div>` + `~~~` opens a fence).
+                        // A line that merely *carries a prefix* (`- a` inside a
+                        // top-level block) does not end anything — HTML block
+                        // content is verbatim.
+                        self.in_html_block = None;
+                    } else {
+                        i = next;
+                        line_start = next;
+                        continue;
+                    }
+                }
+                if content.trim().is_empty() {
+                    // A blank line — including a prefix-only one (`> ` inside
+                    // a quote is a blank line *inside* that container).
                     self.indented = false;
-                    self.in_html_block = false;
                     self.ref_def_lines = 0;
                     self.at_block_start = true;
                     self.stray_display_delim = false;
@@ -413,25 +472,20 @@ impl<'a> Scan<'a> {
                     // The destination and/or the title of the definition above:
                     // markdown is not parsed here either (the destination is a
                     // URL — rewriting it would change what a click opens).
-                    let indented = line.starts_with(' ') || line.starts_with('\t');
-                    if self.ref_def_dest_missing || indented {
-                        self.ref_def_lines -= 1;
-                        // The destination is on this line now; a title may
-                        // still follow, but only if this line was indented.
-                        self.ref_def_dest_missing = false;
-                        if !indented {
-                            self.ref_def_lines = 0;
-                        }
+                    //
+                    // Only lines the definition can actually absorb count
+                    // (CommonMark §4.7): a fence line interrupts the
+                    // definition, and a title is `"…"` / `'…'` / `(…)` —
+                    // otherwise the definition ended and the line is parsed
+                    // (review r4 / S2b: `[ref]: http://x` + `  ~~~` used to
+                    // swallow the fence opener, so the scanner rewrote the
+                    // code the fence opened).
+                    if self.ref_def_continuation(line) {
                         i = next;
                         line_start = next;
                         continue;
                     }
                     self.ref_def_lines = 0;
-                }
-                if self.in_html_block {
-                    i = next;
-                    line_start = next;
-                    continue;
                 }
                 if let Some(track) = fence_opener(line) {
                     self.fence = Some(track);
@@ -455,10 +509,14 @@ impl<'a> Scan<'a> {
                     line_start = next;
                     continue;
                 }
-                if is_html_block_start(content) {
-                    // `<div>`, `<!--`, `<?…`, `<!DOCTYPE` …: pulldown stops
-                    // parsing markdown here (to the next blank line).
-                    self.in_html_block = true;
+                if let Some(block) = html_block_start(content, self.at_block_start) {
+                    // `<div>`, `<!-- … -->`, `<?… ?>` …: markdown is not
+                    // parsed inside the block (CommonMark §4.6, `HtmlBlock`).
+                    // Types 2–5 can end on the very line that opens them
+                    // (`<!-- c -->`), in which case the block is that line.
+                    if !html_block_ends(block, content) {
+                        self.in_html_block = Some((block, HtmlContainer::of(&prefix(line))));
+                    }
                     i = next;
                     line_start = next;
                     continue;
@@ -837,14 +895,250 @@ impl<'a> Scan<'a> {
 /// Whether the line's content opens an HTML block: `<tag`, `</tag`, `<!--`,
 /// `<?…`, `<!DOCTYPE`. Mirrors pulldown's HTML blocks closely enough for the
 /// normalization's purpose — that region must not be rewritten.
-fn is_html_block_start(content: &str) -> bool {
-    let mut chars = content.chars();
-    if chars.next() != Some('<') {
+/// The HTML block a line opens — CommonMark 0.30 §4.6 “HTML blocks”.
+///
+/// Only the seven *start* conditions are modelled, plus the end condition that
+/// matters for the scanner: while the block runs, markdown is not parsed, so
+/// nothing inside may be rewritten.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HtmlBlock {
+    /// Types 1–5 end on the first line **containing** this string (that line
+    /// is part of the block): `</script>`/`</pre>`/`</style>`/`</textarea>`,
+    /// `-->`, `?>`, `>`, `]]>`.
+    Until(&'static str),
+    /// Types 6–7 end at the next blank line.
+    Blank,
+}
+
+/// The block-level tag names of CommonMark’s type-6 start condition.
+const HTML_BLOCK_TAGS: &[&str] = &[
+    "address",
+    "article",
+    "aside",
+    "base",
+    "basefont",
+    "blockquote",
+    "body",
+    "caption",
+    "center",
+    "col",
+    "colgroup",
+    "dd",
+    "details",
+    "dialog",
+    "dir",
+    "div",
+    "dl",
+    "dt",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "frame",
+    "frameset",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "head",
+    "header",
+    "hr",
+    "html",
+    "iframe",
+    "legend",
+    "li",
+    "link",
+    "main",
+    "menu",
+    "menuitem",
+    "nav",
+    "noframes",
+    "ol",
+    "optgroup",
+    "option",
+    "p",
+    "param",
+    "search",
+    "section",
+    "summary",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "title",
+    "tr",
+    "track",
+    "ul",
+];
+
+/// Which HTML block `content` opens, if any — the *only* place that decides it.
+///
+/// Deliberately faithful to the seven start conditions instead of “any line
+/// starting with `<…`”: treating a paragraph like `<3` or `<b>bold</b>` as a
+/// block used to swallow a following fence line, and the scanner then rewrote
+/// code-block content (review r4 / S2a). `at_block_start` matters for type 7,
+/// which cannot interrupt a paragraph.
+fn html_block_start(content: &str, at_block_start: bool) -> Option<HtmlBlock> {
+    let rest = content.strip_prefix('<')?;
+    // Types 2–5: a same-line end marker.
+    if rest.starts_with("!--") {
+        return Some(HtmlBlock::Until("-->"));
+    }
+    if rest.starts_with('?') {
+        return Some(HtmlBlock::Until("?>"));
+    }
+    if rest.starts_with("![CDATA[") {
+        return Some(HtmlBlock::Until("]]>"));
+    }
+    if rest
+        .strip_prefix('!')
+        .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_alphabetic()))
+    {
+        return Some(HtmlBlock::Until(">"));
+    }
+    // Type 1: `<script`, `<pre`, `<style`, `<textarea` (case-insensitive)
+    // followed by whitespace, `>` or EOL.
+    for (tag, close) in [
+        ("script", "</script>"),
+        ("pre", "</pre>"),
+        ("style", "</style>"),
+        ("textarea", "</textarea>"),
+    ] {
+        if starts_with_tag(rest, tag) {
+            return Some(HtmlBlock::Until(close));
+        }
+    }
+    let (name, after) = html_tag_name(rest)?;
+    // Type 6: a known block-level tag name, then whitespace, `>`, `/>` or EOL.
+    if HTML_BLOCK_TAGS.contains(&name.to_ascii_lowercase().as_str())
+        && (after.is_empty() || after.starts_with('>') || after.starts_with('/'))
+    {
+        return Some(HtmlBlock::Blank);
+    }
+    // Type 7: a complete tag and nothing but whitespace after it — and it
+    // cannot interrupt a paragraph.
+    if at_block_start && html_tag_only(content) {
+        return Some(HtmlBlock::Blank);
+    }
+    None
+}
+
+/// The container an HTML block lives in (CommonMark's `containers` stack): the
+/// block ends with its container, not with every line that happens to carry
+/// some prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HtmlContainer {
+    /// How many `>` markers the chain had when the block opened.
+    quotes: usize,
+    /// The list item's content column, when the block lives in one.
+    item_col: Option<usize>,
+}
+
+impl HtmlContainer {
+    fn of(prefix: &crate::render::markdown::stream::Prefix) -> Self {
+        Self {
+            quotes: prefix.quotes,
+            item_col: prefix.item.map(|(_, col)| col),
+        }
+    }
+
+    /// Whether `line` is still inside this container: the `>` chain and the
+    /// item's content column must both still be satisfied (an HTML block inside
+    /// a list item needs its content indented like any other item content).
+    fn holds(&self, prefix: &crate::render::markdown::stream::Prefix) -> bool {
+        prefix.quotes >= self.quotes && self.item_col.is_none_or(|col| prefix.columns >= col)
+    }
+}
+
+/// Whether `line` ends the HTML block (its end condition is satisfied
+/// *including* on the line itself — CommonMark includes that line in the
+/// block).
+fn html_block_ends(block: HtmlBlock, line: &str) -> bool {
+    match block {
+        HtmlBlock::Until(needle) => line.contains(needle),
+        HtmlBlock::Blank => line.trim().is_empty(),
+    }
+}
+
+/// `rest` (everything after `<`) starts with `tag` (ASCII case-insensitive)
+/// followed by whitespace, `>` or end of line.
+fn starts_with_tag(rest: &str, tag: &str) -> bool {
+    let Some(head) = rest.get(..tag.len()) else {
+        return false;
+    };
+    if !head.eq_ignore_ascii_case(tag) {
         return false;
     }
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '!' | '?'))
+    match rest[tag.len()..].chars().next() {
+        None => true,
+        Some(c) => c.is_whitespace() || c == '>',
+    }
+}
+
+/// The tag name at the start of `rest` (after `<`, possibly `/`), plus the
+/// rest of the line after the name.
+fn html_tag_name(rest: &str) -> Option<(&str, &str)> {
+    let rest = rest.strip_prefix('/').unwrap_or(rest);
+    let len = rest
+        .char_indices()
+        .take_while(|(_, c)| c.is_ascii_alphanumeric() || *c == '-')
+        .count();
+    if len == 0 {
+        return None;
+    }
+    let (name, after) = rest.split_at(len);
+    Some((name, after))
+}
+
+/// Whether the whole line is a single complete tag (`<b>`, `</div>`,
+/// `<img src="x">`) followed by whitespace only.
+fn html_tag_only(line: &str) -> bool {
+    let line = line.trim();
+    let start = if line.starts_with("</") { 2 } else { 1 };
+    let Some(rest) = line.get(start..) else {
+        return false;
+    };
+    let Some((_, mut after)) = html_tag_name(rest) else {
+        return false;
+    };
+    // Walk attributes to the closing `>` (quoted values included).
+    let bytes = after.as_bytes();
+    let mut at = 0usize;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'>' => {
+                after = &after[at + 1..];
+                return after.trim().is_empty();
+            }
+            b'"' | b'\'' => {
+                let quote = bytes[at];
+                let Some(end) = bytes[at + 1..].iter().position(|&b| b == quote) else {
+                    return false;
+                };
+                at += end + 2;
+            }
+            b'<' => return false,
+            _ => at += 1,
+        }
+    }
+    false
+}
+
+/// Whether `s` is a CommonMark title (`"…"`, `'…'` or `(…)`).
+fn looks_like_title(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() < 2 {
+        return false;
+    }
+    matches!(
+        (bytes[0], bytes[bytes.len() - 1]),
+        (b'"', b'"') | (b'\'', b'\'') | (b'(', b')')
+    )
 }
 
 /// Whether the line opens a link reference definition (`[label]: url`), and
