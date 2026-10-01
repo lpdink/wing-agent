@@ -1,0 +1,12 @@
+{
+  "//": "App project: `src/` + `tests/`, with the DOM libs and WITHOUT node types — a browser shell must not reach for a node builtin or `process`. The node side (the screenshot tooling, the build/test configs, the import-graph guard) lives in `tsconfig.tools.json`, which is the mirror image (node types, no DOM). Both are run by `pnpm run typecheck`, exactly like the split in `packages/*` and `extensions/vscode` (see docs/dev/vscode-extension.md §2.3).",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+    "jsx": "react-jsx"
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts", "tests/**/*.tsx"],
+  "//exclude": "The layering guard is node code (file system reads); tsconfig.tools.json owns every node-side file in this app.",
+  "exclude": ["tests/layers.test.ts"]
+}

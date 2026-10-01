@@ -1,0 +1,5 @@
+{
+  "//": "Solution-style root config (the layout the VS Code extension and the Vite templates use): it carries no options of its own, it only points editors and lint tooling at the two real projects. Run the gates with the explicit projects (`pnpm run typecheck` runs both), never with this file.",
+  "files": [],
+  "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tsconfig.tools.json" }]
+}

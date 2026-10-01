@@ -1,0 +1,55 @@
+{
+  "name": "@wing-agent/web",
+  "version": "0.1.0",
+  "//": "The mobile-friendly web client: a Vite + React shell that talks to the wing gateway directly (dev: vite proxy / prod: the gateway hosts the built assets, see step 03). Private and never published \u2014 `vite build` is the artifact. Workspace member of the root pnpm workspace (`pnpm-workspace.yaml`), so `pnpm -r run lint|format:check|typecheck|test` (what `make check-ts` / `make test-ts` and CI run) picks it up without any registration.",
+  "private": true,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lpdink/wing-agent.git",
+    "directory": "apps/web"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.tools.json",
+    "lint": "eslint . --max-warnings=0",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "shot": "pnpm run build && node esbuild.shot.mjs && node out/shot/shot.mjs"
+  },
+  "dependencies": {
+    "@wing-agent/client": "workspace:*",
+    "@wing-agent/session": "workspace:*",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "//devDependencies": "Everything here is a build/test-time dependency: the app bundle itself only ships react / react-dom / the two workspace packages. `ws` backs the screenshot fixture gateway (a dev tool, bundled into `out/shot`); `playwright` drives the local Chrome for screenshots and never runs in CI.",
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^24.13.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^6.1.1",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.10.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.12.0",
+    "jsdom": "^30.1.0",
+    "playwright": "^1.63.0",
+    "prettier": "^3.9.8",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.0",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.1",
+    "ws": "^8.21.3"
+  }
+}
