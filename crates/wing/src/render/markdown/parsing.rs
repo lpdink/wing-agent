@@ -485,8 +485,19 @@ pub(crate) fn handle_end_tag(tag: TagEnd, ctx: &mut MarkdownContext<'_>) {
                 } = link;
                 // The alt text as written, captured before the destination /
                 // location-suffix segments are appended below.
+                //
+                // Guarded like the location-suffix branch below: a soft break
+                // inside the label (`![l1\nl2](a.png)`) flushes the line the
+                // label started on, so the saved index can point past the new
+                // line's end. The slice is then empty — and `alt` is only ever
+                // *used* when the label did not span a line break, which is
+                // exactly what `try_image_anchor`'s `lines_at_start` gate
+                // checks, so this cannot change what gets anchored.
                 let alt = if is_image {
-                    ctx.current_line.segments[label_start_segment_idx..]
+                    ctx.current_line
+                        .segments
+                        .get(label_start_segment_idx..)
+                        .unwrap_or(&[])
                         .iter()
                         .map(|segment| segment.text.as_str())
                         .collect::<String>()

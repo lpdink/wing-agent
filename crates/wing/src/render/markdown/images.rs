@@ -314,6 +314,60 @@ impl fmt::Display for PathReject {
     }
 }
 
+/// Whether the workspace containment check below folds ASCII case.
+///
+/// macOS and Windows default to case-insensitive filesystems; Linux does not.
+/// The path itself is never rewritten — this only decides which spellings count
+/// as *the same* path, and only here: a case-variant spelling still names the
+/// file the filesystem resolves it to, so refusing it would be a false
+/// "escapes the workspace" that costs the user a picture.
+const CASE_INSENSITIVE_PATHS: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+
+/// [`Path::starts_with`] under the platform's case rule (see
+/// [`CASE_INSENSITIVE_PATHS`]) — still purely lexical, no `stat` and no
+/// `canonicalize`, so the module's zero-I/O contract is untouched.
+///
+/// Only ASCII case is folded (Unicode folding would need a table this layer has
+/// no business carrying), and symlinks are still compared by their own path:
+/// the boundary here is lexical by design.
+fn is_inside(path: &Path, root: &Path) -> bool {
+    is_inside_with(path, root, CASE_INSENSITIVE_PATHS)
+}
+
+/// [`is_inside`] with the case rule injected, so both rules stay testable on
+/// every platform.
+fn is_inside_with(path: &Path, root: &Path, case_insensitive: bool) -> bool {
+    let mut components = path.components();
+    for root_component in root.components() {
+        let Some(component) = components.next() else {
+            return false;
+        };
+        let same = match (component, root_component) {
+            (Component::Normal(left), Component::Normal(right)) => {
+                os_str_eq(left, right, case_insensitive)
+            }
+            // Roots, prefixes and `..` are compared exactly (`..` is rejected
+            // before this runs anyway).
+            (left, right) => left == right,
+        };
+        if !same {
+            return false;
+        }
+    }
+    true
+}
+
+fn os_str_eq(left: &std::ffi::OsStr, right: &std::ffi::OsStr, case_insensitive: bool) -> bool {
+    if !case_insensitive {
+        return left == right;
+    }
+    match (left.to_str(), right.to_str()) {
+        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+        // Not UTF-8: nothing to fold (macOS/Windows paths are representable).
+        _ => left == right,
+    }
+}
+
 /// Resolve a markdown image destination to the path the metadata table is
 /// keyed by (and the drawing layer feeds to `ImageStore`).
 ///
@@ -325,8 +379,9 @@ impl fmt::Display for PathReject {
 /// Accepted (all normalised: `.`/`..` folded, duplicate separators collapsed):
 /// absolute paths, `file://` URLs, and relative paths joined onto `workspace`.
 /// Rejected (see [`PathReject`]): empty, control characters, over-long, remote
-/// schemes, `~`, relative paths without a workspace, `..` escapes, and
-/// non-image extensions.
+/// schemes, `~`, relative paths without a workspace, `..` escapes (the
+/// containment check folds case on case-insensitive platforms — see
+/// [`is_inside`]), and non-image extensions.
 pub fn resolve_image_path(workspace: Option<&Path>, raw: &str) -> Result<PathBuf, PathReject> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -350,7 +405,7 @@ pub fn resolve_image_path(workspace: Option<&Path>, raw: &str) -> Result<PathBuf
         let joined = normalize(&workspace.join(&path));
         let root = normalize(workspace);
         if joined.components().any(|c| c == Component::ParentDir)
-            || (!root.as_os_str().is_empty() && !joined.starts_with(&root))
+            || (!root.as_os_str().is_empty() && !is_inside(&joined, &root))
         {
             return Err(PathReject::EscapesWorkspace);
         }
@@ -804,6 +859,81 @@ mod tests {
         assert_eq!(
             resolve_image_path(rel.as_deref(), "sub/a.png").unwrap(),
             PathBuf::from("ws/sub/a.png")
+        );
+    }
+
+    /// The workspace containment check follows the *platform's* case rule
+    /// (review #135, N1): on a case-insensitive filesystem a case-variant
+    /// spelling names the same file, and refusing it would cost the user a
+    /// picture for nothing. Both rules are asserted here, on every platform, by
+    /// injecting the rule — the platform default only picks between them.
+    #[test]
+    fn containment_folds_case_only_where_the_filesystem_does() {
+        let root = Path::new("/Users/me/Project");
+        assert!(is_inside_with(
+            Path::new("/Users/me/Project/plots/a.png"),
+            root,
+            true
+        ));
+        assert!(is_inside_with(
+            Path::new("/users/ME/project/plots/a.png"),
+            root,
+            true
+        ));
+        assert!(is_inside_with(
+            Path::new("/Users/me/Project/plots/a.png"),
+            root,
+            false
+        ));
+        assert!(
+            !is_inside_with(Path::new("/users/ME/project/plots/a.png"), root, false),
+            "a case-sensitive filesystem must keep the byte comparison"
+        );
+        // The escape itself is refused under both rules: folding case must not
+        // turn into a prefix match on a *different* directory.
+        for case_insensitive in [true, false] {
+            assert!(!is_inside_with(
+                Path::new("/Users/me/Project-evil/a.png"),
+                root,
+                case_insensitive
+            ));
+            assert!(!is_inside_with(
+                Path::new("/Users/me/Other/a.png"),
+                root,
+                case_insensitive
+            ));
+            assert!(!is_inside_with(
+                Path::new("/Users/me"),
+                root,
+                case_insensitive
+            ));
+        }
+    }
+
+    #[test]
+    fn a_case_variant_spelling_resolves_like_the_platform_allows() {
+        // The same rule, seen from the resolver: the path is never rewritten,
+        // only admitted.
+        let w = Some(ws()); // "/workspace"
+        let variant = resolve_image_path(w.as_deref(), "SUB/./Plot.PNG");
+        match variant {
+            Ok(path) => {
+                assert!(CASE_INSENSITIVE_PATHS, "only folded on those platforms");
+                assert_eq!(path, PathBuf::from("/workspace/SUB/Plot.PNG"));
+            }
+            Err(reason) => {
+                assert_eq!(reason, PathReject::EscapesWorkspace);
+                assert!(!CASE_INSENSITIVE_PATHS, "byte comparison on Linux");
+            }
+        }
+        // Escaping is rejected either way, whatever the platform.
+        assert_eq!(
+            resolve_image_path(w.as_deref(), "../../etc/a.png"),
+            Err(PathReject::EscapesWorkspace)
+        );
+        assert_eq!(
+            resolve_image_path(w.as_deref(), "../a.png"),
+            Err(PathReject::EscapesWorkspace)
         );
     }
 

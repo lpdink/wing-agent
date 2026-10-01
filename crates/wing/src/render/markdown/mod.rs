@@ -1795,4 +1795,127 @@ mod tests {
         assert_eq!(anchors.len(), 2);
         assert!(anchors.iter().all(|a| a.rows == 30 && a.cols == 80));
     }
+
+    // ── Multi-line alt (PR #135 review, blocker B) ─────────────────
+    //
+    // A soft break inside the label flushes the line the label started on
+    // (`Event::SoftBreak` → `flush_line`), so the `label_start_segment_idx`
+    // recorded at `Tag::Image` can point past the end of the *new* line. That
+    // used to be an unchecked slice: `foo \`bar\` ![l1\nl2](a.png)` panicked
+    // with `range start index 3 out of range for slice of length 1`. Every
+    // shape below is a spelling of the same state, and none of them may panic
+    // — or anchor, since the image is no longer alone on its line.
+
+    /// Cross-line alts with the number of in-line segments *before* the label
+    /// (the crash needed ≥ 2: one segment survives the flush, so `[2..]` and
+    /// `[3..]` are the out-of-range ones) and in every enclosing block.
+    const CROSS_LINE_ALT_SHAPES: &[&str] = &[
+        // The review's minimal input: two segments (`foo ` + code `bar`).
+        "foo `bar` ![l1\nl2](a.png)",
+        // Two adjacent inline-code segments, and a longer prefix.
+        "`a` `b` ![l1\nl2](a.png)",
+        "*em* and `code` both ![l1\nl2](a.png) then",
+        // Exactly one segment before the label (the boundary that stayed in
+        // range by luck: `[1..]` of a one-segment line is empty, not a panic).
+        "x ![l1\nl2](a.png)",
+        // No segment before the label at all.
+        "![l1\nl2](a.png)",
+        // The same state inside every block that can hold a paragraph.
+        "- item ![l1\nl2](plot.png)",
+        "- parent\n  - nested ![l1\nl2](plot.png)",
+        "> quoted ![l1\nl2](plot.png)",
+        "# heading ![l1\nl2](plot.png)",
+        "| a | b |\n|---|---|\n| ![l1\nl2](plot.png) | x |",
+        "```markdown\n![l1\nl2](plot.png)\n```",
+        // A hard break is the same event class (two trailing spaces).
+        "foo `bar` ![l1  \nl2](a.png)",
+    ];
+
+    /// The metadata table for the cross-line shapes: both spellings the corpus
+    /// uses, with a shape that *would* anchor if the image were alone.
+    fn cross_line_opts() -> ImageOpts {
+        image_opts(&[("plot.png", 800, 600), ("a.png", 800, 600)])
+    }
+
+    #[test]
+    fn cross_line_alt_never_panics_and_stays_on_the_link_path() {
+        for md in CROSS_LINE_ALT_SHAPES {
+            let on = render_with(md, Some(80), content_opts(&cross_line_opts()));
+            let off = render_with(md, Some(80), RenderOpts::new(Profile::Content, true));
+            assert!(
+                on.iter().all(|line| line.image.is_none()),
+                "a cross-line alt was anchored: {md:?}"
+            );
+            // …and the rendering is the link path, span for span: the guard
+            // only stops the panic, it does not change what is drawn.
+            assert_eq!(fingerprint(&off), fingerprint(&on), "{md:?}");
+        }
+    }
+
+    #[test]
+    fn cross_line_alt_keeps_the_baseline_rendering() {
+        // The exact review input, pinned segment by segment (this is what
+        // `origin/develop` renders for it — verified against the baseline
+        // binary, see the step's design.md):
+        //   line 1: `foo ` · inline code `bar` · ` ` · link label `l1`
+        //   line 2: the label's last line, `l2`, with its (shown) destination
+        let lines = render_with(
+            "foo `bar` ![l1\nl2](a.png)",
+            Some(80),
+            content_opts(&cross_line_opts()),
+        );
+        let flat = lines
+            .iter()
+            .flat_map(|line| line.segments.iter())
+            .map(|seg| (seg.kind, seg.text.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            flat,
+            vec![
+                (SegmentKind::Text, "foo "),
+                (SegmentKind::InlineCode, "bar"),
+                (SegmentKind::Text, " "),
+                (SegmentKind::Link, "l1"),
+                (SegmentKind::Link, "l2 (a.png)"),
+            ]
+        );
+    }
+
+    #[test]
+    fn cross_line_alt_survives_math_and_images_off() {
+        // The review found both switches unable to dodge the panic (it is in
+        // the parser, before either option is consulted) — pin that both are
+        // clean now, and that the output does not depend on the math mode.
+        let math_off = ThemePalette {
+            math_mode: MathMode::Off,
+            ..ThemePalette::default()
+        };
+        for md in CROSS_LINE_ALT_SHAPES {
+            // `images: off` (the default tier) + `math: off`.
+            let off = render_markdown_lines_with(
+                md,
+                Some(80),
+                &math_off,
+                RenderOpts::new(Profile::Content, true),
+            );
+            assert!(off.iter().all(|line| line.image.is_none()), "{md:?}");
+            // `images: anchor` + `math: off`: still no anchor, still no panic.
+            let anchored = render_markdown_lines_with(
+                md,
+                Some(80),
+                &math_off,
+                content_opts(&cross_line_opts()),
+            );
+            assert_eq!(
+                fingerprint(&off),
+                fingerprint(&anchored),
+                "images=anchor math=off for {md:?}"
+            );
+            // `math: off` renders the same text as `math: text` (no `$` in the
+            // corpus) — the option is not what decides the outcome here.
+            let text =
+                render_markdown_lines_with(md, Some(80), &dp(), content_opts(&cross_line_opts()));
+            assert_eq!(fingerprint(&anchored), fingerprint(&text), "{md:?}");
+        }
+    }
 }

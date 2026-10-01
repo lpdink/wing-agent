@@ -32,6 +32,7 @@ use common::{chunk_stream, random_chunks};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use wing::config::ThemePalette;
+use wing::config::rendering::MathMode;
 use wing::render::markdown::ImageEntry;
 use wing::render::markdown::ImageOpts;
 use wing::render::markdown::ImageShape;
@@ -488,18 +489,43 @@ fn reconcile_with(
     images: ImageOpts,
     extra: &str,
 ) {
-    let palette = ThemePalette::default();
+    reconcile_with_palette(
+        name,
+        corpus,
+        chunks,
+        width,
+        profile,
+        images,
+        &ThemePalette::default(),
+        extra,
+    );
+}
+
+/// [`reconcile_with`] with an explicit palette — the `rendering.math` switch
+/// lives there, and the review's cross-line-alt shapes must reconcile with it
+/// off too (the panic they came from is in the parser, before any option).
+#[allow(clippy::too_many_arguments)]
+fn reconcile_with_palette(
+    name: &str,
+    corpus: &str,
+    chunks: &[&str],
+    width: u16,
+    profile: Profile,
+    images: ImageOpts,
+    palette: &ThemePalette,
+    extra: &str,
+) {
     let mut sr = StreamingRender::with_images(profile, images.clone());
     for chunk in chunks {
         sr.push(chunk);
         // Sync every chunk — exactly what the UI does per frame.
-        let _ = sr.lines(width, &palette);
+        let _ = sr.lines(width, palette);
     }
-    let rendered = sr.composed(width, &palette);
+    let rendered = sr.composed(width, palette);
     let streaming: Vec<Line<'static>> = rendered.lines.to_vec();
     let streaming_links = rendered.links.to_vec();
     let streaming_images = rendered.images.to_vec();
-    let reference = full_render(corpus, width, profile, &palette, &images);
+    let reference = full_render(corpus, width, profile, palette, &images);
     let (reference_lines, reference_links, reference_images) = reference.into_parts();
     pretty_assertions::assert_eq!(
         span_pairs(&streaming),
@@ -646,6 +672,25 @@ fn image_shapes() -> Vec<(&'static str, String)> {
             "image_then_heading",
             "![a](./plots/a.png)\n\n# Heading\n\nbody\n".into(),
         ),
+        // --- review #135 blocker B: a label that spans a soft break ---
+        //
+        // The soft break flushes the line the label opened on, so the saved
+        // segment index outlives the line it was recorded against. The shape
+        // must reconcile on both tiers (it is a link, and it is definitely not
+        // an anchor) and must never panic — on `develop` it did, with ≥ 2
+        // inline segments before the label.
+        (
+            "image_multiline_alt",
+            "foo `bar` ![l1\nl2](./plots/a.png)\n\nafter\n".into(),
+        ),
+        (
+            "image_multiline_alt_then_anchor",
+            "`x` `y` ![l1\nl2](./plots/a.png)\n\n![ok](./plots/a.png)\n".into(),
+        ),
+        (
+            "image_multiline_alt_in_containers",
+            "- item ![l1\nl2](./plots/a.png)\n\n> quoted ![l1\nl2](./plots/a.png)\n\n| a | b |\n|---|---|\n| ![l1\nl2](./plots/a.png) | x |\n".into(),
+        ),
     ]
 }
 
@@ -789,6 +834,85 @@ fn reconcile_matrix_images() {
         anchored >= 8,
         "the image corpus must produce anchors, got {anchored}"
     );
+}
+
+/// The review's blocker-B shapes at the chunk sizes the report used
+/// (1 / 3 / 17), across widths, profiles, both image tiers and the math
+/// switch — the panic they came from is in the parser, i.e. the reference
+/// render alone was enough to kill the process, so the streaming engine's
+/// resting state is the *second* thing that must be proven clean here.
+#[test]
+fn reconcile_matrix_cross_line_alt() {
+    let images = image_opts();
+    let cases: Vec<(&'static str, String)> = image_shapes()
+        .into_iter()
+        .filter(|(name, _)| name.starts_with("image_multiline_alt"))
+        .collect();
+    assert_eq!(
+        cases.len(),
+        3,
+        "the cross-line-alt shapes are missing from `image_shapes()`"
+    );
+    let math_off = ThemePalette {
+        math_mode: MathMode::Off,
+        ..ThemePalette::default()
+    };
+    for (name, corpus) in &cases {
+        for &profile in PROFILES {
+            for &chunk in &[1usize, 3, 17] {
+                for &width in WIDTHS {
+                    let chunks = chunk_stream(&corpus, chunk);
+                    for (palette, math) in [
+                        (&math_off, "math=off"),
+                        (&ThemePalette::default(), "math=text"),
+                    ] {
+                        for (opts, tier) in [
+                            (images.clone(), "images=anchor"),
+                            (ImageOpts::default(), "images=off"),
+                        ] {
+                            reconcile_with_palette(
+                                name,
+                                &corpus,
+                                &chunks,
+                                width,
+                                profile,
+                                opts,
+                                palette,
+                                &format!("chunk={chunk}B {tier} {math}"),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Not vacuous on the "no anchor" side: a cross-line alt must render as a
+    // link (only the shapes' *other* images may anchor), in the reference
+    // render, at every width.
+    let expected: &[(&str, usize)] = &[
+        ("image_multiline_alt", 0),
+        // Its second image is a standalone one — that one still anchors, and
+        // nothing else.
+        ("image_multiline_alt_then_anchor", 1),
+        ("image_multiline_alt_in_containers", 0),
+    ];
+    for ((name, corpus), (_, want)) in cases.iter().zip(expected) {
+        for &width in WIDTHS {
+            let rendered = full_render(
+                corpus,
+                width,
+                Profile::Content,
+                &ThemePalette::default(),
+                &images,
+            );
+            let anchors = rendered.images().iter().flatten().count();
+            assert_eq!(
+                anchors, *want,
+                "{name} anchored {anchors} image(s) at width {width} (expected {want}: \
+                 a label that spans a line break is not an anchor)"
+            );
+        }
+    }
 }
 
 /// Reconcile the full generated corpora (streamed at coarser chunks to

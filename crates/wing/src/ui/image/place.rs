@@ -215,6 +215,7 @@ mod tests {
     use crate::ui::image::encode::{decode, encode};
     use crate::ui::image::meta::write_png_fixture;
     use crate::ui::image::probe::CellPixels;
+    use crate::ui::image::store::Limits;
     use crate::ui::image::test_support::TempDir;
 
     const CELL: CellPixels = CellPixels::new(10, 20);
@@ -235,7 +236,7 @@ mod tests {
         let dir = TempDir::new(tag);
         let path = dir.path().join("plot.png");
         write_png_fixture(&path, u32::from(cols) * 10, u32::from(rows) * 20);
-        let decoded = decode(&path).expect("decode");
+        let decoded = decode(&path, &Limits::default()).expect("decode");
         let encoded =
             encode(decoded, Size::new(cols, rows), protocol, CELL, false).expect("encode");
         let epoch = Arc::new(AtomicU64::new(7));

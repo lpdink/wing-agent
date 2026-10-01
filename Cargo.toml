@@ -32,10 +32,15 @@ pulldown-cmark = "0.13"
 # SignedPosition / Protocol 均可直接用），且它内部依赖 `image 0.25.x` + `ratatui 0.30.x`。
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 
-# 图片解码。只开实际用到的 codec（png 是图表截图的主力格式，jpeg 是相机/照片），
-# `default-features = false` 避免 image 把 tiff/webp/exr 等全拉进来；版本必须与
-# ratatui-image 内部的 `image ^0.25.6` 同代，否则 `cargo tree` 会出现两份 image。
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# 图片解码。`default-features = false` 避免 image 把 tiff/exr/dds/avif 等全拉进来；
+# 版本必须与 ratatui-image 内部的 `image ^0.25.6` 同代，否则 `cargo tree` 会出现两份 image。
+#
+# 开的 codec 必须与 `render/markdown/images.rs` 的 `IMAGE_EXTENSIONS`（以及文档里给用户的
+# 验收清单）逐项对齐：只开 `png`+`jpeg` 时，`.gif/.webp/.bmp` 的扩展名会被放行但文件头
+# 永远解析不了 → 那三类图只会显示成链接（能力声明与事实不符）。gif/webp/bmp 三个纯 Rust
+# codec 的代价实测：release 冷构建 +0.9s（24.1s → 25.0s），`wing` 二进制 +450 KiB
+# （13.14 MiB → 13.60 MiB，+3.5%）。`tests/image_pipeline.rs` 有把两侧钉在一起的测试。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 
 # Syntax highlighting
 syntect = "5"

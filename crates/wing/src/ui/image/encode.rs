@@ -36,7 +36,7 @@ use std::io::BufReader;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use image::{DynamicImage, ImageReader};
+use image::{DynamicImage, ImageDecoder, ImageReader};
 use ratatui::layout::Size;
 use ratatui_image::Resize;
 use ratatui_image::protocol::Protocol;
@@ -47,6 +47,7 @@ use ratatui_image::sliced::SlicedProtocol;
 
 use super::meta::Unavailable;
 use super::probe::{CellPixels, ImageProtocol};
+use super::store::Limits;
 
 /// Kitty image ids. Unique-within-session is all the protocol needs; a counter is
 /// reproducible where `rand::random()` is not, and `rand` is not a dependency this step may
@@ -57,13 +58,35 @@ fn next_kitty_id() -> u32 {
     NEXT_KITTY_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Read and fully decode `path`. Worker-thread only.
-pub(crate) fn decode(path: &Path) -> Result<DynamicImage, Unavailable> {
+/// Read and fully decode `path`, re-checking `limits` at the point of the read.
+/// Worker-thread only.
+///
+/// The probe that filled the metadata table ran a frame or more earlier, and the file on
+/// disk can have been replaced in between — rewriting the same path is exactly how a model
+/// publishes a new picture. The budgets are therefore enforced *here* as well, on the very
+/// descriptor that gets decoded: a swapped-in oversized file is never read, a swapped-in
+/// giant header never gets an allocation. Both answer with the reason the probe would have
+/// given, so the caller cannot tell which side of the window it hit.
+pub(crate) fn decode(path: &Path, limits: &Limits) -> Result<DynamicImage, Unavailable> {
     let file = File::open(path).map_err(|_| Unavailable::Unreadable)?;
+    // The size comes off the open descriptor: one `stat`, and no race between
+    // the check and the `open` it is checking.
+    let bytes = file.metadata().map_err(|_| Unavailable::Unreadable)?.len();
+    if bytes > limits.file_bytes {
+        return Err(Unavailable::TooLarge { bytes });
+    }
     let reader = ImageReader::new(BufReader::new(file))
         .with_guessed_format()
         .map_err(|_| Unavailable::Unreadable)?;
-    reader.decode().map_err(|_| Unavailable::NotAnImage)
+    // `into_decoder` constructs the decoder from the **header only** — the same
+    // call `into_dimensions` is built on — so the pixel budget can be checked
+    // before anything is allocated, on the same reader the pixels come from.
+    let decoder = reader.into_decoder().map_err(|_| Unavailable::NotAnImage)?;
+    let (px_w, px_h) = decoder.dimensions();
+    if u64::from(px_w) * u64::from(px_h) > limits.pixels {
+        return Err(Unavailable::TooManyPixels { px_w, px_h });
+    }
+    DynamicImage::from_decoder(decoder).map_err(|_| Unavailable::NotAnImage)
 }
 
 /// Encode an already-decoded image for `protocol`, targeting `target` cells.
@@ -134,7 +157,7 @@ mod tests {
     #[test]
     fn decodes_a_real_png() {
         let (_dir, path) = fixture("encode-decode", 40, 30);
-        let image = decode(&path).expect("decode");
+        let image = decode(&path, &Limits::default()).expect("decode");
         assert_eq!((image.width(), image.height()), (40, 30));
     }
 
@@ -143,14 +166,17 @@ mod tests {
         let dir = TempDir::new("encode-liar");
         let path = dir.path().join("liar.png");
         std::fs::write(&path, b"not a png at all").expect("write");
-        assert_eq!(decode(&path).unwrap_err(), Unavailable::NotAnImage);
+        assert_eq!(
+            decode(&path, &Limits::default()).unwrap_err(),
+            Unavailable::NotAnImage
+        );
     }
 
     #[test]
     fn decode_reports_an_unreadable_file() {
         let dir = TempDir::new("encode-missing");
         assert_eq!(
-            decode(&dir.path().join("nope.png")).unwrap_err(),
+            decode(&dir.path().join("nope.png"), &Limits::default()).unwrap_err(),
             Unavailable::Unreadable
         );
     }
@@ -163,7 +189,7 @@ mod tests {
             ImageProtocol::Sixel,
             ImageProtocol::Iterm2,
         ] {
-            let image = decode(&path).expect("decode");
+            let image = decode(&path, &Limits::default()).expect("decode");
             let encoded = encode(image, Size::new(20, 10), protocol, CELL, false)
                 .unwrap_or_else(|err| panic!("encode {protocol:?}: {err}"));
             let size = encoded.size();
@@ -187,7 +213,7 @@ mod tests {
     fn row_stack_holds_one_protocol_per_visible_row() {
         // 100x100 pixels at a 10x20 cell = 10x5 cells; the target keeps it at natural size.
         let (_dir, path) = fixture("encode-rows", 100, 100);
-        let image = decode(&path).expect("decode");
+        let image = decode(&path, &Limits::default()).expect("decode");
         let encoded =
             encode(image, Size::new(40, 20), ImageProtocol::Iterm2, CELL, false).expect("encode");
         assert_eq!(encoded.size(), Size::new(10, 5));
@@ -201,7 +227,7 @@ mod tests {
     fn fit_never_grows_the_cell_footprint() {
         // 16x16 pixels at a 10x20 cell is 2x1 cells, well inside a 40x20 target.
         let (_dir, path) = fixture("encode-small", 16, 16);
-        let image = decode(&path).expect("decode");
+        let image = decode(&path, &Limits::default()).expect("decode");
         let encoded =
             encode(image, Size::new(40, 20), ImageProtocol::Kitty, CELL, false).expect("encode");
         assert_eq!(encoded.size(), Size::new(2, 1));
@@ -229,7 +255,7 @@ mod tests {
     #[test]
     fn fit_keeps_the_aspect_ratio_inside_the_target() {
         let (_dir, path) = fixture("encode-aspect", 400, 100);
-        let image = decode(&path).expect("decode");
+        let image = decode(&path, &Limits::default()).expect("decode");
         let encoded =
             encode(image, Size::new(20, 20), ImageProtocol::Kitty, CELL, false).expect("encode");
         // 400x100 pixels is 40x5 cells at natural size. Into a 20-cell-wide box the pixels
@@ -256,9 +282,71 @@ mod tests {
             // The kitty anchor carries the transmit sequence, which embeds the image id.
             buf[(0, 0)].symbol().to_string()
         };
-        let first = render_anchor(decode(&path).expect("decode"));
-        let second = render_anchor(decode(&path).expect("decode"));
+        let first = render_anchor(decode(&path, &Limits::default()).expect("decode"));
+        let second = render_anchor(decode(&path, &Limits::default()).expect("decode"));
         assert!(first.contains("\u{1b}_G"), "anchor is not a kitty transmit");
         assert_ne!(first, second, "two encodings reused the same image id");
+    }
+
+    // ── The limits are re-checked at the read (PR #135 review, S1) ──────
+    //
+    // `decode` is the only place that reads a file for drawing, and it is
+    // reached a frame or more after the probe that admitted the path. The
+    // budgets therefore have to hold at the read itself: the file on disk may
+    // have been swapped for another one in between (rewriting the same path is
+    // how a model publishes a new picture).
+
+    #[test]
+    fn decode_refuses_a_file_that_grew_past_the_byte_budget() {
+        let dir = TempDir::new("encode-swap-large");
+        let path = dir.path().join("swapped.png");
+        // Small enough to have been probed and admitted…
+        write_png_fixture(&path, 40, 30);
+        let limits = Limits {
+            file_bytes: 512,
+            ..Limits::default()
+        };
+        assert!(std::fs::metadata(&path).expect("stat").len() <= limits.file_bytes);
+        assert!(decode(&path, &limits).is_ok(), "the small file decodes");
+        // …then replaced by something far past the budget.
+        std::fs::write(&path, vec![0u8; 64 * 1024]).expect("write");
+        assert_eq!(
+            decode(&path, &limits).unwrap_err(),
+            Unavailable::TooLarge { bytes: 64 * 1024 },
+            "the byte budget must hold at the read, not only at the probe"
+        );
+    }
+
+    #[test]
+    fn decode_refuses_a_header_past_the_pixel_budget() {
+        let dir = TempDir::new("encode-swap-pixels");
+        let path = dir.path().join("swapped.png");
+        write_png_fixture(&path, 40, 30);
+        let limits = Limits {
+            pixels: 100,
+            ..Limits::default()
+        };
+        // The header is rejected before a single pixel is allocated: the
+        // reason carries the dimensions the file declares, which is only
+        // knowable from the header.
+        assert_eq!(
+            decode(&path, &limits).unwrap_err(),
+            Unavailable::TooManyPixels { px_w: 40, px_h: 30 }
+        );
+        // The same file under the default budget decodes, so the refusal above
+        // is the budget and not a broken fixture.
+        assert!(decode(&path, &Limits::default()).is_ok());
+    }
+
+    #[test]
+    fn decode_still_reports_a_non_image_as_such() {
+        // The new gates must not swallow the existing verdicts.
+        let dir = TempDir::new("encode-swap-junk");
+        let path = dir.path().join("junk.png");
+        std::fs::write(&path, vec![0u8; 4096]).expect("write");
+        assert_eq!(
+            decode(&path, &Limits::default()).unwrap_err(),
+            Unavailable::NotAnImage
+        );
     }
 }

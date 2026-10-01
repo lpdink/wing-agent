@@ -409,7 +409,10 @@ TypeScript 与源码，看不到 bundler 实际吐出的字节。这个测试：
 - **降级只有一档**：任何一种"不能显示"（被拒绝、还没答复、`<img>` 加载失败）都退回今天的行为——
   指向源地址的链接（alt 兜底、点击交给编辑器），不会有空框。
 - `localResourceRoots` = 扩展根 + `workspaceFolders[0]`（多根窗口也只给第一个，与 `openFile` 的
-  `resolvePath` 同口径）。
+  `resolvePath` 同口径）。**运行期新增/移除第一个 workspace 文件夹后它不会重算**（review #135 [N2] 登记）：
+  webview 的资源根与 `resolveImages` 用的 `root` 都在 `resolveWebviewView` 时一起定格，此后新根之外的
+  图片仍按旧根解析 → 退回链接，直到视图重建（切换容器 / 重载窗口）；重载窗口一次即恢复。
+  `webview.options` 是文档级设置，按帧重算等于把 workspace 状态放进渲染路径，故不修。
 - KaTeX 的字体以 `data:` URI 内联在 `main.css` 里（见 §8.2 的 CSP 说明），所以公式不需要任何
   运行期网络/资源请求；构建期只保留 woff2 源（`tools/fonts.mts`），三段格式里另外两段 Chromium
   永远不会取。

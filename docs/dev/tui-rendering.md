@@ -122,6 +122,7 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 | `f(x) = \begin{cases}…\end{cases}` 的 `f(x) =` 留在上一行 | 归一化只包环境本身，不吞前导正文（吞了就得猜公式起点，代价更大） | 定界符语义（第二节·五） |
 | 行内 `e^{x}` / `\sqrt{2}` 没渲染（显示源码） | 引擎布局是 2 行，行内必须单行 → `None` | 引擎契约（`wing-math/src/api.rs`） |
 | 货币 `$` 与代码跨度里的 `$` 被 pulldown 配成一对（`成本是 $100，用 \`$PATH\` 变量` → `$100` 的 `$` 被吞、代码跨度被拆） | pulldown 0.13 的数学配对是全局扫描：先埋 `$` token 再配对，**代码跨度不参与**，所以「先出现一个未配对 `$`，之后代码跨度里再有 `$`」必然错配。D5 的「代码/围栏内不解析」只对**开**定界符成立；`a946327` 起既有（基线 `94ac0be` 无此问题，因为它不解析数学）。修法需在归一化层保护代码跨度里的 `$`（不能简单加反斜杠：代码跨度内反斜杠是字面量），属独立决策 → 留给后续步骤 | pulldown 配对语义（既有） |
+| 两个**货币符号**互相配对（`the price is $5-$10 today` → `the price is 5 -10 today`；`$5 and $10` 有空白则不配对） | 同上一行的配对语义，只是这次没有代码跨度参与：两个 `$` 恰好满足行内数学的两条空白规则，与货币意图无关。修法同上（需要一层「哪些 `$` 是货币」的判定），**不阻塞**、不在本 PR 内处理 | pulldown 配对语义（既有） |
 | 容器里的反引号围栏（`> ``` `、`- ``` …`、`  - ``` …`）在**某些 chunk 边界**下静息态 ≠ 参考 | 根因是 `ensure_fences_on_own_line`：`> ` / `- ` 不是空白前缀，行首 `> ``` ` 会被当成「粘在文字后的围栏」而插入换行；插入发生在 `push` 里，**某个切片可能先被 promoted、插入还没落地**，于是切片文本与参考的归一化文本不同。分歧点随 profile / 形状 / chunk 漂移（实测 `> ~~~
 > a
 ~~~` + 公式：content chunk=5 双方都分歧；`  - ``` … > ``` ` 这类形状：双方都在 thinking 全 chunk 分歧、本实现另有 content chunk=7 的零星分歧） | 既有噪声（`a946327` 同样分歧，只是组合不同），`finalize()` 收敛；`stream_render_reconcile` 因此不放这些形状（tilde 围栏的同类形状在矩阵里） |
@@ -157,7 +158,7 @@ W            = markdown 渲染宽 = 单元格宽 − 2 列前缀（也就是锚�
 **路径策略**（纯词法：不 stat、不 canonicalize、不解析符号链接——这是显示边界不是安全边界）：
 
 - 接受：workspace 相对路径（`.`/`..`/重复分隔符折掉）、绝对路径、`file://`（`file://host/…` 除外）；
-- 拒绝：空、控制字符（防转义注入）、超过 512 字符、远程 scheme（`http:` / `https:` / `data:` / `ftp:` …）、`~`（要读环境变量）、没有 workspace 时的相对路径、`..` 越出 workspace、扩展名不在 `png jpg jpeg gif webp bmp`（大小写不敏感）。
+- 拒绝：空、控制字符（防转义注入）、超过 512 字符、远程 scheme（`http:` / `https:` / `data:` / `ftp:` …）、`~`（要读环境变量）、没有 workspace 时的相对路径、`..` 越出 workspace（包含判定在大小写不敏感平台折叠 **ASCII** 大小写：macOS/Windows 上 `…/Project/a.png` 与 `…/project/a.png` 是同一个文件，只按平台规则比较、不 stat 也不 canonicalize；见 `images.rs::is_inside`）、扩展名不在 `png jpg jpeg gif webp bmp`（大小写不敏感）。
 
 拒绝不是错误：该图片走链接路径。
 

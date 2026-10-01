@@ -182,6 +182,21 @@ fn write_png(path: &Path, px_w: u32, px_h: u32) {
         .expect("write the fixture");
 }
 
+/// The same fixture in any format the pipeline claims to support.
+///
+/// The write and the read are gated by the *same* `image` feature, so a build
+/// that lost a codec fails right here — the format cannot even be produced —
+/// which is why [`every_claimed_image_extension_has_a_working_codec`] starts
+/// by writing each fixture rather than reading a checked-in one.
+fn write_image(path: &Path, format: image::ImageFormat, px_w: u32, px_h: u32) {
+    let image = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(px_w, px_h, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
+    }));
+    image
+        .save_with_format(path, format)
+        .unwrap_or_else(|err| panic!("write the {format:?} fixture: {err}"));
+}
+
 /// Drive the store the way the event loop does: poll, re-plan, sleep.
 fn poll_until(store: &mut ImageStore, what: &str, mut done: impl FnMut(&mut ImageStore) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -315,5 +330,80 @@ fn missing_files_degrade_to_a_reason_instead_of_an_error() {
     match store.request(&path, Size::new(10, 5)) {
         ImageState::Unavailable(reason) => assert!(!reason.to_string().is_empty()),
         other => panic!("expected an unavailable image, got {other:?}"),
+    }
+}
+
+/// Every extension the markdown layer admits must correspond to a codec that
+/// is actually compiled in.
+///
+/// `IMAGE_EXTENSIONS` (and the docs' acceptance list) is what the render layer
+/// lets through; the `image` crate's feature set is what can be *read*. When the
+/// two drift apart the pipeline does not fail loudly — a `.gif` simply probes as
+/// `NotAnImage` and the user gets a link, with nothing saying why (that is
+/// exactly the review's S2). This test pins both halves together, end to end:
+/// write a real file of each claimed format, probe it, and encode it for the
+/// terminal — the whole path the drawing layer takes.
+#[test]
+fn every_claimed_image_extension_has_a_working_codec() {
+    // The extensions the markdown layer advertises, each with the format the
+    // fixture is written in. `png`/`jpg`/`jpeg` are the two families that were
+    // enabled from the start; the rest are what S2 turned on.
+    let cases: &[(&str, image::ImageFormat)] = &[
+        ("png", image::ImageFormat::Png),
+        ("jpg", image::ImageFormat::Jpeg),
+        ("jpeg", image::ImageFormat::Jpeg),
+        ("gif", image::ImageFormat::Gif),
+        ("webp", image::ImageFormat::WebP),
+        ("bmp", image::ImageFormat::Bmp),
+    ];
+    let mut claimed = wing::render::markdown::IMAGE_EXTENSIONS.to_vec();
+    claimed.sort_unstable();
+    let mut covered: Vec<&str> = cases.iter().map(|(ext, _)| *ext).collect();
+    covered.sort_unstable();
+    assert_eq!(
+        claimed, covered,
+        "`IMAGE_EXTENSIONS` changed: add (or remove) the codec below and, if it \
+         is a real capability change, the note in docs/dev/tui-images.md — and \
+         the `image` feature list in the root Cargo.toml"
+    );
+
+    let dir = TempDir::new("codecs");
+    let mut store = ImageStore::new(ImageSupport::from_parts(ImageProtocol::Kitty, CELL, false));
+    for (extension, format) in cases {
+        let path = dir.file(&format!("fixture.{extension}"));
+        write_image(&path, *format, 60, 40);
+
+        assert_eq!(
+            store.meta(&path),
+            MetaState::Unknown,
+            "{extension}: the first probe is asynchronous"
+        );
+        poll_until(&mut store, extension, |store| {
+            !matches!(store.meta(&path), MetaState::Unknown)
+        });
+        match store.meta(&path) {
+            MetaState::Known(meta) => assert_eq!(
+                (meta.px_w, meta.px_h),
+                (60, 40),
+                "{extension} probed with the wrong dimensions"
+            ),
+            MetaState::Unavailable(reason) => panic!(
+                ".{extension} is advertised as drawable (IMAGE_EXTENSIONS + \
+                 docs/dev/tui-images.md) but this build cannot read it: {reason}"
+            ),
+            MetaState::Unknown => unreachable!("polled until answered"),
+        }
+
+        // …and it can actually be drawn, not merely measured.
+        let target = Size::new(6, 2);
+        assert!(matches!(store.request(&path, target), ImageState::Pending));
+        poll_until(&mut store, extension, |store| {
+            matches!(store.request(&path, target), ImageState::Ready(_))
+        });
+        assert!(
+            store.stats().failed == 0,
+            "{extension} failed to encode: {:?}",
+            store.stats()
+        );
     }
 }

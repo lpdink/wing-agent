@@ -40,6 +40,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   resolveWebviewView(view: vscode.WebviewView): void {
     const { webview } = view;
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+    // Both the resource roots and the `root` captured below are fixed *here*, when
+    // the view resolves: adding or removing the first workspace folder (or moving
+    // the window to another folder) afterwards leaves images resolving against the
+    // old root, so they stay links until the view is rebuilt. Deliberately not
+    // re-resolved per render: `webview.options` is a document-level setting, and
+    // re-reading it on every image would put workspace state on the render path.
+    // Cost of the staleness: a picture shows as a link for that window — see
+    // docs/dev/vscode-extension.md, "已知限制".
     webview.options = {
       enableScripts: true,
       // The transcript can show images from the workspace, and only from there: the

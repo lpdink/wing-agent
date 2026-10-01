@@ -768,7 +768,10 @@ impl Worker {
         let Some(cell) = self.support.cell_pixel_size() else {
             return Err(Unavailable::Disabled);
         };
-        let image = encode::decode(path)?;
+        // The limits are handed to the read itself: the probe that admitted this
+        // path ran before the job was queued, and the file may have been
+        // replaced since (see `encode::decode`).
+        let image = encode::decode(path, &self.limits)?;
         encode::encode(image, target, protocol, cell, self.support.is_tmux())
     }
 }
@@ -1194,6 +1197,47 @@ mod tests {
             matches!(reason, Unavailable::TooLarge { .. }),
             "unexpected reason: {reason:?}"
         );
+    }
+
+    /// PR #135 review, S1: the probe that admitted the path and the encode that
+    /// reads it are a frame or more apart, and the file can be replaced in
+    /// between — exactly what "the model rewrote the same picture" looks like.
+    /// The budgets must hold at the read, not only at the probe: without the
+    /// re-check this test answers `NotAnImage` (the junk is not a PNG) or, with
+    /// a real giant image, decodes it.
+    #[test]
+    fn a_file_swapped_after_the_probe_still_hits_the_limits() {
+        let dir = TempDir::new("store-swap");
+        let path = fixture(&dir, "plot.png", 40, 30);
+        let limits = Limits {
+            file_bytes: 512,
+            ..Limits::default()
+        };
+        let mut store = store_with(ImageProtocol::Kitty, limits, None);
+        let target = Size::new(4, 2);
+
+        // The probe admits the small file (nothing is encoded yet: a probe only
+        // fills the metadata memo).
+        pump_until(&mut store, "the probe", |store| {
+            matches!(store.meta(&path), MetaState::Known(_))
+        });
+        assert!(store.stats().known_meta == 1);
+
+        // …and the file is replaced before the first encode runs.
+        fs::write(&path, vec![0u8; 64 * 1024]).expect("write");
+
+        assert!(matches!(store.request(&path, target), ImageState::Pending));
+        pump_until(&mut store, "the refusal", |store| {
+            matches!(store.request(&path, target), ImageState::Unavailable(_))
+        });
+        let ImageState::Unavailable(reason) = store.request(&path, target) else {
+            panic!("expected a refusal");
+        };
+        assert!(
+            matches!(reason, Unavailable::TooLarge { .. }),
+            "the swapped-in file must be refused by its size, got: {reason:?}"
+        );
+        assert_eq!(store.stats().cached, 0, "nothing may be cached from this");
     }
 
     #[test]

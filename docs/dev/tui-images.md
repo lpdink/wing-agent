@@ -105,6 +105,18 @@ I/O），所以由 app lane 检查：
 | 锚点行数 | `MAX_ANCHOR_ROWS`（`render/markdown/images.rs`） | 36 | 盒子封顶，图在盒内等比缩放留白 |
 | app 元数据表（`Images::known`） | 无上限（随会话引用过的**不同图片数**增长） | — | 一代内容内**只增不减**（见 [`tui-rendering.md`](tui-rendering.md) 第五节：缩表会让锚点在链接/锚点之间振荡）；内容重建（`structure_epoch`）整表清空。实测 120 张 = 120 条（`a_hundred_pictures_stay_within_the_cache_budget` 的断言） |
 
+**上限在读取处也成立**（review #135 [S1]）：`probe` 与真正解码之间隔着一个渲染周期，正是「模型重写同一
+路径」的高发窗口，所以 `ui/image/encode.rs::decode` 在**同一个 fd** 上复核两道预算——超过 `file_bytes`
+时一个字节都不读、超过像素预算时一个解码缓冲都不分配，失败给出与探测相同的 `TooLarge` /
+`TooManyPixels` → 链接路径（测试：`encode.rs` 的两条复核 + `store.rs::a_file_swapped_after_the_probe_still_hits_the_limits`）。
+
+**扩展名 ↔ codec 必须逐项对齐**（review #135 [S2]）：`IMAGE_EXTENSIONS`（`png jpg jpeg gif webp bmp`）
+与根 `Cargo.toml` 的 `image` feature 集是同一份能力声明的两半——只开 `png`+`jpeg` 时，`.gif/.webp/.bmp`
+会被路径策略放行但文件头永远解析不了，静默退回链接、不给任何提示。实测代价（release 冷构建，禁用
+sccache）：**+0.9 s 构建时间、二进制 +450 KiB（13.14 → 13.60 MiB，+3.5%）**，因此选择把三个纯 Rust
+codec 打开而不是收缩声明。`tests/image_pipeline.rs::every_claimed_image_extension_has_a_working_codec`
+为每个扩展名写一个真 fixture 并走完「探测 → 编码」，两侧再漂移会红。
+
 **压力验证**（`app/tests/images.rs::a_hundred_pictures_stay_within_the_cache_budget`）：120 张不同图片、
 整屏滚动若干步，每一步断言 `cached ≤ 8`、`cached_bytes ≤ 24 MiB`、`memo ≤ 256`、`failed ≤ 64`、
 worker 存活、可见图全部画出。变异实验（把 LRU 上限改成永不淘汰）→ `cached: 9` 立刻红。
