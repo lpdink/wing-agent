@@ -121,6 +121,15 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 @pytest.mark.probe_env(provider_extra={"image_delivery": "inline"})
 #   → 合进 providers[0]：provider 级透传旋钮（如覆盖图片投递形态 inline/followup）。
 
+@pytest.mark.probe_env(gateway_extra={"static_dir": "static"})
+#   → 合进 gateway：静态托管（相对路径按 $WING_HOME/core 解析）、开发期 CORS
+#   （cors_origins）与鉴权（auth）场景的配置入口；目录可在场景启动后再创建。
+#   鉴权开启的场景加 connect=False（driver 的 WS 无 key 会被拒连），改用 raw_http。
+
+# 原始 HTTP fixture（未鉴权、无留档）：静态资源 / CORS / 受限图片端点这类断言要按
+# 状态码 + 响应头 + 原始字节取证，driver 的结构化 JSON 通道看不到它们。
+async def test_something(probe: Probe, raw_http: httpx.AsyncClient) -> None: ...
+
 # hooks: 透传 config.yaml 的 hooks: glob；相对路径按**网关进程 cwd**（env.root）解析。
 # 惯例：场景在 reload 前把 hook 文件写进 <root>/hooks/，再 POST /api/system/reload
 @pytest.mark.probe_env(hooks=["hooks/*.py"])

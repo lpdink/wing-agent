@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 
 from wing.common.logger import install_loop_exception_logger
@@ -25,6 +26,19 @@ from wing.gateway.routes import register_routes
 
 if TYPE_CHECKING:
     from wing.gateway.server import GatewayServer
+
+
+def _cors_origins(server: "GatewayServer") -> list[str]:
+    """读取 `gateway.cors_origins`（App 创建时快照）。
+
+    热重载不改变已装配的中间件栈——`cors_origins` 改了要重启网关；`static_dir`
+    相反（逐请求解析，热重载即时生效）。类型不符 / 空白项静默忽略：配置对象在
+    测试里常是替身，这里不能因为"没有这个键"就把服务起崩。
+    """
+    raw = getattr(server.gateway_config, "cors_origins", None)
+    if not isinstance(raw, list | tuple):
+        return []
+    return [item.strip() for item in raw if isinstance(item, str) and item.strip()]
 
 
 def _register_error_handlers(app: FastAPI) -> None:
@@ -87,6 +101,20 @@ def create_app(server: GatewayServer) -> FastAPI:
 
     app.state.server = server
     app.add_middleware(AuthMiddleware)
+    # CORS 必须**后加**（Starlette 的中间件栈后加的更外层）：预检请求
+    # （OPTIONS + Origin/Access-Control-Request-Method）不带鉴权头，必须在
+    # AuthMiddleware 之外被应答，否则 auth 开启时开发期跨源全线 401。
+    cors_origins = _cors_origins(server)
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_methods=["*"],
+            allow_headers=["*"],
+            # 鉴权走显式请求头（Authorization / X-API-Key），不用 Cookie：
+            # 不需要 credentials（开了反而要求精确 origin 并带上用户凭证）。
+            allow_credentials=False,
+        )
     _register_error_handlers(app)
     register_routes(app, server)
 

@@ -26,7 +26,7 @@ import uvicorn
 from wing.background import BackgroundScheduler
 from wing.build_info import get_commit
 from wing.common.logger import log
-from wing.config import AuthConfig, get_config, load_config
+from wing.config import AuthConfig, GatewayConfig, get_config, load_config
 from wing.event import WingEvent, wire_dump
 from wing.event_bus import event_bus
 from wing.runtime import WingRuntime
@@ -34,6 +34,7 @@ from wing.runtime import WingRuntime
 from .app import create_app
 from .frames import HARD_LIMIT_BYTES, Frame, build_frames
 from .remote_tools import RemoteToolManager
+from .static_host import sensitive_static_root_warning
 
 DEFAULT_PORT = 32523
 
@@ -102,6 +103,15 @@ class GatewayServer:
         """当前鉴权配置（每次读取最新单例，热重载后立即生效）。"""
         return load_config().gateway.auth
 
+    @property
+    def gateway_config(self) -> GatewayConfig:
+        """当前 gateway 配置段（静态托管 / CORS / 鉴权豁免的读取口）。
+
+        与 `auth_config` 同理走 `load_config()`（每次读最新单例）：`static_dir`
+        的热重载即时生效；`cors_origins` 只在 App 创建时装配中间件栈，热重载不生效。
+        """
+        return load_config().gateway
+
     def _warn_auth_lockout(self) -> None:
         """启动时检查 auth 配置，空 keys 锁死时发出警告。"""
         auth = self.auth_config
@@ -111,6 +121,12 @@ class GatewayServer:
                 "ALL requests (including /api/system/reload) will be "
                 "rejected with 401. Edit config.yaml and restart to fix."
             )
+
+    def _warn_static_dir_exposure(self) -> None:
+        """启动时检查静态托管根：落在 `$WING_HOME/core` 目录树里就警告（不改行为）。"""
+        warning = sensitive_static_root_warning(self.gateway_config)
+        if warning is not None:
+            log.warning(warning)
 
     @property
     def clients(self) -> dict[str, WebSocket]:
@@ -149,6 +165,7 @@ class GatewayServer:
             sys.exit(1)
 
         self._warn_auth_lockout()
+        self._warn_static_dir_exposure()
 
         # Subscribe EventBus
         event_bus.subscribe(self._on_event)

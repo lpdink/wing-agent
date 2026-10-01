@@ -20,9 +20,11 @@ from fastapi import WebSocket
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.routing import get_route_path
 from starlette.types import ASGIApp
 
 from wing.gateway.protocol import error_response
+from wing.gateway.static_host import is_public_static_path
 
 # 免鉴权路径——无论 auth.enabled 如何，这些路径始终开放。
 EXEMPT_PATHS: set[str] = {"/api/health"}
@@ -106,12 +108,23 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
-        auth_config = request.app.state.server.auth_config
+        server = request.app.state.server
+        auth_config = server.auth_config
 
         if not auth_config.enabled:
             return await call_next(request)
 
-        if request.url.path in EXEMPT_PATHS:
+        # 用**路由路径**（剥掉 root_path）而不是 request.url.path：反代以路径前缀
+        # 暴露网关时（--root-path / 换 ASGI 宿主），`/prefix/api/...` 的 url.path
+        # 不以 `/api/` 开头 → 会被误判成"公开静态资源"→ 鉴权 fail-open。
+        path = get_route_path(request.scope)
+        if path in EXEMPT_PATHS:
+            return await call_next(request)
+
+        # 静态托管开启时，非保留前缀的路径是 web 壳资源（不含数据）——公开，
+        # 否则浏览器连壳都加载不了。`/api/*`、`/docs`、`/redoc`、`/openapi.json`
+        # 与 `/ws` 维持现状（要 key）。判定见 gateway/static_host.py。
+        if is_public_static_path(server.gateway_config, path):
             return await call_next(request)
 
         key = extract_key_from_headers(request.headers)
@@ -124,10 +137,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # RBAC：tool_runtime 仅允许访问 allowlist 路径，其余 403。
         # admin 全量放行；auth 关闭时本方法已在更早处早返回，不做强制。
-        if (
-            role == ROLE_TOOL_RUNTIME
-            and request.url.path not in TOOL_RUNTIME_ALLOWED_PATHS
-        ):
+        if role == ROLE_TOOL_RUNTIME and path not in TOOL_RUNTIME_ALLOWED_PATHS:
             return _forbidden()
 
         request.state.api_key_role = role

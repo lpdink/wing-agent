@@ -35,10 +35,28 @@
 | `tool_result_truncate` | 超长工具结果截断（`max_length` / `keep_chars`，头尾保留 + 全文落临时文件） |
 | `images` | 图片读入与请求期保留预算（`max_bytes` 4718592（4.5 MiB）/ `max_images` 32 / `count_quantum` 8 / `request_budget_bytes` 37748736 / `evict_quantum_bytes` 18874368，全部 > 0）——读图链路与投影算法见 [media-images.md](media-images.md) |
 | `log.level` | 网关**控制台**级别（守护进程 stdout/stderr，被 `gateway.log` 捕获）；每日文件日志恒为 DEBUG |
-| `gateway` | `host` / `port` / `remote_tool_timeout` / `auth`（opt-in API key：`enabled` + `keys[{key, role}]`，角色 `admin` / `tool_runtime`） |
+| `gateway` | `host` / `port` / `remote_tool_timeout` / `auth`（opt-in API key：`enabled` + `keys[{key, role}]`，角色 `admin` / `tool_runtime`）/ `static_dir`（web 构建托管，默认 `null` = 关闭）/ `cors_origins`（开发期 CORS 放行 origin 列表，默认 `[]` = 不挂中间件） |
 | `commands.paths` | prompt 命令（`/xxx` 展开）的 glob 列表，每个 .md（frontmatter: name / description / aliases，正文 `$ARGUMENTS` 占位）定义一个命令 |
 | `user_agent.preset` | HTTP User-Agent 预设（`opencode` / `qwen-code`） |
 | `sessions` | 会话存储路径解析（env 覆盖优先）+ `eviction`（空闲会话逐出：`enabled` / `idle_ttl_seconds`（默认 1800）/ `sweep_interval_seconds`（默认 300，启动时读取）） |
+
+## 静态托管与 CORS（`gateway.static_dir` / `gateway.cors_origins`）
+
+```yaml
+gateway:
+  static_dir: /srv/wing-web/dist   # 绝对路径；null = 关闭（默认）
+  cors_origins:                    # 默认 [] = 不挂 CORS 中间件
+    - http://localhost:5173
+```
+
+| 键 | 取值 | 默认 | 说明 |
+|----|------|------|------|
+| `static_dir` | 目录路径 \| `null` | `null` | `apps/web` 构建产物的托管目录。绝对路径按原样；**相对路径按配置所在目录（`$WING_HOME/core`）解析**；`~` 展开。目录不存在 = 未启用（未知路径回 404，网关照常启动）——解析在**每个请求**上发生，产物事后出现即生效、无需重启。行为（缓存头 / SPA fallback / 保留前缀 / 越界 / 307 保持）见 [http-api.md](http-api.md#静态托管与开发期-cors)。⚠️ 该目录下**所有**文件都会变成未鉴权可读（auth 开启时也一样）：**不要指向 `$WING_HOME/core` 本身或其祖先**（`static_dir: "."` 就等于把 config.yaml 里的 provider key 端出去）；启动时会对此打一行 WARNING |
+| `cors_origins` | origin 列表 | `[]` | 非空才挂 `CORSMiddleware`，只放行所列 origin（逐项 strip + 去尾斜杠）；**拒绝 `"*"`**。方法与头全放、不开 credentials。中间件栈在启动时装配 → **改了要重启网关** |
+
+> `cors_origins` 里的 origin 是浏览器 `Origin` 头的字面值（`scheme://host[:port]`，无尾斜杠）；
+> vite dev server 默认 `http://localhost:5173`，按需增补实际访问用的地址（手机经局域网访问
+> 时是 `http://<局域网 IP>:5173`）。
 
 ## TUI 配置（`~/.wing/tui/config.yaml`）
 

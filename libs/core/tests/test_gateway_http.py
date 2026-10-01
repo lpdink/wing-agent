@@ -1895,3 +1895,136 @@ class TestReservedClientIdAndLifecycle:
             assert resp.status_code == 422
         finally:
             tool_registry.unregister_namespace("host-bad")
+
+
+# ============================================================
+# 静态托管 catch-all 的注册结构 + root_path 归一（返修 r1 [N4][N6]）
+# ============================================================
+
+
+def _flatten_routes(routes: list) -> list:
+    """展开 FastAPI 的 include_router 包装（`_IncludedRouter`），按注册序返回真实路由。"""
+    flat: list = []
+    for route in routes:
+        inner = getattr(route, "original_router", None)
+        if inner is not None:
+            flat.extend(_flatten_routes(inner.routes))
+            continue
+        children = getattr(route, "routes", None)
+        if children:
+            flat.extend(_flatten_routes(children))
+            continue
+        flat.append(route)
+    return flat
+
+
+class TestRouteRegistration:
+    """静态托管 catch-all 的注册结构守门。
+
+    Starlette 取**第一个 FULL 匹配**，catch-all 对任何 GET/HEAD（非保留路径）都是
+    FULL——注册在它之后的路由永远不可达。这条约束今天靠"`register_routes` 把它放
+    最后"维持，没有测试钉住；这里把顺序与保留清单的**互相覆盖**一起钉死：
+    ① catch-all 必须是最后一条；② 其余每一条 HTTP 路由的路径都必须是保留路径
+    （否则它会被 catch-all 吞掉，或反过来被鉴权豁免静默公开）。
+    """
+
+    def test_catch_all_is_last_and_others_are_reserved(self, client: TestClient):
+        from wing.gateway.static_host import is_reserved_path
+
+        routes = _flatten_routes(client.app.routes)
+        paths = [str(getattr(route, "path", "")) for route in routes]
+        assert paths, "路由树为空"
+        assert paths[-1] == "/{file_path:path}", paths
+
+        for route in routes[:-1]:
+            path = str(getattr(route, "path", ""))
+            assert is_reserved_path(path), (
+                path,
+                "非保留路径注册在 catch-all 之前：要么被 catch-all 吞掉，"
+                "要么被静态托管的鉴权豁免顺带公开",
+            )
+
+    def test_catch_all_route_class_is_static_host(self, client: TestClient):
+        """catch-all 用的是 `StaticHostRoute`（匹配层门控 307/405 语义的前提）。"""
+        from wing.gateway.routes.static import StaticHostRoute
+
+        catch_all = _flatten_routes(client.app.routes)[-1]
+        assert isinstance(catch_all, StaticHostRoute), type(catch_all)
+
+
+@pytest.fixture
+def rooted_client(mock_runtime, tmp_path):
+    """auth 开启 + 静态托管的 TestClient，挂在 `root_path="/prefix"` 下。
+
+    模拟"反向代理以路径前缀暴露网关"的部署形态：路由匹配会剥掉 root_path，
+    鉴权豁免与保留前缀判定必须同一个口径（否则 `/prefix/api/...` 会被误判成
+    公开静态资源 —— 鉴权 fail-open）。
+    """
+    from wing.config import ApiKeyEntry
+
+    static = tmp_path / "dist"
+    static.mkdir()
+    (static / "index.html").write_text("SHELL", encoding="utf-8")
+
+    config = _mock_config(
+        auth_enabled=True, auth_keys=[ApiKeyEntry(key="rp-key", role="admin")]
+    )
+    config.gateway.static_dir = str(static)
+    config.gateway.cors_origins = []
+
+    with (
+        patch("wing.gateway.server.WingRuntime") as MockRuntime,
+        patch("wing.gateway.server.load_config") as mock_load_config,
+    ):
+        MockRuntime.return_value = mock_runtime
+        mock_load_config.return_value = config
+
+        from wing.gateway.server import GatewayServer
+
+        server = GatewayServer()
+        server.runtime = mock_runtime
+        with TestClient(server._app, root_path="/prefix") as tc:
+            yield tc
+
+
+class TestRootPathNormalization:
+    """root_path（反代子路径）下：保留前缀仍要 key、静态壳仍公开。"""
+
+    def test_reserved_paths_still_require_key(self, rooted_client: TestClient):
+        """**fail-open 回归**：`/prefix/api/*` 不能因为前缀被当成公开静态资源。"""
+        resp = rooted_client.get("/prefix/api/session/list")
+        assert resp.status_code == 401
+        assert resp.json()["error"] == "unauthorized"
+
+        wrong = rooted_client.get(
+            "/prefix/api/session/list", headers={"X-API-Key": "nope"}
+        )
+        assert wrong.status_code == 401
+
+        ok = rooted_client.get(
+            "/prefix/api/session/list", headers={"X-API-Key": "rp-key"}
+        )
+        assert ok.status_code == 200
+
+    def test_health_exemption_and_method_semantics(self, rooted_client: TestClient):
+        assert rooted_client.get("/prefix/api/health").status_code == 200
+        assert rooted_client.post("/prefix/api/health").status_code == 405
+
+    def test_static_shell_and_fallback_work_under_prefix(
+        self, rooted_client: TestClient
+    ):
+        root = rooted_client.get("/prefix/index.html")
+        assert root.status_code == 200, root.text
+        assert root.text == "SHELL"
+
+        spa = rooted_client.get("/prefix/deep/link")
+        assert spa.status_code == 200, spa.text
+        assert spa.text == "SHELL"
+
+    def test_reserved_path_never_falls_back_under_prefix(
+        self, rooted_client: TestClient
+    ):
+        """保留前缀判定用剥掉 root_path 的路径：`/prefix/api/unknown` 仍 404（不是壳）。"""
+        resp = rooted_client.get("/prefix/api/unknown", headers={"X-API-Key": "rp-key"})
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "not_found"

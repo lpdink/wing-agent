@@ -7,14 +7,18 @@ Frontends (wing 二进制)          Gateway (FastAPI)          Runtime (Python)
 ─────────────────────           ─────────────────          ─────────────────
 TUI 模式（默认，ratatui）   ──►  GatewayServer          ──►  WingRuntime（协调者）
 stdio 模式（wing -p，NDJSON）◄─  · routes/session/system     ├─ SessionManager（多会话）
-                                 · routes/health/ws          ├─ SessionStore（持久化）
-GatewayClient(WS) + ApiClient    · auth（opt-in）            ├─ ContextManager（压缩/回退）
-                                                             └─ EventBus（事件路由）
+Web 客户端（apps/web，浏览器）    · routes/ws（事件流）        ├─ SessionStore（持久化）
+                                 · routes/workspace（图片）   ├─ ContextManager（压缩/回退）
+GatewayClient(WS) + ApiClient    · auth（opt-in）            ├─ EventBus（事件路由）
+                                 · 静态托管 / CORS（opt-in）  └─
 ```
 
 - **Runtime** 是服务层协调者，本身不实现业务：路由 handler 只做参数校验 + 构造响应，逻辑下沉到 `Session` / `ContextManager`（PR #14）。
 - **Gateway** 是 FastAPI 进程，持有 `EventBus` 订阅，把 Runtime 产生的事件经 WS 推给已订阅客户端。
-- **Frontends** 都在 `wing` 二进制里，共享同一套 Gateway + Runtime。
+- **Frontends** 都在 `wing` 二进制里，共享同一套 Gateway + Runtime；`extensions/vscode`
+  与 `apps/web` 是另外两个（后者的构建产物由 Gateway 自身托管：`gateway.static_dir` 配置后
+  网关就是 Web 服务器，未命中路径 SPA fallback 到 `index.html`，`/api/*`、`/ws`、`/docs`
+  永不 fallback——见 [http-api.md](http-api.md#静态托管与开发期-cors)。
 
 ## 数据流（一次对话）
 

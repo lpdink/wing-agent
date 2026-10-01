@@ -12,14 +12,14 @@ Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+
 │ TUI（默认）· ratatui 循环   │──── WS ────►│ GatewayServer           │──── HTTP ────►│ WingRuntime（协调者）   │
 │ stdio（wing -p）· NDJSON    │             │ · routes/session(15)    │               │ ├ SessionManager        │
 │ 编排 CLI · run/wait/ps/…    │◄── 事件 ────│ · routes/system(6)      │◄──────────────│ ├ SessionStore          │
-│ Goal loop（TUI 侧）         │             │ · routes/tools · health │               │ ├ ContextManager        │
-│ GatewayClient(WS)+ApiClient │             │ · routes/ws（事件流）   │               │ ├ EventBus              │
+│ Goal loop（TUI 侧）         │             │ · routes/tools/workspace│               │ ├ ContextManager        │
+│ GatewayClient(WS)+ApiClient │             │ · routes/ws · 静态托管  │               │ ├ EventBus              │
 │ HTTP 建会话 → WS 订阅       │             │ auth（opt-in）          │               │ └ provider/（LLM 调用） │
 └─────────────────────────────┘             └─────────────────────────┘               └─────────────────────────┘
 ```
 
 - **三种前端形态，同一个二进制**：TUI（默认，human-in-the-loop）；stdio（`wing -p`，headless，Claude Code 兼容 NDJSON——把 `wing` alias 为 `claude` 即可接入外部编排器）；编排 CLI（`wing run/wait/ps/info/tail/head/release` 后台任务，`wing start/stop/status` 网关生命周期）。
-- **协议**：HTTP 承载生命周期 / 查询 / 变更（23 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header / WS query param），TLS 交给反向代理。
+- **协议**：HTTP 承载生命周期 / 查询 / 变更（24 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header / WS query param），TLS 交给反向代理。
 - **持久化**：`SessionStore` 是会话全部持久状态（metadata、混合 message/event 日志、aux）的唯一所有者；后端 `file`（默认，`~/.wing/core/sessions/`）与 `memory`（进程内）。`TrackedList` 是纯内存链拓扑引擎（uuid/parentUuid），I/O 全部委托 `MessageLog`；SQL 后端是增量实现，非架构改动。
 - **模型调用**：`provider/` 隔离协议差异（OpenAI 兼容 / Anthropic），ReAct 循环对协议无感知。
 
@@ -102,14 +102,17 @@ libs/core/wing/
 │   ├── token_counter.py             token 估算
 │   └── utils.py                     session id、路径安全校验、异常链格式化
 └── gateway/                         FastAPI 网关
-    ├── app.py                       应用工厂（FastAPI + 路由注册）
+    ├── app.py                       应用工厂（FastAPI + 路由注册 + opt-in CORS）
     ├── server.py                    GatewayServer — 生命周期 + EventBus 订阅 + uptime
     ├── cli.py                       wing-gateway CLI 入口
     ├── auth.py                      opt-in API key 鉴权中间件（HTTP + WS；admin / tool_runtime）
     ├── remote_tools.py              RemoteToolManager — 远程工具宿主连接 + WS 调用分发
     ├── protocol.py                  WS + HTTP Pydantic 模型
     ├── openapi.py                   OpenAPI 元数据
-    └── routes/                      session(15) · system(6) · tools(1) · health(1) · ws（事件传输 + 上行帧）
+    ├── file_policy.py               文件服务策略（纯函数）：realpath 包含性解析 + 类型白名单
+    ├── static_host.py               web 托管策略：static_dir 解析 + 保留路径 + 鉴权豁免判定
+    └── routes/                      session(15) · system(6) · tools(1) · health(1) · workspace(1) ·
+                                     static（静态托管 + SPA fallback，最后注册）· ws（事件传输 + 上行帧）
 ```
 
 ### 前端：`crates/wing/src/`（Rust，TUI + stdio + 编排 CLI）

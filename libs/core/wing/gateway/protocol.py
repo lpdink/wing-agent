@@ -391,6 +391,7 @@ HTTP_ERROR_TYPES: dict[int, str] = {
     403: "forbidden",
     404: "not_found",
     405: "method_not_allowed",
+    413: "payload_too_large",
     422: "validation_error",
     500: "internal_error",
     504: "gateway_timeout",

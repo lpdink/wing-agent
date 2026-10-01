@@ -16,6 +16,10 @@ import ``wing_probe`` 与 pytest。
    ``<env.root>/artifacts/``；转储路径进失败报告（``watch.dump_path`` 已指向该
    目录，expect 超时报告末行即引用它）与终端汇总。
 
+另有 ``raw_http`` fixture（未鉴权、无留档的原始 HTTP 客户端）：静态托管、开发期
+CORS、受限图片端点这类断言必须看**状态码 + 响应头 + 原始字节**，driver 的结构化
+JSON 通道看不到它们；鉴权场景要的也正是一个"没有 key 的客户端"。
+
 ``PROBE_DUMP`` 取值：
 
 - ``on-fail``（默认）：场景失败或内置不变量失败时转储；
@@ -33,6 +37,7 @@ from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 import pytest_asyncio
 
@@ -44,6 +49,9 @@ DUMP_MODES = ("on-fail", "always", "never")
 
 #: 终端汇总的数据源：nodeid → (转储路径, 逃生舱理由)。
 _REPORTS: dict[str, tuple[Path | None, str | None]] = {}
+
+#: ``raw_http`` 的单请求超时（场景都在本机；卡住要尽快失败而不是拖满整个 timeout）。
+RAW_HTTP_TIMEOUT = 20.0
 
 
 def dump_mode() -> str:
@@ -87,6 +95,25 @@ def pytest_terminal_summary(terminalreporter: Any) -> None:
     for nodeid, (path, reason) in sorted(entries.items()):
         note = f"  (invariants disabled: {reason})" if reason else ""
         terminalreporter.write_line(f"  {nodeid} → {path}{note}")
+
+
+@pytest_asyncio.fixture
+async def raw_http(probe: Probe) -> AsyncIterator[httpx.AsyncClient]:
+    """原始 HTTP 客户端：**不带 key**、**无留档**，按 status / headers / bytes 取证。
+
+    与 driver 的分工：driver 是"官方客户端"（结构化 JSON + 调用留档 + 非 2xx 抛错），
+    断言的是"业务回了什么"；本 fixture 面向传输面——静态资源的 Content-Type 与缓存头、
+    CORS 响应头、图片端点的原始字节与 403/413，以及"没有 API key 时会怎样"。
+    两者都只经公开 HTTP 协议，不碰网关内部。
+
+    ``trust_env=False``：只连本机网关，绕开环境 / 系统代理（同 ProbeEnv 的取舍）。
+    """
+    async with httpx.AsyncClient(
+        base_url=probe.env.gateway_url,
+        timeout=RAW_HTTP_TIMEOUT,
+        trust_env=False,
+    ) as client:
+        yield client
 
 
 @pytest_asyncio.fixture

@@ -317,6 +317,34 @@ class GatewayConfig(BaseModel):
     断连是首要失败信号（WS 关闭立即 fail 在途调用），此超时仅兜底
     客户端静默挂死但未断连的极端情况。
     """
+    static_dir: str | None = None
+    """web 构建产物的托管目录（默认关闭）。
+
+    绝对路径按原样；相对路径按配置文件所在目录（`$WING_HOME/core`）解析，
+    `~` 展开。目录不存在 = 未启用（回 404，不报错、不拖垮网关），且**逐请求**
+    解析——产物事后出现即生效，无需重启。详见 docs/dev/config-logging.md。
+    """
+    cors_origins: list[str] = Field(default_factory=list)
+    """开发期 CORS 放行 origin 列表（默认关闭：空列表不挂 CORS 中间件）。
+
+    只放行所列 origin（逐项 strip + 去尾斜杠）；拒绝通配 `"*"`——本键的语义
+    就是"只放行所列 origin"。中间件栈在 App 创建时装配，**热重载不生效**。
+    """
+
+    @field_validator("cors_origins")
+    @classmethod
+    def _normalize_cors_origins(cls, v: list[str]) -> list[str]:
+        origins: list[str] = []
+        for item in v:
+            origin = item.strip().rstrip("/")
+            if not origin:
+                raise ValueError("cors_origins entries must be non-empty origins")
+            if origin == "*":
+                raise ValueError(
+                    "cors_origins must list explicit origins; '*' is not allowed"
+                )
+            origins.append(origin)
+        return origins
 
 
 class CommandsConfig(BaseModel):
