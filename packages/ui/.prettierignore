@@ -1,0 +1,5 @@
+# Dependencies and tool output are never formatted.
+node_modules/
+coverage/
+# The port preview's build output (`pnpm --filter @wing-agent/ui run preview:port`).
+dist/

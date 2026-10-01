@@ -183,11 +183,17 @@ export function describeSocketRuntime(): string {
 /**
  * `process.versions.node`, read off `globalThis`.
  *
- * Structural access on purpose: this package is type-checked both with node types
- * (`tsconfig.json`) *and* against a DOM-only program (`tsconfig.dom.json`, which is
- * what a browser host compiles it as), and a bare `process` identifier does not
- * exist in the latter. `globalThis.process` is the same object in Node and
- * `undefined` anywhere else — behaviour is identical to the usual `typeof` guard.
+ * Structural access on purpose: this package is type-checked with node types
+ * (`tsconfig.json` / `tsconfig.node-probe.json`) *and* against a DOM-only program
+ * (`tsconfig.dom.json`, which is what a browser host compiles it as), and a bare
+ * `process` identifier does not exist in the latter.
+ *
+ * Behaviour: identical in every *reachable* runtime state (`globalThis.process` is
+ * the same object as `process` in Node, `undefined` anywhere else). One pathological
+ * state differs, in this direction only: when a bundler polyfills a `process` object
+ * **without** `versions.node`, the old `process.versions.node` read threw a
+ * `TypeError` out of `describeSocketRuntime()`; this version reports
+ * `unknown runtime, …` instead — a degradation, not a regression.
  */
 function nodeVersion(): string | null {
   const runtime = (globalThis as { readonly process?: { readonly versions?: { readonly node?: unknown } } })
@@ -225,13 +231,22 @@ function isWebSocketConstructor(value: unknown): value is WebSocketConstructor {
  * program, where neither `require` nor node types exist. A browser host never
  * reaches the line: `resolveWebSocket` finds the global `WebSocket` first, and a
  * host without one injects its own {@link SocketFactory}.
+ *
+ * Lint note: the local declaration also *silences* `@typescript-eslint/no-require-imports`
+ * in this file — the rule resolves `require` to a binding, and a module-scoped one is not
+ * the global it is looking for (measured: a stray `require('node:path')` here is not
+ * reported). That is acceptable because the specifier is guarded at the package level:
+ * `tests/layers.test.ts` parses every `require()` literal in `src/`, allows exactly one
+ * non-relative specifier — `'ws'`, from this file — and rejects node builtins, `vscode`
+ * and any other package.
  */
 declare const require: (id: string) => unknown;
 
 function loadFallbackWebSocket(): WebSocketConstructor | undefined {
   try {
     // Lazy, bundled fallback — the declaration above is what lets this line
-    // compile in a DOM-only program; no lint exception is needed for it.
+    // compile in a DOM-only program (and what silences no-require-imports here:
+    // the specifier itself is guarded by tests/layers.test.ts, see above).
     const module = require('ws') as { WebSocket?: unknown };
     return isWebSocketConstructor(module.WebSocket) ? module.WebSocket : undefined;
   } catch {

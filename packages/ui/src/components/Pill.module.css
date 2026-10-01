@@ -1,0 +1,34 @@
+/*
+ * Portions from DeepSeek Harness (https://github.com/deepseek-ai/deepseek-harness),
+ * Copyright (c) 2026 DeepSeek, licensed under the MIT License (see THIRD_PARTY_NOTICES.md).
+ * Source: packages/client/ui-primitives/src/Pill.module.css
+ * Modified for Wing: unchanged.
+ */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 999px;
+  corner-shape: round;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.interactive {
+  cursor: pointer;
+}
+
+.interactive:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.active {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-button-ghost-active-fill);
+  box-shadow: inset 0 0 0 1px var(--dsw-alias-button-ghost-active-border);
+}

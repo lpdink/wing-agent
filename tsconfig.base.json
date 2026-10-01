@@ -1,5 +1,5 @@
 {
-  "//": "Strictness baseline shared by every TypeScript package in the workspace (extensions/vscode, packages/*, apps/*). Environment-specific globals (DOM / node / vscode) are configured in the per-project tsconfigs of each package — that split is what enforces the layering (vscode: see docs/dev/vscode-extension.md §2.3; a portable package: `tsconfig.json` without DOM + a `tsconfig.dom.json` probe).",
+  "//": "Strictness baseline shared by every TypeScript package in the workspace (extensions/vscode, packages/*, apps/*). Environment-specific globals (DOM / node / vscode) are configured in the per-project tsconfigs of each package — that split is what enforces the layering (vscode: see docs/dev/vscode-extension.md §2.3; a portable package: `tsconfig.json` for package + tests, plus TWO probes run by `typecheck` — a pure-`src` node probe (the no-DOM gate: the main project pulls jsdom's DOM lib in through the vitest config) and a DOM probe with no node types).",
   "//allowImportingTsExtensions": "ESM-only build helpers live in `tools/*.mts` / `*.config.mts` and are imported *with* their extension (`./tools/fonts.mts`) so Vite's config loader — and its planned native replacement — never has to guess a module kind. Legal because every project sets `noEmit`.",
   "compilerOptions": {
     "target": "ES2023",

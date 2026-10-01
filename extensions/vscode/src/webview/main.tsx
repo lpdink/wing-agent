@@ -1,15 +1,19 @@
+import { mountApp, readBootstrap } from '@wing-agent/ui';
+
 import { WEBVIEW_ROOT_ID } from '../shared';
 
-import { readBootstrap } from './bootstrap';
 import { createVsCodeTransport } from './bridge/vsCodeTransport';
-import { mountApp } from './mount';
 
 /**
  * Production webview entry (the bundle `vite.config.mts` builds).
  *
- * Exactly three steps: read the injected bootstrap, connect to the host channel,
- * mount. Everything else lives in the shared app so the preview harness can drive
- * it without VS Code.
+ * This file is the extension's whole side of the renderer: it injects the **host
+ * bridge** — a `WebviewTransport` implementation over VS Code's `postMessage`
+ * channel — into the package's `mountApp`. Everything else (the app, the mirror
+ * store, the protocol) lives in `@wing-agent/ui`; there is no protocol logic left
+ * here.
+ *
+ * Three steps: read the injected bootstrap, connect to the host channel, mount.
  */
 
 const bootstrap = readBootstrap();

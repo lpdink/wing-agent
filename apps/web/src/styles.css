@@ -1,0 +1,684 @@
+/*
+ * The shell's styles.
+ *
+ * Three rules of the house:
+ *
+ * 1. **Colors are tokens** (`--bg`, `--fg`, …) so the theme is one `@media` block
+ *    wide and step 09 can add a manual override by setting `[data-theme]` on the
+ *    root. The theme follows `prefers-color-scheme` (the product requirement) —
+ *    there is no JS mirror of the media query to drift out of sync (design.md D12).
+ * 2. **Two layouts, one source**: a two-column grid on desktop; below 900px the
+ *    sidebar becomes a drawer over the main pane (`data-open`), the top bar grows
+ *    the "Sessions" toggle, and the safe-area insets of a notched phone are
+ *    respected (the `viewport-fit=cover` meta in `index.html`).
+ * 3. **No decoration**: every box on screen belongs to a real control or a real
+ *    piece of data (step 08 adds the transcript inside `.pane`).
+ */
+
+:root {
+  color-scheme: light dark;
+
+  --bg: #f4f5f7;
+  --bg-elevated: #ffffff;
+  --bg-sunken: #e9ebf0;
+  --fg: #16181d;
+  --fg-muted: #565b6b;
+  --fg-subtle: #7d8293;
+  --border: #d9dce3;
+  --accent: #2f6fed;
+  --accent-fg: #ffffff;
+  --ok: #14804a;
+  --warn: #a76a11;
+  --error: #c0392b;
+  --radius: 10px;
+  --shadow: 0 1px 2px rgb(16 18 22 / 6%), 0 10px 30px rgb(16 18 22 / 10%);
+  --mono: ui-monospace, sfmono-regular, 'SF Mono', menlo, consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0c0e12;
+    --bg-elevated: #14171d;
+    --bg-sunken: #1b1f26;
+    --fg: #e7e9ee;
+    --fg-muted: #a3a9b8;
+    --fg-subtle: #7f8697;
+    --border: #262b34;
+    --accent: #6f9dff;
+    --accent-fg: #0b1020;
+    --ok: #4ec38a;
+    --warn: #d8a445;
+    --error: #f2777a;
+    --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 12px 32px rgb(0 0 0 / 45%);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font:
+    14px/1.5 system-ui,
+    -apple-system,
+    'Segoe UI',
+    roboto,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.button {
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.button:hover {
+  border-color: var(--fg-subtle);
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.button--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+
+.button--ghost {
+  background: transparent;
+}
+
+/* ── frame ─────────────────────────────────────────────────────────── */
+
+.shell {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100dvh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  padding-top: max(8px, env(safe-area-inset-top));
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar__identity {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  /* The identity is the part that gives way when the bar runs out of room; the
+     status pill and the buttons never shrink. */
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.topbar__brand {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.topbar__subject {
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40ch;
+}
+
+.topbar__status {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: none;
+}
+
+.topbar__address {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-subtle);
+  max-width: 26ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar__drawer {
+  display: none;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font: inherit;
+}
+
+.shell__body {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  min-height: 0;
+}
+
+.sidebar {
+  background: var(--bg-elevated);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.scrim {
+  display: none;
+}
+
+/* ── session list ──────────────────────────────────────────────────── */
+
+.sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  min-height: 100%;
+}
+
+.sessions__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sessions__title {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-subtle);
+}
+
+.sessions__empty {
+  margin: 0;
+  color: var(--fg-muted);
+}
+
+.sessions__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.session {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.session:hover {
+  background: var(--bg-sunken);
+}
+
+.session--current {
+  background: var(--bg-sunken);
+  border-color: var(--border);
+}
+
+.session__top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.session__title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.session__time {
+  color: var(--fg-subtle);
+}
+
+.status {
+  font-size: 12px;
+}
+
+.status--working {
+  color: var(--accent);
+}
+
+.status--waiting {
+  color: var(--warn);
+}
+
+.status--inactive,
+.status--idle {
+  color: var(--fg-muted);
+}
+
+.badge {
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+}
+
+.badge--error {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.badge--result {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.sessions__foot {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ── main pane ─────────────────────────────────────────────────────── */
+
+.banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  background: var(--bg-elevated);
+}
+
+.banner--warning {
+  border-color: var(--warn);
+}
+
+.banner--error {
+  border-color: var(--error);
+}
+
+.banner__text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.banner__detail {
+  color: var(--fg-muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  /* No padding or gap of its own: the transcript owns the whole card, and the shared
+     renderer's rows carry the chat padding (5px 16px, the VS Code metric). The head,
+     the details block and the empty state pad themselves. */
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  overflow: hidden;
+  flex: 1;
+  min-height: 0;
+}
+
+.pane--empty {
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 16px;
+  color: var(--fg-muted);
+}
+
+.pane--empty h2 {
+  color: var(--fg);
+}
+
+.pane--empty p {
+  margin: 0;
+  max-width: 60ch;
+}
+
+.pane__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* The folded runtime facts: one summary line (context usage + message count), the
+   full `wing info` surface one click away. */
+.pane__details {
+  border-bottom: 1px solid var(--border);
+}
+
+.pane__summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 6px 16px;
+  color: var(--fg-muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.pane__summary-value {
+  color: var(--fg-subtle);
+}
+
+.pane__empty {
+  padding: 16px;
+  margin: 0;
+  color: var(--fg-muted);
+}
+
+.pane__title {
+  font-size: 16px;
+}
+
+.pane__turn {
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 6px 24px;
+  margin: 0;
+  padding: 4px 16px 12px;
+}
+
+.facts__row {
+  display: flex;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  padding: 4px 0;
+}
+
+.facts__row dt {
+  color: var(--fg-subtle);
+  min-width: 92px;
+}
+
+.facts__row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.facts__mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.pane__error {
+  margin: 0;
+  padding: 0 16px 12px;
+  color: var(--error);
+}
+
+/* ── notices ───────────────────────────────────────────────────────── */
+
+.notices {
+  position: fixed;
+  right: 12px;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 24px));
+  z-index: 40;
+}
+
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+  padding: 8px 10px;
+}
+
+.notice--warning {
+  border-left-color: var(--warn);
+}
+
+.notice--error {
+  border-left-color: var(--error);
+}
+
+.notice--info {
+  border-left-color: var(--accent);
+}
+
+.notice__text {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.notice__close {
+  border: 0;
+  background: transparent;
+  color: var(--fg-subtle);
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+}
+
+/* ── settings dialog ───────────────────────────────────────────────── */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgb(9 10 14 / 45%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 50;
+}
+
+.dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(520px, 100%);
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 18px;
+}
+
+.dialog__state,
+.dialog__hint,
+.dialog__preview,
+.dialog__warn,
+.dialog__error {
+  margin: 0;
+  font-size: 13px;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
+.dialog__reason {
+  display: block;
+  color: var(--warn);
+}
+
+.dialog__preview--error,
+.dialog__error {
+  color: var(--error);
+}
+
+.dialog__actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field__label {
+  font-weight: 600;
+}
+
+.field__control {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  padding: 7px 9px;
+  font: inherit;
+}
+
+.field__hint {
+  font-size: 12px;
+  color: var(--fg-subtle);
+}
+
+.field--check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── mobile: the sidebar becomes a drawer ──────────────────────────── */
+
+@media (max-width: 899px) {
+  .shell__body {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar__drawer {
+    display: inline-flex;
+  }
+
+  .topbar__address {
+    display: none;
+  }
+
+  .topbar__subject {
+    max-width: 22ch;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(86vw, 320px);
+    padding-top: env(safe-area-inset-top);
+    transform: translateX(-102%);
+    transition: transform 0.18s ease;
+    box-shadow: var(--shadow);
+    z-index: 30;
+  }
+
+  .sidebar[data-open='true'] {
+    transform: none;
+  }
+
+  .scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    border: 0;
+    background: rgb(9 10 14 / 45%);
+    z-index: 20;
+  }
+
+  .main {
+    padding: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar {
+    transition: none;
+  }
+}

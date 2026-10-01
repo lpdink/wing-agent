@@ -17,7 +17,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import type { AskCellModel, ToolCallCellModel } from '../../src/shared';
+import type { AskCellModel, ToolCallCellModel } from '@wing-agent/session';
 
 import type { SmokeGateway } from './gateway';
 import type { FakeProvider, Turn } from './fake-provider';

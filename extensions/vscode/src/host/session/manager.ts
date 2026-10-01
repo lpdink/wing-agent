@@ -5,20 +5,28 @@ import type {
   CellModel,
   CellPatch,
   CommandCatalogModel,
-  HostToWebviewMessage,
   PanelsModel,
+  ReductionEffect,
   SessionId,
   SessionListStatus,
   SystemLevel,
-  UiActionModel,
-} from '../../shared';
+} from '@wing-agent/session';
 import {
   FRONTEND_COMMANDS,
-  MAX_PATCH_TEXT_CHUNK,
+  SerialQueue,
+  SessionRecord,
+  applyLive,
+  applySync,
+  branchRow,
+  buildAskReply,
   matchCommand,
   normalizeCommandName,
-  unhandledVariant,
-} from '../../shared';
+  pushSystem,
+} from '@wing-agent/session';
+import type { HostToWebviewMessage, UiActionModel } from '@wing-agent/ui/protocol';
+import { unhandledVariant } from '@wing-agent/ui/protocol';
+
+import { MAX_PATCH_TEXT_CHUNK } from '../../shared';
 import type {
   CoreLogger,
   GatewayConnection,
@@ -30,11 +38,6 @@ import { GatewayHttpError, createClientRequest, isKnownEvent } from '@wing-agent
 
 import type { WebviewIntent } from '../bridge';
 import type { EditorActions } from '../editorActions';
-import { SerialQueue } from './queue';
-import type { ReductionEffect } from './reducer';
-import { applyLive, applySync, pushSystem } from './reducer';
-import { SessionRecord } from './model';
-import { branchRow, buildAskReply } from './derive';
 
 /**
  * `SessionManager` — the tab list, the control plane and the bridge producer.

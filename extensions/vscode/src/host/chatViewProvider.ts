@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
 
-import type { HostToWebviewMessage } from '../shared';
-import { BRIDGE_PROTOCOL_VERSION, WEBVIEW_ROOT_ID } from '../shared';
+import type { HostToWebviewMessage } from '@wing-agent/ui/protocol';
+import { BRIDGE_PROTOCOL_VERSION } from '@wing-agent/ui/protocol';
+
+import { WEBVIEW_ROOT_ID } from '../shared';
 
 import type { WebviewIntent } from './bridge';
 import { HostBridge } from './bridge';

@@ -8,11 +8,10 @@ import tseslint from 'typescript-eslint';
  * Layering rules — mechanism #2 of three (see design.md D2).
  *
  * This catches the common violations while you type. The complete matrix (import
- * graph over every file, dynamic `import()`, `require`, node builtins,
- * `src/testing` reachability, hardcoded colors in CSS) lives in
- * `tests/layers/layers.test.ts` — that test is the authoritative gate. Each zone
- * declares its *complete* banned set: ESLint replaces (not merges) a rule per
- * matching block, so a zone that forgot a rule would silently allow it.
+ * graph over every file, dynamic `import()`, `require`, node builtins, package entry
+ * points) lives in `tests/layers/layers.test.ts` — that test is the authoritative
+ * gate. Each zone declares its *complete* banned set: ESLint replaces (not merges) a
+ * rule per matching block, so a zone that forgot a rule would silently allow it.
  */
 
 const VSCODE = 'vscode';
@@ -20,36 +19,95 @@ const VSCODE_MESSAGE = 'Only src/host may import "vscode". src/webview and src/s
 const CLIENT_PACKAGE = '@wing-agent/client';
 const CLIENT_MESSAGE =
   'Only src/host may import the gateway capability layer: the renderer talks over the bridge, and src/shared stays dependency-free.';
+/**
+ * The session package is **not** restricted here: it is the environment-agnostic
+ * view model + reduction lane (its own `tests/layers.test.ts` and the two tsconfigs
+ * guard that), and every layer needs it — `src/shared` next to the channel constants,
+ * the thin shell to render. What *is* restricted is the deep path: only the barrel is
+ * a contract (see `tests/layers/layers.test.ts`).
+ */
+const SESSION_PACKAGE = '@wing-agent/session';
+/**
+ * The renderer package (`packages/ui`) and its two extra entries. Which entry a zone
+ * may import is the interesting part (`tests/layers/layers.test.ts` is the authority):
+ *
+ * - `.` — the app (DOM/React/CSS): the thin shell mounts it, nothing else may;
+ * - `./protocol` — the DOM-free wire contract: the host speaks it, the shell
+ *   implements the transport with it;
+ * - `./testing` — fixtures + scripted host: tests and the preview harness only.
+ *
+ * The patterns below allow the entries a zone is entitled to and ban every other
+ * path into the package (a deep path is never a contract).
+ */
+const UI_PACKAGE = '@wing-agent/ui';
+const UI_ENTRIES = {
+  app: UI_PACKAGE,
+  protocol: `${UI_PACKAGE}/protocol`,
+  testing: `${UI_PACKAGE}/testing`,
+};
+const UI_DEEP_PATH_MESSAGE = `Import "${UI_PACKAGE}" through a public entry ("." , "./protocol", "./testing") — a path into the package is not a contract.`;
+
 const HOST_BOUNDARY =
   'src/host must not import the renderer (src/webview): the host talks to it over the bridge only.';
 const WEBVIEW_BOUNDARY =
-  'src/webview must not import host code: the renderer only consumes src/shared contract types.';
+  'src/webview must not import host code: the shell only mounts the renderer package and speaks its protocol.';
 const SHARED_BOUNDARY =
-  'src/shared is dependency-free: no vscode / host / webview / node imports and no packages.';
-const TESTING_BOUNDARY = 'src/testing is test/preview-only; product code must not import it.';
+  `src/shared is the channel constants and stays dependency-free: no vscode / host / webview / node imports, ` +
+  `and no packages other than the session model it sits next to ("${SESSION_PACKAGE}").`;
+const TEST_DOUBLES_MESSAGE = `${UI_ENTRIES.testing} is for tests/ and preview/ only — product code must not import fixtures or mocks.`;
 const NODE_BUILTIN_BOUNDARY =
   'Node builtins are unavailable here: this layer also runs in the webview bundle.';
 
-/** Host / renderer / testing layer directories as glob groups. */
+/** Host / renderer / shell layer directories as glob groups. */
 const LAYER_GLOBS = {
   host: ['**/host/**'],
   webview: ['**/webview/**'],
-  testing: ['**/testing/**'],
 };
 
 /**
  * `no-restricted-imports` rule.
  *
- * `group` values are arrays (minimatch patterns over the import string), which is
- * the shape ESLint 10 validates; a bare string is rejected.
+ * `group` values are arrays (minimatch/gitignore patterns over the import string),
+ * which is the shape ESLint 10 validates; negations inside a group (`!…`) are
+ * supported and are how "these entries are fine, everything deeper is not" is
+ * expressed. Note the gitignore semantics: a bare directory-like pattern
+ * (`@wing-agent/ui`) also matches everything *under* it, which is exactly why the
+ * exact entries are banned through `paths` (string equality) and only the deep
+ * paths go through the group with negations.
+ *
+ * `uiEntries` lists the `@wing-agent/ui` entry points the zone may import; every
+ * other entry and any deep path is banned with a message that says where to go.
  */
-const restricted = ({ banVscode = false, paths = [], groups = [] }) => [
-  'error',
-  {
-    paths: banVscode ? [{ name: VSCODE, message: VSCODE_MESSAGE }, ...paths] : paths,
-    patterns: groups.map(([group, message]) => ({ group, message })),
-  },
-];
+const restricted = ({ banVscode = false, paths = [], groups = [], uiEntries = [] }) => {
+  const bannedUiEntries = Object.values(UI_ENTRIES).filter((entry) => !uiEntries.includes(entry));
+  return [
+    'error',
+    {
+      paths: [
+        ...(banVscode ? [{ name: VSCODE, message: VSCODE_MESSAGE }] : []),
+        ...paths,
+        ...bannedUiEntries.map((entry) => ({
+          name: entry,
+          message: entry === UI_ENTRIES.testing ? TEST_DOUBLES_MESSAGE : UI_DEEP_PATH_MESSAGE,
+        })),
+      ],
+      patterns: [
+        ...groups.map(([group, message]) => ({ group, message })),
+        {
+          group: [`${SESSION_PACKAGE}/*`],
+          message: `Import "${SESSION_PACKAGE}" through its barrel only: a path into the package is not a contract.`,
+        },
+        // Everything *under* the package: the entries above are the only public
+        // ones, and a deep path is never a contract. Banned entries are negated here
+        // so they are reported once, by their exact-path rule above.
+        {
+          group: [`${UI_PACKAGE}/*`, ...Object.values(UI_ENTRIES).map((entry) => `!${entry}`)],
+          message: UI_DEEP_PATH_MESSAGE,
+        },
+      ],
+    },
+  ];
+};
 
 export default tseslint.config(
   {
@@ -98,10 +156,10 @@ export default tseslint.config(
     files: ['src/host/**/*.ts'],
     rules: {
       'no-restricted-imports': restricted({
-        groups: [
-          [LAYER_GLOBS.webview, HOST_BOUNDARY],
-          [LAYER_GLOBS.testing, TESTING_BOUNDARY],
-        ],
+        groups: [[LAYER_GLOBS.webview, HOST_BOUNDARY]],
+        // The host speaks the wire contract and nothing else from the renderer
+        // package — the app barrel would pull a document bundle into Node.
+        uiEntries: [UI_ENTRIES.protocol],
       }),
     },
   },
@@ -115,12 +173,13 @@ export default tseslint.config(
           [LAYER_GLOBS.host, SHARED_BOUNDARY],
           [LAYER_GLOBS.webview, SHARED_BOUNDARY],
           [['node:*'], NODE_BUILTIN_BOUNDARY],
-          [LAYER_GLOBS.testing, TESTING_BOUNDARY],
         ],
       }),
     },
   },
   {
+    // The thin shell: the VS Code transport implementation and the entry that
+    // mounts the renderer package.
     files: ['src/webview/**/*.ts', 'src/webview/**/*.tsx'],
     rules: {
       'no-restricted-imports': restricted({
@@ -129,28 +188,16 @@ export default tseslint.config(
         groups: [
           [LAYER_GLOBS.host, WEBVIEW_BOUNDARY],
           [['node:*'], NODE_BUILTIN_BOUNDARY],
-          [LAYER_GLOBS.testing, TESTING_BOUNDARY],
         ],
-      }),
-    },
-  },
-  {
-    files: ['src/testing/**/*.ts', 'src/testing/**/*.tsx'],
-    rules: {
-      'no-restricted-imports': restricted({
-        banVscode: true,
-        paths: [{ name: CLIENT_PACKAGE, message: 'src/testing may only import src/shared.' }],
-        groups: [
-          [LAYER_GLOBS.host, 'src/testing may only import src/shared.'],
-          [LAYER_GLOBS.webview, 'src/testing may only import src/shared.'],
-        ],
+        // The app it mounts, and the protocol its transport implements.
+        uiEntries: [UI_ENTRIES.app, UI_ENTRIES.protocol],
       }),
     },
   },
 
   // ── React ──────────────────────────────────────────────────────────────
   {
-    files: ['src/webview/**/*.ts', 'src/webview/**/*.tsx', 'preview/**/*.tsx', 'src/testing/**/*.tsx'],
+    files: ['preview/**/*.tsx'],
     plugins: { 'react-hooks': reactHooks },
     rules: {
       'react-hooks/rules-of-hooks': 'error',

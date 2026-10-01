@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
-import type { CellModel } from '../../src/shared';
+import type { CellModel } from '@wing-agent/session';
 import { createHostHarness, flushMicrotasks, textPayload } from './support/harness';
 import type { HostHarness } from './support/harness';
 import { kinds } from './support/mirror';

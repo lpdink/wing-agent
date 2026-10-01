@@ -120,11 +120,17 @@ jobs:
       - name: Build (extension host + webview)
         run: pnpm --filter wing-vscode run build
 
-      # Desktop shell: bundles the Electron main process + preload. Packaging
+# Desktop shell: bundles the Electron main process + preload. Packaging
       # (electron-builder) stays on a developer machine — it needs macOS tooling
       # and produces an unsigned .app.
       - name: Build desktop shell (main + preload)
         run: pnpm --filter @wing-agent/desktop run build
+
+      # The web client is also a build artifact (step 03's `gateway.static_dir`
+      # serves `apps/web/dist`); building it here keeps a broken Vite build or a
+      # missing entry point from reaching `develop`.
+      - name: Build web client
+        run: pnpm --filter @wing-agent/web run build
 
       - name: Build webview preview harness
         run: pnpm --filter wing-vscode run build:preview

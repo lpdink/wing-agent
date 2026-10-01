@@ -1,0 +1,20 @@
+{
+  "//": "Package project: `src/` + `tests/` + the tools (`tools/port-preview`, the port-preview Vite config) + the vitest config (so typescript-eslint's projectService can type-check it all too). This is the *browser* side of the workspace: DOM lib, the Vite client types (CSS modules) and the React JSX transform. NOTE: because this project carries the vitest config, `vitest/config` re-exports jsdom's types and their `reference lib=dom` directive pulls the DOM lib in — irrelevant here (DOM is the point), but it also means the node-only half of the package needs its own probe: `tsconfig.node-probe.json` (`src/protocol`, `src/testing`; no DOM) while `tsconfig.dom.json` is the *no-node* gate (bare `process` is a compile error there). The dev-only preview harness is browser code too (it mounts React), so it lives here rather than in a fourth project.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+    "jsx": "react-jsx"
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "tests/**/*.ts",
+    "tests/**/*.tsx",
+    "tools/**/*.ts",
+    "tools/**/*.tsx",
+    "tools/**/*.mts",
+    "vite.port-preview.config.mts",
+    "vitest.config.mts"
+  ]
+}

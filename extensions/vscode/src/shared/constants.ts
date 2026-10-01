@@ -1,58 +1,19 @@
 /**
- * Shared vocabulary for the host ⇄ webview contract.
+ * Vocabulary of **this extension's** webview channel.
  *
- * This module holds magic strings that both sides must agree on. Keep it free of
- * runtime dependencies (no `vscode`, no DOM, no node) — the layer guard enforces it.
- */
-
-/**
- * Bridge protocol version.
+ * What is left here are the three magic values that describe the VS Code side of the
+ * channel and nothing else — the theme class names the generated document applies,
+ * the element id the bundle mounts into, and the patch-chunk cap the host slices
+ * streamed text with. Keep it free of runtime dependencies (no `vscode`, no DOM, no
+ * node) — the layer guard enforces it.
  *
- * Bump on **breaking** changes to {@link HostToWebviewMessage} /
- * {@link WebviewToHostMessage}. Additive changes (new message variants, new
- * nullable fields on the shared model) do not need a bump: both sides ship in the
- * same VSIX, so they are only ever one version apart at most — the number exists
- * so the host can refuse a stale cached webview instead of failing silently.
+ * The protocol itself — the message unions, their guards, the transport interface,
+ * the protocol version and the image caps — is `@wing-agent/ui/protocol`
+ * (`packages/ui/src/protocol/`), because the renderer and the host both speak it and
+ * the renderer now lives in that package. The session-model and command vocabulary
+ * (`TOOL_NAMES`, `LOCAL_COMMANDS`, `SESSION_TITLE_MAX_LENGTH`) is
+ * `@wing-agent/session`.
  */
-export const BRIDGE_PROTOCOL_VERSION = 1;
-
-/**
- * Tool names — must match the backend tool registry.
- * Source of truth: `crates/wing/src/shared/constants.rs`, `libs/core/wing/tools/`.
- */
-export const TOOL_NAMES = {
-  bash: 'Bash',
-  read: 'Read',
-  write: 'Write',
-  edit: 'Edit',
-  glob: 'Glob',
-  grep: 'Grep',
-  askUserQuestion: 'AskUserQuestion',
-  todoWrite: 'TodoWrite',
-} as const;
-
-export type ToolName = (typeof TOOL_NAMES)[keyof typeof TOOL_NAMES];
-
-/**
- * Frontend-only commands: handled by the host without reaching the gateway.
- * Mirrors `crates/wing/src/shared/constants.rs`.
- *
- * Kept as the TUI's mirror; the shell's vocabulary (which includes these three) is
- * {@link FRONTEND_COMMANDS} in `src/shared/commands.ts`, and only the contract test
- * reads this constant today.
- */
-export const LOCAL_COMMANDS = {
-  new: '/new',
-  clear: '/clear',
-  copy: '/copy',
-} as const;
-
-/**
- * Session title derivation limit (characters) — must match the backend rule
- * (`first_user_message` truncation, see `libs/core/wing/session.py`). The host
- * derives titles with the same rule so both sides agree without an extra RPC.
- */
-export const SESSION_TITLE_MAX_LENGTH = 100;
 
 /** CSS class applied to the webview root for the current theme kind. */
 export const THEME_CLASSES = {

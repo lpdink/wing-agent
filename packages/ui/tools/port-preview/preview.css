@@ -1,0 +1,70 @@
+/* Harness chrome only — the cards under test carry their own CSS modules. */
+.page {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 24px 24px 64px;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-13);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.hint {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.themeButton {
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-sm);
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  cursor: pointer;
+}
+
+.section {
+  margin-top: 28px;
+}
+
+.section h2 {
+  margin: 0 0 8px;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+  font-weight: 500;
+}
+
+/* 06c sections: stack rows the way the transcript does, and give the interacting
+   components the same width axis the shells publish. */
+.rowStack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 16px;
+}
+
+.rowStackInline {
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+}
+
+.rowBody {
+  padding: 4px 0 4px 22px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.shimmerLine {
+  margin: 8px 0 0;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.section :is([data-question-key], [data-approval-key], [data-question-reply]) {
+  margin-bottom: 18px;
+}

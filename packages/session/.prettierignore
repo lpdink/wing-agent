@@ -1,0 +1,3 @@
+# Dependencies and tool output are never formatted.
+node_modules/
+coverage/

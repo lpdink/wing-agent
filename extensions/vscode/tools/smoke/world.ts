@@ -16,13 +16,8 @@ import { GatewayLauncher, probeGateway } from '../../src/host/gateway/launcher';
 import type { EditorActions } from '../../src/host/editorActions';
 import type { GatewaySettings } from '../../src/host/settings';
 import { WingHost, createGatewayClients } from '../../src/host/wingHost';
-import type {
-  CellModel,
-  HostToWebviewMessage,
-  SessionStateModel,
-  SessionViewModel,
-  TabModel,
-} from '../../src/shared';
+import type { CellModel, SessionStateModel, SessionViewModel, TabModel } from '@wing-agent/session';
+import type { HostToWebviewMessage } from '@wing-agent/ui/protocol';
 import type { WingEvent } from '@wing-agent/client';
 import type { WebviewIntent } from '../../src/host/bridge';
 import { WebviewMirror } from '../../tests/host/support/mirror';

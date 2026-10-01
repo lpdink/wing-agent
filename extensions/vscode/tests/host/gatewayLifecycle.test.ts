@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { GlobalNoticeModel } from '../../src/shared';
+import type { GlobalNoticeModel } from '@wing-agent/session';
 
 import { createHostHarness, flushMicrotasks } from './support/harness';
 import type { HostHarness } from './support/harness';

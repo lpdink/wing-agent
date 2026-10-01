@@ -12,10 +12,9 @@
 /**
  * A value that survives structured JSON serialization (the wire's value type).
  *
- * Mirrors `src/shared/types.ts`'s `JsonValue` in the VS Code extension (its contract
- * types stay dependency-free, so this package cannot import them); the two
- * definitions must stay structurally identical — a JSON round-trip is the contract
- * on both sides.
+ * This is the single definition: `@wing-agent/session` re-exports it (its model
+ * types carry tool arguments and ask options verbatim), so a frontend that renders
+ * a wire value and a frontend that decodes it are talking about the same type.
  */
 export type JsonValue =
   string | number | boolean | null | readonly JsonValue[] | { readonly [key: string]: JsonValue };

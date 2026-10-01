@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Wing — port preview (06b)</title>
+    <script>
+      // Dark first, before the sheet loads: the token sheet's dark block hangs off
+      // the body attribute (the boot-theme pattern apps/web will use).
+      if (new URLSearchParams(location.search).get('theme') === 'dark') {
+        document.documentElement.dataset.bootDark = 'true';
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

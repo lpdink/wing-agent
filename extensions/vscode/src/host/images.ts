@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-import { MAX_IMAGE_SRC_CHARS } from '../shared';
+import { MAX_IMAGE_SRC_CHARS } from '@wing-agent/ui/protocol';
 
 /**
  * Image path policy for the transcript.

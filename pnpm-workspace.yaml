@@ -2,10 +2,11 @@
 #
 # `packages:` — every TypeScript package lives here: `extensions/vscode` (the VS Code
 # shell), `packages/*` (shared packages: @wing-agent/client today) and `apps/*` (the
-# shell applications: @wing-agent/desktop today). They are plain members and share one
-# lockfile at the root; `pnpm -r run <script>` (what `make check-ts` / `make test-ts`
-# use) walks this list, so a new package needs no other registration
-# (see 02_workspace_client_pkg/design.md §手册).
+# shell applications: @wing-agent/desktop, @wing-agent/web today). They are plain
+# members and share one lockfile at the root; `pnpm -r run <script>` (what
+# `make check-ts` / `make test-ts` use) walks this list, so a new package needs no
+# other registration — it only has to declare the scripts
+# (lint / format:check / typecheck / test); see docs/dev/vscode-extension.md §9.3.
 packages:
   - 'extensions/vscode'
   - 'packages/*'
@@ -19,20 +20,28 @@ packages:
 #     version that reinstates a postinstall stays allowed instead of failing install.
 #   - @vscode/vsce-sign is only pulled in by `vsce sign` (we ship an unsigned local
 #     .vsix), so its script stays blocked on purpose.
+#   - playwright's install script downloads browser builds. Blocked on purpose:
+#     `pnpm --filter @wing-agent/web shot` drives the *local* Chrome
+#     (`channel: 'chrome'`), so a fresh `pnpm install` stays fast and CI never
+#     downloads ~150 MB it does not use. Install one explicitly when needed:
+#     `pnpm --filter @wing-agent/web exec playwright install chromium`.
 #   - electron-winstaller only matters for Windows NSIS installers (transitive dep
 #     of electron-builder); the desktop shell ships macOS only, so it stays blocked
 #     too — declaring it explicitly keeps `pnpm install` exit 0.
 #
-# minimumReleaseAgeExclude: the workspace-level npm supply-chain guard refuses
-# packages published very recently; prettier is pinned here so the lockfile stays
-# reproducible with `--frozen-lockfile` on CI as well.
+# minimumReleaseAgeExclude: `minimumReleaseAge` (the guard that refuses packages
+# published very recently) is not enabled today, so this entry is inert — it is kept
+# so the guard can be switched on without re-resolving prettier. The version has to
+# match the one resolved in pnpm-lock.yaml (it drifted once, with a lockfile
+# regeneration: the entry said 3.9.8 while the lockfile had moved to 3.9.9).
 allowBuilds:
   esbuild: true
   electron: true
   '@vscode/vsce-sign': false
+  playwright: false
   electron-winstaller: false
 minimumReleaseAgeExclude:
-  - prettier@3.9.8
+  - prettier@3.9.9
 
 # overrides: app-builder-lib@26.15.3 declares `@electron/get: ^3.0.0` but its
 # `resolveCacheMode` reads `ElectronDownloadCacheMode`, an export that only exists

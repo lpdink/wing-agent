@@ -3,19 +3,16 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
 import { afterEach } from 'vitest';
 
-import { setBridgeController } from '../../src/webview/bridge/channel';
-import { resetCollapseOverrides } from '../../src/webview/chat/interaction';
-import { resetImageUris } from '../../src/webview/chat/markdown/image';
-import { resetAppStore } from '../../src/webview/state/appStore';
+import { resetAppStore, resetCollapseOverrides, resetImageUris, setBridgeController } from '@wing-agent/ui';
 
 /**
- * jsdom project setup.
+ * jsdom project setup for the extension's remaining webview-side test.
  *
- * The webview keeps one app-wide store and one mounted controller (that is what a
- * webview document is), so tests must tear both down between cases — otherwise
- * state leaks from one assertion to the next. The renderer's interaction state
- * (expand/collapse choices) and the image URI cache are module-level for the same
- * reason and are reset with them.
+ * The renderer now lives in `@wing-agent/ui` (and so does the same teardown, in
+ * `packages/ui/tests/setup/webview.ts`): this file is only here because the preview
+ * harness — the one webview-side artefact that stayed in the extension — mounts the
+ * app under this project's jsdom. It keeps the document-level singletons from leaking
+ * between cases exactly like the package's copy does.
  */
 afterEach(() => {
   cleanup();
