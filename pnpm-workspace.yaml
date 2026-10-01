@@ -1,9 +1,11 @@
 # pnpm workspace + project config (single source of truth for the whole repo).
 #
-# `packages:` — every TypeScript package lives here; the three shells (vscode today,
-# web / electron later) are plain members and share one lockfile at the root.
-# `pnpm -r run <script>` (what `make check-ts` / `make test-ts` use) walks this list;
-# a new package needs no other registration (see 02_workspace_client_pkg/design.md §手册).
+# `packages:` — every TypeScript package lives here: `extensions/vscode` (the VS Code
+# shell), `packages/*` (shared packages: @wing-agent/client today) and `apps/*` (the
+# shell applications: @wing-agent/desktop today). They are plain members and share one
+# lockfile at the root; `pnpm -r run <script>` (what `make check-ts` / `make test-ts`
+# use) walks this list, so a new package needs no other registration
+# (see 02_workspace_client_pkg/design.md §手册).
 packages:
   - 'extensions/vscode'
   - 'packages/*'
@@ -11,14 +13,29 @@ packages:
 
 # allowBuilds: pnpm 10+ blocks dependency install scripts unless allow-listed.
 #   - esbuild needs its install script to place the platform binary.
+#   - electron's postinstall downloads the runtime binary (apps/desktop typechecks
+#     against its bundled types and runs it for `dev` / `--smoke`).
 #   - @vscode/vsce-sign is only pulled in by `vsce sign` (we ship an unsigned local
 #     .vsix), so its script stays blocked on purpose.
+#   - electron-winstaller only matters for Windows NSIS installers (transitive dep
+#     of electron-builder); the desktop shell ships macOS only, so it stays blocked
+#     too — declaring it explicitly keeps `pnpm install` exit 0.
 #
 # minimumReleaseAgeExclude: the workspace-level npm supply-chain guard refuses
 # packages published very recently; prettier is pinned here so the lockfile stays
 # reproducible with `--frozen-lockfile` on CI as well.
 allowBuilds:
   esbuild: true
+  electron: true
   '@vscode/vsce-sign': false
+  electron-winstaller: false
 minimumReleaseAgeExclude:
   - prettier@3.9.8
+
+# overrides: app-builder-lib@26.15.3 declares `@electron/get: ^3.0.0` but its
+# `resolveCacheMode` reads `ElectronDownloadCacheMode`, an export that only exists
+# in @electron/get ≥ 5 — with 3.x every packaging run dies before the .app is
+# written. electron@44 already depends on @electron/get@^5, so this override
+# dedupes to the version the code expects instead of adding another copy.
+overrides:
+  '@electron/get': '^5.1.0'

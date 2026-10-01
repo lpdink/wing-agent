@@ -12,6 +12,7 @@
 | [tui-images.md](tui-images.md) | 终端图片能力的两档阶梯、探测与配置、三态、资源上限与压力验证、新鲜度（重写同一路径 ≤1s 换图）、失效触发点、性能数字、真机验收清单 |
 | [tui-input.md](tui-input.md) | TUI 输入通道：键盘/鼠标/滚轮的上报模式（DECSET）与生命周期对称、选择与滚动的指针语义 |
 | [vscode-extension.md](vscode-extension.md) | VSCode 扩展：四层分层与数据流、桥协议与归约（重放==直播）、会话时序与多 Tab、连接自愈、构建/测试/smoke、打包与安装 |
+| [web-desktop.md](web-desktop.md) | Web 与桌面壳：`apps/desktop` 的职责与层门禁、`--smoke` 约定、`<userData>/config.json` 键、忽略自签名证书的判定与 Electron API 限制、`wing-app://` 与 CORS 契约、未签名打包与 ad-hoc 重签名 |
 | [probe-testing.md](probe-testing.md) | wing-probe 确定性集成测试：跑法（`make test-probe`）、新增场景、断言原语、红线清单与口径、逃生舱 |
 
 > 事实来源优先级：**代码 > 本目录 > AGENTS.md 概述**。若发现不一致，以代码为准并欢迎修正文档。

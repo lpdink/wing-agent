@@ -1,0 +1,5 @@
+# Dependencies and build output are never formatted.
+node_modules/
+dist/
+release/
+coverage/

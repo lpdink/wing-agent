@@ -1,0 +1,49 @@
+# electron-builder configuration for the desktop shell (05_electron_scaffold/design.md D12).
+#
+# Shape follows the July branch (thin shell, unsigned macOS build, `--dir` for
+# smoke) with the heavy parts of the Harness config deliberately left out:
+# no bundled runtime (Wing uses the `wing` CLI already installed on the machine),
+# no notarization, no auto-update, no publish target.
+
+appId: com.wing-agent.app # same id as the July branch: it decides the userData directory
+productName: Wing
+copyright: Copyright © wing-agent
+
+directories:
+  output: release
+
+asar: true
+# No native modules and no `dependencies` at all: nothing to rebuild against Electron.
+npmRebuild: false
+
+files:
+  - dist/**/*
+  - renderer/**/*
+  - package.json
+
+# Ad-hoc re-sign the finished bundle: electron-builder rewrites it (Info.plist,
+# app.asar) after Electron's own ad-hoc signature was made, which leaves
+# `codesign --verify` failing ("code has no resources but signature indicates they
+# must be present"). See scripts/after-pack.mjs.
+afterPack: ./scripts/after-pack.mjs
+
+# The product is unsigned on purpose (proposal: code signing / notarization are
+# out of scope). `identity: null` disables signing; the afterPack hook above then
+# applies the ad-hoc signature Apple Silicon needs to launch the bundle at all.
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+    - zip
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  notarize: false
+
+dmg:
+  # The dmg target must not write update metadata.
+  writeUpdateInfo: false
+
+# Note: the zip target still emits `latest-mac.yml` (Squirrel.Mac metadata) into
+# `release/`. Nothing consumes it — there is no auto-update and no publish config —
+# and the whole directory is git-ignored.

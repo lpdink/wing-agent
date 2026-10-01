@@ -1,0 +1,9 @@
+{
+  "//": "Package project for the Electron shell: `src/` (main + preload + the pure modules between them) and `tests/`. NO DOM lib on purpose — main-process code must not reach for `window`; the renderer is apps/web, a separate package. `electron` is a real dependency of the source, but every module except src/main.ts / src/preload.ts only takes *types* from it (see tests/layers.test.ts).",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts", "vitest.config.mts"]
+}

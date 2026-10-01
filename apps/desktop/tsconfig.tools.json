@@ -1,0 +1,11 @@
+{
+  "//": "Build/dev config files (esbuild, dev/smoke launchers). Kept in their own project so typescript-eslint's projectService finds a project for root-level and scripts/ JavaScript. JS is parsed but not type-checked (`checkJs: false`), matching extensions/vscode/tsconfig.tools.json. `eslint.config.mjs` is excluded from linting (a config file linting itself is circular).",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": ["esbuild.mjs", "scripts/**/*.mjs"]
+}

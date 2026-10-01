@@ -77,7 +77,9 @@ jobs:
 
   # ── TypeScript: lint + format + types + tests + build + package ──
   # Root pnpm workspace: one install covers every TS package
-  # (extensions/vscode, packages/*) — see docs/dev/vscode-extension.md §9.3.
+  # (extensions/vscode, packages/*, apps/*) — see docs/dev/vscode-extension.md §9.3.
+  # The desktop install pulls the Electron binary (~100 MB): `tsc` needs the types
+  # the package ships, and packaging itself is a developer-machine step.
   typescript-check:
     name: TypeScript Check
     runs-on: ubuntu-latest
@@ -115,6 +117,12 @@ jobs:
 
       - name: Build (extension host + webview)
         run: pnpm --filter wing-vscode run build
+
+      # Desktop shell: bundles the Electron main process + preload. Packaging
+      # (electron-builder) stays on a developer machine — it needs macOS tooling
+      # and produces an unsigned .app.
+      - name: Build desktop shell (main + preload)
+        run: pnpm --filter @wing-agent/desktop run build
 
       - name: Build webview preview harness
         run: pnpm --filter wing-vscode run build:preview
