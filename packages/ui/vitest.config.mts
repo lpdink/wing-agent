@@ -23,7 +23,13 @@ export default defineConfig({
         test: {
           name: 'node',
           environment: 'node',
-          include: ['tests/{protocol,state}/**/*.test.ts', 'tests/layers.test.ts'],
+          include: [
+            'tests/{protocol,state}/**/*.test.ts',
+            'tests/layers.test.ts',
+            // Build-artifact gates: they run Vite in-process and read the emitted CSS,
+            // so they need a Node environment, not a document (see the file headers).
+            'tests/artifacts/**/*.test.ts',
+          ],
         },
       },
       {
@@ -33,7 +39,21 @@ export default defineConfig({
           name: 'jsdom',
           environment: 'jsdom',
           setupFiles: ['tests/setup/webview.ts'],
-          include: ['tests/webview/**/*.test.ts', 'tests/webview/**/*.test.tsx'],
+          include: [
+            'tests/webview/**/*.test.ts',
+            'tests/webview/**/*.test.tsx',
+            // The wing-app cards (port batch 06b) render on their own, outside the
+            // mounted app, so they get their own dirs; batch 06c adds the process
+            // rows, the ask components and the shared atoms.
+            'tests/markdown/**/*.test.tsx',
+            'tests/tool/**/*.test.ts',
+            'tests/tool/**/*.test.tsx',
+            'tests/chat/**/*.test.ts',
+            'tests/chat/**/*.test.tsx',
+            'tests/ask/**/*.test.ts',
+            'tests/ask/**/*.test.tsx',
+            'tests/components/**/*.test.tsx',
+          ],
           css: { modules: { classNameStrategy: 'non-scoped' } },
         },
       },
