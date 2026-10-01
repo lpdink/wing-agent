@@ -2,9 +2,12 @@
  * Portions from DeepSeek Harness (https://github.com/deepseek-ai/deepseek-harness),
  * Copyright (c) 2026 DeepSeek, licensed under the MIT License (see THIRD_PARTY_NOTICES.md).
  * Source: packages/client/ui-user-questions/src/client/QuestionComposer.module.css
- * Modified for Wing: unchanged (the sheet reads tokens the package's theme tables
- * provide; the composer-width axis and the elevation pair are supplied by
- * styles/base.css and styles/design-platform.css).
+ * Modified for Wing: trimmed — the draft-store, countdown/wait and plan-review
+ * blocks this port drops are gone together with their rules (`.cardMinimized`,
+ * `.detail`, `.headerActions`, `.reviewNote`, `.waitButton`, `.waitStatus`); every
+ * rule the trimmed component still renders is unchanged. The sheet reads tokens the
+ * package's theme tables provide; the composer-width axis and the elevation pair
+ * are supplied by styles/base.css and styles/design-platform.css).
  */
 /* The takeover seats where the input card sits, centered on the InputBar
    axis at the shared content width (input card - 32): sides = clearance +

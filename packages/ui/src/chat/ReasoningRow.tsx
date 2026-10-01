@@ -84,7 +84,9 @@ export function latestCompletedParagraphFirstLine(text: string): string {
  */
 function useReasoningDisclosure(collapseKey: string | undefined, autoCollapsed: boolean): CollapsibleState {
   // Both hooks run unconditionally; the remembered one is simply not read without a key
-  // (nothing is written to the override store unless its toggle is the active one).
+  // (nothing is written to the override store unless its toggle is the active one, and
+  // no cell id is the empty string, so the placeholder key cannot collide with a real
+  // one — the store only ever sees a write from a row that actually owns a key).
   const remembered = useCollapsible(collapseKey ?? '', autoCollapsed);
   const [local, setLocal] = useState<boolean | null>(null);
   const toggleLocal = useCallback(() => {

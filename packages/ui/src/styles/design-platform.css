@@ -436,14 +436,16 @@ html[data-platform='darwin'] body[data-ds-dark-theme] {
 
 /* Elevation trio (port batch 06c): upstream declares these in
  * ui-theme/src/styles/gradient-shadow-text.css:5-34, which this port does not
- * carry; the panels ported by 06c (approval card, ask card) read them. Values
- * verbatim from upstream, including the dark-theme stroke override. */
+ * carry; the panels ported by 06c (approval card, ask card) read them. Values and
+ * scopes verbatim from upstream — including the dark override, which upstream
+ * applies to menu-material surfaces only (`body[data-ds-dark-theme]
+ * [data-menu-material]`), not to the whole dark page. */
 body {
   --dsw-shadow-lv2: 0 4px 12px 0 rgba(0, 0, 0, 0.02), 0 2px 8px 0 rgba(0, 0, 0, 0.04);
   --dsw-elevation-stroke-color: var(--dsw-alias-border-l4);
 }
 
-body[data-ds-dark-theme] {
+body[data-ds-dark-theme] [data-menu-material] {
   --dsw-elevation-stroke-color: var(--dsw-alias-border-l3);
 }
 

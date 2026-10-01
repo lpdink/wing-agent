@@ -309,8 +309,19 @@ export const QuestionComposer = memo(function QuestionComposer({
                   }}
                   onKeyDown={(event) => {
                     if (event.key !== 'Enter') return;
+                    // Enter is the mouse: it *selects* the focused option (and a single
+                    // choice advances), never a submit — the batch leaves the form only
+                    // through the final Submit, like the component's contract says.
+                    // `preventDefault` suppresses the browser's implicit click, so the
+                    // option cannot be chosen twice in one keypress (a real double
+                    // toggle would silently undo a multi-select).
+                    //
+                    // Upstream routed this key to `submitDrafts`, which stayed harmless
+                    // only behind its stricter answered-or-skipped completeness gate;
+                    // this port gates on Wing's required-only semantics, where the same
+                    // route dropped the focused option and sent the batch empty.
                     event.preventDefault();
-                    submit();
+                    choose(option.label, question.multiSelect);
                   }}
                 >
                   {question.multiSelect ? (

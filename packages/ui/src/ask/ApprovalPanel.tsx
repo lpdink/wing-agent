@@ -60,7 +60,11 @@ export interface ApprovalPanelProps {
  * Enter approves and Escape denies while focus is inside the card (unless focus sits
  * on a control that owns the key, and never mid-IME-composition); the two buttons do
  * the same. The component holds no in-flight state: it hands the decision to
- * `onDecide` and the owning cell's `state` is what disables it afterwards.
+ * `onDecide` and the owning cell's `state` is what disables it afterwards. Upstream
+ * additionally tracked the promise/carrier round-trip (`waiting` + `active` refs) and
+ * rolled back on rejection; that guard belongs to the carrier contract this port
+ * dropped, so a host that is slow to settle `state` must settle it (or dedupe the
+ * decision) itself — repeating the key before the echo arrives calls `onDecide` again.
  * @param props - request identity, copy, detail and the decision sink.
  * @returns The approval card.
  */

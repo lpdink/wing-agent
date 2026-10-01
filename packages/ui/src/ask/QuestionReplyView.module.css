@@ -5,6 +5,9 @@
  * Modified for Wing: the details divider was `color-mix(in srgb, label-secondary 24%,
  * transparent)` — the package's colour gate rejects colour functions in component
  * sheets — and reads `--dsw-alias-border-l2` (the neighbouring neutral hairline).
+ * The question `detail` block is not ported (this package's `AskQuestionModel` has
+ * no `detail` field), so its rule is gone with it and `.options` is grouped with
+ * `.header` instead; every other rule is unchanged.
  */
 .row {
   display: flex;

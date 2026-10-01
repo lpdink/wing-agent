@@ -184,9 +184,12 @@ Ask/row/atom tests — `packages/ui/tests/`:
 - `tests/ask/approval-panel.test.tsx` — from `packages/client/ui-approval/tests/`.
 - `tests/ask/question-composer.test.tsx` — from
   `packages/client/ui-user-questions/tests/question-composer.client.spec.tsx`.
-- `tests/ask/question-reply.test.tsx`, `tests/ask/question-reply.test.ts` —
+- `tests/ask/question-reply-view.test.tsx`, `tests/ask/question-reply.test.ts` —
   from `packages/client/ui-user-questions/src/client/QuestionReplyView.tsx` and
-  `question-reply.ts` (the trimmed projections' contract).
+  `question-reply.ts` (the trimmed projections' contract). The render half is
+  named after the component (not after the module it tests) so that it does not
+  share a basename with the pure-function file: a `.ts`/`.tsx` sibling pair trips
+  typescript-eslint's project service.
 - `tests/components/button.test.tsx` — from
   `packages/client/ui-primitives/tests/atoms.client.spec.tsx` (button cases).
 - `tests/components/connection-indicator.test.tsx` — from

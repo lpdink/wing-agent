@@ -98,6 +98,93 @@ describe('QuestionComposer', () => {
     expect(alpha.getAttribute('aria-checked')).toBe('false');
   });
 
+  it('selects the focused option on Enter instead of submitting the batch empty', () => {
+    const onSubmit = vi.fn();
+    const questions: readonly AskQuestionModel[] = [
+      question({ id: 'q1', options: [option('One'), option('Two')] }),
+      question({ id: 'q2', options: [option('X')] }),
+    ];
+    const view = render(
+      <QuestionComposer requestId="ask-1" questions={questions} state="awaiting" onSubmit={onSubmit} />,
+    );
+    const one = view.getByRole('radio', { name: 'One' });
+    one.focus();
+    fireEvent.keyDown(one, { key: 'Enter' });
+
+    // The keyboard path is the mouse path: the focused option is *chosen* (and a
+    // single choice walks on). It is never dropped, and nothing is submitted — the
+    // regression this pins sent the whole batch empty instead.
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(view.getByText('2 / 2')).toBeTruthy();
+    fireEvent.click(view.getByRole('button', { name: 'Previous question' }));
+    expect(view.getByRole('radio', { name: 'One' }).getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('toggles a multi-select option once per Enter and still never submits', () => {
+    const onSubmit = vi.fn();
+    const questions: readonly AskQuestionModel[] = [
+      question({ id: 'q1', multiSelect: true, options: [option('Alpha'), option('Beta')] }),
+      question({ id: 'q2', options: [option('X')] }),
+    ];
+    const view = render(
+      <QuestionComposer requestId="ask-1" questions={questions} state="awaiting" onSubmit={onSubmit} />,
+    );
+    const alpha = view.getByRole('checkbox', { name: 'Alpha' });
+    alpha.focus();
+    fireEvent.keyDown(alpha, { key: 'Enter' });
+    // One keypress, one toggle: the handler cancels the browser's implicit click, so
+    // a real double activation cannot silently undo the choice.
+    expect(alpha.getAttribute('aria-checked')).toBe('true');
+    fireEvent.keyDown(alpha, { key: 'Enter' });
+    expect(alpha.getAttribute('aria-checked')).toBe('false');
+    expect(view.getByText('1 / 2')).toBeTruthy();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('carries keyboard-made choices to the Submit button, the only submit path', () => {
+    const onSubmit = vi.fn();
+    const questions: readonly AskQuestionModel[] = [
+      question({ id: 'q1', options: [option('One'), option('Two')] }),
+      question({ id: 'q2', options: [option('X'), option('Y')] }),
+    ];
+    const view = render(
+      <QuestionComposer requestId="ask-1" questions={questions} state="awaiting" onSubmit={onSubmit} />,
+    );
+    const one = view.getByRole('radio', { name: 'One' });
+    one.focus();
+    fireEvent.keyDown(one, { key: 'Enter' });
+    const lastChoice = view.getByRole('radio', { name: 'Y' });
+    lastChoice.focus();
+    fireEvent.keyDown(lastChoice, { key: 'Enter' });
+
+    // On the last question Enter selects and stays (the mouse does the same); the
+    // batch leaves only when Submit is activated, with both choices intact.
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(view.getByText('2 / 2')).toBeTruthy();
+    fireEvent.click(view.getByRole('button', { name: 'Submit' }));
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0]?.[0]).toEqual([
+      { questionId: 'q1', selected: ['One'], text: '' },
+      { questionId: 'q2', selected: ['Y'], text: '' },
+    ]);
+  });
+
+  it('lets Enter on a required option satisfy the gate without submitting it', () => {
+    const onSubmit = vi.fn();
+    const questions: readonly AskQuestionModel[] = [
+      question({ id: 'q1', required: true, options: [option('y'), option('n')] }),
+    ];
+    const view = render(
+      <QuestionComposer requestId="ask-1" questions={questions} state="awaiting" onSubmit={onSubmit} />,
+    );
+    const yes = view.getByRole('radio', { name: 'y' });
+    yes.focus();
+    fireEvent.keyDown(yes, { key: 'Enter' });
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(yes.getAttribute('aria-checked')).toBe('true');
+    expect(view.getByRole('button', { name: 'Submit' })).toHaveProperty('disabled', false);
+  });
+
   it('submits one answer per question in order, with the free-form text', () => {
     const onSubmit = vi.fn();
     const questions: readonly AskQuestionModel[] = [
