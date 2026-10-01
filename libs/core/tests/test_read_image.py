@@ -417,7 +417,58 @@ class TestMaxBytes:
             await read_image(str(image), ctx=_ctx(vision=True))
 
 
-########## 4. 文件 / 格式校验
+########## 4. 默认上限（4.5 MiB）的边界行为
+
+
+class TestDefaultMaxBytes:
+    """默认 `images.max_bytes` = 4_718_592 的边界：= 上限可读 / +1 拒绝。
+
+    `_mock_config` 不覆盖 `images`，所以这里跑的就是解析出的默认值——两个用例
+    合并把默认值**行为上**钉死：恰好 4_718_592（放宽 → "+1 拒绝"变红；收紧 →
+    "= 上限可读"变红）。fixture 字节数与默认值同源，改动必须一起改。
+    """
+
+    #: 默认上限的字节数（4.5 MiB）——与 config.py / default_config.py 同值。
+    DEFAULT_MAX_BYTES = 4_718_592
+
+    @pytest.mark.asyncio
+    async def test_exactly_at_default_limit_passes(self, tmp_path: Path, _mock_config):
+        assert _mock_config.images.max_bytes == self.DEFAULT_MAX_BYTES, (
+            "默认上限变了——fixture 字节数必须同步"
+        )
+        image = tmp_path / "at-limit.png"
+        data = write_image(image, png_bytes(4, 4), total_size=self.DEFAULT_MAX_BYTES)
+        spy = _SpyMedia()
+
+        out = await read_image(str(image), ctx=_ctx(vision=True, media=spy.access))
+
+        assert out.media[0].bytes == self.DEFAULT_MAX_BYTES
+        assert spy.writes[0][1] == data
+
+    @pytest.mark.asyncio
+    async def test_one_byte_over_default_limit_rejected(
+        self, tmp_path: Path, _mock_config
+    ):
+        assert _mock_config.images.max_bytes == self.DEFAULT_MAX_BYTES, (
+            "默认上限变了——fixture 字节数必须同步"
+        )
+        image = tmp_path / "over-limit.png"
+        write_image(image, png_bytes(4, 4), total_size=self.DEFAULT_MAX_BYTES + 1)
+        spy = _SpyMedia()
+
+        with pytest.raises(ToolError) as ei:
+            await read_image(str(image), ctx=_ctx(vision=True, media=spy.access))
+
+        msg = str(ei.value)
+        # 上限字符串是 format_size(4_718_592) == "4.5 MB"（锚定模型可见文案形态）
+        assert "the 4.5 MB per-image limit" in msg, msg
+        assert "images.max_bytes" in msg, msg
+        # 拒绝发生在读字节 / 入库之前（"拒绝不产生副作用"）
+        assert spy.reads == []
+        assert spy.writes == []
+
+
+########## 5. 文件 / 格式校验
 
 
 class TestFileValidation:
@@ -526,7 +577,7 @@ class TestFileValidation:
             await read_image(str(image), ctx=_ctx(vision=True, media=None))
 
 
-########## 5. 工具注册契约（名字 / 参数名冻结）
+########## 6. 工具注册契约（名字 / 参数名冻结）
 
 
 class TestRegistrationContract:
@@ -541,7 +592,51 @@ class TestRegistrationContract:
         assert tool.inject_agent_param == "ctx"
 
 
-########## 6. Read 的图片指引 / Explorer 工具集
+########## 7. 工具描述（模型可见的 docstring）
+
+
+class TestToolDescription:
+    """描述 = 模型可见文本：保留成功路径 + 形态说明，不枚举失败路径。
+
+    失败路径的完整信息由**拒绝发生时的错误文案**给出（`_no_vision_message` /
+    `_too_large_error`），静态描述只留成功语义与可行动形态——这是本步骤的有意
+    取舍（见 03_media_cap/design.md D3），改动必须让本类变红。
+    """
+
+    @staticmethod
+    def _description() -> str:
+        tool = tool_registry.get_tool("ReadImage")
+        assert tool is not None
+        return tool.to_openai()["function"]["description"]
+
+    def test_failure_paths_are_not_enumerated(self):
+        description = self._description()
+        for fragment in (
+            "no vision capability",
+            "vision",  # 「需 vision 前置」表述整体移除（拒绝文案自解释）
+            "unsupported format",
+            "too large",
+            "corrupt",
+            "CgBI",
+            "refused",
+        ):
+            assert fragment not in description, (fragment, description)
+
+    def test_success_semantics_are_kept(self):
+        description = self._description()
+        assert "attach it to the conversation" in description
+        assert "PNG, JPEG, WebP and GIF" in description
+        assert "detected by file content, not by the" in description
+        assert "media store" in description
+        assert "one-line" in description and "envelope" in description
+        assert "[image: PATH | FORMAT WxH | SIZE | id ID | mtime MTIME]" in description
+        # Args: path 语义（相对路径按 workspace 解析）仍在
+        assert "Image file path (relative paths resolve against the workspace)" in (
+            description
+        )
+
+
+########## 8. Read 的图片指引 / Explorer 工具集
 
 
 class TestReadHint:
@@ -574,7 +669,7 @@ class TestExplorerReadOnlySet:
             assert tool_registry.resolve(name) is not None
 
 
-########## 7. WingAgent.capabilities 跟随模型切换
+########## 9. WingAgent.capabilities 跟随模型切换
 
 
 @pytest_asyncio.fixture

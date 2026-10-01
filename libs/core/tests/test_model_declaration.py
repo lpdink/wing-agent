@@ -156,7 +156,7 @@ class TestImagesConfig:
     def test_defaults(self):
         provider = _provider()
         assert _config(provider).images == ImagesConfig(
-            max_bytes=8_388_608,
+            max_bytes=4_718_592,
             max_images=32,
             count_quantum=8,
             request_budget_bytes=37_748_736,

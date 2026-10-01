@@ -168,7 +168,9 @@ tool_result_truncate:
 # image projection (retention budget is applied per request).
 images:
   # Reject images larger than this at read time (raw bytes).
-  max_bytes: 8388608
+  # 4.5 MiB — conservative vs. the ~5 MB per-image tiers most providers
+  # enforce server-side; raise it here if your provider accepts larger.
+  max_bytes: 4718592
 
   # Request-time retention budget. Images are kept by default (KV-cache
   # friendly); once a high-water mark is exceeded the oldest images are

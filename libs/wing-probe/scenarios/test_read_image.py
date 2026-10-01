@@ -1,9 +1,9 @@
-"""read-image 链路 probe 场景（step 06 / 07）。
+"""read-image 链路 probe 场景（step 06 / 07 / 03-media-cap）。
 
-覆盖 11 条：正向读图（默认 followup）/ inline 形态 / 能力门禁 / 换模型降级（红线）/
+覆盖 12 条：正向读图（默认 followup）/ inline 形态 / 能力门禁 / 换模型降级（红线）/
 高水位量子驱逐（红线）/ 压缩剥离（红线）/ fork 后媒体可用 / 存量回放兼容 /
-provider `image_max_bytes` 请求期降级 / `images.max_bytes` 读时拒绝 /
-字节缺失降级（UNAVAILABLE 占位）。
+provider `image_max_bytes` 请求期降级 / `images.max_bytes` 读时拒绝（注入覆盖）/
+字节缺失降级（UNAVAILABLE 占位）/ 默认上限读时拒绝（不注入覆盖）。
 
 断言只锚定四个取证面：**事件时间线**（WS 事件 data）、**假 Provider 请求留档**
 （`probe.context` / `probe.request`）、**history.jsonl**（独立解析）、**文件系统**
@@ -87,6 +87,10 @@ EVICTION_IMAGES: dict[str, Any] = {"max_images": 3, "count_quantum": 2}
 #: < 1 KiB（`format_size` 走 "N bytes" 字面形态，断言不依赖 KB 舍入）。
 IMAGE_BYTES_CAP = 100
 
+#: 默认上限场景的文件尺寸：5 MiB —— 超过默认 `images.max_bytes`（4.5 MiB /
+#: 4_718_592 B）且人类可读形态可区分（"5.0 MB exceeds the 4.5 MB per-image limit"）。
+DEFAULT_CAP_PROBE_BYTES = 5 * 1024 * 1024
+
 #: 状态翻转的轮询预算（TTL 1s + 扫描 0.5s，留足抖动余量）。
 POLL_DEADLINE = 20.0
 POLL_INTERVAL = 0.2
@@ -123,6 +127,17 @@ def write_image(probe: Probe, name: str, data: bytes) -> Path:
     path = probe.workspace / name
     path.write_bytes(data)
     return path
+
+
+def png_padded(size: int, *, tint: int = 0xCC) -> bytes:
+    """合法 PNG 尾部补零到恰 `size` 字节（IEND 之后的尾随字节不参与解析）。
+
+    默认上限场景只探**尺寸门**（`os.stat` 先于读字节，内容不参与判定）——
+    补零让文件保持"确实是图片"且尺寸精确可控（不必真造 5 MiB 像素数据）。
+    """
+    base = png(2, 2, tint=tint)
+    assert size > len(base)
+    return base + b"\x00" * (size - len(base))
 
 
 def media_id(data: bytes) -> str:
@@ -860,3 +875,56 @@ async def test_missing_media_object_degrades_to_unavailable(probe: Probe) -> Non
     assert [part["type"] for part in parts] == ["text", "text"], parts
     assert parts[0]["text"] == envelope, parts[0]
     assert parts[1]["text"] == PLACEHOLDER_UNAVAILABLE, parts
+
+
+# ── 场景 12：默认上限（不注入 images 覆盖） ─────────────────────────
+
+
+@pytest.mark.probe_env(models=[VISION_SPEC])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_default_max_bytes_refuses_read_without_writing(probe: Probe) -> None:
+    """**代码默认值** `images.max_bytes`（4.5 MiB）：超限读时拒绝、媒体池零写入。
+
+    与场景 10 互补：那条注入 `images={"max_bytes": 100}` 探"配置生效"；这条
+    不写 `images:` 段（`probe_env` 缺省即不注入）、探"缺省配置生效"——把默认值
+    放宽回 8 MiB 会让 5 MiB 的文件被正常读入并入库，本场景立刻变红。
+    """
+    data = png_padded(DEFAULT_CAP_PROBE_BYTES)
+    assert len(data) == DEFAULT_CAP_PROBE_BYTES
+    write_image(probe, "over-default.png", data)
+
+    probe.register(
+        VISION_MODEL,
+        Turn.of(tool_calls=[ToolCall("ReadImage", {"path": "over-default.png"})]),
+        Turn.of(text="understood"),
+    )
+    session = await probe.session(model=VISION_MODEL, tools=["ReadImage"])
+    await session.send("look")
+
+    # ① 事件：读时拒绝（tool_success=false、无引用），文案点名实际大小 / 默认上限 /
+    #    配置键——两个大小字符串必须可区分（5.0 MB vs 4.5 MB）。先于轮次结束断言：
+    #    「默认值被放宽」这类变异会以"工具成功"的形态在这里直接变红，而不是绕到
+    #    请求体超限的次生错误上。
+    call_event = await session.watch.expect(
+        "tool_call_result", where={"tool_name": "ReadImage"}, within=30
+    )
+    assert call_event.data["tool_success"] is False, call_event.data
+    message = call_event.data["tool_result"]
+    assert "5.0 MB exceeds the 4.5 MB per-image limit" in message, message
+    assert "images.max_bytes" in message, message
+    assert call_event.data["tool_media"] == [], call_event.data
+
+    # ② 文件系统：拒绝发生在入库之前——媒体池目录整个不存在（零写入）。
+    assert not (probe.env.sessions_path / ".media").exists()
+
+    # 工具失败不打断轮次（正常收尾）。
+    result = await session.watch.expect("turn_result", within=30)
+    assert result.data["subtype"] == "success", result.data
+
+    # ③ 请求留档：工具没产出引用 → 请求链上无 image part / 无占位文案。
+    for entry in probe.requests_for(VISION_MODEL):
+        body = json.dumps(entry.body)
+        assert "image_url" not in body, entry.describe()
+        for placeholder in PLACEHOLDERS:
+            assert placeholder not in body, (entry.describe(), placeholder)
