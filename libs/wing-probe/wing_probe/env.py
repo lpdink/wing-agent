@@ -177,6 +177,7 @@ def render_config_yaml(
     keep_recent_tokens: int = 50_000,
     log_level: str = "INFO",
     sessions: Mapping[str, Any] | None = None,
+    hooks: Sequence[str] = (),
 ) -> str:
     """生成 probe 网关配置（providers 指向假 Provider；agents 预置 default）。
 
@@ -186,6 +187,12 @@ def render_config_yaml(
 
     ``sessions`` 是透传给配置 ``sessions:`` 段的原文（None = 用默认值；
     逐出场景靠它把 TTL 压到秒级）。
+
+    ``hooks`` 是透传给配置 ``hooks:`` 段的 glob 列表（默认空 = 不加载 hook）。
+    相对路径按**网关进程 cwd** 解析——``ProbeEnv`` 以 ``env.root`` 为 cwd 启动
+    网关，因此惯例是 ``"hooks/*.py"``：场景在跑起来后把 hook 文件写进
+    ``<root>/hooks/``，经 ``POST /api/system/reload`` 加载（见
+    scenarios/test_session_persistence.py）。
     """
     config: dict[str, Any] = {
         "providers": [
@@ -216,7 +223,7 @@ def render_config_yaml(
                 "rules": [],
             }
         ],
-        "hooks": [],
+        "hooks": list(hooks),
         "safe_command_patterns": [],
         "yolo": False,
         "log": {"level": log_level},
@@ -336,6 +343,7 @@ class ProbeEnv:
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         env_overrides: Mapping[str, str] | None = None,
         sessions: Mapping[str, Any] | None = None,
+        hooks: Sequence[str] = (),
     ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.wing_home = self.root / "wing_home"
@@ -358,6 +366,7 @@ class ProbeEnv:
         self._gateway_attempts = gateway_attempts
         self._env_overrides = dict(env_overrides or {})
         self._sessions_config = dict(sessions) if sessions is not None else None
+        self._hooks_config = tuple(hooks)
         self._process: subprocess.Popen[bytes] | None = None
         self._log_handle: IO[bytes] | None = None
         self._port: int | None = None
@@ -408,6 +417,7 @@ class ProbeEnv:
                     tools=self.tools,
                     system_prompt=self.system_prompt,
                     sessions=self._sessions_config,
+                    hooks=self._hooks_config,
                 ),
             )
             self._port = port

@@ -111,12 +111,18 @@ Hooks 在定义的扩展点拦截 wing 的行为。每个扩展点有特定的�
 
 | 扩展点 | 触发时机 | 签名 |
 |--------|---------|------|
-| `before_session_start` | Session 创建或加载时 | `(session, **ctx) -> None` |
+| `before_session_start` | **新 session 建立时**（`create` / `fork`；`resume` 不触发——同一个 session id 只是换入内存） | `(session, **ctx) -> None` |
 | `before_user_message` | 处理用户消息前 | `(content: str \| None, **ctx) -> str \| None` |
 | `before_tool_call` | 工具执行前 | `(tc: ToolCall \| None, **ctx) -> ToolCall \| None` |
 | `after_tool_call` | 工具执行后 | `(result: str \| None, tool_name: str, **ctx) -> str \| None` |
 
 Hook handler 组成管道：每个 handler 接收上一个 handler 的输出值。返回 `None` 保持当前值不变，返回新值则替换。
+
+### 追加系统提示词与幂等要求
+
+- 注入内容请走 `session.context_manager.append_to_system_prompt(text)`：追加结果随会话持久化（`metadata.append_system_prompt`），`resume` 时逐字节还原——直接用别的入口改系统提示词不会被记录，重启后前缀会变化。
+- **hook 必须自己保证幂等**：`before_session_start` 在 `fork` 时也会触发，而子会话已经继承了源会话的追加内容——不自幂等的 hook 会在每次分叉时再叠一层（并写进子会话记录）。机制层面的唯一注入 / 去重会在钩子系统重做时提供（见 issue #131）。
+- **从旧版升级（破坏性变更）**：`session.context_manager.inject_system_prompts`（list）已改为 `append_system_prompt`（str）+ `append_to_system_prompt(text)`。旧写法抛的 `AttributeError` 会被 hook 框架吞掉（只剩一条 warning 日志）——注入会**静默失效**，请同步更新 `~/.wing/hooks/*.py`（本仓库自带 hook 已更新）。
 
 ### 编写 Hook
 

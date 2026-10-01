@@ -309,3 +309,74 @@ async def test_rewind_to_root(probe: Probe) -> None:
     for abandoned in ("alpha", "beta", "reply one", "reply two"):
         assert abandoned not in body, (abandoned, context.describe())
     assert context.messages[-1].content == "fresh start", context.describe()
+
+
+COMPACT_REWIND_MODEL = "probe/rewind-after-compact"
+COMPACT_REWIND_SUMMARY = "Task: answer the user."
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_rewind_after_compact_keeps_region_reachable(probe: Probe) -> None:
+    """压缩后回退到"压缩后的第一条消息"：候选不塌、区间不复活（红线）。
+
+    WHEN 压缩（整窗 → 摘要节点）后回退到紧随摘要的那条消息
+    THEN 回退行 = 摘要节点的副本且**带上 unzip**：压缩前区间与 `[Compact]`
+    标记仍是回退 / 分叉候选（旧实现丢 unzip → 候选塌成只剩 `(current)`）；
+    同时活跃链只有回退行——被压缩区间在记录里、不在链上。
+    """
+    probe.register(
+        COMPACT_REWIND_MODEL,
+        Turn.of(text="reply one"),
+        Turn.of(text=f"<summary>{COMPACT_REWIND_SUMMARY}</summary>"),
+        Turn.of(text="post compact reply"),
+        Turn.of(text="restart reply"),
+    )
+    session = await probe.session(model=COMPACT_REWIND_MODEL)
+    await session.chat("alpha")
+    await session.compact()
+    await session.watch.expect("compact_done", within=15)
+    await session.chat("gamma")  # 压缩后的第一条消息（parent = 摘要节点）
+
+    before = probe.history(session)
+    targets_before = [
+        target["content"] for target in (await session.branches())["targets"]
+    ]
+    gamma = next(
+        target
+        for target in (await session.branches())["targets"]
+        if target["content"] == "gamma"
+    )
+
+    response = await session.rewind(gamma["uuid"])
+    assert response["draft"] == "gamma"
+    after = probe.history(session)
+    material = assert_rewind_transition(before, after, gamma["uuid"])
+    assert material["mode"] == "copy", material
+
+    rewind_row = after.by_uuid[material["copy_uuid"]]
+    assert rewind_row["content"].startswith("[Compact]"), rewind_row
+    assert rewind_row.get("unzip_last_uuid") is not None, rewind_row
+
+    # 候选保持完整：压缩前的 User Message 与 [Compact] 标记都还在
+    targets_after = [
+        target["content"] for target in (await session.branches())["targets"]
+    ]
+    assert "alpha" in targets_after, (targets_before, targets_after)
+    assert any(target.startswith("[Compact]") for target in targets_after), (
+        targets_before,
+        targets_after,
+    )
+
+    # 活跃链 = 回退行（区间在记录里，不上链）
+    assert [message["content"] for message in after.messages()] == [
+        rewind_row["content"]
+    ], after.describe()
+
+    # 回退后继续：新消息接在回退行之后，区间始终不进链
+    await session.chat("restart")
+    assert [message["content"] for message in probe.history(session).messages()] == [
+        rewind_row["content"],
+        "restart",
+        "restart reply",
+    ], probe.history(session).describe()

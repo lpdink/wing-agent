@@ -24,8 +24,9 @@ from wing.common.tracked_list import TrackedList
 from wing.config import get_config
 from wing.context_manager import ContextManager
 from wing.provider import create_provider
-from wing.schema import ChainNode, Message
+from wing.schema import ChainNode, Message, Tool
 from wing.store import SessionMetadata, SessionStore
+from wing.tool_registry import ToolRef
 
 if TYPE_CHECKING:
     from wing.agent import WingAgent
@@ -57,6 +58,17 @@ def serialize_message(msg: Message) -> dict:
     if msg.tool_call_id:
         d["tool_call_id"] = msg.tool_call_id
     return d
+
+
+def tool_refs(tools: list[Tool]) -> list[str]:
+    """把 Tool 列表投影为可持久化的 ref 列表（"Bash" / "client.Read"）。
+
+    与 `WingAgent.set_tools()` 接受的引用格式一致——ref 可在任何进程经
+    `tool_registry.resolve()` 还原；闭包 / dispatch 闭包不可持久化，这正是
+    "只存引用不存对象"的原因。会话状态持久化（metadata.tools）与 fork 的
+    工具集对齐共用本投影。
+    """
+    return [str(ToolRef(namespace=t.namespace, name=t.name)) for t in tools]
 
 
 class Session:
@@ -96,10 +108,11 @@ class Session:
         if self._metadata.workspace:
             self._agent.set_cwd(Path(self._metadata.workspace).resolve())
 
-        # 模型绑定还原：与 workspace 同理，构造时统一应用持久状态。
-        # 记录存在时优先于模板默认模型（重启后 resume 的核心），覆盖
-        # resume 与「带 session_id 的 create 恢复」两条路径。
-        self._restore_persisted_model()
+        # 持久状态还原：模型绑定 / 系统提示词 / 工具集 / 动态开关——构造时
+        # 统一应用，覆盖 resume（重启 / 逐出后水合）与 fork 子会话构造两条
+        # 路径（session id 已是既有的、记录已在磁盘上）。记录存在时优先于
+        # 模板默认。
+        self._restore_persisted_state()
 
         self._initial_status = self._agent.get_status()
 
@@ -189,6 +202,12 @@ class Session:
             rules_patterns=template.rules_patterns,
             workspace=self._metadata.workspace,
         )
+        # 追加系统提示词是会话级内容（hook 注入的环境信息 + 追加指令），
+        # 与模板无关：新 CM 上重新挂载持久化值（否则重启/切换后丢失）。
+        if self._metadata.append_system_prompt:
+            self._context_manager.append_system_prompt = (
+                self._metadata.append_system_prompt
+            )
 
         # 3. 创建新 Agent
         provider_cfg = get_config().get_provider(template.provider_name)
@@ -211,8 +230,17 @@ class Session:
 
         self._template_name = template.name
         self._metadata.template_name = template.name
-        # 模板切换覆写模型记录（新模板的生效模型）——与 template_name
-        # 同一次落盘（_persist_model 保存整个 metadata）。
+        # 模板切换以新模板为准——此前记录的显式覆盖（基础提示词 / 工具 /
+        # 动态开关 / 限额）随切换作废：清记录即「跟随新模板与配置」的持久化
+        # 表达（新 agent 已按新模板构造），避免重启后把旧覆盖又贴回新 agent。
+        self._metadata.system_prompt = None
+        self._metadata.tools = None
+        self._metadata.thinking = None
+        self._metadata.reasoning_effort = None
+        self._metadata.yolo = None
+        self._metadata.max_turns = None
+        # 模板切换覆写模型记录（新模板的生效模型）——与 template_name 及
+        # 上述清理同一次落盘（_persist_model 保存整个 metadata）。
         self._persist_model()
         self._initial_status = self._agent.get_status()
         log.info(f"Session {self._session_id}: switched to agent '{template.name}'")
@@ -234,7 +262,7 @@ class Session:
             await self._agent.aclose_providers()
 
     def apply_agent_override(self, override: AgentOverride) -> None:
-        """应用 AgentOverride 到当前 session 的 agent。
+        """应用 AgentOverride 到当前 session 的 agent（创建时调用）。
 
         在 from_template 之后调用，覆盖 template 中的特定字段。
         通过 agent 自身的公共方法完成覆盖，不直接操作内部状态。
@@ -243,6 +271,10 @@ class Session:
         - None 字段不覆盖（保留 template 值）
         - system_prompt 替换，append_system_prompt 追加
         - 两者同时存在时，先替换再追加
+
+        每个被应用的字段同步写入 metadata 并落盘——override 是显式动作，
+        其效果必须跨重启（resume）与 fork 存活，否则系统提示词 / 工具集 /
+        开关在重启后变回模板默认，请求前缀与重启前不一致（KV cache 碎裂）。
         """
         cm = self._context_manager
         agent = self._agent
@@ -255,27 +287,32 @@ class Session:
         # 2. system_prompt 替换（先替换，后追加，保证顺序正确）
         if override.system_prompt is not None:
             cm.setin_system_prompt = override.system_prompt
+            self._record_state(system_prompt=override.system_prompt)
 
-        # 3. append_system_prompt 追加
+        # 3. append_system_prompt 追加（与 hook 注入内容合并进同一字段）
         if override.append_system_prompt is not None:
-            current = cm.setin_system_prompt or ""
-            cm.setin_system_prompt = current + "\n" + override.append_system_prompt
+            cm.append_to_system_prompt(override.append_system_prompt)
+            self._record_state(append_system_prompt=cm.append_system_prompt or None)
 
         # 4. tools 覆盖（从 registry 获取新的未绑定工具，避免闭包泄漏）
         if override.tools is not None:
             agent.set_tools(override.tools)
+            self._record_state(tools=list(override.tools))
 
         # 5. max_turns 覆盖
         if override.max_turns is not None:
             agent.set_max_turns(override.max_turns)
+            self._record_state(max_turns=override.max_turns)
 
         # 6. effort (reasoning_effort) 覆盖
         if override.effort is not None:
             agent.set_reasoning_effort(override.effort)
+            self._record_state(reasoning_effort=override.effort)
 
         # 7. yolo 覆盖
         if override.yolo is not None:
             agent.set_yolo(override.yolo)
+            self._record_state(yolo=override.yolo)
 
         log.info(
             f"Session {self._session_id}: applied agent override "
@@ -380,6 +417,22 @@ class Session:
         """该 session 所属的 SessionStore（fork 继承后端、SM 聚合用）。"""
         return self._store
 
+    @property
+    def persisted_thinking(self) -> bool | None:
+        """记录在案的 thinking 开关（None = 无记录，跟随 provider 配置）。
+
+        fork 快照（`SessionManager.fork_session`）取**记录**而非 live 派生值：
+        派生默认（如 anthropic 未配置 thinking 时的 disabled）被固化进子会话
+        记录后，会变成源会话请求体里不存在的显式配置——前缀身份被破坏，
+        跨协议切模型时还会把一种协议的默认值贴到另一种协议上。
+        """
+        return self._metadata.thinking
+
+    @property
+    def persisted_reasoning_effort(self) -> str | None:
+        """记录在案的推理力度（None = 无记录，跟随 provider 配置）。"""
+        return self._metadata.reasoning_effort
+
     # ── metadata 管理 ──────────────────────────────
 
     def _save_metadata(self) -> None:
@@ -433,21 +486,77 @@ class Session:
 
         if tools is not None:
             self.agent.set_tools(tools)
+            self._record_state(tools=list(tools))
 
         if title is not None:
             self.set_title(title)
 
         if thinking is not None:
             self.agent.model_provider.set_thinking(thinking)
+            self._record_state(thinking=thinking)
 
         if reasoning_effort is not None:
             self.agent.set_reasoning_effort(reasoning_effort)
+            self._record_state(reasoning_effort=reasoning_effort)
 
         if yolo is not None:
             self.agent.set_yolo(yolo)
+            self._record_state(yolo=yolo)
 
         if workspace is not None:
             self.set_workspace(workspace)
+
+    def _record_state(self, **fields: object) -> None:
+        """把显式动作产生的会话状态写进 metadata 并落盘。
+
+        保存的是整个 metadata 模型（幂等）；字段一律来自「用户显式动作 /
+        创建 override / fork 快照」——绝不在普通请求路径上顺手快照，避免把
+        模板/配置默认值固化成记录、挡住未来的配置变更。
+
+        落盘是 best-effort（与 _persist_model 同口径）：live 状态已经生效，
+        把一次磁盘写失败变成 500 只会制造新的前后端错位；最坏退化是本次
+        进程内正确、重启后跟随模板/配置默认。
+        """
+        for name, value in fields.items():
+            setattr(self._metadata, name, value)
+        try:
+            self._save_metadata()
+        except OSError as e:
+            log.warning(f"Session {self._session_id}: state not persisted ({e})")
+
+    def reapply_provider_options(self) -> None:
+        """把记录在案的 provider 级开关贴到**当前** provider 实例上（公开入口）。
+
+        适用于 provider 实例被换掉的第三条路径：`/api/system/reload` 第 4 步
+        对在场会话调 `agent.rebuild_providers()` 按新配置重建 provider——
+        provider 级 extra_body 状态（thinking / reasoning_effort）随之归零，
+        不重贴就会静默退回配置默认（请求前缀漂移，且与 metadata 记录失配，
+        直到下次逐出 / resume 才被纠正）。
+        """
+        self._reapply_recorded_provider_options()
+
+    def sync_tools_record(self) -> None:
+        """把**当前生效**的工具集快照进 metadata 并落盘（fork 专用）。
+
+        fork 记录的是源会话的 live refs，但按 ref 还原可能降级（远程工具宿主
+        断连后 registry 里已无该 ref）：记录与 live 不一致会让子会话重启后
+        tools 声明凭空变化——正是本次要消灭的"重建后前缀漂移"。fork 构造完
+        子会话后调用本方法，把记录对齐到实际生效集合。
+        """
+        self._record_state(tools=tool_refs(self._agent.tools))
+
+    def sync_append_system_prompt(self) -> None:
+        """把 CM 当前 append_system_prompt 快照进 metadata 并落盘。
+
+        create_session 在 before_session_start hook 跑完后调用——hook 注入的
+        内容（如 workspace / OS 信息）是会话级状态，必须随创建落盘，resume /
+        fork 重建 CM 时才能复现同一系统提示词（KV cache 前缀稳定）。
+        与记录相同（含同为 None）时跳过，不产生写噪声。
+        """
+        value = self._context_manager.append_system_prompt or None
+        if value == self._metadata.append_system_prompt:
+            return
+        self._record_state(append_system_prompt=value)
 
     def _apply_model(self, model: str, provider_name: str | None = None) -> None:
         """切换模型，必要时切换 provider——委托 agent 的单一持有能力。
@@ -457,8 +566,14 @@ class Session:
 
         切换成功后把生效的 (provider, model) 记入 metadata 并落盘——这是
         显式模型动作的落盘点，也是模型选择跨进程重启的唯一恢复来源。
+
+        跨 provider 切换会换上另一个 provider 实例（provider 级 extra_body
+        状态归零）：记录在案的 thinking / reasoning_effort 重新贴回，避免
+        一次 /model 就把会话开关悄悄改回配置默认（同 provider 切模型本就
+        保留）。agent 级状态（yolo / max_turns）不随切换变化，不在此重贴。
         """
         self.agent.set_model(model, self._resolve_provider(provider_name))
+        self._reapply_recorded_provider_options()
         self._persist_model()
 
     def _resolve_provider(self, provider_name: str | None) -> "ModelProvider":
@@ -488,6 +603,101 @@ class Session:
                 f"Session {self._session_id}: model record not persisted ({e}); "
                 "switch stays in effect for this process"
             )
+
+    # ── 持久状态还原（构造时统一应用）─────────────
+
+    def _restore_persisted_state(self) -> None:
+        """把 metadata 记录的会话状态应用到 agent / CM（构造时统一调用）。
+
+        覆盖 resume、fork 子会话构造、带 session_id 的磁盘恢复三条路径——
+        「重建 agent = 从磁盘复现请求前缀」，这是 KV cache 跨重启存活的前提。
+        全字段「记录存在才应用」：缺失视为无记录，跟随模板/配置默认，绝不
+        把默认值固化成记录。
+
+        顺序：提示词 → 工具 → 模型 → 动态开关。模型排在开关之前：跨 provider
+        还原会换上 provider 实例，开关必须落在最终活跃的 provider 上。
+        """
+        self._restore_persisted_prompt()
+        self._restore_persisted_tools()
+        self._restore_persisted_model()
+        # 模型还原可能换上别的 provider 实例：provider 级开关必须落在最终
+        # 活跃的 provider 上；agent 级开关（yolo / max_turns）与 provider
+        # 无关，单独应用（两者口径见各自 docstring）。
+        self._reapply_recorded_provider_options()
+        self._restore_persisted_agent_options()
+
+    def _restore_persisted_prompt(self) -> None:
+        """还原基础系统提示词替换与追加系统提示词。"""
+        cm = self._context_manager
+        if self._metadata.system_prompt is not None:
+            cm.setin_system_prompt = self._metadata.system_prompt
+        if self._metadata.append_system_prompt:
+            cm.append_system_prompt = self._metadata.append_system_prompt
+
+    def _restore_persisted_tools(self) -> None:
+        """按记录还原可执行工具集（尽力而为）。
+
+        ref 可能因远程宿主未连接 / 配置变更而失效：逐个解析、失效的跳过并
+        告警；非空记录全部失效或绑定失败时保持模板工具集（宁可多给，不可
+        裸奔——远程工具与动态工具切换尚无系统化设计，先按最简单语义处理）。
+
+        `None`（无记录）与 `[]`（显式清空工具集）语义不同：后者是用户的
+        显式动作，必须原样还原。
+        """
+        refs = self._metadata.tools
+        if refs is None:
+            return
+        from wing.tool_registry import tool_registry
+
+        resolved = [ref for ref in refs if tool_registry.resolve(ref) is not None]
+        missing = [ref for ref in refs if ref not in resolved]
+        if missing:
+            log.warning(
+                f"Session {self._session_id}: {len(missing)} recorded tool(s) "
+                f"no longer resolvable, skipped: {missing}"
+            )
+        if refs and not resolved:
+            log.warning(
+                f"Session {self._session_id}: no recorded tool resolves; "
+                "keeping template tools"
+            )
+            return
+        # 还原 = 重建 agent：声明集复位为未初始化，set_tools 走 init 冷路径
+        # （声明集直接跟随可执行集）——绝不触发热切换的 reminder 注入（那条
+        # 消息在重启前的链里不存在，会碎掉请求前缀）。
+        self._context_manager.reset_declared_tools()
+        try:
+            self._agent.set_tools(resolved)
+        except ValueError as e:
+            log.warning(
+                f"Session {self._session_id}: cannot restore recorded tools ({e}); "
+                "keeping template tools"
+            )
+
+    def _reapply_recorded_provider_options(self) -> None:
+        """把记录在案的 **provider 级**开关应用到当前 provider（无记录即默认）。
+
+        provider 实例在跨 provider 切换与模型还原时会被换掉（provider 级
+        extra_body 状态归零），记录在案的 thinking（enable_thinking）与
+        reasoning_effort 必须重新落上去。
+
+        **只做 provider 级**：yolo / max_turns 是 agent 级状态，不随 provider
+        切换变化——一并重贴会盖掉 live 值（例：Bash 工具的 "always allow"
+        运行时打开 yolo，不产生任何记录）。
+        """
+        m = self._metadata
+        if m.thinking is not None:
+            self._agent.model_provider.set_thinking(m.thinking)
+        if m.reasoning_effort is not None:
+            self._agent.set_reasoning_effort(m.reasoning_effort)
+
+    def _restore_persisted_agent_options(self) -> None:
+        """还原 agent 级开关与限额（构造路径专用；无记录即跟随模板/配置）。"""
+        m = self._metadata
+        if m.yolo is not None:
+            self._agent.set_yolo(m.yolo)
+        if m.max_turns is not None:
+            self._agent.set_max_turns(m.max_turns)
 
     def _restore_persisted_model(self) -> None:
         """从 metadata 还原模型绑定（重启后 resume 的核心动作）。

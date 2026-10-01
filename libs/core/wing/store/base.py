@@ -31,8 +31,25 @@ class SessionMetadata(BaseModel):
     是模型选择跨进程重启的唯一恢复来源。model_name 与 AgentInfo.model_name
     同义（当前生效模型的裸名）。
 
-    TODO(future): 持久化更多动态状态（thinking、yolo 等）——
-    可动态切换的状态将来都应可恢复，届时在此扩展字段。
+    提示词与动态状态（system_prompt / append_system_prompt / tools / thinking /
+    reasoning_effort / yolo / max_turns）走同一套"显式动作写入、resume 优先
+    于模板/配置"语义。它们全部进入 LLM 请求（或改变请求行为），丢失会让
+    fork/resume 后的请求前缀与重启前不一致——直接表现为 KV cache 不命中，
+    因此必须随会话持久化：
+
+    - system_prompt：基础系统提示词的替换值（AgentOverride.system_prompt）；
+    - append_system_prompt：追加系统提示词（hook 注入的环境信息 +
+      AgentOverride.append_system_prompt 的合并结果）；
+    - tools：可执行工具集覆盖（ref 列表，如 "Bash" / "client.Read"）；
+    - thinking / reasoning_effort / yolo / max_turns：会话级开关与限额。
+
+    fork 时这些字段一次写全（快照语义，与模型绑定一致）——子会话重启后不会
+    偏离 fork 时的行为：提示词 / 工具集 / yolo / max_turns 取 fork 时刻的
+    **有效值**（子会话 agent 由 `AgentTemplate.from_agent` 按 live 构造，记录
+    必须与之一致；append_system_prompt 先按 live 值写入供子会话构造时继承，
+    随后 `before_session_start` 在新会话上生效、注入结果覆盖落盘）；
+    thinking / reasoning_effort 只拷**显式记录**——固化了 provider 派生默认
+    （如 anthropic 未配置 thinking）会让子会话请求体带上源会话没有的显式配置。
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -44,6 +61,13 @@ class SessionMetadata(BaseModel):
     template_name: str | None = None
     model_name: str | None = None
     provider_name: str | None = None
+    system_prompt: str | None = None
+    append_system_prompt: str | None = None
+    tools: list[str] | None = None
+    thinking: bool | None = None
+    reasoning_effort: str | None = None
+    yolo: bool | None = None
+    max_turns: int | None = None
 
 
 class SessionSummary(BaseModel):
