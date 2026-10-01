@@ -1,6 +1,6 @@
 import { vi } from 'vitest';
 
-import type { HostToWebviewMessage } from '../../../src/shared';
+import type { HostToWebviewMessage } from '@wing-agent/ui/protocol';
 import { silentLogger } from '@wing-agent/client';
 import type { CoreLogger, HttpTransport } from '@wing-agent/client';
 import { GatewayConnection, GatewayHttpClient } from '@wing-agent/client';

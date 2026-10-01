@@ -1,0 +1,9 @@
+{
+  "//": "Node probe — the **no-DOM** gate for the two entry points a Node program consumes: `src/protocol/**` (the wire contract the extension host imports) and `src/testing/**` (the fixtures + scripted host the host-side harnesses and the preview page import). Both must compile without the DOM lib, exactly like `@wing-agent/session` does, because `extensions/vscode/tsconfig.node.json` type-checks them inside a program that has no DOM: a `document`/`window` usage here breaks the host build. The renderer half of the package (`src/app`, `src/chat`, …) is DOM by construction and only the browser probe applies to it. Deliberately NOT referenced from `tsconfig.json` and NOT used by ESLint (typescript-eslint's projectService requires each file to belong to exactly one project); `pnpm run typecheck` runs it.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "types": ["node"]
+  },
+  "include": ["src/protocol/**/*.ts", "src/testing/**/*.ts"]
+}

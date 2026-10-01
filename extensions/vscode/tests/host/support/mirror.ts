@@ -1,12 +1,13 @@
 import type { CellModel } from '@wing-agent/session';
-import type { HostToWebviewMessage } from '../../../src/shared';
-import { applyCellPatches, isExpectedSeq } from '../../../src/webview/state/applyPatch';
+import type { HostToWebviewMessage } from '@wing-agent/ui/protocol';
+import { applyCellPatches, isExpectedSeq } from '@wing-agent/ui/protocol';
 
 /**
  * The webview's mirror, driven by the host's real messages.
  *
  * It intentionally reuses the *shipped* consumer reducer
- * (`src/webview/state/applyPatch.ts`) instead of reimplementing patch
+ * (`@wing-agent/ui/protocol`, the receiver-side reducer of the patch channel) instead of
+ * reimplementing patch
  * application: when a host test asserts "the webview sees X", it asserts that
  * the frozen implementation can follow the host's patch stream. A host bug that
  * violates `seq` continuity or addresses an unknown cell shows up here as a
