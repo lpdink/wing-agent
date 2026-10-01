@@ -53,6 +53,7 @@ libs/core/wing/
 ├── config.py                        Config 模型 + WING_HOME 解析
 ├── default_config.py                手写默认 config.yaml 模板（事实来源）
 ├── schema.py                        Tool / ToolParam / Message 等核心 schema
+├── media.py                         图片媒体纯函数层（id/格式/尺寸/信封/请求期投影）
 ├── tool_registry.py                 ToolRegistry — 命名空间感知注册表 + ToolRef 解析
 ├── event_bus.py                     EventBus — 全局单例事件路由
 ├── hook_registry.py                 Hook 扩展点（before_session_start / before_user_message / before_tool_call / after_tool_call）
@@ -68,6 +69,7 @@ libs/core/wing/
 ├── provider/                        模型调用层（协议隔离）
 │   ├── base.py                      ModelProvider ABC + StreamAccumulator + parse_tool_args（容错，永不抛）
 │   ├── transport.py                 HTTP/SSE 传输管道与错误面（SSE 行解析 / 空闲超时 / httpx 构造 / raise_with_body）
+│   ├── media.py                     请求期媒体投影与序列化原语（两协议共用）
 │   ├── openai_compat.py             OpenAI 兼容协议（httpx 流式 + 重试）
 │   ├── anthropic.py                 Anthropic Messages API（thinking blocks、x-api-key）
 │   └── __init__.py                  create_provider() + provider registry（并发聚合模型列表）
@@ -80,7 +82,7 @@ libs/core/wing/
 │   ├── react.py / state_change.py / query_response.py
 │   └── __init__.py                  EVENT_TYPES / FACT_EVENTS 注册表 + wire_dump（WS 帧规则）
 ├── tools/                           内置工具
-│   ├── bash.py / file.py / search.py   Bash · Read/Write/Edit · Glob/Grep
+│   ├── bash.py / file.py / read_image.py / search.py   Bash · Read/Write/Edit · ReadImage · Glob/Grep
 │   ├── ask_user.py / todo.py           AskUserQuestion · TodoWrite
 │   ├── explorer.py                     Explorer 子 agent（只读工具集，可 run_in_background）
 │   ├── experimental.py                 BetterEdit（实验，[upto] 锚点）
@@ -202,6 +204,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/http-api.md`](docs/dev/http-api.md) | 完整 HTTP 端点表 + WebSocket 协议 + 鉴权 |
 | [`docs/dev/glossary.md`](docs/dev/glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |
 | [`docs/dev/config-logging.md`](docs/dev/config-logging.md) | WING_HOME 布局、config.yaml 键、日志轮转与查询 |
+| [`docs/dev/media-images.md`](docs/dev/media-images.md) | 媒体与图片（read-image）：ReadImage 工具、内容寻址媒体池、模型能力声明、请求期图片投影（高水位 + 量子批量驱逐）与 KV/前缀 cache、inline/followup 线格式、probe 场景清单 |
 | [`docs/dev/vscode-extension.md`](docs/dev/vscode-extension.md) | VSCode 扩展（`extensions/vscode/`）：四层分层与数据流、桥协议与归约（重放==直播 / 单 WS 多订阅）、会话时序与多 Tab、连接自愈、构建门禁 / smoke / 打包与验收 |
 | [`docs/dev/probe-testing.md`](docs/dev/probe-testing.md) | 确定性集成测试（wing-probe）：跑法 / 新增断言场景（写代码、不写配置）/ 断言原语速查 / 上下文红线清单与 persist 口径 / 逃生舱约定 |
 

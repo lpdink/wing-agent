@@ -139,7 +139,17 @@ class DriverHttp(GatewayClient):
         text_limit: int = HTTP_TEXT_LIMIT,
     ) -> None:
         super().__init__(gateway_url, api_key=api_key)
-        self._client.timeout = httpx.Timeout(timeout)
+        # 只连 loopback：重建 client 以关闭环境 / 系统代理信任——httpx 的
+        # `get_environment_proxies()` 读 `urllib.request.getproxies()`，macOS
+        # 系统代理（scutil）会被继承，连 127.0.0.1 都送进代理（health/请求假红）。
+        # GatewayClient 不暴露 trust_env 透传，所以替换实例；被丢弃的 client
+        # 未发出过任何请求（无连接、无后台任务），无需收尾。
+        self._client = httpx.AsyncClient(
+            base_url=self.gateway_url,
+            headers=dict(self._client.headers),
+            timeout=httpx.Timeout(timeout),
+            trust_env=False,
+        )
         self._clock = clock
         self._started_at = clock() if started_at is None else started_at
         self._calls: list[HttpCall] = []

@@ -18,6 +18,8 @@ from wing.event import CommandInfo
 from wing.gateway.protocol import (
     AgentsResponse,
     CommandsResponse,
+    ModelCapabilities,
+    ModelDetail,
     ModelsResponse,
     ReloadResponse,
     ReloadResultItem as ReloadResultItemProto,
@@ -28,6 +30,7 @@ from wing.magic_command.registry import magic_registry
 
 if TYPE_CHECKING:
     from wing.gateway.server import GatewayServer
+    from wing.provider import ProviderModels as ProviderModelsData
 
 router = APIRouter(tags=["system"])
 
@@ -57,6 +60,30 @@ async def list_commands(request: Request) -> CommandsResponse:
     return CommandsResponse(commands=commands)
 
 
+def _aligned_model_details(group: ProviderModelsData) -> list[ModelDetail]:
+    """把 provider 层明细投影成协议模型，并按 ``models`` 顺序对齐。
+
+    「model_details 与 models 逐项同序同名」是接口契约，在边界（路由）上保证：
+    缺 detail 的模型补最小条目（能力全 false），名字对不上的 detail 直接忽略——
+    任何 producer（含测试替身）都不可能发出错位响应。
+    """
+    declared = {d.name: d for d in group.model_details}
+    details: list[ModelDetail] = []
+    for name in group.models:
+        detail = declared.get(name)
+        details.append(
+            ModelDetail(
+                name=name,
+                display_name=detail.display_name if detail is not None else None,
+                description=detail.description if detail is not None else None,
+                capabilities=ModelCapabilities(
+                    vision=detail.capabilities.vision if detail is not None else False
+                ),
+            )
+        )
+    return details
+
+
 @router.get(
     "/api/models",
     response_model=ModelsResponse,
@@ -69,7 +96,14 @@ async def list_models(request: Request) -> ModelsResponse:
     server = _get_server(request)
     groups = await server.runtime.list_models()
     return ModelsResponse(
-        providers=[ProviderModels(provider=g.provider, models=g.models) for g in groups]
+        providers=[
+            ProviderModels(
+                provider=g.provider,
+                models=g.models,
+                model_details=_aligned_model_details(g),
+            )
+            for g in groups
+        ]
     )
 
 

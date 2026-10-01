@@ -1,5 +1,6 @@
 # wing/schema.py
 import json
+from dataclasses import dataclass, field
 from typing import Annotated, Any, Callable, Dict, List, Literal, Union
 
 from pydantic import (
@@ -207,11 +208,39 @@ class ChainNode(BaseModel):
     unzip_last_uuid: str | None = None
 
 
+class MediaRef(BaseModel):
+    """图片媒体引用（内容寻址，仅元数据不含字节）。
+
+    字节由 SessionStore 以 id 为键托管（file 后端 `<sessions-root>/.media/`，
+    memory 后端进程内）。history.jsonl 只落本引用——绝不落 base64。
+
+    注：id 的格式校验（64 位小写 hex，防路径穿越）在**存储层**，模型层保持
+    宽松——一条损坏的历史记录不至于让整条 Message 加载失败（加载路径对未知/
+    非法值应有容忍面，字节读取失败由消费方降级）。
+    """
+
+    id: str
+    """sha256 hex（64 字符），即存储文件名。"""
+    mime: str
+    """image/png | image/jpeg | image/webp | image/gif"""
+    bytes: int
+    """原始字节数。"""
+    width: int
+    height: int
+    name: str | None = None
+    """展示名（basename，不含路径）。"""
+
+
 class Message(ChainNode):
     role: Literal["system", "user", "assistant", "tool"]
     content_blocks: list[ContentBlock] | None = None
     """assistant 消息的有序 content block 数组——assistant 的唯一存储。
     顺序即数组下标。非 assistant 消息不携带。"""
+    media: list[MediaRef] | None = None
+    """消息携带的图片引用（仅引用，字节在 SessionStore）。
+
+    当前仅 tool 消息使用（预留 user）；None = 无媒体——落盘时 None 被
+    自然剥除，无媒体消息的 history 记录与引入 media 之前完全一致。"""
     tool_call_id: str | None = None  # tool response only
     usage: "LLMUsage | None" = (
         None  # assistant 消息的 token 审计信息，持久化后重放可恢复
@@ -230,6 +259,18 @@ class Message(ChainNode):
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
+    @field_validator("media", mode="before")
+    @classmethod
+    def _empty_media_normalized_to_none(cls, v: Any) -> Any:
+        """空列表归一为 None："无媒体"在内存与落盘只有一种表示。
+
+        否则显式传入的空列表会以 ``"media": []`` 落进 history.jsonl——
+        无信息的新键，还会让"无媒体记录与引入 media 前完全一致"不再成立。
+        """
+        if isinstance(v, (list, tuple)) and len(v) == 0:
+            return None
+        return v
+
     def __init__(
         self,
         *,
@@ -237,6 +278,7 @@ class Message(ChainNode):
         content: str | None = None,
         reasoning_content: str | None = None,
         content_blocks: list[ContentBlock] | None = None,
+        media: list[MediaRef] | None = None,
         tool_calls: list[ToolCall] | None = None,
         tool_call_id: str | None = None,
         usage: LLMUsage | None = None,
@@ -254,6 +296,7 @@ class Message(ChainNode):
             "content": content,
             "reasoning_content": reasoning_content,
             "content_blocks": content_blocks,
+            "media": media,
             "tool_calls": tool_calls,
             "tool_call_id": tool_call_id,
             "usage": usage,
@@ -423,6 +466,19 @@ class Message(ChainNode):
         from wing.common.token_counter import TokenCounter
 
         return TokenCounter.estimate_message(self)
+
+
+@dataclass
+class ToolOutput:
+    """工具结构化结果：文本信封 + 媒体引用列表。
+
+    工具返回值 `str` 仍完全兼容（存量工具零改动）。返回 `ToolOutput` 时
+    ToolExecutor 把 media 原样带进 Message.media——截断与 `after_tool_call`
+    hook 只作用于 content 文本（hook 拿不到 media，也无法改动它）。
+    """
+
+    content: str
+    media: list[MediaRef] = field(default_factory=list)
 
 
 # LLMUsage 在 Message 之后定义，Message.usage 引用它需要前向声明

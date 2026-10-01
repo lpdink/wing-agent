@@ -15,10 +15,10 @@ import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from wing.common.logger import log
-from wing.config import get_config
+from wing.config import ModelCapabilities, get_config, resolve_model_capabilities
 from wing.event import AskEvent, WingEvent
 from wing.provider import create_provider
 from wing.provider.base import ModelProvider
@@ -36,6 +36,9 @@ from .inbox import Inbox
 from .react_loop import ReActLoop
 from .tool_executor import ToolExecutor, _current_tool_call_id
 
+if TYPE_CHECKING:
+    from wing.media import MediaAccess
+
 
 class WingAgent:
     """Agent 核心——组装各部件，提供对外接口。"""
@@ -49,11 +52,18 @@ class WingAgent:
         tools: list[Tool] | None = None,
         max_turns: int | None = None,
         yolo: bool | None = None,
+        media: MediaAccess | None = None,
     ) -> None:
         self.model = model
         self.model_provider = model_provider
         self.context_manager = context_manager
         self.stream = stream
+        self._media = media
+        """会话媒体读写窄接口（工具写图 / provider 序列化读图）。
+
+        为 None 表示该 agent 没有媒体存储（测试构造的裸 agent）——工具侧
+        必须据此安全拒绝（不得假定可用）。Explorer 子 agent 传宿主同一个
+        MediaAccess（共享存储池）。"""
 
         # Provider client 表：按 name 有界持有，切回同名复用（创建即拥有）。
         # 跨 provider 切模型不关闭旧 client（不打断在途生成）；shutdown() 不动
@@ -124,6 +134,20 @@ class WingAgent:
     @property
     def session_id(self) -> str:
         return self.context_manager.id
+
+    @property
+    def media(self) -> MediaAccess | None:
+        """会话媒体读写窄接口（工具经 ctx.media 写图；None = 无媒体存储）。"""
+        return self._media
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        """当前模型的能力声明（实时解析，跟随 /model 切换）。
+
+        无缓存：模型名是 agent 状态（self.model），声明是 provider 配置事实
+        （model_provider.config）——两者各自单所有者，交给纯函数合成即可。
+        """
+        return resolve_model_capabilities(self.model_provider.config, self.model)
 
     @property
     def yolo(self) -> bool:
@@ -307,7 +331,7 @@ class WingAgent:
         if cached is not None:
             return cached
         cfg = get_config().get_provider(name)
-        provider = create_provider(cfg, session_id=self.session_id)
+        provider = create_provider(cfg, session_id=self.session_id, media=self._media)
         self._providers[name] = provider
         return provider
 
@@ -335,7 +359,9 @@ class WingAgent:
         """
         active_name = self.model_provider.name
         cfg = get_config().get_provider(active_name)
-        new_provider = create_provider(cfg, session_id=self.session_id)
+        new_provider = create_provider(
+            cfg, session_id=self.session_id, media=self._media
+        )
 
         old_providers = list(self._providers.values())
         self._providers = {active_name: new_provider}

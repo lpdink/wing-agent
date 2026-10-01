@@ -8,7 +8,7 @@ import copy
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import TYPE_CHECKING, AsyncIterator, cast
 
 import httpx
 
@@ -20,6 +20,13 @@ from wing.provider.base import (
     PendingToolView,
     StreamAccumulator,
     parse_tool_args,
+)
+from wing.provider.media import (
+    FOLLOWUP_GUIDE_TEXT,
+    group_plans_by_message,
+    message_slots,
+    plan_for_request,
+    resolve_image_delivery,
 )
 from wing.provider.transport import (
     STREAM_IDLE_TIMEOUT,
@@ -33,6 +40,7 @@ from wing.schema import (
     ContentBlock,
     LLMResponse,
     LLMUsage,
+    MediaRef,
     Message,
     PendingCall,
     TextBlock,
@@ -45,6 +53,7 @@ from wing.schema import (
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
+    from wing.media import MediaAccess
 
 
 @dataclass
@@ -71,9 +80,12 @@ class OpenAICompatProvider(ModelProvider):
         self,
         config: ProviderConfig,
         session_id: str | None = None,
+        media: MediaAccess | None = None,
     ) -> None:
         self._config = config
         self._session_id = session_id
+        # 会话媒体池（本步骤只持有，序列化在后续步骤接线）。
+        self._media = media
         self.base_url = config.base_url.rstrip("/")
         self.reasoning_effort: str | None = config.reasoning_effort
         self.timeout_first_chunk = config.timeout_first_chunk
@@ -182,7 +194,8 @@ class OpenAICompatProvider(ModelProvider):
 
     async def list_models(self) -> list[str]:
         if self._config.models:
-            return sorted(self._config.models)
+            # 静态声明短路：字符串 / 对象两种形态统一取实际调用名（排序保持现状）。
+            return sorted(self._config.model_names())
         try:
             resp = await self._client.get("/models")
             await raise_with_body(resp)
@@ -249,7 +262,7 @@ class OpenAICompatProvider(ModelProvider):
         tools: list[Tool] | None,
         stream: bool,
     ) -> dict:
-        openai_messages = [m.to_openai() for m in messages]
+        openai_messages = self._serialize_messages(messages, model)
         if self.explicit_cache_mode:
             self._apply_cache_control(openai_messages)
 
@@ -280,6 +293,88 @@ class OpenAICompatProvider(ModelProvider):
             body["prompt_cache_key"] = self._session_id
 
         return body
+
+    def _serialize_messages(self, messages: list[Message], model: str) -> list[dict]:
+        """序列化请求消息（含请求期媒体投影：能力降级 / 高水位驱逐 / 线格式）。
+
+        整条请求任何消息都无媒体时，直接 ``[m.to_openai() ...]`` 返回——与引入
+        媒体前的请求体逐字节一致，且不触碰全局配置。请求内有媒体时按
+        ``image_delivery`` 发射（无媒体的邻座消息仍逐条经 ``to_openai()``，
+        字节不变）：
+
+        - ``inline``：图片留在原消息的 content 数组里（``image_url`` data URL）；
+        - ``followup``（openai 协议默认）：**连续 tool 消息段**内的保留图片
+          汇总成一条 user 消息，插在该段之后（即下一个非 tool 消息之前）；
+          多 tool call 多图只出一条、顺序 == tool 消息顺序 × 消息内顺序。
+
+        被丢弃 / 字节缺失的图片位：不改原文本块，只在其后追加一个占位文本
+        part（保留消息的字节在驱逐前后完全一致 → 前缀 cache 最大复用）。
+        """
+        if not any(m.media for m in messages):
+            return [m.to_openai() for m in messages]
+
+        delivery = resolve_image_delivery(self._config)
+        plans = group_plans_by_message(
+            plan_for_request(messages, provider_cfg=self._config, model=model)
+        )
+        cache: dict[str, str | None] = {}
+        out: list[dict] = []
+        pending: list[dict] = []  # followup：待汇总到段后 user 消息的 image_url parts
+
+        def flush_pending() -> None:
+            """把当前连续 tool 段积累的图片落到一条 user 消息（段后位置）。"""
+            if not pending:
+                return
+            out.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": FOLLOWUP_GUIDE_TEXT},
+                        *pending,
+                    ],
+                }
+            )
+            pending.clear()
+
+        for i, msg in enumerate(messages):
+            if delivery == "followup" and msg.role != "tool":
+                # 连续 tool 段结束——图片挂段后（即当前消息之前）。
+                flush_pending()
+
+            # system 消息的 media 一律忽略（投影层已剔除，见 plan_request_media）：
+            # 本协议 system content 只允许文本 part——此处 slots 恒为空，不发图
+            # 也不加占位，与 anthropic 路径行为一致。
+            slots = message_slots(plans.get(i, []), media=self._media, cache=cache)
+            base = msg.to_openai()
+            move_kept = delivery == "followup" and msg.role == "tool"
+            extra: list[dict] = []
+            for slot in slots:
+                if slot.b64 is None:
+                    extra.append({"type": "text", "text": slot.placeholder})
+                elif move_kept:
+                    pending.append(self._image_part(slot.ref, slot.b64))
+                else:
+                    extra.append(self._image_part(slot.ref, slot.b64))
+            if extra:
+                # content 数组化：原文本保持为独立 part（一个字节都不改），
+                # 追加物随后——空原文不发射空 text part。
+                base["content"] = (
+                    [{"type": "text", "text": base["content"]}]
+                    if base["content"]
+                    else []
+                ) + extra
+            out.append(base)
+
+        flush_pending()
+        return out
+
+    @staticmethod
+    def _image_part(ref: MediaRef, b64: str) -> dict:
+        """图片位 → OpenAI content part（data URL，base64 内联）。"""
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:{ref.mime};base64,{b64}"},
+        }
 
     # ─── Non-streaming ────────────────────────────────────────────
 
@@ -544,7 +639,14 @@ class OpenAICompatProvider(ModelProvider):
 
     @staticmethod
     def _apply_cache_control(openai_messages: list[dict]) -> None:
-        """为最后一条消息的最后一个 content block 追加 cache_control 标记。"""
+        """为最后一条消息的最后一个 content block 追加 cache_control 标记。
+
+        落点恒为「最后一个 part；仅当它是图片（``image_url``）时回退到其前面
+        最后一个非图片 part」——因此从尾部反向扫描（cache_control 是 OpenAI
+        兼容网关的非标准扩展字段，不落在图片上；从头部正向扫描会把标记提前到
+        第一个非图片 part，缓存前缀变短）；整条消息没有任何非图片 part（纯图
+        消息）时跳过本次标记。
+        """
         if not openai_messages:
             return
         last_msg = openai_messages[-1]
@@ -560,4 +662,8 @@ class OpenAICompatProvider(ModelProvider):
                 }
             ]
         elif isinstance(content, list):
-            last_msg["content"][-1]["cache_control"] = {"type": "ephemeral"}
+            for part in reversed(cast("list[dict]", content)):
+                if part.get("type") == "image_url":
+                    continue
+                part["cache_control"] = {"type": "ephemeral"}
+                return

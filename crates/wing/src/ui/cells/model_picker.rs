@@ -49,7 +49,9 @@ pub fn model_picker_lines(panel: &ModelPanel, palette: &ThemePalette) -> Vec<Lin
     lines.push(tab_bar("", &tabs, current_page, palette));
 
     // Model rows — the cursor row stays centered while the list scrolls; the
-    // session's current model carries the `●` mark.
+    // session's current model carries the `●` mark. Rows render the model's
+    // `display_name` when the gateway declared one (falling back to the call
+    // name) — display only: cursor / mark / Apply stay name-keyed.
     let models = panel.models();
     let cursor = panel.cursor();
     let range = window_range(cursor, models.len(), PANEL_WINDOW);
@@ -57,7 +59,7 @@ pub fn model_picker_lines(panel: &ModelPanel, palette: &ThemePalette) -> Vec<Lin
         let is_cursor = cursor == i;
         let mut spans = vec![
             cursor_span(is_cursor, palette),
-            label_span(&models[i], is_cursor, palette),
+            label_span(panel.label_at(i), is_cursor, palette),
         ];
         if panel.committed_at(current_page) == Some(i) {
             spans.push(Span::styled(" ●", Style::default().fg(palette.success)));
@@ -90,6 +92,29 @@ mod tests {
         ProviderModels {
             provider: provider.into(),
             models: models.iter().map(|m| m.to_string()).collect(),
+            model_details: vec![],
+        }
+    }
+
+    /// Group with `display_name` declarations for the given call names.
+    fn group_with_labels(
+        provider: &str,
+        models: &[&str],
+        labels: &[(&str, &str)],
+    ) -> ProviderModels {
+        use wing_api_client::models::ModelDetail;
+        ProviderModels {
+            provider: provider.into(),
+            models: models.iter().map(|m| m.to_string()).collect(),
+            model_details: labels
+                .iter()
+                .map(|(name, label)| ModelDetail {
+                    name: (*name).to_string(),
+                    display_name: Some((*label).to_string()),
+                    description: None,
+                    capabilities: Default::default(),
+                })
+                .collect(),
         }
     }
 
@@ -127,6 +152,30 @@ mod tests {
         );
     }
 
+    /// `display_name` only changes the row text: the `●` mark still tracks
+    /// the session's call name, and uncovered models keep their name.
+    #[test]
+    fn rows_show_display_name_when_the_gateway_declares_one() {
+        let panel = ModelPanel::new(
+            vec![group_with_labels(
+                "qoder",
+                &["dfmodel", "bare"],
+                &[("dfmodel", "DeepSeek-Flash")],
+            )],
+            Some(("qoder", "dfmodel")),
+        );
+        let out = text(&model_picker_lines(&panel, &palette()));
+        assert!(out.contains("❯ DeepSeek-Flash ●"), "{out}");
+        assert!(
+            out.contains("  bare"),
+            "uncovered model keeps its call name: {out}"
+        );
+        assert!(
+            !out.contains("❯ dfmodel"),
+            "the call name is not the rendered label: {out}"
+        );
+    }
+
     #[test]
     fn long_lists_scroll_centered_without_markers() {
         let models: Vec<String> = (0..8).map(|i| format!("m{i}")).collect();
@@ -134,6 +183,7 @@ mod tests {
             vec![ProviderModels {
                 provider: "p".into(),
                 models,
+                model_details: vec![],
             }],
             None,
         );

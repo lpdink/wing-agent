@@ -7,13 +7,14 @@
 //! Header examples:
 //!   ⦁ Bash(ls -la) 3s/30s
 //!   ⦁ Read(wing/src/main.rs)
+//!   ⦁ ReadImage(shot.png)   — basename only
 //!   ⦁ Glob(src/**/*.ts, **/*.py)
 //!   ⦁ AskUserQuestion
 //!
 //! Result strategies:
 //!   Hidden    — success result suppressed (Read, Write, Edit, Glob, Grep)
 //!   Full      — result shown in full (AskUserQuestion)
-//!   Truncated — head/tail with ellipsis (Bash, fallback)
+//!   Truncated — head/tail with ellipsis (Bash, ReadImage, fallback)
 //!   Failed    — always truncated to 50 chars
 
 use std::time::Instant;
@@ -216,6 +217,9 @@ pub enum ResultStrategy {
 enum ToolRenderer {
     Bash,
     Read,
+    /// ReadImage — like Read's family, but the image envelope is shown as a
+    /// regular (single-line) result and the header shows the basename only.
+    ReadImage,
     Write,
     Edit,
     Glob,
@@ -233,6 +237,7 @@ impl ToolRenderer {
         match name {
             constants::TOOL_BASH => Self::Bash,
             constants::TOOL_READ => Self::Read,
+            constants::TOOL_READ_IMAGE => Self::ReadImage,
             constants::TOOL_WRITE => Self::Write,
             constants::TOOL_EDIT => Self::Edit,
             constants::TOOL_GLOB => Self::Glob,
@@ -272,6 +277,20 @@ impl ToolRenderer {
                     String::new()
                 } else {
                     format!("({path})")
+                }
+            }
+            // ReadImage: basename only — the envelope carries the absolute
+            // path, and the card header is one short line.
+            Self::ReadImage => {
+                let name = args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(read_image_basename)
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    String::new()
+                } else {
+                    format!("({name})")
                 }
             }
             Self::Glob | Self::Grep => {
@@ -314,7 +333,11 @@ impl ToolRenderer {
                 ResultStrategy::Hidden
             }
             Self::AskUser => ResultStrategy::Full,
-            Self::Bash | Self::Fallback => ResultStrategy::Truncated,
+            // ReadImage: the envelope is a single text line the user should
+            // see (mime / dimensions / size / id). Truncated keeps it visible
+            // whole for short results and still folds head/tail if a future
+            // envelope grows into multiple lines.
+            Self::Bash | Self::ReadImage | Self::Fallback => ResultStrategy::Truncated,
         }
     }
 }
@@ -723,6 +746,23 @@ fn truncate_path_segments(path: &str, n: usize) -> String {
     segments[segments.len() - n..].join("/")
 }
 
+/// Basename for the ReadImage card title.
+///
+/// The model occasionally emits padded strings or Windows-style paths, so
+/// this is stricter than `truncate_path_segments(_, 1)`: whitespace is
+/// trimmed, `\` normalized to `/`, then the last segment is taken
+/// (`/abs/dir/` → `dir`, mirroring POSIX `basename`). Empty when no usable
+/// segment is left — the caller then renders no parentheses.
+fn read_image_basename(path: &str) -> String {
+    let normalized = path.trim().replace('\\', "/");
+    normalized
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// Collapse a multi-line command into a single line without truncation.
 ///
 /// Replaces `\r\n` and `\n` with `⏎`. The full command is preserved —
@@ -955,6 +995,104 @@ mod tests {
             !text.contains("file contents"),
             "result should be hidden: {text}"
         );
+    }
+
+    #[test]
+    fn test_read_image_header_uses_basename() {
+        let block = ToolCallBlock::new(
+            "ReadImage".into(),
+            json!({"path": "/Users/abiter/shots/retina-shot.png"}),
+            "tc_ri1".into(),
+        );
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(
+            text.contains("ReadImage(retina-shot.png)"),
+            "header must show the basename: {text}"
+        );
+        assert!(
+            !text.contains("/Users/abiter"),
+            "directories stay out of the header: {text}"
+        );
+    }
+
+    #[test]
+    fn test_read_image_basename_edges() {
+        assert_eq!(read_image_basename("/abs/dir/shot.png"), "shot.png");
+        assert_eq!(
+            read_image_basename("/abs/dir/"),
+            "dir",
+            "trailing slash → POSIX basename"
+        );
+        assert_eq!(read_image_basename("C:\\Users\\x\\shot.png"), "shot.png");
+        assert_eq!(read_image_basename("  /a/b/shot.png  "), "shot.png");
+        assert_eq!(read_image_basename("/"), "");
+        assert_eq!(read_image_basename("   "), "");
+        assert_eq!(read_image_basename(""), "");
+    }
+
+    #[test]
+    fn test_read_image_header_normalizes_backslashes_and_whitespace() {
+        let block = ToolCallBlock::new(
+            "ReadImage".into(),
+            json!({"path": "  C:\\Users\\x\\shot.png  "}),
+            "tc_ri5".into(),
+        );
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(
+            text.contains("ReadImage(shot.png)"),
+            "windows path / padding normalized: {text}"
+        );
+
+        // 纯空白路径：没有可用末段 → 无括号、不渲染空白。
+        let blank = ToolCallBlock::new("ReadImage".into(), json!({"path": "   "}), "tc_ri6".into());
+        let text = lines_text(&blank.to_lines(&p(), 10));
+        assert!(text.contains("ReadImage"), "missing tool name: {text}");
+        assert!(
+            !text.contains("ReadImage("),
+            "blank path must not produce empty parens: {text}"
+        );
+    }
+
+    #[test]
+    fn test_read_image_success_shows_envelope() {
+        let mut block = ToolCallBlock::new(
+            "ReadImage".into(),
+            json!({"path": "/tmp/shot.png"}),
+            "tc_ri2".into(),
+        );
+        let envelope =
+            "[image: /tmp/shot.png | png 2880x1800 | 2.4 MB | id 9f3c1a2b | mtime 1789000000]";
+        block.set_result(envelope.into(), true);
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(
+            text.contains(&format!("└ {envelope}")),
+            "the single-line envelope must be visible: {text}"
+        );
+    }
+
+    #[test]
+    fn test_read_image_missing_path_has_no_parens() {
+        let block = ToolCallBlock::new("ReadImage".into(), json!({}), "tc_ri3".into());
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(text.contains("ReadImage"), "missing tool name: {text}");
+        assert!(
+            !text.contains("()"),
+            "empty parens should not appear: {text}"
+        );
+    }
+
+    #[test]
+    fn test_read_image_failure_truncated_like_other_tools() {
+        let mut block = ToolCallBlock::new(
+            "ReadImage".into(),
+            json!({"path": "/tmp/x.png"}),
+            "tc_ri4".into(),
+        );
+        let long_error = "error: not an image ".to_string() + &"x".repeat(100);
+        block.set_result(long_error, false);
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(text.contains("error: not an image"), "{text}");
+        assert!(text.contains("..."), "failure truncates: {text}");
     }
 
     #[test]

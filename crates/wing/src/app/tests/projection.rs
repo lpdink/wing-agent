@@ -694,6 +694,7 @@ fn test_replay_matches_live_cell_sequence_across_two_rounds() {
         tool_result: "a.txt".into(),
         tool_success: true,
         model: "test-model".into(),
+        tool_media: Vec::new(),
         meta: meta.clone(),
     });
     live.handle_event(WingEvent::Reasoning {

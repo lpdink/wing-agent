@@ -72,6 +72,21 @@ providers:
   #   # Static model list — skips remote GET /models when set.
   #   models:
   #     - claude-sonnet-4-20250514
+  #     # Entries may also be objects carrying display metadata and
+  #     # capability declarations (the actual call name is `name`):
+  #     #   - name: dfmodel-2026           # actual call name (sent to the API)
+  #     #     display_name: DeepSeek-Flash # human-readable label
+  #     #     description: deepseek official release
+  #     #     capabilities:
+  #     #       vision: true             # accepts image input; default false
+  #     # A model without a capabilities declaration is treated as
+  #     # text-only (ReadImage refuses to attach images for it).
+  #   # Image delivery form: inline | followup.
+  #   # Default is protocol-specific (openai → followup, anthropic → inline).
+  #   # image_delivery: inline
+  #   # Optional per-image request-time cap (bytes); oversized images are
+  #   # replaced by a placeholder text instead of failing the request.
+  #   # image_max_bytes: 5242880
   #   # Extended thinking (drives the thinking toggle + interleaved beta header):
   #   extra_body:
   #     thinking:
@@ -96,6 +111,7 @@ agents:
     tools:
       - Bash
       - Read
+      - ReadImage
       - Write
       - Edit
       - Glob
@@ -146,6 +162,21 @@ steer: true
 tool_result_truncate:
   max_length: 100000  # trigger threshold (chars). null or <0 disables
   keep_chars: 200     # chars to keep at head and tail
+
+# ── Images ───────────────────────────────────────────────────
+# Image handling for the ReadImage tool and the request-time
+# image projection (retention budget is applied per request).
+images:
+  # Reject images larger than this at read time (raw bytes).
+  max_bytes: 8388608
+
+  # Request-time retention budget. Images are kept by default (KV-cache
+  # friendly); once a high-water mark is exceeded the oldest images are
+  # dropped in batches (quantum), never one by one.
+  max_images: 32                  # count high-water mark per request
+  count_quantum: 8                # count eviction quantum (oldest first)
+  request_budget_bytes: 37748736  # base64-encoded bytes high-water mark
+  evict_quantum_bytes: 18874368   # byte eviction quantum (= budget / 2)
 
 # ── Sessions ─────────────────────────────────────────────────
 sessions:
