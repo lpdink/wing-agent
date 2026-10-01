@@ -1,5 +1,5 @@
 {
-  "//": "Package project: `src/` + `tests/` + the vitest config (so typescript-eslint's projectService can type-check it too). NO DOM lib on purpose — `document` / `window` are a compile error here, which is what keeps the package usable from a Node host (extension host, Electron main). The browser direction is checked by `tsconfig.dom.json`.",
+  "//": "Package project: `src/` + `tests/` + the vitest config (so typescript-eslint's projectService can type-check it too). CAVEAT: including the vitest config drags vitest's jsdom type chain into this program (vitest/config → jsdom types → their `reference lib=dom` directive), so the DOM lib IS present here and `document` compiles clean. The no-DOM gate for src/ therefore lives in `tsconfig.node-probe.json` (pure `src/`, no test tooling) — kept in `pnpm run typecheck`. Browser direction: `tsconfig.dom.json` (no node types).",
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "lib": ["ES2023"],
