@@ -209,6 +209,7 @@ def render_config_yaml(
     keep_recent_tokens: int = 50_000,
     log_level: str = "INFO",
     sessions: Mapping[str, Any] | None = None,
+    hooks: Sequence[str] = (),
 ) -> str:
     """生成 probe 网关配置（providers 指向假 Provider；agents 预置 default）。
 
@@ -220,10 +221,17 @@ def render_config_yaml(
     ``providers[0].models``；None = 不写该键，保持旧配置形态）。``images`` 是
     顶层 ``images:`` 段的原文（None = 不写）。``sessions`` 是透传给配置
     ``sessions:`` 段的原文（None = 用默认值；逐出场景靠它把 TTL 压到秒级）。
+
     ``provider_extra`` 是 provider 级透传旋钮：键值合进 ``providers[0]``
     （None = 不合并，缺省输出与既有形态逐字节一致）——用于覆盖协议级行为
     （如 ``image_delivery: inline``）。**谨慎**：覆盖 ``base_url`` 等接线键会
     断开假 Provider，属场景自伤。
+
+    ``hooks`` 是透传给配置 ``hooks:`` 段的 glob 列表（默认空 = 不加载 hook）。
+    相对路径按**网关进程 cwd** 解析——``ProbeEnv`` 以 ``env.root`` 为 cwd 启动
+    网关，因此惯例是 ``"hooks/*.py"``：场景在跑起来后把 hook 文件写进
+    ``<root>/hooks/``，经 ``POST /api/system/reload`` 加载（见
+    scenarios/test_session_persistence.py）。
     """
     provider: dict[str, Any] = {
         "name": provider_name,
@@ -257,7 +265,7 @@ def render_config_yaml(
                 "rules": [],
             }
         ],
-        "hooks": [],
+        "hooks": list(hooks),
         "safe_command_patterns": [],
         "yolo": False,
         "log": {"level": log_level},
@@ -383,6 +391,7 @@ class ProbeEnv:
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         env_overrides: Mapping[str, str] | None = None,
         sessions: Mapping[str, Any] | None = None,
+        hooks: Sequence[str] = (),
     ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.wing_home = self.root / "wing_home"
@@ -413,6 +422,7 @@ class ProbeEnv:
         self._gateway_attempts = gateway_attempts
         self._env_overrides = dict(env_overrides or {})
         self._sessions_config = dict(sessions) if sessions is not None else None
+        self._hooks_config = tuple(hooks)
         self._process: subprocess.Popen[bytes] | None = None
         self._log_handle: IO[bytes] | None = None
         self._port: int | None = None
@@ -492,6 +502,7 @@ class ProbeEnv:
             tools=self.tools,
             system_prompt=self.system_prompt,
             sessions=self._sessions_config,
+            hooks=self._hooks_config,
         )
 
     def startup_report(self, binary: Path | None = None) -> str:

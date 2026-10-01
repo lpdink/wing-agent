@@ -6,7 +6,6 @@
 3. compact: 压缩节点 + relink 行
 4. rewind: 追加回退行，返回 draft
 5. get_branch_targets: 活跃链上的 user 消息列表
-6. extract_subchain + _remap_chain_uuids: fork 流程
 """
 
 import json
@@ -18,9 +17,8 @@ import pytest
 
 from wing.context_manager import ContextManager
 from wing.common.tracked_list import TrackedList
-from wing.store import FileMessageLog, FileSessionStore
+from wing.store import FileMessageLog
 from wing.schema import ChainNode, Message
-from wing.session_manager import _remap_chain_uuids
 
 
 def _contents(nodes: list) -> list:
@@ -111,6 +109,26 @@ class TestBasicMessageManagement:
         assert llm_msgs[0].role == "system"
         assert "helpful assistant" in (llm_msgs[0].content or "")
         assert llm_msgs[1].content == "hello"
+
+    def test_append_system_prompt_composition_order(self, tmp_dir):
+        """append_system_prompt 拼在 base 之后、rules/skills 之前。"""
+        cm = _make_cm(tmp_dir)
+        cm.setin_system_prompt = "BASE"
+        cm._rules_prompt = "RULES"
+        cm._skills_prompt = "SKILLS"
+
+        cm.append_to_system_prompt("  first  ")
+        cm.append_to_system_prompt("")  # 空串忽略（None 语义的字符串形态）
+        cm.append_to_system_prompt("second")
+
+        assert cm.append_system_prompt == "first\nsecond"
+        assert cm.system_prompt.content == "BASE\n\nfirst\nsecond\n\nRULES\n\nSKILLS"
+
+    def test_append_system_prompt_empty_parts_skipped(self, tmp_dir):
+        """append / rules / skills 为空时不留下空段（拼接不产生多余分隔符）。"""
+        cm = _make_cm(tmp_dir)
+        cm.setin_system_prompt = "BASE"
+        assert cm.system_prompt.content == "BASE"
 
     def test_get_context_window(self, tmp_dir):
         cm = _make_cm(tmp_dir)
@@ -234,6 +252,51 @@ class TestRewind:
         assert rewind_entry["content"] == "hi"  # 复制了 parent 的内容
         assert rewind_entry["role"] == "assistant"
         assert rewind_entry["parent_uuid"] == msgs[0].uuid  # 祖父 uuid
+
+    def test_rewind_to_first_message_after_compact_keeps_region_reachable(
+        self, tmp_dir
+    ):
+        """回退到压缩后的第一条消息：回退行带上 unzip，压缩前区间不消失。
+
+        回退行复制的是目标的 parent——parent 是压缩节点时，`unzip_last_uuid`
+        是"被压缩区间在哪"的唯一编码，丢了会让压缩前区间（乃至整段历史）从
+        /rewind、/fork 候选里消失。
+        """
+        cm = _make_cm(tmp_dir)
+        msgs = [
+            Message(role="user", content="old1"),
+            Message(role="assistant", content="old2"),
+        ]
+        cm.add_messages(msgs)
+
+        compact_node = Message(
+            role="assistant", content="[Compact] summary", parent_uuid=None
+        )
+        compact_node.uuid = "cu"
+        compact_node.unzip_last_uuid = msgs[1].uuid
+        first = Message(role="user", content="first post compact", parent_uuid="cu")
+        first.uuid = "u2"
+        cm._messages.append_detached(compact_node)
+        cm._messages.append_detached(first)
+        cm._messages.set_tip("u2")
+        assert [target["content"] for target in cm.get_branch_targets()] == [
+            "old1",
+            "[Compact] [Compact] summary",
+            "first post compact",
+            "(current)",
+        ]
+
+        draft = cm.rewind("u2")
+        assert draft == "first post compact"
+
+        rewind_entry = _read_history(tmp_dir / "test-session")[-1]
+        assert rewind_entry["content"] == "[Compact] summary"
+        assert rewind_entry["unzip_last_uuid"] == msgs[1].uuid  # ty: ignore[invalid-argument-type]
+        assert [target["content"] for target in cm.get_branch_targets()] == [
+            "old1",
+            "[Compact] [Compact] summary",
+            "(current)",
+        ]
 
     def test_rewind_context_window(self, tmp_dir):
         """rewind 后上下文窗口从回退行重建。"""
@@ -418,227 +481,6 @@ class TestGetBranchTargets:
         assert len(targets) == 2  # 1 user + (current)
         assert targets[-1]["uuid"] == "current"
         assert targets[-1]["content"] == "(current)"
-
-
-# ── 5. Fork (extract_subchain + import_messages) ─
-
-
-class TestFork:
-    def test_extract_subchain_returns_subchain_and_draft(self, tmp_dir):
-        """extract_subchain 返回 target 之前的子链 + draft。"""
-        cm = _make_cm(tmp_dir)
-        msgs = [
-            Message(role="user", content="hello"),
-            Message(role="assistant", content="hi"),
-            Message(role="user", content="question"),
-        ]
-        cm.add_messages(msgs)
-
-        subchain, draft = cm.extract_subchain(msgs[2].uuid)  # ty: ignore[invalid-argument-type]
-        assert draft == "question"
-        assert len(subchain) == 2
-        assert _contents(subchain) == ["hello", "hi"]
-
-    def test_extract_subchain_to_first_message(self, tmp_dir):
-        """extract_subchain 到第一条消息返回空子链。"""
-        cm = _make_cm(tmp_dir)
-        msgs = [
-            Message(role="user", content="hello"),
-            Message(role="assistant", content="hi"),
-        ]
-        cm.add_messages(msgs)
-
-        subchain, draft = cm.extract_subchain(msgs[0].uuid)  # ty: ignore[invalid-argument-type]
-        assert draft == "hello"
-        assert len(subchain) == 0
-
-    def test_extract_subchain_current(self, tmp_dir):
-        """extract_subchain 到 (current) 复制整个活跃链。"""
-        cm = _make_cm(tmp_dir)
-        msgs = [
-            Message(role="user", content="hello"),
-            Message(role="assistant", content="hi"),
-        ]
-        cm.add_messages(msgs)
-
-        subchain, draft = cm.extract_subchain("current")
-        assert draft == ""
-        assert len(subchain) == 2
-        assert _contents(subchain) == ["hello", "hi"]
-
-    def test_extract_subchain_current_with_compact(self, tmp_dir):
-        """extract_subchain('current') 返回完整链，包含压缩节点。"""
-        cm = _make_cm(tmp_dir)
-        msgs = [
-            Message(role="user", content="old1"),
-            Message(role="assistant", content="old2"),
-            Message(role="user", content="tail1"),
-        ]
-        cm.add_messages(msgs)
-
-        # 模拟 compact: 压缩 u1,u2 → compact(cu), relink tail1(rt)
-        compact_node = Message(
-            role="assistant",
-            content="[Compact] summary",
-            parent_uuid=None,
-            unzip_last_uuid=msgs[1].uuid,
-        )
-        compact_node.uuid = "cu"
-        relinked = Message(role="user", content="tail1", parent_uuid="cu")
-        relinked.uuid = "rt"
-        cm._messages.append_detached(compact_node)
-        cm._messages.append_detached(relinked)
-        cm._messages.set_tip("rt")
-
-        # walk_full_chain: [old1(u1), old2(u2), compact(cu), tail1(rt)]
-        subchain, draft = cm.extract_subchain("current")
-        assert draft == ""
-        assert len(subchain) == 4
-        assert _contents(subchain)[:2] == ["old1", "old2"]
-        assert _contents(subchain)[-1] == "tail1"
-        assert subchain[2].uuid == "cu"
-        assert subchain[2].parent_uuid is None
-        assert subchain[2].unzip_last_uuid == msgs[1].uuid
-        assert subchain[3].uuid == "rt"
-        assert subchain[3].parent_uuid == "cu"
-
-    def test_fork_with_compact_preserves_topology(self, tmp_dir):
-        """fork 后新 session 活跃链保留 compact 节点。"""
-        cm = _make_cm(tmp_dir)
-        msgs = [
-            Message(role="user", content="old1"),
-            Message(role="assistant", content="old2"),
-            Message(role="user", content="tail1"),
-        ]
-        cm.add_messages(msgs)
-
-        # 模拟 compact
-        compact_node = Message(
-            role="assistant",
-            content="[Compact] summary",
-            parent_uuid=None,
-            unzip_last_uuid=msgs[1].uuid,
-        )
-        compact_node.uuid = "cu"
-        relinked = Message(role="user", content="tail1", parent_uuid="cu")
-        relinked.uuid = "rt"
-        cm._messages.append_detached(compact_node)
-        cm._messages.append_detached(relinked)
-        cm._messages.set_tip("rt")
-
-        # 记录原活跃链
-        original_len = len(cm._messages.active_chain)
-
-        # fork 的持久化路径（extract_subchain + remap + store 写入）
-        subchain, _ = cm.extract_subchain("current")
-        remapped = _remap_chain_uuids(subchain)
-
-        store = FileSessionStore(tmp_dir)
-        new_session_id = "forked-session"
-        new_tl = TrackedList(store.open_log(new_session_id))
-        new_tl.extend_detached(remapped)
-
-        # 重新加载新 session
-        reloaded = TrackedList.load(store.open_log(new_session_id), Message)
-
-        # 新活跃链应与原活跃链长度一致（compact + tail1）
-        new_active = reloaded.active_chain
-        assert len(new_active) == original_len
-        # 第一条是 compact 节点
-        assert new_active[0].parent_uuid is None
-        assert new_active[0].unzip_last_uuid is not None
-        # 第二条的 parent 指向 compact
-        assert new_active[1].parent_uuid == new_active[0].uuid
-        assert new_active[1].content == "tail1"
-
-        # history.jsonl 有 4 条（old1, old2, compact, tail1）
-        entries = _read_history(tmp_dir / new_session_id)
-        assert len(entries) == 4
-
-    def test_extract_subchain_to_compressed_message(self, tmp_dir):
-        """extract_subchain 可以定位到被压缩的消息。"""
-        cm = _make_cm(tmp_dir)
-        msgs = [
-            Message(role="user", content="old1"),
-            Message(role="assistant", content="old2"),
-            Message(role="user", content="tail1"),
-        ]
-        cm.add_messages(msgs)
-
-        # 模拟 compact
-        compact_node = Message(
-            role="assistant",
-            content="[Compact]",
-            parent_uuid=None,
-            unzip_last_uuid=msgs[1].uuid,
-        )
-        compact_node.uuid = "cu"
-        relinked = Message(role="user", content="tail1", parent_uuid="cu")
-        relinked.uuid = "rt"
-        cm._messages.append_detached(compact_node)
-        cm._messages.append_detached(relinked)
-        cm._messages.set_tip("rt")
-
-        # extract_subchain 到被压缩的 old2
-        subchain, draft = cm.extract_subchain(msgs[1].uuid)  # ty: ignore[invalid-argument-type]
-        assert draft == "old2"
-        assert len(subchain) == 1
-        assert _contents(subchain) == ["old1"]
-
-    def test_remap_chain_uuids_preserves_topology(self, tmp_dir):
-        """_remap_chain_uuids 重写 uuid，保持拓扑。"""
-        cm = _make_cm(tmp_dir)
-        msgs = [
-            Message(role="user", content="hello"),
-            Message(role="assistant", content="hi"),
-        ]
-        cm.add_messages(msgs)
-
-        subchain, _ = cm.extract_subchain(msgs[1].uuid)  # ty: ignore[invalid-argument-type]
-        remapped = _remap_chain_uuids(subchain)
-
-        assert len(remapped) == 1
-        assert _contents(remapped) == ["hello"]
-        assert remapped[0].parent_uuid is None
-
-    def test_remap_chain_uuids_rewrites_all_uuids(self, tmp_dir):
-        """_remap_chain_uuids 重写所有 uuid，线性拓扑保持链接。"""
-        cm = _make_cm(tmp_dir)
-        msgs = [
-            Message(role="user", content="hello"),
-            Message(role="assistant", content="hi"),
-        ]
-        cm.add_messages(msgs)
-
-        subchain, _ = cm.extract_subchain("current")
-        original_uuids = [m.uuid for m in subchain]
-
-        remapped = _remap_chain_uuids(subchain)
-
-        assert remapped[0].uuid != original_uuids[0]
-        assert remapped[1].uuid != original_uuids[1]
-        assert remapped[0].parent_uuid is None
-        assert remapped[1].parent_uuid == remapped[0].uuid
-
-    def test_remap_chain_uuids_does_not_mutate_source(self, tmp_dir):
-        """_remap_chain_uuids 深拷贝，不污染源 session 的 live 消息。"""
-        cm = _make_cm(tmp_dir)
-        msgs = [
-            Message(role="user", content="hello"),
-            Message(role="assistant", content="hi"),
-        ]
-        cm.add_messages(msgs)
-
-        subchain, _ = cm.extract_subchain("current")
-        original_uuids = [m.uuid for m in subchain]
-
-        _remap_chain_uuids(subchain)
-
-        # 源消息对象的 uuid 未被修改
-        assert [m.uuid for m in subchain] == original_uuids
-        # 源 CM 的链状态完好
-        assert [m.uuid for m in cm._messages.active_chain] == original_uuids
-        assert cm._messages.find(original_uuids[0]) is not None  # ty: ignore[invalid-argument-type]
 
 
 # ── 12. Rules 文件跟踪 ──────────────────────────

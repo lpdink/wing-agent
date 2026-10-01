@@ -17,8 +17,9 @@ wing/session_manager.py — SessionManager
 from __future__ import annotations
 
 import asyncio
+import copy
 import time
-import uuid
+from uuid import uuid4
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -36,35 +37,69 @@ from wing.event import (
 from wing.event_bus import event_bus
 from wing.magic_command.prompt_commands import expand_prompt_command
 from wing.schema import ChainNode, Message
-from wing.session import Session
+from wing.session import Session, tool_refs
 from wing.store import SessionMetadata, SessionStore
 
 if TYPE_CHECKING:
     from wing.gateway.protocol import AgentOverride
 
 
-def _remap_chain_uuids(nodes: list[ChainNode]) -> list[ChainNode]:
-    """深拷贝混合链（Message + 事件节点）并重映射 uuid/parent_uuid/unzip_last_uuid，保持拓扑。
+def _fork_slice(
+    records: list[dict],
+    target_uuid: str,
+) -> tuple[list[dict], str | None]:
+    """切出 fork 的记录前缀（**append 顺序**）与 draft。
 
-    深拷贝确保 fork 不污染源 session 的内存链状态
-    （extract_subchain 返回的是源 TrackedList 中的 live 对象）。
+    - ``"current"`` → 全部记录，draft 为空串；
+    - 其他 → 目标记录**之前**的全部记录（目标自身不进拷贝：它由响应里的
+      draft 重新发送），draft = 目标记录的 content。
+
+    用记录口径（而不是链遍历）是刻意的：被压缩区间的记录原样保留在子会话里
+    （用户仍可回退 / 分叉到压缩前的 User Message），而"活跃链从哪里开始"由
+    压缩节点自身编码（``parent_uuid=None`` + ``unzip_last_uuid``）——子会话
+    加载时沿 parent_uuid 回溯到该节点即止，已摘要内容不会复活。选压缩前的
+    节点时，压缩节点是后来追加的记录，切在前缀之外 → 子会话里压缩仿佛没发生
+    过（等价于"在压缩点之前分叉"）。
+
+    Raises:
+        ValueError: 目标 uuid 不在记录里，或指向的是事件记录（事件不是对话节点）。
     """
-    copies = [node.model_copy(deep=True) for node in nodes]
+    if target_uuid == "current":
+        return list(records), ""
+    for index, record in enumerate(records):
+        if record.get("uuid") == target_uuid:
+            if record.get("role") == "event":
+                raise ValueError(
+                    f"uuid {target_uuid!r} is an event record, not a Message"
+                )
+            content = record.get("content")
+            return records[:index], content if isinstance(content, str) else ""
+    raise ValueError(f"uuid {target_uuid!r} not found in {len(records)} record(s)")
 
+
+def _remap_record_uuids(records: list[dict]) -> list[dict]:
+    """深拷贝记录并把链拓扑 uuid 全量重映射到子会话的 uuid 空间。
+
+    重映射 ``uuid`` / ``parent_uuid`` / ``unzip_last_uuid`` 三个键。前缀口径下
+    所有引用都指向前缀内部（parent 必然更早创建、unzip 指向区间末），因此
+    重映射后子记录集自洽：不留悬空引用，也不需要清空任何引用——压缩节点的
+    unzip 指向重映射后的区间末记录，子会话的 fork 候选列表与源会话一致。
+
+    缺省落到 None 是防御：万一出现前缀外的引用，宁可让它成为根节点，也不留
+    跨 session 的引用。
+    """
+    clones = [copy.deepcopy(record) for record in records]
     uuid_map: dict[str, str] = {}
-    for node in copies:
-        if node.uuid:
-            uuid_map[node.uuid] = str(uuid.uuid4())
-
-    for node in copies:
-        if node.uuid:
-            node.uuid = uuid_map.get(node.uuid, str(uuid.uuid4()))
-        if node.parent_uuid:
-            node.parent_uuid = uuid_map.get(node.parent_uuid)
-        if node.unzip_last_uuid:
-            node.unzip_last_uuid = uuid_map.get(node.unzip_last_uuid)
-
-    return copies
+    for clone in clones:
+        uuid = clone.get("uuid")
+        if isinstance(uuid, str):
+            uuid_map[uuid] = str(uuid4())
+    for clone in clones:
+        for key in ("uuid", "parent_uuid", "unzip_last_uuid"):
+            value = clone.get(key)
+            if isinstance(value, str):
+                clone[key] = uuid_map.get(value)
+    return clones
 
 
 class SessionManager:
@@ -136,16 +171,19 @@ class SessionManager:
     def create_session(
         self,
         template_name: str | None = None,
-        session_id: str | None = None,
         workspace: str | None = None,
         agent_override: AgentOverride | None = None,
         backend: str | None = None,
     ) -> Session:
-        """创建新 session。
+        """创建新 session（session id 一律由后端生成）。
+
+        **不接受调用方指定 session_id**：id 由后端生成，客户端不得自造；访问
+        既有会话只能走 :meth:`resume_session`（同一个 session id，换入内存）。
+        这条边界同时定义了 hook 语义：`before_session_start` 属于"创建新
+        session"，resume 不触发（session id 未变）。
 
         Args:
             template_name: Agent 模板名称，None 时使用默认模板
-            session_id: 指定 session_id（磁盘恢复场景），None 时自动生成
             workspace: 工作目录
             agent_override: AgentOverride 参数覆盖（None 字段不覆盖 template 值）
             backend: 存储后端名称（如 file/memory），None 时使用默认后端
@@ -172,15 +210,11 @@ class SessionManager:
         else:
             template = self._template_manager.default
 
-        # 生成或使用传入的 session_id
-        sid = session_id if session_id is not None else self._generate_session_id()
+        # session id 由后端生成（调用方无法指定——见 docstring 的边界）
+        sid = self._generate_session_id()
 
         # 创建 TrackedList（经 store 打开消息日志；混合链：Message + 事件）
-        messages: TrackedList[ChainNode] = (
-            TrackedList.load(store.open_log(sid), Message)
-            if session_id is not None
-            else TrackedList(store.open_log(sid))
-        )
+        messages: TrackedList[ChainNode] = TrackedList(store.open_log(sid))
 
         session = Session.from_template(
             template=template,
@@ -197,8 +231,11 @@ class SessionManager:
         self._sessions[sid] = session
         self.touch(sid)
 
-        # 触发 before_session_start hook
+        # 触发 before_session_start hook（创建新 session = session id 变化，
+        # 见 docstring），随后把 hook 注入落盘：resume 重建 CM 时恢复同一
+        # 系统提示词（前缀身份不因换入内存而漂移）。
         hooks.invoke("before_session_start", session)
+        session.sync_append_system_prompt()
 
         log.info(f"Session created: {sid} (template={template.name})")
         return session
@@ -278,39 +315,54 @@ class SessionManager:
     ) -> tuple[Session, str | None] | None:
         """从指定 session 的 target_uuid 处 fork 出新 session。
 
-        新 session 继承源 session 的后端。消息与元数据均经由源 session
-        所属 store 写入：元数据（workspace/forked_from/template_name/
-        model_name+provider_name 快照/last_interaction）一次写全——fork 的
-        正确性由 store 单一所有者保证。
+        **子会话 = 源会话记录的前缀**（append 顺序，见 ``_fork_slice``）：源
+        记录的 uuid 全量重映射后写进子会话自己的日志，再用加载路径构造内存态
+        ——"子会话在内存里就长得像重启后加载出来的样子"，活跃链由 tip 回溯
+        自然得出。被压缩区间的记录随行走（用户仍可回到压缩前的 User Message），
+        但不会进入活跃链。
+
+        元数据一次写全（workspace / forked_from / template_name / 模型快照 /
+        系统提示词与动态状态快照 / last_interaction）；消息与元数据均经由源
+        session 所属 store 写入——fork 的正确性由 store 单一所有者保证。
         """
         source = self._sessions.get(session_id)
         if source is None:
             return None
 
-        cm = source.context_manager
-        try:
-            subchain, draft = cm.extract_subchain(target_uuid)
-        except ValueError:
-            log.warning(f"fork_session: uuid {target_uuid} not found")
-            return None
-
         store = source.store
         new_session_id = self._generate_session_id()
 
-        # 深拷贝 + uuid 重映射（不污染源 session）
-        remapped = _remap_chain_uuids(subchain)
+        # 记录前缀切片（append 顺序）+ uuid 重映射，写进子会话自己的日志
+        records = store.open_log(session_id).load_all()
+        try:
+            copied, draft = _fork_slice(records, target_uuid)
+        except ValueError:
+            log.warning(f"fork_session: uuid {target_uuid} not found")
+            return None
+        child_log = store.open_log(new_session_id)
+        child_log.append(_remap_record_uuids(copied))
 
-        # 写入消息（经 store 打开日志）
-        new_messages: TrackedList[ChainNode] = TrackedList(
-            store.open_log(new_session_id)
-        )
-        if remapped:
-            new_messages.extend_detached(remapped)
+        # 用加载路径构造内存态（同 resume）：活跃链 = tip 回溯，压缩区间不进链
+        new_messages: TrackedList[ChainNode] = TrackedList.load(child_log, Message)
 
         # 一次写全元数据——fork bug 的结构性修复
         # 模型记录是**快照**：子 session 的 agent 由源 agent 反向抽取模板构造
         # （生效模型=源此刻模型），metadata 记录同一对值，重启后 resume 才
         # 不会偏离 fork 时用户看到的模型。
+        #
+        # 提示词与动态状态同属快照——子会话 resume 时复现 fork 时刻的行为
+        # （live 与重启后一致）。注意 fork 本身不承诺与源会话的前缀身份：
+        # session id 变化 + before_session_start 在新会话上重跑（见下）。口径分两类：
+        # - 提示词 / 工具集 / yolo / max_turns 取 **live 有效值**：子会话的
+        #   agent 由 AgentTemplate.from_agent 按 live 构造，记录必须与之一致，
+        #   否则子会话 live 与 resume 分叉；append_system_prompt 先按 live 值
+        #   写入（子会话构造时继承，也兼容"落盘字段引入前创建的存量会话"——
+        #   hook 注入只存在于内存），随后 before_session_start 在子会话上生效、
+        #   sync 把注入后的结果覆盖落盘。
+        # - thinking / reasoning_effort 取**显式记录**（可能为 None）：派生
+        #   默认值（provider 协议默认）固化进记录会让子会话请求体带上源会话
+        #   没有的显式配置（前缀身份被破坏），跨协议切模型时更会把一种协议的
+        #   默认值贴到另一种协议上。
         store.save_metadata(
             new_session_id,
             SessionMetadata(
@@ -319,6 +371,15 @@ class SessionManager:
                 template_name=source.template_name,
                 model_name=source.agent.model,
                 provider_name=source.agent.model_provider.name,
+                system_prompt=source.context_manager.setin_system_prompt or None,
+                append_system_prompt=(
+                    source.context_manager.append_system_prompt or None
+                ),
+                tools=tool_refs(source.agent.tools),
+                thinking=source.persisted_thinking,
+                reasoning_effort=source.persisted_reasoning_effort,
+                yolo=source.agent.yolo,
+                max_turns=source.agent.max_turns,
                 last_interaction=datetime.now().isoformat(),
             ),
         )
@@ -332,8 +393,24 @@ class SessionManager:
             store=store,
             workspace=source.session_workspace,
         )
+        # 先注册 / 刷新计时器再跑 hook（与 create_session 同序）：hook 内 emit 的
+        # 事件能命中 SessionReaper 的 touch 订阅，hook 内查 SM 也能看到子会话。
         self._sessions[new_session_id] = new_session
         self.touch(new_session_id)
+
+        # fork 也是"创建新 session"（session id 变化）：before_session_start
+        # 在子会话上生效——hook 注入的环境信息属于"这个新 session"。子会话已
+        # 继承源的追加内容（上面的 metadata 快照 + 构造时还原），不自幂等的
+        # hook 会在其上再叠一层（钩子自身的问题，钩子系统重做时收口，见
+        # docs/zh/custom-tools.md 的 hook 契约与 issue #131）；子会话的 session
+        # id 变化本就让上游缓存无法复用（见 docs/dev/architecture.md
+        # 「压缩与缓存哲学」）。
+        hooks.invoke("before_session_start", new_session)
+
+        # 记录对齐（hook 注入后的 append + **实际生效**的工具集：按 ref 还原可能
+        # 降级——远程宿主断连——记录必须与 live 一致，否则重启后声明集凭空变化）。
+        new_session.sync_append_system_prompt()
+        new_session.sync_tools_record()
 
         return new_session, draft
 

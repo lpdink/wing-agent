@@ -214,21 +214,6 @@ class TrackedList(Generic[T]):
             self._last_uuid = item.uuid
         self._persist_append(lst)
 
-    def extend_detached(self, items: Union[Iterator[T], List[T]]) -> None:
-        """批量追加多条消息，不自动填充 uuid/parentUuid。
-
-        调用方已自行设置好拓扑关系时使用（fork 导入场景）。
-        """
-        lst = list(items)
-        if not lst:
-            return
-        self._check_type(lst)
-        self._data.extend(lst)
-        for item in lst:
-            self._update_memory(item)
-            self._last_uuid = item.uuid
-        self._persist_append(lst)
-
     def append_detached(self, item: T) -> None:
         """追加消息，但不自动填充 uuid/parentUuid。
 
