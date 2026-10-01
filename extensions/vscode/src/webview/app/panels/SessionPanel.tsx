@@ -17,7 +17,7 @@
 import { useEffect, useRef } from 'react';
 import type { ReactElement } from 'react';
 
-import type { SessionCandidateModel, SessionListStatus, SessionPickerModel } from '../../../shared';
+import type { SessionCandidateModel, SessionListStatus, SessionPickerModel } from '@wing-agent/session';
 import { postToHost } from '../../bridge/channel';
 import styles from '../../styles/panels.module.css';
 import { statusLabel } from '../selectors';

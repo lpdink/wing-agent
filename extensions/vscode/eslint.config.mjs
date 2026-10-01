@@ -20,12 +20,21 @@ const VSCODE_MESSAGE = 'Only src/host may import "vscode". src/webview and src/s
 const CLIENT_PACKAGE = '@wing-agent/client';
 const CLIENT_MESSAGE =
   'Only src/host may import the gateway capability layer: the renderer talks over the bridge, and src/shared stays dependency-free.';
+/**
+ * The session package is **not** restricted here: it is the environment-agnostic
+ * view model + reduction lane (its own `tests/layers.test.ts` and the two tsconfigs
+ * guard that), and every layer needs it — `shared` for the types its protocol
+ * carries, `testing` for the fixtures, `webview` to render. What *is* restricted is
+ * the deep path: only the barrel is a contract (see `tests/layers/layers.test.ts`).
+ */
+const SESSION_PACKAGE = '@wing-agent/session';
 const HOST_BOUNDARY =
   'src/host must not import the renderer (src/webview): the host talks to it over the bridge only.';
 const WEBVIEW_BOUNDARY =
-  'src/webview must not import host code: the renderer only consumes src/shared contract types.';
+  'src/webview must not import host code: the renderer only consumes the session model and src/shared contract types.';
 const SHARED_BOUNDARY =
-  'src/shared is dependency-free: no vscode / host / webview / node imports and no packages.';
+  `src/shared is the bridge protocol and stays dependency-free: no vscode / host / webview / node imports, ` +
+  `and no packages other than the session model it carries ("${SESSION_PACKAGE}").`;
 const TESTING_BOUNDARY = 'src/testing is test/preview-only; product code must not import it.';
 const NODE_BUILTIN_BOUNDARY =
   'Node builtins are unavailable here: this layer also runs in the webview bundle.';
@@ -42,12 +51,23 @@ const LAYER_GLOBS = {
  *
  * `group` values are arrays (minimatch patterns over the import string), which is
  * the shape ESLint 10 validates; a bare string is rejected.
+ *
+ * Every zone also gets the barrel-only rule for the session package: that package
+ * is portable and any layer may import it (`SESSION_PACKAGE` below), but a path
+ * into it would make its file layout a contract — the authoritative check lives in
+ * `tests/layers/layers.test.ts`, this is the version that is red while you type.
  */
 const restricted = ({ banVscode = false, paths = [], groups = [] }) => [
   'error',
   {
     paths: banVscode ? [{ name: VSCODE, message: VSCODE_MESSAGE }, ...paths] : paths,
-    patterns: groups.map(([group, message]) => ({ group, message })),
+    patterns: [
+      ...groups.map(([group, message]) => ({ group, message })),
+      {
+        group: [`${SESSION_PACKAGE}/*`],
+        message: `Import "${SESSION_PACKAGE}" through its barrel only: a path into the package is not a contract.`,
+      },
+    ],
   },
 ];
 
@@ -139,10 +159,12 @@ export default tseslint.config(
     rules: {
       'no-restricted-imports': restricted({
         banVscode: true,
-        paths: [{ name: CLIENT_PACKAGE, message: 'src/testing may only import src/shared.' }],
+        paths: [
+          { name: CLIENT_PACKAGE, message: 'src/testing may only import src/shared and the session model.' },
+        ],
         groups: [
-          [LAYER_GLOBS.host, 'src/testing may only import src/shared.'],
-          [LAYER_GLOBS.webview, 'src/testing may only import src/shared.'],
+          [LAYER_GLOBS.host, 'src/testing may only import src/shared and the session model.'],
+          [LAYER_GLOBS.webview, 'src/testing may only import src/shared and the session model.'],
         ],
       }),
     },

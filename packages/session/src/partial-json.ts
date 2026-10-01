@@ -1,4 +1,4 @@
-import type { JsonValue } from '../../shared';
+import type { JsonValue } from './types';
 
 /**
  * Fault-tolerant partial JSON parser for streaming tool arguments.

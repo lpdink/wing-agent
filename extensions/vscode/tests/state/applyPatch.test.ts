@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { CellModel, CellPatch } from '../../src/shared';
+import type { CellModel, CellPatch } from '@wing-agent/session';
 import { applyCellPatches, isExpectedSeq } from '../../src/webview/state/applyPatch';
 import { makeAllCells, makeFixtureSession } from '../../src/testing/fixtures';
 

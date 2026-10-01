@@ -43,6 +43,21 @@ const NODE_BUILTINS = new Set([...builtinModules, ...builtinModules.map((name) =
  */
 const CLIENT_PACKAGE = '@wing-agent/client';
 
+/**
+ * The extracted session reduction lane (`packages/session`).
+ *
+ * It is the session view model + the reduction that produces it — the vocabulary
+ * `src/shared` used to hold itself. Two rules, checked below:
+ *
+ * - **every** layer may import it (the model is what the bridge carries, what the
+ *   renderer draws and what the fixtures build; blocking it anywhere would only
+ *   force a second copy of the types, which is what the extraction removed);
+ * - **only the barrel**: `@wing-agent/session` is the contract, a deep path into
+ *   the package is not (`packages/session/tests/layers.test.ts` keeps that
+ *   promise from the other side).
+ */
+const SESSION_PACKAGE = '@wing-agent/session';
+
 /** `sibling` = same layer; `external` = npm packages. */
 interface LayerRule {
   readonly siblings: boolean;
@@ -236,6 +251,20 @@ function checkSpecifier(file: string, specifier: string, violations: Violation[]
         message:
           `only src/host may import "${CLIENT_PACKAGE}" (the gateway capability layer): ` +
           'the renderer talks over the bridge, and src/shared stays dependency-free',
+      });
+    }
+    return;
+  }
+
+  if (specifier === SESSION_PACKAGE || specifier.startsWith(`${SESSION_PACKAGE}/`)) {
+    // Any layer may reach the session package (see SESSION_PACKAGE above) — but
+    // only through its barrel: a deep path would make the package's file layout a
+    // contract and let a consumer bypass the single truth the extraction created.
+    if (specifier !== SESSION_PACKAGE) {
+      violations.push({
+        file: relativeTo(file),
+        specifier,
+        message: `import "${SESSION_PACKAGE}" through its barrel only — a path into the package is not a contract`,
       });
     }
     return;
@@ -760,7 +789,7 @@ describe('layering', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('preview/ only imports preview, src/shared, src/testing and src/webview', () => {
+  it('preview/ only imports preview, src/shared, src/testing, src/webview and the session package', () => {
     const violations: Violation[] = [];
     for (const file of listFiles(PREVIEW, ['.ts', '.tsx'])) {
       for (const specifier of collectModuleSpecifiers(file)) {
@@ -768,12 +797,13 @@ describe('layering', () => {
           if (
             specifier === 'vscode' ||
             NODE_BUILTINS.has(specifier) ||
-            !['react', 'react-dom'].includes(specifier)
+            !['react', 'react-dom', SESSION_PACKAGE].includes(specifier)
           ) {
             violations.push({
               file: path.relative(PACKAGE_ROOT, file),
               specifier,
-              message: 'the preview harness may only import react, react-dom and its own sources',
+              message:
+                'the preview harness may only import react, react-dom, the session package and its own sources',
             });
           }
           continue;

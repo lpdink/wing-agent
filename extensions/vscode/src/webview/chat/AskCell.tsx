@@ -15,7 +15,7 @@
 import { useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
 
-import type { AskAnswerModel, AskCellModel, AskQuestionModel, SessionId } from '../../shared';
+import type { AskAnswerModel, AskCellModel, AskQuestionModel, SessionId } from '@wing-agent/session';
 import { postToHost } from '../bridge/channel';
 import styles from '../styles/chat.module.css';
 

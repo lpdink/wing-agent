@@ -1,10 +1,5 @@
-import type {
-  HostToWebviewMessage,
-  SessionViewModel,
-  TabModel,
-  WebviewToHostMessage,
-  WebviewTransport,
-} from '../shared';
+import type { SessionViewModel, TabModel } from '@wing-agent/session';
+import type { HostToWebviewMessage, WebviewToHostMessage, WebviewTransport } from '../shared';
 
 import { makeFixtureSession, makeTab } from './fixtures';
 

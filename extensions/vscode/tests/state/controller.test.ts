@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { HostToWebviewMessage, WebviewToHostMessage } from '../../src/shared';
-import { BRIDGE_PROTOCOL_VERSION, EMPTY_PANELS } from '../../src/shared';
+import { EMPTY_PANELS } from '@wing-agent/session';
+import { BRIDGE_PROTOCOL_VERSION } from '../../src/shared';
 import { makeFixtureSession } from '../../src/testing/fixtures';
 import { createMockBridge } from '../../src/testing/mockBridge';
 import { createBridgeController } from '../../src/webview/bridge/controller';

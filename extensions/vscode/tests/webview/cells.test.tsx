@@ -1,7 +1,7 @@
 import { fireEvent, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import type { CellModel } from '../../src/shared';
+import type { CellModel } from '@wing-agent/session';
 import {
   FIXTURE_EPOCH,
   makeApprovalAskCell,

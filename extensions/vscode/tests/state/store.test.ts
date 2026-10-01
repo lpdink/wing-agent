@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import type { SessionViewModel } from '../../src/shared';
-import { EMPTY_PANELS } from '../../src/shared';
+import type { SessionViewModel } from '@wing-agent/session';
+import { EMPTY_PANELS } from '@wing-agent/session';
 import { createAppStore, createInitialState, selectActiveSession } from '../../src/webview/state/store';
 import type { AppStoreApi } from '../../src/webview/state/store';
 import { MAX_TOASTS, TOAST_TIMEOUT_MS } from '../../src/webview/state/store';

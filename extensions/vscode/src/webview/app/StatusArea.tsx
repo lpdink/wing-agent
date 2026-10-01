@@ -13,7 +13,7 @@
 
 import type { ReactElement } from 'react';
 
-import type { SessionViewModel } from '../../shared';
+import type { SessionViewModel } from '@wing-agent/session';
 import { postToHost, pingHost } from '../bridge/channel';
 import { useAppStore } from '../state/appStore';
 import styles from '../styles/app.module.css';

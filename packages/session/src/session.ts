@@ -2,12 +2,14 @@
  * Session view model — what a single tab renders.
  *
  * The host owns this structure end to end (reduction from gateway events, title
- * derivation, status derivation). The webview receives it through `hydrate`,
- * then keeps it up to date through `patch` (cells) and `state` (everything else).
+ * derivation, status derivation); this package is its type and its derivation. A
+ * view receives it through a `hydrate`-style full snapshot, then keeps it up to date
+ * through cell patches (`CellPatch`) plus idempotent state replacements — the channel
+ * itself belongs to the shell (in the VS Code extension: `src/shared/bridge.ts`).
  *
  * `SessionStateModel` and `SessionViewModel` are deliberately split: cell content
- * is the only thing that changes at streaming rate, so only `patch` messages
- * carry cells — status/meta updates stay small and idempotent.
+ * is the only thing that changes at streaming rate, so only cell patches carry
+ * cells — status/meta updates stay small and idempotent.
  */
 
 import type { CellModel } from './cells';

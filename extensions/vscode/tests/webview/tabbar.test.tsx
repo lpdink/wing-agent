@@ -1,7 +1,8 @@
 import { act, fireEvent, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { BRIDGE_PROTOCOL_VERSION, EMPTY_PANELS } from '../../src/shared';
+import { EMPTY_PANELS } from '@wing-agent/session';
+import { BRIDGE_PROTOCOL_VERSION } from '../../src/shared';
 import { MAX_TOASTS, TOAST_TIMEOUT_MS } from '../../src/webview/state/store';
 import {
   makeEmptySession,

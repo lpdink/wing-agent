@@ -1,4 +1,5 @@
-import type { CellModel, HostToWebviewMessage } from '../../../src/shared';
+import type { CellModel } from '@wing-agent/session';
+import type { HostToWebviewMessage } from '../../../src/shared';
 import { applyCellPatches, isExpectedSeq } from '../../../src/webview/state/applyPatch';
 
 /**

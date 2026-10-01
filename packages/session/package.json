@@ -1,0 +1,40 @@
+{
+  "name": "@wing-agent/session",
+  "version": "0.1.0",
+  "//": "The session reduction lane shared by every frontend (VS Code extension today; web / Electron tomorrow). It turns gateway events into the host's UI model: the transcript cells, the per-session state, and the `SessionRecord` the view is rebuilt from. Private and never published: the sources ARE the artifact (see `exports`) — bundlers compile them (esbuild for the extension host, Vite for the shells, vitest for tests), so there is no build step to keep in sync. Workspace member of the root pnpm workspace (`pnpm-workspace.yaml`). See `docs/dev/vscode-extension.md` §2.1 for the boundary against the extension's host glue.",
+  "private": true,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lpdink/wing-agent.git",
+    "directory": "packages/session"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "//sideEffects": "Every module here only defines types, constants and functions — nothing runs at import time. Declaring it lets a consumer that only needs the model (the webview renderer imports the cell types) tree-shake the reduction lane, and with it this package's own dependency on the gateway capability layer. Verified by the webview bundle artifact test in the extension.",
+  "sideEffects": false,
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.dom.json",
+    "lint": "eslint . --max-warnings=0",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@wing-agent/client": "workspace:*"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.13.5",
+    "eslint": "^10.10.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.8",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^5.0.1"
+  }
+}

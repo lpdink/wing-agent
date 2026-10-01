@@ -15,8 +15,8 @@
 import { useEffect, useMemo, useRef } from 'react';
 import type { ReactElement } from 'react';
 
-import type { EffortLevel, ModelPickerModel, SessionMetaModel } from '../../../shared';
-import { EFFORT_LEVELS } from '../../../shared';
+import type { EffortLevel, ModelPickerModel, SessionMetaModel } from '@wing-agent/session';
+import { EFFORT_LEVELS } from '@wing-agent/session';
 import { postToHost } from '../../bridge/channel';
 import styles from '../../styles/panels.module.css';
 import { PanelShell } from './PanelShell';

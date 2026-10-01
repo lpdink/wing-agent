@@ -8,8 +8,8 @@ import type {
   SessionViewModel,
   TabModel,
   UserCellModel,
-} from '../shared';
-import { BRANCH_CURRENT_UUID, EMPTY_PANELS } from '../shared';
+} from '@wing-agent/session';
+import { BRANCH_CURRENT_UUID, EMPTY_PANELS } from '@wing-agent/session';
 
 /** Which command a branch picker was opened for. */
 export type BranchPickerMode = BranchPickerModel['mode'];

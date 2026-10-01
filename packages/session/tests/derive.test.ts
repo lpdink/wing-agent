@@ -15,8 +15,8 @@ import {
   toolDisplay,
   truncateChars,
   truncatePathSegments,
-} from '../../src/host/session/derive';
-import { parsePartialJson } from '../../src/host/session/partial-json';
+} from '../src/derive';
+import { parsePartialJson } from '../src/partial-json';
 import type { AskEvent } from '@wing-agent/client';
 
 /**

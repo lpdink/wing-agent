@@ -27,7 +27,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ChangeEvent, KeyboardEvent, ReactElement } from 'react';
 
-import type { CommandInfoModel, FrontendCommand, SessionViewModel } from '../../shared';
+import type { CommandInfoModel, FrontendCommand, SessionViewModel } from '@wing-agent/session';
 import {
   filterCommands,
   isEffortLevel,
@@ -36,7 +36,7 @@ import {
   normalizeCommandName,
   parseBoolArg,
   parseSlashInput,
-} from '../../shared';
+} from '@wing-agent/session';
 import { postToHost } from '../bridge/channel';
 import styles from '../styles/app.module.css';
 import { optionId, useListNav, useRevealIndex } from './panels/listNav';

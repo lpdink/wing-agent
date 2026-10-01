@@ -4,13 +4,12 @@ import type { StoreApi } from 'zustand/vanilla';
 import type {
   CellPatch,
   PanelsModel,
-  ResyncReason,
   SessionId,
   SessionStateModel,
   SessionViewModel,
   TabModel,
-  UiActionModel,
-} from '../../shared';
+} from '@wing-agent/session';
+import type { ResyncReason, UiActionModel } from '../../shared';
 import { BRIDGE_PROTOCOL_VERSION, unhandledVariant } from '../../shared';
 
 import { applyCellPatches, isExpectedSeq } from './applyPatch';

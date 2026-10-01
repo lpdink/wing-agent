@@ -1,7 +1,7 @@
 import { fireEvent, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { EMPTY_PANELS } from '../../src/shared';
+import { EMPTY_PANELS } from '@wing-agent/session';
 import {
   makeCommandCatalog,
   makeEmptySession,

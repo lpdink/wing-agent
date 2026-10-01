@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { CellModel } from '../../src/shared';
+import type { CellModel } from '@wing-agent/session';
 import { FIXTURE_EPOCH, makeFixtureSession } from '../../src/testing/fixtures';
 import type * as ParseModule from '../../src/webview/chat/markdown/parse';
 import type * as RenderModule from '../../src/webview/chat/markdown/render';

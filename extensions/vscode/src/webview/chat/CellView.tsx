@@ -10,7 +10,7 @@
 import { memo } from 'react';
 import type { ReactElement } from 'react';
 
-import type { CellModel, SessionId } from '../../shared';
+import type { CellModel, SessionId } from '@wing-agent/session';
 import { unhandledVariant } from '../../shared';
 import {
   AssistantCell,

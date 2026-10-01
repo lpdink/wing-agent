@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 
-import type { DiffCellModel } from '../shared';
+import type { DiffCellModel } from '@wing-agent/session';
 
 import { log } from './log';
 

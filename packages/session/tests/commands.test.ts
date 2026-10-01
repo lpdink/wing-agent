@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { CommandInfoModel } from '../../src/shared';
+import type { CommandInfoModel } from '../src';
 import {
   BRANCH_CURRENT_UUID,
   EFFORT_LEVELS,
@@ -12,7 +12,7 @@ import {
   mergeCommandCatalog,
   normalizeCommandName,
   parseSlashInput,
-} from '../../src/shared';
+} from '../src';
 
 /**
  * The frontend command vocabulary (step 05).

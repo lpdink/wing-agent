@@ -5,8 +5,8 @@ import type {
   SessionStateModel,
   SessionViewModel,
   TabModel,
-  UiActionModel,
-} from '../../src/shared';
+} from '@wing-agent/session';
+import type { UiActionModel } from '../../src/shared';
 import { createMockBridge } from '../../src/testing/mockBridge';
 import type { MockBridge } from '../../src/testing/mockBridge';
 import { mountApp } from '../../src/webview/mount';

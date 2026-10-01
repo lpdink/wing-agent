@@ -18,7 +18,7 @@ import type {
   SessionViewModel,
   TabModel,
   UserCellModel,
-} from '../../shared';
+} from '@wing-agent/session';
 
 /** User messages the host has not accepted yet (still queued). */
 export function selectQueuedMessages(cells: readonly CellModel[]): readonly UserCellModel[] {

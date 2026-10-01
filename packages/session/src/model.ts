@@ -1,23 +1,18 @@
+import type { CellModel, CellPatch, UsageMetricsModel, UserCellModel } from './cells';
 import type {
-  CellId,
-  CellModel,
-  CellPatch,
   ContextUsageModel,
-  EpochMs,
   PanelsModel,
-  RequestId,
   SessionAttention,
   SessionMetaModel,
   SessionStateModel,
   SessionStatus,
   SessionTotalsModel,
   SessionViewModel,
-  ToolCallId,
   TurnViewModel,
-  UsageMetricsModel,
-  UserCellModel,
-} from '../../shared';
-import { EMPTY_PANELS, SESSION_TITLE_MAX_LENGTH } from '../../shared';
+} from './session';
+import { EMPTY_PANELS } from './session';
+import { SESSION_TITLE_MAX_LENGTH } from './constants';
+import type { CellId, EpochMs, RequestId, ToolCallId } from './types';
 
 import { deriveTitle, truncateChars } from './derive';
 

@@ -41,8 +41,8 @@ export interface FrontendCommand extends CommandInfoModel {
  *
  * Wording is ours; the **names and aliases** are a 1:1 mirror of the TUI's
  * `TUI_ONLY_COMMANDS` (`crates/wing/src/ui/popup/command.rs:59`), minus the two Goal
- * commands (out of scope for this extension) — `tests/shared/commands.test.ts` pins
- * that list, so a drift shows up as a failing test.
+ * commands (out of scope for this extension) — `tests/commands.test.ts` pins that
+ * list, so a drift shows up as a failing test.
  * `kind: 'forward'` rows never reach the switch in the composer's routing table:
  * the host owns their implementation (`/clear`, `/copy`, `/context`, …).
  */

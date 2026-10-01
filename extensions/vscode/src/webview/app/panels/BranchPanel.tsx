@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import type { ReactElement } from 'react';
 
-import type { BranchPickerModel, BranchTargetModel } from '../../../shared';
+import type { BranchPickerModel, BranchTargetModel } from '@wing-agent/session';
 import { postToHost } from '../../bridge/channel';
 import styles from '../../styles/panels.module.css';
 import { PanelEmpty, PanelShell } from './PanelShell';

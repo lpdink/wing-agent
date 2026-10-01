@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { CellModel } from '../../src/shared';
+import type { CellModel } from '@wing-agent/session';
 import { makeFixtureSession, makePendingUserCell } from '../../src/testing/fixtures';
 import {
   baseName,

@@ -1,5 +1,5 @@
-import type { CellPatch, PanelsModel, SessionViewModel } from '../src/shared';
-import { EMPTY_PANELS } from '../src/shared';
+import type { CellPatch, PanelsModel, SessionViewModel } from '@wing-agent/session';
+import { EMPTY_PANELS } from '@wing-agent/session';
 import {
   makeApprovalAskCell,
   makeBranchPicker,

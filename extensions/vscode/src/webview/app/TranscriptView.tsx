@@ -20,7 +20,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactElement, RefObject } from 'react';
 
-import type { SessionViewModel } from '../../shared';
+import type { SessionViewModel } from '@wing-agent/session';
 import { CellView } from '../chat/CellView';
 import styles from '../styles/chat.module.css';
 

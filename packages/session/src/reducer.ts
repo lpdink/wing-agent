@@ -1,13 +1,5 @@
-import type {
-  AskCellModel,
-  CellId,
-  CellModel,
-  EpochMs,
-  JsonValue,
-  SystemLevel,
-  TodoCellModel,
-  ToolCallCellModel,
-} from '../../shared';
+import type { AskCellModel, CellModel, SystemLevel, TodoCellModel, ToolCallCellModel } from './cells';
+import type { CellId, EpochMs, JsonValue } from './types';
 import type {
   AskEvent,
   DiffContentEvent,
@@ -44,9 +36,8 @@ import { parsePartialJson } from './partial-json';
  * structurally impossible instead of merely unlikely.
  *
  * Side effects a reduction may want (attention badges, toasts, scroll hints)
- * leave through {@link ReductionEffect}: the reducer never talks to the bridge
- * or to `vscode` itself, which is what keeps it a pure function of
- * (model, event).
+ * leave through {@link ReductionEffect}: the reducer never talks to a channel, an
+ * editor or the DOM, which is what keeps it a pure function of (model, event).
  */
 
 /** Anything a reduction wants the outside world to do. */

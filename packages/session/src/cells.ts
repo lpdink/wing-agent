@@ -12,8 +12,8 @@
  * 3. Goal cells are out of scope (Goal orchestration is not implemented).
  *
  * Everything a renderer needs is pre-derived by the host: `display.subject` for a
- * tool row, windowed diff rows, normalized ask options. The webview never parses
- * partial JSON and never inspects raw protocol events.
+ * tool row, windowed diff rows, normalized ask options. A view never parses partial
+ * JSON and never inspects raw protocol events.
  */
 
 import type { CellId, EpochMs, RequestId, SessionId, ToolCallId } from './types';
@@ -273,6 +273,39 @@ export type CellModel =
   | AskCellModel
   | MetricsCellModel
   | SeparatorCellModel;
+
+/**
+ * One ordered mutation of a session's transcript.
+ *
+ * This is the journal's unit and the view's input: `SessionRecord` records one of
+ * these for every cell change, and a view rebuilds the transcript by applying them
+ * in order. Ordering matters: `insert_after` addresses the cell that must end up
+ * directly before the new one, which is how the host keeps concurrent tool calls in
+ * arrival order without re-sending the whole transcript.
+ *
+ * The transport that ships a batch of them (the `patch` message and its `seq`
+ * cursor) belongs to the host ⇄ view bridge, not to the model — in the VS Code
+ * extension that protocol lives in `extensions/vscode/src/shared/bridge.ts`.
+ */
+export type CellPatch =
+  /** Append a new cell at the end of the transcript. Fails if the id already exists. */
+  | { readonly op: 'append'; readonly cell: CellModel }
+  /** Insert directly after `afterCellId`. Fails if that cell does not exist. */
+  | { readonly op: 'insert_after'; readonly afterCellId: CellId; readonly cell: CellModel }
+  /** Replace the cell with the same id. Fails if it does not exist. */
+  | { readonly op: 'update'; readonly cell: CellModel }
+  /**
+   * Append streamed text to a text-bearing cell (user / assistant / thinking /
+   * system). Fails on other kinds — callers use `update` there.
+   */
+  | { readonly op: 'append_text'; readonly cellId: CellId; readonly text: string }
+  /** Drop a cell (e.g. a cancelled tool call). Fails if it does not exist. */
+  | { readonly op: 'remove'; readonly cellId: CellId }
+  /** Replace the whole transcript (compaction, rewind, session reload). */
+  | { readonly op: 'replace_all'; readonly cells: readonly CellModel[] };
+
+/** Kinds of patches, derived from the union. */
+export type CellPatchOp = CellPatch['op'];
 
 /**
  * Exhaustiveness helper for `switch` statements over discriminated unions.

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { DIFF_SCHEME, VsCodeEditorActions, diffWindowTexts } from '../../src/host/editorActions';
-import type { DiffCellModel } from '../../src/shared';
+import type { DiffCellModel } from '@wing-agent/session';
 import { env, mockState } from '../mocks/vscode';
 
 /**

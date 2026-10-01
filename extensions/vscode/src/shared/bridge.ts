@@ -1,6 +1,10 @@
 /**
  * The host ⇄ webview bridge protocol.
  *
+ * This is the *channel*: the message unions below, plus their transport rules. The
+ * values they carry (transcript cells, session state, panels) are the session
+ * package's model — `@wing-agent/session` — and are imported, never redeclared.
+ *
  * ## Direction 1 — host → webview (the host is the only authority)
  *
  * | message | scope | meaning |
@@ -27,39 +31,21 @@
  * webview must answer `resync` (never guess) and the host replies with `hydrate`.
  */
 
-import type { AskAnswerModel, CellModel } from './cells';
-import type { PanelsModel, SessionStateModel, SessionViewModel, TabModel } from './session';
-import type { CellId, RequestId, SessionId } from './types';
+import type {
+  AskAnswerModel,
+  CellId,
+  CellPatch,
+  PanelsModel,
+  RequestId,
+  SessionId,
+  SessionStateModel,
+  SessionViewModel,
+  TabModel,
+} from '@wing-agent/session';
+
 import { BRIDGE_PROTOCOL_VERSION } from './constants';
 
 // ── host → webview ────────────────────────────────────────────────────
-
-/**
- * One ordered mutation of a session's transcript.
- *
- * Ordering matters: `insert_after` addresses the cell that must end up directly
- * before the new one, which is how the host keeps concurrent tool calls in
- * arrival order without re-sending the whole transcript.
- */
-export type CellPatch =
-  /** Append a new cell at the end of the transcript. Fails if the id already exists. */
-  | { readonly op: 'append'; readonly cell: CellModel }
-  /** Insert directly after `afterCellId`. Fails if that cell does not exist. */
-  | { readonly op: 'insert_after'; readonly afterCellId: CellId; readonly cell: CellModel }
-  /** Replace the cell with the same id. Fails if it does not exist. */
-  | { readonly op: 'update'; readonly cell: CellModel }
-  /**
-   * Append streamed text to a text-bearing cell (user / assistant / thinking /
-   * system). Fails on other kinds — callers use `update` there.
-   */
-  | { readonly op: 'append_text'; readonly cellId: CellId; readonly text: string }
-  /** Drop a cell (e.g. a cancelled tool call). Fails if it does not exist. */
-  | { readonly op: 'remove'; readonly cellId: CellId }
-  /** Replace the whole transcript (compaction, rewind, session reload). */
-  | { readonly op: 'replace_all'; readonly cells: readonly CellModel[] };
-
-/** Kinds of patches, derived from the union. */
-export type CellPatchOp = CellPatch['op'];
 
 /** One-shot UI actions the host may push. Ephemeral: never part of the model. */
 export type UiActionModel =

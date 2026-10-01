@@ -16,7 +16,7 @@
 
 import type { ReactElement } from 'react';
 
-import type { SessionAttention, TabModel } from '../../shared';
+import type { SessionAttention, TabModel } from '@wing-agent/session';
 import { postToHost } from '../bridge/channel';
 import styles from '../styles/app.module.css';
 import { statusLabel, tabLabel } from './selectors';

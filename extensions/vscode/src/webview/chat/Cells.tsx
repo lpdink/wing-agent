@@ -4,7 +4,7 @@
  * Every component here is a *pure renderer*: it takes a `CellModel` from the
  * host and local interaction state, and never re-derives business facts (no
  * partial-JSON parsing, no diff computation). Everything a renderer needs is
- * already in the model — see `src/shared/cells.ts`.
+ * already in the model — see `@wing-agent/session`'s `cells.ts`.
  *
  * Layout follows VS Code's chat rows (`CHAT:3771-3774`): one row per cell with
  * `padding: 5px 16px`, no extra gap between rows.
@@ -26,7 +26,7 @@ import type {
   ToolCallResultModel,
   ToolCallStatus,
   UserCellModel,
-} from '../../shared';
+} from '@wing-agent/session';
 import { postToHost } from '../bridge/channel';
 import styles from '../styles/chat.module.css';
 import { FileReference, parseFileReference } from './FileReference';

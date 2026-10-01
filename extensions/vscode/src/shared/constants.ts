@@ -1,8 +1,13 @@
 /**
- * Shared vocabulary for the host ⇄ webview contract.
+ * Bridge vocabulary for the host ⇄ webview contract.
  *
- * This module holds magic strings that both sides must agree on. Keep it free of
- * runtime dependencies (no `vscode`, no DOM, no node) — the layer guard enforces it.
+ * This module holds magic strings that both sides of **this extension's** bridge must
+ * agree on. Keep it free of runtime dependencies (no `vscode`, no DOM, no node) — the
+ * layer guard enforces it.
+ *
+ * The session-model and command vocabulary lives in `@wing-agent/session`
+ * (`TOOL_NAMES`, `LOCAL_COMMANDS`, `SESSION_TITLE_MAX_LENGTH`): those values describe
+ * the gateway's sessions, not this channel, and every frontend needs them.
  */
 
 /**
@@ -15,44 +20,6 @@
  * so the host can refuse a stale cached webview instead of failing silently.
  */
 export const BRIDGE_PROTOCOL_VERSION = 1;
-
-/**
- * Tool names — must match the backend tool registry.
- * Source of truth: `crates/wing/src/shared/constants.rs`, `libs/core/wing/tools/`.
- */
-export const TOOL_NAMES = {
-  bash: 'Bash',
-  read: 'Read',
-  write: 'Write',
-  edit: 'Edit',
-  glob: 'Glob',
-  grep: 'Grep',
-  askUserQuestion: 'AskUserQuestion',
-  todoWrite: 'TodoWrite',
-} as const;
-
-export type ToolName = (typeof TOOL_NAMES)[keyof typeof TOOL_NAMES];
-
-/**
- * Frontend-only commands: handled by the host without reaching the gateway.
- * Mirrors `crates/wing/src/shared/constants.rs`.
- *
- * Kept as the TUI's mirror; the shell's vocabulary (which includes these three) is
- * {@link FRONTEND_COMMANDS} in `src/shared/commands.ts`, and only the contract test
- * reads this constant today.
- */
-export const LOCAL_COMMANDS = {
-  new: '/new',
-  clear: '/clear',
-  copy: '/copy',
-} as const;
-
-/**
- * Session title derivation limit (characters) — must match the backend rule
- * (`first_user_message` truncation, see `libs/core/wing/session.py`). The host
- * derives titles with the same rule so both sides agree without an extra RPC.
- */
-export const SESSION_TITLE_MAX_LENGTH = 100;
 
 /** CSS class applied to the webview root for the current theme kind. */
 export const THEME_CLASSES = {

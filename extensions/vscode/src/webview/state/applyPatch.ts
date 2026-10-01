@@ -1,5 +1,6 @@
-import type { CellModel, CellPatch, ResyncReason } from '../../shared';
-import { assertNever } from '../../shared';
+import type { CellModel, CellPatch } from '@wing-agent/session';
+import type { ResyncReason } from '../../shared';
+import { assertNever } from '@wing-agent/session';
 
 /**
  * Cell patch application — the webview's whole "reducer".

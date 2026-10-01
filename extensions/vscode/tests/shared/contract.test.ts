@@ -1,23 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type {
-  CellModel,
-  CellPatch,
-  HostToWebviewMessage,
-  PanelsModel,
-  SessionViewModel,
-  WebviewToHostMessage,
-} from '../../src/shared';
+import type { CellModel, CellPatch, PanelsModel, SessionViewModel } from '@wing-agent/session';
+import type { HostToWebviewMessage, WebviewToHostMessage } from '../../src/shared';
 import {
   BRANCH_CURRENT_UUID,
-  BRIDGE_PROTOCOL_VERSION,
   EMPTY_PANELS,
   LOCAL_COMMANDS,
-  MAX_IMAGE_SRC_CHARS,
-  RESOLVE_IMAGES_MAX_SRCS,
   SESSION_TITLE_MAX_LENGTH,
   TOOL_NAMES,
   assertNever,
+} from '@wing-agent/session';
+import {
+  BRIDGE_PROTOCOL_VERSION,
+  MAX_IMAGE_SRC_CHARS,
+  RESOLVE_IMAGES_MAX_SRCS,
   isHostToWebviewMessage,
   isWebviewToHostMessage,
   readImageSources,

@@ -1,13 +1,13 @@
 import type {
   AskAnswerModel,
   AskQuestionModel,
-  BranchTargetModel,
   DiffLineModel,
-  JsonValue,
   TodoItemModel,
   TodoItemStatus,
   ToolCallDisplayModel,
-} from '../../shared';
+} from './cells';
+import type { BranchTargetModel } from './session';
+import type { JsonValue } from './types';
 import type { AskEvent, BranchTarget } from '@wing-agent/client';
 
 import { asArray, asObject } from './partial-json';
