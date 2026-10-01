@@ -77,19 +77,28 @@
 //! next block starts, so a trailing blank never dangles at the end of the
 //! stream (matching the full render's trailing-blank trim).
 //!
-//! **Thinking vs Content.** The two profiles differ in exactly two rendering
-//! rules — both owned by [`Profile`]: inline ```` normalization (skipped for
-//! reasoning, which discusses fences in prose) and indented (4-space) blocks
-//! (prose for reasoning, code for assistant content). Fenced blocks render
+//! **Thinking vs Content.** The three rendering rules `Profile` owns are the
+//! only place the profiles differ, plus one shared rule: inline ````
+//! normalization (skipped for reasoning, which discusses fences in prose),
+//! indented (4-space) blocks (prose for reasoning, code for assistant
+//! content) — and math delimiter normalization (`\(…\)` / `\[…\]` / a bare
+//! AMS environment → `$…$` / `$$…$$`, see `super::math`), which applies to
+//! both profiles and is therefore also safe per slice: it only fires on a
+//! complete, code-free span inside one blank-line-delimited block, and a
+//! slice boundary IS a blank line or a fence. Fenced blocks render
 //! identically: highlight, gutter, borders. The cell compose is what
-//! recolors reasoning prose (`thinking_segment_style`).
+//! recolors reasoning prose (`thinking_segment_style`); math keeps its own
+//! color in both.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use syntect::easy::HighlightLines;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::links::{LinkSpan, compose_lines, line_link_spans};
+use super::images::{
+    ImageAnchor, ImageOpts, ImageSpan, cover_span, image_side_channel, row_is_cover_row,
+};
+use super::links::{ComposedLines, LinkSpan, compose_lines, line_link_spans};
 use super::profile::Profile;
 use super::types::{
     MarkdownLine, MarkdownSegment, MarkdownTheme, SegmentKind, thinking_segment_style,
@@ -112,10 +121,37 @@ enum Mode {
     Paragraph,
     /// Open list slice — blank lines stay (loose lists), lazy
     /// continuations stay; closes on non-list content after a blank.
-    List { blank_seen: bool },
+    ///
+    /// `fence` is the fence running *inside* the item (`- ~~~`, `  ``` `):
+    /// while it is open nothing may be cut — the normalization scanner is
+    /// inside that fence too, and a cut there would make the two disagree
+    /// about which lines are code (review r3).
+    List {
+        blank_seen: bool,
+        fence: Option<FenceTrack>,
+    },
     /// Open fenced code block. Blank lines are content; closes only on a
     /// matching (or longer) fence line.
-    FencedCode { fence_char: u8, fence_len: usize },
+    ///
+    /// The track is [`FenceTrack`] — the shared state machine; this mode only
+    /// adds the slice bookkeeping around it.
+    FencedCode(FenceTrack),
+    /// A fence that carries a block prefix (`> ~~~`, `- ~~~`): the parser
+    /// still reads it as a code block (prefixes are resolved first), so the
+    /// slice must not cut at the blank lines inside it — a slice starting
+    /// inside a fence body would render its content as prose.
+    ///
+    /// It deliberately does NOT use the fenced-code path: `FencedCode` drives
+    /// the line-level code cache, which expects a bare fence (language on the
+    /// opener line, no prefix in the body). A prefixed fence stays one
+    /// paragraph-ish slice and renders through the generic path, which is
+    /// exactly what the document-level render does with those lines.
+    PrefixedFence {
+        track: FenceTrack,
+        /// Mode to return to when the fence closes: a list slice keeps its
+        /// blank bookkeeping.
+        resume_list: bool,
+    },
     /// Open indented (4-space) code block. Closes on a non-blank line
     /// indented fewer than 4 spaces.
     IndentedCode,
@@ -228,6 +264,73 @@ struct CodeFlat {
 }
 
 // ============================================================
+// FlatLines — composed lines and their side channels
+// ============================================================
+
+/// The composed lines of a streaming cell, with the side channels that must
+/// stay index-parallel to them: the markdown link spans (OSC8 injection and
+/// click hit-testing) and the image anchors (the drawing layer).
+///
+/// Every mutation goes through this type, so the three vectors cannot drift
+/// apart — a `truncate` that missed one of them would silently misplace every
+/// link and every picture below it.
+#[derive(Default)]
+struct FlatLines {
+    lines: Vec<Line<'static>>,
+    /// `links[i]` belongs to `lines[i]` (empty when the line has no link).
+    links: Vec<Vec<LinkSpan>>,
+    /// `images[i]` belongs to `lines[i]` (empty unless the line opens an
+    /// anchor).
+    images: Vec<Vec<ImageSpan>>,
+}
+
+impl FlatLines {
+    fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.lines.truncate(len);
+        self.links.truncate(len);
+        self.images.truncate(len);
+    }
+
+    /// Append the cell's trailing blank line (no side channels).
+    fn push_blank(&mut self) {
+        self.lines.push(Line::from(""));
+        self.links.push(Vec::new());
+        self.images.push(Vec::new());
+        self.assert_parallel();
+    }
+
+    /// Replace the whole buffer (used by `finalize`).
+    fn set(
+        &mut self,
+        lines: Vec<Line<'static>>,
+        links: Vec<Vec<LinkSpan>>,
+        images: Vec<Vec<ImageSpan>>,
+    ) {
+        self.lines = lines;
+        self.links = links;
+        self.images = images;
+        self.assert_parallel();
+    }
+
+    fn slices(&self) -> (&[Line<'static>], &[Vec<LinkSpan>], &[Vec<ImageSpan>]) {
+        (&self.lines, &self.links, &self.images)
+    }
+
+    fn assert_parallel(&self) {
+        debug_assert_eq!(self.links.len(), self.lines.len());
+        debug_assert_eq!(self.images.len(), self.lines.len());
+    }
+}
+
+// ============================================================
 // StreamingRender
 // ============================================================
 
@@ -244,14 +347,14 @@ pub struct StreamingRender {
     /// for a stream that goes a long way without a newline.
     norm_cursor: usize,
     split: Splitter,
-    /// Cell-final lines: promoted closed blocks + separators, then the
-    /// tail and one trailing cell blank (managed by `sync`).
-    flat: Vec<Line<'static>>,
-    /// Link spans of every `flat` line (parallel; empty when a line has no
-    /// link). The markdown target is dropped by `Line::from`, so it travels
-    /// beside the lines — the widget needs it to inject OSC8 and to hit-test
-    /// clicks (`tui-link-open`).
-    links: Vec<Vec<LinkSpan>>,
+    /// Cell-final lines plus their side channels: promoted closed blocks +
+    /// separators, then the tail and one trailing cell blank (managed by
+    /// `sync`).
+    flat_lines: FlatLines,
+    /// Image options the cell is rendering with — owned, because the engine
+    /// is long-lived and has to notice a metadata change (a late probe
+    /// changes the row count, which forces a rebuild).
+    image_opts: ImageOpts,
     /// Length of the promoted (immutable) prefix of `flat` — including the
     /// open fenced block's composed lines (top border + completed body
     /// lines), which are stable in exactly the same sense.
@@ -278,6 +381,11 @@ pub struct StreamingRender {
 
 impl StreamingRender {
     pub fn new(profile: Profile) -> Self {
+        Self::with_images(profile, ImageOpts::default())
+    }
+
+    /// [`new`](Self::new) with image anchors configured (see [`ImageOpts`]).
+    pub fn with_images(profile: Profile, images: ImageOpts) -> Self {
         Self {
             profile,
             buf: String::new(),
@@ -289,8 +397,8 @@ impl StreamingRender {
                 list_item_has_content: false,
                 closed: Vec::new(),
             },
-            flat: Vec::new(),
-            links: Vec::new(),
+            flat_lines: FlatLines::default(),
+            image_opts: images,
             stable_len: 0,
             pending_sep: false,
             tail_sep: false,
@@ -304,6 +412,25 @@ impl StreamingRender {
 
     pub fn profile(&self) -> Profile {
         self.profile
+    }
+
+    /// The image options this engine renders with.
+    pub fn image_opts(&self) -> &ImageOpts {
+        &self.image_opts
+    }
+
+    /// Adopt new image options.
+    ///
+    /// Metadata arrives asynchronously (a header probe finishing), and it
+    /// changes how many rows an anchor reserves — so a change invalidates
+    /// every composed line and forces a full rebuild at the next render, the
+    /// same mechanism a width change uses.
+    pub fn set_image_opts(&mut self, images: ImageOpts) {
+        if self.image_opts == images {
+            return;
+        }
+        self.image_opts = images;
+        self.width = None;
     }
 
     pub fn is_finalized(&self) -> bool {
@@ -334,7 +461,7 @@ impl StreamingRender {
     /// every line is guaranteed ≤ `width` display columns (over-wide
     /// lines are hard-wrapped) — ready for direct blitting.
     pub fn lines(&mut self, width: u16, palette: &ThemePalette) -> &[Line<'static>] {
-        self.lines_and_links(width, palette).0
+        self.composed(width, palette).lines
     }
 
     /// [`lines`](Self::lines) plus the link spans of every returned line.
@@ -345,25 +472,44 @@ impl StreamingRender {
         width: u16,
         palette: &ThemePalette,
     ) -> (&[Line<'static>], &[Vec<LinkSpan>]) {
+        let rendered = self.composed(width, palette);
+        (rendered.lines, rendered.links)
+    }
+
+    /// The cell's composed lines with **both** side channels: link spans and
+    /// image anchors, both index-aligned with `lines`.
+    ///
+    /// This is the accessor the ui layer wants: [`lines`](Self::lines) and
+    /// [`lines_and_links`](Self::lines_and_links) are narrow views of it.
+    pub fn composed(&mut self, width: u16, palette: &ThemePalette) -> StreamLines<'_> {
         if self.finalized && self.width == Some(width) {
-            return (&self.flat, &self.links);
+            return self.stream_lines();
         }
         if self.width != Some(width) {
             // First render at this width (or a width change): full
             // deterministic rebuild from the buffer.
             self.rebuild(width, palette);
-            return (&self.flat, &self.links);
+            return self.stream_lines();
         }
-        if !self.dirty {
-            return (&self.flat, &self.links);
+        if self.dirty {
+            self.sync(width, palette);
         }
-        self.sync(width, palette);
-        (&self.flat, &self.links)
+        self.stream_lines()
+    }
+
+    /// The current buffer's slices, without syncing.
+    fn stream_lines(&self) -> StreamLines<'_> {
+        let (lines, links, images) = self.flat_lines.slices();
+        StreamLines {
+            lines,
+            links,
+            images,
+        }
     }
 
     /// Height in terminal rows — valid after the latest `lines()` call.
     pub fn height(&self) -> usize {
-        self.flat.len()
+        self.flat_lines.len()
     }
 
     /// Terminal: replace the incremental state with the reference full
@@ -371,11 +517,10 @@ impl StreamingRender {
     ///
     /// After finalize the cell must not receive further deltas.
     pub fn finalize(&mut self, width: u16, palette: &ThemePalette) {
-        let (lines, links) = full_lines_with_links(&self.buf, width, self.profile, palette);
-        self.flat = lines;
-        self.links = links;
-        self.stable_len = self.flat.len();
-        debug_assert_eq!(self.links.len(), self.flat.len());
+        let composed = full_render(&self.buf, width, self.profile, palette, &self.image_opts);
+        let (lines, links, images) = composed.into_parts();
+        self.flat_lines.set(lines, links, images);
+        self.stable_len = self.flat_lines.len();
         self.pending_sep = false;
         self.tail_sep = false;
         self.code_tail = None;
@@ -397,7 +542,8 @@ impl StreamingRender {
     fn rebuild(&mut self, width: u16, palette: &ThemePalette) {
         let buf = std::mem::take(&mut self.buf);
         let profile = self.profile;
-        *self = StreamingRender::new(profile);
+        let images = std::mem::take(&mut self.image_opts);
+        *self = StreamingRender::with_images(profile, images);
         self.buf = buf;
         self.scan();
         // The buffer was already fence-normalized as it was appended.
@@ -426,16 +572,14 @@ impl StreamingRender {
         //    region (below it is promoted, which re-renders it whole).
         if !self.split.closed.is_empty() {
             drop_code_flat(
-                &mut self.flat,
-                &mut self.links,
+                &mut self.flat_lines,
                 &mut self.stable_len,
                 &mut self.code_flat,
             );
         }
 
         // 1) Promote newly-closed blocks (in order).
-        self.flat.truncate(self.stable_len);
-        self.links.truncate(self.stable_len);
+        self.flat_lines.truncate(self.stable_len);
         if std::mem::take(&mut self.tail_sep) {
             // The tail is about to be re-rendered and may have collapsed
             // since — re-derive the separator instead of keeping the last
@@ -445,13 +589,7 @@ impl StreamingRender {
         let closed = std::mem::take(&mut self.split.closed);
         for block in closed {
             let emitted_sep = if self.pending_sep {
-                push_separator(
-                    &mut self.flat,
-                    &mut self.links,
-                    width,
-                    palette,
-                    self.profile,
-                );
+                push_separator(&mut self.flat_lines, width, palette, self.profile);
                 self.pending_sep = false;
                 true
             } else {
@@ -464,7 +602,7 @@ impl StreamingRender {
                     &slice,
                     &MarkdownTheme::from_palette(palette),
                 ),
-                None => render_block(&slice, width, self.profile, palette),
+                None => render_block(&slice, width, self.profile, palette, &self.image_opts),
             };
             // The renderer's trailing blank IS the separator signal.
             let sep = md_lines.last().is_some_and(|l| l.segments.is_empty());
@@ -480,24 +618,17 @@ impl StreamingRender {
                 self.pending_sep = sep && !emitted_sep;
                 continue;
             }
-            compose_into(
-                &mut self.flat,
-                &mut self.links,
-                md_lines,
-                width,
-                palette,
-                self.profile,
-            );
+            compose_into(&mut self.flat_lines, md_lines, width, palette, self.profile);
             self.pending_sep = sep;
         }
-        self.stable_len = self.flat.len();
-        debug_assert_eq!(self.links.len(), self.flat.len());
+        self.stable_len = self.flat_lines.len();
+        self.flat_lines.assert_parallel();
 
         // 2) Render the active tail (doc-end semantics: trailing blanks
         // trimmed, matching the full render at the same text).
         let tail_start = self.split.tail_start;
         let mode = self.split.mode.clone();
-        if matches!(mode, Mode::FencedCode { .. }) && self.code_tail.is_some() {
+        if matches!(mode, Mode::FencedCode(_)) && self.code_tail.is_some() {
             // Cached (non-diff) fenced code: append only newly completed
             // body lines — the block's earlier lines stay in the prefix.
             self.sync_fenced_tail(tail_start, width, palette);
@@ -506,37 +637,28 @@ impl StreamingRender {
             // diff fences): re-render the tail slice. Diff fences render
             // through the generic path because their output is whole-block
             // (file summaries, metadata stripping via `group_diff_by_file`).
-            let md_lines = render_generic(&self.buf[tail_start..], width, self.profile, palette);
+            let md_lines = render_generic(
+                &self.buf[tail_start..],
+                width,
+                self.profile,
+                palette,
+                &self.image_opts,
+            );
             // Emit the pending separator only when the tail actually
             // renders content (a blank-run tail keeps it pending — the
             // next block will trigger it). The separator is stable from
             // the moment it is emitted — fold it into the stable prefix
             // so the next sync's truncate keeps it.
             if !md_lines.is_empty() && self.pending_sep {
-                push_separator(
-                    &mut self.flat,
-                    &mut self.links,
-                    width,
-                    palette,
-                    self.profile,
-                );
+                push_separator(&mut self.flat_lines, width, palette, self.profile);
                 self.pending_sep = false;
                 self.tail_sep = true;
             }
-            compose_into(
-                &mut self.flat,
-                &mut self.links,
-                md_lines,
-                width,
-                palette,
-                self.profile,
-            );
+            compose_into(&mut self.flat_lines, md_lines, width, palette, self.profile);
         }
 
         // 3) Cell trailing blank (matches the non-streaming cell renders).
-        self.flat.push(Line::from(""));
-        self.links.push(Vec::new());
-        debug_assert_eq!(self.links.len(), self.flat.len());
+        self.flat_lines.push_blank();
     }
 
     /// Sync the tail when it is an unclosed fenced code block backed by a
@@ -560,8 +682,7 @@ impl StreamingRender {
             rewrite_gutters(&mut cache, number_width);
             cache.gutter_width = number_width;
             drop_code_flat(
-                &mut self.flat,
-                &mut self.links,
+                &mut self.flat_lines,
                 &mut self.stable_len,
                 &mut self.code_flat,
             );
@@ -572,14 +693,13 @@ impl StreamingRender {
             // after promotion / gutter growth): the block's separator,
             // then the top border — both stable from here on.
             if self.pending_sep {
-                push_separator(&mut self.flat, &mut self.links, width, palette, profile);
+                push_separator(&mut self.flat_lines, width, palette, profile);
                 self.pending_sep = false;
                 self.stable_len += 1;
             }
-            let start = self.flat.len();
+            let start = self.flat_lines.len();
             compose_into(
-                &mut self.flat,
-                &mut self.links,
+                &mut self.flat_lines,
                 std::iter::once(code_top_border(has_language, cache.lang.as_deref(), &theme)),
                 width,
                 palette,
@@ -595,8 +715,7 @@ impl StreamingRender {
         let composed = self.code_flat.as_ref().expect("just ensured").body_lines;
         if composed < cache.rendered.len() {
             compose_into(
-                &mut self.flat,
-                &mut self.links,
+                &mut self.flat_lines,
                 cache.rendered[composed..].iter().cloned(),
                 width,
                 palette,
@@ -605,7 +724,7 @@ impl StreamingRender {
             self.code_flat.as_mut().expect("just ensured").body_lines = cache.rendered.len();
         }
         // The composed block prefix (border + completed lines) is stable.
-        self.stable_len = self.flat.len();
+        self.stable_len = self.flat_lines.len();
 
         // Transient: the provisional tail (a trailing blank run and/or the
         // in-flight partial line — see `fill_code_cache`), rendered through a
@@ -620,8 +739,7 @@ impl StreamingRender {
             let md =
                 render_code_line_stateless(line, number, number_width, &theme, pending_hl.as_mut());
             compose_into(
-                &mut self.flat,
-                &mut self.links,
+                &mut self.flat_lines,
                 std::iter::once(md),
                 width,
                 palette,
@@ -629,8 +747,7 @@ impl StreamingRender {
             );
         }
         compose_into(
-            &mut self.flat,
-            &mut self.links,
+            &mut self.flat_lines,
             std::iter::once(code_bottom_border(&theme)),
             width,
             palette,
@@ -638,7 +755,7 @@ impl StreamingRender {
         );
 
         self.code_tail = Some(cache);
-        debug_assert_eq!(self.links.len(), self.flat.len());
+        self.flat_lines.assert_parallel();
     }
 
     /// Apply the fence-on-own-line normalization to unchecked bytes.
@@ -752,13 +869,21 @@ impl StreamingRender {
                 self.split.tail_start = line_start;
                 if let Some((fc, fl, info)) = fence_open(line) {
                     self.open_code_cache(fc, fl, info);
-                    self.split.mode = Mode::FencedCode {
-                        fence_char: fc,
-                        fence_len: fl,
-                    };
+                    self.split.mode = Mode::FencedCode(FenceTrack::plain(fc, fl));
                 } else if list_marker_len(line).is_some() {
+                    // The line opens a list item — and possibly the item's own
+                    // fence (`- ~~~`), which the List mode then has to keep
+                    // track of (see `Mode::List`).
                     self.split.list_item_has_content = false;
-                    self.split.mode = Mode::List { blank_seen: false };
+                    self.split.mode = Mode::List {
+                        blank_seen: false,
+                        fence: fence_opener(line),
+                    };
+                } else if let Some(track) = prefixed_fence_open(line) {
+                    self.split.mode = Mode::PrefixedFence {
+                        track,
+                        resume_list: false,
+                    };
                 } else if indent_of(line) >= 4 {
                     self.split.mode = Mode::IndentedCode;
                 } else {
@@ -777,18 +902,58 @@ impl StreamingRender {
                     // mode for the line-level code cache).
                     self.close_slice(line_start);
                     self.open_code_cache(fc, fl, info);
-                    self.split.mode = Mode::FencedCode {
-                        fence_char: fc,
-                        fence_len: fl,
+                    self.split.mode = Mode::FencedCode(FenceTrack::plain(fc, fl));
+                    return true;
+                }
+                if let Some(track) = prefixed_fence_open(line) {
+                    // A `> ~~~` / `- ~~~` fence: keep it (and the blank lines
+                    // of its body) inside this slice — see `PrefixedFence`.
+                    self.split.mode = Mode::PrefixedFence {
+                        track,
+                        resume_list: false,
                     };
                     return true;
                 }
                 self.split.mode = Mode::Paragraph;
                 true
             }
-            Mode::List { blank_seen } => {
+            Mode::List { blank_seen, fence } => {
+                if let Some(track) = fence {
+                    // A fence opened inside the item is still running: the
+                    // scanner is inside it too, so nothing may be cut here.
+                    let (next, step) = track.step(line);
+                    match step {
+                        FenceStep::Body => {
+                            self.split.mode = Mode::List {
+                                blank_seen,
+                                fence: Some(next),
+                            };
+                            return true;
+                        }
+                        FenceStep::Closes => {
+                            // The closer is item content: consumed here, and
+                            // the item goes on.
+                            self.split.mode = Mode::List {
+                                blank_seen,
+                                fence: None,
+                            };
+                            return true;
+                        }
+                        FenceStep::OpensTopLevel => {
+                            let (fc, fl, info) = fence_open(line)
+                                .expect("FenceStep::OpensTopLevel implies a fence opener");
+                            self.close_slice(line_start);
+                            self.open_code_cache(fc, fl, info);
+                            self.split.mode = Mode::FencedCode(FenceTrack::plain(fc, fl));
+                            return true;
+                        }
+                    }
+                }
                 if line_is_blank(line) {
-                    self.split.mode = Mode::List { blank_seen: true };
+                    self.split.mode = Mode::List {
+                        blank_seen: true,
+                        fence: None,
+                    };
                     return true;
                 }
                 if indent_of(line) == 0
@@ -805,9 +970,15 @@ impl StreamingRender {
                     // body as prose.
                     self.close_slice(line_start);
                     self.open_code_cache(fc, fl, info);
-                    self.split.mode = Mode::FencedCode {
-                        fence_char: fc,
-                        fence_len: fl,
+                    self.split.mode = Mode::FencedCode(FenceTrack::plain(fc, fl));
+                    return true;
+                }
+                if let Some(track) = prefixed_fence_open(line) {
+                    // A fence inside the item: blank lines in its body are
+                    // content, not a list separator.
+                    self.split.mode = Mode::PrefixedFence {
+                        track,
+                        resume_list: true,
                     };
                     return true;
                 }
@@ -821,11 +992,17 @@ impl StreamingRender {
                 let empty_item_continuation = blank_seen && !self.split.list_item_has_content;
                 if marker {
                     self.split.list_item_has_content = false;
-                    self.split.mode = Mode::List { blank_seen: false };
+                    self.split.mode = Mode::List {
+                        blank_seen: false,
+                        fence: fence_opener(line),
+                    };
                     true
                 } else if indented || lazy || empty_item_continuation {
                     self.split.list_item_has_content = true;
-                    self.split.mode = Mode::List { blank_seen: false };
+                    self.split.mode = Mode::List {
+                        blank_seen: false,
+                        fence: fence_opener(line),
+                    };
                     true
                 } else {
                     self.close_slice(line_start);
@@ -833,21 +1010,54 @@ impl StreamingRender {
                     false
                 }
             }
-            Mode::FencedCode {
-                fence_char,
-                fence_len,
-            } => {
-                if is_fence_close(line, fence_char, fence_len) {
+            Mode::FencedCode(track) => {
+                let (track, step) = track.step(line);
+                if step == FenceStep::Closes {
                     self.close_slice(line_start + line.len() + 1);
                     self.split.mode = Mode::Gap;
                     // The cache moved into the closed block.
                     return true;
                 }
-                self.split.mode = Mode::FencedCode {
-                    fence_char,
-                    fence_len,
-                };
+                self.split.mode = Mode::FencedCode(track);
                 true
+            }
+            Mode::PrefixedFence { track, resume_list } => {
+                let (next, step) = track.step(line);
+                match step {
+                    FenceStep::Closes => {
+                        // The fence ends and the container it lives in keeps
+                        // going.
+                        self.split.mode = if resume_list {
+                            Mode::List {
+                                blank_seen: true,
+                                fence: None,
+                            }
+                        } else {
+                            Mode::Paragraph
+                        };
+                        true
+                    }
+                    FenceStep::OpensTopLevel => {
+                        // The container ended here and this line starts a new
+                        // top-level fence. Keep the parser's reading: the line
+                        // is that fence's OPENER and is consumed here.
+                        let (fc, fl, info) = fence_open(line)
+                            .expect("FenceStep::OpensTopLevel implies a fence opener");
+                        self.close_slice(line_start);
+                        self.open_code_cache(fc, fl, info);
+                        self.split.mode = Mode::FencedCode(FenceTrack::plain(fc, fl));
+                        true
+                    }
+                    // Blank lines and prefixed body lines are fence body, not
+                    // a block separator.
+                    FenceStep::Body => {
+                        self.split.mode = Mode::PrefixedFence {
+                            track: next,
+                            resume_list,
+                        };
+                        true
+                    }
+                }
             }
             Mode::IndentedCode => {
                 if line_is_blank(line) {
@@ -913,8 +1123,7 @@ impl StreamingRender {
 /// and a `&mut self.flat` at the same time — the incremental fenced-code
 /// tail must read the buffer while appending lines.
 fn compose_into<I>(
-    flat: &mut Vec<Line<'static>>,
-    links: &mut Vec<Vec<LinkSpan>>,
+    flat: &mut FlatLines,
     md_lines: I,
     width: u16,
     palette: &ThemePalette,
@@ -929,11 +1138,26 @@ fn compose_into<I>(
     // empty flat buffer — the tail is re-composed every frame, so
     // "first" must be positional (flat empty), not a sticky flag.
     let cell_first_pending = flat.is_empty();
-    let flat_ends_blank = flat
-        .last()
-        .is_some_and(|l| l.spans.iter().all(|s| s.content.trim().is_empty()));
+    // "Did the previous content already end this blank run?" — a markdown
+    // blank line, not an anchor cover row (which is blank-looking but is part
+    // of the anchor block above it). The cover-row exception is structural
+    // (the row is inside an anchor's row range), never a content test: at
+    // narrow widths a hard-wrapped prefix row is a lone space too.
+    let flat_ends_blank = match flat.lines.len().checked_sub(1) {
+        Some(last) => {
+            !row_is_cover_row(&flat.images, last)
+                && flat.lines[last]
+                    .spans
+                    .iter()
+                    .all(|span| span.content.trim().is_empty())
+        }
+        None => false,
+    };
     let mut out = Vec::new();
     let mut out_links = Vec::new();
+    // Image anchors, riding on their caption row so the hard wrap below can
+    // move them with the line they belong to (see `hard_wrap_lines_with_links`).
+    let mut out_images: Vec<Option<ImageAnchor>> = Vec::new();
     for (i, md_line) in md_lines.into_iter().enumerate() {
         if flat_ends_blank && i == 0 && md_line.segments.is_empty() && !flat.is_empty() {
             // Dedup: the previous content already ended this blank run.
@@ -952,6 +1176,8 @@ fn compose_into<I>(
         spans.push(prefix);
         // Same 2-column prefix on every line — the link columns shift by it.
         out_links.push(shift_spans(line_link_spans(&md_line), PREFIX_WIDTH));
+        let anchor = md_line.image.map(|boxed| *boxed);
+        let anchor_rows = anchor.as_ref().map_or(1, |anchor| anchor.rows);
         for seg in md_line.segments {
             let style = match profile {
                 Profile::Thinking => thinking_segment_style(seg.kind, seg.style, thinking_style),
@@ -960,10 +1186,36 @@ fn compose_into<I>(
             spans.push(Span::styled(seg.text, style));
         }
         out.push(Line::from(spans));
+        out_images.push(anchor);
+        // An anchor's cover rows: the caption row is already pushed, these
+        // are the blank rows the picture is painted over. Never the cell's
+        // first line, so they take the continuation prefix.
+        if anchor_rows > 1 {
+            for _ in 1..anchor_rows {
+                let prefix = match profile {
+                    Profile::Thinking => Span::styled("  ".to_string(), thinking_style),
+                    Profile::Content => Span::raw("  "),
+                };
+                out.push(Line::from(vec![prefix, cover_span()]));
+                out_links.push(Vec::new());
+                out_images.push(None);
+            }
+        }
     }
-    let (wrapped, wrapped_links) = hard_wrap_lines_with_links(out, out_links, limit);
-    flat.extend(wrapped);
-    links.extend(wrapped_links);
+    let (wrapped, wrapped_links, wrapped_images) =
+        hard_wrap_lines_with_links(out, out_links, out_images, limit);
+    let base = flat.len();
+    let wrapped_len = wrapped.len();
+    // The side channel describes the whole buffer (rows = everything up to and
+    // including this batch), with `base` where this batch lands.
+    let side_channel = image_side_channel(&wrapped_images, base + wrapped_len, base, PREFIX_WIDTH);
+    flat.lines.extend(wrapped);
+    flat.links.extend(wrapped_links);
+    // The side channel covers this batch's rows only; everything above `base`
+    // is untouched (and unchanged).
+    flat.images.truncate(base);
+    flat.images.extend(side_channel);
+    flat.assert_parallel();
 }
 
 /// Cell line prefix width (`⦁ ` / `  `) — links shift by this many columns.
@@ -984,15 +1236,9 @@ fn shift_spans(spans: Vec<LinkSpan>, by: u16) -> Vec<LinkSpan> {
 /// Drop the open fenced block's composed lines (invalidated by a
 /// promotion, a gutter-width rewrite, or a rebuild). Free function so the
 /// caller can hold the buffer borrow that triggered the invalidation.
-fn drop_code_flat(
-    flat: &mut Vec<Line<'static>>,
-    links: &mut Vec<Vec<LinkSpan>>,
-    stable_len: &mut usize,
-    code_flat: &mut Option<CodeFlat>,
-) {
+fn drop_code_flat(flat: &mut FlatLines, stable_len: &mut usize, code_flat: &mut Option<CodeFlat>) {
     if let Some(cf) = code_flat.take() {
         flat.truncate(cf.start);
-        links.truncate(cf.start);
         *stable_len = (*stable_len).min(cf.start);
     }
 }
@@ -1007,16 +1253,9 @@ fn drop_code_flat(
 /// reference's line, and every other position stays the usual two-space
 /// indent. Free function so callers can hold a buffer borrow (the fenced
 /// tail) while composing.
-fn push_separator(
-    flat: &mut Vec<Line<'static>>,
-    links: &mut Vec<Vec<LinkSpan>>,
-    width: u16,
-    palette: &ThemePalette,
-    profile: Profile,
-) {
+fn push_separator(flat: &mut FlatLines, width: u16, palette: &ThemePalette, profile: Profile) {
     compose_into(
         flat,
-        links,
         std::iter::once(MarkdownLine::default()),
         width,
         palette,
@@ -1027,6 +1266,20 @@ fn push_separator(
 // ============================================================
 // Reference full render (finalize + reconcile target)
 // ============================================================
+
+/// Borrowed view of a composition: the lines plus both side channels.
+///
+/// Returned by [`StreamingRender::composed`]; the owned counterpart is
+/// [`ComposedLines`] (the cached, non-streaming form).
+#[derive(Clone, Copy, Debug)]
+pub struct StreamLines<'a> {
+    /// The composed lines.
+    pub lines: &'a [Line<'static>],
+    /// Link spans, index-aligned with `lines`.
+    pub links: &'a [Vec<LinkSpan>],
+    /// Image anchors, index-aligned with `lines`.
+    pub images: &'a [Vec<ImageSpan>],
+}
 
 /// The reference full-render pipeline for a streaming cell: markdown
 /// render with profile options → cell compose (prefix + thinking recolor)
@@ -1040,18 +1293,26 @@ pub fn full_lines(
     profile: Profile,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
-    full_lines_with_links(text, width, profile, palette).0
+    full_render(text, width, profile, palette, ImageOpts::off())
+        .into_parts()
+        .0
 }
 
-/// [`full_lines`] plus the link spans of every line (see
-/// [`StreamingRender::lines_and_links`]).
-pub fn full_lines_with_links(
+/// [`full_lines`] with explicit image options — the reference render the
+/// streaming engine reconciles against when anchors are enabled.
+pub fn full_render(
     text: &str,
     width: u16,
     profile: Profile,
     palette: &ThemePalette,
-) -> (Vec<Line<'static>>, Vec<Vec<LinkSpan>>) {
-    let opts = RenderOpts::new(profile, true);
+    images: &ImageOpts,
+) -> ComposedLines {
+    // The math mode travels with the palette, so the reference render and
+    // the incremental engine always agree on it (see `RenderOpts::math`);
+    // the image options travel explicitly for the same reason.
+    let opts = RenderOpts::new(profile, true)
+        .with_math(palette.math_mode)
+        .with_images(images);
     let md = render_markdown_lines_with(text, Some(width.saturating_sub(2)), palette, opts);
     let thinking_style = Style::default().fg(palette.thinking);
     let bullet_style = Style::default().fg(palette.text);
@@ -1071,11 +1332,29 @@ pub fn full_lines_with_links(
             Profile::Content => style,
         },
     );
-    let (mut lines, mut links) =
-        hard_wrap_lines_with_links(composed.lines().to_vec(), composed.links().to_vec(), limit);
-    lines.push(Line::from(""));
-    links.push(Vec::new());
-    debug_assert_eq!(lines.len(), links.len());
+    let (lines, links, tags) = hard_wrap_lines_with_links(
+        composed.lines().to_vec(),
+        composed.links().to_vec(),
+        composed.image_tags(),
+        limit,
+    );
+    let images = image_side_channel(&tags, lines.len(), 0, PREFIX_WIDTH);
+    let mut composed = ComposedLines::with_images(lines, links, images);
+    // The cell's trailing blank line (matches the non-streaming renders).
+    composed.push_blank();
+    composed
+}
+
+/// [`full_render`] with image anchors off, plus the link spans of every line
+/// (see [`StreamingRender::lines_and_links`]).
+pub fn full_lines_with_links(
+    text: &str,
+    width: u16,
+    profile: Profile,
+    palette: &ThemePalette,
+) -> (Vec<Line<'static>>, Vec<Vec<LinkSpan>>) {
+    let (lines, links, _images) =
+        full_render(text, width, profile, palette, ImageOpts::off()).into_parts();
     (lines, links)
 }
 
@@ -1091,12 +1370,15 @@ fn render_generic(
     width: u16,
     profile: Profile,
     palette: &ThemePalette,
+    images: &ImageOpts,
 ) -> Vec<MarkdownLine> {
     render_markdown_lines_with(
         slice,
         Some(width.saturating_sub(2)),
         palette,
-        RenderOpts::new(profile, true),
+        RenderOpts::new(profile, true)
+            .with_math(palette.math_mode)
+            .with_images(images),
     )
 }
 
@@ -1110,12 +1392,15 @@ fn render_block(
     width: u16,
     profile: Profile,
     palette: &ThemePalette,
+    images: &ImageOpts,
 ) -> Vec<MarkdownLine> {
     render_markdown_lines_with(
         slice,
         Some(width.saturating_sub(2)),
         palette,
-        RenderOpts::new(profile, false),
+        RenderOpts::new(profile, false)
+            .with_math(palette.math_mode)
+            .with_images(images),
     )
 }
 
@@ -1132,6 +1417,7 @@ fn code_top_border(has_language: bool, lang: Option<&str>, theme: &MarkdownTheme
             theme.border,
             label,
         )],
+        ..Default::default()
     }
 }
 
@@ -1142,6 +1428,7 @@ fn code_bottom_border(theme: &MarkdownTheme) -> MarkdownLine {
             theme.border,
             "└────────",
         )],
+        ..Default::default()
     }
 }
 
@@ -1477,7 +1764,7 @@ fn line_is_blank(line: &str) -> bool {
     line.trim().is_empty()
 }
 
-fn indent_of(line: &str) -> usize {
+pub(crate) fn indent_of(line: &str) -> usize {
     let mut n = 0;
     for b in line.bytes() {
         match b {
@@ -1489,14 +1776,224 @@ fn indent_of(line: &str) -> usize {
     n
 }
 
+/// Leading whitespace measured in **columns**, with tabs advanced to the next
+/// multiple of 4 — CommonMark's tab handling (§2.2). Use this whenever an
+/// indentation is compared against something, and [`indent_bytes`] whenever a
+/// line is sliced: the two are different coordinate systems and mixing them is
+/// the defect class of review r4/r5.
+pub(crate) fn indent_columns(line: &str) -> usize {
+    let mut col = 0usize;
+    for c in line.chars() {
+        match c {
+            ' ' => col += 1,
+            '\t' => col = (col / 4 + 1) * 4,
+            _ => break,
+        }
+    }
+    col
+}
+
+/// Number of leading whitespace **bytes** (spaces and tabs) — i.e. the byte
+/// offset of the first non-whitespace character.
+///
+/// Distinct from [`indent_of`], which returns **columns** (a tab counts as
+/// four): the two agree only up to three columns of spaces — and those are
+/// exactly the cases in which the shape helpers below are allowed to look past
+/// the indentation. Anything that *slices* a line must use this one; anything
+/// that compares indentation against CommonMark's limits (≤3 for a fence or a
+/// list marker, ≥4 for an indented block) must use `indent_of`.
+fn indent_bytes(line: &str) -> usize {
+    line.bytes()
+        .take_while(|&b| b == b' ' || b == b'\t')
+        .count()
+}
+
+/// The fenced-code state of a line sequence.
+///
+/// **Single source of truth** for "which lines are code": the streaming
+/// splitter (slice boundaries) and the math normalization scanner (rewrite
+/// suppression) both drive this type. They used to carry two hand-written
+/// copies of the same rules, and the copies drifted — the scanner kept
+/// treating a prefix-less fence line as a closer while the splitter already
+/// knew it opens a new top-level fence (review r3), which rewrote code-block
+/// content in the final render.
+///
+/// The rules below are the only place that decides; add a caller, not a copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FenceTrack {
+    char: u8,
+    len: usize,
+    /// The fence was opened behind a block prefix (`> ~~~`, `- ``` `). The
+    /// parser resolves the prefix first, so such a fence ends when its
+    /// container ends — not when some unrelated fence line shows up.
+    prefixed: bool,
+    /// The innermost list item's `(marker indent, content column)` — both in
+    /// COLUMNS (tabs advanced to the next multiple of 4), so they can be
+    /// compared with `indent_columns`. `None` = no list item in the chain.
+    item_col: Option<(usize, usize)>,
+    /// The tracked item has seen a non-blank content line since its marker.
+    ///
+    /// An EMPTY item ends at a blank line, so an indented, prefix-less fence
+    /// line after blanks is a NEW top-level fence, not the item's content —
+    /// `  - ~~~~/ - / ␣␣ / ␣␣ / ␤ / "  ~~~~"` swallows what follows, while the
+    /// same shape without the blanks (`- ~~~/ - / "  ~~~"`) closes the fence
+    /// and leaves the rest prose (pulldown, review r4 / S1).
+    item_has_content: bool,
+    /// A blank line has been seen since the last marker / content line.
+    seen_blank: bool,
+    /// A line that cannot be item content was seen (less indented than
+    /// `content_col`): the item's content was interrupted, so an indented
+    /// prefix-less fence line can no longer be read as its closer — the
+    /// parser opens a new top-level fence there instead.
+    container_gone: bool,
+}
+
+/// What a line does to a running fence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FenceStep {
+    /// Body of the running fence (blank lines included).
+    Body,
+    /// The line closes the running fence.
+    Closes,
+    /// The container the fence lives in ends here, and the line opens a NEW
+    /// top-level fence which swallows what follows (CommonMark).
+    OpensTopLevel,
+}
+
+impl FenceTrack {
+    /// A fence opened by the line itself (`~~~`, `  ``` `).
+    pub(crate) fn plain(char: u8, len: usize) -> Self {
+        Self {
+            char,
+            len,
+            prefixed: false,
+            item_col: None,
+            item_has_content: false,
+            seen_blank: false,
+            container_gone: false,
+        }
+    }
+
+    /// A fence opened behind a block prefix (`content_col` = where the
+    /// container's content starts).
+    fn behind_prefix(char: u8, len: usize, p: Prefix) -> Self {
+        Self {
+            char,
+            len,
+            prefixed: true,
+            item_col: p.item,
+            // The fence line itself is the item's content.
+            item_has_content: true,
+            seen_blank: false,
+            container_gone: false,
+        }
+    }
+
+    /// What `line` does to this fence, and the track for the next line.
+    pub(crate) fn step(mut self, line: &str) -> (Self, FenceStep) {
+        let blank = line.trim().is_empty();
+        // What the line means is decided by the state BEFORE it; the updates
+        // below are for the next line.
+        let had_content = self.item_has_content;
+        let blank_before = self.seen_blank;
+        if let Some((item_indent, item_col)) = self.item_col
+            && !blank
+            && indent_columns(line) < item_col
+        {
+            // A non-blank line that is not the item's content. Two cases:
+            //
+            // * a LIST ITEM MARKER (`- a`, `1. b`, `  - c`, `1. `): this item
+            //   ended — a nested list would have to be indented at least at
+            //   this item's content column, and the line is less indented than
+            //   that. The marker opens a NEW item, whose own content column
+            //   governs what follows (`1. ~~~` + `  - c` + `   ~~~`: the last
+            //   line at column 3 is below the new item's column 4, so it is a
+            //   top-level fence, exactly as the parser reads it). Adopt it;
+            // * anything else (a paragraph line, a quote, …): the content was
+            //   interrupted, so an indented fence line can no longer be the
+            //   item's closer (see `container_gone`).
+            //
+            // Blank lines are fence body, not content that interrupts the item.
+            if let Some(len) = list_marker_len(line) {
+                let p = prefix(line);
+                self.item_col = p.item.or(Some((item_indent, item_col)));
+                // Whether the new item carries content on its marker line.
+                self.item_has_content = line.get(len..).is_some_and(|rest| !rest.trim().is_empty());
+                self.container_gone = false;
+            } else {
+                self.container_gone = true;
+                self.item_has_content = true;
+            }
+            self.seen_blank = false;
+        } else if blank {
+            self.seen_blank = true;
+        } else {
+            self.item_has_content = true;
+            self.seen_blank = false;
+        }
+        if !self.prefixed {
+            // A plain fence: only a matching fence line (indent ≤3) ends it.
+            let step = if is_fence_close(line, self.char, self.len) {
+                FenceStep::Closes
+            } else {
+                FenceStep::Body
+            };
+            return (self, step);
+        }
+        let start = content_start(line);
+        if start > 0 {
+            // Still carrying a block prefix: only such a line can live in the
+            // fence's container, so only such a line can close it.
+            let step = if is_fence_close(&line[start..], self.char, self.len) {
+                FenceStep::Closes
+            } else {
+                FenceStep::Body
+            };
+            return (self, step);
+        }
+        // No prefix left. Inside an intact list item an indented line is still
+        // item content, so there an indented fence line is the item's OWN
+        // closer (`- ~~~ … \n  ~~~`).
+        if let Some((_, item_col)) = self.item_col
+            && !self.container_gone
+            && indent_columns(line) >= item_col
+            // An empty item ended at the blank line: the fence line that
+            // follows is a new top-level fence (see `item_has_content`).
+            && (had_content || !blank_before)
+        {
+            let step = if is_fence_close(line, self.char, self.len) {
+                FenceStep::Closes
+            } else {
+                FenceStep::Body
+            };
+            return (self, step);
+        }
+        // The container ended here. A fence opener starts a NEW top-level
+        // fence which swallows what follows (CommonMark); anything else is
+        // (conservatively) still body, so nothing inside gets rewritten.
+        if fence_open(line).is_some() {
+            return (self, FenceStep::OpensTopLevel);
+        }
+        (self, FenceStep::Body)
+    }
+}
+
+/// The fence `line` opens, if any — a plain opener or one behind a block
+/// prefix (`> ~~~`, `- ``` `, indented or not).
+pub(crate) fn fence_opener(line: &str) -> Option<FenceTrack> {
+    if let Some((fc, fl, _)) = fence_open(line) {
+        return Some(FenceTrack::plain(fc, fl));
+    }
+    prefixed_fence_open(line)
+}
+
 /// If the line opens a fenced code block, return
 /// `(fence_char, fence_len, info)`.
-fn fence_open(line: &str) -> Option<(u8, usize, &str)> {
-    let indent = indent_of(line);
-    if indent >= 4 {
+pub(crate) fn fence_open(line: &str) -> Option<(u8, usize, &str)> {
+    if indent_of(line) >= 4 {
         return None;
     }
-    let rest = &line[indent..];
+    let rest = &line[indent_bytes(line)..];
     let b = rest.as_bytes();
     if b.is_empty() {
         return None;
@@ -1519,11 +2016,10 @@ fn fence_open(line: &str) -> Option<(u8, usize, &str)> {
 /// Fence-close run length if the line consists only of fence chars
 /// (≥1 run), else None.
 fn fence_close_len(line: &str) -> Option<usize> {
-    let indent = indent_of(line);
-    if indent >= 4 {
+    if indent_of(line) >= 4 {
         return None;
     }
-    let rest = &line[indent..];
+    let rest = &line[indent_bytes(line)..];
     let b = rest.as_bytes();
     if b.is_empty() {
         return None;
@@ -1540,7 +2036,21 @@ fn fence_close_len(line: &str) -> Option<usize> {
     }
 }
 
-fn is_fence_close(line: &str, fence_char: u8, fence_len: usize) -> bool {
+/// A fence opener that carries a block prefix (`> ~~~`, `- ``` `): the
+/// parser resolves the prefix first, so this is a fence in the document even
+/// though the line does not start with the fence run. Returns
+/// `(fence_char, run length)`.
+pub(crate) fn prefixed_fence_open(line: &str) -> Option<FenceTrack> {
+    let p = prefix(line);
+    let content = &line[p.bytes..];
+    if content.len() == line.len() {
+        return None; // a bare fence — the caller handles those
+    }
+    let (fc, fl, _) = fence_open(content)?;
+    Some(FenceTrack::behind_prefix(fc, fl, p))
+}
+
+pub(crate) fn is_fence_close(line: &str, fence_char: u8, fence_len: usize) -> bool {
     let Some(run) = fence_close_len(line) else {
         return false;
     };
@@ -1553,8 +2063,10 @@ fn is_fence_close(line: &str, fence_char: u8, fence_len: usize) -> bool {
 /// Split a fence opener line into (info, rest-after-info) — used for
 /// language extraction.
 fn split_fence_line(opener: &str) -> (&str, &str) {
-    let indent = indent_of(opener);
-    let rest = &opener[indent..];
+    // Callers only pass lines `fence_open` accepted (≤3 columns), where the
+    // two indentation measures coincide; using the byte offset keeps the
+    // slice safe by construction.
+    let rest = &opener[indent_bytes(opener)..];
     let b = rest.as_bytes();
     if b.is_empty() {
         return ("", "");
@@ -1564,37 +2076,141 @@ fn split_fence_line(opener: &str) -> (&str, &str) {
     (&rest[run..], "")
 }
 
+/// The block prefix in front of a line's content, in **both** coordinate
+/// systems — one walk, so nothing can disagree about where the content starts:
+///
+/// ```text
+/// Prefix { bytes, columns, quotes, item: Option<(marker columns, content columns)> }
+/// ```
+///
+/// * `bytes` — where to slice (the callers that need a `&str`);
+/// * `columns` — where the content *is*, with tabs advanced to the next
+///   multiple of 4 (CommonMark §2.2): indentation comparisons must use this,
+///   never `bytes` (mixing them was the defect class of review r4/r5);
+/// * `quotes` — how many `>` markers the chain has (an HTML block ends when its
+///   own chain does, so it needs this);
+/// * `item` — the innermost list item's content columns, from which the
+///   fence tracker derives the item's content column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) struct Prefix {
+    pub(crate) bytes: usize,
+    pub(crate) columns: usize,
+    pub(crate) quotes: usize,
+    pub(crate) item: Option<(usize, usize)>,
+}
+
+/// Alias for callers that replace the pre-`Prefix` helper.
+pub(crate) fn content_start(line: &str) -> usize {
+    prefix(line).bytes
+}
+
+pub(crate) fn prefix(line: &str) -> Prefix {
+    let mut out = Prefix::default();
+    let mut off = 0usize;
+    let mut col = 0usize;
+    loop {
+        let rest = &line[off..];
+        // ≥4 columns of indentation is an indented block: what follows is code
+        // content, never a `>` or a list marker. This is also the only case in
+        // which the two coordinate systems differ by more than nothing at all,
+        // so returning here keeps every slice below on a character boundary.
+        if indent_columns(rest) >= 4 {
+            out.bytes = off;
+            out.columns = col;
+            return out;
+        }
+        let rest_col = col + indent_columns(rest);
+        let after = &rest[indent_bytes(rest)..];
+        if after.starts_with('>') {
+            out.quotes += 1;
+            off += indent_bytes(rest) + 1;
+            col = rest_col + 1;
+            if line[off..].starts_with(' ') {
+                off += 1;
+                col += 1;
+            }
+            continue;
+        }
+        if let Some((content_bytes, content_col)) = list_marker_bounds(after, rest_col) {
+            // The offset right after the marker's padding is exactly where this
+            // item's content starts (in bytes *and* in columns).
+            out.item = Some((rest_col, content_col));
+            off += indent_bytes(rest) + content_bytes;
+            col = content_col;
+            continue;
+        }
+        out.bytes = off;
+        out.columns = col;
+        return out;
+    }
+}
+
 /// Length of the list marker prefix (indent + marker + following space),
 /// or None when the line doesn't start a list item.
 fn list_marker_len(line: &str) -> Option<usize> {
-    let indent = indent_of(line);
-    if indent >= 4 {
+    if indent_columns(line) >= 4 {
         return None;
     }
-    let rest = &line[indent..];
-    let b = rest.as_bytes();
-    if b.is_empty() {
-        return None;
+    let rest = &line[indent_bytes(line)..];
+    let (content, _) = list_marker_bounds(rest, indent_columns(line))?;
+    Some(indent_bytes(line) + content)
+}
+
+/// `(end of the marker, start of the item's content)` for the list marker at
+/// the very start of `s` — CommonMark §5.2: 1–4 spaces of padding after the
+/// marker make the content start after them, otherwise (no space, or 5+) after
+/// the first space.
+fn list_marker_bounds(s: &str, col0: usize) -> Option<(usize, usize)> {
+    let b = s.as_bytes();
+    let marker = match *b.first()? {
+        b'-' | b'*' | b'+' => 1,
+        c if c.is_ascii_digit() => {
+            let digits = b.iter().take_while(|c| c.is_ascii_digit()).count();
+            if !(1..=9).contains(&digits) || !matches!(b.get(digits), Some(b'.') | Some(b')')) {
+                return None;
+            }
+            digits + 1
+        }
+        _ => return None,
+    };
+    // Padding is measured in COLUMNS with tabs advanced to the next multiple of
+    // 4 (CommonMark §5.2 + tab handling): `-\titem` has 3 columns of padding,
+    // `  - \titem` has 5 and therefore starts its content after one space — a
+    // tab counted as a single byte would put the item's content column in the
+    // wrong place and turn an indented code block into a paragraph
+    // (review r5 / S3).
+    let marker_end_col = col0 + marker;
+    let mut at = marker;
+    let mut col = marker_end_col;
+    let mut pad_cols = 0usize;
+    while let Some(&c) = b.get(at) {
+        match c {
+            b' ' => {
+                col += 1;
+                pad_cols += 1;
+                at += 1;
+            }
+            b'\t' => {
+                let next = (col / 4 + 1) * 4;
+                pad_cols += next - col;
+                col = next;
+                at += 1;
+            }
+            _ => break,
+        }
     }
-    if matches!(b[0], b'-' | b'*' | b'+') {
-        if b.len() == 1 {
-            return Some(indent + 1);
-        }
-        if b[1] == b' ' {
-            return Some(indent + 2);
-        }
-        return None;
+    if pad_cols == 0 {
+        // A marker must be followed by whitespace (or end the line): `-item`
+        // is a paragraph, not a list item.
+        return (marker == b.len()).then_some((marker, marker_end_col));
     }
-    let digits = b.iter().take_while(|c| c.is_ascii_digit()).count();
-    if digits > 0 && digits <= 9 && b.len() > digits && matches!(b[digits], b'.' | b')') {
-        if b.len() == digits + 1 {
-            return Some(indent + digits + 1);
-        }
-        if b[digits + 1] == b' ' {
-            return Some(indent + digits + 2);
-        }
+    if pad_cols <= 4 || at == b.len() {
+        Some((at, col))
+    } else {
+        // 5+ columns of padding: the content begins after the first whitespace
+        // character (the rest is content — usually an indented code block).
+        Some((marker + 1, marker_end_col + 1))
     }
-    None
 }
 
 fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -1617,32 +2233,47 @@ fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// never re-emit the cell prefix.
 #[cfg(test)]
 fn hard_wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
-    hard_wrap_lines_with_links(lines, Vec::new(), width).0
+    hard_wrap_lines_with_links(lines, Vec::new(), Vec::new(), width).0
 }
 
-/// [`hard_wrap_lines`] keeping the link spans aligned with the output rows.
+/// [`hard_wrap_lines`] keeping the side channels aligned with the output rows.
 ///
 /// A line that fits keeps its spans unchanged (the common case — prose is
 /// pre-wrapped upstream, so links are not split here). A line that has to be
 /// split loses its spans: the split re-flows the text at arbitrary character
 /// boundaries, and guessing where a link's text landed would risk pointing a
 /// click at the wrong target — the link simply stays inactive on those rows.
+///
+/// `images` carries an image anchor **on its caption row** so that the anchor
+/// follows its line through the split: the returned vector is index-aligned
+/// with the output rows, and a split row drops its anchor (a re-flowed anchor
+/// box has no meaningful geometry — it cannot happen in practice, the anchor's
+/// own rows always fit the width).
 fn hard_wrap_lines_with_links(
     lines: Vec<Line<'static>>,
     links: Vec<Vec<LinkSpan>>,
+    images: Vec<Option<ImageAnchor>>,
     width: usize,
-) -> (Vec<Line<'static>>, Vec<Vec<LinkSpan>>) {
+) -> (
+    Vec<Line<'static>>,
+    Vec<Vec<LinkSpan>>,
+    Vec<Option<ImageAnchor>>,
+) {
     let mut links = links;
     links.resize(lines.len(), Vec::new());
+    let mut images = images;
+    images.resize(lines.len(), None);
     if width == 0 {
-        return (lines, links);
+        return (lines, links, images);
     }
     let mut out = Vec::with_capacity(lines.len());
     let mut out_links = Vec::with_capacity(lines.len());
-    for (line, line_links) in lines.into_iter().zip(links) {
+    let mut out_images = Vec::with_capacity(lines.len());
+    for ((line, line_links), line_image) in lines.into_iter().zip(links).zip(images) {
         if line_width(&line) <= width {
             out.push(line);
             out_links.push(line_links);
+            out_images.push(line_image);
             continue;
         }
         let mut cur: Vec<Span<'static>> = Vec::new();
@@ -1661,6 +2292,7 @@ fn hard_wrap_lines_with_links(
                     }
                     out.push(Line::from(std::mem::take(&mut cur)));
                     out_links.push(Vec::new());
+                    out_images.push(None);
                     cur_w = 0;
                     skipping_spaces = true;
                 }
@@ -1680,10 +2312,12 @@ fn hard_wrap_lines_with_links(
         if !cur.is_empty() {
             out.push(Line::from(cur));
             out_links.push(Vec::new());
+            out_images.push(None);
         }
     }
     debug_assert_eq!(out.len(), out_links.len());
-    (out, out_links)
+    debug_assert_eq!(out.len(), out_images.len());
+    (out, out_links, out_images)
 }
 
 fn line_width(line: &Line<'_>) -> usize {
@@ -1699,7 +2333,24 @@ fn line_width(line: &Line<'_>) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use super::super::images::ImageEntry;
     use super::*;
+
+    /// Byte chunks on char boundaries (the probe's splitter).
+    fn chunk_stream(text: &str, size: usize) -> Vec<&str> {
+        let size = size.max(1);
+        let mut chunks = Vec::new();
+        let mut start = 0usize;
+        while start < text.len() {
+            let mut end = (start + size).min(text.len());
+            while end < text.len() && !text.is_char_boundary(end) {
+                end += 1;
+            }
+            chunks.push(&text[start..end]);
+            start = end;
+        }
+        chunks
+    }
 
     #[test]
     fn helpers_fence_detection() {
@@ -1716,6 +2367,150 @@ mod tests {
         assert_eq!(fence_close_len("`````"), Some(5));
         assert_eq!(fence_close_len("``` tail"), None);
         assert_eq!(fence_close_len("text"), None);
+    }
+
+    /// The shared fence rules (review r3): both the splitter and the math
+    /// scanner drive `FenceTrack::step`, so these assertions pin the single
+    /// source of truth. A prefix-less fence line after a PREFIXED fence is a
+    /// new top-level fence, not that fence's closer — the rule the math
+    /// scanner used to get wrong (it rewrote code-block content).
+    #[test]
+    fn fence_track_step_rules() {
+        let step = |track: FenceTrack, line: &str| track.step(line).1;
+
+        let plain = FenceTrack::plain(b'~', 3);
+        // A plain fence closes on a matching fence line (indent ≤3), also when
+        // it is longer; a prefixed fence line is body.
+        assert_eq!(step(plain, "~~~"), FenceStep::Closes);
+        assert_eq!(step(plain, "   ~~~~"), FenceStep::Closes);
+        assert_eq!(step(plain, "~~~ tail"), FenceStep::Body);
+        assert_eq!(step(plain, "> ~~~"), FenceStep::Body);
+        assert_eq!(step(plain, "    ~~~"), FenceStep::Body);
+        assert_eq!(step(plain, ""), FenceStep::Body);
+
+        let quoted = prefixed_fence_open("> ~~~").unwrap();
+        // Only a line that still carries the container's prefix can close it.
+        assert_eq!(step(quoted, "> ~~~"), FenceStep::Closes);
+        assert_eq!(step(quoted, "> text"), FenceStep::Body);
+        assert_eq!(step(quoted, ">     x"), FenceStep::Body);
+        // A prefix-less fence line ends the container: it opens a NEW
+        // top-level fence (it does not close this one).
+        assert_eq!(step(quoted, "~~~"), FenceStep::OpensTopLevel);
+        assert_eq!(step(quoted, "~~~python"), FenceStep::OpensTopLevel);
+        assert_eq!(step(quoted, "  ```"), FenceStep::OpensTopLevel); // wrong char, still a fence line
+        assert_eq!(step(quoted, "```"), FenceStep::OpensTopLevel);
+
+        let listed = prefixed_fence_open("- ~~~").unwrap();
+        // Inside the item an indented line is item content: there the item's
+        // own fence closer is just that.
+        assert_eq!(step(listed, "  ~~~"), FenceStep::Closes);
+        assert_eq!(step(listed, "  text"), FenceStep::Body);
+        // At column 0 the item ended: a fence line starts a new top-level
+        // fence.
+        assert_eq!(step(listed, "~~~"), FenceStep::OpensTopLevel);
+
+        // Blank lines are fence body: they neither close the fence nor end
+        // the item (review r3: a fence body with blanks must keep its closer).
+        let (listed, s) = listed.step("");
+        assert_eq!(s, FenceStep::Body);
+        assert_eq!(step(listed, "  ~~~"), FenceStep::Closes);
+
+        // …but once a non-blank line that cannot be item content showed up, the
+        // item's fence is over as well: an indented fence line is then a NEW
+        // top-level fence, exactly as the parser reads it (review r3: the
+        // corpus case `- ~~~\n> \n  ~~~\n\n\(x\) T`).
+        let (listed, s) = listed.step("> ");
+        assert_eq!(s, FenceStep::Body);
+        assert_eq!(step(listed, "  ~~~"), FenceStep::OpensTopLevel);
+    }
+
+    /// `content_start` must never slice at a **column** count: `indent_of`
+    /// reports a tab as four columns, and `&line[4..]` is not a character
+    /// boundary in general (review r2 / B1: this panicked the TUI on any
+    /// tab-indented line that reached the streaming splitter).
+    #[test]
+    fn content_start_is_tab_safe() {
+        // Plain prefixes still resolve.
+        assert_eq!(content_start("- item"), 2);
+        assert_eq!(content_start("> quoted"), 2);
+        assert_eq!(content_start("> > nested"), 4);
+        assert_eq!(content_start("1. ordered"), 3);
+        assert_eq!(content_start("text"), 0);
+
+        // A tab is four COLUMNS: the line is an indented block, so no prefix
+        // is stripped — and, crucially, nothing is sliced at column 4.
+        for line in [
+            "\tx",
+            "\t- 中文项目",
+            "\t- ",
+            "  \t中文注释",
+            "\t🙂x",
+            "\t中文",
+            "\t- item",
+            "    x",
+            "    - x",
+        ] {
+            assert_eq!(content_start(line), 0, "{line:?}");
+        }
+        // A tab INSIDE a container: the prefix is resolved, then the tab makes
+        // what follows an indented block (no further stripping) — and the
+        // offset stays a byte offset.
+        assert_eq!(content_start("> \t"), 2);
+        assert_eq!(indent_of(&"> \t"[content_start("> \t")..]), 4);
+        // …and the same lines still go through the shape helpers unharmed.
+        for line in ["\tx", "\t- 中文项目", "  \t中文注释", "\t🙂x"] {
+            assert!(fence_open(&line[content_start(line)..]).is_none());
+            assert!(fence_open(line).is_none());
+            assert!(prefixed_fence_open(line).is_none());
+            assert_eq!(indent_of(&line[content_start(line)..]) >= 4, true);
+        }
+        // A prefixed fence behind a prefix is still found (that is the r1 S2
+        // fix, which must survive the tab-safety change).
+        assert_eq!(
+            prefixed_fence_open("> ~~~").map(|t| (t.char, t.len, t.prefixed, t.item_col)),
+            Some((b'~', 3, true, None))
+        );
+        assert_eq!(
+            prefixed_fence_open("- ```").map(|t| (t.char, t.len, t.prefixed, t.item_col)),
+            Some((b'`', 3, true, Some((0, 2))))
+        );
+        assert_eq!(
+            prefixed_fence_open("> - ~~~").map(|t| (t.char, t.len, t.item_col)),
+            Some((b'~', 3, Some((2, 4)))),
+            "the list item's own (marker indent, content column), not the fence's offset"
+        );
+        // Columns, not bytes: a tab advances to the next multiple of 4, so the
+        // item's content column is 8 — an indented code block, as the parser
+        // reads it (review r5 / S3).
+        assert_eq!(
+            prefixed_fence_open("  - \titem").map(|t| t.item_col),
+            None,
+            "`item` is the item's content, not a fence — but the walk still sees the item"
+        );
+        // Columns, not bytes: `" \t"` is 5 COLUMNS of padding, so the content
+        // starts after the first whitespace character (the tab, byte 4) — its
+        // own 4 columns of indent make it an indented code block, exactly as
+        // the parser reads it (review r5 / S3).
+        assert_eq!(
+            prefix("  - \titem"),
+            Prefix {
+                bytes: 4,
+                columns: 4,
+                quotes: 0,
+                item: Some((2, 4)),
+            }
+        );
+        assert_eq!(indent_columns("\titem"), 4);
+        assert_eq!(
+            prefix("  -     x").bytes,
+            4,
+            "5 columns of padding → one space"
+        );
+        assert_eq!(prefix("  -     x").columns, 4);
+        // 3 columns of padding (`-\t` from column 1 → 4) keep the content at
+        // its real position.
+        assert_eq!(prefix("-\titem").item, Some((0, 4)));
+        assert_eq!(prefixed_fence_open("~~~"), None);
     }
 
     #[test]
@@ -1817,6 +2612,196 @@ mod tests {
             assert_eq!(cache.rendered.len(), complete, "lines for {body:?}");
             assert_eq!(total, complete + pending.len());
         }
+    }
+
+    // ── Image anchors through the incremental engine ─────────────
+
+    fn image_opts() -> ImageOpts {
+        ImageOpts::anchor(
+            Some(std::path::PathBuf::from("/ws")),
+            vec![ImageEntry::new(
+                std::path::PathBuf::from("/ws/plot.png"),
+                super::super::images::ImageShape::new(800, 600),
+            )],
+        )
+    }
+
+    /// Every chunk split of the same text must land on the reference render —
+    /// lines, links **and** image anchors.
+    #[test]
+    fn streaming_anchors_match_the_reference_render() {
+        let palette = ThemePalette::default();
+        let text =
+            "before\n\n![销售趋势](./plot.png)\n\nafter the image\n\n![b](./plot.png)\n\nend";
+        let images = image_opts();
+        for profile in [Profile::Thinking, Profile::Content] {
+            for chunk in [1usize, 3, 16, 256] {
+                // Narrow widths are where the caption truncation and the cover
+                // rows have to fit exactly — the anchor's geometry must still
+                // agree with the reference.
+                for width in [4u16, 5, 20, 80] {
+                    let mut sr = StreamingRender::with_images(profile, images.clone());
+                    for piece in chunk_stream(text, chunk) {
+                        sr.push(piece);
+                        let _ = sr.lines(width, &palette);
+                    }
+                    let rendered = sr.composed(width, &palette);
+                    let got = (
+                        rendered.lines.to_vec(),
+                        rendered.links.to_vec(),
+                        rendered.images.to_vec(),
+                    );
+                    let reference = full_render(text, width, profile, &palette, &images);
+                    let want = reference.into_parts();
+                    assert_eq!(
+                        got.0.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+                        want.0.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+                        "profile={profile:?} chunk={chunk} width={width}"
+                    );
+                    assert_eq!(
+                        got.1, want.1,
+                        "links profile={profile:?} chunk={chunk} width={width}"
+                    );
+                    assert_eq!(
+                        got.2, want.2,
+                        "anchors profile={profile:?} chunk={chunk} width={width}"
+                    );
+                    assert_eq!(got.2.iter().flatten().count(), 2);
+                    for line in rendered.lines {
+                        assert!(
+                            line.width() <= usize::from(width),
+                            "over-wide line at width {width}: {line:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// An over-wide line *above* an anchor is hard-wrapped into extra rows:
+    /// the anchor's row index must move with it (the tag rides the line).
+    #[test]
+    fn streaming_anchor_rows_survive_a_wrap_above_them() {
+        let palette = ThemePalette::default();
+        let long = "a".repeat(80);
+        let wrapped = format!("```\n{long}\n```\n\n![b](./plot.png)");
+        let fitting = "```\nshort\n```\n\n![b](./plot.png)";
+        let images = image_opts();
+        let anchor_line = |text: &str, chunk: usize| {
+            let mut sr = StreamingRender::with_images(Profile::Content, images.clone());
+            for piece in chunk_stream(text, chunk) {
+                sr.push(piece);
+                let _ = sr.lines(30, &palette);
+            }
+            let rendered = sr.composed(30, &palette);
+            let got = rendered.images.to_vec();
+            let want = full_render(text, 30, Profile::Content, &palette, &images)
+                .into_parts()
+                .2;
+            assert_eq!(got, want, "chunk={chunk}");
+            let anchor = got.iter().flatten().next().expect("anchor");
+            let caption = &rendered.lines[anchor.line].to_string();
+            assert!(caption.contains('▢'), "caption row: {caption:?}");
+            anchor.line
+        };
+        for chunk in [1usize, 8, 64] {
+            let wrapped_line = anchor_line(&wrapped, chunk);
+            let fitting_line = anchor_line(fitting, chunk);
+            assert!(
+                wrapped_line > fitting_line,
+                "the widened code line must have moved the anchor down \
+                 (wrapped={wrapped_line}, fitting={fitting_line})"
+            );
+        }
+    }
+
+    /// The engine notices a metadata change and rebuilds: a path that was a
+    /// link becomes an anchor (and the row count changes with it).
+    #[test]
+    fn set_image_opts_rebuilds_the_composed_buffer() {
+        let palette = ThemePalette::default();
+        let text = "para\n\n![b](./plot.png)";
+        let mut sr = StreamingRender::new(Profile::Content);
+        for piece in chunk_stream(text, 8) {
+            sr.push(piece);
+        }
+        let before = sr.composed(80, &palette);
+        assert_eq!(before.images.iter().flatten().count(), 0);
+        let link_rows = before.lines.len();
+
+        sr.set_image_opts(image_opts());
+        let after = sr.composed(80, &palette);
+        let anchors = after.images.iter().flatten().collect::<Vec<_>>();
+        assert_eq!(anchors.len(), 1);
+        // The row count is computed from the *markdown* width (cell width
+        // minus the 2-column prefix), which is where the anchor can live.
+        assert_eq!(anchors[0].column, 2);
+        assert_eq!(anchors[0].cols, 78);
+        assert_eq!(
+            anchors[0].rows,
+            super::super::images::anchor_rows(78, super::super::images::ImageShape::new(800, 600))
+        );
+        assert!(
+            after.lines.len() > link_rows,
+            "the anchor must reserve rows"
+        );
+
+        // Setting the same options again is a no-op (no rebuild, no drift).
+        let lines_before: Vec<String> = after.lines.iter().map(|l| l.to_string()).collect();
+        sr.set_image_opts(image_opts());
+        let again = sr.composed(80, &palette);
+        assert_eq!(
+            again
+                .lines
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>(),
+            lines_before
+        );
+    }
+
+    /// `Off` stays byte-identical to the pre-image streaming output.
+    #[test]
+    fn streaming_with_images_off_matches_the_plain_render() {
+        let palette = ThemePalette::default();
+        let text = "text\n\n![b](./plot.png)\n\nmore";
+        let mut plain = StreamingRender::new(Profile::Content);
+        let mut off = StreamingRender::with_images(Profile::Content, ImageOpts::default());
+        for piece in chunk_stream(text, 5) {
+            plain.push(piece);
+            off.push(piece);
+        }
+        let a = plain.composed(80, &palette);
+        let b = off.composed(80, &palette);
+        assert_eq!(a.lines, b.lines);
+        assert_eq!(a.links, b.links);
+        assert_eq!(a.images, b.images);
+        assert!(a.images.iter().all(Vec::is_empty));
+    }
+
+    /// `finalize` installs the reference render — anchors included.
+    #[test]
+    fn finalize_installs_the_reference_anchors() {
+        let palette = ThemePalette::default();
+        let text = "a\n\n![b](./plot.png)\n\nc";
+        let images = image_opts();
+        let mut sr = StreamingRender::with_images(Profile::Content, images.clone());
+        for piece in chunk_stream(text, 4) {
+            sr.push(piece);
+            let _ = sr.lines(60, &palette);
+        }
+        sr.finalize(60, &palette);
+        let got = sr.composed(60, &palette);
+        let (lines, links, anchor_rows) =
+            (got.lines.to_vec(), got.links.to_vec(), got.images.to_vec());
+        let (want_lines, want_links, want_anchors) =
+            full_render(text, 60, Profile::Content, &palette, &images).into_parts();
+        assert_eq!(
+            lines.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+            want_lines.iter().map(|l| l.to_string()).collect::<Vec<_>>()
+        );
+        assert_eq!(links, want_links);
+        assert_eq!(anchor_rows, want_anchors);
     }
 
     #[test]

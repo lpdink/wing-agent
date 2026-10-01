@@ -13,6 +13,7 @@
     "vite.config.mts",
     "vite.preview.config.mts",
     "vitest.config.mts",
-    "tools/**/*.ts"
+    "tools/**/*.ts",
+    "tools/**/*.mts"
   ]
 }

@@ -15,6 +15,7 @@
 use crate::config::ThemePalette;
 use crate::config::rendering::ThinkingMode;
 use crate::render::markdown::ComposedLines;
+use crate::render::markdown::ImageOpts;
 use crate::render::markdown::Profile;
 use crate::render::markdown::RenderOpts;
 use crate::render::markdown::compose_lines;
@@ -50,14 +51,17 @@ impl ThinkingBlock {
     /// Render to lines based on thinking mode.
     ///
     /// `width` is the full content width; 2 columns are reserved for the line
-    /// prefix so tables balance to fit.
+    /// prefix so tables balance to fit. `images` carries the frame's image
+    /// options — reasoning gets the same anchors as assistant content when
+    /// the markdown layer sees them (see `render/markdown/images.rs`).
     pub fn to_lines(
         &self,
         palette: &ThemePalette,
         mode: ThinkingMode,
         width: u16,
+        images: &ImageOpts,
     ) -> Vec<Line<'static>> {
-        self.render_lines(palette, mode, width).into_lines()
+        self.render_lines(palette, mode, width, images).into_lines()
     }
 
     /// [`to_lines`](Self::to_lines) with the markdown link spans of every
@@ -67,15 +71,21 @@ impl ThinkingBlock {
         palette: &ThemePalette,
         mode: ThinkingMode,
         width: u16,
+        images: &ImageOpts,
     ) -> ComposedLines {
         let dim = Style::default().fg(palette.dim);
         match mode {
-            ThinkingMode::Visible => self.render_visible(palette, width),
+            ThinkingMode::Visible => self.render_visible(palette, width, images),
             ThinkingMode::Hidden => ComposedLines::plain(self.render_hidden(dim)),
         }
     }
 
-    fn render_visible(&self, palette: &ThemePalette, width: u16) -> ComposedLines {
+    fn render_visible(
+        &self,
+        palette: &ThemePalette,
+        width: u16,
+        images: &ImageOpts,
+    ) -> ComposedLines {
         let thinking_style = Style::default().fg(palette.thinking);
         let md_width = Some(width.saturating_sub(2));
         // Code blocks render exactly like assistant content (syntect +
@@ -85,7 +95,9 @@ impl ThinkingBlock {
             &self.content,
             md_width,
             palette,
-            RenderOpts::new(Profile::Thinking, true),
+            RenderOpts::new(Profile::Thinking, true)
+                .with_math(palette.math_mode)
+                .with_images(images),
         );
         let mut composed = compose_lines(
             &md_lines,
@@ -148,7 +160,7 @@ mod tests {
     fn test_thinking_renders_content() {
         let mut block = ThinkingBlock::new();
         block.append("Let me think about this...");
-        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80);
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
         let text: String = lines
             .iter()
             .map(|l| l.to_string())
@@ -165,7 +177,7 @@ mod tests {
     fn test_thinking_prose_uses_thinking_color() {
         let mut block = ThinkingBlock::new();
         block.append("plain reasoning text");
-        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80);
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
         let pairs = span_pairs(&lines);
         let (_, style) = find_span(&pairs, "plain reasoning");
         assert_eq!(style.fg, Some(Color::Gray), "prose fg: {style:?}");
@@ -175,7 +187,7 @@ mod tests {
     fn test_thinking_keeps_inline_code_color() {
         let mut block = ThinkingBlock::new();
         block.append("run `cargo build` now");
-        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80);
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
         let pairs = span_pairs(&lines);
         // Inline code keeps the accent color.
         let (_, code_style) = find_span(&pairs, "cargo build");
@@ -193,7 +205,7 @@ mod tests {
     fn test_thinking_bold_keeps_modifier_with_gray_fg() {
         let mut block = ThinkingBlock::new();
         block.append("this is **important** indeed");
-        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80);
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
         let pairs = span_pairs(&lines);
         let (_, style) = find_span(&pairs, "important");
         assert_eq!(style.fg, Some(Color::Gray), "bold fg: {style:?}");
@@ -232,17 +244,51 @@ mod tests {
             SegmentKind::Link,
             SegmentKind::Border,
             SegmentKind::Gutter,
+            // Math and image anchors are structural like code: a formula or a
+            // caption keeps its own color inside reasoning.
+            SegmentKind::Math,
+            SegmentKind::Image,
         ] {
             let out = thinking_segment_style(kind, original, Style::default().fg(Color::Gray));
             assert_eq!(out, original, "kind {kind:?} should keep its style");
         }
     }
 
+    /// The thinking cell reads the math mode off the palette (like the
+    /// assistant-message cell and the streaming engine): `off` leaves the
+    /// LaTeX source verbatim inside reasoning too.
+    #[test]
+    fn test_thinking_follows_the_palette_math_mode() {
+        use crate::config::rendering::MathMode;
+
+        let mut block = ThinkingBlock::new();
+        block.append("the energy is $E = m c^2$ here");
+
+        let on: String = block
+            .to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off())
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(on.contains("c²"), "math on renders the grid: {on}");
+
+        let mut off_palette = p();
+        off_palette.math_mode = MathMode::Off;
+        let off: String = block
+            .to_lines(&off_palette, ThinkingMode::Visible, 80, ImageOpts::off())
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(off.contains("$E = m c^2$"), "math off stays literal: {off}");
+        assert!(!off.contains("c²"), "math off: {off}");
+    }
+
     #[test]
     fn test_thinking_code_block_colors() {
         let mut block = ThinkingBlock::new();
         block.append("like this:\n```\nlet x = 1;\n```");
-        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80);
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
         let pairs = span_pairs(&lines);
         // Code block content keeps the accent color, not thinking gray.
         let (_, style) = find_span(&pairs, "let x = 1;");
@@ -258,7 +304,7 @@ mod tests {
         let text = "here is code:\n\n```rust\nlet x = 1;\nlet y = \"two\";\n```\n\ndone";
         let mut block = ThinkingBlock::new();
         block.append(text);
-        let thinking = block.to_lines(&p(), ThinkingMode::Visible, 80);
+        let thinking = block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
         let content = crate::render::markdown::stream::full_lines(
             text,
             80,
@@ -309,7 +355,7 @@ mod tests {
     fn test_thinking_renders_indented_blocks_as_prose() {
         let mut block = ThinkingBlock::new();
         block.append("a thought:\n\n    a nested **nesting** with `code`\n\nback");
-        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80);
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
         let pairs = span_pairs(&lines);
         assert!(
             !pairs
@@ -331,7 +377,7 @@ mod tests {
     #[test]
     fn test_thinking_empty() {
         let block = ThinkingBlock::new();
-        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80);
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
         // Empty content → just blank line
         assert_eq!(lines.len(), 1);
     }
@@ -340,7 +386,7 @@ mod tests {
     fn test_thinking_hidden_no_events() {
         let mut block = ThinkingBlock::new();
         block.append("secret reasoning");
-        let lines = block.to_lines(&p(), ThinkingMode::Hidden, 80);
+        let lines = block.to_lines(&p(), ThinkingMode::Hidden, 80, ImageOpts::off());
         let text: String = lines
             .iter()
             .map(|l| l.to_string())
@@ -355,7 +401,7 @@ mod tests {
         let mut block = ThinkingBlock::new();
         block.append("reasoning");
         block.event_count = 5;
-        let lines = block.to_lines(&p(), ThinkingMode::Hidden, 80);
+        let lines = block.to_lines(&p(), ThinkingMode::Hidden, 80, ImageOpts::off());
         let text: String = lines
             .iter()
             .map(|l| l.to_string())

@@ -42,7 +42,17 @@
 
 ## TUI 配置（`~/.wing/tui/config.yaml`）
 
-`colors`（含 diff 行背景 tint：`diff_add_bg` / `diff_del_bg` 与词级强调 `diff_*_bg_strong`，24-bit hex）、`layout`（输入区 / 弹窗 / 工具输出的行数上限）、`rendering`、`goal.checker_system_prompt`、`api_key`（网关鉴权，空则不发送）。diff 的上下文行数不是前端配置——窗口由后端随载荷下发（见 `diff-payload-window`），前端按给定内容逐行渲染。
+`colors`（含 diff 行背景 tint：`diff_add_bg` / `diff_del_bg` 与词级强调 `diff_*_bg_strong`，24-bit hex；`math` = 公式颜色，默认 `cyan`）、`layout`（输入区 / 弹窗 / 工具输出的行数上限）、`rendering`、`goal.checker_system_prompt`、`api_key`（网关鉴权，空则不发送）。
+
+`rendering` 的键：
+
+| 键 | 取值 | 默认 | 说明 |
+|----|------|------|------|
+| `thinking` | `visible` \| `hidden` | `visible` | reasoning 块：完整渲染 / 只显示事件计数 |
+| `math` | `text` \| `off` | `text` | `text` = `$…$` / `$$…$$` / 裸 AMS 环境渲染成字符网格（渲染不了时显示完整 LaTeX 源码）；`off` = 完全不解析、不归一化，即未引入公式渲染前的行为。非法值 warn 后回落 `text` |
+| `images` | `off` / `auto`（大小写不敏感） | `auto` | markdown 本地图片：`auto` = 启动时探测终端图形协议（kitty/sixel/iTerm2），支持就画真图；`off` 或探测失败 = 今天的链接路径（不探测、不读盘、零开销） |
+
+非法的 `rendering.images` 值回退到 `auto` 并在 TUI 日志里 warn 一行；路径策略（workspace 相对 / 越界 / 远程 URL 一律退回链接路径）见 [`tui-rendering.md`](tui-rendering.md) 第五节，能力阶梯 / 资源上限 / 失效触发点 / **文件重写的新鲜度检查（1 s 窗口）** / 性能数字见 [`tui-images.md`](tui-images.md)。`math` / `thinking` / `images` 三个键都**大小写不敏感**：`wing tui --dump-config` 写出的 `Text` / `Off` / `Hidden`（`Serialize` 的变体名）读得回来，dump → 改 → 回填不会把开关悄悄改回默认。diff 的上下文行数不是前端配置——窗口由后端随载荷下发（见 `diff-payload-window`），前端按给定内容逐行渲染。
 
 > `gateway.host/port` 只影响独立启动 `wing-gateway` 的场景；Rust TUI 读的是 backend config，不会读 TUI config 里的网关地址。
 

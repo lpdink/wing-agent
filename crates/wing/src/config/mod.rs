@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use self::colors::parse_color;
+use self::rendering::MathMode;
 use self::rendering::RenderingConfig;
 
 /// Semantic color palette — one slot per UI role.
@@ -34,6 +35,8 @@ pub struct ColorsConfig {
     pub warning: String,
     /// Danger: diff-, error, token high.
     pub danger: String,
+    /// Math: rendered formulas (character grids) and their literal fallback.
+    pub math: String,
     /// Surface: user message background.
     pub surface: String,
     /// Background tint for diff additions (text keeps syntax colors).
@@ -44,6 +47,16 @@ pub struct ColorsConfig {
     pub diff_add_bg_strong: String,
     /// Background tint for changed words inside a deleted line.
     pub diff_del_bg_strong: String,
+    /// Math rendering mode, resolved from `rendering.math` by
+    /// [`AppConfig::resolve`].
+    ///
+    /// Not a YAML key of this section — the user-facing key is
+    /// `rendering.math`. It rides along here because the resolved
+    /// [`ThemePalette`] is the only config value the render layer receives
+    /// (`render::markdown::full_lines` and `StreamingRender` both take a
+    /// palette and nothing else).
+    #[serde(skip)]
+    pub math_mode: MathMode,
 }
 
 impl Default for ColorsConfig {
@@ -57,11 +70,13 @@ impl Default for ColorsConfig {
             success: "green".into(),
             warning: "yellow".into(),
             danger: "red".into(),
+            math: "cyan".into(),
             surface: "#343541".into(),
             diff_add_bg: "#16381f".into(),
             diff_del_bg: "#47242c".into(),
             diff_add_bg_strong: "#1f5230".into(),
             diff_del_bg_strong: "#66323c".into(),
+            math_mode: MathMode::default(),
         }
     }
 }
@@ -105,6 +120,19 @@ pub struct AppConfig {
     pub api_key: Option<String>,
 }
 
+impl AppConfig {
+    /// Fold cross-section settings into the sections the render layer reads.
+    ///
+    /// Today that is one thing: `rendering.math` → `colors.math_mode`, the
+    /// carrier the resolved palette hands to `render::markdown` (see
+    /// [`ColorsConfig::math_mode`]). [`AppConfig::load`] calls it; any
+    /// programmatic construction that changes `rendering.math` must call it
+    /// too, or the renderer keeps the default mode.
+    pub fn resolve(&mut self) {
+        self.colors.math_mode = self.rendering.math;
+    }
+}
+
 /// Goal orchestration configuration.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -124,7 +152,8 @@ impl AppConfig {
         };
         match std::fs::read_to_string(&path) {
             Ok(content) => match serde_yaml::from_str::<AppConfig>(&content) {
-                Ok(cfg) => {
+                Ok(mut cfg) => {
+                    cfg.resolve();
                     tracing::info!(?path, "loaded config");
                     cfg
                 }
@@ -180,6 +209,10 @@ pub struct ThemePalette {
     pub diff_add_bg_strong: Color,
     /// Word-level emphasis background inside a deleted line.
     pub diff_del_bg_strong: Color,
+    /// Math: rendered formulas and their literal fallback.
+    pub math: Color,
+    /// Math rendering mode (see [`MathMode`]).
+    pub math_mode: MathMode,
 }
 
 impl Default for ThemePalette {
@@ -212,6 +245,8 @@ impl ThemePalette {
                 &cfg.diff_del_bg_strong,
                 &defaults.diff_del_bg_strong,
             ),
+            math: resolve_color(&cfg.math, &defaults.math),
+            math_mode: cfg.math_mode,
         }
     }
 }
@@ -256,6 +291,41 @@ mod tests {
         assert_eq!(p.diff_del_bg, Color::Rgb(0x47, 0x24, 0x2c));
         assert_eq!(p.diff_add_bg_strong, Color::Rgb(0x1f, 0x52, 0x30));
         assert_eq!(p.diff_del_bg_strong, Color::Rgb(0x66, 0x32, 0x3c));
+        assert_eq!(p.math, Color::Cyan);
+        assert_eq!(p.math_mode, MathMode::Text);
+    }
+
+    /// `rendering.math` reaches the palette: `resolve()` folds it into the
+    /// carrier field `ThemePalette::from_config` reads.
+    #[test]
+    fn test_math_mode_reaches_the_palette() {
+        let yaml = "rendering:\n  math: off\ncolors:\n  math: magenta\n";
+        let mut cfg: AppConfig = serde_yaml::from_str(yaml).unwrap();
+        cfg.resolve();
+        let p = ThemePalette::from_config(&cfg.colors);
+        assert_eq!(p.math_mode, MathMode::Off);
+        assert_eq!(p.math, Color::Magenta);
+
+        // The default config resolves to the default mode.
+        let mut cfg = AppConfig::default();
+        cfg.resolve();
+        assert_eq!(
+            ThemePalette::from_config(&cfg.colors).math_mode,
+            MathMode::Text
+        );
+    }
+
+    /// `math_mode` is a resolution carrier, not a YAML key of the colors
+    /// section: a config that (wrongly) sets `colors.math_mode` cannot flip
+    /// the renderer, and `--dump-config` never emits it there.
+    #[test]
+    fn test_math_mode_is_skipped_in_the_colors_section() {
+        let yaml = "colors:\n  math_mode: off\n";
+        let cfg: AppConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.colors.math_mode, MathMode::Text);
+        let dumped = cfg.to_yaml();
+        assert!(dumped.contains("math: Text"), "dumped config: {dumped}");
+        assert_eq!(dumped.matches("math_mode").count(), 0);
     }
 
     #[test]

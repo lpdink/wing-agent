@@ -120,6 +120,7 @@ impl Harness {
             palette: &self.palette,
             thinking_mode: ThinkingMode::Visible,
             layout: &self.layout,
+            images: wing::render::markdown::ImageOpts::off(),
         };
         ChatViewWidget::new(&mut self.view, ctx).render(self.area, &mut self.buf);
     }

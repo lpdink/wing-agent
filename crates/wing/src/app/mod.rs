@@ -31,6 +31,7 @@ pub mod turn_state;
 mod commands;
 mod frame;
 mod goal_lane;
+mod images;
 mod modal;
 mod mouse;
 mod projection;
@@ -38,11 +39,15 @@ mod selection_session;
 
 pub use intent::AppIntent;
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
+use ratatui::layout::Rect;
 
+use self::images::Images;
 use self::transport::GatewayEndpoint;
 use self::transport::Transport;
 use self::transport::backoff;
@@ -172,10 +177,28 @@ pub struct App {
     geometry: FrameGeometry,
     /// Overlay scrollbar interaction state (hover / drag).
     scrollbar: scrollbar::ScrollbarState,
+    /// Markdown pictures: capability, store, metadata table, drawing pass —
+    /// see [`images`](self::images).
+    images: Images,
 }
 
 impl App {
+    /// An app with no image capability (`Images::disabled()`): the terminal is
+    /// probed by [`run_app`], not here — a probe reads stdin (it must not race
+    /// the event stream) and costs up to
+    /// [`DEFAULT_DETECT_TIMEOUT`](crate::ui::image::DEFAULT_DETECT_TIMEOUT).
     pub fn new(session_id: String, config: AppConfig, launch_workspace: Option<String>) -> Self {
+        Self::with_images(session_id, config, launch_workspace, Images::disabled())
+    }
+
+    /// [`App::new`] with an explicit image lane (the production path, and the
+    /// test seam for an injected [`ImageSupport`](crate::ui::image::ImageSupport)).
+    pub(crate) fn with_images(
+        session_id: String,
+        config: AppConfig,
+        launch_workspace: Option<String>,
+        images: Images,
+    ) -> Self {
         let palette = ThemePalette::from_config(&config.colors);
         let max_input_lines = config.layout.max_input_lines;
         // 欢迎屏：tip 抽签 + 扫光时钟。这里先按"还没有帧"的宽度建一次，只是
@@ -224,6 +247,7 @@ impl App {
             // canonical 80 the composer's editor starts with).
             geometry: FrameGeometry::default(),
             scrollbar: scrollbar::ScrollbarState::default(),
+            images,
         }
     }
 
@@ -278,6 +302,53 @@ impl App {
     /// outside the event handlers — intent execution, toasts, focus changes.
     fn mark_dirty(&mut self) {
         self.chat_dirty = true;
+    }
+
+    /// The image half of a frame boundary: workspace + store drain + metadata
+    /// table refresh — see [`images::Images::sync`].
+    ///
+    /// Returns whether anything the frame depends on changed; a frame calls
+    /// this twice — before the render (a result that landed is used by *this*
+    /// frame) and after it (the candidates the render just discovered get
+    /// probed, and the worker's answer is what wakes the loop).
+    fn sync_images(&mut self) -> bool {
+        if !self.images.is_enabled() {
+            return false;
+        }
+        let (workdir, launch) = (
+            self.status.workdir.as_deref(),
+            self.launch_workspace.as_deref(),
+        );
+        if self.images.set_workspace(workdir.or(launch)) {
+            // The cells' candidate lists were resolved against the *old* root:
+            // feeding them now would put the paths we just dropped straight back
+            // into the table. The render re-derives them (its options changed,
+            // so every cell re-renders) and the frame's second pass feeds those.
+            return true;
+        }
+        // A content rebuild (session switch / compaction / rewind) may name
+        // files that changed on disk: re-read them rather than trusting the memo.
+        self.images.set_structure_epoch(self.chat.structure_epoch());
+        let candidates = self.chat.image_candidates();
+        self.images.sync(&candidates)
+    }
+
+    /// The picture lane's freshness check — the event loop's half of
+    /// [`images::Images::poll_freshness`].
+    ///
+    /// Called from the run loop when the lane says a check is due, **never**
+    /// from [`App::draw`]: it `stat`s the pictures on screen, and a picture
+    /// whose file changed drops the store's memo, which the next frame's
+    /// `sync` turns into a fresh header probe and a new encoding. Disabled
+    /// lanes (no protocol / `rendering.images: off`) short-circuit here, so
+    /// "off" still reads no file.
+    ///
+    /// `now` is injected so the throttle can be tested without sleeping.
+    fn poll_image_freshness(&mut self, now: std::time::Instant) -> bool {
+        if !self.images.is_enabled() {
+            return false;
+        }
+        self.images.poll_freshness(now)
     }
 
     /// Frame-gated draw decision.
@@ -392,7 +463,17 @@ impl App {
         if self.needs_full_redraw {
             terminal.clear()?;
             self.needs_full_redraw = false;
+            // The same three triggers mean the terminal may have dropped the
+            // pictures it was showing (a cleared screen, a re-laid-out window,
+            // a tab the compositor forgot): drop every encoding and revoke the
+            // handles, so the next request re-encodes and re-transmits.
+            self.images.invalidate();
         }
+
+        // Image half of the frame boundary, first pass: drain the worker and
+        // refresh the metadata table *before* anything is laid out, so a probe
+        // or encode that finished since the last frame is drawn in this one.
+        self.sync_images();
 
         let mut chat_height: u16 = 0;
 
@@ -477,6 +558,7 @@ impl App {
                 palette: &palette,
                 thinking_mode,
                 layout: &layout,
+                images: self.images.opts(),
             };
             frame.render_widget(
                 ChatViewWidget::new(&mut self.chat, ctx),
@@ -555,16 +637,38 @@ impl App {
             frame.set_cursor_position((cursor_x, cursor_y));
 
             // Toast overlay (rendered last, on top of everything).
+            let mut toast_area: Option<Rect> = None;
             if let Some(ref toast) = self.toast
                 && !toast.is_expired()
             {
-                let toast_area = render_toast(toast, area, frame.buffer_mut(), &palette);
+                toast_area = render_toast(toast, area, frame.buffer_mut(), &palette);
                 // The toast paints over the chat band (top-right, below the
                 // status bar): its cells are gone, so the link hit boxes under
                 // it must go too.
-                if let Some(toast_area) = toast_area {
-                    self.chat.mask_links(toast_area);
+                if let Some(area) = toast_area {
+                    self.chat.mask_links(area);
                 }
+            }
+
+            // Markdown pictures — the last write of the frame (see
+            // `ui::image::paint`): every widget above has already painted, so
+            // nothing can land on a placeholder or a sixel anchor afterwards.
+            // Overlays are respected by *not* drawing: a picture whose box the
+            // toast would cover is skipped whole (a partial overdraw would break
+            // the image), and a drag selection keeps the frame text-only — its
+            // snapshot copies the visible rows and the row content must not
+            // change under the finger.
+            //
+            // The frame's placement table is recorded before those gates: it is
+            // also the freshness lane's target set, and a picture that is on
+            // screen but suppressed *this* frame is still worth keeping in step
+            // with its file (see `Images::observe_visible`).
+            let clip = self.chat.geometry().area;
+            let recorded = self.chat.frame_images();
+            self.images.observe_visible(recorded);
+            if !self.selection.is_press_active() {
+                self.images
+                    .paint(recorded, clip, toast_area, frame.buffer_mut());
             }
 
             // In-app text selection — painted after the toast (the selection
@@ -603,6 +707,15 @@ impl App {
             self.toast = None;
         }
 
+        // Image half of the frame boundary, second pass: the cells just
+        // rendered discovered their candidates, so probe anything new here —
+        // the worker answering is what wakes the loop (`ImageStoreConfig::waker`).
+        // Anything that landed this late makes the frame that was just drawn
+        // stale, so ask for another one.
+        if self.sync_images() {
+            self.mark_dirty();
+        }
+
         Ok(())
     }
 }
@@ -630,6 +743,21 @@ fn draw_gate(elapsed_since_last_draw: std::time::Duration) -> bool {
     elapsed_since_last_draw >= MIN_FRAME_INTERVAL
 }
 
+/// Timer arm of the run loop's `select!` for the picture freshness check.
+///
+/// Same absolute-deadline contract as the other timer arms: `select!` rebuilds
+/// the future on every loop iteration, so a relative sleep would be pushed back
+/// by every key press and stream event — the deadline has to come from the
+/// lane's own clock (`last_check + FRESHNESS_INTERVAL`). `None` (nothing
+/// anchored, or no pictures at all) parks, so this lane costs an idle session
+/// nothing.
+async fn image_freshness_tick(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
 /// Run the main application loop.
 pub async fn run_app(
     terminal: &mut WingTerminal,
@@ -639,7 +767,27 @@ pub async fn run_app(
     config: AppConfig,
     launch_workspace: Option<String>,
 ) -> Result<()> {
-    let mut app = App::new(session_id, config, launch_workspace);
+    // Terminal graphics: probe **once**, before `spawn_event_stream` — the
+    // query writes to stdout and reads stdin, so starting the event reader
+    // first would let the two race for the same file descriptors. `off` skips
+    // the probe entirely (no query, no tmux side effects, no startup delay).
+    let image_support = match config.rendering.images {
+        crate::config::rendering::ImagesMode::Off => crate::ui::image::ImageSupport::disabled(),
+        crate::config::rendering::ImagesMode::Auto => {
+            crate::ui::image::ImageSupport::detect(crate::ui::image::DEFAULT_DETECT_TIMEOUT)
+        }
+    };
+    // The worker's wake-up: a `Notify` (Thread-safe, no reactor needed) poked
+    // from the store's worker thread as soon as a probe or an encode finishes.
+    // The arm below turns it into a normal dirty draw.
+    let image_wake = Arc::new(tokio::sync::Notify::new());
+    let image_waker: Option<Arc<dyn Fn() + Send + Sync>> = {
+        let wake = Arc::clone(&image_wake);
+        Some(Arc::new(move || wake.notify_one()))
+    };
+    let images = Images::new(config.rendering.images, image_support, image_waker);
+
+    let mut app = App::with_images(session_id, config, launch_workspace, images);
     let mut term_events = crate::tui::spawn_event_stream();
     let mut transport = Some(transport);
     // Session recovery pending: the transport (WS) is up but the session
@@ -927,6 +1075,26 @@ pub async fn run_app(
             // Background fetch results (non-blocking HTTP queries).
             Some(result) = fetch_rx.recv() => {
                 app.handle_fetch_result(result);
+                app.chat_dirty = true;
+            }
+            // Picture freshness: re-`stat` the pictures on screen at the lane's
+            // own cadence and drop the store's memo for the ones whose file
+            // changed (see `Images::poll_freshness`). This arm is why a
+            // rewrite is noticed even in a session that draws no frames — the
+            // model's last tool call ends, the loop goes idle, and the check
+            // still runs. Nothing changed → no repaint: the frame is only
+            // marked dirty when a file really moved.
+            _ = image_freshness_tick(app.images.freshness_deadline(std::time::Instant::now())) => {
+                if app.poll_image_freshness(std::time::Instant::now()) {
+                    app.mark_dirty();
+                }
+            }
+            // The image worker finished something (a header probe, an encode):
+            // the next draw polls it into place. `chat_dirty` rather than
+            // `input_dirty` — this is content, and the 16 ms frame gate may
+            // coalesce it; the draw itself polls, so a permit consumed early
+            // cannot lose the result (it is in the store's channel).
+            _ = image_wake.notified() => {
                 app.chat_dirty = true;
             }
             else => {

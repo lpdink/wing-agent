@@ -44,7 +44,8 @@ export class WebviewMirror {
         return;
       }
       default:
-        // `state` / `panels` / `tabs` / `ui` / `pong` do not touch the transcript.
+        // `state` / `panels` / `tabs` / `ui` / `pong` / `images` do not touch the
+        // transcript.
         return;
     }
   }

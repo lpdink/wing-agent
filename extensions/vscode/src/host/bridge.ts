@@ -1,12 +1,20 @@
 import type * as vscode from 'vscode';
 
 import type { HostToWebviewMessage, WebviewToHostMessage } from '../shared';
-import { isWebviewToHostMessage } from '../shared';
+import { isWebviewToHostMessage, readImageSources } from '../shared';
 
 import { log } from './log';
 
-/** A user intent (every webview message that is not protocol bookkeeping). */
-export type WebviewIntent = Exclude<WebviewToHostMessage, { type: 'ready' | 'resync' | 'ping' }>;
+/**
+ * A user intent (every webview message that is not protocol bookkeeping).
+ *
+ * `resolveImages` is protocol-level like `ping`: the *view* answers it, no session
+ * is involved, and `host/session/**` must never see it.
+ */
+export type WebviewIntent = Exclude<
+  WebviewToHostMessage,
+  { type: 'ready' | 'resync' | 'ping' | 'resolveImages' }
+>;
 
 export interface HostBridgeHandlers {
   /** The webview mounted and wants its initial state. */
@@ -15,6 +23,8 @@ export interface HostBridgeHandlers {
   onResync(message: Extract<WebviewToHostMessage, { type: 'resync' }>): void;
   /** Channel diagnostics — answer with `pong`. */
   onPing(id: string): void;
+  /** Image sources to turn into webview URIs — answer with `images`. */
+  onResolveImages(message: Extract<WebviewToHostMessage, { type: 'resolveImages' }>): void;
   /** Everything else the user asked for. */
   onIntent(intent: WebviewIntent): void;
 }
@@ -72,6 +82,18 @@ export class HostBridge implements vscode.Disposable {
       case 'ping':
         this.handlers.onPing(raw.id);
         return;
+      case 'resolveImages': {
+        // The only message whose payload we walk: a malformed one is dropped (with a
+        // line in the log) instead of throwing inside `srcs.map(…)`. See
+        // `readImageSources`.
+        const srcs = readImageSources(raw);
+        if (srcs === null) {
+          log().warn(`[bridge] ignoring malformed resolveImages payload: ${safeDescribe(raw)}`);
+          return;
+        }
+        this.handlers.onResolveImages({ type: 'resolveImages', srcs });
+        return;
+      }
       default:
         this.handlers.onIntent(raw);
     }

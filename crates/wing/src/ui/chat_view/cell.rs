@@ -24,9 +24,12 @@ use unicode_width::UnicodeWidthStr;
 use crate::config::ThemePalette;
 use crate::render::Renderable;
 use crate::render::markdown::ComposedLines;
+use crate::render::markdown::ImageOpts;
+use crate::render::markdown::Profile;
+use crate::render::markdown::RenderOpts;
 use crate::render::markdown::compose_lines;
 use crate::render::markdown::links::CELL_PREFIX_WIDTH;
-use crate::render::markdown::render_markdown_lines;
+use crate::render::markdown::render_markdown_lines_with;
 use crate::render::markdown::render_plain;
 use crate::render::renderable::CellContext;
 use crate::shared::goal_role::GoalRole;
@@ -89,8 +92,12 @@ impl ChatCell {
     /// re-deriving what the renderer produced (see `tui-link-open`).
     pub fn render_lines(&self, width: u16, ctx: &CellContext<'_>) -> ComposedLines {
         match self {
-            Self::AssistantMessage(text) => assistant_message_lines(text, width, ctx.palette),
-            Self::Thinking(block) => block.render_lines(ctx.palette, ctx.thinking_mode, width),
+            Self::AssistantMessage(text) => {
+                assistant_message_lines(text, width, ctx.palette, ctx.images)
+            }
+            Self::Thinking(block) => {
+                block.render_lines(ctx.palette, ctx.thinking_mode, width, ctx.images)
+            }
             _ => ComposedLines::plain(self.to_lines(width, ctx)),
         }
     }
@@ -118,7 +125,7 @@ impl ChatCell {
                 Self::user_message_lines(text, style)
             }
             Self::AssistantMessage(text) => {
-                assistant_message_lines(text, width, palette).into_lines()
+                assistant_message_lines(text, width, palette, ctx.images).into_lines()
             }
             Self::SystemMessage(text) => {
                 let label = Style::default().fg(palette.accent);
@@ -150,7 +157,7 @@ impl ChatCell {
                 lines.push(Line::from(""));
                 lines
             }
-            Self::Thinking(block) => block.to_lines(palette, ctx.thinking_mode, width),
+            Self::Thinking(block) => block.to_lines(palette, ctx.thinking_mode, width, ctx.images),
             Self::ToolCall(block) => block.to_lines(palette, ctx.layout.tool_output_max),
             Self::Diff(view) => view.to_lines(palette, width),
             Self::Todo(msg) => msg.to_lines(palette),
@@ -194,10 +201,26 @@ impl ChatCell {
 /// spans of every rendered line (shifted by the 2-column prefix).
 ///
 /// Reserves 2 columns for the prefix so tables balance to fit and downstream
-/// wrapping never breaks a row.
-fn assistant_message_lines(text: &str, width: u16, palette: &ThemePalette) -> ComposedLines {
+/// wrapping never breaks a row. `images` are the frame's image options: the
+/// anchor rows a standalone picture reserves are laid out here, with the same
+/// options the streaming engine holds (see `CachedCell::set_image_opts`).
+fn assistant_message_lines(
+    text: &str,
+    width: u16,
+    palette: &ThemePalette,
+    images: &ImageOpts,
+) -> ComposedLines {
     let md_width = Some(width.saturating_sub(2));
-    let md_lines = render_markdown_lines(text, md_width, palette);
+    let md_lines = render_markdown_lines_with(
+        text,
+        md_width,
+        palette,
+        // The math mode travels with the palette (L1) and the image options
+        // with the frame (L4) — the content cell honours both.
+        RenderOpts::new(Profile::Content, true)
+            .with_math(palette.math_mode)
+            .with_images(images),
+    );
     let bullet_style = Style::default().fg(palette.text);
     let mut composed = compose_lines(
         &md_lines,
@@ -312,5 +335,36 @@ mod tests {
                 .contains(Modifier::CROSSED_OUT)
         );
         assert_eq!(style_of(&normal).fg, Some(palette.text));
+    }
+
+    /// The assistant-message cell reads the math mode off the palette, like
+    /// every other render path: `off` must leave the LaTeX source verbatim
+    /// here too (the cell builds its own `RenderOpts`, so a hardcoded mode
+    /// would silently diverge from the streaming engine and the thinking
+    /// cell).
+    #[test]
+    fn test_assistant_message_follows_the_palette_math_mode() {
+        use crate::config::rendering::MathMode;
+
+        let (mut palette, layout) = test_ctx();
+        let md = "energy is $E = m c^2$ here";
+        let render = |palette: &ThemePalette| {
+            let ctx = make_ctx(palette, &layout);
+            ChatCell::AssistantMessage(md.into())
+                .to_lines(80, &ctx)
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let on = render(&palette);
+        assert!(on.contains("c²"), "math on renders the grid: {on}");
+        assert!(!on.contains("$E = m c^2$"), "math on: {on}");
+
+        palette.math_mode = MathMode::Off;
+        let off = render(&palette);
+        assert!(off.contains("$E = m c^2$"), "math off stays literal: {off}");
+        assert!(!off.contains("c²"), "math off: {off}");
     }
 }

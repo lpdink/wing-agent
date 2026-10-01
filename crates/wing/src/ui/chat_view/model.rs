@@ -1363,6 +1363,7 @@ mod tests {
             palette: &p,
             thinking_mode: ThinkingMode::Hidden,
             layout: &l,
+            images: crate::render::markdown::ImageOpts::off(),
         };
         let mut view = ChatView::new();
         view.append_to_last_thinking("SECRET-REASONING-CONTENT");

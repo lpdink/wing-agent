@@ -1,10 +1,10 @@
 import * as vscode from 'vscode';
-import path from 'node:path';
 
 import { ChatViewProvider } from './chatViewProvider';
 import { registerCommands } from './commands';
 import { VsCodeEditorActions } from './editorActions';
 import { GatewayLauncher } from './gateway/launcher';
+import { resolveWorkspacePath } from './images';
 import { coreLogger, log, logDisposable } from './log';
 import { readGatewaySettings } from './settings';
 import { WingHost, createGatewayClients } from './wingHost';
@@ -21,14 +21,10 @@ export function activate(context: vscode.ExtensionContext): void {
   const logger = coreLogger();
   const editor = new VsCodeEditorActions({
     // Tool rows carry paths as the model wrote them (often relative to the
-    // session's workspace); the editor needs an absolute file URI.
-    resolvePath: (candidate) => {
-      if (path.isAbsolute(candidate)) {
-        return candidate;
-      }
-      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-      return root === undefined ? candidate : path.join(root, candidate);
-    },
+    // session's workspace); the editor needs an absolute file URI. Same rule the
+    // transcript's image resolution uses (`host/images.ts`).
+    resolvePath: (candidate) =>
+      resolveWorkspacePath(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null, candidate),
   });
   const host = new WingHost({
     sink: () => null, // replaced when the chat view resolves

@@ -34,17 +34,42 @@ struct FlatSeg {
 
 /// Whether a line is prose that should be width-wrapped.
 ///
-/// Code blocks (`CodeBlock`/`Gutter`) and decorative chrome (`Border`) are laid
-/// out by their own renderers and must not be re-wrapped; everything else
-/// (`Text`/`Heading`/`InlineCode`/`Link`/`Marker`) is prose.
+/// Whether a line is prose that should be width-wrapped.
+///
+/// Code blocks (`CodeBlock`/`Gutter`), decorative chrome (`Border`) and image
+/// anchors (`Image`) are laid out by their own renderers and must not be
+/// re-wrapped; everything else (`Text`/`Heading`/`InlineCode`/`Link`/`Marker`)
+/// is prose. Wrapping an anchor's caption would invalidate the box geometry
+/// the side channel carries, so an `Image` line never reaches `wrap_prose_line`
+/// (the caption is already truncated to the render width when it is built).
+///
+/// Math is prose *unless the line is a math block line* — a pure grid row,
+/// which the engine already fitted to the width and whose `∑`/`√` layouts a
+/// UAX #14 break would tear apart. An **inline** formula sits in a line with
+/// prose, and that line must keep wrapping like the prose it is: the Math
+/// segment is just another atomic chunk (same semantics as `InlineCode`), so
+/// the line breaks the document at the same places it would with the rendered
+/// text spelled out as plain text.
 pub(crate) fn is_prose_line(line: &MarkdownLine) -> bool {
-    !line.segments.is_empty()
-        && line.segments.iter().all(|s| {
-            !matches!(
-                s.kind,
-                SegmentKind::CodeBlock | SegmentKind::Gutter | SegmentKind::Border
-            )
-        })
+    if line.segments.is_empty() {
+        return false;
+    }
+    let mut has_math = false;
+    let mut has_content = false;
+    for segment in &line.segments {
+        match segment.kind {
+            SegmentKind::CodeBlock
+            | SegmentKind::Gutter
+            | SegmentKind::Border
+            | SegmentKind::Image => return false,
+            SegmentKind::Math => has_math = true,
+            _ if !segment.is_whitespace() => has_content = true,
+            _ => {}
+        }
+    }
+    // A line of nothing but Math segments is a formula grid (a block); a line
+    // that mixes Math with prose is a paragraph line.
+    !has_math || has_content
 }
 
 /// Wrap prose lines to `width` display columns.
@@ -396,6 +421,25 @@ mod tests {
         mixed.push_segment(SegmentKind::Text, Style::new(), "run ");
         mixed.push_segment(SegmentKind::InlineCode, Style::new(), "cargo build");
         assert!(is_prose_line(&mixed));
+
+        // A pure math grid line is a block — never re-wrapped here.
+        let mut math = MarkdownLine::default();
+        math.push_segment(SegmentKind::Math, Style::new(), "∑ x² = ───");
+        assert!(!is_prose_line(&math));
+        // …but a line that merely CONTAINS an inline formula is prose: it must
+        // wrap at the same places the same sentence would without the formula
+        // (see `math_render::inline_math_keeps_prose_wrapping`).
+        let mut inline_math = MarkdownLine::default();
+        inline_math.push_segment(SegmentKind::Text, Style::new(), "so ");
+        inline_math.push_segment(SegmentKind::Math, Style::new(), "x²");
+        inline_math.push_segment(SegmentKind::Text, Style::new(), " holds");
+        assert!(is_prose_line(&inline_math));
+        // A display grid row inside a blockquote carries the bar as a Border
+        // segment, so it stays non-prose for that reason alone.
+        let mut quoted_math = MarkdownLine::default();
+        quoted_math.push_segment(SegmentKind::Border, Style::new(), "│ ");
+        quoted_math.push_segment(SegmentKind::Math, Style::new(), "∑ x²");
+        assert!(!is_prose_line(&quoted_math));
     }
 
     #[test]

@@ -6,12 +6,21 @@ use ratatui::layout::Rect;
 use crate::config::LayoutConfig;
 use crate::config::ThemePalette;
 use crate::config::rendering::ThinkingMode;
+use crate::render::markdown::ImageOpts;
 
 /// Context passed to cell rendering methods.
 pub struct CellContext<'a> {
     pub palette: &'a ThemePalette,
     pub thinking_mode: ThinkingMode,
     pub layout: &'a LayoutConfig,
+    /// Image options (mode, workspace root, metadata table) for this frame.
+    ///
+    /// One value per frame and the **only** source of truth for a cell's
+    /// image anchors: [`CachedCell`](crate::ui::cached_cell::CachedCell)
+    /// adopts it before every projection, so the non-streaming `RenderOpts`
+    /// and the streaming engine can never disagree about the row count of
+    /// the same picture. [`ImageOpts::off`] is the shared "no anchors" value.
+    pub images: &'a ImageOpts,
 }
 
 /// A renderable element with width-aware height estimation.

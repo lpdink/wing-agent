@@ -1,11 +1,13 @@
 {
   "//": "Strictness baseline shared by every project. Layer-specific globals (DOM / node / vscode) are configured in the per-layer tsconfigs — that split is what enforces the layering (see design.md D2).",
+  "//allowImportingTsExtensions": "ESM-only build helpers live in `tools/*.mts` and are imported *with* their extension (`./tools/fonts.mts`) so Vite's config loader — and its planned native replacement — never has to guess a module kind. Legal because every project sets `noEmit`.",
   "compilerOptions": {
     "target": "ES2023",
     "module": "ESNext",
     "moduleResolution": "bundler",
     "noEmit": true,
     "isolatedModules": true,
+    "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "strict": true,
     "noUncheckedIndexedAccess": true,

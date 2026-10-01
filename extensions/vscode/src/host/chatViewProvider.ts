@@ -1,10 +1,12 @@
 import * as vscode from 'vscode';
 
+import type { HostToWebviewMessage } from '../shared';
 import { BRIDGE_PROTOCOL_VERSION, WEBVIEW_ROOT_ID } from '../shared';
 
 import type { WebviewIntent } from './bridge';
 import { HostBridge } from './bridge';
 import { buildWebviewHtml, createNonce } from './html';
+import { resolveWorkspaceImage } from './images';
 import { log } from './log';
 import type { WingHost } from './wingHost';
 
@@ -37,11 +39,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   resolveWebviewView(view: vscode.WebviewView): void {
     const { webview } = view;
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+    // Both the resource roots and the `root` captured below are fixed *here*, when
+    // the view resolves: adding or removing the first workspace folder (or moving
+    // the window to another folder) afterwards leaves images resolving against the
+    // old root, so they stay links until the view is rebuilt. Deliberately not
+    // re-resolved per render: `webview.options` is a document-level setting, and
+    // re-reading it on every image would put workspace state on the render path.
+    // Cost of the staleness: a picture shows as a link for that window — see
+    // docs/dev/vscode-extension.md, "已知限制".
     webview.options = {
       enableScripts: true,
-      localResourceRoots: [this.extensionUri],
+      // The transcript can show images from the workspace, and only from there: the
+      // one folder the host already treats as "the workspace" (`resolvePath` in
+      // `extension.ts`). Deliberately not the whole disk, and not every folder of a
+      // multi-root window — `host/images.ts` refuses anything outside this root.
+      localResourceRoots:
+        workspaceRoot === undefined ? [this.extensionUri] : [this.extensionUri, workspaceRoot],
     };
     webview.html = this.buildHtml(webview);
+    const root = workspaceRoot?.fsPath ?? null;
 
     // Re-resolving the same view (e.g. after a container switch) must not leave
     // a dangling listener on the old webview, and session messages must go to
@@ -63,6 +80,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       },
       onPing: (id) => {
         this.bridge?.post({ type: 'pong', id, hostTimeMs: Date.now() });
+      },
+      onResolveImages: (message) => {
+        this.bridge?.post(resolveImages(webview, root, message.srcs));
       },
       onIntent: (intent: WebviewIntent) => {
         void this.host.onIntent(intent);
@@ -99,4 +119,46 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       rootId: WEBVIEW_ROOT_ID,
     });
   }
+}
+
+/**
+ * Answer one `resolveImages` request.
+ *
+ * Every source that is not a loadable workspace image comes back as `uri: null`,
+ * which the renderer renders as the link it has always shown — so this function
+ * never has to explain *why*. A debug line records the refused sources (a handful,
+ * truncated): "my image is a link" is otherwise indistinguishable from a bug.
+ *
+ * `asWebviewUri` is the only way to build a URI the webview may load, and VS Code
+ * owns its shape (it differs between desktop, remote and virtual workspaces) — we
+ * never assemble one ourselves.
+ */
+function resolveImages(
+  webview: Pick<vscode.Webview, 'asWebviewUri'>,
+  workspaceRoot: string | null,
+  srcs: readonly string[],
+): Extract<HostToWebviewMessage, { type: 'images' }> {
+  const refused: string[] = [];
+  const images = srcs.map((src) => {
+    const file = resolveWorkspaceImage(workspaceRoot, src);
+    if (file === null) {
+      refused.push(src.length > 80 ? `${src.slice(0, 80)}…` : src);
+      return { src, uri: null };
+    }
+    try {
+      return { src, uri: webview.asWebviewUri(vscode.Uri.file(file)).toString() };
+    } catch (error) {
+      // `asWebviewUri` is documented to warn about resources outside the roots; a
+      // throw here would take the whole batch down, so treat it as a refusal.
+      log().warn(`[chat-view] could not build a webview URI for ${src}: ${String(error)}`);
+      return { src, uri: null };
+    }
+  });
+
+  if (refused.length > 0) {
+    log().debug(
+      `[chat-view] ${refused.length}/${srcs.length} image sources kept as links: ${refused.join(', ')}`,
+    );
+  }
+  return { type: 'images', images };
 }

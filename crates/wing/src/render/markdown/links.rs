@@ -13,6 +13,7 @@ use std::borrow::Cow;
 
 use unicode_width::UnicodeWidthStr;
 
+use super::images::{ImageAnchor, ImageSpan, cover_span, span_for_anchor};
 use super::types::MarkdownLine;
 use super::types::MarkdownSegment;
 
@@ -159,54 +160,124 @@ pub fn symbol_width(symbol: &str) -> u16 {
 
 // ============================================================
 // ComposedLines — rendered lines + their link spans
-// ============================================================/// Rendered cell content: ratatui lines plus, for every line, the link spans
-/// the OSC8 injection and the click hit test need.
+// ============================================================/// Rendered cell content: ratatui lines plus, for every line, the side
+/// channels the ui layer needs — the link spans (OSC8 injection, click hit
+/// testing) and the image anchors (the drawing layer).
 ///
-/// `links` is always parallel to `lines` (a line without links has an empty
-/// entry), which keeps the two in sync through every transform the renderers
-/// apply (prefixing, streaming promotion, hard wrapping).
+/// `links` and `images` are always parallel to `lines` (a line without a link
+/// or an anchor has an empty entry), which keeps them in sync through every
+/// transform the renderers apply (prefixing, streaming promotion, hard
+/// wrapping).
 #[derive(Debug, Clone, Default)]
 pub struct ComposedLines {
     lines: Vec<Line<'static>>,
     links: Vec<Vec<LinkSpan>>,
+    images: Vec<Vec<ImageSpan>>,
 }
 
 impl ComposedLines {
-    /// Pair lines with their per-line link spans.
+    /// Pair lines with their per-line link spans (no image anchors).
     ///
     /// `links` may be empty (the "no links anywhere" case) or shorter than
     /// `lines`; it is padded with empty entries so the two are always parallel.
     pub fn new(lines: Vec<Line<'static>>, links: Vec<Vec<LinkSpan>>) -> Self {
+        Self::with_images(lines, links, Vec::new())
+    }
+
+    /// [`new`](Self::new) with image anchors as well.
+    ///
+    /// Both side-channel vectors are padded/truncated to the line count.
+    pub fn with_images(
+        lines: Vec<Line<'static>>,
+        links: Vec<Vec<LinkSpan>>,
+        images: Vec<Vec<ImageSpan>>,
+    ) -> Self {
         let mut links = links;
         links.truncate(lines.len());
         links.resize(lines.len(), Vec::new());
-        Self { lines, links }
+        let mut images = images;
+        images.truncate(lines.len());
+        images.resize(lines.len(), Vec::new());
+        Self {
+            lines,
+            links,
+            images,
+        }
     }
 
     /// Lines with no links at all (every non-markdown cell, and markdown
     /// without links).
     pub fn plain(lines: Vec<Line<'static>>) -> Self {
         let links = vec![Vec::new(); lines.len()];
-        Self { lines, links }
+        let images = vec![Vec::new(); lines.len()];
+        Self {
+            lines,
+            links,
+            images,
+        }
     }
 
     pub fn lines(&self) -> &[Line<'static>] {
         &self.lines
     }
 
-    /// Append a blank line (kept parallel with the spans).
+    /// Append a blank line (kept parallel with the side channels).
     pub fn push_blank(&mut self) {
         self.lines.push(Line::from(""));
         self.links.push(Vec::new());
+        self.images.push(Vec::new());
     }
 
     pub fn links(&self) -> &[Vec<LinkSpan>] {
         &self.links
     }
 
+    /// Image anchors of every line, index-aligned with [`lines`](Self::lines).
+    pub fn images(&self) -> &[Vec<ImageSpan>] {
+        &self.images
+    }
+
+    /// The anchor payload of every line (the pre-compose form).
+    ///
+    /// Composed lines have already expanded their anchors into rows, so the
+    /// payload is rebuilt from the side channel — the fields round-trip
+    /// exactly. Used to carry anchors through a hard wrap (the wrap moves
+    /// rows around, so the payload has to ride the line it belongs to).
+    pub(crate) fn image_tags(&self) -> Vec<Option<ImageAnchor>> {
+        let mut tags = vec![None; self.lines.len()];
+        for (index, spans) in self.images.iter().enumerate() {
+            if let Some(span) = spans.first() {
+                tags[index] = Some(ImageAnchor {
+                    path: span.path.clone(),
+                    alt: span.alt.clone(),
+                    shape: super::images::ImageShape::new(span.px_w, span.px_h),
+                    cols: span.cols,
+                    rows: span.rows,
+                });
+            }
+        }
+        tags
+    }
+
+    /// Split into the three parallel vectors (moving them out).
+    pub fn into_parts(self) -> (Vec<Line<'static>>, Vec<Vec<LinkSpan>>, Vec<Vec<ImageSpan>>) {
+        (self.lines, self.links, self.images)
+    }
+
     /// Whether any line carries a link.
     pub fn has_links(&self) -> bool {
         self.links.iter().any(|l| !l.is_empty())
+    }
+
+    /// Whether any line opens an image anchor.
+    pub fn has_images(&self) -> bool {
+        self.images.iter().any(|l| !l.is_empty())
+    }
+
+    /// Whether any line carries a side channel at all — the gate for the row
+    /// arithmetic ("screen row == line index") that both of them depend on.
+    pub fn has_spans(&self) -> bool {
+        self.has_links() || self.has_images()
     }
 
     /// Whether every line fits `width` — the precondition for "screen row ==
@@ -239,11 +310,16 @@ pub fn compose_lines(
     mut prefix: impl FnMut(usize) -> Span<'static>,
     mut map_style: impl FnMut(SegmentKind, Style) -> Style,
 ) -> ComposedLines {
-    let mut lines = Vec::with_capacity(md_lines.len());
-    let mut links = Vec::with_capacity(md_lines.len());
-    for (i, md_line) in md_lines.iter().enumerate() {
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(md_lines.len());
+    let mut links: Vec<Vec<LinkSpan>> = Vec::with_capacity(md_lines.len());
+    let mut images: Vec<Vec<ImageSpan>> = Vec::with_capacity(md_lines.len());
+    for md_line in md_lines {
+        // The composed row index is not the markdown line index once an
+        // anchor expands into its cover rows, so the prefix closure is fed
+        // the *output* index (the `⦁ ` bullet belongs to the first row).
+        let out_index = lines.len();
         let mut spans = Vec::with_capacity(md_line.segments.len() + 1);
-        spans.push(prefix(i));
+        spans.push(prefix(out_index));
         for seg in &md_line.segments {
             spans.push(Span::styled(
                 seg.text.clone(),
@@ -261,8 +337,23 @@ pub fn compose_lines(
                 })
                 .collect(),
         );
+        // An anchor's caption row is this line; its cover rows follow it.
+        let anchor = md_line.image.as_deref();
+        let mut row_images = Vec::new();
+        if let Some(anchor) = anchor {
+            row_images.push(span_for_anchor(anchor, out_index, prefix_width));
+        }
+        images.push(row_images);
+        if let Some(anchor) = anchor {
+            for _ in 1..anchor.rows {
+                let row = lines.len();
+                lines.push(Line::from(vec![prefix(row), cover_span()]));
+                links.push(Vec::new());
+                images.push(Vec::new());
+            }
+        }
     }
-    ComposedLines::new(lines, links)
+    ComposedLines::with_images(lines, links, images)
 }
 
 /// Whether to render the link destination URL after the link text.
@@ -482,7 +573,10 @@ mod tests {
     // ── Link spans ────────────────────────────────────────────────
 
     fn line(segments: Vec<MarkdownSegment>) -> MarkdownLine {
-        MarkdownLine { segments }
+        MarkdownLine {
+            segments,
+            ..Default::default()
+        }
     }
 
     fn seg(kind: SegmentKind, text: &str, target: Option<&str>) -> MarkdownSegment {
@@ -619,5 +713,149 @@ mod tests {
         assert!(composed.rows_are_exact(5));
         assert!(composed.rows_are_exact(10));
         assert!(!composed.rows_are_exact(4));
+    }
+
+    #[test]
+    fn composed_lines_side_channels_are_parallel_and_reported() {
+        let plain = ComposedLines::plain(vec![Line::from("a")]);
+        assert!(!plain.has_links() && !plain.has_images() && !plain.has_spans());
+        assert_eq!(plain.images().len(), 1);
+
+        let with_images = ComposedLines::with_images(
+            vec![Line::from("a"), Line::from("b")],
+            vec![vec![LinkSpan {
+                start: 0,
+                end: 1,
+                target: "t".into(),
+            }]],
+            vec![Vec::new(), vec![image_span(1)]],
+        );
+        assert!(with_images.has_links() && with_images.has_images() && with_images.has_spans());
+        // Both channels are padded to the line count.
+        assert_eq!(with_images.images().len(), 2);
+        assert_eq!(with_images.links().len(), 2);
+        assert!(with_images.links()[1].is_empty());
+        assert!(with_images.images()[0].is_empty());
+    }
+
+    // ── Image anchors ─────────────────────────────────────────────
+
+    fn image_anchor(rows: u16) -> crate::render::markdown::ImageAnchor {
+        crate::render::markdown::ImageAnchor {
+            path: std::path::PathBuf::from("/ws/plot.png"),
+            alt: "plot".into(),
+            shape: crate::render::markdown::ImageShape::new(800, 600),
+            cols: 78,
+            rows,
+        }
+    }
+
+    fn image_span(line: usize) -> ImageSpan {
+        ImageSpan {
+            line,
+            column: 2,
+            cols: 78,
+            rows: 3,
+            path: std::path::PathBuf::from("/ws/plot.png"),
+            alt: "plot".into(),
+            px_w: 800,
+            px_h: 600,
+        }
+    }
+
+    #[test]
+    fn compose_expands_an_anchor_into_caption_and_cover_rows() {
+        let mut anchored = MarkdownLine::default();
+        anchored.push_segment(SegmentKind::Image, Style::new(), "▢ plot · 800×600");
+        anchored.image = Some(Box::new(image_anchor(3)));
+        let md_lines = vec![MarkdownLine::default(), anchored, MarkdownLine::default()];
+
+        let composed = compose_lines(
+            &md_lines,
+            2,
+            |i| Span::raw(if i == 0 { "★ " } else { "  " }),
+            |_, style| style,
+        );
+
+        // Rows: separator, caption, 2 cover rows, separator.
+        assert_eq!(composed.lines().len(), 5);
+        assert_eq!(composed.lines()[1].to_string(), "  ▢ plot · 800×600");
+        assert_eq!(composed.lines()[2].to_string(), "   ");
+        assert_eq!(composed.lines()[3].to_string(), "   ");
+        // …and the blank delimiter line is untouched (prefix only).
+        assert_eq!(composed.lines()[4].to_string(), "  ");
+        // The prefix closure is fed the OUTPUT row index: only row 0 gets `★ `.
+        assert_eq!(composed.lines()[0].to_string(), "★ ");
+
+        assert_eq!(composed.images().len(), 5);
+        let spans = &composed.images()[1];
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].line, 1);
+        assert_eq!(spans[0].column, 2);
+        assert_eq!(spans[0].cols, 78);
+        assert_eq!(spans[0].rows, 3);
+        assert_eq!(spans[0].path, std::path::PathBuf::from("/ws/plot.png"));
+        assert_eq!((spans[0].px_w, spans[0].px_h), (800, 600));
+        assert_eq!(spans[0].rows_range(), 1..4);
+        assert!(composed.images()[2].is_empty());
+        assert!(composed.has_images());
+    }
+
+    #[test]
+    fn compose_without_a_payload_leaves_the_images_channel_empty() {
+        let mut line = MarkdownLine::default();
+        line.push_segment(SegmentKind::Text, Style::new(), "plain");
+        let composed = compose_lines(&[line], 2, |_| Span::raw("  "), |_, style| style);
+        assert_eq!(composed.lines().len(), 1);
+        assert!(!composed.has_images());
+        assert!(composed.images()[0].is_empty());
+    }
+
+    #[test]
+    fn a_single_row_anchor_is_just_the_caption() {
+        let mut anchored = MarkdownLine::default();
+        anchored.push_segment(SegmentKind::Image, Style::new(), "▢ tiny");
+        anchored.image = Some(Box::new(image_anchor(1)));
+        let composed = compose_lines(&[anchored], 2, |_| Span::raw("  "), |_, style| style);
+        assert_eq!(composed.lines().len(), 1);
+        assert_eq!(composed.images()[0][0].rows, 1);
+        assert_eq!(composed.images()[0][0].rows_range(), 0..1);
+    }
+
+    #[test]
+    fn image_anchors_gate_the_row_arithmetic_like_links_do() {
+        // `rows_are_exact` is what the ui layer trusts before pointing a
+        // click or a picture at a row: an anchor-bearing line set must refuse
+        // it exactly like a link-bearing one when a line overflows.
+        let mut wide = MarkdownLine::default();
+        wide.push_segment(SegmentKind::CodeBlock, Style::new(), &"x".repeat(40));
+        let mut caption = MarkdownLine::default();
+        caption.push_segment(SegmentKind::Image, Style::new(), "▢ plot");
+        caption.image = Some(Box::new(image_anchor(2)));
+        let composed = compose_lines(&[wide, caption], 2, |_| Span::raw("  "), |_, style| style);
+        assert_eq!(composed.lines().len(), 3);
+        assert!(composed.has_spans());
+        assert!(
+            !composed.rows_are_exact(20),
+            "an over-wide line must refuse the row arithmetic"
+        );
+        assert!(composed.rows_are_exact(42));
+    }
+
+    #[test]
+    fn image_tags_round_trip_the_anchor_payload() {
+        let composed = ComposedLines::with_images(
+            vec![Line::from("caption"), Line::from("cover")],
+            vec![Vec::new(), Vec::new()],
+            vec![vec![image_span(0)], Vec::new()],
+        );
+        let tags = composed.image_tags();
+        assert_eq!(tags.len(), 2);
+        let anchor = tags[0].as_ref().expect("tag");
+        assert_eq!(anchor.path, std::path::PathBuf::from("/ws/plot.png"));
+        assert_eq!(anchor.alt, "plot");
+        assert_eq!(anchor.rows, 3);
+        assert_eq!(anchor.cols, 78);
+        assert!(tags[1].is_none());
     }
 }
