@@ -149,7 +149,6 @@ interface GatewayClients {
 
 interface ManagedSession {
   readonly record: SessionRecord;
-  subscribed: boolean;
   retryAttempt: number;
   retryTimer: ReturnType<typeof setTimeout> | null;
   gone: boolean;
@@ -192,6 +191,12 @@ export class GatewayRuntime {
 
   private active: ManagedSession | null = null;
   private recordVersion = 0;
+  /**
+   * Bumped whenever a reduced event can change the session's *state* (meta /
+   * controls). An HTTP read that started before the bump describes an older session
+   * and is discarded instead of applied (see `refreshRuntimeState`).
+   */
+  private metaEpoch = 0;
 
   private sessionList: readonly SessionInfo[] = [];
   private listError: string | null = null;
@@ -258,7 +263,6 @@ export class GatewayRuntime {
     this.stopListPolling();
     this.stopCountdown();
     if (this.active !== null) {
-      this.active.subscribed = false;
       this.cancelResubscribe(this.active);
     }
     this.closeClients();
@@ -314,6 +318,11 @@ export class GatewayRuntime {
           workspace: response.workspace ?? null,
           createdAt: '',
         });
+        // Drop the previous session's route first: the web client shows one session
+        // at a time, and a leftover subscription keeps that session pinned in the
+        // gateway's memory (its reaper treats "has subscribers" as busy) while its
+        // events are parsed and thrown away (review r1 S1).
+        await this.releaseActive();
         this.adopt(record);
         await this.subscribeActive();
         void this.refreshSessions();
@@ -359,8 +368,7 @@ export class GatewayRuntime {
       }
       const previous = this.active;
       if (previous !== null) {
-        this.active = null;
-        await this.unsubscribe(previous.record.sessionId);
+        await this.releaseActive();
       }
       record.setAttention('none');
       record.clearLastError();
@@ -372,6 +380,24 @@ export class GatewayRuntime {
       }
       await this.subscribeActive();
     });
+  }
+
+  /**
+   * Close the open session's route: clear the active pointer, then best-effort
+   * `unsubscribe` on the gateway.
+   *
+   * The pointer is cleared *before* the round trip so a concurrent
+   * `subscribeActive` (a reconnect landing mid-switch) cannot attach the session
+   * we are leaving. Every "a different session becomes the open one" path goes
+   * through here — `activate` and `newSession` alike (review r1 S1).
+   */
+  private async releaseActive(): Promise<void> {
+    const previous = this.active;
+    if (previous === null) {
+      return;
+    }
+    this.active = null;
+    await this.unsubscribe(previous.record.sessionId);
   }
 
   /** Refresh the session list now (the manual path and the poll tick share this). */
@@ -563,9 +589,6 @@ export class GatewayRuntime {
           this.pushNotice('error', `${this.lastError} Check the gateway settings.`);
           // The client does not retry an unauthorized close; neither do we. A
           // manual reconnect (after fixing the key) is the way out.
-          if (this.active !== null) {
-            this.active.subscribed = false;
-          }
         }
         this.notify();
         return;
@@ -584,7 +607,6 @@ export class GatewayRuntime {
   /** Common bookkeeping for every "the socket is gone" transition. */
   private onDisconnected(state: ConnectionState): void {
     if (this.active !== null) {
-      this.active.subscribed = false;
       this.cancelResubscribe(this.active);
     }
     if (state.lastError !== null && state.lastError.kind !== 'disconnected') {
@@ -628,7 +650,6 @@ export class GatewayRuntime {
         await this.unsubscribeQuietly(sessionId, clientId);
         return;
       }
-      managed.subscribed = true;
       managed.retryAttempt = 0;
       this.logger.debug(`subscribed to ${sessionId}`);
       this.notify();
@@ -638,7 +659,6 @@ export class GatewayRuntime {
         try {
           await http.resumeSession(sessionId);
           await http.subscribe(sessionId, clientId);
-          managed.subscribed = true;
           managed.retryAttempt = 0;
           void this.refreshRuntimeState(managed.record);
           return;
@@ -699,7 +719,6 @@ export class GatewayRuntime {
   /** The session vanished from the gateway — say so once; do not retry. */
   private markGone(managed: ManagedSession, error: unknown): void {
     managed.gone = true;
-    managed.subscribed = false;
     this.logger.warn(`session ${managed.record.sessionId} is gone from the gateway`, error);
     managed.record.pushCell({
       kind: 'system',
@@ -712,22 +731,34 @@ export class GatewayRuntime {
     this.pushNotice('error', 'That session no longer exists on the gateway.');
   }
 
-  /** Runtime knobs `sync_session` does not carry (yolo / thinking / effort). */
+  /**
+   * Runtime knobs `sync_session` does not carry (yolo / thinking / effort / model).
+   *
+   * The HTTP read races the live stream: `session_state_changed` is emitted by the
+   * `update_session` RPC (the model picker / thinking toggle step 09 will drive) and
+   * can land *after* the request left but *before* the response arrives, in which
+   * case the response describes an older session than the record does. So the write
+   * is guarded by {@link metaEpoch}: every state event reduced into the open session
+   * bumps it, and a response from before the bump is dropped (review r1 S2).
+   */
   private async refreshRuntimeState(record: SessionRecord): Promise<void> {
     const http = this.clients?.http ?? null;
     if (http === null || this.stopped || this.active?.record !== record) {
       return;
     }
+    const epoch = this.metaEpoch;
     try {
       const info = await http.sessionInfo(record.sessionId);
+      if (this.metaEpoch !== epoch) {
+        this.logger.debug(`runtime state of ${record.sessionId} arrived after a newer state event; ignored`);
+        return;
+      }
       record.meta = {
         ...record.meta,
         thinking: info.thinking,
         reasoningEffort: info.reasoning_effort ?? '',
         yolo: info.yolo,
-        // Fill, never clobber: a model switch that landed while this response was
-        // in flight is newer than the response.
-        model: record.meta.model === '' ? info.model : record.meta.model,
+        model: info.model,
         workspace: info.workdir ?? record.meta.workspace,
       };
       this.flush(record);
@@ -761,8 +792,13 @@ export class GatewayRuntime {
     const effects: ReductionEffect[] = [];
     if (isKnownEvent(event) && event.type === 'sync_session') {
       applySync(managed.record, event);
-      managed.subscribed = true;
+      this.metaEpoch += 1;
     } else {
+      if (isKnownEvent(event) && event.type === 'session_state_changed') {
+        // Local knowledge about the controls just got newer than any in-flight
+        // `/api/session/info` read (review r1 S2).
+        this.metaEpoch += 1;
+      }
       effects.push(...applyLive(managed.record, event));
     }
     this.flush(managed.record);
@@ -807,13 +843,7 @@ export class GatewayRuntime {
   private adopt(record: SessionRecord): void {
     this.records.set(record.sessionId, record);
     this.touchRecord(record.sessionId);
-    this.active = {
-      record,
-      subscribed: false,
-      retryAttempt: 0,
-      retryTimer: null,
-      gone: false,
-    };
+    this.active = { record, retryAttempt: 0, retryTimer: null, gone: false };
     this.evictRecords();
     this.notify();
   }
@@ -826,21 +856,25 @@ export class GatewayRuntime {
     this.recordOrder.push(sessionId);
   }
 
-  /** Keep the cache bounded; the open session is never evicted. */
+  /**
+   * Keep the cache bounded; the open session is never evicted.
+   *
+   * The loop removes the oldest entry that is *not* the open session, so the
+   * invariant holds after this call instead of one `adopt` later (review r1 N5 —
+   * the previous version gave up for the round when the oldest happened to be the
+   * active record).
+   */
   private evictRecords(): void {
     const limit = Math.max(1, this.options.maxCachedRecords ?? DEFAULT_MAX_CACHED_RECORDS);
     while (this.recordOrder.length > limit) {
-      const oldest = this.recordOrder[0];
-      if (oldest === undefined) {
-        return;
+      const index = this.recordOrder.findIndex((id) => id !== this.active?.record.sessionId);
+      if (index === -1) {
+        return; // only the open session is cached
       }
-      if (oldest === this.active?.record.sessionId) {
-        // Never evict the open session: rotate it to the end and stop.
-        this.touchRecord(oldest);
-        return;
+      const [evicted] = this.recordOrder.splice(index, 1);
+      if (evicted !== undefined) {
+        this.records.delete(evicted);
       }
-      this.recordOrder.shift();
-      this.records.delete(oldest);
     }
   }
 

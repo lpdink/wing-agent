@@ -221,7 +221,7 @@ describe('layer guard: src', () => {
 });
 
 describe('layer guard: tests and tools', () => {
-  it('lets tests import the app, and only relative modules inside tests/', () => {
+  it('lets tests import the app and the tooling, nothing else', () => {
     const violations: string[] = [];
     for (const file of testFiles) {
       for (const specifier of collectModuleSpecifiers(file)) {
@@ -233,9 +233,14 @@ describe('layer guard: tests and tools', () => {
             violations.push(`${short}: unresolved relative import "${value}"`);
             continue;
           }
-          const inside = isInside(resolved, path.join(APP_ROOT, 'tests')) || isInside(resolved, SRC);
+          // Tests may exercise the app and the node tooling (both are node-side
+          // here); they must not reach anywhere else (the repo, the packages' files).
+          const inside =
+            isInside(resolved, path.join(APP_ROOT, 'tests')) ||
+            isInside(resolved, SRC) ||
+            isInside(resolved, path.join(APP_ROOT, 'tools'));
           if (!inside) {
-            violations.push(`${short}: "${value}" escapes tests/ and src/`);
+            violations.push(`${short}: "${value}" escapes tests/, src/ and tools/`);
           }
           continue;
         }

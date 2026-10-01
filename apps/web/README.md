@@ -41,11 +41,16 @@ the ESLint zones in `eslint.config.mjs`, and the import-graph guard in
 ## Screenshots (visual acceptance)
 
 ```bash
-pnpm --filter @wing-agent/web shot          # build + bundle + render every scene
-pnpm --filter @wing-agent/web shot -- --list                 # scene names
-pnpm --filter @wing-agent/web shot -- --only=sessions,empty  # a subset
-pnpm --filter @wing-agent/web shot -- --out=/tmp/shots       # another directory
+pnpm --filter @wing-agent/web shot                            # build + bundle + render every scene
+pnpm --filter @wing-agent/web shot --list                     # scene names
+pnpm --filter @wing-agent/web shot --only=sessions,empty      # a subset
+pnpm --filter @wing-agent/web shot --out=/tmp/shots           # another directory
 ```
+
+> **No `--` separator.** This repo pins pnpm 11, which forwards `--` to the script
+> verbatim (`node out/shot/shot.mjs -- --out=…`), where it used to be an unknown
+> argument. `tools/shot/main.ts` now skips a bare `--`, so both spellings work — but
+> the commands above are the documented ones (and what the gates run).
 
 - Output defaults to `$WING_HOME/tasks/wing-app/07_web_shell/shots` (task evidence, not
   committed) and each image must be ≤ 2 MiB — the runner fails if it is not.
@@ -58,6 +63,9 @@ pnpm --filter @wing-agent/web shot -- --out=/tmp/shots       # another directory
   `shot -- --browser=chromium`. `playwright`'s download script is blocked in
   `pnpm-workspace.yaml#allowBuilds` so a fresh install stays fast.
 - A `manifest.json` (scene, viewport, file, bytes, what it shows) lands next to the images.
+- Reproducibility: a rerun is pixel-identical **except for the fixture port digits**
+  (each scene allocates a fresh OS-assigned port, and the number appears in the address
+  pill / the settings preview). Everything else — layout, copy, states — is stable.
 
 ## Seams for the next steps
 

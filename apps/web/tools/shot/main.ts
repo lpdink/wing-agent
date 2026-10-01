@@ -58,6 +58,13 @@ function parseArgs(argv: readonly string[]): Cli {
   let browserChannel: Cli['browserChannel'] = 'chrome';
   let list = false;
   for (const arg of argv) {
+    // pnpm passes the `--` separator through verbatim (`pnpm run shot -- --out=…`
+    // arrives as `["--", "--out=…"]`), so accept both spellings: with the separator
+    // (npm/yarn habit) and without it (what this repo documents, since pnpm needs
+    // no separator to forward arguments).
+    if (arg === '--') {
+      continue;
+    }
     if (arg.startsWith('--out=')) {
       outDir = path.resolve(arg.slice('--out='.length));
     } else if (arg.startsWith('--only=')) {

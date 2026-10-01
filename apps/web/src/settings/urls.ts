@@ -152,10 +152,27 @@ export function gatewayEndpoints(settings: GatewaySettings, location: PageLocati
   const authority = `${host}:${port}`;
   const scheme = settings.scheme;
   const httpBaseUrl = `${scheme}://${authority}`;
-  return {
-    httpBaseUrl,
-    wsUrl: `${scheme === 'https' ? 'wss' : 'ws'}://${authority}/ws`,
-    sameOrigin: false,
-    label: httpBaseUrl,
-  };
+  const wsUrl = `${scheme === 'https' ? 'wss' : 'ws'}://${authority}/ws`;
+  // The browser parses the host once more with WHATWG rules, which are stricter
+  // than the structural checks above: `a|b` (and an IPv6 zone id like
+  // `fe80::1%en0`) passes them but is not a URL. Validating here puts the failure
+  // next to the field instead of inside the reconnect ladder, where it looks like
+  // a dead gateway forever (review r1 N3).
+  assertParsable(httpBaseUrl, host);
+  assertParsable(wsUrl, host);
+  return { httpBaseUrl, wsUrl, sameOrigin: false, label: httpBaseUrl };
+}
+
+/** `new URL` accepts the string, or the host is not usable from a browser. */
+function assertParsable(url: string, host: string): void {
+  try {
+    void new URL(url);
+  } catch {
+    throw new GatewayAddressError(
+      host.includes('%')
+        ? `"${host}" cannot be used: IPv6 zone ids ("%en0") are not allowed in a URL — ` +
+            'use the address without the zone, or a host name'
+        : `"${host}" is not a host name a browser can use`,
+    );
+  }
 }

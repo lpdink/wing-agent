@@ -23,6 +23,8 @@ describe('normalizeGatewayHost', () => {
 
   it('brackets bare IPv6 literals and leaves bracketed ones alone', () => {
     expect(normalizeGatewayHost('::1')).toBe('[::1]');
+    // Structural only: a zone id is bracketed here but rejected by
+    // `gatewayEndpoints`, because WHATWG URLs do not allow it (see below).
     expect(normalizeGatewayHost('fe80::1%en0')).toBe('[fe80::1%en0]');
     expect(normalizeGatewayHost('[::1]')).toBe('[::1]');
   });
@@ -104,6 +106,25 @@ describe('gatewayEndpoints', () => {
     expect(() => gatewayEndpoints(settings({ host: 'host', port: 0 }), LOCATION)).toThrow(
       GatewayAddressError,
     );
+  });
+
+  it('refuses a host the browser cannot parse, instead of looping on connect', () => {
+    // `normalizeGatewayHost` is a structural check; these pass it but produce an
+    // unparseable URL, which used to surface as a dead gateway with a permanent
+    // "connecting… (attempt N)" (review r1 N3).
+    for (const host of ['a|b', 'a<b', 'a^b', 'a%b', 'a b']) {
+      expect(() => gatewayEndpoints(settings({ host }), LOCATION)).toThrow(GatewayAddressError);
+    }
+  });
+
+  it('refuses an IPv6 zone id and says why', () => {
+    expect(() => gatewayEndpoints(settings({ host: 'fe80::1%en0' }), LOCATION)).toThrow(/zone id/);
+  });
+
+  it('still accepts the host shapes a gateway really uses', () => {
+    for (const host of ['127.0.0.1', 'localhost', 'gateway.lan', 'my_host', '::1', '[fe80::1]']) {
+      expect(gatewayEndpoints(settings({ host }), LOCATION).httpBaseUrl).toContain('://');
+    }
   });
 
   it('never leaks the API key into a URL', () => {

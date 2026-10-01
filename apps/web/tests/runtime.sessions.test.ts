@@ -259,6 +259,37 @@ describe('GatewayRuntime sessions', () => {
     await harness.settle();
   });
 
+  it('unsubscribes the previous session when a new one is created', async () => {
+    const gateway = new FakeGateway({ sessions: [FIRST] });
+    const harness = createHarness({ gateway });
+    harness.runtime.start();
+    await harness.settle();
+    expect(harness.snapshot().activeSessionId).toBe('session-1');
+
+    await harness.runtime.newSession();
+    await harness.settle();
+
+    expect(harness.snapshot().activeSessionId).toBe('created-1');
+    // The one-active-session rule (design.md D5) has to hold for `+` too: a
+    // leftover route keeps the old session pinned in the gateway's memory (the
+    // reaper reads "has subscribers" as busy) and streams events nobody shows.
+    expect(
+      gateway.callsTo('POST', '/api/session/unsubscribe').map((call) => call.body?.['session_id']),
+    ).toEqual(['session-1']);
+    gateway.emit('session-1', {
+      type: 'text',
+      session_id: 'session-1',
+      created_at: '2026-10-01T12:00:09Z',
+      request_id: 'req-old',
+      content: 'stale',
+    });
+    await harness.settle();
+    expect(gateway.droppedDeliveries).toBe(1);
+
+    harness.runtime.stop();
+    await harness.settle();
+  });
+
   it('fills the model knobs from /api/session/info (sync_session does not carry them)', async () => {
     const gateway = new FakeGateway({ sessions: [FIRST] });
     FIRST.runtime = {
@@ -280,6 +311,49 @@ describe('GatewayRuntime sessions', () => {
     expect(meta?.reasoningEffort).toBe('high');
     expect(meta?.yolo).toBe(true);
     expect(meta?.workspace).toBe('/tmp/other');
+
+    harness.runtime.stop();
+    await harness.settle();
+  });
+
+  it('drops a runtime-state response that a newer state event overtook', async () => {
+    const gateway = new FakeGateway({ sessions: [FIRST] });
+    // The read stays in flight until the test releases it.
+    gateway.holdPaths.add('/api/session/info');
+    const harness = createHarness({ gateway });
+    harness.runtime.start();
+    await harness.settle();
+    expect(gateway.callsTo('GET', '/api/session/info')).toHaveLength(1);
+    expect(harness.snapshot().record?.meta.yolo).toBe(false);
+
+    // Meanwhile the live stream delivers a *newer* state (the model picker /
+    // thinking toggle of step 09, or another front end writing the session).
+    gateway.emit('session-1', {
+      type: 'session_state_changed',
+      session_id: 'session-1',
+      created_at: '2026-10-01T12:00:20Z',
+      request_id: 'req-state',
+      model: 'glm-5',
+      model_display_name: null,
+      thinking: true,
+      reasoning_effort: 'low',
+      yolo: true,
+      title: null,
+      agent: null,
+    });
+    await harness.settle();
+    expect(harness.snapshot().record?.meta.yolo).toBe(true);
+    expect(harness.snapshot().record?.meta.model).toBe('glm-5');
+
+    // The older response lands: it must not undo the event (review r1 S2).
+    gateway.releaseHeld();
+    await harness.settle();
+
+    const meta = harness.snapshot().record?.meta;
+    expect(meta?.yolo).toBe(true);
+    expect(meta?.thinking).toBe(true);
+    expect(meta?.reasoningEffort).toBe('low');
+    expect(meta?.model).toBe('glm-5');
 
     harness.runtime.stop();
     await harness.settle();

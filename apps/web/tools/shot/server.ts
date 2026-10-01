@@ -67,8 +67,22 @@ interface FixtureContext {
   drop(): void;
 }
 
-/** The user's own gateway — never touch it, not even by accident. */
-const FORBIDDEN_PORT = 32_523;
+/**
+ * The user's own gateway — never touch it, not even by accident.
+ *
+ * `listen(0)` does not hand out 32523 on any real system (it is below the ephemeral
+ * range), so this is an invariant guard rather than a live filter: it is what stops
+ * a future "let me just pin the port for reproducibility" change from taking over
+ * the gateway the user is running. Covered by `tests/shot-server.test.ts`.
+ */
+export const FORBIDDEN_PORT = 32_523;
+
+/** Throw when `port` is the user's gateway. Exported so the guard is testable. */
+export function assertPortAllowed(port: number): void {
+  if (port === FORBIDDEN_PORT) {
+    throw new Error(`refusing to bind the user's gateway port ${FORBIDDEN_PORT}`);
+  }
+}
 
 const CONTENT_TYPES: Readonly<Record<string, string>> = {
   '.html': 'text/html; charset=utf-8',
@@ -150,9 +164,11 @@ async function listen(server: Server): Promise<number> {
   });
   const address = server.address();
   const port = typeof address === 'object' && address !== null ? address.port : 0;
-  if (port === FORBIDDEN_PORT) {
+  try {
+    assertPortAllowed(port);
+  } catch (error) {
     server.close();
-    throw new Error(`refusing to bind the user's gateway port ${FORBIDDEN_PORT}`);
+    throw error;
   }
   return port;
 }

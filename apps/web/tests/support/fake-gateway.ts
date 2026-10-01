@@ -229,7 +229,7 @@ export class FakeGateway {
 
   get transport(): HttpTransport {
     return {
-      request: (request: HttpTransportRequest): Promise<HttpTransportResponse> => {
+      request: async (request: HttpTransportRequest): Promise<HttpTransportResponse> => {
         const parsed = new URL(request.url);
         const body = request.body === null ? null : (JSON.parse(request.body) as Record<string, unknown>);
         const call: HttpCall = {
@@ -240,9 +240,27 @@ export class FakeGateway {
           body,
         };
         this.calls.push(call);
-        return Promise.resolve(this.route(call));
+        if (this.holdPaths.has(call.path)) {
+          await this.hold();
+        }
+        return this.route(call);
       },
     };
+  }
+
+  /** Hold every response whose path is in {@link holdPaths} until released. */
+  private async hold(): Promise<void> {
+    this.heldGate ??= new Promise<void>((resolve) => {
+      this.releaseHeldGate = resolve;
+    });
+    await this.heldGate;
+  }
+
+  /** Let every held response through (idempotent). */
+  releaseHeld(): void {
+    this.releaseHeldGate?.();
+    this.releaseHeldGate = null;
+    this.heldGate = null;
   }
 
   // ── drivers ─────────────────────────────────────────────────────────
@@ -336,6 +354,14 @@ export class FakeGateway {
   readonly missingSubscribe = new Set<string>();
   /** Status code the list endpoint answers with (500 = "the gateway is sick"). */
   listStatus = 200;
+  /**
+   * Paths whose response waits for {@link releaseHeld} — how a test gets a request
+   * *in flight* while it emits an event (the stale-response race of review r1 S2).
+   */
+  readonly holdPaths = new Set<string>();
+
+  private heldGate: Promise<void> | null = null;
+  private releaseHeldGate: (() => void) | null = null;
 
   private subscribe(call: HttpCall): HttpTransportResponse {
     const id = sessionIdOf(call);
