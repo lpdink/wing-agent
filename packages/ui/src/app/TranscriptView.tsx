@@ -17,17 +17,32 @@
  *   keeps the browser's scroll anchoring from fighting the explicit position.
  */
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { ReactElement, RefObject } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { ReactElement, ReactNode, RefObject } from 'react';
 
-import type { SessionViewModel } from '@wing-agent/session';
+import type { CellModel, SessionId, SessionViewModel } from '@wing-agent/session';
 import { CellView } from '../chat/CellView';
 import styles from '../styles/chat.module.css';
 
 /** VS Code: `chatListWidget.ts:342-344` — `scrollHeight - 2`. */
 const AT_BOTTOM_TOLERANCE_PX = 2;
 
-export function TranscriptView({ session }: { readonly session: SessionViewModel | null }): ReactElement {
+export interface TranscriptViewProps {
+  readonly session: SessionViewModel | null;
+  /**
+   * Cell renderer override, for shells that draw the rows themselves.
+   *
+   * The web shell (`apps/web`) replaces a handful of the renderer's cards with the
+   * shared code/tool/ask components (its step 08b) and needs to keep *this*
+   * scroller's rules while doing so — the alternative would be a second copy of the
+   * stick-to-bottom contract below. The signature is {@link CellView}'s, so an
+   * override is a drop-in for one cell; with no `renderCell` the rows come from
+   * `CellView`, i.e. exactly what the VS Code webview renders.
+   */
+  readonly renderCell?: ((cell: CellModel, sessionId: SessionId) => ReactNode) | undefined;
+}
+
+export function TranscriptView({ session, renderCell }: TranscriptViewProps): ReactElement {
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const { pinned, handleScroll, scrollToBottom } = useStickToBottom(scroller, content, session);
@@ -41,9 +56,15 @@ export function TranscriptView({ session }: { readonly session: SessionViewModel
           </p>
         ) : (
           <div className={styles.transcriptContent} data-testid="transcript-content" ref={content}>
-            {session.cells.map((cell) => (
-              <CellView key={cell.id} cell={cell} sessionId={session.sessionId} />
-            ))}
+            {session.cells.map((cell) =>
+              renderCell === undefined ? (
+                <CellView key={cell.id} cell={cell} sessionId={session.sessionId} />
+              ) : (
+                // The Fragment keeps the cell's identity stable across renders, so
+                // React updates a streamed row in place instead of remounting it.
+                <Fragment key={cell.id}>{renderCell(cell, session.sessionId)}</Fragment>
+              ),
+            )}
           </div>
         )}
       </div>

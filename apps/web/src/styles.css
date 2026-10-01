@@ -168,11 +168,6 @@ code {
   flex: none;
 }
 
-.topbar__status-text {
-  color: var(--fg-muted);
-  white-space: nowrap;
-}
-
 .topbar__address {
   font-family: var(--mono);
   font-size: 12px;
@@ -191,27 +186,6 @@ code {
   border-radius: 8px;
   padding: 5px 10px;
   font: inherit;
-}
-
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--fg-subtle);
-  flex: none;
-}
-
-.dot--connected {
-  background: var(--ok);
-}
-
-.dot--connecting,
-.dot--reconnecting {
-  background: var(--warn);
-}
-
-.dot--offline {
-  background: var(--error);
 }
 
 .shell__body {
@@ -665,12 +639,6 @@ code {
   }
 
   .topbar__address {
-    display: none;
-  }
-
-  /* On a phone the status *word* is the first thing to go: the dot still carries
-     the state, and the banner below explains anything that is not "connected". */
-  .topbar__status-text {
     display: none;
   }
 

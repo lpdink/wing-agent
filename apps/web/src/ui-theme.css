@@ -1,17 +1,19 @@
-/* The renderer's own token layer (`--wing-*`), loaded first — see the alias comment
- * in `vite.config.mts`: the package imports this file from `mount.tsx`, a module this
- * app never reaches, so without this line the bundler drops it. */
-@import 'wing-ui-tokens.css';
-
 /*
  * The theme bridge: `--vscode-*` for `@wing-agent/ui`.
  *
  * The shared renderer (`@wing-agent/ui`) styles itself with two variable families:
- * `--wing-*` (its own tokens, loaded with the package) and `--vscode-*` — the VS
- * Code theme variables its colours are sourced from, which inside an editor are
- * injected by the host. A web page has no such host, so `apps/web` supplies the
- * mapping here: **the package is not modified** (06b/06c own it), the adapter lives
- * in the consumer, exactly like the bridge controller in `src/bridge/`.
+ * `--wing-*` (its own tokens, imported by the package's barrel) and `--vscode-*` —
+ * the VS Code theme variables its colours are sourced from, which inside an editor
+ * are injected by the host. A web page has no such host, so `apps/web` supplies the
+ * mapping here: **the package is not modified**, the adapter lives in the consumer,
+ * exactly like the bridge controller in `src/bridge/`.
+ *
+ * The third family, `--dsw-*` (the ported design tokens the shared code/tool/ask
+ * cards are drawn with), is *not* mapped here: `main.tsx` imports the package's
+ * `styles/*` token sheets directly, and `src/theme/color-scheme.ts` publishes the
+ * `body[data-ds-dark-theme]` / `body.vscode-dark` attributes those sheets switch on.
+ * That split is the converged shape after step 08b: this file is only the adapter
+ * for the variables a *host* would otherwise inject.
  *
  * Two rules of the house:
  *
@@ -22,9 +24,10 @@
  *    `prefers-color-scheme` (styles.css). Sizes (font ramp, radii, stroke) are the
  *    VS Code baseSizes values, because those are geometry the package's own
  *    `tokens.css` multiplies — not colours.
- * 2. **Only what the transcript reads.** The panels/composer surfaces the package
- *    also styles (menus, tab strip, suggest widget) are not rendered by this step;
- *    09 extends this file when it mounts them.
+ * 2. **Only what the still-mounted renderer reads.** The cells this app did not
+ *    replace (user / system / todo / metrics / separator) and the markdown node
+ *    renderer underneath the shared cards read these; panels/composer surfaces are
+ *    not rendered by this step yet — 09 extends this file when it mounts them.
  *
  * The list is derived from the three stylesheets the transcript actually pulls in
  * (`chat.module.css`, `markdown.module.css`, `tokens.css`).
@@ -119,31 +122,5 @@
     --vscode-diffEditor-insertedLineBackground: rgb(78 195 138 / 12%);
     --vscode-diffEditor-removedTextBackground: rgb(242 119 122 / 20%);
     --vscode-diffEditor-removedLineBackground: rgb(242 119 122 / 11%);
-  }
-}
-
-/*
- * ── dark syntax highlighting (a web-side repair of a package-side selector) ──
- *
- * `packages/ui/src/styles/markdown.module.css` switches shiki's dual-theme tokens
- * with `body.vscode-dark .codeToken { color: var(--shiki-dark) }`. Both class names
- * in that selector are *hashed* by the CSS-module transform the package is built
- * with — this app's own build emits `body._vscode-dark_mf69w_276 ._codeToken_mf69w_267`,
- * and esbuild's `local-css` (the extension's webview build) does the same — so the rule
- * can never match a real document, which is what a VS Code webview is: the
- * webview inside VS Code has `<body class="vscode-dark">`, which is exactly what the
- * mangled name no longer says. The renderer is not ours to change in this step, so
- * the intent is restated here from the *other* end: the per-token colours are inline
- * custom properties the package itself writes (`--shiki-light` / `--shiki-dark`),
- * so a selector keyed on those survives any class-name mangling, and its specificity
- * (`[a][b]`, 0-2-0) beats the package's single class (0-1-0) whatever the bundle
- * order turns out to be.
- *
- * `tests/transcript.theme.test.ts` pins both preconditions, so this stops being a
- * silent no-op the day either side changes.
- */
-@media (prefers-color-scheme: dark) {
-  [style*='--shiki-dark'][style*='--shiki-light'] {
-    color: var(--shiki-dark, var(--shiki-light));
   }
 }

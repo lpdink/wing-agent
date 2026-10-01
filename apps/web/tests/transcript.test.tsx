@@ -122,10 +122,13 @@ describe('transcript rendering', () => {
     const { runtime } = await mount();
 
     expect(screen.getByText(/The parser chokes on nested tables/)).toBeTruthy();
-    // Real markdown: a heading-free paragraph, inline code and a fenced block.
+    // Real markdown: a heading-free paragraph, inline code and a fenced block — the
+    // fence drawn by the ported code card (step 08b's swap), the rest by the shared
+    // node renderer.
     const assistant = rows('assistant')[0];
     expect(assistant?.textContent).toContain('consumed as a paragraph');
-    expect(assistant?.querySelector('[data-testid="md-code"]')).not.toBeNull();
+    expect(assistant?.querySelector('[data-code-block-content]')).not.toBeNull();
+    expect(assistant?.textContent).toContain('parseParagraph');
 
     runtime.stop();
   });
@@ -266,8 +269,11 @@ describe('transcript rendering', () => {
   it('collapses a finished thinking block and opens a failed tool call', async () => {
     const { runtime } = await mount();
 
+    // The thinking row is the ported `ReasoningRow`: collapsed once the stream
+    // ended, titled `Thought`, expanded by the reader's own toggle.
     const thinking = rows('thinking')[0];
-    expect(thinking?.getAttribute('data-collapsed')).toBe('true');
+    const reasoning = thinking?.querySelector('[data-variant="think"]');
+    expect(reasoning?.hasAttribute('data-expanded')).toBe(false);
     expect(thinking?.textContent).toContain('Thought');
 
     const tools = rows('tool_call');
@@ -277,7 +283,7 @@ describe('transcript rendering', () => {
     // The row already names its subject (a file reference, clickable on its own).
     expect(tools[0]?.textContent).toContain('src/parser.ts');
     // Expanding it reveals the arguments and the result cards.
-    fireEvent.click(tools[0]?.querySelector('[role="button"]') as HTMLElement);
+    fireEvent.click(tools[0]?.querySelector('[data-disclosure-row]') as HTMLElement);
     await waitFor(() => {
       expect(rows('tool_call')[0]?.getAttribute('data-collapsed')).toBe('false');
     });

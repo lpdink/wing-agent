@@ -33,8 +33,20 @@ const UI = '@wing-agent/ui';
  * — a bare `@wing-agent/ui/**` ban would reject it).
  */
 const UI_PROTOCOL = '@wing-agent/ui/protocol';
+/**
+ * …and the second: `./styles/*` is the package's declared theme seam for browser
+ * shells (its `exports` map). The web app imports the five token sheets once in
+ * `src/main.tsx`; the VS Code webview must *not* (it keeps the editor's own theme,
+ * which is why the package's barrel deliberately does not pull them in).
+ *
+ * The un-ban is two patterns, not one, and that is gitignore's rule, not a choice:
+ * `@wing-agent/ui/**` excludes the `styles/` *directory* as well, and a file cannot
+ * be re-included while its parent directory is excluded — so the directory is
+ * re-included first (`…/styles/`), then the sheets.
+ */
+const UI_STYLES = ['!@wing-agent/ui/styles/', '!@wing-agent/ui/styles/*.css'];
 const BARREL_ONLY =
-  'Import workspace packages through their barrel only: a path into the package is not a contract (the one exception is `@wing-agent/ui/protocol`, the DOM-free wire contract).';
+  'Import workspace packages through their barrel only: a path into the package is not a contract (the exceptions are `@wing-agent/ui/protocol`, the DOM-free wire contract, and `@wing-agent/ui/styles/*.css`, the theme sheets a browser shell loads once).';
 const NODE_BUILTIN =
   'This is the browser bundle: node builtins are unavailable (the screenshot tooling lives in tools/, which has its own tsconfig).';
 const REACT_FREE =
@@ -95,7 +107,7 @@ export default tseslint.config(
         [],
         [
           banned(['node:*'], NODE_BUILTIN),
-          banned([`${CLIENT}/**`, `${SESSION}/**`, `${UI}/**`, `!${UI_PROTOCOL}`], BARREL_ONLY),
+          banned([`${CLIENT}/**`, `${SESSION}/**`, `${UI}/**`, `!${UI_PROTOCOL}`, ...UI_STYLES], BARREL_ONLY),
           banned(['../tests/**', '../tools/**', '**/tests/**', '**/tools/**'], NO_TESTS),
         ],
       ),
@@ -124,7 +136,7 @@ export default tseslint.config(
         [
           banned(['node:*'], NODE_BUILTIN),
           banned(['react', 'react-dom', 'react/**', 'react-dom/**'], REACT_FREE),
-          banned([`${CLIENT}/**`, `${SESSION}/**`, `${UI}/**`, `!${UI_PROTOCOL}`], BARREL_ONLY),
+          banned([`${CLIENT}/**`, `${SESSION}/**`, `${UI}/**`, `!${UI_PROTOCOL}`, ...UI_STYLES], BARREL_ONLY),
           banned(['../tests/**', '../tools/**', '**/tests/**', '**/tools/**'], NO_TESTS),
         ],
       ),
@@ -143,7 +155,7 @@ export default tseslint.config(
         [
           banned(['node:*'], NODE_BUILTIN),
           banned(['react', 'react-dom', 'react/**', 'react-dom/**'], REACT_FREE),
-          banned([`${CLIENT}/**`, `${SESSION}/**`, `${UI}/**`, `!${UI_PROTOCOL}`], BARREL_ONLY),
+          banned([`${CLIENT}/**`, `${SESSION}/**`, `${UI}/**`, `!${UI_PROTOCOL}`, ...UI_STYLES], BARREL_ONLY),
           banned(['../tests/**', '../tools/**', '**/tests/**', '**/tools/**'], NO_TESTS),
         ],
       ),

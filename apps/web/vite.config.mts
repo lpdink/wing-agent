@@ -1,5 +1,3 @@
-import { fileURLToPath } from 'node:url';
-
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
@@ -17,38 +15,18 @@ import { defineConfig } from 'vite';
  *    `WING_DEV_GATEWAY=http://host:port pnpm dev`.
  * 2. **`build.outDir = dist`** — the directory step 03's `gateway.static_dir`
  *    serves, and the directory the screenshot fixture gateway hosts.
+ *
+ * There used to be a third: a `wing-ui-tokens` alias reaching into the package's
+ * `src/styles/tokens.css`, because the package imported that sheet from `mount.tsx`
+ * only and a component-consuming build tree-shook it away (rows lost their padding,
+ * the ask card its border — in production builds only). Step 06c fixed the package
+ * (the sheet is imported by the barrel, with `sideEffects` keeping it); step 08b
+ * removed the alias, and `tests/transcript.theme.test.ts` pins the fix instead.
  */
 const gateway = process.env['WING_DEV_GATEWAY'] ?? 'http://127.0.0.1:32523';
 
-/**
- * `@wing-agent/ui`'s token layer, named so a stylesheet can ask for it.
- *
- * The package ships its design tokens in `src/styles/tokens.css`, and it imports
- * them from **one** module: `src/mount.tsx` (`import './styles/tokens.css'`), the
- * entry a consumer reaches through `mountApp`. The web shell renders the package's
- * components directly instead of mounting its app, and `package.json` declares only
- * its stylesheets as side-effectful (the `sideEffects` glob) — so a bundler that
- * tree-shakes the unused
- * `mountApp` export drops `mount.tsx` *and with it the tokens*, leaving every
- * `var(--wing-*)` reference in the renderer's 500 rules resolving to nothing (rows
- * lose their padding, the ask card its border, …) while every `--vscode-*` rule
- * keeps working. It is invisible in `vite dev` (no tree-shaking) and in the VS Code
- * webview (it mounts `mountApp`), which is exactly why it is worth an alias and a
- * comment instead of a silent copy.
- *
- * The alias is the whole workaround: `src/ui-theme.css` imports it next to the
- * `--vscode-*` mapping. `tests/transcript.theme.test.ts` pins both ends (the package
- * still keeps its tokens there; this app still imports them), and the fix on the
- * package side is to import the stylesheet from a module every consumer loads (or to
- * export it as `./styles`) — when that lands, this alias disappears.
- */
-const UI_TOKENS = fileURLToPath(new URL('../../packages/ui/src/styles/tokens.css', import.meta.url));
-
 export default defineConfig({
   plugins: [react()],
-  resolve: {
-    alias: { 'wing-ui-tokens.css': UI_TOKENS },
-  },
   server: {
     proxy: {
       '/api': { target: gateway, changeOrigin: true },

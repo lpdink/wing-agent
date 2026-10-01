@@ -8,7 +8,7 @@
  * Contracts, in the order they are enforced:
  *
  * - the output directory defaults to the *current step's* task directory
- *   (`$WING_HOME/tasks/wing-app/08_web_transcript/shots` — each step's evidence lives
+ *   (`$WING_HOME/tasks/wing-app/08b_ui_swap/shots` — each step's evidence lives
  *   with its own design/task documents; 09/11 move this constant on), `--out` overrides it;
  * - every image must be ≤ 2 MiB — the acceptance rule is machine-checked, not
  *   eyeballed;
@@ -59,7 +59,7 @@ function parseArgs(argv: readonly string[]): Cli {
     process.env['WING_HOME'] ?? path.join(os.homedir(), '.wing'),
     'tasks',
     'wing-app',
-    '08_web_transcript',
+    '08b_ui_swap',
     'shots',
   );
   let only: string[] = [];
@@ -105,7 +105,7 @@ function printUsage(): void {
       'usage: node out/shot/shot.mjs [--only=name[,name]] [--out=DIR] [--browser=chrome|chromium|msedge|none] [--list]',
       '',
       '  --only      render only these scenes (names from --list)',
-      '  --out       output directory (default: $WING_HOME/tasks/wing-app/08_web_transcript/shots)',
+      '  --out       output directory (default: $WING_HOME/tasks/wing-app/08b_ui_swap/shots)',
       "  --browser   browser channel; `none` uses Playwright's bundled chromium",
       '  --list      print the scenes and exit',
       '',

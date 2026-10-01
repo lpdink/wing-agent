@@ -2,10 +2,11 @@
  * Small text helpers shared by the shell components.
  *
  * Kept out of the components so they are testable as plain functions and so the
- * vocabulary ("waiting for input", "reconnecting in 4s") has exactly one home.
+ * vocabulary ("waiting for input", "Reconnecting in 4s") has exactly one home.
+ * The connection *vocabulary* now lives with the indicator (`ConnectionStatus.tsx`)
+ * — the top-bar dot and status word it replaced are gone (step 08b).
  */
 
-import type { ConnectionView } from '../connection/runtime';
 import type { SessionRowStatus } from '../sessions/rows';
 
 /** Status text for the top bar / session rows. */
@@ -19,22 +20,6 @@ export function statusLabel(status: SessionRowStatus): string {
       return 'working';
     case 'waiting':
       return 'waiting for input';
-  }
-}
-
-/** Connection text for the top bar; the countdown makes a retry visible. */
-export function connectionLabel(view: ConnectionView): string {
-  switch (view.phase) {
-    case 'connected':
-      return 'connected';
-    case 'connecting':
-      return view.attempt === 0 ? 'connecting…' : `connecting… (attempt ${view.attempt + 1})`;
-    case 'reconnecting':
-      return view.reconnectInMs === null
-        ? 'reconnecting…'
-        : `reconnecting in ${Math.max(1, Math.ceil(view.reconnectInMs / 1_000))}s`;
-    case 'offline':
-      return view.unauthorized ? 'unauthorized' : 'offline';
   }
 }
 

@@ -14,7 +14,8 @@ import { describe, expect, it } from 'vitest';
  * `import()` / `require()`, and asserts:
  *
  * - `src/**` is the browser bundle: no node builtin, no `tests/` import, and no
- *   deep path into a workspace package (only its barrel is a contract);
+ *   deep path into a workspace package (only its barrel — plus the two declared
+ *   subpaths `@wing-agent/ui/protocol` and `@wing-agent/ui/styles/*` — is a contract);
  * - the framework-free core (`src/lib`, `src/settings`, `src/sessions`,
  *   `src/connection`) never imports React;
  * - `src/lib` and `src/settings` carry no session semantics;
@@ -32,18 +33,33 @@ const CLIENT = '@wing-agent/client';
 const SESSION = '@wing-agent/session';
 const UI = '@wing-agent/ui';
 /**
- * The one allowed subpath beside the barrels: `@wing-agent/ui/protocol` is that
- * package's declared DOM-free wire contract (its `exports` map has three entries,
- * and the package's own layer guard enumerates them). Everything else has to go
- * through the barrel, exactly like `@wing-agent/client` / `@wing-agent/session`.
+ * The allowed subpaths beside the barrels: `@wing-agent/ui/protocol` is that
+ * package's declared DOM-free wire contract, and `@wing-agent/ui/styles/*.css` its
+ * declared theme sheets (both are entries of its `exports` map, and the package's
+ * own layer guard enumerates them). Everything else has to go through the barrel,
+ * exactly like `@wing-agent/client` / `@wing-agent/session`.
  */
 const UI_PROTOCOL = '@wing-agent/ui/protocol';
+/**
+ * …and the second: the five theme sheets of the package's `./styles/*` export.
+ * `src/main.tsx` imports them once (they are the ported design tokens the shared
+ * cards are drawn with); nothing else may reach into the package, and the sheets
+ * themselves are CSS, so they cannot smuggle code into the bundle.
+ */
+const UI_STYLES = [
+  '@wing-agent/ui/styles/design-platform.css',
+  '@wing-agent/ui/styles/base.css',
+  '@wing-agent/ui/styles/scrollbar.css',
+  '@wing-agent/ui/styles/focus.css',
+  '@wing-agent/ui/styles/shiki.css',
+] as const;
 
 const SRC_EXTERNALS = [
   CLIENT,
   SESSION,
   UI,
   UI_PROTOCOL,
+  ...UI_STYLES,
   'react',
   'react-dom',
   'react-dom/client',

@@ -15,11 +15,11 @@ import type { PageLocation } from '../settings/urls';
 
 import type { ShellActions } from './App';
 import { ConnectionBanner } from './ConnectionBanner';
+import { ConnectionStatus } from './ConnectionStatus';
 import { NoticeStack } from './NoticeStack';
 import { SessionList } from './SessionList';
 import { SessionPane } from './SessionPane';
 import { SettingsDialog } from './SettingsDialog';
-import { connectionLabel } from './labels';
 
 export interface ShellProps {
   readonly snapshot: RuntimeSnapshot;
@@ -64,16 +64,10 @@ export function Shell({ snapshot, actions, location, settingsPersistent = true }
           </span>
         </div>
         <div className="topbar__status">
-          <span className={`dot dot--${connection.phase}`} aria-hidden="true" />
-          <span className="topbar__status-text">{connectionLabel(connection)}</span>
+          <ConnectionStatus view={connection} onReconnect={actions.reconnect} />
           <span className="topbar__address" title={connection.address}>
             {connection.address}
           </span>
-          {connection.phase === 'offline' ? (
-            <button type="button" className="button" onClick={actions.reconnect}>
-              Reconnect
-            </button>
-          ) : null}
           <button type="button" className="button" onClick={openSettings}>
             Settings
           </button>
