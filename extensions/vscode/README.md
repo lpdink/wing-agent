@@ -122,8 +122,14 @@ member; the shared TypeScript packages live under `packages/`.
 ```
 packages/client/  @wing-agent/client — gateway capability layer: protocol mirror, WS/HTTP clients,
                   chunk reassembly, reconnect. Environment-agnostic (its own tsconfigs + gates).
-src/shared/       contract types shared by both sides — types, constants, pure helpers. No vscode, no DOM, no node.
-src/host/         extension host: WingHost (connection lifecycle) + SessionManager (tabs, control plane, reduction) + bridge.
+packages/session/ @wing-agent/session — session reduction layer: the cell/session view model, SessionRecord
+                  (+ the CellPatch contract), applyLive/applySync (the one path that makes replay == live),
+                  the pure derivations (titles, tool rows, diffs, asks, partial JSON) and the command
+                  table. Its only dependency is @wing-agent/client; host-side orchestration stays here.
+src/shared/       the host ⇄ webview bridge protocol: message unions, runtime guards, channel constants.
+                  The session model and the command table live in @wing-agent/session (imported, never
+                  redeclared). No vscode, no DOM, no node.
+src/host/         extension host: WingHost (connection lifecycle) + SessionManager (tabs, control plane, reduction host) + bridge.
 src/webview/      React renderer: applies host-produced ops, renders the chat shell.
 src/testing/      fixtures + scripted host (test and preview only).
 preview/          preview harness: the webview app against the scripted host, without VS Code.
@@ -142,11 +148,11 @@ Host-produced overlays (`panels.modelPicker` / `sessionPicker` / `branchPicker` 
 
 ### Layering is enforced by three mechanisms
 
-| Mechanism                                   | Catches                                                                                                                  | Runs in                           |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------- |
-| Split tsconfigs (`lib` / `types` per layer) | DOM globals in `core`/`host`/`shared`; node globals in `webview`/`shared`                                                | `pnpm run typecheck`              |
-| ESLint zones (`no-restricted-imports`)      | `vscode` outside `host`, `host → webview`, `webview → host/core`, `src/testing` in product code                          | `pnpm run lint`                   |
-| `tests/layers/layers.test.ts`               | the full matrix: static/dynamic imports, re-exports, `require`, node builtins, unresolved paths, hardcoded colors in CSS | `pnpm run test` (`make test`, CI) |
+| Mechanism                                                                     | Catches                                                                                                                                                       | Runs in                           |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
+| Split tsconfigs (`lib` / `types` per layer) plus the packages' probe projects | DOM globals in `host`/`shared`; node globals in `webview`/`shared`; and, inside `packages/*`, both directions (a src-only node probe and a DOM probe)         | `pnpm run typecheck`              |
+| ESLint zones (`no-restricted-imports`, `no-restricted-globals`)               | `vscode` outside `host`, `host → webview`, `webview → the gateway layer`, `src/testing` in product code, a deep path into a package, DOM globals in a package | `pnpm run lint`                   |
+| `tests/layers/layers.test.ts`                                                 | the full matrix: static/dynamic imports, re-exports, `require`, node builtins, unresolved paths, hardcoded colors in CSS                                      | `pnpm run test` (`make test`, CI) |
 
 A violating import therefore fails `make check` **and** `make test`; the layer guard test is the
 authoritative one because it resolves the actual import graph instead of pattern matching.

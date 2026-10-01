@@ -91,6 +91,40 @@ describe('replay == live', () => {
     expect(replayed.status).toBe('idle');
   });
 
+  it('replays the assistant text above the tool calls it announces (stream order)', () => {
+    // One assistant message that carries *both* text and tool calls — the shape the
+    // projection produces for every "let me look at that" sentence followed by a call.
+    // The live lane renders it in stream order (text, then the calls), so the replay
+    // must too: pushing the calls first would put the sentence below its own tool
+    // card, with a ReAct separator in between. This is the case the projection-order
+    // comment in `applyMessageProjection` exists for; without it a reordering there
+    // stays invisible inside this package.
+    const live = makeRecord();
+    applyLive(live, turnStarted());
+    applyLive(live, text('Now let me run it'));
+    applyLive(live, toolCall({ toolCallId: 'tc-1', toolName: 'Bash', toolArgs: { command: 'ls' } }));
+
+    const replayed = makeRecord();
+    applySync(
+      replayed,
+      syncSession({
+        status: 'working',
+        messages: [
+          message({
+            role: 'assistant',
+            content: 'Now let me run it',
+            toolCalls: [{ id: 'tc-1', name: 'Bash', arguments: { command: 'ls' } }],
+          }),
+        ],
+      }),
+    );
+
+    // No separator: the text and its calls are one streamed message, not two rounds.
+    expect(kinds(live.cells)).toEqual(['assistant', 'tool_call']);
+    expect(kinds(replayed.cells)).toEqual(kinds(live.cells));
+    expect(stableCells(replayed.cells)).toEqual(stableCells(live.cells));
+  });
+
   it('restores a turn that is still running, including its streaming text', () => {
     const live = makeRecord();
     applyLive(live, turnStarted());

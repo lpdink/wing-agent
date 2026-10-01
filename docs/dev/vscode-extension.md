@@ -118,8 +118,9 @@ ESLint 的 `paths` 禁区一起守；包自己那套「环境无关」门禁随�
 单靠一套都拦不住，这是被 01 的评审逐条确认过的结构：
 
 1. **分 tsconfig 的 `lib`/`types`**（`tsconfig.node.json` 无 DOM、`tsconfig.webview.json` 无
-   node/vscode；`packages/client` 另有「无 DOM 的主项目 + 无 node 的 DOM 探针」）——写
-   `document`/`process` 直接编译错误。它管「用了什么全局」。
+   node/vscode；两个包各有两个探针项目：纯 `src/` 的 node 探针（无 DOM，`document` 编译错误）与
+   无 node 类型的 DOM 探针（裸 `process` 编译错误）——主项目因为要带上 vitest config（jsdom 类型
+   会把 DOM lib 拉进来）而**不能**承担 DOM 方向，探针才是那道门）。它管「用了什么全局」。
 2. **ESLint zones**（`eslint.config.mjs` 的 `no-restricted-imports`）——`vscode` 出 `host`、
    `host → webview`、`webview → 网关能力层（`@wing-agent/client`）`、产品代码引用 `src/testing` 都在编辑时就红。
    它管「常见越层 import」，但表达不了完整矩阵（静态/动态 import、re-export、`require`）。
@@ -542,7 +543,7 @@ pnpm run lint          # eslint（含层门禁 zone）
 pnpm run format:check  # prettier
 
 # 仓库根（连同两个包）
-pnpm run test          # 594（扩展）+ 195（client）+ 104（session）
+pnpm run test          # 594（扩展）+ 195（client）+ 105（session）
 pnpm run typecheck
 ```
 
@@ -706,11 +707,11 @@ pnpm run typecheck && pnpm run lint && pnpm run format:check
 pnpm run test                 # 全部包的 vitest（含两套层守门）
 
 # 包（cd packages/session）
-pnpm run test          # 104 用例（含包自己的 import 图守门）
-pnpm run typecheck     # tsc --noEmit × 2 projects（无 DOM 主项目 + 无 node 的 DOM 探针）
+pnpm run test          # 105 用例（含包自己的 import 图守门）
+pnpm run typecheck     # tsc --noEmit × 3 projects（主项目 + 纯 src 的 node 探针 + 无 node 的 DOM 探针）
 
 # 扩展自身（cd extensions/vscode）
-pnpm run test                 # 只跑本扩展（40 文件 / 648 用例）
+pnpm run test                 # 只跑本扩展（38 文件 / 594 用例）
 pnpm run build && pnpm run build:preview
 pnpm run package              # → wing-vscode.vsix
 pnpm run smoke:gateway        # 12 场景（真网关 + 假 Provider）

@@ -11,9 +11,15 @@ import tseslint from 'typescript-eslint';
  * dependency beyond that one package. Three mechanisms keep that honest, exactly
  * like the layering gates in `extensions/vscode` (docs/dev/vscode-extension.md §2.3):
  *
- * 1. the split tsconfigs — `tsconfig.json` has no DOM lib, `tsconfig.dom.json` has
- *    no node types, so writing `document` or a bare `process` fails one of them;
- * 2. these ESLint zones — the common violations are red while you type;
+ * 1. the split tsconfigs — `tsconfig.node-probe.json` (`src/**` only, no test
+ *    tooling) has no DOM lib, so `document` in `src/` is a compile error, and
+ *    `tsconfig.dom.json` has `types: []`, so a bare `process` fails there. The
+ *    *main* project deliberately carries both the tests and the vitest config
+ *    (jsdom's types bring the DOM lib into that program), which is exactly why the
+ *    src-only probe exists;
+ * 2. these ESLint zones — `no-restricted-imports` for the module boundaries and
+ *    `no-restricted-globals` for the DOM (see DOM_GLOBALS below); the common
+ *    violations are red while you type;
  * 3. `tests/layers.test.ts` — parses the real import graph of every source file
  *    (static imports, `export … from`, dynamic `import()`, `require()`). It is the
  *    authoritative gate and runs in `pnpm test`.
@@ -30,12 +36,12 @@ const OUTSIDE_BOUNDARY =
 /**
  * DOM globals the package must never touch.
  *
- * The tsconfig pair alone cannot enforce this direction any more: `types: ["node"]`
- * is required (the *tests* are node code, and they live in the same project), and
- * `@types/node` pulls `lib.dom.d.ts` in through its own `/// <reference lib="dom" />`
- * — so `document` type-checks in the main project. The browser direction still has a
- * real tsconfig gate (`tsconfig.dom.json` has `types: []`: a bare `process` fails
- * there), and the node direction is gated here.
+ * The lint-time half of the promise: `tsconfig.node-probe.json` already makes these a
+ * compile error in `src/` (the *main* project cannot — it carries the vitest config,
+ * whose jsdom types bring the DOM lib in), but a gate you only meet at `typecheck`
+ * time is easy to forget, and this one is red while you type. The browser direction
+ * is the other tsconfig: `tsconfig.dom.json` has `types: []`, so a bare `process`
+ * fails there.
  */
 const DOM_GLOBALS = ['document', 'window', 'navigator', 'localStorage', 'sessionStorage'];
 

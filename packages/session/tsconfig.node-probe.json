@@ -1,0 +1,9 @@
+{
+  "//": "Node probe: `src/**` only, compiled WITHOUT any test-tooling types — this is the project that actually enforces \"no DOM in src/\". It has to exist because `tsconfig.json` includes `vitest.config.mts` (so typescript-eslint's projectService can check it), and `vitest/config` re-exports jsdom's types, whose `reference lib=dom` directive silently adds the DOM lib to that whole program: `document` would compile clean there. Deliberately NOT referenced from `tsconfig.json` and NOT used by ESLint — typescript-eslint's projectService requires each file to belong to exactly one project; it exists to be run by `pnpm run typecheck`. Browser direction: `tsconfig.dom.json` (DOM lib, no node types).",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"]
+}

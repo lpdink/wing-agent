@@ -15,7 +15,7 @@
   "//sideEffects": "Every module here only defines types, constants and functions — nothing runs at import time. Declaring it lets a consumer that only needs the model (the webview renderer imports the cell types) tree-shake the reduction lane, and with it this package's own dependency on the gateway capability layer. Verified by the webview bundle artifact test in the extension.",
   "sideEffects": false,
   "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.dom.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node-probe.json && tsc --noEmit -p tsconfig.dom.json",
     "lint": "eslint . --max-warnings=0",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
