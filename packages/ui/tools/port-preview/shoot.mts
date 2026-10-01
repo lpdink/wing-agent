@@ -8,22 +8,30 @@
  * talks to Chrome over the DevTools protocol instead: it navigates, waits for the
  * page's own readiness flag (`document.documentElement.dataset.previewReady`, set
  * by `main.tsx` once every fence that must highlight has), optionally runs one
- * action, optionally asserts a DOM condition, and only then captures — so the same
- * command produces the same frame every time. The assertion is printed, so the
- * evidence for a shot is in the log, not only in the picture.
+ * action, optionally asserts a DOM condition, grows the viewport to the page height
+ * and only then captures — so a shot's evidence (the highlighted-fence count and the
+ * assertion, both printed) does not depend on timing.
  *
- * Usage (from `packages/ui`; the built page must be served — see the port-preview
- * section of `design.md`):
+ * Known boundary: Chrome once returned a *tiled* frame (the page repeated across the
+ * image, at the dimensions that were asked for) in ~1 of 13 runs of the same
+ * command. The driver cannot detect that, so the shots this repository ships were
+ * hash-checked against re-captures (see the port-preview section of the step's
+ * `design.md`, `~/.wing/tasks/wing-app/06b_port_i/design.md`).
+ *
+ * Usage (from `packages/ui`; the built page must be served — the exact commands for
+ * the shipped shots are in the step's `design.md`):
  *
  *   node tools/port-preview/shoot.mts --url http://127.0.0.1:8791/ --out /tmp/a.png
  *   node tools/port-preview/shoot.mts --url …?section=code --action "<js>" --assert "<js>"
  *
- * Flags: `--width` / `--height` (CSS px, default 1100×1650), `--scale` (device pixel
- * ratio, default 1), `--timeout` (ms for readiness + assertion polls, default
- * 15000), `--action <js>` (evaluated once after readiness, awaited when it returns
- * a promise), `--assert <js>` (must evaluate truthy or the run fails), `--keep-open`
- * (leave the browser up for inspection). Chrome comes from `$CHROME` or the macOS
- * default path.
+ * Flags: `--width` / `--height` (CSS px, default 1100×1650 — the viewport starts
+ * there and grows to the page before the capture), `--scale` (device pixel ratio,
+ * default 1), `--timeout` (ms for readiness + assertion polls, default 15000),
+ * `--action <js>` (evaluated once after readiness, awaited when it returns a
+ * promise), `--assert <js>` (must evaluate truthy or the run fails), `--scrollbars`
+ * (keep the themed scrollbars visible; the no-wrap code card's horizontal one is
+ * evidence), `--keep-open` (leave the browser up for inspection). Chrome comes from
+ * `$CHROME` or the macOS default path.
  */
 
 import { spawn } from 'node:child_process';
