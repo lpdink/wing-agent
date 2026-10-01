@@ -42,70 +42,76 @@ fn inline_superscripts_for_acceptance_list() {
     inline(r"W^{T}", "Wᵀ");
 }
 
-/// 上标字形表逐条（小写 25 个 + 大写 18 个），码点写在第三个字段里。
+/// 上标字形表逐条（小写 25 个 + 大写 18 个）：期望字形由表里的**码点**导出并断言（N3）。
 #[test]
 fn inline_superscripts_cover_every_available_glyph() {
     // 小写 a–z：Unicode 里有上标字形的 25 个（唯一缺 `q`，见下一个用例）。
+    // (小写字母, 上标字形码点, 字符名)。期望字形由**码点**导出（`char::from_u32`），
+    // 所以下面注释里的码点就是断言的一部分 —— 写错码点必红（r1 的 N3）。
     let lowercase = [
-        ("a", "ᵃ", "U+1D43 MODIFIER LETTER SMALL A"),
-        ("b", "ᵇ", "U+1D47 MODIFIER LETTER SMALL B"),
-        ("c", "ᶜ", "U+1D9C MODIFIER LETTER SMALL C"),
-        ("d", "ᵈ", "U+1D48 MODIFIER LETTER SMALL D"),
-        ("e", "ᵉ", "U+1D49 MODIFIER LETTER SMALL E"),
-        ("f", "ᶠ", "U+1DA0 MODIFIER LETTER SMALL F"),
-        ("g", "ᵍ", "U+1D4D MODIFIER LETTER SMALL G"),
-        ("h", "ʰ", "U+02B0 MODIFIER LETTER SMALL H"),
-        ("i", "ⁱ", "U+2071 SUPERSCRIPT LATIN SMALL LETTER I"),
-        ("j", "ʲ", "U+02B2 MODIFIER LETTER SMALL J"),
-        ("k", "ᵏ", "U+1D4F MODIFIER LETTER SMALL K"),
-        ("l", "ˡ", "U+02E1 MODIFIER LETTER SMALL L"),
-        ("m", "ᵐ", "U+1D50 MODIFIER LETTER SMALL M"),
-        ("n", "ⁿ", "U+207F SUPERSCRIPT LATIN SMALL LETTER N"),
-        ("o", "ᵒ", "U+1D52 MODIFIER LETTER SMALL O"),
-        ("p", "ᵖ", "U+1D56 MODIFIER LETTER SMALL P"),
-        ("r", "ʳ", "U+02B3 MODIFIER LETTER SMALL R"),
-        ("s", "ˢ", "U+02E2 MODIFIER LETTER SMALL S"),
-        ("t", "ᵗ", "U+1D57 MODIFIER LETTER SMALL T"),
-        ("u", "ᵘ", "U+1D58 MODIFIER LETTER SMALL U"),
-        ("v", "ᵛ", "U+1D5B MODIFIER LETTER SMALL V"),
-        ("w", "ʷ", "U+02B7 MODIFIER LETTER SMALL W"),
-        ("x", "ˣ", "U+02E3 MODIFIER LETTER SMALL X"),
-        ("y", "ʸ", "U+02B8 MODIFIER LETTER SMALL Y"),
-        ("z", "ᶻ", "U+1DBB MODIFIER LETTER SMALL Z"),
+        ('a', 0x1D43, "MODIFIER LETTER SMALL A"),
+        ('b', 0x1D47, "MODIFIER LETTER SMALL B"),
+        ('c', 0x1D9C, "MODIFIER LETTER SMALL C"),
+        ('d', 0x1D48, "MODIFIER LETTER SMALL D"),
+        ('e', 0x1D49, "MODIFIER LETTER SMALL E"),
+        ('f', 0x1DA0, "MODIFIER LETTER SMALL F"),
+        ('g', 0x1D4D, "MODIFIER LETTER SMALL G"),
+        ('h', 0x02B0, "MODIFIER LETTER SMALL H"),
+        ('i', 0x2071, "SUPERSCRIPT LATIN SMALL LETTER I"),
+        ('j', 0x02B2, "MODIFIER LETTER SMALL J"),
+        ('k', 0x1D4F, "MODIFIER LETTER SMALL K"),
+        ('l', 0x02E1, "MODIFIER LETTER SMALL L"),
+        ('m', 0x1D50, "MODIFIER LETTER SMALL M"),
+        ('n', 0x207F, "SUPERSCRIPT LATIN SMALL LETTER N"),
+        ('o', 0x1D52, "MODIFIER LETTER SMALL O"),
+        ('p', 0x1D56, "MODIFIER LETTER SMALL P"),
+        ('r', 0x02B3, "MODIFIER LETTER SMALL R"),
+        ('s', 0x02E2, "MODIFIER LETTER SMALL S"),
+        ('t', 0x1D57, "MODIFIER LETTER SMALL T"),
+        ('u', 0x1D58, "MODIFIER LETTER SMALL U"),
+        ('v', 0x1D5B, "MODIFIER LETTER SMALL V"),
+        ('w', 0x02B7, "MODIFIER LETTER SMALL W"),
+        ('x', 0x02E3, "MODIFIER LETTER SMALL X"),
+        ('y', 0x02B8, "MODIFIER LETTER SMALL Y"),
+        ('z', 0x1DBB, "MODIFIER LETTER SMALL Z"),
     ];
-    // 大写：Unicode 里有上标字形的 18 个（缺 C F Q S X Y Z —— 见下一个用例）。
+    // 大写：Unicode 里有上标字形的 18 个。不收的是 `S X Y Z`（UCD 里根本没有上标字形）
+    // 与 `C F Q`（有码位：U+A7F2 / U+A7F3 / U+A7F4，MODIFIER LETTER CAPITAL C/F/Q，
+    // Unicode 14 起 —— 新版码位、字体覆盖差，与 `q` 的 U+107A5 同类，故不收）。
+    // 理由详见 `grid/layout.rs` 的注释。
     let uppercase = [
-        ("A", "ᴬ", "U+1D2C MODIFIER LETTER CAPITAL A"),
-        ("B", "ᴮ", "U+1D2E MODIFIER LETTER CAPITAL B"),
-        ("D", "ᴰ", "U+1D30 MODIFIER LETTER CAPITAL D"),
-        ("E", "ᴱ", "U+1D31 MODIFIER LETTER CAPITAL E"),
-        ("G", "ᴳ", "U+1D33 MODIFIER LETTER CAPITAL G"),
-        ("H", "ᴴ", "U+1D34 MODIFIER LETTER CAPITAL H"),
-        ("I", "ᴵ", "U+1D35 MODIFIER LETTER CAPITAL I"),
-        ("J", "ᴶ", "U+1D36 MODIFIER LETTER CAPITAL J"),
-        ("K", "ᴷ", "U+1D37 MODIFIER LETTER CAPITAL K"),
-        ("L", "ᴸ", "U+1D38 MODIFIER LETTER CAPITAL L"),
-        ("M", "ᴹ", "U+1D39 MODIFIER LETTER CAPITAL M"),
-        ("N", "ᴺ", "U+1D3A MODIFIER LETTER CAPITAL N"),
-        ("O", "ᴼ", "U+1D3C MODIFIER LETTER CAPITAL O"),
-        ("P", "ᴾ", "U+1D3E MODIFIER LETTER CAPITAL P"),
-        ("R", "ᴿ", "U+1D3F MODIFIER LETTER CAPITAL R"),
-        ("T", "ᵀ", "U+1D40 MODIFIER LETTER CAPITAL T"),
-        ("U", "ᵁ", "U+1D41 MODIFIER LETTER CAPITAL U"),
-        ("V", "ⱽ", "U+2C7D MODIFIER LETTER CAPITAL V"),
-        ("W", "ᵂ", "U+1D42 MODIFIER LETTER CAPITAL W"),
+        ('A', 0x1D2C, "MODIFIER LETTER CAPITAL A"),
+        ('B', 0x1D2E, "MODIFIER LETTER CAPITAL B"),
+        ('D', 0x1D30, "MODIFIER LETTER CAPITAL D"),
+        ('E', 0x1D31, "MODIFIER LETTER CAPITAL E"),
+        ('G', 0x1D33, "MODIFIER LETTER CAPITAL G"),
+        ('H', 0x1D34, "MODIFIER LETTER CAPITAL H"),
+        ('I', 0x1D35, "MODIFIER LETTER CAPITAL I"),
+        ('J', 0x1D36, "MODIFIER LETTER CAPITAL J"),
+        ('K', 0x1D37, "MODIFIER LETTER CAPITAL K"),
+        ('L', 0x1D38, "MODIFIER LETTER CAPITAL L"),
+        ('M', 0x1D39, "MODIFIER LETTER CAPITAL M"),
+        ('N', 0x1D3A, "MODIFIER LETTER CAPITAL N"),
+        ('O', 0x1D3C, "MODIFIER LETTER CAPITAL O"),
+        ('P', 0x1D3E, "MODIFIER LETTER CAPITAL P"),
+        ('R', 0x1D3F, "MODIFIER LETTER CAPITAL R"),
+        ('T', 0x1D40, "MODIFIER LETTER CAPITAL T"),
+        ('U', 0x1D41, "MODIFIER LETTER CAPITAL U"),
+        ('V', 0x2C7D, "MODIFIER LETTER CAPITAL V"),
+        ('W', 0x1D42, "MODIFIER LETTER CAPITAL W"),
     ];
 
-    for (base, sup, codepoint) in lowercase.iter().chain(uppercase.iter()) {
+    for (base, codepoint, name) in lowercase.iter().chain(uppercase.iter()) {
+        let sup = char::from_u32(*codepoint)
+            .unwrap_or_else(|| panic!("U+{codepoint:04X} 不是合法码点（{name}）"));
         let got = render_inline(&format!("X^{base}"))
-            .unwrap_or_else(|| panic!("X^{base} 应当行内渲染（{codepoint}）"));
-        assert_eq!(got, format!("X{sup}"), "字形不符：{codepoint}");
-        // 字形必须是**单个字符**且占**一列**（宽度记账进网格，多列会撑坏排版）
-        assert_eq!(sup.chars().count(), 1, "不是一个字符：{codepoint}");
+            .unwrap_or_else(|| panic!("X^{base} 应当行内渲染（U+{codepoint:04X} {name}）"));
+        assert_eq!(got, format!("X{sup}"), "字形不符：U+{codepoint:04X} {name}");
+        // 字形必须占**一列**（宽度记账进网格，多列会撑坏排版）
         assert_eq!(
-            unicode_width::UnicodeWidthChar::width(sup.chars().next().unwrap()),
+            unicode_width::UnicodeWidthChar::width(sup),
             Some(1),
-            "字形宽度不是 1 列：{codepoint}"
+            "字形宽度不是 1 列：U+{codepoint:04X} {name}"
         );
     }
 }
@@ -143,13 +149,13 @@ fn missing_superscript_glyphs_still_fall_back_to_stacking() {
     // 上层显示源码）。这是**刻意保留**的语义（任务书：「缺失字形维持既有堆叠回退语义」）。
     for src in [
         r"x^q",        // 小写 q：只有 Latin Extended-F 的 U+107A5，字体基本没有
-        r"x^C",        // 大写 C：Unicode 无上标字形
-        r"x^F",        // 大写 F
-        r"x^Q",        // 大写 Q
-        r"x^S",        // 大写 S
-        r"x^X",        // 大写 X
-        r"x^Y",        // 大写 Y
-        r"x^Z",        // 大写 Z
+        r"x^C",        // 大写 C：有码位 U+A7F2（Unicode 14 起）但字体覆盖差，不收（同 q）
+        r"x^F",        // 大写 F：U+A7F3，同上
+        r"x^Q",        // 大写 Q：U+A7F4，同上
+        r"x^S",        // 大写 S：UCD 里没有上标字形
+        r"x^X",        // 大写 X：UCD 里没有上标字形
+        r"x^Y",        // 大写 Y：UCD 里没有上标字形
+        r"x^Z",        // 大写 Z：UCD 里没有上标字形
         r"e^{\pi}",    // 希腊字母 π：无上标字形
         r"e^{i\pi}",   // 混合：只要有一个字符没有字形就整体回退
         r"x^{\alpha}", // 拉丁命令产出的希腊字母同理
@@ -186,13 +192,30 @@ fn symbol_table_additions() {
 #[test]
 fn transpose_has_an_inline_form_via_top() {
     // `\top` 在**正文**位置是 ⊤，在**上标**位置是 ᵀ（`to_superscript_char` 的特例）。
-    inline(r"\top", "⊤");
-    inline(r"A^\top", "Aᵀ");
-    inline(r"A^{\top}", "Aᵀ");
+    // 期望字形由码点导出（N3）：ᵀ = U+1D40 MODIFIER LETTER CAPITAL T，⊤ = U+22A4 DOWN TACK。
+    let sup_t = char::from_u32(0x1D40).unwrap(); // MODIFIER LETTER CAPITAL T（上标形态）
+    let top = char::from_u32(0x22A4).unwrap(); // DOWN TACK（正文形态）
+    inline(r"\top", &top.to_string());
+    inline(r"A^\top", &format!("A{sup_t}"));
+    inline(r"A^{\top}", &format!("A{sup_t}"));
     // 用户直接写 Unicode ⊤ 也走同一条路
-    inline(r"A^⊤", "Aᵀ");
+    inline(r"A^⊤", &format!("A{sup_t}"));
+    // 大括号内的尾随空格不再把上标挤出字形路径（r1 的 S1 收窄）
+    inline(r"x^{\top }", &format!("x{sup_t}"));
     // 对照：`\perp`（⊥）同为 ⊤/⊥ 族、同样不是二元算子，正文位置不带间距
     inline(r"\perp", "⊥");
+}
+
+/// 现状登记（N2）：`⊤` **不是**二元算子 —— `is_spaced_operator` 里没有它，所以 `\top`
+/// 自己不贡献任何间距（`a\top b` 只有源里 / 退回输入流的空格，没有两侧间距）。
+///
+/// 这条断言同时钉住 design D4 的决策：把 `U+22A4` 加进间距集会让下面第一行变成
+/// `a ⊤ b`（变异实验可判）。
+#[test]
+fn transpose_symbol_is_not_a_binary_operator() {
+    inline(r"a\top b", "a⊤ b"); // 无间距：只有命令后那个语义空格
+    inline(r"a \top b", "a ⊤ b"); // 源里两侧都写了空格
+    inline(r"a\perp b", "a⊥ b"); // ⊥ 同理（对照组）
 }
 
 #[test]
@@ -233,10 +256,75 @@ fn symbol_command_keeps_its_trailing_space() {
     inline(r"\pi x", "π x");
     inline(r"pi x", "π x");
     inline(r"\alpha x", "α x");
+    // 命令后面是另一个**命令**（同样是一个对象）时也保留
+    inline(r"\pi \alpha", "π α");
     // 上标位置不受影响：空格落在上标之后，不会污染上标参数
     inline(r"w^\top x", "wᵀ x");
     // 相邻空白仍然折叠成一个
     inline(r"\pi  x", "π x");
+}
+
+/// 回归（r1 的 S1）：退回的空格**只在下一位是另一个对象时才保留**。下一位是上下标、
+/// 右定界符、环境分隔符或标点时不能退 —— 否则本来正确的结果会坏掉：
+/// 上标挂到空格上、大括号内尾随空格把整条公式踢回源码、`cases` 单元格多占一列。
+#[test]
+fn symbol_command_space_does_not_detach_scripts_or_punctuation() {
+    // 上下标必须仍然挂在符号上（改前实测：`π ²` / `π ₂` / `ε ₀`）
+    inline(r"\pi ^2", "π²");
+    inline(r"\pi ^{2}", "π²");
+    inline(r"\pi _2", "π₂");
+    inline(r"\epsilon _0", "ε₀");
+    // 撇号同样贴前一个对象
+    inline(r"\pi ' x", "π' x");
+    // 大括号内的尾随空格不再让上标掉回源码（`x^{\top }` == `x^{\top}`）
+    assert_eq!(
+        render_inline(r"x^{\top }"),
+        render_inline(r"x^{\top}"),
+        "大括号里的尾随空格不该改变结果"
+    );
+    // 标点紧贴前一个对象排版（不保留空格）
+    inline(r"\pi , x", "π, x");
+    inline(r"\pi ; x", "π; x");
+    inline(r"\pi . x", "π. x");
+    inline(r"\pi : x", "π: x");
+    // 输入结束时的尾随空格没有对象可分隔（渲染结果不受影响）
+    inline(r"x + \pi ", "x + π");
+    // 显示形态：上下标、分式线宽、环境列宽都回到"空格被吃掉"的尺寸
+    let sum = render_display(r"\sum_{i=1}^{n} \pi _i", 40).unwrap();
+    assert_eq!(sum.lines(), ["  n", "  ∑   πᵢ", "i = 1"]);
+    let sup_sub = render_display(r"\pi _\theta ^2", 40).unwrap();
+    assert_eq!(sup_sub.lines(), [" 2", "π", " θ"]);
+    let frac = render_display(r"\frac{\pi }{2}", 40).unwrap();
+    assert_eq!(frac.lines(), [" π", "───", " 2"]);
+    // `&` 之后的分隔符形态：`cases` 单元格不 trim（见下一个用例），列宽必须是 10
+    let cases = render_display(r"\begin{cases} \pi & a \\ b & c \end{cases}", 40).unwrap();
+    assert_eq!(cases.width(), 10, "{:?}", cases.lines());
+}
+
+/// 现状登记（N4）：`cases` 的值单元格**不 trim** 首尾空白 —— `matrix` / `array` /
+/// `aligned` 都走 `trim_node`，`layout_cases` 不走，所以源里 `a` 后面的空格会留下来
+/// （`{ a   if  b` 里 `if` 前是 3 个空格），矩阵的同形输入已被 trim。
+/// 见 `docs/dev/tui-rendering.md` 第四节「已知边界」。
+#[test]
+fn cases_cells_keep_trailing_blank_that_matrix_trims() {
+    let cases = render_display(r"\begin{cases} a & b \end{cases}", 60).unwrap();
+    assert_eq!(cases.lines(), ["{ a   if  b"]);
+    let matrix = render_display(r"\begin{pmatrix} a & b \end{pmatrix}", 60).unwrap();
+    assert_eq!(matrix.lines(), ["(a  b)"]);
+    assert_eq!(matrix.width(), 6);
+}
+
+/// 现状登记（N5）：大括号内写尾随空格会让上标整条回退（`x^{d }` → 源码），因为
+/// `extract_flat_text` 不 trim，`to_superscript_char(' ')` 又是 `None`。三个版本一致、
+/// 非本轮引入 —— 本改动让 `x^{d}` 能渲染后容易误以为"多打一个空格也行"。
+/// 见 `docs/dev/tui-rendering.md` 第四节「已知边界」。
+#[test]
+fn trailing_space_inside_superscript_braces_still_falls_back() {
+    assert_eq!(render_inline(r"x^{d }"), None);
+    assert_eq!(render_inline(r"W^{T }"), None);
+    // 对照：不带空格的同一写法照常行内渲染
+    inline(r"x^{d}", "xᵈ");
+    inline(r"W^{T}", "Wᵀ");
 }
 
 // ============================================================
