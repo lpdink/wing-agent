@@ -292,9 +292,9 @@ impl ImageOpts {
 ///
 /// Off-screen inputs are impossible: the cap is the box the fit is computed
 /// against, and a fit never grows its box, so the answer is already inside
-/// [`MIN_ANCHOR_ROWS`]..=[`MAX_ANCHOR_ROWS`]. The clamp is kept as the written
-/// contract (and it is the guard that makes the lower bound explicit — the fit's
-/// own `max(…, 1)` is one layer down).
+/// [`MIN_ANCHOR_ROWS`]..=[`MAX_ANCHOR_ROWS`]. The clamp stays as the written
+/// contract; structurally it is an identity here (a degenerate input returns
+/// [`MIN_ANCHOR_ROWS`] above, and the fit's own `max(…, 1)` floors the rest).
 ///
 /// Total: a zero width, a degenerate shape (`px_h == 0`) or a degenerate cell
 /// answers [`MIN_ANCHOR_ROWS`] rather than panicking. The parse layer rejects
