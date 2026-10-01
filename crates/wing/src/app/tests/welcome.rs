@@ -49,7 +49,10 @@ fn welcome_header_shows_brand_version_and_tip() {
     let mut app = test_app();
     let body = frame_body(&mut app, 100, 30);
 
-    assert!(body.contains("✦ wing"), "wordmark 在首帧里：\n{body}");
+    assert!(
+        compact(&body).contains("wing·dev"),
+        "文本形态的 brand + 版本在首帧里：\n{body}"
+    );
     assert!(
         body.contains("dev"),
         "开发构建显示 dev 而不是 v0.0.0：\n{body}"
@@ -80,11 +83,19 @@ fn welcome_header_never_carries_the_retired_release_notes() {
 fn narrow_terminal_drops_the_art_before_the_text() {
     let mut app = test_app();
     let body = frame_body(&mut app, 40, 30);
-    assert!(body.contains("✦ wing"), "窄屏也要有 wordmark：\n{body}");
+    let compacted = compact(&body);
     assert!(
-        !body.contains('█') && !body.contains('▀') && !body.contains('▄'),
-        "窄屏先撤标记：\n{body}"
+        compacted.contains("wing") && compacted.contains("dev·"),
+        "窄屏也要有 wordmark + 版本：\n{body}"
     );
+    // 海鸥撤了：它的琥珀喙 / 脚是只有海鸥才用的颜色，拿它当海鸥的指纹。
+    let amber = ratatui::style::Color::Rgb(245, 169, 60);
+    let gull_present = app.chat.header_lines().iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.style.fg == Some(amber) || span.style.bg == Some(amber))
+    });
+    assert!(!gull_present, "窄屏先撤海鸥：\n{body}");
 }
 
 #[test]

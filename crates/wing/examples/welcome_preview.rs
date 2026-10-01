@@ -31,6 +31,7 @@ use ratatui::style::Modifier;
 use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr;
 use wing::config::ThemePalette;
+use wing::ui::welcome::SWEEP_MS;
 use wing::ui::welcome::Welcome;
 
 /// 前景 / 背景的 SGR 参数（`38;` / `48;` 之后接的那一段）。
@@ -117,16 +118,25 @@ fn render_line(line: &Line<'_>, width: u16, plain: bool) -> String {
 }
 
 /// 画一块：宽度 `width`，扫光进度 `phase`（`None` = 已定格）。
-fn draw(width: u16, phase: Option<f32>, plain: bool, out: &mut String) {
+///
+/// `working` = agent 在干活（海鸥切飞行扇翅）；`ms` = 开屏后多久（落在哪个
+/// 动作帧上，方便把眨眼 / 抖翅 / 跳单独打出来看）。
+fn draw(width: u16, phase: Option<f32>, working: bool, ms: u64, plain: bool, out: &mut String) {
     let palette = ThemePalette::default();
     let started = Instant::now();
     let mut welcome = Welcome::new(2, started);
-    let now = started + Duration::from_millis((phase.unwrap_or(1.0) * 2_000.0) as u64);
-    let lines = welcome.build(&palette, width, now);
+    let sweep_ms = phase.map_or(SWEEP_MS + 1, |p| (p * SWEEP_MS as f32) as u64);
+    let now = started + Duration::from_millis(sweep_ms.max(ms));
+    let lines = welcome.build(&palette, width, now, working, true);
 
     let label = match phase {
         Some(p) => format!("width={width} sweep={:.0}%", p * 100.0),
-        None => format!("width={width} settled"),
+        None => format!("width={width} settled @{ms}ms"),
+    };
+    let label = if working {
+        format!("{label} working")
+    } else {
+        label
     };
     let dashes = "─".repeat((width as usize).saturating_sub(label.len() + 4));
     let _ = writeln!(out, "── {label} {dashes}");
@@ -145,19 +155,26 @@ fn argument(name: &str) -> Option<String> {
 
 fn main() {
     let plain = std::env::args().any(|a| a == "--plain");
+    let working = std::env::args().any(|a| a == "--working");
     let width = argument("--width").and_then(|v| v.parse::<u16>().ok());
     let phase = argument("--phase").and_then(|v| v.parse::<f32>().ok());
+    let ms = argument("--ms")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
 
     let mut out = String::new();
     match width {
-        Some(width) => draw(width, phase, plain, &mut out),
+        Some(width) => draw(width, phase, working, ms, plain, &mut out),
         None => {
             for width in [120u16, 96, 80, 70, 60, 40, 24] {
-                draw(width, None, plain, &mut out);
+                draw(width, None, false, 0, plain, &mut out);
             }
             for phase in [0.0f32, 0.25, 0.5, 0.75] {
-                draw(96, Some(phase), plain, &mut out);
+                draw(96, Some(phase), false, 0, plain, &mut out);
             }
+            // 两个姿态各来一张：待机标准姿势 / 干活飞行。
+            draw(96, None, false, 0, plain, &mut out);
+            draw(96, None, true, 0, plain, &mut out);
         }
     }
     let mut stdout = std::io::stdout();

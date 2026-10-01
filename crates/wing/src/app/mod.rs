@@ -211,6 +211,8 @@ impl App {
             &palette,
             crate::ui::input_area::chrome::UNFRAMED_WIDTH,
             now,
+            false,
+            true,
         ));
         Self {
             status: StatusData::default(),
@@ -253,17 +255,23 @@ impl App {
 
     /// 按当前宽度 / 时刻决定要不要重建欢迎屏 header，要就重建。
     ///
-    /// 每帧调用：扫光期间逐帧重建（进度在走），定格后只有宽度变了才重建一次
-    /// —— 静态 header 不该每帧重新分配。`welcome == None`（测试关掉了）时
+    /// 每帧调用：海鸥动作 / 开屏扫光期间逐帧重建，定格且姿态没到点就一次不建
+    /// —— 动画 header 不该每帧重新分配。`welcome == None`（测试关掉了）时
     /// 什么都不做，header 由调用方自己管。
+    ///
+    /// 两个门控信号：**干活**（`turn.working`，决定站姿还是飞行）与**在视口里**
+    /// （`ChatView::header_in_view`）—— 欢迎屏被滚出去之后整条时钟停摆，
+    /// 常驻 idle 循环因此常态零成本。
     fn sync_welcome(&mut self, palette: &ThemePalette, width: u16, now: std::time::Instant) {
         let Some(welcome) = self.welcome.as_mut() else {
             return;
         };
-        if !welcome.needs_rebuild(width, now) {
+        let working = self.turn.working;
+        let visible = self.chat.header_in_view();
+        if !welcome.needs_rebuild(width, now, working, visible) {
             return;
         }
-        let lines = welcome.build(palette, width, now);
+        let lines = welcome.build(palette, width, now, working, visible);
         self.chat.set_header(lines);
     }
 
@@ -1067,9 +1075,13 @@ pub async fn run_app(
             // (the 100 ms system tick is too coarse for it) until it settles —
             // then the arm parks. chat_dirty (not input_dirty): the frame gate
             // may coalesce it, and no key is waiting on this frame.
-            _ = welcome_sweep_tick(
-                app.welcome.as_ref().and_then(|w| w.next_frame(std::time::Instant::now())),
-            ) => {
+            _ = welcome_sweep_tick(app.welcome.as_ref().and_then(|w| {
+                w.next_frame(
+                    std::time::Instant::now(),
+                    app.turn.working,
+                    app.chat.header_in_view(),
+                )
+            })) => {
                 app.chat_dirty = true;
             }
             // Background fetch results (non-blocking HTTP queries).

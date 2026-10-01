@@ -127,6 +127,14 @@ pub struct ChatView {
 }
 
 impl ChatView {
+    /// 欢迎屏 header 还在视口里吗（顶部若干行没被滚出去）。
+    ///
+    /// 欢迎屏的常驻 idle 动画靠它门控：滚出去就停摆，滚回来续上 ——
+    /// 看不见的东西不花钱。
+    pub(crate) fn header_in_view(&self) -> bool {
+        self.scroll_offset < self.header_lines.len()
+    }
+
     pub fn new() -> Self {
         Self {
             cells: Vec::new(),
