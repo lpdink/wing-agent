@@ -10,6 +10,10 @@
  * - the **transcript renderer**: one component per cell kind, incremental markdown
  *   (markdown-it + shiki + KaTeX), the composer, the shell (tab bar / status row /
  *   welcome) and the host-owned overlays;
+ * - the **code and tool cards**: the shared `CodeBlock` / `CodeToolbar`, the
+ *   `TerminalBlock` (ANSI output) and the `DiffBlock` (host-windowed diffs) — the
+ *   wing-app surface, styled by the token sheets under `styles/` (see the
+ *   `./styles/*` export; a shell imports those once, this barrel does not);
  * - the **mirror**: a zustand store that follows the host's model (`hydrate` /
  *   `patch` / `state` / `panels` / `tabs` / `ui`) and never invents content, plus
  *   the bridge controller that is the only writer into it;
@@ -55,10 +59,37 @@ export * from './chat/Cells';
 export * from './chat/CellView';
 export * from './chat/FileReference';
 export * from './chat/Markdown';
-export * from './chat/interaction';
+// `interaction.ts` and the ported clipboard hook both export `useCopyFeedback`, with
+// different shapes: the renderer's returns the `[copied, report]` tuple its cells
+// drive after the host acknowledged a copy, the card hook owns the clipboard write.
+// The renderer's keeps the bare name; the card hook is exported as
+// `useClipboardFeedback`, so both stay reachable and neither is ambiguous.
+export {
+  COPY_FEEDBACK_MS,
+  resetCollapseOverrides,
+  useCollapsible,
+  useCopyFeedback,
+  type CollapsibleState,
+} from './chat/interaction';
 export * from './chat/markdown/highlight';
 export * from './chat/markdown/image';
 export * from './chat/markdown/math';
 export * from './chat/markdown/parse';
-export * from './chat/markdown/render';
+// Both the VS Code renderer (`render.tsx`) and the ported shared card export a
+// `CodeBlock`. The shared card owns the bare name (that is what a shell wires into
+// the transcript); the renderer's version stays reachable as `MarkdownCodeBlock`.
+export { CodeBlock as MarkdownCodeBlock, MarkdownNodes } from './chat/markdown/render';
 export * from './chat/markdown/split';
+export * from './components/Pill';
+export * from './components/StateDot';
+export * from './icons';
+export * from './markdown/CodeBlock';
+export * from './markdown/CodeToolbar';
+export * from './markdown/useViewportHighlighting';
+export * from './tool/DiffBlock';
+export * from './tool/FoldToggle';
+export * from './tool/TerminalBlock';
+export * from './tool/ansi';
+export * from './tool/clipboard';
+export * from './tool/head-tail-cap';
+export { useCopyFeedback as useClipboardFeedback } from './tool/use-copy-feedback';

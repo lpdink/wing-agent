@@ -33,7 +33,15 @@ export default defineConfig({
           name: 'jsdom',
           environment: 'jsdom',
           setupFiles: ['tests/setup/webview.ts'],
-          include: ['tests/webview/**/*.test.ts', 'tests/webview/**/*.test.tsx'],
+          include: [
+            'tests/webview/**/*.test.ts',
+            'tests/webview/**/*.test.tsx',
+            // The wing-app cards (port batch 06b) render on their own, outside the
+            // mounted app, so they get their own dirs.
+            'tests/markdown/**/*.test.tsx',
+            'tests/tool/**/*.test.ts',
+            'tests/tool/**/*.test.tsx',
+          ],
           css: { modules: { classNameStrategy: 'non-scoped' } },
         },
       },
