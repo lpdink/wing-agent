@@ -73,7 +73,7 @@ extensions/vscode/
 网关能力层（原 `src/core`，现 `packages/client` 的 `@wing-agent/client`）对矩阵来说是一个**外部包**：只有 `host` 能
 import（webview 走桥、shared 保持零依赖），这条规则由 `layers.test.ts` 的 `CLIENT_PACKAGE` 分支与
 ESLint 的 `paths` 禁区一起守；包自己那套「环境无关」门禁随包搬到了
-`packages/client/{tsconfig.json,tsconfig.dom.json,eslint.config.mjs,tests/layers.test.ts}`。
+`packages/client/{tsconfig.json,tsconfig.node-probe.json,tsconfig.dom.json,eslint.config.mjs,tests/layers.test.ts}`。
 
 会话归约层（`@wing-agent/session`）是**每一层都能 import 的便携包**：`bridge.ts` 的
 `CellPatch` / `SessionStateModel` 类型就来自它，`testing` 的夹具、`webview` 的渲染、`preview`

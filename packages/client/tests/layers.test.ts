@@ -9,7 +9,8 @@ import { describe, expect, it } from 'vitest';
 /**
  * Import-graph guard for `@wing-agent/client` — the authoritative gate for the
  * package's "environment-agnostic" promise (mechanism #3 of three; see
- * `eslint.config.mjs` and the two tsconfigs for the other two).
+ * `eslint.config.mjs` and `pnpm run typecheck`'s three tsconfig projects — the
+ * no-DOM one is `tsconfig.node-probe.json` — for the other two).
  *
  * It parses every source file, resolves every static import / re-export / dynamic
  * `import()` / `require()`, and asserts:
