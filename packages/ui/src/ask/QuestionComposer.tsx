@@ -215,20 +215,27 @@ export const QuestionComposer = memo(function QuestionComposer({
     }
   };
 
-  const submit = useCallback((): void => {
-    const firstIncomplete = questions.findIndex((item) => !isAnswered(item, drafts[item.id]));
-    if (firstIncomplete >= 0) {
-      setIndex(firstIncomplete);
-      setError(labels.unanswered);
-      return;
-    }
-    onSubmit(
-      questions.map((item) => {
-        const answer = drafts[item.id] ?? EMPTY_DRAFT;
-        return { questionId: item.id, selected: answer.selected, text: answer.text };
-      }),
-    );
-  }, [drafts, labels.unanswered, onSubmit, questions]);
+  // The drafts travel as an argument, never read from this render's closure: a
+  // handler that first schedules a draft change (Skip clears the current one) would
+  // otherwise submit the value it just replaced. Upstream passes `nextDrafts` the
+  // same way.
+  const submit = useCallback(
+    (values: Record<string, DraftAnswer>): void => {
+      const firstIncomplete = questions.findIndex((item) => !isAnswered(item, values[item.id]));
+      if (firstIncomplete >= 0) {
+        setIndex(firstIncomplete);
+        setError(labels.unanswered);
+        return;
+      }
+      onSubmit(
+        questions.map((item) => {
+          const answer = values[item.id] ?? EMPTY_DRAFT;
+          return { questionId: item.id, selected: answer.selected, text: answer.text };
+        }),
+      );
+    },
+    [labels.unanswered, onSubmit, questions],
+  );
 
   const continueFlow = useCallback((): void => {
     if (question === undefined) return;
@@ -237,7 +244,7 @@ export const QuestionComposer = memo(function QuestionComposer({
       return;
     }
     if (last) {
-      submit();
+      submit(drafts);
       return;
     }
     setIndex(current + 1);
@@ -251,9 +258,13 @@ export const QuestionComposer = memo(function QuestionComposer({
   const hasOptions = question.options.length > 0;
 
   const skipQuestion = (): void => {
+    // Clear locally *and* hand the cleared value to the submit path: `updateDraft`
+    // only schedules a re-render, so the last question would otherwise submit the
+    // answer the user just skipped (upstream builds `nextDrafts` for the same reason).
+    const skipped: Record<string, DraftAnswer> = { ...drafts, [question.id]: EMPTY_DRAFT };
     updateDraft(() => EMPTY_DRAFT);
     if (last) {
-      submit();
+      submit(skipped);
       return;
     }
     setIndex(current + 1);

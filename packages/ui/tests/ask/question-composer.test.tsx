@@ -185,6 +185,76 @@ describe('QuestionComposer', () => {
     expect(view.getByRole('button', { name: 'Submit' })).toHaveProperty('disabled', false);
   });
 
+  it('submits the cleared draft when Skip closes the last question (option form)', () => {
+    const onSubmit = vi.fn();
+    const questions: readonly AskQuestionModel[] = [
+      question({ id: 'q1', options: [option('One')] }),
+      question({ id: 'q2', options: [option('X')] }),
+    ];
+    const view = render(
+      <QuestionComposer requestId="ask-1" questions={questions} state="awaiting" onSubmit={onSubmit} />,
+    );
+    fireEvent.click(view.getByRole('radio', { name: 'One' }));
+    fireEvent.click(view.getByRole('radio', { name: 'X' }));
+    fireEvent.click(view.getByRole('button', { name: 'Skip' }));
+
+    // The payload has to agree with the card the user is looking at: q2 was just
+    // skipped, so it travels empty — the earlier regression submitted the choice
+    // that Skip had already cleared.
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0]?.[0]).toEqual([
+      { questionId: 'q1', selected: ['One'], text: '' },
+      { questionId: 'q2', selected: [], text: '' },
+    ]);
+    expect(view.getByRole('radio', { name: 'X' }).getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('submits the cleared draft when Skip closes the last question (free-form form)', () => {
+    const onSubmit = vi.fn();
+    const questions: readonly AskQuestionModel[] = [
+      question({ id: 'q1', options: [option('One')] }),
+      question({ id: 'q2' }),
+    ];
+    const view = render(
+      <QuestionComposer requestId="ask-1" questions={questions} state="awaiting" onSubmit={onSubmit} />,
+    );
+    fireEvent.click(view.getByRole('radio', { name: 'One' }));
+    fireEvent.change(view.getByPlaceholderText('Type your answer'), { target: { value: 'typed' } });
+    fireEvent.click(view.getByRole('button', { name: 'Skip' }));
+
+    expect(onSubmit.mock.calls[0]?.[0]).toEqual([
+      { questionId: 'q1', selected: ['One'], text: '' },
+      { questionId: 'q2', selected: [], text: '' },
+    ]);
+    expect(view.getByPlaceholderText('Type your answer')).toHaveProperty('value', '');
+  });
+
+  it('keeps clearing only the current question when Skip is not on the last one', () => {
+    const onSubmit = vi.fn();
+    const questions: readonly AskQuestionModel[] = [
+      question({ id: 'q1', options: [option('One')] }),
+      question({ id: 'q2', options: [option('X')] }),
+    ];
+    const view = render(
+      <QuestionComposer requestId="ask-1" questions={questions} state="awaiting" onSubmit={onSubmit} />,
+    );
+    fireEvent.click(view.getByRole('radio', { name: 'One' }));
+    fireEvent.click(view.getByRole('radio', { name: 'X' }));
+    fireEvent.click(view.getByRole('button', { name: 'Previous question' }));
+    fireEvent.click(view.getByRole('button', { name: 'Skip' }));
+
+    // Control for the two cases above: a mid-flow Skip still only clears the question
+    // it was pressed on, walks on, and submits nothing by itself.
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(view.getByText('2 / 2')).toBeTruthy();
+    expect(view.getByRole('radio', { name: 'X' }).getAttribute('aria-checked')).toBe('true');
+    fireEvent.click(view.getByRole('button', { name: 'Submit' }));
+    expect(onSubmit.mock.calls[0]?.[0]).toEqual([
+      { questionId: 'q1', selected: [], text: '' },
+      { questionId: 'q2', selected: ['X'], text: '' },
+    ]);
+  });
+
   it('submits one answer per question in order, with the free-form text', () => {
     const onSubmit = vi.fn();
     const questions: readonly AskQuestionModel[] = [
