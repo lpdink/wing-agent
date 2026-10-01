@@ -309,8 +309,9 @@ fn symbol_command_space_does_not_detach_scripts_or_punctuation() {
 }
 
 /// 回归（r2 的 S1）：`\right` / `\end` 与 `}` / `)` / `]` 同类 —— 它们之前也不能退回空格。
-/// 单独的 `\begin{cases} … \end{cases}` 渲染时行尾会被 trim，看不出差异；这里一律用
-/// **后面还跟内容**的组合形态（否则断言会被 trim 掩蔽）。
+/// 形态选择：`\left( … \right)` 单独渲染就能判别（行尾多余空白会直接进宽度）；
+/// `cases` 的两条必须用**后面还跟内容**的组合形态 —— 单独的 `\begin{cases} … \end{cases}`
+/// 渲染时行尾空白被 trim，看不出差异（断言会被掩蔽）。
 #[test]
 fn symbol_command_space_is_not_kept_before_closing_right_or_end() {
     let delimited = render_display(r"\left( \alpha \right)", 60).unwrap();
