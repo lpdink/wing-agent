@@ -1,0 +1,10 @@
+{
+  "//": "Browser probe — the **no-node** gate for this package. `src/**` typed as a DOM-only program (`types: [\"vite/client\"]`, no `@types/node`): a bare `process`, `require` or `Buffer` in the renderer is a compile error (TS2591), which is exactly the failure mode that produces a white webview. `vite/client` is deliberately kept: it declares the CSS modules the renderer imports, and it does *not* drag node types in (verified: `document` compiles, `process` errors). The other direction is `tsconfig.node-probe.json`; neither probe is referenced from `tsconfig.json` (typescript-eslint's projectService requires each file to belong to exactly one project).",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+    "jsx": "react-jsx"
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
+}

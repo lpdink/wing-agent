@@ -1,25 +1,19 @@
 /**
- * Bridge vocabulary for the host ⇄ webview contract.
+ * Vocabulary of **this extension's** webview channel.
  *
- * This module holds magic strings that both sides of **this extension's** bridge must
- * agree on. Keep it free of runtime dependencies (no `vscode`, no DOM, no node) — the
- * layer guard enforces it.
+ * What is left here are the three magic values that describe the VS Code side of the
+ * channel and nothing else — the theme class names the generated document applies,
+ * the element id the bundle mounts into, and the patch-chunk cap the host slices
+ * streamed text with. Keep it free of runtime dependencies (no `vscode`, no DOM, no
+ * node) — the layer guard enforces it.
  *
- * The session-model and command vocabulary lives in `@wing-agent/session`
- * (`TOOL_NAMES`, `LOCAL_COMMANDS`, `SESSION_TITLE_MAX_LENGTH`): those values describe
- * the gateway's sessions, not this channel, and every frontend needs them.
+ * The protocol itself — the message unions, their guards, the transport interface,
+ * the protocol version and the image caps — is `@wing-agent/ui/protocol`
+ * (`packages/ui/src/protocol/`), because the renderer and the host both speak it and
+ * the renderer now lives in that package. The session-model and command vocabulary
+ * (`TOOL_NAMES`, `LOCAL_COMMANDS`, `SESSION_TITLE_MAX_LENGTH`) is
+ * `@wing-agent/session`.
  */
-
-/**
- * Bridge protocol version.
- *
- * Bump on **breaking** changes to {@link HostToWebviewMessage} /
- * {@link WebviewToHostMessage}. Additive changes (new message variants, new
- * nullable fields on the shared model) do not need a bump: both sides ship in the
- * same VSIX, so they are only ever one version apart at most — the number exists
- * so the host can refuse a stale cached webview instead of failing silently.
- */
-export const BRIDGE_PROTOCOL_VERSION = 1;
 
 /** CSS class applied to the webview root for the current theme kind. */
 export const THEME_CLASSES = {

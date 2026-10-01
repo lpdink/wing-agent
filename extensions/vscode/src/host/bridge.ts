@@ -1,7 +1,7 @@
 import type * as vscode from 'vscode';
 
-import type { HostToWebviewMessage, WebviewToHostMessage } from '../shared';
-import { isWebviewToHostMessage, readImageSources } from '../shared';
+import type { HostToWebviewMessage, WebviewToHostMessage } from '@wing-agent/ui/protocol';
+import { isWebviewToHostMessage, readImageSources } from '@wing-agent/ui/protocol';
 
 import { log } from './log';
 

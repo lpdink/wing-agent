@@ -1,5 +1,5 @@
 {
-  "//": "Extension-host side: src/host + src/shared + src/testing + their tests. NO DOM lib and NO DOM types on purpose — using `document`/`window` here is a compile error, which is how `host` stays UI-free. The gateway capability layer moved into the `@wing-agent/client` workspace package (its own tsconfigs keep it portable; see packages/client/tsconfig.dom.json).",
+  "//": "Extension-host side: src/host + src/shared + their tests. NO DOM lib is declared on purpose — `document`/`window` are meant to be a compile error here, that is how `host` stays UI-free. CAVEAT (pre-existing, review r1 [S1]): `tests/artifact/webviewBundle.test.ts` imports jsdom, whose types carry a `reference lib=dom` directive, so the DOM lib does end up in this program — a DOM usage in `src/host` is *not* caught by tsc today. Follow-up: a pure-src probe project (src only, no test tooling) run from `typecheck`, the pattern `packages/client/tsconfig.node-probe.json` uses. The gateway capability layer (`@wing-agent/client`) and the bridge protocol (`@wing-agent/ui/protocol`) come from workspace packages whose own tsconfigs keep their Node-consumable halves DOM-free — that is why this program can import them without a `.tsx`/CSS in sight.",
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "lib": ["ES2023"],
@@ -8,10 +8,7 @@
   "include": [
     "src/host/**/*.ts",
     "src/shared/**/*.ts",
-    "src/testing/**/*.ts",
     "tests/host/**/*.ts",
-    "tests/shared/**/*.ts",
-    "tests/state/**/*.ts",
     "tests/layers/**/*.ts",
     "tests/artifact/**/*.ts",
     "tests/mocks/**/*.ts"

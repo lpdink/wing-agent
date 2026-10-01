@@ -3,7 +3,8 @@
 # `packages:` — every TypeScript package lives here; the three shells (vscode today,
 # web / electron later) are plain members and share one lockfile at the root.
 # `pnpm -r run <script>` (what `make check-ts` / `make test-ts` use) walks this list;
-# a new package needs no other registration (see 02_workspace_client_pkg/design.md §手册).
+# a new package needs no other registration — it only has to declare the scripts
+# (lint / format:check / typecheck / test); see docs/dev/vscode-extension.md §9.3.
 packages:
   - 'extensions/vscode'
   - 'packages/*'
@@ -19,12 +20,14 @@ packages:
 #     downloads ~150 MB it does not use. Install one explicitly when needed:
 #     `pnpm --filter @wing-agent/web exec playwright install chromium`.
 #
-# minimumReleaseAgeExclude: the workspace-level npm supply-chain guard refuses
-# packages published very recently; prettier is pinned here so the lockfile stays
-# reproducible with `--frozen-lockfile` on CI as well.
+# minimumReleaseAgeExclude: `minimumReleaseAge` (the guard that refuses packages
+# published very recently) is not enabled today, so this entry is inert — it is kept
+# so the guard can be switched on without re-resolving prettier. The version has to
+# match the one resolved in pnpm-lock.yaml (it drifted once, with a lockfile
+# regeneration: the entry said 3.9.8 while the lockfile had moved to 3.9.9).
 allowBuilds:
   esbuild: true
   '@vscode/vsce-sign': false
   playwright: false
 minimumReleaseAgeExclude:
-  - prettier@3.9.8
+  - prettier@3.9.9

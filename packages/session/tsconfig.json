@@ -1,5 +1,5 @@
 {
-  "//": "Package project: `src/` + `tests/` + the vitest config (so typescript-eslint's projectService can type-check it too). The session lane is pure logic over the gateway's events and the view model: no `vscode`, no DOM, no node builtin. `document` / `window` are a compile error here on purpose; the browser direction is checked by `tsconfig.dom.json`.",
+  "//": "Package project: `src/` + `tests/` + the vitest config (so typescript-eslint's projectService can type-check it too). The session lane is pure logic over the gateway's events and the view model: no `vscode`, no DOM, no node builtin. NOTE: because this project also carries the vitest config, `vitest/config` re-exports jsdom's types and their `reference lib=dom` directive pulls the DOM lib in — a DOM usage in `src/` compiles clean HERE. The direction is enforced by `tsconfig.node-probe.json` (src only, no test tooling, no DOM lib), which `pnpm run typecheck` runs alongside this one; the browser direction is checked by `tsconfig.dom.json`.",
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "lib": ["ES2023"],

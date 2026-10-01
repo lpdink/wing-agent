@@ -11,8 +11,11 @@ import tseslint from 'typescript-eslint';
  * `require('ws')` fallback aside). Three mechanisms keep that honest, exactly like
  * the layering gates in `extensions/vscode` (docs/dev/vscode-extension.md §2.3):
  *
- * 1. the split tsconfigs — `tsconfig.json` has no DOM lib, `tsconfig.dom.json` has
- *    no node types, so writing `document` or a bare `process` fails one of them;
+ * 1. the two probe tsconfigs (`pnpm run typecheck` runs all three projects) —
+ *    `tsconfig.node-probe.json` is pure `src/` with no test tooling, so `document`
+ *    fails there; `tsconfig.dom.json` has no node types, so a bare `process` fails
+ *    there. The main `tsconfig.json` is NOT a gate: it includes the vitest config,
+ *    whose type chain drags in jsdom's `reference lib=dom`;
  * 2. these ESLint zones — the common violations are red while you type;
  * 3. `tests/layers.test.ts` — parses the real import graph of every source file
  *    (static imports, `export … from`, dynamic `import()`, `require()`). It is the

@@ -1,5 +1,5 @@
 {
-  "//": "Webview side: src/webview + src/shared + preview harness + component tests. `types: [vite/client]` keeps node globals out — `process`/`Buffer`/`require` are compile errors here, so the renderer cannot depend on the extension host's environment. `vscode` is not in the type set either (and lint/tests ban the import).",
+  "//": "Webview side: the thin shell (src/webview) + src/shared + the preview harness + the one webview-side test that stayed here. The package's ambient declarations are listed explicitly: `@wing-agent/ui` is source-first, so its `.d.ts` files are only in a consumer's program if the consumer includes them (imports do not pull ambient declarations in). `types: [vite/client]` keeps node globals out — `process`/`Buffer`/`require` are compile errors here, so nothing embedded in the document can depend on the extension host's environment. `vscode` is not in the type set either (and lint/tests ban the import). The renderer itself (`@wing-agent/ui`) is type-checked through this program too: it resolves to source (`exports` → `src/index.ts`), which is exactly what the bundlers consume.",
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
@@ -8,14 +8,13 @@
   },
   "include": [
     "src/shared/**/*.ts",
-    "src/testing/**/*.ts",
-    "src/testing/**/*.tsx",
     "src/webview/**/*.ts",
     "src/webview/**/*.tsx",
     "preview/**/*.ts",
     "preview/**/*.tsx",
     "tests/setup/**/*.ts",
     "tests/webview/**/*.ts",
-    "tests/webview/**/*.tsx"
+    "tests/webview/**/*.tsx",
+    "../../packages/ui/src/**/*.d.ts"
   ]
 }

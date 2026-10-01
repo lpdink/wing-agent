@@ -17,7 +17,7 @@ import type { EditorActions } from '../../src/host/editorActions';
 import type { GatewaySettings } from '../../src/host/settings';
 import { WingHost, createGatewayClients } from '../../src/host/wingHost';
 import type { CellModel, SessionStateModel, SessionViewModel, TabModel } from '@wing-agent/session';
-import type { HostToWebviewMessage } from '../../src/shared';
+import type { HostToWebviewMessage } from '@wing-agent/ui/protocol';
 import type { WingEvent } from '@wing-agent/client';
 import type { WebviewIntent } from '../../src/host/bridge';
 import { WebviewMirror } from '../../tests/host/support/mirror';

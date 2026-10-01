@@ -8,7 +8,8 @@ import type * as vscode from 'vscode';
 import { ChatViewProvider, CHAT_VIEW_ID } from '../../src/host/chatViewProvider';
 import { buildContentSecurityPolicy, buildWebviewHtml, createNonce } from '../../src/host/html';
 import { disposeLog } from '../../src/host/log';
-import { RESOLVE_IMAGES_MAX_SRCS, WEBVIEW_ROOT_ID } from '../../src/shared';
+import { RESOLVE_IMAGES_MAX_SRCS } from '@wing-agent/ui/protocol';
+import { WEBVIEW_ROOT_ID } from '../../src/shared';
 import { Uri, mockState, workspace as mockedWorkspace } from '../mocks/vscode';
 
 import { createHostHarness, flushMicrotasks } from './support/harness';

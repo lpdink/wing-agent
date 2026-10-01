@@ -1,6 +1,8 @@
 import type { CellPatch, PanelsModel, SessionViewModel } from '@wing-agent/session';
 import { EMPTY_PANELS } from '@wing-agent/session';
+import { mountApp } from '@wing-agent/ui';
 import {
+  createMockBridge,
   makeApprovalAskCell,
   makeBranchPicker,
   makeCommandCatalog,
@@ -15,14 +17,12 @@ import {
   makeStreamingCells,
   makeStreamingToolCell,
   makeWorkingSession,
-} from '../src/testing/fixtures';
-import { createMockBridge } from '../src/testing/mockBridge';
-import { mountApp } from '../src/webview/mount';
+} from '@wing-agent/ui/testing';
 
 /**
  * Preview harness entry.
  *
- * Mounts the *real* webview app (`src/webview/mount.tsx`) against a scripted host,
+ * Mounts the *real* renderer (`@wing-agent/ui`'s `mountApp`) against a scripted host,
  * so the renderer can be built and inspected without VS Code, a gateway, or the
  * extension being built (`pnpm run dev:preview` / `pnpm run build:preview`).
  *

@@ -23,8 +23,10 @@ import {
   normalizeCommandName,
   pushSystem,
 } from '@wing-agent/session';
-import type { HostToWebviewMessage, UiActionModel } from '../../shared';
-import { MAX_PATCH_TEXT_CHUNK, unhandledVariant } from '../../shared';
+import type { HostToWebviewMessage, UiActionModel } from '@wing-agent/ui/protocol';
+import { unhandledVariant } from '@wing-agent/ui/protocol';
+
+import { MAX_PATCH_TEXT_CHUNK } from '../../shared';
 import type {
   CoreLogger,
   GatewayConnection,

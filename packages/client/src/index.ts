@@ -20,8 +20,10 @@
  *
  * Environment: plain `ES2023` + `globalThis` only — no `vscode`, no node builtin
  * imports, no DOM API, no npm dependency (the single `require('ws')` fallback is
- * lazy and wrapped). Verified by `tsconfig.json` (no DOM lib) *and*
- * `tsconfig.dom.json` (no node types) in `pnpm run typecheck`.
+ * lazy and wrapped). `pnpm run typecheck` runs three projects over these sources:
+ * `tsconfig.json` (package + tests + vitest config), `tsconfig.node-probe.json`
+ * (**the no-DOM gate**: pure `src/`, no test tooling) and `tsconfig.dom.json`
+ * (the no-node gate).
  */
 
 export * from './backoff';

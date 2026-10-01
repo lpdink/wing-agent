@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { BootstrapModel } from '../shared';
+import type { BootstrapModel } from '@wing-agent/ui/protocol';
 
 /**
  * Webview document generation.

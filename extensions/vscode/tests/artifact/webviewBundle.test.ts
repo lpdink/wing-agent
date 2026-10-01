@@ -8,8 +8,10 @@ import { JSDOM } from 'jsdom';
 import { build } from 'vite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { BRIDGE_PROTOCOL_VERSION, WEBVIEW_ROOT_ID } from '../../src/shared';
-import { makeFixtureSession, makeTab } from '../../src/testing/fixtures';
+import { BRIDGE_PROTOCOL_VERSION } from '@wing-agent/ui/protocol';
+import { makeFixtureSession, makeTab } from '@wing-agent/ui/testing';
+
+import { WEBVIEW_ROOT_ID } from '../../src/shared';
 
 /**
  * Build-artifact gate: the *bundled* webview, executed in a DOM that has no Node
