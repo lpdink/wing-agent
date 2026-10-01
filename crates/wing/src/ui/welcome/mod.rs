@@ -190,15 +190,24 @@ impl Welcome {
             return false;
         }
         let ms = self.ms(now);
+        // 从视口外回来：待机节奏从此刻重排，否则四个平面同时到点（回屏第一帧
+        // 会叠成"眨眼 + 跳 + 呼吸"）。
+        if visible && !self.built_visible {
+            self.motion.resume(ms, working);
+        }
         // 先推进规划器再问姿态：姿态变化是 advance 的**产物**，不推进就永远
         // 看到旧姿态 -> 不重建 -> 不 advance 的死锁（真 TUI 里动画会定格）。
         self.motion.advance(ms, working);
         let pose = self.motion.pose(ms, working);
+        // 扫光期逐帧重建；**扫光结束那一刻也要重建一次** —— 否则最后一帧的
+        // 高光会留在屏上，直到下一个动作 deadline（可达 ~2.6s）。
+        let sweeping = self.sweeping(now);
         let rebuild = self.built_width != width
             || !self.built_visible
             || self.built_working != working
             || self.built_pose != Some(pose)
-            || (!self.settled_built && self.sweeping(now));
+            || (!self.settled_built && sweeping)
+            || self.settled_built == sweeping;
         self.built_visible = true;
         rebuild
     }
@@ -366,7 +375,7 @@ fn text_column(
 /// 实现 kitty 键盘协议（见 `tui::push_keyboard_enhancement`），在 header 上
 /// 当既成事实写死就是在骗人 —— tips 池里有那条"看终端"的提示，这里只放
 /// 任何终端都成立的键。
-const KEYS: &str = "Esc 中断 · Ctrl+J 换行 · Ctrl+C ×2 退出";
+const KEYS: &str = "Esc 中断 · Ctrl+J 换行 · Ctrl+C×2 退出";
 
 /// 入口提示（一行）。
 ///
@@ -515,6 +524,9 @@ mod tests {
     use super::*;
     use unicode_width::UnicodeWidthStr as _;
 
+    #[allow(unused_imports)]
+    use ratatui::style::Color as _Color;
+
     fn welcome() -> Welcome {
         Welcome::new(3, Instant::now())
     }
@@ -571,7 +583,16 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined.contains('▀') || joined.contains('▄'), "海鸥得画出来");
+        // 用品牌色指纹判海鸥在场：wordmark 也画 `▀`/`▄`，只数半格字符的话
+        // 把海鸥整个删掉断言照样绿。
+        let amber = ratatui::style::Color::Rgb(245, 169, 60); // 喙 / 脚：只有海鸥用
+        assert!(
+            lines.iter().any(|l| l
+                .spans
+                .iter()
+                .any(|s| s.style.fg == Some(amber) || s.style.bg == Some(amber))),
+            "海鸥得画出来"
+        );
         assert!(
             joined.contains("dev ·") || joined.contains("v0."),
             "版本行得在"
@@ -582,7 +603,7 @@ mod tests {
     fn sweep_ticks_on_the_frame_cadence() {
         // 回归点：只按动作 deadline 排 tick 的话，扫光窗口里几乎不醒（待机
         // deadline 下界 2600ms > SWEEP_MS），光带根本不会出现。
-        let w = welcome();
+        let mut w = welcome();
         let start = w.epoch;
         let mut now = start;
         let mut ticks = 0;
@@ -595,10 +616,16 @@ mod tests {
             worst_gap = worst_gap.max((due - now).as_millis());
             ticks += 1;
             now = due;
+            // 生产口径：每次 tick 都会走一遍 draw -> sync_welcome ->
+            // needs_rebuild（那里推进规划器）。不推进的话 `next_due` 冻结在
+            // 过去的时刻，`max(ms+1)` 会以 1ms 步进"救火"凑出 tick 数 ——
+            // 那样测的就不是帧节奏了。
+            w.needs_rebuild(100, now, false, true);
         }
+        // 2400/40 = 60 帧，外加动作 deadline 恰好插进帧网格的那一两次。
         assert!(
-            ticks >= (SWEEP_MS / FRAME_MS) as usize - 10,
-            "2.4s 扫光至少该有 ~60 帧，实际 {ticks}"
+            (58..=62).contains(&ticks),
+            "2.4s 扫光应当是 ~60 帧（每帧一 tick），实际 {ticks}"
         );
         assert!(
             worst_gap <= FRAME_MS as u128,
@@ -619,6 +646,18 @@ mod tests {
         for width in 0..12usize {
             assert!(elide("中abc中", width).width() <= width, "width={width}");
         }
+    }
+
+    #[test]
+    fn keys_fit_an_80_column_terminal() {
+        // 80 列（多数终端的默认宽）是最常见的档位：内容宽 = 80 - 滚动条 gutter(2)，
+        // 减去海鸥与间隔就是文字预算。键位行差 1 列就会在最多人看到的宽度上省略。
+        let budget = 80 - 2 - (ART_COLS + ART_GAP);
+        assert!(
+            KEYS.width() <= budget,
+            "键位行 {} 列 > 80 列终端的预算 {budget} 列",
+            KEYS.width()
+        );
     }
 
     #[test]
@@ -647,6 +686,24 @@ mod tests {
             w.build(&palette(), width, now, working, true);
             assert!(std::ptr::eq(w.tip(), tip), "tip 不该在重建之间换");
         }
+    }
+
+    #[test]
+    fn sweep_end_forces_one_last_rebuild() {
+        // 扫光结束不是姿态变化，很容易漏掉：没有这一下，最后一帧的高光会留在
+        // 屏上，直到下一个动作 deadline（可达 ~2.6s）。
+        let mut w = welcome();
+        let start = w.epoch;
+        let mid = start + Duration::from_millis(SWEEP_MS - 300);
+        w.build(&palette(), 100, mid, false, true);
+        let just_after = start + Duration::from_millis(SWEEP_MS + 1);
+        assert!(
+            w.needs_rebuild(100, just_after, false, true),
+            "扫光结束那一刻必须重建一次"
+        );
+        // 重建之后（已定格）就不该再因为扫光反复重建。
+        w.build(&palette(), 100, just_after, false, true);
+        assert!(!w.needs_rebuild(100, just_after, false, true));
     }
 
     #[test]
@@ -738,6 +795,60 @@ mod tests {
             .len(),
             ART_TERM_ROWS
         );
+    }
+
+    /// 渲染出来的源像素总数（半格：带背景的格 = 2 像素，只带前景 = 1）。
+    fn rendered_pixels(lines: &[Line<'_>]) -> usize {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| {
+                        let ink = s.content.chars().filter(|c| *c != ' ').count();
+                        ink * if s.style.bg.is_some() { 2 } else { 1 }
+                    })
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+
+    #[test]
+    fn no_frame_loses_a_pixel() {
+        // 盒子装不下时会**静默截断**（`resize_with`，丢的是底行），只断言行数
+        // 是测不出来的。这里把"渲染出的源像素总数 == 网格里的墨迹数"钉死在
+        // 每一帧上：站姿四帧 + 飞行六帧。
+        let accent = (34, 211, 238);
+        let source_ink = |grid: &[&str]| -> usize {
+            grid.iter()
+                .map(|r| r.chars().filter(|c| *c != '.').count())
+                .sum()
+        };
+        let perched = [
+            (PerchedFrame::Idle, PERCHED_IDLE),
+            (PerchedFrame::Blink, PERCHED_BLINK),
+            (PerchedFrame::Flutter1, PERCHED_FLUTTER1),
+            (PerchedFrame::Flutter2, PERCHED_FLUTTER2),
+        ];
+        for (frame, grid) in perched {
+            let lines = gull_lines(Pose::Perched { frame, lift: 0 }, accent);
+            assert_eq!(
+                rendered_pixels(&lines),
+                source_ink(grid),
+                "{frame:?} 丢像素了"
+            );
+        }
+        for (frame, grid) in [FLY_0, FLY_1, FLY_2, FLY_3, FLY_4, FLY_5]
+            .iter()
+            .enumerate()
+        {
+            let lines = gull_lines(Pose::Flying { frame }, accent);
+            assert_eq!(
+                rendered_pixels(&lines),
+                source_ink(grid),
+                "飞行第 {frame} 帧丢像素了"
+            );
+        }
     }
 
     #[test]

@@ -27,12 +27,13 @@ const FLUTTER_HOLD_MS: u64 = 110;
 const FLUTTER_GAP_MS: u64 = 3800;
 const FLUTTER_GAP_JITTER_MS: u64 = 2000;
 
-/// 跳起每帧停留；序列 = [1, 1]（两帧离地）。
-const HOP_HOLD_MS: u64 = 150;
+/// 跳起离地时长（单拍：序列里每个 deadline 都要真的改变姿态，两拍会留一个
+/// 空转的 deadline —— 空转 = 一次白醒 + 一次整帧重绘）。
+const HOP_HOLD_MS: u64 = 300;
 
-/// 呼吸：常驻平面，序列 [1, 1]（抬起半格再落下）—— 待机"活着"的底噪。
+/// 呼吸：常驻平面，单拍抬起半格再落回 —— 待机"活着"的底噪。
 /// 没有它，待机就是每几秒一闪的静态图（用户实测："等了半天才看到动画"）。
-const BREATH_HOLD_MS: u64 = 160;
+const BREATH_HOLD_MS: u64 = 320;
 const BREATH_GAP_MS: u64 = 1500;
 const BREATH_GAP_JITTER_MS: u64 = 800;
 
@@ -87,9 +88,8 @@ impl Limb {
 
     /// 把到期的推进都吃掉。`seq` 是动作帧序列（值即对外暴露的 step 值）。
     fn advance(&mut self, now: u64, seq: &[i32], hold: u64, gap: u64, jitter: u64, rnd: &mut u64) {
-        let mut guard = 0;
-        while self.step >= 0 && now >= self.hold_until && guard < CATCHUP_GUARD {
-            guard += 1;
+        // 每轮要么前进一步、要么退出：上界是 `seq.len()`（≤3），不需要护栏。
+        while self.step >= 0 && now >= self.hold_until {
             if self.step as usize + 1 >= seq.len() {
                 self.step = -1;
                 self.next_pass_at = now.saturating_add(gap + jittered(jitter, rnd));
@@ -97,10 +97,6 @@ impl Limb {
                 self.step += 1;
                 self.hold_until = self.hold_until.saturating_add(hold);
             }
-        }
-        if guard >= CATCHUP_GUARD && self.step >= 0 {
-            self.step = -1;
-            self.next_pass_at = now.saturating_add(gap);
         }
         if self.step < 0 && now >= self.next_pass_at {
             self.step = 0;
@@ -141,8 +137,8 @@ fn jittered(jitter: u64, rnd: &mut u64) -> u64 {
 
 const BLINK_SEQ: &[i32] = &[1];
 const FLUTTER_SEQ: &[i32] = &[1, 2, 1];
-const HOP_SEQ: &[i32] = &[1, 1];
-const BREATH_SEQ: &[i32] = &[1, 1];
+const HOP_SEQ: &[i32] = &[1];
+const BREATH_SEQ: &[i32] = &[1];
 
 /// 规划器状态。构造时播种各动作族的首次时刻。
 #[derive(Debug, Clone)]
@@ -229,6 +225,28 @@ impl Motion {
         Pose::Perched { frame, lift }
     }
 
+    /// 重新播种待机各平面的节奏（落地、或欢迎屏从视口外回来时用）。
+    ///
+    /// 不可见期间不推进，四个平面的 deadline 会一起落在过去 —— 不重播的话回屏
+    /// 第一帧是"眨眼 + 跳 + 呼吸"叠在一起。
+    fn reseed_perched(&mut self, now: u64) {
+        self.blink =
+            Limb::resting(now + BLINK_GAP_MS + jittered(BLINK_GAP_JITTER_MS, &mut self.rnd));
+        self.flutter =
+            Limb::resting(now + FLUTTER_GAP_MS + jittered(FLUTTER_GAP_JITTER_MS, &mut self.rnd));
+        self.hop = Limb::resting(now + HOP_GAP_MS + jittered(HOP_GAP_JITTER_MS, &mut self.rnd));
+        self.breath =
+            Limb::resting(now + BREATH_GAP_MS + jittered(BREATH_GAP_JITTER_MS, &mut self.rnd));
+        self.land_until = 0;
+    }
+
+    /// 欢迎屏回到视口里：待机节奏从此刻重新排。
+    pub fn resume(&mut self, now: u64, working: bool) {
+        if !working {
+            self.reseed_perched(now);
+        }
+    }
+
     /// 吃掉所有到期的推进；`working` 翻转时重新播种对面那档的节奏。
     pub fn advance(&mut self, now: u64, working: bool) {
         if working != self.was_working {
@@ -243,17 +261,8 @@ impl Motion {
                 self.takeoff = None;
                 self.land_until = now.saturating_add(LAND_MS);
                 // 落回站姿：各动作族从此刻重新排，避免"一落地就连眨三下"。
-                self.blink = Limb::resting(
-                    now + BLINK_GAP_MS + jittered(BLINK_GAP_JITTER_MS, &mut self.rnd),
-                );
-                self.flutter = Limb::resting(
-                    now + FLUTTER_GAP_MS + jittered(FLUTTER_GAP_JITTER_MS, &mut self.rnd),
-                );
-                self.hop =
-                    Limb::resting(now + HOP_GAP_MS + jittered(HOP_GAP_JITTER_MS, &mut self.rnd));
-                self.breath = Limb::resting(
-                    now + BREATH_GAP_MS + jittered(BREATH_GAP_JITTER_MS, &mut self.rnd),
-                );
+                self.reseed_perched(now);
+                self.land_until = now.saturating_add(LAND_MS);
             }
         }
         if working {
@@ -450,7 +459,7 @@ mod tests {
                 lift: 0
             }
         );
-        assert!(m.next_due(false) > down + BLINK_GAP_MS / 2);
+        assert!(m.next_due(false) > down, "deadline 必须落在未来");
     }
 
     #[test]
@@ -527,6 +536,56 @@ mod tests {
             "相邻 deadline 最长 {worst}ms > 呼吸节奏 {MAX_GAP}ms：呼吸没进 tick 源"
         );
         assert!(lifts >= 4, "30s 内至少该看到几次呼吸，实际 {lifts}");
+    }
+
+    #[test]
+    fn no_action_sequence_has_redundant_steps() {
+        // 序列里相邻两步值相同 -> 那个 deadline 不改变姿态（白醒 + 白重绘）。
+        // 曾经呼吸 / 跳都是 [1, 1]，实测 20.5% 的 tick 是空转。
+        for (name, seq) in [
+            ("BLINK", BLINK_SEQ),
+            ("FLUTTER", FLUTTER_SEQ),
+            ("HOP", HOP_SEQ),
+            ("BREATH", BREATH_SEQ),
+        ] {
+            for pair in seq.windows(2) {
+                assert_ne!(
+                    pair[0], pair[1],
+                    "{name} 序列有相邻同值步：{seq:?} —— 那是空转的 deadline"
+                );
+            }
+        }
+        // 单拍动作（一拍抬、一拍落）用 length-1 序列表达，不要写成 [1, 1]。
+        assert_eq!(HOP_SEQ.len(), 1);
+        assert_eq!(BREATH_SEQ.len(), 1);
+    }
+
+    #[test]
+    fn most_deadlines_change_the_pose() {
+        // 跨平面遮蔽是分层语义的一部分（呼吸抬起时叠上跳，lift 都是 2；跳的
+        // 那一拍被吃掉），所以做不到 100%；但空转必须是小概率，不能成常态。
+        let mut m = Motion::new(0, 5);
+        let mut now = 0u64;
+        let mut pose = m.pose(now, false);
+        let (mut ticks, mut changed) = (0u32, 0u32);
+        while now < 60_000 {
+            now = m.next_due(false);
+            m.advance(now, false);
+            let next = m.pose(now, false);
+            ticks += 1;
+            if next != pose {
+                changed += 1;
+            }
+            pose = next;
+        }
+        let idle_ratio = 1.0 - changed as f64 / ticks as f64;
+        assert!(
+            idle_ratio <= 0.25,
+            "空转 deadline 占 {:.1}%（{}/{}）—— 太高了",
+            idle_ratio * 100.0,
+            ticks - changed,
+            ticks
+        );
     }
 
     #[test]

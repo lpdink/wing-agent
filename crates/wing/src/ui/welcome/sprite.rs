@@ -34,7 +34,6 @@ pub fn brand(letter: char, accent: Rgb) -> Option<Rgb> {
         'M' => (199, 126, 34),  // 琥珀暗面
         'E' => (20, 28, 51),    // 眼
         'H' => (255, 255, 255), // 眼神光
-        'R' => (224, 82, 63),   // 喙上红点（预留）
         'A' => accent,
         _ => return None,
     })

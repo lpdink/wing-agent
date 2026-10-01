@@ -82,7 +82,9 @@ fn welcome_header_never_carries_the_retired_release_notes() {
 #[test]
 fn narrow_terminal_drops_the_art_before_the_text() {
     let mut app = test_app();
-    let body = frame_body(&mut app, 40, 30);
+    // 60 列：内容宽 60 - gutter 2 = 58 -> Compact 档（撤海鸥、留文字列）。
+    // 40 列会掉到 Minimal（只剩一行 wordmark），那是另一档，下面单独测。
+    let body = frame_body(&mut app, 60, 30);
     let compacted = compact(&body);
     assert!(
         compacted.contains("wing") && compacted.contains("dev·"),
@@ -96,6 +98,19 @@ fn narrow_terminal_drops_the_art_before_the_text() {
             .any(|span| span.style.fg == Some(amber) || span.style.bg == Some(amber))
     });
     assert!(!gull_present, "窄屏先撤海鸥：\n{body}");
+
+    // 最窄档：连文字列也放不下，只剩一行 `wing` + 版本。
+    let mut app = test_app();
+    let body = frame_body(&mut app, 40, 30);
+    let compacted = compact(&body);
+    assert!(
+        compacted.contains("wing") && compacted.contains("dev·"),
+        "最窄档也要有 brand + 版本：\n{body}"
+    );
+    assert!(
+        !compacted.contains("Esc中断"),
+        "最窄档放不下键位行，不该显示：\n{body}"
+    );
 }
 
 #[test]
@@ -214,4 +229,46 @@ fn slash_tips_lists_the_whole_pool() {
     for tip in crate::shared::tips::TIPS {
         assert!(cell.contains(tip.text), "缺 tip：{}", tip.text);
     }
+}
+
+#[test]
+fn scrolling_the_welcome_out_of_view_parks_the_clock() {
+    let mut app = test_app();
+    let palette = app.palette();
+    let now = std::time::Instant::now();
+    // 先跨过扫光，让 block 进入"定格 + idle 循环"状态。
+    let settled = now + Duration::from_millis(crate::ui::welcome::SWEEP_MS + 1);
+    app.sync_welcome(&palette, 100, settled);
+
+    let header_len = app.chat.header_lines().len();
+    assert!(header_len > 0, "欢迎屏在");
+    assert!(
+        app.welcome
+            .as_ref()
+            .expect("welcome 在手")
+            .next_frame(settled, false, true)
+            .is_some(),
+        "可见时 idle 循环有下一个 deadline"
+    );
+
+    // 滚出视口：整条时钟停摆，也不再重建。
+    app.chat.scroll_offset = header_len;
+    assert!(!app.chat.header_in_view());
+    assert!(
+        app.welcome
+            .as_ref()
+            .expect("welcome 在手")
+            .next_frame(settled, false, false)
+            .is_none(),
+        "滚出视口后不该再有 tick"
+    );
+    let hidden = header_text(&app);
+    app.sync_welcome(&palette, 100, settled + Duration::from_secs(5));
+    assert_eq!(hidden, header_text(&app), "滚出视口后不该重建");
+
+    // 滚回顶部：立刻恢复（可见性翻转强制重建一次）。
+    app.chat.scroll_offset = 0;
+    assert!(app.chat.header_in_view());
+    app.sync_welcome(&palette, 100, settled + Duration::from_secs(5));
+    assert_ne!(hidden, header_text(&app), "回到视口要立刻重绘");
 }
