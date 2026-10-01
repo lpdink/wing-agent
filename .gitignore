@@ -39,3 +39,4 @@ Thumbs.db
 ~/.wing/
 libs/wing-sdk/uv.lock
 .wing-orch.json
+.wing/
