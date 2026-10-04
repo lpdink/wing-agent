@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -86,8 +87,29 @@ def write_config(
     return path
 
 
+def guard_home() -> None:
+    """护栏：默认只在自己的 scratch 目录里动手。
+
+    ``$WING_HOME`` 由 ``DEMO_WING_HOME`` 覆盖，而这个名字极易被理解成"复用我的
+    home"——指向真实 ``~/.wing`` 时，`clean_sessions` 会**静默删掉用户全部会话**。
+    真要用外部目录，显式设 ``DEMO_ALLOW_FOREIGN_HOME=1``。
+    """
+    root = DEMO_ROOT.resolve()
+    home = WING_HOME.resolve()
+    if home.is_relative_to(root) and home != root:
+        return
+    if os.environ.get("DEMO_ALLOW_FOREIGN_HOME") == "1":
+        return
+    raise SystemExit(
+        f"[demo] refusing to touch {home}: it is outside {root}.\n"
+        "  point DEMO_WING_HOME inside $DEMO_ROOT, or set DEMO_ALLOW_FOREIGN_HOME=1 "
+        "if you really mean to write there"
+    )
+
+
 def clean_sessions() -> None:
     """清掉上一次录制留下的会话：每次录制从同一张白纸开始。"""
+    guard_home()
     sessions = WING_HOME / "core" / "sessions"
     if sessions.exists():
         shutil.rmtree(sessions)
@@ -115,6 +137,7 @@ class Gateway:
         self._log = None
 
     async def start(self) -> None:
+        guard_home()
         self._log = open(GATEWAY_LOG, "wb")
         self.proc = subprocess.Popen(
             [str(resolve_gateway_bin())],
@@ -129,11 +152,17 @@ class Gateway:
             stdout=self._log,
             stderr=subprocess.STDOUT,
         )
-        await wait_for_health(
-            f"http://127.0.0.1:{self.port}/api/health",
-            process=self.proc,
-            log_path=GATEWAY_LOG,
-        )
+        try:
+            await wait_for_health(
+                f"http://127.0.0.1:{self.port}/api/health",
+                process=self.proc,
+                log_path=GATEWAY_LOG,
+            )
+        except Exception:
+            # 调用方通常把 start() 放在 try/finally 之外（它们只在 start 成功后才
+            # 有机会 stop）：这里自己收尸，否则孤儿网关占着端口、日志句柄也不关。
+            self.stop()
+            raise
 
     def stop(self) -> None:
         if self.proc is None:
@@ -159,8 +188,13 @@ async def run_until_signal() -> None:
 
 
 def ready_line(workspace: Path, port: int) -> str:
-    """录制器解析这一行（见 record.py 的 ready 正则）。"""
-    return f"[demo] ready WING_HOME={WING_HOME} WING_WORKSPACE={workspace} WING_GATEWAY_PORT={port}"
+    """录制器解析这一行（``record.py:parse_ready``）；值转义，路径可含空格。"""
+    return (
+        "[demo] ready "
+        f"WING_HOME={shlex.quote(str(WING_HOME))} "
+        f"WING_WORKSPACE={shlex.quote(str(workspace))} "
+        f"WING_GATEWAY_PORT={port}"
+    )
 
 
 def sleep_until(deadline: float) -> None:

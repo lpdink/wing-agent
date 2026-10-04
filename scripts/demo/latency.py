@@ -259,7 +259,13 @@ def run_rate(
             file=sys.stderr,
         )
 
-    # TUI 侧：标记首次出现在哪个读分片里
+    # TUI 侧：标记首次出现在哪个读分片里。标记可能正好被 os.read 切开，所以每片
+    # 都拼上前一片的尾巴再找（这与查询应答用的是同一套 carry 思路）。
+    padded: list[tuple[float, bytes]] = []
+    prev = b""
+    for at, data in chunks:
+        padded.append((at, prev + data))
+        prev = data[-24:]
     lag: list[float] = []
     missing = 0
     for marker_id, sent_at in sorted(sent.items()):

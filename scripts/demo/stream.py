@@ -31,6 +31,7 @@ import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import IO
 
 import env
@@ -47,6 +48,8 @@ DEFAULT_TTFT = 0.35
 #: reasoning 前缀的长度（字符）：够看出"先想后答"，又不至于让 30 tok/s 那一档
 #: 十秒里只看到思考。切在段落边界上。
 REASON_CHARS = 380
+
+WS_SRC = Path(__file__).resolve().parent / "workspace"
 
 STATE: dict[str, object] = {}
 
@@ -353,6 +356,9 @@ async def main() -> int:
         turn_chars=args.turn_chars,
         cursor=0,
     )
+    # 与 serve.py 对称：录制器会 ``cd`` 进工作区再起 TUI，目录不存在时 pane 直接退出
+    # （现场表现为等首屏 20s 超时）。速度演示不调工具，但目录得在。
+    env.copy_workspace(WS_SRC)
     env.clean_sessions()
     server, base_url = serve(args)
     env.say(

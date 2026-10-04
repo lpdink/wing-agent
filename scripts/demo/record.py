@@ -32,7 +32,9 @@ Pipeline
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -57,6 +59,14 @@ AGG_TARGETS = {
     ("Darwin", "x86_64"): "x86_64-apple-darwin",
     ("Linux", "aarch64"): "aarch64-unknown-linux-gnu",
     ("Linux", "x86_64"): "x86_64-unknown-linux-gnu",
+}
+#: 各平台预编译产物的 sha256（v1.9.0）。下载走的是别人的网络路径，落盘后先验再执行：
+#: 截断的文件、被替换的二进制都会在"下载处"暴露，而不是在渲染阶段变成怪毛病。
+AGG_SHA256 = {
+    "aarch64-apple-darwin": "742b2b6230529b72f310acb835e9479496000f2eabc97b0993cabe1d7fe70171",
+    "x86_64-apple-darwin": "1462150b611d231d2950d10a676303eaeb1019ff330735882aaae09b52e2e1c1",
+    "aarch64-unknown-linux-gnu": "2b4be407b97e00e1c313a41d154ced8fa3d02c560c8f47a0db4950a2576444c9",
+    "x86_64-unknown-linux-gnu": "f111e315cd71056b116302342553dd765b7297579ed511f111d0cedb442aeda6",
 }
 
 
@@ -86,7 +96,9 @@ SPEED_PROMPT = "walk me through the design of a reliable job queue"
 #: 录完之后必须在某一帧里出现的内容——没有就说明这次录制是坏的（工具 schema 漂了、
 #: 沙箱拦了 Bash、provider 没起来），此时**不能**把 GIF 写出去覆盖上一版资产。
 STORY_EXPECT = ("+ def fetch(", "OK", "All three tests pass.")
-SPEED_EXPECT = (" t/s ",)
+#: 速度图还要能看到「用户问的」和「模型答的」——问句打错或语料接错都会在这里断掉
+#: （曾经真的漏过：`--prompt` 的默认值吞掉了模式选择，四张图全是 hero 的问题配队列文档）。
+SPEED_EXPECT = (" t/s ", "walk me through", "job queue")
 
 
 @dataclass
@@ -293,6 +305,9 @@ def agg_bin() -> Path:
         return Path(override)
     local = TOOLS / "agg"
     if local.is_file():
+        # 上一次会话可能留下丢了可执行位的文件（cp / 手工替换都会），补上再执行。
+        if not os.access(local, os.X_OK):
+            local.chmod(0o755)
         return local
     log(f"[record] downloading agg → {local}")
     TOOLS.mkdir(exist_ok=True)
@@ -312,8 +327,29 @@ def agg_bin() -> Path:
         ],
         check=True,
     )
+    verify_agg(local)
     local.chmod(0o755)
     return local
+
+
+def verify_agg(local: Path) -> None:
+    """比对下载产物的 sha256（``$DEMO_AGG_URL`` 指向自编译版本时跳过）。"""
+    if os.environ.get("DEMO_AGG_URL"):
+        return
+    wanted = AGG_SHA256.get(_agg_triple())
+    if not wanted:
+        return
+    digest = hashlib.sha256(local.read_bytes()).hexdigest()
+    if digest != wanted:
+        local.unlink(missing_ok=True)
+        raise SystemExit(
+            f"[record] agg checksum mismatch: got {digest}, want {wanted}.\n"
+            "  the download is truncated or tampered — refusing to run it"
+        )
+
+
+def _agg_triple() -> str:
+    return AGG_TARGETS.get((platform.system(), platform.machine()), "")
 
 
 #: README 里的 GIF 挂在同一个 rolling release 上：同名资产用 --clobber 覆盖，URL 不变，
@@ -432,6 +468,19 @@ def wing_bin() -> Path:
     )
 
 
+def parse_ready(line: str) -> dict[str, str] | None:
+    """解析 ``env.ready_line`` 那一行（值按 shell 引用规则转义，路径可含空格）。"""
+    if "ready" not in line:
+        return None
+    info: dict[str, str] = {}
+    for token in shlex.split(line.split("ready", 1)[1]):
+        key, sep, value = token.partition("=")
+        if sep:
+            info[key] = value
+    needed = {"WING_HOME", "WING_WORKSPACE", "WING_GATEWAY_PORT"}
+    return info if needed <= info.keys() else None
+
+
 def start_demo(
     cfg: Config,
 ) -> tuple[subprocess.Popen[str], dict[str, str], threading.Event]:
@@ -453,11 +502,11 @@ def start_demo(
             line = raw.rstrip()
             if line.startswith("[demo]"):
                 log(f"    {line}")
-            found = re.search(
-                r"WING_HOME=(\S+) WING_WORKSPACE=(\S+) WING_GATEWAY_PORT=(\d+)", line
-            )
+            found = parse_ready(line)
             if found:
-                info["wing_home"], info["workspace"], info["port"] = found.groups()
+                info["wing_home"] = found["WING_HOME"]
+                info["workspace"] = found["WING_WORKSPACE"]
+                info["port"] = found["WING_GATEWAY_PORT"]
                 info["ready"] = "1"
             if "script exhausted" in line:
                 exhausted.set()
@@ -538,7 +587,11 @@ def record(cfg: Config, out: Path) -> tuple[Path, Cast]:
             "COLORTERM=truecolor",
             "-e",
             "TERM=xterm-256color",
-            f"while [ ! -e {gate} ]; do sleep 0.05; done; cd {workspace} && exec {wing}",
+            "while [ ! -e {gate} ]; do sleep 0.05; done; cd {workspace} && exec {wing}".format(
+                gate=shlex.quote(str(gate)),
+                workspace=shlex.quote(str(workspace)),
+                wing=shlex.quote(str(wing)),
+            ),
         )
         term.watch()
         gate.touch()
@@ -585,7 +638,7 @@ def record(cfg: Config, out: Path) -> tuple[Path, Cast]:
                 not sent_enter
                 and elapsed
                 >= cfg.hold_welcome
-                + len(cfg.prompt) * cfg.type_delay
+                + math.ceil(len(cfg.prompt) / cfg.type_chunk) * cfg.type_delay
                 + cfg.hold_before_enter
             ):
                 tmux("send-keys", "-t", term.name, "Enter")
@@ -661,7 +714,11 @@ def parse_args() -> tuple[Config, argparse.Namespace]:
         metavar="ARG",
         help="透传给假 Provider 脚本的参数（可重复，如 --serve-arg --tps=3000）",
     )
-    parser.add_argument("--prompt", default=STORY_PROMPT, help="敲进去的问题")
+    parser.add_argument(
+        "--prompt",
+        default=None,
+        help="敲进去的问题（默认按模式取 hero / 速度演示各自的固定文案）",
+    )
     parser.add_argument(
         "--seconds",
         type=float,

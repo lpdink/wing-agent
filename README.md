@@ -63,7 +63,7 @@ per frame (M6 Mac mini):
 | 30,000 tok/s | 13 ms | 22 ms |
 | 45,000 tok/s | 10 ms | 30 ms |
 
-Reproduce it: `uv run python scripts/demo/latency.py --steps 3000,30000,45000`.
+Reproduce it: `uv run python scripts/demo/latency.py --steps 3000,30000,45000 --marker-every 2000 --seconds 10`.
 
 ## Quick Start
 
@@ -112,12 +112,20 @@ Frontend config: `~/.wing/tui/config.yaml`
 | `Edit` | Surgical string replacement in files |
 | `Glob` | Find files by pattern |
 | `Grep` | Search file contents with regex |
+| `ReadImage` | Feed an image (screenshot, diagram, chart) to a vision model |
 | `AskUserQuestion` | Ask the user a question |
 | `TodoWrite` | Track task progress |
 | `Explorer` | Autonomous code exploration sub-agent (blocking or background) |
 | `BetterEdit` | Anchored `[upto]` edits (experimental) |
 
 Custom tools: **[docs/en/custom-tools.md](https://github.com/lpdink/wing-agent/blob/develop/docs/en/custom-tools.md)**
+
+A terminal UI that renders what the model actually produces, not a log of it: streaming
+markdown with syntax highlighting, LaTeX (`$…$`, `$$…$$`, AMS environments) composed into
+the character grid, and local images drawn inline where the terminal speaks a graphics
+protocol (kitty / iTerm2) or clickable where it doesn't. The same goes the other way:
+`ReadImage` hands a screenshot or chart to a vision model without ever putting image bytes
+in the transcript.
 
 Tool calls render where they happen: an `Edit` grows a syntax-highlighted diff against the
 real file, a `Bash` run shows its real output, and `TodoWrite` keeps the plan visible while
