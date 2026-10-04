@@ -206,7 +206,11 @@ class TestListSessions:
 
 
 class TestListSessionsOrder:
-    """排序口径：活跃（已在内存）优先 + 组内最后交互时间降序，workspace 不参与。"""
+    """排序口径：活跃（已在内存）优先 + 组内最后交互时间降序，workspace 不参与。
+
+    组内不引入状态优先级（waiting 不提前），并列时按 id 定序（全序，见
+    `SessionManager.list_sessions` 的 docstring）。
+    """
 
     def test_active_comes_first_even_when_inactive_is_newer(self, tmp_path: Path):
         # 唯一能区分「活跃优先」与「纯时间降序」的形状：active 的时间更旧。
@@ -245,6 +249,20 @@ class TestListSessionsOrder:
             "idle-session",
             "disk-session",
         ]
+
+    def test_waiting_gets_no_priority_within_the_active_group(self, tmp_path: Path):
+        # 组内只看时间：更新的 idle 排在更旧的 waiting 之前。旧前端的 rank 键
+        # （waiting > working > idle）会给出相反顺序——「正在等你回答」不再靠
+        # 排序提前，靠状态图标（`?`）表达。
+        sessions_path = tmp_path / "sessions"
+        _write_session_dir(sessions_path, "waiting-old", "2025-01-01T00:00:00")
+        _write_session_dir(sessions_path, "idle-new", "2025-06-01T00:00:00")
+
+        sm = _make_manager(sessions_path)
+        _mark_active(sm, "waiting-old", "waiting")
+        _mark_active(sm, "idle-new", "idle")
+
+        assert _ids(sm) == ["idle-new", "waiting-old"]
 
     def test_group_order_is_time_descending(self, tmp_path: Path):
         # active 组内、inactive 组内都按 last_interaction 降序。
@@ -319,8 +337,19 @@ class TestListSessionsOrder:
         sm = _make_manager(sessions_path)
         result = sm.list_sessions()
 
+        # 两个 0 分会话之间的先后由 id 兜底（并列 ≠ 交给文件系统枚举序）。
         assert [s.id for s in result] == [
             "20250101-101010-session",
-            "no-time-session",
             "broken-time",
+            "no-time-session",
         ]
+
+    def test_tied_timestamps_are_ordered_by_id(self, tmp_path: Path):
+        # 完全并列（同一时间戳）时按 id 升序：顺序确定，与 store 的枚举顺序无关。
+        sessions_path = tmp_path / "sessions"
+        for session_id in ("tie-b", "tie-c", "tie-a"):
+            _write_session_dir(sessions_path, session_id, "2025-01-01T00:00:00")
+
+        sm = _make_manager(sessions_path)
+
+        assert _ids(sm) == ["tie-a", "tie-b", "tie-c"]

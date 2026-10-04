@@ -576,7 +576,14 @@ class SessionManager:
         排序口径（唯一事实来源，前端按原序渲染、不再重排）：
 
         1. `status != "inactive"` 的（= 已在内存里的工作集）在前，未加载的在后；
-        2. 组内按 `_timestamp_key`（最后一次交互时间，见该函数的归一化回退）降序。
+        2. 组内按 `_timestamp_key`（最后一次交互时间，见该函数的归一化回退）降序；
+        3. 完全并列（含都取不到时间）时按 session id 升序——**只为定序**，不是
+           优先级：没有它，并列项的先后就取决于 store 的枚举顺序（`iterdir()` /
+           SQL 返回序），同一个列表两次请求可能给出不同顺序。
+
+        `status` 只用来区分 active / inactive，不再有组内优先级：`waiting`
+        （正在等用户回答）不因为状态本身提前——旧的「waiting > working > idle」
+        排序键已从前端删除，需要突出 waiting 时看面板上的状态图标（`?`）。
 
         workspace 不参与排序：workspace 匹配曾作为前端的第一排序键，让
         「在哪启动 TUI」压过了「正在用哪几个会话」——本方法不复制该语义。
@@ -600,8 +607,8 @@ class SessionManager:
                     )
                 )
 
-        # 活跃优先（False < True），组内时间新的在前。
-        result.sort(key=lambda s: (s.status == "inactive", -_timestamp_key(s)))
+        # 活跃优先（False < True），组内时间新的在前；并列时按 id 定序（见 docstring）。
+        result.sort(key=lambda s: (s.status == "inactive", -_timestamp_key(s), s.id))
 
         return result
 
