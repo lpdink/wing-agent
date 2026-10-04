@@ -13,9 +13,9 @@ use ratatui::text::Span;
 
 use super::art::WORDMARK;
 use super::art::WORDMARK_COLS;
-use super::sprite::Rgb;
-use super::sprite::luminance;
-use super::sprite::mix;
+use crate::ui::shimmer::Rgb;
+use crate::ui::shimmer::mix;
+use crate::ui::shimmer::sweep_intensity;
 
 /// 扫光光带半宽（列）。
 pub const SWEEP_RADIUS: f32 = 6.0;
@@ -28,11 +28,6 @@ const DARK_THEME_LIGHT_BLEND: f32 = 0.75;
 
 /// 亮底渐变的暗端：accent 往黑里压这么多。
 const LIGHT_THEME_DARK_BLEND: f32 = 0.45;
-
-/// 主题是不是亮底（按 `text` 色亮度判：亮底主题的正文字是深的）。
-pub fn is_light_theme(text: Rgb) -> bool {
-    luminance(text) < 0.5
-}
 
 /// 第 `col` 列的渐变基色（`light` = 亮底主题）。
 ///
@@ -52,13 +47,11 @@ pub fn column_color(col: usize, accent: Rgb, light: bool) -> Rgb {
 }
 
 /// 扫光在 `col` 列的高光强度（0 = 不在光带里，1 = 正中）。
-pub fn sweep_at(col: usize, phase: f32) -> f32 {
-    let center = phase * (WORDMARK_COLS as f32 + 2.0 * SWEEP_RADIUS) - SWEEP_RADIUS;
-    let d = (col as f32 - center).abs();
-    if d >= SWEEP_RADIUS {
-        return 0.0;
-    }
-    (1.0 - d / SWEEP_RADIUS).powf(1.5)
+///
+/// wordmark 的跨度就是字形宽度；通用的那份数学在
+/// [`crate::ui::shimmer::sweep_intensity`]（聊天里的思考行也用它）。
+fn sweep_at(col: usize, phase: f32) -> f32 {
+    sweep_intensity(col as f32, phase, WORDMARK_COLS as f32, SWEEP_RADIUS)
 }
 
 /// 画 wordmark：5 像素行 → 3 终端行（半格）。
@@ -123,6 +116,7 @@ pub fn lines(phase: Option<f32>, accent: Rgb, light: bool) -> Vec<Line<'static>>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::shimmer::luminance;
 
     #[test]
     fn three_terminal_rows() {
