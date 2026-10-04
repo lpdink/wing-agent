@@ -562,19 +562,25 @@ impl ToolCallBlock {
     pub fn to_lines(&self, palette: &ThemePalette, max_output: usize) -> Vec<Line<'static>> {
         let renderer = ToolRenderer::from_name(&self.tool_name);
         let status = self.status;
-        let bold = Style::default().add_modifier(Modifier::BOLD);
+        // Three registers on the header line: the bullet carries the status
+        // colour, the name is the anchor (bold, primary text), and args +
+        // timer stay quiet — a full screen of calls reads as names first,
+        // parameters second.
+        let name_style = Style::default()
+            .fg(palette.text)
+            .add_modifier(Modifier::BOLD);
+        let args_style = Style::default().fg(palette.dim);
         let dim = Style::default().fg(palette.dim);
 
         // Header: ⦁ ToolName(args) [timer]
-        // Args use the same bold style as the tool name.
         // Timer (Bash only) uses dim style.
         let args_part = renderer.header_args(&self.tool_args);
 
         let mut header_spans = vec![
             Span::styled(status.bullet(), Style::default().fg(status.color(palette))),
             Span::raw(" "),
-            Span::styled(self.tool_name.clone(), bold),
-            Span::styled(args_part, bold),
+            Span::styled(self.tool_name.clone(), name_style),
+            Span::styled(args_part, args_style),
         ];
 
         // Bash timer: appended as dim text after args.
