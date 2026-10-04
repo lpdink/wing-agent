@@ -312,9 +312,10 @@ pub fn filter_candidates(candidates: &[(String, String)], args: &str) -> Vec<Sel
 
 /// Filter session candidates by the given args string, producing rich two-line rows.
 ///
-/// Matching is done on id, title, and workspace (case-insensitive). The order
-/// of `candidates` is preserved within each match tier (exact > prefix > contains),
-/// so the caller's pre-sort (workdir → status → time) is retained.
+/// Matching is done on id, title, and workspace (case-insensitive; workspace is
+/// search-only — it drives no ordering). The order of `candidates` is preserved
+/// within each match tier (exact > prefix > contains), so the backend order
+/// (active first, then last interaction descending) survives filtering.
 pub fn filter_session_candidates(candidates: &[SessionCandidate], args: &str) -> Vec<SelectionRow> {
     let args_lower = args.to_lowercase();
 
@@ -333,7 +334,6 @@ pub fn filter_session_candidates(candidates: &[SessionCandidate], args: &str) ->
                 // Display-only surface: a value this build does not know
                 // (version mismatch on the list endpoint) shows as inactive.
                 status: SessionStatus::parse(&c.status).unwrap_or(SessionStatus::Inactive),
-                workspace: c.workspace.clone(),
                 last_active: super::selection::format_last_active(&c.last_interaction),
                 title: c.title.clone(),
             }),
@@ -365,15 +365,16 @@ pub fn is_exact_session_match(candidates: &[SessionCandidate], args: &str) -> bo
 
 /// A session candidate for the `/session`、`/ss` popup.
 ///
-/// Carries everything needed for the two-line render (status icon + workspace
-/// on line 1, title on line 2) plus the `id` used as the completion value.
+/// Carries everything needed for the two-line render (status icon + last active
+/// time on line 1, title on line 2) plus the `id` used as the completion value.
+/// `workspace` is kept for search only.
 #[derive(Debug, Clone)]
 pub struct SessionCandidate {
     /// Session id — inserted on completion (not displayed verbatim).
     pub id: String,
     /// Session title (line 2).
     pub title: String,
-    /// Session workspace (line 1, after the status icon).
+    /// Session workspace — search-only (never rendered, never ordered by).
     pub workspace: String,
     /// Runtime status string from the backend (inactive|idle|working|waiting).
     pub status: String,
@@ -583,5 +584,79 @@ mod tests {
         assert!(is_session_command("/ss"));
         assert!(!is_session_command("/model"));
         assert!(!is_session_command("/fork"));
+    }
+
+    /// A session candidate as the backend orders it (active first, then time desc).
+    fn session(id: &str, title: &str, workspace: &str, status: &str) -> SessionCandidate {
+        SessionCandidate {
+            id: id.into(),
+            title: title.into(),
+            workspace: workspace.into(),
+            status: status.into(),
+            last_interaction: "2025-07-22T21:41:00".into(),
+        }
+    }
+
+    fn filtered_ids(candidates: &[SessionCandidate], args: &str) -> Vec<String> {
+        filter_session_candidates(candidates, args)
+            .into_iter()
+            .map(|row| row.name)
+            .collect()
+    }
+
+    #[test]
+    fn test_filter_session_candidates_keeps_backend_order() {
+        // 无过滤词：原序透传（active 在前、组内时间降序 = 后端下发顺序）。
+        let candidates = vec![
+            session("sess-active", "current work", "/a", "idle"),
+            session("sess-inactive-old", "older work", "/b", "inactive"),
+            session("sess-inactive-newer", "newer work", "/c", "inactive"),
+        ];
+        assert_eq!(
+            filtered_ids(&candidates, ""),
+            ["sess-active", "sess-inactive-old", "sess-inactive-newer"]
+        );
+    }
+
+    #[test]
+    fn test_filter_session_candidates_tiers_keep_order_within_a_tier() {
+        // 分层 exact > prefix > contains，层内保持原序（不重排）。
+        let candidates = vec![
+            session("session-1", "alpha", "/ws-a", "idle"),
+            session("x-sess-2", "beta", "/ws-b", "inactive"),
+            session("sess", "gamma", "/ws-c", "idle"),
+            session("sess-3", "delta", "/ws-d", "inactive"),
+        ];
+        assert_eq!(
+            filtered_ids(&candidates, "sess"),
+            ["sess", "session-1", "sess-3", "x-sess-2"]
+        );
+    }
+
+    #[test]
+    fn test_filter_session_candidates_matches_workspace_in_the_contains_tier() {
+        // workspace 仍可搜索（只是不再渲染 / 不再排序）：`/ss <workspace 片段>`。
+        let candidates = vec![
+            session("sess-1", "one", "/home/me/wing-agent", "idle"),
+            session("sess-2", "two", "/home/me/other", "idle"),
+        ];
+        assert_eq!(filtered_ids(&candidates, "wing-agent"), ["sess-1"]);
+
+        // 层内顺序 = 后端顺序：两条都命中 workspace 时按原序给出。
+        let both = vec![
+            session("sess-a", "one", "/home/me/repo", "idle"),
+            session("sess-b", "two", "/home/me/repo", "inactive"),
+        ];
+        assert_eq!(filtered_ids(&both, "repo"), ["sess-a", "sess-b"]);
+    }
+
+    #[test]
+    fn test_filter_session_candidates_rich_rows_carry_status_and_time() {
+        let candidates = vec![session("sess-1", "one", "/ws", "working")];
+        let rows = filter_session_candidates(&candidates, "");
+        let rich = rows[0].rich.as_ref().expect("session rows are rich");
+        assert_eq!(rich.status, crate::protocol::SessionStatus::Working);
+        assert_eq!(rich.last_active, "07-22 21:41");
+        assert_eq!(rich.title, "one");
     }
 }

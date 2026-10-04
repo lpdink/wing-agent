@@ -77,6 +77,36 @@ def _fork_slice(
     raise ValueError(f"uuid {target_uuid!r} not found in {len(records)} record(s)")
 
 
+def _timestamp_key(s: SessionInfo) -> float:
+    """归一化 session 的「最后一次交互时间」为可比较的 epoch 秒。
+
+    「有啥用啥」的三级回退：`metadata.last_interaction`（ISO 字符串或数值）→
+    缺失 / 不可解析时用 session id 前缀（`YYYYMMDD-HHMMSS`）→ 都没有按 0。
+    永不抛：排序键不可解析时退化成「排最后」，而不是让整个列表 500。
+
+    时区口径：naive 的 ISO 字符串（仓库内唯一实际写法，`datetime.now().isoformat()`）
+    与 id 前缀回退按**宿主本地时区**折算 epoch，带 `Z` / `+00:00` 的 aware 字符串按
+    UTC 折算——同一份列表里不要混写两种字符串，否则按本地 UTC 偏移错序（小时级）。
+    数值分支是防御代码（`SessionMetadata.last_interaction` 只声明 `str`）。
+    """
+    ts = s.last_interaction
+    if ts is not None:
+        if isinstance(ts, str):
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                return dt.timestamp()
+            except Exception:
+                pass
+        elif isinstance(ts, (int, float)):
+            return float(ts)
+    prefix = s.id[:15] if len(s.id) >= 15 else s.id
+    try:
+        dt = datetime.strptime(prefix, "%Y%m%d-%H%M%S")
+        return dt.timestamp()
+    except Exception:
+        return 0.0
+
+
 def _remap_record_uuids(records: list[dict]) -> list[dict]:
     """深拷贝记录并把链拓扑 uuid 全量重映射到子会话的 uuid 空间。
 
@@ -542,13 +572,26 @@ class SessionManager:
     # ============================================================
 
     def list_sessions(self) -> list[SessionInfo]:
-        """列出所有有效 session（跨 stores 聚合），按 last_interaction 时间降序。
+        """列出所有有效 session（跨 stores 聚合），按「活跃优先 + 最后交互时间降序」。
 
         每个 session 携带运行时 `status`：
         - 已加载进内存（在 `self._sessions` 中）→ 取 live 状态（idle/working/waiting）
         - 未 resume → `inactive`
 
-        workdir 优先排序属于前端业务语义，不在此处处理。
+        排序口径（唯一事实来源，前端按原序渲染、不再重排）：
+
+        1. `status != "inactive"` 的（= 已在内存里的工作集）在前，未加载的在后；
+        2. 组内按 `_timestamp_key`（最后一次交互时间，见该函数的归一化回退）降序；
+        3. 完全并列（含都取不到时间）时按 session id 升序——**只为定序**，不是
+           优先级：没有它，并列项的先后就取决于 store 的枚举顺序（`iterdir()` /
+           SQL 返回序），同一个列表两次请求可能给出不同顺序。
+
+        `status` 只用来区分 active / inactive，不再有组内优先级：`waiting`
+        （正在等用户回答）不因为状态本身提前——旧的「waiting > working > idle」
+        排序键已从前端删除，需要突出 waiting 时看面板上的状态图标（`?`）。
+
+        workspace 不参与排序：workspace 匹配曾作为前端的第一排序键，让
+        「在哪启动 TUI」压过了「正在用哪几个会话」——本方法不复制该语义。
         """
         result = []
         for store in self._stores.values():
@@ -569,26 +612,8 @@ class SessionManager:
                     )
                 )
 
-        # 归一化排序键
-        def _timestamp_key(s: SessionInfo) -> float:
-            ts = s.last_interaction
-            if ts is not None:
-                if isinstance(ts, str):
-                    try:
-                        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                        return dt.timestamp()
-                    except Exception:
-                        pass
-                elif isinstance(ts, (int, float)):
-                    return float(ts)
-            prefix = s.id[:15] if len(s.id) >= 15 else s.id
-            try:
-                dt = datetime.strptime(prefix, "%Y%m%d-%H%M%S")
-                return dt.timestamp()
-            except Exception:
-                return 0.0
-
-        result.sort(key=_timestamp_key, reverse=True)
+        # 活跃优先（False < True），组内时间新的在前；并列时按 id 定序（见 docstring）。
+        result.sort(key=lambda s: (s.status == "inactive", -_timestamp_key(s), s.id))
 
         return result
 

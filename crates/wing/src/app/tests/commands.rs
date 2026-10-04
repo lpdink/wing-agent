@@ -605,3 +605,90 @@ fn test_info_display_name_prefers_the_gateway_and_falls_back_locally() {
     assert_eq!(app.status.model, "mystery");
     assert_eq!(app.status.model_display_name, None);
 }
+
+// ── Session list: the backend owns the order ──
+
+/// `/session`（`/ss`）的候选缓存只做投影：顺序 = 后端 `/api/session/list` 的顺序。
+///
+/// 断言用的是「旧代码会重排」的形状，三条重排键逐一覆盖：
+/// - **workspace 匹配**：inactive 行的 workspace 正是启动目录，active 行的不是；
+/// - **状态优先级**：payload 里更旧的 `waiting`（旧 rank 0）排在更新的 `idle`
+///   （旧 rank 2）之后——只看 rank 会把它提到最前；
+/// - **组合**：旧的全键 `(ws_mismatch, rank)` 给出的顺序与 payload 完全相反。
+#[test]
+fn test_session_list_keeps_the_backend_order() {
+    use crate::app::intent::FetchPayload;
+    use crate::app::intent::FetchResult;
+    use wing_api_client::models::SessionInfo;
+    use wing_api_client::models::SessionListResponse;
+
+    let session = |id: &str, name: &str, ws: &str, status: &str, at: &str| SessionInfo {
+        id: id.into(),
+        name: Some(name.into()),
+        created_at: None,
+        template_name: None,
+        workspace: Some(ws.into()),
+        last_interaction: Some(at.into()),
+        status: status.into(),
+    };
+
+    let payload = SessionListResponse {
+        sessions: vec![
+            // active（在内存里）且时间最新，但 workspace 与启动目录不匹配。
+            session(
+                "active-new",
+                "current work",
+                "/elsewhere/project",
+                "idle",
+                "2025-06-01T00:00:00",
+            ),
+            // 还在 active 组里但时间更旧：waiting 不享有状态优先级。
+            session(
+                "active-old-waiting",
+                "waiting for me",
+                "/elsewhere/project",
+                "waiting",
+                "2025-01-01T00:00:00",
+            ),
+            // inactive 的时间居中，workspace 正是启动目录。
+            session(
+                "inactive-mid",
+                "old work",
+                "/launch/project",
+                "inactive",
+                "2025-03-01T00:00:00",
+            ),
+        ],
+    };
+
+    let mut app = App::new(
+        "test-session".into(),
+        AppConfig::default(),
+        Some("/launch/project".into()),
+    );
+    let session_id = app.session_id.clone();
+    app.handle_fetch_result(FetchResult {
+        session_id,
+        payload: FetchPayload::SessionList(payload),
+    });
+
+    let ids: Vec<&str> = app
+        .popup
+        .cache
+        .sessions
+        .iter()
+        .map(|c| c.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        ["active-new", "active-old-waiting", "inactive-mid"],
+        "the popup renders the payload verbatim — no workspace/status re-ranking"
+    );
+    assert_eq!(app.popup.cache.sessions[0].status, "idle");
+    assert_eq!(
+        app.popup.cache.sessions[0].last_interaction,
+        "2025-06-01T00:00:00"
+    );
+    // workspace 仍然随候选带下来（搜索用），只是不再参与渲染与排序。
+    assert_eq!(app.popup.cache.sessions[2].workspace, "/launch/project");
+}

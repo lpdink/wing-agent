@@ -46,16 +46,6 @@ impl SessionStatus {
             Self::Inactive => Color::DarkGray,
         }
     }
-
-    /// 前端排序优先级（越小越靠前）：waiting > working > idle > inactive。
-    pub fn rank(self) -> u8 {
-        match self {
-            Self::Waiting => 0,
-            Self::Working => 1,
-            Self::Idle => 2,
-            Self::Inactive => 3,
-        }
-    }
 }
 
 /// 双行 session 候选的富渲染数据。
@@ -63,9 +53,7 @@ impl SessionStatus {
 pub struct RichSessionRow {
     /// 运行时状态（决定第一行的图标与颜色）。
     pub status: SessionStatus,
-    /// 第一行：session 工作目录。
-    pub workspace: String,
-    /// 第一行右侧：最后活跃时间（人类可读）。
+    /// 第一行：最后活跃时间（人类可读）。
     pub last_active: String,
     /// 第二行：session 标题。
     pub title: String,
@@ -353,7 +341,10 @@ impl<'a> SelectionPopup<'a> {
     }
 
     /// Render a rich two-line session row:
-    /// line 1 = ` <icon> <workspace>  <last_active>`, line 2 = `    <title>`.
+    /// line 1 = ` <status icon> <last_active>`, line 2 = `    <title>`.
+    ///
+    /// workspace 不渲染：它既不参与排序也不参与分组（`/session` 只把它留给搜索
+    /// 过滤，见 `filter_session_candidates`），行 1 让位给「什么状态 + 多久没动」。
     #[allow(clippy::too_many_arguments)]
     fn render_rich_row(
         &self,
@@ -368,7 +359,7 @@ impl<'a> SelectionPopup<'a> {
     ) {
         let width = area.width as usize;
 
-        // ── Line 1: status icon + workspace + [last_active] ──
+        // ── Line 1: status icon + last_active ──
         Self::clear_line(buf, area, y, base_style);
         let mut line1: Vec<Span<'static>> = Vec::new();
         line1.push(Span::styled(" ", base_style));
@@ -378,32 +369,17 @@ impl<'a> SelectionPopup<'a> {
         ));
         line1.push(Span::styled(" ", base_style));
 
-        // "● " prefix occupies 3 columns. Time tag " [MM-DD HH:MM]" = 14 cols.
-        let time_tag = if rich.last_active.is_empty() {
-            String::new()
+        // The icon prefix already occupies 3 columns.
+        let budget = width.saturating_sub(3);
+        let last_active = if UnicodeWidthStr::width(rich.last_active.as_str()) > budget {
+            truncate_to_display_width(&rich.last_active, budget)
         } else {
-            format!(" [{}]", rich.last_active)
+            rich.last_active.clone()
         };
-        let time_tag_w = UnicodeWidthStr::width(time_tag.as_str());
-        let available = width.saturating_sub(3);
-        let ws_budget = available.saturating_sub(time_tag_w);
-
-        let workspace = if rich.workspace.is_empty() {
-            "(no workspace)".to_string()
-        } else if UnicodeWidthStr::width(rich.workspace.as_str()) > ws_budget {
-            truncate_to_display_width(&rich.workspace, ws_budget)
-        } else {
-            rich.workspace.clone()
-        };
-        line1.push(Span::styled(
-            workspace,
-            Style::default().fg(accent).patch(base_style),
-        ));
-
-        if !time_tag.is_empty() {
+        if !last_active.is_empty() {
             let time_fg = if is_selected { accent } else { dim_color };
             line1.push(Span::styled(
-                time_tag,
+                last_active,
                 Style::default().fg(time_fg).patch(base_style),
             ));
         }
@@ -567,7 +543,6 @@ mod tests {
                 description: String::new(),
                 rich: Some(RichSessionRow {
                     status: SessionStatus::Idle,
-                    workspace: "/tmp".into(),
                     last_active: "07-22 21:41".into(),
                     title: format!("title {i}"),
                 }),
@@ -589,14 +564,6 @@ mod tests {
     }
 
     #[test]
-    fn test_session_status_rank_order() {
-        // waiting > working > idle > inactive
-        assert!(SessionStatus::Waiting.rank() < SessionStatus::Working.rank());
-        assert!(SessionStatus::Working.rank() < SessionStatus::Idle.rank());
-        assert!(SessionStatus::Idle.rank() < SessionStatus::Inactive.rank());
-    }
-
-    #[test]
     fn test_row_height() {
         assert_eq!(plain_row("a", "b").height(), 1);
         let rich = SelectionRow {
@@ -604,12 +571,67 @@ mod tests {
             description: String::new(),
             rich: Some(RichSessionRow {
                 status: SessionStatus::Working,
-                workspace: "/w".into(),
                 last_active: String::new(),
                 title: "t".into(),
             }),
         };
         assert_eq!(rich.height(), 2);
+    }
+
+    /// Render a single rich row (selected, so the title path is exercised) and
+    /// return its two lines as text.
+    fn rich_lines(row: &SelectionRow, filter: &str, width: u16) -> (String, String) {
+        let rows = std::slice::from_ref(row);
+        let state = SelectionState::new(1);
+        let area = Rect::new(0, 0, width, 2);
+        let mut buf = Buffer::empty(area);
+        SelectionPopup::new(rows, &state, filter, &ThemePalette::default()).render(area, &mut buf);
+        let text = |y: u16| {
+            (0..width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        };
+        (text(0), text(1))
+    }
+
+    fn session_row(status: SessionStatus, last_active: &str, title: &str) -> SelectionRow {
+        SelectionRow {
+            name: "sess-1".into(),
+            description: String::new(),
+            rich: Some(RichSessionRow {
+                status,
+                last_active: last_active.into(),
+                title: title.into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn test_rich_row_line1_is_status_icon_and_last_active() {
+        // line 1 只有图标 + 最后活跃时间（workspace 不再渲染）。
+        let row = session_row(SessionStatus::Working, "07-22 21:41", "my session");
+        let (line1, line2) = rich_lines(&row, "", 40);
+        assert_eq!(line1, " ● 07-22 21:41");
+        assert_eq!(line2.trim_start(), "my session");
+    }
+
+    #[test]
+    fn test_rich_row_without_timestamp_shows_only_the_icon() {
+        // 时间不可解析（format_last_active 给空串）时不留悬空的空格/括号。
+        let row = session_row(SessionStatus::Inactive, "", "untitled work");
+        let (line1, line2) = rich_lines(&row, "", 40);
+        assert_eq!(line1, " ●");
+        assert_eq!(line2.trim_start(), "untitled work");
+    }
+
+    #[test]
+    fn test_rich_row_truncates_a_long_timestamp_to_the_row_width() {
+        // 极窄终端：line 1 不得超过行宽（set_line 的边界不外溢）。
+        let row = session_row(SessionStatus::Idle, "07-22 21:41", "title");
+        let (line1, _) = rich_lines(&row, "", 8);
+        assert_eq!(UnicodeWidthStr::width(line1.as_str()), 8, "{line1:?}");
     }
 
     #[test]

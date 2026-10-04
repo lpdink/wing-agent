@@ -79,6 +79,11 @@ impl ActivePopup {
 
         // Session commands (`/session`, `/ss`): HTTP-fetched rich candidates.
         if is_session_command(cmd) {
+            // 这个分支只在**缓存为空**时才发请求（见下方 FetchSessionList），所以
+            // 保持原序渲染 == 渲染「上一次抓取时」的顺序：普通对话不失效缓存，
+            // 而列表的主排序键是每条消息都在更新的 last_interaction —— 打开面板
+            // 前连聊很久，看到的仍是旧顺序与旧时间。修法（打开面板即刷新一次，
+            // 等价于用当前顺序渲染）见 #147。
             if cache.has_sessions() {
                 let candidates = &cache.sessions;
                 // must-select 命令精确匹配时保持 popup 打开（Enter = 确认选择）；

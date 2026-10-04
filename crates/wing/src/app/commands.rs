@@ -420,28 +420,13 @@ impl App {
                 self.update_popup();
             }
             FetchPayload::SessionList(resp) => {
-                use crate::protocol::SessionStatus;
                 use crate::ui::popup::command::SessionCandidate;
 
-                // Normalize a path for workdir comparison (strip trailing slashes).
-                let norm = |p: &str| {
-                    let t = p.trim_end_matches('/');
-                    if t.is_empty() {
-                        "/".to_string()
-                    } else {
-                        t.to_string()
-                    }
-                };
-                let launch_norm = norm(self.launch_workspace.as_deref().unwrap_or(""));
-
-                // A session workspace "matches" the launch dir if it equals it or
-                // is a subdirectory (prefix match on path components).
-                let ws_matches = |ws: &str| {
-                    let n = norm(ws);
-                    n == launch_norm || n.starts_with(&format!("{launch_norm}/"))
-                };
-
-                let mut candidates: Vec<SessionCandidate> = resp
+                // 顺序完全沿用后端下发（active 优先 + 组内最后交互时间降序，
+                // 见 SessionManager.list_sessions）：前端按原序渲染，不做任何
+                // 重排——workspace 匹配与 status 优先级这两个旧排序键已删除，
+                // 它们是「在哪启动 TUI」压过「正在用哪几个会话」的根源。
+                let candidates: Vec<SessionCandidate> = resp
                     .sessions
                     .iter()
                     .map(|s| SessionCandidate {
@@ -452,15 +437,6 @@ impl App {
                         last_interaction: s.last_interaction.clone().unwrap_or_default(),
                     })
                     .collect();
-
-                // Stable sort: ① workdir 匹配当前启动目录者优先（前缀匹配）→
-                // ② 状态优先级 (waiting > working > idle > inactive) →
-                // ③ 保持后端时间降序。
-                candidates.sort_by_key(|c| {
-                    let ws_mismatch = !ws_matches(&c.workspace);
-                    let status = SessionStatus::parse(&c.status).unwrap_or(SessionStatus::Inactive);
-                    (ws_mismatch, status.rank())
-                });
 
                 self.popup.cache.sessions = candidates;
                 self.update_popup();
