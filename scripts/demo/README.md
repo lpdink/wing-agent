@@ -32,10 +32,12 @@ uv run python scripts/demo/latency.py --steps 3000,30000,45000 --marker-every 20
 产物落在 `target/demo/`：`<name>.cast`（asciinema v2）、`<name>.gif`、`stills/*.png`、
 `pane.raw`（pane 的原始字节流，排查启动问题用）、`timeline.txt`。
 
-**录完会自检**：默认要求某一帧里出现 `OK` / `All three tests pass.`（hero）或 ` t/s `
-（速度图），没有就判本次录制失败、**不渲染也不覆盖**已有资产，直接非零退出——防的是
+**录完会自检**：hero 默认要求画面里出现 `+ def fetch(`、`OK`、`All three tests pass.`；
+速度图要求 ` t/s ` 之外还要**问句与答句对得上**（`walk me through` + `job queue`）——
+后者是补的：曾经四张速度图里敲的是 hero 的问句、答的是队列文档，只校验 ` t/s ` 时
+谁也看不出来。缺任何一项就判本次录制失败、**不渲染也不发布**，直接非零退出——防的是
 "工具 schema 漂了 / Bash 被拦了，GIF 里是一张红卡片，却静默成功"。要录别的镜头用
-`--expect TEXT`（可重复）指定自己的守门内容。
+`--expect TEXT`（可重复）指定自己的守门内容（改语料标题时记得同步 `SPEED_EXPECT`）。
 
 依赖：`tmux`（必须）、`agg`（首次运行自动下到 `target/demo-tools/`，`$DEMO_AGG` 可覆盖；
 网络要代理时先 `export https_proxy=...`）、出 PNG 用 `sips`（macOS）或 ImageMagick、

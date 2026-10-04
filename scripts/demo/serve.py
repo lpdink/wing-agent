@@ -124,7 +124,7 @@ class DemoScript(Script):
 
 
 def build_script() -> Script:
-    """剧本：7 轮工具 + 1 轮收尾（每轮 = 一次请求 / 一次模型输出）。"""
+    """剧本：8 轮带工具调用 + 1 轮纯文本收尾（每轮 = 一次请求 / 一次模型输出）。"""
     return DemoScript(
         # 1) 读完清单 → 建任务列表
         Turn.of(

@@ -55,7 +55,7 @@ TUI 从不重画整段回答：markdown 块在闭合时一次性定型，之后�
 | 30,000 tok/s | 13 ms | 22 ms |
 | 45,000 tok/s | 10 ms | 30 ms |
 
-复算：`uv run python scripts/demo/latency.py --steps 3000,30000,45000`。
+复算：`uv run python scripts/demo/latency.py --steps 3000,30000,45000 --marker-every 2000 --seconds 10`。
 
 ## 快速开始
 
@@ -104,12 +104,15 @@ wing         # 重新启动
 | `Edit` | 精准字符串替换 |
 | `Glob` | 按模式查找文件 |
 | `Grep` | 正则搜索文件内容 |
+| `ReadImage` | 把图片（截图、架构图、图表）交给视觉模型 |
 | `AskUserQuestion` | 向用户提问 |
 | `TodoWrite` | 跟踪任务进度 |
 | `Explorer` | 自主代码探索子 agent（可阻塞或后台运行） |
 | `BetterEdit` | 锚定 `[upto]` 编辑（实验性） |
 
 自定义工具：**[docs/zh/custom-tools.md](custom-tools.md)**
+
+一个真的终端界面，而不是模型输出的日志：流式 markdown 带语法高亮、LaTeX（`$…$`、`$$…$$`、AMS 环境）排进字符网格、本地图片在支持图形协议的终端里直接画出来（kitty / iTerm2），不支持的终端退化成可点击的链接。反方向也一样：`ReadImage` 把截图、架构图、图表交给视觉模型，而图片字节**不进**会话记录。
 
 工具调用就在它发生的位置渲染：`Edit` 对着真文件长出一份带语法高亮的 diff，`Bash` 显示真实输出，`TodoWrite` 把计划一直摆在眼前——三者在页面顶部的演示里都能看到。
 
