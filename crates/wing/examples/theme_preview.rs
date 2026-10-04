@@ -19,11 +19,12 @@
 //! 纯预设（不含个人覆盖）可以把 `WING_HOME` 指到空目录再跑：
 //! `WING_HOME=/tmp/empty-wing cargo run -p wing --example theme_preview`。
 //!
-//! 画的就是 TUI 里那一份：全部走真 cell（`ChatCell` / `ToolCallBlock` /
+//! 画的就是 TUI 里那一份：cell 全部走真渲染（`ChatCell` / `ToolCallBlock` /
 //! `ThinkingBlock` / `DiffView` / `AskMessage` / 状态栏），palette 走
 //! `AppConfig::load()` → `ThemePalette::from_config` —— 不会出现"预览好看、
-//! 真机不一样"。`cargo test` 会编译这个 example（不运行），所以它不会因为
-//! 没人跑而腐掉。
+//! 真机不一样"。唯一的近似在用户消息卡：卡的几何（铺底 / 内衬）在 viewport
+//! 层，这里按同样的做法补上，文本行仍出自真 cell。`cargo test` 会编译这个
+//! example（不运行），所以它不会因为没人跑而腐掉。
 
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -76,28 +77,48 @@ fn build(config: &AppConfig, palette: &ThemePalette, width: u16) -> Vec<Line<'st
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // 抬头：预设 + 个人覆盖点名。
-    let mut overrides: Vec<&str> = Vec::new();
-    for (name, value) in [
-        ("accent", &config.colors.accent),
-        ("text", &config.colors.text),
-        ("thinking", &config.colors.thinking),
-        ("tool_result", &config.colors.tool_result),
-        ("dim", &config.colors.dim),
-        ("success", &config.colors.success),
-        ("warning", &config.colors.warning),
-        ("danger", &config.colors.danger),
-        ("math", &config.colors.math),
-        ("surface", &config.colors.surface),
-        ("diff_add_bg", &config.colors.diff_add_bg),
-        ("diff_del_bg", &config.colors.diff_del_bg),
-        ("diff_add_bg_strong", &config.colors.diff_add_bg_strong),
-        ("diff_del_bg_strong", &config.colors.diff_del_bg_strong),
-    ] {
-        if value.is_some() {
-            overrides.push(name);
-        }
-    }
+    // 槽位表：名字 × 覆盖值 × 解析后的颜色 —— 抬头与图例共用一份，别再手抄两遍。
+    let slots: [(&str, &Option<String>, Color); 14] = [
+        ("accent", &config.colors.accent, palette.accent),
+        ("text", &config.colors.text, palette.text),
+        ("thinking", &config.colors.thinking, palette.thinking),
+        (
+            "tool_result",
+            &config.colors.tool_result,
+            palette.tool_result,
+        ),
+        ("dim", &config.colors.dim, palette.dim),
+        ("success", &config.colors.success, palette.success),
+        ("warning", &config.colors.warning, palette.warning),
+        ("danger", &config.colors.danger, palette.danger),
+        ("math", &config.colors.math, palette.math),
+        ("surface", &config.colors.surface, palette.surface),
+        (
+            "diff_add_bg",
+            &config.colors.diff_add_bg,
+            palette.diff_add_bg,
+        ),
+        (
+            "diff_del_bg",
+            &config.colors.diff_del_bg,
+            palette.diff_del_bg,
+        ),
+        (
+            "diff_add_bg_strong",
+            &config.colors.diff_add_bg_strong,
+            palette.diff_add_bg_strong,
+        ),
+        (
+            "diff_del_bg_strong",
+            &config.colors.diff_del_bg_strong,
+            palette.diff_del_bg_strong,
+        ),
+    ];
+    let overrides: Vec<&str> = slots
+        .iter()
+        .filter(|(_, value, _)| value.is_some())
+        .map(|(name, _, _)| *name)
+        .collect();
     lines.push(Line::from(vec![
         Span::styled(
             "wing theme preview".to_string(),
@@ -118,7 +139,7 @@ fn build(config: &AppConfig, palette: &ThemePalette, width: u16) -> Vec<Line<'st
         },
         Style::default().fg(palette.dim),
     )));
-    legend(&mut lines, config, palette);
+    legend(&mut lines, &slots, palette);
 
     // ── chrome · 状态栏 ─────────────────────────────────────────
     section(&mut lines, "chrome · 状态栏", width, palette);
@@ -126,32 +147,24 @@ fn build(config: &AppConfig, palette: &ThemePalette, width: u16) -> Vec<Line<'st
 
     // ── 用户消息：已提交 / pending / discarded ───────────────────
     section(&mut lines, "user · 三种状态", width, palette);
-    user_card(
-        &mut lines,
-        "把模型输出里的 diff 底色统一一下。",
-        palette,
-        width,
-        palette.text,
-        false,
-    );
-    label(&mut lines, "pending（已发出、模型还没取）", palette);
-    user_card(
-        &mut lines,
-        "顺便看看 200 行以外的那个 tab。",
-        palette,
-        width,
-        palette.dim,
-        false,
-    );
-    label(&mut lines, "discarded（被中断丢弃）", palette);
-    user_card(
-        &mut lines,
-        "这条没送出去。",
-        palette,
-        width,
-        palette.dim,
-        true,
-    );
+    let cards = [
+        (
+            "已提交",
+            ChatCell::UserMessage("把模型输出里的 diff 底色统一一下。".into()),
+        ),
+        (
+            "pending（已发出、模型还没取）",
+            ChatCell::PendingUserMessage("顺便看看 200 行以外的那个 tab。".into()),
+        ),
+        (
+            "discarded（被中断丢弃）",
+            ChatCell::DiscardedUserMessage("这条没送出去。".into()),
+        ),
+    ];
+    for (caption, cell) in cards {
+        label(&mut lines, caption, palette);
+        user_card(&mut lines, &cell, &ctx, width, palette);
+    }
 
     // ── 助手 · markdown 全要素 ──────────────────────────────────
     section(&mut lines, "assistant · markdown", width, palette);
@@ -229,37 +242,16 @@ fn build(config: &AppConfig, palette: &ThemePalette, width: u16) -> Vec<Line<'st
 }
 
 /// 灰阶 / 色相一览：`██ 槽位`，被 config 覆盖的槽位带 `*`。
-fn legend(lines: &mut Vec<Line<'static>>, config: &AppConfig, p: &ThemePalette) {
-    let c = &config.colors;
-    let slots: [(&str, Color, bool); 14] = [
-        ("accent", p.accent, c.accent.is_some()),
-        ("text", p.text, c.text.is_some()),
-        ("thinking", p.thinking, c.thinking.is_some()),
-        ("tool_result", p.tool_result, c.tool_result.is_some()),
-        ("dim", p.dim, c.dim.is_some()),
-        ("success", p.success, c.success.is_some()),
-        ("warning", p.warning, c.warning.is_some()),
-        ("danger", p.danger, c.danger.is_some()),
-        ("math", p.math, c.math.is_some()),
-        ("surface", p.surface, c.surface.is_some()),
-        ("diff_add_bg", p.diff_add_bg, c.diff_add_bg.is_some()),
-        ("diff_del_bg", p.diff_del_bg, c.diff_del_bg.is_some()),
-        (
-            "diff_add_bg_strong",
-            p.diff_add_bg_strong,
-            c.diff_add_bg_strong.is_some(),
-        ),
-        (
-            "diff_del_bg_strong",
-            p.diff_del_bg_strong,
-            c.diff_del_bg_strong.is_some(),
-        ),
-    ];
+fn legend(
+    lines: &mut Vec<Line<'static>>,
+    slots: &[(&str, &Option<String>, Color)],
+    p: &ThemePalette,
+) {
     for row in slots.chunks(4) {
         let mut spans: Vec<Span<'static>> = Vec::new();
-        for (name, color, overridden) in row {
+        for (name, value, color) in row {
             spans.push(Span::styled("██ ", Style::default().fg(*color)));
-            let mark = if *overridden { '*' } else { ' ' };
+            let mark = if value.is_some() { '*' } else { ' ' };
             spans.push(Span::styled(
                 format!("{name}{mark}  "),
                 Style::default().fg(p.dim),
@@ -292,28 +284,32 @@ fn label(lines: &mut Vec<Line<'static>>, text: &str, p: &ThemePalette) {
     )));
 }
 
-/// 一张用户消息卡：surface 底、左右铺满、上下留一空行（真机里的内衬）。
+/// 一张用户消息卡：文本行走**真 cell**（正常 / dim / dim+划掉的样式全部来自
+/// `ChatCell`），只有卡的几何是这里补的 —— 铺满整行、左 2 内衬、上下空行，
+/// 与 `chat_view` viewport 的做法一致（几何在 viewport 层，不在 cell）。
 fn user_card(
     lines: &mut Vec<Line<'static>>,
-    text: &str,
-    p: &ThemePalette,
+    cell: &ChatCell,
+    ctx: &CellContext<'_>,
     width: u16,
-    fg: Color,
-    crossed: bool,
+    p: &ThemePalette,
 ) {
-    let mut style = Style::default().fg(fg).bg(p.surface);
-    if crossed {
-        style = style.add_modifier(Modifier::CROSSED_OUT);
-    }
+    let text_lines = cell.to_lines(width, ctx);
+    let style = text_lines
+        .first()
+        .and_then(|line| line.spans.first())
+        .map(|span| span.style)
+        .unwrap_or_else(|| Style::default().fg(p.text).bg(p.surface));
     let blank = Line::from(Span::styled(" ".repeat(width as usize), style));
     lines.push(blank.clone());
-    for raw in text.lines() {
-        let mut text = format!("  {raw}");
-        let used = UnicodeWidthStr::width(text.as_str());
+    for line in text_lines {
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let mut row = format!("  {text}");
+        let used = UnicodeWidthStr::width(row.as_str());
         if used < width as usize {
-            text.push_str(&" ".repeat(width as usize - used));
+            row.push_str(&" ".repeat(width as usize - used));
         }
-        lines.push(Line::from(Span::styled(text, style)));
+        lines.push(Line::from(Span::styled(row, style)));
     }
     lines.push(blank);
 }
@@ -585,6 +581,8 @@ fn sgr(color: Option<Color>, foreground: bool) -> Option<String> {
     match color? {
         Color::Reset => None,
         Color::Rgb(r, g, b) => Some(format!("\x1b[{layer};2;{r};{g};{b}m")),
+        // 256 色索引原样下发；命名色查 16 色表。
+        Color::Indexed(i) => Some(format!("\x1b[{layer};5;{i}m")),
         other => Some(format!("\x1b[{layer};5;{}m", ansi_index(other))),
     }
 }
@@ -667,9 +665,14 @@ fn escape(text: &str) -> String {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let plain = args.iter().any(|a| a == "--plain");
-    let width = value(&args, "--width")
-        .and_then(|v| v.parse::<u16>().ok())
-        .unwrap_or(104);
+    let width = match value(&args, "--width") {
+        None => 104,
+        Some(v) => v
+            .parse::<u16>()
+            .ok()
+            .filter(|w| *w >= 1)
+            .unwrap_or_else(|| fail(&format!("--width expects a positive integer, got '{v}'"))),
+    };
     let html_path = value(&args, "--html");
     let preset_override = value(&args, "--preset").map(|v| v.to_ascii_lowercase());
 
@@ -699,11 +702,15 @@ fn main() {
     }
 }
 
+/// `--flag value`。缺值、或下一个 token 是另一个 flag → 明确报错（以前会把
+/// `--plain` 当成 `--html` 的值，写出一个名叫 `--plain` 的文件）。
 fn value(args: &[String], flag: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == flag)
-        .and_then(|i| args.get(i + 1))
-        .cloned()
+    let index = args.iter().position(|a| a == flag)?;
+    match args.get(index + 1) {
+        Some(v) if !v.starts_with("--") => Some(v.clone()),
+        Some(v) => fail(&format!("{flag} expects a value, got the flag '{v}'")),
+        None => fail(&format!("{flag} expects a value, none was given")),
+    }
 }
 
 fn emit(text: &str) {

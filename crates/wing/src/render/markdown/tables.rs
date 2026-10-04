@@ -469,6 +469,21 @@ fn wrap_cell(cell: &MarkdownLine, width: usize) -> Vec<Vec<MarkdownSegment>> {
                         continue;
                     }
                     let (head, tail) = split_str_by_width(remaining, space_left);
+                    // Safety valve (same as `wrap::hard_break`): a width-2
+                    // glyph cannot fit a degenerate 1-column budget, so the
+                    // split hands back an empty head. Advance one char
+                    // anyway — the row overflows by the glyph's width, but
+                    // the loop must consume its input (it used to spin and
+                    // grow `lines` without bound on a narrow CJK table).
+                    let (head, tail) = if head.is_empty() {
+                        let end = remaining
+                            .char_indices()
+                            .nth(1)
+                            .map_or(remaining.len(), |(i, _)| i);
+                        (&remaining[..end], &remaining[end..])
+                    } else {
+                        (head, tail)
+                    };
                     if !head.is_empty() {
                         current_line.push(MarkdownSegment::new(
                             seg.kind,
@@ -604,6 +619,40 @@ mod tests {
             let w: usize = line_segments.iter().map(|s| s.width()).sum();
             assert!(w <= 8, "line width {w} exceeds 8");
         }
+    }
+
+    /// Regression: a 1-column budget with a width-2 glyph used to hand back an
+    /// empty head forever — the loop spun and grew `lines` without bound (a
+    /// narrow CJK table hung the renderer; `theme_preview --width 11` and the
+    /// baseline `render_probe` both reproduced it). The safety valve must
+    /// consume the input, overflowing the row by the glyph's width.
+    #[test]
+    fn test_wrap_cell_degenerate_width_consumes_input() {
+        let cell = make_line("中文字");
+        let wrapped = wrap_cell(&cell, 1);
+        let text: String = wrapped
+            .iter()
+            .flat_map(|line| line.iter().map(|s| s.text.clone()))
+            .collect();
+        assert_eq!(text, "中文字", "每列 1 格时也必须消费完输入");
+        assert!(
+            wrapped.iter().all(|line| line.len() <= 1),
+            "每个宽字形独占一行：{wrapped:?}"
+        );
+    }
+
+    /// The same degenerate budget at the table level: `share = 1` columns must
+    /// terminate and still produce a bordered table (rows may overflow).
+    #[test]
+    fn test_render_table_degenerate_budget_terminates_with_cjk() {
+        let table = TableBuffer {
+            headers: vec![make_line("槽位"), make_line("岗位")],
+            rows: vec![vec![make_line("text"), make_line("正文")]],
+            ..Default::default()
+        };
+        // 2 columns à 1 content column + chrome ≈ the degenerate share.
+        let lines = render_table(&table, Style::new(), Some(12));
+        assert!(!lines.is_empty());
     }
 
     #[test]

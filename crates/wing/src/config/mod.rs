@@ -122,7 +122,8 @@ pub struct ColorsConfig {
     /// Tool result: tool call output (secondary data).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_result: Option<String>,
-    /// Secondary text: bullets, borders, gutters, separators.
+    /// Quiet register: bullets, borders, gutters, separators — and
+    /// tool-call args / timers (secondary metadata).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dim: Option<String>,
     /// Success: diff+, blockquote, token low.
