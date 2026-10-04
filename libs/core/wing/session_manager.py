@@ -77,6 +77,31 @@ def _fork_slice(
     raise ValueError(f"uuid {target_uuid!r} not found in {len(records)} record(s)")
 
 
+def _timestamp_key(s: SessionInfo) -> float:
+    """归一化 session 的「最后一次交互时间」为可比较的 epoch 秒。
+
+    「有啥用啥」的三级回退：`metadata.last_interaction`（ISO 字符串或数值）→
+    缺失 / 不可解析时用 session id 前缀（`YYYYMMDD-HHMMSS`）→ 都没有按 0。
+    永不抛：排序键不可解析时退化成「排最后」，而不是让整个列表 500。
+    """
+    ts = s.last_interaction
+    if ts is not None:
+        if isinstance(ts, str):
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                return dt.timestamp()
+            except Exception:
+                pass
+        elif isinstance(ts, (int, float)):
+            return float(ts)
+    prefix = s.id[:15] if len(s.id) >= 15 else s.id
+    try:
+        dt = datetime.strptime(prefix, "%Y%m%d-%H%M%S")
+        return dt.timestamp()
+    except Exception:
+        return 0.0
+
+
 def _remap_record_uuids(records: list[dict]) -> list[dict]:
     """深拷贝记录并把链拓扑 uuid 全量重映射到子会话的 uuid 空间。
 
@@ -542,13 +567,19 @@ class SessionManager:
     # ============================================================
 
     def list_sessions(self) -> list[SessionInfo]:
-        """列出所有有效 session（跨 stores 聚合），按 last_interaction 时间降序。
+        """列出所有有效 session（跨 stores 聚合），按「活跃优先 + 最后交互时间降序」。
 
         每个 session 携带运行时 `status`：
         - 已加载进内存（在 `self._sessions` 中）→ 取 live 状态（idle/working/waiting）
         - 未 resume → `inactive`
 
-        workdir 优先排序属于前端业务语义，不在此处处理。
+        排序口径（唯一事实来源，前端按原序渲染、不再重排）：
+
+        1. `status != "inactive"` 的（= 已在内存里的工作集）在前，未加载的在后；
+        2. 组内按 `_timestamp_key`（最后一次交互时间，见该函数的归一化回退）降序。
+
+        workspace 不参与排序：workspace 匹配曾作为前端的第一排序键，让
+        「在哪启动 TUI」压过了「正在用哪几个会话」——本方法不复制该语义。
         """
         result = []
         for store in self._stores.values():
@@ -569,26 +600,8 @@ class SessionManager:
                     )
                 )
 
-        # 归一化排序键
-        def _timestamp_key(s: SessionInfo) -> float:
-            ts = s.last_interaction
-            if ts is not None:
-                if isinstance(ts, str):
-                    try:
-                        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                        return dt.timestamp()
-                    except Exception:
-                        pass
-                elif isinstance(ts, (int, float)):
-                    return float(ts)
-            prefix = s.id[:15] if len(s.id) >= 15 else s.id
-            try:
-                dt = datetime.strptime(prefix, "%Y%m%d-%H%M%S")
-                return dt.timestamp()
-            except Exception:
-                return 0.0
-
-        result.sort(key=_timestamp_key, reverse=True)
+        # 活跃优先（False < True），组内时间新的在前。
+        result.sort(key=lambda s: (s.status == "inactive", -_timestamp_key(s)))
 
         return result
 

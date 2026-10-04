@@ -605,3 +605,81 @@ fn test_info_display_name_prefers_the_gateway_and_falls_back_locally() {
     assert_eq!(app.status.model, "mystery");
     assert_eq!(app.status.model_display_name, None);
 }
+
+// ── Session list: the backend owns the order ──
+
+/// `/session`（`/ss`）的候选缓存只做投影：顺序 = 后端 `/api/session/list` 的顺序。
+///
+/// 断言用的是「旧代码会重排」的形状：inactive 的时间更新、active 的时间更旧，
+/// 且两者的 workspace 相对启动目录分别为「不匹配 / 匹配」——旧的第一排序键
+/// （workspace 匹配）与第二排序键（status 优先级 idle > inactive）都会把
+/// inactive 提到前面，因此这个 payload 能抓住任何重新引入的前端重排。
+#[test]
+fn test_session_list_keeps_the_backend_order() {
+    use crate::app::intent::FetchPayload;
+    use crate::app::intent::FetchResult;
+    use wing_api_client::models::SessionInfo;
+    use wing_api_client::models::SessionListResponse;
+
+    let session = |id: &str, name: &str, ws: &str, status: &str, at: &str| SessionInfo {
+        id: id.into(),
+        name: Some(name.into()),
+        created_at: None,
+        template_name: None,
+        workspace: Some(ws.into()),
+        last_interaction: Some(at.into()),
+        status: status.into(),
+    };
+
+    let payload = SessionListResponse {
+        sessions: vec![
+            // active（空闲、在内存里）但时间更旧，且 workspace 与启动目录不匹配。
+            session(
+                "active-old",
+                "current work",
+                "/elsewhere/project",
+                "idle",
+                "2025-01-01T00:00:00",
+            ),
+            // inactive 的时间更新，且 workspace 正是启动目录。
+            session(
+                "inactive-new",
+                "old work",
+                "/launch/project",
+                "inactive",
+                "2025-06-01T00:00:00",
+            ),
+        ],
+    };
+
+    let mut app = App::new(
+        "test-session".into(),
+        AppConfig::default(),
+        Some("/launch/project".into()),
+    );
+    let session_id = app.session_id.clone();
+    app.handle_fetch_result(FetchResult {
+        session_id,
+        payload: FetchPayload::SessionList(payload),
+    });
+
+    let ids: Vec<&str> = app
+        .popup
+        .cache
+        .sessions
+        .iter()
+        .map(|c| c.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        ["active-old", "inactive-new"],
+        "the popup renders the payload verbatim — no workspace/status re-ranking"
+    );
+    assert_eq!(app.popup.cache.sessions[0].status, "idle");
+    assert_eq!(
+        app.popup.cache.sessions[0].last_interaction,
+        "2025-01-01T00:00:00"
+    );
+    // workspace 仍然随候选带下来（搜索用），只是不再参与渲染与排序。
+    assert_eq!(app.popup.cache.sessions[1].workspace, "/launch/project");
+}
