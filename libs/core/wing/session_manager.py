@@ -83,6 +83,11 @@ def _timestamp_key(s: SessionInfo) -> float:
     「有啥用啥」的三级回退：`metadata.last_interaction`（ISO 字符串或数值）→
     缺失 / 不可解析时用 session id 前缀（`YYYYMMDD-HHMMSS`）→ 都没有按 0。
     永不抛：排序键不可解析时退化成「排最后」，而不是让整个列表 500。
+
+    时区口径：naive 的 ISO 字符串（仓库内唯一实际写法，`datetime.now().isoformat()`）
+    与 id 前缀回退按**宿主本地时区**折算 epoch，带 `Z` / `+00:00` 的 aware 字符串按
+    UTC 折算——同一份列表里不要混写两种字符串，否则按本地 UTC 偏移错序（小时级）。
+    数值分支是防御代码（`SessionMetadata.last_interaction` 只声明 `str`）。
     """
     ts = s.last_interaction
     if ts is not None:
