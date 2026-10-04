@@ -214,9 +214,9 @@ mod tests {
     #[test]
     fn test_kind_colors() {
         let palette = p();
-        assert_eq!(ToastKind::Info.border_color(&palette), Color::Cyan);
-        assert_eq!(ToastKind::Warning.border_color(&palette), Color::Yellow);
-        assert_eq!(ToastKind::Error.border_color(&palette), Color::Red);
+        assert_eq!(ToastKind::Info.border_color(&palette), palette.accent);
+        assert_eq!(ToastKind::Warning.border_color(&palette), palette.warning);
+        assert_eq!(ToastKind::Error.border_color(&palette), palette.danger);
     }
 
     #[test]

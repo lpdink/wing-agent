@@ -448,9 +448,11 @@ mod tests {
     #[test]
     fn theme_default_has_all_styles() {
         let theme = MarkdownTheme::default();
-        // Spot check a few key styles.
-        assert_eq!(theme.code.fg, Some(Color::Cyan));
-        assert_eq!(theme.math.fg, Some(Color::Cyan));
+        let palette = ThemePalette::default();
+        // Spot check a few key styles: the theme is palette-derived, not
+        // hardcoded (a slot value change flows through).
+        assert_eq!(theme.code.fg, Some(palette.accent));
+        assert_eq!(theme.math.fg, Some(palette.math));
         assert!(
             theme
                 .h1
