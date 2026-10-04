@@ -821,7 +821,7 @@ mod tests {
         let lines = block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
         let pairs = span_pairs(&lines);
         let (_, style) = find_span(&pairs, "plain reasoning");
-        assert_eq!(style.fg, Some(Color::Gray), "prose fg: {style:?}");
+        assert_eq!(style.fg, Some(p().thinking), "prose fg: {style:?}");
     }
 
     #[test]
@@ -832,12 +832,12 @@ mod tests {
         let pairs = span_pairs(&lines);
         // Inline code keeps the accent color.
         let (_, code_style) = find_span(&pairs, "cargo build");
-        assert_eq!(code_style.fg, Some(Color::Cyan), "code fg: {code_style:?}");
-        // Surrounding prose is recolored to thinking gray.
+        assert_eq!(code_style.fg, Some(p().accent), "code fg: {code_style:?}");
+        // Surrounding prose is recolored to the thinking color.
         let (_, prose_style) = find_span(&pairs, "run ");
         assert_eq!(
             prose_style.fg,
-            Some(Color::Gray),
+            Some(p().thinking),
             "prose fg: {prose_style:?}"
         );
     }
@@ -849,7 +849,7 @@ mod tests {
         let lines = block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
         let pairs = span_pairs(&lines);
         let (_, style) = find_span(&pairs, "important");
-        assert_eq!(style.fg, Some(Color::Gray), "bold fg: {style:?}");
+        assert_eq!(style.fg, Some(p().thinking), "bold fg: {style:?}");
         assert!(
             style.add_modifier.contains(Modifier::BOLD),
             "bold modifier lost: {style:?}"
@@ -929,7 +929,7 @@ mod tests {
         let pairs = span_pairs(&lines);
         // Code block content keeps the accent color, not thinking gray.
         let (_, style) = find_span(&pairs, "let x = 1;");
-        assert_eq!(style.fg, Some(Color::Cyan), "code block fg: {style:?}");
+        assert_eq!(style.fg, Some(p().accent), "code block fg: {style:?}");
     }
 
     /// The alignment contract: a fenced code block renders exactly like the
@@ -1001,14 +1001,14 @@ mod tests {
             "indented reasoning rendered a code frame: {pairs:?}"
         );
         let (_, nested) = find_span(&pairs, "nested ");
-        assert_eq!(nested.fg, Some(Color::Gray), "nested prose fg: {nested:?}");
+        assert_eq!(nested.fg, Some(p().thinking), "nested prose fg: {nested:?}");
         let (_, bold) = find_span(&pairs, "nesting");
         assert!(
-            bold.add_modifier.contains(Modifier::BOLD) && bold.fg == Some(Color::Gray),
+            bold.add_modifier.contains(Modifier::BOLD) && bold.fg == Some(p().thinking),
             "bold keeps its modifier under the thinking fg: {bold:?}"
         );
         let (_, inline) = find_span(&pairs, "code");
-        assert_eq!(inline.fg, Some(Color::Cyan), "inline code fg: {inline:?}");
+        assert_eq!(inline.fg, Some(p().accent), "inline code fg: {inline:?}");
     }
 
     #[test]

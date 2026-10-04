@@ -42,7 +42,7 @@
 
 ## TUI 配置（`~/.wing/tui/config.yaml`）
 
-`colors`（含 diff 行背景 tint：`diff_add_bg` / `diff_del_bg` 与词级强调 `diff_*_bg_strong`，24-bit hex；`math` = 公式颜色，默认 `cyan`）、`layout`（输入区 / 弹窗 / 工具输出的行数上限）、`rendering`、`goal.checker_system_prompt`、`api_key`（网关鉴权，空则不发送）。
+`colors`（`preset` = `wing` | `terminal` 选底色：`wing` 是给暗底终端设计的一套 hex 灰阶 + cyan accent（默认），`terminal` 跟随终端自己的 ANSI 色；其余每个槽位键**覆盖该槽**：`accent` / `text` / `thinking` / `tool_result` / `dim` / `success` / `warning` / `danger` / `math` / `surface` 与 diff 行背景 tint（`diff_add_bg` / `diff_del_bg` 及词级强调 `diff_*_bg_strong`），命名色或 24-bit hex 都行，非法值 warn 后回落该预设槽位）、`layout`（输入区 / 弹窗 / 工具输出的行数上限）、`rendering`、`goal.checker_system_prompt`、`api_key`（网关鉴权，空则不发送）。调色 / 对色用 `cargo run -p wing --example theme_preview`（整条 transcript 的真 cell 画廊，`--preset` 切预设、`--html` 导出）。
 
 `rendering` 的键：
 

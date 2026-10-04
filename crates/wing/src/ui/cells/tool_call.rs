@@ -562,19 +562,24 @@ impl ToolCallBlock {
     pub fn to_lines(&self, palette: &ThemePalette, max_output: usize) -> Vec<Line<'static>> {
         let renderer = ToolRenderer::from_name(&self.tool_name);
         let status = self.status;
-        let bold = Style::default().add_modifier(Modifier::BOLD);
+        // Three registers on the header line: the bullet carries the status
+        // colour, the name is the anchor (bold, primary text), and args +
+        // timer stay quiet — a full screen of calls reads as names first,
+        // parameters second.
+        let name_style = Style::default()
+            .fg(palette.text)
+            .add_modifier(Modifier::BOLD);
         let dim = Style::default().fg(palette.dim);
 
         // Header: ⦁ ToolName(args) [timer]
-        // Args use the same bold style as the tool name.
-        // Timer (Bash only) uses dim style.
+        // Args and the (Bash-only) timer share the quiet register.
         let args_part = renderer.header_args(&self.tool_args);
 
         let mut header_spans = vec![
             Span::styled(status.bullet(), Style::default().fg(status.color(palette))),
             Span::raw(" "),
-            Span::styled(self.tool_name.clone(), bold),
-            Span::styled(args_part, bold),
+            Span::styled(self.tool_name.clone(), name_style),
+            Span::styled(args_part, dim),
         ];
 
         // Bash timer: appended as dim text after args.
@@ -892,6 +897,44 @@ mod tests {
     fn stream_args(block: &mut ToolCallBlock, fragment: &str) {
         block.append_args_fragment(fragment);
         block.flush_pending_args();
+    }
+
+    /// The header's three registers, pinned: status-colored bullet, the tool
+    /// name in bold primary text, and the args in the quiet register. This is
+    /// the hierarchy the eye scans a column of calls by — a silent drift back
+    /// to one all-bold run would not fail any text assertion.
+    #[test]
+    fn test_header_spans_carry_the_three_registers() {
+        let mut ok = ToolCallBlock::new(
+            "Bash".into(),
+            json!({ "command": "ls -la" }),
+            "call-1".into(),
+        );
+        ok.set_result("ok".into(), true);
+        let lines = ok.to_lines(&p(), 10);
+        let header = &lines[0];
+        let find = |needle: &str| {
+            header
+                .spans
+                .iter()
+                .find(|s| s.content.contains(needle))
+                .unwrap_or_else(|| panic!("no span containing {needle:?}: {header:?}"))
+        };
+
+        let bullet = find("⦁");
+        assert_eq!(bullet.style.fg, Some(p().success), "bullet = status color");
+        let name = find("Bash");
+        assert_eq!(name.style.fg, Some(p().text), "name = primary text");
+        assert!(
+            name.style.add_modifier.contains(Modifier::BOLD),
+            "name must stay bold: {name:?}"
+        );
+        let args = find("ls -la");
+        assert_eq!(args.style.fg, Some(p().dim), "args = quiet register");
+        assert!(
+            !args.style.add_modifier.contains(Modifier::BOLD),
+            "args must not be bold: {args:?}"
+        );
     }
 
     #[test]
