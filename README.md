@@ -23,7 +23,7 @@
 > **⚠️ Experimental** — Expect breaking changes until v1.0.
 
 <p align="center">
-  <img src="assets/demo.gif" alt="wing's TUI running a task: thinking streams in, an Edit fills in a colored diff, the test suite goes from red to green, and the todo list checks itself off" width="920">
+  <img src="https://github.com/lpdink/wing-agent/releases/download/readme-assets/demo.gif" alt="wing's TUI running a task: thinking streams in, an Edit fills in a colored diff, the test suite goes from red to green, and the todo list checks itself off" width="920">
 </p>
 
 ## Why wing?
@@ -43,16 +43,16 @@ not what the answer has grown to.
 Same text, same terminal, four feed rates — scripted feeds, real rendering:
 
 **30 tok/s** — a top-tier reasoning model.
-<p align="center"><img src="assets/speed-30.gif" alt="wing streaming at 30 tokens per second" width="900"></p>
+<p align="center"><img src="https://github.com/lpdink/wing-agent/releases/download/readme-assets/speed-30.gif" alt="wing streaming at 30 tokens per second" width="900"></p>
 
 **60 tok/s** — a current flagship.
-<p align="center"><img src="assets/speed-60.gif" alt="wing streaming at 60 tokens per second" width="900"></p>
+<p align="center"><img src="https://github.com/lpdink/wing-agent/releases/download/readme-assets/speed-60.gif" alt="wing streaming at 60 tokens per second" width="900"></p>
 
 **240 tok/s** — a fast "flash" tier.
-<p align="center"><img src="assets/speed-240.gif" alt="wing streaming at 240 tokens per second" width="900"></p>
+<p align="center"><img src="https://github.com/lpdink/wing-agent/releases/download/readme-assets/speed-240.gif" alt="wing streaming at 240 tokens per second" width="900"></p>
 
 **3,000 tok/s** — about 10× the fastest models shipping today. The UI does not care.
-<p align="center"><img src="assets/speed-3000.gif" alt="wing streaming at 3000 tokens per second" width="900"></p>
+<p align="center"><img src="https://github.com/lpdink/wing-agent/releases/download/readme-assets/speed-3000.gif" alt="wing streaming at 3000 tokens per second" width="900"></p>
 
 End-to-end display latency — provider → gateway → WebSocket → TUI → terminal, one token
 per frame (M6 Mac mini):

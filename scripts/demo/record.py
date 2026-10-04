@@ -8,7 +8,7 @@
     #    状态栏那栏累积 token 让出去，见 scripts/demo/README.md）
     uv run python scripts/demo/record.py --serve stream.py --serve-arg=--tps=3000 \
         --serve-arg=--usage-every=1 --seconds 8 --cols 96 --rows 24 --fps 10 \
-        --fps-cap 10 --name speed-3000 --assets
+        --fps-cap 10 --name speed-3000 --release
 
     uv run python scripts/demo/record.py --no-render     # 只抓 cast
     uv run python scripts/demo/record.py --inspect       # 抓完打印逐帧摘要（调镜头）
@@ -121,7 +121,8 @@ class Config:
     name: str = "demo"  # 产物基名：<name>.gif / <name>.cast
     #: 必须在某一帧里出现的内容（坏录制的守门；见 main 里的用法）。
     expect: tuple[str, ...] = ()
-    copy_assets: bool = False
+    #: 录完传一份到 rolling release（README 的图从这里来）。
+    publish: bool = False
     stills: list[tuple[str, str]] = field(default_factory=lambda: list(STILLS))
 
 
@@ -154,6 +155,9 @@ class Terminal:
         self.name = name
         self.raw = raw
         self.offset = 0
+        self._seen = 0
+        #: 待答查询：``[下次应答时刻, 排队时的输出字节数, 已试次数]``。
+        self._pending: list[list[float]] = []
 
     def watch(self) -> None:
         """把 pane 的输出旁路到 ``raw``（必须在会话建好之后调）。"""
@@ -169,16 +173,32 @@ class Terminal:
     def text(self) -> str:
         return tmux("capture-pane", "-t", self.name, "-p", check=False)
 
-    def answer_queries(self) -> int:
-        """回掉待答的终端查询，返回答了几条。"""
+    def answer_queries(self, stall: float = 0.35, attempts: int = 12) -> int:
+        """回掉待答的光标位置查询（``ESC[6n``），返回答了几条。
+
+        答一次不够：crossterm 读光标位置前会冲掉已到达的输入，回包抢在它冲之前就白给，
+        应用会卡死在自己的超时里（现场就是 pane 里只有那 130 字节启动序列、首帧永不画）。
+        所以没人继续画就隔 `stall` 秒补发一次，看到输出增长才撤销。
+        """
         with self.raw.open("rb") as handle:
             handle.seek(self.offset)
             data = handle.read()
-        pending = data.count(b"\x1b[6n")
         self.offset += len(data)
-        for _ in range(pending):
-            tmux("send-keys", "-t", self.name, "-l", "\x1b[1;1R")
-        return pending
+        self._seen += len(data)
+        now = time.monotonic()
+        for _ in range(data.count(b"\x1b[6n")):
+            self._pending.append([now, self._seen, 0])
+        answered = 0
+        for item in list(self._pending):
+            due, mark, tries = item
+            if self._seen > mark + 200 or tries >= attempts:
+                self._pending.remove(item)
+            elif now >= due:
+                tmux("send-keys", "-t", self.name, "-l", "\x1b[1;1R")
+                item[0] = now + stall
+                item[2] = tries + 1
+                answered += 1
+        return answered
 
     def wait_for(self, marker: str, timeout: float = 20.0) -> None:
         deadline = time.monotonic() + timeout
@@ -294,6 +314,53 @@ def agg_bin() -> Path:
     )
     local.chmod(0o755)
     return local
+
+
+#: README 里的 GIF 挂在同一个 rolling release 上：同名资产用 --clobber 覆盖，URL 不变，
+#: 也就不必把几 MB 的二进制塞进 git 历史。
+RELEASE_TAG = "readme-assets"
+RELEASE_NOTES = (
+    "Automatically published GIFs used by the README (see `scripts/demo/`).\n\n"
+    "Assets are re-uploaded to this tag with `--clobber`, so the raw URLs stay stable.\n"
+    "Nothing here is a source release."
+)
+
+
+def publish_release(gif: Path) -> None:
+    """把渲染好的 GIF 传到 rolling release（缺 release 就先建）。"""
+    if shutil.which("gh") is None:
+        raise SystemExit("[record] --release needs the `gh` CLI on PATH")
+    probe = subprocess.run(
+        ["gh", "release", "view", RELEASE_TAG],
+        cwd=str(REPO),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        log(f"[record] creating rolling release {RELEASE_TAG}")
+        subprocess.run(
+            [
+                "gh",
+                "release",
+                "create",
+                RELEASE_TAG,
+                "--title",
+                "README assets",
+                "--notes",
+                RELEASE_NOTES,
+                "--prerelease",
+            ],
+            cwd=str(REPO),
+            check=True,
+        )
+    subprocess.run(
+        ["gh", "release", "upload", RELEASE_TAG, str(gif), "--clobber"],
+        cwd=str(REPO),
+        check=True,
+    )
+    url = f"https://github.com/lpdink/wing-agent/releases/download/{RELEASE_TAG}/{gif.name}"
+    log(f"[record] published → {url}")
 
 
 def agg_render(cfg: Config, src: Path, dst: Path) -> None:
@@ -615,9 +682,9 @@ def parse_args() -> tuple[Config, argparse.Namespace]:
         help="要求某一帧里出现 TEXT，否则本次录制算失败（可重复；有默认值）",
     )
     parser.add_argument(
-        "--assets",
+        "--release",
         action="store_true",
-        help="渲染完把 GIF 拷进 assets/（默认只落在 --out 指定的目录）",
+        help="渲染完把 GIF 传到 readme-assets 这个 rolling release（URL 不变）",
     )
     parser.add_argument("--no-stills", action="store_true", help="不出静态图")
     parser.add_argument("--no-render", action="store_true", help="只出 cast")
@@ -650,7 +717,7 @@ def parse_args() -> tuple[Config, argparse.Namespace]:
         expect=tuple(args.expect)
         if args.expect
         else (SPEED_EXPECT if speed else STORY_EXPECT),
-        copy_assets=args.assets,
+        publish=args.release,
     )
     if speed:
         # 速度演示不需要"哪个片段"的静态图，默认不出（要的话显式给 --still）。
@@ -696,10 +763,8 @@ def main() -> int:
     log(f"[record] gif → {gif} ({gif.stat().st_size / 1024:.0f} KiB)")
     if cfg.stills:
         render_stills(cfg, cast, out)
-    if cfg.copy_assets:
-        target = REPO / "assets" / gif.name
-        shutil.copy2(gif, target)
-        log(f"[record] assets ← {target} ({target.stat().st_size / 1024:.0f} KiB)")
+    if cfg.publish:
+        publish_release(gif)
     return 0
 
 

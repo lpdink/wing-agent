@@ -17,7 +17,7 @@
 > **⚠️ 实验阶段** — v1.0 之前可能包含 breaking change。
 
 <p align="center">
-  <img src="../../assets/demo.gif" alt="wing TUI 干活的完整过程：思考流式输出、Edit 长出彩色 diff、测试由红转绿、任务清单逐项打勾" width="920">
+  <img src="https://github.com/lpdink/wing-agent/releases/download/readme-assets/demo.gif" alt="wing TUI 干活的完整过程：思考流式输出、Edit 长出彩色 diff、测试由红转绿、任务清单逐项打勾" width="920">
 </p>
 
 ## 为什么选择 wing？
@@ -36,16 +36,16 @@ TUI 从不重画整段回答：markdown 块在闭合时一次性定型，之后�
 同一段文字、同一个终端，四种喂入速率——流是脚本造的，渲染是真的：
 
 **30 tok/s** —— 顶级推理模型。
-<p align="center"><img src="../../assets/speed-30.gif" alt="wing 以 30 tokens/s 流式输出" width="900"></p>
+<p align="center"><img src="https://github.com/lpdink/wing-agent/releases/download/readme-assets/speed-30.gif" alt="wing 以 30 tokens/s 流式输出" width="900"></p>
 
 **60 tok/s** —— 当前旗舰。
-<p align="center"><img src="../../assets/speed-60.gif" alt="wing 以 60 tokens/s 流式输出" width="900"></p>
+<p align="center"><img src="https://github.com/lpdink/wing-agent/releases/download/readme-assets/speed-60.gif" alt="wing 以 60 tokens/s 流式输出" width="900"></p>
 
 **240 tok/s** —— 快档 "flash" 模型。
-<p align="center"><img src="../../assets/speed-240.gif" alt="wing 以 240 tokens/s 流式输出" width="900"></p>
+<p align="center"><img src="https://github.com/lpdink/wing-agent/releases/download/readme-assets/speed-240.gif" alt="wing 以 240 tokens/s 流式输出" width="900"></p>
 
 **3,000 tok/s** —— 约为今天最快模型的 10 倍。界面不在乎。
-<p align="center"><img src="../../assets/speed-3000.gif" alt="wing 以 3000 tokens/s 流式输出" width="900"></p>
+<p align="center"><img src="https://github.com/lpdink/wing-agent/releases/download/readme-assets/speed-3000.gif" alt="wing 以 3000 tokens/s 流式输出" width="900"></p>
 
 端到端显示延迟——Provider → 网关 → WebSocket → TUI → 终端，一 token 一帧（M6 Mac mini）：
 

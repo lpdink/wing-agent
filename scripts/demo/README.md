@@ -17,21 +17,20 @@
 | **性能水位尺** | `stream.py --marker-every` + `latency.py` | 端到端显示延迟 p50/p99（README 里那张表） |
 
 ```bash
-# 剧情 hero（≈35s）：录 → 校验 → 渲染 → 同步进 assets/（等价于 make demo）
-uv run python scripts/demo/record.py --assets
+# 剧情 hero（≈35s）：录 → 校验 → 渲染 → 发布到 readme-assets release（= make demo）
+uv run python scripts/demo/record.py --release
 
 # 速度演示（每档 ≈35s；96 列是为了让底栏那栏累积 token 让出去，见下）
 uv run python scripts/demo/record.py --serve stream.py --serve-arg=--tps=3000 \
     --serve-arg=--usage-every=1 --seconds 8 --cols 96 --rows 24 --fps 10 --fps-cap 10 \
-    --name speed-3000 --assets
+    --name speed-3000 --release
 
 # 端到端显示延迟（每档 ≈12s）
 uv run python scripts/demo/latency.py --steps 3000,30000,45000 --marker-every 2000 --seconds 10
 ```
 
 产物落在 `target/demo/`：`<name>.cast`（asciinema v2）、`<name>.gif`、`stills/*.png`、
-`pane.raw`（pane 的原始字节流，排查启动问题用）、`timeline.txt`。`--assets` 才把 GIF 拷进
-`assets/`（不拷也不会漂移，只是得手工搬）。
+`pane.raw`（pane 的原始字节流，排查启动问题用）、`timeline.txt`。
 
 **录完会自检**：默认要求某一帧里出现 `OK` / `All three tests pass.`（hero）或 ` t/s `
 （速度图），没有就判本次录制失败、**不渲染也不覆盖**已有资产，直接非零退出——防的是
@@ -92,12 +91,26 @@ uv run python scripts/demo/latency.py --steps 3000,30000,45000 --marker-every 20
 | 终端尺寸、字体、字号、帧率 | `record.py` 顶部常量或同名 CLI 选项（**`font_size` 与 `cols` 直接决定成图宽度**） |
 | 静态图取哪一帧 | `record.py` 的 `STILLS`：`(帧里出现的文本, 文件名)`，`<last>` = 最后一帧；临时试 `--still '标记=名字'` |
 
-## 命名与落位
+## 命名与落位（GIF 不进 git）
 
-| 文件 | 用在哪 |
-|------|--------|
-| `assets/demo.gif` | README 顶部 hero（剧情回放） |
-| `assets/speed-{30,60,240,3000}.gif` | README「Built for machine speed」（同一份语料、四种速率） |
+README 里的 GIF **不放在仓库里**，而是挂在同一个 rolling release 上：
+
+```
+https://github.com/lpdink/wing-agent/releases/download/readme-assets/<name>.gif
+```
+
+| 资产名 | 用在哪 |
+|--------|--------|
+| `demo.gif` | README 顶部 hero（剧情回放） |
+| `speed-{30,60,240,3000}.gif` | README「Built for machine speed」（同一份语料、四种速率） |
+
+`record.py --release`（`make demo` 就是它）渲染完会 `gh release upload readme-assets
+target/demo/<name>.gif --clobber`：**同名覆盖，URL 不变**，所以"重录 → 重新上传"是干净的，
+几 MB 二进制也不进 git object store（clone / tarball 都不含）。release 不存在时脚本会
+自己建（标为 pre-release，避免混进正常版本列表）。
+
+所以改完 UI 的闭环是：`make demo`（hero）+ 上面那条速度配方 → README 立刻看到新画面。
+没有 `gh` 或不想联网时，去掉 `--release` 只录到 `target/demo/`，之后手工 `gh release upload`。
 
 ## 注意
 
