@@ -65,7 +65,8 @@ pub enum ChatCell {
     WarningMessage(String),
     /// Error message.
     ErrorMessage(String),
-    /// Reasoning/thinking block (always expanded).
+    /// Reasoning/thinking block — 折叠（一行摘要）或展开（正文），由
+    /// `rendering.thinking` 的默认 + Ctrl+O 的全局覆盖解析。
     Thinking(ThinkingBlock),
     /// Tool invocation + result.
     ToolCall(ToolCallBlock),
@@ -95,9 +96,13 @@ impl ChatCell {
             Self::AssistantMessage(text) => {
                 assistant_message_lines(text, width, ctx.palette, ctx.images)
             }
-            Self::Thinking(block) => {
-                block.render_lines(ctx.palette, ctx.thinking_mode, width, ctx.images)
-            }
+            Self::Thinking(block) => block.render_lines(
+                ctx.palette,
+                ctx.thinking_mode,
+                ctx.thinking_expanded,
+                width,
+                ctx.images,
+            ),
             _ => ComposedLines::plain(self.to_lines(width, ctx)),
         }
     }
@@ -157,7 +162,13 @@ impl ChatCell {
                 lines.push(Line::from(""));
                 lines
             }
-            Self::Thinking(block) => block.to_lines(palette, ctx.thinking_mode, width, ctx.images),
+            Self::Thinking(block) => block.to_lines(
+                palette,
+                ctx.thinking_mode,
+                ctx.thinking_expanded,
+                width,
+                ctx.images,
+            ),
             Self::ToolCall(block) => block.to_lines(palette, ctx.layout.tool_output_max),
             Self::Diff(view) => view.to_lines(palette, width),
             Self::Todo(msg) => msg.to_lines(palette),

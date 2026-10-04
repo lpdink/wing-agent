@@ -69,6 +69,10 @@ pub const TIPS: &[Tip] = &[
         group: TipGroup::Keys,
         text: "PgUp 翻页，Ctrl+End 回到底部",
     },
+    Tip {
+        group: TipGroup::Keys,
+        text: "Ctrl+O 切换思考的详细/简略显示",
+    },
     // ── 命令 ─────────────────────────────────────────────────
     Tip {
         group: TipGroup::Commands,

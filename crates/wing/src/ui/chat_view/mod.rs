@@ -103,6 +103,12 @@ pub struct ChatView {
     /// rows, so a rebuild invalidates it even when the rebuilt list happens to
     /// end up with the same number of cells — see `App::selection_guard`.
     rebuilds: u64,
+    /// Ctrl+O 的全局展开覆盖（`None` = 跟随 `rendering.thinking` 的默认）。
+    ///
+    /// 会话级状态、只由 Ctrl+O 写；渲染期经 `CellContext` 下发（整条
+    /// transcript 一起切）。不做 `clear()` 重置：resume / compaction / sync
+    /// 重建后模式依然生效。
+    thinking_expanded: Option<bool>,
     /// Geometry of the last render (see [`ChatGeometry`]).
     geometry: ChatGeometry,
     /// Links of the last rendered frame, per screen row (absolute columns).
@@ -147,6 +153,7 @@ impl ChatView {
             header_lines: Vec::new(),
             last_total: 0,
             rebuilds: 0,
+            thinking_expanded: None,
             geometry: ChatGeometry::default(),
             frame_links: LinkTable::new(),
             frame_images: Vec::new(),

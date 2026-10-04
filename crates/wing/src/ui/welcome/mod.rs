@@ -37,6 +37,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::config::ThemePalette;
 use crate::shared::constants::TIPS_COMMAND;
 use crate::shared::tips;
+use crate::ui::shimmer::is_light_theme;
+use crate::ui::shimmer::to_rgb;
 use art::FLY_0;
 use art::FLY_0_COLS;
 use art::FLY_1;
@@ -252,7 +254,7 @@ impl Welcome {
         self.settled_built = sweep.is_none();
 
         let accent = to_rgb(palette.accent);
-        let light = wordmark::is_light_theme(to_rgb(palette.text));
+        let light = is_light_theme(to_rgb(palette.text));
         let wm = wordmark::lines(sweep, accent, light);
 
         match layout_for(width) {
@@ -489,33 +491,6 @@ fn version_label() -> String {
         format!("dev · {commit}")
     } else {
         format!("v{version} · {commit}")
-    }
-}
-
-/// 主题色 → RGB。命名色按 xterm 调色板的近似值展开：渐变需要数值，而
-/// `Color::Rgb` 是 ratatui 唯一能表达中间色的形式。
-fn to_rgb(color: ratatui::style::Color) -> sprite::Rgb {
-    use ratatui::style::Color as C;
-    match color {
-        C::Rgb(r, g, b) => (r, g, b),
-        C::Black => (0, 0, 0),
-        C::Red => (205, 49, 49),
-        C::Green => (13, 188, 121),
-        C::Yellow => (229, 229, 16),
-        C::Blue => (36, 114, 200),
-        C::Magenta => (188, 63, 188),
-        C::Cyan => (17, 168, 205),
-        C::Gray => (229, 229, 229),
-        C::DarkGray => (102, 102, 102),
-        C::LightRed => (241, 76, 76),
-        C::LightGreen => (35, 209, 139),
-        C::LightYellow => (245, 245, 67),
-        C::LightBlue => (59, 142, 234),
-        C::LightMagenta => (214, 112, 214),
-        C::LightCyan => (41, 184, 219),
-        C::White => (255, 255, 255),
-        // Reset / 索引色没有可用的数值：当作白，渐变退化成单色，不至于画不出来。
-        _ => (255, 255, 255),
     }
 }
 

@@ -15,8 +15,7 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
 
-/// RGB 三元组。
-pub type Rgb = (u8, u8, u8);
+pub use crate::ui::shimmer::Rgb;
 
 /// 字母 → 品牌色。`None` = 透明（`.`）。`A` = 主题 accent，渲染期填入。
 ///
@@ -120,17 +119,10 @@ fn color(letter: char, accent: Rgb) -> Color {
     }
 }
 
-/// 两个颜色按 `t`（0 = a，1 = b）线性混合。
-pub fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
-    let t = t.clamp(0.0, 1.0);
-    let lerp = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    (lerp(a.0, b.0), lerp(a.1, b.1), lerp(a.2, b.2))
-}
-
-/// 相对亮度（0..1 近似）—— 判断主题是亮是暗，wordmark 渐变方向跟着走。
-pub fn luminance(rgb: Rgb) -> f32 {
-    (0.2126 * rgb.0 as f32 + 0.7152 * rgb.1 as f32 + 0.0722 * rgb.2 as f32) / 255.0
-}
+// 混色 / 亮度这些颜色数学收在 `crate::ui::shimmer`（wordmark 的渐变与聊天里的
+// 思考行共用同一份）；这里原样再导出，历史调用点（wordmark / welcome）不迁移。
+pub use crate::ui::shimmer::luminance;
+pub use crate::ui::shimmer::mix;
 
 #[cfg(test)]
 mod tests {

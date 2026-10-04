@@ -163,6 +163,7 @@ crates/wing/src/
 │   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存 + CellFrame 投影（链接 / 图片锚点侧信道）
 │   ├── image/                       终端图形（唯一 door to ratatui-image/image）：probe（能力探测·可注入）· store（worker+LRU+epoch + 上限：文件/像素/缓存张数与字节/memo）· place（paint 原语）
 │   ├── panel.rs                     选择面板共享渲染（窗口数学取自 shared/panels 内核）
+│   ├── shimmer.rs                   扫光 / 混色原语（开屏 wordmark 与折叠思考行共用）
 │   ├── welcome/                     开屏欢迎屏：mod（状态·宽度阶梯·可见性门控）· art（海鸥帧 + 像素大字数据）· sprite（半格渲染 + 品牌调色板）· motion（idle/干活动作规划）· wordmark（渐变 + 扫光）
 │   ├── status_bar.rs / spinner.rs / toast.rs
 │   ├── input_area/                  Composer 悬浮卡片（chrome：悬浮几何·活动栏·元信息栏 / model：段 + 粘贴 chip 注册表 / widget / editing / movement / wrap / 指针映射与高亮 pointer / paste / helpers）
@@ -230,12 +231,12 @@ make check-python                 # ruff + ty + vulture
 # Rust
 cargo build
 cargo test
-make check-rust                   # fmt + clippy + test
+make check-rust                   # cargo fmt --check + clippy
 
 # All
-make test                         # Python + Rust + TS（含 test-probe）
+make test                         # 只跑测试：Python + Rust + TS + probe
 make test-probe                   # 确定性集成场景（wing-probe，离线、无外部 API key）
-make check                        # Python + Rust + TS（含 extensions/vscode 门禁）
+make check                        # 只跑静态检查：Python + Rust + TS（含 extensions/vscode 门禁）
 make fmt                          # 格式化全部
 ```
 

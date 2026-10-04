@@ -788,6 +788,15 @@ fn test_key_routing_of_the_idle_app() {
         )),
         KeyRoute::Quit
     );
+    // Ctrl+O 是应用保留键（查看动作）：必须赶在 composer 之前截住，
+    // 否则会被当普通字符 `o` 输入进草稿。
+    assert_eq!(
+        app.route_key(&crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('o'),
+            KeyModifiers::CONTROL
+        )),
+        KeyRoute::ToggleReasoning
+    );
     assert_eq!(
         app.route_key(&key(crossterm::event::KeyCode::Char('x'))),
         KeyRoute::Composer
@@ -1009,4 +1018,57 @@ fn test_page_keys_reach_the_chat_through_both_modals() {
     assert!(!app.chat.is_at_bottom(), "PageUp scrolled the chat");
     assert!(app.model_panel.is_some(), "the picker stays open");
     assert_eq!(app.ask_panels.len(), 1, "the ask panel stays open");
+}
+
+#[test]
+fn test_ctrl_o_flips_the_global_thinking_mode() {
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyModifiers;
+
+    let ctrl_o = crossterm::event::KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+
+    // 默认 `visible`（配置）：内容默认展开 —— Ctrl+O 先收起，模式全局保存。
+    let mut app = test_app();
+    app.chat.push(ChatCell::Thinking(
+        crate::ui::cells::thinking::ThinkingBlock::new(),
+    ));
+    assert_eq!(app.chat.thinking_expansion(), None, "初始跟随配置");
+    app.handle_key(ctrl_o);
+    assert_eq!(
+        app.chat.thinking_expansion(),
+        Some(false),
+        "visible 默认下先收起"
+    );
+    app.handle_key(ctrl_o);
+    assert_eq!(app.chat.thinking_expansion(), Some(true), "再按展开");
+
+    // `hidden` 默认：同一颗键先展开。
+    let mut config = crate::config::AppConfig::default();
+    config.rendering.thinking = crate::config::rendering::ThinkingMode::Hidden;
+    let mut app = crate::app::App::new("test-session".into(), config, None);
+    app.chat.push(ChatCell::Thinking(
+        crate::ui::cells::thinking::ThinkingBlock::new(),
+    ));
+    app.handle_key(ctrl_o);
+    assert_eq!(
+        app.chat.thinking_expansion(),
+        Some(true),
+        "hidden 默认下先展开"
+    );
+
+    // 没有思考块时也切（为后面的块定调），只是不值得重画。
+    let mut app = test_app();
+    assert!(!app.chat.toggle_thinking_expansion(true), "没有块就不重画");
+    assert_eq!(app.chat.thinking_expansion(), Some(false));
+
+    // 面板之下也生效（应用保留键），且不会把 `o` 打进草稿。
+    let mut app_with_panel = app_with_ask_panel();
+    let before = app_with_panel.input.expand_and_get_text();
+    app_with_panel.handle_key(ctrl_o);
+    assert_eq!(
+        app_with_panel.input.expand_and_get_text(),
+        before,
+        "草稿不该多出一个 o"
+    );
+    assert_eq!(app_with_panel.chat.thinking_expansion(), Some(false));
 }

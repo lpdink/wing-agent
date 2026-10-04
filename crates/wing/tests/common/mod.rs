@@ -510,6 +510,7 @@ impl BaselineCell {
             BaselineKind::Thinking => self.thinking.to_lines(
                 &self.palette,
                 ThinkingMode::Visible,
+                None,
                 width,
                 ImageOpts::off(),
             ),
@@ -517,6 +518,7 @@ impl BaselineCell {
                 let ctx = CellContext {
                     palette: &self.palette,
                     thinking_mode: ThinkingMode::Visible,
+                    thinking_expanded: None,
                     layout: &self.layout,
                     images: ImageOpts::off(),
                 };

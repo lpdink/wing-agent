@@ -19,7 +19,7 @@
 | `A` | 主题 accent | 唯一跟主题走的字母（点缀预留） |
 
 **品牌色固定、不跟主题走**：海鸥之所以是海鸥靠的就是这身颜色；跟主题呼吸的只有
-`A` 和 wordmark 的渐变方向（暗底冰→accent，亮底 accent→深，见 `wordmark::is_light_theme`）。
+`A` 和 wordmark 的渐变方向（暗底冰→accent，亮底 accent→深，见 `ui::shimmer::is_light_theme`）。
 
 渲染是半格：一个终端格装上下两像素，上=前景、下=背景；只画半格的格子只设前景
 （给 `▄` 配背景会把透明的上半填成对面那半的颜色）。见 `sprite::lines`。
