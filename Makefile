@@ -24,6 +24,8 @@ install:
 	cd crates/wing && maturin develop --release
 	uv sync
 
+# 职责划分：`check` 只跑静态检查、`test` 只跑测试 —— 两者不重合，可以放心连跑
+# （同一件事不会被跑两遍；组清单见 scripts/collect_output.sh）。
 check:
 	bash scripts/collect_output.sh check
 
@@ -32,6 +34,7 @@ fmt: fmt-python fmt-rust
 # 与 CI 的格式门禁等价（Ruff format check + cargo fmt --check），供 pre-commit 快速拦截
 fmt-check: fmt-check-python fmt-check-rust
 
+# 只跑测试，不做静态检查（与 `check` 不重合）。
 test:
 	bash scripts/collect_output.sh test
 
@@ -116,18 +119,7 @@ check-rust:
 	echo ""; \
 	echo "🔍 Running cargo clippy..."; \
 	cargo clippy --quiet -- -D warnings 2>&1 || { echo "❌ cargo clippy failed"; exit 1; }; \
-	echo "✅ cargo clippy passed"; \
-	echo ""; \
-	echo "🔍 Running cargo test..."; \
-	OUTPUT=$$(cargo test 2>&1); \
-	if [ $$? -eq 0 ]; then \
-		echo "$$OUTPUT" | grep "^test result:"; \
-		echo "✅ cargo test passed"; \
-	else \
-		echo "$$OUTPUT"; \
-		echo "❌ cargo test failed"; \
-		exit 1; \
-	fi
+	echo "✅ cargo clippy passed"
 
 fmt-rust:
 	cargo fmt

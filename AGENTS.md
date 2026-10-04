@@ -231,12 +231,12 @@ make check-python                 # ruff + ty + vulture
 # Rust
 cargo build
 cargo test
-make check-rust                   # fmt + clippy + test
+make check-rust                   # cargo fmt --check + clippy
 
 # All
-make test                         # Python + Rust + TS（含 test-probe）
+make test                         # 只跑测试：Python + Rust + TS + probe
 make test-probe                   # 确定性集成场景（wing-probe，离线、无外部 API key）
-make check                        # Python + Rust + TS（含 extensions/vscode 门禁）
+make check                        # 只跑静态检查：Python + Rust + TS（含 extensions/vscode 门禁）
 make fmt                          # 格式化全部
 ```
 
