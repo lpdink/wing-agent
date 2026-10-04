@@ -700,6 +700,33 @@ pub(crate) fn image_side_channel(
     images
 }
 
+/// 在行集**首部**插入一段行后，把侧通道里既有锚点的 `line` 一起下移。
+///
+/// `line` 是锚点的**绝对**行号（行号 == 索引，见 [`image_side_channel`]），
+/// 而侧通道条目只是跟着 `lines` 挪了位置 —— 锚点内部的 `line` 不跟着挪，
+/// 就会指向错行：绘制侧 `caption_at` 的 caption 校验按行找标记、找不到就
+/// 拒绘，图片会**静默消失**（只剩 `▢ alt · W×H`）。
+///
+/// 思考块的 disclosure 标题行就是「首部插入」（`StreamingRender::set_header`
+/// 的晚设 / finalize 重装，与非流式的 `with_header`）——三处都必须过这里。
+pub(crate) fn shift_anchors_after_insert(images: &mut [Vec<ImageSpan>], at: usize) {
+    for span in images.iter_mut().flatten() {
+        if span.line >= at {
+            span.line += 1;
+        }
+    }
+}
+
+/// [`shift_anchors_after_insert`] 的逆操作：移除第 `at` 行后，把它下面的
+/// 锚点 `line` 上移（摘标题行时用；第 `at` 行上的锚点随条目一起被摘掉）。
+pub(crate) fn shift_anchors_after_remove(images: &mut [Vec<ImageSpan>], at: usize) {
+    for span in images.iter_mut().flatten() {
+        if span.line > at {
+            span.line -= 1;
+        }
+    }
+}
+
 /// The side-channel entry for an anchor whose caption row is `line`, with
 /// `column` the display column the box starts at.
 pub(crate) fn span_for_anchor(anchor: &ImageAnchor, line: usize, column: u16) -> ImageSpan {

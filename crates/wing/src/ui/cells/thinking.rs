@@ -171,8 +171,8 @@ impl ThinkingBlock {
 
     /// 折叠行的显示文本：措辞（进行中 / 已结束）+ 时长后缀。
     ///
-    /// 进行中不满一秒不显示秒数（`0s` 没意义）；结束后的块一定有秒数；
-    /// 没有计时数据的历史块（重放）只有措辞。
+    /// 不满一秒不带秒数（`0s` 没意义）—— 进行中与定格同口径；没有计时数据
+    /// 的历史块（重放）只有措辞。
     fn label_texts(&self) -> (String, String) {
         let seconds = self.display_elapsed.as_secs();
         let active = self.is_active();
@@ -181,7 +181,7 @@ impl ThinkingBlock {
         } else {
             format!("{LABEL_PREFIX}{LABEL_DONE}")
         };
-        let tail = if self.started_at.is_none() || (active && seconds == 0) {
+        let tail = if self.started_at.is_none() || seconds == 0 {
             String::new()
         } else {
             format!(" {}", fmt_elapsed(seconds))
@@ -228,11 +228,21 @@ impl ThinkingBlock {
             head = truncate_to_display_width(&head, budget);
         }
         let mut spans = self.shine_spans(&head, palette, dim);
+        // 静止部分跟措辞同一色系：进行中措辞是逐列 Rgb 混色的（见
+        // `shine_spans`），秒数与提示就用 dim 的 Rgb 解析值 —— 命名色与
+        // Rgb 混用会在命名色主题 + 非 truecolor 终端上各走各的色（评审 N）。
+        // 定格后整行回到命名 dim，与旧行为一致。
+        let static_style = if self.is_active() {
+            let base = to_rgb(palette.dim);
+            Style::default().fg(Color::Rgb(base.0, base.1, base.2))
+        } else {
+            dim
+        };
         if !tail.is_empty() {
-            spans.push(Span::styled(tail, dim));
+            spans.push(Span::styled(tail, static_style));
         }
         if let Some(hint) = hint {
-            spans.push(Span::styled(hint.to_string(), dim));
+            spans.push(Span::styled(hint.to_string(), static_style));
         }
         Line::from(spans)
     }
@@ -355,6 +365,9 @@ impl ThinkingBlock {
 /// 在正文前插入标题行（链接 / 图片侧通道保持逐行对齐）。
 fn with_header(composed: ComposedLines, header: Line<'static>) -> ComposedLines {
     let (mut lines, mut links, mut images) = composed.into_parts();
+    // 标题占第 0 行：既有锚点的**绝对**行号（行号 == 索引）跟着下移一行，
+    // 否则绘制侧会按错行找 caption、拒绘 —— 图片静默消失。
+    crate::render::markdown::images::shift_anchors_after_insert(&mut images, 0);
     lines.insert(0, header);
     links.insert(0, Vec::new());
     images.insert(0, Vec::new());
@@ -474,8 +487,8 @@ mod tests {
             span_pairs(&block.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off()));
         let (_, hint_style) = find_span(&pairs, "Ctrl+O");
         assert_eq!(
-            hint_style.fg,
-            Some(p().dim),
+            to_rgb(hint_style.fg.expect("提示有颜色")),
+            to_rgb(p().dim),
             "提示是静止的 affordance，不该跟着刷光：{hint_style:?}"
         );
 
@@ -530,6 +543,19 @@ mod tests {
             text.contains("深度思考 12s"),
             "时长被后续事件拉长了：{text}"
         );
+    }
+
+    #[test]
+    fn hidden_label_omits_a_zero_second_duration() {
+        // 不满一秒就定格：与进行中同口径，不显示 `0s`（评审 N）。
+        let mut block = ThinkingBlock::new();
+        let start = t0();
+        block.start(start);
+        block.finish(start + Duration::from_millis(400));
+        let text = text_of(&block.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off()));
+        assert!(text.contains("深度思考"), "{text}");
+        assert!(!text.contains("深度思考中"), "已定格：{text}");
+        assert!(!text.contains('0'), "0s 不该出现：{text}");
     }
 
     #[test]
@@ -673,6 +699,48 @@ mod tests {
             lines
                 .iter()
                 .any(|l| line_text(l).contains("reasoning body"))
+        );
+    }
+
+    /// 非流式路径（resume 重放 / 收起再展开）：标题占第 0 行、正文整体下移
+    /// 一行 —— 图片锚点的**绝对**行号必须跟着下移。不平移的话绘制侧
+    /// `caption_at` 会按错行找 caption、拒绘，图片静默消失（评审 B）。
+    #[test]
+    fn expanded_header_keeps_the_image_anchor_on_its_caption_row() {
+        use crate::render::markdown::CellPixels;
+        use crate::render::markdown::images::ImageEntry;
+        use crate::render::markdown::images::ImageShape;
+
+        let root = std::path::PathBuf::from("/ws");
+        let images = ImageOpts::anchor(
+            Some(root.clone()),
+            vec![ImageEntry::new(
+                root.join("plot.png"),
+                ImageShape::new(800, 600),
+            )],
+            CellPixels::new(10, 20),
+        );
+        let mut block = ThinkingBlock::new();
+        block.append("intro\n\n![plot](./plot.png)\n\ntail");
+        let composed = block.render_lines(&p(), ThinkingMode::Hidden, Some(true), 80, &images);
+        let (lines, _links, side) = composed.into_parts();
+        assert!(
+            line_text(&lines[0]).contains("深度思考"),
+            "标题应在第 0 行：{:?}",
+            line_text(&lines[0])
+        );
+        let anchors: Vec<(usize, &crate::render::markdown::images::ImageSpan)> = side
+            .iter()
+            .enumerate()
+            .flat_map(|(index, spans)| spans.iter().map(move |span| (index, span)))
+            .collect();
+        assert_eq!(anchors.len(), 1, "夹具里应有 1 个锚点：{anchors:?}");
+        let (index, span) = anchors[0];
+        assert_eq!(span.line, index, "锚点行号必须等于条目下标");
+        assert!(
+            line_text(&lines[span.line]).contains('▢'),
+            "锚点应落在 caption 行：{:?}",
+            line_text(&lines[span.line])
         );
     }
 

@@ -1269,3 +1269,83 @@ fn header_shape_matches_the_reference_body() {
         }
     }
 }
+
+/// 标题的三条「后装」路径 + 摘除路径都要保持锚点对齐（评审 B）。
+///
+/// 上面的 `header_shape_matches_the_reference_body` 只覆盖「标题先于一切
+/// push」的流式路径（那条路径按 `base` 记账，本来就对）。这里补上：晚设
+/// 标题（正文与锚点已合成）、`finalize`（参考渲染整体替换后重装）、宽度
+/// rebuild，以及**摘掉标题后逐项回到参考渲染**。
+///
+/// 旧实现只挪了侧通道**条目**的位置、没有平移锚点内部的绝对 `line`：
+/// 这些路径上的图片会被绘制侧 `caption_at` 的 caption 校验拒绘、静默消失
+/// （只剩 `▢ alt · W×H`）。
+#[test]
+fn a_late_header_and_finalize_keep_the_anchor_rows_aligned() {
+    let palette = ThemePalette::default();
+    let header = Line::from("\u{2981} 深度思考中 4s");
+    let images = image_opts();
+    let corpus = "intro line\n\n![plot](./plots/a.png)\n\nsee [docs](https://example.com) after\n";
+    for width in [40u16, 80, 120] {
+        let mut sr = StreamingRender::with_images(Profile::Thinking, images.clone());
+        for chunk in chunk_stream(corpus, 8) {
+            sr.push(chunk);
+            let _ = sr.lines(width, &palette);
+        }
+        // 正文先合成（锚点已在位），再晚设标题。
+        let _ = sr.composed(width, &palette);
+        sr.set_header(Some(header.clone()));
+        assert_header_anchors(&mut sr, width, &header, &palette, "late header");
+
+        // finalize：行集整体换成参考渲染、标题重装。
+        sr.finalize(width, &palette);
+        assert_header_anchors(&mut sr, width, &header, &palette, "finalize");
+
+        // 摘标题：逐项回到参考渲染（行、链接、锚点几何）。
+        sr.set_header(None);
+        let rendered = sr.composed(width, &palette);
+        let reference = full_render(corpus, width, Profile::Thinking, &palette, &images);
+        let (want_lines, want_links, want_images) = reference.into_parts();
+        pretty_assertions::assert_eq!(
+            rendered.lines.to_vec(),
+            want_lines,
+            "摘掉标题后行集回到参考：width={width}"
+        );
+        pretty_assertions::assert_eq!(
+            rendered.links.to_vec(),
+            want_links,
+            "摘掉标题后链接回到参考：width={width}"
+        );
+        pretty_assertions::assert_eq!(
+            rendered.images.to_vec(),
+            want_images,
+            "摘掉标题后锚点回到参考：width={width}"
+        );
+    }
+}
+
+/// 第 0 行是标题；每个锚点的 `line` == 条目下标（行号 == 索引），且落在
+/// 自己的 caption 行上（绘制侧 `caption_at` 的校验口径）。
+fn assert_header_anchors(
+    sr: &mut StreamingRender,
+    width: u16,
+    header: &Line<'static>,
+    palette: &ThemePalette,
+    when: &str,
+) {
+    let composed = sr.composed(width, palette);
+    assert_eq!(composed.lines[0], *header, "{when}：标题在第 0 行");
+    let mut seen = 0;
+    for (index, spans) in composed.images.iter().enumerate() {
+        for span in spans {
+            assert_eq!(span.line, index, "{when}：锚点行号 == 条目下标");
+            let row = composed.lines[span.line].to_string();
+            assert!(
+                row.contains(wing::render::markdown::images::CAPTION_MARKER),
+                "{when}：锚点应落在 caption 行：{row:?}"
+            );
+            seen += 1;
+        }
+    }
+    assert!(seen > 0, "{when}：夹具里应有锚点");
+}
