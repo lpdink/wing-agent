@@ -50,6 +50,10 @@ from dataclasses import field
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import env  # noqa: E402  (scripts/demo 内部共用模块：ready 行解析等)
+
 #: agg 落在 target/ 下：`target/` 本来就在 .gitignore 里，工具链缓存不污染工作区。
 TOOLS = REPO / "target" / "demo-tools"
 AGG_VERSION = "v1.9.0"
@@ -468,19 +472,6 @@ def wing_bin() -> Path:
     )
 
 
-def parse_ready(line: str) -> dict[str, str] | None:
-    """解析 ``env.ready_line`` 那一行（值按 shell 引用规则转义，路径可含空格）。"""
-    if "ready" not in line:
-        return None
-    info: dict[str, str] = {}
-    for token in shlex.split(line.split("ready", 1)[1]):
-        key, sep, value = token.partition("=")
-        if sep:
-            info[key] = value
-    needed = {"WING_HOME", "WING_WORKSPACE", "WING_GATEWAY_PORT"}
-    return info if needed <= info.keys() else None
-
-
 def start_demo(
     cfg: Config,
 ) -> tuple[subprocess.Popen[str], dict[str, str], threading.Event]:
@@ -502,7 +493,7 @@ def start_demo(
             line = raw.rstrip()
             if line.startswith("[demo]"):
                 log(f"    {line}")
-            found = parse_ready(line)
+            found = env.parse_ready(line)
             if found:
                 info["wing_home"] = found["WING_HOME"]
                 info["workspace"] = found["WING_WORKSPACE"]

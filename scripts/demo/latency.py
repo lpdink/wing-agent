@@ -39,6 +39,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
+sys.path.insert(0, str(HERE))
+
+import env  # noqa: E402  (scripts/demo 内部共用模块：ready 行解析等)
 
 #: 探针代答的终端查询：真终端自己会答，PTY 里没人答，不答 TUI 首帧永远不来。
 REPLIES = {b"\x1b[6n": b"\x1b[1;1R", b"\x1b[c": b"\x1b[?62;1;6;22c"}
@@ -113,10 +116,9 @@ class Provider:
         def pump() -> None:
             assert self.proc.stdout is not None
             for line in self.proc.stdout:
-                if "WING_HOME=" in line:
-                    for token in line.split():
-                        key, _, value = token.partition("=")
-                        self.info[key] = value
+                ready = env.parse_ready(line)
+                if ready:
+                    self.info.update(ready)
 
         threading.Thread(target=pump, daemon=True).start()
         deadline = time.monotonic() + 45
@@ -271,7 +273,7 @@ def run_rate(
     for marker_id, sent_at in sorted(sent.items()):
         needle = f"⟦M{marker_id:05d}".encode()
         found = next(
-            (at for at, data in chunks if needle in ANSI_RE.sub(b"", data)), None
+            (at for at, data in padded if needle in ANSI_RE.sub(b"", data)), None
         )
         if found is None:
             missing += 1

@@ -63,6 +63,7 @@ def write_config(
     log_level: str = "INFO",
 ) -> Path:
     """写 ``$WING_HOME/core/config.yaml``：provider 指向假 Provider，agent 预置。"""
+    guard_home()  # 写盘之前就拦住：指向真实 ~/.wing 时连配置都不该被覆盖
     config = yaml.safe_load(
         render_config_yaml(
             provider_base_url=provider_base_url,
@@ -138,29 +139,31 @@ class Gateway:
 
     async def start(self) -> None:
         guard_home()
-        self._log = open(GATEWAY_LOG, "wb")
-        self.proc = subprocess.Popen(
-            [str(resolve_gateway_bin())],
-            cwd=str(REPO),
-            env={
-                **os.environ,
-                "WING_HOME": str(WING_HOME),
-                # loopback 必须绕开环境 / 系统代理，否则假 Provider 会被送进代理。
-                "NO_PROXY": "127.0.0.1,localhost",
-                "no_proxy": "127.0.0.1,localhost",
-            },
-            stdout=self._log,
-            stderr=subprocess.STDOUT,
-        )
         try:
+            self._log = open(GATEWAY_LOG, "wb")
+            self.proc = subprocess.Popen(
+                [str(resolve_gateway_bin())],
+                cwd=str(REPO),
+                env={
+                    **os.environ,
+                    "WING_HOME": str(WING_HOME),
+                    # loopback 必须绕开环境 / 系统代理，否则假 Provider 会被送进代理。
+                    "NO_PROXY": "127.0.0.1,localhost",
+                    "no_proxy": "127.0.0.1,localhost",
+                },
+                stdout=self._log,
+                stderr=subprocess.STDOUT,
+            )
             await wait_for_health(
                 f"http://127.0.0.1:{self.port}/api/health",
                 process=self.proc,
                 log_path=GATEWAY_LOG,
             )
-        except Exception:
+        except BaseException:
             # 调用方通常把 start() 放在 try/finally 之外（它们只在 start 成功后才
             # 有机会 stop）：这里自己收尸，否则孤儿网关占着端口、日志句柄也不关。
+            # 收 Popen/写日志自身的失败、以及 CancelledError（BaseException，不是
+            # Exception）——取消也要收干净。
             self.stop()
             raise
 
@@ -185,6 +188,24 @@ async def run_until_signal() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
     await stop.wait()
+
+
+def parse_ready(line: str) -> dict[str, str] | None:
+    """解析 :func:`ready_line` 那一行；不是那一行就返回 ``None``。
+
+    值按 shell 引用规则转义（路径可含空格），所以用 ``shlex.split`` 还原，而不是
+    按空白切。录制器与延迟探针共用同一份解析——wire 格式只有一处定义。
+    """
+    prefix = "[demo] ready "
+    if not line.startswith(prefix):
+        return None
+    info: dict[str, str] = {}
+    for token in shlex.split(line[len(prefix) :]):
+        key, sep, value = token.partition("=")
+        if sep:
+            info[key] = value
+    needed = {"WING_HOME", "WING_WORKSPACE", "WING_GATEWAY_PORT"}
+    return info if needed <= info.keys() else None
 
 
 def ready_line(workspace: Path, port: int) -> str:
