@@ -169,6 +169,44 @@ impl ChatView {
         self.scroll_offset
     }
 
+    /// 下一帧的绝对截止时刻 —— `None` = 没有活跃块 / 块不在视口里，帧驱动
+    /// 就此 park（看不见的动画不花钱，同欢迎屏的 `next_frame`）。
+    ///
+    /// 归在视口层：**内容模型不读几何**（见 `model.rs` 的文件头约定），
+    /// 「块在不在屏幕上」只有这一层回答得了。
+    pub fn reasoning_sweep_deadline(&self, now: std::time::Instant) -> Option<std::time::Instant> {
+        let index = self.last_active_thinking()?;
+        if !self.cell_in_view(index) {
+            return None;
+        }
+        let block = match self.cells.get(index)?.cell() {
+            ChatCell::Thinking(block) => block,
+            _ => return None,
+        };
+        block.next_frame(now, crate::ui::cells::thinking::SWEEP_FRAME_STEP)
+    }
+
+    /// 第 `index` 个 cell 的虚拟行区间与当前视口相交吗。
+    ///
+    /// 用最近一帧的几何（`scroll_offset` / 视口高度）与高度表：动画门控要
+    /// 在**不渲染**的情况下回答"它在屏幕上吗"。
+    fn cell_in_view(&self, index: usize) -> bool {
+        let viewport = self.geometry.area.height as usize;
+        if viewport == 0 {
+            return false;
+        }
+        let Some(&height) = self.cell_heights.get(index) else {
+            return false;
+        };
+        let mut start = self.header_lines.len();
+        for h in self.cell_heights.iter().take(index) {
+            start += h;
+        }
+        let end = start + height;
+        let top = self.geometry.scroll_offset;
+        start < top + viewport && end > top
+    }
+
     fn update_heights(&mut self, width: u16, ctx: &CellContext<'_>) {
         self.cell_heights.resize(self.cells.len(), 0);
         for (i, cached) in self.cells.iter_mut().enumerate() {
@@ -791,5 +829,63 @@ mod tests {
         view.scroll_down(0, band.height as usize);
         assert_eq!(view.scroll_position(), before);
         assert!(view.is_at_bottom(), "release at the bottom re-arms follow");
+    }
+
+    /// 刷光排帧的视口门控（评审 S：这套几何判断归 viewport 层 ——
+    /// 内容模型不读 `geometry` / `cell_heights`）。
+    #[test]
+    fn reasoning_sweep_deadline_parks_when_idle_or_off_screen() {
+        use crate::config::rendering::ThinkingMode;
+        use std::time::Instant;
+
+        let (p, l) = test_ctx();
+        let ctx = CellContext {
+            palette: &p,
+            thinking_mode: ThinkingMode::Hidden,
+            thinking_expanded: None,
+            layout: &l,
+            images: crate::render::markdown::ImageOpts::off(),
+        };
+        let mut view = ChatView::new();
+        let now = Instant::now();
+        assert_eq!(
+            view.reasoning_sweep_deadline(now),
+            None,
+            "没有活跃块就 park"
+        );
+
+        view.append_to_last_thinking_at("reasoning", now);
+        // 还没画过帧（没有几何 / 高度）：也 park。
+        assert_eq!(view.reasoning_sweep_deadline(now), None, "不可见就 park");
+
+        // 画一帧的等价物：缓存高度 + 写几何（widget 在渲染时做这两件事）。
+        let height = view.cells[0].compute_height(80, &ctx);
+        view.cell_heights = vec![height];
+        view.geometry = super::super::ChatGeometry {
+            area: Rect::new(0, 0, 80, 24),
+            scroll_offset: 0,
+        };
+        let deadline = view
+            .reasoning_sweep_deadline(now)
+            .expect("可见的活跃块应排帧");
+        assert!(deadline > now, "截止时刻必须严格在未来");
+
+        // 滚出视口：park（看不见的动画不花钱）——滚回来又排上。
+        let height = view.cell_heights[0];
+        view.geometry.scroll_offset = height + 10;
+        assert_eq!(
+            view.reasoning_sweep_deadline(now),
+            None,
+            "块滚出视口即 park"
+        );
+        view.geometry.scroll_offset = 0;
+        assert!(
+            view.reasoning_sweep_deadline(now).is_some(),
+            "滚回视口应重新排帧"
+        );
+
+        // 冻结后 park。
+        view.finish_active_thinking(now);
+        assert_eq!(view.reasoning_sweep_deadline(now), None, "冻结即 park");
     }
 }

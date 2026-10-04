@@ -97,6 +97,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::images::{
     ImageAnchor, ImageOpts, ImageSpan, cover_span, image_side_channel, row_is_cover_row,
+    shift_anchors_after_insert, shift_anchors_after_remove,
 };
 use super::links::{ComposedLines, LinkSpan, compose_lines, line_link_spans};
 use super::profile::Profile;
@@ -490,6 +491,9 @@ impl StreamingRender {
         let Some(header) = self.header.clone() else {
             return;
         };
+        // 首部插一行：既有锚点的**绝对**行号跟着下移（`line` 不随侧通道条目
+        // 自动挪位 —— 不平移就会指向错行，图片静默消失，见 `images.rs`）。
+        shift_anchors_after_insert(&mut self.flat_lines.images, 0);
         self.flat_lines.lines.insert(0, header);
         self.flat_lines.links.insert(0, Vec::new());
         self.flat_lines.images.insert(0, Vec::new());
@@ -528,6 +532,8 @@ impl StreamingRender {
         self.flat_lines.lines.remove(target);
         self.flat_lines.links.remove(target);
         self.flat_lines.images.remove(target);
+        // 摘掉一行：它下面的锚点绝对行号跟着上移（与 `insert` 互为逆操作）。
+        shift_anchors_after_remove(&mut self.flat_lines.images, target);
         self.stable_len = self.stable_len.saturating_sub(1);
         if let Some(code_flat) = self.code_flat.as_mut() {
             code_flat.start = code_flat.start.saturating_sub(1);
@@ -3120,5 +3126,61 @@ mod tests {
         let b_lines: Vec<String> = b.lines.iter().map(|l| l.to_string()).collect();
         assert_eq!(a_lines, b_lines, "摘掉标题后必须回到普通 thinking 渲染");
         assert!(a_lines[0].starts_with("⦁ first"), "{a_lines:?}");
+    }
+
+    /// 每个锚点的 `line` 必须等于它所在侧通道条目的下标，且落在自己的
+    /// caption 行上（绘制侧 `caption_at` 的校验口径）。
+    fn assert_anchors_aligned(sr: &mut StreamingRender, width: u16, when: &str) {
+        let palette = ThemePalette::default();
+        let composed = sr.composed(width, &palette);
+        let mut seen = 0;
+        for (index, spans) in composed.images.iter().enumerate() {
+            for span in spans {
+                assert_eq!(span.line, index, "{when}：锚点行号必须等于条目下标");
+                let row = composed.lines[span.line].to_string();
+                assert!(row.contains('▢'), "{when}：锚点应落在 caption 行：{row:?}");
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "{when}：夹具里应有锚点");
+    }
+
+    /// 标题行首部插入 / 摘除时，锚点的**绝对**行号跟着平移 —— 否则绘制侧按
+    /// 错行找 caption、拒绘，图片静默消失（评审 B）。逐条安装路径回归：
+    /// 先设标题 / 晚设 / finalize 重装 / 宽度 rebuild / 摘标题。
+    #[test]
+    fn a_header_shifts_the_anchor_rows_on_every_install_path() {
+        let palette = ThemePalette::default();
+        let text = "intro\n\n![plot](./plot.png)\n\ntail";
+        let header = Line::from("⦁ 深度思考中 4s");
+
+        // 先设标题（正文按 base 记账，本来就对）。
+        let mut fresh = StreamingRender::with_images(Profile::Thinking, image_opts());
+        fresh.set_header(Some(header.clone()));
+        for piece in chunk_stream(text, 8) {
+            fresh.push(piece);
+        }
+        assert_anchors_aligned(&mut fresh, 80, "header first");
+
+        // 晚设标题：正文已合成、锚点已在位（旧实现只挪条目、不挪行号）。
+        let mut late = StreamingRender::with_images(Profile::Thinking, image_opts());
+        for piece in chunk_stream(text, 8) {
+            late.push(piece);
+        }
+        let _ = late.composed(80, &palette);
+        late.set_header(Some(header.clone()));
+        assert_anchors_aligned(&mut late, 80, "late header");
+
+        // finalize：行集整体换成参考渲染、标题重装。
+        late.finalize(80, &palette);
+        assert_anchors_aligned(&mut late, 80, "finalize");
+
+        // 宽度变化：整体 rebuild 后标题重装。
+        assert_anchors_aligned(&mut late, 40, "rebuild (narrow)");
+        assert_anchors_aligned(&mut late, 80, "rebuild (back)");
+
+        // 摘标题：锚点行号跟着上移，回到「行号 == 索引」。
+        late.set_header(None);
+        assert_anchors_aligned(&mut late, 80, "header removed");
     }
 }
