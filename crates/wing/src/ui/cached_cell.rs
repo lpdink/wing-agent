@@ -16,7 +16,6 @@ use std::path::PathBuf;
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::config::rendering::ThinkingMode;
 use crate::render::Renderable;
 use crate::render::markdown::ComposedLines;
 use crate::render::markdown::ImageOpts;
@@ -476,18 +475,51 @@ impl CachedCell {
     }
 
     /// Whether the incremental stream is the active RENDER authority at
-    /// this context. Hidden thinking mode bypasses it: the stream keeps
-    /// accumulating (for a later mode change / finalize) but the visible
-    /// lines come from the cell's own renderer (the hidden indicator),
-    /// which is the only place ThinkingMode is honored.
+    /// this context. 折叠的思考块绕过它：流仍在累积（供展开 / finalize），
+    /// 但可见行来自 cell 自己的渲染器（折叠行 + 标题）。展开与否由**块自己**
+    /// 决定（`expanded` 覆盖 or `rendering.thinking` 的默认）——见
+    /// `ThinkingBlock::is_expanded`。
     fn stream_render_active(&self, ctx: &CellContext<'_>) -> bool {
         if self.stream.is_none() {
             return false;
         }
         match &self.cell {
-            ChatCell::Thinking(_) => ctx.thinking_mode == ThinkingMode::Visible,
+            ChatCell::Thinking(block) => block.is_expanded(ctx.thinking_mode),
             _ => true,
         }
+    }
+
+    /// 帧边界：推进这个思考块的刷光相位 / 显示秒数。
+    ///
+    /// 与 [`Self::tick_bash_timer`] 同一职责（帧驱动、显示值真的会动才作废）：
+    /// 刷光相位每帧都在动，所以"仍在计时"即作废。返回是否推进了。
+    pub fn tick_thinking(&mut self, now: std::time::Instant) -> bool {
+        let ChatCell::Thinking(block) = &mut self.cell else {
+            return false;
+        };
+        if !block.is_active() {
+            return false;
+        }
+        block.tick(now);
+        self.invalidate();
+        true
+    }
+
+    /// 展开时把折叠行接到流式正文的头部（第 0 行 = 标题，正文拿续行缩进）。
+    ///
+    /// 每帧调用：秒数与刷光相位都在动，值不变时 `StreamingRender::set_header`
+    /// 直接返回，不做无谓搬运。
+    fn sync_stream_header(&mut self, width: u16, ctx: &CellContext<'_>) {
+        let Some(stream) = self.stream.as_mut() else {
+            return;
+        };
+        let header = match &self.cell {
+            ChatCell::Thinking(block) if block.is_labeled(ctx.thinking_mode) => {
+                Some(block.label_line(ctx.palette, width))
+            }
+            _ => None,
+        };
+        stream.set_header(header);
     }
 
     /// Whether the cell's lines at `width` are pre-wrapped (≤ width) —
@@ -512,14 +544,12 @@ impl CachedCell {
 
     /// Install the finalized reference render as the cached lines.
     ///
-    /// Hidden thinking mode never rendered through the stream — drop it
-    /// and fall back to the cell's own renderer (the hidden indicator
-    /// line); the accumulated text stays in the cell.
+    /// 折叠的思考块从不走流式渲染 —— 丢掉流、回到 cell 自己的渲染器（折叠行）；
+    /// 正文文本留在 cell 里（展开时还要用）。
     fn run_finalize(&mut self, width: u16, ctx: &CellContext<'_>) {
         self.pending_finalize = false;
-        let hidden_thinking = matches!(self.cell, ChatCell::Thinking(_))
-            && ctx.thinking_mode != ThinkingMode::Visible;
-        if hidden_thinking {
+        let collapsed_thinking = matches!(&self.cell, ChatCell::Thinking(block) if !block.is_expanded(ctx.thinking_mode));
+        if collapsed_thinking {
             self.stream = None;
             self.cached_lines = None;
             self.cached_height = None;
@@ -593,6 +623,9 @@ impl CachedCell {
         // One set of image options for both render paths: adopt the frame's
         // before anything is cached or returned (see `sync_image_opts`).
         self.sync_image_opts(ctx.images);
+        // 帧边界先把标题装好：流式路径与 finalize 都从这份状态出发
+        // （同一帧内"展开 + 回合结束"也不能丢标题）。
+        self.sync_stream_header(width, ctx);
         if self.pending_finalize {
             self.run_finalize(width, ctx);
         }
@@ -686,6 +719,9 @@ impl CachedCell {
         // come from the same image options the frame will be drawn with —
         // an anchor's rows move a whole cell's height (see `sync_image_opts`).
         self.sync_image_opts(ctx.images);
+        // 帧边界先把标题装好：流式路径与 finalize 都从这份状态出发
+        // （同一帧内"展开 + 回合结束"也不能丢标题）。
+        self.sync_stream_header(width, ctx);
         if self.pending_finalize {
             self.run_finalize(width, ctx);
         }
@@ -763,6 +799,7 @@ mod tests {
     use crate::config::rendering::ThinkingMode;
     use crate::config::{LayoutConfig, ThemePalette};
     use crate::render::markdown::CellPixels;
+    use crate::ui::cells::thinking::ThinkingBlock;
 
     /// The terminal cell the anchor fixtures are laid out for.
     const LAYOUT_CELL: CellPixels = CellPixels::new(10, 20);
@@ -1113,5 +1150,103 @@ mod tests {
         let h_narrow = cell.compute_height(40, &ctx);
         let h_wide = cell.compute_height(120, &ctx);
         assert!(h_narrow >= h_wide);
+    }
+
+    /// 折叠的思考块：标签行来自 cell 自己的渲染器，tick 推进秒数并作废缓存。
+    #[test]
+    fn collapsed_thinking_label_ticks_and_invalidates() {
+        use std::time::Duration;
+        use std::time::Instant;
+
+        let palette = ThemePalette::default();
+        let layout = LayoutConfig::default();
+        let ctx = CellContext {
+            thinking_mode: ThinkingMode::Hidden,
+            ..test_ctx(&palette, &layout)
+        };
+        let frame_text = |cell: &mut CachedCell| -> String {
+            cell.compute_cell_frame(80, &ctx)
+                .lines
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let start = Instant::now();
+        let mut block = ThinkingBlock::new();
+        block.start(start);
+        let mut cell = CachedCell::new(ChatCell::Thinking(block));
+        cell.append_stream("SECRET-REASONING");
+
+        let text = frame_text(&mut cell);
+        assert!(text.contains("深度思考中"), "{text}");
+        assert!(!text.contains("SECRET-REASONING"), "折叠不泄露正文：{text}");
+
+        let generation = cell.generation();
+        assert!(
+            cell.tick_thinking(start + Duration::from_secs(4)),
+            "活跃块应被推进"
+        );
+        assert_ne!(cell.generation(), generation, "tick 必须作废缓存");
+        let text = frame_text(&mut cell);
+        assert!(text.contains("深度思考中 4s"), "{text}");
+
+        // 冻结后 tick 不再推进（帧驱动随即 park）。
+        cell.mutate(|c| {
+            if let ChatCell::Thinking(block) = c {
+                block.finish(start + Duration::from_secs(9));
+            }
+        });
+        assert!(!cell.tick_thinking(start + Duration::from_secs(20)));
+        let text = frame_text(&mut cell);
+        assert!(text.contains("深度思考 9s"), "{text}");
+    }
+
+    /// 展开的思考块：折叠行接到流式正文的头部（第 0 行 = 标题，正文续行缩进）。
+    #[test]
+    fn expanded_thinking_keeps_the_label_as_stream_header() {
+        use std::time::Duration;
+        use std::time::Instant;
+
+        let palette = ThemePalette::default();
+        let layout = LayoutConfig::default();
+        let ctx = CellContext {
+            thinking_mode: ThinkingMode::Hidden,
+            ..test_ctx(&palette, &layout)
+        };
+
+        let start = Instant::now();
+        let mut block = ThinkingBlock::new();
+        block.start(start);
+        block.set_expanded(Some(true));
+        let mut cell = CachedCell::new(ChatCell::Thinking(block));
+        cell.append_stream("the reasoning body");
+
+        let frame = cell.compute_cell_frame(80, &ctx);
+        let lines: Vec<String> = frame.lines.iter().map(|l| l.to_string()).collect();
+        assert!(
+            lines[0].contains("深度思考中"),
+            "标题应是第 0 行：{lines:?}"
+        );
+        let body = lines
+            .iter()
+            .find(|l| l.contains("the reasoning body"))
+            .expect("正文应在行集里");
+        assert!(body.starts_with("  "), "正文应保持两列缩进：{body:?}");
+        assert!(
+            !lines[0].contains("the reasoning body"),
+            "正文不该挤进标题行：{lines:?}"
+        );
+
+        // 秒数每帧在动：同一个 cell 第二帧的标题已更新（流上换行，不是新行）。
+        cell.mutate(|c| {
+            if let ChatCell::Thinking(block) = c {
+                block.tick(start + Duration::from_secs(3));
+            }
+        });
+        let frame = cell.compute_cell_frame(80, &ctx);
+        let first = frame.lines[0].to_string();
+        assert!(first.contains("深度思考中 3s"), "{first:?}");
     }
 }

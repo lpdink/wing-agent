@@ -324,6 +324,10 @@ impl ChatView {
         self.auto_scroll = true;
         self.follow_frozen = false;
         self.rebuilds = self.rebuilds.wrapping_add(1);
+        // 重建后的内容与刚才的流不是同一条时间线：计时 / 展开覆盖都从默认重来。
+        self.active_thinking = None;
+        self.reasoning_override = None;
+        self.turn_thinking_start = 0;
     }
 
     /// Number of full content rebuilds so far ([`Self::clear`]).
@@ -399,45 +403,145 @@ impl ChatView {
     ///
     /// Routes through the incremental `StreamingRender` (stable prefix +
     /// active tail) — no full re-render per delta.
+    ///
+    /// 新块从这里开始计时，并继承本回合的展开覆盖：Ctrl+O 展开后同一回合里
+    /// 后续轮次（工具循环）新起的思考块与已展开的那些保持一致。
     pub fn append_to_last_thinking(&mut self, text: &str) {
+        self.append_to_last_thinking_at(text, std::time::Instant::now());
+    }
+
+    /// [`append_to_last_thinking`](Self::append_to_last_thinking) with the
+    /// clock injected — tests pin the timing, production passes `now`.
+    pub(crate) fn append_to_last_thinking_at(&mut self, text: &str, now: std::time::Instant) {
         if let Some(last) = self.cells.last_mut()
             && matches!(last.cell(), ChatCell::Thinking(_))
         {
             last.append_stream(text);
+            self.active_thinking = Some(self.cells.len() - 1);
             return;
         }
         // New cell: push it EMPTY and route the first delta through the
         // stream too (see append_to_last_assistant).
-        self.push(ChatCell::Thinking(ThinkingBlock::new()));
+        let mut block = ThinkingBlock::new();
+        block.start(now);
+        block.set_expanded(self.reasoning_override);
+        self.push(ChatCell::Thinking(block));
         if let Some(last) = self.cells.last_mut() {
             last.append_stream(text);
         }
+        self.active_thinking = Some(self.cells.len().saturating_sub(1));
     }
 
-    /// Increment the thinking event counter on the last thinking block.
-    pub fn increment_thinking_count(&mut self) {
-        if let Some(last) = self.cells.last_mut()
-            && matches!(last.cell(), ChatCell::Thinking(_))
-        {
-            last.mutate(|cell| {
+    /// 冻结活跃思考块的计时：模型进入下一阶段（正文 / 工具调用）或回合结束。
+    ///
+    /// 幂等 —— 每个转折点都可以无脑调用。冻结后折叠行从 `深度思考中 4s`
+    /// 定格成 `深度思考 4s`。
+    pub fn finish_active_thinking(&mut self, now: std::time::Instant) {
+        let Some(index) = self.active_thinking.take() else {
+            return;
+        };
+        let Some(cached) = self.cells.get_mut(index) else {
+            return;
+        };
+        if matches!(cached.cell(), ChatCell::Thinking(_)) {
+            cached.mutate(|cell| {
                 if let ChatCell::Thinking(block) = cell {
-                    block.event_count += 1;
+                    block.finish(now);
                 }
             });
         }
     }
 
-    /// Reset thinking event counts on all thinking blocks (for new turn).
-    pub fn reset_thinking_count(&mut self) {
-        for cached in &mut self.cells {
-            if matches!(cached.cell(), ChatCell::Thinking(_)) {
+    /// 帧 tick：推进活跃思考块的刷光相位与显示秒数，并作废它的缓存。
+    ///
+    /// 返回是否有活跃块被推进（App 据此把这一帧标记为 dirty）。
+    pub fn tick_active_thinking(&mut self, now: std::time::Instant) -> bool {
+        let Some(index) = self.active_thinking else {
+            return false;
+        };
+        let Some(cached) = self.cells.get_mut(index) else {
+            self.active_thinking = None;
+            return false;
+        };
+        cached.tick_thinking(now)
+    }
+
+    /// 下一帧的绝对截止时刻 —— `None` = 没有活跃块 / 块不在视口里，帧驱动
+    /// 就此 park（看不见的动画不花钱，同欢迎屏的 `next_frame`）。
+    pub fn reasoning_sweep_deadline(&self, now: std::time::Instant) -> Option<std::time::Instant> {
+        let index = self.active_thinking?;
+        if !self.cell_in_view(index) {
+            return None;
+        }
+        let block = match self.cells.get(index)?.cell() {
+            ChatCell::Thinking(block) => block,
+            _ => return None,
+        };
+        block.next_frame(now, crate::ui::cells::thinking::SWEEP_FRAME_STEP)
+    }
+
+    /// Ctrl+O：翻转**本回合**思考块的展开（默认展开由 `rendering.thinking`
+    /// 给，`default_expanded` 是它的布尔投影）。
+    ///
+    /// 只作用于本回合的块：往前的回合各有自己的阅读状态，一把展开长会话会让
+    /// 版面整体跳变。返回是否有块真的变了（App 据此决定要不要重画）。
+    pub fn toggle_reasoning_expansion(&mut self, default_expanded: bool) -> bool {
+        let next = !self.reasoning_override.unwrap_or(default_expanded);
+        self.reasoning_override = Some(next);
+        let start = self.turn_thinking_start.min(self.cells.len());
+        let mut changed = false;
+        for cached in self.cells[start..].iter_mut() {
+            let needs = matches!(cached.cell(), ChatCell::Thinking(block) if block.expanded_override() != Some(next));
+            if needs {
                 cached.mutate(|cell| {
                     if let ChatCell::Thinking(block) = cell {
-                        block.event_count = 0;
+                        block.set_expanded(Some(next));
+                    }
+                });
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// 新回合开始：展开状态回到配置默认（Ctrl+O 是"本回合"的动作）。
+    ///
+    /// 与旧的 `reset_thinking_count` 不同，这里只清展开覆盖 —— 计时全程
+    /// 保留，旧回合的 `深度思考 12s` 不会被抹掉。
+    pub fn reset_reasoning_expansion(&mut self) {
+        self.reasoning_override = None;
+        self.turn_thinking_start = self.cells.len();
+        for cached in self.cells.iter_mut() {
+            let needs = matches!(cached.cell(), ChatCell::Thinking(block) if block.expanded_override().is_some());
+            if needs {
+                cached.mutate(|cell| {
+                    if let ChatCell::Thinking(block) = cell {
+                        block.set_expanded(None);
                     }
                 });
             }
         }
+    }
+
+    /// 第 `index` 个 cell 的虚拟行区间与当前视口相交吗。
+    ///
+    /// 用最近一帧的几何（`scroll_offset` / 视口高度）与高度表：动画门控要
+    /// 在**不渲染**的情况下回答"它在屏幕上吗"。
+    fn cell_in_view(&self, index: usize) -> bool {
+        let viewport = self.geometry.area.height as usize;
+        if viewport == 0 {
+            return false;
+        }
+        let Some(&height) = self.cell_heights.get(index) else {
+            return false;
+        };
+        let mut start = self.header_lines.len();
+        for h in self.cell_heights.iter().take(index) {
+            start += h;
+        }
+        let end = start + height;
+        let top = self.geometry.scroll_offset;
+        start < top + viewport && end > top
     }
 
     /// Set the result on a tool call block by index (from RenderContext).
@@ -1373,9 +1477,9 @@ mod tests {
     #[test]
     fn test_streaming_thinking_hidden_mode_no_leak() {
         // Hidden thinking mode: the stream keeps accumulating but the
-        // visible lines come from the cell's own renderer (the hidden
-        // indicator) — the reasoning content must never leak, neither
-        // while streaming nor after the turn-end finalize.
+        // visible lines come from the cell's own renderer (the collapsed
+        // label) — the reasoning content must never leak, neither while
+        // streaming nor after the turn-end finalize.
         let (p, l) = test_ctx();
         let ctx = CellContext {
             palette: &p,
@@ -1384,15 +1488,16 @@ mod tests {
             images: crate::render::markdown::ImageOpts::off(),
         };
         let mut view = ChatView::new();
-        view.append_to_last_thinking("SECRET-REASONING-CONTENT");
-        view.increment_thinking_count();
+        let started = Instant::now();
+        view.append_to_last_thinking_at("SECRET-REASONING-CONTENT", started);
+        view.tick_active_thinking(started + Duration::from_secs(3));
         let lines: Vec<Line<'static>> = view.cells[0].compute_lines(80, &ctx).to_vec();
         let text: String = lines
             .iter()
             .map(|l| l.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("Thinking..."), "indicator missing: {text}");
+        assert!(text.contains("深度思考中 3s"), "label missing: {text}");
         assert!(
             !text.contains("SECRET-REASONING"),
             "hidden reasoning leaked while streaming: {text}"
@@ -1400,10 +1505,12 @@ mod tests {
         let h_streaming = view.cells[0].compute_height(80, &ctx);
         assert!(
             h_streaming <= 2,
-            "hidden indicator height wrong: {h_streaming}"
+            "collapsed label height wrong: {h_streaming}"
         );
 
-        // Turn end: finalize must not install the visible full render.
+        // Turn end: finalize must not install the visible full render, and the
+        // timing freezes into the completed wording.
+        view.finish_active_thinking(started + Duration::from_secs(9));
         view.finalize_streams();
         let lines: Vec<Line<'static>> = view.cells[0].compute_lines(80, &ctx).to_vec();
         let text: String = lines
@@ -1415,8 +1522,89 @@ mod tests {
             !text.contains("SECRET-REASONING"),
             "hidden reasoning leaked after finalize: {text}"
         );
-        assert!(text.contains("1 events"), "event count lost: {text}");
+        assert!(text.contains("深度思考 9s"), "frozen duration lost: {text}");
+        assert!(!text.contains("深度思考中"), "still says active: {text}");
         assert_eq!(view.cells[0].compute_height(80, &ctx), h_streaming);
+    }
+
+    #[test]
+    fn toggle_expands_only_the_current_turn() {
+        let (p, l) = test_ctx();
+        let ctx = CellContext {
+            palette: &p,
+            thinking_mode: ThinkingMode::Hidden,
+            layout: &l,
+            images: crate::render::markdown::ImageOpts::off(),
+        };
+        let mut view = ChatView::new();
+        // 上一回合的思考块。
+        view.append_to_last_thinking_at("OLD-REASONING", Instant::now());
+        view.finish_active_thinking(Instant::now());
+        view.push(ChatCell::UserMessage("next".into()));
+        // 新回合开始（投影层在 TurnStarted 上做同一件事）。
+        view.reset_reasoning_expansion();
+        view.append_to_last_thinking_at("NEW-REASONING", Instant::now());
+
+        assert!(view.toggle_reasoning_expansion(false), "本回合应有块被翻转");
+        let old = view.cells[0].compute_lines(80, &ctx).to_vec();
+        let new = view.cells[2].compute_lines(80, &ctx).to_vec();
+        let old_text = old.iter().map(|l| l.to_string()).collect::<String>();
+        let new_text = new.iter().map(|l| l.to_string()).collect::<String>();
+        assert!(
+            new_text.contains("NEW-REASONING"),
+            "本回合应展开：{new_text}"
+        );
+        assert!(
+            !old_text.contains("OLD-REASONING"),
+            "上一回合不该被展开：{old_text}"
+        );
+
+        // 回合切换：展开回到默认（都收起）。
+        view.reset_reasoning_expansion();
+        let new = view.cells[2].compute_lines(80, &ctx).to_vec();
+        let new_text = new.iter().map(|l| l.to_string()).collect::<String>();
+        assert!(
+            !new_text.contains("NEW-REASONING"),
+            "新回合开始应回到默认折叠：{new_text}"
+        );
+    }
+
+    #[test]
+    fn reasoning_sweep_deadline_parks_when_idle_or_off_screen() {
+        let (p, l) = test_ctx();
+        let ctx = CellContext {
+            palette: &p,
+            thinking_mode: ThinkingMode::Hidden,
+            layout: &l,
+            images: crate::render::markdown::ImageOpts::off(),
+        };
+        let mut view = ChatView::new();
+        let now = Instant::now();
+        assert_eq!(
+            view.reasoning_sweep_deadline(now),
+            None,
+            "没有活跃块就 park"
+        );
+
+        view.append_to_last_thinking_at("reasoning", now);
+        // 还没画过帧（没有几何 / 高度）：也 park。
+        assert_eq!(view.reasoning_sweep_deadline(now), None, "不可见就 park");
+
+        // 画一帧的等价物：缓存高度 + 写几何（widget 在渲染时做这两件事）。
+        let height = view.cells[0].compute_height(80, &ctx);
+        view.cell_heights = vec![height];
+        view.geometry = super::super::ChatGeometry {
+            area: ratatui::layout::Rect::new(0, 0, 80, 24),
+            scroll_offset: 0,
+        };
+        let deadline = view
+            .reasoning_sweep_deadline(now)
+            .expect("可见的活跃块应排帧");
+        assert!(deadline > now, "截止时刻必须严格在未来");
+
+        // 冻结后 park。
+        view.finish_active_thinking(now);
+        assert_eq!(view.reasoning_sweep_deadline(now), None, "冻结即 park");
     }
 
     #[test]

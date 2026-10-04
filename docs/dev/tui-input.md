@@ -191,3 +191,11 @@ markdown 链接渲染为 OSC8 超链接，单击（无拖动）打开。模块�
 ## 已知中间态：原生拖选需要 Shift/Option
 
 鼠标上报接管后，终端不再把拖拽交给自身的文本选择——**不按 Shift（macOS 用 Option）的拖选不再选中文本**。这是回退 #28 的已知代价：应用内自研选择（`tui-text-selection` + `tui-composer-pointer`）已恢复 **chat 区域与 composer** 的免修饰键体验，同时保留 Shift/Option 原生拖选作为兜底（状态栏与弹层区域仍只能用原生方式）。
+
+## Ctrl+O：展开 / 收起本回合的思考
+
+`Ctrl+O` 翻转**当前回合**思考块的展开（[`app/modal.rs`](../../crates/wing/src/app/modal.rs) 的 `is_toggle_reasoning_key` → `KeyRoute::ToggleReasoning`）：
+
+* **应用保留键**，与 `Esc` / `Ctrl+C` 同档：在弹层（ask 面板 / `/model` picker / 命令 popup）之下也生效；唯一的硬要求是**必须在 composer 之前截住** —— 落到 composer 会被当普通字符 `o` 输入（composer 对 `Char(c)` 不做修饰键过滤，只有 `Ctrl+J/M` 是例外）；
+* **只作用于本回合**：回合开始（`TurnStarted` → `ChatView::reset_reasoning_expansion`）时展开覆盖清空、回到 `rendering.thinking` 的默认 —— 长会话不会被一把展开成几屏；本回合里后续轮次（工具循环）新起的思考块继承当时的覆盖；
+* 默认展开还是折叠由配置给：`hidden` = 默认折叠（标签行），`visible` = 默认展开（正文，与旧行为一致）。语义细节见 [tui-rendering.md](tui-rendering.md) 的「折叠的思考行」。

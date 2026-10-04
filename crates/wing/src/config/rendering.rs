@@ -3,13 +3,16 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-/// Thinking block rendering strategy.
+/// Thinking block rendering strategy — **默认展开还是默认折叠**。
+///
+/// `Ctrl+O` 逐回合翻转（只作用于当前回合，回合切换回默认）；语义与刷光
+/// 细节见 `docs/dev/tui-rendering.md` 第二节·六。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ThinkingMode {
-    /// Full markdown rendering (current default behavior).
+    /// 默认展开：reasoning 正文完整渲染（旧行为）。
     #[default]
     Visible,
-    /// Hide content, show only event count indicator.
+    /// 默认折叠：一行摘要（`⦁ 深度思考中 4s`，进行中持续刷光，结束后定格时长）。
     Hidden,
 }
 

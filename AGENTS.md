@@ -163,6 +163,7 @@ crates/wing/src/
 │   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存 + CellFrame 投影（链接 / 图片锚点侧信道）
 │   ├── image/                       终端图形（唯一 door to ratatui-image/image）：probe（能力探测·可注入）· store（worker+LRU+epoch + 上限：文件/像素/缓存张数与字节/memo）· place（paint 原语）
 │   ├── panel.rs                     选择面板共享渲染（窗口数学取自 shared/panels 内核）
+│   ├── shimmer.rs                   扫光 / 混色原语（开屏 wordmark 与折叠思考行共用）
 │   ├── welcome/                     开屏欢迎屏：mod（状态·宽度阶梯·可见性门控）· art（海鸥帧 + 像素大字数据）· sprite（半格渲染 + 品牌调色板）· motion（idle/干活动作规划）· wordmark（渐变 + 扫光）
 │   ├── status_bar.rs / spinner.rs / toast.rs
 │   ├── input_area/                  Composer 悬浮卡片（chrome：悬浮几何·活动栏·元信息栏 / model：段 + 粘贴 chip 注册表 / widget / editing / movement / wrap / 指针映射与高亮 pointer / paste / helpers）

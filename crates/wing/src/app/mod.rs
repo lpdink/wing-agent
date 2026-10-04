@@ -398,6 +398,8 @@ impl App {
         self.turn.finish();
         self.ctx.reset();
         self.refresh_copy_candidates();
+        // 回合结束：还在计时的思考块就地定格（`深度思考中 4s` → `深度思考 4s`）。
+        self.chat.finish_active_thinking(std::time::Instant::now());
         // Turn-end reconcile: install the full reference render for all
         // streaming cells (converges any incremental drift, frees stream
         // state). The actual render happens at the next draw, where the
@@ -739,6 +741,18 @@ const MIN_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis
 /// event and the sweep would freeze mid-flight. `None` (swept and settled)
 /// parks in `pending()` — a settled welcome costs the loop nothing.
 async fn welcome_sweep_tick(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Timer arm of the run loop's `select!` for the thinking label's shimmer.
+///
+/// 与欢迎屏扫光同一条契约：**绝对**截止时刻（网格锚在块的起点上，见
+/// `ThinkingBlock::next_frame`），否则流式事件会把"睡 40ms"无限推后、光带卡死；
+/// `None`（没有活跃块 / 块不在视口）park —— 看不见的动画不花钱。
+async fn thinking_sweep_tick(deadline: Option<std::time::Instant>) {
     match deadline {
         Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
         None => std::future::pending::<()>().await,
@@ -1088,6 +1102,13 @@ pub async fn run_app(
                 )
             })) => {
                 app.chat_dirty = true;
+            }
+            // Thinking label: 刷光帧驱动（≈25fps）。推进相位 / 秒数并把那一个
+            // cell 作废；块冻结、滚出视口或没有任何活跃块时这条臂 park。
+            _ = thinking_sweep_tick(app.chat.reasoning_sweep_deadline(std::time::Instant::now())) => {
+                if app.chat.tick_active_thinking(std::time::Instant::now()) {
+                    app.chat_dirty = true;
+                }
             }
             // Background fetch results (non-blocking HTTP queries).
             Some(result) = fetch_rx.recv() => {

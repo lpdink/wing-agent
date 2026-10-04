@@ -79,7 +79,8 @@ impl App {
                 tracing::debug!("turn started, was_working={}", self.turn.working);
                 self.turn.start();
                 self.turn.last_result = None;
-                self.chat.reset_thinking_count();
+                // 新回合：展开状态回到配置默认（Ctrl+O 只作用于当前回合）。
+                self.chat.reset_reasoning_expansion();
                 // Set title to working state with initial spinner frame.
                 let working_title = title::title_working(
                     self.turn.spinner.frame_str(),
@@ -184,12 +185,12 @@ impl App {
             WingEvent::Reasoning { content, .. } => {
                 self.chat.append_to_last_thinking(&content);
                 self.ctx.current_thinking = Some(self.chat.len().saturating_sub(1));
-                // Increment thinking event count for hidden mode indicator.
-                self.chat.increment_thinking_count();
             }
 
             // ---- Text events ----
             WingEvent::Text { content, .. } => {
+                // 思考阶段结束：折叠行从 `深度思考中` 定格成 `深度思考 4s`。
+                self.chat.finish_active_thinking(std::time::Instant::now());
                 self.ctx.current_thinking = None;
                 self.chat.append_to_last_assistant(&content);
                 self.ctx.current_assistant = Some(self.chat.len().saturating_sub(1));
@@ -204,6 +205,7 @@ impl App {
                 is_final,
                 ..
             } => {
+                self.chat.finish_active_thinking(std::time::Instant::now());
                 self.ctx.current_thinking = None;
                 self.ctx.current_assistant = None;
 
@@ -234,6 +236,7 @@ impl App {
                 tool_call_id,
                 ..
             } => {
+                self.chat.finish_active_thinking(std::time::Instant::now());
                 self.ctx.current_thinking = None;
                 self.ctx.current_assistant = None;
 

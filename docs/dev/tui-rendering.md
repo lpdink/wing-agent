@@ -98,6 +98,24 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 
 **症状 → 先看哪里**：公式没渲染（显示源码）= 引擎判 `None`（`--kinds` 看 `$` 是否落在该行；超宽就换大宽度或看 `--range`）；公式**整段消失** = B 级缺陷（事件没接线），先用 `--kinds` 确认 `$` 段在不在；**代码块里的 `\(` 变成了 `$`** = 围栏状态机问题（检查 `FenceTrack::step` 的规则与调用方是否都在用它）。
 
+## 二·六、折叠的思考行（`thinking: hidden` 的呈现）
+
+`rendering.thinking` 现在管的是**默认展开还是默认折叠**（`visible` = 默认展开，正文与旧行为一致；`hidden` = 默认折叠成一行摘要）。`Ctrl+O` 逐回合翻转（见 [tui-input.md](tui-input.md) 的登记）。
+
+摘要行 = 折叠时的全部可见内容，也是展开时的**标题行**（disclosure 头）：
+
+```
+⦁ 深度思考中 4s        ← 计时中：措辞持续刷光（灰→白），秒数每秒跳
+⦁ 深度思考 12s         ← 定格：时长冻结（`fmt_elapsed`，>1min 显示 1m 05s）
+⦁ 深度思考             ← 没有计时数据的历史块（重放）：不带秒数
+```
+
+* **刷光**：与开屏 wordmark 同一份数学（`ui/shimmer.rs` 的 `sweep_intensity` + `mix`）；跨度 = 措辞宽 + 8 列余量（扫出去停一拍再回来），周期 1.6s，帧间隔 40ms（≈25fps）。亮底主题方向翻转（朝深压），否则白光看不见 —— 判据同 wordmark（`is_light_theme`）；
+* **帧驱动**：绝对截止时刻（网格锚在块的起点上，`ThinkingBlock::next_frame`），滚动 / 流式事件不会把它推后；没有活跃块、或块**不在视口**时定时臂 park（看不见的动画不花钱）——与欢迎屏扫光的契约相同（[welcome-mascot.md](welcome-mascot.md) 的「重绘成本契约」）；
+* **计时口径**：块内首个 reasoning 事件 → 该块被冻结（下一条正文 / 工具调用事件，或回合结束）。中断（Esc）、错误同样就地冻结。中途重连（sync 重放半截 reasoning）会少算一点；
+* **标题行在流式路径里的位置**：带折叠身份的块展开时，标题由 `StreamingRender` 当作行集的第 0 行（`set_header`）——正文因此拿两列续行缩进，链接 / 图片锚点的「行号 == 索引」不变。后设的标题会**接管**正文首行的 `⦁ `（原件暂存，收起时原样归还）；
+* **暂停与恢复**：`reset_reasoning_expansion`（`TurnStarted` 时）清空展开覆盖，旧回合回到配置默认；块自己冻在 `深度思考 12s`，不再是旧的「新一轮把旧计数清零」。
+
 ## 三、不变量：流式静息态 == 参考全量渲染
 
 `StreamingRender` 是「稳定前缀 + 活动尾部」的增量引擎，但它的**静息态**（每帧 `lines()` 之后、`finalize()` 之前）必须与同一文本的 `full_render` 参考渲染**逐 span 相同**（文本 + 样式 + 链接 + 图片锚点几何）；`finalize()` 直接换成参考渲染。这条不变量由 `crates/wing/tests/stream_render_reconcile.rs` 的矩阵（shape × chunk 大小 × 宽度 × profile）强制，`render_probe --check` 是它的手动版本。

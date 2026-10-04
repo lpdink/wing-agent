@@ -788,6 +788,15 @@ fn test_key_routing_of_the_idle_app() {
         )),
         KeyRoute::Quit
     );
+    // Ctrl+O 是应用保留键（查看动作）：必须赶在 composer 之前截住，
+    // 否则会被当普通字符 `o` 输入进草稿。
+    assert_eq!(
+        app.route_key(&crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('o'),
+            KeyModifiers::CONTROL
+        )),
+        KeyRoute::ToggleReasoning
+    );
     assert_eq!(
         app.route_key(&key(crossterm::event::KeyCode::Char('x'))),
         KeyRoute::Composer
@@ -1009,4 +1018,53 @@ fn test_page_keys_reach_the_chat_through_both_modals() {
     assert!(!app.chat.is_at_bottom(), "PageUp scrolled the chat");
     assert!(app.model_panel.is_some(), "the picker stays open");
     assert_eq!(app.ask_panels.len(), 1, "the ask panel stays open");
+}
+
+#[test]
+fn test_ctrl_o_toggles_the_current_turn_reasoning() {
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyModifiers;
+
+    let mut app = test_app();
+    let ctrl_o = crossterm::event::KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+    let now = std::time::Instant::now();
+
+    // 默认 `visible`（配置）：一块思考内容默认展开 —— Ctrl+O 先收起。
+    app.chat.append_to_last_thinking_at("SECRET-REASONING", now);
+    app.chat.finish_active_thinking(now);
+    app.handle_key(ctrl_o);
+    let block = |app: &crate::app::App| match app.chat.cells.last().map(|c| c.cell()) {
+        Some(ChatCell::Thinking(block)) => block.clone(),
+        other => panic!("expected a thinking cell, got {other:?}"),
+    };
+    assert_eq!(
+        block(&app).expanded_override(),
+        Some(false),
+        "visible 默认下先收起"
+    );
+    app.handle_key(ctrl_o);
+    assert_eq!(block(&app).expanded_override(), Some(true), "再按展开");
+
+    // `hidden` 默认：同一颗键先展开。
+    let mut config = crate::config::AppConfig::default();
+    config.rendering.thinking = crate::config::rendering::ThinkingMode::Hidden;
+    let mut app = crate::app::App::new("test-session".into(), config, None);
+    app.chat.append_to_last_thinking_at("SECRET-REASONING", now);
+    app.chat.finish_active_thinking(now);
+    app.handle_key(ctrl_o);
+    assert_eq!(
+        block(&app).expanded_override(),
+        Some(true),
+        "hidden 默认下先展开"
+    );
+
+    // 有面板时也生效（应用保留键），且不会把 `o` 打进草稿。
+    let mut app2 = app_with_ask_panel();
+    let before = app2.input.expand_and_get_text();
+    app2.handle_key(ctrl_o);
+    assert_eq!(
+        app2.input.expand_and_get_text(),
+        before,
+        "草稿不该多出一个 o"
+    );
 }

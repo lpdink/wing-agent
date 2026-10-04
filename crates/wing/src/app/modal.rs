@@ -79,6 +79,8 @@ pub(super) enum ChatScrollAction {
 pub(super) enum KeyRoute {
     /// Ctrl+C — the double-press quit gesture.
     Quit,
+    /// Ctrl+O — 展开 / 收起当前回合的思考块（应用保留键，面板之下也可用）。
+    ToggleReasoning,
     /// The ask panel owns the key.
     AskPanel,
     /// The `/model` picker owns the key.
@@ -106,6 +108,17 @@ fn app_reserved_key(key: &crossterm::event::KeyEvent) -> bool {
             | crossterm::event::KeyCode::PageUp
             | crossterm::event::KeyCode::PageDown
     )
+}
+
+/// `Ctrl+O` — 展开 / 收起当前回合的思考块。
+///
+/// 应用保留键（面板之下也可用，同 Esc / Ctrl+C）：它是**查看**动作，不碰草稿、
+/// 不碰面板状态。必须在这里截住 —— 放给 composer 就会被当普通字符 `o` 输入。
+fn is_toggle_reasoning_key(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyModifiers;
+
+    matches!(key.code, KeyCode::Char('o' | 'O')) && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 /// The chat-scroll meaning of a key, if it has one.
@@ -169,6 +182,11 @@ impl App {
     pub(super) fn route_key(&self, key: &crossterm::event::KeyEvent) -> KeyRoute {
         if is_quit_key(key) {
             return KeyRoute::Quit;
+        }
+        // Ctrl+O 与应用保留键同档：查看动作，任何面板之下都生效（也必须在
+        // 面板之前截住 —— 落到 composer 会变成输入 `o`）。
+        if is_toggle_reasoning_key(key) {
+            return KeyRoute::ToggleReasoning;
         }
         for layer in self.modal_chain() {
             match layer {
@@ -257,6 +275,10 @@ impl App {
             // Modal owners keep the Ctrl+C counter untouched: the gesture only
             // counts while the app itself is receiving keys.
             KeyRoute::Quit => self.handle_quit_key(key),
+            KeyRoute::ToggleReasoning => {
+                self.reset_quit_counter();
+                self.toggle_reasoning_expansion();
+            }
             KeyRoute::AskPanel => self.handle_ask_panel_key(key),
             KeyRoute::ModelPicker => self.handle_model_picker_key(key),
             KeyRoute::EscLadder => {
@@ -318,6 +340,18 @@ impl App {
             return;
         }
         self.handle_composer_key(key);
+    }
+
+    /// Ctrl+O — 翻转当前回合思考块的展开。
+    ///
+    /// 默认（展开还是折叠）由 `rendering.thinking` 给；按下后的显式值只属于
+    /// 「当前回合」，下一回合开始回到默认（见 `ChatView::reset_reasoning_expansion`）。
+    fn toggle_reasoning_expansion(&mut self) {
+        let default_expanded =
+            self.config.rendering.thinking == crate::config::rendering::ThinkingMode::Visible;
+        if self.chat.toggle_reasoning_expansion(default_expanded) {
+            self.chat_dirty = true;
+        }
     }
 
     /// Ctrl+C — first press warns, second press within 500 ms quits.
