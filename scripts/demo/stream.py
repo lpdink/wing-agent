@@ -8,9 +8,11 @@
   ``content``，永不发 tool_calls；
 * **发射按绝对 deadline 自校正**（`env.sleep_until`）——``--tps`` 是真实目标速率，
   不是被 sleep 粒度污染的名义值；
-* **每一帧都带累计 usage**：网关据此实时算 ``tokens_per_sec``（vLLM 的
-  ``continuous_usage_stats`` 就是这个形态），所以 TUI 底栏的 ``↓N out · M t/s``
-  是**流式过程中**就在跳的，而不是等回合结束才亮一次。
+* ``--usage-every`` 决定 usage 怎么带：``1`` = 每帧带累计 usage，网关据此实时算
+  ``tokens_per_sec``（vLLM 的 ``continuous_usage_stats`` 就是这个形态），TUI 底栏的
+  ``↓N out · M t/s`` 会在**流式过程中**跳——GIF 要的就是这个；``0``（默认）= 只在回合
+  末尾带一次，与真 provider 的常规形态一致，量延迟时必须用这个（每帧带会让事件量翻倍，
+  3000 tok/s 下显示延迟从 ~15ms 涨到 ~150ms）。
 
     uv run python scripts/demo/stream.py --tps 3000       # 起 provider + 网关
     # 录制：uv run python scripts/demo/record.py --serve stream.py --serve-arg=--tps=3000
@@ -70,14 +72,20 @@ def _log_emit(seq: int, kind: str, chars: int, planned: float) -> None:
 
 
 def split_reasoning(text: str, limit: int | None = None) -> tuple[str, str]:
-    """按段落边界切出 reasoning 前缀，剩下的当正文。``limit >= len(text)`` 就是纯 reasoning。"""
+    """按段落边界切出 reasoning 前缀，剩下的当正文。
+
+    ``limit`` 语义：``<= 0`` → 全正文（没有 reasoning）；``>= len(text)`` → 全 reasoning；
+    否则在前缀按段落边界切开。
+    """
     if limit is None:
         limit = int(STATE.get("reason_chars", REASON_CHARS))
     if limit <= 0:
         return "", text
+    if limit >= len(text):
+        return text.strip(), ""
     cut = text.find("\n\n", limit)
     if cut == -1:
-        return "", text
+        return text.strip(), ""
     return text[:cut].strip(), text[cut:].strip()
 
 
@@ -294,7 +302,10 @@ async def main() -> int:
         "--reason-chars",
         type=int,
         default=REASON_CHARS,
-        help="reasoning 前缀长度（字符）；给一个 >= turn-chars 的值就是纯 reasoning 流",
+        help=(
+            "reasoning 前缀长度（字符）：<=0 = 全正文，>=len(语料) = 全 reasoning，"
+            "否则在段落边界切开（默认 380）"
+        ),
     )
     parser.add_argument(
         "--turn-chars",

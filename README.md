@@ -59,9 +59,9 @@ per frame (M6 Mac mini):
 
 | Feed rate | p50 | p99 |
 |---|---|---|
-| 3,000 tok/s | 20 ms | 32 ms |
-| 30,000 tok/s | 13 ms | 26 ms |
-| 45,000 tok/s | 10 ms | 36 ms |
+| 3,000 tok/s | 17 ms | 28 ms |
+| 30,000 tok/s | 13 ms | 22 ms |
+| 45,000 tok/s | 10 ms | 30 ms |
 
 Reproduce it: `uv run python scripts/demo/latency.py --steps 3000,30000,45000`.
 

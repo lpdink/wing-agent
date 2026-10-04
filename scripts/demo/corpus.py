@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import random
+import sys
 
 TITLE = """# Designing a reliable job queue
 
@@ -247,18 +248,14 @@ workers. Beyond that you are not queueing work, you are hiding an outage.""",
 ]
 
 
+#: 代码块模板池（语言混排：GIF 里能看到多种高亮）
+CODE_BLOCKS = [RUST, TYPESCRIPT, PYTHON, SQL, BASH, GO]
+
+
 def build_corpus(target_bytes: int) -> str:
     """确定性生成 ``target_bytes`` 量级的 markdown（同一 seed ⇒ 同一份文本）。"""
     rng = random.Random(20261004)
     parts: list[str] = [TITLE]
-    blocks = [
-        PARAGRAPHS,
-        BULLETS,
-        [RUST, TYPESCRIPT, PYTHON, SQL, BASH, GO],
-        TABLES,
-        QUOTES,
-        MATH,
-    ]
     section = 0
     size = len(TITLE)
     while size < target_bytes:
@@ -268,7 +265,7 @@ def build_corpus(target_bytes: int) -> str:
         for _ in range(rng.randint(2, 3)):
             chunk.append("\n\n" + rng.choice(PARAGRAPHS).strip())
         chunk.append("\n\n" + rng.choice(BULLETS).strip())
-        for group in blocks[2:3] + [TABLES, QUOTES, MATH]:
+        for group in (CODE_BLOCKS, TABLES, QUOTES, MATH):
             chunk.append("\n\n" + rng.choice(group).strip())
         chunk.append("\n\n" + rng.choice(PROSE_TAIL).strip())
 
@@ -306,7 +303,7 @@ def main() -> int:
     print(corpus, end="")
     print(
         f"\n[corpus] {len(corpus)} bytes (target {args.bytes})",
-        file=__import__("sys").stderr,
+        file=sys.stderr,
     )
     return 0
 

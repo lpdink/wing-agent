@@ -87,10 +87,11 @@ README 与真机不会漂移。
 
 ## 演示素材（README 里的 GIF / 截图）
 
-`assets/demo*.gif|png` 也不是手工截的：`scripts/demo/` 用**假 Provider 的剧本**驱动
+`assets/demo.gif`（以及 README 性能那一节的 `assets/speed-*.gif`）也不是手工截的：
+`scripts/demo/` 用**假 Provider 的剧本**驱动
 真网关 + 真 `wing` 二进制，在 tmux 里按帧抓真彩屏幕，`agg` 渲染成 GIF / 静态图
-（`make demo`）。改配色、文案、cell 渲染后重跑即可，不会漂移 —— 机制、依赖与
-调镜头的手册在 [`scripts/demo/README.md`](../../scripts/demo/README.md)。
+（hero 走 `make demo`，录完自动同步进 `assets/`）。改配色、文案、cell 渲染后重跑即可，
+不会漂移 —— 机制、依赖与调镜头的手册在 [`scripts/demo/README.md`](../../scripts/demo/README.md)。
 
 ## 改画 / 预览的创作期工作流
 

@@ -4,10 +4,11 @@
     # ① 剧情回放（README 顶部 hero）：假 Provider 按剧本吐工具调用
     uv run python scripts/demo/record.py
 
-    # ② 速度演示（渲染性能那一节）：同一份语料按不同 tok/s 灌进来
-    uv run python scripts/demo/record.py --serve stream.py --serve-arg --tps=3000 \
-        --seconds 10 --prompt "walk me through the design of a reliable job queue" \
-        --cols 108 --rows 28 --name speed-3000
+    # ② 速度演示（渲染性能那一节）：同一份语料按不同 tok/s 灌进来（96 列是为了让
+    #    状态栏那栏累积 token 让出去，见 scripts/demo/README.md）
+    uv run python scripts/demo/record.py --serve stream.py --serve-arg=--tps=3000 \
+        --serve-arg=--usage-every=1 --seconds 8 --cols 96 --rows 24 --fps 10 \
+        --fps-cap 10 --name speed-3000 --assets
 
     uv run python scripts/demo/record.py --no-render     # 只抓 cast
     uv run python scripts/demo/record.py --inspect       # 抓完打印逐帧摘要（调镜头）
@@ -33,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -48,9 +50,27 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 #: agg 落在 target/ 下：`target/` 本来就在 .gitignore 里，工具链缓存不污染工作区。
 TOOLS = REPO / "target" / "demo-tools"
-AGG_URL = (
-    "https://github.com/asciinema/agg/releases/download/v1.9.0/agg-aarch64-apple-darwin"
-)
+AGG_VERSION = "v1.9.0"
+#: agg 的 release 产物按 <arch>-<os>-<abi> 命名；下载地址按本机平台拼。
+AGG_TARGETS = {
+    ("Darwin", "arm64"): "aarch64-apple-darwin",
+    ("Darwin", "x86_64"): "x86_64-apple-darwin",
+    ("Linux", "aarch64"): "aarch64-unknown-linux-gnu",
+    ("Linux", "x86_64"): "x86_64-unknown-linux-gnu",
+}
+
+
+def agg_url() -> str:
+    triple = AGG_TARGETS.get((platform.system(), platform.machine()))
+    if triple is None:
+        raise SystemExit(
+            f"[record] no prebuilt agg for {platform.system()}/{platform.machine()}: "
+            "install agg yourself and point $DEMO_AGG at it"
+        )
+    return (
+        f"https://github.com/asciinema/agg/releases/download/{AGG_VERSION}/agg-{triple}"
+    )
+
 
 #: 剧情模式默认抓的静态图：按**屏幕内容**挑帧（比按时间猜稳：转录快慢会抖）。
 #: 每项 = (帧里要出现的文本, 输出名)；``<last>`` 是特殊标记：取最后一帧。
@@ -62,6 +82,11 @@ STILLS: list[tuple[str, str]] = [
 
 STORY_PROMPT = "make fetch retry transient failures with exponential backoff, and get the suite green"
 SPEED_PROMPT = "walk me through the design of a reliable job queue"
+
+#: 录完之后必须在某一帧里出现的内容——没有就说明这次录制是坏的（工具 schema 漂了、
+#: 沙箱拦了 Bash、provider 没起来），此时**不能**把 GIF 写出去覆盖上一版资产。
+STORY_EXPECT = ("+ def fetch(", "OK", "All three tests pass.")
+SPEED_EXPECT = (" t/s ",)
 
 
 @dataclass
@@ -94,6 +119,9 @@ class Config:
     server_args: list[str] = field(default_factory=list)
     session: str = "wing-demo"
     name: str = "demo"  # 产物基名：<name>.gif / <name>.cast
+    #: 必须在某一帧里出现的内容（坏录制的守门；见 main 里的用法）。
+    expect: tuple[str, ...] = ()
+    copy_assets: bool = False
     stills: list[tuple[str, str]] = field(default_factory=lambda: list(STILLS))
 
 
@@ -260,7 +288,7 @@ def agg_bin() -> Path:
             "300",
             "-o",
             str(local),
-            os.environ.get("DEMO_AGG_URL", AGG_URL),
+            os.environ.get("DEMO_AGG_URL") or agg_url(),
         ],
         check=True,
     )
@@ -579,6 +607,18 @@ def parse_args() -> tuple[Config, argparse.Namespace]:
     parser.add_argument("--fps-cap", type=int, default=12, help="GIF 帧率上限")
     parser.add_argument("--font-size", type=int, default=16)
     parser.add_argument("--last-frame", type=float, default=None, help="末帧停留秒数")
+    parser.add_argument(
+        "--expect",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help="要求某一帧里出现 TEXT，否则本次录制算失败（可重复；有默认值）",
+    )
+    parser.add_argument(
+        "--assets",
+        action="store_true",
+        help="渲染完把 GIF 拷进 assets/（默认只落在 --out 指定的目录）",
+    )
     parser.add_argument("--no-stills", action="store_true", help="不出静态图")
     parser.add_argument("--no-render", action="store_true", help="只出 cast")
     parser.add_argument("--inspect", action="store_true", help="打印逐帧摘要后退出")
@@ -607,6 +647,10 @@ def parse_args() -> tuple[Config, argparse.Namespace]:
         last_frame=args.last_frame
         if args.last_frame is not None
         else (1.2 if speed else 2.5),
+        expect=tuple(args.expect)
+        if args.expect
+        else (SPEED_EXPECT if speed else STORY_EXPECT),
+        copy_assets=args.assets,
     )
     if speed:
         # 速度演示不需要"哪个片段"的静态图，默认不出（要的话显式给 --still）。
@@ -636,6 +680,14 @@ def main() -> int:
     if args.inspect:
         print((out / "timeline.txt").read_text(encoding="utf-8"))
         return 0
+
+    missing = [marker for marker in cfg.expect if cast.first_with(marker) is None]
+    if missing:
+        # 坏录制不许覆盖上一版资产：这里就退出，GIF 不渲染、不拷。
+        log(f"[record] FAILED: no frame contains {missing!r} — recording looks broken")
+        log(f"[record]        cast kept for inspection: {cast_path}")
+        return 1
+    log(f"[record] checks passed: {list(cfg.expect)}")
     if args.no_render:
         return 0
 
@@ -644,6 +696,10 @@ def main() -> int:
     log(f"[record] gif → {gif} ({gif.stat().st_size / 1024:.0f} KiB)")
     if cfg.stills:
         render_stills(cfg, cast, out)
+    if cfg.copy_assets:
+        target = REPO / "assets" / gif.name
+        shutil.copy2(gif, target)
+        log(f"[record] assets ← {target} ({target.stat().st_size / 1024:.0f} KiB)")
     return 0
 
 

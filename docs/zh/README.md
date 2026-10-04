@@ -51,9 +51,9 @@ TUI 从不重画整段回答：markdown 块在闭合时一次性定型，之后�
 
 | 喂入速率 | p50 | p99 |
 |---|---|---|
-| 3,000 tok/s | 20 ms | 32 ms |
-| 30,000 tok/s | 13 ms | 26 ms |
-| 45,000 tok/s | 10 ms | 36 ms |
+| 3,000 tok/s | 17 ms | 28 ms |
+| 30,000 tok/s | 13 ms | 22 ms |
+| 45,000 tok/s | 10 ms | 30 ms |
 
 复算：`uv run python scripts/demo/latency.py --steps 3000,30000,45000`。
 

@@ -26,6 +26,7 @@ import fcntl
 import json
 import os
 import pty
+import re
 import select
 import signal
 import struct
@@ -43,9 +44,14 @@ REPO = HERE.parents[1]
 REPLIES = {b"\x1b[6n": b"\x1b[1;1R", b"\x1b[c": b"\x1b[?62;1;6;22c"}
 #: 探针里终端多大（列 × 行）——与录制无关，只要装得下标记行。
 PROBE_COLS, PROBE_ROWS = 120, 45
-#: reasoning 前缀长度：够大就是"纯 reasoning 流"（与 fast-stream 的口径对齐，
-#: 便于跨工具比较）；正文是 markdown+代码块，渲染更贵，见 README 里的说明。
-REASON_CHARS = 10_000_000
+#: 喂的内容：0 = 全正文（markdown + 代码块 + 表格，渲染**最贵**的那条路径）。
+#: 量的是"用户真实会遇到的最坏情况"，所以不走便宜的纯 reasoning 流。
+REASON_CHARS = 0
+#: 标记搜索前要剥掉的终端控制序列（SGR / CSI / OSC）：行是分多次写出的，
+#: 中间会夹 CUP 与颜色，直接在原始字节里找 needle 会漏掉一半。
+ANSI_RE = re.compile(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]")
+#: 找到的标记占比低于这个值就认为这一档"样本不足"，不进结论。
+MIN_COVERAGE = 0.4
 
 
 def cpu_seconds(pid: int) -> float:
@@ -133,10 +139,15 @@ def run_rate(
     rate: int, seconds: float, marker_every: int, keep: bool
 ) -> dict[str, float]:
     """跑一个台阶：起 provider + 网关，PTY 里跑真 TUI，量标记的显示延迟。"""
+    reply_log: list[bytes] = []
+    #: 待答的终端查询：``[应答时刻, 排队时的输出字节数, 已试次数]``。
+    #: crossterm 读光标位置前会冲掉已到达的输入 —— 回包抢在它冲之前就白给，
+    #: 应用会卡满 2s 超时（TUI 日志里那条 `cursor position could not be read`）。
+    #: 所以"没人继续画"就补发，看到输出增长就撤掉。
+    pending: list[list[float]] = []
     emit = Path("/tmp") / f"wing-latency-{rate}.jsonl"
     provider = Provider(rate, emit, marker_every)
     try:
-        offset = 0
         env = dict(os.environ)
         env.update(
             WING_HOME=provider.info["WING_HOME"],
@@ -159,7 +170,13 @@ def run_rate(
         chunks: list[tuple[float, bytes]] = []
         started = time.perf_counter()
         typed = False
+        typed_at = 0.0
+        total_bytes = 0
         cpu_start = cpu_at = float("nan")
+        # 滚动窗口：等 TUI 真的画出首屏（欢迎屏上的提示行）再送 prompt。固定 sleep
+        # 会在高负载下抢跑——keystroke 落进还没开始读 stdin 的进程，整档就白测。
+        recent = bytearray()
+        carry = b""
         try:
             while time.perf_counter() - started < seconds:
                 ready, _, _ = select.select([fd], [], [], 0.1)
@@ -171,12 +188,33 @@ def run_rate(
                     if not data:
                         break
                     chunks.append((time.perf_counter(), data))
+                    total_bytes += len(data)
+                    # 查询只有 4 字节，可能正好被 read 切开：拿"上一次的尾巴 + 本次"
+                    # 一起找，减去已在尾巴里数过的，避免重复应答。
+                    window = carry + data
                     for needle, reply in REPLIES.items():
-                        if needle in data:
-                            os.write(fd, reply)
-                if not typed and time.perf_counter() - started > 1.5:
+                        for _ in range(window.count(needle) - carry.count(needle)):
+                            pending.append([time.perf_counter(), total_bytes, 0, reply])
+                    carry = data[-8:]
+                    recent.extend(ANSI_RE.sub(b"", data))
+                    del recent[:-8192]
+
+                # 补答：应用没继续画（输出没长）就隔 200ms 再答一次，最多 15 次；
+                # 一旦看到它继续画，说明这条回包被读到了，撤销。
+                for item in list(pending):
+                    due, mark, tries, reply = item
+                    if total_bytes > mark + 200 or tries >= 15:
+                        pending.remove(item)
+                    elif time.perf_counter() >= due:
+                        os.write(fd, reply)
+                        reply_log.append(reply)
+                        item[0] = time.perf_counter() + 0.2
+                        item[2] = tries + 1
+                elapsed = time.perf_counter() - started
+                if not typed and (b"Esc " in recent or elapsed > 8.0):
                     os.write(fd, b"go\r")
                     typed = True
+                    typed_at = time.perf_counter()
                     cpu_start = cpu_seconds(pid)
                 if typed and cpu_start == cpu_start:
                     cpu_at = cpu_seconds(pid)
@@ -191,14 +229,12 @@ def run_rate(
                 os.close(fd)
             except OSError:
                 pass
-        offset = 0
     finally:
         provider.stop()
 
     # Provider 侧：每个标记帧的发射时刻（marker id = seq // marker_every）
     sent: dict[int, float] = {}
     with emit.open("r", encoding="utf-8", errors="replace") as handle:
-        handle.seek(offset)
         for line in handle:
             if not line.strip():
                 continue
@@ -214,9 +250,12 @@ def run_rate(
 
     if os.environ.get("LATENCY_DEBUG"):
         total = sum(len(data) for _at, data in chunks)
+        tail = ANSI_RE.sub(b"", chunks[-1][1])[-120:] if chunks else b""
+        head = chunks[0][1][:160] if chunks else b""
         print(
             f"[debug] chunks={len(chunks)} bytes={total} emitted={len(sent)} "
-            f"markers={sorted(sent)[:5]}...",
+            f"replies={len(reply_log)} typed={typed} "
+            f"head={head!r} tail={tail!r}",
             file=sys.stderr,
         )
 
@@ -225,7 +264,9 @@ def run_rate(
     missing = 0
     for marker_id, sent_at in sorted(sent.items()):
         needle = f"⟦M{marker_id:05d}".encode()
-        found = next((at for at, data in chunks if needle in data), None)
+        found = next(
+            (at for at, data in chunks if needle in ANSI_RE.sub(b"", data)), None
+        )
         if found is None:
             missing += 1
         else:
@@ -243,9 +284,11 @@ def run_rate(
         if cpu_at != cpu_at or cpu_start != cpu_start
         else max(0.0, cpu_at - cpu_start)
     )
-    elapsed = time.perf_counter() - started - 1.5
+    elapsed = max(0.001, time.perf_counter() - (typed_at or started))
+    coverage = len(lag) / len(sent) if sent else 0.0
     return {
         "rate": rate,
+        "coverage": coverage,
         "cpu": 100.0 * window / elapsed
         if elapsed > 0 and window == window
         else float("nan"),
@@ -277,18 +320,26 @@ def main() -> int:
 
     print(f"标记每 {args.marker_every} 帧一行；lag = 标记出现在终端 − Provider 发射")
     print(
-        f"{'帧/s':>9}{'标记':>7}{'丢失':>6}{'min':>9}{'p50':>9}{'p99':>9}{'max':>9}"
+        f"{'帧/s':>9}{'标记':>7}{'命中率':>8}{'min':>9}{'p50':>9}{'p99':>9}{'max':>9}"
         f"{'趋势':>9}{'TUI CPU':>9}   判定"
     )
     for step in (int(x) for x in args.steps.split(",")):
         row = run_rate(step, args.seconds, args.marker_every, args.keep)
         verdict = "跟得上"
-        if row["p99"] == row["p99"] and row["p99"] > 0.25:
+        if row["coverage"] < MIN_COVERAGE:
+            # 命中率低说明多数标记行在两次绘制之间就被滚过去了（高速下的常态），
+            # 这时 p50/p99 只代表"能被逐帧抽到的那部分"，不能当结论用。
+            verdict = f"样本不足（命中 {row['coverage'] * 100:.0f}%）"
+        elif row["p99"] == row["p99"] and row["p99"] > 0.25:
             verdict = "开始落后"
-        if row["trend"] == row["trend"] and row["trend"] > 0.1:
+        if (
+            row["coverage"] >= MIN_COVERAGE
+            and row["trend"] == row["trend"]
+            and row["trend"] > 0.1
+        ):
             verdict += " + 持续拉大"
         print(
-            f"{row['rate']:>9}{row['markers']:>7}{row['missing']:>6}"
+            f"{row['rate']:>9}{row['markers']:>7}{row['coverage'] * 100:>7.0f}%"
             f"{row['min'] * 1000:>8.1f}m{row['p50'] * 1000:>8.1f}m"
             f"{row['p99'] * 1000:>8.1f}m{row['max'] * 1000:>8.1f}m"
             f"{row['trend'] * 1000:>+8.1f}m{row['cpu']:>8.0f}%   {verdict}",

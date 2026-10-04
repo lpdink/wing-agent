@@ -20,9 +20,10 @@ TS_TOOLING_CHECK = command -v node >/dev/null 2>&1 || { echo "❌ node not found
 # ── README 演示素材 ───────────────────────────────────────────
 
 # 真 TUI + 假 Provider（剧本）的确定性回放：tmux 抓真彩屏幕 → asciinema cast →
-# agg 渲染 GIF / 静态图。产物在 target/demo/，机制与调镜头手册见 scripts/demo/README.md。
+# 重录 README 的 hero（剧情回放），渲染后同步进 assets/。速度演示那 4 张要单独跑
+# （配方见 scripts/demo/README.md）；cast/静态图落在 target/demo/。
 demo:
-	uv run python scripts/demo/record.py
+	uv run python scripts/demo/record.py --assets
 
 run:
 	cargo run

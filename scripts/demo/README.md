@@ -17,19 +17,26 @@
 | **性能水位尺** | `stream.py --marker-every` + `latency.py` | 端到端显示延迟 p50/p99（README 里那张表） |
 
 ```bash
-# 剧情 hero（≈40s）
-uv run python scripts/demo/record.py
+# 剧情 hero（≈35s）：录 → 校验 → 渲染 → 同步进 assets/（等价于 make demo）
+uv run python scripts/demo/record.py --assets
 
-# 速度演示（每档 ≈35s；96 列是为了让底栏没有累积 token 那一栏，见下）
-uv run python scripts/demo/record.py --serve stream.py --serve-arg=--tps=3000 --serve-arg=--usage-every=1 \
-    --seconds 8 --cols 96 --rows 24 --fps 10 --fps-cap 10 --name speed-3000
+# 速度演示（每档 ≈35s；96 列是为了让底栏那栏累积 token 让出去，见下）
+uv run python scripts/demo/record.py --serve stream.py --serve-arg=--tps=3000 \
+    --serve-arg=--usage-every=1 --seconds 8 --cols 96 --rows 24 --fps 10 --fps-cap 10 \
+    --name speed-3000 --assets
 
 # 端到端显示延迟（每档 ≈12s）
 uv run python scripts/demo/latency.py --steps 3000,30000,45000 --marker-every 2000 --seconds 10
 ```
 
 产物落在 `target/demo/`：`<name>.cast`（asciinema v2）、`<name>.gif`、`stills/*.png`、
-`pane.raw`（pane 的原始字节流，排查启动问题用）、`timeline.txt`。把要用的拷进 `assets/`。
+`pane.raw`（pane 的原始字节流，排查启动问题用）、`timeline.txt`。`--assets` 才把 GIF 拷进
+`assets/`（不拷也不会漂移，只是得手工搬）。
+
+**录完会自检**：默认要求某一帧里出现 `OK` / `All three tests pass.`（hero）或 ` t/s `
+（速度图），没有就判本次录制失败、**不渲染也不覆盖**已有资产，直接非零退出——防的是
+"工具 schema 漂了 / Bash 被拦了，GIF 里是一张红卡片，却静默成功"。要录别的镜头用
+`--expect TEXT`（可重复）指定自己的守门内容。
 
 依赖：`tmux`（必须）、`agg`（首次运行自动下到 `target/demo-tools/`，`$DEMO_AGG` 可覆盖；
 网络要代理时先 `export https_proxy=...`）、出 PNG 用 `sips`（macOS）或 ImageMagick、
