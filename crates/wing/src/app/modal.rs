@@ -342,14 +342,14 @@ impl App {
         self.handle_composer_key(key);
     }
 
-    /// Ctrl+O — 翻转当前回合思考块的展开。
+    /// Ctrl+O — 翻转思考块的展开（全局：所有轮一起切，会话内一直有效）。
     ///
-    /// 默认（展开还是折叠）由 `rendering.thinking` 给；按下后的显式值只属于
-    /// 「当前回合」，下一回合开始回到默认（见 `ChatView::reset_reasoning_expansion`）。
+    /// 初始默认（展开还是折叠）由 `rendering.thinking` 给；按下后的显式值
+    /// 在会话内保留，resume / compaction 重建后依然生效。
     fn toggle_reasoning_expansion(&mut self) {
         let default_expanded =
             self.config.rendering.thinking == crate::config::rendering::ThinkingMode::Visible;
-        if self.chat.toggle_reasoning_expansion(default_expanded) {
+        if self.chat.toggle_thinking_expansion(default_expanded) {
             self.chat_dirty = true;
         }
     }

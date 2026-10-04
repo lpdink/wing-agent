@@ -475,8 +475,14 @@ impl StreamingRender {
     }
 
     /// 标题行是否已经在行集的最前面（重建 / finalize 之后的断言）。
+    ///
+    /// 真比对内容，不是"有标题就算"：`remove_header_front` 拿它当"能不能删
+    /// 第 0 行"的依据，认错了就会删掉正文。
     fn header_at_front(&self) -> bool {
-        self.header.is_some() && !self.flat_lines.is_empty()
+        match (self.header.as_ref(), self.flat_lines.lines.first()) {
+            (Some(header), Some(first)) => first == header,
+            _ => false,
+        }
     }
 
     /// 把标题行插到行集最前（空集 = 直接成为第一行）。
@@ -505,22 +511,42 @@ impl StreamingRender {
     /// 摘掉标题行（Ctrl+O 收起 —— 正文回到第一行、自己拿 `⦁ `）。
     fn remove_header_front(&mut self) {
         debug_assert!(self.header_at_front(), "摘标题行前它必须真在第 0 行");
-        self.flat_lines.lines.remove(0);
-        self.flat_lines.links.remove(0);
-        self.flat_lines.images.remove(0);
+        // 防御：不变量被破坏时按内容找标题行，找不到就什么都不删 ——
+        // 绝不把正文行当标题摘掉。
+        let target = if self.header_at_front() {
+            0
+        } else {
+            match self
+                .header
+                .as_ref()
+                .and_then(|header| self.flat_lines.lines.iter().position(|line| line == header))
+            {
+                Some(index) => index,
+                None => return,
+            }
+        };
+        self.flat_lines.lines.remove(target);
+        self.flat_lines.links.remove(target);
+        self.flat_lines.images.remove(target);
         self.stable_len = self.stable_len.saturating_sub(1);
         if let Some(code_flat) = self.code_flat.as_mut() {
             code_flat.start = code_flat.start.saturating_sub(1);
         }
-        // 把之前接管的子弹还给正文首行（还没还过的话）。
-        if let Some(stolen) = self.stolen_bullet.take()
-            && let Some(span) = self
-                .flat_lines
-                .lines
-                .first_mut()
-                .and_then(|line| line.spans.first_mut())
-        {
-            *span = stolen;
+        // 把子弹还给正文首行。优先还暂存的原件（样式逐字节一致）；暂存件可能
+        // 已被 `rebuild`/`finalize` 清掉（引擎整体换过），退化成"就地改写"：
+        // 标题在场时正文首行必然是两列续行前缀，改回 `⦁ ` 即可（Thinking
+        // profile 两套前缀同样式；Content 不用标题）。
+        let first_span = self
+            .flat_lines
+            .lines
+            .first_mut()
+            .and_then(|line| line.spans.first_mut());
+        match (self.stolen_bullet.take(), first_span) {
+            (Some(stolen), Some(span)) => *span = stolen,
+            (None, Some(span)) if span.content.as_ref() == "  " => {
+                span.content = "⦁ ".into();
+            }
+            _ => {}
         }
     }
 
@@ -3035,6 +3061,39 @@ mod tests {
         assert_eq!(updated.len(), first.len(), "换标题不增高");
         assert_eq!(updated[0], "⦁ 深度思考中 2s");
         assert_eq!(updated[1], first[1], "正文不受换标题影响");
+    }
+
+    /// 中途 rebuild（宽度变化会整体重建引擎、暂存件随之清掉）：摘掉标题后
+    /// 正文首行仍然拿回 `⦁ ` —— 不依赖暂存件的就地改写路径。
+    #[test]
+    fn removing_the_header_after_a_rebuild_still_restores_the_bullet() {
+        let palette = ThemePalette::default();
+        let mut sr = StreamingRender::new(Profile::Thinking);
+        for piece in chunk_stream("let me think", 4) {
+            sr.push(piece);
+        }
+        let bullet_first = {
+            let composed = sr.composed(80, &palette);
+            composed.lines[0].to_string()
+        };
+        assert_eq!(bullet_first, "⦁ let me think");
+
+        sr.set_header(Some(Line::from("⦁ 深度思考中 2s")));
+        // 两次 rebuild：引擎被整体替换，stolen_bullet 一起没了。
+        let _ = sr.composed(40, &palette);
+        let _ = sr.composed(80, &palette);
+        let with_header = {
+            let composed = sr.composed(80, &palette);
+            composed.lines[0].to_string()
+        };
+        assert_eq!(with_header, "⦁ 深度思考中 2s");
+
+        sr.set_header(None);
+        let restored = {
+            let composed = sr.composed(80, &palette);
+            composed.lines[0].to_string()
+        };
+        assert_eq!(restored, "⦁ let me think", "rebuild 之后也要归还子弹");
     }
 
     /// 收起（`set_header(None)`）：接管的子弹原样还给正文首行 —— 与从未设过

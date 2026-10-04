@@ -587,6 +587,7 @@ fn a_picture_after_an_over_wide_line_lands_on_its_wrapped_row() {
         let ctx = crate::render::renderable::CellContext {
             palette: &palette,
             thinking_mode: app.config.rendering.thinking,
+            thinking_expanded: app.chat.thinking_expansion(),
             layout: &layout,
             images: app.images.opts(),
         };
@@ -1206,6 +1207,7 @@ fn the_layout_height_matches_what_is_drawn() {
     let ctx = crate::render::renderable::CellContext {
         palette: &palette,
         thinking_mode: app.config.rendering.thinking,
+        thinking_expanded: app.chat.thinking_expansion(),
         layout: &layout,
         images: app.images.opts(),
     };

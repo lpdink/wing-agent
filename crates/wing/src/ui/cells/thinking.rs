@@ -1,6 +1,7 @@
 //! ThinkingBlock — reasoning content.
 //!
-//! 两种呈现，由 `rendering.thinking` 给默认、`Ctrl+O` 逐回合翻转：
+//! 两种呈现，由 `rendering.thinking` 给默认、`Ctrl+O` 全局翻转（整条 transcript
+//! 一起切，会话内一直有效）：
 //!
 //! * **折叠**（`hidden` 的默认）：整块收敛成一行摘要 —— 思考进行时
 //!   `⦁ 深度思考中 4s` 持续刷光（光带走灰→白，`sweep_phase` 由帧 tick 推进），
@@ -77,8 +78,6 @@ pub struct ThinkingBlock {
     display_elapsed: Duration,
     /// 刷光相位 0..1（tick 写入；渲染只读 —— 所以渲染是纯函数、可测）。
     sweep_phase: f32,
-    /// 本块的展开覆盖：`None` = 跟随 `rendering.thinking` 的默认。
-    expanded: Option<bool>,
 }
 
 impl ThinkingBlock {
@@ -90,7 +89,6 @@ impl ThinkingBlock {
             ended_at: None,
             display_elapsed: Duration::ZERO,
             sweep_phase: 0.0,
-            expanded: None,
         }
     }
 
@@ -109,6 +107,11 @@ impl ThinkingBlock {
     /// 计时是否在跑（折叠行显示进行中措辞 + 刷光）。
     pub fn is_active(&self) -> bool {
         self.started_at.is_some() && self.ended_at.is_none()
+    }
+
+    /// 这一段推理是否已经收尾（冻结过）—— 新到的 reasoning 属于下一段。
+    pub fn is_finished(&self) -> bool {
+        self.ended_at.is_some()
     }
 
     /// 推到 `now`：更新显示的耗时与刷光相位。帧 tick 每帧调一次。
@@ -159,29 +162,6 @@ impl ThinkingBlock {
         let due_ms = (elapsed / step_ms + 1).saturating_mul(step_ms);
         let due_ms = u64::try_from(due_ms).unwrap_or(u64::MAX);
         Some(started + Duration::from_millis(due_ms))
-    }
-
-    /// 本块是否展开（`default` = `rendering.thinking` 的默认呈现）。
-    pub fn is_expanded(&self, default: ThinkingMode) -> bool {
-        self.expanded.unwrap_or(default == ThinkingMode::Visible)
-    }
-
-    /// 本块是否带折叠标题行（= 有没有"折叠"这层身份）。
-    ///
-    /// `hidden` 默认折叠、`visible` 默认展开；一旦用户按过 Ctrl+O，这一块就
-    /// 有了折叠身份 —— 展开时标题保留、收起时只剩标题。
-    pub fn is_labeled(&self, default: ThinkingMode) -> bool {
-        default == ThinkingMode::Hidden || self.expanded.is_some()
-    }
-
-    /// 展开覆盖（`None` = 跟随默认）。
-    pub fn expanded_override(&self) -> Option<bool> {
-        self.expanded
-    }
-
-    /// 设置展开覆盖（Ctrl+O / 回合切换回默认时调）。
-    pub fn set_expanded(&mut self, expanded: Option<bool>) {
-        self.expanded = expanded;
     }
 
     /// 折叠行的显示文本：措辞（进行中 / 已结束）+ 时长后缀。
@@ -261,18 +241,23 @@ impl ThinkingBlock {
 
     /// Render to lines based on thinking mode.
     ///
-    /// `width` is the full content width; 2 columns are reserved for the line
-    /// prefix so tables balance to fit. `images` carries the frame's image
-    /// options — reasoning gets the same anchors as assistant content when
-    /// the markdown layer sees them (see `render/markdown/images.rs`).
+    /// `mode` is the configured default and `explicit` the Ctrl+O override
+    /// (`None` = follow the default) — the two resolve through
+    /// [`ThinkingMode::expanded`] / [`ThinkingMode::labeled`]. `width` is the
+    /// full content width; 2 columns are reserved for the line prefix so
+    /// tables balance to fit. `images` carries the frame's image options —
+    /// reasoning gets the same anchors as assistant content when the markdown
+    /// layer sees them (see `render/markdown/images.rs`).
     pub fn to_lines(
         &self,
         palette: &ThemePalette,
         mode: ThinkingMode,
+        explicit: Option<bool>,
         width: u16,
         images: &ImageOpts,
     ) -> Vec<Line<'static>> {
-        self.render_lines(palette, mode, width, images).into_lines()
+        self.render_lines(palette, mode, explicit, width, images)
+            .into_lines()
     }
 
     /// [`to_lines`](Self::to_lines) with the markdown link spans of every
@@ -281,11 +266,12 @@ impl ThinkingBlock {
         &self,
         palette: &ThemePalette,
         mode: ThinkingMode,
+        explicit: Option<bool>,
         width: u16,
         images: &ImageOpts,
     ) -> ComposedLines {
-        let expanded = self.is_expanded(mode);
-        let labeled = self.is_labeled(mode);
+        let expanded = mode.expanded(explicit);
+        let labeled = mode.labeled(explicit);
         if !expanded {
             debug_assert!(labeled, "折叠必然带标题：expanded.is_some() || hidden");
             let mut composed = ComposedLines::plain(vec![self.label_line(palette, width)]);
@@ -399,7 +385,7 @@ mod tests {
         let start = t0();
         block.start(start);
         block.tick(start + Duration::from_millis(300));
-        let lines = block.to_lines(&p(), ThinkingMode::Hidden, 80, ImageOpts::off());
+        let lines = block.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off());
         let text = text_of(&lines);
         // 第一秒内不显示 0s：只有措辞。
         assert!(text.contains("深度思考中"), "{text}");
@@ -407,7 +393,7 @@ mod tests {
         assert!(!text.contains("secret"), "折叠不泄露正文：{text}");
 
         block.tick(start + Duration::from_secs(4));
-        let text = text_of(&block.to_lines(&p(), ThinkingMode::Hidden, 80, ImageOpts::off()));
+        let text = text_of(&block.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off()));
         assert!(text.contains("深度思考中 4s"), "{text}");
     }
 
@@ -420,7 +406,7 @@ mod tests {
         block.tick(start + Duration::from_secs(3));
         block.finish(start + Duration::from_secs(12));
 
-        let text = text_of(&block.to_lines(&p(), ThinkingMode::Hidden, 80, ImageOpts::off()));
+        let text = text_of(&block.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off()));
         assert!(text.contains("深度思考 12s"), "{text}");
         assert!(!text.contains("深度思考中"), "结束后不再说进行中：{text}");
         assert!(!block.is_active());
@@ -428,7 +414,7 @@ mod tests {
         // 幂等 + 定格：再 tick / finish 都不动。
         block.tick(start + Duration::from_secs(30));
         block.finish(start + Duration::from_secs(30));
-        let text = text_of(&block.to_lines(&p(), ThinkingMode::Hidden, 80, ImageOpts::off()));
+        let text = text_of(&block.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off()));
         assert!(
             text.contains("深度思考 12s"),
             "时长被后续事件拉长了：{text}"
@@ -439,7 +425,7 @@ mod tests {
     fn hidden_label_without_timing_has_no_seconds() {
         let mut block = ThinkingBlock::new();
         block.append("replayed reasoning");
-        let text = text_of(&block.to_lines(&p(), ThinkingMode::Hidden, 80, ImageOpts::off()));
+        let text = text_of(&block.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off()));
         assert!(text.contains("深度思考"), "{text}");
         assert!(!text.contains("深度思考中"), "{text}");
         assert!(!text.contains('s'), "没有计时数据就不该出现秒数：{text}");
@@ -456,7 +442,8 @@ mod tests {
 
         let base = to_rgb(p().dim);
         let sum = |rgb: Rgb| rgb.0 as u32 + rgb.1 as u32 + rgb.2 as u32;
-        let pairs = span_pairs(&block.to_lines(&p(), ThinkingMode::Hidden, 80, ImageOpts::off()));
+        let pairs =
+            span_pairs(&block.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off()));
         let colored = |pairs: &[(String, Style)]| -> Vec<(String, Rgb)> {
             pairs
                 .iter()
@@ -488,7 +475,8 @@ mod tests {
         let start = t0();
         block.start(start);
         block.finish(start + Duration::from_secs(5));
-        let pairs = span_pairs(&block.to_lines(&p(), ThinkingMode::Hidden, 80, ImageOpts::off()));
+        let pairs =
+            span_pairs(&block.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off()));
         let base = to_rgb(p().dim);
         for (text, style) in &pairs {
             if let Some(color) = style.fg {
@@ -505,7 +493,7 @@ mod tests {
         block.start(start);
         block.tick(start + Duration::from_secs(65));
         for width in [40u16, 20, 12, 8, 4] {
-            let lines = block.to_lines(&p(), ThinkingMode::Hidden, width, ImageOpts::off());
+            let lines = block.to_lines(&p(), ThinkingMode::Hidden, None, width, ImageOpts::off());
             for line in &lines {
                 assert!(
                     line.width() <= width as usize,
@@ -528,14 +516,42 @@ mod tests {
         assert!((block.sweep_phase - first).abs() < 1e-6);
     }
 
+    #[test]
+    fn next_frame_grid_is_absolute_and_strictly_future() {
+        // 「绝对帧网格」契约：事件循环里任何事件都会重建定时 future，相对 sleep
+        // 会被无限推后 —— 所以下一帧必须锚在块的起点上、且严格在未来。
+        let start = t0();
+        let mut block = ThinkingBlock::new();
+        block.start(start);
+        let step = Duration::from_millis(40);
+        for offset in [0u64, 1, 39, 40, 41, 199] {
+            let now = start + Duration::from_millis(offset);
+            let due = block.next_frame(now, step).expect("活跃块有下一帧");
+            assert!(due > now, "截止时刻必须严格在未来：{due:?} vs {now:?}");
+            let ms = due.saturating_duration_since(start).as_millis();
+            assert_eq!(
+                ms % 40,
+                0,
+                "帧网格必须锚在块的起点上（{offset}ms -> {ms}ms）"
+            );
+            assert!(
+                ms <= u128::from(offset + 40),
+                "不该跳过一个整帧（{offset}ms -> {ms}ms）"
+            );
+        }
+        // 冻结后不再排帧；没有计时数据的历史块（重放）也永远不排。
+        block.finish(start + Duration::from_secs(1));
+        assert_eq!(block.next_frame(start + Duration::from_secs(1), step), None);
+        assert_eq!(ThinkingBlock::new().next_frame(start, step), None);
+    }
+
     // ── 展开 / 标题 ──────────────────────────────────────────
 
     #[test]
     fn expanded_keeps_the_label_as_a_header() {
         let mut block = ThinkingBlock::new();
         block.append("the reasoning body");
-        block.set_expanded(Some(true));
-        let lines = block.to_lines(&p(), ThinkingMode::Hidden, 80, ImageOpts::off());
+        let lines = block.to_lines(&p(), ThinkingMode::Hidden, Some(true), 80, ImageOpts::off());
         assert_eq!(line_text(&lines[0]), "⦁ 深度思考", "标题行丢失");
         assert!(
             line_text(&lines[1]).starts_with("  "),
@@ -555,7 +571,7 @@ mod tests {
         // 没有标题行，正文第一行自己拿 `⦁ `。
         let mut block = ThinkingBlock::new();
         block.append("plain reasoning");
-        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
         let first = line_text(&lines[0]);
         assert!(first.starts_with("⦁ plain reasoning"), "{first:?}");
     }
@@ -564,8 +580,13 @@ mod tests {
     fn toggle_collapses_a_visible_default_block() {
         let mut block = ThinkingBlock::new();
         block.append("SECRET-REASONING");
-        block.set_expanded(Some(false));
-        let text = text_of(&block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off()));
+        let text = text_of(&block.to_lines(
+            &p(),
+            ThinkingMode::Visible,
+            Some(false),
+            80,
+            ImageOpts::off(),
+        ));
         assert!(text.contains("深度思考"), "{text}");
         assert!(!text.contains("SECRET"), "收起后正文不该泄露：{text}");
     }
@@ -576,11 +597,10 @@ mod tests {
         // 只差标题行的插入与首行的缩进（`⦁ ` vs `  `）—— 正文 span 必须一致。
         let mut a = ThinkingBlock::new();
         a.append("here is `code` and text\n\n- item");
-        a.set_expanded(Some(true));
         let mut b = ThinkingBlock::new();
         b.append("here is `code` and text\n\n- item");
-        let expanded = a.to_lines(&p(), ThinkingMode::Hidden, 80, ImageOpts::off());
-        let visible = b.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
+        let expanded = a.to_lines(&p(), ThinkingMode::Hidden, Some(true), 80, ImageOpts::off());
+        let visible = b.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
         assert_eq!(expanded.len(), visible.len() + 1, "展开只多一行标题");
         for (e, v) in expanded.iter().skip(1).zip(visible.iter()) {
             // 第一个 span 是行前缀（首行的前缀按设计不同：缩进 vs 子弹）。
@@ -606,7 +626,7 @@ mod tests {
     fn test_thinking_renders_content() {
         let mut block = ThinkingBlock::new();
         block.append("Let me think about this...");
-        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
         let text = text_of(&lines);
         assert!(text.contains("⦁ "), "missing bullet prefix: {text}");
         assert!(text.contains("Let me think"), "missing content: {text}");
@@ -619,7 +639,7 @@ mod tests {
     fn test_thinking_prose_uses_thinking_color() {
         let mut block = ThinkingBlock::new();
         block.append("plain reasoning text");
-        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
         let pairs = span_pairs(&lines);
         let (_, style) = find_span(&pairs, "plain reasoning");
         assert_eq!(style.fg, Some(Color::Gray), "prose fg: {style:?}");
@@ -629,7 +649,7 @@ mod tests {
     fn test_thinking_keeps_inline_code_color() {
         let mut block = ThinkingBlock::new();
         block.append("run `cargo build` now");
-        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
         let pairs = span_pairs(&lines);
         // Inline code keeps the accent color.
         let (_, code_style) = find_span(&pairs, "cargo build");
@@ -647,7 +667,7 @@ mod tests {
     fn test_thinking_bold_keeps_modifier_with_gray_fg() {
         let mut block = ThinkingBlock::new();
         block.append("this is **important** indeed");
-        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
         let pairs = span_pairs(&lines);
         let (_, style) = find_span(&pairs, "important");
         assert_eq!(style.fg, Some(Color::Gray), "bold fg: {style:?}");
@@ -706,13 +726,18 @@ mod tests {
         let mut block = ThinkingBlock::new();
         block.append("the energy is $E = m c^2$ here");
 
-        let on = text_of(&block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off()));
+        let on = text_of(&block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off()));
         assert!(on.contains("c²"), "math on renders the grid: {on}");
 
         let mut off_palette = p();
         off_palette.math_mode = MathMode::Off;
-        let off =
-            text_of(&block.to_lines(&off_palette, ThinkingMode::Visible, 80, ImageOpts::off()));
+        let off = text_of(&block.to_lines(
+            &off_palette,
+            ThinkingMode::Visible,
+            None,
+            80,
+            ImageOpts::off(),
+        ));
         assert!(off.contains("$E = m c^2$"), "math off stays literal: {off}");
         assert!(!off.contains("c²"), "math off: {off}");
     }
@@ -721,7 +746,7 @@ mod tests {
     fn test_thinking_code_block_colors() {
         let mut block = ThinkingBlock::new();
         block.append("like this:\n```\nlet x = 1;\n```");
-        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
         let pairs = span_pairs(&lines);
         // Code block content keeps the accent color, not thinking gray.
         let (_, style) = find_span(&pairs, "let x = 1;");
@@ -737,7 +762,7 @@ mod tests {
         let text = "here is code:\n\n```rust\nlet x = 1;\nlet y = \"two\";\n```\n\ndone";
         let mut block = ThinkingBlock::new();
         block.append(text);
-        let thinking = block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
+        let thinking = block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
         let content = crate::render::markdown::stream::full_lines(
             text,
             80,
@@ -788,7 +813,7 @@ mod tests {
     fn test_thinking_renders_indented_blocks_as_prose() {
         let mut block = ThinkingBlock::new();
         block.append("a thought:\n\n    a nested **nesting** with `code`\n\nback");
-        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
         let pairs = span_pairs(&lines);
         assert!(
             !pairs
@@ -810,7 +835,7 @@ mod tests {
     #[test]
     fn test_thinking_empty() {
         let block = ThinkingBlock::new();
-        let lines = block.to_lines(&p(), ThinkingMode::Visible, 80, ImageOpts::off());
+        let lines = block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
         // Empty content → just blank line
         assert_eq!(lines.len(), 1);
     }

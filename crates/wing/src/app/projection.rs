@@ -79,8 +79,6 @@ impl App {
                 tracing::debug!("turn started, was_working={}", self.turn.working);
                 self.turn.start();
                 self.turn.last_result = None;
-                // 新回合：展开状态回到配置默认（Ctrl+O 只作用于当前回合）。
-                self.chat.reset_reasoning_expansion();
                 // Set title to working state with initial spinner frame.
                 let working_title = title::title_working(
                     self.turn.spinner.frame_str(),

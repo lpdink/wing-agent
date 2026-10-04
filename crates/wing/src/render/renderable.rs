@@ -11,7 +11,13 @@ use crate::render::markdown::ImageOpts;
 /// Context passed to cell rendering methods.
 pub struct CellContext<'a> {
     pub palette: &'a ThemePalette,
+    /// `rendering.thinking` — 思考块默认怎么呈现（展开 / 折叠）。
     pub thinking_mode: ThinkingMode,
+    /// `Ctrl+O` 的全局展开覆盖（`None` = 跟随 [`Self::thinking_mode`] 的默认）。
+    ///
+    /// 一个会话级开关、渲染期经它下发（见 [`ThinkingMode::expanded`] /
+    /// [`ThinkingMode::labeled`]）：整条 transcript 一起切，会话内一直有效。
+    pub thinking_expanded: Option<bool>,
     pub layout: &'a LayoutConfig,
     /// Image options (mode, workspace root, metadata table) for this frame.
     ///

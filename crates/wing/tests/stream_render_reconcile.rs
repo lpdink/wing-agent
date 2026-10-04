@@ -1151,3 +1151,121 @@ fn reconcile_finalize() {
         }
     }
 }
+
+// ============================================================
+// Header shape — a collapsed reasoning row's disclosure line
+// ============================================================
+
+/// 带标题的静息态：`header + 正文`，正文部分必须与参考渲染逐 span 一致。
+///
+/// 标题（`StreamingRender::set_header`）占第 0 行并接管 `⦁ `：正文因此整体
+/// 走两列续行缩进，链接与图片锚点全部**下移一行**（行号 == 索引不变）。
+/// 这条覆盖折叠思考块展开时的形态（见 `docs/dev/tui-rendering.md` 第三节）。
+#[test]
+fn header_shape_matches_the_reference_body() {
+    let palette = ThemePalette::default();
+    let header = Line::from("\u{2981} 深度思考中 4s ");
+    let images = image_opts();
+    // 一个带链接的正文 + 一个带锚点的正文：链接列与锚点行号都要对。
+    let bodies = [
+        (
+            "links",
+            "see [docs](https://example.com) and [more](./README.md)\n\nafter\n",
+        ),
+        ("anchor", "intro line\n\n![plot](./plots/a.png)\n\ntail\n"),
+    ];
+    for width in [40u16, 80, 120] {
+        for (name, corpus) in bodies {
+            let mut sr = StreamingRender::with_images(Profile::Thinking, images.clone());
+            sr.set_header(Some(header.clone()));
+            for chunk in chunk_stream(corpus, 8) {
+                sr.push(chunk);
+                let _ = sr.lines(width, &palette);
+            }
+            let rendered = sr.composed(width, &palette);
+            let streaming: Vec<Line<'static>> = rendered.lines.to_vec();
+            let streaming_links = rendered.links.to_vec();
+            let streaming_images = rendered.images.to_vec();
+            let reference = full_render(corpus, width, Profile::Thinking, &palette, &images);
+            let (reference_lines, reference_links, reference_images) = reference.into_parts();
+
+            let context = format!("shape={name} width={width}");
+            // 第 0 行 = 标题，正文从第 1 行开始。
+            assert_eq!(
+                streaming[0], header,
+                "标题必须逐 span 原样在第 0 行：{context}"
+            );
+            assert_eq!(
+                streaming.len(),
+                reference_lines.len() + 1,
+                "标题只多一行：{context}"
+            );
+            // 正文逐行：首行只差前缀（`⦁ ` 归标题，正文拿 `  `），其余逐 span 相同。
+            for (index, (body, want)) in streaming[1..].iter().zip(&reference_lines).enumerate() {
+                let body_spans: Vec<(String, Style)> = body
+                    .spans
+                    .iter()
+                    .map(|span| (span.content.to_string(), span.style))
+                    .collect();
+                let want_spans: Vec<(String, Style)> = want
+                    .spans
+                    .iter()
+                    .map(|span| (span.content.to_string(), span.style))
+                    .collect();
+                let (body_rest, want_rest) = if index == 0 {
+                    assert_eq!(body_spans[0].0, "  ", "正文首行拿续行前缀：{context}");
+                    assert_eq!(
+                        want_spans[0].0, "\u{2981} ",
+                        "参考渲染首行拿子弹：{context}"
+                    );
+                    assert_eq!(body_spans[0].1, want_spans[0].1, "前缀样式一致：{context}");
+                    (&body_spans[1..], &want_spans[1..])
+                } else {
+                    (&body_spans[..], &want_spans[..])
+                };
+                pretty_assertions::assert_eq!(body_rest, want_rest, "第 {index} 行正文：{context}");
+            }
+            // 链接 / 锚点的侧通道整体下移一行：行号 == 索引的契约原样成立。
+            assert!(streaming_links[0].is_empty(), "标题行没有链接：{context}");
+            pretty_assertions::assert_eq!(
+                &streaming_links[1..],
+                &reference_links[..],
+                "链接下移一行后必须与参考逐项相同：{context}"
+            );
+            // 锚点整体下移一行：除 `line` 外逐字段相同，`line` = 参考 + 1。
+            for (index, (body_row, want_row)) in streaming_images[1..]
+                .iter()
+                .zip(&reference_images)
+                .enumerate()
+            {
+                assert_eq!(
+                    body_row.len(),
+                    want_row.len(),
+                    "第 {index} 行锚点数：{context}"
+                );
+                for (body, want) in body_row.iter().zip(want_row) {
+                    assert_eq!(
+                        body.line,
+                        want.line + 1,
+                        "锚点行号 = 参考 + 1（标题占一行）：{context}"
+                    );
+                    assert_eq!(body.column, want.column, "{context}");
+                    assert_eq!(body.cols, want.cols, "{context}");
+                    assert_eq!(body.rows, want.rows, "{context}");
+                    assert_eq!(body.px_w, want.px_w, "{context}");
+                    assert_eq!(body.px_h, want.px_h, "{context}");
+                    assert_eq!(body.path, want.path, "{context}");
+                    assert_eq!(body.alt, want.alt, "{context}");
+                }
+            }
+            for (index, spans) in streaming_images.iter().enumerate() {
+                for anchor in spans {
+                    assert_eq!(
+                        anchor.line, index,
+                        "锚点行号必须等于行索引（标题之下也一样）：{context}"
+                    );
+                }
+            }
+        }
+    }
+}

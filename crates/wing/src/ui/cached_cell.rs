@@ -345,7 +345,10 @@ impl CachedCell {
 
     /// Bump the generation and drop the blit fast path — the canonical
     /// "content changed" invalidation.
-    fn invalidate(&mut self) {
+    ///
+    /// 也供 `ChatView` 用：Ctrl+O 翻转思考的呈现时，所有 Thinking cell 的
+    /// 行 / 高度缓存都要作废（presentation 不在缓存键里，见 `CellContext`）。
+    pub(crate) fn invalidate(&mut self) {
         self.generation += 1;
         // The lines will be rebuilt by `to_lines` (which never pre-wraps):
         // drop the blit fast path here rather than relying on
@@ -476,15 +479,15 @@ impl CachedCell {
 
     /// Whether the incremental stream is the active RENDER authority at
     /// this context. 折叠的思考块绕过它：流仍在累积（供展开 / finalize），
-    /// 但可见行来自 cell 自己的渲染器（折叠行 + 标题）。展开与否由**块自己**
-    /// 决定（`expanded` 覆盖 or `rendering.thinking` 的默认）——见
-    /// `ThinkingBlock::is_expanded`。
+    /// 但可见行来自 cell 自己的渲染器（折叠行 + 标题）。展开与否由帧上的
+    /// `thinking_mode` + Ctrl+O 覆盖解析（见 `ThinkingMode::expanded`），
+    /// 不落在块上。
     fn stream_render_active(&self, ctx: &CellContext<'_>) -> bool {
         if self.stream.is_none() {
             return false;
         }
         match &self.cell {
-            ChatCell::Thinking(block) => block.is_expanded(ctx.thinking_mode),
+            ChatCell::Thinking(_) => ctx.thinking_mode.expanded(ctx.thinking_expanded),
             _ => true,
         }
     }
@@ -514,7 +517,7 @@ impl CachedCell {
             return;
         };
         let header = match &self.cell {
-            ChatCell::Thinking(block) if block.is_labeled(ctx.thinking_mode) => {
+            ChatCell::Thinking(block) if ctx.thinking_mode.labeled(ctx.thinking_expanded) => {
                 Some(block.label_line(ctx.palette, width))
             }
             _ => None,
@@ -548,7 +551,8 @@ impl CachedCell {
     /// 正文文本留在 cell 里（展开时还要用）。
     fn run_finalize(&mut self, width: u16, ctx: &CellContext<'_>) {
         self.pending_finalize = false;
-        let collapsed_thinking = matches!(&self.cell, ChatCell::Thinking(block) if !block.is_expanded(ctx.thinking_mode));
+        let collapsed_thinking = matches!(&self.cell, ChatCell::Thinking(_))
+            && !ctx.thinking_mode.expanded(ctx.thinking_expanded);
         if collapsed_thinking {
             self.stream = None;
             self.cached_lines = None;
@@ -808,6 +812,7 @@ mod tests {
         CellContext {
             palette,
             thinking_mode: ThinkingMode::Visible,
+            thinking_expanded: None,
             layout,
             images: ImageOpts::off(),
         }
@@ -1211,15 +1216,16 @@ mod tests {
 
         let palette = ThemePalette::default();
         let layout = LayoutConfig::default();
+        // Ctrl+O 的展开覆盖（全局）在帧上经 ctx 下发。
         let ctx = CellContext {
             thinking_mode: ThinkingMode::Hidden,
+            thinking_expanded: Some(true),
             ..test_ctx(&palette, &layout)
         };
 
         let start = Instant::now();
         let mut block = ThinkingBlock::new();
         block.start(start);
-        block.set_expanded(Some(true));
         let mut cell = CachedCell::new(ChatCell::Thinking(block));
         cell.append_stream("the reasoning body");
 

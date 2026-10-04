@@ -130,6 +130,7 @@ fn transcript(
     let ctx = CellContext {
         palette,
         thinking_mode: ThinkingMode::Hidden,
+        thinking_expanded: None,
         layout: &layout,
         images,
     };
@@ -142,7 +143,7 @@ fn transcript(
     call.set_result("ok. 12 passed".into(), true);
     let mut lines: Vec<Line<'static>> = vec![Line::from("")];
     lines.extend(ChatCell::ToolCall(call).to_lines(width, &ctx));
-    lines.extend(block.to_lines(palette, ThinkingMode::Hidden, width, images));
+    lines.extend(block.to_lines(palette, ThinkingMode::Hidden, None, width, images));
     lines.extend(
         ChatCell::AssistantMessage("测试通过，接着改渲染层。".into()).to_lines(width, &ctx),
     );
@@ -231,7 +232,8 @@ fn gallery(out: &mut String, width: u16, plain: bool, palette: &ThemePalette) {
             LabelState::Untimed,
         ] {
             let block = block_at(phase, state);
-            for line in block.to_lines(palette, ThinkingMode::Hidden, width, ImageOpts::off()) {
+            for line in block.to_lines(palette, ThinkingMode::Hidden, None, width, ImageOpts::off())
+            {
                 let _ = writeln!(out, "{}", render_line(&line, width, plain));
             }
         }
@@ -255,7 +257,7 @@ fn draw_one(out: &mut String, width: u16, phase: f32, plain: bool, palette: &The
         LabelState::Untimed,
     ] {
         let block = block_at(phase, state);
-        for line in block.to_lines(palette, ThinkingMode::Hidden, width, ImageOpts::off()) {
+        for line in block.to_lines(palette, ThinkingMode::Hidden, None, width, ImageOpts::off()) {
             let _ = writeln!(out, "{}", render_line(&line, width, plain));
         }
     }

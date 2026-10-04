@@ -1021,50 +1021,54 @@ fn test_page_keys_reach_the_chat_through_both_modals() {
 }
 
 #[test]
-fn test_ctrl_o_toggles_the_current_turn_reasoning() {
+fn test_ctrl_o_flips_the_global_thinking_mode() {
     use crossterm::event::KeyCode;
     use crossterm::event::KeyModifiers;
 
-    let mut app = test_app();
     let ctrl_o = crossterm::event::KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
-    let now = std::time::Instant::now();
 
-    // 默认 `visible`（配置）：一块思考内容默认展开 —— Ctrl+O 先收起。
-    app.chat.append_to_last_thinking_at("SECRET-REASONING", now);
-    app.chat.finish_active_thinking(now);
+    // 默认 `visible`（配置）：内容默认展开 —— Ctrl+O 先收起，模式全局保存。
+    let mut app = test_app();
+    app.chat.push(ChatCell::Thinking(
+        crate::ui::cells::thinking::ThinkingBlock::new(),
+    ));
+    assert_eq!(app.chat.thinking_expansion(), None, "初始跟随配置");
     app.handle_key(ctrl_o);
-    let block = |app: &crate::app::App| match app.chat.cells.last().map(|c| c.cell()) {
-        Some(ChatCell::Thinking(block)) => block.clone(),
-        other => panic!("expected a thinking cell, got {other:?}"),
-    };
     assert_eq!(
-        block(&app).expanded_override(),
+        app.chat.thinking_expansion(),
         Some(false),
         "visible 默认下先收起"
     );
     app.handle_key(ctrl_o);
-    assert_eq!(block(&app).expanded_override(), Some(true), "再按展开");
+    assert_eq!(app.chat.thinking_expansion(), Some(true), "再按展开");
 
     // `hidden` 默认：同一颗键先展开。
     let mut config = crate::config::AppConfig::default();
     config.rendering.thinking = crate::config::rendering::ThinkingMode::Hidden;
     let mut app = crate::app::App::new("test-session".into(), config, None);
-    app.chat.append_to_last_thinking_at("SECRET-REASONING", now);
-    app.chat.finish_active_thinking(now);
+    app.chat.push(ChatCell::Thinking(
+        crate::ui::cells::thinking::ThinkingBlock::new(),
+    ));
     app.handle_key(ctrl_o);
     assert_eq!(
-        block(&app).expanded_override(),
+        app.chat.thinking_expansion(),
         Some(true),
         "hidden 默认下先展开"
     );
 
-    // 有面板时也生效（应用保留键），且不会把 `o` 打进草稿。
-    let mut app2 = app_with_ask_panel();
-    let before = app2.input.expand_and_get_text();
-    app2.handle_key(ctrl_o);
+    // 没有思考块时也切（为后面的块定调），只是不值得重画。
+    let mut app = test_app();
+    assert!(!app.chat.toggle_thinking_expansion(true), "没有块就不重画");
+    assert_eq!(app.chat.thinking_expansion(), Some(false));
+
+    // 面板之下也生效（应用保留键），且不会把 `o` 打进草稿。
+    let mut app_with_panel = app_with_ask_panel();
+    let before = app_with_panel.input.expand_and_get_text();
+    app_with_panel.handle_key(ctrl_o);
     assert_eq!(
-        app2.input.expand_and_get_text(),
+        app_with_panel.input.expand_and_get_text(),
         before,
         "草稿不该多出一个 o"
     );
+    assert_eq!(app_with_panel.chat.thinking_expansion(), Some(false));
 }

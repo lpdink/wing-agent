@@ -71,7 +71,7 @@ pub const TIPS: &[Tip] = &[
     },
     Tip {
         group: TipGroup::Keys,
-        text: "Ctrl+O 展开本回合的思考过程",
+        text: "Ctrl+O 切换思考的详细/简略显示",
     },
     // ── 命令 ─────────────────────────────────────────────────
     Tip {

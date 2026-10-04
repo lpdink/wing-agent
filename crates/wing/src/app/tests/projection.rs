@@ -1183,3 +1183,78 @@ fn test_interrupted_discards_pending() {
 }
 
 // ── In-app text selection ────────────────────────────────
+
+// ── 思考块的冻结接线（Text / ToolCall / Done / Interrupted）──
+
+/// 触发一次带推理的回合开头，返回思考块是否仍在计时。
+fn thinking_active(app: &App) -> Option<bool> {
+    app.chat
+        .cells
+        .iter()
+        .find_map(|cached| match cached.cell() {
+            ChatCell::Thinking(block) => Some(block.is_active()),
+            _ => None,
+        })
+}
+
+#[test]
+fn test_reasoning_freezes_on_text_and_tool_events() {
+    // 正文事件 = 思考阶段结束。
+    let mut app = test_app();
+    app.handle_event(WingEvent::Reasoning {
+        content: "let me think".into(),
+        meta: event_meta(),
+    });
+    assert_eq!(thinking_active(&app), Some(true), "推理中");
+    app.handle_event(WingEvent::Text {
+        content: "answer".into(),
+        meta: event_meta(),
+    });
+    assert_eq!(thinking_active(&app), Some(false), "正文来了就定格");
+
+    // 工具调用事件同样冻结（流式参数与权威调用两个入口）。
+    for event in [
+        WingEvent::ToolCallStream {
+            tool_call_id: "tc".into(),
+            tool_name: "Bash".into(),
+            args_fragment: "{}".into(),
+            is_final: true,
+            meta: event_meta(),
+        },
+        WingEvent::ToolCall {
+            tool_name: "Bash".into(),
+            tool_args: serde_json::json!({"command": "ls"}),
+            tool_call_id: "tc".into(),
+            meta: event_meta(),
+        },
+    ] {
+        let mut app = test_app();
+        app.handle_event(WingEvent::Reasoning {
+            content: "let me think".into(),
+            meta: event_meta(),
+        });
+        app.handle_event(event);
+        assert_eq!(thinking_active(&app), Some(false), "工具阶段就定格");
+    }
+}
+
+#[test]
+fn test_reasoning_freezes_on_turn_end_and_interrupt() {
+    // 回合结束（Done）：finish_turn 兜底冻结。
+    let mut app = test_app();
+    app.handle_event(WingEvent::Reasoning {
+        content: "long thinking".into(),
+        meta: event_meta(),
+    });
+    app.handle_event(WingEvent::Done { meta: event_meta() });
+    assert_eq!(thinking_active(&app), Some(false), "回合结束定格");
+
+    // 打断（Interrupted）：同样定格，折叠行不该永远停在"思考中"。
+    let mut app = test_app();
+    app.handle_event(WingEvent::Reasoning {
+        content: "long thinking".into(),
+        meta: event_meta(),
+    });
+    app.handle_event(WingEvent::Interrupted { meta: event_meta() });
+    assert_eq!(thinking_active(&app), Some(false), "打断定格");
+}

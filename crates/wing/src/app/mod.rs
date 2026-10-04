@@ -491,6 +491,7 @@ impl App {
         let palette = self.palette;
         let layout = self.config.layout.clone();
         let thinking_mode = self.config.rendering.thinking;
+        let thinking_expanded = self.chat.thinking_expansion();
         let goal_role_label: Option<String> = self.goal.as_ref().and_then(|g| {
             g.active_role()
                 .map(|r| format!("{} {}", r.label(), r.working_verb()))
@@ -567,6 +568,7 @@ impl App {
             let ctx = crate::render::renderable::CellContext {
                 palette: &palette,
                 thinking_mode,
+                thinking_expanded,
                 layout: &layout,
                 images: self.images.opts(),
             };

@@ -103,15 +103,12 @@ pub struct ChatView {
     /// rows, so a rebuild invalidates it even when the rebuilt list happens to
     /// end up with the same number of cells — see `App::selection_guard`.
     rebuilds: u64,
-    /// 活跃（计时中）的思考块下标 —— 帧驱动只 tick 这一个，冻结即清空。
+    /// Ctrl+O 的全局展开覆盖（`None` = 跟随 `rendering.thinking` 的默认）。
     ///
-    /// 不存 "最后一个 Thinking cell"：工具调用锚定插入会让下标失效，而活跃块
-    /// 永远在插入点之前；冻结也总是在插入之前发生（见 `projection`）。
-    active_thinking: Option<usize>,
-    /// 本回合的展开覆盖（Ctrl+O 按下后的显式值；回合切换回默认 `None`）。
-    reasoning_override: Option<bool>,
-    /// 本回合的起点（回合开始时的 cell 数）—— Ctrl+O 只作用于这一段。
-    turn_thinking_start: usize,
+    /// 会话级状态、只由 Ctrl+O 写；渲染期经 `CellContext` 下发（整条
+    /// transcript 一起切）。不做 `clear()` 重置：resume / compaction / sync
+    /// 重建后模式依然生效。
+    thinking_expanded: Option<bool>,
     /// Geometry of the last render (see [`ChatGeometry`]).
     geometry: ChatGeometry,
     /// Links of the last rendered frame, per screen row (absolute columns).
@@ -156,9 +153,7 @@ impl ChatView {
             header_lines: Vec::new(),
             last_total: 0,
             rebuilds: 0,
-            active_thinking: None,
-            reasoning_override: None,
-            turn_thinking_start: 0,
+            thinking_expanded: None,
             geometry: ChatGeometry::default(),
             frame_links: LinkTable::new(),
             frame_images: Vec::new(),
