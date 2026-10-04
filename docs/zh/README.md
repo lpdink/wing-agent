@@ -16,13 +16,46 @@
 
 > **⚠️ 实验阶段** — v1.0 之前可能包含 breaking change。
 
+<p align="center">
+  <img src="https://github.com/lpdink/wing-agent/releases/download/readme-assets/demo.gif" alt="wing TUI 干活的完整过程：思考流式输出、Edit 长出彩色 diff、测试由红转绿、任务清单逐项打勾" width="920">
+</p>
+
 ## 为什么选择 wing？
 
-**不在上下文中施加魔法。** 我们从不注入隐藏的系统提示词。你看到的就是模型看到的——你的 system prompt、你的工具、你的对话。没有多余的东西。
+**上下文是你自己的。** 没有隐藏的系统提示词，没有背着你注入的脚手架。模型看到的就是你写的东西——你的 prompt、你的工具、你的历史。跑歪了的时候，你能读到到底发生了什么。
 
-**理论最高缓存命中率。** 我们承诺达到理论最高的 prompt 缓存命中率。除了压缩，绝不主动破坏缓存前缀。
+**缓存优先是构造出来的。** 除了压缩，我们从不重写 provider 能缓存的前缀：对话只会增长。长会话始终快而便宜，而不是每轮被从头重算一遍。
 
-**极简工具 schema。** 内置工具使用最简化的 schema。上下文窗口初始工具开销不超过 2K tokens——而不是 10K。
+**极简工具 schema。** 内置工具用"够用就好"的最小 schema——上下文里的工具开销不到 2K tokens，而不是 10K。少花在描述工具上的 token，就是多留给你的代码。
+
+## 为机器速度而建
+
+TUI 从不重画整段回答：markdown 块在闭合时一次性定型，之后每一帧只重画仍在生长的尾部——
+一帧的开销由**屏幕上有什么**决定，而不是由回答已经长了多久决定。
+
+同一段文字、同一个终端，四种喂入速率——流是脚本造的，渲染是真的：
+
+**30 tok/s** —— 顶级推理模型。
+<p align="center"><img src="https://github.com/lpdink/wing-agent/releases/download/readme-assets/speed-30.gif" alt="wing 以 30 tokens/s 流式输出" width="900"></p>
+
+**60 tok/s** —— 当前旗舰。
+<p align="center"><img src="https://github.com/lpdink/wing-agent/releases/download/readme-assets/speed-60.gif" alt="wing 以 60 tokens/s 流式输出" width="900"></p>
+
+**240 tok/s** —— 快档 "flash" 模型。
+<p align="center"><img src="https://github.com/lpdink/wing-agent/releases/download/readme-assets/speed-240.gif" alt="wing 以 240 tokens/s 流式输出" width="900"></p>
+
+**3,000 tok/s** —— 约为今天最快模型的 10 倍。界面不在乎。
+<p align="center"><img src="https://github.com/lpdink/wing-agent/releases/download/readme-assets/speed-3000.gif" alt="wing 以 3000 tokens/s 流式输出" width="900"></p>
+
+端到端显示延迟——Provider → 网关 → WebSocket → TUI → 终端，一 token 一帧（M6 Mac mini）：
+
+| 喂入速率 | p50 | p99 |
+|---|---|---|
+| 3,000 tok/s | 17 ms | 28 ms |
+| 30,000 tok/s | 13 ms | 22 ms |
+| 45,000 tok/s | 10 ms | 30 ms |
+
+复算：`uv run python scripts/demo/latency.py --steps 3000,30000,45000`。
 
 ## 快速开始
 
@@ -77,6 +110,8 @@ wing         # 重新启动
 | `BetterEdit` | 锚定 `[upto]` 编辑（实验性） |
 
 自定义工具：**[docs/zh/custom-tools.md](custom-tools.md)**
+
+工具调用就在它发生的位置渲染：`Edit` 对着真文件长出一份带语法高亮的 diff，`Bash` 显示真实输出，`TodoWrite` 把计划一直摆在眼前——三者在页面顶部的演示里都能看到。
 
 ## 魔术命令
 

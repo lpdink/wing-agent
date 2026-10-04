@@ -85,6 +85,15 @@ README 与真机不会漂移。
   headless Chrome `--screenshot --window-size=1280,640` 截一张即可（页面里的
   `<img>` 用相对路径时，包装页要放在 `assets/` 里，否则图加载不到）。
 
+## 演示素材（README 里的 GIF / 截图）
+
+README 的 `demo.gif`（以及性能那一节的 `speed-*.gif`）也不是手工截的：
+`scripts/demo/` 用**假 Provider 的剧本**驱动
+真网关 + 真 `wing` 二进制，在 tmux 里按帧抓真彩屏幕，`agg` 渲染成 GIF / 静态图
+（hero 走 `make demo`）。改配色、文案、cell 渲染后重跑即可，不会漂移；GIF 本身挂在同一
+个 `readme-assets` rolling release 上、不进 git —— 机制、依赖与调镜头的手册在
+[`scripts/demo/README.md`](../../scripts/demo/README.md)。
+
 ## 改画 / 预览的创作期工作流
 
 帧数据是**定稿导出**，不是运行期生成：创作期用一个矢量光栅器（椭圆 / 胶囊 /
