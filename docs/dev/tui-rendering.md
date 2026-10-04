@@ -106,11 +106,13 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 
 ```
 ⦁ 深度思考中 4s        ← 计时中：措辞持续刷光（灰→白），秒数每秒跳
+⦁ 深度思考中 4s · Ctrl+O 展开  ← 还没按过 Ctrl+O 时，行尾的静态提示（不扫光）
 ⦁ 深度思考 12s         ← 定格：时长冻结（`fmt_elapsed`，>1min 显示 1m 05s）
 ⦁ 深度思考             ← 没有计时数据的历史块（重放）：不带秒数
 ```
 
 * **刷光**：与开屏 wordmark 同一份数学（`ui/shimmer.rs` 的 `sweep_intensity` + `mix`）；跨度 = 措辞宽 + 8 列余量（扫出去停一拍再回来），周期 1.6s，帧间隔 40ms（≈25fps）。亮底主题方向翻转（朝深压），否则白光看不见 —— 判据同 wordmark（`is_light_theme`）；
+* **Ctrl+O 提示**：只出现在**进行中**的行上、且这次会话**还没按过** `Ctrl+O`（`CellContext::thinking_expanded` 仍是 `None`）—— 按过一次即退场（模式已全局翻转、切换效果自证），冻结的历史行保持安静。静态、dim、不进刷光跨度（动效只留给「进行中」这一个信号）；让位序排在**最前**：装不下就整个不显示，措辞 / 秒数不为它让位（见 `ThinkingBlock::label_line`）；
 * **帧驱动**：绝对截止时刻（网格锚在块的起点上，`ThinkingBlock::next_frame`），滚动 / 流式事件不会把它推后；没有活跃块、或块**不在视口**时定时臂 park（看不见的动画不花钱）——与欢迎屏扫光的契约相同（[welcome-mascot.md](welcome-mascot.md) 的「重绘成本契约」）；
 * **计时口径**：块内首个 reasoning 事件 → 该块被冻结（下一条正文 / 工具调用事件，或回合结束）。中断（Esc）、错误同样就地冻结。中途重连（sync 重放半截 reasoning）会少算一点；
 * **标题行在流式路径里的位置**：带折叠身份的块展开时，标题由 `StreamingRender` 当作行集的第 0 行（`set_header`）——正文因此拿两列续行缩进，链接 / 图片锚点的「行号 == 索引」不变。后设的标题会**接管**正文首行的 `⦁ `（原件暂存，收起时原样归还）；

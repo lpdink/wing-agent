@@ -6,7 +6,9 @@
 //! * **折叠**（`hidden` 的默认）：整块收敛成一行摘要 —— 思考进行时
 //!   `⦁ 深度思考中 4s` 持续刷光（光带走灰→白，`sweep_phase` 由帧 tick 推进），
 //!   结束后定格成 `⦁ 深度思考 12s`；没有计时数据的历史块（重放）只有
-//!   `⦁ 深度思考`。正文绝不泄露 —— 展开是用户的显式动作。
+//!   `⦁ 深度思考`。正文绝不泄露 —— 展开是用户的显式动作。从未按过 `Ctrl+O`
+//!   时，进行中的行尾带一条静态提示 `· Ctrl+O 展开`（按过一次即退场，见
+//!   [`ThinkingBlock::label_line`]）。
 //! * **展开**（`visible` 的默认，或 `Ctrl+O` 展开后）：markdown 正文。带折叠
 //!   身份的块展开时**保留标题行**作 disclosure 头，正文整体缩进两列；纯
 //!   `visible`（没有折叠身份）与旧行为逐字节一致 —— 没有标题行。
@@ -50,6 +52,9 @@ const LABEL_ACTIVE: &str = "深度思考中";
 const LABEL_DONE: &str = "深度思考";
 /// 折叠行的子弹前缀 —— 与工具调用 / 正文同一套两列词汇。
 const LABEL_PREFIX: &str = "⦁ ";
+/// 折叠行的 Ctrl+O 提示（含与秒数的分隔符）—— 静态、不参与刷光：它是
+/// affordance 不是内容；动效只留给「推理进行中」这一个信号。
+const LABEL_HINT: &str = " · Ctrl+O 展开";
 
 /// 刷光光带半宽（列）。
 const SWEEP_RADIUS: f32 = 5.0;
@@ -187,12 +192,33 @@ impl ThinkingBlock {
     /// 折叠行（也是展开时的标题行）。`width` 是内容宽度：标题在任何宽度下
     /// 都必须 ≤ width（展开时它走 blit 路径，超宽会被裁而不是换行）。
     ///
-    /// 布局：`⦁ 深度思考中` 刷光 + 静态秒数。秒数先让位、措辞后让位 ——
+    /// 布局：`⦁ 深度思考中`（刷光）+ 静态秒数 +（条件性）静态 `Ctrl+O 展开`
+    /// 提示。让位序：**提示最先让位**（整条装不下就不显示）→ 秒数 → 措辞 ——
     /// 极端窄屏下宁可只剩一个词，也不让标题行溢出。
-    pub fn label_line(&self, palette: &ThemePalette, width: u16) -> Line<'static> {
+    ///
+    /// 提示的显示条件：本块**进行中**、且这次会话**还没按过** `Ctrl+O`
+    /// （`explicit.is_none()`）—— 按过一次（模式已全局翻转、切换效果自证）
+    /// 或块已冻结（历史行保持安静）就不再出现。展开出的标题行必然
+    /// `explicit` 有值，天然不带提示。
+    pub fn label_line(
+        &self,
+        palette: &ThemePalette,
+        width: u16,
+        explicit: Option<bool>,
+    ) -> Line<'static> {
         let dim = Style::default().fg(palette.dim);
         let (mut head, mut tail) = self.label_texts();
         let budget = width as usize;
+        // 提示：静态、不进刷光跨度（刷光只扫措辞，见 `shine_spans`）。
+        let mut hint = (self.is_active() && explicit.is_none()).then_some(LABEL_HINT);
+        if let Some(candidate) = hint
+            && UnicodeWidthStr::width(head.as_str())
+                + UnicodeWidthStr::width(tail.as_str())
+                + UnicodeWidthStr::width(candidate)
+                > budget
+        {
+            hint = None;
+        }
         head = truncate_to_display_width(
             &head,
             budget.saturating_sub(UnicodeWidthStr::width(tail.as_str())),
@@ -204,6 +230,9 @@ impl ThinkingBlock {
         let mut spans = self.shine_spans(&head, palette, dim);
         if !tail.is_empty() {
             spans.push(Span::styled(tail, dim));
+        }
+        if let Some(hint) = hint {
+            spans.push(Span::styled(hint.to_string(), dim));
         }
         Line::from(spans)
     }
@@ -274,7 +303,8 @@ impl ThinkingBlock {
         let labeled = mode.labeled(explicit);
         if !expanded {
             debug_assert!(labeled, "折叠必然带标题：expanded.is_some() || hidden");
-            let mut composed = ComposedLines::plain(vec![self.label_line(palette, width)]);
+            let mut composed =
+                ComposedLines::plain(vec![self.label_line(palette, width, explicit)]);
             composed.push_blank();
             return composed;
         }
@@ -283,7 +313,7 @@ impl ThinkingBlock {
         let first_prefix = if labeled { "  " } else { "⦁ " };
         let mut composed = self.content_lines(palette, width, images, first_prefix);
         if labeled {
-            composed = with_header(composed, self.label_line(palette, width));
+            composed = with_header(composed, self.label_line(palette, width, explicit));
         }
         composed.push_blank();
         composed
@@ -395,6 +425,87 @@ mod tests {
         block.tick(start + Duration::from_secs(4));
         let text = text_of(&block.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off()));
         assert!(text.contains("深度思考中 4s"), "{text}");
+    }
+
+    #[test]
+    fn hidden_label_hints_the_toggle_until_first_use() {
+        let mut block = ThinkingBlock::new();
+        let start = t0();
+        block.start(start);
+        block.tick(start + Duration::from_secs(4));
+        // 进行中 + 从未按过 Ctrl+O：静态提示在场。
+        let text = text_of(&block.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off()));
+        assert!(text.contains("深度思考中 4s · Ctrl+O 展开"), "{text}");
+
+        // 按过一次（模式已有显式值）就退场 —— 展开出的标题行与收起态都不带。
+        for explicit in [Some(true), Some(false)] {
+            let text = text_of(&block.to_lines(
+                &p(),
+                ThinkingMode::Hidden,
+                explicit,
+                80,
+                ImageOpts::off(),
+            ));
+            assert!(!text.contains("Ctrl+O"), "{explicit:?}: {text}");
+        }
+
+        // 冻结的历史行保持安静。
+        block.finish(start + Duration::from_secs(9));
+        let text = text_of(&block.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off()));
+        assert!(text.contains("深度思考 9s"), "{text}");
+        assert!(!text.contains("Ctrl+O"), "{text}");
+
+        // 重放的历史块（没有计时、不 active）也不带提示。
+        let replayed = ThinkingBlock::new();
+        let text =
+            text_of(&replayed.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off()));
+        assert!(!text.contains("Ctrl+O"), "{text}");
+    }
+
+    #[test]
+    fn hidden_label_hint_is_static_and_gives_way_first() {
+        let mut block = ThinkingBlock::new();
+        let start = t0();
+        block.start(start);
+        block.tick(start + Duration::from_secs(4));
+
+        // 提示是静态 dim：不参与刷光（单色 span，不是逐列混光的那些）。
+        let pairs =
+            span_pairs(&block.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off()));
+        let (_, hint_style) = find_span(&pairs, "Ctrl+O");
+        assert_eq!(
+            hint_style.fg,
+            Some(p().dim),
+            "提示是静止的 affordance，不该跟着刷光：{hint_style:?}"
+        );
+
+        // 让位序：提示最先让位 —— 正好装下时在，少一列就整个消失，
+        // 措辞与秒数照旧（宁可少提示，不让内容先让位）。
+        let full_lines = block.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off());
+        let tight_width = UnicodeWidthStr::width(line_text(&full_lines[0]).as_str()) as u16;
+        let tight = text_of(&block.to_lines(
+            &p(),
+            ThinkingMode::Hidden,
+            None,
+            tight_width,
+            ImageOpts::off(),
+        ));
+        assert!(tight.contains("Ctrl+O 展开"), "正好装下时应保留：{tight}");
+        let narrow = text_of(&block.to_lines(
+            &p(),
+            ThinkingMode::Hidden,
+            None,
+            tight_width - 1,
+            ImageOpts::off(),
+        ));
+        assert!(
+            !narrow.contains("Ctrl+O"),
+            "容不下时提示第一个让位：{narrow}"
+        );
+        assert!(
+            narrow.contains("深度思考中 4s"),
+            "措辞与秒数不该为提示让位：{narrow}"
+        );
     }
 
     #[test]

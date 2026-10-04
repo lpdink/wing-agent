@@ -518,7 +518,7 @@ impl CachedCell {
         };
         let header = match &self.cell {
             ChatCell::Thinking(block) if ctx.thinking_mode.labeled(ctx.thinking_expanded) => {
-                Some(block.label_line(ctx.palette, width))
+                Some(block.label_line(ctx.palette, width, ctx.thinking_expanded))
             }
             _ => None,
         };
