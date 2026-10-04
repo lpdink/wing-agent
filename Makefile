@@ -1,4 +1,4 @@
-.PHONY: check test test-e2e test-probe format fmt fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts check-ts test-ts run install gateway
+.PHONY: check test test-e2e test-probe format fmt fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts check-ts test-ts run install gateway demo
 
 # ── Unified commands (Python + Rust) ─────────────────────────
 
@@ -16,6 +16,13 @@ VSCODE_DIR := extensions/vscode
 # Node/pnpm 探测 + 提示（单行，避免 make ↔ shell 的续行转义；见 docs/dev/vscode-extension.md §9.3）。
 TS_SKIP_NOTE = echo "⏭️  SKIP_TS=$(SKIP_TS) — TypeScript gates (extensions/vscode) skipped on request."; echo "   CI never sets SKIP_TS: the group stays mandatory there."; exit 0
 TS_TOOLING_CHECK = command -v node >/dev/null 2>&1 || { echo "❌ node not found — the TypeScript gates need Node ≥ 22.12 (vitest 5 / vite 8)."; echo "   Install Node 22 LTS, then re-run; or skip this group with: SKIP_TS=1 make check"; exit 1; }; command -v pnpm >/dev/null 2>&1 || { echo "❌ pnpm not found — this package pins pnpm 11 (packageManager in extensions/vscode/package.json)."; echo "   Enable it with: corepack enable   (corepack ships with Node ≥ 16.13; CI does the same)"; echo "   Or skip the TypeScript group: SKIP_TS=1 make check"; exit 1; }
+
+# ── README 演示素材 ───────────────────────────────────────────
+
+# 真 TUI + 假 Provider（剧本）的确定性回放：tmux 抓真彩屏幕 → asciinema cast →
+# agg 渲染 GIF / 静态图。产物在 target/demo/，机制与调镜头手册见 scripts/demo/README.md。
+demo:
+	uv run python scripts/demo/record.py
 
 run:
 	cargo run
@@ -87,10 +94,10 @@ test-probe:
 check-python:
 	@RUFF_FAILED=0; RUFF_FMT_FAILED=0; TY_FAILED=0; VULTURE_FAILED=0; \
 	echo "🔍 Running ruff..."; \
-	if ! uv run ruff check libs/; then RUFF_FAILED=1; echo "❌ ruff failed"; else echo "✅ ruff passed"; fi; \
+	if ! uv run ruff check libs/ scripts/; then RUFF_FAILED=1; echo "❌ ruff failed"; else echo "✅ ruff passed"; fi; \
 	echo ""; \
 	echo "🔍 Running ruff format check..."; \
-	if ! uv run ruff format --check libs/; then RUFF_FMT_FAILED=1; echo "❌ ruff format failed"; else echo "✅ ruff format passed"; fi; \
+	if ! uv run ruff format --check libs/ scripts/; then RUFF_FMT_FAILED=1; echo "❌ ruff format failed"; else echo "✅ ruff format passed"; fi; \
 	echo ""; \
 	echo "🔍 Running ty..."; \
 	if ! uv run ty check libs; then TY_FAILED=1; echo "❌ ty failed"; else echo "✅ ty passed"; fi; \
@@ -105,10 +112,10 @@ check-python:
 	fi
 
 fmt-python:
-	uv run ruff format libs/
+	uv run ruff format libs/ scripts/
 
 fmt-check-python:
-	uv run ruff format --check libs/
+	uv run ruff format --check libs/ scripts/
 
 # ── Rust ──────────────────────────────────────────────────────
 

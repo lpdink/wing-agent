@@ -22,13 +22,48 @@
 
 > **⚠️ Experimental** — Expect breaking changes until v1.0.
 
+<p align="center">
+  <img src="assets/demo.gif" alt="wing's TUI running a task: thinking streams in, an Edit fills in a colored diff, the test suite goes from red to green, and the todo list checks itself off" width="920">
+</p>
+
 ## Why wing?
 
-**No magic in your context.** We never inject hidden system prompts. You see exactly what the model sees — your system prompt, your tools, your conversation. Nothing more.
+**Your context is yours.** No hidden system prompts, no scaffolding injected behind your back. What the model sees is what you wrote — your prompt, your tools, your history. When a run goes sideways, you can read exactly what happened.
 
-**Maximum cache hit rate.** We commit to the theoretical maximum prompt caching. Beyond compaction, we never break your cache prefix.
+**Cache-first by construction.** We never rewrite the prefix a provider can cache: apart from compaction, the conversation only grows. Long sessions stay fast and cheap instead of being re-processed from scratch every turn.
 
-**Minimal tool schemas.** Our built-in tools use the simplest possible schemas. Your context window starts with under 2K tokens of tool overhead — not 10K.
+**Lean tool schemas.** The built-in tools use the smallest schemas that still do the job — under 2K tokens of tool overhead in your window, not 10K. Fewer tokens spent describing tools is more room for your code.
+
+## Built for machine speed
+
+The TUI never re-renders the whole answer: markdown blocks are promoted once when they
+close, and every frame re-renders only the live tail. A frame costs what is *on screen*,
+not what the answer has grown to.
+
+Same text, same terminal, four feed rates — scripted feeds, real rendering:
+
+**30 tok/s** — a top-tier reasoning model.
+<p align="center"><img src="assets/speed-30.gif" alt="wing streaming at 30 tokens per second" width="900"></p>
+
+**60 tok/s** — a current flagship.
+<p align="center"><img src="assets/speed-60.gif" alt="wing streaming at 60 tokens per second" width="900"></p>
+
+**240 tok/s** — a fast "flash" tier.
+<p align="center"><img src="assets/speed-240.gif" alt="wing streaming at 240 tokens per second" width="900"></p>
+
+**3,000 tok/s** — about 10× the fastest models shipping today. The UI does not care.
+<p align="center"><img src="assets/speed-3000.gif" alt="wing streaming at 3000 tokens per second" width="900"></p>
+
+End-to-end display latency — provider → gateway → WebSocket → TUI → terminal, one token
+per frame (M6 Mac mini):
+
+| Feed rate | p50 | p99 |
+|---|---|---|
+| 3,000 tok/s | 20 ms | 32 ms |
+| 30,000 tok/s | 13 ms | 26 ms |
+| 45,000 tok/s | 10 ms | 36 ms |
+
+Reproduce it: `uv run python scripts/demo/latency.py --steps 3000,30000,45000`.
 
 ## Quick Start
 
@@ -83,6 +118,10 @@ Frontend config: `~/.wing/tui/config.yaml`
 | `BetterEdit` | Anchored `[upto]` edits (experimental) |
 
 Custom tools: **[docs/en/custom-tools.md](https://github.com/lpdink/wing-agent/blob/develop/docs/en/custom-tools.md)**
+
+Tool calls render where they happen: an `Edit` grows a syntax-highlighted diff against the
+real file, a `Bash` run shows its real output, and `TodoWrite` keeps the plan visible while
+the work moves forward — all three are in the demo at the top of this page.
 
 ## Magic Commands
 
