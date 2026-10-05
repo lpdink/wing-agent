@@ -14,6 +14,8 @@ from aiohttp import web
 
 from wing_probe.env import (
     DEFAULT_AGENT_TOOLS,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+    DEFAULT_KEEP_RECENT_TOKENS,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_PROBE_MODEL,
     LOOPBACK_HOSTS,
@@ -429,6 +431,81 @@ def test_env_render_config_passes_provider_extra(tmp_path: Path) -> None:
     assert config["providers"][0]["image_delivery"] == "followup"
 
 
+def test_render_config_auth_section() -> None:
+    """auth 段：缺省仍是 ``{"enabled": False}``；给了原文时整体替换（不合并）。"""
+    baseline = yaml.safe_load(
+        render_config_yaml(provider_base_url="http://127.0.0.1:1/v1", gateway_port=2)
+    )
+    assert baseline["gateway"]["auth"] == {"enabled": False}
+
+    configured = yaml.safe_load(
+        render_config_yaml(
+            provider_base_url="http://127.0.0.1:1/v1",
+            gateway_port=2,
+            auth={
+                "enabled": True,
+                "keys": [
+                    {"key": "probe-admin-key"},
+                    {"key": "probe-tool-key", "role": "tool_runtime"},
+                ],
+            },
+        )
+    )
+    assert configured["gateway"]["auth"] == {
+        "enabled": True,
+        "keys": [
+            {"key": "probe-admin-key"},
+            {"key": "probe-tool-key", "role": "tool_runtime"},
+        ],
+    }
+    # 其余网关接线键不因 auth 而漂移（假 Provider 场景照常起得来）。
+    assert configured["gateway"]["host"] == baseline["gateway"]["host"]
+    assert configured["gateway"]["port"] == 2
+
+
+def test_env_render_config_passes_auth(tmp_path: Path) -> None:
+    """ProbeEnv 的 auth 参数进入生成的配置文本（probe_env 标记透传的落点）。"""
+    env = ProbeEnv(tmp_path, auth={"enabled": True, "keys": [{"key": "k"}]})
+    config = yaml.safe_load(env._render_config(45124))
+    assert config["gateway"]["auth"] == {"enabled": True, "keys": [{"key": "k"}]}
+    assert env.auth == {"enabled": True, "keys": [{"key": "k"}]}
+
+    default_env = ProbeEnv(tmp_path)
+    assert default_env.auth is None
+    assert yaml.safe_load(default_env._render_config(1))["gateway"]["auth"] == {
+        "enabled": False
+    }
+
+
+def test_shutdown_api_key_prefers_admin_role(tmp_path: Path) -> None:
+    """关自己子进程用的 key：优先非 tool_runtime（默认角色 admin），只给
+    tool_runtime 时退而用最后一把，没有 keys 则 None（关停走 terminate 兜底）。"""
+    assert ProbeEnv(tmp_path).shutdown_api_key is None
+    assert (
+        ProbeEnv(tmp_path, auth={"enabled": True, "keys": []}).shutdown_api_key is None
+    )
+    assert (
+        ProbeEnv(
+            tmp_path,
+            auth={"enabled": True, "keys": [{"key": "tool", "role": "tool_runtime"}]},
+        ).shutdown_api_key
+        == "tool"
+    )
+    assert (
+        ProbeEnv(
+            tmp_path,
+            auth={
+                "enabled": True,
+                "keys": [
+                    {"key": "tool", "role": "tool_runtime"},
+                    {"key": "admin"},
+                ],
+            },
+        ).shutdown_api_key
+        == "admin"
+    )
+
+
 def test_merge_no_proxy_keeps_existing_and_adds_loopback() -> None:
     """NO_PROXY 合并：既有条目不丢、loopback 补齐、`*` 原样保留。"""
     default = ",".join(LOOPBACK_HOSTS)
@@ -483,3 +560,48 @@ async def test_wait_for_health_ignores_env_proxy(
         )
     finally:
         await runner.cleanup()
+
+
+def test_env_render_config_passes_context_window_knobs(tmp_path: Path) -> None:
+    """ProbeEnv 的上下文窗口旋钮进入 agent 配置（自动压缩场景的阈值来源）。
+
+    默认与 ``render_config_yaml`` 的缺省一致（不因新增参数而漂移）；显式压小
+    之后 ``compact_window = window - keep_recent`` 才是场景能算出来的数。
+    """
+    default = yaml.safe_load(ProbeEnv(tmp_path)._render_config(45124))["agents"][0]
+    assert default["context_window_tokens"] == DEFAULT_CONTEXT_WINDOW_TOKENS
+    assert default["keep_recent_tokens"] == DEFAULT_KEEP_RECENT_TOKENS
+
+    env = ProbeEnv(tmp_path, context_window_tokens=1000, keep_recent_tokens=400)
+    agent = yaml.safe_load(env._render_config(45124))["agents"][0]
+    assert agent["context_window_tokens"] == 1000
+    assert agent["keep_recent_tokens"] == 400
+
+
+@pytest.mark.asyncio
+async def test_restart_gateway_refuses_stopped_env(tmp_path: Path) -> None:
+    """重启是"活环境"的操作：已 stop 的实例直接报错（单向闸门不破）。"""
+    env = ProbeEnv(tmp_path)
+    await env.stop()
+
+    with pytest.raises(ProbeEnvError, match="one-way gate"):
+        await env.restart_gateway()
+    assert env.process is None
+
+
+@pytest.mark.asyncio
+async def test_restart_gateway_without_running_process_starts_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未起进程时重启 = 起一个新的（不重复起第二个）。"""
+    env = ProbeEnv(tmp_path)
+    started: list[int] = []
+
+    async def fake_start() -> None:
+        started.append(1)
+
+    monkeypatch.setattr(env, "start_gateway", fake_start)
+    await env.restart_gateway()
+
+    assert started == [1], "重启只调用一次 start_gateway"
+    assert env.process is None

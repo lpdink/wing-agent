@@ -60,7 +60,7 @@ class AgentEventSink:
         # （无持久化语义的场景，如测试）。
         self._append_event = append_event
 
-    def _emit(self, event: WingEvent) -> None:
+    def emit(self, event: WingEvent) -> None:
         # 关联元数据定型：在落盘之前完成 request_id 注入，保证磁盘记录
         # 与广播帧携带同一个值（日志是唯一事实来源——live replay 与
         # resume replay 不允许对同一事件呈现不同的 request_id）。
@@ -86,13 +86,13 @@ class AgentEventSink:
     # ── Turn 生命周期 ──
 
     def turn_started(self) -> None:
-        self._emit(TurnStartedEvent(session_id=self._session_id))
+        self.emit(TurnStartedEvent(session_id=self._session_id))
 
     def user_message_accepted(
         self, content: str, origin_request_id: str | None
     ) -> None:
         """用户消息被消费进模型上下文（新 turn 输入或 steer 注入）。"""
-        self._emit(
+        self.emit(
             UserMessageAcceptedEvent(
                 session_id=self._session_id,
                 content=content,
@@ -111,7 +111,7 @@ class AgentEventSink:
         errors: list[str] | None = None,
         is_error: bool = False,
     ) -> None:
-        self._emit(
+        self.emit(
             TurnResultEvent(
                 session_id=self._session_id,
                 subtype=subtype,
@@ -125,22 +125,22 @@ class AgentEventSink:
         )
 
     def done(self) -> None:
-        self._emit(DoneEvent(session_id=self._session_id))
+        self.emit(DoneEvent(session_id=self._session_id))
 
     def error(self, message: str) -> None:
-        self._emit(ErrorEvent(session_id=self._session_id, message=message))
+        self.emit(ErrorEvent(session_id=self._session_id, message=message))
 
     # ── Assistant turn ──
 
     def assistant_turn(self, msg: Message, model: str) -> None:
-        self._emit(AssistantTurnEvent.from_message(msg, model, self._session_id))
+        self.emit(AssistantTurnEvent.from_message(msg, model, self._session_id))
 
     # ── Context stats ──
 
     def context_stats(
         self, message_count: int, total_tokens: int, context_window_tokens: int
     ) -> None:
-        self._emit(
+        self.emit(
             ContextStatsEvent(
                 session_id=self._session_id,
                 message_count=message_count,
@@ -152,7 +152,7 @@ class AgentEventSink:
     # ── Tool events ──
 
     def tool_started(self, tc: ToolCall) -> None:
-        self._emit(ToolCallEvent.from_tool_call(tc, self._session_id))
+        self.emit(ToolCallEvent.from_tool_call(tc, self._session_id))
 
     def tool_finished(
         self,
@@ -168,27 +168,27 @@ class AgentEventSink:
         media 只进 ToolCallResultEvent（tool_media 字段）——ToolResultTurnEvent
         是 Claude SDK 兼容形状（纯文本），不扩展。
         """
-        self._emit(
+        self.emit(
             ToolCallResultEvent.from_execution(
                 tc, result, success, model, self._session_id, media=media
             )
         )
-        self._emit(
+        self.emit(
             ToolResultTurnEvent.from_execution(tc, result, success, self._session_id)
         )
 
     # ── LLM streaming events ──
 
     def llm_text(self, content: str) -> None:
-        self._emit(TextEvent(session_id=self._session_id, content=content))
+        self.emit(TextEvent(session_id=self._session_id, content=content))
 
     def llm_reasoning(self, content: str) -> None:
-        self._emit(ReasoningEvent(session_id=self._session_id, content=content))
+        self.emit(ReasoningEvent(session_id=self._session_id, content=content))
 
     def llm_tool_call_delta(
         self, tool_call_id: str, tool_name: str, args_fragment: str, is_final: bool
     ) -> None:
-        self._emit(
+        self.emit(
             ToolCallStreamEvent(
                 session_id=self._session_id,
                 tool_call_id=tool_call_id,
@@ -199,7 +199,7 @@ class AgentEventSink:
         )
 
     def llm_metrics(self, usage: LLMUsage) -> None:
-        self._emit(
+        self.emit(
             LLMCallMetricsEvent(
                 session_id=self._session_id,
                 prompt_tokens=usage.prompt_tokens,

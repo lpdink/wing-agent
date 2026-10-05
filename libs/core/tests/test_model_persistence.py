@@ -17,13 +17,11 @@ from pathlib import Path
 
 import pytest
 
-from wing.agent_template import AgentTemplate
 from wing.config import ModelCapabilities, ModelSpec
 from wing.event import SessionInitEvent, SessionStateChangedEvent, SyncSessionEvent
 from wing.event_bus import event_bus
-from wing.gateway.protocol import AgentOverride
 from wing.schema import Message
-from wing.session_manager import SessionManager
+from wing.session import AgentTemplate, AgentOverride, SessionManager
 from wing.store import FileSessionStore, SessionMetadata
 
 
@@ -330,7 +328,7 @@ class TestCompatibility:
         sid = session.session_id
         _seed(session, "hello")
 
-        # 模拟本次变更前写下的 metadata（无模型字段）
+        # 模拟模型字段引入前写下的 metadata
         (root / sid / "metadata.json").write_text(
             json.dumps({"session_name": "old"}), encoding="utf-8"
         )

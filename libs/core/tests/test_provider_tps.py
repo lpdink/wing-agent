@@ -22,8 +22,10 @@ import json
 import pytest
 
 from wing.config import ProviderConfig
-from wing.provider.anthropic import AnthropicProvider, _StreamState
-from wing.provider.openai_compat import OpenAICompatProvider, _OAIStreamState
+from wing.provider.anthropic.provider import AnthropicProvider
+from wing.provider.anthropic.stream import _StreamState
+from wing.provider.openai.provider import OpenAICompatProvider
+from wing.provider.openai.stream import _OAIStreamState
 from wing.schema import ToolUseBlock
 
 # ─── SSE 伪造 ────────────────────────────────────────────────────

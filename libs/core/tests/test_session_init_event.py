@@ -76,7 +76,7 @@ class TestSessionInitEvent:
     @pytest.mark.asyncio
     async def test_session_init_permission_mode_yolo(self, runtime: Any):
         """yolo=true 时 permission_mode 为 'bypassPermissions'。"""
-        from wing.gateway.protocol import AgentOverride
+        from wing.session import AgentOverride
 
         session = runtime.create_session()
 

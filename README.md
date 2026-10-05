@@ -85,7 +85,7 @@ agents:
   - name: default
     model: "gpt-4o"                          # ← your model
     default: true
-    tools: [Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, TodoWrite, Explorer]
+    tools: [Bash, Read, ReadImage, Write, Edit, Glob, Grep, AskUserQuestion, TodoWrite]
 ```
 
 Then start wing:
@@ -99,7 +99,7 @@ wing         # start fresh
 
 ## Configuration
 
-Backend config: `~/.wing/core/config.yaml` — generated on first run, fully annotated (see `wing/default_config.py` for the template).
+Backend config: `~/.wing/core/config.yaml` — generated on first run, fully annotated (see `wing/config/default_config.py` for the template).
 Frontend config: `~/.wing/tui/config.yaml`
 
 ## Built-in Tools
@@ -115,8 +115,6 @@ Frontend config: `~/.wing/tui/config.yaml`
 | `ReadImage` | Feed an image (screenshot, diagram, chart) to a vision model |
 | `AskUserQuestion` | Ask the user a question |
 | `TodoWrite` | Track task progress |
-| `Explorer` | Autonomous code exploration sub-agent (blocking or background) |
-| `BetterEdit` | Anchored `[upto]` edits (experimental) |
 
 Custom tools: **[docs/en/custom-tools.md](https://github.com/lpdink/wing-agent/blob/develop/docs/en/custom-tools.md)**
 

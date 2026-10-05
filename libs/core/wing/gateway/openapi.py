@@ -1,4 +1,4 @@
-# wing_gateway/openapi.py — OpenAPI 元数据
+# wing/gateway/openapi.py — OpenAPI 元数据
 
 """OpenAPI 元数据配置——版本、描述、标签、服务器。
 

@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from wing.schema import Message
-from wing.session_manager import SessionManager
+from wing.session import SessionManager
 from wing.store import FileSessionStore
 
 # ============================================================
@@ -49,7 +49,7 @@ def _seed_compact(session) -> dict[str, str]:
         old1(u1) → old2(a1) ─┬─ [Compact](c1, parent=None, unzip=a1)
                              └─ tail1(u2)
     """
-    from wing.context_manager import ContextManager
+    from wing.context import ContextManager
 
     cm: ContextManager = session.context_manager
     old1 = Message(role="user", content="old1")
@@ -181,7 +181,7 @@ class TestForkToolsRecord:
     async def test_tools_record_matches_live_after_ref_degradation(
         self, sm, root, monkeypatch
     ):
-        from wing.gateway.protocol import AgentOverride
+        from wing.session import AgentOverride
         from wing.tool_registry import tool_registry
 
         session = sm.create_session(

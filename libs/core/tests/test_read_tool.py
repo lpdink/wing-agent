@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from wing.schema import ToolError
-from wing.tools.file import MAX_LINES_TO_READ, read_file
+from wing.tools.builtin.read import MAX_LINES_TO_READ, read_file
 
 
 @pytest.fixture

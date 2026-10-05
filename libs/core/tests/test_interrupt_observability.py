@@ -1,6 +1,6 @@
 """interrupt 可观测性（cancel 快照 / 不死看门狗 / 锁争用告警）的对账测试。
 
-背景与判读方式见 ``wing/agent/cancel_watch.py`` 模块文档：一次未生效的
+背景与判读方式见 ``wing/diagnostics/cancel_watch.py`` 模块文档：一次未生效的
 ``Task.cancel()`` 会让 ``await old`` 永久挂住、``_interrupt_lock`` 永不释放
 （2026-09-28 事故现场，只能靠 lldb 注入取证）。这些测试锁定"下次能靠日志
 破案"所需的证据：
@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from wing.agent.cancel_watch import (
+from wing.diagnostics import (
     FRAME_WALK_LIMIT,
     InterruptLockWatch,
     log_cancel_snapshot,

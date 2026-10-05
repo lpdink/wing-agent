@@ -1,14 +1,11 @@
 # wing/event/__init__.py — 事件类型统一出口
 
 """
-WingEvent 统一事件协议 (V2)。
+WingEvent 统一事件协议。
 
-所有事件均继承 WingEvent 基类，通过 type 字段区分。
-V2 变更：
-  - 删除 CreateSessionDoneEvent、SessionActivatedEvent、RewindDoneEvent、ForkDoneEvent
-  - 新增 SyncSessionEvent、SessionStateChangedEvent
-  - 拆分为四个模块：base、react、state_change、query_response
-  - 删除 SystemEvent、SkillsListEvent、ShellCommandEvent（魔术命令消除后不再需要）
+所有事件均继承 WingEvent 基类，通过 type 字段区分，按域拆分为四个模块：
+base（基类 / 辅助 Schema / 通用系统事件）、react（ReAct 循环事件流）、
+state_change（会话状态变更）、query_response（查询响应）。
 """
 
 from .base import (
@@ -51,34 +48,6 @@ from .state_change import (
     SyncSessionEvent,
 )
 
-# 事件类型总集（便于类型检查）
-WingEventUnion = (
-    ErrorEvent
-    | TextEvent
-    | ReasoningEvent
-    | ToolCallEvent
-    | ToolCallStreamEvent
-    | ToolCallResultEvent
-    | LLMCallMetricsEvent
-    | AskEvent
-    | DoneEvent
-    | TurnStartedEvent
-    | UserMessageAcceptedEvent
-    | DiffContentEvent
-    | AssistantTurnEvent
-    | ToolResultTurnEvent
-    | TurnResultEvent
-    | SyncSessionEvent
-    | SessionInitEvent
-    | DeliveredEvent
-    | InterruptedEvent
-    | CompactDoneEvent
-    | SessionStateChangedEvent
-    | ContextStatsEvent
-    | BranchTargetsEvent
-    | NoticeEvent
-)
-
 # 事件类型注册表：type 字面量 → 事件类。
 # history.jsonl 加载时按 role="event" + type 在此分发还原事件节点
 # （TrackedList.load）。未知 type 跳过——前向容忍。
@@ -110,21 +79,10 @@ EVENT_TYPES: dict[str, type[WingEvent]] = {
 }
 
 
-def serialize_event(event: WingEvent) -> dict:
-    """事件 → 传输/重放用的 dict（统一 wire 规则，`wire_dump` 的别名）。
-
-    保留此名以兼容既有调用方（runtime 的 SyncSession.events 组装）；
-    实现与直播帧共用 `wire_dump`，不存在两套序列化形状。
-    """
-    return wire_dump(event)
-
-
 # 事实事件集合：persist=true 且无 Message 孪生的"事实类"事件——resume 时
 # 下发给前端重放（ContextManager.get_active_events 据此过滤）。与 persist
 # 标记同处一文件，过滤策略单点。存量日志里已写入的孪生记录
 # （tool_call_result / llm_call_metrics）不在此集合：加载进链但不下发。
-# 终态（follow-up）：待信号类事件的落盘取舍定完，FACT_EVENTS 与 persist=true
-# 集合重合，下发过滤即消失。本次不宣称达到终态，只把策略从两端收敛到后端单点。
 FACT_EVENTS: frozenset[str] = frozenset(
     {
         "diff_content",
@@ -191,11 +149,8 @@ __all__ = [
     "ContextStatsEvent",
     "BranchTargetInfo",
     "BranchTargetsEvent",
-    # union
-    "WingEventUnion",
     # registry + serializer
     "EVENT_TYPES",
     "FACT_EVENTS",
-    "serialize_event",
     "wire_dump",
 ]

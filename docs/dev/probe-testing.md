@@ -43,6 +43,7 @@ libs/wing-probe/
 │   ├── provider/          # script（剧本模型）· server（假 Provider）· sse（编码）· request_log · context（ContextView）
 │   ├── watch/             # timeline（事件缓存 + 游标）· expect（五原语）· report（失败报告）
 │   ├── history/           # view（history.jsonl 解析）· invariants（三条不变量 + 红线过渡断言）
+│   ├── toolhost.py        # 最小 tool host（远程工具探针侧实现；只走公开 HTTP / WS 协议）
 │   ├── files.py           # workspace 文件断言
 │   └── guard.py           # import 门禁（AST）
 ├── tests/                 # 基础设施自测（不起网关）
@@ -115,6 +116,10 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 #   → providers[0].models：provider 静态模型声明（str 或对象；能力/展示元信息）。
 #   注意：它**不改 agent 默认模型**，场景仍须显式 probe.session(model=…) 选剧本。
 
+@pytest.mark.probe_env(context_window_tokens=1000, keep_recent_tokens=400)
+#   → agents[0]（default 模板）：压缩双阈值——early trigger = 窗口 − 保留区、
+#   apply = 窗口。自动压缩场景把它压到千级，让 early / apply 在几轮内确定性触发。
+
 @pytest.mark.probe_env(images={"max_images": 3, "count_quantum": 2})
 #   → 顶层 images: 段：读图保留预算/高水位（压小阈值即得确定性的驱逐断言）。
 
@@ -124,9 +129,22 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 # hooks: 透传 config.yaml 的 hooks: glob；相对路径按**网关进程 cwd**（env.root）解析。
 # 惯例：场景在 reload 前把 hook 文件写进 <root>/hooks/，再 POST /api/system/reload
 @pytest.mark.probe_env(hooks=["hooks/*.py"])
+
+# auth + api_key: 打开网关鉴权（gateway.auth 段原文，缺省 {"enabled": False}）。
+# `auth` 进 ProbeEnv（配置），`api_key` 进 Probe.start → Driver（HTTP 与 WS 都带
+# Authorization: Bearer）。auth 打开时 ProbeEnv 关自己的子进程也用 keys 里第一把
+# 非 tool_runtime 的 key（/api/shutdown 同样受鉴权保护）。见 scenarios/test_gateway_auth.py
+@pytest.mark.probe_env(auth={"enabled": True, "keys": [{"key": "k"}]}, api_key="k")
 ```
 
 确定性来自配置而不是等待运气：把阈值压到秒级、断言仍走"轮询到状态翻转（带超时）"。
+
+**跨重启**：`probe.restart_gateway()` 在**同一套隔离目录**上重启网关子进程（换端口；
+假 Provider 不重启——剧本与请求留档跨重启连续）。旧会话句柄不再收事件，用
+`probe.resume(session_id)` 在新进程里重新挂载（与真实重启的用户路径一致）。模板见
+`scenarios/test_auto_compact.py::test_pending_compact_survives_process_restart`（aux 上的
+待生效状态跨重启）与 `scenarios/test_memory_backend_eviction.py`（memory / file 后端
+重启后的存在性差异）。
 
 ## 断言原语速查
 
@@ -171,6 +189,7 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 | `records` / `by_uuid` / `record_lines` | 全量记录（含损坏行跳过）、uuid 索引、行号 |
 | `active_chain()` / `full_chain()` / `messages()` / `events()` | 活跃链（tip 回溯）/ 完整链 / 消息层 / 事件层 |
 | `tip_uuid` / `last_record_uuid` / `parent_of(uuid)` / `find(uuid)` / `metadata()` | 拓扑与元数据 |
+| `aux(key)` / `aux_path(key)` | 会话 aux kv（如后台压缩的 `pending_compact`）——**每次访问重新读盘**，是"待生效状态是否已落盘"的观测点；`aux_path` 不读盘（存在性断言用） |
 | `reload()` / `describe(limit=24)` | 重读 / 人类可读摘要（贴进断言消息） |
 | `assert_chain_invariants()` / `assert_tool_pairing()` / `assert_no_transient_records(types=?)` | 三条内置不变量（单个视图） |
 | `assert_compact_transition(before, after, …)` / `assert_rewind_transition(before, after, target_uuid, …)` / `assert_fork_of(source, child, at_uuid, …)` | 红线过渡断言（返回结构化 `material` 供进一步断言） |
@@ -202,19 +221,21 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 - 只保 **`history` 链上的上下文事实**：链拓扑、记录配对、瞬态记录不落盘。**不做**"全事件类型 × `persist` 布尔矩阵"对账（二批）；
 - `assert_no_transient_records` 检查**全量记录**而非仅活跃链：瞬态记录一旦落盘，无论之后是否被 rewind / compact 移出链，都是持久化语义被破坏；
-- 黑名单 `TRANSIENT_EVENT_TYPES` = 产品中 `persist=False` 的**全集**（`text` / `reasoning` / `tool_call_stream` / `tool_call` / `tool_call_result` / `assistant_turn` / `llm_call_metrics` / `sync_session` / `session_state_changed` / `session_init` / `context_stats` / `branch_targets` / `delivered` / `notice` …），是 spec 最低要求（流式 delta 三类）的超集；新增 `persist=False` 事件类型时应同步该集合（`wing_probe/history/invariants.py`）；
+- 黑名单 `TRANSIENT_EVENT_TYPES` = 产品中 `persist=False` 的**全集**（`text` / `reasoning` / `tool_call_stream` / `tool_call` / `tool_call_result` / `assistant_turn` / `tool_result_turn` / `llm_call_metrics` / `sync_session` / `session_state_changed` / `session_init` / `context_stats` / `branch_targets` / `delivered` / `notice`），是 spec 最低要求（流式 delta 三类）的超集；新增 `persist=False` 事件类型时应同步该集合（`wing_probe/history/invariants.py`）；
 - 事件断言锚定**事件序**，时间只作上限；并行工具用集合语义断言，不依赖完成顺序。
 
 ## 逃生舱
 
 `probe.without_invariants(reason="...")` 关闭本场景的 teardown 不变量——**必须给理由**：理由写进 `artifacts/dump.txt` 并在终端汇总回显，空理由直接报错。用于"场景有意制造非法中间态"（例如断言失败路径的中间产物），不得用于掩盖真实失败。
 
+`probe.allow_arguments_error(reason="...")` 是同一纪律的**窄口径**逃生舱：tool 配对不变量不再把 `arguments_error` 视为违规（用于有意构造"模型吐出坏参数"的场景，见 `scenarios/test_malformed_tool_args.py`；链拓扑与"瞬态记录不落盘"继续强制）。单次断言也可以自行放开：`view.assert_tool_pairing(allow_arguments_error=True)`。
+
 ## 已知取舍（与二批范围）
 
-- **env 是 function 级**（design D10）：每个场景一个新 tmp + 新网关进程 + 新假 Provider，正确性优先；实测 14 场景约 8s（约 0.25s/场景启动），暂不构成压力。场景数量显著增长后再走优化路径（session 级共享网关 + 按 model 名分域的剧本），`Probe` 与 `ProbeEnv` 分离就是为了那时只改 fixture 作用域；
-- **二批**：Anthropic 协议路径、远程工具宿主（`wing-sdk` 对接）、中断（interrupt）的**工具执行期**提交语义（流式打断已覆盖：`scenarios/test_interrupt.py`）、性能/时延断言、后台自动压缩（`_apply_pending_compact`）、全事件类型 × `persist` 矩阵；
+- **env 是 function 级**（design D10）：每个场景一个新 tmp + 新网关进程 + 新假 Provider，正确性优先；实测每场景约 0.25s 启动开销，暂不构成压力。场景数量显著增长后再走优化路径（session 级共享网关 + 按 model 名分域的剧本），`Probe` 与 `ProbeEnv` 分离就是为了那时只改 fixture 作用域；
+- **二批**（已收窄）：Anthropic 协议路径、性能/时延断言、全事件类型 × `persist` 矩阵。已补齐：工具执行期中断（`scenarios/test_interrupt_tool_phase.py`）、后台自动压缩 / pending 跨进程重启（`scenarios/test_auto_compact.py`）、远程工具宿主（`scenarios/test_remote_tools.py` + `wing_probe/toolhost.py`）、帧切分与重组（`scenarios/test_frame_chunking.py`）；
 - 兜底：`make test-probe` 传 `--timeout=120`（另有场景级 `@pytest.mark.timeout(120)`），网关进程在 teardown 走 `/api/shutdown` → `terminate` → `kill`；
-- 网关重试 / 退避不进首批（探测配置显式 `max_retries=0`），保证"一次请求 = 一次剧本消费"可数。
+- 网关重试在探测配置里显式打开（`max_retries=2` / `max_retry_delay=1s`，`wing_probe/env.py`）——语义重试场景需要它（`scenarios/test_react_invalid_generation.py`）。计数口径：**一次逻辑调用的剧本消费上界 = 1 + max_retries**，超出即 5xx，仍然可数。
 
 ## 附：变异验证怎么复跑
 
@@ -223,7 +244,7 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 | 变异 | 改动点 | 期望变红 |
 |------|--------|----------|
 | transient 落盘 | `libs/core/wing/event/react.py`：`TextEvent.persist = True` | `scenarios/test_react_basics.py::test_text_turn_event_order_and_persistence`（场景内断言 + teardown 不变量 `no_transient_records`） |
-| rewind 跳过事件节点 | `libs/core/wing/context_manager.py::rewind` 中沿链回溯跳过事件节点的 `while` 循环 | `scenarios/test_rewind.py::test_rewind_skips_event_ancestors` |
-| fork metadata 快照 | `libs/core/wing/session_manager.py::fork_session` 的 `save_metadata(..., forked_from=session_id)` | `scenarios/test_fork.py::test_fork_metadata_snapshot`（`assert_fork_of` 连带 `test_fork_chain_integrity_and_uuid_remap`） |
+| rewind 跳过事件节点 | `libs/core/wing/context/manager.py::rewind` 中沿链回溯跳过事件节点的 `while` 循环 | `scenarios/test_rewind.py::test_rewind_skips_event_ancestors` |
+| fork metadata 快照 | `libs/core/wing/session/manager.py::fork_session` 的 `save_metadata(..., forked_from=session_id)` | `scenarios/test_fork.py::test_fork_metadata_snapshot`（`assert_fork_of` 连带 `test_fork_chain_integrity_and_uuid_remap`） |
 
 **变异绝不入库**：验证完必须还原，工作区只允许 probe 侧改动。

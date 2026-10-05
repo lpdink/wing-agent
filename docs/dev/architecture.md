@@ -113,15 +113,14 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 | 维度 | 口径 |
 |------|------|
-| 判定 | 三条全过才逐出：`status == idle`（working / waiting 钉住）、inbox 无待处理输入、无 client 订阅（EventBus 路由表）、空闲时长 > `sessions.eviction.idle_ttl_seconds` |
-| 硬条件 | inbox 有待处理输入不逐出（`agent.post()` 直投路径不 touch 计时器）；有后台任务（后台 Explorer）不逐出——拆解会关掉它共享的 provider；memory 后端不逐出（逐出 = 数据销毁） |
+| 判定 | `_blocked_reason()` 为 None **且**空闲时长 > `sessions.eviction.idle_ttl_seconds`；四类钉住（任一命中即不逐出）：`status != idle`（working / waiting 有在飞 turn）、inbox 有待处理输入（`agent.post()` 直投路径不 touch 计时器，只看 timer 会漏判）、非持久后端（memory 逐出 = 数据销毁）、有 client 订阅（EventBus 路由表） |
 | 计时 | `touch` = 任何携带该 session_id 的事件（`SessionReaper` 订阅 EventBus）——"会话状态变化即重置计时器"；create / resume 初始化 |
 | 触发 | `BackgroundScheduler`（gateway lifespan 启停）周期扫描（`sweep_interval_seconds`，启动时读取）；`release` 立即判定（忽略空闲时长，不忽略钉住条件） |
 | 拆解 | pop 同步原子摘除 → `Session.aclose()`（`agent.shutdown()` + `aclose_providers()`，顺序固定）异步收尾 |
 | 水合 | 被逐出 ≠ 不存在：`resume` / `subscribe` / `send`（HTTP 与 WS 上行）按需水合；空会话（无消息、无磁盘痕迹）逐出后不可恢复 |
 | 可见痕迹 | `/api/session/list` 的 `status: inactive` 是主信号；此外 `session/get` / `info` / `branches` 对已逐出会话回 404（`wing tail` / `head` / `info` 内部 404→resume），`release` 返回 `not loaded` |
 
-`BackgroundScheduler`（`wing/background.py`）是通用周期任务宿主（单 task 顺序执行、job 异常隔离、start/stop 显式），逐出只是第一个 job——将来的后台机制（dreaming 等）直接 `add_job`。`SessionReaper`（`wing/session_reaper.py`）只做"触摸订阅 + 一次扫描"，不依赖调度器即可单测。
+`BackgroundScheduler`（`wing/background.py`）是通用周期任务宿主（单 task 顺序执行、job 异常隔离、start/stop 显式），逐出只是第一个 job——将来的后台机制（dreaming 等）直接 `add_job`。`SessionReaper`（`wing/session/reaper.py`）只做"触摸订阅 + 一次扫描"，不依赖调度器即可单测。
 
 **不做的**（刻意缺席）：容量上限 / LRU（只有 TTL）；逐出以外的入口不自动水合（`session/get`、`info`、`branches` 对已逐出会话仍 404——`wing tail` 的 404→resume 是既有惯例，需要时按同一模式补）；动态状态（tools 热切换的冻结声明集、thinking / yolo）不落盘，逐出后按模板默认重建（与重启同语义）。
 
@@ -140,7 +139,7 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 **无效轮次与自动重试**：单轮生成若「不进入下一次 ReAct 且不合法」——（a）无 content 且无收敛（已终结）的 tool call（含全空与只有 reasoning——reasoning 不作为收尾依据），或（b）有 content、tool call 起了头但一个都没收敛（流被上游截断，如网关在非法 JSON 工具调用处直接切断；流未正常结束、无权威块数组的形态——如 Anthropic 在 `message_stop` 前被切断——同判）——判定为**无效轮次**（`ReActLoop._call_llm_validated`，抛 `InvalidGenerationError`）：（a）不提交任何内容；（b）提交 content、不提交 tool call（与 provider 剔除未收敛块的口径一致）。随后交给 `with_retry(retry_on=(InvalidGenerationError,), label="模型生成")` 有界重试（参数经 `ReActLoop._config` 跟随**当前 provider 配置**的 `max_retries` / `max_retry_delay`；重试通知走 `notice`）。**有任一收敛 tool call 则永不重试**（自然进入下一轮）。截断检测用 `unfinished_tool_calls()` 计数（含无 id 的半截调用，无盲区）；`retry_on` 过滤保证语义重试不与 provider 层的传输重试叠加放大；无效尝试置空 `_current_acc`（被丢弃的内容不进未提交投影），其 usage 照常计入 turn 账。重试耗尽沿 turn 错误路径上报（`turn_result` error + `error` 事件）：无效轮次绝不作为成功 turn 提交。规则（b）会在链上产生相邻 assistant 消息——Anthropic 序列化器按既有交替规则**合并连续同角色消息**（等价于未截断时「text + tool_use 同一条」的形态）；已知边界：该轮的重试请求以 assistant 结尾（续跑语义），Anthropic 开 thinking 时 prefill 是否被拒待真实环境验证（被拒则该轮重试失败、内容不丢）。
 
-**stop_reason 捕获**：两个 provider 均在最终 usage 携带协议原值（`end_turn`/`max_tokens`/`tool_use`/`stop`/`length`），传导进 `Message.stop_reason`（**唯一落盘审计位置**）与 `LLMCallMetricsEvent.stop_reason`（仅用于直播——该事件 persist=false，不落盘；metrics_registry 经 event_bus 聚合进独立的 metrics.json）。Anthropic 的 max_tokens 砍在 tool args 中间时，未终结的 tool 块从权威块数组剔除（半截 tool_use 不再被当作完整调用执行）；该剔除与未提交投影共用同一实现（`_ordered_finalized_blocks`）。
+**stop_reason 捕获**：两个 provider 均在最终 usage 携带协议原值（`end_turn`/`max_tokens`/`tool_use`/`stop`/`length`），传导进 `Message.stop_reason`（**唯一落盘审计位置**）与 `LLMCallMetricsEvent.stop_reason`（仅用于直播——该事件 persist=false，不落盘；audit 经 event_bus 聚合进独立的 metrics.json）。Anthropic 的 max_tokens 砍在 tool args 中间时，未终结的 tool 块从权威块数组剔除（半截 tool_use 不再被当作完整调用执行）；该剔除与未提交投影共用同一实现（`_ordered_finalized_blocks`）。
 
 合成结果同时发射与正常完成相同的 `ToolCallResultEvent` / `ToolResultTurnEvent`：TUI 据此翻转 cell 状态（Bash 计时器仅在 cell 为 Pending 时前进，结果事件使其冻结——修复了打断后计时器不停的存量问题），stdio 模式据此输出 user turn 消息。
 
@@ -155,13 +154,13 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 - `snapshot_blocks(acc)`：**已终结**块（text/thinking 任意长度保留，未终结 tool 块剔除）——中断补提交与未提交 Message 投影**同源**（resume 与打断变成同一个操作）。
 - `pending_tool_calls(acc)`：**未终结** tool 调用的原始 args 文本（`PendingToolView`）——活工具卡渲染素材，后端不解析半截 JSON（局部解析在客户端 `partial_json.rs`）。截断检测走 `unfinished_tool_calls(acc)` 计数口径（含无 id 的半截调用，见上节「无效轮次与自动重试」）。
 
-**落盘只存事实，不存副本**：`persist=true` 事件（diff/ask/interrupted/error/compact_done）在完整产生时即时落盘进链；流式 delta（`persist=false`）纯广播——不落盘、不进任何内存缓冲，其内容由轮提交时的 Message 记录承载。`tool_call_result` / `llm_call_metrics` 是 Message 孪生（`role="tool"` Message / `Message.usage` + `Message.stop_reason`），已停止落盘（事件本身保留：metrics_registry 与 TUI 直播经 event_bus 依赖）；`turn_result` 保留落盘但 `result` 字段（最终文本孪生）经 `disk_exclude` 排除出磁盘记录（wire 帧仍携带，stdio 消费）。
+**落盘只存事实，不存副本**：`persist=true` 事件（diff/ask/interrupted/error/compact_done）在完整产生时即时落盘进链；流式 delta（`persist=false`）纯广播——不落盘、不进任何内存缓冲，其内容由轮提交时的 Message 记录承载。`tool_call_result` / `llm_call_metrics` 是 Message 孪生（`role="tool"` Message / `Message.usage` + `Message.stop_reason`），已停止落盘（事件本身保留：audit 与 TUI 直播经 event_bus 依赖）；`turn_result` 保留落盘但 `result` 字段（最终文本孪生）经 `disk_exclude` 排除出磁盘记录（wire 帧仍携带，stdio 消费）。
 
 **persist 分流原则**：`WingEvent.persist` 是 `ClassVar[bool]`（非 pydantic 字段——旧的 `Field(exclude=True)` 会被子类重声明静默击穿），基类默认 true。判据两条同时成立：**是事实**（读回来仍成立，非一次性信号）**且无 Message 孪生**。false 仅限（a）流式 delta，（b）与 Message 完全孪生且体积可观的事件（AssistantTurn/ToolResultTurn/ToolCall/ToolCallResult/LLMCallMetrics），（c）可从权威状态实时重建的协议/查询事件（Sync/SessionInit/ContextStats/BranchTargets/Delivered/SessionStateChanged），（d）一次性通知（`notice`——如「LLM 调用失败，N 秒后重试」）。
 
 **error 与 notice 的语义边界**：`error` = 真错误（前端终结 turn、渲染错误单元、未聚焦时 OSC 9 通知）；`notice` = 提醒（`level` + `message`，不终结 turn、不发通知、不落盘）。重试通知走 `notice`——重试中的 turn 并没有结束，而 `error` 在前端是「这一轮结束了」的**终结信号**（曾把「会自愈的失败」误报成真错误：spinner 停、耗时停、状态错位）。
 
-**三个序列化边界，三套剥离规则**（不可用一个 `model_dump(exclude_none)` 打通——`Message._serialize_flat` 是 wrap 序列化器，`content`/`reasoning_content`/`tool_calls` 在内层 handler 之后才注入）：磁盘记录（`TrackedList._to_record`：字典推导剥 null + 剥 target + disk_exclude）、WS 直播帧与 SyncSession 载荷（`event/__init__.py::wire_dump`：剥 null + 剥 `parent_uuid`/`unzip_last_uuid`/`role`/`target`，保留 `uuid`）。`serialize_event` 是 `wire_dump` 的别名——一套规则，无分散实现。
+**三个序列化边界，三套剥离规则**（不可用一个 `model_dump(exclude_none)` 打通——`Message._serialize_flat` 是 wrap 序列化器，`content`/`reasoning_content`/`tool_calls` 在内层 handler 之后才注入）：磁盘记录（`TrackedList._to_record`：字典推导剥 null + 剥 target + disk_exclude）、WS 直播帧与 SyncSession 载荷（`event/__init__.py::wire_dump`：剥 null + 剥 `parent_uuid`/`unzip_last_uuid`/`role`/`target`，保留 `uuid`）。直播帧与 SyncSession 载荷共用 `wire_dump`——一套规则，无分散实现。
 
 **rewind/fork/compact 凭链序免费工作**：事件是链节点——set_tip 后边界外事件移出活跃链；fork 拷贝混合链前缀（事件随行）；compact 后被压缩区间的事件与消息一并离开活跃链（被压缩的 diff 自然不再重放，无孤儿处理）。
 
@@ -175,7 +174,7 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 **前端重放**：`replay.rs` 两段式——先 replay_messages（建 ToolCall/thinking/text cell），再 replay_events（**能力分发**：diff 按 tool_call_id 锚定插入对应 ToolCall cell 后、ask 渲染为可答卡片，无渲染器的类型跳过以保持前向容忍；未知锚点 fallback append，与直播路径同款兜底）。前端**不再编码"孪生事件不得渲染"这类策略**——过滤已在后端 `FACT_EVENTS` 完成，前端只做能力分发。
 
-**diff 载荷是窗口，不是文件**（`diff-payload-window`）：`DiffContentEvent.old_text/new_text` 只携带**变更区域 ± 3 行**（`tools/diff_window.py` 的 `DIFF_CONTEXT_LINES`），外加窗口首行在各自修订版中的 1 起绝对行号 `old_start_line` / `new_start_line`（缺失按 1——旧载荷与旧网关照此渲染）。Write / 新建文件仍发全量（`old_text=None` 即"全是新增"）；`replace_all` 每个匹配位置一条事件（同一 `tool_call_id`、按位置升序），前端按既有锚点顺序逐个插入 diff cell。前端**不折叠**：`DiffView` 逐行渲染后端给的窗口，gutter 行号与 `@@` 头由 `*_start_line` 推算（`LayoutConfig.diff_context` 已删除，前端不再有"上下文行数"这个策略旋钮）。窗口化把 diff 载荷从"随文件大小"降到"随变更区域大小"（实测 67 条事件 10.1 MB → 0.21 MB、渲染行 121k → 2.0k）；历史会话里已落盘的全量事件不迁移，在前端就是"一个覆盖整文件的窗口"。
+**diff 载荷是窗口，不是文件**（`diff-payload-window`）：`DiffContentEvent.old_text/new_text` 只携带**变更区域 ± 3 行**（`tools/internal/diff_window.py` 的 `DIFF_CONTEXT_LINES`），外加窗口首行在各自修订版中的 1 起绝对行号 `old_start_line` / `new_start_line`（缺失按 1——旧载荷与旧网关照此渲染）。Write / 新建文件仍发全量（`old_text=None` 即"全是新增"）；`replace_all` 每个匹配位置一条事件（同一 `tool_call_id`、按位置升序），前端按既有锚点顺序逐个插入 diff cell。前端**不折叠**：`DiffView` 逐行渲染后端给的窗口，gutter 行号与 `@@` 头由 `*_start_line` 推算（`LayoutConfig.diff_context` 已删除，前端不再有"上下文行数"这个策略旋钮）。窗口化把 diff 载荷从"随文件大小"降到"随变更区域大小"（实测 67 条事件 10.1 MB → 0.21 MB、渲染行 121k → 2.0k）；历史会话里已落盘的全量事件不迁移，在前端就是"一个覆盖整文件的窗口"。
 
 **newest.json 已移除**：快照的消费者（重放）由混合日志承担；存在性判据与标题回退收敛为 history.jsonl。磁盘遗留的 newest.json 不读不写不删。
 
@@ -197,7 +196,7 @@ TrackedList = 纯内存链拓扑引擎（uuid/parentUuid、trace、find、set_ti
 MessageLog  = 追加式混合记录 + aux kv（pending compaction 存于此）
 ```
 
-接口与存储无关：`SessionStore` 6 方法 + `MessageLog` 5 方法，全是 kv / append-only / listing 语义，不泄漏路径 / fsync / glob。一个 PG 后端就是三张表（sessions / messages / aux）。
+接口与存储无关：`SessionStore` 8 方法（含内容寻址媒体池的 `write_media` / `read_media`）+ `MessageLog` 5 方法，全是 kv / append-only / listing 语义，不泄漏路径 / fsync / glob。一个 PG 后端就是几张表（sessions / messages / aux / 媒体字节）。
 
 **存量 session 零迁移**：老日志无事件记录 → `TrackedList.load` 按 role 分发（事件走 `EVENT_TYPES` 注册表，未知 type 跳过——前向容忍），事件重放为空即回退纯消息重放。不承诺老版本代码读新格式日志（新 session 由新代码产生，该场景不存在）。
 
@@ -215,7 +214,7 @@ MessageLog  = 追加式混合记录 + aux kv（pending compaction 存于此）
   - **不上链**：活跃链由 tip 沿 `parent_uuid` 回溯自然得出——压缩节点是根（`parent_uuid=None` + `unzip_last_uuid` 指向区间末），已摘要内容不复活；选压缩**之前**的节点时压缩节点被切在前缀之外，子会话里压缩仿佛没发生过。
   没有链遍历（`walk_full_chain` / `trace_chain` 都退出 fork 路径）：活跃链是加载语义的**结果**，不是拷贝时要算的东西。
 - **压缩节点的 `unzip_last_uuid` 是唯一编码**：任何复制 / 重链路径都必须把它带上——丢了，被压缩区间（乃至整段历史）就从 `/rewind`、`/fork` 候选里消失。已覆盖的两条路径：fork（记录前缀拷贝 + 全量重映射，见上）与 rewind（回退行复制 parent 时带上，回退到"压缩后第一条消息"不再塌候选）。
-- 达到 `context_window_tokens` 触发压缩，保留 `keep_recent_tokens`；压缩由 `compactor.py` 的 LLM 摘要策略完成。
+- 达到 `context_window_tokens` 触发压缩，保留 `keep_recent_tokens`；压缩由 `context/compaction.py` 的 LLM 摘要策略完成。
 
 **KV cache 的已知边界（有意不处理）**：
 

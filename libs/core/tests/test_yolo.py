@@ -15,7 +15,7 @@ import pytest
 
 from wing.config import AgentConfig, Config, ProviderConfig
 from wing.event_bus import event_bus
-from wing.gateway.protocol import AgentOverride
+from wing.session import AgentOverride
 
 
 def _cfg(yolo: bool = False) -> Config:

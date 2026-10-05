@@ -57,6 +57,37 @@ class FakeConnection:
         self.closed = True
 
 
+class ScriptedConnection:
+    """假连接：按 ``(text, delay)`` 脚本吐帧（delay 模拟分片间隔），耗尽后抛 ``ConnectionClosed``。"""
+
+    def __init__(self, script: Sequence[tuple[str, float]]) -> None:
+        self._script = list(script)
+
+    async def recv(self) -> str:
+        if not self._script:
+            raise ConnectionClosed(Close(1000, "scripted end"), None)
+        text, delay = self._script.pop(0)
+        if delay:
+            await asyncio.sleep(delay)
+        return text
+
+    async def send(self, text: str) -> None:  # pragma: no cover - 未使用
+        pass
+
+    async def close(self) -> None:  # pragma: no cover - 未使用
+        pass
+
+
+class FrozenClock:
+    """冻结时钟：``started_at`` 与 ``clock()`` 取不同值，暴露尺度混用。"""
+
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def __call__(self) -> float:
+        return self.value
+
+
 class FakeEnv:
     """``Driver`` 需要的 ``ProbeEnv`` 最小面（``EnvLike`` 协议）。"""
 
@@ -144,6 +175,54 @@ async def test_chunked_frames_are_merged_and_dispatched(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_chunk_deadline_uses_the_same_scale_as_on_text(tmp_path: Path) -> None:
+    """分片不闭合超时用 ``now()``（相对 started_at）查询——尺度混用即误报 stalled。
+
+    回归素材：``_read_loop`` 把 ``at=self.now()`` 喂给 ``Reassembler``，deadline
+    因此是**相对**尺度；``_recv_frame`` 若用原始 ``_clock()`` 查询，started_at 一旦
+    非零（真实 ProbeEnv 就是这样）"还有 30s" 会被算成"已过期"，第一个分片到达后
+    立刻断开——大帧整机场景首次走通 `_chunk` 重组时抓到。
+    """
+    driver = Driver(FakeEnv(tmp_path))
+    session = await driver.attach("sid-1", subscribe=False)
+    payload = json.dumps(
+        {"type": "sync_session", "session_id": "sid-1", "messages": []},
+        ensure_ascii=False,
+    )
+    parts = [payload[:40], payload[40:]]
+
+    client = GatewayWS(
+        ScriptedConnection(  # ty: ignore[invalid-argument-type]
+            [
+                (chunk_frame(parts[0], index=0, count=2), 0.0),
+                (chunk_frame(parts[1], index=1, count=2), 0.05),
+                ('{"type":"text","session_id":"sid-1","content":"after"}', 0.0),
+            ]
+        ),
+        client_id="fake-client",
+        handler=driver._on_event,
+        frames=FrameLog(),
+        started_at=500.0,  # 与 clock() 错开：now() 才是 reassembler 的尺度
+        clock=FrozenClock(1000.0),
+    )
+    client._read_task = asyncio.create_task(client._read_loop())
+    assert await client.wait_closed(2.0), "读任务未在时限内退出"
+
+    assert "reassembly failed" not in (client.close_reason or ""), (
+        "把还有 30s 的分片窗口误判为过期（尺度混用）",
+        client.close_reason,
+    )
+    assert "connection closed by gateway" in (client.close_reason or "")
+    events = session.timeline.all()
+    assert [event.type for event in events] == ["sync_session", "text"], events
+    assert events[0].frames == 2, events[0].frames
+    assert events[0].raw == payload
+    assert events[1].data["content"] == "after"
+    assert client.assembling is False
+    await driver.close()
+
+
+@pytest.mark.asyncio
 async def test_malformed_frames_take_invalid_frame_path(tmp_path: Path) -> None:
     """畸形帧：合成 ``invalid_frame`` 事件（带原因与原文），不静默丢帧。"""
     driver = Driver(FakeEnv(tmp_path))
@@ -193,6 +272,9 @@ class StubGateway:
         app.router.add_get("/api/health", self._health)
         app.router.add_post("/api/session/resume", self._resume)
         app.router.add_post("/api/session/subscribe", self._ok)
+        app.router.add_get("/api/tools", self._tools)
+        app.router.add_post("/api/session/update", self._echo)
+        app.router.add_post("/api/session/release", self._echo)
         app.router.add_post("/api/session/boom", self._boom)
         self.runner = web.AppRunner(app, access_log=None)
         await self.runner.setup()
@@ -212,6 +294,25 @@ class StubGateway:
 
     async def _health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
+
+    async def _echo(self, request: web.Request) -> web.Response:
+        """回显请求体（driver 具名动作的请求形状断言用）。"""
+        return web.json_response({"ok": True, "echo": await request.json()})
+
+    async def _tools(self, request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "tools": [
+                    {
+                        "ref": "Bash",
+                        "namespace": "default",
+                        "name": "Bash",
+                        "llm_name": "Bash",
+                        "description": "stub",
+                    }
+                ]
+            }
+        )
 
     async def _resume(self, request: web.Request) -> web.Response:
         body = await request.json()
@@ -358,4 +459,47 @@ async def test_http_client_ignores_env_proxy(
 
     assert response == {"status": "ok"}
     assert len(http.calls) == 1
+    await http.close()
+
+
+@pytest.mark.asyncio
+async def test_named_actions_hit_documented_endpoints(
+    stub_gateway: StubGateway,
+) -> None:
+    """具名动作（``set_session_tools`` / ``release_session``）的 path 与请求体。
+
+    这两个端点上游 SDK 没有（``update_session`` 缺 ``tools`` 形参、release 未包装），
+    probe 用它们驱动工具热切换与逐出——形状漂移（path / 字段名）必须在这里变红，
+    而不是让场景在"改了不生效"的沉默里失败。
+    """
+    http = DriverHttp(stub_gateway.url, started_at=0.0)
+
+    updated = await http.set_session_tools("sid-1", ["Bash", "Read"])
+    assert updated == {
+        "ok": True,
+        "echo": {"session_id": "sid-1", "tools": ["Bash", "Read"]},
+    }, updated
+    released = await http.release_session("sid-1")
+    assert released == {"ok": True, "echo": {"session_id": "sid-1"}}, released
+
+    assert [(call.method, call.path, call.body) for call in http.calls] == [
+        (
+            "POST",
+            "/api/session/update",
+            {"session_id": "sid-1", "tools": ["Bash", "Read"]},
+        ),
+        ("POST", "/api/session/release", {"session_id": "sid-1"}),
+    ], http.calls
+    await http.close()
+
+
+@pytest.mark.asyncio
+async def test_list_tools_reads_registry_surface(stub_gateway: StubGateway) -> None:
+    """``list_tools`` 打 ``GET /api/tools``（注册表视图的具名动作）。"""
+    http = DriverHttp(stub_gateway.url, started_at=0.0)
+
+    payload = await http.list_tools()
+
+    assert [tool["llm_name"] for tool in payload["tools"]] == ["Bash"], payload
+    assert [(call.method, call.path) for call in http.calls] == [("GET", "/api/tools")]
     await http.close()

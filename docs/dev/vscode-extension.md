@@ -165,7 +165,7 @@ interface PanelsModel {
 
 1. 显式名字（`metadata.session_name`）优先；
 2. 否则首条用户消息**按 Unicode 码点直切片 100 个字符，无省略号**——这是后端
-   `first_user_message`（`store/base.py` 的 `content[:100]`）与 `session_manager.py` 的
+   `first_user_message`（`store/base.py` 的 `content[:100]`）与 `session/manager.py` 的
    auto-title 规则，两边必须逐字符一致，否则 Tab 上的标题会和 `/ss` 里的标题出现两种写法；
 3. 否则 workspace basename；
 4. 否则 `New session`。

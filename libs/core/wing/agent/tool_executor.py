@@ -15,12 +15,11 @@ import inspect
 import tempfile
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any
 
 from wing.common.logger import log
 from wing.config import get_config, get_wing_home
-from wing.hook_registry import hooks
-from wing.schema import Message, ToolCall, ToolError, ToolOutput
+from wing.hooks import hooks
+from wing.schema import Message, Tool, ToolCall, ToolError, ToolOutput
 
 from .event_sink import AgentEventSink
 
@@ -68,10 +67,9 @@ class ToolExecutor:
 
     def __init__(self, sink: AgentEventSink) -> None:
         self._sink = sink
-        # 工具表由外部设置（set_tools 时更新）
-        self._tools: dict[str, Any] = {}
+        self._tools: dict[str, Tool] = {}
 
-    def set_tools(self, tools: dict[str, Any]) -> None:
+    def set_tools(self, tools: dict[str, Tool]) -> None:
         self._tools = tools
 
     async def execute(
@@ -188,7 +186,6 @@ class ToolExecutor:
             return result
 
         try:
-            # Hook: before_tool_call
             modified_tc = await hooks.invoke_async("before_tool_call", tc)
             if modified_tc is not None:
                 tc = modified_tc
@@ -218,7 +215,7 @@ class ToolExecutor:
                 content = str(result)
                 media = []
 
-            # Hook: after_tool_call（只见文本——media 是引用元数据，hook 无权改写）
+            # hook 只见文本——media 是引用元数据，hook 无权改写
             modified_result = await hooks.invoke_async(
                 "after_tool_call",
                 content,

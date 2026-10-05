@@ -207,6 +207,23 @@ class Session:
         """压缩上下文（``instruction`` 为可选侧重指令）。"""
         return await self.driver.http.compact_session(self.session_id, instruction)
 
+    async def set_tools(self, tools: Sequence[str]) -> dict:
+        """切换工具集（全量替换，ref 格式：``namespace.name`` 或裸名）。
+
+        链非空时是**热切换**：LLM 可见声明集冻结、链上追加一条 System Reminder；
+        链空（或未初始化）时直接切换。声明集不在响应里——断言看下一轮请求体
+        （``probe.context(...).tool_names``）。
+        """
+        return await self.driver.http.set_session_tools(self.session_id, tools)
+
+    async def release(self) -> dict:
+        """逐出会话内存态（``POST /api/session/release``；被钉住时 409 抛错）。
+
+        只回收内存态，磁盘（history.jsonl / aux）不动；下一次"要求会话在场"的
+        调用按需水合（``probe.resume`` / subscribe / send）。
+        """
+        return await self.driver.http.release_session(self.session_id)
+
     async def rewind(self, target_uuid: str) -> dict:
         """回退到指定消息 uuid（响应的 ``draft`` 由调用方断言）。"""
         return await self.driver.http.rewind_session(self.session_id, target_uuid)

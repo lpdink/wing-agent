@@ -1,4 +1,4 @@
-# wing_gateway/routes/system.py — 系统级 HTTP 端点
+# wing/gateway/routes/system.py — 系统级 HTTP 端点
 
 """系统级端点：commands、models、agents、reload、shutdown。
 
@@ -26,11 +26,11 @@ from wing.gateway.protocol import (
     ToolInfo,
     ToolsListResponse,
 )
-from wing.magic_command.registry import magic_registry
+from wing.commands import magic_registry
 
 if TYPE_CHECKING:
     from wing.gateway.server import GatewayServer
-    from wing.provider import ProviderModels as ProviderModelsData
+    from wing.provider.registry import ProviderModels as ProviderModelsData
 
 router = APIRouter(tags=["system"])
 

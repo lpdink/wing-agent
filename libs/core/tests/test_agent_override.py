@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 
 from wing.event_bus import event_bus
-from wing.gateway.protocol import AgentOverride
+from wing.session import AgentOverride
 
 
 @pytest.fixture(autouse=True)
@@ -345,7 +345,7 @@ class TestMaxTurnsConfig:
 
     def test_agent_template_from_config_max_turns(self):
         """AgentTemplate.from_config 传递 max_turns。"""
-        from wing.agent_template import AgentTemplate
+        from wing.session import AgentTemplate
         from wing.config import AgentConfig
 
         config = AgentConfig(
@@ -356,7 +356,7 @@ class TestMaxTurnsConfig:
 
     def test_agent_template_from_config_default_none(self):
         """AgentTemplate.from_config 默认 max_turns 为 None。"""
-        from wing.agent_template import AgentTemplate
+        from wing.session import AgentTemplate
         from wing.config import AgentConfig
 
         # provider 绑定在 Config 解析阶段落定（此处模拟解析后的 AgentConfig）

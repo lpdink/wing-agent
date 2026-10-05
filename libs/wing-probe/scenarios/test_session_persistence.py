@@ -3,9 +3,9 @@
 **前缀身份**（缓存命中的前提）不只有消息：``system`` 段、``tools`` 声明与
 影响服务端处理的 body 开关（``enable_thinking`` / ``preserve_thinking`` /
 ``reasoning_effort``）都参与"前缀"。会话重建（fork 子会话构造、逐出后按需
-水合 resume）时它们必须逐字节复现——这正是本轮修复的 bug：hook 注入的
-追加系统提示词此前只存在于内存，fork / resume 重建 CM 即丢失，system 段
-从第 0 个 token 起就与重建前不同，整个上下文无法命中缓存。
+水合 resume）时它们必须逐字节复现。hook 注入的追加系统提示词只存在于内存，
+fork / resume 重建 CM 即丢失——system 段会从第 0 个 token 起与重建前不同，
+整个上下文无法命中缓存。
 
 覆盖：
 
@@ -42,7 +42,7 @@ HOOK_MARKER = "<probe-env>injected-at-create</probe-env>"
 #: 场景写入 ``<env.root>/hooks/`` 的 hook 源（模拟用户的 workspace_env_inject）。
 HOOK_SOURCE = '''"""probe hook：before_session_start 注入环境标记。"""
 
-from wing.hook_registry import hooks
+from wing.hooks import hooks
 
 
 @hooks.on("before_session_start")

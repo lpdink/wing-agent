@@ -3,8 +3,8 @@
 「图片文件 → 模型可见」这条链路的机制说明：`ReadImage` 工具、内容寻址的媒体存储、
 消息里的媒体引用、**请求期图片投影**（高水位 + 量子批量驱逐）与两条协议线格式。
 
-事实来源：代码 `libs/core/wing/{media.py,schema.py,store/,agent/,provider/,compactor.py}`、
-`libs/core/wing/tools/read_image.py`；整机证据 `libs/wing-probe/scenarios/test_read_image.py`
+事实来源：代码 `libs/core/wing/{media/,schema/,store/,agent/,provider/,context/compaction.py}`、
+`libs/core/wing/tools/builtin/read_image.py`；整机证据 `libs/wing-probe/scenarios/test_read_image.py`
 （本文末列 12 条场景）。本页只讲 *why* 与不变量，逐行契约以代码为准。
 
 ## 链路总览
@@ -29,12 +29,12 @@ openai: followup(默认) / inline      anthropic: inline(默认) / followup
 模型请求体里的 data URL / base64 image block      （字节由 provider 按需从存储读取）
 ```
 
-`ReadImage` 已在 `default_config.py` 的默认 agent 工具集里；未声明 vision 的模型调用它时
+`ReadImage` 已在 `wing/config/default_config.py` 的默认 agent 工具集里；未声明 vision 的模型调用它时
 按门禁安全拒绝（见下）。
 
 ## ReadImage 工具
 
-- 注册名 `ReadImage`，唯一参数 `path`（相对路径按会话 workspace 解析，见 `tools/utils.py`）。
+- 注册名 `ReadImage`，唯一参数 `path`（相对路径按会话 workspace 解析，见 `tools/internal/utils.py`）。
 - 支持 **PNG / JPEG / WebP / GIF**，以 magic bytes 判定，**不看扩展名**；尺寸用纯 Python 头部解析
   （PNG IHDR / GIF LSD / JPEG SOFn 扫描 / WebP VP8·VP8L·VP8X），不解码像素。
 - **能力门禁在任何文件 I/O 之前**：模型未声明 `capabilities.vision` 时直接拒绝
@@ -119,7 +119,7 @@ providers:
 
 ## 请求期图片投影（核心）
 
-实现：`wing/media.py::plan_request_media`（纯函数；provider 侧只做配置解析与消息对齐，
+实现：`wing/media/policy.py::plan_request_media`（纯函数；provider 侧只做配置解析与消息对齐，
 见 `provider/media.py::plan_for_request`）。
 
 ```python
@@ -200,7 +200,7 @@ def plan_request_media(messages, *, policy: MediaPolicy, vision: bool,
 ## 配置
 
 ```yaml
-images:                       # 顶层段（default_config.py 模板同步维护）
+images:                       # 顶层段（wing/config/default_config.py 模板同步维护）
   max_bytes: 4718592          # 单图原始字节上限 4.5 MiB（读时拒绝 + 降采样提示）
   max_images: 32              # 请求期计数高水位（超出触发批量驱逐）
   count_quantum: 8            # 计数驱逐量子（每次超限至少丢这么多张）

@@ -1,4 +1,4 @@
-"""Windowing of DiffContentEvent payloads (`wing.tools.diff_window`).
+"""Windowing of DiffContentEvent payloads (`wing.tools.internal.diff_window`).
 
 The payload used to be the whole file on both sides; it is now the changed
 region ± 3 context lines plus absolute start lines, and `replace_all` emits
@@ -13,8 +13,8 @@ import json
 
 import pytest
 
-from wing.event import DiffContentEvent, serialize_event
-from wing.tools.diff_window import (
+from wing.event import DiffContentEvent, wire_dump
+from wing.tools.internal.diff_window import (
     DIFF_CONTEXT_LINES,
     build_diff_events,
     find_all,
@@ -269,7 +269,7 @@ def test_payload_is_independent_of_file_size():
     assert small.new_text == large.new_text
     assert (small.old_start_line, small.new_start_line) == (47, 47)
     # The event itself stays tiny: it carries a window, not a file.
-    assert len(json.dumps(serialize_event(large)).encode()) < 2_000
+    assert len(json.dumps(wire_dump(large)).encode()) < 2_000
 
 
 def test_single_event_byte_bound():
@@ -290,7 +290,7 @@ def test_single_event_byte_bound():
         positions=find_all(old, "line 2500"),
     )
 
-    encoded = json.dumps(serialize_event(event)).encode()
+    encoded = json.dumps(wire_dump(event)).encode()
     assert len(encoded) < 8 * 1024, f"windowed event is {len(encoded)} bytes"
 
 

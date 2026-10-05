@@ -17,7 +17,7 @@ import json
 import pytest
 
 from wing.config import ProviderConfig
-from wing.provider.anthropic import AnthropicProvider
+from wing.provider.anthropic.provider import AnthropicProvider
 
 
 class _FakeResponse:

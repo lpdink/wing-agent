@@ -122,7 +122,6 @@ def with_retry(
 
             return wrapper
 
-        # async generator
         @wraps(func)
         async def async_gen_wrapper(
             *args: P.args, **kwargs: P.kwargs
@@ -135,7 +134,7 @@ def with_retry(
                 try:
                     async for item in func(*args, **kwargs):
                         yield item
-                    return  # success, exit generator
+                    return
                 except Exception as e:
                     if retry_on is not None and not isinstance(e, retry_on):
                         raise

@@ -31,7 +31,6 @@ RETENTION_DAYS = 7
 # Current `wing_YYYY-MM-DD.log` and legacy per-process `wing_YYYY-MM-DD-HH-MM-SS.log`.
 _LOG_NAME_RE = re.compile(r"^wing_(\d{4}-\d{2}-\d{2})(?:-\d{2}-\d{2}-\d{2})?\.log$")
 
-# ANSI color codes
 _COLORS = {
     "DEBUG": "\033[90m",
     "INFO": "\033[97m",
@@ -217,7 +216,7 @@ def install_loop_exception_logger() -> None:
 
     previous = loop.get_exception_handler()
     if isinstance(previous, _LoopExceptionLogger):
-        return  # 已安装（幂等：重复调用不叠处理器）
+        return
     loop.set_exception_handler(_LoopExceptionLogger(previous))
 
 

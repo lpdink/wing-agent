@@ -2,19 +2,18 @@
 
 ## 目录布局（WING_HOME）
 
-`WING_HOME` 覆盖 `~/.wing`；后端数据统一落在 `$WING_HOME/core`（`wing/config.py::get_wing_home()`）。`WING_SESSIONS_PATH` 额外覆盖 sessions 目录。
+`WING_HOME` 覆盖 `~/.wing`；后端数据统一落在 `$WING_HOME/core`（`wing/config/loader.py::get_wing_home()`）。`WING_SESSIONS_PATH` 额外覆盖 sessions 目录。
 
 ```
 ~/.wing/
 ├── core/
-│   ├── config.yaml     后端配置（唯一事实来源；缺失时由 default_config.py 模板生成）
+│   ├── config.yaml     后端配置（唯一事实来源；缺失时由 wing/config/default_config.py 模板生成）
 │   ├── logs/           后端日志
 │   │   ├── wing_YYYY-MM-DD.log            网关运行时日志（按本地日期，append；恒 DEBUG）
 │   │   ├── new.log → wing_YYYY-MM-DD.log  指向活跃后端日志的符号链接（仅后端；每次轮转 / setup 刷新）
 │   │   └── gateway.log                    网关守护进程 stdout/stderr（uvicorn 错误、traceback；append）
 │   ├── sessions/       会话持久化（metadata + history.jsonl + aux / metrics.json）；.media/ 为跨会话共享的图片媒体池（内容寻址）
-│   ├── metrics.json    全局指标（LLM / 工具调用 / 压缩，按天聚合）
-│   └── metrics_experimental.json  BetterEdit 实验审计
+│   └── metrics.json    全局指标（LLM / 工具调用 / 压缩，按天聚合）
 └── tui/
     ├── config.yaml     TUI 配置（colors / layout / rendering / goal / api_key）
     └── logs/           TUI 日志：wing_YYYY-MM-DD.log（命名同后端，无符号链接）
@@ -22,7 +21,7 @@
 
 ## 后端 config.yaml
 
-顶层键（手写注释模板即 `wing/default_config.py`，改 Config 字段时须同步维护）：
+顶层键（手写注释模板即 `wing/config/default_config.py`，改 Config 字段时须同步维护）：
 
 | 键 | 说明 |
 |----|------|
@@ -74,7 +73,7 @@ awk '$0 >= "2026-09-08 23:10" && $0 < "2026-09-08 23:30"' ~/.wing/tui/logs/wing_
 `POST /api/session/interrupt` 全程留下分段日志（网关端点 → agent → 锁 → cancel 看门狗），
 用于定位「interrupt 请求永不返回」这类现场——会话本身可能毫发无损，而锁死不释放
 （`interrupt()` 里 `await old` 无超时、cancel 只调一次：一次未生效的 cancel 就足以
-让后续所有 interrupt 排队）。实现与栈链覆盖范围见 `wing/agent/cancel_watch.py` 模块文档。
+让后续所有 interrupt 排队）。实现与栈链覆盖范围见 `wing/diagnostics/cancel_watch.py` 模块文档。
 
 一次正常 interrupt 的日志链（`request_id` 由端点生成、透传到 agent，两侧按同一 id 关联；
 agent 侧 tag 取前 8 位）：

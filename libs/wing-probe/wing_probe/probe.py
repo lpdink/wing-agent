@@ -40,7 +40,12 @@ from wing_probe.history.invariants import (
     assert_no_transient_records,
     assert_tool_pairing,
 )
-from wing_probe.history.view import HistoryView, read_metadata
+from wing_probe.history.view import (
+    HISTORY_FILE,
+    METADATA_FILE,
+    HistoryView,
+    read_metadata,
+)
 from wing_probe.driver.ws import GatewayWS
 from wing_probe.provider.context import ContextView
 from wing_probe.provider.request_log import LoggedRequest, RequestLog
@@ -66,11 +71,31 @@ DUMP_SESSIONS = "sessions"
 #: 网关日志全文拷贝的上限（超过则只留尾部，避免 artifacts 里塞进巨大文件）。
 DUMP_LOG_LIMIT = 2 * 1024 * 1024
 
-#: 内置不变量检查：名字（进失败报告，spec 要求"具体不变量名"）+ 断言函数。
+
+def invariant_checks(
+    *, allow_arguments_error: bool = False
+) -> tuple[tuple[str, Callable[[HistoryView], None]], ...]:
+    """内置不变量检查：名字（进失败报告，spec 要求"具体不变量名"）+ 断言函数。
+
+    ``allow_arguments_error`` 只放开 **tool 配对**里的"参数解析失败"口径（见
+    ``assert_tool_pairing``）——"模型吐出坏参数"是合法场景（短路回灌自纠），
+    但链拓扑与"瞬态不落盘"两条继续强制。默认关闭。
+    """
+    return (
+        ("chain_topology", assert_chain_invariants),
+        (
+            "tool_pairing",
+            lambda view: assert_tool_pairing(
+                view, allow_arguments_error=allow_arguments_error
+            ),
+        ),
+        ("no_transient_records", assert_no_transient_records),
+    )
+
+
+#: 默认（严格）口径的不变量集合——导入本名字的调用方无需感知开关。
 INVARIANT_CHECKS: tuple[tuple[str, Callable[[HistoryView], None]], ...] = (
-    ("chain_topology", assert_chain_invariants),
-    ("tool_pairing", assert_tool_pairing),
-    ("no_transient_records", assert_no_transient_records),
+    invariant_checks()
 )
 
 
@@ -90,13 +115,15 @@ class ProbeInvariantError(AssertionError):
         super().__init__(report)
 
 
-def run_invariants(views: Sequence[HistoryView]) -> list[str]:
+def run_invariants(
+    views: Sequence[HistoryView], *, allow_arguments_error: bool = False
+) -> list[str]:
     """对一个 session 的全部视图运行三条内置不变量，返回问题清单（不抛）。
 
     每条问题形如 ``[chain_topology] session <id>: <底层报告>``——来源、位置与
-    原因都在一行里可读。
+    原因都在一行里可读。``allow_arguments_error`` 见 :func:`invariant_checks`。
     """
-    checks = INVARIANT_CHECKS
+    checks = invariant_checks(allow_arguments_error=allow_arguments_error)
     problems: list[str] = []
     for view in views:
         for name, check in checks:
@@ -127,9 +154,12 @@ class Probe:
         *,
         driver: Driver | None = None,
         workspace: str | Path | None = None,
+        api_key: str | None = None,
     ) -> None:
         self.env = env
         self.driver = driver
+        self.api_key = api_key
+        """连网关用的 API key（auth 关闭的缺省场景为 None；见 ``connect_driver``）。"""
         self.workspace = (
             Path(workspace).expanduser().resolve()
             if workspace is not None
@@ -138,6 +168,8 @@ class Probe:
         """默认 workspace（``probe.session()`` 不带 workspace 时的会话工作目录）。"""
         self.invariants_reason: str | None = None
         """``without_invariants(reason)`` 的理由（None = 不变量正常运行）。"""
+        self.arguments_error_reason: str | None = None
+        """``allow_arguments_error(reason)`` 的理由（None = tool 配对按严格口径）。"""
         self._last_dump: Path | None = None
         self._checked_session_ids: list[str] = []
 
@@ -150,19 +182,34 @@ class Probe:
         *,
         workspace: str | Path | None = None,
         connect: bool = True,
+        api_key: str | None = None,
         **env_kwargs: Any,
     ) -> Probe:
-        """自举环境（+ 默认 workspace 目录）并连接 driver 与会话断言面。"""
+        """自举环境（+ 默认 workspace 目录）并连接 driver 与会话断言面。
+
+        ``api_key`` 是连网关的凭据（``Env`` 侧 ``auth`` 打开时必给）——只作用于
+        driver 的 HTTP / WS 两条客户端，不透传给 ``ProbeEnv``（配置里的 key 由
+        ``auth`` 段决定）。见 :meth:`connect_driver`。
+        """
         env = await ProbeEnv.start(root, **env_kwargs)
-        probe = cls(env, workspace=workspace)
+        probe = cls(env, workspace=workspace, api_key=api_key)
         probe.workspace.mkdir(parents=True, exist_ok=True)
         try:
             if connect:
-                probe.driver = await Driver.connect(env)
+                await probe.connect_driver()
         except BaseException:
             await env.stop()
             raise
         return probe
+
+    async def connect_driver(self) -> Driver:
+        """建立（或重建）driver 连接——``api_key`` 唯一一处透传点。
+
+        ``Probe.start(connect=True)`` 与 :meth:`restart_gateway` 都走这里，
+        保证"重启后仍带同一把 key"不是两处独立代码。
+        """
+        self.driver = await Driver.connect(self.env, api_key=self.api_key)
+        return self.driver
 
     async def stop(self) -> None:
         """关闭 driver 与网关子进程（幂等、不抛——失败场景的 teardown 也要安全）。"""
@@ -254,6 +301,22 @@ class Probe:
         """恢复磁盘上的会话并订阅（留给"重启后仍在"的断言）。"""
         return await self.driver_required.resume(session_id)
 
+    async def restart_gateway(self) -> None:
+        """重启网关进程并重连 driver（跨进程重启语义的入口）。
+
+        进程死了，driver 的 WS 连接也死了（``client_id`` 随进程消失、订阅随之
+        失效）：关掉旧连接、连一个新 driver（新 ``client_id``，同一把
+        ``api_key``）。**已挂载的会话句柄不再收到事件**——用 :meth:`resume`（或
+        ``subscribe``）在新进程里重新挂载，这与真实重启的用户路径一致。假
+        Provider 不重启：剧本与请求留档跨重启连续（``probe.requests`` 因此能
+        对账重启前后的请求）。
+        """
+        await self.env.restart_gateway()
+        previous, self.driver = self.driver, None
+        if previous is not None:
+            await previous.close()
+        await self.connect_driver()
+
     # ── 断言面 ────────────────────────────────────────────────
 
     @property
@@ -325,6 +388,24 @@ class Probe:
             )
         self.invariants_reason = reason.strip()
 
+    def allow_arguments_error(self, reason: str) -> None:
+        """窄口径放开：tool 配对不变量不再把 ``arguments_error`` 视为违规。
+
+        用于**有意**构造"模型吐出坏参数"的场景（短路回灌自纠——坏参数是合法
+        形态，见 ``assert_tool_pairing`` 的 ``allow_arguments_error``）。与
+        ``without_invariants`` 同纪律：**必须**给理由（进现场转储与失败报告），
+        且只放开这一个口径——链拓扑与"瞬态记录不落盘"继续强制。
+
+        Raises:
+            ProbeError: ``reason`` 为空 / 全空白 / 非字符串。
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise ProbeError(
+                "allow_arguments_error() requires a non-empty reason string "
+                "(the reason is written into the artifacts dump and failure report)"
+            )
+        self.arguments_error_reason = reason.strip()
+
     def check_invariants(self, views: Sequence[HistoryView] | None = None) -> list[str]:
         """对全部已挂载 session 运行内置不变量，返回问题清单（不抛）。
 
@@ -341,7 +422,9 @@ class Probe:
             else [self.history(session) for session in self._attached_sessions()]
         )
         self._checked_session_ids = [view.session_id for view in resolved]
-        return run_invariants(resolved)
+        return run_invariants(
+            resolved, allow_arguments_error=self.arguments_error_reason is not None
+        )
 
     def invariant_report(self, problems: Sequence[str]) -> str:
         """把不变量问题渲染成场景失败报告（含来源标注 / session id / 理由）。
@@ -361,6 +444,12 @@ class Probe:
             lines.append(
                 f"NOTE: probe.without_invariants(reason={self.invariants_reason!r}) "
                 "was called for this scenario"
+            )
+        if self.arguments_error_reason is not None:
+            lines.append(
+                "NOTE: probe.allow_arguments_error("
+                f"reason={self.arguments_error_reason!r}) was called for this "
+                "scenario (tool pairing tolerates unparsable tool arguments)"
             )
         if self._last_dump is not None:
             lines.append(f"artifacts: {self._last_dump}")
@@ -383,7 +472,8 @@ class Probe:
         - ``http.jsonl``：driver 的 HTTP 调用留档（method / path / body / status /
           response）；
         - ``requests.json``：假 Provider 收到的原始请求体（LLM 请求的事实来源）；
-        - ``sessions/<id>/history.jsonl`` / ``metadata.json``：落盘拷贝；
+        - ``sessions/<id>/history.jsonl`` / ``metadata.json`` / aux kv
+          （``<key>.json``，如后台压缩的 ``pending_compact``）：落盘拷贝；
         - ``gateway.log`` / ``gateway.log.tail``：网关日志（全文 / 尾部）；
         - ``dump.txt``：环境、会话清单、逃生舱理由与文件清单。
         """
@@ -497,13 +587,25 @@ class Probe:
         return sorted(found.items())
 
     def _dump_sessions(self, target: Path) -> list[str]:
+        """落盘拷贝：链 + 元数据 + **全部 aux kv**（``<key>.json``）。
+
+        aux 是"内存态 · 待生效 · 跨重启"状态的唯一落点（如后台压缩的
+        ``pending_compact``）——失败现场少了它，"待生效状态到底有没有落盘"
+        就无法离线复盘。按后缀收（而不是写死 key 名）：新增 aux key 自动进现场。
+        """
         written: list[str] = []
         root = target / DUMP_SESSIONS
         root.mkdir(parents=True, exist_ok=True)
         for session_id, session_dir in self._session_dirs():
             dest = root / session_id
             dest.mkdir(parents=True, exist_ok=True)
-            for name in ("history.jsonl", "metadata.json", "aux.json"):
+            names = [HISTORY_FILE, METADATA_FILE]
+            names += sorted(
+                path.name
+                for path in session_dir.glob("*.json")
+                if path.name not in names
+            )
+            for name in names:
                 source = session_dir / name
                 if source.is_file():
                     (dest / name).write_bytes(source.read_bytes())
@@ -559,6 +661,12 @@ class Probe:
                 "built-in invariants DISABLED via probe.without_invariants("
                 f"reason={self.invariants_reason!r})"
             )
+        if self.arguments_error_reason is not None:
+            lines.append(
+                "tool pairing tolerates unparsable arguments via "
+                "probe.allow_arguments_error("
+                f"reason={self.arguments_error_reason!r})"
+            )
         if self._last_dump is not None:
             lines.append(f"previous dump: {self._last_dump}")
         lines.append("files:")
@@ -577,6 +685,7 @@ __all__ = [
     "DUMP_SUMMARY",
     "DUMP_TIMELINE",
     "INVARIANT_CHECKS",
+    "invariant_checks",
     "Probe",
     "ProbeError",
     "ProbeInvariantError",

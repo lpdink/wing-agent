@@ -16,7 +16,7 @@ import pytest
 
 from wing.schema import ToolError
 from wing.tool_registry import tool_registry
-from wing.tools.file import edit_file
+from wing.tools.builtin.edit import edit_file
 
 
 class _StubCtx:

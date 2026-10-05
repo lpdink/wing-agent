@@ -21,8 +21,8 @@ import json
 import pytest
 
 from wing.config import AgentConfig, Config, ProviderConfig
-from wing.provider.anthropic import AnthropicProvider
-from wing.provider.openai_compat import OpenAICompatProvider
+from wing.provider.anthropic.provider import AnthropicProvider
+from wing.provider.openai.provider import OpenAICompatProvider
 from wing.schema import (
     Message,
     TextBlock,
@@ -705,7 +705,7 @@ class TestThinkingStatus:
     @pytest.mark.asyncio
     async def test_set_thinking_enable_fills_default_budget(self):
         """无 thinking 配置时启用：补默认预算（type=enabled 必带 budget）。"""
-        from wing.provider.anthropic import _DEFAULT_THINKING_BUDGET
+        from wing.provider.anthropic.provider import _DEFAULT_THINKING_BUDGET
 
         p = _make_anthropic({})
         try:
@@ -726,7 +726,7 @@ class TestThinkingStatus:
 class TestProviderLifecycle:
     @pytest.fixture
     def sm(self):
-        from wing.session_manager import SessionManager
+        from wing.session import SessionManager
         from wing.store import MemorySessionStore
 
         return SessionManager(
@@ -781,7 +781,7 @@ class TestProviderLifecycle:
 
         锁定 bot#1 修复：switch_template 后不得交回已关闭的 client。
         """
-        from wing.agent_template import AgentTemplate
+        from wing.session import AgentTemplate
 
         session = sm.create_session()
         agent_v1 = session.agent
@@ -800,7 +800,7 @@ class TestProviderLifecycle:
             agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
         )
         monkeypatch.setattr("wing.agent.core.get_config", lambda: two)
-        monkeypatch.setattr("wing.session.get_config", lambda: two)
+        monkeypatch.setattr("wing.session.session.get_config", lambda: two)
         session._apply_model("model-2", provider_name="p2")
         p2 = agent_v1._providers["p2"]
 

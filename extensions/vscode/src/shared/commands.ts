@@ -215,7 +215,7 @@ export function isEffortLevel(value: string): value is EffortLevel {
  * The `current` branch target's uuid on the wire.
  *
  * The gateway appends it as the last entry of `get_branch_targets()`
- * (`libs/core/wing/context_manager.py:925`: `{"uuid": "current", "content": "(current)"}`),
+ * (`libs/core/wing/context/manager.py:765`: `{"uuid": "current", "content": "(current)"}`),
  * meaning "the newest state" rather than a message. The **host** normalizes it into
  * `BranchTargetModel.current`; the webview renders that flag (the constant stays
  * here for the host and for the fixtures that build a gateway-shaped list).

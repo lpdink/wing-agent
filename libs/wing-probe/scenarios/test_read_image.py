@@ -49,7 +49,7 @@ TEXT_SPEC: dict[str, Any] = {
     "capabilities": {"vision": False},
 }
 
-# ── 协议常量（frozen strings；见 wing/media.py 与 wing/provider/media.py） ──
+# ── 协议常量（frozen strings；见 wing/media/ 与 wing/provider/media.py） ──
 #
 # 这里按**字面量**断言：AST 门禁（`wing_probe/guard.py`）禁止 probe 侧
 # `import wing`，实现常量不可导入——本文件是外部实现，字面量即线上的事实。

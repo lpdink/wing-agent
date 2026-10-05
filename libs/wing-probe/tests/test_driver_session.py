@@ -155,3 +155,37 @@ async def test_chat_fails_fast_on_error_event(
     assert failure.value.focus is not None
     assert failure.value.focus.type == "error"
     await driver.close()
+
+
+@pytest.mark.asyncio
+async def test_session_state_actions_delegate_to_http(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``Session.set_tools`` / ``Session.release`` 打到 HTTP 动作（会话 id 不许丢）。"""
+    driver = Driver(FakeEnv(tmp_path))
+    session = await driver.attach("sid-1", subscribe=False)
+    calls: list[tuple[str, str, object]] = []
+
+    async def fake_set_tools(session_id: str, tools: list[str]) -> dict:
+        calls.append(("tools", session_id, list(tools)))
+        return {"ok": True}
+
+    async def fake_release(session_id: str) -> dict:
+        calls.append(("release", session_id, None))
+        return {"ok": True, "released": True, "detail": "released"}
+
+    monkeypatch.setattr(driver.http, "set_session_tools", fake_set_tools)
+    monkeypatch.setattr(driver.http, "release_session", fake_release)
+
+    assert await session.set_tools(["Bash", "Read", "Write"]) == {"ok": True}
+    assert await session.release() == {
+        "ok": True,
+        "released": True,
+        "detail": "released",
+    }
+
+    assert calls == [
+        ("tools", "sid-1", ["Bash", "Read", "Write"]),
+        ("release", "sid-1", None),
+    ], calls
+    await driver.close()

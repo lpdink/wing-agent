@@ -67,10 +67,9 @@ class ToolCallStreamEvent(WingEvent):
 
 class ToolCallResultEvent(WingEvent):
     type: Literal["tool_call_result"] = "tool_call_result"
-    # tool Message 的孪生：≤ tool_result_truncate.max_length 时逐字节相同，
-    # 超限时事件带全量、入链 Message 是存储截断版（head/marker/tail）。无代码
-    # 从磁盘读回——停止落盘（事件本身保留：3 个 metrics handler + TUI 直播
-    # 路径依赖，走 event_bus 而非读回磁盘）。
+    # tool Message 的孪生：≤ tool_result_truncate.max_length 时逐字节相同，超限时
+    # 事件带全量、入链 Message 是存储截断版（head/marker/tail）。不落盘，也没有
+    # 代码从磁盘读回——事件本身保留：metrics handler + TUI 直播路径经 event_bus 消费。
     persist: ClassVar[bool] = False
     tool_name: str
     tool_args: dict[str, Any]
@@ -108,10 +107,9 @@ class ToolCallResultEvent(WingEvent):
 
 class LLMCallMetricsEvent(WingEvent):
     type: Literal["llm_call_metrics"] = "llm_call_metrics"
-    # 与 Message.usage + Message.stop_reason 逐字段等价——停止落盘（截断审计
-    # 的唯一落盘位置收敛为 Message.stop_reason + Message.usage）。事件本身
-    # 保留：metrics_registry 经 event_bus 聚合进独立的 metrics.json，且直播
-    # 路径的用量/截断提示依赖它。
+    # 与 Message.usage + Message.stop_reason 逐字段等价，不落盘（截断审计的落盘
+    # 位置是 Message）。事件本身保留：audit 经 event_bus 聚合进独立的 metrics.json，
+    # 直播路径的用量/截断提示依赖它。
     persist: ClassVar[bool] = False
     model: str = ""
     prompt_tokens: int
@@ -167,7 +165,7 @@ class UserMessageAcceptedEvent(WingEvent):
          steer note 进入下一轮。
 
     origin_request_id 是客户端提交时的 ClientRequest.request_id，前端用它
-    关联本地排队状态；无 request_id 的内部投递（如 Explorer 回传）不发射。
+    关联本地排队状态；无 request_id 的内部投递不发射。
 
     与 DeliveredEvent 的区别：Delivered 是 transport ack（到达网关即发），
     本事件是消费确认（消息真正进入模型上下文才发）。
@@ -181,12 +179,12 @@ class UserMessageAcceptedEvent(WingEvent):
 class DiffContentEvent(WingEvent):
     """工具产生的 diff 内容，前端据此渲染 DiffView。
 
-    tool_call_id 关联产生此 diff 的工具调用（Write/Edit/BetterEdit）。
+    tool_call_id 关联产生此 diff 的工具调用（Write/Edit）。
     并发工具调用场景下事件乱序到达，前端据此把 diff 锚定到对应
     ToolCall cell 之后，而非追加到聊天尾部。取自 agent.py 的
     current_tool_call_id()（exec_tool_calls 为每个 gather task 设置）。
 
-    **载荷是窗口**：Edit / BetterEdit 的 old_text/new_text 只携带变更区域
+    **载荷是窗口**：Edit 的 old_text/new_text 只携带变更区域
     ± 上下文行（``tools/diff_window.py`` 的 ``DIFF_CONTEXT_LINES``），而非
     整份文件；``replace_all`` 每个匹配位置一条事件（同一 tool_call_id）。
     窗口首行在各自修订版中的 1 起绝对行号见 old_start_line/new_start_line

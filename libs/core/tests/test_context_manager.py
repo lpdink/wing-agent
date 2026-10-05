@@ -15,9 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from wing.context_manager import ContextManager
-from wing.common.tracked_list import TrackedList
-from wing.store import FileMessageLog
+from wing.context import ContextManager
+from wing.chain import TrackedList
+from wing.store.file import FileMessageLog
 from wing.schema import ChainNode, Message
 
 
@@ -48,7 +48,7 @@ def _read_history(path: Path) -> list[dict]:
 
 def _make_cm(tmp_dir: Path, session_id: str | None = None) -> ContextManager:
     """Create a ContextManager for testing under tmp_dir."""
-    from wing.compactor import Compactor
+    from wing.context import Compactor
 
     sid = session_id or "test-session"
     messages: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir / sid))
@@ -488,7 +488,7 @@ class TestGetBranchTargets:
 
 def _make_cm_with_rules(tmp_dir: Path, rules_patterns: list[str]) -> ContextManager:
     """构造带 rules_patterns 的 ContextManager（复用 _make_cm 的组装方式）。"""
-    from wing.compactor import Compactor
+    from wing.context import Compactor
 
     sid = "test-session-rules"
     messages: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir / sid))

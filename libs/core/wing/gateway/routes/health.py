@@ -1,4 +1,4 @@
-# wing_gateway/routes/health.py — 健康检查端点
+# wing/gateway/routes/health.py — 健康检查端点
 
 """GET /api/health — 服务健康检查。"""
 

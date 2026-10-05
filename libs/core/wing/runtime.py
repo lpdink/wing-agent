@@ -20,8 +20,6 @@ wing/runtime.py — WingRuntime：service 层协调者
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
 from wing.event import (
     BranchTargetInfo,
     BranchTargetsEvent,
@@ -36,44 +34,21 @@ from wing.event import (
     WingEvent,
 )
 from wing.event_bus import event_bus
-from wing.config import get_config, load_hooks
+from wing.config import get_config
+from wing.hooks import load_hooks
 from wing.request_context import (
     get_request_context,
     reset_request_context,
     set_request_context,
 )
 from typing import TYPE_CHECKING
-from wing.session import Session
-from wing.session_manager import SessionManager
-from wing.session_reaper import SessionReaper
+from wing.session import Session, SessionManager, SessionReaper
+from wing.system import ReloadResult, reload_system as _reload_system
 from wing.store import FileSessionStore, MemorySessionStore, SessionStore
 
 if TYPE_CHECKING:
-    from wing.agent_template import AgentTemplateManager
-    from wing.gateway.protocol import AgentOverride
-    from wing.provider import ProviderModels
-
-
-# ============================================================
-# 公共数据类
-# ============================================================
-
-
-@dataclass
-class ReloadResultItem:
-    """reload_system 中单项重载的结果。"""
-
-    name: str
-    ok: bool
-    detail: str | None = None
-
-
-@dataclass
-class ReloadResult:
-    """reload_system 的完整结果。"""
-
-    ok: bool
-    items: list[ReloadResultItem] = field(default_factory=list)
+    from wing.provider.registry import ProviderModels
+    from wing.session import AgentOverride, AgentTemplateManager
 
 
 # ============================================================
@@ -89,6 +64,15 @@ class WingRuntime:
     """
 
     def __init__(self) -> None:
+        # 显式安装内置能力（顶层 wing/__init__ 不再有 import 副作用）：
+        #   - import wing.tools：装饰器注册内置工具（第一次 tool_registry.resolve
+        #     之前必须完成，否则 AgentTemplate.from_config 解析不到任何工具）
+        #   - audit.install()：注册 handler 并订阅 EventBus（幂等）
+        import wing.tools  # noqa: F401
+        from wing.audit import install as install_metrics
+
+        install_metrics()
+
         load_hooks(get_config().hooks)
         # TODO(future): config 驱动的 backend 选择（sessions.backend / dsn）——
         # SQL 后端（SQLite/PG/Supabase）到来时的扩展点。
@@ -128,7 +112,6 @@ class WingRuntime:
                 content=content,
                 request_id=request_id,
                 session_id=session_id,
-                client_id=client_id,
                 tool_call_id=tool_call_id,
             )
         finally:
@@ -209,7 +192,7 @@ class WingRuntime:
 
         Raises:
             LookupError: 内存与磁盘都没有该会话
-            RuntimeError: 被钉住（忙碌 / 有后台任务 / 被订阅 / 非持久后端）
+            RuntimeError: 被钉住（忙碌 / 有待处理输入 / 被订阅 / 非持久后端）
         """
         return self.sm.release_session(session_id)
 
@@ -345,7 +328,7 @@ class WingRuntime:
         draft = cm.rewind(target_uuid)
         self._emit_context_stats(session)
 
-        from wing.event import serialize_event
+        from wing.event import wire_dump
 
         turn_started_at = (
             agent.turn_started_at.isoformat() if agent.turn_started_at else None
@@ -357,7 +340,7 @@ class WingRuntime:
                 uncommitted=agent.uncommitted_message(),
                 uncommitted_tools=agent.uncommitted_tools(),
                 events=[
-                    serialize_event(e)
+                    wire_dump(e)
                     for e in cm.get_active_events(
                         pending_ask_ids=agent.pending_ask_ids()
                     )
@@ -402,7 +385,6 @@ class WingRuntime:
         """
         session = self._require_session(session_id)
 
-        # 解析 template（如有）
         template = None
         if agent is not None:
             template = self.template_manager.get(agent)
@@ -412,7 +394,6 @@ class WingRuntime:
                     f"template '{agent}' not found, available: {available}"
                 )
 
-        # 委托给 Session 执行状态变更
         await session.update_state(
             model=model,
             provider_name=provider,
@@ -457,7 +438,7 @@ class WingRuntime:
         转发 provider 包 registry（模块级持有所有 provider client；配置了
         静态 models 的 provider 跳过请求）。gateway 路由经此获取，不感知 config。
         """
-        from wing.provider import list_all_models
+        from wing.provider.registry import list_all_models
 
         return await list_all_models()
 
@@ -465,86 +446,11 @@ class WingRuntime:
         """热重载全局配置、hooks、prompt commands、provider、skills & rules。
 
         config 加载失败时立即中止。其余项失败时继续。
+
+        流程本体在 ``wing/system.py``（11 归位：逐字自本方法抽出，步骤顺序与
+        失败语义不变）——本方法只做委托，调用点（gateway 路由）不变。
         """
-        from wing.config import load_config, load_hooks
-        from wing.hook_registry import hooks
-        from wing.magic_command.prompt_commands import register_prompt_commands
-        from wing.magic_command.registry import magic_registry
-
-        items: list[ReloadResultItem] = []
-
-        # 1. Reload config
-        try:
-            config = load_config(reload=True)
-            items.append(ReloadResultItem(name="config.yaml", ok=True))
-        except Exception as e:
-            items.append(ReloadResultItem(name="config.yaml", ok=False, detail=str(e)))
-            return ReloadResult(ok=False, items=items)
-
-        # 2. Reload hooks
-        try:
-            hooks.clear()
-            load_hooks(config.hooks)
-            items.append(ReloadResultItem(name="hooks", ok=True))
-        except Exception as e:
-            items.append(ReloadResultItem(name="hooks", ok=False, detail=str(e)))
-
-        # 3. Reload prompt commands
-        try:
-            magic_registry.remove_by_source("prompt")
-            register_prompt_commands(config.commands.paths)
-            items.append(ReloadResultItem(name="prompt commands", ok=True))
-        except Exception as e:
-            items.append(
-                ReloadResultItem(name="prompt commands", ok=False, detail=str(e))
-            )
-
-        # 4. Rebuild provider clients — 所有 session（驱逐重建：按新配置重建
-        #    活跃 provider 后关闭旧 client；配置变更随重建自然生效）。
-        #    模型列表 registry 一并重置（下次查询按新配置重建）。
-        #    单 session 失败不阻断其余 session（否则一个坏 session 会让其他
-        #    session 悄悄留着旧凭据——正是驱逐重建要修的 bug）。
-        try:
-            from wing.provider import reset_registry
-
-            await reset_registry()
-            rebuilt = 0
-            failures: list[str] = []
-            for session in self.sm.iter_sessions():
-                try:
-                    # 快照遍历期间可能发生逐出/拆解：已不在内存的会话跳过，
-                    # 否则会给已关闭 provider 的 agent 重建 client 且无人回收。
-                    if self.sm.get_session(session.session_id) is None:
-                        continue
-                    await session.agent.rebuild_providers()
-                    # provider 实例换了：记录在案的 provider 级开关（thinking /
-                    # reasoning_effort）重贴，否则 reload 后 live 悄悄退回配置
-                    # 默认、请求前缀随之漂移（Session 持有记录，见其 docstring）。
-                    session.reapply_provider_options()
-                    rebuilt += 1
-                except Exception as e:
-                    failures.append(f"{session.session_id}: {e}")
-            detail = f"rebuilt {rebuilt} session(s)"
-            if failures:
-                detail += "; failed: " + ", ".join(failures)
-            items.append(
-                ReloadResultItem(name="provider", ok=not failures, detail=detail)
-            )
-        except Exception as e:
-            items.append(ReloadResultItem(name="provider", ok=False, detail=str(e)))
-
-        # 5. Reload skills & rules for all active sessions
-        try:
-            for session in self.sm.iter_sessions():
-                session.agent.context_manager.reload_skills_and_rules()
-            items.append(ReloadResultItem(name="skills & rules", ok=True))
-        except Exception as e:
-            items.append(
-                ReloadResultItem(name="skills & rules", ok=False, detail=str(e))
-            )
-
-        all_ok = all(item.ok for item in items)
-        return ReloadResult(ok=all_ok, items=items)
+        return await _reload_system(self.sm)
 
     # ============================================================
     # 内部辅助
@@ -565,7 +471,7 @@ class WingRuntime:
         persist=true 且 session 给定时先落盘进链（与 AgentEventSink 同一
         持久化语义）；session 为 None 的事件（无会话上下文）只广播。
         request_id 在落盘前从 RequestContext 定型注入——磁盘记录与广播
-        帧携带同一关联值（与 AgentEventSink._emit 一致）。
+        帧携带同一关联值（与 AgentEventSink.emit 一致）。
         """
         ctx = get_request_context()
         if ctx.request_id is not None:
@@ -606,7 +512,7 @@ class WingRuntime:
         （恢复 working 已耗时）。
         """
         client_target = EventTarget(scope="client", client_ids=[client_id])
-        from wing.event import serialize_event
+        from wing.event import wire_dump
 
         cm = session.context_manager
         agent = session.agent
@@ -621,7 +527,7 @@ class WingRuntime:
                 uncommitted=agent.uncommitted_message(),
                 uncommitted_tools=agent.uncommitted_tools(),
                 events=[
-                    serialize_event(e)
+                    wire_dump(e)
                     for e in cm.get_active_events(
                         pending_ask_ids=agent.pending_ask_ids()
                     )

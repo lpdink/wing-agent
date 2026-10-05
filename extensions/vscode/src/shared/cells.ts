@@ -159,7 +159,7 @@ export interface DiffCellModel extends CellBase {
   readonly removed: number;
   /** True when the host windowed the payload (renderer shows a "…" affordance). */
   readonly truncated: boolean;
-  /** Anchoring tool call (Write / Edit / BetterEdit), when known. */
+  /** Anchoring tool call (Write / Edit), when known. */
   readonly toolCallId: ToolCallId | null;
 }
 

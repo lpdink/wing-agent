@@ -10,10 +10,9 @@ from typing import AsyncIterator
 
 import pytest
 
-from wing.compactor import Compactor
-from wing.common.tracked_list import TrackedList
-from wing.store import FileMessageLog
-from wing.context_manager import ContextManager, PendingCompact
+from wing.context import Compactor, ContextManager, PendingCompact
+from wing.chain import TrackedList
+from wing.store.file import FileMessageLog
 from wing.schema import ChainNode, LLMResponse, LLMUsage, Message
 
 

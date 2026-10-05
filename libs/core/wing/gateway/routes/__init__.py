@@ -1,4 +1,4 @@
-# wing_gateway/routes/__init__.py — 路由注册
+# wing/gateway/routes/__init__.py — 路由注册
 
 """统一注册所有 APIRouter 到 FastAPI app。"""
 

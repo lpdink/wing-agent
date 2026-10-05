@@ -10,7 +10,7 @@
 import tempfile
 from pathlib import Path
 
-from wing.hook_registry import HookRegistry, hooks
+from wing.hooks import HookRegistry, hooks
 
 MAX_TRUNCATE_LENGTH = 50000
 KEEP_HEAD_LENGTH = 100

@@ -27,9 +27,8 @@ from wing.config import ModelCapabilities, ModelSpec
 from wing.media import MediaAccess
 from wing.schema import ToolError, ToolOutput
 from wing.tool_registry import tool_registry
-from wing.tools.explorer import _READONLY_TOOL_NAMES
-from wing.tools.file import read_file
-from wing.tools.read_image import read_image
+from wing.tools.builtin.read import read_file
+from wing.tools.builtin.read_image import read_image
 
 
 def png_bytes(width: int, height: int) -> bytes:
@@ -599,8 +598,8 @@ class TestToolDescription:
     """描述 = 模型可见文本：保留成功路径 + 形态说明，不枚举失败路径。
 
     失败路径的完整信息由**拒绝发生时的错误文案**给出（`_no_vision_message` /
-    `_too_large_error`），静态描述只留成功语义与可行动形态——这是本步骤的有意
-    取舍（见 03_media_cap/design.md D3），改动必须让本类变红。
+    `_too_large_error`），静态描述只留成功语义与可行动形态——有意取舍
+    （见 03_media_cap/design.md D3），改动必须让本类变红。
     """
 
     @staticmethod
@@ -636,7 +635,7 @@ class TestToolDescription:
         )
 
 
-########## 8. Read 的图片指引 / Explorer 工具集
+########## 8. Read 的图片指引
 
 
 class TestReadHint:
@@ -659,14 +658,6 @@ class TestReadHint:
             await read_file(str(blob), ctx=None)  # type: ignore[arg-type]
         assert "Binary file" in str(ei.value)
         assert "ReadImage" not in str(ei.value)
-
-
-class TestExplorerReadOnlySet:
-    def test_read_image_in_readonly_set(self):
-        assert _READONLY_TOOL_NAMES == ("Read", "ReadImage", "Glob", "Grep")
-        # 集合内每个名字都可解析（注册名拼错会在这里变红）
-        for name in _READONLY_TOOL_NAMES:
-            assert tool_registry.resolve(name) is not None
 
 
 ########## 9. WingAgent.capabilities 跟随模型切换

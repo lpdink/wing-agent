@@ -2,13 +2,13 @@
 
 from pathlib import Path
 
-from wing.magic_command.prompt_commands import (
+from wing.commands import (
     expand_prompt_command,
     load_prompt_command_from_file,
     load_prompt_commands_from_paths,
+    magic_registry,
     register_prompt_commands,
 )
-from wing.magic_command.registry import magic_registry
 
 
 class TestLoadPromptCommandFromFile:

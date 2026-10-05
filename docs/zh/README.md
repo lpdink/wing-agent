@@ -77,7 +77,7 @@ agents:
   - name: default
     model: "gpt-4o"                          # ← 你的模型
     default: true
-    tools: [Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, TodoWrite, Explorer]
+    tools: [Bash, Read, ReadImage, Write, Edit, Glob, Grep, AskUserQuestion, TodoWrite]
 ```
 
 然后启动 wing：
@@ -91,7 +91,7 @@ wing         # 重新启动
 
 ## 配置
 
-后端配置：`~/.wing/core/config.yaml` —— 首次运行自动生成，模板带完整注释（见 `wing/default_config.py`）。
+后端配置：`~/.wing/core/config.yaml` —— 首次运行自动生成，模板带完整注释（见 `wing/config/default_config.py`）。
 前端配置：`~/.wing/tui/config.yaml`
 
 ## 内置工具
@@ -107,8 +107,6 @@ wing         # 重新启动
 | `ReadImage` | 把图片（截图、架构图、图表）交给视觉模型 |
 | `AskUserQuestion` | 向用户提问 |
 | `TodoWrite` | 跟踪任务进度 |
-| `Explorer` | 自主代码探索子 agent（可阻塞或后台运行） |
-| `BetterEdit` | 锚定 `[upto]` 编辑（实验性） |
 
 自定义工具：**[docs/zh/custom-tools.md](custom-tools.md)**
 

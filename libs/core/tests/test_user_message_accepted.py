@@ -7,7 +7,7 @@
      turn_started）；
   2. 工具执行后的 steer 注入——消息早于/期间工具调用发送。
 
-无 request_id 的内部投递（如 Explorer 回传）不发射。
+无 request_id 的内部投递不发射。
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ async def _stop_worker(agent) -> None:
 
 
 def _put(agent, content: str, request_id: str | None = None) -> None:
-    from wing.agent import Inbound
+    from wing.agent.inbox import Inbound
     from wing.schema import Message
 
     agent._inbox._queue.put_nowait(
@@ -141,7 +141,7 @@ class TestTurnStartAcceptance:
 
     @pytest.mark.asyncio
     async def test_no_event_for_inbound_without_request_id(self, runtime: Any):
-        """内部投递（无 request_id，如 Explorer 回传）不发射。"""
+        """内部投递（无 request_id）不发射。"""
         session = runtime.create_session()
         agent = session.agent
         await _stop_worker(agent)

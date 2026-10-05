@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from wing.session_manager import SessionManager
+from wing.session import SessionManager
 
 
 @pytest.fixture
@@ -114,7 +114,7 @@ class TestModelDisplayName:
 
     @pytest.mark.asyncio
     async def test_agent_and_agent_info_follow_declaration(self, monkeypatch):
-        import wing.config
+        import wing.config.loader
 
         from wing.config import AgentConfig, Config, ModelSpec, ProviderConfig
         from wing.store import MemorySessionStore
@@ -135,7 +135,7 @@ class TestModelDisplayName:
         )
         # 单例替换（conftest 的 autouse fixture 也走这个口；直接 import 的函数
         # 读的是模块全局 _config，patch get_config 名字对它们无效）。
-        monkeypatch.setattr(wing.config, "_config", cfg)
+        monkeypatch.setattr(wing.config.loader, "_config", cfg)
         sm = SessionManager({"memory": MemorySessionStore()}, default_backend="memory")
         session = sm.create_session()
         assert session.agent.model_display_name == "Fancy Flash"

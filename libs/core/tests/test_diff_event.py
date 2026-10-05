@@ -8,7 +8,7 @@ Two contracts live here:
    of appending in completion order. Mirrors test_feedback.py's use of the
    per-task `_current_tool_call_id` contextvar.
 2. The payload is a **window** (changed region ± context lines, absolute
-   start lines) for Edit/BetterEdit, and the full content for Write. The
+   start lines) for Edit, and the full content for Write. The
    window arithmetic itself is unit-tested in test_diff_window.py; these
    tests lock the wiring the tools actually emit.
 """
@@ -21,8 +21,8 @@ import pytest
 
 from wing.agent.tool_executor import _current_tool_call_id
 from wing.event import DiffContentEvent
-from wing.tools.experimental import better_edit
-from wing.tools.file import edit_file, write_file
+from wing.tools.builtin.edit import edit_file
+from wing.tools.builtin.write import write_file
 
 
 class _StubAgent:
@@ -170,50 +170,6 @@ async def test_edit_single_match_still_emits_one_event(tmp_path: Path):
     await edit_file(str(p), "line 4", "LINE FOUR", replace_all=True, ctx=agent)  # type: ignore[arg-type]
 
     assert len(_diffs(agent)) == 1
-
-
-@pytest.mark.asyncio
-async def test_better_edit_emits_diff_with_current_tool_call_id(tmp_path: Path):
-    p = tmp_path / "f.txt"
-    p.write_text("alpha\nbeta\n")
-    agent = _StubAgent()
-    token = _current_tool_call_id.set("call_better_1")
-    try:
-        await better_edit(str(p), "alpha", "gamma", ctx=agent)  # type: ignore[arg-type]
-    finally:
-        _current_tool_call_id.reset(token)
-
-    (diff,) = _diffs(agent)
-    assert diff.tool_call_id == "call_better_1"
-    assert diff.new_text == "gamma\nbeta"
-
-
-@pytest.mark.asyncio
-async def test_better_edit_anchored_window_uses_the_replaced_span(tmp_path: Path):
-    # `[upto]` replaces a span that is not the literal old_string; the window
-    # must be taken around the actual replaced span.
-    p = tmp_path / "f.txt"
-    body = "\n".join(f"line {i}" for i in range(1, 21))
-    p.write_text(f"head\n{body}\ntail\n")
-    agent = _StubAgent()
-
-    await better_edit(
-        str(p),
-        "line 6\nline 7\n[upto]\nline 10\nline 11",
-        "REPLACED",
-        ctx=agent,  # type: ignore[arg-type]
-    )
-
-    (diff,) = _diffs(agent)
-    # The replaced span is lines 7..12 of the file; the window is ± 3 lines.
-    assert (diff.old_start_line, diff.new_start_line) == (4, 4)
-    assert diff.old_text is not None
-    assert diff.old_text.splitlines()[0] == "line 3"  # file line 4
-    assert diff.old_text.splitlines()[-1] == "line 14"  # file line 15
-    assert "line 6" in diff.old_text  # head anchor of the replaced span
-    assert "line 11" in diff.old_text  # tail anchor of the replaced span
-    assert diff.new_text.splitlines()[3] == "REPLACED"
-    assert "line 6" not in diff.new_text  # replaced span left the new revision
 
 
 @pytest.mark.asyncio

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from wing.schema import Message
-from wing.session_manager import SessionManager
+from wing.session import SessionManager
 from wing.store import FileSessionStore, MemorySessionStore
 
 
@@ -39,7 +39,7 @@ class TestForkCarriesEvents:
         cm = source.context_manager
         _seed(source, "hello", "hi")
         # 在 fork 点之前落盘事件节点（模拟工具执行期间的 diff）
-        source.agent.sink._emit(
+        source.agent.sink.emit(
             DiffContentEvent(path="f.txt", new_text="content", tool_call_id="tc-1")
         )
         cm.add_message(Message(role="user", content="question"))
@@ -107,7 +107,7 @@ class TestForkMetadata:
         assert resumed.session_workspace == str(ws)
         assert resumed.template_name == "default"
         # ContextManager 的 workspace 同步恢复（相对路径 skills/rules 解析依赖它）
-        assert resumed.context_manager._workspace == ws.resolve()
+        assert resumed.context_manager.workspace == ws.resolve()
         # 消息链完整恢复（fork 复制 target 之前的子链，target 成为 draft）
         assert len(resumed.context_manager.get_context_window()) == 1
 
@@ -173,7 +173,7 @@ class TestResumeTemplate:
     @pytest.mark.asyncio
     async def test_resume_restores_persisted_template(self, tmp_path: Path):
         """resume 默认使用 metadata 中持久化的模板。"""
-        from wing.agent_template import AgentTemplate
+        from wing.session import AgentTemplate
 
         store = FileSessionStore(tmp_path / "sessions")
         sm = SessionManager({"file": store})

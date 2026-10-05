@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from wing.session_manager import SessionManager
+from wing.session import SessionManager
 from wing.store import FileSessionStore
 
 _MARKER = "UNIQUE_RULE_MARKER_42"

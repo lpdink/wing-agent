@@ -1,0 +1,269 @@
+# wing/gateway/protocol/session.py — /api/session/* 协议模型
+
+"""Session 端点协议模型——``/api/session/*`` 的请求与响应。
+
+生命周期（create / resume / fork）、订阅（subscribe / unsubscribe）、消息发送
+（send）、查询（list / get / info / branches）与状态变更（update / compact /
+interrupt / release / rewind）。字段与文案即线格式：改动等于改协议。
+"""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+from wing.event import AgentInfo, SessionInfo
+from wing.event.query_response import BranchTargetInfo
+from wing.session.override import AgentOverride
+
+
+# ============================================================
+# 请求模型
+# ============================================================
+
+
+class CreateSessionRequest(BaseModel):
+    """创建新 session 的请求体。"""
+
+    template_name: str | None = Field(
+        default=None, description="Agent 模板名称，None 使用默认模板"
+    )
+    workspace: str | None = Field(default=None, description="工作目录路径")
+    agent: AgentOverride | None = Field(default=None, description="Agent 参数覆盖")
+    backend: str | None = Field(
+        default=None,
+        description=(
+            "存储后端：file（默认，落盘）| memory（session 状态不落盘，仅本次进程有效；"
+            "注意 metrics 审计文件不受此约束）"
+        ),
+    )
+
+
+class ResumeSessionRequest(BaseModel):
+    """恢复已有 session 的请求体。"""
+
+    session_id: str = Field(description="要恢复的 session ID")
+
+
+class ForkSessionRequest(BaseModel):
+    """分叉 session 的请求体。"""
+
+    source_session_id: str = Field(description="源 session ID")
+    target_uuid: str = Field(description="分叉点消息的 UUID")
+
+
+class SubscribeRequest(BaseModel):
+    """订阅 session 事件的请求体。需要 X-Client-Id header。"""
+
+    session_id: str = Field(description="要订阅的 session ID")
+
+
+class UnsubscribeRequest(BaseModel):
+    """取消订阅 session 事件的请求体。需要 X-Client-Id header。"""
+
+    session_id: str = Field(description="要取消订阅的 session ID")
+
+
+class SendMessageRequest(BaseModel):
+    """向 session 发送消息的请求体。"""
+
+    session_id: str = Field(description="目标 session ID")
+    content: str = Field(description="消息内容")
+    tool_call_id: str | None = Field(
+        default=None,
+        description="回复某个 Ask 事件时携带其 tool_call_id，定向 resolve feedback waiter",
+    )
+
+
+class CompactRequest(BaseModel):
+    """压缩 session 上下文的请求体。"""
+
+    session_id: str = Field(description="目标 session ID")
+    instruction: str | None = Field(
+        default=None,
+        description="用户下发的压缩侧重指令（如“保留架构决策与未完成的 TODO”），"
+        "附加到压缩 prompt；缺省使用默认压缩策略",
+    )
+
+
+class InterruptRequest(BaseModel):
+    """中断 session 当前任务的请求体。"""
+
+    session_id: str = Field(description="目标 session ID")
+
+
+class ReleaseRequest(BaseModel):
+    """逐出（release）session 内存态的请求体。"""
+
+    session_id: str = Field(description="目标 session ID")
+
+
+class RewindRequest(BaseModel):
+    """回退 session 到指定消息节点的请求体。"""
+
+    session_id: str = Field(description="目标 session ID")
+    target_uuid: str = Field(description="要回退到的消息 UUID")
+
+
+class UpdateSessionRequest(BaseModel):
+    """POST /api/session/update 请求——统一 session 状态变更。"""
+
+    session_id: str = Field(description="目标 session ID")
+    model: str | None = Field(default=None, description="切换模型")
+    provider: str | None = Field(
+        default=None, description="切换 provider（配合 model 使用）"
+    )
+    agent: str | None = Field(default=None, description="切换 agent 模板")
+    title: str | None = Field(default=None, description="设置 session 名称")
+    thinking: bool | None = Field(default=None, description="开关 thinking 模式")
+    reasoning_effort: str | None = Field(
+        default=None, description="推理力度: low|medium|high|xhigh|max"
+    )
+    yolo: bool | None = Field(default=None, description="开关 yolo 模式")
+    workspace: str | None = Field(default=None, description="切换工作目录路径")
+    tools: list[str] | None = Field(
+        default=None,
+        description="切换工具集（全量替换，ref 格式：namespace.name 或裸名）",
+    )
+
+
+# ============================================================
+# 响应模型
+# ============================================================
+
+
+class ReleaseResponse(BaseModel):
+    """逐出（release）响应。
+
+    released=False（detail="not loaded"）表示会话本就不在内存——幂等，
+    不视为错误：它已经在「逐出」这个目标状态里了。被钉住（忙碌 / 有待处理
+    输入 / 被订阅 / 非持久后端）时以 409 拒绝。
+    """
+
+    ok: bool = Field(default=True, description="操作是否成功")
+    released: bool = Field(description="本次调用是否真的把会话逐出了内存")
+    detail: str = Field(description="结果说明（released / not loaded）")
+
+
+class CreateSessionResponse(BaseModel):
+    """创建 session 的响应。"""
+
+    session_id: str = Field(description="新创建的 session ID")
+    template_name: str = Field(description="使用的模板名称")
+    workspace: str | None = Field(default=None, description="工作目录路径")
+    backend: str = Field(default="file", description="存储后端（file/memory）")
+
+
+class ResumeSessionResponse(BaseModel):
+    """恢复 session 的响应。"""
+
+    session_id: str = Field(description="恢复的 session ID")
+    template_name: str | None = Field(default=None, description="使用的模板名称")
+    workspace: str | None = Field(default=None, description="工作目录路径")
+
+
+class ForkSessionResponse(BaseModel):
+    """分叉 session 的响应。"""
+
+    session_id: str = Field(description="新分叉出的 session ID")
+    draft: str | None = Field(
+        default=None, description="分叉点处的 draft 消息（如果有）"
+    )
+
+
+class OkResponse(BaseModel):
+    """通用成功响应。"""
+
+    ok: bool = Field(default=True, description="操作是否成功")
+
+
+class SendMessageResponse(BaseModel):
+    """发送消息的响应。"""
+
+    ok: bool = Field(default=True, description="操作是否成功")
+    request_id: str = Field(description="请求 ID，用于前端关联 agent 响应")
+
+
+class SessionListResponse(BaseModel):
+    """session 列表响应。"""
+
+    sessions: list[SessionInfo] = Field(description="所有活跃 session 的摘要列表")
+
+
+class SessionGetResponse(BaseModel):
+    """session 详情响应。"""
+
+    session_id: str = Field(description="session ID")
+    name: str | None = Field(default=None, description="session 名称")
+    template_name: str | None = Field(default=None, description="使用的模板名称")
+    workspace: str | None = Field(default=None, description="工作目录路径")
+    status: str = Field(
+        default="idle", description="运行时状态: inactive|idle|working|waiting"
+    )
+    messages: list[dict] = Field(description="消息历史列表")
+    agent: AgentInfo | None = Field(default=None, description="当前 agent 配置信息")
+
+
+class ContextStatsInfo(BaseModel):
+    """上下文统计信息，嵌入 SessionInfoResponse。"""
+
+    message_count: int = Field(description="当前消息数量")
+    total_tokens: int = Field(description="当前上下文 token 总数")
+
+
+class SessionInfoResponse(BaseModel):
+    """GET /api/session/info 响应——session 运行时状态。"""
+
+    model: str = Field(description="当前模型名称（实际调用名，身份标识）")
+    model_display_name: str | None = Field(
+        default=None,
+        description="当前模型的展示名（未声明 / 空串 = None，前端回落 model）",
+    )
+    api_url: str = Field(description="API 基础 URL")
+    tools: list[str] = Field(description="已启用的工具名称列表")
+    total_tokens: int = Field(description="当前上下文 token 总数")
+    context_window_tokens: int = Field(description="上下文窗口大小")
+    thinking: bool = Field(description="thinking 模式是否开启")
+    reasoning_effort: str | None = Field(
+        default=None, description="推理力度: low|medium|high|xhigh|max"
+    )
+    yolo: bool = Field(description="yolo 模式是否开启")
+    session_name: str | None = Field(default=None, description="session 名称")
+    workdir: str | None = Field(
+        default=None,
+        description="session 工作目录（session workspace，非进程启动目录）",
+    )
+    status: str = Field(
+        default="idle", description="运行时状态: inactive|idle|working|waiting"
+    )
+    context_stats: ContextStatsInfo = Field(description="上下文统计信息")
+    skills_info: str = Field(default="", description="已安装的 skills 信息")
+    system_prompt: str = Field(default="", description="完整系统提示词")
+
+
+class CompactResponse(BaseModel):
+    """POST /api/session/compact 响应。"""
+
+    ok: bool = Field(default=True, description="操作是否成功")
+    original_tokens: int = Field(default=0, description="压缩前 token 数")
+    compressed_tokens: int = Field(default=0, description="压缩后 token 数")
+
+
+class RewindResponse(BaseModel):
+    """POST /api/session/rewind 响应。"""
+
+    ok: bool = Field(default=True, description="操作是否成功")
+    draft: str | None = Field(default=None, description="回退点处的用户消息草稿")
+
+
+class BranchesResponse(BaseModel):
+    """GET /api/session/branches 响应——可回退/分叉的消息节点列表。"""
+
+    targets: list[BranchTargetInfo] = Field(
+        default_factory=list, description="可回退/分叉的消息节点"
+    )
+
+
+class UpdateSessionResponse(BaseModel):
+    """POST /api/session/update 响应。"""
+
+    ok: bool = Field(default=True, description="操作是否成功")

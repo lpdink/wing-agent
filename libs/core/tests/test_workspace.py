@@ -18,7 +18,6 @@ def _make_session(tmp_path: Path, workspace: str | None = None):
     mock_agent.cwd = Path(workspace) if workspace else None
 
     mock_cm = MagicMock()
-    mock_cm._workspace = Path(workspace) if workspace else None
 
     session = Session(
         session_id="test-ws",
@@ -43,7 +42,8 @@ class TestSetWorkspace:
 
         assert session.session_workspace == str(target)
         assert session.agent.set_cwd.call_args[0][0] == target
-        assert session._context_manager._workspace == target
+        # CM 的 workspace 经公共方法同步（私有字段不再被外部直写）
+        session.context_manager.set_workspace.assert_called_once_with(target)
 
         # metadata.json 已持久化
         meta_path = tmp_path / "sessions" / "test-ws" / "metadata.json"

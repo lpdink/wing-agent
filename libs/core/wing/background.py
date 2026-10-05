@@ -139,7 +139,7 @@ class BackgroundScheduler:
             wait = max(self._MIN_TICK_SECONDS, min(deadlines) - self._clock())
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=wait)
-                return  # 收到停止信号
+                return
             except TimeoutError:
                 pass
             await self._run_due_jobs()

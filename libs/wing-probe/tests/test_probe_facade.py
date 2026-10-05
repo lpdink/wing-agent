@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from wing_probe import ProbeEnv
+from wing_probe import Driver, ProbeEnv
 from wing_probe.probe import (
     DUMP_FRAMES,
     DUMP_HTTP,
@@ -67,6 +68,55 @@ def test_without_invariants_requires_reason(tmp_path: Path) -> None:
     probe.without_invariants("  检查 rewind 中间态：链此刻故意不自洽  ")
     assert probe.invariants_enabled is False
     assert probe.invariants_reason == "检查 rewind 中间态：链此刻故意不自洽"
+
+
+def test_allow_arguments_error_requires_reason_and_is_scoped(tmp_path: Path) -> None:
+    """窄口径放开：只放开 tool 配对的 arguments_error，其余不变量照旧。"""
+    probe = build_probe(tmp_path)
+    for bad in ("", "   ", "\n"):
+        with pytest.raises(ProbeError) as failure:
+            probe.allow_arguments_error(bad)
+        assert "requires a non-empty reason" in str(failure.value)
+    assert probe.arguments_error_reason is None
+
+    probe.allow_arguments_error("  非法 args 短路场景：模型有意吐坏参数  ")
+    assert probe.arguments_error_reason == "非法 args 短路场景：模型有意吐坏参数"
+    assert probe.invariants_enabled is True, "只放开一个口径，不整体关闭"
+
+    session_dir = tmp_path / "scenario" / SESSION_ID
+    write_history(
+        session_dir,
+        [
+            {"uuid": "u1", "role": "user", "content": "hi"},
+            {
+                "uuid": "a1",
+                "parent_uuid": "u1",
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "name": "Bash",
+                        "arguments": {},
+                        "arguments_error": "boom",
+                    }
+                ],
+            },
+            {
+                "uuid": "t1",
+                "parent_uuid": "a1",
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "not executed",
+            },
+        ],
+    )
+    view = HistoryView(session_dir)
+    strict = run_invariants([view])
+    assert len(strict) == 1 and strict[0].startswith("[tool_pairing]"), strict
+    assert run_invariants([view], allow_arguments_error=True) == []
+
+    report = probe.invariant_report([])
+    assert "allow_arguments_error" in report and "有意吐坏参数" in report
 
 
 def test_invariant_report_carries_source_reason_and_dump(tmp_path: Path) -> None:
@@ -199,6 +249,74 @@ def test_run_invariants_checks_every_view(tmp_path: Path) -> None:
     assert any("sid-b" in problem for problem in problems)
 
 
+# ── 连接与 API key ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_start_passes_api_key_to_driver_and_env_knobs_to_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``Probe.start`` 的接线缝：``api_key`` 进 driver，其余 kwargs 进 env。
+
+    auth 场景（scenarios/test_gateway_auth.py）靠这条缝把 ``api_key`` 交给
+    driver、把 ``auth=…`` 交给 ``ProbeEnv``；两者串线（例如 key 落进 env、
+    auth 落进 driver）会让场景 401/启动失败，但错误信息离根因很远——这里用
+    假 ``ProbeEnv.start`` / 假 ``Driver.connect`` 在进程内把两个去向钉死。
+    """
+    connects: list[dict] = []
+    env_starts: list[dict] = []
+
+    async def fake_env_start(root: str | Path, **kwargs: Any) -> ProbeEnv:
+        env_starts.append({"root": root, **kwargs})
+        env = ProbeEnv(root, **kwargs)
+        env.root.mkdir(parents=True, exist_ok=True)
+        return env
+
+    async def fake_connect(env: ProbeEnv, **kwargs: Any) -> Driver | None:
+        connects.append({"env": env, **kwargs})
+        return None
+
+    monkeypatch.setattr(ProbeEnv, "start", fake_env_start)
+    monkeypatch.setattr(Driver, "connect", fake_connect)
+
+    probe = await Probe.start(
+        tmp_path / "probe", api_key="probe-admin-key", auth={"enabled": True}
+    )
+
+    assert env_starts == [{"root": tmp_path / "probe", "auth": {"enabled": True}}]
+    assert len(connects) == 1 and connects[0]["api_key"] == "probe-admin-key"
+    assert connects[0]["env"] is probe.env
+    assert probe.api_key == "probe-admin-key"
+
+    # 重启复用同一把 key（重连与首次连接是同一条路径）。
+    async def fake_restart(self: ProbeEnv) -> None:
+        return None
+
+    monkeypatch.setattr(ProbeEnv, "restart_gateway", fake_restart)
+    await probe.restart_gateway()
+    assert [call["api_key"] for call in connects] == [
+        "probe-admin-key",
+        "probe-admin-key",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_connect_driver_without_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """缺省连接（auth 关闭）不带 key：``api_key=None`` 原样透传。"""
+    connects: list[dict] = []
+
+    async def fake_connect(env: ProbeEnv, **kwargs: Any) -> Driver | None:
+        connects.append(kwargs)
+        return None
+
+    monkeypatch.setattr(Driver, "connect", fake_connect)
+    probe = build_probe(tmp_path)
+    await probe.connect_driver()
+    assert connects == [{"api_key": None}]
+
+
 # ── 现场转储 ────────────────────────────────────────────────
 
 
@@ -282,6 +400,23 @@ async def test_dump_copies_session_files(tmp_path: Path) -> None:
     assert json.loads((copied / "metadata.json").read_text(encoding="utf-8")) == {
         "workspace": str(probe.workspace)
     }
+
+
+@pytest.mark.asyncio
+async def test_dump_copies_aux_kv_files(tmp_path: Path) -> None:
+    """落盘拷贝带上 aux kv（``<key>.json``）——"待生效状态"的现场不能缺。"""
+    probe = build_probe(tmp_path)
+    session_dir = probe.env.session_dir(SESSION_ID)
+    write_history(session_dir, [{"uuid": "u1", "role": "user", "content": "hi"}])
+    pending = {"compact_content": "[Compact] x", "start_uuid": "u1", "end_uuid": "u1"}
+    (session_dir / "pending_compact.json").write_text(
+        json.dumps(pending), encoding="utf-8"
+    )
+
+    target = await probe.dump()
+
+    copied = target / "sessions" / SESSION_ID / "pending_compact.json"
+    assert json.loads(copied.read_text(encoding="utf-8")) == pending
 
 
 # ── 文件断言器解析的 workspace（review N5） ─────────────────

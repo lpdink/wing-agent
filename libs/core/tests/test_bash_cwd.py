@@ -10,7 +10,7 @@ import pytest
 
 from wing.schema import ToolError
 from wing.tools import glob_files, grep_files
-from wing.tools.bash import execute_shell
+from wing.tools.builtin.bash import execute_shell
 
 
 class _MockAgent:

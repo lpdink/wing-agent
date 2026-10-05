@@ -130,7 +130,7 @@ Hook handler 组成管道：每个 handler 接收上一个 handler 的输出值�
 
 ```python
 # ~/.wing/hooks/audit_tools.py
-from wing.hook_registry import hooks
+from wing.hooks import hooks
 
 @hooks.on("after_tool_call")
 def log_tool_results(result, tool_name=None, **ctx):

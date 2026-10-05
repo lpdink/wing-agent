@@ -35,7 +35,7 @@ from wing.event import (
 )
 from wing.event_bus import event_bus
 from wing.provider.base import StreamAccumulator
-from wing.provider.openai_compat import _OAIStreamState
+from wing.provider.openai.stream import _OAIStreamState
 from wing.schema import Message, PendingCall, ToolCall
 
 
@@ -250,7 +250,7 @@ class TestPersistedEventsOnChain:
         # 不落盘：活跃链上没有该事件（get_active_events 只返回事实事件）
         chain_events = agent.context_manager.get_active_events()
         assert not any(isinstance(e, ToolCallResultEvent) for e in chain_events)
-        # 事件本身仍广播（走 event_bus，metrics_registry / TUI 直播依赖）
+        # 事件本身仍广播（走 event_bus，audit / TUI 直播依赖）
         assert agent.context_manager.get_active_events(pending_ask_ids=set()) == []
 
         await agent.shutdown()

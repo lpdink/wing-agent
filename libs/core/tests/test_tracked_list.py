@@ -19,9 +19,9 @@ import pytest
 from pydantic import BaseModel
 from pydantic.errors import PydanticUserError
 
-from wing.common.tracked_list import TrackedList
+from wing.chain import TrackedList
 from wing.event import DiffContentEvent
-from wing.store import FileMessageLog
+from wing.store.file import FileMessageLog
 from wing.schema import ChainNode, Message
 
 
@@ -849,7 +849,7 @@ class TestMixedChain:
         tl.append(Message(role="assistant", content="a1"))
 
         # fork：记录前缀（含事件）uuid 重映射后写进子日志，再用加载路径构造
-        from wing.session_manager import _remap_record_uuids
+        from wing.session.manager import _remap_record_uuids
 
         forked_log = FileMessageLog(tmp_dir / "fork")
         forked_log.append(_remap_record_uuids(FileMessageLog(tmp_dir).load_all()))

@@ -88,7 +88,6 @@ class ModelProvider(ABC):
 
     由 create_provider 注入；None = 无媒体存储（registry 的仅列表 client、
     测试构造的裸 provider）。构造器各自把它存进来（见协议实现）。"""
-    thinking: bool = True
     reasoning_effort: str | None = None
 
     @property

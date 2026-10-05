@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from wing.common.logger import log
 from wing.common.with_retry import with_retry
 from wing.config import get_config
-from wing.hook_registry import hooks
+from wing.hooks import hooks
 from wing.request_context import reset_request_context, set_request_context
 from wing.schema import ContentBlock, LLMUsage, Message
 
@@ -35,7 +35,7 @@ from .tool_executor import (
 )
 
 if TYPE_CHECKING:
-    from wing.context_manager import ContextManager
+    from wing.context import ContextManager
     from wing.provider.base import ModelProvider, StreamAccumulator
     from wing.schema import Tool
 
@@ -118,8 +118,7 @@ class ReActLoop:
         self.steer: bool = get_config().steer
         # `with_retry` 参数解析源（装饰器经实例的 `_config` 读取
         # max_retries / max_retry_delay）：WingAgent 同步当前 provider 的
-        # `provider.config`；None → 默认口径（10 次重试、3s 起步指数退避、
-        # 封顶 180s）。测试可注入小值以避免真实等待。
+        # config；None → 默认口径（见 with_retry）。测试可注入小值避免真实等待。
         self._config: object | None = None
         # 当前一轮 LLM 调用的流累积状态（未提交内容的唯一权威）。
         # _call_llm 入口新建并登记，轮提交/中断补提交/turn 收口后置空。
@@ -161,14 +160,13 @@ class ReActLoop:
         try:
             # 消费确认：被合并进本轮输入的用户消息在此正式"被模型接受"。
             # 前端据此把排队中的消息上移进聊天历史。只对外部投递发射
-            # （request_id 存在）；内部投递（如 Explorer 回传）不发射。
+            # （request_id 存在）；内部投递（无 request_id）不发射。
             # 先于 turn_started——事件流顺序即渲染顺序。
             for b in batch:
                 if b.request_id and b.message.role == "user" and b.message.content:
                     self._sink.user_message_accepted(b.message.content, b.request_id)
             self._sink.turn_started()
 
-            # Hook: before_user_message
             modified_content = await hooks.invoke_async(
                 "before_user_message", message.content
             )
@@ -233,23 +231,18 @@ class ReActLoop:
 
         Returns: True 需要继续下一轮，False 对话结束。
         """
-        # model / provider 从唯一存储（WingAgent）调用点取值
         model = self._current_model()
         provider = self._current_provider()
 
-        # LLM 调用（含轮有效性校验与无效重试，见 _call_llm_validated）
         assistant_msg = await self._call_llm_validated(
             ctx, provider=provider, model=model
         )
 
-        # Emit turn-level AssistantTurnEvent
         self._sink.assistant_turn(assistant_msg, model)
 
-        # Update accumulator
         ctx.record_usage(assistant_msg.usage)
         ctx.record_text(assistant_msg.content)
 
-        # 工具执行
         pending_tool_calls = assistant_msg.tool_calls or []
         try:
             tc_results = await self._executor.execute(pending_tool_calls, model)
@@ -272,7 +265,6 @@ class ReActLoop:
                 steer_notes = self._inbox.format_steer_note(steer_items)
                 tc_results[-1].content = steer_notes + (tc_results[-1].content or "")
 
-        # 提交本轮消息
         turn_messages = [assistant_msg] + tc_results
         self._cm.add_messages(turn_messages)
 
@@ -281,14 +273,12 @@ class ReActLoop:
         # 内容经投影再渲染一次（多轮 turn 的双重渲染）。
         self._current_acc = None
 
-        # Emit context stats
         count, tokens = self._cm.get_context_stats()
         ctx_window = 0
         if self._cm.compactor:
             ctx_window = self._cm.compactor.context_window_tokens
         self._sink.context_stats(count, tokens, ctx_window)
 
-        # 恢复中断
         if interrupted_exc is not None:
             raise interrupted_exc.original
 
@@ -399,7 +389,7 @@ class ReActLoop:
         content_blocks: list[ContentBlock] | None = None
         last_usage: LLMUsage | None = None
         # accumulator 上提为 turn 级持有（self._current_acc）——未提交投影
-        # （resume）与中断补提交按需快照同一个对象，不再是 _call_llm 局部变量。
+        # （resume）与中断补提交按需快照同一个对象。
         accumulator = provider.create_accumulator()
         self._current_acc = accumulator
 

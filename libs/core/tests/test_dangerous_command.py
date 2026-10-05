@@ -3,7 +3,7 @@
 from unittest.mock import patch
 
 from wing.config import AgentConfig, Config, ProviderConfig
-from wing.tools.shell_safety import is_dangerous_command
+from wing.tools.internal.shell_safety import is_dangerous_command
 
 
 def _cfg(safe_patterns: list[str] | None = None) -> Config:

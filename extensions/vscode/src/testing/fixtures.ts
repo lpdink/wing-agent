@@ -385,7 +385,7 @@ export function makeSessionPicker(currentSessionId = 'session-a'): SessionPicker
 /**
  * The host-opened rewind / fork picker.
  *
- * The last row is the gateway's `current` sentinel (`context_manager.py:925`),
+ * The last row is the gateway's `current` sentinel (`context/manager.py:765`),
  * normalized by the host into `current: true` — it marks "where you are now" and is
  * not a target.
  */

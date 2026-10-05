@@ -1,13 +1,11 @@
-# wing_gateway/server.py — Gateway 服务器
+# wing/gateway/server.py — Gateway 服务器
 
 """
 Gateway 服务器——生命周期管理器 + EventBus 事件路由。
 
-V2 实现（EventBus 模式）：
-  - Gateway 不感知 session_id，只感知 client_id
-  - Gateway 维护 {client_id: ws} 和 {ws: client_id} 两个 dict
-  - Gateway subscribe EventBus，根据 EventTarget 转发给对应 ws
-  - 断连时清理 Gateway 和 EventBus 的路由表
+Gateway 不感知 session_id，只感知 client_id：维护 {client_id: ws} 与
+{ws: client_id} 两张表，subscribe EventBus 后按 EventTarget 转发到对应 ws，
+断连时清理 Gateway 与 EventBus 的路由表。
 
 FastAPI app 创建和路由注册在 app.py 中完成（App Factory 模式）。
 """
@@ -55,10 +53,8 @@ def _check_port_available(host: str, port: int) -> bool:
         try:
             s.settimeout(1)
             s.connect((host, port))
-            # 能连上说明端口被占用
             return False
         except (OSError, socket.timeout):
-            # 连不上说明端口空闲
             return True
 
 
@@ -77,9 +73,9 @@ class GatewayServer:
         self.host = host
         self.port = port
         self.runtime = WingRuntime()
-        self._client_to_ws: dict[str, WebSocket] = {}  # client_id → ws
-        self._ws_to_client: dict[WebSocket, str] = {}  # ws → client_id
-        self._remote_tools = RemoteToolManager()  # 远程工具连接与调用中枢
+        self._client_to_ws: dict[str, WebSocket] = {}
+        self._ws_to_client: dict[WebSocket, str] = {}
+        self._remote_tools = RemoteToolManager()
         # 后台周期任务宿主（首个 job：空闲会话逐出）。interval 在启动时
         # 读取一次——config 热重载不改变已注册 job 的间隔；TTL 每个 sweep
         # 都从当前 config 读，热重载即时生效。
@@ -150,7 +146,6 @@ class GatewayServer:
 
         self._warn_auth_lockout()
 
-        # Subscribe EventBus
         event_bus.subscribe(self._on_event)
 
         print(
@@ -184,14 +179,12 @@ class GatewayServer:
         frames = build_frames(payload, event.type)
 
         if target.scope == "global":
-            # 发给所有 ws（跳过不收事件的 tool host）
             for cid, ws in list(self._client_to_ws.items()):
                 if not self._receives_events(cid):
                     continue
                 self._schedule_send(ws, frames, event.type)
 
         elif target.scope == "client":
-            # 发给指定 client_ids 的 ws
             for cid in target.client_ids:
                 ws = self._client_to_ws.get(cid)
                 if ws is not None and self._receives_events(cid):
@@ -244,7 +237,7 @@ class GatewayServer:
         """回收慢/死消费者：先注销（投递立即停止），再尽力关闭连接。"""
         client_id = await self.drop_client(ws, reason=reason)
         if client_id is None:
-            return  # 已被回收——不重复关闭
+            return
         try:
             await asyncio.wait_for(
                 ws.close(code=1013, reason="slow consumer"),

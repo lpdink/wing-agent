@@ -6,7 +6,7 @@ from typing import AsyncIterator
 
 import pytest
 
-from wing.compactor import Compactor
+from wing.context import Compactor
 from wing.schema import LLMResponse, Message, ToolCall
 
 

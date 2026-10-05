@@ -7,7 +7,7 @@ hook point: before_tool_call
 handler 只拦截 tool_name == "Edit" 或 "Write" 的调用。
 """
 
-from wing.hook_registry import HookRegistry, hooks
+from wing.hooks import HookRegistry, hooks
 from wing.schema import ToolCall
 from wing.common.logger import log
 

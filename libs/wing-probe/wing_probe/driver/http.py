@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -123,7 +123,7 @@ class DriverHttp(GatewayClient):
     **与 ``wing_sdk`` 的耦合**：留档完全依赖上游把出网收敛到 ``_post`` / ``_get``
     这两个**私有**方法上（本类只覆盖它们）。上游若改名 / 改调用点，留档会**静默
     全空**（`http.calls` 一直是 `[]`），断言"网关回了什么"的场景随之失真。
-    这不是注释能守住的，由装配层自测兜住：``tests/test_driver_http.py`` 用桩网关
+    这不是注释能守住的，由装配层自测兜住：``tests/test_driver_transport.py`` 用桩网关
     调用**公开**方法（``health()`` 等）并断言首个调用确实被留档——上游改缝即红。
     """
 
@@ -208,6 +208,35 @@ class DriverHttp(GatewayClient):
     async def _get(self, path: str, params: dict | None = None) -> dict:
         call, payload = await self._call("GET", path, params=params)
         return self._as_object(call, payload)
+
+    # ── 具名动作（上游 SDK 未覆盖的端点） ────────────────────
+
+    async def set_session_tools(self, session_id: str, tools: Sequence[str]) -> dict:
+        """``POST /api/session/update`` 的 ``tools`` 字段（全量替换工具集）。
+
+        ``wing_sdk.GatewayClient.update_session`` 没有 ``tools`` 形参（其余字段
+        都有），而工具热切换场景只需要它——补一个具名动作，而不是让场景散落
+        低层 ``request("POST", …)``。
+        """
+        return await self._post(
+            "/api/session/update", {"session_id": session_id, "tools": list(tools)}
+        )
+
+    async def release_session(self, session_id: str) -> dict:
+        """``POST /api/session/release``（逐出会话内存态）。
+
+        被钉住（忙碌 / 有后台任务 / 被订阅 / 非持久后端）时端点回 409 →
+        抛 ``DriverHttpError``。
+        """
+        return await self._post("/api/session/release", {"session_id": session_id})
+
+    async def list_tools(self) -> dict:
+        """``GET /api/tools``（全局注册表视图：ref / namespace / name / llm_name）。
+
+        端点住 ``routes/system.py``，上游 SDK 没有对应方法——场景用它做"配置里的
+        名字能不能解析"的实时对账（而不是把探针写死的名字清单当成事实）。
+        """
+        return await self._get("/api/tools")
 
     async def request(
         self,

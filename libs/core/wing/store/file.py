@@ -8,7 +8,7 @@ history.jsonl 的混合日志承担，遗留快照文件不读不写不删）：
     ├── metadata.json        SessionMetadata（exclude_none）
     ├── history.jsonl        append-only 混合记录（Message + 事件，每行一条 dict + ts）
     ├── <aux-key>.json       aux kv（如 pending_compact.json）
-    └── subagents/           子 agent 历史（explorer 工具产物）
+    └── subagents/           遗留：旧子 agent 历史（写入方已删除；不再写入，现有数据不读不删）
 
     <root>/.media/<id[:2]>/<id>   会话媒体池（内容寻址，跨 session 共享）
 """
@@ -85,7 +85,7 @@ class FileMessageLog(MessageLog):
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except Exception as e:
-            # 损坏的 aux 数据丢弃（与重构前 pending_compact 行为一致）
+            # 损坏的 aux 数据丢弃（删除后按"无值"处理）
             log.warning(f"Corrupted aux '{key}' at {path}, deleting: {e}")
             self.delete_aux(key)
             return None
@@ -131,7 +131,7 @@ class FileSessionStore(SessionStore):
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception as e:
             # 不静默降级：损坏的 metadata 若被下一次 save 无痕覆盖，
-            # 会丢失 forked_from/标题等字段——正是本轮要消灭的数据丢失。
+            # 会丢失 forked_from / 标题等字段，因此留 warning。
             log.warning(
                 f"Corrupted metadata.json for session '{session_id}' at {path}: {e}. "
                 "Treating as empty; next save will overwrite it."
