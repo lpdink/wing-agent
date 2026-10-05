@@ -76,7 +76,7 @@ class _StreamMixin:
         blocks = []
         for idx in sorted(state.blocks_by_index):
             if idx in state.pending_tools:
-                continue  # 未终结的 tool 块：半截，剔除
+                continue
             block = state.blocks_by_index[idx]
             if _is_zero_info_block(block):
                 continue

@@ -344,7 +344,6 @@ class Config(BaseModel):
         if not self.providers:
             raise ValueError("providers list cannot be empty")
 
-        # provider name 唯一性
         provider_names = [p.name for p in self.providers]
         if len(provider_names) != len(set(provider_names)):
             seen = set()
@@ -353,7 +352,6 @@ class Config(BaseModel):
                     raise ValueError(f"duplicate provider name: '{n}'")
                 seen.add(n)
 
-        # agent name 唯一性
         agent_names = [a.name for a in self.agents]
         if len(agent_names) != len(set(agent_names)):
             seen_agents: set[str] = set()

@@ -108,7 +108,6 @@ class _SerializeMixin:
                 anthropic_msgs.append({"role": "assistant", "content": blocks})
 
             elif msg.role == "tool":
-                # tool result → user 消息中的 tool_result block
                 content: str | list[dict] = msg.content or ""
                 extra: list[dict] = []
                 for slot in slots:
@@ -190,7 +189,7 @@ class _SerializeMixin:
                         {"type": "redacted_thinking", "data": block.signature or ""}
                     )
                 elif not block.thinking.strip() and not block.signature:
-                    continue  # 空 thinking 无签名 → 丢弃
+                    continue
                 else:
                     blocks.append(
                         {
@@ -226,7 +225,6 @@ class _SerializeMixin:
         for msg in msgs[1:]:
             prev = merged[-1]
             if msg["role"] == prev["role"]:
-                # 合并 content blocks
                 prev["content"].extend(msg["content"])
             else:
                 merged.append(msg)

@@ -58,7 +58,7 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
     ) -> None:
         self._config = config
         self._session_id = session_id
-        # 会话媒体池（本步骤只持有，序列化在后续步骤接线）。
+        # 会话媒体池：序列化 mixin 经 self._media 按 id 读字节（见 provider/media.py）。
         self._media = media
         self.base_url = config.base_url.rstrip("/")
         self.reasoning_effort: str | None = config.reasoning_effort
@@ -67,11 +67,10 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         self.explicit_cache_mode = config.explicit_cache_mode
         # 深拷贝：与 anthropic 路径同口径——运行时开关不得写穿全局 ProviderConfig。
         self._extra_body: dict = copy.deepcopy(config.extra_body)
-        # 基线默认行为（对齐 develop）：enable_thinking / preserve_thinking 默认
-        # 随每个请求发送（用户 extra_body 的显式值优先）。preserve_thinking 尤为
-        # 关键——缺它则多轮工具回合间 thinking 被服务端剥离。
-        # thinking 状态从 extra_body 派生（实际请求 payload 源），与 Anthropic
-        # 路径同构：property / setter / 请求体 / 对外上报四者自洽。
+        # enable_thinking / preserve_thinking 默认随每个请求发送（用户 extra_body 的
+        # 显式值优先）。preserve_thinking 尤为关键——缺它则多轮工具回合间 thinking
+        # 被服务端剥离。thinking 状态从 extra_body 派生（实际请求 payload 源），与
+        # Anthropic 路径同构：property / setter / 请求体 / 对外上报四者自洽。
         self._extra_body.setdefault("enable_thinking", True)
         self._extra_body.setdefault("preserve_thinking", True)
 
@@ -223,12 +222,10 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         if stream:
             body["stream_options"] = {"include_usage": True}
 
-        # extra_body 透传（不覆盖已设置的 key）
         for k, v in self._extra_body.items():
             if k not in body:
                 body[k] = v
 
-        # reasoning_effort
         if self.reasoning_effort:
             body["reasoning_effort"] = self.reasoning_effort
 

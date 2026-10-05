@@ -21,11 +21,9 @@ from wing.common.logger import log
 
 # ── httpx 构造 ──────────────────────────────────────────────────
 
-# httpx 层超时是底层兜底——必须 > 应用层 timeout_total（默认 600s），
-# 否则非流式调用（如压缩 LLM decode）会在 httpx 层被杀，先于 asyncio.wait_for
-# 的 timeout_total 触发。设 1200s（2x timeout_total）确保不干扰应用层控制。
-# 实际生效的超时由调用侧 asyncio.wait_for
-# （timeout_first_chunk / timeout_total）控制。
+# httpx 层超时是底层兜底——必须 > 应用层 timeout_total（默认 600s），否则非流式
+# 调用（如压缩 LLM decode）会在 httpx 层先被杀。实际生效的超时由调用侧
+# asyncio.wait_for（timeout_first_chunk / timeout_total）控制。
 _DEFAULT_TIMEOUT = 1200.0
 _CONNECT_TIMEOUT = 5.0
 
@@ -79,11 +77,9 @@ class SSEParser:
                 self._event_type = ""
                 self._data_lines = []
                 return event
-            # 无数据的空行，重置状态
             self._event_type = ""
             return None
 
-        # 解析 field: value
         if ":" in line:
             field_name, _, value = line.partition(":")
             # SSE 规范：冒号后有一个可选空格

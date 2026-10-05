@@ -126,7 +126,7 @@ class Message(ChainNode):
 
     当前仅 tool 消息使用（预留 user）；None = 无媒体——落盘时 None 被
     自然剥除，无媒体消息的 history 记录与引入 media 之前完全一致。"""
-    tool_call_id: str | None = None  # tool response only
+    tool_call_id: str | None = None
     usage: "LLMUsage | None" = (
         None  # assistant 消息的 token 审计信息，持久化后重放可恢复
     )
@@ -334,7 +334,6 @@ class Message(ChainNode):
         if self.content:
             parts.append(f"content={self.content!r}")
         if self.tool_calls:
-            # 显示完整的工具调用参数
             tc_strs = []
             for tc in self.tool_calls:
                 args = json.dumps(tc.arguments, ensure_ascii=False)

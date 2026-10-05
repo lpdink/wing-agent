@@ -74,7 +74,7 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
     ) -> None:
         self._config = config
         self._session_id = session_id
-        # 会话媒体池（本步骤只持有，序列化在后续步骤接线）。
+        # 会话媒体池：序列化 mixin 经 self._media 按 id 读字节（见 provider/media.py）。
         self._media = media
         self.base_url = config.base_url.rstrip("/")
         self.reasoning_effort: str | None = config.reasoning_effort
@@ -218,8 +218,8 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
             tb["type"] = "disabled"
 
     def set_reasoning_effort(self, effort: str | None) -> None:
-        # Anthropic 协议无 reasoning_effort 概念（百炼用 output_config.effort，走 extra_body）。
-        # No-op：不持有状态，不影响请求。
+        # Anthropic 协议无 reasoning_effort 概念（百炼用 output_config.effort，走
+        # extra_body）——保持 No-op，不持有状态、不影响请求。
         pass
 
     # ─── Request Building ─────────────────────────────────────────
@@ -277,7 +277,6 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         if tools:
             body["tools"] = [self._tool_to_anthropic(t) for t in tools]
 
-        # extra_body 透传（不覆盖已设置的 key）
         for k, v in self._extra_body.items():
             if k not in body:
                 body[k] = v
