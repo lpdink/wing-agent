@@ -3,7 +3,7 @@
 覆盖：
 
 - ``evict_idle_sessions`` 的三条判定（空闲 / 无订阅 / TTL）与两条硬条件
-  （后台任务、非持久后端）；
+  （待处理输入、非持久后端）；
 - touch（会话状态变化重置空闲计时器）与 reaper 的 EventBus 触摸通道；
 - 逐出 → ``ensure_loaded`` 水合（链完整、磁盘状态不动、provider 已关闭）；
 - ``release_session`` 的语义（幂等 / 钉住拒绝 / 未知会话）；
@@ -134,25 +134,10 @@ class TestIdleEviction:
         assert runtime.sm.get_session(session.session_id) is not None
 
     @pytest.mark.asyncio
-    async def test_background_work_is_pinned(self):
-        runtime = _runtime()
-        session = runtime.create_session()
-        gate = asyncio.Event()
-        task = asyncio.create_task(gate.wait())
-        session.agent.register_background(task)
-
-        assert runtime.sm.evict_idle_sessions(ttl_seconds=0.0) == []
-
-        gate.set()
-        await task
-        await asyncio.sleep(0)  # done callback 注销登记
-        assert runtime.sm.evict_idle_sessions(ttl_seconds=0.0) == [session.session_id]
-
-    @pytest.mark.asyncio
     async def test_pending_input_is_pinned(self):
         """inbox 里已有待处理输入（worker 尚未取走、status 仍 idle）不逐出。
 
-        回归：直接投递 ``agent.post()``（如后台 Explorer 回传）不经过
+        回归：直接投递 ``agent.post()``（工具侧内部投递）不经过
         ``SM._post``，不会 touch 计时器——只按 timer 判定会把这条输入
         连同它将要驱动的那一轮一起掐掉。
         """
@@ -168,49 +153,6 @@ class TestIdleEviction:
             assert runtime.sm.get_session(sid) is not None
         finally:
             # 关掉 worker：不让测试内的队列消息真的驱动一轮 LLM 调用
-            await session.agent.shutdown()
-
-    @pytest.mark.asyncio
-    async def test_background_explorer_pins_host_session(self, monkeypatch):
-        """后台 Explorer 在跑期间宿主会话不被逐出（``register_background`` 接线）。
-
-        接线断了（explorer 不登记）这个测试会红——生产代码里它是
-        ``register_background`` 的唯一消费者。
-        """
-        from wing.tools import explorer as explorer_module
-        from wing.tools.explorer import explorer_agent
-
-        runtime = _runtime()
-        session = runtime.create_session()
-        gate = asyncio.Event()
-
-        async def fake_collect(sub_agent, sub_sid, task_detail):
-            await gate.wait()
-            return []
-
-        monkeypatch.setattr(explorer_module, "_collect_explorer_output", fake_collect)
-        try:
-            launched = await explorer_agent(
-                name="pin-check",
-                task_detail="just wait",
-                run_in_background=True,
-                ctx=session.agent,
-            )
-            assert "launched in background" in launched
-            assert session.agent.has_background_work is True
-            assert runtime.sm.evict_idle_sessions(ttl_seconds=0.0) == []
-        finally:
-            gate.set()
-            for _ in range(100):  # 等后台任务收尾并注销登记
-                if not session.agent.has_background_work:
-                    break
-                await asyncio.sleep(0.01)
-            # 后台任务已结束，但它的完成回传已投进宿主 inbox（或已被 worker
-            # 取走而起了一轮）——两种形态都不该被逐出（S2 的钉住保护）。
-            assert session.agent.has_background_work is False
-            assert runtime.sm.evict_idle_sessions(ttl_seconds=0.0) == []
-            assert runtime.sm._blocked_reason(session) is not None
-            # 关掉宿主 worker：别让 explorer 的回传真的驱动一轮 LLM 调用。
             await session.agent.shutdown()
 
     @pytest.mark.asyncio

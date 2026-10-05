@@ -329,7 +329,7 @@ class MediaAccess:
     """会话媒体读写窄接口（Session 用 store.read_media/write_media 构造）。
 
     工具（写图）与 provider 序列化（读图编码）都只经此接口，不直接触碰
-    SessionStore——同一实例共享同一存储池（含 Explorer 子 agent）。
+    SessionStore——同一实例共享同一存储池。
     """
 
     read: Callable[[str], bytes | None]

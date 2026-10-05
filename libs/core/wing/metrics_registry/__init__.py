@@ -36,8 +36,5 @@ from wing.metrics_registry._compact_metrics import (  # noqa: F401
     _handle_compact_global,
     _handle_compact_session,
 )
-from wing.metrics_registry.experimental import (  # noqa: F401
-    _handle_better_edit_experiment,
-)
 
 event_bus.subscribe(metrics_registry.handle)

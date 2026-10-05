@@ -118,7 +118,6 @@ agents:
       - Grep
       - AskUserQuestion
       - TodoWrite
-      - Explorer
 
     # Context window token limit. Compression is applied when reached.
     context_window_tokens: 256000
@@ -184,7 +183,7 @@ images:
 sessions:
   # Eviction of idle in-memory sessions (gateway memory hygiene).
   # A session is evicted only when ALL of these hold: no turn running
-  # (working/waiting), no background work, no client subscribed, and
+  # (working/waiting), no pending input queued, no client subscribed, and
   # it has been idle for longer than idle_ttl_seconds. The idle timer
   # resets on every session state change (any event of that session).
   # Eviction never touches the disk: an evicted session is re-loaded

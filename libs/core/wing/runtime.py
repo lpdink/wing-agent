@@ -209,7 +209,7 @@ class WingRuntime:
 
         Raises:
             LookupError: 内存与磁盘都没有该会话
-            RuntimeError: 被钉住（忙碌 / 有后台任务 / 被订阅 / 非持久后端）
+            RuntimeError: 被钉住（忙碌 / 有待处理输入 / 被订阅 / 非持久后端）
         """
         return self.sm.release_session(session_id)
 

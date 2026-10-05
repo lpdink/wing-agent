@@ -161,7 +161,7 @@ class ReActLoop:
         try:
             # 消费确认：被合并进本轮输入的用户消息在此正式"被模型接受"。
             # 前端据此把排队中的消息上移进聊天历史。只对外部投递发射
-            # （request_id 存在）；内部投递（如 Explorer 回传）不发射。
+            # （request_id 存在）；内部投递（无 request_id）不发射。
             # 先于 turn_started——事件流顺序即渲染顺序。
             for b in batch:
                 if b.request_id and b.message.role == "user" and b.message.content:
