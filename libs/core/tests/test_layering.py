@@ -7,7 +7,9 @@
 - **纯 AST，不 import wing**：解析源码文本而非导入源码，规则判定与包能否成功导入无关。
 - 收集每个 ``.py`` 的 ``ast.Import`` / ``ast.ImportFrom``：模块级、``if TYPE_CHECKING:``
   块、函数内懒加载**一律计入**——import 即依赖，懒加载只是延迟代价，不解除依赖。
-- 相对 import 按文件所在包绝对化；``from . import x`` 视为依赖子模块 ``wing.x``。
+- 相对 import 按文件所在包绝对化；``from wing import x`` / ``from . import x`` 先用
+  **文件系统判定**（不 import）x 是否为子模块——是则记为子模块依赖（``wing.x``），
+  否则退回包根（``from wing import execute_shell`` 对应 ``wing/__init__`` re-export 的现状）。
 - 每个模块与每个 ``wing.*`` 目标都必须映射到一个"包族"（``FAMILY_RULES``）；
   未登记即失败（强制登记，防止新包/新文件绕过守门）。
 - 现状违规锁定在 ``KNOWN_VIOLATIONS``（规则名 -> 条目集合），每条注明由哪个步骤清除。
@@ -20,12 +22,19 @@
 ---------------------------------------------------
 R1 传输隔离：L0–L3 / root 不得 import ``wing.gateway.*``（runtime/background 例外）。
 R2 工具不越层：``tools`` 不得 import gateway/runtime/background/session/context/store；
-   agent 侧只允许 ``wing.agent``（公共 re-export）与 ``wing.agent.tool_context``。
+   agent 侧只允许 ``wing.agent`` 包根的**窄接口符号**（ToolContext / current_tool_call_id）
+   与 ``wing.agent.tool_context``。
 R3 provider 独立：``provider`` 不得 import agent/session/context/runtime/gateway/tools。
 R4 存储不反向：``store`` 不得 import L3/L4 任一族。
 R5 叶子纯净：``wing/common/**``、``wing/media*``、``wing/schema*`` 不得 import 叶子组
-   ``{common, media, schema}`` 之外的 wing 包（规则内例外见 ``LEAF_LAZY_EXCEPTIONS``）。
+   ``{common, media, schema}`` 之外的 wing 包（规则内例外：3 条**函数体内**懒加载，
+   见 ``LEAF_LAZY_EXCEPTIONS``）。
 R6 顶层无副作用：``wing/__init__.py`` 不得 import 任何 ``wing.*`` 子模块。
+
+已知边界：动态导入（``importlib.import_module("wing…")`` / ``__import__`` / 运行时拼接的
+模块名）不在守门范围——静态 AST 不猜运行时才能定名的形态（口径对齐 probe 门禁
+``libs/wing-probe/wing_probe/guard.py`` 的残余风险声明）；与它的分工见
+``docs/dev/backend-layout.md`` §4。
 """
 
 from __future__ import annotations
@@ -134,10 +143,11 @@ FAMILY_RULES: tuple[tuple[str, str], ...] = (
 # common.token_counter→schema/media），它们都在依赖图最底层，互依不引入上层耦合。
 LEAF_GROUP: frozenset[str] = frozenset({"common", "media", "schema"})
 
-# R5 规则内例外（精确到「源文件 → 目标模块」）：三条函数内懒加载是设计选择
-# （import 期无结构依赖、无加载副作用），且无重构步骤负责——登记为规则的一部分，
-# 而不是"待清理违规"。其它任何跨组依赖（模块级或懒加载）照常变红。
-# 详情见 docs/dev/backend-layout.md §规则内例外。
+# R5 规则内例外（精确到「源文件 → 目标模块」，且**仅当 import 位于函数体内**时生效）：
+# 三条函数内懒加载是设计选择（import 期无结构依赖、无加载副作用），且无重构步骤负责——
+# 登记为规则的一部分，而不是"待清理违规"。其它任何跨组依赖照常变红：包括模块级的
+# 同类 import（same 文件 → 目标，但位置不满足 → 不豁免），由 `in_function` 维度强制。
+# 详情见 docs/dev/backend-layout.md §6 规则内例外。
 LEAF_LAZY_EXCEPTIONS: frozenset[tuple[str, str]] = frozenset(
     {
         ("wing/common/logger.py", "wing.config"),
@@ -181,6 +191,10 @@ class ImportEdge:
     src_rel: str  # 相对 libs/core 的路径，如 "wing/session.py"
     lineno: int
     dst_module: str  # 目标模块，如 "wing.gateway.protocol"
+    names: tuple[
+        str, ...
+    ]  # import 的符号名（ImportFrom 的 alias.name / Import 的模块名）——符号级规则用
+    in_function: bool  # 是否嵌套在函数体内（懒加载）——R5 例外依赖此维度
     stmt: str  # import 语句源码（单行化，用于失败信息）
 
     @property
@@ -211,33 +225,103 @@ def _stmt_text(source: str, node: ast.AST) -> str:
     return " ".join(segment.split())
 
 
-def _resolve_from(node: ast.ImportFrom, rel_path: str) -> list[str]:
-    """``ImportFrom`` → 目标模块列表；相对 import 按文件所在包绝对化。
+@dataclass(frozen=True)
+class ResolvedImport:
+    """一条 import 语句归一化后的目标（一条语句可展开成多条：``from . import a, b``）。"""
 
-    - ``from a.b import c``      -> ``["a.b"]``（只记模块，不展开符号）
-    - ``from . import x, y``     -> ``["<包>.x", "<包>.y"]``（module=None 时按子模块记）
+    node: ast.Import | ast.ImportFrom
+    dst_module: str
+    names: tuple[str, ...]
+    in_function: bool
+
+
+def _submodule_exists(parent: str, name: str) -> bool:
+    """``parent`` 包目录下是否存在名为 ``name`` 的模块 / 子包（纯文件系统判定，不 import）。
+
+    ``from wing import store`` 与 ``from wing.store import …`` 是等价依赖边（都会真的
+    进入 ``sys.modules``）——包属性形态必须解析成子模块，否则 R1/R2/R4 会被静默绕过。
+    只有 ``name`` 不是子模块时才退回包根（如 ``from wing import execute_shell``，
+    对应 ``wing/__init__`` re-export 的现状）。
+    """
+    if parent != "wing" and not parent.startswith("wing."):
+        return False
+    tail = parent[len("wing") :].strip(".")
+    base_dir = WING_ROOT / tail.replace(".", "/") if tail else WING_ROOT
+    child = base_dir / name
+    return child.with_suffix(".py").is_file() or child.is_dir()
+
+
+def _resolve_from(
+    node: ast.ImportFrom, rel_path: str
+) -> list[tuple[str, tuple[str, ...]]]:
+    """``ImportFrom`` → ``[(目标模块, 符号名), …]``；相对 import 按文件所在包绝对化。
+
+    - ``from a.b import c``              -> ``[("a.b", ("c",))]``（只记模块 + 符号名）
+    - ``from wing import store``         -> ``[("wing.store", ("store",))]``（子模块，文件系统判定）
+    - ``from wing import execute_shell`` -> ``[("wing", ("execute_shell",))]``（非子模块：包根）
+    - ``from . import x, y``             -> ``[("<包>.x", ("x",)), …]``（module=None 时逐个判定）
     """
     if node.level == 0:
-        return [node.module] if node.module else []
+        if node.module is None:
+            return []
+        if node.module == "wing":
+            return [
+                (
+                    f"wing.{alias.name}"
+                    if _submodule_exists("wing", alias.name)
+                    else "wing",
+                    (alias.name,),
+                )
+                for alias in node.names
+            ]
+        return [(node.module, tuple(alias.name for alias in node.names))]
     # 文件所在包：foo/bar.py -> ["foo"]；foo/__init__.py -> ["foo"]
     pkg_parts = list(Path(rel_path).with_suffix("").parts)[:-1]
     if node.level > len(pkg_parts):
         return []  # 越出包边界（正常代码不会出现）
-    base = pkg_parts[: len(pkg_parts) - (node.level - 1)]
+    base_parts = pkg_parts[: len(pkg_parts) - (node.level - 1)]
+    base = ".".join(base_parts)
     if node.module is None:
-        return [".".join(base + [alias.name]) for alias in node.names]
-    return [".".join(base + node.module.split("."))]
+        return [
+            (
+                f"{base}.{alias.name}" if _submodule_exists(base, alias.name) else base,
+                (alias.name,),
+            )
+            for alias in node.names
+        ]
+    return [
+        (
+            ".".join(base_parts + node.module.split(".")),
+            tuple(alias.name for alias in node.names),
+        )
+    ]
 
 
-def _iter_imports(
-    tree: ast.AST, rel_path: str
-) -> Iterator[tuple[ast.Import | ast.ImportFrom, list[str]]]:
-    """遍历全部 import 语句（含 TYPE_CHECKING 块与函数内懒加载）及其目标模块。"""
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            yield node, [alias.name for alias in node.names]
-        elif isinstance(node, ast.ImportFrom):
-            yield node, _resolve_from(node, rel_path)
+def _walk_imports(
+    node: ast.AST, in_function: bool, rel_path: str
+) -> Iterator[ResolvedImport]:
+    """深度优先、源码顺序地遍历 import 语句，并跟踪「是否位于函数体内」。"""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        in_function = True  # 装饰器 / 参数无 import；函数体内的一切都算懒加载
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            yield ResolvedImport(node, alias.name, (alias.name,), in_function)
+        return
+    if isinstance(node, ast.ImportFrom):
+        for dst, names in _resolve_from(node, rel_path):
+            yield ResolvedImport(node, dst, names, in_function)
+        return
+    for child in ast.iter_child_nodes(node):
+        yield from _walk_imports(child, in_function, rel_path)
+
+
+def _iter_imports(tree: ast.AST, rel_path: str) -> Iterator[ResolvedImport]:
+    """遍历全部 import 语句（含 TYPE_CHECKING 块与函数内懒加载）。
+
+    与 ``ast.walk`` 的差别：跟踪 ``in_function``（是否嵌套在函数体内）——
+    R5 的懒加载例外只对函数体内的 import 生效。
+    """
+    yield from _walk_imports(tree, False, rel_path)
 
 
 @functools.lru_cache(maxsize=1)
@@ -260,19 +344,26 @@ def _scan() -> ScanResult:
                 f"[R0] {rel}: 模块未登记分层——请在 test_layering.py 的 FAMILY_RULES 登记，"
                 f"并在 docs/dev/backend-layout.md 写明归属"
             )
-        for node, dst_modules in _iter_imports(tree, rel):
-            for dst in dst_modules:
-                if not (dst == "wing" or dst.startswith("wing.")):
-                    continue  # 非 wing 目标（标准库 / 第三方）
-                if _family_of(dst) is None:
-                    problems.append(
-                        f"[R0] {rel}:{node.lineno} → {dst}: 目标模块未登记"
-                        f"（模块不存在或新包未登记 FAMILY_RULES）"
-                    )
-                    continue
-                edges.append(
-                    ImportEdge(rel, node.lineno, dst, _stmt_text(source, node))
+        for resolved in _iter_imports(tree, rel):
+            dst = resolved.dst_module
+            if not (dst == "wing" or dst.startswith("wing.")):
+                continue  # 非 wing 目标（标准库 / 第三方）
+            if _family_of(dst) is None:
+                problems.append(
+                    f"[R0] {rel}:{resolved.node.lineno} → {dst}: 目标模块未登记"
+                    f"（模块不存在或新包未登记 FAMILY_RULES）"
                 )
+                continue
+            edges.append(
+                ImportEdge(
+                    rel,
+                    resolved.node.lineno,
+                    dst,
+                    resolved.names,
+                    resolved.in_function,
+                    _stmt_text(source, resolved.node),
+                )
+            )
     return ScanResult(tuple(edges), tuple(problems))
 
 
@@ -288,6 +379,8 @@ class ViolationContext:
     dst_module: str
     dst_family: str
     dst_layer: int | None
+    names: tuple[str, ...]
+    in_function: bool
 
 
 def _r1(ctx: ViolationContext) -> bool:
@@ -297,6 +390,15 @@ def _r1(ctx: ViolationContext) -> bool:
         "runtime",
         "background",
     }
+
+
+# R2 的 agent 侧窄接口：tools 允许从 wing.agent 包根导入的符号（其余符号一律禁止）。
+# 包根放行是刻意的——agent/__init__ 是 ToolContext / current_tool_call_id 的公共
+# re-export 路径；但 WingAgent / Inbound 这类运行时符号不在此列（它们与
+# `from wing.agent.core import WingAgent` 是同一个越层依赖的两种写法）。
+AGENT_NARROW_INTERFACE: frozenset[str] = frozenset(
+    {"ToolContext", "current_tool_call_id"}
+)
 
 
 def _r2(ctx: ViolationContext) -> bool:
@@ -312,7 +414,9 @@ def _r2(ctx: ViolationContext) -> bool:
         "store",
     }:
         return True
-    # agent 侧：允许包公共 re-export（wing.agent）与窄接口模块，禁止其它子模块。
+    # agent 侧：包根只放行窄接口符号；其余符号与 wing.agent.* 子模块一律禁止。
+    if ctx.dst_module == "wing.agent":
+        return any(name not in AGENT_NARROW_INTERFACE for name in ctx.names)
     return (
         ctx.dst_module.startswith("wing.agent.")
         and ctx.dst_module != "wing.agent.tool_context"
@@ -339,12 +443,14 @@ def _r4(ctx: ViolationContext) -> bool:
 
 
 def _r5(ctx: ViolationContext) -> bool:
-    """R5 叶子纯净（规则内例外见 LEAF_LAZY_EXCEPTIONS）。"""
+    """R5 叶子纯净（规则内例外：仅**函数体内**的懒加载，见 LEAF_LAZY_EXCEPTIONS）。"""
     if not _is_leaf_path(ctx.src_rel):
         return False
     if ctx.dst_family in LEAF_GROUP:
         return False
-    return (ctx.src_rel, ctx.dst_module) not in LEAF_LAZY_EXCEPTIONS
+    if ctx.in_function and (ctx.src_rel, ctx.dst_module) in LEAF_LAZY_EXCEPTIONS:
+        return False
+    return True
 
 
 def _r6(ctx: ViolationContext) -> bool:
@@ -429,7 +535,13 @@ def _violations_by_rule() -> dict[str, tuple[ImportEdge, ...]]:
         if src is None or dst is None:
             continue  # 未登记的情况由 test_every_module_and_target_is_registered 负责
         ctx = ViolationContext(
-            edge.src_rel, src.name, edge.dst_module, dst.name, dst.layer
+            edge.src_rel,
+            src.name,
+            edge.dst_module,
+            dst.name,
+            dst.layer,
+            edge.names,
+            edge.in_function,
         )
         for rule in RULES:
             if rule.check(ctx):
@@ -486,6 +598,31 @@ def _assert_rule_clean(rule_id: str) -> None:
             lines.append(f"  {entry}")
             lines.append(f"      {_stale_note(entry, actual)}")
     pytest.fail("\n".join(lines), pytrace=False)
+
+
+def _rule_hits_for_source(source: str, rel_path: str) -> set[str]:
+    """对合成源码片段跑一遍 R1–R6（元测试用；不参与全仓扫描）。"""
+    src_family = _family_of(_module_name(rel_path))
+    if src_family is None:
+        raise AssertionError(f"合成路径未登记分层：{rel_path}")
+    hits: set[str] = set()
+    for resolved in _iter_imports(ast.parse(source), rel_path):
+        dst_family = _family_of(resolved.dst_module)
+        if dst_family is None:
+            continue
+        ctx = ViolationContext(
+            rel_path,
+            src_family.name,
+            resolved.dst_module,
+            dst_family.name,
+            dst_family.layer,
+            resolved.names,
+            resolved.in_function,
+        )
+        for rule in RULES:
+            if rule.check(ctx):
+                hits.add(rule.id)
+    return hits
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -566,3 +703,162 @@ def test_r5_leaf_purity() -> None:
 def test_r6_root_has_no_side_effects() -> None:
     """R6：wing/__init__.py 不 import 任何 wing.* 子模块。"""
     _assert_rule_clean("R6")
+
+
+def test_import_normalization_shapes() -> None:
+    """形态级元测试：各类 import 写法 → ``(目标模块, 符号名)`` 的归一化结果。
+
+    覆盖 review S1 的包属性形态（``from wing import store``）、相对形态边界与
+    ``module=None`` 退回包根的形态（用例形状借 ``libs/wing-probe/tests/test_guard.py``）。
+    """
+    cases: list[tuple[str, str, list[tuple[str, tuple[str, ...]]]]] = [
+        # from wing import <子模块>：必须解析成子模块（S1），不是包根
+        (
+            "from wing import store\n",
+            "wing/tools/probe.py",
+            [("wing.store", ("store",))],
+        ),
+        (
+            "from wing import store as s\n",
+            "wing/tools/probe.py",
+            [("wing.store", ("store",))],
+        ),
+        (
+            "from wing import session, store\n",
+            "wing/tools/probe.py",
+            [("wing.session", ("session",)), ("wing.store", ("store",))],
+        ),
+        (
+            "from wing import gateway\n",
+            "wing/agent/probe.py",
+            [("wing.gateway", ("gateway",))],
+        ),
+        # from wing import <符号>（不是子模块）：退回包根（wing/__init__ re-export 的现状）
+        (
+            "from wing import execute_shell\n",
+            "wing/tools/probe.py",
+            [("wing", ("execute_shell",))],
+        ),
+        # 常规形态
+        ("from wing.store import *\n", "wing/tools/probe.py", [("wing.store", ("*",))]),
+        (
+            "import wing.store.base as sb\n",
+            "wing/tools/probe.py",
+            [("wing.store.base", ("wing.store.base",))],
+        ),
+        (
+            "import wing.agent\n",
+            "wing/tools/probe.py",
+            [("wing.agent", ("wing.agent",))],
+        ),
+        (
+            "from wing.agent import ToolContext, current_tool_call_id\n",
+            "wing/tools/probe.py",
+            [("wing.agent", ("ToolContext", "current_tool_call_id"))],
+        ),
+        # 相对形态
+        (
+            "from ..store import base\n",
+            "wing/gateway/probe.py",
+            [("wing.store", ("base",))],
+        ),
+        (
+            "from . import base, react\n",
+            "wing/event/__init__.py",
+            [
+                ("wing.event.base", ("base",)),
+                ("wing.event.react", ("react",)),
+            ],
+        ),
+        (
+            "from . import utils\n",
+            "wing/common/with_retry.py",
+            [("wing.common.utils", ("utils",))],
+        ),
+        # module=None 且名字不是子模块 → 退回所在包（符号 re-export 形态）
+        (
+            "from . import NOT_A_MODULE\n",
+            "wing/common/probe.py",
+            [("wing.common", ("NOT_A_MODULE",))],
+        ),
+    ]
+    problems: list[str] = []
+    for source, rel_path, expected in cases:
+        actual = [
+            (resolved.dst_module, resolved.names)
+            for resolved in _iter_imports(ast.parse(source), rel_path)
+        ]
+        if actual != expected:
+            problems.append(
+                f"{source.strip()!r} @ {rel_path}\n      期望 {expected}\n      实得 {actual}"
+            )
+    if problems:
+        pytest.fail(
+            "[归一化] import 形态解析不符预期：\n"
+            + "\n".join(f"  {problem}" for problem in problems),
+            pytrace=False,
+        )
+
+
+def test_bypass_shapes_are_detected() -> None:
+    """评审 S1/S2 的绕过形态必须命中对应规则（合成片段级回归）。"""
+    cases: list[tuple[str, str, set[str]]] = [
+        # S1：包属性形态（修复前：R1/R2/R4 完全漏判、R5 错报成 → wing）
+        ("from wing import store\n", "wing/tools/probe.py", {"R2"}),
+        ("from wing import store as s\n", "wing/tools/probe.py", {"R2"}),
+        ("from wing import gateway\n", "wing/agent/probe.py", {"R1"}),
+        ("from wing import session\n", "wing/store/probe.py", {"R4"}),
+        ("from wing import tools\n", "wing/common/probe.py", {"R5"}),
+        # S2：WingAgent 等包根越层符号必须命中；窄接口符号不命中
+        ("from wing.agent import WingAgent\n", "wing/tools/probe.py", {"R2"}),
+        ("from wing.agent import Inbound\n", "wing/tools/probe.py", {"R2"}),
+        ("from wing.agent import *\n", "wing/tools/probe.py", {"R2"}),
+        ("import wing.agent\n", "wing/tools/probe.py", {"R2"}),
+        (
+            "from wing.agent import ToolContext, current_tool_call_id\n",
+            "wing/tools/probe.py",
+            set(),
+        ),
+        # 合法形态不应误报
+        ("from wing import schema\n", "wing/common/probe.py", set()),
+        ("import os\n", "wing/tools/probe.py", set()),
+    ]
+    problems: list[str] = []
+    for source, rel_path, expected in cases:
+        actual = _rule_hits_for_source(source, rel_path)
+        if actual != expected:
+            problems.append(
+                f"{source.strip()!r} @ {rel_path}\n      期望 {sorted(expected)}"
+                f"\n      实得 {sorted(actual)}"
+            )
+    if problems:
+        pytest.fail(
+            "[绕过形态] 规则判定不符预期：\n"
+            + "\n".join(f"  {problem}" for problem in problems),
+            pytrace=False,
+        )
+
+
+def test_leaf_exceptions_are_function_local() -> None:
+    """R5 例外登记的是「函数内懒加载」：条目必须真实命中，且命中处位于函数体内。"""
+    scan = _scan()
+    problems: list[str] = []
+    for src_rel, dst_module in sorted(LEAF_LAZY_EXCEPTIONS):
+        matching = [
+            edge
+            for edge in scan.edges
+            if edge.src_rel == src_rel and edge.dst_module == dst_module
+        ]
+        if not matching:
+            problems.append(
+                f"{src_rel} → {dst_module}: 例外未命中任何 import（已失效，请删除）"
+            )
+        elif not any(edge.in_function for edge in matching):
+            problems.append(
+                f"{src_rel} → {dst_module}: 命中的 import 不在函数体内——例外只对懒加载生效"
+            )
+    if problems:
+        pytest.fail(
+            "[R5] 例外观测异常：\n" + "\n".join(f"  {problem}" for problem in problems),
+            pytrace=False,
+        )
