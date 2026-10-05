@@ -31,7 +31,6 @@ async def edit_file(
     """
     path = _resolve_path(path, ctx)
 
-    # 读取
     try:
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -43,20 +42,16 @@ async def edit_file(
     if not old_string:
         raise ToolError("edit: old_string cannot be empty")
 
-    # 计数匹配
     count = content.count(old_string)
     if count == 0:
-        # 提供有用提示：文件总行数、是否为空文件
         total_lines = len(content.splitlines())
         if total_lines == 0:
             raise ToolError("edit: old_string not found (file is empty)")
-        # 提供前几行内容作为提示
         first_lines = "\n".join(content.splitlines()[:3])
         raise ToolError(
             f"edit: old_string not found in {total_lines} lines\nfile starts with:\n{first_lines}"
         )
     if count > 1 and not replace_all:
-        # 返回所有匹配位置的行号
         pos = 0
         match_lines = []
         while True:
@@ -70,7 +65,6 @@ async def edit_file(
             f"edit: ambiguous ({count} matches) at lines: {', '.join(map(str, match_lines[:5]))} — use replace_all=True"
         )
 
-    # 原子替换
     if replace_all:
         positions = find_all(content, old_string)
         new_content = content.replace(old_string, new_string)
@@ -101,7 +95,6 @@ async def edit_file(
     ):
         ctx.emit(event)
 
-    # 计算统计信息
     total_old_lines = len(content.splitlines())
     total_new_lines = len(new_content.splitlines())
 
@@ -116,7 +109,6 @@ async def edit_file(
     new_lines = len(new_string.splitlines())
     line_no = content[:pos].count("\n") + 1
 
-    # 轻量级返回：位置 + 行数变化 + 文件变化
     return (
         f"edit: ok @ line {line_no}\n"
         f"  replaced: {old_lines} → {new_lines} lines\n"

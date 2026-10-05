@@ -68,7 +68,6 @@ class EventBus:
         if ctx.session_id is not None and event.session_id is None:
             event.session_id = ctx.session_id
 
-        # 计算 EventTarget
         if event.target is None:
             event.target = EventTarget(scope="global", client_ids=[])
             scope = "global"
@@ -138,5 +137,4 @@ class EventBus:
         return len(self._subscribers)
 
 
-# 全局单例
 event_bus = EventBus()

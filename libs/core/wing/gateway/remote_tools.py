@@ -94,20 +94,17 @@ class RemoteToolManager:
         Raises:
             ValueError: 请求内工具重名，或同 namespace 同名工具已存在。
         """
-        # 1. 请求内查重
         names = [spec.name for spec in specs]
         if len(names) != len(set(names)):
             dupes = sorted({n for n in names if names.count(n) > 1})
             raise ValueError(f"duplicate tool names in request: {dupes}")
 
-        # 2. registry 碰撞预检（提交前）
         for spec in specs:
             if tool_registry.get_tool(spec.name, client_id) is not None:
                 raise ValueError(
                     f"Tool '{spec.name}' already registered in namespace '{client_id}'"
                 )
 
-        # 3. 提交（预检通过后不会碰撞）
         registered: list[str] = []
         for spec in specs:
             tool = Tool(

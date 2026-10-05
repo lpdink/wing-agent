@@ -45,7 +45,6 @@ async def grep_files(
     if not base.exists():
         raise ToolError(f"grep: {path}: No such file or directory")
 
-    # Determine work directory and target
     if base.is_file():
         work_dir = base.parent
         target = base.name
@@ -55,50 +54,40 @@ async def grep_files(
 
     args = ["--hidden"]
 
-    # Case insensitive
     if i:
         args.append("-i")
 
-    # Ignore rules
     if not respect_gitignore:
         args.append("--no-ignore")
 
-    # Output mode
     if output_mode == "files_with_matches":
         args.append("-l")
     elif output_mode == "count":
         args.append("-c")
 
-    # Context
     if output_mode == "content" and context > 0:
         args.append(f"-C{context}")
 
-    # Glob filter (directory only)
     if glob != "*" and base.is_dir():
         args.extend(["--glob", glob])
 
-    # Content mode options
     if output_mode == "content":
         args.append("-n")
         args.append("--max-columns=200")
 
-    # Pattern and target (rg: rg [OPTIONS] PATTERN [PATH])
     args.extend(["-e", pattern, target])
 
     stdout, stderr, code = _run_rg(args, cwd=work_dir)
 
-    # Regex error
     if code == 2 and "regex" in stderr.lower():
         raise ToolError(f"grep: invalid regex: {stderr.strip()}")
 
-    # No matches
     if code == 1 or not stdout.strip():
         return "grep: no matches found"
 
     if code != 0:
         raise ToolError(f"grep: error: {stderr.strip()}")
 
-    # Post-process output
     lines = stdout.strip().split("\n")
 
     # For single file search, rg outputs "line:content" without filename
@@ -109,8 +98,6 @@ async def grep_files(
         return line[2:] if line.startswith("./") else line
 
     if output_mode == "count":
-        # Format: "./file:count" → "file: count"
-        # Single file: "count" → "filename: count"
         if is_single_file:
             lines = [f"{base.name}: {lines[0]}"]
         else:
@@ -119,18 +106,13 @@ async def grep_files(
                 for p, c in (line.rsplit(":", 1) for line in lines)
             ]
     elif output_mode == "files_with_matches":
-        # Single file: just filename (rg outputs filename)
-        # Directory: strip "./" prefix
         lines = [strip_prefix(line) for line in lines]
     else:  # content
-        # Single file: "line:content" → "filename:line:content"
-        # Directory: "./file:line:content" → "file:line:content"
         if is_single_file:
             lines = [f"{base.name}:{line}" for line in lines]
         else:
             lines = [strip_prefix(line) for line in lines]
 
-    # Apply head_limit
     if len(lines) > head_limit:
         return (
             "\n".join(lines[:head_limit]) + f"\n[... truncated at {head_limit} results]"

@@ -1,4 +1,4 @@
-# wing_gateway/app.py — FastAPI App 工厂
+# wing/gateway/app.py — FastAPI App 工厂
 
 """创建 FastAPI app 实例，注入元数据，注册路由。
 

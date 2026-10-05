@@ -1,14 +1,10 @@
-# wing_gateway/routes/ws.py — WebSocket 端点
+# wing/gateway/routes/ws.py — WebSocket 端点
 
-"""WebSocket handler——从 server.py 提取。
+"""WebSocket 端点：连接身份（client_id）确定、上行帧路由与断连清理。
 
-V2 实现（EventBus 模式）：
-  - Gateway 不感知 session_id，只感知 client_id
-  - Gateway 维护 {client_id: ws} 和 {ws: client_id} 两个 dict
-  - Gateway subscribe EventBus，根据 EventTarget 转发给对应 ws
-  - 断连时清理 Gateway 和 EventBus 的路由表
+帧路由的两条脊柱见 gateway/server.py 的模块 docstring（client_id 表 + EventBus）。
+本端点另有远程工具扩展面：
 
-远程工具扩展：
   - client_id 自选与权限解耦：任何客户端都可经 ?client_id=<id> 自定义身份
     （面向未来 UX——用户需知道"远程是谁"以分配工具）。先来先得到，抢占式，
     全量唯一性校验（冲突拒连），不区分角色。声明了 client_id 即 attach 到
@@ -42,7 +38,7 @@ async def handle_ws(ws: WebSocket) -> None:
     """处理 WebSocket 连接。"""
     server = ws.app.state.server
 
-    # 0. 鉴权（accept 之前）
+    # 0. 鉴权（必须在 accept 之前）
     auth_config = server.auth_config
     role: str | None = None
     if auth_config.enabled:
@@ -63,7 +59,7 @@ async def handle_ws(ws: WebSocket) -> None:
     if declared_id:
         if declared_id == DEFAULT_NAMESPACE:
             # 'default' 是内置工具命名空间——若允许占用，断连注销会清空全局
-            # 内置工具表。保留字，注册时即拒。（核心终将不持有内置工具，届时可放开。）
+            # 内置工具表。保留字，注册时即拒。
             await ws.close(code=4009, reason="client_id 'default' is reserved")
             return
         if declared_id in server.clients:
@@ -86,15 +82,13 @@ async def handle_ws(ws: WebSocket) -> None:
     try:
         await ws.accept()
 
-        # 声明了 client_id → attach（具备注册工具资格）。tool_runtime 不收事件。
+        # attach = 具备注册工具资格；tool_runtime 不收事件。
         if declared_id:
             manager.attach(client_id, ws, receives_events=not is_tool_host)
 
-        # 3. 推送连接成功 + client_id
         await ws.send_json(ConnectResponse(client_id=client_id).model_dump())
         log.info(f"Client connected: {client_id} (role={role or 'no-auth'})")
 
-        # 4. 消息路由循环
         while True:
             data = await ws.receive_text()
             try:
@@ -105,13 +99,12 @@ async def handle_ws(ws: WebSocket) -> None:
 
             try:
                 if "call_id" in payload:
-                    # 工具调用结果帧 → 远程调用管理器（带 client 归属校验）
                     result = ToolCallResult(**payload)
                     manager.resolve_result(
                         client_id, result.call_id, result.result, result.is_error
                     )
                 else:
-                    # 用户消息帧。tool_runtime 是纯工具执行远端，禁止投递。
+                    # tool_runtime 是纯工具执行远端，禁止投递用户消息。
                     if is_tool_host:
                         await ws.send_text(
                             json.dumps(

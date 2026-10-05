@@ -1,4 +1,4 @@
-# wing_gateway/routes/system.py — 系统级 HTTP 端点
+# wing/gateway/routes/system.py — 系统级 HTTP 端点
 
 """系统级端点：commands、models、agents、reload、shutdown。
 

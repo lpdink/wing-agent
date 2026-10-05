@@ -1,4 +1,4 @@
-# wing_gateway/routes/tools.py — 远程工具注册端点
+# wing/gateway/routes/tools.py — 远程工具注册端点
 
 """远程工具注册的 HTTP 端点。
 

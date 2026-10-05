@@ -64,14 +64,12 @@ def _validate_and_normalize(todos: list[dict]) -> tuple[list[dict], list[str]]:
     normalized: list[dict] = []
 
     for i, item in enumerate(todos):
-        # --- content validation ---
         content = item.get("content")
         if not content or not isinstance(content, str) or not content.strip():
             warnings.append(f"Item {i}: missing or empty 'content', skipped.")
             continue
         content = content.strip()
 
-        # --- status validation ---
         status = item.get("status", "")
         if status not in VALID_STATUSES:
             warnings.append(
@@ -80,7 +78,6 @@ def _validate_and_normalize(todos: list[dict]) -> tuple[list[dict], list[str]]:
             )
             continue
 
-        # --- activeForm normalization ---
         active_form = item.get("activeForm")
         if active_form and isinstance(active_form, str):
             active_form = active_form.strip()
@@ -96,7 +93,6 @@ def _validate_and_normalize(todos: list[dict]) -> tuple[list[dict], list[str]]:
         i for i, t in enumerate(normalized) if t["status"] == "in_progress"
     ]
     if len(in_progress_indices) > 1:
-        # Keep only the last in_progress, downgrade others to pending
         for idx in in_progress_indices[:-1]:
             normalized[idx]["status"] = "pending"
         downgraded_names = [
@@ -138,14 +134,12 @@ async def todo_write(todos: list[dict], ctx: ToolContext) -> str:
     """Update the todo list for the current session."""
     normalized, warnings = _validate_and_normalize(todos)
 
-    # If nothing survived validation, raise error with warnings
     if not normalized:
         msg = "No valid todo items provided."
         if warnings:
             msg += " Issues: " + "; ".join(warnings)
         raise ToolError(msg)
 
-    # Get old todos for comparison
     old_todos = _todo_store.get(ctx.session_id, [])
 
     # Detect batch completion: >=3 items changed to completed from in_progress/pending
@@ -162,14 +156,11 @@ async def todo_write(todos: list[dict], ctx: ToolContext) -> str:
             if old_status in ("in_progress", "pending"):
                 batch_completed_count += 1
 
-    # If all completed, clear the list (like Claude does)
     all_done = all(t["status"] == "completed" for t in normalized)
     new_todos = [] if all_done else normalized
 
-    # Store normalized todos
     _todo_store[ctx.session_id] = new_todos
 
-    # Build result message
     result = _build_feedback_message(normalized, all_done)
     if warnings:
         result += " " + "; ".join(warnings)

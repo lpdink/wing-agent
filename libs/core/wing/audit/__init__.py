@@ -1,4 +1,4 @@
-"""wing.audit — 审计注册中心（11 归位：原 ``wing.metrics_registry``）。
+"""wing.audit — 审计注册中心（原 ``wing.metrics_registry``）。
 
 MetricsRegistry 基于 EventBus 订阅事件，按事件类型（isinstance）分发到 handler。
 handler 是纯 sink：接收事件做副作用（写文件等），不做拦截或修改。

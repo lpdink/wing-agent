@@ -1,17 +1,15 @@
-# wing_gateway/cli.py — Gateway 命令行入口
+# wing/gateway/cli.py — Gateway 命令行入口
 
 """
 Gateway CLI——启动 WebSocket 服务器。
 
 用法：
-  wing-gateway                    # 默认 127.0.0.1:32523
-  wing-gateway -p 8080            # 指定端口
+  wing-gateway                       # 默认 127.0.0.1:32523
+  wing-gateway -p 8080               # 指定端口
   wing-gateway -H 127.0.0.1 -p 8080  # 指定 host + port
 
-V2 升级路径：
-  - 加 --key / --credentials-file 参数
-  - 加 --tls-psk 参数
-  - 加 --daemon 参数（守护进程模式）
+鉴权（api_key / tls）与守护进程模式由 config.yaml 与 Rust 侧 `wing start` 提供，
+本入口只做 host / port 覆盖与进程内启动。
 """
 
 from __future__ import annotations
@@ -46,7 +44,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # 加载配置
     config = get_config()
 
     # 初始化日志（控制台级别来自 config；文件日志见 common/logger.py 策略）。

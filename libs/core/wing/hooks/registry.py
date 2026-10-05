@@ -148,5 +148,4 @@ class HookRegistry:
         return value
 
 
-# 全局单例
 hooks = HookRegistry()

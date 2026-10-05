@@ -1,4 +1,4 @@
-# wing_gateway/routes/session.py — Session HTTP 端点
+# wing/gateway/routes/session.py — Session HTTP 端点
 
 """Session 管理的 HTTP 端点。
 

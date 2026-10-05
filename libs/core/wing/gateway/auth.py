@@ -60,14 +60,12 @@ def extract_key_from_headers(headers: Mapping[str, str]) -> str | None:
     优先级：Authorization: Bearer <key> > X-API-Key: <key>。
     header name 查找不区分大小写（Starlette Headers 本身即如此）。
     """
-    # 1. Authorization: Bearer <key>
     auth = headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
         token = auth[7:].strip()
         if token:
             return token
 
-    # 2. X-API-Key: <key>
     api_key = headers.get("x-api-key", "")
     if api_key:
         return api_key
@@ -80,12 +78,10 @@ def extract_key_from_ws(ws: WebSocket) -> str | None:
 
     优先级：headers（同 HTTP）> query param ``api_key``。
     """
-    # 1. Headers
     key = extract_key_from_headers(ws.headers)
     if key:
         return key
 
-    # 2. Query parameter
     return ws.query_params.get("api_key") or None
 
 

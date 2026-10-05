@@ -142,7 +142,6 @@ class ToolRegistry:
                     )
                 )
 
-            # 如果启用了 add_purpose，添加 purpose 参数
             if add_purpose:
                 purpose_param = ToolParam(
                     name="purpose",
@@ -184,7 +183,6 @@ class ToolRegistry:
         if isinstance(t, ForwardRef):
             return any(n in t.__forward_arg__ for n in _INJECTABLE_NAMES)
 
-        # Unwrap Optional[ToolContext] / ToolContext | None
         origin = get_origin(t)
         if origin is Union or isinstance(t, UnionType):
             return any(self._is_agent_type(a) for a in get_args(t))
@@ -204,22 +202,18 @@ class ToolRegistry:
         if t is None:
             return ("string", None)
 
-        # 处理 Union 类型（包括 Optional[X] = Union[X, None]）
         origin = get_origin(t)
         if origin is Union or isinstance(t, UnionType):
             args = get_args(t)
-            # 找到非 None 的类型
             non_none_types = [a for a in args if a is not type(None)]
             if non_none_types:
                 return self._type_to_str(non_none_types[0])
             return ("string", None)
 
-        # 处理泛型类型如 list[str], list[int] 等
         if origin is list:
             args = get_args(t)
             if args:
                 elem_type = args[0]
-                # 元素类型映射
                 elem_mapping: dict[
                     type, Literal["string", "integer", "number", "boolean"]
                 ] = {
@@ -232,7 +226,6 @@ class ToolRegistry:
                 return ("array", items)
             return ("array", None)
 
-        # 基本类型映射
         mapping: dict[
             type,
             Literal["string", "integer", "number", "boolean", "array", "object"],

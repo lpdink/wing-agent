@@ -292,7 +292,6 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         ):
             body["thinking"] = {k: v for k, v in tb.items() if k != "budget_tokens"}
 
-        # 缓存标记
         if self.explicit_cache_mode and anthropic_messages:
             self._apply_cache_control(anthropic_messages)
 

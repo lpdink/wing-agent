@@ -58,7 +58,6 @@ async def reload_system(sm: SessionManager) -> ReloadResult:
 
     items: list[ReloadResultItem] = []
 
-    # 1. Reload config
     try:
         config = load_config(reload=True)
         items.append(ReloadResultItem(name="config.yaml", ok=True))
@@ -66,7 +65,6 @@ async def reload_system(sm: SessionManager) -> ReloadResult:
         items.append(ReloadResultItem(name="config.yaml", ok=False, detail=str(e)))
         return ReloadResult(ok=False, items=items)
 
-    # 2. Reload hooks
     try:
         hooks.clear()
         load_hooks(config.hooks)
@@ -74,7 +72,6 @@ async def reload_system(sm: SessionManager) -> ReloadResult:
     except Exception as e:
         items.append(ReloadResultItem(name="hooks", ok=False, detail=str(e)))
 
-    # 3. Reload prompt commands
     try:
         magic_registry.remove_by_source("prompt")
         register_prompt_commands(config.commands.paths)
@@ -82,11 +79,9 @@ async def reload_system(sm: SessionManager) -> ReloadResult:
     except Exception as e:
         items.append(ReloadResultItem(name="prompt commands", ok=False, detail=str(e)))
 
-    # 4. Rebuild provider clients — 所有 session（驱逐重建：按新配置重建
-    #    活跃 provider 后关闭旧 client；配置变更随重建自然生效）。
-    #    模型列表 registry 一并重置（下次查询按新配置重建）。
-    #    单 session 失败不阻断其余 session（否则一个坏 session 会让其他
-    #    session 悄悄留着旧凭据——正是驱逐重建要修的 bug）。
+    # provider 重建（驱逐重建）：按新配置重建活跃 provider 后关闭旧 client，配置变更
+    # 随重建自然生效；模型列表 registry 一并重置（下次查询按新配置重建）。
+    # 单 session 失败不阻断其余 session——否则坏 session 会悄悄留着旧凭据。
     try:
         from wing.provider.registry import reset_registry
 
@@ -114,7 +109,6 @@ async def reload_system(sm: SessionManager) -> ReloadResult:
     except Exception as e:
         items.append(ReloadResultItem(name="provider", ok=False, detail=str(e)))
 
-    # 5. Reload skills & rules for all active sessions
     try:
         for session in sm.iter_sessions():
             session.agent.context_manager.reload_skills_and_rules()

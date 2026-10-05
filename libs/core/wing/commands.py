@@ -1,14 +1,12 @@
 # wing/commands.py
 """Prompt 命令模块——加载、注册、展开。
 
-11 归位：原 ``wing/magic_command/`` 包（registry + prompt_commands）合成单模块——
-「magic command dispatch」早已移除，这个包只剩元数据与文本展开。类名 / 函数名 /
-单例名保持不变（``MagicCommand`` / ``MagicCommandRegistry`` / ``magic_registry``；
-「magic」是历史命名，改名会连锁消费方）。
-
 分区：
   - registry —— 命令元数据注册表（仅存储元数据，不做分发）；
   - prompt_commands —— Prompt 类型命令加载器和文本展开。
+
+命名沿用历史的 ``MagicCommand`` / ``MagicCommandRegistry`` / ``magic_registry``
+（改名会连锁消费方）；dispatch 已移除，这里只剩元数据与文本展开。
 """
 
 from __future__ import annotations
@@ -86,7 +84,6 @@ class MagicCommandRegistry:
         return result
 
 
-# 全局实例
 magic_registry = MagicCommandRegistry()
 
 # ============================================================
@@ -120,7 +117,6 @@ def expand_prompt_command(name: str, args: str) -> str | None:
         log.error(f"Failed to read prompt command file {md_path}: {e}")
         return None
 
-    # 替换 $ARGUMENTS 变量
     final_content = content.replace("$ARGUMENTS", args)
 
     # 确保不以 "/" 开头避免被误识别为命令

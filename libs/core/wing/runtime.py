@@ -385,7 +385,6 @@ class WingRuntime:
         """
         session = self._require_session(session_id)
 
-        # 解析 template（如有）
         template = None
         if agent is not None:
             template = self.template_manager.get(agent)
@@ -395,7 +394,6 @@ class WingRuntime:
                     f"template '{agent}' not found, available: {available}"
                 )
 
-        # 委托给 Session 执行状态变更
         await session.update_state(
             model=model,
             provider_name=provider,

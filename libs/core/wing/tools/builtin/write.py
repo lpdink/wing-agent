@@ -25,7 +25,6 @@ async def write_file(path: str, content: str, ctx: ToolContext) -> str:
     try:
         path = _resolve_path(path, ctx)
 
-        # Ensure parent directory exists
         parent = os.path.dirname(os.path.abspath(path))
         if parent and not os.path.exists(parent):
             os.makedirs(parent, exist_ok=True)
@@ -44,7 +43,6 @@ async def write_file(path: str, content: str, ctx: ToolContext) -> str:
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
 
-        # Stats
         byte_count = len(content.encode("utf-8"))
         new_lines = len(content.splitlines())
 

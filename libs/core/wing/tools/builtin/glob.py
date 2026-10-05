@@ -46,7 +46,6 @@ async def glob_files(
 
     files = [f for f in stdout.strip().split("\n") if f]
 
-    # Sort by mtime (newest first)
     try:
         files_with_mtime = [
             (f, (base / f).stat().st_mtime) for f in files if (base / f).is_file()
