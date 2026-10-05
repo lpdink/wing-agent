@@ -83,15 +83,6 @@ def _failing_provider():
     return type("MockProvider", (), {"generate": _gen})()
 
 
-def _add_large_messages(cm: ContextManager, count: int, content_size: int = 100):
-    """Add messages that collectively have ~count * content_size/4 tokens."""
-    for i in range(count):
-        cm.add_message(Message(role="user", content=f"q{i}: " + "x" * content_size))
-        cm.add_message(
-            Message(role="assistant", content=f"a{i}: " + "y" * content_size)
-        )
-
-
 # ===================================================================
 # 1. Early Trigger
 # ===================================================================

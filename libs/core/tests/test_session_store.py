@@ -22,10 +22,6 @@ def store(request: pytest.FixtureRequest, tmp_path: Path) -> SessionStore:
     return MemorySessionStore()
 
 
-def _open_log(store: SessionStore, sid: str):
-    return store.open_log(sid)
-
-
 class TestMetadata:
     def test_roundtrip_full(self, store: SessionStore):
         meta = SessionMetadata(

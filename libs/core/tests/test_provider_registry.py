@@ -27,14 +27,12 @@ class _FakeProvider:
         self._models = models or []
         self._fail = fail
         self.closed = False
-        self.list_called = False
 
     @property
     def name(self) -> str:
         return self._name
 
     async def list_models(self) -> list[str]:
-        self.list_called = True
         if self._fail:
             raise RuntimeError("API error")
         return self._models
