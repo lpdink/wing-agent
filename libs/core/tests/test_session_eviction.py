@@ -165,7 +165,7 @@ class TestIdleEviction:
 
     @pytest.mark.asyncio
     async def test_teardown_closes_worker_and_providers(self):
-        from wing.provider.openai_compat import OpenAICompatProvider
+        from wing.provider.openai.provider import OpenAICompatProvider
 
         runtime = _runtime()
         session = runtime.create_session()
@@ -186,7 +186,7 @@ class TestIdleEviction:
         回归：``aclose`` 里 shutdown 与 aclose_providers 的顺序若无
         try/finally，失败会跳过关闭，留下"已摘除但没拆干净"的 client。
         """
-        from wing.provider.openai_compat import OpenAICompatProvider
+        from wing.provider.openai.provider import OpenAICompatProvider
 
         runtime = _runtime()
         session = runtime.create_session()

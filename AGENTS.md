@@ -83,9 +83,11 @@ libs/core/wing/
 │   ├── base.py                      ModelProvider ABC + StreamAccumulator + parse_tool_args（容错，永不抛）
 │   ├── transport.py                 HTTP/SSE 传输管道与错误面（SSE 行解析 / 空闲超时 / httpx 构造 / raise_with_body）
 │   ├── media.py                     请求期媒体投影与序列化原语（两协议共用）
-│   ├── openai_compat.py             OpenAI 兼容协议（httpx 流式 + 重试）
-│   ├── anthropic.py                 Anthropic Messages API（thinking blocks、x-api-key）
-│   └── __init__.py                  create_provider() + provider registry（并发聚合模型列表）
+│   ├── factory.py                   create_provider() — 按协议创建 provider 实例
+│   ├── registry.py                  模块级 provider client registry（/api/models 聚合，长持有 + 并发查询）
+│   ├── openai/                      OpenAI 兼容协议子包（provider / serialize / stream）
+│   ├── anthropic/                   Anthropic 协议子包（provider / serialize / stream）
+│   └── __init__.py                  ModelProvider + create_provider（稳定入口）
 ├── store/                           SessionStore — 会话持久状态唯一所有者
 │   ├── base.py                      SessionStore / MessageLog ABC + SessionMetadata
 │   ├── file.py                      File 后端（history.jsonl 混合日志，零迁移）

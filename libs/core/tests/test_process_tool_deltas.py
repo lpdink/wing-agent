@@ -12,7 +12,7 @@
 """
 
 from wing.provider.base import parse_tool_args
-from wing.provider.openai_compat import OpenAICompatProvider
+from wing.provider.openai.provider import OpenAICompatProvider
 from wing.schema import PendingCall
 
 

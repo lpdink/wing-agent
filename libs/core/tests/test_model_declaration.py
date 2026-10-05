@@ -24,8 +24,8 @@ from wing.config import (
     resolve_model_capabilities,
     resolve_model_display_name,
 )
-from wing.provider.anthropic import AnthropicProvider
-from wing.provider.openai_compat import OpenAICompatProvider
+from wing.provider.anthropic.provider import AnthropicProvider
+from wing.provider.openai.provider import OpenAICompatProvider
 
 
 def _provider(**kwargs) -> ProviderConfig:

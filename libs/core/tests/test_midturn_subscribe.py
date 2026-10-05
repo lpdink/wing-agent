@@ -35,7 +35,7 @@ from wing.event import (
 )
 from wing.event_bus import event_bus
 from wing.provider.base import StreamAccumulator
-from wing.provider.openai_compat import _OAIStreamState
+from wing.provider.openai.stream import _OAIStreamState
 from wing.schema import Message, PendingCall, ToolCall
 
 

@@ -20,8 +20,8 @@ import json
 import pytest
 
 from wing.config import ProviderConfig
-from wing.provider.anthropic import AnthropicProvider
-from wing.provider.openai_compat import OpenAICompatProvider
+from wing.provider.anthropic.provider import AnthropicProvider
+from wing.provider.openai.provider import OpenAICompatProvider
 from wing.provider.transport import STREAM_IDLE_TIMEOUT, lines_with_idle_timeout
 
 # 测试阈值：毫秒级，绝不真的等 120 秒。
@@ -189,7 +189,7 @@ class TestOpenAIStreamIdleTimeout:
     @pytest.mark.timeout(10)  # 回归（缺闲置超时）会挂起，而不是失败
     @pytest.mark.asyncio
     async def test_stalled_body_times_out(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr("wing.provider.openai_compat.STREAM_IDLE_TIMEOUT", FAST)
+        monkeypatch.setattr("wing.provider.openai.provider.STREAM_IDLE_TIMEOUT", FAST)
         response = _FakeResponse(_oai_chunk("hel"), stall=True)
         provider = _openai_provider(_ScriptedClient([response]))
 
@@ -206,7 +206,7 @@ class TestOpenAIStreamIdleTimeout:
         self, monkeypatch: pytest.MonkeyPatch
     ):
         """停滞 → 既有 with_retry —— 不新增任何重试逻辑。"""
-        monkeypatch.setattr("wing.provider.openai_compat.STREAM_IDLE_TIMEOUT", FAST)
+        monkeypatch.setattr("wing.provider.openai.provider.STREAM_IDLE_TIMEOUT", FAST)
         stalled = _FakeResponse(_oai_chunk("partial"), stall=True)
         good = _FakeResponse(_oai_chunk("hello"))
         client = _ScriptedClient([stalled, good])
@@ -230,7 +230,9 @@ class TestAnthropicStreamIdleTimeout:
     @pytest.mark.timeout(10)  # 回归（缺闲置超时）会挂起，而不是失败
     @pytest.mark.asyncio
     async def test_stalled_body_times_out(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr("wing.provider.anthropic.STREAM_IDLE_TIMEOUT", FAST)
+        monkeypatch.setattr(
+            "wing.provider.anthropic.provider.STREAM_IDLE_TIMEOUT", FAST
+        )
         response = _FakeResponse(_anthropic_chunk("hel"), stall=True)
         provider = _anthropic_provider(_ScriptedClient([response]))
 
@@ -244,7 +246,9 @@ class TestAnthropicStreamIdleTimeout:
     @pytest.mark.asyncio
     async def test_healthy_stream_unaffected(self, monkeypatch: pytest.MonkeyPatch):
         """非停滞路径不受影响：正常块照常产出（同构不改语义）。"""
-        monkeypatch.setattr("wing.provider.anthropic.STREAM_IDLE_TIMEOUT", FAST)
+        monkeypatch.setattr(
+            "wing.provider.anthropic.provider.STREAM_IDLE_TIMEOUT", FAST
+        )
         provider = _anthropic_provider(
             _ScriptedClient([_FakeResponse(_anthropic_chunk("hi"))])
         )
