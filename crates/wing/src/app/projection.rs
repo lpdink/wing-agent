@@ -8,13 +8,11 @@
 //! I/O itself.
 //!
 //! The session-scoped guards (drop events from other sessions, always accept
-//! `SyncSession`, accept the goal checker session) live here too: they decide
-//! **what the projection is allowed to see**, which is the projection's own
-//! contract.
+//! `SyncSession`) live here too: they decide **what the projection is allowed
+//! to see**, which is the projection's own contract.
 //!
 //! Call directions: the main loop ([`super`]) calls in with every event;
-//! projections call out to [`super::modal`] (ask registration) and
-//! [`super::goal_lane`] (roles, actions).
+//! projections call out to [`super::modal`] (ask registration).
 
 use super::App;
 use super::AppIntent;
@@ -47,12 +45,9 @@ impl App {
         //
         // Session lifecycle events (SyncSession) are always accepted —
         // their session_id may intentionally differ from the current one.
-        //
-        // Goal mode: also accept events from the checker session.
         if !matches!(event, WingEvent::SyncSession { .. })
             && let Some(event_sid) = event.session_id()
             && event_sid != self.session_id
-            && !self.is_goal_session(event_sid)
         {
             tracing::debug!(
                 event_type = %event.event_type(),
@@ -91,9 +86,9 @@ impl App {
                 origin_request_id, ..
             } => {
                 // The message has actually been fed to the model — only now
-                // may it move up into chat history. Untracked ids (goal
-                // orchestration sends, other clients) are ignored: this
-                // client does not render them.
+                // may it move up into chat history. Untracked ids (another
+                // client's sends) are ignored: this client does not render
+                // them.
                 if !self.chat.promote_pending(&origin_request_id) {
                     tracing::debug!(
                         origin_request_id,
@@ -117,21 +112,13 @@ impl App {
                     )));
                 }
             }
-            WingEvent::Interrupted { meta, .. } => {
+            WingEvent::Interrupted { .. } => {
                 // Interrupt clears the backend inbox — pending messages never
                 // reached the model. Commit them as discarded (dim + struck
                 // through) rather than silently vanishing.
                 self.chat.discard_all_pending();
                 self.finish_turn();
                 self.clear_ask_state();
-                // Goal mode: record which role was interrupted.
-                let goal_role = self.goal_role_for_session(meta.session_id.as_deref());
-                if let Some(goal) = self.goal.as_mut()
-                    && let Some(role) = goal_role
-                {
-                    let actions = goal.on_interrupted(role);
-                    self.execute_goal_actions(actions);
-                }
                 self.show_toast(Toast::info(
                     "Agent interrupted",
                     std::time::Duration::from_secs(2),
@@ -457,7 +444,6 @@ impl App {
                 num_turns,
                 result,
                 usage,
-                meta,
                 ..
             } => {
                 // Extract total tokens from usage JSON.
@@ -484,15 +470,6 @@ impl App {
                     num_turns,
                     "turn result received"
                 );
-
-                // Goal mode: drive the orchestration loop.
-                let goal_role = self.goal_role_for_session(meta.session_id.as_deref());
-                if let Some(goal) = self.goal.as_mut()
-                    && let Some(role) = goal_role
-                {
-                    let actions = goal.on_turn_result(role, result.clone());
-                    self.execute_goal_actions(actions);
-                }
 
                 // Notify user if terminal is not focused.
                 let msg = crate::util::osc9::fmt_turn_result(
@@ -543,14 +520,6 @@ impl App {
         name: Option<String>,
         agent: Option<Box<AgentInfo>>,
     ) {
-        // Goal mode: ignore SyncSession from checker session.
-        // We subscribe to checker for events only — it must NOT
-        // replace the current session or clear the chat.
-        if self.goal.is_some() && self.is_goal_session(&session_id) {
-            tracing::debug!(session_id, "ignoring checker SyncSession in goal mode");
-            return;
-        }
-
         // Update session_id to the new session (Phase 3c).
         self.session_id = session_id;
 

@@ -443,7 +443,6 @@ fn status_bar_lines(width: u16, p: &ThemePalette) -> Vec<Line<'static>> {
         session_completion_tokens: 24_800,
         session_cached_tokens: 98_100,
         connected: true,
-        goal_active: true,
         ..StatusData::default()
     };
     let area = Rect::new(0, 0, width, 1);

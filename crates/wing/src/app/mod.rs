@@ -6,20 +6,17 @@
 //!
 //! * [`commands`] — slash-command routing (table → handler → fetch projection);
 //! * [`projection`] — gateway events projected into chat / turn / status;
-//! * [`modal`] — keyboard ownership, the Escape ladder, panel lifecycles;
-//! * [`goal_lane`] — the App side of the Goal orchestration (state machine in
-//!   [`goal`]).
+//! * [`modal`] — keyboard ownership, the Escape ladder, panel lifecycles.
 //!
 //! The interaction paths live in their own modules too: [`frame`] records the
 //! geometry of the frame just drawn, [`mouse`] routes pointer gestures — its
 //! priority chain declared once — and [`selection_session`] owns the drag's
 //! lifecycle (anchor, fingerprint, edge auto-scroll).
 //!
-//! State that the UI renders as well (the selection panels, the goal display
-//! role, the shared magic strings) is neutral and lives in
-//! [`crate::shared`] — this root only orchestrates it.
+//! State that the UI renders as well (the selection panels, the shared magic
+//! strings) is neutral and lives in [`crate::shared`] — this root only
+//! orchestrates it.
 
-pub mod goal;
 pub mod intent;
 pub mod popup_state;
 pub mod render_context;
@@ -30,7 +27,6 @@ pub mod turn_state;
 
 mod commands;
 mod frame;
-mod goal_lane;
 mod images;
 mod modal;
 mod mouse;
@@ -167,8 +163,6 @@ pub struct App {
     palette: ThemePalette,
     /// Whether the gateway connection is active.
     connected: bool,
-    /// Goal orchestration state (None = normal mode).
-    pub(crate) goal: Option<goal::GoalState>,
     /// TUI 启动时的工作目录，用于 /new 创建 session 时传递 workspace。
     launch_workspace: Option<String>,
     /// Geometry of the last drawn frame — the contract every input path
@@ -242,7 +236,6 @@ impl App {
             config,
             palette,
             connected: true,
-            goal: None,
             launch_workspace,
             // Nothing drawn yet: no band, no composer, no hit testing before
             // anything is on screen (the terminal width falls back to the
@@ -492,11 +485,6 @@ impl App {
         let layout = self.config.layout.clone();
         let thinking_mode = self.config.rendering.thinking;
         let thinking_expanded = self.chat.thinking_expansion();
-        let goal_role_label: Option<String> = self.goal.as_ref().and_then(|g| {
-            g.active_role()
-                .map(|r| format!("{} {}", r.label(), r.working_verb()))
-        });
-
         terminal.draw(|frame| {
             let area = frame.area();
             self.geometry.record_area(area);
@@ -606,7 +594,6 @@ impl App {
                 self.turn.started_at.map(|started_at| ActivityRail {
                     spinner: &self.turn.spinner,
                     started_at,
-                    role: goal_role_label.as_deref(),
                 })
             } else {
                 None

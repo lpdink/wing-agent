@@ -66,7 +66,7 @@ async with GatewayClient("http://127.0.0.1:32523", api_key="secret") as client:
 
 Gateway 开启鉴权时，`api_key` 经 `Authorization: Bearer` 传递。
 纯工具宿主可用 `tool_runtime` 角色 key；需要创建 session / 订阅事件的
-客户端（如 wing-orch）必须用 `admin` 角色 key。
+外部编排客户端必须用 `admin` 角色 key。
 
 ## 依赖
 

@@ -83,7 +83,7 @@ gateway:
 	uv run wing-gateway
 
 test-python:
-	uv run pytest libs/core/tests/ libs/wing-orch/tests/ libs/wing-sdk/tests/
+	uv run pytest libs/core/tests/ libs/wing-sdk/tests/
 
 # 确定性集成测试（假 Provider + 临时 WING_HOME，离线、无外部 API key）。
 # 场景见 libs/wing-probe/scenarios/，说明见 docs/dev/probe-testing.md。

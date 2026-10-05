@@ -40,9 +40,9 @@ async def test_run_safe_client_id_unchanged(monkeypatch):
     captured: dict = {}
     _patch_connect(monkeypatch, captured)
 
-    host = ToolHost(client_id="wing-orch-abcd1234")
+    host = ToolHost(client_id="orchestrator-abcd1234")
     with pytest.raises(RuntimeError, match="stop"):
         await host.run()
 
     # 字母数字与 - 保持原样（自动生成的 ID 不受影响）
-    assert "client_id=wing-orch-abcd1234" in captured["uri"]
+    assert "client_id=orchestrator-abcd1234" in captured["uri"]

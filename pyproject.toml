@@ -48,7 +48,6 @@ packages = ["wing_agent"]
 members = [
     "libs/core",
     "libs/wing-sdk",
-    "libs/wing-orch",
     "libs/wing-probe",
     "crates/wing",
 ]
@@ -57,7 +56,6 @@ members = [
 wing-cli = { workspace = true }
 wing-gateway = { workspace = true }
 wing-sdk = { workspace = true }
-wing-orch = { workspace = true }
 wing-probe = { workspace = true }
 
 [dependency-groups]
@@ -73,7 +71,6 @@ dev = [
     "maturin>=1.9.3,<2.0",
     "hatchling>=1.27",
     "wing-sdk",
-    "wing-orch",
     "wing-probe",
 ]
 

@@ -19,12 +19,6 @@ pub const TIPS_COMMAND: &str = "/tips";
 /// Create a new session.
 pub const NEW_COMMAND: &str = "/new";
 
-/// Activate Goal orchestration mode.
-pub const GOAL_COMMAND: &str = "/goal";
-
-/// Exit Goal orchestration mode.
-pub const GOAL_EXIT_COMMAND: &str = "/goal-exit";
-
 // ── Tool names (must match backend tool registry names) ──────────
 
 pub const TOOL_BASH: &str = "Bash";

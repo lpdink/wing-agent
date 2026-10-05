@@ -35,8 +35,6 @@ Despite the name, there is no backend "magic dispatch" anymore. A slash command 
 | `/skills` | | | Show loaded skills |
 | `/rewind` | | `<uuid>` | Rewind to a specific message (discards later messages) |
 | `/reload` | | | Reload config, hooks, provider, skills (no restart needed) |
-| `/goal` | | `<prompt>` | Start Goal orchestration (executor + checker loop) |
-| `/goal-exit` | | | Exit Goal orchestration mode |
 
 The source of truth for this list is `crates/wing/src/ui/popup/command.rs` (`TUI_ONLY_COMMANDS`).
 
@@ -70,15 +68,6 @@ The source of truth for this list is `crates/wing/src/ui/popup/command.rs` (`TUI
 /context               # message count, token usage, system prompt
 /skills                # list loaded skill files
 /reload                # pick up config/hooks/skills changes without restarting
-```
-
-## Goal orchestration
-
-`/goal` pairs an **executor** (the current session) with an independent **checker** session that verifies the result in a loop, so the agent no longer judges its own work. See [docs/dev/architecture.md](../dev/architecture.md) for the mechanism.
-
-```
-/goal refactor the auth module and add tests
-/goal-exit             # leave Goal mode
 ```
 
 ## Prompt commands

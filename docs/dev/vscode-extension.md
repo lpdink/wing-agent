@@ -19,7 +19,6 @@
 
 **不做**（Out of Scope，别顺手加）：
 
-- Goal 编排（TUI/编排 CLI 有，本扩展不做）；
 - 图片/文件上传、附件、多模态、`@file` 引用（后端未支持，视觉上也不出现）；
 - VS Code 原生 Chat Participant API（我们做自己的 Webview 视图）；
 - 远程场景（SSH / WSL / Dev Container）、多机网关；
@@ -320,7 +319,7 @@ webview 意图（`src/shared/bridge.ts` 的 `WebviewToHostMessage`，全部有�
 1. **gateway prompt command**（`GET /api/commands`，如 `/init`）：作为普通消息文本发给后端，
    由后端展开 `$ARGUMENTS` 再给模型；
 2. **frontend command**（`src/shared/commands.ts` 的 `FRONTEND_COMMANDS`，是 TUI
-   `TUI_ONLY_COMMANDS` 的 1:1 镜像，去掉两条 Goal 命令）：不发模型。`kind: 'intent'` 的走
+   `TUI_ONLY_COMMANDS` 的 1:1 镜像）：不发模型。`kind: 'intent'` 的走
    专用意图（`/model`、`/think`、`/yolo`、`/ss`…），`kind: 'forward'` 的由宿主
    `runPromptCommand` 处理（`/context`、`/skills`、`/reload`、`/copy`、`/title`、`/workdir`、
    `/agents`、`/clear`…）。

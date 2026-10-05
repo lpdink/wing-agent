@@ -50,8 +50,6 @@ pub struct StatusData {
     pub session_cached_tokens: i64,
     /// Whether the gateway connection is active.
     pub connected: bool,
-    /// Whether Goal orchestration mode is active.
-    pub goal_active: bool,
 }
 
 impl Default for StatusData {
@@ -72,7 +70,6 @@ impl Default for StatusData {
             session_completion_tokens: 0,
             session_cached_tokens: 0,
             connected: true,
-            goal_active: false,
         }
     }
 }
@@ -190,13 +187,6 @@ impl Widget for StatusBar<'_> {
                 None => " think".to_string(),
             };
             spans.push(Span::styled(think_label, dim));
-        }
-
-        if d.goal_active {
-            spans.push(Span::styled(
-                " [GOAL]",
-                Style::default().fg(self.palette.accent),
-            ));
         }
 
         // Build right spans.

@@ -15,17 +15,13 @@
 //!
 //! Call directions: [`super`] (main loop / fetch results) and [`super::modal`]
 //! (the composer's submit path, popup refresh) call in; this module calls
-//! [`super::modal`] for the `/model` picker and [`super::goal_lane`] for the
-//! `/goal` commands.
+//! [`super::modal`] for the `/model` picker.
 
 use super::App;
 use super::AppIntent;
-use super::goal_lane;
 use super::title;
 use crate::shared::constants::CLEAR_COMMAND;
 use crate::shared::constants::COPY_COMMAND;
-use crate::shared::constants::GOAL_COMMAND;
-use crate::shared::constants::GOAL_EXIT_COMMAND;
 use crate::shared::constants::NEW_COMMAND;
 use crate::shared::constants::TIPS_COMMAND;
 use crate::shared::panels::picker::ModelPanel;
@@ -127,18 +123,6 @@ pub(super) const COMMANDS: &[CommandRoute] = &[
         takes_args: true,
         handler: copy_assistant_message,
     },
-    CommandRoute {
-        name: GOAL_COMMAND,
-        aliases: &[],
-        takes_args: true,
-        handler: goal_lane::start_goal_command,
-    },
-    CommandRoute {
-        name: GOAL_EXIT_COMMAND,
-        aliases: &[],
-        takes_args: false,
-        handler: goal_lane::exit_goal_command,
-    },
     // ---- HTTP-migrated commands (side effect = AppIntent) ----
     CommandRoute {
         name: "/context",
@@ -228,15 +212,7 @@ impl App {
         if self.try_frontend_command(text) {
             return true;
         }
-        // Goal mode: route user input through Goal state machine.
-        if let Some(goal) = self.goal.as_mut() {
-            self.chat.push(ChatCell::UserMessage(text.to_string()));
-            let actions = goal.on_user_input(text);
-            self.execute_goal_actions(actions);
-            self.turn.usage = TurnUsage::default();
-            return true;
-        }
-        // Normal path: the message only moves up into chat history when the
+        // The message only moves up into chat history when the
         // model actually receives it (user_message_accepted). Until then it
         // queues in the pending area below in-flight streaming output.
         let request_id = crate::protocol::generate_request_id();
