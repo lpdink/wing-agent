@@ -90,8 +90,18 @@ test-e2e:
 
 # 确定性集成测试（假 Provider + 临时 WING_HOME，离线、无外部 API key）。
 # 场景见 libs/wing-probe/scenarios/，说明见 docs/dev/probe-testing.md。
+#
+# 并行度：场景之间零共享（各自 tmp + 各自网关子进程 + 各自假 Provider），所以
+# 按核数铺开是安全的——实测全量 80s → 16s（12 核）。默认 min(8, 核数)：本机 12 核
+# 取 8（给 `make test` 里同时跑的 rust / ts 组留核），CI 的 4 核 runner 取 4。
+# PROBE_WORKERS 可覆盖；WING_TEST_SERIAL=1（排查并发干扰的逃生舱）也归串行——
+# 只关组间并行等于没关。解析成 1 时不传 -n：逃生舱要的是原样的串行，不是
+# "xdist 里只开一个 worker"。
+PROBE_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ "$$n" -gt 8 ]; then echo 8; else echo $$n; fi)
+PROBE_WORKER_ARGS = $(if $(filter 1,$(PROBE_WORKERS)),,-n $(PROBE_WORKERS))
+
 test-probe:
-	uv run pytest libs/wing-probe/ --timeout=120
+	uv run pytest libs/wing-probe/ --timeout=120 $(PROBE_WORKER_ARGS)
 
 check-python:
 	@RUFF_FAILED=0; RUFF_FMT_FAILED=0; TY_FAILED=0; VULTURE_FAILED=0; \

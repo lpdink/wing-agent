@@ -139,7 +139,7 @@ def run_invariants(
 class Probe:
     """一个场景的全部断言面（env + driver + 视图 + 现场转储）。
 
-    用法（见 ``scenarios/conftest.py`` 的 ``probe`` fixture）：
+    用法（见 ``libs/wing-probe/conftest.py`` 的 ``probe`` fixture）：
 
         probe = await Probe.start(tmp_path / "probe")
         probe.register("probe/x", Turn.of(text="hi"))

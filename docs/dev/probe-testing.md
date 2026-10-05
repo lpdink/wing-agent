@@ -13,7 +13,8 @@
 
 | 命令 | 做什么 |
 |------|--------|
-| `make test-probe` | 全部：基础设施自测 + 场景（= `uv run pytest libs/wing-probe/ --timeout=120`） |
+| `make test-probe` | 全部：基础设施自测 + 场景（= `uv run pytest libs/wing-probe/ --timeout=120 -n <核数≤8>`） |
+| `make test-probe PROBE_WORKERS=1` | 串行跑（与 `-n 1` 不同：不经过 xdist，输出与失败语义都是原样的） |
 | `uv run pytest libs/wing-probe/tests/` | 只跑基础设施自测（不起网关，秒级） |
 | `uv run pytest libs/wing-probe/scenarios/test_rewind.py::test_rewind_skips_event_ancestors -v --timeout=120` | 单个场景 |
 | `make test` | 四组（python / probe / rust / ts）**并行**跑完，末尾统一给结论（失败详情在结论之前）——见 `scripts/collect_output.sh` |
@@ -25,8 +26,13 @@
 
 | 变量 | 默认 | 作用 |
 |------|------|------|
+| `PROBE_WORKERS` | `min(8, 核数)` | 场景并行度（`make test-probe` 的 `-n`）。本机 12 核取 8（给 `make test` 里同时跑的 rust / ts 组留核），CI 的 4 核 runner 取 4。`WING_TEST_SERIAL=1` 同样归串行 |
 | `WING_GATEWAY_BIN` | 空 | 显式指定网关可执行文件（覆盖解析顺序）；指向不存在的文件直接报错，不静默回落 |
 | `PROBE_DUMP` | `on-fail` | 现场转储策略：`on-fail` / `always` / `never`（非法值报错） |
+
+**为什么敢并行**：场景之间零共享——各自的 tmp `WING_HOME`、各自的网关子进程、各自的假 Provider、各自 OS 分配的端口。跑起来也不吃 CPU（瓶颈是进程启动与 HTTP 握手这类等待，不是算力：8 worker 实测平均只占 1.35 核），所以并行度按核数铺开是安全的。实测全量 80s → 16s。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
+
+**为什么台账钩子住 `libs/wing-probe/conftest.py`，而不在 `scenarios/` 里**：pytest 的 conftest 加载只从某个路径**向上**走（`Config._importconftest`：`for parent in reversed((directory, *directory.parents))`），而从不下潜；**xdist 的 controller 不做收集**，只为 `args` 调这个函数。于是 `pytest libs/wing-probe/`（`make test-probe` 的原样调用）时 controller 只加载 args 那一层的 conftest——把台账的合并/汇总钩子放进嵌套的 `scenarios/conftest.py`，串行照常工作、一开 `-n` 就成死代码：失败现场的转储路径与逃生舱理由整体消失（CI 的 `probe-check` 没有 artifacts 上传步骤，终端汇总就是这些路径的聚汇点），而测试仍然全绿。`tests/test_conftest_layout.py` 用 AST 门禁守这条位置约定（改名的同义本地函数不算数）。
 
 网关二进制解析顺序（`wing_probe.env.resolve_gateway_bin`）：`$WING_GATEWAY_BIN` → 与 `sys.executable` 同目录 → 仓库 `.venv/bin/wing-gateway` → `PATH`。
 
@@ -46,8 +52,9 @@ libs/wing-probe/
 │   ├── toolhost.py        # 最小 tool host（远程工具探针侧实现；只走公开 HTTP / WS 协议）
 │   ├── files.py           # workspace 文件断言
 │   └── guard.py           # import 门禁（AST）
-├── tests/                 # 基础设施自测（不起网关）
-└── scenarios/             # 整机场景（conftest.py 是唯一的 fixture 定义处）
+├── conftest.py            # 唯一的公共 fixture 定义处（在 args 那一层，不是 scenarios/ 里）
+├── tests/                 # 基础设施自测（不起网关；含 conftest 位置门禁）
+└── scenarios/             # 整机场景（只 import wing_probe 与 pytest）
 ```
 
 ## 新增一个场景
@@ -98,7 +105,7 @@ async def test_bash_write_then_history(probe: Probe) -> None:
 
 三条要点：
 
-1. `probe.register(model, Turn...)` 支持关键字形式 `Turn.of(text=…, thinking=…, tool_calls=[…], usage=…, chunk=…, delay=…)`，也支持 `Script(...)`（分片粒度 / 切断点 / 延迟）；
+1. `probe.register(model, Turn...)` 支持关键字形式 `Turn.of(text=…, thinking=…, tool_calls=[…], usage=…, chunk=…, delay=…, first_delay=…)`，也支持 `Script(...)`（分片粒度 / 切断点 / 延迟）。两个延迟正交：`delay` 是**分片之间**的节奏（流式场景要多帧才有东西可断），`first_delay` 是**首个内容帧之前**的等待（撑「首帧未到」的窗口，例如中途加入场景要落在首块到达前）。**想只要窗口别用 `delay`**——它是逐帧的，5 帧的 turn 用 `delay=3.0` 会等成 12s；
 2. 剧本**按序消费**，请求次数超出即返回 5xx（`ScriptExhaustedError` 附可读报告）——"不该发生的额外调用"会立刻变红，这是特性不是噪音；
 3. 失败报告与场景断言并列：teardown 的三条内置不变量对**场景创建／挂载的全部会话**（含 fork 出来的子会话）自动运行，失败抛 `ProbeInvariantError`，报告标注 `built-in invariants` + session id + 不变量名。
 
@@ -232,7 +239,8 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 ## 已知取舍（与二批范围）
 
-- **env 是 function 级**（design D10）：每个场景一个新 tmp + 新网关进程 + 新假 Provider，正确性优先；实测每场景约 0.25s 启动开销，暂不构成压力。场景数量显著增长后再走优化路径（session 级共享网关 + 按 model 名分域的剧本），`Probe` 与 `ProbeEnv` 分离就是为了那时只改 fixture 作用域；
+- **env 是 function 级**（design D10）：每个场景一个新 tmp + 新网关进程 + 新假 Provider，正确性优先；实测每场景的自举 + 收尾约 0.5s（`start` 0.18s / `stop` 0.30s），78 个场景串行就是 40s——**这部分开销靠并行摊掉，不靠共享环境**（并行不改变隔离语义，共享会）。场景数量再多一个量级、或并行度吃满之后，下一条路径仍是 spec 记的 session 级共享网关 + 按 model 名分域的剧本，`Probe` 与 `ProbeEnv` 分离就是为了那时只改 fixture 作用域；
+- **场景里的等待要花在窗口上，不要花在节奏上**：`delay` 逐帧、`first_delay` 只压首个内容帧，两者混用会互相放大（`scenarios/test_midjoin_sync.py` 曾用 `delay=3.0` 撑窗口，白烧 9s）。写场景时先想清楚"我在等的是什么"，再选旋钮；
 - **二批**（已收窄）：Anthropic 协议路径、性能/时延断言、全事件类型 × `persist` 矩阵。已补齐：工具执行期中断（`scenarios/test_interrupt_tool_phase.py`）、后台自动压缩 / pending 跨进程重启（`scenarios/test_auto_compact.py`）、远程工具宿主（`scenarios/test_remote_tools.py` + `wing_probe/toolhost.py`）、帧切分与重组（`scenarios/test_frame_chunking.py`）；
 - 兜底：`make test-probe` 传 `--timeout=120`（另有场景级 `@pytest.mark.timeout(120)`），网关进程在 teardown 走 `/api/shutdown` → `terminate` → `kill`；
 - 网关重试在探测配置里显式打开（`max_retries=2` / `max_retry_delay=1s`，`wing_probe/env.py`）——语义重试场景需要它（`scenarios/test_react_invalid_generation.py`）。计数口径：**一次逻辑调用的剧本消费上界 = 1 + max_retries**，超出即 5xx，仍然可数。
