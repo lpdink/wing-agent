@@ -436,12 +436,12 @@ pub enum WingEvent {
     /// Diff content for file edits.
     ///
     /// `tool_call_id` correlates the diff with the tool call that produced
-    /// it (Write/Edit/BetterEdit) so the TUI can anchor the Diff cell
+    /// it (Write/Edit) so the TUI can anchor the Diff cell
     /// directly after its ToolCall cell under concurrent (out-of-order)
     /// execution. Empty for older gateways — falls back to append.
     ///
     /// The payload is a **window**: `old_text` / `new_text` carry the changed
-    /// region ± context lines (Edit/BetterEdit), or the full content (Write /
+    /// region ± context lines (Edit), or the full content (Write /
     /// new files). `old_start_line` / `new_start_line` are the 1-based
     /// absolute line numbers of the window's first line in the old / new
     /// revision — the TUI renders the given rows verbatim and uses these for

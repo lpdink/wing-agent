@@ -84,15 +84,12 @@ libs/core/wing/
 ├── tools/                           内置工具
 │   ├── bash.py / file.py / read_image.py / search.py   Bash · Read/Write/Edit · ReadImage · Glob/Grep
 │   ├── ask_user.py / todo.py           AskUserQuestion · TodoWrite
-│   ├── explorer.py                     Explorer 子 agent（只读工具集，可 run_in_background）
-│   ├── experimental.py                 BetterEdit（实验，[upto] 锚点）
 │   ├── shell_safety.py                 Bash 命令安全审查（白名单放行 / 默认拦截）
 │   └── utils.py                        resolve_path — 相对路径按会话 workspace 解析
 ├── magic_command/                   prompt 命令：registry.py（元数据）+ prompt_commands.py（$ARGUMENTS 展开，无分发）
 ├── metrics_registry/                指标 / 审计注册中心（EventBus 订阅，原子写 JSON）
 │   ├── core.py                      MetricsRegistry 类 + 单例 + 原子读写工具
-│   ├── _llm_metrics.py / _tool_call_metrics.py / _compact_metrics.py
-│   └── experimental.py              BetterEdit 实验审计（~/.wing/core/metrics_experimental.json）
+│   └── _llm_metrics.py / _tool_call_metrics.py / _compact_metrics.py
 ├── common/
 │   ├── logger.py                    日志初始化（按本地日期切分 + 轮转 / prune）
 │   ├── tracked_list.py              TrackedList — 链拓扑引擎（I/O 委托 MessageLog）

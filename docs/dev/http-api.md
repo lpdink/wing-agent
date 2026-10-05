@@ -36,9 +36,9 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | POST | `/api/session/compact` | 手动压缩上下文，可带 `instruction` 侧重指令（条件插入压缩 prompt，无指令时 prompt 不变） |
 | POST | `/api/session/interrupt` | 中断当前任务（Esc 键） |
 | POST | `/api/session/rewind` | 回退到指定消息 uuid |
-| POST | `/api/session/release` | 逐出 session 内存态（只回收内存，磁盘不动）：忽略空闲时长，不忽略钉住条件——忙碌 / inbox 有待处理输入 / 有后台任务 / 被订阅 / 非持久后端以 409 拒绝；本就不在内存返回 `released: false`（幂等） |
+| POST | `/api/session/release` | 逐出 session 内存态（只回收内存，磁盘不动）：忽略空闲时长，不忽略钉住条件——忙碌 / inbox 有待处理输入 / 被订阅 / 非持久后端以 409 拒绝；本就不在内存返回 `released: false`（幂等） |
 
-> **会话逐出（eviction）**：空闲会话（无 turn 在跑、inbox 无待处理输入、无后台任务、
+> **会话逐出（eviction）**：空闲会话（无 turn 在跑、inbox 无待处理输入、
 > 无人订阅且超过 `sessions.eviction.idle_ttl_seconds`）会被后台周期任务逐出内存——
 > 只回收 worker 与 provider client，`history.jsonl` / `metadata.json` 一概不动。
 > `resume` / `subscribe` / `send` 按需水合；`session/get`、`info`、`branches` 不
@@ -104,7 +104,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 > `tool_call_stream`：LLM 生成工具参数期间的流式渲染事件，携带**增量原始 args 文本碎片**（`args_fragment`，首个事件含完整前缀）。后端不解析 partial JSON，前端自行累积 buffer 并容错解析渲染；参数生成结束后由 `tool_call` 事件携带权威解析结果。
 
-> `user_message_accepted`：用户消息被消费进模型上下文的确认（`content` + `origin_request_id`，后者即客户端提交时的 `request_id`）。两个发射点：`run_turn` 入口的 drain-and-merge（先于 `turn_started`）与工具执行后的 steer 注入。产品语义：TUI 把已发送消息挂在底部排队区，收到本事件才上移进聊天历史——消息"往上走"当且仅当它真的被发给了模型。无 `request_id` 的内部投递（如 Explorer 回传）不发射。
+> `user_message_accepted`：用户消息被消费进模型上下文的确认（`content` + `origin_request_id`，后者即客户端提交时的 `request_id`）。两个发射点：`run_turn` 入口的 drain-and-merge（先于 `turn_started`）与工具执行后的 steer 注入。产品语义：TUI 把已发送消息挂在底部排队区，收到本事件才上移进聊天历史——消息"往上走"当且仅当它真的被发给了模型。无 `request_id` 的内部投递不发射。
 
 **状态事件**（`event/state_change.py`）：`session_init` · `sync_session`（订阅时重放历史）· `session_state_changed`（update / think / yolo 后统一发出）· `interrupted` · `compact_done`。
 

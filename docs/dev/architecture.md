@@ -114,7 +114,7 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 | 维度 | 口径 |
 |------|------|
 | 判定 | 三条全过才逐出：`status == idle`（working / waiting 钉住）、inbox 无待处理输入、无 client 订阅（EventBus 路由表）、空闲时长 > `sessions.eviction.idle_ttl_seconds` |
-| 硬条件 | inbox 有待处理输入不逐出（`agent.post()` 直投路径不 touch 计时器）；有后台任务（后台 Explorer）不逐出——拆解会关掉它共享的 provider；memory 后端不逐出（逐出 = 数据销毁） |
+| 硬条件 | inbox 有待处理输入不逐出（`agent.post()` 直投路径不 touch 计时器）；memory 后端不逐出（逐出 = 数据销毁） |
 | 计时 | `touch` = 任何携带该 session_id 的事件（`SessionReaper` 订阅 EventBus）——"会话状态变化即重置计时器"；create / resume 初始化 |
 | 触发 | `BackgroundScheduler`（gateway lifespan 启停）周期扫描（`sweep_interval_seconds`，启动时读取）；`release` 立即判定（忽略空闲时长，不忽略钉住条件） |
 | 拆解 | pop 同步原子摘除 → `Session.aclose()`（`agent.shutdown()` + `aclose_providers()`，顺序固定）异步收尾 |
