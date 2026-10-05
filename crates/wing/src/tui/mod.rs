@@ -316,18 +316,6 @@ mod tests {
     ///
     /// `ENTER_BYTES` is the non-multiplexed variant (any-motion on);
     /// `ENTER_BYTES_BUTTON_MOTION_ONLY` is what tmux / zellij / screen get.
-    /// 键盘增强（kitty 协议）的 push / pop。放在序列末尾 / 开头：push 失败不
-    /// 影响进入，pop 先发才不会被后面的恢复步骤漏掉。Windows 不发（见
-    /// `push_keyboard_enhancement`）。
-    #[cfg(unix)]
-    const PUSH_KEYBOARD_ENHANCEMENT: &str = "\x1b[>1u";
-    #[cfg(not(unix))]
-    const PUSH_KEYBOARD_ENHANCEMENT: &str = "";
-    #[cfg(unix)]
-    const POP_KEYBOARD_ENHANCEMENT: &str = "\x1b[<1u";
-    #[cfg(not(unix))]
-    const POP_KEYBOARD_ENHANCEMENT: &str = "";
-
     const ENTER_BYTES: &str = concat!(
         "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?25l",
         "\x1b[>1u",

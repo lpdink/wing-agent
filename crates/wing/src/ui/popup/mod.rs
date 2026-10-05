@@ -535,8 +535,10 @@ mod tests {
     #[test]
     fn test_session_cached_shows_popup_no_action() {
         let mut popup = ActivePopup::default();
-        let mut cache = CandidateCache::default();
-        cache.sessions = vec![sess("sess-1", "My Session"), sess("sess-2", "Other")];
+        let cache = CandidateCache {
+            sessions: vec![sess("sess-1", "My Session"), sess("sess-2", "Other")],
+            ..CandidateCache::default()
+        };
         let action = popup.update_from_input("/session ", &cache);
         assert!(action.is_none()); // No fetch needed
         assert!(popup.is_active());
@@ -546,8 +548,10 @@ mod tests {
     #[test]
     fn test_session_exact_match_keeps_popup_selects_row() {
         let mut popup = ActivePopup::default();
-        let mut cache = CandidateCache::default();
-        cache.sessions = vec![sess("sess-1", "My Session"), sess("sess-2", "Other")];
+        let cache = CandidateCache {
+            sessions: vec![sess("sess-1", "My Session"), sess("sess-2", "Other")],
+            ..CandidateCache::default()
+        };
         let action = popup.update_from_input("/session sess-1", &cache);
         assert!(action.is_none());
         // must-select：精确匹配不隐藏 popup，选中位跟随该行。
@@ -562,8 +566,10 @@ mod tests {
     #[test]
     fn test_session_popup_rows_are_rich() {
         let mut popup = ActivePopup::default();
-        let mut cache = CandidateCache::default();
-        cache.sessions = vec![sess("sess-1", "My Session")];
+        let cache = CandidateCache {
+            sessions: vec![sess("sess-1", "My Session")],
+            ..CandidateCache::default()
+        };
         popup.update_from_input("/session ", &cache);
         if let ActivePopup::SubCommand { rows, state, .. } = &popup {
             assert_eq!(rows.len(), 1);

@@ -909,7 +909,7 @@ fn reconcile_matrix_cross_line_alt() {
         for &profile in PROFILES {
             for &chunk in &[1usize, 3, 17] {
                 for &width in WIDTHS {
-                    let chunks = chunk_stream(&corpus, chunk);
+                    let chunks = chunk_stream(corpus, chunk);
                     for (palette, math) in [
                         (&math_off, "math=off"),
                         (&ThemePalette::default(), "math=text"),
@@ -920,7 +920,7 @@ fn reconcile_matrix_cross_line_alt() {
                         ] {
                             reconcile_with_palette(
                                 name,
-                                &corpus,
+                                corpus,
                                 &chunks,
                                 width,
                                 profile,

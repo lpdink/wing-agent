@@ -1,4 +1,7 @@
 //! Pathological-corpus fuzz for the streaming/reference invariant.
+//! Reports divergences to the terminal on purpose: the printout *is* the
+//! artifact a failing run hands to whoever ran it.
+#![allow(clippy::print_stdout)]
 //!
 //! Deterministic (seeded LCG over a small piece vocabulary) search for inputs
 //! where the incremental engine's resting state differs from `full_lines` —

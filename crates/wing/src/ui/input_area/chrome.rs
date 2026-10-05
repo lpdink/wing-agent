@@ -612,7 +612,7 @@ mod tests {
     /// The meta rail with every number a turn can report.
     fn busy_rail(usage: &TurnUsage) -> MetaRail<'_> {
         MetaRail {
-            workdir: Some("/Users/someone/ws/wing".into()),
+            workdir: Some("/Users/someone/ws/wing"),
             usage,
             total_lines: 200,
             visible_height: 20,

@@ -1,4 +1,6 @@
 //! `export_logo` — 把欢迎屏的像素网格导出成品牌资产（SVG）。
+// Example binary: its console output is the result it reports.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 //!
 //! ```text
 //! cargo run -p wing --example export_logo            # 写到 assets/

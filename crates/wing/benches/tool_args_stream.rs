@@ -119,6 +119,7 @@ impl Harness {
         let ctx = CellContext {
             palette: &self.palette,
             thinking_mode: ThinkingMode::Visible,
+            thinking_expanded: None,
             layout: &self.layout,
             images: wing::render::markdown::ImageOpts::off(),
         };

@@ -482,7 +482,7 @@ mod tests {
         let ls: Vec<Line> = vec![vec![model::Segment::Paste(1)]];
         let vis = build_visual_rows(&ls, &pastes, 40);
         assert_eq!(vis.len(), 1);
-        assert_eq!(display_col_to_char(&chip, &vis[0], 3), 3);
+        assert_eq!(display_col_to_char(chip, &vis[0], 3), 3);
     }
 
     #[test]

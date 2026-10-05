@@ -629,10 +629,7 @@ fn test_click_at_the_content_edge_still_opens_the_link() {
     // The last column the content owns — the gutter starts right of it.
     let at = (content.right() - 1, row);
     assert!(at.0 < geom.column, "the content edge is left of the bar");
-    assert!(
-        link.start <= at.0 && link.end - 1 >= at.0,
-        "inside the link"
-    );
+    assert!(link.start <= at.0 && link.end > at.0, "inside the link");
     assert_eq!(app.handle_mouse(press(at)), MouseOutcome::Immediate);
     assert!(
         !app.scrollbar.dragging,

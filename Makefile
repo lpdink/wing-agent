@@ -128,13 +128,16 @@ fmt-check-python:
 
 # ── Rust ──────────────────────────────────────────────────────
 
+# clippy 带 --all-targets：默认目标集不含 benches / examples / 集成测试，
+# 少了它这些目标会无声腐烂（曾经的实例：benches 里 CellContext 缺字段，
+# 编译不过却谁也不知道，见 PR 评审）。代价是这几个目标也在门禁里编译一遍。
 check-rust:
 	@echo "🔍 Running cargo fmt..."; \
 	cargo fmt --check || { echo "❌ cargo fmt failed"; exit 1; }; \
 	echo "✅ cargo fmt passed"; \
 	echo ""; \
-	echo "🔍 Running cargo clippy..."; \
-	cargo clippy --quiet -- -D warnings 2>&1 || { echo "❌ cargo clippy failed"; exit 1; }; \
+	echo "🔍 Running cargo clippy (--all-targets)..."; \
+	cargo clippy --all-targets --quiet -- -D warnings 2>&1 || { echo "❌ cargo clippy failed"; exit 1; }; \
 	echo "✅ cargo clippy passed"
 
 fmt-rust:

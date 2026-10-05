@@ -600,10 +600,10 @@ fn load_text(
             "content"
         };
         for key in [primary, fallback] {
-            if let Some(text) = value.get(key).and_then(|v| v.as_str()) {
-                if !text.is_empty() {
-                    return Ok(text.to_string());
-                }
+            if let Some(text) = value.get(key).and_then(|v| v.as_str())
+                && !text.is_empty()
+            {
+                return Ok(text.to_string());
             }
         }
         return Err(format!("{path}#{index}: no non-empty {primary}/{fallback} field").into());
