@@ -278,59 +278,16 @@ class TrackedList(Generic[T]):
         """在内存 map 中按 uuid 查找消息（last-write-wins），返回类型化对象。"""
         return self._all_items.get(uuid)
 
-    def trace_full_chain(self, from_uuid: str | None = None) -> list[T]:
-        """从内存 map 回溯构建完整链，跳过压缩节点。
-
-        与 trace_chain 的区别：
-        - trace_chain: 遇到 parent_uuid=None 就停止（活跃链）
-        - trace_full_chain: 遇到 parent_uuid=None 时，检查 unzip_last_uuid
-          - 如果 unzip_last_uuid 不为空：跳过当前节点（压缩节点），从 unzip_last_uuid 继续
-          - 如果 unzip_last_uuid 为空：停止（根节点）
-
-        返回 [根, ..., 叶] 顺序，不含压缩节点。
-        """
-        if not self._all_items:
-            return []
-
-        if from_uuid is not None:
-            start_uuid = from_uuid
-        else:
-            leaf_candidates = [
-                u for u in self._lines_order if u not in self._all_parent_uuids
-            ]
-            start_uuid = (
-                leaf_candidates[-1] if leaf_candidates else self._lines_order[-1]
-            )
-
-        chain: list[T] = []
-        current_uuid = start_uuid
-        while current_uuid:
-            item = self._all_items.get(current_uuid)
-            if not item:
-                break
-
-            if item.parent_uuid is None and item.unzip_last_uuid is not None:
-                current_uuid = item.unzip_last_uuid
-                continue
-
-            chain.append(item)
-
-            if item.parent_uuid is None:
-                break
-
-            current_uuid = item.parent_uuid
-
-        chain.reverse()
-        return chain
-
     def walk_full_chain(self, from_uuid: str | None = None) -> list[T]:
-        """从内存 map 回溯构建完整链，包含压缩节点。
+        """从内存 map 回溯构建完整链，**包含**压缩节点（可跨压缩继续回溯）。
 
-        与 trace_full_chain 的区别：
-        - trace_full_chain: 跳过压缩节点
-        - walk_full_chain: 包含压缩节点（可通过 unzip_last_uuid is not None 识别）
+        与 trace_chain（活跃链）的区别：压缩节点的 ``parent_uuid is None``，
+        trace_chain 到此即止（活跃链从压缩节点开始）；本方法沿压缩节点的
+        ``unzip_last_uuid`` 继续回溯，因此能覆盖压缩**之前**的全部历史
+        （/rewind 与 /fork 的候选列表据此列出压缩前的节点）。
 
-        返回 [根, ..., 叶] 顺序，包含压缩节点。
+        返回 [根, ..., 叶] 顺序，包含压缩节点（``unzip_last_uuid is not None``
+        可识别）。
         """
         if not self._all_items:
             return []

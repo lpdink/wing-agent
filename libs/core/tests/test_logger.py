@@ -165,3 +165,37 @@ def test_malformed_date_names_never_crash(tmp_path: Path, _restore_logger) -> No
     )
     for name in malformed:
         assert (tmp_path / name).exists(), f"{name} should be left untouched"
+
+
+def test_relpath_is_cached_per_source_file(tmp_path: Path, _restore_logger) -> None:
+    """relpath 记忆化：同一源文件的多条日志各自带自己的行号。
+
+    回归：缓存若存的是「路径:行号」整串，同一文件的第二条日志会复用第一条的
+    行号（错误归因）；缓存必须只存相对路径，行号逐条拼接。同时覆盖 root 之外
+    的文件（回退绝对路径，不抛 ValueError）。
+    """
+    from wing.common.logger import _PathFormatter
+
+    formatter = _PathFormatter(Path(__file__).parent, use_color=False)
+
+    def record(pathname: str, lineno: int) -> logging.LogRecord:
+        return logging.LogRecord(
+            name="wing",
+            level=logging.INFO,
+            pathname=pathname,
+            lineno=lineno,
+            msg="m",
+            args=(),
+            exc_info=None,
+        )
+
+    own_file = str(Path(__file__).resolve())
+    first = formatter.format(record(own_file, 11))
+    second = formatter.format(record(own_file, 22))
+    assert "test_logger.py:11" in first
+    assert "test_logger.py:22" in second, (
+        "同一文件的第二条日志复用了第一条的行号——缓存粒度错了"
+    )
+
+    outside = formatter.format(record("/etc/wing-outside.py", 7))
+    assert "/etc/wing-outside.py:7" in outside

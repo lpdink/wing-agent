@@ -388,75 +388,11 @@ class TestTraceChain:
         assert chain[0].uuid == "cu"
 
 
-# ── 4b. trace_full_chain ──────────────────────
+# ── 4b. walk_full_chain ───────────────────────
 
 
-class TestTraceFullChain:
-    """trace_full_chain 跳过压缩节点，walk_full_chain 包含压缩节点。"""
-
-    def test_trace_full_chain_no_compact(self, tmp_dir):
-        """无压缩时 trace_full_chain 与 trace_chain 结果相同。"""
-        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
-        m1 = Message(role="user", content="a", uuid="u1", parent_uuid=None)
-        m2 = Message(role="assistant", content="b", uuid="u2", parent_uuid="u1")
-        m3 = Message(role="user", content="c", uuid="u3", parent_uuid="u2")
-        tl.append_detached(m1)
-        tl.append_detached(m2)
-        tl.append_detached(m3)
-
-        full = tl.trace_full_chain()
-        active = tl.trace_chain()
-        assert full == active
-        assert [m.content for m in full] == ["a", "b", "c"]
-
-    def test_trace_full_chain_skips_compact(self, tmp_dir):
-        """trace_full_chain 跳过压缩节点，沿 unzip_last_uuid 继续。"""
-        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
-        m1 = Message(role="user", content="old1", uuid="u1", parent_uuid=None)
-        m2 = Message(role="assistant", content="old2", uuid="u2", parent_uuid="u1")
-        m3 = Message(role="user", content="tail1", uuid="u3", parent_uuid="u2")
-        tl.append_detached(m1)
-        tl.append_detached(m2)
-        tl.append_detached(m3)
-
-        # Compact: 压缩 u1,u2 → compact, relink u3
-        compact = Message(
-            role="assistant",
-            content="[Compact] summary",
-            uuid="cu",
-            parent_uuid=None,
-            unzip_last_uuid="u2",
-        )
-        relinked = Message(role="user", content="tail1", uuid="rt", parent_uuid="cu")
-        tl.append_detached(compact)
-        tl.append_detached(relinked)
-        tl.set_tip("rt")
-
-        # trace_chain: [compact, relinked]
-        active = tl.trace_chain()
-        assert [m.content for m in active] == ["[Compact] summary", "tail1"]
-
-        # trace_full_chain: [old1, old2, tail1] — 跳过 compact
-        full = tl.trace_full_chain()
-        assert [m.content for m in full] == ["old1", "old2", "tail1"]
-
-    def test_trace_full_chain_from_uuid(self, tmp_dir):
-        """trace_full_chain 从指定 uuid 开始。"""
-        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
-        m1 = Message(role="user", content="a", uuid="u1", parent_uuid=None)
-        m2 = Message(role="assistant", content="b", uuid="u2", parent_uuid="u1")
-        m3 = Message(role="user", content="c", uuid="u3", parent_uuid="u2")
-        tl.append_detached(m1)
-        tl.append_detached(m2)
-        tl.append_detached(m3)
-
-        chain = tl.trace_full_chain(from_uuid="u2")
-        assert [m.content for m in chain] == ["a", "b"]
-
-    def test_trace_full_chain_empty(self, tmp_dir):
-        """trace_full_chain on empty returns empty list."""
-        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
-        assert tl.trace_full_chain() == []
+class TestWalkFullChain:
+    """walk_full_chain 回溯完整链（包含压缩节点，可跨压缩继续回溯）。"""
 
     def test_walk_full_chain_includes_compact(self, tmp_dir):
         """walk_full_chain 包含压缩节点。"""
@@ -492,6 +428,24 @@ class TestTraceFullChain:
         compact_in_result = [m for m in walked if m.unzip_last_uuid is not None]
         assert len(compact_in_result) == 1
         assert compact_in_result[0].uuid == "cu"
+
+    def test_walk_full_chain_from_uuid(self, tmp_dir):
+        """walk_full_chain 从指定 uuid 开始回溯。"""
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
+        m1 = Message(role="user", content="a", uuid="u1", parent_uuid=None)
+        m2 = Message(role="assistant", content="b", uuid="u2", parent_uuid="u1")
+        m3 = Message(role="user", content="c", uuid="u3", parent_uuid="u2")
+        tl.append_detached(m1)
+        tl.append_detached(m2)
+        tl.append_detached(m3)
+
+        chain = tl.walk_full_chain(from_uuid="u2")
+        assert [m.content for m in chain] == ["a", "b"]
+
+    def test_walk_full_chain_empty(self, tmp_dir):
+        """空链返回空列表。"""
+        tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
+        assert tl.walk_full_chain() == []
 
 
 # ── 5. find ───────────────────────────────────

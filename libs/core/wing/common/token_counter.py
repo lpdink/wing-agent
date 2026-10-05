@@ -49,15 +49,6 @@ class TokenCounter:
         return int(cjk * cls.CJK_RATIO + non_cjk * cls.NON_CJK_RATIO)
 
     @classmethod
-    def encode(cls, text: str) -> list[int]:
-        """Compatibility shim: returns dummy list whose length == count.
-
-        替代 tiktoken.get_encoding("o200k_base").encode()，
-        部分代码用 len(encode(text)) 计算 token 数。
-        """
-        return [1] * cls.count(text)
-
-    @classmethod
     def estimate_message(cls, msg: Message) -> int:
         """估算单条消息的 token 数（基于 repr + 图片项）。
 
