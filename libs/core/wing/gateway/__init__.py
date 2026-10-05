@@ -7,6 +7,6 @@
 #   app.py        — FastAPI App 工厂
 #   server.py     — GatewayServer 生命周期管理 + EventBus 路由
 #   cli.py        — CLI 入口 (wing-gateway)
-#   protocol.py   — WS + HTTP 消息协议 (Pydantic models)
+#   protocol/     — WS + HTTP 消息协议 (Pydantic models；session / system / ws / errors 子模块)
 #   openapi.py    — OpenAPI tags 元数据
 #   routes/       — HTTP 路由 (session, health, ws)
