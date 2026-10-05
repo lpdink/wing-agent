@@ -82,9 +82,29 @@ ignore = ["ANN401"]
 "*/tests/*" = ["ANN"]
 "libs/wing_hooks/*" = ["ANN"]
 
+# vulture 门禁跑在 60 档：「未用 import（90）/ 不可达代码（100）」之外的
+# 「没人调用的函数 / 方法 / 属性（60）」才是有价值的死代码信号。60 档必须配
+# 白名单——框架装饰器（FastAPI 路由、pydantic 校验器、hook 注册、pytest
+# fixture）与「只被外部消费」的字段/API 都会被误报，两类分别在
+# `ignore_decorators` 与 `.vulture_whitelist.py`（分组 + 逐条理由）里安放。
 [tool.vulture]
+paths = ["libs/", ".vulture_whitelist.py"]
 exclude = [".venv/"]
-min_confidence = 70
+min_confidence = 60
+ignore_names = ["model_config", "relpath", "side_effect", "pytestmark"]
+ignore_decorators = [
+    "@router.get",
+    "@router.post",
+    "@router.websocket",
+    "@app.exception_handler",
+    "@field_validator",
+    "@model_validator",
+    "@model_serializer",
+    "@hooks.on",
+    "@metrics_registry.on",
+    "@tool_registry.register",
+    "@pytest.fixture",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
