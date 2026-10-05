@@ -216,6 +216,7 @@ def render_config_yaml(
     log_level: str = "INFO",
     sessions: Mapping[str, Any] | None = None,
     hooks: Sequence[str] = (),
+    auth: Mapping[str, Any] | None = None,
 ) -> str:
     """生成 probe 网关配置（providers 指向假 Provider；agents 预置 default）。
 
@@ -238,6 +239,11 @@ def render_config_yaml(
     网关，因此惯例是 ``"hooks/*.py"``：场景在跑起来后把 hook 文件写进
     ``<root>/hooks/``，经 ``POST /api/system/reload`` 加载（见
     scenarios/test_session_persistence.py）。
+
+    ``auth`` 是 ``gateway.auth`` 段的原文（None = 保持缺省
+    ``{"enabled": False}``，与既有输出逐字节一致）。非 None 时**整体替换**该段
+    （场景负责给全 ``enabled`` 与 ``keys``）——配合 driver 的 ``api_key``
+    （``Probe.start``）使用，见 scenarios/test_gateway_auth.py。
     """
     provider: dict[str, Any] = {
         "name": provider_name,
@@ -278,7 +284,7 @@ def render_config_yaml(
         "gateway": {
             "host": DEFAULT_HOST,
             "port": gateway_port,
-            "auth": {"enabled": False},
+            "auth": dict(auth) if auth is not None else {"enabled": False},
         },
         "commands": {"paths": []},
     }
@@ -400,6 +406,7 @@ class ProbeEnv:
         env_overrides: Mapping[str, str] | None = None,
         sessions: Mapping[str, Any] | None = None,
         hooks: Sequence[str] = (),
+        auth: Mapping[str, Any] | None = None,
     ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.wing_home = self.root / "wing_home"
@@ -423,6 +430,9 @@ class ProbeEnv:
         """默认模板的上下文窗口（压缩 apply 阈值；压小即得确定性自动压缩）。"""
         self.keep_recent_tokens = keep_recent_tokens
         """默认模板的保留区预算（``compact_window = window - keep_recent``）。"""
+
+        self.auth = dict(auth) if auth is not None else None
+        """``gateway.auth`` 段原文（None = 缺省关闭；见 ``render_config_yaml``）。"""
 
         self.provider = FakeProvider(host=DEFAULT_HOST)
         """进程内假 Provider（注册剧本 / 读请求留档）。"""
@@ -542,6 +552,7 @@ class ProbeEnv:
             keep_recent_tokens=self.keep_recent_tokens,
             sessions=self._sessions_config,
             hooks=self._hooks_config,
+            auth=self.auth,
         )
 
     def startup_report(self, binary: Path | None = None) -> str:
@@ -655,6 +666,30 @@ class ProbeEnv:
     def process(self) -> subprocess.Popen[bytes] | None:
         return self._process
 
+    @property
+    def shutdown_api_key(self) -> str | None:
+        """关闭自己的网关子进程时要带的 key（auth 段里挑一把非 tool_runtime 的）。
+
+        ``/api/shutdown`` 不在 ``tool_runtime`` 的 allowlist 里：auth 打开时必须带
+        一把 admin 语义的 key 才能优雅关停，否则只能等 ``terminate()`` 兜底（正确
+        但慢 5s）。场景没给 auth / 没给 keys / 只给了 tool_runtime key 时返回
+        None——关停退化为 terminate，不影响正确性。
+        """
+        keys = (self.auth or {}).get("keys")
+        if not isinstance(keys, Sequence):
+            return None
+        fallback: str | None = None
+        for entry in keys:
+            if not isinstance(entry, Mapping):
+                continue
+            key = entry.get("key")
+            if not isinstance(key, str) or not key:
+                continue
+            if entry.get("role", "admin") != "tool_runtime":
+                return key
+            fallback = fallback or key
+        return fallback
+
     def session_dir(self, session_id: str) -> Path:
         """会话持久目录 ``<sessions>/<session_id>/``（history.jsonl 所在）。"""
         return self.sessions_path / session_id
@@ -692,13 +727,20 @@ class ProbeEnv:
             self._close_log()
 
     async def _request_shutdown(self) -> None:
-        """POST /api/shutdown（best effort：连接已被回收时静默继续走 terminate）。"""
+        """POST /api/shutdown（best effort：连接已被回收时静默继续走 terminate）。
+
+        auth 打开时该端点也受鉴权保护（不在 tool_runtime allowlist 里）——用
+        :attr:`shutdown_api_key`（场景写进 ``auth.keys`` 的那把）关自己的子进程，
+        否则会拿到 401、白白走 5s 的 terminate 兜底。
+        """
         url = f"{self.gateway_url}/api/shutdown"
+        key = self.shutdown_api_key
+        headers = {"Authorization": f"Bearer {key}"} if key else None
         try:
             async with httpx.AsyncClient(
                 timeout=HEALTH_REQUEST_TIMEOUT, trust_env=False
             ) as client:
-                await client.post(url, json={})
+                await client.post(url, json={}, headers=headers)
         except httpx.HTTPError as exc:
             _log.debug("probe shutdown request failed (%s): %s", url, exc)
 

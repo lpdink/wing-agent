@@ -154,9 +154,12 @@ class Probe:
         *,
         driver: Driver | None = None,
         workspace: str | Path | None = None,
+        api_key: str | None = None,
     ) -> None:
         self.env = env
         self.driver = driver
+        self.api_key = api_key
+        """连网关用的 API key（auth 关闭的缺省场景为 None；见 ``connect_driver``）。"""
         self.workspace = (
             Path(workspace).expanduser().resolve()
             if workspace is not None
@@ -179,19 +182,34 @@ class Probe:
         *,
         workspace: str | Path | None = None,
         connect: bool = True,
+        api_key: str | None = None,
         **env_kwargs: Any,
     ) -> Probe:
-        """自举环境（+ 默认 workspace 目录）并连接 driver 与会话断言面。"""
+        """自举环境（+ 默认 workspace 目录）并连接 driver 与会话断言面。
+
+        ``api_key`` 是连网关的凭据（``Env`` 侧 ``auth`` 打开时必给）——只作用于
+        driver 的 HTTP / WS 两条客户端，不透传给 ``ProbeEnv``（配置里的 key 由
+        ``auth`` 段决定）。见 :meth:`connect_driver`。
+        """
         env = await ProbeEnv.start(root, **env_kwargs)
-        probe = cls(env, workspace=workspace)
+        probe = cls(env, workspace=workspace, api_key=api_key)
         probe.workspace.mkdir(parents=True, exist_ok=True)
         try:
             if connect:
-                probe.driver = await Driver.connect(env)
+                await probe.connect_driver()
         except BaseException:
             await env.stop()
             raise
         return probe
+
+    async def connect_driver(self) -> Driver:
+        """建立（或重建）driver 连接——``api_key`` 唯一一处透传点。
+
+        ``Probe.start(connect=True)`` 与 :meth:`restart_gateway` 都走这里，
+        保证"重启后仍带同一把 key"不是两处独立代码。
+        """
+        self.driver = await Driver.connect(self.env, api_key=self.api_key)
+        return self.driver
 
     async def stop(self) -> None:
         """关闭 driver 与网关子进程（幂等、不抛——失败场景的 teardown 也要安全）。"""
@@ -287,16 +305,17 @@ class Probe:
         """重启网关进程并重连 driver（跨进程重启语义的入口）。
 
         进程死了，driver 的 WS 连接也死了（``client_id`` 随进程消失、订阅随之
-        失效）：关掉旧连接、连一个新 driver（新 ``client_id``）。**已挂载的会话
-        句柄不再收到事件**——用 :meth:`resume`（或 ``subscribe``）在新进程里重新
-        挂载，这与真实重启的用户路径一致。假 Provider 不重启：剧本与请求留档
-        跨重启连续（``probe.requests`` 因此能对账重启前后的请求）。
+        失效）：关掉旧连接、连一个新 driver（新 ``client_id``，同一把
+        ``api_key``）。**已挂载的会话句柄不再收到事件**——用 :meth:`resume`（或
+        ``subscribe``）在新进程里重新挂载，这与真实重启的用户路径一致。假
+        Provider 不重启：剧本与请求留档跨重启连续（``probe.requests`` 因此能
+        对账重启前后的请求）。
         """
         await self.env.restart_gateway()
         previous, self.driver = self.driver, None
         if previous is not None:
             await previous.close()
-        self.driver = await Driver.connect(self.env)
+        await self.connect_driver()
 
     # ── 断言面 ────────────────────────────────────────────────
 
