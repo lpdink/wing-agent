@@ -20,7 +20,6 @@ from wing.gateway.protocol import (
     BranchesResponse,
     CompactRequest,
     CompactResponse,
-    ContextStatsInfo,
     CreateSessionRequest,
     CreateSessionResponse,
     ForkSessionRequest,
@@ -43,8 +42,8 @@ from wing.gateway.protocol import (
     UpdateSessionRequest,
     UpdateSessionResponse,
 )
+from wing.gateway.projection import build_session_branches, build_session_info
 from wing.common.logger import log
-from wing.event.query_response import BranchTargetInfo
 
 if TYPE_CHECKING:
     from wing.gateway.server import GatewayServer
@@ -270,30 +269,7 @@ async def session_info(
     session = server.runtime.get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="session not found")
-
-    status = session.agent.get_status()
-    cm = session.agent.context_manager
-    msg_count, total_tok = cm.get_context_stats()
-    return SessionInfoResponse(
-        model=status["model"],
-        model_display_name=session.agent.model_display_name,
-        api_url=status["api_url"],
-        tools=status["tools"],
-        total_tokens=status["total_tokens"],
-        context_window_tokens=status["context_window_tokens"],
-        thinking=status["thinking"],
-        reasoning_effort=status["reasoning_effort"],
-        yolo=session.agent.yolo,
-        session_name=session.session_name,
-        workdir=session.session_workspace,
-        status=session.status,
-        context_stats=ContextStatsInfo(
-            message_count=msg_count,
-            total_tokens=total_tok,
-        ),
-        skills_info=cm.get_skills_info(),
-        system_prompt=cm.system_prompt.content or "",
-    )
+    return build_session_info(session)
 
 
 @router.get(
@@ -309,10 +285,7 @@ async def session_branches(
     session = server.runtime.get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="session not found")
-
-    raw_targets = session.agent.context_manager.get_branch_targets()
-    targets = [BranchTargetInfo(**t) for t in raw_targets]
-    return BranchesResponse(targets=targets)
+    return build_session_branches(session)
 
 
 # ============================================================

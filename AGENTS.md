@@ -118,7 +118,9 @@ libs/core/wing/
     ├── cli.py                       wing-gateway CLI 入口
     ├── auth.py                      opt-in API key 鉴权中间件（HTTP + WS；admin / tool_runtime）
     ├── remote_tools.py              RemoteToolManager — 远程工具宿主连接 + WS 调用分发
-    ├── protocol.py                  WS + HTTP Pydantic 模型
+    ├── frames.py                    出网帧切分（>8 MiB 载荷按 UTF-8 边界切为 ≤16 MiB 帧）
+    ├── projection.py                领域 → 协议响应投影（session info / branches）
+    ├── protocol/                    协议模型包（消费方从包根 import）：ws · session · system · errors
     ├── openapi.py                   OpenAPI 元数据
     └── routes/                      session(15) · system(6) · tools(1) · health(1) · ws（事件传输 + 上行帧）
 ```
