@@ -8,8 +8,8 @@ Gateway CLI——启动 WebSocket 服务器。
   wing-gateway -p 8080               # 指定端口
   wing-gateway -H 127.0.0.1 -p 8080  # 指定 host + port
 
-鉴权（api_key / tls）与守护进程模式由 config.yaml 与 Rust 侧 `wing start` 提供，
-本入口只做 host / port 覆盖与进程内启动。
+鉴权（api_key）与守护进程模式分别由 config.yaml 与 Rust 侧 `wing start` 提供
+（TLS 交给反向代理）；本入口只做 host / port 覆盖与进程内启动。
 """
 
 from __future__ import annotations

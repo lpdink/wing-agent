@@ -1,6 +1,6 @@
 //! ConnectResponse — the first message Gateway sends after WS handshake.
 //!
-//! Mirrors: wing_gateway/protocol.py ConnectResponse
+//! Mirrors: wing/gateway/protocol/ws.py ConnectResponse
 
 use serde::Deserialize;
 use serde::Serialize;

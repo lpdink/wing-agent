@@ -1,6 +1,6 @@
 //! ClientRequest — messages the TUI sends to Gateway.
 //!
-//! Mirrors: wing_gateway/protocol.py ClientRequest
+//! Mirrors: wing/gateway/protocol/ws.py ClientRequest
 
 use serde::Deserialize;
 use serde::Serialize;

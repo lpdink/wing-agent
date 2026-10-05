@@ -107,8 +107,9 @@
 | `session.py` / `session_manager.py` 的 `TYPE_CHECKING` 反向依赖 | 随上一条一并清除 | 07 |
 
 守门的包族表在迁移前就**预登记了目标路径**（`wing/chain`、`wing/context`、`wing/session`、
-`wing/audit`、`wing/commands`、`wing/diagnostics`、`wing/hooks`…）——整个迁移没有改一行守门代码，
-规则在目标模块落地的瞬间自动生效。
+`wing/audit`、`wing/commands`、`wing/diagnostics`、`wing/hooks`…），所以目标模块一落地，
+断言自动按新路径生效；迁移期间守门代码的改动只有**白名单条目的增删**（每条清除都在条目上
+标注了步骤，见 §5）与 `wing.system` 这一个新族的登记——**规则本身一次都没有放宽**。
 
 ## 4. 守门机制（`libs/core/tests/test_layering.py`）
 
