@@ -1,6 +1,6 @@
 """自动（early）压缩 + pending compact 跨重启恢复红线场景（spec「自动压缩」）。
 
-被守的语义（`libs/core/wing/context_manager.py` + `compactor.py`）：
+被守的语义（`libs/core/wing/context/manager.py` + `context/compaction.py`）：
 
 - **双阈值**：`compact_window = context_window_tokens - keep_recent_tokens`
   （early trigger）与 `context_window_tokens`（apply）。请求组装时先看 pending：

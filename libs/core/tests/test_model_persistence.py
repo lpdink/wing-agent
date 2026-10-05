@@ -328,7 +328,7 @@ class TestCompatibility:
         sid = session.session_id
         _seed(session, "hello")
 
-        # 模拟本次变更前写下的 metadata（无模型字段）
+        # 模拟模型字段引入前写下的 metadata
         (root / sid / "metadata.json").write_text(
             json.dumps({"session_name": "old"}), encoding="utf-8"
         )

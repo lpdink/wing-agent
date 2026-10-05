@@ -1,6 +1,6 @@
 """会话状态持久化回归测试——resume / fork 后请求前缀与重启前一致。
 
-覆盖（与 test_model_persistence.py 同构，针对本轮新增的字段）：
+覆盖（与 test_model_persistence.py 同构）：
 
 - 显式动作落盘：update_state（thinking / effort / yolo / tools）与创建
   override（system_prompt / append_system_prompt / tools / max_turns /

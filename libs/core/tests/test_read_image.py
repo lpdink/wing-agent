@@ -598,8 +598,8 @@ class TestToolDescription:
     """描述 = 模型可见文本：保留成功路径 + 形态说明，不枚举失败路径。
 
     失败路径的完整信息由**拒绝发生时的错误文案**给出（`_no_vision_message` /
-    `_too_large_error`），静态描述只留成功语义与可行动形态——这是本步骤的有意
-    取舍（见 03_media_cap/design.md D3），改动必须让本类变红。
+    `_too_large_error`），静态描述只留成功语义与可行动形态——有意取舍
+    （见 03_media_cap/design.md D3），改动必须让本类变红。
     """
 
     @staticmethod

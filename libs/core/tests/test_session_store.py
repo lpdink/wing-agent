@@ -165,7 +165,7 @@ class TestExists:
         assert store.exists("zzz") is False
 
     def test_no_fuzzy_matching(self, store: SessionStore):
-        """精确匹配：前缀/子串/通配符都不再解析（历史模糊匹配已移除）。"""
+        """精确匹配：前缀 / 子串 / 通配符都不解析。"""
         self._seed(store, "20260101-111111-aaaaaaaa", "20260202-222222-bbbbbbbb")
         assert store.exists("20260101") is False
         assert store.exists("bbbbbbbb") is False
@@ -231,7 +231,7 @@ class TestMemoryNoDisk:
 
 
 class TestFileLayout:
-    """文件后端磁盘布局（newest.json 快照已移除）。"""
+    """文件后端磁盘布局：每会话一个目录，重放只靠 history.jsonl（无 newest.json 快照）。"""
 
     def test_layout_files(self, tmp_path: Path):
         root = tmp_path / "sessions"

@@ -42,7 +42,7 @@ from websockets.exceptions import ConnectionClosed
 
 from wing_probe.driver import DEFAULT_MAX_SIZE, ws_url
 
-#: 出站/入站帧类型（与 ``gateway/protocol.py`` 的 ToolCallRequest / ToolCallResult 对齐）。
+#: 出站/入站帧类型（与 ``gateway/protocol/system.py`` 的 ToolCallRequest / ToolCallResult 对齐）。
 REQUEST_TYPE = "tool_call_request"
 RESULT_TYPE = "tool_call_result"
 

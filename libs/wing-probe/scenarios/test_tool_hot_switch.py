@@ -1,6 +1,6 @@
 """工具热切换红线场景（spec「工具热切换」）。
 
-被守的语义（`libs/core/wing/context_manager.py` 的 `on_tools_changed` + 注入的
+被守的语义（`libs/core/wing/context/manager.py` 的 `on_tools_changed` + 注入的
 System Reminder，策略归 CM）：
 
 - **链非空（热切换）= 冻结声明集 + 注入 reminder**：`POST /api/session/update`

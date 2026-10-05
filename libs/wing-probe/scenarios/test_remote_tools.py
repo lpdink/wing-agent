@@ -19,7 +19,7 @@
   判别"立即失败 vs 超时兜底"用错误文案（`aborted` / `not connected` vs `timed out after`），
   墙钟只作宽松上界（默认 `remote_tool_timeout` = 1800s）。
 
-协议事实来源：`libs/core/wing/gateway/protocol.py`（ToolCallRequest / ToolCallResult /
+协议事实来源：`libs/core/wing/gateway/protocol/system.py`（ToolCallRequest / ToolCallResult /
 RemoteToolSpec）与 `docs/dev/http-api.md`「远程工具注册」。
 """
 

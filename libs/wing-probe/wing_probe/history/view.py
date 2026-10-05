@@ -3,7 +3,7 @@
 **独立实现**：本模块不 import ``wing`` —— 落盘格式只被当作"外来生产者的产物"
 手写解析（design D2 的独立性判据）。被解析的格式（只读参考：
 
-``libs/core/wing/store/file.py`` / ``common/tracked_list.py``）：
+``libs/core/wing/store/file.py`` / ``wing/chain.py``）：
 
 - 每行一条 JSON：Message 记录（``role ∈ system/user/assistant/tool``）与事件记录
   （``role="event"`` + ``type``）**混排**、共享链拓扑（``uuid`` / ``parent_uuid``）；

@@ -81,8 +81,8 @@ async def test_max_turns_reports_error_and_keeps_chain_paired(probe: Probe) -> N
     assert result.data["is_error"] is True, result.data
     assert result.data["num_turns"] == MAX_TURNS, result.data
     assert result.data["errors"], result.data
-    # 锚产品真实文案（`react_loop` 的 "Reached max turns limit: <n>"）：旧版锚"数字 2"
-    # 弱到任何含 2 的句子都能过；承重的计数断言是上面的 num_turns。
+    # 锚产品真实文案（`react_loop` 的 "Reached max turns limit: <n>"）；承重的计数
+    # 断言是上面的 num_turns（"含数字 2" 之类的弱锚不算数）。
     assert "Reached max turns limit" in result.data["errors"][0], result.data["errors"]
     assert await _wait_idle(session) == "idle"
     session.watch.assert_never("error")
