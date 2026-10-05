@@ -118,8 +118,6 @@ class Session:
         # 模板默认。
         self._restore_persisted_state()
 
-        self._initial_status = self._agent.get_status()
-
         log.info(f"Session initialized: {session_id}")
 
     @classmethod
@@ -250,7 +248,6 @@ class Session:
         # 模板切换覆写模型记录（新模板的生效模型）；_persist_model 保存整个
         # metadata，与上面的清理同一次落盘。
         self._persist_model()
-        self._initial_status = self._agent.get_status()
         log.info(f"Session {self._session_id}: switched to agent '{template.name}'")
 
     async def aclose(self) -> None:
@@ -341,10 +338,6 @@ class Session:
     @property
     def context_manager(self) -> ContextManager:
         return self._context_manager
-
-    @property
-    def initial_status(self) -> dict:
-        return self._initial_status
 
     @property
     def session_name(self) -> str | None:

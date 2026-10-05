@@ -5,7 +5,7 @@ driver 只经公开协议驱动网关，因此 HTTP 通道直接用「系统外�
 只改写它唯一的两处出网口（``_post`` / ``_get``）来做两件事：
 
 1. **留档**：method / path / 请求体 / 状态码 / 响应体 / 相对时间——断言"网关回了什么"
-   不靠重放，靠留档（``http.calls`` / ``last_call`` / ``calls_for``）；
+   不靠重放，靠留档（``http.calls`` / ``last_call`` / ``find``）；
 2. **非 2xx 报错**：抛 ``DriverHttpError``，错误消息里带请求体与响应体——不允许
    "静默失败"，否则场景会以莫名其妙的下游断言失败告终。
 
@@ -53,16 +53,6 @@ class HttpCall:
     @property
     def ok(self) -> bool:
         return 200 <= self.status < 300
-
-    @property
-    def session_id(self) -> str | None:
-        """请求体 / 响应体里出现的 session_id（``calls_for`` 的检索依据）。"""
-        for source in (self.body, self.response):
-            if isinstance(source, Mapping):
-                value = source.get("session_id") or source.get("source_session_id")
-                if isinstance(value, str):
-                    return value
-        return None
 
     def render(self, *, limit: int = 400) -> str:
         """一行摘要（报告与排查用）。"""
@@ -174,10 +164,6 @@ class DriverHttp(GatewayClient):
                 continue
             return call
         return None
-
-    def calls_for(self, session_id: str) -> list[HttpCall]:
-        """与某 session 相关的调用（请求体或响应体里出现该 id）。"""
-        return [call for call in self._calls if call.session_id == session_id]
 
     def find(self, path: str, *, method: str | None = None) -> list[HttpCall]:
         """按 path（精确匹配）检索全部调用。"""

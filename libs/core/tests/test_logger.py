@@ -165,3 +165,45 @@ def test_malformed_date_names_never_crash(tmp_path: Path, _restore_logger) -> No
     )
     for name in malformed:
         assert (tmp_path / name).exists(), f"{name} should be left untouched"
+
+
+def test_relpath_is_cached_per_source_file(tmp_path: Path, _restore_logger) -> None:
+    """relpath 记忆化：同一源文件的多条日志各自带自己的行号。
+
+    回归：缓存若存的是「路径:行号」整串，同一文件的第二条日志会复用第一条的
+    行号（错误归因）；缓存必须只存相对路径，行号逐条拼接。同时覆盖 root 之外
+    的文件（回退绝对路径，不抛 ValueError）。
+    """
+    from wing.common.logger import _PathFormatter
+
+    # root 与生产同口径（logger.py 里也是 resolve 过的），否则 repo 路径含
+    # symlink 时 relative_to 会回退绝对路径，第一条断言退化成子串巧合。
+    formatter = _PathFormatter(Path(__file__).resolve().parent, use_color=False)
+
+    def record(pathname: str, lineno: int) -> logging.LogRecord:
+        return logging.LogRecord(
+            name="wing",
+            level=logging.INFO,
+            pathname=pathname,
+            lineno=lineno,
+            msg="m",
+            args=(),
+            exc_info=None,
+        )
+
+    own_file = str(Path(__file__).resolve())
+    first = formatter.format(record(own_file, 11))
+    second = formatter.format(record(own_file, 22))
+    assert "test_logger.py:11" in first
+    assert "test_logger.py:22" in second, (
+        "同一文件的第二条日志复用了第一条的行号——缓存粒度错了"
+    )
+
+    # root 之外的文件回退绝对路径。用 tmp 目录的兄弟文件而不是 /etc：后者在
+    # macOS 上经 realpath 会变成 /private/etc，子串断言即使实现写成相对路径
+    # （`os.path.relpath`）也会通过——弱 oracle。
+    outside_path = (tmp_path.parent / "wing-outside.py").resolve()
+    outside = formatter.format(record(str(outside_path), 7))
+    # 用「 - <路径> - 」的字段边界断言，而不是子串：子串断言会被
+    # `/etc → /private/etc` 这类 realpath 语义或相对路径实现蒙混过关。
+    assert f" - {outside_path}:7 - " in outside

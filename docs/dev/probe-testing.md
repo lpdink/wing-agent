@@ -5,7 +5,7 @@
 
 `libs/wing-probe/` 是一个**不调真实模型、不碰用户 `~/.wing`** 的整机测试台：每个场景自举一个临时 `WING_HOME` + 一个真网关子进程 + 一个进程内假 Provider（按 model 名消费剧本），断言锚定在四个面上——**事件时间线**（WS 实时帧）、**LLM 请求上下文**（假 Provider 留档的请求体）、**落盘 history**（`history.jsonl` 独立解析）、**workspace 文件**。
 
-为什么要有它：上下文红线（compact / rewind / fork 的链语义、tool 配对、瞬态不落盘）属于"改坏了不一定报错、报错了也看不出"的那一类；既有测试要么是 loopback 单测（`libs/core/tests/`），要么依赖真实模型与网络（`e2e/`）。probe 提供可重复、可断言、离线跑的整机证据。
+为什么要有它：上下文红线（compact / rewind / fork 的链语义、tool 配对、瞬态不落盘）属于"改坏了不一定报错、报错了也看不出"的那一类；既有测试要么是 loopback 单测（`libs/core/tests/`），要么依赖真实模型与网络（跑一次要真 API key，无法进 CI——曾经的 `e2e/` 装置已退役，stdio 输出契约由 `crates/wing/src/stdio/` 的序列化单测守）。probe 提供可重复、可断言、离线跑的整机证据。
 
 硬约束：**probe 不得 `import wing`**（`wing_probe/guard.py` AST 门禁 + `tests/test_no_wing_imports.py` 每次运行强制）——它是"外部实现"，只通过 HTTP / WS 公开协议观测产品。
 

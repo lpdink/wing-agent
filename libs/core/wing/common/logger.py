@@ -50,14 +50,25 @@ class _PathFormatter(logging.Formatter):
         )
         self._root = root
         self._use_color = use_color
+        # pathname → 相对 root 的路径 memo。`Path(...).resolve()` 是一次真实
+        # 文件系统调用（realpath），逐条日志都做会在流式 DEBUG 日志这类热路径上
+        # 累积。产出它的源文件集合有界（仓库源码 + 用户 hooks），无需淘汰策略。
+        self._rel_paths: dict[str, str] = {}
+
+    def _rel_path(self, pathname: str) -> str:
+        cached = self._rel_paths.get(pathname)
+        if cached is not None:
+            return cached
+        abs_path = Path(pathname).resolve()
+        try:
+            rel = str(abs_path.relative_to(self._root))
+        except ValueError:
+            rel = str(abs_path)
+        self._rel_paths[pathname] = rel
+        return rel
 
     def format(self, record: logging.LogRecord) -> str:
-        abs_path = Path(record.pathname).resolve()
-        try:
-            rel = abs_path.relative_to(self._root)
-        except ValueError:
-            rel = abs_path
-        record.relpath = f"{rel}:{record.lineno}"
+        record.relpath = f"{self._rel_path(record.pathname)}:{record.lineno}"
 
         msg = super().format(record)
         if self._use_color and record.levelname in _COLORS:
