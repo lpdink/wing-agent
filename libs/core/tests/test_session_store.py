@@ -110,18 +110,104 @@ class TestMessageLog:
         ]
         log.append(records[:2])
         log.append(records[2:])
-        assert log.load_all() == records
+        assert list(log.iter_all()) == records
 
     def test_append_empty_is_nop(self, store: SessionStore):
         log = store.open_log("sid-empty")
         log.append([])
-        assert log.load_all() == []
+        assert list(log.iter_all()) == []
 
     def test_open_log_same_handle_content(self, store: SessionStore):
         log1 = store.open_log("sid-shared")
         log1.append([{"role": "user", "content": "x"}])
         log2 = store.open_log("sid-shared")
-        assert len(log2.load_all()) == 1
+        assert len(list(log2.iter_all())) == 1
+
+
+class TestFileLogStreaming:
+    """file 后端的流式读契约（加载路径据此把 MiB 级历史的装载峰值降下来）。"""
+
+    def test_iter_all_skips_blank_and_corrupted_lines(self, tmp_path: Path):
+        from wing.store.file import FileMessageLog
+
+        log = FileMessageLog(tmp_path)
+        log.append([{"role": "user", "content": "ok"}])
+        hist = tmp_path / "history.jsonl"
+        hist.write_text(
+            hist.read_text(encoding="utf-8")
+            + "\n{not json}\n"
+            + json.dumps({"role": "assistant", "content": "tail"})
+            + "\n",
+            encoding="utf-8",
+        )
+        assert [r["content"] for r in log.iter_all()] == ["ok", "tail"]
+
+    def test_iter_all_skips_non_dict_json(self, tmp_path: Path):
+        """能解析但不是 dict 的行同样跳过——契约是"记录是 dict"。
+
+        放行会让消费方在 ``record.get`` 上炸掉：fork 切片、标题回退
+        （进而整个 session 列表接口）都直接吃这个契约。
+        """
+        from wing.store.file import FileMessageLog
+
+        log = FileMessageLog(tmp_path)
+        log.append([{"role": "user", "content": "ok"}])
+        hist = tmp_path / "history.jsonl"
+        hist.write_text(
+            hist.read_text(encoding="utf-8") + '123\n"abc"\n[1, 2]\n',
+            encoding="utf-8",
+        )
+        assert [r["content"] for r in log.iter_all()] == ["ok"]
+
+    def test_iter_all_parses_lazily(self, tmp_path: Path, monkeypatch):
+        """取第一条只解析第一条——不得预读/物化整份文件。"""
+        import wing.store.file as file_module
+        from types import SimpleNamespace
+        from wing.store.file import FileMessageLog
+
+        log = FileMessageLog(tmp_path)
+        log.append([{"role": "user", "content": f"m{i}"} for i in range(5)])
+
+        parsed = 0
+        real_loads = json.loads
+
+        def counting_loads(line: str, *args, **kwargs):
+            nonlocal parsed
+            parsed += 1
+            return real_loads(line, *args, **kwargs)
+
+        # 只替换本模块的 json 引用（全局 json 模块不被动）
+        monkeypatch.setattr(file_module, "json", SimpleNamespace(loads=counting_loads))
+        iterator = log.iter_all()
+        assert next(iterator)["content"] == "m0"
+        assert parsed == 1
+
+    def test_append_serializes_before_writing(self, tmp_path: Path):
+        """整批序列化/编码先于任何写入：失败不留半批、不创建文件。
+
+        孤立代理字符（provider 响应的非法转义经 json.loads 原样产出）是
+        现实入口：编码必须发生在 open 之前，否则 fork 的前缀批量追加会留下
+        "有历史没 metadata"的幽灵会话。
+        """
+        from wing.store.file import FileMessageLog
+
+        log = FileMessageLog(tmp_path)
+        log.append([{"role": "user", "content": "keep"}])
+        before = (tmp_path / "history.jsonl").read_bytes()
+
+        with pytest.raises(UnicodeEncodeError):
+            log.append([{"role": "user", "content": "ok"}, {"content": "\ud800"}])
+
+        assert (tmp_path / "history.jsonl").read_bytes() == before
+        assert [r["content"] for r in log.iter_all()] == ["keep"]
+
+    def test_append_failure_does_not_create_file(self, tmp_path: Path):
+        from wing.store.file import FileMessageLog
+
+        log = FileMessageLog(tmp_path / "fresh")
+        with pytest.raises(TypeError):
+            log.append([{"role": "user", "content": {1}}])
+        assert not (tmp_path / "fresh" / "history.jsonl").exists()
 
 
 class TestAux:

@@ -165,12 +165,16 @@ class TrackedList(Generic[T]):
 
         1. 将全部记录读入内存 map
         2. 从内存 map 重建活跃链（trace_chain）——事件节点与消息同链
+
+        记录按流式消费（``MessageLog.iter_all``）：raw dict 列表与类型化对象
+        不同时整份在世——MiB 级历史的装载峰值因此显著下降。逐条容错不变
+        ——未知事件 type 跳过、校验失败的记录跳过。
         """
         from wing.event import EVENT_TYPES
 
         tl = cls(log)
 
-        for record in log.load_all():
+        for record in log.iter_all():
             try:
                 if record.get("role") == "event":
                     event_cls = EVENT_TYPES.get(record.get("type", ""))

@@ -17,8 +17,8 @@ wing/session/manager.py — SessionManager
 from __future__ import annotations
 
 import asyncio
-import copy
 import time
+from collections.abc import Iterable
 from uuid import uuid4
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 
 
 def _fork_slice(
-    records: list[dict],
+    records: Iterable[dict],
     target_uuid: str,
 ) -> tuple[list[dict], str | None]:
     """切出 fork 的记录前缀（**append 顺序**）与 draft。
@@ -62,20 +62,25 @@ def _fork_slice(
     节点时，压缩节点是后来追加的记录，切在前缀之外 → 子会话里压缩仿佛没发生
     过（等价于"在压缩点之前分叉"）。
 
+    ``records`` 是**迭代器**：命中目标即停，fork 点之后的记录不读也不解析
+    ——只有 ``"current"`` 需要走到末尾（全部记录都是前缀）。
+
     Raises:
         ValueError: 目标 uuid 不在记录里，或指向的是事件记录（事件不是对话节点）。
     """
     if target_uuid == "current":
         return list(records), ""
-    for index, record in enumerate(records):
+    prefix: list[dict] = []
+    for record in records:
         if record.get("uuid") == target_uuid:
             if record.get("role") == "event":
                 raise ValueError(
                     f"uuid {target_uuid!r} is an event record, not a Message"
                 )
             content = record.get("content")
-            return records[:index], content if isinstance(content, str) else ""
-    raise ValueError(f"uuid {target_uuid!r} not found in {len(records)} record(s)")
+            return prefix, content if isinstance(content, str) else ""
+        prefix.append(record)
+    raise ValueError(f"uuid {target_uuid!r} not found in {len(prefix)} record(s)")
 
 
 def _timestamp_key(s: SessionInfo) -> float:
@@ -109,7 +114,7 @@ def _timestamp_key(s: SessionInfo) -> float:
 
 
 def _remap_record_uuids(records: list[dict]) -> list[dict]:
-    """深拷贝记录并把链拓扑 uuid 全量重映射到子会话的 uuid 空间。
+    """复制记录并把链拓扑 uuid 全量重映射到子会话的 uuid 空间。
 
     重映射 ``uuid`` / ``parent_uuid`` / ``unzip_last_uuid`` 三个键。前缀口径下
     所有引用都指向前缀内部（parent 必然更早创建、unzip 指向区间末），因此
@@ -118,8 +123,13 @@ def _remap_record_uuids(records: list[dict]) -> list[dict]:
 
     缺省落到 None 是防御：万一出现前缀外的引用，宁可让它成为根节点，也不留
     跨 session 的引用。
+
+    只做**顶层浅拷贝**：重写的三个键都在顶层，而记录（含嵌套值）对读取方
+    一律只读（``MessageLog`` 的记录契约：file 后端每次重新解析，memory
+    后端直接交出内部结构，两边都没有就地改写记录的路径），深拷贝没有额外
+    保护面。
     """
-    clones = [copy.deepcopy(record) for record in records]
+    clones = [{**record} for record in records]
     uuid_map: dict[str, str] = {}
     for clone in clones:
         uuid = clone.get("uuid")
@@ -360,9 +370,10 @@ class SessionManager:
         new_session_id = self._generate_session_id()
 
         # 记录前缀切片（append 顺序）+ uuid 重映射，写进子会话自己的日志
-        records = store.open_log(session_id).load_all()
         try:
-            copied, draft = _fork_slice(records, target_uuid)
+            copied, draft = _fork_slice(
+                store.open_log(session_id).iter_all(), target_uuid
+            )
         except ValueError:
             log.warning(f"fork_session: uuid {target_uuid} not found")
             return None

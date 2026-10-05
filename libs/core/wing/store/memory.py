@@ -7,7 +7,7 @@ wing/store/memory.py — 内存后端（不落盘）。
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Iterator
 
 from wing.store.base import (
     MessageLog,
@@ -26,8 +26,8 @@ class MemoryMessageLog(MessageLog):
         self._records: list[dict[str, Any]] = []
         self._aux: dict[str, dict[str, Any]] = {}
 
-    def load_all(self) -> list[dict[str, Any]]:
-        return list(self._records)
+    def iter_all(self) -> Iterator[dict[str, Any]]:
+        yield from self._records
 
     def append(self, records: list[dict[str, Any]]) -> None:
         self._records.extend(records)
@@ -100,7 +100,7 @@ class MemorySessionStore(SessionStore):
         仅 open_log 而未写入任何记录的 session 不可解析）。"""
         ids = set(self._metadata)
         for session_id, message_log in self._logs.items():
-            if message_log.load_all():
+            if next(message_log.iter_all(), None) is not None:
                 ids.add(session_id)
         return ids
 
@@ -113,14 +113,13 @@ class MemorySessionStore(SessionStore):
         result: list[SessionSummary] = []
         for session_id in set(self._metadata) | set(self._logs):
             message_log = self._logs.get(session_id)
-            records = message_log.load_all() if message_log else []
-            if not records:
+            if message_log is None or next(message_log.iter_all(), None) is None:
                 continue
 
             metadata = self.load_metadata(session_id) or SessionMetadata()
             first_user: str | None = None
             if metadata.session_name is None:
-                for record in records:
+                for record in message_log.iter_all():
                     if record.get("role") == "user":
                         first_user = (record.get("content") or "")[:100]
                         break

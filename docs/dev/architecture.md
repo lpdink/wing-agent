@@ -185,7 +185,9 @@ SessionStore (ABC) ── load/save_metadata · open_log → MessageLog · list/
 TrackedList = 纯内存链拓扑引擎（uuid/parentUuid、trace、find、set_tip），
               ChainNode 家族混排（Message + WingEvent）；所有 I/O 委托
               MessageLog；log=None 即纯内存
-MessageLog  = 追加式混合记录 + aux kv（pending compaction 存于此）
+MessageLog  = 追加式混合记录 + aux kv（pending compaction 存于此）；读接口
+              **流式**（`iter_all`：边读边构造，不物化整份历史——fork 命中
+              目标即停，MiB 级日志的装载 / 分叉峰值因此显著下降）
 ```
 
 接口与存储无关：`SessionStore` 8 方法（含内容寻址媒体池的 `write_media` / `read_media`）+ `MessageLog` 5 方法，全是 kv / append-only / listing 语义，不泄漏路径 / fsync / glob。一个 PG 后端就是几张表（sessions / messages / aux / 媒体字节）。

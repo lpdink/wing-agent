@@ -254,7 +254,7 @@ class TestPersistence:
             Message(role="tool", tool_call_id="c", content="x", media=[_REF])
         )
 
-        records = log.load_all()
+        records = list(log.iter_all())
         assert len(records) == 1
         record = records[0]
         assert record["media"] == [_REF.model_dump()]
@@ -268,7 +268,7 @@ class TestPersistence:
         tracked: TrackedList[ChainNode] = TrackedList(log)
         tracked.append(Message(role="user", content="hi"))
 
-        record = log.load_all()[0]
+        record = list(log.iter_all())[0]
         assert "media" not in record
 
     def test_roundtrip_load_preserves_media(self):

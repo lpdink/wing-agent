@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from wing.common.fs import atomic_write_bytes, atomic_write_json
 from wing.common.logger import log
@@ -50,29 +50,52 @@ class FileMessageLog(MessageLog):
 
     # ── 记录 ──────────────────────────────────
 
-    def load_all(self) -> list[dict[str, Any]]:
+    def iter_all(self) -> Iterator[dict[str, Any]]:
+        """流式读取 history.jsonl（逐行解析，不物化整份文件）。
+
+        只产出 dict 记录：无法解析的行、以及能解析但不是 dict 的行
+        （``123`` / ``"abc"``）一律跳过——契约是"记录是 dict"，放行会让
+        消费方（fork 切片 / 标题回退）在 ``record.get`` 上炸掉。
+        """
         hist = self._path / self._HISTORY
         if not hist.exists():
-            return []
-        records: list[dict[str, Any]] = []
+            return
         with open(hist, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    records.append(json.loads(line))
+                    record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-        return records
+                if isinstance(record, dict):
+                    yield record
 
     def append(self, records: list[dict[str, Any]]) -> None:
+        """追加记录：整批先序列化 + UTF-8 编码，再打开文件逐条写。
+
+        两件事都要保：
+
+        - **不留半批**：序列化 / 编码失败（不可序列化的值、孤立代理字符）
+          必须发生在任何写入之前——否则失败的批量追加会在盘上留下半个
+          前缀，而 fork 的批量前缀追加失败会留下"有历史没 metadata"的
+          幽灵会话（该目录此后会被 list 到）；
+        - **不拼大字符串**：fork/compact 的批量前缀动辄 MiB 级，``join``
+          会把同一份数据再复制一遍。逐条写即可——崩溃窗口仍是最后一行
+          可能截断（加载路径跳过损坏行）。
+
+        代价是整批一份编码副本（``blobs``）——批量只出现在 fork / compact
+        这类重塑路径上，换 all-or-nothing 划算；逐轮的小批量追加可忽略。
+        """
         if not records:
             return
+        blobs = [json.dumps(r, ensure_ascii=False).encode("utf-8") for r in records]
         self._path.mkdir(parents=True, exist_ok=True)
-        lines = [json.dumps(r, ensure_ascii=False) for r in records]
-        with open(self._path / self._HISTORY, "a", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
+        with open(self._path / self._HISTORY, "ab") as f:
+            for blob in blobs:
+                f.write(blob)
+                f.write(b"\n")
             f.flush()
             os.fsync(f.fileno())
 
@@ -198,7 +221,9 @@ class FileSessionStore(SessionStore):
         """列举有消息的 session。
 
         存在性判据：history.jsonl 存在（唯一事实来源日志）。标题回退从
-        history.jsonl 提取第一条 user 消息。不可读的 session 跳过。
+        history.jsonl 提取第一条 user 消息；history.jsonl 不可读时仍列出
+        该 session（first_user_message 为 None，上层按"无标题"处理——
+        无标题的条目最终是否进列表由 SessionManager 决定）。
         遗留的 newest.json 文件不读不删（快照已废弃）。
         """
         if not self._root.exists():
@@ -215,13 +240,7 @@ class FileSessionStore(SessionStore):
             metadata = self.load_metadata(session_dir.name) or SessionMetadata()
             first_user: str | None = None
             if metadata.session_name is None:
-                records = self._read_history_records(history)
-                if records is None:
-                    continue
-                for msg in records:
-                    if msg.get("role") == "user":
-                        first_user = (msg.get("content") or "")[:100]
-                        break
+                first_user = self._first_user_message(session_dir.name)
 
             result.append(
                 SessionSummary(
@@ -232,21 +251,17 @@ class FileSessionStore(SessionStore):
             )
         return result
 
-    @staticmethod
-    def _read_history_records(path: Path) -> list[dict] | None:
-        """从 history.jsonl 提取记录（跳过损坏行）。不存在返回 None。"""
-        if not path.exists():
-            return None
-        records: list[dict] = []
+    def _first_user_message(self, session_id: str) -> str | None:
+        """提取第一条 user 消息（截断 100 字符）作标题回退。
+
+        流式：命中即停——标题只用这一条文本，不把整份历史读进内存；解析与
+        "跳过损坏行"复用 ``MessageLog.iter_all``，不另写一份。日志不可读
+        返回 None（上层按"无标题"处理）。
+        """
         try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+            for record in self.open_log(session_id).iter_all():
+                if record.get("role") == "user":
+                    return (record.get("content") or "")[:100]
         except OSError:
             return None
-        return records
+        return None
