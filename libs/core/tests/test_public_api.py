@@ -2,7 +2,7 @@
 
 06 步骤把两件安装动作从 import 期副作用改为显式调用：
   - 内置工具注册：`import wing.tools`
-  - metrics 订阅：`wing.metrics_registry.install()`（幂等）
+  - metrics 订阅：`wing.audit.install()`（幂等）
 
 「import 有没有副作用」「WingRuntime 会不会真安装」都只能在**全新进程**里
 断言（本测试进程已被 conftest 的 session fixture 全局安装，同进程无法区分
@@ -27,7 +27,7 @@ from wing.tool_registry import tool_registry
 assert tool_registry.tools == [], [t.name for t in tool_registry.tools]
 assert event_bus.subscriber_count == 0, event_bus.subscriber_count
 
-from wing import metrics_registry  # 导入本身不订阅：安装是显式的
+from wing import audit  # 导入本身不订阅：安装是显式的
 
 assert event_bus.subscriber_count == 0, event_bus.subscriber_count
 assert tool_registry.tools == [], [t.name for t in tool_registry.tools]
@@ -47,10 +47,10 @@ assert names == [
     "Write",
 ], names
 
-metrics_registry.install()  # 显式安装②：metrics 订阅
+audit.install()  # 显式安装②：metrics 订阅
 assert event_bus.subscriber_count == 1, event_bus.subscriber_count
 
-metrics_registry.install()  # 幂等：重复调用不重复订阅
+audit.install()  # 幂等：重复调用不重复订阅
 assert event_bus.subscriber_count == 1, event_bus.subscriber_count
 
 print("ok")

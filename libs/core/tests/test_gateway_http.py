@@ -1250,7 +1250,7 @@ class TestSystemReload:
 
     def test_reload_ok(self, client: TestClient, mock_runtime):
         """全部重载成功。"""
-        from wing.runtime import ReloadResult, ReloadResultItem
+        from wing.system import ReloadResult, ReloadResultItem
 
         mock_runtime.reload_system = AsyncMock(
             return_value=ReloadResult(
@@ -1273,7 +1273,7 @@ class TestSystemReload:
 
     def test_reload_config_failure(self, client: TestClient, mock_runtime):
         """config 加载失败立即中止。"""
-        from wing.runtime import ReloadResult, ReloadResultItem
+        from wing.system import ReloadResult, ReloadResultItem
 
         mock_runtime.reload_system = AsyncMock(
             return_value=ReloadResult(

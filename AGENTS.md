@@ -43,6 +43,7 @@ libs/core/wing/
 ├── __init__.py / _version.py        包入口（零 import 副作用）/ 版本号
 ├── build_info.py                    构建信息读取口：版本 + commit hash（构建时注入，运行期零 git）
 ├── runtime.py                       WingRuntime — service 层协调者（post() 唯一入站，路由到 Session/CM）
+├── system.py                        系统级热重载流程（config → hooks → commands → provider → skills/rules；runtime 委托）
 ├── session/                         会话生命周期包（公共 API 经 __init__ re-export）
 │   ├── session.py                   Session — messages + state + metadata（经 SessionStore）
 │   ├── manager.py                   SessionManager — 多会话、fork/resume、store registry
@@ -57,7 +58,7 @@ libs/core/wing/
 ├── background.py                    BackgroundScheduler — 周期任务宿主（逐出 / 未来 dreaming 等）
 ├── config/                          配置包：Config 模型 + WING_HOME 解析（公共 API 经 __init__ re-export）
 │   ├── models.py                    配置模型 + resolve_model_capabilities / resolve_model_display_name
-│   ├── loader.py                    get_wing_home / get_config_path / load_config / get_config / reset_config / load_hooks
+│   ├── loader.py                    get_wing_home / get_config_path / load_config / get_config / reset_config
 │   ├── user_agent.py                UA 预设（opencode / qwen-code）+ get_headers
 │   └── default_config.py            手写默认 config.yaml 模板（事实来源）
 ├── schema/                          领域模型包：Tool / ToolParam / Message 等核心 schema（公共 API 经 __init__ re-export）
@@ -69,7 +70,9 @@ libs/core/wing/
 │   └── policy.py                    请求期投影（高水位 + 量子驱逐）+ 占位常量
 ├── tool_registry.py                 ToolRegistry — 命名空间感知注册表 + ToolRef 解析
 ├── event_bus.py                     EventBus — 全局单例事件路由
-├── hook_registry.py                 Hook 扩展点（before_session_start / before_user_message / before_tool_call / after_tool_call）
+├── hooks/                          Hook 扩展点：注册表 + 配置文件加载（公共 API 经 __init__ re-export）
+│   ├── registry.py                  HookRegistry 管道 + 全局单例 hooks（before_session_start / before_user_message / before_tool_call / after_tool_call）
+│   └── loader.py                    load_hooks — glob 匹配 .py 并 import（注册经 hooks.on() 装饰器）
 ├── request_context.py               每请求上下文（request_id / session_id / client_id，单 ContextVar）
 ├── agent/                           WingAgent 包（公共 API 经 __init__ re-export，导入路径不变）
 │   ├── core.py                      瘦壳：组装、公共 API、worker 生命周期、未提交投影
@@ -77,8 +80,9 @@ libs/core/wing/
 │   ├── tool_executor.py             工具并发分发（asyncio.gather）+ 中断拆卸
 │   ├── event_sink.py                AgentEventSink — 唯一事件发射出口 + persist 分流
 │   ├── inbox.py                     消息队列（drain-and-merge）+ feedback waiters
-│   ├── cancel_watch.py              interrupt 取证：cancel 快照 / 不死看门狗 / 锁争用告警
 │   └── tool_context.py              ToolContext Protocol — 工具收到的窄接口（ctx）
+├── diagnostics/                     中断取证包（公共 API 经 __init__ re-export）
+│   └── cancel_watch.py              cancel 快照 / 不死看门狗 / 锁争用告警（纯观测，不改控制流）
 ├── provider/                        模型调用层（协议隔离）
 │   ├── base.py                      ModelProvider ABC + StreamAccumulator + parse_tool_args（容错，永不抛）
 │   ├── transport.py                 HTTP/SSE 传输管道与错误面（SSE 行解析 / 空闲超时 / httpx 构造 / raise_with_body）
@@ -101,8 +105,8 @@ libs/core/wing/
 │   ├── ask_user.py / todo.py           AskUserQuestion · TodoWrite
 │   ├── shell_safety.py                 Bash 命令安全审查（白名单放行 / 默认拦截）
 │   └── utils.py                        resolve_path — 相对路径按会话 workspace 解析
-├── magic_command/                   prompt 命令：registry.py（元数据）+ prompt_commands.py（$ARGUMENTS 展开，无分发）
-├── metrics_registry/                指标 / 审计注册中心（EventBus 订阅，原子写 JSON）
+├── commands.py                      prompt 命令：元数据注册表 + $ARGUMENTS 展开（无分发）
+├── audit/                           指标 / 审计注册中心（EventBus 订阅，原子写 JSON；install() 由组合根显式调用）
 │   ├── core.py                      MetricsRegistry 类 + 单例 + 原子读写工具
 │   └── _llm_metrics.py / _tool_call_metrics.py / _compact_metrics.py
 ├── common/

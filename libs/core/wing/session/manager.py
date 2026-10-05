@@ -27,14 +27,14 @@ from wing.chain import TrackedList
 from wing.common.logger import log
 from wing.common.utils import generate_session_id
 from wing.config import get_config
-from wing.hook_registry import hooks
+from wing.hooks import hooks
 from wing.event import (
     DeliveredEvent,
     EventTarget,
     SessionInfo,
 )
 from wing.event_bus import event_bus
-from wing.magic_command.prompt_commands import expand_prompt_command
+from wing.commands import expand_prompt_command
 from wing.schema import ChainNode, Message
 from wing.store import SessionMetadata, SessionStore
 

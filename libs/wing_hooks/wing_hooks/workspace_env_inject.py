@@ -11,7 +11,7 @@ import os
 import platform
 from typing import TYPE_CHECKING
 
-from wing.hook_registry import HookRegistry, hooks
+from wing.hooks import HookRegistry, hooks
 
 if TYPE_CHECKING:
     from wing.session import Session

@@ -1,4 +1,4 @@
-"""wing.metrics_registry._tool_call_metrics — 工具调用审计 handler。
+"""wing.audit._tool_call_metrics — 工具调用审计 handler。
 
 schema: ToolCallMetricsEntry (BaseModel)
 handler: _handle_tool_call_global, _handle_tool_call_session
@@ -14,7 +14,7 @@ from wing.common.logger import log
 from wing.common.utils import _is_safe_path_component
 from wing.config import get_config, get_wing_home
 from wing.event import ToolCallResultEvent
-from wing.metrics_registry.core import (
+from wing.audit.core import (
     _atomic_write_json,
     _read_metrics_json,
     metrics_registry,

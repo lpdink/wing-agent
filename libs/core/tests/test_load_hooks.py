@@ -11,7 +11,7 @@
 import tempfile
 from pathlib import Path
 
-from wing.config import load_hooks
+from wing.hooks import load_hooks
 
 
 class TestLoadHooks:
@@ -28,7 +28,7 @@ class TestLoadHooks:
         with tempfile.TemporaryDirectory() as tmpdir:
             hook_file = Path(tmpdir) / "test_hook.py"
             hook_file.write_text(
-                "from wing.hook_registry import hooks\n"
+                "from wing.hooks import hooks\n"
                 "def hooked(msg, **ctx):\n"
                 "    return '[hooked] ' + msg\n"
                 "hooks.on('before_user_message')(hooked)\n"
@@ -36,7 +36,7 @@ class TestLoadHooks:
 
             load_hooks([str(hook_file)])
 
-            from wing.hook_registry import hooks as hook_registry
+            from wing.hooks import hooks as hook_registry
 
             handlers = hook_registry.handlers("before_user_message")
             assert len(handlers) > 0
@@ -47,7 +47,7 @@ class TestLoadHooks:
             for i in range(3):
                 hook_file = Path(tmpdir) / f"hook_{i}.py"
                 content = (
-                    "from wing.hook_registry import hooks\n"
+                    "from wing.hooks import hooks\n"
                     f"def handler_{i}(msg, **ctx):\n"
                     f"    return 'hook{i}(' + msg + ')'\n"
                     f"hooks.on('before_user_message')(handler_{i})\n"
@@ -56,7 +56,7 @@ class TestLoadHooks:
 
             load_hooks([f"{tmpdir}/hook_*.py"])
 
-            from wing.hook_registry import hooks as hook_registry
+            from wing.hooks import hooks as hook_registry
 
             handlers = hook_registry.handlers("before_user_message")
             assert len(handlers) >= 3
@@ -69,13 +69,13 @@ class TestLoadHooks:
 
             good_hook = Path(tmpdir) / "good_hook.py"
             good_hook.write_text(
-                "from wing.hook_registry import hooks\n"
+                "from wing.hooks import hooks\n"
                 "hooks.on('before_user_message')(lambda msg, **ctx: f'[good] {msg}')\n"
             )
 
             load_hooks([f"{tmpdir}/*.py"])
 
-            from wing.hook_registry import hooks as hook_registry
+            from wing.hooks import hooks as hook_registry
 
             handlers = hook_registry.handlers("before_user_message")
             assert len(handlers) >= 1

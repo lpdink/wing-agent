@@ -1,4 +1,4 @@
-# wing/agent/cancel_watch.py
+# wing/diagnostics/cancel_watch.py
 """Cancel 可观测性——worker 取消快照 / 不死看门狗 / interrupt 锁争用告警。
 
 背景（2026-09-28 现场）：`interrupt()` 里 `Task.cancel()` 只调一次、`await old`

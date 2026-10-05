@@ -26,7 +26,7 @@ from wing.gateway.protocol import (
     ToolInfo,
     ToolsListResponse,
 )
-from wing.magic_command.registry import magic_registry
+from wing.commands import magic_registry
 
 if TYPE_CHECKING:
     from wing.gateway.server import GatewayServer

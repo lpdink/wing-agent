@@ -21,7 +21,7 @@ import sys
 
 from wing.common.logger import setup_logger
 from wing.config import get_config
-from wing.magic_command import register_prompt_commands
+from wing.commands import register_prompt_commands
 
 from .server import GatewayServer
 

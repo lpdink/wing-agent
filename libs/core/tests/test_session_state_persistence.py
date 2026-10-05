@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from wing.hook_registry import hooks
+from wing.hooks import hooks
 from wing.schema import Message
 from wing.session import AgentTemplate, AgentOverride, SessionManager
 from wing.store import FileSessionStore

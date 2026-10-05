@@ -5,7 +5,7 @@
 
 from datetime import datetime
 
-from wing.hook_registry import HookRegistry, hooks
+from wing.hooks import HookRegistry, hooks
 
 
 @hooks.on("before_user_message")

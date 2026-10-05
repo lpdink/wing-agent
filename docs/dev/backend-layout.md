@@ -19,7 +19,7 @@
 │ L3 核心域       config · context · session · agent · tools · provider    │
 │                 audit · commands · diagnostics                           │
 ├──────────────────────────────────────────────────────────────────────────┤
-│ L2 领域设施     store/* · event/* · event_bus · hook_registry(hooks)     │
+│ L2 领域设施     store/* · event/* · event_bus · hooks/*                  │
 │                 request_context · tool_registry                          │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ L1 领域模型     schema · media · chain                                   │
@@ -60,7 +60,7 @@
 | `chain.py` | L1 | 链拓扑引擎 TrackedList：uuid/parentUuid 链模型，I/O 全部委托 MessageLog |
 | `store/` | L2 | 会话持久状态唯一所有者：SessionStore / MessageLog / SessionMetadata（file / memory 后端） |
 | `event/`、`event_bus.py` | L2 | 事件类型 + 注册表 + 序列化边界（WingEvent / EVENT_TYPES / wire_dump）与全局 EventBus 路由 |
-| `hook_registry.py` | L2 | Hook 扩展点注册表（before_session_start / before_user_message / before_tool_call / after_tool_call） |
+| `hooks/`（registry / loader） | L2 | Hook 扩展点注册表 + 配置文件加载（`hook_registry.py` 与 `config.load_hooks` 于 11 归位一处） |
 | `request_context.py` | L2 | 每请求上下文（request_id / session_id / client_id，单 ContextVar） |
 | `tool_registry.py` | L2 | 工具注册表：命名空间感知注册 + ToolRef 解析 |
 | `config/`（models / loader / user_agent / default_config） | L3 | 配置模型 + `WING_HOME` 解析 + 手写默认模板（事实来源） |
@@ -69,10 +69,11 @@
 | `agent/` | L3 | WingAgent 运行时：ReAct 主循环、工具并发执行、事件发射、取消取证、未提交投影 |
 | `tools/` | L3 | 内置工具（Bash / Read / Write / Edit / Glob / Grep / ReadImage / AskUserQuestion / TodoWrite） |
 | `provider/` | L3 | 模型调用协议层：OpenAI 兼容 / Anthropic 隔离、SSE 传输、provider registry |
-| `metrics_registry/`（→`audit/`） | L3 | 指标 / 审计注册中心（EventBus 订阅，原子写 JSON） |
-| `magic_command/`（→`commands.py`） | L3 | prompt 命令：registry 元数据 + `$ARGUMENTS` 展开 |
-| `diagnostics/`（现 `agent/cancel_watch.py`） | L3 | 中断取证：cancel 快照、不死看门狗、锁争用告警 |
+| `audit/`（原 `metrics_registry/`） | L3 | 指标 / 审计注册中心（EventBus 订阅，原子写 JSON；`install()` 由组合根显式调用） |
+| `commands.py`（原 `magic_command/`） | L3 | prompt 命令：registry 元数据 + `$ARGUMENTS` 展开 |
+| `diagnostics/`（原 `agent/cancel_watch.py`） | L3 | 中断取证：cancel 快照、不死看门狗、锁争用告警 |
 | `runtime.py` | L4 | WingRuntime：service 层协调者，`post()` 唯一入站，路由到 Session / ContextManager |
+| `system.py`（原 `runtime.reload_system`） | L4 | 系统级热重载流程（config → hooks → commands → provider → skills & rules） |
 | `background.py` | L4 | BackgroundScheduler：周期任务宿主（逐出、未来的 dreaming 等） |
 | `gateway/` | L4 | FastAPI 网关：HTTP 路由 + WS 事件流 + 鉴权 + 远程工具宿主 |
 | `__init__.py` | — | 包入口；**不得 import 任何 wing 子模块**（R6：顶层无副作用，组合根负责显式装配） |

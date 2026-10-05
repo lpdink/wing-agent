@@ -25,20 +25,20 @@ from wing.event import (
     TextEvent,
     ToolCallResultEvent,
 )
-from wing.metrics_registry import MetricsRegistry
-from wing.metrics_registry._llm_metrics import (
+from wing.audit import MetricsRegistry
+from wing.audit._llm_metrics import (
     LLMCallMetricsEntry,
     GlobalLLMMetrics,
     SessionLLMMetrics,
     _handle_global_metrics,
     _handle_session_metrics,
 )
-from wing.metrics_registry._tool_call_metrics import (
+from wing.audit._tool_call_metrics import (
     ToolCallMetricsEntry,
     _handle_tool_call_global,
     _handle_tool_call_session,
 )
-from wing.metrics_registry._compact_metrics import (
+from wing.audit._compact_metrics import (
     CompactDetail,
     CompactMetrics,
     _handle_compact_global,
@@ -446,7 +446,7 @@ class TestGlobalLLMHandler:
     def tmp_home(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch(
-                "wing.metrics_registry._llm_metrics.get_wing_home",
+                "wing.audit._llm_metrics.get_wing_home",
                 return_value=Path(tmpdir),
             ):
                 yield Path(tmpdir)
@@ -515,9 +515,7 @@ class TestSessionLLMHandler:
     @pytest.fixture
     def tmp_sessions(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            with mock.patch(
-                "wing.metrics_registry._llm_metrics.get_config"
-            ) as mock_get_config:
+            with mock.patch("wing.audit._llm_metrics.get_config") as mock_get_config:
                 mock_config = mock_get_config.return_value
                 mock_config.sessions.resolved_path.return_value = Path(tmpdir)
                 yield Path(tmpdir)
@@ -592,7 +590,7 @@ class TestGlobalToolCallHandler:
     def tmp_home(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch(
-                "wing.metrics_registry._tool_call_metrics.get_wing_home",
+                "wing.audit._tool_call_metrics.get_wing_home",
                 return_value=Path(tmpdir),
             ):
                 yield Path(tmpdir)
@@ -653,7 +651,7 @@ class TestSessionToolCallHandler:
     def tmp_sessions(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch(
-                "wing.metrics_registry._tool_call_metrics.get_config"
+                "wing.audit._tool_call_metrics.get_config"
             ) as mock_get_config:
                 mock_config = mock_get_config.return_value
                 mock_config.sessions.resolved_path.return_value = Path(tmpdir)
@@ -730,7 +728,7 @@ class TestGlobalCompactHandler:
     def tmp_home(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch(
-                "wing.metrics_registry._compact_metrics.get_wing_home",
+                "wing.audit._compact_metrics.get_wing_home",
                 return_value=Path(tmpdir),
             ):
                 yield Path(tmpdir)
@@ -784,7 +782,7 @@ class TestSessionCompactHandler:
     def tmp_sessions(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch(
-                "wing.metrics_registry._compact_metrics.get_config"
+                "wing.audit._compact_metrics.get_config"
             ) as mock_get_config:
                 mock_config = mock_get_config.return_value
                 mock_config.sessions.resolved_path.return_value = Path(tmpdir)
@@ -867,9 +865,7 @@ class TestPathTraversal:
     @pytest.fixture
     def tmp_sessions(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            with mock.patch(
-                "wing.metrics_registry._llm_metrics.get_config"
-            ) as mock_get_config:
+            with mock.patch("wing.audit._llm_metrics.get_config") as mock_get_config:
                 mock_config = mock_get_config.return_value
                 mock_config.sessions.resolved_path.return_value = Path(tmpdir)
                 yield Path(tmpdir)

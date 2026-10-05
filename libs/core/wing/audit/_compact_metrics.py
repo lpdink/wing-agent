@@ -1,4 +1,4 @@
-"""wing.metrics_registry._compact_metrics — Compact 审计 handler。
+"""wing.audit._compact_metrics — Compact 审计 handler。
 
 schema: CompactDetail, CompactMetrics (BaseModel)
 handler: _handle_compact_global, _handle_compact_session
@@ -14,7 +14,7 @@ from wing.common.logger import log
 from wing.common.utils import _is_safe_path_component
 from wing.config import get_config, get_wing_home
 from wing.event import CompactDoneEvent
-from wing.metrics_registry.core import (
+from wing.audit.core import (
     _atomic_write_json,
     _read_metrics_json,
     metrics_registry,

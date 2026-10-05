@@ -1,4 +1,4 @@
-"""wing.metrics_registry._core — MetricsRegistry 类、单例、原子写入工具。
+"""wing.audit.core — MetricsRegistry 类、单例、原子写入工具。
 
 单独文件避免 __init__.py 与 handler 模块的循环导入。
 handler 模块从这里导入 metrics_registry 单例和工具函数，

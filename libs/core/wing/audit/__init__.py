@@ -1,4 +1,4 @@
-"""wing.metrics_registry — 审计注册中心。
+"""wing.audit — 审计注册中心（11 归位：原 ``wing.metrics_registry``）。
 
 MetricsRegistry 基于 EventBus 订阅事件，按事件类型（isinstance）分发到 handler。
 handler 是纯 sink：接收事件做副作用（写文件等），不做拦截或修改。
@@ -14,7 +14,7 @@ handler 是纯 sink：接收事件做副作用（写文件等），不做拦截�
 
 from __future__ import annotations
 
-from wing.metrics_registry.core import MetricsRegistry, metrics_registry
+from wing.audit.core import MetricsRegistry, metrics_registry
 
 __all__ = ["MetricsRegistry", "install", "metrics_registry"]
 
@@ -38,7 +38,7 @@ def install() -> None:
     from wing.event_bus import event_bus
 
     # import handler 模块（幂等），触发 @metrics_registry.on(...) 装饰器注册。
-    from wing.metrics_registry import (  # noqa: F401
+    from wing.audit import (  # noqa: F401
         _compact_metrics,
         _llm_metrics,
         _tool_call_metrics,

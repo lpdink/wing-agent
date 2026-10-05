@@ -27,10 +27,10 @@ def _install_wing() -> None:
     SessionManager / AgentTemplate（不经 WingRuntime），必须在此完成与
     `WingRuntime.__init__` 相同的两件事：
       - `import wing.tools`：装饰器注册内置工具；
-      - `wing.metrics_registry.install()`：注册 handler 并订阅 EventBus。
+      - `wing.audit.install()`：注册 handler 并订阅 EventBus。
     """
     import wing.tools  # noqa: F401 — 导入触发装饰器注册
-    from wing.metrics_registry import install as install_metrics
+    from wing.audit import install as install_metrics
 
     install_metrics()
 
