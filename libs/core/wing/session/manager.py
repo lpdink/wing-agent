@@ -124,9 +124,10 @@ def _remap_record_uuids(records: list[dict]) -> list[dict]:
     缺省落到 None 是防御：万一出现前缀外的引用，宁可让它成为根节点，也不留
     跨 session 的引用。
 
-    只做**顶层浅拷贝**：重写的三个键都在顶层，嵌套值在子会话里从不被就地
-    修改（写入走 ``json.dumps``，读入走 ``model_validate``，两者都不改原
-    dict），深拷贝没有额外保护面。
+    只做**顶层浅拷贝**：重写的三个键都在顶层，而记录（含嵌套值）对读取方
+    一律只读（``MessageLog`` 的记录契约：file 后端每次重新解析，memory
+    后端直接交出内部结构，两边都没有就地改写记录的路径），深拷贝没有额外
+    保护面。
     """
     clones = [{**record} for record in records]
     uuid_map: dict[str, str] = {}

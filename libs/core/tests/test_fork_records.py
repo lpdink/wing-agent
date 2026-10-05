@@ -173,6 +173,23 @@ class TestForkRecordPrefix:
         )
         assert sm.fork_session(session.session_id, "ev-1") is None
 
+    def test_fork_slice_stops_reading_at_target(self):
+        """命中目标即停：fork 点之后的记录不读也不解析（流式读的头条收益）。"""
+        from wing.session.manager import _fork_slice
+
+        consumed: list[str] = []
+
+        def records():
+            for i in range(10):
+                consumed.append(f"u{i}")
+                yield {"uuid": f"u{i}", "role": "user", "content": f"m{i}"}
+
+        prefix, draft = _fork_slice(records(), "u2")
+
+        assert consumed == ["u0", "u1", "u2"]
+        assert [r["content"] for r in prefix] == ["m0", "m1"]
+        assert draft == "m2"
+
 
 class TestForkToolsRecord:
     """fork 记录的工具集必须与子会话**实际生效**的一致（含 ref 降级）。"""

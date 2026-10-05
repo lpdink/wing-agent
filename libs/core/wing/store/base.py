@@ -121,6 +121,10 @@ class MessageLog(ABC):
 
     耐久语义由后端定义：file 后端 fsync，memory 后端进程内，
     SQL 后端即一张 (session_id, seq, record jsonb) 表。
+
+    **记录契约**：记录及其嵌套值对读取方**只读**——实现可以直接交出内部
+    结构（memory 后端即如此），消费方不得就地改写；需要变形时自己拷贝
+    （如 ``SessionManager._remap_record_uuids`` 的顶层浅拷贝）。
     """
 
     @abstractmethod
@@ -132,7 +136,8 @@ class MessageLog(ABC):
         "整份 raw dict 列表 + 类型化对象同时在世"的量级。需要列表的
         调用方自行 ``list()``，但不要用它当默认姿势。
 
-        损坏的记录行由后端跳过（存储完整性归后端管）。
+        损坏的记录行由后端跳过（存储完整性归后端管）：无法解析的行、以及
+        能解析但不是 dict 的行都不产出——消费方可以假定每条记录都是 dict。
         """
 
     @abstractmethod
