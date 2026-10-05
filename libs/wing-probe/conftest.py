@@ -1,7 +1,20 @@
-"""场景 fixture（tasks 6.1）——每个场景一个独立的 probe 环境。
+"""probe 的唯一公共 fixture 定义处 —— **位置在 args 那一层，不是 scenarios/ 里**。
 
-本文件是 ``scenarios/`` 唯一的公共 fixture 定义处（design D11）：场景文件只
-import ``wing_probe`` 与 pytest。
+为什么住这一层：pytest 的 conftest 加载只从某个路径**向上**走
+（`Config._importconftest`：`for parent in reversed((directory, *directory.parents))`），
+而从不下潜。执行测试的进程在收集时会把每一层的 conftest 都加载上，但 **xdist 的
+controller 不做收集** —— 它只为 `args` 调这个函数。所以 `pytest libs/wing-probe/`
+（`make test-probe` 的原样调用）时，controller 只加载本文件，**不会**加载
+`scenarios/conftest.py`。
+
+后果不是"少打印一节"那么轻：任何必须在 controller 上跑的钩子（artifacts 台账的
+合并与终端汇总）若定义在 `scenarios/` 里，并行时就成了死代码——失败现场的转储路径
+静默消失，而 CI 上那是唯一的现场。搬到这里之后，`pytest libs/wing-probe/`、
+`pytest libs/wing-probe/scenarios/`、单文件参数三种形态 controller 都能加载到
+（本层是它们的 args 或 args 的祖先）。`tests/test_conftest_layout.py` 守这条约定。
+
+本文件是 ``scenarios/`` 唯一的公共 fixture 定义处（design D11：场景文件只
+import ``wing_probe`` 与 pytest）。
 
 ``probe`` fixture（function 级）提供：
 
@@ -29,6 +42,7 @@ import ``wing_probe`` 与 pytest。
 可以按核数并行跑（``make test-probe`` 的 ``-n``）。并行下 fixture 跑在 worker
 进程里，artifacts 台账经 ``pytest_sessionfinish`` / ``pytest_testnodedown``
 汇回 controller——终端汇总与失败报告里的转储路径与串行时一致（不因并行而丢）。
+台账与汇总钩子住在本文件，正是为了保证 controller 加载得到（见开头）。
 """
 
 from __future__ import annotations

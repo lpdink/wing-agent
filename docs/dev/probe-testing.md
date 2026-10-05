@@ -32,6 +32,8 @@
 
 **为什么敢并行**：场景之间零共享——各自的 tmp `WING_HOME`、各自的网关子进程、各自的假 Provider、各自 OS 分配的端口。跑起来也不吃 CPU（瓶颈是进程启动与 HTTP 握手这类等待，不是算力：8 worker 实测平均只占 1.35 核），所以并行度按核数铺开是安全的。实测全量 80s → 16s。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
 
+**为什么台账钩子住 `libs/wing-probe/conftest.py`，而不在 `scenarios/` 里**：pytest 的 conftest 加载只从某个路径**向上**走（`Config._importconftest`：`for parent in reversed((directory, *directory.parents))`），而从不下潜；**xdist 的 controller 不做收集**，只为 `args` 调这个函数。于是 `pytest libs/wing-probe/`（`make test-probe` 的原样调用）时 controller 只加载 args 那一层的 conftest——把台账的合并/汇总钩子放进嵌套的 `scenarios/conftest.py`，串行照常工作、一开 `-n` 就成死代码：失败现场的转储路径与逃生舱理由整体消失（CI 的 `probe-check` 没有 artifacts 上传步骤，终端汇总就是这些路径的聚汇点），而测试仍然全绿。`tests/test_conftest_layout.py` 用 AST 门禁守这条位置约定（改名的同义本地函数不算数）。
+
 网关二进制解析顺序（`wing_probe.env.resolve_gateway_bin`）：`$WING_GATEWAY_BIN` → 与 `sys.executable` 同目录 → 仓库 `.venv/bin/wing-gateway` → `PATH`。
 
 失败（含 teardown 不变量失败）时自动转储到 `<tmp>/probe/artifacts/`：`timeline.jsonl`（全事件）/ `frames.jsonl`（原始帧，含 `_chunk` 重组前的样子）/ `http.jsonl` / `requests.json`（LLM 请求留档）/ `sessions/*`（各会话的 `history.jsonl` + `metadata.json` 拷贝）/ `gateway.log` / `dump.txt`（逃生舱理由等）。失败报告的末行与终端汇总都打印该路径；本地排查"绿场景长什么样"用 `PROBE_DUMP=always`。
@@ -50,8 +52,9 @@ libs/wing-probe/
 │   ├── toolhost.py        # 最小 tool host（远程工具探针侧实现；只走公开 HTTP / WS 协议）
 │   ├── files.py           # workspace 文件断言
 │   └── guard.py           # import 门禁（AST）
-├── tests/                 # 基础设施自测（不起网关）
-└── scenarios/             # 整机场景（conftest.py 是唯一的 fixture 定义处）
+├── conftest.py            # 唯一的公共 fixture 定义处（在 args 那一层，不是 scenarios/ 里）
+├── tests/                 # 基础设施自测（不起网关；含 conftest 位置门禁）
+└── scenarios/             # 整机场景（只 import wing_probe 与 pytest）
 ```
 
 ## 新增一个场景
