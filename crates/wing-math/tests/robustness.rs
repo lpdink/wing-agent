@@ -551,12 +551,12 @@ fn structural_fuzz_keeps_the_contract() {
             0 => {
                 let pos = next(src.chars().count().max(1));
                 let ch = mutability[next(mutability.len())];
-                src.insert_str(
+                src.insert(
                     src.char_indices()
                         .nth(pos)
                         .map(|(i, _)| i)
                         .unwrap_or(src.len()),
-                    &ch.to_string(),
+                    ch,
                 );
             }
             1 => {

@@ -112,7 +112,7 @@ check-python:
 	if ! uv run ty check libs; then TY_FAILED=1; echo "❌ ty failed"; else echo "✅ ty passed"; fi; \
 	echo ""; \
 	echo "🔍 Running vulture..."; \
-	if ! uv run vulture libs/ --min-confidence 70 --exclude .venv/; then VULTURE_FAILED=1; echo "❌ vulture failed"; else echo "✅ vulture passed"; fi; \
+	if ! uv run vulture; then VULTURE_FAILED=1; echo "❌ vulture failed"; else echo "✅ vulture passed"; fi; \
 	echo ""; \
 	if [ $$RUFF_FAILED -eq 1 ] || [ $$RUFF_FMT_FAILED -eq 1 ] || [ $$TY_FAILED -eq 1 ] || [ $$VULTURE_FAILED -eq 1 ]; then \
 		echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; \
@@ -128,13 +128,16 @@ fmt-check-python:
 
 # ── Rust ──────────────────────────────────────────────────────
 
+# clippy 带 --all-targets：默认目标集不含 benches / examples / 集成测试，
+# 少了它这些目标会无声腐烂（曾经的实例：benches 里 CellContext 缺字段，
+# 编译不过却谁也不知道，见 PR 评审）。代价是这几个目标也在门禁里编译一遍。
 check-rust:
 	@echo "🔍 Running cargo fmt..."; \
 	cargo fmt --check || { echo "❌ cargo fmt failed"; exit 1; }; \
 	echo "✅ cargo fmt passed"; \
 	echo ""; \
-	echo "🔍 Running cargo clippy..."; \
-	cargo clippy --quiet -- -D warnings 2>&1 || { echo "❌ cargo clippy failed"; exit 1; }; \
+	echo "🔍 Running cargo clippy (--all-targets)..."; \
+	cargo clippy --all-targets --quiet -- -D warnings 2>&1 || { echo "❌ cargo clippy failed"; exit 1; }; \
 	echo "✅ cargo clippy passed"
 
 fmt-rust:

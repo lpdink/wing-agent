@@ -190,7 +190,7 @@ fn corpus(count: usize) -> Vec<String> {
         let mut doc = String::new();
         for _ in 0..rng.next() % 9 + 3 {
             doc.push_str(rng.pick(PIECES));
-            if rng.next() % 3 == 0 {
+            if rng.next().is_multiple_of(3) {
                 doc.push_str("\n\n");
             } else {
                 doc.push('\n');

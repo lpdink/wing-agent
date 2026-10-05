@@ -497,7 +497,6 @@ fn version_label() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use unicode_width::UnicodeWidthStr as _;
 
     #[allow(unused_imports)]
     use ratatui::style::Color as _Color;

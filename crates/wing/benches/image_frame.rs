@@ -163,6 +163,7 @@ impl Fixture {
         let ctx = CellContext {
             palette: &self.palette,
             thinking_mode: wing::config::rendering::ThinkingMode::Visible,
+            thinking_expanded: None,
             layout: &self.layout,
             images: &self.opts,
         };

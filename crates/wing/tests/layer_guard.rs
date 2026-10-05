@@ -185,13 +185,13 @@ fn find_offenses(source: &str, needle: &str) -> Vec<Offense> {
         let (first, line) = squashed.origin(start);
         let (last, _) = squashed.origin(end - 1);
         // ASCII needles: the byte after the last matched character is `last + 1`.
-        if is_whole_path(source, first, last + 1, needle) {
-            if !offenses.iter().any(|o| o.line == line) {
-                offenses.push(Offense {
-                    line,
-                    text: original.get(line - 1).unwrap_or(&"").trim().to_string(),
-                });
-            }
+        if is_whole_path(source, first, last + 1, needle)
+            && !offenses.iter().any(|o| o.line == line)
+        {
+            offenses.push(Offense {
+                line,
+                text: original.get(line - 1).unwrap_or(&"").trim().to_string(),
+            });
         }
         // The needle is ASCII, so one byte in is a character boundary.
         from = start + 1;

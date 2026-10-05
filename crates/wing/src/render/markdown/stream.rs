@@ -2592,7 +2592,7 @@ mod tests {
             assert!(fence_open(&line[content_start(line)..]).is_none());
             assert!(fence_open(line).is_none());
             assert!(prefixed_fence_open(line).is_none());
-            assert_eq!(indent_of(&line[content_start(line)..]) >= 4, true);
+            assert!(indent_of(&line[content_start(line)..]) >= 4);
         }
         // A prefixed fence behind a prefix is still found (that is the r1 S2
         // fix, which must survive the tab-safety change).

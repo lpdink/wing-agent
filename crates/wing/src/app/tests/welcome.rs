@@ -58,7 +58,7 @@ fn welcome_header_shows_brand_version_and_tip() {
         "开发构建显示 dev 而不是 v0.0.0：\n{body}"
     );
     assert!(
-        body.contains(&crate::shared::constants::TIPS_COMMAND),
+        body.contains(crate::shared::constants::TIPS_COMMAND),
         "入口提示在：\n{body}"
     );
     let tip = app.tip_text();

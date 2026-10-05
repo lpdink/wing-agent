@@ -89,8 +89,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     """HTTP API Key 鉴权中间件。
 
     当 ``auth_config.enabled`` 为 True 时，拦截所有非免鉴权路径的
-    HTTP 请求，校验 API Key。校验通过后将 role 写入
-    ``request.state.api_key_role``。
+    HTTP 请求，校验 API Key；RBAC 判定在中间件内部完成。
 
     不缓存 AuthConfig——每次 dispatch 从 ``app.state.server.auth_config``
     读取最新配置，热重载后立即生效。
@@ -126,5 +125,4 @@ class AuthMiddleware(BaseHTTPMiddleware):
         ):
             return _forbidden()
 
-        request.state.api_key_role = role
         return await call_next(request)

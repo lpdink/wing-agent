@@ -773,7 +773,6 @@ mod tests {
     fn column_point_ignores_the_hidden_half_of_a_clipped_chip() {
         let pastes = registry(&["a\nb"]);
         let line: Line = vec![Segment::Paste(1)];
-        let flat = flat(&line, &pastes);
         let chip_len = pastes.chip(1).chars().count();
         let row = wrap::VisualRow {
             logical_line: 0,
