@@ -23,9 +23,10 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from wing.event_bus import event_bus
-from wing.provider.anthropic import AnthropicProvider, _StreamState
+from wing.provider.anthropic.provider import AnthropicProvider
+from wing.provider.anthropic.stream import _StreamState
 from wing.provider.base import ModelProvider, StreamAccumulator
-from wing.provider.openai_compat import OpenAICompatProvider
+from wing.provider.openai.provider import OpenAICompatProvider
 from wing.schema import LLMResponse, Message, TextBlock, ThinkingBlock
 
 if TYPE_CHECKING:

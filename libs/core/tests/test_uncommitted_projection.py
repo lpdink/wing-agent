@@ -23,8 +23,10 @@ import pytest
 
 from wing.event import DoneEvent
 from wing.event_bus import event_bus
-from wing.provider.anthropic import AnthropicProvider, _StreamState
-from wing.provider.openai_compat import OpenAICompatProvider, _OAIStreamState
+from wing.provider.anthropic.provider import AnthropicProvider
+from wing.provider.anthropic.stream import _StreamState
+from wing.provider.openai.provider import OpenAICompatProvider
+from wing.provider.openai.stream import _OAIStreamState
 from wing.provider.base import PendingToolView, StreamAccumulator
 from wing.schema import (
     LLMResponse,

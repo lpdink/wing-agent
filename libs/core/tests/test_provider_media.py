@@ -25,14 +25,14 @@ from wing.media import (
     MediaPolicy,
     plan_request_media,
 )
-from wing.provider.anthropic import AnthropicProvider
+from wing.provider.anthropic.provider import AnthropicProvider
 from wing.provider.media import (
     FOLLOWUP_GUIDE_TEXT,
     UNAVAILABLE_PLACEHOLDER,
     plan_for_request,
     resolve_image_delivery,
 )
-from wing.provider.openai_compat import OpenAICompatProvider
+from wing.provider.openai.provider import OpenAICompatProvider
 from wing.schema import LLMResponse, MediaRef, Message, ToolUseBlock
 
 VISION_MODEL = "vl-model"

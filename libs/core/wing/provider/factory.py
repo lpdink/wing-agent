@@ -23,11 +23,11 @@ def create_provider(
     None = 无媒体存储（registry 的仅列表 client、测试构造）。
     """
     if config.protocol == "openai":
-        from wing.provider.openai_compat import OpenAICompatProvider
+        from wing.provider.openai.provider import OpenAICompatProvider
 
         return OpenAICompatProvider(config=config, session_id=session_id, media=media)
     elif config.protocol == "anthropic":
-        from wing.provider.anthropic import AnthropicProvider
+        from wing.provider.anthropic.provider import AnthropicProvider
 
         return AnthropicProvider(config=config, session_id=session_id, media=media)
     else:

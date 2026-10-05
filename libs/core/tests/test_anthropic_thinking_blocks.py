@@ -21,8 +21,8 @@ import json
 import pytest
 
 from wing.config import AgentConfig, Config, ProviderConfig
-from wing.provider.anthropic import AnthropicProvider
-from wing.provider.openai_compat import OpenAICompatProvider
+from wing.provider.anthropic.provider import AnthropicProvider
+from wing.provider.openai.provider import OpenAICompatProvider
 from wing.schema import (
     Message,
     TextBlock,
@@ -705,7 +705,7 @@ class TestThinkingStatus:
     @pytest.mark.asyncio
     async def test_set_thinking_enable_fills_default_budget(self):
         """无 thinking 配置时启用：补默认预算（type=enabled 必带 budget）。"""
-        from wing.provider.anthropic import _DEFAULT_THINKING_BUDGET
+        from wing.provider.anthropic.provider import _DEFAULT_THINKING_BUDGET
 
         p = _make_anthropic({})
         try:

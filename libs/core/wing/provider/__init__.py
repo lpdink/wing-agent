@@ -3,7 +3,7 @@
 
 包入口只放稳定入口（不承载服务实例）：
 
-  - ``ModelProvider``：provider 基类（协议实现见 ``openai_compat`` / ``anthropic``）
+  - ``ModelProvider``：provider 基类（协议实现见 ``openai`` / ``anthropic`` 子包）
   - ``create_provider()``：按协议创建实例的工厂（``factory`` 模块）
 
 模块级 provider client registry（聚合模型列表，服务 ``/api/models``）住在

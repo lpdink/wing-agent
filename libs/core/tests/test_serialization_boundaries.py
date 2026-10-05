@@ -283,7 +283,8 @@ class TestBackoffWindowResidueKnownLimitation:
         （跨越 with_retry 封装边界），此行为会变，测试失败提醒复核该已知限制
         是否已解除。
         """
-        from wing.provider.openai_compat import OpenAICompatProvider, _OAIStreamState
+        from wing.provider.openai.provider import OpenAICompatProvider
+        from wing.provider.openai.stream import _OAIStreamState
 
         provider = OpenAICompatProvider.__new__(OpenAICompatProvider)
         acc = provider.create_accumulator()
