@@ -3,7 +3,7 @@
 「图片文件 → 模型可见」这条链路的机制说明：`ReadImage` 工具、内容寻址的媒体存储、
 消息里的媒体引用、**请求期图片投影**（高水位 + 量子批量驱逐）与两条协议线格式。
 
-事实来源：代码 `libs/core/wing/{media.py,schema.py,store/,agent/,provider/,context/compaction.py}`、
+事实来源：代码 `libs/core/wing/{media/,schema/,store/,agent/,provider/,context/compaction.py}`、
 `libs/core/wing/tools/read_image.py`；整机证据 `libs/wing-probe/scenarios/test_read_image.py`
 （本文末列 12 条场景）。本页只讲 *why* 与不变量，逐行契约以代码为准。
 
@@ -29,7 +29,7 @@ openai: followup(默认) / inline      anthropic: inline(默认) / followup
 模型请求体里的 data URL / base64 image block      （字节由 provider 按需从存储读取）
 ```
 
-`ReadImage` 已在 `default_config.py` 的默认 agent 工具集里；未声明 vision 的模型调用它时
+`ReadImage` 已在 `wing/config/default_config.py` 的默认 agent 工具集里；未声明 vision 的模型调用它时
 按门禁安全拒绝（见下）。
 
 ## ReadImage 工具
@@ -119,7 +119,7 @@ providers:
 
 ## 请求期图片投影（核心）
 
-实现：`wing/media.py::plan_request_media`（纯函数；provider 侧只做配置解析与消息对齐，
+实现：`wing/media/policy.py::plan_request_media`（纯函数；provider 侧只做配置解析与消息对齐，
 见 `provider/media.py::plan_for_request`）。
 
 ```python
@@ -200,7 +200,7 @@ def plan_request_media(messages, *, policy: MediaPolicy, vision: bool,
 ## 配置
 
 ```yaml
-images:                       # 顶层段（default_config.py 模板同步维护）
+images:                       # 顶层段（wing/config/default_config.py 模板同步维护）
   max_bytes: 4718592          # 单图原始字节上限 4.5 MiB（读时拒绝 + 降采样提示）
   max_images: 32              # 请求期计数高水位（超出触发批量驱逐）
   count_quantum: 8            # 计数驱逐量子（每次超限至少丢这么多张）

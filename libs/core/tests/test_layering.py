@@ -114,7 +114,6 @@ FAMILY_RULES: tuple[tuple[str, str], ...] = (
     ("wing._build_info", "build_info"),
     ("wing._version", "build_info"),
     ("wing.config", "config"),
-    ("wing.default_config", "config"),
     ("wing.context", "context"),
     ("wing.session", "session"),
     # 现状：cancel_watch 仍在 wing/agent/ 下（11_rehome 迁往 wing/diagnostics/）

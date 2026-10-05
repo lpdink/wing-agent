@@ -58,7 +58,7 @@
 
 | 概念 | 说明 |
 |------|------|
-| **Tool** | 工具模型（`schema.py`），含 `namespace`、`llm_name`、`effective_llm_name`、`to_openai()`。 |
+| **Tool** | 工具模型（`schema/tool.py`），含 `namespace`、`llm_name`、`effective_llm_name`、`to_openai()`。 |
 | **ToolRegistry** | 命名空间感知注册表：`dict[namespace → {name → Tool}]`（`tool_registry.py`）。 |
 | **ToolRef** | 字符串引用解析：`"Bash"`→`(default, Bash)`，`"client.Bash"`→`(client, Bash)`（k8s 风格 `rsplit(".", 1)`）。 |
 | **namespace** | 按来源分组工具，让多来源同名工具（如多个远程 `Bash`）共存。内置工具在 `default`。 |

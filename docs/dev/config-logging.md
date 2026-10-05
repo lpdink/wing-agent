@@ -2,12 +2,12 @@
 
 ## 目录布局（WING_HOME）
 
-`WING_HOME` 覆盖 `~/.wing`；后端数据统一落在 `$WING_HOME/core`（`wing/config.py::get_wing_home()`）。`WING_SESSIONS_PATH` 额外覆盖 sessions 目录。
+`WING_HOME` 覆盖 `~/.wing`；后端数据统一落在 `$WING_HOME/core`（`wing/config/loader.py::get_wing_home()`）。`WING_SESSIONS_PATH` 额外覆盖 sessions 目录。
 
 ```
 ~/.wing/
 ├── core/
-│   ├── config.yaml     后端配置（唯一事实来源；缺失时由 default_config.py 模板生成）
+│   ├── config.yaml     后端配置（唯一事实来源；缺失时由 wing/config/default_config.py 模板生成）
 │   ├── logs/           后端日志
 │   │   ├── wing_YYYY-MM-DD.log            网关运行时日志（按本地日期，append；恒 DEBUG）
 │   │   ├── new.log → wing_YYYY-MM-DD.log  指向活跃后端日志的符号链接（仅后端；每次轮转 / setup 刷新）
@@ -21,7 +21,7 @@
 
 ## 后端 config.yaml
 
-顶层键（手写注释模板即 `wing/default_config.py`，改 Config 字段时须同步维护）：
+顶层键（手写注释模板即 `wing/config/default_config.py`，改 Config 字段时须同步维护）：
 
 | 键 | 说明 |
 |----|------|

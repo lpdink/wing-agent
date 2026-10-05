@@ -167,7 +167,9 @@ class TestLoadConfig:
         """配置文件不存在时创建模板并抛出错误"""
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / ".wing" / "config.yaml"
-            with mock.patch("wing.config.get_config_path", return_value=config_path):
+            with mock.patch(
+                "wing.config.loader.get_config_path", return_value=config_path
+            ):
                 with pytest.raises(RuntimeError) as exc_info:
                     load_config()
                 assert "created template" in str(exc_info.value)
@@ -184,7 +186,7 @@ class TestLoadConfig:
 
         try:
             with mock.patch(
-                "wing.config.get_config_path", return_value=Path(temp_path)
+                "wing.config.loader.get_config_path", return_value=Path(temp_path)
             ):
                 config = load_config()
                 assert config.providers[0].base_url == "https://api.example.com/v1"
@@ -200,7 +202,7 @@ class TestLoadConfig:
 
         try:
             with mock.patch(
-                "wing.config.get_config_path", return_value=Path(temp_path)
+                "wing.config.loader.get_config_path", return_value=Path(temp_path)
             ):
                 config = load_config()
                 assert config.agents[0].model == "gpt-4"
@@ -215,7 +217,7 @@ class TestLoadConfig:
 
         try:
             with mock.patch(
-                "wing.config.get_config_path", return_value=Path(temp_path)
+                "wing.config.loader.get_config_path", return_value=Path(temp_path)
             ):
                 with pytest.raises(Exception):
                     load_config()
@@ -230,7 +232,7 @@ class TestLoadConfig:
 
         try:
             with mock.patch(
-                "wing.config.get_config_path", return_value=Path(temp_path)
+                "wing.config.loader.get_config_path", return_value=Path(temp_path)
             ):
                 with pytest.raises(ValueError) as exc_info:
                     load_config()
@@ -246,7 +248,7 @@ class TestLoadConfig:
 
         try:
             with mock.patch(
-                "wing.config.get_config_path", return_value=Path(temp_path)
+                "wing.config.loader.get_config_path", return_value=Path(temp_path)
             ):
                 with pytest.raises(ValueError) as exc_info:
                     load_config()
@@ -262,7 +264,7 @@ class TestLoadConfig:
 
         try:
             with mock.patch(
-                "wing.config.get_config_path", return_value=Path(temp_path)
+                "wing.config.loader.get_config_path", return_value=Path(temp_path)
             ):
                 config1 = load_config()
                 config2 = load_config()
@@ -278,7 +280,7 @@ class TestLoadConfig:
 
         try:
             with mock.patch(
-                "wing.config.get_config_path", return_value=Path(temp_path)
+                "wing.config.loader.get_config_path", return_value=Path(temp_path)
             ):
                 config1 = load_config()
 
@@ -319,7 +321,7 @@ class TestGetConfig:
 
         try:
             with mock.patch(
-                "wing.config.get_config_path", return_value=Path(temp_path)
+                "wing.config.loader.get_config_path", return_value=Path(temp_path)
             ):
                 config = get_config()
                 assert config.providers[0].base_url == "https://api.example.com/v1"
@@ -334,7 +336,7 @@ class TestGetConfig:
 
         try:
             with mock.patch(
-                "wing.config.get_config_path", return_value=Path(temp_path)
+                "wing.config.loader.get_config_path", return_value=Path(temp_path)
             ):
                 config1 = get_config()
                 config2 = get_config()
@@ -354,11 +356,11 @@ class TestResetConfig:
 
         try:
             with mock.patch(
-                "wing.config.get_config_path", return_value=Path(temp_path)
+                "wing.config.loader.get_config_path", return_value=Path(temp_path)
             ):
                 _ = get_config()
                 reset_config()
-                import wing.config as config_module
+                import wing.config.loader as config_module
 
                 assert config_module._config is None
         finally:
@@ -374,7 +376,7 @@ class TestDefaultConfigTemplate:
     """
 
     def test_template_parses_into_valid_config(self):
-        from wing.default_config import DEFAULT_CONFIG_YAML
+        from wing.config import DEFAULT_CONFIG_YAML
 
         config = Config(**yaml.safe_load(DEFAULT_CONFIG_YAML))
         # 新增字段在模板里落位（images 段 / 模型声明的两种形态示例）
@@ -385,7 +387,7 @@ class TestDefaultConfigTemplate:
 
     def test_template_covers_every_config_field(self):
         """顶层与 images 段的键集合必须与 Config 模型字段一一对应（SYNC 硬约束）。"""
-        from wing.default_config import DEFAULT_CONFIG_YAML
+        from wing.config import DEFAULT_CONFIG_YAML
 
         raw = yaml.safe_load(DEFAULT_CONFIG_YAML)
         assert set(raw) == set(Config.model_fields)
@@ -393,7 +395,7 @@ class TestDefaultConfigTemplate:
 
     def test_template_keeps_image_option_documented(self):
         """image_delivery / image_max_bytes / capabilities.vision 在模板注释里可见。"""
-        from wing.default_config import DEFAULT_CONFIG_YAML
+        from wing.config import DEFAULT_CONFIG_YAML
 
         assert "image_delivery" in DEFAULT_CONFIG_YAML
         assert "image_max_bytes" in DEFAULT_CONFIG_YAML

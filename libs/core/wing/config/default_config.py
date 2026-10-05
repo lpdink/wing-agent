@@ -1,4 +1,4 @@
-# wing/default_config.py
+# wing/config/default_config.py
 """Default configuration template for wing-agent.
 
 This module contains a hand-maintained YAML string that serves as the

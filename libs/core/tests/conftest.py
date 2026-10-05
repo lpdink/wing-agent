@@ -81,7 +81,7 @@ def _mock_config():
     )
 
     with patch("wing.config.get_config", return_value=test_config):
-        with patch("wing.config._config", test_config):
+        with patch("wing.config.loader._config", test_config):
             yield test_config
 
     reset_config()

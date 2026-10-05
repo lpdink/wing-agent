@@ -55,10 +55,18 @@ libs/core/wing/
 │   ├── compaction.py                Compactor — 压缩策略（LLM 摘要）+ PendingCompact / LLMMessagesResult
 │   └── resources.py                 skills/rules 文件加载（glob + frontmatter，与消息链无关）
 ├── background.py                    BackgroundScheduler — 周期任务宿主（逐出 / 未来 dreaming 等）
-├── config.py                        Config 模型 + WING_HOME 解析
-├── default_config.py                手写默认 config.yaml 模板（事实来源）
-├── schema.py                        Tool / ToolParam / Message 等核心 schema
-├── media.py                         图片媒体纯函数层（id/格式/尺寸/信封/请求期投影）
+├── config/                          配置包：Config 模型 + WING_HOME 解析（公共 API 经 __init__ re-export）
+│   ├── models.py                    配置模型 + resolve_model_capabilities / resolve_model_display_name
+│   ├── loader.py                    get_wing_home / get_config_path / load_config / get_config / reset_config / load_hooks
+│   ├── user_agent.py                UA 预设（opencode / qwen-code）+ get_headers
+│   └── default_config.py            手写默认 config.yaml 模板（事实来源）
+├── schema/                          领域模型包：Tool / ToolParam / Message 等核心 schema（公共 API 经 __init__ re-export）
+│   ├── message.py                   ChainNode / 内容块 / MediaRef / Message（落盘格式守门人）
+│   ├── llm.py                       LLMUsage / LLMResponse / ToolCall / ToolCallDelta / PendingCall
+│   └── tool.py                      ToolError / ToolParam / Tool / ToolOutput / AgentSkill
+├── media/                           图片媒体纯函数层包（id/格式/尺寸/信封/请求期投影）
+│   ├── facts.py                     字节 → 事实（sha256 id / mime / 尺寸 / 信封 / 估算）
+│   └── policy.py                    请求期投影（高水位 + 量子驱逐）+ 占位常量
 ├── tool_registry.py                 ToolRegistry — 命名空间感知注册表 + ToolRef 解析
 ├── event_bus.py                     EventBus — 全局单例事件路由
 ├── hook_registry.py                 Hook 扩展点（before_session_start / before_user_message / before_tool_call / after_tool_call）

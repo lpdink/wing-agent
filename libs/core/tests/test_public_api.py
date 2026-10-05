@@ -72,7 +72,7 @@ with tempfile.TemporaryDirectory(prefix="wing-runtime-probe-") as tmp:
     os.environ["WING_SESSIONS_PATH"] = str(Path(tmp) / "sessions")
 
     from wing.config import load_config
-    from wing.default_config import DEFAULT_CONFIG_YAML
+    from wing.config import DEFAULT_CONFIG_YAML
 
     config_path = Path(tmp) / "core" / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
