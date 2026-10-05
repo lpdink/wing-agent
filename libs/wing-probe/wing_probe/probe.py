@@ -71,11 +71,31 @@ DUMP_SESSIONS = "sessions"
 #: 网关日志全文拷贝的上限（超过则只留尾部，避免 artifacts 里塞进巨大文件）。
 DUMP_LOG_LIMIT = 2 * 1024 * 1024
 
-#: 内置不变量检查：名字（进失败报告，spec 要求"具体不变量名"）+ 断言函数。
+
+def invariant_checks(
+    *, allow_arguments_error: bool = False
+) -> tuple[tuple[str, Callable[[HistoryView], None]], ...]:
+    """内置不变量检查：名字（进失败报告，spec 要求"具体不变量名"）+ 断言函数。
+
+    ``allow_arguments_error`` 只放开 **tool 配对**里的"参数解析失败"口径（见
+    ``assert_tool_pairing``）——"模型吐出坏参数"是合法场景（短路回灌自纠），
+    但链拓扑与"瞬态不落盘"两条继续强制。默认关闭。
+    """
+    return (
+        ("chain_topology", assert_chain_invariants),
+        (
+            "tool_pairing",
+            lambda view: assert_tool_pairing(
+                view, allow_arguments_error=allow_arguments_error
+            ),
+        ),
+        ("no_transient_records", assert_no_transient_records),
+    )
+
+
+#: 默认（严格）口径的不变量集合——导入本名字的调用方无需感知开关。
 INVARIANT_CHECKS: tuple[tuple[str, Callable[[HistoryView], None]], ...] = (
-    ("chain_topology", assert_chain_invariants),
-    ("tool_pairing", assert_tool_pairing),
-    ("no_transient_records", assert_no_transient_records),
+    invariant_checks()
 )
 
 
@@ -95,13 +115,15 @@ class ProbeInvariantError(AssertionError):
         super().__init__(report)
 
 
-def run_invariants(views: Sequence[HistoryView]) -> list[str]:
+def run_invariants(
+    views: Sequence[HistoryView], *, allow_arguments_error: bool = False
+) -> list[str]:
     """对一个 session 的全部视图运行三条内置不变量，返回问题清单（不抛）。
 
     每条问题形如 ``[chain_topology] session <id>: <底层报告>``——来源、位置与
-    原因都在一行里可读。
+    原因都在一行里可读。``allow_arguments_error`` 见 :func:`invariant_checks`。
     """
-    checks = INVARIANT_CHECKS
+    checks = invariant_checks(allow_arguments_error=allow_arguments_error)
     problems: list[str] = []
     for view in views:
         for name, check in checks:
@@ -143,6 +165,8 @@ class Probe:
         """默认 workspace（``probe.session()`` 不带 workspace 时的会话工作目录）。"""
         self.invariants_reason: str | None = None
         """``without_invariants(reason)`` 的理由（None = 不变量正常运行）。"""
+        self.arguments_error_reason: str | None = None
+        """``allow_arguments_error(reason)`` 的理由（None = tool 配对按严格口径）。"""
         self._last_dump: Path | None = None
         self._checked_session_ids: list[str] = []
 
@@ -345,6 +369,24 @@ class Probe:
             )
         self.invariants_reason = reason.strip()
 
+    def allow_arguments_error(self, reason: str) -> None:
+        """窄口径放开：tool 配对不变量不再把 ``arguments_error`` 视为违规。
+
+        用于**有意**构造"模型吐出坏参数"的场景（短路回灌自纠——坏参数是合法
+        形态，见 ``assert_tool_pairing`` 的 ``allow_arguments_error``）。与
+        ``without_invariants`` 同纪律：**必须**给理由（进现场转储与失败报告），
+        且只放开这一个口径——链拓扑与"瞬态记录不落盘"继续强制。
+
+        Raises:
+            ProbeError: ``reason`` 为空 / 全空白 / 非字符串。
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise ProbeError(
+                "allow_arguments_error() requires a non-empty reason string "
+                "(the reason is written into the artifacts dump and failure report)"
+            )
+        self.arguments_error_reason = reason.strip()
+
     def check_invariants(self, views: Sequence[HistoryView] | None = None) -> list[str]:
         """对全部已挂载 session 运行内置不变量，返回问题清单（不抛）。
 
@@ -361,7 +403,9 @@ class Probe:
             else [self.history(session) for session in self._attached_sessions()]
         )
         self._checked_session_ids = [view.session_id for view in resolved]
-        return run_invariants(resolved)
+        return run_invariants(
+            resolved, allow_arguments_error=self.arguments_error_reason is not None
+        )
 
     def invariant_report(self, problems: Sequence[str]) -> str:
         """把不变量问题渲染成场景失败报告（含来源标注 / session id / 理由）。
@@ -381,6 +425,12 @@ class Probe:
             lines.append(
                 f"NOTE: probe.without_invariants(reason={self.invariants_reason!r}) "
                 "was called for this scenario"
+            )
+        if self.arguments_error_reason is not None:
+            lines.append(
+                "NOTE: probe.allow_arguments_error("
+                f"reason={self.arguments_error_reason!r}) was called for this "
+                "scenario (tool pairing tolerates unparsable tool arguments)"
             )
         if self._last_dump is not None:
             lines.append(f"artifacts: {self._last_dump}")
@@ -592,6 +642,12 @@ class Probe:
                 "built-in invariants DISABLED via probe.without_invariants("
                 f"reason={self.invariants_reason!r})"
             )
+        if self.arguments_error_reason is not None:
+            lines.append(
+                "tool pairing tolerates unparsable arguments via "
+                "probe.allow_arguments_error("
+                f"reason={self.arguments_error_reason!r})"
+            )
         if self._last_dump is not None:
             lines.append(f"previous dump: {self._last_dump}")
         lines.append("files:")
@@ -610,6 +666,7 @@ __all__ = [
     "DUMP_SUMMARY",
     "DUMP_TIMELINE",
     "INVARIANT_CHECKS",
+    "invariant_checks",
     "Probe",
     "ProbeError",
     "ProbeInvariantError",

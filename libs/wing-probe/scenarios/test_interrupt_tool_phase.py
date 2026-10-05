@@ -25,6 +25,7 @@ import time
 import pytest
 
 from wing_probe import Probe, Session, ToolCall, Turn
+from wing_probe.history import message_semantics
 
 #: 场景私有 model 名（剧本按 model 名路由，场景之间零共享）。
 TOOL_PHASE_MODEL = "probe/interrupt-tool-phase"
@@ -36,6 +37,7 @@ INTERRUPTED_RESULT = "Tool call interrupted by user."
 #: 慢命令：`sleep` 的秒数就是打断窗口（进程被 interrupt hook 杀掉，场景不等待它）。
 LATE_SECONDS = 2
 LATE_FILE = "late.txt"
+SLOW_COMMAND = f"sleep {LATE_SECONDS} && printf late > {LATE_FILE}"
 
 #: 并行场景：慢者被打断、快者保留真实结果。
 SLOW_CALL = "call_slow"
@@ -96,15 +98,7 @@ async def test_interrupt_during_tool_execution_synthesizes_result(
     """
     probe.register(
         TOOL_PHASE_MODEL,
-        Turn.of(
-            tool_calls=[
-                ToolCall(
-                    "Bash",
-                    {"command": f"sleep {LATE_SECONDS} && printf late > {LATE_FILE}"},
-                    id=SLOW_CALL,
-                )
-            ]
-        ),
+        Turn.of(tool_calls=[ToolCall("Bash", {"command": SLOW_COMMAND}, id=SLOW_CALL)]),
         Turn.of(text="after interrupt"),
     )
     session = await probe.session(model=TOOL_PHASE_MODEL, yolo=True)
@@ -128,13 +122,29 @@ async def test_interrupt_during_tool_execution_synthesizes_result(
         view.describe()
     )
     assistant, tool = messages[1], messages[2]
-    # 生成本身是完整的（tool call 参数一字不少）——被切断的是工具执行阶段，
-    # 不是流式生成阶段（那是 test_interrupt.py 的形态：stop_reason=interrupted）。
-    assert assistant.get("stop_reason") != "interrupted", assistant
-    assert [call["id"] for call in assistant["tool_calls"]] == [SLOW_CALL], assistant
-    assert assistant["tool_calls"][0]["arguments"] == {
-        "command": f"sleep {LATE_SECONDS} && printf late > {LATE_FILE}"
-    }, assistant
+    # 生成本身**逐字完整**：块数组（含 tool_use 的参数）一字不少、也不多出半截文本 /
+    # 思考——被切断的是工具执行阶段，不是流式生成阶段（那是 test_interrupt.py 的形态：
+    # 半截文本 + stop_reason=interrupted）。这里对账的是"补提交内容零损"这个真实失败面。
+    semantics = message_semantics(assistant)
+    assert semantics["content_blocks"] == [
+        {
+            "type": "tool_use",
+            "id": SLOW_CALL,
+            "name": "Bash",
+            "input": {"command": SLOW_COMMAND},
+            "input_error": None,
+        }
+    ], assistant
+    assert semantics["content"] is None, assistant
+    assert semantics["reasoning_content"] is None, assistant
+    assert semantics["tool_calls"] == [
+        {
+            "id": SLOW_CALL,
+            "name": "Bash",
+            "arguments": {"command": SLOW_COMMAND},
+            "arguments_error": None,
+        }
+    ], assistant
     assert tool["tool_call_id"] == SLOW_CALL, tool
     assert tool["content"] == INTERRUPTED_RESULT, tool
     view.assert_tool_pairing()

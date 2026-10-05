@@ -193,6 +193,7 @@ class StubGateway:
         app.router.add_get("/api/health", self._health)
         app.router.add_post("/api/session/resume", self._resume)
         app.router.add_post("/api/session/subscribe", self._ok)
+        app.router.add_get("/api/tools", self._tools)
         app.router.add_post("/api/session/update", self._echo)
         app.router.add_post("/api/session/release", self._echo)
         app.router.add_post("/api/session/boom", self._boom)
@@ -218,6 +219,21 @@ class StubGateway:
     async def _echo(self, request: web.Request) -> web.Response:
         """回显请求体（driver 具名动作的请求形状断言用）。"""
         return web.json_response({"ok": True, "echo": await request.json()})
+
+    async def _tools(self, request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "tools": [
+                    {
+                        "ref": "Bash",
+                        "namespace": "default",
+                        "name": "Bash",
+                        "llm_name": "Bash",
+                        "description": "stub",
+                    }
+                ]
+            }
+        )
 
     async def _resume(self, request: web.Request) -> web.Response:
         body = await request.json()
@@ -395,4 +411,16 @@ async def test_named_actions_hit_documented_endpoints(
         ),
         ("POST", "/api/session/release", {"session_id": "sid-1"}),
     ], http.calls
+    await http.close()
+
+
+@pytest.mark.asyncio
+async def test_list_tools_reads_registry_surface(stub_gateway: StubGateway) -> None:
+    """``list_tools`` 打 ``GET /api/tools``（注册表视图的具名动作）。"""
+    http = DriverHttp(stub_gateway.url, started_at=0.0)
+
+    payload = await http.list_tools()
+
+    assert [tool["llm_name"] for tool in payload["tools"]] == ["Bash"], payload
+    assert [(call.method, call.path) for call in http.calls] == [("GET", "/api/tools")]
     await http.close()

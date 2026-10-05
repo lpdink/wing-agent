@@ -69,6 +69,55 @@ def test_without_invariants_requires_reason(tmp_path: Path) -> None:
     assert probe.invariants_reason == "检查 rewind 中间态：链此刻故意不自洽"
 
 
+def test_allow_arguments_error_requires_reason_and_is_scoped(tmp_path: Path) -> None:
+    """窄口径放开：只放开 tool 配对的 arguments_error，其余不变量照旧。"""
+    probe = build_probe(tmp_path)
+    for bad in ("", "   ", "\n"):
+        with pytest.raises(ProbeError) as failure:
+            probe.allow_arguments_error(bad)
+        assert "requires a non-empty reason" in str(failure.value)
+    assert probe.arguments_error_reason is None
+
+    probe.allow_arguments_error("  非法 args 短路场景：模型有意吐坏参数  ")
+    assert probe.arguments_error_reason == "非法 args 短路场景：模型有意吐坏参数"
+    assert probe.invariants_enabled is True, "只放开一个口径，不整体关闭"
+
+    session_dir = tmp_path / "scenario" / SESSION_ID
+    write_history(
+        session_dir,
+        [
+            {"uuid": "u1", "role": "user", "content": "hi"},
+            {
+                "uuid": "a1",
+                "parent_uuid": "u1",
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "name": "Bash",
+                        "arguments": {},
+                        "arguments_error": "boom",
+                    }
+                ],
+            },
+            {
+                "uuid": "t1",
+                "parent_uuid": "a1",
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "not executed",
+            },
+        ],
+    )
+    view = HistoryView(session_dir)
+    strict = run_invariants([view])
+    assert len(strict) == 1 and strict[0].startswith("[tool_pairing]"), strict
+    assert run_invariants([view], allow_arguments_error=True) == []
+
+    report = probe.invariant_report([])
+    assert "allow_arguments_error" in report and "有意吐坏参数" in report
+
+
 def test_invariant_report_carries_source_reason_and_dump(tmp_path: Path) -> None:
     """失败报告标注来源、session id、不变量名、逃生舱理由与转储路径。"""
     probe = build_probe(tmp_path)

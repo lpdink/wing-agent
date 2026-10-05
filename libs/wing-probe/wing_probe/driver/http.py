@@ -230,6 +230,14 @@ class DriverHttp(GatewayClient):
         """
         return await self._post("/api/session/release", {"session_id": session_id})
 
+    async def list_tools(self) -> dict:
+        """``GET /api/tools``（全局注册表视图：ref / namespace / name / llm_name）。
+
+        端点住 ``routes/system.py``，上游 SDK 没有对应方法——场景用它做"配置里的
+        名字能不能解析"的实时对账（而不是把探针写死的名字清单当成事实）。
+        """
+        return await self._get("/api/tools")
+
     async def request(
         self,
         method: str,
