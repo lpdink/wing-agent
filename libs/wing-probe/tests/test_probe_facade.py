@@ -284,6 +284,23 @@ async def test_dump_copies_session_files(tmp_path: Path) -> None:
     }
 
 
+@pytest.mark.asyncio
+async def test_dump_copies_aux_kv_files(tmp_path: Path) -> None:
+    """落盘拷贝带上 aux kv（``<key>.json``）——"待生效状态"的现场不能缺。"""
+    probe = build_probe(tmp_path)
+    session_dir = probe.env.session_dir(SESSION_ID)
+    write_history(session_dir, [{"uuid": "u1", "role": "user", "content": "hi"}])
+    pending = {"compact_content": "[Compact] x", "start_uuid": "u1", "end_uuid": "u1"}
+    (session_dir / "pending_compact.json").write_text(
+        json.dumps(pending), encoding="utf-8"
+    )
+
+    target = await probe.dump()
+
+    copied = target / "sessions" / SESSION_ID / "pending_compact.json"
+    assert json.loads(copied.read_text(encoding="utf-8")) == pending
+
+
 # ── 文件断言器解析的 workspace（review N5） ─────────────────
 
 

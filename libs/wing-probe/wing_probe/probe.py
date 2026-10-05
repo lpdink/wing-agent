@@ -40,7 +40,12 @@ from wing_probe.history.invariants import (
     assert_no_transient_records,
     assert_tool_pairing,
 )
-from wing_probe.history.view import HistoryView, read_metadata
+from wing_probe.history.view import (
+    HISTORY_FILE,
+    METADATA_FILE,
+    HistoryView,
+    read_metadata,
+)
 from wing_probe.driver.ws import GatewayWS
 from wing_probe.provider.context import ContextView
 from wing_probe.provider.request_log import LoggedRequest, RequestLog
@@ -254,6 +259,21 @@ class Probe:
         """恢复磁盘上的会话并订阅（留给"重启后仍在"的断言）。"""
         return await self.driver_required.resume(session_id)
 
+    async def restart_gateway(self) -> None:
+        """重启网关进程并重连 driver（跨进程重启语义的入口）。
+
+        进程死了，driver 的 WS 连接也死了（``client_id`` 随进程消失、订阅随之
+        失效）：关掉旧连接、连一个新 driver（新 ``client_id``）。**已挂载的会话
+        句柄不再收到事件**——用 :meth:`resume`（或 ``subscribe``）在新进程里重新
+        挂载，这与真实重启的用户路径一致。假 Provider 不重启：剧本与请求留档
+        跨重启连续（``probe.requests`` 因此能对账重启前后的请求）。
+        """
+        await self.env.restart_gateway()
+        previous, self.driver = self.driver, None
+        if previous is not None:
+            await previous.close()
+        self.driver = await Driver.connect(self.env)
+
     # ── 断言面 ────────────────────────────────────────────────
 
     @property
@@ -383,7 +403,8 @@ class Probe:
         - ``http.jsonl``：driver 的 HTTP 调用留档（method / path / body / status /
           response）；
         - ``requests.json``：假 Provider 收到的原始请求体（LLM 请求的事实来源）；
-        - ``sessions/<id>/history.jsonl`` / ``metadata.json``：落盘拷贝；
+        - ``sessions/<id>/history.jsonl`` / ``metadata.json`` / aux kv
+          （``<key>.json``，如后台压缩的 ``pending_compact``）：落盘拷贝；
         - ``gateway.log`` / ``gateway.log.tail``：网关日志（全文 / 尾部）；
         - ``dump.txt``：环境、会话清单、逃生舱理由与文件清单。
         """
@@ -497,13 +518,25 @@ class Probe:
         return sorted(found.items())
 
     def _dump_sessions(self, target: Path) -> list[str]:
+        """落盘拷贝：链 + 元数据 + **全部 aux kv**（``<key>.json``）。
+
+        aux 是"内存态 · 待生效 · 跨重启"状态的唯一落点（如后台压缩的
+        ``pending_compact``）——失败现场少了它，"待生效状态到底有没有落盘"
+        就无法离线复盘。按后缀收（而不是写死 key 名）：新增 aux key 自动进现场。
+        """
         written: list[str] = []
         root = target / DUMP_SESSIONS
         root.mkdir(parents=True, exist_ok=True)
         for session_id, session_dir in self._session_dirs():
             dest = root / session_id
             dest.mkdir(parents=True, exist_ok=True)
-            for name in ("history.jsonl", "metadata.json", "aux.json"):
+            names = [HISTORY_FILE, METADATA_FILE]
+            names += sorted(
+                path.name
+                for path in session_dir.glob("*.json")
+                if path.name not in names
+            )
+            for name in names:
                 source = session_dir / name
                 if source.is_file():
                     (dest / name).write_bytes(source.read_bytes())

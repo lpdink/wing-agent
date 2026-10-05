@@ -84,6 +84,12 @@ DEFAULT_AGENT_TOOLS: tuple[str, ...] = (
 #: （``max_retry_delay``）保证场景快。
 PROBE_MAX_RETRIES = 2
 
+#: 默认模板的上下文窗口 / 保留区（与产品默认同量级）。自动压缩场景用
+#: ``@pytest.mark.probe_env(context_window_tokens=…, keep_recent_tokens=…)``
+#: 压小它们，让 early trigger / apply 在几轮对话内确定性触发。
+DEFAULT_CONTEXT_WINDOW_TOKENS = 256_000
+DEFAULT_KEEP_RECENT_TOKENS = 50_000
+
 
 class ProbeEnvError(RuntimeError):
     """环境自举失败（二进制缺失 / 进程提前退出 / 健康检查超时）。"""
@@ -205,8 +211,8 @@ def render_config_yaml(
     provider_extra: Mapping[str, Any] | None = None,
     tools: Sequence[str] = DEFAULT_AGENT_TOOLS,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-    context_window_tokens: int = 256_000,
-    keep_recent_tokens: int = 50_000,
+    context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS,
+    keep_recent_tokens: int = DEFAULT_KEEP_RECENT_TOKENS,
     log_level: str = "INFO",
     sessions: Mapping[str, Any] | None = None,
     hooks: Sequence[str] = (),
@@ -389,6 +395,8 @@ class ProbeEnv:
         provider_extra: Mapping[str, Any] | None = None,
         tools: Sequence[str] = DEFAULT_AGENT_TOOLS,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS,
+        keep_recent_tokens: int = DEFAULT_KEEP_RECENT_TOKENS,
         env_overrides: Mapping[str, str] | None = None,
         sessions: Mapping[str, Any] | None = None,
         hooks: Sequence[str] = (),
@@ -411,6 +419,10 @@ class ProbeEnv:
         self.tools = tuple(tools)
         self.system_prompt = system_prompt
         """默认模板的 system prompt（非空；场景可与请求里的 system 段对照）。"""
+        self.context_window_tokens = context_window_tokens
+        """默认模板的上下文窗口（压缩 apply 阈值；压小即得确定性自动压缩）。"""
+        self.keep_recent_tokens = keep_recent_tokens
+        """默认模板的保留区预算（``compact_window = window - keep_recent``）。"""
 
         self.provider = FakeProvider(host=DEFAULT_HOST)
         """进程内假 Provider（注册剧本 / 读请求留档）。"""
@@ -490,6 +502,31 @@ class ProbeEnv:
             return
         raise last_error if last_error is not None else ProbeEnvError("gateway failed")
 
+    async def restart_gateway(self) -> None:
+        """重启网关子进程（同一套隔离目录，新端口，假 Provider 不重启）。
+
+        ``stop()`` 是**单向闸门**（实例报废、不支持同实例再起）；而"进程跑起来
+        → 杀掉 → 在同一 ``WING_HOME`` / ``WING_SESSIONS_PATH`` 上重新跑"是另一
+        回事：重启的是**被测进程**，隔离目录与假 Provider（剧本 + 请求留档）都
+        要连续——这正是"跨进程重启"语义的观测前提。
+
+        做的事：``POST /api/shutdown`` → 等退出（同 ``stop`` 的收尾纪律）→
+        ``start_gateway()``（换端口 + 健康检查）。失败即抛，不带半死进程返回。
+
+        Raises:
+            ProbeEnvError: env 已 stop（单向闸门之外）或新进程起不来。
+        """
+        if self._stopped:
+            raise ProbeEnvError(
+                "env is stopped (stop() is a one-way gate); create a new "
+                "ProbeEnv instead of restarting a dead one"
+            )
+        if self._process is not None and self._process.poll() is None:
+            await self._request_shutdown()
+        await self._terminate_process()
+        self._log_marker("--- probe: gateway restart ---")
+        await self.start_gateway()
+
     def _render_config(self, port: int) -> str:
         """按当前参数生成配置文本（启动重试换端口时重新生成）。"""
         return render_config_yaml(
@@ -501,6 +538,8 @@ class ProbeEnv:
             provider_extra=self.provider_extra,
             tools=self.tools,
             system_prompt=self.system_prompt,
+            context_window_tokens=self.context_window_tokens,
+            keep_recent_tokens=self.keep_recent_tokens,
             sessions=self._sessions_config,
             hooks=self._hooks_config,
         )

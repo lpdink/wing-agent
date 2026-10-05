@@ -518,3 +518,50 @@ def test_fact_events_are_not_flagged(tmp_path: Path) -> None:
     view = view_of(tmp_path, records)
     view.assert_no_transient_records()
     view.assert_chain_invariants()
+
+
+# ── aux kv 通道 ─────────────────────────────────────────────────
+
+
+def test_aux_reads_session_dir_kv(tmp_path: Path) -> None:
+    """aux kv：``<session_dir>/<key>.json`` 每次访问重新读盘（待生效状态观测点）。"""
+    session_dir = tmp_path / "sessions" / "sid-1"
+    session_dir.mkdir(parents=True)
+    (session_dir / "history.jsonl").write_text("", encoding="utf-8")
+    view = HistoryView(session_dir)
+
+    assert view.aux_path("pending_compact") == session_dir / "pending_compact.json"
+    assert view.aux("pending_compact") is None, "缺失即 None（不是错误）"
+
+    payload = {"compact_content": "[Compact] x", "start_uuid": "a", "end_uuid": "b"}
+    (session_dir / "pending_compact.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+    assert view.aux("pending_compact") == payload
+
+    # 快照语义只作用于 history.jsonl：aux 是"当下"的观测点。
+    (session_dir / "pending_compact.json").unlink()
+    assert view.aux("pending_compact") is None
+
+
+def test_aux_corrupt_or_unknown_shape_is_none(tmp_path: Path) -> None:
+    """损坏 / 非对象 aux：返回 None（镜像后端"损坏数据丢弃"的口径，不抛）。"""
+    session_dir = tmp_path / "sessions" / "sid-1"
+    session_dir.mkdir(parents=True)
+
+    (session_dir / "broken.json").write_text("{not json", encoding="utf-8")
+    assert HistoryView(session_dir).aux("broken") is None
+
+    (session_dir / "scalar.json").write_text("[1, 2]", encoding="utf-8")
+    assert HistoryView(session_dir).aux("scalar") is None
+
+
+@pytest.mark.parametrize("key", ["", "..", "../escape", ".hidden", "a/b"])
+def test_aux_key_must_be_flat_identifier(tmp_path: Path, key: str) -> None:
+    """aux key 是扁平标识符：越界（路径分隔 / 隐藏 / 空）直接报错，不静默越界。"""
+    view = HistoryView(tmp_path / "sessions" / "sid-1")
+
+    with pytest.raises(HistoryAssertionError, match="flat identifier"):
+        view.aux(key)
+    with pytest.raises(HistoryAssertionError, match="flat identifier"):
+        view.aux_path(key)

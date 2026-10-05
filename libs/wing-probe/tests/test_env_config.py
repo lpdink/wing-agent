@@ -14,6 +14,8 @@ from aiohttp import web
 
 from wing_probe.env import (
     DEFAULT_AGENT_TOOLS,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+    DEFAULT_KEEP_RECENT_TOKENS,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_PROBE_MODEL,
     LOOPBACK_HOSTS,
@@ -483,3 +485,48 @@ async def test_wait_for_health_ignores_env_proxy(
         )
     finally:
         await runner.cleanup()
+
+
+def test_env_render_config_passes_context_window_knobs(tmp_path: Path) -> None:
+    """ProbeEnv 的上下文窗口旋钮进入 agent 配置（自动压缩场景的阈值来源）。
+
+    默认与 ``render_config_yaml`` 的缺省一致（不因新增参数而漂移）；显式压小
+    之后 ``compact_window = window - keep_recent`` 才是场景能算出来的数。
+    """
+    default = yaml.safe_load(ProbeEnv(tmp_path)._render_config(45124))["agents"][0]
+    assert default["context_window_tokens"] == DEFAULT_CONTEXT_WINDOW_TOKENS
+    assert default["keep_recent_tokens"] == DEFAULT_KEEP_RECENT_TOKENS
+
+    env = ProbeEnv(tmp_path, context_window_tokens=1000, keep_recent_tokens=400)
+    agent = yaml.safe_load(env._render_config(45124))["agents"][0]
+    assert agent["context_window_tokens"] == 1000
+    assert agent["keep_recent_tokens"] == 400
+
+
+@pytest.mark.asyncio
+async def test_restart_gateway_refuses_stopped_env(tmp_path: Path) -> None:
+    """重启是"活环境"的操作：已 stop 的实例直接报错（单向闸门不破）。"""
+    env = ProbeEnv(tmp_path)
+    await env.stop()
+
+    with pytest.raises(ProbeEnvError, match="one-way gate"):
+        await env.restart_gateway()
+    assert env.process is None
+
+
+@pytest.mark.asyncio
+async def test_restart_gateway_without_running_process_starts_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未起进程时重启 = 起一个新的（不重复起第二个）。"""
+    env = ProbeEnv(tmp_path)
+    started: list[int] = []
+
+    async def fake_start() -> None:
+        started.append(1)
+
+    monkeypatch.setattr(env, "start_gateway", fake_start)
+    await env.restart_gateway()
+
+    assert started == [1], "重启只调用一次 start_gateway"
+    assert env.process is None

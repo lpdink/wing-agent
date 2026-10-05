@@ -193,6 +193,8 @@ class StubGateway:
         app.router.add_get("/api/health", self._health)
         app.router.add_post("/api/session/resume", self._resume)
         app.router.add_post("/api/session/subscribe", self._ok)
+        app.router.add_post("/api/session/update", self._echo)
+        app.router.add_post("/api/session/release", self._echo)
         app.router.add_post("/api/session/boom", self._boom)
         self.runner = web.AppRunner(app, access_log=None)
         await self.runner.setup()
@@ -212,6 +214,10 @@ class StubGateway:
 
     async def _health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
+
+    async def _echo(self, request: web.Request) -> web.Response:
+        """回显请求体（driver 具名动作的请求形状断言用）。"""
+        return web.json_response({"ok": True, "echo": await request.json()})
 
     async def _resume(self, request: web.Request) -> web.Response:
         body = await request.json()
@@ -358,4 +364,35 @@ async def test_http_client_ignores_env_proxy(
 
     assert response == {"status": "ok"}
     assert len(http.calls) == 1
+    await http.close()
+
+
+@pytest.mark.asyncio
+async def test_named_actions_hit_documented_endpoints(
+    stub_gateway: StubGateway,
+) -> None:
+    """具名动作（``set_session_tools`` / ``release_session``）的 path 与请求体。
+
+    这两个端点上游 SDK 没有（``update_session`` 缺 ``tools`` 形参、release 未包装），
+    probe 用它们驱动工具热切换与逐出——形状漂移（path / 字段名）必须在这里变红，
+    而不是让场景在"改了不生效"的沉默里失败。
+    """
+    http = DriverHttp(stub_gateway.url, started_at=0.0)
+
+    updated = await http.set_session_tools("sid-1", ["Bash", "Read"])
+    assert updated == {
+        "ok": True,
+        "echo": {"session_id": "sid-1", "tools": ["Bash", "Read"]},
+    }, updated
+    released = await http.release_session("sid-1")
+    assert released == {"ok": True, "echo": {"session_id": "sid-1"}}, released
+
+    assert [(call.method, call.path, call.body) for call in http.calls] == [
+        (
+            "POST",
+            "/api/session/update",
+            {"session_id": "sid-1", "tools": ["Bash", "Read"]},
+        ),
+        ("POST", "/api/session/release", {"session_id": "sid-1"}),
+    ], http.calls
     await http.close()

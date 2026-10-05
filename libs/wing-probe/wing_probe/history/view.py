@@ -490,6 +490,38 @@ class HistoryView:
             self._metadata_loaded = True
         return self._metadata_cache
 
+    def aux(self, key: str) -> dict[str, Any] | None:
+        """会话目录 aux kv 通道的原始内容（``<session_dir>/<key>.json``）。
+
+        与 ``history.jsonl`` 同生命周期的 kv 通道（``MessageLog`` 的 aux），
+        "内存态 · 待生效 · 跨重启" 的中间产物落在这里——例如后台自动压缩的
+        ``pending_compact``（``ContextManager`` 的 aux key）：它在**下一次请求**
+        才被换入消息链，此前只存在于 aux。**每次访问重新读盘**（与
+        :attr:`records` 的快照语义不同）：这是"待生效状态是否已落盘"的观测点，
+        必须反映当下。
+
+        缺失返回 None；损坏 / 非对象返回 None（实现口径：损坏数据丢弃，见
+        ``store/file.py`` 的 ``read_aux``）。``key`` 越界（含 ``/``）直接报错
+        ——aux key 是扁平标识符，路径拼接不静默越界。
+        """
+        path = self.aux_path(key)
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            return None
+        mapping = _as_mapping(data)
+        return dict(mapping) if mapping is not None else None
+
+    def aux_path(self, key: str) -> Path:
+        """aux 文件路径（``<session_dir>/<key>.json``；不读盘，用于存在性断言）。"""
+        if not key or "/" in key or "\\" in key or key.startswith("."):
+            raise HistoryAssertionError(
+                f"aux key must be a flat identifier, got {key!r}"
+            )
+        return self.session_dir / f"{key}.json"
+
     # ── 报告 ──────────────────────────────────────────────
 
     def describe(self, *, limit: int = 24) -> str:
