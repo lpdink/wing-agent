@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from wing.common.logger import log
 from wing.common.tracked_list import TrackedList
 from wing.config import get_config
-from wing.context_manager import ContextManager
+from wing.context import ContextManager
 from wing.media import MediaAccess
 from wing.provider import create_provider
 from wing.schema import ChainNode, Message, Tool

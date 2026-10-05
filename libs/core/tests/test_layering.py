@@ -117,8 +117,6 @@ FAMILY_RULES: tuple[tuple[str, str], ...] = (
     ("wing._version", "build_info"),
     ("wing.config", "config"),
     ("wing.default_config", "config"),
-    ("wing.context_manager", "context"),
-    ("wing.compactor", "context"),
     ("wing.context", "context"),
     ("wing.session", "session"),
     ("wing.session_manager", "session"),

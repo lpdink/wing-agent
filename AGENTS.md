@@ -45,8 +45,10 @@ libs/core/wing/
 ├── runtime.py                       WingRuntime — service 层协调者（post() 唯一入站，路由到 Session/CM）
 ├── session.py                       Session — messages + state + metadata（经 SessionStore）
 ├── session_manager.py               SessionManager — 多会话、fork/resume、store registry
-├── context_manager.py               上下文窗口跟踪 + 压缩 + rewind
-├── compactor.py                     压缩策略（LLM 摘要）
+├── context/                         上下文域包：窗口投影 / 声明集 / 压缩 / 资源加载
+│   ├── manager.py                   ContextManager — 窗口投影 / 声明集 / rewind / pending compact 编排
+│   ├── compaction.py                Compactor — 压缩策略（LLM 摘要）+ PendingCompact / LLMMessagesResult
+│   └── resources.py                 skills/rules 文件加载（glob + frontmatter，与消息链无关）
 ├── background.py                    BackgroundScheduler — 周期任务宿主（逐出 / 未来 dreaming 等）
 ├── session_reaper.py                SessionReaper — 空闲会话逐出（触摸订阅 + 扫描）
 ├── agent_template.py                AgentTemplate — 配置 agents: 的 model/tools/prompt/skills/rules

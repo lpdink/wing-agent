@@ -49,7 +49,7 @@ def _seed_compact(session) -> dict[str, str]:
         old1(u1) → old2(a1) ─┬─ [Compact](c1, parent=None, unzip=a1)
                              └─ tail1(u2)
     """
-    from wing.context_manager import ContextManager
+    from wing.context import ContextManager
 
     cm: ContextManager = session.context_manager
     old1 = Message(role="user", content="old1")

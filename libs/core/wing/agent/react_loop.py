@@ -35,7 +35,7 @@ from .tool_executor import (
 )
 
 if TYPE_CHECKING:
-    from wing.context_manager import ContextManager
+    from wing.context import ContextManager
     from wing.provider.base import ModelProvider, StreamAccumulator
     from wing.schema import Tool
 

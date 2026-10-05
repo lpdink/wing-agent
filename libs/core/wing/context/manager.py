@@ -1,22 +1,15 @@
-# wing/context_manager.py
+# wing/context/manager.py
 import asyncio
-import glob
 import json
-import os
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import frontmatter
-
-from .common.logger import log
-from .common.tracked_list import TrackedList
-from .compactor import Compactor
-from .provider.base import ModelProvider
-from .schema import (
+from wing.common.logger import log
+from wing.common.tracked_list import TrackedList
+from wing.provider.base import ModelProvider
+from wing.schema import (
     AgentSkill,
     ChainNode,
     LLMUsage,
@@ -24,50 +17,19 @@ from .schema import (
     Tool,
 )
 
+from .compaction import Compactor, LLMMessagesResult, PendingCompact
+from .resources import (
+    build_skills_prompt,
+    load_all_skills,
+    load_rules,
+    render_skills_info,
+)
+
 if TYPE_CHECKING:
     from wing.event import WingEvent
 
 
-@dataclass
-class LLMMessagesResult:
-    """get_messages_for_llm() 的结构化返回值。
-
-    tools: 本次 LLM 调用应使用的工具列表（声明集快照）。
-    Agent 直接将此传给 provider.generate(tools=...)。
-    """
-
-    messages: list[Message]
-    tools: list[Tool]
-
-
-@dataclass
-class PendingCompact:
-    """预计算的压缩结果，等待 apply 到消息链。
-
-    start_uuid / end_uuid 用于 UUID 自校验：apply 时在当前活跃链中查找，
-    找不到则说明链已被修改（rewind / 手动 compact），自动丢弃。
-    """
-
-    compact_content: str
-    start_uuid: str
-    end_uuid: str
-    usage: LLMUsage | None = None
-    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
-
-
 class ContextManager:
-    _DEFAULT_AGENT_SKILL_INSTRUCTION = (
-        "# Agent Skills\n"
-        "The agent skills are a collection of folds of instructions, scripts, "
-        "and resources that you can load dynamically to improve performance "
-        "on specialized tasks. Each agent skill has a `SKILL.md` file in its "
-        "folder that describes how to use the skill. "
-        "Read its `SKILL.md` file if necessarily."
-    )
-    _DEFAULT_AGENT_SKILL_TEMPLATE = """## {name}
-{description}
-More detail in: "{dir}/SKILL.md" """
-
     def __init__(
         self,
         session_id: str,
@@ -101,11 +63,14 @@ More detail in: "{dir}/SKILL.md" """
         self._rules_patterns = rules_patterns or []
 
         # 加载 rules 和 skills（在初始化时加载一次）
-        # _rules_files 由 _load_rules 记录：实际匹配并成功读取的规则文件路径
-        self._rules_files: list[str] = []
-        self._rules_prompt = self._load_rules()
-        self._skills_cache: dict[str, AgentSkill] = self._load_all_skills()
-        self._skills_prompt = self._build_skills_prompt()
+        # _rules_files：实际匹配并成功读取的规则文件路径（load_rules 的返回）
+        self._rules_prompt, self._rules_files = load_rules(
+            self._rules_patterns, self._workspace
+        )
+        self._skills_cache: dict[str, AgentSkill] = load_all_skills(
+            self._skills_patterns, self._workspace
+        )
+        self._skills_prompt = build_skills_prompt(self._skills_cache)
         # 追加系统提示词（hook 注入的环境信息 + AgentOverride.append_system_prompt
         # 的合并结果）。命名对齐 CLI `--append-system-prompt` / AgentOverride。
         # 它是**会话级持久状态**（metadata.append_system_prompt）：由 Session 在
@@ -285,178 +250,20 @@ More detail in: "{dir}/SKILL.md" """
 
     def reload_skills_and_rules(self) -> None:
         """重新加载 skills 和 rules，用于 /reload 命令。"""
-        self._rules_prompt = self._load_rules()
-        self._skills_cache = self._load_all_skills()
-        self._skills_prompt = self._build_skills_prompt()
-
-    def _resolve_patterns(self, patterns: list[str]) -> list[str]:
-        """将 glob patterns 解析为实际路径列表。
-
-        - ~ 路径: expanduser
-        - 绝对路径: 保持不变
-        - 相对路径: 基于 workspace 解析（无 workspace 则保持原样，由 glob 对 cwd 展开）
-        """
-        resolved: list[str] = []
-        for p in patterns:
-            expanded = os.path.expanduser(p)
-            if self._workspace and not os.path.isabs(expanded):
-                resolved.append(str(self._workspace / expanded))
-            else:
-                resolved.append(expanded)
-        return resolved
-
-    def _load_rules(self) -> str:
-        """加载所有 rules 文件并拼接。
-
-        rules 配置支持 glob 模式，如 ~/.wing/rules/*.md
-        相对路径基于 workspace 解析。
-        文件不存在或读取失败时 log.warning 并跳过。
-
-        实际匹配并成功读取的文件路径记录到 _rules_files
-        （供 AgentInfo 下发，前端展示加载概览）。
-        """
-        all_patterns = self._resolve_patterns(self._rules_patterns)
-        self._rules_files = []
-        if not all_patterns:
-            return ""
-
-        contents = []
-        for pattern in all_patterns:
-            matched_files = sorted(glob.glob(pattern))
-
-            for file_path in matched_files:
-                try:
-                    content = Path(file_path).read_text(encoding="utf-8")
-                    contents.extend([file_path, content])
-                    self._rules_files.append(file_path)
-                except Exception as e:
-                    log.warning(f"Failed to read rules file {file_path}: {e}")
-
-        return "\n\n".join(contents)
-
-    def _load_all_skills(self) -> dict[str, AgentSkill]:
-        """从所有 skills glob patterns 加载技能。
-
-        支持 * 单层目录匹配和 ** 多层目录匹配。
-        相对路径基于 workspace 解析。
-        每个匹配到的 .md 文件必须包含 name 和 description Front Matter。
-        同名 skill 冲突处理：按 glob 结果排序后加载第一个，其他 log.warning 跳过。
-        """
-        all_skills: dict[str, AgentSkill] = {}
-        seen_names: dict[str, str] = {}  # 记录已加载的 skill 名及其来源路径
-
-        all_patterns = self._resolve_patterns(self._skills_patterns)
-
-        for pattern in all_patterns:
-            matched_files = sorted(glob.glob(pattern, recursive=True))
-
-            for skill_md_path in matched_files:
-                skill_md = Path(skill_md_path)
-                if not skill_md.is_file():
-                    continue
-
-                skill_dir = skill_md.parent
-                skill = self._parse_skill(skill_dir, skill_md)
-                if skill is None:
-                    continue
-
-                if skill.name in seen_names:
-                    log.warning(
-                        f"Skill '{skill.name}' already loaded from {seen_names[skill.name]}, "
-                        f"skipping duplicate in {skill_dir}"
-                    )
-                    continue
-
-                seen_names[skill.name] = str(skill_dir)
-                all_skills[skill.name] = skill
-
-        return all_skills
-
-    def _parse_skill(
-        self, skill_dir: Path, skill_md: Path | None = None
-    ) -> AgentSkill | None:
-        """解析单个 skill 目录的 SKILL.md 文件。"""
-        if skill_md is None:
-            skill_md = skill_dir / "SKILL.md"
-        if not skill_md.is_file():
-            log.warning(
-                f"The skill directory '{skill_dir}' must include a SKILL.md file."
-            )
-            return None
-
-        try:
-            with skill_md.open("r", encoding="utf-8") as f:
-                post = frontmatter.load(f)
-
-            name = post.get("name")
-            description = post.get("description")
-
-            if not name or not description:
-                log.warning(
-                    f"The SKILL.md in '{skill_dir}' must have YAML Front Matter "
-                    "with 'name' and 'description' fields."
-                )
-                return None
-
-            return AgentSkill(
-                name=str(name),
-                description=str(description),
-                dir=str(skill_dir),
-            )
-        except Exception as e:
-            log.warning(f"Failed to parse SKILL.md in '{skill_dir}': {e}")
-            return None
-
-    def _build_skills_prompt(self) -> str:
-        """构建 skills 提示词部分。"""
-        if not self._skills_cache:
-            return ""
-
-        skill_descriptions = [
-            ContextManager._DEFAULT_AGENT_SKILL_INSTRUCTION,
-        ] + [
-            ContextManager._DEFAULT_AGENT_SKILL_TEMPLATE.format(
-                name=skill.name,
-                description=skill.description,
-                dir=skill.dir,
-            )
-            for skill in self._skills_cache.values()
-        ]
-        return "\n".join(skill_descriptions)
+        self._rules_prompt, self._rules_files = load_rules(
+            self._rules_patterns, self._workspace
+        )
+        self._skills_cache = load_all_skills(self._skills_patterns, self._workspace)
+        self._skills_prompt = build_skills_prompt(self._skills_cache)
 
     def get_skills_info(self) -> str:
         """返回 skills/rules 信息，用于 /skills 命令显示。"""
-        lines = []
-
-        # 显示 skills patterns
-        if self._skills_patterns:
-            lines.append("📚 Skills patterns:")
-            for pattern in self._skills_patterns:
-                lines.append(f"  - {pattern}")
-            lines.append("")
-
-        # 显示已加载的 skills
-        if self._skills_cache:
-            lines.append("已加载的 Skills:")
-            for skill in self._skills_cache.values():
-                lines.append(f"  {skill.name}: {skill.description}")
-        else:
-            lines.append("暂无已加载的 Skills")
-
-        # 显示实际加载的 rules 文件
-        if self._rules_patterns:
-            lines.append("")
-            lines.append("Rules patterns:")
-            for pattern in self._rules_patterns:
-                lines.append(f"  - {pattern}")
-            if self._rules_files:
-                lines.append("已加载的 Rules 文件:")
-                for file_path in self._rules_files:
-                    lines.append(f"  {file_path}")
-            else:
-                lines.append("暂无已加载的 Rules 文件")
-
-        return "\n".join(lines)
+        return render_skills_info(
+            self._skills_patterns,
+            self._skills_cache,
+            self._rules_patterns,
+            self._rules_files,
+        )
 
     async def get_messages_for_llm(
         self,

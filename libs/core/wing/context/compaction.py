@@ -1,4 +1,4 @@
-# wing/compactor.py
+# wing/context/compaction.py
 """Compactor — 上下文压缩引擎。
 
 负责判断压缩阈值、计算切割点、执行 LLM 压缩调用。
@@ -6,10 +6,38 @@
 """
 
 import re
+from dataclasses import dataclass, field
+from datetime import datetime
 
 from wing.provider.base import ModelProvider
+from wing.schema import LLMResponse, LLMUsage, Message, Tool
 
-from .schema import LLMResponse, Message
+
+@dataclass
+class LLMMessagesResult:
+    """get_messages_for_llm() 的结构化返回值。
+
+    tools: 本次 LLM 调用应使用的工具列表（声明集快照）。
+    Agent 直接将此传给 provider.generate(tools=...)。
+    """
+
+    messages: list[Message]
+    tools: list[Tool]
+
+
+@dataclass
+class PendingCompact:
+    """预计算的压缩结果，等待 apply 到消息链。
+
+    start_uuid / end_uuid 用于 UUID 自校验：apply 时在当前活跃链中查找，
+    找不到则说明链已被修改（rewind / 手动 compact），自动丢弃。
+    """
+
+    compact_content: str
+    start_uuid: str
+    end_uuid: str
+    usage: LLMUsage | None = None
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
 class Compactor:

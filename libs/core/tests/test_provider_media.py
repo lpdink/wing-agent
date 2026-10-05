@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from wing.compactor import Compactor
+from wing.context import Compactor
 from wing.config import ModelCapabilities, ModelSpec, ProviderConfig
 from wing.media import (
     BUDGET_PLACEHOLDER,

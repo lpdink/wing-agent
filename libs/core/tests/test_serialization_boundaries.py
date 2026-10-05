@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 
 from wing.common.tracked_list import TrackedList
-from wing.context_manager import ContextManager
+from wing.context import ContextManager
 from wing.event import (
     FACT_EVENTS,
     DiffContentEvent,
@@ -40,7 +40,7 @@ def _read_history(path: Path) -> list[dict]:
 
 
 def _make_cm(messages: TrackedList[ChainNode], sid: str = "s") -> ContextManager:
-    from wing.compactor import Compactor
+    from wing.context import Compactor
 
     return ContextManager(
         session_id=sid,

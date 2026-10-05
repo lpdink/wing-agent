@@ -12,10 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from wing.compactor import Compactor
+from wing.context import Compactor, ContextManager, PendingCompact
 from wing.common.tracked_list import TrackedList
 from wing.store.file import FileMessageLog
-from wing.context_manager import ContextManager, PendingCompact
 from wing.schema import ChainNode, LLMUsage
 
 

@@ -3,7 +3,7 @@
 「图片文件 → 模型可见」这条链路的机制说明：`ReadImage` 工具、内容寻址的媒体存储、
 消息里的媒体引用、**请求期图片投影**（高水位 + 量子批量驱逐）与两条协议线格式。
 
-事实来源：代码 `libs/core/wing/{media.py,schema.py,store/,agent/,provider/,compactor.py}`、
+事实来源：代码 `libs/core/wing/{media.py,schema.py,store/,agent/,provider/,context/compaction.py}`、
 `libs/core/wing/tools/read_image.py`；整机证据 `libs/wing-probe/scenarios/test_read_image.py`
 （本文末列 12 条场景）。本页只讲 *why* 与不变量，逐行契约以代码为准。
 

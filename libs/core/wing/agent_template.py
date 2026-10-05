@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from wing.common.logger import log
 from wing.config import AgentConfig
-from wing.compactor import Compactor
+from wing.context import Compactor
 from wing.schema import Tool
 from wing.tool_registry import tool_registry
 

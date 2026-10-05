@@ -63,7 +63,7 @@
 | `request_context.py` | L2 | 每请求上下文（request_id / session_id / client_id，单 ContextVar） |
 | `tool_registry.py` | L2 | 工具注册表：命名空间感知注册 + ToolRef 解析 |
 | `config.py`（+`default_config`） | L3 | 配置模型 + `WING_HOME` 解析 + 手写默认模板（事实来源） |
-| `context_manager.py`、`compactor.py` | L3 | 上下文窗口跟踪 + 压缩（LLM 摘要）+ rewind |
+| `context/` | L3 | 上下文窗口跟踪 + 压缩（LLM 摘要）+ rewind + skills/rules 文件加载 |
 | `session.py`、`session_manager.py`、`session_reaper.py`、`agent_template.py` | L3 | 会话生命周期：Session 状态、多会话与 fork/resume、空闲逐出、agent 模板 |
 | `agent/` | L3 | WingAgent 运行时：ReAct 主循环、工具并发执行、事件发射、取消取证、未提交投影 |
 | `tools/` | L3 | 内置工具（Bash / Read / Write / Edit / Glob / Grep / ReadImage / AskUserQuestion / TodoWrite） |

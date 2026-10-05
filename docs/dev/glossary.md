@@ -44,8 +44,8 @@
 
 | 概念 | 说明 |
 |------|------|
-| **ContextManager** | 上下文窗口跟踪 + 压缩 + 回退（`context_manager.py`）。 |
-| **Compactor** | 压缩策略（LLM 摘要）（`compactor.py`）。 |
+| **ContextManager** | 上下文窗口跟踪 + 压缩 + 回退（`context/manager.py`）。 |
+| **Compactor** | 压缩策略（LLM 摘要）（`context/compaction.py`）。 |
 | **缓存前缀** | 核心哲学：除压缩外绝不破坏 prompt 缓存前缀，追求理论最高命中率。**前缀身份 = 会话状态**：system 段（含 append_system_prompt）、tools 声明、处理开关都算，全部随会话持久化。 |
 | **append_system_prompt** | 追加系统提示词：`before_session_start` hook 注入（如 workspace / OS 信息）+ `AgentOverride.append_system_prompt`（CLI `--append-system-prompt`）的合并结果；持久化在 `metadata.json`，resume 时逐字节还原（不触发 hook）。fork 属新会话：子会话先继承该值、hook 再注入一次。 |
 | **持久会话状态** | `metadata.json` 记录的会话级状态：模型绑定、`system_prompt` / `append_system_prompt`、`tools` 覆盖、`thinking` / `reasoning_effort` / `yolo` / `max_turns`。显式动作写入、resume 优先于模板/配置、fork 按 fork 时刻的有效值一次写全（快照；`thinking` / `reasoning_effort` 只拷显式记录，不固化 provider 派生默认）。 |
