@@ -197,5 +197,11 @@ def test_relpath_is_cached_per_source_file(tmp_path: Path, _restore_logger) -> N
         "同一文件的第二条日志复用了第一条的行号——缓存粒度错了"
     )
 
-    outside = formatter.format(record("/etc/wing-outside.py", 7))
-    assert "/etc/wing-outside.py:7" in outside
+    # root 之外的文件回退绝对路径。用 tmp 目录的兄弟文件而不是 /etc：后者在
+    # macOS 上经 realpath 会变成 /private/etc，子串断言即使实现写成相对路径
+    # （`os.path.relpath`）也会通过——弱 oracle。
+    outside_path = (tmp_path.parent / "wing-outside.py").resolve()
+    outside = formatter.format(record(str(outside_path), 7))
+    # 用「 - <路径> - 」的字段边界断言，而不是子串：子串断言会被
+    # `/etc → /private/etc` 这类 realpath 语义或相对路径实现蒙混过关。
+    assert f" - {outside_path}:7 - " in outside

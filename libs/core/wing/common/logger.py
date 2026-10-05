@@ -50,13 +50,10 @@ class _PathFormatter(logging.Formatter):
         )
         self._root = root
         self._use_color = use_color
+        # pathname → 相对 root 的路径 memo。`Path(...).resolve()` 是一次真实
+        # 文件系统调用（realpath），逐条日志都做会在流式 DEBUG 日志这类热路径上
+        # 累积。产出它的源文件集合有界（仓库源码 + 用户 hooks），无需淘汰策略。
         self._rel_paths: dict[str, str] = {}
-        """pathname → 相对 root 的路径 memo。
-
-        `Path(...).resolve()` 是一次真实文件系统调用（realpath），逐条日志
-        都做会在流式 DEBUG 日志这类热路径上累积。产出它的源文件集合有界
-        （仓库源码 + 用户 hooks），因此缓存不需要淘汰策略。
-        """
 
     def _rel_path(self, pathname: str) -> str:
         cached = self._rel_paths.get(pathname)
