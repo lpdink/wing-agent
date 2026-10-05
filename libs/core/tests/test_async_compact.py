@@ -252,10 +252,8 @@ class TestUUIDValidation:
 
         if cm._pending_compact_result:
             msgs = [m for m in cm._messages if isinstance(m, Message)]
-            indices = cm._verify_snapshot_valid(msgs)
-            assert indices is not None
-            start_idx, end_idx = indices
-            assert start_idx <= end_idx
+            end_idx = cm._verify_snapshot_valid(msgs)
+            assert end_idx is not None
 
     @pytest.mark.asyncio
     async def test_uuid_not_found_after_rewind(self, tmp_dir):
@@ -282,8 +280,7 @@ class TestUUIDValidation:
             cm.rewind(chain[0].uuid)  # ty: ignore[invalid-argument-type]
             # Now the UUIDs should not match
             msgs = [m for m in cm._messages if isinstance(m, Message)]
-            indices = cm._verify_snapshot_valid(msgs)
-            assert indices is None
+            assert cm._verify_snapshot_valid(msgs) is None
 
 
 # ===================================================================

@@ -86,7 +86,7 @@ ignore = ["ANN401"]
 "libs/wing_hooks/*" = ["ANN"]
 
 [tool.vulture]
-exclude = [".venv/", "wing_ext/"]
+exclude = [".venv/"]
 min_confidence = 70
 
 [tool.pytest.ini_options]

@@ -88,6 +88,6 @@ def create_app(server: GatewayServer) -> FastAPI:
     app.state.server = server
     app.add_middleware(AuthMiddleware)
     _register_error_handlers(app)
-    register_routes(app, server)
+    register_routes(app)
 
     return app

@@ -297,9 +297,9 @@ class ContextManager:
                         pass
 
                 if self._pending_compact_result is not None:
-                    indices = self._verify_snapshot_valid(msgs)
-                    if indices is not None:
-                        self._apply_pending_compact(msgs, *indices)
+                    end_idx = self._verify_snapshot_valid(msgs)
+                    if end_idx is not None:
+                        self._apply_pending_compact(msgs, end_idx)
                         # Compact 打破 prefix cache——同步声明集（await 后求值，避免过期快照）
                         self._sync_declared_tools(current_tools())
                         return LLMMessagesResult(
@@ -375,10 +375,13 @@ class ContextManager:
 
         self._pending_compact_task = asyncio.create_task(_run())
 
-    def _verify_snapshot_valid(self, msgs: list[Message]) -> tuple[int, int] | None:
-        """在当前消息列表中查找 pending compact 的 start/end UUID。
+    def _verify_snapshot_valid(self, msgs: list[Message]) -> int | None:
+        """校验 pending compact 的 start/end UUID 仍在当前消息列表里。
 
-        返回 (start_idx, end_idx) 或 None（UUID 找不到）。
+        返回 compact 区间**末消息**的下标（apply 的插入点），UUID 对不上
+        （rewind / 手动 compact 改过链）返回 None。start 也参与校验——区间
+        必须完整存在且有序，但它不参与换入（摘要节点用 unzip_last_uuid
+        编码区间，插入点由 end 决定）。
         """
         pc = self._pending_compact_result
         if pc is None:
@@ -393,16 +396,14 @@ class ContextManager:
                 end_idx = i
 
         if start_idx is not None and end_idx is not None and start_idx <= end_idx:
-            return (start_idx, end_idx)
+            return end_idx
         return None
 
-    def _apply_pending_compact(
-        self, msgs: list[Message], start_idx: int, end_idx: int
-    ) -> None:
+    def _apply_pending_compact(self, msgs: list[Message], end_idx: int) -> None:
         """将预计算的 compact 结果换入消息链。
 
-        替换 msgs[start_idx : end_idx+1] 为 compact_node，
-        relink msgs[end_idx+1 :]。
+        摘要节点取代 msgs[:end_idx+1]（区间起点由它的 unzip_last_uuid
+        编码），relink msgs[end_idx+1 :]。
         """
         pc = self._pending_compact_result
         if pc is None:

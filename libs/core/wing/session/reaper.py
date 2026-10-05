@@ -36,11 +36,6 @@ class SessionReaper:
         self._sm = session_manager
         self._attached = False
 
-    @property
-    def attached(self) -> bool:
-        """是否已订阅 EventBus（触摸通道生效中）。"""
-        return self._attached
-
     def attach(self) -> None:
         """订阅 EventBus：任何会话事件都视为状态变化（重置空闲计时器）。"""
         if self._attached:

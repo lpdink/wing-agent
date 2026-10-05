@@ -187,11 +187,6 @@ class Reassembler:
         """是否有未闭合的重组窗口。"""
         return self._pending is not None
 
-    @property
-    def pending_id(self) -> str | None:
-        """未闭合窗口的事件 id（无窗口为 None）。"""
-        return None if self._pending is None else self._pending.id
-
     def deadline(self) -> float | None:
         """ "必须收到下一片"的时刻（与 ``on_text`` 的 ``at`` **同尺度**）；无窗口为 None。"""
         return None if self._pending is None else self._pending.deadline

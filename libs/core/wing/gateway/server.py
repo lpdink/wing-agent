@@ -123,11 +123,6 @@ class GatewayServer:
         """远程工具管理器，供 routes（ws / tools）访问。"""
         return self._remote_tools
 
-    @property
-    def background(self) -> BackgroundScheduler:
-        """后台周期任务宿主（lifespan 启停；测试可读 job 表）。"""
-        return self._background
-
     def start_background(self) -> None:
         """启动后台周期任务（gateway lifespan startup 调用）。"""
         self.runtime.reaper.attach()

@@ -182,10 +182,6 @@ class FrameLog:
     def frames(self) -> list[Frame]:
         return list(self._frames)
 
-    @property
-    def byte_size(self) -> int:
-        return self._bytes
-
     def tail(self, count: int) -> list[Frame]:
         if count <= 0:
             return []

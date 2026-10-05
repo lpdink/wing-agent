@@ -19,15 +19,6 @@ members = [
 ]
 
 [[package]]
-name = "aioconsole"
-version = "0.8.2"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/76/4a/71f535c85991e18e1626429a283d4fc6720053f38211affa888809089ded/aioconsole-0.8.2.tar.gz", hash = "sha256:25cb5530f58f7ab431e9af84fbb5417178287b6c3300d5b1185e3b129a227cef", size = 37712, upload-time = "2025-10-14T05:44:33.245Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/03/10/04ef3313a07e9152a84ce197aa11586376478c167322141e9c79eaedc25b/aioconsole-0.8.2-py3-none-any.whl", hash = "sha256:00f3fabd6de5df2fad635e1e6a13ebe5bb2456b83b31e881ae41bc5862fd6a68", size = 31510, upload-time = "2025-10-14T05:44:32.161Z" },
-]
-
-[[package]]
 name = "aiohappyeyeballs"
 version = "2.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -828,20 +819,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pydantic-settings"
-version = "2.14.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pydantic" },
-    { name = "python-dotenv" },
-    { name = "typing-inspection" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/42/98/c8345dccdc31de4228c039a98f6467a941e39558da41c1744fbe29fa5666/pydantic_settings-2.14.0.tar.gz", hash = "sha256:24285fd4b0e0c06507dd9fdfd331ee23794305352aaec8fc4eb92d4047aeb67d", size = 235709, upload-time = "2026-04-20T13:37:40.293Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/01/dd/bebff3040138f00ae8a102d426b27349b9a49acc310fcae7f92112d867e3/pydantic_settings-2.14.0-py3-none-any.whl", hash = "sha256:fc8d5d692eb7092e43c8647c1c35a3ecd00e040fcf02ed86f4cb5458ca62182e", size = 60940, upload-time = "2026-04-20T13:37:38.586Z" },
-]
-
-[[package]]
 name = "pygments"
 version = "2.20.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1321,10 +1298,8 @@ source = { editable = "crates/wing" }
 name = "wing-gateway"
 source = { editable = "libs/core" }
 dependencies = [
-    { name = "aioconsole" },
     { name = "fastapi" },
     { name = "httpx" },
-    { name = "pydantic-settings" },
     { name = "python-frontmatter" },
     { name = "pyyaml" },
     { name = "uvicorn", extra = ["standard"] },
@@ -1332,10 +1307,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aioconsole", specifier = ">=0.8.2" },
     { name = "fastapi", specifier = ">=0.139.0" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "pydantic-settings", specifier = ">=2.13.1" },
     { name = "python-frontmatter", specifier = ">=1.1.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.51.0" },

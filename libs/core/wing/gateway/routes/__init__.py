@@ -4,15 +4,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from fastapi import FastAPI
 
-if TYPE_CHECKING:
-    from wing.gateway.server import GatewayServer
 
-
-def register_routes(app: FastAPI, server: GatewayServer) -> None:
+def register_routes(app: FastAPI) -> None:
     """注册所有路由（session、system、health、tools、ws）。"""
     from .health import router as health_router
     from .session import router as session_router

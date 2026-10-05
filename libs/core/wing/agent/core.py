@@ -445,7 +445,7 @@ class WingAgent:
         log.info(f"Agent shutdown complete: session={self.session_id}")
 
     def get_status(self) -> dict:
-        """返回当前状态快照，供 Session.initial_status 使用。"""
+        """返回当前状态快照（网关的 session info 投影素材）。"""
         count, tokens = self.context_manager.get_context_stats()
         ctx_window = 0
         if self.context_manager.compactor:
