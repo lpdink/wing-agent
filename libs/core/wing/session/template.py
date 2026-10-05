@@ -1,4 +1,4 @@
-# wing/agent_template.py
+# wing/session/template.py
 """Agent 模板系统——多 agent 配置、模板管理。
 
 AgentTemplate: resolved 的模板数据类（从 AgentConfig 解析或从 WingAgent 反向抽取）。

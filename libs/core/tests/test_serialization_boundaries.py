@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from wing.common.tracked_list import TrackedList
+from wing.chain import TrackedList
 from wing.context import ContextManager
 from wing.event import (
     FACT_EVENTS,

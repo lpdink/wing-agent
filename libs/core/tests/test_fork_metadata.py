@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from wing.schema import Message
-from wing.session_manager import SessionManager
+from wing.session import SessionManager
 from wing.store import FileSessionStore, MemorySessionStore
 
 
@@ -173,7 +173,7 @@ class TestResumeTemplate:
     @pytest.mark.asyncio
     async def test_resume_restores_persisted_template(self, tmp_path: Path):
         """resume 默认使用 metadata 中持久化的模板。"""
-        from wing.agent_template import AgentTemplate
+        from wing.session import AgentTemplate
 
         store = FileSessionStore(tmp_path / "sessions")
         sm = SessionManager({"file": store})

@@ -1,6 +1,6 @@
-# wing/session.py
+# wing/session/session.py
 """
-wing/session.py — Session 类
+wing/session/session.py — Session 类
 
 Session 是有行为的对象，在构造器中创建 ContextManager 和 WingAgent。
 负责单 session 内部操作：metadata 管理、第一条消息自动 title。
@@ -19,8 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from wing.chain import TrackedList
 from wing.common.logger import log
-from wing.common.tracked_list import TrackedList
 from wing.config import get_config
 from wing.context import ContextManager
 from wing.media import MediaAccess
@@ -31,10 +31,11 @@ from wing.tool_registry import ToolRef
 
 if TYPE_CHECKING:
     from wing.agent import WingAgent
-    from wing.agent_template import AgentTemplate
     from wing.event.base import AgentInfo, SessionStatus
-    from wing.gateway.protocol import AgentOverride
     from wing.provider import ModelProvider
+
+    from .override import AgentOverride
+    from .template import AgentTemplate
 
 
 def serialize_message(msg: Message) -> dict:

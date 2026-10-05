@@ -726,7 +726,7 @@ class TestThinkingStatus:
 class TestProviderLifecycle:
     @pytest.fixture
     def sm(self):
-        from wing.session_manager import SessionManager
+        from wing.session import SessionManager
         from wing.store import MemorySessionStore
 
         return SessionManager(
@@ -781,7 +781,7 @@ class TestProviderLifecycle:
 
         锁定 bot#1 修复：switch_template 后不得交回已关闭的 client。
         """
-        from wing.agent_template import AgentTemplate
+        from wing.session import AgentTemplate
 
         session = sm.create_session()
         agent_v1 = session.agent
@@ -800,7 +800,7 @@ class TestProviderLifecycle:
             agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
         )
         monkeypatch.setattr("wing.agent.core.get_config", lambda: two)
-        monkeypatch.setattr("wing.session.get_config", lambda: two)
+        monkeypatch.setattr("wing.session.session.get_config", lambda: two)
         session._apply_model("model-2", provider_name="p2")
         p2 = agent_v1._providers["p2"]
 

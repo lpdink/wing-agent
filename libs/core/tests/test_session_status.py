@@ -131,7 +131,7 @@ def _write_session_dir(
 
 
 def _make_manager(sessions_path: Path):
-    from wing.session_manager import SessionManager
+    from wing.session import SessionManager
     from wing.store import FileSessionStore
 
     return SessionManager({"file": FileSessionStore(sessions_path)})
@@ -165,7 +165,7 @@ class TestListSessions:
     def test_no_workspace_parameter(self):
         import inspect
 
-        from wing.session_manager import SessionManager
+        from wing.session import SessionManager
 
         sig = inspect.signature(SessionManager.list_sessions)
         assert "workspace" not in sig.parameters

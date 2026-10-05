@@ -43,15 +43,12 @@ from wing.request_context import (
     set_request_context,
 )
 from typing import TYPE_CHECKING
-from wing.session import Session
-from wing.session_manager import SessionManager
-from wing.session_reaper import SessionReaper
+from wing.session import Session, SessionManager, SessionReaper
 from wing.store import FileSessionStore, MemorySessionStore, SessionStore
 
 if TYPE_CHECKING:
-    from wing.agent_template import AgentTemplateManager
-    from wing.gateway.protocol import AgentOverride
     from wing.provider.registry import ProviderModels
+    from wing.session import AgentOverride, AgentTemplateManager
 
 
 # ============================================================

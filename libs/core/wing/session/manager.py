@@ -1,6 +1,6 @@
-# wing/session_manager.py
+# wing/session/manager.py
 """
-wing/session_manager.py — SessionManager
+wing/session/manager.py — SessionManager
 
 管理 session 生命周期、消息路由、魔术命令分发。
 
@@ -23,9 +23,8 @@ from uuid import uuid4
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from wing.agent_template import AgentTemplate, AgentTemplateManager
+from wing.chain import TrackedList
 from wing.common.logger import log
-from wing.common.tracked_list import TrackedList
 from wing.common.utils import generate_session_id
 from wing.config import get_config
 from wing.hook_registry import hooks
@@ -37,11 +36,13 @@ from wing.event import (
 from wing.event_bus import event_bus
 from wing.magic_command.prompt_commands import expand_prompt_command
 from wing.schema import ChainNode, Message
-from wing.session import Session, tool_refs
 from wing.store import SessionMetadata, SessionStore
 
+from .session import Session, tool_refs
+from .template import AgentTemplate, AgentTemplateManager
+
 if TYPE_CHECKING:
-    from wing.gateway.protocol import AgentOverride
+    from .override import AgentOverride
 
 
 def _fork_slice(

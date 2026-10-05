@@ -17,7 +17,7 @@ import pytest
 import pytest_asyncio
 
 from wing.common.token_counter import TokenCounter
-from wing.common.tracked_list import TrackedList
+from wing.chain import TrackedList
 from wing.event import ToolCallResultEvent
 from wing.event_bus import event_bus
 from wing.hook_registry import hooks

@@ -22,7 +22,7 @@
 │ L2 领域设施     store/* · event/* · event_bus · hook_registry(hooks)     │
 │                 request_context · tool_registry                          │
 ├──────────────────────────────────────────────────────────────────────────┤
-│ L1 领域模型     schema · media · chain（现 common/tracked_list）         │
+│ L1 领域模型     schema · media · chain                                   │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ L0 基础         common/*（logger / fs / process / with_retry /           │
 │                 token_counter / utils）· build_info                      │
@@ -41,9 +41,10 @@
 
 - **`chain → store.base.MessageLog`、`chain → event.EVENT_TYPES`**：链拓扑引擎把 I/O 全部委托
   `MessageLog` 抽象，并按 `role` 分发事件记录——这两条上向边是 chain 的设计依赖。
-  `chain` 在层次表里标 L1，但**不受 R5 叶子约束**（07 迁出 `wing/common/` 后自然解除）。
-- **`runtime → gateway.protocol.AgentOverride`**：L4 内部依赖，R1 对 runtime 豁免；
-  `session` / `session_manager` 的同款依赖是**违规**（见 §5 白名单），07 或 10 必须清。
+  `chain` 在层次表里标 L1，但**不受 R5 叶子约束**（07 已迁出 `wing/common/`，自然解除）。
+- **`runtime` / `background` 的 gateway 依赖**：R1 豁免（L4 内部依赖）。
+  `AgentOverride` 已于 07 归位 `wing.session.override`（域层类型不再住在传输层）；
+  豁免本身保留——L4 内的 gateway 依赖不需要绕道。
 
 另外 **§6 的两类规则内例外**（叶子组 `common ↔ media ↔ schema` 互依、3 条函数内懒加载）
 同样是刻意批准的横向 / 向上依赖，一并登记在那里。
@@ -56,7 +57,7 @@
 | `build_info.py`（+`_build_info`、`_version`） | L0 | 构建信息读取口：版本 + commit hash（构建期注入，运行期零 git） |
 | `schema.py` | L1 | 领域模型：Message / Tool / ToolParam / ToolError / MediaRef 等公共类型与校验 |
 | `media.py` | L1 | 图片媒体纯函数层：id / 格式 / 尺寸 / 信封 / 请求期投影 |
-| `common/tracked_list.py`（→`chain.py`） | L1 | 链拓扑引擎 TrackedList：uuid/parentUuid 链模型，I/O 全部委托 MessageLog |
+| `chain.py` | L1 | 链拓扑引擎 TrackedList：uuid/parentUuid 链模型，I/O 全部委托 MessageLog |
 | `store/` | L2 | 会话持久状态唯一所有者：SessionStore / MessageLog / SessionMetadata（file / memory 后端） |
 | `event/`、`event_bus.py` | L2 | 事件类型 + 注册表 + 序列化边界（WingEvent / EVENT_TYPES / wire_dump）与全局 EventBus 路由 |
 | `hook_registry.py` | L2 | Hook 扩展点注册表（before_session_start / before_user_message / before_tool_call / after_tool_call） |
@@ -64,7 +65,7 @@
 | `tool_registry.py` | L2 | 工具注册表：命名空间感知注册 + ToolRef 解析 |
 | `config.py`（+`default_config`） | L3 | 配置模型 + `WING_HOME` 解析 + 手写默认模板（事实来源） |
 | `context/` | L3 | 上下文窗口跟踪 + 压缩（LLM 摘要）+ rewind + skills/rules 文件加载 |
-| `session.py`、`session_manager.py`、`session_reaper.py`、`agent_template.py` | L3 | 会话生命周期：Session 状态、多会话与 fork/resume、空闲逐出、agent 模板 |
+| `session/`（session / manager / reaper / template / override） | L3 | 会话生命周期：Session 状态、多会话与 fork/resume、空闲逐出、agent 模板、创建期参数覆盖 |
 | `agent/` | L3 | WingAgent 运行时：ReAct 主循环、工具并发执行、事件发射、取消取证、未提交投影 |
 | `tools/` | L3 | 内置工具（Bash / Read / Write / Edit / Glob / Grep / ReadImage / AskUserQuestion / TodoWrite） |
 | `provider/` | L3 | 模型调用协议层：OpenAI 兼容 / Anthropic 隔离、SSE 传输、provider registry |

@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 
 from wing.agent.event_sink import AgentEventSink
-from wing.common.tracked_list import TrackedList
+from wing.chain import TrackedList
 from wing.event import DiffContentEvent
 from wing.event_bus import event_bus
 from wing.request_context import reset_request_context, set_request_context

@@ -230,6 +230,6 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 |------|--------|----------|
 | transient 落盘 | `libs/core/wing/event/react.py`：`TextEvent.persist = True` | `scenarios/test_react_basics.py::test_text_turn_event_order_and_persistence`（场景内断言 + teardown 不变量 `no_transient_records`） |
 | rewind 跳过事件节点 | `libs/core/wing/context/manager.py::rewind` 中沿链回溯跳过事件节点的 `while` 循环 | `scenarios/test_rewind.py::test_rewind_skips_event_ancestors` |
-| fork metadata 快照 | `libs/core/wing/session_manager.py::fork_session` 的 `save_metadata(..., forked_from=session_id)` | `scenarios/test_fork.py::test_fork_metadata_snapshot`（`assert_fork_of` 连带 `test_fork_chain_integrity_and_uuid_remap`） |
+| fork metadata 快照 | `libs/core/wing/session/manager.py::fork_session` 的 `save_metadata(..., forked_from=session_id)` | `scenarios/test_fork.py::test_fork_metadata_snapshot`（`assert_fork_of` 连带 `test_fork_chain_integrity_and_uuid_remap`） |
 
 **变异绝不入库**：验证完必须还原，工作区只允许 probe 侧改动。

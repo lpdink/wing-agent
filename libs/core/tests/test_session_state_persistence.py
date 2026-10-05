@@ -22,11 +22,9 @@ from pathlib import Path
 
 import pytest
 
-from wing.agent_template import AgentTemplate
-from wing.gateway.protocol import AgentOverride
 from wing.hook_registry import hooks
 from wing.schema import Message
-from wing.session_manager import SessionManager
+from wing.session import AgentTemplate, AgentOverride, SessionManager
 from wing.store import FileSessionStore
 
 # ============================================================

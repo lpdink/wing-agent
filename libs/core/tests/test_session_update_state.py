@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from wing.session_manager import SessionManager
+from wing.session import SessionManager
 
 
 @pytest.fixture

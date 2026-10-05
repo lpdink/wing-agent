@@ -43,15 +43,18 @@ libs/core/wing/
 ├── __init__.py / _version.py        包入口（零 import 副作用）/ 版本号
 ├── build_info.py                    构建信息读取口：版本 + commit hash（构建时注入，运行期零 git）
 ├── runtime.py                       WingRuntime — service 层协调者（post() 唯一入站，路由到 Session/CM）
-├── session.py                       Session — messages + state + metadata（经 SessionStore）
-├── session_manager.py               SessionManager — 多会话、fork/resume、store registry
+├── session/                         会话生命周期包（公共 API 经 __init__ re-export）
+│   ├── session.py                   Session — messages + state + metadata（经 SessionStore）
+│   ├── manager.py                   SessionManager — 多会话、fork/resume、store registry
+│   ├── reaper.py                    SessionReaper — 空闲会话逐出（触摸订阅 + 扫描）
+│   ├── template.py                  AgentTemplate — 配置 agents: 的 model/tools/prompt/skills/rules
+│   └── override.py                  AgentOverride — 创建期参数覆盖（领域类型，住领域层非网关）
+├── chain.py                         TrackedList — 链拓扑引擎（I/O 委托 MessageLog）
 ├── context/                         上下文域包：窗口投影 / 声明集 / 压缩 / 资源加载
 │   ├── manager.py                   ContextManager — 窗口投影 / 声明集 / rewind / pending compact 编排
 │   ├── compaction.py                Compactor — 压缩策略（LLM 摘要）+ PendingCompact / LLMMessagesResult
 │   └── resources.py                 skills/rules 文件加载（glob + frontmatter，与消息链无关）
 ├── background.py                    BackgroundScheduler — 周期任务宿主（逐出 / 未来 dreaming 等）
-├── session_reaper.py                SessionReaper — 空闲会话逐出（触摸订阅 + 扫描）
-├── agent_template.py                AgentTemplate — 配置 agents: 的 model/tools/prompt/skills/rules
 ├── config.py                        Config 模型 + WING_HOME 解析
 ├── default_config.py                手写默认 config.yaml 模板（事实来源）
 ├── schema.py                        Tool / ToolParam / Message 等核心 schema
@@ -94,7 +97,6 @@ libs/core/wing/
 │   └── _llm_metrics.py / _tool_call_metrics.py / _compact_metrics.py
 ├── common/
 │   ├── logger.py                    日志初始化（按本地日期切分 + 轮转 / prune）
-│   ├── tracked_list.py              TrackedList — 链拓扑引擎（I/O 委托 MessageLog）
 │   ├── fs.py                        原子写（tmp + fsync + rename）/ JSON 读写
 │   ├── with_retry.py                重试（指数退避 + 重试事件）
 │   ├── process.py                   进程组管理（killpg 清理子进程树）

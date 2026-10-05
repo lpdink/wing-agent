@@ -7,9 +7,9 @@
 | 概念 | 说明 |
 |------|------|
 | **WingRuntime** | 服务层协调者（`runtime.py`）。路由 handler 薄化，逻辑下沉到 Session / ContextManager。 |
-| **Session** | 一个会话：消息链 + 状态 + metadata，经 SessionStore 持久化（`session.py`）。 |
-| **SessionManager** | 多会话管理 + fork/resume + store 注册表（`{name: store}`）（`session_manager.py`）。 |
-| **AgentTemplate** | agent 模板：model / tools / system_prompt / skills / rules，来自配置 `agents:`（`agent_template.py`）。 |
+| **Session** | 一个会话：消息链 + 状态 + metadata，经 SessionStore 持久化（`session/session.py`）。 |
+| **SessionManager** | 多会话管理 + fork/resume + store 注册表（`{name: store}`）（`session/manager.py`）。 |
+| **AgentTemplate** | agent 模板：model / tools / system_prompt / skills / rules，来自配置 `agents:`（`session/template.py`）。 |
 | **WingAgent** | ReAct agent，`wing/agent/` 包（core / react_loop / llm_caller / tool_executor / event_sink / inbox / tool_context）；公开导入路径经 re-export 保持不变（PR #53）。 |
 | **ToolContext** | 工具侧窄接口 Protocol（session_id / yolo / cwd / ask_feedback / emit / interrupt hooks）；工具收 `ctx` 而非整个 agent，取代旧的 `AgentStateBag` 字符串耦合（PR #53）。 |
 | **EventBus** | 全局单例事件路由，Runtime 发事件、Gateway 订阅转发（`event_bus.py`）。 |
@@ -20,7 +20,7 @@
 |------|------|
 | **SessionStore** | 会话持久化的**唯一**所有者（ABC，`store/base.py`）。backend：`file` / `memory`，建会话时选。 |
 | **MessageLog** | 追加式混合记录 + aux kv（`store/base.py`）。pending compaction 存于 aux。newest.json 快照已移除（重放由混合日志承担）。 |
-| **TrackedList** | 纯内存链拓扑引擎（uuid/parentUuid），ChainNode 家族混排（Message + 事件节点），I/O 全委托 MessageLog（`common/tracked_list.py`）。 |
+| **TrackedList** | 纯内存链拓扑引擎（uuid/parentUuid），ChainNode 家族混排（Message + 事件节点），I/O 全委托 MessageLog（`chain.py`）。 |
 | **SessionMetadata** | 会话元数据模型（workspace、forked_from、template_name、model_name/provider_name、last_interaction…）。 |
 | **模型绑定持久化** | `model_name` + `provider_name` 成对记录会话的当前模型，写入时机是**显式动作**（模型切换、模板切换、创建 override、fork 快照；未动过模型的 session 不写）。resume 时记录优先于模板默认模型；记录的 provider 不可解析则回落模板默认并打 warning，记录保留。进程存活期间前端渲染与后端使用同源于 agent，本机制解决的是重启后的还原。 |
 

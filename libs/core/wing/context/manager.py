@@ -6,8 +6,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from wing.chain import TrackedList
 from wing.common.logger import log
-from wing.common.tracked_list import TrackedList
 from wing.provider.base import ModelProvider
 from wing.schema import (
     AgentSkill,

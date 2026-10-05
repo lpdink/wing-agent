@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from wing.schema import Message
-from wing.session_manager import SessionManager
+from wing.session import SessionManager
 from wing.store import MemorySessionStore
 
 

@@ -318,7 +318,7 @@ class TestCreateSessionOverride:
         self, runtime, register_test_tools: list[Tool]
     ):
         """创建时 override tools → 声明集与可执行集一致。"""
-        from wing.gateway.protocol import AgentOverride
+        from wing.session import AgentOverride
 
         session = runtime.create_session(agent_override=AgentOverride(tools=["Beta"]))
         agent = session.agent

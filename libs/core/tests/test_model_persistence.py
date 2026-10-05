@@ -17,13 +17,11 @@ from pathlib import Path
 
 import pytest
 
-from wing.agent_template import AgentTemplate
 from wing.config import ModelCapabilities, ModelSpec
 from wing.event import SessionInitEvent, SessionStateChangedEvent, SyncSessionEvent
 from wing.event_bus import event_bus
-from wing.gateway.protocol import AgentOverride
 from wing.schema import Message
-from wing.session_manager import SessionManager
+from wing.session import AgentTemplate, AgentOverride, SessionManager
 from wing.store import FileSessionStore, SessionMetadata
 
 

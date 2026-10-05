@@ -99,8 +99,6 @@ FAMILIES: dict[str, Family] = {
 # 迁移目标路径（wing/chain.py、wing/context/、wing/session/、wing/audit/ …）现在就登记：
 # 迁移完成后同一张表自动生效。新增包必须在此登记（未登记 = 测试失败）。
 FAMILY_RULES: tuple[tuple[str, str], ...] = (
-    # 现状：tracked_list 仍在 wing/common/ 下（07_split_session_chain 迁往 wing/chain.py）
-    ("wing.common.tracked_list", "chain"),
     ("wing.chain", "chain"),
     ("wing.common", "common"),
     ("wing.schema", "schema"),
@@ -119,9 +117,6 @@ FAMILY_RULES: tuple[tuple[str, str], ...] = (
     ("wing.default_config", "config"),
     ("wing.context", "context"),
     ("wing.session", "session"),
-    ("wing.session_manager", "session"),
-    ("wing.session_reaper", "session"),
-    ("wing.agent_template", "session"),
     # 现状：cancel_watch 仍在 wing/agent/ 下（11_rehome 迁往 wing/diagnostics/）
     ("wing.agent.cancel_watch", "diagnostics"),
     ("wing.diagnostics", "diagnostics"),
@@ -493,19 +488,9 @@ FIX_HINT = (
 # ─────────────────────────────────────────────────────────────────────────────
 
 KNOWN_VIOLATIONS: dict[str, set[str]] = {
-    "R1": {
-        # cleared by 07_split_session_chain（AgentOverride 移出 gateway/ 到领域层；10 拆分 protocol 时也必须清）
-        "wing/session.py:36 → wing.gateway.protocol",
-        # cleared by 07_split_session_chain
-        "wing/session_manager.py:44 → wing.gateway.protocol",
-    },
+    "R1": set(),
     "R2": set(),
-    "R5": {
-        # cleared by 07_split_session_chain（tracked_list 迁出 wing/common/ → wing/chain.py，不再受 R5 约束）
-        "wing/common/tracked_list.py:28 → wing.store.base",
-        # cleared by 07_split_session_chain（同上；chain 依赖 event 注册表是设计允许项）
-        "wing/common/tracked_list.py:171 → wing.event",
-    },
+    "R5": set(),
     "R6": set(),
 }
 

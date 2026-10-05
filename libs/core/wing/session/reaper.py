@@ -1,4 +1,4 @@
-# wing/session_reaper.py
+# wing/session/reaper.py
 """SessionReaper — 空闲会话逐出。
 
 语义：session 的内存态是**缓存**。逐出只回收运行期资源（worker task +
@@ -25,7 +25,8 @@ from wing.common.logger import log
 from wing.config import get_config
 from wing.event import WingEvent
 from wing.event_bus import event_bus
-from wing.session_manager import SessionManager
+
+from .manager import SessionManager
 
 
 class SessionReaper:

@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from wing.context import ContextManager
-from wing.common.tracked_list import TrackedList
+from wing.chain import TrackedList
 from wing.store.file import FileMessageLog
 from wing.schema import ChainNode, Message
 
