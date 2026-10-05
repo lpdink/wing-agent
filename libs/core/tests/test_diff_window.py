@@ -1,4 +1,4 @@
-"""Windowing of DiffContentEvent payloads (`wing.tools.diff_window`).
+"""Windowing of DiffContentEvent payloads (`wing.tools.internal.diff_window`).
 
 The payload used to be the whole file on both sides; it is now the changed
 region ± 3 context lines plus absolute start lines, and `replace_all` emits
@@ -14,7 +14,7 @@ import json
 import pytest
 
 from wing.event import DiffContentEvent, wire_dump
-from wing.tools.diff_window import (
+from wing.tools.internal.diff_window import (
     DIFF_CONTEXT_LINES,
     build_diff_events,
     find_all,

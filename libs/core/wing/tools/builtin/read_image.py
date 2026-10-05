@@ -1,4 +1,4 @@
-# wing/tools/read_image.py
+# wing/tools/builtin/read_image.py
 """ReadImage — 把图片文件读入会话，作为媒体附件让模型"看见"。
 
 链路：文件字节 →（magic bytes 判定 + 头部尺寸解析）→ SessionStore 内容寻址
@@ -33,7 +33,7 @@ from wing.media import (
 )
 from wing.schema import MediaRef, ToolError, ToolOutput
 from wing.tool_registry import tool_registry
-from wing.tools.utils import resolve_path as _resolve_path
+from wing.tools.internal.utils import resolve_path as _resolve_path
 
 # 降采样建议的目标长边（Anthropic 视觉推荐上限 1568px；Retina 截图常见
 # 3024px 宽，缩到一半即达标）。macOS 自带 sips，不需要额外依赖。

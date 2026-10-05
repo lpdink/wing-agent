@@ -2,7 +2,7 @@
 
 import pytest
 
-from wing.tools.todo import (
+from wing.tools.builtin.todo import (
     VALID_STATUSES,
     _todo_store,
     _validate_and_normalize,

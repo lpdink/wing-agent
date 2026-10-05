@@ -18,12 +18,15 @@ Tools:
     - Grep: File content search
 """
 
-from wing.tools.ask_user import ask_user
-from wing.tools.bash import execute_shell
-from wing.tools.file import edit_file, read_file, write_file
-from wing.tools.read_image import read_image
-from wing.tools.search import glob_files, grep_files
-from wing.tools.todo import todo_write
+from wing.tools.builtin.ask_user import ask_user
+from wing.tools.builtin.bash import execute_shell
+from wing.tools.builtin.edit import edit_file
+from wing.tools.builtin.glob import glob_files
+from wing.tools.builtin.grep import grep_files
+from wing.tools.builtin.read import read_file
+from wing.tools.builtin.read_image import read_image
+from wing.tools.builtin.todo import todo_write
+from wing.tools.builtin.write import write_file
 
 __all__ = [
     "ask_user",

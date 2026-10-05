@@ -100,11 +100,9 @@ libs/core/wing/
 │   ├── base.py                      WingEvent（= ChainNode）基类 + 通用系统事件
 │   ├── react.py / state_change.py / query_response.py
 │   └── __init__.py                  EVENT_TYPES / FACT_EVENTS 注册表 + wire_dump（WS 帧规则）
-├── tools/                           内置工具
-│   ├── bash.py / file.py / read_image.py / search.py   Bash · Read/Write/Edit · ReadImage · Glob/Grep
-│   ├── ask_user.py / todo.py           AskUserQuestion · TodoWrite
-│   ├── shell_safety.py                 Bash 命令安全审查（白名单放行 / 默认拦截）
-│   └── utils.py                        resolve_path — 相对路径按会话 workspace 解析
+├── tools/                           内置工具（__init__ 显式导入 = 注册）
+│   ├── builtin/                     一工具一文件：bash · read/write/edit · glob/grep · read_image · ask_user · todo
+│   └── internal/                    工具基础设施：utils（resolve_path）· rg（_run_rg）· diff_window · shell_safety
 ├── commands.py                      prompt 命令：元数据注册表 + $ARGUMENTS 展开（无分发）
 ├── audit/                           指标 / 审计注册中心（EventBus 订阅，原子写 JSON；install() 由组合根显式调用）
 │   ├── core.py                      MetricsRegistry 类 + 单例 + 原子读写工具

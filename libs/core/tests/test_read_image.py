@@ -27,8 +27,8 @@ from wing.config import ModelCapabilities, ModelSpec
 from wing.media import MediaAccess
 from wing.schema import ToolError, ToolOutput
 from wing.tool_registry import tool_registry
-from wing.tools.file import read_file
-from wing.tools.read_image import read_image
+from wing.tools.builtin.read import read_file
+from wing.tools.builtin.read_image import read_image
 
 
 def png_bytes(width: int, height: int) -> bytes:

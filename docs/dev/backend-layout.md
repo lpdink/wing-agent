@@ -67,7 +67,7 @@
 | `context/` | L3 | 上下文窗口跟踪 + 压缩（LLM 摘要）+ rewind + skills/rules 文件加载 |
 | `session/`（session / manager / reaper / template / override） | L3 | 会话生命周期：Session 状态、多会话与 fork/resume、空闲逐出、agent 模板、创建期参数覆盖 |
 | `agent/` | L3 | WingAgent 运行时：ReAct 主循环、工具并发执行、事件发射、取消取证、未提交投影 |
-| `tools/` | L3 | 内置工具（Bash / Read / Write / Edit / Glob / Grep / ReadImage / AskUserQuestion / TodoWrite） |
+| `tools/`（`builtin/` / `internal/`） | L3 | 内置工具（`builtin/` 一工具一文件）与工具基础设施（`internal/`：resolve_path / ripgrep 封装 / diff 窗口 / 命令安全审查） |
 | `provider/` | L3 | 模型调用协议层：OpenAI 兼容 / Anthropic 隔离、SSE 传输、provider registry |
 | `audit/`（原 `metrics_registry/`） | L3 | 指标 / 审计注册中心（EventBus 订阅，原子写 JSON；`install()` 由组合根显式调用） |
 | `commands.py`（原 `magic_command/`） | L3 | prompt 命令：registry 元数据 + `$ARGUMENTS` 展开 |
@@ -194,7 +194,7 @@
 
 ## 7. 怎么加新代码
 
-1. **新工具** → `tools/`（11 后 `tools/builtin/`）。工具**不得** import `session` / `context` /
+1. **新工具** → `tools/builtin/`（一工具一文件，文件名与工具名对应）；工具共用的内部件 → `tools/internal/`。工具**不得** import `session` / `context` /
    `store` / `runtime` / `gateway` / `background`，以及 `wing.agent.*` 子模块与 `wing.agent`
    包根的非窄接口符号（只放行 `ToolContext` / `current_tool_call_id`）——这就是 R2 的全部禁令；
    其余依赖（`schema` / `media` / `common` / `event` / `tool_registry` / `config` 等）由评审
