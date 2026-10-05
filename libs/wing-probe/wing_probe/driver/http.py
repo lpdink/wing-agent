@@ -54,16 +54,6 @@ class HttpCall:
     def ok(self) -> bool:
         return 200 <= self.status < 300
 
-    @property
-    def session_id(self) -> str | None:
-        """请求体 / 响应体里出现的 session_id（调用与 session 的归属依据）。"""
-        for source in (self.body, self.response):
-            if isinstance(source, Mapping):
-                value = source.get("session_id") or source.get("source_session_id")
-                if isinstance(value, str):
-                    return value
-        return None
-
     def render(self, *, limit: int = 400) -> str:
         """一行摘要（报告与排查用）。"""
         parts = [

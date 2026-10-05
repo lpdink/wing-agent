@@ -176,7 +176,9 @@ def test_relpath_is_cached_per_source_file(tmp_path: Path, _restore_logger) -> N
     """
     from wing.common.logger import _PathFormatter
 
-    formatter = _PathFormatter(Path(__file__).parent, use_color=False)
+    # root 与生产同口径（logger.py 里也是 resolve 过的），否则 repo 路径含
+    # symlink 时 relative_to 会回退绝对路径，第一条断言退化成子串巧合。
+    formatter = _PathFormatter(Path(__file__).resolve().parent, use_color=False)
 
     def record(pathname: str, lineno: int) -> logging.LogRecord:
         return logging.LogRecord(
