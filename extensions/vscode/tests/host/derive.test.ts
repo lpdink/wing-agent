@@ -100,11 +100,11 @@ describe('tool display', () => {
   });
 
   it('falls back to key=value pairs for unknown tools', () => {
-    expect(toolDisplay('Explorer', { prompt: 'find things', purpose: 'skip me' })).toEqual({
-      title: 'Explorer',
+    expect(toolDisplay('MysteryTool', { prompt: 'find things', purpose: 'skip me' })).toEqual({
+      title: 'MysteryTool',
       subject: 'prompt=find things',
     });
-    expect(toolDisplay('Explorer', null).subject).toBe('');
+    expect(toolDisplay('MysteryTool', null).subject).toBe('');
   });
 });
 

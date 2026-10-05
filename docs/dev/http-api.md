@@ -38,8 +38,8 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | POST | `/api/session/rewind` | 回退到指定消息 uuid |
 | POST | `/api/session/release` | 逐出 session 内存态（只回收内存，磁盘不动）：忽略空闲时长，不忽略钉住条件——忙碌 / inbox 有待处理输入 / 被订阅 / 非持久后端以 409 拒绝；本就不在内存返回 `released: false`（幂等） |
 
-> **会话逐出（eviction）**：空闲会话（无 turn 在跑、inbox 无待处理输入、
-> 无人订阅且超过 `sessions.eviction.idle_ttl_seconds`）会被后台周期任务逐出内存——
+> **会话逐出（eviction）**：空闲会话（无 turn 在跑、inbox 无待处理输入、无人订阅、
+> 非 memory 后端，且超过 `sessions.eviction.idle_ttl_seconds`）会被后台周期任务逐出内存——
 > 只回收 worker 与 provider client，`history.jsonl` / `metadata.json` 一概不动。
 > `resume` / `subscribe` / `send` 按需水合；`session/get`、`info`、`branches` 不
 > 自动水合，对已逐出会话仍回 404（`wing tail` / `head` / `info` 内部按 404→resume

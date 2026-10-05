@@ -113,8 +113,7 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 | 维度 | 口径 |
 |------|------|
-| 判定 | 三条全过才逐出：`status == idle`（working / waiting 钉住）、inbox 无待处理输入、无 client 订阅（EventBus 路由表）、空闲时长 > `sessions.eviction.idle_ttl_seconds` |
-| 硬条件 | inbox 有待处理输入不逐出（`agent.post()` 直投路径不 touch 计时器）；memory 后端不逐出（逐出 = 数据销毁） |
+| 判定 | `_blocked_reason()` 为 None **且**空闲时长 > `sessions.eviction.idle_ttl_seconds`；四类钉住（任一命中即不逐出）：`status != idle`（working / waiting 有在飞 turn）、inbox 有待处理输入（`agent.post()` 直投路径不 touch 计时器，只看 timer 会漏判）、非持久后端（memory 逐出 = 数据销毁）、有 client 订阅（EventBus 路由表） |
 | 计时 | `touch` = 任何携带该 session_id 的事件（`SessionReaper` 订阅 EventBus）——"会话状态变化即重置计时器"；create / resume 初始化 |
 | 触发 | `BackgroundScheduler`（gateway lifespan 启停）周期扫描（`sweep_interval_seconds`，启动时读取）；`release` 立即判定（忽略空闲时长，不忽略钉住条件） |
 | 拆解 | pop 同步原子摘除 → `Session.aclose()`（`agent.shutdown()` + `aclose_providers()`，顺序固定）异步收尾 |
@@ -197,7 +196,7 @@ TrackedList = 纯内存链拓扑引擎（uuid/parentUuid、trace、find、set_ti
 MessageLog  = 追加式混合记录 + aux kv（pending compaction 存于此）
 ```
 
-接口与存储无关：`SessionStore` 6 方法 + `MessageLog` 5 方法，全是 kv / append-only / listing 语义，不泄漏路径 / fsync / glob。一个 PG 后端就是三张表（sessions / messages / aux）。
+接口与存储无关：`SessionStore` 8 方法（含内容寻址媒体池的 `write_media` / `read_media`）+ `MessageLog` 5 方法，全是 kv / append-only / listing 语义，不泄漏路径 / fsync / glob。一个 PG 后端就是几张表（sessions / messages / aux / 媒体字节）。
 
 **存量 session 零迁移**：老日志无事件记录 → `TrackedList.load` 按 role 分发（事件走 `EVENT_TYPES` 注册表，未知 type 跳过——前向容忍），事件重放为空即回退纯消息重放。不承诺老版本代码读新格式日志（新 session 由新代码产生，该场景不存在）。
 

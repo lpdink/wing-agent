@@ -183,8 +183,9 @@ pub enum Command {
     /// Evict sessions from gateway memory (idle ones only; disk state is kept).
     ///
     /// Releases the in-memory state (worker + provider clients) of idle
-    /// sessions immediately, without waiting for the idle TTL. Busy or
-    /// subscribed sessions are refused with 409.
+    /// sessions immediately, without waiting for the idle TTL. Busy sessions
+    /// (working / waiting or with pending input), subscribed ones, and
+    /// non-durable backends are refused with 409.
     Release {
         /// Session IDs to release (space-separated).
         session_ids: Vec<String>,

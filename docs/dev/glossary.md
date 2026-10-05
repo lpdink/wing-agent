@@ -10,7 +10,7 @@
 | **Session** | 一个会话：消息链 + 状态 + metadata，经 SessionStore 持久化（`session/session.py`）。 |
 | **SessionManager** | 多会话管理 + fork/resume + store 注册表（`{name: store}`）（`session/manager.py`）。 |
 | **AgentTemplate** | agent 模板：model / tools / system_prompt / skills / rules，来自配置 `agents:`（`session/template.py`）。 |
-| **WingAgent** | ReAct agent，`wing/agent/` 包（core / react_loop / llm_caller / tool_executor / event_sink / inbox / tool_context）；公开导入路径经 re-export 保持不变（PR #53）。 |
+| **WingAgent** | ReAct agent，`wing/agent/` 包（core / react_loop / tool_executor / event_sink / inbox / tool_context）；公开导入路径经 re-export 保持不变（PR #53）。 |
 | **ToolContext** | 工具侧窄接口 Protocol（session_id / yolo / cwd / ask_feedback / emit / interrupt hooks）；工具收 `ctx` 而非整个 agent，取代旧的 `AgentStateBag` 字符串耦合（PR #53）。 |
 | **EventBus** | 全局单例事件路由，Runtime 发事件、Gateway 订阅转发（`event_bus.py`）。 |
 

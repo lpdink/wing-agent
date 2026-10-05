@@ -199,7 +199,7 @@ describe('effort vocabulary', () => {
 
 describe('branch current marker', () => {
   it('is the gateway sentinel', () => {
-    // `libs/core/wing/context_manager.py:925` appends `{"uuid": "current", ...}`.
+    // `libs/core/wing/context/manager.py:765` appends `{"uuid": "current", ...}`.
     expect(BRANCH_CURRENT_UUID).toBe('current');
   });
 });
