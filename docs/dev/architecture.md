@@ -161,7 +161,7 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 **error 与 notice 的语义边界**：`error` = 真错误（前端终结 turn、渲染错误单元、未聚焦时 OSC 9 通知）；`notice` = 提醒（`level` + `message`，不终结 turn、不发通知、不落盘）。重试通知走 `notice`——重试中的 turn 并没有结束，而 `error` 在前端是「这一轮结束了」的**终结信号**（曾把「会自愈的失败」误报成真错误：spinner 停、耗时停、状态错位）。
 
-**三个序列化边界，三套剥离规则**（不可用一个 `model_dump(exclude_none)` 打通——`Message._serialize_flat` 是 wrap 序列化器，`content`/`reasoning_content`/`tool_calls` 在内层 handler 之后才注入）：磁盘记录（`TrackedList._to_record`：字典推导剥 null + 剥 target + disk_exclude）、WS 直播帧与 SyncSession 载荷（`event/__init__.py::wire_dump`：剥 null + 剥 `parent_uuid`/`unzip_last_uuid`/`role`/`target`，保留 `uuid`）。`serialize_event` 是 `wire_dump` 的别名——一套规则，无分散实现。
+**三个序列化边界，三套剥离规则**（不可用一个 `model_dump(exclude_none)` 打通——`Message._serialize_flat` 是 wrap 序列化器，`content`/`reasoning_content`/`tool_calls` 在内层 handler 之后才注入）：磁盘记录（`TrackedList._to_record`：字典推导剥 null + 剥 target + disk_exclude）、WS 直播帧与 SyncSession 载荷（`event/__init__.py::wire_dump`：剥 null + 剥 `parent_uuid`/`unzip_last_uuid`/`role`/`target`，保留 `uuid`）。直播帧与 SyncSession 载荷共用 `wire_dump`——一套规则，无分散实现。
 
 **rewind/fork/compact 凭链序免费工作**：事件是链节点——set_tip 后边界外事件移出活跃链；fork 拷贝混合链前缀（事件随行）；compact 后被压缩区间的事件与消息一并离开活跃链（被压缩的 diff 自然不再重放，无孤儿处理）。
 

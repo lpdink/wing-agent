@@ -63,7 +63,7 @@ class TestDrainAndMerge:
             pass
 
         # 直接入队 3 条消息（模拟快速连续 post）
-        from wing.agent import Inbound
+        from wing.agent.inbox import Inbound
         from wing.schema import Message
 
         agent._inbox._queue.put_nowait(
@@ -98,7 +98,7 @@ class TestDrainAndMerge:
         except (Exception, asyncio.CancelledError):
             pass
 
-        from wing.agent import Inbound
+        from wing.agent.inbox import Inbound
         from wing.schema import Message
 
         agent._inbox._queue.put_nowait(
@@ -137,7 +137,7 @@ class TestDrainAndMerge:
         except (Exception, asyncio.CancelledError):
             pass
 
-        from wing.agent import Inbound
+        from wing.agent.inbox import Inbound
         from wing.schema import Message
 
         agent._inbox._queue.put_nowait(

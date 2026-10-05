@@ -51,34 +51,6 @@ from .state_change import (
     SyncSessionEvent,
 )
 
-# 事件类型总集（便于类型检查）
-WingEventUnion = (
-    ErrorEvent
-    | TextEvent
-    | ReasoningEvent
-    | ToolCallEvent
-    | ToolCallStreamEvent
-    | ToolCallResultEvent
-    | LLMCallMetricsEvent
-    | AskEvent
-    | DoneEvent
-    | TurnStartedEvent
-    | UserMessageAcceptedEvent
-    | DiffContentEvent
-    | AssistantTurnEvent
-    | ToolResultTurnEvent
-    | TurnResultEvent
-    | SyncSessionEvent
-    | SessionInitEvent
-    | DeliveredEvent
-    | InterruptedEvent
-    | CompactDoneEvent
-    | SessionStateChangedEvent
-    | ContextStatsEvent
-    | BranchTargetsEvent
-    | NoticeEvent
-)
-
 # 事件类型注册表：type 字面量 → 事件类。
 # history.jsonl 加载时按 role="event" + type 在此分发还原事件节点
 # （TrackedList.load）。未知 type 跳过——前向容忍。
@@ -108,15 +80,6 @@ EVENT_TYPES: dict[str, type[WingEvent]] = {
     "context_stats": ContextStatsEvent,
     "branch_targets": BranchTargetsEvent,
 }
-
-
-def serialize_event(event: WingEvent) -> dict:
-    """事件 → 传输/重放用的 dict（统一 wire 规则，`wire_dump` 的别名）。
-
-    保留此名以兼容既有调用方（runtime 的 SyncSession.events 组装）；
-    实现与直播帧共用 `wire_dump`，不存在两套序列化形状。
-    """
-    return wire_dump(event)
 
 
 # 事实事件集合：persist=true 且无 Message 孪生的"事实类"事件——resume 时
@@ -191,11 +154,8 @@ __all__ = [
     "ContextStatsEvent",
     "BranchTargetInfo",
     "BranchTargetsEvent",
-    # union
-    "WingEventUnion",
     # registry + serializer
     "EVENT_TYPES",
     "FACT_EVENTS",
-    "serialize_event",
     "wire_dump",
 ]

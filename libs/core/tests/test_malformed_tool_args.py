@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from wing.agent import Inbound
+from wing.agent.inbox import Inbound
 from wing.agent.event_sink import AgentEventSink
 from wing.agent.tool_executor import ToolExecutor
 from wing.event import DoneEvent, ToolCallResultEvent

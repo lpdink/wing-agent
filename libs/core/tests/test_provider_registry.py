@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-import wing.provider as provider_pkg
+import wing.provider.registry as registry_mod
 from wing.config import (
     AgentConfig,
     Config,
@@ -18,7 +18,7 @@ from wing.config import (
     ModelSpec,
     ProviderConfig,
 )
-from wing.provider import ModelDetail, ProviderModels, _ProviderRegistry
+from wing.provider.registry import _ProviderRegistry, ModelDetail, ProviderModels
 
 
 class _FakeProvider:
@@ -61,7 +61,7 @@ class TestProviderRegistry:
         }
         monkeypatch.setattr("wing.config.get_config", lambda: _config("p1", "p2"))
         monkeypatch.setattr(
-            provider_pkg, "create_provider", lambda cfg: fakes[cfg.name]
+            registry_mod, "create_provider", lambda cfg: fakes[cfg.name]
         )
 
         registry = _ProviderRegistry()
@@ -81,7 +81,7 @@ class TestProviderRegistry:
         }
         monkeypatch.setattr("wing.config.get_config", lambda: _config("ok", "bad"))
         monkeypatch.setattr(
-            provider_pkg, "create_provider", lambda cfg: fakes[cfg.name]
+            registry_mod, "create_provider", lambda cfg: fakes[cfg.name]
         )
 
         result = await _ProviderRegistry().list_all_models()
@@ -137,7 +137,7 @@ class TestProviderRegistry:
         )
         fakes = {"p1": _FakeProvider("p1", ["remote-only", "vision-model"])}
         monkeypatch.setattr("wing.config.get_config", lambda: cfg)
-        monkeypatch.setattr(provider_pkg, "create_provider", lambda c: fakes[c.name])
+        monkeypatch.setattr(registry_mod, "create_provider", lambda c: fakes[c.name])
 
         result = await _ProviderRegistry().list_all_models()
 
@@ -156,7 +156,7 @@ class TestProviderRegistry:
         fakes = {"p1": _FakeProvider("p1", ["m1"])}
         monkeypatch.setattr("wing.config.get_config", lambda: _config("p1"))
         monkeypatch.setattr(
-            provider_pkg, "create_provider", lambda cfg: fakes[cfg.name]
+            registry_mod, "create_provider", lambda cfg: fakes[cfg.name]
         )
 
         registry = _ProviderRegistry()
@@ -177,7 +177,7 @@ class TestProviderRegistry:
             return p
 
         monkeypatch.setattr("wing.config.get_config", lambda: _config("p1"))
-        monkeypatch.setattr(provider_pkg, "create_provider", _create)
+        monkeypatch.setattr(registry_mod, "create_provider", _create)
 
         registry = _ProviderRegistry()
         await registry.list_all_models()

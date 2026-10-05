@@ -79,7 +79,7 @@ async def _stop_worker(agent) -> None:
 
 
 def _put(agent, content: str, request_id: str | None = None) -> None:
-    from wing.agent import Inbound
+    from wing.agent.inbox import Inbound
     from wing.schema import Message
 
     agent._inbox._queue.put_nowait(

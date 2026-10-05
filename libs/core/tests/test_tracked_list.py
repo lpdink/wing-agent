@@ -21,7 +21,7 @@ from pydantic.errors import PydanticUserError
 
 from wing.common.tracked_list import TrackedList
 from wing.event import DiffContentEvent
-from wing.store import FileMessageLog
+from wing.store.file import FileMessageLog
 from wing.schema import ChainNode, Message
 
 

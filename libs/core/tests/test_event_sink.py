@@ -20,7 +20,7 @@ from wing.event import DiffContentEvent
 from wing.event_bus import event_bus
 from wing.request_context import reset_request_context, set_request_context
 from wing.schema import ChainNode, ToolCall
-from wing.store import FileMessageLog
+from wing.store.file import FileMessageLog
 
 
 def _read_log_lines(tmp_dir) -> list[dict]:

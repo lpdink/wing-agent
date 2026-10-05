@@ -14,12 +14,9 @@ handler 是纯 sink：接收事件做副作用（写文件等），不做拦截�
 
 from __future__ import annotations
 
-from wing.metrics_registry.core import (
-    MetricsRegistry as MetricsRegistry,  # noqa: F401 — re-export
-    _atomic_write_json as _atomic_write_json,  # noqa: F401 — re-export
-    _read_metrics_json as _read_metrics_json,  # noqa: F401 — re-export
-    metrics_registry,
-)
+from wing.metrics_registry.core import MetricsRegistry, metrics_registry
+
+__all__ = ["MetricsRegistry", "install", "metrics_registry"]
 
 _installed = False
 

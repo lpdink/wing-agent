@@ -51,7 +51,7 @@ from wing.store import FileSessionStore, MemorySessionStore, SessionStore
 if TYPE_CHECKING:
     from wing.agent_template import AgentTemplateManager
     from wing.gateway.protocol import AgentOverride
-    from wing.provider import ProviderModels
+    from wing.provider.registry import ProviderModels
 
 
 # ============================================================
@@ -354,7 +354,7 @@ class WingRuntime:
         draft = cm.rewind(target_uuid)
         self._emit_context_stats(session)
 
-        from wing.event import serialize_event
+        from wing.event import wire_dump
 
         turn_started_at = (
             agent.turn_started_at.isoformat() if agent.turn_started_at else None
@@ -366,7 +366,7 @@ class WingRuntime:
                 uncommitted=agent.uncommitted_message(),
                 uncommitted_tools=agent.uncommitted_tools(),
                 events=[
-                    serialize_event(e)
+                    wire_dump(e)
                     for e in cm.get_active_events(
                         pending_ask_ids=agent.pending_ask_ids()
                     )
@@ -466,7 +466,7 @@ class WingRuntime:
         转发 provider 包 registry（模块级持有所有 provider client；配置了
         静态 models 的 provider 跳过请求）。gateway 路由经此获取，不感知 config。
         """
-        from wing.provider import list_all_models
+        from wing.provider.registry import list_all_models
 
         return await list_all_models()
 
@@ -514,7 +514,7 @@ class WingRuntime:
         #    单 session 失败不阻断其余 session（否则一个坏 session 会让其他
         #    session 悄悄留着旧凭据——正是驱逐重建要修的 bug）。
         try:
-            from wing.provider import reset_registry
+            from wing.provider.registry import reset_registry
 
             await reset_registry()
             rebuilt = 0
@@ -615,7 +615,7 @@ class WingRuntime:
         （恢复 working 已耗时）。
         """
         client_target = EventTarget(scope="client", client_ids=[client_id])
-        from wing.event import serialize_event
+        from wing.event import wire_dump
 
         cm = session.context_manager
         agent = session.agent
@@ -630,7 +630,7 @@ class WingRuntime:
                 uncommitted=agent.uncommitted_message(),
                 uncommitted_tools=agent.uncommitted_tools(),
                 events=[
-                    serialize_event(e)
+                    wire_dump(e)
                     for e in cm.get_active_events(
                         pending_ask_ids=agent.pending_ask_ids()
                     )

@@ -19,7 +19,7 @@ from typing import AsyncIterator
 import pytest
 
 from wing.common.tracked_list import TrackedList
-from wing.store import FileMessageLog
+from wing.store.file import FileMessageLog
 from wing.compactor import Compactor
 from wing.context_manager import ContextManager
 from wing.schema import ChainNode, LLMResponse, Message, ToolCall

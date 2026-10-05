@@ -281,7 +281,7 @@ class TestReloadProviderIsolation:
 
         s1.agent.rebuild_providers = AsyncMock(side_effect=RuntimeError("boom"))
         s2.agent.rebuild_providers = AsyncMock()
-        monkeypatch.setattr("wing.provider.reset_registry", AsyncMock())
+        monkeypatch.setattr("wing.provider.registry.reset_registry", AsyncMock())
         # 隔离环境配置：CI 无用户 config 文件，load_config(reload=True) 会因
         # 文件缺失提前中止 reload（本测试只关心 provider 重建的失败隔离）。
         monkeypatch.setattr(
