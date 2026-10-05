@@ -42,7 +42,7 @@ description: 超大型任务的无人值守交付编排：把大任务拆成步�
 **不适用**：
 
 - 小改动（一个文件、一次编辑）→ 直接自己做，不要开子 agent；
-- 探索 / 调研 / 问答 → 自己查或派只读调查（`Explorer`）；
+- 探索 / 调研 / 问答 → 自己查或派只读子 agent（`Bash` + `Read` + `Glob` + `Grep`）；
 - 需求还在变、需要持续与人交互 → 先把需求澄清完，不要进入调度循环。
 
 ## 1. 角色
@@ -63,7 +63,7 @@ description: 超大型任务的无人值守交付编排：把大任务拆成步�
 2. **同一个 worktree，同一时刻只能有一个 executor**：想并行 → 开多个 worktree（一条 lane 一个）。绝不让两个 executor 在同一目录里写代码。
 3. **不设 `--max-turns`**：现代 agent 需要的 ReAct 轮数很高，设了会让任务中途夭折。
 4. **不改模型与 effort**：用模板默认（不加 `-m` / `--provider` / `--effort`）。模型选择带来的收益远小于版本漂移与不可复现的风险。
-5. **工具集写死**（见上表）：不要给子 agent 加 `TodoWrite` / `Explorer` / `AskUserQuestion`。
+5. **工具集写死**（见上表）：不要给子 agent 加 `TodoWrite` / `AskUserQuestion`。
 6. **子 agent 不问问题**：没有人类在线（`AskUserQuestion` 不在工具集里；即使问了也没人答，会白挂 100 分钟）。契约里必须明确「遇到不确定自己决策，并把假设写进 design.md 与最终消息」。
 7. **push / 建 PR 只能你做**：executor 只 commit（commit message 要写清楚，reviewer 靠它取信息）。
 8. **任务文档一律放 `$WING_HOME/tasks/<task>/`，用绝对路径引用**：绝不写进 worktree（会污染 diff 与 review 范围）。任务目录在 worktree 之外是刻意设计。

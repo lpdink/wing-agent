@@ -8,7 +8,7 @@ history.jsonl 的混合日志承担，遗留快照文件不读不写不删）：
     ├── metadata.json        SessionMetadata（exclude_none）
     ├── history.jsonl        append-only 混合记录（Message + 事件，每行一条 dict + ts）
     ├── <aux-key>.json       aux kv（如 pending_compact.json）
-    └── subagents/           遗留：子 agent 历史（不再写入，现有数据不读不删）
+    └── subagents/           遗留：旧子 agent 历史（写入方已删除；不再写入，现有数据不读不删）
 
     <root>/.media/<id[:2]>/<id>   会话媒体池（内容寻址，跨 session 共享）
 """
