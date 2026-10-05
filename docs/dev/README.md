@@ -5,6 +5,7 @@
 | 文档 | 内容 |
 |------|------|
 | [architecture.md](architecture.md) | 三层架构与数据流、TUI / stdio / 编排 CLI 三种前端形态、Goal 编排、会话生命周期、持久化与压缩 |
+| [backend-layout.md](backend-layout.md) | 后端分层规范（`libs/core/wing/**`）：分层图与依赖方向、每包职责一句话、迁移映射表、分层守门测试（`test_layering.py`）与白名单 |
 | [http-api.md](http-api.md) | 完整 HTTP 端点表、WebSocket 事件协议、Gateway 鉴权 |
 | [glossary.md](glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |
 | [config-logging.md](config-logging.md) | WING_HOME 布局、config.yaml 顶层键、TUI 配置、日志轮转与查询、环境变量 |
