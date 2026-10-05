@@ -124,6 +124,12 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 # hooks: 透传 config.yaml 的 hooks: glob；相对路径按**网关进程 cwd**（env.root）解析。
 # 惯例：场景在 reload 前把 hook 文件写进 <root>/hooks/，再 POST /api/system/reload
 @pytest.mark.probe_env(hooks=["hooks/*.py"])
+
+# auth + api_key: 打开网关鉴权（gateway.auth 段原文，缺省 {"enabled": False}）。
+# `auth` 进 ProbeEnv（配置），`api_key` 进 Probe.start → Driver（HTTP 与 WS 都带
+# Authorization: Bearer）。auth 打开时 ProbeEnv 关自己的子进程也用 keys 里第一把
+# 非 tool_runtime 的 key（/api/shutdown 同样受鉴权保护）。见 scenarios/test_gateway_auth.py
+@pytest.mark.probe_env(auth={"enabled": True, "keys": [{"key": "k"}]}, api_key="k")
 ```
 
 确定性来自配置而不是等待运气：把阈值压到秒级、断言仍走"轮询到状态翻转（带超时）"。
