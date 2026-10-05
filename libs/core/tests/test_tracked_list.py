@@ -806,7 +806,7 @@ class TestMixedChain:
         from wing.session.manager import _remap_record_uuids
 
         forked_log = FileMessageLog(tmp_dir / "fork")
-        forked_log.append(_remap_record_uuids(FileMessageLog(tmp_dir).load_all()))
+        forked_log.append(_remap_record_uuids(list(FileMessageLog(tmp_dir).iter_all())))
         forked: TrackedList[ChainNode] = TrackedList.load(forked_log, Message)
 
         kinds = [type(x).__name__ for x in forked.active_chain]

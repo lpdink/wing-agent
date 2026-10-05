@@ -110,18 +110,57 @@ class TestMessageLog:
         ]
         log.append(records[:2])
         log.append(records[2:])
-        assert log.load_all() == records
+        assert list(log.iter_all()) == records
 
     def test_append_empty_is_nop(self, store: SessionStore):
         log = store.open_log("sid-empty")
         log.append([])
-        assert log.load_all() == []
+        assert list(log.iter_all()) == []
 
     def test_open_log_same_handle_content(self, store: SessionStore):
         log1 = store.open_log("sid-shared")
         log1.append([{"role": "user", "content": "x"}])
         log2 = store.open_log("sid-shared")
-        assert len(log2.load_all()) == 1
+        assert len(list(log2.iter_all())) == 1
+
+
+class TestFileLogStreaming:
+    """file 后端的流式读契约（加载路径据此把 MiB 级历史的峰值减半）。"""
+
+    def test_iter_all_skips_blank_and_corrupted_lines(self, tmp_path: Path):
+        from wing.store.file import FileMessageLog
+
+        log = FileMessageLog(tmp_path)
+        log.append([{"role": "user", "content": "ok"}])
+        hist = tmp_path / "history.jsonl"
+        hist.write_text(
+            hist.read_text(encoding="utf-8")
+            + "\n{not json}\n"
+            + json.dumps({"role": "assistant", "content": "tail"})
+            + "\n",
+            encoding="utf-8",
+        )
+        assert [r["content"] for r in log.iter_all()] == ["ok", "tail"]
+
+    def test_iter_all_parses_lazily(self, tmp_path: Path, monkeypatch):
+        """取第一条只解析第一条——不得预读/物化整份文件。"""
+        from wing.store.file import FileMessageLog
+
+        log = FileMessageLog(tmp_path)
+        log.append([{"role": "user", "content": f"m{i}"} for i in range(5)])
+
+        parsed = 0
+        real_loads = json.loads
+
+        def counting_loads(line: str, *args, **kwargs):
+            nonlocal parsed
+            parsed += 1
+            return real_loads(line, *args, **kwargs)
+
+        monkeypatch.setattr("wing.store.file.json.loads", counting_loads)
+        iterator = log.iter_all()
+        assert next(iterator)["content"] == "m0"
+        assert parsed == 1
 
 
 class TestAux:

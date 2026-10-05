@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from wing.common.fs import atomic_write_bytes, atomic_write_json
 from wing.common.logger import log
@@ -50,29 +50,32 @@ class FileMessageLog(MessageLog):
 
     # ── 记录 ──────────────────────────────────
 
-    def load_all(self) -> list[dict[str, Any]]:
+    def iter_all(self) -> Iterator[dict[str, Any]]:
+        """流式读取 history.jsonl（逐行解析，不物化整份文件）。"""
         hist = self._path / self._HISTORY
         if not hist.exists():
-            return []
-        records: list[dict[str, Any]] = []
+            return
         with open(hist, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    records.append(json.loads(line))
+                    yield json.loads(line)
                 except json.JSONDecodeError:
                     continue
-        return records
 
     def append(self, records: list[dict[str, Any]]) -> None:
+        """逐条追加 + 末尾 fsync（不拼整体字符串——fork/compact 的批量追加
+        前缀动辄 MiB 级，join 会再复制一份）。崩溃窗口是最后一行可能截断，
+        加载路径本就跳过损坏行。"""
         if not records:
             return
         self._path.mkdir(parents=True, exist_ok=True)
-        lines = [json.dumps(r, ensure_ascii=False) for r in records]
         with open(self._path / self._HISTORY, "a", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
+            for record in records:
+                f.write(json.dumps(record, ensure_ascii=False))
+                f.write("\n")
             f.flush()
             os.fsync(f.fileno())
 
@@ -215,13 +218,7 @@ class FileSessionStore(SessionStore):
             metadata = self.load_metadata(session_dir.name) or SessionMetadata()
             first_user: str | None = None
             if metadata.session_name is None:
-                records = self._read_history_records(history)
-                if records is None:
-                    continue
-                for msg in records:
-                    if msg.get("role") == "user":
-                        first_user = (msg.get("content") or "")[:100]
-                        break
+                first_user = self._first_user_message(history)
 
             result.append(
                 SessionSummary(
@@ -233,20 +230,26 @@ class FileSessionStore(SessionStore):
         return result
 
     @staticmethod
-    def _read_history_records(path: Path) -> list[dict] | None:
-        """从 history.jsonl 提取记录（跳过损坏行）。不存在返回 None。"""
+    def _first_user_message(path: Path) -> str | None:
+        """提取第一条 user 消息（截断 100 字符）作标题回退。
+
+        流式：命中即停——标题只用这一条文本，不把整份历史读进内存。
+        文件不可读或没有 user 记录返回 None（上层按"无标题"处理）。
+        """
         if not path.exists():
             return None
-        records: list[dict] = []
         try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if record.get("role") == "user":
+                        return (record.get("content") or "")[:100]
         except OSError:
             return None
-        return records
+        return None

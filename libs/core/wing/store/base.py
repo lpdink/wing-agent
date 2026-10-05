@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Iterator
 
 from pydantic import BaseModel, ConfigDict
 
@@ -124,8 +124,13 @@ class MessageLog(ABC):
     """
 
     @abstractmethod
-    def load_all(self) -> list[dict[str, Any]]:
-        """按写入序返回全部记录。无记录返回空列表。
+    def iter_all(self) -> Iterator[dict[str, Any]]:
+        """按写入序**流式**迭代全部记录。无记录为空迭代。
+
+        流式是接口契约而非实现细节：历史日志动辄 MiB 级，加载路径
+        （``TrackedList.load``）边读边构造类型化对象，峰值内存不再是
+        "整份 raw dict 列表 + 类型化对象同时在世"的量级。需要列表的
+        调用方自行 ``list()``，但不要用它当默认姿势。
 
         损坏的记录行由后端跳过（存储完整性归后端管）。
         """
