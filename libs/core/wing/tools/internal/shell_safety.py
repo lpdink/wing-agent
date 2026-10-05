@@ -36,7 +36,6 @@ def is_dangerous_command(command: str | None) -> bool:
 
     cmd = command.strip()
 
-    # Config whitelist (safe_command_patterns)
     from wing.config import get_config
 
     patterns = get_config().safe_command_patterns
