@@ -9,7 +9,6 @@
  *    state change is an `update` patch instead of a remove + insert.
  * 2. The TUI's `/model` picker cell is not a transcript cell here — it lives in
  *    `PanelsModel` (an overlay, not part of the conversation).
- * 3. Goal cells are out of scope (Goal orchestration is not implemented).
  *
  * Everything a renderer needs is pre-derived by the host: `display.subject` for a
  * tool row, windowed diff rows, normalized ask options. The webview never parses

@@ -233,7 +233,7 @@ const UI_ANCHORS: &[&str] = &["ui/panel.rs", "ui/chat_view/cell.rs", "ui/cells/a
 const SHARED_ANCHORS: &[&str] = &[
     "shared/mod.rs",
     "shared/constants.rs",
-    "shared/goal_role.rs",
+    "shared/tips.rs",
     "shared/panels/mod.rs",
     "shared/panels/ask.rs",
     "shared/panels/picker.rs",
@@ -301,7 +301,7 @@ fn scanner_catches_every_spelling_of_a_reverse_dependency() {
         // The plain forms.
         "use crate::app::App;\n",
         "use crate::app;\n",
-        "fn cell() -> Role {\n    Role::from(crate::app::goal::GoalRole::Executor)\n}\n",
+        "fn cell() -> Role {\n    Role::from(crate::app::App::default())\n}\n",
         // Nested import groups.
         "use crate::{app::App};\n",
         "use crate::{\n    app::constants::TOOL_BASH,\n};\n",
@@ -312,7 +312,7 @@ fn scanner_catches_every_spelling_of_a_reverse_dependency() {
         "use super::app::App;\n",
         "use super::super::app::App;\n",
         // Doc comments are references too.
-        "//! the snapshot mirrors `crate :: app::goal::GoalRole`\n",
+        "//! the snapshot mirrors `crate :: app::App`\n",
     ];
     for spelling in spellings {
         assert!(hits(&needles, spelling), "not caught: {spelling}");
@@ -336,12 +336,12 @@ fn scanner_catches_an_external_crate_path() {
 #[test]
 fn scanner_reports_the_original_line() {
     // Single line: the line and its text.
-    let inline = "fn f() {\n    let r = crate::app::goal::GoalRole::Executor;\n}\n";
+    let inline = "fn f() {\n    let r = crate::app::intent::AppIntent::Quit;\n}\n";
     assert_eq!(
         find_offenses(inline, "crate::app"),
         vec![Offense {
             line: 2,
-            text: "let r = crate::app::goal::GoalRole::Executor;".into(),
+            text: "let r = crate::app::intent::AppIntent::Quit;".into(),
         }]
     );
     // A path split across lines is reported at the line it starts on.

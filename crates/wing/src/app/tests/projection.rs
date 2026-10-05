@@ -1142,7 +1142,7 @@ fn test_accepted_event_unknown_id_ignored() {
 
     app.handle_event(accepted_event("someone-elses-id"));
 
-    // Not ours (goal orchestration / other client) — nothing changes.
+    // Not ours (another client's request id) — nothing changes.
     assert_eq!(app.chat.pending.len(), 1);
     assert!(app.chat.cells.is_empty());
 }

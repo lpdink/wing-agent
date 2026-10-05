@@ -117,10 +117,6 @@ pub const TIPS: &[Tip] = &[
     // ── 工作流 ────────────────────────────────────────────────
     Tip {
         group: TipGroup::Workflow,
-        text: "/goal <任务> 进入编排：干活 + 验收",
-    },
-    Tip {
-        group: TipGroup::Workflow,
         text: "wing run 后台起任务，wing wait 收尾",
     },
     Tip {

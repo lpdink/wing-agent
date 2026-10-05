@@ -78,7 +78,6 @@ wing 的斜杠命令分三类（「magic command dispatch」已在 PR #14 移除
 |------|------|------|
 | **前端命令** | TUI 拦截，转 HTTP 调用或本地处理 | `/compact`→HTTP、`/model`→HTTP、`/clear`·`/copy`→本地 |
 | **prompt 命令** | 用户 `.md` 文件，`$ARGUMENTS` 文本展开后作为普通消息发送（`commands.py`） | 用户自定义 `/plan` 等 |
-| **Goal 命令** | TUI 编排状态机 | `/goal`、`/goal-exit` |
 
 命令清单的真相在 `crates/wing/src/ui/popup/command.rs`（`TUI_ONLY_COMMANDS`）；`GET /api/commands` 仅返回 prompt 命令。
 
@@ -86,7 +85,6 @@ wing 的斜杠命令分三类（「magic command dispatch」已在 PR #14 移除
 
 | 概念 | 说明 |
 |------|------|
-| **Goal 模式** | executor/checker 验证循环，`goal.rs` 纯状态机（PR #22）；TUI 内 `/goal` 前台运行，`wing-orch` 提供后台 + 持久化 + resume 版本（PR #49）。 |
 | **stdio 模式** | `wing -p` 头模式，Claude 协议 NDJSON，text/json/stream-json 三种输出（PR #1）。 |
 | **SyncSession** | 订阅时重放历史消息的事件（`event/state_change.py`）。 |
 
@@ -98,7 +96,6 @@ wing 的斜杠命令分三类（「magic command dispatch」已在 PR #14 移除
 | **Gateway 鉴权** | opt-in API key（HTTP header / WS query），`/api/health` 豁免；TLS 交给反代（PR #35）。 |
 | **RBAC 角色** | `admin`（全量）/ `tool_runtime`（纯工具执行远端，仅注册端点 + 工具 WS，不收事件）；`role` 字段现已强制（PR #47）。 |
 | **wing-sdk** | Python 远程工具宿主 SDK：decorator 注册 + WS serve loop + 标准工具（`libs/wing-sdk/`，PR #49）。Rust 对应 `wing-api-client::tool_host`。 |
-| **wing-orch** | 后台 Goal 编排 CLI：executor/checker 循环、原子状态持久化 + resume，依赖 wing-sdk（`libs/wing-orch/`，PR #49）。 |
 | **HTTP 生命周期** | `wing start/stop/status` 全基于 `/api/health` + `/api/shutdown`，无 PID / state.json（PR #10）。 |
 | **yolo** | 跳过危险命令审查（agent 级设置）。 |
 | **steer** | 以 steering prompt 引导 agent 行为。 |

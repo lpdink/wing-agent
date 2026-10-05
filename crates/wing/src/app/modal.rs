@@ -24,12 +24,10 @@
 //! Call directions: [`super::commands`] calls in for the `/model` picker and
 //! the composer's submit path; [`super::projection`] calls in for ask
 //! registration; this module calls [`super::commands`] (submit / popup
-//! refresh) and [`super::goal_lane`] (ask answers in goal mode).
+//! refresh).
 
 use super::App;
 use super::AppIntent;
-use super::goal;
-use crate::shared::goal_role::GoalRole;
 use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::ask::PanelAction;
 use crate::shared::panels::picker::ModelPanel;
@@ -434,25 +432,7 @@ impl App {
             self.input.clear();
             return false;
         }
-        // Goal mode: interrupt only the active session.
-        if let Some(goal) = &self.goal
-            && let Some(role) = goal.active_role()
-        {
-            match role {
-                GoalRole::Executor => {
-                    self.push_intent(AppIntent::InterruptSession);
-                }
-                GoalRole::Checker => {
-                    if let Some(checker_id) = &goal.checker_session_id {
-                        self.push_intent(AppIntent::GoalInterrupt {
-                            session_id: checker_id.clone(),
-                        });
-                    }
-                }
-            }
-        } else {
-            self.push_intent(AppIntent::InterruptSession);
-        }
+        self.push_intent(AppIntent::InterruptSession);
         self.show_toast(Toast::info(
             "Interrupting agent...",
             std::time::Duration::from_secs(2),
@@ -665,33 +645,16 @@ impl App {
 
     /// Answer a pending ask — the single reply path (every ask is a panel).
     ///
-    /// Goal mode routes to the active session (executor/checker); otherwise the
-    /// answer is a normal message carrying the ask's `tool_call_id` so the
+    /// The answer is a normal message carrying the ask's `tool_call_id` so the
     /// backend resolves its waiter. The content is whatever the panel built:
     /// `header: answer` lines for `Question` mode, the bare option label
     /// (`y` / `n` / `yolo`) for `RequiredChoice`.
     fn reply_to_ask(&mut self, content: String, tool_call_id: String) {
-        if let Some(goal) = &self.goal
-            && let Some(role) = goal.active_role()
-        {
-            let actions = match role {
-                GoalRole::Executor => vec![goal::GoalAction::SendToExecutor {
-                    content,
-                    tool_call_id: Some(tool_call_id),
-                }],
-                GoalRole::Checker => vec![goal::GoalAction::SendToChecker {
-                    content,
-                    tool_call_id: Some(tool_call_id),
-                }],
-            };
-            self.execute_goal_actions(actions);
-        } else {
-            self.push_intent(AppIntent::SendMessage {
-                content,
-                tool_call_id: Some(tool_call_id),
-                request_id: crate::protocol::generate_request_id(),
-            });
-        }
+        self.push_intent(AppIntent::SendMessage {
+            content,
+            tool_call_id: Some(tool_call_id),
+            request_id: crate::protocol::generate_request_id(),
+        });
     }
 
     // -----------------------------------------------------------------------

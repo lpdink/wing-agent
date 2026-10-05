@@ -19,7 +19,6 @@ use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::widgets::Wrap;
-use unicode_width::UnicodeWidthStr;
 
 use crate::config::ThemePalette;
 use crate::render::Renderable;
@@ -32,7 +31,6 @@ use crate::render::markdown::links::CELL_PREFIX_WIDTH;
 use crate::render::markdown::render_markdown_lines_with;
 use crate::render::markdown::render_plain;
 use crate::render::renderable::CellContext;
-use crate::shared::goal_role::GoalRole;
 use crate::shared::panels::picker::ModelPanel;
 use crate::ui::cached_cell::CachedCell;
 use crate::ui::cells::ask_msg::AskMessage;
@@ -80,8 +78,6 @@ pub enum ChatCell {
     ModelPicker(ModelPanel),
     /// ReAct loop separator.
     Separator,
-    /// Goal orchestration separator (marks agent role + round).
-    GoalSeparator { role: GoalRole, round: u32 },
 }
 
 impl ChatCell {
@@ -180,20 +176,6 @@ impl ChatCell {
                     sep,
                     Style::default().fg(palette.dim),
                 ))]
-            }
-            Self::GoalSeparator { role, round } => {
-                let label = format!(" {} {} · Round {} ", role.icon(), role.label(), round);
-                // Display width (not char count) — emoji like 🔍 are 2 columns.
-                let label_w = UnicodeWidthStr::width(label.as_str());
-                let dash_total = (width as usize).saturating_sub(label_w);
-                let left = dash_total / 2;
-                let right = dash_total - left;
-                let text = format!("{}{}{}", "─".repeat(left), label, "─".repeat(right));
-                vec![
-                    Line::from(""),
-                    Line::from(Span::styled(text, Style::default().fg(palette.dim))),
-                    Line::from(""),
-                ]
             }
         }
     }
