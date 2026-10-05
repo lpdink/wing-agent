@@ -67,13 +67,11 @@ class WingAgent:
         """会话媒体读写窄接口（工具写图 / provider 序列化读图）。
 
         为 None 表示该 agent 没有媒体存储（测试构造的裸 agent）——工具侧
-        必须据此安全拒绝（不得假定可用）。同一 MediaAccess 实例可被多个
-        agent 共享（共享存储池，不复制字节）。"""
+        必须据此安全拒绝（不得假定可用）。"""
 
-        # Provider client 表：按 name 有界持有，切回同名复用（创建即拥有）。
-        # 跨 provider 切模型不关闭旧 client（不打断在途生成）；shutdown() 不动
-        # provider——client 生命周期由其创建方终结；aclose_providers() 仅在
-        # agent 整体废弃（模板切换）或 session 释放时调用。
+        # Provider client 表：按 name 有界持有（切回同名复用、跨 provider 切模型
+        # 不关闭旧 client，不打断在途生成）。生命周期由创建方终结：shutdown() 不动
+        # provider，仅 aclose_providers()（agent 整体废弃 / session 释放）关闭。
         self._providers: dict[str, ModelProvider] = {
             model_provider.name: model_provider
         }
@@ -284,7 +282,10 @@ class WingAgent:
         return "idle"
 
     def set_tools(self, tool_names: list[str]) -> None:
-        """设置工具集——唯一变更入口。"""
+        """设置工具集——唯一变更入口。
+
+        经 registry 重新解析为未绑定工具（不沿用旧实例的绑定闭包）。
+        """
         from wing.tool_registry import tool_registry
 
         unbound_tools: list[Tool] = []
@@ -389,16 +390,12 @@ class WingAgent:
             f"worker={task_label(self._worker)}"
         )
 
-        # 触发所有 interrupt hooks（如杀子进程）
         self._fire_interrupt_hooks()
 
-        # 取消 feedback waiters
         self._inbox.cancel_all_waiters()
 
-        # 清空 inbox
         self._inbox.clear()
 
-        # 取消旧 worker 并等待补提交
         async with self._interrupt_lock_watch.hold(self._interrupt_lock, tag):
             old = self._worker
             log_cancel_snapshot(old, context=tag)

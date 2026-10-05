@@ -175,7 +175,6 @@ class SessionManager:
         self._last_active: dict[str, float] = {}
         self._teardowns: set[asyncio.Task[None]] = set()
 
-        # 从 config 创建 AgentTemplateManager
         config = get_config()
         self._template_manager = AgentTemplateManager(config.agents)
 
@@ -230,7 +229,6 @@ class SessionManager:
                 f"Available: {list(self._stores)}"
             )
 
-        # 查询模板
         if template_name is not None:
             template = self._template_manager.get(template_name)
             if template is None:
@@ -244,7 +242,6 @@ class SessionManager:
         # session id 由后端生成（调用方无法指定——见 docstring 的边界）
         sid = self._generate_session_id()
 
-        # 创建 TrackedList（经 store 打开消息日志；混合链：Message + 事件）
         messages: TrackedList[ChainNode] = TrackedList(store.open_log(sid))
 
         session = Session.from_template(
@@ -255,16 +252,15 @@ class SessionManager:
             workspace=workspace,
         )
 
-        # 应用 agent override（在 session 完全构建后覆盖特定字段）
+        # agent override 需在 session 完全构建后应用
         if agent_override is not None:
             session.apply_agent_override(agent_override)
 
         self._sessions[sid] = session
         self.touch(sid)
 
-        # 触发 before_session_start hook（创建新 session = session id 变化，
-        # 见 docstring），随后把 hook 注入落盘：resume 重建 CM 时恢复同一
-        # 系统提示词（前缀身份不因换入内存而漂移）。
+        # 触发 before_session_start hook，随后把 hook 注入落盘：resume 重建 CM
+        # 时恢复同一系统提示词（前缀身份不因换入内存而漂移）。
         hooks.invoke("before_session_start", session)
         session.sync_append_system_prompt()
 
@@ -313,7 +309,7 @@ class SessionManager:
 
         metadata = store.load_metadata(resolved)
 
-        # 模板解析：metadata.template_name > 默认（metadata 是唯一来源）
+        # metadata 是模板的唯一来源：template_name > 默认
         tpl = None
         if metadata is not None and metadata.template_name is not None:
             tpl = self._template_manager.get(metadata.template_name)
@@ -376,24 +372,20 @@ class SessionManager:
         # 用加载路径构造内存态（同 resume）：活跃链 = tip 回溯，压缩区间不进链
         new_messages: TrackedList[ChainNode] = TrackedList.load(child_log, Message)
 
-        # 一次写全元数据——fork bug 的结构性修复
-        # 模型记录是**快照**：子 session 的 agent 由源 agent 反向抽取模板构造
-        # （生效模型=源此刻模型），metadata 记录同一对值，重启后 resume 才
-        # 不会偏离 fork 时用户看到的模型。
-        #
-        # 提示词与动态状态同属快照——子会话 resume 时复现 fork 时刻的行为
-        # （live 与重启后一致）。注意 fork 本身不承诺与源会话的前缀身份：
-        # session id 变化 + before_session_start 在新会话上重跑（见下）。口径分两类：
-        # - 提示词 / 工具集 / yolo / max_turns 取 **live 有效值**：子会话的
-        #   agent 由 AgentTemplate.from_agent 按 live 构造，记录必须与之一致，
-        #   否则子会话 live 与 resume 分叉；append_system_prompt 先按 live 值
-        #   写入（子会话构造时继承，也兼容"落盘字段引入前创建的存量会话"——
-        #   hook 注入只存在于内存），随后 before_session_start 在子会话上生效、
-        #   sync 把注入后的结果覆盖落盘。
-        # - thinking / reasoning_effort 取**显式记录**（可能为 None）：派生
-        #   默认值（provider 协议默认）固化进记录会让子会话请求体带上源会话
-        #   没有的显式配置（前缀身份被破坏），跨协议切模型时更会把一种协议的
-        #   默认值贴到另一种协议上。
+        # 一次写全元数据——模型 / 提示词 / 工具集 / yolo / max_turns 都是**快照**：
+        # 子会话的 agent 由源 agent 反向抽取模板构造（生效模型 = 源此刻模型），
+        # metadata 记录同一对值，重启后 resume 才不会偏离 fork 时用户看到的值。
+        # 注意 fork 不承诺与源会话的前缀身份：session id 变化 +
+        # before_session_start 在新会话上重跑（见下）。口径分两类：
+        # - 提示词 / 工具集 / yolo / max_turns 取 **live 有效值**：agent 由
+        #   AgentTemplate.from_agent 按 live 构造，记录必须与之一致，否则子会话
+        #   live 与 resume 分叉。append_system_prompt 先按 live 值写入（子会话
+        #   构造时继承，也兼容 hook 注入只存在于内存的存量会话），随后
+        #   before_session_start 在子会话上生效、sync 把注入后的结果覆盖落盘。
+        # - thinking / reasoning_effort 取**显式记录**（可能为 None）：派生默认值
+        #   （provider 协议默认）固化进记录会让子会话请求体带上源会话没有的显式
+        #   配置（前缀身份被破坏），跨协议切模型时更会把一种协议的默认值贴到另一种
+        #   协议上。
         store.save_metadata(
             new_session_id,
             SessionMetadata(
@@ -415,7 +407,6 @@ class SessionManager:
             ),
         )
 
-        # 从旧 agent 抽取模板，构建新 session
         template = AgentTemplate.from_agent(source.agent, name=source.template_name)
         new_session = Session.from_template(
             template=template,
@@ -429,13 +420,12 @@ class SessionManager:
         self._sessions[new_session_id] = new_session
         self.touch(new_session_id)
 
-        # fork 也是"创建新 session"（session id 变化）：before_session_start
-        # 在子会话上生效——hook 注入的环境信息属于"这个新 session"。子会话已
-        # 继承源的追加内容（上面的 metadata 快照 + 构造时还原），不自幂等的
-        # hook 会在其上再叠一层（钩子自身的问题，钩子系统重做时收口，见
-        # docs/zh/custom-tools.md 的 hook 契约与 issue #131）；子会话的 session
-        # id 变化本就让上游缓存无法复用（见 docs/dev/architecture.md
-        # 「压缩与缓存哲学」）。
+        # fork 也是"创建新 session"（session id 变化）：before_session_start 在子会话
+        # 上生效，hook 注入的环境信息属于这个新 session。子会话已继承源的追加内容
+        # （上面的 metadata 快照 + 构造时还原），不自幂等的 hook 会在其上再叠一层
+        # （钩子自身的问题，钩子系统重做时收口，见 docs/zh/custom-tools.md 的 hook
+        # 契约与 issue #131）；session id 变化本就让上游缓存无法复用
+        # （见 docs/dev/architecture.md「压缩与缓存哲学」）。
         hooks.invoke("before_session_start", new_session)
 
         # 记录对齐（hook 注入后的 append + **实际生效**的工具集：按 ref 还原可能
@@ -642,7 +632,6 @@ class SessionManager:
 
         session = self.ensure_loaded(session_id)
 
-        # DeliveredEvent（总是 emit）
         event_bus.emit(
             DeliveredEvent(
                 session_id=session.session_id,
@@ -650,7 +639,6 @@ class SessionManager:
             )
         )
 
-        # Prompt 命令展开：/ 开头 → 尝试展开 → 展开成功则用展开文本投递
         if content.startswith("/"):
             parts = content.lstrip("/").split(maxsplit=1)
             cmd_name = parts[0]

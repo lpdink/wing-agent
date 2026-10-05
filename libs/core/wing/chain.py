@@ -41,7 +41,7 @@ class TrackedList(Generic[T]):
     def __init__(self, log: MessageLog | None = None) -> None:
         self._log: MessageLog | None = log
         self._data: list[T] = []
-        self._last_uuid: str | None = None  # 活跃链最后一条消息的 uuid
+        self._last_uuid: str | None = None
 
         # 内存 full chain map：仅 load / 写操作维护，find/trace_chain 从此读取
         self._all_items: dict[str, T] = {}  # uuid -> item
@@ -73,12 +73,10 @@ class TrackedList(Generic[T]):
                     f"expected ChainNode (Message or WingEvent), "
                     f"got {type(it).__name__}"
                 )
-            # 填充 uuid 和 parentUuid
             if it.uuid is None:
                 it.uuid = str(uuid_mod.uuid4())
             if it.parent_uuid is None:
                 it.parent_uuid = self._last_uuid
-            # 更新 _last_uuid，供下一条消息链接
             if it.uuid:
                 self._last_uuid = it.uuid
 
@@ -187,7 +185,6 @@ class TrackedList(Generic[T]):
 
         tl._data = tl.trace_chain()
 
-        # 从 _data 中恢复 _last_uuid
         for item in tl._data:
             if item.uuid:
                 tl._last_uuid = item.uuid
@@ -252,7 +249,6 @@ class TrackedList(Generic[T]):
         if not self._all_items:
             return []
 
-        # 确定起点
         if from_uuid is not None:
             start_uuid = from_uuid
         else:
@@ -264,7 +260,6 @@ class TrackedList(Generic[T]):
                 leaf_candidates[-1] if leaf_candidates else self._lines_order[-1]
             )
 
-        # 从起点倒序遍历到根
         chain: list[T] = []
         current_uuid = start_uuid
         while current_uuid:
@@ -276,7 +271,6 @@ class TrackedList(Generic[T]):
                 break
             current_uuid = item.parent_uuid
 
-        # 反转：从根到叶
         chain.reverse()
         return chain
 
@@ -298,7 +292,6 @@ class TrackedList(Generic[T]):
         if not self._all_items:
             return []
 
-        # 确定起点
         if from_uuid is not None:
             start_uuid = from_uuid
         else:
@@ -309,7 +302,6 @@ class TrackedList(Generic[T]):
                 leaf_candidates[-1] if leaf_candidates else self._lines_order[-1]
             )
 
-        # 从起点倒序遍历到根
         chain: list[T] = []
         current_uuid = start_uuid
         while current_uuid:
@@ -317,7 +309,6 @@ class TrackedList(Generic[T]):
             if not item:
                 break
 
-            # 压缩节点：parent_uuid=None, unzip_last_uuid is set → 跳过
             if item.parent_uuid is None and item.unzip_last_uuid is not None:
                 current_uuid = item.unzip_last_uuid
                 continue
@@ -344,7 +335,6 @@ class TrackedList(Generic[T]):
         if not self._all_items:
             return []
 
-        # 确定起点
         if from_uuid is not None:
             start_uuid = from_uuid
         else:
@@ -355,7 +345,6 @@ class TrackedList(Generic[T]):
                 leaf_candidates[-1] if leaf_candidates else self._lines_order[-1]
             )
 
-        # 从起点倒序遍历到根
         chain: list[T] = []
         current_uuid = start_uuid
         while current_uuid:
@@ -366,7 +355,6 @@ class TrackedList(Generic[T]):
             chain.append(item)
 
             if item.parent_uuid is None and item.unzip_last_uuid is not None:
-                # 压缩节点：包含它，然后沿 unzip_last_uuid 继续
                 current_uuid = item.unzip_last_uuid
             elif item.parent_uuid is None:
                 break

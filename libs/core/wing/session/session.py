@@ -98,7 +98,6 @@ class Session:
         self._store = store
         self._template_name: str | None = None
 
-        # 从 store 加载已有 metadata（磁盘恢复场景），与 workspace 参数合并
         metadata = store.load_metadata(session_id) or SessionMetadata()
         if workspace is not None:
             metadata.workspace = workspace
@@ -143,7 +142,6 @@ class Session:
         """
         from wing.agent import WingAgent
 
-        # 创建 ContextManager
         context_manager = ContextManager(
             session_id=session_id,
             messages=messages,
@@ -154,7 +152,6 @@ class Session:
             workspace=workspace,
         )
 
-        # 创建 WingAgent
         provider_cfg = get_config().get_provider(template.provider_name)
         # 会话媒体池：读/写都经窄接口，工具与 provider 序列化不直接触存储。
         media = MediaAccess(read=store.read_media, write=store.write_media)
@@ -195,14 +192,12 @@ class Session:
         """
         from wing.agent import WingAgent
 
-        # 1. 干净关闭旧 agent（清空 inbox + cancel worker + await 完成），
-        #    并关闭其拥有的全部 provider client（新 agent 从空表开始——
-        #    旧缓存连同已关闭的 client 一起清除，不会被后续切换交回）。
+        # 干净关闭旧 agent 及其拥有的全部 provider client：旧缓存不留给新 agent
+        # （否则后续切换会把已关闭的 client 交回来）。
         old_agent = self._agent
         await old_agent.shutdown()
         await old_agent.aclose_providers()
 
-        # 2. 用同一个 TrackedList 构建新 ContextManager
         self._context_manager = ContextManager(
             session_id=self._session_id,
             messages=self._messages,
@@ -219,7 +214,6 @@ class Session:
                 self._metadata.append_system_prompt
             )
 
-        # 3. 创建新 Agent
         provider_cfg = get_config().get_provider(template.provider_name)
         media = MediaAccess(read=self._store.read_media, write=self._store.write_media)
         self._agent = WingAgent(
@@ -253,8 +247,8 @@ class Session:
         self._metadata.reasoning_effort = None
         self._metadata.yolo = None
         self._metadata.max_turns = None
-        # 模板切换覆写模型记录（新模板的生效模型）——与 template_name 及
-        # 上述清理同一次落盘（_persist_model 保存整个 metadata）。
+        # 模板切换覆写模型记录（新模板的生效模型）；_persist_model 保存整个
+        # metadata，与上面的清理同一次落盘。
         self._persist_model()
         self._initial_status = self._agent.get_status()
         log.info(f"Session {self._session_id}: switched to agent '{template.name}'")
@@ -293,37 +287,30 @@ class Session:
         cm = self._context_manager
         agent = self._agent
 
-        # 1. model 覆盖（若指定 provider 则切换 provider，否则用当前）
-        #    走 _apply_model：与运行时切换同一条路径，一并落盘模型记录。
+        # model 覆盖走 _apply_model：与运行时切换同一条路径，一并落盘模型记录。
         if override.model is not None:
             self._apply_model(override.model, override.provider)
 
-        # 2. system_prompt 替换（先替换，后追加，保证顺序正确）
         if override.system_prompt is not None:
             cm.setin_system_prompt = override.system_prompt
             self._record_state(system_prompt=override.system_prompt)
 
-        # 3. append_system_prompt 追加（与 hook 注入内容合并进同一字段）
         if override.append_system_prompt is not None:
             cm.append_to_system_prompt(override.append_system_prompt)
             self._record_state(append_system_prompt=cm.append_system_prompt or None)
 
-        # 4. tools 覆盖（从 registry 获取新的未绑定工具，避免闭包泄漏）
         if override.tools is not None:
             agent.set_tools(override.tools)
             self._record_state(tools=list(override.tools))
 
-        # 5. max_turns 覆盖
         if override.max_turns is not None:
             agent.set_max_turns(override.max_turns)
             self._record_state(max_turns=override.max_turns)
 
-        # 6. effort (reasoning_effort) 覆盖
         if override.effort is not None:
             agent.set_reasoning_effort(override.effort)
             self._record_state(reasoning_effort=override.effort)
 
-        # 7. yolo 覆盖
         if override.yolo is not None:
             agent.set_yolo(override.yolo)
             self._record_state(yolo=override.yolo)
@@ -772,7 +759,7 @@ class Session:
         避免首条消息两次连续落盘。
         """
         if self._metadata.session_name is not None:
-            return  # 已有标题，不是第一条消息
+            return
         self._metadata.session_name = content[:100]
 
     async def post(

@@ -178,14 +178,12 @@ def render_skills_info(
     """返回 skills/rules 信息，用于 /skills 命令显示。"""
     lines = []
 
-    # 显示 skills patterns
     if skills_patterns:
         lines.append("📚 Skills patterns:")
         for pattern in skills_patterns:
             lines.append(f"  - {pattern}")
         lines.append("")
 
-    # 显示已加载的 skills
     if skills_cache:
         lines.append("已加载的 Skills:")
         for skill in skills_cache.values():
@@ -193,7 +191,6 @@ def render_skills_info(
     else:
         lines.append("暂无已加载的 Skills")
 
-    # 显示实际加载的 rules 文件
     if rules_patterns:
         lines.append("")
         lines.append("Rules patterns:")

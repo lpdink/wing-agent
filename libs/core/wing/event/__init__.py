@@ -1,14 +1,11 @@
 # wing/event/__init__.py — 事件类型统一出口
 
 """
-WingEvent 统一事件协议 (V2)。
+WingEvent 统一事件协议。
 
-所有事件均继承 WingEvent 基类，通过 type 字段区分。
-V2 变更：
-  - 删除 CreateSessionDoneEvent、SessionActivatedEvent、RewindDoneEvent、ForkDoneEvent
-  - 新增 SyncSessionEvent、SessionStateChangedEvent
-  - 拆分为四个模块：base、react、state_change、query_response
-  - 删除 SystemEvent、SkillsListEvent、ShellCommandEvent（魔术命令消除后不再需要）
+所有事件均继承 WingEvent 基类，通过 type 字段区分，按域拆分为四个模块：
+base（基类 / 辅助 Schema / 通用系统事件）、react（ReAct 循环事件流）、
+state_change（会话状态变更）、query_response（查询响应）。
 """
 
 from .base import (
@@ -86,8 +83,6 @@ EVENT_TYPES: dict[str, type[WingEvent]] = {
 # 下发给前端重放（ContextManager.get_active_events 据此过滤）。与 persist
 # 标记同处一文件，过滤策略单点。存量日志里已写入的孪生记录
 # （tool_call_result / llm_call_metrics）不在此集合：加载进链但不下发。
-# 终态（follow-up）：待信号类事件的落盘取舍定完，FACT_EVENTS 与 persist=true
-# 集合重合，下发过滤即消失。本次不宣称达到终态，只把策略从两端收敛到后端单点。
 FACT_EVENTS: frozenset[str] = frozenset(
     {
         "diff_content",

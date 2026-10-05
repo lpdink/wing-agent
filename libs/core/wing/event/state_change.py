@@ -57,7 +57,7 @@ class SyncSessionEvent(WingEvent):
 
     type: Literal["sync_session"] = "sync_session"
     persist: ClassVar[bool] = False
-    session_id: str  # 新 session 的 id
+    session_id: str
     messages: list[dict[str, Any]] = Field(default_factory=list)
     uncommitted: dict[str, Any] | None = None
     uncommitted_tools: list[dict[str, Any]] = Field(default_factory=list)
@@ -107,9 +107,8 @@ class CompactDoneEvent(WingEvent):
 # ============================================================
 
 
-# TODO: SessionInitEvent 与 SyncSessionEvent 存在信息重叠（两者都携带 model、tools
-# 等 session 状态）。当前阶段保持独立——前者面向 stdio 协议消费者，后者面向 TUI
-# 状态同步。未来考虑是否统一。
+# TODO: SessionInitEvent 与 SyncSessionEvent 信息重叠（都携带 model / tools 等
+# session 状态）——前者面向 stdio 协议消费者，后者面向 TUI 状态同步。
 class SessionInitEvent(WingEvent):
     """Session 初始化事件——供 stdio 模式输出 system/init 消息。
 

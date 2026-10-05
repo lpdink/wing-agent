@@ -58,7 +58,6 @@ class AgentTemplate(BaseModel):
         """
         cm = agent.context_manager
 
-        # 反查 tool_registry 获取未绑定工具
         unbound_tools = [
             t
             for tool in agent.tools
@@ -92,7 +91,6 @@ class AgentTemplate(BaseModel):
                 "before template construction"
             )
 
-        # 解析 tools（walrus 避免双重查询）
         resolved_tools = [
             t
             for name in agent_config.tools
@@ -138,7 +136,6 @@ class AgentTemplateManager:
             template = AgentTemplate.from_config(ac)
             self._templates[template.name] = template
 
-        # 解析 default
         explicit_default = next((ac.name for ac in agents_config if ac.default), None)
 
         self._default_name = explicit_default or agents_config[0].name

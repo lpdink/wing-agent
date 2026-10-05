@@ -67,10 +67,9 @@ class ToolCallStreamEvent(WingEvent):
 
 class ToolCallResultEvent(WingEvent):
     type: Literal["tool_call_result"] = "tool_call_result"
-    # tool Message 的孪生：≤ tool_result_truncate.max_length 时逐字节相同，
-    # 超限时事件带全量、入链 Message 是存储截断版（head/marker/tail）。无代码
-    # 从磁盘读回——停止落盘（事件本身保留：3 个 metrics handler + TUI 直播
-    # 路径依赖，走 event_bus 而非读回磁盘）。
+    # tool Message 的孪生：≤ tool_result_truncate.max_length 时逐字节相同，超限时
+    # 事件带全量、入链 Message 是存储截断版（head/marker/tail）。不落盘，也没有
+    # 代码从磁盘读回——事件本身保留：metrics handler + TUI 直播路径经 event_bus 消费。
     persist: ClassVar[bool] = False
     tool_name: str
     tool_args: dict[str, Any]
@@ -108,10 +107,9 @@ class ToolCallResultEvent(WingEvent):
 
 class LLMCallMetricsEvent(WingEvent):
     type: Literal["llm_call_metrics"] = "llm_call_metrics"
-    # 与 Message.usage + Message.stop_reason 逐字段等价——停止落盘（截断审计
-    # 的唯一落盘位置收敛为 Message.stop_reason + Message.usage）。事件本身
-    # 保留：metrics_registry 经 event_bus 聚合进独立的 metrics.json，且直播
-    # 路径的用量/截断提示依赖它。
+    # 与 Message.usage + Message.stop_reason 逐字段等价，不落盘（截断审计的落盘
+    # 位置是 Message）。事件本身保留：audit 经 event_bus 聚合进独立的 metrics.json，
+    # 直播路径的用量/截断提示依赖它。
     persist: ClassVar[bool] = False
     model: str = ""
     prompt_tokens: int

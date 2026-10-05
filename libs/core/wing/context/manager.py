@@ -53,16 +53,13 @@ class ContextManager:
         self.compactor = compactor
         self.setin_system_prompt = system_prompt
 
-        # 接收外部传入的 session_id 和 messages
         self._session_id = session_id
-        self._messages = messages  # 混合链：Message + WingEvent（role="event"）
+        self._messages = messages
         self._workspace = Path(workspace).resolve() if workspace else None
 
-        # 使用传入的 patterns（不再从全局 config 读取）
         self._skills_patterns = skills_patterns or []
         self._rules_patterns = rules_patterns or []
 
-        # 加载 rules 和 skills（在初始化时加载一次）
         # _rules_files：实际匹配并成功读取的规则文件路径（load_rules 的返回）
         self._rules_prompt, self._rules_files = load_rules(
             self._rules_patterns, self._workspace
@@ -71,17 +68,13 @@ class ContextManager:
             self._skills_patterns, self._workspace
         )
         self._skills_prompt = build_skills_prompt(self._skills_cache)
-        # 追加系统提示词（hook 注入的环境信息 + AgentOverride.append_system_prompt
-        # 的合并结果）。命名对齐 CLI `--append-system-prompt` / AgentOverride。
-        # 它是**会话级持久状态**（metadata.append_system_prompt）：由 Session 在
-        # 构造时恢复、在 create/update 后落盘——fork/resume 重建 CM 绝不丢失，
-        # 否则系统提示词变化会从第 0 个 token 起碎掉 KV cache 前缀。
+        # 会话级持久状态（metadata.append_system_prompt）：Session 构造时恢复、
+        # create/update 后落盘——丢失会让系统提示词变化，碎掉 KV cache 前缀。
         self.append_system_prompt: str = ""
 
         # ── 异步 compact 状态 ──────────────────────
         self._pending_compact_task: asyncio.Task[None] | None = None
         self._pending_compact_result: PendingCompact | None = None
-        # 尝试从磁盘恢复 pending compact（进程重启场景）
         self._pending_compact_result = self._load_pending_compact()
 
         # ── 工具声明集（LLM 可见视图）──────────────
@@ -187,11 +180,9 @@ class ContextManager:
         sorted_new = sorted(new_tools, key=lambda t: t.effective_llm_name)
 
         if not self._declared_initialized or self._chain_is_empty():
-            # 初始化或冷切换：直接设置
             self._declared_tools = sorted_new
             self._declared_initialized = True
         else:
-            # 热切换：冻结 _declared_tools，注入 reminder
             old_set = {
                 (t.namespace, t.effective_llm_name) for t in self._declared_tools
             }
@@ -299,7 +290,6 @@ class ContextManager:
         # ── Step 1: 有预计算结果？尝试 apply ──
         if self._pending_compact_result is not None:
             if self.compactor.need_apply_compact(msgs, server_tokens):
-                # 等后台 task 跑完（如果还在跑）
                 if self._pending_compact_task and not self._pending_compact_task.done():
                     try:
                         await self._pending_compact_task
@@ -317,11 +307,9 @@ class ContextManager:
                             tools=list(self._declared_tools),
                         )
                     else:
-                        # UUID 不匹配（rewind 等），丢弃
                         self._discard_pending_compact()
             else:
-                # 已有预计算结果，但还没到 apply 阈值——直接返回，
-                # 不再走 Step 2/3，避免重复启动 compact task
+                # 未到 apply 阈值：不能走 Step 2/3（避免重复启动 compact task）
                 return LLMMessagesResult(
                     [self.system_prompt] + msgs, tools=list(self._declared_tools)
                 )
@@ -329,10 +317,8 @@ class ContextManager:
         # ── Step 2: task 还在跑？ ──
         if self._pending_compact_task is not None:
             if self._pending_compact_task.done():
-                # task 完成了但 result 没设上（失败了），清掉
                 self._pending_compact_task = None
             else:
-                # task 还在跑，返回原始消息
                 return LLMMessagesResult(
                     [self.system_prompt] + msgs, tools=list(self._declared_tools)
                 )
@@ -359,7 +345,7 @@ class ContextManager:
         cut_idx = self.compactor._calc_cut_idx(head)
 
         if cut_idx == 0:
-            return  # 没有消息可压缩
+            return
 
         start_uuid: str = head[0].uuid  # ty: ignore[invalid-assignment]
         end_uuid: str = head[cut_idx - 1].uuid  # ty: ignore[invalid-assignment]
@@ -422,7 +408,6 @@ class ContextManager:
         if pc is None:
             raise RuntimeError("apply called without pending compact result")
 
-        # 构造压缩节点
         compact_node = Message(
             role="assistant",
             content=pc.compact_content,
@@ -431,7 +416,6 @@ class ContextManager:
         )
         compact_node.uuid = str(uuid.uuid4())
 
-        # 构造 relink tail（end_idx 之后的消息）
         tail = msgs[end_idx + 1 :]
         relink_tail: list[Message] = []
         prev_uuid: str | None = compact_node.uuid
@@ -450,7 +434,6 @@ class ContextManager:
             relink_tail.append(relinked)
             prev_uuid = relinked.uuid
 
-        # 写入 JSONL
         # TODO(crash-safety): append_detached(compact_node) 和 set_tip 之间存在
         # 崩溃窗口。如果进程在 compact_node 写入后、relink tail set_tip 前被杀，
         # compact_node（parent_uuid=None）会成为新根，trace_chain 从它回溯到
@@ -461,13 +444,11 @@ class ContextManager:
         for msg in relink_tail:
             self._messages.append_detached(msg)
 
-        # 切换活跃链末尾
         if relink_tail:
             self._messages.set_tip(relink_tail[-1].uuid)  # ty: ignore[invalid-argument-type]
         else:
             self._messages.set_tip(compact_node.uuid)
 
-        # 清理状态
         self._pending_compact_task = None
         self._pending_compact_result = None
         self._delete_pending_compact()
@@ -683,7 +664,6 @@ class ContextManager:
         if target_uuid == "current":
             return None
 
-        # 用 find() 定位 target
         target = self._messages.find(target_uuid)
         if target is None:
             raise ValueError(f"uuid {target_uuid} not found")
@@ -712,7 +692,6 @@ class ContextManager:
             )
             rewind_msg.uuid = str(uuid.uuid4())
         else:
-            # 用 find() 定位 parent（上面循环已保证是 Message）
             parent_msg = self._messages.find(parent_uuid)
             assert isinstance(parent_msg, Message)
 
@@ -726,7 +705,7 @@ class ContextManager:
                 content_blocks=parent_msg.content_blocks,
                 tool_calls=parent_msg.tool_calls,
                 tool_call_id=parent_msg.tool_call_id,
-                parent_uuid=parent_msg.parent_uuid,  # 祖父 uuid
+                parent_uuid=parent_msg.parent_uuid,
                 unzip_last_uuid=parent_msg.unzip_last_uuid,
             )
             rewind_msg.uuid = str(uuid.uuid4())
@@ -755,7 +734,6 @@ class ContextManager:
                     }
                 )
             elif node.unzip_last_uuid is not None:
-                # 压缩节点标记
                 result.append(
                     {
                         "uuid": node.uuid,

@@ -67,7 +67,6 @@ class ToolExecutor:
 
     def __init__(self, sink: AgentEventSink) -> None:
         self._sink = sink
-        # 工具表由外部设置（set_tools 时更新）
         self._tools: dict[str, Tool] = {}
 
     def set_tools(self, tools: dict[str, Tool]) -> None:
@@ -187,7 +186,6 @@ class ToolExecutor:
             return result
 
         try:
-            # Hook: before_tool_call
             modified_tc = await hooks.invoke_async("before_tool_call", tc)
             if modified_tc is not None:
                 tc = modified_tc
@@ -217,7 +215,7 @@ class ToolExecutor:
                 content = str(result)
                 media = []
 
-            # Hook: after_tool_call（只见文本——media 是引用元数据，hook 无权改写）
+            # hook 只见文本——media 是引用元数据，hook 无权改写
             modified_result = await hooks.invoke_async(
                 "after_tool_call",
                 content,

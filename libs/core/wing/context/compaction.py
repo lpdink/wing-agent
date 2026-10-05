@@ -49,8 +49,7 @@ class Compactor:
       - Apply:         tokens >= context_window_tokens → 换入预计算结果
     """
 
-    # This PROMPT comes from https://github.com/browser-use/agent-sdk
-    # 内容主体：五段式续作摘要模板（截至 "immediate resumption" 段）。
+    # 本 PROMPT 取自 https://github.com/browser-use/agent-sdk（五段式续作摘要模板）。
     _COMPACT_PROMPT_BODY = """You have been working on the task described above but have not yet completed it. Write a continuation summary that will allow you (or another instance of yourself) to resume work efficiently in a future context window where the conversation history will be replaced with this summary. Your summary should be structured, concise, and actionable. Include:
 
     1. Task Overview
@@ -80,11 +79,10 @@ class Compactor:
 
     Be concise but complete - err on the side of including information that would prevent duplicate work or repeated mistakes. Write in a way that enables immediate resumption of the task."""
 
-    # 格式约束尾部：<summary> 标签 + CRITICAL 工具禁令。
-    # 拆分目的：用户指令（/compact <侧重>）以条件渲染方式插在主体与
-    # 格式约束之间（存在则插入、不存在则原样）——对提示词只做增加、
-    # 不做修改，无指令路径（后台自动压缩、裸手动压缩）的 prompt 与
-    # 历史 COMPACT_PROMPT 逐字节一致。
+    # 格式约束尾部：<summary> 标签 + CRITICAL 工具禁令。拆分目的是让用户指令
+    # （/compact <侧重>）条件渲染地插在主体与格式约束之间——对提示词只做增加、
+    # 不做修改，无指令路径（后台自动压缩、裸手动压缩）的 prompt 与历史
+    # COMPACT_PROMPT 逐字节一致。
     # 指令必须排在格式约束之前、CRITICAL 保持末位 recency：
     # _extract_compact_result 以正则强提取 <summary> 标签，格式失守
     # 即整次压缩报废（手动 500 / 后台静默丢弃）。
