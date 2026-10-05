@@ -160,7 +160,13 @@ async def test_interrupt_during_tool_execution_synthesizes_result(
     assert interrupted["type"] == "interrupted", view.describe()
     interrupted_uuid = interrupted["uuid"]
     tool_uuid = tool["uuid"]
-    assert view.line_of(tool_uuid) < view.line_of(interrupted_uuid), (view.describe(),)
+    tool_line = view.line_of(tool_uuid)
+    interrupted_line = view.line_of(interrupted_uuid)
+    # 行号是可定位的硬前提：某个 uuid 不在记录里（line_of → None）时给可读的红，
+    # 而不是让 `<` 以 TypeError 收场。
+    assert tool_line is not None, view.describe()
+    assert interrupted_line is not None, view.describe()
+    assert tool_line < interrupted_line, (view.describe(),)
     parent = view.parent_of(interrupted_uuid)
     assert parent is not None and parent["uuid"] == tool_uuid, (view.describe(),)
 

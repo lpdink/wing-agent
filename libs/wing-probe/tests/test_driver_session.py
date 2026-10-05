@@ -166,8 +166,8 @@ async def test_session_state_actions_delegate_to_http(
     session = await driver.attach("sid-1", subscribe=False)
     calls: list[tuple[str, str, object]] = []
 
-    async def fake_set_tools(session_id: str, tools: object) -> dict:
-        calls.append(("tools", session_id, list(tools)))  # ty: ignore[call-overload]
+    async def fake_set_tools(session_id: str, tools: list[str]) -> dict:
+        calls.append(("tools", session_id, list(tools)))
         return {"ok": True}
 
     async def fake_release(session_id: str) -> dict:

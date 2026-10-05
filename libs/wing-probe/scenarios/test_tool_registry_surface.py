@@ -105,3 +105,17 @@ async def test_explicit_override_with_unknown_name_is_rejected(probe: Probe) -> 
 
     sessions = await probe.driver_required.http.list_sessions()
     assert sessions == {"sessions": []}, sessions
+
+
+# ── HANDOFF（C.2）：删除的"缺席"半边 ─────────────────────────────
+#
+# `03_delete_legacy_tools`（L2 lane）合并到集成分支之后，在
+# `test_config_legacy_tool_names_are_tolerated` 里补一行**严格**断言：
+#
+#     assert not ({"Explorer", "BetterEdit"} & registry), registry
+#
+# 本 worktree 里写它必然红（两个名字此刻仍在 `GET /api/tools` 里），与"probe 全绿"
+# 闸门冲突——这是结构性约束，不存在与合并顺序无关的等价断言：使"删除"安全的
+# **容忍契约**（配置里留着已删名字不炸会话）已由本文件的 `GhostTool` 分支独立钉住，
+# 两个方向都断言了（可解析的一个不少、不可解析的一个不多）；缺的只是"名字真的没了"
+# 这条**否定式**契约。由 scheduler 登记在步骤 12/13 落地（design.md Assumption A3）。
