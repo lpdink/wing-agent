@@ -168,15 +168,9 @@ class TestWireFrame:
         assert payload["path"] == "f"
         assert payload["new_text"] == "x"
         # null 字段（old_text/session_id/target）与存储专用字段一并剥除
-        for k in (
-            "old_text",
-            "session_id",
-            "target",
-            "persist",
-            "parent_uuid",
-            "unzip_last_uuid",
-            "role",
-        ):
+        # （persist/role 是 ClassVar / 无此字段，凡 model_dump 输出里恒无——
+        # 不在此列，避免读者误以为在校验 persist 语义）
+        for k in ("old_text", "session_id", "target", "parent_uuid", "unzip_last_uuid"):
             assert k not in payload, k
         # 事件身份与关联字段保留
         assert payload["uuid"] == "u1"
