@@ -1,20 +1,23 @@
 # 后端分层规范（libs/core/wing）
 
-本页是 `libs/core/wing/**` 的**目标分层规范**：谁在哪一层、能依赖谁、东西该放哪、迁移怎么走。
+本页是 `libs/core/wing/**` 的**分层规范**：谁在哪一层、能依赖谁、东西该放哪。
 [`architecture.md`](architecture.md) 讲**机制与数据流**（数据怎么流动、会话怎么跑、事件怎么送）；
 本页只讲**静态结构与归属**（回答「这个模块放哪、能不能 import 那个包」）。
+
+§3 / §5 是**已完成迁移的历史记录**（03–13 全部完成、白名单清零）；§1、§2、§4、§6、§7
+是当前事实与常态门禁。
 
 规范不是口头约定：由 [`libs/core/tests/test_layering.py`](../../libs/core/tests/test_layering.py)
 以 AST 解析 import 关系强制执行（见 §4 守门机制）。新增代码违反分层会直接把测试打红。
 
-## 1. 目标分层图
+## 1. 分层图
 
 依赖方向**只能向下**（↓）；同层之间按 §4 的规则各论。
 
 ```
                                            依赖方向 ↓
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ L4 编排与传输   runtime · background · gateway/*                         │
+│ L4 编排与传输   runtime · system · background · gateway/*                │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ L3 核心域       config · context · session · agent · tools · provider    │
 │                 audit · commands · diagnostics                           │
@@ -29,13 +32,13 @@
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-| 层 | 包（目标路径） | 允许依赖 | 备注 |
+| 层 | 包（路径） | 允许依赖 | 备注 |
 |---|---|---|---|
 | L0 基础 | `wing.common.*`、`wing.build_info` | 标准库 / L0 | 通用无领域依赖 |
 | L1 领域模型 | `wing.schema.*`、`wing.media.*`、`wing.chain` | L0–L1 | 叶子组，另有 R5 约束 |
 | L2 领域设施 | `wing.store.*`、`wing.event*`、`wing.event_bus`、`wing.hooks`、`wing.request_context`、`wing.tool_registry` | L0–L2 | 可被任意上层复用 |
 | L3 核心域 | `wing.config.*`、`wing.context.*`、`wing.session.*`、`wing.agent.*`、`wing.tools.*`、`wing.provider.*`、`wing.audit.*`、`wing.commands`、`wing.diagnostics.*` | L0–L3 | `tools` / `provider` 另有更严规则（R2/R3） |
-| L4 编排与传输 | `wing.runtime`、`wing.background`、`wing.gateway.*` | L0–L4 | 唯一允许依赖 gateway 的位置 |
+| L4 编排与传输 | `wing.runtime`、`wing.system`、`wing.background`、`wing.gateway.*` | L0–L4 | 唯一允许依赖 gateway 的位置（R1 豁免 `runtime` / `background`） |
 
 两处与「只向下」看似冲突、实为设计批准的依赖（写在这里以免后人误当违规）：
 
@@ -44,7 +47,7 @@
   `chain` 在层次表里标 L1，但**不受 R5 叶子约束**（07 已迁出 `wing/common/`，自然解除）。
 - **`runtime` / `background` 的 gateway 依赖**：R1 豁免（L4 内部依赖）。
   `AgentOverride` 已于 07 归位 `wing.session.override`（域层类型不再住在传输层）；
-  豁免本身保留——L4 内的 gateway 依赖不需要绕道。
+  豁免本身保留——R1 的豁免集精确为 `{gateway, runtime, background}`（`system` 不在内）。
 
 另外 **§6 的两类规则内例外**（叶子组 `common ↔ media ↔ schema` 互依、3 条函数内懒加载）
 同样是刻意批准的横向 / 向上依赖，一并登记在那里。
@@ -78,12 +81,12 @@
 | `gateway/` | L4 | FastAPI 网关：HTTP 路由 + WS 事件流 + 鉴权 + 远程工具宿主 |
 | `__init__.py` | — | 包入口；**不得 import 任何 wing 子模块**（R6：顶层无副作用，组合根负责显式装配） |
 
-## 3. 迁移映射表（旧路径 → 新路径）
+## 3. 迁移映射（历史记录：旧路径 → 新路径）
 
-基线 `develop@83751e0` 的路径 → 目标路径；「步骤」列对应任务书编号（03–13），
-括号内是重构阶段说明。
+下表记录 03–13 的迁移，**已全部完成**——每行右侧的新路径都能在本仓库直接验证。
+保留它，是为了让按旧路径找路的人能直达新家。
 
-| 旧路径（基线） | 新路径（目标） | 步骤 |
+| 旧路径（基线 `develop@83751e0`） | 新路径（现状） | 完成于 |
 |---|---|---|
 | `context_manager.py` | `context/manager.py` | 05 |
 | `compactor.py` | `context/compaction.py` | 05 |
@@ -99,13 +102,13 @@
 | `metrics_registry/` | `audit/*` | 11 |
 | `config.load_hooks` | `hooks/*`（与 `hook_registry` 归位一处） | 11 |
 | `tools/*.py` | `tools/builtin/*`（一工具一文件） | 11 |
-| `runtime.reload_system` | 从 runtime 抽出（拆分） | 11 |
-| `AgentOverride`（住 `gateway/protocol.py`） | 领域层（session 侧或独立协议模型模块） | 07 / 10（必须清 R1 白名单） |
-| `session.py` / `session_manager.py` 的 `TYPE_CHECKING` 反向依赖 | 随上一条一并清除 | 07 / 10 |
+| `runtime.reload_system` | `system.py`（从 runtime 抽出） | 11 |
+| `AgentOverride`（住 `gateway/protocol.py`） | `session/override.py`（领域层） | 07 |
+| `session.py` / `session_manager.py` 的 `TYPE_CHECKING` 反向依赖 | 随上一条一并清除 | 07 |
 
-守门测试的族表已**预登记目标路径**（`wing/chain`、`wing/context`、`wing/session`、
-`wing/audit`、`wing/commands`、`wing/diagnostics`、`wing/hooks`…）——迁移后同一套规则自动生效，
-测试代码无需跟着改。
+守门的包族表在迁移前就**预登记了目标路径**（`wing/chain`、`wing/context`、`wing/session`、
+`wing/audit`、`wing/commands`、`wing/diagnostics`、`wing/hooks`…）——整个迁移没有改一行守门代码，
+规则在目标模块落地的瞬间自动生效。
 
 ## 4. 守门机制（`libs/core/tests/test_layering.py`）
 
@@ -117,7 +120,8 @@
   → `wing.agent.inbox`；`from ..schema import Y` → `wing.schema`）；包属性形态
   `from wing import store` / `from . import store` 先用**文件系统判定**（`wing/store/`
   存在，不 import）解析成子模块 `wing.store`，只有名字不是子模块时才退回包根
-  （`from wing import execute_shell` 记 `wing`，对应 `wing/__init__` re-export 的现状）；
+  （如 `from wing import execute_shell` 记 `wing`——R6 之后包根不 re-export 任何符号，
+  此形态只作为解析兜底存在）；
 - 每个模块与每个 `wing.*` 目标都必须映射到一个「包族」；**未登记 = 测试失败**（新包必须登记，
   不允许绕过守门）；扫描到的 import 边过少也会失败（防扫描器失效假绿）。
 
@@ -148,23 +152,30 @@
 | 形态覆盖 | 相对 import 展开、包属性形态（文件系统判定）、函数体位置维度 | 字符串导入入口（`importlib.import_module` / `__import__`）与别名追踪 |
 | 动态导入 | 不检（显式边界） | 检字面量形态，其余显式残余风险 |
 
-**白名单机制**：现状违规锁定在测试的 `KNOWN_VIOLATIONS`（规则名 → 条目集合），条目格式与
-失败信息中的违规一致：
+**白名单机制**：违规锁定在测试的 `KNOWN_VIOLATIONS`（规则名 → 条目集合），条目格式与
+失败信息中的违规一致（历史条目示例）：
 
 ```
 "wing/session.py:36 → wing.gateway.protocol"
 ```
 
-每条必须注明由哪个步骤清除。判定是**集合严格相等**：未登记的新违规 → 红；已清除/已迁移的
-条目（stale，含行号漂移）→ 也红（附「删除条目 / 更新行号」提示）。
-**白名单是待办清单，不是豁免开关**——13 步骤（分层白名单清零）终结时必须为空。
+判定是**集合严格相等**：未登记的新违规 → 红；白名单里已不存在的条目（stale，含行号漂移）
+→ 也红（附「删除条目 / 更新行号」提示）。
 
-## 5. 白名单基线（develop@83751e0，10 条）
+**13 之后白名单为空、守门即常态门禁**：`KNOWN_VIOLATIONS` 现在是全空集合
+（03–13 期间它是待办清单，逐条注明清除步骤；历史见 §5）——任何时候出现违规都直接打红，
+不存在豁免开关，也没有"过渡期"这一档。
 
-| 规则 | 条目 | 清除步骤（预期） |
+## 5. 白名单：从基线 10 条到零（历史记录）
+
+**当前基线 = 零**（`test_layering.py` 的 `KNOWN_VIOLATIONS` 四个规则集全空）。
+下表的 10 条是基线 `develop@83751e0` 的真实违规快照，03–13 已逐条清除；保留它仅作历史核对，
+不对应当前代码（表内旧路径见 §3 的迁移映射）：
+
+| 规则 | 条目（基线） | 清除于 |
 |---|---|---|
-| R1 | `wing/session.py:36 → wing.gateway.protocol` | 07（或 10）：`AgentOverride` 移出 gateway |
-| R1 | `wing/session_manager.py:44 → wing.gateway.protocol` | 07（或 10） |
+| R1 | `wing/session.py:36 → wing.gateway.protocol` | 07：`AgentOverride` 移出 gateway |
+| R1 | `wing/session_manager.py:44 → wing.gateway.protocol` | 07 |
 | R2 | `wing/tools/explorer.py:21 → wing.context_manager` | 03：删除 Explorer |
 | R2 | `wing/tools/explorer.py:25 → wing.store` | 03 |
 | R2 | `wing/tools/explorer.py:29 → wing.agent.core` | 03 |
@@ -202,8 +213,9 @@
 2. **新 provider（协议）** → `provider/` 下独立子包，实现 `ModelProvider`；协议差异收敛在子包内，
    不得 import `agent` / `session` / `context` / `runtime` / `gateway` / `tools`（R3）。
 3. **跨层类型** → 领域层需要的类型放 `schema`（模型）或 `event`（事件）；只在网关边界出现的
-   传输模型放 `gateway/protocol/`。域层**不得**反向 import `gateway`（R1）——所以写在
-   `gateway/protocol.py` 里的领域类型（如 `AgentOverride`）必须迁往域层。
+   传输模型放 `gateway/protocol/`。域层**不得**反向 import `gateway`（R1）——所以领域类型
+   不能写在 `gateway/protocol.py`（`AgentOverride` 这名前车之鉴已于 07 迁往
+   `session/override.py`）。
 4. **新包** → 在 `test_layering.py` 的 `FAMILY_RULES` 登记包族，并到本页补一行职责——
    未登记会让守门测试直接失败（这是刻意的）。
 
