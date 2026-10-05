@@ -473,8 +473,8 @@ mod tests {
     fn ws_url_encodes_client_id() {
         // 安全字符（字母数字 - _ . ~）保持原样
         assert_eq!(
-            ws_url_with_client_id("ws://127.0.0.1:32523/ws", "wing-orch-abcd1234"),
-            "ws://127.0.0.1:32523/ws?client_id=wing-orch-abcd1234"
+            ws_url_with_client_id("ws://127.0.0.1:32523/ws", "orchestrator-abcd1234"),
+            "ws://127.0.0.1:32523/ws?client_id=orchestrator-abcd1234"
         );
         // URI 特殊字符被百分号编码
         assert_eq!(

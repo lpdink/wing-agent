@@ -12,7 +12,7 @@ Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+
 │ TUI（默认）· ratatui 循环   │──── WS ────►│ GatewayServer           │──── HTTP ────►│ WingRuntime（协调者）   │
 │ stdio（wing -p）· NDJSON    │             │ · routes/session(15)    │               │ ├ SessionManager        │
 │ 编排 CLI · run/wait/ps/…    │◄── 事件 ────│ · routes/system(6)      │◄──────────────│ ├ SessionStore          │
-│ 编排 CLI（run/wait/ps/…）   │             │ · routes/tools · health │               │ ├ ContextManager        │
+│ 网关生命周期 · start/stop   │             │ · routes/tools · health │               │ ├ ContextManager        │
 │ GatewayClient(WS)+ApiClient │             │ · routes/ws（事件流）   │               │ ├ EventBus              │
 │ HTTP 建会话 → WS 订阅       │             │ auth（opt-in）          │               │ └ provider/（LLM 调用） │
 └─────────────────────────────┘             └─────────────────────────┘               └─────────────────────────┘

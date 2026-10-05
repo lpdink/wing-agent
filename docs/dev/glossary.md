@@ -72,7 +72,7 @@
 
 ## 命令
 
-wing 的斜杠命令分三类（「magic command dispatch」已在 PR #14 移除，`commands.py`（原 `magic_command/`）现仅存元数据 + 文本展开）：
+wing 的斜杠命令分两类（「magic command dispatch」已在 PR #14 移除，`commands.py`（原 `magic_command/`）现仅存元数据 + 文本展开）：
 
 | 类别 | 机制 | 例子 |
 |------|------|------|
