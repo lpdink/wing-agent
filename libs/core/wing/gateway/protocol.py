@@ -198,8 +198,8 @@ class ReleaseResponse(BaseModel):
     """逐出（release）响应。
 
     released=False（detail="not loaded"）表示会话本就不在内存——幂等，
-    不视为错误：它已经在「逐出」这个目标状态里了。被钉住（忙碌 / 有后台
-    任务 / 被订阅 / 非持久后端）时以 409 拒绝。
+    不视为错误：它已经在「逐出」这个目标状态里了。被钉住（忙碌 / 有待处理
+    输入 / 被订阅 / 非持久后端）时以 409 拒绝。
     """
 
     ok: bool = Field(default=True, description="操作是否成功")

@@ -17,7 +17,7 @@ import pytest
 
 from wing.context_manager import ContextManager
 from wing.common.tracked_list import TrackedList
-from wing.store import FileMessageLog
+from wing.store.file import FileMessageLog
 from wing.schema import ChainNode, Message
 
 

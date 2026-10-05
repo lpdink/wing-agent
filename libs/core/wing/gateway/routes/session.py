@@ -473,7 +473,7 @@ async def release_session(
 ) -> ReleaseResponse:
     """逐出（eviction）——只回收内存态，磁盘状态不动。
 
-    忽略空闲时长（不为 TTL 等待），但不忽略钉住条件：忙碌 / 有后台任务 /
+    忽略空闲时长（不为 TTL 等待），但不忽略钉住条件：忙碌 / 有待处理输入 /
     被订阅 / 非持久后端的会话一律 409 拒绝，附带原因。
     """
     server = _get_server(request)

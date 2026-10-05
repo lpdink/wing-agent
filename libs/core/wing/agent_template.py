@@ -71,12 +71,8 @@ class AgentTemplate(BaseModel):
             provider_name=agent.model_provider.name,
             system_prompt=cm.setin_system_prompt,
             resolved_tools=unbound_tools,
-            skills_patterns=list(cm._skills_patterns)
-            if hasattr(cm, "_skills_patterns")
-            else [],
-            rules_patterns=list(cm._rules_patterns)
-            if hasattr(cm, "_rules_patterns")
-            else [],
+            skills_patterns=cm.skills_patterns,
+            rules_patterns=cm.rules_patterns,
             compactor=cm.compactor,
             context_window_tokens=cm.compactor.context_window_tokens
             if cm.compactor

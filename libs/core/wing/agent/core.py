@@ -67,12 +67,12 @@ class WingAgent:
         """会话媒体读写窄接口（工具写图 / provider 序列化读图）。
 
         为 None 表示该 agent 没有媒体存储（测试构造的裸 agent）——工具侧
-        必须据此安全拒绝（不得假定可用）。Explorer 子 agent 传宿主同一个
-        MediaAccess（共享存储池）。"""
+        必须据此安全拒绝（不得假定可用）。同一 MediaAccess 实例可被多个
+        agent 共享（共享存储池，不复制字节）。"""
 
         # Provider client 表：按 name 有界持有，切回同名复用（创建即拥有）。
         # 跨 provider 切模型不关闭旧 client（不打断在途生成）；shutdown() 不动
-        # provider（Explorer 子 agent 共享父 provider）；aclose_providers() 仅在
+        # provider——client 生命周期由其创建方终结；aclose_providers() 仅在
         # agent 整体废弃（模板切换）或 session 释放时调用。
         self._providers: dict[str, ModelProvider] = {
             model_provider.name: model_provider
@@ -113,12 +113,6 @@ class WingAgent:
         # hook_id → (label, hook)：label 只用于日志归因（如 "Bash pid=12345"），
         # interrupt 触发时与 pid 的对应关系直接可读，不用再从 history 反推。
         self._interrupt_hooks: dict[str, tuple[str, Callable[[], None]]] = {}
-
-        # ── 后台任务登记 ──
-        # tool 侧发起、生命周期长于当前 turn 的工作（如后台 Explorer）。
-        # 供逐出判定使用：有后台任务的会话一律钉住——拆解会关掉它正在
-        # 用的 provider。任务结束自动注销。
-        self._background_tasks: set[asyncio.Task] = set()
 
         # ── Worker 生命周期 ──
         self._working: bool = False
@@ -198,7 +192,7 @@ class WingAgent:
         persist=false 纯广播（不落盘、不缓冲）——与 react loop 事件同一出口，
         不存在绕过 sink 的直连 event_bus。
         """
-        self._sink._emit(event)
+        self._sink.emit(event)
 
     def register_interrupt_hook(self, hook: Callable[[], None], label: str = "") -> str:
         """注册 interrupt hook；``label`` 为日志归因说明（如 "Bash pid=12345"）。"""
@@ -209,29 +203,12 @@ class WingAgent:
     def unregister_interrupt_hook(self, hook_id: str) -> None:
         self._interrupt_hooks.pop(hook_id, None)
 
-    # ── 后台任务 ──
-
-    def register_background(self, task: asyncio.Task) -> None:
-        """登记后台任务（任务结束自动注销）。
-
-        供 tool 侧登记"生命周期长于当前 turn"的工作（如后台 Explorer）：
-        turn 结束后会话仍是 idle，但后台任务还在用本 agent 的 provider，
-        逐出会把它掐死。登记即钉住（``has_background_work``）。
-        """
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
-
-    @property
-    def has_background_work(self) -> bool:
-        """是否有在跑的后台任务。"""
-        return bool(self._background_tasks)
+    # ── 对外接口 ──
 
     @property
     def has_pending_input(self) -> bool:
         """inbox 里是否有待处理输入（已投递、worker 尚未取走）。"""
         return self._inbox.has_pending
-
-    # ── 对外接口 ──
 
     @property
     def tools(self) -> list[Tool]:
@@ -353,8 +330,8 @@ class WingAgent:
         """关闭并清空 provider client 表。
 
         仅由显式终结 provider 生命周期的一方调用：模板切换（旧 agent 整体
-        废弃）、未来的 session 释放。shutdown() 不做此事（Explorer 子 agent
-        共享父 agent 的 provider 实例，子 agent 关停不得影响父）。
+        废弃）、未来的 session 释放。shutdown() 不做此事——provider 的生命
+        周期归创建 / 持有它的那一层（Session），agent 关停不关闭共享 client。
         """
         providers = list(self._providers.values())
         self._providers.clear()
@@ -456,8 +433,8 @@ class WingAgent:
     async def shutdown(self) -> None:
         """显式关闭 Agent：不重建 worker。
 
-        注意：不关闭 provider——provider 生命周期由 Session 层管理
-        （Explorer 子 agent 共享父 agent 的 provider）。
+        注意：不关闭 provider——provider 生命周期由 Session 层管理，
+        client 的终结由显式调用 aclose_providers() 的一方负责。
         """
         self._fire_interrupt_hooks()
         self._inbox.cancel_all_waiters()
@@ -569,7 +546,7 @@ class WingAgent:
                 self._sink.error(f"处理消息失败：异常：{e}")
                 self._sink.done()
 
-    def _bind_tools(self, tools: list[Tool]) -> dict[str, Any]:
+    def _bind_tools(self, tools: list[Tool]) -> dict[str, Tool]:
         from wing.tool_registry import ToolRef
 
         seen: dict[str, str] = {}
@@ -583,7 +560,7 @@ class WingAgent:
                 )
             seen[key] = desc
 
-        bound_map: dict[str, Any] = {}
+        bound_map: dict[str, Tool] = {}
 
         for tool in tools:
             if not tool.inject_agent_param:

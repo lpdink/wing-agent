@@ -588,7 +588,6 @@ class TestSMPostNoContextvars:
         await runtime.sm._post(
             "hello",
             session_id=session.session_id,
-            client_id="test-client",
             request_id="direct-call",
         )
 

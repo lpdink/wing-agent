@@ -25,7 +25,8 @@ from typing import Any
 
 import pytest
 
-from wing.agent import Inbound, WingAgent
+from wing.agent import WingAgent
+from wing.agent.inbox import Inbound
 from wing.agent.tool_executor import INTERRUPTED_RESULT as _INTERRUPTED_RESULT
 from wing.event import (
     AskEvent,

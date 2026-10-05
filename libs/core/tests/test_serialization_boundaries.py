@@ -6,7 +6,7 @@ Message._serialize_flat 是 wrap 序列化器，content/reasoning_content/tool_c
 
   磁盘记录   TrackedList._to_record   剥 null + 剥 target + disk_exclude
   WS 直播帧  wire_dump                剥 null + 剥 parent_uuid/unzip_last_uuid/role/target，保留 uuid
-  SyncSession serialize_event         同 wire_dump（统一出口）
+  SyncSession wire_dump               同一出口（events 组装直用，无独立序列化器）
 """
 
 from __future__ import annotations
@@ -22,11 +22,10 @@ from wing.event import (
     LLMCallMetricsEvent,
     TextEvent,
     ToolCallResultEvent,
-    serialize_event,
     wire_dump,
 )
 from wing.schema import ChainNode, Message, TextBlock
-from wing.store import FileMessageLog
+from wing.store.file import FileMessageLog
 
 
 def _read_history(path: Path) -> list[dict]:
@@ -159,10 +158,23 @@ class TestWireFrame:
         ev = TextEvent(content="x", session_id="s-1")
         assert wire_dump(ev)["session_id"] == "s-1"
 
-    def test_serialize_event_matches_wire_dump(self):
-        """SyncSession 载荷与直播帧同规则（serialize_event 是 wire_dump 的别名）。"""
-        ev = DiffContentEvent(path="f", old_text=None, new_text="x")
-        assert serialize_event(ev) == wire_dump(ev)
+    def test_sync_session_payload_follows_wire_rule(self):
+        """SyncSession 载荷（runtime 直用 wire_dump）剥 null + 剥存储专用字段。"""
+        # uuid 由链拓扑在入链时落定——重放素材必带，此处显式模拟。
+        ev = DiffContentEvent(path="f", old_text=None, new_text="x", uuid="u1")
+        payload = wire_dump(ev)
+        # 事实字段保留（diff 载荷本身极小：窗口而非整份文件）
+        assert payload["type"] == "diff_content"
+        assert payload["path"] == "f"
+        assert payload["new_text"] == "x"
+        # null 字段（old_text/session_id/target）与存储专用字段一并剥除
+        # （persist/role 是 ClassVar / 无此字段，凡 model_dump 输出里恒无——
+        # 不在此列，避免读者误以为在校验 persist 语义）
+        for k in ("old_text", "session_id", "target", "parent_uuid", "unzip_last_uuid"):
+            assert k not in payload, k
+        # 事件身份与关联字段保留
+        assert payload["uuid"] == "u1"
+        assert payload["request_id"]
 
     def test_uuid_preserved_for_turn_level_events(self):
         """uuid 保留（AssistantTurn/TurnResult 的 uuid 被 stdio 前端消费）。"""

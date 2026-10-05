@@ -527,7 +527,7 @@ class SessionManager:
 
         Raises:
             LookupError: 内存与磁盘都没有该会话
-            RuntimeError: 被钉住（忙碌 / 有后台任务 / 被订阅 / 非持久后端）
+            RuntimeError: 被钉住（忙碌 / 有待处理输入 / 被订阅 / 非持久后端）
         """
         session = self._sessions.get(session_id)
         if session is None:
@@ -548,19 +548,17 @@ class SessionManager:
     def _blocked_reason(self, session: Session) -> str | None:
         """不可逐出的原因；None = 可以逐出。
 
-        五类：在飞 turn（working / waiting）、inbox 有待处理输入、后台任务、
-        非持久后端、有订阅的客户端。前三者是正确性（拆解会打断它们），
-        后两者是语义（memory 后端逐出即毁数据；订阅中的会话是用户的工作集）。
+        四类：在飞 turn（working / waiting）、inbox 有待处理输入、非持久
+        后端、有订阅的客户端。前两者是正确性（拆解会打断它们），后两者是
+        语义（memory 后端逐出即毁数据；订阅中的会话是用户的工作集）。
         """
         if session.status != "idle":
             return f"status={session.status}"
         if session.agent.has_pending_input:
             # 消息已入队但 turn 未开始（status 仍 idle）——直接投递
-            # `agent.post()` 的路径（如后台 Explorer 回传）不经过
+            # `agent.post()` 的路径（工具侧内部投递等）不经过
             # SM._post，不会 touch 计时器，只靠 timer 会漏判。
             return "pending input"
-        if session.agent.has_background_work:
-            return "background work running"
         if not session.store.durable:
             return f"non-durable store '{session.store.name}'"
         if event_bus.subscribers_of(session.session_id):
@@ -626,7 +624,6 @@ class SessionManager:
         content: str,
         request_id: str | None = None,
         session_id: str | None = None,
-        client_id: str | None = None,
         tool_call_id: str | None = None,
     ) -> None:
         """路由消息到指定 session。（内部方法，由 WingRuntime 调用）

@@ -12,8 +12,8 @@ provider client），磁盘状态一概不动——被逐出的会话在下一�
   3. **空闲时长 > idle_ttl_seconds**：计时器由"会话状态变化"重置——
      任何携带该 session_id 的事件都会 ``touch`` 一次（见 ``_on_event``）。
 
-另有两条硬性不逐出条件：有后台任务在跑（拆解会关掉它正在用的 provider）、
-非持久后端（memory 后端逐出 = 数据销毁）。
+另有两条硬性不逐出条件：inbox 里还有待处理输入（worker 尚未取走，直接投递
+路径不 touch 计时器）、非持久后端（memory 后端逐出 = 数据销毁）。
 
 节奏由 ``BackgroundScheduler`` 驱动（gateway lifespan 注册 job）；本类只做
 "触摸订阅 + 一次扫描"，不依赖调度器即可单测。

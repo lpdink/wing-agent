@@ -13,8 +13,7 @@
 │   │   ├── new.log → wing_YYYY-MM-DD.log  指向活跃后端日志的符号链接（仅后端；每次轮转 / setup 刷新）
 │   │   └── gateway.log                    网关守护进程 stdout/stderr（uvicorn 错误、traceback；append）
 │   ├── sessions/       会话持久化（metadata + history.jsonl + aux / metrics.json）；.media/ 为跨会话共享的图片媒体池（内容寻址）
-│   ├── metrics.json    全局指标（LLM / 工具调用 / 压缩，按天聚合）
-│   └── metrics_experimental.json  BetterEdit 实验审计
+│   └── metrics.json    全局指标（LLM / 工具调用 / 压缩，按天聚合）
 └── tui/
     ├── config.yaml     TUI 配置（colors / layout / rendering / goal / api_key）
     └── logs/           TUI 日志：wing_YYYY-MM-DD.log（命名同后端，无符号链接）

@@ -24,7 +24,8 @@ from wing.hook_registry import hooks
 from wing.media import MediaAccess, estimate_image_tokens
 from wing.schema import ChainNode, MediaRef, Message, Tool, ToolCall, ToolOutput
 from wing.session import serialize_message
-from wing.store import FileSessionStore, MemoryMessageLog
+from wing.store import FileSessionStore
+from wing.store.memory import MemoryMessageLog
 
 _REF = MediaRef(
     id="ab" * 32,

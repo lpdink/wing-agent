@@ -4,6 +4,8 @@
   - WING_SESSIONS_PATH 设为临时目录，避免测试 session 污染
     用户真实的 ~/.wing/sessions/ 目录。
   - 自动 mock config，避免加载真实 config.yaml（可能使用旧格式）
+  - 显式安装内置工具注册与 metrics 订阅（`_install_wing`，见下）——
+    顶层 `wing/__init__` 已无 import 副作用（06 步骤）。
 """
 
 import os
@@ -15,6 +17,22 @@ import pytest
 # 模块级：整个测试 session 共享一个临时目录
 _TEST_SESSIONS_DIR = tempfile.mkdtemp(prefix="wing-test-sessions-")
 os.environ["WING_SESSIONS_PATH"] = _TEST_SESSIONS_DIR
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _install_wing() -> None:
+    """显式安装内置能力——测试侧的组合根等价物。
+
+    顶层 `wing/__init__` 不做 import 副作用（06 步骤）；测试大量直接构造
+    SessionManager / AgentTemplate（不经 WingRuntime），必须在此完成与
+    `WingRuntime.__init__` 相同的两件事：
+      - `import wing.tools`：装饰器注册内置工具；
+      - `wing.metrics_registry.install()`：注册 handler 并订阅 EventBus。
+    """
+    import wing.tools  # noqa: F401 — 导入触发装饰器注册
+    from wing.metrics_registry import install as install_metrics
+
+    install_metrics()
 
 
 @pytest.fixture(autouse=True)

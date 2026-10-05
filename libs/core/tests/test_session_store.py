@@ -142,7 +142,7 @@ class TestAux:
         log.delete_aux("never-existed")
 
     def test_file_corrupted_aux_discarded(self, tmp_path: Path):
-        from wing.store import FileMessageLog
+        from wing.store.file import FileMessageLog
 
         log = FileMessageLog(tmp_path / "sid-corrupt")
         log._path.mkdir(parents=True)

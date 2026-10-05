@@ -51,7 +51,7 @@ from wing.store import FileSessionStore, MemorySessionStore, SessionStore
 if TYPE_CHECKING:
     from wing.agent_template import AgentTemplateManager
     from wing.gateway.protocol import AgentOverride
-    from wing.provider import ProviderModels
+    from wing.provider.registry import ProviderModels
 
 
 # ============================================================
@@ -89,6 +89,15 @@ class WingRuntime:
     """
 
     def __init__(self) -> None:
+        # 显式安装内置能力（顶层 wing/__init__ 不再有 import 副作用）：
+        #   - import wing.tools：装饰器注册内置工具（第一次 tool_registry.resolve
+        #     之前必须完成，否则 AgentTemplate.from_config 解析不到任何工具）
+        #   - metrics_registry.install()：注册 handler 并订阅 EventBus（幂等）
+        import wing.tools  # noqa: F401
+        from wing.metrics_registry import install as install_metrics
+
+        install_metrics()
+
         load_hooks(get_config().hooks)
         # TODO(future): config 驱动的 backend 选择（sessions.backend / dsn）——
         # SQL 后端（SQLite/PG/Supabase）到来时的扩展点。
@@ -128,7 +137,6 @@ class WingRuntime:
                 content=content,
                 request_id=request_id,
                 session_id=session_id,
-                client_id=client_id,
                 tool_call_id=tool_call_id,
             )
         finally:
@@ -209,7 +217,7 @@ class WingRuntime:
 
         Raises:
             LookupError: 内存与磁盘都没有该会话
-            RuntimeError: 被钉住（忙碌 / 有后台任务 / 被订阅 / 非持久后端）
+            RuntimeError: 被钉住（忙碌 / 有待处理输入 / 被订阅 / 非持久后端）
         """
         return self.sm.release_session(session_id)
 
@@ -345,7 +353,7 @@ class WingRuntime:
         draft = cm.rewind(target_uuid)
         self._emit_context_stats(session)
 
-        from wing.event import serialize_event
+        from wing.event import wire_dump
 
         turn_started_at = (
             agent.turn_started_at.isoformat() if agent.turn_started_at else None
@@ -357,7 +365,7 @@ class WingRuntime:
                 uncommitted=agent.uncommitted_message(),
                 uncommitted_tools=agent.uncommitted_tools(),
                 events=[
-                    serialize_event(e)
+                    wire_dump(e)
                     for e in cm.get_active_events(
                         pending_ask_ids=agent.pending_ask_ids()
                     )
@@ -457,7 +465,7 @@ class WingRuntime:
         转发 provider 包 registry（模块级持有所有 provider client；配置了
         静态 models 的 provider 跳过请求）。gateway 路由经此获取，不感知 config。
         """
-        from wing.provider import list_all_models
+        from wing.provider.registry import list_all_models
 
         return await list_all_models()
 
@@ -505,7 +513,7 @@ class WingRuntime:
         #    单 session 失败不阻断其余 session（否则一个坏 session 会让其他
         #    session 悄悄留着旧凭据——正是驱逐重建要修的 bug）。
         try:
-            from wing.provider import reset_registry
+            from wing.provider.registry import reset_registry
 
             await reset_registry()
             rebuilt = 0
@@ -565,7 +573,7 @@ class WingRuntime:
         persist=true 且 session 给定时先落盘进链（与 AgentEventSink 同一
         持久化语义）；session 为 None 的事件（无会话上下文）只广播。
         request_id 在落盘前从 RequestContext 定型注入——磁盘记录与广播
-        帧携带同一关联值（与 AgentEventSink._emit 一致）。
+        帧携带同一关联值（与 AgentEventSink.emit 一致）。
         """
         ctx = get_request_context()
         if ctx.request_id is not None:
@@ -606,7 +614,7 @@ class WingRuntime:
         （恢复 working 已耗时）。
         """
         client_target = EventTarget(scope="client", client_ids=[client_id])
-        from wing.event import serialize_event
+        from wing.event import wire_dump
 
         cm = session.context_manager
         agent = session.agent
@@ -621,7 +629,7 @@ class WingRuntime:
                 uncommitted=agent.uncommitted_message(),
                 uncommitted_tools=agent.uncommitted_tools(),
                 events=[
-                    serialize_event(e)
+                    wire_dump(e)
                     for e in cm.get_active_events(
                         pending_ask_ids=agent.pending_ask_ids()
                     )

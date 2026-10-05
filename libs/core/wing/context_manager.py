@@ -137,6 +137,29 @@ More detail in: "{dir}/SKILL.md" """
         return self._session_id
 
     @property
+    def skills_patterns(self) -> list[str]:
+        """Skills glob 模式列表（构造时固化；副本，外部改动不回写）。"""
+        return list(self._skills_patterns)
+
+    @property
+    def rules_patterns(self) -> list[str]:
+        """Rules glob 模式列表（构造时固化；副本，外部改动不回写）。"""
+        return list(self._rules_patterns)
+
+    @property
+    def workspace(self) -> Path | None:
+        """当前工作目录（相对 patterns 的解析基准；None = 未设置）。"""
+        return self._workspace
+
+    def set_workspace(self, workspace: Path | None) -> None:
+        """替换工作目录解析基准（唯一入口）。
+
+        只替换路径字段——已缓存的 rules/skills 不重载（与既有语义一致：
+        改 workspace 后需重建会话才重新加载）。
+        """
+        self._workspace = workspace
+
+    @property
     def system_prompt(self) -> Message:
         """构造完整系统提示词，按顺序拼接：system_prompt + append + rules + skills"""
         parts = []

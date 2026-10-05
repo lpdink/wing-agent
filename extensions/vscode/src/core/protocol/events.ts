@@ -221,7 +221,7 @@ export interface UserMessageAcceptedEvent extends EventMeta {
   readonly origin_request_id: string;
 }
 
-/** `diff_content` — diff payload for Write / Edit / BetterEdit. */
+/** `diff_content` — diff payload for Write / Edit. */
 export interface DiffContentEvent extends EventMeta {
   readonly type: 'diff_content';
   readonly path: string;

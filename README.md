@@ -85,7 +85,7 @@ agents:
   - name: default
     model: "gpt-4o"                          # ← your model
     default: true
-    tools: [Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, TodoWrite, Explorer]
+    tools: [Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, TodoWrite]
 ```
 
 Then start wing:
@@ -115,8 +115,6 @@ Frontend config: `~/.wing/tui/config.yaml`
 | `ReadImage` | Feed an image (screenshot, diagram, chart) to a vision model |
 | `AskUserQuestion` | Ask the user a question |
 | `TodoWrite` | Track task progress |
-| `Explorer` | Autonomous code exploration sub-agent (blocking or background) |
-| `BetterEdit` | Anchored `[upto]` edits (experimental) |
 
 Custom tools: **[docs/en/custom-tools.md](https://github.com/lpdink/wing-agent/blob/develop/docs/en/custom-tools.md)**
 

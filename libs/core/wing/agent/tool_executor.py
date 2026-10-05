@@ -15,12 +15,11 @@ import inspect
 import tempfile
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any
 
 from wing.common.logger import log
 from wing.config import get_config, get_wing_home
 from wing.hook_registry import hooks
-from wing.schema import Message, ToolCall, ToolError, ToolOutput
+from wing.schema import Message, Tool, ToolCall, ToolError, ToolOutput
 
 from .event_sink import AgentEventSink
 
@@ -69,9 +68,9 @@ class ToolExecutor:
     def __init__(self, sink: AgentEventSink) -> None:
         self._sink = sink
         # 工具表由外部设置（set_tools 时更新）
-        self._tools: dict[str, Any] = {}
+        self._tools: dict[str, Tool] = {}
 
-    def set_tools(self, tools: dict[str, Any]) -> None:
+    def set_tools(self, tools: dict[str, Tool]) -> None:
         self._tools = tools
 
     async def execute(
