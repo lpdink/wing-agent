@@ -35,6 +35,7 @@ from wing_probe.driver import (
     DEFAULT_MAX_SIZE,
     DEFAULT_TIMEOUT,
     DEFAULT_TURN_WITHIN,
+    ChunkEnvelope,
     Driver,
     DriverError,
     DriverHttp,
@@ -43,6 +44,7 @@ from wing_probe.driver import (
     HttpCall,
     Session,
     WsError,
+    parse_envelope,
     ws_url,
 )
 from wing_probe.env import (
@@ -141,6 +143,12 @@ from wing_probe.provider import (
     match_message,
     stream_frames,
 )
+from wing_probe.toolhost import (
+    RemoteCall,
+    RemoteTool,
+    ToolHost,
+    ToolHostError,
+)
 from wing_probe.watch import (
     DEFAULT_WITHIN,
     Event,
@@ -182,6 +190,7 @@ __all__ = [
     "REWIND_TO_ROOT_CONTENT",
     "SSE_CONTENT_TYPE",
     "TRANSIENT_EVENT_TYPES",
+    "ChunkEnvelope",
     "ContextAssertionError",
     "ContextView",
     "Driver",
@@ -208,6 +217,8 @@ __all__ = [
     "ProbeEnvError",
     "ProbeError",
     "ProbeInvariantError",
+    "RemoteCall",
+    "RemoteTool",
     "RequestLog",
     "SSEFrame",
     "Script",
@@ -218,6 +229,8 @@ __all__ = [
     "Timeline",
     "ToolCall",
     "ToolCallView",
+    "ToolHost",
+    "ToolHostError",
     "Turn",
     "UnregisteredModelError",
     "Usage",
@@ -248,6 +261,7 @@ __all__ = [
     "merge_no_proxy",
     "message_semantics",
     "node_semantics",
+    "parse_envelope",
     "read_log_tail",
     "read_metadata",
     "render_config_yaml",

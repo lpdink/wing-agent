@@ -57,6 +57,37 @@ class FakeConnection:
         self.closed = True
 
 
+class ScriptedConnection:
+    """假连接：按 ``(text, delay)`` 脚本吐帧（delay 模拟分片间隔），耗尽后抛 ``ConnectionClosed``。"""
+
+    def __init__(self, script: Sequence[tuple[str, float]]) -> None:
+        self._script = list(script)
+
+    async def recv(self) -> str:
+        if not self._script:
+            raise ConnectionClosed(Close(1000, "scripted end"), None)
+        text, delay = self._script.pop(0)
+        if delay:
+            await asyncio.sleep(delay)
+        return text
+
+    async def send(self, text: str) -> None:  # pragma: no cover - 未使用
+        pass
+
+    async def close(self) -> None:  # pragma: no cover - 未使用
+        pass
+
+
+class FrozenClock:
+    """冻结时钟：``started_at`` 与 ``clock()`` 取不同值，暴露尺度混用。"""
+
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def __call__(self) -> float:
+        return self.value
+
+
 class FakeEnv:
     """``Driver`` 需要的 ``ProbeEnv`` 最小面（``EnvLike`` 协议）。"""
 
@@ -140,6 +171,54 @@ async def test_chunked_frames_are_merged_and_dispatched(tmp_path: Path) -> None:
     assert client._reassembler.on_text('{"type":"text"}', at=1.0) == [
         Delivery('{"type":"text"}', 1.0)
     ]
+    await driver.close()
+
+
+@pytest.mark.asyncio
+async def test_chunk_deadline_uses_the_same_scale_as_on_text(tmp_path: Path) -> None:
+    """分片不闭合超时用 ``now()``（相对 started_at）查询——尺度混用即误报 stalled。
+
+    回归素材：``_read_loop`` 把 ``at=self.now()`` 喂给 ``Reassembler``，deadline
+    因此是**相对**尺度；``_recv_frame`` 若用原始 ``_clock()`` 查询，started_at 一旦
+    非零（真实 ProbeEnv 就是这样）"还有 30s" 会被算成"已过期"，第一个分片到达后
+    立刻断开——大帧整机场景首次走通 `_chunk` 重组时抓到。
+    """
+    driver = Driver(FakeEnv(tmp_path))
+    session = await driver.attach("sid-1", subscribe=False)
+    payload = json.dumps(
+        {"type": "sync_session", "session_id": "sid-1", "messages": []},
+        ensure_ascii=False,
+    )
+    parts = [payload[:40], payload[40:]]
+
+    client = GatewayWS(
+        ScriptedConnection(  # ty: ignore[invalid-argument-type]
+            [
+                (chunk_frame(parts[0], index=0, count=2), 0.0),
+                (chunk_frame(parts[1], index=1, count=2), 0.05),
+                ('{"type":"text","session_id":"sid-1","content":"after"}', 0.0),
+            ]
+        ),
+        client_id="fake-client",
+        handler=driver._on_event,
+        frames=FrameLog(),
+        started_at=500.0,  # 与 clock() 错开：now() 才是 reassembler 的尺度
+        clock=FrozenClock(1000.0),
+    )
+    client._read_task = asyncio.create_task(client._read_loop())
+    assert await client.wait_closed(2.0), "读任务未在时限内退出"
+
+    assert "reassembly failed" not in (client.close_reason or ""), (
+        "把还有 30s 的分片窗口误判为过期（尺度混用）",
+        client.close_reason,
+    )
+    assert "connection closed by gateway" in (client.close_reason or "")
+    events = session.timeline.all()
+    assert [event.type for event in events] == ["sync_session", "text"], events
+    assert events[0].frames == 2, events[0].frames
+    assert events[0].raw == payload
+    assert events[1].data["content"] == "after"
+    assert client.assembling is False
     await driver.close()
 
 

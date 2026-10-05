@@ -193,7 +193,7 @@ class Reassembler:
         return None if self._pending is None else self._pending.id
 
     def deadline(self) -> float | None:
-        """ "必须收到下一片"的时刻（``time.monotonic`` 尺度）；无窗口为 None。"""
+        """ "必须收到下一片"的时刻（与 ``on_text`` 的 ``at`` **同尺度**）；无窗口为 None。"""
         return None if self._pending is None else self._pending.deadline
 
     def seconds_until_deadline(self, now: float) -> float | None:
@@ -494,8 +494,13 @@ class GatewayWS:
             self._finish(f"read error: {exc!r}")
 
     async def _recv_frame(self) -> str:
-        """读一帧；分片窗口打开时按不闭合超时设上界（静默即失败）。"""
-        timeout = self._reassembler.seconds_until_deadline(self._clock())
+        """读一帧；分片窗口打开时按不闭合超时设上界（静默即失败）。
+
+        deadline 与 ``on_text`` 的 ``at`` 同尺度——读循环喂的是 ``now()``（相对
+        ``started_at``），查询也必须用 ``now()``：用原始 ``_clock()`` 会把"还有
+        30s"算成"已过期"，第一个分片到达后立刻误报 stalled（实测踩过）。
+        """
+        timeout = self._reassembler.seconds_until_deadline(self.now())
         try:
             if timeout is None:
                 raw = await self._ws.recv()
