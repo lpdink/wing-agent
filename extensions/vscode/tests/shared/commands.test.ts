@@ -79,7 +79,7 @@ describe('matchCommand', () => {
 
   it('pins the vocabulary the TUI also carries', () => {
     // Sources: `crates/wing/src/ui/popup/command.rs:59` (TUI_ONLY_COMMANDS) and
-    // `crates/wing/src/app/commands.rs:88` (COMMANDS). Goal commands are out of scope.
+    // `crates/wing/src/app/commands.rs:88` (COMMANDS).
     const names = FRONTEND_COMMANDS.map((command) => command.name);
     expect(names).toEqual([
       '/new',
@@ -99,7 +99,6 @@ describe('matchCommand', () => {
       '/fork',
       '/rewind',
     ]);
-    expect(names).not.toContain('/goal');
 
     // Names and aliases are unique, so no row can shadow another (the TUI pins the
     // same property in `commands.rs`).

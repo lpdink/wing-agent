@@ -35,8 +35,6 @@
 | `/skills` | | | 显示已加载的 skills |
 | `/rewind` | | `<uuid>` | 回退到指定消息（丢弃其后所有消息） |
 | `/reload` | | | 重载配置、hooks、provider、skills（无需重启） |
-| `/goal` | | `<prompt>` | 启动 Goal 编排（executor + checker 循环） |
-| `/goal-exit` | | | 退出 Goal 编排模式 |
 
 本清单的事实来源是 `crates/wing/src/ui/popup/command.rs`（`TUI_ONLY_COMMANDS`）。
 
@@ -70,15 +68,6 @@
 /context               # 消息数、token 用量、系统提示词
 /skills                # 列出已加载的 skill 文件
 /reload                # 无需重启即可生效配置/hooks/skills 变更
-```
-
-## Goal 编排
-
-`/goal` 将 **executor**（当前会话）与一个独立的 **checker** 会话配对，循环验证结果——让 agent 不再自评自己的成果。机制详见 [docs/dev/architecture.md](../dev/architecture.md)。
-
-```
-/goal 重构 auth 模块并补充测试
-/goal-exit             # 退出 Goal 模式
 ```
 
 ## Prompt 命令

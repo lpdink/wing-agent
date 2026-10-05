@@ -145,8 +145,6 @@ pub struct ActivityRail<'a> {
     pub spinner: &'a SpinnerState,
     /// When the turn started (elapsed shown next to the label).
     pub started_at: Instant,
-    /// Goal-mode role label (`Executor working`, `Checker reviewing`, …).
-    pub role: Option<&'a str>,
 }
 
 /// The card's bottom-border content: where the session is and how big the
@@ -380,11 +378,10 @@ fn activity_spans(activity: &ActivityRail<'_>, palette: &ThemePalette) -> Vec<Sp
         activity.spinner.frame_str().to_string(),
         Style::default().fg(palette.accent),
     )];
-    let label = match activity.role {
-        Some(role) => format!(" {role}..."),
-        None => " Working...".to_string(),
-    };
-    spans.push(Span::styled(label, Style::default().fg(palette.text)));
+    spans.push(Span::styled(
+        " Working...".to_string(),
+        Style::default().fg(palette.text),
+    ));
     if elapsed > 0 {
         spans.push(Span::styled(
             format!(" ({})", crate::ui::spinner::fmt_elapsed(elapsed)),
@@ -568,7 +565,6 @@ mod tests {
         let activity = ActivityRail {
             spinner: &spinner,
             started_at: Instant::now(),
-            role: Some("Executor working"),
         };
         let usage = TurnUsage::default();
         paint(
@@ -580,7 +576,7 @@ mod tests {
             &palette(),
         );
         let top = row_text(&buf, 0);
-        assert!(top.starts_with("╭─ ⠋ Executor working... "), "{top}");
+        assert!(top.starts_with("╭─ ⠋ Working... "), "{top}");
         assert!(top.contains("Esc to interrupt"), "{top}");
         assert!(top.ends_with("╮"), "{top}");
         assert_eq!(top.chars().count(), 60, "the rail fills its width: {top}");
@@ -594,7 +590,6 @@ mod tests {
         let activity = ActivityRail {
             spinner: &spinner,
             started_at: Instant::now(),
-            role: None,
         };
         let usage = TurnUsage::default();
         paint(

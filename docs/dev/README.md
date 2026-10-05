@@ -4,7 +4,7 @@
 
 | 文档 | 内容 |
 |------|------|
-| [architecture.md](architecture.md) | 三层架构与数据流、TUI / stdio / 编排 CLI 三种前端形态、Goal 编排、会话生命周期、持久化与压缩 |
+| [architecture.md](architecture.md) | 三层架构与数据流、TUI / stdio / 编排 CLI 三种前端形态、会话生命周期、持久化与压缩 |
 | [backend-layout.md](backend-layout.md) | 后端分层规范（`libs/core/wing/**`）：分层图与依赖方向、每包职责一句话、迁移映射表、分层守门测试（`test_layering.py`）与白名单 |
 | [http-api.md](http-api.md) | 完整 HTTP 端点表、WebSocket 事件协议、Gateway 鉴权 |
 | [glossary.md](glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |
@@ -19,4 +19,4 @@
 
 > 事实来源优先级：**代码 > 本目录 > AGENTS.md 概述**。若发现不一致，以代码为准并欢迎修正文档。
 >
-> 许多设计决策的 *why* 记录在对应 PR 的 body 中，可用 `gh pr view <number>` 查阅。关键 PR：#1(stdio) · #9(HTTP 化) · #10(HTTP 生命周期) · #14(去 magic dispatch) · #22(Goal) · #34(工具命名空间) · #35(鉴权) · #39(SessionStore) · #43(流式工具渲染) · #47(远程工具注册) · #49(SDK + wing-orch) · #50(动态工具切换) · #52(中断提交) · #53(WingAgent 拆包)。
+> 许多设计决策的 *why* 记录在对应 PR 的 body 中，可用 `gh pr view <number>` 查阅。关键 PR：#1(stdio) · #9(HTTP 化) · #10(HTTP 生命周期) · #14(去 magic dispatch) · #34(工具命名空间) · #35(鉴权) · #39(SessionStore) · #43(流式工具渲染) · #47(远程工具注册) · #49(远程工具 SDK) · #50(动态工具切换) · #52(中断提交) · #53(WingAgent 拆包)。

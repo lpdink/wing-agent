@@ -31,15 +31,7 @@ fn assert_not_consumed(text: &str) {
 
 #[test]
 fn test_frontend_commands_consumed() {
-    for cmd in [
-        "/clear",
-        "/new",
-        "/copy",
-        "/copy 1",
-        "/tips",
-        "/goal do something",
-        "/goal-exit",
-    ] {
+    for cmd in ["/clear", "/new", "/copy", "/copy 1", "/tips"] {
         assert_consumed(cmd);
     }
 }
@@ -486,13 +478,6 @@ fn test_command_table_keeps_exact_and_argument_spellings_apart() {
     assert!(session.matches("/session sess-1"));
     assert!(session.matches("/ss sess-1"));
     assert!(!session.matches("/sessions sess-1"));
-
-    // A prefix that happens to start with another command's name is not that
-    // command (`/goal-exit` is not `/goal`).
-    let goal = find("/goal");
-    assert!(goal.matches("/goal"));
-    assert!(goal.matches("/goal do it"));
-    assert!(!goal.matches("/goal-exit"));
 }
 
 #[test]

@@ -75,8 +75,8 @@ impl ChatView {
 
     /// Promote the pending message matching `request_id` into history.
     ///
-    /// Returns `false` when nothing matches (message originated from
-    /// another client / goal orchestration — not tracked here).
+    /// Returns `false` when nothing matches (the message originated from
+    /// another client — not tracked here).
     pub fn promote_pending(&mut self, request_id: &str) -> bool {
         let Some(pos) = self.pending.iter().position(|p| p.request_id == request_id) else {
             return false;
