@@ -192,7 +192,7 @@ class WingAgent:
         persist=false 纯广播（不落盘、不缓冲）——与 react loop 事件同一出口，
         不存在绕过 sink 的直连 event_bus。
         """
-        self._sink._emit(event)
+        self._sink.emit(event)
 
     def register_interrupt_hook(self, hook: Callable[[], None], label: str = "") -> str:
         """注册 interrupt hook；``label`` 为日志归因说明（如 "Bash pid=12345"）。"""
@@ -546,7 +546,7 @@ class WingAgent:
                 self._sink.error(f"处理消息失败：异常：{e}")
                 self._sink.done()
 
-    def _bind_tools(self, tools: list[Tool]) -> dict[str, Any]:
+    def _bind_tools(self, tools: list[Tool]) -> dict[str, Tool]:
         from wing.tool_registry import ToolRef
 
         seen: dict[str, str] = {}
@@ -560,7 +560,7 @@ class WingAgent:
                 )
             seen[key] = desc
 
-        bound_map: dict[str, Any] = {}
+        bound_map: dict[str, Tool] = {}
 
         for tool in tools:
             if not tool.inject_agent_param:

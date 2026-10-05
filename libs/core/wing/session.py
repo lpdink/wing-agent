@@ -394,7 +394,7 @@ class Session:
         resolved_str = str(resolved)
         self._metadata.workspace = resolved_str
         self._agent.set_cwd(resolved)
-        self._context_manager._workspace = resolved
+        self._context_manager.set_workspace(resolved)
         self._save_metadata()
         log.info(f"Session {self._session_id}: workspace changed to {resolved_str}")
 

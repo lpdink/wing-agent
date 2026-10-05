@@ -624,7 +624,6 @@ class SessionManager:
         content: str,
         request_id: str | None = None,
         session_id: str | None = None,
-        client_id: str | None = None,
         tool_call_id: str | None = None,
     ) -> None:
         """路由消息到指定 session。（内部方法，由 WingRuntime 调用）

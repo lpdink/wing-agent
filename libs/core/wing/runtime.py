@@ -137,7 +137,6 @@ class WingRuntime:
                 content=content,
                 request_id=request_id,
                 session_id=session_id,
-                client_id=client_id,
                 tool_call_id=tool_call_id,
             )
         finally:
@@ -574,7 +573,7 @@ class WingRuntime:
         persist=true 且 session 给定时先落盘进链（与 AgentEventSink 同一
         持久化语义）；session 为 None 的事件（无会话上下文）只广播。
         request_id 在落盘前从 RequestContext 定型注入——磁盘记录与广播
-        帧携带同一关联值（与 AgentEventSink._emit 一致）。
+        帧携带同一关联值（与 AgentEventSink.emit 一致）。
         """
         ctx = get_request_context()
         if ctx.request_id is not None:

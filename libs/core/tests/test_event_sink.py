@@ -50,7 +50,7 @@ class TestPersistSplit:
 
         sink.llm_text("hello ")  # persist=false → 纯广播
         sink.llm_text("world")
-        sink._emit(DiffContentEvent(path="f", new_text="x"))  # persist=true → 落盘
+        sink.emit(DiffContentEvent(path="f", new_text="x"))  # persist=true → 落盘
 
         # 落盘：只有 diff 事件（流式 delta 不落盘、也不进任何缓冲）
         assert len(persisted) == 1
@@ -76,7 +76,7 @@ class TestPersistSplit:
         broadcast: list = []
         sink = AgentEventSink(session_id="s", append_event=None)
         event_bus.subscribe(broadcast.append)
-        sink._emit(DiffContentEvent(path="f", new_text="x"))
+        sink.emit(DiffContentEvent(path="f", new_text="x"))
         assert len(broadcast) == 1
 
 
@@ -95,7 +95,7 @@ class TestRequestIdFinalization:
         sink = AgentEventSink(session_id="s", append_event=tl.append)
         token = set_request_context(request_id="req-from-client", session_id="s")
         try:
-            sink._emit(DiffContentEvent(path="f", new_text="x"))
+            sink.emit(DiffContentEvent(path="f", new_text="x"))
         finally:
             reset_request_context(token)
 
@@ -111,7 +111,7 @@ class TestRequestIdFinalization:
         """ctx 无 request_id 时保留后端生成值，内存与磁盘一致。"""
         tl: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_path))
         sink = AgentEventSink(session_id="s", append_event=tl.append)
-        sink._emit(DiffContentEvent(path="f", new_text="x"))
+        sink.emit(DiffContentEvent(path="f", new_text="x"))
 
         (record,) = _read_log_lines(tmp_path)
         assert record["request_id"]  # 非空：后端生成的 uuid4 hex
@@ -129,7 +129,7 @@ class TestRequestIdFinalization:
         event_bus.subscribe(broadcast.append)
         token = set_request_context(request_id="req-shared", session_id="s")
         try:
-            sink._emit(DiffContentEvent(path="f", new_text="x"))
+            sink.emit(DiffContentEvent(path="f", new_text="x"))
         finally:
             reset_request_context(token)
 
