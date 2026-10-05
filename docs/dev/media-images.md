@@ -4,7 +4,7 @@
 消息里的媒体引用、**请求期图片投影**（高水位 + 量子批量驱逐）与两条协议线格式。
 
 事实来源：代码 `libs/core/wing/{media/,schema/,store/,agent/,provider/,context/compaction.py}`、
-`libs/core/wing/tools/read_image.py`；整机证据 `libs/wing-probe/scenarios/test_read_image.py`
+`libs/core/wing/tools/builtin/read_image.py`；整机证据 `libs/wing-probe/scenarios/test_read_image.py`
 （本文末列 12 条场景）。本页只讲 *why* 与不变量，逐行契约以代码为准。
 
 ## 链路总览
@@ -34,7 +34,7 @@ openai: followup(默认) / inline      anthropic: inline(默认) / followup
 
 ## ReadImage 工具
 
-- 注册名 `ReadImage`，唯一参数 `path`（相对路径按会话 workspace 解析，见 `tools/utils.py`）。
+- 注册名 `ReadImage`，唯一参数 `path`（相对路径按会话 workspace 解析，见 `tools/internal/utils.py`）。
 - 支持 **PNG / JPEG / WebP / GIF**，以 magic bytes 判定，**不看扩展名**；尺寸用纯 Python 头部解析
   （PNG IHDR / GIF LSD / JPEG SOFn 扫描 / WebP VP8·VP8L·VP8X），不解码像素。
 - **能力门禁在任何文件 I/O 之前**：模型未声明 `capabilities.vision` 时直接拒绝

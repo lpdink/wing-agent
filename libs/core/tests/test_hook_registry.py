@@ -16,7 +16,7 @@ TDD：先定义行为，再实现。
 
 import pytest
 
-from wing.hook_registry import HookRegistry
+from wing.hooks import HookRegistry
 
 
 # ============================================================

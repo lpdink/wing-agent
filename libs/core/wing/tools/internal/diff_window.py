@@ -1,4 +1,4 @@
-# wing/tools/diff_window.py
+# wing/tools/internal/diff_window.py
 """Diff payload windowing — the shape contract of ``DiffContentEvent`` payloads.
 
 A ``DiffContentEvent`` used to carry the **whole file** on both sides. Every

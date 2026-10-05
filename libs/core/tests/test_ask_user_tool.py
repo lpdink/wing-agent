@@ -8,7 +8,7 @@ import pytest
 
 from wing.event import AskEvent
 from wing.schema import ToolError
-from wing.tools.ask_user import (
+from wing.tools.builtin.ask_user import (
     ASK_CANCEL_TOKEN,
     CANCEL_RESULT,
     ask_user,

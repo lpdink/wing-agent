@@ -21,7 +21,8 @@ import pytest
 
 from wing.agent.tool_executor import _current_tool_call_id
 from wing.event import DiffContentEvent
-from wing.tools.file import edit_file, write_file
+from wing.tools.builtin.edit import edit_file
+from wing.tools.builtin.write import write_file
 
 
 class _StubAgent:

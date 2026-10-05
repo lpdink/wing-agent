@@ -25,17 +25,17 @@ from wing.config import (
     resolve_model_display_name,
 )
 from wing.event import AskEvent, WingEvent
-from wing.provider import create_provider
-from wing.provider.base import ModelProvider
-from wing.schema import Message, Tool
-
-from .cancel_watch import (
+from wing.diagnostics import (
     InterruptLockWatch,
     log_cancel_snapshot,
     stack_trace,
     task_label,
     watch_undead_task,
 )
+from wing.provider import create_provider
+from wing.provider.base import ModelProvider
+from wing.schema import Message, Tool
+
 from .event_sink import AgentEventSink
 from .inbox import Inbox
 from .react_loop import ReActLoop

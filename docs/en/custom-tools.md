@@ -130,7 +130,7 @@ Create a file matched by your `hooks` config glob pattern:
 
 ```python
 # ~/.wing/hooks/audit_tools.py
-from wing.hook_registry import hooks
+from wing.hooks import hooks
 
 @hooks.on("after_tool_call")
 def log_tool_results(result, tool_name=None, **ctx):

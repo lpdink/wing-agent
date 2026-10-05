@@ -1,4 +1,4 @@
-"""wing.metrics_registry._llm_metrics — LLM 调用指标审计 handler。
+"""wing.audit._llm_metrics — LLM 调用指标审计 handler。
 
 schema: LLMCallMetricsEntry (BaseModel)
 handler: _handle_global_metrics, _handle_session_metrics
@@ -18,7 +18,7 @@ from wing.common.logger import log
 from wing.common.utils import _is_safe_path_component
 from wing.config import get_config, get_wing_home
 from wing.event import LLMCallMetricsEvent
-from wing.metrics_registry.core import (
+from wing.audit.core import (
     _atomic_write_json,
     _read_metrics_json,
     metrics_registry,

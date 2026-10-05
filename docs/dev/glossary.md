@@ -38,7 +38,7 @@
 | **事件链锚定** | rewind/fork/compact 凭链序免费工作：事件是链节点，set_tip/fork 拷贝/压缩边界自然裁剪事件可见性。 |
 | **中途订阅视图** | SyncSessionEvent = 状态 + 四组素材：status（快照时刻的 idle/working/waiting，**必填、权威**——working 不可由内容反推，也没有回落推断）+ turn_started_at（恢复已耗时）+ messages（已提交投影）+ uncommitted（单个未提交 assistant Message 投影）+ uncommitted_tools（未终结调用原始 args）+ events（活跃链**事实**事件）。前端按 **messages → uncommitted → uncommitted_tools → events → live** 组装（uncommitted 走 replay_messages、uncommitted_tools 走 live ToolCallStream 分支），diff 锚点结构性先于 diff 存在。 |
 | **事实事件下发过滤** | 后端单点策略：`get_active_events()` 按 `FACT_EVENTS`（与 persist 标记同处 `event/__init__.py`）过滤，ask 额外按 `pending_ask_ids()`（inbox feedback waiters）过滤。前端只做能力分发（有渲染器则渲染），不编码"孪生不得渲染"策略。存量孪生记录加载进链但不下发（零迁移）。 |
-| **diff 载荷窗口** | `DiffContentEvent` 的 old_text/new_text 只带变更区域 ± 3 行（`tools/diff_window.py`）与窗口首行绝对行号（old_start_line/new_start_line，缺失按 1）。Write / 新建文件仍全量；`replace_all` 每匹配一条事件（同一 tool_call_id）。前端逐行渲染、不折叠（`LayoutConfig.diff_context` 已删）。 |
+| **diff 载荷窗口** | `DiffContentEvent` 的 old_text/new_text 只带变更区域 ± 3 行（`tools/internal/diff_window.py`）与窗口首行绝对行号（old_start_line/new_start_line，缺失按 1）。Write / 新建文件仍全量；`replace_all` 每匹配一条事件（同一 tool_call_id）。前端逐行渲染、不折叠（`LayoutConfig.diff_context` 已删）。 |
 
 ## 上下文与压缩
 
@@ -72,12 +72,12 @@
 
 ## 命令
 
-wing 的斜杠命令分三类（「magic command dispatch」已在 PR #14 移除，`magic_command/` 现仅存元数据 + 文本展开）：
+wing 的斜杠命令分三类（「magic command dispatch」已在 PR #14 移除，`commands.py`（原 `magic_command/`）现仅存元数据 + 文本展开）：
 
 | 类别 | 机制 | 例子 |
 |------|------|------|
 | **前端命令** | TUI 拦截，转 HTTP 调用或本地处理 | `/compact`→HTTP、`/model`→HTTP、`/clear`·`/copy`→本地 |
-| **prompt 命令** | 用户 `.md` 文件，`$ARGUMENTS` 文本展开后作为普通消息发送（`magic_command/prompt_commands.py`） | 用户自定义 `/plan` 等 |
+| **prompt 命令** | 用户 `.md` 文件，`$ARGUMENTS` 文本展开后作为普通消息发送（`commands.py`） | 用户自定义 `/plan` 等 |
 | **Goal 命令** | TUI 编排状态机 | `/goal`、`/goal-exit` |
 
 命令清单的真相在 `crates/wing/src/ui/popup/command.rs`（`TUI_ONLY_COMMANDS`）；`GET /api/commands` 仅返回 prompt 命令。
@@ -94,7 +94,7 @@ wing 的斜杠命令分三类（「magic command dispatch」已在 PR #14 移除
 
 | 概念 | 说明 |
 |------|------|
-| **Hooks** | 扩展点：`before_session_start` / `before_user_message` / `before_tool_call` / `after_tool_call`（`hook_registry.py`）。官方包 `wing-hooks`。 |
+| **Hooks** | 扩展点：`before_session_start` / `before_user_message` / `before_tool_call` / `after_tool_call`（`hooks/`）。官方包 `wing-hooks`。 |
 | **Gateway 鉴权** | opt-in API key（HTTP header / WS query），`/api/health` 豁免；TLS 交给反代（PR #35）。 |
 | **RBAC 角色** | `admin`（全量）/ `tool_runtime`（纯工具执行远端，仅注册端点 + 工具 WS，不收事件）；`role` 字段现已强制（PR #47）。 |
 | **wing-sdk** | Python 远程工具宿主 SDK：decorator 注册 + WS serve loop + 标准工具（`libs/wing-sdk/`，PR #49）。Rust 对应 `wing-api-client::tool_host`。 |

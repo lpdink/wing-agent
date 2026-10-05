@@ -18,7 +18,7 @@ from pathlib import Path
 
 from wing.common.logger import log
 from wing.config import get_config, get_wing_home
-from wing.hook_registry import hooks
+from wing.hooks import hooks
 from wing.schema import Message, Tool, ToolCall, ToolError, ToolOutput
 
 from .event_sink import AgentEventSink

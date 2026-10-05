@@ -1,4 +1,4 @@
-# wing/tools/shell_safety.py
+# wing/tools/internal/shell_safety.py
 """Shell command safety checker.
 
 Simple two-layer model:

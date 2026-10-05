@@ -73,7 +73,7 @@ awk '$0 >= "2026-09-08 23:10" && $0 < "2026-09-08 23:30"' ~/.wing/tui/logs/wing_
 `POST /api/session/interrupt` 全程留下分段日志（网关端点 → agent → 锁 → cancel 看门狗），
 用于定位「interrupt 请求永不返回」这类现场——会话本身可能毫发无损，而锁死不释放
 （`interrupt()` 里 `await old` 无超时、cancel 只调一次：一次未生效的 cancel 就足以
-让后续所有 interrupt 排队）。实现与栈链覆盖范围见 `wing/agent/cancel_watch.py` 模块文档。
+让后续所有 interrupt 排队）。实现与栈链覆盖范围见 `wing/diagnostics/cancel_watch.py` 模块文档。
 
 一次正常 interrupt 的日志链（`request_id` 由端点生成、透传到 agent，两侧按同一 id 关联；
 agent 侧 tag 取前 8 位）：

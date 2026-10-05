@@ -42,7 +42,7 @@ HOOK_MARKER = "<probe-env>injected-at-create</probe-env>"
 #: 场景写入 ``<env.root>/hooks/`` 的 hook 源（模拟用户的 workspace_env_inject）。
 HOOK_SOURCE = '''"""probe hook：before_session_start 注入环境标记。"""
 
-from wing.hook_registry import hooks
+from wing.hooks import hooks
 
 
 @hooks.on("before_session_start")

@@ -20,7 +20,7 @@ from wing.common.token_counter import TokenCounter
 from wing.chain import TrackedList
 from wing.event import ToolCallResultEvent
 from wing.event_bus import event_bus
-from wing.hook_registry import hooks
+from wing.hooks import hooks
 from wing.media import MediaAccess, estimate_image_tokens
 from wing.schema import ChainNode, MediaRef, Message, Tool, ToolCall, ToolOutput
 from wing.session import serialize_message

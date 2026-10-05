@@ -73,7 +73,7 @@ MARKER_B = "<probe-hook-b/>"
 #: f-string 花括号会被当成格式字段）。
 HOOK_TEMPLATE = '''"""probe hook：before_user_message 追加标记。"""
 
-from wing.hook_registry import hooks
+from wing.hooks import hooks
 
 
 @hooks.on("before_user_message")

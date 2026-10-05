@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from wing.common.logger import log
 from wing.common.with_retry import with_retry
 from wing.config import get_config
-from wing.hook_registry import hooks
+from wing.hooks import hooks
 from wing.request_context import reset_request_context, set_request_context
 from wing.schema import ContentBlock, LLMUsage, Message
 

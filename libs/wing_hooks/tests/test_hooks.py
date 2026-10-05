@@ -12,7 +12,7 @@ import re
 
 import pytest
 
-from wing.hook_registry import HookRegistry
+from wing.hooks import HookRegistry
 
 
 # ============================================================
