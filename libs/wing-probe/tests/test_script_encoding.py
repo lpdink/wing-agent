@@ -224,6 +224,8 @@ def test_cut_validation() -> None:
         Turn.of(text="x", chunk=0)
     with pytest.raises(ValueError, match="delay"):
         Turn.of(text="x", delay=-1.0)
+    with pytest.raises(ValueError, match="first_delay"):
+        Turn.of(text="x", first_delay=-1.0)
 
 
 def test_truncated_turn_omits_finish_frame() -> None:
@@ -268,6 +270,60 @@ def test_frames_carry_delay_between_chunks() -> None:
     )
     assert frames[0].delay == 0.0, "首帧不等待（尽快交出响应头）"
     assert all(frame.delay == 0.25 for frame in frames[1:])
+
+
+def frames_of(turn: Turn) -> list[float]:
+    """该 turn 的逐帧等待（编码器视角）。"""
+    return [
+        frame.delay
+        for frame in stream_frames(
+            turn,
+            turn_index=0,
+            model=MODEL,
+            completion_id=COMPLETION_ID,
+            created=CREATED,
+        )
+    ]
+
+
+def test_first_delay_lands_only_on_the_first_content_frame() -> None:
+    """``first_delay`` 只落在首个内容帧上——撑开窗口不是拖慢整条流。
+
+    回归点：``delay`` 是**逐帧**的。想表达「首帧晚 3s 到」却写成 ``delay=3.0``
+    时，一个 5 帧的 turn 会等成 12s（``scenarios/test_midjoin_sync.py`` 曾如此，
+    白烧 9s）。窗口与节奏因此必须能各自表达。
+    """
+    delays = frames_of(Turn.of(text="late answer", first_delay=3.0))
+
+    assert delays[0] == 0.0, "role 帧不等待"
+    assert delays[1] == 3.0, "首个内容帧等 first_delay"
+    assert sum(delays) == 3.0, f"整条流只等一个窗口，实际 {sum(delays)}s"
+
+
+def test_first_delay_and_delay_are_orthogonal() -> None:
+    """两者同时给定：首帧用 ``first_delay``，其余帧仍按 ``delay`` 的节奏。"""
+    delays = frames_of(Turn.of(text="abcd", chunk=2, delay=0.25, first_delay=2.0))
+
+    assert delays[0] == 0.0
+    assert delays[1] == 2.0
+    assert all(delay == 0.25 for delay in delays[2:])
+
+
+def test_first_delay_none_keeps_delay_pacing() -> None:
+    """未指定（None）＝沿用 ``delay`` 的节奏，既有剧本逐帧语义不变。"""
+    delays = frames_of(Turn.of(text="abcd", chunk=2, delay=0.25))
+
+    assert delays[1] == 0.25
+
+
+def test_first_delay_applies_to_tool_only_turns() -> None:
+    """无文本轮（工具调用）：首个内容帧就是首个 tool_calls 增量帧。"""
+    delays = frames_of(
+        Turn.of(tool_calls=[ToolCall("Bash", {"command": "ls"})], first_delay=1.5)
+    )
+
+    assert delays[1] == 1.5
+    assert sum(delays) == 1.5
 
 
 def test_explicit_call_id_wins() -> None:
@@ -426,6 +482,12 @@ def test_turn_describe_mentions_finish_and_usage() -> None:
     assert "text='hi'" in described
     assert "finish=stop" in described
     assert "1in/2out" in described
+
+
+def test_turn_describe_mentions_first_delay() -> None:
+    """窗口旋钮要出现在报告里（剧本 dump 时能看出谁在等）。"""
+    assert "first_delay=3.0" in Turn.of(text="hi", first_delay=3.0).describe()
+    assert "first_delay" not in Turn.of(text="hi").describe()
 
 
 # ── HTTP 面（进程内假 Provider，无子进程） ──────────────────────

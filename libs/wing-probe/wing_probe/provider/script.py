@@ -123,7 +123,14 @@ class Turn:
 
     ``finish`` 为 None 时自动判定（有 tool_calls → ``tool_calls``，否则 ``stop``）。
     ``chunk`` 是 thinking / text 的分片粒度（字符数）；``delay`` 是分片之间的
-    等待秒数（首帧不等待——服务端要尽快把响应头交出去）。
+    等待秒数（首帧不等待——服务端要尽快把响应头交出去）；``first_delay`` 是
+    **首个内容帧之前**的等待（None = 沿用 ``delay`` 的节奏）。
+
+    两个延迟正交，各自的用途不同：``delay`` 管**分片之间的节奏**（流式场景要
+    多帧才有东西可断），``first_delay`` 撑**「turn 已开始、首个内容块尚未到达」
+    这个窗口**（中途加入 / 首帧未到的状态断言）。想只要窗口不要慢时用
+    ``first_delay=3.0`` 而**不要**用 ``delay=3.0``——后者是逐帧的，一个
+    5 帧的 turn 会等成 12s。
 
     ``truncated=True``：模拟上游截断——流在 finish 帧之前被切断（tool call
     已开始输出但没有终结信号；「网关在非法 JSON 工具调用处直接截断」的形态）。
@@ -137,6 +144,7 @@ class Turn:
     finish: str | None = None
     chunk: int | None = None
     delay: float = 0.0
+    first_delay: float | None = None
     truncated: bool = False
 
     def __post_init__(self) -> None:
@@ -145,6 +153,10 @@ class Turn:
             raise ValueError(f"Turn.chunk must be >= 1 or None, got {self.chunk}")
         if self.delay < 0:
             raise ValueError(f"Turn.delay must be >= 0, got {self.delay}")
+        if self.first_delay is not None and self.first_delay < 0:
+            raise ValueError(
+                f"Turn.first_delay must be >= 0 or None, got {self.first_delay}"
+            )
         if self.truncated and self.finish is not None:
             raise ValueError(
                 "Turn.truncated cannot declare finish "
@@ -162,6 +174,7 @@ class Turn:
         finish: str | None = None,
         chunk: int | None = None,
         delay: float = 0.0,
+        first_delay: float | None = None,
         truncated: bool = False,
     ) -> Turn:
         """关键字形式构造（可读性优先，与 design 示例一致）。"""
@@ -173,6 +186,7 @@ class Turn:
             finish=finish,
             chunk=chunk,
             delay=delay,
+            first_delay=first_delay,
             truncated=truncated,
         )
 
@@ -213,6 +227,8 @@ class Turn:
             parts.append(f"chunk={self.chunk}")
         if self.delay:
             parts.append(f"delay={self.delay}")
+        if self.first_delay is not None:
+            parts.append(f"first_delay={self.first_delay}")
         if self.truncated:
             parts.append("truncated")
         return f"Turn({', '.join(parts)})"

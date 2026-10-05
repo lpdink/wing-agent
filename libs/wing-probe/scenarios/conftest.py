@@ -24,10 +24,16 @@ import ``wing_probe`` 与 pytest。
 
 逃生舱 ``probe.without_invariants(reason=...)`` 必须给理由：理由写进
 ``artifacts/dump.txt``，并在终端汇总里回显（spec「逃生舱必须说明理由」）。
+
+**并行**：场景之间零共享（各自 tmp + 各自网关子进程 + 各自假 Provider），所以
+可以按核数并行跑（``make test-probe`` 的 ``-n``）。并行下 fixture 跑在 worker
+进程里，artifacts 台账经 ``pytest_sessionfinish`` / ``pytest_testnodedown``
+汇回 controller——终端汇总与失败报告里的转储路径与串行时一致（不因并行而丢）。
 """
 
 from __future__ import annotations
 
+import importlib.util
 import os
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -44,6 +50,9 @@ DUMP_MODES = ("on-fail", "always", "never")
 
 #: 终端汇总的数据源：nodeid → (转储路径, 逃生舱理由)。
 _REPORTS: dict[str, tuple[Path | None, str | None]] = {}
+
+#: artifacts 台账从 worker 交回 controller 的键（见 ``pytest_sessionfinish``）。
+WORKER_REPORTS_KEY = "probe_artifacts"
 
 
 def dump_mode() -> str:
@@ -87,6 +96,39 @@ def pytest_terminal_summary(terminalreporter: Any) -> None:
     for nodeid, (path, reason) in sorted(entries.items()):
         note = f"  (invariants disabled: {reason})" if reason else ""
         terminalreporter.write_line(f"  {nodeid} → {path}{note}")
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    """worker 收尾：把本进程的 artifacts 台账交回 controller。
+
+    并行下 fixture 跑在 worker 进程里、终端汇总只在 controller 打印——不显式
+    回收，失败现场的转储路径就会**静默消失**（看起来只是"今天没转储"，而 CI 上
+    artifacts 是唯一的现场）。串行运行没有 ``workeroutput``，这里是 no-op。
+
+    只声明用得上的参数（pluggy 允许 hook 实现取 hookspec 的子集）：xdist 在
+    ``pytest_sessionfinish`` 的 hookwrapper 里发回 ``workeroutput``，本实现跑在
+    ``yield`` 之内，因此台账一定先落进那个 dict、再被送回 controller。
+    """
+    workeroutput = getattr(session.config, "workeroutput", None)
+    if not isinstance(workeroutput, dict):
+        return
+    workeroutput[WORKER_REPORTS_KEY] = {
+        nodeid: [str(path) if path is not None else None, reason]
+        for nodeid, (path, reason) in _REPORTS.items()
+    }
+
+
+# xdist 的钩子**只在 xdist 可导入时**定义：conftest 里的未知钩子名是
+# INTERNALERROR（不是警告），没装 xdist 的环境不该因为这段可选集成整体跑不起来。
+if importlib.util.find_spec("xdist") is not None:
+
+    def pytest_testnodedown(node: Any, error: Any) -> None:
+        """controller 收尾：合并各 worker 交回的 artifacts 台账。"""
+        payload = getattr(node, "workeroutput", {}).get(WORKER_REPORTS_KEY)
+        if not isinstance(payload, dict):
+            return
+        for nodeid, (path, reason) in payload.items():
+            _REPORTS[nodeid] = (Path(path) if path else None, reason)
 
 
 @pytest_asyncio.fixture

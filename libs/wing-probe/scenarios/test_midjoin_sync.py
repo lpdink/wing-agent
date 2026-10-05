@@ -67,8 +67,10 @@ async def test_midjoin_before_first_chunk_reports_working(probe: Probe) -> None:
 
     delay 取 3s 而不是刚够用：这个相位没有别的东西撑着窗口（工具轮的窗口是
     工具执行时长），"确实落在首帧之前"这条证据必须离机器繁忙时的假红足够远。
+    用 ``first_delay`` 而不是 ``delay``：撑开窗口的是**首个内容帧之前**的等待，
+    ``delay`` 是逐帧的（5 帧 × 3s = 12s），那是白付的。
     """
-    probe.register(FIRST_CHUNK_MODEL, Turn.of(text="late answer", delay=3.0))
+    probe.register(FIRST_CHUNK_MODEL, Turn.of(text="late answer", first_delay=3.0))
     session = await probe.session(model=FIRST_CHUNK_MODEL)
 
     await session.send("hi")

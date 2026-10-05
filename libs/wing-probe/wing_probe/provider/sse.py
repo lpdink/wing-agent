@@ -7,7 +7,8 @@
 
 分片与延迟：``Turn.chunk`` 决定 thinking / text 的分片粒度；``ToolCall.cut``
 决定参数 JSON 的切断点；``Turn.delay`` 是**除首帧外**每帧前的等待秒数
-（由 server 逐帧 sleep）。
+（由 server 逐帧 sleep）；``Turn.first_delay`` 给定则取代**首个内容帧**上的
+``delay``（撑开「首帧未到」的窗口，其余帧仍按 ``delay`` 的节奏）。
 """
 
 from __future__ import annotations
@@ -73,6 +74,20 @@ def chunk_payload(
     return payload
 
 
+def frame_delay(turn: Turn, index: int) -> float:
+    """第 ``index`` 个载荷帧之前的等待秒数。
+
+    首帧不等待（服务端要尽快把响应头交出去）；``first_delay`` 给定时取代
+    第 1 帧——**首个内容帧**——上的 ``delay``，其余帧仍按 ``delay`` 的节奏。
+    窗口撑开与流式节奏因此可以各自表达，不会互相放大。
+    """
+    if index == 0:
+        return 0.0
+    if index == 1 and turn.first_delay is not None:
+        return turn.first_delay
+    return turn.delay
+
+
 def stream_frames(
     turn: Turn,
     *,
@@ -86,6 +101,8 @@ def stream_frames(
     帧序：role 空帧 → thinking 分片 → text 分片 → tool_calls 增量分片
     → finish_reason 帧（``turn.truncated`` 时跳过——流被上游切断，无终结
     信号）→ usage 帧 → ``[DONE]``。
+
+    逐帧等待见 :func:`frame_delay`（``first_delay`` 落在首个内容帧上）。
     """
     payloads: list[dict[str, Any]] = [
         chunk_payload(
@@ -153,7 +170,7 @@ def stream_frames(
     )
 
     frames = [
-        SSEFrame(data=payload, delay=0.0 if index == 0 else turn.delay)
+        SSEFrame(data=payload, delay=frame_delay(turn, index))
         for index, payload in enumerate(payloads)
     ]
     frames.append(SSEFrame(data=None, delay=turn.delay))
@@ -231,6 +248,7 @@ __all__ = [
     "completion_response",
     "done_frame",
     "encode_turn_stream",
+    "frame_delay",
     "stream_frames",
     "tool_calls_wire",
 ]
