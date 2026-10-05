@@ -89,6 +89,15 @@ class WingRuntime:
     """
 
     def __init__(self) -> None:
+        # 显式安装内置能力（顶层 wing/__init__ 不再有 import 副作用）：
+        #   - import wing.tools：装饰器注册内置工具（第一次 tool_registry.resolve
+        #     之前必须完成，否则 AgentTemplate.from_config 解析不到任何工具）
+        #   - metrics_registry.install()：注册 handler 并订阅 EventBus（幂等）
+        import wing.tools  # noqa: F401
+        from wing.metrics_registry import install as install_metrics
+
+        install_metrics()
+
         load_hooks(get_config().hooks)
         # TODO(future): config 驱动的 backend 选择（sessions.backend / dsn）——
         # SQL 后端（SQLite/PG/Supabase）到来时的扩展点。

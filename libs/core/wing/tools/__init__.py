@@ -4,6 +4,10 @@
 This package contains all tool implementations, automatically registered
 with the tool_registry on import.
 
+安装是显式的：顶层 `wing/__init__` 不再代劳导入本包（无 import 副作用），
+由组合根 `WingRuntime.__init__` 与测试侧 `libs/core/tests/conftest.py` 显式
+``import wing.tools`` 完成注册（机制不变：模块导入触发装饰器注册）。
+
 Tools:
     - AskUserQuestion: Ask user for feedback during execution
     - Bash: Execute shell commands
