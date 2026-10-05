@@ -11,9 +11,9 @@
 
 断言面：`GET /api/tools`（注册表视图）、请求体声明集、HTTP 状态码、workspace 文件。
 
-> **删除钉子（03 review [S]1 的"缺席"半边）未落在这里**：本 worktree（集成分支）上
-> `03_delete_legacy_tools` 尚未合并，`Explorer` / `BetterEdit` 仍在注册表里——"不含二者"
-> 的断言在合并前必然红。合并后要补的一行见本文件末尾注释与 design.md Assumption A3。
+> **删除钉子（03 review [S]1 的"缺席"半边）已落地**：本场景在集成分支上运行
+> （`03_delete_legacy_tools` 已并入），断言 `Explorer` / `BetterEdit` **不在**
+> 注册表里——两个名字在删除前后分别是"可解析"与"不可解析"，本文件两个方向都钉。
 """
 
 from __future__ import annotations
@@ -57,6 +57,9 @@ async def test_config_legacy_tool_names_are_tolerated(probe: Probe) -> None:
     """
     registry = await _registry_names(probe)
     assert {"Bash", "Read", "Write"} <= registry, registry
+    # 删除钉子（03 review [S]1 的"缺席"半边）：两个已删工具名真的不在注册表里——
+    # 与上面"配置里留着它们也不炸"的容忍契约是**两个方向**的断言。
+    assert not ({"Explorer", "BetterEdit"} & registry), registry
     expected = sorted(name for name in CONFIG_TOOLS if name in registry)
 
     probe.register(
@@ -105,17 +108,3 @@ async def test_explicit_override_with_unknown_name_is_rejected(probe: Probe) -> 
 
     sessions = await probe.driver_required.http.list_sessions()
     assert sessions == {"sessions": []}, sessions
-
-
-# ── HANDOFF（C.2）：删除的"缺席"半边 ─────────────────────────────
-#
-# `03_delete_legacy_tools`（L2 lane）合并到集成分支之后，在
-# `test_config_legacy_tool_names_are_tolerated` 里补一行**严格**断言：
-#
-#     assert not ({"Explorer", "BetterEdit"} & registry), registry
-#
-# 本 worktree 里写它必然红（两个名字此刻仍在 `GET /api/tools` 里），与"probe 全绿"
-# 闸门冲突——这是结构性约束，不存在与合并顺序无关的等价断言：使"删除"安全的
-# **容忍契约**（配置里留着已删名字不炸会话）已由本文件的 `GhostTool` 分支独立钉住，
-# 两个方向都断言了（可解析的一个不少、不可解析的一个不多）；缺的只是"名字真的没了"
-# 这条**否定式**契约。由 scheduler 登记在步骤 12/13 落地（design.md Assumption A3）。

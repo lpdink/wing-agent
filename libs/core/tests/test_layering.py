@@ -397,8 +397,14 @@ def _r1(ctx: ViolationContext) -> bool:
 # re-export 路径；但 WingAgent / Inbound 这类运行时符号不在此列（它们与
 # `from wing.agent.core import WingAgent` 是同一个越层依赖的两种写法）。
 AGENT_NARROW_INTERFACE: frozenset[str] = frozenset(
-    {"ToolContext", "current_tool_call_id"}
+    {"ToolContext", "current_tool_call_id", "tool_context"}
 )
+"""允许经包属性形态 import 的符号。
+
+``tool_context`` 是子模块名：``wing.agent.__init__`` 的 ``from .tool_context import
+ToolContext`` 使 ``wing.agent.tool_context`` 成为包属性，``from wing.agent import
+tool_context`` 与 ``import wing.agent.tool_context`` 在运行期等价（两者都放行）。
+"""
 
 
 def _r2(ctx: ViolationContext) -> bool:
@@ -495,28 +501,14 @@ KNOWN_VIOLATIONS: dict[str, set[str]] = {
         # cleared by 07_split_session_chain
         "wing/session_manager.py:44 → wing.gateway.protocol",
     },
-    "R2": {
-        # cleared by 03_delete_legacy_tools（Explorer 整体删除）
-        "wing/tools/explorer.py:21 → wing.context_manager",
-        # cleared by 03_delete_legacy_tools（Explorer 整体删除）
-        "wing/tools/explorer.py:25 → wing.store",
-        # cleared by 03_delete_legacy_tools（Explorer 整体删除）
-        "wing/tools/explorer.py:29 → wing.agent.core",
-        # cleared by 03_delete_legacy_tools（Explorer 整体删除）
-        "wing/tools/explorer.py:81 → wing.agent.core",
-    },
+    "R2": set(),
     "R5": {
         # cleared by 07_split_session_chain（tracked_list 迁出 wing/common/ → wing/chain.py，不再受 R5 约束）
         "wing/common/tracked_list.py:28 → wing.store.base",
         # cleared by 07_split_session_chain（同上；chain 依赖 event 注册表是设计允许项）
         "wing/common/tracked_list.py:171 → wing.event",
     },
-    "R6": {
-        # cleared by 06_public_api（顶层 wing/__init__ 无副作用化）
-        "wing/__init__.py:1 → wing.tools",
-        # cleared by 06_public_api（同上）
-        "wing/__init__.py:2 → wing.metrics_registry",
-    },
+    "R6": set(),
 }
 
 
@@ -817,6 +809,18 @@ def test_bypass_shapes_are_detected() -> None:
         (
             "from wing.agent import ToolContext, current_tool_call_id\n",
             "wing/tools/probe.py",
+            set(),
+        ),
+        (
+            "from wing.agent import tool_context\n",
+            "wing/tools/probe.py",
+            set(),
+        ),
+        # N1（r2）：R5 例外只对**函数体内**懒加载生效——同一对写成模块级必须变红
+        ("from wing.config import get_config\n", "wing/common/logger.py", {"R5"}),
+        (
+            "def f():\n    from wing.config import get_config\n",
+            "wing/common/logger.py",
             set(),
         ),
         # 合法形态不应误报
