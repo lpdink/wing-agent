@@ -67,6 +67,14 @@ pub const TIPS: &[Tip] = &[
     },
     Tip {
         group: TipGroup::Keys,
+        text: "点击状态栏 ☆ 置顶会话，再点取消",
+    },
+    Tip {
+        group: TipGroup::Keys,
+        text: "点击状态栏的会话 ID 可复制它",
+    },
+    Tip {
+        group: TipGroup::Keys,
         text: "PgUp 翻页，Ctrl+End 回到底部",
     },
     Tip {

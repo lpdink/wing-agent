@@ -90,6 +90,12 @@ class SessionMetadata(BaseModel):
       不做语义解析）。由 ``SessionManager.set_session_tags``（``POST
       /api/session/tag``）原子增删维护；不进 LLM 请求前缀，**fork 不继承**。
       空列表与 None 等价（序列化排除 None——无标签的 metadata.json 零字段）。
+    - tag_meta：每个标签的元数据记录（``{tag: TagMeta}``），与 tags 同生同灭、
+      **键集 ⊆ tags**（不属于 tags 的键在读取投影与下次写盘时丢弃）。由标签
+      变更原语（``session.tags.apply_tag_ops``）维护：tag 被添加时记录一次
+      加入时间，移除时删除记录。值是对象（当前只有 ``added_at``），**面向
+      增量**：后续要加审计字段（来源 / actor / 变更历史）时往 ``TagMeta`` 里
+      加即可，不必再动存储结构。空字典与 None 等价（与 tags 同一约定）。
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -109,12 +115,57 @@ class SessionMetadata(BaseModel):
     yolo: bool | None = None
     max_turns: int | None = None
     tags: list[str] | None = None
+    tag_meta: dict[str, "TagMeta"] | None = None
 
     @field_validator("tags", mode="after")
     @classmethod
     def _normalize_tags(cls, value: list[str] | None) -> list[str] | None:
         """空列表与 None 等价（无标签不落字段，存量文件零变化）。"""
         return value or None
+
+    @field_validator("tag_meta", mode="before")
+    @classmethod
+    def _drop_bad_tag_meta(cls, value: object) -> dict[str, TagMeta] | None:
+        """读侧容错：坏键 / 坏值**逐条丢弃**，不让整份 metadata 降级。
+
+        ``tag_meta`` 是嵌套结构，被手改 / 老版本写坏的概率远高于平铺字段；
+        一条坏记录就让整个会话的 metadata（含 model / 提示词等）变成空对象
+        是不可接受的。这里在模型边界做与 ``session.tags.sanitize_tag_meta``
+        同一精神的清洗（丢弃而非 raise）；"键集 ⊆ tags" 的约束不在这里管
+        （需要 tags 上下文，由投影与写路径负责）。空字典与 None 等价。
+        """
+        if not isinstance(value, dict):
+            return None
+        clean: dict[str, TagMeta] = {}
+        for key, raw in value.items():
+            if not isinstance(key, str):
+                continue
+            try:
+                clean[key] = (
+                    raw if isinstance(raw, TagMeta) else TagMeta.model_validate(raw)
+                )
+            except Exception:
+                continue
+        return clean or None
+
+
+class TagMeta(BaseModel):
+    """单个标签的元数据记录（``SessionMetadata.tag_meta`` 的值）。
+
+    **面向增量**：现在是单字段对象，未来加审计维度（来源 / actor / 变更
+    历史）时在此扩展，存储结构不必再动。``extra="ignore"`` 保证新版本写入
+    的字段不会让旧版本的读取失败（旧版本读新文件时静默丢弃未知字段）。
+
+    added_at: 标签**加入**的时间（``datetime.now().isoformat()``，本地 naive
+    ISO——与 ``last_interaction`` 同一时间口径）。重复添加（已存在的 tag）
+    是幂等 no-op，**不刷新**这个时间；移除即删除整条记录（清空后整字段
+    从 metadata 消失）。缺失 / 不可解析 = 时间未知：读取方（前端排序等）
+    自行降级，不影响标签本身的有效性。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    added_at: str | None = None
 
 
 class SessionSummary(BaseModel):

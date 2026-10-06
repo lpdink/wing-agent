@@ -17,6 +17,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::config::ThemePalette;
 use crate::protocol::SessionStatus;
+use crate::render::markdown::truncate_left_to_display_width;
 use crate::render::markdown::truncate_to_display_width;
 
 /// Maximum rows to show before scrolling (single-line popups).
@@ -57,6 +58,10 @@ pub struct RichSessionRow {
     pub last_active: String,
     /// 第二行：session 标题。
     pub title: String,
+    /// 第一行：session 工作目录（**只展示**，不参与排序）。
+    pub workspace: String,
+    /// 是否被 pin —— 第一行末尾一个星标（`★`）；未 pin 不占位。
+    pub pinned: bool,
 }
 
 /// Format an ISO 8601 timestamp (e.g. `2025-07-22T21:41:28.123`) into a compact
@@ -341,10 +346,11 @@ impl<'a> SelectionPopup<'a> {
     }
 
     /// Render a rich two-line session row:
-    /// line 1 = ` <status icon> <last_active>`, line 2 = `    <title>`.
+    /// line 1 = ` <icon> <workspace>  [<last_active>]` + ` ★`（仅 pinned）,
+    /// line 2 = `    <title>`.
     ///
-    /// workspace 不渲染：它既不参与排序也不参与分组（`/session` 只把它留给搜索
-    /// 过滤，见 `filter_session_candidates`），行 1 让位给「什么状态 + 多久没动」。
+    /// workspace 只做展示（#145 删掉的是「按 workspace 排序」，不是这段显示）：
+    /// 行 1 的容量先让给时间标签与星标，剩下的才画 workspace（超长截断）。
     #[allow(clippy::too_many_arguments)]
     fn render_rich_row(
         &self,
@@ -359,7 +365,7 @@ impl<'a> SelectionPopup<'a> {
     ) {
         let width = area.width as usize;
 
-        // ── Line 1: status icon + last_active ──
+        // ── Line 1: status icon + workspace + [last_active] + [★] ──
         Self::clear_line(buf, area, y, base_style);
         let mut line1: Vec<Span<'static>> = Vec::new();
         line1.push(Span::styled(" ", base_style));
@@ -369,18 +375,44 @@ impl<'a> SelectionPopup<'a> {
         ));
         line1.push(Span::styled(" ", base_style));
 
-        // The icon prefix already occupies 3 columns.
-        let budget = width.saturating_sub(3);
-        let last_active = if UnicodeWidthStr::width(rich.last_active.as_str()) > budget {
-            truncate_to_display_width(&rich.last_active, budget)
+        // "● " prefix occupies 3 columns; the time tag " [MM-DD HH:MM]" 14;
+        // the pin star " ★" 2. The workspace gets what is left.
+        let time_tag = if rich.last_active.is_empty() {
+            String::new()
         } else {
-            rich.last_active.clone()
+            format!(" [{}]", rich.last_active)
         };
-        if !last_active.is_empty() {
+        let star_w = if rich.pinned { 2 } else { 0 };
+        let available = width.saturating_sub(3 + star_w);
+        let ws_budget = available.saturating_sub(UnicodeWidthStr::width(time_tag.as_str()));
+
+        let workspace = if rich.workspace.is_empty() {
+            "(no workspace)".to_string()
+        } else if UnicodeWidthStr::width(rich.workspace.as_str()) > ws_budget {
+            // 左截断：路径的区分度在尾段（`…/ws/wing-agent`）——右截断留下的
+            // 是每个会话都一样的 `/Users/…` 前缀，等于没显示。
+            truncate_left_to_display_width(&rich.workspace, ws_budget)
+        } else {
+            rich.workspace.clone()
+        };
+        line1.push(Span::styled(
+            workspace,
+            Style::default().fg(accent).patch(base_style),
+        ));
+
+        if !time_tag.is_empty() {
             let time_fg = if is_selected { accent } else { dim_color };
             line1.push(Span::styled(
-                last_active,
+                time_tag,
                 Style::default().fg(time_fg).patch(base_style),
+            ));
+        }
+        if rich.pinned {
+            // 星标只标"已 pin"（未 pin 不占位）：展示面在 pin 与否之间只差
+            // 这一个字形，行宽不因 pin 变化而抖动。
+            line1.push(Span::styled(
+                " ★",
+                Style::default().fg(Color::Yellow).patch(base_style),
             ));
         }
 
@@ -545,6 +577,8 @@ mod tests {
                     status: SessionStatus::Idle,
                     last_active: "07-22 21:41".into(),
                     title: format!("title {i}"),
+                    workspace: "/ws".into(),
+                    pinned: false,
                 }),
             })
             .collect();
@@ -573,6 +607,8 @@ mod tests {
                 status: SessionStatus::Working,
                 last_active: String::new(),
                 title: "t".into(),
+                workspace: String::new(),
+                pinned: false,
             }),
         };
         assert_eq!(rich.height(), 2);
@@ -597,6 +633,16 @@ mod tests {
     }
 
     fn session_row(status: SessionStatus, last_active: &str, title: &str) -> SelectionRow {
+        session_row_at(status, last_active, title, "/ws/wing", false)
+    }
+
+    fn session_row_at(
+        status: SessionStatus,
+        last_active: &str,
+        title: &str,
+        workspace: &str,
+        pinned: bool,
+    ) -> SelectionRow {
         SelectionRow {
             name: "sess-1".into(),
             description: String::new(),
@@ -604,34 +650,76 @@ mod tests {
                 status,
                 last_active: last_active.into(),
                 title: title.into(),
+                workspace: workspace.into(),
+                pinned,
             }),
         }
     }
 
     #[test]
-    fn test_rich_row_line1_is_status_icon_and_last_active() {
-        // line 1 只有图标 + 最后活跃时间（workspace 不再渲染）。
+    fn test_rich_row_line1_is_icon_workspace_and_time() {
+        // line 1 = 图标 + workspace + 时间标签（workspace 的**展示**回归；
+        // 它不参与排序，只和搜索有关）。
         let row = session_row(SessionStatus::Working, "07-22 21:41", "my session");
         let (line1, line2) = rich_lines(&row, "", 40);
-        assert_eq!(line1, " ● 07-22 21:41");
+        assert_eq!(line1, " ● /ws/wing [07-22 21:41]");
         assert_eq!(line2.trim_start(), "my session");
     }
 
     #[test]
-    fn test_rich_row_without_timestamp_shows_only_the_icon() {
-        // 时间不可解析（format_last_active 给空串）时不留悬空的空格/括号。
+    fn test_rich_row_pin_star_is_only_drawn_when_pinned() {
+        let pinned = session_row_at(SessionStatus::Idle, "07-22 21:41", "t", "/ws", true);
+        let (line1, _) = rich_lines(&pinned, "", 40);
+        assert_eq!(line1, " ● /ws [07-22 21:41] ★");
+
+        // 未 pin 不占位：同一行去掉星标后是另一条完整的行（宽度不抖动）。
+        let plain = session_row_at(SessionStatus::Idle, "07-22 21:41", "t", "/ws", false);
+        let (line1, _) = rich_lines(&plain, "", 40);
+        assert_eq!(line1, " ● /ws [07-22 21:41]");
+        assert!(!line1.contains('★'));
+    }
+
+    #[test]
+    fn test_rich_row_without_timestamp_keeps_the_workspace() {
+        // 时间不可解析（format_last_active 给空串）时不留悬空的空格/括号；
+        // workspace 照常渲染。
         let row = session_row(SessionStatus::Inactive, "", "untitled work");
         let (line1, line2) = rich_lines(&row, "", 40);
-        assert_eq!(line1, " ●");
+        assert_eq!(line1, " ● /ws/wing");
         assert_eq!(line2.trim_start(), "untitled work");
     }
 
     #[test]
-    fn test_rich_row_truncates_a_long_timestamp_to_the_row_width() {
-        // 极窄终端：line 1 不得超过行宽（set_line 的边界不外溢）。
-        let row = session_row(SessionStatus::Idle, "07-22 21:41", "title");
-        let (line1, _) = rich_lines(&row, "", 8);
-        assert_eq!(UnicodeWidthStr::width(line1.as_str()), 8, "{line1:?}");
+    fn test_rich_row_without_a_workspace_says_so() {
+        // 老会话 / 无 workspace：显式占位，而不是一段空白（那看起来像渲染失败）。
+        let row = session_row_at(SessionStatus::Idle, "07-22 21:41", "t", "", false);
+        let (line1, _) = rich_lines(&row, "", 40);
+        assert_eq!(line1, " ● (no workspace) [07-22 21:41]");
+    }
+
+    #[test]
+    fn test_rich_row_truncates_the_workspace_from_the_left_before_time_and_star() {
+        // 极窄终端：时间标签与星标先保，workspace 左截断（保留区分度最高的
+        // 尾段——右截断留下的 `/a/very/…` 对每个会话都一样）；line 1 不得超宽。
+        let row = session_row_at(
+            SessionStatus::Idle,
+            "07-22 21:41",
+            "title",
+            "/a/very/long/workspace/path",
+            true,
+        );
+        let (line1, _) = rich_lines(&row, "", 24);
+        assert_eq!(UnicodeWidthStr::width(line1.as_str()), 24, "{line1:?}");
+        assert!(line1.ends_with("★"), "the pin star survives: {line1:?}");
+        assert!(line1.contains("[07-22 21:41]"), "{line1:?}");
+        assert!(
+            line1.contains('…') && line1.contains("path"),
+            "the workspace keeps its tail, got: {line1:?}"
+        );
+        assert!(
+            !line1.contains("/a/very"),
+            "the shared prefix is what gets dropped, got: {line1:?}"
+        );
     }
 
     #[test]

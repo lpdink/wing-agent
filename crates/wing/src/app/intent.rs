@@ -71,6 +71,10 @@ pub enum AppIntent {
     /// Write text to clipboard via OSC52 escape sequence.
     CopyToClipboard(String),
 
+    /// 切换当前会话的 pin（置顶 = 会话上的一个普通标签，前端约定、后端零感知
+    /// ——见 `crate::shared::pinning`；写入走通用的 `/api/session/tag`）。
+    SetSessionPin { pinned: bool },
+
     /// Open a markdown link target with the system opener (browser for URLs,
     /// default application for local files). The raw destination is carried
     /// verbatim — resolution happens in `util::open` on the blocking pool.

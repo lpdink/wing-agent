@@ -39,7 +39,7 @@ from wing.schema import ChainNode, Message
 from wing.store import SessionMetadata, SessionStore
 
 from .session import Session, tool_refs
-from .tags import TagMutation, apply_tag_ops, sanitize_tags
+from .tags import TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
 from .template import AgentTemplate, AgentTemplateManager
 
 if TYPE_CHECKING:
@@ -480,6 +480,9 @@ class SessionManager:
         - 未加载 / 已逐出 → 直接 store 读改写，**不水合**——给旧会话打
           favorite 不会把它"弄醒"变成 idle（会话保持 inactive，内存零代价）。
 
+        打标时间（``tag_meta``）随同一处变更维护：新增记时间、移除删记录，
+        与 tags 一次落盘。
+
         session id 先过格式闸门（``_resolve_with_store``）：不合规的值按
         "不存在"处理，绝不触达 store（防路径穿越）。
 
@@ -499,9 +502,12 @@ class SessionManager:
             return session.apply_tag_ops(add=add, remove=remove)
 
         metadata = store.load_metadata(resolved_id) or SessionMetadata()
-        mutation = apply_tag_ops(metadata.tags, add=add, remove=remove)
+        mutation = apply_tag_ops(
+            metadata.tags, add=add, remove=remove, meta=metadata.tag_meta
+        )
         if mutation.added or mutation.removed:
             metadata.tags = mutation.tags or None
+            metadata.tag_meta = mutation.tag_meta or None
             store.save_metadata(resolved_id, metadata)
         return mutation
 
@@ -664,6 +670,7 @@ class SessionManager:
                     continue
 
                 loaded = self._sessions.get(summary.id)
+                tags = sanitize_tags(metadata.tags)
                 result.append(
                     SessionInfo(
                         id=summary.id,
@@ -671,7 +678,8 @@ class SessionManager:
                         workspace=metadata.workspace,
                         last_interaction=metadata.last_interaction,
                         status=loaded.status if loaded is not None else "inactive",
-                        tags=sanitize_tags(metadata.tags),
+                        tags=tags,
+                        tag_meta=sanitize_tag_meta(metadata.tag_meta, tags),
                     )
                 )
 

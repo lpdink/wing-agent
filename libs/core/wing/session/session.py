@@ -27,10 +27,10 @@ from wing.context import ContextManager
 from wing.media import MediaAccess
 from wing.provider import create_provider
 from wing.schema import ChainNode, Message, Tool
-from wing.store import SessionMetadata, SessionStore
+from wing.store import SessionMetadata, SessionStore, TagMeta
 from wing.tool_registry import ToolRef
 
-from .tags import TagMutation, apply_tag_ops, sanitize_tags
+from .tags import TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
 
 if TYPE_CHECKING:
     from wing.agent import WingAgent
@@ -362,6 +362,11 @@ class Session:
         return sanitize_tags(self._metadata.tags)
 
     @property
+    def tag_meta(self) -> dict[str, TagMeta]:
+        """当前会话的标签记录（打标时间等；键集 ⊆ ``tags``，读侧已清洗）。"""
+        return sanitize_tag_meta(self._metadata.tag_meta, self.tags)
+
+    @property
     def status(self) -> "SessionStatus":
         """Session 运行时状态（idle/working/waiting），委托 agent 推导。"""
         return self._agent.status
@@ -456,12 +461,21 @@ class Session:
     ) -> TagMutation:
         """原子应用标签增删并落盘（幂等；无实际变化不产生写）。
 
+        打标时间随变更一并维护（新增记时间、移除删记录）——整条 metadata
+        一次落盘，两个字段不会各自漂移。
+
         Raises:
             ValueError: 标签非法（校验在 ``session.tags`` 统一执行）
         """
-        mutation = apply_tag_ops(self._metadata.tags, add=add, remove=remove)
+        mutation = apply_tag_ops(
+            self._metadata.tags,
+            add=add,
+            remove=remove,
+            meta=self._metadata.tag_meta,
+        )
         if mutation.added or mutation.removed:
             self._metadata.tags = mutation.tags or None
+            self._metadata.tag_meta = mutation.tag_meta or None
             self._save_metadata()
         return mutation
 

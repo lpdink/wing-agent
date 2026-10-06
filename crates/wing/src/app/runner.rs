@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::app::intent::{AppIntent, FetchPayload, FetchResult};
 use crate::app::transport::Transport;
+use crate::shared::pinning::{is_pinned, pin_tag_ops};
 use crate::tui::WingTerminal;
 use crate::ui::toast::Toast;
 use crate::util::title;
@@ -73,6 +74,31 @@ pub async fn execute_intent(
                         format!("Copy failed: {e}"),
                         std::time::Duration::from_secs(3),
                     ));
+                }
+            }
+        }
+        AppIntent::SetSessionPin { pinned } => {
+            // pin = 当前会话上的一个普通标签（前端约定，后端零感知）。写走
+            // 通用标签端点：加 `pin` / 删 `pin`，幂等——重复点击不会累积。
+            // 目标状态 → 请求体的映射是纯函数（`pin_tag_ops`），有单测锚定：
+            // 翻反了只会"点了没反应"（幂等 + 回读纠正），现场没有报错。
+            if let Some(t) = transport {
+                let http = t.http.clone();
+                let session_id = app.session_id.clone();
+                let (add, remove) = pin_tag_ops(pinned);
+                match http.tag_session(&session_id, add, remove).await {
+                    Ok(resp) => {
+                        // 以服务端回读为准（而不是点击时的乐观值）。
+                        app.status.pinned = is_pinned(&resp.tags);
+                        tracing::debug!(pinned = app.status.pinned, "session pin toggled");
+                    }
+                    Err(e) => {
+                        tracing::warn!("session pin failed: {e}");
+                        app.show_toast(Toast::warning(
+                            format!("Pin failed: {e}"),
+                            std::time::Duration::from_secs(3),
+                        ));
+                    }
                 }
             }
         }
@@ -644,6 +670,8 @@ mod tests {
             workspace: "/old".into(),
             status: "idle".into(),
             last_interaction: "2025-01-01T00:00:00Z".into(),
+            pinned: false,
+            pin_added_at: None,
         }];
         app
     }

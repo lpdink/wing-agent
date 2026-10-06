@@ -74,6 +74,7 @@ pub use links::strip_osc8;
 pub use links::symbol_width;
 
 // Re-export utilities used by other modules.
+pub use types::truncate_left_to_display_width;
 pub use types::truncate_to_display_width;
 
 use std::borrow::Cow;

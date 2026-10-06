@@ -470,7 +470,7 @@ impl App {
                     && is_must_select_command(cmd)
                 {
                     self.input.set_text(&text);
-                    self.update_popup();
+                    self.update_popup_from_input();
                     if self.popup.active.is_active() {
                         return;
                     }
@@ -481,7 +481,7 @@ impl App {
             }
             InputAction::Escape | InputAction::None => {
                 // Update popup based on new text.
-                self.update_popup();
+                self.update_popup_from_input();
             }
         }
         // NOTE: editing the composer must NOT yank the view back to the
@@ -506,7 +506,7 @@ impl App {
             crossterm::event::KeyCode::Tab => {
                 if let Some(completion) = self.popup.active.completion_text() {
                     self.input.set_text(&completion);
-                    self.update_popup();
+                    self.update_popup_from_input();
                 }
                 true
             }
@@ -552,7 +552,7 @@ impl App {
                 } else {
                     if let Some(completion) = self.popup.active.completion_text() {
                         self.input.set_text(&completion);
-                        self.update_popup();
+                        self.update_popup_from_input();
                     }
                 }
                 true
@@ -577,7 +577,7 @@ impl App {
             return;
         }
         self.input.insert_str(text);
-        self.update_popup();
+        self.update_popup_from_input();
     }
 
     // -----------------------------------------------------------------------

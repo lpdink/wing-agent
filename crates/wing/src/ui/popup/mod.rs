@@ -79,12 +79,11 @@ impl ActivePopup {
 
         // Session commands (`/session`, `/ss`): HTTP-fetched rich candidates.
         if is_session_command(cmd) {
-            // 这个分支只在**缓存为空**时才发请求（见下方 FetchSessionList），所以
-            // 保持原序渲染 == 渲染「上一次抓取时」的顺序：普通对话不失效缓存，
-            // 而列表的主排序键是每条消息都在更新的 last_interaction —— 打开面板
-            // 前连聊很久，看到的仍是旧顺序与旧时间。修法（打开面板即刷新一次，
-            // 等价于用当前顺序渲染）见 #147。
-            if cache.has_sessions() {
+            // 缓存只负责"先渲染旧行"：打开面板的那一刻由输入路径补发一次刷新
+            // （#147，见 `App::update_popup_from_input`），不再是"有缓存就不
+            // 取数"的判据。**空列表也算抓过**——否则"抓到了 0 条"会退回"等待
+            // 首帧"分支，每一次刷新响应都再发一次请求（空列表请求环）。
+            if cache.sessions_fetched {
                 let candidates = &cache.sessions;
                 // must-select 命令精确匹配时保持 popup 打开（Enter = 确认选择）；
                 // 非 must-select 命令精确匹配即隐藏。
@@ -273,6 +272,38 @@ impl ActivePopup {
         }
     }
 
+    /// 把选中位重新对准某一行（按 `name` 精确匹配；不存在则不动）。
+    ///
+    /// 用于「原地刷新」：行序可能因 pin / 活跃度变化，光标按 id 回到原来
+    /// 那一行，而不是留在下标处（那会指到别的会话）。
+    pub fn reselect(&mut self, name: &str) -> bool {
+        match self {
+            Self::None => false,
+            Self::Command { rows, state, .. } | Self::SubCommand { rows, state, .. } => {
+                match rows.iter().position(|row| row.name == name) {
+                    Some(index) => {
+                        state.select(index);
+                        true
+                    }
+                    None => false,
+                }
+            }
+        }
+    }
+
+    /// 当前是否处于 session 候选面板（`/session` / `/ss` 的子命令态）。
+    ///
+    /// 「打开面板即刷新一次」（#147）靠它判断面板的进入 / 离开：**同一个
+    /// 面板身份内只刷新一次**，刷新响应原地换行不再次触发。
+    /// 注意等待首帧列表的 `Command` 等待态不算面板本体——那条路径自己
+    /// 返回 [`PopupAction::FetchSessionList`]，重复计数会多打一次请求。
+    pub fn session_panel_command(&self) -> Option<&str> {
+        match self {
+            Self::SubCommand { command, .. } if is_session_command(command) => Some(command),
+            _ => None,
+        }
+    }
+
     /// Build the completion text for the selected item.
     ///
     /// For commands with candidates: returns command + space (e.g. "/model ").
@@ -357,6 +388,8 @@ mod tests {
             workspace: "/tmp/ws".into(),
             status: "idle".into(),
             last_interaction: "2025-07-22T21:41:00".into(),
+            pinned: false,
+            pin_added_at: None,
         }
     }
 
@@ -537,6 +570,7 @@ mod tests {
         let mut popup = ActivePopup::default();
         let cache = CandidateCache {
             sessions: vec![sess("sess-1", "My Session"), sess("sess-2", "Other")],
+            sessions_fetched: true,
             ..CandidateCache::default()
         };
         let action = popup.update_from_input("/session ", &cache);
@@ -550,6 +584,7 @@ mod tests {
         let mut popup = ActivePopup::default();
         let cache = CandidateCache {
             sessions: vec![sess("sess-1", "My Session"), sess("sess-2", "Other")],
+            sessions_fetched: true,
             ..CandidateCache::default()
         };
         let action = popup.update_from_input("/session sess-1", &cache);
@@ -564,10 +599,36 @@ mod tests {
     }
 
     #[test]
+    fn test_reselect_re_anchors_by_name_and_leaves_a_missing_one_alone() {
+        let mut popup = ActivePopup::default();
+        let cache = CandidateCache {
+            sessions: vec![sess("sess-1", "My Session"), sess("sess-2", "Other")],
+            sessions_fetched: true,
+            ..CandidateCache::default()
+        };
+        popup.update_from_input("/ss", &cache);
+        assert_eq!(popup.selected_name(), Some("sess-1"));
+
+        // 命中锚点：光标跟到那一行（原地刷新后行序变了也不跳走）。
+        assert!(popup.reselect("sess-2"));
+        assert_eq!(popup.selected_name(), Some("sess-2"));
+
+        // 锚点不在列表里（会话被删 / 过滤掉了）：光标**不动**，返回 false。
+        assert!(!popup.reselect("gone"));
+        assert_eq!(popup.selected_name(), Some("sess-2"));
+
+        // 没有面板时什么都不做。
+        let mut none = ActivePopup::None;
+        assert!(!none.reselect("sess-1"));
+        assert!(matches!(none, ActivePopup::None));
+    }
+
+    #[test]
     fn test_session_popup_rows_are_rich() {
         let mut popup = ActivePopup::default();
         let cache = CandidateCache {
             sessions: vec![sess("sess-1", "My Session")],
+            sessions_fetched: true,
             ..CandidateCache::default()
         };
         popup.update_from_input("/session ", &cache);

@@ -529,6 +529,11 @@ fn test_stale_fetch_results_are_discarded() {
 /// Feed a `FetchPayload::Info` result into the app (the `/api/session/info`
 /// projection path).
 fn feed_info(app: &mut App, model: &str, display_name: Option<&str>) {
+    feed_info_with_tags(app, model, display_name, vec![]);
+}
+
+/// 同 [`feed_info`]，但可以带上会话标签（pin 星标的真值来源）。
+fn feed_info_with_tags(app: &mut App, model: &str, display_name: Option<&str>, tags: Vec<String>) {
     use crate::app::intent::FetchPayload;
     use crate::app::intent::FetchResult;
     use wing_api_client::models::ContextStatsInfo;
@@ -556,9 +561,28 @@ fn feed_info(app: &mut App, model: &str, display_name: Option<&str>) {
             },
             skills_info: String::new(),
             system_prompt: String::new(),
-            tags: vec![],
+            tags,
+            tag_meta: Default::default(),
         })),
     });
+}
+
+#[test]
+fn test_info_carries_the_pin_state_of_the_current_session() {
+    // 星标的真值只从这里来（`/api/session/info` 的 tags）：赋值错了方向就反，
+    // 点一下想 unpin 结果又 add（幂等自愈，但用户看到的是"没反应"）。
+    let mut app = test_app();
+    assert!(!app.status.pinned);
+
+    feed_info_with_tags(&mut app, "m", None, vec!["pin".into()]);
+    assert!(app.status.pinned, "pin 标签 → 星标点亮");
+
+    // 别的标签不算 pin；unpin 后（标签消失）星标熄灭。
+    feed_info_with_tags(&mut app, "m", None, vec!["favorite".into()]);
+    assert!(!app.status.pinned, "只有裸 `pin` 才算置顶");
+    feed_info_with_tags(&mut app, "m", None, vec!["pin".into()]);
+    feed_info_with_tags(&mut app, "m", None, vec![]);
+    assert!(!app.status.pinned, "标签被移除 → 星标熄灭");
 }
 
 #[test]
@@ -592,90 +616,453 @@ fn test_info_display_name_prefers_the_gateway_and_falls_back_locally() {
     assert_eq!(app.status.model_display_name, None);
 }
 
-// ── Session list: the backend owns the order ──
+// ── Session list: backend base order + the pin overlay ──
 
-/// `/session`（`/ss`）的候选缓存只做投影：顺序 = 后端 `/api/session/list` 的顺序。
+/// `/session`（`/ss`）的候选缓存：后端下发的**基准序**原样保留，唯一的前端
+/// 语义叠加是「pin 置顶」（组内后 pin 的更靠前，见 `shared::pinning`）。
 ///
-/// 断言用的是「旧代码会重排」的形状，三条重排键逐一覆盖：
+/// 断言用的仍是「旧代码会重排」的形状，三条旧重排键逐一覆盖：
 /// - **workspace 匹配**：inactive 行的 workspace 正是启动目录，active 行的不是；
 /// - **状态优先级**：payload 里更旧的 `waiting`（旧 rank 0）排在更新的 `idle`
 ///   （旧 rank 2）之后——只看 rank 会把它提到最前；
 /// - **组合**：旧的全键 `(ws_mismatch, rank)` 给出的顺序与 payload 完全相反。
-#[test]
-fn test_session_list_keeps_the_backend_order() {
+mod session_list {
+    use crate::app::App;
     use crate::app::intent::FetchPayload;
     use crate::app::intent::FetchResult;
+    use crate::config::AppConfig;
+    use crate::shared::pinning::PIN_TAG;
     use wing_api_client::models::SessionInfo;
     use wing_api_client::models::SessionListResponse;
+    use wing_api_client::models::TagMeta;
 
-    let session = |id: &str, name: &str, ws: &str, status: &str, at: &str| SessionInfo {
-        id: id.into(),
-        name: Some(name.into()),
-        created_at: None,
-        template_name: None,
-        workspace: Some(ws.into()),
-        last_interaction: Some(at.into()),
-        status: status.into(),
-        tags: vec![],
-    };
+    /// `pinned_at` 给出时带 `pin` 标签与对应记录。
+    fn session(
+        id: &str,
+        name: &str,
+        ws: &str,
+        status: &str,
+        at: &str,
+        pinned_at: Option<&str>,
+    ) -> SessionInfo {
+        let tags = if pinned_at.is_some() {
+            vec![PIN_TAG.to_string()]
+        } else {
+            vec![]
+        };
+        let tag_meta = pinned_at
+            .map(|stamp| {
+                [(
+                    PIN_TAG.to_string(),
+                    TagMeta {
+                        added_at: Some(stamp.to_string()),
+                    },
+                )]
+                .into_iter()
+                .collect()
+            })
+            .unwrap_or_default();
+        SessionInfo {
+            id: id.into(),
+            name: Some(name.into()),
+            created_at: None,
+            template_name: None,
+            workspace: Some(ws.into()),
+            last_interaction: Some(at.into()),
+            status: status.into(),
+            tags,
+            tag_meta,
+        }
+    }
 
-    let payload = SessionListResponse {
-        sessions: vec![
-            // active（在内存里）且时间最新，但 workspace 与启动目录不匹配。
-            session(
-                "active-new",
-                "current work",
-                "/elsewhere/project",
-                "idle",
-                "2025-06-01T00:00:00",
-            ),
-            // 还在 active 组里但时间更旧：waiting 不享有状态优先级。
-            session(
-                "active-old-waiting",
-                "waiting for me",
-                "/elsewhere/project",
-                "waiting",
-                "2025-01-01T00:00:00",
-            ),
-            // inactive 的时间居中，workspace 正是启动目录。
-            session(
-                "inactive-mid",
-                "old work",
-                "/launch/project",
-                "inactive",
-                "2025-03-01T00:00:00",
-            ),
-        ],
-    };
+    fn app() -> App {
+        App::new(
+            "test-session".into(),
+            AppConfig::default(),
+            Some("/launch/project".into()),
+        )
+    }
 
-    let mut app = App::new(
-        "test-session".into(),
-        AppConfig::default(),
-        Some("/launch/project".into()),
+    fn feed(app: &mut App, sessions: Vec<SessionInfo>) {
+        let session_id = app.session_id.clone();
+        app.handle_fetch_result(FetchResult {
+            session_id,
+            payload: FetchPayload::SessionList(SessionListResponse { sessions }),
+        });
+    }
+
+    fn ids(app: &App) -> Vec<&str> {
+        app.popup
+            .cache
+            .sessions
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn test_session_list_keeps_the_backend_order() {
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                // active（在内存里）且时间最新，但 workspace 与启动目录不匹配。
+                session(
+                    "active-new",
+                    "current work",
+                    "/elsewhere/project",
+                    "idle",
+                    "2025-06-01T00:00:00",
+                    None,
+                ),
+                // 还在 active 组里但时间更旧：waiting 不享有状态优先级。
+                session(
+                    "active-old-waiting",
+                    "waiting for me",
+                    "/elsewhere/project",
+                    "waiting",
+                    "2025-01-01T00:00:00",
+                    None,
+                ),
+                // inactive 的时间居中，workspace 正是启动目录。
+                session(
+                    "inactive-mid",
+                    "old work",
+                    "/launch/project",
+                    "inactive",
+                    "2025-03-01T00:00:00",
+                    None,
+                ),
+            ],
+        );
+
+        assert_eq!(
+            ids(&app),
+            ["active-new", "active-old-waiting", "inactive-mid"],
+            "无 pin 时原序透传——workspace / status 都不参与重排"
+        );
+        assert_eq!(app.popup.cache.sessions[0].status, "idle");
+        assert_eq!(
+            app.popup.cache.sessions[0].last_interaction,
+            "2025-06-01T00:00:00"
+        );
+        // workspace 随候选带下来（展示 + 搜索），但不参与排序。
+        assert_eq!(app.popup.cache.sessions[2].workspace, "/launch/project");
+    }
+
+    #[test]
+    fn test_pinned_sessions_float_to_the_top_even_when_inactive() {
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                session(
+                    "active-new",
+                    "current work",
+                    "/ws",
+                    "idle",
+                    "2025-06-01T00:00:00",
+                    None,
+                ),
+                session(
+                    "inactive-pinned",
+                    "pinned yesterday",
+                    "/ws",
+                    "inactive",
+                    "2025-01-01T00:00:00",
+                    Some("2025-05-01T09:00:00"),
+                ),
+            ],
+        );
+
+        assert_eq!(
+            ids(&app),
+            ["inactive-pinned", "active-new"],
+            "pin 是前端的第一排序键：即使 inactive 也置顶"
+        );
+        assert!(app.popup.cache.sessions[0].pinned);
+        assert_eq!(
+            app.popup.cache.sessions[0].pin_added_at.as_deref(),
+            Some("2025-05-01T09:00:00")
+        );
+    }
+
+    #[test]
+    fn test_later_pins_sort_earlier_and_unknown_times_sort_last() {
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                session(
+                    "old-pin",
+                    "old",
+                    "/ws",
+                    "idle",
+                    "2025-01-01T00:00:00",
+                    Some("2025-01-02T00:00:00"),
+                ),
+                session(
+                    "loose-pin",
+                    "hand-tagged",
+                    "/ws",
+                    "idle",
+                    "2025-01-01T00:00:00",
+                    Some("nonsense"),
+                ),
+                session(
+                    "new-pin",
+                    "new",
+                    "/ws",
+                    "idle",
+                    "2025-01-01T00:00:00",
+                    Some("2025-06-02T00:00:00"),
+                ),
+                session(
+                    "bare-pin",
+                    "no record",
+                    "/ws",
+                    "idle",
+                    "2025-01-01T00:00:00",
+                    None,
+                ),
+            ],
+        );
+
+        // 有时间的按时间降序；未知 / 不可解析的排在其后（稳定保原序）。
+        assert_eq!(ids(&app), ["new-pin", "old-pin", "loose-pin", "bare-pin"]);
+    }
+
+    #[test]
+    fn test_refresh_reselects_the_row_by_id() {
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                session("first", "one", "/ws", "idle", "2025-01-01T00:00:00", None),
+                session("second", "two", "/ws", "idle", "2025-01-02T00:00:00", None),
+            ],
+        );
+        app.input.set_text("/ss");
+        app.update_popup_from_input();
+        app.popup.active.move_down(); // 用户把光标移到第二行
+        assert_eq!(app.popup.active.selected_name(), Some("second"));
+
+        // 刷新响应：行序变化（second 被 pin 到最前）——光标跟着 id 走。
+        feed(
+            &mut app,
+            vec![
+                session(
+                    "second",
+                    "two",
+                    "/ws",
+                    "idle",
+                    "2025-01-02T00:00:00",
+                    Some("2025-07-01T00:00:00"),
+                ),
+                session("first", "one", "/ws", "idle", "2025-01-01T00:00:00", None),
+            ],
+        );
+        assert_eq!(ids(&app), ["second", "first"]);
+        assert_eq!(
+            app.popup.active.selected_name(),
+            Some("second"),
+            "刷新后光标按 session id 重定位，不留在旧下标上"
+        );
+    }
+}
+
+// ── The `/ss` panel refreshes on open (#147) ──
+
+#[test]
+fn test_opening_the_session_panel_refreshes_the_cached_list_once() {
+    use crate::app::intent::AppIntent;
+    use crate::ui::popup::command::SessionCandidate;
+
+    let mut app = test_app();
+    app.popup.cache.sessions = vec![SessionCandidate {
+        id: "s1".into(),
+        title: "Test".into(),
+        workspace: "/tmp".into(),
+        status: "idle".into(),
+        last_interaction: "2025-01-01T00:00:00Z".into(),
+        pinned: false,
+        pin_added_at: None,
+    }];
+    app.popup.cache.sessions_fetched = true;
+
+    // 进入面板：即使有缓存也刷新一次（缓存只负责"先渲染旧行"）。
+    app.input.set_text("/ss");
+    app.update_popup_from_input();
+    assert!(
+        matches!(
+            app.drain_intents().as_slice(),
+            [AppIntent::FetchSessionList]
+        ),
+        "opening the panel must ask for a fresh list"
     );
+
+    // 面板已开：继续打字（过滤词）不再触发请求。
+    app.input.set_text("/ss work");
+    app.update_popup_from_input();
+    assert!(
+        app.drain_intents().is_empty(),
+        "a keystroke inside the open panel must not refetch"
+    );
+
+    // 关闭再打开：新的一次打开 = 新的一次刷新。
+    app.input.clear();
+    app.update_popup_from_input();
+    app.input.set_text("/ss");
+    app.update_popup_from_input();
+    assert!(
+        matches!(
+            app.drain_intents().as_slice(),
+            [AppIntent::FetchSessionList]
+        ),
+        "reopening the panel refreshes again"
+    );
+}
+
+#[test]
+fn test_the_refresh_response_does_not_trigger_another_request() {
+    use crate::ui::popup::command::SessionCandidate;
+    use wing_api_client::models::SessionListResponse;
+
+    let mut app = test_app();
+    app.popup.cache.sessions = vec![SessionCandidate {
+        id: "s1".into(),
+        title: "Test".into(),
+        workspace: "/tmp".into(),
+        status: "idle".into(),
+        last_interaction: "2025-01-01T00:00:00Z".into(),
+        pinned: false,
+        pin_added_at: None,
+    }];
+    app.popup.cache.sessions_fetched = true;
+    app.input.set_text("/ss");
+    app.update_popup_from_input();
+    assert_eq!(app.drain_intents().len(), 1);
+
+    // 响应路径（update_popup，非输入路径）原地换行：不得再发一次请求。
     let session_id = app.session_id.clone();
-    app.handle_fetch_result(FetchResult {
+    app.handle_fetch_result(crate::app::intent::FetchResult {
         session_id,
-        payload: FetchPayload::SessionList(payload),
+        payload: crate::app::intent::FetchPayload::SessionList(SessionListResponse {
+            sessions: vec![],
+        }),
     });
+    assert!(
+        app.drain_intents().is_empty(),
+        "the refresh response must land in place, not spawn another fetch"
+    );
+}
 
-    let ids: Vec<&str> = app
-        .popup
-        .cache
-        .sessions
-        .iter()
-        .map(|c| c.id.as_str())
-        .collect();
-    assert_eq!(
-        ids,
-        ["active-new", "active-old-waiting", "inactive-mid"],
-        "the popup renders the payload verbatim — no workspace/status re-ranking"
+#[test]
+fn test_opening_the_panel_with_an_empty_cache_requests_the_list_once() {
+    use crate::app::intent::AppIntent;
+    use wing_api_client::models::SessionListResponse;
+
+    let mut app = test_app();
+    assert!(!app.popup.cache.has_sessions());
+
+    // 等待首帧列表的路径自己发请求（一次）。
+    app.input.set_text("/ss");
+    app.update_popup_from_input();
+    assert!(matches!(
+        app.drain_intents().as_slice(),
+        [AppIntent::FetchSessionList]
+    ));
+
+    // 列表到达 → 原地建面板；响应路径不得再次请求。
+    let session_id = app.session_id.clone();
+    app.handle_fetch_result(crate::app::intent::FetchResult {
+        session_id,
+        payload: crate::app::intent::FetchPayload::SessionList(SessionListResponse {
+            sessions: vec![],
+        }),
+    });
+    let intents = app.drain_intents();
+    assert!(intents.is_empty(), "unexpected intents: {intents:?}");
+}
+
+// ── The streaming guard vs. a panel's first frame ──
+
+#[test]
+fn test_a_panels_first_fetch_survives_a_running_turn() {
+    // 回归（集成测试发现 + bot 复核补上 `/session` 全拼写）：流式守卫曾把
+    // "等待首帧候选"的那条 fetch 一并丢掉——那条请求是**打开面板的前提**，
+    // 而没有任何路径会在 turn 结束时补发（响应路径挂在 fetch 结果上，不挂在
+    // turn 状态上），于是"agent 干活时敲 /ss（缓存空）"面板永远停在占位上，
+    // 直到用户再敲一个键。
+    //
+    // 四个入口逐一锚定：等待态的可见性各不相同（`/ss` 的占位列表无行，
+    // `/session`、`/fork`、`/agents` 画得出一条命令占位行），这正是"按有没有
+    // 画出来做判据"会在全拼写上失手的原因。
+    use crate::app::intent::AppIntent;
+
+    type Matcher = fn(&AppIntent) -> bool;
+    let cases: [(&str, Matcher); 4] = [
+        ("/ss", |intent| {
+            matches!(intent, AppIntent::FetchSessionList)
+        }),
+        ("/session", |intent| {
+            matches!(intent, AppIntent::FetchSessionList)
+        }),
+        ("/fork ", |intent| {
+            matches!(intent, AppIntent::FetchBranches)
+        }),
+        ("/agents ", |intent| {
+            matches!(intent, AppIntent::FetchAgents)
+        }),
+    ];
+    for (input, expected) in cases {
+        let mut app = test_app();
+        app.turn.working = true;
+        assert!(!app.popup.cache.sessions_fetched, "前提：缓存是冷的");
+
+        app.input.set_text(input);
+        app.update_popup_from_input();
+        let intents = app.drain_intents();
+        assert_eq!(
+            intents.len(),
+            1,
+            "{input}: 首帧请求必须发出去（流式不是把它丢掉的理由），got {intents:?}"
+        );
+        assert!(
+            expected(&intents[0]),
+            "{input}: 请求了错误的资源 {intents:?}"
+        );
+    }
+}
+
+#[test]
+fn test_a_panel_refresh_still_waits_for_an_idle_agent() {
+    // 反向锚定：有缓存时面板照常渲染旧行，但"打开即刷新"（#147）不在
+    // turn 进行中发请求——刷新**不排队**（不补发），下次打开面板自然会再刷。
+    use crate::ui::popup::ActivePopup;
+    use crate::ui::popup::command::SessionCandidate;
+
+    let mut app = test_app();
+    app.popup.cache.sessions = vec![SessionCandidate {
+        id: "s1".into(),
+        title: "Test".into(),
+        workspace: "/tmp".into(),
+        status: "idle".into(),
+        last_interaction: "2025-01-01T00:00:00Z".into(),
+        pinned: false,
+        pin_added_at: None,
+    }];
+    app.popup.cache.sessions_fetched = true;
+    app.turn.working = true;
+
+    app.input.set_text("/ss");
+    app.update_popup_from_input();
+    assert!(
+        matches!(app.popup.active, ActivePopup::SubCommand { .. }),
+        "有缓存的面板照常弹出（用旧行）"
     );
-    assert_eq!(app.popup.cache.sessions[0].status, "idle");
-    assert_eq!(
-        app.popup.cache.sessions[0].last_interaction,
-        "2025-06-01T00:00:00"
+    assert!(
+        app.drain_intents().is_empty(),
+        "agent 忙碌时不刷新——刷新留到下一次打开"
     );
-    // workspace 仍然随候选带下来（搜索用），只是不再参与渲染与排序。
-    assert_eq!(app.popup.cache.sessions[2].workspace, "/launch/project");
 }

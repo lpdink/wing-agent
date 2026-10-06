@@ -471,7 +471,10 @@ fn status_bar_lines(width: u16, p: &ThemePalette) -> Vec<Line<'static>> {
     };
     let area = Rect::new(0, 0, width, 1);
     let mut buf = Buffer::empty(area);
-    StatusBar::new(&data, true, p).render(area, &mut buf);
+    let mut regions = wing::ui::status_bar::StatusBarRegions::default();
+    // 与 App 同一口径：宽终端才画完整 ID（窄终端退化尾 8 位）。
+    let wide = width >= 100;
+    StatusBar::new(&data, "20261005-213012-ab12cd34", wide, p, &mut regions).render(area, &mut buf);
 
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut run: Option<(Style, String)> = None;

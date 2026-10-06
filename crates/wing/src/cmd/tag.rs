@@ -162,6 +162,7 @@ mod tests {
             last_interaction: None,
             status: "inactive".into(),
             tags: tags.iter().map(|t| t.to_string()).collect(),
+            tag_meta: Default::default(),
         }
     }
 

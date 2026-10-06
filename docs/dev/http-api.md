@@ -28,12 +28,12 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | POST | `/api/session/subscribe` | 将某 client 订阅到 session 事件（触发 SyncSession 重放；不在内存的会话先按需水合） |
 | POST | `/api/session/unsubscribe` | 取消订阅 |
 | POST | `/api/session/send` | 发送用户消息，驱动 agent loop（不在内存的会话先按需水合，磁盘上也没有才 404） |
-| GET | `/api/session/list` | 列出所有 session（跨 store 聚合）；`status: inactive` = 不在内存（未加载 / 已逐出）。每个条目携带 `tags`（插入序；无标签为空数组）；**带标签的会话即使还没有首条消息也列出**（"创建即打标"窗口期可查，name 为 null）。**顺序是契约**：活跃（`status != inactive`，= 已在内存的工作集）在前，组内按 `last_interaction` 降序（缺失 / 不可解析时回退 session id 前缀 `YYYYMMDD-HHMMSS`，都没有按 0），完全并列则按 session id 升序（全序，避免顺序随 store 枚举漂移）。前端按原序渲染，**不做语义重排**（`/ss <args>` 只按 exact > prefix > contains 分层，层内仍是后端顺序）；组内没有状态优先级（`waiting` 不提前），workspace 不参与排序 |
+| GET | `/api/session/list` | 列出所有 session（跨 store 聚合）；`status: inactive` = 不在内存（未加载 / 已逐出）。每个条目携带 `tags`（插入序；无标签为空数组）与 `tag_meta`（每个标签的记录，当前含 `added_at` 打标时间；键集 ⊆ tags）；**带标签的会话即使还没有首条消息也列出**（"创建即打标"窗口期可查，name 为 null）。**顺序是契约**：活跃（`status != inactive`，= 已在内存的工作集）在前，组内按 `last_interaction` 降序（缺失 / 不可解析时回退 session id 前缀 `YYYYMMDD-HHMMSS`，都没有按 0），完全并列则按 session id 升序（全序，避免顺序随 store 枚举漂移）。后端只定这个基准序；前端在其上加**自己的语义叠加**——当前是「`pin` 标签置顶」（组内按 `tag_meta.pin.added_at` 降序，后 pin 的更靠前；缺时间的**仍然置顶**，只在置顶组内排在有时间者之后——时间口径：写者只产出 naive 本地 ISO；比较时 naive 值按固定基准、带偏移值按瞬时——两类混排（手改数据）是已知边界，且前后端对 naive 取的基准不同、不互为一致性合约），以及 `/ss <args>` 的 exact > prefix > contains 分层（层内保持上述顺序）；后端不感知 `pin`（它只是普通标签），状态优先级（`waiting` 不提前）与 workspace 不参与排序 |
 | GET | `/api/session/get` | 获取 session 详情 |
-| GET | `/api/session/info` | 运行时状态，含 `context_stats`、`skills_info`、`reasoning_effort`、`model_display_name`（模型展示名；未声明 = null，前端回落 `model`）、`tags`（会话标签） |
+| GET | `/api/session/info` | 运行时状态，含 `context_stats`、`skills_info`、`reasoning_effort`、`model_display_name`（模型展示名；未声明 = null，前端回落 `model`）、`tags`（会话标签）与 `tag_meta`（标签记录，含 `added_at`） |
 | GET | `/api/session/branches` | 可回退 / 分叉的消息节点 |
 | POST | `/api/session/update` | 更新状态：model / agent / title / thinking / reasoning_effort / yolo / workspace / tools（`tools` 全量替换，ref 格式，PR #50） |
-| POST | `/api/session/tag` | 读取或原子增删会话标签。body `{session_id, add?, remove?}`：两者皆缺省 = 纯读取；同时给出时服务端一次原子应用（幂等，remove 胜出）。响应 `{ok, session_id, tags, added, removed}`。**不水合**已逐出会话（标签属持久 metadata，读写都不把会话换入内存）；标签为不透明字符串（1..64 字符，禁空白 / 逗号 / 控制符，不以 `-` 开头，单会话上限 64；建议小写、`k=v` 作命名空间）；非法 400 / 未知会话 404 |
+| POST | `/api/session/tag` | 读取或原子增删会话标签。body `{session_id, add?, remove?}`：两者皆缺省 = 纯读取；同时给出时服务端一次原子应用（幂等，remove 胜出）。响应 `{ok, session_id, tags, added, removed, tag_meta}`。**打标时间**：实际加入的标签记 `added_at`（本地 naive ISO，与 `last_interaction` 同口径；幂等 no-op 不刷新），移除即删记录，清空后 `tag_meta` 与 `tags` 一起从 metadata 消失。**不水合**已逐出会话（标签与记录属持久 metadata，读写都不把会话换入内存）；标签为不透明字符串（1..64 字符，禁空白 / 逗号 / 控制符，不以 `-` 开头，单会话上限 64；建议小写、`k=v` 作命名空间）；非法 400 / 未知会话 404 |
 | POST | `/api/session/compact` | 手动压缩上下文，可带 `instruction` 侧重指令（条件插入压缩 prompt，无指令时 prompt 不变） |
 | POST | `/api/session/interrupt` | 中断当前任务（Esc 键） |
 | POST | `/api/session/rewind` | 回退到指定消息 uuid |

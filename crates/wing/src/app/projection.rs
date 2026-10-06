@@ -523,7 +523,19 @@ impl App {
         agent: Option<Box<AgentInfo>>,
     ) {
         // Update session_id to the new session (Phase 3c).
+        //
+        // 快照不带会话的标签（pin 星标的数据源）：换会话时补一次
+        // `/api/session/info`（响应携带 tags / tag_meta）。只有**身份真的变了**
+        // 才取——首帧（启动）与重连沿用既有路径，不重复请求。
+        let switched = self.session_id != session_id;
         self.session_id = session_id;
+        if switched {
+            // 星标此刻挂的是**上一个会话**的状态：先复位成未知（未 pin），
+            // 别在一个 RTT 的窗口里把别人的 pin 显成你的——补取的 info 到达
+            // 后立即纠正（点击期间也不会据此算错目标值）。
+            self.status.pinned = false;
+            self.push_intent(AppIntent::FetchInfo);
+        }
 
         // Clear old content + reset render context before replay.
         // SyncSession is a full state replacement — not an append.

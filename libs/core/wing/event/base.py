@@ -17,6 +17,11 @@ from pydantic import BaseModel, Field
 
 from wing.schema import ChainNode
 
+# 线格式刻意复用持久 schema 的记录类型：tag_meta 的"值对象"在存储与协议里是
+# 同一个事实（改它 = 同时改 metadata.json 与 HTTP 响应），复制一份只会漂移。
+# 分层允许（L2 同层），且 store 不认识事件层，无环。
+from wing.store.base import TagMeta
+
 
 # ============================================================
 # 路由目标 — EventBus emit 时注入，Gateway 据此转发
@@ -59,6 +64,9 @@ class SessionInfo(BaseModel):
 
     tags：会话级结构化标签（``metadata.tags`` 的投影；插入序，无标签为空
     列表）。列表端点携带它是"标签过滤"这类跨会话能力的素材。
+    tag_meta：每个标签的记录（``metadata.tag_meta`` 的投影；键集 ⊆ ``tags``，
+    无记录为空字典）——当前只有 ``added_at`` 打标时间（本地 naive ISO），
+    前端据此做「后 pin 的排在更前面」这类**前端语义**的排序。
     """
 
     id: str
@@ -69,6 +77,7 @@ class SessionInfo(BaseModel):
     last_interaction: str | None = None
     status: SessionStatus = "inactive"
     tags: list[str] = Field(default_factory=list)
+    tag_meta: dict[str, TagMeta] = Field(default_factory=dict)
 
 
 class AgentInfo(BaseModel):

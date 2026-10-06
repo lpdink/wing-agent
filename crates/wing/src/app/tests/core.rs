@@ -68,11 +68,18 @@ fn test_invalidate_session_cache_clears_sessions() {
         workspace: "/tmp".into(),
         status: "idle".into(),
         last_interaction: "2025-01-01T00:00:00Z".into(),
+        pinned: false,
+        pin_added_at: None,
     }];
+    app.popup.cache.sessions_fetched = true;
     assert!(app.popup.cache.has_sessions());
 
     app.invalidate_session_cache();
     assert!(!app.popup.cache.has_sessions());
+    assert!(
+        !app.popup.cache.sessions_fetched,
+        "失效的是「抓过没有」，空列表也算抓过 —— 切换会话后必须重新抓"
+    );
     assert!(app.popup.cache.sessions.is_empty());
 }
 

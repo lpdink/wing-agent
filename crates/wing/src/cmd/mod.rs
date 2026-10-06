@@ -174,9 +174,12 @@ pub enum Command {
         timeout: u64,
     },
 
-    /// List sessions (active only by default; use --all for all).
+    /// List sessions (active + pinned by default; use --all for all).
     Ps {
         /// Show all sessions including inactive ones.
+        ///
+        /// Pinned sessions are shown even without this flag (pin means
+        /// "keep this one in sight").
         #[arg(long = "all")]
         all: bool,
         /// Filter by tag (repeatable / comma-separated; multiple tags = AND).
