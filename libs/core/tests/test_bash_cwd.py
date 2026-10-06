@@ -102,6 +102,33 @@ class TestBashExecution:
         assert agent.cwd == tmp_path
 
 
+class TestBashSessionEnv:
+    """Every executed shell sees ``WING_SESSION_ID`` = ``ctx.session_id``."""
+
+    @pytest.mark.asyncio
+    async def test_session_id_visible_in_shell(self, tmp_path: Path):
+        agent = _MockAgent(str(tmp_path))
+
+        result = await execute_shell('echo "$WING_SESSION_ID"', agent, timeout=10)
+
+        assert _parse_rc(result) == 0
+        assert result.splitlines()[-1] == "test-session"
+
+    @pytest.mark.asyncio
+    async def test_stale_inherited_value_is_overridden(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """An inherited value in the gateway env must not leak through."""
+        monkeypatch.setenv("WING_SESSION_ID", "stale-session")
+        agent = _MockAgent(str(tmp_path))
+
+        result = await execute_shell(
+            'printf "%s" "$WING_SESSION_ID"', agent, timeout=10
+        )
+
+        assert result.splitlines()[-1] == "test-session"
+
+
 class TestBashShellBehavior:
     """Basic shell features must work: multi-line, heredoc, background, pipe."""
 

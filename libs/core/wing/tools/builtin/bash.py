@@ -2,6 +2,7 @@
 """Shell command execution tool."""
 
 import asyncio
+import os
 import time
 
 from wing.agent import ToolContext
@@ -18,6 +19,8 @@ FEEDBACK_TIMEOUT = 6000
 @tool_registry.register(name="Bash", add_purpose=True)
 async def execute_shell(command: str, ctx: ToolContext, timeout: int = 30) -> str:
     """Execute a shell command.
+
+    Executed commands see env var `WING_SESSION_ID` = this session's id.
 
     Args:
         command: The command to execute.
@@ -132,6 +135,10 @@ async def _execute_command(command: str, ctx: ToolContext, timeout: int) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(cwd) if cwd else None,
+            # Explicit override (never rely on inheritance — the gateway process
+            # env may carry a stale value): every executed shell learns the id
+            # of the session that owns this tool call.
+            env={**os.environ, "WING_SESSION_ID": ctx.session_id},
             start_new_session=True,
         )
 
