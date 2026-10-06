@@ -1,17 +1,18 @@
 //! ThinkingBlock — reasoning content.
 //!
 //! 两种呈现，由 `rendering.thinking` 给默认、`Ctrl+O` 全局翻转（整条 transcript
-//! 一起切，会话内一直有效）：
+//! 一起切，会话内一直有效）；标题行是两者的共同部分：
 //!
-//! * **折叠**（`hidden` 的默认）：整块收敛成一行摘要 —— 思考进行时
-//!   `⦁ 深度思考中 4s` 持续刷光（光带走灰→白，`sweep_phase` 由帧 tick 推进），
-//!   结束后定格成 `⦁ 深度思考 12s`；没有计时数据的历史块（重放）只有
-//!   `⦁ 深度思考`。正文绝不泄露 —— 展开是用户的显式动作。从未按过 `Ctrl+O`
-//!   时，进行中的行尾带一条静态提示 `· Ctrl+O 展开`（按过一次即退场，见
+//! * **标题行**（所有思考块都有）：一行摘要 —— 思考进行时 `⦁ 深度思考中 4s`
+//!   持续刷光（光带走灰→白，`sweep_phase` 由帧 tick 推进），结束后定格成
+//!   `⦁ 深度思考 12s`；没有计时数据的历史块（重放）只有 `⦁ 深度思考`。
+//!   从未按过 `Ctrl+O` 时，**进行中**的行尾带一条静态提示：展开态
+//!   `· Ctrl+O 折叠`、折叠态 `· Ctrl+O 展开`（按过一次即退场，见
 //!   [`ThinkingBlock::label_line`]）。
-//! * **展开**（`visible` 的默认，或 `Ctrl+O` 展开后）：markdown 正文。带折叠
-//!   身份的块展开时**保留标题行**作 disclosure 头，正文整体缩进两列；纯
-//!   `visible`（没有折叠身份）与旧行为逐字节一致 —— 没有标题行。
+//! * **折叠**（`hidden` 的默认）：标题行就是全部可见内容，正文绝不泄露 ——
+//!   展开是用户的显式动作。
+//! * **展开**（`visible` 的默认，或 `Ctrl+O` 展开后）：标题行作 disclosure
+//!   头，markdown 正文整体缩进两列。
 //!
 //! 展开时的正文渲染：只用正文（text, headings, list markers）继承 thinking
 //! 色 —— 换前景、其余修饰符与背景原样保留。代码类与装饰类（行内代码、代码块、
@@ -46,15 +47,17 @@ use crate::ui::shimmer::sweep_intensity;
 use crate::ui::shimmer::to_rgb;
 use crate::ui::spinner::fmt_elapsed;
 
-/// 折叠行进行中的措辞。
+/// 标题行进行中的措辞。
 const LABEL_ACTIVE: &str = "深度思考中";
-/// 折叠行结束后的措辞（后接定格时长）。
+/// 标题行结束后的措辞（后接定格时长）。
 const LABEL_DONE: &str = "深度思考";
-/// 折叠行的子弹前缀 —— 与工具调用 / 正文同一套两列词汇。
+/// 标题行的子弹前缀 —— 与工具调用 / 正文同一套两列词汇。
 const LABEL_PREFIX: &str = "⦁ ";
-/// 折叠行的 Ctrl+O 提示（含与秒数的分隔符）—— 静态、不参与刷光：它是
+/// 展开态标题行的 Ctrl+O 提示（含与秒数的分隔符）—— 静态、不参与刷光：它是
 /// affordance 不是内容；动效只留给「推理进行中」这一个信号。
-const LABEL_HINT: &str = " · Ctrl+O 展开";
+const LABEL_HINT_COLLAPSE: &str = " · Ctrl+O 折叠";
+/// 折叠态标题行的同款提示（指向按下去会发生什么：展开）。
+const LABEL_HINT_EXPAND: &str = " · Ctrl+O 展开";
 
 /// 刷光光带半宽（列）。
 const SWEEP_RADIUS: f32 = 5.0;
@@ -86,7 +89,7 @@ pub struct ThinkingBlock {
 }
 
 impl ThinkingBlock {
-    /// 历史块（重放 / resume）：有正文、没有计时 —— 折叠行不带秒数。
+    /// 历史块（重放 / resume）：有正文、没有计时 —— 标题行不带秒数。
     pub fn new() -> Self {
         Self {
             content: String::new(),
@@ -109,7 +112,7 @@ impl ThinkingBlock {
         }
     }
 
-    /// 计时是否在跑（折叠行显示进行中措辞 + 刷光）。
+    /// 计时是否在跑（标题行显示进行中措辞 + 刷光）。
     pub fn is_active(&self) -> bool {
         self.started_at.is_some() && self.ended_at.is_none()
     }
@@ -169,7 +172,7 @@ impl ThinkingBlock {
         Some(started + Duration::from_millis(due_ms))
     }
 
-    /// 折叠行的显示文本：措辞（进行中 / 已结束）+ 时长后缀。
+    /// 标题行的显示文本：措辞（进行中 / 已结束）+ 时长后缀。
     ///
     /// 不满一秒不带秒数（`0s` 没意义）—— 进行中与定格同口径；没有计时数据
     /// 的历史块（重放）只有措辞。
@@ -189,28 +192,36 @@ impl ThinkingBlock {
         (head, tail)
     }
 
-    /// 折叠行（也是展开时的标题行）。`width` 是内容宽度：标题在任何宽度下
-    /// 都必须 ≤ width（展开时它走 blit 路径，超宽会被裁而不是换行）。
+    /// 标题行（折叠时的全部可见内容，展开时的 disclosure 头）。`width` 是
+    /// 内容宽度：标题在任何宽度下都必须 ≤ width（展开时它走 blit 路径，
+    /// 超宽会被裁而不是换行）。
     ///
-    /// 布局：`⦁ 深度思考中`（刷光）+ 静态秒数 +（条件性）静态 `Ctrl+O 展开`
-    /// 提示。让位序：**提示最先让位**（整条装不下就不显示）→ 秒数 → 措辞 ——
+    /// 布局：`⦁ 深度思考中`（刷光）+ 静态秒数 +（条件性）静态 `Ctrl+O` 提示。
+    /// 让位序：**提示最先让位**（整条装不下就不显示）→ 秒数 → 措辞 ——
     /// 极端窄屏下宁可只剩一个词，也不让标题行溢出。
     ///
     /// 提示的显示条件：本块**进行中**、且这次会话**还没按过** `Ctrl+O`
     /// （`explicit.is_none()`）—— 按过一次（模式已全局翻转、切换效果自证）
-    /// 或块已冻结（历史行保持安静）就不再出现。展开出的标题行必然
-    /// `explicit` 有值，天然不带提示。
+    /// 或块已冻结（历史行保持安静）就不再出现。文案指向**按下去会发生什么**
+    /// （由 `mode` + `explicit` 解析出的当前展开态）：展开中 `· Ctrl+O 折叠`、
+    /// 折叠中 `· Ctrl+O 展开`。
     pub fn label_line(
         &self,
         palette: &ThemePalette,
         width: u16,
+        mode: ThinkingMode,
         explicit: Option<bool>,
     ) -> Line<'static> {
         let dim = Style::default().fg(palette.dim);
         let (mut head, mut tail) = self.label_texts();
         let budget = width as usize;
         // 提示：静态、不进刷光跨度（刷光只扫措辞，见 `shine_spans`）。
-        let mut hint = (self.is_active() && explicit.is_none()).then_some(LABEL_HINT);
+        let mut hint =
+            (self.is_active() && explicit.is_none()).then_some(if mode.expanded(explicit) {
+                LABEL_HINT_COLLAPSE
+            } else {
+                LABEL_HINT_EXPAND
+            });
         if let Some(candidate) = hint
             && UnicodeWidthStr::width(head.as_str())
                 + UnicodeWidthStr::width(tail.as_str())
@@ -281,12 +292,12 @@ impl ThinkingBlock {
     /// Render to lines based on thinking mode.
     ///
     /// `mode` is the configured default and `explicit` the Ctrl+O override
-    /// (`None` = follow the default) — the two resolve through
-    /// [`ThinkingMode::expanded`] / [`ThinkingMode::labeled`]. `width` is the
-    /// full content width; 2 columns are reserved for the line prefix so
-    /// tables balance to fit. `images` carries the frame's image options —
-    /// reasoning gets the same anchors as assistant content when the markdown
-    /// layer sees them (see `render/markdown/images.rs`).
+    /// (`None` = follow the default) — they resolve through
+    /// [`ThinkingMode::expanded`]. `width` is the full content width; 2
+    /// columns are reserved for the line prefix so tables balance to fit.
+    /// `images` carries the frame's image options — reasoning gets the same
+    /// anchors as assistant content when the markdown layer sees them (see
+    /// `render/markdown/images.rs`).
     pub fn to_lines(
         &self,
         palette: &ThemePalette,
@@ -309,33 +320,26 @@ impl ThinkingBlock {
         width: u16,
         images: &ImageOpts,
     ) -> ComposedLines {
-        let expanded = mode.expanded(explicit);
-        let labeled = mode.labeled(explicit);
-        if !expanded {
-            debug_assert!(labeled, "折叠必然带标题：expanded.is_some() || hidden");
-            let mut composed =
-                ComposedLines::plain(vec![self.label_line(palette, width, explicit)]);
+        let header = self.label_line(palette, width, mode, explicit);
+        if !mode.expanded(explicit) {
+            let mut composed = ComposedLines::plain(vec![header]);
             composed.push_blank();
             return composed;
         }
-        // 展开：带折叠身份的块保留标题行，正文整体用两列续行缩进；纯 visible
-        // （没有折叠身份）与旧行为一致 —— 正文第一行自己拿 `⦁ `。
-        let first_prefix = if labeled { "  " } else { "⦁ " };
-        let mut composed = self.content_lines(palette, width, images, first_prefix);
-        if labeled {
-            composed = with_header(composed, self.label_line(palette, width, explicit));
-        }
+        // 展开：标题行作 disclosure 头，正文整体用两列续行缩进。
+        let mut composed = self.content_lines(palette, width, images);
+        composed = with_header(composed, header);
         composed.push_blank();
         composed
     }
 
-    /// 展开的正文（markdown，thinking profile），`first_prefix` 给第一行。
+    /// 展开的正文（markdown，thinking profile）—— 每行都拿两列续行缩进
+    /// （子弹 `⦁ ` 归标题行，由 [`with_header`] 装上）。
     fn content_lines(
         &self,
         palette: &ThemePalette,
         width: u16,
         images: &ImageOpts,
-        first_prefix: &'static str,
     ) -> ComposedLines {
         let thinking_style = Style::default().fg(palette.thinking);
         let md_width = Some(width.saturating_sub(2));
@@ -353,10 +357,7 @@ impl ThinkingBlock {
         compose_lines(
             &md_lines,
             CELL_PREFIX_WIDTH,
-            |i| {
-                let prefix = if i == 0 { first_prefix } else { "  " };
-                Span::styled(prefix.to_string(), thinking_style)
-            },
+            |_i| Span::styled("  ", thinking_style),
             |kind, style| thinking_segment_style(kind, style, thinking_style),
         )
     }
@@ -419,7 +420,7 @@ mod tests {
         lines.iter().map(line_text).collect::<Vec<_>>().join("\n")
     }
 
-    // ── 折叠行 ───────────────────────────────────────────────
+    // ── 标题行 ───────────────────────────────────────────────
 
     #[test]
     fn hidden_label_shows_live_seconds() {
@@ -745,14 +746,52 @@ mod tests {
     }
 
     #[test]
-    fn visible_default_renders_without_a_header() {
-        // `rendering.thinking = visible`（没按过 Ctrl+O）与旧行为一致：
-        // 没有标题行，正文第一行自己拿 `⦁ `。
+    fn visible_default_keeps_the_label_as_a_header() {
+        // `rendering.thinking = visible`（没按过 Ctrl+O）：标题行在上、正文
+        // 展开在下 —— 标题拿 `⦁ `，正文两列续行缩进。
         let mut block = ThinkingBlock::new();
         block.append("plain reasoning");
         let lines = block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
-        let first = line_text(&lines[0]);
-        assert!(first.starts_with("⦁ plain reasoning"), "{first:?}");
+        let header = line_text(&lines[0]);
+        assert!(header.starts_with("⦁ 深度思考"), "{header:?}");
+        let body = line_text(&lines[1]);
+        assert!(body.starts_with("  plain reasoning"), "{body:?}");
+        assert!(
+            !header.contains("plain reasoning"),
+            "正文不该挤进标题行：{header:?}"
+        );
+    }
+
+    #[test]
+    fn visible_default_hints_collapse_while_active() {
+        // 默认展开 + 进行中 + 从未按过 Ctrl+O：标题行尾提示指向「按下去会折叠」。
+        let mut block = ThinkingBlock::new();
+        block.append("body");
+        let start = t0();
+        block.start(start);
+        block.tick(start + Duration::from_secs(4));
+        let text =
+            text_of(&block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off()));
+        assert!(text.contains("深度思考中 4s · Ctrl+O 折叠"), "{text}");
+
+        // 按过一次（模式已有显式值）就退场 —— 两个方向都不带。
+        for explicit in [Some(true), Some(false)] {
+            let text = text_of(&block.to_lines(
+                &p(),
+                ThinkingMode::Visible,
+                explicit,
+                80,
+                ImageOpts::off(),
+            ));
+            assert!(!text.contains("Ctrl+O"), "{explicit:?}: {text}");
+        }
+
+        // 冻结的历史行保持安静。
+        block.finish(start + Duration::from_secs(9));
+        let text =
+            text_of(&block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off()));
+        assert!(text.contains("深度思考 9s"), "{text}");
+        assert!(!text.contains("Ctrl+O"), "{text}");
     }
 
     #[test]
@@ -771,28 +810,58 @@ mod tests {
     }
 
     #[test]
-    fn hidden_expanded_matches_visible_span_for_span() {
-        // 同一块正文：hidden + Ctrl+O 展开（带标题）与 visible 默认，正文部分
-        // 只差标题行的插入与首行的缩进（`⦁ ` vs `  `）—— 正文 span 必须一致。
+    fn hidden_expanded_matches_the_visible_default_span_for_span() {
+        // 展开的两条路径 —— `hidden` + Ctrl+O 展开、`visible` 默认 —— 渲染
+        // 同一形态（标题 + 两列缩进正文）；唯一的差别是标题行尾的 Ctrl+O
+        // 提示（hidden 一侧已按过键、提示退场；visible 一侧指向「折叠」）。
+        let start = t0();
+        let body = "here is `code` and text\n\n- item";
         let mut a = ThinkingBlock::new();
-        a.append("here is `code` and text\n\n- item");
+        a.append(body);
+        a.start(start);
+        a.tick(start + Duration::from_secs(4));
         let mut b = ThinkingBlock::new();
-        b.append("here is `code` and text\n\n- item");
+        b.append(body);
+        b.start(start);
+        b.tick(start + Duration::from_secs(4));
         let expanded = a.to_lines(&p(), ThinkingMode::Hidden, Some(true), 80, ImageOpts::off());
         let visible = b.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
-        assert_eq!(expanded.len(), visible.len() + 1, "展开只多一行标题");
-        for (e, v) in expanded.iter().skip(1).zip(visible.iter()) {
-            // 第一个 span 是行前缀（首行的前缀按设计不同：缩进 vs 子弹）。
+        assert_eq!(
+            expanded.len(),
+            visible.len(),
+            "两条路径同形态（标题 + 正文）"
+        );
+        assert_eq!(line_text(&expanded[0]), "⦁ 深度思考中 4s");
+        assert_eq!(line_text(&visible[0]), "⦁ 深度思考中 4s · Ctrl+O 折叠");
+        // 标题行：visible 侧只多一个提示 span（含逐列混色的措辞在内，其余
+        // 逐 span 相同 —— 两边相位与颜色换算完全一致）。
+        let e_header: Vec<_> = expanded[0]
+            .spans
+            .iter()
+            .map(|s| (s.content.to_string(), s.style))
+            .collect();
+        let v_header: Vec<_> = visible[0]
+            .spans
+            .iter()
+            .map(|s| (s.content.to_string(), s.style))
+            .collect();
+        assert_eq!(v_header.len(), e_header.len() + 1, "只多提示一个 span");
+        assert_eq!(
+            v_header[..e_header.len()],
+            e_header[..],
+            "提示之前的标题 span 相同"
+        );
+        assert_eq!(v_header.last().unwrap().0, " · Ctrl+O 折叠");
+        // 正文（第 1 行起）逐 span 相同。
+        for (e, v) in expanded.iter().skip(1).zip(visible.iter().skip(1)) {
             let e_pairs: Vec<_> = e
                 .spans
                 .iter()
-                .skip(1)
                 .map(|s| (s.content.to_string(), s.style))
                 .collect();
             let v_pairs: Vec<_> = v
                 .spans
                 .iter()
-                .skip(1)
                 .map(|s| (s.content.to_string(), s.style))
                 .collect();
             assert_eq!(e_pairs, v_pairs, "正文行必须逐 span 相同");
@@ -807,10 +876,11 @@ mod tests {
         block.append("Let me think about this...");
         let lines = block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
         let text = text_of(&lines);
-        assert!(text.contains("⦁ "), "missing bullet prefix: {text}");
+        assert!(text.contains("⦁ 深度思考"), "missing header: {text}");
         assert!(text.contains("Let me think"), "missing content: {text}");
-        // No header, no border
-        assert!(!text.contains("深度思考"), "should not have header: {text}");
+        // Header on top, body below (two-column continuation indent).
+        assert!(line_text(&lines[0]).starts_with("⦁ 深度思考"), "{text}");
+        assert!(line_text(&lines[1]).starts_with("  Let me think"), "{text}");
         assert!(!text.contains("│"), "should not have border: {text}");
     }
 
@@ -1015,7 +1085,8 @@ mod tests {
     fn test_thinking_empty() {
         let block = ThinkingBlock::new();
         let lines = block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
-        // Empty content → just blank line
-        assert_eq!(lines.len(), 1);
+        // Empty content → header + blank line.
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(line_text(&lines[0]).contains("深度思考"), "{lines:?}");
     }
 }

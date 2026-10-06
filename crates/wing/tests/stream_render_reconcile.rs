@@ -1153,14 +1153,15 @@ fn reconcile_finalize() {
 }
 
 // ============================================================
-// Header shape — a collapsed reasoning row's disclosure line
+// Header shape — a thinking block's disclosure line
 // ============================================================
 
 /// 带标题的静息态：`header + 正文`，正文部分必须与参考渲染逐 span 一致。
 ///
 /// 标题（`StreamingRender::set_header`）占第 0 行并接管 `⦁ `：正文因此整体
 /// 走两列续行缩进，链接与图片锚点全部**下移一行**（行号 == 索引不变）。
-/// 这条覆盖折叠思考块展开时的形态（见 `docs/dev/tui-rendering.md` 第三节）。
+/// 这条覆盖思考块展开时的形态 —— `visible` 默认（存量用户看到的），或
+/// `hidden` + Ctrl+O（见 `docs/dev/tui-rendering.md` 第三节）。
 #[test]
 fn header_shape_matches_the_reference_body() {
     let palette = ThemePalette::default();

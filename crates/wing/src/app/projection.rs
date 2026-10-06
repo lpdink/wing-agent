@@ -174,7 +174,7 @@ impl App {
 
             // ---- Text events ----
             WingEvent::Text { content, .. } => {
-                // 思考阶段结束：折叠行从 `深度思考中` 定格成 `深度思考 4s`。
+                // 思考阶段结束：标题行从 `深度思考中` 定格成 `深度思考 4s`。
                 self.chat.finish_active_thinking(std::time::Instant::now());
                 self.ctx.current_thinking = None;
                 self.chat.append_to_last_assistant(&content);

@@ -47,7 +47,7 @@
 
 | 键 | 取值 | 默认 | 说明 |
 |----|------|------|------|
-| `thinking` | `visible` \| `hidden` | `visible` | reasoning 块的**默认呈现**：`visible` = 展开渲染正文；`hidden` = 折叠成一行摘要（`⦁ 深度思考中 4s`，持续刷光、完成后定格时长）。`Ctrl+O` 全局切换详细 / 简略（所有轮一起、会话内保持），语义见 [`tui-rendering.md`](tui-rendering.md) 第二节·六 |
+| `thinking` | `visible` \| `hidden` | `visible` | reasoning 块的**默认呈现**：`visible` = 默认展开（标题行 + 正文）；`hidden` = 默认折叠（只剩标题行 `⦁ 深度思考中 4s`，持续刷光、完成后定格时长）。标题行是所有思考块的固有部分，`Ctrl+O` 全局切换详细 / 简略（所有轮一起、会话内保持），语义见 [`tui-rendering.md`](tui-rendering.md) 第二节·六 |
 | `math` | `text` \| `off` | `text` | `text` = `$…$` / `$$…$$` / 裸 AMS 环境渲染成字符网格（渲染不了时显示完整 LaTeX 源码）；`off` = 完全不解析、不归一化，即未引入公式渲染前的行为。非法值 warn 后回落 `text` |
 | `images` | `off` / `auto`（大小写不敏感） | `auto` | markdown 本地图片：`auto` = 启动时探测终端图形协议（kitty/sixel/iTerm2），支持就画真图；`off` 或探测失败 = 今天的链接路径（不探测、不读盘、零开销） |
 

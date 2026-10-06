@@ -547,6 +547,9 @@ pub struct StreamCell {
     engine: Engine,
     baseline: BaselineCell,
     stream: Option<StreamingRender>,
+    /// Frames rendered so far — the incremental Thinking side moves the
+    /// header every frame (see [`Self::frame`]).
+    frame_no: u64,
 }
 
 impl StreamCell {
@@ -562,6 +565,7 @@ impl StreamCell {
                 Engine::Baseline => None,
                 Engine::Incremental => Some(StreamingRender::new(profile)),
             },
+            frame_no: 0,
         }
     }
 
@@ -580,6 +584,12 @@ impl StreamCell {
     ///   render (the production per-frame path).
     /// - Incremental: `StreamingRender::lines()` — promote closed blocks,
     ///   re-render only the active tail; height is the flat line count.
+    ///   A Thinking cell feeds the header first, exactly like
+    ///   `CachedCell::sync_stream_header` does every frame: while the
+    ///   block is in flight the label moves with the seconds / sweep
+    ///   phase, and the remove + insert that pays for it is part of the
+    ///   production per-frame cost — the two sides must describe the
+    ///   same shape.
     pub fn frame(&mut self, width: u16, viewport: u16) -> usize {
         match self.engine {
             Engine::Baseline => self.baseline.frame(width, viewport),
@@ -588,6 +598,13 @@ impl StreamCell {
                     .stream
                     .as_mut()
                     .expect("incremental engine must have a stream");
+                if self.baseline.kind == BaselineKind::Thinking {
+                    self.frame_no += 1;
+                    stream.set_header(Some(Line::from(format!(
+                        "⦁ 深度思考中 {}s · Ctrl+O 折叠",
+                        self.frame_no
+                    ))));
+                }
                 let lines = stream.lines(width, &ThemePalette::default());
                 lines.len()
             }

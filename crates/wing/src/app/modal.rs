@@ -77,7 +77,7 @@ pub(super) enum ChatScrollAction {
 pub(super) enum KeyRoute {
     /// Ctrl+C — the double-press quit gesture.
     Quit,
-    /// Ctrl+O — 展开 / 收起当前回合的思考块（应用保留键，面板之下也可用）。
+    /// Ctrl+O — 展开 / 收起思考块（**全局**：所有轮一起切；应用保留键，面板之下也可用）。
     ToggleReasoning,
     /// The ask panel owns the key.
     AskPanel,
@@ -108,7 +108,7 @@ fn app_reserved_key(key: &crossterm::event::KeyEvent) -> bool {
     )
 }
 
-/// `Ctrl+O` — 展开 / 收起当前回合的思考块。
+/// `Ctrl+O` — 展开 / 收起思考块（**全局**：所有轮一起切）。
 ///
 /// 应用保留键（面板之下也可用，同 Esc / Ctrl+C）：它是**查看**动作，不碰草稿、
 /// 不碰面板状态。必须在这里截住 —— 放给 composer 就会被当普通字符 `o` 输入。

@@ -1,9 +1,10 @@
-//! `thinking_preview` — 折叠思考行（刷光标签）的创作期预览。
+//! `thinking_preview` — 思考行（标题 + 正文）的创作期预览。
 //!
 //! 调刷光手感 / 措辞 / 秒数时用它，不用起网关、不用开 TUI：
 //!
 //! ```text
-//! # 默认画廊：几个相位 × 几个状态（进行中 / 定格 / 无计时），带一段上下文
+//! # 默认画廊：折叠 / 展开两种形态 × 几个相位与状态（进行中 / 定格 / 无计时），
+//! # 带一段上下文
 //! cargo run -p wing --example thinking_preview
 //!
 //! # 动起来（真终端里看持续刷光，Ctrl+C / 到时退出）
@@ -16,9 +17,9 @@
 //! cargo run -p wing --example thinking_preview -- --plain
 //! ```
 //!
-//! 画的就是 TUI 里那一份：`ThinkingBlock::to_lines`（折叠行 + 上下文真 cell），
-//! 不会出现"预览好看、真机不一样"。`cargo test` 会编译这个 example（不运行），
-//! 所以它不会因为没人跑而腐掉。
+//! 画的就是 TUI 里那一份：`ThinkingBlock::to_lines`（标题 + 正文 + 上下文
+//! 真 cell），不会出现"预览好看、真机不一样"。`cargo test` 会编译这个
+//! example（不运行），所以它不会因为没人跑而腐掉。
 
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -118,7 +119,10 @@ fn palette() -> ThemePalette {
     ThemePalette::default()
 }
 
-/// 一段假对话：工具调用（真 cell）→ 折叠的思考行 → 助手回复（真 cell）。
+/// 一段假对话：工具调用（真 cell）→ 展开的思考块 → 助手回复（真 cell）。
+///
+/// 思考块按 `visible` 默认渲染 —— 真机上存量用户（默认配置）看到的就是
+/// 这个形态：标题 + 两列缩进的正文。
 fn transcript(
     block: &ThinkingBlock,
     width: u16,
@@ -129,7 +133,7 @@ fn transcript(
     let images = ImageOpts::off();
     let ctx = CellContext {
         palette,
-        thinking_mode: ThinkingMode::Hidden,
+        thinking_mode: ThinkingMode::Visible,
         thinking_expanded: None,
         layout: &layout,
         images,
@@ -143,7 +147,7 @@ fn transcript(
     call.set_result("ok. 12 passed".into(), true);
     let mut lines: Vec<Line<'static>> = vec![Line::from("")];
     lines.extend(ChatCell::ToolCall(call).to_lines(width, &ctx));
-    lines.extend(block.to_lines(palette, ThinkingMode::Hidden, None, width, images));
+    lines.extend(block.to_lines(palette, ThinkingMode::Visible, None, width, images));
     lines.extend(
         ChatCell::AssistantMessage("测试通过，接着改渲染层。".into()).to_lines(width, &ctx),
     );
@@ -156,10 +160,13 @@ fn transcript(
     (rendered, height)
 }
 
+/// 示例正文（展开形态里显示的那段 reasoning）。
+const SAMPLE_BODY: &str = "先看渲染管线的入口，再一步步拆折叠行的状态机。";
+
 /// 一块思考行在给定状态下的样子。
 fn block_at(width_phase: f32, state: LabelState) -> ThinkingBlock {
     let mut block = ThinkingBlock::new();
-    block.append("（正文只在展开时可见，折叠行不显示。）");
+    block.append(SAMPLE_BODY);
     let now = Instant::now();
     match state {
         LabelState::Active(elapsed) => {
@@ -213,11 +220,15 @@ fn main() {
     emit(&out);
 }
 
-/// 画廊：相位 × 状态，最后来一张带上下文的整屏。
+/// 画廊：折叠 / 展开两种形态，最后来一张带上下文的整屏。
 fn gallery(out: &mut String, width: u16, plain: bool, palette: &ThemePalette) {
     let _ = writeln!(
         out,
-        "\n折叠思考行画廊（width={width}，宽 {width} 列；真机里进行中那条会持续刷光）\n"
+        "\n思考行画廊（width={width}，宽 {width} 列；真机里进行中那条会持续刷光）\n"
+    );
+    let _ = writeln!(
+        out,
+        "折叠形态（thinking: hidden 的默认）—— 标题行就是全部可见内容："
     );
     for (label, phase) in [
         ("相位 0.00", 0.0f32),
@@ -239,7 +250,28 @@ fn gallery(out: &mut String, width: u16, plain: bool, palette: &ThemePalette) {
         }
         let _ = writeln!(out);
     }
-    let _ = writeln!(out, "上下文（真 cell：工具调用 / 思考行 / 回复）：");
+    let _ = writeln!(
+        out,
+        "展开形态（thinking: visible 的默认）—— 标题行 + 两列缩进的正文："
+    );
+    for state in [
+        LabelState::Active(Duration::from_secs(4)),
+        LabelState::Done(Duration::from_secs(12)),
+        LabelState::Untimed,
+    ] {
+        let block = block_at(0.4, state);
+        for line in block.to_lines(
+            palette,
+            ThinkingMode::Visible,
+            None,
+            width,
+            ImageOpts::off(),
+        ) {
+            let _ = writeln!(out, "{}", render_line(&line, width, plain));
+        }
+        let _ = writeln!(out);
+    }
+    let _ = writeln!(out, "上下文（真 cell：工具调用 / 思考块 / 回复）：");
     let block = block_at(0.4, LabelState::Active(Duration::from_secs(4)));
     let (lines, _) = transcript(&block, width, plain, palette);
     for line in lines {
@@ -248,9 +280,10 @@ fn gallery(out: &mut String, width: u16, plain: bool, palette: &ThemePalette) {
     let _ = writeln!(out);
 }
 
-/// 单张：一个相位。
+/// 单张：一个相位（折叠 + 展开两种形态）。
 fn draw_one(out: &mut String, width: u16, phase: f32, plain: bool, palette: &ThemePalette) {
     let _ = writeln!(out, "\n相位 {phase:.2}（width={width}）");
+    let _ = writeln!(out, "折叠形态（hidden）：");
     for state in [
         LabelState::Active(Duration::from_secs(4)),
         LabelState::Done(Duration::from_secs(12)),
@@ -260,6 +293,23 @@ fn draw_one(out: &mut String, width: u16, phase: f32, plain: bool, palette: &The
         for line in block.to_lines(palette, ThinkingMode::Hidden, None, width, ImageOpts::off()) {
             let _ = writeln!(out, "{}", render_line(&line, width, plain));
         }
+    }
+    let _ = writeln!(out, "展开形态（visible，进行中 + 定格）：");
+    for state in [
+        LabelState::Active(Duration::from_secs(4)),
+        LabelState::Done(Duration::from_secs(12)),
+    ] {
+        let block = block_at(phase, state);
+        for line in block.to_lines(
+            palette,
+            ThinkingMode::Visible,
+            None,
+            width,
+            ImageOpts::off(),
+        ) {
+            let _ = writeln!(out, "{}", render_line(&line, width, plain));
+        }
+        let _ = writeln!(out);
     }
 }
 
@@ -271,7 +321,7 @@ fn animate_loop(out: &mut String, palette: &ThemePalette, width: u16, plain: boo
     let mut drawn = 0usize;
     let _ = writeln!(
         out,
-        "\n持续刷光（{seconds}s，Ctrl+C 退出）—— 真机里这条只在一行里动\n"
+        "\n持续刷光（{seconds}s，Ctrl+C 退出）—— 真机里标题行在刷光、正文在流式追加\n"
     );
     loop {
         let elapsed = start.elapsed();
@@ -279,7 +329,7 @@ fn animate_loop(out: &mut String, palette: &ThemePalette, width: u16, plain: boo
             break;
         }
         let mut block = ThinkingBlock::new();
-        block.append("正文");
+        block.append(SAMPLE_BODY);
         block.start(start);
         block.tick(start + elapsed);
         let (lines, height) = transcript(&block, width, plain, palette);
@@ -297,7 +347,7 @@ fn animate_loop(out: &mut String, palette: &ThemePalette, width: u16, plain: boo
         std::thread::sleep(Duration::from_millis(40));
     }
     let mut tail = String::new();
-    let _ = writeln!(tail, "\n（预览结束 —— 真机里这条只在聊天流里那一行动）");
+    let _ = writeln!(tail, "\n（预览结束 —— 真机里这块就长在聊天流里）");
     emit(&tail);
 }
 
