@@ -280,7 +280,7 @@ ls "$STEP"/design.md "$STEP"/task.md        # 必须存在
 
 ### 7.4 巡检与逃生舱
 
-- 全局巡检：`wing ps --json | jq '.[] | {id, status, last_interaction}'`（默认已过滤 `inactive`；状态取值：`working` / `idle` / `waiting` / `inactive`）；
+- 全局巡检：`wing ps --json | jq '.[] | {id, status, last_interaction}'`（默认已过滤 `inactive`，**被 pin 的会话除外**；状态取值：`working` / `idle` / `waiting` / `inactive`）；
 - 看某人正在干什么：`wing tail <sid> -n 10 -t tool_call`（工具调用一览）、`-t content`（助手正文）、`-t reasoning`（思路）、`-t user`（你派发时给的 prompt）；
 - **识别"假忙"**：`wing tail <sid> -n 10 -t tool_call` 看最近工具调用是否在原地打转（同一条命令 / 同一个文件反复出现、报错反复重试）→ 别干等：interrupt，然后 `-r` 直接点破（「你已经连续 3 次因为 X 失败，换成 Y 试试」）；
 - **卡死逃生舱**（长时间 `working` 却无新增消息，或状态是 `waiting`）：
@@ -464,7 +464,7 @@ git push -u origin <task>/integration
 | 派发（非阻塞） | `wing run --json --tools "..." -p "$(...)"` | **必须先 `cd <worktree>`** |
 | 续跑同一 session | `wing run -r <sid> -p "..."` | 忽略 `--tools` / `-m` |
 | 等待（阻塞） | `wing wait <sid...> --timeout 1800 --json` | Bash 工具 timeout 要更大 |
-| 会话列表 | `wing ps --json` | 默认过滤 `inactive` |
+| 会话列表 | `wing ps --json` | 默认过滤 `inactive`（被 pin 的除外） |
 | 单会话状态 | `wing info <sid> --json` | status / workdir / tools / tokens |
 | 看消息 | `wing tail <sid> -n 20 -t <type>` | type: all / user / assistant / tool_call / tool_result / reasoning / content |
 | 看开头 | `wing head <sid> -n 5 -t user` | 复核你派发时给的 prompt |

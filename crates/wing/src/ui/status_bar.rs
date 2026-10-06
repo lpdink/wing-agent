@@ -1,4 +1,18 @@
-//! Status bar widget — top row showing model, tokens, usage.
+//! Status bar widget — top row showing model, tokens, usage, session identity.
+//!
+//! The bar declares the frame's only top-row pointer targets: the session id
+//! (click = copy) and the pin star (click = toggle). Their hit regions are
+//! recorded while drawing (see [`StatusBarRegions`]) and measured the way the
+//! layout measures everything else — `unicode-width`, which resolves the
+//! East-Asian *Ambiguous* glyphs (`…` `☆` `★` `·` …) to one column.
+//!
+//! **Known boundary**: a terminal configured to render ambiguous-width
+//! characters as two columns would draw those glyphs one column wider than we
+//! account for, so a pointer would land one cell right of the recorded region
+//! (the whole frame is misaligned there — every box-drawing border in the TUI
+//! has the same assumption). We keep the region equal to the drawn glyph
+//! rather than padding it, so the contract stays "a region covers exactly the
+//! cells it was drawn in".
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

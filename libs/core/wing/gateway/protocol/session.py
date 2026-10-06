@@ -14,6 +14,9 @@ from pydantic import BaseModel, Field
 from wing.event import AgentInfo, SessionInfo
 from wing.event.query_response import BranchTargetInfo
 from wing.session.override import AgentOverride
+
+# 与 `wing.event.SessionInfo.tag_meta` 同一记录类型（线格式 = 持久记录形态，
+# 刻意不另立一份：见 `wing/event/base.py` 的同一说明）。
 from wing.store import TagMeta
 
 
