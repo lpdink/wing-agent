@@ -123,7 +123,7 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 面向现代模型的生成时序（reasoning → content → tool_calls，tool 流完响应才结束），打断分四种情况，其中两种需要对账：
 
 - **流式三段**（reasoning / content / tool 参数流式）中打断：`_call_llm` 在 `except CancelledError` 中从 caller 持有的 accumulator 快照已累积的部分块——text/thinking 任意长度保留（半截无害），**未终结的 tool 块由 provider 剔除**（半截参数不可解析，且无配对结果会破坏不变量）——组装 partial assistant Message（`stop_reason="interrupted"`）提交进上下文，然后 re-raise。用户可放心打断长思考：已花费 tokens 的内容不丢，模型下轮请求能看到自己的半成品。
-- **工具执行中**打断：LLM 响应已完整。`interrupt()`（async）cancel 旧 worker 并等待其拆卸完成后重建——等待是**有界取消阶梯**（单次 6s × 最多 3 次取消，最坏 ~18s；取消被吸收时重投取消兜底）→ 旧 worker 的 `exec_tool_calls` 在 `except CancelledError` 中收拢每个 call 的最终结果——已完成的取**真结果**，被取消的合成一句话结果（`"Tool call interrupted by user."`）——经 `_InterruptedToolResults` 抛给 `_llm_turn`，本轮消息沿**正常路径** `add_messages` 提交，然后重新抛出**原始** `CancelledError`（保留取消调用栈）让 worker 终止（不重抛则取消被消化，agent 会继续跑下一轮 LLM）。`shutdown()`（switch_template）走同一路径，免费获得同样保证。
+- **工具执行中**打断：LLM 响应已完整。`interrupt()`（async）cancel 旧 worker 并等待其拆卸完成后重建——等待是**有界取消阶梯**（单次 6s × 最多 3 次取消，单次收口最坏 ~18s；排队在另一个 interrupt 之后总等待还会叠加；取消被吸收时重投取消兜底）→ 旧 worker 的 `exec_tool_calls` 在 `except CancelledError` 中收拢每个 call 的最终结果——已完成的取**真结果**，被取消的合成一句话结果（`"Tool call interrupted by user."`）——经 `_InterruptedToolResults` 抛给 `_llm_turn`，本轮消息沿**正常路径** `add_messages` 提交，然后重新抛出**原始** `CancelledError`（保留取消调用栈）让 worker 终止（不重抛则取消被消化，agent 会继续跑下一轮 LLM）。`shutdown()`（switch_template）走同一路径，免费获得同样保证。
 
 **provider accumulator 协议**：`ModelProvider.generate(..., accumulator=)` 接受 caller 注入的不透明容器（`StreamAccumulator`），每次尝试（含重试）开始时填充新状态——取消后 caller 仍可经 `snapshot_blocks()` 读取已累积内容。`with_retry` 只捕 `Exception`（CancelledError 是 BaseException），取消直通，不会被重试吞掉（`test_with_retry.py` 钉死）。
 
@@ -135,7 +135,7 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 合成结果同时发射与正常完成相同的 `ToolCallResultEvent` / `ToolResultTurnEvent`：TUI 据此翻转 cell 状态（Bash 计时器仅在 cell 为 Pending 时前进，结果事件使其冻结——修复了打断后计时器不停的存量问题），stdio 模式据此输出 user turn 消息。
 
-**时序**：runtime 先 await `agent.interrupt()`（补提交随之完成）再 emit `InterruptedEvent`（persist=true，落盘于 partial Message 之后，链序正确）——客户端观察到 Interrupted 时 store 已一致。收尸 gather 带 5s 兜底超时，行为不端的工具（吞掉取消）不会无限挂起补提交路径。打断在入口（等锁之前）同步丢弃**当时**已排队的输入与 pending ask；锁等待期间新投递的消息（客户端 POST 已应答）留给重建后的消费者，不被排队中的 interrupt 吞掉。hooks 只在拿到锁之后触发——排队中的请求不提前杀掉在途 turn 的前台工具。
+**时序**：runtime 先 await `agent.interrupt()`（补提交随之完成）再 emit `InterruptedEvent`（persist=true，落盘于 partial Message 之后，链序正确）——客户端观察到 Interrupted 时 store 已一致。收尸 gather 带 5s 兜底超时，行为不端的工具（吞掉取消）不会无限挂起补提交路径。打断在入口（等锁之前）同步丢弃**当时**已排队的输入与 pending ask，被放弃的输入以 `request_id` 列表随 `InterruptedEvent.dropped_request_ids` 下发——前端据此只把真正被放弃的 pending 消息标为 discarded；锁等待期间新投递的消息（客户端 POST 已应答）不在其中，留给随后的消费者（重建的新 worker、保留 worker 的续期继任者），不被排队中的 interrupt 吞掉。hooks 只在拿到锁之后触发——排队中的请求不提前杀掉在途 turn 的前台工具。
 
 **降级路径（worker 不响应取消）**：worker 在取消阶梯内始终不终止时，`interrupt()` 保留旧 worker（绝不重建第二个消费者）、打 ERROR + 广播 notice（TUI 显示"打断未生效"）后立即返回——锁必然释放、RPC 必然应答。此时 `InterruptedEvent` 可能先于（甚至永久早于）partial Message——链序保证在降级路径下让位于"会话不失去打断能力"。被保留的 worker 随后若自然终止，终局续期自动重建消费者（`shutdown()` 置位的 `_closing` 闸门同时挡住终局续期与 `interrupt()` 的重建——逐出 / 模板切换后不会被复活）。
 

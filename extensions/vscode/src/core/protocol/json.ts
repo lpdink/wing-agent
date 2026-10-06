@@ -240,6 +240,22 @@ export function readStringArray(object: JsonObject, key: string): readonly strin
 }
 
 /**
+ * Nullable array-of-strings field: absent / `null` → `null` (the caller
+ * decides the default).
+ *
+ * Used where a *missing* field must stay distinguishable from an empty list —
+ * e.g. `interrupted.dropped_request_ids`: old gateways never send it (the
+ * frontend falls back to legacy behavior), while a present-but-empty list
+ * means "nothing was dropped".
+ */
+export function optStringArray(object: JsonObject, key: string): readonly string[] | null {
+  if (object[key] === undefined || object[key] === null) {
+    return null;
+  }
+  return readStringArray(object, key);
+}
+
+/**
  * Decode every element of a collection, dropping the ones that do not decode.
  *
  * Used exactly where the backend itself is forward-tolerant (`sync_session`

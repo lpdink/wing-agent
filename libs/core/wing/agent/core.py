@@ -49,7 +49,8 @@ if TYPE_CHECKING:
 # `tool_executor._INTERRUPT_GATHER_TIMEOUT`（工具收尸的 5s 兜底）再加提交
 # 余量——两个常量联动：重投取消若落在收尸路径内，本轮 partial 提交会整体
 # 丢失（链仍自洽）。最坏 `_INTERRUPT_WAIT_SECONDS × _INTERRUPT_MAX_CANCELS`
-# （默认 ~18s）后放手：保留旧 worker、绝不重建第二个，并登记终局续期。
+# （默认 ~18s）后放手：保留旧 worker、绝不重建第二个，并登记终局续期（排在
+# 另一个 interrupt 之后的请求，总等待还要叠加前者的收口时间）。
 _INTERRUPT_WAIT_SECONDS = 6.0
 _INTERRUPT_MAX_CANCELS = 3
 
@@ -117,8 +118,11 @@ def _worker_frames(worker: asyncio.Task[Any], *, limit: int = 8) -> str:
         return None, None
 
     try:
-        # deque(maxlen)：超长链时保留**最内层**（真正的暂停点），而不是外层。
+        # deque(maxlen)：超长链时保留**最内层**（真正的暂停点），而不是外层；
+        # 被截掉的外层在输出右端以 `…` 标注（读日志的人要能分辨"停在那"与
+        # "被截断"）。
         steps: deque[Any] = deque(maxlen=limit)
+        visited = 0
         current: Any = worker.get_coro()
         seen: set[int] = set()
         while current is not None and id(current) not in seen:
@@ -126,18 +130,20 @@ def _worker_frames(worker: asyncio.Task[Any], *, limit: int = 8) -> str:
             frame = _frame_of(current)
             if frame is not None:
                 steps.append(frame)
+                visited += 1
             current, marker = _descend(current)
             if marker is not None:
                 steps.append(marker)
+                visited += 1
         if not steps:
             steps.extend(worker.get_stack()[-4:])
-        return (
-            " <- ".join(
-                step if isinstance(step, str) else _location(step)
-                for step in reversed(steps)
-            )
-            or "<none>"
+        text = " <- ".join(
+            step if isinstance(step, str) else _location(step)
+            for step in reversed(steps)
         )
+        if visited > limit:
+            text = f"{text} <- …"
+        return text or "<none>"
     except Exception:  # noqa: BLE001 - 诊断不得外溢
         return "<unavailable>"
 
@@ -468,14 +474,15 @@ class WingAgent:
         """接收用户消息或 feedback。"""
         await self._inbox.post(content, request_id, role, tool_call_id)
 
-    async def interrupt(self) -> None:
+    async def interrupt(self) -> list[str]:
         """中断 Agent：清理积压、触发 hooks、取消旧 worker 后重建。
 
         积压在**等锁之前**清（入口处同步执行）：打断时刻之前排队的输入视为
         放弃；推迟到拿锁之后再清会把锁等待期间新到的消息（客户端 POST 已
-        返回 ok）一并吞掉——排队等待期在正常路径就有秒级，降级路径最长
-        ~18s。hooks 与收口在锁内：注定排队的请求不提前杀掉在途 turn 的
-        前台工具，也不会并发重建出第二个消费者。
+        返回 ok）一并吞掉——排队等待期在正常路径就有秒级，单次降级路径最长
+        ~18s（排队在另一个 interrupt 之后还会叠加）。hooks 与收口在锁内：
+        注定排队的请求不提前杀掉在途 turn 的前台工具，也不会并发重建出
+        第二个消费者。
 
         收口等待是**有界**的取消阶梯（见 `_stop_worker`）：worker 在阶梯内
         始终不终止时**保留旧 worker**（绝不重建第二个，避免两个 worker 抢
@@ -484,9 +491,15 @@ class WingAgent:
         消费者（否则消息进 inbox 无人消费）。interrupt 绝不会因为 worker
         不响应而永久持有 `_interrupt_lock`。`_closing`（shutdown 的终局闸门）
         同样挡住这里的重建：已关闭的 agent 不会被 interrupt 复活。
+
+        Returns:
+            被放弃的积压输入的 `request_id` 列表（打断时刻已排队、尚未被
+            消费的输入）。调用方（runtime）把它带进 `InterruptedEvent`——
+            前端据此只把真正被丢弃的消息标为 discarded，不误伤锁等待期间
+            新到的消息。
         """
         self._inbox.cancel_all_waiters()
-        self._inbox.clear()
+        dropped = [b.request_id for b in self._inbox.clear() if b.request_id]
 
         async with self._interrupt_lock:
             self._fire_interrupt_hooks()
@@ -506,6 +519,7 @@ class WingAgent:
                     self._worker = asyncio.create_task(self._run())
             else:
                 self._arm_worker_renewal(old)
+        return dropped
 
     async def shutdown(self) -> None:
         """显式关闭 Agent：取消阶梯收口，不重建 worker。

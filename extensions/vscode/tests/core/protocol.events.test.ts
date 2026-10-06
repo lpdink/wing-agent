@@ -289,6 +289,34 @@ describe('event mirror — every type decodes field by field', () => {
     }
   });
 
+  it('interrupted carries the dropped-request list when the gateway reports one', () => {
+    // 有清单：原样透传（前端只丢弃这些 pending）。
+    expect(
+      known({
+        type: 'interrupted',
+        session_id: 's',
+        dropped_request_ids: ['req-1', 'req-2'],
+        ...META,
+      }),
+    ).toStrictEqual({
+      ...META,
+      type: 'interrupted',
+      session_id: 's',
+      uuid: null,
+      dropped_request_ids: ['req-1', 'req-2'],
+    });
+
+    // 空列表 = "什么都没丢"，与缺字段（旧网关 → 全部丢弃的兼容形态）不同：
+    // 字段本身保留下来。
+    expect(known({ type: 'interrupted', session_id: 's', dropped_request_ids: [], ...META })).toStrictEqual({
+      ...META,
+      type: 'interrupted',
+      session_id: 's',
+      uuid: null,
+      dropped_request_ids: [],
+    });
+  });
+
   it('user_message_accepted', () => {
     expect(
       known({

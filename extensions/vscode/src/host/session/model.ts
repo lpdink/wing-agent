@@ -402,9 +402,27 @@ export class SessionRecord {
   }
 
   /** Commit every pending message as `discarded` (interrupt semantics). */
+  /**
+   * Discard the listed pending requests (the backend reported them as dropped
+   * by the interrupt). Every other pending message stays queued — it arrived
+   * after the interrupt request and is still going to be consumed.
+   */
+  discardPending(requestIds: readonly RequestId[]): CellPatch[] {
+    const dropped = new Set(requestIds);
+    return this.discardPendingWhere((requestId) => dropped.has(requestId));
+  }
+
+  /** Discard every pending message (legacy gateway without a drop list). */
   discardAllPending(): CellPatch[] {
+    return this.discardPendingWhere(() => true);
+  }
+
+  private discardPendingWhere(predicate: (requestId: RequestId) => boolean): CellPatch[] {
     const patches: CellPatch[] = [];
     for (const [requestId, cellId] of [...this.pendingRequests.entries()]) {
+      if (!predicate(requestId)) {
+        continue;
+      }
       this.pendingRequests.delete(requestId);
       this.pendingIds.delete(cellId);
       const cell = this.cellById(cellId);

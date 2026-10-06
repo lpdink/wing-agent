@@ -314,6 +314,50 @@ class TestInterruptDuringStreaming:
         await agent.shutdown()
 
     @pytest.mark.asyncio
+    async def test_interrupt_reports_dropped_request_ids(
+        self, runtime, monkeypatch
+    ) -> None:
+        """打断入口放弃的积压 request_id 随 InterruptedEvent 下发。
+
+        前端据此只把真正被放弃的 pending 消息标为 discarded（锁等待期间新到
+        的消息不属于此列）——积压的显式化是"后端丢什么、前端画什么"的唯一
+        对齐口径。
+        """
+        session = runtime.create_session()
+        agent = session.agent
+
+        streaming = asyncio.Event()
+
+        async def _blocking_generate(*args: Any, **kwargs: Any):
+            streaming.set()
+            await asyncio.sleep(30)
+            yield LLMResponse(content="never")  # pragma: no cover
+
+        class _Acc:
+            state = object()
+
+        monkeypatch.setattr(agent.model_provider, "generate", _blocking_generate)
+        monkeypatch.setattr(agent.model_provider, "create_accumulator", lambda: _Acc())
+        monkeypatch.setattr(agent.model_provider, "snapshot_blocks", lambda acc: [])
+
+        _start_turn(agent)
+        await _wait_until(streaming.is_set)
+        # 阻塞中的流式轮不消费队列（steer 只在工具轮后 drain）——消息留在积压。
+        await agent.post("stale queued message", request_id="req-stale")
+        await runtime.interrupt_session(session.session_id)
+
+        from wing.event import InterruptedEvent
+
+        interrupted = [
+            e
+            for e in session.context_manager.get_active_events()
+            if isinstance(e, InterruptedEvent)
+        ]
+        assert interrupted
+        assert interrupted[-1].dropped_request_ids == ["req-stale"]
+        await agent.shutdown()
+
+    @pytest.mark.asyncio
     async def test_interrupt_with_finalized_tool_commits_synthesized_result(
         self, runtime, monkeypatch
     ):

@@ -645,6 +645,7 @@ describe('pending user messages', () => {
     harness.wipe();
 
     await harness.intent({ type: 'sendMessage', sessionId, text: 'message one' });
+    // 旧网关形态：不带 dropped_request_ids → 回落"全部丢弃"。
     harness.gateway.emit({ type: 'interrupted', session_id: sessionId });
     await flushMicrotasks();
 
@@ -665,6 +666,51 @@ describe('pending user messages', () => {
     record = harness.host.sessionManager.record(sessionId);
     const states = (record?.cells ?? []).map((cell) => (cell.kind === 'user' ? cell.state : cell.kind));
     expect(states).toEqual(['discarded', 'accepted']);
+  });
+
+  it('discards only the reported requests and keeps messages that arrived mid-interrupt', async () => {
+    const harness = createHostHarness();
+    teardown.push(harness);
+    await harness.boot();
+    const sessionId = harness.gateway.createdOrder[0] ?? '';
+    harness.wipe();
+
+    await harness.intent({ type: 'sendMessage', sessionId, text: 'dropped by interrupt' });
+    let record = harness.host.sessionManager.record(sessionId);
+    const droppedId = [...(record?.pendingRequests.keys() ?? [])][0] ?? '';
+
+    await harness.intent({ type: 'sendMessage', sessionId, text: 'sent while interrupting' });
+    record = harness.host.sessionManager.record(sessionId);
+    const liveId = [...(record?.pendingRequests.keys() ?? [])].find((id) => id !== droppedId) ?? '';
+
+    harness.gateway.emit({
+      type: 'interrupted',
+      session_id: sessionId,
+      dropped_request_ids: [droppedId],
+    });
+    await flushMicrotasks();
+
+    // 按文本断言（此时 transcript 为空，pending 的相对顺序是实现的内部形态）。
+    const stateOf = (text: string): string | undefined => {
+      const cell = harness.host.sessionManager
+        .record(sessionId)
+        ?.cells.find((candidate) => candidate.kind === 'user' && candidate.text === text);
+      return cell !== undefined && cell.kind === 'user' ? cell.state : undefined;
+    };
+    expect(stateOf('dropped by interrupt')).toBe('discarded');
+    expect(stateOf('sent while interrupting')).toBe('pending');
+
+    // 幸存的 pending 随后被模型消费 → 正常提升，仍能对上号。
+    harness.gateway.emit({
+      type: 'user_message_accepted',
+      content: 'sent while interrupting',
+      origin_request_id: liveId,
+      session_id: sessionId,
+    });
+    await flushMicrotasks();
+
+    expect(stateOf('dropped by interrupt')).toBe('discarded');
+    expect(stateOf('sent while interrupting')).toBe('accepted');
   });
 
   it('drops the pending cell when the frame cannot be sent', async () => {

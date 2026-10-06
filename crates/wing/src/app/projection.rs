@@ -112,11 +112,18 @@ impl App {
                     )));
                 }
             }
-            WingEvent::Interrupted { .. } => {
-                // Interrupt clears the backend inbox — pending messages never
-                // reached the model. Commit them as discarded (dim + struck
-                // through) rather than silently vanishing.
-                self.chat.discard_all_pending();
+            WingEvent::Interrupted {
+                dropped_request_ids,
+                ..
+            } => {
+                // The interrupt discarded exactly the requests the backend
+                // reports — messages that arrived while the interrupt was in
+                // flight survive and are promoted by `user_message_accepted`.
+                // Legacy gateways omit the list: keep the blanket discard.
+                match dropped_request_ids {
+                    Some(ids) => self.chat.discard_pending(&ids),
+                    None => self.chat.discard_all_pending(),
+                }
                 self.finish_turn();
                 self.clear_ask_state();
                 self.show_toast(Toast::info(

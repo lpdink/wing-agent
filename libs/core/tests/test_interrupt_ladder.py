@@ -239,6 +239,9 @@ class TestCancelLadder:
         现场场景：打断没生效 → 发一条纠正消息 → 再按一次打断——第二条消息
         正好落在两次 interrupt 之间（排队中的那个在等锁）。旧实现把 clear
         推迟到拿锁之后，这条已 POST 成功（客户端收到 ok）的消息被静默吞掉。
+
+        被放弃的积压以 `request_id` 列表返回（随 InterruptedEvent 下发，
+        前端据此只丢弃真正被放弃的 pending 消息）。
         """
         _shrink_ladder(monkeypatch)
         agent = runtime.create_session().agent
@@ -246,12 +249,13 @@ class TestCancelLadder:
         stubborn = await _replace_worker(agent, swallow_all(), started=started)
 
         await agent._interrupt_lock.acquire()
-        await agent.post("stale backlog before interrupt")
+        await agent.post("stale backlog before interrupt", request_id="req-stale")
         queued = asyncio.create_task(agent.interrupt())
-        await asyncio.sleep(0.05)  # 排队 interrupt 已执行入口清理、正等锁
-        await agent.post("correction sent during lock wait")
+        # 等入口清理真正发生（积压消失）——不赌固定时长，负载下不竞态。
+        await _wait_until(lambda: not agent._inbox.has_pending)
+        await agent.post("correction sent during lock wait", request_id="req-live")
         agent._interrupt_lock.release()
-        await asyncio.wait_for(queued, timeout=5.0)
+        dropped = await asyncio.wait_for(queued, timeout=5.0)
 
         # 入口时刻的积压放弃；等待期到达的消息幸存（留给重建后的消费者）。
         # 先收尾再断言：断言失败时不让吞取消的 worker 泄漏到 loop 关闭。
@@ -259,6 +263,7 @@ class TestCancelLadder:
         await _dispose(stubborn, stop)
         await agent.shutdown()
 
+        assert dropped == ["req-stale"]
         assert survivors == ["correction sent during lock wait"]
 
     @pytest.mark.asyncio
@@ -358,18 +363,21 @@ class TestCancelLadder:
         agent = runtime.create_session().agent
 
         started = asyncio.Event()
+        cancelled = asyncio.Event()
 
         async def slow_death() -> None:
             started.set()
             try:
                 await asyncio.sleep(30)
             except asyncio.CancelledError:
+                cancelled.set()
                 await asyncio.sleep(0.2)  # 收尸很慢
 
         worker = await _replace_worker(agent, slow_death(), started=started)
 
         task = asyncio.create_task(agent.interrupt())
-        await asyncio.sleep(0.1)  # interrupt 已 cancel worker、正等在有界等待里
+        # 等取消真正投递（worker 已进入收尸）再取消 interrupt——不赌固定时长。
+        await asyncio.wait_for(cancelled.wait(), timeout=1.0)
         task.cancel()  # 模拟上层取消在途请求（客户端断开 / 关停）
         await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 2.0)
 
@@ -377,6 +385,30 @@ class TestCancelLadder:
         await _wait_until(lambda: agent._worker is not worker, timeout=3.0)
         assert not agent._worker.done()
         await agent.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_renewal_gate_stays_closed_after_shutdown(
+        self, runtime, monkeypatch
+    ) -> None:
+        """`_closing` 闸门挡住终局续期：shutdown 后保留 worker 迟死也不复活。
+
+        变异守门：删掉 `_renew` 里的 `self._closing` 判断后本用例转红
+        （interrupt() 重建侧的 `_closing` 闸门由
+        `test_interrupt_after_shutdown_never_rebuilds` 守）。
+        """
+        _shrink_ladder(monkeypatch)
+        agent = runtime.create_session().agent
+        stop, started, swallow_all = _swallow_all_factory()
+        stubborn = await _replace_worker(agent, swallow_all(), started=started)
+
+        await asyncio.wait_for(agent.interrupt(), timeout=5.0)
+        assert agent._worker is stubborn  # undead：保留 + 续期已登记
+        await asyncio.wait_for(agent.shutdown(), timeout=5.0)  # 闸门置位
+
+        await _dispose(stubborn, stop)  # 保留的 worker 迟死
+        await asyncio.sleep(0.05)  # 让 done callback 跑完
+
+        assert agent._worker is stubborn and stubborn.done()  # 未被复活
 
     @pytest.mark.asyncio
     async def test_queued_interrupts_both_return(self, runtime) -> None:
@@ -527,3 +559,33 @@ class TestWorkerFrames:
 
         text = await _suspended_frames(joiner())
         assert "<gather ×2>" in text, text
+
+    @pytest.mark.asyncio
+    async def test_long_chain_keeps_innermost_and_marks_truncation(self) -> None:
+        """超长链：保留最内层（真正的暂停点），右端标注截断。
+
+        没有标记时读日志的人分不清"就停在那"与"被截断"——这是排障现场的
+        第一类误判。
+        """
+
+        async def leaf() -> None:
+            await asyncio.sleep(30)
+
+        coro = leaf()
+        for _ in range(6):
+
+            async def layer(inner: Any = coro) -> None:
+                await inner
+
+            coro = layer()
+
+        task = asyncio.create_task(coro)
+        await asyncio.sleep(0.05)
+        short = _worker_frames(task, limit=8)
+        truncated = _worker_frames(task, limit=3)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+        assert "…" not in short, short
+        assert truncated.endswith("…"), truncated
+        assert ":leaf" in truncated, truncated
