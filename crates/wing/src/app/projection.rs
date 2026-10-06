@@ -128,28 +128,22 @@ impl App {
                     self.dir_label().as_deref(),
                 )));
             }
-            WingEvent::Notice {
-                level,
-                message,
-                attempt,
-                max_attempts,
-                retry_in_s,
-                ..
-            } => {
+            WingEvent::Notice { level, message, .. } => {
                 // Informational only. Deliberately does NOT call finish_turn():
                 // retrying a failed LLM call means the turn is still running —
                 // treating it as an error used to fake an end-of-turn in the UI
                 // while the backend kept working.
+                //
+                // The message is rendered as it arrives. The `attempt` /
+                // `max_attempts` / `retry_in_s` fields stay on the event for
+                // consumers that want them structured, but the body already
+                // spells the retry out (`… (1/11): …, 3s 后重试`) — appending a
+                // second, English copy of the same two facts made one notice
+                // say "6s 后重试" and "retrying in 6.0s" back to back.
                 let text = if message.is_empty() {
                     "notice".to_string()
                 } else {
                     message
-                };
-                let text = match (attempt, max_attempts, retry_in_s) {
-                    (Some(a), Some(max), Some(delay)) => {
-                        format!("{text} (attempt {a}/{max}, retrying in {delay:.0}s)")
-                    }
-                    _ => text,
                 };
                 if level.eq_ignore_ascii_case("warning") || level.eq_ignore_ascii_case("error") {
                     self.chat.push(ChatCell::WarningMessage(text));

@@ -62,7 +62,13 @@ fn test_notice_keeps_turn_running_and_renders_warning() {
     match app.chat.cells.last().map(|c| c.cell()) {
         Some(ChatCell::WarningMessage(text)) => {
             assert!(text.contains("stalled"), "{text}");
-            assert!(text.contains("attempt 1/3"), "{text}");
+            // 一次性事实只说一遍：消息里已经有 `(1/3)` 与 `6s 后重试`，
+            // 前端不再追加 `(attempt 1/3, retrying in 6.0s)`。
+            assert_eq!(
+                text,
+                "generate 调用失败 (1/3): TimeoutError: stalled, 6s 后重试"
+            );
+            assert!(!text.contains("retrying"), "{text}");
         }
         other => panic!("expected WarningMessage, got {other:?}"),
     }

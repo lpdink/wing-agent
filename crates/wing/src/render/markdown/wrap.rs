@@ -91,6 +91,38 @@ pub(crate) fn wrap_prose_lines(lines: Vec<MarkdownLine>, width: usize) -> Vec<Ma
     out
 }
 
+/// Wrap **plain text** to `width` display columns, one row per output string.
+///
+/// Same UAX #14 oracle as the markdown path ([`wrap_ranges`]): CJK runs break
+/// at the margin, Latin words stay intact, kinsoku rules hold, and an
+/// unbreakable run (a long URL) is hard-broken by display width. Hard newlines
+/// in `text` are respected — every source line is wrapped on its own and a
+/// blank source line yields one empty row.
+///
+/// No markdown semantics are applied: this is the raw text of things that are
+/// *not* prose documents (command output, notices), where re-parsing would
+/// reinterpret `#`, `-` and `*` as structure. Rows are trailing-trimmed so a
+/// caller can prefix each one without carrying invisible whitespace along.
+pub(crate) fn wrap_plain_text(text: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for source in text.split('\n') {
+        if width == 0 || UnicodeWidthStr::width(source) <= width {
+            out.push(source.trim_end().to_string());
+            continue;
+        }
+        let mut rows = 0usize;
+        for (a, b) in wrap_ranges(source, width) {
+            out.push(source[a..b].trim_end().to_string());
+            rows += 1;
+        }
+        if rows == 0 {
+            // Whitespace-only source line: keep the blank row.
+            out.push(String::new());
+        }
+    }
+    out
+}
+
 /// Wrap a single prose line into one or more lines, each ≤ `width` display
 /// columns, breaking at UAX #14 opportunities and preserving segment styling.
 fn wrap_prose_line(line: &MarkdownLine, width: usize) -> Vec<MarkdownLine> {
@@ -453,5 +485,52 @@ mod tests {
         }
         let flat: String = out.iter().map(|l| l.to_plain()).collect();
         assert_eq!(flat, "abcdefghijklmnopqrstuvwxyz");
+    }
+
+    // ── 纯文本折行（注记行用）───────────────────────────────
+
+    /// 折出来的每一行都不超过宽度，且 CJK 在边界处断行（不是整段推下去）。
+    #[test]
+    fn plain_text_wraps_to_the_width() {
+        let rows = wrap_plain_text("一二三四五六七八九十一二三四五六七八九十", 10);
+        assert!(rows.len() >= 4, "中文应逐段折行：{rows:?}");
+        for row in &rows {
+            assert!(
+                UnicodeWidthStr::width(row.as_str()) <= 10,
+                "行超宽：{row:?}"
+            );
+        }
+        assert_eq!(rows.concat(), "一二三四五六七八九十一二三四五六七八九十");
+    }
+
+    /// 硬换行被尊重：每个源行各自折行，空行留一个空行。
+    #[test]
+    fn plain_text_keeps_source_lines_and_blanks() {
+        let rows = wrap_plain_text("first\n\nsecond", 80);
+        assert_eq!(rows, vec!["first", "", "second"]);
+        // 只有空白字符的源行同样是空行（不是被吞掉）。
+        assert_eq!(wrap_plain_text("a\n   \nb", 80), vec!["a", "", "b"]);
+    }
+
+    /// 行首缩进保留（命令输出的层级），行尾空白被裁掉（让调用方可以安全地
+    /// 加前缀，不会把不可见空格一起带上）。
+    #[test]
+    fn plain_text_keeps_indent_and_trims_the_tail() {
+        assert_eq!(
+            wrap_plain_text("  - pattern   \n", 80),
+            vec!["  - pattern", ""]
+        );
+    }
+
+    /// 没有断点的长 token 硬断；宽度为 0 时原样返回（防除零 / 死循环）。
+    #[test]
+    fn plain_text_hard_breaks_and_survives_zero_width() {
+        let rows = wrap_plain_text("abcdefghijklmnopqrstuvwxyz", 6);
+        for row in &rows {
+            assert!(UnicodeWidthStr::width(row.as_str()) <= 6, "{row:?}");
+        }
+        assert_eq!(rows.concat(), "abcdefghijklmnopqrstuvwxyz");
+        assert_eq!(wrap_plain_text("abc", 0), vec!["abc"]);
+        assert_eq!(wrap_plain_text("", 10), vec![""]);
     }
 }
