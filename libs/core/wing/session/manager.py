@@ -39,6 +39,7 @@ from wing.schema import ChainNode, Message
 from wing.store import SessionMetadata, SessionStore
 
 from .session import Session, tool_refs
+from .tags import TagMutation, apply_tag_ops
 from .template import AgentTemplate, AgentTemplateManager
 
 if TYPE_CHECKING:
@@ -214,6 +215,7 @@ class SessionManager:
         workspace: str | None = None,
         agent_override: AgentOverride | None = None,
         backend: str | None = None,
+        tags: Iterable[str] | None = None,
     ) -> Session:
         """创建新 session（session id 一律由后端生成）。
 
@@ -227,9 +229,10 @@ class SessionManager:
             workspace: 工作目录
             agent_override: AgentOverride 参数覆盖（None 字段不覆盖 template 值）
             backend: 存储后端名称（如 file/memory），None 时使用默认后端
+            tags: 创建即打标（经 :meth:`set_session_tags` 同一套校验与应用）
 
         Raises:
-            ValueError: 模板不存在或 backend 未知
+            ValueError: 模板不存在 / backend 未知 / 标签非法
         """
         backend_name = backend if backend is not None else self._default_backend
         store = self._stores.get(backend_name)
@@ -265,6 +268,11 @@ class SessionManager:
         # agent override 需在 session 完全构建后应用
         if agent_override is not None:
             session.apply_agent_override(agent_override)
+
+        # 创建即打标（原子语义：校验在写盘前完成，非法标签此刻 raise——
+        # 会话尚未注册、磁盘零痕迹）
+        if tags:
+            session.apply_tag_ops(add=tags)
 
         self._sessions[sid] = session
         self.touch(sid)
@@ -446,6 +454,46 @@ class SessionManager:
 
         return new_session, draft
 
+    # ── 标签 ─────────────────────────────────
+
+    def set_session_tags(
+        self,
+        session_id: str,
+        *,
+        add: Iterable[str] = (),
+        remove: Iterable[str] = (),
+    ) -> TagMutation:
+        """按 session id 原子增删标签（幂等；读或写都不触发水合）。
+
+        标签是**持久 metadata**（不是运行时状态），因此有两条互斥路径：
+
+        - 已在内存 → 经 ``Session.apply_tag_ops`` 改内存元数据并落盘
+          （内存对象是磁盘事实的同一来源，绕开它会被后续 save 回写覆盖）；
+        - 未加载 / 已逐出 → 直接 store 读改写，**不水合**——给旧会话打
+          favorite 不会把它"弄醒"变成 idle（会话保持 inactive，内存零代价）。
+
+        add / remove 皆空 = 纯读（返回当前标签，不产生任何写）。
+
+        Raises:
+            LookupError: 会话不存在（内存与磁盘都没有）
+            ValueError: 标签非法 / 超过单会话上限
+        """
+        resolved = self._resolve_with_store(session_id)
+        if resolved is None:
+            raise LookupError(f"Session not found: {session_id}")
+        resolved_id, store = resolved
+
+        session = self._sessions.get(resolved_id)
+        if session is not None:
+            return session.apply_tag_ops(add=add, remove=remove)
+
+        metadata = store.load_metadata(resolved_id) or SessionMetadata()
+        mutation = apply_tag_ops(metadata.tags, add=add, remove=remove)
+        if mutation.added or mutation.removed:
+            metadata.tags = mutation.tags or None
+            store.save_metadata(resolved_id, metadata)
+        return mutation
+
     # ============================================================
     # 外部方法：逐出（eviction）
     # ============================================================
@@ -609,6 +657,7 @@ class SessionManager:
                         workspace=metadata.workspace,
                         last_interaction=metadata.last_interaction,
                         status=loaded.status if loaded is not None else "inactive",
+                        tags=list(metadata.tags or []),
                     )
                 )
 

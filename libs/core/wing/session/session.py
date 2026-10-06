@@ -15,6 +15,7 @@ Session 是有行为的对象，在构造器中创建 ContextManager 和 WingAge
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,6 +29,8 @@ from wing.provider import create_provider
 from wing.schema import ChainNode, Message, Tool
 from wing.store import SessionMetadata, SessionStore
 from wing.tool_registry import ToolRef
+
+from .tags import TagMutation, apply_tag_ops
 
 if TYPE_CHECKING:
     from wing.agent import WingAgent
@@ -350,6 +353,11 @@ class Session:
         return self._metadata.workspace
 
     @property
+    def tags(self) -> list[str]:
+        """当前会话标签（metadata.tags 的拷贝；插入序）。"""
+        return list(self._metadata.tags or [])
+
+    @property
     def status(self) -> "SessionStatus":
         """Session 运行时状态（idle/working/waiting），委托 agent 推导。"""
         return self._agent.status
@@ -438,6 +446,20 @@ class Session:
         """设置 session 标题并持久化。"""
         self._metadata.session_name = title
         self._save_metadata()
+
+    def apply_tag_ops(
+        self, *, add: Iterable[str] = (), remove: Iterable[str] = ()
+    ) -> TagMutation:
+        """原子应用标签增删并落盘（幂等；无实际变化不产生写）。
+
+        Raises:
+            ValueError: 标签非法（校验在 ``session.tags`` 统一执行）
+        """
+        mutation = apply_tag_ops(self._metadata.tags, add=add, remove=remove)
+        if mutation.added or mutation.removed:
+            self._metadata.tags = mutation.tags or None
+            self._save_metadata()
+        return mutation
 
     async def update_state(
         self,

@@ -20,7 +20,7 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any, Iterator
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from wing.media import media_id as compute_media_id
 
@@ -84,6 +84,12 @@ class SessionMetadata(BaseModel):
     随后 `before_session_start` 在新会话上生效、注入结果覆盖落盘）；
     thinking / reasoning_effort 只拷**显式记录**——固化了 provider 派生默认
     （如 anthropic 未配置 thinking）会让子会话请求体带上源会话没有的显式配置。
+
+    - tags：会话级结构化标签（不透明字符串列表，如 ``scheduler`` /
+      ``favorite`` / ``task=wing-tag``；约定小写、``k=v`` 作命名空间，系统
+      不做语义解析）。由 ``SessionManager.set_session_tags``（``POST
+      /api/session/tag``）原子增删维护；不进 LLM 请求前缀，**fork 不继承**。
+      空列表与 None 等价（序列化排除 None——无标签的 metadata.json 零字段）。
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -102,6 +108,13 @@ class SessionMetadata(BaseModel):
     reasoning_effort: str | None = None
     yolo: bool | None = None
     max_turns: int | None = None
+    tags: list[str] | None = None
+
+    @field_validator("tags", mode="after")
+    @classmethod
+    def _normalize_tags(cls, value: list[str] | None) -> list[str] | None:
+        """空列表与 None 等价（无标签不落字段，存量文件零变化）。"""
+        return value or None
 
 
 class SessionSummary(BaseModel):
