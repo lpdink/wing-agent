@@ -1,10 +1,11 @@
 //! Mouse routing — one declaration of who owns a pointer gesture.
 //!
-//! The pointer has four channels, and each of them is declared here:
+//! The pointer has five channels, and each of them is declared here:
 //!
 //! * [`App::pointer_owner`] walks [`POINTER_PRIORITY`] — the **one** place
-//!   where the order (scrollbar → composer → chat band) is written down. A
-//!   press is offered to each owner in turn and the first claim wins;
+//!   where the order (scrollbar → composer → chat band → status bar) is
+//!   written down. A press is offered to each owner in turn and the first
+//!   claim wins;
 //! * the wheel is a channel of its own: it always scrolls the chat view and is
 //!   never claimed by a panel or a popup, so the history stays reachable while
 //!   an ask panel / the model picker / the command popup is up;
@@ -13,7 +14,12 @@
 //! * a drag / release does **not** re-pick an owner: it goes back to the region
 //!   the press started in (see [`super::selection_session`]), so a pointer that
 //!   wanders out of the region keeps producing coordinates in the space the
-//!   gesture began in.
+//!   gesture began in;
+//! * the status bar owns two cells of its own row — the session id (click =
+//!   copy the full id) and the pin star (click = toggle the session's pin
+//!   tag). Both are claims on the *last frame's* recorded regions
+//!   ([`crate::ui::status_bar::StatusBarRegions`]), so a click always lands on
+//!   what was drawn.
 //!
 //! Call directions: the run loop calls [`App::handle_mouse`] and turns the
 //! [`MouseOutcome`] into a frame request; this module calls the composer /
@@ -58,6 +64,9 @@ pub(super) enum PointerOwner {
     Composer,
     /// The chat band: it keeps its drag-to-copy contract and the link click.
     Chat,
+    /// 状态栏：只认领会话 ID 段与 pin 星标两格（这一行其余位置——品牌 /
+    /// 模型 / 用量 / 连接点——不认领指针）。
+    StatusBar,
 }
 
 /// The order a pointer gesture is offered to the owners.
@@ -66,10 +75,13 @@ pub(super) enum PointerOwner {
 /// place where it is written down, and [`App::pointer_owner`] is its only
 /// reader. Moving a line here moves the priority for presses; nothing else in
 /// the app encodes it.
-pub(super) const POINTER_PRIORITY: [PointerOwner; 3] = [
+pub(super) const POINTER_PRIORITY: [PointerOwner; 4] = [
     PointerOwner::Scrollbar,
     PointerOwner::Composer,
     PointerOwner::Chat,
+    // 状态栏只占自己的一行（不与上面三者重叠），位置只在该行被别的认领
+    // 命中时才可观察；追加在末尾，既有三者的相对优先级不变。
+    PointerOwner::StatusBar,
 ];
 
 impl PointerOwner {
@@ -89,8 +101,18 @@ impl PointerOwner {
                 app.composer_contains(column, row) && !app.composer_pointer_blocked()
             }
             PointerOwner::Chat => app.chat.contains_screen(column, row),
+            PointerOwner::StatusBar => app.status_bar_hit(column, row).is_some(),
         }
     }
+}
+
+/// 状态栏上认领指针的两格。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StatusBarHit {
+    /// 会话 ID 段（点击 = 复制完整 ID）。
+    SessionId,
+    /// pin 星标（点击 = 切换 pin）。
+    Star,
 }
 
 impl App {
@@ -193,8 +215,10 @@ impl App {
         let outcome = match owner {
             Some(PointerOwner::Composer) => self.composer_press(column, row),
             Some(PointerOwner::Chat) => self.chat_selection_press(column, row),
+            Some(PointerOwner::StatusBar) => self.status_bar_press(column, row),
             // `Scrollbar` returned above; `None` = nobody claims the position
-            // (status bar, popups) — like hover, it changes nothing.
+            // (popups and the rest of the status bar) — like hover, it
+            // changes nothing.
             Some(PointerOwner::Scrollbar) | None => MouseOutcome::Ignored,
         };
         match outcome {
@@ -248,6 +272,52 @@ impl App {
     /// here, the modal guard from the modal lane.
     pub(super) fn composer_contains(&self, column: u16, row: u16) -> bool {
         self.geometry.composer_contains(column, row)
+    }
+
+    /// 状态栏上命中的格子——读的是**本帧**绘制时记录的命中区
+    /// （[`crate::ui::status_bar::StatusBarRegions`]），没画出来 = 不可点。
+    pub(super) fn status_bar_hit(&self, column: u16, row: u16) -> Option<StatusBarHit> {
+        let regions = self.geometry.status_regions();
+        let within = |rect: Option<ratatui::layout::Rect>| {
+            rect.is_some_and(|rect| {
+                rect.width > 0
+                    && rect.height > 0
+                    && column >= rect.x
+                    && column < rect.right()
+                    && row >= rect.y
+                    && row < rect.bottom()
+            })
+        };
+        if within(regions.session_id) {
+            Some(StatusBarHit::SessionId)
+        } else if within(regions.star) {
+            Some(StatusBarHit::Star)
+        } else {
+            None
+        }
+    }
+
+    /// 状态栏按下的动作：ID = 复制完整 ID；星标 = 切换 pin。
+    ///
+    /// 点击本身不改变画面（复制会亮一条 toast、pin 以服务端回读的标签为准），
+    /// 所以两条路径都只**投递 intent**、不要求立即重绘——intent 执行后的
+    /// `mark_dirty` 会带来那一帧。
+    fn status_bar_press(&mut self, column: u16, row: u16) -> MouseOutcome {
+        match self.status_bar_hit(column, row) {
+            Some(StatusBarHit::SessionId) => {
+                // 复制的**永远**是完整 ID（窄终端画的是退化形态）。
+                if !self.session_id.is_empty() {
+                    self.push_intent(super::AppIntent::CopyToClipboard(self.session_id.clone()));
+                }
+            }
+            Some(StatusBarHit::Star) => {
+                self.push_intent(super::AppIntent::SetSessionPin {
+                    pinned: !self.status.pinned,
+                });
+            }
+            None => {}
+        }
+        MouseOutcome::Ignored
     }
 
     /// Grab the bar at a pressed row: the track jumps there, and the grip is

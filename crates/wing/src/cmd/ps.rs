@@ -11,6 +11,8 @@ use std::time::Duration;
 use anyhow::Result;
 use wing_api_client::models::{SessionInfo, SessionInfoResponse};
 
+use crate::shared::pinning::{is_pinned, pin_added_at, pin_key};
+
 use super::common;
 
 /// Entry point for `wing ps`.
@@ -20,7 +22,8 @@ pub async fn run_ps(all: bool, tags: &[String], json: bool, watch: bool) -> Exit
     }
     match fetch_sessions().await {
         Ok(sessions) => {
-            let filtered = filter_sessions(sessions, all, tags);
+            let mut filtered = filter_sessions(sessions, all, tags);
+            order_sessions(&mut filtered);
             if json {
                 common::print_json_compact(&filtered);
             } else {
@@ -56,7 +59,8 @@ async fn run_ps_watch(all: bool, tags: &[String], json: bool) -> ExitCode {
     loop {
         match http.list_sessions().await {
             Ok(resp) => {
-                let filtered = filter_sessions(resp.sessions, all, tags);
+                let mut filtered = filter_sessions(resp.sessions, all, tags);
+                order_sessions(&mut filtered);
                 // Clear screen.
                 print!("\x1b[2J\x1b[H");
                 if json {
@@ -96,7 +100,10 @@ pub async fn run_info(session_id: &str, json: bool) -> ExitCode {
 /// - With `tags` given: keep sessions carrying ALL tags (AND), **inactive
 ///   included** — tags describe long-term taxonomy (favorites / task crews
 ///   are often archived), so the default inactive-drop does not apply.
-/// - Without `tags`: `all=true` keeps everything; otherwise drop `inactive`.
+/// - Without `tags`: `all=true` keeps everything; otherwise drop `inactive`
+///   — except **pinned** sessions, which the default view keeps on purpose
+///   (pin means "keep this one in sight", and what you pin is usually a
+///   session you stepped away from).
 fn filter_sessions(sessions: Vec<SessionInfo>, all: bool, tags: &[String]) -> Vec<SessionInfo> {
     if !tags.is_empty() {
         return sessions
@@ -109,9 +116,16 @@ fn filter_sessions(sessions: Vec<SessionInfo>, all: bool, tags: &[String]) -> Ve
     } else {
         sessions
             .into_iter()
-            .filter(|s| s.status != "inactive")
+            .filter(|s| s.status != "inactive" || is_pinned(&s.tags))
             .collect()
     }
+}
+
+/// 呈现顺序：后端基准序 + 前端 pin 叠加 —— 被 pin 的置顶，组内后 pin 的更靠前
+/// （唯一实现在 [`crate::shared::pinning`]，与 `/ss` 面板共用）；其余保持
+/// 后端下发的顺序（活跃优先、组内按最后交互时间降序）。
+fn order_sessions(sessions: &mut [SessionInfo]) {
+    sessions.sort_by_cached_key(|s| pin_key(is_pinned(&s.tags), pin_added_at(&s.tag_meta)));
 }
 
 async fn fetch_sessions() -> Result<Vec<SessionInfo>> {
@@ -222,7 +236,22 @@ mod tests {
             last_interaction: None,
             status: status.into(),
             tags: tags.iter().map(|t| t.to_string()).collect(),
+            tag_meta: Default::default(),
         }
+    }
+
+    /// 一个 pin 过的会话（带打标时间）。
+    fn pinned(id: &str, status: &str, added_at: Option<&str>) -> SessionInfo {
+        let mut info = session(id, status, &["pin"]);
+        if let Some(stamp) = added_at {
+            info.tag_meta.insert(
+                "pin".into(),
+                wing_api_client::models::TagMeta {
+                    added_at: Some(stamp.into()),
+                },
+            );
+        }
+        info
     }
 
     fn ids(sessions: &[SessionInfo]) -> Vec<String> {
@@ -234,6 +263,51 @@ mod tests {
         let sessions = vec![session("a", "working", &[]), session("b", "inactive", &[])];
         assert_eq!(ids(&filter_sessions(sessions.clone(), false, &[])), ["a"]);
         assert_eq!(ids(&filter_sessions(sessions, true, &[])), ["a", "b"]);
+    }
+
+    #[test]
+    fn default_filter_keeps_pinned_inactive_sessions() {
+        // pin 的语义是"我要一直看到它"——inactive 也不例外；未 pin 的
+        // inactive 照旧被默认视图丢掉。
+        let sessions = vec![
+            session("a", "working", &[]),
+            session("b", "inactive", &[]),
+            pinned("c", "inactive", Some("2026-10-05T21:30:12")),
+        ];
+        assert_eq!(
+            ids(&filter_sessions(sessions.clone(), false, &[])),
+            ["a", "c"]
+        );
+        assert_eq!(ids(&filter_sessions(sessions, true, &[])), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn order_puts_pinned_first_by_pin_time() {
+        // 后端基准序（活跃在前、组内时间降序）之上叠加 pin：置顶组内后 pin
+        // 的更靠前；无记录 / 不可解析的排在有时间者之后；未 pin 的原序。
+        let mut sessions = vec![
+            session("active-new", "idle", &[]),
+            pinned("old-pin", "inactive", Some("2026-10-01T09:00:00")),
+            session("active-old", "waiting", &[]),
+            pinned("new-pin", "inactive", Some("2026-10-06T09:00:00")),
+            pinned("bare-pin", "inactive", None),
+        ];
+        order_sessions(&mut sessions);
+        assert_eq!(
+            ids(&sessions),
+            ["new-pin", "old-pin", "bare-pin", "active-new", "active-old"]
+        );
+    }
+
+    #[test]
+    fn order_is_stable_when_nothing_is_pinned() {
+        let mut sessions = vec![
+            session("first", "idle", &[]),
+            session("second", "inactive", &[]),
+            session("third", "working", &["executor"]),
+        ];
+        order_sessions(&mut sessions);
+        assert_eq!(ids(&sessions), ["first", "second", "third"]);
     }
 
     #[test]

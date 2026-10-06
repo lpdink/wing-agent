@@ -944,3 +944,110 @@ fn test_composer_edit_aborts_the_selection() {
         );
     }
 }
+
+// ── The status bar's two hot cells (id → copy, star → pin) ──
+
+/// The regions the last frame really drew (the click target contract).
+fn status_cells(app: &App) -> (ratatui::layout::Rect, ratatui::layout::Rect) {
+    let regions = app.geometry.status_regions();
+    (
+        regions.session_id.expect("the session id cell was drawn"),
+        regions.star.expect("the star cell was drawn"),
+    )
+}
+
+#[test]
+fn test_clicking_the_session_id_copies_it() {
+    let mut app = app_with_message();
+    let mut terminal = test_terminal(120, 12);
+    draw(&mut app, &mut terminal);
+    let (id, _) = status_cells(&app);
+
+    // 点击本身不改变画面（复制由 intent 完成），所以按下的结果是 Ignored。
+    assert_eq!(app.handle_mouse(press((id.x, id.y))), MouseOutcome::Ignored);
+    match app.drain_intents().as_slice() {
+        [AppIntent::CopyToClipboard(text)] => assert_eq!(text, "test-session"),
+        other => panic!("expected exactly one clipboard intent, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_clicking_the_star_toggles_pin_both_ways() {
+    let mut app = app_with_message();
+    let mut terminal = test_terminal(120, 12);
+    draw(&mut app, &mut terminal);
+    let (_, star) = status_cells(&app);
+
+    // 未 pin → 点一下请求 pin。
+    assert_eq!(
+        app.handle_mouse(press((star.x, star.y))),
+        MouseOutcome::Ignored
+    );
+    match app.drain_intents().as_slice() {
+        // intent 携带的是**目标状态**：未 pin 的会话点一下 = 请求 pin。
+        [AppIntent::SetSessionPin { pinned }] => assert!(*pinned, "not pinned yet"),
+        other => panic!("expected a pin intent, got {other:?}"),
+    }
+
+    // 服务端回读把它们置为已 pin（`FetchPayload::Info` 的同一路径）——这里
+    // 直接翻状态，再点一下必须请求 unpin。
+    app.status.pinned = true;
+    draw(&mut app, &mut terminal);
+    let (_, star) = status_cells(&app);
+    assert_eq!(
+        app.handle_mouse(press((star.x, star.y))),
+        MouseOutcome::Ignored
+    );
+    match app.drain_intents().as_slice() {
+        [AppIntent::SetSessionPin { pinned }] => assert!(!*pinned, "already pinned"),
+        other => panic!("expected an unpin intent, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_the_rest_of_the_status_bar_claims_no_pointer() {
+    let mut app = app_with_message();
+    let mut terminal = test_terminal(120, 12);
+    draw(&mut app, &mut terminal);
+    let (id, star) = status_cells(&app);
+
+    // 品牌 / 模型格：点了什么都不发生（不收事件、不发 intent）。
+    for column in [0u16, id.x.saturating_sub(1)] {
+        assert_eq!(
+            app.handle_mouse(press((column, 0))),
+            MouseOutcome::Ignored,
+            "cell ({column},0) must be inert"
+        );
+    }
+    assert!(
+        app.drain_intents().is_empty(),
+        "no intent may come out of an inert cell"
+    );
+    // 星标之后的空白（模型区）同样不认领。
+    assert_eq!(
+        app.handle_mouse(press((star.x + 1, 0))),
+        MouseOutcome::Ignored
+    );
+    assert!(app.drain_intents().is_empty());
+}
+
+#[test]
+fn test_a_status_bar_click_never_starts_a_selection() {
+    // 状态栏不是可选区（选区只有 chat 与 composer 两个区域）：点它不会
+    // 起拖拽选择，也不会因为拖到别处而进入选中态。
+    let mut app = app_with_message();
+    let mut terminal = test_terminal(120, 12);
+    draw(&mut app, &mut terminal);
+    let (id, _) = status_cells(&app);
+
+    app.handle_mouse(press((id.x, id.y)));
+    assert!(!app.selection.is_press_active());
+    app.handle_mouse(drag((id.x + 3, id.y)));
+    assert!(!app.selection.is_press_active());
+    app.drain_intents(); // 丢掉按下时的那条复制 intent
+    app.handle_mouse(release((id.x + 3, id.y)));
+    assert!(
+        app.drain_intents().is_empty(),
+        "the release must not copy anything"
+    );
+}

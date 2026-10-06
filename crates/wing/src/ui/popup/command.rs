@@ -324,6 +324,8 @@ pub fn filter_session_candidates(candidates: &[SessionCandidate], args: &str) ->
                 status: SessionStatus::parse(&c.status).unwrap_or(SessionStatus::Inactive),
                 last_active: super::selection::format_last_active(&c.last_interaction),
                 title: c.title.clone(),
+                workspace: c.workspace.clone(),
+                pinned: c.pinned,
             }),
         };
         if args.is_empty() {
@@ -353,21 +355,25 @@ pub fn is_exact_session_match(candidates: &[SessionCandidate], args: &str) -> bo
 
 /// A session candidate for the `/session`、`/ss` popup.
 ///
-/// Carries everything needed for the two-line render (status icon + last active
-/// time on line 1, title on line 2) plus the `id` used as the completion value.
-/// `workspace` is kept for search only.
+/// Carries everything needed for the two-line render (status icon + workspace +
+/// last active time on line 1, title on line 2) plus the `id` used as the
+/// completion value. `workspace` doubles as a search field.
 #[derive(Debug, Clone)]
 pub struct SessionCandidate {
     /// Session id — inserted on completion (not displayed verbatim).
     pub id: String,
     /// Session title (line 2).
     pub title: String,
-    /// Session workspace — search-only (never rendered, never ordered by).
+    /// Session workspace — displayed on line 1 and searched by `args`.
     pub workspace: String,
     /// Runtime status string from the backend (inactive|idle|working|waiting).
     pub status: String,
     /// Last interaction timestamp (ISO 8601), displayed on line 1.
     pub last_interaction: String,
+    /// 是否被 pin（`pin` 标签；前端约定，见 [`crate::shared::pinning`]）。
+    pub pinned: bool,
+    /// pin 时间（`tag_meta.pin.added_at`）——排序用，不渲染。
+    pub pin_added_at: Option<String>,
 }
 
 /// Cached sub-command candidate data and dynamic command list.
@@ -381,6 +387,10 @@ pub struct CandidateCache {
     pub commands: Vec<CommandInfo>,
     /// Session list from HTTP GET /api/session/list (rich, two-line render).
     pub sessions: Vec<SessionCandidate>,
+    /// 会话列表**是否已经抓过**——空列表是合法结果（"还没抓"与"抓到了 0 条"
+    /// 必须区分开：混为一谈会让面板在空列表上把"等待首帧"分支反复走一遍，
+    /// 每次刷新响应都再发一次请求）。
+    pub sessions_fetched: bool,
     /// Branch targets from HTTP GET /api/session/branches or WS BranchTargetsEvent.
     pub branches: Vec<(String, String)>,
     /// Agent list from HTTP GET /api/agents. Description is empty.
@@ -392,10 +402,16 @@ pub struct CandidateCache {
 impl CandidateCache {
     pub fn clear(&mut self) {
         // commands 不清空——来自 gateway 的全局命令列表，不随 session 变化
-        self.sessions.clear();
+        self.invalidate_sessions();
         self.branches.clear();
         self.agents.clear();
         self.copies.clear();
+    }
+
+    /// 会话候选失效：下次打开面板必须重新抓取（会话切换等动作调用）。
+    pub fn invalidate_sessions(&mut self) {
+        self.sessions.clear();
+        self.sessions_fetched = false;
     }
 
     /// Whether session candidates are cached (for `/ss`、`/session`).
@@ -582,6 +598,8 @@ mod tests {
             workspace: workspace.into(),
             status: status.into(),
             last_interaction: "2025-07-22T21:41:00".into(),
+            pinned: false,
+            pin_added_at: None,
         }
     }
 

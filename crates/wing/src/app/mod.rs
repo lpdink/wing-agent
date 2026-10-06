@@ -540,11 +540,23 @@ impl App {
                 .constraints(constraints)
                 .split(area);
 
-            // Status bar (model top-left, cumulative usage, connection).
+            // Status bar (model top-left, cumulative usage, connection) — plus
+            // the session identity tail (id + pin star), the two pointer
+            // targets the bar itself declares. The regions the widget really
+            // drew are recorded here, next to the other frame geometry: a
+            // click between frames must hit what the user was looking at.
+            let mut status_regions = crate::ui::status_bar::StatusBarRegions::default();
             frame.render_widget(
-                StatusBar::new(&self.status, self.is_wide(), &palette),
+                StatusBar::new(
+                    &self.status,
+                    &self.session_id,
+                    self.is_wide(),
+                    &palette,
+                    &mut status_regions,
+                ),
                 chunks[0],
             );
+            self.geometry.record_status_regions(status_regions);
 
             // Chat view — the scrollable viewport only. The widget is rendered
             // into the band **minus the scrollbar gutter**, so no cell

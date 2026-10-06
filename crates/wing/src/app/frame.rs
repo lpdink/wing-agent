@@ -61,6 +61,9 @@ pub(super) struct FrameGeometry {
     chat_band: Rect,
     /// The composer's card (the floating block's frame) of the last frame.
     composer: Rect,
+    /// 状态栏上两处可点区域（会话 ID / pin 星标）——由状态栏自己在绘制时
+    /// 回填（"只有画出来才可点"），随后记录到这里。
+    status: crate::ui::status_bar::StatusBarRegions,
 }
 
 impl Default for FrameGeometry {
@@ -83,6 +86,7 @@ impl Default for FrameGeometry {
             area: Rect::new(0, 0, UNFRAMED_WIDTH, 0),
             chat_band: Rect::default(),
             composer: Rect::default(),
+            status: crate::ui::status_bar::StatusBarRegions::default(),
         }
     }
 }
@@ -105,6 +109,19 @@ impl FrameGeometry {
     /// Record the composer block this frame laid out.
     pub(super) fn record_composer(&mut self, area: Rect) {
         self.composer = area;
+    }
+
+    /// Record the status bar's pointer regions as they were really drawn.
+    pub(super) fn record_status_regions(
+        &mut self,
+        regions: crate::ui::status_bar::StatusBarRegions,
+    ) {
+        self.status = regions;
+    }
+
+    /// The status bar's pointer regions of the last frame.
+    pub(super) fn status_regions(&self) -> crate::ui::status_bar::StatusBarRegions {
+        self.status
     }
 
     /// Terminal width of the last frame.

@@ -241,7 +241,24 @@ impl App {
     ///
     /// Skips requests while the agent is streaming to avoid interference.
     /// HTTP calls are idempotent — no dedup needed.
+    ///
+    /// 响应路径（fetch 结果、快照）走这里：只原地换行，不产生新请求。
     pub(super) fn update_popup(&mut self) {
+        self.update_popup_inner(false);
+    }
+
+    /// 输入路径的 popup 更新（按键 / 粘贴改变了 draft）：额外承担
+    /// **「面板打开即刷新一次」**（#147）。
+    ///
+    /// 面板是快照：缓存只负责"先渲染旧行"，不再是"有缓存就不取数"的判据。
+    /// 边沿只在输入路径判定（`was_session_panel → is_session_panel`），刷新
+    /// 响应走响应路径原地换行——**一次打开恰好一次请求**；流式（agent 忙）
+    /// 时沿用既有守卫，不发请求。
+    pub(super) fn update_popup_from_input(&mut self) {
+        self.update_popup_inner(true);
+    }
+
+    fn update_popup_inner(&mut self, from_input: bool) {
         // The modal model panel owns keyboard input — no popup while open.
         if self.model_panel.is_some() {
             return;
@@ -249,6 +266,8 @@ impl App {
 
         // Streaming guard: skip requests while agent is busy.
         let streaming = self.turn.working;
+        // 面板身份必须在更新**之前**读：进入（上一次不在面板里）才是边沿。
+        let was_session_panel = self.popup.active.session_panel_command().is_some();
         let text = self.input.text().to_string();
         if let Some(action) = self.popup.update_from_input(&text) {
             if streaming {
@@ -265,6 +284,16 @@ impl App {
                     self.push_intent(AppIntent::FetchSessionList);
                 }
             }
+            return;
+        }
+        // 刚打开面板（且这次是输入路径）→ 刷新一次。等待首帧列表的路径已经
+        // 由上面的 action 分支发过请求，不会走到这里。
+        if from_input
+            && !streaming
+            && !was_session_panel
+            && self.popup.active.session_panel_command().is_some()
+        {
+            self.push_intent(AppIntent::FetchSessionList);
         }
     }
 
@@ -276,9 +305,11 @@ impl App {
     /// Invalidate the cached session list so the next `/session` popup re-fetches.
     ///
     /// Called after session-mutating operations (resume, create, fork, title
-    /// update) succeed, ensuring the popup always shows fresh data.
+    /// update) succeed, ensuring the popup always shows fresh data. 复位的是
+    /// "抓过没有"而不是"有没有内容"：空列表也是抓过的结果，切换会话后必须
+    /// 重新抓（见 `CandidateCache::sessions_fetched`）。
     pub(super) fn invalidate_session_cache(&mut self) {
-        self.popup.cache.sessions.clear();
+        self.popup.cache.invalidate_sessions();
     }
 
     /// Apply a background fetch result to app state.
@@ -322,6 +353,9 @@ impl App {
                 self.status.yolo = info.yolo;
                 self.status.session_name = info.session_name;
                 self.status.workdir = info.workdir;
+                // pin 星标的唯一数据来源（快照不带标签，见 `apply_sync_session`
+                // 的补取）——以服务端读回的 `pin` 标签为准。
+                self.status.pinned = crate::shared::pinning::is_pinned(&info.tags);
                 // Refresh title so the workdir suffix appears once known.
                 let dir = self.dir_label();
                 let title = if self.turn.working {
@@ -396,13 +430,17 @@ impl App {
                 self.update_popup();
             }
             FetchPayload::SessionList(resp) => {
+                use crate::shared::pinning::{is_pinned, pin_added_at, pin_key};
                 use crate::ui::popup::command::SessionCandidate;
 
-                // 顺序完全沿用后端下发（active 优先 + 组内最后交互时间降序，
-                // 见 SessionManager.list_sessions）：前端按原序渲染，不做任何
-                // 重排——workspace 匹配与 status 优先级这两个旧排序键已删除，
-                // 它们是「在哪启动 TUI」压过「正在用哪几个会话」的根源。
-                let candidates: Vec<SessionCandidate> = resp
+                // 后端下发的是**基准序**（active 优先 + 组内最后交互时间降序，
+                // 见 SessionManager.list_sessions）；前端在它之上叠加自己的
+                // 语义：被 pin 的会话置顶（组内后 pin 的更靠前，见
+                // `shared::pinning`）。其余条目保持后端原序——workspace 匹配
+                // 与 status 优先级这两个旧排序键已删除（它们是「在哪启动 TUI」
+                // 压过「正在用哪几个会话」的根源），workspace 只做展示与搜索。
+                let anchor = self.popup.active.selected_name().map(str::to_string);
+                let mut candidates: Vec<SessionCandidate> = resp
                     .sessions
                     .iter()
                     .map(|s| SessionCandidate {
@@ -411,11 +449,20 @@ impl App {
                         workspace: s.workspace.clone().unwrap_or_default(),
                         status: s.status.clone(),
                         last_interaction: s.last_interaction.clone().unwrap_or_default(),
+                        pinned: is_pinned(&s.tags),
+                        pin_added_at: pin_added_at(&s.tag_meta).map(str::to_string),
                     })
                     .collect();
+                candidates.sort_by_cached_key(|c| pin_key(c.pinned, c.pin_added_at.as_deref()));
 
                 self.popup.cache.sessions = candidates;
+                self.popup.cache.sessions_fetched = true;
                 self.update_popup();
+                // 刷新后光标按 session id 回到原选中行（行序可能因 pin 变化，
+                // 选区不该跟着跳走）。
+                if let Some(anchor) = anchor {
+                    self.popup.active.reselect(&anchor);
+                }
             }
             FetchPayload::ContextInfo(text) => {
                 self.chat.push(ChatCell::SystemMessage(text));

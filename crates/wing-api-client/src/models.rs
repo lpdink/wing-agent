@@ -1,5 +1,7 @@
 //! Request / response types — mirrors `wing.gateway.protocol` (Python).
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +24,22 @@ pub struct SessionInfo {
     /// 会话级标签（插入序；无标签为空数组。旧网关缺省为空）。
     #[serde(default)]
     pub tags: Vec<String>,
+    /// 每个标签的记录（键集 ⊆ tags）；当前含 `added_at` 打标时间。
+    /// 旧网关 / 老数据缺省为空。
+    #[serde(default)]
+    pub tag_meta: HashMap<String, TagMeta>,
+}
+
+/// 单个标签的记录（`SessionMetadata.tag_meta` 的值）。
+///
+/// 值是**对象**（面向增量：后续审计维度在此扩展）；当前只有 `added_at`
+/// ——标签**实际加入**的时间（本地 naive ISO，与 `last_interaction` 同口径；
+/// 幂等 no-op 不刷新，移除即删记录）。时间缺失 / 不可解析 = 未知，
+/// 消费方自行降级。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TagMeta {
+    #[serde(default)]
+    pub added_at: Option<String>,
 }
 
 /// Agent 配置信息。
@@ -271,6 +289,9 @@ pub struct SessionInfoResponse {
     /// 会话标签（插入序；无标签为空数组。旧网关缺省为空）。
     #[serde(default)]
     pub tags: Vec<String>,
+    /// 每个标签的记录（键集 ⊆ tags）；当前含 `added_at` 打标时间。
+    #[serde(default)]
+    pub tag_meta: HashMap<String, TagMeta>,
 }
 
 /// POST /api/session/compact 响应。
@@ -379,6 +400,9 @@ pub struct TagSessionResponse {
     pub added: Vec<String>,
     #[serde(default)]
     pub removed: Vec<String>,
+    /// 变更后的全量标签记录（键集 ⊆ tags）。
+    #[serde(default)]
+    pub tag_meta: HashMap<String, TagMeta>,
 }
 
 // ============================================================

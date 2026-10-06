@@ -225,7 +225,8 @@ fn test_pointer_priority_is_declared_once_and_in_order() {
         [
             PointerOwner::Scrollbar,
             PointerOwner::Composer,
-            PointerOwner::Chat
+            PointerOwner::Chat,
+            PointerOwner::StatusBar
         ]
     );
 
@@ -280,8 +281,25 @@ fn test_pointer_priority_is_declared_once_and_in_order() {
         app.pointer_owner(composer.x + 1, composer.y),
         Some(PointerOwner::Composer)
     );
-    // 4. Outside every region (the status bar row): nobody.
-    assert_eq!(app.pointer_owner(band.x, 0), None);
+    // 4. The status bar's own row: its two hot cells (the session id and the
+    //    pin star) are the bar's; every other cell up there is nobody's.
+    assert_eq!(
+        app.pointer_owner(band.x, 0),
+        None,
+        "the brand cell is inert"
+    );
+    let regions = app.geometry.status_regions();
+    let id = regions.session_id.expect("the id cell was drawn");
+    let star = regions.star.expect("the star cell was drawn");
+    assert_eq!(id.y, 0, "the id lives in the status bar row");
+    assert_eq!(star.y, 0);
+    assert_eq!(app.pointer_owner(id.x, 0), Some(PointerOwner::StatusBar));
+    assert_eq!(app.pointer_owner(star.x, 0), Some(PointerOwner::StatusBar));
+    assert_eq!(
+        app.pointer_chain(star.x, 0).collect::<Vec<_>>(),
+        vec![PointerOwner::StatusBar],
+        "and nothing else claims it"
+    );
 
     // The press path consumes exactly these verdicts: the bar's position grabs
     // the bar (and starts no selection), the composer's position starts a
