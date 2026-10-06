@@ -32,11 +32,13 @@ CloudCLI（siteboon/claudecodeui）的**会话列表**来自递归扫描
   ``load_hooks()``（网关启动 / ``POST /api/system/reload``）只重新订阅一次，
   挂起行 / 已定 cwd / 写线程跨 reload 存活；
 - 跨进程续链：网关重启（或重装投影器）后，会话首次落盘前若目标文件已存在，
-  从尾部读回最后一个完整行的游标（``uuid``，或 ``last-prompt.leafUuid``）作为
-  初始 ``last_uuid``——重启后的段落续到旧链上，全文件保持单根线性链；文件若以
-  半截行收尾，先补一个换行给残行封口；
-- 落盘纪律：游标只在**写成功之后**提交——单批写盘失败时游标不动（下一批重链到
-  最后一个已落盘行），文件里绝不出现悬空 ``parentUuid``。
+  从尾部读回最后一个完整行的游标（``uuid``，或**校验过真实存在**的
+  ``last-prompt.leafUuid``）作为初始 ``last_uuid``——重启后的段落续到旧链上，
+  全文件保持单根线性链；文件若以半截行收尾，先补一个换行给残行封口；
+- 落盘纪律：游标只在**写成功之后**提交；写失败（含内核部分写：ENOSPC / EFBIG
+  写完一半才报错）时 best-effort 截回写前尺寸——文件不粘行、不丢行，也
+  **绝不**出现悬空 ``parentUuid``；每次写前还会对账物理尺寸，尺寸漂移
+  （外部 / 残留写入）即重探残行 + 重播种。
 
 启用（任选其一）：
 
@@ -297,23 +299,37 @@ def _workspace_from_metadata(session_id: str) -> str | None:
 # ============================================================
 
 
-def _cursor_of(row: dict[str, Any]) -> str | None:
-    """一条投影行贡献的链游标：自身 ``uuid``，或 ``last-prompt`` 的 ``leafUuid``。"""
+def _cursor_of(row: dict[str, Any], known_uuids: set[str]) -> str | None:
+    """一条投影行贡献的链游标：自身 ``uuid``，或**校验过存在性**的 ``last-prompt.leafUuid``。
+
+    ``leafUuid`` 是"声明的叶子"而不是"文件里存在的行"（部分写事故会留下指向
+    不存在 uuid 的孤儿 ``last-prompt``）；只有它真的出现在本次扫描到的
+    ``uuid`` 集合里才接受，否则跳过、继续往前找自带 ``uuid`` 的行——宁可
+    产生一次 fork，也绝不让种子把悬空带进重启后的第一行（见 design R2/S-b）。
+    """
     uuid = row.get("uuid")
     if isinstance(uuid, str) and uuid:
         return uuid
     if row.get("type") == "last-prompt":
         leaf = row.get("leafUuid")
-        if isinstance(leaf, str) and leaf:
+        if isinstance(leaf, str) and leaf and leaf in known_uuids:
             return leaf
     return None
+
+
+def _size_of(path: Path) -> int:
+    """文件字节数（不存在 / 不可读 = 0）。"""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
 
 
 def _ends_mid_line(path: Path) -> bool:
     """文件已存在且以半截行收尾（最后一个字节不是换行）——崩溃残行的判据。
 
-    这时直接 append 会把新行拼到残行上（新行随之不可解析），所以首次落盘时
-    先补一个换行把残行封口（见 ``_write_rows`` 的 ``needs_separator``）。
+    这时直接 append 会把新行拼到残行上（新行随之不可解析），所以落盘前先补一个
+    换行把残行封口（见 ``_write_rows`` 的 ``needs_separator``）。
     """
     try:
         with path.open("rb") as handle:
@@ -327,16 +343,18 @@ def _ends_mid_line(path: Path) -> bool:
 
 
 def _seed_last_uuid(path: Path) -> str | None:
-    """从已存在的投影文件尾部恢复链游标（网关重启后接着写，见 design R1/S1）。
+    """从已存在的投影文件尾部恢复链游标（网关重启 / 写失败残留后接着写）。
 
     从尾部窗口往前找第一条能解析出游标的**完整**行：半截行（崩溃留下的、
-    或读到写了一半的行）与非法 JSON 行一律跳过。窗口不够（最后一行特别长）
-    时按倍率放大重读；仍找不到就返回 None（从新根开始——绝不猜）。
+    或读到写了一半的行）与非法 JSON 行一律跳过；``leafUuid`` 需在窗口内真实
+    存在（见 ``_cursor_of``）。窗口不够（最后一行特别长）时按倍率放大重读；
+    仍找不到就返回 None（从新根开始——绝不猜）。
+
+    行切分只用 ``\\n``（与消费端 ``readline`` 对齐）：JSON 里 U+2028 / U+0085
+    这类字符不是 JSONL 的行界，``str.splitlines()`` 会把它们切碎、让种子
+    错误地回退到更旧的行（见 design R2/N1'）。
     """
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return None
+    size = _size_of(path)
     if size <= 0:
         return None
     window = SEED_WINDOW_START
@@ -353,7 +371,8 @@ def _seed_last_uuid(path: Path) -> str | None:
             # 窗口首部必然是半截行：从第一个换行之后开始（窗口整体落在一行内则无完整行）
             head, sep, tail = text.partition("\n")
             text = tail if sep else ""
-        for line in reversed(text.splitlines()):
+        rows: list[dict[str, Any]] = []
+        for line in text.split("\n"):
             line = line.strip()
             if not line:
                 continue
@@ -361,9 +380,15 @@ def _seed_last_uuid(path: Path) -> str | None:
                 row = json.loads(line)
             except ValueError:
                 continue
-            if not isinstance(row, dict):
-                continue
-            cursor = _cursor_of(row)
+            if isinstance(row, dict):
+                rows.append(row)
+        known_uuids = {
+            row["uuid"]
+            for row in rows
+            if isinstance(row.get("uuid"), str) and row["uuid"]
+        }
+        for row in reversed(rows):
+            cursor = _cursor_of(row, known_uuids)
             if cursor:
                 return cursor
         if start == 0 or window >= SEED_WINDOW_MAX:
@@ -394,6 +419,7 @@ class _SessionCtx:
         "title",
         "metadata_probed",
         "needs_separator",
+        "expected_size",
         "pending",
     )
 
@@ -406,6 +432,8 @@ class _SessionCtx:
         self.metadata_probed = False
         self.needs_separator = False
         """已存在文件以半截行收尾：下一批落盘前先补一个换行（见 _ends_mid_line）。"""
+        self.expected_size: int | None = None
+        """上一次成功写入后文件应有的字节数；None = 记账失效（写前对账会重播种）。"""
         self.pending: list[dict[str, Any]] = []
 
 
@@ -615,13 +643,20 @@ class ClaudeSessionMirror:
     def _write_rows(self, ctx: _SessionCtx, rows: list[dict[str, Any]]) -> None:
         """串行落盘：补链拓扑（parentUuid）+ cwd，一次 append 写完这批行。
 
-        游标只在**写成功之后**提交（S2）：本批写盘失败（ENOSPC / 权限 / 目录
-        不可写…）时 ``ctx.last_uuid`` 不动，下一批自动重链到最后一个**已落盘**
-        行，不会在文件里留下悬空 ``parentUuid``。
+        失败路径（R1/S2 + R2/S-a）：
+
+        - **写前对账**：物理尺寸与记账不符（外部写入 / 上一次失败的残留）→
+          重探残行 + 重播种，游标与换行封口都基于文件真实状态；
+        - **写失败**（整批失败，或内核部分写 ENOSPC / EFBIG / EIO 写完一半才
+          抛错）→ best-effort ``os.truncate`` 回到写前尺寸：文件回到写前状态后
+          "游标不提交"即刻是正确语义（不粘行、不丢行、不悬空）；回滚也失败时
+          作废记账（``expected_size = None``），下一批写前重新播种；
+        - **写成功后才提交游标**——下一批不会链到没落盘的行上。
         """
         if not rows:
             return
-        path = self._resolve_path(ctx)  # 首次落盘：定路径 + 续链种子（必须先于取游标）
+        path = self._resolve_path(ctx)
+        self._reconcile(ctx, path)
         cursor = ctx.last_uuid
         for row in rows:
             if "uuid" in row:
@@ -632,18 +667,21 @@ class ClaudeSessionMirror:
         payload = ("\n" if ctx.needs_separator else "") + "".join(
             json.dumps(row, ensure_ascii=False, default=str) + "\n" for row in rows
         )
+        before = _size_of(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(payload)
+        try:
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(payload)
+        except BaseException:
+            # 部分写会把半批字节留在文件里：截回写前尺寸再让异常冒泡（S-a）。
+            ctx.expected_size = before if self._rollback(path, before) else None
+            raise
         ctx.last_uuid = cursor
         ctx.needs_separator = False
+        ctx.expected_size = _size_of(path)
 
     def _resolve_path(self, ctx: _SessionCtx) -> Path:
-        """首次落盘时定下文件路径；目标文件已存在则续链（S1）+ 残行封口。
-
-        只做一次（``ctx.path`` 一旦确定即复用）：同一个投影器实例不会为同一
-        会话反复读尾部，重启后的新实例则在这里把旧链接上。
-        """
+        """首次落盘时定下文件路径（只做一次，``ctx.path`` 一旦确定即复用）。"""
         if ctx.path is None:
             ctx.path = (
                 self._home
@@ -651,9 +689,34 @@ class ClaudeSessionMirror:
                 / encode_cwd(ctx.cwd or "")
                 / f"{ctx.session_id}.jsonl"
             )
-            ctx.needs_separator = _ends_mid_line(ctx.path)
-            ctx.last_uuid = _seed_last_uuid(ctx.path)
         return ctx.path
+
+    def _reconcile(self, ctx: _SessionCtx, path: Path) -> None:
+        """写前对账：物理尺寸与记账不符 → 重探残行 + 重播种。
+
+        ``expected_size`` 是"上一次成功写入后文件应有的字节数"；``None`` 表示
+        记账失效（回滚失败 / 还没写过）。不符即视为文件被外部或残留写入改过，
+        游标与封口全部按文件真实状态重建——包括**进程内**新产生的残行
+        （S-a 的第 2 条：``needs_separator`` 不能只在首次落盘时算一次）。
+        """
+        size = _size_of(path)
+        if ctx.expected_size == size:
+            return
+        ctx.needs_separator = _ends_mid_line(path)
+        ctx.last_uuid = _seed_last_uuid(path)
+        ctx.expected_size = size
+
+    @staticmethod
+    def _rollback(path: Path, size: int) -> bool:
+        """best-effort 截回写前尺寸；成功返回 True（文件回到写前状态）。"""
+        try:
+            os.truncate(path, size)
+        except OSError as e:
+            log.warning(
+                f"[claude-mirror] rollback to {size} bytes failed for {path}: {e}"
+            )
+            return False
+        return True
 
 
 # ============================================================

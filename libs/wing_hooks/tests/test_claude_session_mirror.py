@@ -14,6 +14,7 @@ tool_use / thinking）/ tool_result）、**文件路径与目录编码生成**�
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -85,6 +86,15 @@ def _project_file(home: Path, project: str, session_id: str = SESSION_ID) -> Pat
 
 def _read_rows(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _parses(line: str) -> bool:
+    """该物理行是不是合法 JSON（残行台账 / 断言用）。"""
+    try:
+        json.loads(line)
+    except ValueError:
+        return False
+    return True
 
 
 def _assistant_event(
@@ -422,7 +432,7 @@ def test_rows_parked_until_cwd_is_known(mirror, project):
 
 
 # ============================================================
-# 跨进程续链（网关重启）与写盘失败（R1: S1 / S2）
+# 跨进程续链（网关重启）与写盘失败（R1: S1 / S2；R2: S-a / S-b）
 # ============================================================
 
 
@@ -432,6 +442,56 @@ def _fresh_mirror(home: Path):
     instance = mirror_mod.install(bus=bus, claude_home=home)
     assert instance is not None
     return instance, bus
+
+
+class _PartialWriteHandle:
+    """代理真实句柄：先把前缀写进文件，再抛 ``EFBIG``（内核部分写的语义）。"""
+
+    def __init__(self, real, injector: "_PartialWriteInjector") -> None:
+        self._real = real
+        self._injector = injector
+
+    def write(self, data: str) -> int:
+        self._injector.triggered += 1
+        self._real.write(data[: self._injector.prefix_chars])
+        self._real.flush()  # 让字节真的落到文件（部分写）
+        raise OSError(27, "File too large")  # 内核再报错
+
+    def __enter__(self) -> "_PartialWriteHandle":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        self._real.close()
+        return False
+
+    def __getattr__(self, name: str):
+        return getattr(self._real, name)
+
+
+class _PartialWriteInjector:
+    """把目标文件的 ``Path.open`` 换成"写一半再抛错"的句柄（只拦目标路径）。
+
+    真实内核语义（ENOSPC / EFBIG / EIO）是"先落盘一部分再报错"，注入点必须
+    落在 ``write`` 上才测得到回滚路径；其它路径原样放行。
+    """
+
+    def __init__(self, target: Path, prefix_chars: int = 40) -> None:
+        self.target = target
+        self.prefix_chars = prefix_chars
+        self.armed = True
+        self.triggered = 0
+
+    def install(self, monkeypatch) -> None:
+        real_open = Path.open
+        injector = self
+
+        def flaky_open(inner_self: Path, *args, **kwargs):
+            handle = real_open(inner_self, *args, **kwargs)
+            if injector.armed and inner_self == injector.target:
+                return _PartialWriteHandle(handle, injector)
+            return handle
+
+        monkeypatch.setattr(Path, "open", flaky_open)
 
 
 def _chained_rows(rows: list[dict]) -> list[dict]:
@@ -513,6 +573,176 @@ def test_seed_last_uuid_reads_tail_and_skips_junk(tmp_path):
     assert mirror_mod._ends_mid_line(empty) is False
     assert mirror_mod._ends_mid_line(normal) is False
     assert mirror_mod._ends_mid_line(torn) is True
+
+    # 末行 last-prompt 的 leafUuid 指向不存在的行（部分写事故的孤儿标题行）
+    # → 不接受，回退到文件里真实存在的最后一条链行（R2/S-b）
+    ghost = tmp_path / "ghost.jsonl"
+    ghost.write_text(
+        json.dumps({"type": "user", "uuid": "u-real"})
+        + "\n"
+        + json.dumps(
+            {"type": "last-prompt", "lastPrompt": "ghost", "leafUuid": "u-ghost"}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert seed(ghost) == "u-real"
+
+    # U+2028 / U+0085 不是 JSONL 的行界（消费端 readline 只认 \n）——行切分不能被切碎（R2/N1'）
+    exotic = tmp_path / "exotic.jsonl"
+    exotic.write_text(
+        json.dumps({"type": "user", "uuid": "u-old"})
+        + "\n"
+        + json.dumps(
+            {"type": "user", "uuid": "u-exotic", "text": "a\u2028b\u0085c"},
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert seed(exotic) == "u-exotic"
+
+
+def test_restart_ignores_dangling_leaf_uuid(tmp_path, project):
+    """尾行 last-prompt 指向不存在的行时，重启后的首行必须续到真实存在的链行（R2/S-b）。"""
+    home = tmp_path / "claude"
+    first, bus1 = _fresh_mirror(home)
+    try:
+        first.note_session(SESSION_ID, project)
+        bus1.emit(UserMessageAcceptedEvent(session_id=SESSION_ID, content="real"))
+        assert first.flush()
+    finally:
+        mirror_mod.uninstall(bus1)
+
+    path = _project_file(home, project)
+    # 降级现场：追加一条指向不存在 uuid 的孤儿 last-prompt（部分写事故的典型残留）
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "type": "last-prompt",
+                    "lastPrompt": "ghost",
+                    "leafUuid": "ghost-uuid",
+                    "sessionId": SESSION_ID,
+                }
+            )
+            + "\n"
+        )
+
+    second, bus2 = _fresh_mirror(home)
+    try:
+        second.note_session(SESSION_ID, project)
+        bus2.emit(UserMessageAcceptedEvent(session_id=SESSION_ID, content="after"))
+        assert second.flush()
+    finally:
+        mirror_mod.uninstall(bus2)
+
+    rows = _read_rows(path)
+    new_user = [row for row in rows if row["type"] == "user"][-1]
+    assert new_user["parentUuid"] == rows[0]["uuid"], (
+        "种子不得采用指向不存在行的 leafUuid"
+    )
+    _assert_single_root_chain(rows)
+
+
+def test_partial_write_failure_rolls_back(tmp_path, project, monkeypatch):
+    """部分写（写了一半才抛错）→ 回滚到写前尺寸：不粘行、不丢行、不悬空（R2/S-a）。"""
+    home = tmp_path / "claude"
+    instance, bus = _fresh_mirror(home)
+    try:
+        instance.note_session(SESSION_ID, project)
+        bus.emit(UserMessageAcceptedEvent(session_id=SESSION_ID, content="first"))
+        assert instance.flush()
+
+        path = _project_file(home, project)
+        before = path.stat().st_size
+        injector = _PartialWriteInjector(path)
+        injector.install(monkeypatch)
+
+        bus.emit(
+            UserMessageAcceptedEvent(session_id=SESSION_ID, content="half-written")
+        )
+        assert instance.flush()
+        assert injector.triggered == 1, "注入未生效"
+        assert path.stat().st_size == before, "部分写的残字节必须被截回写前尺寸"
+
+        injector.armed = False
+        bus.emit(UserMessageAcceptedEvent(session_id=SESSION_ID, content="recovered"))
+        assert instance.flush()
+    finally:
+        mirror_mod.uninstall(bus)
+
+    rows = _read_rows(path)
+    assert [row["type"] for row in rows] == [
+        "user",
+        "last-prompt",
+        "user",
+        "last-prompt",
+    ], "失败批次不得留下任何行（含半行）"
+    assert all(
+        "half-written" not in row["message"]["content"][0].get("text", "")
+        for row in rows
+        if row["type"] == "user"
+    )
+    assert rows[2]["parentUuid"] == rows[0]["uuid"]
+    _assert_single_root_chain(rows)
+
+
+def test_partial_write_with_failed_rollback_reseeds(tmp_path, project, monkeypatch):
+    """回滚也失败（truncate 不生效）→ 作废记账：下一批写前重探残行 + 重播种（R2/S-a #3）。"""
+    home = tmp_path / "claude"
+    instance, bus = _fresh_mirror(home)
+    try:
+        instance.note_session(SESSION_ID, project)
+        bus.emit(UserMessageAcceptedEvent(session_id=SESSION_ID, content="first"))
+        assert instance.flush()
+
+        path = _project_file(home, project)
+        injector = _PartialWriteInjector(path)
+        injector.install(monkeypatch)
+
+        real_truncate = os.truncate
+        calls = {"n": 0}
+
+        def stubborn_truncate(_target, _length):
+            calls["n"] += 1
+            raise OSError(1, "Operation not permitted")  # 只失败一次：模拟回滚不可用
+
+        monkeypatch.setattr(mirror_mod.os, "truncate", stubborn_truncate)
+        bus.emit(
+            UserMessageAcceptedEvent(session_id=SESSION_ID, content="half-written")
+        )
+        assert instance.flush()
+        assert calls["n"] == 1, "回滚应当尝试过一次"
+        spilled = path.read_bytes()
+        assert spilled and not spilled.endswith(b"\n"), (
+            "部分写残留应当留在文件里（回滚失败）"
+        )
+
+        monkeypatch.setattr(mirror_mod.os, "truncate", real_truncate)
+        injector.armed = False
+        bus.emit(UserMessageAcceptedEvent(session_id=SESSION_ID, content="recovered"))
+        assert instance.flush()
+    finally:
+        mirror_mod.uninstall(bus)
+
+    # 残行按设计留在文件里（被换行封口、自成一行、不可解析）——按消费端口径跳过它
+    physical = path.read_text(encoding="utf-8").split("\n")
+    rows = [json.loads(line) for line in physical if line.strip() and _parses(line)]
+    user_texts = [
+        row["message"]["content"][0].get("text")
+        for row in rows
+        if row["type"] == "user"
+    ]
+    assert user_texts == ["first", "recovered"], user_texts
+    recovered = [row for row in rows if row["type"] == "user"][-1]
+    assert recovered["parentUuid"] == rows[0]["uuid"], (
+        "重播种后的首行必须指向文件里真实存在的链行"
+    )
+    # 残行被换行封口：新行自成一行（不会被粘进残行）
+    torn_lines = [ln for ln in physical if ln.strip() and not _parses(ln)]
+    assert len(torn_lines) == 1, torn_lines
+    _assert_single_root_chain(rows)
 
 
 def test_restart_resumes_chain_from_last_prompt_leaf(tmp_path, project):
