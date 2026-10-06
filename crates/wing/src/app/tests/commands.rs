@@ -529,6 +529,11 @@ fn test_stale_fetch_results_are_discarded() {
 /// Feed a `FetchPayload::Info` result into the app (the `/api/session/info`
 /// projection path).
 fn feed_info(app: &mut App, model: &str, display_name: Option<&str>) {
+    feed_info_with_tags(app, model, display_name, vec![]);
+}
+
+/// 同 [`feed_info`]，但可以带上会话标签（pin 星标的真值来源）。
+fn feed_info_with_tags(app: &mut App, model: &str, display_name: Option<&str>, tags: Vec<String>) {
     use crate::app::intent::FetchPayload;
     use crate::app::intent::FetchResult;
     use wing_api_client::models::ContextStatsInfo;
@@ -556,10 +561,28 @@ fn feed_info(app: &mut App, model: &str, display_name: Option<&str>) {
             },
             skills_info: String::new(),
             system_prompt: String::new(),
-            tags: vec![],
+            tags,
             tag_meta: Default::default(),
         })),
     });
+}
+
+#[test]
+fn test_info_carries_the_pin_state_of_the_current_session() {
+    // 星标的真值只从这里来（`/api/session/info` 的 tags）：赋值错了方向就反，
+    // 点一下想 unpin 结果又 add（幂等自愈，但用户看到的是"没反应"）。
+    let mut app = test_app();
+    assert!(!app.status.pinned);
+
+    feed_info_with_tags(&mut app, "m", None, vec!["pin".into()]);
+    assert!(app.status.pinned, "pin 标签 → 星标点亮");
+
+    // 别的标签不算 pin；unpin 后（标签消失）星标熄灭。
+    feed_info_with_tags(&mut app, "m", None, vec!["favorite".into()]);
+    assert!(!app.status.pinned, "只有裸 `pin` 才算置顶");
+    feed_info_with_tags(&mut app, "m", None, vec!["pin".into()]);
+    feed_info_with_tags(&mut app, "m", None, vec![]);
+    assert!(!app.status.pinned, "标签被移除 → 星标熄灭");
 }
 
 #[test]

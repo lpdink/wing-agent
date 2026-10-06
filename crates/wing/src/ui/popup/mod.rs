@@ -599,6 +599,31 @@ mod tests {
     }
 
     #[test]
+    fn test_reselect_re_anchors_by_name_and_leaves_a_missing_one_alone() {
+        let mut popup = ActivePopup::default();
+        let cache = CandidateCache {
+            sessions: vec![sess("sess-1", "My Session"), sess("sess-2", "Other")],
+            sessions_fetched: true,
+            ..CandidateCache::default()
+        };
+        popup.update_from_input("/ss", &cache);
+        assert_eq!(popup.selected_name(), Some("sess-1"));
+
+        // 命中锚点：光标跟到那一行（原地刷新后行序变了也不跳走）。
+        assert!(popup.reselect("sess-2"));
+        assert_eq!(popup.selected_name(), Some("sess-2"));
+
+        // 锚点不在列表里（会话被删 / 过滤掉了）：光标**不动**，返回 false。
+        assert!(!popup.reselect("gone"));
+        assert_eq!(popup.selected_name(), Some("sess-2"));
+
+        // 没有面板时什么都不做。
+        let mut none = ActivePopup::None;
+        assert!(!none.reselect("sess-1"));
+        assert!(matches!(none, ActivePopup::None));
+    }
+
+    #[test]
     fn test_session_popup_rows_are_rich() {
         let mut popup = ActivePopup::default();
         let cache = CandidateCache {
