@@ -8,17 +8,24 @@ Policy under test (see docs/dev/config-logging.md):
 - files older than 7 days are pruned.
 """
 
+import asyncio
 import logging
 import os
 import re
 import subprocess
 import sys
+from collections.abc import Iterator
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from wing.common.logger import RETENTION_DAYS, setup_logger
+from wing.common.logger import (
+    RETENTION_DAYS,
+    install_loop_exception_logger,
+    setup_logger,
+)
 
 
 @pytest.fixture()
@@ -207,3 +214,57 @@ def test_relpath_is_cached_per_source_file(tmp_path: Path, _restore_logger) -> N
     # 用「 - <路径> - 」的字段边界断言，而不是子串：子串断言会被
     # `/etc → /private/etc` 这类 realpath 语义或相对路径实现蒙混过关。
     assert f" - {outside_path}:7 - " in outside
+
+
+@pytest.fixture()
+def wing_logs(caplog: pytest.LogCaptureFixture) -> Iterator[pytest.LogCaptureFixture]:
+    """捕获 wing logger 的记录（库 logger propagate=False，需挂 handler）。"""
+    caplog.set_level(logging.DEBUG, logger="wing")
+    logger = logging.getLogger("wing")
+    logger.addHandler(caplog.handler)
+    yield caplog
+    logger.removeHandler(caplog.handler)
+
+
+class TestLoopExceptionLogger:
+    """asyncio 未处理异常的兜底日志（转发给原处理器）。"""
+
+    @pytest.mark.asyncio
+    async def test_logs_and_chains_to_previous_handler(self, wing_logs) -> None:
+        loop = asyncio.get_running_loop()
+        chained: list[dict[str, Any]] = []
+        original = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: chained.append(context))
+        try:
+            install_loop_exception_logger()
+            handler = loop.get_exception_handler()
+            assert handler is not None
+            error = RuntimeError("probe boom")
+            handler(
+                loop,
+                {
+                    "message": "Task exception was never retrieved",
+                    "exception": error,
+                    "task": asyncio.current_task(),
+                },
+            )
+            # 幂等：重复安装不叠处理器（依旧是同一个 handler）
+            install_loop_exception_logger()
+            assert loop.get_exception_handler() is handler
+            handler(loop, {"message": "second"})
+        finally:
+            loop.set_exception_handler(original)
+
+        messages = [record.message for record in wing_logs.records]
+        assert sum("asyncio unhandled" in message for message in messages) == 2
+        assert any("Task exception was never retrieved" in m for m in messages)
+        assert "probe boom" in wing_logs.text
+        # 原处理器（stderr 行为）被原样链上。
+        assert [context["message"] for context in chained] == [
+            "Task exception was never retrieved",
+            "second",
+        ]
+
+    def test_no_running_loop_is_a_noop(self) -> None:
+        """无运行中的事件循环时静默跳过（库导入零副作用）。"""
+        install_loop_exception_logger()  # 不抛即通过

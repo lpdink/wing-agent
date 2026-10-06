@@ -135,9 +135,9 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 合成结果同时发射与正常完成相同的 `ToolCallResultEvent` / `ToolResultTurnEvent`：TUI 据此翻转 cell 状态（Bash 计时器仅在 cell 为 Pending 时前进，结果事件使其冻结——修复了打断后计时器不停的存量问题），stdio 模式据此输出 user turn 消息。
 
-**时序**：runtime 先 await `agent.interrupt()`（补提交随之完成）再 emit `InterruptedEvent`（persist=true，落盘于 partial Message 之后，链序正确）——客户端观察到 Interrupted 时 store 已一致。收尸 gather 带 5s 兜底超时，行为不端的工具（吞掉取消）不会无限挂起补提交路径。
+**时序**：runtime 先 await `agent.interrupt()`（补提交随之完成）再 emit `InterruptedEvent`（persist=true，落盘于 partial Message 之后，链序正确）——客户端观察到 Interrupted 时 store 已一致。收尸 gather 带 5s 兜底超时，行为不端的工具（吞掉取消）不会无限挂起补提交路径。打断在入口（等锁之前）同步丢弃**当时**已排队的输入与 pending ask；锁等待期间新投递的消息（客户端 POST 已应答）留给重建后的消费者，不被排队中的 interrupt 吞掉。hooks 只在拿到锁之后触发——排队中的请求不提前杀掉在途 turn 的前台工具。
 
-**降级路径（worker 不响应取消）**：worker 在取消阶梯内始终不终止时，`interrupt()` 保留旧 worker（绝不重建第二个消费者）、打 ERROR + 广播 notice（TUI 显示"打断未生效"）后立即返回——锁必然释放、RPC 必然应答。此时 `InterruptedEvent` 可能先于（甚至永久早于）partial Message——链序保证在降级路径下让位于"会话不失去打断能力"。被保留的 worker 随后若自然终止，终局续期自动重建消费者（`shutdown()` 置位的 `_closing` 闸门保证逐出后不会被复活）。
+**降级路径（worker 不响应取消）**：worker 在取消阶梯内始终不终止时，`interrupt()` 保留旧 worker（绝不重建第二个消费者）、打 ERROR + 广播 notice（TUI 显示"打断未生效"）后立即返回——锁必然释放、RPC 必然应答。此时 `InterruptedEvent` 可能先于（甚至永久早于）partial Message——链序保证在降级路径下让位于"会话不失去打断能力"。被保留的 worker 随后若自然终止，终局续期自动重建消费者（`shutdown()` 置位的 `_closing` 闸门同时挡住终局续期与 `interrupt()` 的重建——逐出 / 模板切换后不会被复活）。
 
 ## 事件系统与统一日志
 

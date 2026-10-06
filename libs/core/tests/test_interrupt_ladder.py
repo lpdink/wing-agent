@@ -12,9 +12,13 @@
 - 重投取消前重放 interrupt hooks（第一次取消被吞后 worker 可能又起了新
   子进程）；
 - `shutdown()` 共用同一阶梯——worker 不响应时会话拆解（逐出 / release /
-  模板切换）也不会被拖死，且不会被终局续期复活；
-- hook / inbox 清理等副作用在拿到 `_interrupt_lock` 之后才执行：排队中的
-  请求不再提前杀 turn 的前台工具。
+  模板切换）也不会被拖死，且不会被终局续期或 interrupt 重建复活（`_closing`
+  闸门）；
+- hooks 在拿到 `_interrupt_lock` 之后才执行：排队中的请求不提前杀 turn 的
+  前台工具；积压输入在 interrupt 入口（等锁之前）清——锁等待期间新到的
+  消息不被排队中的 interrupt 吞掉；
+- `_worker_frames` 穿透常见挂起形态（`await <Task>` / `gather` / `async for`）
+  ——阶梯耗尽时的现场日志要能看到真正的暂停点。
 
 阶梯的时间参数在测试里被缩小（monkeypatch 模块常量），保持毫秒级。
 """
@@ -29,6 +33,7 @@ from typing import Any
 import pytest
 
 from wing.agent import WingAgent
+from wing.agent.core import _INTERRUPT_WAIT_SECONDS, _worker_frames
 from wing.event import NoticeEvent
 from wing.event_bus import event_bus
 
@@ -72,6 +77,16 @@ async def _wait_until(pred: Any, timeout: float = 5.0) -> None:
             await asyncio.sleep(0.005)
 
     await asyncio.wait_for(_inner(), timeout)
+
+
+async def _suspended_frames(coro: Any) -> str:
+    """跑起协程、等它挂起，返回 `_worker_frames` 文本（随后取消、收尸）。"""
+    task = asyncio.create_task(coro)
+    await asyncio.sleep(0.05)
+    text = _worker_frames(task)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    return text
 
 
 async def _replace_worker(
@@ -216,6 +231,37 @@ class TestCancelLadder:
         await agent.shutdown()
 
     @pytest.mark.asyncio
+    async def test_queued_interrupt_preserves_messages_arriving_during_wait(
+        self, runtime, monkeypatch
+    ) -> None:
+        """积压在 interrupt 入口清；锁等待期间新到的消息不被吞掉。
+
+        现场场景：打断没生效 → 发一条纠正消息 → 再按一次打断——第二条消息
+        正好落在两次 interrupt 之间（排队中的那个在等锁）。旧实现把 clear
+        推迟到拿锁之后，这条已 POST 成功（客户端收到 ok）的消息被静默吞掉。
+        """
+        _shrink_ladder(monkeypatch)
+        agent = runtime.create_session().agent
+        stop, started, swallow_all = _swallow_all_factory()
+        stubborn = await _replace_worker(agent, swallow_all(), started=started)
+
+        await agent._interrupt_lock.acquire()
+        await agent.post("stale backlog before interrupt")
+        queued = asyncio.create_task(agent.interrupt())
+        await asyncio.sleep(0.05)  # 排队 interrupt 已执行入口清理、正等锁
+        await agent.post("correction sent during lock wait")
+        agent._interrupt_lock.release()
+        await asyncio.wait_for(queued, timeout=5.0)
+
+        # 入口时刻的积压放弃；等待期到达的消息幸存（留给重建后的消费者）。
+        # 先收尾再断言：断言失败时不让吞取消的 worker 泄漏到 loop 关闭。
+        survivors = [b.message.content for b in agent._inbox.drain()]
+        await _dispose(stubborn, stop)
+        await agent.shutdown()
+
+        assert survivors == ["correction sent during lock wait"]
+
+    @pytest.mark.asyncio
     async def test_shutdown_is_bounded_with_unstoppable_worker(
         self, runtime, monkeypatch
     ) -> None:
@@ -230,6 +276,24 @@ class TestCancelLadder:
 
         assert agent._worker is stubborn and not stubborn.done()
         await _dispose(stubborn, stop)
+
+    @pytest.mark.asyncio
+    async def test_interrupt_after_shutdown_never_rebuilds(self, runtime) -> None:
+        """shutdown 是终局：其后的 interrupt 不重建 worker（不复活已关闭 agent）。
+
+        可达路径：模板切换 / 逐出期间 shutdown 已收口，而在飞的 interrupt
+        排在它的锁之后——重建条件若不看 `_closing`，会在已关闭的 agent
+        上留下一个永不终止的消费者（任务泄漏 + provider 已关的残骸复活）。
+        """
+        agent = runtime.create_session().agent
+        await agent.shutdown()
+        worker = agent._worker
+        assert worker.done()
+
+        await asyncio.wait_for(agent.interrupt(), timeout=5.0)
+
+        assert agent._worker is worker
+        assert worker.done()
 
     @pytest.mark.asyncio
     async def test_re_cancel_refires_hooks(self, runtime, monkeypatch) -> None:
@@ -382,3 +446,84 @@ class TestCancelLadder:
         agent._interrupt_lock.release()
         await asyncio.wait_for(task, timeout=5.0)
         assert fired == ["hook"]
+
+    def test_interrupt_wait_covers_tool_gather_timeout(self) -> None:
+        """单次阶梯等待覆盖工具收尸 5s 兜底 + 提交余量（常量联动）。
+
+        重投取消若落在收尸路径内（清理 gather 挂住越过收尸兜底时会发生），
+        `InterruptedToolResults` 不再抛出、本轮 partial 提交整体丢失——两个
+        常量之一被调整时必须重审（见 core.py 阶梯注释）。
+        """
+        from wing.agent import tool_executor
+
+        assert _INTERRUPT_WAIT_SECONDS >= tool_executor._INTERRUPT_GATHER_TIMEOUT + 1.0
+
+
+class TestWorkerFrames:
+    """`_worker_frames` 穿透常见挂起形态（阶梯耗尽现场日志的素材）。"""
+
+    @pytest.mark.asyncio
+    async def test_idle_worker_shows_the_await_chain(self, runtime) -> None:
+        """空闲 worker（等 inbox）：链一路走到队列 get——真实形态的冒烟。"""
+        agent = runtime.create_session().agent
+        await asyncio.sleep(0.2)  # 让 worker 真正挂起在 inbox.get 上
+
+        text = _worker_frames(agent._worker)
+
+        assert ":run_turn" in text and ":_run" in text, text
+        await agent.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_follows_awaited_task_frames(self) -> None:
+        """`await <Task>`：`cr_await` 是 FutureIter（无帧），经 referents 下钻。"""
+
+        async def inner() -> None:
+            await asyncio.sleep(30)
+
+        async def outer() -> None:
+            await asyncio.ensure_future(inner())
+
+        text = await _suspended_frames(outer())
+        assert ":outer" in text and ":inner" in text, text
+
+    @pytest.mark.asyncio
+    async def test_follows_async_generator_frames(self) -> None:
+        """`async for`：经 asend 包装器（无帧）下钻到生成器帧。"""
+
+        async def stream():
+            yield 1
+            await asyncio.sleep(30)
+            yield 2
+
+        async def consumer() -> None:
+            async for _ in stream():
+                pass
+
+        text = await _suspended_frames(consumer())
+        assert ":consumer" in text and ":stream" in text, text
+
+    @pytest.mark.asyncio
+    async def test_descends_single_child_gather(self) -> None:
+        """单 child 的 gather：经 `_children` 下钻到 child 的协程帧。"""
+
+        async def child() -> None:
+            await asyncio.sleep(30)
+
+        async def joiner() -> None:
+            await asyncio.gather(child())
+
+        text = await _suspended_frames(joiner())
+        assert ":joiner" in text and ":child" in text, text
+
+    @pytest.mark.asyncio
+    async def test_marks_multi_child_gather_without_guessing(self) -> None:
+        """多 child 的 gather：只标注 `<gather ×N>`，不猜哪条分支。"""
+
+        async def child() -> None:
+            await asyncio.sleep(30)
+
+        async def joiner() -> None:
+            await asyncio.gather(child(), child())
+
+        text = await _suspended_frames(joiner())
+        assert "<gather ×2>" in text, text

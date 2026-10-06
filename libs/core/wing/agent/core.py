@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import gc
 import inspect
+import types
 import uuid
+from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,19 +45,37 @@ if TYPE_CHECKING:
 # 的已知形态；CPython `Task.cancel()` 注释明言 "we may have to cancel it again
 # later"）。对可重投的等待（挂起的 Future/Task），第二次 cancel 会重新投递
 # ——典型吸收形态可被重投击穿；对不可取消的等待（如线程池 future），重投
-# 只能挂账到等待结束——这正是收口必须保持有界的原因。单次等待覆盖工具收尸
-# 的 5s 兜底 + 提交余量；最坏 `_INTERRUPT_WAIT_SECONDS × _INTERRUPT_MAX_CANCELS`
+# 只能挂账到等待结束——这正是收口必须保持有界的原因。单次等待必须覆盖
+# `tool_executor._INTERRUPT_GATHER_TIMEOUT`（工具收尸的 5s 兜底）再加提交
+# 余量——两个常量联动：重投取消若落在收尸路径内，本轮 partial 提交会整体
+# 丢失（链仍自洽）。最坏 `_INTERRUPT_WAIT_SECONDS × _INTERRUPT_MAX_CANCELS`
 # （默认 ~18s）后放手：保留旧 worker、绝不重建第二个，并登记终局续期。
 _INTERRUPT_WAIT_SECONDS = 6.0
 _INTERRUPT_MAX_CANCELS = 3
 
+#: 无帧中转对象：唯一 awaitable 引用只挂在 GC referents 上（见 `_descend`）。
+_REFERENT_WRAPPERS = frozenset(
+    {"async_generator_asend", "async_generator_athrow", "FutureIter"}
+)
+
+#: GC referents 兜底只认这些类型，避免误抓无关引用。
+_REFERENT_AWAITABLES: tuple[type, ...] = (
+    asyncio.Future,
+    types.CoroutineType,
+    types.AsyncGeneratorType,
+    types.GeneratorType,
+)
+
 
 def _worker_frames(worker: asyncio.Task[Any], *, limit: int = 8) -> str:
-    """worker 挂起点的浅栈（最内层在右，`<-` 连接）。
+    """worker 挂起点的浅栈（最内层在左，`<-` 连接）。
 
-    沿 `cr_await` / `ag_await` / `gi_yieldfrom` 下钻（`Task` 换成其协程）；
-    `Task.get_stack()` 在 3.12 只给顶层帧，拿不到真正的暂停点。任何异常都
-    退回 `get_stack()` 或占位符——诊断不得外溢。
+    `Task.get_stack()` 在 3.12 只给顶层帧；这里沿 `cr_await` / `ag_await` /
+    `gi_yieldfrom` 一路走到真正的暂停点，并穿透三类无帧中转对象：`await
+    <Task>`（FutureIter）与 `async for`（asend）经 GC referents 找唯一
+    awaitable，gather 的 `_GatheringFuture` 经 `_children` 取单一 child
+    （多 child 只标注不猜）。超长链截断保留最内层。任何异常都退回
+    `get_stack()` 或占位符——诊断不得外溢。
     """
 
     def _location(obj: Any) -> str:
@@ -62,30 +83,61 @@ def _worker_frames(worker: asyncio.Task[Any], *, limit: int = 8) -> str:
             f"{Path(obj.f_code.co_filename).name}:{obj.f_lineno}:{obj.f_code.co_name}"
         )
 
+    def _frame_of(obj: Any) -> Any:
+        return (
+            getattr(obj, "cr_frame", None)
+            or getattr(obj, "ag_frame", None)
+            or getattr(obj, "gi_frame", None)
+        )
+
+    def _descend(current: Any) -> tuple[Any, str | None]:
+        """下钻一层：返回 (下一跳, 标记)；标记用于无法下钻的分叉点。"""
+        nxt = (
+            getattr(current, "cr_await", None)
+            or getattr(current, "ag_await", None)
+            or getattr(current, "gi_yieldfrom", None)
+        )
+        if nxt is not None:
+            return nxt, None
+        if isinstance(current, asyncio.Task):
+            return current.get_coro(), None
+        children = getattr(current, "_children", None)  # asyncio.gather 的 future
+        if children is not None:
+            kids = list(children)
+            if len(kids) == 1:
+                return kids[0], None
+            return None, f"<gather ×{len(kids)}>"
+        if type(current).__name__ in _REFERENT_WRAPPERS:
+            candidates = [
+                ref
+                for ref in gc.get_referents(current)
+                if isinstance(ref, _REFERENT_AWAITABLES)
+            ]
+            return (candidates[0], None) if len(candidates) == 1 else (None, None)
+        return None, None
+
     try:
-        frames: list[str] = []
+        # deque(maxlen)：超长链时保留**最内层**（真正的暂停点），而不是外层。
+        steps: deque[Any] = deque(maxlen=limit)
         current: Any = worker.get_coro()
         seen: set[int] = set()
-        while current is not None and len(frames) < limit and id(current) not in seen:
+        while current is not None and id(current) not in seen:
             seen.add(id(current))
-            frame = (
-                getattr(current, "cr_frame", None)
-                or getattr(current, "ag_frame", None)
-                or getattr(current, "gi_frame", None)
-            )
+            frame = _frame_of(current)
             if frame is not None:
-                frames.append(_location(frame))
-            if isinstance(current, asyncio.Task):
-                current = current.get_coro()
-                continue
-            current = (
-                getattr(current, "cr_await", None)
-                or getattr(current, "ag_await", None)
-                or getattr(current, "gi_yieldfrom", None)
+                steps.append(frame)
+            current, marker = _descend(current)
+            if marker is not None:
+                steps.append(marker)
+        if not steps:
+            steps.extend(worker.get_stack()[-4:])
+        return (
+            " <- ".join(
+                step if isinstance(step, str) else _location(step)
+                for step in reversed(steps)
             )
-        if not frames:
-            frames = [_location(frame) for frame in worker.get_stack()[-4:]]
-        return " <- ".join(reversed(frames)) or "<none>"
+            or "<none>"
+        )
     except Exception:  # noqa: BLE001 - 诊断不得外溢
         return "<unavailable>"
 
@@ -163,7 +215,7 @@ class WingAgent:
         self._turn_started_at: datetime | None = None
         self._interrupt_lock = asyncio.Lock()
         # shutdown 是一次性的终局：置位后终局续期（见 `_arm_worker_renewal`）
-        # 不再重建 worker——"逐出后又被复活"必须不可能发生。
+        # 与 interrupt 的直接重建都不再发生——"逐出后又被复活"必须不可能。
         self._closing: bool = False
         self._worker = asyncio.create_task(self._run())
 
@@ -417,22 +469,27 @@ class WingAgent:
         await self._inbox.post(content, request_id, role, tool_call_id)
 
     async def interrupt(self) -> None:
-        """中断 Agent：触发 hooks、清理 inbox、取消旧 worker 后重建。
+        """中断 Agent：清理积压、触发 hooks、取消旧 worker 后重建。
+
+        积压在**等锁之前**清（入口处同步执行）：打断时刻之前排队的输入视为
+        放弃；推迟到拿锁之后再清会把锁等待期间新到的消息（客户端 POST 已
+        返回 ok）一并吞掉——排队等待期在正常路径就有秒级，降级路径最长
+        ~18s。hooks 与收口在锁内：注定排队的请求不提前杀掉在途 turn 的
+        前台工具，也不会并发重建出第二个消费者。
 
         收口等待是**有界**的取消阶梯（见 `_stop_worker`）：worker 在阶梯内
         始终不终止时**保留旧 worker**（绝不重建第二个，避免两个 worker 抢
         同一个 inbox），打 ERROR 并广播 notice 后立即返回；同时登记终局
         续期——被保留的 worker 随后若自然终止且仍是当前 worker，自动重建
         消费者（否则消息进 inbox 无人消费）。interrupt 绝不会因为 worker
-        不响应而永久持有 `_interrupt_lock`。
-
-        副作用（hooks / feedback waiters / inbox）在拿到锁之后才执行：注定
-        排队的请求不再提前杀掉 turn 的前台工具。
+        不响应而永久持有 `_interrupt_lock`。`_closing`（shutdown 的终局闸门）
+        同样挡住这里的重建：已关闭的 agent 不会被 interrupt 复活。
         """
+        self._inbox.cancel_all_waiters()
+        self._inbox.clear()
+
         async with self._interrupt_lock:
             self._fire_interrupt_hooks()
-            self._inbox.cancel_all_waiters()
-            self._inbox.clear()
 
             old = self._worker
             try:
@@ -442,9 +499,10 @@ class WingAgent:
                 # 吞掉，并按 worker 的实际状态决定后续。
                 stopped = old.done()
             if stopped:
-                # 终局续期可能已抢先重建（worker 在等待期间正好死亡）——只在
-                # 还是旧 worker 时重建，避免出现第二个消费者。
-                if self._worker is old:
+                # 终局续期可能已抢先重建（worker 在等待期间正好死亡），
+                # shutdown 也可能已置位 _closing——只在还是旧 worker 且未关闭
+                # 时重建，避免出现第二个消费者 / 复活已关闭的 agent。
+                if self._worker is old and not self._closing:
                     self._worker = asyncio.create_task(self._run())
             else:
                 self._arm_worker_renewal(old)
@@ -459,6 +517,8 @@ class WingAgent:
         client 的终结由显式调用 aclose_providers() 的一方负责。
         """
         self._closing = True
+        # 清积压留在锁内无妨：shutdown 是终局，锁等待期间到达的输入注定无人
+        # 消费（`_closing` 已挡住一切重建）——不存在 interrupt 的"吞消息"语义。
         async with self._interrupt_lock:
             self._fire_interrupt_hooks()
             self._inbox.cancel_all_waiters()
