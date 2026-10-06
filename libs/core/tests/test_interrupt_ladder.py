@@ -3,13 +3,16 @@
 被守的语义（`libs/core/wing/agent/core.py::_stop_worker`）：
 
 - 一次 `Task.cancel()` 可能被吸收（取消计数已增加、CancelledError 未投递
-  ——asyncio 的已知形态）：阶梯重投取消（对 >1 的计数强制重新投递），
-  worker 在有界时间内被杀掉、interrupt 正常重建；
+  ——asyncio 的已知形态）：阶梯重投取消（对挂起的 Future/Task 会重新投递，
+  典型吸收形态可被击穿），worker 在有界时间内被杀掉、interrupt 正常重建；
 - worker 对所有取消都不响应（极端形态）：interrupt 仍然**有界**返回，
   **保留旧 worker**（绝不重建第二个，避免两个 worker 抢同一个 inbox），
-  打 ERROR 并广播 notice；
+  打 ERROR 并广播 notice；被保留的 worker 随后若自然终止，终局续期自动
+  重建消费者（否则消息进 inbox 无人消费）；
+- 重投取消前重放 interrupt hooks（第一次取消被吞后 worker 可能又起了新
+  子进程）；
 - `shutdown()` 共用同一阶梯——worker 不响应时会话拆解（逐出 / release /
-  模板切换）也不会被拖死；
+  模板切换）也不会被拖死，且不会被终局续期复活；
 - hook / inbox 清理等副作用在拿到 `_interrupt_lock` 之后才执行：排队中的
   请求不再提前杀 turn 的前台工具。
 
@@ -227,3 +230,155 @@ class TestCancelLadder:
 
         assert agent._worker is stubborn and not stubborn.done()
         await _dispose(stubborn, stop)
+
+    @pytest.mark.asyncio
+    async def test_re_cancel_refires_hooks(self, runtime, monkeypatch) -> None:
+        """重投取消前重放 hooks：第一次取消被吞后可能又起了新子进程。"""
+        _shrink_ladder(monkeypatch)
+        agent = runtime.create_session().agent
+
+        fired: list[str] = []
+        agent.register_interrupt_hook(lambda: fired.append("hook"))
+
+        started = asyncio.Event()
+
+        async def swallow_once() -> None:
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                await asyncio.sleep(30)  # 吞掉第一次投递，继续运行
+
+        await _replace_worker(agent, swallow_once(), started=started)
+        await asyncio.wait_for(agent.interrupt(), timeout=5.0)
+
+        # 入口一次 + 重投前一次（worker 被第二次投递杀死，无第三次重投）。
+        assert fired == ["hook", "hook"]
+        await agent.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_undead_worker_late_death_triggers_renewal(
+        self, runtime, monkeypatch
+    ) -> None:
+        """阶梯放手后 worker 迟死：终局续期自动重建消费者（消息不落空）。"""
+        _shrink_ladder(monkeypatch, wait=0.02)
+        agent = runtime.create_session().agent
+
+        started = asyncio.Event()
+
+        async def die_late() -> None:
+            started.set()
+            for _ in range(3):
+                try:
+                    await asyncio.sleep(30)
+                except asyncio.CancelledError:
+                    pass
+            await asyncio.sleep(0.3)  # 阶梯之外才自然结束
+
+        stubborn = await _replace_worker(agent, die_late(), started=started)
+
+        await asyncio.wait_for(agent.interrupt(), timeout=5.0)
+        assert agent._worker is stubborn  # 先保留（绝不重建第二个）
+
+        await _wait_until(lambda: agent._worker is not stubborn, timeout=3.0)
+        assert stubborn.done()
+        assert not agent._worker.done()
+        await agent.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_interrupt_cancelled_while_worker_dying_renews(
+        self, runtime, monkeypatch
+    ) -> None:
+        """interrupt 自身被取消、worker 随后死亡：终局续期同样兜住消费者。"""
+        _shrink_ladder(monkeypatch, wait=1.0)
+        agent = runtime.create_session().agent
+
+        started = asyncio.Event()
+
+        async def slow_death() -> None:
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.2)  # 收尸很慢
+
+        worker = await _replace_worker(agent, slow_death(), started=started)
+
+        task = asyncio.create_task(agent.interrupt())
+        await asyncio.sleep(0.1)  # interrupt 已 cancel worker、正等在有界等待里
+        task.cancel()  # 模拟上层取消在途请求（客户端断开 / 关停）
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 2.0)
+
+        assert not worker.done()  # 尚未死：保留 + 续期已登记
+        await _wait_until(lambda: agent._worker is not worker, timeout=3.0)
+        assert not agent._worker.done()
+        await agent.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_queued_interrupts_both_return(self, runtime) -> None:
+        """持锁者让路后，排队的两个 interrupt 都返回且各触发一次 hooks。"""
+        agent = runtime.create_session().agent
+
+        fired: list[str] = []
+        agent.register_interrupt_hook(lambda: fired.append("hook"))
+
+        await agent._interrupt_lock.acquire()
+        first = asyncio.create_task(agent.interrupt())
+        second = asyncio.create_task(agent.interrupt())
+        await asyncio.sleep(0.05)
+        assert fired == []  # 排队中：副作用不入场
+        agent._interrupt_lock.release()
+        await asyncio.wait_for(asyncio.gather(first, second), timeout=5.0)
+
+        assert fired == ["hook", "hook"]
+        assert not agent._worker.done()
+        await agent.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_retry_interrupt_kills_kept_worker(
+        self, runtime, monkeypatch
+    ) -> None:
+        """undead 保留旧 worker 后，再次 interrupt 的第二投递把它杀死并重建。"""
+        import wing.agent.core as core
+
+        _shrink_ladder(monkeypatch)
+        monkeypatch.setattr(core, "_INTERRUPT_MAX_CANCELS", 1)  # 第一次只投一次
+        agent = runtime.create_session().agent
+
+        started = asyncio.Event()
+
+        async def swallow_once() -> None:
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                await asyncio.sleep(30)  # 吞掉第一次投递，继续运行
+
+        stubborn = await _replace_worker(agent, swallow_once(), started=started)
+
+        await asyncio.wait_for(agent.interrupt(), timeout=5.0)
+        assert agent._worker is stubborn and not stubborn.done()  # 保留（undead）
+
+        monkeypatch.setattr(core, "_INTERRUPT_MAX_CANCELS", 3)
+        await asyncio.wait_for(agent.interrupt(), timeout=5.0)
+
+        assert stubborn.done() and stubborn.cancelled()
+        assert agent._worker is not stubborn
+        assert not agent._worker.done()
+        await agent.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_side_effects_wait_for_lock(self, runtime) -> None:
+        """shutdown 同样只在拿到锁之后执行副作用。"""
+        agent = runtime.create_session().agent
+
+        fired: list[str] = []
+        agent.register_interrupt_hook(lambda: fired.append("hook"))
+
+        await agent._interrupt_lock.acquire()
+        task = asyncio.create_task(agent.shutdown())
+        await asyncio.sleep(0.05)
+        assert fired == []
+        agent._interrupt_lock.release()
+        await asyncio.wait_for(task, timeout=5.0)
+        assert fired == ["hook"]

@@ -149,6 +149,11 @@ async def _execute_command(command: str, ctx: ToolContext, timeout: int) -> str:
                 raise ToolError(_format_timeout_result(stdout, stderr, elapsed))
 
             stdout, stderr = await _drain_pipes(process, timeout=1.0)
+        except asyncio.CancelledError:
+            # 被打断：杀进程组（幂等——hook 通常已杀过）后透传取消。兜住
+            # 「取消在 hook 之后才到达 / 重投取消」的窗口，绝不留迟到副作用。
+            kill_process_group(process)
+            raise
         finally:
             ctx.unregister_interrupt_hook(hook_id)
 

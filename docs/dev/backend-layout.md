@@ -20,7 +20,7 @@
 │ L4 编排与传输   runtime · system · background · gateway/*                │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ L3 核心域       config · context · session · agent · tools · provider    │
-│                 audit · commands                                          │
+│                 audit · commands                                         │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ L2 领域设施     store/* · event/* · event_bus · hooks/*                  │
 │                 request_context · tool_registry                          │
@@ -69,7 +69,7 @@
 | `config/`（models / loader / user_agent / default_config） | L3 | 配置模型 + `WING_HOME` 解析 + 手写默认模板（事实来源） |
 | `context/` | L3 | 上下文窗口跟踪 + 压缩（LLM 摘要）+ rewind + skills/rules 文件加载 |
 | `session/`（session / manager / reaper / template / override） | L3 | 会话生命周期：Session 状态、多会话与 fork/resume、空闲逐出、agent 模板、创建期参数覆盖 |
-| `agent/` | L3 | WingAgent 运行时：ReAct 主循环、工具并发执行、事件发射、取消取证、未提交投影 |
+| `agent/` | L3 | WingAgent 运行时：ReAct 主循环、工具并发执行、事件发射、打断收口阶梯、未提交投影 |
 | `tools/`（`builtin/` / `internal/`） | L3 | 内置工具（`builtin/` 一工具一文件）与工具基础设施（`internal/`：resolve_path / ripgrep 封装 / diff 窗口 / 命令安全审查） |
 | `provider/` | L3 | 模型调用协议层：OpenAI 兼容 / Anthropic 隔离、SSE 传输、provider registry |
 | `audit/`（原 `metrics_registry/`） | L3 | 指标 / 审计注册中心（EventBus 订阅，原子写 JSON；`install()` 由组合根显式调用） |
