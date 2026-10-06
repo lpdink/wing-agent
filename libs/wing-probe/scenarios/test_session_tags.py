@@ -106,7 +106,7 @@ async def test_create_with_tags_atomic_mutation_and_idempotence(probe: Probe) ->
     assert bad.value.status == 400, bad.value.call.render()
     assert "bad tag" in str(bad.value.call.response), bad.value.call.response
     with pytest.raises(DriverHttpError) as missing:
-        await _tag(probe, "20250101-000000-missing0", add=["x"])
+        await _tag(probe, "20250101-000000-deadbeef", add=["x"])
     assert missing.value.status == 404, missing.value.call.render()
 
 
@@ -167,3 +167,21 @@ async def test_fork_does_not_inherit_tags(probe: Probe) -> None:
 
     assert (await _tag(probe, child.session_id))["tags"] == []
     assert (await _tag(probe, sid))["tags"] == ["favorite", "task=wing-tags"]
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_tagged_session_without_messages_is_listed_immediately(
+    probe: Probe,
+) -> None:
+    """创建即打标：首条消息落盘前 list 就能找到（"创建即打标"的窗口期）。
+
+    WHEN 创建一个带 ["wing-probe"] 的会话、不发任何消息
+    THEN /api/session/list 立即包含它（tags 已带、name 为空）——"按标签找回"
+    从会话出生那一刻成立，而不是等首条消息。
+    """
+    session = await _create(probe, tags=["wing-probe"])
+
+    entry = await _list_entry(probe, session.session_id)
+    assert entry["tags"] == ["wing-probe"], entry
+    assert not entry.get("name"), entry

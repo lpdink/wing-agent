@@ -178,6 +178,13 @@ class SessionStore(ABC):
     """一个 session 全部持久状态的唯一所有者。
 
     实现：FileSessionStore（现有文件布局）、MemorySessionStore（不落盘）。
+
+    **session id 契约**：id 一律由会话层生成（``common.utils.generate_session_id``
+    ——``YYYYMMDD-HHMMSS-<8hex>``），所有后端入口（exists / metadata / log）
+    都在拼接或取值前校验格式，不合规即 ValueError——它是路径组件或键，
+    脏值说明调用方已错（或是对抗输入），必须大声失败（同 ``validate_media_id``
+    的精神）。对网络请求的 **not-found 语义** 在会话层完成：解析入口先把
+    不合规 id 折成"不存在"（404），存储层的 ValueError 只服务编程错误。
     """
 
     durable: bool = True

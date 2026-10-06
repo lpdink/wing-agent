@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
@@ -17,6 +18,16 @@ import pytest
 
 from wing.agent import WingAgent
 from wing.agent.inbox import Inbox
+
+
+def _sid(label: str) -> str:
+    """测试用 session id：稳定、唯一、契合后端生成的既定格式。
+
+    存储层把 session id 当路径组件并校验格式——不得再用 'old' / 'new'
+    这类任意字符串当 id；需要 id 前缀时间语义的测试请显式写字面 id。
+    """
+    digest = hashlib.md5(label.encode()).hexdigest()[:8]
+    return f"20250101-000000-{digest}"
 
 
 def _make_agent(working: bool = False) -> WingAgent:
@@ -93,7 +104,7 @@ class TestSessionStatusDelegation:
 
         mock_cm = MagicMock()
         session = Session(
-            session_id="test-status",
+            session_id="20250101-000000-abcdef06",
             messages=MagicMock(),
             context_manager=mock_cm,
             agent=agent,
@@ -153,14 +164,14 @@ def _ids(sm) -> list[str]:
 class TestListSessions:
     def test_time_descending_order(self, tmp_path: Path):
         sessions_path = tmp_path / "sessions"
-        _write_session_dir(sessions_path, "old", "2025-01-01T00:00:00")
-        _write_session_dir(sessions_path, "new", "2025-06-01T00:00:00")
-        _write_session_dir(sessions_path, "mid", "2025-03-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("old"), "2025-01-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("new"), "2025-06-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("mid"), "2025-03-01T00:00:00")
 
         sm = _make_manager(sessions_path)
         result = sm.list_sessions()
 
-        assert [s.id for s in result] == ["new", "mid", "old"]
+        assert [s.id for s in result] == [_sid("new"), _sid("mid"), _sid("old")]
 
     def test_no_workspace_parameter(self):
         import inspect
@@ -172,7 +183,7 @@ class TestListSessions:
 
     def test_disk_only_session_is_inactive(self, tmp_path: Path):
         sessions_path = tmp_path / "sessions"
-        _write_session_dir(sessions_path, "on-disk", "2025-01-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("on-disk"), "2025-01-01T00:00:00")
 
         sm = _make_manager(sessions_path)
         result = sm.list_sessions()
@@ -182,10 +193,10 @@ class TestListSessions:
 
     def test_loaded_session_reflects_live_status(self, tmp_path: Path):
         sessions_path = tmp_path / "sessions"
-        _write_session_dir(sessions_path, "loaded", "2025-01-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("loaded"), "2025-01-01T00:00:00")
 
         sm = _make_manager(sessions_path)
-        _mark_active(sm, "loaded", "working")
+        _mark_active(sm, _sid("loaded"), "working")
 
         result = sm.list_sessions()
 
@@ -194,15 +205,15 @@ class TestListSessions:
 
     def test_mixed_loaded_and_disk(self, tmp_path: Path):
         sessions_path = tmp_path / "sessions"
-        _write_session_dir(sessions_path, "a", "2025-01-01T00:00:00")
-        _write_session_dir(sessions_path, "b", "2025-02-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("a"), "2025-01-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("b"), "2025-02-01T00:00:00")
 
         sm = _make_manager(sessions_path)
-        _mark_active(sm, "a")
+        _mark_active(sm, _sid("a"))
 
         result = {s.id: s.status for s in sm.list_sessions()}
 
-        assert result == {"a": "idle", "b": "inactive"}
+        assert result == {_sid("a"): "idle", _sid("b"): "inactive"}
 
 
 class TestListSessionsOrder:
@@ -215,39 +226,39 @@ class TestListSessionsOrder:
     def test_active_comes_first_even_when_inactive_is_newer(self, tmp_path: Path):
         # 唯一能区分「活跃优先」与「纯时间降序」的形状：active 的时间更旧。
         sessions_path = tmp_path / "sessions"
-        _write_session_dir(sessions_path, "active-old", "2025-01-01T00:00:00")
-        _write_session_dir(sessions_path, "inactive-new", "2025-06-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("active-old"), "2025-01-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("inactive-new"), "2025-06-01T00:00:00")
 
         sm = _make_manager(sessions_path)
-        _mark_active(sm, "active-old")
+        _mark_active(sm, _sid("active-old"))
 
         result = sm.list_sessions()
 
-        assert [s.id for s in result] == ["active-old", "inactive-new"]
+        assert [s.id for s in result] == [_sid("active-old"), _sid("inactive-new")]
         assert [s.status for s in result] == ["idle", "inactive"]
 
     def test_every_live_status_counts_as_active(self, tmp_path: Path):
         # active = 已加载进内存：working / waiting / idle 都是，只有 inactive 不在前。
         sessions_path = tmp_path / "sessions"
         for name, stamp in (
-            ("idle-session", "2025-01-01T00:00:00"),
-            ("working-session", "2025-01-01T00:00:01"),
-            ("waiting-session", "2025-01-01T00:00:02"),
-            ("disk-session", "2025-01-01T00:00:03"),
+            (_sid("idle-session"), "2025-01-01T00:00:00"),
+            (_sid("working-session"), "2025-01-01T00:00:01"),
+            (_sid("waiting-session"), "2025-01-01T00:00:02"),
+            (_sid("disk-session"), "2025-01-01T00:00:03"),
         ):
             _write_session_dir(sessions_path, name, stamp)
 
         sm = _make_manager(sessions_path)
-        _mark_active(sm, "idle-session", "idle")
-        _mark_active(sm, "working-session", "working")
-        _mark_active(sm, "waiting-session", "waiting")
+        _mark_active(sm, _sid("idle-session"), "idle")
+        _mark_active(sm, _sid("working-session"), "working")
+        _mark_active(sm, _sid("waiting-session"), "waiting")
 
         # 三个 active 都在最新的 inactive（时间 00:00:03）之前——组内仍是时间降序。
         assert _ids(sm) == [
-            "waiting-session",
-            "working-session",
-            "idle-session",
-            "disk-session",
+            _sid("waiting-session"),
+            _sid("working-session"),
+            _sid("idle-session"),
+            _sid("disk-session"),
         ]
 
     def test_waiting_gets_no_priority_within_the_active_group(self, tmp_path: Path):
@@ -255,32 +266,32 @@ class TestListSessionsOrder:
         # （waiting > working > idle）会给出相反顺序——「正在等你回答」不再靠
         # 排序提前，靠状态图标（`?`）表达。
         sessions_path = tmp_path / "sessions"
-        _write_session_dir(sessions_path, "waiting-old", "2025-01-01T00:00:00")
-        _write_session_dir(sessions_path, "idle-new", "2025-06-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("waiting-old"), "2025-01-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("idle-new"), "2025-06-01T00:00:00")
 
         sm = _make_manager(sessions_path)
-        _mark_active(sm, "waiting-old", "waiting")
-        _mark_active(sm, "idle-new", "idle")
+        _mark_active(sm, _sid("waiting-old"), "waiting")
+        _mark_active(sm, _sid("idle-new"), "idle")
 
-        assert _ids(sm) == ["idle-new", "waiting-old"]
+        assert _ids(sm) == [_sid("idle-new"), _sid("waiting-old")]
 
     def test_group_order_is_time_descending(self, tmp_path: Path):
         # active 组内、inactive 组内都按 last_interaction 降序。
         sessions_path = tmp_path / "sessions"
-        _write_session_dir(sessions_path, "active-old", "2025-01-01T00:00:00")
-        _write_session_dir(sessions_path, "active-new", "2025-02-01T00:00:00")
-        _write_session_dir(sessions_path, "inactive-old", "2025-03-01T00:00:00")
-        _write_session_dir(sessions_path, "inactive-new", "2025-04-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("active-old"), "2025-01-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("active-new"), "2025-02-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("inactive-old"), "2025-03-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("inactive-new"), "2025-04-01T00:00:00")
 
         sm = _make_manager(sessions_path)
-        _mark_active(sm, "active-old")
-        _mark_active(sm, "active-new")
+        _mark_active(sm, _sid("active-old"))
+        _mark_active(sm, _sid("active-new"))
 
         assert _ids(sm) == [
-            "active-new",
-            "active-old",
-            "inactive-new",
-            "inactive-old",
+            _sid("active-new"),
+            _sid("active-old"),
+            _sid("inactive-new"),
+            _sid("inactive-old"),
         ]
 
     def test_workspace_does_not_affect_order(self, tmp_path: Path):
@@ -288,68 +299,76 @@ class TestListSessionsOrder:
         left, right = tmp_path / "left", tmp_path / "right"
         for path, (a_ws, b_ws) in ((left, ("/a", "/b")), (right, ("/b", "/a"))):
             _write_session_dir(
-                path, "active-old", "2025-01-01T00:00:00", workspace=a_ws
+                path, _sid("active-old"), "2025-01-01T00:00:00", workspace=a_ws
             )
             _write_session_dir(
-                path, "inactive-new", "2025-06-01T00:00:00", workspace=b_ws
+                path, _sid("inactive-new"), "2025-06-01T00:00:00", workspace=b_ws
             )
 
         first, second = _make_manager(left), _make_manager(right)
-        _mark_active(first, "active-old")
-        _mark_active(second, "active-old")
+        _mark_active(first, _sid("active-old"))
+        _mark_active(second, _sid("active-old"))
 
-        assert _ids(first) == ["active-old", "inactive-new"]
-        assert _ids(second) == ["active-old", "inactive-new"]
+        assert _ids(first) == [_sid("active-old"), _sid("inactive-new")]
+        assert _ids(second) == [_sid("active-old"), _sid("inactive-new")]
 
     def test_missing_last_interaction_falls_back_to_id_prefix(self, tmp_path: Path):
         # metadata 没有 last_interaction → 用 id 前缀 YYYYMMDD-HHMMSS。
         sessions_path = tmp_path / "sessions"
-        _write_session_dir(sessions_path, "20250101-101010-session", None)
-        _write_session_dir(sessions_path, "20250601-101010-session", None)
-        _write_session_dir(sessions_path, "20250301-101010-session", None)
+        _write_session_dir(sessions_path, "20250101-101010-aaaaaaaa", None)
+        _write_session_dir(sessions_path, "20250601-101010-aaaaaaaa", None)
+        _write_session_dir(sessions_path, "20250301-101010-aaaaaaaa", None)
 
         sm = _make_manager(sessions_path)
 
         assert _ids(sm) == [
-            "20250601-101010-session",
-            "20250301-101010-session",
-            "20250101-101010-session",
+            "20250601-101010-aaaaaaaa",
+            "20250301-101010-aaaaaaaa",
+            "20250101-101010-aaaaaaaa",
         ]
 
     def test_id_prefix_fallback_keeps_active_first(self, tmp_path: Path):
         # 回退路径同样受「活跃优先」支配：active 的 id 前缀时间更旧也仍在前面。
         sessions_path = tmp_path / "sessions"
-        _write_session_dir(sessions_path, "20250101-101010-session", None)
-        _write_session_dir(sessions_path, "20250601-101010-session", None)
+        _write_session_dir(sessions_path, "20250101-101010-aaaaaaaa", None)
+        _write_session_dir(sessions_path, "20250601-101010-aaaaaaaa", None)
 
         sm = _make_manager(sessions_path)
-        _mark_active(sm, "20250101-101010-session")
+        _mark_active(sm, "20250101-101010-aaaaaaaa")
 
-        assert _ids(sm) == ["20250101-101010-session", "20250601-101010-session"]
+        assert _ids(sm) == ["20250101-101010-aaaaaaaa", "20250601-101010-aaaaaaaa"]
 
     def test_unparseable_timestamp_sorts_last(self, tmp_path: Path):
         # 时间与 id 前缀都取不到 → 按 0，排在所有可解析的会话之后（不抛）。
         sessions_path = tmp_path / "sessions"
-        _write_session_dir(sessions_path, "no-time-session", None)
-        _write_session_dir(sessions_path, "broken-time", "not-a-timestamp")
-        _write_session_dir(sessions_path, "20250101-101010-session", None)
+        _write_session_dir(sessions_path, "99999999-999999-00000002", None)
+        _write_session_dir(sessions_path, "99999999-999999-00000001", "not-a-timestamp")
+        _write_session_dir(sessions_path, "20250101-101010-aaaaaaaa", None)
 
         sm = _make_manager(sessions_path)
         result = sm.list_sessions()
 
         # 两个 0 分会话之间的先后由 id 兜底（并列 ≠ 交给文件系统枚举序）。
         assert [s.id for s in result] == [
-            "20250101-101010-session",
-            "broken-time",
-            "no-time-session",
+            "20250101-101010-aaaaaaaa",
+            "99999999-999999-00000001",
+            "99999999-999999-00000002",
         ]
 
     def test_tied_timestamps_are_ordered_by_id(self, tmp_path: Path):
         # 完全并列（同一时间戳）时按 id 升序：顺序确定，与 store 的枚举顺序无关。
         sessions_path = tmp_path / "sessions"
-        for session_id in ("tie-b", "tie-c", "tie-a"):
+        for session_id in (
+            "20250101-000000-cccccccc",
+            "20250101-000000-bbbbbbbb",
+            "20250101-000000-aaaaaaaa",
+        ):
             _write_session_dir(sessions_path, session_id, "2025-01-01T00:00:00")
 
         sm = _make_manager(sessions_path)
 
-        assert _ids(sm) == ["tie-a", "tie-b", "tie-c"]
+        assert _ids(sm) == [
+            "20250101-000000-aaaaaaaa",
+            "20250101-000000-bbbbbbbb",
+            "20250101-000000-cccccccc",
+        ]

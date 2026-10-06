@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 
 from wing.chain import TrackedList
 from wing.common.logger import log
-from wing.common.utils import generate_session_id
+from wing.common.utils import generate_session_id, is_valid_session_id
 from wing.config import get_config
 from wing.hooks import hooks
 from wing.event import (
@@ -39,7 +39,7 @@ from wing.schema import ChainNode, Message
 from wing.store import SessionMetadata, SessionStore
 
 from .session import Session, tool_refs
-from .tags import TagMutation, apply_tag_ops
+from .tags import TagMutation, apply_tag_ops, sanitize_tags
 from .template import AgentTemplate, AgentTemplateManager
 
 if TYPE_CHECKING:
@@ -291,7 +291,15 @@ class SessionManager:
         """跨 stores 精确解析 session id，返回 (session_id, store)。
 
         优先命中内存中的 session，再按 stores 注册顺序查后端是否存在。
+
+        **格式闸门在最前**：session id 是后端生成的固定格式（见
+        ``common.utils.SESSION_ID_PATTERN``），不合规的值一律按"不存在"处理
+        ——绝不允许它进入任何 store 调用（file 后端拿它拼路径，这是路径
+        穿越的唯一入口；gate 在这里，所有网络路径都经过本方法）。解析失败
+        与格式不合规最终都映射为 404，不向客户端区分（不给探测反馈）。
         """
+        if not is_valid_session_id(session_id):
+            return None
         if session_id in self._sessions:
             return session_id, self._sessions[session_id].store
         for store in self._stores.values():
@@ -472,10 +480,13 @@ class SessionManager:
         - 未加载 / 已逐出 → 直接 store 读改写，**不水合**——给旧会话打
           favorite 不会把它"弄醒"变成 idle（会话保持 inactive，内存零代价）。
 
+        session id 先过格式闸门（``_resolve_with_store``）：不合规的值按
+        "不存在"处理，绝不触达 store（防路径穿越）。
+
         add / remove 皆空 = 纯读（返回当前标签，不产生任何写）。
 
         Raises:
-            LookupError: 会话不存在（内存与磁盘都没有）
+            LookupError: 会话不存在（内存与磁盘都没有；id 格式不合规同价）
             ValueError: 标签非法 / 超过单会话上限
         """
         resolved = self._resolve_with_store(session_id)
@@ -646,7 +657,9 @@ class SessionManager:
             for summary in store.list_summaries():
                 metadata = summary.metadata
                 name = metadata.session_name or summary.first_user_message
-                if not name:
+                # 无名且带标也要列出（"创建即打标"的会话在首条消息落盘前就应
+                # 可被 ps --tag / tag --list 找到）；无名无标的照旧隐藏。
+                if not name and not metadata.tags:
                     continue
 
                 loaded = self._sessions.get(summary.id)
@@ -657,7 +670,7 @@ class SessionManager:
                         workspace=metadata.workspace,
                         last_interaction=metadata.last_interaction,
                         status=loaded.status if loaded is not None else "inactive",
-                        tags=list(metadata.tags or []),
+                        tags=sanitize_tags(metadata.tags),
                     )
                 )
 

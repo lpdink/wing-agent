@@ -30,7 +30,7 @@ from wing.schema import ChainNode, Message, Tool
 from wing.store import SessionMetadata, SessionStore
 from wing.tool_registry import ToolRef
 
-from .tags import TagMutation, apply_tag_ops
+from .tags import TagMutation, apply_tag_ops, sanitize_tags
 
 if TYPE_CHECKING:
     from wing.agent import WingAgent
@@ -354,8 +354,12 @@ class Session:
 
     @property
     def tags(self) -> list[str]:
-        """当前会话标签（metadata.tags 的拷贝；插入序）。"""
-        return list(self._metadata.tags or [])
+        """当前会话标签（metadata.tags 的投影；插入序，读侧已清洗）。
+
+        磁盘载入的存量数据可能被手改 / 老版本写入：投影前经 ``sanitize_tags``
+        去重 + 丢弃违规格值（绝不 raise）——展示面永远合法。
+        """
+        return sanitize_tags(self._metadata.tags)
 
     @property
     def status(self) -> "SessionStatus":

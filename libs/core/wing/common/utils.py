@@ -1,14 +1,44 @@
+import re
 import uuid
 from datetime import datetime
 
 
 # ============================================================
-# Session ID 生成
+# Session ID 生成与校验
 # ============================================================
+
+#: session id 的**唯一合法形态**（后端生成，客户端不得自造）：
+#: ``YYYYMMDD-HHMMSS-<8 位小写 hex>``（见 ``generate_session_id``）。
+#: 这是硬闸门而非"尽量匹配"——id 会作为存储路径组件使用，任何不合规的
+#: 值一律拒绝（防路径穿越），不做清洗或容错。
+SESSION_ID_PATTERN = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{8}$")
+
+
+def is_valid_session_id(value: object) -> bool:
+    """判断值是否契合 session id 格式（不抛异常，供解析层做闸门判断）。"""
+    return isinstance(value, str) and SESSION_ID_PATTERN.fullmatch(value) is not None
+
+
+def validate_session_id(session_id: str) -> str:
+    """校验 session id 格式并原样返回；不合规即 raise ValueError。
+
+    与 ``validate_media_id`` 同一精神：id 直接充当存储路径组件，脏值说明
+    调用方逻辑已错（或是对抗输入），必须大声失败——静默清洗只会把问题
+    藏起来，还留下路径穿越口子。
+    """
+    if not is_valid_session_id(session_id):
+        raise ValueError(
+            f"invalid session id: {session_id!r} "
+            "(expect YYYYMMDD-HHMMSS-<8 lowercase hex>; ids are backend-generated)"
+        )
+    return session_id
 
 
 def generate_session_id() -> str:
-    """生成唯一 session id：{YYYYMMDD-HHMMSS}-{8位uuid}。"""
+    """生成唯一 session id：{YYYYMMDD-HHMMSS}-{8位uuid}。
+
+    产出一律契合 ``SESSION_ID_PATTERN``（校验与生成同处一份格式定义）。
+    """
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     short_uuid = str(uuid.uuid4()).replace("-", "")[:8]
     return f"{timestamp}-{short_uuid}"

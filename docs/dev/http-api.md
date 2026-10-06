@@ -28,7 +28,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | POST | `/api/session/subscribe` | 将某 client 订阅到 session 事件（触发 SyncSession 重放；不在内存的会话先按需水合） |
 | POST | `/api/session/unsubscribe` | 取消订阅 |
 | POST | `/api/session/send` | 发送用户消息，驱动 agent loop（不在内存的会话先按需水合，磁盘上也没有才 404） |
-| GET | `/api/session/list` | 列出所有 session（跨 store 聚合）；`status: inactive` = 不在内存（未加载 / 已逐出）。每个条目携带 `tags`（插入序；无标签为空数组）。**顺序是契约**：活跃（`status != inactive`，= 已在内存的工作集）在前，组内按 `last_interaction` 降序（缺失 / 不可解析时回退 session id 前缀 `YYYYMMDD-HHMMSS`，都没有按 0），完全并列则按 session id 升序（全序，避免顺序随 store 枚举漂移）。前端按原序渲染，**不做语义重排**（`/ss <args>` 只按 exact > prefix > contains 分层，层内仍是后端顺序）；组内没有状态优先级（`waiting` 不提前），workspace 不参与排序 |
+| GET | `/api/session/list` | 列出所有 session（跨 store 聚合）；`status: inactive` = 不在内存（未加载 / 已逐出）。每个条目携带 `tags`（插入序；无标签为空数组）；**带标签的会话即使还没有首条消息也列出**（"创建即打标"窗口期可查，name 为 null）。**顺序是契约**：活跃（`status != inactive`，= 已在内存的工作集）在前，组内按 `last_interaction` 降序（缺失 / 不可解析时回退 session id 前缀 `YYYYMMDD-HHMMSS`，都没有按 0），完全并列则按 session id 升序（全序，避免顺序随 store 枚举漂移）。前端按原序渲染，**不做语义重排**（`/ss <args>` 只按 exact > prefix > contains 分层，层内仍是后端顺序）；组内没有状态优先级（`waiting` 不提前），workspace 不参与排序 |
 | GET | `/api/session/get` | 获取 session 详情 |
 | GET | `/api/session/info` | 运行时状态，含 `context_stats`、`skills_info`、`reasoning_effort`、`model_display_name`（模型展示名；未声明 = null，前端回落 `model`）、`tags`（会话标签） |
 | GET | `/api/session/branches` | 可回退 / 分叉的消息节点 |
@@ -46,6 +46,12 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 > 自动水合，对已逐出会话仍回 404（`wing tail` / `head` / `info` 内部按 404→resume
 > 惯例处理；`/api/session/list` 的 `status: inactive` 是逐出的可观测痕迹）。
 > `wing release <sid>` 是对应的显式操作。
+>
+> **session id 是硬闸门**：唯一合法形态是后端生成的
+> `YYYYMMDD-HHMMSS-<8 位小写 hex>`（`common.utils.SESSION_ID_PATTERN`）。
+> 所有端点的 session_id 先过格式闸门再触达存储——不合规的值与"不存在"同价
+> （一律 404，不给探测反馈），绝不进入文件路径拼接（防路径穿越；file 后端
+> 在拼接处还有最终防线）。会话 id 一律由后端生成，客户端不得自造。
 >
 > 边界：**空会话**（从未发言 → 磁盘无痕迹）一旦被逐出即不可恢复——它没有可水合
 > 的状态，此后 `release` / `send` / `subscribe` 都回 404（不是幂等 `not loaded`）。

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -13,6 +14,16 @@ from wing.store import (
     SessionMetadata,
     SessionStore,
 )
+
+
+def _sid(label: str) -> str:
+    """测试用 session id：稳定、唯一、契合后端生成的既定格式。
+
+    存储层把 session id 当路径组件并校验格式（防路径穿越的最终防线）——
+    'sid-1' 这类任意字符串不再是合法的存储键。
+    """
+    digest = hashlib.md5(label.encode()).hexdigest()[:8]
+    return f"20250101-000000-{digest}"
 
 
 @pytest.fixture(params=["file", "memory"])
@@ -33,39 +44,39 @@ class TestMetadata:
             model_name="qwen3-max",
             provider_name="dashscope",
         )
-        store.save_metadata("sid-1", meta)
-        loaded = store.load_metadata("sid-1")
+        store.save_metadata(_sid("1"), meta)
+        loaded = store.load_metadata(_sid("1"))
         assert loaded == meta
 
     def test_model_binding_roundtrip(self, store: SessionStore):
         """模型绑定成对 round-trip：provider 与 model 一并读回。"""
         store.save_metadata(
-            "sid-model",
+            _sid("model"),
             SessionMetadata(model_name="qwen3-max", provider_name="dashscope"),
         )
-        loaded = store.load_metadata("sid-model")
+        loaded = store.load_metadata(_sid("model"))
         assert loaded is not None
         assert loaded.model_name == "qwen3-max"
         assert loaded.provider_name == "dashscope"
 
     def test_half_written_model_binding_kept_as_is(self, store: SessionStore):
         """半写记录原样存取（「单字段视为无记录」是读取侧语义，非存储侧）。"""
-        store.save_metadata("sid-half", SessionMetadata(model_name="qwen3-max"))
-        loaded = store.load_metadata("sid-half")
+        store.save_metadata(_sid("half"), SessionMetadata(model_name="qwen3-max"))
+        loaded = store.load_metadata(_sid("half"))
         assert loaded is not None
         assert loaded.model_name == "qwen3-max"
         assert loaded.provider_name is None
 
     def test_load_missing_returns_none(self, store: SessionStore):
-        assert store.load_metadata("no-such") is None
+        assert store.load_metadata(_sid("no-such")) is None
 
     def test_save_empty_is_no_record(self, store: SessionStore):
-        store.save_metadata("sid-2", SessionMetadata())
-        assert store.load_metadata("sid-2") is None
+        store.save_metadata(_sid("2"), SessionMetadata())
+        assert store.load_metadata(_sid("2")) is None
 
     def test_partial_fields(self, store: SessionStore):
-        store.save_metadata("sid-3", SessionMetadata(workspace="/tmp/ws"))
-        loaded = store.load_metadata("sid-3")
+        store.save_metadata(_sid("3"), SessionMetadata(workspace="/tmp/ws"))
+        loaded = store.load_metadata(_sid("3"))
         assert loaded is not None
         assert loaded.workspace == "/tmp/ws"
         assert loaded.session_name is None
@@ -94,17 +105,17 @@ class TestFileCompat:
 
     def test_corrupted_metadata_returns_empty(self, tmp_path: Path):
         root = tmp_path / "sessions"
-        session_dir = root / "sid-bad"
+        session_dir = root / _sid("bad")
         session_dir.mkdir(parents=True)
         (session_dir / "metadata.json").write_text("{not json", encoding="utf-8")
         store = FileSessionStore(root)
-        loaded = store.load_metadata("sid-bad")
+        loaded = store.load_metadata(_sid("bad"))
         assert loaded == SessionMetadata()
 
 
 class TestMessageLog:
     def test_append_load_order(self, store: SessionStore):
-        log = store.open_log("sid-log")
+        log = store.open_log(_sid("log"))
         records = [
             {"role": "user", "content": f"m{i}", "uuid": f"u{i}"} for i in range(5)
         ]
@@ -113,14 +124,14 @@ class TestMessageLog:
         assert list(log.iter_all()) == records
 
     def test_append_empty_is_nop(self, store: SessionStore):
-        log = store.open_log("sid-empty")
+        log = store.open_log(_sid("empty"))
         log.append([])
         assert list(log.iter_all()) == []
 
     def test_open_log_same_handle_content(self, store: SessionStore):
-        log1 = store.open_log("sid-shared")
+        log1 = store.open_log(_sid("shared"))
         log1.append([{"role": "user", "content": "x"}])
-        log2 = store.open_log("sid-shared")
+        log2 = store.open_log(_sid("shared"))
         assert len(list(log2.iter_all())) == 1
 
 
@@ -212,7 +223,7 @@ class TestFileLogStreaming:
 
 class TestAux:
     def test_write_read_delete(self, store: SessionStore):
-        log = store.open_log("sid-aux")
+        log = store.open_log(_sid("aux"))
         assert log.read_aux("pending_compact") is None
         log.write_aux("pending_compact", {"start_uuid": "a"})
         assert log.read_aux("pending_compact") == {"start_uuid": "a"}
@@ -220,7 +231,7 @@ class TestAux:
         assert log.read_aux("pending_compact") is None
 
     def test_delete_missing_is_nop(self, store: SessionStore):
-        log = store.open_log("sid-aux2")
+        log = store.open_log(_sid("aux2"))
         log.delete_aux("never-existed")
 
     def test_file_corrupted_aux_discarded(self, tmp_path: Path):
@@ -244,41 +255,58 @@ class TestExists:
 
     def test_missing_returns_false(self, store: SessionStore):
         self._seed(store, "20260101-111111-aaaaaaaa")
-        assert store.exists("zzz") is False
+        assert store.exists(_sid("missing")) is False
 
     def test_no_fuzzy_matching(self, store: SessionStore):
-        """精确匹配：前缀 / 子串 / 通配符都不解析。"""
+        """精确匹配：前缀 / 子串 / 通配符都不解析。
+
+        存储层的 id 契约是**格式闸门**：不合规的输入（前缀 / 子串 / 通配符
+        / 任意字符串）在入口即 ValueError，绝不进路径拼接——"不匹配"与
+        "非法输入"是两种拒绝（前者 False、后者 raise）；网络侧统一表现为
+        404（会话层解析闸门先把非法 id 折成"不存在"，见 SessionManager）。
+        """
         self._seed(store, "20260101-111111-aaaaaaaa", "20260202-222222-bbbbbbbb")
-        assert store.exists("20260101") is False
-        assert store.exists("bbbbbbbb") is False
-        assert store.exists("20260101*aaaaaaaa") is False
+        for malformed in ("20260101", "bbbbbbbb", "20260101*aaaaaaaa", "zzz"):
+            with pytest.raises(ValueError):
+                store.exists(malformed)
+        # 合规但不存在 → False（精确匹配，不做前缀解析）
+        assert store.exists("20260101-111111-bbbbbbbb") is False
 
     def test_empty_session_not_exists(self, store: SessionStore):
         """仅 open_log 而未写入任何记录的 session 不算存在（两后端一致）。"""
-        store.open_log("sid-empty")
-        assert store.exists("sid-empty") is False
-        store.open_log("sid-empty").append([{"role": "user", "content": "x"}])
-        assert store.exists("sid-empty") is True
+        store.open_log(_sid("empty"))
+        assert store.exists(_sid("empty")) is False
+        store.open_log(_sid("empty")).append([{"role": "user", "content": "x"}])
+        assert store.exists(_sid("empty")) is True
 
 
 class TestListSummaries:
-    def test_requires_messages(self, store: SessionStore):
-        # 只有 metadata 没有消息 → 不列出
-        store.save_metadata("sid-meta-only", SessionMetadata(session_name="x"))
+    def test_requires_messages_or_tags(self, store: SessionStore):
+        # 只有 metadata（不带标签）又没有消息 → 不列出
+        store.save_metadata(_sid("meta-only"), SessionMetadata(session_name="x"))
         assert store.list_summaries() == []
 
+    def test_tagged_session_without_messages_is_listed(self, store: SessionStore):
+        """带标签的会话即使还没有首条消息也列出（"创建即打标"的窗口期可查）。"""
+        sid = _sid("tagged")
+        store.save_metadata(sid, SessionMetadata(tags=["favorite"]))
+        summaries = store.list_summaries()
+        assert [s.id for s in summaries] == [sid]
+        assert summaries[0].metadata.tags == ["favorite"]
+        assert summaries[0].first_user_message is None
+
     def test_name_from_metadata(self, store: SessionStore):
-        store.save_metadata("sid-1", SessionMetadata(session_name="titled"))
-        store.open_log("sid-1").append([{"role": "user", "content": "first"}])
+        store.save_metadata(_sid("1"), SessionMetadata(session_name="titled"))
+        store.open_log(_sid("1")).append([{"role": "user", "content": "first"}])
         summaries = store.list_summaries()
         assert len(summaries) == 1
-        assert summaries[0].id == "sid-1"
+        assert summaries[0].id == _sid("1")
         assert summaries[0].metadata.session_name == "titled"
         assert summaries[0].first_user_message is None
 
     def test_first_user_message_fallback(self, store: SessionStore):
-        store.save_metadata("sid-2", SessionMetadata(workspace="/ws"))
-        store.open_log("sid-2").append(
+        store.save_metadata(_sid("2"), SessionMetadata(workspace="/ws"))
+        store.open_log(_sid("2")).append(
             [
                 {"role": "system", "content": "sys"},
                 {"role": "user", "content": "hello " * 30},
@@ -299,13 +327,15 @@ class TestMemoryNoDisk:
         sentinel = tmp_path / "should-never-exist"
         store = MemorySessionStore()
 
-        store.save_metadata("sid-m", SessionMetadata(session_name="m", workspace="/w"))
-        log = store.open_log("sid-m")
+        store.save_metadata(
+            _sid("m"), SessionMetadata(session_name="m", workspace="/w")
+        )
+        log = store.open_log(_sid("m"))
         log.append([{"role": "user", "content": "hi", "uuid": "u1"}])
         log.write_aux("pending_compact", {"start_uuid": "u1"})
         assert log.read_aux("pending_compact") is not None
         assert store.list_summaries()
-        assert store.exists("sid-m") is True
+        assert store.exists(_sid("m")) is True
 
         assert not sentinel.exists()
         # tmp_path 下没有任何 wing 产生的内容
@@ -318,12 +348,14 @@ class TestFileLayout:
     def test_layout_files(self, tmp_path: Path):
         root = tmp_path / "sessions"
         store = FileSessionStore(root)
-        store.save_metadata("sid-l", SessionMetadata(session_name="l", workspace="/w"))
-        log = store.open_log("sid-l")
+        store.save_metadata(
+            _sid("l"), SessionMetadata(session_name="l", workspace="/w")
+        )
+        log = store.open_log(_sid("l"))
         log.append([{"role": "user", "content": "hi"}])
         log.write_aux("pending_compact", {"k": "v"})
 
-        session_dir = root / "sid-l"
+        session_dir = root / _sid("l")
         assert (session_dir / "metadata.json").exists()
         assert (session_dir / "history.jsonl").exists()
         assert not (session_dir / "newest.json").exists()
@@ -338,8 +370,8 @@ class TestFileLayout:
 
     def test_history_append_only(self, tmp_path: Path):
         store = FileSessionStore(tmp_path / "sessions")
-        log = store.open_log("sid-a")
+        log = store.open_log(_sid("a"))
         log.append([{"role": "user", "content": "1"}])
         log.append([{"role": "assistant", "content": "2"}])
-        lines = (tmp_path / "sessions" / "sid-a" / "history.jsonl").read_text()
+        lines = (tmp_path / "sessions" / _sid("a") / "history.jsonl").read_text()
         assert lines.count("\n") == 2

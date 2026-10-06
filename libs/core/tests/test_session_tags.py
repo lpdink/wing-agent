@@ -19,6 +19,7 @@ from wing.session.tags import (
     MAX_TAG_LENGTH,
     MAX_TAGS_PER_SESSION,
     apply_tag_ops,
+    sanitize_tags,
     validate_tag,
 )
 from wing.store import FileSessionStore, SessionMetadata
@@ -78,26 +79,65 @@ class TestApplyTagOps:
         assert m.tags == ["a", "c"]
         assert m.removed == ["b"]
 
-    def test_remove_wins_when_tag_on_both_sides(self):
-        """同一标签同时在 add / remove：先加后删，remove 胜出。"""
+    def test_remove_wins_when_tag_on_both_sides_net_delta_empty(self):
+        """同一标签同时在 add / remove：先加后删 remove 胜出；净变化两侧皆空。
+
+        added / removed 报**净变化**（不是操作流）——净 no-op 不触发写盘。
+        """
         m = apply_tag_ops(None, add=["x"], remove=["x"])
         assert m.tags == []
-        assert m.added == ["x"]
-        assert m.removed == ["x"]
+        assert m.added == []
+        assert m.removed == []
+
+    def test_net_delta_against_existing_base(self):
+        """净变化相对既有集合计算：既有 [x]，add=[x] remove=[] → 无净变化。"""
+        m = apply_tag_ops(["x"], add=["x"])
+        assert m.tags == ["x"]
+        assert m.added == [] and m.removed == []
 
     def test_read_only_call_returns_copy(self):
         m = apply_tag_ops(["a"])
         assert m.tags == ["a"]
         assert not m.added and not m.removed
 
-    def test_cap_enforced_on_result(self):
+    def test_cap_blocks_expansion_only(self):
+        """上限只拦扩张：存量超限（损坏 / 手改）允许读取与收缩，不允许再增加。"""
         full = [f"t{i}" for i in range(MAX_TAGS_PER_SESSION)]
         with pytest.raises(ValueError):
             apply_tag_ops(full, add=["one-more"])
 
+        oversized = [f"t{i}" for i in range(MAX_TAGS_PER_SESSION + 3)]
+        assert apply_tag_ops(oversized).tags == oversized  # 读取放行
+        shrunk = apply_tag_ops(oversized, remove=["t0", "t1", "t2"])
+        assert len(shrunk.tags) == MAX_TAGS_PER_SESSION  # 收缩放行
+        with pytest.raises(ValueError):
+            apply_tag_ops(oversized, add=["one-more"])  # 扩张拦截
+
     def test_invalid_input_never_silently_dropped(self):
         with pytest.raises(ValueError):
             apply_tag_ops(None, add=["ok", "bad tag"])
+
+
+class TestSanitizeTags:
+    """读侧清洗：存量脏数据的投影归一（绝不 raise）。"""
+
+    def test_dedupes_and_drops_invalid_keeps_order(self):
+        assert sanitize_tags(["a", "a", "bad tag", "b", "", "-lead", "a=b", "c"]) == [
+            "a",
+            "b",
+            "a=b",
+            "c",
+        ]
+
+    def test_none_and_empty(self):
+        assert sanitize_tags(None) == []
+        assert sanitize_tags([]) == []
+
+    def test_applied_as_mutation_base(self):
+        """apply_tag_ops 的既有集合先清洗：脏数据不阻断变更，且写出的结果干净。"""
+        m = apply_tag_ops(["ok", "bad tag", "ok"], add=["new"])
+        assert m.tags == ["ok", "new"]
+        assert m.added == ["new"]
 
 
 class TestManagerSetTags:
@@ -165,7 +205,24 @@ class TestManagerSetTags:
     @pytest.mark.asyncio
     async def test_unknown_session_raises_lookup_error(self, file_sm: SessionManager):
         with pytest.raises(LookupError):
-            file_sm.set_session_tags("20250101-000000-missing0", add=["x"])
+            file_sm.set_session_tags("20250101-000000-abcdef03", add=["x"])
+
+    @pytest.mark.asyncio
+    async def test_malformed_session_id_never_reaches_store(
+        self, file_sm: SessionManager
+    ):
+        """格式闸门：不合规 id 与"不存在"同价（LookupError），不触碰文件系统。"""
+        for bad in (
+            "sid-1",
+            "../escape",
+            "../../etc/passwd",
+            "/tmp/absolute",
+            "20250101-000000-ABCDEF01",  # 大写 hex 不合规（严格小写）
+            "20250101-000000-abcdef0",  # 长度不足
+            "20260101-111111",  # 前缀（截断）不合规
+        ):
+            with pytest.raises(LookupError):
+                file_sm.set_session_tags(bad, add=["x"])
 
     @pytest.mark.asyncio
     async def test_invalid_tag_raises_before_any_write(self, file_sm: SessionManager):
@@ -190,7 +247,7 @@ class TestStorePathClearLastTag:
         """只有 history.jsonl 的会话（崩溃窗口 / 老数据）add 后再 remove。"""
         store = FileSessionStore(tmp_path / "sessions")
         sm = SessionManager({"file": store})
-        sid = "20250101-000000-legacy00"
+        sid = "20250101-000000-abcdef01"
         session_dir = tmp_path / "sessions" / sid
         session_dir.mkdir(parents=True)
         (session_dir / "history.jsonl").write_text(
@@ -219,7 +276,7 @@ class TestStorePathClearLastTag:
 
         store = MemorySessionStore()
         sm = SessionManager({"memory": store}, default_backend="memory")
-        sid = "20250101-000000-mem0001"
+        sid = "20250101-000000-abcdef02"
         store.save_metadata(sid, SessionMetadata(tags=["favorite"]))
 
         removed = sm.set_session_tags(sid, remove=["favorite"])
@@ -238,6 +295,18 @@ class TestCreateAndProjection:
 
         infos = {i.id: i for i in file_sm.list_sessions()}
         assert infos[session.session_id].tags == ["scheduler", "task=x"]
+
+    @pytest.mark.asyncio
+    async def test_tagged_session_without_messages_is_listed(
+        self, file_sm: SessionManager
+    ):
+        """带标会话在首条消息落盘前就可被列表找到（"创建即打标"的窗口期）。"""
+        session = file_sm.create_session(tags=["wing-probe"])
+
+        infos = {i.id: i for i in file_sm.list_sessions()}
+        entry = infos[session.session_id]
+        assert entry.tags == ["wing-probe"]
+        assert entry.name is None  # 无名（首条消息未至）但已可寻址
 
     @pytest.mark.asyncio
     async def test_create_with_invalid_tag_fails_cleanly(self, file_sm: SessionManager):
@@ -282,3 +351,40 @@ class TestForkDoesNotInheritTags:
 
         assert child.tags == []
         assert source.tags == ["favorite", "task=x"]
+
+
+class TestStorePathSanitize:
+    """读侧清洗与自愈：磁盘脏标签不阻断读取，下一次真实写盘落盘清洗结果。"""
+
+    @pytest.mark.asyncio
+    async def test_dirty_disk_tags_are_sanitized_and_healed(
+        self, tmp_path: Path
+    ) -> None:
+        store = FileSessionStore(tmp_path / "sessions")
+        sm = SessionManager({"file": store})
+        sid = "20250101-000000-abcdef04"
+        session_dir = tmp_path / "sessions" / sid
+        session_dir.mkdir(parents=True)
+        (session_dir / "history.jsonl").write_text(
+            '{"role": "user", "content": "hi", "uuid": "u1"}\n',
+            encoding="utf-8",
+        )
+        # 手改 / 老数据：重复 + 违规格值（含逗号）
+        (session_dir / "metadata.json").write_text(
+            json.dumps({"tags": ["ok", "bad tag", "ok"]}), encoding="utf-8"
+        )
+
+        # 读：投影清洗，不写盘（磁盘原样）
+        assert sm.set_session_tags(sid).tags == ["ok"]
+        assert json.loads((session_dir / "metadata.json").read_text())["tags"] == [
+            "ok",
+            "bad tag",
+            "ok",
+        ]
+
+        # 写：变更相对清洗后的集合计算；清洗结果随写盘自愈
+        m = sm.set_session_tags(sid, add=["new"])
+        assert m.tags == ["ok", "new"]
+        assert m.added == ["new"]
+        raw = json.loads((session_dir / "metadata.json").read_text())
+        assert raw["tags"] == ["ok", "new"]
