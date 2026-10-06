@@ -18,21 +18,22 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 ## HTTP 端点
 
-### Session（`routes/session.py`，15 个）
+### Session（`routes/session.py`，16 个）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/session/create` | 创建新 session（可选 `backend: file\|memory`，默认 file；`workspace`、`template` 等） |
+| POST | `/api/session/create` | 创建新 session（可选 `backend: file\|memory`，默认 file；`workspace`、`template` 等；可选 `tags` 创建即打标，校验语义同 `/api/session/tag`） |
 | POST | `/api/session/resume` | 恢复已有 session（还原 template_name、workspace 与模型绑定；模型记录优先于模板默认；也是被逐出会话的显式水合入口） |
 | POST | `/api/session/fork` | 从指定消息 uuid 分叉；新 session 含该消息及之前全部消息，继承源 backend |
 | POST | `/api/session/subscribe` | 将某 client 订阅到 session 事件（触发 SyncSession 重放；不在内存的会话先按需水合） |
 | POST | `/api/session/unsubscribe` | 取消订阅 |
 | POST | `/api/session/send` | 发送用户消息，驱动 agent loop（不在内存的会话先按需水合，磁盘上也没有才 404） |
-| GET | `/api/session/list` | 列出所有 session（跨 store 聚合）；`status: inactive` = 不在内存（未加载 / 已逐出）。**顺序是契约**：活跃（`status != inactive`，= 已在内存的工作集）在前，组内按 `last_interaction` 降序（缺失 / 不可解析时回退 session id 前缀 `YYYYMMDD-HHMMSS`，都没有按 0），完全并列则按 session id 升序（全序，避免顺序随 store 枚举漂移）。前端按原序渲染，**不做语义重排**（`/ss <args>` 只按 exact > prefix > contains 分层，层内仍是后端顺序）；组内没有状态优先级（`waiting` 不提前），workspace 不参与排序 |
+| GET | `/api/session/list` | 列出所有 session（跨 store 聚合）；`status: inactive` = 不在内存（未加载 / 已逐出）。每个条目携带 `tags`（插入序；无标签为空数组）。**顺序是契约**：活跃（`status != inactive`，= 已在内存的工作集）在前，组内按 `last_interaction` 降序（缺失 / 不可解析时回退 session id 前缀 `YYYYMMDD-HHMMSS`，都没有按 0），完全并列则按 session id 升序（全序，避免顺序随 store 枚举漂移）。前端按原序渲染，**不做语义重排**（`/ss <args>` 只按 exact > prefix > contains 分层，层内仍是后端顺序）；组内没有状态优先级（`waiting` 不提前），workspace 不参与排序 |
 | GET | `/api/session/get` | 获取 session 详情 |
-| GET | `/api/session/info` | 运行时状态，含 `context_stats`、`skills_info`、`reasoning_effort`、`model_display_name`（模型展示名；未声明 = null，前端回落 `model`） |
+| GET | `/api/session/info` | 运行时状态，含 `context_stats`、`skills_info`、`reasoning_effort`、`model_display_name`（模型展示名；未声明 = null，前端回落 `model`）、`tags`（会话标签） |
 | GET | `/api/session/branches` | 可回退 / 分叉的消息节点 |
 | POST | `/api/session/update` | 更新状态：model / agent / title / thinking / reasoning_effort / yolo / workspace / tools（`tools` 全量替换，ref 格式，PR #50） |
+| POST | `/api/session/tag` | 读取或原子增删会话标签。body `{session_id, add?, remove?}`：两者皆缺省 = 纯读取；同时给出时服务端一次原子应用（幂等，remove 胜出）。响应 `{ok, session_id, tags, added, removed}`。**不水合**已逐出会话（标签属持久 metadata，读写都不把会话换入内存）；标签为不透明字符串（1..64 字符，禁空白 / 逗号 / 控制符，不以 `-` 开头，单会话上限 64；建议小写、`k=v` 作命名空间）；非法 400 / 未知会话 404 |
 | POST | `/api/session/compact` | 手动压缩上下文，可带 `instruction` 侧重指令（条件插入压缩 prompt，无指令时 prompt 不变） |
 | POST | `/api/session/interrupt` | 中断当前任务（Esc 键） |
 | POST | `/api/session/rewind` | 回退到指定消息 uuid |
