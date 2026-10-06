@@ -556,6 +556,7 @@ fn feed_info(app: &mut App, model: &str, display_name: Option<&str>) {
             },
             skills_info: String::new(),
             system_prompt: String::new(),
+            tags: vec![],
         })),
     });
 }
@@ -615,6 +616,7 @@ fn test_session_list_keeps_the_backend_order() {
         workspace: Some(ws.into()),
         last_interaction: Some(at.into()),
         status: status.into(),
+        tags: vec![],
     };
 
     let payload = SessionListResponse {

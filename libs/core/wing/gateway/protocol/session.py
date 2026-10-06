@@ -36,6 +36,10 @@ class CreateSessionRequest(BaseModel):
             "注意 metrics 审计文件不受此约束）"
         ),
     )
+    tags: list[str] | None = Field(
+        default=None,
+        description="创建即打标（校验语义同 /api/session/tag；非法 400）",
+    )
 
 
 class ResumeSessionRequest(BaseModel):
@@ -123,6 +127,25 @@ class UpdateSessionRequest(BaseModel):
     tools: list[str] | None = Field(
         default=None,
         description="切换工具集（全量替换，ref 格式：namespace.name 或裸名）",
+    )
+
+
+class TagSessionRequest(BaseModel):
+    """POST /api/session/tag 请求——读取或原子增删会话标签。
+
+    标签是不透明字符串（建议全小写，``k=v`` 作命名空间约定）；单个长度
+    1..64，禁空白 / 控制字符 / 逗号，不以 ``-`` 开头，单会话上限 64 个。
+    ``add`` / ``remove`` 皆缺省（None）= 纯读取，不产生任何变更。
+    """
+
+    session_id: str = Field(description="目标 session ID")
+    add: list[str] | None = Field(
+        default=None,
+        description="要添加的标签（幂等；已存在为 no-op）",
+    )
+    remove: list[str] | None = Field(
+        default=None,
+        description="要移除的标签（幂等；不存在为 no-op；与 add 同值则移除胜出）",
     )
 
 
@@ -238,6 +261,9 @@ class SessionInfoResponse(BaseModel):
     context_stats: ContextStatsInfo = Field(description="上下文统计信息")
     skills_info: str = Field(default="", description="已安装的 skills 信息")
     system_prompt: str = Field(default="", description="完整系统提示词")
+    tags: list[str] = Field(
+        default_factory=list, description="会话标签（插入序；无标签为空列表）"
+    )
 
 
 class CompactResponse(BaseModel):
@@ -267,3 +293,20 @@ class UpdateSessionResponse(BaseModel):
     """POST /api/session/update 响应。"""
 
     ok: bool = Field(default=True, description="操作是否成功")
+
+
+class TagSessionResponse(BaseModel):
+    """POST /api/session/tag 响应——变更后的标签全貌 + 实际增删。"""
+
+    ok: bool = Field(default=True, description="操作是否成功")
+    session_id: str = Field(description="目标 session ID")
+    tags: list[str] = Field(
+        default_factory=list,
+        description="变更后的全量标签（插入序；已有保持原序、新增追加在后）",
+    )
+    added: list[str] = Field(
+        default_factory=list, description="本次实际新增（幂等 no-op 不计）"
+    )
+    removed: list[str] = Field(
+        default_factory=list, description="本次实际移除（幂等 no-op 不计）"
+    )

@@ -181,12 +181,14 @@ class TestMediaNotASession:
         mid = _mid(data)
         store.write_media(mid, data)
         assert store.list_summaries() == []
-        assert store.exists(mid) is False
+        with pytest.raises(ValueError):
+            store.exists(mid)  # 媒体 id 不是会话 id：会话层格式闸门直接拒绝
 
-        store.save_metadata("sid-1", SessionMetadata(session_name="s"))
-        store.open_log("sid-1").append([{"role": "user", "content": "hi"}])
-        assert [s.id for s in store.list_summaries()] == ["sid-1"]
-        assert store.exists("sid-1") is True
+        sid = "20250101-000000-aaaaaaaa"
+        store.save_metadata(sid, SessionMetadata(session_name="s"))
+        store.open_log(sid).append([{"role": "user", "content": "hi"}])
+        assert [s.id for s in store.list_summaries()] == [sid]
+        assert store.exists(sid) is True
 
     def test_memory_media_does_not_create_session(self):
         store = MemorySessionStore()
@@ -200,9 +202,10 @@ class TestMediaSurvivesSessionLifecycle:
         """媒体池独立于会话目录/日志——会话的常规读写不清媒体。"""
         data = b"image"
         mid = _mid(data)
-        store.save_metadata("sid-1", SessionMetadata(session_name="s"))
-        store.open_log("sid-1").append([{"role": "user", "content": "hi"}])
+        sid = "20250101-000000-aaaaaaaa"
+        store.save_metadata(sid, SessionMetadata(session_name="s"))
+        store.open_log(sid).append([{"role": "user", "content": "hi"}])
         store.write_media(mid, data)
-        store.save_metadata("sid-1", SessionMetadata(session_name="renamed"))
-        store.open_log("sid-1").append([{"role": "assistant", "content": "yo"}])
+        store.save_metadata(sid, SessionMetadata(session_name="renamed"))
+        store.open_log(sid).append([{"role": "assistant", "content": "yo"}])
         assert store.read_media(mid) == data

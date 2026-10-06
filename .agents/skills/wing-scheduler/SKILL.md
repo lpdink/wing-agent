@@ -9,7 +9,7 @@ tags: [orchestration, scheduler, multi-agent, delivery, headless]
 
 一句话：**你（scheduler）负责想清楚、拆、派、审、集成、收口；子 agent 负责执行。需求澄清之后全程无人值守。**
 
-本 skill 只依赖 `wing` CLI（`wing run` / `wait` / `ps` / `info` / `tail` / `head`）与普通 shell / git 命令，不需要额外脚本或编排框架。
+本 skill 只依赖 `wing` CLI（`wing run` / `wait` / `ps` / `info` / `tag` / `tail` / `head`）与普通 shell / git 命令，不需要额外脚本或编排框架。
 
 本文用 `$WING_HOME` 指 wing 的状态目录（默认 `~/.wing`，可用同名环境变量覆盖）：任务文档与 worktree 都放在它下面，与目标仓库解耦。
 
@@ -59,6 +59,15 @@ tags: [orchestration, scheduler, multi-agent, delivery, headless]
 
 > 由 `wing run` / `wing -p` 创建的 session 一律强制 `yolo=true`（危险命令不询问），这正是无人值守需要的；也意味着子 agent 的破坏力没有闸门——所以**工具集与工作区边界必须写死，不能靠子 agent 自觉**。
 
+### 1.1 会话标记（tags：scheduler / executor / reviewer / task）
+
+开工第一件事给自己打标，派发时给每个子 agent 打标——巡检、收口、事后找回都靠它：
+
+- **自己**：`wing tag $WING_SESSION_ID scheduler task=<task_name>`——`$WING_SESSION_ID` 是 Bash 工具注入的环境变量 = 你所在会话的 id（开工时先 `echo $WING_SESSION_ID` 确认非空；为空说明运行环境尚未支持该注入，打标需人工确认 sid）；
+- **executor / reviewer**：派发的 `wing run` 直接带 `--tag executor --tag task=<task_name>`（reviewer 用 `--tag reviewer`）——创建即打标、一条命令原子完成，没有"派发了但没标上"的窗口；`-r` 续跑同样接受 `--tag`（幂等追加）；
+- **巡检 / 找回**：`wing ps --tag task=<task_name>` 看任务全家（多个 `--tag` 为 AND；`--tag` 隐含包含 inactive，归档会话也查得到）；
+- 约定：标签是不透明字符串（建议小写、`k=v` 作命名空间）；角色用裸词，任务统一 `task=<task_name>`。不确定标过没：`wing tag <sid>` 读、`wing tag --list` 清点全局。
+
 ## 2. 铁律（违反任意一条，编排都会崩坏）
 
 1. **并发 ≤ 3**：executor + reviewer 加起来，同一时刻最多 3 个在飞（你自己不算）。TPM 限流是硬约束，不是建议。
@@ -70,7 +79,7 @@ tags: [orchestration, scheduler, multi-agent, delivery, headless]
 7. **push / 建 PR 只能你做**：executor 只 commit（commit message 要写清楚，reviewer 靠它取信息）。
 8. **任务文档一律放 `$WING_HOME/tasks/<task>/`，用绝对路径引用**：绝不写进 worktree（会污染 diff 与 review 范围）。任务目录在 worktree 之外是刻意设计。
 9. **先记录 base commit，再派发**：没有 base 就没有 review 范围（`<base>..HEAD`）。
-10. **每个 session 都要登记**：派发即写进 `scheduler_log.md`（sid / 角色 / step / lane）。任务一大，不记就失忆。
+10. **每个 session 都要登记并打标**：派发即写进 `scheduler_log.md`（sid / 角色 / step / lane）并落标签（`--tag`，见 §1.1）；自己也随手可被 `wing ps --tag scheduler` 找回。任务一大，不记就失忆。
 11. **失败优先 `-r` 续跑**：`wing run -r <sid> -p "..."` 保留原上下文。开新 session 只在原上下文彻底跑偏时才考虑（不推荐）。
 12. **`wing wait` 的 Bash timeout 必须放大**：Bash 工具默认 30s 会把 `wing wait` 进程杀掉（会话本身不受影响，但白等一轮）。`timeout = wait --timeout + 100` 起步。
 13. **别相信自己的记忆，相信日志**：你自己的上下文会被自动压缩，跑到后面会忘掉前面。关键状态（sid、base sha、决策、结论）一律**当场**写进 `scheduler_log.md`，需要时读回来。
@@ -191,6 +200,7 @@ git -C "$WT" rev-parse HEAD                             # ← 记进 scheduler_l
 ```bash
 cd "$WT" && wing run --json \
   --tools "Bash,Read,Write,Edit,Grep,Glob" \
+  --tag executor --tag task=<task_name> \
   -p "$(cat <<'EOF'
 <执行者契约（§6.2）+ 本步骤的具体交代>
 EOF
@@ -199,6 +209,7 @@ EOF
 ```
 
 - **`cd <worktree>` 决定 session 的 workspace**（子 agent 所有工具的相对路径基准）——必须 `cd` 到 worktree，不能在自己的目录里派发；
+- **`--tag executor --tag task=<task_name>` 派发即打标**（§1.1，reviewer 用 `--tag reviewer`）——创建时原子写进会话，别事后再补；
 - `--json` 给你可解析的 session id：`| jq -r .session_id`；
 - 用 `<<'EOF'`（**带引号**）确保 prompt 里的反引号、`$VAR`、引号原样传入（已实测）；
 - 想留痕可先把同一段 prompt 落盘到 `<step_dir>/prompt_executor.md`，再 `-p "$(cat ...)"`（可选，便于事后复盘）。
@@ -282,7 +293,7 @@ ls "$STEP"/design.md "$STEP"/task.md        # 必须存在
 
 ### 7.4 巡检与逃生舱
 
-- 全局巡检：`wing ps --json | jq '.[] | {id, status, last_interaction}'`（默认已过滤 `inactive`；状态取值：`working` / `idle` / `waiting` / `inactive`）；
+- 全局巡检：`wing ps --json | jq '.[] | {id, status, last_interaction}'`（默认已过滤 `inactive`；状态取值：`working` / `idle` / `waiting` / `inactive`）；本任务范围用 `wing ps --tag task=<task_name>`（§1.1）；
 - 看某人正在干什么：`wing tail <sid> -n 10 -t tool_call`（工具调用一览）、`-t content`（助手正文）、`-t reasoning`（思路）、`-t user`（你派发时给的 prompt）；
 - **识别"假忙"**：`wing tail <sid> -n 10 -t tool_call` 看最近工具调用是否在原地打转（同一条命令 / 同一个文件反复出现、报错反复重试）→ 别干等：interrupt，然后 `-r` 直接点破（「你已经连续 3 次因为 X 失败，换成 Y 试试」）；
 - **卡死逃生舱**（长时间 `working` 却无新增消息，或状态是 `waiting`）：
@@ -322,6 +333,7 @@ reviewer 与别的 worktree 上的 executor 可以同时跑（不同目录互不
 
 ```bash
 cd <worktree> && wing run --json --tools "Bash,Read,Glob,Grep,Write,Edit" \
+  --tag reviewer --tag task=<task_name> \
   -p "$(cat <<'EOF'
 <审查者契约 + 审查要求文件绝对路径>
 EOF
@@ -467,6 +479,10 @@ git push -u origin <task>/integration
 | 续跑同一 session | `wing run -r <sid> -p "..."` | 忽略 `--tools` / `-m` |
 | 等待（阻塞） | `wing wait <sid...> --timeout 1800 --json` | Bash 工具 timeout 要更大 |
 | 会话列表 | `wing ps --json` | 默认过滤 `inactive` |
+| 打标 / 读标 / 清标 | `wing tag <sid> scheduler task=<task>` / `wing tag <sid> --remove <tag>` / `wing tag <sid>` | 幂等；不唤醒逐出会话；`--json` 可解析 |
+| 标签清点 | `wing tag --list` | 全局标签 + 计数（含 inactive） |
+| 按标签找会话 | `wing ps --tag <tag> [--tag <tag2>]` | 多个 `--tag` 为 AND；隐含包含 `inactive` |
+| 自己的 session id | `echo $WING_SESSION_ID` | Bash 工具注入的环境变量 = 当前会话 id |
 | 单会话状态 | `wing info <sid> --json` | status / workdir / tools / tokens |
 | 看消息 | `wing tail <sid> -n 20 -t <type>` | type: all / user / assistant / tool_call / tool_result / reasoning / content |
 | 看开头 | `wing head <sid> -n 5 -t user` | 复核你派发时给的 prompt |

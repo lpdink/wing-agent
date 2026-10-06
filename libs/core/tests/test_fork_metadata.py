@@ -240,7 +240,7 @@ class TestLegacyCompat:
         from uuid import uuid4
 
         root = tmp_path / "sessions"
-        sid = "20250101-000000-legacy01"
+        sid = "20250101-000000-abcdef01"
         session_dir = root / sid
         session_dir.mkdir(parents=True)
 

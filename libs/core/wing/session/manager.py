@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 
 from wing.chain import TrackedList
 from wing.common.logger import log
-from wing.common.utils import generate_session_id
+from wing.common.utils import generate_session_id, is_valid_session_id
 from wing.config import get_config
 from wing.hooks import hooks
 from wing.event import (
@@ -39,6 +39,7 @@ from wing.schema import ChainNode, Message
 from wing.store import SessionMetadata, SessionStore
 
 from .session import Session, tool_refs
+from .tags import TagMutation, apply_tag_ops, sanitize_tags
 from .template import AgentTemplate, AgentTemplateManager
 
 if TYPE_CHECKING:
@@ -214,6 +215,7 @@ class SessionManager:
         workspace: str | None = None,
         agent_override: AgentOverride | None = None,
         backend: str | None = None,
+        tags: Iterable[str] | None = None,
     ) -> Session:
         """创建新 session（session id 一律由后端生成）。
 
@@ -227,9 +229,10 @@ class SessionManager:
             workspace: 工作目录
             agent_override: AgentOverride 参数覆盖（None 字段不覆盖 template 值）
             backend: 存储后端名称（如 file/memory），None 时使用默认后端
+            tags: 创建即打标（经 :meth:`set_session_tags` 同一套校验与应用）
 
         Raises:
-            ValueError: 模板不存在或 backend 未知
+            ValueError: 模板不存在 / backend 未知 / 标签非法
         """
         backend_name = backend if backend is not None else self._default_backend
         store = self._stores.get(backend_name)
@@ -266,6 +269,11 @@ class SessionManager:
         if agent_override is not None:
             session.apply_agent_override(agent_override)
 
+        # 创建即打标（原子语义：校验在写盘前完成，非法标签此刻 raise——
+        # 会话尚未注册、磁盘零痕迹）
+        if tags:
+            session.apply_tag_ops(add=tags)
+
         self._sessions[sid] = session
         self.touch(sid)
 
@@ -283,7 +291,15 @@ class SessionManager:
         """跨 stores 精确解析 session id，返回 (session_id, store)。
 
         优先命中内存中的 session，再按 stores 注册顺序查后端是否存在。
+
+        **格式闸门在最前**：session id 是后端生成的固定格式（见
+        ``common.utils.SESSION_ID_PATTERN``），不合规的值一律按"不存在"处理
+        ——绝不允许它进入任何 store 调用（file 后端拿它拼路径，这是路径
+        穿越的唯一入口；gate 在这里，所有网络路径都经过本方法）。解析失败
+        与格式不合规最终都映射为 404，不向客户端区分（不给探测反馈）。
         """
+        if not is_valid_session_id(session_id):
+            return None
         if session_id in self._sessions:
             return session_id, self._sessions[session_id].store
         for store in self._stores.values():
@@ -446,6 +462,49 @@ class SessionManager:
 
         return new_session, draft
 
+    # ── 标签 ─────────────────────────────────
+
+    def set_session_tags(
+        self,
+        session_id: str,
+        *,
+        add: Iterable[str] = (),
+        remove: Iterable[str] = (),
+    ) -> TagMutation:
+        """按 session id 原子增删标签（幂等；读或写都不触发水合）。
+
+        标签是**持久 metadata**（不是运行时状态），因此有两条互斥路径：
+
+        - 已在内存 → 经 ``Session.apply_tag_ops`` 改内存元数据并落盘
+          （内存对象是磁盘事实的同一来源，绕开它会被后续 save 回写覆盖）；
+        - 未加载 / 已逐出 → 直接 store 读改写，**不水合**——给旧会话打
+          favorite 不会把它"弄醒"变成 idle（会话保持 inactive，内存零代价）。
+
+        session id 先过格式闸门（``_resolve_with_store``）：不合规的值按
+        "不存在"处理，绝不触达 store（防路径穿越）。
+
+        add / remove 皆空 = 纯读（返回当前标签，不产生任何写）。
+
+        Raises:
+            LookupError: 会话不存在（内存与磁盘都没有；id 格式不合规同价）
+            ValueError: 标签非法 / 超过单会话上限
+        """
+        resolved = self._resolve_with_store(session_id)
+        if resolved is None:
+            raise LookupError(f"Session not found: {session_id}")
+        resolved_id, store = resolved
+
+        session = self._sessions.get(resolved_id)
+        if session is not None:
+            return session.apply_tag_ops(add=add, remove=remove)
+
+        metadata = store.load_metadata(resolved_id) or SessionMetadata()
+        mutation = apply_tag_ops(metadata.tags, add=add, remove=remove)
+        if mutation.added or mutation.removed:
+            metadata.tags = mutation.tags or None
+            store.save_metadata(resolved_id, metadata)
+        return mutation
+
     # ============================================================
     # 外部方法：逐出（eviction）
     # ============================================================
@@ -598,7 +657,10 @@ class SessionManager:
             for summary in store.list_summaries():
                 metadata = summary.metadata
                 name = metadata.session_name or summary.first_user_message
-                if not name:
+                # 无名且无标的照旧隐藏——"带标"按**清洗后**的集合判定（仅含
+                # 非法标签的脏会话不当作带标，避免空标题噪音；store 层的
+                # 原始字段判定只负责把候选交给这里）。
+                if not name and not sanitize_tags(metadata.tags):
                     continue
 
                 loaded = self._sessions.get(summary.id)
@@ -609,6 +671,7 @@ class SessionManager:
                         workspace=metadata.workspace,
                         last_interaction=metadata.last_interaction,
                         status=loaded.status if loaded is not None else "inactive",
+                        tags=sanitize_tags(metadata.tags),
                     )
                 )
 

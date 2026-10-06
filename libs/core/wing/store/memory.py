@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
+from wing.common.utils import validate_session_id
 from wing.store.base import (
     MessageLog,
     SessionMetadata,
@@ -59,17 +60,25 @@ class MemorySessionStore(SessionStore):
     # ── metadata ──────────────────────────────
 
     def load_metadata(self, session_id: str) -> SessionMetadata | None:
+        validate_session_id(session_id)
         meta = self._metadata.get(session_id)
         return meta.model_copy() if meta is not None else None
 
     def save_metadata(self, session_id: str, metadata: SessionMetadata) -> None:
-        if not metadata.model_dump(exclude_none=True):
+        validate_session_id(session_id)
+        # 空数据 + 无现存记录 = 不创造空记录（与 file 后端"首次写入前不存在"
+        # 语义一致）；有现存记录则照写——"清空"必须可持久化。
+        if (
+            not metadata.model_dump(exclude_none=True)
+            and session_id not in self._metadata
+        ):
             return
         self._metadata[session_id] = metadata.model_copy()
 
     # ── log ───────────────────────────────────
 
     def open_log(self, session_id: str) -> MemoryMessageLog:
+        validate_session_id(session_id)
         message_log = self._logs.get(session_id)
         if message_log is None:
             message_log = MemoryMessageLog()
@@ -105,20 +114,33 @@ class MemorySessionStore(SessionStore):
         return ids
 
     def exists(self, session_id: str) -> bool:
-        """精确判断 session 是否存在。"""
+        """精确判断 session 是否存在。id 不合规即 ValueError（同 file 后端）。"""
+        validate_session_id(session_id)
         return session_id in self._live_session_ids()
 
     def list_summaries(self) -> list[SessionSummary]:
-        """列举有消息的 session（存在性判据与文件后端一致：有日志记录）。"""
+        """列举 session（存在性判据：有日志记录 **或** 带标签的 metadata）。
+
+        带标会话即使还没有首条消息（"创建即打标"的窗口期）也可被列表到——
+        上层据此让 ``ps --tag`` / ``tag --list`` 立即找得到；是否最终进列表
+        由 SessionManager 决定（无名且无标的条目会被它过滤）。
+
+        与 file 后端"目录名不契合 session id 格式即跳过"的口径一致：memory
+        后端的 key 由会话层生成，天然合规。
+        """
         result: list[SessionSummary] = []
         for session_id in set(self._metadata) | set(self._logs):
+            metadata = self.load_metadata(session_id) or SessionMetadata()
             message_log = self._logs.get(session_id)
-            if message_log is None or next(message_log.iter_all(), None) is None:
+            has_records = (
+                message_log is not None
+                and next(message_log.iter_all(), None) is not None
+            )
+            if not has_records and not metadata.tags:
                 continue
 
-            metadata = self.load_metadata(session_id) or SessionMetadata()
             first_user: str | None = None
-            if metadata.session_name is None:
+            if metadata.session_name is None and message_log is not None:
                 for record in message_log.iter_all():
                     if record.get("role") == "user":
                         first_user = (record.get("content") or "")[:100]

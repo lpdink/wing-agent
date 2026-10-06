@@ -21,6 +21,7 @@ from .manager import SessionManager
 from .override import AgentOverride
 from .reaper import SessionReaper
 from .session import Session, serialize_message, tool_refs
+from .tags import TagMutation
 from .template import AgentTemplate, AgentTemplateManager
 
 __all__ = [
@@ -30,6 +31,7 @@ __all__ = [
     "Session",
     "SessionManager",
     "SessionReaper",
+    "TagMutation",
     "serialize_message",
     "tool_refs",
 ]

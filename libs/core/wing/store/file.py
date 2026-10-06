@@ -22,6 +22,7 @@ from typing import Any, Iterator
 
 from wing.common.fs import atomic_write_bytes, atomic_write_json
 from wing.common.logger import log
+from wing.common.utils import is_valid_session_id, validate_session_id
 from wing.store.base import (
     MessageLog,
     SessionMetadata,
@@ -142,7 +143,15 @@ class FileSessionStore(SessionStore):
         return self._root
 
     def _session_dir(self, session_id: str) -> Path:
-        return self._root / session_id
+        """会话目录。**所有文件路径拼接的唯一入口**。
+
+        拼接前先过 session id 格式闸门（``validate_session_id``）：id 是路径
+        组件，不合规的值（``../`` / 绝对路径 / 任意字符串）必须在此失败——
+        这是防路径穿越的最终防线（会话层的解析闸门是第一道；两道都过才可能
+        触碰文件系统）。
+        """
+        safe_id = validate_session_id(session_id)
+        return self._root / safe_id
 
     # ── metadata ──────────────────────────────
 
@@ -152,21 +161,27 @@ class FileSessionStore(SessionStore):
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            return SessionMetadata.model_validate(data)
         except Exception as e:
-            # 不静默降级：损坏的 metadata 若被下一次 save 无痕覆盖，
-            # 会丢失 forked_from / 标题等字段，因此留 warning。
+            # 损坏的 metadata（JSON 解析失败 / schema 不符）统一降级：
+            # warning + 空对象。不抛——损坏数据不能把读取路径打挂（列表 /
+            # TUI / 水合；一个坏目录不该噎死整个会话列表）；也不静默——
+            # 下一次 save 会把它覆盖成当前状态（丢失的字段因此可见于日志）。
             log.warning(
                 f"Corrupted metadata.json for session '{session_id}' at {path}: {e}. "
                 "Treating as empty; next save will overwrite it."
             )
             return SessionMetadata()
-        return SessionMetadata.model_validate(data)
 
     def save_metadata(self, session_id: str, metadata: SessionMetadata) -> None:
         data = metadata.model_dump(exclude_none=True)
-        if not data:
+        path = self._session_dir(session_id) / self._METADATA
+        # 空数据 + 无现存文件 = 不创造空记录（首次写入语义）；有现存文件则
+        # 照写——"清空"必须可持久化（如移除最后一个标签后 metadata 变空，
+        # 静默跳过会让删除在下次读取时"复活"）。
+        if not data and not path.exists():
             return
-        atomic_write_json(self._session_dir(session_id) / self._METADATA, data)
+        atomic_write_json(path, data)
 
     # ── log ───────────────────────────────────
 
@@ -218,12 +233,16 @@ class FileSessionStore(SessionStore):
         ).exists()
 
     def list_summaries(self) -> list[SessionSummary]:
-        """列举有消息的 session。
+        """列举 session（存在性判据：history.jsonl **或** 带标签的 metadata）。
 
-        存在性判据：history.jsonl 存在（唯一事实来源日志）。标题回退从
-        history.jsonl 提取第一条 user 消息；history.jsonl 不可读时仍列出
-        该 session（first_user_message 为 None，上层按"无标题"处理——
-        无标题的条目最终是否进列表由 SessionManager 决定）。
+        带标会话即使还没有首条消息（"创建即打标"的窗口期）也可被列表到——
+        上层据此让 ``ps --tag`` / ``tag --list`` 立即找得到；是否最终进列表
+        由 SessionManager 决定（无名且无标的条目会被它过滤）。
+
+        目录名不契合 session id 格式的一律跳过：它们不是合法的会话（也无法
+        经任何 API 寻址——解析闸门同样拒绝），可能只是 root 里的杂物。
+        标题回退从 history.jsonl 提取第一条 user 消息；history.jsonl 不可读
+        时仍列出该 session（first_user_message 为 None）。
         遗留的 newest.json 文件不读不删（快照已废弃）。
         """
         if not self._root.exists():
@@ -233,11 +252,13 @@ class FileSessionStore(SessionStore):
         for session_dir in self._root.iterdir():
             if not session_dir.is_dir():
                 continue
+            if not is_valid_session_id(session_dir.name):
+                continue
+            metadata = self.load_metadata(session_dir.name) or SessionMetadata()
             history = session_dir / FileMessageLog._HISTORY
-            if not history.exists():
+            if not history.exists() and not metadata.tags:
                 continue
 
-            metadata = self.load_metadata(session_dir.name) or SessionMetadata()
             first_user: str | None = None
             if metadata.session_name is None:
                 first_user = self._first_user_message(session_dir.name)

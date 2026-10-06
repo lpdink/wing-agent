@@ -38,6 +38,8 @@ from wing.gateway.protocol import (
     SessionInfoResponse,
     SessionListResponse,
     SubscribeRequest,
+    TagSessionRequest,
+    TagSessionResponse,
     UnsubscribeRequest,
     UpdateSessionRequest,
     UpdateSessionResponse,
@@ -92,6 +94,7 @@ async def create_session(
             workspace=body.workspace,
             agent_override=body.agent,
             backend=body.backend,
+            tags=body.tags,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -347,6 +350,42 @@ async def update_session(
         raise HTTPException(status_code=400, detail=str(e))
 
     return UpdateSessionResponse(ok=True)
+
+
+@router.post(
+    "/api/session/tag",
+    response_model=TagSessionResponse,
+    summary="读取或增删 session 标签",
+)
+async def tag_session(
+    body: TagSessionRequest,
+    request: Request,
+) -> TagSessionResponse:
+    """标签读 / 写同一端点：``add`` / ``remove`` 皆缺省 = 纯读取。
+
+    不水合已逐出会话（标签属于持久 metadata，读或写都不把会话换入内存）；
+    增删在服务端一次原子应用（单进程内：内存态与磁盘态同源；跨进程共享
+    同一 file store 时沿用既有 metadata 的"最后写者覆盖"语义）。
+    """
+    server = _get_server(request)
+    try:
+        mutation = server.runtime.set_session_tags(
+            body.session_id,
+            add=body.add or (),
+            remove=body.remove or (),
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return TagSessionResponse(
+        ok=True,
+        session_id=body.session_id,
+        tags=mutation.tags,
+        added=mutation.added,
+        removed=mutation.removed,
+    )
 
 
 # ============================================================

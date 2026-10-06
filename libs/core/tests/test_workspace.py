@@ -20,7 +20,7 @@ def _make_session(tmp_path: Path, workspace: str | None = None):
     mock_cm = MagicMock()
 
     session = Session(
-        session_id="test-ws",
+        session_id="20250101-000000-abcdef05",
         messages=MagicMock(),
         context_manager=mock_cm,
         agent=mock_agent,
@@ -46,7 +46,7 @@ class TestSetWorkspace:
         session.context_manager.set_workspace.assert_called_once_with(target)
 
         # metadata.json 已持久化
-        meta_path = tmp_path / "sessions" / "test-ws" / "metadata.json"
+        meta_path = tmp_path / "sessions" / "20250101-000000-abcdef05" / "metadata.json"
         assert meta_path.exists()
         import json
 

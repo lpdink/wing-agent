@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from wing.config import ApiKeyEntry, AuthConfig
 from wing.event import AgentInfo, SessionInfo
 from wing.gateway.routes import health as health_route
+from wing.session import TagMutation
 
 
 def _raise_package_not_found(name: str) -> str:
@@ -183,7 +184,11 @@ class TestSessionCreate:
         assert data["template_name"] == "default"
         assert data["backend"] == "file"
         mock_runtime.create_session.assert_called_once_with(
-            template_name=None, workspace=None, agent_override=None, backend=None
+            template_name=None,
+            workspace=None,
+            agent_override=None,
+            backend=None,
+            tags=None,
         )
 
     def test_create_with_template(self, client: TestClient, mock_runtime):
@@ -194,7 +199,11 @@ class TestSessionCreate:
         )
         assert resp.status_code == 200
         mock_runtime.create_session.assert_called_once_with(
-            template_name="coder", workspace="/ws", agent_override=None, backend=None
+            template_name="coder",
+            workspace="/ws",
+            agent_override=None,
+            backend=None,
+            tags=None,
         )
 
     def test_create_template_not_found(self, client: TestClient, mock_runtime):
@@ -208,7 +217,11 @@ class TestSessionCreate:
         resp = client.post("/api/session/create", json={"backend": "memory"})
         assert resp.status_code == 200
         mock_runtime.create_session.assert_called_once_with(
-            template_name=None, workspace=None, agent_override=None, backend="memory"
+            template_name=None,
+            workspace=None,
+            agent_override=None,
+            backend="memory",
+            tags=None,
         )
 
     def test_create_unknown_backend_returns_400(self, client: TestClient, mock_runtime):
@@ -219,6 +232,25 @@ class TestSessionCreate:
         resp = client.post("/api/session/create", json={"backend": "redis"})
         assert resp.status_code == 400
         assert "redis" in resp.json()["detail"]
+
+    def test_create_with_tags(self, client: TestClient, mock_runtime):
+        """tags 透传（创建即打标）；非法标签由 runtime raise → 400。"""
+        resp = client.post(
+            "/api/session/create", json={"tags": ["scheduler", "task=x"]}
+        )
+        assert resp.status_code == 200
+        mock_runtime.create_session.assert_called_once_with(
+            template_name=None,
+            workspace=None,
+            agent_override=None,
+            backend=None,
+            tags=["scheduler", "task=x"],
+        )
+
+        mock_runtime.create_session.side_effect = ValueError("invalid tag: 'bad tag'")
+        resp = client.post("/api/session/create", json={"tags": ["bad tag"]})
+        assert resp.status_code == 400
+        assert "bad tag" in resp.json()["detail"]
 
     def test_create_with_agent_override(self, client: TestClient, mock_runtime):
         """创建 session 时传入 agent override。"""
@@ -953,6 +985,66 @@ class TestSessionUpdate:
         )
         assert resp.status_code == 400
         assert "does not exist" in resp.json()["detail"]
+
+
+# ============================================================
+# 6.3 Session Tag
+# ============================================================
+
+
+class TestSessionTag:
+    """POST /api/session/tag 测试（读 / 写同一端点）。"""
+
+    def test_read_without_ops(self, client: TestClient, mock_runtime):
+        """add / remove 皆缺省 = 纯读：runtime 收到空元组，响应回显当前标签。"""
+        mock_runtime.set_session_tags.return_value = TagMutation(
+            tags=["favorite"], added=[], removed=[]
+        )
+        resp = client.post("/api/session/tag", json={"session_id": "test-id"})
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "ok": True,
+            "session_id": "test-id",
+            "tags": ["favorite"],
+            "added": [],
+            "removed": [],
+        }
+        mock_runtime.set_session_tags.assert_called_once_with(
+            "test-id", add=(), remove=()
+        )
+
+    def test_mutation_passthrough(self, client: TestClient, mock_runtime):
+        """add / remove 透传；响应携带变更后的全量标签与实际增删。"""
+        mock_runtime.set_session_tags.return_value = TagMutation(
+            tags=["a", "c"], added=["c"], removed=["b"]
+        )
+        resp = client.post(
+            "/api/session/tag",
+            json={"session_id": "test-id", "add": ["c"], "remove": ["b"]},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["tags"] == ["a", "c"]
+        assert resp.json()["added"] == ["c"]
+        assert resp.json()["removed"] == ["b"]
+        mock_runtime.set_session_tags.assert_called_once_with(
+            "test-id", add=["c"], remove=["b"]
+        )
+
+    def test_not_found_maps_to_404(self, client: TestClient, mock_runtime):
+        mock_runtime.set_session_tags.side_effect = LookupError(
+            "Session not found: nope"
+        )
+        resp = client.post("/api/session/tag", json={"session_id": "nope"})
+        assert resp.status_code == 404
+        assert "nope" in resp.json()["detail"]
+
+    def test_invalid_tag_maps_to_400(self, client: TestClient, mock_runtime):
+        mock_runtime.set_session_tags.side_effect = ValueError("invalid tag: 'bad tag'")
+        resp = client.post(
+            "/api/session/tag", json={"session_id": "test-id", "add": ["bad tag"]}
+        )
+        assert resp.status_code == 400
+        assert "bad tag" in resp.json()["detail"]
 
 
 # ============================================================

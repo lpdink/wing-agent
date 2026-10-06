@@ -26,6 +26,7 @@ pub mod run;
 pub(crate) mod start;
 mod status;
 mod stop;
+pub mod tag;
 pub mod wait;
 
 /// wing — AI agent CLI
@@ -60,6 +61,12 @@ pub struct Cli {
     /// Override tools (comma-separated). If not set, uses template defaults.
     #[arg(long = "tools")]
     pub tools: Option<String>,
+
+    /// Attach tags to the session (stdio mode `wing -p` only — subcommands
+    /// like `wing run` / `wing tag` carry their own `--tag`; a misplaced
+    /// top-level flag is rejected instead of being silently dropped).
+    #[arg(long = "tag", value_delimiter = ',')]
+    pub tag: Vec<String>,
 
     /// Resume an existing session by ID.
     #[arg(short = 'r', long = "resume")]
@@ -172,12 +179,38 @@ pub enum Command {
         /// Show all sessions including inactive ones.
         #[arg(long = "all")]
         all: bool,
+        /// Filter by tag (repeatable / comma-separated; multiple tags = AND).
+        ///
+        /// Implies --all: tags describe long-term taxonomy (favorites /
+        /// task crews are often inactive), so inactive matches are included.
+        #[arg(long = "tag", value_delimiter = ',')]
+        tag: Vec<String>,
     },
 
     /// Show session runtime info (model, tools, tokens, status).
     Info {
         /// Session ID.
         session_id: String,
+    },
+
+    /// Read or edit session tags (also: --list for the global inventory).
+    ///
+    /// Tags are opaque strings (lowercase recommended; `k=v` is a namespace
+    /// convention). Positional args add tags, --remove removes them; both in
+    /// one call is applied atomically. Idempotent; never wakes evicted
+    /// sessions; no tags at all = pure read.
+    Tag {
+        /// Session ID (omit when using --list).
+        session_id: Option<String>,
+        /// Tags to add (repeatable / comma-separated).
+        #[arg(value_delimiter = ',')]
+        tags: Vec<String>,
+        /// Tags to remove (repeatable / comma-separated).
+        #[arg(long = "remove", value_delimiter = ',')]
+        remove: Vec<String>,
+        /// List all tags across sessions with counts (inactive included).
+        #[arg(long = "list")]
+        list: bool,
     },
 
     /// Evict sessions from gateway memory (idle ones only; disk state is kept).
@@ -229,6 +262,23 @@ pub enum Command {
     Agents,
 }
 
+/// Error message when the top-level `--tag` is used outside stdio mode.
+///
+/// Stdio mode (`wing -p --tag ...`) consumes it legitimately; every other
+/// path would silently drop it (clap accepts the flag before the subcommand
+/// but nothing reads it), which recreates the "dispatched but untagged"
+/// gap this feature exists to close. `None` = invocation is fine.
+fn misplaced_global_tag_error(tags: &[String]) -> Option<String> {
+    if tags.is_empty() {
+        return None;
+    }
+    Some(
+        "top-level --tag only applies to stdio mode (wing -p --tag ...); with a \
+         subcommand put it after the subcommand, e.g. `wing run --tag executor ...`"
+            .to_string(),
+    )
+}
+
 /// Dispatch CLI command.
 pub async fn dispatch(cli: Cli) -> ExitCode {
     // Logging is initialized for **every** path — TUI, stdio and all
@@ -241,6 +291,14 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
     // stdio mode takes priority over subcommands.
     if cli.is_stdio_mode() {
         return dispatch_stdio(cli).await;
+    }
+
+    // 顶层 --tag 只服务 stdio 模式（`wing -p --tag ...`）；子命令各自的 --tag
+    // 定义在 RunArgs / Command::Tag 上。`wing --tag x run ...` 这类放错位置
+    // 的写法会被 clap 静默接受但丢弃标签——显式报错，别让 Agent 以为打上了。
+    if let Some(message) = misplaced_global_tag_error(&cli.tag) {
+        eprintln!("wing error: {message}");
+        return ExitCode::FAILURE;
     }
 
     match cli.command {
@@ -295,8 +353,19 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                 session_ids,
                 timeout,
             } => crate::cmd::wait::run_wait(&session_ids, timeout, cli.json).await,
-            Command::Ps { all } => crate::cmd::ps::run_ps(all, cli.json, cli.watch).await,
+            Command::Ps { all, tag } => {
+                crate::cmd::ps::run_ps(all, &tag, cli.json, cli.watch).await
+            }
             Command::Info { session_id } => crate::cmd::ps::run_info(&session_id, cli.json).await,
+            Command::Tag {
+                session_id,
+                tags,
+                remove,
+                list,
+            } => {
+                crate::cmd::tag::run_tag(session_id.as_deref(), &tags, &remove, list, cli.json)
+                    .await
+            }
             Command::Release { session_ids } => {
                 crate::cmd::release::run(&session_ids, cli.json).await
             }
@@ -352,6 +421,7 @@ async fn dispatch_stdio(cli: Cli) -> ExitCode {
         effort: cli.effort,
         provider: cli.provider,
         tools: cli.tools,
+        tag: cli.tag,
         output_format,
         input_format,
         yolo: cli.yolo,
@@ -476,4 +546,29 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     result?;
     tracing::info!("wing exited cleanly");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn misplaced_global_tag_is_rejected_outside_stdio() {
+        assert!(misplaced_global_tag_error(&[]).is_none());
+
+        let message = misplaced_global_tag_error(&["executor".to_string()])
+            .expect("tags outside stdio mode must be rejected");
+        assert!(message.contains("stdio"), "{message}");
+        assert!(message.contains("wing run --tag"), "{message}");
+    }
+
+    #[test]
+    fn clap_parses_top_level_tag_before_subcommand() {
+        // 这正是 guard 存在的理由：clap 接受这种写法（flag 绑在顶层），
+        // 若不放行闸门，标签会被静默丢弃。
+        let cli = Cli::try_parse_from(["wing", "--tag", "executor", "ps"]).expect("parses");
+        assert_eq!(cli.tag, vec!["executor".to_string()]);
+        assert!(matches!(cli.command, Some(Command::Ps { .. })));
+        assert!(misplaced_global_tag_error(&cli.tag).is_some());
+    }
 }

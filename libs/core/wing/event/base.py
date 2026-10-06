@@ -55,7 +55,11 @@ SessionStatus = Literal["inactive", "idle", "working", "waiting"]
 
 
 class SessionInfo(BaseModel):
-    """用于会话列表/详情中的 session 摘要信息。"""
+    """用于会话列表/详情中的 session 摘要信息。
+
+    tags：会话级结构化标签（``metadata.tags`` 的投影；插入序，无标签为空
+    列表）。列表端点携带它是"标签过滤"这类跨会话能力的素材。
+    """
 
     id: str
     name: str | None = None
@@ -64,6 +68,7 @@ class SessionInfo(BaseModel):
     workspace: str | None = None
     last_interaction: str | None = None
     status: SessionStatus = "inactive"
+    tags: list[str] = Field(default_factory=list)
 
 
 class AgentInfo(BaseModel):
