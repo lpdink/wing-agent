@@ -17,6 +17,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::config::ThemePalette;
 use crate::protocol::SessionStatus;
+use crate::render::markdown::truncate_left_to_display_width;
 use crate::render::markdown::truncate_to_display_width;
 
 /// Maximum rows to show before scrolling (single-line popups).
@@ -388,7 +389,9 @@ impl<'a> SelectionPopup<'a> {
         let workspace = if rich.workspace.is_empty() {
             "(no workspace)".to_string()
         } else if UnicodeWidthStr::width(rich.workspace.as_str()) > ws_budget {
-            truncate_to_display_width(&rich.workspace, ws_budget)
+            // 左截断：路径的区分度在尾段（`…/ws/wing-agent`）——右截断留下的
+            // 是每个会话都一样的 `/Users/…` 前缀，等于没显示。
+            truncate_left_to_display_width(&rich.workspace, ws_budget)
         } else {
             rich.workspace.clone()
         };
@@ -695,8 +698,9 @@ mod tests {
     }
 
     #[test]
-    fn test_rich_row_truncates_the_workspace_before_the_time_and_star() {
-        // 极窄终端：时间标签与星标先保，workspace 截断；line 1 不得超宽。
+    fn test_rich_row_truncates_the_workspace_from_the_left_before_time_and_star() {
+        // 极窄终端：时间标签与星标先保，workspace 左截断（保留区分度最高的
+        // 尾段——右截断留下的 `/a/very/…` 对每个会话都一样）；line 1 不得超宽。
         let row = session_row_at(
             SessionStatus::Idle,
             "07-22 21:41",
@@ -708,6 +712,14 @@ mod tests {
         assert_eq!(UnicodeWidthStr::width(line1.as_str()), 24, "{line1:?}");
         assert!(line1.ends_with("★"), "the pin star survives: {line1:?}");
         assert!(line1.contains("[07-22 21:41]"), "{line1:?}");
+        assert!(
+            line1.contains('…') && line1.contains("path"),
+            "the workspace keeps its tail, got: {line1:?}"
+        );
+        assert!(
+            !line1.contains("/a/very"),
+            "the shared prefix is what gets dropped, got: {line1:?}"
+        );
     }
 
     #[test]

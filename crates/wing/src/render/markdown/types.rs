@@ -304,6 +304,33 @@ pub fn thinking_segment_style(kind: SegmentKind, original: Style, thinking_style
     }
 }
 
+/// Truncate from the **left**, keeping the tail (`…/ws/wing-agent`).
+///
+/// 路径类文本的区分度在尾段：右截断（保留头部）留给所有路径一串相同的
+/// `/Users/…` 前缀，等于什么都没说。省略号占 1 列、计入预算；本身放得下
+/// 的文本原样返回（可以无条件调用）。宽度按 `UnicodeWidthChar` 记账（CJK 安全）。
+pub fn truncate_left_to_display_width(text: &str, max_width: usize) -> String {
+    if unicode_width::UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let budget = max_width - 1; // 省略号的 1 列
+    let mut tail: Vec<char> = Vec::new();
+    let mut width = 0;
+    for ch in text.chars().rev() {
+        let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + char_width > budget {
+            break;
+        }
+        width += char_width;
+        tail.push(ch);
+    }
+    tail.reverse();
+    format!("…{}", tail.into_iter().collect::<String>())
+}
+
 /// Truncate a string to fit within a given display width (CJK-safe).
 ///
 /// Uses UnicodeWidthChar to measure each character's display width,
@@ -332,6 +359,23 @@ pub fn truncate_to_display_width(text: &str, max_width: usize) -> String {
 mod tests {
     use super::*;
     use ratatui::style::Color;
+
+    #[test]
+    fn truncate_left_keeps_the_tail_and_counts_the_ellipsis() {
+        // 放得下就原样返回（可以无条件调用）。
+        assert_eq!(truncate_left_to_display_width("/ws/wing", 20), "/ws/wing");
+        // 省略号占 1 列，计入预算：总宽不超过 max_width。
+        let out = truncate_left_to_display_width("/Users/me/ws/wing-agent", 12);
+        assert_eq!(out, "…/wing-agent");
+        assert_eq!(UnicodeWidthStr::width(out.as_str()), 12);
+        // CJK 安全（按列不按字节）。
+        let cjk = truncate_left_to_display_width("前缀/中文目录", 8);
+        assert!(UnicodeWidthStr::width(cjk.as_str()) <= 8, "{cjk:?}");
+        assert!(cjk.starts_with('…'));
+        // 退化输入不炸。
+        assert_eq!(truncate_left_to_display_width("abc", 0), "");
+        assert_eq!(truncate_left_to_display_width("", 5), "");
+    }
 
     #[test]
     fn segment_width_ascii() {
