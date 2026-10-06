@@ -40,6 +40,18 @@ pub fn pin_added_at(tag_meta: &HashMap<String, TagMeta>) -> Option<&str> {
     tag_meta.get(PIN_TAG)?.added_at.as_deref()
 }
 
+/// 目标状态 → 标签请求体：`(add, remove)` 二选一（写走通用标签端点）。
+///
+/// 抽成纯函数是为了让这一步可被测试锚定：映射一旦翻反，星标的表现是"点了
+/// 没反应"——幂等会把方向错误变成 no-op，再由服务端回读纠正，现场没有报错。
+pub fn pin_tag_ops(pinned: bool) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    if pinned {
+        (Some(vec![PIN_TAG.to_string()]), None)
+    } else {
+        (None, Some(vec![PIN_TAG.to_string()]))
+    }
+}
+
 /// pin 排序键 —— 升序排列即目标顺序（配 `sort_by_cached_key` 使用，
 /// 稳定排序：未置顶的条目键相等，相对顺序原样保留）。
 ///
@@ -57,8 +69,12 @@ pub fn pin_key(pinned: bool, added_at: Option<&str>) -> (bool, Reverse<Option<i6
     (!pinned, Reverse(recency))
 }
 
-/// ISO 时间 → 微秒（只用于**定序**：naive 值按 UTC 解释与同格式值比较，
-/// 混合时区是既有时间口径的已知边界，与后端 `_timestamp_key` 的说明一致）。
+/// ISO 时间 → 微秒（只用于**定序**）。
+///
+/// naive 值按 UTC 基准解释：对单一写者产出的同格式值，取哪个基准都不改变
+/// 它们彼此的先后（这里是 Rust 侧的口径；后端 `_timestamp_key` 另按宿主本地
+/// 解释 naive——两条路径**不互为一致性合约**）。带偏移 / `Z` 的值按瞬时比较；
+/// 两类混排（只有手改 metadata 才会出现）会差一个时区偏移，是已知边界。
 fn parse_added_at(value: &str) -> Option<i64> {
     if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f") {
         return Some(naive.and_utc().timestamp_micros());
@@ -96,6 +112,20 @@ mod tests {
         assert!(is_pinned(&tags(&["task=x", "pin"])));
         assert!(!is_pinned(&tags(&["pinned"]))); // 不做前缀 / 语义匹配
         assert!(!is_pinned(&[]));
+    }
+
+    #[test]
+    fn tag_ops_pick_add_or_remove_by_target_state() {
+        assert_eq!(
+            pin_tag_ops(true),
+            (Some(vec!["pin".to_string()]), None),
+            "点 ☆ 要的是 add"
+        );
+        assert_eq!(
+            pin_tag_ops(false),
+            (None, Some(vec!["pin".to_string()])),
+            "点 ★ 要的是 remove"
+        );
     }
 
     #[test]

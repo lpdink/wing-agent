@@ -989,30 +989,50 @@ fn test_opening_the_panel_with_an_empty_cache_requests_the_list_once() {
 
 #[test]
 fn test_a_panels_first_fetch_survives_a_running_turn() {
-    // 回归（集成测试发现）：流式守卫曾把"等待首帧候选"的那条 fetch 一并
-    // 丢掉——那条请求是**打开面板的前提**，而没有任何路径会在 turn 结束时
-    // 补发（响应路径挂在 fetch 结果上，不挂在 turn 状态上），于是"agent 干活
-    // 时敲 /ss（缓存空）"面板永远不弹，直到用户再敲一个键。
+    // 回归（集成测试发现 + bot 复核补上 `/session` 全拼写）：流式守卫曾把
+    // "等待首帧候选"的那条 fetch 一并丢掉——那条请求是**打开面板的前提**，
+    // 而没有任何路径会在 turn 结束时补发（响应路径挂在 fetch 结果上，不挂在
+    // turn 状态上），于是"agent 干活时敲 /ss（缓存空）"面板永远停在占位上，
+    // 直到用户再敲一个键。
+    //
+    // 四个入口逐一锚定：等待态的可见性各不相同（`/ss` 的占位列表无行，
+    // `/session`、`/fork`、`/agents` 画得出一条命令占位行），这正是"按有没有
+    // 画出来做判据"会在全拼写上失手的原因。
     use crate::app::intent::AppIntent;
 
-    let mut app = test_app();
-    app.turn.working = true;
-    assert!(!app.popup.cache.sessions_fetched, "前提：列表还没抓过");
+    type Matcher = fn(&AppIntent) -> bool;
+    let cases: [(&str, Matcher); 4] = [
+        ("/ss", |intent| {
+            matches!(intent, AppIntent::FetchSessionList)
+        }),
+        ("/session", |intent| {
+            matches!(intent, AppIntent::FetchSessionList)
+        }),
+        ("/fork ", |intent| {
+            matches!(intent, AppIntent::FetchBranches)
+        }),
+        ("/agents ", |intent| {
+            matches!(intent, AppIntent::FetchAgents)
+        }),
+    ];
+    for (input, expected) in cases {
+        let mut app = test_app();
+        app.turn.working = true;
+        assert!(!app.popup.cache.sessions_fetched, "前提：缓存是冷的");
 
-    app.input.set_text("/ss");
-    app.update_popup_from_input();
-    assert_eq!(
-        app.popup.active.height(),
-        0,
-        "等待态画不出内容（这正是它被守卫吞掉后不可见的原因）"
-    );
-    assert!(
-        matches!(
-            app.drain_intents().as_slice(),
-            [AppIntent::FetchSessionList]
-        ),
-        "首帧请求必须发出去，流式不是把它丢掉的理由"
-    );
+        app.input.set_text(input);
+        app.update_popup_from_input();
+        let intents = app.drain_intents();
+        assert_eq!(
+            intents.len(),
+            1,
+            "{input}: 首帧请求必须发出去（流式不是把它丢掉的理由），got {intents:?}"
+        );
+        assert!(
+            expected(&intents[0]),
+            "{input}: 请求了错误的资源 {intents:?}"
+        );
+    }
 }
 
 #[test]

@@ -530,6 +530,10 @@ impl App {
         let switched = self.session_id != session_id;
         self.session_id = session_id;
         if switched {
+            // 星标此刻挂的是**上一个会话**的状态：先复位成未知（未 pin），
+            // 别在一个 RTT 的窗口里把别人的 pin 显成你的——补取的 info 到达
+            // 后立即纠正（点击期间也不会据此算错目标值）。
+            self.status.pinned = false;
             self.push_intent(AppIntent::FetchInfo);
         }
 
