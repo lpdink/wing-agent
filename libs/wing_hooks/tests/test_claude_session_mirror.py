@@ -313,9 +313,21 @@ def test_cwd_from_session_start_hook(monkeypatch, tmp_path):
         mirror_mod.uninstall(bus)
 
 
-def test_global_registry_has_session_start_handler():
-    """模块装载即把登记 handler 注册进全局 HookRegistry（load_hooks 的路径）。"""
-    assert mirror_mod._on_before_session_start in hooks.handlers("before_session_start")
+def test_session_start_handler_registers_into_global_registry():
+    """显式注册到**全局** registry 生效（自包含，不依赖 import 期的现场状态）。
+
+    模块装载（``load_hooks`` exec）时的 import 期注册由
+    ``test_module_loads_the_way_load_hooks_does`` 断言；这里只验证「全局注册表
+    这条路径本身」——core 的 fixture 会 ``hooks.clear()``，同 session 组合跑时
+    "import 期注册仍在场"不是可靠前提（见 conftest 的隔离说明）。
+    """
+    handler = mirror_mod.claude_mirror_session_start
+    hooks.off("before_session_start", handler)
+    try:
+        mirror_mod.register_claude_session_mirror(hooks)
+        assert handler in hooks.handlers("before_session_start")
+    finally:
+        hooks.off("before_session_start", handler)
 
 
 def test_module_loads_the_way_load_hooks_does(monkeypatch, tmp_path):
@@ -407,6 +419,274 @@ def test_rows_parked_until_cwd_is_known(mirror, project):
     rows = _read_rows(_project_file(home, project))
     assert [row["type"] for row in rows] == ["user", "last-prompt"]
     assert rows[0]["uuid"] and rows[0]["parentUuid"] is None
+
+
+# ============================================================
+# 跨进程续链（网关重启）与写盘失败（R1: S1 / S2）
+# ============================================================
+
+
+def _fresh_mirror(home: Path):
+    """新 EventBus + 新投影器实例：模拟进程重启（内存态全丢，磁盘文件还在）。"""
+    bus = EventBus()
+    instance = mirror_mod.install(bus=bus, claude_home=home)
+    assert instance is not None
+    return instance, bus
+
+
+def _chained_rows(rows: list[dict]) -> list[dict]:
+    return [row for row in rows if "uuid" in row]
+
+
+def _assert_single_root_chain(rows: list[dict]) -> None:
+    """全文件结构自检：恰好一个根、无悬空 parentUuid、链序与行序一致。"""
+    chained = _chained_rows(rows)
+    uuids = {row["uuid"] for row in chained}
+    roots = [row["uuid"] for row in chained if row["parentUuid"] is None]
+    assert len(roots) == 1, f"投影文件必须单根（实际根数 {len(roots)}）"
+    for row in chained:
+        assert row["parentUuid"] is None or row["parentUuid"] in uuids, (
+            f"悬空 parentUuid: {row}"
+        )
+    for previous, current in zip(chained, chained[1:], strict=False):
+        assert current["parentUuid"] == previous["uuid"]
+
+
+def test_seed_last_uuid_reads_tail_and_skips_junk(tmp_path):
+    """游标种子：空 / 缺失 / 只有标题行 → None；半截行与非法行跳过；超长尾行放大窗口。"""
+    seed = mirror_mod._seed_last_uuid
+    assert seed(tmp_path / "missing.jsonl") is None
+
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    assert seed(empty) is None
+
+    title_only = tmp_path / "title.jsonl"
+    title_only.write_text(
+        json.dumps({"type": "custom-title", "customTitle": "t"}) + "\n",
+        encoding="utf-8",
+    )
+    assert seed(title_only) is None
+
+    rows = [
+        {"type": "user", "uuid": "u1"},
+        {"type": "last-prompt", "leafUuid": "u1"},
+        {"type": "assistant", "uuid": "a1"},
+    ]
+    normal = tmp_path / "normal.jsonl"
+    normal.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    assert seed(normal) == "a1"
+
+    # 尾部半截行（崩溃残留、无换行）→ 回退到最后一条完整行
+    torn = tmp_path / "torn.jsonl"
+    torn.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows)
+        + '{"type": "user", "uuid": "torn',
+        encoding="utf-8",
+    )
+    assert seed(torn) == "a1"
+
+    # 末行超长（> SEED_WINDOW_START）→ 放大窗口后仍要找到它
+    huge = tmp_path / "huge.jsonl"
+    huge.write_text(
+        json.dumps({"type": "user", "uuid": "u-before"})
+        + "\n"
+        + json.dumps({"type": "assistant", "uuid": "a-huge", "text": "x" * 200_000})
+        + "\n",
+        encoding="utf-8",
+    )
+    assert seed(huge) == "a-huge"
+
+    # 末行是 last-prompt → 取 leafUuid（真实转录的续链标记）
+    tail_prompt = tmp_path / "tail-prompt.jsonl"
+    tail_prompt.write_text(
+        json.dumps({"type": "user", "uuid": "u9"})
+        + "\n"
+        + json.dumps({"type": "last-prompt", "lastPrompt": "p", "leafUuid": "u9"})
+        + "\n",
+        encoding="utf-8",
+    )
+    assert seed(tail_prompt) == "u9"
+
+    # 残行判据（决定首次落盘要不要先补换行）
+    assert mirror_mod._ends_mid_line(tmp_path / "missing.jsonl") is False
+    assert mirror_mod._ends_mid_line(empty) is False
+    assert mirror_mod._ends_mid_line(normal) is False
+    assert mirror_mod._ends_mid_line(torn) is True
+
+
+def test_restart_resumes_chain_from_last_prompt_leaf(tmp_path, project):
+    """网关重启后续链（末行是 last-prompt 行 → 种子取 leafUuid），全文件单根。"""
+    home = tmp_path / "claude"
+    first, bus1 = _fresh_mirror(home)
+    try:
+        first.note_session(SESSION_ID, project)
+        bus1.emit(UserMessageAcceptedEvent(session_id=SESSION_ID, content="before"))
+        assert first.flush()
+    finally:
+        mirror_mod.uninstall(bus1)
+
+    second, bus2 = _fresh_mirror(home)
+    try:
+        second.note_session(SESSION_ID, project)
+        bus2.emit(UserMessageAcceptedEvent(session_id=SESSION_ID, content="after"))
+        assert second.flush()
+    finally:
+        mirror_mod.uninstall(bus2)
+
+    rows = _read_rows(_project_file(home, project))
+    assert [row["type"] for row in rows] == [
+        "user",
+        "last-prompt",
+        "user",
+        "last-prompt",
+    ]
+    assert rows[2]["parentUuid"] == rows[0]["uuid"], "重启后的首行必须续到旧链上"
+    _assert_single_root_chain(rows)
+
+
+def test_restart_resumes_chain_from_last_row_uuid(tmp_path, project):
+    """末行是 assistant 行时，种子取该行自身的 uuid。"""
+    home = tmp_path / "claude"
+    first, bus1 = _fresh_mirror(home)
+    try:
+        first.note_session(SESSION_ID, project)
+        bus1.emit(_assistant_event(text="before restart"))
+        assert first.flush()
+    finally:
+        mirror_mod.uninstall(bus1)
+
+    last_before = _read_rows(_project_file(home, project))[-1]
+
+    second, bus2 = _fresh_mirror(home)
+    try:
+        second.note_session(SESSION_ID, project)
+        bus2.emit(UserMessageAcceptedEvent(session_id=SESSION_ID, content="after"))
+        assert second.flush()
+    finally:
+        mirror_mod.uninstall(bus2)
+
+    rows = _read_rows(_project_file(home, project))
+    new_user = [row for row in rows if row["type"] == "user"][0]
+    assert new_user["parentUuid"] == last_before["uuid"]
+    _assert_single_root_chain(rows)
+
+
+def test_restart_skips_torn_tail_line(tmp_path, project):
+    """文件尾部有半截行时，种子回退到最后一条完整行（链不悬空）。"""
+    home = tmp_path / "claude"
+    first, bus1 = _fresh_mirror(home)
+    try:
+        first.note_session(SESSION_ID, project)
+        bus1.emit(UserMessageAcceptedEvent(session_id=SESSION_ID, content="before"))
+        assert first.flush()
+    finally:
+        mirror_mod.uninstall(bus1)
+
+    path = _project_file(home, project)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('{"type": "user", "uuid": "half-writ')  # 半截、无换行
+
+    second, bus2 = _fresh_mirror(home)
+    try:
+        second.note_session(SESSION_ID, project)
+        bus2.emit(UserMessageAcceptedEvent(session_id=SESSION_ID, content="after"))
+        assert second.flush()
+    finally:
+        mirror_mod.uninstall(bus2)
+
+    parsed: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            parsed.append(json.loads(line))
+        except ValueError:
+            continue  # 半截行（我们自己的写入不会产生，只有崩溃残留）
+    new_user = [row for row in parsed if row.get("type") == "user"][-1]
+    assert new_user["parentUuid"] == parsed[0]["uuid"]
+    _assert_single_root_chain(parsed)
+
+
+def test_write_failure_does_not_advance_cursor(tmp_path, project):
+    """写盘失败的一批不推进游标：恢复后的首行 parentUuid 指向文件里真实存在的行。"""
+    home = tmp_path / "claude"
+    instance, bus = _fresh_mirror(home)
+    try:
+        instance.note_session(SESSION_ID, project)
+        bus.emit(UserMessageAcceptedEvent(session_id=SESSION_ID, content="first"))
+        assert instance.flush()
+
+        path = _project_file(home, project)
+        backup = path.with_name(f"{path.name}.bak")
+        path.rename(backup)
+        path.mkdir()  # 同名目录：追加写必然失败（可移植的注入，不依赖权限位）
+        bus.emit(UserMessageAcceptedEvent(session_id=SESSION_ID, content="lost"))
+        assert instance.flush()
+        assert path.is_dir(), "注入未生效"
+        assert json.loads(backup.read_text(encoding="utf-8").splitlines()[0])[
+            "uuid"
+        ]  # 备份里只有第一批
+
+        path.rmdir()
+        backup.rename(path)
+        bus.emit(UserMessageAcceptedEvent(session_id=SESSION_ID, content="recovered"))
+        assert instance.flush()
+    finally:
+        mirror_mod.uninstall(bus)
+
+    rows = _read_rows(path)
+    assert [row["type"] for row in rows] == [
+        "user",
+        "last-prompt",
+        "user",
+        "last-prompt",
+    ]
+    assert all(
+        row["message"]["content"][0]["text"] != "lost"
+        for row in rows
+        if row["type"] == "user"
+    ), "写失败的批次不得落盘"
+    recovered = [row for row in rows if row["type"] == "user"][-1]
+    assert recovered["parentUuid"] == rows[0]["uuid"], (
+        "恢复后的首行必须指向最后一个**已落盘**行"
+    )
+    _assert_single_root_chain(rows)
+
+
+# ============================================================
+# 内容上限安全网（design D7 / R1: N2）
+# ============================================================
+
+
+def test_cap_boundary_exact_limit_and_one_over():
+    """`_cap`：恰好等于上限不截断；超 1 字符即截断并带可见标记。"""
+    assert mirror_mod._cap("x" * 10, 10) == "x" * 10
+    capped = mirror_mod._cap("x" * 11, 10)
+    assert capped.startswith("x" * 10)
+    assert "truncated by wing claude mirror" in capped
+    assert "original 11 chars" in capped
+    assert mirror_mod._cap("", 10) == ""
+
+
+def test_content_and_last_prompt_limits_in_rows(mirror, project):
+    """集成口径：>1 MiB 的块被截断；`lastPrompt` 服从 LAST_PROMPT_MAX_CHARS。"""
+    instance, bus, home = mirror
+    instance.note_session(SESSION_ID, project)
+    bus.emit(
+        UserMessageAcceptedEvent(
+            session_id=SESSION_ID, content="y" * (mirror_mod.MAX_CONTENT_CHARS + 5)
+        )
+    )
+    assert instance.flush()
+
+    rows = _read_rows(_project_file(home, project))
+    user, last_prompt = rows[0], rows[1]
+    text = user["message"]["content"][0]["text"]
+    assert "original" in text and "truncated by wing claude mirror" in text
+    assert len(text) < mirror_mod.MAX_CONTENT_CHARS + 200
+
+    assert last_prompt["lastPrompt"].startswith("y" * 100)
+    assert "truncated by wing claude mirror" in last_prompt["lastPrompt"]
+    assert len(last_prompt["lastPrompt"]) <= mirror_mod.LAST_PROMPT_MAX_CHARS + 200
 
 
 def test_queue_full_drops_record_without_raising(monkeypatch, tmp_path):

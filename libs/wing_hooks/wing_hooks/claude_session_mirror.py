@@ -30,16 +30,26 @@ CloudCLI（siteboon/claudecodeui）的**会话列表**来自递归扫描
   绝不向 EventBus 或 agent 主流程抛；
 - reload 幂等：投影器实例挂在 ``event_bus`` 单例的私有属性上，重复
   ``load_hooks()``（网关启动 / ``POST /api/system/reload``）只重新订阅一次，
-  挂起行 / 已定 cwd / 写线程跨 reload 存活。
+  挂起行 / 已定 cwd / 写线程跨 reload 存活；
+- 跨进程续链：网关重启（或重装投影器）后，会话首次落盘前若目标文件已存在，
+  从尾部读回最后一个完整行的游标（``uuid``，或 ``last-prompt.leafUuid``）作为
+  初始 ``last_uuid``——重启后的段落续到旧链上，全文件保持单根线性链；文件若以
+  半截行收尾，先补一个换行给残行封口；
+- 落盘纪律：游标只在**写成功之后**提交——单批写盘失败时游标不动（下一批重链到
+  最后一个已落盘行），文件里绝不出现悬空 ``parentUuid``。
 
 启用（任选其一）：
 
 - ``cp libs/wing_hooks/wing_hooks/claude_session_mirror.py ~/.wing/hooks/``，
   配置 ``hooks: ~/.wing/hooks/*.py``；``POST /api/system/reload`` 即生效；
 - 或 ``from wing_hooks.claude_session_mirror import install`` 后显式
-  ``install(bus=event_bus, claude_home=...)``（测试 / 隔离部署）。
-- ``WING_CLAUDE_MIRROR_HOME`` / ``CLAUDE_CONFIG_DIR`` 可覆盖 ``~/.claude``
-  （测试或隔离部署用）。
+  ``install(bus=..., claude_home=...)``。
+
+**注意 import 侧效应**：本模块装载（import / 被 ``load_hooks`` exec）即
+``install()`` 到**全局** ``event_bus`` 上，默认落点是 ``~/.claude``；此后显式
+``install(bus, claude_home=X)`` 会复用已装实例、``X`` 不生效。要换根请先设
+``WING_CLAUDE_MIRROR_HOME`` / ``CLAUDE_CONFIG_DIR``，或先 ``uninstall()`` 再显式
+安装（测试即这么做）。
 
 cwd 来源优先级（决定文件落点，见任务 design.md D3）：``before_session_start``
 （创建 / fork）→ ``session_init`` 事件（订阅时下发）→ ``sync_session`` 事件的
@@ -90,6 +100,11 @@ MAX_CONTENT_CHARS = 1024 * 1024
 
 #: ``lastPrompt`` 上限（消费端只取前 120 字符做标题）。
 LAST_PROMPT_MAX_CHARS = 2000
+
+#: 链游标种子（跨进程续链）从文件尾部读的窗口：先小后大，覆盖"最后一行特别长"
+#: （单行上限见 MAX_CONTENT_CHARS）的极端情况；读完仍找不到完整行就放弃。
+SEED_WINDOW_START = 64 * 1024
+SEED_WINDOW_MAX = 8 * 1024 * 1024
 
 #: 挂在 event_bus 单例上的标记：投影器实例 / 安装锁（跨 reload 复用与互斥）。
 _MARKER = "_claude_session_mirror_state"
@@ -278,6 +293,85 @@ def _workspace_from_metadata(session_id: str) -> str | None:
 
 
 # ============================================================
+# 链游标种子（跨进程续链）
+# ============================================================
+
+
+def _cursor_of(row: dict[str, Any]) -> str | None:
+    """一条投影行贡献的链游标：自身 ``uuid``，或 ``last-prompt`` 的 ``leafUuid``。"""
+    uuid = row.get("uuid")
+    if isinstance(uuid, str) and uuid:
+        return uuid
+    if row.get("type") == "last-prompt":
+        leaf = row.get("leafUuid")
+        if isinstance(leaf, str) and leaf:
+            return leaf
+    return None
+
+
+def _ends_mid_line(path: Path) -> bool:
+    """文件已存在且以半截行收尾（最后一个字节不是换行）——崩溃残行的判据。
+
+    这时直接 append 会把新行拼到残行上（新行随之不可解析），所以首次落盘时
+    先补一个换行把残行封口（见 ``_write_rows`` 的 ``needs_separator``）。
+    """
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                return False
+            handle.seek(-1, os.SEEK_END)
+            return handle.read(1) != b"\n"
+    except OSError:
+        return False
+
+
+def _seed_last_uuid(path: Path) -> str | None:
+    """从已存在的投影文件尾部恢复链游标（网关重启后接着写，见 design R1/S1）。
+
+    从尾部窗口往前找第一条能解析出游标的**完整**行：半截行（崩溃留下的、
+    或读到写了一半的行）与非法 JSON 行一律跳过。窗口不够（最后一行特别长）
+    时按倍率放大重读；仍找不到就返回 None（从新根开始——绝不猜）。
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size <= 0:
+        return None
+    window = SEED_WINDOW_START
+    while True:
+        start = max(0, size - window)
+        try:
+            with path.open("rb") as handle:
+                handle.seek(start)
+                raw = handle.read()
+        except OSError:
+            return None
+        text = raw.decode("utf-8", errors="ignore")
+        if start > 0:
+            # 窗口首部必然是半截行：从第一个换行之后开始（窗口整体落在一行内则无完整行）
+            head, sep, tail = text.partition("\n")
+            text = tail if sep else ""
+        for line in reversed(text.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            cursor = _cursor_of(row)
+            if cursor:
+                return cursor
+        if start == 0 or window >= SEED_WINDOW_MAX:
+            return None
+        window = min(window * 8, SEED_WINDOW_MAX)
+
+
+# ============================================================
 # 会话运行态
 # ============================================================
 
@@ -299,6 +393,7 @@ class _SessionCtx:
         "last_uuid",
         "title",
         "metadata_probed",
+        "needs_separator",
         "pending",
     )
 
@@ -309,6 +404,8 @@ class _SessionCtx:
         self.last_uuid: str | None = None
         self.title: str | None = None
         self.metadata_probed = False
+        self.needs_separator = False
+        """已存在文件以半截行收尾：下一批落盘前先补一个换行（见 _ends_mid_line）。"""
         self.pending: list[dict[str, Any]] = []
 
 
@@ -516,15 +613,37 @@ class ClaudeSessionMirror:
             )
 
     def _write_rows(self, ctx: _SessionCtx, rows: list[dict[str, Any]]) -> None:
-        """串行落盘：补链拓扑（parentUuid）+ cwd，一次 append 写完这批行。"""
+        """串行落盘：补链拓扑（parentUuid）+ cwd，一次 append 写完这批行。
+
+        游标只在**写成功之后**提交（S2）：本批写盘失败（ENOSPC / 权限 / 目录
+        不可写…）时 ``ctx.last_uuid`` 不动，下一批自动重链到最后一个**已落盘**
+        行，不会在文件里留下悬空 ``parentUuid``。
+        """
         if not rows:
             return
+        path = self._resolve_path(ctx)  # 首次落盘：定路径 + 续链种子（必须先于取游标）
+        cursor = ctx.last_uuid
         for row in rows:
             if "uuid" in row:
-                row["parentUuid"] = ctx.last_uuid
-                ctx.last_uuid = row["uuid"]
+                row["parentUuid"] = cursor
+                cursor = row["uuid"]
             if "cwd" in row:
                 row["cwd"] = ctx.cwd
+        payload = ("\n" if ctx.needs_separator else "") + "".join(
+            json.dumps(row, ensure_ascii=False, default=str) + "\n" for row in rows
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(payload)
+        ctx.last_uuid = cursor
+        ctx.needs_separator = False
+
+    def _resolve_path(self, ctx: _SessionCtx) -> Path:
+        """首次落盘时定下文件路径；目标文件已存在则续链（S1）+ 残行封口。
+
+        只做一次（``ctx.path`` 一旦确定即复用）：同一个投影器实例不会为同一
+        会话反复读尾部，重启后的新实例则在这里把旧链接上。
+        """
         if ctx.path is None:
             ctx.path = (
                 self._home
@@ -532,12 +651,9 @@ class ClaudeSessionMirror:
                 / encode_cwd(ctx.cwd or "")
                 / f"{ctx.session_id}.jsonl"
             )
-        ctx.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = "".join(
-            json.dumps(row, ensure_ascii=False, default=str) + "\n" for row in rows
-        )
-        with ctx.path.open("a", encoding="utf-8") as handle:
-            handle.write(payload)
+            ctx.needs_separator = _ends_mid_line(ctx.path)
+            ctx.last_uuid = _seed_last_uuid(ctx.path)
+        return ctx.path
 
 
 # ============================================================
