@@ -264,13 +264,19 @@ impl App {
             return;
         }
 
-        // Streaming guard: skip requests while agent is busy.
+        // Streaming guard: defer *refreshes* while the agent is busy.
         let streaming = self.turn.working;
         // 面板身份必须在更新**之前**读：进入（上一次不在面板里）才是边沿。
         let was_session_panel = self.popup.active.session_panel_command().is_some();
         let text = self.input.text().to_string();
         if let Some(action) = self.popup.update_from_input(&text) {
-            if streaming {
+            // 守卫只推迟"已经有东西可画"的面板的请求（height > 0）。等待首帧
+            // 候选的面板画不出内容（height == 0，典型是 `/ss`：命令表里没有
+            // 匹配 `/session` 的行），而这条 fetch 正是**这次打开面板的前提**
+            // ——丢掉它面板永远开不出来：没有任何路径会在 turn 结束时补发
+            // （`update_popup` 的响应路径挂在 fetch 结果上，不挂在 turn 状态
+            // 上）。它也不打扰正在跑的一轮：intent 是 spawn 出去的只读 GET。
+            if streaming && self.popup.active.height() > 0 {
                 return;
             }
             match action {

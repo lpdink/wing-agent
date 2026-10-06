@@ -961,3 +961,65 @@ fn test_opening_the_panel_with_an_empty_cache_requests_the_list_once() {
     let intents = app.drain_intents();
     assert!(intents.is_empty(), "unexpected intents: {intents:?}");
 }
+
+// ── The streaming guard vs. a panel's first frame ──
+
+#[test]
+fn test_a_panels_first_fetch_survives_a_running_turn() {
+    // 回归（集成测试发现）：流式守卫曾把"等待首帧候选"的那条 fetch 一并
+    // 丢掉——那条请求是**打开面板的前提**，而没有任何路径会在 turn 结束时
+    // 补发（响应路径挂在 fetch 结果上，不挂在 turn 状态上），于是"agent 干活
+    // 时敲 /ss（缓存空）"面板永远不弹，直到用户再敲一个键。
+    use crate::app::intent::AppIntent;
+
+    let mut app = test_app();
+    app.turn.working = true;
+    assert!(!app.popup.cache.sessions_fetched, "前提：列表还没抓过");
+
+    app.input.set_text("/ss");
+    app.update_popup_from_input();
+    assert_eq!(
+        app.popup.active.height(),
+        0,
+        "等待态画不出内容（这正是它被守卫吞掉后不可见的原因）"
+    );
+    assert!(
+        matches!(
+            app.drain_intents().as_slice(),
+            [AppIntent::FetchSessionList]
+        ),
+        "首帧请求必须发出去，流式不是把它丢掉的理由"
+    );
+}
+
+#[test]
+fn test_a_panel_refresh_still_waits_for_an_idle_agent() {
+    // 反向锚定：有缓存时面板照常渲染旧行，但"打开即刷新"（#147）不在
+    // turn 进行中发请求——刷新**不排队**（不补发），下次打开面板自然会再刷。
+    use crate::ui::popup::ActivePopup;
+    use crate::ui::popup::command::SessionCandidate;
+
+    let mut app = test_app();
+    app.popup.cache.sessions = vec![SessionCandidate {
+        id: "s1".into(),
+        title: "Test".into(),
+        workspace: "/tmp".into(),
+        status: "idle".into(),
+        last_interaction: "2025-01-01T00:00:00Z".into(),
+        pinned: false,
+        pin_added_at: None,
+    }];
+    app.popup.cache.sessions_fetched = true;
+    app.turn.working = true;
+
+    app.input.set_text("/ss");
+    app.update_popup_from_input();
+    assert!(
+        matches!(app.popup.active, ActivePopup::SubCommand { .. }),
+        "有缓存的面板照常弹出（用旧行）"
+    );
+    assert!(
+        app.drain_intents().is_empty(),
+        "agent 忙碌时不刷新——刷新留到下一次打开"
+    );
+}
