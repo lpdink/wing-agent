@@ -63,8 +63,9 @@ pub enum ChatCell {
     WarningMessage(String),
     /// Error message.
     ErrorMessage(String),
-    /// Reasoning/thinking block — 折叠（一行摘要）或展开（正文），由
-    /// `rendering.thinking` 的默认 + Ctrl+O 的全局覆盖解析。
+    /// Reasoning/thinking block — 标题行（折叠时是全部可见内容、展开时是
+    /// disclosure 头）+ 正文（按展开态）；由 `rendering.thinking` 的默认 +
+    /// Ctrl+O 的全局覆盖解析。
     Thinking(ThinkingBlock),
     /// Tool invocation + result.
     ToolCall(ToolCallBlock),

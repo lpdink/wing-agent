@@ -1249,7 +1249,7 @@ fn test_reasoning_freezes_on_turn_end_and_interrupt() {
     app.handle_event(WingEvent::Done { meta: event_meta() });
     assert_eq!(thinking_active(&app), Some(false), "回合结束定格");
 
-    // 打断（Interrupted）：同样定格，折叠行不该永远停在"思考中"。
+    // 打断（Interrupted）：同样定格，标题行不该永远停在"思考中"。
     let mut app = test_app();
     app.handle_event(WingEvent::Reasoning {
         content: "long thinking".into(),

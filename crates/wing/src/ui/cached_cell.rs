@@ -479,7 +479,7 @@ impl CachedCell {
 
     /// Whether the incremental stream is the active RENDER authority at
     /// this context. 折叠的思考块绕过它：流仍在累积（供展开 / finalize），
-    /// 但可见行来自 cell 自己的渲染器（折叠行 + 标题）。展开与否由帧上的
+    /// 但可见行来自 cell 自己的渲染器（标题行）。展开与否由帧上的
     /// `thinking_mode` + Ctrl+O 覆盖解析（见 `ThinkingMode::expanded`），
     /// 不落在块上。
     fn stream_render_active(&self, ctx: &CellContext<'_>) -> bool {
@@ -508,17 +508,19 @@ impl CachedCell {
         true
     }
 
-    /// 展开时把折叠行接到流式正文的头部（第 0 行 = 标题，正文拿续行缩进）。
+    /// 把标题行接到流式正文的头部（第 0 行 = 标题，正文拿续行缩进）。
     ///
     /// 每帧调用：秒数与刷光相位都在动，值不变时 `StreamingRender::set_header`
-    /// 直接返回，不做无谓搬运。
+    /// 直接返回，不做无谓搬运。所有 Thinking 块都有标题行；折叠时整条流
+    /// 不显示（[`Self::stream_render_active`]），标题照设 —— 展开 / 折叠
+    /// 切换时行集已经就位。
     fn sync_stream_header(&mut self, width: u16, ctx: &CellContext<'_>) {
         let Some(stream) = self.stream.as_mut() else {
             return;
         };
         let header = match &self.cell {
-            ChatCell::Thinking(block) if ctx.thinking_mode.labeled(ctx.thinking_expanded) => {
-                Some(block.label_line(ctx.palette, width, ctx.thinking_expanded))
+            ChatCell::Thinking(block) => {
+                Some(block.label_line(ctx.palette, width, ctx.thinking_mode, ctx.thinking_expanded))
             }
             _ => None,
         };
@@ -547,7 +549,7 @@ impl CachedCell {
 
     /// Install the finalized reference render as the cached lines.
     ///
-    /// 折叠的思考块从不走流式渲染 —— 丢掉流、回到 cell 自己的渲染器（折叠行）；
+    /// 折叠的思考块从不走流式渲染 —— 丢掉流、回到 cell 自己的渲染器（标题行）；
     /// 正文文本留在 cell 里（展开时还要用）。
     fn run_finalize(&mut self, width: u16, ctx: &CellContext<'_>) {
         self.pending_finalize = false;
@@ -1157,7 +1159,7 @@ mod tests {
         assert!(h_narrow >= h_wide);
     }
 
-    /// 折叠的思考块：标签行来自 cell 自己的渲染器，tick 推进秒数并作废缓存。
+    /// 折叠的思考块：标题行来自 cell 自己的渲染器，tick 推进秒数并作废缓存。
     #[test]
     fn collapsed_thinking_label_ticks_and_invalidates() {
         use std::time::Duration;
@@ -1208,7 +1210,7 @@ mod tests {
         assert!(text.contains("深度思考 9s"), "{text}");
     }
 
-    /// 展开的思考块：折叠行接到流式正文的头部（第 0 行 = 标题，正文续行缩进）。
+    /// 展开的思考块：标题行接到流式正文的头部（第 0 行 = 标题，正文续行缩进）。
     #[test]
     fn expanded_thinking_keeps_the_label_as_stream_header() {
         use std::time::Duration;
@@ -1254,5 +1256,52 @@ mod tests {
         let frame = cell.compute_cell_frame(80, &ctx);
         let first = frame.lines[0].to_string();
         assert!(first.contains("深度思考中 3s"), "{first:?}");
+    }
+
+    /// 默认展开（`visible` + 未按过 Ctrl+O）：流式路径同样带标题行 ——
+    /// 这是存量用户（默认配置）现在看到的形态，提示指向「折叠」。
+    #[test]
+    fn a_visible_default_thinking_stream_carries_the_header() {
+        use std::time::Instant;
+
+        let palette = ThemePalette::default();
+        let layout = LayoutConfig::default();
+        let ctx = test_ctx(&palette, &layout); // visible + None
+
+        let start = Instant::now();
+        let mut block = ThinkingBlock::new();
+        block.start(start);
+        let mut cell = CachedCell::new(ChatCell::Thinking(block));
+        cell.append_stream("the reasoning body");
+
+        let frame = cell.compute_cell_frame(80, &ctx);
+        let lines: Vec<String> = frame.lines.iter().map(|l| l.to_string()).collect();
+        assert!(
+            lines[0].contains("深度思考中") && lines[0].contains("Ctrl+O 折叠"),
+            "默认展开的进行中标题应在第 0 行并提示折叠：{lines:?}"
+        );
+        let body = lines
+            .iter()
+            .find(|l| l.contains("the reasoning body"))
+            .expect("正文应在行集里");
+        assert!(body.starts_with("  "), "正文应保持两列缩进：{body:?}");
+
+        // 收起（同一帧的 ctx 翻转）：只剩标题、正文不泄露。
+        let collapsed = CellContext {
+            thinking_expanded: Some(false),
+            ..test_ctx(&palette, &layout)
+        };
+        let text = cell
+            .compute_cell_frame(80, &collapsed)
+            .lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("深度思考中"), "{text}");
+        assert!(
+            !text.contains("the reasoning body"),
+            "收起不泄露正文：{text}"
+        );
     }
 }

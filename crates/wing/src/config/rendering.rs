@@ -5,14 +5,16 @@ use serde::Serialize;
 
 /// Thinking block rendering strategy — **默认展开还是默认折叠**。
 ///
-/// `Ctrl+O` 全局翻转（所有轮一起、会话内保持）；语义与刷光细节见
-/// `docs/dev/tui-rendering.md` 第二节·六。
+/// 标题行（`⦁ 深度思考中 4s`，刷光 + 读秒）是所有思考块的固有部分：折叠时
+/// 它是全部可见内容，展开时它是 disclosure 头；`Ctrl+O` 全局翻转（所有轮
+/// 一起、会话内保持）。`visible` / `hidden` 只决定初始展开还是折叠 ——
+/// 语义与刷光细节见 `docs/dev/tui-rendering.md` 第二节·六。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ThinkingMode {
-    /// 默认展开：reasoning 正文完整渲染（旧行为）。
+    /// 默认展开：标题行 + reasoning 正文（正文整体两列续行缩进）。
     #[default]
     Visible,
-    /// 默认折叠：一行摘要（`⦁ 深度思考中 4s`，进行中持续刷光，结束后定格时长）。
+    /// 默认折叠：只有标题行（`⦁ 深度思考中 4s`，进行中持续刷光，结束后定格时长）。
     Hidden,
 }
 
@@ -20,14 +22,6 @@ impl ThinkingMode {
     /// 这一帧展开吗：`explicit`（Ctrl+O 的全局覆盖）优先，否则看默认。
     pub fn expanded(self, explicit: Option<bool>) -> bool {
         explicit.unwrap_or(self == Self::Visible)
-    }
-
-    /// 这一帧带折叠标题行吗（= 有没有"折叠"这层身份）。
-    ///
-    /// `hidden` 默认折叠、`visible` 默认展开；一旦按过 Ctrl+O，整条 transcript
-    /// 就都有折叠身份 —— 展开时标题保留、收起时只剩标题。
-    pub fn labeled(self, explicit: Option<bool>) -> bool {
-        self == Self::Hidden || explicit.is_some()
     }
 }
 
@@ -218,19 +212,13 @@ mod tests {
     }
 
     #[test]
-    fn the_expansion_helpers_resolve_explicit_over_the_default() {
+    fn the_expansion_helper_resolves_explicit_over_the_default() {
         // 默认 + 无覆盖：跟随配置。
         assert!(ThinkingMode::Visible.expanded(None));
         assert!(!ThinkingMode::Hidden.expanded(None));
         // 覆盖优先于默认（两个方向）。
         assert!(!ThinkingMode::Visible.expanded(Some(false)));
         assert!(ThinkingMode::Hidden.expanded(Some(true)));
-        // 折叠身份：`hidden` 天然有；`visible` 要看用户按没按过 Ctrl+O。
-        assert!(ThinkingMode::Hidden.labeled(None));
-        assert!(ThinkingMode::Hidden.labeled(Some(true)));
-        assert!(!ThinkingMode::Visible.labeled(None));
-        assert!(ThinkingMode::Visible.labeled(Some(false)));
-        assert!(ThinkingMode::Visible.labeled(Some(true)));
     }
 
     #[test]

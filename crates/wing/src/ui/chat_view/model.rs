@@ -1376,9 +1376,21 @@ mod tests {
         assert!(!view.cells[0].is_streaming());
         assert!(view.cells[0].is_prewrapped(80, &ctx));
 
+        // 标题行在第 0 行；正文与参考渲染一致 —— 首行只差前缀
+        // （`⦁ ` 归标题、正文拿 `  `），其余逐 span 相同。
         let reference =
             crate::render::markdown::stream::full_lines(text, 80, Profile::Thinking, &p);
-        assert_eq!(span_texts(&finalized), span_texts(&reference));
+        assert_eq!(finalized.len(), reference.len() + 1, "标题只多一行");
+        assert!(
+            finalized[0].to_string().contains("深度思考"),
+            "标题应在第 0 行：{:?}",
+            finalized[0]
+        );
+        let mut body = span_texts(&finalized[1..]);
+        let mut want = span_texts(&reference);
+        assert_eq!(body.remove(0), "  ", "正文首行拿续行前缀");
+        assert_eq!(want.remove(0), "⦁ ", "参考渲染首行拿子弹");
+        assert_eq!(body, want, "正文（前缀除外）与参考逐 span 相同");
         // Height survives as the line count after finalize.
         assert_eq!(view.cells[0].compute_height(80, &ctx), finalized.len());
     }
@@ -1511,7 +1523,7 @@ mod tests {
         view.push(ChatCell::UserMessage("next".into()));
         view.append_to_last_thinking_at("NEW-REASONING", Instant::now());
 
-        // 折叠行在（默认 hidden），两块都不带正文。
+        // 标题行在（默认 hidden），两块都不带正文。
         for index in [0usize, 2] {
             let text = view.cells[index]
                 .compute_lines(80, &ctx(None))
