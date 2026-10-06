@@ -2,7 +2,8 @@
 //!
 //! Triggered by `-p` / `--prompt` or `--input-format stream-json`.
 //! Supports three output formats: text, json, stream-json.
-#![allow(clippy::print_stdout, clippy::print_stderr)]
+// stderr 承载诊断（`wing error: …` / session_id 提示）；stdout 已被 stdio 协议占用。
+#![allow(clippy::print_stderr)]
 
 pub mod ndjson;
 pub mod renderer;

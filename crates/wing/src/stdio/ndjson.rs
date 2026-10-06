@@ -164,6 +164,12 @@ pub struct ResultMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_reason: Option<String>,
     /// Error texts of a failed turn (`SDKResultError.errors`).
+    ///
+    /// **错误结果帧不得省略这个字段**：SDK 对 `is_error=true && subtype !=
+    /// "success"` 的帧无条件读它（0.3.165 `e.errors.join("; ")` / 0.3.291
+    /// `e.errors.map(…)`），缺字段直接抛 `TypeError`，把后端错误原文换成 JS
+    /// 内部错误。渲染器为此保证：`is_error` 为真时该数组非空（后端没给文本
+    /// 就补通用文案）——`skip_serializing_if` 只是让成功帧不带它。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
     pub session_id: String,

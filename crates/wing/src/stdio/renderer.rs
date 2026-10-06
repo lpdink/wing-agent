@@ -1,5 +1,6 @@
 //! StdioRenderer — converts WingEvent to stdout output based on format.
-#![allow(clippy::print_stdout)]
+// 错误轮把错误文本写到 stderr（stdout 是协议通道，只能有协议帧）。
+#![allow(clippy::print_stderr)]
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -17,7 +18,6 @@ pub struct StdioRenderer {
     start_time: Instant,
     session_id: String,
     exit_code: std::process::ExitCode,
-    done: bool,
     /// 协议帧的出口。与 stdin pump 共享同一个 sink——stdout 只能有一个写者，
     /// 见 [`StdoutSink`]。
     out: Arc<StdoutSink>,
@@ -27,6 +27,36 @@ pub struct StdioRenderer {
     /// 本相位里是否出现过「中断收口合成的工具结果」（见
     /// [`INTERRUPTED_TOOL_RESULT`]）——工具阶段被打断的判据之一。
     tool_phase_aborted: bool,
+}
+
+/// 错误轮写 stderr 的文案。
+///
+/// `result` 只在成功轮有值；错误轮的后端详情在 `errors`（例如
+/// `format_exception_chain` 的全文）。两者都试，别把真实错误丢成通用文案。
+fn error_line_text(result: Option<&str>, errors: &[String]) -> String {
+    result
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| (!errors.is_empty()).then(|| errors.join("; ")))
+        .unwrap_or_else(|| "error during execution".to_string())
+}
+
+/// 错误结果帧的 `errors`（`SDKResultError.errors`）。
+///
+/// **错误帧永不省略该字段**：SDK 对 `is_error=true && subtype != "success"`
+/// 的结果帧无条件读它（0.3.165：`e.errors.join("; ")`；0.3.291：
+/// `e.errors.map(…)`），缺了会抛 `TypeError`，把后端错误原文换成 JS 内部错误。
+/// 后端没给文本时补一条通用文案，保证字段非空。
+fn error_texts(is_error: bool, errors: &[String]) -> Vec<String> {
+    if !is_error {
+        // 成功帧不带（`SDKResultSuccess` 没有 `errors` 字段）。
+        return Vec::new();
+    }
+    if errors.is_empty() {
+        vec!["error during execution".to_string()]
+    } else {
+        errors.to_vec()
+    }
 }
 
 /// 被打断轮次的错误文案（`SDKResultError.errors`）。
@@ -57,7 +87,6 @@ impl StdioRenderer {
             start_time,
             session_id,
             exit_code: std::process::ExitCode::SUCCESS,
-            done: false,
             out,
             pending_tools: 0,
             tool_phase_aborted: false,
@@ -103,11 +132,13 @@ impl StdioRenderer {
                 subtype,
                 is_error,
                 result,
+                errors,
                 ..
             } => {
                 if *is_error {
-                    let msg = result.as_deref().unwrap_or("error during execution");
-                    eprintln!("Error: {msg}");
+                    // 错误详情在后端的 `errors` 里（`result` 只在成功轮有值）——
+                    // 先前只看 `result`，把真实错误文本丢成了通用文案。
+                    eprintln!("Error: {}", error_line_text(result.as_deref(), errors));
                     self.exit_code = std::process::ExitCode::FAILURE;
                 } else if let Some(text) = result {
                     self.out_line(text);
@@ -117,7 +148,6 @@ impl StdioRenderer {
                     self.exit_code = std::process::ExitCode::FAILURE;
                 }
 
-                self.done = true;
                 true
             }
             _ => false,
@@ -135,6 +165,7 @@ impl StdioRenderer {
                 subtype,
                 is_error,
                 result,
+                errors,
                 num_turns,
                 duration_ms,
                 usage,
@@ -144,7 +175,8 @@ impl StdioRenderer {
                     msg_type: "result".into(),
                     subtype: subtype.clone(),
                     is_error: *is_error,
-                    result: Some(result.clone().unwrap_or_default()),
+                    // 一条规则：错误帧不带 `result`（`SDKResultError` 没有该字段）。
+                    result: (!*is_error).then(|| result.clone().unwrap_or_default()),
                     duration_ms: self.start_time.elapsed().as_millis() as i64,
                     duration_api_ms: *duration_ms,
                     num_turns: *num_turns,
@@ -157,7 +189,7 @@ impl StdioRenderer {
                         })
                     }),
                     terminal_reason: None,
-                    errors: Vec::new(),
+                    errors: error_texts(*is_error, errors),
                     session_id: self.session_id.clone(),
                     uuid: uuid.clone(),
                 };
@@ -169,7 +201,6 @@ impl StdioRenderer {
                     self.exit_code = std::process::ExitCode::FAILURE;
                 }
 
-                self.done = true;
                 true
             }
             _ => false,
@@ -317,6 +348,7 @@ impl StdioRenderer {
                 subtype,
                 is_error,
                 result,
+                errors,
                 num_turns,
                 duration_ms,
                 usage,
@@ -326,7 +358,8 @@ impl StdioRenderer {
                     msg_type: "result".into(),
                     subtype: subtype.clone(),
                     is_error: *is_error,
-                    result: Some(result.clone().unwrap_or_default()),
+                    // 一条规则：错误帧不带 `result`（`SDKResultError` 没有该字段）。
+                    result: (!*is_error).then(|| result.clone().unwrap_or_default()),
                     duration_ms: self.start_time.elapsed().as_millis() as i64,
                     duration_api_ms: *duration_ms,
                     num_turns: *num_turns,
@@ -339,7 +372,7 @@ impl StdioRenderer {
                         })
                     }),
                     terminal_reason: None,
-                    errors: Vec::new(),
+                    errors: error_texts(*is_error, errors),
                     session_id: self.session_id.clone(),
                     uuid: uuid.clone(),
                 };
@@ -349,7 +382,6 @@ impl StdioRenderer {
                     self.exit_code = std::process::ExitCode::FAILURE;
                 }
 
-                self.done = true;
                 true
             }
 
@@ -415,7 +447,6 @@ impl StdioRenderer {
             self.emit_ndjson(&msg);
         }
         self.exit_code = std::process::ExitCode::SUCCESS;
-        self.done = true;
         true
     }
 }
@@ -775,6 +806,89 @@ mod tests {
         assert_eq!(parsed["subtype"], "error_during_execution");
         assert_eq!(parsed["terminal_reason"], "aborted_streaming");
         assert_eq!(renderer.exit_code(), std::process::ExitCode::SUCCESS);
+    }
+
+    // ---- S1: 错误轮的 errors 透传（SDK 无条件读它，缺字段会抛 TypeError） ----
+
+    fn turn_error(errors: Vec<&str>, sub: &str) -> WingEvent {
+        decode(json!({
+            "type": "turn_result",
+            "uuid": "u-err",
+            "subtype": sub,
+            "is_error": true,
+            "result": null,
+            "num_turns": 1,
+            "duration_ms": 12,
+            "errors": errors,
+            "created_at": "2025-01-01T00:00:00",
+            "request_id": "req-err",
+        }))
+    }
+
+    /// 后端错误原文必须逐字进帧（两个 result 格式都一样），且错误帧不带
+    /// `result`（`SDKResultError` 没有该字段）。
+    #[test]
+    fn error_result_forwards_backend_errors() {
+        for format in [OutputFormat::Json, OutputFormat::StreamJson] {
+            let (mut renderer, buf) = setup(format.clone());
+            let event = turn_error(
+                vec!["Reached max turns limit: 1", "second detail"],
+                "error_max_turns",
+            );
+
+            assert!(renderer.handle_event(&event));
+
+            let out = buf.text();
+            assert_eq!(out.lines().count(), 1, "{format:?}: {out}");
+            let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(parsed["type"], "result", "{format:?}");
+            assert_eq!(parsed["subtype"], "error_max_turns", "{format:?}");
+            assert_eq!(parsed["is_error"], true, "{format:?}");
+            assert_eq!(
+                parsed["errors"],
+                json!(["Reached max turns limit: 1", "second detail"]),
+                "{format:?}: {parsed}"
+            );
+            assert!(parsed.get("result").is_none(), "{format:?}: {parsed}");
+            assert_eq!(renderer.exit_code(), std::process::ExitCode::FAILURE);
+        }
+    }
+
+    /// 后端没给错误文本时也不能省略 `errors`（SDK 会 `errors.join`）——
+    /// 补通用文案，形状仍然合法。
+    #[test]
+    fn error_result_without_backend_text_still_carries_errors() {
+        let (mut renderer, buf) = setup(OutputFormat::StreamJson);
+
+        assert!(renderer.handle_event(&turn_error(Vec::new(), "error_during_execution")));
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(buf.text().lines().last().unwrap()).unwrap();
+        assert_eq!(parsed["errors"], json!(["error during execution"]));
+        assert_eq!(parsed["is_error"], true);
+    }
+
+    /// 成功轮的形状不因这条规则漂移：有 `result`、无 `errors`/`terminal_reason`。
+    #[test]
+    fn success_result_keeps_its_shape() {
+        let (mut renderer, buf) = setup(OutputFormat::StreamJson);
+
+        assert!(renderer.handle_event(&turn_result("done", false, "success")));
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(buf.text().lines().last().unwrap()).unwrap();
+        assert_eq!(parsed["result"], "done");
+        assert!(parsed.get("errors").is_none(), "{parsed}");
+        assert!(parsed.get("terminal_reason").is_none(), "{parsed}");
+    }
+
+    /// text 模式的错误文案：`result` 只在成功轮有值，错误详情在后端 `errors`。
+    #[test]
+    fn error_line_text_prefers_result_then_backend_errors() {
+        assert_eq!(error_line_text(Some("boom"), &[]), "boom");
+        assert_eq!(error_line_text(Some(""), &["a".into(), "b".into()]), "a; b");
+        assert_eq!(error_line_text(None, &["chain".into()]), "chain");
+        assert_eq!(error_line_text(None, &[]), "error during execution");
     }
 
     /// text 模式没有终态文本可打（中止不是错误，stdout 保持干净），但同样
