@@ -215,10 +215,11 @@ def install_loop_exception_logger() -> None:
     """把 asyncio 的未处理异常转写进 wing 日志（gateway 启动时调用）。
 
     默认处理器只把 "Task exception was never retrieved" / "Task was
-    destroyed but it is pending" 这类暗角信息打到 stderr——网关是守护进程，
-    stderr 无人收尸，信息随之丢失。这里先落一条 wing 日志（带 traceback），
-    再把 context 原样交给原处理器（stderr 行为不变）。幂等；不在运行中的
-    事件循环内调用时静默跳过（库导入不得有副作用）。
+    destroyed but it is pending" 这类暗角信息打到 stderr——守护进程场景
+    重定向进 gateway.log，既不随日志轮转，也不在按日检索的日志面里。
+    这里先落一条 wing 日志（带 traceback），再把 context 原样交给原处理器
+    （stderr 行为不变）。幂等；不在运行中的事件循环内调用时静默跳过
+    （库导入不得有副作用）。
     """
     try:
         loop = asyncio.get_running_loop()

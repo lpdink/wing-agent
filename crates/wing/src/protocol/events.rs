@@ -542,6 +542,14 @@ pub enum WingEvent {
     /// Agent interrupted.
     #[serde(rename = "interrupted")]
     Interrupted {
+        /// Pending client requests the interrupt discarded from the agent
+        /// inbox (queue order). `None` = legacy gateway that predates the
+        /// field — frontends then fall back to discarding every pending
+        /// message (the historical behavior); `Some` lists exactly what was
+        /// dropped, so messages that arrived while the interrupt was in
+        /// flight are kept pending.
+        #[serde(default)]
+        dropped_request_ids: Option<Vec<String>>,
         #[serde(flatten)]
         meta: EventMeta,
     },
@@ -803,6 +811,45 @@ mod tests {
         }"#;
         let event: WingEvent = serde_json::from_str(json).unwrap();
         assert!(matches!(event, WingEvent::ToolCall { ref tool_name, .. } if tool_name == "Bash"));
+    }
+
+    #[test]
+    fn deserialize_interrupted_event() {
+        // 旧网关：不带 dropped_request_ids → None（前端回落"全部丢弃"）。
+        let json = r#"{
+            "type": "interrupted",
+            "created_at": "2025-01-01T00:00:00",
+            "session_id": "abc123",
+            "request_id": "req5"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match event {
+            WingEvent::Interrupted {
+                dropped_request_ids,
+                ..
+            } => assert_eq!(dropped_request_ids, None),
+            _ => panic!("expected Interrupted"),
+        }
+
+        // 新网关：显式列出被放弃的 request_id。
+        let json = r#"{
+            "type": "interrupted",
+            "dropped_request_ids": ["req-a", "req-b"],
+            "created_at": "2025-01-01T00:00:00",
+            "session_id": "abc123",
+            "request_id": "req6"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match event {
+            WingEvent::Interrupted {
+                dropped_request_ids,
+                ..
+            } => assert_eq!(
+                dropped_request_ids,
+                Some(vec!["req-a".to_string(), "req-b".to_string()])
+            ),
+            _ => panic!("expected Interrupted"),
+        }
     }
 
     #[test]

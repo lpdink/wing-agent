@@ -1183,7 +1183,11 @@ fn test_interrupted_discards_pending() {
     assert!(app.submit_message("hello"));
     app.drain_intents();
 
-    app.handle_event(WingEvent::Interrupted { meta: event_meta() });
+    // 旧网关：不带丢弃清单 → 回落到"全部丢弃"的兼容形态。
+    app.handle_event(WingEvent::Interrupted {
+        dropped_request_ids: None,
+        meta: event_meta(),
+    });
 
     assert!(app.chat.pending.is_empty());
     assert!(
@@ -1192,6 +1196,48 @@ fn test_interrupted_discards_pending() {
             .iter()
             .any(|c| matches!(c.cell(), ChatCell::DiscardedUserMessage(s) if s == "hello")),
         "interrupted pending message must be committed as discarded, not lost"
+    );
+}
+
+#[test]
+fn test_interrupted_discards_only_reported_requests() {
+    let mut app = test_app();
+    assert!(app.submit_message("dropped"));
+    app.drain_intents();
+    let dropped_id = app.chat.pending[0].request_id.clone();
+    assert!(app.submit_message("survives"));
+    app.drain_intents();
+    let survives_id = app.chat.pending[1].request_id.clone();
+
+    // 后端明确报出被放弃的 request_id：只有它标为 discarded；打断在途期间
+    // 新发的消息仍在 pending（随后被 user_message_accepted 提升）。
+    app.handle_event(WingEvent::Interrupted {
+        dropped_request_ids: Some(vec![dropped_id]),
+        meta: event_meta(),
+    });
+
+    assert_eq!(app.chat.pending.len(), 1);
+    assert_eq!(app.chat.pending[0].request_id, survives_id);
+    assert!(
+        app.chat
+            .cells
+            .iter()
+            .any(|c| matches!(c.cell(), ChatCell::DiscardedUserMessage(s) if s == "dropped"))
+    );
+    assert!(
+        !app.chat
+            .cells
+            .iter()
+            .any(|c| matches!(c.cell(), ChatCell::DiscardedUserMessage(s) if s == "survives"))
+    );
+
+    app.handle_event(accepted_event(&survives_id));
+    assert!(app.chat.pending.is_empty());
+    assert!(
+        app.chat
+            .cells
+            .iter()
+            .any(|c| matches!(c.cell(), ChatCell::UserMessage(s) if s == "survives"))
     );
 }
 
@@ -1268,6 +1314,9 @@ fn test_reasoning_freezes_on_turn_end_and_interrupt() {
         content: "long thinking".into(),
         meta: event_meta(),
     });
-    app.handle_event(WingEvent::Interrupted { meta: event_meta() });
+    app.handle_event(WingEvent::Interrupted {
+        dropped_request_ids: None,
+        meta: event_meta(),
+    });
     assert_eq!(thinking_active(&app), Some(false), "打断定格");
 }

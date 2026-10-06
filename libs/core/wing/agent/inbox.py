@@ -70,13 +70,20 @@ class Inbox:
             return ""
         return f"[User steer note: {'\n'.join(notes)}]\n"
 
-    def clear(self) -> None:
-        """清空队列（interrupt/shutdown 时调用）。"""
+    def clear(self) -> list[Inbound]:
+        """清空队列（interrupt 时调用），返回被丢弃的条目。
+
+        返回值让调用方（`WingAgent.interrupt`）能把「哪些输入被放弃」显式
+        告知前端（`InterruptedEvent.dropped_request_ids`）——前端只把这些
+        消息标为 discarded，不误伤锁等待期间新到的消息。
+        """
+        dropped: list[Inbound] = []
         while not self._queue.empty():
             try:
-                self._queue.get_nowait()
+                dropped.append(self._queue.get_nowait())
             except asyncio.QueueEmpty:
                 break
+        return dropped
 
     @property
     def has_pending(self) -> bool:

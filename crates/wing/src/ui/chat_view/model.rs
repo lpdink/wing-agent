@@ -105,9 +105,34 @@ impl ChatView {
         }
     }
 
-    /// Interrupted: pending messages were dropped from the backend inbox
-    /// without reaching the model — commit them as discarded (dim +
-    /// struck through) instead of silently vanishing.
+    /// Interrupted: the backend discarded the listed pending requests from
+    /// its inbox (they never reached the model) — commit exactly those as
+    /// discarded (dim + struck through) instead of silently vanishing.
+    ///
+    /// Every other pending message stays queued: it arrived after the
+    /// interrupt request and is still going to be consumed (promoted by
+    /// `user_message_accepted` when that happens).
+    pub fn discard_pending(&mut self, request_ids: &[String]) {
+        let mut kept = Vec::with_capacity(self.pending.len());
+        let mut discarded: Vec<String> = Vec::new();
+        for msg in self.pending.drain(..) {
+            if request_ids.contains(&msg.request_id) {
+                if let ChatCell::PendingUserMessage(content) = msg.cell.into_inner() {
+                    discarded.push(content);
+                }
+            } else {
+                kept.push(msg);
+            }
+        }
+        self.pending = kept;
+        for content in discarded {
+            self.push(ChatCell::DiscardedUserMessage(content));
+        }
+    }
+
+    /// Interrupted without a drop list (legacy gateway): assume every
+    /// pending message was dropped and commit them as discarded (dim +
+    /// struck through).
     pub fn discard_all_pending(&mut self) {
         let contents: Vec<String> = self
             .pending
@@ -1302,6 +1327,22 @@ mod tests {
         assert!(matches!(
             view.cells[0].cell(),
             ChatCell::DiscardedUserMessage(text) if text == "lost"
+        ));
+    }
+
+    #[test]
+    fn test_discard_pending_keeps_unlisted_messages() {
+        let mut view = ChatView::new();
+        view.push_pending("req-1".into(), "dropped".into());
+        view.push_pending("req-2".into(), "survives".into());
+
+        view.discard_pending(&["req-1".to_string()]);
+
+        assert_eq!(view.pending.len(), 1);
+        assert_eq!(view.pending[0].request_id, "req-2");
+        assert!(matches!(
+            view.cells[0].cell(),
+            ChatCell::DiscardedUserMessage(text) if text == "dropped"
         ));
     }
 

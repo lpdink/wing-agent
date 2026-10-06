@@ -142,9 +142,7 @@ async def _execute_command(command: str, ctx: ToolContext, timeout: int) -> str:
             start_new_session=True,
         )
 
-        hook_id = ctx.register_interrupt_hook(
-            lambda: kill_process_group(process), label=f"Bash pid={process.pid}"
-        )
+        hook_id = ctx.register_interrupt_hook(lambda: kill_process_group(process))
         try:
             try:
                 await asyncio.wait_for(process.wait(), timeout=timeout)
@@ -158,6 +156,15 @@ async def _execute_command(command: str, ctx: ToolContext, timeout: int) -> str:
                 raise ToolError(_format_timeout_result(stdout, stderr, elapsed))
 
             stdout, stderr = await _drain_pipes(process, timeout=1.0)
+        except asyncio.CancelledError:
+            # 被打断：杀进程组（幂等——hook 通常已杀过）后透传取消。兜住
+            # 「取消在 hook 之后才到达 / 重投取消」的窗口，绝不留迟到副作用。
+            # 权衡：进程已被 reap 时 `process.pid` 仍在，`os.killpg` 会对着
+            # 陈旧 pgid 打一枪（通常 ESRCH 无害）；换成 `returncode is None`
+            # 短路会丢掉「组长已死、孤儿仍在」的清理形态，故保留现状——窗口
+            # 是 reap → killpg 的微秒级，hook 重放让每次打断最多试 3 次。
+            kill_process_group(process)
+            raise
         finally:
             ctx.unregister_interrupt_hook(hook_id)
 

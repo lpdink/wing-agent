@@ -40,6 +40,7 @@ import {
   optJsonObject,
   optNumber,
   optString,
+  optStringArray,
   readJsonArray,
   readStringArray,
   reqBoolean,
@@ -311,6 +312,13 @@ export interface SessionInitEvent extends EventMeta {
 /** `interrupted` — the user aborted the running turn. */
 export interface InterruptedEvent extends EventMeta {
   readonly type: 'interrupted';
+  /**
+   * Pending requests the interrupt discarded from the agent inbox. Absent on
+   * older gateways — the frontend then falls back to discarding every pending
+   * message (the historical behavior); a present list (even empty) means
+   * exactly those were dropped.
+   */
+  readonly dropped_request_ids?: readonly string[];
 }
 
 /** `compact_done` — manual compaction finished. */
@@ -587,10 +595,16 @@ const decodeSessionInit: EventDecoder<SessionInitEvent> = (payload, meta) => ({
   cwd: stringOr(payload, 'cwd', ''),
 });
 
-const decodeInterrupted: EventDecoder<InterruptedEvent> = (_payload, meta) => ({
-  ...meta,
-  type: 'interrupted',
-});
+const decodeInterrupted: EventDecoder<InterruptedEvent> = (payload, meta) => {
+  const dropped = optStringArray(payload, 'dropped_request_ids');
+  return {
+    ...meta,
+    type: 'interrupted',
+    // Absent stays `undefined` (legacy gateway → discard-all fallback); a
+    // present list — including an empty one — is carried through verbatim.
+    ...(dropped === null ? {} : { dropped_request_ids: dropped }),
+  };
+};
 
 const decodeCompactDone: EventDecoder<CompactDoneEvent> = (payload, meta) => ({
   ...meta,

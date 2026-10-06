@@ -241,7 +241,15 @@ function applyKnown(record: SessionRecord, event: KnownWingEvent, effects: Reduc
       return;
     }
     case 'interrupted': {
-      record.discardAllPending();
+      // The interrupt discarded exactly the requests the backend reports;
+      // messages that arrived while it was in flight stay pending (promoted
+      // by `user_message_accepted`). Legacy gateways omit the list: fall back
+      // to discarding every pending message.
+      if (event.dropped_request_ids === undefined) {
+        record.discardAllPending();
+      } else {
+        record.discardPending(event.dropped_request_ids);
+      }
       finishTurn(record);
       effects.push({ kind: 'toast', level: 'info', message: 'Agent interrupted' });
       return;

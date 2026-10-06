@@ -93,6 +93,12 @@ class SessionStateChangedEvent(WingEvent):
 
 class InterruptedEvent(WingEvent):
     type: Literal["interrupted"] = "interrupted"
+    dropped_request_ids: list[str] = Field(default_factory=list)
+    """打断入口放弃的积压输入（`request_id`，队列序）。
+
+    前端据此只把**这些** pending 消息标为 discarded；锁等待期间新投递的
+    消息（客户端 POST 已应答）不在其中，留给重建后的消费者。旧网关不含
+    此字段——前端按缺失（而非空列表）回落"全部丢弃"的兼容形态。"""
 
 
 class CompactDoneEvent(WingEvent):

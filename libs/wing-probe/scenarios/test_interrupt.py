@@ -1,4 +1,4 @@
-"""中断场景（interrupt）：真实网关下的打断往返与可取证日志。
+"""中断场景（interrupt）：真实网关下的打断往返。
 
 覆盖点：
 
@@ -7,17 +7,15 @@
   正常返回；半截文本作为 partial assistant 消息提交（``stop_reason="interrupted"``）；
   ``interrupted`` 事件落盘并广播；会话回到 idle 并可继续下一轮对话；
   链不变量（teardown 自动）保持。
-- ``test_interrupt_leaves_forensic_log_lines``：
-  同一条打断路径在网关自身日志里留下分段日志（端点到达 / cancel 快照 /
-  锁获取 / worker 退休 / reset）——死锁类现场（2026-09-28）无需 lldb 取证。
-  断言面：``$WING_HOME/core/logs/wing_*.log``（产品写出的日志文件）。
+
+说明：worker 卡死维度（取消被吸收）无法经公开协议确定性构造（吞没不在
+wing 代码内），由单测覆盖（``libs/core/tests/test_interrupt_ladder.py``）。
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from pathlib import Path
 
 import pytest
 
@@ -25,7 +23,6 @@ from wing_probe import Probe, Session, Turn
 
 #: 场景私有 model 名（剧本按 model 名路由，场景之间零共享）。
 STREAM_MODEL = "probe/interrupt-stream"
-LOG_MODEL = "probe/interrupt-log"
 
 #: 慢速流式文本：分片 4 字符 + 每片 50ms → 约 3s 的流。长度即打断窗口的余量
 #: （打断到达即切断，流越长场景耗时不变——只在打断本身延误时才多等）。
@@ -112,61 +109,3 @@ async def test_interrupt_mid_stream_closes_turn_and_keeps_chain_valid(
     assert follow_up.role_sequence() == ["user", "assistant", "user"], (
         follow_up.role_sequence()
     )
-
-
-def _wing_log_dir(probe: Probe) -> Path:
-    """网关自身日志目录（``$WING_HOME/core/logs``；probe 的 WING_HOME 在 tmp 内）。"""
-    return probe.env.wing_home / "core" / "logs"
-
-
-def _read_wing_log(probe: Probe) -> str:
-    log_dir = _wing_log_dir(probe)
-    files = sorted(log_dir.glob("wing_*.log"))
-    assert files, f"no wing_*.log under {log_dir}"
-    return "\n".join(
-        path.read_text(encoding="utf-8", errors="replace") for path in files
-    )
-
-
-async def _wait_for_log_lines(
-    probe: Probe, *needles: str, timeout: float = 10.0
-) -> str:
-    """轮询到日志里出现全部关键行（文件 handler 逐条 flush，正常是即时可见）。"""
-    deadline = time.monotonic() + timeout
-    text = ""
-    while time.monotonic() < deadline:
-        text = _read_wing_log(probe)
-        if all(needle in text for needle in needles):
-            return text
-        await asyncio.sleep(0.05)
-    missing = [needle for needle in needles if needle not in text]
-    raise AssertionError(
-        f"gateway log missing {missing}; last 2000 chars:\n{text[-2000:]}"
-    )
-
-
-@pytest.mark.timeout(120)
-@pytest.mark.asyncio
-async def test_interrupt_leaves_forensic_log_lines(probe: Probe) -> None:
-    """打断路径在网关日志里留下可 grep 的分段现场（下次无需 lldb）。"""
-    await _start_and_interrupt(probe, LOG_MODEL)
-
-    text = await _wait_for_log_lines(
-        probe,
-        "interrupt request: session_id=",
-        "interrupt start [",
-        "cancel snapshot [",
-        "fut_waiter=",
-        "interrupt lock acquired [",
-        "interrupt old worker retired [",
-        "Agent interrupted and reset [",
-        "interrupt done: session_id=",
-    )
-    assert "await_result=cancelled" in text
-    # cancel 快照一行给出判读三件套：cancelling 簿记（快照先于 cancel，必为 0）、
-    # fut_waiter 类型（吞没路径判别器）与 worker 暂停点栈。
-    snapshot = next(line for line in text.splitlines() if "cancel snapshot [" in line)
-    assert "done=False cancelling=0" in snapshot, snapshot
-    # 类型而非具体状态：读侧实现细节（httpx/Queue）变化不应让本断言变红。
-    assert "fut_waiter=Future(" in snapshot, snapshot
-    assert "stack=[" in snapshot, snapshot
