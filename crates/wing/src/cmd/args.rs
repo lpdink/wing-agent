@@ -44,4 +44,11 @@ pub struct RunArgs {
     /// Override tools (comma-separated). If not set, uses template defaults.
     #[arg(long = "tools")]
     pub tools: Option<String>,
+
+    /// Attach tags to the session (repeatable / comma-separated).
+    ///
+    /// Applied at creation; with -r the tags are added to the resumed
+    /// session. Invalid tags fail the launch (nothing is sent).
+    #[arg(long = "tag", value_delimiter = ',')]
+    pub tag: Vec<String>,
 }

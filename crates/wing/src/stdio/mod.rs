@@ -92,6 +92,8 @@ pub struct StdioArgs {
     pub effort: Option<String>,
     pub provider: Option<String>,
     pub tools: Option<String>,
+    /// Tags attached to the session (created tagged; `-r` adds to the resumed one).
+    pub tag: Vec<String>,
     pub output_format: OutputFormat,
     pub input_format: InputFormat,
     pub yolo: bool,
@@ -348,6 +350,12 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
             .resume_session(resume_id)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to resume session: {e}"))?;
+        // `-r` + `--tag`: add tags to the resumed session before anything is sent.
+        if !args.tag.is_empty() {
+            http.tag_session(&resp.session_id, Some(args.tag.clone()), None)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to tag session: {e}"))?;
+        }
         tracing::info!(session_id = %resp.session_id, "session resumed");
         // Print session_id to stderr so it doesn't pollute stdout
         // (which carries the Claude Code protocol stream).
@@ -382,6 +390,8 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
             workspace,
             agent: Some(override_),
             backend: None,
+            // Atomic: the session is born tagged (no dispatch-without-tags window).
+            tags: (!args.tag.is_empty()).then(|| args.tag.clone()),
         };
 
         let resp = http

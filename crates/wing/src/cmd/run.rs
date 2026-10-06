@@ -31,6 +31,8 @@ struct RunOutput {
     model: String,
     provider: Option<String>,
     tools: Vec<String>,
+    /// Resulting tags (on `-r`: existing + newly added).
+    tags: Vec<String>,
     workspace: Option<String>,
     prompt: String,
     started_at: String,
@@ -75,6 +77,13 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
 
     let (session_id, template_name, resolved_workspace) = if let Some(ref resume_id) = args.resume {
         let resp = http.resume_session(resume_id).await?;
+        // `-r` + `--tag`: tags are added to the resumed session (idempotent;
+        // the resumed session keeps its existing tags).
+        if !args.tag.is_empty() {
+            http.tag_session(&resp.session_id, Some(args.tag.clone()), None)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to tag session: {e}"))?;
+        }
         (
             resp.session_id,
             resp.template_name.unwrap_or_default(),
@@ -97,6 +106,8 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
             workspace: workspace.clone(),
             agent: Some(override_),
             backend: None,
+            // Atomic: the session is born tagged (no dispatch-without-tags window).
+            tags: (!args.tag.is_empty()).then(|| args.tag.clone()),
         };
 
         let resp = http.create_session(&create_req).await?;
@@ -110,14 +121,15 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to send prompt: {e}"))?;
 
-    // 4. Fetch session info for model/tools display.
-    let (model, tools_list) = match http.get_session_info(&session_id).await {
-        Ok(info) => (info.model, info.tools),
+    // 4. Fetch session info for model/tools/tags display (resulting state —
+    //    on `-r` this includes tags the session already had).
+    let (model, tools_list, tags) = match http.get_session_info(&session_id).await {
+        Ok(info) => (info.model, info.tools, info.tags),
         Err(e) => {
             // Non-fatal: the session was created and the prompt was sent.
             // The agent is working; we just couldn't get display metadata.
             tracing::warn!("Failed to get session info: {e}");
-            (args.model.unwrap_or_default(), vec![])
+            (args.model.unwrap_or_default(), vec![], args.tag)
         }
     };
 
@@ -127,6 +139,7 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
         model,
         provider: args.provider,
         tools: tools_list,
+        tags,
         workspace: resolved_workspace,
         prompt: args.prompt,
         started_at,
@@ -141,6 +154,9 @@ fn print_text(output: &RunOutput) {
     }
     println!("template:    {}", output.template_name);
     println!("tools:       {}", output.tools.join(", "));
+    if !output.tags.is_empty() {
+        println!("tags:        {}", output.tags.join(", "));
+    }
     if let Some(ref ws) = output.workspace {
         println!("workspace:   {ws}");
     }

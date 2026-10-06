@@ -19,6 +19,9 @@ pub struct SessionInfo {
     /// 运行时状态: inactive|idle|working|waiting（旧网关缺省时为空串，前端降级为 inactive）。
     #[serde(default)]
     pub status: String,
+    /// 会话级标签（插入序；无标签为空数组。旧网关缺省为空）。
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// Agent 配置信息。
@@ -80,6 +83,9 @@ pub struct CreateSessionRequest {
     /// Storage backend: "file" (default, durable) | "memory" (ephemeral).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+    /// Tags attached at creation (validation identical to `/api/session/tag`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -262,6 +268,9 @@ pub struct SessionInfoResponse {
     pub skills_info: String,
     #[serde(default)]
     pub system_prompt: String,
+    /// 会话标签（插入序；无标签为空数组。旧网关缺省为空）。
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// POST /api/session/compact 响应。
@@ -347,6 +356,29 @@ pub struct UpdateSessionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSessionResponse {
     pub ok: bool,
+}
+
+/// POST /api/session/tag 请求——读取（add / remove 皆缺省）或原子增删标签。
+#[derive(Debug, Clone, Serialize)]
+pub struct TagSessionRequest {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub add: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remove: Option<Vec<String>>,
+}
+
+/// POST /api/session/tag 响应——变更后的全量标签 + 实际增删。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagSessionResponse {
+    pub ok: bool,
+    pub session_id: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub added: Vec<String>,
+    #[serde(default)]
+    pub removed: Vec<String>,
 }
 
 // ============================================================

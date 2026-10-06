@@ -230,6 +230,24 @@ impl GatewayClient {
         self.post_json("/api/session/update", req).await
     }
 
+    /// 读取或原子增删 session 标签。
+    ///
+    /// `add` / `remove` 皆 `None` = 纯读取（返回当前标签，不做变更）；
+    /// 两者同时给出时服务端一次原子应用（幂等）。不水合已逐出会话。
+    pub async fn tag_session(
+        &self,
+        session_id: &str,
+        add: Option<Vec<String>>,
+        remove: Option<Vec<String>>,
+    ) -> Result<TagSessionResponse, ApiClientError> {
+        let body = TagSessionRequest {
+            session_id: session_id.to_owned(),
+            add,
+            remove,
+        };
+        self.post_json("/api/session/tag", &body).await
+    }
+
     // ============================================================
     // Session 操作
     // ============================================================
