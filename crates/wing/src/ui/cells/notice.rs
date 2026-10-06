@@ -90,10 +90,11 @@ pub fn notice_lines(
     let body = level.body(palette);
     let rail = level.rail(palette);
 
-    // Zero columns: nothing can be painted — return the blank row alone so the
-    // caller's height arithmetic still has a line to measure.
+    // Zero columns: nothing can be painted — but keep the shape ("a body row,
+    // then the blank") so the cell's height contract reads the same at every
+    // width.
     if width == 0 {
-        return vec![Line::from("")];
+        return vec![Line::from(""), Line::from("")];
     }
 
     // Too narrow for the rail (`│ ` is 2 columns): degrade to plain rows rather
@@ -140,12 +141,21 @@ pub fn notice_lines(
 /// `width - 2 == 1`) a CJK row would still be one column too wide. Drop what
 /// cannot fit instead of painting outside the cell — the renderer must obey
 /// the same "no row exceeds the width" invariant every other cell holds.
+///
+/// The truncation is per character but the check is per row: a variation
+/// selector (U+FE0F and friends) is zero columns on its own and only lifts the
+/// glyph it follows to two columns in the *string* width, so a per-character
+/// pass alone can leave a row one column too wide. Re-check the result and drop
+/// from the end until it really fits.
 fn clamp(row: &str, width: usize) -> String {
-    if UnicodeWidthStr::width(row) > width {
-        truncate_to_display_width(row, width)
-    } else {
-        row.to_string()
+    if UnicodeWidthStr::width(row) <= width {
+        return row.to_string();
     }
+    let mut out = truncate_to_display_width(row, width);
+    while !out.is_empty() && UnicodeWidthStr::width(out.as_str()) > width {
+        out.pop();
+    }
+    out
 }
 
 #[cfg(test)]
@@ -277,6 +287,45 @@ mod tests {
     // ── 宽度与折行 ──────────────────────────────────────────
 
     #[test]
+    fn a_hard_broken_word_never_leaves_a_stray_rail_row() {
+        // 回归（评审 S-1）：词宽 == 折行宽 + 尾随空格时，硬断会把那块空白切
+        // 成独立一格；它不能变成一条只有栏杆的空行。
+        let lines = notice_lines("aaaaaaaa bbb ccc", NoticeLevel::Info, 10, &palette());
+        assert_eq!(text_of(&lines), "│ aaaaaaaa\n│ bbb ccc\n");
+        assert!(
+            !lines.iter().any(|l| l.to_string() == "│"),
+            "不该出现孤立栏杆：{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_trailing_newline_does_not_draw_a_dangling_rail() {
+        // 回归（评审 S-2）：`/context` 的文本恒以 `\n` 结尾 —— 结尾换行是
+        // 终止符，不是一行。
+        let lines = notice_lines(
+            "Messages: 5\nTokens: 1200 / 128000\n",
+            NoticeLevel::Info,
+            40,
+            &palette(),
+        );
+        assert_eq!(text_of(&lines), "│ Messages: 5\n│ Tokens: 1200 / 128000\n");
+    }
+
+    #[test]
+    fn emoji_presentation_cannot_overflow_the_cell() {
+        // 回归（评审 N-3）：U+2764 + U+FE0F 逐字符宽 1 + 0，串级宽 2 ——
+        // 逐字符裁剪会放出去一列。
+        for width in 0u16..12 {
+            for line in &notice_lines("❤️ x", NoticeLevel::Info, width, &palette()) {
+                assert!(
+                    line_width(line) <= width as usize,
+                    "width={width}: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_row_fits_every_width() {
         // 核心不变量：任何宽度下都不能有行超出（Paragraph 不换行，超了就是被裁）。
         let long = "模型生成 调用失败 (1/11)：TimeoutError: stalled for 60s without any byte \
@@ -296,6 +345,20 @@ mod tests {
         let cjk = "这是一条很长的中文系统注记，用来验证换行发生在这个宽度之内而不是溢出";
         for width in 0u16..80 {
             for line in &notice_lines(cjk, NoticeLevel::Info, width, &palette()) {
+                assert!(
+                    line_width(line) <= width as usize,
+                    "width={width}: {line:?}"
+                );
+            }
+        }
+        // 变体选择符（emoji presentation）也不溢出。
+        for width in 0u16..40 {
+            for line in &notice_lines(
+                "状态 ❤️ ok ✅ done",
+                NoticeLevel::Warning,
+                width,
+                &palette(),
+            ) {
                 assert!(
                     line_width(line) <= width as usize,
                     "width={width}: {line:?}"

@@ -173,20 +173,24 @@ fn argument(name: &str) -> Option<String> {
     args.get(index + 1).cloned()
 }
 
-/// `--facts 2,1` —— 会话事实（skills,rules）；解析不出来就退回默认 `2,1`。
-/// `0,0` 是"什么都没加载"：名牌上那一行不出现。
+/// `--facts 2,1` —— 会话事实（skills,rules）。没给、或给了但解析不出来（这是
+/// 调试入口，不为参数报错）→ 默认 `2,1`；`0,0` 是"什么都没加载"：名牌上那一行
+/// 是空白占位（槽位恒在）。
 fn facts_argument() -> Option<SessionFacts> {
+    const DEFAULT: Option<SessionFacts> = Some(SessionFacts {
+        skills: 2,
+        rules: 1,
+    });
     let Some(raw) = argument("--facts") else {
-        return Some(SessionFacts {
-            skills: 2,
-            rules: 1,
-        });
+        return DEFAULT;
     };
-    let (skills, rules) = raw.split_once(',')?;
-    Some(SessionFacts {
-        skills: skills.trim().parse().ok()?,
-        rules: rules.trim().parse().ok()?,
-    })
+    let parsed = raw.split_once(',').and_then(|(skills, rules)| {
+        Some(SessionFacts {
+            skills: skills.trim().parse().ok()?,
+            rules: rules.trim().parse().ok()?,
+        })
+    });
+    parsed.or(DEFAULT)
 }
 
 fn main() {

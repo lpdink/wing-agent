@@ -30,14 +30,14 @@ function systemTexts(harness: HostHarness, sessionId: string): string[] {
 }
 
 describe('notice events', () => {
-  it('renders a notice cell with its retry hint and does not end the turn', async () => {
+  it('renders a notice cell verbatim and does not end the turn', async () => {
     const { harness, sessionId } = await boot();
     harness.gateway.emit({ type: 'turn_started', session_id: sessionId });
     await flushMicrotasks();
 
     harness.gateway.emit({
       type: 'notice',
-      message: 'Rate limited by the provider',
+      message: 'Rate limited by the provider (2/5), 4s 后重试',
       level: 'warning',
       attempt: 2,
       max_attempts: 5,
@@ -46,9 +46,9 @@ describe('notice events', () => {
     });
     await flushMicrotasks();
 
-    expect(systemTexts(harness, sessionId)).toEqual([
-      'Rate limited by the provider (attempt 2/5, retrying in 4s)',
-    ]);
+    // 一次性事实只说一遍：重试信息已经在正文里（后端产出的形态），前端
+    // 不再追加 `(attempt 2/5, retrying in 4s)`。
+    expect(systemTexts(harness, sessionId)).toEqual(['Rate limited by the provider (2/5), 4s 后重试']);
     // A notice is not a turn boundary: the agent is still working.
     expect(harness.host.sessionManager.record(sessionId)?.status).toBe('working');
   });

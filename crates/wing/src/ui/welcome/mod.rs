@@ -7,7 +7,7 @@
 //! * **wordmark**（[`wordmark`]）：手绘 5 行像素大字 `WING`，开屏一道扫光扫过；
 //! * 右侧文字列：版本 / 会话事实 / 键位 / 轮换 tip；
 //! * **会话事实**：[`SessionFacts`]（`2 skills · 1 rule`）—— 这个会话加载了什么，
-//!   随 SyncSession 到达、0/0 时整行不出现（由 app 的 `sync_welcome` 喂进来）；
+//!   随 SyncSession 到达；0/0 时槽位留空（行数因此恒定，见 [`text_column`]）；
 //! * **动作规划器**（[`motion`]）：纯 deadline 状态机，眨眼 / 抖翅 / 跳各管各的。
 //!
 //! **内容只放"永远是事实"的东西**：版本号、commit、会话的加载事实、键位、tips
@@ -99,9 +99,9 @@ const COMPACT_MIN: u16 = 40;
 
 /// 右列行数（wordmark 3 + 版本 + 会话事实 + 空 + 键位 + tip + 入口）。
 ///
-/// 事实行可以缺席（0/0 或老网关），右列就短一行 —— 竖排起点 [`TEXT_OFFSET`]
-/// 两种行数下相同（(13-8)/2 == (13-9)/2 == 2），所以事实行到达 / 消失都不会
-/// 让名牌整体位移。
+/// 事实槽位恒在（缺席时留空行，见 [`text_column`]），所以两个布局档的 header
+/// 高度都固定：Full 档文字列骑在海鸥的 13 行盒子里（8/9 行同起点），Compact
+/// 档文字列就是整块 —— 事实到达 / 消失都不会让下方内容位移。
 const TEXT_ROWS: usize = 9;
 
 /// 右列在 12 行海鸥里的竖排起点（居中）。
@@ -425,8 +425,12 @@ fn text_column(
     // 像素大字是品牌形，但终端里还得有**文本**形态的 brand（grep / 读屏 / 测试
     // 都读像素）—— 版本行带上它：`wing · dev · <commit>`。
     out.push(dim_line(&format!("wing · {}", version_label()), width, dim));
-    if let Some(line) = facts.and_then(SessionFacts::line) {
-        out.push(dim_line(&line, width, dim));
+    // 事实槽位**恒在**：缺席（0/0 / 老网关）时留一行空白 —— 右列行数因此在
+    // 两个布局档里都固定。Full 档本来就骑在海鸥的 13 行盒子里（高度由画盒
+    // 定），Compact 档文字列**就是**整块 header，多一行会让下方内容跳一行。
+    match facts.and_then(SessionFacts::line) {
+        Some(line) => out.push(dim_line(&line, width, dim)),
+        None => out.push(Line::from("")),
     }
     out.push(Line::from(""));
     out.push(dim_line(KEYS, width, dim));
@@ -652,16 +656,17 @@ mod tests {
         let zero = w.build(&palette(), 120, now, false, true, facts(0, 0));
         assert!(!text_of(&none).contains("skill"), "{}", text_of(&none));
         assert!(!text_of(&zero).contains("skill"), "{}", text_of(&zero));
-        // 缺席 = 右列少一行（不是留个空位）——而 header 的**高度**不变：
-        // 事实行挂在海鸥的行盒里（13 行内右列 8/9 行都装得下），所以它到达 /
-        // 消失都不会让聊天区整体跳一行。
+        // 槽位恒在：事实缺席时那一行是空白 —— header 的**高度**在任何宽度
+        // 档里都不随事实变化（Full 档由海鸥的画盒定，Compact 档由占位行定），
+        // 所以 sync 到达时下方内容不会跳一行。
         assert_eq!(none.len(), zero.len());
-        assert_eq!(
-            none.len(),
-            w.build(&palette(), 120, now, false, true, facts(2, 1))
-                .len(),
-            "事实行不改变 header 高度"
-        );
+        for width in [120u16, 96, 80, 70, 60, 40] {
+            let without = w.build(&palette(), width, now, false, true, None).len();
+            let with = w
+                .build(&palette(), width, now, false, true, facts(2, 1))
+                .len();
+            assert_eq!(without, with, "width={width}：事实行改变了 header 高度");
+        }
     }
 
     #[test]

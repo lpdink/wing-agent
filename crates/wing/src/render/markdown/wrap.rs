@@ -97,7 +97,13 @@ pub(crate) fn wrap_prose_lines(lines: Vec<MarkdownLine>, width: usize) -> Vec<Ma
 /// at the margin, Latin words stay intact, kinsoku rules hold, and an
 /// unbreakable run (a long URL) is hard-broken by display width. Hard newlines
 /// in `text` are respected — every source line is wrapped on its own and a
-/// blank source line yields one empty row.
+/// blank source line yields one empty row. A **trailing** newline is a
+/// terminator, not a row (same reading as `str::lines` / the markdown lane's
+/// `render_plain`), so `"a\n"` is one row.
+///
+/// Leading spaces are a hanging indent: they move to every wrapped row and the
+/// body wraps in the columns that remain, so a wrapped command-output line
+/// keeps its level instead of snapping back to column zero.
 ///
 /// No markdown semantics are applied: this is the raw text of things that are
 /// *not* prose documents (command output, notices), where re-parsing would
@@ -105,18 +111,30 @@ pub(crate) fn wrap_prose_lines(lines: Vec<MarkdownLine>, width: usize) -> Vec<Ma
 /// caller can prefix each one without carrying invisible whitespace along.
 pub(crate) fn wrap_plain_text(text: &str, width: usize) -> Vec<String> {
     let mut out = Vec::new();
-    for source in text.split('\n') {
+    for source in text.lines() {
         if width == 0 || UnicodeWidthStr::width(source) <= width {
             out.push(source.trim_end().to_string());
             continue;
         }
-        let mut rows = 0usize;
-        for (a, b) in wrap_ranges(source, width) {
-            out.push(source[a..b].trim_end().to_string());
-            rows += 1;
+        let indent = &source[..source.len() - source.trim_start_matches(' ').len()];
+        let indent_width = UnicodeWidthStr::width(indent);
+        let body = &source[indent.len()..];
+        let body_width = width.saturating_sub(indent_width).max(1);
+        let before = out.len();
+        for (a, b) in wrap_ranges(body, body_width) {
+            let row = body[a..b].trim_end();
+            // A hard-broken atom can leave a whitespace-only remainder (the
+            // trailing space of `"word "` becomes a piece of its own) — that
+            // is an artefact of cutting, not content. Emitting it would draw a
+            // stray blank row in a notice (or an empty line in prose).
+            if row.is_empty() {
+                continue;
+            }
+            out.push(format!("{indent}{row}"));
         }
-        if rows == 0 {
-            // Whitespace-only source line: keep the blank row.
+        if out.len() == before {
+            // Whitespace-only source line: keep the blank row (structure, not
+            // an artefact).
             out.push(String::new());
         }
     }
@@ -293,7 +311,13 @@ fn hard_break(flat: &str, cs: usize, ce: usize, width: usize, ranges: &mut Vec<(
         } else {
             head.len()
         };
-        ranges.push((s, s + hl));
+        // Whitespace-only pieces never become a row: an over-wide atom like
+        // `"word "` is cut *including* its trailing space, which would land as
+        // a piece of its own — a phantom blank line in prose, a stray rail row
+        // in a notice.
+        if !flat[s..s + hl].trim().is_empty() {
+            ranges.push((s, s + hl));
+        }
         s += hl;
     }
 }
@@ -503,22 +527,52 @@ mod tests {
         assert_eq!(rows.concat(), "一二三四五六七八九十一二三四五六七八九十");
     }
 
-    /// 硬换行被尊重：每个源行各自折行，空行留一个空行。
+    /// 硬换行被尊重：每个源行各自折行，空行留一个空行；**结尾**的换行是
+    /// 终止符不是一行（`"a\n"` 只有一行 —— `/context` 的输出恒以 `\n` 结尾，
+    /// 多出来的空行会在 notice 里画成一条悬空栏杆）。
     #[test]
     fn plain_text_keeps_source_lines_and_blanks() {
         let rows = wrap_plain_text("first\n\nsecond", 80);
         assert_eq!(rows, vec!["first", "", "second"]);
         // 只有空白字符的源行同样是空行（不是被吞掉）。
         assert_eq!(wrap_plain_text("a\n   \nb", 80), vec!["a", "", "b"]);
+        // 尾随换行是终止符。
+        assert_eq!(
+            wrap_plain_text("Messages: 5\nTokens: 1200\n", 80),
+            vec!["Messages: 5", "Tokens: 1200"]
+        );
+        assert_eq!(wrap_plain_text("", 10), Vec::<String>::new());
     }
 
-    /// 行首缩进保留（命令输出的层级），行尾空白被裁掉（让调用方可以安全地
-    /// 加前缀，不会把不可见空格一起带上）。
+    /// 行首缩进保留（命令输出的层级）——包括折行之后；行尾空白被裁掉
+    /// （让调用方可以安全地加前缀，不会把不可见空格一起带上）。
     #[test]
     fn plain_text_keeps_indent_and_trims_the_tail() {
+        assert_eq!(wrap_plain_text("  - pattern   \n", 80), vec!["  - pattern"]);
+        // 超宽的行：缩进变成悬挂前缀，正文用剩下的列折。
+        // 缩进 2 列 → 正文只有 6 列（3 个汉字）可折。
+        let rows = wrap_plain_text("  长描述文字需要折行", 8);
+        assert_eq!(rows, vec!["  长描述", "  文字需", "  要折行"]);
+        // 续行与首行同缩进，且每行都不超宽。
+        for row in &rows {
+            assert!(row.starts_with("  "), "缩进应在每个折行行上：{row:?}");
+            assert!(UnicodeWidthStr::width(row.as_str()) <= 8, "{row:?}");
+        }
+    }
+
+    /// 词宽恰好等于折行宽（+ 尾随空格）不该产出伪空行：`hard_break` 会把
+    /// `"aaaaaaaa "` 连尾随空格一起切，那块空白自成一格。
+    #[test]
+    fn plain_text_never_emits_a_phantom_blank_row() {
+        assert_eq!(wrap_plain_text("aaaaaaaa bbb", 8), vec!["aaaaaaaa", "bbb"]);
         assert_eq!(
-            wrap_plain_text("  - pattern   \n", 80),
-            vec!["  - pattern", ""]
+            wrap_plain_text("aaaaaaaa bbb ccc", 8),
+            vec!["aaaaaaaa", "bbb ccc"]
+        );
+        // 极窄宽度下空白残段同样不产出行。
+        assert_eq!(
+            wrap_plain_text("中文 abc", 1),
+            vec!["中", "文", "a", "b", "c"]
         );
     }
 
@@ -531,6 +585,5 @@ mod tests {
         }
         assert_eq!(rows.concat(), "abcdefghijklmnopqrstuvwxyz");
         assert_eq!(wrap_plain_text("abc", 0), vec!["abc"]);
-        assert_eq!(wrap_plain_text("", 10), vec![""]);
     }
 }
