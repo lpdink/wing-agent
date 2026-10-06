@@ -7,8 +7,10 @@
 pub mod ndjson;
 pub mod renderer;
 pub mod stdin_handler;
+pub mod stdout;
 
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -21,6 +23,7 @@ use wing_api_client::GatewayClient as GatewayApiClient;
 use wing_api_client::models::{AgentOverride, CreateSessionRequest};
 
 use self::renderer::StdioRenderer;
+use self::stdout::StdoutSink;
 
 // ============================================================
 // Output / Input format enums
@@ -267,6 +270,32 @@ pub fn filter_unknown_args(args: Vec<String>) -> Vec<String> {
 }
 
 // ============================================================
+// `--tools` normalization
+// ============================================================
+
+/// Claude Agent SDK 的 tools preset 值（`--tools default`）。
+const TOOLS_PRESET_DEFAULT: &str = "default";
+
+/// 归一化 `--tools`：返回 `None` = 不覆盖工具集（让会话模板生效）。
+///
+/// SDK 固定传 `--tools default`（tools preset）或 `--tools ""`（空列表）——它们
+/// **不是**工具名列表：照既有语义切分会把模板的工具集覆盖成「名字叫 default 的
+/// 工具」/ 空集。其他值（真正的工具名列表）保持 wing 既有语义：逗号切分、trim、
+/// 丢弃空项。
+fn normalize_tools(raw: Option<&str>) -> Option<Vec<String>> {
+    let raw = raw?.trim();
+    if raw.is_empty() || raw == TOOLS_PRESET_DEFAULT {
+        return None;
+    }
+    Some(
+        raw.split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect(),
+    )
+}
+
+// ============================================================
 // Gateway auto-start (extracted from smart_default_tui)
 // ============================================================
 
@@ -366,13 +395,10 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
             .ok()
             .map(|p| p.to_string_lossy().to_string());
 
-        // Parse --tools (comma-separated) if provided; None = use template defaults.
-        let tools = args.tools.as_ref().map(|s| {
-            s.split(',')
-                .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty())
-                .collect::<Vec<String>>()
-        });
+        // Parse --tools if provided; None = use template defaults. The SDK's
+        // semantic values (`default` / empty) are dropped here, see
+        // `normalize_tools`.
+        let tools = normalize_tools(args.tools.as_deref());
 
         let override_ = AgentOverride {
             model: args.model.clone(),
@@ -414,43 +440,102 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
 
     tracing::info!("subscribed to session events");
 
-    // 6. Build renderer.
-    let mut renderer =
-        StdioRenderer::new(args.output_format.clone(), start_time, session_id.clone());
+    // 6. Build renderer. stdout 只有一个出口：renderer 的协议帧与 stdin pump 的
+    //    control 应答共享同一个 sink（见 `stdout::StdoutSink`）。
+    let out = Arc::new(StdoutSink::stdout());
+    let mut renderer = StdioRenderer::new(
+        args.output_format.clone(),
+        start_time,
+        session_id.clone(),
+        Arc::clone(&out),
+    );
 
-    // 7. Resolve prompt: CLI arg > stdin (stream-json) > error.
+    // 7. stdin pump：stream-json 输入模式下 stdin 是常驻控制通道——turn 期间
+    //    仍要消费 control_request（interrupt 等）并应答，编排器在 await 它们。
+    let mut pump = None;
+    if args.input_format == InputFormat::StreamJson {
+        pump = Some(stdin_handler::spawn(stdin_handler::StdinPumpContext {
+            interruptor: Arc::new(stdin_handler::GatewayInterruptor::new(
+                http.clone(),
+                session_id.clone(),
+            )),
+            out: Arc::clone(&out),
+            // prompt 由 CLI 参数给出时，stdin 上的 user 消息只需被忽略。
+            await_prompt: args.prompt.is_empty(),
+        }));
+    }
+
+    // 8. Resolve prompt: CLI arg > stdin (stream-json) > error.
     let prompt = if !args.prompt.is_empty() {
         args.prompt
-    } else if args.input_format == InputFormat::StreamJson {
-        stdin_handler::handle_stdin_stream().await?
+    } else if let Some(pump) = pump.as_mut() {
+        pump.wait_prompt().await?
     } else {
         anyhow::bail!("no prompt provided");
     };
 
-    // 8. Send prompt.
+    // 9. Send prompt.
     http.send_message(&session_id, &prompt, None)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to send message: {e}"))?;
 
     tracing::info!("prompt sent, entering event loop");
 
-    // 9. Event loop: receive events from WS, render, exit on TurnResult.
-    loop {
-        match gateway.recv_event().await {
+    // 10. Event loop: receive events from WS, render, exit on TurnResult.
+    //
+    // `turn_active`：prompt 发出后到「这轮结束」之间为真。被打断的轮次后端
+    // **不发 result 帧**（只发出 interrupted 事件——半截内容已作为 partial
+    // assistant 提交进链），所以 stdin 关闭后的收尾不能只认 result。
+    let mut turn_active = true;
+    let mut stdin_eof = false;
+    let exit_code = loop {
+        // 编排器关掉 stdin = 「end of run」：没有进行中的 turn 就收尾退出
+        // （CloudCLI 的中止流程：interrupt 应答 → release stdin → CLI 退出）。
+        // 进行中的 turn 不受影响——`echo … | wing --input-format stream-json`
+        // 依旧等它的 result 帧。
+        if stdin_eof && !turn_active {
+            tracing::info!("stdin closed and no turn in flight; exiting");
+            break renderer.exit_code();
+        }
+
+        let event = match pump.as_mut() {
+            Some(pump) if !stdin_eof => {
+                tokio::select! {
+                    biased;
+                    _ = pump.stdin_closed() => {
+                        stdin_eof = true;
+                        continue;
+                    }
+                    event = gateway.recv_event() => event,
+                }
+            }
+            // 没有 stdin 控制通道（text/json 模式，或 stdin 已关闭）。
+            _ => gateway.recv_event().await,
+        };
+
+        match event {
             Some(event) => {
-                let should_exit = renderer.handle_event(&event);
-                if should_exit {
-                    break;
+                if matches!(event, crate::protocol::WingEvent::Interrupted { .. }) {
+                    turn_active = false;
+                }
+                if renderer.handle_event(&event) {
+                    break renderer.exit_code();
                 }
             }
             None => {
                 tracing::warn!("WS connection closed before TurnResult");
-                return Ok(ExitCode::FAILURE);
+                break ExitCode::FAILURE;
             }
         }
+    };
+
+    // 11. 收尾：通知 stdin pump 停下（有界等待进行中的应答写完——它可能恰好
+    //     跨过 turn 结束，直接 abort 会让编排器收不到响应）。
+    if let Some(pump) = pump.take() {
+        pump.finish().await;
     }
 
-    Ok(renderer.exit_code())
+    Ok(exit_code)
 }
 
 // ============================================================
@@ -698,6 +783,45 @@ mod tests {
                 "5",
                 "--yolo",
             ]
+        );
+    }
+
+    // ---- normalize_tools ----
+
+    #[test]
+    fn tools_absent_keeps_template_defaults() {
+        assert_eq!(normalize_tools(None), None);
+    }
+
+    #[test]
+    fn tools_preset_and_empty_values_are_dropped() {
+        // SDK 固定传 `--tools default` / `--tools ""`——两者都不是工具名列表，
+        // 必须丢弃（= 用模板默认），否则模板工具集被覆盖成空集/假工具名。
+        assert_eq!(normalize_tools(Some("")), None);
+        assert_eq!(normalize_tools(Some("   ")), None);
+        assert_eq!(normalize_tools(Some("default")), None);
+        assert_eq!(normalize_tools(Some("  default  ")), None);
+    }
+
+    #[test]
+    fn real_tool_lists_keep_existing_semantics() {
+        assert_eq!(normalize_tools(Some("Read")), Some(vec!["Read".into()]));
+        assert_eq!(
+            normalize_tools(Some("Read,Bash")),
+            Some(vec!["Read".into(), "Bash".into()])
+        );
+        assert_eq!(
+            normalize_tools(Some("Read, ,Bash")),
+            Some(vec!["Read".into(), "Bash".into()])
+        );
+        assert_eq!(
+            normalize_tools(Some(" Read , Bash ")),
+            Some(vec!["Read".into(), "Bash".into()])
+        );
+        // 只丢弃"整个值就是语义值"的情形，混合值按既有语义处理。
+        assert_eq!(
+            normalize_tools(Some("default,Read")),
+            Some(vec!["default".into(), "Read".into()])
         );
     }
 }

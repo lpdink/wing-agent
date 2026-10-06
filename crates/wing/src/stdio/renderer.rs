@@ -1,7 +1,7 @@
 //! StdioRenderer — converts WingEvent to stdout output based on format.
 #![allow(clippy::print_stdout)]
 
-use std::io::Write;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::protocol::WingEvent;
@@ -9,6 +9,7 @@ use crate::stdio::OutputFormat;
 use crate::stdio::ndjson::{
     AssistantMessage, MessageContent, ResultMessage, SystemInitMessage, UserMessage,
 };
+use crate::stdio::stdout::StdoutSink;
 
 /// Renders WingEvents to stdout in the specified format.
 pub struct StdioRenderer {
@@ -17,23 +18,17 @@ pub struct StdioRenderer {
     session_id: String,
     exit_code: std::process::ExitCode,
     done: bool,
-    /// Where rendered frames go. Production: stdout. Tests: a captured buffer
-    /// — `wing -p`'s stdout contract (one frame per line, exit code) is the
-    /// front-end's user-facing surface, so it has to be assertable without a
-    /// real terminal.
-    out: Box<dyn Write>,
+    /// 协议帧的出口。与 stdin pump 共享同一个 sink——stdout 只能有一个写者，
+    /// 见 [`StdoutSink`]。
+    out: Arc<StdoutSink>,
 }
 
 impl StdioRenderer {
-    pub fn new(format: OutputFormat, start_time: Instant, session_id: String) -> Self {
-        Self::with_writer(format, start_time, session_id, Box::new(std::io::stdout()))
-    }
-
-    fn with_writer(
+    pub fn new(
         format: OutputFormat,
         start_time: Instant,
         session_id: String,
-        out: Box<dyn Write>,
+        out: Arc<StdoutSink>,
     ) -> Self {
         Self {
             format,
@@ -48,8 +43,8 @@ impl StdioRenderer {
     /// Write one frame line, keeping `println!`'s failure semantics: a stdout
     /// that cannot be written (e.g. the orchestrator closed the pipe) is fatal
     /// rather than silently swallowed.
-    fn out_line(&mut self, text: &str) {
-        writeln!(self.out, "{text}").unwrap_or_else(|e| panic!("failed printing to stdout: {e}"));
+    fn out_line(&self, text: &str) {
+        self.out.line(text);
     }
 
     pub fn exit_code(&self) -> std::process::ExitCode {
@@ -327,38 +322,12 @@ mod tests {
     //! boundary, so a change to the frames fails offline.
 
     use super::*;
+    use crate::stdio::stdout::CaptureSink;
     use serde_json::json;
-    use std::sync::Arc;
-    use std::sync::Mutex;
 
-    /// A `Write` sink whose bytes the test can read back.
-    #[derive(Clone, Default)]
-    struct SharedBuf(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for SharedBuf {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl SharedBuf {
-        fn text(&self) -> String {
-            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-        }
-    }
-
-    fn setup(format: OutputFormat) -> (StdioRenderer, SharedBuf) {
-        let buf = SharedBuf::default();
-        let renderer = StdioRenderer::with_writer(
-            format,
-            Instant::now(),
-            "sess-1".into(),
-            Box::new(buf.clone()),
-        );
+    fn setup(format: OutputFormat) -> (StdioRenderer, CaptureSink) {
+        let buf = CaptureSink::default();
+        let renderer = StdioRenderer::new(format, Instant::now(), "sess-1".into(), buf.sink());
         (renderer, buf)
     }
 
