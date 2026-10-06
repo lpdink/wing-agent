@@ -54,6 +54,10 @@ class TestValidateTag:
             "-leading-dash",
             "x" * (MAX_TAG_LENGTH + 1),
             "line\nbreak",
+            "c1\x9bcontrol",  # C1 CSI（8-bit 转义前导）
+            "c1\x90control",  # C1 DCS
+            "del\x7fchar",
+            "nul\x00char",
         ],
     )
     def test_rejects_invalid(self, tag: str):
@@ -132,6 +136,10 @@ class TestSanitizeTags:
     def test_none_and_empty(self):
         assert sanitize_tags(None) == []
         assert sanitize_tags([]) == []
+
+    def test_drops_control_characters_including_c1(self):
+        """C1 控制符（8-bit 转义前导）在读侧同样被清洗。"""
+        assert sanitize_tags(["ok", "csi\x9bhere", "dcs\x90here", "del\x7f"]) == ["ok"]
 
     def test_applied_as_mutation_base(self):
         """apply_tag_ops 的既有集合先清洗：脏数据不阻断变更，且写出的结果干净。"""

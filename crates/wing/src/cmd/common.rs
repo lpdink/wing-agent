@@ -86,10 +86,16 @@ pub async fn ensure_tags_applied(
         .tag_session(session_id, None, None)
         .await
         .map_err(|e| {
-            anyhow::anyhow!(
-                "failed to verify --tag on session {session_id}: {e} \
-                 (does the running gateway predate session tags? restart it: wing stop && wing start)"
-            )
+            // 404/405 = 运行中的网关早于 tags 能力（重启即可）；其余保持
+            // 传输错误的原文——不要把网络抖动归因成"旧网关"。
+            if e.is_not_found() {
+                anyhow::anyhow!(
+                    "failed to verify --tag on session {session_id}: {e} \
+                     (does the running gateway predate session tags? restart it: wing stop && wing start)"
+                )
+            } else {
+                anyhow::anyhow!("failed to verify --tag on session {session_id}: {e}")
+            }
         })?;
     let missing = missing_tags(tags, &resp.tags);
     if !missing.is_empty() {

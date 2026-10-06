@@ -27,6 +27,7 @@ raise ValueError（错误信息点名违规值——CLI / Agent 靠它纠错，�
 
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
@@ -45,7 +46,11 @@ def validate_tag(tag: str) -> str:
     if tag.startswith("-"):
         raise ValueError(f"invalid tag {tag!r}: must not start with '-'")
     for ch in tag:
-        if ch.isspace() or ch == "," or ord(ch) < 32 or ord(ch) == 127:
+        # Cc = C0 控制符（\n \t 等先被 isspace 命中）+ DEL + **C1**
+        # （U+0080–U+009F：识别 8-bit 转义序列的终端会把它们当成 CSI/DCS
+        # 前导——标签会被原样回显到 `wing ps` / `tag` / `info` 的输出里，
+        # 注入面必须在这层关掉）。
+        if ch.isspace() or ch == "," or unicodedata.category(ch) == "Cc":
             raise ValueError(
                 f"invalid tag {tag!r}: contains forbidden character {ch!r} "
                 "(whitespace / comma / control characters are not allowed)"
