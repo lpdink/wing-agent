@@ -220,6 +220,7 @@ class TestManagerSetTags:
             "20250101-000000-ABCDEF01",  # 大写 hex 不合规（严格小写）
             "20250101-000000-abcdef0",  # 长度不足
             "20260101-111111",  # 前缀（截断）不合规
+            "٢٠٢٥٠١٠١-٠٠٠٠٠٠-abcdef01",  # Unicode 数字不是 ASCII 数字
         ):
             with pytest.raises(LookupError):
                 file_sm.set_session_tags(bad, add=["x"])
@@ -388,3 +389,32 @@ class TestStorePathSanitize:
         assert m.added == ["new"]
         raw = json.loads((session_dir / "metadata.json").read_text())
         assert raw["tags"] == ["ok", "new"]
+
+
+class TestListInclusionUsesSanitizedTags:
+    """N-3：列表的"带标"判定与投影同口径（清洗后的集合）。"""
+
+    @pytest.mark.asyncio
+    async def test_garbage_only_tags_stay_hidden_valid_tags_listed(
+        self, tmp_path: Path
+    ) -> None:
+        store = FileSessionStore(tmp_path / "sessions")
+        sm = SessionManager({"file": store})
+
+        garbage = "20250101-000000-abcdef07"
+        garbage_dir = tmp_path / "sessions" / garbage
+        garbage_dir.mkdir(parents=True)
+        (garbage_dir / "metadata.json").write_text(
+            json.dumps({"tags": ["bad tag"]}), encoding="utf-8"
+        )
+
+        valid = "20250101-000000-abcdef08"
+        valid_dir = tmp_path / "sessions" / valid
+        valid_dir.mkdir(parents=True)
+        (valid_dir / "metadata.json").write_text(
+            json.dumps({"tags": ["ok"]}), encoding="utf-8"
+        )
+
+        ids = [i.id for i in sm.list_sessions()]
+        assert valid in ids
+        assert garbage not in ids  # 清洗后为空 = 无名无标

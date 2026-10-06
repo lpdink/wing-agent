@@ -657,9 +657,10 @@ class SessionManager:
             for summary in store.list_summaries():
                 metadata = summary.metadata
                 name = metadata.session_name or summary.first_user_message
-                # 无名且带标也要列出（"创建即打标"的会话在首条消息落盘前就应
-                # 可被 ps --tag / tag --list 找到）；无名无标的照旧隐藏。
-                if not name and not metadata.tags:
+                # 无名且无标的照旧隐藏——"带标"按**清洗后**的集合判定（仅含
+                # 非法标签的脏会话不当作带标，避免空标题噪音；store 层的
+                # 原始字段判定只负责把候选交给这里）。
+                if not name and not sanitize_tags(metadata.tags):
                     continue
 
                 loaded = self._sessions.get(summary.id)

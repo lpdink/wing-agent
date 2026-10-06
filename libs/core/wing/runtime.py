@@ -148,10 +148,10 @@ class WingRuntime:
         )
 
     def resume_session(self, session_id: str) -> Session:
-        """从磁盘恢复已有 session。支持模糊匹配。
+        """从磁盘恢复已有 session（精确匹配 + 格式闸门，见 SessionManager）。
 
         Raises:
-            LookupError: session 不存在
+            LookupError: session 不存在（含 id 格式不合规——与本处同价）
         """
         return self.sm.resume_session(session_id)
 

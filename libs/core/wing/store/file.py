@@ -161,15 +161,17 @@ class FileSessionStore(SessionStore):
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            return SessionMetadata.model_validate(data)
         except Exception as e:
-            # 不静默降级：损坏的 metadata 若被下一次 save 无痕覆盖，
-            # 会丢失 forked_from / 标题等字段，因此留 warning。
+            # 损坏的 metadata（JSON 解析失败 / schema 不符）统一降级：
+            # warning + 空对象。不抛——损坏数据不能把读取路径打挂（列表 /
+            # TUI / 水合；一个坏目录不该噎死整个会话列表）；也不静默——
+            # 下一次 save 会把它覆盖成当前状态（丢失的字段因此可见于日志）。
             log.warning(
                 f"Corrupted metadata.json for session '{session_id}' at {path}: {e}. "
                 "Treating as empty; next save will overwrite it."
             )
             return SessionMetadata()
-        return SessionMetadata.model_validate(data)
 
     def save_metadata(self, session_id: str, metadata: SessionMetadata) -> None:
         data = metadata.model_dump(exclude_none=True)

@@ -11,7 +11,9 @@ from datetime import datetime
 #: ``YYYYMMDD-HHMMSS-<8 位小写 hex>``（见 ``generate_session_id``）。
 #: 这是硬闸门而非"尽量匹配"——id 会作为存储路径组件使用，任何不合规的
 #: 值一律拒绝（防路径穿越），不做清洗或容错。
-SESSION_ID_PATTERN = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{8}$")
+#: 数字位显式用 ``[0-9]``（``\d`` 会放行 Unicode 数字，与生成端的 ASCII
+#: 语义不符——闸门必须恰好等于生成器能产出的形态）。
+SESSION_ID_PATTERN = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$")
 
 
 def is_valid_session_id(value: object) -> bool:

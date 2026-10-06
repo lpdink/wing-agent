@@ -375,3 +375,39 @@ class TestFileLayout:
         log.append([{"role": "assistant", "content": "2"}])
         lines = (tmp_path / "sessions" / _sid("a") / "history.jsonl").read_text()
         assert lines.count("\n") == 2
+
+
+class TestListSummariesResilience:
+    """坏 metadata（合法 JSON / 非法 schema）不能噎死整个列表（r2 复核 S-1 回归）。"""
+
+    def test_schema_invalid_metadata_does_not_break_listing(self, tmp_path: Path):
+        """no-history 目录：不再因先读 metadata 而抛 ValidationError。"""
+        root = tmp_path / "sessions"
+        bad = root / _sid("schema-bad")
+        bad.mkdir(parents=True)
+        (bad / "metadata.json").write_text(
+            json.dumps({"tags": "abc"}), encoding="utf-8"
+        )
+
+        store = FileSessionStore(root)
+        assert store.list_summaries() == []  # 降级为"无 metadata"，而不是 raise
+
+    def test_schema_invalid_metadata_with_history_still_listed(self, tmp_path: Path):
+        """带 history 的坏 metadata：按"损坏数据 warning + 空"政策降级，条目保留。"""
+        root = tmp_path / "sessions"
+        sid = _sid("schema-bad-history")
+        session_dir = root / sid
+        session_dir.mkdir(parents=True)
+        (session_dir / "history.jsonl").write_text(
+            json.dumps({"role": "user", "content": "hello", "uuid": "u1"}) + "\n",
+            encoding="utf-8",
+        )
+        (session_dir / "metadata.json").write_text(
+            json.dumps({"tags": 42}), encoding="utf-8"
+        )
+
+        store = FileSessionStore(root)
+        summaries = store.list_summaries()
+        assert [s.id for s in summaries] == [sid]
+        assert summaries[0].metadata.tags is None
+        assert summaries[0].first_user_message == "hello"

@@ -104,3 +104,37 @@ async def test_nonconforming_dirs_are_not_sessions(probe: Probe) -> None:
             body={"session_id": "not-a-session"},
         )
     assert failure.value.status == 404, failure.value.call.render()
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_broken_metadata_directory_does_not_break_listing(probe: Probe) -> None:
+    """坏 metadata（合法 JSON / 非法 schema）目录不能让 /api/session/list 500（r2 S-1）。
+
+    WHEN sessions root 里手工放入两个合法目录名的坏目录：一个无 history 只有
+    `{"tags": "abc"}`，一个带 history 但 `{"tags": 42}`
+    THEN 列表接口 200：前者按"无内容"跳过、后者按"损坏降级"照常列出。
+    """
+    root = probe.env.sessions_path
+
+    no_history = root / "20250101-000000-abcdef09"
+    no_history.mkdir(parents=True, exist_ok=True)
+    (no_history / "metadata.json").write_text(
+        json.dumps({"tags": "abc"}), encoding="utf-8"
+    )
+
+    with_history = root / "20250101-000000-abcdef0a"
+    with_history.mkdir(parents=True, exist_ok=True)
+    (with_history / "history.jsonl").write_text(
+        json.dumps({"role": "user", "content": "hello", "uuid": "h-u1"}) + "\n",
+        encoding="utf-8",
+    )
+    (with_history / "metadata.json").write_text(
+        json.dumps({"tags": 42}), encoding="utf-8"
+    )
+
+    driver = probe.driver_required
+    payload = await driver.http.request("GET", "/api/session/list")
+    ids = [entry["id"] for entry in payload.get("sessions", [])]
+    assert "20250101-000000-abcdef09" not in ids, ids
+    assert "20250101-000000-abcdef0a" in ids, ids
