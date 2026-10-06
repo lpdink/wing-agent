@@ -125,7 +125,7 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 * **Ctrl+O 提示**：只出现在**进行中**的行上、且这次会话**还没按过** `Ctrl+O`（`CellContext::thinking_expanded` 仍是 `None`）—— 按过一次即退场（模式已全局翻转、切换效果自证），冻结的历史行保持安静。文案指向**按下去会发生什么**：展开中 `· Ctrl+O 折叠`、折叠中 `· Ctrl+O 展开`。静态、dim、不进刷光跨度（动效只留给「进行中」这一个信号）；让位序排在**最前**：装不下就整个不显示，措辞 / 秒数不为它让位（见 `ThinkingBlock::label_line`）；
 * **帧驱动**：绝对截止时刻（网格锚在块的起点上，`ThinkingBlock::next_frame`），滚动 / 流式事件不会把它推后；没有活跃块、或块**不在视口**时定时臂 park（看不见的动画不花钱）——与欢迎屏扫光的契约相同（[welcome-mascot.md](welcome-mascot.md) 的「重绘成本契约」）；
 * **计时口径**：块内首个 reasoning 事件 → 该块被冻结（下一条正文 / 工具调用事件，或回合结束）。中断（Esc）、错误同样就地冻结。中途重连（sync 重放半截 reasoning）会少算一点；
-* **标题行在流式路径里的位置**：展开的思考块，标题由 `StreamingRender` 当作行集的第 0 行（`set_header`）——正文因此拿两列续行缩进，链接 / 图片锚点的「行号 == 索引」不变（插 / 摘标题行时锚点的**绝对行号**随之 ±1 平移，见 `images.rs` 的 `shift_anchors_after_insert/remove`；漏平移会让绘制侧按错行找 caption、拒绘，图片静默消失）。后设的标题会**接管**正文首行的 `⦁ `（原件暂存，收起时原样归还）；
+* **标题行在流式路径里的位置**：展开的思考块，标题由 `StreamingRender` 当作行集的第 0 行（`set_header`）——正文因此拿两列续行缩进，链接 / 图片锚点的「行号 == 索引」不变（插 / 摘标题行时锚点的**绝对行号**随之 ±1 平移，见 `images.rs` 的 `shift_anchors_after_insert/remove`；漏平移会让绘制侧按错行找 caption、拒绘，图片静默消失）。后设的标题会**接管**正文首行的 `⦁ `（原件暂存，收起时原样归还）。`sync_stream_header` 对**每个**思考块都设标题：折叠时也设，只是整条流不参与渲染（展开 / 折叠切换的那一帧行集已经就位）；
 * **切换的落点**：覆盖是 `ChatView` 的一个会话级字段、渲染期经 `CellContext` 下发（`ThinkingMode::expanded` 一个纯函数解析），不落在块上 —— 新起的块天然跟随当前模式，`clear()` 也不重置它。块自己冻在 `深度思考 12s`，不再是旧的「新一轮把旧计数清零」。
 
 ## 三、不变量：流式静息态 == 参考全量渲染
@@ -134,7 +134,7 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 
 宽度矩阵分两段：**narrow（1..=6 列）** 与主矩阵（40/80/120）。窄带不是"边角料"——布局层没有最小列宽约束（tmux 窄 pane 可达 1 列），而硬折行在那里最粗暴：2 列 cell 前缀就能填满一整行，普通行会长得和锚点的空白覆盖行一模一样（历史上正是这一档把空行去重判据带歪过）。
 
-**标题行的例外**：展开的思考块，cell 每帧给引擎设一行标题（`StreamingRender::set_header`，第 0 行）。不变量在这种形态下读作：`header + 正文`，且**正文部分**必须与同一文本的参考渲染逐 span 相同（正文第一行按续行缩进 —— 参考渲染的 `⦁ ` 归属移交给了标题）。`crates/wing/tests/stream_render_reconcile.rs` 的 `header_shape_matches_the_reference_body` 覆盖这条（含链接 / 锚点的行号 == 索引）。
+**标题行的例外**：展开的思考块，cell 每帧给引擎设一行标题（`StreamingRender::set_header`，第 0 行；折叠时也设置 —— 整条流不参与渲染，只为展开 / 折叠切换就位）。不变量在这种形态下读作：`header + 正文`，且**正文部分**必须与同一文本的参考渲染逐 span 相同（正文第一行按续行缩进 —— 参考渲染的 `⦁ ` 归属移交给了标题）。`crates/wing/tests/stream_render_reconcile.rs` 的 `header_shape_matches_the_reference_body` 覆盖这条（含链接 / 锚点的行号 == 索引）。
 
 因此：**流式与终态不一致 = bug**，不是"渲染风格问题"。反过来说，最终画面看着不对但 `--check` 通过，说明问题在解析/规则（第二节），不在增量引擎。
 

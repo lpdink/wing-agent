@@ -1259,7 +1259,9 @@ mod tests {
     }
 
     /// 默认展开（`visible` + 未按过 Ctrl+O）：流式路径同样带标题行 ——
-    /// 这是存量用户（默认配置）现在看到的形态，提示指向「折叠」。
+    /// 这是存量用户（默认配置）现在看到的形态，提示指向「折叠」；并且
+    /// 收起 → 再展开的往返（默认路径最频繁的动作）要在 CachedCell 边界上
+    /// 保持子弹接管 / 归还的完整。
     #[test]
     fn a_visible_default_thinking_stream_carries_the_header() {
         use std::time::Instant;
@@ -1302,6 +1304,25 @@ mod tests {
         assert!(
             !text.contains("the reasoning body"),
             "收起不泄露正文：{text}"
+        );
+
+        // 再展开：正文回来、标题仍在第 0 行，且首行前缀**恰好**两格
+        // （子弹归标题行，接管 / 归还往返不残留、不多缩进）。
+        let frame = cell.compute_cell_frame(80, &ctx);
+        let lines: Vec<String> = frame.lines.iter().map(|l| l.to_string()).collect();
+        assert!(
+            lines[0].contains("深度思考中"),
+            "标题应在第 0 行：{lines:?}"
+        );
+        let body_line = frame
+            .lines
+            .iter()
+            .find(|l| l.to_string().contains("the reasoning body"))
+            .expect("再展开后正文应回来");
+        assert_eq!(
+            body_line.spans[0].content.as_ref(),
+            "  ",
+            "正文首行前缀恰好两格：{body_line:?}"
         );
     }
 }

@@ -376,12 +376,14 @@ pub struct StreamingRender {
     code_tail: Option<CodeCache>,
     /// Composed-line bookkeeping for that same open block.
     code_flat: Option<CodeFlat>,
-    /// 插入标题时要接管 / 归还的正文首行子弹。
+    /// 标题行接管 / 归还 `⦁ `（正文首行子弹）时的原件暂存。
     ///
-    /// 正文可能先以 `⦁ `（cell 首行）渲染过（`visible` 默认，或展开前的
-    /// 折叠帧），之后才展开出标题（Ctrl+O）：子弹原件在这里暂存、正文首行
-    /// 就地换成两列续行缩进（等宽，链接 / 图片的列算术不变），摘掉标题时原样
-    /// 还回去 —— 两套 profile 的子弹样式都不会串。
+    /// 标题行在场时子弹归它：`insert_header_front` 把正文首行的 `⦁ ` 偷走
+    /// （原件放这里）、正文首行就地换成两列续行缩进（等宽，链接 / 图片的列
+    /// 算术不变）；`remove_header_front` 优先把原件原样还回去 —— 两套 profile
+    /// 的子弹样式都不会串。实践中每次 `set_header` 更新（进行中的秒数 /
+    /// 刷光相位每帧在动）都走一轮「还旧、偷新」；暂存件被 `rebuild` /
+    /// `finalize` 清掉时，归还退化成「就地改写前缀」（见 `remove_header_front`）。
     stolen_bullet: Option<Span<'static>>,
     /// 可选的标题行：cell 顶部的固定一行（思考块展开时保留的
     /// `⦁ 深度思考中 4s` 标题），由 cell 每帧提供。
@@ -501,8 +503,8 @@ impl StreamingRender {
         if let Some(code_flat) = self.code_flat.as_mut() {
             code_flat.start += 1;
         }
-        // 标题要占 `⦁ `：正文首行若还握着子弹（先渲染后展开的情形），
-        // 就地换成两列续行缩进，原件暂存待还。
+        // 标题要占 `⦁ `：正文首行若握着子弹（上一轮 remove 归还的，或
+        // 历史上无标题时渲染出的），就地换成两列续行缩进，原件暂存待还。
         if let Some(first) = self.flat_lines.lines.get_mut(1)
             && let Some(span) = first.spans.first_mut()
             && span.content.as_ref() == "⦁ "

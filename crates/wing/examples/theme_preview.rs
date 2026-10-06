@@ -207,7 +207,21 @@ fn build(config: &AppConfig, palette: &ThemePalette, width: u16) -> Vec<Line<'st
     done.finish(now);
     lines.extend(done.to_lines(palette, ThinkingMode::Hidden, None, width, images));
 
-    section(&mut lines, "thinking · 展开（Ctrl+O）", width, palette);
+    section(
+        &mut lines,
+        "thinking · 展开（visible 默认）",
+        width,
+        palette,
+    );
+    // 进行中：标题带刷光与 `Ctrl+O 折叠` 提示（存量用户默认看到的形态）。
+    let mut expanded_active = ThinkingBlock::new();
+    expanded_active.append("正文在下方流式展开，标题行持续刷光。");
+    expanded_active.start(now - Duration::from_secs(4));
+    expanded_active.tick(now);
+    expanded_active.set_sweep_phase(0.45);
+    lines.extend(expanded_active.to_lines(palette, ThinkingMode::Visible, None, width, images));
+
+    label(&mut lines, "展开 · 已定格", palette);
     let mut expanded = ThinkingBlock::new();
     expanded.append(
         "先确认槽位语义。`dim` 归 chrome —— 边框、gutter、计时都走它，不能再兼作正文的次级色。\n\n",
@@ -218,7 +232,7 @@ fn build(config: &AppConfig, palette: &ThemePalette, width: u16) -> Vec<Line<'st
     expanded.append("warning 往琥珀收，别和 accent 撞。");
     expanded.start(now - Duration::from_secs(12));
     expanded.finish(now);
-    lines.extend(expanded.to_lines(palette, ThinkingMode::Hidden, Some(true), width, images));
+    lines.extend(expanded.to_lines(palette, ThinkingMode::Visible, None, width, images));
 
     // ── 工具调用：各状态 × 各渲染策略 ────────────────────────────
     section(&mut lines, "tool calls", width, palette);
