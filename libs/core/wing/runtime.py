@@ -42,7 +42,8 @@ from wing.request_context import (
     set_request_context,
 )
 from typing import TYPE_CHECKING
-from wing.session import Session, SessionManager, SessionReaper
+from collections.abc import Iterable
+from wing.session import Session, SessionManager, SessionReaper, TagMutation
 from wing.system import ReloadResult, reload_system as _reload_system
 from wing.store import FileSessionStore, MemorySessionStore, SessionStore
 
@@ -127,20 +128,23 @@ class WingRuntime:
         workspace: str | None = None,
         agent_override: AgentOverride | None = None,
         backend: str | None = None,
+        tags: list[str] | None = None,
     ) -> Session:
         """创建新 session。
 
         Args:
             backend: 存储后端（file/memory），None 使用默认后端（file）。
+            tags: 创建即打标（校验语义同 :meth:`set_session_tags`）。
 
         Raises:
-            ValueError: 模板不存在或 backend 未知
+            ValueError: 模板不存在 / backend 未知 / 标签非法
         """
         return self.sm.create_session(
             template_name=template_name,
             workspace=workspace,
             agent_override=agent_override,
             backend=backend,
+            tags=tags,
         )
 
     def resume_session(self, session_id: str) -> Session:
@@ -179,6 +183,21 @@ class WingRuntime:
                 f"or target_uuid '{target_uuid}' invalid"
             )
         return result
+
+    def set_session_tags(
+        self,
+        session_id: str,
+        *,
+        add: Iterable[str] = (),
+        remove: Iterable[str] = (),
+    ) -> TagMutation:
+        """原子增删会话标签（add / remove 皆空 = 纯读；不水合已逐出会话）。
+
+        Raises:
+            LookupError: session 不存在
+            ValueError: 标签非法 / 超过单会话上限
+        """
+        return self.sm.set_session_tags(session_id, add=add, remove=remove)
 
     # ============================================================
     # Session 逐出（eviction）

@@ -43,6 +43,7 @@ def build_session_info(session: Session) -> SessionInfoResponse:
         ),
         skills_info=cm.get_skills_info(),
         system_prompt=cm.system_prompt.content or "",
+        tags=session.tags,
     )
 
 
