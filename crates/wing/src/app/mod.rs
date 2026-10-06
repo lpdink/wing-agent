@@ -66,6 +66,7 @@ use crate::ui::status_bar::StatusData;
 use crate::ui::toast::Toast;
 use crate::ui::toast::ToastKind;
 use crate::ui::toast::render_toast;
+use crate::ui::welcome::SessionFacts;
 use crate::ui::welcome::Welcome;
 use crate::util::title;
 use title::AttentionKind;
@@ -174,6 +175,12 @@ pub struct App {
     /// Markdown pictures: capability, store, metadata table, drawing pass —
     /// see [`images`](self::images).
     images: Images,
+    /// 这个会话加载的 skills / rules 数量 —— 名牌右列的事实行。
+    ///
+    /// 由 SyncSession 的 agent 快照写入（`None` = 老网关 / 还没同步到），
+    /// 读它的只有 [`App::sync_welcome`]：它曾是 transcript 顶部一条 system
+    /// 消息，现在归名牌（见 [`crate::ui::welcome::SessionFacts`]）。
+    session_facts: Option<SessionFacts>,
 }
 
 impl App {
@@ -207,6 +214,7 @@ impl App {
             now,
             false,
             true,
+            None,
         ));
         Self {
             status: StatusData::default(),
@@ -243,6 +251,7 @@ impl App {
             geometry: FrameGeometry::default(),
             scrollbar: scrollbar::ScrollbarState::default(),
             images,
+            session_facts: None,
         }
     }
 
@@ -254,17 +263,19 @@ impl App {
     ///
     /// 两个门控信号：**干活**（`turn.working`，决定站姿还是飞行）与**在视口里**
     /// （`ChatView::header_in_view`）—— 欢迎屏被滚出去之后整条时钟停摆，
-    /// 常驻 idle 循环因此常态零成本。
+    /// 常驻 idle 循环因此常态零成本。第三个信号是**会话事实**（skills / rules
+    /// 计数，SyncSession 到达时变化）：名牌右列的那一行随它重建。
     fn sync_welcome(&mut self, palette: &ThemePalette, width: u16, now: std::time::Instant) {
+        let working = self.turn.working;
+        let visible = self.chat.header_in_view();
+        let facts = self.session_facts;
         let Some(welcome) = self.welcome.as_mut() else {
             return;
         };
-        let working = self.turn.working;
-        let visible = self.chat.header_in_view();
-        if !welcome.needs_rebuild(width, now, working, visible) {
+        if !welcome.needs_rebuild(width, now, working, visible, facts) {
             return;
         }
-        let lines = welcome.build(palette, width, now, working, visible);
+        let lines = welcome.build(palette, width, now, working, visible, facts);
         self.chat.set_header(lines);
     }
 

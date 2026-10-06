@@ -272,3 +272,58 @@ fn scrolling_the_welcome_out_of_view_parks_the_clock() {
     app.sync_welcome(&palette, 100, settled + Duration::from_secs(5));
     assert_ne!(hidden, header_text(&app), "回到视口要立刻重绘");
 }
+
+/// 开屏 = 名牌 + 输入卡：会话事实（skills / rules）挂在名牌右列，
+/// transcript 里既没有 system 消息，也没有别的 cell。
+#[test]
+fn the_start_screen_shows_session_facts_in_the_nameplate() {
+    let mut app = test_app();
+    app.handle_event(crate::protocol::WingEvent::SyncSession {
+        session_id: "test-session".into(),
+        messages: vec![],
+        uncommitted: None,
+        uncommitted_tools: vec![],
+        events: vec![],
+        status: crate::protocol::SessionStatus::Idle,
+        turn_started_at: None,
+        agent: Some(Box::new(crate::protocol::AgentInfo {
+            model_name: "test-model".into(),
+            system_prompt: None,
+            tools: vec![],
+            skills: vec!["pdf".into(), "webapp".into()],
+            rules: vec!["AGENTS.md".into()],
+            workspace: None,
+            provider_name: None,
+            model_display_name: None,
+        })),
+        name: None,
+        draft: None,
+        meta: crate::protocol::EventMeta {
+            created_at: "2026-01-01T00:00:00+00:00".into(),
+            session_id: Some("test-session".into()),
+            request_id: "r".into(),
+        },
+    });
+
+    let body = frame_body(&mut app, 100, 30);
+    let compacted = compact(&body);
+    assert!(
+        compacted.contains("2skills·1rule"),
+        "事实行在名牌右列：\n{body}"
+    );
+    assert!(
+        !compacted.contains("system"),
+        "开屏不该有 system 行：\n{body}"
+    );
+    assert!(app.chat.cells.is_empty(), "transcript 里不该有任何 cell");
+
+    // 老网关（没有 agent 快照）：整行不出现，名牌其余部分照旧。
+    let mut app = test_app();
+    app.handle_event(sync_event(vec![], None, vec![], vec![], None));
+    app.session_facts = None;
+    let body = frame_body(&mut app, 100, 30);
+    assert!(
+        !compact(&body).contains("skill"),
+        "没有会话事实时不出现那一行：\n{body}"
+    );
+}

@@ -35,6 +35,7 @@ use crate::ui::cells::tool_call::ToolStatus;
 use crate::ui::chat_view::ChatCell;
 use crate::ui::status_bar::TurnUsage;
 use crate::ui::toast::Toast;
+use crate::ui::welcome::SessionFacts;
 use crate::util::title::AttentionKind;
 
 impl App {
@@ -490,10 +491,10 @@ impl App {
 
     /// Replace the whole view with a session snapshot (`SyncSession`).
     ///
-    /// A full state replacement, not an append: clear → banner → working state
-    /// → replay in the chain order that makes diff anchoring structural
-    /// (messages → uncommitted → uncommitted tools → fact events) → draft /
-    /// name / agent snapshot.
+    /// A full state replacement, not an append: clear → session facts →
+    /// working state → replay in the chain order that makes diff anchoring
+    /// structural (messages → uncommitted → uncommitted tools → fact events)
+    /// → draft / name / agent snapshot.
     ///
     /// The working state comes from the snapshot's **status** — it is read, not
     /// inferred. A new subscriber cannot hear the past `turn_started` (a
@@ -522,22 +523,23 @@ impl App {
         self.chat.clear();
         self.ctx.reset();
 
-        // Loaded skills/rules banner: one summary line pinned at the
-        // top of the chat, mirrored on every sync (connect / resume /
-        // switch / fork) — counts only; details stay behind /skills
-        // so the sync payload carries lists, not rendered blobs.
+        // Session facts (skills / rules counts) ride the snapshot straight into
+        // the welcome nameplate's right column — they are *environment* facts,
+        // not transcript content. They used to land in the chat as a system
+        // message ("loaded 2 skills, 1 rules · /skills for details"), which put
+        // a log line under the pixel wordmark on the start screen; the details
+        // themselves stay behind /skills so the sync payload carries lists, not
+        // rendered blobs.
         //
         // The same snapshot is the session's own metadata, restored *before*
         // the turn state below: the terminal title carries the workdir suffix,
         // and it must already be the new session's label when that title is
         // composed (a session switch with no tick to self-correct on).
+        self.session_facts = agent.as_ref().map(|agent_info| SessionFacts {
+            skills: agent_info.skills.len(),
+            rules: agent_info.rules.len(),
+        });
         if let Some(agent_info) = &agent {
-            let line = format!(
-                "loaded {} skills, {} rules · /skills for details",
-                agent_info.skills.len(),
-                agent_info.rules.len()
-            );
-            self.chat.push(ChatCell::SystemMessage(line));
             self.status.model = agent_info.model_name.clone();
             self.status.model_display_name = agent_info.model_display_name.clone();
             self.status.provider = agent_info.provider_name.clone();

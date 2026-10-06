@@ -12,6 +12,7 @@ use crate::protocol::WingEvent;
 use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::ask::PanelMode;
 use crate::ui::chat_view::ChatCell;
+use crate::ui::welcome::SessionFacts;
 
 fn utc_ago(secs: i64) -> String {
     (chrono::Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339()
@@ -388,7 +389,7 @@ fn test_sync_idle_session_not_working() {
     assert!(app.turn.started_at.is_none());
 }
 
-/// sync_event with an AgentInfo attached (skills/rules banner source).
+/// sync_event with an AgentInfo attached (session-facts source).
 fn sync_event_with_agent(
     agent: Option<crate::protocol::AgentInfo>,
     messages: Vec<serde_json::Value>,
@@ -404,9 +405,10 @@ fn sync_event_with_agent(
 }
 
 #[test]
-fn test_sync_renders_skills_rules_banner() {
-    // Loaded-skills/rules summary: one SystemMessage at the top of the
-    // chat, counts from AgentInfo, details left to /skills.
+fn test_sync_feeds_the_nameplate_instead_of_pushing_a_banner_cell() {
+    // The loaded-skills/rules summary is *session environment*, not a message:
+    // it lands in the welcome nameplate's right column (counts from AgentInfo,
+    // details left to /skills) — the transcript starts with real content.
     let mut app = test_app();
     let agent = crate::protocol::AgentInfo {
         model_name: "test-model".into(),
@@ -423,35 +425,40 @@ fn test_sync_renders_skills_rules_banner() {
         vec![serde_json::json!({"role": "user", "content": "hi"})],
     ));
 
-    match app.chat.cells.first().map(|c| c.cell()) {
-        Some(ChatCell::SystemMessage(text)) => {
-            assert!(
-                text.contains("loaded 2 skills, 1 rules"),
-                "banner should carry counts, got: {text}"
-            );
-            assert!(
-                text.contains("/skills"),
-                "banner should hint the details command, got: {text}"
-            );
-        }
-        other => panic!("expected SystemMessage banner as first cell, got {other:?}"),
-    }
-    // Replay content is untouched behind the banner.
-    assert!(cell_kinds(&app).contains(&"user"));
+    assert_eq!(
+        app.session_facts,
+        Some(SessionFacts {
+            skills: 2,
+            rules: 1
+        }),
+        "counts ride the snapshot into the nameplate"
+    );
+    assert!(
+        !cell_kinds(&app).contains(&"system"),
+        "facts are not a chat cell: {:?}",
+        cell_kinds(&app)
+    );
+    // Replay content is the first thing in the transcript.
+    assert_eq!(cell_kinds(&app).first(), Some(&"user"));
 }
 
 #[test]
-fn test_sync_without_agent_omits_banner() {
-    // agent: None (e.g. older gateway) → no banner, replay only.
+fn test_sync_without_agent_clears_the_facts() {
+    // agent: None (e.g. older gateway) → no facts line in the nameplate.
     let mut app = test_app();
+    app.session_facts = Some(SessionFacts {
+        skills: 2,
+        rules: 1,
+    });
     app.handle_event(sync_event_with_agent(
         None,
         vec![serde_json::json!({"role": "user", "content": "hi"})],
     ));
-    assert!(
-        !cell_kinds(&app).contains(&"system"),
-        "no agent info → no banner"
+    assert_eq!(
+        app.session_facts, None,
+        "a snapshot without agent info clears"
     );
+    assert!(!cell_kinds(&app).contains(&"system"));
 }
 
 #[test]
