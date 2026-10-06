@@ -128,6 +128,22 @@ class TestBashSessionEnv:
 
         assert result.splitlines()[-1] == "test-session"
 
+    @pytest.mark.asyncio
+    async def test_other_env_vars_are_preserved(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The merge (`**os.environ`) keeps the rest of the environment intact.
+
+        Guards the second half of the contract: a refactor degrading the env
+        to `{"WING_SESSION_ID": ...}` (dropping PATH/HOME/...) must go red.
+        """
+        monkeypatch.setenv("WING_SENTINEL", "kept")
+        agent = _MockAgent(str(tmp_path))
+
+        result = await execute_shell('printf "%s" "$WING_SENTINEL"', agent, timeout=10)
+
+        assert result.splitlines()[-1] == "kept"
+
 
 class TestBashShellBehavior:
     """Basic shell features must work: multi-line, heredoc, background, pipe."""

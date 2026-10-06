@@ -24,10 +24,16 @@ ENV_MODEL = "probe/bash-session-env"
 COMMAND = "printf '%s' \"$WING_SESSION_ID\""
 
 
+#: 把网关进程 env 污染成"带旧值"——显式覆盖语义由此变成端到端确定性验证：
+#: 没有注入时命令会漏出 stale-outer-session，注入后必须是真实会话 id。
+@pytest.mark.probe_env(env_overrides={"WING_SESSION_ID": "stale-outer-session"})
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_bash_sees_own_session_id_env(probe: Probe) -> None:
     """Bash 工具里 `WING_SESSION_ID` == 本会话真实 id（红线）。
+
+    网关进程 env 预置了旧值 `stale-outer-session`（probe_env 旋钮）——"显式
+    覆盖、不依赖继承"因此成为场景的确定断言，而非"恰好没触发"。
 
     WHEN yolo 会话里剧本发起一次 Bash 调用（打印该环境变量）
     THEN 工具结果里 stdout 逐字等于该会话的真实 session id；调用参数、事件与
