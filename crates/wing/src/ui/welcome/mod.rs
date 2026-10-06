@@ -111,8 +111,10 @@ const TEXT_OFFSET: usize = (ART_TERM_ROWS - TEXT_ROWS) / 2;
 ///
 /// 名牌右列的**环境事实**行（`2 skills · 1 rule`）：它随每次 SyncSession 到达，
 /// 曾经是一条渲染在 transcript 顶部的 system 消息（`⦁ system` + 日志式英文），
-/// 开屏时紧贴在像素名牌下面 —— 那里没有它的位置。0/0 时整行不出现：一条
-/// 什么都没说的事实不值得占一行。
+/// 开屏时紧贴在像素名牌下面 —— 那里没有它的位置。
+///
+/// 0/0（或老网关）时这一行是**空白占位**、不是缺席：槽位恒在，名牌高度才不随
+/// sync 变化（见 [`text_column`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionFacts {
     /// 已加载的 skill 数（`AgentInfo.skills`）。
@@ -595,6 +597,24 @@ mod tests {
         Some(SessionFacts { skills, rules })
     }
 
+    /// 名牌右列的**事实槽位**：版本行的下一行，取那行的最后一个 span（Full 档
+    /// 那一行 = 海鸥字形 + 补白 + 文字列；槽位缺席时是空行）。
+    ///
+    /// 断言走槽位而不是整块文本：tip 是抽签来的（池子里有 `/skills 看已装技能`
+    /// 这类含 "skill" 的句子），对整块文本做"不含某词"的断言迟早会随池子改动
+    /// 变红。
+    fn facts_slot(lines: &[Line<'static>]) -> String {
+        let version = lines
+            .iter()
+            .position(|line| line.spans.iter().any(|s| s.content.contains("wing · ")))
+            .expect("版本行在名牌右列");
+        lines[version + 1]
+            .spans
+            .last()
+            .map(|span| span.content.trim().to_string())
+            .unwrap_or_default()
+    }
+
     #[test]
     fn layout_ladder() {
         assert_eq!(layout_for(200), Layout::Full);
@@ -631,21 +651,14 @@ mod tests {
     #[test]
     fn facts_line_carries_the_counts_with_correct_plurals() {
         let mut w = welcome();
-        let lines = w.build(&palette(), 120, Instant::now(), false, true, facts(2, 1));
-        let text = text_of(&lines);
-        assert!(text.contains("2 skills · 1 rule"), "{text}");
-        assert!(
-            !text.contains("1 rules"),
-            "复数错（旧 banner 的老毛病）：{text}"
-        );
-
-        // 单个也是单数；只有一类加载物时另一类不出现。
-        let one = text_of(&w.build(&palette(), 120, Instant::now(), false, true, facts(1, 1)));
-        assert!(one.contains("1 skill · 1 rule"), "{one}");
-        let rules_only =
-            text_of(&w.build(&palette(), 120, Instant::now(), false, true, facts(0, 3)));
-        assert!(rules_only.contains("3 rules"), "{rules_only}");
-        assert!(!rules_only.contains("skill"), "{rules_only}");
+        let line = |w: &mut Welcome, facts| {
+            facts_slot(&w.build(&palette(), 120, Instant::now(), false, true, facts))
+        };
+        assert_eq!(line(&mut w, facts(2, 1)), "2 skills · 1 rule");
+        assert_eq!(line(&mut w, facts(1, 1)), "1 skill · 1 rule");
+        // 只有一类加载物时另一类不出现。
+        assert_eq!(line(&mut w, facts(0, 3)), "3 rules");
+        assert_eq!(line(&mut w, facts(3, 1)), "3 skills · 1 rule");
     }
 
     #[test]
@@ -654,8 +667,8 @@ mod tests {
         let now = Instant::now();
         let none = w.build(&palette(), 120, now, false, true, None);
         let zero = w.build(&palette(), 120, now, false, true, facts(0, 0));
-        assert!(!text_of(&none).contains("skill"), "{}", text_of(&none));
-        assert!(!text_of(&zero).contains("skill"), "{}", text_of(&zero));
+        assert_eq!(facts_slot(&none), "", "无事实（老网关）时槽位留空");
+        assert_eq!(facts_slot(&zero), "", "0/0 时槽位留空");
         // 槽位恒在：事实缺席时那一行是空白 —— header 的**高度**在任何宽度
         // 档里都不随事实变化（Full 档由海鸥的画盒定，Compact 档由占位行定），
         // 所以 sync 到达时下方内容不会跳一行。
@@ -681,6 +694,8 @@ mod tests {
             text.find("Esc 中断").expect("键位行") > facts,
             "事实行要在键位行之前（环境簇 → 帮助簇）：{text}"
         );
+        // 槽位就贴在版本行下面一行（不是"某处出现过"）。
+        assert_eq!(facts_slot(&lines), "2 skills · 1 rule");
     }
 
     #[test]

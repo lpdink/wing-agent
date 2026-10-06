@@ -103,7 +103,9 @@ pub(crate) fn wrap_prose_lines(lines: Vec<MarkdownLine>, width: usize) -> Vec<Ma
 ///
 /// Leading spaces are a hanging indent: they move to every wrapped row and the
 /// body wraps in the columns that remain, so a wrapped command-output line
-/// keeps its level instead of snapping back to column zero.
+/// keeps its level instead of snapping back to column zero. The indent is
+/// capped at half the width — it is a hint, and an uncapped one could leave the
+/// body a single column (or nothing) on a deeply indented line.
 ///
 /// No markdown semantics are applied: this is the raw text of things that are
 /// *not* prose documents (command output, notices), where re-parsing would
@@ -116,10 +118,16 @@ pub(crate) fn wrap_plain_text(text: &str, width: usize) -> Vec<String> {
             out.push(source.trim_end().to_string());
             continue;
         }
-        let indent = &source[..source.len() - source.trim_start_matches(' ').len()];
-        let indent_width = UnicodeWidthStr::width(indent);
-        let body = &source[indent.len()..];
-        let body_width = width.saturating_sub(indent_width).max(1);
+        // Hanging indent: only spaces are indentation (a tab is not width-stable
+        // across terminals), capped at half the width. The cap keeps a deeply
+        // indented line readable instead of squeezing its body into nothing:
+        // without it `indent ≥ width` leaves one column of body, which the
+        // caller's clamp then cuts back to invisible spaces.
+        let indent_width = source.len() - source.trim_start_matches(' ').len();
+        let hanging = indent_width.min(width / 2);
+        let prefix = " ".repeat(hanging);
+        let body = &source[indent_width..];
+        let body_width = width.saturating_sub(hanging).max(1);
         let before = out.len();
         for (a, b) in wrap_ranges(body, body_width) {
             let row = body[a..b].trim_end();
@@ -130,7 +138,7 @@ pub(crate) fn wrap_plain_text(text: &str, width: usize) -> Vec<String> {
             if row.is_empty() {
                 continue;
             }
-            out.push(format!("{indent}{row}"));
+            out.push(format!("{prefix}{row}"));
         }
         if out.len() == before {
             // Whitespace-only source line: keep the blank row (structure, not
@@ -574,6 +582,20 @@ mod tests {
             wrap_plain_text("中文 abc", 1),
             vec!["中", "文", "a", "b", "c"]
         );
+    }
+
+    /// 深缩进的悬挂前缀有上限（宽度的一半）：缩进是层级提示，不该把正文挤没
+    /// ——没有上限时 `indent ≥ width` 会让正文只剩一列，再被上层钳成看不见的
+    /// 空格（评审 N）。
+    #[test]
+    fn plain_text_caps_a_deep_hanging_indent() {
+        let rows = wrap_plain_text("            deep body text", 8);
+        // 上限 = 宽度/2：4 列悬挂缩进 + 4 列正文（源缩进 12 列被裁到 4）。
+        assert_eq!(rows, vec!["    deep", "    body", "    text"]);
+        for row in &rows {
+            assert!(UnicodeWidthStr::width(row.as_str()) <= 8, "{row:?}");
+        }
+        assert_eq!(rows.concat().replace(' ', ""), "deepbodytext");
     }
 
     /// 没有断点的长 token 硬断；宽度为 0 时原样返回（防除零 / 死循环）。

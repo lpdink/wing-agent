@@ -273,6 +273,27 @@ fn scrolling_the_welcome_out_of_view_parks_the_clock() {
     assert_ne!(hidden, header_text(&app), "回到视口要立刻重绘");
 }
 
+/// 名牌右列的**事实槽位**：版本行的下一行（`2 skills · 1 rule`，缺席时空白）。
+///
+/// 帧级断言刻意不写成"整帧不含某个词"：tip 是按**时间种子**抽的
+/// （`tips::seed_now()`），池子里有 `/skills 看已装技能…` —— 任何对整帧做
+/// 子串扫描的断言都会随进程抖动（评审 S-1：40 次里红 3 次）。槽位是确定性的：
+/// 它只由事实本身决定。
+fn facts_slot(app: &App) -> String {
+    let lines = app.chat.header_lines();
+    let version = lines
+        .iter()
+        .position(|line| line.spans.iter().any(|s| s.content.contains("wing · ")))
+        .expect("版本行在名牌右列");
+    // Full 档那一行 = 海鸥字形 + 补白 + 文字列的最后一个 span（右列的行都
+    // 是单 span 构建的；槽位缺席时是空行）。
+    lines[version + 1]
+        .spans
+        .last()
+        .map(|span| span.content.trim().to_string())
+        .unwrap_or_default()
+}
+
 /// 开屏 = 名牌 + 输入卡：会话事实（skills / rules）挂在名牌右列，
 /// transcript 里既没有 system 消息，也没有别的 cell。
 #[test]
@@ -306,24 +327,23 @@ fn the_start_screen_shows_session_facts_in_the_nameplate() {
     });
 
     let body = frame_body(&mut app, 100, 30);
-    let compacted = compact(&body);
-    assert!(
-        compacted.contains("2skills·1rule"),
+    assert_eq!(
+        facts_slot(&app),
+        "2 skills · 1 rule",
         "事实行在名牌右列：\n{body}"
     );
     assert!(
-        !compacted.contains("system"),
-        "开屏不该有 system 行：\n{body}"
+        compact(&body).contains("2skills·1rule"),
+        "事实行真的画在帧上（不是只存在于 header 行里）：\n{body}"
     );
+    // 事实不是 chat cell：transcript 里什么都没有（旧版在顶部推一条
+    // `loaded 2 skills, 1 rules · /skills for details`）。
     assert!(app.chat.cells.is_empty(), "transcript 里不该有任何 cell");
 
-    // 老网关（没有 agent 快照）：整行不出现，名牌其余部分照旧。
+    // 老网关（没有 agent 快照）：槽位留空，名牌高度不变。
     let mut app = test_app();
     app.handle_event(sync_event(vec![], None, vec![], vec![], None));
-    app.session_facts = None;
     let body = frame_body(&mut app, 100, 30);
-    assert!(
-        !compact(&body).contains("skill"),
-        "没有会话事实时不出现那一行：\n{body}"
-    );
+    assert_eq!(facts_slot(&app), "", "没有会话事实时槽位是空白：\n{body}");
+    assert!(app.chat.cells.is_empty());
 }

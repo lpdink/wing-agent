@@ -120,7 +120,12 @@ export function applySync(record: SessionRecord, sync: SyncSessionEvent): void {
   record.clear();
   record.replaced = true;
 
-  // Agent snapshot: skills/rules banner (TUI parity) + model/provider/workspace.
+  // Agent snapshot: skills/rules counts + model/provider/workspace.
+  //
+  // The counts surface as a system cell here because this frontend has no
+  // nameplate to hang them on; the TUI moved the same facts into the welcome
+  // block's session line, so the two lanes agree on the *information*, not on
+  // the shape. 0/0 is silent in both.
   if (sync.agent !== null) {
     const skills = sync.agent.skills.length;
     const rules = sync.agent.rules.length;
