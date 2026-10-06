@@ -63,7 +63,7 @@ tags: [orchestration, scheduler, multi-agent, delivery, headless]
 
 开工第一件事给自己打标，派发时给每个子 agent 打标——巡检、收口、事后找回都靠它：
 
-- **自己**：`wing tag $WING_SESSION_ID scheduler task=<task_name>`（`$WING_SESSION_ID` 是 Bash 工具注入的环境变量 = 你所在会话的 id，`echo $WING_SESSION_ID` 即可取到）；
+- **自己**：`wing tag $WING_SESSION_ID scheduler task=<task_name>`——`$WING_SESSION_ID` 是 Bash 工具注入的环境变量 = 你所在会话的 id（开工时先 `echo $WING_SESSION_ID` 确认非空；为空说明运行环境尚未支持该注入，打标需人工确认 sid）；
 - **executor / reviewer**：派发的 `wing run` 直接带 `--tag executor --tag task=<task_name>`（reviewer 用 `--tag reviewer`）——创建即打标、一条命令原子完成，没有"派发了但没标上"的窗口；`-r` 续跑同样接受 `--tag`（幂等追加）；
 - **巡检 / 找回**：`wing ps --tag task=<task_name>` 看任务全家（多个 `--tag` 为 AND；`--tag` 隐含包含 inactive，归档会话也查得到）；
 - 约定：标签是不透明字符串（建议小写、`k=v` 作命名空间）；角色用裸词，任务统一 `task=<task_name>`。不确定标过没：`wing tag <sid>` 读、`wing tag --list` 清点全局。

@@ -189,7 +189,9 @@ fn print_session_info(info: &SessionInfoResponse) {
     if let Some(ref name) = info.session_name {
         println!("session_name:        {name}");
     }
-    println!("tags:                {}", info.tags.join(", "));
+    if !info.tags.is_empty() {
+        println!("tags:                {}", info.tags.join(", "));
+    }
     if let Some(ref wd) = info.workdir {
         println!("workdir:             {wd}");
     }

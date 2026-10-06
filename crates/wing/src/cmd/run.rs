@@ -31,7 +31,8 @@ struct RunOutput {
     model: String,
     provider: Option<String>,
     tools: Vec<String>,
-    /// Resulting tags (on `-r`: existing + newly added).
+    /// Resulting tags reported by session info (on `-r`: existing + newly
+    /// added); falls back to the requested `--tag` list if info is unavailable.
     tags: Vec<String>,
     workspace: Option<String>,
     prompt: String,

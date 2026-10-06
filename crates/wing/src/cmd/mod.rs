@@ -274,6 +274,17 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
         return dispatch_stdio(cli).await;
     }
 
+    // 顶层 --tag 只服务 stdio 模式（`wing -p --tag ...`）；子命令各自的 --tag
+    // 定义在 RunArgs / Command::Tag 上。`wing --tag x run ...` 这类放错位置
+    // 的写法会被 clap 静默接受但丢弃标签——显式报错，别让 Agent 以为打上了。
+    if !cli.tag.is_empty() {
+        eprintln!(
+            "wing error: top-level --tag only applies to stdio mode (wing -p --tag ...); \
+             with a subcommand put it after the subcommand, e.g. `wing run --tag executor ...`"
+        );
+        return ExitCode::FAILURE;
+    }
+
     match cli.command {
         Some(cmd) => match cmd {
             Command::Tui {
