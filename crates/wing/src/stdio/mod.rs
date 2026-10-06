@@ -469,55 +469,33 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
     let prompt = if !args.prompt.is_empty() {
         args.prompt
     } else if let Some(pump) = pump.as_mut() {
+        // 这里的错误 = stdin 在首条 `user` 之前关闭（见 `wait_prompt` 语义：
+        // 错误只在发送端消失时产生，即 pump 任务已结束），无需再 finish。
         pump.wait_prompt().await?
     } else {
         anyhow::bail!("no prompt provided");
     };
 
     // 9. Send prompt.
-    http.send_message(&session_id, &prompt, None)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to send message: {e}"))?;
+    if let Err(e) = http.send_message(&session_id, &prompt, None).await {
+        // 收尾纪律：还没进事件循环就退出——先把 pump 收干净，别把半收尾的
+        // 任务 detach 到运行时回收。
+        if let Some(pump) = pump.take() {
+            pump.finish().await;
+        }
+        return Err(anyhow::anyhow!("Failed to send message: {e}"));
+    }
 
     tracing::info!("prompt sent, entering event loop");
 
-    // 10. Event loop: receive events from WS, render, exit on TurnResult.
+    // 10. Event loop: receive events from WS, render, exit on the terminal frame.
     //
-    // `turn_active`：prompt 发出后到「这轮结束」之间为真。被打断的轮次后端
-    // **不发 result 帧**（只发出 interrupted 事件——半截内容已作为 partial
-    // assistant 提交进链），所以 stdin 关闭后的收尾不能只认 result。
-    let mut turn_active = true;
-    let mut stdin_eof = false;
+    // 终态有两个来源，都由 renderer 落到 stdout 并返回 `true`：
+    // `turn_result`（正常/失败收口），以及 `interrupted`（被打断的轮次后端不发
+    // turn_result，前端补一条终态 result 帧——见 `handle_interrupted`）。
     let exit_code = loop {
-        // 编排器关掉 stdin = 「end of run」：没有进行中的 turn 就收尾退出
-        // （CloudCLI 的中止流程：interrupt 应答 → release stdin → CLI 退出）。
-        // 进行中的 turn 不受影响——`echo … | wing --input-format stream-json`
-        // 依旧等它的 result 帧。
-        if stdin_eof && !turn_active {
-            tracing::info!("stdin closed and no turn in flight; exiting");
-            break renderer.exit_code();
-        }
-
-        let event = match pump.as_mut() {
-            Some(pump) if !stdin_eof => {
-                tokio::select! {
-                    biased;
-                    _ = pump.stdin_closed() => {
-                        stdin_eof = true;
-                        continue;
-                    }
-                    event = gateway.recv_event() => event,
-                }
-            }
-            // 没有 stdin 控制通道（text/json 模式，或 stdin 已关闭）。
-            _ => gateway.recv_event().await,
-        };
-
-        match event {
+        match gateway.recv_event().await {
             Some(event) => {
-                if matches!(event, crate::protocol::WingEvent::Interrupted { .. }) {
-                    turn_active = false;
-                }
                 if renderer.handle_event(&event) {
                     break renderer.exit_code();
                 }

@@ -5,15 +5,13 @@
 //! 请求**必须有应答**，否则编排器的"停止"按钮永远等不到结果。
 //!
 //! 分工：pump 负责「读一行 → 分类 → 应答 / 触发」，与 turn 驱动（`run_stdio`
-//! 的 WS 事件循环）通过三条通道协作——`oneshot` 交付首条 `user` 消息作为 prompt，
-//! `watch<shutdown>` 接收收尾信号，`watch<stdin_closed>` 上报「编排器关掉了控制
-//! 通道」（= end of run）。所有 stdout 写入经共享的
+//! 的 WS 事件循环）通过两条通道协作——`oneshot` 交付首条 `user` 消息作为 prompt，
+//! `watch<shutdown>` 接收收尾信号。所有 stdout 写入经共享的
 //! [`StdoutSink`](crate::stdio::stdout::StdoutSink) 串行化。
 //!
 //! 单轮语义：本步骤不做多轮——turn 期间的额外 `user` 消息只记日志；进程在
-//! `result` 帧后退出（与既有 `-p` 行为一致），或在被中断（无 result 帧）且 stdin
-//! 已关闭时退出（CloudCLI 的中止流程）。
-#![allow(clippy::print_stdout)]
+//! `result` 帧后退出（与既有 `-p` 行为一致），被打断的轮次由 renderer 补一条终态
+//! `result` 帧后同样退出（见 `renderer::StdioRenderer::handle_interrupted`）。
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -53,6 +51,16 @@ const PUMP_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 #[derive(Debug)]
 pub enum StdinMessage {
     ControlRequest(ControlRequest),
+    /// `type == "control_request"` 但解析失败（缺/错类型的 `request_id` 等）。
+    ///
+    /// 单独成桶而不是并进 [`StdinMessage::Unknown`]：这类帧**必须被应答**
+    /// （SDK 在 await 它），静默丢弃会让编排器挂死且无从审计。能捞到
+    /// `request_id`（**原样**，任意 JSON 类型——应答靠它匹配）就回显式 error，
+    /// 捞不到只能记日志。
+    MalformedControlRequest {
+        request_id: Option<serde_json::Value>,
+        error: String,
+    },
     /// SDK 对「CLI 主动发起的 control_request」的应答。wing 目前不发起任何
     /// control_request，收到即忽略（记 debug：它意味着对端在应答一个并不存在的
     /// 请求）。
@@ -70,9 +78,18 @@ impl StdinMessage {
     pub fn from_value(value: serde_json::Value) -> Self {
         let msg_type = value.get("type").and_then(|t| t.as_str()).unwrap_or("");
         match msg_type {
-            "control_request" => serde_json::from_value(value)
-                .map(Self::ControlRequest)
-                .unwrap_or(Self::Unknown),
+            "control_request" => {
+                // 解析失败前先把 request_id 原样捞出来（能捞到就还能应答：
+                // 应答的 request_id 必须与对方发出的一致，类型也照抄）。
+                let salvage = value.get("request_id").cloned();
+                match serde_json::from_value(value) {
+                    Ok(req) => Self::ControlRequest(req),
+                    Err(e) => Self::MalformedControlRequest {
+                        request_id: salvage,
+                        error: e.to_string(),
+                    },
+                }
+            }
             "control_response" => Self::ControlResponse,
             "user" => serde_json::from_value(value)
                 .map(Self::User)
@@ -168,7 +185,9 @@ struct ControlResponse {
 #[derive(Serialize)]
 struct ControlResponseBody {
     subtype: &'static str,
-    request_id: String,
+    /// 回显对方发来的 `request_id`（对方靠它匹配应答；畸形帧里它可能不是字符串，
+    /// 因此原样回传而不是转成 String）。
+    request_id: serde_json::Value,
     /// 成功应答的载荷（SDK 只看 subtype / request_id）。
     #[serde(skip_serializing_if = "Option::is_none")]
     response: Option<serde_json::Value>,
@@ -179,12 +198,12 @@ struct ControlResponseBody {
 
 impl ControlResponse {
     /// 成功应答（载荷为空对象，与既有 initialize 应答形状一致）。
-    fn success(request_id: &str) -> Self {
+    fn success(request_id: impl Into<serde_json::Value>) -> Self {
         Self {
             msg_type: "control_response",
             response: ControlResponseBody {
                 subtype: "success",
-                request_id: request_id.to_string(),
+                request_id: request_id.into(),
                 response: Some(serde_json::json!({})),
                 error: None,
             },
@@ -192,12 +211,12 @@ impl ControlResponse {
     }
 
     /// 失败应答：显式告诉编排器「这个操作 wing 没做成」，而不是静默 success。
-    fn error(request_id: &str, error: impl Into<String>) -> Self {
+    fn error(request_id: impl Into<serde_json::Value>, error: impl Into<String>) -> Self {
         Self {
             msg_type: "control_response",
             response: ControlResponseBody {
                 subtype: "error",
-                request_id: request_id.to_string(),
+                request_id: request_id.into(),
                 response: None,
                 error: Some(error.into()),
             },
@@ -274,8 +293,6 @@ pub struct StdinPumpContext {
 /// 常驻 stdin pump 的把手（turn 驱动侧持有）。
 pub struct StdinPump {
     prompt: Option<oneshot::Receiver<Result<String>>>,
-    /// EOF（或读错误）置位：编排器关掉了控制通道 = 「end of run」信号。
-    stdin_closed: watch::Receiver<bool>,
     shutdown: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
@@ -295,14 +312,6 @@ impl StdinPump {
         }
     }
 
-    /// stdin 关闭（EOF / 读错误）后 resolve。
-    ///
-    /// `watch::Receiver::changed()` 认版本号：EOF 早于本调用发生也已成立（不会
-    /// 丢信号）。取消安全（可用于 `select!`）。
-    pub async fn stdin_closed(&mut self) {
-        let _ = self.stdin_closed.changed().await;
-    }
-
     /// 收尾：通知 pump 停下，并（有界）等它把进行中的工作做完。
     ///
     /// 存在这样的竞态：pump 正在处理 `interrupt`（HTTP 往返在手）而 turn 恰好
@@ -312,7 +321,6 @@ impl StdinPump {
     pub async fn finish(self) {
         let StdinPump {
             prompt,
-            stdin_closed: _,
             shutdown,
             mut task,
         } = self;
@@ -368,24 +376,18 @@ fn spawn_stdin_reader() -> mpsc::UnboundedReceiver<String> {
 fn spawn_with(rx: mpsc::UnboundedReceiver<String>, ctx: StdinPumpContext) -> StdinPump {
     let (prompt_tx, prompt_rx) = oneshot::channel();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let (closed_tx, closed_rx) = watch::channel(false);
 
     // 不需要交付 prompt 时连发送端一起丢掉：任何 user 消息都只是日志。
     let prompt_tx = ctx.await_prompt.then_some(prompt_tx);
 
     let task = tokio::spawn(async move {
-        let outcome = pump_loop(rx, &ctx, prompt_tx, shutdown_rx).await;
-        // 无论正常 EOF 还是读错误，控制通道都不复存在——先置位再报告错误
-        // （置位是 turn 驱动的收尾条件，不能被日志路径吞掉）。
-        let _ = closed_tx.send(true);
-        if let Err(e) = outcome {
+        if let Err(e) = pump_loop(rx, &ctx, prompt_tx, shutdown_rx).await {
             tracing::warn!(error = %e, "stdin pump stopped on stdin read error");
         }
     });
 
     StdinPump {
         prompt: Some(prompt_rx),
-        stdin_closed: closed_rx,
         shutdown: shutdown_tx,
         task,
     }
@@ -427,6 +429,30 @@ async fn pump_loop(
 
         match StdinMessage::from_value(value) {
             StdinMessage::ControlRequest(req) => handle_control_request(&req, ctx).await,
+            StdinMessage::MalformedControlRequest { request_id, error } => {
+                // 「必有应答」不变量的兜底：解析失败的控制请求同样要有出口，
+                // 且必须留下可审计的 warn（静默丢弃会让编排器挂死且查不到原因）。
+                match request_id {
+                    Some(request_id) => {
+                        tracing::warn!(
+                            request_id = %request_id,
+                            error = %error,
+                            "malformed control_request; answering error"
+                        );
+                        ctx.out.line(
+                            &ControlResponse::error(
+                                request_id,
+                                format!("malformed control request: {error}"),
+                            )
+                            .to_line(),
+                        );
+                    }
+                    None => tracing::warn!(
+                        error = %error,
+                        "malformed control_request without request_id; cannot answer"
+                    ),
+                }
+            }
             StdinMessage::User(user) => {
                 let prompt = extract_prompt_text(&user.message.content);
                 match prompt_tx.take() {
@@ -472,7 +498,7 @@ async fn handle_control_request(req: &ControlRequest, ctx: &StdinPumpContext) {
         "initialize" => {
             tracing::info!(request_id = %req.request_id, "received initialize control_request");
             ctx.out
-                .line(&ControlResponse::success(&req.request_id).to_line());
+                .line(&ControlResponse::success(req.request_id.as_str()).to_line());
         }
 
         "interrupt" => {
@@ -494,7 +520,7 @@ async fn handle_control_request(req: &ControlRequest, ctx: &StdinPumpContext) {
                 ),
             }
             ctx.out
-                .line(&ControlResponse::success(&req.request_id).to_line());
+                .line(&ControlResponse::success(req.request_id.as_str()).to_line());
         }
 
         other => {
@@ -506,7 +532,7 @@ async fn handle_control_request(req: &ControlRequest, ctx: &StdinPumpContext) {
             );
             ctx.out.line(
                 &ControlResponse::error(
-                    &req.request_id,
+                    req.request_id.as_str(),
                     format!("unsupported control request subtype: {subtype}"),
                 )
                 .to_line(),
@@ -961,6 +987,86 @@ mod tests {
         pump.finish().await;
     }
 
+    // ---- 畸形 control_request（N2）：仍要有出口 ----
+
+    #[test]
+    fn parse_malformed_control_request_keeps_the_request_id() {
+        // request_id 不是字符串 → 整帧解析失败，但 id 仍要能捞出来（用于应答）。
+        let json = serde_json::json!({
+            "type": "control_request",
+            "request_id": 42,
+            "request": {"subtype": "interrupt"}
+        });
+
+        match StdinMessage::from_value(json) {
+            StdinMessage::MalformedControlRequest { request_id, error } => {
+                assert_eq!(request_id, Some(serde_json::json!(42)), "{error}");
+            }
+            other => panic!("expected MalformedControlRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_malformed_control_request_without_id() {
+        let json = serde_json::json!({"type": "control_request"});
+        match StdinMessage::from_value(json) {
+            StdinMessage::MalformedControlRequest { request_id, .. } => {
+                assert_eq!(request_id, None);
+            }
+            other => panic!("expected MalformedControlRequest, got {other:?}"),
+        }
+    }
+
+    /// 解析失败但能捞到 id → 回显式 error（「必有应答」不变量可审计）。
+    #[tokio::test]
+    async fn pump_answers_error_for_a_malformed_control_request() {
+        let input = concat!(
+            r#"{"type":"control_request","request_id":42,"request":{"subtype":"interrupt"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"go"}}"#,
+            "\n",
+        );
+        let capture = CaptureSink::default();
+        let interruptor = Arc::new(FakeInterruptor::default());
+        let mut pump = spawn_static(input, &interruptor, &capture, true);
+
+        assert_eq!(pump.wait_prompt().await.unwrap(), "go");
+
+        let lines = wait_lines(&capture, 1).await;
+        assert_eq!(lines[0]["response"]["subtype"], "error");
+        // 原样回显：对方发的是数字 42，应答里也是数字（不是 "42"）。
+        assert_eq!(lines[0]["response"]["request_id"], serde_json::json!(42));
+        assert!(
+            lines[0]["response"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("malformed"),
+            "{:?}",
+            lines[0]
+        );
+        // 畸形帧不触发任何中断动作。
+        assert_eq!(interruptor.calls(), 0);
+
+        pump.finish().await;
+    }
+
+    /// 连 id 都没有：只能记 warn，不产生输出、不 panic。
+    #[tokio::test]
+    async fn pump_logs_a_malformed_control_request_without_id() {
+        let capture = CaptureSink::default();
+        let interruptor = Arc::new(FakeInterruptor::default());
+        let pump = spawn_static(
+            r#"{"type":"control_request"}"#,
+            &interruptor,
+            &capture,
+            false,
+        );
+
+        pump.finish().await;
+        assert_eq!(capture.text(), "");
+        assert_eq!(interruptor.calls(), 0);
+    }
+
     #[tokio::test]
     async fn pump_ignores_junk_keep_alive_and_control_response() {
         let input = concat!(
@@ -1068,20 +1174,20 @@ mod tests {
         assert_eq!(capture.text(), "");
     }
 
-    /// 编排器关掉 stdin（CloudCLI 中止流程的 release）→ 收尾信号置位。
+    /// 编排器关掉 stdin（EOF）：pump 自行结束，finish 幂等收尾。
     #[tokio::test]
-    async fn pump_signals_stdin_closed_when_the_orchestrator_closes_stdin() {
+    async fn pump_ends_on_stdin_eof_without_prompt() {
         let (sdk, rx) = mpsc::unbounded_channel();
         let capture = CaptureSink::default();
         let interruptor = Arc::new(FakeInterruptor::default());
-        let mut pump = spawn_with(rx, context(Arc::clone(&interruptor), &capture, true));
+        let pump = spawn_with(rx, context(Arc::clone(&interruptor), &capture, true));
 
-        drop(sdk);
+        drop(sdk); // EOF
 
-        tokio::time::timeout(Duration::from_secs(2), pump.stdin_closed())
+        tokio::time::timeout(Duration::from_secs(2), pump.finish())
             .await
-            .expect("stdin 关闭必须置位收尾信号");
-        pump.finish().await;
+            .expect("EOF 后 pump 必须已结束（finish 立即返回）");
+        assert_eq!(capture.text(), "");
     }
 
     #[tokio::test]
