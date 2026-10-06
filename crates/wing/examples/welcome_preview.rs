@@ -14,6 +14,10 @@
 //!
 //! # 不带颜色（贴 issue / 对比字形）
 //! cargo run -p wing --example welcome_preview -- --plain
+//!
+//! # 会话事实行的两种样子：`2 skills · 1 rule`（默认）/ 什么都没加载
+//! cargo run -p wing --example welcome_preview -- --facts 2,1
+//! cargo run -p wing --example welcome_preview -- --facts 0,0
 //! ```
 //!
 //! 画的就是 TUI 里那一份：与 `App::sync_welcome` 同一个 `Welcome::build`，
@@ -32,6 +36,7 @@ use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr;
 use wing::config::ThemePalette;
 use wing::ui::welcome::SWEEP_MS;
+use wing::ui::welcome::SessionFacts;
 use wing::ui::welcome::Welcome;
 
 /// 前景 / 背景的 SGR 参数（`38;` / `48;` 之后接的那一段）。
@@ -120,8 +125,18 @@ fn render_line(line: &Line<'_>, width: u16, plain: bool) -> String {
 /// 画一块：宽度 `width`，扫光进度 `phase`（`None` = 已定格）。
 ///
 /// `working` = agent 在干活（海鸥切飞行扇翅）；`ms` = 开屏后多久（落在哪个
-/// 动作帧上，方便把眨眼 / 抖翅 / 跳单独打出来看）。
-fn draw(width: u16, phase: Option<f32>, working: bool, ms: u64, plain: bool, out: &mut String) {
+/// 动作帧上，方便把眨眼 / 抖翅 / 跳单独打出来看）；`facts` = 名牌右列会话事实
+/// 行（`None` = 这个会话什么都没加载 / 还没同步到）。
+#[allow(clippy::too_many_arguments)] // 预览的参数就是真 `build` 的参数 + 打印开关
+fn draw(
+    width: u16,
+    phase: Option<f32>,
+    working: bool,
+    ms: u64,
+    plain: bool,
+    facts: Option<SessionFacts>,
+    out: &mut String,
+) {
     let palette = ThemePalette::default();
     let started = Instant::now();
     let mut welcome = Welcome::new(2, started);
@@ -132,7 +147,7 @@ fn draw(width: u16, phase: Option<f32>, working: bool, ms: u64, plain: bool, out
         None => ms,
     };
     let now = started + Duration::from_millis(at);
-    let lines = welcome.build(&palette, width, now, working, true);
+    let lines = welcome.build(&palette, width, now, working, true, facts);
 
     let label = match phase {
         Some(p) => format!("width={width} sweep={:.0}%", p * 100.0),
@@ -158,6 +173,26 @@ fn argument(name: &str) -> Option<String> {
     args.get(index + 1).cloned()
 }
 
+/// `--facts 2,1` —— 会话事实（skills,rules）。没给、或给了但解析不出来（这是
+/// 调试入口，不为参数报错）→ 默认 `2,1`；`0,0` 是"什么都没加载"：名牌上那一行
+/// 是空白占位（槽位恒在）。
+fn facts_argument() -> Option<SessionFacts> {
+    const DEFAULT: Option<SessionFacts> = Some(SessionFacts {
+        skills: 2,
+        rules: 1,
+    });
+    let Some(raw) = argument("--facts") else {
+        return DEFAULT;
+    };
+    let parsed = raw.split_once(',').and_then(|(skills, rules)| {
+        Some(SessionFacts {
+            skills: skills.trim().parse().ok()?,
+            rules: rules.trim().parse().ok()?,
+        })
+    });
+    parsed.or(DEFAULT)
+}
+
 fn main() {
     let plain = std::env::args().any(|a| a == "--plain");
     let working = std::env::args().any(|a| a == "--working");
@@ -166,20 +201,23 @@ fn main() {
     let ms = argument("--ms")
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
+    let facts = facts_argument();
 
     let mut out = String::new();
     match width {
-        Some(width) => draw(width, phase, working, ms, plain, &mut out),
+        Some(width) => draw(width, phase, working, ms, plain, facts, &mut out),
         None => {
             for width in [120u16, 96, 80, 70, 60, 40, 24] {
-                draw(width, None, false, 0, plain, &mut out);
+                draw(width, None, false, 0, plain, facts, &mut out);
             }
             for phase in [0.0f32, 0.25, 0.5, 0.75] {
-                draw(96, Some(phase), false, 0, plain, &mut out);
+                draw(96, Some(phase), false, 0, plain, facts, &mut out);
             }
             // 两个姿态各来一张：待机标准姿势 / 干活飞行。
-            draw(96, None, false, 0, plain, &mut out);
-            draw(96, None, true, 0, plain, &mut out);
+            draw(96, None, false, 0, plain, facts, &mut out);
+            draw(96, None, true, 0, plain, facts, &mut out);
+            // 事实行缺席的样子（0/0 或老网关）。
+            draw(96, None, false, 0, plain, None, &mut out);
         }
     }
     let mut stdout = std::io::stdout();

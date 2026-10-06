@@ -170,17 +170,27 @@ fn build(config: &AppConfig, palette: &ThemePalette, width: u16) -> Vec<Line<'st
     section(&mut lines, "assistant · markdown", width, palette);
     lines.extend(ChatCell::AssistantMessage(SAMPLE_MD.into()).to_lines(width, &ctx));
 
-    // ── system / warning / error 三种消息 ────────────────────────
+    // ── system / warning / error 三种注记（同一形态：栏杆 + 分级寄存器）──
     section(
         &mut lines,
-        "messages · system / warning / error",
+        "notices · system / warning / error",
         width,
         palette,
     );
     for cell in [
-        ChatCell::SystemMessage("system: 工具集已更新 — 链空冷切换，冻结 declared 视图".into()),
-        ChatCell::WarningMessage("notice: provider 限流，6s 后重试".into()),
-        ChatCell::ErrorMessage("error: connection closed (1006)".into()),
+        ChatCell::SystemMessage("工具集已更新 — 链空冷切换，冻结 declared 视图".into()),
+        ChatCell::WarningMessage(
+            "模型生成 调用失败 (1/11)：TimeoutError: stalled for 60s without any \
+             byte, 3s 后重试"
+                .into(),
+        ),
+        ChatCell::ErrorMessage("处理消息失败：异常：ConnectError: connection closed (1006)".into()),
+        // 命令输出（/skills、/context）：多行文本走同一形态，块内的空行也带栏杆。
+        ChatCell::SystemMessage(
+            "已加载的 Skills:\n  pdf: 处理 PDF 文档\n  webapp: 前端脚手架\n\n\
+             已加载的 Rules 文件:\n  /Users/abiter/ws/proj/AGENTS.md"
+                .into(),
+        ),
     ] {
         lines.extend(cell.to_lines(width, &ctx));
     }

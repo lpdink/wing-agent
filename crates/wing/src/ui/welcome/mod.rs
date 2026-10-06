@@ -1,15 +1,17 @@
 //! 欢迎屏 —— 空会话时 chat 顶部那一段（随会话滚走）。
 //!
-//! 拼成它的四样东西：
+//! 拼成它的五样东西：
 //!
 //! * **海鸥**（[`art`] 的字母网格 + [`sprite`] 的半格渲染）：待机是站姿 chibi，
 //!   agent 干活时切成飞行扇翅 —— "它在飞" = "它在干活"；
 //! * **wordmark**（[`wordmark`]）：手绘 5 行像素大字 `WING`，开屏一道扫光扫过；
-//! * 右侧文字列：版本 / 键位 / 轮换 tip；
+//! * 右侧文字列：版本 / 会话事实 / 键位 / 轮换 tip；
+//! * **会话事实**：[`SessionFacts`]（`2 skills · 1 rule`）—— 这个会话加载了什么，
+//!   随 SyncSession 到达；0/0 时槽位留空（行数因此恒定，见 [`text_column`]）；
 //! * **动作规划器**（[`motion`]）：纯 deadline 状态机，眨眼 / 抖翅 / 跳各管各的。
 //!
-//! **内容只放"永远是事实"的东西**：版本号、commit、键位、tips 池里抽的一条。
-//! 想告诉用户新能力，就写进 `shared::tips` 池，那里只讲稳定能力。
+//! **内容只放"永远是事实"的东西**：版本号、commit、会话的加载事实、键位、tips
+//! 池里抽的一条。想告诉用户新能力，就写进 `shared::tips` 池，那里只讲稳定能力。
 //!
 //! 窄终端按宽度档位降级：整块 → 只文字列 → 一行 wordmark，任何宽度都不截断。
 //!
@@ -95,11 +97,56 @@ const TEXT_MIN: usize = 34;
 /// 文字列布局需要的最小列数（再窄就只剩一行 wordmark）。
 const COMPACT_MIN: u16 = 40;
 
-/// 右列行数（wordmark 3 + 版本 + 空 + 键位 + tip + 入口）。
-const TEXT_ROWS: usize = 8;
+/// 右列行数（wordmark 3 + 版本 + 会话事实 + 空 + 键位 + tip + 入口）。
+///
+/// 事实槽位恒在（缺席时留空行，见 [`text_column`]），所以两个布局档的 header
+/// 高度都固定：Full 档文字列骑在海鸥的 13 行盒子里（8/9 行同起点），Compact
+/// 档文字列就是整块 —— 事实到达 / 消失都不会让下方内容位移。
+const TEXT_ROWS: usize = 9;
 
 /// 右列在 12 行海鸥里的竖排起点（居中）。
 const TEXT_OFFSET: usize = (ART_TERM_ROWS - TEXT_ROWS) / 2;
+
+/// 会话事实 —— 这个会话加载了多少 skills / rules。
+///
+/// 名牌右列的**环境事实**行（`2 skills · 1 rule`）：它随每次 SyncSession 到达，
+/// 曾经是一条渲染在 transcript 顶部的 system 消息（`⦁ system` + 日志式英文），
+/// 开屏时紧贴在像素名牌下面 —— 那里没有它的位置。
+///
+/// 0/0（或老网关）时这一行是**空白占位**、不是缺席：槽位恒在，名牌高度才不随
+/// sync 变化（见 [`text_column`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionFacts {
+    /// 已加载的 skill 数（`AgentInfo.skills`）。
+    pub skills: usize,
+    /// 已加载的 rule 文件数（`AgentInfo.rules`）。
+    pub rules: usize,
+}
+
+impl SessionFacts {
+    /// 事实行文案（`2 skills · 1 rule`）；什么都没加载时为 `None`。
+    ///
+    /// 复数按英语习惯走（`1 rule`，不是 `1 rules` —— 旧 banner 的复数错就错在
+    /// 数字在前、名词固定复数）。
+    fn line(self) -> Option<String> {
+        let mut parts = Vec::new();
+        if self.skills > 0 {
+            parts.push(format!("{} skill{}", self.skills, plural(self.skills)));
+        }
+        if self.rules > 0 {
+            parts.push(format!("{} rule{}", self.rules, plural(self.rules)));
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        Some(parts.join(" · "))
+    }
+}
+
+/// 英语复数后缀（`1` → 空）。
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
 
 /// header 的宽度档位。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +191,8 @@ pub struct Welcome {
     built_pose: Option<Pose>,
     /// 上次构建的是不是"定格版"（开屏扫光已结束）。
     settled_built: bool,
+    /// 上次构建用到的会话事实（`None` = 无 / 还没同步到）。
+    built_facts: Option<SessionFacts>,
 }
 
 impl Welcome {
@@ -158,6 +207,7 @@ impl Welcome {
             built_working: false,
             built_pose: None,
             settled_built: false,
+            built_facts: None,
         }
     }
 
@@ -179,13 +229,16 @@ impl Welcome {
     /// 需要重建 header 吗。
     ///
     /// `visible` = 欢迎屏还在视口里（见 `ChatView::header_in_view`）：不在就一切
-    /// 短路 —— 常驻 idle 循环的前提是"看不见就不花钱"。
+    /// 短路 —— 常驻 idle 循环的前提是"看不见就不花钱"。`facts` 是这一帧的会话
+    /// 事实（sync 到达时变化）；不可见时我们不重建它，但也不记进 `built_facts`
+    /// —— 回到视口那一下的 `!built_visible` 会带着最新事实重建。
     pub fn needs_rebuild(
         &mut self,
         width: u16,
         now: Instant,
         working: bool,
         visible: bool,
+        facts: Option<SessionFacts>,
     ) -> bool {
         if !visible {
             self.built_visible = false;
@@ -208,6 +261,7 @@ impl Welcome {
             || !self.built_visible
             || self.built_working != working
             || self.built_pose != Some(pose)
+            || self.built_facts != facts
             || (!self.settled_built && sweeping)
             || self.settled_built == sweeping;
         self.built_visible = true;
@@ -241,6 +295,7 @@ impl Welcome {
         now: Instant,
         working: bool,
         visible: bool,
+        facts: Option<SessionFacts>,
     ) -> Vec<Line<'static>> {
         let ms = self.ms(now);
         self.motion.advance(ms, working);
@@ -252,6 +307,7 @@ impl Welcome {
         self.built_working = working;
         self.built_pose = Some(pose);
         self.settled_built = sweep.is_none();
+        self.built_facts = facts;
 
         let accent = to_rgb(palette.accent);
         let light = is_light_theme(to_rgb(palette.text));
@@ -265,6 +321,7 @@ impl Welcome {
                     width.saturating_sub(left as u16) as usize,
                     wm,
                     self.tip.text,
+                    facts,
                 );
                 let art = gull_lines(pose, accent);
                 let mut lines = Vec::with_capacity(ART_TERM_ROWS + 2);
@@ -290,6 +347,7 @@ impl Welcome {
                     width.saturating_sub(1) as usize,
                     wm,
                     self.tip.text,
+                    facts,
                 ));
                 lines.push(Line::from(""));
                 lines
@@ -348,12 +406,17 @@ fn gull_lines(pose: Pose, accent: sprite::Rgb) -> Vec<Line<'static>> {
     }
 }
 
-/// 右侧文字列：wordmark（3 行）/ 版本 / 空 / 键位 / tip / 入口。
+/// 右侧文字列：wordmark（3 行）/ 版本 / 会话事实 / 空 / 键位 / tip / 入口。
+///
+/// 事实行（`2 skills · 1 rule`）只在这个会话真的有加载物时出现；它是**环境
+/// 事实**，所以和版本行同簇、同 dim 寄存器 —— 曾经它是 transcript 顶部的
+/// system 消息，开屏时贴在像素名牌下面，读起来像一行日志。
 fn text_column(
     palette: &ThemePalette,
     width: usize,
     wm: Vec<Line<'static>>,
     tip: &str,
+    facts: Option<SessionFacts>,
 ) -> Vec<Line<'static>> {
     let dim = Style::default().fg(palette.dim);
     let text = Style::default().fg(palette.text);
@@ -364,6 +427,13 @@ fn text_column(
     // 像素大字是品牌形，但终端里还得有**文本**形态的 brand（grep / 读屏 / 测试
     // 都读像素）—— 版本行带上它：`wing · dev · <commit>`。
     out.push(dim_line(&format!("wing · {}", version_label()), width, dim));
+    // 事实槽位**恒在**：缺席（0/0 / 老网关）时留一行空白 —— 右列行数因此在
+    // 两个布局档里都固定。Full 档本来就骑在海鸥的 13 行盒子里（高度由画盒
+    // 定），Compact 档文字列**就是**整块 header，多一行会让下方内容跳一行。
+    match facts.and_then(SessionFacts::line) {
+        Some(line) => out.push(dim_line(&line, width, dim)),
+        None => out.push(Line::from("")),
+    }
     out.push(Line::from(""));
     out.push(dim_line(KEYS, width, dim));
     out.push(tip_line(tip, width, dim, text));
@@ -514,6 +584,37 @@ mod tests {
         line.spans.iter().map(|s| s.content.width()).sum()
     }
 
+    /// header 的纯文本（断言文案用）。
+    fn text_of(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn facts(skills: usize, rules: usize) -> Option<SessionFacts> {
+        Some(SessionFacts { skills, rules })
+    }
+
+    /// 名牌右列的**事实槽位**：版本行的下一行，取那行的最后一个 span（Full 档
+    /// 那一行 = 海鸥字形 + 补白 + 文字列；槽位缺席时是空行）。
+    ///
+    /// 断言走槽位而不是整块文本：tip 是抽签来的（池子里有 `/skills 看已装技能`
+    /// 这类含 "skill" 的句子），对整块文本做"不含某词"的断言迟早会随池子改动
+    /// 变红。
+    fn facts_slot(lines: &[Line<'static>]) -> String {
+        let version = lines
+            .iter()
+            .position(|line| line.spans.iter().any(|s| s.content.contains("wing · ")))
+            .expect("版本行在名牌右列");
+        lines[version + 1]
+            .spans
+            .last()
+            .map(|span| span.content.trim().to_string())
+            .unwrap_or_default()
+    }
+
     #[test]
     fn layout_ladder() {
         assert_eq!(layout_for(200), Layout::Full);
@@ -529,24 +630,96 @@ mod tests {
         // 核心不变量：任何宽度下都不能有行超出（Paragraph 不换行，超了就是被切）。
         let palette = palette();
         for width in 2u16..200 {
-            let mut w = welcome();
             let now = Instant::now();
             for working in [false, true] {
-                let lines = w.build(&palette, width, now, working, true);
-                for line in &lines {
-                    assert!(
-                        line_width(line) <= width as usize,
-                        "width={width} working={working} 行超宽：{line:?}"
-                    );
+                for facts in [None, facts(2, 1), facts(12, 130)] {
+                    let mut w = welcome();
+                    let lines = w.build(&palette, width, now, working, true, facts);
+                    for line in &lines {
+                        assert!(
+                            line_width(line) <= width as usize,
+                            "width={width} working={working} facts={facts:?} 行超宽：{line:?}"
+                        );
+                    }
                 }
             }
         }
     }
 
+    // ── 会话事实行 ────────────────────────────────────────
+
+    #[test]
+    fn facts_line_carries_the_counts_with_correct_plurals() {
+        let mut w = welcome();
+        let line = |w: &mut Welcome, facts| {
+            facts_slot(&w.build(&palette(), 120, Instant::now(), false, true, facts))
+        };
+        assert_eq!(line(&mut w, facts(2, 1)), "2 skills · 1 rule");
+        assert_eq!(line(&mut w, facts(1, 1)), "1 skill · 1 rule");
+        // 只有一类加载物时另一类不出现。
+        assert_eq!(line(&mut w, facts(0, 3)), "3 rules");
+        assert_eq!(line(&mut w, facts(3, 1)), "3 skills · 1 rule");
+    }
+
+    #[test]
+    fn facts_line_is_absent_when_nothing_is_loaded() {
+        let mut w = welcome();
+        let now = Instant::now();
+        let none = w.build(&palette(), 120, now, false, true, None);
+        let zero = w.build(&palette(), 120, now, false, true, facts(0, 0));
+        assert_eq!(facts_slot(&none), "", "无事实（老网关）时槽位留空");
+        assert_eq!(facts_slot(&zero), "", "0/0 时槽位留空");
+        // 槽位恒在：事实缺席时那一行是空白 —— header 的**高度**在任何宽度
+        // 档里都不随事实变化（Full 档由海鸥的画盒定，Compact 档由占位行定），
+        // 所以 sync 到达时下方内容不会跳一行。
+        assert_eq!(none.len(), zero.len());
+        for width in [120u16, 96, 80, 70, 60, 40] {
+            let without = w.build(&palette(), width, now, false, true, None).len();
+            let with = w
+                .build(&palette(), width, now, false, true, facts(2, 1))
+                .len();
+            assert_eq!(without, with, "width={width}：事实行改变了 header 高度");
+        }
+    }
+
+    #[test]
+    fn facts_sit_right_after_the_version_line() {
+        let mut w = welcome();
+        let lines = w.build(&palette(), 120, Instant::now(), false, true, facts(2, 1));
+        let text = text_of(&lines);
+        let version = text.find("dev ·").expect("版本行");
+        let facts = text.find("2 skills").expect("事实行");
+        assert!(version < facts, "事实行要在版本行之后：{text}");
+        assert!(
+            text.find("Esc 中断").expect("键位行") > facts,
+            "事实行要在键位行之前（环境簇 → 帮助簇）：{text}"
+        );
+        // 槽位就贴在版本行下面一行（不是"某处出现过"）。
+        assert_eq!(facts_slot(&lines), "2 skills · 1 rule");
+    }
+
+    #[test]
+    fn facts_change_rebuilds_the_header() {
+        let mut w = welcome();
+        let settled = Instant::now() + Duration::from_millis(SWEEP_MS + 500);
+        w.build(&palette(), 120, settled, false, true, facts(2, 1));
+        // 同一事实、已定格、姿态未到点：不重建。
+        assert!(!w.needs_rebuild(120, settled, false, true, facts(2, 1)));
+        // 事实变了（sync 到达 / 换会话）：必须重建。
+        assert!(
+            w.needs_rebuild(120, settled, false, true, facts(3, 1)),
+            "事实变化要重建"
+        );
+        assert!(
+            w.needs_rebuild(120, settled, false, true, None),
+            "老网关 / 清空事实也要重建"
+        );
+    }
+
     #[test]
     fn full_layout_has_the_gull_and_the_wordmark() {
         let mut w = welcome();
-        let lines = w.build(&palette(), 120, Instant::now(), false, true);
+        let lines = w.build(&palette(), 120, Instant::now(), false, true, None);
         let joined: String = lines
             .iter()
             .map(|l| {
@@ -594,7 +767,7 @@ mod tests {
             // needs_rebuild（那里推进规划器）。不推进的话 `next_due` 冻结在
             // 过去的时刻，`max(ms+1)` 会以 1ms 步进"救火"凑出 tick 数 ——
             // 那样测的就不是帧节奏了。
-            w.needs_rebuild(100, now, false, true);
+            w.needs_rebuild(100, now, false, true, None);
         }
         // 2400/40 = 60 帧，外加动作 deadline 恰好插进帧网格的那一两次。
         assert!(
@@ -657,7 +830,7 @@ mod tests {
         let tip = w.tip();
         let now = Instant::now();
         for (width, working) in [(120u16, false), (60, true), (30, false), (120, false)] {
-            w.build(&palette(), width, now, working, true);
+            w.build(&palette(), width, now, working, true, None);
             assert!(std::ptr::eq(w.tip(), tip), "tip 不该在重建之间换");
         }
     }
@@ -669,23 +842,26 @@ mod tests {
         let mut w = welcome();
         let start = w.epoch;
         let mid = start + Duration::from_millis(SWEEP_MS - 300);
-        w.build(&palette(), 100, mid, false, true);
+        w.build(&palette(), 100, mid, false, true, None);
         let just_after = start + Duration::from_millis(SWEEP_MS + 1);
         assert!(
-            w.needs_rebuild(100, just_after, false, true),
+            w.needs_rebuild(100, just_after, false, true, None),
             "扫光结束那一刻必须重建一次"
         );
         // 重建之后（已定格）就不该再因为扫光反复重建。
-        w.build(&palette(), 100, just_after, false, true);
-        assert!(!w.needs_rebuild(100, just_after, false, true));
+        w.build(&palette(), 100, just_after, false, true, None);
+        assert!(!w.needs_rebuild(100, just_after, false, true, None));
     }
 
     #[test]
     fn offscreen_welcome_costs_nothing() {
         let mut w = welcome();
         let now = Instant::now();
-        w.build(&palette(), 120, now, false, true);
-        assert!(!w.needs_rebuild(120, now, false, false), "滚出视口就不重建");
+        w.build(&palette(), 120, now, false, true, None);
+        assert!(
+            !w.needs_rebuild(120, now, false, false, None),
+            "滚出视口就不重建"
+        );
         assert!(
             w.next_frame(now, false, false).is_none(),
             "滚出视口就不走时钟"
@@ -696,9 +872,9 @@ mod tests {
     fn working_switch_rebuilds() {
         let mut w = welcome();
         let now = Instant::now();
-        w.build(&palette(), 120, now, false, true);
+        w.build(&palette(), 120, now, false, true, None);
         assert!(
-            w.needs_rebuild(120, now, true, true),
+            w.needs_rebuild(120, now, true, true, None),
             "干活/闲切换要换姿态，必须重建"
         );
     }
@@ -708,9 +884,9 @@ mod tests {
         let mut w = welcome();
         let start = Instant::now();
         let settled = start + Duration::from_millis(SWEEP_MS + 500);
-        w.build(&palette(), 120, settled, false, true);
+        w.build(&palette(), 120, settled, false, true, None);
         // 定格后、姿态没到点：不重建。
-        assert!(!w.needs_rebuild(120, settled, false, true));
+        assert!(!w.needs_rebuild(120, settled, false, true, None));
     }
 
     #[test]

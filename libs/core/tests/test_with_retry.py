@@ -348,7 +348,16 @@ class TestRetryLabel:
 
             notices = [e for e in events if isinstance(e, NoticeEvent)]
             assert len(notices) == 1
-            assert notices[0].message.startswith("模型生成 调用失败 (1/1)")
+            notice = notices[0]
+            assert notice.message.startswith("模型生成 调用失败 (1/1)")
+            # 文案自足（跨组件契约）：前端只渲染 message，不再自行拼重试后缀
+            # —— 所以"第几次 / 多久后重试"必须由正文说全，结构化字段只是同一
+            # 事实的机器可读孪生。前端两侧（TUI / VSCode）都按这条口径渲染，
+            # 改动这里等于改动两个前端的显示文本。
+            assert notice.message.endswith("0s 后重试"), notice.message
+            assert notice.attempt == 1
+            assert notice.max_attempts == 1
+            assert notice.retry_in_s == 0.01
         finally:
             event_bus._subscribers.clear()
 

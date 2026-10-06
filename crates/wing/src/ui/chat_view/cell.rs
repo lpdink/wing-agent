@@ -36,6 +36,8 @@ use crate::ui::cached_cell::CachedCell;
 use crate::ui::cells::ask_msg::AskMessage;
 use crate::ui::cells::diff_view::DiffView;
 use crate::ui::cells::model_picker::model_picker_lines;
+use crate::ui::cells::notice::NoticeLevel;
+use crate::ui::cells::notice::notice_lines;
 use crate::ui::cells::thinking::ThinkingBlock;
 use crate::ui::cells::todo_msg::TodoMessage;
 use crate::ui::cells::tool_call::ToolCallBlock;
@@ -129,36 +131,13 @@ impl ChatCell {
             Self::AssistantMessage(text) => {
                 assistant_message_lines(text, width, palette, ctx.images).into_lines()
             }
-            Self::SystemMessage(text) => {
-                let label = Style::default().fg(palette.accent);
-                let body = Style::default().fg(palette.text).italic();
-                let mut lines = vec![Line::from(Span::styled("⦁ system", label))];
-                for line in render_plain(text) {
-                    lines.push(Span::styled(line.to_string(), body).into());
-                }
-                lines.push(Line::from(""));
-                lines
-            }
+            Self::SystemMessage(text) => notice_lines(text, NoticeLevel::Info, width, palette),
             Self::WarningMessage(text) => {
                 // A notice (e.g. "retrying in 6s") — yellow, but explicitly not
                 // an error: the turn is still running.
-                let warning = Style::default().fg(palette.warning);
-                let mut lines = vec![Line::from(Span::styled("⦁ warning", warning.bold()))];
-                for line in render_plain(text) {
-                    lines.push(Span::styled(line.to_string(), warning).into());
-                }
-                lines.push(Line::from(""));
-                lines
+                notice_lines(text, NoticeLevel::Warning, width, palette)
             }
-            Self::ErrorMessage(text) => {
-                let danger = Style::default().fg(palette.danger);
-                let mut lines = vec![Line::from(Span::styled("⦁ error", danger.bold()))];
-                for line in render_plain(text) {
-                    lines.push(Span::styled(line.to_string(), danger).into());
-                }
-                lines.push(Line::from(""));
-                lines
-            }
+            Self::ErrorMessage(text) => notice_lines(text, NoticeLevel::Error, width, palette),
             Self::Thinking(block) => block.to_lines(
                 palette,
                 ctx.thinking_mode,

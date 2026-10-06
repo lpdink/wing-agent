@@ -120,7 +120,12 @@ export function applySync(record: SessionRecord, sync: SyncSessionEvent): void {
   record.clear();
   record.replaced = true;
 
-  // Agent snapshot: skills/rules banner (TUI parity) + model/provider/workspace.
+  // Agent snapshot: skills/rules counts + model/provider/workspace.
+  //
+  // The counts surface as a system cell here because this frontend has no
+  // nameplate to hang them on; the TUI moved the same facts into the welcome
+  // block's session line, so the two lanes agree on the *information*, not on
+  // the shape. 0/0 is silent in both.
   if (sync.agent !== null) {
     const skills = sync.agent.skills.length;
     const rules = sync.agent.rules.length;
@@ -252,10 +257,13 @@ function applyKnown(record: SessionRecord, event: KnownWingEvent, effects: Reduc
     case 'notice': {
       // Informational only — deliberately does NOT finish the turn: retrying a
       // failed LLM call means the turn is still running.
-      let text = event.message === '' ? 'notice' : event.message;
-      if (event.attempt !== null && event.max_attempts !== null && event.retry_in_s !== null) {
-        text = `${text} (attempt ${event.attempt}/${event.max_attempts}, retrying in ${Math.round(event.retry_in_s)}s)`;
-      }
+      //
+      // The message renders as it arrives: the backend's text already spells
+      // the retry out (`… (2/5) …, 4s 后重试`), so appending a second, English
+      // copy said the same two facts twice (TUI parity — see the notice lane
+      // in `crates/wing/src/app/projection.rs`). `attempt` / `max_attempts` /
+      // `retry_in_s` stay on the event for consumers that want them structured.
+      const text = event.message === '' ? 'notice' : event.message;
       const level: SystemLevel = event.level === 'warning' || event.level === 'error' ? 'warning' : 'notice';
       pushSystem(record, level, text);
       return;
