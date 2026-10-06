@@ -23,7 +23,7 @@ from wing.config import (
     resolve_model_capabilities,
     resolve_model_display_name,
 )
-from wing.event import AskEvent, WingEvent
+from wing.event import AskEvent, NoticeEvent, WingEvent
 from wing.provider import create_provider
 from wing.provider.base import ModelProvider
 from wing.schema import Message, Tool
@@ -35,6 +35,16 @@ from .tool_executor import ToolExecutor, _current_tool_call_id
 
 if TYPE_CHECKING:
     from wing.media import MediaAccess
+
+
+# ── 打断收口阶梯 ──
+# worker 的取消可能被吸收（取消计数已增加但 CancelledError 未投递——asyncio
+# 的已知形态；CPython `Task.cancel()` 注释明言 "we may have to cancel it again
+# later"）。重投取消一定会重新投递（对 >1 的计数强制 `_must_cancel = True`），
+# 因此收口采用有界阶梯：单次等待覆盖工具收尸的 5s 兜底 + 提交余量，最多
+# `_INTERRUPT_MAX_CANCELS` 次取消；阶梯耗尽时保留旧 worker、绝不重建第二个。
+_INTERRUPT_WAIT_SECONDS = 6.0
+_INTERRUPT_MAX_CANCELS = 3
 
 
 class WingAgent:
@@ -361,42 +371,112 @@ class WingAgent:
         await self._inbox.post(content, request_id, role, tool_call_id)
 
     async def interrupt(self) -> None:
-        """中断 Agent：触发 hooks、清理 inbox、等待旧 worker 补提交后重建。"""
-        self._fire_interrupt_hooks()
+        """中断 Agent：触发 hooks、清理 inbox、取消旧 worker 后重建。
 
-        self._inbox.cancel_all_waiters()
+        收口等待是**有界**的取消阶梯（见 `_stop_worker`）：一次取消可能被
+        吸收（取消计数已增加但 CancelledError 未投递），重投取消一定会重新
+        投递。worker 在阶梯内始终不终止时**保留旧 worker**（绝不重建第二个，
+        避免两个 worker 抢同一个 inbox），打 ERROR 并广播 notice 后立即返回
+        ——interrupt 绝不会因为 worker 不响应而永久持有 `_interrupt_lock`。
 
-        self._inbox.clear()
-
+        副作用（hooks / feedback waiters / inbox）在拿到锁之后才执行：注定
+        排队的请求不再提前杀掉 turn 的前台工具。
+        """
         async with self._interrupt_lock:
+            self._fire_interrupt_hooks()
+            self._inbox.cancel_all_waiters()
+            self._inbox.clear()
+
             old = self._worker
-            old.cancel()
             try:
-                await old
+                stopped = await self._stop_worker(old)
             except asyncio.CancelledError:
-                pass
-            except Exception:
-                log.exception("old worker died with error during interrupt")
-            finally:
+                # 本协程自身被取消（无法与 worker 收口区分）——沿用既有语义：
+                # 吞掉，并按 worker 的实际状态决定是否重建。
+                stopped = old.done()
+            if stopped:
                 self._worker = asyncio.create_task(self._run())
-        log.info("Agent interrupted and reset")
 
     async def shutdown(self) -> None:
-        """显式关闭 Agent：不重建 worker。
+        """显式关闭 Agent：取消阶梯收口，不重建 worker。
 
+        收口与 interrupt 共用同一阶梯（有界）：worker 不响应取消时打 ERROR
+        后返回——会话拆解（逐出 / release / 模板切换）绝不会被拖死。
         注意：不关闭 provider——provider 生命周期由 Session 层管理，
         client 的终结由显式调用 aclose_providers() 的一方负责。
         """
-        self._fire_interrupt_hooks()
-        self._inbox.cancel_all_waiters()
-        self._inbox.clear()
+        async with self._interrupt_lock:
+            self._fire_interrupt_hooks()
+            self._inbox.cancel_all_waiters()
+            self._inbox.clear()
 
-        self._worker.cancel()
+            worker = self._worker
+            try:
+                stopped = await self._stop_worker(worker, notify=False)
+            except asyncio.CancelledError:
+                stopped = worker.done()
+        log.info(
+            f"Agent shutdown complete: session={self.session_id} "
+            f"worker_stopped={stopped}"
+        )
+
+    async def _stop_worker(self, worker: asyncio.Task, *, notify: bool = True) -> bool:
+        """cancel + 阶梯等待 worker 收口；返回是否已终止（等待保证有界）。
+
+        阶梯：cancel → 最多等 `_INTERRUPT_WAIT_SECONDS` → 未死则重投取消
+        （重投一定会重新投递，专治「只记数不投递」的吸收）→ 最多
+        `_INTERRUPT_MAX_CANCELS` 次。耗尽仍未终止：保留 worker 原样
+        （由调用方决定语义），ERROR 报告现场，`notify=True` 时广播 notice。
+        """
+        for attempt in range(1, _INTERRUPT_MAX_CANCELS + 1):
+            if worker.done():
+                break
+            worker.cancel()
+            done, _ = await asyncio.wait({worker}, timeout=_INTERRUPT_WAIT_SECONDS)
+            if done:
+                break
+            if attempt < _INTERRUPT_MAX_CANCELS:
+                log.warning(
+                    f"interrupt: worker 在 cancel #{attempt} 后 "
+                    f"{_INTERRUPT_WAIT_SECONDS:g}s 未终止，重投取消 "
+                    f"(attempt {attempt + 1}/{_INTERRUPT_MAX_CANCELS})"
+                )
+        if not worker.done():
+            self._report_undead_worker(worker, notify=notify)
+            return False
+        if not worker.cancelled():
+            exc = worker.exception()
+            if exc is not None:
+                log.error("old worker died with error during interrupt", exc_info=exc)
+        return True
+
+    def _report_undead_worker(self, worker: asyncio.Task, *, notify: bool) -> None:
+        """阶梯耗尽：worker 不响应取消——保留它（不重建），ERROR + notice。"""
         try:
-            await self._worker
-        except asyncio.CancelledError:
-            pass
-        log.info(f"Agent shutdown complete: session={self.session_id}")
+            frames = " <- ".join(
+                f"{Path(f.f_code.co_filename).name}:{f.f_lineno}:{f.f_code.co_name}"
+                for f in worker.get_stack()[-4:]
+            )
+        except Exception:  # noqa: BLE001 - 报告不得外溢
+            frames = "<unavailable>"
+        fut_waiter = getattr(worker, "_fut_waiter", None)
+        log.error(
+            f"interrupt: worker 在 {_INTERRUPT_MAX_CANCELS} 次取消后仍未终止；"
+            f"保留为当前 worker（不重建）：task={worker.get_name()} "
+            f"cancelling={worker.cancelling()} "
+            f"fut_waiter={type(fut_waiter).__name__ if fut_waiter is not None else '-'} "
+            f"stack=[{frames or '<none>'}]"
+        )
+        if notify:
+            self._sink.emit(
+                NoticeEvent(
+                    level="error",
+                    message=(
+                        "打断未生效：worker 未在取消阶梯内终止（保留原 worker）"
+                        "——会话可能仍在运行，可再次打断重试"
+                    ),
+                )
+            )
 
     def get_status(self) -> dict:
         """返回当前状态快照（网关的 session info 投影素材）。"""
