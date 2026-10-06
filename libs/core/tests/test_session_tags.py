@@ -21,7 +21,7 @@ from wing.session.tags import (
     apply_tag_ops,
     validate_tag,
 )
-from wing.store import FileSessionStore
+from wing.store import FileSessionStore, SessionMetadata
 
 
 @pytest.fixture
@@ -124,12 +124,12 @@ class TestManagerSetTags:
         _seed(session, "hello")
         sid = session.session_id
         # 逐出（等价于不在内存；evict 的拆解语义与标签路径无关）
-        del file_sm._sessions[sid]  # ty: ignore[unresolved-attribute]
+        del file_sm._sessions[sid]
 
         m = file_sm.set_session_tags(sid, add=["favorite"])
         assert m.tags == ["favorite"]
         # 不水合：调用后会话仍在内存之外
-        assert sid not in file_sm._sessions  # ty: ignore[unresolved-attribute]
+        assert sid not in file_sm._sessions
 
         # 磁盘事实：metadata.json 里只有 tags 与必要字段（未创建会话对象）
         meta = session.store.load_metadata(sid)
@@ -139,7 +139,7 @@ class TestManagerSetTags:
         # 纯读同样不水合
         read = file_sm.set_session_tags(sid)
         assert read.tags == ["favorite"]
-        assert sid not in file_sm._sessions  # ty: ignore[unresolved-attribute]
+        assert sid not in file_sm._sessions
 
     @pytest.mark.asyncio
     async def test_noop_mutation_does_not_write(
@@ -177,6 +177,58 @@ class TestManagerSetTags:
         assert meta is None or not meta.tags
 
 
+class TestStorePathClearLastTag:
+    """B1 回归：store 路径（未加载会话）清掉最后一个标签必须真的落盘。
+
+    旧缺陷：这次变更把 metadata 整体清空（tags-only 记录）时，
+    ``save_metadata`` 因"序列化后为空"早退 → 端点回报 removed、磁盘却保留
+    旧 tags → 下一次读取"复活"。清空必须是可持久化的显式事实。
+    """
+
+    @pytest.mark.asyncio
+    async def test_clear_last_tag_on_history_only_session(self, tmp_path: Path):
+        """只有 history.jsonl 的会话（崩溃窗口 / 老数据）add 后再 remove。"""
+        store = FileSessionStore(tmp_path / "sessions")
+        sm = SessionManager({"file": store})
+        sid = "20250101-000000-legacy00"
+        session_dir = tmp_path / "sessions" / sid
+        session_dir.mkdir(parents=True)
+        (session_dir / "history.jsonl").write_text(
+            '{"role": "user", "content": "hi", "uuid": "u1", "parent_uuid": null}\n',
+            encoding="utf-8",
+        )
+
+        added = sm.set_session_tags(sid, add=["favorite"])
+        assert added.tags == ["favorite"]
+        assert sid not in sm._sessions
+        # store 路径写出的 tags-only 记录（未水合，故无 template/workspace 等）
+        assert json.loads((session_dir / "metadata.json").read_text()) == {
+            "tags": ["favorite"]
+        }
+
+        removed = sm.set_session_tags(sid, remove=["favorite"])
+        assert removed.tags == [] and removed.removed == ["favorite"]
+        # 磁盘事实：真的清掉了（不是"端点说清掉了"）；重读不复活。
+        assert sm.set_session_tags(sid).tags == []
+        assert "tags" not in json.loads((session_dir / "metadata.json").read_text())
+
+    @pytest.mark.asyncio
+    async def test_clear_last_tag_on_memory_store(self):
+        """memory 后端同型语义：清空落位，不复活。"""
+        from wing.store import MemorySessionStore
+
+        store = MemorySessionStore()
+        sm = SessionManager({"memory": store}, default_backend="memory")
+        sid = "20250101-000000-mem0001"
+        store.save_metadata(sid, SessionMetadata(tags=["favorite"]))
+
+        removed = sm.set_session_tags(sid, remove=["favorite"])
+        assert removed.tags == [] and removed.removed == ["favorite"]
+        assert sm.set_session_tags(sid).tags == []
+        meta = store.load_metadata(sid)
+        assert meta is not None and meta.tags is None
+
+
 class TestCreateAndProjection:
     @pytest.mark.asyncio
     async def test_create_with_tags(self, file_sm: SessionManager):
@@ -189,10 +241,10 @@ class TestCreateAndProjection:
 
     @pytest.mark.asyncio
     async def test_create_with_invalid_tag_fails_cleanly(self, file_sm: SessionManager):
-        before = len(file_sm._sessions)  # ty: ignore[unresolved-attribute]
+        before = len(file_sm._sessions)
         with pytest.raises(ValueError):
             file_sm.create_session(tags=["ok", "bad tag"])
-        assert len(file_sm._sessions) == before  # ty: ignore[unresolved-attribute]
+        assert len(file_sm._sessions) == before
 
     @pytest.mark.asyncio
     async def test_empty_tags_stay_off_disk(self, file_sm: SessionManager):

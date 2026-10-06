@@ -198,7 +198,12 @@ class SessionStore(ABC):
 
     @abstractmethod
     def save_metadata(self, session_id: str, metadata: SessionMetadata) -> None:
-        """保存元数据（全 None 时跳过，等价于无记录）。"""
+        """保存元数据。
+
+        全 None（序列化后无字段）且**尚无现存记录**时跳过——首次写入不创造
+        空记录；已有记录时照写（可能写成空记录，即"清空"是显式可持久化的：
+        标签增删等"字段级清空"操作不能因整体变空而被静默吞掉）。
+        """
 
     @abstractmethod
     def open_log(self, session_id: str) -> MessageLog:

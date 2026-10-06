@@ -164,9 +164,13 @@ class FileSessionStore(SessionStore):
 
     def save_metadata(self, session_id: str, metadata: SessionMetadata) -> None:
         data = metadata.model_dump(exclude_none=True)
-        if not data:
+        path = self._session_dir(session_id) / self._METADATA
+        # 空数据 + 无现存文件 = 不创造空记录（首次写入语义）；有现存文件则
+        # 照写——"清空"必须可持久化（如移除最后一个标签后 metadata 变空，
+        # 静默跳过会让删除在下次读取时"复活"）。
+        if not data and not path.exists():
             return
-        atomic_write_json(self._session_dir(session_id) / self._METADATA, data)
+        atomic_write_json(path, data)
 
     # ── log ───────────────────────────────────
 

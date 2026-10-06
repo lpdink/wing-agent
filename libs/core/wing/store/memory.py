@@ -63,7 +63,12 @@ class MemorySessionStore(SessionStore):
         return meta.model_copy() if meta is not None else None
 
     def save_metadata(self, session_id: str, metadata: SessionMetadata) -> None:
-        if not metadata.model_dump(exclude_none=True):
+        # 空数据 + 无现存记录 = 不创造空记录（与 file 后端"首次写入前不存在"
+        # 语义一致）；有现存记录则照写——"清空"必须可持久化。
+        if (
+            not metadata.model_dump(exclude_none=True)
+            and session_id not in self._metadata
+        ):
             return
         self._metadata[session_id] = metadata.model_copy()
 
