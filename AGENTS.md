@@ -148,7 +148,8 @@ crates/wing/src/
 │   ├── mod.rs                       run_stdio + ensure_gateway_running + 参数过滤
 │   ├── ndjson.rs                    stream-json NDJSON 帧
 │   ├── renderer.rs                  text / json / stream-json 输出渲染
-│   └── stdin_handler.rs             SDK 双向 stdin 握手
+│   ├── stdout.rs                    stdout 串行化写口（renderer 与 stdin pump 共享）
+│   └── stdin_handler.rs             常驻 stdin pump（initialize / interrupt 应答 + 收尾）
 ├── gateway/client.rs                GatewayClient — WS 连接 + 读写任务
 ├── protocol/                        WingEvent + ClientRequest + ConnectResponse（Python 事件的 Rust 镜像）
 │   ├── events.rs / client_request.rs / connect_response.rs

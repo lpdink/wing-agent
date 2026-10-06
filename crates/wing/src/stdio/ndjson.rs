@@ -138,18 +138,40 @@ pub struct ToolUseResult {
 // ============================================================
 
 /// Final result message (mapped from TurnResultEvent).
+///
+/// Two shapes share this struct, mirroring the SDK's `SDKResultMessage` union:
+/// - success (`subtype="success"`) carries `result`;
+/// - error (`subtype="error_*"`, `is_error=true`) carries `errors` and no
+///   `result` — `SDKResultError` has no such field.
+///
+/// `terminal_reason` is the SDK's `TerminalReason`: the interrupted terminal
+/// frame uses `aborted_streaming` / `aborted_tools`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultMessage {
     #[serde(rename = "type")]
     pub msg_type: String,
     pub subtype: String,
     pub is_error: bool,
-    pub result: String,
+    /// Final text of a successful turn. Absent on error results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
     pub duration_ms: i64,
     pub duration_api_ms: i64,
     pub num_turns: i64,
     pub total_cost_usd: f64,
     pub usage: serde_json::Value,
+    /// Why the query loop terminated (`TerminalReason` in `sdk.d.ts`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_reason: Option<String>,
+    /// Error texts of a failed turn (`SDKResultError.errors`).
+    ///
+    /// **错误结果帧不得省略这个字段**：SDK 对 `is_error=true && subtype !=
+    /// "success"` 的帧无条件读它（0.3.165 `e.errors.join("; ")` / 0.3.291
+    /// `e.errors.map(…)`），缺字段直接抛 `TypeError`，把后端错误原文换成 JS
+    /// 内部错误。渲染器为此保证：`is_error` 为真时该数组非空（后端没给文本
+    /// 就补通用文案）——`skip_serializing_if` 只是让成功帧不带它。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
     pub session_id: String,
     pub uuid: String,
 }
@@ -255,12 +277,14 @@ mod tests {
             msg_type: "result".into(),
             subtype: "success".into(),
             is_error: false,
-            result: "Done!".into(),
+            result: Some("Done!".into()),
             duration_ms: 5000,
             duration_api_ms: 3000,
             num_turns: 3,
             total_cost_usd: 0.0,
             usage: serde_json::json!({"input_tokens": 100, "output_tokens": 50, "cached_tokens": 20}),
+            terminal_reason: None,
+            errors: Vec::new(),
             session_id: "sess-123".into(),
             uuid: "uuid-result".into(),
         };
@@ -276,6 +300,38 @@ mod tests {
         assert_eq!(parsed["total_cost_usd"], 0.0);
         assert_eq!(parsed["session_id"], "sess-123");
         assert_eq!(parsed["uuid"], "uuid-result");
+        // 成功形状不因新增字段漂移：terminal_reason / errors 缺省即不出现。
+        assert!(parsed.get("terminal_reason").is_none(), "{parsed}");
+        assert!(parsed.get("errors").is_none(), "{parsed}");
+    }
+
+    #[test]
+    fn error_result_shape_matches_sdk_result_error() {
+        // 错误结果按 `SDKResultError` 出帧：无 `result`，有 `errors` 与
+        // `terminal_reason`（被打断的轮次用它收尾）。
+        let msg = ResultMessage {
+            msg_type: "result".into(),
+            subtype: "error_during_execution".into(),
+            is_error: true,
+            result: None,
+            duration_ms: 1200,
+            duration_api_ms: 900,
+            num_turns: 1,
+            total_cost_usd: 0.0,
+            usage: serde_json::json!({"input_tokens": 1, "output_tokens": 2, "cached_tokens": 0}),
+            terminal_reason: Some("aborted_streaming".into()),
+            errors: vec!["Interrupted by user".into()],
+            session_id: "sess-123".into(),
+            uuid: "uuid-aborted".into(),
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+        assert_eq!(parsed["type"], "result");
+        assert_eq!(parsed["subtype"], "error_during_execution");
+        assert_eq!(parsed["is_error"], true);
+        assert_eq!(parsed["terminal_reason"], "aborted_streaming");
+        assert_eq!(parsed["errors"], serde_json::json!(["Interrupted by user"]));
+        assert!(parsed.get("result").is_none(), "{parsed}");
     }
 
     #[test]
@@ -295,12 +351,14 @@ mod tests {
             msg_type: "result".into(),
             subtype: "success".into(),
             is_error: false,
-            result: "".into(),
+            result: Some("".into()),
             duration_ms: 0,
             duration_api_ms: 0,
             num_turns: 0,
             total_cost_usd: 0.0,
             usage: serde_json::json!({}),
+            terminal_reason: None,
+            errors: Vec::new(),
             session_id: "s".into(),
             uuid: "u".into(),
         };
