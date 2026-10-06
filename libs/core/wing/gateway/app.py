@@ -17,7 +17,6 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse
 
-from wing.common.logger import install_loop_exception_logger
 from wing.gateway.auth import AuthMiddleware
 from wing.gateway.openapi import OPENAPI_METADATA
 from wing.gateway.protocol import error_response
@@ -69,7 +68,6 @@ def create_app(server: GatewayServer) -> FastAPI:
         不启 lifespan（如无上下文的 TestClient）时后台任务完全不跑——
         单测与嵌入式使用零副作用。
         """
-        install_loop_exception_logger()
         server.start_background()
         try:
             yield

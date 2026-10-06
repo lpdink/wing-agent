@@ -9,7 +9,6 @@ Route handler 只做：参数验证 → 调 Runtime → 构造 HTTP 响应。
 from __future__ import annotations
 
 import asyncio
-import time
 import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -64,11 +63,6 @@ def _require_client_id(x_client_id: str | None = Header(None)) -> str:
 
 def _get_server(request: Request) -> GatewayServer:
     return request.app.state.server
-
-
-def _one_line(value: str) -> str:
-    """日志单行化：客户端可控文本里的 CR/LF 会伪造日志行（换行注入）。"""
-    return value.replace("\r", "\\r").replace("\n", "\\n")
 
 
 # ============================================================
@@ -393,45 +387,12 @@ async def interrupt_session(
     body: InterruptRequest,
     request: Request,
 ) -> OkResponse:
-    """中断会话；请求级日志（到达 / 完成 / 失败）供死锁类现场取证。
-
-    中断不返回类事故里，「请求几点到达、卡了多久」必须能从服务端日志
-    直接读出——不依赖客户端超时反推。request_id 生成的同一值透传给 agent，
-    与 agent 侧 cancel 快照 / 锁等待日志按同一 id 关联。
-    """
+    """中断会话；agent 侧收口等待有界（取消阶梯），请求保证返回。"""
     server = _get_server(request)
-    request_id = uuid.uuid4().hex
-    peer = request.client
-    # session_id 是客户端可控自由文本：CR/LF 会伪造日志行（换行注入）→ 单行化。
-    session_id = _one_line(body.session_id)
-    client_id = _one_line(request.headers.get("x-client-id") or "-")
-    log.info(
-        f"interrupt request: session_id={session_id} "
-        f"client={peer.host + ':' + str(peer.port) if peer else '-'} "
-        f"client_id={client_id} request_id={request_id}"
-    )
-    started = time.monotonic()
     try:
-        await server.runtime.interrupt_session(body.session_id, request_id=request_id)
+        await server.runtime.interrupt_session(body.session_id)
     except LookupError:
-        log.warning(
-            f"interrupt session not found: session_id={session_id} "
-            f"request_id={request_id} "
-            f"elapsed_ms={int((time.monotonic() - started) * 1000)}"
-        )
         raise HTTPException(status_code=404, detail="session not found")
-    except Exception as e:
-        log.error(
-            f"interrupt failed: session_id={session_id} "
-            f"request_id={request_id} "
-            f"elapsed_ms={int((time.monotonic() - started) * 1000)} "
-            f"error={type(e).__name__}: {e}"
-        )
-        raise
-    log.info(
-        f"interrupt done: session_id={session_id} request_id={request_id} "
-        f"elapsed_ms={int((time.monotonic() - started) * 1000)}"
-    )
     return OkResponse()
 
 

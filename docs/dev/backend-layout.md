@@ -20,7 +20,7 @@
 │ L4 编排与传输   runtime · system · background · gateway/*                │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ L3 核心域       config · context · session · agent · tools · provider    │
-│                 audit · commands · diagnostics                           │
+│                 audit · commands                                          │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ L2 领域设施     store/* · event/* · event_bus · hooks/*                  │
 │                 request_context · tool_registry                          │
@@ -37,7 +37,7 @@
 | L0 基础 | `wing.common.*`、`wing.build_info` | 标准库 / L0 | 通用无领域依赖 |
 | L1 领域模型 | `wing.schema.*`、`wing.media.*`、`wing.chain` | L0–L1 | 叶子组，另有 R5 约束 |
 | L2 领域设施 | `wing.store.*`、`wing.event*`、`wing.event_bus`、`wing.hooks`、`wing.request_context`、`wing.tool_registry` | L0–L2 | 可被任意上层复用 |
-| L3 核心域 | `wing.config.*`、`wing.context.*`、`wing.session.*`、`wing.agent.*`、`wing.tools.*`、`wing.provider.*`、`wing.audit.*`、`wing.commands`、`wing.diagnostics.*` | L0–L3 | `tools` / `provider` 另有更严规则（R2/R3） |
+| L3 核心域 | `wing.config.*`、`wing.context.*`、`wing.session.*`、`wing.agent.*`、`wing.tools.*`、`wing.provider.*`、`wing.audit.*`、`wing.commands` | L0–L3 | `tools` / `provider` 另有更严规则（R2/R3） |
 | L4 编排与传输 | `wing.runtime`、`wing.system`、`wing.background`、`wing.gateway.*` | L0–L4 | 唯一允许依赖 gateway 的位置（R1 豁免 `runtime` / `background`） |
 
 两处与「只向下」看似冲突、实为设计批准的依赖（写在这里以免后人误当违规）：
@@ -74,7 +74,6 @@
 | `provider/` | L3 | 模型调用协议层：OpenAI 兼容 / Anthropic 隔离、SSE 传输、provider registry |
 | `audit/`（原 `metrics_registry/`） | L3 | 指标 / 审计注册中心（EventBus 订阅，原子写 JSON；`install()` 由组合根显式调用） |
 | `commands.py`（原 `magic_command/`） | L3 | prompt 命令：registry 元数据 + `$ARGUMENTS` 展开 |
-| `diagnostics/`（原 `agent/cancel_watch.py`） | L3 | 中断取证：cancel 快照、不死看门狗、锁争用告警 |
 | `runtime.py` | L4 | WingRuntime：service 层协调者，`post()` 唯一入站，路由到 Session / ContextManager |
 | `system.py`（原 `runtime.reload_system`） | L4 | 系统级热重载流程（config → hooks → commands → provider → skills & rules） |
 | `background.py` | L4 | BackgroundScheduler：周期任务宿主（逐出、未来的 dreaming 等） |
@@ -97,7 +96,6 @@
 | `config.py` | `config/*`（`default_config.py` 并入） | 08 |
 | `provider/anthropic.py` / `provider/openai_compat.py` | `provider/anthropic/*` / `provider/openai/*`；provider registry 抽出为独立模块 | 09 |
 | `gateway/protocol.py` | `gateway/protocol/*`（领域需要的类型**移出** gateway） | 10 |
-| `agent/cancel_watch.py` | `diagnostics/*` | 11 |
 | `magic_command/` | `commands.py` | 11 |
 | `metrics_registry/` | `audit/*` | 11 |
 | `config.load_hooks` | `hooks/*`（与 `hook_registry` 归位一处） | 11 |
@@ -107,7 +105,7 @@
 | `session.py` / `session_manager.py` 的 `TYPE_CHECKING` 反向依赖 | 随上一条一并清除 | 07 |
 
 守门的包族表在迁移前就**预登记了目标路径**（`wing/chain`、`wing/context`、`wing/session`、
-`wing/audit`、`wing/commands`、`wing/diagnostics`、`wing/hooks`…），所以目标模块一落地，
+`wing/audit`、`wing/commands`、`wing/hooks`…），所以目标模块一落地，
 断言自动按新路径生效；迁移期间守门代码的改动只有**白名单条目的增删**（每条清除都在条目上
 标注了步骤，见 §5）与 `wing.system` 这一个新族的登记——**规则本身一次都没有放宽**。
 

@@ -81,8 +81,6 @@ libs/core/wing/
 │   ├── event_sink.py                AgentEventSink — 唯一事件发射出口 + persist 分流
 │   ├── inbox.py                     消息队列（drain-and-merge）+ feedback waiters
 │   └── tool_context.py              ToolContext Protocol — 工具收到的窄接口（ctx）
-├── diagnostics/                     中断取证包（公共 API 经 __init__ re-export）
-│   └── cancel_watch.py              cancel 快照 / 不死看门狗 / 锁争用告警（纯观测，不改控制流）
 ├── provider/                        模型调用层（协议隔离）
 │   ├── base.py                      ModelProvider ABC + StreamAccumulator + parse_tool_args（容错，永不抛）
 │   ├── transport.py                 HTTP/SSE 传输管道与错误面（SSE 行解析 / 空闲超时 / httpx 构造 / raise_with_body）

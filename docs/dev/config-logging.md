@@ -68,46 +68,6 @@ grep '^2026-09-08 23:' ~/.wing/core/logs/new.log
 awk '$0 >= "2026-09-08 23:10" && $0 < "2026-09-08 23:30"' ~/.wing/tui/logs/wing_2026-09-08.log
 ```
 
-## interrupt 取证日志（runbook）
-
-`POST /api/session/interrupt` 全程留下分段日志（网关端点 → agent → 锁 → cancel 看门狗），
-用于定位「interrupt 请求永不返回」这类现场——会话本身可能毫发无损，而锁死不释放
-（`interrupt()` 里 `await old` 无超时、cancel 只调一次：一次未生效的 cancel 就足以
-让后续所有 interrupt 排队）。实现与栈链覆盖范围见 `wing/diagnostics/cancel_watch.py` 模块文档。
-
-一次正常 interrupt 的日志链（`request_id` 由端点生成、透传到 agent，两侧按同一 id 关联；
-agent 侧 tag 取前 8 位）：
-
-```
-interrupt request: session_id=… client=127.0.0.1:63525 client_id=- request_id=58a40cb0…
-interrupt start [<sid> req=58a40cb0]: hooks=1 lock_waiters=0 worker=Task-11(0x…)
-interrupt hooks [<sid>]: firing 1 hook(s): Bash pid=4242
-interrupt lock acquired [<sid> req=58a40cb0]: waited 0ms (queued=0)
-cancel snapshot [<sid> req=58a40cb0]: task=Task-11(0x…) done=False cancelling=0 must_cancel=False fut_waiter=Future(pending) <Future pending …> stack=[queues.py:158:get <- inbox.py:43:get <- react_loop.py:141:run_turn <- core.py:517:_run]
-interrupt old worker retired [<sid> req=58a40cb0]: await_result=cancelled waited=0ms done=True cancelled=True cancelling=1
-Agent interrupted and reset [<sid> req=58a40cb0] total=1ms
-interrupt done: session_id=… request_id=58a40cb0… elapsed_ms=1
-```
-
-排查顺序（目标：日志本身即可定位，无需 lldb 注入）：
-
-1. `grep 'interrupt lock' new.log` —— 出现 `still NOT acquired` / `held … holder stuck?`
-   即锁已死：告警自带持锁时长、持锁者 tag 与 waiter 数（间隔翻倍退避，封顶 60s）。
-2. 看 `cancel snapshot` —— cancel 那一刻 worker 挂在哪。`fut_waiter` 的**类型**是判别器：
-   `Future`（Queue / httpx 读 / sleep）、`_GatheringFuture`（工具 gather）、`Task`（在等
-   另一个 task）指向完全不同的吞没路径；`stack=[…]` 沿协程等待链下钻（协程 / async
-   generator / Task / 单 child 的 gather，`<gather ×N>` 标记多 child 分叉），覆盖到
-   httpx/httpcore 一类第三方栈帧；`await Future` 的链末端没有帧，由 `fut_waiter=` 承担。
-3. 看 `cancel watchdog […]`（T+1/5/15s 复查未死时的全量 dump）与
-   `worker loop boundary … cancelling 0 -> 1` —— 两次 dump 栈不同 = cancel 已投递但被
-   某帧吞掉后继续跑；纹丝不动 = 从未投递。**看门狗完全没有输出**是第三种签名：日志停在
-   `interrupt start` 之后——看门狗与被观测者同 loop，指向"循环被同步调用卡住"一类问题。
-4. `interrupt hooks … Bash pid=…` 对齐 history 里的 `[exit code: -9]` —— 归因「排队中的
-   interrupt 仍会先杀一次前台工具」（hook 副作用在拿锁之前执行）。
-5. `grep 'with_retry\|模型生成' new.log` —— 重试日志的异常类型分布：无 `*Timeout` 类重试
-   可排除 anyio CancelScope 吞外来 cancel 的路径；也别忘了 `asyncio unhandled: …`
-   （loop 异常处理器兜底，含 traceback）。
-
 ## 环境变量
 
 | 变量 | 作用 |
