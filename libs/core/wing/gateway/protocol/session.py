@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from wing.event import AgentInfo, SessionInfo
 from wing.event.query_response import BranchTargetInfo
 from wing.session.override import AgentOverride
+from wing.store import TagMeta
 
 
 # ============================================================
@@ -264,6 +265,10 @@ class SessionInfoResponse(BaseModel):
     tags: list[str] = Field(
         default_factory=list, description="会话标签（插入序；无标签为空列表）"
     )
+    tag_meta: dict[str, TagMeta] = Field(
+        default_factory=dict,
+        description="每个标签的记录（键集 ⊆ tags）；当前含 added_at 打标时间",
+    )
 
 
 class CompactResponse(BaseModel):
@@ -309,4 +314,8 @@ class TagSessionResponse(BaseModel):
     )
     removed: list[str] = Field(
         default_factory=list, description="本次实际移除（幂等 no-op 不计）"
+    )
+    tag_meta: dict[str, TagMeta] = Field(
+        default_factory=dict,
+        description="变更后的全量标签记录（键集 ⊆ tags）；当前含 added_at 打标时间",
     )

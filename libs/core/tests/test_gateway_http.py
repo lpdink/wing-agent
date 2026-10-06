@@ -18,6 +18,7 @@ from wing.config import ApiKeyEntry, AuthConfig
 from wing.event import AgentInfo, SessionInfo
 from wing.gateway.routes import health as health_route
 from wing.session import TagMutation
+from wing.store import TagMeta
 
 
 def _raise_package_not_found(name: str) -> str:
@@ -645,6 +646,7 @@ class TestSessionInfo:
             "You are a helpful assistant."
         )
         mock_runtime.get_session.return_value = mock_session
+        mock_session.tag_meta = {}
 
         resp = client.get("/api/session/info", params={"session_id": "test-id"})
         assert resp.status_code == 200
@@ -687,6 +689,7 @@ class TestSessionInfo:
         mock_session.agent.context_manager.get_skills_info.return_value = ""
         mock_session.agent.context_manager.system_prompt.content = ""
         mock_runtime.get_session.return_value = mock_session
+        mock_session.tag_meta = {}
 
         resp = client.get("/api/session/info", params={"session_id": "test-id"})
         assert resp.status_code == 200
@@ -714,6 +717,7 @@ class TestSessionInfo:
         mock_session.agent.context_manager.get_skills_info.return_value = ""
         mock_session.agent.context_manager.system_prompt.content = ""
         mock_runtime.get_session.return_value = mock_session
+        mock_session.tag_meta = {}
 
         resp = client.get("/api/session/info", params={"session_id": "test-id"})
         assert resp.status_code == 200
@@ -996,9 +1000,12 @@ class TestSessionTag:
     """POST /api/session/tag 测试（读 / 写同一端点）。"""
 
     def test_read_without_ops(self, client: TestClient, mock_runtime):
-        """add / remove 皆缺省 = 纯读：runtime 收到空元组，响应回显当前标签。"""
+        """add / remove 皆缺省 = 纯读：runtime 收到空元组，响应回显当前标签与记录。"""
         mock_runtime.set_session_tags.return_value = TagMutation(
-            tags=["favorite"], added=[], removed=[]
+            tags=["favorite"],
+            added=[],
+            removed=[],
+            tag_meta={"favorite": TagMeta(added_at="2026-10-05T21:30:12")},
         )
         resp = client.post("/api/session/tag", json={"session_id": "test-id"})
         assert resp.status_code == 200
@@ -1008,15 +1015,19 @@ class TestSessionTag:
             "tags": ["favorite"],
             "added": [],
             "removed": [],
+            "tag_meta": {"favorite": {"added_at": "2026-10-05T21:30:12"}},
         }
         mock_runtime.set_session_tags.assert_called_once_with(
             "test-id", add=(), remove=()
         )
 
     def test_mutation_passthrough(self, client: TestClient, mock_runtime):
-        """add / remove 透传；响应携带变更后的全量标签与实际增删。"""
+        """add / remove 透传；响应携带变更后的全量标签、实际增删与打标时间。"""
         mock_runtime.set_session_tags.return_value = TagMutation(
-            tags=["a", "c"], added=["c"], removed=["b"]
+            tags=["a", "c"],
+            added=["c"],
+            removed=["b"],
+            tag_meta={"c": TagMeta(added_at="2026-10-05T21:30:12")},
         )
         resp = client.post(
             "/api/session/tag",
@@ -1026,6 +1037,7 @@ class TestSessionTag:
         assert resp.json()["tags"] == ["a", "c"]
         assert resp.json()["added"] == ["c"]
         assert resp.json()["removed"] == ["b"]
+        assert resp.json()["tag_meta"] == {"c": {"added_at": "2026-10-05T21:30:12"}}
         mock_runtime.set_session_tags.assert_called_once_with(
             "test-id", add=["c"], remove=["b"]
         )

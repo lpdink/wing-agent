@@ -8,7 +8,13 @@ MemoryMessageLog）是直测耐久语义时才需要的实现细节，经
 ``wing.store.file`` / ``wing.store.memory`` 直达。
 """
 
-from wing.store.base import MessageLog, SessionMetadata, SessionStore, SessionSummary
+from wing.store.base import (
+    MessageLog,
+    SessionMetadata,
+    SessionStore,
+    SessionSummary,
+    TagMeta,
+)
 from wing.store.file import FileSessionStore
 from wing.store.memory import MemorySessionStore
 
@@ -17,6 +23,7 @@ __all__ = [
     "SessionMetadata",
     "SessionStore",
     "SessionSummary",
+    "TagMeta",
     "FileSessionStore",
     "MemorySessionStore",
 ]

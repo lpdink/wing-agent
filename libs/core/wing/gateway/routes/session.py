@@ -379,6 +379,7 @@ async def tag_session(
         tags=mutation.tags,
         added=mutation.added,
         removed=mutation.removed,
+        tag_meta=mutation.tag_meta,
     )
 
 
