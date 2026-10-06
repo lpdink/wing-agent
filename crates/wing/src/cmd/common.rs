@@ -65,3 +65,61 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
     let truncated: String = chars.into_iter().take(keep).collect();
     format!("{truncated}...")
 }
+
+/// Verify the requested tags actually landed on `session_id`.
+///
+/// Guards against a gateway that predates session tags: the create endpoint
+/// there silently ignores the `tags` field (pydantic `extra="ignore"`), which
+/// would recreate the "dispatched but untagged" window this feature exists to
+/// close. The read (no ops) doubles as the compatibility probe — an older
+/// gateway has no `/api/session/tag` route at all and fails loudly here,
+/// before the prompt is sent.
+pub async fn ensure_tags_applied(
+    http: &GatewayApiClient,
+    session_id: &str,
+    tags: &[String],
+) -> Result<()> {
+    if tags.is_empty() {
+        return Ok(());
+    }
+    let resp = http
+        .tag_session(session_id, None, None)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to verify --tag on session {session_id}: {e} \
+                 (does the running gateway predate session tags? restart it: wing stop && wing start)"
+            )
+        })?;
+    let missing = missing_tags(tags, &resp.tags);
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "gateway did not apply tags {missing:?} to session {session_id} \
+             (older gateways ignore the create `tags` field; restart it: wing stop && wing start)"
+        );
+    }
+    Ok(())
+}
+
+/// Requested tags not present in `actual` (pure; unit-tested).
+fn missing_tags<'a>(requested: &'a [String], actual: &[String]) -> Vec<&'a str> {
+    requested
+        .iter()
+        .filter(|tag| !actual.iter().any(|applied| applied == *tag))
+        .map(String::as_str)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_tags_reports_only_absent() {
+        let requested = vec!["executor".to_string(), "task=x".to_string()];
+        let actual = vec!["task=x".to_string(), "favorite".to_string()];
+        assert_eq!(missing_tags(&requested, &actual), vec!["executor"]);
+        assert!(missing_tags(&requested, &requested).is_empty());
+        assert_eq!(missing_tags(&requested, &[]).len(), 2);
+    }
+}

@@ -398,6 +398,9 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
             .create_session(&create_req)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create session: {e}"))?;
+        // 创建即带标；读回校验——旧网关（早于 tags 端点）在这里响亮失败，
+        // 而不是静默丢标后继续把 prompt 发出去。
+        crate::cmd::common::ensure_tags_applied(&http, &resp.session_id, &args.tag).await?;
         tracing::info!(session_id = %resp.session_id, "session created");
         // Print session_id to stderr for recovery/reference.
         eprintln!("session_id: {}", resp.session_id);

@@ -62,7 +62,9 @@ pub struct Cli {
     #[arg(long = "tools")]
     pub tools: Option<String>,
 
-    /// Attach tags to the session (repeatable / comma-separated).
+    /// Attach tags to the session (stdio mode `wing -p` only — subcommands
+    /// like `wing run` / `wing tag` carry their own `--tag`; a misplaced
+    /// top-level flag is rejected instead of being silently dropped).
     #[arg(long = "tag", value_delimiter = ',')]
     pub tag: Vec<String>,
 
@@ -260,6 +262,23 @@ pub enum Command {
     Agents,
 }
 
+/// Error message when the top-level `--tag` is used outside stdio mode.
+///
+/// Stdio mode (`wing -p --tag ...`) consumes it legitimately; every other
+/// path would silently drop it (clap accepts the flag before the subcommand
+/// but nothing reads it), which recreates the "dispatched but untagged"
+/// gap this feature exists to close. `None` = invocation is fine.
+fn misplaced_global_tag_error(tags: &[String]) -> Option<String> {
+    if tags.is_empty() {
+        return None;
+    }
+    Some(
+        "top-level --tag only applies to stdio mode (wing -p --tag ...); with a \
+         subcommand put it after the subcommand, e.g. `wing run --tag executor ...`"
+            .to_string(),
+    )
+}
+
 /// Dispatch CLI command.
 pub async fn dispatch(cli: Cli) -> ExitCode {
     // Logging is initialized for **every** path — TUI, stdio and all
@@ -277,11 +296,8 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
     // 顶层 --tag 只服务 stdio 模式（`wing -p --tag ...`）；子命令各自的 --tag
     // 定义在 RunArgs / Command::Tag 上。`wing --tag x run ...` 这类放错位置
     // 的写法会被 clap 静默接受但丢弃标签——显式报错，别让 Agent 以为打上了。
-    if !cli.tag.is_empty() {
-        eprintln!(
-            "wing error: top-level --tag only applies to stdio mode (wing -p --tag ...); \
-             with a subcommand put it after the subcommand, e.g. `wing run --tag executor ...`"
-        );
+    if let Some(message) = misplaced_global_tag_error(&cli.tag) {
+        eprintln!("wing error: {message}");
         return ExitCode::FAILURE;
     }
 
@@ -530,4 +546,29 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     result?;
     tracing::info!("wing exited cleanly");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn misplaced_global_tag_is_rejected_outside_stdio() {
+        assert!(misplaced_global_tag_error(&[]).is_none());
+
+        let message = misplaced_global_tag_error(&["executor".to_string()])
+            .expect("tags outside stdio mode must be rejected");
+        assert!(message.contains("stdio"), "{message}");
+        assert!(message.contains("wing run --tag"), "{message}");
+    }
+
+    #[test]
+    fn clap_parses_top_level_tag_before_subcommand() {
+        // 这正是 guard 存在的理由：clap 接受这种写法（flag 绑在顶层），
+        // 若不放行闸门，标签会被静默丢弃。
+        let cli = Cli::try_parse_from(["wing", "--tag", "executor", "ps"]).expect("parses");
+        assert_eq!(cli.tag, vec!["executor".to_string()]);
+        assert!(matches!(cli.command, Some(Command::Ps { .. })));
+        assert!(misplaced_global_tag_error(&cli.tag).is_some());
+    }
 }

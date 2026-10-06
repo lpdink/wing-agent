@@ -112,6 +112,9 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
         };
 
         let resp = http.create_session(&create_req).await?;
+        // 创建即带标；读回校验——旧网关（早于 tags 端点）会在这里响亮失败，
+        // 而不是静默丢标后继续把 prompt 发出去。
+        common::ensure_tags_applied(&http, &resp.session_id, &args.tag).await?;
         (resp.session_id, resp.template_name, resp.workspace)
     };
 
