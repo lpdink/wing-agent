@@ -117,6 +117,15 @@ pub struct Cli {
     #[arg(long = "input-format", default_value = "text")]
     pub input_format: String,
 
+    /// Emit `stream_event` frames (Anthropic SSE shape) for token-level streaming.
+    ///
+    /// Claude CLI's `--include-partial-messages`. stdio mode only, and only with
+    /// `--output-format stream-json` (text/json have no NDJSON channel to carry
+    /// the frames — the flag is then a no-op with a log warning). Without the
+    /// flag the output is byte-identical to before.
+    #[arg(long = "include-partial-messages")]
+    pub include_partial_messages: bool,
+
     /// Skip dangerous command review (YOLO mode).
     #[arg(long = "yolo")]
     pub yolo: bool,
@@ -322,6 +331,26 @@ fn misplaced_session_id_error(session_id: Option<&str>) -> Option<String> {
     ))
 }
 
+/// Error message when the top-level `--include-partial-messages` is used outside
+/// stdio mode.
+///
+/// Same reasoning as the `--session-id` / `--tag` guards: the flag must live on
+/// the top-level `Cli` (otherwise the stdio argument filter would silently drop
+/// it — the exact failure this feature removes), which means clap accepts it
+/// next to subcommands where nobody reads it. Refuse with a pointer instead of
+/// silently ignoring. `None` = invocation is fine.
+fn misplaced_include_partial_messages_error(flag: bool) -> Option<String> {
+    if !flag {
+        return None;
+    }
+    Some(
+        "top-level --include-partial-messages only applies to stdio mode \
+         (wing -p ... --output-format stream-json); wing refuses it here instead of \
+         silently ignoring it."
+            .to_string(),
+    )
+}
+
 /// Dispatch CLI command.
 pub async fn dispatch(cli: Cli) -> ExitCode {
     // Logging is initialized for **every** path — TUI, stdio and all
@@ -360,6 +389,13 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
     // 同理：顶层 --session-id 只服务 stdio 模式（create-or-adopt）。放错位置时
     // 被静默丢弃会让编排方以为自己指定的 id 生效了。
     if let Some(message) = misplaced_session_id_error(cli.session_id.as_deref()) {
+        eprintln!("wing error: {message}");
+        return ExitCode::FAILURE;
+    }
+
+    // 同理：`--include-partial-messages` 只服务 stdio 模式（流式增量帧）。它
+    // 在别的路径上不会有任何反应——静默吃掉等于骗消费方"流开着"。
+    if let Some(message) = misplaced_include_partial_messages_error(cli.include_partial_messages) {
         eprintln!("wing error: {message}");
         return ExitCode::FAILURE;
     }
@@ -489,6 +525,7 @@ async fn dispatch_stdio(cli: Cli) -> ExitCode {
         tag: cli.tag,
         output_format,
         input_format,
+        include_partial_messages: cli.include_partial_messages,
         yolo: cli.yolo,
     };
 
@@ -684,5 +721,37 @@ mod tests {
         let cli = Cli::try_parse_from(["wing", "-p", "hi", "--session-id=abc"]).expect("parses");
         assert!(cli.is_stdio_mode());
         assert_eq!(cli.session_id.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn clap_parses_include_partial_messages() {
+        let cli = Cli::try_parse_from(["wing", "-p", "hi", "--include-partial-messages"])
+            .expect("parses");
+        assert!(cli.include_partial_messages);
+        assert!(cli.is_stdio_mode());
+
+        let cli = Cli::try_parse_from(["wing", "-p", "hi"]).expect("absent");
+        assert!(!cli.include_partial_messages);
+    }
+
+    #[test]
+    fn misplaced_include_partial_messages_is_rejected_outside_stdio() {
+        assert!(misplaced_include_partial_messages_error(false).is_none());
+
+        let message = misplaced_include_partial_messages_error(true)
+            .expect("outside stdio mode the flag must be rejected");
+        assert!(message.contains("stdio"), "{message}");
+        assert!(message.contains("--include-partial-messages"), "{message}");
+
+        // clap 接受这种写法（flag 绑在顶层）——guard 是唯一防线。
+        let cli =
+            Cli::try_parse_from(["wing", "--include-partial-messages", "ps"]).expect("parses");
+        assert!(cli.include_partial_messages);
+        assert!(misplaced_include_partial_messages_error(cli.include_partial_messages).is_some());
+
+        // stdio 模式：`dispatch` 在 is_stdio_mode() 分支之后才走到闸门，不受影响。
+        let cli = Cli::try_parse_from(["wing", "-p", "hi", "--include-partial-messages"])
+            .expect("parses");
+        assert!(cli.is_stdio_mode());
     }
 }

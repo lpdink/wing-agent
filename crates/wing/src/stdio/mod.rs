@@ -9,6 +9,7 @@ pub mod ndjson;
 pub mod renderer;
 pub mod stdin_handler;
 pub mod stdout;
+pub mod stream;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -104,6 +105,9 @@ pub struct StdioArgs {
     pub tag: Vec<String>,
     pub output_format: OutputFormat,
     pub input_format: InputFormat,
+    /// `--include-partial-messages`: emit `stream_event` frames (only with
+    /// `--output-format stream-json`).
+    pub include_partial_messages: bool,
     pub yolo: bool,
 }
 
@@ -190,6 +194,16 @@ pub fn validate_stdio_args(args: &StdioArgs) -> Result<(), String> {
         }
     }
 
+    // `--include-partial-messages` 只在 stream-json 输出下有意义（其余输出形态
+    // 没有协议通道可承载 `stream_event` 帧）——给了没反应必须可诊断，与
+    // `--provider` 单独给出同一口径。
+    if partial_messages_without_stream_json_output(args) {
+        tracing::warn!(
+            "--include-partial-messages requires --output-format stream-json: without \
+             the NDJSON stream there is no place for stream_event frames"
+        );
+    }
+
     Ok(())
 }
 
@@ -211,6 +225,12 @@ fn resume_ignored_flags(args: &StdioArgs) -> Vec<&'static str> {
 /// `--provider` 给了但没有 `--model`：no-op（纯函数，便于单测）。
 fn provider_without_model(args: &StdioArgs) -> bool {
     args.provider.is_some() && args.model.is_none()
+}
+
+/// `--include-partial-messages` 给了但输出不是 stream-json：no-op（纯函数，
+/// 便于单测）。其余输出形态没有 NDJSON 通道，`stream_event` 帧无处可写。
+fn partial_messages_without_stream_json_output(args: &StdioArgs) -> bool {
+    args.include_partial_messages && args.output_format != OutputFormat::StreamJson
 }
 
 /// `--session-id` 未被网关兑现时的错误文案（纯函数，便于单测）。
@@ -765,6 +785,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         start_time,
         session_id.clone(),
         Arc::clone(&out),
+        args.include_partial_messages,
     );
 
     // 7. stdin pump：stream-json 输入模式下 stdin 是常驻通道——turn 期间仍要消费
@@ -969,7 +990,7 @@ mod tests {
             "-p",
             "hello",
             "--verbose",
-            "--include-partial-messages",
+            "--debug-to-stderr",
             "--max-turns",
             "5",
         ]
@@ -978,6 +999,22 @@ mod tests {
         .collect();
         let filtered = filter_unknown_args(args);
         assert_eq!(filtered, vec!["-p", "hello", "--max-turns", "5"]);
+    }
+
+    /// `--include-partial-messages` 是已知 bool（步骤 03 起进入 clap 定义）：
+    /// 过滤器必须保留它，否则流式能力又变回"被静默丢弃"。
+    #[test]
+    fn filter_keeps_include_partial_messages() {
+        let args: Vec<String> = vec!["-p", "hello", "--include-partial-messages", "--verbose"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let filtered = filter_unknown_args(args);
+        assert_eq!(
+            filtered,
+            vec!["-p", "hello", "--include-partial-messages"],
+            "已知 flag 保留、未知 flag 丢弃"
+        );
     }
 
     #[test]
@@ -1156,6 +1193,7 @@ mod tests {
             tag: Vec::new(),
             output_format: OutputFormat::Text,
             input_format: InputFormat::Text,
+            include_partial_messages: false,
             yolo: false,
         }
     }
@@ -1280,6 +1318,29 @@ mod tests {
         // provider 不由这里管（它在任何路径上都是 no-op，单独一套消息）。
         a.provider = Some("p".into());
         assert!(!resume_ignored_flags(&a).contains(&"--provider"));
+    }
+
+    // ---- --include-partial-messages（流式的可诊断 no-op） ----
+
+    #[test]
+    fn include_partial_messages_needs_stream_json_output_to_matter() {
+        let mut a = args();
+        a.include_partial_messages = true;
+        assert!(
+            partial_messages_without_stream_json_output(&a),
+            "text 输出：没有协议通道承载 stream_event 帧"
+        );
+
+        a.output_format = OutputFormat::Json;
+        assert!(partial_messages_without_stream_json_output(&a));
+
+        a.output_format = OutputFormat::StreamJson;
+        assert!(!partial_messages_without_stream_json_output(&a));
+
+        // 没给旗标：任何输出形态都不警告。
+        let mut a = args();
+        a.output_format = OutputFormat::StreamJson;
+        assert!(!partial_messages_without_stream_json_output(&a));
     }
 
     // ---- session id 兑现闸门（防御旧网关 / 别名） ----

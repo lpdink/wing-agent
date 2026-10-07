@@ -177,12 +177,64 @@ pub struct ResultMessage {
 }
 
 // ============================================================
+// stream_event frame (`--include-partial-messages`)
+// ============================================================
+
+/// 增量帧（`SDKPartialAssistantMessage`，`sdk.d.ts`）。
+///
+/// 仅在 `--include-partial-messages` 置位时输出：一条 assistant 消息的快照帧
+/// （`assistant`）之前先逐条发 `stream_event`，`event` 是 Anthropic Messages
+/// API 的 `RawMessageStreamEvent`（`message_start` / `content_block_start` /
+/// `content_block_delta` / `content_block_stop` / `message_delta` /
+/// `message_stop`），由 `stdio::stream::StreamState` 从 wing 的 delta 事件
+/// （`text` / `reasoning` / `tool_call_stream`）翻译。
+///
+/// - `parent_tool_use_id`：恒 `null`（wing 无子 agent tool_use 嵌套）；
+/// - `uuid`：帧级去重/关联 id（`protocol::generate_request_id`——事件不带链
+///   uuid 时现铸的帧 id，与打断合成终态帧同一口径）；
+/// - `message_start.message.id` == 同一消息快照帧 `message.id`（去重键）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamEventFrame {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub event: serde_json::Value,
+    pub parent_tool_use_id: Option<String>,
+    pub session_id: String,
+    pub uuid: String,
+}
+
+// ============================================================
 // Tests
 // ============================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_event_frame_matches_the_sdk_shape() {
+        let frame = StreamEventFrame {
+            msg_type: "stream_event".into(),
+            event: serde_json::json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "hi"},
+            }),
+            parent_tool_use_id: None,
+            session_id: "sess-1".into(),
+            uuid: "wing_7".into(),
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(!json.contains('\n'), "NDJSON: 单行");
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "stream_event");
+        assert_eq!(parsed["event"]["type"], "content_block_delta");
+        assert_eq!(parsed["event"]["delta"]["text"], "hi");
+        assert_eq!(parsed["parent_tool_use_id"], serde_json::Value::Null);
+        assert_eq!(parsed["session_id"], "sess-1");
+        assert_eq!(parsed["uuid"], "wing_7");
+    }
 
     #[test]
     fn system_init_serializes_to_valid_json() {

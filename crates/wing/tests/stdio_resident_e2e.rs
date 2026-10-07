@@ -65,6 +65,9 @@ enum Scenario {
     ErrorThenSuccess,
     /// 单轮失败。
     ErrorTurn,
+    /// 一条带流式增量的消息：turn_started → reasoning/text/tool_use 增量 →
+    /// 快照 → tool result → result（`--include-partial-messages` 的 e2e 素材）。
+    StreamingTurn,
 }
 
 struct FakeGateway {
@@ -260,6 +263,9 @@ async fn drive_ws(
                         emit(&mut ws, turn_started_event()).await;
                         emit(&mut ws, result_event("", true)).await;
                     }
+                    (Scenario::StreamingTurn, HttpEvent::Send { .. }) => {
+                        emit_streaming_turn(&mut ws).await;
+                    }
                     // 其余组合（如 Turns 场景收到 Interrupt）：不推事件。
                     _ => {}
                 }
@@ -282,6 +288,24 @@ async fn emit_turn(ws: &mut WebSocketStream<TcpStream>, seq: usize) {
     emit(ws, turn_started_event()).await;
     emit(ws, assistant_event(&format!("turn-{seq}"))).await;
     emit(ws, result_event(&format!("turn-{seq}"), false)).await;
+}
+
+/// 流式轮次：reasoning → text → tool_use 增量 → 快照 → 工具结果 → result。
+///
+/// 覆盖三种块（thinking / text / tool_use）与全部收口点（类型切换、
+/// `is_final`、消息收口），是 `--include-partial-messages` e2e 的素材。
+async fn emit_streaming_turn(ws: &mut WebSocketStream<TcpStream>) {
+    emit(ws, turn_started_event()).await;
+    emit(ws, reasoning_delta_event("pon")).await;
+    emit(ws, reasoning_delta_event("der")).await;
+    emit(ws, text_delta_event("Hel")).await;
+    emit(ws, text_delta_event("lo")).await;
+    emit(ws, tool_delta_event("call_1", "Bash", "{\"cmd", false)).await;
+    emit(ws, tool_delta_event("call_1", "Bash", "\": \"ls\"}", false)).await;
+    emit(ws, tool_delta_event("call_1", "Bash", "", true)).await;
+    emit(ws, assistant_with_tool_event()).await;
+    emit(ws, tool_result_turn_event()).await;
+    emit(ws, result_event("turn-1", false)).await;
 }
 
 // ============================================================
@@ -334,6 +358,74 @@ fn interrupted_event() -> Value {
     json!({
         "type": "interrupted",
         "dropped_request_ids": [],
+        "session_id": SESSION_ID,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "request_id": "fake",
+    })
+}
+
+// ---- 流式增量（`--include-partial-messages`） ----
+
+fn reasoning_delta_event(text: &str) -> Value {
+    json!({
+        "type": "reasoning",
+        "content": text,
+        "session_id": SESSION_ID,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "request_id": "fake",
+    })
+}
+
+fn text_delta_event(text: &str) -> Value {
+    json!({
+        "type": "text",
+        "content": text,
+        "session_id": SESSION_ID,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "request_id": "fake",
+    })
+}
+
+fn tool_delta_event(id: &str, name: &str, fragment: &str, is_final: bool) -> Value {
+    json!({
+        "type": "tool_call_stream",
+        "tool_call_id": id,
+        "tool_name": name,
+        "args_fragment": fragment,
+        "is_final": is_final,
+        "session_id": SESSION_ID,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "request_id": "fake",
+    })
+}
+
+/// 与 `emit_streaming_turn` 的增量对应的快照（thinking + text + tool_use）。
+fn assistant_with_tool_event() -> Value {
+    json!({
+        "type": "assistant_turn",
+        "uuid": "a-1",
+        "content_blocks": [
+            {"type": "thinking", "thinking": "ponder"},
+            {"type": "text", "text": "Hello"},
+            {"type": "tool_use", "id": "call_1", "name": "Bash", "input": {"cmd": "ls"}},
+        ],
+        "model": "fake-model",
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 10, "output_tokens": 4, "cached_tokens": 0},
+        "session_id": SESSION_ID,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "request_id": "fake",
+    })
+}
+
+fn tool_result_turn_event() -> Value {
+    json!({
+        "type": "tool_result_turn",
+        "uuid": "t-1",
+        "tool_use_id": "call_1",
+        "tool_name": "Bash",
+        "content": "file1\nfile2",
+        "is_error": false,
         "session_id": SESSION_ID,
         "created_at": "2026-01-01T00:00:00+00:00",
         "request_id": "fake",
@@ -580,6 +672,22 @@ fn is_result(frame: &Value) -> bool {
     frame["type"] == "result"
 }
 
+/// stdout 里的 `stream_event` 帧（按顺序）。
+fn stream_frames(frames: &[Value]) -> Vec<&Value> {
+    frames
+        .iter()
+        .filter(|f| f["type"] == "stream_event")
+        .collect()
+}
+
+/// `stream_event` 帧的 event 类型序列。
+fn stream_event_types(frames: &[Value]) -> Vec<&str> {
+    stream_frames(frames)
+        .iter()
+        .map(|f| f["event"]["type"].as_str().unwrap_or("<missing>"))
+        .collect()
+}
+
 fn cleanup(home: &PathBuf) {
     let _ = std::fs::remove_dir_all(home);
 }
@@ -802,6 +910,180 @@ async fn resident_with_cli_prompt_keeps_serving_stdin_turns() {
         gateway.sends(),
         vec!["from cli".to_string(), "from stdin".to_string()]
     );
+
+    wing.close_stdin();
+    wing.expect_exit(0).await;
+    cleanup(&home);
+}
+
+/// `--include-partial-messages`：一轮流式会话的帧序关键性质——
+/// `message_start` 先于任何块、`message_start.id == 快照帧 message.id`、
+/// 块 start/stop 配对、`message_stop` 先于快照帧、`input_json_delta` 增量
+/// 拼接等于工具入参、快照之后不再有流式帧。
+#[tokio::test]
+async fn resident_streams_partial_messages_when_flagged() {
+    let (home, _gateway, _port) = start_gateway(Scenario::StreamingTurn, "streaming-on").await;
+    let mut wing = WingProcess::spawn_with(&home, &["--include-partial-messages"]).await;
+
+    wing.write_line(&user_frame("go")).await;
+    let result = wing.read_frame("result", is_result).await;
+    assert_eq!(result["result"], "turn-1");
+
+    let frames = wing.frames.clone();
+    assert_eq!(
+        frames.last().unwrap()["type"],
+        "result",
+        "result 仍是最后一帧：{:?}",
+        frames
+    );
+    assert_eq!(frames[0]["type"], "stream_event", "首个协议帧就是增量帧");
+    assert_eq!(
+        stream_event_types(&frames),
+        vec![
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_delta",
+            "content_block_stop",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_delta",
+            "content_block_stop",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+        ],
+        "{frames:?}"
+    );
+
+    let stream = stream_frames(&frames);
+    // 信封字段（SDKPartialAssistantMessage）。
+    for frame in &stream {
+        assert_eq!(frame["parent_tool_use_id"], Value::Null);
+        assert_eq!(frame["session_id"], SESSION_ID);
+        assert!(frame["uuid"].as_str().unwrap().starts_with("wing_"));
+    }
+
+    // 块序列：thinking(0) → text(1) → tool_use(2)，index 单调。
+    let block_types: Vec<&str> = stream
+        .iter()
+        .filter(|f| f["event"]["type"] == "content_block_start")
+        .map(|f| f["event"]["content_block"]["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        block_types,
+        vec!["thinking", "text", "tool_use"],
+        "{frames:?}"
+    );
+    let indexes: Vec<u64> = stream
+        .iter()
+        .filter(|f| f["event"]["type"] == "content_block_start")
+        .map(|f| f["event"]["index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(indexes, vec![0, 1, 2]);
+    assert_eq!(
+        stream
+            .iter()
+            .filter(|f| f["event"]["type"] == "content_block_start")
+            .count(),
+        stream
+            .iter()
+            .filter(|f| f["event"]["type"] == "content_block_stop")
+            .count(),
+        "每个块都要收口"
+    );
+    assert_eq!(
+        stream
+            .iter()
+            .find(|f| f["event"]["content_block"]["type"] == "tool_use")
+            .unwrap()["event"]["content_block"]["id"],
+        "call_1"
+    );
+
+    // input_json_delta 增量透传：拼接 == 工具入参（provider 侧片段不重发）。
+    let partial: String = stream
+        .iter()
+        .filter_map(|f| f["event"]["delta"]["partial_json"].as_str())
+        .collect();
+    assert_eq!(partial, "{\"cmd\": \"ls\"}");
+
+    // message_delta 与快照帧同值（stop_reason / output_tokens）。
+    let message_delta = stream
+        .iter()
+        .find(|f| f["event"]["type"] == "message_delta")
+        .unwrap();
+    assert_eq!(message_delta["event"]["delta"]["stop_reason"], "tool_use");
+    assert_eq!(message_delta["event"]["usage"], json!({"output_tokens": 4}));
+
+    // id 一致性（硬要求）：message_start.id == 快照帧 message.id；
+    // message_stop 先于快照帧；快照之后没有该消息的流式帧。
+    let start_id = stream[0]["event"]["message"]["id"].as_str().unwrap();
+    assert_ne!(
+        start_id, "msg_a-1",
+        "id 是流式侧铸的（不是既有 msg_{{uuid}}）"
+    );
+    let stop_at = frames
+        .iter()
+        .position(|f| f["type"] == "stream_event" && f["event"]["type"] == "message_stop")
+        .unwrap();
+    let assistant_at = frames
+        .iter()
+        .position(|f| f["type"] == "assistant")
+        .unwrap();
+    assert!(
+        stop_at < assistant_at,
+        "message_stop 必须先于快照帧: {frames:?}"
+    );
+    assert_eq!(
+        frames[assistant_at]["message"]["id"].as_str(),
+        Some(start_id)
+    );
+    assert_eq!(
+        frames[assistant_at]["uuid"], "a-1",
+        "帧 uuid 仍是链事件 uuid"
+    );
+    assert!(
+        frames[assistant_at + 1..]
+            .iter()
+            .all(|f| f["type"] != "stream_event"),
+        "快照之后不得再有流式帧: {frames:?}"
+    );
+
+    // 工具结果帧与终态帧照旧。
+    assert!(
+        frames
+            .iter()
+            .any(|f| f["type"] == "user" && f["tool_use_result"]["tool_use_id"] == "call_1")
+    );
+
+    wing.close_stdin();
+    wing.expect_exit(0).await;
+    cleanup(&home);
+}
+
+/// 不带 flag：同一条流式轮次零 `stream_event` 帧，快照 id 保持既有形状
+/// （`msg_{事件 uuid}`）——「零行为变化」的 e2e 兜底。
+#[tokio::test]
+async fn resident_emits_no_stream_frames_without_the_flag() {
+    let (home, _gateway, _port) = start_gateway(Scenario::StreamingTurn, "streaming-off").await;
+    let mut wing = WingProcess::spawn(&home).await;
+
+    wing.write_line(&user_frame("go")).await;
+    let result = wing.read_frame("result", is_result).await;
+    assert_eq!(result["result"], "turn-1");
+
+    let frames = wing.frames.clone();
+    assert!(
+        frames.iter().all(|f| f["type"] != "stream_event"),
+        "无 flag：不得有 stream_event 帧: {frames:?}"
+    );
+    let assistant = frames.iter().find(|f| f["type"] == "assistant").unwrap();
+    assert_eq!(assistant["message"]["id"], "msg_a-1");
+    assert_eq!(assistant["message"]["stop_reason"], "tool_use");
+    assert_eq!(assistant["message"]["content"][1]["text"], "Hello");
 
     wing.close_stdin();
     wing.expect_exit(0).await;
