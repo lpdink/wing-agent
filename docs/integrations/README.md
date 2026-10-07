@@ -61,16 +61,16 @@ wing acp --help
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}' | wing acp
 ```
 
-期望：标准输出出现**一行** JSON-RPC 响应，形如
+期望：标准输出出现**一行** JSON-RPC 响应。下面是真机捕获的完整一行（`version` 串随构建变化，其余字段逐字一致）：
 
 ```json
-{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":false,"audio":false,"embeddedContext":false}},"authMethods":[],"agentInfo":{"name":"wing","version":"0.x.y"}}}
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":false,"audio":false,"embeddedContext":false},"mcpCapabilities":{"http":false,"sse":false},"sessionCapabilities":{"list":{},"resume":{},"close":{}},"auth":{}},"authMethods":[],"agentInfo":{"name":"wing","version":"0.x.y (构建 commit)"}}}
 ```
 
-判定标准（其余字段随版本变化，不必逐字一致）：
+判定标准（只需看这三条；其余字段随版本变化，不必逐字一致）：
 
 - `result.protocolVersion` 为 `1`；
-- `result.agentInfo.name` 为 `wing`；
+- `result.agentInfo.name` 为 `wing`（`version` 与 `wing --version` 同口径，形如 `0.x.y (构建 commit)`）；
 - stdin 关闭后进程正常退出。
 
 > 这一步会按需自动拉起本机网关（已在跑则直接复用），不会改动你已有的会话。
@@ -118,9 +118,3 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
    - 网关（后端）：`$WING_HOME/core/logs/new.log`（活跃日志的符号链接）；守护进程的 stdout / stderr 在 `~/.wing/core/logs/gateway.log`。
    目录布局与按日期 grep 的技巧见 [docs/dev/config-logging.md](../dev/config-logging.md)。
 
-<!--
-对账（integration 阶段核对后删除）：
-- `wing acp` 参数面：本文按 02 步骤任务书口径写 `wing acp [--agent <模板名>] [--model <模型名>]`，以 01 交付代码的 `wing acp --help` 为准。
-- initialize 响应示例的字段形状（agentCapabilities / authMethods / agentInfo 内容）以真实输出为准。
-- 能力矩阵中「wing 的 prompt 命令（`/` 补全）」一行取决于 `available_commands_update` 是否落地（01 任务书映射表未列），未落地则删行。
--->
