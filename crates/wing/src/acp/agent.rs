@@ -12,16 +12,18 @@
 //! | `session/load` | request | resume 校验 → 挂载（arm + subscribe）→ 回放 `sync_session` 快照 → 标题/用量/命令 → 响应（[`restore_session`]） |
 //! | `session/resume` | request | 同 load，不回放 |
 //! | `session/close` | request | 在途轮次按 cancel 处理 → 回收 hub 条目（N6）→ unsubscribe + release（幂等成功） |
+//! | `session/set_config_option` | request | 只认 `model`（`provider:model` 值域 / 裸模型名）→ `POST /api/session/update` → 回**全量** options（见 [`super::model`]） |
 //!
-//! **后续步骤在这里追加**（04 model）：`set_config_option` 是同形的
-//! `on_receive_request` 注册；`session/new|load|resume` 响应上的 `configOptions` 由 04
-//! 填充——本文件里构造这三个响应的地方就是单点接入位。handler 里可以拿
-//! `hub`（`Arc<SessionHub>`）与 handler 自带的 `cx: ConnectionTo<Client>`。
+//! `session/new` / `session/load` / `session/resume` 的响应都带 `configOptions`
+//! （id=`model`；构造与解析全在 [`super::model`]）；外部改模型（TUI / 其它前端）触发
+//! `session_state_changed` 时，中继在 hub 的分流路径上（见 `super::session::SessionHub::dispatch`），
+//! 不在这里。
+//!
 //! （03 的 Ask 映射不注册新方法：它在 `session/prompt` 的轮次循环里分流，见 [`super::ask`]。）
 //!
 //! 纪律：SDK 的 handler 在 dispatch loop 内执行并阻塞后续消息，因此**任何会等外部
 //! 事件的活都必须 `cx.spawn(...)` 出去**（`session/new` 的 HTTP 往返、整轮 prompt、
-//! load/resume 的回放、close 的收尾等待都是）。
+//! load/resume 的回放、close 的收尾等待、模型热切换的 HTTP 往返都是）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -54,16 +56,20 @@ use agent_client_protocol::schema::v1::ResumeSessionRequest;
 use agent_client_protocol::schema::v1::ResumeSessionResponse;
 use agent_client_protocol::schema::v1::SessionCapabilities;
 use agent_client_protocol::schema::v1::SessionCloseCapabilities;
+use agent_client_protocol::schema::v1::SessionConfigOption;
 use agent_client_protocol::schema::v1::SessionId;
 use agent_client_protocol::schema::v1::SessionInfo as SessionListEntry;
 use agent_client_protocol::schema::v1::SessionListCapabilities;
 use agent_client_protocol::schema::v1::SessionNotification;
 use agent_client_protocol::schema::v1::SessionResumeCapabilities;
 use agent_client_protocol::schema::v1::SessionUpdate;
+use agent_client_protocol::schema::v1::SetSessionConfigOptionRequest;
+use agent_client_protocol::schema::v1::SetSessionConfigOptionResponse;
 use agent_client_protocol::schema::v1::StopReason;
 
 use super::AcpArgs;
 use super::ask;
+use super::model;
 use super::session::Attached;
 use super::session::HubError;
 use super::session::NewSessionParams;
@@ -91,6 +97,7 @@ pub async fn serve(hub: Arc<SessionHub>, args: AcpArgs) -> Result<(), Error> {
     let hub_load = Arc::clone(&hub);
     let hub_resume = Arc::clone(&hub);
     let hub_close = Arc::clone(&hub);
+    let hub_config = Arc::clone(&hub);
 
     Agent
         .builder()
@@ -209,6 +216,7 @@ pub async fn serve(hub: Arc<SessionHub>, args: AcpArgs) -> Result<(), Error> {
                         request.mcp_servers.len(),
                         request.additional_directories.len(),
                     );
+                    let session_key = request.session_id.to_string();
                     let result = restore_session(
                         &hub,
                         &task_cx,
@@ -218,8 +226,12 @@ pub async fn serve(hub: Arc<SessionHub>, args: AcpArgs) -> Result<(), Error> {
                     )
                     .await;
                     match result {
-                        // 04 步：这里补 configOptions。
-                        Ok(()) => responder.respond(LoadSessionResponse::new())?,
+                        Ok(()) => {
+                            // 04：模型 options 与标题 / 用量 / 命令同批，在响应之前。
+                            let options = model_options(&hub, &session_key).await;
+                            responder
+                                .respond(LoadSessionResponse::new().config_options(options))?;
+                        }
                         Err(error) => responder.respond_with_error(error)?,
                     }
                     drop(pending);
@@ -241,6 +253,7 @@ pub async fn serve(hub: Arc<SessionHub>, args: AcpArgs) -> Result<(), Error> {
                         request.mcp_servers.len(),
                         request.additional_directories.len(),
                     );
+                    let session_key = request.session_id.to_string();
                     let result = restore_session(
                         &hub,
                         &task_cx,
@@ -250,8 +263,34 @@ pub async fn serve(hub: Arc<SessionHub>, args: AcpArgs) -> Result<(), Error> {
                     )
                     .await;
                     match result {
-                        // 04 步：这里补 configOptions。
-                        Ok(()) => responder.respond(ResumeSessionResponse::new())?,
+                        Ok(()) => {
+                            // 04：模型 options 与标题 / 用量 / 命令同批，在响应之前。
+                            let options = model_options(&hub, &session_key).await;
+                            responder
+                                .respond(ResumeSessionResponse::new().config_options(options))?;
+                        }
+                        Err(error) => responder.respond_with_error(error)?,
+                    }
+                    drop(pending);
+                    Ok(())
+                })?;
+                Ok(())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: SetSessionConfigOptionRequest,
+                        responder: Responder<SetSessionConfigOptionResponse>,
+                        cx: ConnectionTo<Client>| {
+                let hub = Arc::clone(&hub_config);
+                // 在途响应凭据（与 load/resume 同款）：更新是一次 HTTP 往返，
+                // WS 万一断开，进程要等错误帧入队才收尾。
+                let pending = hub.pending_reply();
+                cx.spawn(async move {
+                    match model::set_config_option(&hub, &request).await {
+                        Ok(options) => {
+                            responder.respond(SetSessionConfigOptionResponse::new(options))?
+                        }
                         Err(error) => responder.respond_with_error(error)?,
                     }
                     drop(pending);
@@ -278,6 +317,9 @@ pub async fn serve(hub: Arc<SessionHub>, args: AcpArgs) -> Result<(), Error> {
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(Stdio::new(), async move |cx| {
+            // 04：把连接句柄留给 hub——模型变更中继从事件分流路径发 `config_option_update`
+            // （那条路径没有 handler 的 `cx`）。
+            hub.register_client_connection(cx.clone());
             // 客户端关连接时通知 hub：WS 断开的收尾窗口据此尽早退出
             // （不做这件事也不影响正确性，只是收尾要等满窗口）。
             let watcher = cx.clone();
@@ -387,10 +429,42 @@ async fn create_session(
         .await
         .map_err(hub_error)?;
 
-    // 04 步：这里补 configOptions（id=model / category=model / select / provider:model 值域）。
     tracing::info!(session_id = %session_id, "acp: session created");
+    // 04：模型 config options（id=model / category=model / select，值域 `provider:model`）。
+    let options = model_options(hub, &session_id).await;
     let session_id = SessionId::new(session_id);
-    Ok((session_id.clone(), NewSessionResponse::new(session_id)))
+    Ok((
+        session_id.clone(),
+        NewSessionResponse::new(session_id).config_options(options),
+    ))
+}
+
+/// 会话的模型 config options（04）：取不到 / 空表都**不广告**（返回 None），只记日志。
+///
+/// 建会话 / 打开线程是主目的：模型目录或会话状态的一次失败不该把整个会话打掉。缺了
+/// options 的客户端只是没有模型下拉，下一次 `session/load` 或外部变更的中继都会重新构造。
+async fn model_options(
+    hub: &Arc<SessionHub>,
+    session_id: &str,
+) -> Option<Vec<SessionConfigOption>> {
+    match model::options_for(hub, session_id).await {
+        Ok(options) if !options.is_empty() => Some(options),
+        Ok(_) => {
+            tracing::info!(
+                session_id,
+                "acp: the gateway lists no models; config options not advertised"
+            );
+            None
+        }
+        Err(err) => {
+            tracing::warn!(
+                session_id,
+                error = %err,
+                "acp: model config options unavailable; not advertised"
+            );
+            None
+        }
+    }
 }
 
 /// cwd 校验：ACP 要求绝对路径；相对/不存在都会让后续工具落到意外目录。
@@ -816,7 +890,47 @@ fn hub_error(error: HubError) -> Error {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::ErrorCode;
+    use agent_client_protocol::schema::v1::SessionConfigSelectOption;
+    use agent_client_protocol::schema::v1::SessionConfigSelectOptions;
     use serde_json::json;
+
+    /// 04：`configOptions` 缺席 = 不广告（不是空数组）；有值时是我们在 `model` 模块里
+    /// 构造的那份（`session/new` / `load` / `resume` 三个响应共用同一形状）。
+    #[test]
+    fn session_responses_carry_the_model_option_only_when_advertised() {
+        let bare = serde_json::to_value(NewSessionResponse::new(SessionId::new("s1")))
+            .expect("response serializes");
+        assert_eq!(bare["sessionId"], "s1");
+        assert!(
+            bare.get("configOptions").is_none(),
+            "取不到目录 / 没有值时不发 configOptions 字段"
+        );
+
+        let option = SessionConfigOption::select(
+            "model",
+            "Model",
+            "dashscope:glm-4.6",
+            SessionConfigSelectOptions::Ungrouped(vec![SessionConfigSelectOption::new(
+                "dashscope:glm-4.6",
+                "GLM-4.6",
+            )]),
+        );
+        let advertised = serde_json::to_value(
+            NewSessionResponse::new(SessionId::new("s1")).config_options(Some(vec![option])),
+        )
+        .expect("response serializes");
+        assert_eq!(advertised["configOptions"][0]["id"], "model");
+        assert_eq!(
+            advertised["configOptions"][0]["currentValue"],
+            "dashscope:glm-4.6"
+        );
+
+        // load / resume 的响应形状同款（字段名 `configOptions`）。
+        let loaded = serde_json::to_value(LoadSessionResponse::new()).expect("serializes");
+        assert!(loaded.get("configOptions").is_none());
+        let resumed = serde_json::to_value(ResumeSessionResponse::new()).expect("serializes");
+        assert!(resumed.get("configOptions").is_none());
+    }
 
     #[test]
     fn initialize_echoes_version_and_advertises_session_lifecycle() {

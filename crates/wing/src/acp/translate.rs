@@ -377,11 +377,10 @@ fn stateless_updates(event: &WingEvent) -> Vec<SessionUpdate> {
             // branch_targets / assistant_turn / tool_result_turn / session_init /
             // unknown …）不产生 ACP 帧。
             //
-            // 后续步骤的追加点：
-            // - 04：`SessionStateChanged{model, model_display_name, …}` →
-            //   `ConfigOptionUpdate`（模型 config option 回执）；
-            // - 05：`SyncSession` 的素材 → 历史回放 update 序列（`session/load` 用），
-            //   届时在 `translate` 里加独立函数，仍不依赖连接。
+            // `session_state_changed{model}` **不在这里**映射：它是会话级事实，与「有没有
+            // 在途 prompt」无关，而本函数只在轮次里被调用（空闲时事件根本到不了这里）。
+            // 模型变更的中继在 `super::model::relay_model_change`，触发点见
+            // `SessionHub::dispatch`（design D7）。
             tracing::debug!(event_type = other.event_type(), "acp: event not mapped");
             Vec::new()
         }

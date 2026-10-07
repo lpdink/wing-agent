@@ -42,6 +42,8 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use agent_client_protocol::Client;
+use agent_client_protocol::ConnectionTo;
 use agent_client_protocol::schema::v1::ClientCapabilities;
 use agent_client_protocol::schema::v1::Implementation;
 use agent_client_protocol::schema::v1::SessionUpdate;
@@ -176,6 +178,10 @@ struct EntryState {
     tools: ToolCards,
     /// 是否有一轮 prompt 已 armed（`request_cancel` 据此决定发不发 interrupt）。
     active: bool,
+    /// 模型变更中继在途（04）：同一会话同时只有一次在中继（见 [`SessionEntry::claim_model_relay`]）。
+    model_relay_in_flight: bool,
+    /// 中继在途期间又收到模型变更（收尾时再跑一次，合并成「以最新状态为准」）。
+    model_relay_dirty: bool,
 }
 
 impl SessionEntry {
@@ -235,6 +241,32 @@ impl SessionEntry {
         self.inner.lock().expect("entry mutex poisoned").active
     }
 
+    /// 模型变更中继的去重/合并协议（04，见 `model::relay_model_change`）：
+    /// 返回 true = 现在没有在途中继，调用方**负责跑一次**；false = 已有在途，
+    /// 本次变更被记成「积压」（收尾时由 [`SessionEntry::finish_model_relay`] 再跑一次）。
+    fn claim_model_relay(&self) -> bool {
+        let mut state = self.inner.lock().expect("entry mutex poisoned");
+        if state.model_relay_in_flight {
+            state.model_relay_dirty = true;
+            false
+        } else {
+            state.model_relay_in_flight = true;
+            true
+        }
+    }
+
+    /// 中继收尾：期间又收到变更 → true（调用方再跑一次，重取权威状态）；否则清在途标记。
+    fn finish_model_relay(&self) -> bool {
+        let mut state = self.inner.lock().expect("entry mutex poisoned");
+        if state.model_relay_dirty {
+            state.model_relay_dirty = false;
+            true
+        } else {
+            state.model_relay_in_flight = false;
+            false
+        }
+    }
+
     /// 会话级工具卡片映射（持锁期间不许 await）。
     fn updates_for(&self, event: &WingEvent) -> Vec<SessionUpdate> {
         let mut state = self.inner.lock().expect("entry mutex poisoned");
@@ -285,6 +317,12 @@ pub struct SessionHub {
     /// 「事件流已死」的唤醒信号（与 `stream_dead` 配对：先登记再复查，见
     /// [`SessionHub::stream_dead`]）。
     stream_dead_notify: Notify,
+    /// ACP 客户端连接句柄（`agent::serve` 的 `connect_with` 注册）。
+    ///
+    /// 04 的模型变更中继从**事件分流**路径发 `config_option_update`——那条路径没有 handler
+    /// 的 `cx`，所以连接得在 hub 里留一份。一个进程只服务一个 ACP 连接（stdio 传输性质），
+    /// 一份就够（同前提见 03 的能力门控）。
+    client: Mutex<Option<ConnectionTo<Client>>>,
     state: Mutex<HubState>,
 }
 
@@ -332,6 +370,7 @@ impl SessionHub {
             client_closed: Arc::new(ClientClosed::default()),
             stream_dead: AtomicBool::new(false),
             stream_dead_notify: Notify::new(),
+            client: Mutex::new(None),
             state: Mutex::new(HubState::default()),
         });
         (hub, outbound_rx)
@@ -365,6 +404,22 @@ impl SessionHub {
             .expect("hub mutex poisoned")
             .client_info
             .clone()
+    }
+
+    /// 注册 ACP 客户端连接（`agent::serve` 在 `connect_with` 里调用；重复注册覆盖）。
+    ///
+    /// 只在**事件分流**路径里用：04 的模型变更中继要从 `dispatch` 发
+    /// `config_option_update`，而那里没有 handler 的 `cx`（见 [`SessionHub::client_connection`]）。
+    pub fn register_client_connection(&self, client: ConnectionTo<Client>) {
+        *self.client.lock().expect("hub mutex poisoned") = Some(client);
+    }
+
+    /// 客户端连接句柄（未注册时为 None）。
+    ///
+    /// 一个进程只服务一个 ACP 连接：这一份是全部。`initialize` 之前的 `session/new` 不可能
+    /// 发生（协议先 initialize），所以注册时机不构成竞态。
+    pub fn client_connection(&self) -> Option<ConnectionTo<Client>> {
+        self.client.lock().expect("hub mutex poisoned").clone()
     }
 
     /// 客户端是否可用 `elicitation/create`（form 模式）—— 03 步 Ask 的门控。
@@ -700,7 +755,12 @@ impl SessionHub {
     }
 
     /// 事件分流（WS 泵调用）：按 `meta.session_id` 投递到对应会话。
-    fn dispatch(&self, event: WingEvent) {
+    ///
+    /// 另外挂 04 的**模型变更中继**：`session_state_changed{model}` 是会话级事实，
+    /// 与「有没有在途 prompt」无关（空闲时下面 `deliver` 会把它丢掉），所以触发点在这里
+    /// 而不是 prompt 轮次的事件循环里（design D7）。中继经 `claim_model_relay` 合并：
+    /// 同一会话同时只有一次在途，期间的变更合到下一次。
+    fn dispatch(self: &Arc<Self>, event: WingEvent) {
         let Some(session_id) = event.session_id().map(str::to_string) else {
             // 全局事件（无 session_id）：ACP 侧没有对应物。
             tracing::debug!(event_type = event.event_type(), "acp: global event dropped");
@@ -717,8 +777,22 @@ impl SessionHub {
             })
             .ok();
         if let Some(entry) = entry {
+            if super::model::is_model_change(&event) && entry.claim_model_relay() {
+                let hub = Arc::clone(self);
+                let session_id = session_id.clone();
+                tokio::spawn(async move {
+                    super::model::relay_model_change(&hub, &session_id).await;
+                });
+            }
             entry.deliver(event);
         }
+    }
+
+    /// 模型变更中继的收尾（[`SessionEntry::finish_model_relay`]；会话已被回收 → false）。
+    pub fn finish_model_relay(&self, session_id: &str) -> bool {
+        self.entry(session_id)
+            .map(|entry| entry.finish_model_relay())
+            .unwrap_or(false)
     }
 
     /// WS 事件流结束的第一步：让所有在途 prompt 的接收端立刻结束
@@ -1679,6 +1753,45 @@ mod tests {
         assert!(
             !hub.elicitation_form_supported(),
             "降级是进程级粘性状态，重新 initialize 不该复活它"
+        );
+    }
+
+    // ---- 04：模型变更中继的合并协议 ----
+
+    #[test]
+    fn model_relay_claims_are_merged_while_one_is_in_flight() {
+        let entry = SessionEntry::new("s1");
+        assert!(entry.claim_model_relay(), "空闲：这次由我跑");
+        assert!(!entry.claim_model_relay(), "在途：合并（只置积压标记）");
+        assert!(!entry.claim_model_relay(), "再来一次仍只是合并");
+        assert!(entry.finish_model_relay(), "收尾发现积压 → 再跑一次");
+        assert!(
+            !entry.finish_model_relay(),
+            "第二次收尾没有积压 → 结束（在途标记清掉）"
+        );
+        assert!(entry.claim_model_relay(), "回到空闲后新的变更又能认领");
+        assert!(!entry.finish_model_relay(), "干净收尾不再重跑");
+    }
+
+    #[test]
+    fn finish_model_relay_is_a_noop_for_unknown_sessions() {
+        let (hub, _outbound_rx) = test_hub();
+        assert!(!hub.finish_model_relay("nope"));
+    }
+
+    /// 未注册客户端连接（`connect_with` 之前）时中继只记日志，但**必须**走收尾：
+    /// 否则在途标记永远挂着，此后所有模型变更都只会被合并、再也不播报。
+    #[tokio::test]
+    async fn relay_model_change_clears_the_in_flight_flag_without_a_client_connection() {
+        let (hub, _outbound_rx) = test_hub();
+        let entry = hub.register("s1");
+        assert!(hub.client_connection().is_none(), "测试 hub 不注册连接");
+
+        assert!(entry.claim_model_relay());
+        super::super::model::relay_model_change(&hub, "s1").await;
+        assert!(
+            entry.claim_model_relay(),
+            "收尾已执行：后续变更仍能认领（标记没被挂死）"
         );
     }
 }
