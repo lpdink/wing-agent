@@ -9,6 +9,7 @@ pub mod app;
 pub mod cmd;
 pub mod config;
 pub mod gateway;
+pub mod model_selection;
 pub mod protocol;
 pub mod render;
 pub mod shared;
