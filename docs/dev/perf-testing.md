@@ -211,20 +211,31 @@ sha / 轮数 / 档位不一致时插入告警、放弃单值表头）；改文�
 `calibrate=true` 跑，产物在 artifact 里。
 
 **CI 噪声地板实测**（校准 run `37672003292`：`calibrate=true`、两侧同 rev `e5d53e7`、
-`gateway` 族、rounds=3）：8 项里 **6 项 |Δ| ≤ 2%**（`context.build_p50` +0.4% /
-`context.build_p99` +0.6% / `fanout.cpu_ms_per_1k` ±0% / `resume.sync` −1.2% /
-`turn.p50` +1.7% / `turn.p99` −0.3%），`fanout.gap_p99` −5.5%（仍在 30% 带内）；唯一
-越界的是 `fanout.complete_ms` **−57.4%** —— base 侧逐轮 295 / 297 / **127**ms
-（head 125–126 / 126 / 126ms）：**3 轮中位数挡得住单点尖峰，挡不住连续两轮被拖慢**。
-这正是"评论里的数字要结合 artifact 逐轮值判读"的实证；要更稳得加轮数或改聚合口径，
-本轮不动带宽。
+rounds=3、quick；注意它跑在**本轮改动之前**的口径上）：
+
+- **gateway**：8 项里 6 项 |Δ| ≤ 2%（`context.build_p50` +0.4% / `build_p99` +0.6% /
+  `fanout.cpu_ms_per_1k` ±0% / `resume.sync` −1.2% / `turn.p50` +1.7% / `turn.p99` −0.3%），
+  `fanout.gap_p99` −5.5%（30% 带内）；唯一越界的 `fanout.complete_ms` **−57.4%** ——
+  base 侧逐轮 295 / 297 / **127**ms（head 125–126 / 126 / 126ms）。
+- **rust**：16 项里 15 项 |Δ| ≤ 1.8%（ns 级 bench ≤ 0.9%、`session_replay` ≤ 0.6%）；
+  唯一越界的 `tool_args_stream.append.256` **−14.9%**（base 逐轮 20.2 / 24.6 / 24.2 µs、
+  head 20.6 / 19.8 / 20.9 µs → 轮间 spread 21.8% vs 5.5%），与 run 1 的 23.8% 同量级 ——
+  这正是给该 bench 放宽带宽（12/30）并单独加 `--measurement-time` 3s 的依据。
+- **tui**：`lag_p50` +6.8%、`lag_p99` / `lag_max` −13.2%（都在 15/30、25/45 带内，判"持平"）；
+  `trend` 在同一 rev 下给出 **−109.5%**（base 中位 +6.1ms vs head −0.6ms，逐轮值横跨
+  ±8ms）—— 旧口径判"改善"，现在它是 `info_only`；coverage 两侧逐轮完全一致（0.7083 ×3）。
+
+两条结论写进 CI 局限：**3 轮中位数挡得住单点尖峰、挡不住连续两轮被拖慢**，且**大 Δ 要先看
+artifact 的逐轮值**。`append.*` 这一轮是 2s 测量时间的旧口径；下一次 calibrate dispatch 会带
+3s 新口径重测，若同 rev 漂移仍 > 12% 就把带宽再放宽（本轮不预支）。
+
 
 ### 初始值与依据
 
 | 指标族 | noise / regress | 依据 |
 |---|---|---|
 | 默认（rust 全族） | 6 / 20 | 06 的 `--calibrate`（两侧同 rev、1 轮）：12 项 \|Δ\| ≤ 1.9%、中位 ≈ 0.2%；同产品代码的 e2e 12 项 \|Δ\| ≤ 0.84%。6% 已是地板的 3 倍。 |
-| `rust.tool_args_stream.append.*` | 12 / 30 | CI 首跑（run 37667281765）：base 侧 `append.256` 三轮 **24.1 / 29.5 / 29.8 µs**（轮间 spread 23.8%）、head 侧 `append.512` 60.1 / 55.3 / 59.0 µs（8.6%）——µs 级 bench 对 CPU 频率与邻居抖动特别敏感；同轮 ns 级 bench（`stream_render` content.64）只 0.3%。带宽放宽 + 该 bench 的 `--measurement-time` 单独给 3s（更多样本）。 |
+| `rust.tool_args_stream.append.*` | 12 / 30 | CI 首跑（run 37667281765）：base 侧 `append.256` 三轮 **24.1 / 29.5 / 29.8 µs**（轮间 spread 23.8%）、head 侧 `append.512` 60.1 / 55.3 / 59.0 µs（8.6%）——µs 级 bench 对 CPU 频率与邻居抖动特别敏感；同轮 ns 级 bench（`stream_render` content.64）只 0.3%。校准 run（同 rev）复现：`append.256` base 20.2 / 24.6 / 24.2 vs head 20.6 / 19.8 / 20.9 µs → 中位对比 −14.9%（当时是 2s 测量时间）。带宽放宽 + 该 bench 的 `--measurement-time` 单独给 3s（更多样本）；下一轮 calibrate 用新口径复测。 |
 | `tui.display.lag_p50_us` | 15 / 30 | 04 的 `--calibrate`（quick、单轮）：Δp50 = +12.1% / −11.3% → 单轮地板 ≈ ±12%。CI 3 轮取中会更好，但带宽要站在"不误报"一侧。 |
 | `tui.display.lag_p99_us` / `lag_max_us` | 25 / 45 | 04 实测 p99 常态 29–43ms、负载高时 60–115ms；quick 档一次只有约 20 个标记，p99/max 是小样本极值，比 p50 更跳。CI 首跑两侧逐轮 22.2/26.1/28.2ms 与 21.6/30.7/28.9ms 都在带内。 |
 | `tui.tui_cpu_ratio` | 30 / 60 | CPU 采样是 `ps -o time=`（10ms 量化）对约 2s 窗口、约 3% 占用（≈60ms CPU）→ 量化不确定度 ≈17%。CI runner 上 quick 档两侧都读到 0（分辨率不够）→ 该行按"基准非正"判 n/a，不再显示成 0% 持平。 |
@@ -276,9 +287,9 @@ sha / 轮数 / 档位不一致时插入告警、放弃单值表头）；改文�
     波动很小）——带宽已放宽，`--measurement-time` 也单独加到 3s。
   - `tui.tui_cpu_ratio` 在 CI runner 上 quick 档两侧都读到 0（`ps -o time=` 分辨率不够）
     → 该行按"基准非正"判 n/a；本地开发机可见非零值。
-  - **大 Δ 先看逐轮值**：校准 run（两侧同 rev）实测 `gateway.fanout.complete_ms` −57%
-    （base 侧 295 / 297 / 127ms）——轮间中位数只挡单点尖峰。artifact 的
-    `raw/<suite>-<side>-r<n>.json` 才是判读的第一现场。
+  - **大 Δ 先看逐轮值**：校准 run（两侧同 rev）实测 `gateway.fanout.complete_ms` −57%、
+    `rust.tool_args_stream.append.256` −14.9%、`tui.display.trend_us` −109% —— 轮间中位数
+    只挡单点尖峰。artifact 的 `raw/<suite>-<side>-r<n>.json` 才是判读的第一现场。
   - gateway 套件失败时现场留在 runner 的 `<RUNNER_TEMP>/perf/wing-home/` 里，artifact 只带
     `raw/`（JSON + 日志）——要看完整现场需要 runner 还活着（或本地复跑）。
   - 不跑 nightly 全量档（非 quick）、不维护跨 run 趋势、不做强制门禁、不测内存/二进制体积/
