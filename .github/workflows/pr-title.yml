@@ -1,0 +1,74 @@
+name: PR Title
+
+# PR 标题门禁：`type(scope): description` + 全英文（禁 CJK）。规则见 AGENTS.md「提交信息」。
+# 独立于 ci.yml 的 workflow：标题变更（edited）与代码推送是两条生命周期，互不牵连；
+# 本项也适合单独设为必需检查（分支保护里勾 "Check PR title"）。
+on:
+  pull_request:
+    branches: [develop]
+    types: [opened, edited, reopened]
+
+permissions: {}
+
+jobs:
+  check:
+    name: Check PR title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          # CJK 族（与 .githooks/commit-msg 保持同一组范围）。
+          CJK_RANGES = (
+              (0x2E80, 0x303F),
+              (0x3040, 0x30FF),
+              (0x3400, 0x4DBF),
+              (0x4E00, 0x9FFF),
+              (0xAC00, 0xD7AF),
+              (0xF900, 0xFAFF),
+              (0xFE30, 0xFE4F),
+              (0xFF00, 0xFFEF),
+              (0x20000, 0x2FFFF),
+          )
+
+          # 规范：type(scope): description；type 固定六种，scope 为模块名（小写字母/数字/连字符）。
+          FORMAT_RE = re.compile(
+              r"^(feat|fix|refactor|test|docs|chore)\([a-z0-9][a-z0-9-]*\): \S"
+          )
+
+
+          def first_cjk(text):
+              for char in text:
+                  code = ord(char)
+                  if any(start <= code <= end for start, end in CJK_RANGES):
+                      return char
+              return None
+
+
+          title = os.environ["PR_TITLE"]
+          problems = []
+
+          hit = first_cjk(title)
+          if hit:
+              problems.append(f"包含 CJK 字符 {hit!r}：标题一律英文")
+          if not FORMAT_RE.match(title):
+              problems.append(
+                  "需匹配 `type(scope): 描述`——type ∈ feat|fix|refactor|test|docs|chore，"
+                  "scope 为模块名（例：feat(acp): add ...）"
+              )
+
+          if problems:
+              print("❌ PR 标题不符合规范：")
+              for problem in problems:
+                  print(f"  - {problem}")
+              print(f"  当前标题：{title}")
+              sys.exit(1)
+
+          print(f"✅ PR 标题符合规范：{title}")
+          PY
