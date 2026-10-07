@@ -15,6 +15,7 @@ import fnmatch
 import json
 import math
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -33,11 +34,19 @@ SIDE_FIELDS: tuple[str, ...] = (
     "wing_home",
 )
 
-#: metric id 的单位后缀（契约 §4）；报告按它选显示单位。
-UNIT_SUFFIXES: tuple[str, ...] = ("_ns", "_us", "_ms", "_ratio", "_pct")
+#: metric id 的单位后缀（契约 §4）；报告按它选显示单位。`_ms_per_1k` 放在 `_ms` 前面。
+UNIT_SUFFIXES: tuple[str, ...] = (
+    "_ms_per_1k",
+    "_ns",
+    "_us",
+    "_ms",
+    "_ratio",
+    "_pct",
+)
 
 #: 单位后缀 → 显示单位（`_ratio` 无量纲）。
 _UNIT_DISPLAY: Mapping[str, str] = {
+    "_ms_per_1k": "ms/1k",
     "_ns": "ns",
     "_us": "µs",
     "_ms": "ms",
@@ -47,6 +56,14 @@ _UNIT_DISPLAY: Mapping[str, str] = {
 
 #: 日志尾部带给错误信息的字符数上限。
 LOG_TAIL_CHARS = 1200
+
+#: ANSI CSI 转义序列（`\x1b[…` 到 0x40–0x7e 的终止字节）：cargo 的彩色 stderr 等。
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def strip_ansi(text: str) -> str:
+    """去掉 ANSI CSI 转义：进 PR 评论的文本必须是纯文本（CI 里 cargo 输出带色）。"""
+    return ANSI_RE.sub("", text)
 
 
 class CommandError(RuntimeError):

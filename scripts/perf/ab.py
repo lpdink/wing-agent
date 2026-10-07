@@ -15,8 +15,10 @@ report JSON（交给 `report.py` 渲染成 PR 评论）。
 原始单次结果落 `<workdir>/raw/<suite>-<side>-r<round>.json`，子进程日志落
 `<workdir>/raw/logs/`；suite 失败只记 `failures[]`（退出码非 0，CI 视为基础设施故障），
 其余测量继续；suite 侧写在 raw 里的 `meta.notes` 会带上 `<suite>/<side> r<round>` 标注
-汇总进报告的 `meta.notes`（不吞不截断）。契约（§Frozen Interfaces）见 perf-ci 任务书；
-设计与取舍见 01 harness_core 步骤的 `design.md`。
+汇总进报告的 `meta.notes`（不吞不截断）。rust 的两个质量信号在这里被消费：**载荷指纹**
+两侧都采到且不一致 → 该 suite 的指标判 n/a（比的可能不是同一份载荷）；**criterion CI
+宽度** > 10% → 加一条提示 note（只提示样本抖动，不改判档）。契约（§Frozen Interfaces）
+见 perf-ci 任务书；设计与取舍见 01 harness_core 与 08 ci_calibration 步骤的 `design.md`。
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import math
 import re
 import shlex
 import shutil
@@ -54,6 +57,7 @@ from common import (  # noqa: E402
     metric_unit,
     read_json,
     run_command,
+    strip_ansi,
     verdict_for,
     write_json,
 )
@@ -62,10 +66,19 @@ from common import (  # noqa: E402
 SUITE_NAMES: tuple[str, ...] = ("rust", "tui", "gateway")
 
 #: 每个 suite 的构建命令（契约 §5 的 `--prepare`），cwd = side worktree，顺序执行。
+#: uv 一律跳过 `wing-cli`（maturin 编译是纯开销：套件用 `target/release/wing` 与
+#: `.venv/bin/wing-gateway`，不需要 venv 里的 `wing` 脚本）。
+UV_SYNC: tuple[str, ...] = (
+    "uv",
+    "sync",
+    "--frozen",
+    "--no-install-package",
+    "wing-cli",
+)
 SUITE_PREPARE: Mapping[str, tuple[tuple[str, ...], ...]] = {
     "rust": (("cargo", "bench", "--no-run", "-p", "wing"),),
-    "tui": (("cargo", "build", "--release", "-p", "wing"), ("uv", "sync", "--frozen")),
-    "gateway": (("uv", "sync", "--frozen"),),
+    "tui": (("cargo", "build", "--release", "-p", "wing"), UV_SYNC),
+    "gateway": (UV_SYNC,),
 }
 
 #: 需要 side venv（`<worktree>/.venv/bin/python`）的 suite：缺 venv 直接明确报错。
@@ -466,12 +479,121 @@ def orchestrate(
 
 # ── 聚合与判定（契约 §5/§6） ────────────────────────────────────
 
+#: criterion 置信区间相对宽度超过它 → 聚合一条提示 note（rust 族专有信号）。
+CI_WIDTH_WARN_PCT = 10.0
+
+#: 提示 note 里最多列几个指标。
+CI_WIDTH_NOTE_LIMIT = 5
+
+
+def _as_float(value: Any) -> float | None:
+    """有限数值 → float；其余（bool / 字符串 / NaN / inf）→ None。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _fmt_number(value: float) -> str:
+    """note 里的数字显示（`%g`：0 / -12.5 / 1.2e+06 都读得出来）。"""
+    return f"{value:g}"
+
+
+def _config_of(result: SuiteResult) -> Mapping[str, Any]:
+    config = result.meta.get("config")
+    return config if isinstance(config, Mapping) else {}
+
+
+def _payload_fingerprints(result: SuiteResult) -> Mapping[str, Any]:
+    fingerprints = _config_of(result).get("payload_fingerprints")
+    return fingerprints if isinstance(fingerprints, Mapping) else {}
+
+
+def fingerprint_mismatches(results: Sequence[SuiteResult]) -> dict[str, str]:
+    """suite → 细节：两侧都采到载荷指纹且不一致（"比的可能不是同一份载荷"）。
+
+    指纹由 bench 打印、suite 收进 `meta.config.payload_fingerprints`（载荷大小 → hash）。
+    **仅单侧有**（如首 PR 的 base 缺 bench）不算不一致——那是"没测"，不是"测得不一样"，
+    拿它告警会在每个新 bench 的首 PR 上刷假警报。
+    """
+    per_suite: dict[str, dict[str, dict[str, Any]]] = {}
+    for result in results:
+        found = _payload_fingerprints(result)
+        if found:
+            per_suite.setdefault(result.suite, {}).setdefault(result.side, {}).update(
+                found
+            )
+    mismatches: dict[str, str] = {}
+    for suite, sides in per_suite.items():
+        base, head = sides.get("base", {}), sides.get("head", {})
+        if not base or not head:
+            continue
+        differing = [
+            size
+            for size in sorted(set(base) | set(head), key=lambda item: str(item))
+            if base.get(size) != head.get(size)
+        ]
+        if not differing:
+            continue
+        parts = []
+        for size in differing[:3]:
+            base_hash = (
+                base.get(size, {}).get("fnv1a")
+                if isinstance(base.get(size), Mapping)
+                else None
+            )
+            head_hash = (
+                head.get(size, {}).get("fnv1a")
+                if isinstance(head.get(size), Mapping)
+                else None
+            )
+            parts.append(f"n={size} base={base_hash} head={head_hash}")
+        more = "" if len(differing) <= 3 else f"（共 {len(differing)} 项）"
+        mismatches[suite] = "；".join(parts) + more
+    return mismatches
+
+
+def ci_width_notes(results: Sequence[SuiteResult]) -> list[str]:
+    """任一侧 criterion 相对宽度 > 10% 的指标 → 一条提示 note（不改判档）。
+
+    宽度大 = criterion 自己说"这个中位数的置信区间很宽"，值得让人知道；它与"回归"是两件事，
+    所以只提示、不进判定（否则等于第二套阈值）。只有 rust 族写入这个信号。
+    """
+    widths: dict[str, float] = {}
+    for result in results:
+        raw = _config_of(result).get("ci_rel_pct")
+        if not isinstance(raw, Mapping):
+            continue
+        for metric, value in raw.items():
+            number = _as_float(value)
+            if number is None or number <= CI_WIDTH_WARN_PCT:
+                continue
+            widths[str(metric)] = max(widths.get(str(metric), 0.0), number)
+    if not widths:
+        return []
+    ordered = sorted(widths.items(), key=lambda item: item[1], reverse=True)
+    shown = "、".join(
+        f"{metric} {value:.1f}%" for metric, value in ordered[:CI_WIDTH_NOTE_LIMIT]
+    )
+    more = f"（共 {len(ordered)} 项）" if len(ordered) > CI_WIDTH_NOTE_LIMIT else ""
+    return [
+        f"criterion 置信区间偏宽（> {CI_WIDTH_WARN_PCT:.0f}%{more}）：{shown}"
+        " —— 只提示样本抖动，不改判档"
+    ]
+
 
 def build_comparisons(
     results: Sequence[SuiteResult], thresholds: Thresholds
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """每轮代表值 → 轮间中位数 → delta% → 判定；不可比 / 不判定的也显式留下（verdict=n/a）。"""
     notes: list[str] = []
+    mismatched = fingerprint_mismatches(results)
+    for suite, detail in sorted(mismatched.items()):
+        notes.append(
+            f"{suite}: 两侧载荷指纹不一致（bench 载荷生成器被改过？该 suite 的指标不可比）"
+            f"：{detail}"
+        )
+    notes.extend(ci_width_notes(results))
     table: dict[str, dict[str, dict[int, float]]] = {}
     suites: dict[str, str] = {}
     for result in results:
@@ -516,14 +638,18 @@ def build_comparisons(
         if base_median is None or head_median is None:
             missing = "base" if base_median is None else "head"
             note = f"{missing} 侧无数据"
-        elif base_median == 0:
-            note = "base 中位数为 0：Δ% 无定义"
+        elif base_median <= 0:
+            # 负基准与零基准是同一类问题：百分比在 base ≤ 0 时没有方向含义
+            # （有符号量的 ±Δ 会翻转符号，零基准则无定义）。
+            note = f"基准非正（base 中位数 {_fmt_number(base_median)}）：Δ% 无定义"
         else:
             delta = round(100.0 * (head_median - base_median) / base_median, 3)
             entry["delta_pct"] = delta
-            if thresholds.is_info_only(metric):
-                # 测量质量信息项（例：TUI 覆盖率）：数值照给，但不判档 ——
-                # 覆盖率下降不等于性能变差，标成 improved 是错的。
+            if suite in mismatched:
+                note = "两侧载荷指纹不一致：比的可能不是同一份载荷"
+            elif thresholds.is_info_only(metric):
+                # 测量质量信息项（例：TUI 覆盖率、零中心的有符号 trend）：数值照给，
+                # 但不判档 —— 覆盖率下降不等于性能变差，标成 improved 是错的。
                 note = "测量质量信息项（不参与判定）"
             else:
                 entry["verdict"] = verdict_for(
@@ -552,12 +678,15 @@ def suite_notes(results: Sequence[SuiteResult]) -> list[str]:
 
     suite 的软异常（case n/a、采样不足、帧数对不上…）只落在单侧 raw JSON 里，PR 评论
     看不到就是"有样本被守卫拒了"没人知道。这里逐条带上定位信息原样透传，不做去重与
-    截断（同一 note 出现在两个 round 就是两个事实）。
+    截断（同一 note 出现在两个 round 就是两个事实）；文本过一遍 `strip_ansi` 兜底——
+    CI 上 cargo 的彩色 stderr 曾把 `\x1b[…` 直接带进评论。
     """
     notes: list[str] = []
     for result in results:
         for note in result.notes:
-            notes.append(f"{result.suite}/{result.side} r{result.round}: {note}")
+            notes.append(
+                f"{result.suite}/{result.side} r{result.round}: {strip_ansi(note)}"
+            )
     return notes
 
 
@@ -962,7 +1091,13 @@ def _rev_of(path: Path) -> str:
 
 
 def _synth(
-    suite: str, side: str, round_no: int, metrics: Mapping[str, float]
+    suite: str,
+    side: str,
+    round_no: int,
+    metrics: Mapping[str, float],
+    *,
+    config: Mapping[str, Any] | None = None,
+    notes: Sequence[str] = (),
 ) -> SuiteResult:
     payload = {
         "suite": suite,
@@ -972,7 +1107,7 @@ def _synth(
         "error": None,
         "metrics": dict(metrics),
         "samples": {},
-        "meta": {},
+        "meta": {"notes": list(notes), "config": dict(config or {})},
     }
     return SuiteResult.parse(payload, Path("<synthetic>"))
 
@@ -1013,13 +1148,14 @@ def run_selftest() -> int:
         ("tui.display.lag_p50_us", "tui", (15.0, 30.0)),
         ("tui.display.lag_p99_us", "tui", (25.0, 45.0)),
         ("tui.display.lag_max_us", "tui", (25.0, 45.0)),
-        ("tui.display.trend_us", "tui", (50.0, 100.0)),
         ("tui.tui_cpu_ratio", "tui", (30.0, 60.0)),
         ("gateway.fanout.complete_ms", "gateway", (15.0, 30.0)),
         ("gateway.fanout.gap_p99_us", "gateway", (30.0, 50.0)),
-        ("gateway.turn.p99_ms", "gateway", (30.0, 50.0)),
-        ("gateway.context.build_p99_ms", "gateway", (30.0, 50.0)),
         ("gateway.resume.sync_ms", "gateway", (15.0, 30.0)),
+        # µs 级 bench：CI 实测轮间漂移 ~24%（run 37667281765），只给 append 放宽。
+        ("rust.tool_args_stream.append.256.median_ns", "rust", (12.0, 30.0)),
+        ("rust.tool_args_stream.append.512.median_ns", "rust", (12.0, 30.0)),
+        ("rust.tool_args_stream.frames_60fps.256.median_ns", "rust", (6.0, 20.0)),
         ("rust.session_replay.replay.1000.median_ns", "rust", (6.0, 20.0)),
     ):
         checker.check(
@@ -1029,8 +1165,17 @@ def run_selftest() -> int:
         )
     checker.check(
         "thresholds.file.info_only",
-        thresholds.is_info_only("tui.display.coverage_ratio")
+        all(
+            thresholds.is_info_only(metric)
+            for metric in (
+                "tui.display.coverage_ratio",
+                "tui.display.trend_us",
+                "gateway.turn.p99_ms",
+                "gateway.context.build_p99_ms",
+            )
+        )
         and not thresholds.is_info_only("tui.display.lag_p50_us")
+        and not thresholds.is_info_only("gateway.turn.p50_ms")
         and not thresholds.higher_better,
         f"info_only={thresholds.info_only} higher_better={thresholds.higher_better}",
     )
@@ -1100,15 +1245,25 @@ def run_selftest() -> int:
         and metric_unit("rust.session_replay.replay.1000.median_ns") == "ns"
         and metric_unit("tui.coverage_ratio") == ""
         and metric_unit("gateway.cpu_pct") == "%"
+        and metric_unit("gateway.fanout.cpu_ms_per_1k") == "ms/1k"
         and metric_unit("weird.metric") == "",
         " / ".join(
             metric_unit(metric)
             for metric in (
                 "stub.worse.median_ms",
                 "tui.display.lag_p50_us",
+                "gateway.fanout.cpu_ms_per_1k",
                 "weird.metric",
             )
         ),
+    )
+    checker.check(
+        "strip_ansi.csi",
+        strip_ansi("\x1b[1m\x1b[91merror\x1b[0m: no bench target named `x`")
+        == "error: no bench target named `x`"
+        and strip_ansi("plain text") == "plain text"
+        and strip_ansi("a\x1b[0mb") == "ab",
+        repr(strip_ansi("\x1b[1m\x1b[91merror\x1b[0m: no bench target")),
     )
     checker.check(
         "fmt_value.ladder",
@@ -1122,6 +1277,28 @@ def run_selftest() -> int:
         " / ".join(
             report_render.fmt_value(value)
             for value in (14.5, 0.98, 0.000123, 0.0000123, None)
+        ),
+    )
+    checker.check(
+        "report.per_1k_unit",
+        "70 ms/1k"
+        in report_render._row(
+            {
+                "metric": "gateway.fanout.cpu_ms_per_1k",
+                "base_median": 70.0,
+                "head_median": 60.0,
+                "delta_pct": -14.3,
+                "verdict": "flat",
+            }
+        ),
+        report_render._row(
+            {
+                "metric": "gateway.fanout.cpu_ms_per_1k",
+                "base_median": 70.0,
+                "head_median": 60.0,
+                "delta_pct": -14.3,
+                "verdict": "flat",
+            }
         ),
     )
 
@@ -1337,6 +1514,30 @@ def run_selftest() -> int:
                 for side_name in ("base", "head")
             ],
             str(propagated),
+        )
+        ansi_note = suite_notes(
+            [
+                _synth(
+                    "rust",
+                    "base",
+                    1,
+                    {"rust.x.median_ns": 1.0},
+                    notes=[
+                        "session_replay: bench target missing on side base "
+                        "(\x1b[1m\x1b[91merror\x1b[0m: no bench target named `session_replay`)"
+                    ],
+                )
+            ]
+        )
+        checker.check(
+            "notes.ansi_stripped",
+            ansi_note
+            == [
+                "rust/base r1: session_replay: bench target missing on side base "
+                "(error: no bench target named `session_replay`)"
+            ]
+            and "\x1b" not in ansi_note[0],
+            repr(ansi_note),
         )
 
         ctx = RunContext(
@@ -1795,6 +1996,20 @@ def run_selftest() -> int:
             "edge.comparable_survives",
             by_e["stub.shared.median_ms"]["verdict"] == "flat",
         )
+        # 负基准与零基准同类：百分比在有符号量上没有方向含义（B 级原文的触发条件）。
+        negative = [
+            _synth("stub", "base", 1, {"stub.neg.median_ms": -5.0}),
+            _synth("stub", "head", 1, {"stub.neg.median_ms": 20.0}),
+        ]
+        comparisons_n, _ = build_comparisons(negative, thresholds)
+        by_n = {str(entry["metric"]): entry for entry in comparisons_n}
+        checker.check(
+            "edge.base_negative",
+            by_n["stub.neg.median_ms"]["verdict"] == "n/a"
+            and by_n["stub.neg.median_ms"]["delta_pct"] is None
+            and "基准非正" in str(by_n["stub.neg.median_ms"].get("note")),
+            str(by_n["stub.neg.median_ms"]),
+        )
 
         # ⑩b 信息项（info_only）：数值照给、不判档；报告里不跟"改善"混在一起
         info = [
@@ -1843,6 +2058,186 @@ def run_selftest() -> int:
             "info_only.counted",
             "1 项未判定" in md_i and "项改善" not in md_i,
             md_i.splitlines()[3] if len(md_i.splitlines()) > 3 else "",
+        )
+
+        # ⑩c 有符号零中心量（trend）：判档没有方向意义（base<0 时 Δ% 符号还会翻转）
+        trend = [
+            _synth("tui", "base", 1, {"tui.display.trend_us": 20000.0}),
+            _synth("tui", "head", 1, {"tui.display.trend_us": 10000.0}),
+        ]
+        comparisons_t, _ = build_comparisons(trend, thresholds)
+        by_t = {str(entry["metric"]): entry for entry in comparisons_t}
+        checker.check(
+            "info_only.signed_trend",
+            by_t["tui.display.trend_us"]["verdict"] == "n/a"
+            and abs(float(by_t["tui.display.trend_us"]["delta_pct"]) + 50.0) < 1e-6
+            and "信息项" in str(by_t["tui.display.trend_us"].get("note")),
+            str(by_t["tui.display.trend_us"]),
+        )
+        # 负基准时守卫先接管：连 Δ% 都不给（否则 -50% 会被读成"改善"）。
+        trend_neg = [
+            _synth("tui", "base", 1, {"tui.display.trend_us": -20000.0}),
+            _synth("tui", "head", 1, {"tui.display.trend_us": 20000.0}),
+        ]
+        comparisons_tn, _ = build_comparisons(trend_neg, thresholds)
+        by_tn = {str(entry["metric"]): entry for entry in comparisons_tn}
+        checker.check(
+            "info_only.signed_trend_negative_base",
+            by_tn["tui.display.trend_us"]["verdict"] == "n/a"
+            and by_tn["tui.display.trend_us"]["delta_pct"] is None
+            and "基准非正" in str(by_tn["tui.display.trend_us"].get("note")),
+            str(by_tn["tui.display.trend_us"]),
+        )
+
+        # ⑩d 质量信号消费：载荷指纹（两侧不一致 → 该 suite 全行 n/a；单侧有 → 跳过）
+        same = {"200": {"fnv1a": "aa"}, "1000": {"fnv1a": "bb"}}
+        checked_same = [
+            _synth(
+                "rust",
+                "base",
+                1,
+                {"rust.a.median_ns": 10.0},
+                config={"payload_fingerprints": same},
+            ),
+            _synth(
+                "rust",
+                "head",
+                1,
+                {"rust.a.median_ns": 9.0},
+                config={"payload_fingerprints": dict(same)},
+            ),
+        ]
+        checker.check(
+            "fingerprint.same_side_values",
+            not fingerprint_mismatches(checked_same),
+            str(fingerprint_mismatches(checked_same)),
+        )
+        one_sided = [
+            _synth("rust", "base", 1, {"rust.a.median_ns": 10.0}),
+            _synth(
+                "rust",
+                "head",
+                1,
+                {"rust.a.median_ns": 9.0},
+                config={"payload_fingerprints": same},
+            ),
+        ]
+        checker.check(
+            "fingerprint.single_side_skipped",
+            not fingerprint_mismatches(one_sided),
+            str(fingerprint_mismatches(one_sided)),
+        )
+        comparisons_one, notes_one = build_comparisons(one_sided, thresholds)
+        checker.check(
+            "fingerprint.single_side_judged",
+            len(comparisons_one) == 1
+            and comparisons_one[0]["verdict"] == "improved"
+            and not notes_one,
+            str(comparisons_one),
+        )
+        differing = [
+            _synth(
+                "rust",
+                "base",
+                1,
+                {"rust.a.median_ns": 10.0},
+                config={"payload_fingerprints": same},
+            ),
+            _synth(
+                "rust",
+                "head",
+                1,
+                {"rust.a.median_ns": 9.0},
+                config={
+                    "payload_fingerprints": {
+                        "200": {"fnv1a": "zz"},
+                        "1000": {"fnv1a": "bb"},
+                    }
+                },
+            ),
+        ]
+        comparisons_d, notes_d = build_comparisons(differing, thresholds)
+        checker.check(
+            "fingerprint.mismatch_n_a",
+            len(comparisons_d) == 1
+            and comparisons_d[0]["verdict"] == "n/a"
+            and "载荷指纹不一致" in str(comparisons_d[0].get("note"))
+            and len(comparisons_d[0]["base"]) == 1,
+            str(comparisons_d[0]),
+        )
+        checker.check(
+            "fingerprint.mismatch_note",
+            any(
+                "载荷指纹不一致" in note and "n=200" in note and "aa" in note
+                for note in notes_d
+            ),
+            str(notes_d),
+        )
+
+        # ⑩e 质量信号消费：criterion CI 宽度 > 10% → 提示 note（不判档）
+        wide = [
+            _synth(
+                "rust",
+                "base",
+                1,
+                {"rust.a.median_ns": 10.0, "rust.b.median_ns": 2.0},
+                config={
+                    "ci_rel_pct": {"rust.a.median_ns": 3.5, "rust.b.median_ns": 22.5}
+                },
+            ),
+            _synth(
+                "rust",
+                "head",
+                1,
+                {"rust.a.median_ns": 8.0, "rust.b.median_ns": 1.95},
+                config={
+                    "ci_rel_pct": {"rust.a.median_ns": 4.0, "rust.b.median_ns": 11.0}
+                },
+            ),
+        ]
+        comparisons_w, notes_w = build_comparisons(wide, thresholds)
+        by_w = {str(entry["metric"]): entry for entry in comparisons_w}
+        checker.check(
+            "ci_width.note",
+            len(notes_w) == 1
+            and "置信区间偏宽" in notes_w[0]
+            and "rust.b.median_ns 22.5%" in notes_w[0]
+            and "rust.a.median_ns" not in notes_w[0],
+            str(notes_w),
+        )
+        checker.check(
+            "ci_width.verdict_untouched",
+            by_w["rust.b.median_ns"]["verdict"] == "flat"
+            and abs(float(by_w["rust.b.median_ns"]["delta_pct"]) + 2.5) < 1e-6
+            and by_w["rust.a.median_ns"]["verdict"] == "improved",
+            str(by_w),
+        )
+        checker.check(
+            "ci_width.below_threshold_silent",
+            not ci_width_notes(
+                [
+                    _synth(
+                        "rust",
+                        "base",
+                        1,
+                        {"rust.a.median_ns": 10.0},
+                        config={"ci_rel_pct": {"rust.a.median_ns": 10.0}},
+                    )
+                ]
+            ),
+            str(
+                ci_width_notes(
+                    [
+                        _synth(
+                            "rust",
+                            "base",
+                            1,
+                            {"rust.a.median_ns": 10.0},
+                            config={"ci_rel_pct": {"rust.a.median_ns": 10.0}},
+                        )
+                    ]
+                )
+            ),
         )
 
         # ⑪ 校准语义：两侧同 rev。用 HEAD~1（≠ HEAD）构造——实现里删掉"校准钉住 head"就会红。
