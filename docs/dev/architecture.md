@@ -68,11 +68,13 @@ Zed / omnigent 等 ACP 客户端（前者配在 `settings.json` 的 `agent_serve
 `session/prompt` 串行化（第二个排队等前一个终态）。
 
 `wing acp` 的 stdout 只承载 ACP 帧（日志与其它形态同走 `$WING_HOME/tui/logs/`），实现
-四个方法：`initialize`（固定回 v1 + 保守能力广告）、`session/new`（用客户端 `cwd` 建 wing
-会话，应答后补 `available_commands_update`）、`session/prompt`（wing 事件 → `session/update`：
-文本 / 思考分片、工具卡片、diff、标题、用量）、`session/cancel`（→ `/api/session/interrupt`，
-在途轮次回 `stopReason: cancelled`）。映射规则与并发/收尾语义见
-`crates/wing/src/acp/`（`translate.rs` 纯函数映射 + 单测，`session.rs` 的 SessionHub）。
+ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力广告）、`session/new`（用客户端
+`cwd` 建 wing 会话，应答后补 `available_commands_update`）、`session/prompt`（wing 事件 →
+`session/update`：文本 / 思考分片、工具卡片、diff、标题、用量）、`session/cancel`（→
+`/api/session/interrupt`，在途轮次回 `stopReason: cancelled`）、`session/list`、
+`session/load`（历史回放）/ `session/resume`、`session/close`、`session/set_config_option`
+（模型热切换）。Ask 走 permission / elicitation / 回退三径（`ask.rs`）。映射规则与并发/收尾
+语义见 `crates/wing/src/acp/`（`translate.rs` 纯函数映射 + 单测，`session.rs` 的 SessionHub）。
 
 ### 编排 CLI（`wing run` / `wait` / `ps` …，PR #64）
 

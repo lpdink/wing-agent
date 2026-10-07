@@ -57,6 +57,8 @@ Zed 是 GUI 程序，启动 agent 时用的环境变量来自 **Zed 进程本身
 
 ### 也可以从 GUI 添加
 
+（以下菜单文案来自 Zed 官方文档，Zed 大版本更新后可能变化。）
+
 命令面板打开 **Agent Settings** → **External Agents** 页面 → `Add Agent` → `Add Custom Agent`，Zed 会打开设置文件并生成一条 `agent_servers` 条目，再把上面的字段补全即可。Zed 会热加载设置，不需要重启。
 
 ## 打开线程
@@ -106,11 +108,3 @@ Zed 是 GUI 程序，启动 agent 时用的环境变量来自 **Zed 进程本身
 5. 用线程里的模型选择器换个模型 → 再发消息仍正常继续（历史保留）；
 6. Thread History → Import Threads → 应能列出 wing 会话。
 
-<!--
-对账（integration 阶段核对后删除）：
-- Ask（AskUserQuestion）→ elicitation 表单的具体形态（字段类型 / 多选 / 取消语义）以 03 步实现为准。
-- 「总是允许」= 打开 yolo 模式（Bash 确认三选项的语义）以 03 步实现为准。
-- 关闭 Zed 线程是否走 `session/close`（→ wing release）以 05 步实现 + Zed 实际行为为准。
-- 模型 config option 的值域（`provider:model`）与显示名以 04 步实现为准。
-- GUI 文案（Agent Settings → External Agents → Add Agent → Add Custom Agent）来自 Zed 官方文档，Zed 大版本更新后可能变化。
--->

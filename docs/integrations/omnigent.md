@@ -108,10 +108,3 @@ omni run --harness acp:wing
 3. 用 `/model` 换个模型 → 再发消息仍正常继续（历史保留）；
 4. 让它「用 AskUserQuestion 问我一个问题」→ 应出现逐题权限卡片（不是表单），选一个选项后 agent 收到答案。
 
-<!--
-对账（integration 阶段核对后删除）：
-- Ask 降级为「逐题权限卡片」的具体形态（选项来源、自由文本是否可用、取消语义）以 03 步实现为准。
-- `model` 字段的取值格式（`provider:model`）与「warm switch 应用」细节以 04 步实现与 omnigent 实际行为为准。
-- `HARNESS_ACP_PROMPT_TIMEOUT_S` 的设置位置与生效方式（在 omnigent 服务进程环境里 export）以 omnigent 实际行为为准。
-- `omni run --harness acp:wing`、`omni setup` 向导文案以 omnigent 当期版本为准。
--->
