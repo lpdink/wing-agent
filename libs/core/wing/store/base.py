@@ -278,6 +278,46 @@ class SessionStore(ABC):
     def exists(self, session_id: str) -> bool:
         """该 session 是否存在（精确匹配 session id）。"""
 
+    @abstractmethod
+    def resolve_stored_id(self, session_id: str) -> str | None:
+        """把请求的 session id 解析为存储里的**真实键**；毫无痕迹时返回 None。
+
+        与 :meth:`exists` 的分工：``exists`` 问"这是不是一个会话"，本方法问
+        "这个 id 在存储里对应**哪一个键**"（file 后端 = 目录名，memory 后端 =
+        字典键）。返回"键"而不是布尔，是因为键**可能与请求值不同**：
+
+        - 大小写不敏感（macOS APFS 默认）或 Unicode 归一化不敏感的文件系统上，
+          ``team-a`` 与 ``Team-A`` 解析到同一份日志；
+        - 目录**存在但还不是会话**（失败的 create 残留 / 手工目录）也要被看见，
+          否则新建会把写入目标落到别人的目录名上。
+
+        会话层据此把内存索引与落盘键对齐——**内存键 == 存储键**是"两个不同 id
+        不会共用一份 history.jsonl"的唯一保证（静默数据混合的红线）。调用方
+        仍需自行判断"是不是会话"（``exists``），本方法只回答"键是哪个"。
+
+        实现契约：不合规的 id 抛 ``ValueError``（同其它入口，闸门先于一切）；
+        返回值一律是**能通过闸门的键**。
+        """
+
+    @abstractmethod
+    def claim_session_id(self, session_id: str) -> str:
+        """为**新建**会话认领键，返回该会话在本存储里的键（= 内存索引的键）。
+
+        与 :meth:`resolve_stored_id` 的差别是"能不能回答还不存在的东西"：
+        别名在**目录还没有**时无法被看见（``team-a`` 与 ``Team-A`` 都还没有目录，
+        谁也不知道会不会撞上），而两个空会话各自键在自己的拼写上，一落盘就会
+        **共用一份日志**。file 后端因此在这里做一次 ``mkdir``：EEXIST ⇒ 该路径
+        已经解析到某个目录（别名或残留目录）→ 取真实目录名；成功 ⇒ 本文件系统
+        视两者为不同目录（Linux 的 ext4/btrfs），逐字使用。多出来的空目录是
+        "会话正在被创建"的正常前奏（空目录不算会话，见 ``exists``）。
+
+        调用点只有 ``SessionManager.create_session`` 的新建路径：读路径（resume /
+        tag / send / release）一律用纯解析的 :meth:`resolve_stored_id`，绝不因为
+        查一个不存在的 id 而建目录。
+
+        实现契约：不合规的 id 抛 ``ValueError``；返回值是**能通过闸门的键**。
+        """
+
     # ── 媒体字节（内容寻址的会话媒体池）──────────
     #
     # 媒体池按"存储根"共享：file 后端多个 session 共用 <root>/.media/，

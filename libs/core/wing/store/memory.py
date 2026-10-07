@@ -118,6 +118,21 @@ class MemorySessionStore(SessionStore):
         validate_session_id(session_id)
         return session_id in self._live_session_ids()
 
+    def resolve_stored_id(self, session_id: str) -> str | None:
+        """键即请求值：进程内字典没有文件系统别名问题（大小写/归一化都逐字区分）。
+
+        判据比 ``exists`` 宽——只要键已有痕迹（metadata 或日志句柄）就返回，
+        与 file 后端"目录存在即算"的口径一致。
+        """
+        validate_session_id(session_id)
+        if session_id in self._metadata or session_id in self._logs:
+            return session_id
+        return None
+
+    def claim_session_id(self, session_id: str) -> str:
+        """认领键 = 请求值本身（内存字典没有别名，不存在"两个名字一个键"）。"""
+        return validate_session_id(session_id)
+
     def list_summaries(self) -> list[SessionSummary]:
         """列举 session（存在性判据：有日志记录 **或** 带标签的 metadata）。
 

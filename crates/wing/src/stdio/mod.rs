@@ -130,9 +130,13 @@ pub fn resume_session_at_error(value: &str) -> String {
 /// 只查"静默忽略"类问题：
 /// 1. `--session-id` 与 `-r/--resume` 互斥——一个是 create-or-adopt、一个是
 ///    恢复既有会话，语义冲突，同时给出即报错（不猜调用方想要哪个）；
-/// 2. resume 下不生效的覆盖旗标（`--system-prompt` / `--append-system-prompt` /
-///    `--max-turns`）只打日志警告——它们**不该**改链上前缀，但"给了没反应"
-///    必须可诊断（stderr 留给协议与错误，警告进日志）。
+/// 2. resume / adopt 下不生效的覆盖旗标（`--system-prompt` / `--append-system-prompt` /
+///    `--max-turns`）打日志警告——它们**不该**改链上前缀，但"给了没反应"
+///    必须可诊断；
+/// 3. 任何路径下都不生效的 `--provider`（单独给出，没有 `--model`）同样出声。
+///
+/// 警告只进日志（`$WING_HOME/tui/logs/`）：stderr 留给错误与 `session_id:` 行，
+/// stdout 是协议流。
 ///
 /// `Ok(())` = 可以继续；`Err(message)` = 打印 `wing error: {message}` 后以非零
 /// 退出码结束。
@@ -152,18 +156,18 @@ pub fn validate_stdio_args(args: &StdioArgs) -> Result<(), String> {
         );
     }
 
+    // `--provider` 单独给出：切 provider 需要一个要切过去的模型（与
+    // `session/update` 的"model 与 provider 必须成对"同一口径）——它在**任何**
+    // 路径上都是 no-op，因此不看是否 resume。
+    if provider_without_model(args) {
+        tracing::warn!(
+            "--provider without --model is a no-op: switching provider needs a model \
+             to switch to; the session keeps its current provider"
+        );
+    }
+
     if args.resume.is_some() || args.session_id.is_some() {
-        let ignored: Vec<&str> = [
-            ("--system-prompt", args.system_prompt.is_some()),
-            (
-                "--append-system-prompt",
-                args.append_system_prompt.is_some(),
-            ),
-            ("--max-turns", args.max_turns.is_some()),
-        ]
-        .into_iter()
-        .filter_map(|(flag, given)| given.then_some(flag))
-        .collect();
+        let ignored = resume_ignored_flags(args);
         if !ignored.is_empty() {
             tracing::warn!(
                 flags = %ignored.join(", "),
@@ -174,6 +178,42 @@ pub fn validate_stdio_args(args: &StdioArgs) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// resume / adopt 下不生效的创建期旗标（纯函数，便于单测）。
+fn resume_ignored_flags(args: &StdioArgs) -> Vec<&'static str> {
+    let mut flags = Vec::new();
+    if args.system_prompt.is_some() {
+        flags.push("--system-prompt");
+    }
+    if args.append_system_prompt.is_some() {
+        flags.push("--append-system-prompt");
+    }
+    if args.max_turns.is_some() {
+        flags.push("--max-turns");
+    }
+    flags
+}
+
+/// `--provider` 给了但没有 `--model`：no-op（纯函数，便于单测）。
+fn provider_without_model(args: &StdioArgs) -> bool {
+    args.provider.is_some() && args.model.is_none()
+}
+
+/// `--session-id` 未被网关兑现时的错误文案（纯函数，便于单测）。
+///
+/// 两种成因都要说清，否则调用方会把"id 别名"误判成"网关太旧"：
+/// 1. 运行中的网关早于 create-or-adopt（重启即可）；
+/// 2. 大小写 / Unicode 归一化不敏感的文件系统上，请求的 id 解析到**已存在**的
+///    那个会话（``team-a`` 与 ``Team-A`` 是同一份日志）——网关按磁盘真名回应，
+///    前端拒绝在别的 id 名下继续。
+pub fn session_id_mismatch_error(requested: &str, returned: &str) -> String {
+    format!(
+        "gateway did not honour --session-id: asked for {requested}, got {returned} — \
+         either the running gateway predates create-or-adopt (restart it: wing stop && \
+         wing start), or {requested} resolves to the existing session {returned} on a \
+         case / Unicode-normalization-insensitive filesystem (use the exact id)"
+    )
 }
 
 // ============================================================
@@ -538,13 +578,13 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         // 而不是静默丢标后继续把 prompt 发出去。
         crate::cmd::common::ensure_tags_applied(&http, &resp.session_id, &args.tag).await?;
         // 指定 id 时必须精确一致：网关若悄悄换一个 id（旧版本忽略该字段），
-        // 编排方的续链认知会立刻错位——在发请求之前就响亮失败。
+        // 编排方的续链认知会立刻错位；别名（大小写 / 归一化不敏感 FS）同理——
+        // 在发请求之前就响亮失败。
         if let Some(requested) = args.session_id.as_deref() {
             anyhow::ensure!(
                 resp.session_id == requested,
-                "gateway did not honour --session-id: asked for {requested}, got {} \
-                 (does the running gateway predate create-or-adopt? restart it: wing stop && wing start)",
-                resp.session_id
+                "{}",
+                session_id_mismatch_error(requested, &resp.session_id)
             );
         }
         tracing::info!(
@@ -1038,5 +1078,49 @@ mod tests {
         let message = resume_session_at_error("3");
         assert!(message.contains("--resume-session-at=3"), "{message}");
         assert!(message.contains("not supported"), "{message}");
+    }
+
+    // ---- 不生效旗标的识别（纯函数） ----
+
+    #[test]
+    fn provider_without_model_is_recognised() {
+        let mut a = args();
+        assert!(!provider_without_model(&a)); // 都没有 = 没问题
+
+        a.provider = Some("p".into());
+        assert!(provider_without_model(&a), "单独的 --provider 是 no-op");
+
+        a.model = Some("m".into());
+        assert!(!provider_without_model(&a), "--provider + --model 成对生效");
+    }
+
+    #[test]
+    fn resume_ignored_flags_lists_create_time_flags() {
+        let mut a = args();
+        assert!(resume_ignored_flags(&a).is_empty());
+
+        a.system_prompt = Some("s".into());
+        a.append_system_prompt = Some("t".into());
+        a.max_turns = Some(3);
+        assert_eq!(
+            resume_ignored_flags(&a),
+            vec!["--system-prompt", "--append-system-prompt", "--max-turns"]
+        );
+
+        // provider 不由这里管（它在任何路径上都是 no-op，单独一套消息）。
+        a.provider = Some("p".into());
+        assert!(!resume_ignored_flags(&a).contains(&"--provider"));
+    }
+
+    // ---- session id 兑现闸门（防御旧网关 / 别名） ----
+
+    #[test]
+    fn session_id_mismatch_error_names_both_causes() {
+        let message = session_id_mismatch_error("team-a", "Team-A");
+        assert!(message.contains("asked for team-a"), "{message}");
+        assert!(message.contains("got Team-A"), "{message}");
+        assert!(message.contains("predates create-or-adopt"), "{message}");
+        assert!(message.contains("filesystem"), "{message}");
+        assert!(message.contains("use the exact id"), "{message}");
     }
 }

@@ -2,6 +2,10 @@
 
 使用 FastAPI TestClient + Mock WingRuntime 测试所有 HTTP 路由。
 不启动真实 uvicorn server，不依赖端口 32523。
+
+例外：``TestRealRuntimeIdGate`` 用**真实** ``WingRuntime``——它要证明的是
+"闸门在 HTTP 面上把恶意 id 折成 400（而不是让它走到响应序列化处炸 500）"，
+mock 掉 runtime 就只剩 route 的胶水，证明不了这件事。
 """
 
 from __future__ import annotations
@@ -9,6 +13,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -2058,3 +2063,61 @@ class TestReservedClientIdAndLifecycle:
             assert resp.status_code == 422
         finally:
             tool_registry.unregister_namespace("host-bad")
+
+
+# ============================================================
+# 真实 runtime 的 id 闸门（HTTP 面：400，而不是 500）
+# ============================================================
+
+
+class TestRealRuntimeIdGate:
+    """恶意 id 在**真实** runtime 上的 HTTP 表现：400 + 零残留（绝不 500）。
+
+    覆盖"孤立代理字符"这条：``{"session_id": "\\ud800"}`` 是合法 JSON 但 id 不是
+    合法 UTF-8——旧实现的 create 会成功、响应序列化炸 500（``PydanticSerializationError``）。
+    httpx 的 ``json=`` 在客户端就编码不了代理字符，因此这里发**原始字节体**
+    （服务端收到的是转义形式，pydantic 解出代理字符）。
+    """
+
+    @pytest.fixture
+    def real_client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """真实 WingRuntime + 独立 sessions 根（不与共享临时目录混）。"""
+        from wing.gateway.server import GatewayServer
+        from wing.runtime import WingRuntime
+
+        monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
+        with patch("wing.gateway.server.load_config") as mock_load_config:
+            mock_load_config.return_value = _mock_config()
+            server = GatewayServer()
+        server.runtime = WingRuntime()
+        with TestClient(server._app) as tc:
+            yield tc, tmp_path / "sessions"
+
+    def test_surrogate_session_id_is_400_not_500(self, real_client):
+        client, sessions_root = real_client
+        resp = client.post(
+            "/api/session/create",
+            content=b'{"session_id": "\\ud800"}',
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "invalid session id" in resp.json()["detail"]
+        assert not sessions_root.exists() or list(sessions_root.iterdir()) == []
+
+    def test_surrogate_id_on_tag_is_404_not_500(self, real_client):
+        """读路径：闸门把非法 id 折成"不存在"（404），且错误体可序列化。"""
+        client, _ = real_client
+        resp = client.post(
+            "/api/session/tag",
+            content=b'{"session_id": "\\ud800"}',
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 404, resp.text
+        assert "Session not found" in resp.json()["detail"]
+
+    def test_overlong_byte_id_is_400(self, real_client):
+        """128 字符的 CJK（= 384 字节）在 Linux 上会让 mkdir ENAMETOOLONG：闸门先拒。"""
+        client, sessions_root = real_client
+        resp = client.post("/api/session/create", json={"session_id": "收" * 128})
+        assert resp.status_code == 400, resp.text
+        assert not sessions_root.exists() or list(sessions_root.iterdir()) == []

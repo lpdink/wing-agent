@@ -42,7 +42,7 @@ from wing.commands import expand_prompt_command
 from wing.schema import ChainNode, Message
 from wing.store import SessionMetadata, SessionStore
 
-from .session import Session, tool_refs
+from .session import Session, tool_refs, validate_tool_refs
 from .tags import TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
 from .template import AgentTemplate, AgentTemplateManager
 
@@ -86,6 +86,21 @@ def _fork_slice(
             return prefix, content if isinstance(content, str) else ""
         prefix.append(record)
     raise ValueError(f"uuid {target_uuid!r} not found in {len(prefix)} record(s)")
+
+
+def _warn_alias(requested: str, resolved: str) -> None:
+    """别名（请求 id ≠ 存储键）时说清发生了什么——**不做静默归一**。
+
+    大小写 / Unicode 归一化不敏感的文件系统上（macOS APFS 默认 / Windows NTFS），
+    ``team-a`` 与 ``Team-A`` 是同一份日志：只会有一条 warning，然后按磁盘真名
+    继续（内存索引也用真名，两个拼写因此落在同一个会话上）。
+    """
+    if requested == resolved:
+        return
+    log.warning(
+        f"session id {requested!r} resolves to existing session {resolved!r} on this "
+        "filesystem (case / Unicode-normalization insensitive); using the on-disk id"
+    )
 
 
 def _timestamp_key(s: SessionInfo) -> float:
@@ -266,10 +281,13 @@ class SessionManager:
                 f"Available: {list(self._stores)}"
             )
 
-        # 标签纯校验提到最前（不写盘）：任何非法标签在任何副作用之前 raise，
-        # "失败即零残留"对 create-or-adopt 尤其重要（重试必须还是干净状态）。
+        # 标签与工具 ref 纯校验提到最前（都不写盘）：任何非法输入在任何副作用之前
+        # raise，"失败即零残留"对 create-or-adopt 尤其重要（重试必须还是干净状态）。
+        # 工具 ref 必须在**认领键**之前校验——认领会建会话目录。
         if tags:
             apply_tag_ops([], add=tags)
+        if agent_override is not None and agent_override.tools is not None:
+            validate_tool_refs(agent_override.tools)
 
         if template_name is not None:
             template = self._template_manager.get(template_name)
@@ -281,8 +299,24 @@ class SessionManager:
         else:
             template = self._template_manager.default
 
-        # 指定 id 时它就是最终 id；否则自生成（默认策略）
-        sid = session_id if session_id is not None else self._generate_session_id()
+        # 指定 id 时它就是最终 id；否则自生成（默认策略）。
+        #
+        # **认领键**（create 路径专用，会建目录）：大小写 / 归一化不敏感的文件系统
+        # 上，"两个只差大小写的 id"在两个会话都还没落盘时看不见别名——`mkdir` 的
+        # 成败把它变成确定事实（EEXIST ⇒ 该路径已解析到某个目录，取真实目录名）。
+        # 认领回来的键若已在内存（空会话变体），走收养而不是新建：内存键 == 目录名
+        # 这条不变量对所有写入路径成立，同一目录才不会被两个 Session 各写一份链。
+        sid = (
+            self._generate_session_id()
+            if session_id is None
+            else store.claim_session_id(session_id)
+        )
+        if session_id is not None:
+            _warn_alias(session_id, sid)
+            if sid in self._sessions:
+                return self._finish_adoption(
+                    sid, agent_override=agent_override, tags=tags
+                )
 
         messages: TrackedList[ChainNode] = TrackedList(store.open_log(sid))
 
@@ -317,23 +351,34 @@ class SessionManager:
     # ── resolve ───────────────────────────────
 
     def _resolve_with_store(self, session_id: str) -> tuple[str, SessionStore] | None:
-        """跨 stores 精确解析 session id，返回 (session_id, store)。
+        """跨 stores 精确解析 session id，返回 (真实键, store)。
 
         优先命中内存中的 session，再按 stores 注册顺序查后端是否存在。
 
-        **闸门在最前**：session id 由会话层确定（默认自生成，编排方可自带，
-        见 ``common.utils.is_valid_session_id``），不合规的值一律按"不存在"
-        处理——绝不允许它进入任何 store 调用（file 后端拿它拼路径，这是路径
-        穿越的唯一入口；gate 在这里，所有网络路径都经过本方法）。解析失败
-        与闸门拒绝最终都映射为 404，不向客户端区分（不给探测反馈）。
+        **闸门在最前**（`is_valid_session_id`）：不合规的值一律按"不存在"处理，
+        绝不允许它进入任何 store 调用——file 后端拿它拼路径，这是路径穿越的
+        唯一入口（gate 在这里，所有网络路径都经过本方法）。
+
+        **返回的是存储里的真实键**（不是请求字符串）：大小写 / Unicode 归一化不
+        敏感的文件系统上（macOS APFS / Windows NTFS），``team-a`` 与 ``Team-A``
+        解析到同一个目录——按请求字符串建内存索引会让两个 Session 共用一份
+        history.jsonl（静默数据混合）。归一是**正确性要求**：调用方拿到的一律是
+        磁盘上的真名（别名会留一行 warning），因此「两个不同 id 指向同一目录」
+        在内存里不可能出现。
+
+        解析失败与闸门拒绝最终都映射为 404，不向客户端区分（不给探测反馈）。
         """
         if not is_valid_session_id(session_id):
             return None
         if session_id in self._sessions:
             return session_id, self._sessions[session_id].store
         for store in self._stores.values():
-            if store.exists(session_id):
-                return session_id, store
+            canonical = store.resolve_stored_id(session_id)
+            if canonical is None or not store.exists(canonical):
+                # 目录 / 键存在但不是会话（空壳、杂物目录）与"不存在"同价。
+                continue
+            _warn_alias(session_id, canonical)
+            return canonical, store
         return None
 
     def resume_session(
@@ -365,7 +410,7 @@ class SessionManager:
         """
         result = self._resolve_with_store(session_id)
         if result is None:
-            raise LookupError(f"Session not found: {session_id}")
+            raise LookupError(f"Session not found: {session_id!r}")
         resolved, store = result
 
         existing = self._sessions.get(resolved)
@@ -423,17 +468,34 @@ class SessionManager:
           会话"而非"创建新会话"（该 hook 的语义边界就是"新 session id"）。
 
         Returns:
-            收养到的 Session；``session_id`` 不存在时返回 None（调用方走新建）。
+            收养到的 Session；``session_id`` 不存在（或未成会话）时返回 None。
         """
         if self._resolve_with_store(session_id) is None:
             return None
+        return self._finish_adoption(
+            session_id, agent_override=agent_override, tags=tags
+        )
+
+    def _finish_adoption(
+        self,
+        session_id: str,
+        *,
+        agent_override: "AgentOverride | None",
+        tags: Iterable[str] | None,
+    ) -> Session:
+        """对**已知存在**的会话应用收养语义（resume + 覆盖子集 + tags）。
+
+        与 :meth:`_adopt_session` 分开，是因为"键已认领但还没成会话"的空会话变体
+        （见 create_session 的认领注释）也要走这条路——那时 ``_resolve_with_store``
+        查不到它（空会话不是会话），但它确实已经在内存里了。
+        """
         # 标签先纯校验：非法标签不得留下"覆盖已应用"的半截状态。
         if tags:
             apply_tag_ops([], add=tags)
         session = self.resume_session(session_id, agent_override=agent_override)
         if tags:
             session.apply_tag_ops(add=tags)
-        log.info(f"Session adopted: {session_id} (create-or-adopt)")
+        log.info(f"Session adopted: {session.session_id} (create-or-adopt)")
         return session
 
     def fork_session(
@@ -569,7 +631,7 @@ class SessionManager:
         """
         resolved = self._resolve_with_store(session_id)
         if resolved is None:
-            raise LookupError(f"Session not found: {session_id}")
+            raise LookupError(f"Session not found: {session_id!r}")
         resolved_id, store = resolved
 
         session = self._sessions.get(resolved_id)
@@ -674,7 +736,7 @@ class SessionManager:
         session = self._sessions.get(session_id)
         if session is None:
             if self._resolve_with_store(session_id) is None:
-                raise LookupError(f"Session not found: {session_id}")
+                raise LookupError(f"Session not found: {session_id!r}")
             return False, "not loaded"
         blocker = self._blocked_reason(session)
         if blocker is not None:

@@ -60,8 +60,8 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 会话身份与会话恢复（SDK 系消费方自带 id 的用法）：
 
-- `--session-id <id>`：**create-or-adopt**——该 id 不存在则以它建会话（编排方自己生成的 UUID / 任意安全 id 就此生效），已存在则收养既有会话（同 resume 语义：模板与 workspace 来自 metadata、`agent` 覆盖只应用 resume 子集）。与 `-r/--resume` 互斥；
-- `-r/--resume <id>`：恢复既有会话，`--model` / `--provider` / `--effort` / `--tools` 作为参数覆盖生效（与创建路径同语义、同持久化）；`--system-prompt` / `--append-system-prompt` / `--max-turns` **不生效**（它们会改请求前缀 / 会话既有限额，是创建期语义，日志会记一条 warning）；
+- `--session-id <id>`：**create-or-adopt**——该 id 不存在则以它建会话（编排方自己生成的 UUID / 任意安全 id 就此生效），已存在则收养既有会话（同 resume 语义：模板与 workspace 来自 metadata、`agent` 覆盖只应用 resume 子集）。与 `-r/--resume` 互斥。**id 在同一个文件系统上只对应一个会话**：大小写 / Unicode 归一化不敏感的文件系统（macOS APFS 默认 / Windows NTFS）上，`team-a` 与 `Team-A` 是同一份日志——网关按**磁盘真名**回应（日志留一条 warning），stdio 侧发现"请求 id ≠ 回应 id"即拒绝继续（`session_id_mismatch_error`），绝不静默换 id；
+- `-r/--resume <id>`：恢复既有会话，`--model` / `--provider` / `--effort` / `--tools` 作为参数覆盖生效（与创建路径同语义、同持久化）；`--system-prompt` / `--append-system-prompt` / `--max-turns` **不生效**（它们会改请求前缀 / 会话既有限额，是创建期语义，日志会记一条 warning）。`--provider` 只在**伴随 `--model`** 时生效（切 provider 需要一个要切过去的模型；单独给出同样是 no-op + warning，与 `session/update` 的"成对"约定同口径）。`--tools` 走的是运行期热切换：**链非空时声明集冻结**（请求里仍是老 tools，KV cache 不碎），改动以 System Reminder 告知模型；链空或压缩后同步到新声明集；
 - `--resume-session-at`：wing 没有会话截断能力，**出现即非零退出 + 明确文案**（绝不静默忽略——被忽略会让编排方以为上下文已回退，与 wing 的实际状态错位）。
 
 > 在后台执行 `wing -p "request" > /tmp/result.md` 等价于调度了一个拥有任意命令执行权限的子 agent。多 agent 不易驾驭，yolo 本身危险，编排者应审慎使用。

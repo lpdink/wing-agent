@@ -79,7 +79,7 @@ def tool_refs(tools: list[Tool]) -> list[str]:
     return [str(ToolRef(namespace=t.namespace, name=t.name)) for t in tools]
 
 
-def _validate_tool_refs(tools: list[str]) -> None:
+def validate_tool_refs(tools: list[str]) -> None:
     """纯校验工具 ref 可解析；不可解析即 raise ValueError。
 
     **先校验后动手**：一次覆盖里 model / 提示词 / 工具逐个应用，若工具排在后
@@ -92,6 +92,33 @@ def _validate_tool_refs(tools: list[str]) -> None:
     for ref in tools:
         if tool_registry.resolve(ref) is None:
             raise ValueError(f"cannot resolve tool reference: '{ref}'")
+
+
+def ignored_override_fields(override: "AgentOverride", *, resume: bool) -> list[str]:
+    """本次覆盖里**不会生效**的字段名（纯函数，供 warning 与单测）。
+
+    - ``provider`` 只在**同时给出 model** 时生效（切 provider 需要"切到哪个
+      模型"；单独给 provider 是 no-op）——创建与 resume 两条路径同此口径
+      （``session/update`` 直接 400 拒绝半对，这里只出声不改行为）；
+    - ``resume=True`` 时 ``system_prompt`` / ``append_system_prompt`` /
+      ``max_turns`` / ``yolo`` 一律不生效（它们改请求前缀或会话既有限额，
+      属创建期语义）。
+    """
+    ignored: list[str] = []
+    if override.provider is not None and override.model is None:
+        ignored.append("provider")
+    if resume:
+        ignored.extend(
+            name
+            for name, value in (
+                ("system_prompt", override.system_prompt),
+                ("append_system_prompt", override.append_system_prompt),
+                ("max_turns", override.max_turns),
+                ("yolo", override.yolo),
+            )
+            if value is not None
+        )
+    return ignored
 
 
 class Session:
@@ -294,18 +321,29 @@ class Session:
         - None 字段不覆盖（保留 template 值）
         - system_prompt 替换，append_system_prompt 追加
         - 两者同时存在时，先替换再追加
+        - ``provider`` 只在**同时给出 model** 时生效（切 provider 需要一个要
+          切过去的模型；单独给 provider 是 no-op——与 ``session/update`` 的
+          "model 与 provider 必须成对"同一口径，只是这里出声而非报错）
 
         每个被应用的字段同步写入 metadata 并落盘——override 是显式动作，
         其效果必须跨重启（resume）与 fork 存活，否则系统提示词 / 工具集 /
         开关在重启后变回模板默认，请求前缀与重启前不一致（KV cache 碎裂）。
 
         工具 ref 先做纯校验（失败时不落任何字段）；其它字段的应用不会失败。
+        不会生效的字段（``provider`` 单独给出）打 warning——**不做静默忽略**。
         """
         cm = self._context_manager
         agent = self._agent
 
+        ignored = ignored_override_fields(override, resume=False)
+        if ignored:
+            log.warning(
+                f"Session {self._session_id}: agent override ignores "
+                f"{', '.join(ignored)} (provider only applies together with model)"
+            )
+
         if override.tools is not None:
-            _validate_tool_refs(override.tools)
+            validate_tool_refs(override.tools)
 
         # model 覆盖走 _apply_model：与运行时切换同一条路径，一并落盘模型记录。
         if override.model is not None:
@@ -354,35 +392,30 @@ class Session:
           前缀身份漂移（KV cache 碎裂）；要换请对新会话用创建覆盖，或走
           `session/update` 的显式动作；
         - ``max_turns``：会话既有限额是运行时状态，不因"续链"被改写；
-        - ``yolo``：同上（创建期决定，resume 不重贴）。
+        - ``yolo``：同上（创建期决定，resume 不重贴）；
+        - ``provider`` 单独给出（没有 ``model``）同样是 no-op——切 provider 需要
+          一个要切过去的模型（与 ``session/update`` 的成对约定同一口径）。
 
         给了被忽略的字段会打 warning（**不做静默忽略**：编排方能在日志里看到
-        `--system-prompt` 在 `-r` 下没生效），但仍然继续应用子集。
+        `--system-prompt` / 单独的 `--provider` 在 `-r` 下没生效），但仍然继续
+        应用子集。
 
         每个被应用的字段同步写入 metadata 并落盘（与创建覆盖同一套语义），
         因此跨重启 / 逐出后水合仍然生效。
         """
-        ignored = [
-            name
-            for name, value in (
-                ("system_prompt", override.system_prompt),
-                ("append_system_prompt", override.append_system_prompt),
-                ("max_turns", override.max_turns),
-                ("yolo", override.yolo),
-            )
-            if value is not None
-        ]
+        ignored = ignored_override_fields(override, resume=True)
         if ignored:
             log.warning(
                 f"Session {self._session_id}: resume override ignores "
                 f"{', '.join(ignored)} (prompt fields would change the "
                 "conversation prefix; max_turns / yolo are create-time session "
-                "settings — use session/update for an explicit change)"
+                "settings; provider only applies together with model — use "
+                "session/update for an explicit change)"
             )
 
         # 纯校验在前（工具 ref 不可解析时不得留下"model 已切换"的半截状态）
         if override.tools is not None:
-            _validate_tool_refs(override.tools)
+            validate_tool_refs(override.tools)
 
         if override.model is not None:
             self._apply_model(override.model, override.provider)
@@ -585,7 +618,7 @@ class Session:
         """
         # 纯校验：任何字段非法在 mutation 之前退出，避免部分应用
         if tools is not None:
-            _validate_tool_refs(tools)
+            validate_tool_refs(tools)
 
         if template is not None:
             await self.switch_template(template)

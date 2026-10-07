@@ -9,12 +9,17 @@
   append_system_prompt / max_turns / yolo **一律不应用**（不改链上前缀 / 不改
   会话既有限额），且被忽略的字段要出声（warning 日志）；
 - **零残留**：非法 id / 非法标签 / 无法解析的工具 ref 都必须在**任何写盘之前**
-  失败——否则下一次同 id 的 create 会"收养"一个半成品幽灵会话。
+  失败——否则下一次同 id 的 create 会"收养"一个半成品幽灵会话；
+- **别名不得静默混合**：大小写 / Unicode 归一化不敏感的文件系统上，请求 id 的
+  变体会解析到同一份日志——内存键必须等于**存储键**，绝不允许两个 Session
+  共用一份 ``history.jsonl``。
 """
 
 from __future__ import annotations
 
 import json
+import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -22,7 +27,11 @@ import pytest
 from wing.hooks import hooks
 from wing.schema import Message
 from wing.session import AgentOverride, SessionManager, tool_refs
-from wing.store import FileSessionStore, MemorySessionStore
+from wing.session.session import ignored_override_fields
+from wing.store import (
+    FileSessionStore,
+    MemorySessionStore,
+)
 
 #: 编排方自带的 UUID（真实消费方形态；旧闸门会拒绝，新闸门接受）。
 CUSTOM_ID = "3f2b9d1e-6c1a-4f2b-9d3e-1a2b3c4d5e6f"
@@ -36,6 +45,38 @@ def root(tmp_path: Path) -> Path:
 @pytest.fixture
 def sm(root: Path) -> SessionManager:
     return SessionManager({"file": FileSessionStore(root)})
+
+
+class _CapturingHandler(logging.Handler):
+    """捕获 ``wing`` logger 的消息（``propagate=False``，caplog 抓不到）。"""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+@pytest.fixture
+def wing_warnings() -> Iterator[list[str]]:
+    """抓 ``wing`` logger 的 WARNING 消息。
+
+    ``wing/common/logger.py`` 在导入时就把 ``propagate`` 关掉（日志只经显式装配
+    的文件 handler 出去），因此 pytest 的 ``caplog``（挂在 root 上）看不到任何一条
+    后端日志——实测 ``caplog.text`` 为空串。这里直接把捕获 handler 挂到 ``wing``
+    logger 上：同一条通道，不依赖 cwd / 配置文件。
+    """
+    logger = logging.getLogger("wing")
+    handler = _CapturingHandler()
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+    try:
+        yield handler.messages
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
 
 
 def _restart(root: Path) -> SessionManager:
@@ -326,3 +367,261 @@ class TestResumeOverrideSubset:
                 agent_override=AgentOverride(model="gpt-4o-mini", tools=["Nope"]),
             )
         assert session.agent.model == before_model
+
+
+class _CaseInsensitiveFileStore(FileSessionStore):
+    """`resolve_stored_id` 大小写不敏感：模拟 macOS APFS / Windows NTFS 的别名。
+
+    存储本身保持**逐字**：磁盘上真实存在的目录名就是首次写入者的拼写（真实不敏感
+    FS 上 ``mkdir("Team-A")`` 之后 ``team-a`` 解析到同一目录，目录项名字仍是
+    ``Team-A``）。真实不敏感 FS 上本类与父类等价（父类的 ``samefile`` 探测已能看见
+    真名）；在大小写敏感的 Linux 上它把"别名"这一现象**造出来**，让红线契约在任何
+    平台都可测——这正是 S1 想要的复现能力。
+    """
+
+    def resolve_stored_id(self, session_id: str) -> str | None:
+        exact = super().resolve_stored_id(session_id)
+        if exact is not None:
+            return exact
+        folded = session_id.casefold()
+        if not self.root.is_dir():
+            return None
+        for entry in sorted(self.root.iterdir()):
+            if entry.is_dir() and entry.name.casefold() == folded:
+                return entry.name
+        return None
+
+
+def _fs_is_case_insensitive(base: Path) -> bool:
+    """本机文件系统对大小写是否不敏感（决定别名是否真的发生）。"""
+    probe = base / "fs-case-probe"
+    probe.mkdir(parents=True, exist_ok=True)
+    try:
+        return (base / "FS-CASE-PROBE").is_dir()
+    finally:
+        probe.rmdir()
+
+
+class TestFilesystemAliases:
+    """大小写 / 归一化别名：内存键必须等于存储键（S1 红线）。"""
+
+    @pytest.fixture
+    def aliasing(self, tmp_path: Path) -> SessionManager:
+        """别名 store（模拟 macOS / Windows 的不敏感 FS），任何平台都能跑。"""
+        return SessionManager(
+            {"file": _CaseInsensitiveFileStore(tmp_path / "sessions")}
+        )
+
+    @pytest.mark.asyncio
+    async def test_case_variant_adopts_the_same_session(self, aliasing: SessionManager):
+        created = aliasing.create_session(session_id="Team-A", tags=["x"])
+        _seed(created, "from A")
+        adopted = aliasing.create_session(session_id="team-a", tags=["y"])
+
+        assert adopted is created
+        assert adopted.session_id == created.session_id  # 真名，不是请求字符串
+        assert list(aliasing._sessions) == [created.session_id]
+        assert adopted.tags == ["x", "y"]
+
+    @pytest.mark.asyncio
+    async def test_alias_resolves_from_disk_too(self, tmp_path: Path):
+        """冷路径（不在内存）：变体 resume 归一到同一会话，不得再水合一份。"""
+        store = _CaseInsensitiveFileStore(tmp_path / "sessions")
+        first = SessionManager({"file": store})
+        created = first.create_session(session_id="Team-A", tags=["x"])
+        _seed(created, "hello")
+
+        restarted = SessionManager({"file": store})
+        resumed = restarted.resume_session("team-a")
+        assert resumed.session_id == "Team-A"
+        assert _roles(resumed) == ["user"]
+        assert list(restarted._sessions) == ["Team-A"]
+
+    @pytest.mark.asyncio
+    async def test_one_directory_never_gets_two_writers(
+        self, aliasing: SessionManager, root: Path
+    ):
+        """两个变体 id 只对应**一个** Session 对象——一份日志只有一个写入者。"""
+        a = aliasing.create_session(session_id="Team-A", tags=["x"])
+        b = aliasing.create_session(session_id="team-a", tags=["y"])
+        c = aliasing.create_session(session_id="TEAM-a", tags=["z"])
+        assert a is b is c
+        _seed(a, "only")
+        assert len(_history_lines(root, "Team-A")) == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_alias_converges_before_any_write(
+        self, aliasing: SessionManager, root: Path
+    ):
+        """两个**空**会话（都还没落盘）也必须归一。
+
+        这是别名最隐蔽的一档：没有 metadata / history，`exists` 不认它，只有
+        "认领键"（mkdir 判据）能看见——不归一的话，两个 Session 的第一次写入会
+        落进同一个目录（静默混合）。
+        """
+        a = aliasing.create_session(session_id="Team-E")  # 无 tags：只有认领
+        b = aliasing.create_session(session_id="team-e")
+        assert a is b
+        assert list(aliasing._sessions) == ["Team-E"]
+        _seed(a, "single writer")
+        assert len(_history_lines(root, "Team-E")) == 1
+
+    @pytest.mark.asyncio
+    async def test_new_variant_still_creates(self, aliasing: SessionManager):
+        """别名只在**真的命中**时归一：全新 id 照常新建（不得误伤）。"""
+        created = aliasing.create_session(session_id="Team-A")
+        fresh = aliasing.create_session(session_id="Team-B")
+        assert created is not fresh
+        assert sorted(aliasing._sessions) == ["Team-A", "Team-B"]
+
+    @pytest.mark.asyncio
+    async def test_alias_logs_a_warning(
+        self, aliasing: SessionManager, wing_warnings: list[str]
+    ):
+        aliasing.create_session(session_id="Team-A")
+        aliasing.create_session(session_id="team-a")
+        assert any("resolves to existing session" in line for line in wing_warnings), (
+            wing_warnings
+        )
+
+    @pytest.mark.asyncio
+    async def test_real_filesystem_never_shares_one_history(self, tmp_path: Path):
+        """真实 FS 上的不变量：变体 id 要么同一会话，要么**两个目录**——绝不混写。
+
+        大小写敏感（Linux）时两个 id 是独立会话；不敏感（macOS/Windows）时归一到
+        真名。两种结果都合法，唯一非法的是"两个会话共用一份 history.jsonl"。
+        """
+        root = tmp_path / "sessions"
+        sm = SessionManager({"file": FileSessionStore(root)})
+        aliases = _fs_is_case_insensitive(tmp_path)
+
+        created = sm.create_session(session_id="Team-R", tags=["x"])
+        second = sm.create_session(session_id="team-r", tags=["y"])
+
+        if aliases:
+            assert second is created
+            assert second.session_id == "Team-R"
+        else:
+            assert second is not created
+            assert second.session_id == "team-r"
+
+        # 不变量（与 FS 类型无关）：回报的 id 逐字对应一个目录，目录数 == 会话数
+        assert sorted(sm._sessions) == sorted({created.session_id, second.session_id})
+        assert sorted(p.name for p in root.iterdir()) == sorted(sm._sessions)
+        for session_id in sm._sessions:
+            assert (root / session_id).is_dir(), session_id
+
+
+class TestIgnoredOverrideWarnings:
+    """被忽略的覆盖字段必须出声（N1/S3；``caplog`` 抓不到 wing logger）。"""
+
+    @pytest.mark.asyncio
+    async def test_resume_override_warns_about_ignored_fields(
+        self, sm: SessionManager, wing_warnings: list[str]
+    ):
+        session = sm.create_session()
+        sm.resume_session(
+            session.session_id,
+            agent_override=AgentOverride(
+                model="gpt-4o-mini",
+                system_prompt="X",
+                append_system_prompt="Y",
+                max_turns=1,
+                yolo=True,
+            ),
+        )
+        text = "\n".join(wing_warnings)
+        assert "resume override ignores" in text, wing_warnings
+        for field in ("system_prompt", "append_system_prompt", "max_turns", "yolo"):
+            assert field in text, wing_warnings
+        # 生效的字段不进 warning。
+        assert "resume override ignores model" not in text
+
+    @pytest.mark.asyncio
+    async def test_provider_without_model_warns_on_resume(
+        self, sm: SessionManager, wing_warnings: list[str]
+    ):
+        """`provider` 单独给出（没有 model）是 no-op——本步新增的一条静默路径。"""
+        session = sm.create_session()
+        sm.resume_session(
+            session.session_id, agent_override=AgentOverride(provider="alt")
+        )
+        text = "\n".join(wing_warnings)
+        assert "resume override ignores provider" in text, wing_warnings
+
+    @pytest.mark.asyncio
+    async def test_provider_without_model_warns_on_adopt(
+        self, sm: SessionManager, wing_warnings: list[str]
+    ):
+        created = sm.create_session(session_id=CUSTOM_ID)
+        adopted = sm.create_session(
+            session_id=CUSTOM_ID, agent_override=AgentOverride(provider="alt")
+        )
+        assert adopted is created
+        assert any("resume override ignores provider" in line for line in wing_warnings)
+
+    @pytest.mark.asyncio
+    async def test_provider_without_model_warns_on_create(
+        self, sm: SessionManager, wing_warnings: list[str]
+    ):
+        """创建路径同一口径（provider 与 model 成对；``session/update`` 直接 400）。"""
+        sm.create_session(agent_override=AgentOverride(provider="alt"))
+        assert any("agent override ignores provider" in line for line in wing_warnings)
+
+    @pytest.mark.asyncio
+    async def test_provider_with_model_is_silent(
+        self, sm: SessionManager, wing_warnings: list[str]
+    ):
+        session = sm.create_session()
+        sm.resume_session(
+            session.session_id,
+            agent_override=AgentOverride(model="gpt-4o-mini", provider="alt"),
+        )
+        assert session.agent.model_provider.name == "alt"
+        assert not [line for line in wing_warnings if "provider" in line], wing_warnings
+
+    def test_ignored_override_fields_is_pure(self):
+        """纯函数直接对账（warning 的判据，不依赖日志捕获）。"""
+        assert ignored_override_fields(AgentOverride(), resume=True) == []
+        assert ignored_override_fields(AgentOverride(provider="p"), resume=False) == [
+            "provider"
+        ]
+        assert (
+            ignored_override_fields(AgentOverride(model="m", provider="p"), resume=True)
+            == []
+        )
+        assert ignored_override_fields(
+            AgentOverride(provider="p", system_prompt="s", yolo=True),
+            resume=True,
+        ) == ["provider", "system_prompt", "yolo"]
+        # 创建语义下只有 provider 的成对性构成"被忽略"。
+        assert (
+            ignored_override_fields(
+                AgentOverride(system_prompt="s", max_turns=1), resume=False
+            )
+            == []
+        )
+
+
+class TestAdoptIgnoresCreateParams:
+    """收养路径忽略创建参数（N5：同一请求体因 id 是否存在回报不同类别结果）。"""
+
+    @pytest.mark.asyncio
+    async def test_existing_id_skips_create_param_validation(self, sm: SessionManager):
+        created = sm.create_session(session_id=CUSTOM_ID)
+        adopted = sm.create_session(
+            session_id=CUSTOM_ID,
+            backend="nope",
+            template_name="nope",
+            workspace="/nope",
+        )
+        assert adopted is created
+        assert adopted.template_name == created.template_name
+
+    @pytest.mark.asyncio
+    async def test_same_body_with_fresh_id_raises(self, sm: SessionManager, root: Path):
+        with pytest.raises(ValueError):
+            sm.create_session(
+                session_id="brand-new", backend="nope", template_name="nope"
+            )
+        assert _session_dirs(root) == []

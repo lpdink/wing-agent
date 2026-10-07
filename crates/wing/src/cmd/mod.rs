@@ -55,6 +55,9 @@ pub struct Cli {
     pub model: Option<String>,
 
     /// Override provider name (references config `providers[].name`).
+    ///
+    /// Only takes effect together with `--model`: switching provider needs a model
+    /// to switch to (a lone `--provider` is a no-op and says so in the log).
     #[arg(long = "provider")]
     pub provider: Option<String>,
 
@@ -302,16 +305,20 @@ fn misplaced_global_tag_error(tags: &[String]) -> Option<String> {
 
 /// Error message when the top-level `--session-id` is used outside stdio mode.
 ///
-/// Same discipline as [`misplaced_global_tag_error`]: stdio mode
-/// (`wing -p --session-id ...`) consumes it, every other invocation would
-/// accept it and silently ignore it — an orchestrator asking for a specific
-/// session id must never be handed a different one without noticing.
+/// Stdio mode (`wing -p --session-id ...`) is the only consumer. The flag must be
+/// part of the clap definition (otherwise the stdio argument filter would silently
+/// drop it), which means a misplaced use now parses fine and would reach dispatch
+/// with nobody reading it — the "silently ignored" shape this step exists to
+/// remove. Refuse with a pointer instead: exit 1 + this message. (Before the flag
+/// existed clap rejected it as an unknown argument — also exit ≠ 0, just with no
+/// explanation of the stdio-only intent.)
 /// `None` = invocation is fine.
 fn misplaced_session_id_error(session_id: Option<&str>) -> Option<String> {
     let session_id = session_id?;
     Some(format!(
         "top-level --session-id only applies to stdio mode (wing -p --session-id {session_id} ...); \
-         it would be silently ignored here (session ids are backend-generated on other paths)"
+         wing refuses it here instead of ignoring it. On other paths the session id is \
+         backend-generated (wing run) or positional (wing info/tail/head/release)."
     ))
 }
 

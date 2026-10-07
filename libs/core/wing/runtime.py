@@ -496,7 +496,7 @@ class WingRuntime:
         """获取 session，不存在则 raise LookupError。"""
         session = self.sm.get_session(session_id)
         if session is None:
-            raise LookupError(f"Session not found: {session_id}")
+            raise LookupError(f"Session not found: {session_id!r}")
         return session
 
     def _emit_session_event(

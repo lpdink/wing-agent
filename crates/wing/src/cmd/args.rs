@@ -17,7 +17,8 @@ pub struct RunArgs {
     pub model: Option<String>,
 
     /// Override provider name (references config `providers[].name`).
-    /// When set with `--model`, switches to that provider's endpoint.
+    /// When set with `--model`, switches to that provider's endpoint; a lone
+    /// `--provider` (no `--model`) is a no-op.
     #[arg(long = "provider")]
     pub provider: Option<String>,
 

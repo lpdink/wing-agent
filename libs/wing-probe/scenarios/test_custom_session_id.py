@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -61,6 +62,7 @@ async def _create(
     model: str | None = None,
     workspace: str | None = None,
     agent: dict | None = None,
+    tags: list[str] | None = None,
 ) -> dict:
     """``POST /api/session/create``（留档调用；非 2xx 抛 ``DriverHttpError``）。"""
     body: dict = {}
@@ -68,6 +70,8 @@ async def _create(
         body["session_id"] = session_id
     if workspace is not None:
         body["workspace"] = workspace
+    if tags is not None:
+        body["tags"] = tags
     overrides: dict = dict(agent or {})
     if model is not None:
         overrides["model"] = model
@@ -231,7 +235,19 @@ async def test_adopt_with_custom_id_applies_resume_subset(probe: Probe) -> None:
 async def test_invalid_session_id_is_rejected_without_traces(probe: Probe) -> None:
     """越界 id → 400 且磁盘零痕迹；任意安全 id 照常可用（闸门只防穿越与卫生）。"""
     driver = _driver(probe)
-    for bad in ("../escape", "/tmp/absolute", "a/b", ".media", "a..b", "x" * 129):
+    for bad in (
+        "../escape",
+        "/tmp/absolute",
+        "a/b",
+        ".media",
+        "a..b",
+        "x" * 129,  # 超字节上限（ASCII）
+        "收" * 128,  # 384 字节：按字符限长会误放行，Linux 上 mkdir ENAMETOOLONG
+        # 孤立代理字符（合法 JSON / 非法 UTF-8）走不了这里：httpx 的 json= 在
+        # **客户端**就编码不了它（UnicodeEncodeError）。那条路径由原始字节体的
+        # 路由测试覆盖：libs/core/tests/test_gateway_http.py 的
+        # TestRealRuntimeIdGate（必须 400，不是 500）。
+    ):
         with pytest.raises(DriverHttpError) as failure:
             await _create(probe, session_id=bad)
         assert failure.value.status == 400, failure.value.call.render()
@@ -254,3 +270,47 @@ async def test_invalid_session_id_is_rejected_without_traces(probe: Probe) -> No
     result = await session.chat("hello")
     assert result.data["subtype"] == "success", result.data
     assert (probe.env.session_dir("team.run-7") / "history.jsonl").exists()
+
+
+def _fs_is_case_insensitive(base: Path) -> bool:
+    """本机文件系统对大小写是否不敏感（决定两个变体是否解析到同一个目录）。"""
+    probe_dir = base / "fs-case-probe"
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        return (base / "FS-CASE-PROBE").is_dir()
+    finally:
+        probe_dir.rmdir()
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_case_variant_ids_never_share_one_directory(probe: Probe) -> None:
+    """大小写 / 归一化变体：要么归一到同一会话，要么是两个独立目录——绝不混写。
+
+    不变量（与文件系统类型无关）：**回报的 id 逐字对应一个磁盘目录**，且不存在
+    "两个 id 一份 history.jsonl"。不敏感 FS（macOS APFS / Windows NTFS）上第二个
+    请求被归一到第一个会话的真名（网关按磁盘真名回应）；敏感 FS（Linux）上两者
+    是各自独立的会话。
+    """
+    probe.register(CREATED_MODEL, Turn.of(text="variant reply"))
+    aliases = _fs_is_case_insensitive(probe.env.root)
+
+    created = await _create(
+        probe, session_id="Team-V", model=CREATED_MODEL, tags=["favorite"]
+    )
+    assert created["session_id"] == "Team-V", created
+
+    variant = await _create(probe, session_id="team-v", model=CREATED_MODEL)
+    if aliases:
+        assert variant["session_id"] == "Team-V", variant  # 归一：真名
+        assert _session_dirs(probe) == ["Team-V"], _session_dirs(probe)
+    else:
+        assert variant["session_id"] == "team-v", variant
+        assert _session_dirs(probe) == ["Team-V", "team-v"], _session_dirs(probe)
+
+    # 不变量：每个回报的 id 都能逐字寻址，且目录数 == 会话数（无共享目录）。
+    expected = {created["session_id"], variant["session_id"]}
+    assert _session_dirs(probe) == sorted(expected), _session_dirs(probe)
+    for session_id in expected:
+        assert (probe.env.sessions_path / session_id).is_dir(), session_id
+    assert len(await _listed_ids(probe)) == len(expected)

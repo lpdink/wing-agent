@@ -6,9 +6,12 @@ from datetime import datetime
 # Session ID 生成与校验
 # ============================================================
 
-#: session id 长度上限（字符数）。与"id 是**单层路径组件**"同源：会话目录名 /
-#: 投影文件名都在文件系统的名字长度限制内，过长的 id 直接拒绝。
-SESSION_ID_MAX_LENGTH = 128
+#: session id 长度上限（**字节**，不是字符）。与"id 是**单层路径组件**"同源：
+#: 会话目录名就是它，claude 转录投影还用 ``<id>.jsonl``（+6 字节）。Linux 与
+#: macOS 的 ``NAME_MAX`` 都是 255 **字节**——按**字符**限长兜不住：``"收" * 128``
+#: 是 384 字节，在 Linux 上会在首次写入炸 ``ENAMETOOLONG``（而 create 早已回 200）。
+#: 128 字节远超任何真实编排方的 id（UUID = 36 字节），也给投影后缀留了余量。
+SESSION_ID_MAX_BYTES = 128
 
 
 def is_valid_session_id(value: object) -> bool:
@@ -17,18 +20,24 @@ def is_valid_session_id(value: object) -> bool:
     闸门口径是"**仅防路径穿越 + 基本卫生**"：id 由后端生成（默认形态见
     ``generate_session_id``）**或由编排方自带**（Claude Agent SDK 系消费方
     用自己的 UUID 建会话 / 续链），因此不再限定某一种形态。接受：非空、
-    ≤ ``SESSION_ID_MAX_LENGTH`` 字符、其余任意 UTF-8。拒绝：
+    **可编码为 UTF-8**、≤ ``SESSION_ID_MAX_BYTES`` 字节、其余任意字符。拒绝：
 
     - 含路径分隔符（``/`` ``\\``）或父目录引用 ``..``——id 是单层路径组件，
       防穿越（这也是它必须拒绝而非清洗的原因）；
     - 以 ``.`` 开头——覆盖 ``.`` / ``..`` 两个特例，并保留存储自己的点命名
       空间（``<sessions root>/.media`` 是媒体池，绝不能被寻址成会话）；
     - 含 ASCII 控制字符（0x00–0x1F、0x7F）——路径与终端展示的卫生；
-    - 空串 / 超过长度上限。
+    - **无法编码为 UTF-8**（孤立代理字符 ``"\\ud800"``：合法 JSON 但不是合法
+      UTF-8——放行的话 create 会成功、随后在落盘与 HTTP 序列化处炸 500）；
+    - 空串 / 超过字节上限。
     """
     if not isinstance(value, str) or not value:
         return False
-    if len(value) > SESSION_ID_MAX_LENGTH:
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    if len(encoded) > SESSION_ID_MAX_BYTES:
         return False
     if value.startswith("."):
         return False
@@ -43,12 +52,15 @@ def validate_session_id(session_id: str) -> str:
     与 ``validate_media_id`` 同一精神：id 直接充当存储路径组件（会话目录名），
     脏值说明调用方逻辑已错（或是对抗输入），必须大声失败——静默清洗只会把
     问题藏起来，还留下路径穿越口子。
+
+    错误文案里的 id 用 ``repr``（转义形式，恒为 ASCII）：原始代理字符直接拼进
+    消息会在 HTTP 错误体序列化处再次炸。
     """
     if not is_valid_session_id(session_id):
         raise ValueError(
             f"invalid session id: {session_id!r} "
-            f"(expect non-empty, ≤ {SESSION_ID_MAX_LENGTH} chars, no path "
-            "separator / '..' / control char / leading '.')"
+            f"(expect non-empty UTF-8 encodable id, ≤ {SESSION_ID_MAX_BYTES} bytes, "
+            "no path separator / '..' / control char / leading '.')"
         )
     return session_id
 

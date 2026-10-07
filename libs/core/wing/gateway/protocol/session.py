@@ -50,8 +50,13 @@ class CreateSessionRequest(BaseModel):
             "指定 session id（**create-or-adopt**）：不存在则以该 id 建会话；"
             "已存在（内存或任一 store）则收养既有会话（语义同 /api/session/resume，"
             "agent 覆盖只应用 resume 子集）。缺省 = 后端自生成。"
-            "id 只做基本卫生校验（非空、≤128 字符、无路径分隔符 / '..' / "
-            "控制字符、不以 '.' 开头），不合规 400 且不产生任何残留。"
+            "**收养路径忽略 template_name / workspace / backend**——它们以 metadata "
+            "为准且不做校验（同一个请求体因此可能'id 存在 → 200 / id 不存在 → 400'，"
+            "例如 backend 非法时）。"
+            "id 只做基本卫生校验（非空、≤128 字节、可编码为 UTF-8、无路径分隔符 / "
+            "'..' / 控制字符、不以 '.' 开头），不合规 400 且不产生任何残留。"
+            "同一文件系统内一个 id 只对应一个会话：大小写 / 归一化不敏感的 FS 上"
+            "别名会被归一到磁盘真名并在响应里回报（日志留 warning）。"
         ),
     )
 
@@ -65,7 +70,9 @@ class ResumeSessionRequest(BaseModel):
         description=(
             "恢复时应用的参数覆盖——只应用 model / provider / effort / tools 子集"
             "（system_prompt / append_system_prompt / max_turns / yolo 一律不应用："
-            "它们会改变对话前缀或会话既有限额，是创建期语义）"
+            "它们会改变对话前缀或会话既有限额，是创建期语义）。被忽略的字段会记 "
+            "warning；provider 只在**伴随 model** 时生效（切 provider 需要一个要切"
+            "过去的模型，与 /api/session/update 的成对约定同口径）。"
         ),
     )
 
