@@ -188,6 +188,9 @@ struct EntryState {
     /// 有一次**挂载**（`session/load` / `session/resume`）已 armed：同会话 prompt 排队等它，
     /// `close` 也要等它收口——但它**不是**在途轮次（不发 interrupt）。
     attach_armed: bool,
+    /// `close` 已决定回收本条目（仍有在途轮次时还会在表里等它收口）。
+    /// 决定先于等待落地：**之后**拿到 gate 的排队者（prompt / 挂载）一律拒绝。
+    closing: bool,
     /// 模型变更中继在途（04）：同一会话同时只有一次在中继（见 [`SessionEntry::claim_model_relay`]）。
     model_relay_in_flight: bool,
     /// 中继在途期间又收到模型变更（收尾时再跑一次，合并成「以最新状态为准」）。
@@ -224,12 +227,30 @@ impl SessionEntry {
         rx
     }
 
-    /// 置位「已请求取消」（`request_cancel` 调用）。
+    /// 有在途轮次则置位「已请求取消」并返回 `true`。
+    ///
+    /// 检查与置位在同一把锁内（原子）：否则「上一轮 `Turn::drop` + 下一轮 `arm_turn`
+    /// 复位」交错时，取消可能落到**下一轮**头上（该轮所有 ask 被立即丢弃）。
     ///
     /// `send_replace` 无接收者也不丢：置位发生在 `turn_armed` 之后、[`Turn`] 订阅之前
     /// 的窗口里也照样生效（订阅者拿到的是当前值）。
-    fn signal_cancel(&self) {
+    fn signal_cancel_if_armed(&self) -> bool {
+        let state = self.inner.lock().expect("entry mutex poisoned");
+        if !state.turn_armed {
+            return false;
+        }
         self.cancel.send_replace(true);
+        true
+    }
+
+    /// 落「本条目正在关闭」标记（`close_session` 在有界等待之前调用）。
+    fn mark_closing(&self) {
+        self.inner.lock().expect("entry mutex poisoned").closing = true;
+    }
+
+    /// 本条目是否已被 `close` 决定回收。
+    fn is_closing(&self) -> bool {
+        self.inner.lock().expect("entry mutex poisoned").closing
     }
 
     /// 装上一次**挂载**的事件通道并置位 `attach_armed`（调用方已持有 gate）。
@@ -559,12 +580,9 @@ impl SessionHub {
     pub async fn begin_turn(&self, session_id: &str, text: &str) -> Result<Turn, HubError> {
         let entry = self.entry(session_id)?;
         let gate = Arc::clone(&entry.gate).lock_owned().await;
-        // 拿到 gate 之后再确认条目仍在表内、且**仍是同一个**（close 后又 load 会建新条目）：
-        // `close_session` 的「检查 armed → 有界等待 → 回收」之间，排队的 prompt 可以拿到
-        // gate，随后被回收路径抽掉事件通道，以误导性的「事件流终止」收场（而消息已投递、
-        // 后端照常起轮）。命中 → `UnknownSession`：消息不投递，客户端拿到明确诊断。
-        let current = self.entry(session_id)?;
-        if !Arc::ptr_eq(&current, &entry) {
+        // 拿到 gate 之后再复查条目还能不能接新工作（见 [`SessionHub::accepts_new_work`]）：
+        // close 的回收决定与「排队者拿到 gate」两种排序都在这里封死。
+        if !self.accepts_new_work(session_id, &entry) {
             return Err(HubError::UnknownSession(session_id.to_string()));
         }
         // 拿到 gate 之后、arm 之前检查：WS 事件流是否已经死了。
@@ -615,13 +633,13 @@ impl SessionHub {
             tracing::debug!(session_id, "acp: cancel for an unknown session; ignored");
             return;
         };
-        if !entry.has_turn_in_flight() {
+        // 先置位「已请求取消」（在途 ask 的等待据此收口、丢弃迟到应答）：interrupt
+        // 一到后端就会清掉 feedback waiter，等到 HTTP 返回再置位就晚了。检查与置位原子，
+        // 且无在途轮次直接忽略（空闲期的 interrupt 会把 `interrupted` 广播留给下一个 prompt）。
+        if !entry.signal_cancel_if_armed() {
             tracing::debug!(session_id, "acp: cancel with no prompt in flight; ignored");
             return;
         }
-        // 先置位「已请求取消」（在途 ask 的等待据此收口、丢弃迟到应答）：interrupt
-        // 一到后端就会清掉 feedback waiter，等到 HTTP 返回再置位就晚了。
-        entry.signal_cancel();
         let hub = Arc::clone(self);
         let sid = session_id.to_string();
         tokio::spawn(async move {
@@ -692,7 +710,13 @@ impl SessionHub {
         }
         let (entry, created) = self.entry_or_register(session_id);
         let gate = Arc::clone(&entry.gate).lock_owned().await;
-        // 拿到 gate 之后再查一次（与 `begin_turn` 同款）：排队期间泵可能已经退出。
+        // 拿到 gate 之后再查一次（与 `begin_turn` 同款）：排队期间会话可能被 close 回收 /
+        // 决定回收（拒绝：挂载一个正在关闭的条目会以「快照超时」收场，且回滚判据
+        // `created == false` 会跳过 unsubscribe，把会话钉在网关内存里）。
+        if !self.accepts_new_work(session_id, &entry) {
+            return Err(HubError::UnknownSession(session_id.to_string()));
+        }
+        // 再查一次事件流（与 `begin_turn` 同款）：排队期间泵可能已经退出。
         if self.stream_dead.load(Ordering::SeqCst) {
             // 本次新建的条目连同卡片记忆一起回滚（06 审查 N3）：死流上不留「在表但
             // 无人投递」的半截会话。只回收新建条目——既有条目是别的挂载/轮次正在用
@@ -737,6 +761,9 @@ impl SessionHub {
     pub async fn close_session(self: &Arc<Self>, session_id: &str) {
         let known = match self.entry(session_id) {
             Ok(entry) => {
+                // 先落「正在关闭」标记（`accepts_new_work` 据此拒绝**之后**拿到 gate 的
+                // 排队者）：回收决定必须早于有界等待，否则「排队者先得 gate」的排序会漏。
+                entry.mark_closing();
                 // ACP：close 必须先当作 `session/cancel` 处理，让**在途轮次**有机会以
                 // `cancelled` 收口（而不是被我们抽掉通道、以内部错误收场）。挂载窗口
                 // 没有后端轮次——不发 interrupt（05 审查 N3），但仍要等它收口。
@@ -796,6 +823,30 @@ impl SessionHub {
             .sessions
             .insert(session_id.to_string(), Arc::clone(&entry));
         (entry, true)
+    }
+
+    /// 条目是否还能接新工作：仍在表内、仍是同一个（`close` 后重建的新条目不认），
+    /// 且没有被 `close` 决定回收。
+    ///
+    /// 两个调用点（`begin_turn` / `attach_session`）都在**拿到 gate 之后**复查：`close`
+    /// 与排队者有两种排序，都要挡住——
+    ///
+    /// - `close` 先连回收一起做完：条目已不在表内（`entry()` 失败或 `ptr_eq` 不成立）；
+    /// - 排队者先拿到 gate（tokio Mutex 是 FIFO，先到者先得）：`close` 的强迫回收会
+    ///   抽掉它的通道，prompt / 挂载以误导性的「事件流终止」收场（消息已投递、后端照常
+    ///   起轮）——所以 `close_session` 在**有界等待之前**就落下标记，这里看到即拒绝。
+    ///
+    /// 拒绝语义 = `UnknownSession`：消息不投递，客户端拿到明确诊断。
+    fn accepts_new_work(&self, session_id: &str, entry: &Arc<SessionEntry>) -> bool {
+        if entry.is_closing() {
+            return false;
+        }
+        self.state
+            .lock()
+            .expect("hub mutex poisoned")
+            .sessions
+            .get(session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, entry))
     }
 
     /// 会话出表 + 卸下事件通道（卡片记忆随条目 `Arc` 释放）。
@@ -1468,6 +1519,74 @@ mod tests {
         assert!(
             matches!(result, Err(HubError::UnknownSession(_))),
             "排队者必须得到 UnknownSession，实际 {:?}",
+            result.as_ref().err(),
+        );
+    }
+
+    /// 排队者先拿到 gate 的排序（tokio Mutex 是 FIFO）：close 的有界回收会抽掉它的
+    /// 通道，所以「回收决定」必须先行——排队者拿到 gate 时看到标记即拒绝，而不是等一条
+    /// 永远不会到来的事件流（消息已投递、后端照常起轮）。
+    #[tokio::test]
+    async fn queued_prompt_after_close_decision_is_unknown_session() {
+        let (hub, _outbound) = test_hub();
+        let sid = "session-close-fifo";
+        let (entry, _) = hub.entry_or_register(sid);
+        let gate = Arc::clone(&entry.gate).lock_owned().await;
+        let queued = {
+            let hub = Arc::clone(&hub);
+            let sid = sid.to_string();
+            tokio::spawn(async move { hub.begin_turn(&sid, "queued").await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        // close 在**有界等待之前**落的那一步。
+        entry.mark_closing();
+        drop(gate);
+        let result = queued.await.expect("queued task joins");
+        assert!(
+            matches!(result, Err(HubError::UnknownSession(_))),
+            "排队者必须得到 UnknownSession，实际 {:?}",
+            result.as_ref().err(),
+        );
+    }
+
+    /// `close` 的决定先于有界等待落地：在途轮次还占着 gate 时，条目必须已经带标记。
+    #[tokio::test]
+    async fn close_marks_the_entry_before_waiting_for_the_gate() {
+        let (hub, _outbound) = hub_with_dead_http().await;
+        let sid = "session-close-marks";
+        let (entry, _) = hub.entry_or_register(sid);
+        let turn = hub.begin_turn(sid, "in flight").await.expect("turn arms");
+        assert!(!entry.is_closing(), "初始未关闭");
+        let closing = {
+            let hub = Arc::clone(&hub);
+            let sid = sid.to_string();
+            tokio::spawn(async move { hub.close_session(&sid).await })
+        };
+        // 轮次还占着 gate（close 卡在有界等待里）：标记必须已经可见。
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !entry.is_closing() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "close 未在有界等待前落「正在关闭」标记"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        drop(turn);
+        closing.await.expect("close task joins");
+    }
+
+    /// `session/load` 排在 close 之后：挂载一个正在关闭的条目会以「快照超时」收场，
+    /// 且 `created == false` 的回滚会跳过 unsubscribe（把会话钉在网关内存里）——直接拒绝。
+    #[tokio::test]
+    async fn attach_on_a_closing_session_is_unknown_session() {
+        let (hub, _outbound) = hub_with_dead_http().await;
+        let sid = "session-attach-closing";
+        let (entry, _) = hub.entry_or_register(sid);
+        entry.mark_closing();
+        let result = hub.attach_session(sid).await;
+        assert!(
+            matches!(result, Err(HubError::UnknownSession(_))),
+            "关闭中的会话不得再挂载，实际 {:?}",
             result.as_ref().err(),
         );
     }

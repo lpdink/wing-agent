@@ -523,11 +523,15 @@ pub fn flatten_prompt(prompt: &[ContentBlock]) -> Option<String> {
 
 /// `file://` URI → 本地路径；`None` = 不是本地文件链接（调用方跳过不追加）。
 ///
-/// 主机段只接受空主机（`file:///abs`，主流客户端都这么发）与 `localhost`
-/// （`file://localhost/abs`，URI 规范里等价于空主机）；其它主机是**另一台
-/// 机器**上的路径，拼进 prompt 只会误导模型 → 跳过。
+/// scheme 大小写不敏感（URI 规范）；主机段只接受空主机（`file:///abs`，主流客户端都
+/// 这么发）与 `localhost`（`file://localhost/abs`，URI 规范里等价于空主机）；其它主机是
+/// **另一台机器**上的路径，拼进 prompt 只会误导模型 → 跳过。
 fn file_uri_to_path(uri: &str) -> Option<String> {
-    let rest = uri.strip_prefix("file://")?;
+    // 前 7 字节是 ASCII scheme 才继续（`get(..7)` 对非 ASCII 边界返回 None，切片安全）。
+    let rest = match uri.get(..7) {
+        Some(scheme) if scheme.eq_ignore_ascii_case("file://") => &uri[7..],
+        _ => return None,
+    };
     if rest.starts_with('/') {
         return Some(percent_decode_minimal(rest));
     }
@@ -1528,6 +1532,15 @@ mod tests {
         assert_eq!(
             flatten_prompt(&[link("file:///tmp/a.rs")]).as_deref(),
             Some("/tmp/a.rs")
+        );
+    }
+
+    #[test]
+    fn flatten_prompt_accepts_any_scheme_case() {
+        assert_eq!(
+            flatten_prompt(&[link("FILE:///tmp/a.rs")]).as_deref(),
+            Some("/tmp/a.rs"),
+            "URI scheme 大小写不敏感"
         );
     }
 

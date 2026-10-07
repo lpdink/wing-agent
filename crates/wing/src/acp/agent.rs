@@ -829,6 +829,10 @@ async fn run_turn(
             // 消息（幽灵轮次 + 持久化历史污染）。丢弃它，放行事件循环去消费随后到达的
             // `interrupted`，本轮以 `cancelled` 收口（客户端不关权限卡/表单也不再悬挂）。
             let reply = tokio::select! {
+                // `biased` + 取消臂在前：取消已置位时优先走取消路——取消后丢弃应答永远
+                // 安全（轮次本来要以 `cancelled` 收口），随机挑臂没有语义收益。
+                biased;
+                () = turn.cancel_requested() => AskReply::Abandoned,
                 outcome = ask::resolve(hub, cx, &session_id, &event) => AskReply::Write(outcome),
                 () = hub.stream_dead() => {
                     tracing::warn!(
@@ -838,7 +842,6 @@ async fn run_turn(
                     );
                     AskReply::Write(ask::default_answer(&event))
                 }
-                () = turn.cancel_requested() => AskReply::Abandoned,
             };
             match reply {
                 AskReply::Write(Some(outcome)) => {
