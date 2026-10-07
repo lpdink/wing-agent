@@ -328,9 +328,10 @@ def run(args: argparse.Namespace) -> int:
         main_rows = measure_rate(RATE_MAIN, seconds, repeats, scratch, out)
         if not main_rows:
             failures = (
-                f"no markers measured at {RATE_MAIN} tok/s in {repeats}×{MAX_ATTEMPTS} "
-                "attempts: the TUI never streamed a turn (see the emit logs in the "
-                "kept scratch)"
+                f"no usable display-lag sample at {RATE_MAIN} tok/s in "
+                f"{repeats}×{MAX_ATTEMPTS} attempts (no marker was captured: the TUI "
+                "drew no first screen, or the provider sent no frame — see the emit "
+                "logs in the kept scratch)"
             )
             print(f"[suite_tui] error: {failures}", file=sys.stderr, flush=True)
             out.write(out_path, ok=False, error=failures)

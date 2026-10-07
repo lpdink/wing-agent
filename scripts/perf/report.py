@@ -25,6 +25,7 @@ from common import (  # noqa: E402  (同目录模块：脚本直接跑时 sys.pa
     Thresholds,
     metric_unit,
     read_json,
+    strip_ansi,
 )
 
 #: 评论唯一标识：comment.py 据此查找 / 更新同一条评论。
@@ -275,13 +276,14 @@ def _failure_section(failures: Sequence[Mapping[str, Any]]) -> list[str]:
             where = f"{label}（prepare）"
         else:
             where = f"{label} r{entry.get('round')}"
-        error = str(entry.get("error") or "未记录原因")
+        # 失败现场是套件日志的尾巴：rust 那边可能是 cargo 的彩色 stderr，
+        # 直接把 `\x1b[…` 贴进评论没有意义（note 与错误摘要已各有一层 strip）。
+        error = strip_ansi(str(entry.get("error") or "未记录原因"))
         first = error.strip().splitlines()[0] if error.strip() else "未记录原因"
         lines.append(f"- `{where}`：{first}")
         if len(error.strip().splitlines()) > 1 or entry.get("log_tail"):
-            details.append(
-                f"**{where}**\n\n```\n{str(entry.get('log_tail') or error).strip()}\n```"
-            )
+            tail = strip_ansi(str(entry.get("log_tail") or error)).strip()
+            details.append(f"**{where}**\n\n```\n{tail}\n```")
     lines.append("")
     if details:
         lines += [

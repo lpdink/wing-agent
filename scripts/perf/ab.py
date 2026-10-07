@@ -1869,6 +1869,25 @@ def run_selftest() -> int:
             and "🚫 不判定" in md_f,
             "",
         )
+        # 失败现场（log_tail）同样不能把 ANSI 带进评论：cargo 的彩色 stderr 会落进日志尾部。
+        ansi_failure = Failure(
+            suite="rust",
+            side="base",
+            round=1,
+            error="suite exited 101",
+            exit_code=101,
+            log_tail="\x1b[1m\x1b[91merror\x1b[0m: could not compile `wing`",
+        )
+        md_fail_ansi = report_render.render_comment(
+            build_report(ctx, [], [ansi_failure], [], 1.0)
+        )
+        checker.check(
+            "report.failure_tail_ansi_stripped",
+            "\x1b" not in md_fail_ansi
+            and "error: could not compile `wing`" in md_fail_ansi
+            and "r1" in md_fail_ansi,
+            repr(md_fail_ansi[-300:]),
+        )
 
         # ⑧ prepare 失败 → 跳过该 suite、其余继续
         def prepare_broken(suite: str) -> list[Failure]:

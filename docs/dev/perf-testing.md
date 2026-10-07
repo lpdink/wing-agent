@@ -217,9 +217,10 @@ rounds=3、quick；注意它跑在**本轮改动之前**的口径上）：
   `fanout.cpu_ms_per_1k` ±0% / `resume.sync` −1.2% / `turn.p50` +1.7% / `turn.p99` −0.3%），
   `fanout.gap_p99` −5.5%（30% 带内）；唯一越界的 `fanout.complete_ms` **−57.4%** ——
   base 侧逐轮 295 / 297 / **127**ms（head 125–126 / 126 / 126ms）。
-- **rust**：16 项里 15 项 |Δ| ≤ 1.8%（ns 级 bench ≤ 0.9%、`session_replay` ≤ 0.6%）；
-  唯一越界的 `tool_args_stream.append.256` **−14.9%**（base 逐轮 20.2 / 24.6 / 24.2 µs、
-  head 20.6 / 19.8 / 20.9 µs → 轮间 spread 21.8% vs 5.5%），与 run 1 的 23.8% 同量级 ——
+- **rust**：16 项里 **14 项 |Δ| ≤ 1.8%**（`stream_render` ≤ 0.18% / `frames_60fps` ≤ 0.42% /
+  `session_replay` ≤ 0.56% / `image_frame` ≤ 1.78%）；两项越界：`tool_args_stream.append.256`
+  **−14.9%**（base 逐轮 20.2 / 24.6 / 24.2 µs、head 20.6 / 19.8 / 20.9 µs → 轮间 spread
+  21.8% vs 5.5%，与 run 1 的 23.8% 同量级）与 `append.512` **−2.5%**（放宽后的 12% 带内）——
   这正是给该 bench 放宽带宽（12/30）并单独加 `--measurement-time` 3s 的依据。
 - **tui**：`lag_p50` +6.8%、`lag_p99` / `lag_max` −13.2%（都在 15/30、25/45 带内，判"持平"）；
   `trend` 在同一 rev 下给出 **−109.5%**（base 中位 +6.1ms vs head −0.6ms，逐轮值横跨
@@ -243,7 +244,7 @@ artifact 的逐轮值**。`append.*` 这一轮是 2s 测量时间的旧口径；
 | `gateway.fanout.gap_p99_us` | 30 / 50 | 1000 个帧间隔的 p99（不是小样本极值），但负载尖峰下仍可翻倍；05 的 `--calibrate --rounds 2` 在尖峰下出现过 −41%~+40% 的伪差异。CI 首跑 −6.6%。 |
 | `tui.display.coverage_ratio` | — | **`info_only`**：覆盖率是测量质量，不判档（`verdict=n/a` + note；Δ 照算照显示）。 |
 | `tui.display.trend_us` | — | **`info_only`**：零中心有符号量（后 1/4 中位 − 前 1/4 中位），`Δ% = (head−base)/base` 在 base<0 时符号翻转（wing-review 用仓库代码复现：base=−20ms→head=+20ms 判"改善"）；CI 首跑逐轮 −0.1/1.7/7.2ms，判档也没有信息量。 |
-| `gateway.turn.p99_ms` / `gateway.context.build_p99_ms` | — | **`info_only`**：小样本（n=12 / n=5）下 p99 = 最大值。CI 首跑逐轮 turn.p99 base [73.0, 23.8, 76.9] vs head [90.6, 27.3, 23.9]、build.p99 base [36.1, 20.7, 51.6] vs head [176.7, 229.4, 52.4] → ±390%/±63% 全是调度噪声。对应的 p50 保留判档。 |
+| `gateway.turn.p99_ms` / `gateway.context.build_p99_ms` | — | **`info_only`**：小样本（n=12 / n=5）下 p99 = 最大值。CI 首跑逐轮 turn.p99 base [73.0, 23.8, 76.8] vs head [90.6, 27.3, 23.9]、build.p99 base [36.1, 20.7, 51.6] vs head [176.7, 229.4, 52.4] → ±390%/±63% 全是调度噪声。对应的 p50 保留判档。 |
 
 **`info_only` 的语义**：数值与 Δ 照算照显示、`verdict=n/a` + note「测量质量信息项（不参与
 判定）」；进了 `info_only` 的指标不再单独给带宽（判档与带宽无关），将来若要恢复判档，按
