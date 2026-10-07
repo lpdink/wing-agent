@@ -15,7 +15,8 @@
   （`frame/pictures/4` 的目录是 `frame/pictures_4/`），不能从路径反推；`benchmark.json`
   缺失（残局）时退化为目录相对路径并去掉最后一段 label。
   criterion 根目录镜像 criterion 0.5.1 的解析顺序：`$CRITERION_HOME` →
-  `$CARGO_TARGET_DIR/criterion` → `<worktree>/target/criterion`。
+  `$CARGO_TARGET_DIR/criterion` → `<worktree>/target/criterion`（相对值的基准差异见
+  `criterion_root`：套件相对 worktree、criterion 相对 bench cwd；命中时会写一条 note）。
 - 一侧缺 bench target（本 PR 的 base 早于 session_replay）→ 该 bench 的 case 记 n/a（notes），
   **退出码 0**，其余 bench 照常；编译错误 / 超时 / 坏 JSON → `ok=false` + 退出码 1
   （ab.py 记 infrastructure failure）。
@@ -213,7 +214,13 @@ def criterion_root(worktree: Path) -> Path:
     镜像 criterion 0.5.1 的解析顺序（`criterion-0.5.1/src/lib.rs:134-144`）：
     ``$CRITERION_HOME`` → ``$CARGO_TARGET_DIR/criterion`` → ``./target/criterion``
     （第三档是 cargo metadata 的 target dir，非 workspace 场景这里不做等价实现）。
-    相对路径按 cargo 的规则相对 worktree 解析。
+
+    基准差异（只影响**相对值**这种非常规配置）：本套件对相对路径按 cargo 的规则相对
+    ``worktree`` 解析，而 criterion 对 ``CRITERION_HOME`` / ``CARGO_TARGET_DIR`` 的
+    相对值不做归一化、直接相对 bench 进程的 cwd（= 包根，如
+    ``<worktree>/crates/wing``）解析；两者不一致时套件读不到数据（全 case n/a、退出码
+    仍 0，`relative_override_note()` 会把原因写进 ``meta.notes``）。绝对路径（CI 与常规
+    用法）不受影响。
     """
     for key, suffix in (("CRITERION_HOME", ""), ("CARGO_TARGET_DIR", "criterion")):
         override = os.environ.get(key)
@@ -222,6 +229,23 @@ def criterion_root(worktree: Path) -> Path:
             base = path if path.is_absolute() else worktree / path
             return (base / suffix).resolve() if suffix else base.resolve()
     return worktree / "target" / "criterion"
+
+
+def relative_override_note(worktree: Path) -> str | None:
+    """相对 `CRITERION_HOME` / `CARGO_TARGET_DIR` 的基准差异提示（没有则 None）。
+
+    环境里有人设了相对值时才产出：这类配置下"套件读的位置"与"criterion 写的位置"
+    可能不是同一处，现场只会表现为"全 case n/a"——把原因写成一条 note，别让排查靠猜。
+    """
+    for key in ("CRITERION_HOME", "CARGO_TARGET_DIR"):
+        value = os.environ.get(key)
+        if value and not Path(value).is_absolute():
+            return (
+                f"{key}={value!r} 是相对路径：本套件相对 worktree 解析，criterion 自身相对 "
+                f"bench cwd（包根，如 {worktree / 'crates' / 'wing'}）解析——两者可能不是"
+                "同一处，读不到数据时请改用绝对路径"
+            )
+    return None
 
 
 # ── 取数 ─────────────────────────────────────────────────────
@@ -365,6 +389,10 @@ def collect(
         raise SuiteError(f"side {side.name}: worktree missing: {worktree}")
     root = criterion_root(worktree)
     label = safe_label(side.name, out.round)
+    relative_note = relative_override_note(worktree)
+    if relative_note:
+        # 放在最前：它解释的是"为什么下面全是 n/a"，比逐 case 的 n/a note 更接近原因。
+        out.note(relative_note)
 
     filters: dict[str, str | None] = {}
     measurement: dict[str, int] = {}

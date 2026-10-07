@@ -102,7 +102,7 @@ HTTP / WS 驱动真网关。quick = 1000 帧扇出 / 12 轮 / 10×10KB 历史 / 
 | `gateway.fanout.gap_p99_us` | 同上 | 相邻帧到达间隔的 p99（客户端读循环） |
 | `gateway.fanout.cpu_ms_per_1k` | 同上 | 网关进程 CPU 增量 / 千帧（darwin `proc_pid_rusage`、linux `/proc/<pid>/stat`） |
 | `gateway.turn.p50_ms` / `p99_ms` | 12 个迷你轮次 | send → `turn_result` |
-| `gateway.context.build_p50_ms` / `build_p99_ms` | 大 history 后的 5 次 probe | send → provider 收到请求体（同进程同钟） |
+| `gateway.context.build_p50_ms` / `build_p99_ms` | 大 history 后的 probe（quick 5 / full 8） | send → provider 收到请求体（同进程同钟） |
 | `gateway.resume.sync_ms` | 重启网关 → subscribe | subscribe 调用 → `sync_session` 到达（水合在窗口外，单列 `resume.hydrate_ms`） |
 
 软异常（帧数对不上、请求数不是 1、重放条数与期望不符）一律写 `meta.notes`，不改退出码；
@@ -207,12 +207,14 @@ sha / 轮数 / 档位不一致时插入告警、放弃单值表头）；改文�
 | `tui.display.lag_p99_us` / `lag_max_us` | 25 / 45 | 04 实测 p99 常态 29–43ms、负载高时 60–115ms；quick 档一次只有约 20 个标记，p99/max 是小样本极值，比 p50 更跳。 |
 | `tui.display.trend_us` | 50 / 100 | 04 实测 trend ≈ ±20ms，而 p50 本身 19–27ms——趋势量级可与被测量同阶；保留判档但带宽很宽。 |
 | `tui.tui_cpu_ratio` | 30 / 60 | CPU 采样是 `ps -o time=`（10ms 量化）对约 2s 窗口、约 3% 占用（≈60ms CPU）→ 量化不确定度 ≈17%。 |
-| `gateway.*`（其余 6 项） | 15 / 30 | 05 安静窗口（loadavg 4.2）同侧连跑：6/8 项 ≤ 8%（complete 0.2% / cpu 0.8% / turn.p50 0.9% / build_p50 1.2% / sync 0.7%）；高负载窗口（loadavg 9–10）可达 100%+。 |
-| `gateway.fanout.gap_p99_us` / `turn.p99_ms` / `context.build_p99_ms` | 30 / 50 | 同为小样本极值：安静窗口也分别出现 28.2% / 7.6% / 51.5% 的摆动；05 的 `--calibrate --rounds 2` 在负载尖峰下出现 −41%~+40% 的伪差异。 |
+| `gateway.*`（其余 5 项：`fanout.complete_ms` / `fanout.cpu_ms_per_1k` / `turn.p50_ms` / `context.build_p50_ms` / `resume.sync_ms`） | 15 / 30 | 05 安静窗口（loadavg 4.2）同侧连跑 8 项，其中 **6 项 ≤ 8%**（complete 0.2% / cpu 0.8% / turn.p50 0.9% / **turn.p99 7.6%** / build_p50 1.2% / sync 0.7%；另 2 项 gap_p99 28.2% / build_p99 51.5% 超过 8%）；高负载窗口（loadavg 9–10）可达 100%+，说明带宽要覆盖"轮内被尖峰命中"。 |
+| `gateway.fanout.gap_p99_us` / `turn.p99_ms` / `context.build_p99_ms` | 30 / 50 | 同为小样本极值：安静窗口里 gap_p99 28.2% / build_p99 51.5% 的摆动就超过 8%（turn.p99 的 7.6% 虽在 8% 内，但小样本下它等于最大值，一并划入这一族）；05 的 `--calibrate --rounds 2` 在负载尖峰下出现 −41%~+40% 的伪差异。 |
 | `tui.display.coverage_ratio` | — | **`info_only`**：覆盖率是测量质量，不判档（`verdict=n/a` + note；Δ 照算照显示）。 |
 
-这些是**初值**：CI 落地的 `--calibrate` 数据到手后按上面的流程收窄/加宽，改 `thresholds.json`
-即可（`ab.py` 的 selftest 会核对当前文件里各族的带宽与匹配顺序）。
+这些是**初值**：CI 落地的 `--calibrate` 数据到手后按上面的流程收窄/加宽——**带宽表与
+`ab.py` selftest 里的钉值表要一起改**（两处：`thresholds.json` 与 `run_selftest()` 的
+`thresholds.file …` 循环；selftest 逐点核对各族的带宽与匹配顺序，只改一处会立刻红灯——
+这是刻意的：把带宽的静默漂移变成显式改动）。
 
 ## 6. CI 行为与局限
 
@@ -242,7 +244,7 @@ sha / 轮数 / 档位不一致时插入告警、放弃单值表头）；改文�
 | run 非 0 退出 / 评论里"n 个套件失败" | `[perf] FAIL <suite>/<side> r<n>` 那几行（stdout）；两段 `log`/`log_tail` 在 `ab.json` 的 `failures[]` 里 |
 | 某侧 suite 失败 | `<workdir>/raw/logs/<suite>-<side>-r<n>.log`（套件 stdout+stderr）；CI 上在 artifact 的 `raw/logs/` |
 | 构建失败 | `<workdir>/raw/logs/prepare-<suite>-<side>-<i>-<cmd>.log` |
-| rust 行大面积 `n/a` | 该侧缺 bench（`cases` 列表 / notes 写着 `no bench target named …`）——正常现象；否则查 `criterion_dir`、`CARGO_TARGET_DIR` / `CRITERION_HOME` 是否被外部设置 |
+| rust 行大面积 `n/a` | 该侧缺 bench（`cases` 列表 / notes 写着 `no bench target named …`）——正常现象；否则查 `criterion_dir`、`CARGO_TARGET_DIR` / `CRITERION_HOME` 是否被外部设置（**相对值**会把原因写成一条 note：套件相对 worktree 解析、criterion 相对 bench cwd） |
 | tui 行低置信 / 行缺失 | `meta.config.runs[]` 的 `coverage` / `markers` / `missing` / `resends`；`meta.notes` 会点出"低置信""重试""补发" |
 | gateway 数字整体偏大 | `meta.config.machine.loadavg`（判读同机负载的第一手证据）；再用 `--calibrate` 量地板 |
 | 评论没出现 | 是不是 fork PR / draft / 上一轮 run 被取消；`perf-report` job 的 `compose` 步骤输出；artifact `perf-comment` |
