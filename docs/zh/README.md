@@ -139,6 +139,8 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 | 自定义工具 | [docs/en/custom-tools.md](../en/custom-tools.md) | [docs/zh/custom-tools.md](custom-tools.md) |
 | 魔术命令 | [docs/en/magic-commands.md](../en/magic-commands.md) | [docs/zh/magic-commands.md](magic-commands.md) |
 
+接入 ACP 客户端（Zed / omnigent）见 **[docs/integrations/](../integrations/README.md)**。
+
 ## 开发
 
 从 **[AGENTS.md](../../AGENTS.md)** 开始（高信息密度的项目总览）。需要机制级细节（数据流、完整 HTTP API、术语表）请读 **[docs/dev/](../dev/)**。
