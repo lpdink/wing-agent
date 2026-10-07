@@ -64,6 +64,11 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "que
 # Error handling
 thiserror = "2"
 
+# Agent Client Protocol —— `wing acp` 前端（stdio 上的 ACP agent 服务端）。
+# schema v1 stable；`stdio` feature 提供 `Stdio` 传输（本仓库只充当 agent 侧，
+# 不需要 `process`）。
+agent-client-protocol = { version = "3.0.0", features = ["stdio"] }
+
 # Utilities
 unicode-width = "0.2"
 unicode-linebreak = "0.1.5"
