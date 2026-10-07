@@ -1,0 +1,5 @@
+{
+  "default": {"noise_pct": 6, "regress_pct": 20},
+  "overrides": {},
+  "higher_better": []
+}
