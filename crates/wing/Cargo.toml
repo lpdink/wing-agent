@@ -62,3 +62,7 @@ harness = false
 name = "image_frame"
 harness = false
 
+[[bench]]
+name = "session_replay"
+harness = false
+
