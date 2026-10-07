@@ -502,6 +502,9 @@ impl SessionHub {
             }),
             backend: None,
             tags: None,
+            // ACP 的 `session/new` 没有客户端指定 id 的位置：由网关铸 id，原样回给客户端
+            // 作 ACP sessionId（`--session-id` 那套 create-or-adopt 是 CLI 用法）。
+            session_id: None,
         };
         let created = self
             .http

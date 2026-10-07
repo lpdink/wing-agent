@@ -22,8 +22,8 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/session/create` | 创建新 session（可选 `backend: file\|memory`，默认 file；`workspace`、`template` 等；可选 `tags` 创建即打标，校验语义同 `/api/session/tag`） |
-| POST | `/api/session/resume` | 恢复已有 session（还原 template_name、workspace 与模型绑定；模型记录优先于模板默认；也是被逐出会话的显式水合入口） |
+| POST | `/api/session/create` | 创建新 session（可选 `backend: file\|memory`，默认 file；`workspace`、`template` 等；可选 `tags` 创建即打标，校验语义同 `/api/session/tag`；可选 `session_id` = **create-or-adopt**：不存在则以该 id 建会话，已存在则收养既有会话——语义同 `/api/session/resume`，`agent` 覆盖只应用 resume 子集。**收养路径忽略创建参数**：`template_name` / `workspace` / `backend` 一律以 metadata 为准、且不做校验，因此同一个请求体可能"id 存在 → 200（参数被忽略）/ id 不存在 → 400（如 `backend` 非法）"；**例外**是"该 id 已命中内存里的**空会话**"（同 FS 的变体）：那条路径走的是认领之后的校验分支，`backend` / `template_name` 非法仍会 **400**） |
+| POST | `/api/session/resume` | 恢复已有 session（还原 template_name、workspace 与模型绑定；模型记录优先于模板默认；也是被逐出会话的显式水合入口）。可选 `agent` 覆盖：**只应用 `model` / `provider` / `effort` / `tools`**——`system_prompt` / `append_system_prompt` / `max_turns` / `yolo` 一律不应用（它们会改请求前缀或会话既有限额，属创建期语义），被忽略的字段会记 warning；`provider` 只在**伴随 `model`** 时生效 |
 | POST | `/api/session/fork` | 从指定消息 uuid 分叉；新 session 含该消息及之前全部消息，继承源 backend |
 | POST | `/api/session/subscribe` | 将某 client 订阅到 session 事件（触发 SyncSession 重放；不在内存的会话先按需水合） |
 | POST | `/api/session/unsubscribe` | 取消订阅 |
@@ -47,11 +47,22 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 > 惯例处理；`/api/session/list` 的 `status: inactive` 是逐出的可观测痕迹）。
 > `wing release <sid>` 是对应的显式操作。
 >
-> **session id 是硬闸门**：唯一合法形态是后端生成的
-> `YYYYMMDD-HHMMSS-<8 位小写 hex>`（`common.utils.SESSION_ID_PATTERN`）。
-> 所有端点的 session_id 先过格式闸门再触达存储——不合规的值与"不存在"同价
-> （一律 404，不给探测反馈），绝不进入文件路径拼接（防路径穿越；file 后端
-> 在拼接处还有最终防线）。会话 id 一律由后端生成，客户端不得自造。
+> **session id 是闸门（只防穿越与卫生）**：id 由后端生成（默认形态
+> `YYYYMMDD-HHMMSS-<8 位小写 hex>`）**或由编排方自带**（`/api/session/create`
+> 的 `session_id` = create-or-adopt）。校验只拒绝危险值：含路径分隔符 / `..`、
+> 点开头（`<sessions root>/.media` 是媒体池，存储自己的点命名空间）、ASCII
+> 控制字符、不可编码为 UTF-8（孤立代理字符）、空串、超过 **128 字节**
+> （`common.utils.is_valid_session_id`；字节而非字符——Linux/macOS 的
+> `NAME_MAX` 是 255 字节，`"收" * 128` 是 384 字节，会在首次写入炸
+> `ENAMETOOLONG`）。所有端点的 session_id 先过闸门再触达存储——不过闸门的值
+> 与"不存在"同价（一律 404，不给探测反馈），绝不进入文件路径拼接（防路径穿越；
+> file 后端在拼接处还有最终防线）；create 端点则回 400（请求非法，而非"找不到"）。
+>
+> **一个 id 一个会话（同文件系统内）**：大小写 / Unicode 归一化不敏感的文件系统
+> 上，`team-a` 与 `Team-A` 解析到同一个目录——会话层一律按**磁盘真名**建索引并在
+> 响应里回报它（别名留 warning），因此"两个 id 共用一份 `history.jsonl`"不可能
+> 发生；大小写敏感的 FS（Linux）上两者是各自独立的会话。读端点（`get` / `info` /
+> `branches` / `interrupt`）只认内存里的精确键，别名请求回 404。
 >
 > 边界：**空会话**（从未发言 → 磁盘无痕迹）一旦被逐出即不可恢复——它没有可水合
 > 的状态，此后 `release` / `send` / `subscribe` 都回 404（不是幂等 `not loaded`）。

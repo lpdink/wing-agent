@@ -2,6 +2,10 @@
 
 使用 FastAPI TestClient + Mock WingRuntime 测试所有 HTTP 路由。
 不启动真实 uvicorn server，不依赖端口 32523。
+
+例外：``TestRealRuntimeGates`` 用**真实** ``WingRuntime``——它要证明的是
+"闸门在 HTTP 面上把恶意 id 折成 400（而不是让它走到响应序列化处炸 500）"，
+mock 掉 runtime 就只剩 route 的胶水，证明不了这件事。
 """
 
 from __future__ import annotations
@@ -9,6 +13,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -190,6 +195,7 @@ class TestSessionCreate:
             agent_override=None,
             backend=None,
             tags=None,
+            session_id=None,
         )
 
     def test_create_with_template(self, client: TestClient, mock_runtime):
@@ -205,6 +211,7 @@ class TestSessionCreate:
             agent_override=None,
             backend=None,
             tags=None,
+            session_id=None,
         )
 
     def test_create_template_not_found(self, client: TestClient, mock_runtime):
@@ -223,6 +230,7 @@ class TestSessionCreate:
             agent_override=None,
             backend="memory",
             tags=None,
+            session_id=None,
         )
 
     def test_create_unknown_backend_returns_400(self, client: TestClient, mock_runtime):
@@ -246,12 +254,38 @@ class TestSessionCreate:
             agent_override=None,
             backend=None,
             tags=["scheduler", "task=x"],
+            session_id=None,
         )
 
         mock_runtime.create_session.side_effect = ValueError("invalid tag: 'bad tag'")
         resp = client.post("/api/session/create", json={"tags": ["bad tag"]})
         assert resp.status_code == 400
         assert "bad tag" in resp.json()["detail"]
+
+    def test_create_with_session_id(self, client: TestClient, mock_runtime):
+        """指定 session_id 透传（create-or-adopt 的请求面）。"""
+        resp = client.post(
+            "/api/session/create",
+            json={"session_id": "3f2b9d1e-6c1a-4f2b-9d3e-1a2b3c4d5e6f"},
+        )
+        assert resp.status_code == 200
+        mock_runtime.create_session.assert_called_once_with(
+            template_name=None,
+            workspace=None,
+            agent_override=None,
+            backend=None,
+            tags=None,
+            session_id="3f2b9d1e-6c1a-4f2b-9d3e-1a2b3c4d5e6f",
+        )
+
+    def test_create_invalid_session_id_is_400(self, client: TestClient, mock_runtime):
+        """不合规的 session_id → runtime raise ValueError → 400（明确文案）。"""
+        mock_runtime.create_session.side_effect = ValueError(
+            "invalid session id: '../escape'"
+        )
+        resp = client.post("/api/session/create", json={"session_id": "../escape"})
+        assert resp.status_code == 400
+        assert "invalid session id" in resp.json()["detail"]
 
     def test_create_with_agent_override(self, client: TestClient, mock_runtime):
         """创建 session 时传入 agent override。"""
@@ -315,13 +349,46 @@ class TestSessionResume:
         assert resp.status_code == 200
         data = resp.json()
         assert data["session_id"] == "test-session-id"
-        mock_runtime.resume_session.assert_called_once_with("abc123")
+        mock_runtime.resume_session.assert_called_once_with(
+            "abc123", agent_override=None
+        )
 
     def test_resume_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
         mock_runtime.resume_session.side_effect = LookupError("Session not found: xxx")
         resp = client.post("/api/session/resume", json={"session_id": "xxx"})
         assert resp.status_code == 404
+
+    def test_resume_passes_agent_override(self, client: TestClient, mock_runtime):
+        """resume 的 agent 覆盖透传到 runtime（resume 子集由 Session 决定）。"""
+        resp = client.post(
+            "/api/session/resume",
+            json={
+                "session_id": "abc123",
+                "agent": {"model": "gpt-4o", "effort": "high", "tools": ["Read"]},
+            },
+        )
+        assert resp.status_code == 200
+        override = mock_runtime.resume_session.call_args.kwargs["agent_override"]
+        assert override is not None
+        assert override.model == "gpt-4o"
+        assert override.effort == "high"
+        assert override.tools == ["Read"]
+        assert override.system_prompt is None
+
+    def test_resume_override_validation_error_is_400(
+        self, client: TestClient, mock_runtime
+    ):
+        """覆盖里的工具引用无法解析 → runtime raise ValueError → 400（不是 404）。"""
+        mock_runtime.resume_session.side_effect = ValueError(
+            "cannot resolve tool reference: 'Nope'"
+        )
+        resp = client.post(
+            "/api/session/resume",
+            json={"session_id": "abc123", "agent": {"tools": ["Nope"]}},
+        )
+        assert resp.status_code == 400
+        assert "Nope" in resp.json()["detail"]
 
 
 # ============================================================
@@ -1996,3 +2063,261 @@ class TestReservedClientIdAndLifecycle:
             assert resp.status_code == 422
         finally:
             tool_registry.unregister_namespace("host-bad")
+
+
+# ============================================================
+# 真实 runtime 的 id 闸门（HTTP 面：400，而不是 500）
+# ============================================================
+
+
+class TestRealRuntimeGates:
+    """非法输入在**真实** runtime 上的 HTTP 表现：400/404 + 零残留（绝不 500）。
+
+    覆盖"孤立代理字符"这一族：``{"session_id": "\\ud800"}`` 是合法 JSON，但值不是
+    合法 UTF-8——旧实现里 create 会成功、随后在响应序列化（``PydanticSerializationError``）
+    或 metadata 落盘处炸 500；更新一点的路径（agent 覆盖的字符串字段）还会留下
+    半份 metadata，让下一次同 id 的 create "收养"这个半成品幽灵会话。
+
+    httpx 的 ``json=`` 在客户端就编码不了代理字符，因此这里发**原始字节体**
+    （服务端收到的是转义形式，pydantic 解出代理字符）——正是恶意 / 异常客户端
+    能造出的那一类请求。
+    """
+
+    @pytest.fixture
+    def real_client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """真实 WingRuntime + 独立 sessions 根（不与共享临时目录混）。"""
+        from wing.gateway.server import GatewayServer
+        from wing.runtime import WingRuntime
+
+        monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
+        with patch("wing.gateway.server.load_config") as mock_load_config:
+            mock_load_config.return_value = _mock_config()
+            server = GatewayServer()
+        server.runtime = WingRuntime()
+        with TestClient(server._app) as tc:
+            yield tc, tmp_path / "sessions"
+
+    def test_surrogate_session_id_is_400_not_500(self, real_client):
+        client, sessions_root = real_client
+        resp = client.post(
+            "/api/session/create",
+            content=b'{"session_id": "\\ud800"}',
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "invalid session id" in resp.json()["detail"]
+        assert not sessions_root.exists() or list(sessions_root.iterdir()) == []
+
+    def test_surrogate_id_on_tag_is_404_not_500(self, real_client):
+        """读路径：闸门把非法 id 折成"不存在"（404），且错误体可序列化。"""
+        client, _ = real_client
+        resp = client.post(
+            "/api/session/tag",
+            content=b'{"session_id": "\\ud800"}',
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 404, resp.text
+        assert "Session not found" in resp.json()["detail"]
+
+    def test_overlong_byte_id_is_400(self, real_client):
+        """128 字符的 CJK（= 384 字节）在 Linux 上会让 mkdir ENAMETOOLONG：闸门先拒。"""
+        client, sessions_root = real_client
+        resp = client.post("/api/session/create", json={"session_id": "收" * 128})
+        assert resp.status_code == 400, resp.text
+        assert not sessions_root.exists() or list(sessions_root.iterdir()) == []
+
+    # ── N1：覆盖 / 文本字段的非 UTF-8 输入（400 而非 500，零残留、无幽灵） ──
+
+    def test_surrogate_in_override_is_400_not_500(self, real_client):
+        """agent 覆盖里的孤立代理字符 → 400；**零残留**（连目录都不建）。"""
+        client, sessions_root = real_client
+        resp = client.post(
+            "/api/session/create",
+            content=(
+                b'{"session_id": "Ghost-R", "agent": '
+                b'{"model": "m", "system_prompt": "\\ud800"}}'
+            ),
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "system_prompt" in resp.json()["detail"], resp.text
+        # 零残留：没有目录、没有 metadata——认领键发生在校验之后
+        assert not sessions_root.exists() or list(sessions_root.iterdir()) == []
+
+    def test_no_ghost_session_is_adopted_after_the_failed_create(self, real_client):
+        """失败之后同 id 的 create 是**新建**，不是收养半成品幽灵。"""
+        client, _ = real_client
+        failed = client.post(
+            "/api/session/create",
+            content=(
+                b'{"session_id": "Ghost-R", "agent": '
+                b'{"model": "m", "system_prompt": "\\ud800"}}'
+            ),
+            headers={"content-type": "application/json"},
+        )
+        assert failed.status_code == 400, failed.text
+
+        again = client.post("/api/session/create", json={"session_id": "Ghost-R"})
+        assert again.status_code == 200, again.text
+        assert again.json()["session_id"] == "Ghost-R"
+        # 幽灵的痕迹（model / system_prompt 记录）不存在 → 这是全新会话。
+        state = client.get("/api/session/get", params={"session_id": "Ghost-R"})
+        assert state.status_code == 200, state.text
+        assert state.json()["messages"] == []
+
+    def test_surrogate_in_workspace_or_title_is_400(self, real_client):
+        """同一族输入的另一半：workspace（create/update）与 title 也必须 400。"""
+        client, sessions_root = real_client
+        created = client.post("/api/session/create", json={"session_id": "W-1"})
+        assert created.status_code == 200, created.text
+
+        bad_workspace = client.post(
+            "/api/session/create",
+            content=(b'{"session_id": "W-2", "workspace": "/tmp/\\ud800"}'),
+            headers={"content-type": "application/json"},
+        )
+        assert bad_workspace.status_code == 400, bad_workspace.text
+        assert not (sessions_root / "W-2").exists()
+
+        bad_title = client.post(
+            "/api/session/update",
+            content=(b'{"session_id": "W-1", "title": "\\ud800"}'),
+            headers={"content-type": "application/json"},
+        )
+        assert bad_title.status_code == 400, bad_title.text
+
+    def test_surrogate_in_message_content_is_400(self, real_client):
+        """消息正文：非法 UTF-8 → 400（它在首条消息时还会成为标题）。"""
+        client, _ = real_client
+        created = client.post("/api/session/create", json={"session_id": "C-1"})
+        assert created.status_code == 200, created.text
+        resp = client.post(
+            "/api/session/send",
+            content=b'{"session_id": "C-1", "content": "\\ud800"}',
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "message content" in resp.json()["detail"]
+
+    def test_error_detail_echoing_a_surrogate_is_serialisable(self, real_client):
+        """错误文案回显原始输入时也不能炸：出口统一转义（否则 400 变 500）。"""
+        client, _ = real_client
+        created = client.post("/api/session/create", json={"session_id": "E-1"})
+        assert created.status_code == 200, created.text
+        # 模板名带孤立代理字符：域内报错会**回显它**（"template '<x>' not found"），
+        # 原始形式会让响应序列化炸成 500。
+        resp = client.post(
+            "/api/session/update",
+            content=b'{"session_id": "E-1", "agent": "\\ud800"}',
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 404, resp.text
+        assert "\\ud800" in resp.json()["detail"], resp.text
+
+    # ── S1（终轮复审）：update 的 model / reasoning_effort 也必须先过闸门 ──
+
+    def test_update_model_surrogate_is_400_without_poisoning(self, real_client):
+        """毒化路径：内存态先被写脏 → `/info` 500、后续写全失败（修复前）。"""
+        client, sessions_root = real_client
+        created = client.post("/api/session/create", json={"session_id": "U-1"})
+        assert created.status_code == 200, created.text
+
+        # model / provider 必须成对给出（既有约定）——provider 用测试配置里的合法值
+        bad = client.post(
+            "/api/session/update",
+            content=(
+                b'{"session_id": "U-1", "model": "\\ud800", "provider": "default"}'
+            ),
+            headers={"content-type": "application/json"},
+        )
+        assert bad.status_code == 400, bad.text
+        assert "model must be UTF-8 encodable" in bad.json()["detail"]
+
+        # 未被毒化：读端点与后续写操作全部照常，metadata 无痕
+        assert (
+            client.get("/api/session/info", params={"session_id": "U-1"}).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/api/session/update", json={"session_id": "U-1", "title": "ok"}
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/api/session/send", json={"session_id": "U-1", "content": "hi"}
+            ).status_code
+            == 200
+        )
+        metadata = (sessions_root / "U-1" / "metadata.json").read_text()
+        assert "model_name" not in metadata, metadata
+
+    def test_update_reasoning_effort_surrogate_is_400_without_poisoning(
+        self, real_client
+    ):
+        """对照组：另一条同形路径（provider 级开关）同样是"拒绝在 mutation 之前"。"""
+        client, _ = real_client
+        created = client.post("/api/session/create", json={"session_id": "U-2"})
+        assert created.status_code == 200, created.text
+
+        bad = client.post(
+            "/api/session/update",
+            content=b'{"session_id": "U-2", "reasoning_effort": "\\ud800"}',
+            headers={"content-type": "application/json"},
+        )
+        assert bad.status_code == 400, bad.text
+        assert "reasoning_effort must be UTF-8 encodable" in bad.json()["detail"]
+
+        assert (
+            client.get("/api/session/info", params={"session_id": "U-2"}).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/api/session/update", json={"session_id": "U-2", "title": "ok"}
+            ).status_code
+            == 200
+        )
+
+
+class TestSendRouteErrorMapping:
+    """`send` 路由的错误映射口径：**只有输入非法**才回 400。
+
+    终轮复审 N1：把 `runtime.post` 抛出的任何 `ValueError` 都映射成 400 太宽——
+    链上将来出现的内部 `ValueError`（队列关闭、prompt 命令语义错误）会被报成
+    "客户端的错"。现在只认 `InvalidInputError`（文本闸门专用类型），其它
+    `ValueError` 走 500（带着栈进日志）。
+    """
+
+    def test_invalid_input_error_maps_to_400(self, client, mock_runtime):
+        from wing.common.utils import InvalidInputError
+
+        mock_runtime.post = AsyncMock(
+            side_effect=InvalidInputError("message content must be UTF-8 encodable")
+        )
+        resp = client.post(
+            "/api/session/send", json={"session_id": "sid-1", "content": "hi"}
+        )
+        assert resp.status_code == 400, resp.text
+        assert "must be UTF-8 encodable" in resp.json()["detail"]
+
+    def test_other_value_error_is_not_blamed_on_the_client(self, client, mock_runtime):
+        """内部 ValueError **不该**被折成 400。
+
+        TestClient 默认把未捕获异常重新抛出（`raise_server_exceptions=True`），
+        因此这里断言它**穿透**路由——生产里由 ASGI 层转成 500（带栈进日志），
+        关键是它不会被当成"客户端的错"。
+        """
+        mock_runtime.post = AsyncMock(side_effect=ValueError("inbox closed"))
+        with pytest.raises(ValueError, match="inbox closed"):
+            client.post(
+                "/api/session/send", json={"session_id": "sid-1", "content": "hi"}
+            )
+
+    def test_missing_session_is_still_404(self, client, mock_runtime):
+        mock_runtime.ensure_loaded.side_effect = LookupError("nope")
+        resp = client.post(
+            "/api/session/send", json={"session_id": "sid-1", "content": "hi"}
+        )
+        assert resp.status_code == 404, resp.text

@@ -181,8 +181,12 @@ class TestMediaNotASession:
         mid = _mid(data)
         store.write_media(mid, data)
         assert store.list_summaries() == []
-        with pytest.raises(ValueError):
-            store.exists(mid)  # 媒体 id 不是会话 id：会话层格式闸门直接拒绝
+        # 媒体 id（64 位 hex）在放宽后的会话 id 闸门里是**合法形态**（id 不透明，
+        # 只防穿越与卫生），只是不存在 → False；真正危险的值仍然 raise。
+        assert store.exists(mid) is False
+        for unsafe in (".media", "../escape", "a/b", "a..b", "x" * 129):
+            with pytest.raises(ValueError):
+                store.exists(unsafe)
 
         sid = "20250101-000000-aaaaaaaa"
         store.save_metadata(sid, SessionMetadata(session_name="s"))

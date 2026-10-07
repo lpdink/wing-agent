@@ -25,7 +25,12 @@ from typing import TYPE_CHECKING
 
 from wing.chain import TrackedList
 from wing.common.logger import log
-from wing.common.utils import generate_session_id, is_valid_session_id
+from wing.common.utils import (
+    generate_session_id,
+    is_valid_session_id,
+    require_utf8,
+    validate_session_id,
+)
 from wing.config import get_config
 from wing.hooks import hooks
 from wing.event import (
@@ -38,7 +43,8 @@ from wing.commands import expand_prompt_command
 from wing.schema import ChainNode, Message
 from wing.store import SessionMetadata, SessionStore
 
-from .session import Session, tool_refs
+from .override import AgentOverride, validate_override_utf8
+from .session import Session, tool_refs, validate_tool_refs
 from .tags import TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
 from .template import AgentTemplate, AgentTemplateManager
 
@@ -82,6 +88,21 @@ def _fork_slice(
             return prefix, content if isinstance(content, str) else ""
         prefix.append(record)
     raise ValueError(f"uuid {target_uuid!r} not found in {len(prefix)} record(s)")
+
+
+def _warn_alias(requested: str, resolved: str) -> None:
+    """别名（请求 id ≠ 存储键）时说清发生了什么——**不做静默归一**。
+
+    大小写 / Unicode 归一化不敏感的文件系统上（macOS APFS 默认 / Windows NTFS），
+    ``team-a`` 与 ``Team-A`` 是同一份日志：只会有一条 warning，然后按磁盘真名
+    继续（内存索引也用真名，两个拼写因此落在同一个会话上）。
+    """
+    if requested == resolved:
+        return
+    log.warning(
+        f"session id {requested!r} resolves to existing session {resolved!r} on this "
+        "filesystem (case / Unicode-normalization insensitive); using the on-disk id"
+    )
 
 
 def _timestamp_key(s: SessionInfo) -> float:
@@ -216,24 +237,44 @@ class SessionManager:
         agent_override: AgentOverride | None = None,
         backend: str | None = None,
         tags: Iterable[str] | None = None,
+        session_id: str | None = None,
     ) -> Session:
-        """创建新 session（session id 一律由后端生成）。
+        """创建（或按 id 收养）session。
 
-        **不接受调用方指定 session_id**：id 由后端生成，客户端不得自造；访问
-        既有会话只能走 :meth:`resume_session`（同一个 session id，换入内存）。
-        这条边界同时定义了 hook 语义：`before_session_start` 属于"创建新
-        session"，resume 不触发（session id 未变）。
+        ``session_id`` 是 **create-or-adopt** 入口（编排方自带 id 的场景，如
+        Claude Agent SDK 系消费方用自己的 UUID 建会话）：给定时该 id 即最终
+        session id——已存在（内存或任 store）则**收养**既有会话，语义等同
+        :meth:`resume_session`（模板 / workspace 来自 metadata，agent 覆盖只
+        应用 resume 子集，见 :meth:`Session.apply_resume_override`），且不触发
+        `before_session_start`（session id 未变，是"恢复"而非"创建新会话"）；
+        不存在则以该 id 建会话（此时 agent 覆盖是创建语义：全字段应用）。
+
+        不给 ``session_id`` 时行为不变：id 由后端生成（见
+        :meth:`_generate_session_id`）——**既有策略是默认，不是唯一**。
 
         Args:
-            template_name: Agent 模板名称，None 时使用默认模板
-            workspace: 工作目录
-            agent_override: AgentOverride 参数覆盖（None 字段不覆盖 template 值）
+            template_name: Agent 模板名称，None 时使用默认模板（仅新会话生效）
+            workspace: 工作目录（仅新会话生效）
+            agent_override: AgentOverride 参数覆盖（None 字段不覆盖 template 值；
+                收养路径只应用 model/provider/effort/tools）
             backend: 存储后端名称（如 file/memory），None 时使用默认后端
-            tags: 创建即打标（经 :meth:`set_session_tags` 同一套校验与应用）
+            tags: 创建即打标 / 收养时并入（经 :meth:`set_session_tags` 同一套校验）
+            session_id: 指定 session id（create-or-adopt）；None = 自生成
 
         Raises:
-            ValueError: 模板不存在 / backend 未知 / 标签非法
+            ValueError: session_id 不合规 / 模板不存在 / backend 未知 / 标签非法
         """
+        # 闸门先于一切：不合规的 id 不得触达任何 store（防路径穿越），也必须
+        # 在任何写盘之前失败——否则一个失败的 create 会在磁盘上留下半份
+        # metadata，下一次同 id 的 create 就会"收养"一个幽灵会话。
+        if session_id is not None:
+            validate_session_id(session_id)
+            adopted = self._adopt_session(
+                session_id, agent_override=agent_override, tags=tags
+            )
+            if adopted is not None:
+                return adopted
+
         backend_name = backend if backend is not None else self._default_backend
         store = self._stores.get(backend_name)
         if store is None:
@@ -241,6 +282,18 @@ class SessionManager:
                 f"Unknown storage backend '{backend_name}'. "
                 f"Available: {list(self._stores)}"
             )
+
+        # 标签、覆盖文本与工具 ref 的纯校验提到最前（都不写盘）：任何非法输入在
+        # 任何副作用之前 raise，"失败即零残留"对 create-or-adopt 尤其重要（重试
+        # 必须还是干净状态）。全部必须在**认领键**之前——认领会建会话目录。
+        if tags:
+            apply_tag_ops([], add=tags)
+        if agent_override is not None:
+            validate_override_utf8(agent_override)
+            if agent_override.tools is not None:
+                validate_tool_refs(agent_override.tools)
+        if workspace is not None:
+            require_utf8(workspace, field="workspace")
 
         if template_name is not None:
             template = self._template_manager.get(template_name)
@@ -252,8 +305,24 @@ class SessionManager:
         else:
             template = self._template_manager.default
 
-        # session id 由后端生成（调用方无法指定——见 docstring 的边界）
-        sid = self._generate_session_id()
+        # 指定 id 时它就是最终 id；否则自生成（默认策略）。
+        #
+        # **认领键**（create 路径专用，会建目录）：大小写 / 归一化不敏感的文件系统
+        # 上，"两个只差大小写的 id"在两个会话都还没落盘时看不见别名——`mkdir` 的
+        # 成败把它变成确定事实（EEXIST ⇒ 该路径已解析到某个目录，取真实目录名）。
+        # 认领回来的键若已在内存（空会话变体），走收养而不是新建：内存键 == 目录名
+        # 这条不变量对所有写入路径成立，同一目录才不会被两个 Session 各写一份链。
+        sid = (
+            self._generate_session_id()
+            if session_id is None
+            else store.claim_session_id(session_id)
+        )
+        if session_id is not None:
+            _warn_alias(session_id, sid)
+            if sid in self._sessions:
+                return self._finish_adoption(
+                    sid, agent_override=agent_override, tags=tags
+                )
 
         messages: TrackedList[ChainNode] = TrackedList(store.open_log(sid))
 
@@ -288,26 +357,41 @@ class SessionManager:
     # ── resolve ───────────────────────────────
 
     def _resolve_with_store(self, session_id: str) -> tuple[str, SessionStore] | None:
-        """跨 stores 精确解析 session id，返回 (session_id, store)。
+        """跨 stores 精确解析 session id，返回 (真实键, store)。
 
         优先命中内存中的 session，再按 stores 注册顺序查后端是否存在。
 
-        **格式闸门在最前**：session id 是后端生成的固定格式（见
-        ``common.utils.SESSION_ID_PATTERN``），不合规的值一律按"不存在"处理
-        ——绝不允许它进入任何 store 调用（file 后端拿它拼路径，这是路径
-        穿越的唯一入口；gate 在这里，所有网络路径都经过本方法）。解析失败
-        与格式不合规最终都映射为 404，不向客户端区分（不给探测反馈）。
+        **闸门在最前**（`is_valid_session_id`）：不合规的值一律按"不存在"处理，
+        绝不允许它进入任何 store 调用——file 后端拿它拼路径，这是路径穿越的
+        唯一入口（gate 在这里，所有网络路径都经过本方法）。
+
+        **返回的是存储里的真实键**（不是请求字符串）：大小写 / Unicode 归一化不
+        敏感的文件系统上（macOS APFS / Windows NTFS），``team-a`` 与 ``Team-A``
+        解析到同一个目录——按请求字符串建内存索引会让两个 Session 共用一份
+        history.jsonl（静默数据混合）。归一是**正确性要求**：调用方拿到的一律是
+        磁盘上的真名（别名会留一行 warning），因此「两个不同 id 指向同一目录」
+        在内存里不可能出现。
+
+        解析失败与闸门拒绝最终都映射为 404，不向客户端区分（不给探测反馈）。
         """
         if not is_valid_session_id(session_id):
             return None
         if session_id in self._sessions:
             return session_id, self._sessions[session_id].store
         for store in self._stores.values():
-            if store.exists(session_id):
-                return session_id, store
+            canonical = store.resolve_stored_id(session_id)
+            if canonical is None or not store.exists(canonical):
+                # 目录 / 键存在但不是会话（空壳、杂物目录）与"不存在"同价。
+                continue
+            _warn_alias(session_id, canonical)
+            return canonical, store
         return None
 
-    def resume_session(self, session_id: str) -> Session:
+    def resume_session(
+        self,
+        session_id: str,
+        agent_override: "AgentOverride | None" = None,
+    ) -> Session:
         """恢复已有 session（精确匹配 session id）。已在内存中则直接返回。
 
         模板只从 metadata.template_name 解析——resume 不接受显式模板：
@@ -315,22 +399,32 @@ class SessionManager:
         `session/update`（agent 字段）。template_name 缺失或已不存在于
         config 时回退默认模板。
 
+        ``agent_override`` 是 resume 语义的参数覆盖（编排方 `--model` 等）：
+        只应用 `model` / `provider` / `effort` / `tools` 子集——见
+        :meth:`Session.apply_resume_override`（不改链上前缀是不变量）。
+
         Args:
             session_id: 目标 session ID（须为完整 ID）
+            agent_override: 恢复后应用的参数覆盖（None = 不覆盖）
 
         Returns:
             恢复后的 Session 实例
 
         Raises:
             LookupError: session 不存在
+            ValueError: 覆盖里的工具引用无法解析
         """
         result = self._resolve_with_store(session_id)
         if result is None:
-            raise LookupError(f"Session not found: {session_id}")
+            raise LookupError(f"Session not found: {session_id!r}")
         resolved, store = result
 
         existing = self._sessions.get(resolved)
         if existing is not None:
+            # 已在内存的早退路径同样要应用覆盖——否则"刚被逐出的会话 resume
+            # 时覆盖生效、未逐出的会话覆盖丢失"会成为一个静默分叉。
+            if agent_override is not None:
+                existing.apply_resume_override(agent_override)
             return existing
 
         metadata = store.load_metadata(resolved)
@@ -356,9 +450,58 @@ class SessionManager:
             store=store,
             workspace=metadata.workspace if metadata is not None else None,
         )
+        if agent_override is not None:
+            session.apply_resume_override(agent_override)
         self._sessions[resolved] = session
         self.touch(resolved)
         log.info(f"Session resumed: {resolved}")
+        return session
+
+    def _adopt_session(
+        self,
+        session_id: str,
+        *,
+        agent_override: "AgentOverride | None",
+        tags: Iterable[str] | None,
+    ) -> Session | None:
+        """create-or-adopt 的「已存在」分支：收养既有会话。
+
+        语义 = :meth:`resume_session` + 覆盖子集 + tags 并入：
+        - 模板 / workspace 来自 metadata（"创建"参数对既有会话无意义）；
+        - `agent_override` 走 resume 子集（model/provider/effort/tools）；
+        - `tags` 按 add 语义并入（幂等；非法标签在此 ValueError，零写盘）；
+        - **不触发 `before_session_start`**：session id 未变，这是"恢复既有
+          会话"而非"创建新会话"（该 hook 的语义边界就是"新 session id"）。
+
+        Returns:
+            收养到的 Session；``session_id`` 不存在（或未成会话）时返回 None。
+        """
+        if self._resolve_with_store(session_id) is None:
+            return None
+        return self._finish_adoption(
+            session_id, agent_override=agent_override, tags=tags
+        )
+
+    def _finish_adoption(
+        self,
+        session_id: str,
+        *,
+        agent_override: "AgentOverride | None",
+        tags: Iterable[str] | None,
+    ) -> Session:
+        """对**已知存在**的会话应用收养语义（resume + 覆盖子集 + tags）。
+
+        与 :meth:`_adopt_session` 分开，是因为"键已认领但还没成会话"的空会话变体
+        （见 create_session 的认领注释）也要走这条路——那时 ``_resolve_with_store``
+        查不到它（空会话不是会话），但它确实已经在内存里了。
+        """
+        # 标签先纯校验：非法标签不得留下"覆盖已应用"的半截状态。
+        if tags:
+            apply_tag_ops([], add=tags)
+        session = self.resume_session(session_id, agent_override=agent_override)
+        if tags:
+            session.apply_tag_ops(add=tags)
+        log.info(f"Session adopted: {session.session_id} (create-or-adopt)")
         return session
 
     def fork_session(
@@ -494,7 +637,7 @@ class SessionManager:
         """
         resolved = self._resolve_with_store(session_id)
         if resolved is None:
-            raise LookupError(f"Session not found: {session_id}")
+            raise LookupError(f"Session not found: {session_id!r}")
         resolved_id, store = resolved
 
         session = self._sessions.get(resolved_id)
@@ -599,7 +742,7 @@ class SessionManager:
         session = self._sessions.get(session_id)
         if session is None:
             if self._resolve_with_store(session_id) is None:
-                raise LookupError(f"Session not found: {session_id}")
+                raise LookupError(f"Session not found: {session_id!r}")
             return False, "not loaded"
         blocker = self._blocked_reason(session)
         if blocker is not None:

@@ -363,3 +363,57 @@ class TestMaxTurnsConfig:
         config = AgentConfig(name="test", model="gpt-4", provider="default")
         template = AgentTemplate.from_config(config)
         assert template.max_turns is None
+
+
+class TestUtf8GateFieldDerivation:
+    """可编码闸门的字段清单按模型定义**派生**（终轮复审 N2）。
+
+    手写清单会被静默漏过：`AgentOverride` 将来加一个字符串字段（如新的
+    `xxx_prompt`），若忘了同步清单，非法 UTF-8 又能一路走到落盘处炸 500。
+    """
+
+    def test_derived_from_model_definition(self):
+        from typing import get_args
+
+        from wing.session.override import _TEXT_FIELDS
+
+        # 与独立推导一致（清单不是手写的）
+        expected = {
+            name
+            for name, field in AgentOverride.model_fields.items()
+            if str in (field.annotation, *get_args(field.annotation))
+        }
+        assert set(_TEXT_FIELDS) == expected
+        # 今日本身就这些（不是空集 / 不是把 list[str] 也算进来）
+        assert set(_TEXT_FIELDS) == {
+            "model",
+            "provider",
+            "system_prompt",
+            "append_system_prompt",
+            "effort",
+        }
+        assert "tools" not in _TEXT_FIELDS  # 元素要逐个查，单独一遍
+
+    def test_new_string_field_is_covered_automatically(self):
+        """派生自 `model_fields` ⇒ 新增字符串字段自动纳入（无需改闸门代码）。"""
+        from wing.session import override as override_module
+
+        extra = type(
+            "AgentOverrideWithNewField",
+            (AgentOverride,),
+            {
+                "__annotations__": {"brand_new_prompt": str | None},
+                "brand_new_prompt": None,
+            },
+        )
+        # 模拟"新增字段"：直接按同一个派生逻辑算一遍
+        from typing import get_args
+
+        derived = [
+            name
+            for name, field in extra.model_fields.items()
+            if str in (field.annotation, *get_args(field.annotation))
+        ]
+        assert "brand_new_prompt" in derived
+        # 闸门用的是同一套派生逻辑（对 AgentOverride 本体；此处对账逻辑一致）
+        assert set(override_module._TEXT_FIELDS) <= set(derived)
