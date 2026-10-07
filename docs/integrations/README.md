@@ -1,6 +1,6 @@
 # 集成 ACP 客户端（Integrations）
 
-> 受众：已经（或准备）安装 wing 的最终用户。适用版本：带 `wing acp` 子命令的 wing（Agent Client Protocol v1）。
+> 受众：已经（或准备）安装 wing 的最终用户。适用版本：带 `wing acp` 子命令的 wing（该子命令自本次交付起引入；ACP 协议 v1）。
 > 本目录只讲「怎么接、怎么用、出问题先看哪里」；实现机制在 [docs/dev/](../dev/architecture.md)。
 
 `wing acp` 是 wing 的第四种前端形态（TUI / stdio / 编排 CLI / ACP）：一个跑在标准输入输出上的 **ACP agent 服务端**，把这台机器上 wing 网关的能力（模型、会话、工具、权限）交给任意 ACP 客户端使用。客户端负责界面，wing 负责干活：
@@ -43,7 +43,7 @@ Zed / omnigent（ACP 客户端）
 
 ## 前置条件
 
-1. **wing 已安装**：`wing` 命令可用（`pip install wing-agent`，或下载 Release 二进制）；
+1. **wing 已安装**：`wing` 命令可用（`pip install wing-agent`，或下载 Release 二进制）。**注意版本门槛**：必须包含 `wing acp` 子命令——若 `wing acp --help` 报 `unrecognized subcommand 'acp'`，说明装的是旧版本，升级到带 ACP 前端的版本即可；
 2. **已配置过 wing**：`~/.wing/core/config.yaml` 里有可用的 provider / model / agent 模板（首次运行 `wing` 会生成带注释的模板，填好后重启网关或 `/reload`）；
 3. **网关能被拉起**：`wing status` 显示 running，或交给 `wing acp` 自动拉起（需要能找到 `wing-gateway` 可执行文件，见「排障」）。
 

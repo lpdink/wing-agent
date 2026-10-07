@@ -97,7 +97,7 @@ omni run --harness acp:wing
 
 1. **agent 起不来**：确认 `command` 的第一段能在 omnigent 进程的 PATH 里找到（PATH 在白名单里，但 GUI / 服务化部署的 PATH 可能与终端不同）→ 写绝对路径；
 2. **wing 用了错误的目录 / 配置**：自定义了 `WING_HOME` 却没加 `env_passthrough`，wing 会退回默认的 `~/.wing`。另外如果你在 omnigent 侧设置过 `OMNIGENT_ACP_ENV_UNSET`，检查它没有把 wing 需要的变量清掉；
-3. **轮次超时**：omnigent 对一次 prompt 设了「空闲超时」（默认 300 秒，每有进展就重新计时；环境变量 `HARNESS_ACP_PROMPT_TIMEOUT_S` 可调，在运行 omnigent 的进程环境里设置）。wing 在等你回答 Ask / 权限卡片时是静默的，卡片停留太久可能先被 omnigent 判超时——别把需要长时间思考的卡片晾着，或调大该变量；
+3. **超时**：omnigent 对一轮 prompt 设了「无进展空闲超时」（默认 300 秒；`HARNESS_ACP_PROMPT_TIMEOUT_S`，在运行 omnigent / harness 的进程环境里设置，远程 runner 部署则设在 runner 宿主上）——它管的是 agent **长时间不出帧**（例如一条跑很久、中间不吐事件的命令）。等你回答权限 / Ask 卡片时轮次是阻塞等待的，不会被它掐断；但也别把卡片无限晾着：omnigent 服务端等待裁决默认一天，单轮硬上限默认 3 小时（`HARNESS_TURN_ABSOLUTE_TIMEOUT_S`），而 wing 自己会在约 100 分钟（`FEEDBACK_TIMEOUT`，6000 秒）把该次询问判超时（工具调用以超时失败收尾）；
 4. **看 wing 侧发生了什么**：`wing ps`（会话在不在）、`wing tail <session-id>`；日志在 `~/.wing/core/logs/`（网关）与 `~/.wing/tui/logs/`（`wing acp` 进程）。omnigent 自身的日志位置见其官方文档；
 5. **最小复现**：`omni run --harness acp:wing` 直接跑一句话，比在界面里排查更快。
 
