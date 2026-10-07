@@ -9,6 +9,10 @@ name: Perf
 # 用 pull_request（而非 pull_request_target）：fork PR 的 token 会被 GitHub 强制降为只读，
 # 评论步骤显式跳过（结果只留 artifact）。
 #
+# 轮数：两个测量 job 都是 `--rounds 3`（交错 A/B + 轮次中位数）。tui / gateway 的单轮噪声
+# 大到 2 轮不够：2 轮的中位数就是两数均值，一颗负载尖峰就能翻档；3 轮取中可丢掉单颗尖峰。
+# 依据见 docs/dev/perf-testing.md 的「初始值与依据」。
+#
 # 并发：同一 PR 的后续推送 / 手工 dispatch 会取消上一轮 run。
 on:
   pull_request:
@@ -143,7 +147,7 @@ jobs:
           else
             REF="$BASE_SHA"
           fi
-          ARGS=(--base-ref "$REF" --suites rust,tui --prepare --quick --rounds 2
+          ARGS=(--base-ref "$REF" --suites rust,tui --prepare --quick --rounds 3
                 --workdir "$RUNNER_TEMP/perf" --out-json perf-tui.json --out-md perf-tui.md)
           if [ "$CALIBRATE" = "true" ]; then
             ARGS+=(--calibrate)
@@ -224,7 +228,7 @@ jobs:
           else
             REF="$BASE_SHA"
           fi
-          ARGS=(--base-ref "$REF" --suites gateway --prepare --quick --rounds 2
+          ARGS=(--base-ref "$REF" --suites gateway --prepare --quick --rounds 3
                 --workdir "$RUNNER_TEMP/perf" --out-json perf-gateway.json --out-md perf-gateway.md)
           if [ "$CALIBRATE" = "true" ]; then
             ARGS+=(--calibrate)

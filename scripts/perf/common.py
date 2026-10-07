@@ -303,12 +303,19 @@ class Failure:
 
 @dataclass(frozen=True)
 class Thresholds:
-    """噪声带 / 回归线 / 方向约定；`overrides` 键可以是 suite 名或 metric 模式。"""
+    """噪声带 / 回归线 / 方向约定；`overrides` 键可以是 suite 名或 metric 模式。
+
+    `higher_better` / `info_only` 都是 metric 模式列表（`fnmatch`）：前者翻转方向
+    判定的语义（越大越好），后者把指标降级为"只给数值、不判档"（例：TUI 覆盖率——
+    它衡量的是测量质量，下降既不是改善也不是回归）。`overrides` 按书写顺序先命中
+    先胜，所以更具体的模式要写在更宽的模式前面。
+    """
 
     noise_pct: float = 6.0
     regress_pct: float = 20.0
     overrides: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
     higher_better: tuple[str, ...] = ()
+    info_only: tuple[str, ...] = ()
 
     @classmethod
     def load(cls, path: Path) -> Thresholds:
@@ -342,11 +349,15 @@ class Thresholds:
             raise ValueError(
                 f"{path}: 'higher_better' must be a list of metric patterns"
             )
+        info_only = payload.get("info_only") or []
+        if not isinstance(info_only, Sequence) or isinstance(info_only, (str, bytes)):
+            raise ValueError(f"{path}: 'info_only' must be a list of metric patterns")
         return cls(
             noise_pct=float(default.get("noise_pct", cls.noise_pct)),
             regress_pct=float(default.get("regress_pct", cls.regress_pct)),
             overrides=overrides,
             higher_better=tuple(str(item) for item in higher_better),
+            info_only=tuple(str(item) for item in info_only),
         )
 
     def for_metric(self, metric: str, suite: str) -> tuple[float, float]:
@@ -369,6 +380,10 @@ class Thresholds:
         return any(
             fnmatch.fnmatchcase(metric, pattern) for pattern in self.higher_better
         )
+
+    def is_info_only(self, metric: str) -> bool:
+        """信息项：数值照常给（含 Δ%），但不判档（verdict 记 n/a + note）。"""
+        return any(fnmatch.fnmatchcase(metric, pattern) for pattern in self.info_only)
 
 
 def verdict_for(

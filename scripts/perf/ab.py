@@ -14,8 +14,9 @@ report JSON（交给 `report.py` 渲染成 PR 评论）。
 
 原始单次结果落 `<workdir>/raw/<suite>-<side>-r<round>.json`，子进程日志落
 `<workdir>/raw/logs/`；suite 失败只记 `failures[]`（退出码非 0，CI 视为基础设施故障），
-其余测量继续。契约（§Frozen Interfaces）见 perf-ci 任务书；设计与取舍见 01 harness_core
-步骤的 `design.md`。
+其余测量继续；suite 侧写在 raw 里的 `meta.notes` 会带上 `<suite>/<side> r<round>` 标注
+汇总进报告的 `meta.notes`（不吞不截断）。契约（§Frozen Interfaces）见 perf-ci 任务书；
+设计与取舍见 01 harness_core 步骤的 `design.md`。
 """
 
 from __future__ import annotations
@@ -268,11 +269,13 @@ def make_preparer(
         failures: list[Failure] = []
         for side in sides.values():
             side_failed = False
-            for cmd in SUITE_PREPARE[suite]:
+            for index, cmd in enumerate(SUITE_PREPARE[suite], start=1):
                 key = (side.name, cmd)
                 if not enabled or key in ran:
                     continue
-                log_path = log_dir / f"prepare-{suite}-{side.name}.log"
+                # 一条命令一份日志：tui 的 cargo 与 uv 曾互相覆盖（`prepare-<suite>-<side>.log`）。
+                label = re.sub(r"[^A-Za-z0-9._-]", "_", cmd[0])
+                log_path = log_dir / f"prepare-{suite}-{side.name}-{index}-{label}.log"
                 try:
                     result = run_command(
                         cmd, cwd=side.worktree, log_path=log_path, echo=True
@@ -467,7 +470,7 @@ def orchestrate(
 def build_comparisons(
     results: Sequence[SuiteResult], thresholds: Thresholds
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """每轮代表值 → 轮间中位数 → delta% → 判定；不可比的也显式留下（verdict=n/a）。"""
+    """每轮代表值 → 轮间中位数 → delta% → 判定；不可比 / 不判定的也显式留下（verdict=n/a）。"""
     notes: list[str] = []
     table: dict[str, dict[str, dict[int, float]]] = {}
     suites: dict[str, str] = {}
@@ -518,12 +521,17 @@ def build_comparisons(
         else:
             delta = round(100.0 * (head_median - base_median) / base_median, 3)
             entry["delta_pct"] = delta
-            entry["verdict"] = verdict_for(
-                delta,
-                noise_pct=noise,
-                regress_pct=regress,
-                higher_better=thresholds.is_higher_better(metric),
-            )
+            if thresholds.is_info_only(metric):
+                # 测量质量信息项（例：TUI 覆盖率）：数值照给，但不判档 ——
+                # 覆盖率下降不等于性能变差，标成 improved 是错的。
+                note = "测量质量信息项（不参与判定）"
+            else:
+                entry["verdict"] = verdict_for(
+                    delta,
+                    noise_pct=noise,
+                    regress_pct=regress,
+                    higher_better=thresholds.is_higher_better(metric),
+                )
         if note:
             entry["note"] = note
         comparisons.append(entry)
@@ -537,6 +545,20 @@ def build_comparisons(
         shown = ", ".join(unequal[:4]) + (" …" if len(unequal) > 4 else "")
         notes.append(f"{len(unequal)} 个指标两侧轮数不等（有轮次失败）：{shown}")
     return comparisons, notes
+
+
+def suite_notes(results: Sequence[SuiteResult]) -> list[str]:
+    """把各侧 raw 输出的 `meta.notes` 汇总进编排层的 notes（标注 suite/side/round）。
+
+    suite 的软异常（case n/a、采样不足、帧数对不上…）只落在单侧 raw JSON 里，PR 评论
+    看不到就是"有样本被守卫拒了"没人知道。这里逐条带上定位信息原样透传，不做去重与
+    截断（同一 note 出现在两个 round 就是两个事实）。
+    """
+    notes: list[str] = []
+    for result in results:
+        for note in result.notes:
+            notes.append(f"{result.suite}/{result.side} r{result.round}: {note}")
+    return notes
 
 
 @dataclass(frozen=True)
@@ -653,6 +675,7 @@ def run_ab(args: argparse.Namespace) -> int:
     thresholds = Thresholds.load(HERE / "thresholds.json")
     comparisons, agg_notes = build_comparisons(results, thresholds)
     notes.extend(agg_notes)
+    notes.extend(suite_notes(results))
     ctx = RunContext(
         repo=repo,
         workdir=workdir,
@@ -985,6 +1008,32 @@ def run_selftest() -> int:
         thresholds.noise_pct > 0 and thresholds.regress_pct > thresholds.noise_pct,
         f"noise={thresholds.noise_pct} regress={thresholds.regress_pct}",
     )
+    # 落库的带宽：更具体的模式在前（for_metric 先命中先胜）——顺序写反会静默吃掉覆盖。
+    for metric, suite, want in (
+        ("tui.display.lag_p50_us", "tui", (15.0, 30.0)),
+        ("tui.display.lag_p99_us", "tui", (25.0, 45.0)),
+        ("tui.display.lag_max_us", "tui", (25.0, 45.0)),
+        ("tui.display.trend_us", "tui", (50.0, 100.0)),
+        ("tui.tui_cpu_ratio", "tui", (30.0, 60.0)),
+        ("gateway.fanout.complete_ms", "gateway", (15.0, 30.0)),
+        ("gateway.fanout.gap_p99_us", "gateway", (30.0, 50.0)),
+        ("gateway.turn.p99_ms", "gateway", (30.0, 50.0)),
+        ("gateway.context.build_p99_ms", "gateway", (30.0, 50.0)),
+        ("gateway.resume.sync_ms", "gateway", (15.0, 30.0)),
+        ("rust.session_replay.replay.1000.median_ns", "rust", (6.0, 20.0)),
+    ):
+        checker.check(
+            f"thresholds.file {metric}",
+            thresholds.for_metric(metric, suite) == want,
+            f"{thresholds.for_metric(metric, suite)} != {want}",
+        )
+    checker.check(
+        "thresholds.file.info_only",
+        thresholds.is_info_only("tui.display.coverage_ratio")
+        and not thresholds.is_info_only("tui.display.lag_p50_us")
+        and not thresholds.higher_better,
+        f"info_only={thresholds.info_only} higher_better={thresholds.higher_better}",
+    )
     for delta, want in (
         (0.0, "flat"),
         (3.0, "flat"),
@@ -1035,6 +1084,12 @@ def run_selftest() -> int:
         and not overridden.is_higher_better("tui.display.lag_p50_us"),
     )
     checker.check(
+        "thresholds.defaults.info_only",
+        Thresholds().info_only == ()
+        and not Thresholds().is_info_only("tui.display.coverage_ratio"),
+        str(Thresholds().info_only),
+    )
+    checker.check(
         "suites.all", parse_suites("all") == SUITE_NAMES, str(parse_suites("all"))
     )
     checker.check("suites.explicit", parse_suites("tui,gateway") == ("tui", "gateway"))
@@ -1073,6 +1128,18 @@ def run_selftest() -> int:
     with tempfile.TemporaryDirectory(prefix="wing-perf-selftest-") as tmp:
         workdir = Path(tmp) / "scratch"
         workdir.mkdir(parents=True, exist_ok=True)
+
+        # 阈值文件的向后兼容：契约 §8 的形状（没有 info_only 键）必须照常加载。
+        legacy_path = workdir / "thresholds-legacy.json"
+        write_json(legacy_path, {"default": {"noise_pct": 8, "regress_pct": 25}})
+        legacy = Thresholds.load(legacy_path)
+        checker.check(
+            "thresholds.legacy_shape",
+            (legacy.noise_pct, legacy.regress_pct) == (8.0, 25.0)
+            and legacy.info_only == ()
+            and legacy.higher_better == (),
+            f"{legacy.noise_pct}/{legacy.regress_pct}/{legacy.info_only}",
+        )
 
         # ① suite 输出构造器 / 解析器（契约 §3）
         shape_path = workdir / "shape.json"
@@ -1260,6 +1327,17 @@ def run_selftest() -> int:
             str(by_metric["stub.better.median_ms"]["head"]),
         )
         checker.check("aggregate.no_notes", not notes, str(notes))
+        propagated = suite_notes(results)
+        checker.check(
+            "notes.propagation",
+            propagated
+            == [
+                f"stub/{side_name} r{round_no}: stub note for {side_name} r{round_no}"
+                for round_no in (1, 2, 3)
+                for side_name in ("base", "head")
+            ],
+            str(propagated),
+        )
 
         ctx = RunContext(
             repo=REPO_ROOT,
@@ -1279,7 +1357,7 @@ def run_selftest() -> int:
             ctx,
             comparisons,
             failures,
-            [*notes, "head worktree 有未提交改动：head 数字对应工作区"],
+            ["head worktree 有未提交改动：head 数字对应工作区", *notes, *propagated],
             1.0,
         )
         checker.check("report.exit_code.ok", exit_code(payload) == 0)
@@ -1334,6 +1412,13 @@ def run_selftest() -> int:
             "",
         )
         checker.check(
+            "report.suite_notes_visible",
+            "stub/base r1: stub note for base r1" in md
+            and "其余" in md
+            and "stub/head r3: stub note for head r3" in md,
+            "",
+        )
+        checker.check(
             "report.conclusion",
             "**结论**" in md
             and "1 项回归" in md
@@ -1360,7 +1445,8 @@ def run_selftest() -> int:
         checker.check(
             "report.footnote",
             "方法与口径" in md
-            and "噪声带 6.0%" in md
+            and "噪声 6.0% / 回归 20.0%" in md
+            and "thresholds.json" in md
             and "https://example.invalid/runs/1" in md
             and "selftest" in md,
             "",
@@ -1575,10 +1661,11 @@ def run_selftest() -> int:
             "",
         )
         checker.check(
-            "report.uncomparable_shown",
-            "不可比" in md_f
+            "report.unjudged_shown",
+            "未判定：" in md_f
             and "`stubfail.steady.median_ms`" in md_f
-            and "head 侧无数据" in md_f,
+            and "head 侧无数据" in md_f
+            and "🚫 不判定" in md_f,
             "",
         )
 
@@ -1709,6 +1796,55 @@ def run_selftest() -> int:
             by_e["stub.shared.median_ms"]["verdict"] == "flat",
         )
 
+        # ⑩b 信息项（info_only）：数值照给、不判档；报告里不跟"改善"混在一起
+        info = [
+            _synth(
+                "tui",
+                "base",
+                1,
+                {"tui.display.coverage_ratio": 0.6, "tui.display.lag_p50_us": 24000.0},
+            ),
+            _synth(
+                "tui",
+                "head",
+                1,
+                {"tui.display.coverage_ratio": 0.5, "tui.display.lag_p50_us": 26400.0},
+            ),
+        ]
+        comparisons_i, _ = build_comparisons(info, thresholds)
+        by_i = {str(entry["metric"]): entry for entry in comparisons_i}
+        coverage = by_i["tui.display.coverage_ratio"]
+        # 覆盖率 -16.7% 在 lower-better 下会被判成 improved —— 那正是要禁止的结论。
+        checker.check(
+            "info_only.verdict",
+            coverage["verdict"] == "n/a"
+            and abs(float(coverage["delta_pct"]) + 16.667) < 1e-3
+            and "信息项" in str(coverage.get("note")),
+            str(coverage),
+        )
+        checker.check(
+            "info_only.judged_neighbour",
+            by_i["tui.display.lag_p50_us"]["verdict"] == "flat"
+            and by_i["tui.display.lag_p50_us"]["noise_pct"] == 15.0,
+            str(by_i["tui.display.lag_p50_us"]),
+        )
+        md_i = report_render.render_comment(
+            build_report(ctx, comparisons_i, [], [], 1.0)
+        )
+        checker.check(
+            "info_only.report",
+            "`tui.display.coverage_ratio`" in md_i
+            and "🚫 不判定" in md_i
+            and "-16.7%" in md_i
+            and "未判定：`tui.display.coverage_ratio`：测量质量信息项" in md_i,
+            "",
+        )
+        checker.check(
+            "info_only.counted",
+            "1 项未判定" in md_i and "项改善" not in md_i,
+            md_i.splitlines()[3] if len(md_i.splitlines()) > 3 else "",
+        )
+
         # ⑪ 校准语义：两侧同 rev。用 HEAD~1（≠ HEAD）构造——实现里删掉"校准钉住 head"就会红。
         try:
             revs_head = resolve_revs(REPO_ROOT, "HEAD", calibrate=False)
@@ -1813,6 +1949,19 @@ def run_selftest() -> int:
                     "calibrate" in note
                     for note in (cal.get("meta") or {}).get("notes", [])
                 ),
+                str((cal.get("meta") or {}).get("notes")),
+            )
+            checker.check(
+                "notes.cli_propagation",
+                [
+                    note
+                    for note in (cal.get("meta") or {}).get("notes", [])
+                    if note.startswith("rust/")
+                ]
+                == [
+                    "rust/base r1: stub note for base r1",
+                    "rust/head r1: stub note for head r1",
+                ],
                 str((cal.get("meta") or {}).get("notes")),
             )
             checker.check(

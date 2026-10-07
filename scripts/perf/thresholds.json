@@ -1,5 +1,16 @@
 {
   "default": {"noise_pct": 6, "regress_pct": 20},
-  "overrides": {},
-  "higher_better": []
+  "overrides": {
+    "tui.display.lag_p99_us": {"noise_pct": 25, "regress_pct": 45},
+    "tui.display.lag_max_us": {"noise_pct": 25, "regress_pct": 45},
+    "tui.display.trend_us": {"noise_pct": 50, "regress_pct": 100},
+    "tui.display.*": {"noise_pct": 15, "regress_pct": 30},
+    "tui.tui_cpu_ratio": {"noise_pct": 30, "regress_pct": 60},
+    "gateway.fanout.gap_p99_us": {"noise_pct": 30, "regress_pct": 50},
+    "gateway.turn.p99_ms": {"noise_pct": 30, "regress_pct": 50},
+    "gateway.context.build_p99_ms": {"noise_pct": 30, "regress_pct": 50},
+    "gateway.*": {"noise_pct": 15, "regress_pct": 30}
+  },
+  "higher_better": [],
+  "info_only": ["tui.display.coverage_ratio"]
 }

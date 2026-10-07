@@ -30,13 +30,14 @@ from common import (  # noqa: E402  (同目录模块：脚本直接跑时 sys.pa
 #: 评论唯一标识：comment.py 据此查找 / 更新同一条评论。
 MARKER = "<!-- wing-perf -->"
 
-#: 判定 → 表格里的显示。
+#: 判定 → 表格里的显示。`n/a` 覆盖两种情形：某一侧没有数据（真的不可比），
+#: 以及 `thresholds.json` 的 `info_only` 信息项（只给数值、不判档）。
 VERDICT_LABELS: Mapping[str, str] = {
     "regression": "🔴 回归",
     "watch": "🟠 关注",
     "improved": "🟢 改善",
     "flat": "⚪ 持平",
-    "n/a": "🚫 不可比",
+    "n/a": "🚫 不判定",
 }
 
 #: 结论行里的统计顺序（坏消息在前）。
@@ -45,7 +46,7 @@ VERDICT_ORDER: tuple[tuple[str, str], ...] = (
     ("watch", "项关注"),
     ("improved", "项改善"),
     ("flat", "项持平"),
-    ("n/a", "项不可比"),
+    ("n/a", "项未判定"),
 )
 
 
@@ -223,25 +224,23 @@ def _conclusion_line(
 def _table(comparisons: Sequence[Mapping[str, Any]]) -> list[str]:
     if not comparisons:
         return ["_没有可比较的指标。_", ""]
-    comparable = [
-        entry for entry in comparisons if _number(entry.get("delta_pct")) is not None
-    ]
-    uncomparable = [
-        entry for entry in comparisons if _number(entry.get("delta_pct")) is None
-    ]
-    comparable.sort(
+    # 分区键是 verdict，不是"有没有 delta"：info_only 的行有 Δ 但不判档，
+    # 它们要跟"某一侧无数据"一起沉底（否则它们的 note 在表里没有出口）。
+    judged = [entry for entry in comparisons if str(entry.get("verdict")) != "n/a"]
+    unjudged = [entry for entry in comparisons if str(entry.get("verdict")) == "n/a"]
+    judged.sort(
         key=lambda entry: abs(_number(entry.get("delta_pct")) or 0.0), reverse=True
     )
     lines = ["| 指标 | base | head | Δ | 判定 |", "|---|---:|---:|---:|---|"]
-    for entry in list(comparable) + list(uncomparable):
+    for entry in list(judged) + list(unjudged):
         lines.append(_row(entry))
     lines.append("")
-    if uncomparable:
+    if unjudged:
         reasons = [
             f"`{entry.get('metric')}`：{entry.get('note') or '无法比较'}"
-            for entry in uncomparable
+            for entry in unjudged
         ]
-        lines += ["不可比：" + "；".join(reasons), ""]
+        lines += ["未判定：" + "；".join(reasons), ""]
     return lines
 
 
@@ -312,8 +311,12 @@ def _footnote(
     bullets = [
         f"- **交错 A/B**：同一 runner 内 `base`/`head` 逐轮交错（base r1 → head r1 → …），"
         f"每指标先取每轮中位数、再取轮间中位数；{rounds_text}。",
-        f"- **判定**：|Δ| < 噪声带 {noise}% 记「持平」；劣化 ≥ {regress}% 记「回归」；"
-        "劣化介于两者之间记「关注」；方向变好记「改善」（默认 lower-better）。",
+        f"- **判定**：|Δ| 小于该指标的噪声带记「持平」，劣化达到回归线记「回归」，"
+        f"两者之间记「关注」，方向变好记「改善」（默认 lower-better）。本次最常用的"
+        f"带宽：噪声 {noise}% / 回归 {regress}%；p99 型等指标族有更宽的覆盖，"
+        "完整名单见 `scripts/perf/thresholds.json`。",
+        "- **`🚫 不判定`**：某一侧没有数据（真的不可比），或该指标是信息项"
+        "（如 `tui.display.coverage_ratio` 是测量质量、不是显示性能，只报数值）。",
         "- **口径**：排除冷启动；TUI / Gateway 用假 Provider（零 LLM 时延）；两侧由同一份 "
         "harness 代码驱动（`scripts/perf/`），只允许代码来源不同。",
         "- **注意**：runner 噪声、样本量与并行负载都会影响数字；本评论只作参考，不是合并门禁。"
@@ -336,18 +339,24 @@ def _footnote(
 
 
 def _thresholds_used(comparisons: Sequence[Mapping[str, Any]]) -> tuple[float, float]:
-    """优先用 comparisons 里实际生效的阈值（诚实），否则回退 thresholds.json。"""
-    noises = [_number(entry.get("noise_pct")) for entry in comparisons]
-    regresses = [_number(entry.get("regress_pct")) for entry in comparisons]
-    fallback = _load_thresholds()
-    noise = max(
-        [value for value in noises if value is not None], default=fallback.noise_pct
-    )
-    regress = max(
-        [value for value in regresses if value is not None],
-        default=fallback.regress_pct,
-    )
-    return (noise, regress)
+    """本次跑**最常用**的 (noise_pct, regress_pct)。
+
+    每个指标族可以有自己的带宽（`thresholds.json.overrides`，如 p99 型更宽），任何单一
+    数字都只是近似——取出现次数最多的一对，避免"取最大值"把某个宽带宽吹成全局口径。
+    """
+    counts: dict[tuple[float, float], int] = {}
+    for entry in comparisons:
+        noise = _number(entry.get("noise_pct"))
+        regress = _number(entry.get("regress_pct"))
+        if noise is None or regress is None:
+            continue
+        key = (noise, regress)
+        counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        fallback = _load_thresholds()
+        return (fallback.noise_pct, fallback.regress_pct)
+    # 次数降序，平手时取更小的带宽（更保守的表述）。
+    return max(counts.items(), key=lambda item: (item[1], -item[0][0], -item[0][1]))[0]
 
 
 def _load_thresholds() -> Thresholds:
