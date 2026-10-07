@@ -50,6 +50,15 @@ pretty_assertions = "1"
 criterion = "0.5"
 # Integration tests build their own PNG fixtures through the same decoder the library uses.
 image = { workspace = true }
+# acp_e2e: the official ACP SDK drives the real `wing acp` binary as a client
+# (spawns it as a child process; `process` adds the AcpAgent transport).
+agent-client-protocol = { workspace = true, features = ["process"] }
+# acp_e2e: in-process fake gateway. hyper/http-body-util/bytes are already in the
+# lock file (transitive deps of reqwest); the WS side reuses tokio-tungstenite.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
 
 [[bench]]
 name = "stream_render"
