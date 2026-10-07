@@ -37,6 +37,12 @@ uv run python scripts/perf/comment.py --repo owner/repo --pr 42 --body-file /tmp
 `--quick` = CI 档（单侧单轮有界：rust ≈ 2–3 min、tui ≈ 8–10s、gateway ≈ 4–6s）；
 不带 `--quick` 是本地深潜档（rust 全 case 45 分钟级/侧、tui ≈ 48s/侧）。
 
+`--prepare`（默认）按套件构建两侧：rust 用 `cargo bench --no-run -p wing`；tui 用
+`cargo build --release -p wing` + uv；gateway 只需 uv。uv 一律
+`uv sync --frozen --no-install-package wing-cli`（跳过 maturin 编译——套件只用
+`wing-gateway` 与 `target/release/wing`）；本地若要 venv 里的 `wing` 脚本，自己跑一次
+`uv sync --frozen`。
+
 ## side.json（契约 §1）
 
 `ab.py` 自己写 `<workdir>/sides/{base,head}.json`；手搓单侧时照抄这个形状（全绝对路径）：
@@ -88,3 +94,7 @@ git -C <repo> worktree remove --force target/perf/base && rm -rf target/perf
   回退同名 suite 的键，最后 `default`。各族的当前值与依据见
   [docs/dev/perf-testing.md §5](../../docs/dev/perf-testing.md)。
 - `higher_better`：越大越好的指标；`info_only`：只给数值、不判档（`verdict=n/a` + note）。
+  当前名单：`tui.display.coverage_ratio`、`tui.display.trend_us`、`gateway.turn.p99_ms`、
+  `gateway.context.build_p99_ms`。
+- 另有一条通用守卫：`base_median <= 0` 的指标一律 n/a（Δ% 在非正基准上没有方向含义）。
+- 改带宽要**同时改** `ab.py` selftest 里的钉值表（`thresholds.file …` 循环），否则红灯。
