@@ -105,6 +105,24 @@ pub fn provider_names(catalog: &ModelsResponse) -> Vec<String> {
         .collect()
 }
 
+/// 解析值 id 的「已知 provider 集合」= 目录里的 provider ∪ **会话当前 provider**。
+///
+/// 后者是 review r1 S1 的修复（design D2「已知集合」）：provider 被改名 / 删除 + 配置热重载
+/// 之后，会话仍活在那个 provider 上（网关报 `provider 'x' not found`，但会话保留），此时
+/// [`build_options`] 自补的值 id `x:model` 必须仍能被我们自己的解析切回 `(x, model)`——
+/// 只认目录就会把整串（含前缀）当模型名下发：静默选错模型，且每往返一次前缀叠加一层。
+///
+/// 顺序 = 目录序 + （缺席时）当前 provider 追加在末尾；最长前缀匹配与顺序无关。
+pub fn known_providers(catalog: &ModelsResponse, current: Option<&str>) -> Vec<String> {
+    let mut providers = provider_names(catalog);
+    if let Some(current) = non_blank(current)
+        && !providers.iter().any(|known| known == current)
+    {
+        providers.push(current.to_string());
+    }
+    providers
+}
+
 /// 值 id →（provider, model）：对已知 provider 名做**最长前缀**匹配。
 ///
 /// - 命中（`"{p}:{rest}"`，`rest` 非空）→ `provider = Some(p)`、`model = rest`
@@ -188,7 +206,19 @@ pub fn resolve_provider(
 /// - 当前值不在目录里时**自补一项**（追加到它自己 provider 的组；组不存在就新建一组），
 ///   这样值列表里总有 `currentValue`——客户端才会显示真实模型而不是 `Unknown`。
 pub fn build_options(catalog: &ModelsResponse, current: &SessionModel) -> Vec<SessionConfigOption> {
-    let current_value = current.current_value_id();
+    build_options_with(catalog, current, current.current_value_id())
+}
+
+/// [`build_options`] 的可指定 `currentValue` 版本。
+///
+/// `current_value` 与 `current` 不一致的唯一来源是 S2 的**回显**（请求是裸模型名等非规范
+/// 形式、而解析结果与权威状态一致 → 回显请求原文，让 `echoed == requested`）；此时该值
+/// 同样按 [`append_current`] 补进值列表，客户端才找得到它的显示名。
+fn build_options_with(
+    catalog: &ModelsResponse,
+    current: &SessionModel,
+    current_value: String,
+) -> Vec<SessionConfigOption> {
     let mut seen: Vec<String> = Vec::new();
     let mut groups: Vec<SessionConfigSelectGroup> = Vec::new();
     for provider in &catalog.providers {
@@ -279,6 +309,27 @@ pub fn is_model_change(event: &WingEvent) -> bool {
     )
 }
 
+/// `set_config_option` 回执里的 `currentValue`：请求**等价**于权威状态时回显请求原文（S2）。
+///
+/// 触发场景是 omnigent 的 curation 部署：它把「响应回显值 == 自己的请求值」当硬校验
+/// （`_apply_model_override`：不一致就抛错，**prompt 根本不发**，且每轮都先做一次），
+/// 而它发的是自己配置里的**裸模型名**。回显原文让 `echoed == requested` 自洽；值列表里
+/// 没有它时由 [`build_options_with`] 补一项，客户端才找得到显示名。
+///
+/// - 请求解析结果（`asked`，provider 已由归属解析补全）== 权威状态 → 回显 `raw`（trim 后）；
+/// - 不一致（切换被别的更新覆盖 / 重取失败）→ 回规范值 `provider:model`，不撒谎。
+///
+/// 外部变更中继（`config_option_update`）不走这里：它没有请求可回显，一律发规范值。
+fn echoed_value(raw: &str, asked: &ModelSelection, current: &SessionModel) -> String {
+    let same = current.model == asked.model
+        && non_blank(current.provider.as_deref()) == asked.provider.as_deref();
+    if same {
+        raw.trim().to_string()
+    } else {
+        current.current_value_id()
+    }
+}
+
 /// 全量 options → `config_option_update` 帧；空 options → `None`（没有可播报的选择面）。
 pub fn config_option_update(options: Vec<SessionConfigOption>) -> Option<SessionUpdate> {
     if options.is_empty() {
@@ -317,28 +368,31 @@ pub async fn set_config_option(
     // 值的解析与回执都要目录；拿不到 / 目录为空一律报错——把 `provider:model` 误当裸模型名
     // 会把整串（含前缀）下发给网关，静默选错模型比报错糟得多。
     let catalog = fetch_catalog(hub).await?;
-    let providers = provider_names(&catalog);
-    if providers.is_empty() {
+    if provider_names(&catalog).is_empty() {
         return Err(Error::internal_error().data(
             "the gateway lists no model providers; refusing to guess what a value id means",
         ));
     }
+    // 会话当前状态：解析（归属解析 / 「当前 provider 也算已知前缀」）与回执都要它。
+    let before = fetch_state(hub, &session_id).await?;
+    let providers = known_providers(&catalog, before.provider.as_deref());
     let Some(selection) = parse_value_id(raw, &providers) else {
         return Err(Error::invalid_params().data("empty model value"));
     };
     let provider = match selection.provider {
         Some(provider) => provider,
-        None => {
-            let current = fetch_state(hub, &session_id).await?;
-            resolve_provider(&selection.model, &catalog, current.provider.as_deref()).ok_or_else(
-                || {
-                    Error::invalid_params().data(format!(
-                        "cannot resolve a provider for model '{}'",
-                        selection.model
-                    ))
-                },
-            )?
-        }
+        None => resolve_provider(&selection.model, &catalog, before.provider.as_deref())
+            .ok_or_else(|| {
+                Error::invalid_params().data(format!(
+                    "cannot resolve a provider for model '{}'",
+                    selection.model
+                ))
+            })?,
+    };
+    // 请求指向的完整身份（provider 由归属解析补全）：回执判断「回显原文还是回规范值」用它。
+    let asked = ModelSelection {
+        provider: Some(provider.clone()),
+        model: selection.model.clone(),
     };
 
     let update = UpdateSessionRequest {
@@ -379,7 +433,10 @@ pub async fn set_config_option(
             }
         }
     };
-    Ok(build_options(&catalog, &current))
+    // S2：请求（裸模型名等非规范形式）与权威状态等价时回显请求原文，让客户端看到的
+    // `echoed == requested`（omnigent 的 curation 部署把它当硬校验）。
+    let current_value = echoed_value(raw, &asked, &current);
+    Ok(build_options_with(&catalog, &current, current_value))
 }
 
 /// 模型变更中继（`session_state_changed{model}`）：权威状态 → 全量 options → 通知。
@@ -767,20 +824,154 @@ mod tests {
     #[test]
     fn every_advertised_value_parses_back_to_its_provider_and_model() {
         let catalog = catalog();
-        let options = build_options(&catalog, &current("dashscope", "glm-4.6", None));
-        let known = provider_names(&catalog);
-        for group in groups_of(&options) {
-            for option in &group.options {
-                let value = option.value.0.to_string();
-                let parsed = parse_value_id(&value, &known)
-                    .unwrap_or_else(|| panic!("advertised value {value} must parse"));
-                assert_eq!(parsed.provider.as_deref(), Some(group.group.0.as_ref()));
-                assert_eq!(
-                    format!("{}:{}", parsed.provider.as_deref().unwrap(), parsed.model),
-                    value
-                );
+        // 覆盖四种会话当前状态：目录内 / provider 已离开目录（S1）/ 同名模型跨 provider
+        // 且 provider 离开目录 / provider 未知。不变量：**options 里给出的任一 value id
+        // 都能被我们自己的解析切回同一 (provider, model)**（= 回拼出的值 id 与广告值逐字相同）。
+        for state in [
+            current("dashscope", "glm-4.6", None),
+            current("gone", "glm-4.6", None),
+            current("gone", "shared-model", Some("Shared")),
+            SessionModel {
+                provider: None,
+                model: "m2".into(),
+                display_name: None,
+            },
+        ] {
+            let options = build_options(&catalog, &state);
+            let known = known_providers(&catalog, state.provider.as_deref());
+            let mut checked = 0;
+            for group in groups_of(&options) {
+                for option in &group.options {
+                    let value = option.value.0.to_string();
+                    let parsed = parse_value_id(&value, &known)
+                        .unwrap_or_else(|| panic!("advertised value {value} must parse"));
+                    assert_eq!(
+                        parsed.provider.as_deref(),
+                        Some(group.group.0.as_ref()),
+                        "{state:?}: {value} 必须解析回它所在组的 provider"
+                    );
+                    assert_eq!(
+                        format!("{}:{}", parsed.provider.as_deref().unwrap(), parsed.model),
+                        value,
+                        "{state:?}: 值 id 必须往返"
+                    );
+                    checked += 1;
+                }
             }
+            assert!(checked > 0, "{state:?}: 一定有可广告的值");
         }
+    }
+
+    /// S1（review r1）：会话当前 provider 已离开 `/api/models` 目录时的往返。
+    ///
+    /// 场景：provider 改名 / 删除 + 配置热重载，会话仍活在那个 provider 上（网关报
+    /// `provider 'x' not found`，但会话保留）。此时 `build_options` 自补的值 id 是
+    /// `gone:beta-1`；只认目录的解析会把它整串当模型名（provider=None → 归属回落当前
+    /// provider）→ 网关收到 `model="gone:beta-1"` —— 静默选错模型且前缀逐次叠加。
+    #[test]
+    fn values_stay_parseable_when_the_session_provider_left_the_catalog() {
+        let catalog = catalog();
+        let state = current("gone", "beta-1", None);
+        let options = build_options(&catalog, &state);
+        let select = select_of(&options);
+        let value = select.current_value.0.to_string();
+        assert_eq!(
+            value, "gone:beta-1",
+            "自补的值 id 形状不变（provider:model）"
+        );
+        assert!(
+            values(groups_of(&options).last().expect("至少一组")).contains(&value),
+            "自补项在值列表里"
+        );
+
+        // 只认目录 → 整串当模型名（S1 的病灶）。
+        let catalog_only = provider_names(&catalog);
+        assert_eq!(
+            parse_value_id(&value, &catalog_only).expect("裸名兜底仍会解析"),
+            ModelSelection {
+                provider: None,
+                model: "gone:beta-1".into(),
+            }
+        );
+
+        // 已知集合 = 目录 ∪ 会话当前 provider → 切回同一 (provider, model)。
+        let known = known_providers(&catalog, state.provider.as_deref());
+        assert_eq!(
+            parse_value_id(&value, &known).expect("并集解析"),
+            ModelSelection {
+                provider: Some("gone".into()),
+                model: "beta-1".into(),
+            }
+        );
+
+        // 当前 provider 已在目录里 → 并集 = 目录（不引入重复项，行为不变）。
+        assert_eq!(
+            known_providers(&catalog, Some("dashscope")),
+            catalog_only,
+            "在目录里的 provider 不重复追加"
+        );
+        // provider 缺席 / 空白 → 并集 = 目录。
+        assert_eq!(known_providers(&catalog, None), catalog_only);
+        assert_eq!(known_providers(&catalog, Some("   ")), catalog_only);
+    }
+
+    /// S2（review r1）：请求与权威状态**等价**时回显请求原文（omnigent 的裸名形状）。
+    #[test]
+    fn response_echoes_the_requested_bare_value_when_it_matches_the_state() {
+        let catalog = catalog();
+        // 裸名请求 `shared-model` → 归属解析到 (openai, shared-model)（同名模型跨 provider 时
+        // 当前 provider 优先，这里当前 provider 就是 openai）。
+        let state = current("openai", "shared-model", Some("Shared"));
+        let asked = ModelSelection {
+            provider: Some("openai".into()),
+            model: "shared-model".into(),
+        };
+        assert_eq!(
+            echoed_value("shared-model", &asked, &state),
+            "shared-model",
+            "回显原文：客户端看到的 echoed == requested"
+        );
+        // 回显值必须能在响应的 options 里作为 currentValue 找到（客户端才显示得出名字）。
+        let options = build_options_with(&catalog, &state, "shared-model".to_string());
+        assert_eq!(select_of(&options).current_value.0.as_ref(), "shared-model");
+        assert!(
+            values(&groups_of(&options)[1]).contains(&"shared-model".to_string()),
+            "回显值补进了它 provider 的组"
+        );
+        // 回显值的显示名沿用会话当前模型的展示名。
+        let echoed = groups_of(&options)[1]
+            .options
+            .iter()
+            .find(|option| option.value.0.as_ref() == "shared-model")
+            .expect("回显项存在");
+        assert_eq!(echoed.name, "Shared");
+
+        // 请求本来就是规范值 → 回显 = 规范值（值列表里本来就有，不必补）。
+        assert_eq!(
+            echoed_value("openai:shared-model", &asked, &state),
+            "openai:shared-model"
+        );
+        // 两侧空白按 trim（值 id 不接受空白）。
+        assert_eq!(
+            echoed_value("  shared-model ", &asked, &state),
+            "shared-model"
+        );
+        // 权威状态与请求不一致（被别的更新覆盖）→ 回规范值，不撒谎。
+        let other = current("dashscope", "glm-4.6", None);
+        assert_eq!(
+            echoed_value("shared-model", &asked, &other),
+            "dashscope:glm-4.6"
+        );
+        // provider 缺席的权威状态（旧网关）→ 规范值 = 裸模型名。
+        let anonymous = SessionModel {
+            provider: None,
+            model: "shared-model".into(),
+            display_name: None,
+        };
+        assert_eq!(
+            echoed_value("shared-model", &asked, &anonymous),
+            "shared-model"
+        );
     }
 
     // ---- resolve_provider ----

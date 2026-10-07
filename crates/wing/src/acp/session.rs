@@ -289,12 +289,12 @@ impl SessionEntry {
 
 /// 会话表 + 出站队列 + WS 事件泵的持有者。
 ///
-/// 公开面是后续步骤（04 model / 05 sessions）的接入点：
+/// 公开面是各步骤的接入点（本步起也是「模型变更中继」的宿主）：
 ///
 /// | 步骤 | 用到的入口 |
 /// |------|-----------|
 /// | 03 | [`SessionHub::elicitation_form_supported`] / [`SessionHub::downgrade_elicitation`]（Ask 能力门控）、[`SessionHub::answer_ask`]（应答 Ask） |
-/// | 04 | [`SessionHub::client_capabilities`]、[`Turn::updates_for`]，模型切换本身走 `http.update_session`（05 步的会话操作同址） |
+/// | 04 | [`SessionHub::register_client_connection`] / [`SessionHub::client_connection`]（中继的出站）、[`SessionHub::finish_model_relay`]（中继收尾）；模型切换本身走 `http.update_session`，触发点在 [`SessionHub::dispatch`]（**不**经 `Turn::updates_for`，见 design D7） |
 /// | 05 | [`SessionHub::attach_and_subscribe`] / [`SessionHub::close_session`]（load/resume 挂载 + 回收） |
 /// | 05+ | [`SessionHub::session_ids`] / [`SessionHub::knows`]（会话查询） |
 pub struct SessionHub {
