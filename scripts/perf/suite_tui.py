@@ -60,8 +60,10 @@ QUICK_REPEATS = 1
 FULL_REPEATS = 3
 MARKER_EVERY = 400
 #: 首击后这么久 provider 还是零帧（emit log 为空）→ 补发同一句 prompt（见 design.md
-#: D7「启动竞态」：TUI 启动期的终端查询阶段会冲掉先到的按键）。只给本套件开；CLI 的
-#: 默认行为不变（`latency.run_rate` 的 `resend_after=None`）。
+#: D7「启动竞态」：TUI 启动期的终端查询阶段会冲掉先到的按键）。守卫是"provider 零帧"这个
+#: 代理信号，不是"prompt 未被消费"的直接证据——首帧一出来就停止补发（实测"网关开始路由 →
+#: provider 首帧"约 60ms，余量 10x+）。只给本套件开；CLI 的默认行为不变
+#: （`latency.run_rate` 的 `resend_after=None`）。
 RESEND_AFTER = 0.7
 #: 命中率低于它 → meta.notes 标注"低置信"（指标照常输出；与 latency.py 表格里的
 #: MIN_COVERAGE=0.4「样本不足」是两件事：一个管套件置信，一个管人类的终端读数）。
@@ -192,7 +194,7 @@ def measure_rate(
             if resends:
                 out.note(
                     f"{rate} tok/s 第 {index} 次测量补发了 {resends} 次 prompt"
-                    "（首击被 TUI 启动期的终端初始化冲掉，emit log 为空才补）"
+                    "（守卫：provider 尚未发过任何一帧（emit log 为空），出帧即停）"
                 )
             if int(candidate["markers"]) > 0:
                 row = candidate

@@ -12,7 +12,10 @@
 - 取数：`target/criterion/**/<label>/estimates.json` 的 `median.point_estimate`（纳秒），
   label = `perf-<side>-r<round>-p<pid>`（含进程 pid：同侧同轮的并发/孤儿 writer 不会混进来）。
   criterion id 取同目录 `benchmark.json` 的 `full_id` —— 目录名会把 `/` 换成 `_`
-  （`frame/pictures/4` 的目录是 `frame/pictures_4/`），不能从路径反推。
+  （`frame/pictures/4` 的目录是 `frame/pictures_4/`），不能从路径反推；`benchmark.json`
+  缺失（残局）时退化为目录相对路径并去掉最后一段 label。
+  criterion 根目录镜像 criterion 0.5.1 的解析顺序：`$CRITERION_HOME` →
+  `$CARGO_TARGET_DIR/criterion` → `<worktree>/target/criterion`。
 - 一侧缺 bench target（本 PR 的 base 早于 session_replay）→ 该 bench 的 case 记 n/a（notes），
   **退出码 0**，其余 bench 照常；编译错误 / 超时 / 坏 JSON → `ok=false` + 退出码 1
   （ab.py 记 infrastructure failure）。
@@ -205,11 +208,19 @@ def select_benches(raw: str) -> tuple[Bench, ...]:
 
 
 def criterion_root(worktree: Path) -> Path:
-    """criterion 的输出目录：跟随 `CARGO_TARGET_DIR`（cargo 的规则：相对路径相对 worktree）。"""
-    override = os.environ.get("CARGO_TARGET_DIR")
-    if override:
-        path = Path(override)
-        return (path if path.is_absolute() else worktree / path).resolve() / "criterion"
+    """criterion 的输出目录。
+
+    镜像 criterion 0.5.1 的解析顺序（`criterion-0.5.1/src/lib.rs:134-144`）：
+    ``$CRITERION_HOME`` → ``$CARGO_TARGET_DIR/criterion`` → ``./target/criterion``
+    （第三档是 cargo metadata 的 target dir，非 workspace 场景这里不做等价实现）。
+    相对路径按 cargo 的规则相对 worktree 解析。
+    """
+    for key, suffix in (("CRITERION_HOME", ""), ("CARGO_TARGET_DIR", "criterion")):
+        override = os.environ.get(key)
+        if override:
+            path = Path(override)
+            base = path if path.is_absolute() else worktree / path
+            return (base / suffix).resolve() if suffix else base.resolve()
     return worktree / "target" / "criterion"
 
 
@@ -270,7 +281,10 @@ def _criterion_id(report_dir: Path, root: Path) -> str:
         parts = report_dir.relative_to(root).parts
     except ValueError:  # pragma: no cover - glob 结果必然在 root 下
         parts = (report_dir.name,)
-    return "/".join(parts)
+    # 最后一段是 `--save-baseline` 的 label（`perf-<side>-r<round>-p<pid>`），不是
+    # criterion id 的一部分：留着会让 quick 档把它误判成 filter drift、full 档写出
+    # 逐轮不同的 metric id。
+    return "/".join(parts[:-1] if len(parts) > 1 else parts)
 
 
 def _ci_rel_pct(median: Mapping[str, Any], point: float) -> float | None:

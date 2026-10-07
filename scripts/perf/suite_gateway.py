@@ -29,6 +29,7 @@ import argparse
 import asyncio
 import ctypes
 import ctypes.util
+import json
 import math
 import os
 import shutil
@@ -292,19 +293,29 @@ class ScenarioRun:
             keep_recent_tokens=KEEP_RECENT_TOKENS,
             health_timeout=HEALTH_TIMEOUT,
         )
-        print(
-            f"[gateway] scenario {self.name}: gateway up (pid {self.pid}, {self.root})",
-            flush=True,
-        )
+        try:
+            print(
+                f"[gateway] scenario {self.name}: gateway up "
+                f"(pid {self.pid}, {self.root})",
+                flush=True,
+            )
+        except BaseException:
+            # 没进 `async with` 就没有 `__aexit__`：已起的网关进程必须在这里收掉。
+            await self._stop_probe()
+            raise
         return self
 
     async def __aexit__(self, *_: object) -> None:
-        probe, self._probe = self._probe, None
-        if probe is not None:
-            await probe.stop()
+        await self._stop_probe()
         elapsed = time.monotonic() - self.started
         self.out.setting(f"{self.name}.duration_s", round(elapsed, 3))
         print(f"[gateway] scenario {self.name}: teardown in {elapsed:.1f}s", flush=True)
+
+    async def _stop_probe(self) -> None:
+        """停掉并忘掉本场景的 probe（幂等：`__aenter__` 失败与 `__aexit__` 共用）。"""
+        probe, self._probe = self._probe, None
+        if probe is not None:
+            await probe.stop()
 
     @property
     def probe(self) -> Probe:
@@ -330,6 +341,24 @@ def _rel(run: ScenarioRun, t: float) -> float:
     return t - run.env.started_at
 
 
+def _error_summary(event: Event) -> str:
+    """``error`` 事件的一行摘要：优先 ``[status_code] message``，否则退回紧凑 JSON。
+
+    ``event.data`` 含整个错误事件字典，直接塞进失败摘要是半截 JSON（400 字符截断会切在
+    ``{"er…`` 处）。完整现场仍在 stdout 的 traceback 与 ab 的 ``failures[].log`` 里。
+    """
+    data = event.data if isinstance(event.data, Mapping) else {}
+    message = data.get("message")
+    if isinstance(message, str) and message.strip():
+        text = message.strip().splitlines()[0]
+        status = data.get("status_code")
+        return f"[{status}] {text}" if isinstance(status, int) else text
+    try:
+        return json.dumps(dict(data), ensure_ascii=False)[:400]
+    except (TypeError, ValueError):  # pragma: no cover - 帧里的 JSON 必可再序列化
+        return str(data)[:400]
+
+
 async def _finish_turn(
     session: Session, content: str, *, within: float, label: str
 ) -> Event:
@@ -337,7 +366,9 @@ async def _finish_turn(
     await session.send(content)
     event = await session.watch.expect(["turn_result", "error"], within=within)
     if event.type != "turn_result":
-        raise ScenarioError(f"{label}: turn ended with an error event: {event.data}")
+        raise ScenarioError(
+            f"{label}: turn ended with an error event: {_error_summary(event)}"
+        )
     return event
 
 
@@ -401,7 +432,9 @@ async def scenario_fanout(
     event = await session.watch.expect(["turn_result", "error"], within=FANOUT_WITHIN)
     cpu_after = process_cpu_seconds(run.pid)
     if event.type != "turn_result":
-        raise ScenarioError(f"fanout: turn ended with an error event: {event.data}")
+        raise ScenarioError(
+            f"fanout: turn ended with an error event: {_error_summary(event)}"
+        )
 
     frames = _text_events_after(session, cursor)
     frames_after = probe.driver_required.websocket.frames_received
@@ -534,7 +567,8 @@ async def scenario_context(
         event = await session.watch.expect(["turn_result", "error"], within=TURN_WITHIN)
         if event.type != "turn_result":
             raise ScenarioError(
-                f"context: probe #{index} ended with an error event: {event.data}"
+                f"context: probe #{index} ended with an error event: "
+                f"{_error_summary(event)}"
             )
         fresh = probe.requests.all()[before:]
         if len(fresh) != 1:
@@ -630,8 +664,15 @@ async def scenario_resume(
         out.note(
             f"resume: 只有 {len(sync_ms)} 个 sync 样本（期望 {settings.resume_cycles}）"
         )
-    if message_counts and min(message_counts) <= 0:
-        out.note(f"resume: sync_session 的 messages 计数异常 {message_counts}")
+    # 重放完整性：warmup + 每个构造轮次各一对 user/assistant ⇒ 2×(history_turns+1)。
+    # 计数已经写进 meta.config.resume.messages，这里把"对不上"的事实也写进 notes
+    # （部分重放 / 空重放都要能被报告看见）。
+    expected_messages = 2 * (settings.history_turns + 1)
+    if message_counts and min(message_counts) != expected_messages:
+        out.note(
+            f"resume: sync_session 重放 {message_counts} 条消息，"
+            f"期望 {expected_messages}（= 2×({settings.history_turns}+1)）"
+        )
 
     out.metric("gateway.resume.sync_ms", median(sync_ms), *sync_ms)
     out.setting("resume.cycles", settings.resume_cycles)
@@ -734,6 +775,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def validate_side(side: Side) -> str | None:
     """side 描述符的可用性检查（返回错误文案；None = 通过）。"""
+    if not side.wing_home.is_absolute():
+        # 契约 §1 要求绝对路径；相对路径会把 scratch 写进调用方 cwd（畸形 side 里
+        # `null` 会被 `Side.load` 强转成 `Path("None")`）。
+        return (
+            f"side {side.name}: wing_home must be an absolute path (contract §1), "
+            f"got {side.wing_home}"
+        )
     if not side.gateway_bin.is_file():
         return (
             f"gateway binary not found: {side.gateway_bin} "
