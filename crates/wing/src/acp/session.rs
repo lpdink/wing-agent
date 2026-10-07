@@ -217,14 +217,21 @@ impl SessionEntry {
 
     /// 装上一轮 **prompt** 的事件通道并置位 `turn_armed`（调用方已持有 gate）。
     ///
-    /// 同时复位「已请求取消」信号：新一轮从「未取消」开始（更早的 `session/cancel`
-    /// 已被 `request_cancel` 的 `turn_armed` 判据挡在轮次之外）。
-    fn arm_turn(&self) -> mpsc::Receiver<WingEvent> {
-        self.cancel.send_replace(false);
+    /// `close` 已决定回收本条目 → `None`（不 arm）。检查与置位在同一把锁上：`mark_closing`
+    /// 与 arm 串行化，「复查通过 → 决定落地 → 还是 arm 了」的窗口没有缝。
+    ///
+    /// 同时复位「已请求取消」信号：新一轮从「未取消」开始（复位与 arm 同锁，取消不会被
+    /// 带到新轮次；更早的 `session/cancel` 已被 `request_cancel` 的 `turn_armed` 判据挡在
+    /// 轮次之外）。
+    fn arm_turn(&self) -> Option<mpsc::Receiver<WingEvent>> {
         let mut state = self.inner.lock().expect("entry mutex poisoned");
+        if state.closing {
+            return None;
+        }
+        self.cancel.send_replace(false);
         let rx = Self::install_events(&mut state);
         state.turn_armed = true;
-        rx
+        Some(rx)
     }
 
     /// 有在途轮次则置位「已请求取消」并返回 `true`。
@@ -248,17 +255,24 @@ impl SessionEntry {
         self.inner.lock().expect("entry mutex poisoned").closing = true;
     }
 
-    /// 本条目是否已被 `close` 决定回收。
+    /// 本条目是否已被 `close` 决定回收（单测观察 `mark_closing` 的时序；生产路径不看这里
+    /// ——arm 在同一把锁上直接查 `state.closing`）。
+    #[cfg(test)]
     fn is_closing(&self) -> bool {
         self.inner.lock().expect("entry mutex poisoned").closing
     }
 
     /// 装上一次**挂载**的事件通道并置位 `attach_armed`（调用方已持有 gate）。
-    fn arm_attached(&self) -> mpsc::Receiver<WingEvent> {
+    ///
+    /// `close` 已决定回收本条目 → `None`（同 [`SessionEntry::arm_turn`]，检查与置位同锁）。
+    fn arm_attached(&self) -> Option<mpsc::Receiver<WingEvent>> {
         let mut state = self.inner.lock().expect("entry mutex poisoned");
+        if state.closing {
+            return None;
+        }
         let rx = Self::install_events(&mut state);
         state.attach_armed = true;
-        rx
+        Some(rx)
     }
 
     /// 卸下通道、清 armed 标记（轮次 / 挂载收口；Drop 与回收路径也走这里）。
@@ -580,9 +594,9 @@ impl SessionHub {
     pub async fn begin_turn(&self, session_id: &str, text: &str) -> Result<Turn, HubError> {
         let entry = self.entry(session_id)?;
         let gate = Arc::clone(&entry.gate).lock_owned().await;
-        // 拿到 gate 之后再复查条目还能不能接新工作（见 [`SessionHub::accepts_new_work`]）：
-        // close 的回收决定与「排队者拿到 gate」两种排序都在这里封死。
-        if !self.accepts_new_work(session_id, &entry) {
+        // 拿到 gate 之后再复查条目仍在表内（见 [`SessionHub::is_current_entry`]）；
+        // 「close 已决定回收」由 arm 在同一把锁上拒绝。
+        if !self.is_current_entry(session_id, &entry) {
             return Err(HubError::UnknownSession(session_id.to_string()));
         }
         // 拿到 gate 之后、arm 之前检查：WS 事件流是否已经死了。
@@ -594,7 +608,10 @@ impl SessionHub {
         if self.stream_dead.load(Ordering::SeqCst) {
             return Err(HubError::Disconnected);
         }
-        let rx = entry.arm_turn();
+        let Some(rx) = entry.arm_turn() else {
+            // `close` 已决定回收（与 arm 同锁看到的决定）：消息不投递。
+            return Err(HubError::UnknownSession(session_id.to_string()));
+        };
         // 订阅「已请求取消」：arm 之后订阅，中间的取消不会丢（watch 保存当前值）。
         let cancelled = entry.cancel.subscribe();
         let turn = Turn {
@@ -712,8 +729,9 @@ impl SessionHub {
         let gate = Arc::clone(&entry.gate).lock_owned().await;
         // 拿到 gate 之后再查一次（与 `begin_turn` 同款）：排队期间会话可能被 close 回收 /
         // 决定回收（拒绝：挂载一个正在关闭的条目会以「快照超时」收场，且回滚判据
-        // `created == false` 会跳过 unsubscribe，把会话钉在网关内存里）。
-        if !self.accepts_new_work(session_id, &entry) {
+        // `created == false` 会跳过 unsubscribe，把会话钉在网关内存里）。这里不回滚也不需要：
+        // 新建条目不可能被拒（`closing` 只有并发 `close_session` 能置，而它必然 `remove_entry`）。
+        if !self.is_current_entry(session_id, &entry) {
             return Err(HubError::UnknownSession(session_id.to_string()));
         }
         // 再查一次事件流（与 `begin_turn` 同款）：排队期间泵可能已经退出。
@@ -727,7 +745,11 @@ impl SessionHub {
             }
             return Err(HubError::Disconnected);
         }
-        let rx = entry.arm_attached();
+        let Some(rx) = entry.arm_attached() else {
+            // `close` 已决定回收（新建条目不可能：`closing` 只有并发 `close_session` 能置，
+            // 而它必然 `remove_entry`）。
+            return Err(HubError::UnknownSession(session_id.to_string()));
+        };
         Ok((
             Attached {
                 session_id: session_id.to_string(),
@@ -764,6 +786,8 @@ impl SessionHub {
                 // 先落「正在关闭」标记（`accepts_new_work` 据此拒绝**之后**拿到 gate 的
                 // 排队者）：回收决定必须早于有界等待，否则「排队者先得 gate」的排序会漏。
                 entry.mark_closing();
+                // （本函数若在中途被 drop——只会发生在进程收尾——条目会带着 `closing`
+                // 留在表里恒拒新工作；后续收尾路径本来就不再服务任何新 prompt。）
                 // ACP：close 必须先当作 `session/cancel` 处理，让**在途轮次**有机会以
                 // `cancelled` 收口（而不是被我们抽掉通道、以内部错误收场）。挂载窗口
                 // 没有后端轮次——不发 interrupt（05 审查 N3），但仍要等它收口。
@@ -825,22 +849,19 @@ impl SessionHub {
         (entry, true)
     }
 
-    /// 条目是否还能接新工作：仍在表内、仍是同一个（`close` 后重建的新条目不认），
-    /// 且没有被 `close` 决定回收。
+    /// 条目是否**仍是表里的那一个**（`close` 后又 `load` 会建新条目——旧条目不认）。
     ///
-    /// 两个调用点（`begin_turn` / `attach_session`）都在**拿到 gate 之后**复查：`close`
-    /// 与排队者有两种排序，都要挡住——
+    /// 与 arm 侧的两道防线合起来构成「close 与排队者两种排序都封死」（调用点
+    /// `begin_turn` / `attach_session`，都在**拿到 gate 之后**复查）：
     ///
     /// - `close` 先连回收一起做完：条目已不在表内（`entry()` 失败或 `ptr_eq` 不成立）；
-    /// - 排队者先拿到 gate（tokio Mutex 是 FIFO，先到者先得）：`close` 的强迫回收会
-    ///   抽掉它的通道，prompt / 挂载以误导性的「事件流终止」收场（消息已投递、后端照常
-    ///   起轮）——所以 `close_session` 在**有界等待之前**就落下标记，这里看到即拒绝。
+    /// - 排队者先拿到 gate（tokio Mutex 是 FIFO，先到者先得）：`close` 在**有界等待之前**
+    ///   就落 `closing` 标记（[`SessionEntry::mark_closing`]），arm 在同一把锁上看到即拒绝
+    ///   （[`SessionEntry::arm_turn`] / [`SessionEntry::arm_attached`]）——否则强迫回收会抽
+    ///   掉它的通道，prompt / 挂载以误导性的「事件流终止」收场（消息已投递、后端照常起轮）。
     ///
     /// 拒绝语义 = `UnknownSession`：消息不投递，客户端拿到明确诊断。
-    fn accepts_new_work(&self, session_id: &str, entry: &Arc<SessionEntry>) -> bool {
-        if entry.is_closing() {
-            return false;
-        }
+    fn is_current_entry(&self, session_id: &str, entry: &Arc<SessionEntry>) -> bool {
         self.state
             .lock()
             .expect("hub mutex poisoned")
@@ -1480,10 +1501,21 @@ mod tests {
         assert!(!entry.deliver(event("s1")), "no consumer → dropped");
     }
 
+    /// `close` 的决定与 arm 在同一把锁上串行化：决定之后 arm 一律拒绝（含「复查通过 →
+    /// 决定落地 → 还是 arm 了」的窗口），两种 arm 形态都算。
+    #[test]
+    fn arm_refuses_after_the_close_decision() {
+        let entry = SessionEntry::new("s1");
+        entry.mark_closing();
+        assert!(entry.arm_turn().is_none(), "prompt arm 必须被拒");
+        assert!(entry.arm_attached().is_none(), "挂载 arm 必须被拒");
+        assert!(!entry.is_armed(), "拒绝 = 没有消费者");
+    }
+
     #[test]
     fn armed_entry_delivers_events_in_order() {
         let entry = SessionEntry::new("s1");
-        let mut rx = entry.arm_turn();
+        let mut rx = entry.arm_turn().expect("armed");
         assert!(entry.is_armed());
         assert!(entry.has_turn_in_flight(), "轮次 armed ≠ 挂载 armed（N3）");
         assert!(entry.deliver(event("s1")));
@@ -1594,7 +1626,7 @@ mod tests {
     #[test]
     fn disarm_releases_queued_events_with_the_receiver() {
         let entry = SessionEntry::new("s1");
-        let rx = entry.arm_turn();
+        let rx = entry.arm_turn().expect("armed");
         entry.deliver(event("s1"));
         drop(rx);
         // 接收端没了 → 投递退化为「无消费者」，不 panic。
@@ -1621,7 +1653,7 @@ mod tests {
     #[test]
     fn a_full_event_channel_drops_instead_of_blocking() {
         let entry = SessionEntry::new("s1");
-        let mut rx = entry.arm_turn();
+        let mut rx = entry.arm_turn().expect("armed");
         for i in 0..EVENT_BUFFER {
             assert!(entry.deliver(event("s1")), "buffered event {i} must fit");
         }
@@ -1733,7 +1765,7 @@ mod tests {
         // 收刀之后：下一个 prompt 重新 arm，通道里不允许有残帧。
         drop(turn);
         assert!(!entry.is_armed());
-        let mut next = entry.arm_turn();
+        let mut next = entry.arm_turn().expect("armed");
         assert!(
             matches!(next.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
             "上一个轮次的尾帧不允许留给下一个 prompt"
