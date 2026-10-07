@@ -320,10 +320,10 @@ impl SessionEntry {
 ///
 /// | 步骤 | 用到的入口 |
 /// |------|-----------|
-/// | 03 | [`SessionHub::elicitation_form_supported`] / [`SessionHub::downgrade_elicitation`]（Ask 能力门控）、[`SessionHub::answer_ask`]（应答 Ask） |
+/// | 03 | [`SessionHub::elicitation_form_supported`] / [`SessionHub::downgrade_elicitation`]（Ask 能力门控）；应答经 `Turn::answer_ask`（三径见 `ask.rs`） |
 /// | 04 | [`SessionHub::register_client_connection`] / [`SessionHub::client_connection`]（中继的出站）、[`SessionHub::finish_model_relay`]（中继收尾）；模型切换本身走 `http.update_session`，触发点在 [`SessionHub::dispatch`]（**不**经 `Turn::updates_for`，见 design D7） |
 /// | 05 | [`SessionHub::attach_and_subscribe`] / [`SessionHub::close_session`]（load/resume 挂载 + 回收） |
-/// | 05+ | [`SessionHub::session_ids`] / [`SessionHub::knows`]（会话查询） |
+/// | 05+ | [`SessionHub::knows`]（会话查询；列表走 `http.list_sessions`） |
 pub struct SessionHub {
     /// 网关 HTTP 客户端（建会话 / 订阅 / interrupt；update/list/load 也用它）。
     pub(crate) http: GatewayApiClient,
@@ -358,8 +358,6 @@ struct HubState {
     sessions: HashMap<String, Arc<SessionEntry>>,
     /// `initialize` 声明的客户端能力（03 步的 elicitation / fs / terminal 门控）。
     client_capabilities: ClientCapabilities,
-    /// `initialize` 声明的客户端实现（日志用）。
-    client_info: Option<Implementation>,
     /// `elicitation/create` 被客户端回 `-32601`（粘性）：本进程内不再发 elicitation
     /// （见 [`SessionHub::downgrade_elicitation`]）。
     elicitation_unsupported: bool,
@@ -412,7 +410,6 @@ impl SessionHub {
             "acp: client registered"
         );
         state.client_capabilities = capabilities;
-        state.client_info = info;
     }
 
     /// 客户端声明的能力（未 initialize 时是默认值 = 全不支持）。
@@ -421,15 +418,6 @@ impl SessionHub {
             .lock()
             .expect("hub mutex poisoned")
             .client_capabilities
-            .clone()
-    }
-
-    /// 客户端声明的实现信息（未 initialize 时为 None）。
-    pub fn client_info(&self) -> Option<Implementation> {
-        self.state
-            .lock()
-            .expect("hub mutex poisoned")
-            .client_info
             .clone()
     }
 
@@ -532,18 +520,6 @@ impl SessionHub {
             .ok_or_else(|| HubError::UnknownSession(session_id.to_string()))
     }
 
-    /// 已知会话 id 快照（诊断用；`session/list` 的数据源是网关的 `/api/session/list`，
-    /// 不是本表——本表只有本进程服务过的会话）。
-    pub fn session_ids(&self) -> Vec<String> {
-        self.state
-            .lock()
-            .expect("hub mutex poisoned")
-            .sessions
-            .keys()
-            .cloned()
-            .collect()
-    }
-
     /// 是否认识该会话（`session/cancel` 等通知的静默忽略判据）。
     pub fn knows(&self, session_id: &str) -> bool {
         self.state
@@ -617,29 +593,6 @@ impl SessionHub {
                 tracing::warn!(session_id = %sid, error = %err, "acp: interrupt failed");
             }
         });
-    }
-
-    /// 应答 Ask（经 WS 出站队列，定向 resolve feedback waiter）。
-    ///
-    /// 03 步的正式实现也从这里走（答案格式：`header: answer` 逐行 / 多选逗号 /
-    /// 未答占位 / 取消哨兵——见 `shared::panels::ask` 的契约）。
-    pub async fn answer_ask(
-        &self,
-        session_id: &str,
-        tool_call_id: &str,
-        content: &str,
-    ) -> Result<(), HubError> {
-        if !self.knows(session_id) {
-            return Err(HubError::UnknownSession(session_id.to_string()));
-        }
-        self.outbound
-            .send(Outbound::Message {
-                session_id: session_id.to_string(),
-                content: content.to_string(),
-                tool_call_id: Some(tool_call_id.to_string()),
-            })
-            .await
-            .map_err(|_| HubError::Disconnected)
     }
 
     // ============================================================
@@ -1251,7 +1204,10 @@ impl Turn {
         trailing
     }
 
-    /// 应答一个 Ask（占位实现与 03 步的正式实现共用这条路径）。
+    /// 应答一个 Ask（经 WS 出站队列，定向 resolve feedback waiter）。
+    ///
+    /// 答案格式：`header: answer` 逐行 / 多选逗号 / 未答占位 / 取消哨兵
+    /// （契约见 `shared::panels::ask`；三径分流见 `ask.rs`）。
     pub async fn answer_ask(&self, tool_call_id: &str, content: &str) -> Result<(), HubError> {
         self.outbound
             .send(Outbound::Message {
