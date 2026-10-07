@@ -799,6 +799,10 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
                 http.clone(),
                 session_id.clone(),
             )),
+            model_switcher: Arc::new(stdin_handler::GatewayModelSwitcher::new(
+                http.clone(),
+                session_id.clone(),
+            )),
             out: Arc::clone(&out),
             delivery: message_delivery(resident, !args.prompt.is_empty()),
         }));

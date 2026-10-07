@@ -48,6 +48,7 @@ use wing_api_client::models::ModelsResponse;
 use wing_api_client::models::ProviderModels;
 use wing_api_client::models::UpdateSessionRequest;
 
+use crate::model_selection::resolve_provider;
 use crate::protocol::WingEvent;
 
 use super::session::SessionHub;
@@ -163,36 +164,6 @@ pub fn parse_value_id(raw: &str, providers: &[String]) -> Option<ModelSelection>
             model: raw.to_string(),
         },
     })
-}
-
-/// 裸模型名的 provider 归属（只在 `parse_value_id` 给出 `provider = None` 时调用）。
-///
-/// 1. 当前 provider 的模型表里有它 → 当前 provider（同 provider 换名最贴近直觉，
-///    也避免同名模型跨 provider 时被目录顺序带走）；
-/// 2. 否则目录里第一个列出它的 provider（目录序 = 确定性）；
-/// 3. 否则回落当前 provider——provider 的静态模型表**不是权威**（会话可以跑在表外模型上）；
-/// 4. 都没有 → `None`（调用方报 invalid params：网关要求 model / provider 成对下发）。
-pub fn resolve_provider(
-    model: &str,
-    catalog: &ModelsResponse,
-    current: Option<&str>,
-) -> Option<String> {
-    let current = non_blank(current);
-    if let Some(current) = current
-        && catalog.providers.iter().any(|provider| {
-            provider_name(provider) == Some(current) && lists_model(provider, model)
-        })
-    {
-        return Some(current.to_string());
-    }
-    if let Some(found) = catalog
-        .providers
-        .iter()
-        .find(|provider| provider_name(provider).is_some() && lists_model(provider, model))
-    {
-        return provider_name(found).map(str::to_string);
-    }
-    current.map(str::to_string)
 }
 
 /// `GET /api/models` 的目录 + 会话当前状态 → `model` option（空 vec = 没有可广告的值）。
@@ -567,16 +538,6 @@ fn provider_name(provider: &ProviderModels) -> Option<&str> {
     non_blank(Some(provider.provider.as_str()))
 }
 
-/// provider 的模型表里是否有该模型（逐字比对，两侧 trim）。
-fn lists_model(provider: &ProviderModels, model: &str) -> bool {
-    let model = model.trim();
-    !model.is_empty()
-        && provider
-            .models
-            .iter()
-            .any(|candidate| candidate.trim() == model)
-}
-
 /// 模型声明的描述（空白 / 未声明 → None）。
 fn description_of<'a>(provider: &'a ProviderModels, model: &str) -> Option<&'a str> {
     non_blank(
@@ -614,17 +575,6 @@ mod tests {
             ]
         }))
         .expect("catalog fixture decodes")
-    }
-
-    /// 同名模型跨 provider 的目录（归属解析用）。
-    fn shared_catalog() -> ModelsResponse {
-        serde_json::from_value(json!({
-            "providers": [
-                {"provider": "alpha", "models": ["shared", "alpha-only"]},
-                {"provider": "beta", "models": ["shared", "beta-only"]}
-            ]
-        }))
-        .expect("shared catalog fixture decodes")
     }
 
     fn providers(names: &[&str]) -> Vec<String> {
@@ -971,43 +921,6 @@ mod tests {
         assert_eq!(
             echoed_value("shared-model", &asked, &anonymous),
             "shared-model"
-        );
-    }
-
-    // ---- resolve_provider ----
-
-    #[test]
-    fn resolve_provider_prefers_the_current_provider_then_the_catalog_order() {
-        let catalog = shared_catalog();
-        // 同名模型跨 provider：当前 provider 优先（两个方向都成立）。
-        assert_eq!(
-            resolve_provider("shared", &catalog, Some("beta")).as_deref(),
-            Some("beta")
-        );
-        assert_eq!(
-            resolve_provider("shared", &catalog, Some("alpha")).as_deref(),
-            Some("alpha")
-        );
-        // 当前 provider 的表里没有它 → 目录里第一个列出它的 provider。
-        assert_eq!(
-            resolve_provider("shared", &catalog, None).as_deref(),
-            Some("alpha")
-        );
-        assert_eq!(
-            resolve_provider("beta-only", &catalog, Some("alpha")).as_deref(),
-            Some("beta")
-        );
-        // 目录里没有的模型名：回落当前 provider（静态表不是权威）。
-        assert_eq!(
-            resolve_provider("table-outside", &catalog, Some("alpha")).as_deref(),
-            Some("alpha")
-        );
-        // 连当前 provider 都不知道 → None（调用方报 invalid params）。
-        assert_eq!(resolve_provider("table-outside", &catalog, None), None);
-        // 空白 provider 名视同缺席。
-        assert_eq!(
-            resolve_provider("table-outside", &catalog, Some("  ")),
-            None
         );
     }
 

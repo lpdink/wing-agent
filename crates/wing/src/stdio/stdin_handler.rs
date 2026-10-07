@@ -28,7 +28,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use wing_api_client::GatewayClient as GatewayApiClient;
+use wing_api_client::models::UpdateSessionRequest;
 
+use crate::model_selection::resolve_provider;
 use crate::stdio::stdout::StdoutSink;
 
 /// interrupt 触发后等网关回话的上限。
@@ -36,6 +38,13 @@ use crate::stdio::stdout::StdoutSink;
 /// 中断本身在极端形态下要走取消阶梯（后端文档 ~18s），但编排器正在 await 应答
 /// ——"中断已触发"必须尽快回话，超时只记日志（见 [`handle_control_request`]）。
 const INTERRUPT_ACK_WAIT: Duration = Duration::from_secs(2);
+
+/// `set_model` 触发后等网关回话的上限。
+///
+/// pump 是串行的（读一行、处理完再读下一行），一次慢更新会顶住后续 stdin——
+/// 包括用户 prompt 的投递。与 [`INTERRUPT_ACK_WAIT`] 同一考虑：有界等待，
+/// 超时如实回 error（编排器能看到"这次切模型没做成"，不会静默错位）。
+const MODEL_SWITCH_ACK_WAIT: Duration = Duration::from_secs(15);
 
 /// 收尾时等 pump 把进行中的工作做完的上限。
 ///
@@ -106,9 +115,10 @@ impl StdinMessage {
 
 /// SDK → wing: `control_request` message.
 ///
-/// The SDK sends this for the initialize handshake and for operations like
-/// `interrupt`. Every subtype gets an explicit reply — the SDK awaits most of
-/// them, so silence means a hung orchestrator.
+/// The SDK sends this for the initialize handshake and for session operations
+/// like `interrupt`, `set_permission_mode`, and `set_model`. Every subtype gets
+/// an explicit reply — the SDK awaits most of them, so silence means a hung
+/// orchestrator.
 #[derive(Debug, Deserialize)]
 pub struct ControlRequest {
     #[serde(rename = "type")]
@@ -281,6 +291,72 @@ impl Interruptor for GatewayInterruptor {
 }
 
 // ============================================================
+// Model switch trigger
+// ============================================================
+
+/// 模型切换动作的 future（trait 要 dyn-safe，不能直接写 `async fn`）。
+pub type ModelSwitchFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+
+/// 模型切换口（与 [`Interruptor`] 同一精神：pump 只懂协议，动作经窄接口注入）。
+///
+/// Claude 协议的 `set_model` 控制请求只给一个**裸模型名**（编排器的值域来自它自己
+/// 配置的模型清单），而 `POST /api/session/update` 要求 model / provider 成对下发。
+/// 归属解析与 ACP 侧同一条规则（[`resolve_provider`]）：读会话当前 provider
+/// （`GET /api/session/get`；读路径不水合，但 stdio 进程持有订阅、会话不会被逐出）
+/// → 目录归属 → 更新。读/解析失败如实报错，不替编排器猜。
+pub trait ModelSwitcher: Send + Sync + 'static {
+    /// 把当前会话的模型切到 `model`。
+    fn set_model(&self, model: String) -> ModelSwitchFuture;
+}
+
+/// 生产实现：`POST /api/session/update {model, provider}`（wing-api-client）。
+pub struct GatewayModelSwitcher {
+    http: GatewayApiClient,
+    session_id: String,
+}
+
+impl GatewayModelSwitcher {
+    pub fn new(http: GatewayApiClient, session_id: impl Into<String>) -> Self {
+        Self {
+            http,
+            session_id: session_id.into(),
+        }
+    }
+}
+
+impl ModelSwitcher for GatewayModelSwitcher {
+    fn set_model(&self, model: String) -> ModelSwitchFuture {
+        let http = self.http.clone();
+        let session_id = self.session_id.clone();
+        Box::pin(async move {
+            let current = http
+                .get_session(&session_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("could not read session state: {e}"))?
+                .agent
+                .and_then(|agent| agent.provider_name);
+            let catalog = http
+                .get_models()
+                .await
+                .map_err(|e| anyhow::anyhow!("the gateway did not list its models: {e}"))?;
+            let provider = resolve_provider(&model, &catalog, current.as_deref())
+                .ok_or_else(|| anyhow::anyhow!("cannot resolve a provider for model '{model}'"))?;
+
+            let update = UpdateSessionRequest {
+                session_id,
+                model: Some(model),
+                provider: Some(provider),
+                ..Default::default()
+            };
+            http.update_session(&update)
+                .await
+                .map(|_| ())
+                .map_err(anyhow::Error::from)
+        })
+    }
+}
+
+// ============================================================
 // The pump
 // ============================================================
 
@@ -288,6 +364,8 @@ impl Interruptor for GatewayInterruptor {
 pub struct StdinPumpContext {
     /// 中断动作的注入点。
     pub interruptor: Arc<dyn Interruptor>,
+    /// 模型切换动作的注入点（`set_model` 控制请求）。
+    pub model_switcher: Arc<dyn ModelSwitcher>,
     /// 与 renderer 共享的 stdout 出口（串行化，见 [`StdoutSink`]）。
     pub out: Arc<StdoutSink>,
     /// `user` 消息的投递策略（见 [`MessageDelivery`]）。
@@ -554,6 +632,98 @@ async fn handle_control_request(req: &ControlRequest, ctx: &StdinPumpContext) {
                 .line(&ControlResponse::success(req.request_id.as_str()).to_line());
         }
 
+        "set_permission_mode" => {
+            // wing 的 stdio 会话创建即 yolo（该形态没有承接确认弹窗的通道——
+            // 后端确认流程会阻塞等待，等不到人）。权限模式因此不改变 wing 的
+            // 执行路径：如实接受请求，让编排器（T3 Code 等）继续。
+            // 「真正的」监督模式需要 wing 主动向编排器发 `can_use_tool` 请求，
+            // 那是另一个功能；在那之前这里不做任何虚假承诺。
+            let mode = req
+                .request
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            tracing::info!(
+                request_id = %req.request_id,
+                mode = mode,
+                "set_permission_mode accepted (stdio sessions always run yolo)"
+            );
+            ctx.out
+                .line(&ControlResponse::success(req.request_id.as_str()).to_line());
+        }
+
+        "set_model" => {
+            let model = req
+                .request
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if model.is_empty() {
+                tracing::warn!(
+                    request_id = %req.request_id,
+                    "set_model without a usable 'model' value; answering error"
+                );
+                ctx.out.line(
+                    &ControlResponse::error(
+                        req.request_id.as_str(),
+                        "set_model requires a non-empty 'model' value",
+                    )
+                    .to_line(),
+                );
+            } else {
+                match tokio::time::timeout(
+                    MODEL_SWITCH_ACK_WAIT,
+                    ctx.model_switcher.set_model(model.clone()),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        tracing::info!(
+                            request_id = %req.request_id,
+                            model = %model,
+                            "model switched"
+                        );
+                        ctx.out
+                            .line(&ControlResponse::success(req.request_id.as_str()).to_line());
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            request_id = %req.request_id,
+                            model = %model,
+                            error = %e,
+                            "model switch failed; answering error"
+                        );
+                        ctx.out.line(
+                            &ControlResponse::error(
+                                req.request_id.as_str(),
+                                format!("model switch failed: {e}"),
+                            )
+                            .to_line(),
+                        );
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            request_id = %req.request_id,
+                            model = %model,
+                            "model switch did not finish in time; answering error"
+                        );
+                        ctx.out.line(
+                            &ControlResponse::error(
+                                req.request_id.as_str(),
+                                format!(
+                                    "model switch timed out after {}s",
+                                    MODEL_SWITCH_ACK_WAIT.as_secs()
+                                ),
+                            )
+                            .to_line(),
+                        );
+                    }
+                }
+            }
+        }
+
         other => {
             let subtype = if other.is_empty() { "unknown" } else { other };
             tracing::warn!(
@@ -634,13 +804,63 @@ mod tests {
         }
     }
 
+    /// 假模型切换器：记录调用序列，可配置为失败。
+    #[derive(Default)]
+    struct FakeModelSwitcher {
+        calls: Mutex<Vec<String>>,
+        fail: bool,
+    }
+
+    impl FakeModelSwitcher {
+        fn failing() -> Self {
+            Self {
+                fail: true,
+                ..Default::default()
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl ModelSwitcher for FakeModelSwitcher {
+        fn set_model(&self, model: String) -> ModelSwitchFuture {
+            self.calls.lock().unwrap().push(model);
+            let fail = self.fail;
+            Box::pin(async move {
+                if fail {
+                    Err(anyhow::anyhow!("gateway said no"))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
     fn context(
         interruptor: Arc<FakeInterruptor>,
         out: &CaptureSink,
         delivery: MessageDelivery,
     ) -> StdinPumpContext {
+        context_with_switcher(
+            interruptor,
+            Arc::new(FakeModelSwitcher::default()),
+            out,
+            delivery,
+        )
+    }
+
+    /// 带模型切换器的上下文（`set_model` 相关测试用，便于断言调用序列）。
+    fn context_with_switcher(
+        interruptor: Arc<FakeInterruptor>,
+        switcher: Arc<FakeModelSwitcher>,
+        out: &CaptureSink,
+        delivery: MessageDelivery,
+    ) -> StdinPumpContext {
         StdinPumpContext {
             interruptor: interruptor as Arc<dyn Interruptor>,
+            model_switcher: switcher as Arc<dyn ModelSwitcher>,
             out: out.sink(),
             delivery,
         }
@@ -996,7 +1216,7 @@ mod tests {
     #[tokio::test]
     async fn pump_answers_error_for_unsupported_control_request() {
         let input = concat!(
-            r#"{"type":"control_request","request_id":"m-1","request":{"subtype":"set_model","model":"x"}}"#,
+            r#"{"type":"control_request","request_id":"m-1","request":{"subtype":"get_context_usage"}}"#,
             "\n",
             r#"{"type":"user","message":{"role":"user","content":"go"}}"#,
             "\n",
@@ -1014,11 +1234,157 @@ mod tests {
             lines[0]["response"]["error"]
                 .as_str()
                 .unwrap()
-                .contains("set_model"),
+                .contains("get_context_usage"),
             "{:?}",
             lines[0]
         );
         assert_eq!(interruptor.calls(), 0);
+
+        pump.finish().await;
+    }
+
+    // ---- set_permission_mode / set_model（编排器的模式同步与模型切换）----
+
+    /// 送一条控制帧 + 一条 prompt，返回捕获出口与 pump（`set_model` 测试共用）。
+    fn spawn_with_switcher(
+        control: &str,
+        switcher: &Arc<FakeModelSwitcher>,
+        capture: &CaptureSink,
+    ) -> StdinPump {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(control.to_string()).unwrap();
+        tx.send(r#"{"type":"user","message":{"role":"user","content":"go"}}"#.to_string())
+            .unwrap();
+        drop(tx);
+        spawn_with(
+            rx,
+            context_with_switcher(
+                Arc::new(FakeInterruptor::default()),
+                Arc::clone(switcher),
+                capture,
+                MessageDelivery::FirstOnly,
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn pump_accepts_set_permission_mode_and_answers_success() {
+        // T3 Code 等编排器在续轮前用 set_permission_mode 恢复线程模式；wing 的
+        // stdio 会话恒为 yolo（没有承接确认弹窗的通道），请求如实接受即可——
+        // 回 error 会让整个 turn 起不来。
+        let input = concat!(
+            r#"{"type":"control_request","request_id":"perm-1","request":{"subtype":"set_permission_mode","mode":"acceptEdits"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"go"}}"#,
+            "\n",
+        );
+        let capture = CaptureSink::default();
+        let interruptor = Arc::new(FakeInterruptor::default());
+        let mut pump = spawn_static(input, &interruptor, &capture, MessageDelivery::FirstOnly);
+
+        assert_eq!(pump.wait_prompt().await.unwrap(), "go");
+
+        let lines = wait_lines(&capture, 1).await;
+        assert_eq!(lines[0]["response"]["subtype"], "success");
+        assert_eq!(lines[0]["response"]["request_id"], "perm-1");
+
+        pump.finish().await;
+    }
+
+    #[tokio::test]
+    async fn pump_accepts_set_permission_mode_without_a_mode_value() {
+        // 缺失 mode 不改变 wing 的行为（恒 yolo），照回 success——同 initialize
+        // 的宽容姿势：编排器 await 的应答不能因为字段不完美就悬着。
+        let input = concat!(
+            r#"{"type":"control_request","request_id":"perm-2","request":{"subtype":"set_permission_mode"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"go"}}"#,
+            "\n",
+        );
+        let capture = CaptureSink::default();
+        let interruptor = Arc::new(FakeInterruptor::default());
+        let mut pump = spawn_static(input, &interruptor, &capture, MessageDelivery::FirstOnly);
+
+        assert_eq!(pump.wait_prompt().await.unwrap(), "go");
+
+        let lines = wait_lines(&capture, 1).await;
+        assert_eq!(lines[0]["response"]["subtype"], "success");
+        assert_eq!(lines[0]["response"]["request_id"], "perm-2");
+
+        pump.finish().await;
+    }
+
+    #[tokio::test]
+    async fn pump_switches_model_and_answers_success() {
+        let capture = CaptureSink::default();
+        let switcher = Arc::new(FakeModelSwitcher::default());
+        let mut pump = spawn_with_switcher(
+            r#"{"type":"control_request","request_id":"model-1","request":{"subtype":"set_model","model":"gmodel"}}"#,
+            &switcher,
+            &capture,
+        );
+
+        assert_eq!(pump.wait_prompt().await.unwrap(), "go");
+
+        let lines = wait_lines(&capture, 1).await;
+        assert_eq!(lines[0]["response"]["subtype"], "success");
+        assert_eq!(lines[0]["response"]["request_id"], "model-1");
+        assert_eq!(switcher.calls(), vec!["gmodel".to_string()]);
+
+        pump.finish().await;
+    }
+
+    #[tokio::test]
+    async fn pump_answers_error_when_the_model_switch_fails() {
+        let capture = CaptureSink::default();
+        let switcher = Arc::new(FakeModelSwitcher::failing());
+        let mut pump = spawn_with_switcher(
+            r#"{"type":"control_request","request_id":"model-2","request":{"subtype":"set_model","model":"gmodel"}}"#,
+            &switcher,
+            &capture,
+        );
+
+        assert_eq!(pump.wait_prompt().await.unwrap(), "go");
+
+        let lines = wait_lines(&capture, 1).await;
+        assert_eq!(lines[0]["response"]["subtype"], "error");
+        assert_eq!(lines[0]["response"]["request_id"], "model-2");
+        assert!(
+            lines[0]["response"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("gateway said no"),
+            "{:?}",
+            lines[0]
+        );
+        assert_eq!(switcher.calls(), vec!["gmodel".to_string()]);
+
+        pump.finish().await;
+    }
+
+    #[tokio::test]
+    async fn pump_rejects_set_model_without_a_value() {
+        let capture = CaptureSink::default();
+        let switcher = Arc::new(FakeModelSwitcher::default());
+        let mut pump = spawn_with_switcher(
+            r#"{"type":"control_request","request_id":"model-3","request":{"subtype":"set_model"}}"#,
+            &switcher,
+            &capture,
+        );
+
+        assert_eq!(pump.wait_prompt().await.unwrap(), "go");
+
+        let lines = wait_lines(&capture, 1).await;
+        assert_eq!(lines[0]["response"]["subtype"], "error");
+        assert!(
+            lines[0]["response"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("non-empty"),
+            "{:?}",
+            lines[0]
+        );
+        assert!(switcher.calls().is_empty(), "没有可用 model 时不该调切换口");
 
         pump.finish().await;
     }
@@ -1330,6 +1696,7 @@ mod tests {
             rx,
             StdinPumpContext {
                 interruptor: Arc::new(SlowInterruptor),
+                model_switcher: Arc::new(FakeModelSwitcher::default()),
                 out,
                 delivery: MessageDelivery::Ignore,
             },
