@@ -1263,8 +1263,44 @@ mod tests {
 
     // ---- 容量有界 ----
 
+    /// 到顶 warn（`apply_diff` 里那条）的 callsite 是**进程级共享**的：tracing 的
+    /// interest 缓存全局且不会自愈，而「无订阅者」的线程可能先把该 callsite 注册成
+    /// never。两个会触发它的测试串行执行，让注册时序确定（细节见
+    /// `diff_cap_warns_exactly_once`）。
+    static CAP_WARN_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 取串行锁；测试失败（panic）会毒化锁，直接取回内层，避免连带影响另一个测试。
+    fn lock_cap_warn_serial() -> std::sync::MutexGuard<'static, ()> {
+        CAP_WARN_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// 把一张卡片填到 diff 上限、再送一条溢出（触发一次真实的到顶 warn）。
+    fn fill_card_to_the_cap(cards: &mut ToolCards, id: &str) {
+        cards.apply(&tool_call_stream(id, "Edit"));
+        cards.apply(&tool_call(id, "Edit", json!({"path": "a.rs"})));
+        for i in 0..MAX_DIFFS_PER_CARD {
+            assert_eq!(
+                cards
+                    .apply(&diff_event(id, "a.rs", None, &format!("v{i}")))
+                    .len(),
+                1,
+                "第 {i} 条 diff 应当发 update"
+            );
+        }
+        assert!(
+            cards
+                .apply(&diff_event(id, "a.rs", None, "overflow"))
+                .is_empty(),
+            "超出上限的 diff 必须被丢弃且不产帧"
+        );
+    }
+
     #[test]
     fn per_card_diffs_are_capped() {
+        // 与 diff_cap_warns_exactly_once 串行（共享同一条 warn 的 callsite）。
+        let _serial = lock_cap_warn_serial();
         let mut cards = ToolCards::default();
         cards.apply(&tool_call_stream("tc1", "Edit"));
         cards.apply(&tool_call("tc1", "Edit", json!({"path": "a.rs"})));
@@ -1279,6 +1315,7 @@ mod tests {
 
         // 「到顶」只记一次（N-r2-2）：warn 一次化靠 `cap_warned` 保证——记的是
         // 「本条卡片已经报过到顶」，后续被丢弃的 diff 不再刷屏。
+        // 这里只钉标志位；可观测的 warn 次数由 `diff_cap_warns_exactly_once` 断言（N1）。
         let card = cards.cards.get("tc1").expect("卡片仍在");
         assert!(
             card.cap_warned,
@@ -1321,6 +1358,82 @@ mod tests {
             }
             other => panic!("expected tool_call_update, got {other:?}"),
         }
+    }
+
+    /// 06 r1 N1：`cap_warned` 只是「别重复刷屏」的实现手段，断言要落在**可观测的
+    /// warn 次数**上——只查标志位的旧断言放过了「每次都 warn」的回归（变异 M9）。
+    #[test]
+    fn diff_cap_warns_exactly_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+        use tracing_subscriber::layer::Layer;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        /// 只数 WARN 事件的计数 Layer。
+        #[derive(Default)]
+        struct WarnCounter(Arc<AtomicUsize>);
+
+        impl<S: tracing::Subscriber> Layer<S> for WarnCounter {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if event.metadata().level() == &tracing::Level::WARN {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+
+        // 两个会触发同一条 warn 的测试串行：tracing 的 interest 缓存是进程级全局的
+        // ——并行注册（注册线程没有订阅者）会把 callsite 粘成 never，时序不定。
+        let _serial = lock_cap_warn_serial();
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(WarnCounter(Arc::clone(&counter)));
+        // thread-local 作用域：不影响并行跑的其它测试的事件分发。
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        // 该 callsite 可能已被「无订阅者」的线程提前注册（历史运行 / 并行测试），
+        // 缓存里的 never 不会自愈——从本线程显式重建一次（此刻无注册在途，见上锁）。
+        tracing::callsite::rebuild_interest_cache();
+
+        // 预热：确认本订阅者确实收得到这条 warn（收不到的话后面的计数只会是
+        // 无意义的 0）。
+        let mut warm = ToolCards::default();
+        fill_card_to_the_cap(&mut warm, "warm");
+        assert!(
+            counter.load(Ordering::SeqCst) > 0,
+            "计数订阅者收不到到顶 warn（interest 缓存异常）"
+        );
+        counter.store(0, Ordering::SeqCst);
+
+        // ---- 被测断言 ----
+        let mut cards = ToolCards::default();
+        cards.apply(&tool_call_stream("tc1", "Edit"));
+        cards.apply(&tool_call("tc1", "Edit", json!({"path": "a.rs"})));
+
+        for i in 0..MAX_DIFFS_PER_CARD {
+            let updates = cards.apply(&diff_event("tc1", "a.rs", None, &format!("v{i}")));
+            assert_eq!(updates.len(), 1, "第 {i} 条 diff 应当发 update");
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "未到顶不该有 warn");
+
+        // 到顶之后连来 5 条：只允许第一条 warn（「每次都 warn」= 5 次，必须被抓住）。
+        for _ in 0..5 {
+            assert!(
+                cards
+                    .apply(&diff_event("tc1", "a.rs", None, "overflow"))
+                    .is_empty(),
+                "超出上限的 diff 必须被丢弃且不产帧"
+            );
+        }
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "到顶只 warn 一次；后续被丢弃的 diff 不再刷屏（N1）"
+        );
     }
 
     #[test]
