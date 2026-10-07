@@ -50,7 +50,7 @@ job 只在基础设施故障时红（构建/测量失败、报告渲染失败）
 
 ### rust（criterion 微基准）
 
-`--quick` = 每个 bench 一组锚定 case + `--measurement-time 2`（单侧 ≈ 2–2.5 分钟，
+`--quick` = 每个 bench 一组锚定 case + `--measurement-time 2`（单侧 ≈ 2–3 分钟，
 支配项是 `tool_args_stream/frames_60fps/*`）；非 quick = 全 case、无 filter
 （含分钟级 case，45 分钟级/侧，只作本地深潜、不做预算承诺）。指标 id 形如
 `rust.stream_render.incremental.content.256.median_ns`（criterion id 的 `/` → `.`，

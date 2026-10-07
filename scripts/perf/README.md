@@ -34,7 +34,7 @@ uv run python scripts/perf/comment.py --repo owner/repo --pr 42 --body-file /tmp
 `--suites`（`all` 或 `rust,tui,gateway`）、`--rounds`、`--quick`、`--prepare/--no-prepare`、
 `--calibrate`、`--out-json` / `--out-md`、`--selftest`。
 
-`--quick` = CI 档（单侧单轮有界：rust ≈ 2–2.5 min、tui ≈ 8–10s、gateway ≈ 4–6s）；
+`--quick` = CI 档（单侧单轮有界：rust ≈ 2–3 min、tui ≈ 8–10s、gateway ≈ 4–6s）；
 不带 `--quick` 是本地深潜档（rust 全 case 45 分钟级/侧、tui ≈ 48s/侧）。
 
 ## side.json（契约 §1）
