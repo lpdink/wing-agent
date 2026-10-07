@@ -42,7 +42,7 @@ jobs:
     timeout-minutes: 5
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     permissions:
-      contents: read
+      # dispatch 路径要经 API 读 PR 的 head/base；本 job 不 checkout，无需 contents。
       pull-requests: read
     outputs:
       pr_number: ${{ steps.pr.outputs.pr_number }}
@@ -112,7 +112,7 @@ jobs:
         run: |
           set -euo pipefail
           # fetch-depth: 0 已带上所有分支；这里只在 origin/<base> 缺席时补拉（幂等）。
-          if ! git rev-parse --verify --quiet "origin/$BASE_REF"; then
+          if ! git rev-parse --verify --quiet "origin/$BASE_REF" >/dev/null; then
             git fetch --no-tags origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
           fi
           BASE=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")
@@ -193,7 +193,7 @@ jobs:
         run: |
           set -euo pipefail
           # fetch-depth: 0 已带上所有分支；这里只在 origin/<base> 缺席时补拉（幂等）。
-          if ! git rev-parse --verify --quiet "origin/$BASE_REF"; then
+          if ! git rev-parse --verify --quiet "origin/$BASE_REF" >/dev/null; then
             git fetch --no-tags origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
           fi
           BASE=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")
@@ -289,13 +289,16 @@ jobs:
           CALIBRATE: ${{ github.event.inputs.calibrate || 'false' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          set -uo pipefail
+          # runner 对 run 步骤强制 set -e（这里显式声明，保证本地演练与 runner 同语义）。
+          set -euo pipefail
 
           # 1) 两个 suite 的 ab.py 输出（缺失 = 该侧没有可用数据）
           #    按文件名用 find 定位：解包后的相对布局由 upload-artifact 的「公共根目录」
           #    规则决定（json/md 在 workspace、raw 在 $RUNNER_TEMP），这里不假设前缀。
+          #    `|| true`：目录不存在是预期情形（download-artifact 无匹配时不建目录），
+          #    不能以非 0 退出——裸赋值 + set -e 会中止整个步骤、丢掉 no-data 兜底。
           find_json() {
-            find perf-artifacts -type f -name "$1" -print -quit 2>/dev/null
+            find perf-artifacts -type f -name "$1" -print -quit 2>/dev/null || true
           }
           JSONS=()
           for suite in tui gateway; do
@@ -332,6 +335,10 @@ jobs:
                    2>report-stderr.log; then
               RENDER_FAILED=true
             fi
+            # 退出 0 但没写出（或写出空文件）同样算渲染失败：正文走兜底、最后一步标红。
+            if [ ! -s comment-body.md ]; then
+              RENDER_FAILED=true
+            fi
           fi
 
           # 4) 组装最终正文：正常结果 / 渲染失败兜底 / 无数据兜底，末尾附失败标注
@@ -345,7 +352,7 @@ jobs:
                 '两个测量 job 都没有产出可用的结果（基础设施故障）。请查看本次 run 的日志与 artifact：perf-tui / perf-gateway。' \
                 '' \
                 "[run 日志]($RUN_URL)"
-            elif [ "$RENDER_FAILED" = "true" ] || [ ! -s comment-body.md ]; then
+            elif [ "$RENDER_FAILED" = "true" ]; then
               printf '%s\n' \
                 '<!-- wing-perf -->' \
                 '' \
@@ -368,18 +375,10 @@ jobs:
           echo "report_failed=$RENDER_FAILED" >> "$GITHUB_OUTPUT"
           echo "comment body: $(wc -c < comment.md) bytes"
 
-      - name: Upload the comment body
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: perf-comment
-          path: comment.md
-          if-no-files-found: warn
-          retention-days: 14
-
       - name: Upsert sticky PR comment
         # fork PR（head 来自其它仓库）不发评论：那种情况下 GITHUB_TOKEN 被强制降为只读，
         # 契约也要求 fork 只留 artifact。pr_number 为空（resolve 失败）时同样跳过。
+        # 排在 artifact 上传之前：评论不依赖 artifact，上传抖动不该吞掉评论。
         if: needs.resolve.outputs.pr_number != '' && needs.resolve.outputs.is_fork != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -389,6 +388,15 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --pr "${{ needs.resolve.outputs.pr_number }}" \
             --body-file comment.md
+
+      - name: Upload the comment body
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-comment
+          path: comment.md
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Step summary
         if: always()

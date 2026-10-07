@@ -147,16 +147,15 @@ def find_sticky_comment(repo: str, pr: int) -> int | None:
     )
 
 
-def print_dry_run(repo: str, pr: int, body: str) -> None:
+def print_dry_run(repo: str, pr: int, body: str, marker_added: bool) -> None:
     """打印真实运行会发出的 API 调用（离线；不需要 gh / token）。"""
     payload = json.dumps({"body": body}, ensure_ascii=False)
     search = f"gh api --method GET 'repos/{repo}/issues/{pr}/comments?per_page={PAGE_SIZE}&page=<n>'"
     update = f"gh api --method PATCH 'repos/{repo}/issues/comments/<id>' --input -"
     create = f"gh api --method POST 'repos/{repo}/issues/{pr}/comments' --input -"
     print("dry-run: nothing is sent; a real run would make these calls")
-    print(
-        f"  body    : {len(body)} chars (marker {'present' if MARKER in body else 'prepended'})"
-    )
+    marker_state = "prepended" if marker_added else "present"
+    print(f"  body    : {len(body)} chars (marker {marker_state})")
     print(
         f"  payload : {len(payload.encode('utf-8'))} bytes of JSON on stdin (--input -)"
     )
@@ -214,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"warning: body had no {MARKER} marker; prepended it", file=sys.stderr
             )
         if args.dry_run:
-            print_dry_run(args.repo, args.pr, body)
+            print_dry_run(args.repo, args.pr, body, added)
             return 0
         print(upsert(args.repo, args.pr, body))
         return 0
