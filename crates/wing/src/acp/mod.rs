@@ -27,8 +27,8 @@
 //! | [`session`] | `SessionHub`：会话表、WS 事件泵与分流、出站队列、prompt 串行化 |
 //! | [`translate`] | `WingEvent` → ACP `session/update` 的映射（纯函数） |
 //!
-//! 后续步骤（06 e2e）从协议面驱动：所有能力都经公开的 ACP 方法与 `/api/*` 观察，
-//! 模块内部没有为测试留的开关。
+//! 整机 e2e（`crates/wing/tests/acp_e2e.rs`）从协议面驱动：所有能力都经公开的 ACP
+//! 方法与 `/api/*` 观察，模块内部没有为测试留的开关。
 // stderr 承载诊断（`wing error: …`），stdout 已被 ACP 协议占用。
 #![allow(clippy::print_stderr)]
 

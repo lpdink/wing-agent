@@ -94,6 +94,8 @@ struct Card {
     result: Option<String>,
     /// `diff_content` 送来的文件改动（按到达顺序，最多 [`MAX_DIFFS_PER_CARD`] 条）。
     diffs: Vec<Diff>,
+    /// 「diff 到顶」是否已报过（warn 一次化：到顶后每条被丢弃的 diff 不再刷屏）。
+    cap_warned: bool,
 }
 
 impl Card {
@@ -311,7 +313,11 @@ impl ToolCards {
         let card = self.card_mut(tool_call_id);
         if card.diffs.len() >= MAX_DIFFS_PER_CARD {
             // 到顶即冻结：列表没变化，不发 update（也不重发列表）。
-            if card.diffs.len() == MAX_DIFFS_PER_CARD {
+            //
+            // warn **一次**（N-r2-2）：只在首次跨过阈值时报，此后每条被丢弃的 diff
+            // 都是同一件事的重复（曾按帧刷屏，1000 条 diff 出 ≈936 行 warn）。
+            if !card.cap_warned {
+                card.cap_warned = true;
                 tracing::warn!(
                     tool_call_id,
                     cap = MAX_DIFFS_PER_CARD,
@@ -1270,6 +1276,23 @@ mod tests {
         // 到顶之后：不再追加、不再发 update（列表冻结，无内容抖动）。
         let extra = cards.apply(&diff_event("tc1", "a.rs", None, "overflow"));
         assert!(extra.is_empty(), "超出上限的 diff 必须被丢弃且不产帧");
+
+        // 「到顶」只记一次（N-r2-2）：warn 一次化靠 `cap_warned` 保证——记的是
+        // 「本条卡片已经报过到顶」，后续被丢弃的 diff 不再刷屏。
+        let card = cards.cards.get("tc1").expect("卡片仍在");
+        assert!(
+            card.cap_warned,
+            "首次跨过阈值必须置位（否则每条被丢弃的 diff 都会 warn 一次）"
+        );
+        let before = card.diffs.len();
+        for _ in 0..5 {
+            let _ = cards.apply(&diff_event("tc1", "a.rs", None, "overflow"));
+        }
+        assert_eq!(
+            cards.cards.get("tc1").expect("卡片仍在").diffs.len(),
+            before,
+            "到顶后列表不再增长"
+        );
 
         // 结果行仍会把冻结后的完整列表发一次（整表替换语义不变）。
         match single(cards.apply(&tool_call_result("tc1", "Edit", "edited", true))) {

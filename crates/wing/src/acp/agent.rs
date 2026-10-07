@@ -933,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn initialize_echoes_version_and_advertises_session_lifecycle() {
+    fn initialize_replies_v1_and_advertises_session_lifecycle() {
         let request: InitializeRequest = serde_json::from_value(json!({
             "protocolVersion": 1,
             "clientCapabilities": {

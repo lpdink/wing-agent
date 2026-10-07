@@ -172,12 +172,16 @@ struct SessionEntry {
 
 #[derive(Default)]
 struct EntryState {
-    /// 当前在途 prompt 的事件接收口；`None` = 没有消费者（事件丢弃）。
+    /// 当前 armed 的事件接收口；`None` = 没有消费者（事件丢弃）。
     events: Option<mpsc::Sender<WingEvent>>,
     /// 会话级工具卡片记忆（跨轮次）。
     tools: ToolCards,
-    /// 是否有一轮 prompt 已 armed（`request_cancel` 据此决定发不发 interrupt）。
-    active: bool,
+    /// 有一轮 **prompt** 已 armed：`session/cancel` / `close` 据此决定发不发 interrupt
+    /// （05 审查 N3：挂载窗口没有后端轮次，对空闲会话 interrupt 是多余行为）。
+    turn_armed: bool,
+    /// 有一次**挂载**（`session/load` / `session/resume`）已 armed：同会话 prompt 排队等它，
+    /// `close` 也要等它收口——但它**不是**在途轮次（不发 interrupt）。
+    attach_armed: bool,
     /// 模型变更中继在途（04）：同一会话同时只有一次在中继（见 [`SessionEntry::claim_model_relay`]）。
     model_relay_in_flight: bool,
     /// 中继在途期间又收到模型变更（收尾时再跑一次，合并成「以最新状态为准」）。
@@ -193,20 +197,47 @@ impl SessionEntry {
         }
     }
 
-    /// 装上本轮的事件通道并置位 active（调用方已持有 gate）。
-    fn arm(&self) -> mpsc::Receiver<WingEvent> {
+    /// 装上事件通道（调用方已持有 gate；armed 标记由 [`SessionEntry::arm_turn`] /
+    /// [`SessionEntry::arm_attached`] 各自置位）。
+    fn install_events(state: &mut EntryState) -> mpsc::Receiver<WingEvent> {
         let (tx, rx) = mpsc::channel(EVENT_BUFFER);
-        let mut state = self.inner.lock().expect("entry mutex poisoned");
         state.events = Some(tx);
-        state.active = true;
         rx
     }
 
-    /// 卸下通道、清 active 标记（轮次收口；Drop 也走这里）。
+    /// 装上一轮 **prompt** 的事件通道并置位 `turn_armed`（调用方已持有 gate）。
+    fn arm_turn(&self) -> mpsc::Receiver<WingEvent> {
+        let mut state = self.inner.lock().expect("entry mutex poisoned");
+        let rx = Self::install_events(&mut state);
+        state.turn_armed = true;
+        rx
+    }
+
+    /// 装上一次**挂载**的事件通道并置位 `attach_armed`（调用方已持有 gate）。
+    fn arm_attached(&self) -> mpsc::Receiver<WingEvent> {
+        let mut state = self.inner.lock().expect("entry mutex poisoned");
+        let rx = Self::install_events(&mut state);
+        state.attach_armed = true;
+        rx
+    }
+
+    /// 卸下通道、清 armed 标记（轮次 / 挂载收口；Drop 与回收路径也走这里）。
     fn disarm(&self) {
         let mut state = self.inner.lock().expect("entry mutex poisoned");
         state.events = None;
-        state.active = false;
+        state.turn_armed = false;
+        state.attach_armed = false;
+    }
+
+    /// 是否有**在途轮次**（`request_cancel` 的判据；挂载期不算）。
+    fn has_turn_in_flight(&self) -> bool {
+        self.inner.lock().expect("entry mutex poisoned").turn_armed
+    }
+
+    /// 是否有 armed 的消费者（轮次或挂载）——`close` 的等待判据。
+    fn is_armed(&self) -> bool {
+        let state = self.inner.lock().expect("entry mutex poisoned");
+        state.turn_armed || state.attach_armed
     }
 
     /// 事件投递：没有消费者 → 丢弃（debug）；通道满 → 丢弃 + warn。
@@ -235,10 +266,6 @@ impl SessionEntry {
             }
             Err(mpsc::error::TrySendError::Closed(_)) => false,
         }
-    }
-
-    fn is_active(&self) -> bool {
-        self.inner.lock().expect("entry mutex poisoned").active
     }
 
     /// 模型变更中继的去重/合并协议（04，见 `model::relay_model_change`）：
@@ -543,7 +570,7 @@ impl SessionHub {
         if self.stream_dead.load(Ordering::SeqCst) {
             return Err(HubError::Disconnected);
         }
-        let rx = entry.arm();
+        let rx = entry.arm_turn();
         let turn = Turn {
             session_id: session_id.to_string(),
             entry: Arc::clone(&entry),
@@ -569,8 +596,9 @@ impl SessionHub {
 
     /// 请求取消当前轮次：异步触发网关 interrupt。
     ///
-    /// 只有会话确实有在途 prompt 时才发起 HTTP interrupt——空闲期发会把网关的
-    /// `interrupted` 广播留给下一个 prompt，等于凭空把它打回 cancelled。
+    /// 只有会话确实有**在途 prompt** 时才发起 HTTP interrupt——空闲期发会把网关的
+    /// `interrupted` 广播留给下一个 prompt，等于凭空把它打回 cancelled。挂载窗口
+    /// （`session/load` / `session/resume`）同样没有后端轮次，也不发（05 审查 N3）。
     /// 网关随后广播 `interrupted`，在途 [`Turn`] 收到即以 `cancelled` 收口
     /// （`session/cancel` 必回 `stopReason: "cancelled"`）。
     pub fn request_cancel(self: &Arc<Self>, session_id: &str) {
@@ -578,7 +606,7 @@ impl SessionHub {
             tracing::debug!(session_id, "acp: cancel for an unknown session; ignored");
             return;
         };
-        if !entry.is_active() {
+        if !entry.has_turn_in_flight() {
             tracing::debug!(session_id, "acp: cancel with no prompt in flight; ignored");
             return;
         }
@@ -625,40 +653,69 @@ impl SessionHub {
     /// 一步就没有消费者，快照被丢弃（回放无从谈起）。两条动作封在一个方法里，顺序不
     /// 会写错。
     ///
-    /// 订阅失败 → 回收条目并报错（不留一个「在表但收不到事件」的会话：那种会话的
-    /// prompt 会静默挂起）。
+    /// 订阅失败 → 回滚（只回收**本次新建**的条目；见下）并报错——不留一个「在表但
+    /// 收不到事件」的会话（那种会话的 prompt 会静默挂起）。
+    ///
+    /// 回滚的两个边界（05 审查 N1/N2）：
+    ///
+    /// - **只回收本次新建的条目**：重复挂载一个既有会话时，条目（含卡片记忆）与网关侧
+    ///   订阅本来健康，一次失败的重复挂载不该把它们删掉；
+    /// - **best-effort 撤销网关侧订阅**（只对新建条目）：`POST /api/session/subscribe`
+    ///   是「先建路由后应答」（见 `routes/session.py`），响应丢失时网关仍认为本 client
+    ///   订阅着该会话——不撤销会把会话钉在网关内存里（release 被 409 拒绝、reaper 逐出
+    ///   不了）。既有条目的订阅**不能**撤（那是它的健康订阅）。
     ///
     /// 取 gate 会排队等同会话的在途轮次 / 上一次挂载收口（复用 `Turn` 的串行化语义）：
-    /// 挂载期间 `active = true`，同会话的 `session/prompt` 也排队等挂载结束——回放中途
-    /// 换掉事件通道会让回放读不到快照帧。
+    /// 挂载期间 armed，同会话的 `session/prompt` 也排队等挂载结束——回放中途换掉事件
+    /// 通道会让回放读不到快照帧。
     pub async fn attach_and_subscribe(&self, session_id: &str) -> Result<Attached, HubError> {
-        let attached = self.attach_session(session_id).await?;
+        let (attached, created) = self.attach_session(session_id).await?;
         if let Err(error) = self.subscribe_session(session_id).await {
-            self.remove_entry(session_id);
+            if created {
+                self.remove_entry(session_id);
+                if let Err(err) = self.http.unsubscribe(session_id, &self.client_id).await {
+                    tracing::warn!(
+                        session_id,
+                        error = %err,
+                        "acp: rollback unsubscribe failed; the route self-heals when this process exits",
+                    );
+                }
+            } else {
+                tracing::debug!(
+                    session_id,
+                    "acp: re-attach failed to subscribe; keeping the existing entry"
+                );
+            }
+            // 既有条目的回滚 = 仅 disarm（`attached` 随错误返回被 drop 时已经做了）。
             return Err(error);
         }
         Ok(attached)
     }
 
     /// 挂载的第一段：入表 + gate + arm（见 [`SessionHub::attach_and_subscribe`]）。
-    async fn attach_session(&self, session_id: &str) -> Result<Attached, HubError> {
+    ///
+    /// 返回 `(attached, created)`：`created` = 条目是否是**本次新建**的（回滚判据，N1）。
+    async fn attach_session(&self, session_id: &str) -> Result<(Attached, bool), HubError> {
         // 事件流已死 = 递不出任何事件（快照也不会来）：不挂一个注定失败的会话。
         if self.stream_dead.load(Ordering::SeqCst) {
             return Err(HubError::Disconnected);
         }
-        let entry = self.entry_or_register(session_id);
+        let (entry, created) = self.entry_or_register(session_id);
         let gate = Arc::clone(&entry.gate).lock_owned().await;
         // 拿到 gate 之后再查一次（与 `begin_turn` 同款）：排队期间泵可能已经退出。
         if self.stream_dead.load(Ordering::SeqCst) {
             return Err(HubError::Disconnected);
         }
-        let rx = entry.arm();
-        Ok(Attached {
-            session_id: session_id.to_string(),
-            entry,
-            rx,
-            _gate: gate,
-        })
+        let rx = entry.arm_attached();
+        Ok((
+            Attached {
+                session_id: session_id.to_string(),
+                entry,
+                rx,
+                _gate: gate,
+            },
+            created,
+        ))
     }
 
     /// 挂载的第二段：订阅（幂等）；网关随即推一份 `sync_session` 快照。
@@ -683,10 +740,13 @@ impl SessionHub {
     pub async fn close_session(self: &Arc<Self>, session_id: &str) {
         let known = match self.entry(session_id) {
             Ok(entry) => {
-                if entry.is_active() {
-                    // ACP：close 必须先当作 `session/cancel` 处理，让在途轮次有机会以
-                    // `cancelled` 收口（而不是被我们抽掉通道、以内部错误收场）。
+                // ACP：close 必须先当作 `session/cancel` 处理，让**在途轮次**有机会以
+                // `cancelled` 收口（而不是被我们抽掉通道、以内部错误收场）。挂载窗口
+                // 没有后端轮次——不发 interrupt（05 审查 N3），但仍要等它收口。
+                if entry.has_turn_in_flight() {
                     self.request_cancel(session_id);
+                }
+                if entry.is_armed() {
                     // 等 gate 归还 = 轮次 / 挂载已收口（有界；超时则强制 disarm 回收）。
                     let reclaimed =
                         tokio::time::timeout(CLOSE_GRACE, Arc::clone(&entry.gate).lock_owned())
@@ -726,16 +786,19 @@ impl SessionHub {
     }
 
     /// 取既有条目；不存在则建一个并入表（挂载路径用，幂等——重复挂载不丢卡片记忆）。
-    fn entry_or_register(&self, session_id: &str) -> Arc<SessionEntry> {
+    ///
+    /// 返回 `(entry, created)`：`created == true` 只对**本次新建**的条目——回滚时据此
+    /// 决定要不要回收（05 审查 N1：既有条目不能误删）。
+    fn entry_or_register(&self, session_id: &str) -> (Arc<SessionEntry>, bool) {
         let mut state = self.state.lock().expect("hub mutex poisoned");
         if let Some(entry) = state.sessions.get(session_id) {
-            return Arc::clone(entry);
+            return (Arc::clone(entry), false);
         }
         let entry = Arc::new(SessionEntry::new(session_id));
         state
             .sessions
             .insert(session_id.to_string(), Arc::clone(&entry));
-        entry
+        (entry, true)
     }
 
     /// 会话出表 + 卸下事件通道（卡片记忆随条目 `Arc` 释放）。
@@ -957,7 +1020,8 @@ pub struct NewSessionParams {
 
 /// 一次会话挂载（`attach_session` 的产物）：条目 + 事件接收端 + gate guard。
 ///
-/// 生命周期即「挂载期」：期间 `active = true`（同会话 prompt 排队等 gate），Drop 时
+/// 生命周期即「挂载期」：期间 `attach_armed = true`（同会话 prompt 排队等 gate，
+/// 但**不是**在途轮次——`close` / `cancel` 不据此发 interrupt，05 审查 N3），Drop 时
 /// 一并卸下事件通道、释放 gate（回到空闲语义：事件丢弃，下一个 prompt 自己再 arm）。
 ///
 /// 职责分工：调用方 `subscribe_session` → [`Attached::read_snapshot`] 读快照 →
@@ -1256,6 +1320,69 @@ mod tests {
         SessionHub::new_unstarted(http, "client-test".into())
     }
 
+    /// 测试用 hub，HTTP 指向一个「记录请求行」的极简监听：**订阅一律 500**（触发回滚），
+    /// 其余路径 200。用来观察「发不发 HTTP / 发的是哪条路径」（05 审查 N1/N2/N3）。
+    ///
+    /// 返回的 `Arc<Mutex<Vec<String>>>` 是请求行（`"POST /api/session/… HTTP/1.1"`）。
+    async fn hub_with_recording_http() -> (
+        Arc<SessionHub>,
+        mpsc::Receiver<Outbound>,
+        Arc<Mutex<Vec<String>>>,
+    ) {
+        use tokio::io::AsyncReadExt as _;
+        use tokio::io::AsyncWriteExt as _;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&lines);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let recorded = Arc::clone(&recorded);
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match stream.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => head.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let line = String::from_utf8_lossy(&head)
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string();
+                    if line.is_empty() {
+                        return;
+                    }
+                    let subscribe = line.contains("/api/session/subscribe");
+                    recorded.lock().expect("request lines").push(line);
+                    let (status, body) = if subscribe {
+                        (
+                            "500 Internal Server Error",
+                            r#"{"error":"boom","detail":"subscribe failed"}"#,
+                        )
+                    } else {
+                        ("200 OK", r#"{"ok":true}"#)
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+        let http =
+            GatewayApiClient::new(format!("http://{addr}"), None).expect("reqwest client builds");
+        let (hub, outbound_rx) = SessionHub::new_unstarted(http, "client-test".into());
+        (hub, outbound_rx, lines)
+    }
+
     /// `sync_session` fixture（回放快照）。
     fn sync_event(session_id: &str) -> WingEvent {
         serde_json::from_value(json!({
@@ -1286,28 +1413,31 @@ mod tests {
     #[test]
     fn entry_without_consumer_drops_events() {
         let entry = SessionEntry::new("s1");
-        assert!(!entry.is_active());
+        assert!(!entry.is_armed());
+        assert!(!entry.has_turn_in_flight());
         assert!(!entry.deliver(event("s1")), "no consumer → dropped");
     }
 
     #[test]
     fn armed_entry_delivers_events_in_order() {
         let entry = SessionEntry::new("s1");
-        let mut rx = entry.arm();
-        assert!(entry.is_active());
+        let mut rx = entry.arm_turn();
+        assert!(entry.is_armed());
+        assert!(entry.has_turn_in_flight(), "轮次 armed ≠ 挂载 armed（N3）");
         assert!(entry.deliver(event("s1")));
         assert!(entry.deliver(event("s1")));
         assert_eq!(rx.try_recv().expect("first event").event_type(), "text");
         assert_eq!(rx.try_recv().expect("second event").event_type(), "text");
         entry.disarm();
-        assert!(!entry.is_active());
+        assert!(!entry.is_armed());
+        assert!(!entry.has_turn_in_flight());
         assert!(!entry.deliver(event("s1")), "disarmed → dropped again");
     }
 
     #[test]
     fn disarm_releases_queued_events_with_the_receiver() {
         let entry = SessionEntry::new("s1");
-        let rx = entry.arm();
+        let rx = entry.arm_turn();
         entry.deliver(event("s1"));
         drop(rx);
         // 接收端没了 → 投递退化为「无消费者」，不 panic。
@@ -1334,7 +1464,7 @@ mod tests {
     #[test]
     fn a_full_event_channel_drops_instead_of_blocking() {
         let entry = SessionEntry::new("s1");
-        let mut rx = entry.arm();
+        let mut rx = entry.arm_turn();
         for i in 0..EVENT_BUFFER {
             assert!(entry.deliver(event("s1")), "buffered event {i} must fit");
         }
@@ -1382,9 +1512,9 @@ mod tests {
             .await
             .expect("a healthy stream arms");
         assert_eq!(turn.session_id(), "s1");
-        assert!(entry.is_active());
+        assert!(entry.has_turn_in_flight());
         drop(turn);
-        assert!(!entry.is_active());
+        assert!(!entry.is_armed());
 
         // WS 断开（pump 退出前置位）之后：
         hub.mark_stream_dead();
@@ -1394,7 +1524,7 @@ mod tests {
         };
         assert_eq!(err, HubError::Disconnected);
         assert!(
-            !entry.is_active(),
+            !entry.is_armed(),
             "绝不能留下 armed 却无人投递的 turn（客户端会只看到连接消失）"
         );
 
@@ -1445,8 +1575,8 @@ mod tests {
 
         // 收刀之后：下一个 prompt 重新 arm，通道里不允许有残帧。
         drop(turn);
-        assert!(!entry.is_active());
-        let mut next = entry.arm();
+        assert!(!entry.is_armed());
+        let mut next = entry.arm_turn();
         assert!(
             matches!(next.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
             "上一个轮次的尾帧不允许留给下一个 prompt"
@@ -1499,7 +1629,7 @@ mod tests {
     #[tokio::test]
     async fn attach_registers_an_unknown_session_and_arms_it() {
         let (hub, _outbound_rx) = test_hub();
-        let mut attached = hub.attach_session("s1").await.expect("attach");
+        let (mut attached, _) = hub.attach_session("s1").await.expect("attach");
         assert_eq!(attached.session_id(), "s1");
         assert!(
             hub.knows("s1"),
@@ -1507,9 +1637,10 @@ mod tests {
         );
 
         let entry = hub.entry("s1").expect("entry is registered");
+        assert!(entry.is_armed(), "挂载期间 armed：同会话 prompt 排队等挂载");
         assert!(
-            entry.is_active(),
-            "挂载期间 active：同会话 prompt 排队等挂载"
+            !entry.has_turn_in_flight(),
+            "挂载不是在途轮次（N3：close/cancel 不该据此发 interrupt）"
         );
         assert!(entry.deliver(event("s1")), "armed：事件投递到挂载句柄");
 
@@ -1530,14 +1661,14 @@ mod tests {
 
         // Drop = 卸载（disarm，回到空闲语义）。
         drop(attached);
-        assert!(!entry.is_active());
+        assert!(!entry.is_armed());
     }
 
     #[tokio::test]
     async fn read_snapshot_returns_the_sync_session_frame() {
         let (hub, _outbound_rx) = test_hub();
         let entry = hub.register("s1");
-        let mut attached = hub.attach_session("s1").await.expect("attach");
+        let (mut attached, _) = hub.attach_session("s1").await.expect("attach");
 
         // 快照之前混进来的实时帧：丢弃（debug），不能污染回放。
         entry.deliver(event("s1"));
@@ -1578,6 +1709,135 @@ mod tests {
         );
     }
 
+    /// 05 审查 N1 + N2：新建条目的回滚 = 回收条目 **且** best-effort 撤销网关侧订阅
+    /// （subscribe 是「先建路由后应答」，不撤会把会话钉在网关内存里）。
+    #[tokio::test]
+    async fn a_fresh_entry_rolls_back_and_unsubscribes() {
+        let (hub, _outbound_rx, lines) = hub_with_recording_http().await;
+        let Err(err) = hub.attach_and_subscribe("s1").await else {
+            panic!("订阅必须失败（假网关对 /api/session/subscribe 回 500）");
+        };
+        assert!(matches!(err, HubError::Gateway(_)), "错误原样上报：{err}");
+        assert!(!hub.knows("s1"), "新建条目必须回收");
+
+        let lines = lines.lock().expect("request lines").clone();
+        assert_eq!(lines.len(), 2, "subscribe + 回滚 unsubscribe：{lines:?}");
+        assert!(
+            lines[0].starts_with("POST /api/session/subscribe"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].starts_with("POST /api/session/unsubscribe"),
+            "回滚必须撤销网关侧订阅（N2）：{lines:?}"
+        );
+    }
+
+    /// 05 审查 N1 + N2：重复挂载（条目已存在）失败时**保留**既有条目与卡片记忆，
+    /// 且**不**撤销它的健康订阅——一次失败的重复挂载不该把它打坏。
+    #[tokio::test]
+    async fn a_failed_re_attach_keeps_the_existing_entry_and_its_subscription() {
+        let (hub, _outbound_rx, lines) = hub_with_recording_http().await;
+        let entry = hub.register("s1");
+        assert_eq!(entry.updates_for(&tool_stream("tc1")).len(), 1);
+
+        let Err(err) = hub.attach_and_subscribe("s1").await else {
+            panic!("订阅必须失败（假网关对 /api/session/subscribe 回 500）");
+        };
+        assert!(matches!(err, HubError::Gateway(_)), "错误原样上报：{err}");
+
+        assert!(hub.knows("s1"), "既有条目必须保留（N1）");
+        let kept = hub.entry("s1").expect("entry");
+        assert!(Arc::ptr_eq(&kept, &entry), "保留的是同一个条目");
+        assert!(
+            entry.updates_for(&tool_stream("tc1")).is_empty(),
+            "卡片记忆随条目保留"
+        );
+        assert!(!entry.is_armed(), "失败路径要把本次挂载的通道卸下");
+
+        let lines = lines.lock().expect("request lines").clone();
+        assert_eq!(lines.len(), 1, "不撤销既有订阅（N2）：{lines:?}");
+        assert!(
+            lines[0].starts_with("POST /api/session/subscribe"),
+            "{lines:?}"
+        );
+    }
+
+    /// 05 审查 N3：挂载窗口没有后端轮次——`session/cancel` 不该向网关发 interrupt；
+    /// 真有一轮 prompt 在途时才发（本测试同时钉住正反两面）。
+    #[tokio::test]
+    async fn cancel_only_interrupts_when_a_turn_is_in_flight() {
+        let (hub, _outbound_rx, lines) = hub_with_recording_http().await;
+        hub.register("s1");
+        let (attached, _) = hub.attach_session("s1").await.expect("attach");
+
+        hub.request_cancel("s1");
+        // 有界静默：旧实现（只看 is_active）会在这里发出 interrupt。
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            lines.lock().expect("request lines").is_empty(),
+            "挂载窗口（无在途轮次）不该发 interrupt：{:?}",
+            lines.lock().expect("request lines")
+        );
+
+        // 对照组：真有一轮 prompt 在途，cancel 必须发 interrupt。
+        drop(attached);
+        let turn = hub.begin_turn("s1", "hi").await.expect("turn arms");
+        hub.request_cancel("s1");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while lines.lock().expect("request lines").is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "在途轮次的 cancel 必须发 interrupt"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            lines.lock().expect("request lines")[0].starts_with("POST /api/session/interrupt"),
+            "{:?}",
+            lines.lock().expect("request lines")
+        );
+        drop(turn);
+    }
+
+    /// 05 审查 N3（close 面）：挂载窗口的 `close` 不发 interrupt——但等挂载收口后
+    /// 照常回收（unsubscribe + release）。
+    #[tokio::test]
+    async fn close_during_a_mount_window_does_not_interrupt() {
+        let (hub, _outbound_rx, lines) = hub_with_recording_http().await;
+        hub.register("s1");
+        let (attached, _) = hub.attach_session("s1").await.expect("attach");
+
+        let closer = {
+            let hub = Arc::clone(&hub);
+            tokio::spawn(async move { hub.close_session("s1").await })
+        };
+        // 给 close 走到「等 gate」的时间（旧实现在这里发 interrupt）。
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(attached);
+        closer.await.expect("close task");
+
+        let lines = lines.lock().expect("request lines").clone();
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("/api/session/interrupt")),
+            "挂载窗口的 close 不该发 interrupt：{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("/api/session/unsubscribe")),
+            "close 仍要撤销订阅：{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("/api/session/release")),
+            "close 仍要 release：{lines:?}"
+        );
+        assert!(!hub.knows("s1"), "close 回收条目");
+    }
+
     #[tokio::test]
     async fn dispatch_routes_a_sync_session_to_the_armed_entry() {
         // 回归（smoke 实测）：`sync_session` 的 session_id 是**具名字段**，
@@ -1585,7 +1845,7 @@ mod tests {
         // 回放永远等不到快照。这里直接从分流入口投递，锁住这条路径。
         let (hub, _outbound_rx) = test_hub();
         hub.register("s1");
-        let mut attached = hub.attach_session("s1").await.expect("attach");
+        let (mut attached, _) = hub.attach_session("s1").await.expect("attach");
         hub.dispatch(sync_event("s1"));
         let snapshot = attached
             .read_snapshot(Duration::from_secs(1))
@@ -1598,7 +1858,7 @@ mod tests {
     async fn read_snapshot_reports_a_dead_event_stream() {
         let (hub, _outbound_rx) = test_hub();
         let entry = hub.register("s1");
-        let mut attached = hub.attach_session("s1").await.expect("attach");
+        let (mut attached, _) = hub.attach_session("s1").await.expect("attach");
 
         // WS 断开 / hub 收尾：通道被卸下 → 快照不会来了，立刻可诊断地失败。
         entry.disarm();
@@ -1625,7 +1885,7 @@ mod tests {
     async fn replay_writes_into_the_session_card_memory() {
         let (hub, _outbound_rx) = test_hub();
         let entry = hub.register("s1");
-        let attached = hub.attach_session("s1").await.expect("attach");
+        let (attached, _) = hub.attach_session("s1").await.expect("attach");
 
         let value = json!({
             "type": "sync_session",
@@ -1670,10 +1930,10 @@ mod tests {
         hub.close_session("s1").await;
 
         assert!(!hub.knows("s1"), "close 必须回收会话表条目（N6）");
-        assert!(!entry.is_active(), "关闭后的条目不再 arm");
+        assert!(!entry.is_armed(), "关闭后的条目不再 arm");
 
         // 重新挂载：同一 tool_call_id 必须重新建卡——记忆随条目一起释放了。
-        let fresh = hub.entry_or_register("s1");
+        let (fresh, _) = hub.entry_or_register("s1");
         assert_eq!(
             fresh.updates_for(&tool_stream("tc1")).len(),
             1,
@@ -1701,7 +1961,7 @@ mod tests {
         let (hub, _outbound_rx) = hub_with_dead_http().await;
         let entry = hub.register("s1");
         let turn = hub.begin_turn("s1", "hi").await.expect("turn arms");
-        assert!(entry.is_active());
+        assert!(entry.has_turn_in_flight());
 
         // close 会先按 cancel 语义处理（HTTP interrupt 立刻失败，只记 warn），
         // 然后有界等 gate 归还——轮次收刀（drop）后回收。
@@ -1713,7 +1973,7 @@ mod tests {
         closer.await.expect("close task");
 
         assert!(!hub.knows("s1"), "close 在活跃轮次收口后仍要回收条目");
-        assert!(!entry.is_active());
+        assert!(!entry.is_armed());
     }
 
     /// 03：elicitation 门控 = 声明能力 + 未被 `-32601` 降级（降级粘性）。
