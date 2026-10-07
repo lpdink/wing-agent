@@ -21,6 +21,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from common import (  # noqa: E402  (同目录模块：脚本直接跑时 sys.path 已含 HERE)
+    CommandError,
     Thresholds,
     metric_unit,
     read_json,
@@ -99,6 +100,9 @@ def merge_reports(reports: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "notes": notes,
             "stub": stub,
             "sources": len(sources),
+            # 合并进来的产物彼此不一致 → 表头必须放弃"轮数/档位"这类单值断言（否则误导）。
+            "sha_mismatch": len(revs) > 1,
+            "shape_mismatch": len(shapes) > 1,
         },
     }
 
@@ -126,18 +130,30 @@ def render_comment(
     lines: list[str] = [MARKER, "", "## ⚡ 性能对比（perf-ci）", ""]
 
     header = [f"`base` {base_sha} → `head` {head_sha}"]
-    rounds = report.get("rounds")
-    if rounds:
-        header.append(f"{rounds} 轮交错 A/B")
-    if report.get("quick"):
-        header.append("quick 档")
-    if report.get("calibrate"):
-        header.append("校准运行（两侧同 rev，测的是噪声地板）")
+    inconsistencies: list[str] = []
+    if meta.get("sha_mismatch"):
+        inconsistencies.append("sha 不一致")
+    if meta.get("shape_mismatch"):
+        inconsistencies.append("轮数 / 档位不一致")
+    if inconsistencies:
+        # 合并产物的单值表头会说谎：这里只报不一致，具体数值交给注意事项。
+        header.append(
+            "合并了多份产物：" + "、".join(inconsistencies) + "（见注意事项）"
+        )
+    else:
+        rounds = report.get("rounds")
+        if rounds:
+            header.append(f"{rounds} 轮交错 A/B")
+        if report.get("quick"):
+            header.append("quick 档")
+        if report.get("calibrate"):
+            header.append("校准运行（两侧同 rev，测的是噪声地板）")
     if label:
         header.append(str(label))
     if meta.get("stub"):
         header.append("⚠️ 自测数据（非真实测量）")
     lines += [" · ".join(header), ""]
+    lines += _notes_block(_notes(meta))
 
     lines += [_conclusion_line(comparisons, failures), ""]
     lines += _table(comparisons)
@@ -153,6 +169,37 @@ def render_comment(
         footer.append("由 `ab.py --selftest` 生成")
     lines += ["", " · ".join(footer), ""]
     return "\n".join(lines)
+
+
+def _notes(meta: Mapping[str, Any]) -> list[str]:
+    """`meta.notes` → 去重后的字符串列表（顺序保持；合并告警由 merge_reports 排在最前）。"""
+    raw = meta.get("notes")
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return []
+    return list(
+        dict.fromkeys(text for text in (str(item).strip() for item in raw) if text)
+    )
+
+
+def _notes_block(notes: Sequence[str]) -> list[str]:
+    """注意事项：头部直出前 2 条（合并告警 / 未提交改动这类 caveat 必须可见），其余折叠。"""
+    if not notes:
+        return []
+    lines = [f"> ⚠️ {note}" for note in notes[:2]]
+    rest = list(notes[2:])
+    if rest:
+        lines.append(f"> ⚠️ 其余 {len(rest)} 条注意事项见下方折叠块。")
+    lines.append("")
+    if rest:
+        lines += [
+            f"<details><summary>注意事项（其余 {len(rest)} 条）</summary>",
+            "",
+            *[f"- {note}" for note in rest],
+            "",
+            "</details>",
+            "",
+        ]
+    return lines
 
 
 def _conclusion_line(
@@ -255,10 +302,16 @@ def _footnote(
     run_url: str | None,
 ) -> list[str]:
     noise, regress = _thresholds_used(comparisons)
-    rounds = report.get("rounds") or "?"
+    meta_raw = report.get("meta")
+    meta: Mapping[str, Any] = meta_raw if isinstance(meta_raw, Mapping) else {}
+    if meta.get("shape_mismatch"):
+        # 合并了档位/轮数不一致的产物：不能报"本次 N 轮"这种单值口径。
+        rounds_text = "多份报告（轮数 / 档位不一致，见注意事项）"
+    else:
+        rounds_text = f"本次 {report.get('rounds') or '?'} 轮"
     bullets = [
         f"- **交错 A/B**：同一 runner 内 `base`/`head` 逐轮交错（base r1 → head r1 → …），"
-        f"每指标先取每轮中位数、再取轮间中位数；本次 {rounds} 轮。",
+        f"每指标先取每轮中位数、再取轮间中位数；{rounds_text}。",
         f"- **判定**：|Δ| < 噪声带 {noise}% 记「持平」；劣化 ≥ {regress}% 记「回归」；"
         "劣化介于两者之间记「关注」；方向变好记「改善」（默认 lower-better）。",
         "- **口径**：排除冷启动；TUI / Gateway 用假 Provider（零 LLM 时延）；两侧由同一份 "
@@ -311,7 +364,7 @@ def _number(value: Any) -> float | None:
 
 
 def fmt_value(value: float | None) -> str:
-    """表格里的数值显示：≥1000 取整带千分位，≥1 保留 3 位小数，<1 保留 4 位（去尾零）。"""
+    """表格里的数值显示：按量级选精度，小值不塌成 "0"（ratio 类指标会读成零）。"""
     if value is None:
         return "—"
     number = float(value)
@@ -322,7 +375,11 @@ def fmt_value(value: float | None) -> str:
         return f"{number:,.0f}"
     if magnitude >= 1:
         return f"{number:,.3f}".rstrip("0").rstrip(".")
-    return f"{number:.4f}".rstrip("0").rstrip(".")
+    if magnitude >= 0.01:
+        return f"{number:.4f}".rstrip("0").rstrip(".")
+    if magnitude >= 0.0001:
+        return f"{number:.6f}".rstrip("0").rstrip(".")
+    return f"{number:.3g}"  # 1e-4 以下用科学计数：0.0000123 渲染成 "0" 是错的
 
 
 def _short(sha: Any) -> str:
@@ -349,9 +406,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--label", help="extra header label, e.g. 'PR #12 · run 345'")
     args = parser.parse_args(argv)
 
-    reports = [read_json(Path(path)) for path in args.json]
-    merged = merge_reports(reports)
-    markdown = render_comment(merged, run_url=args.run_url, label=args.label)
+    try:
+        reports = [read_json(Path(path)) for path in args.json]
+        merged = merge_reports(reports)
+        markdown = render_comment(merged, run_url=args.run_url, label=args.label)
+    except (CommandError, ValueError) as exc:
+        # CI 里只看到 traceback 没法排查：给出可操作的一行错误 + 明确的退出码。
+        print(f"[report] error: {exc}", file=sys.stderr)
+        return 2
     if args.out_md:
         out = Path(args.out_md)
         out.parent.mkdir(parents=True, exist_ok=True)
