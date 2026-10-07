@@ -58,6 +58,14 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 `stream-json` 消息类型：`system/init`（tools/model/cwd）· `assistant`（content blocks + usage）· `user`（tool_result blocks）· `result`（终止信号：累计 usage / turns / 耗时）。支持 SDK 双向 stdin 握手（`--input-format stream-json`）。**未识别的 `--xxx` 参数被静默忽略**，确保外部编排层传递的 Claude 专有参数（如 `--permission-mode`）不报错。
 
+**常驻多轮**（`--input-format stream-json` + `--output-format stream-json`，SDK 系消费方的 prompt 队列形态）：进程长开，**终态帧只结束当前轮**——`result`（含被打断轮次的合成终态帧）之后进程继续等 stdin 的下一条消息或 EOF：
+
+- 轮间 / 轮中投递的 `user` 消息**不丢弃**：逐条转发 `POST /api/session/send`，由网关 inbox 决定 steer（并入当前轮）还是排队（成新轮）。投递失败（网关不可达等）响亮失败：stderr + 非零退出——编排器在等这一轮的输出，静默继续等于让它挂死；
+- **stdin EOF = 收尾**：空闲 → 立即退出；有在途轮（含刚转发、轮还没起，以及首轮 prompt）→ 等该轮终态后退出；**退出码 = 最后一轮结果**（成功 / 被打断 = 0，失败轮 = 非零；逐轮权威状态在各自的 `result` 帧里）。在轮中被排队、当前轮结束才轮到的那条消息**不再等待**（消费方关 stdin 即表示不再关心后续输出）；WS 断开仍按现状 FAILURE 退出；
+- 空文本消息不发（后端对空 content 不起轮、不发终态帧，发了只会让 EOF 收尾等一个不存在的终态）；
+- 每轮边界由后端的 `turn_started` 事件给出（渲染器的相位账本据此重置）；control_request 应答纪律（`initialize` / `interrupt` / 未知 subtype）与逐轮 `result` 帧不变；
+- **行为不变的部分**：text/json 输出模式与非 stream-json 输入一律保持一次性语义（`json` 的契约仍是「单个 result 对象」）；`-p` 给 prompt 时它是首轮，stdin 后续消息仍成新轮。
+
 会话身份与会话恢复（SDK 系消费方自带 id 的用法）：
 
 - `--session-id <id>`：**create-or-adopt**——该 id 不存在则以它建会话（编排方自己生成的 UUID / 任意安全 id 就此生效），已存在则收养既有会话（同 resume 语义：模板与 workspace 来自 metadata、`agent` 覆盖只应用 resume 子集）。与 `-r/--resume` 互斥。**id 在同一个文件系统上只对应一个会话**：大小写 / Unicode 归一化不敏感的文件系统（macOS APFS 默认 / Windows NTFS）上，`team-a` 与 `Team-A` 是同一份日志——网关按**磁盘真名**回应（日志留一条 warning），stdio 侧发现"请求 id ≠ 回应 id"即拒绝继续（`session_id_mismatch_error`），绝不静默换 id；

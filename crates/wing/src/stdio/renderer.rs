@@ -104,9 +104,33 @@ impl StdioRenderer {
         self.exit_code
     }
 
-    /// Handle an event. Returns `true` when the renderer is done (TurnResult
-    /// received, or the run was interrupted — see [`Self::handle_interrupted`]).
+    /// 新一轮开始：清掉上一轮的相位账本。
+    ///
+    /// **轮边界由后端事件给出**（`turn_started`，`ReActLoop.run_turn` 每轮必发、
+    /// 先于该轮任何内容帧），不由驱动侧的「转发了消息」推断——排队成轮的那一轮
+    /// 没有对应的转发动作，而 steer 中途重置又会把当前轮的账本清坏
+    /// （`aborted_tools` 判据依赖它）。
+    ///
+    /// 常驻模式下这是「renderer 以轮为单位重置」的唯一入口；一次性流程里它只是
+    /// 一次幂等清空（构造时账本为空）。
+    pub fn begin_turn(&mut self) {
+        self.pending_tools = 0;
+        self.tool_phase_aborted = false;
+    }
+
+    /// Handle an event.
+    ///
+    /// Returns `true` when the **current turn** is done — a `turn_result` frame,
+    /// or the synthesized terminal frame of an interrupted turn (see
+    /// [`Self::handle_interrupted`]). Whether the *process* then exits is the
+    /// driver's call: the one-shot flow exits on it as before; the resident flow
+    /// (`crate::stdio::ExitPolicy`) exits only once stdin is closed.
     pub fn handle_event(&mut self, event: &WingEvent) -> bool {
+        // 每轮重置：`turn_started` 是后端给出的轮边界（每轮必发一次）。
+        if matches!(event, WingEvent::TurnStarted { .. }) {
+            self.begin_turn();
+            return false;
+        }
         // 被打断的轮次后端**不发** `turn_result`（半截内容作为 partial
         // assistant 提交进链，见 design D10）：前端在这里补一条终态帧，否则
         // 编排器永远等不到终态——SDK 的 `streamInput` 在 canUseTool/hooks 存在时
@@ -378,9 +402,14 @@ impl StdioRenderer {
                 };
                 self.emit_ndjson(&msg);
 
-                if *is_error || subtype != "success" {
-                    self.exit_code = std::process::ExitCode::FAILURE;
-                }
+                // 退出码 = 最后一轮结果：每个终态帧**覆盖**（不累积）——常驻多轮
+                // 下前面失败、最后一轮成功 = SUCCESS；逐轮的权威状态由各自的
+                // result 帧承载（subtype / is_error / terminal_reason）。
+                self.exit_code = if *is_error || subtype != "success" {
+                    std::process::ExitCode::FAILURE
+                } else {
+                    std::process::ExitCode::SUCCESS
+                };
 
                 true
             }
@@ -773,6 +802,104 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(buf.text().lines().last().unwrap()).unwrap();
         assert_eq!(parsed["terminal_reason"], "aborted_streaming");
+    }
+
+    // ---- 常驻多轮：每轮重置与退出码口径 ----
+
+    fn turn_started() -> WingEvent {
+        decode(json!({
+            "type": "turn_started",
+            "session_id": "sess-1",
+            "created_at": "2025-01-01T00:00:00",
+            "request_id": "req-1",
+        }))
+    }
+
+    /// 中断收口的合成工具结果（后端 `INTERRUPTED_RESULT` 文案）。
+    fn synthesized_tool_result() -> WingEvent {
+        decode(json!({
+            "type": "tool_result_turn",
+            "uuid": "u-4",
+            "tool_use_id": "call_1",
+            "tool_name": "Bash",
+            "content": INTERRUPTED_TOOL_RESULT,
+            "is_error": true,
+            "created_at": "2025-01-01T00:00:00",
+            "request_id": "req-1",
+        }))
+    }
+
+    /// 每轮重置：上一轮留在账本里的相位痕迹（工具在飞 + 合成结果）不得影响
+    /// 新轮的 interrupted 判据——否则「上一轮工具被打断」会把下一轮的流式
+    /// 打断误报成 `aborted_tools`。
+    #[test]
+    fn turn_started_resets_the_phase_ledger_of_the_previous_turn() {
+        let (mut renderer, buf) = setup(OutputFormat::StreamJson);
+
+        // 上一轮：工具在飞（pending_tools=1）+ 合成结果（tool_phase_aborted=true）。
+        assert!(!renderer.handle_event(&assistant_with_tool_call()));
+        assert!(!renderer.handle_event(&synthesized_tool_result()));
+        assert!(renderer.handle_event(&interrupted()));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(buf.text().lines().last().unwrap()).unwrap()
+                ["terminal_reason"],
+            "aborted_tools"
+        );
+
+        // 新的一轮：只走了流式阶段就被打断 → 必须是 aborted_streaming。
+        assert!(
+            !renderer.handle_event(&turn_started()),
+            "turn_started 不结束任何一轮"
+        );
+        assert!(renderer.handle_event(&interrupted()));
+        let parsed: serde_json::Value =
+            serde_json::from_str(buf.text().lines().last().unwrap()).unwrap();
+        assert_eq!(
+            parsed["terminal_reason"], "aborted_streaming",
+            "新轮的相位必须从零开始：{parsed}"
+        );
+    }
+
+    /// `begin_turn()` 是显式的重置入口（与 `turn_started` 事件同一条路径）。
+    #[test]
+    fn begin_turn_is_the_explicit_reset_entry() {
+        let (mut renderer, _buf) = setup(OutputFormat::StreamJson);
+
+        // 工具在飞（未结算）→ 账本不为零。
+        assert!(!renderer.handle_event(&assistant_with_tool_call()));
+        assert_eq!(renderer.pending_tools, 1);
+        renderer.begin_turn();
+        assert_eq!(renderer.pending_tools, 0);
+
+        // 合成结果留下的相位痕迹同样被清掉。
+        assert!(!renderer.handle_event(&synthesized_tool_result()));
+        assert!(renderer.tool_phase_aborted);
+        renderer.begin_turn();
+        assert!(!renderer.tool_phase_aborted);
+    }
+
+    /// 退出码 = 最后一轮结果：终态帧**覆盖**（不累积）。
+    #[test]
+    fn exit_code_follows_the_last_turn() {
+        let (mut renderer, _buf) = setup(OutputFormat::StreamJson);
+
+        // 第一轮失败 → FAILURE。
+        assert!(renderer.handle_event(&turn_error(vec!["boom"], "error_during_execution")));
+        assert_eq!(renderer.exit_code(), std::process::ExitCode::FAILURE);
+
+        // 第二轮成功 → 覆盖成 SUCCESS（逐轮状态由各自的 result 帧承载）。
+        assert!(!renderer.handle_event(&turn_started()));
+        assert!(renderer.handle_event(&turn_result("done", false, "success")));
+        assert_eq!(
+            renderer.exit_code(),
+            std::process::ExitCode::SUCCESS,
+            "最后一轮成功即 SUCCESS"
+        );
+
+        // 再来一轮失败 → 又回到 FAILURE。
+        assert!(!renderer.handle_event(&turn_started()));
+        assert!(renderer.handle_event(&turn_error(vec!["again"], "error_during_execution")));
+        assert_eq!(renderer.exit_code(), std::process::ExitCode::FAILURE);
     }
 
     /// Drift guard：相位判据依赖的合成文本必须与后端常量逐字一致

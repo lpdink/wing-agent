@@ -107,6 +107,19 @@ pub struct StdioArgs {
     pub yolo: bool,
 }
 
+impl StdioArgs {
+    /// 常驻（多轮）判定：输入 stream-json（stdin 是持久消息通道）且输出
+    /// stream-json（每轮有独立终态帧，「轮」才有消费方）。
+    ///
+    /// text/json 输出与非 stream-json 输入都保持一次性语义（见 design.md D1）：
+    /// 前者没有逐轮帧可对账（json 的契约是「单个 result 对象」），后者的 stdin
+    /// 根本不是消息通道。
+    pub fn is_resident(&self) -> bool {
+        self.input_format == InputFormat::StreamJson
+            && self.output_format == OutputFormat::StreamJson
+    }
+}
+
 // ============================================================
 // Argument gates (before any side effect)
 // ============================================================
@@ -480,6 +493,70 @@ pub async fn ensure_gateway_running() -> Result<(String, u16)> {
 }
 
 // ============================================================
+// Resident (multi-turn) mode
+// ============================================================
+
+/// stdin pump 的消息投递策略（纯函数，便于单测）。
+///
+/// - 常驻：每条 `user` 消息都投递（轮间起新轮、轮中转发给网关 inbox）；
+/// - 一次性 + prompt 来自 stdin：只投递首条（它就是 prompt）；
+/// - 一次性 + prompt 来自 CLI：一条都不投（既有单轮语义）。
+fn message_delivery(resident: bool, prompt_from_cli: bool) -> stdin_handler::MessageDelivery {
+    match (resident, prompt_from_cli) {
+        (true, _) => stdin_handler::MessageDelivery::All,
+        (false, true) => stdin_handler::MessageDelivery::Ignore,
+        (false, false) => stdin_handler::MessageDelivery::FirstOnly,
+    }
+}
+
+/// 常驻循环的退出判定（纯状态机，无 I/O——EOF 边界由单测钉住）。
+///
+/// 常驻语义（`--input-format stream-json` + `--output-format stream-json`）：
+/// 终态帧只结束**当前轮**，进程退出由 stdin EOF 收尾决定：
+///
+/// - EOF + 空闲（无在途轮）→ 立即退；
+/// - EOF + 有在途轮 → 等该轮终态后退出；
+/// - 轮间/轮中收到 `user` 消息 → 转发（网关 inbox 决定 steer / 排队）。该消息
+///   驱动的轮（无论起没起）在下一次终态前都被观察到——**除了**「在轮中被排队、
+///   当前轮结束才轮到它」的那条：EOF 后不等它。裁定见 design.md D5：消费方关
+///   stdin 即表示不再关心后续输出。
+#[derive(Debug, Clone, Copy)]
+struct ExitPolicy {
+    /// 有在途轮，或刚转发、尚未见到终态帧的消息。
+    in_turn: bool,
+    /// stdin 已关闭。
+    eof: bool,
+}
+
+impl ExitPolicy {
+    /// 循环起点：`prompt_sent` = 首轮 prompt 已经发出（它必然驱动一轮，即使
+    /// 它的终态帧还没被观察到——首轮 prompt 在进入循环**之前**就发出去了）。
+    fn new(prompt_sent: bool) -> Self {
+        Self {
+            in_turn: prompt_sent,
+            eof: false,
+        }
+    }
+
+    /// 已把一条 `user` 消息交给网关：它必然驱动一轮（起新轮或并入当前轮）。
+    fn on_message(&mut self) {
+        self.in_turn = true;
+    }
+
+    /// stdin 关闭 / EOF：`true` = 现在就退。
+    fn on_eof(&mut self) -> bool {
+        self.eof = true;
+        !self.in_turn
+    }
+
+    /// 收到终态帧（本轮结束）：`true` = 现在就退（EOF 已到且无事在途）。
+    fn on_terminal(&mut self) -> bool {
+        self.in_turn = false;
+        self.eof
+    }
+}
+
+// ============================================================
 // stdio entry point
 // ============================================================
 
@@ -495,6 +572,82 @@ pub async fn run_stdio(args: StdioArgs) -> ExitCode {
         Err(e) => {
             eprintln!("wing error: {e}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// 一次性事件循环（既有语义）：终态帧结束**进程**。
+async fn run_one_shot_loop(gateway: &mut GatewayClient, renderer: &mut StdioRenderer) -> ExitCode {
+    // 终态有两个来源，都由 renderer 落到 stdout 并返回 `true`：
+    // `turn_result`（正常/失败收口），以及 `interrupted`（被打断的轮次后端不发
+    // turn_result，前端补一条终态 result 帧——见 `handle_interrupted`）。
+    loop {
+        match gateway.recv_event().await {
+            Some(event) => {
+                if renderer.handle_event(&event) {
+                    return renderer.exit_code();
+                }
+            }
+            None => {
+                tracing::warn!("WS connection closed before TurnResult");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+}
+
+/// 常驻事件循环：终态帧只结束当前轮；stdin 消息逐条转发；EOF 收尾。
+///
+/// 与一次性循环的区别只有两处：终态帧之后由 [`ExitPolicy`] 裁决是否退出；stdin
+/// 上的 `user` 消息逐条转发 `POST /api/session/send`（轮间消息起新轮、轮中消息由
+/// 网关 inbox 决定 steer / 排队，**不丢弃**）。
+async fn run_resident_loop(
+    gateway: &mut GatewayClient,
+    pump: &mut stdin_handler::StdinPump,
+    http: &GatewayApiClient,
+    session_id: &str,
+    renderer: &mut StdioRenderer,
+    prompt_sent: bool,
+) -> Result<ExitCode> {
+    let mut policy = ExitPolicy::new(prompt_sent);
+    // EOF 之后 pump 通道会立刻反复返回 `None`——关掉这个 select 分支，否则
+    // select 每次都被它唤醒、空转烧 CPU（与 `wait_fail_fast_e2e` 事故同型）。
+    let mut pump_open = true;
+
+    loop {
+        tokio::select! {
+            event = gateway.recv_event() => match event {
+                Some(event) => {
+                    // 终态帧（含 interrupted 合成帧）= 本轮结束。
+                    if renderer.handle_event(&event) && policy.on_terminal() {
+                        return Ok(renderer.exit_code());
+                    }
+                }
+                None => {
+                    tracing::warn!("gateway event stream closed before stdin closed");
+                    return Ok(ExitCode::FAILURE);
+                }
+            },
+            message = pump.next_message(), if pump_open => match message {
+                Some(text) if text.is_empty() => {
+                    // 空消息在后端不会驱动任何一轮（`run_turn` 对空 content 直接
+                    // return，不发终态帧）——转发它会让 EOF 收尾永远等下去。
+                    tracing::warn!("ignoring empty user message (it would never drive a turn, and its terminal frame would never come)");
+                }
+                Some(text) => {
+                    // 转发：网关 inbox 决定 steer（轮到当前）还是排队（成新轮）。
+                    http.send_message(session_id, &text, None)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to send message: {e}"))?;
+                    policy.on_message();
+                }
+                None => {
+                    pump_open = false;
+                    if policy.on_eof() {
+                        return Ok(renderer.exit_code());
+                    }
+                }
+            },
         }
     }
 }
@@ -614,8 +767,10 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         Arc::clone(&out),
     );
 
-    // 7. stdin pump：stream-json 输入模式下 stdin 是常驻控制通道——turn 期间
-    //    仍要消费 control_request（interrupt 等）并应答，编排器在 await 它们。
+    // 7. stdin pump：stream-json 输入模式下 stdin 是常驻通道——turn 期间仍要消费
+    //    control_request（interrupt 等）并应答（编排器在 await 它们）；常驻模式下
+    //    每条 `user` 消息都要投递给驱动侧转发。
+    let resident = args.is_resident();
     let mut pump = None;
     if args.input_format == InputFormat::StreamJson {
         pump = Some(stdin_handler::spawn(stdin_handler::StdinPumpContext {
@@ -624,60 +779,75 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
                 session_id.clone(),
             )),
             out: Arc::clone(&out),
-            // prompt 由 CLI 参数给出时，stdin 上的 user 消息只需被忽略。
-            await_prompt: args.prompt.is_empty(),
+            delivery: message_delivery(resident, !args.prompt.is_empty()),
         }));
     }
 
     // 8. Resolve prompt: CLI arg > stdin (stream-json) > error.
     let prompt = if !args.prompt.is_empty() {
-        args.prompt
+        args.prompt.clone()
     } else if let Some(pump) = pump.as_mut() {
         // 这里的错误 = stdin 在首条 `user` 之前关闭（见 `wait_prompt` 语义：
-        // 错误只在发送端消失时产生，即 pump 任务已结束），无需再 finish。
+        // 通道关闭且没有缓冲消息），无需再 finish。
         pump.wait_prompt().await?
     } else {
         anyhow::bail!("no prompt provided");
     };
 
-    // 9. Send prompt.
-    if let Err(e) = http.send_message(&session_id, &prompt, None).await {
-        // 收尾纪律：还没进事件循环就退出——先把 pump 收干净，别把半收尾的
-        // 任务 detach 到运行时回收。
-        if let Some(pump) = pump.take() {
-            pump.finish().await;
+    // 9. Send prompt（首轮）。
+    //
+    // 常驻模式下空文本 prompt 不发：后端对空 content 不起轮（`run_turn` 直接
+    // return、不发任何终态帧），发了就等于挂在这里等一个永不发生的终态。跳过它，
+    // 后续消息照常成轮；一次性路径保持既有行为不动。
+    let prompt_sent = if resident && prompt.is_empty() {
+        tracing::warn!("empty prompt in resident mode: skipping the initial send");
+        false
+    } else {
+        if let Err(e) = http.send_message(&session_id, &prompt, None).await {
+            // 收尾纪律：还没进事件循环就退出——先把 pump 收干净，别把半收尾的
+            // 任务 detach 到运行时回收。
+            if let Some(pump) = pump.take() {
+                pump.finish().await;
+            }
+            return Err(anyhow::anyhow!("Failed to send message: {e}"));
         }
-        return Err(anyhow::anyhow!("Failed to send message: {e}"));
+        true
+    };
+
+    if resident {
+        tracing::info!("prompt sent, entering resident event loop (multi-turn)");
+    } else {
+        tracing::info!("prompt sent, entering event loop");
     }
 
-    tracing::info!("prompt sent, entering event loop");
-
-    // 10. Event loop: receive events from WS, render, exit on the terminal frame.
-    //
-    // 终态有两个来源，都由 renderer 落到 stdout 并返回 `true`：
-    // `turn_result`（正常/失败收口），以及 `interrupted`（被打断的轮次后端不发
-    // turn_result，前端补一条终态 result 帧——见 `handle_interrupted`）。
-    let exit_code = loop {
-        match gateway.recv_event().await {
-            Some(event) => {
-                if renderer.handle_event(&event) {
-                    break renderer.exit_code();
-                }
-            }
-            None => {
-                tracing::warn!("WS connection closed before TurnResult");
-                break ExitCode::FAILURE;
-            }
-        }
+    // 10. Event loop。区别只在退出裁决：
+    //     - 一次性：终态帧结束进程（既有语义）；
+    //     - 常驻（`--input-format stream-json` + `--output-format stream-json`）：
+    //       终态帧只结束当前轮，EOF 收尾（空闲置退 / 在途轮等终态）。
+    let exit_code = if resident {
+        let pump = pump
+            .as_mut()
+            .expect("resident mode always spawns the stdin pump");
+        run_resident_loop(
+            &mut gateway,
+            pump,
+            &http,
+            &session_id,
+            &mut renderer,
+            prompt_sent,
+        )
+        .await
+    } else {
+        Ok(run_one_shot_loop(&mut gateway, &mut renderer).await)
     };
 
     // 11. 收尾：通知 stdin pump 停下（有界等待进行中的应答写完——它可能恰好
-    //     跨过 turn 结束，直接 abort 会让编排器收不到响应）。
+    //     跨过轮结束，直接 abort 会让编排器收不到响应）。
     if let Some(pump) = pump.take() {
         pump.finish().await;
     }
 
-    Ok(exit_code)
+    exit_code
 }
 
 // ============================================================
@@ -1122,5 +1292,126 @@ mod tests {
         assert!(message.contains("predates create-or-adopt"), "{message}");
         assert!(message.contains("filesystem"), "{message}");
         assert!(message.contains("use the exact id"), "{message}");
+    }
+
+    // ---- 常驻判定 / 消息投递策略 ----
+
+    fn resident_args() -> StdioArgs {
+        let mut a = args();
+        a.input_format = InputFormat::StreamJson;
+        a.output_format = OutputFormat::StreamJson;
+        a
+    }
+
+    #[test]
+    fn resident_requires_stream_json_input_and_output() {
+        assert!(resident_args().is_resident());
+
+        // 输入 stream-json 但输出 text/json：一次性语义（json 的契约是单个
+        // result 对象，没有逐轮帧可对账）。
+        let mut text_out = resident_args();
+        text_out.output_format = OutputFormat::Text;
+        assert!(!text_out.is_resident());
+
+        let mut json_out = resident_args();
+        json_out.output_format = OutputFormat::Json;
+        assert!(!json_out.is_resident());
+
+        // 非 stream-json 输入（prompt 一次性给出）：一次性语义。
+        let mut text_in = resident_args();
+        text_in.input_format = InputFormat::Text;
+        assert!(!text_in.is_resident());
+        assert!(!args().is_resident());
+    }
+
+    #[test]
+    fn message_delivery_matrix() {
+        use stdin_handler::MessageDelivery;
+
+        // 常驻：无论 prompt 来源，每条消息都要投递（轮间/轮中新轮）。
+        assert_eq!(
+            message_delivery(true, false),
+            MessageDelivery::All,
+            "常驻 + prompt 来自 stdin：首条是 prompt，其余是新轮"
+        );
+        assert_eq!(
+            message_delivery(true, true),
+            MessageDelivery::All,
+            "常驻 + prompt 来自 CLI：stdin 消息全是新轮"
+        );
+
+        // 一次性：只认首条（prompt 来自 stdin），或一条都不认（prompt 来自 CLI）。
+        assert_eq!(message_delivery(false, false), MessageDelivery::FirstOnly);
+        assert_eq!(message_delivery(false, true), MessageDelivery::Ignore);
+    }
+
+    // ---- ExitPolicy：EOF 收尾判定 ----
+
+    #[test]
+    fn eof_while_idle_exits_immediately() {
+        let mut policy = ExitPolicy::new(false);
+        assert!(policy.on_eof(), "空闲 + EOF → 立即退出");
+    }
+
+    /// 首轮 prompt 在进入常驻循环**之前**就发出去了：EOF 紧接着来也不能退，
+    /// 要等它的终态帧（否则第一轮的输出直接丢失）。
+    #[test]
+    fn eof_right_after_the_prompt_waits_for_the_first_turn() {
+        let mut policy = ExitPolicy::new(true);
+        assert!(!policy.on_eof(), "首轮在飞：EOF 不能直接退");
+        assert!(policy.on_terminal(), "首轮终态到达后才退");
+    }
+
+    #[test]
+    fn eof_while_in_turn_waits_for_the_terminal_frame() {
+        let mut policy = ExitPolicy::new(false);
+        policy.on_message();
+        assert!(!policy.on_eof(), "有在途轮：EOF 不能直接退");
+        assert!(policy.on_terminal(), "该轮终态到达后才退");
+    }
+
+    #[test]
+    fn terminal_without_eof_keeps_the_process_alive() {
+        let mut policy = ExitPolicy::new(false);
+        policy.on_message();
+        assert!(!policy.on_terminal(), "常驻：终态帧只结束当前轮");
+        // 轮间再来一轮，同样不退出。
+        policy.on_message();
+        assert!(!policy.on_terminal());
+        // 直到 EOF。
+        assert!(policy.on_eof());
+    }
+
+    /// 上一轮结束后才关 stdin（CloudCLI 的 result → release(EOF) → 退出）：
+    /// EOF 时已经空闲 → 立即退出（退出码 = 该轮结果）。
+    #[test]
+    fn eof_after_the_last_turn_exits_immediately() {
+        let mut policy = ExitPolicy::new(true);
+        assert!(!policy.on_terminal(), "轮结束而 stdin 还开着 → 继续等");
+        assert!(policy.on_eof(), "空闲 + EOF → 立即退出");
+    }
+
+    /// 轮中投递的第二条消息（steer / 排队）：EOF 后仍在**当前轮**的终态帧上
+    /// 收尾——不额外等它自己那一轮（design.md D5 的裁定：排队的那一轮不等）。
+    #[test]
+    fn eof_settles_on_the_current_turns_terminal_frame() {
+        let mut policy = ExitPolicy::new(false);
+        policy.on_message();
+        policy.on_message(); // 轮中再投一条
+        assert!(!policy.on_eof());
+        assert!(policy.on_terminal(), "当前轮终态即收尾");
+    }
+
+    /// 被中断的轮同样是「终态」：EOF 已到则立即收尾（CloudCLI 的
+    /// interrupt → release → 退出 形状）。
+    #[test]
+    fn interrupted_terminal_closes_a_waiting_eof() {
+        let mut policy = ExitPolicy::new(false);
+        policy.on_message();
+        assert!(!policy.on_eof());
+        assert!(
+            policy.on_terminal(),
+            "合成终态帧同样结束当前轮（EOF 已到 → 退出）"
+        );
     }
 }
