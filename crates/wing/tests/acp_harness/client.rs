@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use agent_client_protocol::AcpAgent;
 use agent_client_protocol::Agent;
@@ -267,7 +268,14 @@ pub enum PermissionReply {
     Select(String),
     /// 回 `cancelled` outcome（轮次被取消；也是脚本耗尽时的兜底）。
     Cancel,
+    /// 延迟 `delay` 之后再选中该 `optionId`：模拟「轮次已被取消、用户才点按钮」的
+    /// 迟到应答。发出前会往 [`Recorder`] 记一条 [`Record::Marker`]（名字见下），
+    /// 供用例断言「应答确实已经发出」。
+    SelectAfter { option_id: String, delay: Duration },
 }
+
+/// [`PermissionReply::SelectAfter`] 发出迟到应答时打的顺序锚。
+pub const LATE_PERMISSION_MARKER: &str = "permission-answered-late";
 
 /// 脚本化的 permission 应答队列。
 #[derive(Default)]
@@ -360,6 +368,13 @@ pub async fn run_client(
                 permission_recorder.push(Record::Permission(raw.clone()));
                 let response = match permissions.next() {
                     Some(PermissionReply::Select(option_id)) => {
+                        RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+                            SelectedPermissionOutcome::new(option_id),
+                        ))
+                    }
+                    Some(PermissionReply::SelectAfter { option_id, delay }) => {
+                        tokio::time::sleep(delay).await;
+                        permission_recorder.marker(LATE_PERMISSION_MARKER);
                         RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
                             SelectedPermissionOutcome::new(option_id),
                         ))

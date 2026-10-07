@@ -544,6 +544,7 @@ async fn list_sessions(
 /// - `workspace` 缺失或不是绝对路径 → 跳过（ACP 要求 `cwd` 是绝对路径）并记 debug；
 /// - `cursor` 是不透明字符串（本实现 = 十进制 offset）；非法 → invalid params；
 /// - 页大小 [`LIST_PAGE_SIZE`]；还有余量时回 `nextCursor`，否则缺省 = 结束。
+
 fn list_page(
     sessions: Vec<wing_api_client::models::SessionInfo>,
     cwd: Option<&std::path::Path>,
@@ -774,6 +775,14 @@ fn log_ignored_request_fields(mcp_servers: usize, additional_directories: usize)
 // session/prompt
 // ============================================================
 
+/// 在途 ask 的收口方式（[`run_turn`] 的等待结果）。
+enum AskReply {
+    /// 需要回写这个答案（`None` = 事件不可应答，只记日志）。
+    Write(Option<ask::AskOutcome>),
+    /// 本会话已请求取消：不回写（feedback waiter 已被 interrupt 清除）。
+    Abandoned,
+}
+
 /// 驱动一轮 prompt，直到终态（或错误）。
 ///
 /// 事件流：`turn.next_event()` → [`Turn::updates_for`] 翻译 → `session/update` 通知；
@@ -809,19 +818,26 @@ async fn run_turn(
         // 让轮次走到下面 `next_event() == None` 的「gateway event stream ended」错误分支——
         // 否则 `session/prompt` 会一直卡在这条客户端请求上，只以连接消失告终（无可诊断错误）。
         if let WingEvent::Ask { tool_call_id, .. } = &event {
-            let outcome = tokio::select! {
-                outcome = ask::resolve(hub, cx, &session_id, &event) => outcome,
+            // 三路收口：客户端作答 / 事件流已死（默认答案）/ **本会话已请求取消**。
+            //
+            // 取消路：网关 interrupt 已经（或正在）清掉后端的 feedback waiter——迟到的
+            // 客户端应答不能再回写：网关对无 waiter 的定向消息会 fallthrough 成普通用户
+            // 消息（幽灵轮次 + 持久化历史污染）。丢弃它，放行事件循环去消费随后到达的
+            // `interrupted`，本轮以 `cancelled` 收口（客户端不关权限卡/表单也不再悬挂）。
+            let reply = tokio::select! {
+                outcome = ask::resolve(hub, cx, &session_id, &event) => AskReply::Write(outcome),
                 () = hub.stream_dead() => {
                     tracing::warn!(
                         session_id = %session_key,
                         tool_call_id = %tool_call_id,
                         "acp: gateway event stream died while an ask was pending; answering with the default"
                     );
-                    ask::default_answer(&event)
+                    AskReply::Write(ask::default_answer(&event))
                 }
+                () = turn.cancel_requested() => AskReply::Abandoned,
             };
-            match outcome {
-                Some(outcome) => {
+            match reply {
+                AskReply::Write(Some(outcome)) => {
                     if outcome.elicitation_unsupported {
                         // elicitation 被客户端回 `-32601`：进程级粘性降级，
                         // 此后所有 ask 直接走回退路径。
@@ -832,9 +848,14 @@ async fn run_turn(
                     }
                 }
                 // 不可应答（空 tool_call_id —— `ask::classify` 已记 warn）。
-                None => tracing::warn!(
+                AskReply::Write(None) => tracing::warn!(
                     session_id = %session_key,
                     "acp: ask event left unanswered"
+                ),
+                AskReply::Abandoned => tracing::debug!(
+                    session_id = %session_key,
+                    tool_call_id = %tool_call_id,
+                    "acp: ask abandoned after cancel; the turn will close as cancelled"
                 ),
             }
         }

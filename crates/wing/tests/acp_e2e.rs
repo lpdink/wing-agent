@@ -4,8 +4,8 @@
 //! 客户端 / 临时 WING_HOME）见 [`acp_harness`]。纪律：不联网、不碰用户网关与 `~/.wing`，
 //! 端口临时分配，每测试独立进程。
 //!
-//! 十一个测试 = 清单七组（list / load+resume / close 各自成函数，便于失败定位）+ 一个
-//! 回归（冷启动 stdout 清洁）。
+//! 十二个测试 = 清单七组（list / load+resume / close 各自成函数，便于失败定位）+ 两个
+//! 回归（冷启动 stdout 清洁、取消后迟到应答不回写）。
 
 #![allow(clippy::print_stderr)] // harness 的调试回调（WING_ACP_E2E_TRACE=1）写 stderr
 
@@ -20,8 +20,10 @@ use acp_harness::ElicitationReply;
 use acp_harness::ElicitationScript;
 use acp_harness::FakeGateway;
 use acp_harness::Harness;
+use acp_harness::LATE_PERMISSION_MARKER;
 use acp_harness::PermissionReply;
 use acp_harness::PermissionScript;
+use acp_harness::Record;
 use acp_harness::Recorder;
 use acp_harness::TempHome;
 use acp_harness::bash_ask;
@@ -1386,4 +1388,98 @@ fn kill_placeholder_gateway(pidfile: &std::path::Path) {
     let _ = std::process::Command::new("kill")
         .args(["-9", pid])
         .status();
+}
+
+/// 取消打断在途 ask 后，迟到的客户端应答必须被丢弃。
+///
+/// 后端 `interrupt()` 第一步就清掉了 feedback waiter，迟到应答若照旧回写，会被网关
+/// 当作**用户消息**入队（幽灵轮次 + 持久化历史污染）；反过来，客户端不关权限卡时
+/// 被取消的轮次也不能悬挂。断言两块：
+/// (a) `session/prompt` 以 `stopReason: cancelled` 收口（不等迟到的应答）；
+/// (b) 客户端**确实**把迟到应答发了出去（handler 延迟后回选），但网关从未见到
+///     任何带 `tool_call_id` 的上行帧（不回写）。
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_during_an_ask_discards_the_late_answer() {
+    let harness = Harness::start().await;
+    let gateway = Arc::clone(&harness.gateway);
+    let workspace = harness.workspace();
+    gateway.set_models(models_catalog(&[("fake", &[("echo-1", "Echo One")])]));
+
+    let recorder = Recorder::new();
+    let permissions = PermissionScript::new();
+    let elicitations = ElicitationScript::new();
+    let rec = Arc::clone(&recorder);
+    let gw = Arc::clone(&gateway);
+    let ws = workspace.clone();
+
+    // 权限卡 1.5s 后才被「点掉」：取消必须先收口，应答是迟到者。
+    permissions.push(PermissionReply::SelectAfter {
+        option_id: "y".to_string(),
+        delay: Duration::from_millis(1500),
+    });
+
+    run_client(
+        harness.agent(),
+        recorder,
+        permissions,
+        elicitations,
+        async move |connection: ConnectionTo<Agent>| {
+            initialize(&connection, false).await?;
+            let new = connection
+                .send_request(NewSessionRequest::new(ws))
+                .block_task()
+                .await?;
+            let sid = new.session_id.to_string();
+
+            let command = "rm -rf /tmp/wing-e2e-scratch";
+            let prompt = spawn_prompt(&connection, new.session_id.clone(), command)?;
+            gw.wait_ws_inbound("prompt 上行帧", |frame| {
+                frame["session_id"] == sid.as_str() && frame["content"] == command
+            })
+            .await;
+
+            // 工具卡片 + Bash 确认形态的 ask（客户端会收到权限卡，但先不点）。
+            gw.push(wing_event(
+                &sid,
+                tool_call("tc-cancel-ask", "Bash", json!({"command": command})),
+            ));
+            gw.push(wing_event(
+                &sid,
+                bash_ask("tc-cancel-ask", &format!("Allow running: {command}?")),
+            ));
+            let request = rec.wait_permission("permission 请求", 1).await;
+            assert_eq!(request["toolCall"]["toolCallId"], "tc-cancel-ask");
+
+            // 取消在途轮次：interrupt →（测试推）interrupted。
+            connection.send_notification(CancelNotification::new(new.session_id.clone()))?;
+            gw.wait_request("interrupt", |r| r.path == "/api/session/interrupt")
+                .await;
+            gw.push(wing_event(&sid, interrupted()));
+
+            // (a) 立刻以 cancelled 收口——不等迟到的应答。
+            let response = prompt.await.expect("prompt 任务被取消")?;
+            assert_eq!(response.stop_reason, StopReason::Cancelled);
+
+            // (b) 迟到应答确实发出（客户端 handler 延迟后回选）……
+            rec.wait_entry(
+                "迟到的 permission 应答已发出",
+                |record| matches!(record, Record::Marker(name) if *name == LATE_PERMISSION_MARKER),
+            )
+            .await;
+            // ……有界静默后，网关的上行帧里必须从未出现定向回写（tool_call_id 非空）。
+            settle().await;
+            let writes: Vec<Value> = gw
+                .ws_inbound()
+                .into_iter()
+                .filter(|frame| !frame["tool_call_id"].is_null())
+                .collect();
+            assert!(
+                writes.is_empty(),
+                "取消后的迟到应答不得回写网关（会变成幽灵用户消息）：{writes:?}"
+            );
+            Ok(())
+        },
+    )
+    .await
+    .expect("取消打断 ask 的场景");
 }

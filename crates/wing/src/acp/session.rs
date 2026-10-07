@@ -167,6 +167,12 @@ struct SessionEntry {
     id: String,
     /// prompt 串行化闸门（同会话第二个 prompt 排队等它）。
     gate: Arc<tokio::sync::Mutex<()>>,
+    /// 在途轮次的「已请求取消」信号（`session/cancel` 置位，`arm_turn` 复位）。
+    ///
+    /// 在途 ask 靠它感知取消：interrupt 会清掉后端的 feedback waiter，迟到的客户端
+    /// 应答必须丢弃（否则被网关当作新的用户消息 → 幽灵轮次 + 历史污染）。
+    /// `watch` = 粘性快照 + 可等待：先查现值再等翻转，不存在丢唤醒。
+    cancel: watch::Sender<bool>,
     inner: Mutex<EntryState>,
 }
 
@@ -193,6 +199,7 @@ impl SessionEntry {
         Self {
             id: id.to_string(),
             gate: Arc::new(tokio::sync::Mutex::new(())),
+            cancel: watch::channel(false).0,
             inner: Mutex::new(EntryState::default()),
         }
     }
@@ -206,11 +213,23 @@ impl SessionEntry {
     }
 
     /// 装上一轮 **prompt** 的事件通道并置位 `turn_armed`（调用方已持有 gate）。
+    ///
+    /// 同时复位「已请求取消」信号：新一轮从「未取消」开始（更早的 `session/cancel`
+    /// 已被 `request_cancel` 的 `turn_armed` 判据挡在轮次之外）。
     fn arm_turn(&self) -> mpsc::Receiver<WingEvent> {
+        self.cancel.send_replace(false);
         let mut state = self.inner.lock().expect("entry mutex poisoned");
         let rx = Self::install_events(&mut state);
         state.turn_armed = true;
         rx
+    }
+
+    /// 置位「已请求取消」（`request_cancel` 调用）。
+    ///
+    /// `send_replace` 无接收者也不丢：置位发生在 `turn_armed` 之后、[`Turn`] 订阅之前
+    /// 的窗口里也照样生效（订阅者拿到的是当前值）。
+    fn signal_cancel(&self) {
+        self.cancel.send_replace(true);
     }
 
     /// 装上一次**挂载**的事件通道并置位 `attach_armed`（调用方已持有 gate）。
@@ -547,11 +566,14 @@ impl SessionHub {
             return Err(HubError::Disconnected);
         }
         let rx = entry.arm_turn();
+        // 订阅「已请求取消」：arm 之后订阅，中间的取消不会丢（watch 保存当前值）。
+        let cancelled = entry.cancel.subscribe();
         let turn = Turn {
             session_id: session_id.to_string(),
             entry: Arc::clone(&entry),
             outbound: self.outbound.clone(),
             rx,
+            cancelled,
             _gate: gate,
         };
         if self
@@ -586,6 +608,9 @@ impl SessionHub {
             tracing::debug!(session_id, "acp: cancel with no prompt in flight; ignored");
             return;
         }
+        // 先置位「已请求取消」（在途 ask 的等待据此收口、丢弃迟到应答）：interrupt
+        // 一到后端就会清掉 feedback waiter，等到 HTTP 返回再置位就晚了。
+        entry.signal_cancel();
         let hub = Arc::clone(self);
         let sid = session_id.to_string();
         tokio::spawn(async move {
@@ -1150,6 +1175,8 @@ pub struct Turn {
     entry: Arc<SessionEntry>,
     outbound: mpsc::Sender<Outbound>,
     rx: mpsc::Receiver<WingEvent>,
+    /// 本轮的「已请求取消」信号（见 [`SessionEntry::cancel`]）。
+    cancelled: watch::Receiver<bool>,
     /// 持有到轮次结束：同会话第二个 prompt 在 `begin_turn` 里排队等它。
     _gate: OwnedMutexGuard<()>,
 }
@@ -1163,6 +1190,15 @@ impl Turn {
     /// 下一条事件；`None` = 事件流已终止（WS 断开 / hub 收尾）。
     pub async fn next_event(&mut self) -> Option<WingEvent> {
         self.rx.recv().await
+    }
+
+    /// 等「本会话已被请求取消」（`session/cancel` 已到）——在途 ask 的收口路径之一。
+    ///
+    /// 命中的语义：interrupt 正在/已经清掉后端的 feedback waiter，迟到的客户端应答
+    /// 必须丢弃；随后 `interrupted` 进入事件通道，由主循环消费并以 `cancelled` 收口。
+    /// `watch` 是「粘性快照 + 可等待」：先查现值再等翻转，不存在丢唤醒。
+    pub async fn cancel_requested(&mut self) {
+        let _ = self.cancelled.wait_for(|requested| *requested).await;
     }
 
     /// 事件 → ACP update 列表（会话级工具卡片状态在内部落地）。
