@@ -316,7 +316,7 @@ impl SessionEntry {
 
 /// 会话表 + 出站队列 + WS 事件泵的持有者。
 ///
-/// 公开面是各步骤的接入点（本步起也是「模型变更中继」的宿主）：
+/// 公开面（03/04/05 的接入点）：
 ///
 /// | 步骤 | 用到的入口 |
 /// |------|-----------|
@@ -325,7 +325,7 @@ impl SessionEntry {
 /// | 05 | [`SessionHub::attach_and_subscribe`] / [`SessionHub::close_session`]（load/resume 挂载 + 回收） |
 /// | 05+ | [`SessionHub::session_ids`] / [`SessionHub::knows`]（会话查询） |
 pub struct SessionHub {
-    /// 网关 HTTP 客户端（建会话 / 订阅 / interrupt；后续步骤的 update/list/load 也用它）。
+    /// 网关 HTTP 客户端（建会话 / 订阅 / interrupt；update/list/load 也用它）。
     pub(crate) http: GatewayApiClient,
     /// 本进程在网关侧的 client_id（订阅与事件路由的钥匙）。
     client_id: String,
@@ -694,7 +694,8 @@ impl SessionHub {
 
     /// 挂载的第一段：入表 + gate + arm（见 [`SessionHub::attach_and_subscribe`]）。
     ///
-    /// 返回 `(attached, created)`：`created` = 条目是否是**本次新建**的（回滚判据，N1）。
+    /// 返回 `(attached, created)`：`created` = 条目是否是**本次新建**的（回滚判据，
+    /// N1）——第二道死流复查命中时也据此回滚（N3）。
     async fn attach_session(&self, session_id: &str) -> Result<(Attached, bool), HubError> {
         // 事件流已死 = 递不出任何事件（快照也不会来）：不挂一个注定失败的会话。
         if self.stream_dead.load(Ordering::SeqCst) {
@@ -704,6 +705,13 @@ impl SessionHub {
         let gate = Arc::clone(&entry.gate).lock_owned().await;
         // 拿到 gate 之后再查一次（与 `begin_turn` 同款）：排队期间泵可能已经退出。
         if self.stream_dead.load(Ordering::SeqCst) {
+            // 本次新建的条目连同卡片记忆一起回滚（06 审查 N3）：死流上不留「在表但
+            // 无人投递」的半截会话。只回收新建条目——既有条目是别的挂载/轮次正在用
+            // 的（与订阅失败的回滚同判据，见 [`SessionHub::attach_and_subscribe`]）。
+            // 本路径还没 subscribe，无需撤销网关侧订阅。
+            if created {
+                self.remove_entry(session_id);
+            }
             return Err(HubError::Disconnected);
         }
         let rx = entry.arm_attached();
@@ -1879,6 +1887,38 @@ mod tests {
         };
         assert_eq!(err, HubError::Disconnected);
         assert!(!hub.knows("s1"), "死流上不挂载、也不入表");
+    }
+
+    /// 06 审查 N3：死流在「入表之后、arm 之前」才被置位时，第二道复查必须把本次
+    /// **新建**的条目录回滚——否则会话表里留一个收不到事件的半截会话。
+    ///
+    /// 窗口是**构造**出来的（不是竞速）：先扣住 hub 的 `state` 锁——`entry_or_register`
+    /// 的必经点。`attach_session` 必然已经过了第一道死流检查（此刻还是 false）、还没
+    /// 建条目；放锁前把 `stream_dead` 置位，任务继续后就会在第二道复查命中。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attach_on_a_stream_that_dies_while_queued_rolls_back_the_new_entry() {
+        let (hub, _outbound_rx) = test_hub();
+        let state_guard = hub.state.lock().expect("hub state lock");
+        let attach = {
+            let hub = Arc::clone(&hub);
+            tokio::spawn(async move { hub.attach_session("s1").await })
+        };
+        // 有界等待：让 attach 任务走到 `state` 锁上（第一道检查已通过）。用阻塞
+        // sleep：`state_guard` 是 std 锁，不能跨 await 持有（clippy
+        // `await_holding_lock`）；multi-thread runtime 的其它 worker 照常跑任务。
+        std::thread::sleep(Duration::from_millis(50));
+        hub.stream_dead.store(true, Ordering::SeqCst);
+        drop(state_guard);
+
+        let err = match attach.await.expect("attach task") {
+            Ok(_) => panic!("a dead stream must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err, HubError::Disconnected);
+        assert!(
+            !hub.knows("s1"),
+            "死流早退必须回滚本次新建的条目（N3）：不留收不到事件的半截会话"
+        );
     }
 
     #[tokio::test]
