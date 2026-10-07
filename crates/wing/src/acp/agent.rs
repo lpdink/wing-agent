@@ -345,8 +345,23 @@ async fn run_turn(
         // 就地 await（见 `ask` 模块与 design D5）：同一会话至多一个在途 agent→client
         // 请求，后续 ask 留在会话事件缓冲里排队（与 TUI 的 ask 面板 FIFO 同语义）。
         // 等待期间后端轮次被 feedback waiter 阻塞，不会有事件堆积。
+        //
+        // 等客户端作答时**同时等事件流终止**（review r1 N-1）：WS 一断就用默认答案收口，
+        // 让轮次走到下面 `next_event() == None` 的「gateway event stream ended」错误分支——
+        // 否则 `session/prompt` 会一直卡在这条客户端请求上，只以连接消失告终（无可诊断错误）。
         if let WingEvent::Ask { tool_call_id, .. } = &event {
-            match ask::resolve(hub, cx, &session_id, &event).await {
+            let outcome = tokio::select! {
+                outcome = ask::resolve(hub, cx, &session_id, &event) => outcome,
+                () = hub.stream_dead() => {
+                    tracing::warn!(
+                        session_id = %session_key,
+                        tool_call_id = %tool_call_id,
+                        "acp: gateway event stream died while an ask was pending; answering with the default"
+                    );
+                    ask::default_answer(&event)
+                }
+            };
+            match outcome {
                 Some(outcome) => {
                     if outcome.elicitation_unsupported {
                         // elicitation 被客户端回 `-32601`：进程级粘性降级，
@@ -357,7 +372,7 @@ async fn run_turn(
                         tracing::warn!(error = %err, "acp: failed to answer ask");
                     }
                 }
-                // 不可应答（空 tool_call_id —— `ask::resolve` 已记 warn）。
+                // 不可应答（空 tool_call_id —— `ask::classify` 已记 warn）。
                 None => tracing::warn!(
                     session_id = %session_key,
                     "acp: ask event left unanswered"

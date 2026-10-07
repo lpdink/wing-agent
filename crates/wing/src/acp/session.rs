@@ -252,6 +252,9 @@ pub struct SessionHub {
     /// 事件流已死（粘性）：WS 泵退出前置位，此后任何新 turn 一律立刻失败
     /// （见 [`SessionHub::begin_turn`]——绝不 arm 一个「没人投递」的 turn）。
     stream_dead: AtomicBool,
+    /// 「事件流已死」的唤醒信号（与 `stream_dead` 配对：先登记再复查，见
+    /// [`SessionHub::stream_dead`]）。
+    stream_dead_notify: Notify,
     state: Mutex<HubState>,
 }
 
@@ -298,6 +301,7 @@ impl SessionHub {
             pending: Arc::new(PendingReplies::default()),
             client_closed: Arc::new(ClientClosed::default()),
             stream_dead: AtomicBool::new(false),
+            stream_dead_notify: Notify::new(),
             state: Mutex::new(HubState::default()),
         });
         (hub, outbound_rx)
@@ -598,6 +602,29 @@ impl SessionHub {
         }
         let _ = rx.wait_for(|closed| *closed).await;
     }
+
+    /// 置「事件流已死」并唤醒等待者（泵进入收尾的第一步）。
+    fn mark_stream_dead(&self) {
+        self.stream_dead.store(true, Ordering::SeqCst);
+        self.stream_dead_notify.notify_waiters();
+    }
+
+    /// 等「事件流已死」（粘性；已死则立刻返回）。
+    ///
+    /// 在途 ask 等待客户端作答时用它做 `select!` 的另一臂（见 `agent::run_turn`）：
+    /// WS 一断就（用默认答案）收口，让轮次走到既有的「gateway event stream ended」错误
+    /// 分支——否则 `session/prompt` 会一直卡在客户端请求上，只以连接消失告终
+    /// （review r1 N-1）。
+    pub async fn stream_dead(&self) {
+        loop {
+            // 先登记再复查：漏掉「登记与检查之间刚置位」的窗口。
+            let notified = self.stream_dead_notify.notified();
+            if self.stream_dead.load(Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 // ============================================================
@@ -645,10 +672,11 @@ async fn pump(
     if let Some(hub) = hub.upgrade() {
         // 收尾四步（顺序是语义的一部分，见 DRAIN_GRACE 与 stream_dead）：
         // 0. 置「事件流已死」（粘性）：此后新 turn 一律立刻失败，不再 arm；
+        //    在途 ask 的等待也随之醒来（见 [`SessionHub::stream_dead`]）；
         // 1. 让在途 prompt 立刻失败（接收端关闭）；
         // 2. 等它们把 JSON-RPC error 交给出站队列（有界）；
         // 3. 等客户端关连接（有界），再广播 closed 让前台 future 退出（退出码 1）。
-        hub.stream_dead.store(true, Ordering::SeqCst);
+        hub.mark_stream_dead();
         hub.fail_in_flight();
         if !hub.drain_pending_replies(DRAIN_GRACE).await {
             tracing::warn!(
@@ -956,6 +984,29 @@ mod tests {
         assert!(entry.deliver(event("s1")));
     }
 
+    /// N-1：`stream_dead()` 是给在途 ask 的等待信号——置位前不返回、置位后立刻返回。
+    #[tokio::test]
+    async fn stream_dead_signal_wakes_waiters_and_is_sticky() {
+        let (hub, _outbound_rx) = test_hub();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), hub.stream_dead())
+                .await
+                .is_err(),
+            "还活着的事件流不该唤醒等待者"
+        );
+
+        hub.mark_stream_dead();
+        tokio::time::timeout(Duration::from_millis(20), hub.stream_dead())
+            .await
+            .expect("置位后立刻返回");
+
+        // 粘性：后来的等待者（以及重复调用）立刻返回。
+        hub.mark_stream_dead();
+        tokio::time::timeout(Duration::from_millis(20), hub.stream_dead())
+            .await
+            .expect("已死是粘性状态");
+    }
+
     /// S1：事件流已死时，新一轮 prompt 立刻失败——绝不 arm 一个「没人投递」的 turn。
     #[tokio::test]
     async fn turn_on_a_dead_stream_fails_fast() {
@@ -973,7 +1024,7 @@ mod tests {
         assert!(!entry.is_active());
 
         // WS 断开（pump 退出前置位）之后：
-        hub.stream_dead.store(true, Ordering::SeqCst);
+        hub.mark_stream_dead();
         let err = match hub.begin_turn("s1", "hi").await {
             Ok(_) => panic!("a dead stream must fail fast"),
             Err(err) => err,

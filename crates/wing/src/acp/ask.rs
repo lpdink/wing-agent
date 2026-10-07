@@ -4,12 +4,12 @@
 //!
 //! | 形态 | 出路 |
 //! |------|------|
-//! | `required` + `choices`（Bash 危险命令确认，retired 形态） | `session/request_permission`：y=allow_once / yolo=allow_always / n=reject_once |
+//! | `required` + `choices`（Bash 危险命令确认，retired 形态） | `session/request_permission`：choices 恰为 `{y,n,yolo}` 时三选项友好映射（token 回写）；其它 choices 按 label 生成选项并回 label |
 //! | `questions`（AskUserQuestion，1–4 题） | `elicitation/create`（form 模式，**能力门控**） |
 //! | 同上但客户端无 elicitation 能力（或回 `-32601`） | 回退：逐题串行 `session/request_permission` |
 //!
 //! 答案经 WS `ClientRequest{content, tool_call_id}` 定向回写 feedback waiter，内容格式是
-//! **逐字契约**（常量直接复用 TUI 面板的 `shared::panels::ask`，见 [`AnswerLines`] 的说明）：
+//! **逐字契约**（常量直接复用 TUI 面板的 `shared::panels::ask`）：
 //!
 //! - `questions` 形态：每题一行 `header: answer`（header 空回退 id）；多选 label 以 `", "`
 //!   连接；未答 `(user did not answer)`；取消 `__wing_ask_cancelled__`；
@@ -19,12 +19,11 @@
 //! 并发语义（design D5）：ask 处理**就地 await** 在轮次事件循环里——同一会话至多一个在途
 //! agent→client 请求，后续 ask 留在会话事件缓冲里排队（与 TUI `ask_panels` 的 FIFO 队列
 //! 同语义）。因此答案永远在轮次内回写，不需要 detached 任务的簿记，也不存在「终态之后才到
-//! 的答案」竞态。
+//! 的答案」竞态。等待时同时等 `SessionHub::stream_dead()`：WS 一断就用
+//! [`default_answer`] 收口（review r1 N-1）。
 //!
-//! 可测性：整条流程（[`resolve_with`]）只依赖 [`AskInteraction`] 这一小片交互面，
+//! 可测性：整条流程（`resolve_with`）只依赖 [`AskInteraction`] 这一小片交互面，
 //! 单测用脚本化 mock 驱动，不需要真实连接。
-//!
-//! [`AnswerLines`]: #构造答案
 
 use std::future::Future;
 
@@ -75,11 +74,31 @@ const BASH_TOKEN_YOLO: &str = "yolo";
 /// Bash 确认的回写 token：拒绝（`reject_once`）。也是**任何**异常结果的默认值。
 const BASH_TOKEN_N: &str = "n";
 
-/// 回退路径里「跳过本题」选项的 `optionId`。
+/// Bash 危险命令确认的 token 集合（`bash.py` 的 `_DANGEROUS_CHOICES`）。
 ///
-/// 用连字符包起来的保留名：后端保证题目标签非空且互不相同（`ask_user.py` 校验），
-/// 不会与 label 撞车，客户端把它原样回给我们即可识别。
+/// 只有 `choices` 恰好是这一组时才走友好映射（三选项 + 回 token）：后端
+/// `_parse_feedback` 只认这三个，别的词回过去会被判无效并反复追问。
+const DANGEROUS_CHOICES: [&str; 3] = [BASH_TOKEN_Y, BASH_TOKEN_N, BASH_TOKEN_YOLO];
+
+/// 回退路径里「跳过本题」选项的 `optionId`（`reject_once`）。
 const SKIP_OPTION_ID: &str = "__wing_skip__";
+
+/// 回退路径里自由文本题的「无答案继续」选项的 `optionId`（`allow_once`）。
+///
+/// 与 [`SKIP_OPTION_ID`] 语义相同（本题未答、继续下一题），但必须单独存在：
+/// 权限卡片只能给按钮、收不到自由文本，若一道自由文本题**只有** `reject_*` 一条选项，
+/// 只提供「同意 / 拒绝」二态的客户端（omnigent 的 yes/no 桥）在「同意」时会找不到
+/// `allow_*` 而回 `cancelled` outcome——那被我们判成「轮次已取消」，后续题目整批不再询问。
+/// 补一条正面的 `allow_once` 后：这类客户端会渲染选项卡（≥2 条 + 含 `reject_*`），
+/// 「同意」也落到 `selected`（未答 + 继续），不再撞上 `cancelled`。
+const CONTINUE_OPTION_ID: &str = "__wing_continue__";
+
+/// 回退路径里题目选项的 `optionId` 前缀（其后是 `{题号}_{选项号}`）。
+///
+/// 用保留前缀 + 下标生成，而不是直接拿 label 当 `optionId`：后端只保证 label 非空且
+/// 同题内唯一，没有保留名约定——某个 label 恰好叫 `__wing_skip__` 时，客户端选它会被
+/// 当成「跳过」。
+const OPTION_ID_PREFIX: &str = "__wing_opt_";
 
 /// 自由文本题的 `description` 提示（单选/多选题的提示由各选项的 description 承担）。
 const FREE_FORM_HINT: &str = "Type your answer";
@@ -93,9 +112,13 @@ const FREE_FORM_HINT: &str = "Type your answer";
 pub enum AskView<'a> {
     /// AskUserQuestion：`questions` 形态（1–4 题）。
     Questions(&'a [AskQuestion]),
-    /// Bash 危险命令确认（retired 形态）：`questions` 空 + `required` + `choices` 非空。
-    RequiredChoice,
-    /// 未分类形态（当前后端不会产生）：防御性回退（回取消哨兵，见 [`resolve_with`]）。
+    /// retired 单问题形态（`questions` 空 + `required` + `choices` 非空）：
+    /// Bash 危险命令确认，或未来别的「必须从这些 label 里选一个」的询问。
+    RequiredChoice {
+        /// 必须被选中的 label 集合（Bash 形态 = `["y","n","yolo"]`）。
+        choices: &'a [String],
+    },
+    /// 未分类形态（当前后端不会产生）：防御性回退（回取消哨兵，见 `resolve_with`）。
     Unclassified,
 }
 
@@ -123,7 +146,7 @@ pub fn classify(event: &WingEvent) -> Option<(&str, AskView<'_>)> {
     let view = if !questions.is_empty() {
         AskView::Questions(questions)
     } else if *required && !choices.is_empty() {
-        AskView::RequiredChoice
+        AskView::RequiredChoice { choices }
     } else {
         AskView::Unclassified
     };
@@ -230,9 +253,9 @@ async fn resolve_with(
     view: AskView<'_>,
 ) -> AskOutcome {
     match view {
-        AskView::RequiredChoice => {
-            AskOutcome::answer(bash_confirmation(interaction, session_id, tool_call_id).await)
-        }
+        AskView::RequiredChoice { choices } => AskOutcome::answer(
+            required_choice(interaction, session_id, tool_call_id, choices).await,
+        ),
         AskView::Questions(questions) => {
             questions_answer(
                 interaction,
@@ -255,15 +278,50 @@ async fn resolve_with(
     }
 }
 
+/// 事件流已死（`hub` 已进入收尾）而询问还没答完时的**默认答案**。
+///
+/// 与「无人可问」的语义一致：Bash / required 形态 = 拒绝（已知 token 形态）或取消哨兵
+/// （泛化形态）；`questions` = 逐题未答占位；未分类 = 取消哨兵。轮次随后会走到既有的
+/// 「gateway event stream ended」错误分支，答案本身多半已递不出去（WS 已断）——它的作用是
+/// 让这条路径与正常收口共用同一段代码（绝不留一个悬挂的 waiter）。
+///
+/// `None` = 这条事件本来就不该应答（非 `ask` / 空 `tool_call_id`）。
+pub fn default_answer(event: &WingEvent) -> Option<AskOutcome> {
+    let (_, view) = classify(event)?;
+    let answer = match view {
+        AskView::RequiredChoice { choices } => required_choice_default(choices).to_string(),
+        AskView::Questions(questions) => questions
+            .iter()
+            .map(|question| format!("{}: {}", question.tab_label(), UNANSWERED_PLACEHOLDER))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        AskView::Unclassified => ASK_CANCEL_CONTENT.to_string(),
+    };
+    Some(AskOutcome::answer(answer))
+}
+
 // ============================================================
-// ① Bash 危险命令确认 → permission
+// ① required 形态（Bash 危险命令确认 / 未来别的必选询问）→ permission
 // ============================================================
 
-/// Bash 确认：`session/request_permission`，三选项的 `optionId` 就是回写 token。
-async fn bash_confirmation(
+/// `choices` 是否恰好是 Bash 的三个 token（顺序无关）。
+fn is_dangerous_choices(choices: &[String]) -> bool {
+    choices.len() == DANGEROUS_CHOICES.len()
+        && DANGEROUS_CHOICES
+            .iter()
+            .all(|token| choices.iter().any(|choice| choice == token))
+}
+
+/// required 形态：`session/request_permission`。
+///
+/// - 已知 Bash 三 token：三选项的 `optionId` 就是回写 token（友好名字 + 对应 kind）；
+/// - 其它 `required+choices`（当前无生产者，防御性泛化）：每个 label 一条 `allow_once`，
+///   回选中的 label（与 TUI 的 `RequiredChoice` 同口径：回裸 label）。
+async fn required_choice(
     interaction: &impl AskInteraction,
     session_id: &SessionId,
     tool_call_id: &str,
+    choices: &[String],
 ) -> String {
     let request = RequestPermissionRequest::new(
         session_id.clone(),
@@ -274,22 +332,50 @@ async fn bash_confirmation(
             ToolCallId::new(tool_call_id.to_string()),
             ToolCallUpdateFields::new().kind(ToolKind::Execute),
         ),
-        bash_options(),
+        required_choice_options(choices),
     );
     match interaction.permission(request).await {
-        Ok(response) => bash_token(&response.outcome),
+        Ok(response) => required_choice_answer(choices, &response.outcome),
         Err(err) => {
             tracing::warn!(
                 tool_call_id,
                 error = %err,
-                "acp: bash confirmation request failed; rejecting"
+                "acp: required-choice permission request failed; answering with the default"
             );
-            BASH_TOKEN_N.to_string()
+            required_choice_default(choices).to_string()
         }
     }
 }
 
-/// 三个选项：`optionId` 即回写 token，客户端原样回传，映射恒等。
+/// 请求失败 / 事件流已死时的默认答案：已知 Bash 形态 = 拒绝（`n`）；泛化形态 = 取消哨兵
+/// （不伪造某个 label，见 [`required_choice_answer`]）。
+fn required_choice_default(choices: &[String]) -> &'static str {
+    if is_dangerous_choices(choices) {
+        BASH_TOKEN_N
+    } else {
+        ASK_CANCEL_CONTENT
+    }
+}
+
+/// 选项集合：已知 Bash 形态用友好三选项（token 即 `optionId`）；
+/// 泛化形态每个 label 一条 `allow_once`（`optionId` = label，客户端原样回传）。
+fn required_choice_options(choices: &[String]) -> Vec<PermissionOption> {
+    if is_dangerous_choices(choices) {
+        return bash_options();
+    }
+    choices
+        .iter()
+        .map(|label| {
+            PermissionOption::new(
+                label.clone(),
+                label.clone(),
+                PermissionOptionKind::AllowOnce,
+            )
+        })
+        .collect()
+}
+
+/// 三个友好选项（`optionId` 即回写 token，客户端原样回传，映射恒等）。
 fn bash_options() -> Vec<PermissionOption> {
     vec![
         PermissionOption::new(BASH_TOKEN_Y, "Yes, run it", PermissionOptionKind::AllowOnce),
@@ -302,15 +388,29 @@ fn bash_options() -> Vec<PermissionOption> {
     ]
 }
 
-/// permission 结果 → 回写 token。
+/// permission 结果 → 回写内容。
 ///
-/// `cancelled` outcome、未知 `optionId`、请求出错一律回 [`BASH_TOKEN_N`]（拒绝）：
-/// 后端只认 y/n/yolo，**绝不能**用取消哨兵（`_parse_feedback` 会判无效并重新追问）。
-fn bash_token(outcome: &RequestPermissionOutcome) -> String {
+/// - 已知 Bash 形态：只认 `y`/`yolo`/`n`；`cancelled` outcome、未知 `optionId`、请求出错
+///   一律回 `n`（拒绝）——后端只认这三个 token，**绝不能**用取消哨兵
+///   （`_parse_feedback` 会判无效并重新追问）。
+/// - 泛化形态：回选中的 label（与 TUI `RequiredChoice` 同口径）；`cancelled` / 未知 id →
+///   取消哨兵——这类形态的语义未知，伪造一个 label 比明确说「取消了」更危险。
+fn required_choice_answer(choices: &[String], outcome: &RequestPermissionOutcome) -> String {
     let RequestPermissionOutcome::Selected(selected) = outcome else {
-        return BASH_TOKEN_N.to_string();
+        return required_choice_default(choices).to_string();
     };
-    match selected.option_id.0.as_ref() {
+    let option_id = selected.option_id.0.as_ref();
+    if !is_dangerous_choices(choices) {
+        if choices.iter().any(|label| label == option_id) {
+            return option_id.to_string();
+        }
+        tracing::warn!(
+            option_id,
+            "acp: unknown option for a required-choice ask; answering as cancelled"
+        );
+        return ASK_CANCEL_CONTENT.to_string();
+    }
+    match option_id {
         BASH_TOKEN_Y => BASH_TOKEN_Y.to_string(),
         BASH_TOKEN_YOLO => BASH_TOKEN_YOLO.to_string(),
         BASH_TOKEN_N => BASH_TOKEN_N.to_string(),
@@ -528,6 +628,11 @@ fn answer_text(value: Option<&ElicitationContentValue>) -> String {
 /// **`cancelled` outcome = 轮次已被取消**（ACP 规范对该 outcome 的定义），此时不再追问
 /// 后续题目（后面的卡片发给一个正在取消的轮次只会让用户对着空气按按钮），剩余题目按
 /// 未答占位收口并立刻回写——prompt 不必等用户把多余的卡片一张张关掉。
+///
+/// 注意：**只有 `cancelled` 才停**。看板客户端在「同意」时未必回 `selected`——只提供
+/// Approve/Reject 二态的实现（omnigent 的 yes/no 桥）在找不到 `allow_*` 选项时会回
+/// `cancelled`（`_permission_outcome` 的兜底）。因此每道题**必须**至少有一条 `allow_once`
+/// 选项（见 [`fallback_options`]），否则它后面的题目会被整批吞掉（review r1 S-1）。
 async fn fallback_questions(
     interaction: &impl AskInteraction,
     session_id: &SessionId,
@@ -535,8 +640,9 @@ async fn fallback_questions(
     questions: &[AskQuestion],
 ) -> String {
     let mut answers: Vec<String> = Vec::with_capacity(questions.len());
-    for question in questions {
-        let Some(answer) = fallback_question(interaction, session_id, tool_call_id, question).await
+    for (index, question) in questions.iter().enumerate() {
+        let Some(answer) =
+            fallback_question(interaction, session_id, tool_call_id, index, question).await
         else {
             break;
         };
@@ -560,6 +666,7 @@ async fn fallback_question(
     interaction: &impl AskInteraction,
     session_id: &SessionId,
     tool_call_id: &str,
+    question_index: usize,
     question: &AskQuestion,
 ) -> Option<String> {
     let request = RequestPermissionRequest::new(
@@ -572,10 +679,10 @@ async fn fallback_question(
                 .title(question_title(question))
                 .kind(ToolKind::Other),
         ),
-        fallback_options(question),
+        fallback_options(question, question_index),
     );
     match interaction.permission(request).await {
-        Ok(response) => fallback_choice_answer(question, &response.outcome),
+        Ok(response) => fallback_choice_answer(question, question_index, &response.outcome),
         Err(err) => {
             tracing::warn!(
                 tool_call_id,
@@ -588,47 +695,71 @@ async fn fallback_question(
     }
 }
 
-/// 该题的选项（每条 `allow_once`，`optionId` = label，客户端原样回传）+ 一条 `Skip`。
+/// 题目选项的保留 `optionId`：`__wing_opt_{题号}_{选项号}`。
 ///
-/// 带 `reject_*` 的 ≥2 选项是 omnigent 走「选项卡」而不是 Approve/Reject 二态的条件；
-/// 自由文本题只剩 Skip 一条 → 客户端无论如何作答都落到「未答」（权限卡片收不到自由文本）。
-fn fallback_options(question: &AskQuestion) -> Vec<PermissionOption> {
-    let mut options: Vec<PermissionOption> = enum_options(question)
-        .into_iter()
-        .map(|option| {
+/// 不用 label 当 `optionId`：后端只保证 label 非空且题内唯一，没有保留名约定——某个
+/// label 恰好叫 `__wing_skip__` 时，客户端选它会被当成「跳过」。
+fn option_id_for(question_index: usize, option_index: usize) -> String {
+    format!("{OPTION_ID_PREFIX}{question_index}_{option_index}")
+}
+
+/// 该题的选项（`allow_once`，`optionId` 见 [`option_id_for`]）+ 两条逃生选项。
+///
+/// 逃生选项（本题未答、继续下一题）：
+///
+/// - `Skip`（`reject_once`，[`SKIP_OPTION_ID`]）——「拒绝 / 跳过」语义的落点；
+/// - 自由文本题**额外**一条 `Continue`（`allow_once`，[`CONTINUE_OPTION_ID`]）——没有它，
+///   只给 Approve/Reject 的客户端（权限卡片收不到自由文本）在「同意」时会回 `cancelled`
+///   outcome，被我们按规范判成「轮次已取消」，后面的题目整批不再询问（review r1 S-1）。
+///   顺带让选项数 ≥2 且含 `reject_*`，这类客户端会直接渲染选项卡而不是二态卡。
+fn fallback_options(question: &AskQuestion, question_index: usize) -> Vec<PermissionOption> {
+    let options = enum_options(question);
+    let mut fallback: Vec<PermissionOption> = options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
             PermissionOption::new(
+                option_id_for(question_index, index),
                 option.value.clone(),
-                option.value,
                 PermissionOptionKind::AllowOnce,
             )
         })
         .collect();
-    options.push(PermissionOption::new(
+    if options.is_empty() {
+        fallback.push(PermissionOption::new(
+            CONTINUE_OPTION_ID,
+            "Continue",
+            PermissionOptionKind::AllowOnce,
+        ));
+    }
+    fallback.push(PermissionOption::new(
         SKIP_OPTION_ID,
         "Skip",
         PermissionOptionKind::RejectOnce,
     ));
-    options
+    fallback
 }
 
-/// 选中某个 label → 该 label 即答案；Skip / 未知 id → 未答占位；
-/// `None` = `cancelled` outcome（轮次已取消，见 [`fallback_questions`]）。
+/// 选项 → 答案：题目选项按保留 id 映射回 label；`Continue` / `Skip` = 未答（继续下一题）；
+/// 未知 id = 未答 + warn；`None` = `cancelled` outcome（轮次已取消，见 [`fallback_questions`]）。
 fn fallback_choice_answer(
     question: &AskQuestion,
+    question_index: usize,
     outcome: &RequestPermissionOutcome,
 ) -> Option<String> {
     let RequestPermissionOutcome::Selected(selected) = outcome else {
         return None;
     };
     let chosen = selected.option_id.0.as_ref();
-    if chosen == SKIP_OPTION_ID {
+    if chosen == SKIP_OPTION_ID || chosen == CONTINUE_OPTION_ID {
         return Some(UNANSWERED_PLACEHOLDER.to_string());
     }
     Some(
         enum_options(question)
             .into_iter()
-            .find(|option| option.value == chosen)
-            .map(|option| option.value)
+            .enumerate()
+            .find(|(index, _)| option_id_for(question_index, *index) == chosen)
+            .map(|(_, option)| option.value)
             .unwrap_or_else(|| {
                 tracing::warn!(
                     question_id = %question.id,
@@ -708,6 +839,13 @@ mod tests {
             WingEvent::Ask { questions, .. } => questions,
             other => panic!("expected an ask event, got {}", other.event_type()),
         }
+    }
+
+    /// 一条非 ask 事件（分类与默认答案都应直接拒绝它）。
+    fn text_event() -> WingEvent {
+        event(json!({
+            "type": "text", "content": "hi", "created_at": "c", "session_id": "s1", "request_id": "r",
+        }))
     }
 
     fn selected(option_id: &str) -> RequestPermissionResponse {
@@ -885,7 +1023,10 @@ mod tests {
         let bash = bash_ask();
         let (id, view) = classify(&bash).expect("bash ask classifies");
         assert_eq!(id, "tc_bash");
-        assert_eq!(view, AskView::RequiredChoice);
+        assert!(matches!(
+            view,
+            AskView::RequiredChoice { choices } if choices == ["y", "n", "yolo"]
+        ));
 
         let questions = questions_ask();
         let (id, view) = classify(&questions).expect("questions ask classifies");
@@ -926,10 +1067,58 @@ mod tests {
         assert!(mock.elicitation_log().is_empty(), "不得发起任何请求");
     }
 
-    // ---- ① Bash 三选项 ----
+    /// N-1：事件流已死时的默认答案（并发问都不发，纯函数）。
+    #[test]
+    fn default_answer_covers_every_shape() {
+        assert_eq!(
+            default_answer(&bash_ask()).map(|outcome| outcome.answer),
+            Some("n".to_string()),
+            "Bash 形态：拒绝（后端只认 y/n/yolo）"
+        );
+        assert_eq!(
+            default_answer(&questions_ask()).map(|outcome| outcome.answer),
+            Some(
+                "配色: (user did not answer)\nfeatures: (user did not answer)\n名字: (user did not answer)"
+                    .to_string()
+            ),
+            "questions 形态：逐题未答占位"
+        );
+        let unclassified = event(json!({
+            "type": "ask", "tool_call_id": "tc_x", "question": "?",
+            "created_at": "c", "session_id": "s1", "request_id": "r",
+        }));
+        assert_eq!(
+            default_answer(&unclassified).map(|outcome| outcome.answer),
+            Some(ASK_CANCEL_CONTENT.to_string())
+        );
+
+        // 不可应答的事件 → None；泛化 required 形态 → 取消哨兵。
+        assert!(default_answer(&text_event()).is_none());
+        let empty_id = event(json!({
+            "type": "ask", "tool_call_id": "", "required": true, "choices": ["y", "n", "yolo"],
+            "created_at": "c", "session_id": "s1", "request_id": "r",
+        }));
+        assert!(default_answer(&empty_id).is_none());
+        let generic = event(json!({
+            "type": "ask", "tool_call_id": "tc_g", "required": true, "choices": ["yes", "no"],
+            "created_at": "c", "session_id": "s1", "request_id": "r",
+        }));
+        assert_eq!(
+            default_answer(&generic).map(|outcome| outcome.answer),
+            Some(ASK_CANCEL_CONTENT.to_string())
+        );
+    }
+
+    // ---- ① required 形态（Bash 三 token + 泛化 choices） ----
+
+    /// Bash 危险命令确认的 `choices`（`bash.py::_DANGEROUS_CHOICES`）。
+    fn dangerous_choices() -> Vec<String> {
+        ["y", "n", "yolo"].iter().map(|t| t.to_string()).collect()
+    }
 
     #[tokio::test]
     async fn bash_confirmation_maps_three_tokens() {
+        let choices = dangerous_choices();
         for (reply, expected) in [
             (selected("y"), "y"),
             (selected("yolo"), "yolo"),
@@ -938,8 +1127,14 @@ mod tests {
             (permission_cancelled(), "n"),
         ] {
             let mock = ScriptedAsk::ready_permissions([Ok(reply)]);
-            let outcome =
-                resolve_with(&mock, true, &session(), "tc_bash", AskView::RequiredChoice).await;
+            let outcome = resolve_with(
+                &mock,
+                true,
+                &session(),
+                "tc_bash",
+                AskView::RequiredChoice { choices: &choices },
+            )
+            .await;
             assert_eq!(outcome.answer, expected);
             assert!(!outcome.elicitation_unsupported);
         }
@@ -947,8 +1142,16 @@ mod tests {
 
     #[tokio::test]
     async fn bash_confirmation_request_shape() {
+        let choices = dangerous_choices();
         let mock = ScriptedAsk::ready_permissions([Ok(selected("y"))]);
-        resolve_with(&mock, true, &session(), "tc_bash", AskView::RequiredChoice).await;
+        resolve_with(
+            &mock,
+            true,
+            &session(),
+            "tc_bash",
+            AskView::RequiredChoice { choices: &choices },
+        )
+        .await;
 
         let requests = mock.seen_permissions();
         assert_eq!(requests.len(), 1, "只发一条 permission");
@@ -958,7 +1161,7 @@ mod tests {
         assert_eq!(request.tool_call.fields.kind, Some(ToolKind::Execute));
         assert!(
             request.tool_call.fields.title.is_none(),
-            "卡片已存在，不覆盖标题"
+            "卡片已存在，不覆盖标题（Zed 的字段合并语义）"
         );
         let options: Vec<(String, String, PermissionOptionKind)> = request
             .options
@@ -991,11 +1194,63 @@ mod tests {
 
     #[tokio::test]
     async fn bash_confirmation_failure_rejects() {
+        let choices = dangerous_choices();
         let mock = ScriptedAsk::ready_permissions([Err(Error::internal_error().data("boom"))]);
-        let outcome =
-            resolve_with(&mock, true, &session(), "tc_bash", AskView::RequiredChoice).await;
+        let outcome = resolve_with(
+            &mock,
+            true,
+            &session(),
+            "tc_bash",
+            AskView::RequiredChoice { choices: &choices },
+        )
+        .await;
         assert_eq!(outcome.answer, "n");
         assert!(!outcome.elicitation_unsupported);
+    }
+
+    /// N-2：`choices` 不是 Bash 三 token 时按 label 生成选项、回选中的 label（TUI 同口径）。
+    #[tokio::test]
+    async fn generic_required_choices_echo_the_selected_label() {
+        let choices: Vec<String> = ["yes", "no"].iter().map(|t| t.to_string()).collect();
+        let view = || AskView::RequiredChoice { choices: &choices };
+
+        // 选项 = 每条 label 一条 allow_once（optionId = label）。
+        let mock = ScriptedAsk::ready_permissions([Ok(selected("no"))]);
+        let outcome = resolve_with(&mock, true, &session(), "tc_gen", view()).await;
+        assert_eq!(outcome.answer, "no", "回选中的 label，不伪造 y/n/yolo");
+        assert_eq!(
+            mock.seen_permissions()[0]
+                .options
+                .iter()
+                .map(|option| (option.option_id.to_string(), option.kind))
+                .collect::<Vec<_>>(),
+            vec![
+                ("yes".to_string(), PermissionOptionKind::AllowOnce),
+                ("no".to_string(), PermissionOptionKind::AllowOnce),
+            ]
+        );
+        assert_eq!(
+            mock.seen_permissions()[0].tool_call.fields.kind,
+            Some(ToolKind::Execute)
+        );
+
+        // 取消 / 未知 id / 出错 → 取消哨兵（不拿某个 label 冒名顶替）。
+        for reply in [permission_cancelled(), selected("y"), selected("yolo")] {
+            let mock = ScriptedAsk::ready_permissions([Ok(reply)]);
+            let outcome = resolve_with(&mock, true, &session(), "tc_gen", view()).await;
+            assert_eq!(outcome.answer, ASK_CANCEL_CONTENT);
+        }
+        let mock = ScriptedAsk::ready_permissions([Err(Error::internal_error().data("boom"))]);
+        let outcome = resolve_with(&mock, true, &session(), "tc_gen", view()).await;
+        assert_eq!(outcome.answer, ASK_CANCEL_CONTENT);
+
+        // 顺序无关的已知集合判定：打乱顺序仍是 Bash 形态。
+        let shuffled: Vec<String> = ["n", "yolo", "y"].iter().map(|t| t.to_string()).collect();
+        assert!(is_dangerous_choices(&shuffled));
+        assert!(!is_dangerous_choices(&choices));
+        assert!(!is_dangerous_choices(
+            &["y", "n"].iter().map(|t| t.to_string()).collect::<Vec<_>>()
+        ));
     }
 
     // ---- ② 表单 ----
@@ -1186,14 +1441,45 @@ mod tests {
 
     // ---- ③ 回退 ----
 
+    /// review r1 S-1 的最小复现形状：自由文本题在前、有选项的题在后。
+    fn free_text_first_ask() -> WingEvent {
+        event(json!({
+            "type": "ask",
+            "tool_call_id": "tc_ff",
+            "questions": [
+                {"id": "name", "header": "名字", "question": "叫什么名字"},
+                {"id": "theme", "header": "配色", "question": "选一个配色",
+                 "options": [{"label": "浅色"}, {"label": "深色"}]},
+            ],
+            "created_at": "c",
+            "session_id": "s1",
+            "request_id": "r",
+        }))
+    }
+
+    /// 一份权限卡片是否满足 omnigent「选项卡」的门槛：≥2 条非空唯一 label + 含 `reject_*`。
+    fn looks_like_a_choice_card(options: &[PermissionOption]) -> bool {
+        let labels: Vec<&str> = options.iter().map(|option| option.name.as_str()).collect();
+        options.len() >= 2
+            && labels.iter().all(|label| !label.trim().is_empty())
+            && labels
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                == labels.len()
+            && options
+                .iter()
+                .any(|option| matches!(option.kind, PermissionOptionKind::RejectOnce))
+    }
+
     #[tokio::test]
     async fn fallback_when_the_client_has_no_elicitation() {
         let event = questions_ask();
         let questions = questions_of(&event);
         let mock = ScriptedAsk::ready_permissions([
-            Ok(selected("浅色")),
+            Ok(selected(&option_id_for(0, 0))),
             Ok(selected(SKIP_OPTION_ID)),
-            Ok(permission_cancelled()),
+            Ok(selected(CONTINUE_OPTION_ID)),
         ]);
 
         let outcome = resolve_with(
@@ -1214,7 +1500,7 @@ mod tests {
             "无能力不发 elicitation"
         );
 
-        // 逐题卡片：合成 id、标题 = 问题全文、选项 = label(allow_once) + Skip(reject_once)。
+        // 逐题卡片：合成 id、标题 = 问题全文、选项 = 保留 id(allow_once) + 逃生选项。
         let requests = mock.seen_permissions();
         assert_eq!(
             mock.permission_log(),
@@ -1235,17 +1521,109 @@ mod tests {
             .iter()
             .map(|option| option.option_id.to_string())
             .collect();
-        assert_eq!(first, vec!["浅色", "深色", SKIP_OPTION_ID]);
+        assert_eq!(
+            first,
+            vec![
+                option_id_for(0, 0),
+                option_id_for(0, 1),
+                SKIP_OPTION_ID.to_string()
+            ],
+            "optionId 用保留前缀 + 下标，不拿 label 当 id（N-4）"
+        );
+        assert_eq!(
+            requests[0]
+                .options
+                .iter()
+                .map(|option| option.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["浅色", "深色", "Skip"],
+            "label 仍原样展示"
+        );
         assert_eq!(
             requests[0].options[2].kind,
             PermissionOptionKind::RejectOnce
         );
-        let free_form: Vec<String> = requests[2]
-            .options
-            .iter()
-            .map(|option| option.option_id.to_string())
-            .collect();
-        assert_eq!(free_form, vec![SKIP_OPTION_ID], "自由文本题只剩 Skip");
+
+        // 自由文本题：Continue(allow_once) + Skip(reject_once)——两条都为「未答并继续」，
+        // 且满足「≥2 + 含 reject」的选项卡门槛（N-5/S-1）。
+        let free_form = &requests[2].options;
+        assert_eq!(
+            free_form
+                .iter()
+                .map(|option| (
+                    option.option_id.to_string(),
+                    option.name.as_str(),
+                    option.kind
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    CONTINUE_OPTION_ID.to_string(),
+                    "Continue",
+                    PermissionOptionKind::AllowOnce
+                ),
+                (
+                    SKIP_OPTION_ID.to_string(),
+                    "Skip",
+                    PermissionOptionKind::RejectOnce
+                ),
+            ]
+        );
+        assert!(looks_like_a_choice_card(free_form));
+        for request in &requests {
+            assert!(
+                looks_like_a_choice_card(&request.options),
+                "每张卡都该是可渲染的选项卡：{:?}",
+                request.options
+            );
+        }
+    }
+
+    /// S-1 回归：自由文本题的正面作答（Approve / Continue）不再吞掉后续题目。
+    #[tokio::test]
+    async fn a_free_text_question_keeps_asking_after_a_positive_answer() {
+        let ask = free_text_first_ask();
+        let questions = questions_of(&ask);
+        // 「同意」的两条路（Continue / Skip）都必须继续问下一题。
+        for positive in [CONTINUE_OPTION_ID, SKIP_OPTION_ID] {
+            let mock = ScriptedAsk::ready_permissions([
+                Ok(selected(positive)),
+                Ok(selected(&option_id_for(1, 1))),
+            ]);
+            let outcome = resolve_with(
+                &mock,
+                false,
+                &session(),
+                "tc_ff",
+                AskView::Questions(questions),
+            )
+            .await;
+            assert_eq!(
+                outcome.answer, "名字: (user did not answer)\n配色: 深色",
+                "自由文本题之后的题目必须照常询问（{positive}）"
+            );
+            assert_eq!(
+                mock.permission_log(),
+                vec!["permission:tc_ff:name", "permission:tc_ff:theme"],
+                "第二题必须被发出（{positive}）"
+            );
+        }
+
+        // 对照：只有真正的 `cancelled` outcome（轮次取消）才停。
+        let mock = ScriptedAsk::ready_permissions([Ok(permission_cancelled())]);
+        let outcome = resolve_with(
+            &mock,
+            false,
+            &session(),
+            "tc_ff",
+            AskView::Questions(questions),
+        )
+        .await;
+        assert_eq!(
+            outcome.answer,
+            "名字: (user did not answer)\n配色: (user did not answer)"
+        );
+        assert_eq!(mock.permission_log(), vec!["permission:tc_ff:name"]);
     }
 
     #[tokio::test]
@@ -1253,7 +1631,11 @@ mod tests {
         let (release, released) = oneshot::channel();
         let mock = std::sync::Arc::new(ScriptedAsk::new());
         mock.push_deferred(released);
-        mock.push_permissions([Ok(selected("多选")), Ok(selected(SKIP_OPTION_ID))]);
+        // 第二题（features，多选）的「多选」是第 0 个选项 → 保留 id；第三题走 Continue。
+        mock.push_permissions([
+            Ok(selected(&option_id_for(1, 0))),
+            Ok(selected(CONTINUE_OPTION_ID)),
+        ]);
 
         let flow_mock = std::sync::Arc::clone(&mock);
         let flow = tokio::spawn(async move {
@@ -1280,7 +1662,7 @@ mod tests {
         );
 
         release
-            .send(Ok(selected("浅色")))
+            .send(Ok(selected(&option_id_for(0, 0))))
             .expect("release the first question");
         let outcome = flow.await.expect("the ask flow finishes");
         assert_eq!(
@@ -1315,7 +1697,7 @@ mod tests {
         // ① 请求失败、② 正常选中、③ 回了个我们没提供的 optionId（客户端乱来）。
         let mock = ScriptedAsk::ready_permissions([
             Err(Error::internal_error().data("boom")),
-            Ok(selected("预览")),
+            Ok(selected(&option_id_for(1, 1))),
             Ok(selected("从未提供过的选项")),
         ]);
         let outcome = resolve_with(
@@ -1368,7 +1750,7 @@ mod tests {
         let mock = ScriptedAsk::new();
         mock.push_elicitation(Err(Error::method_not_found()));
         mock.push_permissions([
-            Ok(selected("深色")),
+            Ok(selected(&option_id_for(0, 1))),
             Ok(selected(SKIP_OPTION_ID)),
             Ok(selected(SKIP_OPTION_ID)),
         ]);
@@ -1400,7 +1782,7 @@ mod tests {
         let mock = ScriptedAsk::new();
         mock.push_elicitation(Err(Error::internal_error().data("transient")));
         mock.push_permissions([
-            Ok(selected("浅色")),
+            Ok(selected(&option_id_for(0, 0))),
             Ok(selected(SKIP_OPTION_ID)),
             Ok(selected(SKIP_OPTION_ID)),
         ]);
