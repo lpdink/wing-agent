@@ -147,9 +147,10 @@ crates/wing/src/
 │   └── query.rs                     `wing models` / `tools` / `agents`（查询端点，表格 / JSON）
 ├── acp/                             ACP 前端（wing acp，stdio 上的 Agent Client Protocol 服务端）
 │   ├── mod.rs                       入口（ensure gateway → WS 连接 → HTTP client → 服务循环）+ CLI 参数
-│   ├── agent.rs                     ACP handler 注册（initialize / session/new / session/prompt / session/cancel）
-│   ├── session.rs                   SessionHub：会话表 · WS 事件泵与按 session_id 分流 · 出站队列 · prompt 串行化
+│   ├── agent.rs                     ACP handler 注册（initialize / new / prompt / cancel / list / load / resume / close）
+│   ├── session.rs                   SessionHub：会话表 · WS 事件泵与分流 · 挂载（load/resume）与回收（close）· prompt 串行化
 │   └── translate.rs                 WingEvent → ACP session/update 映射（工具卡片状态 + prompt 拍平 + 终态判定）
+│       └── replay.rs                session/load 的历史回放投影（sync_session → update 序列）
 ├── stdio/                           headless 前端（wing -p，Claude 协议）
 │   ├── mod.rs                       run_stdio + ensure_gateway_running + 参数过滤
 │   ├── ndjson.rs                    stream-json NDJSON 帧
