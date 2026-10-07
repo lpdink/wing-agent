@@ -26,6 +26,12 @@
 //! | `context_stats` | `UsageUpdate`（窗口 <=0 跳过） |
 //! | `turn_result` / `interrupted` / `error` | 轮次终态（end_turn / cancelled / JSON-RPC error） |
 //! | 其余 | 零帧（debug 日志） |
+//!
+//! 子模块 [`replay`]：`session/load` 的历史回放投影（`sync_session` 快照 → update
+//! 序列）。它与实时映射共用同一份 [`ToolCards`] 记忆与 title/kind/locations 规则——
+//! 回放建好的卡片，后续实时 `diff_content` / `tool_call_result` 继续锚定。
+
+pub mod replay;
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -183,37 +189,56 @@ impl ToolCards {
         tool_name: &str,
         tool_args: &serde_json::Value,
     ) -> Vec<SessionUpdate> {
+        self.upsert_call(tool_call_id, tool_name, Some(tool_args.clone()))
+    }
+
+    /// 工具卡片的「创建或补齐」：实时 `tool_call` 与历史回放（[`replay`]）共用——
+    /// title / kind / locations 与「已创建 → update、未创建 → create」只此一份实现。
+    ///
+    /// `args`：`None` = 参数缺席（历史消息的 `arguments` 可以缺席）→ `rawInput` 字段
+    /// 不发；`Some(Value::Null)` 是显式 null，照发（与线格式保真）。
+    fn upsert_call(
+        &mut self,
+        tool_call_id: &str,
+        tool_name: &str,
+        args: Option<serde_json::Value>,
+    ) -> Vec<SessionUpdate> {
         if tool_call_id.is_empty() {
             tracing::debug!("acp: tool_call without tool_call_id; dropped");
             return Vec::new();
         }
-        let title = tool_title(tool_name, tool_args);
+        // 标题 / 定位用的形状：参数缺席时按空对象处理（退回工具名，不发 rawInput）。
+        let shape = args.as_ref().unwrap_or(&serde_json::Value::Null);
+        let title = tool_title(tool_name, shape);
         let kind = tool_kind(tool_name);
-        let locations = tool_locations(tool_name, tool_args);
+        let locations = tool_locations(tool_name, shape);
         let created = self.card(tool_call_id).is_some_and(|card| card.created);
         self.card_mut(tool_call_id).created = true;
 
         if created {
-            let fields = ToolCallUpdateFields::new()
+            let mut fields = ToolCallUpdateFields::new()
                 .title(title)
                 .name(tool_name)
                 .kind(kind)
                 .locations(locations)
-                .raw_input(tool_args.clone())
                 .status(ToolCallStatus::InProgress);
+            if let Some(args) = args {
+                fields = fields.raw_input(args);
+            }
             vec![SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 ToolCallId::new(tool_call_id),
                 fields,
             ))]
         } else {
-            vec![SessionUpdate::ToolCall(
-                ToolCall::new(ToolCallId::new(tool_call_id), title)
-                    .name(tool_name)
-                    .kind(kind)
-                    .locations(locations)
-                    .raw_input(tool_args.clone())
-                    .status(ToolCallStatus::InProgress),
-            )]
+            let mut call = ToolCall::new(ToolCallId::new(tool_call_id), title)
+                .name(tool_name)
+                .kind(kind)
+                .locations(locations)
+                .status(ToolCallStatus::InProgress);
+            if let Some(args) = args {
+                call = call.raw_input(args);
+            }
+            vec![SessionUpdate::ToolCall(call)]
         }
     }
 
@@ -389,6 +414,26 @@ fn usage_update(total_tokens: i64, context_window_tokens: i64) -> Vec<SessionUpd
     let used = u64::try_from(total_tokens).unwrap_or(0);
     let size = u64::try_from(context_window_tokens).unwrap_or(0);
     vec![SessionUpdate::UsageUpdate(UsageUpdate::new(used, size))]
+}
+
+/// 会话的标题与上下文用量（`session/load` / `session/resume` 的收尾帧，
+/// 数据来自 `GET /api/session/info`）。
+///
+/// - `name` 非空（trim 后）→ `session_info_update{title}`；否则不发；
+/// - 用量沿用 [`usage_update`] 的规则（窗口 <=0 跳过）。
+pub fn session_info_updates(
+    name: Option<&str>,
+    total_tokens: i64,
+    context_window_tokens: i64,
+) -> Vec<SessionUpdate> {
+    let mut updates = Vec::new();
+    if let Some(title) = name.map(str::trim).filter(|title| !title.is_empty()) {
+        updates.push(SessionUpdate::SessionInfoUpdate(
+            SessionInfoUpdate::new().title(title.to_string()),
+        ));
+    }
+    updates.extend(usage_update(total_tokens, context_window_tokens));
+    updates
 }
 
 // ============================================================
@@ -1343,5 +1388,43 @@ mod tests {
             flatten_prompt(&[link("file:///tmp")]),
             Some("/tmp".to_string())
         );
+    }
+
+    // ---- 会话收尾帧（session/load · session/resume） ----
+
+    #[test]
+    fn session_info_updates_send_title_and_usage() {
+        let updates = session_info_updates(Some("修 ACP 前端"), 5000, 80000);
+        assert_eq!(updates.len(), 2);
+        match &updates[0] {
+            SessionUpdate::SessionInfoUpdate(update) => {
+                assert_eq!(
+                    update.title.value().map(String::as_str),
+                    Some("修 ACP 前端")
+                );
+            }
+            other => panic!("expected session_info_update, got {other:?}"),
+        }
+        match &updates[1] {
+            SessionUpdate::UsageUpdate(update) => {
+                assert_eq!(update.used, 5000);
+                assert_eq!(update.size, 80000);
+            }
+            other => panic!("expected usage_update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_info_updates_skip_blank_titles_and_bad_windows() {
+        // 无标题 + 窗口未知：什么都没有。
+        assert!(session_info_updates(None, 10, 0).is_empty());
+        // 空白标题视同缺席，用量照发。
+        let updates = session_info_updates(Some("   "), 10, 100);
+        assert_eq!(updates.len(), 1);
+        assert!(matches!(updates[0], SessionUpdate::UsageUpdate(_)));
+        // 窗口合法但标题缺席。
+        let updates = session_info_updates(None, 10, 100);
+        assert_eq!(updates.len(), 1);
+        assert!(matches!(updates[0], SessionUpdate::UsageUpdate(_)));
     }
 }
