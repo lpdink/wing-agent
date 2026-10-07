@@ -1,0 +1,411 @@
+name: Perf
+
+# PR 性能对比（纯报告，不做门禁）：以 merge-base 为基线、同一 runner 内交错 A/B 测量，
+# 结果以 sticky comment（marker `<!-- wing-perf -->`）贴到 PR 上，供人与 wing-review 判断。
+# job 只在基础设施故障时红（构建/测量失败、报告渲染失败）；性能回归只用评论表达。
+#
+# 权限：workflow 级最小（contents: read）。仅 report job 加 pull-requests: write（发评论）、
+# resolve job 加 pull-requests: read（dispatch 路径经 API 解析 PR 的 head/base）。全程无 secrets ——
+# 用 pull_request（而非 pull_request_target）：fork PR 的 token 会被 GitHub 强制降为只读，
+# 评论步骤显式跳过（结果只留 artifact）。
+#
+# 并发：同一 PR 的后续推送 / 手工 dispatch 会取消上一轮 run。
+on:
+  pull_request:
+    branches: [develop]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to measure (required)'
+        required: true
+        type: string
+      calibrate:
+        description: 'Calibrate mode: measure both sides at the same revision (noise floor)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  # ── 解析 PR 上下文：pr_number / head sha / base 分支 / 是否 fork ──────
+  # 四个 job 里唯一读 PR 元数据的地方（草稿也在这里统一拦下）。
+  resolve:
+    name: Resolve PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      pr_number: ${{ steps.pr.outputs.pr_number }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      base_ref: ${{ steps.pr.outputs.base_ref }}
+      is_fork: ${{ steps.pr.outputs.is_fork }}
+    steps:
+      - name: Resolve pr_number, head sha and base branch
+        id: pr
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const repoFullName = `${context.repo.owner}/${context.repo.repo}`;
+            const fromPullRequest = context.eventName === 'pull_request';
+
+            let prNumber;
+            if (fromPullRequest) {
+              prNumber = context.payload.pull_request.number;
+            } else {
+              const raw = context.payload.inputs?.pr_number;
+              prNumber = Number(raw);
+              if (!Number.isInteger(prNumber) || prNumber <= 0) {
+                core.setFailed(`workflow_dispatch input pr_number is not a positive integer: ${JSON.stringify(raw)}`);
+                return;
+              }
+            }
+
+            let pr = context.payload.pull_request;
+            if (!fromPullRequest) {
+              const response = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+              pr = response.data;
+              if (pr.state !== 'open') {
+                core.setFailed(`PR #${prNumber} is ${pr.state}; only open PRs can be measured.`);
+                return;
+              }
+            }
+
+            core.setOutput('pr_number', String(prNumber));
+            core.setOutput('head_sha', pr.head.sha);
+            core.setOutput('base_ref', pr.base.ref);
+            // head.repo 为 null（fork 被删）也按 fork 处理 → 不发评论。
+            core.setOutput('is_fork', String(pr.head.repo?.full_name !== repoFullName));
+
+  # ── 测量 1：rust criterion 子集 + session replay + TUI 显示延迟 ────────
+  perf-tui:
+    name: Perf TUI
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: resolve
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.head_sha }}
+          fetch-depth: 0
+
+      - name: Resolve merge-base against the PR base branch
+        id: base
+        env:
+          BASE_REF: ${{ needs.resolve.outputs.base_ref }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          # fetch-depth: 0 已带上所有分支；这里只在 origin/<base> 缺席时补拉（幂等）。
+          if ! git rev-parse --verify --quiet "origin/$BASE_REF"; then
+            git fetch --no-tags origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          fi
+          BASE=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")
+          echo "merge-base(origin/$BASE_REF, $HEAD_SHA) = $BASE"
+          echo "base_sha=$BASE" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run A/B measurement (rust + tui)
+        env:
+          BASE_SHA: ${{ steps.base.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          CALIBRATE: ${{ github.event.inputs.calibrate || 'false' }}
+        run: |
+          set -euo pipefail
+          if [ "$CALIBRATE" = "true" ]; then
+            # 校准模式：两侧同 rev。显式传 head sha —— 不依赖 ab.py 内部如何解释 --calibrate。
+            REF="$HEAD_SHA"
+          else
+            REF="$BASE_SHA"
+          fi
+          ARGS=(--base-ref "$REF" --suites rust,tui --prepare --quick --rounds 2
+                --workdir "$RUNNER_TEMP/perf" --out-json perf-tui.json --out-md perf-tui.md)
+          if [ "$CALIBRATE" = "true" ]; then
+            ARGS+=(--calibrate)
+          fi
+          uv run python scripts/perf/ab.py "${ARGS[@]}"
+
+      - name: Step summary
+        if: always()
+        run: |
+          if [ -f perf-tui.md ]; then
+            cat perf-tui.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no perf-tui.md produced" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-tui
+          path: |
+            perf-tui.json
+            perf-tui.md
+            ${{ runner.temp }}/perf/raw/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ── 测量 2：gateway socket 级套件（流式扇出 / 轮次开销 / 大上下文 / resume）──
+  perf-gateway:
+    name: Perf Gateway
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: resolve
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.head_sha }}
+          fetch-depth: 0
+
+      - name: Resolve merge-base against the PR base branch
+        id: base
+        env:
+          BASE_REF: ${{ needs.resolve.outputs.base_ref }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          # fetch-depth: 0 已带上所有分支；这里只在 origin/<base> 缺席时补拉（幂等）。
+          if ! git rev-parse --verify --quiet "origin/$BASE_REF"; then
+            git fetch --no-tags origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          fi
+          BASE=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")
+          echo "merge-base(origin/$BASE_REF, $HEAD_SHA) = $BASE"
+          echo "base_sha=$BASE" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run A/B measurement (gateway)
+        env:
+          BASE_SHA: ${{ steps.base.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          CALIBRATE: ${{ github.event.inputs.calibrate || 'false' }}
+        run: |
+          set -euo pipefail
+          if [ "$CALIBRATE" = "true" ]; then
+            # 校准模式：两侧同 rev。显式传 head sha —— 不依赖 ab.py 内部如何解释 --calibrate。
+            REF="$HEAD_SHA"
+          else
+            REF="$BASE_SHA"
+          fi
+          ARGS=(--base-ref "$REF" --suites gateway --prepare --quick --rounds 2
+                --workdir "$RUNNER_TEMP/perf" --out-json perf-gateway.json --out-md perf-gateway.md)
+          if [ "$CALIBRATE" = "true" ]; then
+            ARGS+=(--calibrate)
+          fi
+          uv run python scripts/perf/ab.py "${ARGS[@]}"
+
+      - name: Step summary
+        if: always()
+        run: |
+          if [ -f perf-gateway.md ]; then
+            cat perf-gateway.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no perf-gateway.md produced" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-gateway
+          path: |
+            perf-gateway.json
+            perf-gateway.md
+            ${{ runner.temp }}/perf/raw/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ── 汇总：把测量结果渲染成一条 sticky comment ────────────────────────
+  # 测量 job 失败时也要跑（always 语义）：把「谁失败了、数据缺在哪」如实写进评论 / artifact。
+  perf-report:
+    name: Perf Report
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [resolve, perf-tui, perf-gateway]
+    # always()：测量失败也要汇总；!cancelled()：被并发取消的 run 不发评论（否则会贴上
+    # 一条残缺的假失败评论，随后又被新 run 覆盖）。用了状态函数就不再继承 needs 的
+    # 「失败即跳过」，所以草稿条件必须在这里重复一次。
+    if: >-
+      always() && !cancelled() &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout PR head (scripts only)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.head_sha }}
+
+      - name: Download measurement artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: perf-*
+          path: perf-artifacts
+          merge-multiple: true
+
+      - name: Compose the sticky comment body
+        id: compose
+        env:
+          TUI_RESULT: ${{ needs.perf-tui.result }}
+          GATEWAY_RESULT: ${{ needs.perf-gateway.result }}
+          CALIBRATE: ${{ github.event.inputs.calibrate || 'false' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+
+          # 1) 两个 suite 的 ab.py 输出（缺失 = 该侧没有可用数据）
+          #    按文件名用 find 定位：解包后的相对布局由 upload-artifact 的「公共根目录」
+          #    规则决定（json/md 在 workspace、raw 在 $RUNNER_TEMP），这里不假设前缀。
+          find_json() {
+            find perf-artifacts -type f -name "$1" -print -quit 2>/dev/null
+          }
+          JSONS=()
+          for suite in tui gateway; do
+            f="$(find_json "perf-$suite.json")"
+            [ -n "$f" ] && JSONS+=("$f")
+          done
+
+          # 2) 失败标注（job 结果 + 产物缺失）
+          NOTES=""
+          note() {
+            local name="$1" suites="$2" result="$3" artifact="$4" line
+            if [ "$result" != "success" ]; then
+              line="$(printf -- '- **%s**（%s）：job 结果为 `%s` —— 该侧数据缺失或被截断，结论不完整（artifact：`%s`）。' \
+                "$name" "$suites" "$result" "$artifact")"
+            elif [ -z "$(find_json "$artifact.json")" ]; then
+              line="$(printf -- '- **%s**（%s）：job 成功但没有产出 `%s.json`。' "$name" "$suites" "$artifact")"
+            else
+              return 0
+            fi
+            NOTES+="${line}"$'\n'
+          }
+          note 'Perf TUI' 'rust,tui' "$TUI_RESULT" 'perf-tui'
+          note 'Perf Gateway' 'gateway' "$GATEWAY_RESULT" 'perf-gateway'
+
+          # 3) 渲染正文（report.py 只吃 stdlib，用系统 python3 即可）
+          LABEL='PR 性能对比（base = merge-base）'
+          if [ "$CALIBRATE" = "true" ]; then
+            LABEL='🔧 校准模式：两侧同 rev（噪声地板，无性能含义）'
+          fi
+          RENDER_FAILED=false
+          if [ "${#JSONS[@]}" -gt 0 ]; then
+            if ! python3 scripts/perf/report.py --json "${JSONS[@]}" \
+                   --out-md comment-body.md --run-url "$RUN_URL" --label "$LABEL" \
+                   2>report-stderr.log; then
+              RENDER_FAILED=true
+            fi
+          fi
+
+          # 4) 组装最终正文：正常结果 / 渲染失败兜底 / 无数据兜底，末尾附失败标注
+          {
+            if [ "${#JSONS[@]}" -eq 0 ]; then
+              printf '%s\n' \
+                '<!-- wing-perf -->' \
+                '' \
+                '### ❌ 本轮没有可用的测量数据' \
+                '' \
+                '两个测量 job 都没有产出可用的结果（基础设施故障）。请查看本次 run 的日志与 artifact：perf-tui / perf-gateway。' \
+                '' \
+                "[run 日志]($RUN_URL)"
+            elif [ "$RENDER_FAILED" = "true" ] || [ ! -s comment-body.md ]; then
+              printf '%s\n' \
+                '<!-- wing-perf -->' \
+                '' \
+                '### ❌ 性能报告渲染失败（基础设施问题）' \
+                '' \
+                '测量已产出结果，但 report.py 未能渲染成 markdown —— 原始数据见 artifact：perf-tui / perf-gateway。' \
+                '' \
+                "[run 日志]($RUN_URL)"
+              if [ -s report-stderr.log ]; then
+                printf '%s\n' '' '<details><summary>report.py stderr（尾部 25 行）</summary>' '' '```' "$(tail -n 25 report-stderr.log)" '```' '</details>'
+              fi
+            else
+              cat comment-body.md
+            fi
+            if [ -n "$NOTES" ]; then
+              printf '%s\n' '' '---' '' '### ⚠️ 注意' ''
+              printf '%s' "$NOTES"
+            fi
+          } > comment.md
+          echo "report_failed=$RENDER_FAILED" >> "$GITHUB_OUTPUT"
+          echo "comment body: $(wc -c < comment.md) bytes"
+
+      - name: Upload the comment body
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-comment
+          path: comment.md
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upsert sticky PR comment
+        # fork PR（head 来自其它仓库）不发评论：那种情况下 GITHUB_TOKEN 被强制降为只读，
+        # 契约也要求 fork 只留 artifact。pr_number 为空（resolve 失败）时同样跳过。
+        if: needs.resolve.outputs.pr_number != '' && needs.resolve.outputs.is_fork != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/perf/comment.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --pr "${{ needs.resolve.outputs.pr_number }}" \
+            --body-file comment.md
+
+      - name: Step summary
+        if: always()
+        env:
+          IS_FORK: ${{ needs.resolve.outputs.is_fork }}
+        run: |
+          if [ -f comment.md ]; then
+            cat comment.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no comment body produced" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "$IS_FORK" = "true" ]; then
+            printf '\n> fork PR：评论跳过，正文见 artifact perf-comment。\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Fail if the report could not be rendered
+        if: steps.compose.outputs.report_failed == 'true'
+        run: |
+          echo "::error::report.py failed to render the perf comment (infrastructure failure)."
+          exit 1
