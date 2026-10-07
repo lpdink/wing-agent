@@ -58,6 +58,12 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 `stream-json` 消息类型：`system/init`（tools/model/cwd）· `assistant`（content blocks + usage）· `user`（tool_result blocks）· `result`（终止信号：累计 usage / turns / 耗时）。支持 SDK 双向 stdin 握手（`--input-format stream-json`）。**未识别的 `--xxx` 参数被静默忽略**，确保外部编排层传递的 Claude 专有参数（如 `--permission-mode`）不报错。
 
+会话身份与会话恢复（SDK 系消费方自带 id 的用法）：
+
+- `--session-id <id>`：**create-or-adopt**——该 id 不存在则以它建会话（编排方自己生成的 UUID / 任意安全 id 就此生效），已存在则收养既有会话（同 resume 语义：模板与 workspace 来自 metadata、`agent` 覆盖只应用 resume 子集）。与 `-r/--resume` 互斥；
+- `-r/--resume <id>`：恢复既有会话，`--model` / `--provider` / `--effort` / `--tools` 作为参数覆盖生效（与创建路径同语义、同持久化）；`--system-prompt` / `--append-system-prompt` / `--max-turns` **不生效**（它们会改请求前缀 / 会话既有限额，是创建期语义，日志会记一条 warning）；
+- `--resume-session-at`：wing 没有会话截断能力，**出现即非零退出 + 明确文案**（绝不静默忽略——被忽略会让编排方以为上下文已回退，与 wing 的实际状态错位）。
+
 > 在后台执行 `wing -p "request" > /tmp/result.md` 等价于调度了一个拥有任意命令执行权限的子 agent。多 agent 不易驾驭，yolo 本身危险，编排者应审慎使用。
 
 ### 编排 CLI（`wing run` / `wait` / `ps` …，PR #64）

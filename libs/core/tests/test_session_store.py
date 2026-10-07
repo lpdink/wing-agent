@@ -260,16 +260,20 @@ class TestExists:
     def test_no_fuzzy_matching(self, store: SessionStore):
         """精确匹配：前缀 / 子串 / 通配符都不解析。
 
-        存储层的 id 契约是**格式闸门**：不合规的输入（前缀 / 子串 / 通配符
-        / 任意字符串）在入口即 ValueError，绝不进路径拼接——"不匹配"与
-        "非法输入"是两种拒绝（前者 False、后者 raise）；网络侧统一表现为
-        404（会话层解析闸门先把非法 id 折成"不存在"，见 SessionManager）。
+        存储层的 id 契约是**闸门**：真正危险的值（穿越 / 点开头 / 控制字符 /
+        超长）在入口即 ValueError，绝不进路径拼接；而任意**安全**字符串
+        （id 不透明——编排方可自带 UUID 等）一律合法，只是"不存在" → False。
+        "不匹配"与"非法输入"是两种拒绝（前者 False、后者 raise）；网络侧
+        统一表现为 404（会话层解析闸门先把非法 id 折成"不存在"）。
         """
         self._seed(store, "20260101-111111-aaaaaaaa", "20260202-222222-bbbbbbbb")
-        for malformed in ("20260101", "bbbbbbbb", "20260101*aaaaaaaa", "zzz"):
+        for malformed in ("../20260101", "20260101/111111", ".hidden", "a..b", "\x00"):
             with pytest.raises(ValueError):
                 store.exists(malformed)
-        # 合规但不存在 → False（精确匹配，不做前缀解析）
+        # 合法（含非既定时态形态：前缀 / 子串 / 通配符 / 任意编排方 id）但不存在
+        # → False（精确匹配，不做前缀解析）
+        for safe in ("20260101", "bbbbbbbb", "20260101*aaaaaaaa", "zzz"):
+            assert store.exists(safe) is False
         assert store.exists("20260101-111111-bbbbbbbb") is False
 
     def test_empty_session_not_exists(self, store: SessionStore):

@@ -333,21 +333,40 @@ class TestManagerSetTags:
 
     @pytest.mark.asyncio
     async def test_malformed_session_id_never_reaches_store(
-        self, file_sm: SessionManager
+        self, file_sm: SessionManager, monkeypatch: pytest.MonkeyPatch
     ):
-        """格式闸门：不合规 id 与"不存在"同价（LookupError），不触碰文件系统。"""
+        """闸门：不合规 id 与"不存在"同价（LookupError），且不触碰文件系统。"""
+        store = file_sm._stores["file"]
+        reads: list[str] = []
+        original = store.exists
+
+        def spy(session_id: str) -> bool:
+            reads.append(session_id)
+            return original(session_id)
+
+        monkeypatch.setattr(store, "exists", spy)
+
         for bad in (
-            "sid-1",
             "../escape",
             "../../etc/passwd",
             "/tmp/absolute",
-            "20250101-000000-ABCDEF01",  # 大写 hex 不合规（严格小写）
-            "20250101-000000-abcdef0",  # 长度不足
-            "20260101-111111",  # 前缀（截断）不合规
-            "٢٠٢٥٠١٠١-٠٠٠٠٠٠-abcdef01",  # Unicode 数字不是 ASCII 数字
+            ".media",  # 存储保留的点命名空间（媒体池）
+            "..",
+            "a..b",
+            "line\nbreak",
+            "\x7f",
+            "",  # 空串
+            "x" * 129,
         ):
             with pytest.raises(LookupError):
                 file_sm.set_session_tags(bad, add=["x"])
+        assert reads == [], f"闸门没有挡住: {reads}"
+
+        # 任意安全字符串现在是**合法** id（编排方可自带），只是不存在——
+        # 它会被交给 store 精确匹配，仍然 LookupError。
+        with pytest.raises(LookupError):
+            file_sm.set_session_tags("sid-1", add=["x"])
+        assert reads == ["sid-1"]
 
     @pytest.mark.asyncio
     async def test_invalid_tag_raises_before_any_write(self, file_sm: SessionManager):

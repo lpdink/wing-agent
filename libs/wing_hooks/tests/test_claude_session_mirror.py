@@ -38,7 +38,7 @@ from wing.schema import Message, ToolCall
 
 from wing_hooks import claude_session_mirror as mirror_mod
 
-#: 契合 SESSION_ID_PATTERN 的 wing 原生 session id（文件名的直接来源）。
+#: 契合 session id 闸门的 wing 原生 session id（文件名的直接来源）。
 SESSION_ID = "20260101-120000-abcdef12"
 
 TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")

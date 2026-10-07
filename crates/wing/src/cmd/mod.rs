@@ -72,6 +72,24 @@ pub struct Cli {
     #[arg(short = 'r', long = "resume")]
     pub resume: Option<String>,
 
+    /// Create (or adopt) a session with this ID — create-or-adopt.
+    ///
+    /// When the ID does not exist yet the new session gets exactly this ID
+    /// (orchestrators generate their own UUIDs); when it already exists the
+    /// existing session is adopted (resume semantics, with the CLI overrides
+    /// applied as the resume subset). Mutually exclusive with `-r/--resume`.
+    #[arg(long = "session-id")]
+    pub session_id: Option<String>,
+
+    /// NOT SUPPORTED — always rejected (wing cannot truncate a session).
+    ///
+    /// Claude Code's "resume the session at an earlier point" flag. wing has no
+    /// history-truncation support, and silently ignoring it would let an
+    /// orchestrator believe its context was rolled back while wing kept the
+    /// full history. Passing it exits non-zero with an explicit message.
+    #[arg(long = "resume-session-at")]
+    pub resume_session_at: Option<String>,
+
     /// Replace system prompt.
     #[arg(long = "system-prompt")]
     pub system_prompt: Option<String>,
@@ -282,6 +300,21 @@ fn misplaced_global_tag_error(tags: &[String]) -> Option<String> {
     )
 }
 
+/// Error message when the top-level `--session-id` is used outside stdio mode.
+///
+/// Same discipline as [`misplaced_global_tag_error`]: stdio mode
+/// (`wing -p --session-id ...`) consumes it, every other invocation would
+/// accept it and silently ignore it — an orchestrator asking for a specific
+/// session id must never be handed a different one without noticing.
+/// `None` = invocation is fine.
+fn misplaced_session_id_error(session_id: Option<&str>) -> Option<String> {
+    let session_id = session_id?;
+    Some(format!(
+        "top-level --session-id only applies to stdio mode (wing -p --session-id {session_id} ...); \
+         it would be silently ignored here (session ids are backend-generated on other paths)"
+    ))
+}
+
 /// Dispatch CLI command.
 pub async fn dispatch(cli: Cli) -> ExitCode {
     // Logging is initialized for **every** path — TUI, stdio and all
@@ -290,6 +323,19 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
     // tracing event that nobody was subscribed to (no subscriber = no file, no
     // stderr). Idempotent, so the TUI / stdio paths keep calling it too.
     let _log_guard = init_logging();
+
+    // `--resume-session-at`（Claude Code 的"会话截断回滚"旗标）：wing 未实现，
+    // 且**绝不静默忽略**——消费方会据此认为上下文已回退，与 wing 的实际状态
+    // 错位。检查在任何副作用（起网关 / 建会话 / 发请求）之前，且对**任何**调用
+    // 形态生效（stdio / 无子命令 / "顶层旗标 + 子命令"）：只要 clap 收下了它，
+    // 就一定会被拒绝，不存在被谁静默吃掉的路径。
+    if let Some(value) = cli.resume_session_at.as_deref() {
+        eprintln!(
+            "wing error: {}",
+            crate::stdio::resume_session_at_error(value)
+        );
+        return ExitCode::FAILURE;
+    }
 
     // stdio mode takes priority over subcommands.
     if cli.is_stdio_mode() {
@@ -300,6 +346,13 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
     // 定义在 RunArgs / Command::Tag 上。`wing --tag x run ...` 这类放错位置
     // 的写法会被 clap 静默接受但丢弃标签——显式报错，别让 Agent 以为打上了。
     if let Some(message) = misplaced_global_tag_error(&cli.tag) {
+        eprintln!("wing error: {message}");
+        return ExitCode::FAILURE;
+    }
+
+    // 同理：顶层 --session-id 只服务 stdio 模式（create-or-adopt）。放错位置时
+    // 被静默丢弃会让编排方以为自己指定的 id 生效了。
+    if let Some(message) = misplaced_session_id_error(cli.session_id.as_deref()) {
         eprintln!("wing error: {message}");
         return ExitCode::FAILURE;
     }
@@ -418,6 +471,8 @@ async fn dispatch_stdio(cli: Cli) -> ExitCode {
         prompt,
         model: cli.model,
         resume: cli.resume,
+        session_id: cli.session_id,
+        resume_session_at: cli.resume_session_at,
         system_prompt: cli.system_prompt,
         append_system_prompt: cli.append_system_prompt,
         max_turns: cli.max_turns,
@@ -573,5 +628,54 @@ mod tests {
         assert_eq!(cli.tag, vec!["executor".to_string()]);
         assert!(matches!(cli.command, Some(Command::Ps { .. })));
         assert!(misplaced_global_tag_error(&cli.tag).is_some());
+    }
+
+    #[test]
+    fn clap_parses_session_id_in_both_forms() {
+        let cli = Cli::try_parse_from(["wing", "-p", "hi", "--session-id=abc-123"]).expect("=");
+        assert_eq!(cli.session_id.as_deref(), Some("abc-123"));
+
+        let cli =
+            Cli::try_parse_from(["wing", "-p", "hi", "--session-id", "abc-123"]).expect("space");
+        assert_eq!(cli.session_id.as_deref(), Some("abc-123"));
+
+        let cli = Cli::try_parse_from(["wing", "-p", "hi"]).expect("absent");
+        assert_eq!(cli.session_id, None);
+    }
+
+    #[test]
+    fn clap_parses_resume_session_at_in_both_forms() {
+        // 两种传送形式都必须命中（否则它会退回"未知参数丢弃"路径——正是本步要
+        // 消灭的静默忽略）。
+        let cli = Cli::try_parse_from(["wing", "-p", "hi", "--resume-session-at=3"]).expect("=");
+        assert_eq!(cli.resume_session_at.as_deref(), Some("3"));
+
+        let cli =
+            Cli::try_parse_from(["wing", "-p", "hi", "--resume-session-at", "3"]).expect("space");
+        assert_eq!(cli.resume_session_at.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn misplaced_session_id_is_rejected_outside_stdio() {
+        assert!(misplaced_session_id_error(None).is_none());
+
+        let message = misplaced_session_id_error(Some("abc"))
+            .expect("session id outside stdio mode must be rejected");
+        assert!(message.contains("stdio"), "{message}");
+        assert!(message.contains("--session-id"), "{message}");
+
+        // clap 接受这种写法（flag 绑在顶层）——guard 是唯一防线。
+        let cli = Cli::try_parse_from(["wing", "--session-id", "abc", "ps"]).expect("parses");
+        assert_eq!(cli.session_id.as_deref(), Some("abc"));
+        assert!(misplaced_session_id_error(cli.session_id.as_deref()).is_some());
+    }
+
+    #[test]
+    fn stdio_invocation_keeps_session_id() {
+        // stdio 模式下 `--session-id` 是正式参数：`dispatch` 在 `is_stdio_mode()`
+        // 分支之后才走到"放错位置"闸门，因此这条路径不会被拦下。
+        let cli = Cli::try_parse_from(["wing", "-p", "hi", "--session-id=abc"]).expect("parses");
+        assert!(cli.is_stdio_mode());
+        assert_eq!(cli.session_id.as_deref(), Some("abc"));
     }
 }

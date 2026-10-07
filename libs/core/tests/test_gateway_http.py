@@ -190,6 +190,7 @@ class TestSessionCreate:
             agent_override=None,
             backend=None,
             tags=None,
+            session_id=None,
         )
 
     def test_create_with_template(self, client: TestClient, mock_runtime):
@@ -205,6 +206,7 @@ class TestSessionCreate:
             agent_override=None,
             backend=None,
             tags=None,
+            session_id=None,
         )
 
     def test_create_template_not_found(self, client: TestClient, mock_runtime):
@@ -223,6 +225,7 @@ class TestSessionCreate:
             agent_override=None,
             backend="memory",
             tags=None,
+            session_id=None,
         )
 
     def test_create_unknown_backend_returns_400(self, client: TestClient, mock_runtime):
@@ -246,12 +249,38 @@ class TestSessionCreate:
             agent_override=None,
             backend=None,
             tags=["scheduler", "task=x"],
+            session_id=None,
         )
 
         mock_runtime.create_session.side_effect = ValueError("invalid tag: 'bad tag'")
         resp = client.post("/api/session/create", json={"tags": ["bad tag"]})
         assert resp.status_code == 400
         assert "bad tag" in resp.json()["detail"]
+
+    def test_create_with_session_id(self, client: TestClient, mock_runtime):
+        """指定 session_id 透传（create-or-adopt 的请求面）。"""
+        resp = client.post(
+            "/api/session/create",
+            json={"session_id": "3f2b9d1e-6c1a-4f2b-9d3e-1a2b3c4d5e6f"},
+        )
+        assert resp.status_code == 200
+        mock_runtime.create_session.assert_called_once_with(
+            template_name=None,
+            workspace=None,
+            agent_override=None,
+            backend=None,
+            tags=None,
+            session_id="3f2b9d1e-6c1a-4f2b-9d3e-1a2b3c4d5e6f",
+        )
+
+    def test_create_invalid_session_id_is_400(self, client: TestClient, mock_runtime):
+        """不合规的 session_id → runtime raise ValueError → 400（明确文案）。"""
+        mock_runtime.create_session.side_effect = ValueError(
+            "invalid session id: '../escape'"
+        )
+        resp = client.post("/api/session/create", json={"session_id": "../escape"})
+        assert resp.status_code == 400
+        assert "invalid session id" in resp.json()["detail"]
 
     def test_create_with_agent_override(self, client: TestClient, mock_runtime):
         """创建 session 时传入 agent override。"""
@@ -315,13 +344,46 @@ class TestSessionResume:
         assert resp.status_code == 200
         data = resp.json()
         assert data["session_id"] == "test-session-id"
-        mock_runtime.resume_session.assert_called_once_with("abc123")
+        mock_runtime.resume_session.assert_called_once_with(
+            "abc123", agent_override=None
+        )
 
     def test_resume_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
         mock_runtime.resume_session.side_effect = LookupError("Session not found: xxx")
         resp = client.post("/api/session/resume", json={"session_id": "xxx"})
         assert resp.status_code == 404
+
+    def test_resume_passes_agent_override(self, client: TestClient, mock_runtime):
+        """resume 的 agent 覆盖透传到 runtime（resume 子集由 Session 决定）。"""
+        resp = client.post(
+            "/api/session/resume",
+            json={
+                "session_id": "abc123",
+                "agent": {"model": "gpt-4o", "effort": "high", "tools": ["Read"]},
+            },
+        )
+        assert resp.status_code == 200
+        override = mock_runtime.resume_session.call_args.kwargs["agent_override"]
+        assert override is not None
+        assert override.model == "gpt-4o"
+        assert override.effort == "high"
+        assert override.tools == ["Read"]
+        assert override.system_prompt is None
+
+    def test_resume_override_validation_error_is_400(
+        self, client: TestClient, mock_runtime
+    ):
+        """覆盖里的工具引用无法解析 → runtime raise ValueError → 400（不是 404）。"""
+        mock_runtime.resume_session.side_effect = ValueError(
+            "cannot resolve tool reference: 'Nope'"
+        )
+        resp = client.post(
+            "/api/session/resume",
+            json={"session_id": "abc123", "agent": {"tools": ["Nope"]}},
+        )
+        assert resp.status_code == 400
+        assert "Nope" in resp.json()["detail"]
 
 
 # ============================================================

@@ -129,15 +129,18 @@ class WingRuntime:
         agent_override: AgentOverride | None = None,
         backend: str | None = None,
         tags: list[str] | None = None,
+        session_id: str | None = None,
     ) -> Session:
-        """创建新 session。
+        """创建（或按 id 收养）session。
 
         Args:
             backend: 存储后端（file/memory），None 使用默认后端（file）。
             tags: 创建即打标（校验语义同 :meth:`set_session_tags`）。
+            session_id: 指定 id 的 **create-or-adopt**（None = 自生成；
+                已存在则收养既有会话，语义同 :meth:`resume_session`）。
 
         Raises:
-            ValueError: 模板不存在 / backend 未知 / 标签非法
+            ValueError: session_id 不合规 / 模板不存在 / backend 未知 / 标签非法
         """
         return self.sm.create_session(
             template_name=template_name,
@@ -145,15 +148,23 @@ class WingRuntime:
             agent_override=agent_override,
             backend=backend,
             tags=tags,
+            session_id=session_id,
         )
 
-    def resume_session(self, session_id: str) -> Session:
-        """从磁盘恢复已有 session（精确匹配 + 格式闸门，见 SessionManager）。
+    def resume_session(
+        self, session_id: str, agent_override: AgentOverride | None = None
+    ) -> Session:
+        """从磁盘恢复已有 session（精确匹配 + 闸门，见 SessionManager）。
+
+        Args:
+            agent_override: resume 语义的参数覆盖（只应用
+                model/provider/effort/tools 子集，见 `Session.apply_resume_override`）
 
         Raises:
-            LookupError: session 不存在（含 id 格式不合规——与本处同价）
+            LookupError: session 不存在（含 id 不过闸门——与本处同价）
+            ValueError: 覆盖里的工具引用无法解析
         """
-        return self.sm.resume_session(session_id)
+        return self.sm.resume_session(session_id, agent_override=agent_override)
 
     def ensure_loaded(self, session_id: str) -> Session:
         """取会话；不在内存（被逐出 / 未加载）时从磁盘水合。

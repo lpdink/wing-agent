@@ -79,6 +79,21 @@ def tool_refs(tools: list[Tool]) -> list[str]:
     return [str(ToolRef(namespace=t.namespace, name=t.name)) for t in tools]
 
 
+def _validate_tool_refs(tools: list[str]) -> None:
+    """纯校验工具 ref 可解析；不可解析即 raise ValueError。
+
+    **先校验后动手**：一次覆盖里 model / 提示词 / 工具逐个应用，若工具排在后
+    面才失败，前面的字段已经落盘（`_persist_model` 会写 metadata）——"部分
+    应用"正是要避免的状态（尤其 create-or-adopt：失败的 create 不该留下任何
+    残留）。所有覆盖入口（创建 / resume / update_state）都先过这里。
+    """
+    from wing.tool_registry import tool_registry
+
+    for ref in tools:
+        if tool_registry.resolve(ref) is None:
+            raise ValueError(f"cannot resolve tool reference: '{ref}'")
+
+
 class Session:
     """有行为的 Session 对象。
 
@@ -283,9 +298,14 @@ class Session:
         每个被应用的字段同步写入 metadata 并落盘——override 是显式动作，
         其效果必须跨重启（resume）与 fork 存活，否则系统提示词 / 工具集 /
         开关在重启后变回模板默认，请求前缀与重启前不一致（KV cache 碎裂）。
+
+        工具 ref 先做纯校验（失败时不落任何字段）；其它字段的应用不会失败。
         """
         cm = self._context_manager
         agent = self._agent
+
+        if override.tools is not None:
+            _validate_tool_refs(override.tools)
 
         # model 覆盖走 _apply_model：与运行时切换同一条路径，一并落盘模型记录。
         if override.model is not None:
@@ -321,6 +341,64 @@ class Session:
             f"tools={override.tools}, "
             f"max_turns={override.max_turns}, effort={override.effort}, "
             f"yolo={override.yolo})"
+        )
+
+    def apply_resume_override(self, override: AgentOverride) -> None:
+        """应用 **resume 语义** 的 AgentOverride 子集（恢复既有会话时调用）。
+
+        只应用 ``model`` / ``provider`` / ``effort`` / ``tools``——它们改的是
+        "下一轮怎么发起请求"，不触碰已落链的对话内容。其余字段**一律不应用**：
+
+        - ``system_prompt`` / ``append_system_prompt``：改的是系统提示词，
+          即请求前缀的第一段——既有会话的链是按老前缀建立的，中途换掉会让
+          前缀身份漂移（KV cache 碎裂）；要换请对新会话用创建覆盖，或走
+          `session/update` 的显式动作；
+        - ``max_turns``：会话既有限额是运行时状态，不因"续链"被改写；
+        - ``yolo``：同上（创建期决定，resume 不重贴）。
+
+        给了被忽略的字段会打 warning（**不做静默忽略**：编排方能在日志里看到
+        `--system-prompt` 在 `-r` 下没生效），但仍然继续应用子集。
+
+        每个被应用的字段同步写入 metadata 并落盘（与创建覆盖同一套语义），
+        因此跨重启 / 逐出后水合仍然生效。
+        """
+        ignored = [
+            name
+            for name, value in (
+                ("system_prompt", override.system_prompt),
+                ("append_system_prompt", override.append_system_prompt),
+                ("max_turns", override.max_turns),
+                ("yolo", override.yolo),
+            )
+            if value is not None
+        ]
+        if ignored:
+            log.warning(
+                f"Session {self._session_id}: resume override ignores "
+                f"{', '.join(ignored)} (prompt fields would change the "
+                "conversation prefix; max_turns / yolo are create-time session "
+                "settings — use session/update for an explicit change)"
+            )
+
+        # 纯校验在前（工具 ref 不可解析时不得留下"model 已切换"的半截状态）
+        if override.tools is not None:
+            _validate_tool_refs(override.tools)
+
+        if override.model is not None:
+            self._apply_model(override.model, override.provider)
+
+        if override.tools is not None:
+            self._agent.set_tools(override.tools)
+            self._record_state(tools=list(override.tools))
+
+        if override.effort is not None:
+            self._agent.set_reasoning_effort(override.effort)
+            self._record_state(reasoning_effort=override.effort)
+
+        log.info(
+            f"Session {self._session_id}: applied resume override "
+            f"(model={override.model}, provider={override.provider}, "
+            f"tools={override.tools}, effort={override.effort})"
         )
 
     # ── 暴露属性 ──────────────────────────────────
@@ -507,11 +585,7 @@ class Session:
         """
         # 纯校验：任何字段非法在 mutation 之前退出，避免部分应用
         if tools is not None:
-            from wing.tool_registry import tool_registry
-
-            for ref in tools:
-                if tool_registry.resolve(ref) is None:
-                    raise ValueError(f"cannot resolve tool reference: '{ref}'")
+            _validate_tool_refs(tools)
 
         if template is not None:
             await self.switch_template(template)

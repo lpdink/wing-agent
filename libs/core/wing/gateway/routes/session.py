@@ -89,6 +89,7 @@ async def create_session(
             agent_override=body.agent,
             backend=body.backend,
             tags=body.tags,
+            session_id=body.session_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -109,11 +110,19 @@ async def resume_session(
     body: ResumeSessionRequest,
     request: Request,
 ) -> ResumeSessionResponse:
+    """恢复既有会话；可选 `agent` 覆盖只应用 model/provider/effort/tools 子集。
+
+    覆盖的参数校验不过（工具引用无法解析）→ 400；会话不存在 → 404。
+    """
     server = _get_server(request)
     try:
-        session = server.runtime.resume_session(body.session_id)
+        session = server.runtime.resume_session(
+            body.session_id, agent_override=body.agent
+        )
     except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return ResumeSessionResponse(
         session_id=session.session_id,
         template_name=session.template_name,

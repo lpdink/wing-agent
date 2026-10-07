@@ -44,12 +44,30 @@ class CreateSessionRequest(BaseModel):
         default=None,
         description="创建即打标（校验语义同 /api/session/tag；非法 400）",
     )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "指定 session id（**create-or-adopt**）：不存在则以该 id 建会话；"
+            "已存在（内存或任一 store）则收养既有会话（语义同 /api/session/resume，"
+            "agent 覆盖只应用 resume 子集）。缺省 = 后端自生成。"
+            "id 只做基本卫生校验（非空、≤128 字符、无路径分隔符 / '..' / "
+            "控制字符、不以 '.' 开头），不合规 400 且不产生任何残留。"
+        ),
+    )
 
 
 class ResumeSessionRequest(BaseModel):
     """恢复已有 session 的请求体。"""
 
     session_id: str = Field(description="要恢复的 session ID")
+    agent: AgentOverride | None = Field(
+        default=None,
+        description=(
+            "恢复时应用的参数覆盖——只应用 model / provider / effort / tools 子集"
+            "（system_prompt / append_system_prompt / max_turns / yolo 一律不应用："
+            "它们会改变对话前缀或会话既有限额，是创建期语义）"
+        ),
+    )
 
 
 class ForkSessionRequest(BaseModel):

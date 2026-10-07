@@ -104,11 +104,22 @@ pub struct CreateSessionRequest {
     /// Tags attached at creation (validation identical to `/api/session/tag`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    /// Requested session id — **create-or-adopt**: when the id does not exist
+    /// the new session gets exactly this id; when it exists (in memory or in
+    /// any store) the existing session is adopted (resume semantics, with the
+    /// `agent` override applied as the resume subset). `None` = the backend
+    /// generates an id (the default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ResumeSessionRequest {
     pub session_id: String,
+    /// Resume-time override: only `model` / `provider` / `effort` / `tools`
+    /// are applied (the rest would change the conversation prefix).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentOverride>,
 }
 
 #[derive(Debug, Clone, Serialize)]

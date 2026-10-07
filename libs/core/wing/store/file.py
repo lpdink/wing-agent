@@ -145,10 +145,11 @@ class FileSessionStore(SessionStore):
     def _session_dir(self, session_id: str) -> Path:
         """会话目录。**所有文件路径拼接的唯一入口**。
 
-        拼接前先过 session id 格式闸门（``validate_session_id``）：id 是路径
-        组件，不合规的值（``../`` / 绝对路径 / 任意字符串）必须在此失败——
-        这是防路径穿越的最终防线（会话层的解析闸门是第一道；两道都过才可能
-        触碰文件系统）。
+        拼接前先过 session id 闸门（``validate_session_id``）：id 是路径
+        组件，不合规的值（``../`` / 绝对路径 / 控制字符 / 点开头 / 超长）
+        必须在此失败——这是防路径穿越的最终防线（会话层的解析闸门是第一道；
+        两道都过才可能触碰文件系统）。id 由会话层确定（默认后端自生成，
+        编排方可经 create-or-adopt 指定），闸门只防穿越与卫生。
         """
         safe_id = validate_session_id(session_id)
         return self._root / safe_id
@@ -239,8 +240,11 @@ class FileSessionStore(SessionStore):
         上层据此让 ``ps --tag`` / ``tag --list`` 立即找得到；是否最终进列表
         由 SessionManager 决定（无名且无标的条目会被它过滤）。
 
-        目录名不契合 session id 格式的一律跳过：它们不是合法的会话（也无法
-        经任何 API 寻址——解析闸门同样拒绝），可能只是 root 里的杂物。
+        目录名不过 session id 闸门的一律跳过：它们不是会话（也无法经任何
+        API 寻址——解析闸门同样拒绝），可能只是 root 里的杂物，或是存储
+        自己的点命名空间（``.media`` 媒体池）。闸门只防穿越与卫生，因此
+        "点开头 / 含 ``..`` / 控制字符 / 超长"之外的名字都可能是合法会话
+        （编排方可自带 UUID 等任意 id）。
         标题回退从 history.jsonl 提取第一条 user 消息；history.jsonl 不可读
         时仍列出该 session（first_user_message 为 None）。
         遗留的 newest.json 文件不读不删（快照已废弃）。

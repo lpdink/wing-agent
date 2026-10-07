@@ -22,8 +22,8 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/session/create` | 创建新 session（可选 `backend: file\|memory`，默认 file；`workspace`、`template` 等；可选 `tags` 创建即打标，校验语义同 `/api/session/tag`） |
-| POST | `/api/session/resume` | 恢复已有 session（还原 template_name、workspace 与模型绑定；模型记录优先于模板默认；也是被逐出会话的显式水合入口） |
+| POST | `/api/session/create` | 创建新 session（可选 `backend: file\|memory`，默认 file；`workspace`、`template` 等；可选 `tags` 创建即打标，校验语义同 `/api/session/tag`；可选 `session_id` = **create-or-adopt**：不存在则以该 id 建会话，已存在则收养既有会话——语义同 `/api/session/resume`，`agent` 覆盖只应用 resume 子集） |
+| POST | `/api/session/resume` | 恢复已有 session（还原 template_name、workspace 与模型绑定；模型记录优先于模板默认；也是被逐出会话的显式水合入口）。可选 `agent` 覆盖：**只应用 `model` / `provider` / `effort` / `tools`**——`system_prompt` / `append_system_prompt` / `max_turns` / `yolo` 一律不应用（它们会改请求前缀或会话既有限额，属创建期语义） |
 | POST | `/api/session/fork` | 从指定消息 uuid 分叉；新 session 含该消息及之前全部消息，继承源 backend |
 | POST | `/api/session/subscribe` | 将某 client 订阅到 session 事件（触发 SyncSession 重放；不在内存的会话先按需水合） |
 | POST | `/api/session/unsubscribe` | 取消订阅 |
@@ -47,11 +47,14 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 > 惯例处理；`/api/session/list` 的 `status: inactive` 是逐出的可观测痕迹）。
 > `wing release <sid>` 是对应的显式操作。
 >
-> **session id 是硬闸门**：唯一合法形态是后端生成的
-> `YYYYMMDD-HHMMSS-<8 位小写 hex>`（`common.utils.SESSION_ID_PATTERN`）。
-> 所有端点的 session_id 先过格式闸门再触达存储——不合规的值与"不存在"同价
+> **session id 是闸门（只防穿越与卫生）**：id 由后端生成（默认形态
+> `YYYYMMDD-HHMMSS-<8 位小写 hex>`）**或由编排方自带**（`/api/session/create`
+> 的 `session_id` = create-or-adopt）。校验只拒绝危险值：含路径分隔符 / `..`、
+> 点开头（`<sessions root>/.media` 是媒体池，存储自己的点命名空间）、ASCII
+> 控制字符、空串、超过 128 字符（`common.utils.is_valid_session_id`）。
+> 所有端点的 session_id 先过闸门再触达存储——不过闸门的值与"不存在"同价
 > （一律 404，不给探测反馈），绝不进入文件路径拼接（防路径穿越；file 后端
-> 在拼接处还有最终防线）。会话 id 一律由后端生成，客户端不得自造。
+> 在拼接处还有最终防线）；create 端点则回 400（请求非法，而非"找不到"）。
 >
 > 边界：**空会话**（从未发言 → 磁盘无痕迹）一旦被逐出即不可恢复——它没有可水合
 > 的状态，此后 `release` / `send` / `subscribe` 都回 404（不是幂等 `not loaded`）。

@@ -90,6 +90,10 @@ pub struct StdioArgs {
     pub prompt: String,
     pub model: Option<String>,
     pub resume: Option<String>,
+    /// `--session-id`: create-or-adopt (mutually exclusive with `resume`).
+    pub session_id: Option<String>,
+    /// `--resume-session-at`: unsupported, rejected before any side effect.
+    pub resume_session_at: Option<String>,
     pub system_prompt: Option<String>,
     pub append_system_prompt: Option<String>,
     pub max_turns: Option<u32>,
@@ -101,6 +105,116 @@ pub struct StdioArgs {
     pub output_format: OutputFormat,
     pub input_format: InputFormat,
     pub yolo: bool,
+}
+
+// ============================================================
+// Argument gates (before any side effect)
+// ============================================================
+
+/// `--resume-session-at` 的拒绝文案（含取值的回显）。
+///
+/// 该旗标来自 Claude Code，语义是"把会话回退到某个点"——wing 没有历史截断
+/// 能力，且**绝不能静默忽略**：编排方会据此认为上下文已回退，而 wing 实际
+/// 保留着完整历史，两边的上下文认知就此错位（这才是本步要消灭的失败模式，
+/// 不是"少一个功能"）。真实现留待后续评估。
+pub fn resume_session_at_error(value: &str) -> String {
+    format!(
+        "--resume-session-at={value} is not supported: wing cannot truncate a session's \
+         history, and pretending it did would desync your view of the conversation from \
+         wing's actual state. Drop the flag (or start a clean history with --session-id)."
+    )
+}
+
+/// stdio 参数闸门：在任何副作用（起网关 / 建会话 / 发请求）之前校验。
+///
+/// 只查"静默忽略"类问题：
+/// 1. `--session-id` 与 `-r/--resume` 互斥——一个是 create-or-adopt、一个是
+///    恢复既有会话，语义冲突，同时给出即报错（不猜调用方想要哪个）；
+/// 2. resume 下不生效的覆盖旗标（`--system-prompt` / `--append-system-prompt` /
+///    `--max-turns`）只打日志警告——它们**不该**改链上前缀，但"给了没反应"
+///    必须可诊断（stderr 留给协议与错误，警告进日志）。
+///
+/// `Ok(())` = 可以继续；`Err(message)` = 打印 `wing error: {message}` 后以非零
+/// 退出码结束。
+pub fn validate_stdio_args(args: &StdioArgs) -> Result<(), String> {
+    // `--resume-session-at`：wing 未实现会话截断，**绝不静默忽略**（默认的闸门
+    // 在 `cmd::dispatch` 里更靠前生效；这里是 stdio 侧的独立保证——无论谁调用
+    // `run_stdio`，这个旗标都不会被吃下去）。
+    if let Some(value) = args.resume_session_at.as_deref() {
+        return Err(resume_session_at_error(value));
+    }
+
+    if args.session_id.is_some() && args.resume.is_some() {
+        return Err(
+            "--session-id and -r/--resume are mutually exclusive: --session-id creates or \
+             adopts the given id, -r/--resume restores an existing one. Pick one."
+                .to_string(),
+        );
+    }
+
+    if args.resume.is_some() || args.session_id.is_some() {
+        let ignored: Vec<&str> = [
+            ("--system-prompt", args.system_prompt.is_some()),
+            (
+                "--append-system-prompt",
+                args.append_system_prompt.is_some(),
+            ),
+            ("--max-turns", args.max_turns.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(flag, given)| given.then_some(flag))
+        .collect();
+        if !ignored.is_empty() {
+            tracing::warn!(
+                flags = %ignored.join(", "),
+                "ignored on resume/adopt: these change the conversation prefix or the \
+                 session's own limits and are create-time only"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================
+// Override assembly
+// ============================================================
+
+/// 创建语义的覆盖：全字段（stdio 一律 yolo）。
+fn create_override(args: &StdioArgs) -> AgentOverride {
+    AgentOverride {
+        model: args.model.clone(),
+        provider: args.provider.clone(),
+        system_prompt: args.system_prompt.clone(),
+        append_system_prompt: args.append_system_prompt.clone(),
+        tools: normalize_tools(args.tools.as_deref()),
+        max_turns: args.max_turns,
+        effort: args.effort.clone(),
+        yolo: Some(true),
+    }
+}
+
+/// resume（含 adopt）语义的覆盖：**只装** model / provider / effort / tools。
+///
+/// `--system-prompt` / `--append-system-prompt` / `--max-turns` 不在其中：它们
+/// 会改请求前缀或会话既有限额（网关侧也照此口径，见 `apply_resume_override`）。
+/// 四个字段全空时返回 `None`——不发一个全空的覆盖体。
+fn resume_override(args: &StdioArgs) -> Option<AgentOverride> {
+    let override_ = AgentOverride {
+        model: args.model.clone(),
+        provider: args.provider.clone(),
+        system_prompt: None,
+        append_system_prompt: None,
+        tools: normalize_tools(args.tools.as_deref()),
+        max_turns: None,
+        effort: args.effort.clone(),
+        yolo: None,
+    };
+    let is_empty = override_.model.is_none()
+        && override_.provider.is_none()
+        && override_.tools.is_none()
+        && override_.effort.is_none();
+    (!is_empty).then_some(override_)
 }
 
 // ============================================================
@@ -331,6 +445,11 @@ pub async fn ensure_gateway_running() -> Result<(String, u16)> {
 
 /// Run stdio mode: create/resume session, send prompt, output results.
 pub async fn run_stdio(args: StdioArgs) -> ExitCode {
+    // 参数闸门先于任何副作用：不启网关、不建会话、不发请求。
+    if let Err(message) = validate_stdio_args(&args) {
+        eprintln!("wing error: {message}");
+        return ExitCode::FAILURE;
+    }
     match run_stdio_inner(args).await {
         Ok(code) => code,
         Err(e) => {
@@ -374,10 +493,14 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
     let http = GatewayApiClient::new(http_base, api_key_ref)
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
 
-    // 4. Create or resume session.
+    // 4. Create, adopt, or resume the session.
+    //
+    // 三条路径的语义差：`-r/--resume` 恢复既有会话（覆盖按 resume 子集）；
+    // `--session-id` 是 create-or-adopt（同一个端点两种结果，覆盖语义由网关
+    // 决定：新建 = 创建语义，收养 = resume 子集）；都不给 = 自生成 id。
     let session_id = if let Some(ref resume_id) = args.resume {
         let resp = http
-            .resume_session(resume_id)
+            .resume_session_with_override(resume_id, resume_override(&args).as_ref())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to resume session: {e}"))?;
         // `-r` + `--tag`: add tags to the resumed session before anything is sent.
@@ -396,29 +519,15 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
             .ok()
             .map(|p| p.to_string_lossy().to_string());
 
-        // Parse --tools if provided; None = use template defaults. The SDK's
-        // semantic values (`default` / empty) are dropped here, see
-        // `normalize_tools`.
-        let tools = normalize_tools(args.tools.as_deref());
-
-        let override_ = AgentOverride {
-            model: args.model.clone(),
-            provider: args.provider.clone(),
-            system_prompt: args.system_prompt.clone(),
-            append_system_prompt: args.append_system_prompt.clone(),
-            tools,
-            max_turns: args.max_turns,
-            effort: args.effort.clone(),
-            yolo: Some(true),
-        };
-
         let create_req = CreateSessionRequest {
             template_name: None,
             workspace,
-            agent: Some(override_),
+            agent: Some(create_override(&args)),
             backend: None,
             // Atomic: the session is born tagged (no dispatch-without-tags window).
             tags: (!args.tag.is_empty()).then(|| args.tag.clone()),
+            // create-or-adopt：给了 id 就是它（已存在则被收养）。
+            session_id: args.session_id.clone(),
         };
 
         let resp = http
@@ -428,7 +537,21 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         // 创建即带标；读回校验——旧网关（早于 tags 端点）在这里响亮失败，
         // 而不是静默丢标后继续把 prompt 发出去。
         crate::cmd::common::ensure_tags_applied(&http, &resp.session_id, &args.tag).await?;
-        tracing::info!(session_id = %resp.session_id, "session created");
+        // 指定 id 时必须精确一致：网关若悄悄换一个 id（旧版本忽略该字段），
+        // 编排方的续链认知会立刻错位——在发请求之前就响亮失败。
+        if let Some(requested) = args.session_id.as_deref() {
+            anyhow::ensure!(
+                resp.session_id == requested,
+                "gateway did not honour --session-id: asked for {requested}, got {} \
+                 (does the running gateway predate create-or-adopt? restart it: wing stop && wing start)",
+                resp.session_id
+            );
+        }
+        tracing::info!(
+            session_id = %resp.session_id,
+            requested_id = ?args.session_id,
+            "session ready (created, or adopted when --session-id matched an existing one)"
+        );
         // Print session_id to stderr for recovery/reference.
         eprintln!("session_id: {}", resp.session_id);
         resp.session_id
@@ -802,5 +925,118 @@ mod tests {
             normalize_tools(Some("default,Read")),
             Some(vec!["default".into(), "Read".into()])
         );
+    }
+
+    // ---- 参数闸门 / 覆盖装配 ----
+
+    /// 测试用 StdioArgs（默认全空 + prompt）。
+    fn args() -> StdioArgs {
+        StdioArgs {
+            prompt: "hi".into(),
+            model: None,
+            resume: None,
+            session_id: None,
+            resume_session_at: None,
+            system_prompt: None,
+            append_system_prompt: None,
+            max_turns: None,
+            effort: None,
+            provider: None,
+            tools: None,
+            tag: Vec::new(),
+            output_format: OutputFormat::Text,
+            input_format: InputFormat::Text,
+            yolo: false,
+        }
+    }
+
+    #[test]
+    fn resume_session_at_is_rejected_by_the_stdio_gate() {
+        let mut a = args();
+        a.resume_session_at = Some("3".into());
+        let message = validate_stdio_args(&a).expect_err("must be rejected");
+        assert!(message.contains("--resume-session-at=3"), "{message}");
+    }
+
+    #[test]
+    fn session_id_and_resume_are_mutually_exclusive() {
+        let mut a = args();
+        a.session_id = Some("abc".into());
+        assert!(validate_stdio_args(&a).is_ok());
+
+        a.resume = Some("abc".into());
+        let message = validate_stdio_args(&a).expect_err("both flags must be rejected");
+        assert!(message.contains("--session-id"), "{message}");
+        assert!(message.contains("--resume"), "{message}");
+    }
+
+    #[test]
+    fn ignored_override_flags_do_not_block_resume() {
+        // 不改链上前缀的旗标在 resume 下不生效，但只警告、不阻断（否则
+        // "SDK 照旧传全套旗标" 的场景会被硬拒绝）。
+        let mut a = args();
+        a.resume = Some("abc".into());
+        a.system_prompt = Some("x".into());
+        a.max_turns = Some(3);
+        assert!(validate_stdio_args(&a).is_ok());
+    }
+
+    #[test]
+    fn resume_override_carries_only_the_resume_subset() {
+        let mut a = args();
+        a.model = Some("m".into());
+        a.provider = Some("p".into());
+        a.effort = Some("high".into());
+        a.tools = Some("Read,Bash".into());
+        // 创建期旗标：不得进入 resume 覆盖。
+        a.system_prompt = Some("SYS".into());
+        a.append_system_prompt = Some("APP".into());
+        a.max_turns = Some(7);
+
+        let override_ = resume_override(&a).expect("non-empty override");
+        assert_eq!(override_.model.as_deref(), Some("m"));
+        assert_eq!(override_.provider.as_deref(), Some("p"));
+        assert_eq!(override_.effort.as_deref(), Some("high"));
+        assert_eq!(override_.tools, Some(vec!["Read".into(), "Bash".into()]));
+        assert_eq!(override_.system_prompt, None);
+        assert_eq!(override_.append_system_prompt, None);
+        assert_eq!(override_.max_turns, None);
+        assert_eq!(override_.yolo, None);
+    }
+
+    #[test]
+    fn resume_override_is_absent_when_nothing_to_override() {
+        let mut a = args();
+        a.resume = Some("abc".into());
+        assert!(resume_override(&a).is_none());
+
+        // SDK 的语义值（`--tools default` / 空）不算覆盖。
+        a.tools = Some("default".into());
+        assert!(resume_override(&a).is_none());
+        a.tools = Some(String::new());
+        assert!(resume_override(&a).is_none());
+    }
+
+    #[test]
+    fn create_override_keeps_full_semantics_and_yolo() {
+        let mut a = args();
+        a.system_prompt = Some("SYS".into());
+        a.append_system_prompt = Some("APP".into());
+        a.max_turns = Some(7);
+        a.tools = Some("default".into()); // 语义值丢弃 → None
+
+        let override_ = create_override(&a);
+        assert_eq!(override_.system_prompt.as_deref(), Some("SYS"));
+        assert_eq!(override_.append_system_prompt.as_deref(), Some("APP"));
+        assert_eq!(override_.max_turns, Some(7));
+        assert_eq!(override_.tools, None);
+        assert_eq!(override_.yolo, Some(true));
+    }
+
+    #[test]
+    fn resume_session_at_error_is_explicit() {
+        let message = resume_session_at_error("3");
+        assert!(message.contains("--resume-session-at=3"), "{message}");
+        assert!(message.contains("not supported"), "{message}");
     }
 }

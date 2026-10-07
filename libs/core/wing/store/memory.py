@@ -125,8 +125,9 @@ class MemorySessionStore(SessionStore):
         上层据此让 ``ps --tag`` / ``tag --list`` 立即找得到；是否最终进列表
         由 SessionManager 决定（无名且无标的条目会被它过滤）。
 
-        与 file 后端"目录名不契合 session id 格式即跳过"的口径一致：memory
-        后端的 key 由会话层生成，天然合规。
+        与 file 后端"目录名不过闸门即跳过"的口径一致：memory 后端的 key 由
+        会话层确定（默认自生成，编排方可经 create-or-adopt 指定），天然通过
+        闸门——这里无需再过滤。
         """
         result: list[SessionSummary] = []
         for session_id in set(self._metadata) | set(self._logs):
