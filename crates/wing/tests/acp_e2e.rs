@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use tokio::io::AsyncBufReadExt as _;
 
 use acp_harness::ElicitationReply;
 use acp_harness::ElicitationScript;
@@ -212,7 +213,6 @@ async fn prompt_streams_in_order_and_reports_end_turn() {
                 .block_task()
                 .await?;
             let sid = new.session_id.to_string();
-            rec.marker("new-response");
 
             // 建会话请求体：workspace = 客户端 cwd；**不设 yolo**（危险操作要在 ACP 可见）。
             let create = gw
@@ -247,15 +247,13 @@ async fn prompt_streams_in_order_and_reports_end_turn() {
             assert_eq!(option["options"][0]["options"][0]["value"], "fake:echo-1");
             assert_eq!(option["options"][0]["options"][0]["name"], "Echo One");
 
-            // 命令列表在应答**之后**补发（marker 之前没有任何 update）。
+            // 命令列表在应答**之后**补发（「应答先于通知」这一顺序性质由
+            // `frame_order_is_pinned_on_the_wire` 在 wire 层钉死——这里的锚点会与
+            // 客户端派发/唤醒竞态，不能用来断言顺序）。
             rec.wait_update("命令列表", &sid, |update| {
                 update_kind(update) == "available_commands_update"
             })
             .await;
-            assert!(
-                rec.updates_before_marker(&sid, "new-response").is_empty(),
-                "命令列表必须在 session/new 应答之后"
-            );
             let commands = rec.updates_for(&sid)[0].clone();
             assert_eq!(commands["sessionUpdate"], "available_commands_update");
             assert_eq!(commands["availableCommands"][0]["name"], "model");
@@ -1012,6 +1010,10 @@ async fn session_list_maps_filters_and_paginates() {
 // B9 session/load（回放） + session/resume（不回放）
 // ============================================================
 
+/// `session/load` 的帧数：回放 9 帧（文本/思考/工具卡片/收口/diff/标题/用量）
+/// + 命令列表。见 `frame_order_is_pinned_on_the_wire` 的同序断言。
+const REPLAY_FRAME_COUNT: usize = 10;
+
 #[tokio::test(flavor = "multi_thread")]
 async fn session_load_replays_before_the_response_and_resume_skips_it() {
     let harness = Harness::start().await;
@@ -1070,7 +1072,6 @@ async fn session_load_replays_before_the_response_and_resume_skips_it() {
                 .send_request(LoadSessionRequest::new("s-old", workspace.clone()))
                 .block_task()
                 .await?;
-            rec.marker("load-response");
             assert!(loaded.config_options.is_some(), "load 响应带 configOptions");
 
             let resume = gw
@@ -1090,8 +1091,17 @@ async fn session_load_replays_before_the_response_and_resume_skips_it() {
                 .await;
             assert_eq!(subscribe.client_id.as_deref(), Some(gw.client_id()));
 
-            // 回放帧序（全部在响应之前——marker 之后的第一条 update 就是 resume 的收尾帧）。
-            let replayed = rec.updates_before_marker("s-old", "load-response");
+            // load 的帧（回放 + 标题/用量/命令）先于 resume 的帧到达；「load 的帧全部先于
+            // load 应答」这一顺序性质由 `frame_order_is_pinned_on_the_wire` 在 wire 层钉死。
+            rec.wait_update("load 收尾帧（命令列表）", "s-old", |update| {
+                update_kind(update) == "available_commands_update"
+            })
+            .await;
+            let replayed: Vec<serde_json::Value> = rec
+                .updates_for("s-old")
+                .into_iter()
+                .take(REPLAY_FRAME_COUNT)
+                .collect();
             assert_eq!(
                 describe_kinds(&replayed.iter().map(update_kind).collect::<Vec<_>>()),
                 concat!(
@@ -1099,7 +1109,7 @@ async fn session_load_replays_before_the_response_and_resume_skips_it() {
                     "tool_call → tool_call → tool_call_update → tool_call_update → ",
                     "session_info_update → usage_update → available_commands_update",
                 ),
-                "load 回放帧序（全部在响应之前）"
+                "load 回放帧序"
             );
             assert!(
                 !replayed
@@ -1135,13 +1145,26 @@ async fn session_load_replays_before_the_response_and_resume_skips_it() {
                 .send_request(ResumeSessionRequest::new("s-old", workspace.clone()))
                 .block_task()
                 .await?;
-            rec.marker("resume-response");
             assert!(resumed.config_options.is_some());
-            let after = rec.updates_after_marker("s-old", "load-response");
+            rec.wait_update("resume 收尾帧（命令列表）", "s-old", |update| {
+                update_kind(update) == "available_commands_update"
+            })
+            .await;
+            let all = rec.updates_for("s-old");
             assert_eq!(
-                describe_kinds(&after.iter().map(update_kind).collect::<Vec<_>>()),
+                describe_kinds(
+                    &all[REPLAY_FRAME_COUNT..]
+                        .iter()
+                        .map(update_kind)
+                        .collect::<Vec<_>>()
+                ),
                 "session_info_update → usage_update → available_commands_update",
                 "resume 不回放历史（只补事实帧）"
+            );
+            assert_eq!(
+                all.len(),
+                REPLAY_FRAME_COUNT + 3,
+                "除回放与 resume 的事实帧外不该有别的 update"
             );
 
             // 未知会话：invalid params，且不产生 subscribe。
@@ -1482,4 +1505,201 @@ async fn cancel_during_an_ask_discards_the_late_answer() {
     )
     .await
     .expect("取消打断 ask 的场景");
+}
+
+// ============================================================
+// 帧序（wire 层）：不经客户端 SDK，逐行读 stdout
+// ============================================================
+
+/// 原始 stdio 驱动：直连 `wing acp` 收发 ACP 帧（[`run_client`] 之外的第二种驱动）。
+///
+/// 与官方客户端的区别不在协议能力（这里只发简单请求），而在**可观察性**：帧就是
+/// stdout 的行序，没有 SDK 的派发链与任务唤醒插在中间——顺序性质只有在这里才不会
+/// 被调度竞态污染（客户端前台「响应后打锚」的做法本身是竞态的：通知的派发与前台
+/// 任务的唤醒谁先落地不由我们决定，CI 负载下会颠倒）。
+struct RawAgent {
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    lines: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+}
+
+impl RawAgent {
+    fn spawn(home: &TempHome) -> Self {
+        use std::process::Stdio;
+        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_wing"))
+            .arg("acp")
+            .env("WING_HOME", home.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn wing acp");
+        let stdin = child.stdin.take().expect("stdin piped");
+        let stdout = child.stdout.take().expect("stdout piped");
+        Self {
+            child,
+            stdin,
+            lines: tokio::io::BufReader::new(stdout).lines(),
+        }
+    }
+
+    /// 写一帧 JSON-RPC 请求。
+    async fn send(&mut self, frame: Value) {
+        use tokio::io::AsyncWriteExt as _;
+        self.stdin
+            .write_all(format!("{frame}\n").as_bytes())
+            .await
+            .expect("write request");
+        self.stdin.flush().await.expect("flush stdin");
+    }
+
+    /// 读下一条 stdout 行（有界超时；非 JSON 直接失败）。
+    async fn next_frame(&mut self) -> Value {
+        let line = tokio::time::timeout(Duration::from_secs(10), self.lines.next_line())
+            .await
+            .expect("10s 内必须出现下一条 ACP 帧")
+            .expect("read stdout")
+            .expect("stdout 在响应到齐前关闭");
+        serde_json::from_str(&line)
+            .unwrap_or_else(|err| panic!("stdout 行不是 JSON：{line:?}（{err}）"))
+    }
+
+    /// 读到 `id` 的**响应**为止，返回它之前收到的通知（顺序即到达顺序）。
+    async fn until_response(&mut self, id: u64) -> Vec<Value> {
+        let mut notifications = Vec::new();
+        loop {
+            let frame = self.next_frame().await;
+            if frame["id"] == id {
+                assert!(
+                    frame.get("result").is_some() || frame.get("error").is_some(),
+                    "id={id} 的帧必须是响应：{frame}"
+                );
+                return notifications;
+            }
+            assert_eq!(
+                frame["method"], "session/update",
+                "响应之前的帧必须是通知：{frame}"
+            );
+            notifications.push(frame);
+        }
+    }
+
+    /// 读下一条 `session/update` 通知，返回其中的 `update` 对象。
+    async fn next_update(&mut self) -> Value {
+        let frame = self.next_frame().await;
+        assert_eq!(frame["method"], "session/update", "期望通知：{frame}");
+        frame["params"]["update"].clone()
+    }
+
+    /// 通知序列的 `sessionUpdate` 种类（wire 层，无客户端派发）。
+    fn kinds(notifications: &[Value]) -> Vec<String> {
+        notifications
+            .iter()
+            .map(|frame| {
+                frame["params"]["update"]["sessionUpdate"]
+                    .as_str()
+                    .unwrap_or("<unknown>")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    async fn shutdown(mut self) {
+        let _ = self.child.kill().await;
+    }
+}
+
+impl Drop for RawAgent {
+    fn drop(&mut self) {
+        // panic 路径也不留子进程（`kill` 需要 await，Drop 里只能发信号）。
+        let _ = self.child.start_kill();
+    }
+}
+
+/// 帧序（wire 层）：`session/new` 的应答先于补发的命令列表；`session/load` 的回放
+/// （含标题/用量/命令）全部先于应答；`session/resume` 只补事实帧、不回放。
+#[tokio::test(flavor = "multi_thread")]
+async fn frame_order_is_pinned_on_the_wire() {
+    let gateway = FakeGateway::start();
+    let home = TempHome::new(gateway.port());
+    let workspace = home.path().to_string_lossy().to_string();
+    gateway.set_models(models_catalog(&[("fake", &[("echo-1", "Echo One")])]));
+    gateway.set_commands(commands_catalog(&[("model", "Switch the model", "")]));
+    gateway.add_resumable("s-old", Some(&workspace));
+    gateway.set_session_state("s-old", "fake", "echo-1", Some("Echo One"));
+    gateway.set_session_info("s-old", Some("旧会话"), 321, 262_144);
+    let messages = json!([
+        {"role": "user", "content": "看一下这个 bug"},
+        {
+            "role": "assistant",
+            "content": "我来改",
+            "reasoning_content": "先看代码",
+            "tool_calls": [{"id": "tc-a", "name": "Edit", "arguments": {"path": "a.rs"}}],
+            "tool_call_id": null,
+        },
+        {"role": "tool", "content": "applied a", "tool_call_id": "tc-a", "tool_name": "Edit"},
+    ]);
+    gateway.set_snapshot("s-old", sync_session("s-old", messages, json!([])));
+
+    let mut agent = RawAgent::spawn(&home);
+    agent
+        .send(json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": 1, "clientCapabilities": {}},
+        }))
+        .await;
+    assert!(
+        agent.until_response(1).await.is_empty(),
+        "initialize 之前不得有任何通知"
+    );
+
+    // session/new：应答先于补发的命令列表（应答之前不得有通知）。
+    agent
+        .send(json!({
+            "jsonrpc": "2.0", "id": 2, "method": "session/new",
+            "params": {"cwd": workspace, "mcpServers": []},
+        }))
+        .await;
+    assert!(
+        agent.until_response(2).await.is_empty(),
+        "session/new 的应答必须先于命令列表通知"
+    );
+    let commands = agent.next_update().await;
+    assert_eq!(commands["sessionUpdate"], "available_commands_update");
+    assert_eq!(commands["availableCommands"][0]["name"], "model");
+
+    // session/load：回放（+ 标题/用量/命令）全部先于应答。
+    agent
+        .send(json!({
+            "jsonrpc": "2.0", "id": 3, "method": "session/load",
+            "params": {"sessionId": "s-old", "cwd": workspace, "mcpServers": []},
+        }))
+        .await;
+    let before = agent.until_response(3).await;
+    assert_eq!(
+        describe_kinds(&RawAgent::kinds(&before)),
+        concat!(
+            "user_message_chunk → agent_thought_chunk → agent_message_chunk → ",
+            "tool_call → tool_call_update → session_info_update → usage_update → ",
+            "available_commands_update",
+        ),
+        "load 的回放帧必须全部先于应答"
+    );
+
+    // session/resume：不回放——应答之前只有事实帧。
+    agent
+        .send(json!({
+            "jsonrpc": "2.0", "id": 4, "method": "session/resume",
+            "params": {"sessionId": "s-old", "cwd": workspace},
+        }))
+        .await;
+    let before = agent.until_response(4).await;
+    assert_eq!(
+        describe_kinds(&RawAgent::kinds(&before)),
+        "session_info_update → usage_update → available_commands_update",
+        "resume 不回放历史（只补事实帧）"
+    );
+
+    agent.shutdown().await;
+    drop(gateway);
 }

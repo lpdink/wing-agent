@@ -7,9 +7,10 @@
 //! - `RequestPermissionRequest` → 按 [`PermissionScript`] 应答（Bash 确认 / 回退路径）；
 //! - `CreateElicitationRequest` → 按 [`ElicitationScript`] 应答（表单路径）。
 //!
-//! 顺序锚：前台在关键请求 resolve 之后调用 [`Recorder::marker`]——由于 SDK 在一条
-//! dispatch 链上顺序处理「通知 → 响应」，marker 之前的记录就是「客户端在收到响应前
-//! 已经看到」的帧（`session/load` 的回放帧序断言靠它）。
+//! [`Recorder::marker`] 只用于「某事是否已经发生」的记账（例如迟到应答已发出），
+//! **不能**用来断言帧的顺序：前台任务在响应后打锚的落地时机与通知的派发是竞态的
+//! （CI 负载下会颠倒）。顺序性质（响应先于/后于通知）一律在 wire 层钉死——见
+//! `acp_e2e` 的 `frame_order_is_pinned_on_the_wire`（原始 stdio，逐行读）。
 
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
@@ -113,39 +114,6 @@ impl Recorder {
             .iter()
             .map(update_kind)
             .collect()
-    }
-
-    /// 第一条 [`Record::Marker`]（`name`）**之前**的该会话 update 序列。
-    pub fn updates_before_marker(&self, session_id: &str, name: &str) -> Vec<Value> {
-        let mut updates = Vec::new();
-        for record in self.entries() {
-            match record {
-                Record::Marker(marker) if marker == name => break,
-                Record::Update {
-                    session_id: recorded,
-                    update,
-                } if recorded == session_id => updates.push(update),
-                _ => {}
-            }
-        }
-        updates
-    }
-
-    /// 第一条 [`Record::Marker`]（`name`）**之后**的该会话 update 序列。
-    pub fn updates_after_marker(&self, session_id: &str, name: &str) -> Vec<Value> {
-        let mut seen = false;
-        let mut updates = Vec::new();
-        for record in self.entries() {
-            match record {
-                Record::Marker(marker) if marker == name => seen = true,
-                Record::Update {
-                    session_id: recorded,
-                    update,
-                } if recorded == session_id && seen => updates.push(update),
-                _ => {}
-            }
-        }
-        updates
     }
 
     /// 等该会话收到一条满足谓词的 update。
