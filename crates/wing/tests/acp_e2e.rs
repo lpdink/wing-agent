@@ -4,7 +4,7 @@
 //! 客户端 / 临时 WING_HOME）见 [`acp_harness`]。纪律：不联网、不碰用户网关与 `~/.wing`，
 //! 端口临时分配，每测试独立进程。
 //!
-//! 九个测试 = 清单七组（list / load+resume / close 各自成函数，便于失败定位）。
+//! 十个测试 = 清单七组（list / load+resume / close 各自成函数，便于失败定位）。
 
 #![allow(clippy::print_stderr)] // harness 的调试回调（WING_ACP_E2E_TRACE=1）写 stderr
 
