@@ -3,7 +3,7 @@
 使用 FastAPI TestClient + Mock WingRuntime 测试所有 HTTP 路由。
 不启动真实 uvicorn server，不依赖端口 32523。
 
-例外：``TestRealRuntimeIdGate`` 用**真实** ``WingRuntime``——它要证明的是
+例外：``TestRealRuntimeGates`` 用**真实** ``WingRuntime``——它要证明的是
 "闸门在 HTTP 面上把恶意 id 折成 400（而不是让它走到响应序列化处炸 500）"，
 mock 掉 runtime 就只剩 route 的胶水，证明不了这件事。
 """
@@ -2070,13 +2070,17 @@ class TestReservedClientIdAndLifecycle:
 # ============================================================
 
 
-class TestRealRuntimeIdGate:
-    """恶意 id 在**真实** runtime 上的 HTTP 表现：400 + 零残留（绝不 500）。
+class TestRealRuntimeGates:
+    """非法输入在**真实** runtime 上的 HTTP 表现：400/404 + 零残留（绝不 500）。
 
-    覆盖"孤立代理字符"这条：``{"session_id": "\\ud800"}`` 是合法 JSON 但 id 不是
-    合法 UTF-8——旧实现的 create 会成功、响应序列化炸 500（``PydanticSerializationError``）。
+    覆盖"孤立代理字符"这一族：``{"session_id": "\\ud800"}`` 是合法 JSON，但值不是
+    合法 UTF-8——旧实现里 create 会成功、随后在响应序列化（``PydanticSerializationError``）
+    或 metadata 落盘处炸 500；更新一点的路径（agent 覆盖的字符串字段）还会留下
+    半份 metadata，让下一次同 id 的 create "收养"这个半成品幽灵会话。
+
     httpx 的 ``json=`` 在客户端就编码不了代理字符，因此这里发**原始字节体**
-    （服务端收到的是转义形式，pydantic 解出代理字符）。
+    （服务端收到的是转义形式，pydantic 解出代理字符）——正是恶意 / 异常客户端
+    能造出的那一类请求。
     """
 
     @pytest.fixture
@@ -2121,3 +2125,91 @@ class TestRealRuntimeIdGate:
         resp = client.post("/api/session/create", json={"session_id": "收" * 128})
         assert resp.status_code == 400, resp.text
         assert not sessions_root.exists() or list(sessions_root.iterdir()) == []
+
+    # ── N1：覆盖 / 文本字段的非 UTF-8 输入（400 而非 500，零残留、无幽灵） ──
+
+    def test_surrogate_in_override_is_400_not_500(self, real_client):
+        """agent 覆盖里的孤立代理字符 → 400；**零残留**（连目录都不建）。"""
+        client, sessions_root = real_client
+        resp = client.post(
+            "/api/session/create",
+            content=(
+                b'{"session_id": "Ghost-R", "agent": '
+                b'{"model": "m", "system_prompt": "\\ud800"}}'
+            ),
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "system_prompt" in resp.json()["detail"], resp.text
+        # 零残留：没有目录、没有 metadata——认领键发生在校验之后
+        assert not sessions_root.exists() or list(sessions_root.iterdir()) == []
+
+    def test_no_ghost_session_is_adopted_after_the_failed_create(self, real_client):
+        """失败之后同 id 的 create 是**新建**，不是收养半成品幽灵。"""
+        client, _ = real_client
+        failed = client.post(
+            "/api/session/create",
+            content=(
+                b'{"session_id": "Ghost-R", "agent": '
+                b'{"model": "m", "system_prompt": "\\ud800"}}'
+            ),
+            headers={"content-type": "application/json"},
+        )
+        assert failed.status_code == 400, failed.text
+
+        again = client.post("/api/session/create", json={"session_id": "Ghost-R"})
+        assert again.status_code == 200, again.text
+        assert again.json()["session_id"] == "Ghost-R"
+        # 幽灵的痕迹（model / system_prompt 记录）不存在 → 这是全新会话。
+        state = client.get("/api/session/get", params={"session_id": "Ghost-R"})
+        assert state.status_code == 200, state.text
+        assert state.json()["messages"] == []
+
+    def test_surrogate_in_workspace_or_title_is_400(self, real_client):
+        """同一族输入的另一半：workspace（create/update）与 title 也必须 400。"""
+        client, sessions_root = real_client
+        created = client.post("/api/session/create", json={"session_id": "W-1"})
+        assert created.status_code == 200, created.text
+
+        bad_workspace = client.post(
+            "/api/session/create",
+            content=(b'{"session_id": "W-2", "workspace": "/tmp/\\ud800"}'),
+            headers={"content-type": "application/json"},
+        )
+        assert bad_workspace.status_code == 400, bad_workspace.text
+        assert not (sessions_root / "W-2").exists()
+
+        bad_title = client.post(
+            "/api/session/update",
+            content=(b'{"session_id": "W-1", "title": "\\ud800"}'),
+            headers={"content-type": "application/json"},
+        )
+        assert bad_title.status_code == 400, bad_title.text
+
+    def test_surrogate_in_message_content_is_400(self, real_client):
+        """消息正文：非法 UTF-8 → 400（它在首条消息时还会成为标题）。"""
+        client, _ = real_client
+        created = client.post("/api/session/create", json={"session_id": "C-1"})
+        assert created.status_code == 200, created.text
+        resp = client.post(
+            "/api/session/send",
+            content=b'{"session_id": "C-1", "content": "\\ud800"}',
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "message content" in resp.json()["detail"]
+
+    def test_error_detail_echoing_a_surrogate_is_serialisable(self, real_client):
+        """错误文案回显原始输入时也不能炸：出口统一转义（否则 400 变 500）。"""
+        client, _ = real_client
+        created = client.post("/api/session/create", json={"session_id": "E-1"})
+        assert created.status_code == 200, created.text
+        # 模板名带孤立代理字符：域内报错会**回显它**（"template '<x>' not found"），
+        # 原始形式会让响应序列化炸成 500。
+        resp = client.post(
+            "/api/session/update",
+            content=b'{"session_id": "E-1", "agent": "\\ud800"}',
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 404, resp.text
+        assert "\\ud800" in resp.json()["detail"], resp.text

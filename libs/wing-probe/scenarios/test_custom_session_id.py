@@ -287,10 +287,14 @@ def _fs_is_case_insensitive(base: Path) -> bool:
 async def test_case_variant_ids_never_share_one_directory(probe: Probe) -> None:
     """大小写 / 归一化变体：要么归一到同一会话，要么是两个独立目录——绝不混写。
 
-    不变量（与文件系统类型无关）：**回报的 id 逐字对应一个磁盘目录**，且不存在
-    "两个 id 一份 history.jsonl"。不敏感 FS（macOS APFS / Windows NTFS）上第二个
-    请求被归一到第一个会话的真名（网关按磁盘真名回应）；敏感 FS（Linux）上两者
-    是各自独立的会话。
+    不变量（与文件系统类型无关）：**回报的 id 逐字对应一个磁盘目录**、目录数 ==
+    会话数、两个变体**绝不共享一份 history.jsonl**。不敏感 FS（macOS APFS /
+    Windows NTFS）上第二个请求被归一到第一个会话的真名（网关按磁盘真名回应）；
+    敏感 FS（Linux ext4/btrfs）上两者是各自独立的会话。
+
+    两次 create 都带 tags：列表判据是"有 history 或 metadata 带标"，只给 model
+    覆盖的会话**列不出来**——不带标的话，这条断言在敏感 FS 上会误红（CI 的
+    ubuntu-latest 正是敏感 FS）。
     """
     probe.register(CREATED_MODEL, Turn.of(text="variant reply"))
     aliases = _fs_is_case_insensitive(probe.env.root)
@@ -300,7 +304,9 @@ async def test_case_variant_ids_never_share_one_directory(probe: Probe) -> None:
     )
     assert created["session_id"] == "Team-V", created
 
-    variant = await _create(probe, session_id="team-v", model=CREATED_MODEL)
+    variant = await _create(
+        probe, session_id="team-v", model=CREATED_MODEL, tags=["variant"]
+    )
     if aliases:
         assert variant["session_id"] == "Team-V", variant  # 归一：真名
         assert _session_dirs(probe) == ["Team-V"], _session_dirs(probe)
@@ -308,9 +314,23 @@ async def test_case_variant_ids_never_share_one_directory(probe: Probe) -> None:
         assert variant["session_id"] == "team-v", variant
         assert _session_dirs(probe) == ["Team-V", "team-v"], _session_dirs(probe)
 
-    # 不变量：每个回报的 id 都能逐字寻址，且目录数 == 会话数（无共享目录）。
+    # 不变量 1：每个回报的 id 都能逐字寻址，且目录数 == 会话数（无共享目录）。
     expected = {created["session_id"], variant["session_id"]}
     assert _session_dirs(probe) == sorted(expected), _session_dirs(probe)
     for session_id in expected:
         assert (probe.env.sessions_path / session_id).is_dir(), session_id
-    assert len(await _listed_ids(probe)) == len(expected)
+
+    # 不变量 2：列表与回报的 id 集合一致（两个都带标 → 两种 FS 上都列得出）。
+    listed = await _listed_ids(probe)
+    assert sorted(listed) == sorted(expected), listed
+
+    # 不变量 3：绝不共享一份 history.jsonl——只写一次，只有那一个会话落链。
+    session = await _driver(probe).attach(
+        created["session_id"], workspace=probe.workspace
+    )
+    result = await session.chat("variant ping")
+    assert result.data["subtype"] == "success", result.data
+    histories = sorted(
+        entry.parent.name for entry in probe.env.sessions_path.glob("*/history.jsonl")
+    )
+    assert histories == [created["session_id"]], histories

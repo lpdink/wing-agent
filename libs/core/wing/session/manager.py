@@ -28,6 +28,7 @@ from wing.common.logger import log
 from wing.common.utils import (
     generate_session_id,
     is_valid_session_id,
+    require_utf8,
     validate_session_id,
 )
 from wing.config import get_config
@@ -42,6 +43,7 @@ from wing.commands import expand_prompt_command
 from wing.schema import ChainNode, Message
 from wing.store import SessionMetadata, SessionStore
 
+from .override import AgentOverride, validate_override_utf8
 from .session import Session, tool_refs, validate_tool_refs
 from .tags import TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
 from .template import AgentTemplate, AgentTemplateManager
@@ -281,13 +283,17 @@ class SessionManager:
                 f"Available: {list(self._stores)}"
             )
 
-        # 标签与工具 ref 纯校验提到最前（都不写盘）：任何非法输入在任何副作用之前
-        # raise，"失败即零残留"对 create-or-adopt 尤其重要（重试必须还是干净状态）。
-        # 工具 ref 必须在**认领键**之前校验——认领会建会话目录。
+        # 标签、覆盖文本与工具 ref 的纯校验提到最前（都不写盘）：任何非法输入在
+        # 任何副作用之前 raise，"失败即零残留"对 create-or-adopt 尤其重要（重试
+        # 必须还是干净状态）。全部必须在**认领键**之前——认领会建会话目录。
         if tags:
             apply_tag_ops([], add=tags)
-        if agent_override is not None and agent_override.tools is not None:
-            validate_tool_refs(agent_override.tools)
+        if agent_override is not None:
+            validate_override_utf8(agent_override)
+            if agent_override.tools is not None:
+                validate_tool_refs(agent_override.tools)
+        if workspace is not None:
+            require_utf8(workspace, field="workspace")
 
         if template_name is not None:
             template = self._template_manager.get(template_name)

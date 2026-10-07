@@ -27,6 +27,7 @@ import pytest
 from wing.hooks import hooks
 from wing.schema import Message
 from wing.session import AgentOverride, SessionManager, tool_refs
+from wing.session.override import non_utf8_override_fields
 from wing.session.session import ignored_override_fields
 from wing.store import (
     FileSessionStore,
@@ -625,3 +626,100 @@ class TestAdoptIgnoresCreateParams:
                 session_id="brand-new", backend="nope", template_name="nope"
             )
         assert _session_dirs(root) == []
+
+
+class TestNonUtf8InputGates:
+    """非 UTF-8 输入（孤立代理字符）的闸门：400 级错误 + 零残留 + 无幽灵。
+
+    "合法 JSON ≠ 合法 UTF-8"：``"\\ud800"`` 能过 JSON 解析，却过不了任何
+    ``encode("utf-8")``——落盘（metadata / history）与出网序列化都会炸。旧行为是
+    500 + 半份 metadata，随后同 id 的 create 会"收养"这个半成品幽灵会话。
+    """
+
+    def test_pure_field_scan(self):
+        assert non_utf8_override_fields(AgentOverride()) == []
+        assert non_utf8_override_fields(AgentOverride(model="m", effort="high")) == []
+        assert non_utf8_override_fields(AgentOverride(system_prompt="\ud800")) == [
+            "system_prompt"
+        ]
+        assert non_utf8_override_fields(
+            AgentOverride(model="\ud800", provider="\udc00", tools=["ok", "\ud800"])
+        ) == ["model", "provider", "tools[1]"]
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            AgentOverride(system_prompt="\ud800"),
+            AgentOverride(append_system_prompt="\ud800"),
+            AgentOverride(model="\ud800"),
+            AgentOverride(provider="\ud800"),
+            AgentOverride(effort="\ud800"),
+            AgentOverride(tools=["\ud800"]),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_create_rejects_and_leaves_no_trace(
+        self, sm: SessionManager, root: Path, override: AgentOverride
+    ):
+        with pytest.raises(ValueError) as failure:
+            sm.create_session(session_id="Ghost-1", agent_override=override)
+        assert "UTF-8" in str(failure.value), failure.value
+        # 连认领键都没发生（校验在它之前）→ 磁盘上没有任何痕迹
+        assert _session_dirs(root) == []
+
+    @pytest.mark.asyncio
+    async def test_failed_create_does_not_leave_a_ghost(
+        self, sm: SessionManager, root: Path
+    ):
+        """失败之后同 id 的 create 是**新建**：模型记录不存在、历史为空。"""
+        with pytest.raises(ValueError):
+            sm.create_session(
+                session_id="Ghost-2",
+                agent_override=AgentOverride(
+                    model="gpt-4o-mini", system_prompt="\ud800"
+                ),
+            )
+        session = sm.create_session(session_id="Ghost-2")
+        assert session.session_id == "Ghost-2"
+        # 幽灵的痕迹（模板默认提示词之外没有任何覆盖）不存在
+        assert not session.context_manager.setin_system_prompt
+        metadata = session.store.load_metadata("Ghost-2")
+        assert metadata is None or metadata.model_name is None
+
+    @pytest.mark.asyncio
+    async def test_other_input_fields_are_gated_too(
+        self, sm: SessionManager, root: Path
+    ):
+        """同一族的其它输入（workspace / tags）：合法性判定同源。"""
+        with pytest.raises(ValueError):
+            sm.create_session(session_id="H-1", workspace="/tmp/\ud800")
+        with pytest.raises(ValueError):
+            sm.create_session(session_id="H-2", tags=["\ud800"])
+        assert _session_dirs(root) == []
+
+    @pytest.mark.asyncio
+    async def test_resume_and_update_gates_leave_state_untouched(
+        self, sm: SessionManager
+    ):
+        session = sm.create_session(session_id="K-1")
+        before = session.agent.model
+
+        with pytest.raises(ValueError):
+            sm.resume_session(
+                "K-1",
+                agent_override=AgentOverride(model="gpt-4o-mini", provider="\ud800"),
+            )
+        with pytest.raises(ValueError):
+            session.set_title("\ud800")
+        with pytest.raises(ValueError):
+            session.set_workspace("/tmp/\ud800")
+        with pytest.raises(ValueError):
+            sm.set_session_tags("K-1", add=["\ud800"])
+        with pytest.raises(ValueError):
+            await session.post("\ud800")
+
+        assert session.agent.model == before  # 没有半截状态
+        metadata = session.store.load_metadata("K-1")
+        assert metadata is None or (
+            metadata.model_name is None and metadata.session_name is None
+        )

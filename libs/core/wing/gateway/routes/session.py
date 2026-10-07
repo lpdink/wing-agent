@@ -216,12 +216,16 @@ async def send_message(
     except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
 
-    await server.runtime.post(
-        content=body.content,
-        request_id=request_id,
-        session_id=body.session_id,
-        tool_call_id=body.tool_call_id,
-    )
+    try:
+        await server.runtime.post(
+            content=body.content,
+            request_id=request_id,
+            session_id=body.session_id,
+            tool_call_id=body.tool_call_id,
+        )
+    except ValueError as e:
+        # 正文非法（不可编码为 UTF-8）：输入问题 → 400，不是 500。
+        raise HTTPException(status_code=400, detail=str(e))
     return SendMessageResponse(ok=True, request_id=request_id)
 
 

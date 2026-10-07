@@ -22,7 +22,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/session/create` | 创建新 session（可选 `backend: file\|memory`，默认 file；`workspace`、`template` 等；可选 `tags` 创建即打标，校验语义同 `/api/session/tag`；可选 `session_id` = **create-or-adopt**：不存在则以该 id 建会话，已存在则收养既有会话——语义同 `/api/session/resume`，`agent` 覆盖只应用 resume 子集。**收养路径忽略创建参数**：`template_name` / `workspace` / `backend` 一律以 metadata 为准、且不做校验，因此同一个请求体可能"id 存在 → 200（参数被忽略）/ id 不存在 → 400（如 `backend` 非法）"） |
+| POST | `/api/session/create` | 创建新 session（可选 `backend: file\|memory`，默认 file；`workspace`、`template` 等；可选 `tags` 创建即打标，校验语义同 `/api/session/tag`；可选 `session_id` = **create-or-adopt**：不存在则以该 id 建会话，已存在则收养既有会话——语义同 `/api/session/resume`，`agent` 覆盖只应用 resume 子集。**收养路径忽略创建参数**：`template_name` / `workspace` / `backend` 一律以 metadata 为准、且不做校验，因此同一个请求体可能"id 存在 → 200（参数被忽略）/ id 不存在 → 400（如 `backend` 非法）"；**例外**是"该 id 已命中内存里的**空会话**"（同 FS 的变体）：那条路径走的是认领之后的校验分支，`backend` / `template_name` 非法仍会 **400**） |
 | POST | `/api/session/resume` | 恢复已有 session（还原 template_name、workspace 与模型绑定；模型记录优先于模板默认；也是被逐出会话的显式水合入口）。可选 `agent` 覆盖：**只应用 `model` / `provider` / `effort` / `tools`**——`system_prompt` / `append_system_prompt` / `max_turns` / `yolo` 一律不应用（它们会改请求前缀或会话既有限额，属创建期语义），被忽略的字段会记 warning；`provider` 只在**伴随 `model`** 时生效 |
 | POST | `/api/session/fork` | 从指定消息 uuid 分叉；新 session 含该消息及之前全部消息，继承源 backend |
 | POST | `/api/session/subscribe` | 将某 client 订阅到 session 事件（触发 SyncSession 重放；不在内存的会话先按需水合） |

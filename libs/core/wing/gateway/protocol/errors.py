@@ -39,6 +39,21 @@ HTTP_ERROR_TYPES: dict[int, str] = {
 }
 
 
+def _ascii_safe(text: str) -> str:
+    """把错误文案里 **UTF-8 编不了** 的字符转义成 ``\\udXXX``（恒可编码）。
+
+    错误文案常常回显用户输入（session id / 字段名 / 路径）。``JSONResponse`` 用
+    ``ensure_ascii=False`` 序列化，原始代理字符会让**响应本身**炸掉——一个本该
+    400 / 404 的错误就变成 500，还掩盖了真正的原因。所有错误响应都经
+    :func:`error_response` 这一个出口，因此在这里兜底一次即可。
+    """
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return text.encode("utf-8", "backslashreplace").decode("utf-8")
+    return text
+
+
 def error_response(
     status_code: int,
     detail: str | None = None,
@@ -49,7 +64,7 @@ def error_response(
     """构造统一形状（ErrorResponse）的错误响应。"""
     body = ErrorResponse(
         error=error or HTTP_ERROR_TYPES.get(status_code, "error"),
-        detail=detail,
+        detail=None if detail is None else _ascii_safe(detail),
     )
     return JSONResponse(
         status_code=status_code,

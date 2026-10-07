@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from wing.chain import TrackedList
+from wing.common.utils import require_utf8
 from wing.common.logger import log
 from wing.config import get_config
 from wing.context import ContextManager
@@ -30,6 +31,7 @@ from wing.schema import ChainNode, Message, Tool
 from wing.store import SessionMetadata, SessionStore, TagMeta
 from wing.tool_registry import ToolRef
 
+from .override import validate_override_utf8
 from .tags import TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
 
 if TYPE_CHECKING:
@@ -329,11 +331,14 @@ class Session:
         其效果必须跨重启（resume）与 fork 存活，否则系统提示词 / 工具集 /
         开关在重启后变回模板默认，请求前缀与重启前不一致（KV cache 碎裂）。
 
-        工具 ref 先做纯校验（失败时不落任何字段）；其它字段的应用不会失败。
+        # 工具 ref 先做纯校验（失败时不落任何字段）；其它字段的应用不会失败。
+        # 文本字段的可编码性同样在应用之前收口（非法 UTF-8 → 落盘就会炸）。
         不会生效的字段（``provider`` 单独给出）打 warning——**不做静默忽略**。
         """
         cm = self._context_manager
         agent = self._agent
+
+        validate_override_utf8(override)
 
         ignored = ignored_override_fields(override, resume=False)
         if ignored:
@@ -414,6 +419,7 @@ class Session:
             )
 
         # 纯校验在前（工具 ref 不可解析时不得留下"model 已切换"的半截状态）
+        validate_override_utf8(override)
         if override.tools is not None:
             validate_tool_refs(override.tools)
 
@@ -492,8 +498,9 @@ class Session:
             path: 目标路径（支持 ~ 展开）
 
         Raises:
-            ValueError: 路径不存在或不是目录
+            ValueError: 路径不可编码为 UTF-8 / 不存在 / 不是目录
         """
+        require_utf8(path, field="workspace")
         resolved = Path(path).expanduser().resolve()
         if not resolved.exists():
             raise ValueError(f"workspace path does not exist: {resolved}")
@@ -563,7 +570,12 @@ class Session:
         self._store.save_metadata(self._session_id, self._metadata)
 
     def set_title(self, title: str) -> None:
-        """设置 session 标题并持久化。"""
+        """设置 session 标题并持久化。
+
+        Raises:
+            ValueError: 标题不可编码为 UTF-8（落盘就会炸，且失败路径不留半份记录）
+        """
+        require_utf8(title, field="session title")
         self._metadata.session_name = title
         self._save_metadata()
 
@@ -913,7 +925,12 @@ class Session:
         先检查并写入第一条消息 metadata，更新最后互动时间，再转发给 agent。
         标题与 last_interaction 合并为一次 metadata 落盘（touch_last_interaction）。
         tool_call_id 非空时表示这是对某个 Ask 事件的定向回复。
+
+        Raises:
+            ValueError: 正文不可编码为 UTF-8（它在首条消息时会成为标题，也会进
+                LLM 请求体——两处都在 ``encode("utf-8")`` 处炸）
         """
+        require_utf8(content, field="message content")
         self._check_first_message_metadata(content)
         self.touch_last_interaction()
         await self._agent.post(

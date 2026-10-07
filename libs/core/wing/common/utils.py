@@ -14,6 +14,30 @@ from datetime import datetime
 SESSION_ID_MAX_BYTES = 128
 
 
+def is_utf8_encodable(value: str) -> bool:
+    """字符串能否编码为 UTF-8（孤立代理字符不能）。
+
+    "合法 JSON ≠ 合法 UTF-8"：``"\\ud800"`` 是合法 JSON 转义，pydantic 会把它
+    解成一个**孤立代理字符**，而任何落盘（``ensure_ascii=False`` 的 JSON 写入）
+    或出网序列化都会在 ``encode("utf-8")`` 处炸。所有用户输入的闸门共用这一条
+    判据（会话 id / 文本覆盖 / 工作目录 / 标题 / 标签 / 消息正文）。
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def require_utf8(value: str, *, field: str) -> str:
+    """可编码为 UTF-8 就原样返回，否则 ValueError（指出是哪个输入）。"""
+    if not is_utf8_encodable(value):
+        raise ValueError(
+            f"{field} must be UTF-8 encodable (lone surrogates are not valid UTF-8)"
+        )
+    return value
+
+
 def is_valid_session_id(value: object) -> bool:
     """判断值是否可作为 session id（不抛异常，供解析层做闸门判断）。
 
@@ -33,11 +57,9 @@ def is_valid_session_id(value: object) -> bool:
     """
     if not isinstance(value, str) or not value:
         return False
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError:
+    if not is_utf8_encodable(value):
         return False
-    if len(encoded) > SESSION_ID_MAX_BYTES:
+    if len(value.encode("utf-8")) > SESSION_ID_MAX_BYTES:
         return False
     if value.startswith("."):
         return False
