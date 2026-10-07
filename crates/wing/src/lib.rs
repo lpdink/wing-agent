@@ -4,6 +4,7 @@
 #![deny(clippy::print_stdout)]
 #![deny(clippy::print_stderr)]
 
+pub mod acp;
 pub mod app;
 pub mod cmd;
 pub mod config;

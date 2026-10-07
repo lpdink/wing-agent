@@ -1,6 +1,6 @@
 # wing-agent
 
-Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+ Rust 前端（`crates/wing/`，一个 `wing` 二进制，提供 TUI / stdio / 编排 CLI 三种形态）。
+Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+ Rust 前端（`crates/wing/`，一个 `wing` 二进制，提供 TUI / stdio / ACP / 编排 CLI 四种形态）。
 
 > **维护约定**：本文件只保留高信息密度总览。**不要随手往里加东西，除非 user 明确要求或同意**；机制细节、临时知识、踩坑记录一律写进 `docs/dev/`（见文末「深潜阅读」登记表）。
 
@@ -11,14 +11,15 @@ Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+
 │ Frontends（wing 二进制）    │             │ Gateway (FastAPI)       │               │ Runtime (Python)        │
 │ TUI（默认）· ratatui 循环   │──── WS ────►│ GatewayServer           │──── HTTP ────►│ WingRuntime（协调者）   │
 │ stdio（wing -p）· NDJSON    │             │ · routes/session(16)    │               │ ├ SessionManager        │
-│ 编排 CLI · run/wait/ps/…    │◄── 事件 ────│ · routes/system(6)      │◄──────────────│ ├ SessionStore          │
-│ 网关生命周期 · start/stop   │             │ · routes/tools · health │               │ ├ ContextManager        │
-│ GatewayClient(WS)+ApiClient │             │ · routes/ws（事件流）   │               │ ├ EventBus              │
-│ HTTP 建会话 → WS 订阅       │             │ auth（opt-in）          │               │ └ provider/（LLM 调用） │
+│ acp（wing acp）· ACP v1     │             │ · routes/system(6)      │               │ ├ SessionStore          │
+│ 编排 CLI · run/wait/ps/…    │◄── 事件 ────│ · routes/tools · health │◄──────────────│ ├ ContextManager        │
+│ 网关生命周期 · start/stop   │             │ · routes/ws（事件流）   │               │ ├ EventBus              │
+│ GatewayClient(WS)+ApiClient │             │ auth（opt-in）          │               │ └ provider/（LLM 调用） │
+│ HTTP 建会话 → WS 订阅       │             │                         │               │                         │
 └─────────────────────────────┘             └─────────────────────────┘               └─────────────────────────┘
 ```
 
-- **三种前端形态，同一个二进制**：TUI（默认，human-in-the-loop）；stdio（`wing -p`，headless，Claude Code 兼容 NDJSON——把 `wing` alias 为 `claude` 即可接入外部编排器）；编排 CLI（`wing run/wait/ps/info/tail/head/release` 后台任务，`wing start/stop/status` 网关生命周期）。
+- **四种前端形态，同一个二进制**：TUI（默认，human-in-the-loop）；stdio（`wing -p`，headless，Claude Code 兼容 NDJSON——把 `wing` alias 为 `claude` 即可接入外部编排器）；ACP（`wing acp`，stdio 上的 Agent Client Protocol v1 agent 服务端，桥接本机网关供 Zed / omnigent 等驱动）；编排 CLI（`wing run/wait/ps/info/tail/head/release` 后台任务，`wing start/stop/status` 网关生命周期）。
 - **协议**：HTTP 承载生命周期 / 查询 / 变更（24 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header / WS query param），TLS 交给反向代理。
 - **持久化**：`SessionStore` 是会话全部持久状态（metadata、混合 message/event 日志、aux）的唯一所有者；后端 `file`（默认，`~/.wing/core/sessions/`）与 `memory`（进程内）。`TrackedList` 是纯内存链拓扑引擎（uuid/parentUuid），I/O 全部委托 `MessageLog`；SQL 后端是增量实现，非架构改动。
 - **模型调用**：`provider/` 隔离协议差异（OpenAI 兼容 / Anthropic），ReAct 循环对协议无感知。
@@ -144,6 +145,13 @@ crates/wing/src/
 │   ├── release.rs                   `wing release` 逐出会话内存态（显式 eviction，幂等）
 │   ├── messages.rs                  `wing tail` / `wing head`（消息过滤，类 Unix head/tail）
 │   └── query.rs                     `wing models` / `tools` / `agents`（查询端点，表格 / JSON）
+├── acp/                             ACP 前端（wing acp，stdio 上的 Agent Client Protocol 服务端）
+│   ├── mod.rs                       入口（ensure gateway → WS 连接 → HTTP client → 服务循环）+ CLI 参数
+│   ├── agent.rs                     ACP handler 注册（initialize / new / prompt / cancel / list / load / resume / close / set_config_option）
+│   ├── model.rs                     模型 config option（值域 / 分组 / currentValue）+ 热切换 + 外部变更中继
+│   ├── session.rs                   SessionHub：会话表 · WS 事件泵与分流 · 挂载（load/resume）与回收（close）· prompt 串行化
+│   └── translate.rs                 WingEvent → ACP session/update 映射（工具卡片状态 + prompt 拍平 + 终态判定）
+│       └── replay.rs                session/load 的历史回放投影（sync_session → update 序列）
 ├── stdio/                           headless 前端（wing -p，Claude 协议）
 │   ├── mod.rs                       run_stdio + ensure_gateway_running + 参数过滤
 │   ├── ndjson.rs                    stream-json NDJSON 帧
@@ -203,7 +211,7 @@ crates/wing/src/
 - `libs/wing-sdk/wing_sdk/` — Python 远程工具宿主 SDK：`host.py`（装饰器注册 + WS 循环）、`http_client.py`、`schema.py`、`tools/`（Bash/Read/Write/Edit/Glob/Grep，workspace-bound）。
 - `assets/` — 品牌与演示素材（README 页头 banner 明暗两版、站姿 mascot SVG、社交预览 PNG、README 的 demo/速度 GIF）：SVG 由 `examples/export_logo.rs` 从欢迎屏的同一份像素网格导出，README 的 GIF 由 `scripts/demo/`（假 Provider 喂真 TUI，`make demo`）录制后挂在 `readme-assets` rolling release 上（不进 git），性能数字由 `scripts/demo/latency.py` 现量 —— 不会漂移 → [scripts/demo/README.md](scripts/demo/README.md)。
 - `libs/wing-probe/` — 确定性集成测试基础设施（假 Provider + driver + observer 断言库）：`wing_probe/`（env / provider / driver / watch / history / files / toolhost）、`scenarios/`（整机断言场景）、`tests/`（基础设施自测）。**禁止 import `wing`**（AST 门禁强制；允许 `wing_sdk`），一切经公开 HTTP / WS 协议 → [docs/dev/probe-testing.md](docs/dev/probe-testing.md)。
-- `extensions/vscode/` — VSCode 前端（第四个前端形态；TS strict + pnpm 单包四层：`src/core` 网关能力层 / `src/host` 扩展宿主 / `src/webview` React 渲染 / `src/shared` 两侧契约）。层门禁由机制强制：分 tsconfig（DOM/node 隔离）+ ESLint 分区规则 + `tests/layers` 守门测试；`make check`/`make test` 含 `check-ts`/`test-ts`，CI 有 `typescript-check` job → [docs/dev/vscode-extension.md](docs/dev/vscode-extension.md) · [extensions/vscode/README.md](extensions/vscode/README.md)。
+- `extensions/vscode/` — VSCode 前端（编辑器内的接入面，与 `wing` 二进制的四种形态并列；TS strict + pnpm 单包四层：`src/core` 网关能力层 / `src/host` 扩展宿主 / `src/webview` React 渲染 / `src/shared` 两侧契约）。层门禁由机制强制：分 tsconfig（DOM/node 隔离）+ ESLint 分区规则 + `tests/layers` 守门测试；`make check`/`make test` 含 `check-ts`/`test-ts`，CI 有 `typescript-check` job → [docs/dev/vscode-extension.md](docs/dev/vscode-extension.md) · [extensions/vscode/README.md](extensions/vscode/README.md)。
 - 测试目录：`libs/core/tests/`（后端 pytest，81 个测试文件 + `conftest.py`）、`libs/wing-sdk/tests/`。
 - 顶层 `docs/dev/` 为开发者深度文档（中文），`scripts/sync_version.py` 同步版本号。
 
@@ -217,7 +225,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 
 | 文档 | 内容 |
 |------|------|
-| [`docs/dev/architecture.md`](docs/dev/architecture.md) | 三层架构与数据流、TUI / stdio / 编排 CLI 三种前端形态、远程工具、会话生命周期与中断提交语义、事件系统与统一日志、持久化与压缩 |
+| [`docs/dev/architecture.md`](docs/dev/architecture.md) | 三层架构与数据流、TUI / stdio / ACP / 编排 CLI 四种前端形态、远程工具、会话生命周期与中断提交语义、事件系统与统一日志、持久化与压缩 |
 | [`docs/dev/backend-layout.md`](docs/dev/backend-layout.md) | 后端分层规范（`libs/core/wing/**`）：分层图与依赖方向、每包职责一句话、迁移映射（历史记录）、分层守门测试（`test_layering.py`） |
 | [`docs/dev/http-api.md`](docs/dev/http-api.md) | 完整 HTTP 端点表 + WebSocket 协议 + 鉴权 |
 | [`docs/dev/glossary.md`](docs/dev/glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |

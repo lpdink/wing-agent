@@ -768,9 +768,21 @@ impl WingEvent {
         }
     }
 
-    /// Returns the session_id from the event meta, if present.
+    /// Returns the session this event belongs to, if present.
+    ///
+    /// Most variants carry it in [`EventMeta`]; `SyncSession` has its own
+    /// **named** `session_id` field instead — serde's flatten only sees the
+    /// keys no named field consumed, so its meta never holds the id. Frontends
+    /// route the replay snapshot by this value (wing acp's `SessionHub`), so it
+    /// must read the named field. An absent key (empty string) counts as none,
+    /// matching the meta-based variants.
     pub fn session_id(&self) -> Option<&str> {
-        self.meta().and_then(|m| m.session_id.as_deref())
+        match self {
+            Self::SyncSession { session_id, .. } => {
+                (!session_id.is_empty()).then_some(session_id.as_str())
+            }
+            _ => self.meta().and_then(|m| m.session_id.as_deref()),
+        }
     }
 
     /// Returns the request_id from the event meta.
@@ -1551,6 +1563,33 @@ mod tests {
             }
             _ => panic!("expected SyncSession"),
         }
+    }
+
+    #[test]
+    fn sync_session_reports_its_own_session_id() {
+        // `SyncSession` carries `session_id` as a **named** field: serde's
+        // flatten only sees the leftover keys, so the flattened meta never
+        // holds this id. `session_id()` must read the named field — frontends
+        // route the replay snapshot by it (wing acp's `SessionHub::dispatch`).
+        let json = r#"{
+            "type": "sync_session",
+            "session_id": "s1",
+            "status": "idle",
+            "created_at": "2025-01-01T00:00:00",
+            "request_id": "req4"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.session_id(), Some("s1"));
+
+        // 缺 key → 与 meta 口径一致：None（不是空串）。
+        let bare = r#"{
+            "type": "sync_session",
+            "status": "idle",
+            "created_at": "2025-01-01T00:00:00",
+            "request_id": "req4"
+        }"#;
+        let event: WingEvent = serde_json::from_str(bare).unwrap();
+        assert_eq!(event.session_id(), None);
     }
 
     #[test]

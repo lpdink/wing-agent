@@ -154,6 +154,8 @@ Useful flags: `-m/--model`, `-r/--resume`, `--system-prompt`, `--append-system-p
 | Custom Tools | [docs/en/custom-tools.md](https://github.com/lpdink/wing-agent/blob/develop/docs/en/custom-tools.md) | [docs/zh/custom-tools.md](https://github.com/lpdink/wing-agent/blob/develop/docs/zh/custom-tools.md) |
 | Magic Commands | [docs/en/magic-commands.md](https://github.com/lpdink/wing-agent/blob/develop/docs/en/magic-commands.md) | [docs/zh/magic-commands.md](https://github.com/lpdink/wing-agent/blob/develop/docs/zh/magic-commands.md) |
 
+Client integrations (ACP): **[docs/integrations/](https://github.com/lpdink/wing-agent/blob/develop/docs/integrations/README.md)** (中文) — use wing from Zed or omnigent.
+
 ## Developing
 
 Start with **[AGENTS.md](https://github.com/lpdink/wing-agent/blob/develop/AGENTS.md)** (high-density project overview). For mechanism-level deep dives (data flow, full HTTP API, glossary), see **[docs/dev/](https://github.com/lpdink/wing-agent/tree/develop/docs/dev/)** (中文).
