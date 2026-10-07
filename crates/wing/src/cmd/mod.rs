@@ -263,6 +263,18 @@ pub enum Command {
 
     /// List available agent templates.
     Agents,
+
+    /// Serve ACP (Agent Client Protocol) on stdio — for Zed / omnigent and other
+    /// ACP clients. Bridges every ACP session to a local wing session.
+    Acp {
+        /// Agent template for new sessions (default: gateway default template).
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Initial model override for new sessions (clients can change it later).
+        #[arg(long)]
+        model: Option<String>,
+    },
 }
 
 /// Error message when the top-level `--tag` is used outside stdio mode.
@@ -385,6 +397,9 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
             Command::Models => crate::cmd::query::run_models(cli.json).await,
             Command::Tools => crate::cmd::query::run_tools(cli.json).await,
             Command::Agents => crate::cmd::query::run_agents(cli.json).await,
+            Command::Acp { agent, model } => {
+                crate::acp::run_acp(crate::acp::AcpArgs { agent, model }).await
+            }
         },
         None => {
             // Smart default: auto-start gateway if needed, then enter TUI.

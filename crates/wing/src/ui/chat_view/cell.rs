@@ -43,7 +43,16 @@ use crate::ui::cells::todo_msg::TodoMessage;
 use crate::ui::cells::tool_call::ToolCallBlock;
 
 /// A single cell in the chat view.
+///
+/// `large_enum_variant` 被显式放行：`ToolCallBlock`（352 B）比第二大的 `DiffView`
+/// （128 B）大 200 B 以上，而两个尺寸都不由本文件决定。触发点与 `wing acp` 引入的
+/// `agent-client-protocol` 依赖有关——它开启 `serde_json/preserve_order`，Cargo
+/// 的特性合并会把该特性并到本 crate 的 `serde_json` 上，`serde_json::Value`
+/// （`IndexMap` 化）随之变大 32 B，把原本压在线下的差值顶过了阈值。装箱整个
+/// `ToolCall` 变体是另一条路，但那要改掉所有构造点；这里的放行只为把 lint 恢复
+/// 到引入 ACP 依赖之前的基线。
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum ChatCell {
     /// User message.
     UserMessage(String),
