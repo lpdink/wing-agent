@@ -24,6 +24,7 @@ import argparse
 import contextlib
 import io
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -711,10 +712,12 @@ def _print_summary(
         )
     print(f"[perf] wrote {out_json}", flush=True)
     print(f"[perf] wrote {out_md}", flush=True)
+    base_worktree = shlex.quote(str(workdir / "base"))
+    scratch = shlex.quote(str(workdir))
     print(
-        f"[perf] scratch: {workdir} (base worktree: {workdir / 'base'}) — reuse it for the next "
-        f"run, or clean up with `git -C <repo> worktree remove --force {workdir / 'base'}` "
-        f"+ `rm -rf {workdir}`",
+        f"[perf] scratch: {scratch} (base worktree: {base_worktree}) — reuse it for the next "
+        f"run, or clean up with `git -C <repo> worktree remove --force {base_worktree}` "
+        f"+ `rm -rf {scratch}`",
         flush=True,
     )
 
@@ -732,16 +735,23 @@ import time
 from pathlib import Path
 
 MODE = "__MODE__"
+SUITE = "__SUITE__"
 SIDE_FIELDS = ("name", "worktree", "wing_bin", "gateway_bin", "python", "wing_home")
 #: (case, base 各轮代表值, head 各轮代表值)：构造 flat / improved / watch / regression 四档。
+#: `steady` / `skew` 的轮值刻意不对称（均值 != 中位数）：把聚合口径换成均值会翻档 / 改数。
 CASES = (
-    ("steady", (10.0, 10.0, 10.0), (10.2, 10.0, 9.8)),
+    ("steady", (10.0, 10.0, 10.0), (10.6, 10.0, 9.8)),
     ("better", (10.0, 10.0, 10.0), (9.5, 9.0, 8.5)),
     ("watch", (10.0, 10.0, 10.0), (11.4, 11.5, 11.6)),
     ("worse", (10.0, 10.0, 10.0), (13.0, 14.0, 15.0)),
+    ("skew", (10.0, 10.0, 10.0), (9.0, 9.2, 13.0)),
 )
 #: 只给 samples、不给 metrics 的 case：验证 ab 的「样本中位数」回退路径。
 SAMPLES_ONLY = "better"
+#: metrics 与样本中位数**刻意**不一致的 case（样本中位数 base=6 / head=10，metrics 一律 8）：
+#: 钉住 ab 的「metrics 优先于 samples」规则——真实 suite 应保持两者一致，这里只为判别力。
+MISMATCH = "mismatch"
+MISMATCH_SAMPLE_MEDIAN = {"base": 6.0, "head": 10.0}
 
 
 def main() -> int:
@@ -758,9 +768,8 @@ def main() -> int:
             print(f"stub: side descriptor missing {key!r}", file=sys.stderr)
             return 9
     name = str(side["name"])
-    prefix = "stub" if MODE == "ok" else "stubfail"
     payload = {
-        "suite": prefix,
+        "suite": SUITE,
         "side": name,
         "round": args.round,
         "ok": True,
@@ -779,13 +788,20 @@ def main() -> int:
         _write(Path(args.out), payload)
         print("stub: injected failure on head", file=sys.stderr)
         return 1
+    if MODE == "bad_side":
+        payload["side"] = f"{name}-wrong"
+    if MODE == "bad_round":
+        payload["round"] = args.round + 1
     for case, base_values, head_values in CASES:
         values = base_values if name == "base" else head_values
         value = float(values[min(args.round - 1, len(values) - 1)])
-        metric = f"{prefix}.{case}.median_ms"
+        metric = f"{SUITE}.{case}.median_ms"
         payload["samples"][metric] = [round(value * 0.99, 6), value, round(value * 1.01, 6)]
         if case != SAMPLES_ONLY:
             payload["metrics"][metric] = value
+    median = MISMATCH_SAMPLE_MEDIAN.get(name, 0.0)
+    payload["metrics"][f"{SUITE}.{MISMATCH}.median_ms"] = 8.0
+    payload["samples"][f"{SUITE}.{MISMATCH}.median_ms"] = [median, median, median]
     payload["meta"]["duration_s"] = round(time.monotonic() - started, 3)
     _write(Path(args.out), payload)
     return 0
@@ -799,6 +815,14 @@ def _write(path: Path, payload: dict) -> None:
 if __name__ == "__main__":
     raise SystemExit(main())
 '''
+
+#: stub 模式 → suite 名（= `suite_<name>.py` 与输出里的 `suite` 字段）。
+STUB_MODES: Mapping[str, str] = {
+    "ok": "stub",
+    "fail": "stubfail",
+    "bad_side": "stubside",
+    "bad_round": "stubround",
+}
 
 
 class _Checker:
@@ -833,12 +857,54 @@ class _Checker:
         return 0
 
 
-def _write_stub(directory: Path, mode: str) -> Path:
-    name = "suite_stub.py" if mode == "ok" else "suite_stubfail.py"
-    path = directory / name
+def _write_stub(directory: Path, mode: str, suite: str | None = None) -> Path:
+    """生成一个 stub suite（内置数据）；`suite` 覆盖名字（CLI 端到端会写成 `rust`）。"""
+    name = suite or STUB_MODES[mode]
+    path = directory / f"suite_{name}.py"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(STUB_SUITE.replace("__MODE__", mode), encoding="utf-8")
+    path.write_text(
+        STUB_SUITE.replace("__MODE__", mode).replace("__SUITE__", name),
+        encoding="utf-8",
+    )
     return path
+
+
+def _copy_harness(destination: Path) -> Path:
+    """把 harness 三件套 + thresholds 复制到临时目录：CLI 端到端自测要在隔离布局里跑。"""
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in ("ab.py", "common.py", "report.py", "thresholds.json"):
+        shutil.copy(HERE / name, destination / name)
+    return destination
+
+
+def _init_scratch_repo(root: Path) -> tuple[str, str]:
+    """建一个最小的临时 git 仓库（`Cargo.toml` + 两个提交），返回 (HEAD~1 sha, HEAD sha)。"""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+    git(root, "-c", "init.defaultBranch=main", "init", "-q")
+    git(root, "add", "Cargo.toml")
+    _git_commit(root, "first")
+    _git_commit(root, "second", allow_empty=True)
+    return (git(root, "rev-parse", "HEAD~1"), git(root, "rev-parse", "HEAD"))
+
+
+def _git_commit(repo: Path, message: str, *, allow_empty: bool = False) -> None:
+    """临时仓库里的提交（显式带身份与 gpgsign，别依赖 runner 的全局配置）。"""
+    args = [
+        "-c",
+        "user.email=perf-selftest@invalid",
+        "-c",
+        "user.name=perf-selftest",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-q",
+        "-m",
+        message,
+    ]
+    if allow_empty:
+        args.append("--allow-empty")
+    git(repo, *args)
 
 
 def _fake_side(workdir: Path, name: str) -> Side:
@@ -852,6 +918,24 @@ def _fake_side(workdir: Path, name: str) -> Side:
         python=root / ".venv" / "bin" / "python",
         wing_home=root / "wing-home",
     )
+
+
+def _read_or_empty(path: Path) -> dict[str, Any]:
+    """自测用：文件缺失 / 坏 JSON 都返回 `{}`，让断言给出可读的失败而不是崩溃。"""
+    if not path.is_file():
+        return {}
+    try:
+        payload = read_json(path)
+    except (ValueError, CommandError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _rev_of(path: Path) -> str:
+    try:
+        return git(path, "rev-parse", "HEAD")
+    except CommandError:
+        return "<not-a-worktree>"
 
 
 def _synth(
@@ -890,7 +974,8 @@ def _parse_order(text: str) -> list[tuple[str, str, int]]:
 def run_selftest() -> int:
     checker = _Checker()
     print(
-        "[selftest] offline · no cargo/uv · no worktrees · stub suites use built-in data",
+        "[selftest] offline · no cargo/uv · built-in stub data · a scratch git repo in a temp "
+        "dir (this worktree is never touched)",
         flush=True,
     )
 
@@ -904,6 +989,9 @@ def run_selftest() -> int:
         (0.0, "flat"),
         (3.0, "flat"),
         (-5.9, "flat"),
+        (5.999, "flat"),  # |Δ| == noise 的紧邻下侧
+        (6.0, "watch"),  # 契约：|Δ| == noise_pct 不再算 flat（劣化侧 → watch）
+        (-6.0, "improved"),  # 同上，变好侧 → improved
         (-10.0, "improved"),
         (15.0, "watch"),
         (19.9, "watch"),
@@ -965,6 +1053,20 @@ def run_selftest() -> int:
                 "tui.display.lag_p50_us",
                 "weird.metric",
             )
+        ),
+    )
+    checker.check(
+        "fmt_value.ladder",
+        report_render.fmt_value(0.0) == "0"
+        and report_render.fmt_value(14.5) == "14.5"
+        and report_render.fmt_value(1000.0) == "1,000"
+        and report_render.fmt_value(0.98) == "0.98"
+        and report_render.fmt_value(0.000123) == "0.000123"
+        and report_render.fmt_value(0.0000123) == "1.23e-05"  # 不许塌成 "0"
+        and report_render.fmt_value(None) == "—",
+        " / ".join(
+            report_render.fmt_value(value)
+            for value in (14.5, 0.98, 0.000123, 0.0000123, None)
         ),
     )
 
@@ -1038,6 +1140,8 @@ def run_selftest() -> int:
         stub_dir = workdir / "stub"
         _write_stub(stub_dir, "ok")
         _write_stub(stub_dir, "fail")
+        _write_stub(stub_dir, "bad_side")
+        _write_stub(stub_dir, "bad_round")
         raw_dir = workdir / "raw"
         invoker = SubprocessInvoker(
             script_dir=stub_dir, side_json=side_json, raw_dir=raw_dir, quick=False
@@ -1087,7 +1191,7 @@ def run_selftest() -> int:
             ),
         )
 
-        # ④ 聚合：中位数 / delta 符号 / 四档判定 / 样本回退
+        # ④ 聚合：中位数（不是均值）/ delta 符号 / 四档判定 / 样本回退 / metrics 优先
         comparisons, notes = build_comparisons(results, thresholds)
         by_metric = {str(entry["metric"]): entry for entry in comparisons}
         checker.check(
@@ -1098,6 +1202,8 @@ def run_selftest() -> int:
                 "stub.better.median_ms",
                 "stub.watch.median_ms",
                 "stub.worse.median_ms",
+                "stub.skew.median_ms",
+                "stub.mismatch.median_ms",
             },
             str(sorted(by_metric)),
         )
@@ -1105,16 +1211,34 @@ def run_selftest() -> int:
             "aggregate.medians",
             by_metric["stub.worse.median_ms"]["head"] == [13.0, 14.0, 15.0]
             and by_metric["stub.worse.median_ms"]["head_median"] == 14.0
-            and by_metric["stub.steady.median_ms"]["head_median"] == 10.0
             and by_metric["stub.steady.median_ms"]["base"] == [10.0, 10.0, 10.0],
             str(by_metric["stub.worse.median_ms"]),
+        )
+        # 轮值刻意不对称：steady 中位数 10.0（均值 10.13）、skew 中位数 9.2（均值 10.4，Δ 会翻档）。
+        checker.check(
+            "aggregate.median_not_mean",
+            by_metric["stub.steady.median_ms"]["head"] == [10.6, 10.0, 9.8]
+            and by_metric["stub.steady.median_ms"]["head_median"] == 10.0
+            and by_metric["stub.skew.median_ms"]["head_median"] == 9.2
+            and abs(float(by_metric["stub.skew.median_ms"]["delta_pct"]) + 8.0) < 1e-6,
+            f"{by_metric['stub.steady.median_ms']['head_median']} / "
+            f"{by_metric['stub.skew.median_ms']['head_median']}",
         )
         checker.check(
             "aggregate.delta_sign",
             abs(float(by_metric["stub.better.median_ms"]["delta_pct"]) + 10.0) < 1e-6
             and abs(float(by_metric["stub.worse.median_ms"]["delta_pct"]) - 40.0)
             < 1e-6,
-            f"{by_metric['stub.better.median_ms']['delta_pct']} / {by_metric['stub.worse.median_ms']['delta_pct']}",
+            f"{by_metric['stub.better.median_ms']['delta_pct']} / "
+            f"{by_metric['stub.worse.median_ms']['delta_pct']}",
+        )
+        # metrics 与样本中位数刻意不一致（8.0 vs 6.0 / 10.0）：优先 samples 会把 flat 翻成 regression。
+        checker.check(
+            "aggregate.metrics_over_samples",
+            by_metric["stub.mismatch.median_ms"]["base"] == [8.0, 8.0, 8.0]
+            and by_metric["stub.mismatch.median_ms"]["head"] == [8.0, 8.0, 8.0]
+            and by_metric["stub.mismatch.median_ms"]["verdict"] == "flat",
+            str(by_metric["stub.mismatch.median_ms"]),
         )
         verdicts = {metric: entry["verdict"] for metric, entry in by_metric.items()}
         checker.check(
@@ -1125,6 +1249,8 @@ def run_selftest() -> int:
                 "stub.better.median_ms": "improved",
                 "stub.watch.median_ms": "watch",
                 "stub.worse.median_ms": "regression",
+                "stub.skew.median_ms": "improved",
+                "stub.mismatch.median_ms": "flat",
             },
             str(verdicts),
         )
@@ -1149,7 +1275,13 @@ def run_selftest() -> int:
             prepared=False,
             stub=True,
         )
-        payload = build_report(ctx, comparisons, failures, notes, 1.0)
+        payload = build_report(
+            ctx,
+            comparisons,
+            failures,
+            [*notes, "head worktree 有未提交改动：head 数字对应工作区"],
+            1.0,
+        )
         checker.check("report.exit_code.ok", exit_code(payload) == 0)
         checker.check(
             "report.shape",
@@ -1197,11 +1329,17 @@ def run_selftest() -> int:
         )
         checker.check("report.marker", md.startswith("<!-- wing-perf -->"))
         checker.check(
+            "report.notes_visible",
+            "未提交改动" in md and "> ⚠️" in md,
+            "",
+        )
+        checker.check(
             "report.conclusion",
             "**结论**" in md
             and "1 项回归" in md
-            and "1 项改善" in md
-            and "1 项持平" in md,
+            and "1 项关注" in md
+            and "2 项改善" in md
+            and "2 项持平" in md,
             md.splitlines()[3] if len(md.splitlines()) > 3 else "",
         )
         checker.check(
@@ -1251,6 +1389,109 @@ def run_selftest() -> int:
             "report.merge",
             proc.returncode == 0 and merged_md.count("`stub.worse.median_ms`") == 2,
             f"rc={proc.returncode} count={merged_md.count('`stub.worse.median_ms`')}",
+        )
+
+        # ⑥b 不一致合并（03 的 report job 若拿到不同 sha / 档位的产物）：告警必须可见、表头不得说谎
+        other_json = workdir / "ab-other.json"
+        write_json(
+            other_json,
+            build_report(
+                replace(
+                    ctx, rounds=2, quick=True, base_sha="d" * 40, head_sha="e" * 40
+                ),
+                comparisons,
+                [],
+                [],
+                2.0,
+            ),
+        )
+        merged_bad = report_render.merge_reports(
+            [read_json(ab_json), read_json(other_json)]
+        )
+        checker.check(
+            "report.merge_flags",
+            merged_bad["meta"]["sha_mismatch"] is True
+            and merged_bad["meta"]["shape_mismatch"] is True
+            and any("不可直接比较" in note for note in merged_bad["meta"]["notes"]),
+            str(merged_bad["meta"]),
+        )
+        merged_bad_path = workdir / "merged-inconsistent.md"
+        proc = _run(
+            [
+                sys.executable,
+                str(HERE / "report.py"),
+                "--json",
+                str(ab_json),
+                str(other_json),
+                "--out-md",
+                str(merged_bad_path),
+            ]
+        )
+        merged_bad_md = (
+            merged_bad_path.read_text(encoding="utf-8")
+            if merged_bad_path.is_file()
+            else ""
+        )
+        header_line = next(
+            (line for line in merged_bad_md.splitlines() if line.startswith("`base` ")),
+            "",
+        )
+        checker.check(
+            "report.merge_inconsistent",
+            proc.returncode == 0
+            and "不可直接比较" in merged_bad_md
+            and "sha 不一致" in header_line
+            and "轮数 / 档位不一致" in header_line
+            and "轮交错 A/B" not in merged_bad_md
+            and "quick 档" not in merged_bad_md,
+            f"rc={proc.returncode} header={header_line}",
+        )
+
+        # ⑥c suite 输出一致性守卫：suite/side/round 与请求不符 → Failure（不静默接受）
+        raw_guard = workdir / "raw-guard"
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log):
+            _, failures_bad_side = orchestrate(
+                suites=("stubside",),
+                sides=sides,
+                rounds=1,
+                invoker=SubprocessInvoker(
+                    script_dir=stub_dir,
+                    side_json=side_json,
+                    raw_dir=raw_guard,
+                    quick=False,
+                ),
+                prepare=lambda suite: [],
+            )
+            _, failures_bad_round = orchestrate(
+                suites=("stubround",),
+                sides=sides,
+                rounds=1,
+                invoker=SubprocessInvoker(
+                    script_dir=stub_dir,
+                    side_json=side_json,
+                    raw_dir=raw_guard,
+                    quick=False,
+                ),
+                prepare=lambda suite: [],
+            )
+        checker.check(
+            "guard.side_mismatch",
+            len(failures_bad_side) == 2
+            and all(
+                "output mismatch" in failure.error and "side=" in failure.error
+                for failure in failures_bad_side
+            ),
+            str([failure.error for failure in failures_bad_side]),
+        )
+        checker.check(
+            "guard.round_mismatch",
+            len(failures_bad_round) == 2
+            and all(
+                "output mismatch" in failure.error and "round=" in failure.error
+                for failure in failures_bad_round
+            ),
+            str([failure.error for failure in failures_bad_round]),
         )
 
         # ⑦ 失败路径：suite 失败 → failures[] + 退出码非 0 + 其余测量继续
@@ -1468,20 +1709,28 @@ def run_selftest() -> int:
             by_e["stub.shared.median_ms"]["verdict"] == "flat",
         )
 
-        # ⑪ 校准语义：两侧同 rev（读本地 repo，只读、不建 worktree）
+        # ⑪ 校准语义：两侧同 rev。用 HEAD~1（≠ HEAD）构造——实现里删掉"校准钉住 head"就会红。
         try:
-            revs = resolve_revs(REPO_ROOT, "HEAD", calibrate=True)
+            revs_head = resolve_revs(REPO_ROOT, "HEAD", calibrate=False)
+            revs_cal = resolve_revs(REPO_ROOT, "HEAD~1", calibrate=True)
+            revs_off = resolve_revs(REPO_ROOT, "HEAD~1", calibrate=False)
         except CommandError as exc:
-            checker.skip("calibrate.same_rev", f"not a git checkout: {exc}")
+            checker.skip("calibrate.revs", f"no git checkout with HEAD~1: {exc}")
         else:
             checker.check(
-                "calibrate.same_rev",
-                revs.base_sha == revs.head_sha and len(revs.head_sha) >= 7,
-                f"base={revs.base_sha[:12]} head={revs.head_sha[:12]}",
+                "calibrate.revs",
+                revs_cal.base_sha == revs_cal.head_sha == revs_head.head_sha
+                and revs_cal.base_ref == "HEAD~1"
+                and revs_off.base_sha != revs_off.head_sha,
+                f"cal={revs_cal.base_sha[:8]} head={revs_cal.head_sha[:8]} "
+                f"off={revs_off.base_sha[:8]}",
             )
             payload_cal = build_report(
                 replace(
-                    ctx, calibrate=True, base_sha=revs.base_sha, head_sha=revs.head_sha
+                    ctx,
+                    calibrate=True,
+                    base_sha=revs_cal.base_sha,
+                    head_sha=revs_cal.head_sha,
                 ),
                 [],
                 [],
@@ -1489,14 +1738,128 @@ def run_selftest() -> int:
                 0.0,
             )
             checker.check(
-                "calibrate.flag",
-                payload_cal["calibrate"] is True
-                and payload_cal["base_sha"] == payload_cal["head_sha"],
-            )
-            checker.check(
                 "calibrate.note",
                 any("calibrate" in note for note in payload_cal["meta"]["notes"]),
                 str(payload_cal["meta"]["notes"]),
+            )
+
+        # ⑪b CLI 端到端（隔离布局：临时 git 仓库 + harness 副本 + stub 的 suite_rust.py）：
+        #     `--calibrate` 是否真的透传到两侧 rev、材料化的 base worktree 是否落在同一 rev。
+        try:
+            scratch_repo = workdir / "cli-repo"
+            prev_sha, scratch_head = _init_scratch_repo(scratch_repo)
+        except CommandError as exc:
+            checker.skip("calibrate.cli", f"cannot create a scratch git repo: {exc}")
+        else:
+            harness = _copy_harness(workdir / "cli-harness")
+            _write_stub(harness, "ok", suite="rust")
+            # 路径故意带空格：顺带钉住"清理提示可复制执行"（shlex.quote）与含空格 workdir。
+            cal_workdir = workdir / "cli-cal dir"
+            cal_json = workdir / "cli-cal.json"
+            proc = _run(
+                [
+                    sys.executable,
+                    str(harness / "ab.py"),
+                    "--repo",
+                    str(scratch_repo),
+                    "--base-ref",
+                    "HEAD~1",
+                    "--calibrate",
+                    "--suites",
+                    "rust",
+                    "--rounds",
+                    "1",
+                    "--no-prepare",
+                    "--workdir",
+                    str(cal_workdir),
+                    "--out-json",
+                    str(cal_json),
+                    "--out-md",
+                    str(workdir / "cli-cal.md"),
+                ]
+            )
+            cal = _read_or_empty(cal_json)
+            checker.check(
+                "calibrate.cli.same_rev",
+                proc.returncode == 0
+                and cal.get("calibrate") is True
+                and cal.get("base_sha") == cal.get("head_sha") == scratch_head
+                and cal.get("base_ref") == "HEAD~1",
+                f"rc={proc.returncode} base={str(cal.get('base_sha'))[:8]} "
+                f"head={str(cal.get('head_sha'))[:8]} {proc.stderr.strip()[-200:]}",
+            )
+            checker.check(
+                "calibrate.cli.worktree",
+                _rev_of(cal_workdir / "base") == scratch_head,
+                _rev_of(cal_workdir / "base")[:12],
+            )
+            order_cli = _parse_order(proc.stdout)
+            checker.check(
+                "cli.interleaved",
+                order_cli == [("rust", "base", 1), ("rust", "head", 1)],
+                str(order_cli),
+            )
+            quoted = shlex.quote(
+                str(cal_workdir.resolve())
+            )  # run_ab 打印 resolve() 后的路径
+            checker.check(
+                "cli.space_path_hint",
+                quoted in proc.stdout,  # 去掉 shlex.quote 就会红
+                f"quoted={quoted} in stdout={quoted in proc.stdout}",
+            )
+            checker.check(
+                "calibrate.cli.notes",
+                any(
+                    "calibrate" in note
+                    for note in (cal.get("meta") or {}).get("notes", [])
+                ),
+                str((cal.get("meta") or {}).get("notes")),
+            )
+            checker.check(
+                "cli.success_path",
+                proc.returncode == 0
+                and len(cal.get("comparisons") or []) == 6
+                and not cal.get("failures"),
+                f"{len(cal.get('comparisons') or [])} comparisons / "
+                f"{len(cal.get('failures') or [])} failures",
+            )
+            off_workdir = workdir / "cli-off"
+            off_json = workdir / "cli-off.json"
+            proc = _run(
+                [
+                    sys.executable,
+                    str(harness / "ab.py"),
+                    "--repo",
+                    str(scratch_repo),
+                    "--base-ref",
+                    "HEAD~1",
+                    "--suites",
+                    "rust",
+                    "--rounds",
+                    "1",
+                    "--no-prepare",
+                    "--workdir",
+                    str(off_workdir),
+                    "--out-json",
+                    str(off_json),
+                    "--out-md",
+                    str(workdir / "cli-off.md"),
+                ]
+            )
+            off = _read_or_empty(off_json)
+            checker.check(
+                "calibrate.cli.off",
+                proc.returncode == 0
+                and off.get("calibrate") is False
+                and off.get("base_sha") == prev_sha
+                and off.get("head_sha") == scratch_head,
+                f"rc={proc.returncode} base={str(off.get('base_sha'))[:8]} "
+                f"prev={prev_sha[:8]} {proc.stderr.strip()[-200:]}",
+            )
+            checker.check(
+                "calibrate.cli.worktree_off",
+                _rev_of(off_workdir / "base") == prev_sha,
+                _rev_of(off_workdir / "base")[:12],
             )
 
         # ⑫ CLI 契约：--help 参数齐全 / 未知 suite / 缺 --base-ref
@@ -1546,6 +1909,22 @@ def run_selftest() -> int:
         checker.check(
             "cli.missing_base_ref",
             proc.returncode != 0 and "--base-ref" in text,
+            f"rc={proc.returncode} {text.strip()[-200:]}",
+        )
+        proc = _run(
+            [
+                sys.executable,
+                str(HERE / "report.py"),
+                "--json",
+                str(workdir / "does-not-exist.json"),
+                "--out-md",
+                str(workdir / "never.md"),
+            ]
+        )
+        text = proc.stdout + proc.stderr
+        checker.check(
+            "cli.report_input_error",
+            proc.returncode == 2 and "cannot read" in text and "Traceback" not in text,
             f"rc={proc.returncode} {text.strip()[-200:]}",
         )
 
