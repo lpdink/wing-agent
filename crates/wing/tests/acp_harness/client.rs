@@ -58,7 +58,7 @@ pub enum Record {
     Permission(Value),
     /// 一条 `elicitation/create` 请求（原始 JSON）。
     Elicitation(Value),
-    /// 前台插入的顺序锚（见模块文档）。
+    /// 前台插入的记账锚：只表达「某事已发生」，**不**表达相对顺序（见模块文档）。
     Marker(&'static str),
 }
 
@@ -242,7 +242,7 @@ pub enum PermissionReply {
     SelectAfter { option_id: String, delay: Duration },
 }
 
-/// [`PermissionReply::SelectAfter`] 发出迟到应答时打的顺序锚。
+/// [`PermissionReply::SelectAfter`] 发出迟到应答时打的记账锚（「应答确实已发出」）。
 pub const LATE_PERMISSION_MARKER: &str = "permission-answered-late";
 
 /// 脚本化的 permission 应答队列。

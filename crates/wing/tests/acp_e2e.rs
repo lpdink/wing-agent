@@ -1010,8 +1010,11 @@ async fn session_list_maps_filters_and_paginates() {
 // B9 session/load（回放） + session/resume（不回放）
 // ============================================================
 
-/// `session/load` 的帧数：回放 9 帧（文本/思考/工具卡片/收口/diff/标题/用量）
-/// + 命令列表。见 `frame_order_is_pinned_on_the_wire` 的同序断言。
+/// 本用例里 `session/load` 的帧数：回放 9 帧（文本 / 思考 / 工具卡片 / 收口 / diff /
+/// 标题 / 用量）+ 命令列表。
+///
+/// `frame_order_is_pinned_on_the_wire` 钉的是同一**性质**（回放先于应答），但它用的是
+/// 更小的 fixture。
 const REPLAY_FRAME_COUNT: usize = 10;
 
 #[tokio::test(flavor = "multi_thread")]
