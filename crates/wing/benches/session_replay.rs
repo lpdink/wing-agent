@@ -13,7 +13,10 @@
 //!    (`projection.rs:630-661` → `188-218`): append to an existing cell, else
 //!    `ToolCallBlock::new_streaming` + push (never final on this path);
 //! 5. fact events → `replay_events` (`projection.rs:665`);
-//! 6. the first frame: `CellContext` + `ChatViewWidget` into
+//! 6. the copy-candidate refresh that closes the replay →
+//!    `chat.collect_assistant_messages()` (`projection.rs:692` →
+//!    `commands.rs:306-308`; the App stores the result in its popup cache);
+//! 7. the first frame: `CellContext` + `ChatViewWidget` into
 //!    `scrollbar::content_area(band)` (`app/mod.rs:579-589`).
 //!
 //! ```text
@@ -31,11 +34,23 @@
 //!
 //! The payload is synthetic and deterministic — a pure function of `(SEED, n)`
 //! (see [`payload`]): no fixture files, no gateway, no `~/.wing`. The first
-//! measured pass prints a phase breakdown to stderr (stdout is denied).
+//! **executed** pass of each case prints a phase breakdown to stderr: it runs
+//! during warm-up, so its numbers are a cold first execution, not the medians
+//! criterion reports (3000-message cases land within ~1% of the median; the
+//! small ones come out several times slower). The payload fingerprint line
+//! (bytes + FNV-1a) is what two worktrees compare to prove they measured the
+//! same content.
+//!
+//! Tuning knobs are **not** uniform: `sample_size(10)` and a 1 s warm-up are
+//! pinned by the groups below, so `--sample-size` / `--warm-up-time` on the
+//! command line are ignored (and criterion rejects any sample size < 10
+//! outright). What really drives a run is the `<filter>` and
+//! `--measurement-time`.
 //!
 //! Run:    cargo bench --bench session_replay
-//! Quick:  cargo bench --bench session_replay -- --sample-size 10 --warm-up-time 1 --measurement-time 2
+//! CI:     cargo bench --bench session_replay -- --measurement-time 2            (all 9)
 //! Filter: cargo bench --bench session_replay -- 'replay/1000'
+//!         cargo bench --bench session_replay -- '^(replay|frame)/'
 
 use std::cell::Cell;
 use std::time::Duration;
@@ -580,11 +595,12 @@ struct Phases {
     uncommitted: Duration,
     tools: Duration,
     events: Duration,
+    copies: Duration,
 }
 
 impl Phases {
     fn total(&self) -> Duration {
-        self.messages + self.uncommitted + self.tools + self.events
+        self.messages + self.uncommitted + self.tools + self.events + self.copies
     }
 }
 
@@ -633,18 +649,35 @@ fn replay(chat: &mut ChatView, payload: &Payload) -> Phases {
     let _ = replay_events(chat, &payload.events);
     let events = t.elapsed();
 
+    // 6. The copy-candidate refresh that closes the production replay
+    //    (`projection.rs:692`): the App stores the result in its popup cache
+    //    (`commands.rs:306-308`), which is a field assignment here — the
+    //    O(cells) scan below is the whole cost. Black-boxed so the optimizer
+    //    cannot drop the work an App would really do.
+    let t = Instant::now();
+    std::hint::black_box(chat.collect_assistant_messages());
+    let copies = t.elapsed();
+
     Phases {
         messages,
         uncommitted,
         tools,
         events,
+        copies,
     }
 }
 
 /// One frame of the chat band, the way `App::draw` renders it
 /// (`app/mod.rs:579-589`): the widget into `content_area` of the band, with the
-/// production `CellContext` (no Ctrl+O override, images off — a session with no
-/// picture anchors renders with exactly these options).
+/// production `CellContext` — stock palette / layout (what the default config
+/// yields), no Ctrl+O override, and `ImageOpts::off()`.
+///
+/// The image options are the one deliberate simplification: with the picture
+/// lane enabled, production passes `ImageOpts::anchor(workspace, known, cell)`
+/// even for a session with no pictures (`app/images.rs:531-555`), and `off()`
+/// only when the lane is disabled. This payload carries no image or link
+/// syntax, so the two paths differ by one empty-link-list iteration per cell —
+/// equivalent work, simpler fixture.
 fn draw_frame(
     view: &mut ChatView,
     buf: &mut Buffer,
@@ -729,21 +762,26 @@ fn bench_scroll(c: &mut Criterion) {
         let mut buf = Buffer::empty(band());
         // The session is already open: replayed and drawn once, so the caches
         // are the ones a user has after the first frame. Scrolling is what
-        // they repeat from there.
+        // they repeat from there — the production PageDown entry,
+        // `page_down(chat_height - 2, chat_height)` (`app/modal.rs:447`),
+        // restarted from the top at the bottom edge (Ctrl+Home,
+        // `jump_top`), so one full pass walks the whole session.
         replay(&mut view, &payload);
         draw_frame(&mut view, &mut buf, &palette, &layout);
         let span = view.content_height().max(1);
         let reported = Cell::new(false);
         group.bench_function(n.to_string(), |b| {
-            let mut offset = 0usize;
             b.iter(|| {
-                view.scroll_to(offset, HEIGHT as usize);
+                if view.is_at_bottom() {
+                    view.jump_top();
+                }
+                view.page_down(HEIGHT as usize - 2, HEIGHT as usize);
                 draw_frame(&mut view, &mut buf, &palette, &layout);
-                let next = offset + HEIGHT as usize;
-                offset = if next >= span { 0 } else { next };
                 if !reported.replace(true) {
                     write_stderr(&format!(
-                        "session_replay: scroll/{n}: content {span} rows, one page per iteration\n"
+                        "session_replay: scroll/{n}: content {span} rows, one PageDown \
+                         ({page} rows) + frame per iteration\n",
+                        page = HEIGHT as usize - 2,
                     ));
                 }
             });
@@ -752,7 +790,7 @@ fn bench_scroll(c: &mut Criterion) {
     group.finish();
 }
 
-// ── stderr report (first measured pass per case) ────────────────
+// ── stderr report (first executed pass per case, during warm-up) ──
 
 /// The percentages of the phases against the assembly total.
 fn share(part: Duration, total: Duration) -> f64 {
@@ -767,7 +805,8 @@ fn report_replay(n: usize, payload: &Payload, phases: &Phases, view: &ChatView) 
     write_stderr(&format!(
         "session_replay: replay/{n}: {} messages ({:.1} MiB json), {} cells | \
          {:.3}ms = messages {:.1}% ({:.3}ms) + uncommitted {:.1}% ({:.3}ms) + \
-         tools {:.1}% ({:.3}ms) + events {:.1}% ({:.3}ms) | {:.2}µs/message\n",
+         tools {:.1}% ({:.3}ms) + events {:.1}% ({:.3}ms) + copies {:.1}% ({:.3}ms) | \
+         {:.2}µs/message\n",
         payload.messages.len(),
         payload.encoded_json().len() as f64 / (1024.0 * 1024.0),
         view.len(),
@@ -780,6 +819,8 @@ fn report_replay(n: usize, payload: &Payload, phases: &Phases, view: &ChatView) 
         phases.tools.as_secs_f64() * 1e3,
         share(phases.events, total),
         phases.events.as_secs_f64() * 1e3,
+        share(phases.copies, total),
+        phases.copies.as_secs_f64() * 1e3,
         total.as_secs_f64() * 1e6 / payload.messages.len() as f64,
     ));
 }
@@ -805,31 +846,48 @@ fn write_stderr(text: &str) {
     let _ = std::io::stderr().write_all(text.as_bytes());
 }
 
+/// FNV-1a (64-bit) — the payload's cross-side fingerprint, no dependency.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    hash
+}
+
 /// One entry point for the whole suite, so the determinism guard runs exactly
 /// once per process (also under a `-- <filter>` run).
 fn benches(c: &mut Criterion) {
     // Payload identity is a contract: a bench that measured different content
-    // on every run could not be compared against a baseline. The generator is
-    // one code path (the sizes differ only in turn count), so pinning the
-    // smallest payload pins the pump; a failure here means the content drifted.
-    let first = payload(SIZES[0]);
-    let again = payload(SIZES[0]);
-    assert_eq!(
-        first.messages.len(),
-        SIZES[0],
-        "a payload must carry exactly n messages"
-    );
-    assert_eq!(
-        first.encoded_json(),
-        again.encoded_json(),
-        "payload generation is not deterministic"
-    );
-    let bytes = first.encoded_json().len();
-    write_stderr(&format!(
-        "session_replay: payload seed {SEED:#x} verified for n={} ({bytes} bytes of json); \
-         sizes {:?}\n",
-        SIZES[0], SIZES
-    ));
+    // on every run could not be compared against a baseline, and perf-ci
+    // compares two worktrees side by side. Every size is generated twice and
+    // asserted byte-identical, the fill of the last two replay steps is
+    // asserted, and each fingerprint is printed for the sides to compare.
+    for n in SIZES {
+        let first = payload(n);
+        let again = payload(n);
+        assert_eq!(
+            first.messages.len(),
+            n,
+            "a payload must carry exactly n messages"
+        );
+        assert!(
+            !first.uncommitted_tools.is_empty() && !first.events.is_empty(),
+            "the in-flight tail must give replay steps 4 and 5 real work (n={n})"
+        );
+        let json = first.encoded_json();
+        assert_eq!(
+            json,
+            again.encoded_json(),
+            "payload generation is not deterministic (n={n})"
+        );
+        write_stderr(&format!(
+            "session_replay: payload n={n} seed {SEED:#x}: {} bytes, fnv1a {:016x}\n",
+            json.len(),
+            fnv1a(json.as_bytes()),
+        ));
+    }
 
     bench_replay(c);
     bench_frame(c);
