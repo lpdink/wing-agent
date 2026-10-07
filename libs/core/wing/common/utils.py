@@ -14,6 +14,15 @@ from datetime import datetime
 SESSION_ID_MAX_BYTES = 128
 
 
+class InvalidInputError(ValueError):
+    """请求携带了**无法表示**的输入（当前唯一来源：不可编码为 UTF-8 的文本）。
+
+    继承 ``ValueError``：既有的"非法输入 → 400"捕获点（create / update / tag）
+    不需要改动；需要把 400 的口径钉死的地方（如 send 路由只该为"正文非法"回
+    400，不该吞掉链上未来出现的其它 ``ValueError``）可以精确捕获本类型。
+    """
+
+
 def is_utf8_encodable(value: str) -> bool:
     """字符串能否编码为 UTF-8（孤立代理字符不能）。
 
@@ -30,9 +39,9 @@ def is_utf8_encodable(value: str) -> bool:
 
 
 def require_utf8(value: str, *, field: str) -> str:
-    """可编码为 UTF-8 就原样返回，否则 ValueError（指出是哪个输入）。"""
+    """可编码为 UTF-8 就原样返回，否则 ``InvalidInputError``（指出是哪个输入）。"""
     if not is_utf8_encodable(value):
-        raise ValueError(
+        raise InvalidInputError(
             f"{field} must be UTF-8 encodable (lone surrogates are not valid UTF-8)"
         )
     return value

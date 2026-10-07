@@ -2213,3 +2213,111 @@ class TestRealRuntimeGates:
         )
         assert resp.status_code == 404, resp.text
         assert "\\ud800" in resp.json()["detail"], resp.text
+
+    # ── S1（终轮复审）：update 的 model / reasoning_effort 也必须先过闸门 ──
+
+    def test_update_model_surrogate_is_400_without_poisoning(self, real_client):
+        """毒化路径：内存态先被写脏 → `/info` 500、后续写全失败（修复前）。"""
+        client, sessions_root = real_client
+        created = client.post("/api/session/create", json={"session_id": "U-1"})
+        assert created.status_code == 200, created.text
+
+        # model / provider 必须成对给出（既有约定）——provider 用测试配置里的合法值
+        bad = client.post(
+            "/api/session/update",
+            content=(
+                b'{"session_id": "U-1", "model": "\\ud800", "provider": "default"}'
+            ),
+            headers={"content-type": "application/json"},
+        )
+        assert bad.status_code == 400, bad.text
+        assert "model must be UTF-8 encodable" in bad.json()["detail"]
+
+        # 未被毒化：读端点与后续写操作全部照常，metadata 无痕
+        assert (
+            client.get("/api/session/info", params={"session_id": "U-1"}).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/api/session/update", json={"session_id": "U-1", "title": "ok"}
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/api/session/send", json={"session_id": "U-1", "content": "hi"}
+            ).status_code
+            == 200
+        )
+        metadata = (sessions_root / "U-1" / "metadata.json").read_text()
+        assert "model_name" not in metadata, metadata
+
+    def test_update_reasoning_effort_surrogate_is_400_without_poisoning(
+        self, real_client
+    ):
+        """对照组：另一条同形路径（provider 级开关）同样是"拒绝在 mutation 之前"。"""
+        client, _ = real_client
+        created = client.post("/api/session/create", json={"session_id": "U-2"})
+        assert created.status_code == 200, created.text
+
+        bad = client.post(
+            "/api/session/update",
+            content=b'{"session_id": "U-2", "reasoning_effort": "\\ud800"}',
+            headers={"content-type": "application/json"},
+        )
+        assert bad.status_code == 400, bad.text
+        assert "reasoning_effort must be UTF-8 encodable" in bad.json()["detail"]
+
+        assert (
+            client.get("/api/session/info", params={"session_id": "U-2"}).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/api/session/update", json={"session_id": "U-2", "title": "ok"}
+            ).status_code
+            == 200
+        )
+
+
+class TestSendRouteErrorMapping:
+    """`send` 路由的错误映射口径：**只有输入非法**才回 400。
+
+    终轮复审 N1：把 `runtime.post` 抛出的任何 `ValueError` 都映射成 400 太宽——
+    链上将来出现的内部 `ValueError`（队列关闭、prompt 命令语义错误）会被报成
+    "客户端的错"。现在只认 `InvalidInputError`（文本闸门专用类型），其它
+    `ValueError` 走 500（带着栈进日志）。
+    """
+
+    def test_invalid_input_error_maps_to_400(self, client, mock_runtime):
+        from wing.common.utils import InvalidInputError
+
+        mock_runtime.post = AsyncMock(
+            side_effect=InvalidInputError("message content must be UTF-8 encodable")
+        )
+        resp = client.post(
+            "/api/session/send", json={"session_id": "sid-1", "content": "hi"}
+        )
+        assert resp.status_code == 400, resp.text
+        assert "must be UTF-8 encodable" in resp.json()["detail"]
+
+    def test_other_value_error_is_not_blamed_on_the_client(self, client, mock_runtime):
+        """内部 ValueError **不该**被折成 400。
+
+        TestClient 默认把未捕获异常重新抛出（`raise_server_exceptions=True`），
+        因此这里断言它**穿透**路由——生产里由 ASGI 层转成 500（带栈进日志），
+        关键是它不会被当成"客户端的错"。
+        """
+        mock_runtime.post = AsyncMock(side_effect=ValueError("inbox closed"))
+        with pytest.raises(ValueError, match="inbox closed"):
+            client.post(
+                "/api/session/send", json={"session_id": "sid-1", "content": "hi"}
+            )
+
+    def test_missing_session_is_still_404(self, client, mock_runtime):
+        mock_runtime.ensure_loaded.side_effect = LookupError("nope")
+        resp = client.post(
+            "/api/session/send", json={"session_id": "sid-1", "content": "hi"}
+        )
+        assert resp.status_code == 404, resp.text

@@ -8,6 +8,8 @@ Rust client（crates/wing-api-client）依赖同一份形状。
 
 from __future__ import annotations
 
+from typing import get_args
+
 from pydantic import BaseModel, Field
 
 from wing.common.utils import is_utf8_encodable
@@ -40,8 +42,21 @@ class AgentOverride(BaseModel):
     )
 
 
-#: 覆盖里的字符串字段（可编码性闸门的覆盖面）。
-_TEXT_FIELDS = ("model", "provider", "system_prompt", "append_system_prompt", "effort")
+def _text_field_names() -> tuple[str, ...]:
+    """从模型定义派生"字符串字段"（新增字段自动纳入闸门，不再手写清单）。
+
+    ``list[str]`` 字段（``tools``）**不**在此列：它的元素要逐个查（错误信息要能
+    指到 ``tools[i]``），由 :func:`non_utf8_override_fields` 单独一遍。
+    """
+    names: list[str] = []
+    for name, field in AgentOverride.model_fields.items():
+        if str in (field.annotation, *get_args(field.annotation)):
+            names.append(name)
+    return tuple(names)
+
+
+#: 覆盖里的字符串字段（可编码性闸门的覆盖面，按模型定义派生）。
+_TEXT_FIELDS = _text_field_names()
 
 
 def non_utf8_override_fields(override: AgentOverride) -> list[str]:

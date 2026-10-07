@@ -631,6 +631,17 @@ class Session:
         # 纯校验：任何字段非法在 mutation 之前退出，避免部分应用
         if tools is not None:
             validate_tool_refs(tools)
+        # 文本字段的可编码性：model / provider / effort 先写内存态、再落 metadata 与
+        # LLM 请求体——非 UTF-8（孤立代理字符）会让 `_persist_model` 在
+        # `encode("utf-8")` 处抛错，而这时**内存态已经被污染**（此后 `/info` 序列化
+        # 就炸、该会话所有写操作全失败）。与 set_title / set_workspace 同形：拦在
+        # mutation 之前，不可编码的输入等价于"没发生过"。
+        if model is not None:
+            require_utf8(model, field="model")
+        if provider_name is not None:
+            require_utf8(provider_name, field="provider")
+        if reasoning_effort is not None:
+            require_utf8(reasoning_effort, field="reasoning_effort")
 
         if template is not None:
             await self.switch_template(template)
@@ -669,13 +680,15 @@ class Session:
 
         落盘是 best-effort（与 _persist_model 同口径）：live 状态已经生效，
         把一次磁盘写失败变成 500 只会制造新的前后端错位；最坏退化是本次
-        进程内正确、重启后跟随模板/配置默认。
+        进程内正确、重启后跟随模板/配置默认。**不可编码为 UTF-8 的值**
+        （hook 注入的文本 / 配置里的非法转义）与"写不进去"同价：写盘必然
+        失败，没有重试余地。
         """
         for name, value in fields.items():
             setattr(self._metadata, name, value)
         try:
             self._save_metadata()
-        except OSError as e:
+        except (OSError, UnicodeEncodeError) as e:
             log.warning(f"Session {self._session_id}: state not persisted ({e})")
 
     def reapply_provider_options(self) -> None:
@@ -746,13 +759,14 @@ class Session:
         落盘是 best-effort：写失败（disk full / 只读挂载 / 权限）只打 warning，
         不让 OSError 穿出去——切换已经生效，把请求变成 500 只会制造一次新的
         前后端错位（agent 在新模型上跑、前端以为失败）。最坏退化成本次进程内
-        正确、重启后回模板默认。
+        正确、重启后回模板默认。不可编码为 UTF-8 的模型名（配置里的非法转义 /
+        远端工具宿主注册的名字）同样是"写不进去"，一并按 best-effort 处理。
         """
         self._metadata.model_name = self.agent.model
         self._metadata.provider_name = self.agent.model_provider.name
         try:
             self._save_metadata()
-        except OSError as e:
+        except (OSError, UnicodeEncodeError) as e:
             log.warning(
                 f"Session {self._session_id}: model record not persisted ({e}); "
                 "switch stays in effect for this process"

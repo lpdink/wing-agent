@@ -8,11 +8,46 @@
     顶层 `wing/__init__` 已无 import 副作用（06 步骤）。
 """
 
+import logging
 import os
 import tempfile
+from collections.abc import Iterator
 from unittest.mock import patch
 
 import pytest
+
+
+class _CapturingHandler(logging.Handler):
+    """捕获 ``wing`` logger 的消息（``propagate=False``，caplog 抓不到）。"""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+@pytest.fixture
+def wing_warnings() -> Iterator[list[str]]:
+    """抓 ``wing`` logger 的 WARNING 消息。
+
+    ``wing/common/logger.py`` 在导入时就把 ``propagate`` 关掉（日志只经显式装配
+    的文件 handler 出去），因此 pytest 的 ``caplog``（挂在 root 上）看不到任何一条
+    后端日志——实测 ``caplog.text`` 为空串。这里直接把捕获 handler 挂到 ``wing``
+    logger 上：同一条通道，不依赖 cwd / 配置文件。
+    """
+    logger = logging.getLogger("wing")
+    handler = _CapturingHandler()
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+    try:
+        yield handler.messages
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+
 
 # 模块级：整个测试 session 共享一个临时目录
 _TEST_SESSIONS_DIR = tempfile.mkdtemp(prefix="wing-test-sessions-")
