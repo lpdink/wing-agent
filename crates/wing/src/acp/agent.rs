@@ -9,9 +9,10 @@
 //! | `session/prompt` | request | 拍平 prompt → WS 投递 → 事件流转 update → 终态收口 |
 //! | `session/cancel` | notification | → HTTP interrupt；在途轮次等 `interrupted` 事件回 `stopReason: "cancelled"` |
 //!
-//! **后续步骤在这里追加**（03 ask / 04 model / 05 sessions）：`set_config_option`、
+//! **后续步骤在这里追加**（04 model / 05 sessions）：`set_config_option`、
 //! `list`/`load`/`resume`/`close` 都是同形的 `on_receive_request` 注册；handler 里
 //! 可以拿 `hub`（`Arc<SessionHub>`）与 handler 自带的 `cx: ConnectionTo<Client>`。
+//! （03 的 Ask 映射不注册新方法：它在 `session/prompt` 的轮次循环里分流，见 [`super::ask`]。）
 //!
 //! 纪律：SDK 的 handler 在 dispatch loop 内执行并阻塞后续消息，因此**任何会等外部
 //! 事件的活都必须 `cx.spawn(...)` 出去**（`session/new` 的 HTTP 往返、整轮 prompt 都是）。
@@ -43,6 +44,7 @@ use agent_client_protocol::schema::v1::SessionUpdate;
 use agent_client_protocol::schema::v1::StopReason;
 
 use super::AcpArgs;
+use super::ask;
 use super::session::HubError;
 use super::session::NewSessionParams;
 use super::session::SessionHub;
@@ -337,21 +339,29 @@ async fn run_turn(
             );
         };
 
-        // Ask 占位：立即应答以免轮次卡死（详见 `translate::ask_placeholder_answer`）。
-        // 03 步替换：Bash 确认 → session/request_permission；AskUserQuestion →
-        // elicitation/create（能力门控），回答同样经 WS ClientRequest 回写。
-        if let (WingEvent::Ask { tool_call_id, .. }, Some(answer)) =
-            (&event, translate::ask_placeholder_answer(&event))
-        {
-            tracing::warn!(
-                session_id = %session_key,
-                tool_call_id = %tool_call_id,
-                "acp: ask event placeholder-answered (03 step replaces this)"
-            );
-            if !tool_call_id.is_empty()
-                && let Err(err) = turn.answer_ask(tool_call_id, &answer).await
-            {
-                tracing::warn!(error = %err, "acp: failed to answer ask");
+        // Ask 事件：按形态分流到 permission / elicitation / 回退三径（见 `ask` 模块），
+        // 答案经 WS `ClientRequest{content, tool_call_id}` 定向 resolve feedback waiter。
+        //
+        // 就地 await（见 `ask` 模块与 design D5）：同一会话至多一个在途 agent→client
+        // 请求，后续 ask 留在会话事件缓冲里排队（与 TUI 的 ask 面板 FIFO 同语义）。
+        // 等待期间后端轮次被 feedback waiter 阻塞，不会有事件堆积。
+        if let WingEvent::Ask { tool_call_id, .. } = &event {
+            match ask::resolve(hub, cx, &session_id, &event).await {
+                Some(outcome) => {
+                    if outcome.elicitation_unsupported {
+                        // elicitation 被客户端回 `-32601`：进程级粘性降级，
+                        // 此后所有 ask 直接走回退路径。
+                        hub.downgrade_elicitation();
+                    }
+                    if let Err(err) = turn.answer_ask(tool_call_id, &outcome.answer).await {
+                        tracing::warn!(error = %err, "acp: failed to answer ask");
+                    }
+                }
+                // 不可应答（空 tool_call_id —— `ask::resolve` 已记 warn）。
+                None => tracing::warn!(
+                    session_id = %session_key,
+                    "acp: ask event left unanswered"
+                ),
             }
         }
 

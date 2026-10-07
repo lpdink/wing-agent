@@ -22,16 +22,18 @@
 //! | 模块 | 职责 |
 //! |------|------|
 //! | [`agent`] | ACP handler 注册（initialize / session/new / session/prompt / session/cancel） |
+//! | [`ask`] | Ask 事件 → ACP 交互面（permission / elicitation / 回退，答案格式契约） |
 //! | [`session`] | `SessionHub`：会话表、WS 事件泵与分流、出站队列、prompt 串行化 |
 //! | [`translate`] | `WingEvent` → ACP `session/update` 的映射（纯函数） |
 //!
-//! 后续步骤（03 ask / 04 model / 05 sessions）在本模块的接口上追加：
+//! 后续步骤（04 model / 05 sessions）在本模块的接口上追加：
 //! handler 追加点见 [`agent::serve`]，事件映射追加点见 [`translate::ToolCards::updates_for`]
 //! 与 [`translate::turn_end`]，会话操作追加点见 [`session::SessionHub`]。
 // stderr 承载诊断（`wing error: …`），stdout 已被 ACP 协议占用。
 #![allow(clippy::print_stderr)]
 
 pub mod agent;
+pub mod ask;
 pub mod session;
 pub mod translate;
 

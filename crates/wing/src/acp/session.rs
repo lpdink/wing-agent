@@ -228,11 +228,11 @@ impl SessionEntry {
 
 /// 会话表 + 出站队列 + WS 事件泵的持有者。
 ///
-/// 公开面是后续步骤（03 ask / 04 model / 05 sessions）的接入点：
+/// 公开面是后续步骤（04 model / 05 sessions）的接入点：
 ///
 /// | 步骤 | 用到的入口 |
 /// |------|-----------|
-/// | 03 | [`SessionHub::answer_ask`]（应答 Ask）、[`SessionHub::client_capabilities`]（elicitation 门控） |
+/// | 03 | [`SessionHub::elicitation_form_supported`] / [`SessionHub::downgrade_elicitation`]（Ask 能力门控）、[`SessionHub::answer_ask`]（应答 Ask） |
 /// | 04 | [`SessionHub::client_capabilities`]、[`Turn::updates_for`]，模型切换本身走 `http.update_session`（05 步的会话操作同址） |
 /// | 05 | [`SessionHub::session_ids`] / [`SessionHub::knows`] / [`SessionHub::http`-级操作由 handler 直接持有 hub 完成] |
 pub struct SessionHub {
@@ -262,6 +262,9 @@ struct HubState {
     client_capabilities: ClientCapabilities,
     /// `initialize` 声明的客户端实现（日志用）。
     client_info: Option<Implementation>,
+    /// `elicitation/create` 被客户端回 `-32601`（粘性）：本进程内不再发 elicitation
+    /// （见 [`SessionHub::downgrade_elicitation`]）。
+    elicitation_unsupported: bool,
 }
 
 impl SessionHub {
@@ -328,6 +331,35 @@ impl SessionHub {
             .expect("hub mutex poisoned")
             .client_info
             .clone()
+    }
+
+    /// 客户端是否可用 `elicitation/create`（form 模式）—— 03 步 Ask 的门控。
+    ///
+    /// 判据 = `initialize` 声明了 `clientCapabilities.elicitation.form`，且本进程尚未
+    /// 因 `-32601` 降级（[`SessionHub::downgrade_elicitation`]）。
+    pub fn elicitation_form_supported(&self) -> bool {
+        let state = self.state.lock().expect("hub mutex poisoned");
+        !state.elicitation_unsupported
+            && state
+                .client_capabilities
+                .elicitation
+                .as_ref()
+                .is_some_and(|elicitation| elicitation.form.is_some())
+    }
+
+    /// `elicitation/create` 被客户端回 `-32601`：**粘性**降级（本进程内不再发 elicitation，
+    /// Ask 一律走回退路径）。
+    ///
+    /// 一个进程只服务一个 ACP 连接，所以「进程级 = 连接级 = 客户端级」；粘性是刻意的——
+    /// 客户端不实现该方法就不会中途学会（omnigent 即此类）。
+    pub fn downgrade_elicitation(&self) {
+        let mut state = self.state.lock().expect("hub mutex poisoned");
+        if !state.elicitation_unsupported {
+            state.elicitation_unsupported = true;
+            tracing::info!(
+                "acp: client replied method-not-found to elicitation/create; falling back to per-question permissions"
+            );
+        }
     }
 
     /// 建会话：HTTP create + subscribe + 入表；返回 wing 会话 id（原样作 ACP sessionId）。
@@ -824,6 +856,8 @@ impl Drop for Turn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::v1::ElicitationCapabilities;
+    use agent_client_protocol::schema::v1::ElicitationFormCapabilities;
     use serde_json::json;
 
     fn event(session_id: &str) -> WingEvent {
@@ -1039,6 +1073,46 @@ mod tests {
         assert_eq!(
             HubError::Disconnected.to_string(),
             "gateway connection lost"
+        );
+    }
+
+    /// 03：elicitation 门控 = 声明能力 + 未被 `-32601` 降级（降级粘性）。
+    #[test]
+    fn elicitation_capability_is_gated_and_sticky() {
+        let (hub, _outbound_rx) = test_hub();
+        // 未 initialize / 未声明 → 不支持（默认保守）。
+        assert!(!hub.elicitation_form_supported());
+        hub.register_client(ClientCapabilities::new(), None);
+        assert!(!hub.elicitation_form_supported());
+
+        // 声明 form 能力 → 支持（omnigent 那种「声明了 elicitation 但没有 form」也算不支持）。
+        hub.register_client(
+            ClientCapabilities::new().elicitation(ElicitationCapabilities::new()),
+            None,
+        );
+        assert!(!hub.elicitation_form_supported());
+        hub.register_client(
+            ClientCapabilities::new().elicitation(
+                ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
+            ),
+            None,
+        );
+        assert!(hub.elicitation_form_supported());
+
+        // `-32601` 降级：粘性——即便能力仍在声明里也不再试探；重复降级幂等。
+        hub.downgrade_elicitation();
+        assert!(!hub.elicitation_form_supported());
+        hub.downgrade_elicitation();
+        assert!(!hub.elicitation_form_supported());
+        hub.register_client(
+            ClientCapabilities::new().elicitation(
+                ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
+            ),
+            None,
+        );
+        assert!(
+            !hub.elicitation_form_supported(),
+            "降级是进程级粘性状态，重新 initialize 不该复活它"
         );
     }
 }

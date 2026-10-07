@@ -8,7 +8,9 @@
 //!
 //! - [`ToolCards::apply`]：**有状态**映射（状态跨轮次存活于会话上）。工具卡片的
 //!   「只创建一次」去重、`diff_content` 的锚定、content 的累积都要它。
-//! - [`turn_end`] / [`flatten_prompt`] / [`ask_placeholder_answer`]：无状态纯函数。
+//! - [`turn_end`] / [`flatten_prompt`]：无状态纯函数。
+//!
+//! Ask 事件在 `ask` 模块分流（permission / elicitation / 回退），本模块对它**不产帧**。
 //!
 //! 映射规格（与 01 步任务书的表格逐行对应）：
 //!
@@ -72,9 +74,6 @@ const MAX_TRACKED_CALLS: usize = 512;
 /// 上限取 64（远大于人工可读的规模），到顶后列表冻结——稳定前缀比「追赶最新」更省
 /// 流量，也不会有内容抖动。
 const MAX_DIFFS_PER_CARD: usize = 64;
-
-/// Ask 占位应答用的取消哨兵（= 后端 `ASK_CANCEL_TOKEN`）。
-pub const ASK_CANCEL_SENTINEL: &str = "__wing_ask_cancelled__";
 
 // ============================================================
 // 工具卡片（会话级状态）
@@ -510,37 +509,6 @@ fn content_block_name(block: &ContentBlock) -> &'static str {
         ContentBlock::ResourceLink(_) => "resource_link",
         ContentBlock::Resource(_) => "resource",
         _ => "unknown",
-    }
-}
-
-// ============================================================
-// Ask 占位应答
-// ============================================================
-
-/// Ask 事件的占位应答内容；`None` = 不是 Ask 事件。
-///
-/// **03 步替换**：正式实现里 Bash 危险命令确认映射为 `session/request_permission`
-/// （y=allow_once / yolo=allow_always / n=reject_once），AskUserQuestion 映射为
-/// `elicitation/create` 表单（能力门控），回答经 WS `ClientRequest` 回写 feedback waiter。
-///
-/// 占位必须**按 ask 形态**选择应答，否则会造出占位本身要防的「轮次卡死」：
-///
-/// - Bash 确认（`required=true` + `choices=[y,n,yolo]`）：后端 `_parse_feedback` 只认
-///   y/n/yolo，收到取消哨兵会**重新提问**（继续等下一条应答，直到 6000s 超时）——
-///   故回 `"n"`（拒绝执行，语义与 03 步的 reject_once 一致）；
-/// - AskUserQuestion / legacy 单问题：哨兵被后端翻译成 “User cancelled the questions.
-///   Proceed with your best judgment.” —— 正常收口。
-pub fn ask_placeholder_answer(event: &WingEvent) -> Option<String> {
-    let WingEvent::Ask {
-        choices, required, ..
-    } = event
-    else {
-        return None;
-    };
-    if *required && !choices.is_empty() {
-        Some("n".to_string())
-    } else {
-        Some(ASK_CANCEL_SENTINEL.to_string())
     }
 }
 
@@ -1228,7 +1196,7 @@ mod tests {
                    "session_id": "s1", "request_id": "r"}),
             json!({"type": "tool_result_turn", "tool_use_id": "t1", "tool_name": "Bash",
                    "content": "x", "created_at": "c", "session_id": "s1", "request_id": "r"}),
-            // ask 本身不产帧：占位应答在 agent 层做（03 步替换为 permission/elicitation）。
+            // ask 本身不产帧：分流与应答在 `ask` 模块（permission / elicitation / 回退）。
             json!({"type": "ask", "tool_call_id": "tc_ask", "question": "?", "required": true,
                    "created_at": "c", "session_id": "s1", "request_id": "r"}),
             json!({"type": "from_the_future", "created_at": "c", "session_id": "s1",
@@ -1375,55 +1343,5 @@ mod tests {
             flatten_prompt(&[link("file:///tmp")]),
             Some("/tmp".to_string())
         );
-    }
-
-    // ---- Ask 占位 ----
-
-    #[test]
-    fn ask_placeholder_picks_the_sentinel_by_shape() {
-        // Bash 危险命令确认：required + choices → 拒绝（哨兵会被后端当成无效选项反复追问）。
-        let bash = event(json!({
-            "type": "ask",
-            "tool_call_id": "tc_bash",
-            "question": "⚠️ Dangerous command detected",
-            "choices": ["y", "n", "yolo"],
-            "required": true,
-            "created_at": "c",
-            "session_id": "s1",
-            "request_id": "r",
-        }));
-        assert_eq!(ask_placeholder_answer(&bash).as_deref(), Some("n"));
-
-        // AskUserQuestion（多问题）→ 取消哨兵。
-        let questions = event(json!({
-            "type": "ask",
-            "tool_call_id": "tc_ask",
-            "questions": [{"id": "q1", "question": "?", "options": []}],
-            "created_at": "c",
-            "session_id": "s1",
-            "request_id": "r",
-        }));
-        assert_eq!(
-            ask_placeholder_answer(&questions).as_deref(),
-            Some(ASK_CANCEL_SENTINEL)
-        );
-
-        // required 但没有 choices → 哨兵（自由文本提问）。
-        let free = event(json!({
-            "type": "ask",
-            "tool_call_id": "tc_free",
-            "question": "什么名字？",
-            "required": true,
-            "created_at": "c",
-            "session_id": "s1",
-            "request_id": "r",
-        }));
-        assert_eq!(
-            ask_placeholder_answer(&free).as_deref(),
-            Some(ASK_CANCEL_SENTINEL)
-        );
-
-        // 非 Ask 事件 → None。
-        assert_eq!(ask_placeholder_answer(&text_event("hi")), None);
     }
 }
