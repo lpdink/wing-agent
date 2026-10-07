@@ -313,6 +313,7 @@ fn bash_token(outcome: &RequestPermissionOutcome) -> String {
     match selected.option_id.0.as_ref() {
         BASH_TOKEN_Y => BASH_TOKEN_Y.to_string(),
         BASH_TOKEN_YOLO => BASH_TOKEN_YOLO.to_string(),
+        BASH_TOKEN_N => BASH_TOKEN_N.to_string(),
         option_id => {
             tracing::debug!(
                 option_id,
