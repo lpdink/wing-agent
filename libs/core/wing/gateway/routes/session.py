@@ -44,6 +44,7 @@ from wing.gateway.protocol import (
     UpdateSessionResponse,
 )
 from wing.gateway.projection import build_session_branches, build_session_info
+from wing.common.utils import InvalidInputError
 from wing.common.logger import log
 
 if TYPE_CHECKING:
@@ -89,6 +90,7 @@ async def create_session(
             agent_override=body.agent,
             backend=body.backend,
             tags=body.tags,
+            session_id=body.session_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -109,11 +111,19 @@ async def resume_session(
     body: ResumeSessionRequest,
     request: Request,
 ) -> ResumeSessionResponse:
+    """恢复既有会话；可选 `agent` 覆盖只应用 model/provider/effort/tools 子集。
+
+    覆盖的参数校验不过（工具引用无法解析）→ 400；会话不存在 → 404。
+    """
     server = _get_server(request)
     try:
-        session = server.runtime.resume_session(body.session_id)
+        session = server.runtime.resume_session(
+            body.session_id, agent_override=body.agent
+        )
     except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return ResumeSessionResponse(
         session_id=session.session_id,
         template_name=session.template_name,
@@ -207,12 +217,18 @@ async def send_message(
     except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
 
-    await server.runtime.post(
-        content=body.content,
-        request_id=request_id,
-        session_id=body.session_id,
-        tool_call_id=body.tool_call_id,
-    )
+    try:
+        await server.runtime.post(
+            content=body.content,
+            request_id=request_id,
+            session_id=body.session_id,
+            tool_call_id=body.tool_call_id,
+        )
+    except InvalidInputError as e:
+        # 正文非法（不可编码为 UTF-8）：输入问题 → 400，不是 500。
+        # 只认这一种——链上将来出现的其它 ValueError 是内部故障，不该被报成
+        # "客户端的错"（500 让它带着栈进日志，而不是骗调用方去改请求）。
+        raise HTTPException(status_code=400, detail=str(e))
     return SendMessageResponse(ok=True, request_id=request_id)
 
 

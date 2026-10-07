@@ -33,6 +33,18 @@ from wing.store.base import (
 )
 
 
+def _is_same_directory(candidate: Path, target: Path) -> bool:
+    """两个路径是否指向同一个目录（同 inode）；任一侧不可达即 False。
+
+    仅用于探测文件系统别名（大小写 / Unicode 归一化不敏感）：请求路径解析成功
+    但目录项名字对不上时，逐个目录项与它比对。
+    """
+    try:
+        return os.path.samefile(candidate, target)
+    except OSError:
+        return False
+
+
 class FileMessageLog(MessageLog):
     """文件消息日志：history.jsonl（append+fsync）。"""
 
@@ -145,10 +157,11 @@ class FileSessionStore(SessionStore):
     def _session_dir(self, session_id: str) -> Path:
         """会话目录。**所有文件路径拼接的唯一入口**。
 
-        拼接前先过 session id 格式闸门（``validate_session_id``）：id 是路径
-        组件，不合规的值（``../`` / 绝对路径 / 任意字符串）必须在此失败——
-        这是防路径穿越的最终防线（会话层的解析闸门是第一道；两道都过才可能
-        触碰文件系统）。
+        拼接前先过 session id 闸门（``validate_session_id``）：id 是路径
+        组件，不合规的值（``../`` / 绝对路径 / 控制字符 / 点开头 / 超长）
+        必须在此失败——这是防路径穿越的最终防线（会话层的解析闸门是第一道；
+        两道都过才可能触碰文件系统）。id 由会话层确定（默认后端自生成，
+        编排方可经 create-or-adopt 指定），闸门只防穿越与卫生。
         """
         safe_id = validate_session_id(session_id)
         return self._root / safe_id
@@ -232,6 +245,70 @@ class FileSessionStore(SessionStore):
             session_dir / FileMessageLog._HISTORY
         ).exists()
 
+    def resolve_stored_id(self, session_id: str) -> str | None:
+        """该 id 在磁盘上对应的**目录名**；目录不存在返回 None。
+
+        不能只 stat 请求路径：文件系统可能对**大小写**（macOS APFS 默认 /
+        Windows NTFS）或 **Unicode 归一化**不敏感——``team-a`` 会解析到
+        ``Team-A`` 的目录，名字却与请求值不同。只认请求字符串会让两个内存会话
+        共用一份 history.jsonl（静默数据混合），因此这里**逐字比对目录项**并返回
+        真实名字。大小写敏感的 FS（Linux ext4/btrfs）上没有别名，逐字命中即返回。
+
+        判据是**目录存在**（不要求"是会话"）：目录已存在但还没有 metadata /
+        history（失败的 create 残留、手工目录）时，新建也必须沿用真实目录名，
+        否则同一个目录会被两个 id 写。
+        """
+        safe_id = validate_session_id(session_id)
+        real = self._on_disk_name(self._root / safe_id)
+        # 别名名同样要过闸门（否则会给内存索引塞进一个闸门拒绝的键）
+        return real if real is not None and is_valid_session_id(real) else None
+
+    def claim_session_id(self, session_id: str) -> str:
+        """新建会话的键认领：``mkdir`` 的成败把"别名"变成确定事实（见接口说明）。
+
+        - 目录已在（逐字或别名）→ **真实目录名**（别名在 mkdir 之前就被看见，
+          不必靠 EEXIST 反推）；
+        - 目录不在 → ``mkdir``：成功 ⇒ 这个名字在本文件系统上还是空闲的（Linux 的
+          敏感 FS 上两个大小写变体是两个目录），逐字使用；``FileExistsError`` ⇒
+          路径被别的东西占住（同名文件 / 竞态）→ 尽力取真实名字；
+        - 其它 ``OSError``（只读挂载 / 权限）→ 退回逐字使用，让真正的写路径去报错
+          （不把 create 打得过早死掉，错误面收在写盘处）。
+
+        建出来的空目录是"会话正在被创建"的正常前奏：空目录不算会话（见
+        ``exists``），但**必须存在**——后面来的大小写变体正是靠它才看得见别名。
+        """
+        safe_id = validate_session_id(session_id)
+        existing = self.resolve_stored_id(safe_id)
+        if existing is not None:
+            return existing
+        target = self._root / safe_id
+        try:
+            target.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            real = self._on_disk_name(target)
+            return real if real is not None and is_valid_session_id(real) else safe_id
+        except OSError as e:
+            log.warning(f"session dir '{target}' not created here: {e}")
+            return safe_id
+        return safe_id
+
+    def _on_disk_name(self, target: Path) -> str | None:
+        """（内部）``target`` 解析到的**真实目录名**，逐字优先；不是目录返回 None。
+
+        逐字命中是常见情形（大小写敏感的 FS 上唯一可能的情形），也是唯一不必
+        探测别名的情形；逐字目录项不在时用 ``samefile`` 找别名——别名即"请求路径
+        能被解析、但磁盘上的名字是另一个"（大小写 / Unicode 归一化不敏感）。
+        """
+        if not target.is_dir():
+            return None
+        alias: str | None = None
+        for entry in self._root.iterdir():
+            if entry.name == target.name:
+                return target.name
+            if alias is None and _is_same_directory(entry, target):
+                alias = entry.name
+        return alias
+
     def list_summaries(self) -> list[SessionSummary]:
         """列举 session（存在性判据：history.jsonl **或** 带标签的 metadata）。
 
@@ -239,8 +316,11 @@ class FileSessionStore(SessionStore):
         上层据此让 ``ps --tag`` / ``tag --list`` 立即找得到；是否最终进列表
         由 SessionManager 决定（无名且无标的条目会被它过滤）。
 
-        目录名不契合 session id 格式的一律跳过：它们不是合法的会话（也无法
-        经任何 API 寻址——解析闸门同样拒绝），可能只是 root 里的杂物。
+        目录名不过 session id 闸门的一律跳过：它们不是会话（也无法经任何
+        API 寻址——解析闸门同样拒绝），可能只是 root 里的杂物，或是存储
+        自己的点命名空间（``.media`` 媒体池）。闸门只防穿越与卫生，因此
+        "点开头 / 含 ``..`` / 控制字符 / 超长"之外的名字都可能是合法会话
+        （编排方可自带 UUID 等任意 id）。
         标题回退从 history.jsonl 提取第一条 user 消息；history.jsonl 不可读
         时仍列出该 session（first_user_message 为 None）。
         遗留的 newest.json 文件不读不删（快照已废弃）。

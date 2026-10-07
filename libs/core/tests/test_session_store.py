@@ -260,16 +260,20 @@ class TestExists:
     def test_no_fuzzy_matching(self, store: SessionStore):
         """精确匹配：前缀 / 子串 / 通配符都不解析。
 
-        存储层的 id 契约是**格式闸门**：不合规的输入（前缀 / 子串 / 通配符
-        / 任意字符串）在入口即 ValueError，绝不进路径拼接——"不匹配"与
-        "非法输入"是两种拒绝（前者 False、后者 raise）；网络侧统一表现为
-        404（会话层解析闸门先把非法 id 折成"不存在"，见 SessionManager）。
+        存储层的 id 契约是**闸门**：真正危险的值（穿越 / 点开头 / 控制字符 /
+        超长）在入口即 ValueError，绝不进路径拼接；而任意**安全**字符串
+        （id 不透明——编排方可自带 UUID 等）一律合法，只是"不存在" → False。
+        "不匹配"与"非法输入"是两种拒绝（前者 False、后者 raise）；网络侧
+        统一表现为 404（会话层解析闸门先把非法 id 折成"不存在"）。
         """
         self._seed(store, "20260101-111111-aaaaaaaa", "20260202-222222-bbbbbbbb")
-        for malformed in ("20260101", "bbbbbbbb", "20260101*aaaaaaaa", "zzz"):
+        for malformed in ("../20260101", "20260101/111111", ".hidden", "a..b", "\x00"):
             with pytest.raises(ValueError):
                 store.exists(malformed)
-        # 合规但不存在 → False（精确匹配，不做前缀解析）
+        # 合法（含非既定时态形态：前缀 / 子串 / 通配符 / 任意编排方 id）但不存在
+        # → False（精确匹配，不做前缀解析）
+        for safe in ("20260101", "bbbbbbbb", "20260101*aaaaaaaa", "zzz"):
+            assert store.exists(safe) is False
         assert store.exists("20260101-111111-bbbbbbbb") is False
 
     def test_empty_session_not_exists(self, store: SessionStore):
@@ -278,6 +282,77 @@ class TestExists:
         assert store.exists(_sid("empty")) is False
         store.open_log(_sid("empty")).append([{"role": "user", "content": "x"}])
         assert store.exists(_sid("empty")) is True
+
+
+class TestIdResolution:
+    """`resolve_stored_id`（纯解析）与 `claim_session_id`（新建认领）。
+
+    两者存在的理由都是"键可能与请求值不同"——大小写 / Unicode 归一化不敏感的文件
+    系统上，``team-a`` 与 ``Team-A`` 是同一份日志；会话层只有拿到**真实键**才能保证
+    "内存键 == 存储键"（否则两个 Session 会各写一份链到同一目录）。
+    """
+
+    def test_resolve_missing_is_none(self, store: SessionStore):
+        assert store.resolve_stored_id(_sid("nope")) is None
+
+    def test_resolve_existing_returns_the_key(self, store: SessionStore):
+        sid = _sid("present")
+        store.save_metadata(sid, SessionMetadata(session_name="x"))
+        assert store.resolve_stored_id(sid) == sid
+
+    def test_resolve_invalid_id_raises(self, store: SessionStore):
+        """闸门先于一切：脏值不触达存储（同其它入口）。"""
+        for bad in ("../escape", ".media", "", "x" * 129, "\ud800"):
+            with pytest.raises(ValueError):
+                store.resolve_stored_id(bad)
+            with pytest.raises(ValueError):
+                store.claim_session_id(bad)
+
+    def test_claim_is_verbatim_when_free(self, store: SessionStore):
+        """未被占用的 id：认领 = 请求值（两后端一致，id 逐字保留）。"""
+        assert store.claim_session_id("Team-A") == "Team-A"
+        assert store.claim_session_id("Team-A") == "Team-A"  # 幂等可重入
+
+    def test_memory_keys_stay_verbatim(self):
+        """memory 后端没有文件系统别名：两个大小写变体是两个键（不得误伤）。"""
+        store = MemorySessionStore()
+        assert store.claim_session_id("Team-A") == "Team-A"
+        assert store.claim_session_id("team-a") == "team-a"
+        assert store.resolve_stored_id("Team-A") is None  # 还没写过痕迹
+
+    def test_file_claim_reuses_an_existing_directory_name(self, tmp_path: Path):
+        """目录已存在（残留 / 手工）：认领沿用真实目录名，不另建同路径变体。"""
+        store = FileSessionStore(tmp_path / "sessions")
+        (tmp_path / "sessions" / "Team-Z").mkdir(parents=True)
+        assert store.claim_session_id("Team-Z") == "Team-Z"
+        assert store.resolve_stored_id("Player") is None
+        assert sorted(p.name for p in (tmp_path / "sessions").iterdir()) == ["Team-Z"]
+
+    def test_file_resolve_sees_alias_on_this_filesystem(self, tmp_path: Path):
+        """真实 FS 上的别名探针：不敏感（macOS/Windows）→ 返回真名；敏感 → None。"""
+        root = tmp_path / "sessions"
+        store = FileSessionStore(root)
+        (root / "Team-A").mkdir(parents=True)
+        variant = Path(str(root / "team-a"))
+        if variant.is_dir():  # 大小写不敏感的文件系统
+            assert store.resolve_stored_id("team-a") == "Team-A"
+        else:
+            assert store.resolve_stored_id("team-a") is None
+
+    def test_file_claim_arbitrates_aliases_via_mkdir(self, tmp_path: Path):
+        """`mkdir` 成败决定键：不敏感 FS 上变体拿到同一键，敏感 FS 上各用各的。"""
+        root = tmp_path / "sessions"
+        root.mkdir(parents=True)
+        (root / "Team-A").mkdir()
+        variant_is_alias = (root / "team-a").is_dir()
+        store = FileSessionStore(root)
+        key = store.claim_session_id("team-a")
+        if variant_is_alias:
+            assert key == "Team-A"
+            assert sorted(p.name for p in root.iterdir()) == ["Team-A"]
+        else:
+            assert key == "team-a"
+            assert sorted(p.name for p in root.iterdir()) == ["Team-A", "team-a"]
 
 
 class TestListSummaries:

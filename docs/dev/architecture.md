@@ -56,7 +56,28 @@ wing -p "列出文件" --output-format json      # json：单个 result 对象
 wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 ```
 
-`stream-json` 消息类型：`system/init`（tools/model/cwd）· `assistant`（content blocks + usage）· `user`（tool_result blocks）· `result`（终止信号：累计 usage / turns / 耗时）。支持 SDK 双向 stdin 握手（`--input-format stream-json`）。**未识别的 `--xxx` 参数被静默忽略**，确保外部编排层传递的 Claude 专有参数（如 `--permission-mode`）不报错。
+`stream-json` 消息类型：`system/init`（tools/model/cwd）· `assistant`（content blocks + usage）· `user`（tool_result blocks）· `result`（终止信号：累计 usage / turns / 耗时）· `stream_event`（`--include-partial-messages` 下的增量帧，见下）。支持 SDK 双向 stdin 握手（`--input-format stream-json`）。**未识别的 `--xxx` 参数被静默忽略**，确保外部编排层传递的 Claude 专有参数（如 `--permission-mode`）不报错。
+
+**流式增量**（`--include-partial-messages`）：置位时，每条 assistant 消息的快照帧（`assistant`）之前先逐条输出 `stream_event` 帧（`SDKPartialAssistantMessage` 形状：`{type, event, parent_tool_use_id:null, session_id, uuid}`，`event` 是 Anthropic SSE 的 `RawMessageStreamEvent`）——`message_start`（含 `message.id`）→ 每条块的 `content_block_start` / `content_block_delta`（`text_delta` / `thinking_delta`；tool_use 的 `input_json_delta` 是 provider 侧增量原样透传，`is_final` 收口块）→ `content_block_stop` → `message_delta`（stop_reason / output_tokens 与快照帧同值）→ `message_stop`。要点：
+
+- **id 一致性（硬要求）**：`message_start.message.id` == 同一消息快照帧 `message.id`（消费方的流式/快照去重键）。跨帧关联在渲染器本地完成（`crates/wing/src/stdio/stream.rs`）：首增量铸 `msg_<hex>`、快照帧复用它产出 `message.id`（方案选择见 `03_streaming/design.md` D1——核心事件面无需携带消息 id）；
+- **帧序**：流式收口先于快照帧（SDK 契约：最终完整消息仍会作为独立消息到来）；**打断轮与错误轮的终态帧之前也会先收口**（不留悬空 `message_start`，合成 `result` 帧仍是最后一条）；轮边界（`turn_started`）防御性收口，跨轮不泄漏；
+- **多消息/多轮**：一轮可含多条 assistant 消息，各自独立 `message_start…message_stop`（按 deltas→快照帧边界切分）；无增量的消息不伪造流式帧；
+- **零行为变化**：不带 flag 时 delta 不产帧、快照 id 仍是 `msg_{事件 uuid}`（逐字节不变）；该 flag 只在 `--output-format stream-json` 下有意义（其余输出形态记一条 warn 说明），且只服务 stdio 模式（子命令路径显式拒绝，不静默忽略）。
+
+**常驻多轮**（`--input-format stream-json` + `--output-format stream-json`，SDK 系消费方的 prompt 队列形态）：进程长开，**终态帧只结束当前轮**——`result`（含被打断轮次的合成终态帧）之后进程继续等 stdin 的下一条消息或 EOF：
+
+- 轮间 / 轮中投递的 `user` 消息**不丢弃**：逐条转发 `POST /api/session/send`，由网关 inbox 决定 steer（并入当前轮）还是排队（成新轮）。投递失败（网关不可达等）响亮失败：stderr + 非零退出——编排器在等这一轮的输出，静默继续等于让它挂死；
+- **stdin EOF = 收尾**：空闲 → 立即退出；有在途轮（含刚转发、轮还没起，以及首轮 prompt）→ 等该轮终态后退出；**退出码 = 最后一轮结果**（成功 / 被打断 = 0，失败轮 = 非零；逐轮权威状态在各自的 `result` 帧里）。在轮中被排队、当前轮结束才轮到的那条消息**不再等待**（消费方关 stdin 即表示不再关心后续输出）；WS 断开仍按现状 FAILURE 退出；
+- 空文本消息不发（后端对空 content 不起轮、不发终态帧，发了只会让 EOF 收尾等一个不存在的终态）；
+- 每轮边界由后端的 `turn_started` 事件给出（渲染器的相位账本据此重置）；control_request 应答纪律（`initialize` / `interrupt` / 未知 subtype）与逐轮 `result` 帧不变；
+- **行为不变的部分**：text/json 输出模式与非 stream-json 输入一律保持一次性语义（`json` 的契约仍是「单个 result 对象」）；`-p` 给 prompt 时它是首轮，stdin 后续消息仍成新轮。
+
+会话身份与会话恢复（SDK 系消费方自带 id 的用法）：
+
+- `--session-id <id>`：**create-or-adopt**——该 id 不存在则以它建会话（编排方自己生成的 UUID / 任意安全 id 就此生效），已存在则收养既有会话（同 resume 语义：模板与 workspace 来自 metadata、`agent` 覆盖只应用 resume 子集）。与 `-r/--resume` 互斥。**id 在同一个文件系统上只对应一个会话**：大小写 / Unicode 归一化不敏感的文件系统（macOS APFS 默认 / Windows NTFS）上，`team-a` 与 `Team-A` 是同一份日志——网关按**磁盘真名**回应（日志留一条 warning），stdio 侧发现"请求 id ≠ 回应 id"即拒绝继续（`session_id_mismatch_error`），绝不静默换 id；
+- `-r/--resume <id>`：恢复既有会话，`--model` / `--provider` / `--effort` / `--tools` 作为参数覆盖生效（与创建路径同语义、同持久化）；`--system-prompt` / `--append-system-prompt` / `--max-turns` **不生效**（它们会改请求前缀 / 会话既有限额，是创建期语义，日志会记一条 warning）。`--provider` 只在**伴随 `--model`** 时生效（切 provider 需要一个要切过去的模型；单独给出同样是 no-op + warning，与 `session/update` 的"成对"约定同口径）。`--tools` 走的是运行期热切换：**链非空时声明集冻结**（请求里仍是老 tools，KV cache 不碎），改动以 System Reminder 告知模型；链空或压缩后同步到新声明集。**aliases**：`-r <别名>`（同文件系统的大小写 / 归一化变体）按**磁盘真名**恢复并在 stderr 的 `session_id:` 行回显真名、日志留 warning——与 `--session-id` 的 create 路径**故意不同**（那条会硬拒绝别名：create 可能"新建"，一个名字不能有两种命运，而 resume 只可能"恢复"，按真名继续是确定的）；
+- `--resume-session-at`：wing 没有会话截断能力，**出现即非零退出 + 明确文案**（绝不静默忽略——被忽略会让编排方以为上下文已回退，与 wing 的实际状态错位）。
 
 > 在后台执行 `wing -p "request" > /tmp/result.md` 等价于调度了一个拥有任意命令执行权限的子 agent。多 agent 不易驾驭，yolo 本身危险，编排者应审慎使用。
 

@@ -109,6 +109,9 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
             backend: None,
             // Atomic: the session is born tagged (no dispatch-without-tags window).
             tags: (!args.tag.is_empty()).then(|| args.tag.clone()),
+            // `wing run` 不暴露 --session-id：id 由后端生成（stdio 前端才有
+            // create-or-adopt，见 crates/wing/src/stdio/mod.rs）。
+            session_id: None,
         };
 
         let resp = http.create_session(&create_req).await?;

@@ -333,21 +333,47 @@ class TestManagerSetTags:
 
     @pytest.mark.asyncio
     async def test_malformed_session_id_never_reaches_store(
-        self, file_sm: SessionManager
+        self, file_sm: SessionManager, monkeypatch: pytest.MonkeyPatch
     ):
-        """格式闸门：不合规 id 与"不存在"同价（LookupError），不触碰文件系统。"""
+        """闸门：不合规 id 与"不存在"同价（LookupError），且不触碰文件系统。"""
+        store = file_sm._stores["file"]
+        reads: list[tuple[str, str]] = []
+        original_resolve = store.resolve_stored_id
+        original_exists = store.exists
+
+        def resolve_spy(session_id: str) -> str | None:
+            reads.append(("resolve_stored_id", session_id))
+            return original_resolve(session_id)
+
+        def exists_spy(session_id: str) -> bool:
+            reads.append(("exists", session_id))
+            return original_exists(session_id)
+
+        monkeypatch.setattr(store, "resolve_stored_id", resolve_spy)
+        monkeypatch.setattr(store, "exists", exists_spy)
+
         for bad in (
-            "sid-1",
             "../escape",
             "../../etc/passwd",
             "/tmp/absolute",
-            "20250101-000000-ABCDEF01",  # 大写 hex 不合规（严格小写）
-            "20250101-000000-abcdef0",  # 长度不足
-            "20260101-111111",  # 前缀（截断）不合规
-            "٢٠٢٥٠١٠١-٠٠٠٠٠٠-abcdef01",  # Unicode 数字不是 ASCII 数字
+            ".media",  # 存储保留的点命名空间（媒体池）
+            "..",
+            "a..b",
+            "line\nbreak",
+            "\x7f",
+            "",  # 空串
+            "x" * 129,
+            "\ud800",  # 孤立代理字符（不可编码为 UTF-8）
         ):
             with pytest.raises(LookupError):
                 file_sm.set_session_tags(bad, add=["x"])
+        assert reads == [], f"闸门没有挡住: {reads}"
+
+        # 任意安全字符串现在是**合法** id（编排方可自带），只是不存在——
+        # 它会被交给 store 精确解析，仍然 LookupError。
+        with pytest.raises(LookupError):
+            file_sm.set_session_tags("sid-1", add=["x"])
+        assert reads == [("resolve_stored_id", "sid-1")]
 
     @pytest.mark.asyncio
     async def test_invalid_tag_raises_before_any_write(self, file_sm: SessionManager):

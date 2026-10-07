@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from wing.chain import TrackedList
+from wing.common.utils import require_utf8
 from wing.common.logger import log
 from wing.config import get_config
 from wing.context import ContextManager
@@ -30,6 +31,7 @@ from wing.schema import ChainNode, Message, Tool
 from wing.store import SessionMetadata, SessionStore, TagMeta
 from wing.tool_registry import ToolRef
 
+from .override import validate_override_utf8
 from .tags import TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
 
 if TYPE_CHECKING:
@@ -77,6 +79,48 @@ def tool_refs(tools: list[Tool]) -> list[str]:
     工具集对齐共用本投影。
     """
     return [str(ToolRef(namespace=t.namespace, name=t.name)) for t in tools]
+
+
+def validate_tool_refs(tools: list[str]) -> None:
+    """纯校验工具 ref 可解析；不可解析即 raise ValueError。
+
+    **先校验后动手**：一次覆盖里 model / 提示词 / 工具逐个应用，若工具排在后
+    面才失败，前面的字段已经落盘（`_persist_model` 会写 metadata）——"部分
+    应用"正是要避免的状态（尤其 create-or-adopt：失败的 create 不该留下任何
+    残留）。所有覆盖入口（创建 / resume / update_state）都先过这里。
+    """
+    from wing.tool_registry import tool_registry
+
+    for ref in tools:
+        if tool_registry.resolve(ref) is None:
+            raise ValueError(f"cannot resolve tool reference: '{ref}'")
+
+
+def ignored_override_fields(override: "AgentOverride", *, resume: bool) -> list[str]:
+    """本次覆盖里**不会生效**的字段名（纯函数，供 warning 与单测）。
+
+    - ``provider`` 只在**同时给出 model** 时生效（切 provider 需要"切到哪个
+      模型"；单独给 provider 是 no-op）——创建与 resume 两条路径同此口径
+      （``session/update`` 直接 400 拒绝半对，这里只出声不改行为）；
+    - ``resume=True`` 时 ``system_prompt`` / ``append_system_prompt`` /
+      ``max_turns`` / ``yolo`` 一律不生效（它们改请求前缀或会话既有限额，
+      属创建期语义）。
+    """
+    ignored: list[str] = []
+    if override.provider is not None and override.model is None:
+        ignored.append("provider")
+    if resume:
+        ignored.extend(
+            name
+            for name, value in (
+                ("system_prompt", override.system_prompt),
+                ("append_system_prompt", override.append_system_prompt),
+                ("max_turns", override.max_turns),
+                ("yolo", override.yolo),
+            )
+            if value is not None
+        )
+    return ignored
 
 
 class Session:
@@ -279,13 +323,32 @@ class Session:
         - None 字段不覆盖（保留 template 值）
         - system_prompt 替换，append_system_prompt 追加
         - 两者同时存在时，先替换再追加
+        - ``provider`` 只在**同时给出 model** 时生效（切 provider 需要一个要
+          切过去的模型；单独给 provider 是 no-op——与 ``session/update`` 的
+          "model 与 provider 必须成对"同一口径，只是这里出声而非报错）
 
         每个被应用的字段同步写入 metadata 并落盘——override 是显式动作，
         其效果必须跨重启（resume）与 fork 存活，否则系统提示词 / 工具集 /
         开关在重启后变回模板默认，请求前缀与重启前不一致（KV cache 碎裂）。
+
+        # 工具 ref 先做纯校验（失败时不落任何字段）；其它字段的应用不会失败。
+        # 文本字段的可编码性同样在应用之前收口（非法 UTF-8 → 落盘就会炸）。
+        不会生效的字段（``provider`` 单独给出）打 warning——**不做静默忽略**。
         """
         cm = self._context_manager
         agent = self._agent
+
+        validate_override_utf8(override)
+
+        ignored = ignored_override_fields(override, resume=False)
+        if ignored:
+            log.warning(
+                f"Session {self._session_id}: agent override ignores "
+                f"{', '.join(ignored)} (provider only applies together with model)"
+            )
+
+        if override.tools is not None:
+            validate_tool_refs(override.tools)
 
         # model 覆盖走 _apply_model：与运行时切换同一条路径，一并落盘模型记录。
         if override.model is not None:
@@ -321,6 +384,60 @@ class Session:
             f"tools={override.tools}, "
             f"max_turns={override.max_turns}, effort={override.effort}, "
             f"yolo={override.yolo})"
+        )
+
+    def apply_resume_override(self, override: AgentOverride) -> None:
+        """应用 **resume 语义** 的 AgentOverride 子集（恢复既有会话时调用）。
+
+        只应用 ``model`` / ``provider`` / ``effort`` / ``tools``——它们改的是
+        "下一轮怎么发起请求"，不触碰已落链的对话内容。其余字段**一律不应用**：
+
+        - ``system_prompt`` / ``append_system_prompt``：改的是系统提示词，
+          即请求前缀的第一段——既有会话的链是按老前缀建立的，中途换掉会让
+          前缀身份漂移（KV cache 碎裂）；要换请对新会话用创建覆盖，或走
+          `session/update` 的显式动作；
+        - ``max_turns``：会话既有限额是运行时状态，不因"续链"被改写；
+        - ``yolo``：同上（创建期决定，resume 不重贴）；
+        - ``provider`` 单独给出（没有 ``model``）同样是 no-op——切 provider 需要
+          一个要切过去的模型（与 ``session/update`` 的成对约定同一口径）。
+
+        给了被忽略的字段会打 warning（**不做静默忽略**：编排方能在日志里看到
+        `--system-prompt` / 单独的 `--provider` 在 `-r` 下没生效），但仍然继续
+        应用子集。
+
+        每个被应用的字段同步写入 metadata 并落盘（与创建覆盖同一套语义），
+        因此跨重启 / 逐出后水合仍然生效。
+        """
+        ignored = ignored_override_fields(override, resume=True)
+        if ignored:
+            log.warning(
+                f"Session {self._session_id}: resume override ignores "
+                f"{', '.join(ignored)} (prompt fields would change the "
+                "conversation prefix; max_turns / yolo are create-time session "
+                "settings; provider only applies together with model — use "
+                "session/update for an explicit change)"
+            )
+
+        # 纯校验在前（工具 ref 不可解析时不得留下"model 已切换"的半截状态）
+        validate_override_utf8(override)
+        if override.tools is not None:
+            validate_tool_refs(override.tools)
+
+        if override.model is not None:
+            self._apply_model(override.model, override.provider)
+
+        if override.tools is not None:
+            self._agent.set_tools(override.tools)
+            self._record_state(tools=list(override.tools))
+
+        if override.effort is not None:
+            self._agent.set_reasoning_effort(override.effort)
+            self._record_state(reasoning_effort=override.effort)
+
+        log.info(
+            f"Session {self._session_id}: applied resume override "
+            f"(model={override.model}, provider={override.provider}, "
+            f"tools={override.tools}, effort={override.effort})"
         )
 
     # ── 暴露属性 ──────────────────────────────────
@@ -381,8 +498,9 @@ class Session:
             path: 目标路径（支持 ~ 展开）
 
         Raises:
-            ValueError: 路径不存在或不是目录
+            ValueError: 路径不可编码为 UTF-8 / 不存在 / 不是目录
         """
+        require_utf8(path, field="workspace")
         resolved = Path(path).expanduser().resolve()
         if not resolved.exists():
             raise ValueError(f"workspace path does not exist: {resolved}")
@@ -452,7 +570,12 @@ class Session:
         self._store.save_metadata(self._session_id, self._metadata)
 
     def set_title(self, title: str) -> None:
-        """设置 session 标题并持久化。"""
+        """设置 session 标题并持久化。
+
+        Raises:
+            ValueError: 标题不可编码为 UTF-8（落盘就会炸，且失败路径不留半份记录）
+        """
+        require_utf8(title, field="session title")
         self._metadata.session_name = title
         self._save_metadata()
 
@@ -507,11 +630,18 @@ class Session:
         """
         # 纯校验：任何字段非法在 mutation 之前退出，避免部分应用
         if tools is not None:
-            from wing.tool_registry import tool_registry
-
-            for ref in tools:
-                if tool_registry.resolve(ref) is None:
-                    raise ValueError(f"cannot resolve tool reference: '{ref}'")
+            validate_tool_refs(tools)
+        # 文本字段的可编码性：model / provider / effort 先写内存态、再落 metadata 与
+        # LLM 请求体——非 UTF-8（孤立代理字符）会让 `_persist_model` 在
+        # `encode("utf-8")` 处抛错，而这时**内存态已经被污染**（此后 `/info` 序列化
+        # 就炸、该会话所有写操作全失败）。与 set_title / set_workspace 同形：拦在
+        # mutation 之前，不可编码的输入等价于"没发生过"。
+        if model is not None:
+            require_utf8(model, field="model")
+        if provider_name is not None:
+            require_utf8(provider_name, field="provider")
+        if reasoning_effort is not None:
+            require_utf8(reasoning_effort, field="reasoning_effort")
 
         if template is not None:
             await self.switch_template(template)
@@ -550,13 +680,15 @@ class Session:
 
         落盘是 best-effort（与 _persist_model 同口径）：live 状态已经生效，
         把一次磁盘写失败变成 500 只会制造新的前后端错位；最坏退化是本次
-        进程内正确、重启后跟随模板/配置默认。
+        进程内正确、重启后跟随模板/配置默认。**不可编码为 UTF-8 的值**
+        （hook 注入的文本 / 配置里的非法转义）与"写不进去"同价：写盘必然
+        失败，没有重试余地。
         """
         for name, value in fields.items():
             setattr(self._metadata, name, value)
         try:
             self._save_metadata()
-        except OSError as e:
+        except (OSError, UnicodeEncodeError) as e:
             log.warning(f"Session {self._session_id}: state not persisted ({e})")
 
     def reapply_provider_options(self) -> None:
@@ -627,13 +759,14 @@ class Session:
         落盘是 best-effort：写失败（disk full / 只读挂载 / 权限）只打 warning，
         不让 OSError 穿出去——切换已经生效，把请求变成 500 只会制造一次新的
         前后端错位（agent 在新模型上跑、前端以为失败）。最坏退化成本次进程内
-        正确、重启后回模板默认。
+        正确、重启后回模板默认。不可编码为 UTF-8 的模型名（配置里的非法转义 /
+        远端工具宿主注册的名字）同样是"写不进去"，一并按 best-effort 处理。
         """
         self._metadata.model_name = self.agent.model
         self._metadata.provider_name = self.agent.model_provider.name
         try:
             self._save_metadata()
-        except OSError as e:
+        except (OSError, UnicodeEncodeError) as e:
             log.warning(
                 f"Session {self._session_id}: model record not persisted ({e}); "
                 "switch stays in effect for this process"
@@ -806,7 +939,12 @@ class Session:
         先检查并写入第一条消息 metadata，更新最后互动时间，再转发给 agent。
         标题与 last_interaction 合并为一次 metadata 落盘（touch_last_interaction）。
         tool_call_id 非空时表示这是对某个 Ask 事件的定向回复。
+
+        Raises:
+            ValueError: 正文不可编码为 UTF-8（它在首条消息时会成为标题，也会进
+                LLM 请求体——两处都在 ``encode("utf-8")`` 处炸）
         """
+        require_utf8(content, field="message content")
         self._check_first_message_metadata(content)
         self.touch_last_interaction()
         await self._agent.post(

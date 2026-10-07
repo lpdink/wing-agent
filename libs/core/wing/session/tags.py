@@ -38,6 +38,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from wing.common.utils import is_utf8_encodable
 from wing.store import TagMeta
 
 MAX_TAG_LENGTH = 64
@@ -54,6 +55,13 @@ def validate_tag(tag: str) -> str:
         )
     if tag.startswith("-"):
         raise ValueError(f"invalid tag {tag!r}: must not start with '-'")
+    if not is_utf8_encodable(tag):
+        # 孤立代理字符：合法 JSON、非法 UTF-8——落盘（metadata）就会炸，且标签会
+        # 被原样回显到 `wing ps` / `tag` / `info` 的输出里。
+        raise ValueError(
+            f"invalid tag {tag!r}: must be UTF-8 encodable "
+            "(lone surrogates are not valid UTF-8)"
+        )
     for ch in tag:
         # Cc = C0 控制符（\n \t 等先被 isspace 命中）+ DEL + **C1**
         # （U+0080–U+009F：识别 8-bit 转义序列的终端会把它们当成 CSI/DCS

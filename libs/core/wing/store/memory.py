@@ -118,6 +118,21 @@ class MemorySessionStore(SessionStore):
         validate_session_id(session_id)
         return session_id in self._live_session_ids()
 
+    def resolve_stored_id(self, session_id: str) -> str | None:
+        """键即请求值：进程内字典没有文件系统别名问题（大小写/归一化都逐字区分）。
+
+        判据比 ``exists`` 宽——只要键已有痕迹（metadata 或日志句柄）就返回，
+        与 file 后端"目录存在即算"的口径一致。
+        """
+        validate_session_id(session_id)
+        if session_id in self._metadata or session_id in self._logs:
+            return session_id
+        return None
+
+    def claim_session_id(self, session_id: str) -> str:
+        """认领键 = 请求值本身（内存字典没有别名，不存在"两个名字一个键"）。"""
+        return validate_session_id(session_id)
+
     def list_summaries(self) -> list[SessionSummary]:
         """列举 session（存在性判据：有日志记录 **或** 带标签的 metadata）。
 
@@ -125,8 +140,9 @@ class MemorySessionStore(SessionStore):
         上层据此让 ``ps --tag`` / ``tag --list`` 立即找得到；是否最终进列表
         由 SessionManager 决定（无名且无标的条目会被它过滤）。
 
-        与 file 后端"目录名不契合 session id 格式即跳过"的口径一致：memory
-        后端的 key 由会话层生成，天然合规。
+        与 file 后端"目录名不过闸门即跳过"的口径一致：memory 后端的 key 由
+        会话层确定（默认自生成，编排方可经 create-or-adopt 指定），天然通过
+        闸门——这里无需再过滤。
         """
         result: list[SessionSummary] = []
         for session_id in set(self._metadata) | set(self._logs):

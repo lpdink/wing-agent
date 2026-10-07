@@ -4,14 +4,18 @@
 //! 写 `control_request`（`interrupt` 等）与 `keep_alive`；凡被 SDK await 的控制
 //! 请求**必须有应答**，否则编排器的"停止"按钮永远等不到结果。
 //!
-//! 分工：pump 负责「读一行 → 分类 → 应答 / 触发」，与 turn 驱动（`run_stdio`
-//! 的 WS 事件循环）通过两条通道协作——`oneshot` 交付首条 `user` 消息作为 prompt，
-//! `watch<shutdown>` 接收收尾信号。所有 stdout 写入经共享的
-//! [`StdoutSink`](crate::stdio::stdout::StdoutSink) 串行化。
+//! 分工：pump 负责「读一行 → 分类 → 应答 / 投递」，与 turn 驱动（`run_stdio`
+//! 的事件循环）通过两条通道协作——`mpsc` 按到达顺序投递 `user` 消息（常驻模式下
+//! 由驱动侧逐条转发给网关），`watch<shutdown>` 接收收尾信号。所有 stdout 写入经
+//! 共享的 [`StdoutSink`](crate::stdio::stdout::StdoutSink) 串行化。
 //!
-//! 单轮语义：本步骤不做多轮——turn 期间的额外 `user` 消息只记日志；进程在
-//! `result` 帧后退出（与既有 `-p` 行为一致），被打断的轮次由 renderer 补一条终态
-//! `result` 帧后同样退出（见 `renderer::StdioRenderer::handle_interrupted`）。
+//! 多轮语义（`--input-format stream-json` + `--output-format stream-json`）：pump
+//! 是常驻消息通道，轮间与轮中的每条 `user` 消息都投递给驱动侧（转发
+//! `POST /api/session/send`，由网关 inbox 决定 steer / 排队）；进程在 stdin EOF
+//! 时收尾，而不是在 `result` 帧后退出（见 `crate::stdio::ExitPolicy`）。
+//!
+//! 一次性语义（非常驻）：只有首条 `user` 消息有归宿——它要么是 prompt（CLI 未给
+//! `-p`），要么被丢弃（CLI 已给 prompt）；其余消息记日志丢弃。
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -21,7 +25,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use wing_api_client::GatewayClient as GatewayApiClient;
 
@@ -286,29 +290,53 @@ pub struct StdinPumpContext {
     pub interruptor: Arc<dyn Interruptor>,
     /// 与 renderer 共享的 stdout 出口（串行化，见 [`StdoutSink`]）。
     pub out: Arc<StdoutSink>,
-    /// 首条 `user` 消息是否作为 prompt 交付（prompt 已由 CLI 参数给出时为 false）。
-    pub await_prompt: bool,
+    /// `user` 消息的投递策略（见 [`MessageDelivery`]）。
+    pub delivery: MessageDelivery,
+}
+
+/// pump 对 stdin `user` 消息的投递策略。
+///
+/// 驱动侧按模式选一种（`crate::stdio::message_delivery`）：
+/// - 常驻多轮：每条消息都要转发 → [`MessageDelivery::All`]；
+/// - 一次性且 prompt 来自 stdin → 首条就是 prompt，其余没有归宿
+///   （[`MessageDelivery::FirstOnly`]）；
+/// - 一次性且 prompt 来自 CLI → stdin 上的消息一条都不要
+///   （[`MessageDelivery::Ignore`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageDelivery {
+    /// 全部投递（常驻多轮）。
+    All,
+    /// 只投递首条（一次性流程里的 prompt）。
+    FirstOnly,
+    /// 一条都不投递（一次性流程且 prompt 已由 CLI 参数给出）。
+    Ignore,
 }
 
 /// 常驻 stdin pump 的把手（turn 驱动侧持有）。
 pub struct StdinPump {
-    prompt: Option<oneshot::Receiver<Result<String>>>,
+    /// pump 投递的 `user` 消息（按 stdin 到达顺序；通道关闭 = stdin 关闭）。
+    messages: mpsc::UnboundedReceiver<String>,
     shutdown: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
 
 impl StdinPump {
-    /// 等首条 `user` 消息（仅在 `await_prompt` 时可用）。
+    /// 下一条投递的 `user` 消息。
     ///
-    /// stdin 在消息到达前 EOF → 明确报错，而不是让 turn 驱动永远等下去。
+    /// `None` = stdin 关闭（EOF / 读错误 / 收尾），且已无缓冲消息——常驻循环
+    /// 据此收尾。
+    pub async fn next_message(&mut self) -> Option<String> {
+        self.messages.recv().await
+    }
+
+    /// 等首条 `user` 消息（仅用于 prompt 要从 stdin 来的流程）。
+    ///
+    /// stdin 在消息到达前关闭 → 明确报错，而不是让 turn 驱动永远等下去。
     pub async fn wait_prompt(&mut self) -> Result<String> {
-        let Some(rx) = self.prompt.take() else {
-            anyhow::bail!("stdin prompt receiver already taken");
-        };
-        match rx.await {
-            Ok(prompt) => prompt,
-            // 发送端未发送就消失（pump 异常结束）——语义同 stdin 关闭。
-            Err(_) => anyhow::bail!("stdin closed before receiving user message"),
+        match self.next_message().await {
+            Some(prompt) => Ok(prompt),
+            // 通道关闭且没有缓冲消息 = stdin 在首条消息之前就没了。
+            None => anyhow::bail!("stdin closed before receiving user message"),
         }
     }
 
@@ -320,11 +348,12 @@ impl StdinPump {
     /// 收尾信号立即命中，join 立刻返回），有界保证极端形态也不拖住进程退出。
     pub async fn finish(self) {
         let StdinPump {
-            prompt,
+            messages,
             shutdown,
             mut task,
         } = self;
-        drop(prompt);
+        // 先丢掉消息出口：pump 下一次投递会失败并自行结束（不必再读 stdin）。
+        drop(messages);
         let _ = shutdown.send(true);
         if tokio::time::timeout(PUMP_SHUTDOWN_GRACE, &mut task)
             .await
@@ -374,20 +403,17 @@ fn spawn_stdin_reader() -> mpsc::UnboundedReceiver<String> {
 
 /// [`spawn`] 的注入版：行从通道来（单测直接喂行 / drop 发送端模拟 stdin 关闭）。
 fn spawn_with(rx: mpsc::UnboundedReceiver<String>, ctx: StdinPumpContext) -> StdinPump {
-    let (prompt_tx, prompt_rx) = oneshot::channel();
+    let (messages_tx, messages_rx) = mpsc::unbounded_channel();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // 不需要交付 prompt 时连发送端一起丢掉：任何 user 消息都只是日志。
-    let prompt_tx = ctx.await_prompt.then_some(prompt_tx);
-
     let task = tokio::spawn(async move {
-        if let Err(e) = pump_loop(rx, &ctx, prompt_tx, shutdown_rx).await {
+        if let Err(e) = pump_loop(rx, &ctx, messages_tx, shutdown_rx).await {
             tracing::warn!(error = %e, "stdin pump stopped on stdin read error");
         }
     });
 
     StdinPump {
-        prompt: Some(prompt_rx),
+        messages: messages_rx,
         shutdown: shutdown_tx,
         task,
     }
@@ -397,9 +423,11 @@ fn spawn_with(rx: mpsc::UnboundedReceiver<String>, ctx: StdinPumpContext) -> Std
 async fn pump_loop(
     mut lines: mpsc::UnboundedReceiver<String>,
     ctx: &StdinPumpContext,
-    mut prompt_tx: Option<oneshot::Sender<Result<String>>>,
+    messages: mpsc::UnboundedSender<String>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
+    // 是否已投递过 `user` 消息（`MessageDelivery::FirstOnly` 的判据）。
+    let mut delivered_first = false;
     loop {
         // 收尾信号与下一行二选一。`biased` + 读优先：已经到达的控制帧先处理完，
         // 再执行收尾（`interrupt` 的应答可能正好排在这一行）。`changed()` 只看
@@ -455,19 +483,27 @@ async fn pump_loop(
             }
             StdinMessage::User(user) => {
                 let prompt = extract_prompt_text(&user.message.content);
-                match prompt_tx.take() {
-                    Some(tx) => {
-                        tracing::info!(
-                            prompt_len = prompt.len(),
-                            "received user prompt from stdin"
-                        );
-                        // 交付失败 = 主流程已不需要它（收尾中），忽略。
-                        let _ = tx.send(Ok(prompt));
-                    }
-                    None => tracing::warn!(
+                let deliver = match ctx.delivery {
+                    MessageDelivery::All => true,
+                    MessageDelivery::FirstOnly => !delivered_first,
+                    MessageDelivery::Ignore => false,
+                };
+                if deliver {
+                    delivered_first = true;
+                    tracing::info!(
                         prompt_len = prompt.len(),
-                        "ignoring additional user message (single-turn stdio mode)"
-                    ),
+                        "forwarding user message from stdin"
+                    );
+                    // 投递失败 = 驱动侧已走（收尾/退出）：别再读了。
+                    if messages.send(prompt).is_err() {
+                        break;
+                    }
+                } else {
+                    tracing::warn!(
+                        prompt_len = prompt.len(),
+                        "ignoring user message (one-shot stdio mode: only the first message \
+                         becomes the prompt)"
+                    );
                 }
             }
             StdinMessage::ControlResponse => {
@@ -482,13 +518,8 @@ async fn pump_loop(
         }
     }
 
-    // 收尾/EOF 时首条 prompt 还没交付 → 显式失败，别让 turn 驱动永远等下去。
-    if let Some(tx) = prompt_tx.take() {
-        let _ = tx.send(Err(anyhow::anyhow!(
-            "stdin closed before receiving user message"
-        )));
-    }
-
+    // EOF / 收尾：返回即 drop 消息出口 → 驱动侧 `next_message()` 得到 `None`
+    // （若首条 prompt 还没投递，`wait_prompt` 在那里明确报错）。
     Ok(())
 }
 
@@ -606,12 +637,12 @@ mod tests {
     fn context(
         interruptor: Arc<FakeInterruptor>,
         out: &CaptureSink,
-        await_prompt: bool,
+        delivery: MessageDelivery,
     ) -> StdinPumpContext {
         StdinPumpContext {
             interruptor: interruptor as Arc<dyn Interruptor>,
             out: out.sink(),
-            await_prompt,
+            delivery,
         }
     }
 
@@ -865,7 +896,7 @@ mod tests {
         input: &str,
         interruptor: &Arc<FakeInterruptor>,
         capture: &CaptureSink,
-        await_prompt: bool,
+        delivery: MessageDelivery,
     ) -> StdinPump {
         let (tx, rx) = mpsc::unbounded_channel();
         // 逐行送（空行也送：真实 stdin 的空行语义要在 fixture 里保留），
@@ -874,7 +905,7 @@ mod tests {
             tx.send(line.to_string()).unwrap();
         }
         drop(tx);
-        spawn_with(rx, context(Arc::clone(interruptor), capture, await_prompt))
+        spawn_with(rx, context(Arc::clone(interruptor), capture, delivery))
     }
 
     #[tokio::test]
@@ -884,7 +915,7 @@ mod tests {
         );
         let capture = CaptureSink::default();
         let interruptor = Arc::new(FakeInterruptor::default());
-        let mut pump = spawn_static(&input, &interruptor, &capture, true);
+        let mut pump = spawn_static(&input, &interruptor, &capture, MessageDelivery::FirstOnly);
 
         assert_eq!(pump.wait_prompt().await.unwrap(), "say hello");
 
@@ -907,7 +938,12 @@ mod tests {
     async fn pump_reports_stdin_closed_before_prompt() {
         let capture = CaptureSink::default();
         let interruptor = Arc::new(FakeInterruptor::default());
-        let mut pump = spawn_static(INITIALIZE, &interruptor, &capture, true);
+        let mut pump = spawn_static(
+            INITIALIZE,
+            &interruptor,
+            &capture,
+            MessageDelivery::FirstOnly,
+        );
 
         let err = pump.wait_prompt().await.unwrap_err();
         assert!(
@@ -930,7 +966,7 @@ mod tests {
         );
         let capture = CaptureSink::default();
         let interruptor = Arc::new(FakeInterruptor::default());
-        let mut pump = spawn_static(&input, &interruptor, &capture, true);
+        let mut pump = spawn_static(&input, &interruptor, &capture, MessageDelivery::FirstOnly);
 
         assert_eq!(pump.wait_prompt().await.unwrap(), "go");
 
@@ -947,7 +983,7 @@ mod tests {
         let input = format!("{INITIALIZE}\n{INTERRUPT}\n");
         let capture = CaptureSink::default();
         let interruptor = Arc::new(FakeInterruptor::failing());
-        let pump = spawn_static(&input, &interruptor, &capture, true);
+        let pump = spawn_static(&input, &interruptor, &capture, MessageDelivery::FirstOnly);
 
         let lines = wait_lines(&capture, 2).await;
         assert_eq!(lines[1]["response"]["subtype"], "success");
@@ -967,7 +1003,7 @@ mod tests {
         );
         let capture = CaptureSink::default();
         let interruptor = Arc::new(FakeInterruptor::default());
-        let mut pump = spawn_static(input, &interruptor, &capture, true);
+        let mut pump = spawn_static(input, &interruptor, &capture, MessageDelivery::FirstOnly);
 
         assert_eq!(pump.wait_prompt().await.unwrap(), "go");
 
@@ -1028,7 +1064,7 @@ mod tests {
         );
         let capture = CaptureSink::default();
         let interruptor = Arc::new(FakeInterruptor::default());
-        let mut pump = spawn_static(input, &interruptor, &capture, true);
+        let mut pump = spawn_static(input, &interruptor, &capture, MessageDelivery::FirstOnly);
 
         assert_eq!(pump.wait_prompt().await.unwrap(), "go");
 
@@ -1059,7 +1095,7 @@ mod tests {
             r#"{"type":"control_request"}"#,
             &interruptor,
             &capture,
-            false,
+            MessageDelivery::Ignore,
         );
 
         pump.finish().await;
@@ -1083,7 +1119,7 @@ mod tests {
         );
         let capture = CaptureSink::default();
         let interruptor = Arc::new(FakeInterruptor::default());
-        let mut pump = spawn_static(input, &interruptor, &capture, true);
+        let mut pump = spawn_static(input, &interruptor, &capture, MessageDelivery::FirstOnly);
 
         assert_eq!(pump.wait_prompt().await.unwrap(), "hi");
         pump.finish().await;
@@ -1091,7 +1127,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pump_only_delivers_the_first_user_message() {
+    async fn first_only_delivery_drops_everything_after_the_prompt() {
         let input = concat!(
             r#"{"type":"user","message":{"role":"user","content":"first"}}"#,
             "\n",
@@ -1100,16 +1136,75 @@ mod tests {
         );
         let capture = CaptureSink::default();
         let interruptor = Arc::new(FakeInterruptor::default());
-        let mut pump = spawn_static(input, &interruptor, &capture, true);
+        let mut pump = spawn_static(input, &interruptor, &capture, MessageDelivery::FirstOnly);
 
         assert_eq!(pump.wait_prompt().await.unwrap(), "first");
-        // 第二条被忽略（记日志，不产生输出、不 panic）。
+        // 第二条既不投递也不产生输出：通道里没有第二条（EOF 已到 → None）。
+        assert_eq!(pump.next_message().await, None, "第二条消息不得被投递");
         pump.finish().await;
         assert_eq!(capture.text(), "");
     }
 
     #[tokio::test]
-    async fn pump_ignores_user_messages_when_prompt_came_from_cli() {
+    async fn all_delivery_forwards_every_message_in_order() {
+        let input = concat!(
+            r#"{"type":"user","message":{"role":"user","content":"one"}}"#,
+            "\n",
+            r#"{"type":"keep_alive"}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"two"},{"type":"text","text":"and a half"}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"three"}}"#,
+            "\n",
+        );
+        let capture = CaptureSink::default();
+        let interruptor = Arc::new(FakeInterruptor::default());
+        let mut pump = spawn_static(input, &interruptor, &capture, MessageDelivery::All);
+
+        // 常驻：每条都投递（首条也照投——由驱动侧决定它是不是 prompt）。
+        assert_eq!(pump.next_message().await.as_deref(), Some("one"));
+        assert_eq!(pump.next_message().await.as_deref(), Some("two and a half"));
+        assert_eq!(pump.next_message().await.as_deref(), Some("three"));
+        assert_eq!(pump.next_message().await, None, "EOF 收尾");
+        pump.finish().await;
+        assert_eq!(capture.text(), "", "user 消息不产生 stdout 输出");
+    }
+
+    /// 常驻通道是**活流**：stdin 不关，消息陆续到达即投递（轮间/轮中投递的
+    /// 关键行为）。
+    #[tokio::test]
+    async fn all_delivery_streams_messages_while_stdin_stays_open() {
+        let (sdk, rx) = mpsc::unbounded_channel();
+        let capture = CaptureSink::default();
+        let interruptor = Arc::new(FakeInterruptor::default());
+        let mut pump = spawn_with(
+            rx,
+            context(Arc::clone(&interruptor), &capture, MessageDelivery::All),
+        );
+
+        sdk.send(r#"{"type":"user","message":{"role":"user","content":"one"}}"#.to_string())
+            .unwrap();
+        assert_eq!(pump.next_message().await.as_deref(), Some("one"));
+
+        sdk.send(r#"{"type":"user","message":{"role":"user","content":"two"}}"#.to_string())
+            .unwrap();
+        assert_eq!(pump.next_message().await.as_deref(), Some("two"));
+
+        // stdin 保持张开：下一次读还没结果（不是 EOF）。
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), pump.next_message())
+                .await
+                .is_err(),
+            "stdin 未关时不得以 None 收尾"
+        );
+
+        drop(sdk);
+        assert_eq!(pump.next_message().await, None);
+        pump.finish().await;
+    }
+
+    #[tokio::test]
+    async fn ignore_delivery_keeps_control_requests_working() {
         let input = concat!(
             r#"{"type":"user","message":{"role":"user","content":"ignored"}}"#,
             "\n",
@@ -1118,8 +1213,11 @@ mod tests {
         );
         let capture = CaptureSink::default();
         let interruptor = Arc::new(FakeInterruptor::default());
-        let pump = spawn_static(input, &interruptor, &capture, false);
+        let mut pump = spawn_static(input, &interruptor, &capture, MessageDelivery::Ignore);
 
+        // 消息一条都不投递（通道立刻 EOF）……
+        assert_eq!(pump.next_message().await, None);
+        // ……但 control_request 的应答纪律不受影响。
         pump.finish().await;
         let lines = wait_lines(&capture, 1).await;
         assert_eq!(lines.len(), 1);
@@ -1135,7 +1233,14 @@ mod tests {
         let (sdk, rx) = mpsc::unbounded_channel();
         let capture = CaptureSink::default();
         let interruptor = Arc::new(FakeInterruptor::default());
-        let mut pump = spawn_with(rx, context(Arc::clone(&interruptor), &capture, true));
+        let mut pump = spawn_with(
+            rx,
+            context(
+                Arc::clone(&interruptor),
+                &capture,
+                MessageDelivery::FirstOnly,
+            ),
+        );
 
         sdk.send(INITIALIZE.to_string()).unwrap();
         wait_lines(&capture, 1).await; // initialize 已应答
@@ -1166,7 +1271,14 @@ mod tests {
         let (_sdk, rx) = mpsc::unbounded_channel();
         let capture = CaptureSink::default();
         let interruptor = Arc::new(FakeInterruptor::default());
-        let pump = spawn_with(rx, context(Arc::clone(&interruptor), &capture, true));
+        let pump = spawn_with(
+            rx,
+            context(
+                Arc::clone(&interruptor),
+                &capture,
+                MessageDelivery::FirstOnly,
+            ),
+        );
 
         tokio::time::timeout(Duration::from_secs(2), pump.finish())
             .await
@@ -1180,7 +1292,14 @@ mod tests {
         let (sdk, rx) = mpsc::unbounded_channel();
         let capture = CaptureSink::default();
         let interruptor = Arc::new(FakeInterruptor::default());
-        let pump = spawn_with(rx, context(Arc::clone(&interruptor), &capture, true));
+        let pump = spawn_with(
+            rx,
+            context(
+                Arc::clone(&interruptor),
+                &capture,
+                MessageDelivery::FirstOnly,
+            ),
+        );
 
         drop(sdk); // EOF
 
@@ -1212,7 +1331,7 @@ mod tests {
             StdinPumpContext {
                 interruptor: Arc::new(SlowInterruptor),
                 out,
-                await_prompt: false,
+                delivery: MessageDelivery::Ignore,
             },
         );
 

@@ -1,17 +1,19 @@
-"""Session ID 格式闸门场景：越界写防护 + 列表隔离（安全红线）。
+"""Session ID 闸门场景：越界写防护 + 列表隔离（安全红线）。
 
-被守的语义（``common.utils.SESSION_ID_PATTERN`` → ``SessionManager._resolve_with_store``
+被守的语义（``common.utils.is_valid_session_id`` → ``SessionManager._resolve_with_store``
 → ``FileSessionStore`` 路径拼接点，三道一致的硬闸门）：
 
-- session id 必须是后端生成的固定格式（``YYYYMMDD-HHMMSS-<8 小写 hex>``）；
-  不合规的值按"不存在"处理（404）——**绝不进入任何 store 路径拼接**；
+- session id 由后端自生成或**由编排方自带**（create-or-adopt），闸门只防路径
+  穿越与卫生：含 ``/`` / ``\\`` / ``..``、点开头（存储保留的 ``.media`` 媒体池）、
+  ASCII 控制字符、空串、超长的值一律拒绝；不合规的值按"不存在"处理（404）——
+  **绝不进入任何 store 路径拼接**；
 - 同源证据：在 store root **之外**构造一个内容完整的诱饵会话目录
   （history.jsonl + metadata.json），用相对穿越（``../escape``）与绝对路径两种
   形态打 tag / resume / send 端点——请求一律 404，且诱饵文件逐字节不变
   （没有闸门时，tag 的 store 直写路径会解析到这个目录并**整体覆盖** metadata）；
-- 不给探测反馈：格式不合规与真不存在无从区分（都是 404）；
-- 列表隔离：sessions root 里不合规的杂物目录（哪怕带 history.jsonl）不会被
-  ``/api/session/list`` 列出，也不会让列表接口崩掉。
+- 不给探测反馈：闸门拒绝与真不存在无从区分（都是 404）；
+- 列表隔离：sessions root 里**不过闸门**的杂物目录（哪怕带 history.jsonl）不会
+  被 ``/api/session/list`` 列出，也不会让列表接口崩掉。
 """
 
 from __future__ import annotations
@@ -22,6 +24,10 @@ import pytest
 
 from wing_probe import Probe
 from wing_probe.driver import DriverHttpError
+
+#: 不过闸门的杂物目录名（点开头 / 含 ``..``）——"任意安全字符串"现在是合法 id，
+#: 所以这里必须用新闸门仍然拒绝的形态（见 ``test_session_id_validation.py`` 的矩阵）。
+JUNK_NAMES = (".hidden-junk", "..junk", "x" * 129)
 
 
 def _craft_decoy(probe: Probe) -> tuple[str, str]:
@@ -83,27 +89,39 @@ async def test_traversal_ids_are_rejected_without_side_effects(probe: Probe) -> 
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_nonconforming_dirs_are_not_sessions(probe: Probe) -> None:
-    """sessions root 里的杂物目录不是会话：不列出、可寻址性为零、不炸列表。"""
-    junk = probe.env.sessions_path / "not-a-session"
-    junk.mkdir(parents=True, exist_ok=True)
-    (junk / "history.jsonl").write_text(
-        json.dumps({"role": "user", "content": "junk", "uuid": "junk-u1"}) + "\n",
-        encoding="utf-8",
-    )
+    """不过闸门的目录不是会话：不列出、可寻址性为零、不炸列表。"""
+    for name in JUNK_NAMES:
+        junk = probe.env.sessions_path / name
+        junk.mkdir(parents=True, exist_ok=True)
+        (junk / "history.jsonl").write_text(
+            json.dumps({"role": "user", "content": "junk", "uuid": "junk-u1"}) + "\n",
+            encoding="utf-8",
+        )
 
     driver = probe.driver_required
     payload = await driver.http.request("GET", "/api/session/list")
     ids = [entry["id"] for entry in payload.get("sessions", [])]
-    assert "not-a-session" not in ids, ids
+    for name in JUNK_NAMES:
+        assert name not in ids, ids
 
-    # 寻址同样被闸门拒绝（404，而不是 500 / 也不命中杂物目录）
-    with pytest.raises(DriverHttpError) as failure:
-        await driver.http.request(
-            "POST",
-            "/api/session/tag",
-            body={"session_id": "not-a-session"},
-        )
-    assert failure.value.status == 404, failure.value.call.render()
+        # 寻址同样被闸门拒绝（404，而不是 500 / 也不命中杂物目录）
+        with pytest.raises(DriverHttpError) as failure:
+            await driver.http.request(
+                "POST",
+                "/api/session/tag",
+                body={"session_id": name},
+            )
+        assert failure.value.status == 404, failure.value.call.render()
+
+        # create-or-adopt 同样不得把这些名字变成会话（且不留痕迹）
+        with pytest.raises(DriverHttpError) as failure:
+            await driver.http.request(
+                "POST",
+                "/api/session/create",
+                body={"session_id": name},
+            )
+        assert failure.value.status == 400, failure.value.call.render()
+        assert (junk / "metadata.json").exists() is False
 
 
 @pytest.mark.timeout(120)
