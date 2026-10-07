@@ -84,12 +84,16 @@ impl Harness {
 }
 
 /// 临时 `WING_HOME`（Drop 时 best-effort 清理）。
-struct TempHome {
+///
+/// 公开给不走 [`Harness`] 的用例（如冷启动回归：网关由 `wing acp` 自己拉起，
+/// 端口与 `WING_GATEWAY_CMD` 都要测试自己安排）。
+pub struct TempHome {
     path: PathBuf,
 }
 
 impl TempHome {
-    fn new(port: u16) -> Self {
+    /// 建一个临时 `WING_HOME`，其 `core/config.yaml` 指向 `port`。
+    pub fn new(port: u16) -> Self {
         let seq = HOME_SEQ.fetch_add(1, Ordering::SeqCst);
         let path = std::env::temp_dir().join(format!("wing-acp-e2e-{}-{seq}", std::process::id()));
         std::fs::create_dir_all(path.join("core")).expect("create temp WING_HOME");
@@ -101,7 +105,7 @@ impl TempHome {
         Self { path }
     }
 
-    fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 }

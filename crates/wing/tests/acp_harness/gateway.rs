@@ -176,7 +176,17 @@ pub struct FakeGateway {
 impl FakeGateway {
     /// 起服务（绑定临时端口 + 派生 accept 循环）。
     pub fn start() -> Self {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake gateway");
+        Self::bind("127.0.0.1:0")
+    }
+
+    /// 在**指定端口**起服务（冷启动回归用：端口先空着让 `wing acp` 判定「网关没在跑」，
+    /// 等它拉起 `WING_GATEWAY_CMD` 之后由测试把服务绑上来）。
+    pub fn start_on(port: u16) -> Self {
+        Self::bind(("127.0.0.1", port))
+    }
+
+    fn bind(addr: impl std::net::ToSocketAddrs) -> Self {
+        let listener = std::net::TcpListener::bind(addr).expect("bind fake gateway");
         listener
             .set_nonblocking(true)
             .expect("fake gateway listener is non-blocking");

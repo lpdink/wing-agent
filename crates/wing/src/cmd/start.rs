@@ -19,7 +19,9 @@ pub async fn start_gateway(host: &str, port: u16) -> anyhow::Result<()> {
         && let Ok(health) = client.health().await
         && health.service == "wing-gateway"
     {
-        println!(
+        // 走 stderr：headless 前端（`wing acp` / `wing -p`）的 stdout 只承载协议帧
+        // （ACP 的 JSON-RPC / NDJSON），拉起过程的消息插进去就是首行 parse error。
+        eprintln!(
             "Gateway already running (ws://{host}:{port}/ws, v{}, commit {})",
             health.version,
             health.commit.as_deref().unwrap_or("unknown"),
@@ -125,7 +127,8 @@ pub async fn start_gateway(host: &str, port: u16) -> anyhow::Result<()> {
     }
 
     if ready {
-        println!("Gateway started (PID {pid}, ws://{host}:{port}/ws)");
+        // 同「already running」：消息保留，但走 stderr（见上）。
+        eprintln!("Gateway started (PID {pid}, ws://{host}:{port}/ws)");
     } else {
         eprintln!(
             "⚠ Gateway process spawned (PID {pid}) but not yet reachable after 5s. \
@@ -133,6 +136,6 @@ pub async fn start_gateway(host: &str, port: u16) -> anyhow::Result<()> {
             log_path.display()
         );
     }
-    println!("Log: {}", log_path.display());
+    eprintln!("Log: {}", log_path.display());
     Ok(())
 }

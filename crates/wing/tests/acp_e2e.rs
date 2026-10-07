@@ -4,7 +4,8 @@
 //! 客户端 / 临时 WING_HOME）见 [`acp_harness`]。纪律：不联网、不碰用户网关与 `~/.wing`，
 //! 端口临时分配，每测试独立进程。
 //!
-//! 十个测试 = 清单七组（list / load+resume / close 各自成函数，便于失败定位）。
+//! 十一个测试 = 清单七组（list / load+resume / close 各自成函数，便于失败定位）+ 一个
+//! 回归（冷启动 stdout 清洁）。
 
 #![allow(clippy::print_stderr)] // harness 的调试回调（WING_ACP_E2E_TRACE=1）写 stderr
 
@@ -12,13 +13,17 @@ mod acp_harness;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use acp_harness::ElicitationReply;
 use acp_harness::ElicitationScript;
+use acp_harness::FakeGateway;
 use acp_harness::Harness;
 use acp_harness::PermissionReply;
 use acp_harness::PermissionScript;
 use acp_harness::Recorder;
+use acp_harness::TempHome;
 use acp_harness::bash_ask;
 use acp_harness::commands_catalog;
 use acp_harness::context_stats;
@@ -41,6 +46,7 @@ use acp_harness::tool_call_result;
 use acp_harness::tool_call_stream;
 use acp_harness::turn_result;
 use acp_harness::update_kind;
+use acp_harness::wait_until;
 use acp_harness::wing_event;
 use agent_client_protocol::Agent;
 use agent_client_protocol::ConnectionTo;
@@ -68,6 +74,7 @@ use agent_client_protocol::schema::v1::ToolCallContent;
 use agent_client_protocol::schema::v1::ToolCallStatus;
 use agent_client_protocol::schema::v1::ToolCallUpdate;
 use agent_client_protocol::schema::v1::ToolKind;
+use serde_json::Value;
 use serde_json::json;
 
 /// 场景开始：initialize（默认能力 = terminal；`elicitation` 决定是否广告表单能力）。
@@ -1239,4 +1246,144 @@ async fn session_close_unsubscribes_and_releases_idempotently() {
     )
     .await
     .expect("close 场景");
+}
+
+// ============================================================
+// 回归：冷启动 stdout 清洁 + 取消后的迟到应答
+// ============================================================
+
+/// 冷启动（网关没在跑）时 `wing acp` 会拉起 `WING_GATEWAY_CMD`：拉起过程的消息必须走
+/// **stderr**——stdout 的首行只能是 ACP 帧（JSON-RPC），否则 ACP 客户端首行即 parse error。
+///
+/// 装置：临时 `WING_HOME` 指向一个**空端口**（健康检查必然失败）；`WING_GATEWAY_CMD` 是
+/// 占位脚本（记 PID 后存活）；等它被 `wing acp` 拉起后，测试把假网关绑到该端口
+/// （[`FakeGateway::start_on`]）——于是「健康检查失败 → 拉起 → 轮询成功 → WS 接入」
+/// 这条真实冷启动路径全部走完，再喂一帧 `initialize` 检查 stdout。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn cold_start_keeps_the_first_stdout_line_json() {
+    use std::process::Stdio;
+    use tokio::io::AsyncBufReadExt as _;
+    use tokio::io::AsyncWriteExt as _;
+
+    // 1) 空端口：先绑再放，让 wing 的健康检查打不通（随后由测试重新绑上假网关）。
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
+        listener.local_addr().expect("free port addr").port()
+    };
+    let home = TempHome::new(port);
+
+    // 2) 占位网关：被拉起后只记录 PID 并存活（真正的假网关由测试随后绑端口）。
+    let pidfile = home.path().join("fake-gateway.pid");
+    let script = home.path().join("fake-gateway.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n# acp_e2e 冷启动占位：被 wing acp 拉起后只负责存活。\necho $$ > \"$WING_E2E_FAKE_GATEWAY_PID\"\nexec sleep 120\n",
+    )
+    .expect("write placeholder gateway script");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut perms = std::fs::metadata(&script)
+            .expect("script metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod placeholder gateway");
+    }
+
+    // 3) 真二进制 + 冷 WING_HOME + WING_GATEWAY_CMD。
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_wing"))
+        .arg("acp")
+        .env("WING_HOME", home.path())
+        .env("WING_GATEWAY_CMD", &script)
+        .env("WING_E2E_FAKE_GATEWAY_PID", &pidfile)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn wing acp");
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+
+    // stderr 全量收集：拉起消息的断言靠它。
+    let stderr_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let collected = Arc::clone(&stderr_lines);
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            collected.lock().expect("stderr lines").push(line);
+        }
+    });
+
+    // 4) 冷启动：等占位网关被拉起（= 健康检查确实打空了），再把假网关绑上端口。
+    wait_until("wing 拉起占位网关", || pidfile.exists().then_some(())).await;
+    let gateway = FakeGateway::start_on(port);
+
+    // 5) 握手自检：喂一帧 initialize，stdout 首行必须是 JSON-RPC 响应。
+    let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}"#;
+    stdin
+        .write_all(format!("{initialize}\n").as_bytes())
+        .await
+        .expect("write initialize");
+    stdin.flush().await.expect("flush stdin");
+
+    let mut stdout_lines = tokio::io::BufReader::new(stdout).lines();
+    let first = tokio::time::timeout(Duration::from_secs(10), stdout_lines.next_line())
+        .await
+        .expect("冷启动后 10s 内 stdout 必须出现首行")
+        .expect("read stdout")
+        .expect("stdout 不能为空");
+    let frame: Value = serde_json::from_str(&first).unwrap_or_else(|err| {
+        panic!("stdout 首行必须是 JSON-RPC（拉起消息不得走 stdout）；实际拿到 {first:?}：{err}")
+    });
+    assert_eq!(frame["jsonrpc"], "2.0");
+    assert_eq!(frame["id"], 1);
+    assert_eq!(frame["result"]["agentInfo"]["name"], "wing");
+    assert_eq!(frame["result"]["protocolVersion"], 1);
+
+    // 6) 拉起消息保留、且落在 stderr 上。
+    wait_until("stderr 出现拉起消息", || {
+        stderr_lines
+            .lock()
+            .expect("stderr lines")
+            .iter()
+            .find(|line| line.contains("Gateway started"))
+            .cloned()
+    })
+    .await;
+    let log_line = wait_until("stderr 出现日志路径", || {
+        stderr_lines
+            .lock()
+            .expect("stderr lines")
+            .iter()
+            .find(|line| line.starts_with("Log: "))
+            .cloned()
+    })
+    .await;
+    assert!(
+        log_line.contains("gateway.log"),
+        "Log 行应指向网关日志：{log_line}"
+    );
+
+    // 7) 收尾：杀被测进程与占位网关（脚本 `exec sleep`，文件里的 PID 即进程）。
+    let _ = child.kill().await;
+    kill_placeholder_gateway(&pidfile);
+    let _ = stderr_task.await;
+    // 假网关的 accept 循环随测试进程退出，无需显式收口。
+    drop(gateway);
+}
+
+/// 杀掉冷启动用例的占位网关（脚本把 PID 写进文件）。
+#[cfg(unix)]
+fn kill_placeholder_gateway(pidfile: &std::path::Path) {
+    let Ok(raw) = std::fs::read_to_string(pidfile) else {
+        return;
+    };
+    let pid = raw.trim();
+    if pid.is_empty() {
+        return;
+    }
+    let _ = std::process::Command::new("kill")
+        .args(["-9", pid])
+        .status();
 }
