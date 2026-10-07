@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""commit-msg 钩子：commit message 必须为英文——含 CJK 字符即拒绝。
+
+规则见 AGENTS.md「提交信息」。git 生成提交时调用本钩子，参数 = 提交信息文件
+（.git/COMMIT_EDITMSG）。注释行与 scissors 之后是 git 的模板编排区（会被 git
+移除），这里一并跳过，避免模板注释与 verbose diff 误报。
+逃生舱：git commit --no-verify。
+"""
+
+import re
+import sys
+
+# CJK 族：中文（含扩展区）/ 假名 / 谚文 / 全角形态；英文与常见排版符号（—、→、✓ 等）不受影响。
+CJK_RANGES = (
+    (0x2E80, 0x303F),  # CJK 部首补充 / 康熙部首 / CJK 标点
+    (0x3040, 0x30FF),  # 平假名 / 片假名
+    (0x3400, 0x4DBF),  # CJK 扩展 A
+    (0x4E00, 0x9FFF),  # CJK 基本区
+    (0xAC00, 0xD7AF),  # 谚文音节
+    (0xF900, 0xFAFF),  # CJK 兼容表意文字
+    (0xFE30, 0xFE4F),  # CJK 兼容形式
+    (0xFF00, 0xFFEF),  # 全角 / 半角形态
+    (0x20000, 0x2FFFF),  # CJK 扩展 B 及以后（表意文字补充面）
+)
+
+# git commit -v 的裁剪线：其后的 diff 预览不属于提交信息。
+SCISSORS_RE = re.compile(r"^# -+ >8 -+ *$")
+
+
+def first_cjk(text):
+    """返回文本中首个 CJK 字符；没有则返回 None。"""
+    for char in text:
+        code = ord(char)
+        if any(start <= code <= end for start, end in CJK_RANGES):
+            return char
+    return None
+
+
+def offending_lines(message):
+    for number, line in enumerate(message.splitlines(), 1):
+        if SCISSORS_RE.match(line):
+            break
+        if line.startswith("#"):
+            continue
+        if first_cjk(line):
+            yield number, line.strip()
+
+
+def main():
+    if len(sys.argv) < 2:
+        return 0
+    try:
+        with open(sys.argv[1], encoding="utf-8", errors="replace") as handle:
+            message = handle.read()
+    except OSError:
+        return 0  # 读不到就不拦：钩子只管规则，不管基建故障
+
+    offenders = list(offending_lines(message))
+    if not offenders:
+        return 0
+
+    print("", file=sys.stderr)
+    print("❌ 提交信息包含 CJK 字符：commit message 一律英文（AGENTS.md「提交信息」）。", file=sys.stderr)
+    for number, line in offenders[:5]:
+        print(f"   第 {number} 行：{line[:80]}", file=sys.stderr)
+    if len(offenders) > 5:
+        print(f"   …（其余 {len(offenders) - 5} 行略）", file=sys.stderr)
+    print("   改写后重新提交；确需原样提交：git commit --no-verify", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

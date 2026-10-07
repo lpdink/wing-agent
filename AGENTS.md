@@ -286,4 +286,5 @@ test(gateway): add HTTP endpoint unit tests
 **语言与内容**（commit message 与 PR 一视同仁）：
 
 - commit message 与 PR 标题一律英文（PR 正文中文）；
-- 只描述改动本身（改了什么、为什么），不写产出过程信息：是否经过审查、分级结论（如 B/S/N）、返修轮次、内部编排代号等，一律不写。
+- 只描述改动本身（改了什么、为什么），不写产出过程信息：是否经过审查、分级结论（如 B/S/N）、返修轮次、内部编排代号等，一律不写；
+- 已有强制校验：commit message 走 `commit-msg` 钩子（含 CJK 即拒），PR 标题走 `pr-title` workflow；新克隆需先 `git config core.hooksPath .githooks` 启用钩子。
