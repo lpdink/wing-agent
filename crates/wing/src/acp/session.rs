@@ -59,6 +59,18 @@ const EVENT_BUFFER: usize = 256;
 /// 出站命令队列容量（prompt / Ask 应答 / 03 步的模型切换共用）。
 const OUTBOUND_BUFFER: usize = 64;
 
+/// 终态之后的**尾帧消化**窗口（有界、写死）。
+///
+/// 后端的帧序：正常 `turn_result → done`；异常 `turn_result → error → done`
+/// （`react_loop.py` 的 except 分支，三帧同步连发）。前端若只消费第一个终态就把 gate
+/// 还回去，排队中的下一个 prompt 会把那条尾随 `error` 当成自己的终态——故终态后必须
+/// 把尾帧读干净再放 gate。正常路径只需多读一帧 `done`（微秒级）；没有尾帧的路径
+/// （如 cancel）最多多等这一个窗口。
+const TRAILING_FRAME_GRACE: Duration = Duration::from_millis(50);
+
+/// 一次尾帧消化最多收集的事件数（防「停不下来的流」把内存拖走）。
+const TRAILING_FRAME_MAX: usize = 64;
+
 /// WS 断开后的收尾窗口：等客户端关连接（或超时）再退进程。
 ///
 /// 三段收尾的顺序是语义的一部分：
@@ -237,6 +249,9 @@ pub struct SessionHub {
     pending: Arc<PendingReplies>,
     /// 客户端关连接信号（收尾窗口的提前退出条件）。
     client_closed: Arc<ClientClosed>,
+    /// 事件流已死（粘性）：WS 泵退出前置位，此后任何新 turn 一律立刻失败
+    /// （见 [`SessionHub::begin_turn`]——绝不 arm 一个「没人投递」的 turn）。
+    stream_dead: AtomicBool,
     state: Mutex<HubState>,
 }
 
@@ -255,6 +270,20 @@ impl SessionHub {
     /// 泵持有连接本体的**弱引用**（防循环引用）：hub 被丢弃 → 出站 channel 关闭 →
     /// 泵退出。
     pub fn start(ws: GatewayClient, http: GatewayApiClient, client_id: String) -> Arc<Self> {
+        let (hub, outbound_rx) = Self::new_unstarted(http, client_id);
+        tokio::spawn(pump(ws, Arc::downgrade(&hub), outbound_rx));
+        hub
+    }
+
+    /// 建 hub 但**不**启动 WS 泵，返回（hub, 出站接收端）。
+    ///
+    /// 生产路径由 [`SessionHub::start`] 立刻把接收端交给泵；单测直接建 hub 时会自己
+    /// 持有它（保持存活 = 出站发送仍会成功，从而把「因队列关闭而失败」与「因事件流已死
+    /// 而失败」两条路径区分开）。
+    fn new_unstarted(
+        http: GatewayApiClient,
+        client_id: String,
+    ) -> (Arc<Self>, mpsc::Receiver<Outbound>) {
         let (outbound, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
         let (closed, closed_rx) = watch::channel(false);
         let hub = Arc::new(Self {
@@ -265,10 +294,10 @@ impl SessionHub {
             closed_rx,
             pending: Arc::new(PendingReplies::default()),
             client_closed: Arc::new(ClientClosed::default()),
+            stream_dead: AtomicBool::new(false),
             state: Mutex::new(HubState::default()),
         });
-        tokio::spawn(pump(ws, Arc::downgrade(&hub), outbound_rx));
-        hub
+        (hub, outbound_rx)
     }
 
     /// 记录 `initialize` 的客户端能力与身份（03 步据此决定 elicitation 走不走）。
@@ -303,6 +332,11 @@ impl SessionHub {
 
     /// 建会话：HTTP create + subscribe + 入表；返回 wing 会话 id（原样作 ACP sessionId）。
     pub async fn new_session(&self, params: NewSessionParams) -> Result<String, HubError> {
+        // 事件流已死 = 这个进程再也递不出 `session/update`：不签发病入膏肓的会话，
+        // 直接以可诊断错误回绝（进程本身正在收尾）。
+        if self.stream_dead.load(Ordering::SeqCst) {
+            return Err(HubError::Disconnected);
+        }
         let request = CreateSessionRequest {
             template_name: params.template,
             workspace: Some(params.workspace.to_string_lossy().to_string()),
@@ -324,12 +358,19 @@ impl SessionHub {
             .subscribe(&session_id, &self.client_id)
             .await
             .map_err(gateway_error)?;
+        self.register(&session_id);
+        Ok(session_id)
+    }
+
+    /// 会话入表（返回条目）。会话 id 由网关发放，正常不会重复。
+    fn register(&self, session_id: &str) -> Arc<SessionEntry> {
+        let entry = Arc::new(SessionEntry::new(session_id));
         self.state
             .lock()
             .expect("hub mutex poisoned")
             .sessions
-            .insert(session_id.clone(), Arc::new(SessionEntry::new(&session_id)));
-        Ok(session_id)
+            .insert(session_id.to_string(), Arc::clone(&entry));
+        entry
     }
 
     /// 会话条目（未知 id → [`HubError::UnknownSession`]）。
@@ -371,6 +412,15 @@ impl SessionHub {
     pub async fn begin_turn(&self, session_id: &str, text: &str) -> Result<Turn, HubError> {
         let entry = self.entry(session_id)?;
         let gate = Arc::clone(&entry.gate).lock_owned().await;
+        // 拿到 gate 之后、arm 之前检查：WS 事件流是否已经死了。
+        //
+        // 这一步专门收「同会话排队中的 prompt」——`fail_in_flight` 只收得掉已经 armed
+        // 的条目，排队者会在前一轮还回 gate 之后重新 arm：此时泵还没退出、出站队列
+        // 还在，send 会成功，于是它永远等不到事件（客户端只看到连接消失）。粘性标记
+        // 让这种 turn 根本不会被 arm。
+        if self.stream_dead.load(Ordering::SeqCst) {
+            return Err(HubError::Disconnected);
+        }
         let rx = entry.arm();
         let turn = Turn {
             session_id: session_id.to_string(),
@@ -561,10 +611,12 @@ async fn pump(
         }
     }
     if let Some(hub) = hub.upgrade() {
-        // 收尾三步（顺序是语义的一部分，见 DRAIN_GRACE）：
+        // 收尾四步（顺序是语义的一部分，见 DRAIN_GRACE 与 stream_dead）：
+        // 0. 置「事件流已死」（粘性）：此后新 turn 一律立刻失败，不再 arm；
         // 1. 让在途 prompt 立刻失败（接收端关闭）；
         // 2. 等它们把 JSON-RPC error 交给出站队列（有界）；
         // 3. 等客户端关连接（有界），再广播 closed 让前台 future 退出（退出码 1）。
+        hub.stream_dead.store(true, Ordering::SeqCst);
         hub.fail_in_flight();
         if !hub.drain_pending_replies(DRAIN_GRACE).await {
             tracing::warn!(
@@ -716,6 +768,40 @@ impl Turn {
         self.entry.updates_for(event)
     }
 
+    /// 消化本轮**终态之后**的尾帧（有界，见 [`TRAILING_FRAME_GRACE`]）。
+    ///
+    /// 必须在 `Turn` drop（= gate 释放）之前调用：后端的异常帧序
+    /// `turn_result → error → done` 里，那条 `error` 若是留给下一个排队 prompt 去读，
+    /// 它会被当成新轮次的终态（review_r1 S3 实测复现）。
+    ///
+    /// 返回窗口内收到的尾帧（已从通道取走）；`done`（正常路径的尾帧）到达即停，
+    /// 通道关闭或预算耗尽同样停——总耗时不超过 [`TRAILING_FRAME_GRACE`]。
+    pub async fn drain_trailing(&mut self) -> Vec<WingEvent> {
+        let deadline = tokio::time::Instant::now() + TRAILING_FRAME_GRACE;
+        let mut trailing = Vec::new();
+        while trailing.len() < TRAILING_FRAME_MAX {
+            match tokio::time::timeout_at(deadline, self.rx.recv()).await {
+                Ok(Some(event)) => {
+                    let is_done = matches!(event, WingEvent::Done { .. });
+                    trailing.push(event);
+                    if is_done {
+                        break;
+                    }
+                }
+                // 通道关闭（WS 断开）或窗口耗尽：本轮不会再有意义事件。
+                Ok(None) | Err(_) => break,
+            }
+        }
+        if !trailing.is_empty() {
+            tracing::debug!(
+                count = trailing.len(),
+                kinds = ?trailing.iter().map(WingEvent::event_type).collect::<Vec<_>>(),
+                "acp: drained trailing frames after the terminal event"
+            );
+        }
+        trailing
+    }
+
     /// 应答一个 Ask（占位实现与 03 步的正式实现共用这条路径）。
     pub async fn answer_ask(&self, tool_call_id: &str, content: &str) -> Result<(), HubError> {
         self.outbound
@@ -749,6 +835,27 @@ mod tests {
             "request_id": "req-1",
         }))
         .expect("fixture decodes")
+    }
+
+    /// 任意事件类型的最小 fixture（只补公共字段）。
+    fn event_of(kind: &str, session_id: &str) -> WingEvent {
+        serde_json::from_value(json!({
+            "type": kind,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "session_id": session_id,
+            "request_id": "req-1",
+        }))
+        .unwrap_or_else(|err| panic!("fixture {kind} must decode: {err}"))
+    }
+
+    /// 测试用 hub：不启泵（事件流由测试自己投递），HTTP 客户端只构造不连网。
+    ///
+    /// 出站接收端由调用方持有并保持存活——否则「发送失败」会来自队列关闭，
+    /// 掩盖我们要断言的那条路径（事件流已死）。
+    fn test_hub() -> (Arc<SessionHub>, mpsc::Receiver<Outbound>) {
+        let http = GatewayApiClient::new("http://127.0.0.1:9", None)
+            .expect("reqwest client builds without a server");
+        SessionHub::new_unstarted(http, "client-test".into())
     }
 
     #[test]
@@ -796,6 +903,127 @@ mod tests {
         assert_eq!(entry.updates_for(&stream).len(), 1);
         // 第二轮（同一会话条目）：同一 id 不再创建。
         assert!(entry.updates_for(&stream).is_empty());
+    }
+
+    /// N5：事件通道满 → 丢弃（绝不阻塞事件泵）。
+    #[test]
+    fn a_full_event_channel_drops_instead_of_blocking() {
+        let entry = SessionEntry::new("s1");
+        let mut rx = entry.arm();
+        for i in 0..EVENT_BUFFER {
+            assert!(entry.deliver(event("s1")), "buffered event {i} must fit");
+        }
+        assert!(
+            !entry.deliver(event("s1")),
+            "a full buffer must drop (warn) rather than block the pump"
+        );
+        // 消费一条之后又能投递。
+        rx.try_recv().expect("one buffered event");
+        assert!(entry.deliver(event("s1")));
+    }
+
+    /// S1：事件流已死时，新一轮 prompt 立刻失败——绝不 arm 一个「没人投递」的 turn。
+    #[tokio::test]
+    async fn turn_on_a_dead_stream_fails_fast() {
+        let (hub, _outbound_rx) = test_hub();
+        let entry = hub.register("s1");
+
+        // 对照组：健康的事件流正常 arm 并正常收刀。
+        let turn = hub
+            .begin_turn("s1", "hi")
+            .await
+            .expect("a healthy stream arms");
+        assert_eq!(turn.session_id(), "s1");
+        assert!(entry.is_active());
+        drop(turn);
+        assert!(!entry.is_active());
+
+        // WS 断开（pump 退出前置位）之后：
+        hub.stream_dead.store(true, Ordering::SeqCst);
+        let err = match hub.begin_turn("s1", "hi").await {
+            Ok(_) => panic!("a dead stream must fail fast"),
+            Err(err) => err,
+        };
+        assert_eq!(err, HubError::Disconnected);
+        assert!(
+            !entry.is_active(),
+            "绝不能留下 armed 却无人投递的 turn（客户端会只看到连接消失）"
+        );
+
+        // 同一个标记也挡住「签发永远收不到事件的会话」。
+        let err = hub
+            .new_session(NewSessionParams {
+                workspace: PathBuf::from("/tmp"),
+                template: None,
+                model: None,
+            })
+            .await
+            .expect_err("session/new on a dead stream must fail fast");
+        assert_eq!(err, HubError::Disconnected);
+    }
+
+    /// S3：终态之后的尾帧必须被本轮消化掉，不能留给下一个排队 prompt。
+    #[tokio::test]
+    async fn trailing_terminal_frames_are_drained_before_the_gate_opens() {
+        let (hub, _outbound_rx) = test_hub();
+        let entry = hub.register("s1");
+        let mut turn = hub.begin_turn("s1", "hi").await.expect("turn arms");
+
+        // 后端异常帧序：turn_result → error → done（三帧连发）。
+        entry.deliver(event_of("turn_result", "s1"));
+        let first = turn.next_event().await.expect("terminal frame");
+        assert_eq!(first.event_type(), "turn_result");
+        entry.deliver(
+            serde_json::from_value(json!({
+                "type": "error",
+                "message": "处理消息失败：异常：boom",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "session_id": "s1",
+                "request_id": "req-1",
+            }))
+            .expect("error fixture decodes"),
+        );
+        entry.deliver(event_of("done", "s1"));
+
+        let trailing = turn.drain_trailing().await;
+        assert!(
+            trailing.iter().any(|e| e.event_type() == "error"),
+            "尾随 error 必须被本轮取走：{trailing:?}"
+        );
+        assert!(
+            trailing.iter().any(|e| e.event_type() == "done"),
+            "`done` 到达即停（正常路径只多读一帧）"
+        );
+
+        // 收刀之后：下一个 prompt 重新 arm，通道里不允许有残帧。
+        drop(turn);
+        assert!(!entry.is_active());
+        let mut next = entry.arm();
+        assert!(
+            matches!(next.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "上一个轮次的尾帧不允许留给下一个 prompt"
+        );
+    }
+
+    /// S3：没有尾帧时（如 cancel 路径）窗口有界——不能无限等。
+    #[tokio::test]
+    async fn drain_trailing_is_bounded_when_nothing_follows() {
+        let (hub, _outbound_rx) = test_hub();
+        hub.register("s1");
+        let mut turn = hub.begin_turn("s1", "hi").await.expect("turn arms");
+
+        let started = tokio::time::Instant::now();
+        let trailing = turn.drain_trailing().await;
+        let elapsed = started.elapsed();
+        assert!(trailing.is_empty());
+        assert!(
+            elapsed >= TRAILING_FRAME_GRACE,
+            "静默窗口没等满就返回了？elapsed={elapsed:?}"
+        );
+        assert!(
+            elapsed < TRAILING_FRAME_GRACE * 4,
+            "窗口必须写死有界：elapsed={elapsed:?}"
+        );
     }
 
     #[test]

@@ -65,6 +65,14 @@ const BASH_TITLE_MAX_CHARS: usize = 80;
 /// 客户端侧的 “Tool call not found” 假卡片。
 const MAX_TRACKED_CALLS: usize = 512;
 
+/// 单张工具卡片的 diff 条数上限（超出丢弃后到的，见 [`Card::diffs`]）。
+///
+/// `replace_all` 这类工具「每个匹配位置一条 `diff_content`」，而 ACP 的 content 是
+/// 整表替换语义 → 每条 diff 都要重发一份完整列表，流量与内存都是 O(N²)/O(N)。
+/// 上限取 64（远大于人工可读的规模），到顶后列表冻结——稳定前缀比「追赶最新」更省
+/// 流量，也不会有内容抖动。
+const MAX_DIFFS_PER_CARD: usize = 64;
+
 /// Ask 占位应答用的取消哨兵（= 后端 `ASK_CANCEL_TOKEN`）。
 pub const ASK_CANCEL_SENTINEL: &str = "__wing_ask_cancelled__";
 
@@ -79,7 +87,7 @@ struct Card {
     created: bool,
     /// `tool_call_result` 的文本（已截断的展示副本）。
     result: Option<String>,
-    /// `diff_content` 送来的文件改动（按到达顺序）。
+    /// `diff_content` 送来的文件改动（按到达顺序，最多 [`MAX_DIFFS_PER_CARD`] 条）。
     diffs: Vec<Diff>,
 }
 
@@ -277,6 +285,17 @@ impl ToolCards {
             diff = diff.old_text(old);
         }
         let card = self.card_mut(tool_call_id);
+        if card.diffs.len() >= MAX_DIFFS_PER_CARD {
+            // 到顶即冻结：列表没变化，不发 update（也不重发列表）。
+            if card.diffs.len() == MAX_DIFFS_PER_CARD {
+                tracing::warn!(
+                    tool_call_id,
+                    cap = MAX_DIFFS_PER_CARD,
+                    "acp: tool card diff cap reached; later diffs are dropped"
+                );
+            }
+            return Vec::new();
+        }
         card.diffs.push(diff);
         let content = card.content();
         vec![SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
@@ -422,13 +441,21 @@ pub fn flatten_prompt(prompt: &[ContentBlock]) -> Option<String> {
     for block in prompt {
         match block {
             ContentBlock::Text(text) => out.push_str(&text.text),
-            ContentBlock::ResourceLink(link) => {
-                if !out.is_empty() && !out.ends_with('\n') {
+            ContentBlock::ResourceLink(link) => match file_uri_to_path(&link.uri) {
+                Some(path) => {
+                    if !out.is_empty() && !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push_str(&path);
                     out.push('\n');
                 }
-                out.push_str(&file_uri_to_path(&link.uri));
-                out.push('\n');
-            }
+                // 客户端内部 uri（`zed://…` 之类）：追加进 prompt 只会给模型一行
+                // 无意义文本，跳过（`file://` 主路径不受影响）。
+                None => tracing::debug!(
+                    uri = %link.uri,
+                    "acp: non-file resource link skipped"
+                ),
+            },
             other => {
                 tracing::warn!(
                     block = content_block_name(other),
@@ -445,10 +472,10 @@ pub fn flatten_prompt(prompt: &[ContentBlock]) -> Option<String> {
     }
 }
 
-/// `file://` URI → 路径；非 file URI 原样返回（host 非空时保留后两段语义照旧字符串）。
-fn file_uri_to_path(uri: &str) -> String {
-    let stripped = uri.strip_prefix("file://").unwrap_or(uri);
-    percent_decode_minimal(stripped)
+/// `file://` URI → 本地路径；`None` = 不是本地文件链接（调用方跳过不追加）。
+fn file_uri_to_path(uri: &str) -> Option<String> {
+    let stripped = uri.strip_prefix("file://")?;
+    Some(percent_decode_minimal(stripped))
 }
 
 /// ACP URI 里最常见的是百分号编码的空格 / 中文；只解一层 `%XX`，不做全量 URI 解码。
@@ -896,6 +923,54 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_result_for_an_unseen_card_still_reports_status() {
+        // 客户端没见过这张卡（订阅晚于轮次开始 / 记忆被容量淘汰）：状态与内容仍是
+        // 主信号，必须发 update——否则卡片永远停在 pending。
+        let mut cards = ToolCards::default();
+        match single(cards.apply(&tool_call_result("ghost", "Bash", "boom", false))) {
+            SessionUpdate::ToolCallUpdate(update) => {
+                assert_eq!(update.tool_call_id.to_string(), "ghost");
+                assert_eq!(update.fields.status, Some(ToolCallStatus::Failed));
+                assert_eq!(
+                    update.fields.content,
+                    Some(vec![ToolCallContent::from("boom".to_string())])
+                );
+            }
+            other => panic!("expected tool_call_update, got {other:?}"),
+        }
+        // 之后同一 id 的 diff 也能锚定（结果已经把它记下来了）。
+        assert_eq!(
+            cards.apply(&diff_event("ghost", "a.rs", None, "n")).len(),
+            1
+        );
+    }
+
+    // ---- N5：空 tool_call_id 的丢弃分支 ----
+
+    #[test]
+    fn events_without_tool_call_id_are_dropped() {
+        let mut cards = ToolCards::default();
+        assert!(
+            cards.apply(&tool_call_stream("", "Bash")).is_empty(),
+            "tool_call_stream without an id must not create a card"
+        );
+        assert!(
+            cards
+                .apply(&tool_call("", "Bash", json!({"command": "ls"})))
+                .is_empty(),
+            "tool_call without an id must not create a card"
+        );
+        assert!(
+            cards
+                .apply(&tool_call_result("", "Bash", "out", true))
+                .is_empty(),
+            "tool_call_result without an id must not close/report anything"
+        );
+        // 没有卡片被创建（后续 diff 也锚不上）。
+        assert!(cards.apply(&diff_event("", "a.rs", None, "n")).is_empty());
+    }
+
+    #[test]
     fn long_tool_result_is_truncated_with_a_note() {
         let mut cards = ToolCards::default();
         cards.apply(&tool_call("tc1", "Bash", json!({"command": "rg ."})));
@@ -1145,6 +1220,17 @@ mod tests {
             json!({"type": "session_init", "created_at": "c", "session_id": "s1", "request_id": "r"}),
             json!({"type": "sync_session", "session_id": "s1", "status": "idle", "messages": [],
                    "created_at": "c", "request_id": "r"}),
+            json!({"type": "compact_done", "original_tokens": 100, "compressed_tokens": 10,
+                   "created_at": "c", "session_id": "s1", "request_id": "r"}),
+            json!({"type": "branch_targets", "targets": [], "created_at": "c",
+                   "session_id": "s1", "request_id": "r"}),
+            json!({"type": "assistant_turn", "content_blocks": [], "created_at": "c",
+                   "session_id": "s1", "request_id": "r"}),
+            json!({"type": "tool_result_turn", "tool_use_id": "t1", "tool_name": "Bash",
+                   "content": "x", "created_at": "c", "session_id": "s1", "request_id": "r"}),
+            // ask 本身不产帧：占位应答在 agent 层做（03 步替换为 permission/elicitation）。
+            json!({"type": "ask", "tool_call_id": "tc_ask", "question": "?", "required": true,
+                   "created_at": "c", "session_id": "s1", "request_id": "r"}),
             json!({"type": "from_the_future", "created_at": "c", "session_id": "s1",
                    "request_id": "r"}),
         ];
@@ -1158,6 +1244,49 @@ mod tests {
     }
 
     // ---- 容量有界 ----
+
+    #[test]
+    fn per_card_diffs_are_capped() {
+        let mut cards = ToolCards::default();
+        cards.apply(&tool_call_stream("tc1", "Edit"));
+        cards.apply(&tool_call("tc1", "Edit", json!({"path": "a.rs"})));
+
+        for i in 0..MAX_DIFFS_PER_CARD {
+            let updates = cards.apply(&diff_event("tc1", "a.rs", None, &format!("v{i}")));
+            assert_eq!(updates.len(), 1, "第 {i} 条 diff 应当发 update");
+        }
+        // 到顶之后：不再追加、不再发 update（列表冻结，无内容抖动）。
+        let extra = cards.apply(&diff_event("tc1", "a.rs", None, "overflow"));
+        assert!(extra.is_empty(), "超出上限的 diff 必须被丢弃且不产帧");
+
+        // 结果行仍会把冻结后的完整列表发一次（整表替换语义不变）。
+        match single(cards.apply(&tool_call_result("tc1", "Edit", "edited", true))) {
+            SessionUpdate::ToolCallUpdate(update) => {
+                let content = update.fields.content.expect("content");
+                assert_eq!(
+                    content.len(),
+                    MAX_DIFFS_PER_CARD + 1,
+                    "64 条 diff + 1 条结果"
+                );
+                assert!(matches!(content[0], ToolCallContent::Diff(_)));
+                assert!(matches!(
+                    content[MAX_DIFFS_PER_CARD],
+                    ToolCallContent::Content(_)
+                ));
+                match &content[MAX_DIFFS_PER_CARD - 1] {
+                    ToolCallContent::Diff(diff) => {
+                        assert_eq!(
+                            diff.new_text,
+                            format!("v{}", MAX_DIFFS_PER_CARD - 1),
+                            "保留的是最早的 64 条"
+                        );
+                    }
+                    other => panic!("expected diff, got {other:?}"),
+                }
+            }
+            other => panic!("expected tool_call_update, got {other:?}"),
+        }
+    }
 
     #[test]
     fn tool_card_memory_is_bounded() {
@@ -1221,6 +1350,21 @@ mod tests {
             text_block("描述这张图"),
         ];
         assert_eq!(flatten_prompt(&prompt).as_deref(), Some("描述这张图"));
+    }
+
+    #[test]
+    fn flatten_prompt_skips_non_file_links() {
+        // 客户端内部 uri（zed://…）不追加：模型不该看到一行无意义文本。
+        assert_eq!(
+            flatten_prompt(&[text_block("hi"), link("zed://thread/42")]).as_deref(),
+            Some("hi")
+        );
+        assert_eq!(flatten_prompt(&[link("zed://thread/42")]), None);
+        // `file://` 主路径不受影响。
+        assert_eq!(
+            flatten_prompt(&[link("file:///tmp/a.rs")]).as_deref(),
+            Some("/tmp/a.rs")
+        );
     }
 
     #[test]

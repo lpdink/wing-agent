@@ -25,6 +25,7 @@ use agent_client_protocol::ConnectionTo;
 use agent_client_protocol::Error;
 use agent_client_protocol::Responder;
 use agent_client_protocol::Stdio;
+use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::AgentCapabilities;
 use agent_client_protocol::schema::v1::AvailableCommand;
 use agent_client_protocol::schema::v1::AvailableCommandsUpdate;
@@ -181,16 +182,39 @@ struct SessionDefaults {
 // initialize
 // ============================================================
 
-/// 本步的能力广告：**全部保守**。
+/// 初始化应答：协议版本**固定回 v1**（不回显客户端请求的版本）+ 保守能力广告。
 ///
+/// - 版本：本构建不做协议版本守卫——只开 `stdio` 时 SDK 的 `ProtocolCompat` 是
+///   `unstable_protocol_v2` 门后的空实现（实测 `initialize{protocolVersion:2}` 会被
+///   原样接受），所以这里自己把关。schema 对 `InitializeResponse.protocolVersion` 的
+///   定义是「客户端指定的版本（若 agent 支持），否则 agent 支持的最新版本」——只支持
+///   v1 就回 v1，客户端若不支持 v1，断不断由它判断。更高版本记 warn（不静默错答）。
 /// - `promptCapabilities` 全 false：不广告 image / audio / embeddedContext（收到
 ///   未广告的 prompt 块会 warn 跳过，见 `translate::flatten_prompt`）；
 /// - `loadSession` 与 `sessionCapabilities`（resume/close/list）留给 05 步；
 /// - `agentInfo` 是给客户端日志/关于页的可读身份。
 fn initialize_response(request: &InitializeRequest) -> InitializeResponse {
-    InitializeResponse::new(request.protocol_version)
+    if request.protocol_version != ProtocolVersion::V1 {
+        tracing::warn!(
+            requested = %request.protocol_version,
+            "acp: client requested a protocol version this build does not support; replying v1",
+        );
+    }
+    InitializeResponse::new(ProtocolVersion::V1)
         .agent_capabilities(agent_capabilities())
-        .agent_info(Implementation::new("wing", env!("CARGO_PKG_VERSION")))
+        .agent_info(Implementation::new("wing", agent_version()))
+}
+
+/// `agentInfo` 的版本串：与 `wing --version` 同口径（版本 + 短 commit）。
+///
+/// workspace 版本恒为 `0.0.0`，裸版本号在客户端的 About / 日志里没有信息量；
+/// commit hash 由 `build.rs` 注入（`WING_COMMIT_HASH`）。
+fn agent_version() -> String {
+    format!(
+        "{} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("WING_COMMIT_HASH")
+    )
 }
 
 /// 本步的 agent 能力（05 步在这里升级）。
@@ -339,18 +363,28 @@ async fn run_turn(
                 })?;
         }
 
-        match translate::turn_end(&event) {
-            Some(translate::TurnEnd::EndTurn) => {
-                return Ok(PromptResponse::new(StopReason::EndTurn));
+        let Some(end) = translate::turn_end(&event) else {
+            continue;
+        };
+
+        // 终态之后、把 gate 还回去之前，先把**本轮尾帧**消化掉：后端的异常帧序是
+        // `turn_result → error → done`，只消费第一个终态的话，那条 `error` 会被下一个
+        // 排队 prompt 当成自己的终态（见 `Turn::drain_trailing` 与 design 的 S3）。
+        for trailing in turn.drain_trailing().await {
+            for update in turn.updates_for(&trailing) {
+                cx.send_notification(SessionNotification::new(session_id.clone(), update))
+                    .map_err(|err| {
+                        tracing::warn!(error = %err, "acp: failed to send session/update");
+                        err
+                    })?;
             }
-            Some(translate::TurnEnd::Cancelled) => {
-                return Ok(PromptResponse::new(StopReason::Cancelled));
-            }
-            Some(translate::TurnEnd::Failed(message)) => {
-                return Err(Error::internal_error().data(message));
-            }
-            None => {}
         }
+
+        return match end {
+            translate::TurnEnd::EndTurn => Ok(PromptResponse::new(StopReason::EndTurn)),
+            translate::TurnEnd::Cancelled => Ok(PromptResponse::new(StopReason::Cancelled)),
+            translate::TurnEnd::Failed(message) => Err(Error::internal_error().data(message)),
+        };
     }
 }
 
@@ -386,10 +420,7 @@ mod tests {
         .expect("initialize fixture decodes");
 
         let response = initialize_response(&request);
-        assert_eq!(
-            response.protocol_version,
-            agent_client_protocol::schema::ProtocolVersion::V1
-        );
+        assert_eq!(response.protocol_version, ProtocolVersion::V1);
         assert!(!response.agent_capabilities.load_session);
         assert!(
             !response.agent_capabilities.prompt_capabilities.image
@@ -402,7 +433,29 @@ mod tests {
         );
         let info = response.agent_info.expect("agentInfo is advertised");
         assert_eq!(info.name, "wing");
-        assert!(!info.version.is_empty());
+        assert_eq!(
+            info.version,
+            format!(
+                "{} ({})",
+                env!("CARGO_PKG_VERSION"),
+                env!("WING_COMMIT_HASH")
+            ),
+            "agentInfo 与 `wing --version` 同口径（版本 + 短 commit）"
+        );
+    }
+
+    #[test]
+    fn initialize_with_a_newer_protocol_version_still_replies_v1() {
+        // 本构建不做版本守卫：更高版本既不能 echo 回去（那等于声称支持 v2），
+        // 也不能静默错答——固定回 v1，客户端自己判断要不要继续。
+        let request: InitializeRequest = serde_json::from_value(json!({
+            "protocolVersion": 2,
+            "clientCapabilities": {},
+        }))
+        .expect("initialize fixture decodes");
+
+        let response = initialize_response(&request);
+        assert_eq!(response.protocol_version, ProtocolVersion::V1);
     }
 
     #[test]

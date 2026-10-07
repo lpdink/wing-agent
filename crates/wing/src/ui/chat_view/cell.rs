@@ -48,9 +48,9 @@ use crate::ui::cells::tool_call::ToolCallBlock;
 /// （128 B）大 200 B 以上，而两个尺寸都不由本文件决定。触发点与 `wing acp` 引入的
 /// `agent-client-protocol` 依赖有关——它开启 `serde_json/preserve_order`，Cargo
 /// 的特性合并会把该特性并到本 crate 的 `serde_json` 上，`serde_json::Value`
-/// （`IndexMap` 化）随之变大 32 B，把原本压在线下的差值顶过了阈值。装箱整个
-/// `ToolCall` 变体是另一条路，但那要改掉所有构造点；这里的放行只为把 lint 恢复
-/// 到引入 ACP 依赖之前的基线。
+/// （`IndexMap` 化）随之**从 32 B 变成 72 B（+40 B，实测）**，把原本压在线下的差值
+/// 顶过了阈值。装箱整个 `ToolCall` 变体是另一条路，但那要改掉所有构造点；这里的放行
+/// 只为把 lint 恢复到引入 ACP 依赖之前的基线。
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum ChatCell {

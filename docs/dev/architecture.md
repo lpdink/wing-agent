@@ -31,7 +31,7 @@ GatewayClient(WS) + ApiClient    · auth（opt-in）            ├─ ContextMa
 
 工具参数 JSON 解析是容错契约（`provider/base.parse_tool_args`，**永不抛**）：笨模型吐出非法 args（尾逗号、非 object 等）时不触发整轮重试——那会丢弃已生成的 thinking/content/tool call——而是置 `arguments={}` 并在 `ToolCall.arguments_error` 记录错误现场（含完整原始文本），`ToolExecutor` 见它短路执行（不走工具、不走 hook），把错误作为工具结果回灌给模型自纠。回放时该 call 序列化为 `{}` 参数，教学信息由 tool result 承载。
 
-## 三种前端形态
+## 四种前端形态
 
 ### TUI 模式（默认）
 
@@ -59,6 +59,20 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 `stream-json` 消息类型：`system/init`（tools/model/cwd）· `assistant`（content blocks + usage）· `user`（tool_result blocks）· `result`（终止信号：累计 usage / turns / 耗时）。支持 SDK 双向 stdin 握手（`--input-format stream-json`）。**未识别的 `--xxx` 参数被静默忽略**，确保外部编排层传递的 Claude 专有参数（如 `--permission-mode`）不报错。
 
 > 在后台执行 `wing -p "request" > /tmp/result.md` 等价于调度了一个拥有任意命令执行权限的子 agent。多 agent 不易驾驭，yolo 本身危险，编排者应审慎使用。
+
+### ACP 模式（`wing acp`）
+
+stdio 上的 **Agent Client Protocol（ACP）v1** agent 服务端：把本机 wing 网关桥接给
+Zed / omnigent 等 ACP 客户端（前者配在 `settings.json` 的 `agent_servers`）。一个进程
+服务多个会话——单条 WS 连接的事件按 `meta.session_id` 分流到每会话通道，同会话的
+`session/prompt` 串行化（第二个排队等前一个终态）。
+
+`wing acp` 的 stdout 只承载 ACP 帧（日志与其它形态同走 `$WING_HOME/tui/logs/`），实现
+四个方法：`initialize`（固定回 v1 + 保守能力广告）、`session/new`（用客户端 `cwd` 建 wing
+会话，应答后补 `available_commands_update`）、`session/prompt`（wing 事件 → `session/update`：
+文本 / 思考分片、工具卡片、diff、标题、用量）、`session/cancel`（→ `/api/session/interrupt`，
+在途轮次回 `stopReason: cancelled`）。映射规则与并发/收尾语义见
+`crates/wing/src/acp/`（`translate.rs` 纯函数映射 + 单测，`session.rs` 的 SessionHub）。
 
 ### 编排 CLI（`wing run` / `wait` / `ps` …，PR #64）
 
