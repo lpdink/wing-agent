@@ -8,8 +8,9 @@
 
 指标只取 3000 tok/s 档（``--quick`` 单次 6s；默认档额外跑一次 30000 tok/s，仅信息性、
 不进指标）；命中率低于 0.6 时照常出指标、但在 meta.notes 标注"低置信"。一次测量若
-**一个标记都没采到**（TUI 没在窗口里画出首屏，冷启动下首帧可花 4s+），最多重跑
-``MAX_ATTEMPTS`` 次 —— 那是 rig 的启动竞态、不是性能信号；重试仍失败才算 suite 失败。
+**没有采到任何可用的 lag 值**（TUI 没在窗口里画出首屏，或 provider 没发帧；冷启动下
+首帧可花 4s+），最多尝试 ``MAX_ATTEMPTS`` 次（= 1 次重跑）—— 那是 rig 的启动竞态、
+不是性能信号；重试仍失败才算 suite 失败。
 
     uv run python scripts/perf/suite_tui.py \
         --side target/perf/sides/head.json --out /tmp/tui.json --round 1 --quick
@@ -68,9 +69,11 @@ RESEND_AFTER = 0.7
 #: 命中率低于它 → meta.notes 标注"低置信"（指标照常输出；与 latency.py 表格里的
 #: MIN_COVERAGE=0.4「样本不足」是两件事：一个管套件置信，一个管人类的终端读数）。
 LOW_COVERAGE = 0.6
-#: 一次测量"没采到任何标记"= TUI 没在这个窗口里画出首屏（pty fork → 首帧在冷启动时
-#: 可花 4s+，见 design.md D7），属 rig 启动竞态而不是性能信号：同一次测量最多重跑这么多
-#: 次；仍然没有标记才作废（quick 档没有备用测量 → suite 失败）。
+#: 一次测量的**可用样本**判据：这一轮没有任何有限 lag 值（`min/p50/p99/max` 全 NaN）。
+#: 两种成因都算：provider 没发帧（prompt 没送进去）与 provider 发了帧但 TUI 一个标记都没
+#: 渲染出来（coverage=0）——都是"这一轮没有可用的显示延迟样本"，不是性能信号（pty fork →
+#: 首屏在冷启动时可花 4s+，见 design.md D7）。同一次测量最多尝试 `MAX_ATTEMPTS` 次
+#: （= 1 次重跑）；仍然没有样本才作废（quick 档没有备用测量 → suite 失败）。
 MAX_ATTEMPTS = 2
 
 #: row 字段 → (metric id, 换算系数)：秒 → µs；cpu 百分数 → ratio。
@@ -157,15 +160,24 @@ def fmt_ms(seconds: float) -> str:
     return f"{seconds * 1000:.1f}ms"
 
 
+def usable_lag(candidate: Mapping[str, float]) -> bool:
+    """本轮是否有可用的显示延迟样本：`min/p50/p99/max` 至少一个有限。
+
+    `markers`（provider 发射数）不能当判据：provider 发了帧但 TUI 一个标记都没渲染出来
+    （coverage=0）时它 > 0，可这一轮一个 lag 值都没有 —— 那同样是"没测到"，要重试。
+    """
+    return bool(finite(candidate.get(key) for key in ("min", "p50", "p99", "max")))
+
+
 def measure_rate(
     rate: int, seconds: float, repeats: int, scratch: Path, out: SuiteOutput
 ) -> list[dict[str, float]]:
-    """跑 ``repeats`` 次 ``rate`` tok/s 的测量，返回成功采到标记的各次 row。
+    """跑 ``repeats`` 次 ``rate`` tok/s 的测量，返回采到可用样本的各次 row。
 
-    没采到标记的一次（TUI 没在窗口内画出首屏）最多重跑 ``MAX_ATTEMPTS`` 次：这是 rig 的
-    启动竞态，不是性能信号，重试不掩盖任何回归；重试与跳过都记进 ``out`` 的 notes。
-    emit log 保留在 scratch 里（``keep=True``）：成功时随 scratch 一起删、失败时正是
-    排查"标记为什么没被看到"的第一手材料。
+    没有可用样本的一次（TUI 没在窗口内画出首屏）最多尝试 ``MAX_ATTEMPTS`` 次（= 1 次重跑）：
+    这是 rig 的启动竞态，不是性能信号，重试不掩盖任何回归；重试与跳过都记进 ``out`` 的
+    notes。emit log 保留在 scratch 里（``keep=True``）：成功时随 scratch 一起删、失败时
+    正是排查"标记为什么没被看到"的第一手材料。
     """
     rows: list[dict[str, float]] = []
     for index in range(1, repeats + 1):
@@ -196,13 +208,14 @@ def measure_rate(
                     f"{rate} tok/s 第 {index} 次测量补发了 {resends} 次 prompt"
                     "（守卫：provider 尚未发过任何一帧（emit log 为空），出帧即停）"
                 )
-            if int(candidate["markers"]) > 0:
+            if usable_lag(candidate):
                 row = candidate
                 break
         if row is None:
             out.note(
-                f"{rate} tok/s 第 {index} 次测量 {MAX_ATTEMPTS} 次尝试都没采到标记"
-                "（TUI 未在窗口内画出首屏），该次不计入指标"
+                f"{rate} tok/s 第 {index} 次测量 {MAX_ATTEMPTS} 次尝试都没有可用的显示"
+                "延迟样本（标记一个都没被采到：TUI 未在窗口内画出首屏，或 provider 没发帧），"
+                "该次不计入指标"
             )
         else:
             if attempts > 1:

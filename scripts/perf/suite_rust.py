@@ -3,7 +3,8 @@
 
     <python> scripts/perf/suite_rust.py --side <side.json> --out <out.json> --round <n> [--quick] [--benches a,b]
 
-- quick 档 = CI 子集（每个 bench 一组锚定过滤正则 + `--measurement-time 2`），单侧 ≈ 2.5 分钟；
+- quick 档 = CI 子集（每个 bench 一组锚定过滤正则 + `--measurement-time 2`，
+  `tool_args_stream` 3s——µs 级 bench 的轮间漂移实测 ~24%，见 design D8），单侧 ≈ 2–3 分钟；
   非 quick 档 = 每个 bench 的全部 case（不加 filter，`--measurement-time 3`）——含 `baseline/*/512`
   这类分钟级 case，本机 45 分钟级/侧，只作本地深潜用、不做预算承诺（`--benches` 可只跑其中几个）。
 - 调档只用 `<filter>` 与 `--measurement-time`：各 bench 在 group 里钉了 `sample_size(10)` /
@@ -48,6 +49,7 @@ from common import (  # noqa: E402  (同目录模块：脚本直接跑时 sys.pa
     SuiteOutput,
     read_json,
     run_command,
+    strip_ansi,
 )
 
 #: suite 名（= metric id 的第一段，契约 §4）。
@@ -58,6 +60,11 @@ QUICK_MEASUREMENT_S = 2
 FULL_MEASUREMENT_S = 3
 QUICK_TIMEOUT_S = 900
 FULL_TIMEOUT_S = 3600
+
+#: 单个 bench 的 quick 测量时长覆盖（秒）：`tool_args_stream` 是 µs 级 bench，CI 上轮间
+#: 漂移实测 ~24%（run 37667281765 的 `append.256`：24.1 / 29.5 / 29.8 µs），多给 1s
+#: 换更稳的中位数；只加这一个 bench，别让整档变慢。
+QUICK_MEASUREMENT_S_OVERRIDES: Mapping[str, int] = {"tool_args_stream": 3}
 
 #: cargo 在目标不存在时的报错 —— 这是"一侧缺 bench"的正常情形，不是失败。
 _MISSING_TARGET = re.compile(r"no bench target named")
@@ -147,9 +154,13 @@ class BenchRun:
 
     @property
     def first_line(self) -> str:
-        """输出里第一行有内容的东西（首行是 run_command 写的命令回显，跳过）。"""
+        """输出里第一行有内容的东西（首行是 run_command 写的命令回显，跳过）。
+
+        cargo 的彩色 stderr 带 ANSI 码（CI 上尤其明显），这条线会进 `meta.notes` 与
+        失败摘要、最终出现在 PR 评论里 —— 先剥掉。
+        """
         for line in self.output.splitlines():
-            stripped = line.strip()
+            stripped = strip_ansi(line).strip()
             if stripped and not stripped.startswith("$ "):
                 return stripped
         return "(no output)"
@@ -187,6 +198,13 @@ def safe_label(side_name: str, round_no: int) -> str:
     """
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", side_name) or "side"
     return f"perf-{safe}-r{round_no}-p{os.getpid()}"
+
+
+def measurement_seconds(bench: str, *, quick: bool) -> int:
+    """该 bench 的 `--measurement-time`（秒）：quick 档允许按 bench 覆盖（见常量注释）。"""
+    if not quick:
+        return FULL_MEASUREMENT_S
+    return QUICK_MEASUREMENT_S_OVERRIDES.get(bench, QUICK_MEASUREMENT_S)
 
 
 def select_benches(raw: str) -> tuple[Bench, ...]:
@@ -403,7 +421,7 @@ def collect(
 
     for bench in benches:
         filt = filter_for(bench.quick_cases) if quick else None
-        seconds = QUICK_MEASUREMENT_S if quick else FULL_MEASUREMENT_S
+        seconds = measurement_seconds(bench.name, quick=quick)
         timeout = QUICK_TIMEOUT_S if quick else FULL_TIMEOUT_S
         filters[bench.name] = filt
         measurement[bench.name] = seconds

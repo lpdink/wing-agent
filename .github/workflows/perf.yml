@@ -39,7 +39,8 @@ concurrency:
 
 jobs:
   # ── 解析 PR 上下文：pr_number / head sha / base 分支 / 是否 fork ──────
-  # 四个 job 里唯一读 PR 元数据的地方（草稿也在这里统一拦下）。
+  # 四个 job 里唯一读 PR 元数据的地方。草稿**只在 `pull_request` 路径**拦下；
+  # `workflow_dispatch` 是人显式指定 pr_number 的（想测草稿就能测），不做 draft 过滤。
   resolve:
     name: Resolve PR
     runs-on: ubuntu-latest
@@ -152,7 +153,10 @@ jobs:
           if [ "$CALIBRATE" = "true" ]; then
             ARGS+=(--calibrate)
           fi
-          uv run python scripts/perf/ab.py "${ARGS[@]}"
+          # wing-cli（maturin）是纯编译开销：套件只用 wing-gateway 与 target/release/wing。
+          # `--no-sync` 必须带着 —— 否则 `uv run` 自己再 sync 一次、把 wing-cli 装回来。
+          uv sync --frozen --no-install-package wing-cli
+          uv run --no-sync python scripts/perf/ab.py "${ARGS[@]}"
 
       - name: Step summary
         if: always()
@@ -209,11 +213,7 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+      # 本 job 不跑任何 cargo 命令（gateway 套件的 prepare 只是 uv sync）——不需要 Rust。
 
       - name: Run A/B measurement (gateway)
         env:
@@ -233,7 +233,10 @@ jobs:
           if [ "$CALIBRATE" = "true" ]; then
             ARGS+=(--calibrate)
           fi
-          uv run python scripts/perf/ab.py "${ARGS[@]}"
+          # wing-cli（maturin）是纯编译开销：套件只用 wing-gateway 与 target/release/wing。
+          # `--no-sync` 必须带着 —— 否则 `uv run` 自己再 sync 一次、把 wing-cli 装回来。
+          uv sync --frozen --no-install-package wing-cli
+          uv run --no-sync python scripts/perf/ab.py "${ARGS[@]}"
 
       - name: Step summary
         if: always()
@@ -265,7 +268,7 @@ jobs:
     needs: [resolve, perf-tui, perf-gateway]
     # always()：测量失败也要汇总；!cancelled()：被并发取消的 run 不发评论（否则会贴上
     # 一条残缺的假失败评论，随后又被新 run 覆盖）。用了状态函数就不再继承 needs 的
-    # 「失败即跳过」，所以草稿条件必须在这里重复一次。
+    # 「失败即跳过」，所以草稿条件必须在这里重复一次（同样只作用于 `pull_request`）。
     if: >-
       always() && !cancelled() &&
       (github.event_name != 'pull_request' || !github.event.pull_request.draft)
