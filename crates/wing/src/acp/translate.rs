@@ -522,9 +522,25 @@ pub fn flatten_prompt(prompt: &[ContentBlock]) -> Option<String> {
 }
 
 /// `file://` URI → 本地路径；`None` = 不是本地文件链接（调用方跳过不追加）。
+///
+/// 主机段只接受空主机（`file:///abs`，主流客户端都这么发）与 `localhost`
+/// （`file://localhost/abs`，URI 规范里等价于空主机）；其它主机是**另一台
+/// 机器**上的路径，拼进 prompt 只会误导模型 → 跳过。
 fn file_uri_to_path(uri: &str) -> Option<String> {
-    let stripped = uri.strip_prefix("file://")?;
-    Some(percent_decode_minimal(stripped))
+    let rest = uri.strip_prefix("file://")?;
+    if rest.starts_with('/') {
+        return Some(percent_decode_minimal(rest));
+    }
+    let (host, path) = match rest.split_once('/') {
+        Some((host, path)) => (host, format!("/{path}")),
+        // `file://localhost`（没有路径）：没有可追加的内容。
+        None => return None,
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        Some(percent_decode_minimal(&path))
+    } else {
+        None
+    }
 }
 
 /// ACP URI 里最常见的是百分号编码的空格 / 中文；只解一层 `%XX`，不做全量 URI 解码。
@@ -1513,6 +1529,19 @@ mod tests {
             flatten_prompt(&[link("file:///tmp/a.rs")]).as_deref(),
             Some("/tmp/a.rs")
         );
+    }
+
+    #[test]
+    fn flatten_prompt_maps_localhost_and_skips_remote_hosts() {
+        // `localhost` = 空主机的等价写法（URI 规范）：路径照常追加。
+        assert_eq!(
+            flatten_prompt(&[link("file://localhost/tmp/a.rs")]).as_deref(),
+            Some("/tmp/a.rs")
+        );
+        // 其它主机是另一台机器上的路径：跳过（不拼出一个 `host/path` 相对路径）。
+        assert_eq!(flatten_prompt(&[link("file://build-box/tmp/a.rs")]), None);
+        // 没有路径的 `file://localhost` 同样没有内容可追加。
+        assert_eq!(flatten_prompt(&[link("file://localhost")]), None);
     }
 
     #[test]

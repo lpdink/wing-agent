@@ -317,6 +317,8 @@ fn is_dangerous_choices(choices: &[String]) -> bool {
 /// - 已知 Bash 三 token：三选项的 `optionId` 就是回写 token（友好名字 + 对应 kind）；
 /// - 其它 `required+choices`（当前无生产者，防御性泛化）：每个 label 一条 `allow_once`，
 ///   回选中的 label（与 TUI 的 `RequiredChoice` 同口径：回裸 label）。
+///   这里 `kind` 一律标成 `Execute`——`ask` 事件只带 `tool_call_id`（没有工具名），真要
+///   按工具归类得回查会话卡片记忆；等第二个生产者出现时再做。
 async fn required_choice(
     interaction: &impl AskInteraction,
     session_id: &SessionId,

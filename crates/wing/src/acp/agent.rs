@@ -544,7 +544,11 @@ async fn list_sessions(
 /// - `workspace` 缺失或不是绝对路径 → 跳过（ACP 要求 `cwd` 是绝对路径）并记 debug；
 /// - `cursor` 是不透明字符串（本实现 = 十进制 offset）；非法 → invalid params；
 /// - 页大小 [`LIST_PAGE_SIZE`]；还有余量时回 `nextCursor`，否则缺省 = 结束。
-
+///
+/// **已知取舍**：每页都重新拉全量列表再按 offset 切——页间列表若发生变动
+/// （网关按「活跃优先 + 时间降序」排序，新会话或活跃度变化都会重排），会出现重复项或漏项。
+/// 会话规模小的时候无感；要更稳就把游标换成「上一页最后一条的 session_id」这类稳定锚点
+/// （需要定义锚点消失时的回退语义），暂不做。
 fn list_page(
     sessions: Vec<wing_api_client::models::SessionInfo>,
     cwd: Option<&std::path::Path>,

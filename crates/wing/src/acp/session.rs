@@ -556,6 +556,14 @@ impl SessionHub {
     pub async fn begin_turn(&self, session_id: &str, text: &str) -> Result<Turn, HubError> {
         let entry = self.entry(session_id)?;
         let gate = Arc::clone(&entry.gate).lock_owned().await;
+        // 拿到 gate 之后再确认条目仍在表内、且**仍是同一个**（close 后又 load 会建新条目）：
+        // `close_session` 的「检查 armed → 有界等待 → 回收」之间，排队的 prompt 可以拿到
+        // gate，随后被回收路径抽掉事件通道，以误导性的「事件流终止」收场（而消息已投递、
+        // 后端照常起轮）。命中 → `UnknownSession`：消息不投递，客户端拿到明确诊断。
+        let current = self.entry(session_id)?;
+        if !Arc::ptr_eq(&current, &entry) {
+            return Err(HubError::UnknownSession(session_id.to_string()));
+        }
         // 拿到 gate 之后、arm 之前检查：WS 事件流是否已经死了。
         //
         // 这一步专门收「同会话排队中的 prompt」——`fail_in_flight` 只收得掉已经 armed
@@ -1432,6 +1440,33 @@ mod tests {
         assert!(!entry.is_armed());
         assert!(!entry.has_turn_in_flight());
         assert!(!entry.deliver(event("s1")), "disarmed → dropped again");
+    }
+
+    /// close 的回收与排队中的 prompt：条目被回收后，排队者拿到 gate 必须
+    /// 得到 `UnknownSession`——否则它会被抽掉事件通道、以误导性的「事件流终止」收场
+    /// （消息已投递网关，后端照常起轮）。
+    #[tokio::test]
+    async fn queued_prompt_after_entry_removal_is_unknown_session() {
+        let (hub, _outbound) = test_hub();
+        let sid = "session-close-race";
+        let (entry, _) = hub.entry_or_register(sid);
+        // 占住 gate（模拟在途轮次 / 挂载）。
+        let gate = Arc::clone(&entry.gate).lock_owned().await;
+        let queued = {
+            let hub = Arc::clone(&hub);
+            let sid = sid.to_string();
+            tokio::spawn(async move { hub.begin_turn(&sid, "queued").await })
+        };
+        // 让排队者先取到条目、卡在 gate 上（即便没赶上，下面的断言同样成立）。
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        hub.remove_entry(sid); // close 的回收一步
+        drop(gate);
+        let result = queued.await.expect("queued task joins");
+        assert!(
+            matches!(result, Err(HubError::UnknownSession(_))),
+            "排队者必须得到 UnknownSession，实际 {:?}",
+            result.as_ref().err(),
+        );
     }
 
     #[test]
