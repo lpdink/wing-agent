@@ -532,7 +532,7 @@ impl SessionHub {
             workspace: Some(params.workspace.to_string_lossy().to_string()),
             // 明确不设 yolo：危险操作要在 ACP 客户端里可见（03 步映射为权限询问）。
             agent: Some(AgentOverride {
-                model: params.model,
+                model_id: params.model,
                 ..Default::default()
             }),
             backend: None,
@@ -1079,7 +1079,7 @@ pub struct NewSessionParams {
     pub workspace: PathBuf,
     /// 会话模板名（`--agent`）。
     pub template: Option<String>,
-    /// 初始模型覆盖（`--model`）。
+    /// 初始模型覆盖（`--model`；值 = 引用词 model_id）。
     pub model: Option<String>,
 }
 
