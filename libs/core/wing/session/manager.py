@@ -208,7 +208,7 @@ class SessionManager:
         self._teardowns: set[asyncio.Task[None]] = set()
 
         config = get_config()
-        self._template_manager = AgentTemplateManager(config.agents)
+        self._template_manager = AgentTemplateManager(config.agents, config)
 
     @property
     def template_manager(self) -> AgentTemplateManager:

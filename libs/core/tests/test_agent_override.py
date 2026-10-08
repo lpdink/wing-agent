@@ -346,22 +346,41 @@ class TestMaxTurnsConfig:
     def test_agent_template_from_config_max_turns(self):
         """AgentTemplate.from_config 传递 max_turns。"""
         from wing.session import AgentTemplate
-        from wing.config import AgentConfig
+        from wing.config import AgentConfig, Config, ProviderConfig
 
-        config = AgentConfig(
-            name="test", model="gpt-4", provider="default", max_turns=30
+        config = Config(
+            providers=[
+                ProviderConfig(
+                    name="default",
+                    base_url="http://x",
+                    api_key="k",
+                    models=["gpt-4"],
+                )
+            ],
+            agents=[
+                AgentConfig(name="test", model="gpt-4", max_turns=30, default=True)
+            ],
         )
-        template = AgentTemplate.from_config(config)
+        template = AgentTemplate.from_config(config.agents[0], config)
         assert template.max_turns == 30
 
     def test_agent_template_from_config_default_none(self):
         """AgentTemplate.from_config 默认 max_turns 为 None。"""
         from wing.session import AgentTemplate
-        from wing.config import AgentConfig
+        from wing.config import AgentConfig, Config, ProviderConfig
 
-        # provider 绑定在 Config 解析阶段落定（此处模拟解析后的 AgentConfig）
-        config = AgentConfig(name="test", model="gpt-4", provider="default")
-        template = AgentTemplate.from_config(config)
+        config = Config(
+            providers=[
+                ProviderConfig(
+                    name="default",
+                    base_url="http://x",
+                    api_key="k",
+                    models=["gpt-4"],
+                )
+            ],
+            agents=[AgentConfig(name="test", model="gpt-4")],
+        )
+        template = AgentTemplate.from_config(config.agents[0], config)
         assert template.max_turns is None
 
 

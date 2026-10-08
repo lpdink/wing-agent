@@ -5,7 +5,7 @@
 
     from wing.config import Config, get_config, load_config, get_headers, ...
 
-内部模块：``models``（pydantic 配置模型 + 模型能力 / 展示名解析）·
+内部模块：``models``（pydantic 配置模型 + 模型目录（id 空间）/ 能力 / 展示名解析）·
 ``loader``（WING_HOME 解析 + 配置单例加载）·
 ``user_agent``（UA 预设与请求头构造）·
 ``default_config``（手写默认 config.yaml 模板，事实来源）。
@@ -30,6 +30,8 @@ from .models import (
     ImagesConfig,
     LogConfig,
     ModelCapabilities,
+    ModelGroup,
+    ModelRef,
     ModelSpec,
     ProviderConfig,
     SessionsConfig,
@@ -52,6 +54,8 @@ __all__ = [
     "ImagesConfig",
     "LogConfig",
     "ModelCapabilities",
+    "ModelGroup",
+    "ModelRef",
     "ModelSpec",
     "ProviderConfig",
     "SessionsConfig",

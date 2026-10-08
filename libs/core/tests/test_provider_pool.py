@@ -8,7 +8,7 @@
   在已关闭的 client 上——reload 在途调用的冲突根因）；
 - 已关闭实例上的新调用快速失败（`ProviderClosedError`，不进重试栈空转）；
 - 配置移除的 name 保留旧实例（钉在它上面的会话不因 reload 被拆）；
-- ``/api/models`` 聚合复用同一批实例（不再维护第二套只读 client）。
+- 池只持有实例：模型目录已归配置声明（``/api/models`` 不再经池聚合）。
 """
 
 from __future__ import annotations
@@ -17,24 +17,10 @@ import asyncio
 
 import pytest
 
-from wing.config import AgentConfig, Config, ModelSpec, ProviderConfig
+from wing.config import AgentConfig, Config, ProviderConfig
 from wing.provider.base import ModelProvider, ProviderClosedError
 from wing.provider.pool import ProviderPool
 from wing.schema import LLMResponse, Message
-
-
-class _FailingProvider(ModelProvider):
-    """list_models 恒失败的受控 provider（聚合失败落空的测试桩）。"""
-
-    def __init__(self, name: str) -> None:
-        super().__init__()
-        self._config = ProviderConfig(name=name, base_url="http://x", api_key="k")
-
-    def _generate(self, *args, **kwargs):
-        raise NotImplementedError
-
-    async def list_models(self) -> list[str]:
-        raise RuntimeError("boom")
 
 
 class _ControlledProvider(ModelProvider):
@@ -45,7 +31,6 @@ class _ControlledProvider(ModelProvider):
         self._config = ProviderConfig(name=name, base_url="http://x", api_key="k")
         self.release = asyncio.Event()
         self.transport_closed = 0
-        self.list_calls = 0
 
     async def _generate(
         self,
@@ -62,17 +47,15 @@ class _ControlledProvider(ModelProvider):
     async def _close_transport(self) -> None:
         self.transport_closed += 1
 
-    async def list_models(self) -> list[str]:
-        self.list_calls += 1
-        return ["m1"]
-
 
 def _config(*names: str) -> Config:
+    """每个 provider 声明一个模型 id（配置契约：目录来自声明且 id 全局唯一）。"""
     return Config(
         providers=[
-            ProviderConfig(name=n, base_url="http://x", api_key="k") for n in names
+            ProviderConfig(name=n, base_url="http://x", api_key="k", models=[f"{n}-m"])
+            for n in names
         ],
-        agents=[AgentConfig(name="default", model="m", provider=names[0])],
+        agents=[AgentConfig(name="default", model=f"{names[0]}-m")],
     )
 
 
@@ -80,7 +63,6 @@ def _install(pool: ProviderPool, *providers: ModelProvider) -> None:
     """把受控 provider 登记进池（替换懒建条目，测试自建实例的注入口径）。"""
     for provider in providers:
         pool._providers[provider.name] = provider
-        pool._configs[provider.name] = provider.config
 
 
 async def _wait_inflight(provider: ModelProvider, expected: int = 1) -> None:
@@ -223,23 +205,7 @@ class TestPoolReset:
         assert alt._closed is False
 
 
-class TestListAllModels:
-    @pytest.mark.asyncio
-    async def test_aggregates_with_shared_instances(self, monkeypatch):
-        """聚合查询复用池实例本身（不再有第二套只读 client）。"""
-        monkeypatch.setattr("wing.config.loader._config", _config("default", "alt"))
-        pool = ProviderPool()
-        first, second = _ControlledProvider("default"), _ControlledProvider("alt")
-        _install(pool, first, second)
-
-        groups = await pool.list_all_models()
-
-        assert sorted(g.provider for g in groups) == ["alt", "default"]
-        assert all(g.models == ["m1"] for g in groups)
-        # 查询确实打在共享实例上（同一对象计数），而不是新建的 client
-        assert first.list_calls == 1
-        assert second.list_calls == 1
-
+class TestPoolClose:
     @pytest.mark.asyncio
     async def test_close_clears_and_closes_all(self, monkeypatch):
         monkeypatch.setattr("wing.config.loader._config", _config("default", "alt"))
@@ -251,47 +217,6 @@ class TestListAllModels:
         assert a._closed is True
         assert b._closed is True
         assert pool._providers == {}
-
-    @pytest.mark.asyncio
-    async def test_single_failure_falls_back_to_empty_group(self, monkeypatch):
-        """单个 provider 查询失败落空，不影响其余分组（registry 时代的既有契约）。"""
-        monkeypatch.setattr("wing.config.loader._config", _config("default", "alt"))
-        pool = ProviderPool()
-        _install(pool, _FailingProvider("default"), _ControlledProvider("alt"))
-
-        groups = await pool.list_all_models()
-
-        by_name = {group.provider: group for group in groups}
-        assert by_name["default"].models == []
-        assert by_name["alt"].models == ["m1"]
-
-    @pytest.mark.asyncio
-    async def test_details_align_with_static_declarations(self, monkeypatch):
-        """声明的模型带元信息（display_name / description）；details 与 models 逐项同序同名。"""
-        cfg = Config(
-            providers=[
-                ProviderConfig(
-                    name="default",
-                    base_url="http://x",
-                    api_key="k",
-                    models=[
-                        ModelSpec(name="fancy", display_name="Fancy", description="d"),
-                        "plain",
-                    ],
-                )
-            ],
-            agents=[AgentConfig(name="default", model="fancy", provider="default")],
-        )
-        monkeypatch.setattr("wing.config.loader._config", cfg)
-        pool = ProviderPool()
-
-        (group,) = await pool.list_all_models()
-
-        assert group.models == ["fancy", "plain"]
-        assert [detail.name for detail in group.model_details] == group.models
-        assert group.model_details[0].display_name == "Fancy"
-        assert group.model_details[0].description == "d"
-        assert group.model_details[1].display_name is None  # 远端发现 / 裸名最小条目
 
 
 async def _collect(provider: ModelProvider, sink: list[LLMResponse]) -> None:

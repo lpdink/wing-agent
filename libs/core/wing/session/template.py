@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict, Field
 
 from wing.common.logger import log
-from wing.config import AgentConfig
+from wing.config import AgentConfig, Config
 from wing.context import Compactor
 from wing.schema import Tool
 from wing.tool_registry import tool_registry
@@ -81,15 +81,15 @@ class AgentTemplate(BaseModel):
         )
 
     @classmethod
-    def from_config(cls, agent_config: AgentConfig) -> "AgentTemplate":
-        """从 AgentConfig 构建 AgentTemplate。"""
-        # provider 绑定在配置解析阶段落定（Config 校验填充默认第一个
-        # provider）；此处不接受 None（解析产物不携带可选性）。
-        if agent_config.provider is None:
-            raise ValueError(
-                f"agent '{agent_config.name}': provider must be resolved "
-                "before template construction"
-            )
+    def from_config(cls, agent_config: AgentConfig, config: Config) -> "AgentTemplate":
+        """从 AgentConfig 构建 AgentTemplate。
+
+        ``agents[].model`` 是 model **id**（配置加载期保证 ∈ id 空间）；这里解析成
+        运行期二元组：``model`` = 上游调用名、``provider_name`` = 声明该模型的
+        provider。解析只有「命中」一种结果——查不中即配置损坏（``require_model``
+        抛出 C7 文案）。
+        """
+        ref = config.require_model(agent_config.model)
 
         resolved_tools = [
             t
@@ -104,8 +104,8 @@ class AgentTemplate(BaseModel):
 
         return cls(
             name=agent_config.name,
-            model=agent_config.model,
-            provider_name=agent_config.provider,
+            model=ref.name,
+            provider_name=ref.provider_name,
             system_prompt=agent_config.system_prompt,
             resolved_tools=resolved_tools,
             skills_patterns=list(agent_config.skills),
@@ -124,16 +124,18 @@ class AgentTemplateManager:
     不创建 Session、Agent 或管理生命周期。
     """
 
-    def __init__(self, agents_config: list[AgentConfig]) -> None:
+    def __init__(self, agents_config: list[AgentConfig], config: Config) -> None:
         """初始化模板管理器。
 
         Args:
             agents_config: Config.agents 列表（至少一个）
+            config: 所属配置——``agents[].model`` 是 model id，必须查表解析成
+                (调用名, provider) 二元组（见 `AgentTemplate.from_config`）
         """
-        # 解析模板（校验由 Config._validate_agents 保证）
+        # 解析模板（校验由 Config._validate_config 保证）
         self._templates: dict[str, AgentTemplate] = {}
         for ac in agents_config:
-            template = AgentTemplate.from_config(ac)
+            template = AgentTemplate.from_config(ac, config)
             self._templates[template.name] = template
 
         explicit_default = next((ac.name for ac in agents_config if ac.default), None)

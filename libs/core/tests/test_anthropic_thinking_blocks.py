@@ -784,12 +784,16 @@ class TestProviderLifecycle:
                     name="default",
                     base_url="https://a.example.com",
                     api_key=api_key,
+                    models=["gpt-4"],
                 ),
                 ProviderConfig(
-                    name="p2", base_url="https://b.example.com", api_key="k"
+                    name="p2",
+                    base_url="https://b.example.com",
+                    api_key="k",
+                    models=["model-2", "model-3"],
                 ),
             ],
-            agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
+            agents=[AgentConfig(name="default", model="gpt-4")],
         )
 
     @pytest.mark.asyncio
@@ -884,10 +888,13 @@ class TestProviderLifecycle:
         only_default = Config(
             providers=[
                 ProviderConfig(
-                    name="default", base_url="https://a.example.com", api_key="k"
+                    name="default",
+                    base_url="https://a.example.com",
+                    api_key="k",
+                    models=["gpt-4"],
                 ),
             ],
-            agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
+            agents=[AgentConfig(name="default", model="gpt-4")],
         )
         self._use_config(monkeypatch, only_default)
         await reset_providers()

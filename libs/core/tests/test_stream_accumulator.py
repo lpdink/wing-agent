@@ -577,7 +577,6 @@ async def _interrupted_agent(
     import wing.provider.pool as pool_mod
 
     pool_mod._pool._providers[provider.name] = provider
-    pool_mod._pool._configs[provider.name] = provider.config
 
     session = runtime.create_session()
     agent = session.agent

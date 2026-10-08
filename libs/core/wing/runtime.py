@@ -34,7 +34,7 @@ from wing.event import (
     WingEvent,
 )
 from wing.event_bus import event_bus
-from wing.config import get_config
+from wing.config import ModelGroup, get_config
 from wing.hooks import load_hooks
 from wing.request_context import (
     get_request_context,
@@ -48,7 +48,6 @@ from wing.system import ReloadResult, reload_system as _reload_system
 from wing.store import FileSessionStore, MemorySessionStore, SessionStore
 
 if TYPE_CHECKING:
-    from wing.provider.pool import ProviderModels
     from wing.session import AgentOverride, AgentTemplateManager
 
 
@@ -469,15 +468,13 @@ class WingRuntime:
     # 系统操作
     # ============================================================
 
-    async def list_models(self) -> list["ProviderModels"]:
-        """可用模型列表（跨 provider 聚合，按 provider 分组）。
+    def list_models(self) -> list[ModelGroup]:
+        """模型目录（按 provider 分组，配置声明序）。
 
-        转发 provider 共享池（全部会话共用同一批 provider 实例；配置了
-        静态 models 的 provider 跳过请求）。gateway 路由经此获取，不感知 config。
+        目录是**配置声明的同步投影**——不查远端、不发网络请求（远端 ``/models``
+        发现已退役）。gateway 路由经此获取，不感知 config。
         """
-        from wing.provider.pool import list_all_models
-
-        return await list_all_models()
+        return get_config().model_groups()
 
     async def reload_system(self) -> ReloadResult:
         """热重载全局配置、hooks、prompt commands、provider、skills & rules。

@@ -1166,32 +1166,52 @@ class TestSystemCommands:
 
 
 class TestSystemModels:
-    """GET /api/models 测试——嵌套响应，经 runtime 转发（路由不感知 config）。"""
+    """GET /api/models 测试——嵌套响应，经 runtime 取目录（路由不读 config）。
+
+    目录是配置声明的静态投影（无远端发现）：域类型 ``ModelGroup`` / ``ModelRef``
+    → wire 的 **对象数组**；``id`` 是全局唯一引用词。
+    """
 
     def test_list_models_ok(self, client: TestClient, mock_runtime):
-        """正常获取模型列表（按 provider 分组嵌套 + 逐项对应的 model_details）。"""
-        from wing.config import ModelCapabilities
-        from wing.provider.pool import ModelDetail, ProviderModels
+        """正常获取目录（按 provider 分组嵌套，每项携带 id / name / 展示元信息）。"""
+        from wing.config import ModelGroup, ModelRef, ModelSpec
 
-        mock_runtime.list_models = AsyncMock(
+        mock_runtime.list_models = MagicMock(
             return_value=[
-                ProviderModels(
+                ModelGroup(
                     provider="default",
-                    models=["gpt-4o", "gpt-4o-mini"],
-                    model_details=[
-                        ModelDetail(
+                    models=[
+                        ModelRef(
+                            id="gpt-4o",
                             name="gpt-4o",
-                            display_name="GPT-4o",
-                            description="flagship",
-                            capabilities=ModelCapabilities(vision=True),
+                            provider_name="default",
+                            spec=ModelSpec(
+                                name="gpt-4o",
+                                display_name="GPT-4o",
+                                description="flagship",
+                                capabilities={"vision": True},  # ty: ignore[invalid-argument-type]
+                            ),
                         ),
-                        ModelDetail(name="gpt-4o-mini", display_name="GPT-4o mini"),
+                        ModelRef(
+                            id="gpt-4o-mini",
+                            name="gpt-4o-mini",
+                            provider_name="default",
+                            spec=ModelSpec(
+                                name="gpt-4o-mini", display_name="GPT-4o mini"
+                            ),
+                        ),
                     ],
                 ),
-                ProviderModels(
+                ModelGroup(
                     provider="claude",
-                    models=["claude-opus-4"],
-                    model_details=[ModelDetail(name="claude-opus-4")],
+                    models=[
+                        ModelRef(
+                            id="sonnet",
+                            name="claude-opus-4",
+                            provider_name="claude",
+                            spec=ModelSpec(id="sonnet", name="claude-opus-4"),
+                        )
+                    ],
                 ),
             ]
         )
@@ -1202,15 +1222,16 @@ class TestSystemModels:
             "providers": [
                 {
                     "provider": "default",
-                    "models": ["gpt-4o", "gpt-4o-mini"],
-                    "model_details": [
+                    "models": [
                         {
+                            "id": "gpt-4o",
                             "name": "gpt-4o",
                             "display_name": "GPT-4o",
                             "description": "flagship",
                             "capabilities": {"vision": True},
                         },
                         {
+                            "id": "gpt-4o-mini",
                             "name": "gpt-4o-mini",
                             "display_name": "GPT-4o mini",
                             "description": None,
@@ -1220,9 +1241,9 @@ class TestSystemModels:
                 },
                 {
                     "provider": "claude",
-                    "models": ["claude-opus-4"],
-                    "model_details": [
+                    "models": [
                         {
+                            "id": "sonnet",
                             "name": "claude-opus-4",
                             "display_name": None,
                             "description": None,
@@ -1233,34 +1254,104 @@ class TestSystemModels:
             ]
         }
 
-    def test_list_models_details_padded_to_match_models(
-        self, client: TestClient, mock_runtime
-    ):
-        """producer 未给 detail（或无详情）时边界补最小条目——逐项一致是接口契约。"""
-        from wing.provider.pool import ProviderModels
-
-        mock_runtime.list_models = AsyncMock(
-            return_value=[
-                ProviderModels(provider="legacy", models=["a", "b"]),
-            ]
-        )
-
-        resp = client.get("/api/models")
-        assert resp.status_code == 200
-        group = resp.json()["providers"][0]
-        assert group["models"] == ["a", "b"]
-        assert [d["name"] for d in group["model_details"]] == ["a", "b"]
-        assert all(
-            d["capabilities"] == {"vision": False} for d in group["model_details"]
-        )
-
     def test_list_models_empty(self, client: TestClient, mock_runtime):
         """无 provider 时返回空分组列表。"""
-        mock_runtime.list_models = AsyncMock(return_value=[])
+        mock_runtime.list_models = MagicMock(return_value=[])
 
         resp = client.get("/api/models")
         assert resp.status_code == 200
         assert resp.json() == {"providers": []}
+
+
+class TestModelsCatalogFromConfig:
+    """真 runtime + 真 config：目录投影端到端（配置声明序 → wire，形状即契约）。
+
+    mock 掉的 runtime 只能证明 route 的胶水；这一组证明「目录 = 配置声明的静态
+    投影」——没有远端请求、没有平行数组、id 就是配置里写的那个。
+    """
+
+    @pytest.fixture
+    def catalog_client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        from wing.config import AgentConfig, Config, ModelSpec, ProviderConfig
+        from wing.gateway.server import GatewayServer
+        from wing.runtime import WingRuntime
+
+        config = Config(
+            providers=[
+                ProviderConfig(
+                    name="local",
+                    base_url="http://localhost:1/v1",
+                    api_key="k",
+                    models=[
+                        "dfmodel",
+                        ModelSpec(
+                            name="dfmodel-2026",
+                            display_name="DeepSeek-Flash",
+                            capabilities={"vision": True},  # ty: ignore[invalid-argument-type]
+                        ),
+                        ModelSpec(id="ds-flash", name="sonnet", display_name="Sonnet"),
+                    ],
+                ),
+            ],
+            agents=[AgentConfig(name="default", model="dfmodel")],
+        )
+        # 单例替换（与 conftest 的 _mock_config 同口径）：runtime 构造与路由都读它。
+        monkeypatch.setattr("wing.config.loader._config", config)
+        monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
+
+        with patch("wing.gateway.server.load_config") as mock_load_config:
+            mock_load_config.return_value = _mock_config()
+            server = GatewayServer()
+        server.runtime = WingRuntime()
+        with TestClient(server._app) as tc:
+            yield tc
+
+    def test_catalog_follows_declaration_order_and_ids(self, catalog_client):
+        resp = catalog_client.get("/api/models")
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "providers": [
+                {
+                    "provider": "local",
+                    "models": [
+                        {
+                            "id": "dfmodel",
+                            "name": "dfmodel",
+                            "display_name": None,
+                            "description": None,
+                            "capabilities": {"vision": False},
+                        },
+                        {
+                            "id": "dfmodel-2026",
+                            "name": "dfmodel-2026",
+                            "display_name": "DeepSeek-Flash",
+                            "description": None,
+                            "capabilities": {"vision": True},
+                        },
+                        {
+                            "id": "ds-flash",
+                            "name": "sonnet",
+                            "display_name": "Sonnet",
+                            "description": None,
+                            "capabilities": {"vision": False},
+                        },
+                    ],
+                }
+            ]
+        }
+
+    def test_catalog_builds_no_provider_instances(self, catalog_client):
+        """目录是纯配置投影：列目录不构造任何 provider 实例（旧实现经池懒建并发请求）。"""
+        import wing.provider.pool as pool_mod
+
+        resp = catalog_client.get("/api/models")
+        assert resp.status_code == 200
+        assert [m["id"] for m in resp.json()["providers"][0]["models"]] == [
+            "dfmodel",
+            "dfmodel-2026",
+            "ds-flash",
+        ]
+        assert pool_mod._pool._providers == {}
 
 
 # ============================================================

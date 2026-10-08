@@ -81,9 +81,14 @@ class ModelCapabilities(BaseModel):
 
 
 class ModelDetail(BaseModel):
-    """单条模型声明的详情（与同组 ``models`` 逐项同序对应）。"""
+    """单条模型声明（``ProviderModels.models`` 的元素）。
 
-    name: str = Field(description="实际调用名")
+    字段即线格式：``id`` 是全局唯一引用词（一切请求 / 协议引用它），``name`` 是
+    发给上游的调用名，``display_name`` 可空（前端回落 name）。
+    """
+
+    id: str = Field(description="模型 id（全局唯一引用词）")
+    name: str = Field(description="实际调用名（发给 provider API 的值）")
     display_name: str | None = Field(
         default=None, description="展示名（可空，前端回落 name）"
     )
@@ -94,15 +99,11 @@ class ModelDetail(BaseModel):
 
 
 class ProviderModels(BaseModel):
-    """单个 provider 的可用模型（嵌套模型列表条目）。"""
+    """单个 provider 的模型目录（嵌套模型列表条目）。"""
 
-    provider: str = Field(description="Provider 名称")
-    models: list[str] = Field(
-        default_factory=list, description="该 provider 的模型名列表"
-    )
-    model_details: list[ModelDetail] = Field(
-        default_factory=list,
-        description="模型声明详情；与 models 逐项同序同名（追加属性，可为空）",
+    provider: str = Field(description="Provider 名称（展示分组 + 运行期事实维度）")
+    models: list[ModelDetail] = Field(
+        default_factory=list, description="该 provider 声明的模型（配置声明序）"
     )
 
 

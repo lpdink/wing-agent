@@ -133,7 +133,7 @@ class TestModelDisplayName:
                     ],
                 )
             ],
-            agents=[AgentConfig(name="default", model="fancy", provider="p")],
+            agents=[AgentConfig(name="default", model="fancy")],
         )
         # 单例替换（conftest 的 autouse fixture 也走这个口；直接 import 的函数
         # 读的是模块全局 _config，patch get_config 名字对它们无效）。

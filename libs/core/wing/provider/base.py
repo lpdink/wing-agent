@@ -202,11 +202,6 @@ class ModelProvider(ABC):
         """
         ...  # pragma: no cover
 
-    @abstractmethod
-    async def list_models(self) -> list[str]:
-        """获取可用模型列表。"""
-        ...
-
     @property
     def thinking(self) -> bool:
         """thinking 的配置基线（无会话覆盖时请求会带什么）。

@@ -106,7 +106,6 @@ def install_provider() -> Callable[[ModelProvider], ModelProvider]:
 
     def _install(provider: ModelProvider) -> ModelProvider:
         pool_mod._pool._providers[provider.name] = provider
-        pool_mod._pool._configs[provider.name] = provider.config
         return provider
 
     return _install
@@ -125,10 +124,16 @@ def _mock_config():
     test_config = Config(
         providers=[
             ProviderConfig(
-                name="default", base_url="https://api.example.com", api_key="test"
+                name="default",
+                base_url="https://api.example.com",
+                api_key="test",
+                models=["gpt-4"],
             ),
             ProviderConfig(
-                name="alt", base_url="https://api.alt.com", api_key="test-alt"
+                name="alt",
+                base_url="https://api.alt.com",
+                api_key="test-alt",
+                models=["qwen3-max", "gpt-4o-mini", "claude-x"],
             ),
         ],
         agents=[

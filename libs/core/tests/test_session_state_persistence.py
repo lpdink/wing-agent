@@ -228,9 +228,10 @@ class TestProviderResetKeepsSessionSwitches:
                     base_url="https://a.example.com",
                     api_key="k",
                     max_retries=3,
+                    models=["gpt-4"],
                 )
             ],
-            agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
+            agents=[AgentConfig(name="default", model="gpt-4")],
         )
         monkeypatch.setattr("wing.config.loader._config", rotated)
         monkeypatch.setattr("wing.config.get_config", lambda: rotated)

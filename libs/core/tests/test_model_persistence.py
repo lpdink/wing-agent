@@ -227,7 +227,8 @@ class TestDegradation:
         self, sm, root, wing_logs, _mock_config
     ):
         """provider 在、model 不在其静态列表内：仍然还原，只打 warning。"""
-        _mock_config.providers[0].models = ["only-this-model"]
+        # 目录声明必须仍然覆盖模板引用的 model id（否则模板解析就该失败）
+        _mock_config.providers[0].models = ["gpt-4", "only-this-model"]
 
         session = sm.create_session()
         sid = session.session_id
@@ -249,11 +250,12 @@ class TestDegradation:
     ):
         """对象形态声明：模型在列表内（按实际调用名）时正常还原、不告警。"""
         _mock_config.providers[0].models = [
+            ModelSpec(name="gpt-4"),
             ModelSpec(
                 name="qwen3-max",
                 display_name="Qwen3 Max",
                 capabilities=ModelCapabilities(vision=True),
-            )
+            ),
         ]
 
         session = sm.create_session()
@@ -270,7 +272,10 @@ class TestDegradation:
         self, sm, root, wing_logs, _mock_config
     ):
         """对象形态声明：不在列表内仍只 warning 不阻断（与字符串形态同语义）。"""
-        _mock_config.providers[0].models = [ModelSpec(name="other-model")]
+        _mock_config.providers[0].models = [
+            ModelSpec(name="gpt-4"),
+            ModelSpec(name="other-model"),
+        ]
 
         session = sm.create_session()
         sid = session.session_id
