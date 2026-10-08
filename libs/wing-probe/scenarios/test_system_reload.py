@@ -274,8 +274,10 @@ async def test_reload_replaces_hook_registrations(probe: Probe) -> None:
     )
 
 
-#: 在途 reload 场景的慢速流（分片 4 字符 + 4ms 帧间隔 → 约 1s 的流；
-#: 目的是撑出「流已开始、尚未结束」的窗口，reload 落在窗口正中）。
+#: 在途 reload 场景的慢速流（分片 4 字符 + 30ms 帧间隔 → 约 0.9s 的流）。
+#: 窗口必须显著大于「reload 往返 + 调度抖动」，否则 reload 可能在流结束后
+#: 才落地——测试静默失去在途语义（旧代码也能过）。断言点见场景正文的
+#: 「reload 返回时该轮尚未收尾」。
 INFLIGHT_MODEL = "probe/reload-inflight"
 INFLIGHT_TEXT = (
     "reload-me-while-i-stream the-request-is-long-enough-to-keep-the-window-"
@@ -294,7 +296,7 @@ async def test_reload_during_inflight_stream_keeps_turn_alive(probe: Probe) -> N
     """
     probe.register(
         INFLIGHT_MODEL,
-        Turn.of(text=INFLIGHT_TEXT, chunk=4, delay=0.004),
+        Turn.of(text=INFLIGHT_TEXT, chunk=4, delay=0.03),
         Turn.of(text="after reload"),
     )
     session = await probe.session(model=INFLIGHT_MODEL)
@@ -312,6 +314,12 @@ async def test_reload_during_inflight_stream_keeps_turn_alive(probe: Probe) -> N
     await session.watch.expect("text", within=15)
 
     _assert_reload_items(await http.reload(), rebuilt_providers=1)
+    # reload 必须**落在在途轮内**：返回时该轮尚未收尾（窗口 ~0.9s，reload
+    # 往返毫秒级——这里没有等待，pending 是即时快照）。不这么钉，reload 若
+    # 飘到流结束后，所有后续断言在旧代码上也会通过——回归灵敏度靠它保住。
+    assert not [
+        event for event in session.watch.pending() if event.type == "turn_result"
+    ], "reload 返回时该轮已结束：场景没压中在途窗口（调大 delay 或检查调度）"
 
     # ── 在途轮：照常收尾（success），落盘完整、无错误单元 ──
     turn = await session.watch.expect("turn_result", within=30)

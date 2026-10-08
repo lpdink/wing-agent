@@ -119,14 +119,30 @@ class ReActLoop:
         self.max_turns: int | None = None
         self.steer: bool = get_config().steer
         # `with_retry` 参数解析源（装饰器经实例的 `_config` 读取
-        # max_retries / max_retry_delay）：WingAgent 同步当前 provider 的
-        # config；None → 默认口径（见 with_retry）。测试可注入小值避免真实等待。
-        self._config: object | None = None
+        # max_retries / max_retry_delay）——见 `_config` property：
+        # 默认实时跟随当前 provider 配置，测试可注入替身覆盖。
+        self._config_override: object | None = None
         # 当前一轮 LLM 调用的流累积状态（未提交内容的唯一权威）。
         # _call_llm 入口新建并登记，轮提交/中断补提交/turn 收口后置空。
         # 未提交投影（uncommitted_message / uncommitted_tools）按需快照它，
         # 不缓存副本。
         self._current_acc: "StreamAccumulator | None" = None
+
+    @property
+    def _config(self) -> object | None:
+        """重试参数解析源（`with_retry` 经实例的 `_config` 读取）。
+
+        实时跟随当前 provider 的配置——池换新（reload）后**无需任何逐会话
+        同步**；每次 `_call_llm_validated` 入口解析一次（单条重试阶梯内不
+        中途变更）。测试可经 setter 注入小值替身，避免真实等待。
+        """
+        if self._config_override is not None:
+            return self._config_override
+        return self._current_provider().config
+
+    @_config.setter
+    def _config(self, value: object | None) -> None:
+        self._config_override = value
 
     @property
     def current_acc(self) -> "StreamAccumulator | None":

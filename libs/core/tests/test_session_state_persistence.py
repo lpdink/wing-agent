@@ -206,6 +206,40 @@ class TestProviderResetKeepsSessionSwitches:
         assert body["enable_thinking"] is False
         assert body["reasoning_effort"] == "low"
 
+    @pytest.mark.asyncio
+    async def test_pool_reset_refreshes_loop_retry_config(self, sm, monkeypatch):
+        """reload 后 loop 的无效轮次重试口径跟随新 provider 配置。
+
+        回归（审查发现）：旧实现逐会话 rebuild 时同步 `_loop._config`；共享池
+        化后没有逐会话同步点——`_config` 改为实时解析当前 provider 配置，
+        reload 换新后自动生效（无需任何广播 / 重贴）。
+        """
+        from wing.config import AgentConfig, Config, ProviderConfig
+        from wing.provider.pool import reset_providers
+
+        session = sm.create_session()
+        loop = session.agent._loop
+        assert loop._config is session.agent.model_provider.config
+
+        rotated = Config(
+            providers=[
+                ProviderConfig(
+                    name="default",
+                    base_url="https://a.example.com",
+                    api_key="k",
+                    max_retries=3,
+                )
+            ],
+            agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
+        )
+        monkeypatch.setattr("wing.config.loader._config", rotated)
+        monkeypatch.setattr("wing.config.get_config", lambda: rotated)
+
+        assert await reset_providers() == 1
+
+        assert loop._config is session.agent.model_provider.config
+        assert loop._config.max_retries == 3
+
 
 class TestHookFiringFollowsSessionId:
     """hook 语义：session id 变化（create / fork）触发；resume（同 id）不触发。"""

@@ -248,12 +248,14 @@ class Compactor:
         ]
         messages = request_messages + [Message(role="user", content=prompt)]
 
+        # 消费完整（非流式路径只产出一个响应）：不 break——被 break 放弃的
+        # 生成器要到 finalizer 才收尾，provider 的在途计数（退场「排空即关」
+        # 的依据）会白挂一程。
         response = None
         async for item in model_provider.generate(
             messages, model, tools=tools, stream=False, options=options
         ):
             response = item
-            break
 
         if response is None:
             response = LLMResponse(content="")

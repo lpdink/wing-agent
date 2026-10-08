@@ -203,8 +203,6 @@ class WingAgent:
             stream=stream,
             set_working=self._set_working,
         )
-        # 重试口径跟随当前 provider 的配置（构造与切换时同步；见 ReActLoop._config）
-        self._loop._config = self.model_provider.config
 
         # ── 工具集 ──
         self._tools: dict[str, Tool] = self._bind_tools(tools or [])
@@ -433,7 +431,6 @@ class WingAgent:
             get_provider(provider_name)  # 校验（不可解析 → raise，状态不变）
             self._provider_name = provider_name
         self.model = model
-        self._loop._config = self.model_provider.config  # 重试口径跟随 provider
 
     def set_reasoning_effort(self, effort: str | None) -> None:
         """设置会话级推理力度覆盖（None = 跟随 provider 配置默认）。"""

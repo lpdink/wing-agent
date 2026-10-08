@@ -17,10 +17,24 @@ import asyncio
 
 import pytest
 
-from wing.config import AgentConfig, Config, ProviderConfig
+from wing.config import AgentConfig, Config, ModelSpec, ProviderConfig
 from wing.provider.base import ModelProvider, ProviderClosedError
 from wing.provider.pool import ProviderPool
 from wing.schema import LLMResponse, Message
+
+
+class _FailingProvider(ModelProvider):
+    """list_models 恒失败的受控 provider（聚合失败落空的测试桩）。"""
+
+    def __init__(self, name: str) -> None:
+        super().__init__()
+        self._config = ProviderConfig(name=name, base_url="http://x", api_key="k")
+
+    def _generate(self, *args, **kwargs):
+        raise NotImplementedError
+
+    async def list_models(self) -> list[str]:
+        raise RuntimeError("boom")
 
 
 class _ControlledProvider(ModelProvider):
@@ -237,6 +251,47 @@ class TestListAllModels:
         assert a._closed is True
         assert b._closed is True
         assert pool._providers == {}
+
+    @pytest.mark.asyncio
+    async def test_single_failure_falls_back_to_empty_group(self, monkeypatch):
+        """单个 provider 查询失败落空，不影响其余分组（registry 时代的既有契约）。"""
+        monkeypatch.setattr("wing.config.loader._config", _config("default", "alt"))
+        pool = ProviderPool()
+        _install(pool, _FailingProvider("default"), _ControlledProvider("alt"))
+
+        groups = await pool.list_all_models()
+
+        by_name = {group.provider: group for group in groups}
+        assert by_name["default"].models == []
+        assert by_name["alt"].models == ["m1"]
+
+    @pytest.mark.asyncio
+    async def test_details_align_with_static_declarations(self, monkeypatch):
+        """声明的模型带元信息（display_name / description）；details 与 models 逐项同序同名。"""
+        cfg = Config(
+            providers=[
+                ProviderConfig(
+                    name="default",
+                    base_url="http://x",
+                    api_key="k",
+                    models=[
+                        ModelSpec(name="fancy", display_name="Fancy", description="d"),
+                        "plain",
+                    ],
+                )
+            ],
+            agents=[AgentConfig(name="default", model="fancy", provider="default")],
+        )
+        monkeypatch.setattr("wing.config.loader._config", cfg)
+        pool = ProviderPool()
+
+        (group,) = await pool.list_all_models()
+
+        assert group.models == ["fancy", "plain"]
+        assert [detail.name for detail in group.model_details] == group.models
+        assert group.model_details[0].display_name == "Fancy"
+        assert group.model_details[0].description == "d"
+        assert group.model_details[1].display_name is None  # 远端发现 / 裸名最小条目
 
 
 async def _collect(provider: ModelProvider, sink: list[LLMResponse]) -> None:

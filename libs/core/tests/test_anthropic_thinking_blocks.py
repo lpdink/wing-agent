@@ -769,9 +769,9 @@ class TestProviderLifecycle:
     def _use_config(monkeypatch: pytest.MonkeyPatch, cfg: Config) -> None:
         """让所有读取方都看到 cfg。
 
-        池在调用点惰性取 ``wing.config.get_config``（conftest 会把它 patch 成
-        固定值，测试内再 patch 即覆盖）；其余模块（session / agent / CM）持有
-        的是原始函数引用，读 ``loader._config`` 单例——两处都要指到同一份。
+        池在调用点惰性取 ``wing.config.get_config``（名字 patch 即覆盖）；
+        其余模块（session / agent / CM）持有的是原始函数引用，读
+        ``loader._config`` 单例——两处都要指到同一份。
         """
         monkeypatch.setattr("wing.config.get_config", lambda: cfg)
         monkeypatch.setattr("wing.config.loader._config", cfg)
