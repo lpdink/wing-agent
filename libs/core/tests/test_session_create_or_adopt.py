@@ -225,7 +225,7 @@ class TestAdoptAppliesResumeSubset:
 
         assert adopted is created
         assert adopted.agent.model == "gpt-4o-mini"
-        assert adopted.agent.model_provider.reasoning_effort == "high"
+        assert adopted.agent.reasoning_effort == "high"
         assert sorted(tool_refs(adopted.agent.tools)) == ["Bash", "Read"]
 
         metadata = adopted.store.load_metadata(CUSTOM_ID)
@@ -297,7 +297,7 @@ class TestResumeOverrideSubset:
 
         assert resumed is session
         assert resumed.agent.model == "gpt-4o-mini"
-        assert resumed.agent.model_provider.reasoning_effort == "low"
+        assert resumed.agent.reasoning_effort == "low"
         assert _roles(resumed) == ["user"]
 
     @pytest.mark.asyncio

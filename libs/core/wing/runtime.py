@@ -48,7 +48,7 @@ from wing.system import ReloadResult, reload_system as _reload_system
 from wing.store import FileSessionStore, MemorySessionStore, SessionStore
 
 if TYPE_CHECKING:
-    from wing.provider.registry import ProviderModels
+    from wing.provider.pool import ProviderModels
     from wing.session import AgentOverride, AgentTemplateManager
 
 
@@ -305,6 +305,7 @@ class WingRuntime:
             model_provider=session.agent.model_provider,
             current_tools=lambda: session.agent.tools,
             instruction=instruction,
+            options=session.agent.request_options(),
         )
 
         self._emit_session_event(
@@ -452,10 +453,10 @@ class WingRuntime:
                 model_display_name=session.agent.model_display_name
                 if model_emitted
                 else None,
-                thinking=session.agent.model_provider.thinking
+                thinking=session.agent.thinking
                 if thinking is not None or agent_switched
                 else None,
-                reasoning_effort=session.agent.model_provider.reasoning_effort
+                reasoning_effort=session.agent.reasoning_effort
                 if reasoning_effort is not None or agent_switched
                 else None,
                 yolo=session.agent.yolo if yolo is not None or agent_switched else None,
@@ -471,10 +472,10 @@ class WingRuntime:
     async def list_models(self) -> list["ProviderModels"]:
         """可用模型列表（跨 provider 聚合，按 provider 分组）。
 
-        转发 provider 包 registry（模块级持有所有 provider client；配置了
+        转发 provider 共享池（全部会话共用同一批 provider 实例；配置了
         静态 models 的 provider 跳过请求）。gateway 路由经此获取，不感知 config。
         """
-        from wing.provider.registry import list_all_models
+        from wing.provider.pool import list_all_models
 
         return await list_all_models()
 

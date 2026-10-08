@@ -168,7 +168,7 @@ class TestApplyAgentOverride:
         override = AgentOverride(effort="high")
         session.apply_agent_override(override)
 
-        assert session.agent.model_provider.reasoning_effort == "high"
+        assert session.agent.reasoning_effort == "high"
 
     @pytest.mark.asyncio
     async def test_none_fields_not_overridden(self, runtime: Any):
@@ -178,7 +178,7 @@ class TestApplyAgentOverride:
         original_prompt = session.context_manager.setin_system_prompt
         original_tools = [t.name for t in session.agent.tools]
         original_max_turns = session.agent.max_turns
-        original_effort = session.agent.model_provider.reasoning_effort
+        original_effort = session.agent.reasoning_effort
 
         override = AgentOverride()  # All None
         session.apply_agent_override(override)
@@ -187,7 +187,7 @@ class TestApplyAgentOverride:
         assert session.context_manager.setin_system_prompt == original_prompt
         assert [t.name for t in session.agent.tools] == original_tools
         assert session.agent.max_turns == original_max_turns
-        assert session.agent.model_provider.reasoning_effort == original_effort
+        assert session.agent.reasoning_effort == original_effort
 
     @pytest.mark.asyncio
     async def test_override_via_create_session(self, runtime: Any):
@@ -201,7 +201,7 @@ class TestApplyAgentOverride:
 
         assert session.agent.model == "gpt-4o"
         assert session.agent.max_turns == 25
-        assert session.agent.model_provider.reasoning_effort == "low"
+        assert session.agent.reasoning_effort == "low"
 
 
 # ============================================================
@@ -262,10 +262,10 @@ class TestWingAgentSetters:
         agent = session.agent
 
         agent.set_reasoning_effort("low")
-        assert agent.model_provider.reasoning_effort == "low"
+        assert agent.reasoning_effort == "low"
 
         agent.set_reasoning_effort(None)
-        assert agent.model_provider.reasoning_effort is None
+        assert agent.reasoning_effort is None
 
     @pytest.mark.asyncio
     async def test_bind_tools_llm_name_collision_raises(self, runtime: Any):

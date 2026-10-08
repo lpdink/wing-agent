@@ -22,7 +22,9 @@ import pytest
 
 from wing.config import AgentConfig, Config, ProviderConfig
 from wing.provider.anthropic.provider import AnthropicProvider
+from wing.provider.base import RequestOptions
 from wing.provider.openai.provider import OpenAICompatProvider
+from wing.provider.pool import get_provider, reset_providers
 from wing.schema import (
     Message,
     TextBlock,
@@ -629,24 +631,30 @@ class TestThinkingStatus:
 
     @pytest.mark.asyncio
     async def test_interleaved_beta_header_follows_thinking_state(self):
-        """beta header 每请求计算，跟随运行时 thinking 状态（不固化在 client）。
+        """beta header 每请求计算，跟随会话级 thinking 覆盖（不固化在 client）。
 
         缺 interleaved beta header 则工具轮次间不会产生多块 thinking，
-        故运行时 set_thinking() 切换后 header 必须跟随。
+        故 options.thinking 覆盖后 header 必须跟随；无覆盖 = 配置基线。
         """
-        p = _make_anthropic({"thinking": {"type": "enabled"}})
+        enabled = _make_anthropic({"thinking": {"type": "enabled"}})
+        disabled = _make_anthropic({"thinking": {"type": "disabled"}})
         try:
-            assert p._request_headers() == {
+            assert enabled._request_headers() == {
                 "anthropic-beta": "interleaved-thinking-2025-05-14"
             }
-            # 运行时关闭 → 下次请求 header 跟随
-            p.set_thinking(False)
-            assert p._request_headers() == {}
-            # 再启用 → 跟随恢复
-            p.set_thinking(True)
-            assert "anthropic-beta" in p._request_headers()
+            # 覆盖关闭 → 下次请求 header 跟随（配置基线不受影响）
+            assert enabled._request_headers(RequestOptions(thinking=False)) == {}
+            assert "anthropic-beta" in enabled._request_headers(
+                RequestOptions(thinking=True)
+            )
+            # 配置禁用 + 覆盖启用 → 跟随恢复
+            assert disabled._request_headers() == {}
+            assert "anthropic-beta" in disabled._request_headers(
+                RequestOptions(thinking=True)
+            )
         finally:
-            await p.aclose()
+            await enabled.aclose()
+            await disabled.aclose()
 
     @pytest.mark.asyncio
     async def test_static_headers_have_no_beta(self):
@@ -656,35 +664,36 @@ class TestThinkingStatus:
         assert headers["x-api-key"] == "sk"
 
     @pytest.mark.asyncio
-    async def test_set_thinking_roundtrip_self_consistent(self):
-        """set_thinking 改写 extra_body（payload 源）：property / 请求体 /
-        beta header 全部跟随，无第二份状态。"""
+    async def test_thinking_override_roundtrip_self_consistent(self):
+        """会话级 thinking 覆盖（RequestOptions）的往返自洽：请求体跟随覆盖，
+        共享 extra_body（配置基线）零改写——覆盖只活在 per-request 视图里。"""
         p = _make_anthropic({"thinking": {"type": "enabled", "budget_tokens": 8192}})
         try:
             msgs = [Message(role="user", content="hi")]
 
-            # 关闭：body thinking.type=disabled，且按 Anthropic 校验剥离 budget
-            p.set_thinking(False)
-            assert p.thinking is False
-            body = p._build_body(msgs, "claude-x", None, False)
+            # 覆盖关闭：body thinking.type=disabled，且按校验剥离 budget
+            body = p._build_body(
+                msgs, "claude-x", None, False, RequestOptions(thinking=False)
+            )
             assert body["thinking"] == {"type": "disabled"}
-            # 状态层保留用户原预算（再启用时恢复）
+            # 共享状态保留用户原预算；配置基线不变（无覆盖时仍启用）
             assert p._extra_body["thinking"]["budget_tokens"] == 8192
-
-            # 再启用：用户原预算原样恢复（非默认值）
-            p.set_thinking(True)
             assert p.thinking is True
-            body = p._build_body(msgs, "claude-x", None, False)
+
+            # 覆盖启用：用户原预算原样恢复（非默认值）
+            body = p._build_body(
+                msgs, "claude-x", None, False, RequestOptions(thinking=True)
+            )
             assert body["thinking"] == {"type": "enabled", "budget_tokens": 8192}
         finally:
             await p.aclose()
 
     @pytest.mark.asyncio
-    async def test_set_thinking_does_not_mutate_provider_config(self):
-        """set_thinking 不得写穿全局 ProviderConfig（extra_body 深拷贝）。
+    async def test_thinking_override_does_not_mutate_provider_config(self):
+        """会话级覆盖不得写穿共享配置（ProviderConfig / 实例 extra_body 皆只读）。
 
-        嵌套的 thinking dict 若与 config 共享引用，运行时开关会污染同进程
-        其他会话与按配置重建的 provider（review 发现：潜拷贝 + setdefault）。
+        嵌套的 thinking dict 若被覆盖逻辑原地改写，会污染同进程其他会话
+        与池中其他引用者（review 发现：浅拷贝 + setdefault 的历史坑）。
         """
         cfg = ProviderConfig(
             name="test-anthropic",
@@ -695,27 +704,38 @@ class TestThinkingStatus:
         )
         p = AnthropicProvider(cfg)
         try:
-            p.set_thinking(True)
-            assert p.thinking is True
-            # 全局配置保持原样（budget 不得渗进 cfg.extra_body）
+            msgs = [Message(role="user", content="hi")]
+            body = p._build_body(
+                msgs, "claude-x", None, False, RequestOptions(thinking=True)
+            )
+            assert body["thinking"]["type"] == "enabled"
+            # 覆盖不落共享状态：配置基线 / 实例视图均保持原样（budget 不渗入）
+            assert p.thinking is False
             assert cfg.extra_body == {"thinking": {"type": "disabled"}}
+            assert p._extra_body == {"thinking": {"type": "disabled"}}
         finally:
             await p.aclose()
 
     @pytest.mark.asyncio
-    async def test_set_thinking_enable_fills_default_budget(self):
-        """无 thinking 配置时启用：补默认预算（type=enabled 必带 budget）。"""
+    async def test_thinking_override_enable_fills_default_budget(self):
+        """无 thinking 配置时覆盖启用：补默认预算（type=enabled 必带 budget）。"""
         from wing.provider.anthropic.provider import _DEFAULT_THINKING_BUDGET
 
         p = _make_anthropic({})
         try:
-            p.set_thinking(True)
-            assert p.thinking is True
-            body = p._build_body([Message(role="user", content="hi")], "m", None, False)
+            body = p._build_body(
+                [Message(role="user", content="hi")],
+                "m",
+                None,
+                False,
+                RequestOptions(thinking=True),
+            )
             assert body["thinking"] == {
                 "type": "enabled",
                 "budget_tokens": _DEFAULT_THINKING_BUDGET,
             }
+            # 共享状态不被覆盖污染
+            assert p._extra_body == {}
         finally:
             await p.aclose()
 
@@ -724,6 +744,18 @@ class TestThinkingStatus:
 
 
 class TestProviderLifecycle:
+    """共享池的所有权语义（provider 无状态化后）。
+
+    旧模型（每 agent 一份 client 表、切模板 / 逐出 / reload 时关闭）已废弃：
+    #172 的根因正是「重建即关闭」把在途重试钉死在退场实例上。新语义：
+
+    - 实例归全局池（``wing.provider.pool``），agent 只持有 name；
+    - 同名的全部会话共享同一个实例（FD 不再按会话 × provider 放大）；
+    - 切 provider / 切模板 / 逐出不关闭任何 client（其他会话可能正在用）；
+    - reload = 池 reset：新配置建新实例替换，旧实例 retire（无在途即刻关闭，
+      有在途则等收尾——在途请求绝不被打断）。
+    """
+
     @pytest.fixture
     def sm(self):
         from wing.session import SessionManager
@@ -733,17 +765,25 @@ class TestProviderLifecycle:
             {"memory": MemorySessionStore()}, default_backend="memory"
         )
 
-    @pytest.mark.asyncio
-    async def test_cross_provider_switch_keeps_old_client(self, sm, monkeypatch):
-        """跨 provider 切模型：旧 client 不关闭（不打断在途）、切回同名复用。"""
-        session = sm.create_session()
-        old_provider = session.agent.model_provider
-        assert old_provider.name == "default"
+    @staticmethod
+    def _use_config(monkeypatch: pytest.MonkeyPatch, cfg: Config) -> None:
+        """让所有读取方都看到 cfg。
 
-        two = Config(
+        池在调用点惰性取 ``wing.config.get_config``（conftest 会把它 patch 成
+        固定值，测试内再 patch 即覆盖）；其余模块（session / agent / CM）持有
+        的是原始函数引用，读 ``loader._config`` 单例——两处都要指到同一份。
+        """
+        monkeypatch.setattr("wing.config.get_config", lambda: cfg)
+        monkeypatch.setattr("wing.config.loader._config", cfg)
+
+    @staticmethod
+    def _two_provider_config(api_key: str = "k") -> Config:
+        return Config(
             providers=[
                 ProviderConfig(
-                    name="default", base_url="https://a.example.com", api_key="k"
+                    name="default",
+                    base_url="https://a.example.com",
+                    api_key=api_key,
                 ),
                 ProviderConfig(
                     name="p2", base_url="https://b.example.com", api_key="k"
@@ -751,151 +791,109 @@ class TestProviderLifecycle:
             ],
             agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
         )
-        monkeypatch.setattr("wing.agent.core.get_config", lambda: two)
 
-        # 跨 provider 切模型
+    @pytest.mark.asyncio
+    async def test_same_provider_name_shares_one_instance_across_sessions(self, sm):
+        """同名 provider 在全进程只有一个实例：多会话共享（FD 不再按会话放大）。"""
+        s1 = sm.create_session()
+        s2 = sm.create_session()
+        assert s1.agent.model_provider is s2.agent.model_provider
+        assert s1.agent.model_provider is get_provider("default")
+
+    @pytest.mark.asyncio
+    async def test_cross_provider_switch_resolves_from_pool(self, sm, monkeypatch):
+        """跨 provider 切模型：实例经池解析；切回同名复用同一实例（client 不重建）。"""
+        self._use_config(monkeypatch, self._two_provider_config())
+        session = sm.create_session()
+        p_default = session.agent.model_provider
+        assert p_default.name == "default"
+
         session._apply_model("model-2", provider_name="p2")
         assert session.agent.model_provider.name == "p2"
-        # 旧 client 未被关闭（在途生成不被打断）
-        assert old_provider._client.is_closed is False
-        # 旧 provider 仍被 agent 有界持有（Session 不持有 provider）
-        assert session.agent._providers["default"] is old_provider
-        assert not hasattr(session, "_providers")
+        assert session.agent.model_provider is not p_default
+        # 旧实例仍在池中可用（其他会话可能钉着它），未被关闭
+        assert p_default._client.is_closed is False
+        assert get_provider("default") is p_default
 
-        # 切回 default：复用缓存的 client（同一对象），而非新建
+        # 切回 default：复用池中同一实例，而非新建
         session._apply_model("model-3", provider_name="default")
-        assert session.agent.model_provider is old_provider
+        assert session.agent.model_provider is p_default
 
     @pytest.mark.asyncio
-    async def test_same_provider_model_switch_no_new_client(self, sm):
-        """同 provider 内切模型（provider_name 与当前相同）不创建新 provider。"""
-        session = sm.create_session()
-        original = session.agent.model_provider
-        session._apply_model("new-model", provider_name="default")
-        assert session.agent.model_provider is original
-        assert session.agent.model == "new-model"
-
-    @pytest.mark.asyncio
-    async def test_switch_template_closes_old_agent_providers(self, sm, monkeypatch):
-        """模板切换：旧 agent 的整个 provider 表被关闭，新 agent 从空表开始。
-
-        锁定 bot#1 修复：switch_template 后不得交回已关闭的 client。
-        """
+    async def test_switch_template_keeps_shared_clients_open(self, sm):
+        """模板切换不关闭任何 client：实例归池，新 agent 解析到同一共享实例。"""
         from wing.session import AgentTemplate
 
         session = sm.create_session()
+        p_default = session.agent.model_provider
         agent_v1 = session.agent
-        p_default = agent_v1.model_provider
 
-        # 先跨 provider 用一次 p2，使旧 agent 表中含两个 client
-        two = Config(
-            providers=[
-                ProviderConfig(
-                    name="default", base_url="https://a.example.com", api_key="k"
-                ),
-                ProviderConfig(
-                    name="p2", base_url="https://b.example.com", api_key="k"
-                ),
-            ],
-            agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
-        )
-        monkeypatch.setattr("wing.agent.core.get_config", lambda: two)
-        monkeypatch.setattr("wing.session.session.get_config", lambda: two)
-        session._apply_model("model-2", provider_name="p2")
-        p2 = agent_v1._providers["p2"]
-
-        # 切换模板（回到 default provider 的新 agent）
         template = AgentTemplate(name="default", model="gpt-4", provider_name="default")
         await session.switch_template(template)
 
-        # 旧 agent 的两个 client 全部关闭
-        assert p_default._client.is_closed is True
-        assert p2._client.is_closed is True
-        assert agent_v1._providers == {}
-        # 新 agent 是另一实例，持有全新的活跃 provider
+        assert p_default._client.is_closed is False
         assert session.agent is not agent_v1
-        assert session.agent.model_provider.name == "default"
-        assert session.agent.model_provider._client.is_closed is False
+        assert session.agent.model_provider is p_default
 
     @pytest.mark.asyncio
-    async def test_rebuild_providers_evicts_all_and_recreates_active(
+    async def test_reload_resets_pool_and_retires_idle_instances(self, sm, monkeypatch):
+        """reload（池 reset）：按新配置建新实例替换；无在途的旧实例即刻退场关闭。"""
+        session = sm.create_session()
+        old = session.agent.model_provider
+
+        self._use_config(monkeypatch, self._two_provider_config(api_key="NEW-KEY"))
+        rebuilt = await reset_providers()
+
+        assert rebuilt == 2  # default + p2
+        new = session.agent.model_provider
+        assert new is not old
+        assert old._client.is_closed is True  # 无在途 → 退场即关闭
+        assert new._client.is_closed is False
+        assert new._config.api_key == "NEW-KEY"
+
+    @pytest.mark.asyncio
+    async def test_reload_failure_keeps_pool_intact(self, sm, monkeypatch):
+        """先建后换：任一 provider 构建失败时池保持原样（会话不被钉死）。"""
+        session = sm.create_session()
+        old = session.agent.model_provider
+
+        import wing.provider.pool as pool_mod
+
+        def _boom(cfg):
+            raise ValueError(f"unsupported protocol: '{cfg.protocol}'")
+
+        monkeypatch.setattr(pool_mod, "create_provider", _boom)
+        with pytest.raises(ValueError, match="unsupported protocol"):
+            await reset_providers()
+
+        # 池未被改动：旧 client 未关闭、活跃 provider 不变
+        assert old._client.is_closed is False
+        assert session.agent.model_provider is old
+
+    @pytest.mark.asyncio
+    async def test_removed_provider_stays_usable_for_pinned_sessions(
         self, sm, monkeypatch
     ):
-        """驱逐重建：表中 client 全部关闭驱逐，活跃 provider 按新配置重建。
-
-        锁定 bot#2 修复：api_key 轮换经 reload（驱逐重建）自然生效。
-        """
+        """配置移除某 provider：池保留旧实例——钉在它上面的会话不被 reload 拆解。"""
+        self._use_config(monkeypatch, self._two_provider_config())
         session = sm.create_session()
-        agent = session.agent
-        old_provider = agent.model_provider
+        session._apply_model("model-2", provider_name="p2")
+        p2 = session.agent.model_provider
 
-        two = Config(
+        # 新配置只剩 default（p2 被移除）
+        only_default = Config(
             providers=[
                 ProviderConfig(
                     name="default", base_url="https://a.example.com", api_key="k"
                 ),
-                ProviderConfig(
-                    name="p2", base_url="https://b.example.com", api_key="k"
-                ),
             ],
             agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
         )
-        monkeypatch.setattr("wing.agent.core.get_config", lambda: two)
-        # 表中放入第二个 provider（模拟跨 provider 用过）
-        session._apply_model("model-2", provider_name="p2")
-        p2 = agent._providers["p2"]
-        session._apply_model("model-3", provider_name="default")
+        self._use_config(monkeypatch, only_default)
+        await reset_providers()
 
-        # 新配置：default 的 api_key 轮换
-        rotated = Config(
-            providers=[
-                ProviderConfig(
-                    name="default", base_url="https://a.example.com", api_key="NEW-KEY"
-                ),
-            ],
-            agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
-        )
-        monkeypatch.setattr("wing.agent.core.get_config", lambda: rotated)
-
-        await agent.rebuild_providers()
-
-        # 旧 client 全部关闭、驱逐
-        assert old_provider._client.is_closed is True
-        assert p2._client.is_closed is True
-        # 活跃 provider 按新配置重建（新实例、新 key），model 名保持
-        assert agent.model_provider is not old_provider
-        assert agent.model_provider._client.is_closed is False
-        assert agent._providers == {"default": agent.model_provider}
-        assert agent.model == "model-3"
-
-    @pytest.mark.asyncio
-    async def test_rebuild_failure_keeps_old_clients_live(self, sm, monkeypatch):
-        """先建后关：重建失败时旧 client 保持可用，session 不被钉死。
-
-        场景：新配置移除了活跃 provider 名 → get_provider 抛错；此时旧
-        client 必须仍然打开、agent 状态不变（而非关了一切后重建失败）。
-        """
-        session = sm.create_session()
-        agent = session.agent
-        old_provider = agent.model_provider
-
-        empty = Config(
-            providers=[
-                ProviderConfig(
-                    name="other", base_url="https://b.example.com", api_key="k"
-                )
-            ],
-            agents=[AgentConfig(name="default", model="gpt-4", provider="other")],
-        )
-        monkeypatch.setattr("wing.agent.core.get_config", lambda: empty)
-
-        with pytest.raises(ValueError, match="provider 'default' not found"):
-            await agent.rebuild_providers()
-
-        # 旧 client 未关闭、活跃 provider 与表均不变
-        assert old_provider._client.is_closed is False
-        assert agent.model_provider is old_provider
-        assert agent._providers["default"] is old_provider
+        assert p2._client.is_closed is False
+        assert session.agent.model_provider is p2
 
 
 # ─── OpenAI-compat 覆盖 ──────────────────────────────────────────
@@ -1107,23 +1105,21 @@ class TestOpenAICompat:
             await p.aclose()
 
     @pytest.mark.asyncio
-    async def test_set_thinking_flips_body_and_status(self):
-        """set_thinking 改写 extra_body（payload 源）：请求体与 property 同步翻转。"""
+    async def test_thinking_override_flips_body_only(self):
+        """options.thinking 覆盖：请求体跟随翻转；共享状态（配置基线）零改写。"""
         p = self._make()
         try:
-            p.set_thinking(False)
-            assert p.thinking is False
+            msgs = [Message(role="user", content="hi")]
             body = p._build_body(
-                [Message(role="user", content="hi")], "gpt-4", None, False
+                msgs, "gpt-4", None, False, RequestOptions(thinking=False)
             )
             assert body["enable_thinking"] is False
             # preserve_thinking 不随开关变化（与 develop 基线一致：恒真）
             assert body["preserve_thinking"] is True
+            assert p.thinking is True  # 无覆盖时的基线不受影响
 
-            p.set_thinking(True)
-            assert p.thinking is True
             body = p._build_body(
-                [Message(role="user", content="hi")], "gpt-4", None, False
+                msgs, "gpt-4", None, False, RequestOptions(thinking=True)
             )
             assert body["enable_thinking"] is True
         finally:

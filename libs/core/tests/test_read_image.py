@@ -683,17 +683,17 @@ class TestAgentCapabilities:
             ModelSpec(name="vision-model", capabilities=ModelCapabilities(vision=True)),
         ]
 
-        agent.set_model("vision-model", agent.model_provider)
+        agent.set_model("vision-model")
         assert agent.capabilities.vision is True
 
         # 声明了但没开 vision → 安全默认 false
-        agent.set_model("text-model", agent.model_provider)
+        agent.set_model("text-model")
         assert agent.capabilities.vision is False
 
         # 完全未声明 → false（不做名字启发式）
-        agent.set_model("undeclared-model", agent.model_provider)
+        agent.set_model("undeclared-model")
         assert agent.capabilities.vision is False
 
         # 切回来仍然是实时解析（无缓存）
-        agent.set_model("vision-model", agent.model_provider)
+        agent.set_model("vision-model")
         assert agent.capabilities.vision is True

@@ -35,6 +35,7 @@ def _make_loop() -> ReActLoop:
         current_model=lambda: "test-model",
         current_provider=lambda: None,  # ty: ignore[invalid-argument-type]
         current_tools=lambda: [],
+        current_options=lambda: None,  # ty: ignore[invalid-argument-type]
         stream=True,
     )
 

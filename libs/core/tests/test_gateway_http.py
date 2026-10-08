@@ -1171,7 +1171,7 @@ class TestSystemModels:
     def test_list_models_ok(self, client: TestClient, mock_runtime):
         """正常获取模型列表（按 provider 分组嵌套 + 逐项对应的 model_details）。"""
         from wing.config import ModelCapabilities
-        from wing.provider.registry import ModelDetail, ProviderModels
+        from wing.provider.pool import ModelDetail, ProviderModels
 
         mock_runtime.list_models = AsyncMock(
             return_value=[
@@ -1237,7 +1237,7 @@ class TestSystemModels:
         self, client: TestClient, mock_runtime
     ):
         """producer 未给 detail（或无详情）时边界补最小条目——逐项一致是接口契约。"""
-        from wing.provider.registry import ProviderModels
+        from wing.provider.pool import ProviderModels
 
         mock_runtime.list_models = AsyncMock(
             return_value=[

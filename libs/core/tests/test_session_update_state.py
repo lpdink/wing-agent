@@ -49,17 +49,17 @@ class TestSessionUpdateState:
     async def test_update_thinking(self, sm):
         """开关 thinking 模式。"""
         session = sm.create_session()
-        original = session.agent.model_provider.thinking
+        original = session.agent.thinking
 
         await session.update_state(thinking=not original)
-        assert session.agent.model_provider.thinking == (not original)
+        assert session.agent.thinking == (not original)
 
     @pytest.mark.asyncio
     async def test_update_reasoning_effort(self, sm):
         """设置推理力度。"""
         session = sm.create_session()
         await session.update_state(reasoning_effort="high")
-        assert session.agent.model_provider.reasoning_effort == "high"
+        assert session.agent.reasoning_effort == "high"
 
     @pytest.mark.asyncio
     async def test_update_yolo(self, sm):
@@ -106,8 +106,8 @@ class TestSessionUpdateState:
 
         assert session.agent.model == "gpt-4o-mini"
         assert session.session_name == "Multi Update"
-        assert session.agent.model_provider.thinking is True
-        assert session.agent.model_provider.reasoning_effort == "medium"
+        assert session.agent.thinking is True
+        assert session.agent.reasoning_effort == "medium"
         assert session.agent.yolo is True
 
 
@@ -185,13 +185,13 @@ class TestNonUtf8UpdateState:
         self, file_sm: SessionManager
     ):
         session = file_sm.create_session(session_id="U-2")
-        before = session.agent.model_provider.reasoning_effort
+        before = session.agent.reasoning_effort
 
         with pytest.raises(ValueError) as failure:
             await session.update_state(reasoning_effort="\ud800")
         assert "reasoning_effort must be UTF-8 encodable" in str(failure.value)
 
-        assert session.agent.model_provider.reasoning_effort == before
+        assert session.agent.reasoning_effort == before
         await session.update_state(title="ok")  # 后续写操作不受影响
         metadata = session.store.load_metadata("U-2")
         assert metadata is not None and metadata.session_name == "ok"

@@ -22,7 +22,7 @@ Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+
 - **四种前端形态，同一个二进制**：TUI（默认，human-in-the-loop）；stdio（`wing -p`，headless，Claude Code 兼容 NDJSON——把 `wing` alias 为 `claude` 即可接入外部编排器）；ACP（`wing acp`，stdio 上的 Agent Client Protocol v1 agent 服务端，桥接本机网关供 Zed / omnigent 等驱动）；编排 CLI（`wing run/wait/ps/info/tail/head/release` 后台任务，`wing start/stop/status` 网关生命周期）。
 - **协议**：HTTP 承载生命周期 / 查询 / 变更（24 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header / WS query param），TLS 交给反向代理。
 - **持久化**：`SessionStore` 是会话全部持久状态（metadata、混合 message/event 日志、aux）的唯一所有者；后端 `file`（默认，`~/.wing/core/sessions/`）与 `memory`（进程内）。`TrackedList` 是纯内存链拓扑引擎（uuid/parentUuid），I/O 全部委托 `MessageLog`；SQL 后端是增量实现，非架构改动。
-- **模型调用**：`provider/` 隔离协议差异（OpenAI 兼容 / Anthropic），ReAct 循环对协议无感知。
+- **模型调用**：`provider/` 隔离协议差异（OpenAI 兼容 / Anthropic），ReAct 循环对协议无感知；provider 实例无状态、归全进程共享池（`provider/pool.py`），会话级参数（session id 缓存亲和 / media / thinking）经 `RequestOptions` 每次调用注入。
 
 **改代码前必读的不变量**（细节一律在 docs/dev，不要在这里展开）：
 
@@ -87,7 +87,7 @@ libs/core/wing/
 │   ├── transport.py                 HTTP/SSE 传输管道与错误面（SSE 行解析 / 空闲超时 / httpx 构造 / raise_with_body）
 │   ├── media.py                     请求期媒体投影与序列化原语（两协议共用）
 │   ├── factory.py                   create_provider() — 按协议创建 provider 实例
-│   ├── registry.py                  模块级 provider client registry（/api/models 聚合，长持有 + 并发查询）
+│   ├── pool.py                      共享 provider 池（每 name 一个无状态实例；全会话与 /api/models 聚合共用；reload 换新 + 旧实例退场）
 │   ├── openai/                      OpenAI 兼容协议子包（provider / serialize / stream）
 │   ├── anthropic/                   Anthropic 协议子包（provider / serialize / stream）
 │   └── __init__.py                  ModelProvider + create_provider（稳定入口）

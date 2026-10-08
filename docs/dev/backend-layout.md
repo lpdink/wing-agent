@@ -71,7 +71,7 @@
 | `session/`（session / manager / reaper / template / override） | L3 | 会话生命周期：Session 状态、多会话与 fork/resume、空闲逐出、agent 模板、创建期参数覆盖 |
 | `agent/` | L3 | WingAgent 运行时：ReAct 主循环、工具并发执行、事件发射、打断收口阶梯、未提交投影 |
 | `tools/`（`builtin/` / `internal/`） | L3 | 内置工具（`builtin/` 一工具一文件）与工具基础设施（`internal/`：resolve_path / ripgrep 封装 / diff 窗口 / 命令安全审查） |
-| `provider/` | L3 | 模型调用协议层：OpenAI 兼容 / Anthropic 隔离、SSE 传输、provider registry |
+| `provider/` | L3 | 模型调用协议层：OpenAI 兼容 / Anthropic 隔离、SSE 传输、无状态 provider 与全进程共享池（`pool.py`） |
 | `audit/`（原 `metrics_registry/`） | L3 | 指标 / 审计注册中心（EventBus 订阅，原子写 JSON；`install()` 由组合根显式调用） |
 | `commands.py`（原 `magic_command/`） | L3 | prompt 命令：registry 元数据 + `$ARGUMENTS` 展开 |
 | `runtime.py` | L4 | WingRuntime：service 层协调者，`post()` 唯一入站，路由到 Session / ContextManager |

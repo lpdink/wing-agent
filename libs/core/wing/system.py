@@ -79,33 +79,16 @@ async def reload_system(sm: SessionManager) -> ReloadResult:
     except Exception as e:
         items.append(ReloadResultItem(name="prompt commands", ok=False, detail=str(e)))
 
-    # provider 重建（驱逐重建）：按新配置重建活跃 provider 后关闭旧 client，配置变更
-    # 随重建自然生效；模型列表 registry 一并重置（下次查询按新配置重建）。
-    # 单 session 失败不阻断其余 session——否则坏 session 会悄悄留着旧凭据。
+    # provider 重建：共享池按新配置重建全部实例（先建后换——任一构建失败池保持
+    # 原样）；旧实例退场（在途请求跑完后自动关闭，reload 对会话透明）。会话不再
+    # 逐一重建：实例经池按 name 实时解析，新请求立即用新配置；会话级开关住
+    # agent，不随实例更替漂移，无需重贴。
     try:
-        from wing.provider.registry import reset_registry
+        from wing.provider.pool import reset_providers
 
-        await reset_registry()
-        rebuilt = 0
-        failures: list[str] = []
-        for session in sm.iter_sessions():
-            try:
-                # 快照遍历期间可能发生逐出/拆解：已不在内存的会话跳过，
-                # 否则会给已关闭 provider 的 agent 重建 client 且无人回收。
-                if sm.get_session(session.session_id) is None:
-                    continue
-                await session.agent.rebuild_providers()
-                # provider 实例换了：记录在案的 provider 级开关（thinking /
-                # reasoning_effort）重贴，否则 reload 后 live 悄悄退回配置
-                # 默认、请求前缀随之漂移（Session 持有记录，见其 docstring）。
-                session.reapply_provider_options()
-                rebuilt += 1
-            except Exception as e:
-                failures.append(f"{session.session_id}: {e}")
-        detail = f"rebuilt {rebuilt} session(s)"
-        if failures:
-            detail += "; failed: " + ", ".join(failures)
-        items.append(ReloadResultItem(name="provider", ok=not failures, detail=detail))
+        rebuilt = await reset_providers()
+        detail = f"rebuilt {rebuilt} provider(s)"
+        items.append(ReloadResultItem(name="provider", ok=True, detail=detail))
     except Exception as e:
         items.append(ReloadResultItem(name="provider", ok=False, detail=str(e)))
 

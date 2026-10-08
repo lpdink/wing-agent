@@ -563,7 +563,7 @@ class SessionManager:
                 forked_from=session_id,
                 template_name=source.template_name,
                 model_name=source.agent.model,
-                provider_name=source.agent.model_provider.name,
+                provider_name=source.agent.provider_name,
                 system_prompt=source.context_manager.setin_system_prompt or None,
                 append_system_prompt=(
                     source.context_manager.append_system_prompt or None

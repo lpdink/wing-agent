@@ -24,7 +24,7 @@ from wing.agent.event_sink import AgentEventSink
 from wing.agent.react_loop import InvalidGenerationError, ReActLoop
 from wing.event import NoticeEvent
 from wing.event_bus import event_bus
-from wing.provider.base import PendingToolView, StreamAccumulator
+from wing.provider.base import PendingToolView, RequestOptions, StreamAccumulator
 from wing.schema import (
     LLMResponse,
     LLMUsage,
@@ -128,6 +128,7 @@ def _make_loop(cm: _FakeCM, provider: _FakeProvider) -> ReActLoop:
         current_model=lambda: "test-model",
         current_provider=lambda: provider,  # ty: ignore[invalid-argument-type]
         current_tools=lambda: [],
+        current_options=lambda: RequestOptions(),
         stream=True,
     )
     loop._config = _NO_WAIT
@@ -180,7 +181,7 @@ class TestInvalidGenerationRetry:
         provider = _FakeProvider([_empty(), _text("hi")])
         loop = _make_loop(cm, provider)
 
-        msg = await loop._call_llm_validated(_Ctx(), provider, model="m")
+        msg = await loop._call_llm_validated(_Ctx(), model="m")
 
         assert msg.content == "hi"
         assert provider.calls == 2
@@ -198,7 +199,7 @@ class TestInvalidGenerationRetry:
         provider = _FakeProvider([_thinking_only(), _text("hi")])
         loop = _make_loop(cm, provider)
 
-        msg = await loop._call_llm_validated(_Ctx(), provider, model="m")
+        msg = await loop._call_llm_validated(_Ctx(), model="m")
 
         assert msg.content == "hi"
         assert provider.calls == 2
@@ -211,7 +212,7 @@ class TestInvalidGenerationRetry:
         provider = _FakeProvider([_attempt(_tool_call()["chunks"], unfinished=1)])
         loop = _make_loop(cm, provider)
 
-        msg = await loop._call_llm_validated(_Ctx(), provider, model="m")
+        msg = await loop._call_llm_validated(_Ctx(), model="m")
 
         assert msg.tool_calls is not None and msg.tool_calls[0].name == "Bash"
         assert provider.calls == 1
@@ -241,7 +242,7 @@ class TestInvalidGenerationRetry:
         loop = _make_loop(cm, provider)
         ctx = _Ctx()
 
-        msg = await loop._call_llm_validated(ctx, provider, model="m")
+        msg = await loop._call_llm_validated(ctx, model="m")
 
         assert msg.content == "done"
         assert provider.calls == 2
@@ -260,7 +261,7 @@ class TestInvalidGenerationRetry:
         provider = _FakeProvider([_text("final")])
         loop = _make_loop(cm, provider)
 
-        msg = await loop._call_llm_validated(_Ctx(), provider, model="m")
+        msg = await loop._call_llm_validated(_Ctx(), model="m")
 
         assert msg.content == "final"
         assert provider.calls == 1
@@ -275,7 +276,7 @@ class TestInvalidGenerationRetry:
         loop._config = SimpleNamespace(max_retries=1, max_retry_delay=0.0)
 
         with pytest.raises(InvalidGenerationError):
-            await loop._call_llm_validated(_Ctx(), provider, model="m")
+            await loop._call_llm_validated(_Ctx(), model="m")
 
         assert provider.calls == 2  # 1 次 + 1 次重试
         assert cm.added == []
@@ -288,7 +289,7 @@ class TestInvalidGenerationRetry:
         loop = _make_loop(cm, provider)
 
         with pytest.raises(RuntimeError, match="boom"):
-            await loop._call_llm_validated(_Ctx(), provider, model="m")
+            await loop._call_llm_validated(_Ctx(), model="m")
 
         assert provider.calls == 1
 
@@ -299,8 +300,35 @@ class TestInvalidGenerationRetry:
         provider = _FakeProvider([_attempt([]), _text("hi")])
         loop = _make_loop(cm, provider)
 
-        msg = await loop._call_llm_validated(_Ctx(), provider, model="m")
+        msg = await loop._call_llm_validated(_Ctx(), model="m")
 
         assert msg.content == "hi"
         assert provider.calls == 2
         assert cm.added == []
+
+    @pytest.mark.asyncio
+    async def test_retry_re_resolves_provider_after_swap(self):
+        """每次 attempt 重新解析当前 provider：重试期间 provider 被换新（等价
+        reload / 池换新），第二次 attempt 必须落在新实例上并正常完成。
+
+        #172 的根因回归：重试栈绑定 turn 开始时捕获的实例——换新后每次
+        attempt 都打在退场实例上，永远不可能成功。
+        """
+        cm = _FakeCM()
+        second = _FakeProvider([_text("recovered")])
+        holder = SimpleNamespace(provider=None)
+
+        async def swap_then_empty(*, accumulator: Any = None, **_: Any):
+            holder.provider = second  # 模拟 attempt 1 期间发生的池换新
+            yield LLMResponse(content_blocks=[])
+
+        holder.provider = SimpleNamespace(
+            generate=swap_then_empty, create_accumulator=StreamAccumulator
+        )
+        loop = _make_loop(cm, None)  # ty: ignore[invalid-argument-type]
+        loop._current_provider = lambda: holder.provider
+
+        msg = await loop._call_llm_validated(_Ctx(), model="m")
+
+        assert msg.content == "recovered"
+        assert second.calls == 1

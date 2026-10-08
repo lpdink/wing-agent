@@ -9,26 +9,22 @@ from wing.provider.base import ModelProvider
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
-    from wing.media import MediaAccess
 
 
-def create_provider(
-    config: ProviderConfig,
-    session_id: str | None = None,
-    media: MediaAccess | None = None,
-) -> ModelProvider:
+def create_provider(config: ProviderConfig) -> ModelProvider:
     """根据 ProviderConfig 的 protocol 字段创建对应 provider 实例。
 
-    media 是会话媒体池的读写窄接口（provider 序列化图片时按 id 读字节）；
-    None = 无媒体存储（registry 的仅列表 client、测试构造）。
+    实例是**无状态**的（协议 + 配置 + 连接池）；会话级参数经
+    `generate(..., options=RequestOptions)` 注入。生命周期归
+    ``wing.provider.pool``，调用方不持有所有权。
     """
     if config.protocol == "openai":
         from wing.provider.openai.provider import OpenAICompatProvider
 
-        return OpenAICompatProvider(config=config, session_id=session_id, media=media)
+        return OpenAICompatProvider(config=config)
     elif config.protocol == "anthropic":
         from wing.provider.anthropic.provider import AnthropicProvider
 
-        return AnthropicProvider(config=config, session_id=session_id, media=media)
+        return AnthropicProvider(config=config)
     else:
         raise ValueError(f"unsupported protocol: '{config.protocol}'")

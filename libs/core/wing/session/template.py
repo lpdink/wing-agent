@@ -67,7 +67,7 @@ class AgentTemplate(BaseModel):
         return cls(
             name=name or agent.model,
             model=agent.model,
-            provider_name=agent.model_provider.name,
+            provider_name=agent.provider_name,
             system_prompt=cm.setin_system_prompt,
             resolved_tools=unbound_tools,
             skills_patterns=cm.skills_patterns,
