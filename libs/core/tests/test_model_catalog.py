@@ -71,6 +71,39 @@ class TestModelIdDeclaration:
         assert config.find_model("dfmodel") is not None
         assert config.find_model("sd-x") is not None
 
+    @pytest.mark.parametrize("bad_name", [" x", "x ", " x ", "\ttab"])
+    def test_name_with_surrounding_whitespace_rejected(self, bad_name):
+        """调用名带首尾空白 → 拒绝（隐式 id 必须无空白，见 `_name_valid`）。
+
+        否则 `effective_id = id or name` 会造出一个带空白的 id，而解析入口
+        `find_model()` 按 trim 后的键查表：加载说合法、解析说未知（或静默落到
+        另一个模型上）。空白在这里被拒 = id 空间由构造保证干净。
+        """
+        with pytest.raises(ValidationError, match="leading/trailing whitespace"):
+            ModelSpec(name=bad_name)
+
+    def test_agent_model_with_whitespace_loads_and_resolves_consistently(self):
+        """`agents[].model` 带首尾空白：「加载说合法 ⇔ 解析能命中」恒成立（S1）。
+
+        校验（`_validate_config`）与解析（`AgentTemplate.from_config`）共用
+        `require_model` 的 trim 语义——不会出现「配置加载通过、运行期构造报未知」。
+        """
+        config = Config(
+            providers=[_provider("p", models=["m"])],
+            agents=[AgentConfig(name="default", model="  m  ")],
+        )
+        resolved = config.require_model(config.agents[0].model)
+        assert resolved.id == "m"
+        assert config.find_model(config.agents[0].model) == resolved
+
+    def test_agent_model_whitespace_variant_misses_like_find_model(self):
+        """空白变体只在「trim 后命中」时合法：查不中时加载与解析给同一条错。"""
+        with pytest.raises(ValueError, match="unknown model id ' ghost '"):
+            Config(
+                providers=[_provider("p", models=["m"])],
+                agents=[AgentConfig(name="default", model=" ghost ")],
+            )
+
     def test_explicit_id_separates_reference_from_call_name(self):
         """``{id, name}``：id 是引用词，name 是发给上游的调用名。"""
         provider = _provider(
@@ -158,6 +191,26 @@ class TestCatalogValidation:
                 ],
                 agents=[AgentConfig(name="default", model="shared")],
             )
+
+    def test_duplicate_id_within_one_provider_names_it_once(self):
+        """同一 provider 内两条声明撞 id：错误信息只说一次 provider（N4）。
+
+        跨 provider 的模板（"... provider 'a' and provider 'b'"）落到单 provider
+        场景会读成 bug（'a' and 'a'）；这里换成 "declared twice by provider 'a'"，修复示例不变。
+        """
+        with pytest.raises(ValueError) as failure:
+            Config(
+                providers=[
+                    _provider("a", models=["x", ModelSpec(id="x", name="y")]),
+                ],
+                agents=[AgentConfig(name="default", model="x")],
+            )
+
+        message = str(failure.value)
+        assert "duplicate model id 'x' declared twice by provider 'a'." in message
+        assert "'a' and provider 'a'" not in message
+        assert "Give one an explicit id, e.g.:" in message
+        assert "- id: a-y" in message
 
     def test_same_name_across_providers_is_fine_with_distinct_ids(self):
         """跨 provider 同名**调用名**合法：只要 id 不同（各自可切换）。"""

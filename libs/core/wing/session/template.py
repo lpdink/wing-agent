@@ -33,9 +33,9 @@ class AgentTemplate(BaseModel):
     name: str
     model: str
     provider_name: str
-    """绑定的 provider 名称（对应 providers[].name）。解析后必填——
-    "未指定时默认第一个 provider" 在配置解析阶段落定（Config 校验），
-    解析产物不携带可选性。"""
+    """绑定的 provider 名称（对应 providers[].name）。由 `agents[].model` 的
+    model id 查表得到（`Config.require_model` → `ModelRef.provider_name`）——
+    不存在「未指定 = 第一个 provider」的回落。"""
     system_prompt: str = ""
     resolved_tools: list[Tool] = Field(default_factory=list)
     skills_patterns: list[str] = Field(default_factory=list)

@@ -57,9 +57,20 @@ class ModelSpec(BaseModel):
 
     @field_validator("name")
     @classmethod
-    def _name_non_empty(cls, v: str) -> str:
+    def _name_valid(cls, v: str) -> str:
+        """调用名非空且无首尾空白。
+
+        「无首尾空白」是**隐式 id 的前提**：``effective_id = id or name``，而
+        ``find_model()`` 按 trim 后的键查表——name 若带空白，id 空间就会出现
+        「查不到自己声明」的破洞（加载说合法、解析说未知），或把请求静默落到
+        另一个模型上。
+        """
         if not v.strip():
             raise ValueError("model name must be non-empty")
+        if v != v.strip():
+            raise ValueError(
+                f"model name must not have leading/trailing whitespace, got: '{v}'"
+            )
         return v
 
     @field_validator("id")
@@ -85,7 +96,11 @@ class ModelSpec(BaseModel):
 
     @property
     def effective_id(self) -> str:
-        """生效的引用词：显式 id，缺省回落调用名（存量形态零改动）。"""
+        """生效的引用词：显式 id，缺省回落调用名（存量形态零改动）。
+
+        两个来源都保证无首尾空白（``name`` / ``id`` 校验），所以 id 空间的键就是
+        ``Config.find_model()`` trim 查找时用的键。
+        """
         return self.id or self.name
 
 
@@ -461,9 +476,20 @@ class Config(BaseModel):
                 model_id = spec.effective_id
                 owner = declared_by.get(model_id)
                 if owner is not None:
+                    if owner == provider.name:
+                        # 同一 provider 内两条声明撞 id（名字不同、id 显式撞车）：
+                        # 说两遍 provider 名会读成 bug。
+                        conflict = (
+                            f"duplicate model id '{model_id}' declared twice "
+                            f"by provider '{provider.name}'."
+                        )
+                    else:
+                        conflict = (
+                            f"duplicate model id '{model_id}': declared by provider "
+                            f"'{owner}' and provider '{provider.name}'."
+                        )
                     raise ValueError(
-                        f"duplicate model id '{model_id}': declared by provider "
-                        f"'{owner}' and provider '{provider.name}'.\n"
+                        f"{conflict}\n"
                         "Give one an explicit id, e.g.:\n"
                         f"  - id: {provider.name}-{spec.name}\n"
                         f"    name: {spec.name}"
@@ -471,10 +497,11 @@ class Config(BaseModel):
                 declared_by[model_id] = provider.name
 
         # agents[].model 必须落在 id 空间内（未命中即配置错误——错误信息即 C7 文案：
-        # available ids + 调用名提示，外部编排方据此一次改对）。
+        # available ids + 调用名提示，外部编排方据此一次改对）。校验与解析共用
+        # `require_model`（同一 trim 语义）：`find_model()` 能命中的值，加载期就
+        # 一定放行——「加载说合法 ⇔ 解析能命中」由构造保证，不留第二种判断口径。
         for agent in self.agents:
-            if agent.model not in declared_by:
-                raise ValueError(self.describe_unknown_model(agent.model))
+            self.require_model(agent.model)
 
         return self
 

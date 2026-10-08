@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Request
 
 from wing.event import CommandInfo
-from wing.config import ModelRef
 from wing.gateway.protocol import (
     AgentsResponse,
     CommandsResponse,
@@ -30,6 +29,8 @@ from wing.gateway.protocol import (
 from wing.commands import magic_registry
 
 if TYPE_CHECKING:
+    # 注解专用：路由只经 runtime 拿数据，不在运行期 import config（design D6）。
+    from wing.config import ModelRef
     from wing.gateway.server import GatewayServer
 
 router = APIRouter(tags=["system"])
