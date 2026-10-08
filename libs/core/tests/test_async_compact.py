@@ -56,6 +56,7 @@ def _mock_provider(response: LLMResponse | None = None, delay: float = 0):
         model: str,
         tools: list | None = None,
         stream: bool = False,
+        options: object = None,
     ) -> AsyncIterator[LLMResponse]:
         if delay > 0:
             await asyncio.sleep(delay)
@@ -76,6 +77,7 @@ def _failing_provider():
         model: str,
         tools: list | None = None,
         stream: bool = False,
+        options: object = None,
     ) -> AsyncIterator[LLMResponse]:
         raise RuntimeError("LLM call failed")
         yield  # make it a generator  # noqa: unreachable

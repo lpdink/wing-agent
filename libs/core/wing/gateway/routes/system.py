@@ -30,7 +30,7 @@ from wing.commands import magic_registry
 
 if TYPE_CHECKING:
     from wing.gateway.server import GatewayServer
-    from wing.provider.registry import ProviderModels as ProviderModelsData
+    from wing.provider.pool import ProviderModels as ProviderModelsData
 
 router = APIRouter(tags=["system"])
 

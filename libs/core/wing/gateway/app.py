@@ -75,6 +75,12 @@ def create_app(server: GatewayServer) -> FastAPI:
             yield
         finally:
             await server.stop_background()
+            # provider 池是全进程共享资源，生命周期随进程：lifespan 收尾
+            # （uvicorn 优雅停机，含 /api/shutdown → SIGTERM 路径）是它的
+            # 终结入口——关掉全部 client，释放 keepalive socket。
+            from wing.provider.pool import close_providers
+
+            await close_providers()
 
     app = FastAPI(
         title=OPENAPI_METADATA["title"],

@@ -86,8 +86,8 @@ class TestUpdateStatePersists:
         assert sorted(meta["tools"]) == ["Glob", "Read"]
 
         restored = _restart(root).resume_session(sid)
-        assert restored.agent.model_provider.thinking is False
-        assert restored.agent.model_provider.reasoning_effort == "low"
+        assert restored.agent.thinking is False
+        assert restored.agent.reasoning_effort == "low"
         assert restored.agent.yolo is True
         assert [t.name for t in restored.agent.tools] == ["Glob", "Read"]
 
@@ -100,8 +100,8 @@ class TestUpdateStatePersists:
         await session.update_state(model="qwen-max", provider_name="alt")
 
         assert session.agent.model_provider.name == "alt"
-        assert session.agent.model_provider.thinking is False
-        assert session.agent.model_provider.reasoning_effort == "high"
+        assert session.agent.thinking is False
+        assert session.agent.reasoning_effort == "high"
 
 
 # ============================================================
@@ -133,7 +133,7 @@ class TestCreateOverridePersists:
         assert cm.append_system_prompt == "Appended env info."
         assert [t.name for t in restored.agent.tools] == ["Read"]
         assert restored.agent.max_turns == 7
-        assert restored.agent.model_provider.reasoning_effort == "high"
+        assert restored.agent.reasoning_effort == "high"
         assert restored.agent.yolo is True
         # 系统提示词逐字节一致（KV cache 前缀稳定的前提）
         assert cm.system_prompt.content == source_prompt
@@ -167,23 +167,78 @@ class TestCreateOverridePersists:
             assert hooks.off("before_session_start", hook_inject)
 
 
-class TestProviderRebuildReapply:
-    """provider 实例被换掉后（reload 的 rebuild_providers）重贴记录开关。"""
+class TestProviderResetKeepsSessionSwitches:
+    """reload（池 reset）换新实例后，会话级开关不漂移。
+
+    开关住 agent（provider 无状态化）——实例更替与开关彻底解耦，旧模型里
+    reload 需要逐会话「重贴记录」的那一步被架构消灭了。请求体口径也一并
+    钉住：新实例 + request_options() 仍产出与旧实例相同的开关字段。
+    """
 
     @pytest.mark.asyncio
-    async def test_rebuild_then_reapply_restores_recorded_switches(self, sm):
+    async def test_pool_reset_keeps_recorded_switches(self, sm):
+        from wing.provider.pool import reset_providers
+        from wing.schema import Message
+
         session = sm.create_session()
         await session.update_state(thinking=False, reasoning_effort="low")
-        assert session.agent.model_provider.thinking is False
+        agent = session.agent
+        old_provider = agent.model_provider
+        assert agent.thinking is False
+        assert agent.reasoning_effort == "low"
 
-        # reload 第 4 步：按新配置重建 provider 实例（provider 级状态归零）
-        await session.agent.rebuild_providers()
-        assert session.agent.model_provider.thinking is True  # 配置默认
+        rebuilt = await reset_providers()
 
-        # 重贴记录值（runtime 在 rebuild 之后调用）
-        session.reapply_provider_options()
-        assert session.agent.model_provider.thinking is False
-        assert session.agent.model_provider.reasoning_effort == "low"
+        assert rebuilt >= 1
+        assert agent.model_provider is not old_provider  # 实例换新
+        assert old_provider._client.is_closed is True  # 无在途 → 退场即关
+        assert agent.thinking is False  # 开关不漂移
+        assert agent.reasoning_effort == "low"
+
+        # 请求体口径：新实例 + 会话参数 → 开关字段与 reload 前一致
+        body = agent.model_provider._build_body(
+            [Message(role="user", content="hi")],
+            agent.model,
+            None,
+            False,
+            agent.request_options(),
+        )
+        assert body["enable_thinking"] is False
+        assert body["reasoning_effort"] == "low"
+
+    @pytest.mark.asyncio
+    async def test_pool_reset_refreshes_loop_retry_config(self, sm, monkeypatch):
+        """reload 后 loop 的无效轮次重试口径跟随新 provider 配置。
+
+        回归（审查发现）：旧实现逐会话 rebuild 时同步 `_loop._config`；共享池
+        化后没有逐会话同步点——`_config` 改为实时解析当前 provider 配置，
+        reload 换新后自动生效（无需任何广播 / 重贴）。
+        """
+        from wing.config import AgentConfig, Config, ProviderConfig
+        from wing.provider.pool import reset_providers
+
+        session = sm.create_session()
+        loop = session.agent._loop
+        assert loop._config is session.agent.model_provider.config
+
+        rotated = Config(
+            providers=[
+                ProviderConfig(
+                    name="default",
+                    base_url="https://a.example.com",
+                    api_key="k",
+                    max_retries=3,
+                )
+            ],
+            agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
+        )
+        monkeypatch.setattr("wing.config.loader._config", rotated)
+        monkeypatch.setattr("wing.config.get_config", lambda: rotated)
+
+        assert await reset_providers() == 1
+
+        assert loop._config is session.agent.model_provider.config
+        assert loop._config.max_retries == 3
 
 
 class TestHookFiringFollowsSessionId:
@@ -316,8 +371,8 @@ class TestForkSnapshot:
         )
         assert [t.name for t in restored.agent.tools] == ["Glob", "Read"]
         assert restored.agent.max_turns == 11
-        assert restored.agent.model_provider.thinking is False
-        assert restored.agent.model_provider.reasoning_effort == "high"
+        assert restored.agent.thinking is False
+        assert restored.agent.reasoning_effort == "high"
         assert restored.agent.yolo is True
 
     @pytest.mark.asyncio
@@ -338,9 +393,7 @@ class TestForkSnapshot:
         assert "thinking" not in raw, raw
         assert "reasoning_effort" not in raw, raw
         # provider 级状态随配置派生：子会话与源会话一致
-        assert (
-            child.agent.model_provider.thinking == source.agent.model_provider.thinking
-        )
+        assert child.agent.thinking == source.agent.thinking
 
     @pytest.mark.asyncio
     async def test_fork_copies_recorded_provider_options(self, sm, root):
@@ -358,8 +411,8 @@ class TestForkSnapshot:
         assert raw["reasoning_effort"] == "low"
 
         restored = _restart(root).resume_session(child.session_id)
-        assert restored.agent.model_provider.thinking is False
-        assert restored.agent.model_provider.reasoning_effort == "low"
+        assert restored.agent.thinking is False
+        assert restored.agent.reasoning_effort == "low"
 
     @pytest.mark.asyncio
     async def test_fork_copies_live_append_without_record(self, sm, root):

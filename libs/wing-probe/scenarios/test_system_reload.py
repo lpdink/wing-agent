@@ -1,23 +1,27 @@
 """`/api/system/reload` 场景：逐项结果契约 + 记录开关重贴 + 配置/hook 真的重读。
 
-reload 是"配置 / hook / provider 实例 / skills 全部重来一遍"的入口，重构（步骤
-11 会把 `runtime.reload_system` 抽成模块）最容易改坏的正是三件事：
+reload 是"配置 / hook / provider 实例 / skills 全部重来一遍"的入口，重构最容易
+改坏的正是三件事：
 
-1. **provider 实例被换掉**：provider 级开关（thinking / reasoning_effort）随旧
-   实例一起丢——不重贴就退回配置默认（`openai_compat` 构造时把
-   `enable_thinking` / `preserve_thinking` setdefault 为 True），请求前缀漂移，
-   且与 metadata 记录失配；
-2. **config.yaml 是重读磁盘**：provider 级配置（如 `extra_body`）变更随
-   `rebuild_providers` 生效——只刷新内存单例而不重建 client 的写法会静默失效；
+1. **provider 实例被换掉**：会话级开关（thinking / reasoning_effort）必须与
+   实例更替解耦（开关住 agent，经 request_options 下发）——换实例后开关漂移
+   就会退回配置默认（`openai_compat` 构造时把 `enable_thinking` /
+   `preserve_thinking` setdefault 为 True），请求前缀碎裂；
+2. **config.yaml 是重读磁盘**：provider 级配置（如 `extra_body`）变更随共享池
+   `reset_providers` 生效——只刷新内存单例而不重建 client 的写法会静默失效；
 3. **hook 是 clear + 重载**（不是叠加）：改写 hook 文件后 reload，旧 handler 必须
    消失——残留会让注入叠层。
+
+在途 reload（`test_reload_during_inflight_stream_keeps_turn_alive`）另守 #172：
+reload 落在流式生成上时该轮不受影响（旧实例退场服务完在途才关闭，绝不 aclose
+掉在途请求的 client）。
 
 覆盖的断言点：
 
 - ``test_reload_reports_every_item_and_keeps_recorded_switches``：reload 响应的
-  **名字序**恰好五项、逐项 ok、provider 项 detail 是确定计数（内存里只有本场景
-  一个会话）；记录在案的 `thinking=False` / `reasoning_effort="high"` 在 reload
-  后的下一次请求里逐字段一致（`reapply_provider_options` 生效），会话照常收尾，
+  **名字序**恰好五项、逐项 ok、provider 项 detail 是确定计数（本场景一条 provider
+  配置）；记录在案的 `thinking=False` / `reasoning_effort="high"` 在 reload
+  后的下一次请求里逐字段一致（开关住 agent，不随实例更替漂移），会话照常收尾，
   live 状态与记录一致；
 - ``test_reload_rereads_provider_config_from_disk``：改盘上的 `config.yaml`
   （provider `extra_body` 加一个透传键）→ reload → 下一轮请求带上它（provider
@@ -135,13 +139,15 @@ def _assert_prefix_identity(
         )
 
 
-def _assert_reload_items(reload_result: dict, *, rebuilt_sessions: int) -> list[dict]:
+def _assert_reload_items(reload_result: dict, *, rebuilt_providers: int) -> list[dict]:
     """reload 响应的逐项契约：名字序恰好五项、逐项 ok、provider 计数确定。"""
     assert reload_result["ok"] is True, reload_result
     items = reload_result["results"]
     assert [item["name"] for item in items] == EXPECTED_ITEMS, items
     assert [item["ok"] for item in items] == [True] * len(EXPECTED_ITEMS), items
-    assert items[3].get("detail") == f"rebuilt {rebuilt_sessions} session(s)", items[3]
+    assert items[3].get("detail") == f"rebuilt {rebuilt_providers} provider(s)", items[
+        3
+    ]
     return items
 
 
@@ -171,7 +177,7 @@ async def test_reload_reports_every_item_and_keeps_recorded_switches(
     }, before.body
 
     # 内存里只有本场景这一个会话 → provider 项计数确定。
-    _assert_reload_items(await http.reload(), rebuilt_sessions=1)
+    _assert_reload_items(await http.reload(), rebuilt_providers=1)
 
     # 会话仍可继续对话：下一轮正常收尾。
     follow_up = await session.chat("beta")
@@ -208,7 +214,7 @@ async def test_reload_rereads_provider_config_from_disk(probe: Probe) -> None:
         extra[CONFIG_MARKER_KEY] = CONFIG_MARKER_VALUE
 
     _edit_config(probe, add_marker)
-    _assert_reload_items(await http.reload(), rebuilt_sessions=1)
+    _assert_reload_items(await http.reload(), rebuilt_providers=1)
 
     await session.chat("beta")
     after = probe.request(CONFIG_MODEL, 1)
@@ -243,14 +249,14 @@ async def test_reload_replaces_hook_registrations(probe: Probe) -> None:
 
     # 写入 hook（标记 A）→ reload → 注入生效。
     _install_hook(probe, MARKER_A)
-    _assert_reload_items(await http.reload(), rebuilt_sessions=1)
+    _assert_reload_items(await http.reload(), rebuilt_providers=1)
     await session.chat("beta")
     loaded = probe.request(HOOK_MODEL, 1)
     assert _last_user_text(loaded) == f"beta {MARKER_A}", loaded.body["messages"]
 
     # 改写同一文件（标记 B）→ 再 reload → 只有 B（旧 handler 已随 clear 摘除）。
     _install_hook(probe, MARKER_B)
-    _assert_reload_items(await http.reload(), rebuilt_sessions=1)
+    _assert_reload_items(await http.reload(), rebuilt_providers=1)
     await session.chat("gamma")
     replaced = probe.request(HOOK_MODEL, 2)
     assert _last_user_text(replaced) == f"gamma {MARKER_B}", (
@@ -266,3 +272,73 @@ async def test_reload_replaces_hook_registrations(probe: Probe) -> None:
     assert user_contents == ["alpha", f"beta {MARKER_A}", f"gamma {MARKER_B}"], (
         user_contents
     )
+
+
+#: 在途 reload 场景的慢速流（分片 4 字符 + 30ms 帧间隔 → 约 0.9s 的流）。
+#: 窗口必须显著大于「reload 往返 + 调度抖动」，否则 reload 可能在流结束后
+#: 才落地——测试静默失去在途语义（旧代码也能过）。断言点见场景正文的
+#: 「reload 返回时该轮尚未收尾」。
+INFLIGHT_MODEL = "probe/reload-inflight"
+INFLIGHT_TEXT = (
+    "reload-me-while-i-stream the-request-is-long-enough-to-keep-the-window-"
+    "open for-a-deterministic-reload-under-ci-load"
+)
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_reload_during_inflight_stream_keeps_turn_alive(probe: Probe) -> None:
+    """在途流式生成中触发 reload：该轮不受影响、无错误单元（#172 回归）。
+
+    旧实现 reload 逐会话 aclose 掉旧 client——在途流被 abort、重试栈绑死
+    死 client，本轮必然以 error_during_execution 收场且不可自愈。共享池 +
+    退场语义下：旧实例服务完在途请求才关闭，新一轮请求用新配置的新实例。
+    """
+    probe.register(
+        INFLIGHT_MODEL,
+        Turn.of(text=INFLIGHT_TEXT, chunk=4, delay=0.03),
+        Turn.of(text="after reload"),
+    )
+    session = await probe.session(model=INFLIGHT_MODEL)
+    http = probe.driver_required.http
+
+    # 先改盘上 config：marker 透传键只有 reload 后的新实例才带上（观测点）。
+    def add_marker(config: dict[str, Any]) -> None:
+        extra = config["providers"][0].setdefault("extra_body", {})
+        extra[CONFIG_MARKER_KEY] = CONFIG_MARKER_VALUE
+
+    _edit_config(probe, add_marker)
+
+    await session.send("start a long stream")
+    # 等到流确实已经开始（在途正中；首帧无延迟）。
+    await session.watch.expect("text", within=15)
+
+    _assert_reload_items(await http.reload(), rebuilt_providers=1)
+    # reload 必须**落在在途轮内**：返回时该轮尚未收尾（窗口 ~0.9s，reload
+    # 往返毫秒级——这里没有等待，pending 是即时快照）。不这么钉，reload 若
+    # 飘到流结束后，所有后续断言在旧代码上也会通过——回归灵敏度靠它保住。
+    assert not [
+        event for event in session.watch.pending() if event.type == "turn_result"
+    ], "reload 返回时该轮已结束：场景没压中在途窗口（调大 delay 或检查调度）"
+
+    # ── 在途轮：照常收尾（success），落盘完整、无错误单元 ──
+    turn = await session.watch.expect("turn_result", within=30)
+    assert turn.data["subtype"] == "success", turn.data
+    session.watch.assert_never("error")
+
+    view = session.history
+    messages = view.messages()
+    assert [message["role"] for message in messages] == ["user", "assistant"], (
+        view.describe()
+    )
+    assert messages[-1].get("content") == INFLIGHT_TEXT, view.describe()
+    events = view.events()
+    assert "error" not in {event["type"] for event in events}, view.describe()
+    assert not [event for event in events if event.get("is_error")], view.describe()
+    view.assert_chain_invariants()
+
+    # ── 下一轮：新实例生效（marker 出现），前缀身份照常 ──
+    follow_up = await session.chat("continue")
+    assert follow_up.data["subtype"] == "success", follow_up.data
+    after = probe.request(INFLIGHT_MODEL, 1)
+    assert after.body.get(CONFIG_MARKER_KEY) == CONFIG_MARKER_VALUE, after.body

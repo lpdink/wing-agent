@@ -36,7 +36,7 @@ from .tool_executor import (
 
 if TYPE_CHECKING:
     from wing.context import ContextManager
-    from wing.provider.base import ModelProvider, StreamAccumulator
+    from wing.provider.base import ModelProvider, RequestOptions, StreamAccumulator
     from wing.schema import Tool
 
 
@@ -101,6 +101,7 @@ class ReActLoop:
         current_model: Callable[[], str],
         current_provider: Callable[[], "ModelProvider"],
         current_tools: Callable[[], list[Tool]],
+        current_options: Callable[[], "RequestOptions"],
         stream: bool = True,
         set_working: Callable[[bool], None] | None = None,
     ) -> None:
@@ -111,20 +112,37 @@ class ReActLoop:
         self._current_model = current_model
         self._current_provider = current_provider
         self._current_tools = current_tools
+        self._current_options = current_options
         self._stream = stream
         self._set_working = set_working
         # 运行时可变配置（由 WingAgent 在构造与 provider 切换时同步）
         self.max_turns: int | None = None
         self.steer: bool = get_config().steer
         # `with_retry` 参数解析源（装饰器经实例的 `_config` 读取
-        # max_retries / max_retry_delay）：WingAgent 同步当前 provider 的
-        # config；None → 默认口径（见 with_retry）。测试可注入小值避免真实等待。
-        self._config: object | None = None
+        # max_retries / max_retry_delay）——见 `_config` property：
+        # 默认实时跟随当前 provider 配置，测试可注入替身覆盖。
+        self._config_override: object | None = None
         # 当前一轮 LLM 调用的流累积状态（未提交内容的唯一权威）。
         # _call_llm 入口新建并登记，轮提交/中断补提交/turn 收口后置空。
         # 未提交投影（uncommitted_message / uncommitted_tools）按需快照它，
         # 不缓存副本。
         self._current_acc: "StreamAccumulator | None" = None
+
+    @property
+    def _config(self) -> object | None:
+        """重试参数解析源（`with_retry` 经实例的 `_config` 读取）。
+
+        实时跟随当前 provider 的配置——池换新（reload）后**无需任何逐会话
+        同步**；每次 `_call_llm_validated` 入口解析一次（单条重试阶梯内不
+        中途变更）。测试可经 setter 注入小值替身，避免真实等待。
+        """
+        if self._config_override is not None:
+            return self._config_override
+        return self._current_provider().config
+
+    @_config.setter
+    def _config(self, value: object | None) -> None:
+        self._config_override = value
 
     @property
     def current_acc(self) -> "StreamAccumulator | None":
@@ -232,11 +250,8 @@ class ReActLoop:
         Returns: True 需要继续下一轮，False 对话结束。
         """
         model = self._current_model()
-        provider = self._current_provider()
 
-        assistant_msg = await self._call_llm_validated(
-            ctx, provider=provider, model=model
-        )
+        assistant_msg = await self._call_llm_validated(ctx, model=model)
 
         self._sink.assistant_turn(assistant_msg, model)
 
@@ -289,9 +304,7 @@ class ReActLoop:
     # ── 生成有效性（无效轮次重试）─────────────────
 
     @with_retry(label="模型生成", retry_on=(InvalidGenerationError,))
-    async def _call_llm_validated(
-        self, ctx: "_TurnAccumulator", provider: "ModelProvider", model: str
-    ) -> Message:
+    async def _call_llm_validated(self, ctx: "_TurnAccumulator", model: str) -> Message:
         """一次 LLM 生成 + 轮有效性校验；无效则抛错交给装饰器有界重试。
 
         有效性规则（上游「空响应 / 截断」的容错——判定放 loop 层而非
@@ -308,27 +321,36 @@ class ReActLoop:
         另：流未正常结束（无权威块数组）时 `_call_llm` 抛同型异常，一并
         落入重试（如 Anthropic 在 message_stop 前被切断）。
 
-        每次尝试重新取 `get_messages_for_llm`——规则 3 的重试请求必须带上
-        刚提交的 content。无效尝试置空 `_current_acc`：被丢弃的内容不进
-        未提交投影（中途订阅者不会看到将被重试覆盖的内容），其 usage 照常
-        计入 turn 账（token 真花掉了；provider 未产出块数组的尝试除外——
-        该路径无 usage 可读）。
+        每次尝试重新取 `get_messages_for_llm` 与当前 provider——规则 3 的重试
+        请求必须带上刚提交的 content；provider 重解析保证重试栈不绑定上一
+        次尝试的实例（共享池 reload 换新后，下一次尝试用新实例自愈）。无效
+        尝试置空 `_current_acc`：被丢弃的内容不进未提交投影（中途订阅者不会
+        看到将被重试覆盖的内容），其 usage 照常计入 turn 账（token 真花掉
+        了；provider 未产出块数组的尝试除外——该路径无 usage 可读）。
 
         已知边界（待真实 Anthropic 环境验证后决策）：规则 3 的重试请求以
         已提交的 assistant 消息结尾（续跑语义）——OpenAI 兼容协议即
         continuation；Anthropic 开 thinking 时 prefill 可能被拒（则该轮
         重试失败、走错误路径，内容不丢）。
         """
+        # 触发后台 compact 用触发时刻的 provider / options 快照（compact 是
+        # 预计算：允许因 reload 退场而失败——下一轮重新触发）。
         llm_result = await self._cm.get_messages_for_llm(
             model=model,
-            model_provider=provider,
+            model_provider=self._current_provider(),
             current_tools=self._current_tools,
+            options=self._current_options(),
         )
+        # 发送时刻重新解析（晚解析纪律）：「解析 → 首次迭代」之间 MUST 无
+        # await（此处到 `_call_llm` 进入流迭代全是同步代码）——池换新与
+        # 在途迭代之间因此不存在竞态窗口（provider/base.py 的退场语义）。
+        provider = self._current_provider()
         assistant_msg = await self._call_llm(
             provider=provider,
             messages=llm_result.messages,
             model=model,
             tools=llm_result.tools,
+            options=self._current_options(),
         )
 
         if assistant_msg.tool_calls:
@@ -367,8 +389,13 @@ class ReActLoop:
         messages: list[Message],
         model: str,
         tools: list[Tool] | None,
+        options: "RequestOptions | None" = None,
     ) -> Message:
         """消费 provider 的 chunk 流：发射流式事件，组装 assistant Message。
+
+        options 是本次调用的会话级参数（session id 缓存亲和 / 媒体池 / 开关）——
+        入口到首次迭代之间 MUST 保持无 await（晚解析纪律的落点，见
+        `_call_llm_validated`）。
 
         实际模型调用在 provider.generate()；本方法只消费流 + 发射事件 +
         组装 Message。两个 provider 统一在最终 chunk 产出权威 content_blocks，
@@ -400,6 +427,7 @@ class ReActLoop:
                 tools=tools,
                 stream=self._stream,
                 accumulator=accumulator,
+                options=options,
             ):
                 if chunk.reasoning_content:
                     self._sink.llm_reasoning(chunk.reasoning_content)

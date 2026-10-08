@@ -26,7 +26,6 @@ from wing.common.logger import log
 from wing.config import get_config
 from wing.context import ContextManager
 from wing.media import MediaAccess
-from wing.provider import create_provider
 from wing.schema import ChainNode, Message, Tool
 from wing.store import SessionMetadata, SessionStore, TagMeta
 from wing.tool_registry import ToolRef
@@ -37,7 +36,6 @@ from .tags import TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
 if TYPE_CHECKING:
     from wing.agent import WingAgent
     from wing.event.base import AgentInfo, SessionStatus
-    from wing.provider import ModelProvider
 
     from .override import AgentOverride
     from .template import AgentTemplate
@@ -197,14 +195,14 @@ class Session:
             workspace=workspace,
         )
 
-        provider_cfg = get_config().get_provider(template.provider_name)
+        # provider name 先校验（不可解析 = 模板/配置错误，创建即失败）；
+        # 实例经共享池解析（无状态化，见 wing.provider.pool）。
+        get_config().get_provider(template.provider_name)
         # 会话媒体池：读/写都经窄接口，工具与 provider 序列化不直接触存储。
         media = MediaAccess(read=store.read_media, write=store.write_media)
         agent = WingAgent(
             model=template.model,
-            model_provider=create_provider(
-                provider_cfg, session_id=session_id, media=media
-            ),
+            provider_name=template.provider_name,
             stream=True,
             context_manager=context_manager,
             tools=template.resolved_tools,
@@ -237,11 +235,10 @@ class Session:
         """
         from wing.agent import WingAgent
 
-        # 干净关闭旧 agent 及其拥有的全部 provider client：旧缓存不留给新 agent
-        # （否则后续切换会把已关闭的 client 交回来）。
+        # 干净关闭旧 agent 的 worker；provider 实例归共享池，不随 agent 关闭
+        # （其他会话可能正在用，且新 agent 多半解析到同一实例）。
         old_agent = self._agent
         await old_agent.shutdown()
-        await old_agent.aclose_providers()
 
         self._context_manager = ContextManager(
             session_id=self._session_id,
@@ -259,13 +256,11 @@ class Session:
                 self._metadata.append_system_prompt
             )
 
-        provider_cfg = get_config().get_provider(template.provider_name)
+        get_config().get_provider(template.provider_name)
         media = MediaAccess(read=self._store.read_media, write=self._store.write_media)
         self._agent = WingAgent(
             model=template.model,
-            model_provider=create_provider(
-                provider_cfg, session_id=self._session_id, media=media
-            ),
+            provider_name=template.provider_name,
             stream=True,
             context_manager=self._context_manager,
             tools=template.resolved_tools,
@@ -300,18 +295,13 @@ class Session:
     async def aclose(self) -> None:
         """释放运行期资源（逐出路径专用）。
 
-        顺序：先 ``shutdown()``（取消 worker，避免拆解期间还有调用方在用
-        provider），再 ``aclose_providers()``（关闭该 agent 拥有的 client 表）。
-        provider 的关闭放在 ``finally``：shutdown 失败（worker 带异常退出）
-        也不能留下"已摘除但没拆干净"的 client——那时已没有人再持有它。
+        只关闭本会话的 worker；provider 实例归共享池（其他会话共用、逐出
+        不拆池）——agent 只持有 name，没有任何 client 所有权要终结。
 
         只回收内存态，**不动磁盘**：消息日志已 append+fsync 落盘，元数据
         在该落的时候已落——session 仍可经 resume 完整水合回来。
         """
-        try:
-            await self._agent.shutdown()
-        finally:
-            await self._agent.aclose_providers()
+        await self._agent.shutdown()
 
     def apply_agent_override(self, override: AgentOverride) -> None:
         """应用 AgentOverride 到当前 session 的 agent（创建时调用）。
@@ -528,7 +518,7 @@ class Session:
             skills=list(cm._skills_cache.keys()),
             rules=list(cm._rules_files),
             workspace=self._metadata.workspace,
-            provider_name=self._agent.model_provider.name,
+            provider_name=self._agent.provider_name,
             model_display_name=self._agent.model_display_name,
         )
 
@@ -657,7 +647,7 @@ class Session:
             self.set_title(title)
 
         if thinking is not None:
-            self.agent.model_provider.set_thinking(thinking)
+            self.agent.set_thinking(thinking)
             self._record_state(thinking=thinking)
 
         if reasoning_effort is not None:
@@ -691,17 +681,6 @@ class Session:
         except (OSError, UnicodeEncodeError) as e:
             log.warning(f"Session {self._session_id}: state not persisted ({e})")
 
-    def reapply_provider_options(self) -> None:
-        """把记录在案的 provider 级开关贴到**当前** provider 实例上（公开入口）。
-
-        适用于 provider 实例被换掉的第三条路径：`/api/system/reload` 第 4 步
-        对在场会话调 `agent.rebuild_providers()` 按新配置重建 provider——
-        provider 级 extra_body 状态（thinking / reasoning_effort）随之归零，
-        不重贴就会静默退回配置默认（请求前缀漂移，且与 metadata 记录失配，
-        直到下次逐出 / resume 才被纠正）。
-        """
-        self._reapply_recorded_provider_options()
-
     def sync_tools_record(self) -> None:
         """把**当前生效**的工具集快照进 metadata 并落盘（fork 专用）。
 
@@ -726,28 +705,20 @@ class Session:
         self._record_state(append_system_prompt=value)
 
     def _apply_model(self, model: str, provider_name: str | None = None) -> None:
-        """切换模型，必要时切换 provider——委托 agent 的单一持有能力。
+        """切换模型，必要时切换 provider name——委托 agent 的单一持有能力。
 
-        Session 不持有 provider：provider client 表归 WingAgent（按 name 有界
-        持有、切回同名复用、跨 provider 切模型不关闭旧 client）。
+        Session 与 agent 都不持有 provider 实例：实例归共享池，agent 只记
+        name（切回同名解析到同一实例，无创建 / 关闭动作）。
 
         切换成功后把生效的 (provider, model) 记入 metadata 并落盘——这是
         显式模型动作的落盘点，也是模型选择跨进程重启的唯一恢复来源。
 
-        跨 provider 切换会换上另一个 provider 实例（provider 级 extra_body
-        状态归零）：记录在案的 thinking / reasoning_effort 重新贴回，避免
-        一次 /model 就把会话开关悄悄改回配置默认（同 provider 切模型本就
-        保留）。agent 级状态（yolo / max_turns）不随切换变化，不在此重贴。
+        会话级开关（thinking / reasoning_effort）住 agent、与 provider 实例
+        无关，跨 provider 切换天然保留（不存在实例更替导致的状态归零）；
+        agent 级状态（yolo / max_turns）同样不随切换变化。
         """
-        self.agent.set_model(model, self._resolve_provider(provider_name))
-        self._reapply_recorded_provider_options()
+        self.agent.set_model(model, provider_name)
         self._persist_model()
-
-    def _resolve_provider(self, provider_name: str | None) -> "ModelProvider":
-        """按 name 解析 provider：None 或与当前同名时沿用当前活跃实例。"""
-        if provider_name is None or provider_name == self.agent.model_provider.name:
-            return self.agent.model_provider
-        return self.agent.get_or_create_provider(provider_name)
 
     def _persist_model(self) -> None:
         """把 agent 当前生效的 (provider, model) 成对记入 metadata 并落盘。
@@ -763,7 +734,7 @@ class Session:
         远端工具宿主注册的名字）同样是"写不进去"，一并按 best-effort 处理。
         """
         self._metadata.model_name = self.agent.model
-        self._metadata.provider_name = self.agent.model_provider.name
+        self._metadata.provider_name = self.agent.provider_name
         try:
             self._save_metadata()
         except (OSError, UnicodeEncodeError) as e:
@@ -782,16 +753,13 @@ class Session:
         全字段「记录存在才应用」：缺失视为无记录，跟随模板/配置默认，绝不
         把默认值固化成记录。
 
-        顺序：提示词 → 工具 → 模型 → 动态开关。模型排在开关之前：跨 provider
-        还原会换上 provider 实例，开关必须落在最终活跃的 provider 上。
+        顺序：提示词 → 工具 → 模型 → 动态开关。模型排在开关之前：请求首次
+        发起前所有状态就位（开关住 agent、与 provider 实例无关，顺序不敏感，
+        保持"模型先行"以对齐历史语义）。
         """
         self._restore_persisted_prompt()
         self._restore_persisted_tools()
         self._restore_persisted_model()
-        # 模型还原可能换上别的 provider 实例：provider 级开关必须落在最终
-        # 活跃的 provider 上；agent 级开关（yolo / max_turns）与 provider
-        # 无关，单独应用（两者口径见各自 docstring）。
-        self._reapply_recorded_provider_options()
         self._restore_persisted_agent_options()
 
     def _restore_persisted_prompt(self) -> None:
@@ -842,26 +810,18 @@ class Session:
                 "keeping template tools"
             )
 
-    def _reapply_recorded_provider_options(self) -> None:
-        """把记录在案的 **provider 级**开关应用到当前 provider（无记录即默认）。
+    def _restore_persisted_agent_options(self) -> None:
+        """还原 agent 级开关与限额（构造路径专用；无记录即跟随模板/配置）。
 
-        provider 实例在跨 provider 切换与模型还原时会被换掉（provider 级
-        extra_body 状态归零），记录在案的 thinking（enable_thinking）与
-        reasoning_effort 必须重新落上去。
-
-        **只做 provider 级**：yolo / max_turns 是 agent 级状态，不随 provider
-        切换变化——一并重贴会盖掉 live 值（例：Bash 工具的 "always allow"
-        运行时打开 yolo，不产生任何记录）。
+        thinking / reasoning_effort 现在也是 agent 级状态（provider 无状态化：
+        实例不再承载会话开关），与 yolo / max_turns 同口径——「记录存在才应用，
+        缺失跟随模板/配置默认」，绝不把派生默认固化成记录。
         """
         m = self._metadata
         if m.thinking is not None:
-            self._agent.model_provider.set_thinking(m.thinking)
+            self._agent.set_thinking(m.thinking)
         if m.reasoning_effort is not None:
             self._agent.set_reasoning_effort(m.reasoning_effort)
-
-    def _restore_persisted_agent_options(self) -> None:
-        """还原 agent 级开关与限额（构造路径专用；无记录即跟随模板/配置）。"""
-        m = self._metadata
         if m.yolo is not None:
             self._agent.set_yolo(m.yolo)
         if m.max_turns is not None:
@@ -884,7 +844,6 @@ class Session:
             return
         try:
             provider_cfg = get_config().get_provider(provider_name)
-            provider = self._resolve_provider(provider_name)
         except Exception as e:
             log.warning(
                 f"Session {self._session_id}: cannot restore model '{model}' "
@@ -901,7 +860,7 @@ class Session:
                 f"Session {self._session_id}: recorded model '{model}' is not "
                 f"in provider '{provider_name}' static model list; restoring anyway"
             )
-        self.agent.set_model(model, provider)
+        self.agent.set_model(model, provider_name)
         log.info(
             f"Session {self._session_id}: restored model "
             f"'{model}' (provider '{provider_name}')"

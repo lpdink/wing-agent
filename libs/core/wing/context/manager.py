@@ -27,6 +27,7 @@ from .resources import (
 
 if TYPE_CHECKING:
     from wing.event import WingEvent
+    from wing.provider.base import RequestOptions
 
 
 class ContextManager:
@@ -261,6 +262,7 @@ class ContextManager:
         model: str,
         model_provider: ModelProvider,
         current_tools: Callable[[], list[Tool]],
+        options: "RequestOptions | None" = None,
     ) -> LLMMessagesResult:
         """Get messages ready for LLM API call.
 
@@ -274,9 +276,12 @@ class ContextManager:
 
         Args:
             model: 主 model 名称（触发 compact 时透传给 provider）。
-            model_provider: ModelProvider 实例（触发 compact 时使用）。
+            model_provider: ModelProvider 实例（触发 compact 时使用；
+                仅后台 compact 消费——主调用由调用方在发送时刻重新解析）。
             current_tools: 零参 callable，返回 Agent 当前可执行工具。
                 compact sync 在 await 结束后求值，避免并发切换导致过期快照。
+            options: 会话级调用参数（缓存亲和 session id / 开关）——compact
+                请求与主调用保持同一 prompt cache key 与开关口径。
         """
         if not self.compactor:
             return LLMMessagesResult(
@@ -325,7 +330,7 @@ class ContextManager:
 
         # ── Step 3: 该触发 early compact 了？ ──
         if self.compactor.need_early_trigger(msgs, server_tokens):
-            self._start_background_compact(msgs, model, model_provider)
+            self._start_background_compact(msgs, model, model_provider, options)
 
         return LLMMessagesResult(
             [self.system_prompt] + msgs, tools=list(self._declared_tools)
@@ -338,6 +343,7 @@ class ContextManager:
         msgs: list[Message],
         model: str,
         model_provider: ModelProvider,
+        options: "RequestOptions | None" = None,
     ) -> None:
         """启动后台异步 compact task。"""
         preserve_last = msgs[-1].role == "user" if msgs else False
@@ -360,6 +366,7 @@ class ContextManager:
                     model,
                     model_provider,
                     tools=compact_tools,
+                    options=options,
                 )
                 result = PendingCompact(
                     compact_content=response.content or "",
@@ -468,6 +475,7 @@ class ContextManager:
         model_provider: ModelProvider,
         current_tools: Callable[[], list[Tool]],
         instruction: str | None = None,
+        options: "RequestOptions | None" = None,
     ) -> tuple[int, int]:
         """手动压缩上下文。
 
@@ -500,6 +508,7 @@ class ContextManager:
             model_provider,
             tools=list(self._declared_tools),
             instruction=instruction,
+            options=options,
         )
 
         last_compressed_uuid = msgs[-1].uuid if msgs else None

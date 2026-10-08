@@ -20,22 +20,27 @@ from wing.schema import MediaRef, Message
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
-    from wing.media import MediaAccess
+    from wing.provider.base import RequestOptions
 
 
 class _SerializeMixin:
     """``OpenAICompatProvider`` 的请求期序列化方法组（与 provider 类合体后生效）。"""
 
     _config: ProviderConfig
-    _media: MediaAccess | None
 
-    def _serialize_messages(self, messages: list[Message], model: str) -> list[dict]:
+    def _serialize_messages(
+        self,
+        messages: list[Message],
+        model: str,
+        options: "RequestOptions | None" = None,
+    ) -> list[dict]:
         """序列化请求消息（含请求期媒体投影：能力降级 / 高水位驱逐 / 线格式）。
 
-        整条请求任何消息都无媒体时，直接 ``[m.to_openai() ...]`` 返回——与引入
-        媒体前的请求体逐字节一致，且不触碰全局配置。请求内有媒体时按
-        ``image_delivery`` 发射（无媒体的邻座消息仍逐条经 ``to_openai()``，
-        字节不变）：
+        媒体池读接口经 ``options.media`` 注入（会话级；None = 无存储，图片位
+        退化占位）。整条请求任何消息都无媒体时，直接 ``[m.to_openai() ...]``
+        返回——与引入媒体前的请求体逐字节一致，且不触碰全局配置。请求内有
+        媒体时按 ``image_delivery`` 发射（无媒体的邻座消息仍逐条经
+        ``to_openai()``，字节不变）：
 
         - ``inline``：图片留在原消息的 content 数组里（``image_url`` data URL）；
         - ``followup``（openai 协议默认）：**连续 tool 消息段**内的保留图片
@@ -52,6 +57,7 @@ class _SerializeMixin:
         plans = group_plans_by_message(
             plan_for_request(messages, provider_cfg=self._config, model=model)
         )
+        media = options.media if options is not None else None
         cache: dict[str, str | None] = {}
         out: list[dict] = []
         pending: list[dict] = []  # followup：待汇总到段后 user 消息的 image_url parts
@@ -79,7 +85,7 @@ class _SerializeMixin:
             # system 消息的 media 一律忽略（投影层已剔除，见 plan_request_media）：
             # 本协议 system content 只允许文本 part——此处 slots 恒为空，不发图
             # 也不加占位，与 anthropic 路径行为一致。
-            slots = message_slots(plans.get(i, []), media=self._media, cache=cache)
+            slots = message_slots(plans.get(i, []), media=media, cache=cache)
             base = msg.to_openai()
             move_kept = delivery == "followup" and msg.role == "tool"
             extra: list[dict] = []

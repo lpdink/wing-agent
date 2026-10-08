@@ -51,8 +51,8 @@ def mock_session():
     session.agent.model = "gpt-4o"
     session.agent.model_display_name = None
     session.agent.yolo = False
-    session.agent.model_provider.thinking = False
-    session.agent.model_provider.reasoning_effort = None
+    session.agent.thinking = False
+    session.agent.reasoning_effort = None
     session.update_state = AsyncMock()
     return session
 
@@ -98,7 +98,7 @@ class TestRuntimeUpdateSessionEvents:
     ):
         """model 未被触碰时（如只切 thinking）不携带展示名——它与 model 同刻发放。"""
         runtime.sm._sessions["test-session"] = mock_session
-        mock_session.agent.model_provider.thinking = True
+        mock_session.agent.thinking = True
 
         await runtime.update_session("test-session", thinking=True)
 
@@ -143,7 +143,7 @@ class TestRuntimeUpdateSessionEvents:
         mock_session.agent.model = "gpt-4o-mini"
         mock_session.session_name = "new title"
         mock_session.template_name = "coder"
-        mock_session.agent.model_provider.thinking = True
+        mock_session.agent.thinking = True
         mock_session.agent.yolo = True
 
         await runtime.update_session(
@@ -178,8 +178,8 @@ class TestRuntimeUpdateSessionEvents:
         runtime.sm._sessions["test-session"] = mock_session
 
         # 模拟 switch_template 后的 agent 状态
-        mock_session.agent.model_provider.thinking = True
-        mock_session.agent.model_provider.reasoning_effort = "medium"
+        mock_session.agent.thinking = True
+        mock_session.agent.reasoning_effort = "medium"
         mock_session.agent.yolo = False
         mock_session.agent.model = "gpt-4o"
         mock_session.template_name = "coder"
@@ -269,21 +269,26 @@ class TestThinkingTogglePassthrough:
         mock_session.update_state.assert_awaited_once()
 
 
-class TestReloadProviderIsolation:
-    """reload_system 的 provider 驱逐重建：单 session 失败不阻断其余。"""
+class TestReloadProviderPool:
+    """reload_system 的 provider 步骤：共享池重建（先建后换，失败不改动池）。"""
 
     @pytest.mark.asyncio
-    async def test_one_bad_session_does_not_skip_rest(self, runtime, monkeypatch):
+    async def test_pool_reset_failure_keeps_pool_and_reports_item(
+        self, runtime, monkeypatch
+    ):
         from wing.config import get_config
 
-        s1 = runtime.create_session()
-        s2 = runtime.create_session()
+        session = runtime.create_session()
+        old = session.agent.model_provider
 
-        s1.agent.rebuild_providers = AsyncMock(side_effect=RuntimeError("boom"))
-        s2.agent.rebuild_providers = AsyncMock()
-        monkeypatch.setattr("wing.provider.registry.reset_registry", AsyncMock())
+        import wing.provider.pool as pool_mod
+
+        def _boom(cfg):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(pool_mod, "create_provider", _boom)
         # 隔离环境配置：CI 无用户 config 文件，load_config(reload=True) 会因
-        # 文件缺失提前中止 reload（本测试只关心 provider 重建的失败隔离）。
+        # 文件缺失提前中止 reload（本测试只关心 provider 重建的失败语义）。
         monkeypatch.setattr(
             "wing.config.load_config", lambda reload=False: get_config()
         )
@@ -292,7 +297,29 @@ class TestReloadProviderIsolation:
 
         provider_item = next(i for i in result.items if i.name == "provider")
         assert provider_item.ok is False
-        assert "rebuilt 1 session(s)" in provider_item.detail
         assert "boom" in provider_item.detail
-        # 坏 session 之后的 session 仍然被重建（不被跳过）
-        s2.agent.rebuild_providers.assert_awaited_once()
+        # 先建后换：失败不改动池——旧实例未关闭、仍被解析（会话不被钉死）
+        assert old._client.is_closed is False
+        assert session.agent.model_provider is old
+
+    @pytest.mark.asyncio
+    async def test_pool_reset_replaces_instances_and_reports_count(
+        self, runtime, monkeypatch
+    ):
+        from wing.config import get_config
+
+        session = runtime.create_session()
+        old = session.agent.model_provider
+        monkeypatch.setattr(
+            "wing.config.load_config", lambda reload=False: get_config()
+        )
+
+        result = await runtime.reload_system()
+
+        provider_item = next(i for i in result.items if i.name == "provider")
+        assert provider_item.ok is True
+        assert provider_item.detail == "rebuilt 2 provider(s)"  # conftest 配置两个
+        # 池换新：旧实例退场关闭（无在途），后续请求走新实例
+        assert old._client.is_closed is True
+        assert session.agent.model_provider is not old
+        assert session.agent.model_provider._client.is_closed is False

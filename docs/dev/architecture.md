@@ -138,14 +138,14 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 
 ### 会话逐出（eviction）
 
-**内存态是缓存**：`SessionManager._sessions` 是"在场会话"的工作集，磁盘（`history.jsonl` + `metadata.json`）是唯一事实来源。逐出 = 让该会话经历一次"gateway 重启"——只回收运行期资源（worker task + provider client），磁盘一概不动。
+**内存态是缓存**：`SessionManager._sessions` 是"在场会话"的工作集，磁盘（`history.jsonl` + `metadata.json`）是唯一事实来源。逐出 = 让该会话经历一次"gateway 重启"——只回收运行期资源（worker task；provider 实例归共享池，不随会话关闭），磁盘一概不动。
 
 | 维度 | 口径 |
 |------|------|
 | 判定 | `_blocked_reason()` 为 None **且**空闲时长 > `sessions.eviction.idle_ttl_seconds`；四类钉住（任一命中即不逐出）：`status != idle`（working / waiting 有在飞 turn）、inbox 有待处理输入（`agent.post()` 直投路径不 touch 计时器，只看 timer 会漏判）、非持久后端（memory 逐出 = 数据销毁）、有 client 订阅（EventBus 路由表） |
 | 计时 | `touch` = 任何携带该 session_id 的事件（`SessionReaper` 订阅 EventBus）——"会话状态变化即重置计时器"；create / resume 初始化 |
 | 触发 | `BackgroundScheduler`（gateway lifespan 启停）周期扫描（`sweep_interval_seconds`，启动时读取）；`release` 立即判定（忽略空闲时长，不忽略钉住条件） |
-| 拆解 | pop 同步原子摘除 → `Session.aclose()`（`agent.shutdown()` + `aclose_providers()`，顺序固定）异步收尾 |
+| 拆解 | pop 同步原子摘除 → `Session.aclose()`（`agent.shutdown()`，异步收尾；agent 只持 provider name，无 client 所有权要终结） |
 | 水合 | 被逐出 ≠ 不存在：`resume` / `subscribe` / `send`（HTTP 与 WS 上行）按需水合；空会话（无消息、无磁盘痕迹）逐出后不可恢复 |
 | 可见痕迹 | `/api/session/list` 的 `status: inactive` 是主信号；此外 `session/get` / `info` / `branches` 对已逐出会话回 404（`wing tail` / `head` / `info` 内部 404→resume），`release` 返回 `not loaded` |
 
@@ -175,6 +175,23 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 **时序**：runtime 先 await `agent.interrupt()`（补提交随之完成）再 emit `InterruptedEvent`（persist=true，落盘于 partial Message 之后，链序正确）——客户端观察到 Interrupted 时 store 已一致。收尸 gather 带 5s 兜底超时，行为不端的工具（吞掉取消）不会无限挂起补提交路径。打断在入口（等锁之前）同步丢弃**当时**已排队的输入与 pending ask，被放弃的输入以 `request_id` 列表随 `InterruptedEvent.dropped_request_ids` 下发——前端据此只把真正被放弃的 pending 消息标为 discarded；锁等待期间新投递的消息（客户端 POST 已应答）不在其中，留给随后的消费者（重建的新 worker、保留 worker 的续期继任者），不被排队中的 interrupt 吞掉。hooks 只在拿到锁之后触发——排队中的请求不提前杀掉在途 turn 的前台工具。
 
 **降级路径（worker 不响应取消）**：worker 在取消阶梯内始终不终止时，`interrupt()` 保留旧 worker（绝不重建第二个消费者）、打 ERROR + 广播 notice（TUI 显示"打断未生效"）后立即返回——锁必然释放、RPC 必然应答。此时 `InterruptedEvent` 可能先于（甚至永久早于）partial Message——链序保证在降级路径下让位于"会话不失去打断能力"。被保留的 worker 随后若自然终止，终局续期自动重建消费者（`shutdown()` 置位的 `_closing` 闸门同时挡住终局续期与 `interrupt()` 的重建——逐出 / 模板切换后不会被复活）。
+
+## 模型调用：无状态 provider 与共享池
+
+provider 实例是**无状态**的（配置 + 连接池），生命周期归 `wing.provider.pool` 的**全进程共享池**——每 provider name 一个实例（懒建），全部会话与 `/api/models` 聚合共用。旧版「每 agent 一份 client 表」会按 会话数 × provider 数 放大 socket 占用（httpx keepalive 连接只在下次使用连接池时才被过期检查，会一直挂着），reload 的逐会话重建还会把在途请求的 client 关死（#172：重试栈绑死在已关闭实例上，永不成功）。
+
+- agent 只持有 **provider name**（`WingAgent.provider_name`），实例经 `get_provider(name)` 实时解析；切模型 = 换 name，无需创建/关闭任何 client。
+- 一切**会话级参数**经 `RequestOptions` 在每次调用时注入（`WingAgent.request_options()` → `generate(..., options=)`）：
+
+| 参数 | 用途 | 缺省 |
+|------|------|------|
+| `session_id` | 缓存亲和：`explicit_cache_mode` 的 OpenAI 兼容 provider 下发 `prompt_cache_key`（压缩调用与主调用同一 key）；Anthropic 走 cache_control，不需要 | 无（不下发） |
+| `media` | 请求期媒体投影的读接口（序列化图片时按 id 读字节） | 无媒体存储（图片位退化占位） |
+| `thinking` / `reasoning_effort` | 会话级开关覆盖（状态住 `WingAgent`，随 metadata 记录持久化） | None = 跟随 provider 配置基线 |
+
+**退场（retire）语义**：`/api/system/reload` 的 provider 步骤调用 `reset_providers()`——按新配置**先建后换**（任一构建失败池保持原样），被替换的旧实例 `retire()`：在途计数归零才真正 `aclose`，**在途请求不受影响**，新请求立即由池解析到新实例。因此 reload 对会话完全透明（比「打断 + 重试自愈」更强）：不打断在途、无需重贴记录、无逐会话重建；配置中已移除的 name 保留旧实例（钉在它上面的会话不被拆解）。
+
+**竞态守卫**：已关闭实例上的新调用抛 `ProviderClosedError` 快速失败（不进重试栈空转——对死 client 重试永远不可能成功）；ReActLoop 每次 attempt 在发起前重新解析当前 provider，且「解析 → 首次迭代」之间无 await（晚解析纪律）——池换新与在途迭代之间不存在竞态窗口。
 
 ## 事件系统与统一日志
 

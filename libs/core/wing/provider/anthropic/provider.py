@@ -32,6 +32,7 @@ from wing.provider.anthropic.stream import (
 from wing.provider.base import (
     ModelProvider,
     PendingToolView,
+    RequestOptions,
     StreamAccumulator,
 )
 from wing.provider.transport import (
@@ -56,7 +57,6 @@ from wing.schema import (
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
-    from wing.media import MediaAccess
 
 # 运行时开启 thinking 且用户未配置 budget 时的默认预算。
 # Anthropic 要求 type=enabled 必带 budget_tokens（1024 <= budget < max_tokens）。
@@ -64,25 +64,21 @@ _DEFAULT_THINKING_BUDGET = 4096
 
 
 class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
-    """Anthropic Messages API provider（httpx 实现）。"""
+    """Anthropic Messages API provider（httpx 实现）。
 
-    def __init__(
-        self,
-        config: ProviderConfig,
-        session_id: str | None = None,
-        media: MediaAccess | None = None,
-    ) -> None:
+    无状态：实例只含配置与连接池；会话级参数（媒体池 / thinking 开关）经
+    `generate(..., options=RequestOptions)` 注入（见 ModelProvider）。
+    """
+
+    def __init__(self, config: ProviderConfig) -> None:
+        super().__init__()
         self._config = config
-        self._session_id = session_id
-        # 会话媒体池：序列化 mixin 经 self._media 按 id 读字节（见 provider/media.py）。
-        self._media = media
         self.base_url = config.base_url.rstrip("/")
-        self.reasoning_effort: str | None = config.reasoning_effort
         self.timeout_first_chunk = config.timeout_first_chunk
         self.timeout_total = config.timeout_total
         self.explicit_cache_mode = config.explicit_cache_mode
-        # 深拷贝：运行时开关（set_thinking）会改写嵌套的 thinking dict，
-        # 浅拷贝会把改动写穿到全局 ProviderConfig（污染其他会话/进程内重建）。
+        # 深拷贝：配置里的 extra_body 是共享只读源——会话级 thinking 覆盖只在
+        # per-request 视图上应用，任何路径都不得写穿它。
         self._extra_body: dict = copy.deepcopy(config.extra_body)
         self._anthropic_version = config.anthropic_version
 
@@ -98,22 +94,24 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
     # ─── Public API ───────────────────────────────────────────────
 
     @with_retry()
-    async def generate(
+    async def _generate(
         self,
         messages: list[Message],
         model: str,
         tools: list[Tool] | None = None,
         stream: bool = False,
         accumulator: StreamAccumulator | None = None,
+        options: RequestOptions | None = None,
     ) -> AsyncIterator[LLMResponse]:
+        options = options or RequestOptions()
         log.info(f"[BEGIN] anthropic call {model} with {len(messages)} stream:{stream}")
-        body = self._build_body(messages, model, tools, stream)
+        body = self._build_body(messages, model, tools, stream, options)
 
         if stream:
-            async for item in self._generate_stream(body, model, accumulator):
+            async for item in self._generate_stream(body, model, accumulator, options):
                 yield item
         else:
-            async for item in self._generate_sync(body, model):
+            async for item in self._generate_sync(body, model, options):
                 yield item
 
     def create_accumulator(self) -> StreamAccumulator:
@@ -178,17 +176,16 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
             log.error(f"Failed to list models: {e}")
             raise
 
-    async def aclose(self) -> None:
+    async def _close_transport(self) -> None:
         await self._client.aclose()
 
     @property
     def thinking(self) -> bool:
-        """thinking 开关状态——从 extra_body 的 thinking 配置推导。
+        """thinking 的**配置基线**——extra_body 的 thinking.type 派生值。
 
-        Anthropic 的 thinking 由 extra_body（thinking.type=enabled）控制，
-        该配置平铺进请求 body。状态从它推导，保证「序列化回放 / 对外
-        get_status() 上报 / 开关语义」三者自洽。set_thinking() 直接改写
-        这份配置（运行时开关与静态配置走同一存储）。
+        会话级覆盖（options.thinking）优先于此值；本 property 是「无覆盖时
+        请求会带什么」的口径（会话侧生效值 = 覆盖 ?? 基线，见
+        `WingAgent.thinking`）。
         """
         return self._thinking_enabled(self._extra_body)
 
@@ -198,29 +195,24 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         tb = extra_body.get("thinking")
         return isinstance(tb, dict) and tb.get("type") == "enabled"
 
-    def set_thinking(self, enable: bool) -> None:
-        """运行时 thinking 开关：改写 extra_body.thinking（请求 body 透传源）。
+    @staticmethod
+    def _thinking_override_view(extra_body: dict, override: bool) -> dict:
+        """会话级 thinking 覆盖的 per-request extra_body 视图（不改共享状态）。
 
-        与 OpenAI-compat 路径同构：状态取自实际 payload 源，property 派生 /
-        get_status 上报 / 请求体三者自洽。启用时缺 budget_tokens 则补默认预算
-        （Anthropic 要求 type=enabled 必带 budget）；关闭只改 type、保留
-        budget——序列化时按 Anthropic 校验剥离（disabled 不得携带 budget），
-        再启用时用户原预算原样恢复。
+        启用时缺 budget_tokens 则补默认预算（Anthropic 要求 type=enabled 必带
+        budget）；关闭只改 type、保留 budget——序列化时按 Anthropic 校验剥离
+        （disabled 不得携带 budget），再启用时用户原预算原样恢复。
         """
-        tb = self._extra_body.get("thinking")
-        if not isinstance(tb, dict):
-            tb = {}
-            self._extra_body["thinking"] = tb
-        if enable:
+        view = dict(extra_body)
+        tb = view.get("thinking")
+        tb = dict(tb) if isinstance(tb, dict) else {}
+        if override:
             tb["type"] = "enabled"
             tb.setdefault("budget_tokens", _DEFAULT_THINKING_BUDGET)
         else:
             tb["type"] = "disabled"
-
-    def set_reasoning_effort(self, effort: str | None) -> None:
-        # Anthropic 协议无 reasoning_effort 概念（百炼用 output_config.effort，走
-        # extra_body）——保持 No-op，不持有状态、不影响请求。
-        pass
+        view["thinking"] = tb
+        return view
 
     # ─── Request Building ─────────────────────────────────────────
 
@@ -228,7 +220,7 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
     def _make_headers(api_key: str, anthropic_version: str) -> dict:
         """构造静态请求 header（client 创建时固化）。
 
-        interleaved thinking beta header 随运行时 thinking 状态变化，
+        interleaved thinking beta header 随会话级 thinking 状态变化，
         由 _request_headers() 每请求计算，不在此固化。
         """
         return {
@@ -237,14 +229,17 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
             "Content-Type": "application/json",
         }
 
-    def _request_headers(self) -> dict:
+    def _request_headers(self, options: RequestOptions | None = None) -> dict:
         """每请求动态 header：thinking 启用时携带 interleaved thinking beta header
         （缺它则工具轮次间不会产生多块 thinking）。
 
-        运行时 set_thinking() 改写 extra_body.thinking 后 header 必须跟随，
-        故 MUST NOT 在 client 创建时固化。
+        会话级开关（options.thinking）与配置基线都经此判定，故 MUST NOT 在
+        client 创建时固化。
         """
-        if self._thinking_enabled(self._extra_body):
+        enabled = self._thinking_enabled(self._extra_body)
+        if options is not None and options.thinking is not None:
+            enabled = options.thinking
+        if enabled:
             return {"anthropic-beta": "interleaved-thinking-2025-05-14"}
         return {}
 
@@ -254,8 +249,12 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         model: str,
         tools: list[Tool] | None,
         stream: bool,
+        options: RequestOptions | None = None,
     ) -> dict:
-        system_text, anthropic_messages = self._serialize_messages(messages, model)
+        options = options or RequestOptions()
+        system_text, anthropic_messages = self._serialize_messages(
+            messages, model, options
+        )
 
         body: dict = {
             "model": model,
@@ -277,13 +276,18 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         if tools:
             body["tools"] = [self._tool_to_anthropic(t) for t in tools]
 
-        for k, v in self._extra_body.items():
+        # 会话级 thinking 覆盖：只改 per-request 视图，绝不写穿共享 extra_body。
+        extra_body = self._extra_body
+        if options.thinking is not None:
+            extra_body = self._thinking_override_view(
+                self._extra_body, options.thinking
+            )
+        for k, v in extra_body.items():
             if k not in body:
                 body[k] = v
 
         # Anthropic 校验：type=disabled 的 thinking 不得携带 budget_tokens。
-        # 状态层（_extra_body）保留 budget（toggle 再启用时原样恢复），仅序列化
-        # 时剥离——浅拷贝写 body，MUST NOT 改动 _extra_body。
+        # 序列化剥离——浅拷贝写 body，MUST NOT 改动 _extra_body。
         tb = body.get("thinking")
         if (
             isinstance(tb, dict)
@@ -300,13 +304,13 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
     # ─── Non-streaming ────────────────────────────────────────────
 
     async def _generate_sync(
-        self, body: dict, model: str
+        self, body: dict, model: str, options: RequestOptions | None = None
     ) -> AsyncIterator[LLMResponse]:
         t0 = time.monotonic()
         try:
             resp = await asyncio.wait_for(
                 self._client.post(
-                    "/v1/messages", json=body, headers=self._request_headers()
+                    "/v1/messages", json=body, headers=self._request_headers(options)
                 ),
                 timeout=self.timeout_total,
             )
@@ -393,12 +397,19 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
     # ─── Streaming ────────────────────────────────────────────────
 
     async def _generate_stream(
-        self, body: dict, model: str, accumulator: StreamAccumulator | None = None
+        self,
+        body: dict,
+        model: str,
+        accumulator: StreamAccumulator | None = None,
+        options: RequestOptions | None = None,
     ) -> AsyncIterator[LLMResponse]:
         t0 = time.monotonic()
         try:
             req = self._client.build_request(
-                "POST", "/v1/messages", json=body, headers=self._request_headers()
+                "POST",
+                "/v1/messages",
+                json=body,
+                headers=self._request_headers(options),
             )
             resp = await asyncio.wait_for(
                 self._client.send(req, stream=True),

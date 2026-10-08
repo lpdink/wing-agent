@@ -28,8 +28,9 @@ from wing.config import (
     resolve_model_display_name,
 )
 from wing.event import AskEvent, NoticeEvent, WingEvent
-from wing.provider import create_provider
+from wing.provider import RequestOptions
 from wing.provider.base import ModelProvider
+from wing.provider.pool import get_provider
 from wing.schema import Message, Tool
 
 from .event_sink import AgentEventSink
@@ -150,12 +151,18 @@ def _worker_frames(worker: asyncio.Task[Any], *, limit: int = 8) -> str:
 
 
 class WingAgent:
-    """Agent 核心——组装各部件，提供对外接口。"""
+    """Agent 核心——组装各部件，提供对外接口。
+
+    provider 实例不归 agent 持有：只记 name，经共享池实时解析
+    （``wing.provider.pool``）——reload 换新后自动拿到新实例。会话级
+    LLM 调用参数（thinking / reasoning_effort 开关）住在本类，经
+    `request_options()` 在每次调用时注入 provider。
+    """
 
     def __init__(
         self,
         model: str,
-        model_provider: ModelProvider,
+        provider_name: str,
         context_manager: Any,  # ContextManager（避免循环导入）
         stream: bool = False,
         tools: list[Tool] | None = None,
@@ -164,7 +171,7 @@ class WingAgent:
         media: MediaAccess | None = None,
     ) -> None:
         self.model = model
-        self.model_provider = model_provider
+        self._provider_name = provider_name
         self.context_manager = context_manager
         self.stream = stream
         self._media = media
@@ -173,12 +180,10 @@ class WingAgent:
         为 None 表示该 agent 没有媒体存储（测试构造的裸 agent）——工具侧
         必须据此安全拒绝（不得假定可用）。"""
 
-        # Provider client 表：按 name 有界持有（切回同名复用、跨 provider 切模型
-        # 不关闭旧 client，不打断在途生成）。生命周期由创建方终结：shutdown() 不动
-        # provider，仅 aclose_providers()（agent 整体废弃 / session 释放）关闭。
-        self._providers: dict[str, ModelProvider] = {
-            model_provider.name: model_provider
-        }
+        # 会话级模型开关（provider 无状态化后住在本类；None = 跟随 provider
+        # 配置默认）。per-call 经 request_options() 注入——绝不落在共享实例上。
+        self._thinking: bool | None = None
+        self._reasoning_effort: str | None = None
 
         # ── 内部部件组装 ──
         self._inbox = Inbox()
@@ -195,11 +200,10 @@ class WingAgent:
             current_model=lambda: self.model,
             current_provider=lambda: self.model_provider,
             current_tools=lambda: self.tools,
+            current_options=self.request_options,
             stream=stream,
             set_working=self._set_working,
         )
-        # 重试口径跟随当前 provider 的配置（构造与切换时同步；见 ReActLoop._config）
-        self._loop._config = model_provider.config
 
         # ── 工具集 ──
         self._tools: dict[str, Tool] = self._bind_tools(tools or [])
@@ -403,67 +407,66 @@ class WingAgent:
     def set_max_turns(self, max_turns: int | None) -> None:
         self._loop.max_turns = max_turns
 
-    def set_model(self, model: str, provider: ModelProvider) -> None:
-        """切换模型与 provider（两参必填）。
+    @property
+    def provider_name(self) -> str:
+        """当前 provider name（实例经共享池按 name 实时解析）。"""
+        return self._provider_name
 
-        model 只由 WingAgent 持有（唯一存储）；provider 入表并换为活跃。
+    @property
+    def model_provider(self) -> ModelProvider:
+        """当前共享 provider 实例（池解析；reload 换新后自动可见）。
+
+        provider 生命周期归池——agent 不做也不该做关闭动作。
+        """
+        return get_provider(self._provider_name)
+
+    def set_model(self, model: str, provider_name: str | None = None) -> None:
+        """切换模型（必要时切 provider name）。
+
+        model 只由 WingAgent 持有（唯一存储）；provider 只记 name、实例经
+        共享池解析。先校验目标 name 可解析再落状态——失败不留半截切换。
         ReActLoop / ToolExecutor 不存储 model——经注入取值器与调用点传参
-        获取，无需传播。同 provider 内换 model 的调用方传当前 provider
-        实例——任何 OpenAI-compat 端点都能给出 provider，可选 + fallback
-        只引入隐式约定。
+        获取，无需传播。
         """
+        if provider_name is not None and provider_name != self._provider_name:
+            get_provider(provider_name)  # 校验（不可解析 → raise，状态不变）
+            self._provider_name = provider_name
         self.model = model
-        self.model_provider = provider
-        self._providers[provider.name] = provider
-        self._loop._config = provider.config  # 重试口径跟随 provider 配置
-
-    def get_or_create_provider(self, name: str) -> ModelProvider:
-        """按 name 获取缓存的 provider client，缺失时创建并缓存（创建即拥有）。"""
-        cached = self._providers.get(name)
-        if cached is not None:
-            return cached
-        cfg = get_config().get_provider(name)
-        provider = create_provider(cfg, session_id=self.session_id, media=self._media)
-        self._providers[name] = provider
-        return provider
-
-    async def aclose_providers(self) -> None:
-        """关闭并清空 provider client 表。
-
-        仅由显式终结 provider 生命周期的一方调用：模板切换（旧 agent 整体
-        废弃）、未来的 session 释放。shutdown() 不做此事——provider 的生命
-        周期归创建 / 持有它的那一层（Session），agent 关停不关闭共享 client。
-        """
-        providers = list(self._providers.values())
-        self._providers.clear()
-        for provider in providers:
-            await provider.aclose()
-
-    async def rebuild_providers(self) -> None:
-        """驱逐重建：按新配置重建活跃 provider，成功后关闭旧表全部 client。
-
-        配置热加载入口——provider 客户端无"热刷新"语义（ModelProvider 不提供
-        reload），reload 即驱逐 + 重建。api_key / base_url / anthropic_version /
-        extra_body 等变更随重建自然生效；非活跃 name 下次用到时按新配置懒创建。
-
-        先建后关：重建失败（如 provider 从新配置中移除）时旧 client 保持可用，
-        session 不会被钉死在已关闭的 client 上。
-        """
-        active_name = self.model_provider.name
-        cfg = get_config().get_provider(active_name)
-        new_provider = create_provider(
-            cfg, session_id=self.session_id, media=self._media
-        )
-
-        old_providers = list(self._providers.values())
-        self._providers = {active_name: new_provider}
-        self.model_provider = new_provider
-        self._loop._config = new_provider.config  # 重试口径跟随 provider 配置
-        for provider in old_providers:
-            await provider.aclose()
 
     def set_reasoning_effort(self, effort: str | None) -> None:
-        self.model_provider.reasoning_effort = effort
+        """设置会话级推理力度覆盖（None = 跟随 provider 配置默认）。"""
+        self._reasoning_effort = effort
+
+    @property
+    def reasoning_effort(self) -> str | None:
+        """会话生效的推理力度：显式覆盖优先，否则 provider 配置默认。"""
+        if self._reasoning_effort is not None:
+            return self._reasoning_effort
+        return self.model_provider.config.reasoning_effort
+
+    def set_thinking(self, enable: bool) -> None:
+        """设置会话级 thinking 覆盖（None 语义不可达：显式开关即覆盖）。"""
+        self._thinking = enable
+
+    @property
+    def thinking(self) -> bool:
+        """会话生效的 thinking 状态：显式覆盖优先，否则 provider 配置基线。"""
+        if self._thinking is not None:
+            return self._thinking
+        return self.model_provider.thinking
+
+    def request_options(self) -> RequestOptions:
+        """本次模型调用的会话级参数（provider 无状态化的唯一注入点）。
+
+        缓存亲和（session id → prompt_cache_key）、媒体池读接口、thinking /
+        reasoning_effort 覆盖——全部经这里下发；provider 实例零会话状态。
+        """
+        return RequestOptions(
+            session_id=self.session_id,
+            media=self._media,
+            thinking=self._thinking,
+            reasoning_effort=self._reasoning_effort,
+        )
 
     async def post(
         self,
@@ -547,8 +550,8 @@ class WingAgent:
         收口与 interrupt 共用同一阶梯（有界）：worker 不响应取消时打 ERROR
         后返回——会话拆解（逐出 / release / 模板切换）绝不会被拖死；`_closing`
         置位后终局续期也被闸门挡住（不会"逐出后又被复活"）。
-        注意：不关闭 provider——provider 生命周期由 Session 层管理，
-        client 的终结由显式调用 aclose_providers() 的一方负责。
+        注意：不关闭 provider——实例归共享池（其他会话共用），agent 只持有
+        name，没有任何 client 所有权要终结。
         """
         self._closing = True
         # 清积压留在锁内无妨：shutdown 是终局，锁等待期间到达的输入注定无人
@@ -652,8 +655,8 @@ class WingAgent:
             ctx_window = self.context_manager.compactor.context_window_tokens
         return {
             "model": self.model,
-            "thinking": self.model_provider.thinking,
-            "reasoning_effort": self.model_provider.reasoning_effort,
+            "thinking": self.thinking,
+            "reasoning_effort": self.reasoning_effort,
             "message_count": count,
             "total_tokens": tokens,
             "context_window_tokens": ctx_window,

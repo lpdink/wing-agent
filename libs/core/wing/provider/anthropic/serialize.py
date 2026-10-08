@@ -27,19 +27,24 @@ from wing.schema import (
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
-    from wing.media import MediaAccess, MediaPlan
+    from wing.media import MediaPlan
+    from wing.provider.base import RequestOptions
 
 
 class _SerializeMixin:
     """``AnthropicProvider`` 的请求期序列化方法组（与 provider 类合体后生效）。"""
 
     _config: ProviderConfig
-    _media: MediaAccess | None
 
     def _serialize_messages(
-        self, messages: list[Message], model: str
+        self,
+        messages: list[Message],
+        model: str,
+        options: "RequestOptions | None" = None,
     ) -> tuple[str, list[dict]]:
         """将 Message 列表转换为 Anthropic 格式（含请求期媒体投影）。
+
+        媒体池读接口经 ``options.media`` 注入（会话级；None = 无存储）。
 
         无媒体的消息与引入媒体前逐字节一致（快路径不触碰全局配置）。有媒体时：
 
@@ -95,7 +100,11 @@ class _SerializeMixin:
                 # 连续 tool 段结束——图片挂段后（即当前消息之前）。
                 flush_pending()
 
-            slots = message_slots(plans.get(i, []), media=self._media, cache=cache)
+            slots = message_slots(
+                plans.get(i, []),
+                media=options.media if options is not None else None,
+                cache=cache,
+            )
 
             if msg.role == "assistant":
                 blocks = self._serialize_assistant(msg)

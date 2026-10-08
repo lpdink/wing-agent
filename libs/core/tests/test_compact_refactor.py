@@ -61,6 +61,7 @@ def _mock_provider(response: LLMResponse):
         model: str,
         tools: list | None = None,
         stream: bool = False,
+        options: object = None,
     ) -> AsyncIterator[LLMResponse]:
         yield response
 
@@ -77,6 +78,7 @@ def _capturing_provider():
         model: str,
         tools: list | None = None,
         stream: bool = False,
+        options: object = None,
     ) -> AsyncIterator[LLMResponse]:
         state["messages"] = messages
         state["model"] = model
@@ -384,6 +386,7 @@ class TestCompactIntegration:
             model: str,
             tools: list | None = None,
             stream: bool = False,
+            options: object = None,
         ) -> AsyncIterator[LLMResponse]:
             yield LLMResponse(content="<summary>compressed old1 and old2</summary>")
 

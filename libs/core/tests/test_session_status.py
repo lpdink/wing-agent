@@ -98,9 +98,9 @@ class TestSessionStatusDelegation:
         agent.context_manager = MagicMock()
         agent.context_manager.get_context_stats.return_value = (0, 0)
         agent.context_manager.compactor = None
-        agent.model_provider = MagicMock()
-        agent.model_provider.thinking = False
-        agent.model_provider.reasoning_effort = None
+        agent._provider_name = "default"
+        agent._thinking = False
+        agent._reasoning_effort = None
 
         mock_cm = MagicMock()
         session = Session(
